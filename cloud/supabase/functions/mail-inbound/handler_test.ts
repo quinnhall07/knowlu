@@ -5,6 +5,7 @@
 // and message here is invented for these tests: no real capture is used.
 import { assert, assertEquals } from "@std/assert";
 import { canonicalBody, canonicalHeader, type TxtResolver } from "../_shared/dkim.ts";
+import { type BindBatch, type BindCanary, nonceTag } from "../_shared/mail_bind.ts";
 import { s3Client } from "../_shared/s3.ts";
 import { type AddressRow, handle, type InboundConfig, type InboundDeps, type InboundStore } from "./handler.ts";
 import { hmacKey, nonceHmac, tokenHmac } from "./keys.ts";
@@ -128,9 +129,13 @@ const MICROSOFT = await rsaKey(); // s1._domainkey.microsoft.com (a test key, as
 const keyRecord = async (k: CryptoKeyPair) => [[
   `v=DKIM1; k=rsa; p=${b64(new Uint8Array(await crypto.subtle.exportKey("spki", k.publicKey)))}`,
 ]];
+const KNOWLU = await rsaKey(); // s1._domainkey.knowlu.test: the canary sender's domain
+const GMAIL = await rsaKey(); // s1._domainkey.gmail.com: the student's own sends (a test key)
 const ZONE: Record<string, string[][]> = {
   "s1._domainkey.google.com": await keyRecord(GOOGLE),
   "s1._domainkey.microsoft.com": await keyRecord(MICROSOFT),
+  "s1._domainkey.knowlu.test": await keyRecord(KNOWLU),
+  "s1._domainkey.gmail.com": await keyRecord(GMAIL),
 };
 const resolveTxt: TxtResolver = (name) => Promise.resolve(ZONE[name] ?? []);
 
@@ -246,6 +251,36 @@ class FakeStore implements InboundStore {
   receivedAt: Record<string, string> = {};
   failHandOff = false;
   calls: string[] = [];
+  /** Each mailbox's open batches and canaries, as `bindRows` answers them. */
+  batches: Record<string, BindBatch[]> = {};
+  canaries: Record<string, BindCanary[]> = {};
+  /** `mail_batches.received`, by batch id. */
+  batchReceivedCounts: Record<string, number> = {};
+  /** `mail_addresses.last_canary_ok_at`, by address id. */
+  canaryOk: Record<string, string> = {};
+  canaryArrived(canaryId: string, addressId: string, forwardHint: string | null, iso: string) {
+    this.calls.push("canaryArrived");
+    const c = (this.canaries[addressId] ?? []).find((x) => x.id === canaryId);
+    if (c === undefined || c.arrivedAt !== null) return Promise.resolve(false);
+    c.arrivedAt = Date.parse(iso);
+    const a = this.addresses.find((x) => x.id === addressId)!;
+    if (forwardHint !== null) a.forwardHint = forwardHint;
+    this.canaryOk[addressId] = iso;
+    if (["pending", "confirmed", "quiet", "blocked", "off"].includes(a.status)) a.status = "active";
+    return Promise.resolve(true);
+  }
+  confirmed(addressId: string) {
+    this.calls.push("confirmed");
+    const a = this.addresses.find((x) => x.id === addressId)!;
+    if (a.status === "pending") a.status = "confirmed";
+    a.confirmUntil = null;
+    return Promise.resolve();
+  }
+  batchReceived(batchId: string, _addressId: string, n: number) {
+    this.calls.push("batchReceived");
+    this.batchReceivedCounts[batchId] = (this.batchReceivedCounts[batchId] ?? 0) + n;
+    return Promise.resolve();
+  }
   async addressByTokenHmac(hmac: string) {
     this.calls.push("addressByTokenHmac");
     return await Promise.resolve(
@@ -263,9 +298,12 @@ class FakeStore implements InboundStore {
     a.lapsedSince ??= new Date(NOW).toISOString();
     return Promise.resolve();
   }
-  bindRows(_addressId: string) {
+  bindRows(addressId: string) {
     this.calls.push("bindRows");
-    return Promise.resolve({ batches: [], canaries: [] });
+    return Promise.resolve({
+      batches: (this.batches[addressId] ?? []).map((b) => ({ ...b })),
+      canaries: (this.canaries[addressId] ?? []).map((c) => ({ ...c })),
+    });
   }
   async fpKey(accountId: string) {
     this.calls.push("fpKey");
@@ -314,6 +352,45 @@ function row(id: string, accountId: string, tok: string, over: Partial<AddressRo
   }));
 }
 
+// ---------------------------------------------------------------- Google's confirmation page, faked
+
+/** Google's `vf-` link as the confirmation mail carries it (an invented code). */
+const CONFIRM_LINK = "https://mail-settings.google.com/mail/vf-%5BANGjdJ-test%5D-AbCdEf123_x";
+interface ConfirmRequest {
+  method: string;
+  path: string;
+  cookie: string | null;
+  contentType: string | null;
+  body: string;
+}
+
+/** The page's one form: a hidden field (its value carries an entity) and a nameless submit button. */
+const confirmHtml = (action: string) =>
+  `<!doctype html><html><head><title>Confirm</title></head><body><p>Confirm forwarding?</p>` +
+  `<form method="POST" action="${action}"><input type="hidden" name="vf" value="ANGjdJ&amp;x7">` +
+  `<input type="submit" value="Confirm"></form></body></html>`;
+
+/** The fake answers by `w.confirm.mode`: the page (setting a cookie a browser would send back), a
+ * redirect, or a page whose form posts off the allow-list; a POST answers Google's success page. */
+function confirmPage(w: World, req: Request, path: string, body: string): Response {
+  w.confirm.requests.push({
+    method: req.method,
+    path,
+    cookie: req.headers.get("cookie"),
+    contentType: req.headers.get("content-type"),
+    body,
+  });
+  if (req.method === "POST") return new Response("<p>Confirmation Success!</p>", { status: 200 });
+  if (w.confirm.mode === "redirect") {
+    // Relative, so a fetch that followed it would come back to this listener, never leave the machine.
+    return new Response(null, { status: 302, headers: { location: `${new URL(CONFIRM_LINK).pathname}-2` } });
+  }
+  const action = w.confirm.mode === "offlist" ? "https://evil.test/mail/vf-collect" : CONFIRM_LINK;
+  return new Response(confirmHtml(action), {
+    headers: { "content-type": "text/html; charset=utf-8", "set-cookie": "GMAIL_RTT=1; Secure; HttpOnly" },
+  });
+}
+
 interface World {
   store: FakeStore;
   /** The fake bucket, by key. */
@@ -321,6 +398,8 @@ interface World {
   gets: number;
   failPut: boolean;
   logs: string[];
+  /** Google's confirmation page, faked on the same listener: how it answers, and what reached it. */
+  confirm: { mode: "ok" | "redirect" | "offlist"; requests: ConfirmRequest[] };
   deps: InboundDeps;
   /** Put `raw` at `key` as SES would, then deliver the notification; the handler's answer. */
   arrive(raw: string, d: Delivery): Promise<Response>;
@@ -344,12 +423,14 @@ async function withWorld(fn: (w: World) => Promise<void>): Promise<void> {
     await row("addr-5", "acct-3", TOK_LAPSED, { mailboxHint: "sam@gmail.com" }),
   ];
   const bucket = new Map<string, Uint8Array>();
-  const w = { store, bucket, gets: 0, failPut: false, logs: [] as string[] } as World;
+  const confirm = { mode: "ok" as World["confirm"]["mode"], requests: [] as ConfirmRequest[] };
+  const w = { store, bucket, gets: 0, failPut: false, logs: [] as string[], confirm } as World;
   const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen: () => {} }, async (req) => {
     const path = new URL(req.url).pathname;
     if (path.endsWith(".pem")) return new Response(PEM);
     const key = decodeURIComponent(path.slice(1));
     const body = new Uint8Array(await req.arrayBuffer());
+    if (path.startsWith("/mail/vf-")) return confirmPage(w, req, path, new TextDecoder().decode(body));
     if (req.method === "GET") {
       w.gets++;
       const got = bucket.get(key);
@@ -383,6 +464,7 @@ async function withWorld(fn: (w: World) => Promise<void>): Promise<void> {
     tokenHmac: (tok) => tokenHmac(ADDRESS_KEY, tok),
     now: () => NOW,
     workKey: () => `work/item-${++n}`,
+    confirmFetch: local,
   };
   w.arrive = async (raw, d) => {
     bucket.set(d.key, bin(raw));
@@ -625,5 +707,278 @@ Deno.test("no_object_is_left_after_unbound_revoked_unauthenticated_and_duplicate
     assertEquals(keysUnder(w, "work/"), ["work/item-1"]);
     assertEquals(w.store.counters, { "addr-1:unbound": 1, "addr-1:unauthenticated": 1 });
     assertEquals(w.store.workRows.length, 1);
+  });
+});
+
+// ---------------------------------------------------------------- T2g.2: what each arrival does
+
+/** A relaxed/relaxed DKIM-Signature over `head` (fields picked bottom-up) and `body`, put on top. */
+async function dkimSigned(head: string[], body: string, key: CryptoKeyPair, d: string, h: string[]) {
+  const bh = b64(new Uint8Array(await crypto.subtle.digest("SHA-256", bin(canonicalBody(body, "relaxed")))));
+  const sig = `DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=${d}; s=s1; h=${h.join(":")}; bh=${bh}; b=`;
+  return [sig + await signData(key, picked(head, h) + canonicalHeader(sig, "relaxed")), ...head];
+}
+const assemble = (head: string[], body: string) => head.join("\r\n") + "\r\n\r\n" + body;
+
+const NONCE = "0123456789abcdef0123456789abcdef";
+const NONCE2 = "fedcba9876543210fedcba9876543210";
+const BACKFILL: BindBatch = { id: "b-1", phase: "backfill", nonceHmac: "", closedAt: null };
+const RECOVER: BindBatch = { id: "b-2", phase: "recover", nonceHmac: "", closedAt: null };
+
+/** An original as Gmail delivered it: its own Received line and delivery stamp, the marker inside. */
+const ORIGINAL_A = [
+  "Received: by 2002:a05:6000:1::1 with SMTP id x1; Thu, 1 Oct 2026 07:00:01 -0700",
+  "Authentication-Results: mx.google.com; dkim=pass header.i=@school.test header.s=s1 header.b=AbCd;" +
+  " spf=pass smtp.mailfrom=prof@school.test; dmarc=pass (p=REJECT) header.from=school.test",
+  `From: Prof ${MARKER} <prof@school.test>`,
+  "To: jane@gmail.com",
+  `Subject: Quiz 2 moved ${MARKER}`,
+  "Date: Thu, 01 Oct 2026 08:59:00 -0500",
+  `Message-ID: <${MARKER}.a@school.test>`,
+].join("\r\n") + `\r\n\r\nQuiz 2 is now on Monday. ${MARKER}\r\n`;
+/** An original with no aligned pass in its delivery stamp, and no Received line (its Date keys it). */
+const ORIGINAL_B = [
+  `Authentication-Results: mx.google.com; ${FAIL_AAR.slice("mx.google.com; ".length)}`,
+  `From: Prof ${MARKER} <prof@school.test>`,
+  "To: jane@gmail.com",
+  `Subject: Office hours ${MARKER}`,
+  "Date: Wed, 30 Sep 2026 09:15:40 -0500",
+  `Message-ID: <${MARKER}.b@school.test>`,
+].join("\r\n") + `\r\n\r\nOffice hours move to Room 12. ${MARKER}\r\n`;
+const PDF_MARK = "zq-pdf-4410";
+
+/** The student's own batch send: From the hint, signed by gmail.com, the batch's nonce in the Subject,
+ * a covering note, then each part (`eml` an attached original, `pdf` a file). */
+async function batchSend(nonce: string, parts: Array<{ eml: string } | { pdf: string }>): Promise<string> {
+  const segs = [`--b1\r\nContent-Type: text/plain\r\n\r\nForwarding these. ${MARKER}-outer`];
+  for (const p of parts) {
+    segs.push(
+      "eml" in p
+        ? `--b1\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment; filename="m.eml"\r\n\r\n${p.eml}`
+        : `--b1\r\nContent-Type: application/pdf; name="syllabus.pdf"\r\nContent-Transfer-Encoding: base64\r\n` +
+          `Content-Disposition: attachment; filename="syllabus.pdf"\r\n\r\n${btoa(p.pdf)}`,
+    );
+  }
+  const body = segs.join("\r\n") + "\r\n--b1--\r\n";
+  const head = [
+    "From: Jane <jane@gmail.com>",
+    `To: ${at(TOK1)}`,
+    `Subject: Fwd: ${parts.length} messages ${nonceTag(nonce)}`,
+    'Content-Type: multipart/mixed; boundary="b1"',
+  ];
+  return assemble(await dkimSigned(head, body, GMAIL, "gmail.com", ["from", "to", "subject"]), body);
+}
+/** Jane's batch sends travel straight from Gmail: the envelope is her own address. */
+const SEND = (key: string): Delivery => ({ key, recipients: [at(TOK1)], source: "jane@gmail.com" });
+const text = (b: Uint8Array | undefined) => new TextDecoder().decode(b);
+
+async function openBatches(w: World) {
+  w.store.batches["addr-1"] = [
+    { ...BACKFILL, nonceHmac: await nonceHmac(ADDRESS_KEY, NONCE) },
+    { ...RECOVER, nonceHmac: await nonceHmac(ADDRESS_KEY, NONCE2) },
+  ];
+}
+
+Deno.test("each_rfc822_attachment_becomes_one_work_item_counted_toward_its_batch", async () => {
+  await withWorld(async (w) => {
+    await openBatches(w);
+    const send = await batchSend(NONCE, [{ eml: ORIGINAL_A }, { eml: ORIGINAL_B }]);
+    assertEquals((await w.arrive(send, SEND("inbound/s1"))).status, 200);
+    assertEquals(
+      w.store.workRows.map((x) => [x.addressId, x.batchId, x.phase, x.authenticity]),
+      [["addr-1", "b-1", "backfill", "aligned"], ["addr-1", "b-1", "backfill", "unaligned"]],
+    );
+    assertEquals(w.store.batchReceivedCounts, { "b-1": 2 });
+    // Each work object is the attached original, byte for byte; the outer send is never stored.
+    assertEquals(keysUnder(w, "work/"), ["work/item-1", "work/item-2"]);
+    assertEquals(text(w.bucket.get("work/item-1")), ORIGINAL_A);
+    assertEquals(text(w.bucket.get("work/item-2")), ORIGINAL_B);
+    // Each original keys on its own delivery time: the topmost Received, else its Date.
+    assertEquals(
+      w.store.seenRows.map((s) => [s.phase, s.receivedMinute]),
+      [["backfill", "2026-10-01T14:00:00.000Z"], ["backfill", "2026-09-30T14:15:00.000Z"]],
+    );
+    // A batch send is not bound live mail, and nothing is counted against the address.
+    assertEquals(w.store.receivedAt, {});
+    assertEquals(w.store.counters, {});
+    assertEquals(keysUnder(w, "inbound/"), []);
+    // Sent again (a resend of the same originals): each counts toward the batch, neither is queued twice.
+    await w.arrive(send, SEND("inbound/s2"));
+    assertEquals(w.store.workRows.length, 2);
+    assertEquals(w.store.batchReceivedCounts, { "b-1": 4 });
+    assertEquals(keysUnder(w, "work/"), ["work/item-1", "work/item-2"]);
+  });
+});
+
+Deno.test("a_pdf_attachment_is_ignored", async () => {
+  await withWorld(async (w) => {
+    await openBatches(w);
+    const send = await batchSend(NONCE, [{ pdf: `%PDF-1.4 ${PDF_MARK}` }, { eml: ORIGINAL_A }]);
+    assertEquals((await w.arrive(send, SEND("inbound/p1"))).status, 200);
+    assertEquals(w.store.workRows.map((x) => [x.batchId, x.authenticity]), [["b-1", "aligned"]]);
+    assertEquals(w.store.batchReceivedCounts, { "b-1": 1 });
+    assertEquals(keysUnder(w, "work/"), ["work/item-1"]);
+    for (const k of keysUnder(w, "work/")) {
+      const stored = text(w.bucket.get(k));
+      assert(!stored.includes(btoa(`%PDF-1.4 ${PDF_MARK}`)) && !stored.includes(PDF_MARK), "a PDF was stored");
+      assert(!stored.includes(`${MARKER}-outer`), "the outer text was stored");
+    }
+    // A send with only a PDF queues nothing and counts nothing.
+    await w.arrive(await batchSend(NONCE, [{ pdf: PDF_MARK }]), SEND("inbound/p2"));
+    assertEquals(w.store.workRows.length, 1);
+    assertEquals(w.store.batchReceivedCounts, { "b-1": 1 });
+    assertEquals(keysUnder(w, "inbound/"), []);
+  });
+});
+
+Deno.test("an_unaligned_backfilled_original_is_kept_unaligned", async () => {
+  await withWorld(async (w) => {
+    await openBatches(w);
+    const send = await batchSend(NONCE2, [{ eml: ORIGINAL_B }]);
+    assertEquals((await w.arrive(send, SEND("inbound/n1"))).status, 200);
+    // Kept, as the recover batch's, and marked unaligned: never deleted as unauthenticated.
+    assertEquals(w.store.workRows.map((x) => [x.batchId, x.phase, x.authenticity]), [["b-2", "recover", "unaligned"]]);
+    assertEquals(text(w.bucket.get(w.store.workRows[0].s3Key)), ORIGINAL_B);
+    assertEquals(w.store.counters, {});
+    assertEquals(w.store.batchReceivedCounts, { "b-2": 1 });
+    assertEquals(w.store.receivedAt, {});
+  });
+});
+
+/** Google's forwarding confirmation for `jane@gmail.com`, signed by google.com, carrying `CONFIRM_LINK`. */
+async function confirmation(): Promise<string> {
+  const head = [
+    "From: Gmail Team <forwarding-noreply@google.com>",
+    `To: ${at(TOK1)}`,
+    "Subject: (#123456789) Gmail Forwarding Confirmation - Receive Mail from jane@gmail.com",
+    'Content-Type: text/plain; charset="UTF-8"',
+  ];
+  const body = `jane@gmail.com has requested to automatically forward mail to your email address\r\n` +
+    `${at(TOK1)}.\r\nConfirmation code: 123456789\r\n\r\nTo allow jane@gmail.com to automatically forward ` +
+    `mail to your address, please click the link below\r\nto confirm the request:\r\n\r\n${CONFIRM_LINK}\r\n`;
+  return assemble(await dkimSigned(head, body, GOOGLE, "google.com", ["from", "to", "subject"]), body);
+}
+const GOOGLE_SENDS = (key: string): Delivery => ({ key, recipients: [at(TOK1)], source: "bounce@google.com" });
+/** Jane is mid-setup: her mailbox is pending, its confirm window open for ten more minutes. */
+function confirming(w: World) {
+  const jane = w.store.addresses[0];
+  jane.status = "pending";
+  jane.confirmUntil = new Date(NOW + 600_000).toISOString();
+  return jane;
+}
+
+Deno.test("the_confirmation_is_completed_by_a_cookieless_get_and_post_to_a_local_fake", async () => {
+  await withWorld(async (w) => {
+    const jane = confirming(w);
+    assertEquals((await w.arrive(await confirmation(), GOOGLE_SENDS("inbound/v1"))).status, 200);
+    const path = new URL(CONFIRM_LINK).pathname;
+    assertEquals(w.confirm.requests.map((r) => [r.method, r.path]), [["GET", path], ["POST", path]]);
+    // Cookie-less both ways: the page set a cookie, and the POST did not send it back.
+    assertEquals(w.confirm.requests.map((r) => r.cookie), [null, null]);
+    const post = w.confirm.requests[1];
+    assertEquals(post.contentType, "application/x-www-form-urlencoded");
+    assertEquals(post.body, "vf=ANGjdJ%26x7");
+    // The mailbox reads `confirmed`, and its window is closed: a second confirmation is refused.
+    assertEquals(jane.status, "confirmed");
+    assertEquals(jane.confirmUntil, null);
+    assertEquals(w.store.counters, {});
+    assertEquals(w.store.workRows, []);
+    assertEquals(keysUnder(w, "inbound/"), []);
+    await w.arrive(await confirmation(), GOOGLE_SENDS("inbound/v2"));
+    assertEquals(w.confirm.requests.length, 2);
+    assertEquals(w.store.counters, { "addr-1:unbound": 1 });
+  });
+});
+
+Deno.test("a_confirmation_redirect_is_refused", async () => {
+  await withWorld(async (w) => {
+    const jane = confirming(w);
+    w.confirm.mode = "redirect";
+    assertEquals((await w.arrive(await confirmation(), GOOGLE_SENDS("inbound/v3"))).status, 200);
+    // The redirect is not followed and nothing is posted.
+    assertEquals(w.confirm.requests.map((r) => r.method), ["GET"]);
+    assertEquals(jane.status, "pending");
+    assert(jane.confirmUntil !== null);
+    assertEquals(w.store.counters, { "addr-1:unbound": 1 });
+    assertEquals(keysUnder(w, "inbound/"), []);
+  });
+});
+
+Deno.test("a_form_action_off_the_allow_list_is_refused", async () => {
+  await withWorld(async (w) => {
+    const jane = confirming(w);
+    w.confirm.mode = "offlist";
+    assertEquals((await w.arrive(await confirmation(), GOOGLE_SENDS("inbound/v4"))).status, 200);
+    assertEquals(w.confirm.requests.map((r) => r.method), ["GET"]);
+    assertEquals(jane.status, "pending");
+    assertEquals(w.store.counters, { "addr-1:unbound": 1 });
+    for (const line of w.logs) assert(!line.includes("evil") && !line.includes("vf-"), "a log line carries the link");
+  });
+});
+
+/** Knowlu's canary as the school's forwarding hands it on: its ForwardingLoop naming `tenant` on top. */
+async function canaryMail(nonce: string, tenant: string): Promise<string> {
+  const head = [
+    "From: Knowlu <check@knowlu.test>",
+    "To: jdoe@school.test",
+    `Subject: Knowlu delivery check - no need to open this ${nonceTag(nonce)}`,
+    "Content-Type: text/plain",
+  ];
+  const body = "Knowlu sent this to check that your mail reaches it. Turn it off in Settings, Email.\r\n";
+  const signed = await dkimSigned(head, body, KNOWLU, "knowlu.test", ["from", "to", "subject"]);
+  return assemble([`X-MS-Exchange-ForwardingLoop: jdoe@school.test;${tenant}`, ...signed], body);
+}
+const SCHOOL_FWD = (key: string): Delivery => ({ key, recipients: [at(TOK_M365)], source: SRS });
+
+Deno.test("a_canary_marks_arrived_and_records_forward_hint", async () => {
+  await withWorld(async (w) => {
+    const school = w.store.addresses[3];
+    school.status = "pending";
+    school.forwardHint = null;
+    w.store.canaries["addr-4"] = [{ id: "c-1", nonceHmac: await nonceHmac(ADDRESS_KEY, NONCE), arrivedAt: null }];
+    assertEquals((await w.arrive(await canaryMail(NONCE, TENANT), SCHOOL_FWD("inbound/c1"))).status, 200);
+    assertEquals(w.store.canaries["addr-4"][0].arrivedAt, Date.parse("2026-10-02T12:00:00.000Z"));
+    assertEquals(school.forwardHint, TENANT);
+    assertEquals(w.store.canaryOk, { "addr-4": "2026-10-02T12:00:00.000Z" });
+    assertEquals(school.status, "active");
+    // A canary is not mail: no work, no seen row, no last_received_at, nothing counted.
+    assertEquals(w.store.workRows, []);
+    assertEquals(w.store.seenRows, []);
+    assertEquals(w.store.receivedAt, {});
+    assertEquals(w.store.counters, {});
+    assertEquals(keysUnder(w, "inbound/"), []);
+    assertEquals(keysUnder(w, "work/"), []);
+  });
+});
+
+Deno.test("a_replayed_canary_changes_nothing", async () => {
+  await withWorld(async (w) => {
+    const school = w.store.addresses[3];
+    const hmac = await nonceHmac(ADDRESS_KEY, NONCE);
+    w.store.canaries["addr-4"] = [{ id: "c-1", nonceHmac: hmac, arrivedAt: null }];
+    await w.arrive(await canaryMail(NONCE, TENANT), SCHOOL_FWD("inbound/c2"));
+    const after = { ...school };
+    const ok = { ...w.store.canaryOk };
+    // The same canary again, this time with another tenant in its loop: nothing moves.
+    school.status = "quiet";
+    const calls = w.store.calls.length;
+    assertEquals((await w.arrive(await canaryMail(NONCE, TENANT2), SCHOOL_FWD("inbound/c3"))).status, 200);
+    assertEquals({ ...school, status: after.status }, after);
+    assertEquals(school.status, "quiet");
+    assertEquals(w.store.canaryOk, ok);
+    assert(!w.store.calls.slice(calls).includes("canaryArrived"), "a replay wrote the canary");
+    assertEquals(w.store.counters, {});
+    assertEquals(keysUnder(w, "inbound/"), []);
+    // A canary already arrived before this delivery (a concurrent delivery won): the store refuses it.
+    w.store.canaries["addr-4"] = [{ id: "c-9", nonceHmac: hmac, arrivedAt: null }];
+    const won = w.store.canaryArrived.bind(w.store);
+    w.store.canaryArrived = (id, address, hint, iso) => {
+      w.store.canaries["addr-4"][0].arrivedAt = NOW - 1;
+      return won(id, address, hint, iso);
+    };
+    await w.arrive(await canaryMail(NONCE, TENANT2), SCHOOL_FWD("inbound/c4"));
+    assertEquals(school.forwardHint, TENANT);
+    assertEquals(school.status, "quiet");
+    assertEquals(w.store.canaryOk, ok);
   });
 });

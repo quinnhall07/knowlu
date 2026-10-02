@@ -4,6 +4,9 @@
  * the check. Secrets, named only (spec §5.1): `MAIL_DOMAIN`, `MAIL_ADDRESS_KEY`, `MAIL_ENC_KEY`,
  * `MAIL_BUCKET`, `MAIL_SNS_TOPIC_ARN`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
  *
+ * The one other outbound fetch is Gmail's confirmation (`confirm.ts`, T2g.2), and it reaches only a link
+ * and a form action on `mail_bind.ts`'s fixed Google allow-list.
+ *
  * The store logs nothing: a failed call throws `store <what> <status>`, the database's answer is
  * cancelled unread (a constraint error can echo a hash), and the handler logs only that a store call
  * failed.
@@ -24,14 +27,20 @@ function env(name: string): string {
 }
 
 /** One PostgREST call; a failure throws a fixed message and its body is never read. */
-async function call(rest: Rest, what: string, path: string, init: RequestInit = {}): Promise<Response> {
+async function call(
+  rest: Rest,
+  what: string,
+  path: string,
+  init: RequestInit = {},
+  prefer = init.method === "PATCH" ? "return=minimal" : undefined,
+): Promise<Response> {
   const res = await rest.fetch(`${rest.url}/rest/v1/${path}`, {
     ...init,
     headers: {
       apikey: rest.serviceKey,
       authorization: `Bearer ${rest.serviceKey}`,
       "content-type": "application/json",
-      ...(init.method === "PATCH" ? { prefer: "return=minimal" } : {}),
+      ...(prefer === undefined ? {} : { prefer }),
     },
   });
   if (!res.ok) {
@@ -82,6 +91,12 @@ async function wire(): Promise<{ cfg: InboundConfig; deps: InboundDeps }> {
       .body?.cancel();
   const rpc = (fn: string, args: unknown) =>
     call(rest, fn, `rpc/${fn}`, { method: "POST", body: JSON.stringify(args) });
+  /** A PATCH that answers how many rows it changed (their ids only). */
+  const patched = async (what: string, table: string, query: string, body: unknown) => {
+    const init = { method: "PATCH", body: JSON.stringify(body) };
+    const res = await call(rest, what, `${table}?${query}&select=id`, init, "return=representation");
+    return (await rows<{ id: string }>(res)).length;
+  };
 
   const deps: InboundDeps = {
     sns: { fetch: globalThis.fetch },
@@ -170,7 +185,49 @@ async function wire(): Promise<{ cfg: InboundConfig; deps: InboundDeps }> {
       received: async (address, iso) => {
         await patch("received", `id=eq.${id(address)}`, { last_received_at: iso });
       },
+      async canaryArrived(canary, address, hint, at) {
+        // The mark is the guard: only one delivery turns `arrived_at` from null. If the mailbox's own
+        // writes then fail, the mark is taken back out so SNS's retry is processed as new.
+        const mine = `id=eq.${id(canary)}&address_id=eq.${id(address)}`;
+        const unarrived = `${mine}&arrived_at=is.null`;
+        if (await patched("canary", "mail_canaries", unarrived, { arrived_at: at }) === 0) return false;
+        try {
+          await patch("canary ok", `id=eq.${id(address)}`, {
+            last_canary_ok_at: at,
+            ...(hint === null ? {} : { forward_hint: hint }),
+          });
+          await patch("active", `id=eq.${id(address)}&status=in.(pending,confirmed,quiet,blocked,off)`, {
+            status: "active",
+          });
+        } catch (e) {
+          await call(rest, "canary undo", `mail_canaries?${mine}`, {
+            method: "PATCH",
+            body: JSON.stringify({ arrived_at: null }),
+          }).then((r) => r.body?.cancel()).catch(() => {});
+          throw e;
+        }
+        return true;
+      },
+      async confirmed(address) {
+        await patch("confirmed", `id=eq.${id(address)}&status=eq.pending`, { status: "confirmed" });
+        await patch("confirm window", `id=eq.${id(address)}`, { confirm_until: null });
+      },
+      async batchReceived(batch, address, n) {
+        // PostgREST has no increment: read, then write only if nobody else wrote between (a concurrent
+        // send of the same batch), a few times over.
+        const mine = `id=eq.${id(batch)}&address_id=eq.${id(address)}`;
+        for (let tries = 0; tries < 8; tries++) {
+          const [b] = await rows<{ received: number }>(
+            await call(rest, "batch", `mail_batches?${mine}&select=received&limit=1`),
+          );
+          if (b === undefined) return; // pruned or disconnected: nothing left to count toward
+          const unchanged = `${mine}&received=eq.${b.received}`;
+          if (await patched("batch received", "mail_batches", unchanged, { received: b.received + n }) > 0) return;
+        }
+        throw new Error("store batch received contended");
+      },
     },
+    confirmFetch: (url, init) => fetch(url, init),
   };
   return { cfg, deps };
 }

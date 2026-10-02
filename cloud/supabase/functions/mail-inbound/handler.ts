@@ -2,7 +2,8 @@
  * `mail-inbound` (email plan T2g.1; spec §4.6 steps 1–4 and 7–8, D2, D3, D8). SES stores each message in
  * S3 under `inbound/` and SNS posts a notification here; this handler verifies it, finds the mailbox,
  * checks entitlement, fetches the object, classifies it (`mail_bind.ts`), dedups and hands the original
- * off under `work/` for `mail-process`. In order:
+ * off under `work/` for `mail-process`; T2g.2 (§4.6 steps 5 and 6, the effects) acts on each
+ * classification. In order:
  *
  * 1. **Verify** (`sns.ts`): a refused notification answers 403 and nothing else is read.
  * 2. **Find**, from the notification alone: each recipient at `MAIL_DOMAIN` whose token's HMAC names a
@@ -12,9 +13,17 @@
  *    `lapsed_since`, kept from the first lapse); with no entitled mailbox left the message is deleted
  *    unread and no `mail_seen` row is written.
  * 4. **Fetch** the object once.
- * 5. **Classify** per mailbox. A live `aligned` forward is handed off; a live `unaligned` one is deleted
- *    and counted `unauthenticated`; `unbound` is deleted and counted on the address. A canary, a Gmail
- *    confirmation and a batch send are T2g.2's: until it lands each is deleted with nothing recorded.
+ * 5. **Classify** per mailbox, then act (T2g.2 for the first three):
+ *    - a **canary** is marked arrived once (the store refuses a second marking), recording the mailbox's
+ *      `forward_hint` and `last_canary_ok_at` and reading `active`; a replay changes nothing;
+ *    - **Gmail's confirmation** is completed by a cookie-less GET and POST (`confirm.ts`), and the mailbox
+ *      reads `confirmed` with its window closed; a refusal, the classifier's or the page's, is counted
+ *      `unbound`;
+ *    - a **batch send**'s `message/rfc822` attachments each go through steps 7 and 8 as the batch's phase,
+ *      with step 6's word from the original alone (`unaligned` is kept), and all of them count toward the
+ *      batch's `received`; nothing else in the send is parsed;
+ *    - a live `aligned` forward is handed off; a live `unaligned` one is deleted and counted
+ *      `unauthenticated`; `unbound` is deleted and counted on the address.
  * 7. **Dedup** on `mail_seen`'s keyed `msg_hash` (`keys.ts`): already there, deleted, done.
  * 8. **Hand off**: put the original under `work/`; only after the put, `store.handOff` writes the
  *    `mail_work` and `mail_seen` rows in one transaction (the `mail_hand_off` RPC; it answers false when a
@@ -25,11 +34,20 @@
  * **Privacy:** every log line is a fixed phrase. No address, token, key, header value, subject, body or
  * object key is logged, put in an error or answered; a store or S3 failure is logged by its kind only.
  */
-import { type BindBatch, type BindCanary, type BindDeps, type BindMailbox, classifyArrival } from "../_shared/mail_bind.ts";
-import { parseHeaders } from "../_shared/mime.ts";
+import {
+  type Arrival,
+  type BindBatch,
+  type BindCanary,
+  type BindDeps,
+  type BindMailbox,
+  classifyArrival,
+  originalAuthenticity,
+} from "../_shared/mail_bind.ts";
+import { attachedMessages, parseHeaders } from "../_shared/mime.ts";
 import { allowedKey, type S3Client, S3Error } from "../_shared/s3.ts";
 import { type SnsDeps, verifySns } from "../_shared/sns.ts";
 import { fail, json, methodNotAllowed } from "../_shared/http.ts";
+import { completeConfirmation, type ConfirmFetch } from "./confirm.ts";
 import { seenHashes } from "./keys.ts";
 
 export interface InboundConfig {
@@ -90,6 +108,20 @@ export interface InboundStore {
   count(addressId: string, counter: "unbound" | "unauthenticated"): Promise<void>;
   /** `last_received_at`. */
   received(addressId: string, iso: string): Promise<void>;
+  /** Marks the canary arrived at `iso` only while it is unarrived; false, with nothing written, when it
+   * already was (a replay, or a concurrent delivery that won). When it marks, the mailbox records
+   * `forwardHint` (when not null) and `last_canary_ok_at`, and reads `active` unless it is `active`,
+   * `paused_send`, `lapsed` or `revoked`. */
+  canaryArrived(
+    canaryId: string,
+    addressId: string,
+    forwardHint: string | null,
+    iso: string,
+  ): Promise<boolean>;
+  /** Gmail's confirmation completed: a `pending` mailbox reads `confirmed`, and its confirm window closes. */
+  confirmed(addressId: string): Promise<void>;
+  /** Adds `n` to the batch's `received`. */
+  batchReceived(batchId: string, addressId: string, n: number): Promise<void>;
 }
 export interface InboundDeps {
   sns: SnsDeps;
@@ -101,6 +133,8 @@ export interface InboundDeps {
   now(): number;
   /** A fresh `work/` key; a random UUID by default. */
   workKey?(): string;
+  /** The fetch Gmail's confirmation page is read and posted with (`confirm.ts`). */
+  confirmFetch: ConfirmFetch;
 }
 
 /** Knowlu's canary sender (spec §4.10, plan P9). The canary's sender (T4.2, `_shared/canary_send.ts`)
@@ -270,11 +304,73 @@ async function arrive(raw: Uint8Array, f: Found, n: Receipt, cfg: InboundConfig,
       }
       return;
     }
-    default:
-      // A canary, a Gmail confirmation (completed or refused) and a batch send: their effects are
-      // T2g.2's. Until then each is deleted with nothing recorded.
-      log(`${arrival.kind}, no effect yet`);
+    case "canary":
+      if (arrival.replay) {
+        log("canary replay, nothing changed");
+        return;
+      }
+      log(
+        await deps.store.canaryArrived(arrival.canaryId, f.row.id, arrival.forwardHint, iso(n.arrivedAt))
+          ? "canary arrived"
+          : "canary replay, nothing changed",
+      );
+      return;
+    case "gmail_confirm":
+    case "gmail_confirm_refused":
+      await gmailConfirm(arrival, f.row, deps);
+      return;
+    case "batch":
+      await batchSend(raw, f.row, arrival, n, deps);
+      return;
   }
+}
+
+const iso = (ms: number) => new Date(ms).toISOString();
+
+/** Step 5's Gmail confirmation: completed cookie-less (`confirm.ts`), or refused and counted on the
+ * address as `unbound` (a confirmation the mailbox's own setup did not ask for is a leaked address). */
+async function gmailConfirm(
+  arrival: Extract<Arrival, { kind: "gmail_confirm" | "gmail_confirm_refused" }>,
+  row: AddressRow,
+  deps: InboundDeps,
+): Promise<void> {
+  const outcome = arrival.kind === "gmail_confirm"
+    ? await completeConfirmation(arrival.link, deps.confirmFetch)
+    : arrival.reason;
+  if (outcome === "confirmed") {
+    await deps.store.confirmed(row.id);
+    log("gmail confirmation completed");
+    return;
+  }
+  await deps.store.count(row.id, "unbound");
+  log(`gmail confirmation refused (${outcome})`);
+}
+
+/** Step 5's batch send: each `message/rfc822` attachment is one work item of the batch's id and phase,
+ * its authenticity read from the original alone (step 6), keyed on its own delivery time (step 7), and
+ * every attachment that arrived counts toward the batch's `received`, a duplicate too (the device's count
+ * of what it sent). The outer text and every other attachment are dropped unparsed. */
+async function batchSend(
+  raw: Uint8Array,
+  row: AddressRow,
+  batch: Extract<Arrival, { kind: "batch" }>,
+  n: Receipt,
+  deps: InboundDeps,
+): Promise<void> {
+  const originals = attachedMessages(raw);
+  let queued = 0;
+  for (const original of originals) {
+    const delivered = parseHeaders(original).deliveredAt;
+    const item = {
+      batchId: batch.batchId,
+      phase: batch.phase,
+      authenticity: await originalAuthenticity(original, row.provider, deps.bind),
+      receivedAt: delivered === null ? n.arrivedAt : Math.min(delivered, n.arrivedAt),
+    };
+    if (await handOff(original, row, item, deps)) queued++;
+  }
+  if (originals.length > 0) await deps.store.batchReceived(batch.batchId, row.id, originals.length);
+  log(`batch send: ${queued} of ${originals.length} queued (${batch.phase})`);
 }
 
 /** Steps 2–4 and the final delete: find, entitle, fetch once, then each bound mailbox in turn. */
