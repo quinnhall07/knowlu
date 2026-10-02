@@ -1917,7 +1917,7 @@ fn the_google_row_shows_the_plan_polling_sentence_in_the_state_line() {
     let start = js.find("function renderGoogleRow(").expect("renderGoogleRow");
     let end = start + js[start..].find("\n  }\n").expect("end of renderGoogleRow");
     let f = &js[start..end];
-    assert!(f.contains("EL(\"set-google-state\").textContent = busy ? GOOGLE_POLLING : googleSentence(g)"), "{f}");
+    assert!(f.contains("EL(\"set-google-state\").textContent = busy ? GOOGLE_POLLING : (SET.googleWaitedOut"), "{f}");
     let c = js.find("function connectGoogle(").expect("connectGoogle");
     let c_end = c + js[c..].find("\n  }\n").expect("end of connectGoogle");
     assert!(!js[c..c_end].contains("SET.googleNote = GOOGLE_POLLING"), "the note stays empty while polling");
@@ -2419,4 +2419,32 @@ fn undo_within_the_toast_never_calls_remove_lane_date() {
     assert!(b.contains("clearTimeout("), "undo cancels the timer");
     assert!(b[u..].contains("delete pendingLaneRemovals["), "undo clears the pending uid");
     assert_eq!(js.matches("invoke(\"remove_lane_date\"").count(), 1, "one call site, behind the timer");
+}
+
+/// Live proof 2026-10-02 (F2): the row keeps polling until the consent link's own lifetime (the
+/// server's nonce dies ten minutes after minting), backing off gently, then offers "Check again",
+/// which re-reads the status and never mints a new link. Reconnect shares the same code.
+#[test]
+fn the_google_row_waits_out_the_link_lifetime_then_offers_check_again() {
+    let js = read("console.js");
+    let html = read("index.html");
+    assert!(js.contains("var GOOGLE_LINK_LIFETIME_MS = 600000;"), "ten minutes, the nonce's lifetime");
+    assert!(js.contains("var GOOGLE_NO_ANSWER = \"Didn\u{2019}t hear back from Google.\";"));
+    let start = js.find("async function connectGoogle(").expect("connectGoogle");
+    let end = start + js[start..].find("\n  }\n").expect("end of connectGoogle");
+    let f = &js[start..end];
+    assert!(!f.contains("i < 20"), "no fixed count of polls: {f}");
+    assert!(f.contains("GOOGLE_LINK_LIFETIME_MS") && f.contains("Date.now()"), "{f}");
+    assert!(f.contains("delay = Math.min("), "the wait grows between polls: {f}");
+    assert!(f.contains("SET.googleWaitedOut = !googleDone("), "{f}");
+    assert!(html.contains("id=\"set-google-check\"") && html.contains(">Check again</button>"));
+    let r = js.find("function renderGoogleRow(").expect("renderGoogleRow");
+    let r_end = r + js[r..].find("\n  }\n").expect("end");
+    assert!(js[r..r_end].contains("EL(\"set-google-check\").hidden = !SET.googleWaitedOut"), "shown only after the wait ran out");
+    assert!(js[r..r_end].contains("GOOGLE_NO_ANSWER"));
+    let c = js.find("function checkGoogleAgain(").expect("checkGoogleAgain");
+    let c_end = c + js[c..].find("\n  }\n").expect("end");
+    assert!(js[c..c_end].contains("invoke(\"google_status\"") && !js[c..c_end].contains("google_connect"), "re-polls status, never re-mints");
+    assert!(js.contains("closest(\"#set-google-check\")) { checkGoogleAgain(); return; }"));
+    assert_eq!(js.matches("invoke(\"google_connect\", { scope: scope })").count(), 1, "only connectGoogle mints a link");
 }
