@@ -15,7 +15,8 @@
  * 4. **Fetch** the object once.
  * 5. **Classify** per mailbox, then act (T2g.2 for the first three):
  *    - a **canary** is marked arrived once (the store refuses a second marking), recording the mailbox's
- *      `forward_hint` and `last_canary_ok_at` and reading `active`; a replay changes nothing;
+ *      `forward_hint` and `last_canary_ok_at` and reading `active` (through a token retired by Rotate the
+ *      status stays: the new address is not proven yet); a replay changes nothing;
  *    - **Gmail's confirmation** is completed by a cookie-less GET and POST (`confirm.ts`), and the mailbox
  *      reads `confirmed` with its window closed; a refusal, the classifier's or the page's, is counted
  *      `unbound`;
@@ -112,13 +113,16 @@ export interface InboundStore {
   received(addressId: string, iso: string): Promise<void>;
   /** Marks the canary arrived at `iso` only while it is unarrived; false, with nothing written, when it
    * already was (a replay, or a concurrent delivery that won). When it marks, the mailbox records
-   * `forwardHint` (when not null) and `last_canary_ok_at`, and reads `active` unless it is `active`,
-   * `paused_send`, `lapsed` or `revoked`. */
+   * `forwardHint` (when not null) and `last_canary_ok_at`, and, when the canary came through the
+   * mailbox's `current` token, reads `active` unless it is `active`, `paused_send`, `lapsed` or `revoked`.
+   * Through a token retired by Rotate the status is left alone: the forward still points at the old
+   * address, and a rotated Gmail mailbox stays `pending` until its new address is confirmed (D3). */
   canaryArrived(
     canaryId: string,
     addressId: string,
     forwardHint: string | null,
     iso: string,
+    current: boolean,
   ): Promise<boolean>;
   /** Rotate's grace is over: `retired_token_hmac` and `retired_until` go back to null. */
   endRotateGrace(addressId: string): Promise<void>;
@@ -355,21 +359,23 @@ async function arrive(
       }
       return 0;
     }
-    case "canary":
+    case "canary": {
       if (arrival.replay) {
         log("canary replay, nothing changed");
         return 0;
       }
-      if (!await deps.store.canaryArrived(arrival.canaryId, f.row.id, arrival.forwardHint, iso(n.arrivedAt))) {
+      const at = iso(n.arrivedAt);
+      if (!await deps.store.canaryArrived(arrival.canaryId, f.row.id, arrival.forwardHint, at, f.current)) {
         log("canary replay, nothing changed");
         return 0;
       }
       // Rotate's grace (D3) ends when a canary comes back through the new address: the forwarding
-      // now points at it. One through the retired token leaves the grace to run out by its date. A
-      // failure here keeps the old token a little longer, never shorter.
+      // now points at it. One through the retired token leaves the grace to run out by its date, and the
+      // status as it was. A failure here keeps the old token a little longer, never shorter.
       if (f.current && f.row.retiredTokenHmac !== null) await deps.store.endRotateGrace(f.row.id);
       log("canary arrived");
       return 0;
+    }
     case "gmail_confirm":
     case "gmail_confirm_refused":
       await gmailConfirm(arrival, f.row, deps);

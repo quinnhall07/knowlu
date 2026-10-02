@@ -8,7 +8,8 @@
  *   address (409, `LIVE_CAP`) or a seventh mint in 30 days (429, `MINT_CAP`) is refused by name. The first
  *   mint opens the account's `mail_accounts` row with a fresh fingerprint key (§4.6 step 7).
  * - `POST /addresses/<id>/hint {hint}` sets `mailbox_hint` once, to an address that fits the mailbox's
- *   provider (P21; `provider.ts`) and that none of the account's other mailboxes holds.
+ *   provider (P21; `provider.ts`'s `hintFits`: only a provable mismatch is refused, so a school behind a
+ *   filtering gateway's MX still fits) and that none of the account's other mailboxes holds.
  * - `POST /addresses/<id>/rotate` mints a new token for the mailbox and retires the old one for seven
  *   days (D3); intake ends that grace early when a canary comes back through the new address. On Gmail
  *   the mailbox reads `pending` again, since the new address needs its own confirm (§4.3 steps 3–5).
@@ -24,7 +25,7 @@
 import type { Entitle } from "../_shared/judge_handler.ts";
 import { asResponse, fail, json, methodNotAllowed, readJson, subPath } from "../_shared/http.ts";
 import type { S3Client } from "../_shared/s3.ts";
-import { DOMAIN, type MailProvider, providerOf, PROVIDERS, type ResolveMx } from "./provider.ts";
+import { DOMAIN, hintFits, type MailProvider, PROVIDERS, type ResolveMx } from "./provider.ts";
 
 /** D3's caps, by name: the device shows these sentences as they are. */
 export const LIVE_CAP = "this account already has three live mail addresses";
@@ -242,7 +243,7 @@ async function hint(req: Request, accountId: string, id: string, deps: MailDeps)
   if (row.mailboxHint !== null) throw fail(409, ALREADY);
   let fits: boolean;
   try {
-    fits = await providerOf(value.slice(value.indexOf("@") + 1), deps.resolveMx) === row.provider;
+    fits = await hintFits(row.provider, value.slice(value.indexOf("@") + 1), deps.resolveMx);
   } catch {
     throw fail(503, "the address's mail domain could not be checked; try again");
   }

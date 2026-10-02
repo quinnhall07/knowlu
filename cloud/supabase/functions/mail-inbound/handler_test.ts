@@ -258,7 +258,13 @@ class FakeStore implements InboundStore {
   batchReceivedCounts: Record<string, number> = {};
   /** `mail_addresses.last_canary_ok_at`, by address id. */
   canaryOk: Record<string, string> = {};
-  canaryArrived(canaryId: string, addressId: string, forwardHint: string | null, iso: string) {
+  canaryArrived(
+    canaryId: string,
+    addressId: string,
+    forwardHint: string | null,
+    iso: string,
+    current: boolean,
+  ) {
     this.calls.push("canaryArrived");
     const c = (this.canaries[addressId] ?? []).find((x) => x.id === canaryId);
     if (c === undefined || c.arrivedAt !== null) return Promise.resolve(false);
@@ -266,7 +272,8 @@ class FakeStore implements InboundStore {
     const a = this.addresses.find((x) => x.id === addressId)!;
     if (forwardHint !== null) a.forwardHint = forwardHint;
     this.canaryOk[addressId] = iso;
-    if (["pending", "confirmed", "quiet", "blocked", "off"].includes(a.status)) a.status = "active";
+    const promotes = ["pending", "confirmed", "quiet", "blocked", "off"];
+    if (current && promotes.includes(a.status)) a.status = "active";
     return Promise.resolve(true);
   }
   endRotateGrace(addressId: string) {
@@ -1037,6 +1044,30 @@ Deno.test("a_canary_through_the_new_token_ends_the_rotate_grace", async () => {
   });
 });
 
+Deno.test("a_canary_through_a_retired_token_leaves_a_rotated_gmail_mailbox_pending", async () => {
+  // D3 and §4.3 steps 3–5: after a Rotate, Gmail's new address needs its own confirm, so the mailbox reads
+  // `pending`. A canary that comes back through the old forward proves only the old address: it is
+  // recorded, but the mailbox stays pending (its heads-up stays open) and the grace runs on.
+  await withWorld(async (w) => {
+    const jane = w.store.addresses[0];
+    jane.status = "pending";
+    const hmac = await nonceHmac(ADDRESS_KEY, NONCE);
+    w.store.canaries["addr-1"] = [{ id: "c-1", nonceHmac: hmac, arrivedAt: null }];
+    const old = { key: "inbound/r1", recipients: [at(RETIRED)], source: caf("jane", RETIRED) };
+    assertEquals((await w.arrive(await canaryMail(NONCE, TENANT), old)).status, 200);
+    assertEquals(w.store.canaries["addr-1"][0].arrivedAt, Date.parse("2026-10-02T12:00:00.000Z"));
+    assertEquals(w.store.canaryOk, { "addr-1": "2026-10-02T12:00:00.000Z" });
+    assertEquals(jane.status, "pending");
+    assertEquals(jane.retiredTokenHmac, await tokenHmac(ADDRESS_KEY, RETIRED));
+    // The next canary, through the new address: the mailbox reads active and the grace ends.
+    w.store.canaries["addr-1"] = [{ id: "c-2", nonceHmac: hmac, arrivedAt: null }];
+    const now = { key: "inbound/r2", recipients: [at(TOK1)], source: caf("jane", TOK1) };
+    assertEquals((await w.arrive(await canaryMail(NONCE, TENANT), now)).status, 200);
+    assertEquals(jane.status, "active");
+    assertEquals([jane.retiredTokenHmac, jane.retiredUntil], [null, null]);
+  });
+});
+
 Deno.test("a_replayed_canary_changes_nothing", async () => {
   await withWorld(async (w) => {
     const school = w.store.addresses[3];
@@ -1058,9 +1089,9 @@ Deno.test("a_replayed_canary_changes_nothing", async () => {
     // A canary already arrived before this delivery (a concurrent delivery won): the store refuses it.
     w.store.canaries["addr-4"] = [{ id: "c-9", nonceHmac: hmac, arrivedAt: null }];
     const won = w.store.canaryArrived.bind(w.store);
-    w.store.canaryArrived = (id, address, hint, iso) => {
+    w.store.canaryArrived = (id, address, hint, iso, current) => {
       w.store.canaries["addr-4"][0].arrivedAt = NOW - 1;
-      return won(id, address, hint, iso);
+      return won(id, address, hint, iso, current);
     };
     await w.arrive(await canaryMail(NONCE, TENANT2), SCHOOL_FWD("inbound/c4"));
     assertEquals(school.forwardHint, TENANT);

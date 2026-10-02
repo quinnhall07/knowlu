@@ -7,8 +7,8 @@
  *   `mail.protection.outlook.com` (or Microsoft's newer `mx.microsoft`) is `m365`, one of Google's MX hosts
  *   is `google`, anything else is `other`, and no MX at all is `null` (nothing can be sent there).
  *
- * T4.1's hint check (`a_hint_is_set_once_and_must_fit_the_providers_domains`) and T4.2's `GET /provider`
- * and `POST /canary` read this one table. The resolver is injected, so no test queries DNS.
+ * T4.1's hint check (`hintFits`) and T4.2's `GET /provider` and `POST /canary` read this one table. The
+ * resolver is injected, so no test queries DNS.
  */
 export type MailProvider = "m365" | "google" | "other";
 export const PROVIDERS: readonly MailProvider[] = ["m365", "google", "other"];
@@ -43,6 +43,29 @@ export async function providerOf(domain: string, resolveMx: ResolveMx): Promise<
   if (!DOMAIN.test(d)) return null;
   const hosts = await resolveMx(d);
   return hosts.length === 0 ? null : providerOfMx(hosts[0]);
+}
+
+/**
+ * Whether a hint on `domain` can be the mailbox's own address (spec §4.10's limit; PS). Only a mismatch
+ * the server can prove is refused, since the curated campus row that set the mailbox's provider lives on
+ * the device:
+ * - a Gmail domain fits a `google` mailbox and nothing else;
+ * - a domain with no MX fits nothing (nothing can be sent there);
+ * - an MX reading `m365` or `google` fits only that provider;
+ * - an MX reading `other` fits any mailbox: for `m365` or `google` it is a filtering gateway in front of
+ *   the school's provider (a Proofpoint or Mimecast host), and refusing it would need a per-school
+ *   exception, which rule 1 forbids. This widens nothing: a mint with `other` already reaches such a domain.
+ * Throws when DNS could not answer. T4.1's hint route and T4.2's canary limit both read this.
+ */
+export async function hintFits(
+  provider: MailProvider,
+  domain: string,
+  resolveMx: ResolveMx,
+): Promise<boolean> {
+  const read = await providerOf(domain, resolveMx);
+  if (read === null) return false;
+  if (GMAIL_DOMAINS.includes(domain.trim().toLowerCase())) return provider === "google";
+  return read === provider || read === "other";
 }
 
 /** Production's resolver: `Deno.resolveDns`'s MX records, sorted by preference. No such name, or no MX

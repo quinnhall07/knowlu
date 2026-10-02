@@ -210,7 +210,7 @@ async function wire(): Promise<{ cfg: InboundConfig; deps: InboundDeps }> {
       received: async (address, iso) => {
         await patch("received", `id=eq.${id(address)}`, { last_received_at: iso });
       },
-      async canaryArrived(canary, address, hint, at) {
+      async canaryArrived(canary, address, hint, at, current) {
         // The mark is the guard: only one delivery turns `arrived_at` from null. If the mailbox's own
         // writes then fail, the mark is taken back out so SNS's retry is processed as new.
         const mine = `id=eq.${id(canary)}&address_id=eq.${id(address)}`;
@@ -221,9 +221,12 @@ async function wire(): Promise<{ cfg: InboundConfig; deps: InboundDeps }> {
             last_canary_ok_at: at,
             ...(hint === null ? {} : { forward_hint: hint }),
           });
-          await patch("active", `id=eq.${id(address)}&status=in.(pending,confirmed,quiet,blocked,off)`, {
-            status: "active",
-          });
+          // Through a retired token the status stays: the forward is not re-pointed yet (D3).
+          if (current) {
+            await patch("active", `id=eq.${id(address)}&status=in.(pending,confirmed,quiet,blocked,off)`, {
+              status: "active",
+            });
+          }
         } catch (e) {
           await call(rest, "canary undo", `mail_canaries?${mine}`, {
             method: "PATCH",

@@ -17,7 +17,7 @@ import {
   type NewToken,
   ROTATE_GRACE_MS,
 } from "./handler.ts";
-import type { ResolveMx } from "./provider.ts";
+import { hintFits, type MailProvider, type ResolveMx } from "./provider.ts";
 
 const DOMAIN = "in.knowlu.test";
 const NOW = Date.UTC(2026, 9, 2, 12, 0, 0);
@@ -417,9 +417,9 @@ Deno.test("a_hint_is_set_once_and_must_fit_the_providers_domains", async () => {
   assertEquals(w.store.rows.find((r) => r.id === A2)!.mailboxHint, "jane.doe@gmail.com");
   assertEquals(w.lookups, ["school.test"]);
 
-  // M365: the domain's MX must be Microsoft's; a Google-hosted, a third-party or an MX-less domain
-  // does not fit, and neither does a Gmail address.
-  for (const hint of ["a@uni.test", "a@elsewhere.test", "a@nomx.test", "a@gmail.com"]) {
+  // M365: only a mismatch the server can prove is refused: a Google-hosted or an MX-less domain, or a
+  // Gmail address. (A third-party MX is a filtering gateway's; under PS the curated row wins.)
+  for (const hint of ["a@uni.test", "a@nomx.test", "a@gmail.com"]) {
     assertEquals((await w.call("POST", `/addresses/${A3}/hint`, { hint })).status, 422, hint);
   }
   assertEquals(w.store.rows.find((r) => r.id === A3)!.mailboxHint, null);
@@ -435,6 +435,55 @@ Deno.test("a_hint_is_set_once_and_must_fit_the_providers_domains", async () => {
   assertEquals(w.store.rows.find((r) => r.id === A3)!.mailboxHint, "jsmith@school.test");
   // Another account's mailbox reads as not found.
   assertEquals((await w.call("POST", `/addresses/${B1}/hint`, { hint: "joe2@gmail.com" })).status, 404);
+});
+
+Deno.test("a_school_hint_behind_a_filtering_gateways_mx_fits_m365_and_google", async () => {
+  // Spec §4.10 and PS: the curated row's provider wins, and the server cannot see the row. A school whose
+  // MX is a filtering gateway (Proofpoint here) reads `other`; that is no proof against the mailbox's
+  // provider, so its students' hints fit an M365 or a Google mailbox.
+  const w = await world();
+  MX["gateway.test"] = ["mx0a-001.pphosted.com", "mx0b-001.pphosted.com"];
+  try {
+    w.store.rows.push(
+      await stored(A2, ACCT, TOK2, { provider: "google" }),
+      await stored(A3, ACCT, TOK3, { provider: "m365" }),
+    );
+    assertEquals((await w.call("POST", `/addresses/${A3}/hint`, { hint: "jdoe@gateway.test" })).status, 200);
+    assertEquals((await w.call("POST", `/addresses/${A2}/hint`, { hint: "jane@gateway.test" })).status, 200);
+    // A Gmail address on a mailbox that is not Google's is still refused, with no lookup.
+    w.store.rows.find((r) => r.id === A3)!.mailboxHint = null;
+    const looked = w.lookups.length;
+    assertEquals(
+      (await w.call("POST", `/addresses/${A3}/hint`, { hint: "jdoe@googlemail.com" })).status,
+      422,
+    );
+    assertEquals(w.lookups.length, looked);
+  } finally {
+    delete MX["gateway.test"];
+  }
+});
+
+Deno.test("hint_fits_refuses_only_a_provable_mismatch", async () => {
+  const mx = (domain: string) => Promise.resolve(MX[domain] ?? []);
+  const cases: [MailProvider, string, boolean][] = [
+    ["m365", "school.test", true],
+    ["m365", "elsewhere.test", true],
+    ["m365", "uni.test", false],
+    ["m365", "nomx.test", false],
+    ["m365", "gmail.com", false],
+    ["google", "gmail.com", true],
+    ["google", "uni.test", true],
+    ["google", "elsewhere.test", true],
+    ["google", "school.test", false],
+    ["other", "elsewhere.test", true],
+    ["other", "school.test", false],
+    ["other", "uni.test", false],
+    ["other", "gmail.com", false],
+    ["other", "nomx.test", false],
+  ];
+  for (const [provider, domain, fits] of cases) {
+    assertEquals(await hintFits(provider, domain, mx), fits, `${provider} ${domain}`);
+  }
 });
 
 // ---------------------------------------------------------------- test 16b: entitlement on the routes
