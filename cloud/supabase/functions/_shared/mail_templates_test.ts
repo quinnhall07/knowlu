@@ -11,6 +11,7 @@ import {
   templateClaims,
   type TemplateMessage,
   TEMPLATES,
+  VENDOR_DOMAINS,
 } from "./mail_templates.ts";
 
 /** The vendor rows' data region in mail_templates.ts: the only place a vendor may be named. */
@@ -191,6 +192,25 @@ Deno.test("every row is data of the right shape, and the receipts are lms_receip
   }
 });
 
+Deno.test("the_vendor_domains_are_bare_lower_case_domains_and_cover_every_rows_sender", () => {
+  assert(VENDOR_DOMAINS.length > 0);
+  assertEquals(new Set(VENDOR_DOMAINS).size, VENDOR_DOMAINS.length, "no domain twice");
+  for (const d of VENDOR_DOMAINS) {
+    assert(/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d), `"${d}" is a bare lower-case domain`);
+    assert(!d.endsWith(".edu"), `"${d}": any .edu is already allowed`);
+  }
+  // A row's vendor is a vendor: its sender's domain is a vendor domain or a subdomain of one.
+  for (const t of TEMPLATES) {
+    for (const s of t.senders) {
+      const domain = s.split("@")[1] ?? "";
+      assert(
+        VENDOR_DOMAINS.some((d) => domain === d || domain.endsWith(`.${d}`)),
+        `${t.label}: ${domain} is not on VENDOR_DOMAINS`,
+      );
+    }
+  }
+});
+
 Deno.test("a new_item, a cancelled change and a course_info row each fill only their own fields", () => {
   const row = (claim: MailTemplate["claim"], body: RegExp): MailTemplate => ({
     label: "Example LMS",
@@ -253,6 +273,10 @@ Deno.test("the_code_names_no_vendor", async () => {
   assertEquals(source.indexOf(VENDOR_ROWS_BEGIN, begin + 1), -1, "one data region only");
   const code = (source.slice(0, begin) + source.slice(end)).toLowerCase();
   const names = new Set(["blackboard", "canvas", "instructure", "zybooks", "moodle", "brightspace", "d2l"]);
+  for (const d of VENDOR_DOMAINS) {
+    names.add(d);
+    names.add(d.split(".").slice(-2)[0]);
+  }
   for (const t of TEMPLATES) {
     names.add(t.label.toLowerCase());
     for (const s of t.senders) {

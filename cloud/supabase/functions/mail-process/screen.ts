@@ -6,7 +6,8 @@
  *    allow-list: any `.edu`, the school's own domain, and the LMS and homework-platform vendors' domains.
  *    The server never holds the campus row's `mail_domain` (it is the device's), so the school's domain is
  *    the domain of the account's own mailboxes, less Google's personal-mail domains (personal Gmail is
- *    not a school). The vendors' domains are the template rows' senders' (data, never named here).
+ *    not a school). The vendors' domains are `mail_templates.ts`'s `VENDOR_DOMAINS` (data, never named
+ *    here), their own list beside the template rows, so a vendor with no row yet still passes.
  * 2. **Microsoft's bulk score** (`BCL` in `X-Microsoft-Antispam`, the topmost one), where it exists, at 7
  *    or above.
  * 3. **The account's promoted rules** (`judge_rules.ts`, tier 2) answering noise: an `email` rule, keyed on
@@ -49,15 +50,21 @@ export function domainOf(address: string | null): string | null {
   return domain === "" ? null : domain;
 }
 
-/** The allow-list's named domains: the account's mailboxes' (less personal Gmail) and the vendors'. */
+/** The allow-list's named domains: the account's mailboxes' (less personal Gmail), the vendors' own list,
+ * and any template row's sender's (a row is a vendor's, so it never narrows the list). */
 export function allowDomains(
   mailboxes: readonly ScreenMailbox[],
+  vendors: readonly string[],
   templates: readonly MailTemplate[],
 ): string[] {
   const out = new Set<string>();
   for (const m of mailboxes) {
     const d = domainOf(m.mailboxHint);
     if (d !== null && !PERSONAL_DOMAINS.includes(d)) out.add(d);
+  }
+  for (const v of vendors) {
+    const d = domainOf(`@${v}`);
+    if (d !== null) out.add(d);
   }
   for (const t of templates) {
     for (const s of t.senders) {

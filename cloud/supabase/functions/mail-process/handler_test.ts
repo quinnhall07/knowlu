@@ -5,6 +5,7 @@
 // message here is invented for these tests: no real capture is used.
 import { assert, assertEquals } from "@std/assert";
 import type { RuleTable } from "../_shared/judge_rules.ts";
+import { VENDOR_DOMAINS } from "../_shared/mail_templates.ts";
 import { mailUid, parseHeaders } from "../_shared/mime.ts";
 import { s3Client } from "../_shared/s3.ts";
 import {
@@ -243,7 +244,7 @@ Deno.test("an_edu_sender_with_list_unsubscribe_passes_on", async () => {
   await withWorld(async (w) => {
     w.put(mail({ from: "Registrar <registrar@univ.edu>", extra: [UNSUB] }));
     w.put(mail({ from: "notices@mail.univ.edu", extra: ["Precedence: bulk"] }));
-    // The school's own domain (the account's school mailbox), and a vendor's (a template row's sender).
+    // The school's own domain (the account's school mailbox), and a vendor's (`VENDOR_DOMAINS`).
     w.put(mail({ from: "dean@school.test", extra: [UNSUB] }));
     w.put(mail({ from: "do-not-reply@blackboard.com", subject: "Weekly digest", extra: [UNSUB] }));
     // Not on the list: a personal Gmail domain, and `.edu` anywhere but the end.
@@ -260,6 +261,24 @@ Deno.test("an_edu_sender_with_list_unsubscribe_passes_on", async () => {
     assertEquals(w.store.done, ["5", "6", "7"]);
     // The model path holds what it was handed; the noise objects are gone.
     assertEquals(keysUnder(w, "work/"), ["work/item-1", "work/item-2", "work/item-3", "work/item-4"]);
+  });
+});
+
+Deno.test("a_vendor_with_no_template_row_is_still_allow_listed", async () => {
+  // The vendor half of the allow-list is its own data (`VENDOR_DOMAINS`), not the template rows' senders:
+  // with no template row at all (PQ10: no notification row exists yet), a vendor's list mail, such as a
+  // "due date changed" notification carrying List-Unsubscribe, still goes to the model, never to noise.
+  assert(VENDOR_DOMAINS.length > 0, "the vendor domains are data, never empty");
+  await withWorld(async (w) => {
+    w.deps.templates = [];
+    const froms: string[] = [];
+    for (const d of VENDOR_DOMAINS) froms.push(`notifications@${d}`, `LMS <notify@mail.${d}>`);
+    for (const from of froms) w.put(mail({ from, subject: "Due date changed", extra: [UNSUB] }));
+    // A look-alike is not the vendor: a domain that only ends with the vendor's name is screened.
+    w.put(mail({ from: `notifications@not${VENDOR_DOMAINS[0]}`, extra: [UNSUB] }));
+    await w.run();
+    assertEquals(modelledFroms(w), froms);
+    assertEquals(w.store.done, [String(froms.length + 1)]);
   });
 });
 

@@ -96,6 +96,18 @@ const TITLE_CHARS = 200;
  * notifications are captured. Until then such mail goes to the model, which costs a call but writes
  * nothing a template would not. */
 export const MAIL_TEMPLATES: readonly MailTemplate[] = [];
+
+/** The LMS and homework-platform vendors' own sending domains: the vendor half of §4.7 step 2's allow-list
+ * (`mail-process/screen.ts`). Its own list, not the rows' senders, so a vendor with no row yet (every
+ * notification row, under PQ10) is still allowed past the bulk screen and goes to the model. A domain
+ * covers its subdomains; every row's sender is on it (a test holds that). Blackboard, Canvas (its mail is
+ * Instructure's), and the two homework platforms Knowlu reads. */
+export const VENDOR_DOMAINS: readonly string[] = [
+  "blackboard.com",
+  "instructure.com",
+  "vhlcentral.com",
+  "zybooks.com",
+];
 // vendor rows: end
 
 /** Every row, notifications first, then each `RECEIPT_TEMPLATES` row read as a `receipt` row. */

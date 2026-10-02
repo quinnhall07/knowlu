@@ -30,7 +30,13 @@ import { mailPromptText } from "../_shared/judge_prompts.ts";
 import type { RuleTable } from "../_shared/judge_rules.ts";
 import { validateMailClaims } from "../_shared/judge_validate.ts";
 import type { Authenticity } from "../_shared/mail_bind.ts";
-import { type MailClaim, type MailTemplate, templateClaims, TEMPLATES } from "../_shared/mail_templates.ts";
+import {
+  type MailClaim,
+  type MailTemplate,
+  templateClaims,
+  TEMPLATES,
+  VENDOR_DOMAINS,
+} from "../_shared/mail_templates.ts";
 import { bodyText, decodeWords, type MailHeaders, mailUid, parseHeaders } from "../_shared/mime.ts";
 import { type S3Client, S3Error } from "../_shared/s3.ts";
 import { scrubForPrompt } from "../_shared/scrub.ts";
@@ -119,6 +125,8 @@ export interface ProcessDeps {
   model(input: ModelInput): Promise<void>;
   /** The template rows; `mail_templates.ts`'s `TEMPLATES` by default. */
   templates?: readonly MailTemplate[];
+  /** The vendors' sending domains (the screen's allow-list); `mail_templates.ts`'s `VENDOR_DOMAINS` by default. */
+  vendorDomains?: readonly string[];
 }
 
 /** How long a run holds an item it took: past any one item's work, short of the next attempt. */
@@ -284,7 +292,7 @@ async function run(deps: ProcessDeps): Promise<Record<Outcome | "failed", number
         [mailboxes, known],
       ) => ({
         mailboxes,
-        allow: allowDomains(mailboxes, deps.templates ?? TEMPLATES),
+        allow: allowDomains(mailboxes, deps.vendorDomains ?? VENDOR_DOMAINS, deps.templates ?? TEMPLATES),
         knownCourses: known,
       }));
       got.catch(() => accounts.delete(id));
