@@ -17,7 +17,8 @@ working title appears nowhere in this plan, the code, the tests or the copy.
 **Stage:** MVP (spec D1; ruling 10's MVP list as amended by A5). **Size:** XL, the largest MVP lane.
 **Status:** in build. T5.1–T5.4, T8, T8b, T8c, T5.5 and both Checkpoint A fix rounds are on
 `email-engine` (HEAD `4194817`). Checkpoint A passed on 2026-10-02 (Quinn). PQ6, PQ7 and PQ8 were
-answered the same day (§4); T5.6 is next in `email-engine`. The ledger is
+answered the same day (§4). T5.6 is built (`d0abe3e`); its addendum read opened PQ9 (§4) and
+amended T6.3. The ledger is
 `.superpowers/sdd/2026-09-30-email-forwarding/progress.md`.
 
 ## 1. Goal, and what must not move
@@ -389,6 +390,34 @@ Briefs cite functions and headings, never line numbers.
     as the student's own mail, so a note the student mails themselves between two connected mailboxes
     still reaches the model.
 
+### Asked after T5.6's addendum read (2026-10-02, open)
+
+- **PQ9. A new due for a task a pending mail card proposes.** As built (`d0abe3e`), T5.6 matches an
+  open mail `kind: task` card by normalised title and course only. A live `new_item` for that task
+  with another due is skipped as already applied: no card and no notice, and once the message is
+  acked the date is gone. Example: a pending card for "Lab 5" in CS 101 due 2026-10-12, then a live
+  `new_item` "Lab 5" in CS 101 due 2026-10-14T23:59, plans `[Skip(AlreadyApplied)]`, and
+  `a_live_new_item_matching_a_pending_mail_task_card_files_nothing` pins it. Before T5.6 this filed a
+  second card. Had the task been a note, test 24 would read the same mail as a due change and file
+  an amend card, so a pending card is the one place a moved date is lost without a trace. A weekly item
+  that reuses its title is dropped too while last week's card is pending. PQ8's answer named title
+  and course and never addressed the due; the code follows its words.
+  - *Recommend (b), due-aware:* skip only when the claim has no due, or its due falls on the card's due
+    day (the card's `due` read from its fenced payload, T6.3). Any other due takes `New`'s rows: a
+    second card, as before T5.6. S0 capture 5's duplicate still files one card, since both copies
+    carry the same date. The costs: if the model reads two dates from the two copies, the student sees one
+    card per date; and a time moved within the same day is not caught while the card is pending.
+  - *The alternative (a):* confirm title and course only. The finding closes, and nothing changes.
+  - *If (b):* a contract-engineer fix to T5.6's two files. Five cases of
+    `a_live_new_item_matching_a_pending_mail_task_card_files_nothing` move from the skip to `New`'s
+    rows, every claim whose due day is not 2026-10-12 (`2026-10-14T23:59`, `2026-09-20`, the exam and
+    both events). That moves a built assertion, which §5 allows only on a ruling. A named test,
+    `a_live_new_item_with_another_due_files_its_own_card`, pins the 2026-10-14T23:59 case. `walk`'s
+    argument that "resolution reads no `due`" is re-checked, since `carded` would read a task card's
+    due.
+  - *Blocks:* T6.2, by T5.6's rule that no Important finding from its read is open. T6.3 fills a
+    card's `due` either way.
+
 ## 5. Tasks
 
 **Rules for every task.**
@@ -441,7 +470,7 @@ marks a task that needs Quinn's word, presence, a secret or a spend. **WT** is t
 | T8c | `contract-engineer` (Opus, xhigh) | yes | F3 (answered) | `engine/src/approvals.rs` CL | T8b | engine |
 | T5.5 | `contract-engineer` (Opus, xhigh) | yes | PQ4, PQ7 (answered) | `engine/src/mailreconcile/{mod,resolve,rules}.rs` | T8c | engine |
 | A | `contract-reviewer` (Opus, xhigh) | yes | diffs to Quinn | `docs/reports/…-email-forwarding-contract-review-a.md` | T5.5 and both fix rounds; **passed 2026-10-02** | — |
-| T5.6 | `contract-engineer` (Opus, xhigh) | yes | PQ8 (answered: (ii)) | `engine/src/mailreconcile/{resolve,rules}.rs` | A | engine |
+| T5.6 | `contract-engineer` (Opus, xhigh) | yes | PQ8 (answered: (ii)); PQ9 (open) for its read's fix | `engine/src/mailreconcile/{resolve,rules}.rs` | A | engine |
 | T6.1 | `implementer` (Sonnet, high) | no | — | `engine/src/cloudmodel.rs`, `engine/tests/mail_pass.rs` (new) | T5.6 | engine |
 | T6.2 | `implementer` (Sonnet, high) | no | — | `engine/src/mail.rs` (new), `engine/tests/mail_pass.rs` | A, T5.6's read, T6.1, H1b | engine |
 | T6.3 | `implementer` (Sonnet, high) | no | PQ7 (answered) | `engine/src/mail.rs`, `engine/tests/mail_pass.rs` | T6.2 | engine |
@@ -1158,10 +1187,25 @@ engine half of 36), in `engine/tests/mail_pass.rs`:
 - `the_seen_ledger_records_mail_uids_as_email_and_a_hostile_title_cannot_add_a_line` (§10, R11): a
   claim titled `Quiz` + U+2028 + `- bb-uid-123 · x` leaves `ingest::load_seen` holding the mail uid and
   no `bb-uid-123`.
+- `a_rule_forward_in_a_later_pull_files_no_second_card` (T5.6 against real card files; S0 capture 5's
+  shape, synthetic): pull one delivers a live `new_item` "Lab 5" in CS 101, and T6.2's writer files
+  `approvals/task-lab-5.md` (`created_by: mail`; `status: snoozed` on vault day 1, `pending` on day
+  2). Pull two delivers the rule forward (a new Message-ID, the same item) and "Lab 5" in MATH 220.
+  On both days, `approvals/` then holds exactly two mail task cards: the first, unchanged byte for
+  byte, and one for MATH 220; pull two's line counts `K` = 1. It fails if the view leaves a card's
+  `kind` or `course` as `None`, which every T5.6 unit test would miss.
 
 **Behaviour.** `pull_mail(vault, client, opts, budget)` (§4.8 steps 1, 4–7).
 - It builds T5's view from `tasks/`, `archive/` and `approvals/`, with `Journal::human_set` for each
-  field a claim may touch, and each note's `archived_reason` (T5.5).
+  field a claim may touch, each note's `archived_reason` (T5.5), and every note's `kind` as its
+  frontmatter holds it (T5.6).
+- A `kind: task` card in `approvals/` is viewed as the task it proposes (T5.6's addendum). Its own
+  frontmatter gives `status`, `created_by` and `source_uid`. Its fenced `task` payload's frontmatter
+  gives `title`, `course` and `due`, since `write_gmail_card`'s shape puts no `course:` or `due:` on
+  the card. The fence is found by `approvals::materialize`'s pattern (`PAYLOAD_FENCE`, mirrored in
+  `mail.rs`; `approvals.rs` is not edited), and the payload is read only, never re-dumped. A card
+  whose payload has no frontmatter or no `course:` keeps `course: None`, so it matches no claim: a
+  second card, never a dropped task. `due` is read whichever way PQ9 is answered.
 - Live mail takes up to `PULL_ROUNDS`. A closed batch drains until `budget`, by `pull_gmail`'s
   before-the-round check.
 - It calls `mailreconcile::plan`, applies the actions through T6.2's writers, acks, and records each
@@ -2038,7 +2082,7 @@ controller's (spec T18; HANDOFF §2's controller rules).
 | Worktree | Order |
 |---|---|
 | `main` (T19's branch) | T19 → T13a → R19 → PR merged on Quinn's word → `main` merged into the lane and into `email-app` |
-| `email-engine` | H1a → T5.1 → T5.2 → T5.3 → T5.4 → (PQ5) T8 → T8b → A's first fix round (`968d86d`) → (F3) T8c → (PQ4) T5.5 → A's second fix round (all built, HEAD `4194817`) → Checkpoint A passed (2026-10-02) → (PQ8 ii) T5.6 → T6.1, while contract-reviewer reads T5.6 → that read's fix loop, if any → H1b → T6.2 → T6.3 (PQ7 answered) → T6.4 → H1c → T7 → H2 |
+| `email-engine` | H1a → T5.1 → T5.2 → T5.3 → T5.4 → (PQ5) T8 → T8b → A's first fix round (`968d86d`) → (F3) T8c → (PQ4) T5.5 → A's second fix round (all built, HEAD `4194817`) → Checkpoint A passed (2026-10-02) → (PQ8 ii) T5.6 → T6.1, while contract-reviewer reads T5.6 → that read's fix loop (the T6.3 amendment; PQ9, then its fix if (b)) → H1b → T6.2 → T6.3 (PQ7 answered) → T6.4 → H1c → T7 → H2 |
 | `email-cloud` | S0 (passed) → T1.1 → T1.2 (both built, with the old column names) → T1.3 (PQ6 answered; unblocked; renames the two columns first) → T2a → T2b → T2c → T2d (PQ2 answered) → interop check → T2e → T2f → T2g.1 → T2g.2 → T3a (PQ4 answered) → T3b → T3c → T3d (PQ8 (i) declined) → T3e → T4.1 → T4.2 → T4.3 → T4.4 → T4.5 → T4.6 → T4b → Checkpoint B → T16 (only if PQ3 keeps it) |
 | `email-app` | T19 merged → T14 → H3a → T9.1 → H3c → T10.1 → S1–S3 → H3b → T9.2 → T10.2a → T10.2b → T10.3a → T10.3b → H3d → T11.1 → T11.2 → T11.3 → H4 → T12 → Checkpoint C → `email-engine` merged in (for `mail-applied`) → T11.4 → H5 with test 37 → T11.5 → `origin/main` merged in and the registrar check → T15.1 → … → T15.5 |
 | lane | T0.0 → … → T13b (after T15.5 and B) → T17 → Checkpoint D → T18 |
@@ -2061,6 +2105,7 @@ account, the region (`us-east-2`), DNS and the DMARC sender (S0); PQ2, PQ4, F3, 
 ((ii) only) (2026-10-02, later the same day). T19 merged as #29 (§9.5).
 Still open:
 - the plan's reading of "pending" in T5.6 (open or snoozed), read with T5.6's addendum;
+- PQ9, a new due for a task a pending mail card proposes (T5.6's addendum; blocks T6.2);
 - the sign-ins at the machine (S1–S3);
 - the M365 test tenant (S6);
 - UA's mail fields (T14);
@@ -2077,7 +2122,7 @@ R19. Every other task starts on Sonnet, and a second failure moves it to Opus at
 - **R19:** T19's diff and review, before its PR merges.
 - **Checkpoint A:** the contract review of T5, T8, T8b and T8c, with the diffs and the plan's reading
   of F3. Passed 2026-10-02; T5.6's addendum goes to Quinn only if it opens a finding or the
-  "pending" reading is questioned.
+  "pending" reading is questioned. It opened one: PQ9.
 - **Checkpoint D:** the whole-branch review, before T18, with PQ3.
 - **The merge word** at T18d.
 - **Outside this lane:** A13's review trigger at the 20th paying account. T13a puts it in Quinn's
@@ -2175,7 +2220,7 @@ numbers are spec §12's; named tests are this plan's (§5).
 | F3 (b) (2026-10-02): a mail amend fills an empty `due`; a future due un-archives an `imported-past` note | T8c, T5.5, T6.2 | T8c's tests; T5.5's F3 tests and the two changed T5.4 assertions; `a_fill_due_card_and_an_unarchive_card_pass_validate_amendment`; Checkpoint A |
 | T8c's reading, confirmed at Checkpoint A (2026-10-02): arm (1) keyed on the card, so any dateless task, hand-made too | T8c, T5.5 | `a_mail_card_fills_an_empty_due_…`, `a_date_for_a_hand_made_note_with_no_due_is_an_amend_card_from_null` |
 | PQ7 (2026-10-02): a residual `NotAmendable` counts in `U`; §4.8 step 7's line unchanged | T5.5, T6.3 | `the_mail_run_line_is_exact` |
-| PQ8 (2026-10-02): (ii) a live `new_item` matching an open mail task card files nothing; (i) declined, the screen keeps "From is the mailbox itself" | T5.6, T3d | T5.6's tests; `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` |
+| PQ8 (2026-10-02): (ii) a live `new_item` matching an open mail task card files nothing; (i) declined, the screen keeps "From is the mailbox itself" | T5.6, T6.3, T3d | T5.6's tests; `a_rule_forward_in_a_later_pull_files_no_second_card` (T6.3's view of a card); `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` |
 | D8: two-stage intake and a separate queue; `seen` written with work after the put; an expired item loses `seen` | T1.1, T2g.1, T3d, T3e, T4.4 | tests 7 and 16; `an_expired_item_loses_its_seen_row_…` |
 | D9: claims cheapest first; templates; a small model with a fixed schema; verbatim evidence; the 0.6 floor | T3a–T3e | tests 8, 9 and 10 |
 | D10: deterministic reconcile in `judge`; the ordering date; batches whole; backfill applies and lists, live proposes; Undo | T4.4, T5.1–T5.5, T6.3, T7, T15.4 | tests 12, 18, 19 and 29; `undo_invokes_…`; proof step 3 |
@@ -2360,7 +2405,7 @@ spec text moves. A row marked **open** waits on Quinn or the planner.
 | PQ2's interop corpus. The progress ledger says the raw S0 copies are kept for the check, but `s0-captures.md` says local copies were deleted. | The check needs the raw copies; the header facts alone verify nothing. | T2d; Checkpoint B | **open (controller):** confirm before T2d, and re-capture cases 1, 3, 4 and 6 if the copies are gone |
 | Checkpoint A passed. T8c's two arms are keyed on the card's `created_by: mail`, so arm (1) fills any dateless task, hand-made too, and never checks the target's `created_by`. | Quinn confirmed the plan's reading at Checkpoint A. The re-read covered both fix rounds through `4194817` (`fa980a1` and `4194817` added to the list). | T8c, T5.5; Checkpoint A's report | **Answered 2026-10-02 (Quinn)** |
 | PQ6 (a). The allowance is per account per 120-day period on `mail_accounts.allowance_opened_at`. T1.1 was built before the answer with `allowance_term_start` and `term_start`; T1.3 renames them to `allowance_opened_at` (`timestamptz`) and `backfill_since` in the still-unapplied `20261002000200_mail.sql`, and updates `the_mail_tables_have_section_5_1s_columns_and_words`. `term_start` is renamed, not dropped: T4.2 and T10.1 read the window start, and T15.1 shows it. The opening rule sits in `charge_allowance`'s one statement, so the period opens at the first backfill charge, not at the batch route. | Quinn, 2026-10-02, amending decision 8 and D23 (markers at decision 8, D23 and §5.1). Renaming in the unapplied file keeps one mail migration; nothing is applied until T18. Opening in the charge keeps T4.2 unchanged; the two moments differ by minutes. | T1.3, T3e; the renamed column test, T1.3's and T3e's allowance tests | **Answered 2026-10-02 (Quinn)**; the column and opening details are the plan's |
-| PQ8 (ii) only. T5.6 is added before T6.1 and T6.2: a live `new_item` matching an open mail task card by normalised title and course files nothing (`AlreadyApplied`). "Open" is read as `pending` or `snoozed`, since a first-day card is snoozed (R16). (i) is declined: T3d keeps "From is the mailbox itself". | Quinn, 2026-10-02. The device rule catches S0 capture 5's rule-forward duplicate without dropping a note the student mails themselves. | T5.6, T3d; T5.6's tests, `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` | **Answered 2026-10-02 (Quinn)**; the "snoozed" reading is the plan's, for Quinn's read with T5.6's addendum |
+| PQ8 (ii) only. T5.6 is added before T6.1 and T6.2: a live `new_item` matching an open mail task card by normalised title and course files nothing (`AlreadyApplied`). "Open" is read as `pending` or `snoozed`, since a first-day card is snoozed (R16). (i) is declined: T3d keeps "From is the mailbox itself". | Quinn, 2026-10-02. The device rule catches S0 capture 5's rule-forward duplicate without dropping a note the student mails themselves. | T5.6, T3d; T5.6's tests, `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` | **Answered 2026-10-02 (Quinn)**; the "snoozed" reading is the plan's, for Quinn's read with T5.6's addendum. Built `d0abe3e`. The addendum read amended T6.3: the view fills `kind`, and a task card's `title`, `course` and `due` come from its fenced payload. **Open: PQ9** (a different due, §4) |
 
 ## 10. Review revisions (2026-09-30)
 
