@@ -4,7 +4,8 @@
 // are as in forwarding_set.js. It returns one of
 //   { result: "ok", forwarding: "off", changed: boolean }   (changed is false when it was already off)
 //   { result: "elsewhere" }      (forwarding goes to another address: that is the student's and is left on)
-//   { result: "not found", control: "switch" | "save" }
+//   { result: "not found", control: "switch" | "address" | "save" }   (address: forwarding is on and the
+//      field that says where to cannot be found, so it cannot be told whether the student's own is there)
 //   { result: "failed", reason: "no address" | "save did not settle" | "read back differed" }
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => {
@@ -44,7 +45,8 @@ const sw = switchEl();
 if (!sw) return { result: "not found", control: "switch" };
 if (sw.checked !== true) return { result: "ok", forwarding: "off", changed: false };
 const there = fieldEl();
-if (there && norm(there.value) !== "" && norm(there.value) !== address) return { result: "elsewhere" };
+if (!there) return { result: "not found", control: "address" };
+if (norm(there.value) !== "" && norm(there.value) !== address) return { result: "elsewhere" };
 if (!saveEl()) return { result: "not found", control: "save" };
 
 sw.click();

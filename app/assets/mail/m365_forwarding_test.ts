@@ -176,11 +176,41 @@ Deno.test("m365_a_missing_control_returns_not_found", async () => {
     assertEquals(f.snap(), before, `${without}: the switch is put back`);
     assertEquals(f.saves, 0, without);
   }
+  // Forwarding is on but the address field cannot be found (a renamed label): turning it off could switch
+  // off forwarding that points elsewhere, so the script says what it cannot find and clicks nothing.
+  const g = forwarding({ on: true, to: OTHER, without: "address" });
+  const kept = g.snap();
+  assertEquals(await run("m365/forwarding_off.js", g.page, { address: OURS }), NOT_FOUND("address"));
+  assertEquals(g.saves, 0);
+  assertEquals(g.snap(), kept);
   // An empty page (a sign-in or error page that answered on the mail origin) has no control either.
   assertEquals(
     await run("m365/forwarding_read.js", { ...load("<p>Oops</p>") }, { address: OURS }),
     NOT_FOUND("switch"),
   );
+});
+
+Deno.test("m365_forwarding_set_replaces_elsewhere_only_with_the_students_answer", async () => {
+  // Without the answer the other address is left alone.
+  const a = forwarding({ on: true, to: OTHER, keep: false });
+  assertEquals(await run("m365/forwarding_set.js", a.page, { address: OURS }), { result: "elsewhere" });
+  assertEquals(await run("m365/forwarding_set.js", a.page, { address: OURS, replace: false }), {
+    result: "elsewhere",
+  });
+  assertEquals(a.saves, 0);
+  assertEquals(a.snap(), { on: true, to: OTHER, keep: false });
+  // With it, the address is replaced, keep-copy is turned on and the page is read back.
+  const b = forwarding({ on: true, to: OTHER, keep: false });
+  const r = await run("m365/forwarding_set.js", b.page, { address: OURS, replace: true });
+  assertEquals(r, { result: "ok", forwarding: "on", to: "ours", keep_copy: true, changed: true });
+  assertEquals(b.saves, 1);
+  assertEquals(b.saved, { on: true, to: OURS, keep: true });
+  // Only a literal true counts.
+  const c = forwarding({ on: true, to: OTHER });
+  assertEquals(await run("m365/forwarding_set.js", c.page, { address: OURS, replace: "yes" }), {
+    result: "elsewhere",
+  });
+  assertEquals(c.saves, 0);
 });
 
 Deno.test("m365_forwarding_off_turns_it_off_and_reads_it_back", async () => {

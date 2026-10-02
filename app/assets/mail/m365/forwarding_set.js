@@ -5,11 +5,14 @@
 // (default 2000) bounds the wait for a control the switch reveals; `args.settle_ms` (default 5000)
 // bounds the wait for the page to take the Save (its Save button goes disabled). It returns one of
 //   { result: "ok", forwarding: "on", to: "ours", keep_copy: true, changed: boolean }
-//   { result: "elsewhere" }       (forwarding is on to another address: nothing is changed, the student is asked)
+//   { result: "elsewhere" }       (forwarding is on to another address and `args.replace` is not true: nothing is
+//      changed, the student is asked)
 //   { result: "not found", control: "switch" | "address" | "keep copy" | "save" }
 //   { result: "failed", reason: "no address" | "save did not settle" | "read back differed" }
-// It never replaces an existing forwarding address. A control it cannot find after flipping the switch
-// is answered with the switch flipped back, so no unsaved change is left on the page.
+// It replaces another forwarding address only when `args.replace === true`, which the caller sets only
+// from the student's answer to the "forward to Knowlu instead" question (spec 4.2 step 3). A control it
+// cannot find after flipping the switch is answered with the switch flipped back, so no unsaved change is
+// left on the page.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => {
   const aria = el.getAttribute("aria-label");
@@ -52,6 +55,7 @@ const address = norm(args && args.address);
 if (!address) return { result: "failed", reason: "no address" };
 const waitMs = Number(args.wait_ms) >= 0 ? Number(args.wait_ms) : 2000;
 const settleMs = Number(args.settle_ms) >= 0 ? Number(args.settle_ms) : 5000;
+const replace = args.replace === true;
 
 const sw = switchEl();
 if (!sw) return { result: "not found", control: "switch" };
@@ -59,7 +63,7 @@ if (!saveEl()) return { result: "not found", control: "save" };
 if (sw.checked === true) {
   const there = fieldEl();
   if (!there) return { result: "not found", control: "address" };
-  if (norm(there.value) !== "" && norm(there.value) !== address) return { result: "elsewhere" };
+  if (!replace && norm(there.value) !== "" && norm(there.value) !== address) return { result: "elsewhere" };
 }
 
 let changed = false;
