@@ -1291,7 +1291,9 @@ lives in the one SQL statement, so T4.2's batch route does not change.
 - `a_subscription_handshake_is_confirmed_only_for_the_configured_topic`
 
 **Behaviour.** D2 and §4.6 step 1. The certificate is fetched through an injected fetcher and only from
-an allowed host. Every refusal answers 403 and reads nothing more.
+an allowed host. Every refusal answers 403 and reads nothing more. Only `SignatureVersion` 2
+(SHA-256) is accepted (§9.5), so the topic's `SignatureVersion` attribute must be 2 before anything
+subscribes (T18a, T13b's runbook).
 
 #### T2b. S3 by SigV4 (`_shared/s3.ts`)
 
@@ -1962,7 +1964,9 @@ kept, that side is a follow-on brief, not part of this lane.
   `mail-setup` profiles, the `mail` window label, and the `mail` step before the chain.
 - **`docs/reference/engine-commands.md`:** `mail-applied`, `judge`'s mail pass and its run line, and
   `ingest`'s ruling-3 card.
-- **`cloud/supabase/README.md`:** the AWS runbook (§5.1), with the secrets by name only.
+- **`cloud/supabase/README.md`:** the AWS runbook (§5.1), with the secrets by name only. Before the
+  subscribe step it sets the topic's `SignatureVersion` attribute to 2 and reads it back, as T18a
+  does (§9.5).
 - **The legal note:** its two stale Crimson lines.
 - **`docs/notes/2026-09-29-vision-program.md`:** the email row as an MVP item.
 - **HANDOFF:**
@@ -2023,6 +2027,11 @@ controller's (spec T18; HANDOFF §2's controller rules).
     `MAIL_SNS_TOPIC_ARN` and `AWS_REGION`.
   - `db push` the migration, with `--include-all` only if an older stamp is pending.
   - Deploy the functions with `--use-api`, and add the cron's Vault token.
+  - Set the topic to sign with SHA-256 before subscribing, since a topic signs with version 1 by
+    default and `verifySns` refuses it (§9.5):
+    `aws sns set-topic-attributes --topic-arn <MAIL_SNS_TOPIC_ARN> --attribute-name SignatureVersion --attribute-value 2`,
+    then read it back with `aws sns get-topic-attributes`. If this step is skipped, the
+    SubscriptionConfirmation gets a bare 403 and the subscription stays PendingConfirmation, with no log.
   - Point SNS's HTTPS subscription at `mail-inbound` and confirm it.
   - Smoke by OTP session (at most two OTPs an hour): a canary round trip, one synthetic forward, and
     the controller's count-only query.
@@ -2367,6 +2376,7 @@ spec text moves. A row marked **open** waits on Quinn or the planner.
 | Checkpoint A passed. T8c's two arms are keyed on the card's `created_by: mail`, so arm (1) fills any dateless task, hand-made too, and never checks the target's `created_by`. | Quinn confirmed the plan's reading at Checkpoint A. The re-read covered both fix rounds through `4194817` (`fa980a1` and `4194817` added to the list). | T8c, T5.5; Checkpoint A's report | **Answered 2026-10-02 (Quinn)** |
 | PQ6 (a). The allowance is per account per 120-day period on `mail_accounts.allowance_opened_at`. T1.1 was built before the answer with `allowance_term_start` and `term_start`; T1.3 renames them to `allowance_opened_at` (`timestamptz`) and `backfill_since` in the still-unapplied `20261002000200_mail.sql`, and updates `the_mail_tables_have_section_5_1s_columns_and_words`. `term_start` is renamed, not dropped: T4.2 and T10.1 read the window start, and T15.1 shows it. The opening rule sits in `charge_allowance`'s one statement, so the period opens at the first backfill charge, not at the batch route. | Quinn, 2026-10-02, amending decision 8 and D23 (markers at decision 8, D23 and §5.1). Renaming in the unapplied file keeps one mail migration; nothing is applied until T18. Opening in the charge keeps T4.2 unchanged; the two moments differ by minutes. | T1.3, T3e; the renamed column test, T1.3's and T3e's allowance tests | **Answered 2026-10-02 (Quinn)**; the column and opening details are the plan's |
 | The allowance refund (T1.3's review, 2026-10-02). `refund_allowance(p_account)` is added to the still-unapplied `20261002000200_mail.sql`: one `update` of `mail_accounts` that gives one judgment back only while `allowance_until > now()` and never above 2,000, service-role only, and never opens, extends or re-prices an allowance. T3e calls it on `model failed` alone (F1's rule: a refusal, a truncation or a failed validation reached the model and stays charged) and routes the item through wait-and-retry. Chosen over "a failed backfill item is never counted" because charge-before-call is the hot-loop guard and stays, as F1 kept it for `charge_call`. Unlike `refund_call`, refunds are not counted: the caller is the server's cron worker, so request volume is bounded by the item's retry schedule, and dollars by `enforce_budget`'s raised ceiling. Spec §5.1's RPC list names two; this third is the plan's. | `charge_allowance` charges before the call, as `charge_call` did before F1 (main's `20261002000100_refund_failed_call.sql`, PR #33). A first backfill during a provider outage would spend 2,000 judgments in seconds on calls the model never answered, then trickle at the daily cap for the 120-day period: D23's failure. | T1.3, T3e; `refund_allowance_gives_one_judgment_back_only_while_the_allowance_is_open`, `a_model_failure_on_a_backfill_item_refunds_…`. The function-count pin is 36 here; merging main (PR #33's `refund_call`) moves it to 37, not 36. | recorded, for the planner; T3e must not build past it |
+| SNS signature version (T2a's review, 2026-10-02). `verifySns` accepts only `SignatureVersion` 2 (RSA with SHA-256) and refuses version 1 (SHA-1) before any fetch. An SNS topic signs with version 1 by default, and S0's topic was built with the default. So T18a now sets the topic's `SignatureVersion` attribute to 2 and reads it back before the subscribe step, and T13b's runbook carries the same step. `sns.ts` is unchanged. | Without the step, the SubscriptionConfirmation is refused with the same bare 403 as every other refusal and leaves no log line. The subscription stays PendingConfirmation, no mail arrives, and nothing points at the cause. That costs a live deploy, but it fails closed. | T18a, T13b; T2a's version test in `sns_test.ts` | **carried (controller):** T18a's attribute step; T13b's runbook line |
 | PQ8 (ii) only. T5.6 is added before T6.1 and T6.2: a live `new_item` matching an open mail task card by normalised title and course files nothing (`AlreadyApplied`). "Open" is read as `pending` or `snoozed`, since a first-day card is snoozed (R16). (i) is declined: T3d keeps "From is the mailbox itself". | Quinn, 2026-10-02. The device rule catches S0 capture 5's rule-forward duplicate without dropping a note the student mails themselves. | T5.6, T3d; T5.6's tests, `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` | **Answered 2026-10-02 (Quinn)**; the "snoozed" reading is the plan's, for Quinn's read with T5.6's addendum |
 
 ## 10. Review revisions (2026-09-30)
