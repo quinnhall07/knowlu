@@ -822,8 +822,8 @@ pub fn sync_tasks(
 /// charged to the 15-a-day budget like any proposal. `Ok(None)` files nothing:
 /// - a null or a collection on the note's side, or a value no card holds on one line: such a card
 ///   could never be applied, so the note keeps its value (R14);
-/// - a pending `kind: amend` card for the note and exactly `{field}`, whoever filed it, is already
-///   the open decision (`write::find_pending_amendment`, R14);
+/// - a pending or snoozed `kind: amend` card for the note and exactly `{field}`, whoever filed it,
+///   is already the open decision ([`open_amendment`], R14);
 /// - the student rejected a card for the note and field proposing this same value (P12).
 #[allow(clippy::too_many_arguments)]
 fn propose_feed_value(
@@ -846,8 +846,7 @@ fn propose_feed_value(
     if [from_text.as_str(), to].into_iter().any(|text| crate::write::single_line_problem(text).is_some()) {
         return Ok(None);
     }
-    let fields = std::collections::BTreeSet::from([field.to_string()]);
-    if crate::write::find_pending_amendment(vault, target_rel, &fields).is_some() || rejected_before(vault, target_rel, field, to) {
+    if open_amendment(vault, target_rel, field).is_some() || rejected_before(vault, target_rel, field, to) {
         return Ok(None);
     }
     let title = crate::yaml::get(meta, "title").and_then(crate::yaml::text).unwrap_or_else(|| stem.to_string());
@@ -880,6 +879,39 @@ fn propose_feed_value(
         suffix += 1;
     }
     crate::write::create(vault, &crate::ids::rel(vault, &path), &text, ctx, journal, None).map(Some)
+}
+
+/// Plan §10 R14's one open decision per field: a `kind: amend` card in `approvals/` for the note at
+/// `target_rel` whose `changes` name exactly `{field}`, whoever filed it, either `pending`
+/// (`write::find_pending_amendment`) or `snoozed`. A snoozed card is still undecided: it wakes
+/// `pending` with its own `to`. `defer_over_budget` snoozes a day's overflow (R3), the student may
+/// snooze a card by hand, and the mail pass files its first-day cards snoozed (R16); were any of
+/// them invisible here, each slot would file another card for the same field. `write.rs` is not
+/// edited (Checkpoint A); the mail card writer (plan T6.2) takes the same rule.
+pub(crate) fn open_amendment(vault: &Path, target_rel: &str, field: &str) -> Option<PathBuf> {
+    let fields = std::collections::BTreeSet::from([field.to_string()]);
+    if let Some(pending) = crate::write::find_pending_amendment(vault, target_rel, &fields) {
+        return Some(pending);
+    }
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(vault.join("approvals"))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|x| x == "md"))
+        .collect();
+    paths.sort();
+    paths.into_iter().find(|path| {
+        let Some(meta) = crate::ids::read_meta(path) else { return false };
+        let word = |key: &str| crate::yaml::get(&meta, key).and_then(crate::yaml::text);
+        let card = [("type", "approval"), ("kind", "amend"), ("status", "snoozed"), ("target", target_rel)];
+        let named = match crate::yaml::get(&meta, "changes") {
+            Some(serde_yaml_ng::Value::Mapping(changes)) => {
+                changes.keys().filter_map(crate::yaml::text).collect::<std::collections::BTreeSet<String>>() == fields
+            }
+            _ => false,
+        };
+        card.iter().all(|(key, want)| word(key).as_deref() == Some(*want)) && named
+    })
 }
 
 /// P12's "already rejected": a card in `archive/` with `kind: amend` and `status: rejected` for
@@ -2007,6 +2039,56 @@ mod tests {
             assert_eq!(files(&v, "approvals").len(), 16, "deferred, never deleted");
             let last = "approvals/amend-task-hw-16-due.md";
             assert_eq!((get(&v, last, "status"), get(&v, last, "snooze_until")), (Some("snoozed".into()), Some("2026-08-29".into())));
+        }
+
+        /// Plan §10 R14 with R3 (Checkpoint A's failing input): the card `defer_over_budget` snoozed
+        /// is still the open decision on its field. The next ingest files no second card for it,
+        /// whether the feed says the same value or a new one, so the overflow never grows a slot at
+        /// a time.
+        #[test]
+        fn a_card_the_budget_snoozed_is_still_the_open_decision() {
+            let v = sync_vault();
+            let events = |day: i8| (1..=16).map(|n| ev(&format!("bb:{n}"), &format!("HW {n:02}"), dt(2026, 9, day))).collect::<Vec<_>>();
+            run(&v, &events(11), &[]);
+            for n in 1..=16 {
+                by_hand(&v, &format!("tasks/task-hw-{n:02}.md"), "due", "2026-09-18T23:59");
+            }
+            assert_eq!(run(&v, &events(16), &[]).len(), 16);
+            let mut journal = crate::journal::Journal::new(&v);
+            let deferred = crate::approvals::defer_over_budget(&v, TODAY, 15, &crate::approvals::default_ctx(), &mut journal);
+            assert_eq!(deferred, ["amend-task-hw-16-due"]);
+            assert_eq!(run(&v, &events(16), &[]), Vec::<String>::new());
+            assert_eq!(run(&v, &events(14), &[]), Vec::<String>::new(), "a moved feed value waits too");
+            assert_eq!(files(&v, "approvals").len(), 16);
+            assert!(!v.join("approvals/amend-task-hw-16-due-2.md").exists());
+            assert_eq!(get(&v, "tasks/task-hw-16.md", "due").as_deref(), Some("2026-09-18T23:59"));
+        }
+
+        /// Plan §10 R14 with R16: a card the student snoozed by hand is still the open decision on
+        /// its field while it sleeps. So is a mail card held to the vault's second day (R16), whoever
+        /// filed it; a snoozed card for another field blocks nothing.
+        #[test]
+        fn a_card_the_student_snoozed_is_still_the_open_decision() {
+            let v = made();
+            by_hand(&v, NOTE, "due", "2026-09-18T23:59");
+            run(&v, &[hw(dt(2026, 9, 16))], &[]);
+            by_hand(&v, CARD, "status", "snoozed");
+            by_hand(&v, CARD, "snooze_until", "2026-09-01");
+            assert_eq!(run(&v, &[hw(dt(2026, 9, 16))], &[]), Vec::<String>::new());
+            assert_eq!(run(&v, &[hw(dt(2026, 9, 14))], &[]), Vec::<String>::new(), "a moved feed value waits too");
+            assert_eq!(files(&v, "approvals"), ["amend-task-hw-01-due.md"]);
+            assert_eq!(get(&v, NOTE, "due").as_deref(), Some("2026-09-18T23:59"));
+            // A mail `{due}` card snoozed to day 2 blocks the feed's due card, and not its title card.
+            let v = made();
+            by_hand(&v, NOTE, "title", "\"HW 01 (mine)\"");
+            by_hand(&v, NOTE, "due", "2026-09-18T23:59");
+            let mail = "---\ntype: approval\nkind: amend\ntitle: Lab moved\nstatus: snoozed\ntarget: tasks/task-hw-01.md\n\
+                        proposed_at: 2026-08-29\nfirst_proposed_at: 2026-08-28\nexpires: null\nsnooze_until: 2026-08-29\n\
+                        created_by: mail\nchanges:\n  due:\n    from: 2026-09-18T23:59\n    to: 2026-09-19T23:59\n---\n\nMail.\n";
+            pystr::write_text(&v.join("approvals").join("amend-mail.md"), mail).unwrap();
+            let log = run(&v, &[ev("bb:1", "HW 01 revised", dt(2026, 9, 16))], &[]);
+            assert_eq!(log, ["proposed task-hw-01: title"]);
+            assert_eq!(files(&v, "approvals"), ["amend-mail.md", "amend-task-hw-01-title.md"]);
         }
     }
 }
