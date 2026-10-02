@@ -674,7 +674,12 @@ pinned by test 14):
   `mail-canary` hourly; `mail-sweep` nightly (expire work and delete the expired items' seen rows,
   close timed-out batches, prune seen, sweep claims, batches and canaries).
 
-**A claim** (the `claims` array's element; validated server-side, re-checked for shape on the device):
+**A claim** (the `claims` array's element; validated server-side, re-checked for shape on the device)
+*(amended 2026-10-02, Quinn: a fifth kind, `receipt`, beside the four below and in D9's list. It is a
+submission receipt: `{kind: receipt, course, target, field: null, value: null, item: null, topic:
+null, evidence, why, confidence, source: template, resolution}`. Only a deterministic template parser
+emits it, never the model; validation refuses a `receipt` whose `source` is `model`. On the device it
+maps to `completion::propose_done` in both phases, always a card, as §4.9's receipt row says.)*:
 
 ```
 { kind: new_item | change | course_info | noise,
@@ -1972,7 +1977,7 @@ Decisions Quinn signs:
 1. All of email ships in the MVP; no release carries it, or the suspended grades gate, before privacy bump #1 (D1, D18).
 2. Each mailbox forwards everything to a private `@in.knowlu.com` address; AWS holds a message until read, about two days at most (D2–D4).
 3. Setup is automatic: the wizard says "Next: connect your school email" and the mail sign-in opens with the console (D5, D6).
-4. Mail since the term began is applied and listed with Undo; later mail, and any conflict with you or the LMS, is a card; mail cards show the sender (D7–D11, D21, D24).
+4. Mail since the term began is applied and listed with Undo; later mail, and any conflict with you or the LMS, is a card; mail cards show the sender (D7–D11, D21, D24). *(amended 2026-10-02, Quinn: the backfill reads a fixed 120 days of mail before setup, the same for every student; "since the term began" and D7's term dates, curated terms and confirmed default are replaced by it. No term-start logic and no school's dates in code. The plan's §4 and §9.5 carry it through D7, D23, §4.2 step 5, §4.3 step 7, §4.9, §5.1 and T14.)*
 5. The LMS feed stops overwriting a title or due date you set by hand and files a card instead (D11, T8b).
 6. The saved mail sign-in and the kept Blackboard sign-in are on at every school, no school's policy read, until the 20th paying account; then you rule again (D15, D25, T19).
 7. Forwarding found off is turned back on and you are told; never for a mailbox you turned off in Knowlu's Settings (§4.11).
