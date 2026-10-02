@@ -273,6 +273,12 @@
     return { pri: "Approve", sec: "Reject" };
   }
 
+  // Gmail spec D15: a card from Gmail says so (its source_uid prefix, the same key the task chip
+  // reads) beside the model's reason; never the sender, which the card does not carry.
+  function sourceLabel(c) {
+    return c.source_uid && String(c.source_uid).indexOf("gmail:") === 0 ? ' <span class="src">from Gmail</span>' : "";
+  }
+
   function renderDeck(state) {
     var d = state.decisions, deck = EL("deck");
     if (!d.pending && !d.events_in_digest) {
@@ -319,7 +325,7 @@
     d.cards.slice(0, 1).forEach(function (c) {
       // Q11-b: a commitment-ask card is answered in the Decisions view's form, not approved here.
       var approve = c.kind === "commitment-ask" ? '<button class="b pri y" type="button" data-answer-in>Answer&hellip;</button>' : '<button class="b pri y" data-verdict="approved">' + verdictLabels(c.kind).pri + '</button>';
-      deck.innerHTML += '<div class="card" data-id="' + h(c.id) + '" data-kind="approval"><button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button><div class="t">' + h(c.title) + '</div><div class="w">' + h(c.why || c.kind) + "</div>" +
+      deck.innerHTML += '<div class="card" data-id="' + h(c.id) + '" data-kind="approval"><button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button><div class="t">' + h(c.title) + '</div><div class="w">' + h(c.why || c.kind) + sourceLabel(c) + "</div>" +
         '<div class="nb"><input type="text" placeholder="Note (optional)"></div><div class="acts">' + approve + '<button class="b n" data-verdict="rejected">' + verdictLabels(c.kind).sec + '</button><button class="b" data-verdict="snoozed">&hellip;</button><input type="date" hidden value="' + h(tomorrow) + '"></div></div>';
     });
     var newCard = deck.querySelector(".card[data-id]");
@@ -529,7 +535,7 @@
         return '<div class="row dec" data-id="' + h(c.id) + '" data-kind="approval">' +
           '<button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button>' +
           '<div class="ttl"><span class="a">' + h(c.title) + '</span><span class="meta">' + h(meta.join(" · ")) + "</span>" +
-          '<div class="why">' + h(c.why) + "</div>" + changes + "</div>" +
+          '<div class="why">' + h(c.why) + sourceLabel(c) + "</div>" + changes + "</div>" +
           '<div class="acts"><input type="text" class="dnote" placeholder="Note (optional)" value="' + h(notes[c.id] || "") + '">' +
           '<button class="b pri y" data-verdict="approved">' + verdictLabels(c.kind).pri + '</button><button class="b n" data-verdict="rejected">' + verdictLabels(c.kind).sec + '</button>' +
           '<button class="b" data-verdict="snoozed" data-snooze="' + h(tomorrow) + '">Snooze</button></div></div>';

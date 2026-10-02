@@ -2460,3 +2460,15 @@ fn the_google_row_waits_out_the_link_lifetime_then_offers_check_again() {
     assert!(js.contains("closest(\"#set-google-check\")) { checkGoogleAgain(); return; }"));
     assert_eq!(js.matches("invoke(\"google_connect\", { scope: scope })").count(), 1, "only connectGoogle mints a link");
 }
+
+#[test]
+fn a_gmail_card_shows_its_gmail_attribution_and_never_a_sender() {
+    let js = read("console.js");
+    assert!(js.contains("function sourceLabel(c)"), "one helper names a card's source");
+    assert!(js.contains("from Gmail"), "the label words");
+    let deck = js.split("function renderDeck(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(deck.contains("sourceLabel(c)"), "the deck card carries the label");
+    let view = js.split("function renderDecisionsView(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(view.contains("sourceLabel(c)"), "so does the decisions row");
+    assert!(!js.contains("c.sender") && !js.contains("c.from"), "never the sender");
+}
