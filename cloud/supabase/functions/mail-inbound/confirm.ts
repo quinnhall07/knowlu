@@ -9,12 +9,23 @@
  * 3. The page must hold exactly one `<form>` posting by POST, whose action, resolved against the link, is
  *    on the same allow-list. Its named `hidden` and `submit` inputs are sent, nothing else.
  * 4. The form is posted the same way, cookie-less with `redirect: "manual"`; only a 2xx answer completes.
+ *    A 3xx here is not followed either, and reads `post_redirect`, apart from the page's `redirect`: §4.6
+ *    step 5 refuses only the page's redirect, so whether Google answers the POST with a
+ *    Post/Redirect/Get, and so whether this refusal stays, is the live proof's step 4 to decide.
  *
  * Every outcome is a fixed word; no link, page or field leaves this file, and nothing here logs or throws.
  */
 import { confirmUrlAllowed } from "../_shared/mail_bind.ts";
 
-export type ConfirmOutcome = "confirmed" | "link" | "redirect" | "page" | "form" | "action" | "post";
+export type ConfirmOutcome =
+  | "confirmed"
+  | "link"
+  | "redirect"
+  | "page"
+  | "form"
+  | "action"
+  | "post"
+  | "post_redirect";
 export type ConfirmFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 const TIMEOUT_MS = 8_000;
@@ -127,7 +138,7 @@ export async function completeConfirmation(link: string, fetchImpl: ConfirmFetch
       }),
     );
     await res.body?.cancel();
-    if (res.status >= 300 && res.status < 400) return "redirect";
+    if (res.status >= 300 && res.status < 400) return "post_redirect";
     return res.ok ? "confirmed" : "post";
   } catch {
     return "page";

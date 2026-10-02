@@ -1458,6 +1458,8 @@ comment (P5).
 - `an_unaligned_backfilled_original_is_kept_unaligned` (4)
 - `the_confirmation_is_completed_by_a_cookieless_get_and_post_to_a_local_fake` (5)
 - `a_confirmation_redirect_is_refused` (5)
+- `a_redirect_after_the_post_is_refused_and_named` (5): a 3xx answer to the form's POST is not followed,
+  is refused, and logs `post_redirect`, never the page's `redirect` (T2g.2 review, ruling 4)
 - `a_form_action_off_the_allow_list_is_refused` (5)
 - `a_canary_marks_arrived_and_records_forward_hint` (6)
 - `a_replayed_canary_changes_nothing` (6)
@@ -2103,6 +2105,10 @@ controller's (spec T18; HANDOFF §2's controller rules).
   scratch profile and founder-owned mailboxes, and Quinn at the machine for each sign-in and phone
   tap. Until S6 confirms the pace, the school backfill stays under 600. Afterwards, clean up per the
   standing rule and restore the school mailbox's forwarding.
+  - Step 4's checklist names **"POST answered 3xx"**: if `mail-inbound` logs `gmail confirmation
+    refused (post_redirect)`, Google answered the confirm POST with a Post/Redirect/Get. The server-side
+    confirm refuses that today, since §4.6 step 5 rules only on the page's redirect. Quinn decides from
+    the proof whether a 3xx after the POST counts as completion; changing it is a `cloud-engineer` task.
 - **T18d. The PR.** CI green and Quinn's word to merge; the merge carries H0. No release is tagged
   before privacy bump #1 (D18). The controller's HANDOFF milestone update follows.
 
@@ -2328,7 +2334,7 @@ numbers are spec §12's; named tests are this plan's (§5).
 | 2: binding, zero GETs, lapsed, Rotate's grace, forgeries | T2f, T2g.1 | T2f's five binding tests; T2g.1's first five |
 | 3: never reject, verify after | T2f | `a_dmarc_failing_original_…`, `a_pass_only_in_a_sender_written_…`, `no_authentication_result_ever_produces_…` |
 | 4: a backfill send and its attachments | T2e, T2g.2 | the batch-send tests; `each_rfc822_attachment_…`, `a_pdf_attachment_is_ignored`, `an_unaligned_backfilled_original_is_kept_unaligned` |
-| 5: Gmail's confirm, completed and refused | T2e, T2g.2 | T2e's six confirm tests; T2g.2's three |
+| 5: Gmail's confirm, completed and refused | T2e, T2g.2 | T2e's six confirm tests; T2g.2's four |
 | 6: the canary, its route limits and its cadence | T2e, T2g.2, T4.2, T4.3 | the canary tests in each |
 | 7: dedup, keyed hashes, put before rows, expiry | T2c, T2g.1, T3e | T2g.1's three dedup tests; `an_expired_item_loses_its_seen_row_…` |
 | 8: the screen with zero model calls | T3d | T3d's first five |

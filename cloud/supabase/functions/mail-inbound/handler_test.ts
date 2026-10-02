@@ -371,7 +371,8 @@ const confirmHtml = (action: string) =>
   `<input type="submit" value="Confirm"></form></body></html>`;
 
 /** The fake answers by `w.confirm.mode`: the page (setting a cookie a browser would send back), a
- * redirect, or a page whose form posts off the allow-list; a POST answers Google's success page. */
+ * redirect, or a page whose form posts off the allow-list; a POST answers Google's success page, or a
+ * 303 to it under `post_redirect` (a Post/Redirect/Get answer). */
 function confirmPage(w: World, req: Request, path: string, body: string): Response {
   w.confirm.requests.push({
     method: req.method,
@@ -380,7 +381,13 @@ function confirmPage(w: World, req: Request, path: string, body: string): Respon
     contentType: req.headers.get("content-type"),
     body,
   });
-  if (req.method === "POST") return new Response("<p>Confirmation Success!</p>", { status: 200 });
+  if (req.method === "POST") {
+    if (w.confirm.mode === "post_redirect") {
+      const location = `${new URL(CONFIRM_LINK).pathname}-done`;
+      return new Response(null, { status: 303, headers: { location } });
+    }
+    return new Response("<p>Confirmation Success!</p>", { status: 200 });
+  }
   if (w.confirm.mode === "redirect") {
     // Relative, so a fetch that followed it would come back to this listener, never leave the machine.
     return new Response(null, { status: 302, headers: { location: `${new URL(CONFIRM_LINK).pathname}-2` } });
@@ -399,7 +406,7 @@ interface World {
   failPut: boolean;
   logs: string[];
   /** Google's confirmation page, faked on the same listener: how it answers, and what reached it. */
-  confirm: { mode: "ok" | "redirect" | "offlist"; requests: ConfirmRequest[] };
+  confirm: { mode: "ok" | "redirect" | "post_redirect" | "offlist"; requests: ConfirmRequest[] };
   deps: InboundDeps;
   /** Put `raw` at `key` as SES would, then deliver the notification; the handler's answer. */
   arrive(raw: string, d: Delivery): Promise<Response>;
@@ -901,6 +908,24 @@ Deno.test("a_confirmation_redirect_is_refused", async () => {
     assert(jane.confirmUntil !== null);
     assertEquals(w.store.counters, { "addr-1:unbound": 1 });
     assertEquals(keysUnder(w, "inbound/"), []);
+    const named = w.logs.some((l) => l.includes("gmail confirmation refused (redirect)"));
+    assert(named, "the page redirect is named");
+  });
+});
+
+Deno.test("a_redirect_after_the_post_is_refused_and_named", async () => {
+  await withWorld(async (w) => {
+    const jane = confirming(w);
+    w.confirm.mode = "post_redirect";
+    assertEquals((await w.arrive(await confirmation(), GOOGLE_SENDS("inbound/v3b"))).status, 200);
+    // The 303 is not followed: one GET, one POST, nothing after.
+    assertEquals(w.confirm.requests.map((r) => r.method), ["GET", "POST"]);
+    // Refused until the live proof (step 4) shows what Google answers; named apart from a page redirect.
+    assertEquals(jane.status, "pending");
+    assertEquals(w.store.counters, { "addr-1:unbound": 1 });
+    const named = w.logs.some((l) => l.includes("gmail confirmation refused (post_redirect)"));
+    assert(named, "the POST's 3xx is named");
+    assert(!w.logs.some((l) => l.includes("refused (redirect)")), "a POST's 3xx reads as a page redirect");
   });
 });
 
