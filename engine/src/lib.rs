@@ -121,6 +121,10 @@ pub mod cloudmodel;
 // `agent:knowlu.enrich`, log. The cloud routine's step 3, run locally, so that step starves.
 pub mod enrich;
 
+// Email forwarding to Knowlu (email spec 2026-09-30, §6.1): the pure reconciler. Notes and claims
+// in, an ordered list of actions out; the one place card or direct write is decided (D11).
+pub mod mailreconcile;
+
 // Knowlu C3′ — journal sync (cloud design §5.5, as amended 2026-09-17). Every record this device
 // writes, and the text of every note that changed, goes up to the account's own copy as it is —
 // readable by our service, encrypted at rest, and said so on the privacy page (there is no
