@@ -34,6 +34,9 @@ use crate::write;
 pub mod resolve;
 mod rules;
 
+// The one place a body line, a sender and a message day are formatted (D21); `mail.rs`'s writers read them.
+pub(crate) use rules::{body_line, message_day, sender as sender_text};
+
 use resolve::{Resolved, Working};
 
 // ---------------------------------------------------------------------------

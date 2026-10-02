@@ -305,13 +305,18 @@ fn amendable(note: &NoteView, field: &str, from: &Value, to: &Value, today: Date
 /// §5.2's body line for a direct change: `<date> · <sender>: <why> — "<evidence>"`. The date is the
 /// message's Date header, else its ordering date, as a UTC day (the module has no time zone, and
 /// the journal's days are UTC); the sender is its display name and address (D21).
-fn body_line(message: &Message, claim: &Claim) -> String {
-    let date = message.message_date.unwrap_or(message.ordering_date).strftime("%Y-%m-%d");
-    format!("{date} \u{b7} {}: {} \u{2014} \"{}\"", sender(&message.sender), claim.why, claim.evidence)
+pub(crate) fn body_line(message: &Message, claim: &Claim) -> String {
+    format!("{} \u{b7} {}: {} \u{2014} \"{}\"", message_day(message), sender(&message.sender), claim.why, claim.evidence)
+}
+
+/// The day a card or a body line shows for a message (D21): its Date header, else its ordering date,
+/// as a UTC day. `mail.rs`'s writers read it here, so a card and a body line always agree.
+pub(crate) fn message_day(message: &Message) -> String {
+    message.message_date.unwrap_or(message.ordering_date).strftime("%Y-%m-%d").to_string()
 }
 
 /// A sender as D21 names it: `Name <address>`, or the address alone when it has no display name.
-fn sender(sender: &Sender) -> String {
+pub(crate) fn sender(sender: &Sender) -> String {
     match sender.name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
         Some(name) => format!("{name} <{}>", sender.address),
         None => sender.address.clone(),
