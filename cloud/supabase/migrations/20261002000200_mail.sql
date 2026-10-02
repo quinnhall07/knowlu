@@ -1,6 +1,8 @@
 -- Knowlu email forwarding (spec docs/specs/2026-09-30-email-forwarding-design.md §5.1), T1.1: the
--- seven tables. T1.2 and T1.3 extend this same file (kinds, origins, RPCs, budget, cron) before it
--- is applied anywhere; nothing here edits an applied migration.
+-- seven tables; T1.2, at the end: the kinds, the origin, the training and rules paths and the
+-- provisional pins. T1.3 extends this same file (RPCs, budget, cron) before it is applied anywhere;
+-- nothing here edits an applied migration. Stamped after 20261002000100_refund_failed_call.sql so it
+-- still sorts last.
 --
 -- Every table has RLS on, no policy, and Supabase's default grants to `anon` and `authenticated`
 -- revoked: only the service role reads them, as `google_accounts` (§5.1). Every `account_id`
@@ -167,3 +169,177 @@ alter table public.mail_claims enable row level security;
 revoke all on public.mail_claims from anon, authenticated;
 create index if not exists mail_claims_undelivered on public.mail_claims (account_id, queued_at) where delivered_at is null;
 create index if not exists mail_claims_address on public.mail_claims (address_id);
+
+-- T1.2: the existing objects, constraint by constraint (spec §5.1's "Changes to existing objects").
+-- Each check below is the inline one of 20260911000100_judgment_service.sql, under the name Postgres
+-- gave it (`<table>_<column>_check`), dropped and re-issued with the new words.
+--
+-- The three mail judgment kinds: `models` takes their pins, `usage_daily` lets `charge_call` and
+-- `record_tokens` count them (without it `charge_call` answers 23514 and every claim reads `capped`),
+-- and `judgments` records them.
+alter table public.models drop constraint if exists models_kind_check;
+alter table public.models add constraint models_kind_check
+  check (kind in ('task', 'event', 'email', 'mail_claim', 'mail_resolve', 'mail_digest'));
+alter table public.usage_daily drop constraint if exists usage_daily_kind_check;
+alter table public.usage_daily add constraint usage_daily_kind_check
+  check (kind in ('task', 'event', 'email', 'mail_claim', 'mail_resolve', 'mail_digest'));
+alter table public.judgments drop constraint if exists judgments_kind_check;
+alter table public.judgments add constraint judgments_kind_check
+  check (kind in ('task', 'event', 'email', 'mail_claim', 'mail_resolve', 'mail_digest'));
+
+-- A judgment of forwarded mail has its own origin, so the training export, the rules path and the
+-- corrections back-fill can each pass over it by that word alone.
+alter table public.judgments drop constraint if exists judgments_origin_check;
+alter table public.judgments add constraint judgments_origin_check
+  check (origin in ('device', 'gmail_api', 'events', 'forward'));
+
+-- Not widened, deliberately: `corrections.judgment_kind`, `rules.kind`, `eval_cases.kind`,
+-- `eval_runs.kind` and `telemetry/handler.ts`'s `JUDGMENT_KINDS`. A mail judgment never becomes a
+-- rule, a correction or an eval row.
+
+-- The training export: forwarded mail is excluded beside Gmail and calendar rows. Still security
+-- invoker and non-writing.
+create or replace function export_training_rows(p_since timestamptz)
+returns setof judgments
+language sql
+stable
+security invoker
+set search_path = public, extensions
+as $$
+  select * from judgments where origin not in ('gmail_api', 'events', 'forward') and judged_at >= p_since;
+$$;
+revoke execute on function public.export_training_rows(timestamptz) from public, anon, authenticated;
+grant execute on function public.export_training_rows(timestamptz) to service_role;
+
+-- The corrections back-fill, re-issued from 20260911000500_rule_promotion_fix.sql with one change: it
+-- never joins a correction to a forwarded-mail judgment. Such a join would write `mail_claim` into
+-- `corrections.judgment_kind`, whose check refuses it, and abort the nightly job for every account.
+create or replace function public.backfill_correction_judgments()
+returns integer
+language plpgsql
+security invoker
+set search_path = public, extensions
+as $$
+declare
+  filled integer := 0;
+begin
+  update public.corrections c
+     set judgment_id = j.judgment_id,
+         judgment_kind = j.judgment_kind
+    from (
+      select distinct on (c2.id) c2.id as correction_id, j2.id as judgment_id, j2.kind as judgment_kind
+        from public.corrections c2
+        join public.judgments j2 on j2.account_id = c2.account_id and j2.item_id = c2.item_id and j2.judged_at < c2.ts
+       where c2.judgment_id is null
+         and j2.origin <> 'forward'
+       order by c2.id, j2.judged_at desc, j2.id desc
+    ) j
+   where c.id = j.correction_id;
+  get diagnostics filled = row_count;
+  return filled;
+end;
+$$;
+revoke execute on function public.backfill_correction_judgments() from public, anon, authenticated;
+grant execute on function public.backfill_correction_judgments() to service_role;
+
+-- Rule promotion, re-issued from 20260911000500_rule_promotion_fix.sql with one change: both reads of
+-- `judgments` pass over forwarded mail. Otherwise `judgment_features` would offer a `mail_claim`
+-- feature, the `rules` insert would refuse its kind, and the whole nightly promotion would abort for
+-- every account. The nightly job (`knowlu-promote-rules`) calls it by name and is unchanged.
+create or replace function public.promote_rules()
+returns integer
+language plpgsql
+security invoker
+set search_path = public, extensions
+as $$
+declare
+  promoted integer := 0;
+begin
+  with judged as (
+    select j.id, j.account_id, j.kind, j.item_id, j.judged_at, j.fields,
+           j.fields - 'created_by' - 'title_prefix' - 'organizer' - 'source' - 'series_uid' as verdict_fields,
+           f.feature, f.value
+      from judgments j
+      cross join lateral judgment_features(j.kind, j.fields) as f(feature, value)
+     where j.tier = 3
+       and j.outcome = 'answered'
+       and j.origin <> 'forward'
+       and j.judged_at >= now() - interval '60 days'
+  ),
+  agreed as (
+    select account_id, kind, feature, value,
+           count(distinct item_id) as items,
+           count(distinct verdict_fields) as distinct_answers,
+           (array_agg(verdict_fields order by judged_at desc, id desc))[1] as answer,
+           array_agg(id) as judgment_ids
+      from judged
+     group by account_id, kind, feature, value
+  ),
+  contradicted as (
+    select distinct j.account_id, j.kind, f.feature, f.value
+      from public.corrections c
+      join judgments j on j.id = c.judgment_id
+      cross join lateral judgment_features(j.kind, j.fields) as f(feature, value)
+     where c.ts >= now() - interval '60 days'
+       and j.origin <> 'forward'
+  ),
+  fresh as (
+    insert into rules (account_id, scope, kind, feature, value, verdict, active, proposed_at, expires_at)
+    select a.account_id, 'account', a.kind, a.feature, a.value, a.answer, false,
+           current_date, current_date + 30
+      from agreed a
+     where a.items >= 3
+       and a.distinct_answers = 1
+       and a.answer <> '{}'::jsonb
+       and not exists (
+             select 1 from contradicted x
+              where x.account_id = a.account_id and x.kind = a.kind
+                and x.feature = a.feature and x.value = a.value)
+       and not exists (
+             select 1 from rules r
+              where r.account_id = a.account_id and r.kind = a.kind
+                and r.feature = a.feature and r.value = a.value
+                and (r.active or r.decided_at is null or r.decided_at > now() - interval '90 days'))
+    returning id, account_id, kind, feature, value
+  ),
+  evidence as (
+    insert into rule_evidence (rule_id, judgment_id, agrees)
+    select f.id, unnest(a.judgment_ids), true
+      from fresh f
+      join agreed a
+        on a.account_id = f.account_id and a.kind = f.kind
+       and a.feature = f.feature and a.value = f.value
+  )
+  select count(*) into promoted from fresh;
+
+  delete from rules where scope = 'account' and active = false and decided_at is null and expires_at < current_date;
+  return promoted;
+end;
+$$;
+revoke execute on function public.promote_rules() from public, anon, authenticated;
+grant execute on function public.promote_rules() to service_role;
+
+-- The pins (plan P8). PROVISIONAL: `mail_claim` and `mail_resolve` take `email`'s current model,
+-- precision, price, sampling and route (one named zero-retention upstream, no fallback), read from
+-- 20260916000100_provider_swap.sql's re-pin, which nothing since has moved. Test 17's live check
+-- (T18a) confirms each pin, or a one-statement follow-up migration re-pins it before the proof.
+-- The prompt and grammar versions are each kind's first; `max_tokens` is email's 640.
+-- `mail_digest` gets a row only if T16 is built. The eval seed stays empty (R-C2-E12).
+insert into public.models (kind, provider, model_id, prompt_version, grammar_version, max_tokens) values
+  ('mail_claim',   'openrouter', 'qwen/qwen3.5-35b-a3b', 'mail_claim-1',   'mail_claim-1',   640),
+  ('mail_resolve', 'openrouter', 'qwen/qwen3.5-35b-a3b', 'mail_resolve-1', 'mail_resolve-1', 640)
+on conflict (kind) do nothing;
+update public.models set
+  provider = 'openrouter', model_id = 'qwen/qwen3.5-35b-a3b', precision = 'fp8 (DeepInfra)',
+  usd_per_m_in = 0.14, usd_per_m_out = 1.00,
+  sampling = '{"temperature": 0, "reasoning": {"enabled": false}}'::jsonb,
+  route = '{"order": ["DeepInfra"], "allow_fallbacks": false, "zdr": true, "require_parameters": true}'::jsonb,
+  since = current_date
+where kind = 'mail_claim';
+update public.models set
+  provider = 'openrouter', model_id = 'qwen/qwen3.5-35b-a3b', precision = 'fp8 (DeepInfra)',
+  usd_per_m_in = 0.14, usd_per_m_out = 1.00,
+  sampling = '{"temperature": 0, "reasoning": {"enabled": false}}'::jsonb,
+  route = '{"order": ["DeepInfra"], "allow_fallbacks": false, "zdr": true, "require_parameters": true}'::jsonb,
+  since = current_date
+where kind = 'mail_resolve';
