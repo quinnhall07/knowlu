@@ -388,6 +388,22 @@ Briefs cite functions and headings, never line numbers.
     rule (From is the mailbox itself) and never reads From equal to any `mailbox_hint` on the account
     as the student's own mail, so a note the student mails themselves between two connected mailboxes
     still reaches the model.
+- **PQ9. The Gmail live binding (T2f's review, 2026-10-02; for Checkpoint B).** Spec §4.6 step 5 and
+  test 2 need both checks: (i) the provider's AMS `h=` covers a binding header naming this mailbox, and
+  (ii) SES's SPF pass on Gmail's `<local>+caf_=…@gmail.com` return path. PQ2's interop check found that
+  no AMS covers `X-Forwarded-*`, so (i) as written cannot be met, and Gmail live mail would never bind.
+  - *Built (pending this answer):* on Gmail, check (i) is Google's verifying seal and AMS with no
+    seeded forwarding field, and does not name the mailbox; check (ii) alone names it. So risk 10's
+    "both must hold" rests on (ii) alone on Gmail. The envelope is `@gmail.com` only, as the spec says.
+  - *Recommend:* sign an amendment that accepts (i) without the mailbox naming on Gmail, since S0 shows
+    no provider-covered field names it, and keep (ii) at `@gmail.com`.
+  - *The open half:* a Workspace mailbox's `+caf_=` envelope is on its own domain. Accepting it would
+    let a sender who can set that MAIL FROM on Google's infrastructure (a Workspace SMTP-relay tenant
+    allowed "any addresses", or a school whose SPF includes Google's shared ranges) bind live mail. If
+    Workspace is wanted, accept a non-`gmail.com` domain only when the provider came from a curated
+    campus row. Until the answer, Workspace live mail is unbound.
+  - *Blocks:* nothing before Checkpoint B. The ruling is recorded in the spec's amendments, then the
+    code is kept or narrowed.
 
 ## 5. Tasks
 
@@ -1390,24 +1406,30 @@ is the one signed, and an unsigned instance of the same name means the binding i
 - **A forward-as-attachment from Gmail or Outlook keeps the original whole** (its Received lines,
   Authentication-Results, DKIM and Message-ID), so T2g.2 reads the original's own delivery stamp.
 
-**The branch taken (2026-10-02, after PQ2's interop check).** No provider's topmost AMS covers
-`X-Forwarded-For`, `X-Forwarded-To` or `X-MS-Exchange-ForwardingLoop`, so `mail_bind.ts` binds this way:
+**The branch built (2026-10-02, after PQ2's interop check; not authority until Quinn answers PQ9 at
+Checkpoint B).** No provider's topmost AMS covers `X-Forwarded-For`, `X-Forwarded-To` or
+`X-MS-Exchange-ForwardingLoop`, so `mail_bind.ts` binds this way:
 - **Check (ii) carries the binding on both providers.** The envelope is the verified SNS
   notification's (`mail.source`, `receipt.spfVerdict` `PASS`, and the recipient whose token found the
-  mailbox), never the message's `Return-Path`. Gmail: `<hint local>+caf_=<recipient, @ as =>@<hint
-  domain>`, so a Workspace mailbox works too. M365: `<hint local>+SRS=…@<hint domain>`.
+  mailbox), never the message's `Return-Path`. Gmail: `<hint local>+caf_=<recipient, @ as =>@gmail.com`,
+  as the spec says; a Workspace mailbox's envelope on its own domain is unbound until PQ9's open half is
+  answered. M365: `<hint local>+SRS=…@<hint domain>`.
 - **Check (i)** is Google's or Microsoft's topmost seal and AMS, verifying. A signed forwarding field
   with an unsigned twin refuses the message. For M365, the topmost ForwardingLoop (or the covered one, if
   the AMS ever covers it) must name the hint and the canary's `forward_hint`. A null `forward_hint`
   binds nothing.
-- **X-Forwarded-\* never bind.** For Gmail, check (i) cannot name the mailbox. The attacker's-own-Gmail
-  forgery is stopped by (ii) alone, and the seeded forgery by each check alone. Risk 10 holds for M365 in
-  full.
+- **X-Forwarded-\* never bind.** For Gmail, check (i) cannot name the mailbox, which departs from spec
+  §4.6 step 5 (PQ9). The attacker's-own-Gmail forgery is stopped by (ii) alone, and the seeded forgery
+  by each check alone. Risk 10 holds for M365 in full.
 - **Step 6.** A live forward reads the verified hop's AAR. An original reads the provider's verifying
   topmost ARC set, else the topmost `Authentication-Results`, counted only with `mx.google.com` (Google)
   or no authserv-id (EOP's form). One From field only. `other` reads nothing and is `unaligned`.
 - **Arrival kinds.** T2e's `other` is now `unbound`, and `live` carries the word.
-- **Checkpoint B reads:** whether EOP SRS-rewrites an **intra-school** forward. S0 did not record case
+- **Step 6's alignment** is from the safe side: a dkim or spf pass aligns when its domain is the From
+  domain or a parent of it; a domain under the From aligns only through the provider's own `dmarc=pass
+  header.from=`. A From on a bare label never aligns (T2f's review, 2026-10-02).
+- **Checkpoint B reads:** PQ9 (the Gmail binding, and the Workspace `+caf_=` envelope), and whether EOP
+  SRS-rewrites an **intra-school** forward. S0 did not record case
   4's envelope. If it does not, live intra-school mail is unbound.
 
 #### T2g.1. The handler: verify, find, entitle, fetch, dedup, hand off (`mail-inbound`)
@@ -1645,7 +1667,8 @@ service reads the school address domain's MX.
 **Agent:** `reviewer` (Opus, high). **Report:** `docs/reports/<date>-email-forwarding-cloud-review.md`.
 It reads the cloud diff against spec §4.6–§4.10, §5.1, §6.3, §7's retention rows, D2, D3, D8, D9,
 D14, D17, D22, D23 and P5–P9, P21 and P22. It reads in particular:
-- the SNS verification and the binding rules, with the PQ2 interop record;
+- the SNS verification and the binding rules, with the PQ2 interop record, and PQ9 put to Quinn as a
+  spec amendment (the Gmail binding and the Workspace envelope) before the sub-branch merges;
 - that no text lands in a table or a log;
 - that every final path deletes its object;
 - that charge and budget always run before the model;
@@ -2406,6 +2429,7 @@ spec text moves. A row marked **open** waits on Quinn or the planner.
 | The allowance refund (T1.3's review, 2026-10-02). `refund_allowance(p_account)` is added to the still-unapplied `20261002000200_mail.sql`: one `update` of `mail_accounts` that gives one judgment back only while `allowance_until > now()` and never above 2,000, service-role only, and never opens, extends or re-prices an allowance. T3e calls it on `model failed` alone (F1's rule: a refusal, a truncation or a failed validation reached the model and stays charged) and routes the item through wait-and-retry. Chosen over "a failed backfill item is never counted" because charge-before-call is the hot-loop guard and stays, as F1 kept it for `charge_call`. Unlike `refund_call`, refunds are not counted: the caller is the server's cron worker, so request volume is bounded by the item's retry schedule, and dollars by `enforce_budget`'s raised ceiling. Spec §5.1's RPC list names two; this third is the plan's. | `charge_allowance` charges before the call, as `charge_call` did before F1 (main's `20261002000100_refund_failed_call.sql`, PR #33). A first backfill during a provider outage would spend 2,000 judgments in seconds on calls the model never answered, then trickle at the daily cap for the 120-day period: D23's failure. | T1.3, T3e; `refund_allowance_gives_one_judgment_back_only_while_the_allowance_is_open`, `a_model_failure_on_a_backfill_item_refunds_…`. The function-count pin is 36 here; merging main (PR #33's `refund_call`) moves it to 37, not 36. | recorded, for the planner; T3e must not build past it |
 | SNS signature version (T2a's review, 2026-10-02). `verifySns` accepts only `SignatureVersion` 2 (RSA with SHA-256) and refuses version 1 (SHA-1) before any fetch. An SNS topic signs with version 1 by default, and S0's topic was built with the default. So T18a now sets the topic's `SignatureVersion` attribute to 2 and reads it back before the subscribe step, and T13b's runbook carries the same step. `sns.ts` is unchanged. | Without the step, the SubscriptionConfirmation is refused with the same bare 403 as every other refusal and leaves no log line. The subscription stays PendingConfirmation, no mail arrives, and nothing points at the cause. That costs a live deploy, but it fails closed. | T18a, T13b; T2a's version test in `sns_test.ts` | **carried (controller):** T18a's attribute step; T13b's runbook line |
 | PQ8 (ii) only. T5.6 is added before T6.1 and T6.2: a live `new_item` matching an open mail task card by normalised title and course files nothing (`AlreadyApplied`). "Open" is read as `pending` or `snoozed`, since a first-day card is snoozed (R16). (i) is declined: T3d keeps "From is the mailbox itself". | Quinn, 2026-10-02. The device rule catches S0 capture 5's rule-forward duplicate without dropping a note the student mails themselves. | T5.6, T3d; T5.6's tests, `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` | **Answered 2026-10-02 (Quinn)**; the "snoozed" reading is the plan's, for Quinn's read with T5.6's addendum |
+| PQ9 (T2f's review, 2026-10-02). On Gmail, check (i) does not name the mailbox (no AMS covers `X-Forwarded-*`), and the `+caf_=` envelope is `@gmail.com` only, so Workspace live mail is unbound. Step 6 aligns a child of the From domain only through the provider's DMARC pass. | Spec §4.6 step 5 cannot be met as written on Gmail; widening to the hint's domain was not signed. | T2f; `a_gmail_forward_binds_by_googles_arc_seal_and_its_caf_return_path`, `a_from_on_a_bare_label_or_public_suffix_never_aligns_with_a_signer_under_it`; Checkpoint B | **open (Quinn):** PQ9 |
 
 ## 10. Review revisions (2026-09-30)
 

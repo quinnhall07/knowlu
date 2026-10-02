@@ -468,12 +468,14 @@ const live = (raw: string, box: BindMailbox, envelope: BindEnvelope) => classify
 Deno.test("a_gmail_forward_binds_by_googles_arc_seal_and_its_caf_return_path", async () => {
   const fwd = await gmailForward();
   assertEquals(await live(fwd, GMAIL_BOX, CAF), LIVE_ALIGNED);
-  // The envelope is compared case-folded; a Workspace mailbox's envelope is on its own domain.
+  // The envelope is compared case-folded.
   const upper = { ...CAF, mailFrom: "Jane+CAF_=Tok=In.Knowlu.Test@Gmail.com" };
   assertEquals(await live(fwd, GMAIL_BOX, upper), LIVE_ALIGNED);
+  // Spec §4.6 step 5 (ii): Gmail's return path is `@gmail.com`. A Workspace mailbox's `+caf_=` envelope on
+  // its own domain does not bind until Quinn rules on it (Checkpoint B; the plan's T2f section).
   const workspace = mailbox({ mailboxHint: "jdoe@school.test", confirmUntil: null });
   const wsEnv = { ...CAF, mailFrom: "jdoe+caf_=tok=in.knowlu.test@school.test" };
-  assertEquals(await live(fwd, workspace, wsEnv), LIVE_ALIGNED);
+  assertEquals(await live(fwd, workspace, wsEnv), UNBOUND);
 
   // Check (ii): SES's SPF pass on exactly this mailbox's forwarding envelope to exactly this address.
   for (
@@ -629,18 +631,20 @@ Deno.test("a_dmarc_failing_original_with_an_aligned_provider_hop_result_is_align
   const ses = "Authentication-Results: amazonses.com; spf=fail smtp.mailfrom=gmail.com; dmarc=fail" +
     " header.from=school.test";
   assertEquals(await gmailLive({ above: [ses] }), LIVE_ALIGNED);
-  // An aligned DKIM or SPF pass alone, on the From domain or a domain under it, is aligned too.
+  // An aligned DKIM or SPF pass alone, on the From domain or a parent of it, is aligned too.
   for (
     const aar of [
       "mx.google.com; dkim=pass header.i=@school.test header.s=s1",
-      "mx.google.com; dkim=pass header.d=mail.school.test; dmarc=fail header.from=school.test",
-      "mx.google.com; spf=pass smtp.mailfrom=bounce@lists.school.test",
       "mx.google.com; spf=pass smtp.mailfrom=school.test",
       "mx.google.com;dmarc=pass header.from=SCHOOL.TEST",
+      // A domain under the From aligns only through the provider's own DMARC pass (its public-suffix list).
+      "mx.google.com; dkim=pass header.d=mail.school.test; dmarc=pass header.from=school.test",
     ]
   ) {
     assertEquals(await gmailLive({ aar }), LIVE_ALIGNED, aar);
   }
+  const parent = "mx.google.com; dkim=pass header.d=school.test; spf=fail smtp.mailfrom=x@evil.test";
+  assertEquals(await gmailLive({ aar: parent, from: "Dept <dept@cs.school.test>" }), LIVE_ALIGNED);
   // Microsoft's form (an `n` version after the authserv-id; `;` without a space) reads the same.
   assertEquals(await live(await m365Forward(), MS_BOX, SRS), LIVE_ALIGNED);
   const msDkim = "mx.microsoft.com 1; spf=fail smtp.mailfrom=other.test;dkim=pass (signature was verified)" +
@@ -663,6 +667,9 @@ Deno.test("a_pass_only_in_a_sender_written_authentication_results_is_unaligned",
       "mx.google.com; dmarc=pass header.from=evil.test",
       "mx.google.com; dkim=pass header.d=school.test.evil.test",
       "mx.google.com; dkim=pass header.d=test",
+      // A child of the From domain, with no DMARC pass from the provider, is not ours to align.
+      "mx.google.com; dkim=pass header.d=mail.school.test; dmarc=fail header.from=school.test",
+      "mx.google.com; spf=pass smtp.mailfrom=bounce@lists.school.test",
       "mx.google.com; spf=pass smtp.mailfrom=x@notschool.test",
       "mx.google.com; arc=pass (i=1 dmarc=pass header.from=school.test dkim=pass header.d=school.test)",
       "mx.google.com; dmarc=passed header.from=school.test",
@@ -763,4 +770,27 @@ Deno.test("no_authentication_result_ever_produces_a_non_2xx_answer", async () =>
   }
   // An unreachable key server is never a pass: the live forward is unbound, not failed.
   assertEquals(await classifyArrival(await gmailForward(), GMAIL_BOX, CONFIG, CAF, throwing), UNBOUND);
+});
+
+Deno.test("a_from_on_a_bare_label_or_public_suffix_never_aligns_with_a_signer_under_it", async () => {
+  // Without a public-suffix list, a child of the From domain may be a stranger's registration under it.
+  const cases = [
+    { from: "Registrar <registrar@edu>", d: "evil.edu" },
+    { from: "Registrar <x@co.uk>", d: "evil.co.uk" },
+  ];
+  for (const { from, d } of cases) {
+    const stamp = `Authentication-Results: mx.google.com; dkim=pass header.d=${d} header.s=s1;` +
+      ` spf=pass smtp.mailfrom=bounce@${d}`;
+    assertEquals(await auth(stored([stamp], { from }), "google"), "unaligned", d);
+    assertEquals(
+      await auth(stored([stamp.replace("mx.google.com; ", "")], { from }), "m365"),
+      "unaligned",
+      d,
+    );
+    const aar = `mx.google.com; dkim=pass header.d=${d} header.s=s1; spf=pass smtp.mailfrom=bounce@${d}`;
+    assertEquals(await gmailLive({ from, aar }), LIVE_UNALIGNED, d);
+  }
+  // A bare-label From never aligns, whatever the record says.
+  const own = "mx.google.com; dkim=pass header.d=edu; dmarc=pass header.from=edu";
+  assertEquals(await gmailLive({ from: "Registrar <registrar@edu>", aar: own }), LIVE_UNALIGNED);
 });

@@ -20,9 +20,11 @@
  *   forwarding header has an unsigned twin of a signed instance, and for M365 the ForwardingLoop names
  *   the mailbox and its `forward_hint` tenant. Check (ii): SES's SPF verdict passed on an envelope sender
  *   that is the provider's forwarding return path for this mailbox (Gmail's
- *   `<local>+caf_=<our address, @ as =>@<domain>`, Microsoft's SRS `<local>+SRS=…@<domain>`). PQ2's
+ *   `<local>+caf_=<our address, @ as =>@gmail.com`, Microsoft's SRS `<local>+SRS=…@<domain>`). PQ2's
  *   interop check (2026-10-02) found that no provider's AMS covers X-Forwarded-For, X-Forwarded-To or
  *   the ForwardingLoop, so X-Forwarded-* never bind, and the envelope carries the binding with the seal.
+ *   On Gmail check (i) therefore cannot name the mailbox, a departure from the spec that waits on Quinn's
+ *   ruling at Checkpoint B (the plan's T2f section, PQ9).
  * - **Unbound:** anything else.
  * - **Authenticity** (`aligned` or `unaligned`): for a live forward, only the verified hop's
  *   ARC-Authentication-Results; for a backfilled or recovered original (`originalAuthenticity`), the
@@ -263,13 +265,16 @@ async function providerArc(input: MailInput, provider: BindMailbox["provider"], 
   return arc.result === "pass" && arc.sealDomain === domain && arc.amsDomain === domain ? arc : null;
 }
 
-/** Check (ii): SES passed SPF on the provider's forwarding return path for this mailbox and address. */
+/** Check (ii): SES passed SPF on the provider's forwarding return path for this mailbox and address.
+ * Gmail's is `@gmail.com` only, as spec §4.6 step 5 states; a Workspace domain's `+caf_=` envelope waits
+ * on Quinn's ruling at Checkpoint B (the plan's T2f section). */
 function envelopeBinds(mailbox: BindMailbox, hint: string, envelope: BindEnvelope): boolean {
   const from = envelope.mailFrom?.trim().toLowerCase() ?? "";
   const own = split(hint);
   const env = from.length <= 512 && ADDRESS.test(from) ? split(from) : null;
   if (!envelope.spfPass || own === null || env === null || env[1] !== own[1]) return false;
   if (mailbox.provider === "google") {
+    if (env[1] !== "gmail.com") return false;
     const to = envelope.recipient.trim().toLowerCase();
     return ADDRESS.test(to) && env[0] === `${own[0]}+caf_=${to.replace("@", "=")}`;
   }
@@ -316,15 +321,18 @@ const DELIVERY_STAMP: Partial<Record<BindMailbox["provider"], string | null>> = 
 };
 const MAX_RESULTS = 16_384;
 const DOMAIN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
-/** DMARC's relaxed alignment without a public-suffix list: the From domain, a parent of it (never a bare
- * label), or a domain under it. */
-const relaxed = (d: string, from: string) => DOMAIN.test(d) && (aligned(d, from) || d.endsWith("." + from));
+/** DMARC's relaxed alignment from the safe side, without a public-suffix list: the From domain or a parent
+ * of it (never a bare label; no stranger can sign as a parent). A domain under the From aligns only through
+ * the provider's own `dmarc=pass header.from=`, which it computed with a public-suffix list. */
+const relaxed = (d: string, from: string) => DOMAIN.test(d) && aligned(d, from);
 const domainOf = (s: string | undefined) => s?.slice(s.lastIndexOf("@") + 1);
 
-/** The From domain when the message has exactly one From field with one address; else `null`. */
+/** The From domain when the message has exactly one From field with one address on a dotted domain;
+ * else `null`. */
 function soleFromDomain(head: MailHeaders): string | null {
   const froms = head.headers.filter((h) => h.name.trim().toLowerCase() === "from").length;
-  return froms === 1 && head.fromAddress !== null ? domainOf(head.fromAddress) ?? null : null;
+  const domain = froms === 1 && head.fromAddress !== null ? domainOf(head.fromAddress) : undefined;
+  return domain !== undefined && DOMAIN.test(domain) ? domain : null;
 }
 
 /** An Authentication-Results value's elements (RFC 8601), comments and quoted strings removed; `null`
