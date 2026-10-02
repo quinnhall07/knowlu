@@ -1223,3 +1223,213 @@ fn the_probe_fires_when_only_a_label_is_waiting() {
     assert!(card_field(&v, "approvals/event-check-talk.md", "reported_at").is_some());
     let _ = std::fs::remove_dir_all(&v);
 }
+
+// ---------------------------------------------------------------------------
+// T6.1: the two mail service calls (spec §6.1, test 30's client half)
+// ---------------------------------------------------------------------------
+
+use knowlu_engine::cloudmodel::{pull_mail_claims, resolve_mail, Candidate, MailboxState, ResolveAnswer, ResolveBatch};
+use knowlu_engine::mailreconcile::{Authenticity, ClaimKind, ClaimRef, Phase};
+
+fn mail_row(uid: &str, ordering: &str, claims: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "uid": uid,
+        "message_date": ordering,
+        "ordering_date": ordering,
+        "sender_name": "Prof Example",
+        "sender_addr": "prof@example.edu",
+        "phase": "live",
+        "authenticity": "aligned",
+        "claims": claims,
+        "judgment_id": null,
+    })
+}
+
+fn due_claim(target: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "change", "course": "CS 101", "target": target, "field": "due",
+        "value": "2026-10-14T23:59", "item": null, "topic": null,
+        "evidence": "now due Wednesday", "why": "the deadline moved", "confidence": 0.9,
+        "source": "model", "resolution": null
+    })
+}
+
+fn mail_reply(rows: Vec<serde_json::Value>, mailboxes: serde_json::Value) -> String {
+    knowlu_engine::ledger::dumps_value(&serde_json::json!({ "messages": rows, "mailboxes": mailboxes, "more": false }))
+}
+
+#[test]
+fn pull_mail_claims_over_loopback_returns_messages_in_order_with_mailbox_states() {
+    let mut second = mail_row("mail:bb22", "2026-10-02T09:30:00Z", serde_json::json!([due_claim("Lab 5")]));
+    second["phase"] = serde_json::json!("backfill");
+    second["authenticity"] = serde_json::json!("unaligned");
+    second["sender_name"] = serde_json::Value::Null;
+    let mut first_row = mail_row(
+        "mail:aa11",
+        "2026-10-02T08:00:00Z",
+        serde_json::json!([due_claim("Lab 4"), { "kind": "noise" }, "not a claim"]),
+    );
+    first_row["judgment_id"] = serde_json::json!("0a1b2c3d-0000-4000-8000-0123456789ab");
+    let rows = vec![
+        first_row,
+        second,
+        serde_json::json!({ "uid": "not-a-mail-uid", "ordering_date": "2026-10-02T10:00:00Z" }),
+    ];
+    let mailboxes = serde_json::json!([
+        { "address_id": "addr-1", "status": "active", "reenabled_at": null, "unbound": 0, "unauthenticated": 1, "expired": 2 },
+        { "address_id": "addr-2", "status": "quiet", "reenabled_at": "2026-10-01T12:00:00Z", "unbound": 3, "unauthenticated": 0, "expired": 0 },
+        { "address_id": "addr-3", "status": "a-word-from-the-future" },
+    ]);
+    let mut server = loopback(vec![(200, mail_reply(rows, mailboxes))]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let ack = vec!["mail:9f9f".to_string(), "mail:9e9e".to_string()];
+    let pull = pull_mail_claims(&client, &ack).expect("the service answered");
+
+    let uids: Vec<&str> = pull.messages.iter().map(|m| m.uid.as_str()).collect();
+    assert_eq!(uids, ["mail:aa11", "mail:bb22"], "the service's order is kept; a row with no mail uid is no message");
+    assert_eq!(pull.unreadable, 1);
+    assert_eq!(pull.judgment_ids.len(), 1, "only a well-formed id is carried, and `mail:bb22` had none");
+    assert_eq!(pull.judgment_ids["mail:aa11"], "0a1b2c3d-0000-4000-8000-0123456789ab");
+    let first = &pull.messages[0];
+    assert_eq!(first.phase, Phase::Live);
+    assert_eq!(first.authenticity, Authenticity::Aligned);
+    assert_eq!(first.sender.address, "prof@example.edu");
+    assert_eq!(first.sender.name.as_deref(), Some("Prof Example"));
+    assert_eq!(first.ordering_date, "2026-10-02T08:00:00Z".parse().unwrap());
+    assert_eq!(first.claims.len(), 3, "an unreadable claim keeps its index, so `mail:<h>:<n>` never shifts");
+    assert_eq!(first.claims[0].kind, ClaimKind::Change);
+    assert_eq!(first.claims[2].kind, ClaimKind::Noise, "a claim that fails the shape check reads as noise");
+    let late = &pull.messages[1];
+    assert_eq!((late.phase, late.authenticity, late.sender.name.clone()), (Phase::Backfill, Authenticity::Unaligned, None));
+
+    assert_eq!(pull.mailboxes.len(), 3);
+    let (a, b, c) = (&pull.mailboxes[0], &pull.mailboxes[1], &pull.mailboxes[2]);
+    assert_eq!((a.state, a.unauthenticated, a.expired), (MailboxState::Active, 1, 2));
+    assert_eq!((b.state, b.unbound), (MailboxState::Quiet, 3));
+    assert_eq!(b.reenabled_at, Some("2026-10-01T12:00:00Z".parse().unwrap()));
+    assert_eq!(c.state, MailboxState::Unknown, "a state word this engine does not know is data, not an error");
+    assert!(!pull.more);
+
+    let sent = server.requests().remove(0);
+    assert!(sent.starts_with("POST /functions/v1/mail-pull HTTP/1.1"), "{sent}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(body_of(&sent)).unwrap(),
+        serde_json::json!({ "ack": ["mail:9f9f", "mail:9e9e"] }),
+        "the pull sends the ack and nothing else"
+    );
+}
+
+/// A server that reads the request and then says nothing, so a short client timeout fires.
+fn silent_loopback() -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the loopback listener");
+    let port = listener.local_addr().expect("the listener has an address").port();
+    let handle = std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let _ = read_request(&stream);
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        }
+    });
+    (format!("http://127.0.0.1:{port}/functions/v1"), handle)
+}
+
+fn claim_ref(message: &str, index: usize) -> ClaimRef {
+    ClaimRef { message: message.to_string(), index }
+}
+
+#[test]
+fn every_mail_failure_shape_is_a_named_outcome() {
+    for (code, body, label, fatal) in [
+        (401, r#"{"error":"invalid jwt"}"#, "no session", true),
+        (402, r#"{"error":"no active subscription"}"#, "no entitlement", true),
+        (429, r#"{"error":"slow down"}"#, "rate limited", false),
+        (503, r#"{"error":"upstream overloaded"}"#, "the service refused", false),
+    ] {
+        let mut server = loopback(vec![(code, body.to_string()), (code, body.to_string())]);
+        let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+        let pull = pull_mail_claims(&client, &[]).expect_err("a refusal is an error");
+        assert_eq!((pull.label(), pull.fatal()), (label, fatal), "pull, HTTP {code}");
+        let batch = ResolveBatch { course: "CS 101".to_string(), claims: vec![claim_ref("mail:aa11", 0)], candidates: vec![] };
+        let resolve = resolve_mail(&client, &batch).expect_err("a refusal is an error");
+        assert_eq!((resolve.label(), resolve.fatal()), (label, fatal), "resolve, HTTP {code}");
+        let _ = server.requests();
+    }
+
+    let (base, handle) = silent_loopback();
+    let client = CloudClient::new(&config(&base), "jwt-not-a-secret").with_timeout(std::time::Duration::from_millis(150));
+    let timed_out = pull_mail_claims(&client, &[]).expect_err("no answer inside the bound");
+    assert_eq!((timed_out.label(), timed_out.fatal()), ("no network", false), "{timed_out}");
+    handle.join().expect("the silent listener did not panic");
+
+    let mut server = loopback(vec![(200, "not json".to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    assert_eq!(pull_mail_claims(&client, &[]).expect_err("an unreadable reply").label(), "an unreadable reply");
+    let _ = server.requests();
+}
+
+#[test]
+fn a_mail_pull_never_reads_as_gmail_quiet() {
+    // Mail has no `Quiet` arm: a mailbox's state is data. A reply that carries Gmail's `quiet` keys,
+    // and the 503 `/gmail-read` uses for "Google is not configured", must not become `CloudError::Quiet`.
+    let quiet = r#"{"messages":[],"mailboxes":[],"quiet":true,"reason":"revoked"}"#;
+    let mut server = loopback(vec![(200, quiet.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let pull = pull_mail_claims(&client, &[]).expect("a reply with those keys is still a mail pull");
+    assert!(pull.messages.is_empty() && pull.mailboxes.is_empty());
+    let _ = server.requests();
+
+    let detail = r#"{"error":"Google sign-in is not configured on this deployment"}"#;
+    let mut server = loopback(vec![(503, detail.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let err = pull_mail_claims(&client, &[]).expect_err("a 503");
+    assert!(matches!(err, knowlu_engine::cloudmodel::CloudError::Status { code: 503, .. }), "{err:?}");
+    let _ = server.requests();
+}
+
+#[test]
+fn resolve_mail_over_loopback_returns_one_answer_per_claim() {
+    let batch = ResolveBatch {
+        course: "CS 101".to_string(),
+        claims: vec![claim_ref("mail:aa11", 0), claim_ref("mail:aa11", 1), claim_ref("mail:bb22", 0), claim_ref("mail:cc33", 0)],
+        candidates: vec![
+            Candidate { id: "id-lab-4".to_string(), title: "Lab 4".to_string(), due: Some("2026-10-07T23:59".to_string()) },
+            Candidate { id: "id-essay".to_string(), title: "Essay".to_string(), due: None },
+        ],
+    };
+    let reply = serde_json::json!({ "answers": [
+        { "uid": "mail:aa11", "index": 0, "target_id": "id-lab-4" },
+        { "uid": "mail:aa11", "index": 1, "target_id": null },
+        { "uid": "mail:bb22", "index": 0, "target_id": "id-not-in-the-batch" },
+        { "uid": "mail:zz99", "index": 0, "target_id": "id-essay" },
+    ] });
+    let mut server = loopback(vec![(200, knowlu_engine::ledger::dumps_value(&reply))]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let answers = resolve_mail(&client, &batch).expect("the service answered");
+    assert_eq!(
+        answers,
+        vec![
+            ResolveAnswer { claim: claim_ref("mail:aa11", 0), target_id: Some("id-lab-4".to_string()) },
+            ResolveAnswer { claim: claim_ref("mail:aa11", 1), target_id: None },
+            ResolveAnswer { claim: claim_ref("mail:bb22", 0), target_id: None },
+        ],
+        "an id outside the batch reads none; an answer for a claim never asked is dropped; a claim the \
+         service did not answer has no entry, so it is asked again, never taken as none"
+    );
+
+    let sent = server.requests().remove(0);
+    assert!(sent.starts_with("POST /functions/v1/mail-resolve HTTP/1.1"), "{sent}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(body_of(&sent)).unwrap(),
+        serde_json::json!({
+            "course": "CS 101",
+            "claims": [
+                { "uid": "mail:aa11", "index": 0 }, { "uid": "mail:aa11", "index": 1 },
+                { "uid": "mail:bb22", "index": 0 }, { "uid": "mail:cc33", "index": 0 },
+            ],
+            "candidates": [
+                { "id": "id-lab-4", "title": "Lab 4", "due": "2026-10-07T23:59" },
+                { "id": "id-essay", "title": "Essay", "due": null },
+            ],
+        }),
+        "the claims travel as references: the service holds their text"
+    );
+}
