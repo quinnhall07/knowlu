@@ -1,8 +1,8 @@
 # Email forwarding to Knowlu (implementation plan)
 
-**Date:** 2026-09-30. **Base:** this lane's branch and worktree under `.claude/worktrees/`, cut on
-2026-09-30 for the spec. Their current name carries the retired working title; PQ1 renames both to
-`email-forwarding`. The branch is `main` at `4aa6560` plus the signed spec and its amendments. `main`
+**Date:** 2026-09-30, amended 2026-10-02 for Quinn's rulings (§4, §9.5). **Base:** this lane's branch
+and worktree under `.claude/worktrees/`, cut on 2026-09-30 for the spec, renamed `email-forwarding` at
+T0.0 (PQ1). The three lane branches were cut from `main` at `25592d4` (§9.5). The branch was `main` at `4aa6560` plus the signed spec and its amendments. `main`
 is now `30b6fb7`: Gmail connect (#26) and M2 editing (#27) are both merged. T0.0 merges `origin/main`'s
 HEAD as it stands then, recorded by sha. §2 was read at `199cd1f`, and its citations were re-checked by
 name at `30b6fb7` (§10, R1).
@@ -15,13 +15,14 @@ Knowlu"**, and what it brings is **"forwarded mail"**. Code names are `mail` and
 (`mail-inbound`, `mail_addresses`, origin `forward`), with the spec's meanings unchanged. The retired
 working title appears nowhere in this plan, the code, the tests or the copy.
 **Stage:** MVP (spec D1; ruling 10's MVP list as amended by A5). **Size:** XL, the largest MVP lane.
-**Status:** draft for review. Nothing here is built.
+**Status:** in build. T5.1–T5.4, T8, T8b and Checkpoint A's first fix round are on `email-engine`
+(HEAD `968d86d`); the ledger is `.superpowers/sdd/2026-09-30-email-forwarding/progress.md`.
 
 ## 1. Goal, and what must not move
 
 A student signs in to their school mail, and to personal Gmail if they want it, in a Knowlu window
 that is only for signing in. Knowlu turns forwarding on to their Knowlu address, proves it with a
-test message, and brings in mail since the term began, applied and listed under "From your email"
+test message, and brings in the last 120 days of mail (Quinn, 2026-10-02), applied and listed under "From your email"
 with Undo. Mail after setup is proposed as cards. A mailbox that goes quiet says so, and the saved
 sign-in repairs it. VISION check: the sources line (A7), commitment 5's setup exception (A10),
 "Knowlu reads" (A8), data minimisation (A9), success 2 (nothing missed) and success 5 (the first
@@ -36,8 +37,8 @@ These must not change:
 - **The contract list, except two files.** `write.rs`, `journal.rs` (`VIAS`, `OPS`), `yamlemit.rs`,
   `yaml.rs`, `pystr.rs`, `ledger.rs`, `ids.rs` (`NOTE_FOLDERS`), `provenance.rs`
   (`JUDGED_FIELDS_TASK` is not widened), `sync.rs`, `entitle.rs`, `wincred.rs`, `reconcile.rs`,
-  `credentials.rs` and `updates.rs` are used, never edited. Only `approvals.rs` (T8) and `account.rs`
-  (T12) change, by contract-engineer, reviewed by contract-reviewer. Every gate checks this with §10
+  `credentials.rs` and `updates.rs` are used, never edited. Only `approvals.rs` (T8, T8c) and
+  `account.rs` (T12) change, by contract-engineer, reviewed by contract-reviewer. Every gate checks this with §10
   R12's three-dot diff over the whole list.
 - **Frozen references and oracles.** None is regenerated. `git diff --stat origin/main...HEAD --
   engine/tests/fixtures` stays empty at every gate; no fixture vault holds a mail note.
@@ -243,6 +244,9 @@ Briefs cite functions and headings, never line numbers.
     to `.claude/worktrees/email-forwarding`, push the new name and delete the old remote branch. The
     branch holds docs only today, so nothing is lost.
   - *Needs Quinn's word:* deleting a remote branch is destructive.
+  - **Answered at T0.0, 2026-10-01 (Quinn): done.** The lane branch is `email-forwarding`. The three
+    lane branches `email-engine`, `email-app` and `email-cloud` were cut from `main` (`25592d4`), not
+    from the lane branch as P3 says (§9.5).
 - **PQ2. DKIM and ARC verification: our own verifier or a library.** Binding a live forward
   (§4.6 step 5) needs the provider hop's ARC set verified. SES gives verdicts only for the outer
   message, so this verification is ours.
@@ -256,6 +260,13 @@ Briefs cite functions and headings, never line numbers.
     but Deno's `node:dns` and `node:crypto` compatibility is unproven, and with `lock: false` its
     transitive dependencies would float inside the function that reads every student's mail.
   - *Blocks:* T2d only. Asked when S0 passes.
+  - **Answered 2026-10-02 (Quinn): our own verifier**, as recommended. `_shared/dkim.ts` does
+    rsa-sha256 with relaxed and simple canonicalisation, and verifies the **topmost** ARC instance's
+    seal (the highest `i=`, sealed by the provider that handed the message to SES) and that instance's
+    ARC-Message-Signature. The key resolver is injected, and no test queries DNS. S0's captures
+    (§9.5) are the interop corpus. The raw copies are never committed. The progress ledger says they
+    are kept for the check; `s0-captures.md` says local copies were deleted. The controller confirms
+    which is true before T2d. If they are gone, the check re-captures cases 1, 3, 4 and 6.
 - **PQ3. The per-course digest (D13, T16).** It is optional, behind `mail_digest: false`, and "cut if
   time is short".
   - *Recommend:* decide at Checkpoint D, and cut it from this lane unless the lane is ahead of plan.
@@ -271,6 +282,16 @@ Briefs cite functions and headings, never line numbers.
   - *The alternative:* a fifth claim kind, `receipt`. This is clearer on the wire, but it changes the
     kind set Q5 fixed.
   - *Blocks:* T3a, T3b and T5.5's receipt test. It is asked with PQ2.
+  - **Answered 2026-10-02 (Quinn): the alternative, a new fifth claim kind `receipt`.** This amends
+    Q5's four kinds and spec §5.1's claim shape, which now carries a dated marker.
+    - The shape is `{kind: receipt, course, target, field: null, value: null, item: null, topic: null,
+      evidence, why, confidence, source: template, resolution}`. No `completed` field value exists.
+    - Only a deterministic template parser emits it (T3a), never the model. T3b refuses a `receipt`
+      whose `source` is `model`, and `mail-1`'s grammar offers no such kind (T3c).
+    - Its `target` is resolved as a `change`'s is (T5.2, D12). T5.5 maps it to
+      `completion::propose_done` in both phases. That always proposes, asking once per task, so a
+      receipt is always a card and never a direct write. An unmatched receipt takes §4.9's unmatched
+      row, a notice.
 - **PQ5. A feed card for `title` cannot be approved today (§10, R9).** D11 (5) has `ingest` file an
   amend card for a hand-set `title` or `due`. `approvals::AMENDABLE_FIELDS` has no `title`, and
   `validate_amendment` answers "field not amendable: title". That refusal is recoverable, so an approved
@@ -285,6 +306,65 @@ Briefs cite functions and headings, never line numbers.
   - *(b)* Narrow D11 (5) to `due` only: a hand-set title is kept and the feed's rename files nothing.
     This changes a signed answer (§13 Q7).
   - *Blocks:* T8 and T8b. It is asked at T0.0, after PQ1.
+  - **Answered at T0.0, 2026-10-01 (Quinn): (c).** `title` is amendable only on a card whose
+    `created_by` is `blackboard`. `AMENDABLE_FIELDS` stays nine, and `amendable_fields_is_exactly_the_nine`
+    is unchanged. Built in T8 (`968d86d`).
+
+### Quinn's rulings of 2026-10-02 that no PQ asked
+
+- **F3, the `NotAmendable` rows of §9.5. Answered 2026-10-02 (Quinn): (b).** An amend card may fill
+  an **empty** `due`, such as a mail-created "needs a date" note. Approving a card that gives an archived
+  `imported-past` note a due on or after the approval day **un-archives** the note. This is a change to
+  `approvals.rs`, built by contract-engineer as the new task T8c and read at Checkpoint A. T5.5 then
+  plans those cards where T5.4 planned `NotAmendable`.
+- **BW, the backfill window. Answered 2026-10-02 (Quinn): a fixed 120 days for every student.** This
+  amends signed decision 4's "mail since the term began" and D7. The spec carries a dated marker at
+  decision 4.
+  - The window starts 120 days before the setup day. It is fixed when the mailbox's first backfill
+    batch opens, and every resume or recover of that backfill reads the same start (§9.5).
+  - There is no term-start logic. No school is named in code, and there is no default to confirm.
+  - Every task that read a term start now reads this window: T1.1, T4.2, T10.1, T11.3, T14, T15.1,
+    the ledger and the tests (§9.5). The engine never sees the window, so T6 does not change.
+  - VISION check: a fixed window needs no per-school table that would need hand-editing for a second
+    school (rule 1). D7's "no age cutoff inside the window" still holds.
+- **PS, per-school data. Answered 2026-10-02 (Quinn).** The mail provider comes from the curated
+  campus row, else from an MX lookup of the school address's domain (§13 Q4, T4.2's
+  `provider_reads_mx_…`). Campus rows are data, never code. No code path branches on a school, and
+  T14 adds only the rows' mail fields (`mail_provider`, `mail_domain`).
+
+### Open after the rulings of 2026-10-02 (each with a recommendation)
+
+- **PQ6. The backfill allowance's key under BW.** D23 holds one allowance "per account per term,
+  keyed by the term's start" (`mail_accounts.allowance_term_start`), and signed decision 8 says "per
+  term". BW leaves no term to key on.
+  - *Recommend (a):* one allowance per account per 120-day period. It opens at the account's first
+    backfill, and a backfill that opens 120 days or more after the last opening opens a new one.
+    Disconnecting and reconnecting inside the period renews nothing. The column becomes
+    `allowance_opened_at`. The 14 days, 2,000 judgments and $1.00 are unchanged.
+  - *(b)* One allowance per account, ever. This is simpler, but a returning student's setup in a
+    later semester trickles at the daily cap.
+  - *Blocks:* the one `mail_accounts` column in T1.1, and T1.3's and T3e's allowance tests. T1.1's
+    other six tables do not wait. If PQ6 is open when T1.1 starts, `mail_accounts` lands last, in its
+    own commit. A ruling other than the recommendation needs a dated marker at decision 8.
+- **PQ7. The count for a residual `NotAmendable`.** After T8c, a few card rows still cannot be filed:
+  a note the student archived, a `cancelled` claim for a note with no `status:` line, and a collection
+  `from`. T6.3 counts each on the run line.
+  - *Recommend:* count it in `U` (unmatched: "no live item to change"), which keeps §4.8 step 7's
+    signed line.
+  - *The alternative:* a new slot, which changes the signed line and needs a marker.
+  - *Blocks:* T6.3's line test only.
+- **PQ8. The same mail by two routes (S0 capture 5).** A rule forward ("FW:") sent from one of the
+  student's mailboxes is a new message with a new Message-ID. When it reaches Knowlu through another
+  connected mailbox, intake's Message-ID dedup (D8, test 7) cannot see it.
+  - *Recommend (i), the screen:* T3d reads §4.7 step 2's "the student's own mail coming back (From
+    is the mailbox itself)" as From equal to **any** `mailbox_hint` on the account, outside a batch.
+    The test is `a_rule_forward_from_another_of_the_accounts_mailboxes_is_noise`. The cost: a note
+    the student mails themselves from one connected mailbox to another is dropped too.
+  - *Recommend (ii), the device:* a live `new_item` whose normalised title and course match a
+    pending mail `kind: task` card files nothing (`AlreadyApplied`). Today two such claims file two
+    cards (progress ledger, T5.3). If answered yes, this is a T5.6 dispatch, one rule and its test,
+    before T6.2. T5.5 does not wait for it.
+  - *Blocks:* T3d (i) and T5.6 (ii) only.
 
 ## 5. Tasks
 
@@ -333,11 +413,13 @@ marks a task that needs Quinn's word, presence, a secret or a spend. **WT** is t
 | T5.2 | `contract-engineer` (Opus, xhigh) | yes | — | `engine/src/mailreconcile/resolve.rs` (new) | T5.1 | engine |
 | T5.3 | `contract-engineer` (Opus, xhigh) | yes | — | `engine/src/mailreconcile/rules.rs` (new) | T5.2 | engine |
 | T5.4 | `contract-engineer` (Opus, xhigh) | yes | — | `engine/src/mailreconcile/rules.rs` | T5.3 | engine |
-| T5.5 | `contract-engineer` (Opus, xhigh) | yes | PQ4 | `engine/src/mailreconcile/rules.rs` | T5.4 | engine |
-| T8 | `contract-engineer` (Opus, xhigh) | yes | PQ5 | `engine/src/approvals.rs` CL | T5.5, PQ5 | engine |
-| T8b | `contract-engineer` (Opus, xhigh) | yes | PQ5 | `engine/src/ingest.rs` | T8, PQ5 | engine |
-| A | `contract-reviewer` (Opus, xhigh) | yes | diffs to Quinn | `docs/reports/…-email-forwarding-contract-review-a.md` | T8b | — |
-| T6.1 | `implementer` (Sonnet, high) | no | — | `engine/src/cloudmodel.rs`, `engine/tests/mail_pass.rs` (new) | T8b | engine |
+| T8 | `contract-engineer` (Opus, xhigh) | yes | PQ5 (answered) | `engine/src/approvals.rs` CL | T5.4, PQ5 (built first, §9.5) | engine |
+| T8b | `contract-engineer` (Opus, xhigh) | yes | PQ5 (answered) | `engine/src/ingest.rs` | T8, PQ5 | engine |
+| T8c | `contract-engineer` (Opus, xhigh) | yes | F3 (answered) | `engine/src/approvals.rs` CL | T8b | engine |
+| T5.5 | `contract-engineer` (Opus, xhigh) | yes | PQ4 (answered), PQ7 | `engine/src/mailreconcile/{mod,resolve,rules}.rs` | T8c | engine |
+| T5.6 (only if PQ8 (ii) is yes) | `contract-engineer` (Opus, xhigh) | yes | PQ8 | `engine/src/mailreconcile/{resolve,rules}.rs` | T5.5 | engine |
+| A | `contract-reviewer` (Opus, xhigh) | yes | diffs to Quinn | `docs/reports/…-email-forwarding-contract-review-a.md` | T5.5 (re-read of the fix round, T8c and T5.5) | — |
+| T6.1 | `implementer` (Sonnet, high) | no | — | `engine/src/cloudmodel.rs`, `engine/tests/mail_pass.rs` (new) | T5.5 | engine |
 | T6.2 | `implementer` (Sonnet, high) | no | — | `engine/src/mail.rs` (new), `engine/tests/mail_pass.rs` | A, T6.1, H1b | engine |
 | T6.3 | `implementer` (Sonnet, high) | no | — | `engine/src/mail.rs`, `engine/tests/mail_pass.rs` | T6.2 | engine |
 | T6.4 | `implementer` (Sonnet, high) | no | — | `engine/src/mail.rs`, `engine/src/enrich.rs` (one call), `engine/tests/mail_pass.rs` | T6.3 | engine |
@@ -348,13 +430,13 @@ marks a task that needs Quinn's word, presence, a secret or a spend. **WT** is t
 | T2a | `cloud-engineer` (Opus, high) | yes | — | `functions/_shared/sns.ts` (new, with its test) | T1.3 | cloud |
 | T2b | `cloud-engineer` (Opus, high) | yes | — | `functions/_shared/s3.ts` (new) | T2a | cloud |
 | T2c | `cloud-engineer` (Opus, high) | yes | — | `functions/_shared/mime.ts` (new) | T2b | cloud |
-| T2d | `cloud-engineer` (Opus, high) | yes | PQ2 | `functions/_shared/dkim.ts` (new) | T2c | cloud |
+| T2d | `cloud-engineer` (Opus, high) | yes | PQ2 (answered) | `functions/_shared/dkim.ts` (new) | T2c | cloud |
 | T2e | `cloud-engineer` (Opus, high) | yes | — | `functions/_shared/mail_bind.ts` (new) | T2d | cloud |
 | T2f | `cloud-engineer` (Opus, high) | yes | — | `functions/_shared/mail_bind.ts` | T2e | cloud |
 | T2g.1 | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-inbound/**` (new), `config.toml` | T2f | cloud |
 | T2g.2 | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-inbound/**` | T2g.1 | cloud |
-| T3a | `cloud-engineer` (Opus, high) | yes | PQ4 | `functions/_shared/mail_templates.ts` (new) | T2g.2 | cloud |
-| T3b | `cloud-engineer` (Opus, high) | yes | PQ4 | `functions/_shared/judge_validate.ts` (mail region) | T3a | cloud |
+| T3a | `cloud-engineer` (Opus, high) | yes | PQ4 (answered) | `functions/_shared/mail_templates.ts` (new) | T2g.2 | cloud |
+| T3b | `cloud-engineer` (Opus, high) | yes | PQ4 (answered) | `functions/_shared/judge_validate.ts` (mail region) | T3a | cloud |
 | T3c | `cloud-engineer` (Opus, high) | yes | — | `functions/_shared/judge_prompts.ts`, `judge_caps.ts` | T3b | cloud |
 | T3d | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-process/**` (new), `config.toml` | T3c | cloud |
 | T3e | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-process/**` | T3d | cloud |
@@ -366,7 +448,7 @@ marks a task that needs Quinn's word, presence, a secret or a spend. **WT** is t
 | T4.6 | `cloud-engineer` (Opus, high) | yes | — | `functions/account/**` | T4.5 | cloud |
 | T4b | `cloud-engineer` (Opus, high) | yes | — | `functions/gmail-read/handler.ts` and its test | T4.6 | cloud |
 | B | `reviewer` (Opus, high) | yes | — | `docs/reports/…-email-forwarding-cloud-review.md` | T4b | — |
-| T14 | `mechanical` (Sonnet, low) | no | UA's values | `app/src/scaffold.rs`, `app/src/onboarding.rs`, `app/tests/{scaffold,onboarding}.rs`, the `Curated` literals in `app/tests/{grades,scheduler}.rs` | T19 in the lane | app |
+| T14 | `mechanical` (Sonnet, low) | no | UA's mail fields | `app/src/scaffold.rs`, `app/src/onboarding.rs`, `app/tests/{scaffold,onboarding}.rs`, the `Curated` literals in `app/tests/{grades,scheduler}.rs` | T19 in the lane | app |
 | T9.1 | `contract-engineer` (Opus, xhigh) | yes | — | `app/src/mail_session.rs` (new), `app/tests/mail.rs` (new) | T14, H3a | app |
 | T10.1 | `implementer` (Sonnet, high) | no | — | `app/src/mail_steps.rs` (new), `app/tests/mail.rs` | T9.1, H3c | app |
 | T9.2 | `contract-engineer` (Opus, xhigh) | yes | — | `app/src/mail.rs` (new), `app/tests/mail.rs` | S1–S3, T10.1, H3b | app |
@@ -462,6 +544,18 @@ forward-as-attachment keeps the delivery headers.
 **Pass:** the DMARC-failing message is in S3 with its verdicts recorded, and nothing was bounced or
 dropped. **No cloud task starts until S0 passes.** If the intra-school message is not aligned, Quinn
 hears the proportion before T2f fixes the `aligned` rule (spec §4.6 step 6).
+
+**Done (recorded 2026-10-02).**
+- Q-B was answered `us-east-2`, not `us-east-1`. AWS's new sign-up fixes the region, and SES
+  receiving is offered there. The staging receiver exists: `in.knowlu.com` is verified, and the
+  bucket, topic and rule set are built. T18a sets `AWS_REGION=us-east-2`.
+- The DMARC gate **passed 2026-10-01**. A `p=reject`, unaligned message was stored, with DMARC FAIL
+  recorded. Every cloud task may start.
+- The real forwards were captured on 2026-10-02 in `.superpowers/sdd/2026-09-30-email-forwarding/s0-captures.md`,
+  as header facts only. The intra-school message is DKIM-signed by Microsoft when forwarded, so it is
+  aligned and there is no proportion to report. T2f's facts are listed under T2f.
+- The temporary SQS queue is deleted. Still Quinn's: remove the S0 Gmail filter and the S0 forwarding
+  address in that Gmail.
 
 #### T0.S1–S3. The Tauri 2 host checks
 
@@ -563,6 +657,8 @@ cut from `main` (P19). **Files:** `app/src/grades.rs`, `app/tests/grades.rs`, an
 **Stops:** if a kept assertion cannot pass with the callers unchanged, or if a change would reach an
 entitlement test, the implementer stops and asks. No test is deleted.
 **Done when:** tests 39–41 pass, the date-and-bump tests are untouched, and R19 has no open finding.
+**Done:** merged as #29 (`77fa9bf`). It is in `main`'s `25592d4` and so in every lane worktree. T14
+and T11.5 no longer wait on it.
 
 ### T13a. HANDOFF for the suspension and the lane (`docs-keeper`, on T19's branch)
 
@@ -588,7 +684,7 @@ test, the entitlement tests untouched). **Report:**
 `docs/reports/<date>-grades-gate-suspended-review.md`. Quinn reads the diff. The PR merges on CI
 green and Quinn's word, and the main session then merges `main` into the lane branch.
 
-### T5. The reconciler (`engine/src/mailreconcile/`), in five dispatches
+### T5. The reconciler (`engine/src/mailreconcile/`), in five dispatches (and T5.6 if PQ8 (ii) is yes)
 
 **Agent, all five:** `contract-engineer` (Opus, xhigh). **Why:** it is off the list, but it is the
 one place that decides direct write or card (D11). A silent error there changes a student's plan
@@ -679,8 +775,10 @@ the view's `human_set` set, never from `write`'s judged set. For the two-value r
 the value of the claim that sorts last by uid and claim index, and its body names both values, each
 with its sender. That is this plan's deterministic reading of "naming both".
 
-#### T5.5. Feed items, templates, supersession and notices (`rules.rs`)
+#### T5.5. Feed items, templates, receipts, supersession, notices and the F3 cards (`mod.rs`, `resolve.rs`, `rules.rs`)
 
+**Before it:** T8c is committed (F3). PQ4 is answered. The P10 grep below is already done and
+recorded (progress ledger, 2026-10-01).
 **First step:** grep every `created_by:` the engine's templates write, and record the list in the
 ledger (P10).
 **Tests first** (spec tests 22, 19, and 26's planning half, plus P10 and D24 pins):
@@ -696,10 +794,47 @@ ledger (P10).
 - `an_unmatched_claim_is_a_notice`
 - `feed_creators_hold_the_feeds_and_nothing_else` (P10)
 - `no_action_ever_targets_commitments` (D24)
-- `a_template_receipt_is_propose_done_in_both_phases` (§4.9's receipt row, under PQ4)
+- PQ4, the receipt kind:
+  - `a_template_receipt_is_propose_done_in_both_phases` (§4.9's receipt row): always a
+    `ProposeDone`, never a direct write.
+  - `a_receipt_from_the_model_is_noise`: the device re-checks the shape, and a `receipt` whose
+    `source` is `model` skips as noise.
+  - `a_receipt_on_a_note_this_plan_files_names_it_by_its_creating_claim` (`Place::Planned`, §9.5)
+  - `an_unmatched_receipt_is_an_unmatched_notice`
+- F3 (b), once T8c is in:
+  - `a_live_date_for_a_needs_a_date_mail_note_is_an_amend_card_from_null`
+  - `a_date_for_a_hand_made_note_with_no_due_is_an_amend_card_from_null` (row 6; the plan's
+    reading, §9.5)
+  - `a_due_ahead_for_an_archived_imported_past_mail_note_is_an_amend_card`, in both phases
+  - `a_note_the_student_archived_is_still_not_amendable`: an `archive/` note without
+    `archived_reason: imported-past` (`done`, or deleted by hand) still skips as `NotAmendable`
+  - `a_cancelled_claim_for_a_note_with_no_status_line_is_still_not_amendable`
+
+**The one sanctioned change to built assertions (F3).** Quinn's ruling changes what two T5.4 tests
+assert: `a_card_the_approvals_executor_would_refuse_is_never_planned` and
+`a_backfill_never_sets_an_archived_mail_note_to_a_due_today_or_later`. Their undated, hand-made and
+`imported-past` cases change from `NotAmendable` to the cards above. The second test's
+whole-or-split property must still hold: the whole plan's card names the note by `Place::Planned`
+and the split plan's by path, as the test's still-past case already does for its `Set`. Their other cases are unchanged: the `done` archive, the
+missing `status:` line, and a due still past set directly. The commit message names the ruling.
+Checkpoint A reads these two diffs line by line. No other built assertion moves.
 
 **Behaviour.** §4.9's rows 7–9 and 13–15, D13 and D24. Values are compared in the vault's literal
 form (`write::to_literal`), so a date and a date-time never compare equal by accident.
+- **The receipt kind (PQ4).**
+  - `ClaimKind` gains `Receipt` in `mod.rs`, with the shape §5.1's marker gives. A `receipt`
+    carrying a `field`, `value`, `item` or `topic` is noise.
+  - `resolve.rs` resolves its `target` as it resolves a `change`'s, stored answers included.
+  - `rules.rs` plans `ProposeDone` for it in both phases. Supersession and `mail_asof` do not apply
+    to it.
+- **The F3 cards (T8c).**
+  - `amendable` mirrors T8c exactly. It accepts a null `from` for `due`. It also accepts a `due` card
+    on an `archive/` note whose `archived_reason` is `imported-past` when `to` is on or after
+    `today`.
+  - The view gains `archived_reason`. T6.3 fills it.
+  - Every other case keeps T5.4's rule. A due still before `today` on an `imported-past` note is
+    still set directly when the row writes directly.
+- **The residual `NotAmendable`** is counted as PQ7 rules.
 
 ### T8. Approving a mail amend card writes as the student (`approvals.rs`)
 
@@ -768,7 +903,57 @@ are never regenerated.
   <from> by hand, so this is a proposal". It is never filed through `write::propose_amendment`.
 - The run line says `proposed <stem>: <field>`, one line per card.
 
-### Checkpoint A. Contract review of T5.1–T5.5, T8 and T8b
+### T8c. A mail amend may fill an empty due, or un-archive an imported-past note (`approvals.rs`)
+
+**Agent:** `contract-engineer` (Opus, xhigh). **Why:** `approvals.rs` is on the contract list, and
+this is Quinn's F3 ruling (b). A wrong arm moves a note out of `archive/` that the student put there,
+or opens every amend to a null `from`. **Before it:** T8b is committed. Repeat the disjointness check
+for `two-desktop`, which edits `approvals.rs` (§10, R2). **Reviewed at:** Checkpoint A.
+
+**The plan's reading of the ruling (Checkpoint A confirms it with Quinn).**
+- Both arms are keyed on the **card's** `created_by: mail`, as T8's actor arm is.
+- They change only `due`, so spec §8's "every other amend executes exactly as today" stays true.
+- The ruling's example is a mail-created "needs a date" note. Keyed on the card, arm (1) also covers
+  a hand-made note with no due, which row 6 makes a card. If Quinn meant mail-created targets only,
+  arm (1) also checks the target's `created_by`, and the hand-made test flips to a refusal.
+
+**Tests first**, in `approvals.rs`'s test module beside T8's:
+- `a_mail_card_fills_an_empty_due_as_the_human_actor`: the target has `due: null` or no `due:`
+  line, and the card's `from` is null. The due is written, journalled as T8 writes.
+- `a_null_from_on_any_other_card_or_field_is_refused_exactly_as_today`: a blackboard card, an
+  `agent:knowlu.enrich` card, and a mail card for `status`. All are refused with today's string, and
+  all are recoverable.
+- `a_mail_card_with_a_null_from_against_a_note_that_now_has_a_due_is_refused`: the note gained a due
+  after the card was filed. The stale card is handled as any card whose `from` no longer matches is
+  today, and never overwrites that due.
+- `approving_a_future_due_for_an_imported_past_mail_note_unarchives_it`: the note moves from
+  `archive/` to `tasks/` through `write::move_note`. It gets `status: active`, the new `due`, and
+  `archived_reason` set to null.
+- `a_due_that_is_past_by_approval_day_is_set_in_place_and_the_note_stays_archived`: this is T5.4's
+  "a due still past is set directly". There is no refusal, so the card never sits pending for good.
+- `an_archive_target_on_any_other_card_or_note_is_refused_exactly_as_today`: a non-mail card, or a
+  note without `archived_reason: imported-past` (`done`, or deleted by hand). The refusal is
+  unrecoverable, `target outside tasks/courses`.
+- `an_unarchive_interrupted_between_its_writes_completes_or_stays_pending`: a failure injected
+  between the steps either leaves the card pending with the note unchanged, or a re-run finishes
+  it. A card never settles while its note is half moved.
+- `amendable_fields_is_exactly_the_nine` and the `AMENDABLE_FOLDERS` pin (`["tasks", "courses"]`)
+  pass unchanged.
+
+**Behaviour.**
+- Arm (1) relaxes one check, `validate_amendment`'s "from/to must both be present and non-null". It
+  does so only for `due`, only on a `created_by: mail` card, and only when the target's `due` is null
+  or absent. `to` must still be non-null and a single line.
+- Arm (2) widens target resolution to `archive/` for a mail card whose `changes` hold only `due`,
+  when the note's `status` is `archived` and its `archived_reason` is `imported-past`.
+  `resolve_amend_target` and `AMENDABLE_FOLDERS` are unchanged; the arm sits beside them, as PQ5's
+  title arm sits beside `AMENDABLE_FIELDS`.
+- "Future" is the rule T5.3's `imported-past` uses: a due on or after the approval day. The note's
+  writes are the student's, under T8's actor (`journal::read_human_actor`, with the executor's `via`
+  and run id).
+- The card's own bookkeeping stays `agent:approvals`. `write.rs` is used, never edited.
+
+### Checkpoint A. Contract review of T5.1–T5.5, T8, T8b and T8c
 
 **Agent:** `contract-reviewer` (Opus, xhigh). **Report:**
 `docs/reports/<date>-email-forwarding-contract-review-a.md`. The review:
@@ -780,7 +965,16 @@ are never regenerated.
 - reads PQ5's arm, T8's `append` refusal, and T8b's per-field cards, null rule and budget fields
   (§10, R3, R9, R14 and R15);
 - confirms that a mail or feed `append_body` landing while M2's body editor is open makes the editor's
-  `set_body` refuse as a conflict, as M2 intends, and never drops the line (§10, R1).
+  `set_body` refuse as a conflict, as M2 intends, and never drops the line (§10, R1);
+- re-reads the first fix round (`b697cf8`, `4e4c873`, `968d86d`), then T8c and T5.5 (added
+  2026-10-02):
+  - T8c's two arms against F3 (b) and the plan's reading under T8c, which goes to Quinn with the
+    report;
+  - that no other amend changes, and the `AMENDABLE_FIELDS` and `AMENDABLE_FOLDERS` pins;
+  - the un-archive's order of writes and its interrupted case;
+  - that T5.5's `amendable` mirrors T8c exactly;
+  - the two T5.4 assertions F3 changes, line by line;
+  - the receipt kind (PQ4): template-only, and always a card.
 
 T6.1 runs while the reviewer reads, since the review only reads commits. The fix loop opens only after
 T6.1 has committed, so one agent at a time writes in `email-engine` (§10, R6). Fixes go back to
@@ -821,6 +1015,8 @@ the first half of 28c, plus P13 pins):
 - `a_mail_note_is_written_needs_enrichment_false_with_the_claims_effort_and_importance` (28c)
 - `a_mail_amend_card_passes_validate_amendment_and_carries_from_mail_date_and_evidence` (D11 (3),
   D21)
+- `a_fill_due_card_and_an_unarchive_card_pass_validate_amendment` (F3, T8c): `from: null` on an
+  undated note, and `target: archive/<name>` on an `imported-past` note.
 - `a_colon_a_quote_and_an_img_onerror_in_evidence_survive_as_literals`, widened (§10, R11) to every
   mail-derived field (title, sender, why, evidence) and to `\r`, U+0085 and U+2028: a value T5 lets
   through lands as one literal line, and one T5 skips writes no byte.
@@ -851,7 +1047,8 @@ the first half of 28c, plus P13 pins):
 **Tests first** (spec tests 28, 18's third half, 22e's vault half, the second half of 28c, and the
 engine half of 36), in `engine/tests/mail_pass.rs`:
 - `the_mail_run_line_is_exact`: `mail: N new, M changed, K proposed, J notices, P past, S superseded, U
-  unmatched`.
+  unmatched`. A residual `NotAmendable` is counted as PQ7 rules. A receipt counts in `K` when
+  `propose_done` files a card, and nowhere when it has already asked about that task.
 - `no_connected_mailbox_prints_nothing`
 - `seen_records_mail_uids_and_the_ack_sends_them`
 - `a_closed_batch_drains_past_three_rounds_until_the_budget_is_spent`
@@ -872,7 +1069,7 @@ engine half of 36), in `engine/tests/mail_pass.rs`:
 
 **Behaviour.** `pull_mail(vault, client, opts, budget)` (§4.8 steps 1, 4–7).
 - It builds T5's view from `tasks/`, `archive/` and `approvals/`, with `Journal::human_set` for each
-  field a claim may touch.
+  field a claim may touch, and each note's `archived_reason` (T5.5).
 - Live mail takes up to `PULL_ROUNDS`. A closed batch drains until `budget`, by `pull_gmail`'s
   before-the-round check.
 - It calls `mailreconcile::plan`, applies the actions through T6.2's writers, acks, and records each
@@ -924,7 +1121,11 @@ leaks every student's mail metadata (spec T1). **After:** S0. The stamp sorts af
 
 **Behaviour.** Spec §5.1's table, column for column: `mail_accounts`, `mail_addresses`,
 `mail_batches`, `mail_canaries`, `mail_seen`, `mail_work` and `mail_claims`. `mail_batches` gains its
-`phase` (`backfill` or `recover`) as the spec lists it.
+`phase` (`backfill` or `recover`) as the spec lists it. Two changes come from BW (§4, §9.5):
+- `mail_addresses.term_start` is named `backfill_since`. It is the mailbox's window start, set once
+  when its first backfill batch opens.
+- `mail_accounts.allowance_term_start` follows PQ6. Under the recommendation it is
+  `allowance_opened_at`. Until PQ6 is answered, `mail_accounts` lands last, in its own commit.
 
 #### T1.2. Kinds, origins, the training and rules paths, the provisional pins
 
@@ -950,7 +1151,7 @@ adds a migration (§10, R2). The `mail` migration's stamp sorts after `j-events`
   `security definer` with a pinned `search_path`.
 - `charge_allowance_is_one_statement_like_charge_call`
 - `enforce_budget_raises_the_ceiling_by_the_allowance_only_while_it_is_open` (D23: 2,000 judgments and
-  $1.00 per account per term, within 14 days of the first setup)
+  $1.00 per account per allowance period as PQ6 rules, within 14 days of the first setup)
 - `the_mail_cron_jobs_use_the_vault_token`: `mail-process` every minute, `mail-canary` hourly, and
   `mail-process` in sweep mode nightly (P7).
 
@@ -1005,11 +1206,14 @@ the delivery time for §4.6 step 7.
 - `verifies_relaxed_and_simple_rsa_sha256_signatures_made_with_an_in_test_key`
 - `a_changed_signed_header_fails`
 - `a_header_absent_from_h_is_not_covered`
-- `the_highest_arc_instances_seal_verifies_and_reports_its_domain`
+- `the_topmost_arc_instances_seal_and_its_ams_verify_and_report_the_sealing_domain`
+- `a_lower_arc_instance_is_never_read_as_the_topmost`
 - `the_key_resolver_is_injected_and_no_test_queries_dns`
 
-**Behaviour.** PQ2's recommended scope. In production the resolver uses `Deno.resolveDns` for TXT
-records. **After it:** the main session runs the interop check over S0's captures (PQ2).
+**Behaviour.** PQ2 as answered on 2026-10-02: rsa-sha256, relaxed and simple, and the topmost ARC
+instance's seal and AMS. In production the resolver uses `Deno.resolveDns` for TXT records. **After
+it:** the main session runs the interop check over S0's captures (PQ2's answer; cases 1, 3, 4 and 6)
+and records pass or fail by case in the T0 report.
 
 #### T2e. Binding, part 1: canary, Gmail confirm, batch send (`_shared/mail_bind.ts`)
 
@@ -1042,6 +1246,24 @@ records. **After it:** the main session runs the interop check over S0's capture
 
 **Behaviour.** §4.6 steps 5 (the live case and "anything else") and 6. The words recorded are
 `aligned` or `unaligned`, never a header.
+
+**S0's facts (2026-10-02, `s0-captures.md`).**
+- **Gmail binding.** The envelope sender is `<user>+caf_=<knowlu-address-with-=>@gmail.com`: the
+  Knowlu address with its `@` written as `=`. It encodes this mailbox's own destination, and the
+  topmost seal is `google.com`.
+  `X-Forwarded-To` and `X-Forwarded-For` are present but forgeable, and never bind alone.
+- **Microsoft binding.** `X-MS-Exchange-ForwardingLoop: <mailbox>;<tenant GUID>` names the tenant,
+  and the topmost ARC seal is `microsoft.com`. Microsoft rewrites the envelope by SRS on the school
+  domain. S0 records Microsoft's AMS `h=` only in part. The interop check records whether
+  `X-MS-Exchange-ForwardingLoop` is in that `h=`. If it is not, the tenant binding also needs the
+  SRS envelope with SES's SPF pass, and Checkpoint B reads the case.
+- **Intra-school mail** is DKIM-signed by Microsoft when forwarded, so it is `aligned`.
+- **Every forwarding hop adds its own ARC set**, and the topmost seal is the provider that handed the
+  message to SES. The original's DKIM survives Gmail's forward.
+- **The same mail can arrive twice, by two routes, with different Message-IDs.** Intake's dedup is
+  by Message-ID (D8) and does not change here. PQ8 covers the duplicate.
+- **A forward-as-attachment from Gmail or Outlook keeps the original whole** (its Received lines,
+  Authentication-Results, DKIM and Message-ID), so T2g.2 reads the original's own delivery stamp.
 
 #### T2g.1. The handler: verify, find, entitle, fetch, dedup, hand off (`mail-inbound`)
 
@@ -1086,11 +1308,14 @@ comment (P5).
 - `an_aligned_lms_due_date_changed_mail_yields_a_template_claim_with_a_resolved_due`
 - `the_same_mail_unaligned_goes_to_the_model`
 - `a_template_matches_only_the_vendors_exact_address_subject_and_body`
-- `a_submission_receipt_template_yields_field_completed` (PQ4)
+- `a_submission_receipt_template_yields_a_receipt_claim` (PQ4): `kind: receipt`, `source: template`,
+  a `target` and a course, and `field`, `value`, `item` and `topic` null.
+- `an_unaligned_receipt_mail_yields_no_receipt` (only an `aligned` vendor sender matches a template)
 - `the_code_names_no_vendor` (a source test: vendors are data rows)
 
-**Behaviour.** §4.7 step 3. Dates go through `judge_due.ts`, and course codes are matched against the
-known courses. `lms_receipts.ts` is not edited.
+**Behaviour.** §4.7 step 3, and PQ4's `receipt` kind as §5.1's marker gives it. Dates go through
+`judge_due.ts`, and course codes are matched against the known courses. `lms_receipts.ts` is not
+edited.
 
 #### T3b. Validation (`_shared/judge_validate.ts`, the mail region)
 
@@ -1107,16 +1332,20 @@ rebase onto them if they merged first (§10, R2).
 - `a_claim_below_point_six_is_refused`
 - `a_new_item_without_effort_or_importance_in_range_is_refused`
 - `a_topic_outside_the_fixed_set_is_refused`
-- `the_model_can_never_emit_field_completed` (PQ4)
+- `a_receipt_claim_from_the_model_is_refused` (PQ4)
+- `a_receipt_carrying_a_field_value_item_or_topic_is_refused` (PQ4)
 - `a_resolve_answer_naming_an_id_outside_its_batch_reads_none` (13)
 
-**Behaviour.** §5.1's claim shape and D9, with `MailKind` (P6).
+**Behaviour.** §5.1's claim shape as amended on 2026-10-02 (five kinds, `receipt` from templates
+only), and D9, with `MailKind` (P6). The claim kind `receipt` is not a judgment kind, so `MailKind`
+is unchanged.
 
 #### T3c. Prompts and caps (`judge_prompts.ts`, `judge_caps.ts`)
 
 **Tests first** (spec test 11's cap half, plus plan pins):
 - `the_mail_claim_prompt_holds_only_scrubbed_text_cut_to_2000_characters`
 - `the_resolve_prompt_holds_only_ids_titles_and_dues`
+- `the_mail_1_grammar_offers_no_receipt_kind` (PQ4)
 - `mail_daily_caps_are_120_for_claims_and_20_for_resolve`
 - `the_existing_kinds_caps_are_unchanged`
 
@@ -1130,6 +1359,8 @@ rebase onto them if they merged first (§10, R2).
 - `a_microsoft_bulk_score_of_seven_or_more_is_noise`
 - `a_promoted_rule_answering_noise_is_noise`
 - `the_students_own_mail_outside_a_batch_is_noise`
+- Under PQ8 (i), if answered yes: `a_rule_forward_from_another_of_the_accounts_mailboxes_is_noise`
+  (S0 capture 5's shape)
 - `no_process_log_line_carries_the_messages_marker` (15)
 - `no_object_is_left_after_noise_refused_template_only_or_unauthenticated` (16)
 
@@ -1184,6 +1415,9 @@ in (P5).
 - `a_fourth_canary_for_one_address_in_a_utc_day_is_refused` (6)
 - `the_canary_goes_through_resend_with_its_nonce_in_a_header_and_the_subject` (P9, a fake Resend)
 - `post_batches_opens_a_batch_of_its_phase_and_answers_its_nonce_once`
+- `a_backfill_batch_reaching_more_than_120_days_before_its_opening_is_refused` (BW): the service
+  bounds the window, so a device bug cannot open a wider backfill. The first backfill batch sets
+  `backfill_since`, and every later backfill or recover batch that finishes it reuses that value.
 - `sent_closes_a_batch_with_the_devices_count`
 - `reconcile_answers_only_held_fingerprints_in_the_window_and_the_key` (§4.11 step 3)
 - `the_reconcile_request_carries_only_the_window` (nothing about unforwarded mail reaches the service)
@@ -1191,7 +1425,9 @@ in (P5).
 - `state_confirming_opens_a_fifteen_minute_confirm_window` (P21)
 - `provider_reads_mx_through_an_injected_resolver_as_m365_google_or_other` (§13 Q4)
 
-**Behaviour.** The rest of spec §6.3's `mail` routes, with §4.10's limits.
+**Behaviour.** The rest of spec §6.3's `mail` routes, with §4.10's limits. The provider route is the
+MX fallback that Quinn's per-school ruling (PS) names: a curated row's `mail_provider` wins, else the
+service reads the school address domain's MX.
 
 #### T4.3. The periodic canary (`functions/mail-canary/`)
 
@@ -1264,25 +1500,29 @@ Important finding is open.
 
 ### T14. Campus rows and the wizard's marker (`scaffold.rs`, `onboarding.rs`)
 
-**Agent:** `mechanical` (Sonnet, low). **Why:** three struct fields and one marker, fully fixed here.
-**After:** T19 is in the lane, because T14 touches T19's test files. **Files:** `app/src/scaffold.rs`,
+**Agent:** `mechanical` (Sonnet, low). **Why:** two struct fields and one marker, fully fixed here.
+**Shrunk 2026-10-02 (BW, PS).** The rows carry only their mail fields, the provider and the domain.
+D7's `terms` field is dropped, because the backfill window is a fixed 120 days (§4).
+**After:** T19, which is in every lane worktree (§9.5). **Files:** `app/src/scaffold.rs`,
 `app/src/onboarding.rs`, `app/tests/scaffold.rs`, `app/tests/onboarding.rs`, and the four `Curated`
-literals in `app/tests/{grades,scheduler}.rs`. Those literals gain the three fields and no assertion
+literals in `app/tests/{grades,scheduler}.rs`. Those literals gain the two fields and no assertion
 changes. **Before it:** the disjointness check is repeated for `p3-registrar`, which adds fields to
-`Curated` in `scaffold.rs`. T14's three fields go after every field `main`'s `Curated` has, and the
+`Curated` in `scaffold.rs`. T14's two fields go after every field `main`'s `Curated` has, and the
 registrar (a draft Pilot PR, expected to merge later) rebases onto them (§10, R2). **UA's values:**
-the main session supplies them from UA's public academic calendar and its
-student mail domain, and Quinn confirms them (a queue item). Kentucky's row is `other`, with no
-domain and no terms.
+the main session supplies UA's provider and student mail domain from the school's public pages, and
+Quinn confirms them (a queue item). No calendar is read. Kentucky's row is `other`, with no domain.
 **Tests first:**
 - `every_curated_row_names_a_known_mail_provider`
 - `a_mail_domain_is_set_only_for_m365_or_google`
-- `terms_are_ordered_non_overlapping_iso_date_pairs`
 - `the_mail_offer_marker_is_set_and_cleared_on_create_restore_and_adopt`
 
 **Behaviour.**
-- `Curated` gains `mail_provider` (`m365`, `google` or `other`), `mail_domain` (an optional string)
-  and `terms` (`&'static [(start, end)]`), per §4.1 and D7.
+- `Curated` gains `mail_provider` (`m365`, `google` or `other`) and `mail_domain` (an optional
+  string), per §4.1. They are data in the curated table, never code: no code path branches on a
+  school (T11.3's source test).
+- **The fallback** for a school with no curated row: the setup asks once for the school address,
+  and the service reads its domain's MX (T4.2's
+  `provider_reads_mx_…`, T11.3's `an_uncurated_school_asks_once_…`, §13 Q4).
 - `onboarding` gains `mail_offer_marker(profile_dir)`, set or cleared on the three finishing paths
   from the finish plan's `offer_mail` field. Like `offer_marker`, it is a file, never a `Settings`
   field, and `offer_mail` carries `#[serde(default)]` so existing callers are unchanged (D6, §13 Q9).
@@ -1341,8 +1581,10 @@ against synthetic pages (spec T10). **Rules for the scripts:**
 - `each_provider_has_its_step_list_in_order` (§4.2, §4.3)
 - `a_failed_step_falls_back_to_guided_for_that_step_only_and_later_steps_continue` (§4.4)
 - `an_existing_forwarding_address_is_a_needs_you_and_never_replaced`
-- `the_term_start_default_is_the_latest_of_5_jan_15_may_and_15_aug_before_today` (D7)
-- `a_curated_term_covering_today_wins_over_the_default` (D7)
+- `the_backfill_window_starts_120_days_before_the_setup_day` (BW; replaces D7's term-start default):
+  `BACKFILL_DAYS = 120` is one constant, the same for every school, curated or not.
+- `a_resumed_backfill_keeps_its_first_window_start` (BW): a resume reads `backfill_since` and never
+  recomputes it from a later day.
 - `the_pace_is_at_most_10_a_minute_and_600_a_mailbox_a_day` (provisional until S6)
 - `the_first_send_failure_stops_the_routine_with_its_named_outcome`
 - `nothing_is_retried_in_a_loop`
@@ -1421,13 +1663,15 @@ never writes the vault here: the vault changes only through the engine's `judge`
 
 #### T11.3. The setup runner (`app/src/mail.rs`)
 
-**Tests first** (§4.1–§4.5, D6, D7, D15 and D16, as plan tests):
+**Tests first** (§4.1–§4.5, D6, D7 as BW amends it, D15 and D16, as plan tests):
 - `one_setup_at_a_time`
 - `a_closed_sign_in_window_is_setup_cancelled_and_nothing_changed`
 - `stop_ends_after_the_current_step_and_names_what_was_done`
 - `a_canary_not_back_in_three_minutes_leaves_blocked_with_retry_and_offers_what_remains` (D16)
 - `an_uncurated_school_asks_once_for_the_address_and_the_service_decides_the_provider` (§4.1)
-- `a_term_date_with_no_curated_term_is_asked_before_any_mail_is_read` (D7)
+- `no_date_is_asked_and_every_school_reads_the_same_120_days` (BW; replaces D7's ask)
+- `the_mail_code_names_no_school` (PS): a source test. No curated campus id and no mail domain
+  literal appears in `app/src/mail*.rs` or `app/assets/mail/**`.
 - `an_open_backfill_resumes_at_launch`, and resumes again as its pace allows
 - `a_closed_backfill_batch_starts_a_slot_now` (§4.8 step 1, `scheduler::run_slot`)
 - `with_the_saved_sign_in_off_setup_uses_mail_setup_and_wipes_it_on_close`
@@ -1529,7 +1773,8 @@ R2).
 **Tests first:**
 - `the_progress_view_shows_one_row_per_step_with_its_state`
 - `needs_you_names_its_reason_and_offers_its_answers`
-- `the_term_date_needs_you_shows_the_date_to_confirm_before_any_mail_is_read` (D7)
+- `the_backfill_row_names_its_start_date_and_asks_nothing` (BW; replaces D7's confirm). The copy is
+  this plan's ("mail from the last 120 days, since <date>"), not signed text.
 - `leave_closes_the_panel_and_settings_carries_the_progress`
 - `stop_invokes_mail_setup_stop_and_shows_what_was_done`
 - `backfill_shows_n_of_m_and_a_time_left`
@@ -1673,8 +1918,8 @@ controller's (spec T18; HANDOFF §2's controller rules).
 | Worktree | Order |
 |---|---|
 | `main` (T19's branch) | T19 → T13a → R19 → PR merged on Quinn's word → `main` merged into the lane and into `email-app` |
-| `email-engine` | H1a → T5.1 → T5.2 → T5.3 → T5.4 → T5.5 → (PQ5) T8 → T8b → Checkpoint A reads while T6.1 runs → T6.1 committed → A's fix loop → H1b → T6.2 → T6.3 → T6.4 → H1c → T7 → H2 |
-| `email-cloud` | S0 → T1.1 → T1.2 → T1.3 → T2a → T2b → T2c → T2d (PQ2) → interop check → T2e → T2f → T2g.1 → T2g.2 → T3a (PQ4) → T3b → T3c → T3d → T3e → T4.1 → T4.2 → T4.3 → T4.4 → T4.5 → T4.6 → T4b → Checkpoint B → T16 (only if PQ3 keeps it) |
+| `email-engine` | H1a → T5.1 → T5.2 → T5.3 → T5.4 → (PQ5) T8 → T8b → A's first fix round (all built, `968d86d`) → (F3) T8c → (PQ4) T5.5 → (PQ8 ii, if yes) T5.6 → Checkpoint A re-reads while T6.1 runs → T6.1 committed → A's fix loop → H1b → T6.2 → T6.3 → T6.4 → H1c → T7 → H2 |
+| `email-cloud` | S0 (passed) → T1.1 (`mail_accounts` last, under PQ6) → T1.2 → T1.3 (PQ6) → T2a → T2b → T2c → T2d (PQ2 answered) → interop check → T2e → T2f → T2g.1 → T2g.2 → T3a (PQ4 answered) → T3b → T3c → T3d (PQ8 i) → T3e → T4.1 → T4.2 → T4.3 → T4.4 → T4.5 → T4.6 → T4b → Checkpoint B → T16 (only if PQ3 keeps it) |
 | `email-app` | T19 merged → T14 → H3a → T9.1 → H3c → T10.1 → S1–S3 → H3b → T9.2 → T10.2a → T10.2b → T10.3a → T10.3b → H3d → T11.1 → T11.2 → T11.3 → H4 → T12 → Checkpoint C → `email-engine` merged in (for `mail-applied`) → T11.4 → H5 with test 37 → T11.5 → `origin/main` merged in and the registrar check → T15.1 → … → T15.5 |
 | lane | T0.0 → … → T13b (after T15.5 and B) → T17 → Checkpoint D → T18 |
 
@@ -1690,27 +1935,30 @@ controller's (spec T18; HANDOFF §2's controller rules).
 - S6 blocks T17's merge of the pace numbers, not the code.
 - S4 changes one constant whenever it lands.
 
-**Waits on Quinn, one at a time, each with its context:**
-- PQ1 (T0.0);
-- PQ5 (T0.0, before T8 and T8b);
-- the AWS account, region, DNS and DMARC sender (S0);
+**Waits on Quinn, one at a time, each with its context.** Answered: PQ1 and PQ5 (T0.0); the AWS
+account, the region (`us-east-2`), DNS and the DMARC sender (S0); PQ2, PQ4, F3, BW and PS (2026-10-02).
+Still open:
+- PQ6 (before T1.1's `mail_accounts`, T1.3 and T3e's allowance tests);
+- PQ7 (before T6.3's line test);
+- PQ8 (before T3d, and before T6.2 for T5.6);
+- the plan's reading of F3 under T8c, at Checkpoint A;
 - the sign-ins at the machine (S1–S3);
-- PQ2 (before T2d) and PQ4 (before T3a and T5.5);
 - the M365 test tenant (S6);
-- UA's values (T14);
+- UA's mail fields (T14);
 - T19's merge word;
 - the §13 Q3 revisit after S4;
 - PQ3 at Checkpoint D;
 - the staging secrets, the sign-ins and the merge word at T18.
 
-**Opus starts:** T0, T5.1–T5.5, T8, T8b, A, T1–T4b, B, T9.1, T9.2, T12, C, T16, T17, D, T18 and
+**Opus starts:** T0, T5.1–T5.6, T8, T8b, T8c, A, T1–T4b, B, T9.1, T9.2, T12, C, T16, T17, D, T18 and
 R19. Every other task starts on Sonnet, and a second failure moves it to Opus at high.
 
 **Checkpoints for Quinn** (spec §14):
 - **Checkpoint 0:** the T0 report, with S0's DMARC result and header shapes, and S1–S3; S6 and S4 are
   added when they land.
 - **R19:** T19's diff and review, before its PR merges.
-- **Checkpoint A:** the contract review of T5, T8 and T8b, with the diffs.
+- **Checkpoint A:** the contract review of T5, T8, T8b and T8c, with the diffs and the plan's reading
+  of F3.
 - **Checkpoint D:** the whole-branch review, before T18, with PQ3.
 - **The merge word** at T18d.
 - **Outside this lane:** A13's review trigger at the 20th paying account. T13a puts it in Quinn's
@@ -1803,7 +2051,9 @@ numbers are spec §12's; named tests are this plan's (§5).
 | D4: forward everything, and keep the copy | T10.2a, T10.3a | `m365_forwarding_set_turns_it_on_with_keep_copy_…`, `gmail_forwarding_on_keeps_gmails_copy_…` |
 | D5: automatic, DOM-only setup; window visible only to sign in; an origin list; no CDP or OS input; guided fallback per step | T0.S1–S3, T9.2, T10.1–T10.3b, T11.3 | tests 33, 34 and 35; `a_failed_step_falls_back_to_guided_…`; Checkpoint C |
 | D6, §13 Q9: announced in the wizard, run at the console's first open, offered in Settings any time | T14, T11.4, T15.1–T15.3 | `the_mail_offer_marker_is_set_…`, `mail_status_reports_offer_pending_…`, `the_consoles_first_open_starts_…`, `the_panel_after_sign_in_reads_…`; proof step 1 |
-| D7: backfill to the term's start; curated terms, else a default the student confirms; no age cutoff | T14, T10.1, T11.3, T15.1, T5.3 | `terms_are_ordered_…`, `the_term_start_default_…`, `a_curated_term_covering_today_wins_…`, `a_term_date_with_no_curated_term_is_asked_…`; test 23 |
+| D7 as amended 2026-10-02 (BW; the marker at decision 4): the backfill reads a fixed 120 days before setup for every student; no term logic, no date asked; no age cutoff inside the window | T1.1, T4.2, T10.1, T11.3, T15.1, T5.3 | `the_backfill_window_starts_120_days_…`, `a_resumed_backfill_keeps_its_first_window_start`, `a_backfill_batch_reaching_more_than_120_days_…`, `no_date_is_asked_…`, `the_backfill_row_names_its_start_date_…`; test 23 |
+| PS (2026-10-02): the provider from a curated row (data, never code), else MX | T14, T4.2, T11.3 | `every_curated_row_names_a_known_mail_provider`, `provider_reads_mx_…`, `the_mail_code_names_no_school` |
+| F3 (b) (2026-10-02): a mail amend fills an empty `due`; a future due un-archives an `imported-past` note | T8c, T5.5, T6.2 | T8c's tests; T5.5's F3 tests and the two changed T5.4 assertions; `a_fill_due_card_and_an_unarchive_card_pass_validate_amendment`; Checkpoint A |
 | D8: two-stage intake and a separate queue; `seen` written with work after the put; an expired item loses `seen` | T1.1, T2g.1, T3d, T3e, T4.4 | tests 7 and 16; `an_expired_item_loses_its_seen_row_…` |
 | D9: claims cheapest first; templates; a small model with a fixed schema; verbatim evidence; the 0.6 floor | T3a–T3e | tests 8, 9 and 10 |
 | D10: deterministic reconcile in `judge`; the ordering date; batches whole; backfill applies and lists, live proposes; Undo | T4.4, T5.1–T5.5, T6.3, T7, T15.4 | tests 12, 18, 19 and 29; `undo_invokes_…`; proof step 3 |
@@ -1821,7 +2071,7 @@ numbers are spec §12's; named tests are this plan's (§5).
 | D20: the actor, `created_by: mail`, `mail:` uids, `ingest-seen` | T2c, T5.1, T6.2, T6.3 | `seen_records_mail_uids_…`, `a_message_without_a_message_id_keys_…`; Checkpoint A |
 | D21, §13 Q10: sender and date on mail cards, notices and applied changes | T3e, T6.2, T15.5 | `…_carries_from_mail_date_and_evidence`, `a_mail_card_shows_its_sender_date_and_quote` |
 | D22: one mailbox, one path; never `quiet` | T4b | test 16c; P22 |
-| D23, §13 Q1: an allowance of 2,000 judgments and $1.00 per account per term | T1.1, T1.3, T3e | test 11 |
+| D23, §13 Q1: an allowance of 2,000 judgments and $1.00 per account per term (its key under BW is PQ6) | T1.1, T1.3, T3e | test 11; PQ6's answer |
 | D24: events and schedules stay the student's; nothing written to `commitments/` | T5.3, T5.5 | test 23; `no_action_ever_targets_commitments` |
 | D25, §13 Q6, A13: the policy-read gate suspended, as one constant | T19, T13a, R19 | tests 39–41; R19's report; proof step 1's grades half |
 | A1–A4 and A6–A11: the signed text in the cloud design, the Gmail spec and VISION | T0.0 (H6) | T0.0's marker check; the docs commit on `main` |
@@ -1831,7 +2081,7 @@ numbers are spec §12's; named tests are this plan's (§5).
 | §10's corrections that need no signature (the legal note's Crimson lines, HANDOFF) | T13a, T13b | the edited lines |
 | §13 Q2: a canary only after quiet, at least 72 hours apart, never on a day with a Knowlu email | T4.3 | test 6's cadence half; P9 |
 | §13 Q3: reconcile once a day, revisited after the 10-08 spike | T11.5, T0.S4 | `reconcile_follows_reconcile_cadence_in_both_modes`; S4's record |
-| §13 Q4: the provider from the curated row, else MX | T14, T4.2, T11.3 | `provider_reads_mx_…`, `an_uncurated_school_asks_once_…` |
+| §13 Q4: the provider from the curated row, else MX (confirmed by PS, 2026-10-02) | T14, T4.2, T11.3 | `provider_reads_mx_…`, `an_uncurated_school_asks_once_…` |
 | §13 Q5: `in.knowlu.com` | T0.S0, T18a | S0's MX; `MAIL_DOMAIN` |
 | §13 Q8: S6 on an M365 test tenant, never a real school account | T0.S6, T17 | S6's record; T17 step 6 |
 | §13 Q11: re-enable automatically and say so; never a mailbox turned off in Knowlu's Settings | T9.1, T11.4, T11.5, T6.3 | `turned_off_only_grows`, `mail_disconnect_writes_turned_off_before_anything_else`; test 36; proof steps 6–7 |
@@ -1847,7 +2097,8 @@ numbers are spec §12's; named tests are this plan's (§5).
 | §4.6: receiver intake, steps 1–8 | T2a–T2g.2 | tests 1–7, 15 and 16 |
 | §4.7: claims extraction, steps 1–6 | T3a–T3e | tests 8–11, 15 and 16 |
 | §4.8: reconcile on the device, steps 1–7 | T4.4, T5.1–T5.5, T6.3, T6.4 | tests 12, 18, 19, 25 and 28 |
-| §4.9: which writes are direct and which are cards, row by row | T5.3, T5.4, T5.5 | tests 20–24 and 22b–22d; `a_template_receipt_…` (PQ4); `…_naming_both` (P20) |
+| §4.9: which writes are direct and which are cards, row by row | T5.3, T5.4, T5.5 | tests 20–24 and 22b–22d; `a_template_receipt_…` and `a_receipt_from_the_model_is_noise` (PQ4); `…_naming_both` (P20) |
+| §5.1's claim shape as amended 2026-10-02: a fifth kind `receipt`, template-only (PQ4) | T3a, T3b, T3c, T5.5 | `a_submission_receipt_template_yields_a_receipt_claim`, `a_receipt_claim_from_the_model_is_refused`, `the_mail_1_grammar_offers_no_receipt_kind`, T5.5's receipt tests |
 | §4.9: a card is charged to the 15-a-day budget, overflow snoozed, never deleted; on day 1 snoozed to day 2 | T5.3, T6.2, T6.3, T8b | `twenty_mail_cards_are_charged_and_overflow_is_snoozed_…`, `the_feed_card_is_charged_to_the_daily_budget`, `a_first_day_card_is_written_snoozed_to_day_two` (`status: snoozed`) |
 | §4.10: the canary, its limits and *Shown* | T4.2, T4.3, T6.3 | test 6; `each_mailboxs_state_…`; `a_non_active_mailbox_…` |
 | §4.11: the saved session: reconcile, recover, re-enable | T11.2, T11.5, H4 | test 36; T11.2's tests |
@@ -1950,7 +2201,10 @@ numbers are spec §12's; named tests are this plan's (§5).
 **Plan-only tests.** Every named test that pins a plan decision is this plan's addition: P9, P10,
 P12, P20, P21, P22, and PQ4's receipt tests. So are the module-level tests under T2a–T2d, the extra
 T10.1 and T11.1–T11.3 tests, and the T15 tests beyond §12.4's list. Each pins a spec requirement that
-had no test of its own, or only a combined one. None changes a spec test's assertion.
+had no test of its own, or only a combined one. None changes a spec test's assertion. The tests
+added on 2026-10-02 pin Quinn's rulings: BW, PS, F3 (T8c and T5.5) and PQ4's `receipt` kind. They
+also pin PQ8's tests, if PQ8 is answered yes. Each replaces a D7 test that was never built, or
+adds a new one. The only built assertions that move are F3's two T5.4 cases (§9.5).
 
 ### 9.5 Build deviations and open rulings (T5.4's review, 2026-10-01)
 
@@ -1960,13 +2214,20 @@ spec text moves. A row marked **open** waits on Quinn or the planner.
 | What | Why | Task, proof | Status |
 |---|---|---|---|
 | `Action::AmendCard` gains `also`: the other claims a two-value card names, each with its value and sender. T5.1's action list had no such field. | P20's body "names both values, each with its sender"; T6.2 writes them from the action. | T5.4; `two_claims_…_naming_both` | recorded |
-| A seventh skip reason, `NotAmendable`, beyond T5.1's six: a card row whose card `approvals::validate_amendment` refuses (the note outside `tasks/` and `courses/`, or a null `from`). The note keeps its value and nothing is filed. | D11 (3); §10 R14's rule for the feed's card. | T5.4; `a_card_the_approvals_executor_would_refuse_…` | **open.** It drops the feature's main follow-up without a trace: a live date for a mail note that needs one, a hand-made note with no due, or an archived note. Quinn rules before T5.5 and T6: (a) a notice row, or (b) a contract-engineer change to `approvals` that accepts a null `from` for `due`, through Checkpoint A. T6.3 counts every `NotAmendable` on the run line. Which count it lands in (U, or a new slot in §4.8 step 7's signed line) is part of the ruling. |
+| A seventh skip reason, `NotAmendable`, beyond T5.1's six: a card row whose card `approvals::validate_amendment` refuses (the note outside `tasks/` and `courses/`, or a null `from`). The note keeps its value and nothing is filed. | D11 (3); §10 R14's rule for the feed's card. | T5.4; `a_card_the_approvals_executor_would_refuse_…` | **Answered 2026-10-02 (Quinn): (b)**, built as T8c before T5.5, which then plans the card (§4, F3). The residual count is PQ7. It was open because it drops the feature's main follow-up without a trace: a live date for a mail note that needs one, a hand-made note with no due, or an archived note. Quinn rules before T5.5 and T6: (a) a notice row, or (b) a contract-engineer change to `approvals` that accepts a null `from` for `due`, through Checkpoint A. T6.3 counts every `NotAmendable` on the run line. Which count it lands in (U, or a new slot in §4.8 step 7's signed line) is part of the ruling. |
 | P20 is read as: the card proposes the value of the last claim, by uid and claim index, **whose value the note did not hold before the run**, and names every other claim. A group with a member already applied before the run files nothing more. | Read literally, P20 proposes the note's own value when one message names the old date and the new. `apply_amendment` then reads `to` as applied and writes nothing, so the student could never take the other date. The new reading stays deterministic and still names both. Without the applied rule, a run delivered again after its card was approved would propose the other value a second time (§4.8 step 4). | T5.4; `a_two_value_card_proposes_the_last_value_the_note_does_not_hold`, `a_claim_delivered_twice_in_a_two_value_run_…`, `a_message_that_creates_and_moves_an_item_…` | recorded, for the planner. If the planner declines, Quinn rules. |
-| A direct set never gives a note outside `tasks/` a due today or later. An aligned backfill's change to an archived `imported-past` mail note takes the card row. No card can amend outside `tasks/`, so it skips as `NotAmendable`. A due still past is set directly. | Spec risk 1, and T5.3's `imported-past` (a due before today). The note would otherwise stay archived with a future due that rank never shows. A batch split over two slots would also write what the same batch planned whole does not (D10). | T5.4; `a_backfill_never_sets_an_archived_mail_note_…` | **open**, with the `NotAmendable` ruling: a notice, or un-archiving the note. |
+| A direct set never gives a note outside `tasks/` a due today or later. An aligned backfill's change to an archived `imported-past` mail note takes the card row. No card can amend outside `tasks/`, so it skips as `NotAmendable`. A due still past is set directly. | Spec risk 1, and T5.3's `imported-past` (a due before today). The note would otherwise stay archived with a future due that rank never shows. A batch split over two slots would also write what the same batch planned whole does not (D10). | T5.4; `a_backfill_never_sets_an_archived_mail_note_…` | **Answered 2026-10-02 (Quinn): un-archive** (F3 (b)). On approval, T8c moves the note back to `tasks/`. T5.5 plans the card where T5.4 skipped. |
 | The planned-note amendment. A change to a note this plan files (`Target::Planned`) takes the rows of the mail note it will be (`created_by: mail`, no field a human set). `Set`, `AmendCard` and `ProposeDone` name their note by `Place`: `Path` for a vault note, `Planned(by)` for the note the `Create` of claim `by` files earlier in the same plan, which `mail.rs` writes at the path that `Create` gave. The move is its own `Set` keyed by `by`, never folded into the `Create`. `settle` groups a planned note as a vault note, from the due it was filed with. An applied `new_item` whose target is the note it created itself says nothing in a group, as when it was first planned (`New`). | D10 and spec test 18's third case: a batch applied whole reaches the item it creates. A separate `Set` keeps the plan the same whole or split, an archived `imported-past` note included (a fold would un-archive it whole and not split), and keeps §5.2's body line and one action per claim. Without the said rule, a re-plan after a pass cut short between the `Create` and the `Set` would group the creating claim's due with the move and drop the move. | Checkpoint A fix; `a_batch_applied_whole_reaches_the_item_it_creates`, `a_message_that_creates_and_moves_an_item_moves_it_once_on_every_desktop` (replaces T5.4's `a_run_another_desktop_planned_…`, which pinned the dropped move), `a_two_value_run_on_a_note_this_plan_files_makes_one_card`, `a_backfill_never_sets_an_archived_mail_note_…` (now whole = split, action for action) | landed; Checkpoint A re-reads it. **For T5.5:** a `Create` stamps `mail_asof` at its own ordering date, so §4.8 step 5's "not later than `mail_asof`" read per claim would supersede a move in the same message, on the first plan and on a re-plan; the creates-and-moves test pins that it must not. **For T6.2:** an action naming a `Place::Planned` whose `Create` wrote nothing writes nothing and is counted, never retargeted. |
 | T8 and T8b are built before T5.5 (§6 orders T5.5 first). | T5.5 waits on PQ4 and the `NotAmendable` ruling; T8 and T8b wait only on PQ5, answered (c), and read no T5.5 code. T8 closes Checkpoint A's judge-once gap: an approved mail card journalled as `agent:approvals` is invisible to `Journal::human_set`, so a later aligned backfill would set over the student's approved value. T6.2 wires no direct set before T8 is in. | Checkpoint A fix round | recorded |
 | T8b's card, where P12 is silent. Its file is `approvals/amend-<note stem>-<field>.md` (a `-2` suffix if taken), not `propose_amendment`'s random suffix. Its title is "Blackboard changed <field> for <note title>". It carries no `source_uid`. A value no card can hold on one line (`write::single_line_problem`, on either side) files no card and keeps the note's value, as R14's null rule does. "Already rejected" compares a `due` as a time (`due_changed`) and a `title` as text. | A deterministic name keeps two runs' cards comparable. `existing_by_uid` indexes `archive/`, so an archived card holding the event's uid could shadow the note. `validate_amendment` refuses a line break on either side, and that refusal is recoverable, so such a card would stay pending for good (R9's failure). | T8b; `the_feed_card_passes_validate_amendment_…` (the card's bytes), `a_hand_cleared_due_or_a_feed_cleared_due_…` | recorded |
 | T8 writes an approved `title` quoted, as `status` and `importance_reason` are (`QUOTED_FIELDS` gains `title`). | PQ5 (c) makes `title` amendable on a `created_by: blackboard` card. Written bare, a title holding `: ` fails `write_problem`'s re-read, so the card would go back to pending at every `rank`: R9's failure by another door. Only a blackboard card reaches the literal, so every other amend writes exactly as before. | T8; `title_is_amendable_only_on_a_blackboard_card` | recorded |
+| The three lane branches were cut from `main` at `25592d4`, not from the lane branch (P3). That base holds T19 (#29, `77fa9bf`) and the events lane (#31). | T0.0 found nothing to merge (progress ledger, 2026-10-01). `j-events` closed unmerged and the events work merged as #31, so R2's four `j-events` rows are already in the base. | T0.0 | recorded |
+| PQ4's `receipt` kind. T5.5's files widen to `mod.rs` and `resolve.rs` (`ClaimKind::Receipt`, target resolution). T3a's and T3b's `field: completed` tests are renamed to the kind, and T3c gains a grammar test. | Quinn, 2026-10-02. It amends Q5's four kinds; §5.1 carries the marker. | T3a–T3c, T5.5 | **Answered 2026-10-02 (Quinn)** |
+| BW, the fixed 120-day window. `mail_addresses.term_start` is named `backfill_since` and is set once by the first backfill batch. T14 drops `terms`. T10.1's two D7 tests, T11.3's ask test, T15.1's confirm test and T14's terms test are replaced by the BW tests. None of them was built, so no built assertion moves. T15.1 keeps D7's "the student sees the date" as a row that only shows it. | Quinn, 2026-10-02, amending signed decision 4 and D7; the marker is at decision 4. | T1.1, T4.2, T10.1, T11.3, T14, T15.1 | **Answered 2026-10-02 (Quinn)**; the allowance's key is PQ6 |
+| The only built assertions that move are two T5.4 tests' undated, hand-made and `imported-past` cases (T5.5). | F3 (b) makes those cards fileable. §5's rule "a test's name may change; its assertion may not" yields only to a ruling, and this is one. | T5.5; Checkpoint A | **Answered 2026-10-02 (Quinn)** |
+| Spec text that still says "term" and is read through the two markers: §1's goal lines, D7, D9's kind list, §4.2 step 5, §4.3 step 7, §4.7 step 4, §4.9's backfill column header, D23 and decision 8. Quinn asked for two markers only. | No other spec edit was made. A reader of D7 or D9 meets the old text and must follow the markers. | T13b (reference docs cite the markers) | recorded; Quinn may want a marker at D7 and D9 too |
+| S0: `us-east-2`; the DMARC gate passed 2026-10-01; real forwards captured 2026-10-02 (`s0-captures.md`). | Header facts for T2d and T2f, listed under T2f. | T0.S0, T2d, T2f, T18a | recorded |
+| PQ2's interop corpus. The progress ledger says the raw S0 copies are kept for the check, but `s0-captures.md` says local copies were deleted. | The check needs the raw copies; the header facts alone verify nothing. | T2d; Checkpoint B | **open (controller):** confirm before T2d, and re-capture cases 1, 3, 4 and 6 if the copies are gone |
 
 ## 10. Review revisions (2026-09-30)
 
@@ -2020,10 +2281,23 @@ the plan has been edited to match, and each edit names its R number.
 | `scripts/wizard-check.py` | `p3-registrar` | T15.3 | `p3-registrar` | `console-ui` |
 | `engine/src/cli.rs` | `p3-registrar` | H2 | the second to merge | main session |
 | `app/src/{lib,main}.rs` | `p3-registrar` | H3–H5 | the second to merge | main session |
+| `engine/src/lib.rs` (added 2026-10-02, T0.0 step 5) | `p3-registrar` | H1a–H1c (`pub mod` lines; H1a is built) | `p3-registrar` | main session |
+| `app/static/index.html` (added 2026-10-02) | `p3-registrar` | T15.1–T15.5 | `p3-registrar` | `console-ui` |
+| `app/static/console.js` (added 2026-10-02) | `p3-registrar` | T15.1–T15.5 | `p3-registrar` | `console-ui` |
+| `app/static/console.css` (added 2026-10-02) | `p3-registrar` | T15.1–T15.5 | `p3-registrar` | `console-ui` |
+| `app/tests/static_assets.rs` (added 2026-10-02) | `p3-registrar` | T15.1–T15.5 | `p3-registrar` | `console-ui` |
+| `CLAUDE.md` (added 2026-10-02) | `p3-registrar` | H0 (at T17) | `p3-registrar` | main session |
+| `engine/src/journal.rs` CL (added 2026-10-02) | `two-desktop` | none: read-only here | `two-desktop` | `contract-engineer` (no conflict expected; this lane does not edit it) |
+| `engine/src/sync.rs` CL (added 2026-10-02) | `two-desktop` | none: read-only here | `two-desktop` | `contract-engineer` (no conflict expected) |
+| `engine/src/ids.rs` CL (added 2026-10-02) | `two-desktop` | none: read-only here | `two-desktop` | `contract-engineer` (no conflict expected) |
 
 - T3b checks `MailKind` against `j-events`' `Kind` and validators before it starts. T1.2's
   `lastModelPinBlocks` change and its retitled export test are checked against `j-events`' edits to
-  the same file.
+  the same file. *(2026-10-02: the events lane merged as #31 and is in the base, so these checks
+  read `main`'s files, and the `j-events` rows above need no rebase; §9.5.)*
+- The ten rows added on 2026-10-02 come from T0.0 step 5's record. `p3-registrar` (Pilot) and
+  `two-desktop` (Launch) are later in the program, so each rebases onto this MVP lane. R12's
+  contract-list diff shows any edit this lane makes to `journal.rs`, `sync.rs` or `ids.rs`.
 
 ### R3. §4.9's daily budget had no task, test or ledger row (important)
 
@@ -2203,6 +2477,10 @@ the plan has been edited to match, and each edit names its R number.
   folder it made, recorded in the T0 report, per the live-proof cleanup rule.
 
 ### Open for Quinn after this round
+
+*(2026-10-02: PQ5 was answered (c) at T0.0 and built in T8. What is still open is in §4's "Open after
+the rulings of 2026-10-02": PQ6, PQ7 and PQ8, plus the plan's reading of F3 under T8c, asked at
+Checkpoint A.)*
 
 - **PQ5 (blocks T8 and T8b).** How a feed card for `title` becomes approvable. The recommendation is
   (c): `title` is amendable only on a `created_by: blackboard` card, `AMENDABLE_FIELDS` stays nine, and
