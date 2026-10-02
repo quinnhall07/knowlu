@@ -633,13 +633,13 @@ Deno.test("a case whose call fails then answers is retried, and the answer is wh
 });
 
 Deno.test("cases that never answer are unscored, and an outage fails as a provider error, not a quality result", async () => {
-  const run = await liveEventRun(3, Array.from({ length: 9 }, blip));
+  const run = await liveEventRun(2, Array.from({ length: 6 }, blip));
   assertEquals(run.code, 2);
-  assertEquals(run.calls, 9, "three attempts per case, never more");
+  assertEquals(run.calls, 6, "three attempts per case, never more");
   assertEquals(run.evalRuns, [], "an outage writes no eval_runs row");
-  assert(run.log.includes("event: 3 of 3 cases unscored (model failed)"), run.log.join(" | "));
+  assert(run.log.includes("event: 2 of 2 cases unscored (model failed)"), run.log.join(" | "));
   assert(
-    run.error.includes("event: provider error, 3 of 3 cases failed after 3 attempts each: not a quality result"),
+    run.error.includes("event: provider error, 2 of 2 cases failed after 3 attempts each: not a quality result"),
     run.error.join(" | "),
   );
   assert(!run.log.some((l) => l.includes("FAIL")), "never reported as a failed metric");
@@ -652,6 +652,19 @@ Deno.test("a long outage stops calling once the bound is passed", async () => {
   assertEquals(run.calls, 12);
   assert(
     run.error.includes("event: provider error, 4 of 30 cases failed after 3 attempts each (stopped early): not a quality result"),
+    run.error.join(" | "),
+  );
+  assertEquals(run.evalRuns, []);
+});
+
+Deno.test("a small kind with fewer than half its cases scored is a provider error, not a 1-case result", async () => {
+  // 3 cases allow 2 unscored by count, but 1 scored case of 3 is under half: the second failed
+  // case decides the outcome, so the run stops before the third.
+  const run = await liveEventRun(3, Array.from({ length: 9 }, blip));
+  assertEquals(run.code, 2);
+  assertEquals(run.calls, 6);
+  assert(
+    run.error.includes("event: provider error, 2 of 3 cases failed after 3 attempts each (stopped early): not a quality result"),
     run.error.join(" | "),
   );
   assertEquals(run.evalRuns, []);
