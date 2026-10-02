@@ -5,24 +5,42 @@
 //! (message uid and index: the service holds their text) and the course's items as (id, title, due), the
 //! only vault text it sends. Each answer is set on its claim as the stored [`Resolution`] the service
 //! also keeps, so the plan reads it as it reads any stored answer: a chosen item is a change to it, and
-//! "none" is a notice, never a guess. A claim the service did not answer, or any claim after a failed
-//! call, stays ambiguous: it writes nothing and its message is held, so it is asked again next slot.
+//! "none" is a notice, never a guess. A claim the service did not answer stays ambiguous: it writes
+//! nothing and its message is held, so it is asked again next slot. A course the service refuses for
+//! itself (a 4xx other than 401, 402, 403, 408 and 429) is skipped and the next course is still asked; any
+//! other failure (session, entitlement, rate, 5xx, no network, no time) ends the asking for the pass.
+//! There is no give-up path: a claim the service never answers stays held (plan ledger, T5.5 row).
 
 use std::collections::BTreeMap;
 
-use crate::cloudmodel::{self, Candidate, CloudClient, ResolveBatch};
+use crate::cloudmodel::{self, Candidate, CloudClient, CloudError, ResolveBatch};
 use crate::mailreconcile::{ClaimRef, Message, Resolution, VaultView};
 
+/// What [`settle`] could not finish, as closed-set words that name no message text.
+#[derive(Default)]
+pub(super) struct Unsettled {
+    /// What ended the asking early (a failed call that every course would meet, or no time left).
+    pub ended: Option<&'static str>,
+    /// A course the service refused for itself and was skipped: the courses after it were still asked.
+    pub refused: Option<&'static str>,
+}
+
+/// A refusal of one batch (a 4xx that is not about the session, the entitlement, the rate or the clock):
+/// the next course is a different request, so it is still asked.
+fn batch_refusal(e: &CloudError) -> bool {
+    matches!(e, CloudError::Status { code: 400..=499, .. }) && !e.fatal() && !matches!(e, CloudError::Status { code: 408 | 429, .. })
+}
+
 /// Ask once per course about `asked`, and store each answer on its claim in `messages`. `may_call` is the
-/// budget's say before each request. Returns the closed-set word for what ended the asking early (a
-/// failed call or no time left), which names no message text.
+/// budget's say before each request.
 pub(super) fn settle(
     client: &CloudClient,
     view: &VaultView,
     messages: &mut [Message],
     asked: &[ClaimRef],
     mut may_call: impl FnMut() -> bool,
-) -> Option<&'static str> {
+) -> Unsettled {
+    let mut unsettled = Unsettled::default();
     let mut by_course: BTreeMap<String, Vec<ClaimRef>> = BTreeMap::new();
     for at in asked {
         let course = messages.iter().find(|m| m.uid == at.message).and_then(|m| m.claims.get(at.index)).and_then(|c| c.course.clone());
@@ -32,12 +50,20 @@ pub(super) fn settle(
     }
     for (course, claims) in by_course {
         if !may_call() {
-            return Some("out of time");
+            unsettled.ended = Some("out of time");
+            return unsettled;
         }
         let batch = ResolveBatch { candidates: candidates(view, &course), course, claims };
         let answers = match cloudmodel::resolve_mail(client, &batch) {
             Ok(answers) => answers,
-            Err(e) => return Some(e.label()),
+            Err(e) if batch_refusal(&e) => {
+                unsettled.refused = Some(e.label());
+                continue;
+            }
+            Err(e) => {
+                unsettled.ended = Some(e.label());
+                return unsettled;
+            }
         };
         for answer in answers {
             let claim = messages.iter_mut().find(|m| m.uid == answer.claim.message).and_then(|m| m.claims.get_mut(answer.claim.index));
@@ -46,7 +72,7 @@ pub(super) fn settle(
             }
         }
     }
-    None
+    unsettled
 }
 
 /// The course's items, in the view's order: the notes a stored answer may name (`tasks/` and `archive/`).

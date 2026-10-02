@@ -58,6 +58,7 @@ pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budg
         connected: false,
         held: BTreeSet::new(),
         asking_failed: None,
+        asking_refused: None,
     };
     let (mut ack, mut round, mut batch, mut more) = (Vec::<String>::new(), 0usize, false, false);
     let mut failure: Option<String> = None;
@@ -99,7 +100,7 @@ pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budg
     let held = mailreconcile::proposal(today, crate::commitments::vault_day(vault, today));
     let mut writer = Writer::new(vault, opts.via, opts.run_id, &mut journal, today, held);
     lines.extend(heads::keep(&mut writer, vault, &boxes, &today.to_string()));
-    if let Some(why) = run.asking_failed {
+    if let Some(why) = run.asking_failed.or(run.asking_refused) {
         lines.push(format!("mail: could not ask which item ({why}); left for the next slot"));
     }
     if more && failure.is_none() {
@@ -129,6 +130,9 @@ struct Run<'a> {
     /// What ended the asking of `mail-resolve` (a failed call, no time left): the rest of the pass does not
     /// ask again, since the next call would fail the same way, and the claims wait for the next slot.
     asking_failed: Option<&'static str>,
+    /// A course the service refused for itself was skipped: later courses were still asked, and its
+    /// claims wait for the next slot. Named like `asking_failed`.
+    asking_refused: Option<&'static str>,
 }
 
 impl Run<'_> {
@@ -186,7 +190,9 @@ impl Run<'_> {
         let asked: Vec<ClaimRef> = resolve::to_ask(&view, &fresh, self.today, vault_day).into_iter().map(|(at, _)| at).collect();
         if !asked.is_empty() && self.asking_failed.is_none() {
             let (started, budget) = (self.started, self.budget);
-            self.asking_failed = asks::settle(self.client, &view, &mut fresh, &asked, || started.elapsed() + CALL_TIMEOUT <= budget);
+            let unsettled = asks::settle(self.client, &view, &mut fresh, &asked, || started.elapsed() + CALL_TIMEOUT <= budget);
+            self.asking_failed = unsettled.ended;
+            self.asking_refused = self.asking_refused.or(unsettled.refused);
         }
         let fresh = &fresh[..];
         let waiting: BTreeSet<ClaimRef> =

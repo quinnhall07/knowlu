@@ -950,6 +950,34 @@ fn a_failed_resolve_holds_the_message_and_is_named() {
     let _ = std::fs::remove_dir_all(&vault);
 }
 
+/// Head of line: a course the service refuses for itself (a 4xx that is not about the session, the
+/// entitlement or the rate) is skipped and the next course is still asked, so one course never starves the
+/// courses behind it in the order. Its claims stay asked: the message is held and the line names the refusal.
+#[test]
+fn a_refused_course_is_skipped_and_the_next_is_asked() {
+    let vault = scratch("resolve-refused");
+    labs_and_quizzes(&vault);
+    let today = vault_today(&vault);
+    let pulled = knowlu_engine::ledger::dumps_value(&pull(vec![ambiguous_message(today)], json!([]), false));
+    let mut server = serve(move |request, _| {
+        if request.starts_with("POST /functions/v1/mail-resolve ") {
+            let body: Value = serde_json::from_str(body_of(request)).unwrap_or(Value::Null);
+            if body["course"] == "CS 101" {
+                return (422, r#"{"error":"too many candidates"}"#.to_string());
+            }
+            return (200, knowlu_engine::ledger::dumps_value(&scripted(&body)));
+        }
+        (200, pulled.clone())
+    });
+    let lines = run(&vault, &server, today);
+    assert_eq!(server.calls("mail-resolve").len(), 2, "the refused course does not end the asking");
+    assert_eq!(field(&vault, "tasks/quiz-2.md", "due").unwrap(), ahead(today, 11), "the later course was answered");
+    assert_eq!(field(&vault, "tasks/lab-6.md", "due").unwrap(), "2030-01-01", "the refused course wrote nothing");
+    assert!(lines.iter().any(|l| l == "mail: could not ask which item (the service refused); left for the next slot"), "{lines:?}");
+    assert!(!knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"), "its claims are unanswered, so it is held");
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
 /// Spec test 28b: the device never reports a label on a mail card. A rejected `mail_claim` card is no row
 /// (`labels_to_report` is unchanged), while a rejected `task` card beside it still is, so the test is not
 /// vacuous.
