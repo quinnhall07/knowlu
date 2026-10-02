@@ -129,6 +129,10 @@ pub mod mailreconcile;
 // write as `agent:knowlu.mail`. Doc-only until T6.2 (plan H1b).
 pub mod mail;
 
+// Email forwarding to Knowlu (email spec 2026-09-30, §6.1): `mail-applied`, the read-only list of
+// what the mail pass wrote. Doc-only until T7 (plan H1c).
+pub mod mailapplied;
+
 // Knowlu C3′ — journal sync (cloud design §5.5, as amended 2026-09-17). Every record this device
 // writes, and the text of every note that changed, goes up to the account's own copy as it is —
 // readable by our service, encrypted at rest, and said so on the privacy page (there is no
