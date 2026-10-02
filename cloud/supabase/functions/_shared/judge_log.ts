@@ -1,13 +1,16 @@
 import type { Db } from "./judge_db.ts";
-import type { Cause, Kind } from "./judge_validate.ts";
+import type { Cause, Kind, MailKind } from "./judge_validate.ts";
 
 /// One judgment, ready to record. **There is nowhere in this type to put a title, a body, a prompt
 /// or a reply**, and that is the design (§5.6): the privacy property is structural rather than a
 /// matter of care at each call site. `fields` is field name -> the literal that was (or would have
 /// been) written, plus the five promotion features tier 2 is keyed on.
+///
+/// Email plan T3e (P6): `mail-process` writes `mail_claim` rows with the origin `forward`, so the kind and
+/// the origin are widened here; nothing typed on `Kind` alone changes.
 export interface JudgmentRow {
   account_id: string;
-  kind: Kind;
+  kind: Kind | MailKind;
   item_id: string;
   tier: number;
   outcome: string;
@@ -19,7 +22,7 @@ export interface JudgmentRow {
   grammar_version: string | null;
   prompt_hash: string | null;
   ms: number;
-  origin: "device" | "gmail_api" | "events";
+  origin: "device" | "gmail_api" | "events" | "forward";
 }
 
 export interface JudgmentSink {

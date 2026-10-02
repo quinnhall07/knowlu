@@ -1,7 +1,8 @@
 -- Knowlu email forwarding (spec docs/specs/2026-09-30-email-forwarding-design.md §5.1), T1.1: the
 -- seven tables; T1.2: the kinds, the origin, the training and rules paths and the provisional pins;
 -- T1.3, at the end: the three RPCs, the raised budget and the cron; T2g.1, before the cron: intake's
--- two RPCs. All before it is applied anywhere; nothing here edits an applied migration. Stamped after
+-- two RPCs; T3e, after them: the expiry RPC, and the seen row's hash on the work row it serves. All
+-- before it is applied anywhere; nothing here edits an applied migration. Stamped after
 -- 20261002000100_refund_failed_call.sql so it still sorts last.
 --
 -- Every table has RLS on, no policy, and Supabase's default grants to `anon` and `authenticated`
@@ -140,6 +141,9 @@ create table if not exists public.mail_work (
   arrived_at      timestamptz not null default now(),
   attempts        integer not null default 0 check (attempts >= 0),
   next_attempt_at timestamptz not null default now(),
+  -- The `mail_seen` row this item was written with (its keyed hash, never the Message-ID), so an item
+  -- that expires can take that row with it once its object is gone (D8; `expire_mail_work`).
+  msg_hash        text not null,
   foreign key (address_id, account_id) references public.mail_addresses (id, account_id) on delete cascade
 );
 alter table public.mail_work enable row level security;
@@ -501,8 +505,8 @@ begin
   if fresh is null then
     return false;
   end if;
-  insert into public.mail_work (account_id, address_id, batch_id, s3_key, phase, authenticity)
-       values (p_account, p_address, p_batch, p_s3_key, p_phase, p_authenticity);
+  insert into public.mail_work (account_id, address_id, batch_id, s3_key, phase, authenticity, msg_hash)
+       values (p_account, p_address, p_batch, p_s3_key, p_phase, p_authenticity, p_msg_hash);
   return true;
 end;
 $$;
@@ -526,6 +530,34 @@ end;
 $$;
 revoke execute on function public.count_mail_arrival(uuid, text) from public, anon, authenticated;
 grant execute on function public.count_mail_arrival(uuid, text) to service_role;
+
+-- T3e (spec §4.7 step 5, D8): an item whose object expired first, or that was capped on its third
+-- attempt. One transaction: the work row, then the seen row it was written with (by the hash the hand-off
+-- put on both), then one more `expired` on its mailbox. A second caller for the same item (the worker and
+-- the sweep at once) finds no row, answers false and counts nothing. The caller deletes the object after,
+-- if it is still there; nothing here can reach S3. With the seen row gone, the next reconcile lists the
+-- message as missing and recover's re-forward of it is accepted (§4.11).
+create or replace function public.expire_mail_work(p_work bigint)
+returns boolean
+language plpgsql
+security invoker
+set search_path = public, extensions
+as $$
+declare
+  gone record;
+begin
+  delete from public.mail_work where id = p_work
+  returning account_id, address_id, msg_hash into gone;
+  if not found then
+    return false;
+  end if;
+  delete from public.mail_seen where account_id = gone.account_id and msg_hash = gone.msg_hash;
+  update public.mail_addresses set expired = expired + 1 where id = gone.address_id;
+  return true;
+end;
+$$;
+revoke execute on function public.expire_mail_work(bigint) from public, anon, authenticated;
+grant execute on function public.expire_mail_work(bigint) to service_role;
 
 -- The cron (spec §5.1, §6.3; plan P7), in 20260910000700's guarded form: the URL and the token come
 -- from Vault, a missing one raises into `cron.job_run_details`, and the token travels only in

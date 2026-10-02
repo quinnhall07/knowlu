@@ -16,7 +16,12 @@
  * 3. **Templates, no model** (`mail_templates.ts`): a row's claims, checked by `validateMailClaims` against
  *    the text as the model would see it (cut and scrubbed). Kept: one `mail_claims` row is queued
  *    (`template-only`). All refused: `refused`. Either way the object and the row are deleted.
- * 4. Everything else goes to `deps.model`, §4.7 steps 4–6 (T3e: charge, model, queue, and its deletes).
+ * 4. Everything else goes to `deps.model`, §4.7 steps 4–6 (T3e, `model.ts`: charge, model, queue, and its
+ *    deletes, or a wait to the next UTC day and, at the third attempt, expiry).
+ *
+ * An item whose object is gone (the bucket's expiry came first) is expired here (`expire_mail_work`): its
+ * work row and its `mail_seen` row are deleted and the mailbox counts one more `expired` (D8). A cron call
+ * with `{mode: "sweep"}` runs the nightly sweep instead (`sweep.ts`, plan P7).
  *
  * **Every final path deletes the work object** (step 6). The row goes first and the object after it, so a
  * failure between them leaves an object the bucket's one-day `work/` expiry removes, never a row that would
@@ -42,6 +47,7 @@ import { type S3Client, S3Error } from "../_shared/s3.ts";
 import { scrubForPrompt } from "../_shared/scrub.ts";
 import { equalHex } from "../_shared/stripe.ts";
 import { allowDomains, screen } from "./screen.ts";
+import { sweep } from "./sweep.ts";
 
 export interface ProcessConfig {
   /** `MAIL_JOBS_TOKEN`: the cron's and the kick's `x-knowlu-job-token`. */
@@ -98,6 +104,27 @@ export interface ProcessStore {
   /** Deletes the `mail_work` row. */
   finish(workId: string): Promise<void>;
   count(addressId: string, counter: "unauthenticated"): Promise<void>;
+  /** After a capped, over-budget or failed attempt (§4.7 step 5): the item's next attempt and its count. */
+  wait(workId: string, untilIso: string, attempts: number): Promise<void>;
+  /** `expire_mail_work`: the work row, its `mail_seen` row and one `expired` on its mailbox, in one
+   * transaction; false, counting nothing, when the row is already gone. */
+  expire(workId: string): Promise<boolean>;
+}
+/** The nightly sweep's reads and deletes (plan P7). Every bound is an ISO time, at or before which a row
+ * qualifies; each answers how many rows it touched. */
+export interface SweepStore {
+  /** Work that arrived at or before the bound, oldest first, at most `limit`. */
+  expirable(arrivedByIso: string, limit: number): Promise<Array<{ id: string; s3Key: string }>>;
+  /** Stamps `closed_at` on open batches sent at or before `sentByIso` or opened at or before `openedByIso`. */
+  closeBatches(nowIso: string, sentByIso: string, openedByIso: string): Promise<number>;
+  pruneSeen(seenByIso: string): Promise<number>;
+  /** Delivered claims delivered at or before the first bound; undelivered ones queued at or before the second. */
+  pruneClaims(
+    deliveredByIso: string,
+    queuedByIso: string,
+  ): Promise<{ delivered: number; undelivered: number }>;
+  pruneBatches(closedByIso: string): Promise<number>;
+  pruneCanaries(sentByIso: string): Promise<number>;
 }
 /** The message as step 1 parsed it. Held in memory only. */
 export interface MailMessage {
@@ -117,7 +144,7 @@ export interface ModelInput {
   knownCourses: readonly string[];
 }
 export interface ProcessDeps {
-  store: ProcessStore;
+  store: ProcessStore & SweepStore;
   s3: S3Client;
   rules: RuleTable;
   now(): number;
@@ -127,6 +154,12 @@ export interface ProcessDeps {
   templates?: readonly MailTemplate[];
   /** The vendors' sending domains (the screen's allow-list); `mail_templates.ts`'s `VENDOR_DOMAINS` by default. */
   vendorDomains?: readonly string[];
+}
+
+/** What finishing or expiring one item needs. */
+export interface ItemDeps {
+  store: ProcessStore;
+  s3: S3Client;
 }
 
 /** How long a run holds an item it took: past any one item's work, short of the next attempt. */
@@ -197,12 +230,20 @@ export async function claimsRow(
 
 /** Step 6's deletes: the row, then the object. A failed object delete is left to the bucket's one-day
  * `work/` expiry; the row is already gone, so nothing is processed twice. */
-export async function finishItem(item: WorkItem, deps: ProcessDeps): Promise<void> {
+export async function finishItem(item: WorkItem, deps: ItemDeps): Promise<void> {
   await deps.store.finish(item.id);
   await deps.s3.delete(item.s3Key).catch(() => log("work object delete failed, left to the bucket's expiry"));
 }
 
-type Outcome = "noise" | "template" | "refused" | "unauthenticated" | "model" | "taken" | "left";
+/** Expiry (D8): the work row and its seen row in one transaction, counted, then the object if it is still
+ * there. A failed object delete is left to the bucket's expiry, as `finishItem`'s is. */
+export async function expireItem(item: { id: string; s3Key: string }, deps: ItemDeps): Promise<boolean> {
+  const expired = await deps.store.expire(item.id);
+  await deps.s3.delete(item.s3Key).catch(() => log("work object delete failed, left to the bucket's expiry"));
+  return expired;
+}
+
+type Outcome = "noise" | "template" | "refused" | "unauthenticated" | "model" | "expired" | "taken" | "left";
 
 /** The account's mailboxes, allow-list and known courses, read once a run. */
 interface Account {
@@ -228,7 +269,13 @@ async function processItem(
   try {
     raw = await deps.s3.get(item.s3Key);
   } catch (e) {
-    // A missing object (expired first) is T3e's sweep to count; anything else waits out the lease.
+    // A missing object expired first (D8): the item is counted `expired` and loses its seen row. Anything
+    // else waits out the lease.
+    if (e instanceof S3Error && e.status === 404) {
+      await expireItem(item, deps);
+      log("work object gone, expired");
+      return "expired";
+    }
     log(`work object unreadable (${e instanceof S3Error ? `s3 get ${e.status}` : "s3"}), left`);
     return "left";
   }
@@ -279,6 +326,7 @@ async function run(deps: ProcessDeps): Promise<Record<Outcome | "failed", number
     refused: 0,
     unauthenticated: 0,
     model: 0,
+    expired: 0,
     taken: 0,
     left: 0,
     failed: 0,
@@ -324,14 +372,14 @@ async function run(deps: ProcessDeps): Promise<Record<Outcome | "failed", number
   return counts;
 }
 
-/** One cron call or kick. 401 without the job token; the sweep (`{mode: "sweep"}`) is T3e's. */
+/** One cron call or kick. 401 without the job token; `{mode: "sweep"}` runs the nightly sweep (P7). */
 export async function handle(req: Request, cfg: ProcessConfig, deps: ProcessDeps): Promise<Response> {
   if (req.method !== "POST") return methodNotAllowed(["POST"]);
   const token = req.headers.get("x-knowlu-job-token") ?? "";
   if (cfg.jobsToken === "" || !equalHex(token, cfg.jobsToken)) return fail(401, "not a job caller");
   const body = await req.json().catch(() => ({})) as { mode?: unknown };
-  if (body?.mode === "sweep") return fail(501, "the sweep is not built yet");
   try {
+    if (body?.mode === "sweep") return json(200, { ok: true, ...(await sweep(deps)) });
     return json(200, { ok: true, ...(await run(deps)) });
   } catch (e) {
     log(`run failed (${e instanceof S3Error ? `s3 ${e.op} ${e.status}` : "store"})`);

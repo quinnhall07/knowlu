@@ -16,6 +16,7 @@ import {
   type ProcessConfig,
   type ProcessDeps,
   type ProcessStore,
+  type SweepStore,
   type WorkItem,
 } from "./handler.ts";
 
@@ -28,7 +29,7 @@ const enc = new TextEncoder();
 
 // ---------------------------------------------------------------- the store, the rules, the bucket
 
-class FakeStore implements ProcessStore {
+class FakeStore implements ProcessStore, SweepStore {
   work: WorkItem[] = [];
   claims: ClaimsRow[] = [];
   done: string[] = [];
@@ -80,6 +81,34 @@ class FakeStore implements ProcessStore {
     this.calls.push("count");
     this.counters[`${addressId}:${counter}`] = (this.counters[`${addressId}:${counter}`] ?? 0) + 1;
     return Promise.resolve();
+  }
+  // T3e's waits, expiry and sweep: these tests stop at the model path's spy, so none is reached
+  // (`worker_test.ts` models them).
+  wait() {
+    this.calls.push("wait");
+    return Promise.resolve();
+  }
+  expire() {
+    this.calls.push("expire");
+    return Promise.resolve(false);
+  }
+  expirable() {
+    return Promise.resolve([]);
+  }
+  closeBatches() {
+    return Promise.resolve(0);
+  }
+  pruneSeen() {
+    return Promise.resolve(0);
+  }
+  pruneClaims() {
+    return Promise.resolve({ delivered: 0, undelivered: 0 });
+  }
+  pruneBatches() {
+    return Promise.resolve(0);
+  }
+  pruneCanaries() {
+    return Promise.resolve(0);
   }
 }
 

@@ -2,10 +2,12 @@
  * The wire for `mail-process` (email plan T3d): the environment, the store over PostgREST, S3 and the
  * promoted rules, then `handler.ts`. `verify_jwt = false` (config.toml): the cron and intake's kick send
  * `x-knowlu-job-token`, and that token is the check. Secrets, named only: `MAIL_JOBS_TOKEN`, `MAIL_BUCKET`,
- * `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
+ * `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and the pinned provider's key
+ * (`OPENROUTER_API_KEY` for today's `mail_claim` row).
  *
- * The model path (§4.7 steps 4–6) is T3e's: until it lands, an item no screen or template decided waits in
- * `mail_work`, its object kept, and is offered again when its lease runs out.
+ * The model path (§4.7 steps 4–6, T3e) is `model.ts` over the shared judgment tables: the `mail_claim` pin,
+ * the charges (`charge_allowance`, `refund_allowance`, `charge_call`, `enforce_budget`, `record_tokens`)
+ * and the judgment sink. The sweep's reads and deletes are below, by age, across every account (P7).
  *
  * The store logs nothing: a failed call throws `store <what> <status>`, the database's answer is
  * cancelled unread, and the handler logs only that a store call failed.
@@ -13,9 +15,20 @@
 import { type Rest, restFromEnv } from "../_shared/db.ts";
 import { asResponse, fail } from "../_shared/http.ts";
 import { sharedDb } from "../_shared/judge_deps.ts";
+import { judgmentSink } from "../_shared/judge_log.ts";
+import { modelRow } from "../_shared/judge_models.ts";
+import { modelFor } from "../_shared/judge_provider.ts";
 import { ruleTable } from "../_shared/judge_rules.ts";
 import { s3Client } from "../_shared/s3.ts";
-import { handle, type Mailbox, type ProcessConfig, type ProcessDeps, type WorkItem } from "./handler.ts";
+import {
+  handle,
+  type Mailbox,
+  type ModelInput,
+  type ProcessConfig,
+  type ProcessDeps,
+  type WorkItem,
+} from "./handler.ts";
+import { mailCharges, modelPath, type ModelPathDeps } from "./model.ts";
 
 function env(name: string): string {
   const v = Deno.env.get(name);
@@ -42,6 +55,10 @@ async function call(rest: Rest, what: string, path: string, init: RequestInit = 
 }
 const rows = async <T>(res: Response) => await res.json() as T[];
 const q = (s: string) => encodeURIComponent(s);
+/** A delete or patch answered with its rows' ids (`return=representation`), counted. */
+const touched = async (res: Response) => (await rows(res)).length;
+/** One model call's bound: the run's budget plus one call in flight stays inside the platform's limit. */
+const CALL_MS = 30_000;
 
 interface WorkDb {
   id: number;
@@ -77,14 +94,33 @@ function wire(): { cfg: ProcessConfig; deps: ProcessDeps } {
     accessKeyId: env("AWS_ACCESS_KEY_ID"),
     secretAccessKey: env("AWS_SECRET_ACCESS_KEY"),
   }, { fetch: globalThis.fetch });
+  const db = sharedDb();
+  let pinned: ReturnType<ModelPathDeps["pin"]> | null = null;
+  const pin = () => {
+    pinned ??= modelRow(db, "mail_claim").then((row) => ({
+      row,
+      model: modelFor(row, (name) => Deno.env.get(name), { timeoutMs: CALL_MS }),
+    }));
+    pinned.catch(() => (pinned = null));
+    return pinned;
+  };
+  let path: ((input: ModelInput) => Promise<void>) | null = null;
   const deps: ProcessDeps = {
     s3,
-    rules: ruleTable(sharedDb()),
+    rules: ruleTable(db),
     now: () => Date.now(),
-    model: () => {
-      console.log("mail-process: awaiting the model path, left");
-      return Promise.resolve();
-    },
+    // Built at first use, once: it reads `deps.store`, defined below.
+    model: (input) =>
+      (path ??= modelPath({
+        store: deps.store,
+        s3,
+        now: deps.now,
+        charges: mailCharges(db),
+        log: judgmentSink(db),
+        pin,
+      }))(
+        input,
+      ),
     store: {
       async due(now, limit) {
         const path = `mail_work?next_attempt_at=lte.${q(now)}&select=${WORK_COLUMNS}` +
@@ -171,6 +207,58 @@ function wire(): { cfg: ProcessConfig; deps: ProcessDeps } {
       async count(address, counter) {
         const init = { method: "POST", body: JSON.stringify({ p_address: address, p_counter: counter }) };
         await (await call(rest, "count", "rpc/count_mail_arrival", init)).body?.cancel();
+      },
+      async wait(id, until, attempts) {
+        const init = { method: "PATCH", body: JSON.stringify({ next_attempt_at: until, attempts }) };
+        await (await call(rest, "wait", `mail_work?id=eq.${q(id)}`, init, "return=minimal")).body?.cancel();
+      },
+      async expire(id) {
+        const init = { method: "POST", body: JSON.stringify({ p_work: Number(id) }) };
+        return await (await call(rest, "expire", "rpc/expire_mail_work", init)).json() === true;
+      },
+      async expirable(arrivedBy, limit) {
+        const path = `mail_work?arrived_at=lte.${
+          q(arrivedBy)
+        }&select=id,s3_key&order=arrived_at.asc,id.asc&limit=${limit}`;
+        const got = await rows<{ id: number; s3_key: string }>(await call(rest, "expirable", path));
+        return got.map((r) => ({ id: String(r.id), s3Key: r.s3_key }));
+      },
+      async closeBatches(now, sentBy, openedBy) {
+        const timedOut = q(`(sent_at.lte."${sentBy}",opened_at.lte."${openedBy}")`);
+        const path = `mail_batches?closed_at=is.null&or=${timedOut}&select=id`;
+        const init = { method: "PATCH", body: JSON.stringify({ closed_at: now }) };
+        return await touched(await call(rest, "close batches", path, init, "return=representation"));
+      },
+      async pruneSeen(seenBy) {
+        const path = `mail_seen?seen_at=lte.${q(seenBy)}&select=address_id`;
+        return await touched(
+          await call(rest, "prune seen", path, { method: "DELETE" }, "return=representation"),
+        );
+      },
+      async pruneClaims(deliveredBy, queuedBy) {
+        const del = { method: "DELETE" };
+        const delivered = `mail_claims?delivered_at=lte.${q(deliveredBy)}&select=id`;
+        const stale = `mail_claims?delivered_at=is.null&queued_at=lte.${q(queuedBy)}&select=id`;
+        return {
+          delivered: await touched(
+            await call(rest, "prune delivered", delivered, del, "return=representation"),
+          ),
+          undelivered: await touched(
+            await call(rest, "prune undelivered", stale, del, "return=representation"),
+          ),
+        };
+      },
+      async pruneBatches(closedBy) {
+        const path = `mail_batches?closed_at=lte.${q(closedBy)}&select=id`;
+        return await touched(
+          await call(rest, "prune batches", path, { method: "DELETE" }, "return=representation"),
+        );
+      },
+      async pruneCanaries(sentBy) {
+        const path = `mail_canaries?sent_at=lte.${q(sentBy)}&select=id`;
+        return await touched(
+          await call(rest, "prune canaries", path, { method: "DELETE" }, "return=representation"),
+        );
       },
     },
   };

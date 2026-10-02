@@ -327,8 +327,9 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // and the re-issued `enforce_budget`, writing; each revoked from `public, anon, authenticated`),
   // plus the T1.3 review's `refund_allowance` (writing, revoked the same way; main's F1 `refund_call`
   // arrives with the merge of PR #33 and moves this by one), plus T2g.1's two (`mail_hand_off` and
-  // `count_mail_arrival`, writing, each revoked from `public, anon, authenticated`).
-  assertEquals(parsed, 38, "today's corpus should parse exactly 38 function creations");
+  // `count_mail_arrival`, writing, each revoked from `public, anon, authenticated`), plus T3e's
+  // `expire_mail_work` (writing, revoked the same way).
+  assertEquals(parsed, 39, "today's corpus should parse exactly 39 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -1134,7 +1135,7 @@ Deno.test("the_mail_tables_have_section_5_1s_columns_and_words", async () => {
     mail_seen: ["account_id", "msg_hash", "fp_hash", "received_minute", "address_id", "phase", "seen_at"],
     mail_work: [
       "id", "account_id", "address_id", "batch_id", "s3_key", "phase", "authenticity", "arrived_at", "attempts",
-      "next_attempt_at",
+      "next_attempt_at", "msg_hash",
     ],
     mail_claims: [
       "id", "account_id", "address_id", "batch_id", "uid", "message_date", "ordering_date", "sender_name",
@@ -1586,8 +1587,8 @@ Deno.test("mail_hand_off_writes_the_seen_row_then_the_work_row_in_one_transactio
     "values (p_account, p_msg_hash, p_fp_hash, date_trunc('minute', p_received_minute), p_address, p_phase) " +
     "on conflict (account_id, msg_hash) do nothing returning true into fresh;",
     "if fresh is null then return false; end if;",
-    "insert into public.mail_work (account_id, address_id, batch_id, s3_key, phase, authenticity) " +
-    "values (p_account, p_address, p_batch, p_s3_key, p_phase, p_authenticity);",
+    "insert into public.mail_work (account_id, address_id, batch_id, s3_key, phase, authenticity, msg_hash) " +
+    "values (p_account, p_address, p_batch, p_s3_key, p_phase, p_authenticity, p_msg_hash);",
     "return true;",
   ];
   let at = -1;
@@ -1617,4 +1618,31 @@ Deno.test("count_mail_arrival_adds_one_to_one_mailboxs_unbound_or_unauthenticate
     `${f.name}: one statement, one mailbox, the named counter only`,
   );
   assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 1, `${f.name}: one write`);
+});
+
+// Email forwarding T3e (spec §4.7 step 5, D8, test 7's expiry half): an item whose object expired first
+// is counted `expired` and loses its `mail_seen` row, so recover's re-forward of it is accepted.
+
+Deno.test("expire_mail_work_deletes_the_work_row_and_its_seen_row_and_counts_expired_in_one_transaction", async () => {
+  const f = await mailFunction("expire_mail_work");
+  assert(/expire_mail_work\s*\(\s*p_work bigint\s*\)/.test(f.header), `${f.name}: expire_mail_work(p_work bigint)`);
+  assert(f.header.includes("returns boolean"), `${f.name}: answers expired, or already gone`);
+  assert(!f.header.includes("security definer"), `${f.name}: security invoker, as mail_hand_off`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "expire_mail_work", "bigint");
+  // The work row names its seen row by the keyed hash intake wrote into both (`mail_hand_off`).
+  const steps = [
+    "delete from public.mail_work where id = p_work returning account_id, address_id, msg_hash into gone;",
+    "if not found then return false; end if;",
+    "delete from public.mail_seen where account_id = gone.account_id and msg_hash = gone.msg_hash;",
+    "update public.mail_addresses set expired = expired + 1 where id = gone.address_id;",
+    "return true;",
+  ];
+  let at = -1;
+  for (const s of steps) {
+    const next = f.body.indexOf(s);
+    assert(next > at, `${f.name}: '${s}' in order (work, the second caller's way out, seen, the count)`);
+    at = next;
+  }
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 3, `${f.name}: the three writes only`);
 });
