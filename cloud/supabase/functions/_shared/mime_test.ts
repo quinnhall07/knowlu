@@ -156,6 +156,37 @@ Deno.test("takes_the_first_text_plain_part_else_reduces_html_to_text", () => {
   ]);
   assertEquals(bodyText(attachedFirst), "the body");
 
+  // A named file is an attachment whatever its disposition (Apple Mail and Outlook mark files
+  // `inline`): an inline text/plain with a filename, a text/plain with only a `name=`, and an
+  // RFC 2231 `filename*` are never the body, so the HTML part is read.
+  const namedFile = (fileHeaders: string[]) =>
+    crlf([
+      "Content-Type: multipart/mixed; boundary=b3",
+      "",
+      "--b3",
+      "Content-Type: text/html",
+      "",
+      "<p>the html body</p>",
+      "--b3",
+      ...fileHeaders,
+      "",
+      "roster contents",
+      "--b3--",
+    ]);
+  for (
+    const fileHeaders of [
+      ['Content-Type: text/plain; name="roster.txt"', 'Content-Disposition: inline; filename="roster.txt"'],
+      ['Content-Type: text/plain; name="roster.txt"'],
+      ["Content-Type: text/plain", "Content-Disposition: inline; filename*=utf-8''roster.txt"],
+      ["Content-Type: text/plain; name*0=ros; name*1=ter.txt"],
+    ]
+  ) assertEquals(bodyText(namedFile(fileHeaders)), "the html body");
+  // An inline disposition with no file name is still a body.
+  assertEquals(
+    bodyText(namedFile(["Content-Type: text/plain", "Content-Disposition: inline"])),
+    "roster contents",
+  );
+
   // No Content-Type is text/plain; a declared single-byte charset is honoured; CRLF reads as LF.
   assertEquals(bodyText("Subject: x\r\n\r\nline one\r\nline two\r\n"), "line one\nline two");
   const latin = new Uint8Array([...utf8("Content-Type: text/plain; charset=iso-8859-1\n\nr"), 0xe9, 0x73]);

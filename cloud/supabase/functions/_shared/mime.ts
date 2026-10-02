@@ -447,6 +447,11 @@ interface Leaf {
   body: string;
 }
 
+/** Whether the parameters name a file: `param`, or its RFC 2231 forms (`param*`, `param*0`, ...). A
+ * named part is an attachment whatever its disposition: Apple Mail and Outlook mark files `inline`. */
+const namesFile = (params: Record<string, string>, param: string) =>
+  Object.keys(params).some((k) => k === param || k.startsWith(`${param}*`));
+
 /** A boundary is 1 to 70 characters on one line (RFC 2046 §5.1.1). */
 const validBoundary = (b: string) => b.length >= 1 && b.length <= 70 && !/[\r\n]/.test(b);
 
@@ -469,11 +474,13 @@ function leaves(entity: string): Leaf[] {
       for (const part of splitMultipart(body, boundary, budget.parts)) visit(part, depth + 1, inner);
       return;
     }
+    const cd = parseContentType(field(fields, "content-disposition"));
     out.push({
       type,
       charset: ct.params.charset,
       cte: (field(fields, "content-transfer-encoding") ?? "").trim().toLowerCase(),
-      attachment: parseContentType(field(fields, "content-disposition")).type === "attachment",
+      attachment: cd.type === "attachment" || namesFile(cd.params, "filename") ||
+        namesFile(ct.params, "name"),
       body,
     });
   };
@@ -522,8 +529,8 @@ function decodeLeaf(leaf: Leaf): string {
 
 /**
  * §4.7 step 1's text: the first `text/plain` part, else the first `text/html` part reduced to text;
- * `""` when there is neither. A part marked `attachment`, and anything inside a `message/rfc822`
- * part, is never read. The caller cuts and scrubs it (`scrubForPrompt`) before any model sees it.
+ * `""` when there is neither. A part marked `attachment` or naming a file (a `filename` disposition
+ * or a `name` type parameter), and anything inside a `message/rfc822` part, is never read. The caller cuts and scrubs it (`scrubForPrompt`) before any model sees it.
  */
 export function bodyText(input: MailInput): string {
   const readable = leaves(toBinary(input)).filter((l) => !l.attachment);
