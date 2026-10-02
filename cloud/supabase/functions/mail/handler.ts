@@ -1,5 +1,6 @@
 /**
- * The device's `mail` routes (email spec §6.3; plan T4.1): the secret addresses. T4.2 adds the rest.
+ * The device's `mail` routes (email spec §6.3; plan T4.1): the secret addresses. T4.2's routes (the
+ * canary, batches, reconcile, the state and the provider) live in `routes.ts` and are dispatched here.
  *
  * - `GET /addresses` lists the account's mailboxes, each with its own address so Settings can show it
  *   again (D3), and never a token's HMAC, ciphertext or IV.
@@ -22,10 +23,12 @@
  * not found. **Nothing here logs** a token, an address, a hint or a key: errors leave as a status and a
  * fixed sentence (`_shared/http.ts`).
  */
+import type { SendCanary } from "../_shared/canary_send.ts";
 import type { Entitle } from "../_shared/judge_handler.ts";
 import { asResponse, fail, json, methodNotAllowed, readJson, subPath } from "../_shared/http.ts";
 import type { S3Client } from "../_shared/s3.ts";
 import { DOMAIN, hintFits, type MailProvider, PROVIDERS, type ResolveMx } from "./provider.ts";
+import { batchSent, canary, openBatch, provider, reconcile, setState } from "./routes.ts";
 
 /** D3's caps, by name: the device shows these sentences as they are. */
 export const LIVE_CAP = "this account already has three live mail addresses";
@@ -53,9 +56,45 @@ export interface MailRow {
   backfillSince: string | null;
   lastReceivedAt: string | null;
   lastCanaryOkAt: string | null;
+  /** §4.10's limit: canaries sent on the UTC day of `lastCanarySentAt`. */
+  lastCanarySentAt: string | null;
+  canariesToday: number;
+  /** Gmail's confirm window (P21). */
+  confirmUntil: string | null;
   unbound: number;
   unauthenticated: number;
   expired: number;
+}
+/** A `mail_batches` row as `POST /batches/<id>/sent` reads it (never its nonce's HMAC). */
+export interface BatchRow {
+  id: string;
+  addressId: string;
+  phase: "backfill" | "recover";
+  since: string;
+  expected: number;
+  sent: number | null;
+  received: number;
+  sentAt: string | null;
+  closedAt: string | null;
+}
+export interface NewBatch {
+  addressId: string;
+  phase: "backfill" | "recover";
+  nonceHmac: string;
+  /** ISO instant: the window's start. */
+  since: string;
+  expected: number;
+}
+/** One `mail_seen` entry as reconcile answers it: `fp_hash` and `received_minute` (§4.11 step 3). */
+export interface HeldRow {
+  fp: string;
+  minute: string;
+}
+/** What `POST /addresses/<id>/state` writes. */
+export interface StatePatch {
+  status?: "off";
+  reenabledAt?: string;
+  confirmUntil?: string;
 }
 /** A token as it is kept: its lookup HMAC and its ciphertext with the IV. */
 export interface NewToken {
@@ -90,6 +129,32 @@ export interface MailStore {
   workKeys(accountId: string, id: string): Promise<string[]>;
   /** The `delete_mail_address` RPC (D17): every row that serves the mailbox, then the mailbox. */
   deleteMailAddress(id: string): Promise<void>;
+  // T4.2.
+  /** Writes `next` to `canaries_today` and `last_canary_sent_at` only while they still hold `seen`. */
+  takeCanary(
+    accountId: string,
+    id: string,
+    seen: { count: number; lastSentAt: string | null },
+    next: { count: number; lastSentAt: string },
+  ): Promise<boolean>;
+  /** A new `mail_canaries` row; its id. */
+  insertCanary(addressId: string, nonceHmac: string, sentAt: string): Promise<string>;
+  deleteCanary(addressId: string, id: string): Promise<void>;
+  /** Sets `backfill_since` (a date) only while it is null; false, with nothing written, otherwise. */
+  setBackfillSince(accountId: string, id: string, since: string): Promise<boolean>;
+  /** How many of the mailbox's batches are open (`closed_at` null). */
+  openBatches(addressId: string): Promise<number>;
+  insertBatch(b: NewBatch): Promise<string>;
+  /** One batch by id, whichever account's: the caller checks its mailbox is the account's. */
+  batch(id: string): Promise<BatchRow | null>;
+  /** Writes `sent` and `sent_at` only while the batch is open and unsent; false otherwise. */
+  markSent(addressId: string, id: string, sent: number, sentAt: string): Promise<boolean>;
+  /** `mail_accounts`' encrypted fingerprint key, or null when the account has none. */
+  fpKey(accountId: string): Promise<{ ciphertext: string; iv: string } | null>;
+  /** The account's `mail_seen` entries whose received minute lies in `[from, to]`. */
+  held(accountId: string, from: string, to: string): Promise<HeldRow[]>;
+  /** Applies `patch` while the mailbox is the account's and not revoked; false otherwise. */
+  setState(accountId: string, id: string, patch: StatePatch): Promise<boolean>;
 }
 export interface MailDeps {
   /** A session alone: `GET /addresses` and `DELETE /addresses/<id>`. */
@@ -107,6 +172,12 @@ export interface MailDeps {
   mailDomain: string;
   now(): number;
   resolveMx: ResolveMx;
+  /** `keys.ts`'s `nonceHmac` under `MAIL_ADDRESS_KEY`: how batch and canary nonces are kept. */
+  nonceHmac(nonce: string): Promise<string>;
+  /** `_shared/canary_send.ts`'s sender over Resend. */
+  sendCanary: SendCanary;
+  /** `mail_bind.ts`'s `newNonce`, unless a test pins one. */
+  newNonce?: () => string;
 }
 
 const B32 = "abcdefghijklmnopqrstuvwxyz234567";
@@ -135,7 +206,18 @@ function newFpKey(): string {
 const iso = (ms: number) => new Date(ms).toISOString();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ONE = /^\/addresses\/([^/]+)$/;
-const ACTION = /^\/addresses\/([^/]+)\/(rotate|hint)$/;
+const ACTION = /^\/addresses\/([^/]+)\/(rotate|hint|state)$/;
+const SENT = /^\/batches\/([^/]+)\/sent$/;
+/** T4.2's fixed routes: path, method, handler. */
+const FIXED: Record<
+  string,
+  [string, (req: Request, accountId: string, deps: MailDeps) => Promise<Response>]
+> = {
+  "/canary": ["POST", canary],
+  "/batches": ["POST", openBatch],
+  "/reconcile": ["POST", reconcile],
+  "/provider": ["GET", (req, _accountId, deps) => provider(req, deps)],
+};
 const live = (rows: MailRow[]) => rows.filter((r) => r.status !== "revoked").length;
 const NOT_FOUND = "no such mailbox";
 
@@ -301,9 +383,20 @@ export function mailHandler(deps: MailDeps): (req: Request) => Promise<Response>
       const action = ACTION.exec(path);
       if (action !== null) {
         if (req.method !== "POST") return methodNotAllowed(["POST"]);
+        if (action[2] === "state") return await setState(req, account_id, action[1], deps);
         return action[2] === "rotate"
           ? await rotate(account_id, action[1], deps)
           : await hint(req, account_id, action[1], deps);
+      }
+      const fixed = Object.hasOwn(FIXED, path) ? FIXED[path] : undefined;
+      if (fixed !== undefined) {
+        if (req.method !== fixed[0]) return methodNotAllowed([fixed[0]]);
+        return await fixed[1](req, account_id, deps);
+      }
+      const sent = SENT.exec(path);
+      if (sent !== null) {
+        if (req.method !== "POST") return methodNotAllowed(["POST"]);
+        return await batchSent(req, account_id, sent[1], deps);
       }
       return fail(404, "no such route");
     } catch (e) {
