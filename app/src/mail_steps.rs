@@ -9,8 +9,10 @@
 //!
 //! **Falling back.** A scripted step that fails becomes `Failed` and guided, for that step only. The
 //! steps after it continue scripted unless they need it (the canary needs forwarding on; Gmail's
-//! steps run in a chain). The machine hands each step out once: there is no retry here, only the
-//! student's own "I've done this" ([`Setup::guided_checked`]).
+//! steps run in a chain). A failed canary (D16, a school that blocks forwarding) ends the scripted
+//! backfill: it becomes `Failed(Blocked)` and guided; Finish only closes the window and still runs.
+//! The machine hands each step out once: there is no retry here, only
+//! the student's own "I've done this" ([`Setup::guided_checked`]).
 //!
 //! **An existing forwarding address** is a `NeedsYou`, never replaced: the script gets
 //! `replace_forwarding` only after [`Setup::answer_forwarding_elsewhere`] says yes.
@@ -121,6 +123,9 @@ pub enum Reason {
     /// A control the script looks for is not on the page.
     NotFound,
     ScriptFailed,
+    /// The canary did not arrive: the school may be blocking forwarding (D16). Names the steps that
+    /// cannot go on as script.
+    Blocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,6 +321,14 @@ impl Setup {
         self.set(step, state);
         if guided {
             if let Some(i) = self.at(step) {
+                self.steps[i].2 = Mode::Guided;
+            }
+        }
+        // D16: a canary that fails means the school (or Gmail) is not forwarding, so a scripted
+        // backfill would bring in old mail while new mail never arrives. Only the guided step remains.
+        if step == Canary && matches!(state, State::Failed(_)) && self.state(Backfill) == State::Waiting {
+            self.set(Backfill, State::Failed(Reason::Blocked));
+            if let Some(i) = self.at(Backfill) {
                 self.steps[i].2 = Mode::Guided;
             }
         }

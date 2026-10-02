@@ -254,3 +254,22 @@ fn stop_after_the_current_step_says_what_was_done() {
     assert!(sum.left.is_empty());
     assert_eq!(sum.mail_not_brought_in_before, None);
 }
+
+#[test]
+fn a_failed_canary_leaves_only_guided_steps() {
+    // D16: a school that blocks forwarding fails the canary; no scripted backfill follows, for either
+    // provider. The backfill is guided, named as blocked, and the cleanup Finish still runs.
+    for p in [Provider::M365, Provider::Gmail] {
+        let mut s = setup(p);
+        let ran = drive(&mut s, |st| if st == Step::Canary { Outcome::Failed } else { Outcome::Done });
+        assert!(!ran.contains(&Step::Backfill), "{p:?} must not run a scripted backfill: {ran:?}");
+        assert_eq!(s.state(Step::Canary), State::Failed(Reason::ScriptFailed));
+        assert_eq!(s.state(Step::Backfill), State::Failed(Reason::Blocked));
+        assert_eq!(s.mode(Step::Backfill), Mode::Guided);
+        assert_eq!(*ran.last().unwrap(), Step::Finish, "Finish only closes the window and still runs");
+        assert_eq!(s.summary().mail_not_brought_in_before, Some(date(2026, 6, 4)));
+        // The student's own backfill count passes: done by hand.
+        s.guided_checked(Step::Backfill, true);
+        assert_eq!(s.state(Step::Backfill), State::DoneByHand);
+    }
+}
