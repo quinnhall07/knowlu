@@ -52,20 +52,30 @@ fn a_direct_change_sets_the_field_and_mail_asof_and_appends_one_body_line() {
 #[test]
 fn a_human_set_landing_between_plan_and_apply_turns_the_direct_set_into_a_card() {
     let vault = scratch("race");
-    mail_note(&vault, "tasks/lab-5.md", "2026-10-03");
+    let id = mail_note(&vault, "tasks/lab-5.md", "2026-10-03");
     let m = message("mail:bb", Phase::Backfill, vec![change("Lab 5", "2026-10-08")]);
-    let action = set_due(at("mail:bb", 0), "tasks/lab-5.md", "2026-10-08", "2026-10-01T12:00:00Z");
 
-    // The writer's own journal read is cached before the student writes, as `resolve_mail`'s network
-    // call leaves it.
+    // The plan is made from a view of the note as the mail left it, as T6.3 builds it, so it is a
+    // direct Set. The writer's journal has read the ledger by then, as building the view does.
+    let note = NoteView {
+        id, path: "tasks/lab-5.md".to_string(), folder: "tasks".to_string(), kind: None, course: Some("CS 101".to_string()),
+        title: "Lab 5".to_string(), due: json!("2026-10-03"), status: Some("active".to_string()), archived_reason: None,
+        source_uid: Some("mail:aa:0".to_string()), created_by: Some("mail".to_string()),
+        mail_asof: Default::default(), human_set: Default::default(),
+    };
+    let actions = mailreconcile::plan(&VaultView { notes: vec![note] }, std::slice::from_ref(&m), today(), 9);
+    assert!(matches!(actions.as_slice(), [Action::Set { field, .. }] if field == "due"), "{actions:?}");
     let mut journal = Journal::new(&vault);
+    journal.read(None, None);
     let mut writer = Writer::new(&vault, VIA, None, &mut journal, today(), held());
+
+    // The student's set lands after that read, as `resolve_mail`'s network call leaves room for.
     let human = WriteContext::new(crate::journal::read_human_actor(&vault).unwrap(), "dashboard");
     let student = [("due".to_string(), serde_yaml_ng::Value::String("2026-10-05".to_string()))];
     write::write(&vault, "tasks/lab-5.md", &student, &human, &mut Journal::new(&vault), &WriteOpts::default()).unwrap();
 
     let src = Source { message: &m, claim: &m.claims[0], judgment_id: None };
-    let done = writer.apply(&action, &src).unwrap();
+    let done = writer.apply(&actions[0], &src).unwrap();
     assert_eq!(done, Wrote::Card("approvals/amend-lab-5-due.md".to_string()));
     assert_eq!(field(&vault, "tasks/lab-5.md", "due"), Some(json!("2026-10-05")), "the student's value stands");
     assert_eq!(field(&vault, "tasks/lab-5.md", "mail_asof"), None);

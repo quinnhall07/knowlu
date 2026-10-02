@@ -9,7 +9,7 @@ use jiff::Timestamp;
 use serde_json::json;
 
 use super::*;
-use crate::mailreconcile::{Authenticity, CardStatus, ClaimField, ClaimKind, ClaimSource, ItemKind, NewItem, Phase, Sender};
+use crate::mailreconcile::{Authenticity, CardStatus, ClaimField, ClaimKind, ClaimSource, ItemKind, NewItem, NoteView, Phase, Sender, VaultView};
 
 mod cards;
 mod hostile;
