@@ -83,7 +83,8 @@ pub enum Target<'v> {
     Note(&'v NoteView),
     /// A note the action of an earlier claim in this plan (`by`) files, not written yet: its `id`
     /// and `path` are empty, so an action can name it only through `by`. How an action does is the
-    /// plan amendment T5.3 waits on; this variant keeps a rule from taking it for a vault note.
+    /// plan amendment T5.4's change rows wait on (T5.3's rows act only on [`Resolved::New`]); this
+    /// variant keeps a rule from taking it for a vault note.
     Planned { by: &'v ClaimRef, note: &'v NoteView },
 }
 

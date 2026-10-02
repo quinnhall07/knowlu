@@ -15,8 +15,9 @@
 //!
 //! T5.1 holds the types, the order and the noise screen; T5.2's [`resolve`] holds §4.8 steps 2 and
 //! 4, what a claim's target is, read against the vault the earlier claims' actions leave (D10).
-//! Every claim that passes the screen and is not already applied goes to a rule stub until
-//! T5.3–T5.5 fill in §4.9's table.
+//! `rules.rs` holds §4.9's table: T5.3's `new_item` rows, authenticity and the first day. Every
+//! other claim that passes the screen and is not already applied is unmatched until T5.4 and T5.5
+//! fill in their rows.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,6 +29,7 @@ use serde_json::Value;
 use crate::write;
 
 pub mod resolve;
+mod rules;
 
 use resolve::{Resolved, Working};
 
@@ -333,7 +335,7 @@ struct Step<'m> {
 /// The walk [`plan`] and [`resolve::to_ask`] share, with the rules: one function, so what is asked
 /// is exactly what the plan finds ambiguous.
 fn planned_steps<'m>(view: &VaultView, messages: &'m [Message], today: Date, vault_day: i64) -> Vec<Step<'m>> {
-    walk(view, messages, |resolved, message, at, claim| rule(resolved, message, at, claim, today, vault_day))
+    walk(view, messages, |resolved, message, at, claim| rules::rule(resolved, message, at, claim, today, vault_day))
 }
 
 /// Every claim in §4.8's order, each resolved against the vault the earlier claims' actions leave
@@ -372,33 +374,17 @@ fn order(messages: &[Message]) -> Vec<(&Message, usize)> {
 
 /// §4.9's `noise` row, and plan §10 R11: a claim whose title, sender, why or evidence
 /// `write::single_line_problem` refuses is noise whatever its kind, so no mail text that breaks a
-/// line (any `pystr::splitlines` boundary) ever reaches a writer.
+/// line (any `pystr::splitlines` boundary) ever reaches a writer. So is a `new_item` whose due is
+/// not §5.1's wire shape ([`rules::due_date`]): the device's own check, as `enrich.rs` re-checks a
+/// Gmail due, since such a due can neither be ordered against today nor written.
 fn is_noise(message: &Message, claim: &Claim) -> bool {
     let title = claim.item.as_ref().map(|item| item.title.as_str());
     let sender = [message.sender.name.as_deref(), Some(message.sender.address.as_str())];
     let texts = [title, Some(claim.why.as_str()), Some(claim.evidence.as_str())];
+    let due = claim.item.as_ref().and_then(|item| item.due.as_deref());
     claim.kind == ClaimKind::Noise
         || sender.into_iter().chain(texts).flatten().any(|text| write::single_line_problem(text).is_some())
-}
-
-/// The rules, from the walk's resolution. §4.8 step 4 is in place (T5.2): a claim already applied
-/// writes nothing, and an undated `new_item` that restates a note writes nothing either (counted
-/// equal; it never clears a due, spec risk 1). Every other claim that passes the noise screen is
-/// unmatched until T5.3–T5.5 fill in §4.9's table. Spec test 18 runs unchanged over each of them.
-fn rule(
-    resolved: &Resolved<'_>,
-    _message: &Message,
-    at: ClaimRef,
-    _claim: &Claim,
-    _today: Date,
-    _vault_day: i64,
-) -> Vec<Action> {
-    let reason = match resolved {
-        Resolved::AlreadyApplied => SkipReason::AlreadyApplied,
-        Resolved::Restated { .. } => SkipReason::Equal,
-        _ => SkipReason::Unmatched,
-    };
-    vec![Action::Skip { claim: at, reason }]
+        || due.is_some_and(|due| rules::due_date(due).is_none())
 }
 
 #[cfg(test)]
