@@ -3,7 +3,21 @@
 Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads stays short.
 `CLAUDE.md` keeps the rules; this file keeps the reference. Update it with the code.
 
-- `rank --vault <v> [--today YYYY-MM-DD] [--runner manual|local|cloud] [--run-id <id>]`
+- `rank --vault <v> [--today YYYY-MM-DD] [--runner manual|local|cloud] [--run-id <id>]` — no new
+  flag for events. Its events pass runs in this order (`cli.rs`; events spec §6.1, P16): D9's
+  rebuild of a rejected `event-accept` card's declines and the series carry
+  (`eventcarry::run`), then series inheritance of a settled `event-check` answer, then the roster,
+  then the cards (obligation `event-accept` cards, the digest only with `event_cards` off, `unsure`
+  `event-check` cards, opportunity `event-accept` cards only with `event_cards` on), each sized to
+  what the earlier steps left of the 15 a day. `event_cards` (`config/events.yaml`) switches the
+  card kinds on. The carry covers executed `event-accept` series and executed `event-check` series
+  with `instances:` (`answered_series`, `accepted_check_series`): each later date of an accepted
+  series becomes a commitment (a lane-shaped date none), and writes **one ledger line per carried
+  date** to `state/events-seen.md`, by `agent:knowlu.carry`, with `from:`, `start:` and `end:`
+  (P15); a moved lane date gets one more such line (PQ5 (b2), PQ7 (c)). The carry runs before
+  inheritance (P16), so inheritance skips every date the carry answered. A date the student removed
+  (`eventcarry::remove_lane_date`, P17) holds a `declined` line, which the carry, never-ask-twice
+  and `relevant_events` all respect. `rank` still never calls a model.
 - `coursework --vault <v> [--dry-run] [--via <via>] [--run-id <id>]` — zyBooks + VHL into `tasks/`.
   Always exits 0. An empty parse is a failure, never an empty semester. A vendor figure at 100%
   (zyBooks points, VHL `percentage_complete`) files a `status: done` amend proposal as

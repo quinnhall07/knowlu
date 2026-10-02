@@ -1,6 +1,8 @@
 # University of Alabama. Six public event feeds; each host must be reachable from this machine.
 # Copying this file for a new campus: add `timezone: <IANA name>` unless the campus is Central —
 # `events::load_events_config` defaults a missing `timezone:` to America/Chicago.
+# Switches on the event cards (accept/decline proposals for campus events).
+event_cards: true
 roster_window_days: 90
 audit_window_days: 14
 judge_per_run_cap: 150

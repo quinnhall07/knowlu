@@ -2330,3 +2330,93 @@ fn coming_up_offers_a_not_shown_list_from_dropped_events() {
     assert!(body.contains("renderNotShown("), "renderComingUp triggers it");
     assert!(!render[render.find("function poll(").unwrap()..].split("// Task 13").next().unwrap().contains("dropped_events"), "poll does not fetch it");
 }
+
+// events T5 (spec test 26, P8, PQ3, P17, PQ6 (b)).
+fn fn_body<'a>(js: &'a str, head: &str) -> &'a str {
+    let at = js.find(head).unwrap_or_else(|| panic!("{head}"));
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    &js[at..end]
+}
+
+#[test]
+fn event_cards_read_accept_and_decline_and_send_the_same_verdicts() {
+    let js = read("console.js");
+    let l = fn_body(&js, "function verdictLabels(");
+    assert!(l.contains("event-accept") && l.contains("event-check") && l.contains("Accept") && l.contains("Decline"), "one switch names both kinds");
+    assert!(l.contains("Approve") && l.contains("Reject"), "other kinds keep Approve and Reject");
+    for f in ["function renderDeck(", "function renderDecisionsView("] {
+        let b = js.split(f).nth(1).unwrap().split("\n  function ").next().unwrap();
+        assert!(b.contains("verdictLabels(c.kind)"), "{f} reads the switch");
+        assert!(b.contains("data-verdict=\"approved\"") && b.contains("data-verdict=\"rejected\""), "{f} still sends approved and rejected");
+        assert!(!b.contains(">Approve<") && !b.contains(">Reject<"), "{f} has no fixed label");
+    }
+    assert!(js.contains("data-answer-in>Answer&hellip;"), "commitment-ask keeps Answer");
+}
+
+#[test]
+fn coming_up_shows_accepted_events() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function renderComingUp(");
+    assert!(b.contains("e.accepted") && b.contains("Accepted"), "the tag");
+    assert!(b.contains("h(e.provenance)"), "the carry's provenance, escaped, as the engine gives it");
+    assert!(b.contains("e.provenance ?") || b.contains("e.provenance)"), "provenance replaces the plain tag");
+}
+
+#[test]
+fn coming_up_shows_the_carrys_provenance() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function renderComingUp(");
+    let p = b.find("e.provenance").unwrap();
+    let a = b.find("\"Accepted\"").unwrap();
+    assert!(p < a, "provenance is tried first; plain Accepted is the fallback");
+}
+
+#[test]
+fn the_lane_offers_remove_on_accepted_dates_only() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function renderTheDay(");
+    assert!(b.contains("all_day_uids"), "reads the uids");
+    assert!(b.contains("Remove from my day") && b.contains("data-lane-remove=\"") && b.contains("data-title=\""), "the button carries uid and title");
+    assert!(b.contains("(all day) "), "an entry without a uid renders as today");
+    assert!(b.contains("h(uid)") && b.contains("h(t)"), "escaped");
+    assert!(b.contains("pendingLaneRemovals"), "a pending uid is skipped");
+}
+
+#[test]
+fn remove_from_my_day_hides_at_once_and_calls_when_the_undo_toast_closes() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function removeFromMyDay(");
+    assert!(b.contains("pendingLaneRemovals[") && b.contains("renderTheDay("), "hidden at once");
+    assert!(b.contains("Removed") && b.contains("Undo") && b.contains("10000"), "Removed - Undo for 10 seconds");
+    assert!(b.contains("className = \"lanetoast\"") && !b.contains("savedtoast"), "its own class, which dropSavedToast leaves alone");
+    assert!(read("console.css").contains(".savedtoast, .settoast, .lanetoast"), "styled by the existing rule");
+    assert!(b.contains("invoke(\"remove_lane_date\", { view: stateView(), uid: uid })"), "the one invoke, with the view and uid");
+    assert!(b.contains("applyEnvelope("), "the envelope goes to applyEnvelope");
+    assert!(!js.contains("confirm(\"Remove"), "no window.confirm");
+    let call = b.find("invoke(\"remove_lane_date\"").unwrap();
+    let to = b.find("setTimeout(").unwrap();
+    assert!(to < call, "the call sits behind the timer");
+    assert!(js.contains("[data-lane-remove]") && js.contains("removeFromMyDay("), "the delegated handler");
+    assert!(!b.contains("ev("), "no telemetry row of its own (D12)");
+}
+
+#[test]
+fn a_refused_removal_repaints_the_lane() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function removeFromMyDay(");
+    let d = b.find("delete pendingLaneRemovals[uid];").unwrap();
+    let r = b[d..].find("renderTheDay(").expect("the .then branch re-renders");
+    let a = b[d..].find("applyEnvelope(").unwrap();
+    assert!(r < a, "the lane is repainted before the envelope is applied, state or not");
+    assert!(b.contains("querySelectorAll(\".lanetoast\")"), "a second pending toast is offset, not stacked on the first");
+}
+
+#[test]
+fn undo_within_the_toast_never_calls_remove_lane_date() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function removeFromMyDay(");
+    let u = b.find("data-lane-undo").expect("an Undo button");
+    assert!(b.contains("clearTimeout("), "undo cancels the timer");
+    assert!(b[u..].contains("delete pendingLaneRemovals["), "undo clears the pending uid");
+    assert_eq!(js.matches("invoke(\"remove_lane_date\"").count(), 1, "one call site, behind the timer");
+}

@@ -52,6 +52,8 @@ pub mod eventfilter;
 pub mod eventfeed;
 pub mod eventroster;
 pub mod eventemit;
+pub mod eventaccept;
+pub mod eventcarry;
 
 // Wave 6 - coursework: zyBooks and VHL.
 pub mod coursework;

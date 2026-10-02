@@ -52,6 +52,19 @@ fn the_console_list_names_the_three_google_commands_and_the_wizard_list_none() {
     );
 }
 
+/// P17 (Quinn, Checkpoint B): `remove_lane_date` is the one command events adds, in the console's
+/// list only.
+#[test]
+fn the_console_list_names_remove_lane_date_and_the_wizard_list_does_not() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let lists = handler_lists(&src);
+    let console = list_with(&lists, "commands::state");
+    let wizard = list_with(&lists, "onboarding::finish_onboarding");
+    assert!(console.iter().any(|n| n == "commands::remove_lane_date"), "the console list must name commands::remove_lane_date");
+    assert!(!wizard.iter().any(|n| n == "commands::remove_lane_date"), "the wizard list must not name commands::remove_lane_date");
+}
+
 #[test]
 fn the_parser_reads_a_list_by_its_names() {
     let text = "x.invoke_handler(tauri::generate_handler![a::one, b::two,\n c::three])\n\

@@ -3578,4 +3578,53 @@ mod tests {
         handle.join().unwrap();
         let _ = std::fs::remove_dir_all(&v);
     }
+
+    /// Events spec test 24 (no code change here): a rejected `event-accept` card is a `decision`
+    /// row, an executed one is no row, and an `event-check` keeps its `verdict` row. Each card is
+    /// filed by its agent, answered by the student and settled as `process_approvals` settles it.
+    #[test]
+    fn labels_report_a_rejected_event_accept_card_as_a_decision() {
+        let v = vault("labels-event-accept");
+        let student = WriteContext::new(crate::journal::read_human_actor(&v).unwrap(), "dashboard");
+        let agent = WriteContext::new("agent:events", "cli");
+        let mut journal = Journal::new(&v);
+        let mut file = |stem: &str, kind: &str, jid: &str, answer: &str, settled: Option<&str>| -> String {
+            let verdict = if kind == "event-accept" { "verdict: obligation\n" } else { "" };
+            let text = format!(
+                "---\ntype: approval\nkind: {kind}\ntitle: An event\nstatus: pending\n{verdict}\
+                 source_uid: \"localist:{stem}:1\"\nproposed_at: 2026-10-01\nfirst_proposed_at: 2026-10-01\n\
+                 expires: 2026-10-08\nsnooze_until: null\ncreated_by: events\njudgment_id: {jid}\n\
+                 judgment_kind: event\n---\n\nbody\n"
+            );
+            let rel = format!("approvals/{stem}.md");
+            write::create(&v, &rel, &text, &agent, &mut journal, None).unwrap();
+            let status = |value: &str| [("status".to_string(), value.to_string())];
+            write::write_literals(&v, &rel, &status(answer), &student, &mut journal, &WriteOpts::default()).unwrap();
+            if let Some(settled) = settled {
+                write::write_literals(&v, &rel, &status(settled), &agent, &mut journal, &WriteOpts::default()).unwrap();
+            }
+            write::delete(&v, &rel, &agent, &mut journal).unwrap();
+            crate::ids::read_meta(&v.join("archive").join(format!("{stem}.md")))
+                .and_then(|m| crate::yaml::opt_text(crate::yaml::get(&m, "id")))
+                .unwrap()
+        };
+        let rejected = file("event-a", "event-accept", "3fa85f64-5717-4562-b3fc-2c963f66afa6", "rejected", None);
+        let _executed = file("event-b", "event-accept", "7c9e6679-7425-40de-944b-e07fc1f90ae7", "approved", Some("executed"));
+        let checked = file("event-check-c", "event-check", "0f0e0d0c-0b0a-4908-8706-050403020100", "approved", Some("executed"));
+
+        let rows: Vec<(String, String, String, String)> = labels_to_report(&v)
+            .iter()
+            .map(|c| {
+                let field = |k: &str| c.row[k].as_str().unwrap_or_default().to_string();
+                (c.item_id.clone(), field("field"), field("ours"), field("theirs"))
+            })
+            .collect();
+        let row = |id: &str, field: &str, ours: &str, theirs: &str| (id.to_string(), field.into(), ours.into(), theirs.into());
+        let mut expected = vec![row(&rejected, "decision", "proposed", "rejected"), row(&checked, "verdict", "unsure", "obligation")];
+        let mut got = rows.clone();
+        expected.sort();
+        got.sort();
+        assert_eq!(got, expected, "one decision row for the rejected card, none for the executed one");
+        let _ = std::fs::remove_dir_all(&v);
+    }
 }

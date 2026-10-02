@@ -98,6 +98,119 @@ pub struct Loaded {
     /// preview, against the current window). `None` with no planning-day note, and whenever the
     /// windows or the plans are equal.
     pub moved: Option<crate::commitments::Moved>,
+    /// The accepted events `archive/` and `commitments/` name, read once for the page (T4b).
+    pub(crate) accepted: AcceptedEvents,
+}
+
+/// One lane-shaped instance of an accepted event (all-day, multi-day or zero-length).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LaneInstance {
+    pub uid: String,
+    pub title: String,
+    pub first: Date,
+    pub last: Date,
+}
+
+/// What the page reads as accepted: the uid set, and the instances the all-day lane draws.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AcceptedEvents {
+    pub uids: std::collections::BTreeSet<String>,
+    /// De-duplicated by uid, in `(first day, title, uid)` order, so the lane's order is total.
+    pub lane: Vec<LaneInstance>,
+    /// The day each executed card in `archive/` was executed (its `executed_at`), keyed by the
+    /// card's `id:`: what the label "from your answer to the series on <day>" names.
+    pub executed_on: BTreeMap<String, Date>,
+    /// The uids each executed `event-accept` or `event-check` card lists in its own `instances:`,
+    /// keyed by the card's `id:`: a uid listed on the card its carry line names was answered on
+    /// that card, not through its series.
+    pub listed_by: BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+/// What `archive/`, `commitments/` and the ledger say the student accepted (spec §4.2's lane,
+/// Q1b (i), P4, P8, PQ3, PQ5, P17). Read-only. The lane and `eventcarry::remove_lane_date` (T4d)
+/// read this one definition, so a date the lane draws is a date the student can remove.
+///
+/// - `archive/`: every `executed` `event-accept` or `event-check` card's `instances:`. Each
+///   instance's uid is accepted; one whose [`crate::eventaccept::shape`] is all-day, multi-day or
+///   zero-length (a lane shape) is also a lane instance, its days `first..=last`. An `instances:`
+///   entry that does not read back is skipped, as is an unreadable note. The scan also keeps each
+///   executed card's `executed_at` day and its listed uids, keyed by its `id:`.
+/// - `commitments/`: the `source_uid` of every confirmed `kind: event` note, which the carry books
+///   for a later instance of an accepted series (a card names only the instances it listed).
+/// - `ledger`: every uid whose entry has `carry` is accepted, and is a lane instance, whatever its
+///   verdict, when its carry span is a lane shape. A lane instance is drawn with its entry's carry
+///   span whenever it has one (the last same-card carry line, PQ5), else its card's entry. A carry
+///   span that is not a lane shape (PQ7: a date moved to clock hours) takes the uid out of the lane.
+/// - A uid whose entry is `declined` is neither accepted nor a lane instance, whichever source
+///   named it (P17).
+pub(crate) fn accepted_events(
+    vault: &Path,
+    ledger: &BTreeMap<String, crate::eventledger::LedgerEntry>,
+) -> AcceptedEvents {
+    use crate::eventaccept::{shape, Instance};
+    let mut out = AcceptedEvents::default();
+    for path in crate::approvals::sorted_md(&vault.join("archive")) {
+        let Ok(text) = crate::pystr::read_text(&path) else { continue };
+        let Ok((meta, _)) = crate::models::split_frontmatter(&text) else { continue };
+        let kind = meta_text(Some(&meta), "kind").unwrap_or_default();
+        let is_event_card = kind == "event-accept" || kind == "event-check";
+        let field_is = |key: &str, want: &str| meta_text(Some(&meta), key).is_some_and(|v| v.trim() == want);
+        if !field_is("type", "approval") || !field_is("status", "executed") {
+            continue;
+        }
+        let card_id = meta_text(Some(&meta), "id").map(|id| id.trim().to_string()).filter(|id| crate::ids::is_id(id));
+        if let Some(id) = &card_id {
+            let executed = meta_text(Some(&meta), "executed_at")
+                .and_then(|at| at.split_whitespace().next().and_then(|day| day.parse::<Date>().ok()));
+            if let Some(day) = executed {
+                out.executed_on.entry(id.clone()).or_insert(day);
+            }
+        }
+        if !is_event_card {
+            continue;
+        }
+        let Some(serde_yaml_ng::Value::Sequence(items)) = crate::yaml::get(&meta, "instances") else { continue };
+        for item in items {
+            let Some(instance) = item.as_mapping().and_then(Instance::from_yaml) else { continue };
+            out.uids.insert(instance.uid.clone());
+            if let Some(id) = &card_id {
+                out.listed_by.entry(id.clone()).or_default().insert(instance.uid.clone());
+            }
+            let Some((first, last)) = shape(instance.start, instance.end).lane() else { continue };
+            if out.lane.iter().all(|lane| lane.uid != instance.uid) {
+                out.lane.push(LaneInstance { uid: instance.uid, title: instance.title, first, last });
+            }
+        }
+    }
+    for note in crate::commitments::load(vault).confirmed {
+        if let (true, Some(uid)) = (note.kind == "event", note.source_uid) {
+            out.uids.insert(uid);
+        }
+    }
+    for entry in ledger.values().filter(|entry| !entry.declined) {
+        let Some(carry) = &entry.carry else { continue };
+        out.uids.insert(entry.uid.clone());
+        let at = out.lane.iter().position(|lane| lane.uid == entry.uid);
+        match (shape(carry.start, carry.end).lane(), at) {
+            (Some((first, last)), Some(i)) => {
+                out.lane[i].first = first;
+                out.lane[i].last = last;
+            }
+            (Some((first, last)), None) => {
+                out.lane.push(LaneInstance { uid: entry.uid.clone(), title: entry.title.clone(), first, last });
+            }
+            (None, Some(i)) => {
+                out.lane.remove(i);
+            }
+            (None, None) => {}
+        }
+    }
+    for entry in ledger.values().filter(|entry| entry.declined) {
+        out.uids.remove(&entry.uid);
+        out.lane.retain(|lane| lane.uid != entry.uid);
+    }
+    out.lane.sort_by(|a, b| (a.first, &a.title, &a.uid).cmp(&(b.first, &b.title, &b.uid)));
+    out
 }
 
 /// The one place the vault is read for the page: notes, calendar snapshot, and the ranking and
@@ -159,7 +272,8 @@ fn load_with(vault: &Path, today: Date, preview: Option<&Window>) -> Loaded {
     let takes = designate_today_explained(&ranked, today, &cal, Some(&planning));
     let moved = against
         .and_then(|base| crate::commitments::moved(&ranked, today, &cal, &base, Some(&planning)));
-    Loaded { tasks, metas, unreadable, cal, planning, ranked, takes, moved }
+    let accepted = accepted_events(vault, &crate::eventledger::load_ledger(vault, None));
+    Loaded { tasks, metas, unreadable, cal, planning, ranked, takes, moved, accepted }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -889,6 +1003,11 @@ pub struct DayBlock {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TheDay {
     pub all_day: Vec<String>,
+    /// Parallel to `all_day` (P17): `None` for a calendar entry, the uid for an accepted lane date,
+    /// so the console can offer "Remove from my day". Empty, and absent from the JSON, when no
+    /// accepted lane date covers the day.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub all_day_uids: Vec<Option<String>>,
     pub commitments: Vec<Commitment>,
     pub commitments_hours: f64,
     pub blocks: Vec<DayBlock>,
@@ -963,6 +1082,19 @@ pub fn the_day(l: &Loaded, today: Date) -> TheDay {
             blocks.push(DayBlock { start: hm(e.start), end: hm(e.end), kind: "busy".into(), label: e.title.clone(), hours: hours_between(e.start, e.end), takes: Vec::new() });
         }
     }
+    // An accepted all-day, multi-day or zero-length event has no commitment (P4, PQ2): it is drawn
+    // here on each day it covers, after the calendar's own entries, and never touches capacity.
+    // `all_day_uids` names each accepted lane date so the console can offer to remove it (P17); a
+    // calendar entry is `None`. With no lane date today it stays empty.
+    let calendar_entries = all_day.len();
+    let mut all_day_uids: Vec<Option<String>> = Vec::new();
+    for e in l.accepted.lane.iter().filter(|e| e.first <= today && today <= e.last) {
+        all_day.push(e.title.clone());
+        all_day_uids.push(Some(e.uid.clone()));
+    }
+    if !all_day_uids.is_empty() {
+        all_day_uids.splice(0..0, std::iter::repeat_n(None, calendar_entries));
+    }
     // Classes are the gaps between the TEMPLATE's classes alone inside the day window —
     // `template_only_blocks` (weekcal.rs) has no commitment span folded in, so a confirmed club
     // is never mistaken for a class gap here (R15); the commitment spans draw their own blocks
@@ -987,7 +1119,7 @@ pub fn the_day(l: &Loaded, today: Date) -> TheDay {
     let committed = nz(round1(commitments.iter().map(|c| c.hours).sum()));
     let empty_text = free.is_empty().then(|| EMPTY_TEXT.the_day.to_string());
     let open_hours = round1(l.cal.capacity(today) - committed);
-    TheDay { all_day, commitments, commitments_hours: committed, blocks, open_hours: nz(open_hours.max(0.0)), empty_text }
+    TheDay { all_day, all_day_uids, commitments, commitments_hours: committed, blocks, open_hours: nz(open_hours.max(0.0)), empty_text }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1074,6 +1206,14 @@ pub struct ComingUp {
     pub when: String,
     pub location: String,
     pub organizer: String,
+    /// The student accepted this event (P8). Absent from the JSON when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub accepted: bool,
+    /// Why it is accepted, for an event the student answered through its series (PQ3): "Accepted ·
+    /// from your answer to the series on Thu 9/24". Absent from the JSON when none, and for a uid
+    /// its own `from:` card lists (it was answered on that card).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
 }
 
 /// The next five relevant events, read the same way `cli::run`'s events step assembles them for
@@ -1091,9 +1231,12 @@ pub fn coming_up(vault: &Path, today: Date, now: DateTime) -> Vec<ComingUp> {
             crate::render::ComingUpEvent { uid: e.uid, title: e.title, start, location: e.location, organizer: e.organizer }
         })
         .collect();
+    let accepted = accepted_events(vault, &ledger);
     crate::render::upcoming(&events, today, Some(now))
         .into_iter()
         .map(|e| ComingUp {
+            accepted: accepted.uids.contains(&e.uid),
+            provenance: provenance(&accepted, &ledger, &e.uid),
             when: format!("{} {} {}", WEEKDAYS[e.start.date().weekday().to_monday_zero_offset() as usize], short_date(e.start.date()), hm(e.start)),
             start: e.start.strftime("%Y-%m-%dT%H:%M").to_string(),
             uid: e.uid,
@@ -1102,6 +1245,31 @@ pub fn coming_up(vault: &Path, today: Date, now: DateTime) -> Vec<ComingUp> {
             organizer: e.organizer,
         })
         .collect()
+}
+
+/// The label for a uid the carry accepted (PQ3): "Accepted · from your answer to the series on
+/// <Ddd> <M/D>", the same day format as `when`. It drops " on …" when the card or its `executed_at`
+/// cannot be read. `None` for a uid with no carry line, and for one its `from:` card lists itself
+/// (PQ5 (b2): it was answered on that card, and a move gave it the carry line).
+fn provenance(
+    accepted: &AcceptedEvents,
+    ledger: &BTreeMap<String, crate::eventledger::LedgerEntry>,
+    uid: &str,
+) -> Option<String> {
+    let entry = ledger.get(uid).filter(|entry| !entry.declined)?;
+    let carry = entry.carry.as_ref()?;
+    if accepted.listed_by.get(&carry.from).is_some_and(|uids| uids.contains(uid)) {
+        return None;
+    }
+    let label = "Accepted · from your answer to the series";
+    Some(match accepted.executed_on.get(&carry.from) {
+        Some(day) => format!(
+            "{label} on {} {}",
+            WEEKDAYS[day.weekday().to_monday_zero_offset() as usize],
+            short_date(*day)
+        ),
+        None => label.to_string(),
+    })
 }
 
 /// The named empty states (S2 §9.6). One place; the page renders these strings, never its own.
@@ -3421,6 +3589,568 @@ mod moved_tests {
             assert!(err.is_some(), "{bad} must be refused");
         }
         assert!(build_state_preview(&v, View::Week, DAY, &now(), None, WEEKDAYS_22).is_err());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+}
+
+/// T4b — the all-day lane and "Accepted": an accepted event reads from `archive/` cards and
+/// `commitments/` only (the carry's ledger lines are T4c's), and `surface` still writes nothing.
+#[cfg(test)]
+mod accepted_tests {
+    use super::tests::{fixture_full, TODAY};
+    use super::*;
+    use crate::events::DiscoveredEvent;
+    use std::path::PathBuf;
+
+    fn at(day: i8, hour: i8, minute: i8) -> DateTime {
+        Date::constant(2026, 8, day).at(hour, minute, 0, 0)
+    }
+
+    fn event(uid: &str, start: DateTime, end: DateTime) -> DiscoveredEvent {
+        DiscoveredEvent::new(uid, &format!("Event {uid}"), start, end, "campus")
+    }
+
+    /// An archived `event-accept` or `event-check` card in the emitter's shape, `instances:` listing
+    /// `listed`. `status` is `executed` for an Accept.
+    fn card(vault: &Path, name: &str, kind: &str, status: &str, listed: &[&DiscoveredEvent]) {
+        use crate::yamlemit::Node;
+        let pairs = vec![
+            ("id", Node::text("appr_0123456789")),
+            ("type", Node::text("approval")),
+            ("kind", Node::text(kind)),
+            ("title", Node::text("Required · an event")),
+            ("status", Node::text(status)),
+            ("source_uid", Node::text(&listed[0].uid)),
+            ("series_uid", Node::text(&listed[0].series_uid)),
+            ("events", Node::Seq(listed.iter().map(|e| Node::text(&e.uid)).collect())),
+            (
+                "instances",
+                Node::Seq(listed.iter().map(|e| crate::eventaccept::Instance::from_event(e).to_node()).collect()),
+            ),
+            ("created_by", Node::text("events")),
+        ];
+        let text = format!("---\n{}---\n\nbody\n", crate::yamlemit::safe_dump_block(&Node::map(pairs)));
+        std::fs::create_dir_all(vault.join("archive")).unwrap();
+        crate::pystr::write_text(&vault.join("archive").join(name), &text).unwrap();
+    }
+
+    fn lane_on(vault: &Path, day: Date) -> Vec<String> {
+        the_day(&load(vault, day), day).all_day
+    }
+
+    #[test]
+    fn an_accepted_two_day_event_is_in_the_all_day_lane_on_each_day() {
+        let v = fixture_full();
+        let day = |n: i8| Date::constant(2026, 8, n);
+        let open = |n: i8| the_day(&load(&v, day(n)), day(n)).open_hours;
+        let before: Vec<f64> = (27..=31).map(open).collect();
+        // Fri 28 00:00 to Sun 30 00:00: Fri and Sat, both inclusive. A zero-length event on Mon 31.
+        let two_day = event("lx:1:1", at(28, 0, 0), at(30, 0, 0));
+        let zero = event("lx:2:1", at(31, 10, 0), at(31, 10, 0));
+        card(&v, "event-two-day.md", "event-accept", "executed", &[&two_day]);
+        card(&v, "event-zero.md", "event-check", "executed", &[&zero]);
+        let after: Vec<f64> = (27..=31).map(open).collect();
+        assert_eq!(before, after, "the lane never moves capacity");
+        assert!(lane_on(&v, day(27)).is_empty(), "the day before lists nothing");
+        assert_eq!(lane_on(&v, day(28)), ["Event lx:1:1"]);
+        assert_eq!(lane_on(&v, day(29)), ["Event lx:1:1"]);
+        assert!(lane_on(&v, day(30)).is_empty(), "the day after lists nothing");
+        assert_eq!(lane_on(&v, day(31)), ["Event lx:2:1"], "a zero-length event is on its own day");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn the_lane_is_ordered_by_first_day_title_and_uid() {
+        let v = fixture_full();
+        let mut b = event("lx:b:1", at(28, 0, 0), at(29, 0, 0));
+        b.title = "Same".into();
+        let mut a = event("lx:a:1", at(28, 0, 0), at(29, 0, 0));
+        a.title = "Same".into();
+        let mut early = event("lx:c:1", at(27, 0, 0), at(29, 0, 0));
+        early.title = "Zed".into();
+        card(&v, "event-1.md", "event-accept", "executed", &[&b, &a]);
+        card(&v, "event-2.md", "event-accept", "executed", &[&early]);
+        let l = load(&v, TODAY);
+        let order: Vec<String> = l.accepted.lane.iter().map(|i| i.uid.clone()).collect();
+        assert_eq!(order, ["lx:c:1", "lx:a:1", "lx:b:1"]);
+        assert_eq!(the_day(&l, TODAY).all_day, ["Zed", "Same", "Same"]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn an_unanswered_or_declined_card_adds_nothing_to_the_lane() {
+        let v = fixture_full();
+        let e = event("lx:1:1", at(28, 0, 0), at(29, 0, 0));
+        card(&v, "event-a.md", "event-accept", "rejected", &[&e]);
+        card(&v, "event-b.md", "event-accept", "expired", &[&e]);
+        card(&v, "event-c.md", "event-accept", "pending", &[&e]);
+        assert!(lane_on(&v, TODAY).is_empty());
+        assert!(accepted_events(&v, &BTreeMap::new()).uids.is_empty());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// A vault holding only a roster and its verdict ledger, as `rank` leaves them.
+    fn coming_up_vault(events: &[(DiscoveredEvent, &str)]) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("qo-t4b-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        for (e, verdict) in events {
+            crate::eventledger::record_verdict(&dir, &e.uid, &e.title, TODAY, verdict, "", "", "").unwrap();
+        }
+        let list: Vec<DiscoveredEvent> = events.iter().map(|(e, _)| e.clone()).collect();
+        let ledger = crate::eventledger::load_ledger(&dir, None);
+        let path = dir.join("state").join("events.md");
+        crate::eventroster::write_roster(&path, &list, &ledger, &Default::default(), TODAY, &[]).unwrap();
+        dir
+    }
+
+    fn sep(day: i8, from: (i8, i8), to: (i8, i8)) -> (DateTime, DateTime) {
+        let d = Date::constant(2026, 9, day);
+        (d.at(from.0, from.1, 0, 0), d.at(to.0, to.1, 0, 0))
+    }
+
+    #[test]
+    fn an_accepted_event_is_marked_in_coming_up() {
+        let (s, e) = sep(2, (16, 0), (17, 0));
+        let timed = event("lx:t:1", s, e);
+        let allday = event("lx:d:1", Date::constant(2026, 9, 3).at(0, 0, 0, 0), Date::constant(2026, 9, 4).at(0, 0, 0, 0));
+        let (s, e) = sep(4, (10, 0), (11, 0));
+        let booked_hard = event("lx:h:1", s, e);
+        let (s, e) = sep(5, (10, 0), (11, 0));
+        let booked_check = event("lx:k:1", s, e);
+        let (s, e) = sep(6, (10, 0), (11, 0));
+        let open = event("lx:u:1", s, e);
+        let v = coming_up_vault(&[
+            (timed.clone(), "obligation"),
+            (allday.clone(), "obligation"),
+            (booked_hard.clone(), "obligation"),
+            (booked_check.clone(), "opportunity"),
+            (open, "obligation"),
+        ]);
+        card(&v, "event-timed.md", "event-accept", "executed", &[&timed]);
+        card(&v, "event-allday.md", "event-check", "executed", &[&allday]);
+        // The carry's booking of a later instance of a series: a `kind: event` commitment, no card.
+        std::fs::create_dir_all(v.join("commitments")).unwrap();
+        for (id, uid) in [("cmt_hhhhhhhhhh", &booked_hard.uid), ("cmt_kkkkkkkkkk", &booked_check.uid)] {
+            std::fs::write(
+                v.join("commitments").join(format!("{id}.md")),
+                format!(
+                    "---\nid: {id}\ntype: commitment\nkind: event\nlevel: hard\ntitle: \"An event\"\n\
+                     meets: [{{days: [fri], start: \"10:00\", end: \"11:00\"}}]\n\
+                     source_uid: \"{uid}\"\nstatus: confirmed\n---\n\nbody\n"
+                ),
+            )
+            .unwrap();
+        }
+        let rows = coming_up(&v, TODAY, TODAY.at(9, 0, 0, 0));
+        let marks: Vec<(&str, bool)> = rows.iter().map(|r| (r.uid.as_str(), r.accepted)).collect();
+        assert_eq!(marks, [("lx:t:1", true), ("lx:d:1", true), ("lx:h:1", true), ("lx:k:1", true), ("lx:u:1", false)]);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn accepted_is_absent_from_the_json_when_false() {
+        let row = ComingUp {
+            uid: "lx:1".into(),
+            title: "T".into(),
+            start: "2026-09-02T16:00".into(),
+            when: "Wed 9/2 16:00".into(),
+            location: String::new(),
+            organizer: String::new(),
+            accepted: false,
+            provenance: None,
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(!json.contains("accepted"), "{json}");
+        let json = serde_json::to_string(&ComingUp { accepted: true, ..row }).unwrap();
+        assert!(json.contains("\"accepted\":true"), "{json}");
+    }
+}
+
+/// T4c — PQ3 and P17: a carried date is drawn in the all-day lane from its carry line and carries
+/// its provenance in "Coming up"; a `declined` line takes any lane date out; `surface` writes nothing.
+#[cfg(test)]
+mod carried_tests {
+    use super::tests::{fixture_full, TODAY};
+    use super::*;
+    use crate::events::DiscoveredEvent;
+    use crate::eventledger::{record_answer, record_carried_answer, record_declined, record_verdict};
+
+    const CARD: &str = "appr_aaaaaaaaaa";
+    const OTHER: &str = "appr_bbbbbbbbbb";
+
+    fn aug(day: i8, hour: i8, minute: i8) -> DateTime {
+        Date::constant(2026, 8, day).at(hour, minute, 0, 0)
+    }
+
+    fn sep(day: i8, hour: i8, minute: i8) -> DateTime {
+        Date::constant(2026, 9, day).at(hour, minute, 0, 0)
+    }
+
+    fn event(uid: &str, start: DateTime, end: DateTime) -> DiscoveredEvent {
+        DiscoveredEvent::new(uid, &format!("Event {uid}"), start, end, "campus")
+    }
+
+    /// An archived executed card, in the emitter's shape, with this id and `executed_at`.
+    fn archived(vault: &Path, name: &str, id: &str, executed_at: &str, listed: &[&DiscoveredEvent]) {
+        use crate::yamlemit::Node;
+        let pairs = vec![
+            ("id", Node::text(id)),
+            ("type", Node::text("approval")),
+            ("kind", Node::text("event-accept")),
+            ("title", Node::text("Required · an event")),
+            ("status", Node::text("executed")),
+            ("executed_at", Node::text(executed_at)),
+            ("events", Node::Seq(listed.iter().map(|e| Node::text(&e.uid)).collect())),
+            (
+                "instances",
+                Node::Seq(listed.iter().map(|e| crate::eventaccept::Instance::from_event(e).to_node()).collect()),
+            ),
+            ("created_by", Node::text("events")),
+        ];
+        let text = format!("---\n{}---\n\nbody\n", crate::yamlemit::safe_dump_block(&Node::map(pairs)));
+        std::fs::create_dir_all(vault.join("archive")).unwrap();
+        crate::pystr::write_text(&vault.join("archive").join(name), &text).unwrap();
+    }
+
+    /// The carry's line for `e` as the feed gave it, from `from`.
+    fn carry(vault: &Path, e: &DiscoveredEvent, verdict: &str, from: &str) {
+        record_carried_answer(vault, &e.uid, &e.title, TODAY, verdict, from, e.start(), e.end()).unwrap();
+    }
+
+    fn ledger(vault: &Path) -> BTreeMap<String, crate::eventledger::LedgerEntry> {
+        crate::eventledger::load_ledger(vault, None)
+    }
+
+    /// The roster `rank` writes: `events` and the vault's ledger as it stands.
+    fn roster(vault: &Path, events: &[&DiscoveredEvent]) {
+        let list: Vec<DiscoveredEvent> = events.iter().map(|e| (*e).clone()).collect();
+        let path = vault.join("state").join("events.md");
+        crate::eventroster::write_roster(&path, &list, &ledger(vault), &Default::default(), TODAY, &[]).unwrap();
+    }
+
+    fn lane(vault: &Path, day: Date) -> (Vec<String>, Vec<Option<String>>) {
+        let d = the_day(&load(vault, day), day);
+        (d.all_day, d.all_day_uids)
+    }
+
+    fn titles(uids: &[&str]) -> Vec<String> {
+        uids.iter().map(|u| format!("Event {u}")).collect()
+    }
+
+    fn some(uids: &[&str]) -> Vec<Option<String>> {
+        uids.iter().map(|u| Some(u.to_string())).collect()
+    }
+
+    fn rows(vault: &Path) -> Vec<ComingUp> {
+        coming_up(vault, TODAY, TODAY.at(9, 0, 0, 0))
+    }
+
+    fn row<'a>(rows: &'a [ComingUp], uid: &str) -> Option<&'a ComingUp> {
+        rows.iter().find(|r| r.uid == uid)
+    }
+
+    fn lane_uids(vault: &Path) -> Vec<String> {
+        accepted_events(vault, &ledger(vault)).lane.into_iter().map(|i| i.uid).collect()
+    }
+
+    #[test]
+    fn a_carried_lane_date_is_drawn_on_each_day_it_covers() {
+        let v = fixture_full();
+        let open = |n: i8| the_day(&load(&v, Date::constant(2026, 8, n)), Date::constant(2026, 8, n)).open_hours;
+        let before: Vec<f64> = (27..=31).map(open).collect();
+        let two_day = event("lx:a:1", aug(28, 0, 0), aug(30, 0, 0));
+        let zero = event("lx:b:1", aug(31, 10, 0), aug(31, 10, 0));
+        let weekend = event("lx:c:1", aug(28, 17, 0), aug(30, 14, 0));
+        let timed = event("lx:d:1", aug(27, 10, 0), aug(27, 11, 0));
+        for e in [&two_day, &zero, &weekend, &timed] {
+            carry(&v, e, "obligation", CARD);
+        }
+        let after: Vec<f64> = (27..=31).map(open).collect();
+        assert_eq!(before, after, "the lane never moves capacity");
+        let on = |n: i8| lane(&v, Date::constant(2026, 8, n)).0;
+        assert!(on(27).is_empty(), "a carried timed one-day date is not in the lane, nor is the day before");
+        assert_eq!(on(28), titles(&["lx:a:1", "lx:c:1"]));
+        assert_eq!(on(29), titles(&["lx:a:1", "lx:c:1"]));
+        assert_eq!(on(30), titles(&["lx:c:1"]), "the Fri 5pm to Sun 2pm date covers Sunday; the two-day date does not");
+        assert_eq!(on(31), titles(&["lx:b:1"]), "a zero-length date is on its own day");
+        assert!(on(30).iter().all(|t| t != "Event lx:a:1"), "the day after the two-day date lists nothing of it");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn the_lane_holds_whatever_the_roster_says() {
+        let v = fixture_full();
+        let two_day = event("lx:a:1", aug(28, 0, 0), aug(30, 0, 0));
+        let zero = event("lx:b:1", aug(31, 10, 0), aug(31, 10, 0));
+        let weekend = event("lx:c:1", aug(28, 17, 0), aug(30, 14, 0));
+        for e in [&two_day, &zero, &weekend] {
+            carry(&v, e, "obligation", CARD);
+        }
+        let days = |v: &Path| -> Vec<(Vec<String>, Vec<Option<String>>)> {
+            (27..=31).map(|n| lane(v, Date::constant(2026, 8, n))).collect()
+        };
+        // As a feed-failure run leaves it: each date read back as 00:00-01:00.
+        roster(&v, &[&two_day, &zero, &weekend]);
+        let with_roster = days(&v);
+        let _ = std::fs::remove_file(v.join("state").join("events.md"));
+        let without = days(&v);
+        assert_eq!(with_roster, without);
+        assert_eq!(without[1].0, titles(&["lx:a:1", "lx:c:1"]));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_carried_date_is_listed_with_its_provenance() {
+        let v = fixture_full();
+        let other = event("lx:o:1", sep(8, 10, 0), sep(8, 11, 0));
+        archived(&v, "event-series.md", CARD, "2026-09-24 10:15", &[&other]);
+        let timed = event("lx:t:1", sep(2, 16, 0), sep(2, 17, 0));
+        let all_day = event("lx:d:1", sep(3, 0, 0), sep(4, 0, 0));
+        carry(&v, &timed, "obligation", CARD);
+        carry(&v, &all_day, "opportunity", CARD);
+        roster(&v, &[&timed, &all_day]);
+        let listed = rows(&v);
+        for uid in ["lx:t:1", "lx:d:1"] {
+            let r = row(&listed, uid).unwrap_or_else(|| panic!("{uid} is listed"));
+            assert!(r.accepted, "{uid}");
+            assert_eq!(r.provenance.as_deref(), Some("Accepted · from your answer to the series on Thu 9/24"), "{uid}");
+        }
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_provenance_without_its_card_has_no_date() {
+        let v = fixture_full();
+        let timed = event("lx:t:1", sep(2, 16, 0), sep(2, 17, 0));
+        carry(&v, &timed, "obligation", CARD);
+        roster(&v, &[&timed]);
+        let listed = rows(&v);
+        assert_eq!(row(&listed, "lx:t:1").unwrap().provenance.as_deref(), Some("Accepted · from your answer to the series"));
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_declined_or_human_answered_date_is_neither_listed_nor_drawn() {
+        let v = fixture_full();
+        // A declined series' instances: `declined` lines and no carry line.
+        let s1 = event("lx:s:1", aug(28, 0, 0), aug(29, 0, 0));
+        let s2 = event("lx:s:2", sep(3, 0, 0), sep(4, 0, 0));
+        for e in [&s1, &s2] {
+            record_verdict(&v, &e.uid, &e.title, TODAY, "obligation", "", "", "").unwrap();
+            record_declined(&v, &e.uid, TODAY).unwrap();
+        }
+        // A carry line, then a `declined` line.
+        let carried_then_declined = event("lx:c:1", aug(28, 0, 0), aug(29, 0, 0));
+        carry(&v, &carried_then_declined, "obligation", CARD);
+        record_declined(&v, &carried_then_declined.uid, TODAY).unwrap();
+        // A carry line, then a human `drop` answer.
+        let carried_then_dropped = event("lx:h:1", aug(28, 0, 0), aug(29, 0, 0));
+        carry(&v, &carried_then_dropped, "obligation", CARD);
+        record_answer(&v, &carried_then_dropped.uid, &carried_then_dropped.title, TODAY, "drop", "quinn", None).unwrap();
+        // (P17) A card-listed one-day all-day date, confidently judged and in the roster, then declined.
+        let listed = event("lx:k:1", aug(28, 0, 0), aug(29, 0, 0));
+        archived(&v, "event-accept.md", CARD, "2026-09-24 10:15", &[&listed]);
+        record_verdict(&v, &listed.uid, &listed.title, TODAY, "obligation", "", "", "").unwrap();
+        record_declined(&v, &listed.uid, TODAY).unwrap();
+        let all = [&s1, &s2, &carried_then_declined, &carried_then_dropped, &listed];
+        roster(&v, &all);
+        assert!(rows(&v).is_empty(), "{:?}", rows(&v));
+        assert!(lane(&v, TODAY).0.is_empty() && lane(&v, TODAY).1.is_empty());
+        let accepted = accepted_events(&v, &ledger(&v));
+        assert!(accepted.lane.is_empty(), "{:?}", accepted.lane);
+        assert!(accepted.uids.is_empty(), "{:?}", accepted.uids);
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_confidently_judged_carried_date_keeps_its_listing_and_gains_the_label() {
+        let v = fixture_full();
+        let judged = event("lx:j:1", sep(2, 16, 0), sep(2, 17, 0));
+        record_verdict(&v, &judged.uid, &judged.title, TODAY, "opportunity", "strong", "", "").unwrap();
+        carry(&v, &judged, "obligation", CARD);
+        let dropped = event("lx:p:1", aug(28, 0, 0), aug(29, 0, 0));
+        record_verdict(&v, &dropped.uid, &dropped.title, TODAY, "drop", "strong", "", "").unwrap();
+        carry(&v, &dropped, "obligation", CARD);
+        roster(&v, &[&judged, &dropped]);
+        let listed = rows(&v);
+        let r = row(&listed, "lx:j:1").expect("listed");
+        assert!(r.accepted);
+        assert_eq!(r.provenance.as_deref(), Some("Accepted · from your answer to the series"));
+        assert!(row(&listed, "lx:p:1").is_none(), "a machine drop stays out of Coming up");
+        assert_eq!(lane(&v, TODAY).0, titles(&["lx:p:1"]), "but the carried date is in the lane");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_dropped_lane_date_is_drawn_with_its_uid_until_removed() {
+        let v = fixture_full();
+        let carried = event("lx:a:1", aug(28, 0, 0), aug(30, 0, 0));
+        let timed = event("lx:t:1", aug(27, 10, 0), aug(27, 11, 0));
+        let listed = event("lx:k:1", aug(31, 0, 0), sep(1, 0, 0));
+        carry(&v, &carried, "obligation", CARD);
+        carry(&v, &timed, "obligation", CARD);
+        archived(&v, "event-accept.md", OTHER, "2026-09-24 10:15", &[&listed]);
+        // A successful fetch's roster: another event, none of the three.
+        let another = event("lx:o:1", sep(2, 10, 0), sep(2, 11, 0));
+        record_verdict(&v, &another.uid, &another.title, TODAY, "obligation", "", "", "").unwrap();
+        roster(&v, &[&another]);
+        let on = |n: i8| lane(&v, Date::constant(2026, 8, n));
+        for n in [28, 29] {
+            assert_eq!(on(n), (titles(&["lx:a:1"]), some(&["lx:a:1"])), "Aug {n}");
+        }
+        assert_eq!(on(31), (titles(&["lx:k:1"]), some(&["lx:k:1"])));
+        let listed_uids: Vec<String> = rows(&v).into_iter().map(|r| r.uid).collect();
+        assert_eq!(listed_uids, ["lx:o:1"], "Coming up lists none of the three");
+
+        record_declined(&v, "lx:a:1", TODAY).unwrap();
+        for n in [28, 29] {
+            assert_eq!(on(n), (Vec::new(), Vec::new()), "Aug {n}");
+        }
+        assert_eq!(on(31).1, some(&["lx:k:1"]), "the card-listed date is still drawn");
+        record_declined(&v, "lx:k:1", TODAY).unwrap();
+        assert_eq!(on(31), (Vec::new(), Vec::new()));
+        let accepted = accepted_events(&v, &ledger(&v));
+        assert!(lane_uids(&v).is_empty());
+        for uid in ["lx:a:1", "lx:k:1"] {
+            assert!(!accepted.uids.contains(uid), "{uid}");
+        }
+        assert!(accepted.uids.contains("lx:t:1"), "the timed date is untouched");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn a_moved_lane_date_is_drawn_on_its_new_day_only() {
+        let v = fixture_full();
+        // A carried date moved Fri-Sat to Sat-Sun: two lines from one card.
+        let moved = event("lx:m:1", aug(28, 0, 0), aug(30, 0, 0));
+        carry(&v, &moved, "obligation", CARD);
+        let moved_again = event("lx:m:1", aug(29, 0, 0), aug(31, 0, 0));
+        carry(&v, &moved_again, "obligation", CARD);
+        // A card-listed date on Fri, moved to Sat by a carry line from its card.
+        let listed = event("lx:k:1", aug(28, 0, 0), aug(29, 0, 0));
+        archived(&v, "event-accept.md", CARD, "2026-09-24 10:15", &[&listed]);
+        carry(&v, &event("lx:k:1", aug(29, 0, 0), aug(30, 0, 0)), "obligation", CARD);
+        // PQ7: Fri all-day, then Sat 10:00-15:00, from one card: booked, not drawn.
+        carry(&v, &event("lx:p:1", aug(28, 0, 0), aug(29, 0, 0)), "obligation", CARD);
+        carry(&v, &event("lx:p:1", aug(29, 10, 0), aug(29, 15, 0)), "obligation", CARD);
+        let both_moved = || {
+            assert_eq!(lane(&v, Date::constant(2026, 8, 28)), (Vec::new(), Vec::new()), "Fri");
+            assert_eq!(lane(&v, Date::constant(2026, 8, 29)), (titles(&["lx:k:1", "lx:m:1"]), some(&["lx:k:1", "lx:m:1"])), "Sat");
+            assert_eq!(lane(&v, Date::constant(2026, 8, 30)), (titles(&["lx:m:1"]), some(&["lx:m:1"])), "Sun");
+        };
+        both_moved();
+        // A carry line from another card moves neither date (T2b.4's first-line rule).
+        carry(&v, &event("lx:k:1", aug(31, 0, 0), sep(1, 0, 0)), "obligation", OTHER);
+        carry(&v, &event("lx:m:1", aug(31, 0, 0), sep(1, 0, 0)), "obligation", OTHER);
+        both_moved();
+        assert_eq!(lane(&v, Date::constant(2026, 8, 31)), (Vec::new(), Vec::new()));
+        assert_eq!(lane_uids(&v), ["lx:k:1", "lx:m:1"], "the PQ7 date is in no day's lane");
+        assert!(accepted_events(&v, &ledger(&v)).uids.contains("lx:p:1"), "but it is still accepted");
+        // Coming up: the card-listed date is accepted with no label, the carried one has it.
+        roster(&v, &[&moved_again, &event("lx:k:1", aug(29, 0, 0), aug(30, 0, 0))]);
+        let listed_rows = rows(&v);
+        let k = row(&listed_rows, "lx:k:1").expect("listed");
+        assert!(k.accepted && k.provenance.is_none());
+        assert_eq!(
+            row(&listed_rows, "lx:m:1").unwrap().provenance.as_deref(),
+            Some("Accepted · from your answer to the series on Thu 9/24")
+        );
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn the_lane_names_each_accepted_date_by_uid() {
+        let v = fixture_full();
+        carry(&v, &event("lx:a:1", aug(28, 0, 0), aug(30, 0, 0)), "obligation", CARD);
+        let listed = event("lx:k:1", aug(28, 0, 0), aug(29, 0, 0));
+        archived(&v, "event-accept.md", CARD, "2026-09-24 10:15", &[&listed]);
+        let holiday = |title: &str, from: i8| crate::weekcal::CalEvent {
+            title: title.into(),
+            start: aug(from, 0, 0),
+            end: aug(from + 1, 0, 0),
+            all_day: true,
+        };
+        let mut l = load(&v, TODAY);
+        l.cal = WeekCalendar::for_vault(&v, vec![holiday("Holiday", 28), holiday("Quiz day", 27)]);
+        let day = |n: i8| the_day(&l, Date::constant(2026, 8, n));
+        let fri = day(28);
+        assert_eq!(fri.all_day, ["Holiday", "Event lx:a:1", "Event lx:k:1"]);
+        assert_eq!(fri.all_day_uids, [None, Some("lx:a:1".to_string()), Some("lx:k:1".to_string())]);
+        assert_eq!(fri.all_day_uids.len(), fri.all_day.len());
+        let sat = day(29);
+        assert_eq!(sat.all_day, ["Event lx:a:1"]);
+        assert_eq!(sat.all_day_uids, some(&["lx:a:1"]));
+        let thu = day(27);
+        assert_eq!(thu.all_day, ["Quiz day"]);
+        assert!(thu.all_day_uids.is_empty(), "only calendar entries: no uids");
+        let mon = day(31);
+        assert!(mon.all_day.is_empty() && mon.all_day_uids.is_empty());
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    #[test]
+    fn provenance_is_absent_from_the_json_when_none() {
+        let row = ComingUp {
+            uid: "lx:1".into(),
+            title: "T".into(),
+            start: "2026-09-02T16:00".into(),
+            when: "Wed 9/2 16:00".into(),
+            location: String::new(),
+            organizer: String::new(),
+            accepted: false,
+            provenance: None,
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(!json.contains("provenance") && !json.contains("accepted"), "{json}");
+        let labelled = ComingUp { accepted: true, provenance: Some("Accepted · from your answer to the series".into()), ..row };
+        assert!(serde_json::to_string(&labelled).unwrap().contains("\"provenance\":\"Accepted"));
+        let v = fixture_full();
+        let plain = serde_json::to_string(&the_day(&load(&v, TODAY), TODAY)).unwrap();
+        assert!(!plain.contains("all_day_uids"), "{plain}");
+        carry(&v, &event("lx:a:1", aug(28, 0, 0), aug(29, 0, 0)), "obligation", CARD);
+        let drawn = serde_json::to_string(&the_day(&load(&v, TODAY), TODAY)).unwrap();
+        assert!(drawn.contains("\"all_day_uids\":[\"lx:a:1\"]"), "{drawn}");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    fn snapshot(dir: &Path, out: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                snapshot(&path, out);
+            } else {
+                out.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn surface_writes_nothing_and_reads_the_same_twice() {
+        let v = fixture_full();
+        let later = event("lx:b:1", aug(28, 0, 0), aug(29, 0, 0));
+        let earlier = event("lx:a:1", aug(28, 0, 0), aug(29, 0, 0));
+        let timed = event("lx:t:1", sep(2, 16, 0), sep(2, 17, 0));
+        for e in [&later, &earlier, &timed] {
+            carry(&v, e, "obligation", CARD);
+        }
+        archived(&v, "event-accept.md", CARD, "2026-09-24 10:15", &[&event("lx:k:1", aug(28, 0, 0), aug(29, 0, 0))]);
+        roster(&v, &[&timed]);
+        let mut before = BTreeMap::new();
+        snapshot(&v, &mut before);
+        let read = || {
+            let l = load(&v, TODAY);
+            (the_day(&l, TODAY), rows(&v))
+        };
+        let (first, second) = (read(), read());
+        assert_eq!(first, second);
+        assert_eq!(first.0.all_day, titles(&["lx:a:1", "lx:b:1", "lx:k:1"]), "(first day, title, uid) order");
+        assert_eq!(first.0.all_day_uids, some(&["lx:a:1", "lx:b:1", "lx:k:1"]));
+        let mut after = BTreeMap::new();
+        snapshot(&v, &mut after);
+        assert!(before == after, "surface wrote into the vault");
         let _ = std::fs::remove_dir_all(&v);
     }
 }

@@ -1,0 +1,2383 @@
+//! The vault-writing event state outside `approvals.rs`: the ever-written set, the series carry,
+//! D9's rebuild and `answered_series`.
+//!
+//! Spec `2026-09-29-events-design.md` §4.5 and §6.1. [`answered_series`] is the one definition of
+//! an answered `event-accept` series. The emitter's never-ask-twice, the carry and `judge_roster`
+//! all call it and none restates it, so one `rank` cannot both carry a series and ask about it.
+//! [`accepted_check_series`] (PQ1 (a), Quinn, 2026-09-30) adds the series an accepted
+//! `event-check` card carries, for the accept carry alone.
+//!
+//! [`run`] is the one entry point `rank` calls: D9's rebuild of `declined` lines from archived
+//! `rejected` cards, then the carry over every fetched instance of an answered series that no event
+//! card names. For each carried date of an accepted series, timed or lane-shaped, the carry writes
+//! one ledger line credited to itself, never to the student (PQ3 (b-prime), the plan's P15):
+//! `eventledger::record_carried_answer`, by `agent:knowlu.carry`, `from:` the answering card's id,
+//! with the series' real verdict and the date's span as the feed gave it. When a later fetch moves
+//! an accepted lane date (a carried one, or one its card lists) to another lane span, the carry
+//! appends one more line of that shape with the new span (PQ5 (b2), [`follow_moves`]). A carried
+//! lane date moved to clock hours is booked at its new hours and gets that line with its timed
+//! span (PQ7 (c)); a card-listed one stays drawn where it was.
+//!
+//! The student's removal of an accepted lane date, [`remove_lane_date`] (P17), is the one write in
+//! this module made on the student's click.
+//!
+//! **A run built from the roster carries nothing, deliberately.** When every feed fails, `rank`
+//! passes `eventroster::read_roster`'s events. Their `series_uid` is their own uid and their span
+//! is the roster's lossy read-back, so they match no answered series, and the carry skips any
+//! `source: "roster"` event besides. The next run that fetches the feeds carries as usual. The
+//! carry reads series only from fetched events, never from the roster, the ledger or any other
+//! store. This is intended: do not "fix" it.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+use jiff::civil::{Date, DateTime};
+use serde_yaml_ng::Mapping;
+
+use crate::commitments::{create_confirmed, Level};
+use crate::eventaccept::{commitment_for, shape, Instance};
+use crate::eventledger::{
+    carried_answer_reads_back, load_ledger, record_carried_answer, record_declined, LedgerEntry,
+};
+use crate::events::DiscoveredEvent;
+use crate::journal::Journal;
+use crate::models::split_frontmatter;
+use crate::write::WriteContext;
+use crate::{ids, pystr, yaml};
+
+/// The card kind whose answers [`answered_series`] reads.
+const EVENT_ACCEPT: &str = "event-accept";
+
+/// The other event card kind. [`shown_on_a_card`] reads its uids; [`answered_series`] does not.
+const EVENT_CHECK: &str = "event-check";
+
+/// The `source` `eventroster::read_roster` gives every event it reads back (spec §2).
+const ROSTER_SOURCE: &str = "roster";
+
+/// One series an archived `event-accept` card answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeriesAccept {
+    /// `executed` answers accept (`true`); `rejected` answers decline (`false`).
+    pub accepted: bool,
+    /// The answering card's file name in `archive/`.
+    pub file: String,
+    /// The answering card's `id:`, or empty when it has none or [`ids::is_id`] refuses it. The
+    /// carry's ledger line names the card by it (the plan's P15, `from:`).
+    pub id: String,
+    /// The card's `verdict:`, stripped: `obligation` or `opportunity` on every card the emitter
+    /// files. The accept carry's level reads it.
+    pub verdict: String,
+    /// The uids the card's `events:` lists. The settlement answered these, so the carry never does.
+    pub listed: BTreeSet<String>,
+}
+
+/// Every series an `event-accept` card answered, keyed by `series_uid` (spec §6.1).
+///
+/// The edge rules follow `eventemit::settled_series`:
+/// - it reads `archive/` only, through `approvals::sorted_md`, and only `type: approval`,
+///   `kind: event-accept` cards: an `event-check` card is not counted (accepted `event-check`
+///   series reach the carry through their own reader, never through this one);
+/// - `executed` answers accept and `rejected` answers decline; `expired` or any other status
+///   answers nothing (ruling G1), so it shadows no other card;
+/// - a card with a missing or empty `series_uid` answers no series; the uid rule (§4.1) closes
+///   that card's own instances;
+/// - if two cards answer one series, the lowest file name wins.
+///
+/// It reads no ledger. An unreadable card answers nothing. The `id:` is read as `ids::build_index`
+/// reads it (unstripped, then [`ids::is_id`]), so the carry never names a card by an id the index
+/// would refuse.
+pub fn answered_series(vault: &Path) -> BTreeMap<String, SeriesAccept> {
+    let mut answered: BTreeMap<String, SeriesAccept> = BTreeMap::new();
+    for path in crate::approvals::sorted_md(&vault.join("archive")) {
+        let Ok(text) = pystr::read_text(&path) else { continue };
+        let Ok((meta, _)) = split_frontmatter(&text) else { continue };
+        if card_text(&meta, "type") != "approval" || card_text(&meta, "kind") != EVENT_ACCEPT {
+            continue;
+        }
+        let accepted = match card_text(&meta, "status").as_str() {
+            "executed" => true,
+            "rejected" => false,
+            _ => continue,
+        };
+        let series = card_text(&meta, "series_uid");
+        if series.is_empty() || answered.contains_key(&series) {
+            continue;
+        }
+        let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let id = yaml::opt_text(yaml::get(&meta, "id")).filter(|id| ids::is_id(id)).unwrap_or_default();
+        let verdict = card_text(&meta, "verdict");
+        let listed = crate::eventemit::card_event_uids(&meta).into_iter().collect();
+        answered.insert(series, SeriesAccept { accepted, file, id, verdict, listed });
+    }
+    answered
+}
+
+/// One series an archived `executed` `event-check` card with `instances:` claimed and accepted
+/// (PQ1 (a)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckAccept {
+    /// The answering card's file name in `archive/`.
+    pub file: String,
+    /// The answering card's `id:`, read as [`SeriesAccept::id`] is: the carry's ledger line names
+    /// the card by it (the plan's P15, `from:`).
+    pub id: String,
+    /// The uids the card's `events:` lists. The settlement answered these, so the carry never does.
+    pub listed: BTreeSet<String>,
+}
+
+/// Every series an accepted `event-check` card carries, keyed by `series_uid` (PQ1 (a), Quinn,
+/// 2026-09-30). D11 makes such a card's Approve an Accept, so its series carries as an accepted
+/// `event-accept` series does, at `level: hard` (P7).
+///
+/// Only the accept carry reads it: never the decline carry, the emitter or `judge_roster`, which
+/// keep [`answered_series`] (whose edge rule still leaves `event-check` cards out). The rules:
+/// - it reads `archive/` only, through `approvals::sorted_md`, and only `type: approval`,
+///   `kind: event-check` cards;
+/// - a series is claimed as `eventemit::settled_series` claims it, so the two `event-check`
+///   readers never disagree: the lowest-named `executed` or `rejected` card with a non-empty
+///   `series_uid` claims it, and an `expired` card or any other status claims nothing (ruling G1);
+/// - the series carries only when its claiming card is `executed` and its `instances:` is a
+///   sequence. A claiming `rejected` card (its series has `drop` lines through
+///   `eventemit::inherit_series_answers`) or a claiming card filed before this lane (no
+///   `instances:`: its Approve only answered) carries nothing, and no later card of the series
+///   can book it (review finding on T2b.2b).
+///
+/// It reads no ledger. An unreadable card answers nothing.
+pub fn accepted_check_series(vault: &Path) -> BTreeMap<String, CheckAccept> {
+    let mut claimed: BTreeSet<String> = BTreeSet::new();
+    let mut accepted: BTreeMap<String, CheckAccept> = BTreeMap::new();
+    for path in crate::approvals::sorted_md(&vault.join("archive")) {
+        let Ok(text) = pystr::read_text(&path) else { continue };
+        let Ok((meta, _)) = split_frontmatter(&text) else { continue };
+        if card_text(&meta, "type") != "approval" || card_text(&meta, "kind") != EVENT_CHECK {
+            continue;
+        }
+        let executed = match card_text(&meta, "status").as_str() {
+            "executed" => true,
+            "rejected" => false,
+            _ => continue,
+        };
+        let series = card_text(&meta, "series_uid");
+        if series.is_empty() || !claimed.insert(series.clone()) {
+            continue;
+        }
+        if !executed || !matches!(yaml::get(&meta, "instances"), Some(serde_yaml_ng::Value::Sequence(_))) {
+            continue;
+        }
+        let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let id = yaml::opt_text(yaml::get(&meta, "id")).filter(|id| ids::is_id(id)).unwrap_or_default();
+        let listed = crate::eventemit::card_event_uids(&meta).into_iter().collect();
+        accepted.insert(series, CheckAccept { file, id, listed });
+    }
+    accepted
+}
+
+/// The ever-written set (spec §5.3): the `source_uid` of every note in `commitments/`, `tasks/` and
+/// `archive/`. A live note means "already written"; an archived one means "written, then deleted by
+/// the student" (`write::delete` moves it there with its frontmatter intact). Both mean "never
+/// write again", so a uid (or `register:<uid>`) in this set is never written by the settlement or
+/// the carry.
+///
+/// Notes with `type: approval` are left out, and `approvals/` is not read: an event card carries
+/// its primary's uid as `source_uid`, and counting it would stop that instance from ever being
+/// written. Unreadable notes are skipped.
+pub fn ever_written(vault: &Path) -> BTreeSet<String> {
+    let mut written = BTreeSet::new();
+    for folder in [crate::commitments::FOLDER, "tasks", "archive"] {
+        for path in crate::approvals::sorted_md(&vault.join(folder)) {
+            let Ok(text) = pystr::read_text(&path) else { continue };
+            let Ok((meta, _)) = split_frontmatter(&text) else { continue };
+            if card_text(&meta, "type") == "approval" {
+                continue;
+            }
+            let uid = card_text(&meta, "source_uid");
+            if !uid.is_empty() {
+                written.insert(uid);
+            }
+        }
+    }
+    written
+}
+
+/// The shown set: every uid an event card of either kind names, as `source_uid` or in `events:`,
+/// in `approvals/` or `archive/`, whatever its status. These are the folders and kinds the
+/// emitter's never-ask-twice reads. The carry acts on none of them.
+///
+/// An answer covers the instances its own card lists and the series' instances that no card has
+/// shown. An instance another card showed belongs to that card. While the card is live, its own
+/// answer is still to come. Once it has expired, the instance stays unanswered: D8 keeps it in
+/// Coming up and out of the plan. A later card of the series never lists it (ruling G1), so that
+/// card's answer does not cover it either (review finding on T2b.2). Unreadable cards are skipped.
+fn shown_on_a_card(vault: &Path) -> BTreeSet<String> {
+    let mut shown = BTreeSet::new();
+    for folder in ["approvals", "archive"] {
+        for path in crate::approvals::sorted_md(&vault.join(folder)) {
+            let Ok(text) = pystr::read_text(&path) else { continue };
+            let Ok((meta, _)) = split_frontmatter(&text) else { continue };
+            let kind = card_text(&meta, "kind");
+            if card_text(&meta, "type") != "approval" || (kind != EVENT_ACCEPT && kind != EVENT_CHECK) {
+                continue;
+            }
+            let uid = card_text(&meta, "source_uid");
+            if !uid.is_empty() {
+                shown.insert(uid);
+            }
+            shown.extend(crate::eventemit::card_event_uids(&meta));
+        }
+    }
+    shown
+}
+
+/// D9's rebuild, then the series carry (spec §4.5, D4, D9): the one entry point `rank` calls.
+/// Returns `(ledger lines written, warnings)`, and updates `ledger` as `load_ledger` would read
+/// every new line.
+///
+/// 1. **D9.** Each uid a `rejected` `event-accept` card in `archive/` lists gets a `declined` line
+///    unless it has one: the archived card is the record of the answer, and it syncs where the
+///    ledger does not. An `executed` card needs nothing here.
+/// 2. **The carry**, over each fetched instance in `events` whose series a card answered
+///    ([`answered_series`], or for an accept [`accepted_check_series`] too) and whose uid no event
+///    card names (`shown_on_a_card`: not the answering card, and not an expired or live one), in
+///    `(start, uid)` order, each uid once:
+///    - a declined series ([`answered_series`] alone) gives the instance a `declined` line unless
+///      it has one;
+///    - an accepted series (`accepted_series`: the union, [`answered_series`] winning an overlap)
+///      books an instance starting today or later, one carried date at a time (`book`): the
+///      commitment `eventaccept::commitment_for` gives at the level the `event-accept` card's
+///      `verdict:` names, or `hard` for an `event-check` series (P7), through
+///      `commitments::create_confirmed` (actor `agent:commitments`, journal first). A
+///      lane-shaped instance (all-day, multi-day, zero-length) has no commitment. No register
+///      task is written (P9): a series has one, for its primary. It never books a uid in the
+///      [`ever_written`] set, so a note the student deleted stays deleted, nor an instance the
+///      student turned down on its own (`turned_down`);
+///    - then, whatever the booking's outcome, the date's one carry line (`carry_line`, PQ3, P15),
+///      unless the uid already has a carry line, a human answer or a `declined` line. A card with
+///      no usable `id:` books its dates and writes no line, with one warning naming it.
+/// 3. **A moved lane span** (PQ5 (b2)): over the same events and the map with step 2's lines, one
+///    more carry line for each accepted lane date the feed moved to another lane span starting
+///    today or later ([`follow_moves`]), and for each carried lane date it moved to clock hours,
+///    which step 2 booked at those hours (PQ7 (c)).
+///
+/// A `source: "roster"` event is never carried (the module doc says why).
+///
+/// A write failure is a warning and the next `rank` retries; nothing here panics. Every carried
+/// note is a journal `create` in this run, which is what lists it in the read model's delta. No
+/// ledger line has a journal record, the carry's included.
+pub fn run(
+    vault: &Path,
+    events: &[DiscoveredEvent],
+    ledger: &mut BTreeMap<String, LedgerEntry>,
+    today: Date,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> (usize, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut lines = rebuild_declines(vault, ledger, today, &mut warnings);
+    let answered = answered_series(vault);
+    let accepted = accepted_series(&answered, &accepted_check_series(vault), &mut warnings);
+    let written = ever_written(vault);
+    let shown = shown_on_a_card(vault);
+    let mut ordered: Vec<&DiscoveredEvent> = events.iter().filter(|e| e.source != ROSTER_SOURCE).collect();
+    ordered.sort_by(|a, b| (a.start(), &a.uid).cmp(&(b.start(), &b.uid)));
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut carried: Vec<String> = Vec::new();
+    let mut unlisted: BTreeSet<String> = BTreeSet::new();
+    for &event in &ordered {
+        if !seen.insert(event.uid.as_str()) || shown.contains(&event.uid) {
+            continue;
+        }
+        if let Some(series) = answered.get(&event.series_uid).filter(|s| !s.accepted) {
+            if !series.listed.contains(&event.uid) && decline(vault, &event.uid, ledger, today, &mut warnings) {
+                lines += 1;
+            }
+            continue;
+        }
+        let Some(series) = accepted.get(&event.series_uid) else { continue };
+        if series.listed.contains(&event.uid) || event.start().date() < today {
+            continue;
+        }
+        book(vault, event, series.level, &written, ledger, today, ctx, journal, &mut warnings);
+        // PQ3: the date's one line, whatever the booking's outcome (P15's *When*).
+        if carry_line(vault, event, series, ledger, today, &mut unlisted, &mut warnings) {
+            carried.push(event.uid.clone());
+        }
+    }
+    read_back(vault, &carried, ledger);
+    // PQ5 (b2): then each accepted lane date the feed moved, over the map as now read.
+    let moved = follow_moves(vault, &ordered, &accepted, ledger, today, &mut unlisted, &mut warnings);
+    read_back(vault, &moved, ledger);
+    (lines + carried.len() + moved.len(), warnings)
+}
+
+/// P17 (Quinn, Checkpoint B, 2026-10-01): the student's "Remove from my day" on an accepted lane
+/// date, from either source: a carried date whose carry span is lane-shaped, or a date on an
+/// executed card's `instances:`. It writes the line a card's Decline writes (spec §4.3),
+/// `- <uid> · declined <today>`, through `eventledger::record_declined`. `rank` never calls it.
+///
+/// In P17's order:
+/// 1. the gate ([`student_gate`]): only the vault's own human token removes a date;
+/// 2. a uid the ledger cannot read back (`ledger_reads`) is refused: its line would never read as
+///    declined;
+/// 3. a uid already `declined` writes nothing: `Ok(false)`;
+/// 4. a uid that is not a lane instance of `surface::accepted_events` over the vault's ledger is
+///    refused, so the lane and the removal read one definition of an accepted lane date;
+/// 5. the line, then `Ok(true)`.
+///
+/// Each refusal is one line naming the uid and the reason, and writes nothing. The line is the
+/// only write: no note, and no journal record (a ledger line has none, P15). The existing readers
+/// do the rest: `load_ledger` sets `declined` whatever the verdict, and the lane, Coming up, the
+/// carry and never-ask-twice each leave a declined uid alone.
+pub fn remove_lane_date(vault: &Path, uid: &str, today: Date, ctx: &WriteContext) -> Result<bool, String> {
+    let refused = |why: &str| format!("{uid:?} was not removed: {why}");
+    student_gate(vault, ctx).map_err(|why| refused(&why))?;
+    if !ledger_reads(uid) {
+        return Err(refused("the event ledger cannot read that uid back"));
+    }
+    let ledger = load_ledger(vault, None);
+    if ledger.get(uid).is_some_and(|entry| entry.declined) {
+        return Ok(false);
+    }
+    if crate::surface::accepted_events(vault, &ledger).lane.iter().all(|lane| lane.uid != uid) {
+        return Err(refused("it is not an accepted all-day date on the day"));
+    }
+    record_declined(vault, uid, today).map_err(|err| refused(&format!("the event ledger was not written ({err})")))?;
+    Ok(true)
+}
+
+/// [`remove_lane_date`]'s gate: `write::human_gate`'s rule, restated here because that gate is
+/// private and on the contract list, and made stricter, because only the student removes a date.
+/// A change to one is to be seen beside the other.
+///
+/// - An invalid `config/actor.yaml` refuses every actor with `journal::read_human_actor`'s own
+///   line (ruling 11). `human_gate` lets an agent past without reading the file; this gate admits
+///   no agent, so it reads the file first.
+/// - An `agent:` or `system:` actor is refused, where `human_gate` lets it write.
+/// - A human actor that is not the vault's own token is refused, as `human_gate` refuses it.
+///
+/// The token is read on every call, never cached.
+fn student_gate(vault: &Path, ctx: &WriteContext) -> Result<(), String> {
+    let token = crate::journal::read_human_actor(vault).map_err(|err| err.to_string())?;
+    let actor = &ctx.actor;
+    if crate::provenance::is_agent(actor) || actor.starts_with("system:") {
+        return Err(format!("only the student removes a date from the day, and {actor:?} is not the student"));
+    }
+    if actor != token {
+        let file = crate::journal::ACTOR_FILE;
+        return Err(format!("{file}: this vault's human is {token}, so a removal as {actor:?} is refused"));
+    }
+    Ok(())
+}
+
+/// D9: a `declined` line for each uid a `rejected` `event-accept` card in `archive/` lists, unless
+/// the ledger has one. Every rejected card counts, whatever its `series_uid`, since the lines
+/// decline the card's own instances: cards in file-name order, uids in `events:` order. Returns
+/// the lines written.
+fn rebuild_declines(
+    vault: &Path,
+    ledger: &mut BTreeMap<String, LedgerEntry>,
+    today: Date,
+    warnings: &mut Vec<String>,
+) -> usize {
+    let mut lines = 0;
+    for path in crate::approvals::sorted_md(&vault.join("archive")) {
+        let Ok(text) = pystr::read_text(&path) else { continue };
+        let Ok((meta, _)) = split_frontmatter(&text) else { continue };
+        let rejected = card_text(&meta, "status") == "rejected";
+        if card_text(&meta, "type") != "approval" || card_text(&meta, "kind") != EVENT_ACCEPT || !rejected {
+            continue;
+        }
+        for uid in crate::eventemit::card_event_uids(&meta) {
+            if decline(vault, &uid, ledger, today, warnings) {
+                lines += 1;
+            }
+        }
+    }
+    lines
+}
+
+/// A `declined` line for `uid` unless the ledger has one, then the map updated as `load_ledger`
+/// reads that line. `true` when a line was written. A uid the ledger cannot read back gets no line
+/// and a warning: its line would never read as declined, so it would be written on every `rank`.
+fn decline(
+    vault: &Path,
+    uid: &str,
+    ledger: &mut BTreeMap<String, LedgerEntry>,
+    today: Date,
+    warnings: &mut Vec<String>,
+) -> bool {
+    if ledger.get(uid).is_some_and(|entry| entry.declined) {
+        return false;
+    }
+    if !ledger_reads(uid) {
+        warnings.push(format!("carry: no declined line for {uid:?}: the ledger cannot read it back"));
+        return false;
+    }
+    if let Err(err) = record_declined(vault, uid, today) {
+        warnings.push(format!("carry: no declined line for {uid:?} ({err})"));
+        return false;
+    }
+    ledger.entry(uid.to_string()).or_insert_with(|| LedgerEntry::new(uid)).declined = true;
+    true
+}
+
+/// Does `load_ledger` read a marker line for `uid` back? Its uid class is `[A-Za-z0-9_.:@+-]`, and
+/// a uid holding `verdict:` breaks its own marker line (`eventledger`'s module doc).
+fn ledger_reads(uid: &str) -> bool {
+    !uid.is_empty()
+        && uid.chars().all(|c| c.is_ascii_alphanumeric() || "_.:@+-".contains(c))
+        && !uid.contains("verdict:")
+}
+
+/// One accepted series, as the accept carry books it and writes its lines.
+struct Accepted {
+    /// `Hard` for an obligation or an `event-check` series (P7), `Soft` for an opportunity (D1).
+    level: Level,
+    /// The series' real verdict, the carry line's word (P15): the `event-accept` card's
+    /// `verdict:`, or `obligation` for an `event-check` series.
+    word: &'static str,
+    /// The answering card's `id:` (the carry line's `from:`), empty when it has none.
+    id: String,
+    /// The answering card's file name in `archive/`, for the warning when `id` is empty.
+    file: String,
+    /// The uids the answering card listed: the settlement's, never the carry's.
+    listed: BTreeSet<String>,
+}
+
+/// The accepted set, keyed by `series_uid`: the one place it is built. It is the union of
+/// [`answered_series`]' executed entries, at the level the card's `verdict:` names, and
+/// [`accepted_check_series`] (PQ1 (a)), at `Hard` (P7).
+///
+/// A series in both readers, which only a hand edit makes, takes [`answered_series`]' answer
+/// whatever it is: a series declined on an `event-accept` card is never booked, and one whose
+/// `event-accept` card names no verdict the carry reads is not booked either. An `event-accept`
+/// card with any other verdict books nothing and warns, since Knowlu never guesses a level; only a
+/// hand edit makes one.
+fn accepted_series(
+    answered: &BTreeMap<String, SeriesAccept>,
+    checks: &BTreeMap<String, CheckAccept>,
+    warnings: &mut Vec<String>,
+) -> BTreeMap<String, Accepted> {
+    let mut accepted = BTreeMap::new();
+    for (series, answer) in answered.iter().filter(|(_, answer)| answer.accepted) {
+        let (level, word) = match answer.verdict.as_str() {
+            "obligation" => (Level::Hard, "obligation"),
+            "opportunity" => (Level::Soft, "opportunity"),
+            _ => {
+                let file = &answer.file;
+                warnings.push(format!(
+                    "carry: archive/{file} has no verdict the carry reads; its series is not booked"
+                ));
+                continue;
+            }
+        };
+        let (id, file, listed) = (answer.id.clone(), answer.file.clone(), answer.listed.clone());
+        accepted.insert(series.clone(), Accepted { level, word, id, file, listed });
+    }
+    for (series, check) in checks.iter().filter(|(series, _)| !answered.contains_key(*series)) {
+        let (id, file, listed) = (check.id.clone(), check.file.clone(), check.listed.clone());
+        accepted.insert(series.clone(), Accepted { level: Level::Hard, word: "obligation", id, file, listed });
+    }
+    accepted
+}
+
+/// One carried date's booking step: `event`'s commitment at `level`, unless its uid is in the
+/// ever-written set (`written`) or the student turned it down on its own. A lane-shaped event has
+/// no commitment. A failed create is a warning, and the next `rank` retries.
+///
+/// A carried lane date the feed moves to clock hours is booked here at its new hours, like any
+/// timed date; [`follow_moves`] then records its timed span, so the lane stops drawing it (PQ7 (c),
+/// Quinn, 2026-10-01).
+#[allow(clippy::too_many_arguments)]
+fn book(
+    vault: &Path,
+    event: &DiscoveredEvent,
+    level: Level,
+    written: &BTreeSet<String>,
+    ledger: &BTreeMap<String, LedgerEntry>,
+    today: Date,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+    warnings: &mut Vec<String>,
+) {
+    if written.contains(&event.uid) || ledger.get(&event.uid).is_some_and(turned_down) {
+        return;
+    }
+    let Some(commitment) = commitment_for(&Instance::from_event(event), level) else { return };
+    if let Err(err) = create_confirmed(vault, &commitment, &event.uid, today, ctx, journal) {
+        warnings.push(format!("carry: {} not booked ({err})", event.uid));
+    }
+}
+
+/// One carried date's ledger line (PQ3 (b-prime), P15), after its booking step whatever that
+/// step's outcome: `record_carried_answer` with the series' real verdict, the answering card's id
+/// and the event's own span. `true` when a line was written.
+///
+/// It does not wait on the booking, which retries on its own through the ever-written set: a line
+/// held back by a failed booking would let the same run's `inherit_series_answers` (P16) answer the
+/// date as the student, and the carry never could after that. No line for a uid that already has a
+/// carry line, a human answer or a `declined` line (judge once). A card with no usable `id:` books
+/// its dates but cannot name itself on a line: one warning per card (`unlisted` holds the files
+/// warned about). A line the ledger could not read back exactly as written
+/// (`eventledger::carried_answer_reads_back`: a uid or span outside its classes, or a feed title
+/// that splits the line or starts with a field head such as `verdict:` or `by:`) would be misread
+/// or written again on every `rank`, so it is not written and a warning says why. The date is
+/// booked all the same. The line has no journal record, as no ledger line has
+/// one. A write failure is a warning, and the next `rank` retries.
+fn carry_line(
+    vault: &Path,
+    event: &DiscoveredEvent,
+    series: &Accepted,
+    ledger: &BTreeMap<String, LedgerEntry>,
+    today: Date,
+    unlisted: &mut BTreeSet<String>,
+    warnings: &mut Vec<String>,
+) -> bool {
+    let answered = |entry: &LedgerEntry| entry.carry.is_some() || entry.declined || answered_by_human(entry);
+    if ledger.get(&event.uid).is_some_and(answered) {
+        return false;
+    }
+    append_line(vault, event, series, today, unlisted, warnings)
+}
+
+/// The carry's line for `event` (P15), shared by its first line ([`carry_line`]) and a moved span
+/// ([`follow_moves`]): `record_carried_answer` with the series' real verdict, the answering card's
+/// id and the event's own span. `true` when a line was written. The rules below are
+/// [`carry_line`]'s, stated there.
+fn append_line(
+    vault: &Path,
+    event: &DiscoveredEvent,
+    series: &Accepted,
+    today: Date,
+    unlisted: &mut BTreeSet<String>,
+    warnings: &mut Vec<String>,
+) -> bool {
+    if series.id.is_empty() {
+        if unlisted.insert(series.file.clone()) {
+            let file = &series.file;
+            warnings.push(format!("carry: archive/{file} has no id; its dates are booked but not listed"));
+        }
+        return false;
+    }
+    let (start, end) = (event.start(), event.end());
+    if !carried_answer_reads_back(&event.uid, &event.title, today, series.word, &series.id, start, end) {
+        warnings.push(format!("carry: no line for {:?}: the ledger cannot read it back", event.uid));
+        return false;
+    }
+    let written = record_carried_answer(vault, &event.uid, &event.title, today, series.word, &series.id, start, end);
+    if let Err(err) = written {
+        warnings.push(format!("carry: no line for {} ({err})", event.uid));
+        return false;
+    }
+    true
+}
+
+/// PQ5 (b2) (Quinn, 2026-10-01): one more carry line for each accepted lane date the feed has
+/// moved to another lane span, so the lane draws it on its new days; and, by PQ7 (c) (Quinn,
+/// 2026-10-01), for a carried lane date the feed moved to clock hours, so the lane stops drawing
+/// it. `events` are [`run`]'s, in its order and never the roster's; `ledger` holds T2b.5's lines
+/// of this run. Returns the uids given a line. A fetched event, each uid once, gets a line when its
+/// series is accepted and:
+/// - it is an accepted lane date: its entry has `carry`, or its uid is on the `instances:` of its
+///   series' answering card ([`card_spans`]); the span it is drawn with (the `carry` span, else the
+///   card's) is lane-shaped (`eventaccept::shape`), so a carried timed date is never followed;
+/// - the fetched span differs from that span at the second, and starts today or later;
+/// - the fetched span is lane-shaped too, unless the uid is a carried date: an entry with `carry`
+///   whose uid the series' card does not list, which `run`'s step 2 booked (`book`). Lane to lane
+///   only holds for a card-listed date, `carry` or not: the carry never books one, so a timed line
+///   would leave it out of the lane and unbooked. It stays drawn where it is (PQ5's *Not covered*);
+/// - it has no `declined` line and no human answer (judge once);
+/// - a `carry` it has names the series' card: `load_ledger` reads a later line only from the first
+///   one's card, so a line from another would be written again on every `rank`;
+/// - [`append_line`]'s rules hold: a card id, and a line the ledger reads back as written.
+///
+/// The line is the only write here: no commitment and no journal record. `book` made the booking
+/// of a date moved to clock hours, before this step, and a failed booking does not hold the line
+/// back (the next `rank` books it, and finds the line written). A write failure is a warning, and
+/// the next `rank` retries.
+fn follow_moves(
+    vault: &Path,
+    events: &[&DiscoveredEvent],
+    accepted: &BTreeMap<String, Accepted>,
+    ledger: &BTreeMap<String, LedgerEntry>,
+    today: Date,
+    unlisted: &mut BTreeSet<String>,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    let lane = |(start, end): Interval| shape(start, end).lane().is_some();
+    let second = |at: DateTime| at.date().at(at.hour(), at.minute(), at.second(), 0);
+    let mut cards: BTreeMap<&str, BTreeMap<String, Interval>> = BTreeMap::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut moved = Vec::new();
+    for &event in events {
+        if !seen.insert(event.uid.as_str()) {
+            continue;
+        }
+        let Some(series) = accepted.get(&event.series_uid) else { continue };
+        let entry = ledger.get(&event.uid);
+        if entry.is_some_and(|e| e.declined || answered_by_human(e)) {
+            continue;
+        }
+        let carry = entry.and_then(|e| e.carry.as_ref());
+        let drawn = match carry {
+            Some(carry) => Some((carry.start, carry.end)),
+            None => {
+                let spans = cards.entry(series.file.as_str()).or_insert_with(|| card_spans(vault, &series.file));
+                spans.get(&event.uid).copied()
+            }
+        };
+        let fetched = (second(event.start()), second(event.end()));
+        // PQ7 (c): a carried date, which step 2's `book` booked, may move to clock hours. A
+        // card-listed one may not, even with a `carry` from a lane move: the carry never books it.
+        let carried = carry.is_some() && !series.listed.contains(&event.uid);
+        let is_move = drawn.is_some_and(|drawn| drawn != fetched && lane(drawn) && (lane(fetched) || carried));
+        if !is_move || event.start().date() < today || carry.is_some_and(|c| c.from != series.id) {
+            continue;
+        }
+        if append_line(vault, event, series, today, unlisted, warnings) {
+            moved.push(event.uid.clone());
+        }
+    }
+    moved
+}
+
+/// A span, `(start, end)`, as a carry line and an `instances:` entry hold it.
+type Interval = (DateTime, DateTime);
+
+/// Each uid's span on the `instances:` of `archive/<file>`, a series' answering card, read as the
+/// settlement reads it (`Instance::from_yaml`: a malformed entry is skipped). The first entry for
+/// a uid wins. Empty when the card cannot be read or has no `instances:` sequence.
+fn card_spans(vault: &Path, file: &str) -> BTreeMap<String, Interval> {
+    let mut spans = BTreeMap::new();
+    let Ok(text) = pystr::read_text(&vault.join("archive").join(file)) else { return spans };
+    let Ok((meta, _)) = split_frontmatter(&text) else { return spans };
+    let Some(serde_yaml_ng::Value::Sequence(entries)) = yaml::get(&meta, "instances") else { return spans };
+    for instance in entries.iter().filter_map(|e| e.as_mapping().and_then(Instance::from_yaml)) {
+        spans.entry(instance.uid).or_insert((instance.start, instance.end));
+    }
+    spans
+}
+
+/// The map updated as `load_ledger` reads the carry's new lines (P15's *Read*): each uid given a
+/// line in this run takes its entry from the file itself, so the map and the reader cannot
+/// disagree. One read, and only when a line was written.
+fn read_back(vault: &Path, uids: &[String], ledger: &mut BTreeMap<String, LedgerEntry>) {
+    if uids.is_empty() {
+        return;
+    }
+    let fresh = load_ledger(vault, None);
+    for uid in uids {
+        if let Some(entry) = fresh.get(uid) {
+            ledger.insert(uid.clone(), entry.clone());
+        }
+    }
+}
+
+/// Did the student turn this instance down on its own: a `declined` line, or a human `drop`
+/// answer? The carry never books one (judge once). A machine's `drop` verdict is no answer: the
+/// student's answer for the series covers it.
+fn turned_down(entry: &LedgerEntry) -> bool {
+    entry.declined || (answered_by_human(entry) && entry.verdict.as_deref() == Some("drop"))
+}
+
+/// Was this uid settled by a human answer: an `answered_by` that `provenance::is_agent` rejects?
+/// The carry's own line leaves an agent's (`eventledger::CARRY_ACTOR`).
+fn answered_by_human(entry: &LedgerEntry) -> bool {
+    !entry.answered_by.is_empty() && !crate::provenance::is_agent(&entry.answered_by)
+}
+
+/// A card field as text, stripped; empty when absent, null or not a scalar.
+fn card_text(meta: &Mapping, key: &str) -> String {
+    let raw = yaml::opt_text(yaml::get(meta, key)).unwrap_or_default();
+    pystr::strip(&raw).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    //! T2b.1: `answered_series`' edge rules (spec §6.1), each with an answering card beside it so
+    //! a reader that answers nothing fails them.
+
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    const ID_A: &str = "appr_0123456789";
+    const ID_B: &str = "appr_abcdef0123";
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("qo-carry-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A card written by hand into `folder`. `extra` is whole frontmatter lines, each ending `\n`.
+    fn card(vault: &Path, folder: &str, name: &str, kind: &str, status: &str, extra: &str) {
+        fs::create_dir_all(vault.join(folder)).unwrap();
+        let text = format!(
+            "---\n{extra}type: approval\nkind: {kind}\ntitle: \"Required · Weekly meeting · Tue 22 Sep 7–9pm\"\n\
+             status: {status}\nverdict: obligation\nsource_uid: \"lx:77:1\"\nevents:\n- \"lx:77:1\"\n\
+             proposed_at: 2026-09-20\nfirst_proposed_at: 2026-09-20\nexpires: 2026-09-22\n\
+             snooze_until: null\ncreated_by: events\n---\n\nbody\n"
+        );
+        pystr::write_text(&vault.join(folder).join(name), &text).unwrap();
+    }
+
+    /// An `event-accept` card in `archive/` answering `series`; `id` is the YAML text of `id:`.
+    fn accept(vault: &Path, name: &str, status: &str, series: &str, id: Option<&str>) {
+        let id_line = id.map(|i| format!("id: {i}\n")).unwrap_or_default();
+        card(vault, "archive", name, EVENT_ACCEPT, status, &format!("{id_line}series_uid: \"{series}\"\n"));
+    }
+
+    fn keys(answered: &BTreeMap<String, SeriesAccept>) -> Vec<&str> {
+        answered.keys().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn an_executed_card_answers_accept_and_a_rejected_one_decline() {
+        let vault = tmp("answers");
+        accept(&vault, "event-weekly-meeting-2026-09-22.md", "executed", "lx:77", Some(ID_A));
+        accept(&vault, "event-film-night-2026-09-23.md", "rejected", "lx:78", Some(ID_B));
+        accept(&vault, "event-no-id-2026-09-24.md", "executed", "lx:79", None);
+        accept(&vault, "event-bad-id-2026-09-25.md", "rejected", "lx:80", Some("not-an-id"));
+        // Read as `ids::build_index` reads an id, unstripped: this one names no note.
+        accept(&vault, "event-spaced-id-2026-09-26.md", "executed", "lx:81", Some("\" appr_0123456789\""));
+
+        let answered = answered_series(&vault);
+        assert_eq!(keys(&answered), ["lx:77", "lx:78", "lx:79", "lx:80", "lx:81"]);
+        let weekly = &answered["lx:77"];
+        assert!(weekly.accepted, "executed answers accept");
+        assert_eq!(weekly.file, "event-weekly-meeting-2026-09-22.md");
+        assert_eq!(weekly.id, ID_A);
+        let film = &answered["lx:78"];
+        assert!(!film.accepted, "rejected answers decline");
+        assert_eq!(film.file, "event-film-night-2026-09-23.md");
+        assert_eq!(film.id, ID_B);
+        for (series, accepted) in [("lx:79", true), ("lx:80", false), ("lx:81", true)] {
+            assert_eq!(answered[series].accepted, accepted, "{series}");
+            assert_eq!(answered[series].id, "", "{series}: no id, or one ids::is_id refuses");
+        }
+    }
+
+    #[test]
+    fn an_expired_or_other_status_answers_nothing() {
+        let vault = tmp("statuses");
+        for (name, status, series) in [
+            ("event-a-expired.md", "expired", "lx:1"),
+            // A `pending` card moved into `archive/` by hand was never answered.
+            ("event-b-pending.md", "pending", "lx:2"),
+            ("event-c-approved.md", "approved", "lx:3"),
+            ("event-d-failed.md", "failed", "lx:4"),
+            ("event-e-empty.md", "\"\"", "lx:5"),
+            ("event-f-null.md", "null", "lx:6"),
+        ] {
+            accept(&vault, name, status, series, Some(ID_A));
+        }
+        // Ruling G1: an expired card answers nothing, so it does not shadow a later answer.
+        accept(&vault, "event-g-expired.md", "expired", "lx:9", Some(ID_A));
+        accept(&vault, "event-h-executed.md", "executed", "lx:9", Some(ID_B));
+        let broken = "---\ntype: approval\nkind: [event-accept\nstatus: executed\n---\n";
+        pystr::write_text(&vault.join("archive").join("event-i-unreadable.md"), broken).unwrap();
+
+        let answered = answered_series(&vault);
+        assert_eq!(keys(&answered), ["lx:9"]);
+        assert!(answered["lx:9"].accepted);
+        assert_eq!(answered["lx:9"].file, "event-h-executed.md");
+        assert_eq!(answered["lx:9"].id, ID_B);
+    }
+
+    #[test]
+    fn a_card_with_a_missing_or_empty_series_uid_answers_no_series() {
+        let vault = tmp("no-series");
+        card(&vault, "archive", "event-a-missing.md", EVENT_ACCEPT, "executed", &format!("id: {ID_A}\n"));
+        let empties = [("event-b-empty.md", "\"\""), ("event-c-blank.md", "\"   \""), ("event-d-null.md", "null")];
+        for (name, series) in empties {
+            let extra = format!("id: {ID_A}\nseries_uid: {series}\n");
+            card(&vault, "archive", name, EVENT_ACCEPT, "rejected", &extra);
+        }
+        accept(&vault, "event-e.md", "executed", "lx:9", Some(ID_B));
+
+        // No series, and no fallback to the card's `source_uid` (`lx:77:1`): the uid rule (§4.1)
+        // closes that card's own instances, not this reader.
+        let answered = answered_series(&vault);
+        assert_eq!(keys(&answered), ["lx:9"]);
+        assert_eq!(answered["lx:9"].file, "event-e.md");
+    }
+
+    #[test]
+    fn an_event_check_card_is_not_counted() {
+        let vault = tmp("event-check");
+        // PQ1 (a) leaves this rule unchanged: an executed `event-check` card, even one carrying
+        // `instances:`, reaches the carry only through `accepted_check_series` (T2b.2b).
+        let instances = "instances:\n- uid: \"lx:1:1\"\n  title: \"Weekly meeting\"\n  \
+                         start: \"2026-09-22T19:00\"\n  end: \"2026-09-22T21:00\"\n";
+        let carried = format!("series_uid: \"lx:1\"\n{instances}");
+        card(&vault, "archive", "event-check-a.md", "event-check", "executed", &carried);
+        card(&vault, "archive", "event-check-b.md", "event-check", "rejected", "series_uid: \"lx:2\"\n");
+        // A note that is not an approval is no card, whatever its `kind:` says.
+        let task = "---\ntype: task\nkind: event-accept\nstatus: executed\nseries_uid: \"lx:3\"\n---\n";
+        pystr::write_text(&vault.join("archive").join("event-c-task.md"), task).unwrap();
+        accept(&vault, "event-d.md", "executed", "lx:9", Some(ID_A));
+
+        assert_eq!(keys(&answered_series(&vault)), ["lx:9"]);
+    }
+
+    #[test]
+    fn two_cards_for_one_series_the_lowest_file_name_wins() {
+        let vault = tmp("two-cards");
+        // Written highest first, so the directory's own order cannot decide.
+        accept(&vault, "event-weekly-b.md", "executed", "lx:77", Some(ID_B));
+        accept(&vault, "event-weekly-a.md", "rejected", "lx:77", Some(ID_A));
+        accept(&vault, "event-film-b.md", "rejected", "lx:78", Some(ID_B));
+        accept(&vault, "event-film-a.md", "executed", "lx:78", Some(ID_A));
+        // Lowest by bytes: a collision's `-2.md` sorts before `.md`.
+        accept(&vault, "event-talk-2026-10-06.md", "executed", "lx:79", Some(ID_A));
+        accept(&vault, "event-talk-2026-10-06-2.md", "rejected", "lx:79", Some(ID_B));
+
+        let answered = answered_series(&vault);
+        let pick = |series: &str| {
+            let a = &answered[series];
+            (a.accepted, a.file.clone(), a.id.clone())
+        };
+        assert_eq!(pick("lx:77"), (false, "event-weekly-a.md".to_string(), ID_A.to_string()));
+        assert_eq!(pick("lx:78"), (true, "event-film-a.md".to_string(), ID_A.to_string()));
+        assert_eq!(pick("lx:79"), (false, "event-talk-2026-10-06-2.md".to_string(), ID_B.to_string()));
+    }
+
+    #[test]
+    fn only_archive_is_read() {
+        let vault = tmp("archive-only");
+        assert!(answered_series(&vault).is_empty(), "a vault with no archive/ answers nothing");
+        for (name, status, series) in [("event-a.md", "executed", "lx:1"), ("event-b.md", "rejected", "lx:2")] {
+            let extra = format!("id: {ID_A}\nseries_uid: \"{series}\"\n");
+            card(&vault, "approvals", name, EVENT_ACCEPT, status, &extra);
+        }
+        assert!(answered_series(&vault).is_empty(), "a card in approvals/ answers nothing");
+
+        accept(&vault, "event-c.md", "executed", "lx:9", Some(ID_B));
+        assert_eq!(keys(&answered_series(&vault)), ["lx:9"]);
+    }
+
+    // --- T2b.2: the ever-written set, D9's rebuild and the series carry (spec §4.5, §5.3) -------
+    //
+    // No test here asserts on an accepted series' ledger lines or on `run`'s line count when an
+    // accepted series carries: T2b.5 adds the carry's line, and an assertion may not change later.
+
+    use crate::eventledger::{load_ledger, record_answer, record_verdict};
+    use jiff::civil::{date, DateTime};
+
+    /// The run's day, Thu 1 Oct 2026. The series below meet on Tuesdays.
+    const TODAY: Date = Date::constant(2026, 10, 1);
+    const DECLINED_ON: &str = "declined 2026-10-01";
+
+    fn at(month: i8, day: i8, hour: i8, minute: i8) -> DateTime {
+        date(2026, month, day).at(hour, minute, 0, 0)
+    }
+
+    /// A fetched instance of `series`, as a feed gives it.
+    fn instance(uid: &str, series: &str, start: DateTime, end: DateTime) -> DiscoveredEvent {
+        let mut event = DiscoveredEvent::new(uid, "Weekly meeting", start, end, "localist");
+        event.series_uid = series.to_string();
+        event
+    }
+
+    /// An answered `event-accept` card in `archive/`, as the settlement leaves it. `events:` lists
+    /// `listed`, the first its primary; an empty `verdict` or `series` writes a null.
+    fn answered_card(vault: &Path, name: &str, status: &str, verdict: &str, series: &str, listed: &[&str], id: &str) {
+        let events: String = listed.iter().map(|uid| format!("- \"{uid}\"\n")).collect();
+        let primary = listed.first().copied().unwrap_or_default();
+        let series = if series.is_empty() { "null".to_string() } else { format!("\"{series}\"") };
+        let text = format!(
+            "---\nid: {id}\ntype: approval\nkind: {EVENT_ACCEPT}\ntitle: \"Weekly meeting · Tue 6 Oct 7–9pm\"\n\
+             status: {status}\nverdict: {verdict}\nsource_uid: \"{primary}\"\nseries_uid: {series}\n\
+             events:\n{events}proposed_at: 2026-09-24\nfirst_proposed_at: 2026-09-24\n\
+             expires: 2026-10-06\nsnooze_until: null\ncreated_by: events\n---\n\nbody\n"
+        );
+        fs::create_dir_all(vault.join("archive")).unwrap();
+        pystr::write_text(&vault.join("archive").join(name), &text).unwrap();
+    }
+
+    /// The context `rank` passes: an agent, so `write`'s human gate does not apply.
+    fn rank_ctx() -> WriteContext {
+        WriteContext { actor: "agent:approvals".into(), via: "cli".into(), run_id: Some("run-carry".into()) }
+    }
+
+    /// The student's own context, its actor read from the vault (rule 1: no literal).
+    fn student(vault: &Path) -> WriteContext {
+        WriteContext::new(crate::journal::read_human_actor(vault).unwrap(), "dashboard")
+    }
+
+    /// One `run` over the vault's ledger as `rank` loads it: `(lines, warnings, the updated map)`.
+    fn carry(vault: &Path, events: &[DiscoveredEvent]) -> (usize, Vec<String>, BTreeMap<String, LedgerEntry>) {
+        let mut ledger = load_ledger(vault, None);
+        let mut journal = Journal::new(vault);
+        let (lines, warnings) = run(vault, events, &mut ledger, TODAY, &rank_ctx(), &mut journal);
+        (lines, warnings, ledger)
+    }
+
+    fn ledger_text(vault: &Path) -> Option<String> {
+        pystr::read_text(&vault.join("state").join("events-seen.md")).ok()
+    }
+
+    /// The `declined` lines of the ledger, in file order.
+    fn declined_lines(vault: &Path) -> Vec<String> {
+        let text = ledger_text(vault).unwrap_or_default();
+        text.lines().filter(|l| l.contains(" · declined ")).map(str::to_string).collect()
+    }
+
+    /// Every journal file's bytes, in file-name order.
+    fn journal_text(vault: &Path) -> String {
+        let dir = vault.join("state").join("journal");
+        let mut files: Vec<PathBuf> = fs::read_dir(&dir)
+            .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        files.sort();
+        files.iter().map(|f| fs::read_to_string(f).unwrap()).collect()
+    }
+
+    /// `(file name, frontmatter)` of every note in `folder`, in file-name order.
+    fn notes(vault: &Path, folder: &str) -> Vec<(String, Mapping)> {
+        crate::approvals::sorted_md(&vault.join(folder))
+            .into_iter()
+            .map(|p| {
+                let (meta, _) = split_frontmatter(&pystr::read_text(&p).unwrap()).unwrap();
+                (p.file_name().unwrap().to_string_lossy().into_owned(), meta)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_ever_written_set_reads_commitments_tasks_and_archive() {
+        let vault = tmp("ever-written");
+        let mut journal = Journal::new(&vault);
+        let ctx = rank_ctx();
+        // Written as the settlement writes them; two then deleted as the student deletes them.
+        let mut book = |uid: &str, day: i8| {
+            let event = instance(uid, "lx:1", at(10, day, 19, 0), at(10, day, 21, 0));
+            let commitment = commitment_for(&Instance::from_event(&event), Level::Hard).unwrap();
+            create_confirmed(&vault, &commitment, uid, TODAY, &ctx, &mut journal).unwrap()
+        };
+        book("lx:1:1", 6);
+        let gone = book("lx:3:1", 13);
+        let mut register = |uid: &str, day: i8| {
+            let mut event = instance(uid, "lx:2", at(10, day, 19, 0), at(10, day, 21, 0));
+            event.registration = true;
+            let (stem, text) = crate::eventaccept::register_task(&Instance::from_event(&event)).unwrap();
+            crate::write::create(&vault, &format!("tasks/{stem}.md"), &text, &ctx, &mut journal, None).unwrap()
+        };
+        register("lx:2:1", 6);
+        let gone_task = register("lx:4:1", 13);
+        for path in [&gone, &gone_task] {
+            crate::write::delete(&vault, &crate::ids::rel(&vault, path), &student(&vault), &mut journal).unwrap();
+        }
+        assert_eq!(notes(&vault, "archive").len(), 2, "write::delete moves each note to archive/");
+        // Approval cards carry their primary's uid (`lx:77:1`) as `source_uid`: not a note written.
+        accept(&vault, "event-weekly-2026-10-06.md", "executed", "lx:77", Some(ID_A));
+        card(&vault, "approvals", "event-pending.md", EVENT_ACCEPT, "pending", "series_uid: \"lx:77\"\n");
+        // A folder the set does not read, a null uid, and an unreadable note.
+        fs::create_dir_all(vault.join("info")).unwrap();
+        pystr::write_text(&vault.join("info").join("x.md"), "---\ntype: info\nsource_uid: \"lx:7:1\"\n---\n").unwrap();
+        pystr::write_text(&vault.join("tasks").join("y.md"), "---\ntitle: Y\nsource_uid: null\n---\n").unwrap();
+        pystr::write_text(&vault.join("commitments").join("z.md"), "---\nsource_uid: [lx:8:1\n---\n").unwrap();
+
+        let set: Vec<String> = ever_written(&vault).into_iter().collect();
+        assert_eq!(set, ["lx:1:1", "lx:3:1", "register:lx:2:1", "register:lx:4:1"]);
+    }
+
+    #[test]
+    fn d9_rebuilds_declined_lines_from_a_rejected_card() {
+        let vault = tmp("d9");
+        let film = ["lx:78:1", "lx:78:2"];
+        answered_card(&vault, "event-film-night-2026-10-08.md", "rejected", "opportunity", "lx:78", &film, "appr_00000000a1");
+        // Every rejected card counts, whatever its series: its lines decline its own instances.
+        answered_card(&vault, "event-talk-2026-10-09.md", "rejected", "opportunity", "", &["lx:79:1"], "appr_00000000a2");
+        // An executed or expired card, and a rejected `event-check` card, write nothing here.
+        answered_card(&vault, "event-weekly-2026-10-06.md", "executed", "obligation", "lx:77", &["lx:77:1"], "appr_00000000a3");
+        answered_card(&vault, "event-fair-2026-10-07.md", "expired", "opportunity", "lx:80", &["lx:80:1"], "appr_00000000a4");
+        card(&vault, "archive", "event-check-lab.md", "event-check", "rejected", "series_uid: \"lx:81\"\n");
+        assert_eq!(ledger_text(&vault), None, "an empty ledger");
+
+        let (lines, warnings, ledger) = carry(&vault, &[]);
+        assert_eq!((lines, warnings), (3, Vec::<String>::new()));
+        let expected: Vec<String> =
+            ["lx:78:1", "lx:78:2", "lx:79:1"].iter().map(|uid| format!("- {uid} · {DECLINED_ON}")).collect();
+        assert_eq!(declined_lines(&vault), expected, "cards in file-name order, uids in `events:` order");
+        assert_eq!(ledger, load_ledger(&vault, None), "the map reads as `load_ledger` reads the file");
+        assert_eq!(journal_text(&vault), "", "a ledger line has no journal record");
+
+        // `relevant_events` then excludes them: each has a verdict that would list it, as a control does.
+        let events: Vec<DiscoveredEvent> = ["lx:78:1", "lx:78:2", "lx:79:1", "lx:82:1"]
+            .iter()
+            .map(|uid| instance(uid, "lx:78", at(10, 8, 19, 0), at(10, 8, 21, 0)))
+            .collect();
+        for event in &events {
+            record_verdict(&vault, &event.uid, "Film night", TODAY, "opportunity", "", "", "").unwrap();
+        }
+        let shown = crate::eventroster::relevant_events(&events, &load_ledger(&vault, None));
+        assert_eq!(shown.iter().map(|e| e.uid.as_str()).collect::<Vec<_>>(), ["lx:82:1"]);
+
+        // A second call writes nothing.
+        let before = ledger_text(&vault);
+        let (lines, warnings, _) = carry(&vault, &[]);
+        assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+        assert_eq!(ledger_text(&vault), before);
+    }
+
+    #[test]
+    fn a_declined_series_declines_its_later_instances() {
+        let vault = tmp("declined-series");
+        answered_card(&vault, "event-film-night-2026-10-06.md", "rejected", "opportunity", "lx:78", &["lx:78:1"], "appr_00000000b1");
+        // The settlement's own line for the instance the card listed (spec §4.3).
+        crate::eventledger::record_declined(&vault, "lx:78:1", date(2026, 9, 30)).unwrap();
+        let events = [
+            instance("lx:78:2", "lx:78", at(10, 13, 19, 0), at(10, 13, 21, 0)),
+            instance("lx:78:1", "lx:78", at(10, 6, 19, 0), at(10, 6, 21, 0)),
+            // A decline has no date rule (spec §4.5): an instance already started is declined too.
+            instance("lx:78:0", "lx:78", at(9, 29, 19, 0), at(9, 29, 21, 0)),
+            // A series nobody answered.
+            instance("lx:90:1", "lx:90", at(10, 13, 19, 0), at(10, 13, 21, 0)),
+        ];
+        let (lines, warnings, ledger) = carry(&vault, &events);
+        assert_eq!((lines, warnings), (2, Vec::<String>::new()));
+        let expected = vec![
+            "- lx:78:1 · declined 2026-09-30".to_string(),
+            format!("- lx:78:0 · {DECLINED_ON}"),
+            format!("- lx:78:2 · {DECLINED_ON}"),
+        ];
+        assert_eq!(declined_lines(&vault), expected, "one line per new instance, in (start, uid) order");
+        assert_eq!(ledger, load_ledger(&vault, None), "the map reads as `load_ledger` reads the file");
+        assert!(!ledger.contains_key("lx:90:1"));
+        assert!(!vault.join(crate::commitments::FOLDER).exists());
+        assert_eq!(journal_text(&vault), "");
+
+        let before = ledger_text(&vault);
+        let (lines, warnings, _) = carry(&vault, &events);
+        assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+        assert_eq!(ledger_text(&vault), before, "a second call writes nothing");
+    }
+
+    #[test]
+    fn an_accepted_series_books_a_later_instance_once() {
+        let vault = tmp("accepted-series");
+        answered_card(&vault, "event-weekly-meeting-2026-10-06.md", "executed", "obligation", "lx:77", &["lx:77:1"], "appr_00000000c1");
+        answered_card(&vault, "event-film-night-2026-10-08.md", "executed", "opportunity", "lx:88", &["lx:88:1"], "appr_00000000c2");
+        let mut later = instance("lx:77:2", "lx:77", at(10, 13, 19, 0), at(10, 13, 21, 0));
+        later.registration = true; // P9: the carry still writes no register task
+        later.location = "Ferguson Center".into();
+        let events = [
+            later.clone(),
+            instance("lx:77:1", "lx:77", at(10, 6, 19, 0), at(10, 6, 21, 0)), // listed: the settlement's
+            instance("lx:77:0", "lx:77", at(9, 30, 19, 0), at(9, 30, 21, 0)), // starts before today
+            instance("lx:77:5", "lx:77", at(10, 1, 18, 0), at(10, 1, 19, 0)), // starts today
+            instance("lx:77:3", "lx:77", at(10, 20, 0, 0), at(10, 21, 0, 0)), // all day: the answer stands
+            instance("lx:88:2", "lx:88", at(10, 15, 17, 0), at(10, 15, 18, 0)), // an opportunity: soft
+            later, // the same instance from a second feed: booked once
+        ];
+        let (_, warnings, _) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new(), "an all-day instance is not a warning");
+
+        let booked: Vec<(String, String, String, String)> = notes(&vault, crate::commitments::FOLDER)
+            .iter()
+            .map(|(_, m)| (card_text(m, "source_uid"), card_text(m, "level"), card_text(m, "kind"), card_text(m, "from")))
+            .collect();
+        let row = |uid: &str, level: &str, from: &str| (uid.to_string(), level.to_string(), "event".to_string(), from.to_string());
+        let mut sorted = booked.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            [row("lx:77:2", "hard", "2026-10-13"), row("lx:77:5", "hard", "2026-10-01"), row("lx:88:2", "soft", "2026-10-15")],
+            "the level is the card's verdict's; nothing before today, listed, or all day"
+        );
+        // One journal `create` per note, journal first, as `agent:commitments`, in (start, uid) order.
+        let records = Journal::new(&vault).read(None, None);
+        let created: Vec<(String, String)> = records
+            .iter()
+            .map(|r| (r["op"].as_str().unwrap().to_string(), r["actor"].as_str().unwrap().to_string()))
+            .collect();
+        assert_eq!(created, vec![("create".to_string(), crate::commitments::CARD_ACTOR.to_string()); 3]);
+        let order: Vec<String> = records
+            .iter()
+            .map(|r| {
+                let meta = split_frontmatter(&pystr::read_text(&vault.join(r["path"].as_str().unwrap())).unwrap()).unwrap().0;
+                card_text(&meta, "source_uid")
+            })
+            .collect();
+        assert_eq!(order, ["lx:77:5", "lx:77:2", "lx:88:2"]);
+        assert!(!vault.join("tasks").exists(), "P9: the carry writes commitments only");
+
+        // A second call writes nothing, no journal record included.
+        let journal = journal_text(&vault);
+        let (_, warnings, _) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(journal_text(&vault), journal);
+        assert_eq!(notes(&vault, crate::commitments::FOLDER).len(), 3);
+    }
+
+    #[test]
+    fn a_deleted_carried_note_stays_deleted() {
+        let vault = tmp("delete-sticks");
+        answered_card(&vault, "event-weekly-meeting-2026-10-06.md", "executed", "obligation", "lx:77", &["lx:77:1"], "appr_00000000d1");
+        let mut primary = instance("lx:77:1", "lx:77", at(10, 6, 19, 0), at(10, 6, 21, 0));
+        primary.registration = true;
+        // The settlement's register task, for the primary only (spec §4.2).
+        let (stem, text) = crate::eventaccept::register_task(&Instance::from_event(&primary)).unwrap();
+        let mut journal = Journal::new(&vault);
+        crate::write::create(&vault, &format!("tasks/{stem}.md"), &text, &rank_ctx(), &mut journal, None).unwrap();
+        let events = [primary, instance("lx:77:2", "lx:77", at(10, 13, 19, 0), at(10, 13, 21, 0))];
+        let (_, warnings, _) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        let carried = notes(&vault, crate::commitments::FOLDER);
+        assert_eq!(carried.iter().map(|(_, m)| card_text(m, "source_uid")).collect::<Vec<_>>(), ["lx:77:2"]);
+
+        // The student deletes the carried commitment and the register task: each goes to archive/.
+        let mut journal = Journal::new(&vault);
+        for rel in [format!("commitments/{}", carried[0].0), format!("tasks/{stem}.md")] {
+            crate::write::delete(&vault, &rel, &student(&vault), &mut journal).unwrap();
+        }
+        let after_delete = journal_text(&vault);
+        for _ in 0..2 {
+            let (_, warnings, _) = carry(&vault, &events);
+            assert_eq!(warnings, Vec::<String>::new());
+        }
+        assert!(notes(&vault, crate::commitments::FOLDER).is_empty(), "the deleted commitment stays deleted");
+        assert!(notes(&vault, "tasks").is_empty(), "the deleted register task is never re-created");
+        assert_eq!(journal_text(&vault), after_delete, "no journal record for either uid");
+    }
+
+    #[test]
+    fn roster_read_events_carry_nothing() {
+        let vault = tmp("roster-run");
+        answered_card(&vault, "event-weekly-meeting-2026-10-06.md", "executed", "obligation", "lx:77", &["lx:77:1"], "appr_00000000e1");
+        answered_card(&vault, "event-film-night-2026-10-06.md", "rejected", "opportunity", "lx:78", &["lx:78:1"], "appr_00000000e2");
+        crate::eventledger::record_declined(&vault, "lx:78:1", date(2026, 9, 30)).unwrap();
+        // The control: a fetched later instance of the declined series is carried.
+        let control = [instance("lx:78:2", "lx:78", at(10, 13, 19, 0), at(10, 13, 21, 0))];
+        assert_eq!(carry(&vault, &control).0, 1);
+        // As `read_roster` builds them: `source: "roster"`, `series_uid` its own uid, one hour.
+        let roster = |uid: &str| DiscoveredEvent::new(uid, "Weekly meeting", at(10, 20, 19, 0), at(10, 20, 20, 0), "roster");
+        let events = [roster("lx:77:3"), roster("lx:78:3")];
+        assert_eq!(events[0].series_uid, "lx:77:3");
+        let ledger = ledger_text(&vault);
+
+        let (lines, warnings, _) = carry(&vault, &events);
+        assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+        // The series rule alone carries nothing either: an event whose series is its own uid
+        // reaches no answered series, whatever its source.
+        let fetched: Vec<DiscoveredEvent> =
+            events.iter().map(|e| DiscoveredEvent { source: "localist".into(), ..e.clone() }).collect();
+        let (lines, warnings, _) = carry(&vault, &fetched);
+        assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+
+        assert_eq!(ledger_text(&vault), ledger, "no ledger line");
+        assert!(!vault.join(crate::commitments::FOLDER).exists(), "no note");
+        assert_eq!(journal_text(&vault), "", "no journal record");
+    }
+
+    #[test]
+    fn a_card_with_an_unknown_verdict_books_nothing_and_warns() {
+        let vault = tmp("unknown-verdict");
+        // Only a hand edit makes these: the emitter writes `obligation` or `opportunity`.
+        answered_card(&vault, "event-weekly-meeting-2026-10-06.md", "executed", "maybe", "lx:77", &["lx:77:1"], "appr_00000000f1");
+        answered_card(&vault, "event-lab-2026-10-06.md", "executed", "", "lx:76", &["lx:76:1"], "appr_00000000f2");
+        let events = [
+            instance("lx:77:2", "lx:77", at(10, 13, 19, 0), at(10, 13, 21, 0)),
+            instance("lx:76:2", "lx:76", at(10, 13, 15, 0), at(10, 13, 16, 0)),
+        ];
+        let (_, warnings, _) = carry(&vault, &events);
+        let warned = |file: &str| format!("carry: archive/{file} has no verdict the carry reads; its series is not booked");
+        assert_eq!(warnings, [warned("event-lab-2026-10-06.md"), warned("event-weekly-meeting-2026-10-06.md")]);
+        assert!(!vault.join(crate::commitments::FOLDER).exists(), "Knowlu never guesses a level");
+        assert_eq!(journal_text(&vault), "");
+    }
+
+    #[test]
+    fn an_instance_turned_down_on_its_own_is_never_booked() {
+        let vault = tmp("turned-down");
+        answered_card(&vault, "event-weekly-meeting-2026-10-06.md", "executed", "obligation", "lx:77", &["lx:77:1"], "appr_00000000a5");
+        let before = date(2026, 9, 30);
+        crate::eventledger::record_declined(&vault, "lx:77:2", before).unwrap();
+        let human = crate::journal::read_human_actor(&vault).unwrap();
+        record_answer(&vault, "lx:77:3", "Weekly meeting", before, "drop", human, None).unwrap();
+        // A machine's `drop` is no answer: the student's answer for the series covers the instance.
+        record_verdict(&vault, "lx:77:4", "Weekly meeting", before, "drop", "", "", "").unwrap();
+        let events: Vec<DiscoveredEvent> = [("lx:77:2", 13), ("lx:77:3", 20), ("lx:77:4", 27)]
+            .iter()
+            .map(|(uid, day)| instance(uid, "lx:77", at(10, *day, 19, 0), at(10, *day, 21, 0)))
+            .collect();
+        let (_, warnings, _) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        let booked: Vec<String> =
+            notes(&vault, crate::commitments::FOLDER).iter().map(|(_, m)| card_text(m, "source_uid")).collect();
+        assert_eq!(booked, ["lx:77:4"]);
+    }
+
+    #[test]
+    fn an_instance_another_card_showed_is_never_carried() {
+        // Review finding on T2b.2 (D8 against D4, §4.5): a later card's answer does not reach an
+        // instance an earlier card showed. Expired, that card left it unanswered: it stays in Coming
+        // up and out of the plan (D8). The emitter never puts it on the later card (ruling G1).
+        let vault = tmp("shown-elsewhere");
+        answered_card(&vault, "event-weekly-2026-10-06.md", "expired", "opportunity", "lx:77", &["lx:77:1"], "appr_00000000b2");
+        answered_card(&vault, "event-weekly-2026-10-13.md", "executed", "opportunity", "lx:77", &["lx:77:2"], "appr_00000000b3");
+        answered_card(&vault, "event-film-2026-10-06.md", "expired", "opportunity", "lx:78", &["lx:78:1"], "appr_00000000b4");
+        answered_card(&vault, "event-film-2026-10-13.md", "rejected", "opportunity", "lx:78", &["lx:78:2"], "appr_00000000b5");
+        // Either event kind, any status, either folder, named in `events:` or as `source_uid` alone.
+        let shown = |folder: &str, name: &str, kind: &str, status: &str, uid: &str, in_events: bool| {
+            let events = if in_events { format!("events:\n- \"{uid}\"\n") } else { String::new() };
+            let text = format!(
+                "---\ntype: approval\nkind: {kind}\nstatus: {status}\nsource_uid: \"{uid}\"\n\
+                 series_uid: \"{}\"\n{events}---\n\nbody\n",
+                &uid[..5]
+            );
+            fs::create_dir_all(vault.join(folder)).unwrap();
+            pystr::write_text(&vault.join(folder).join(name), &text).unwrap();
+        };
+        shown("archive", "event-check-a.md", "event-check", "expired", "lx:77:3", true);
+        shown("approvals", "event-weekly-b.md", EVENT_ACCEPT, "pending", "lx:77:4", true);
+        shown("archive", "event-check-c.md", "event-check", "expired", "lx:78:3", false);
+        shown("approvals", "event-check-d.md", "event-check", "pending", "lx:78:4", true);
+        // `:5` of each series is on no card: the controls, carried as before.
+        let events: Vec<DiscoveredEvent> = ["lx:77", "lx:78"]
+            .iter()
+            .flat_map(|series| {
+                [(1, 10, 6), (2, 10, 13), (3, 10, 20), (4, 10, 27), (5, 11, 3)].map(|(n, month, day)| {
+                    instance(&format!("{series}:{n}"), series, at(month, day, 19, 0), at(month, day, 21, 0))
+                })
+            })
+            .collect();
+
+        // No assertion on `run`'s line count: an accepted series carries here (the T2b.2 note above).
+        let (_, warnings, ledger) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        let booked: Vec<String> =
+            notes(&vault, crate::commitments::FOLDER).iter().map(|(_, m)| card_text(m, "source_uid")).collect();
+        assert_eq!(booked, ["lx:77:5"], "no instance another card showed is booked");
+        let expected = [format!("- lx:78:2 · {DECLINED_ON}"), format!("- lx:78:5 · {DECLINED_ON}")];
+        assert_eq!(declined_lines(&vault), expected, "D9 for the card's own, the carry for the control");
+        assert_eq!(ledger, load_ledger(&vault, None));
+        for uid in ["lx:77:1", "lx:78:1", "lx:78:3", "lx:78:4"] {
+            assert!(!ledger.contains_key(uid), "{uid}: no line, so it stays in Coming up (D8)");
+        }
+    }
+
+    #[test]
+    fn a_uid_the_ledger_cannot_read_back_gets_no_declined_line() {
+        let vault = tmp("unreadable-uid");
+        let listed = ["lx:78:1", "lx:78 bad", "lx:verdict:2"];
+        answered_card(&vault, "event-film-night-2026-10-06.md", "rejected", "opportunity", "lx:78", &listed, "appr_00000000a6");
+        let events = [instance("lx:78:verdict:3", "lx:78", at(10, 13, 19, 0), at(10, 13, 21, 0))];
+        let warned = |uid: &str| format!("carry: no declined line for {uid:?}: the ledger cannot read it back");
+        let expected = [warned("lx:78 bad"), warned("lx:verdict:2"), warned("lx:78:verdict:3")];
+
+        let (lines, warnings, _) = carry(&vault, &events);
+        assert_eq!((lines, warnings.as_slice()), (1, expected.as_slice()));
+        assert_eq!(declined_lines(&vault), [format!("- lx:78:1 · {DECLINED_ON}")]);
+        // Written anyway, such a line would be written again on every `rank`.
+        let before = ledger_text(&vault);
+        let (lines, warnings, _) = carry(&vault, &events);
+        assert_eq!((lines, warnings.as_slice()), (0, expected.as_slice()));
+        assert_eq!(ledger_text(&vault), before);
+    }
+
+    // --- T2b.2b: PQ1 (a), an accepted `event-check` series carries -----------------------------
+    //
+    // As in T2b.2, no test here asserts on the accept carry's ledger lines: T2b.5 adds them.
+
+    /// An answered `event-check` card in `archive/`, in the emitter's shape: no `verdict:`,
+    /// `events:` lists `listed` (the first its primary), and `instances:` carries them when
+    /// `with_instances` (a card filed before this lane carries none). An empty `series` is `''`.
+    fn check_card(vault: &Path, name: &str, status: &str, series: &str, listed: &[&DiscoveredEvent], with_instances: bool, id: &str) {
+        use crate::yamlemit::Node;
+        let mut pairs = vec![
+            ("id", Node::text(id)),
+            ("type", Node::text("approval")),
+            ("kind", Node::text(EVENT_CHECK)),
+            ("title", Node::text(&crate::eventemit::what_and_when(listed[0]))),
+            ("status", Node::text(status)),
+            ("source_uid", Node::text(&listed[0].uid)),
+            ("series_uid", Node::text(series)),
+            ("events", Node::Seq(listed.iter().map(|e| Node::text(&e.uid)).collect())),
+        ];
+        if with_instances {
+            pairs.push(("instances", Node::Seq(listed.iter().map(|e| Instance::from_event(e).to_node()).collect())));
+        }
+        pairs.extend([
+            ("proposed_at", Node::Date(date(2026, 9, 24))),
+            ("first_proposed_at", Node::Date(date(2026, 9, 24))),
+            ("expires", Node::Date(listed[0].start().date())),
+            ("snooze_until", Node::Null),
+            ("created_by", Node::text("events")),
+        ]);
+        let text = format!("---\n{}---\n\nbody\n", crate::yamlemit::safe_dump_block(&Node::map(pairs)));
+        fs::create_dir_all(vault.join("archive")).unwrap();
+        pystr::write_text(&vault.join("archive").join(name), &text).unwrap();
+    }
+
+    /// `(source_uid, level)` of every commitment, in file-name order.
+    fn booked(vault: &Path) -> Vec<(String, String)> {
+        let rows = notes(vault, crate::commitments::FOLDER);
+        rows.iter().map(|(_, m)| (card_text(m, "source_uid"), card_text(m, "level"))).collect()
+    }
+
+    #[test]
+    fn an_accepted_event_check_series_books_a_later_instance_once() {
+        let vault = tmp("check-series");
+        let first = instance("lx:9:1", "lx:9", at(10, 6, 19, 0), at(10, 6, 21, 0));
+        let mut later = instance("lx:9:2", "lx:9", at(10, 13, 19, 0), at(10, 13, 21, 0));
+        later.registration = true; // P9: the carry still writes no register task
+        check_card(&vault, "event-check-weekly-b.md", "executed", "lx:9", &[&first], true, ID_B);
+        check_card(&vault, "event-check-weekly-a.md", "executed", "lx:9", &[&first], true, ID_A);
+        // The reader: the lowest file name wins; the value is its file, its id and its listed uids.
+        let checks = accepted_check_series(&vault);
+        let listed = BTreeSet::from(["lx:9:1".to_string()]);
+        let file = "event-check-weekly-a.md".to_string();
+        assert_eq!(checks, BTreeMap::from([("lx:9".to_string(), CheckAccept { file, id: ID_A.into(), listed })]));
+        assert!(answered_series(&vault).is_empty(), "T2b.1's edge rule is unchanged: the card is not counted");
+
+        let events = [first.clone(), later.clone()];
+        let (_, warnings, _) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        let row = (String::from("lx:9:2"), String::from("hard"));
+        assert_eq!(booked(&vault), [row.clone()], "P7: hard; nothing for lx:9:1, which the card listed");
+        let records = Journal::new(&vault).read(None, None);
+        let ops: Vec<(&str, &str)> = records.iter().map(|r| (r["op"].as_str().unwrap(), r["actor"].as_str().unwrap())).collect();
+        assert_eq!(ops, [("create", crate::commitments::CARD_ACTOR)], "one create, journal first");
+        assert!(!vault.join("tasks").exists(), "P9: the carry writes commitments only");
+        // A second call writes nothing, no journal record included.
+        let journal = journal_text(&vault);
+        let (_, warnings, _) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!((journal_text(&vault), booked(&vault)), (journal, vec![row]));
+
+        // A hand edit makes an archived `rejected` `event-accept` card answer `lx:9` too:
+        // `answered_series`' answer wins, so the series is declined and nothing is booked.
+        let edited = tmp("check-series-hand-edit");
+        check_card(&edited, "event-check-weekly-a.md", "executed", "lx:9", &[&first], true, ID_A);
+        answered_card(&edited, "event-weekly-2026-10-20.md", "rejected", "obligation", "lx:9", &["lx:9:3"], ID_B);
+        let (_, warnings, ledger) = carry(&edited, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert!(!edited.join(crate::commitments::FOLDER).exists(), "a series declined on an event-accept card");
+        assert_eq!(journal_text(&edited), "");
+        assert!(ledger["lx:9:2"].declined, "the decline carry's line, as answered_series answers it");
+
+        // Built as `read_roster` builds events (series equal to uid): a one-instance `ics:fair`
+        // whose executed card lists it writes nothing, from the roster or from a feed.
+        let fair_vault = tmp("check-series-roster");
+        let fair = DiscoveredEvent::new("ics:fair", "Career fair", at(10, 20, 10, 0), at(10, 20, 14, 0), "ics");
+        check_card(&fair_vault, "event-check-career-fair-2026-10-20.md", "executed", "ics:fair", &[&fair], true, ID_A);
+        let roster = DiscoveredEvent::new("ics:fair", "Career fair", at(10, 20, 10, 0), at(10, 20, 11, 0), "roster");
+        assert_eq!(roster.series_uid, "ics:fair");
+        for events in [[roster], [fair]] {
+            let (lines, warnings, _) = carry(&fair_vault, &events);
+            assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+        }
+        assert!(!fair_vault.join(crate::commitments::FOLDER).exists(), "no note");
+        assert_eq!((journal_text(&fair_vault), ledger_text(&fair_vault)), (String::new(), None), "no record, no line");
+    }
+
+    #[test]
+    fn an_event_check_card_without_instances_carries_nothing() {
+        let vault = tmp("check-without-instances");
+        let primary = |n: u8| instance(&format!("lx:{n}:1"), &format!("lx:{n}"), at(10, 6, 19, 0), at(10, 6, 21, 0));
+        let later = |n: u8| instance(&format!("lx:{n}:2"), &format!("lx:{n}"), at(10, 13, 19, 0), at(10, 13, 21, 0));
+        // As filed before this lane: executed, with no `instances:` key. Its Approve only answered (D11).
+        check_card(&vault, "event-check-a.md", "executed", "lx:1", &[&primary(1)], false, ID_A);
+        // Rejected and expired, each carrying `instances:`.
+        check_card(&vault, "event-check-b.md", "rejected", "lx:2", &[&primary(2)], true, ID_A);
+        check_card(&vault, "event-check-c.md", "expired", "lx:3", &[&primary(3)], true, ID_A);
+        // A hand edit: `instances:` that is not a sequence.
+        card(&vault, "archive", "event-check-d.md", EVENT_CHECK, "executed", "series_uid: \"lx:4\"\ninstances: null\n");
+        // Executed with `instances:`, but in `approvals/`, or with an empty `series_uid`.
+        check_card(&vault, "event-check-e.md", "executed", "lx:5", &[&primary(5)], true, ID_A);
+        fs::create_dir_all(vault.join("approvals")).unwrap();
+        fs::rename(vault.join("archive").join("event-check-e.md"), vault.join("approvals").join("event-check-e.md")).unwrap();
+        check_card(&vault, "event-check-f.md", "executed", "", &[&primary(6)], true, ID_A);
+        assert!(accepted_check_series(&vault).is_empty(), "no card here answers a series for the carry");
+        // The control: an executed card with `instances:`, whose later instance is booked.
+        check_card(&vault, "event-check-g.md", "executed", "lx:7", &[&primary(7)], true, ID_B);
+
+        let events: Vec<DiscoveredEvent> = (1..=7).map(later).collect();
+        // No assertion on `run`'s line count: the control carries (the T2b.2b note above).
+        let (_, warnings, _) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        // A rejected `event-check` series has its `drop` lines through `inherit_series_answers`.
+        assert_eq!(declined_lines(&vault), Vec::<String>::new(), "the decline carry reads event-accept cards only");
+        assert_eq!(booked(&vault), [(String::from("lx:7:2"), String::from("hard"))], "only the control");
+        let records = Journal::new(&vault).read(None, None);
+        assert_eq!(records.len(), 1, "one journal record, the control's");
+    }
+
+    #[test]
+    fn a_rejected_or_pre_lane_check_card_blocks_its_series() {
+        // Review finding on T2b.2b: the carry claims a series as `eventemit::settled_series` does.
+        // The lowest-named executed or rejected card claims it, and the series carries only if that
+        // card is executed with `instances:`. A hand edit, or sync merging two desktops' cards, makes
+        // two cards for one series.
+        let vault = tmp("check-claims");
+        let at_day = |series: &str, n: u8, day: i8| instance(&format!("{series}:{n}"), series, at(10, day, 19, 0), at(10, day, 21, 0));
+        // lx:9: the student rejected it first, then a later card was executed.
+        check_card(&vault, "event-check-weekly-2026-10-13.md", "executed", "lx:9", &[&at_day("lx:9", 2, 13)], true, "appr_0000000002");
+        check_card(&vault, "event-check-weekly-2026-10-06.md", "rejected", "lx:9", &[&at_day("lx:9", 1, 6)], true, "appr_0000000001");
+        // lx:8: a card filed before this lane (no `instances:`), then one with them.
+        check_card(&vault, "event-check-lab-2026-10-06.md", "executed", "lx:8", &[&at_day("lx:8", 1, 6)], false, "appr_0000000003");
+        check_card(&vault, "event-check-lab-2026-10-13.md", "executed", "lx:8", &[&at_day("lx:8", 2, 13)], true, "appr_0000000004");
+        // lx:6, the control: executed with `instances:` first, so a later rejected card loses.
+        check_card(&vault, "event-check-club-2026-10-06.md", "executed", "lx:6", &[&at_day("lx:6", 1, 6)], true, "appr_0000000005");
+        check_card(&vault, "event-check-club-2026-10-13.md", "rejected", "lx:6", &[&at_day("lx:6", 2, 13)], true, "appr_0000000006");
+
+        // Both `event-check` readers give one answer per series.
+        let settled = crate::eventemit::settled_series(&vault);
+        let verdicts: Vec<(&str, &str)> = settled.iter().map(|(s, a)| (s.as_str(), a.verdict.as_str())).collect();
+        assert_eq!(verdicts, [("lx:6", "obligation"), ("lx:8", "obligation"), ("lx:9", "drop")]);
+        let checks = accepted_check_series(&vault);
+        assert_eq!(checks.keys().map(String::as_str).collect::<Vec<_>>(), ["lx:6"]);
+        assert_eq!(checks["lx:6"].file, "event-check-club-2026-10-06.md", "the claiming card's");
+
+        let events = [at_day("lx:9", 3, 20), at_day("lx:8", 3, 20), at_day("lx:6", 3, 20)];
+        let (_, warnings, _) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(booked(&vault), [(String::from("lx:6:3"), String::from("hard"))], "only the control");
+        let records = Journal::new(&vault).read(None, None);
+        assert_eq!(records.len(), 1, "one journal record, the control's: none for lx:9:3 or lx:8:3");
+    }
+
+    // --- T2b.5: PQ3 (b-prime) with the span, the carry writes its line (P15) --------------------
+
+    use crate::eventledger::{Carried, CARRY_ACTOR, HEADER, NEWLINE};
+
+    /// PQ3's vault: an executed `event-accept` card for `lx:77` (`verdict: opportunity`, id `ID_A`)
+    /// listing `lx:77:1`. The events, given latest first so `run`'s own order shows: a zero-length
+    /// `:4`, a two-day all-day `:3`, a timed `:2`, the listed `:1`, and `:0`, before today.
+    fn pq3_vault(name: &str) -> (PathBuf, Vec<DiscoveredEvent>) {
+        let vault = tmp(name);
+        answered_card(&vault, "event-weekly-meeting-2026-10-06.md", "executed", "opportunity", "lx:77", &["lx:77:1"], ID_A);
+        let events = vec![
+            instance("lx:77:4", "lx:77", at(10, 27, 18, 0), at(10, 27, 18, 0)),
+            instance("lx:77:3", "lx:77", at(10, 20, 0, 0), at(10, 22, 0, 0)),
+            instance("lx:77:2", "lx:77", at(10, 13, 19, 0), at(10, 13, 21, 0)),
+            instance("lx:77:1", "lx:77", at(10, 6, 19, 0), at(10, 6, 21, 0)),
+            instance("lx:77:0", "lx:77", at(9, 29, 19, 0), at(9, 29, 21, 0)),
+        ];
+        (vault, events)
+    }
+
+    /// T2b.2b's vault: an executed `event-check` card for `lx:9` (id `ID_A`) carrying `instances:`
+    /// and listing `lx:9:1`; the events are `lx:9:1` and a later timed `lx:9:2`.
+    fn check_vault(name: &str) -> (PathBuf, Vec<DiscoveredEvent>) {
+        let vault = tmp(name);
+        let first = instance("lx:9:1", "lx:9", at(10, 6, 19, 0), at(10, 6, 21, 0));
+        let later = instance("lx:9:2", "lx:9", at(10, 13, 19, 0), at(10, 13, 21, 0));
+        check_card(&vault, "event-check-weekly-a.md", "executed", "lx:9", &[&first], true, ID_A);
+        (vault, vec![first, later])
+    }
+
+    /// The carry's line for `event`, as P15 shapes it, answered on `TODAY`.
+    fn carry_line(event: &DiscoveredEvent, word: &str, from: &str) -> String {
+        let span = |at: DateTime| at.strftime("%Y-%m-%dT%H:%M:%S").to_string();
+        format!(
+            "- {} · {} · verdict:{word} · by:{CARRY_ACTOR} · from:{from} · start:{} · end:{} · answered 2026-10-01",
+            event.uid,
+            event.title,
+            span(event.start()),
+            span(event.end())
+        )
+    }
+
+    /// Every ledger line for `uid`, in file order.
+    fn lines_for(vault: &Path, uid: &str) -> Vec<String> {
+        let head = format!("- {uid} · ");
+        ledger_text(vault).unwrap_or_default().lines().filter(|l| l.starts_with(&head)).map(str::to_string).collect()
+    }
+
+    /// The ledger's carry lines, in file order.
+    fn carry_lines(vault: &Path) -> Vec<String> {
+        let by = format!("· by:{CARRY_ACTOR} ·");
+        ledger_text(vault).unwrap_or_default().lines().filter(|l| l.contains(&by)).map(str::to_string).collect()
+    }
+
+    fn row(uid: &str, level: &str) -> (String, String) {
+        (uid.to_string(), level.to_string())
+    }
+
+    fn the_carry(from: &str, event: &DiscoveredEvent) -> Option<Carried> {
+        Some(Carried { from: from.to_string(), start: event.start(), end: event.end() })
+    }
+
+    #[test]
+    fn the_carry_writes_one_line_per_carried_date() {
+        let (vault, events) = pq3_vault("pq3-lines");
+        let (lines, warnings, ledger) = carry(&vault, &events);
+        assert_eq!((lines, warnings), (3, Vec::<String>::new()));
+        let expected = [
+            "- lx:77:2 · Weekly meeting · verdict:opportunity · by:agent:knowlu.carry · from:appr_0123456789 · \
+             start:2026-10-13T19:00:00 · end:2026-10-13T21:00:00 · answered 2026-10-01",
+            "- lx:77:3 · Weekly meeting · verdict:opportunity · by:agent:knowlu.carry · from:appr_0123456789 · \
+             start:2026-10-20T00:00:00 · end:2026-10-22T00:00:00 · answered 2026-10-01",
+            "- lx:77:4 · Weekly meeting · verdict:opportunity · by:agent:knowlu.carry · from:appr_0123456789 · \
+             start:2026-10-27T18:00:00 · end:2026-10-27T18:00:00 · answered 2026-10-01",
+        ];
+        let text = fs::read_to_string(vault.join("state").join("events-seen.md")).unwrap();
+        let body: String = expected.iter().map(|l| format!("{l}{NEWLINE}")).collect();
+        assert_eq!(text, format!("{HEADER}{NEWLINE}{body}"), "one line each, (start, uid) order; none for :1 or :0");
+        for event in &events[..3] {
+            let entry = &ledger[&event.uid];
+            assert_eq!(entry.verdict.as_deref(), Some("opportunity"), "{}", event.uid);
+            assert_eq!(entry.answered_by, CARRY_ACTOR, "{}", event.uid);
+            assert_eq!(entry.carry, the_carry(ID_A, event), "{}: the card and the event's own span", event.uid);
+        }
+        assert_eq!(ledger, load_ledger(&vault, None), "the map reads as `load_ledger` reads the file");
+        // `:2` also has its commitment, and that commitment's journal `create` record.
+        assert_eq!(booked(&vault), [row("lx:77:2", "soft")]);
+        let records = Journal::new(&vault).read(None, None);
+        let created: Vec<(&str, &str)> = records.iter().map(|r| (r["op"].as_str().unwrap(), r["path"].as_str().unwrap())).collect();
+        let note = format!("commitments/{}", notes(&vault, crate::commitments::FOLDER)[0].0);
+        assert_eq!(created, [("create", note.as_str())]);
+    }
+
+    /// The fault: `state/journal` is a file, so a commitment's journal record cannot be written
+    /// and `write::create` writes nothing (journal first). Returns its path, to lift it.
+    fn break_the_journal(vault: &Path) -> PathBuf {
+        let path = vault.join("state").join("journal");
+        fs::create_dir_all(vault.join("state")).unwrap();
+        fs::write(&path, "not a folder").unwrap();
+        path
+    }
+
+    #[test]
+    fn a_failed_booking_still_gets_its_line_and_is_rebooked_next_run() {
+        let (vault, events) = pq3_vault("pq3-failed-booking");
+        let fault = break_the_journal(&vault);
+        let (lines, warnings, _) = carry(&vault, &events);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("carry: lx:77:2 not booked ("), "{warnings:?}");
+        assert_eq!(booked(&vault), Vec::<(String, String)>::new(), "no commitment");
+        assert_eq!(journal_text(&vault), "", "no journal record");
+        let carried: Vec<String> = ["lx:77:2", "lx:77:3", "lx:77:4"].iter().map(|u| u.to_string()).collect();
+        let uids: Vec<String> = carry_lines(&vault).iter().map(|l| l[2..9].to_string()).collect();
+        assert_eq!((lines, uids), (3, carried), "every carried date still gets its one line");
+
+        // The fault gone: `:2` is booked, journal record first, and no second line is written.
+        fs::remove_file(&fault).unwrap();
+        let ledger = ledger_text(&vault);
+        let (lines, warnings, _) = carry(&vault, &events);
+        assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+        assert_eq!(booked(&vault), [row("lx:77:2", "soft")]);
+        let records = Journal::new(&vault).read(None, None);
+        let ops: Vec<(&str, &str)> = records.iter().map(|r| (r["op"].as_str().unwrap(), r["actor"].as_str().unwrap())).collect();
+        assert_eq!(ops, [("create", crate::commitments::CARD_ACTOR)]);
+        assert_eq!(ledger_text(&vault), ledger, "no second line");
+
+        // P16's order: the same fault, then `inherit_series_answers`, leaves an `event-check`
+        // series' carried date with the carry's line only, never the student's.
+        let (check, events) = check_vault("pq3-failed-check");
+        break_the_journal(&check);
+        let (_, warnings, mut ledger) = carry(&check, &events);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        crate::eventemit::inherit_series_answers(&check, &events, &mut ledger, TODAY);
+        assert_eq!(lines_for(&check, "lx:9:2"), [carry_line(&events[1], "obligation", ID_A)]);
+        assert_eq!(ledger["lx:9:2"], load_ledger(&check, None)["lx:9:2"]);
+        assert_eq!(ledger["lx:9:2"].answered_by, CARRY_ACTOR);
+    }
+
+    #[test]
+    fn a_second_run_writes_nothing() {
+        let (vault, events) = pq3_vault("pq3-second-run");
+        let (lines, _, _) = carry(&vault, &events);
+        assert_eq!(lines, 3, "the first run's lines");
+        let (ledger, journal) = (ledger_text(&vault), journal_text(&vault));
+        let (lines, warnings, _) = carry(&vault, &events);
+        assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+        assert_eq!((ledger_text(&vault), journal_text(&vault)), (ledger.clone(), journal));
+
+        // The student deletes `:2`'s commitment: a third call rebooks nothing and writes no line.
+        let note = format!("commitments/{}", notes(&vault, crate::commitments::FOLDER)[0].0);
+        crate::write::delete(&vault, &note, &student(&vault), &mut Journal::new(&vault)).unwrap();
+        let after_delete = journal_text(&vault);
+        let (lines, warnings, _) = carry(&vault, &events);
+        assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+        assert_eq!(booked(&vault), Vec::<(String, String)>::new(), "nothing is rebooked");
+        assert_eq!((ledger_text(&vault), journal_text(&vault)), (ledger, after_delete));
+    }
+
+    #[test]
+    fn an_accepted_event_check_series_gets_the_carrys_line() {
+        let (vault, events) = check_vault("pq3-check-series");
+        let (lines, warnings, ledger) = carry(&vault, &events);
+        assert_eq!((lines, warnings), (1, Vec::<String>::new()));
+        assert_eq!(carry_lines(&vault), [carry_line(&events[1], "obligation", ID_A)], "P7: obligation; from: the card");
+        assert_eq!(booked(&vault), [row("lx:9:2", "hard")], "beside its commitment");
+        assert_eq!(ledger["lx:9:2"].verdict.as_deref(), Some("obligation"));
+        assert_eq!(ledger["lx:9:2"].carry, the_carry(ID_A, &events[1]));
+        assert!(!ledger.contains_key("lx:9:1"), "the card listed it: the settlement's, never the carry's");
+        assert_eq!(ledger, load_ledger(&vault, None));
+    }
+
+    #[test]
+    fn the_carry_never_writes_over_a_human_answer_or_a_decline() {
+        let vault = tmp("pq3-human-first");
+        answered_card(&vault, "event-weekly-meeting-2026-10-06.md", "executed", "opportunity", "lx:77", &["lx:77:1"], ID_A);
+        answered_card(&vault, "event-film-night-2026-10-08.md", "rejected", "opportunity", "lx:78", &["lx:78:1"], ID_B);
+        let human = crate::journal::read_human_actor(&vault).unwrap();
+        let before = date(2026, 9, 30);
+        record_answer(&vault, "lx:77:2", "Weekly meeting", before, "obligation", human, None).unwrap();
+        record_answer(&vault, "lx:77:3", "Weekly meeting", before, "drop", human, None).unwrap();
+        crate::eventledger::record_declined(&vault, "lx:77:4", before).unwrap();
+        let on = |uid: &str, series: &str, day: i8| instance(uid, series, at(10, day, 19, 0), at(10, day, 21, 0));
+        let events = [
+            on("lx:77:2", "lx:77", 13),
+            on("lx:77:3", "lx:77", 20),
+            on("lx:77:4", "lx:77", 27),
+            on("lx:77:5", "lx:77", 28), // the control
+            on("lx:78:2", "lx:78", 15),
+            on("lx:78:3", "lx:78", 22),
+        ];
+        let (_, warnings, ledger) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(carry_lines(&vault), [carry_line(&events[3], "opportunity", ID_A)], "the control's line alone");
+        for (uid, verdict) in [("lx:77:2", "obligation"), ("lx:77:3", "drop")] {
+            assert_eq!(ledger[uid].verdict.as_deref(), Some(verdict), "{uid}");
+            assert_eq!((ledger[uid].answered_by.as_str(), &ledger[uid].carry), (human, &None), "{uid}: the student's");
+        }
+        assert_eq!((ledger["lx:77:4"].verdict.clone(), ledger["lx:77:4"].declined), (None, true));
+        for uid in ["lx:78:2", "lx:78:3"] {
+            assert_eq!(lines_for(&vault, uid), [format!("- {uid} · {DECLINED_ON}")], "{uid}: declined, no answer line");
+        }
+        assert_eq!(ledger, load_ledger(&vault, None));
+    }
+
+    #[test]
+    fn a_confidently_judged_carried_date_gets_its_line_and_keeps_its_verdict() {
+        let (vault, events) = pq3_vault("pq3-confident");
+        record_verdict(&vault, "lx:77:2", "Weekly meeting", date(2026, 9, 30), "obligation", "", "", "").unwrap();
+        let (_, warnings, ledger) = carry(&vault, &events);
+        assert_eq!(warnings, Vec::<String>::new());
+        let lines = lines_for(&vault, "lx:77:2");
+        assert_eq!(lines.len(), 2, "the judged line, then the carry's one line: {lines:?}");
+        assert_eq!(lines[1], carry_line(&events[2], "opportunity", ID_A));
+        let read = load_ledger(&vault, None);
+        let entry = &read["lx:77:2"];
+        assert_eq!(entry.verdict.as_deref(), Some("obligation"), "a confident machine verdict is never flipped");
+        assert_eq!(entry.answered_by, "", "the carry did not set the verdict");
+        assert_eq!(entry.carry, the_carry(ID_A, &events[2]), "but its card and span are recorded");
+        assert_eq!(ledger, read);
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap().map(Result::unwrap) {
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+
+    fn ledger_bytes(vault: &Path) -> Option<Vec<u8>> {
+        fs::read(vault.join("state").join("events-seen.md")).ok()
+    }
+
+    #[test]
+    fn an_existing_vaults_ledger_bytes_are_unchanged() {
+        // `vault-full`, copied first and never used in place. Its events as the roster reads them
+        // back, and the same events as a feed gives them.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault-full");
+        let full = tmp("pq3-vault-full");
+        copy_tree(&fixture, &full);
+        let frozen = ledger_bytes(&fixture);
+        assert!(frozen.is_some(), "vault-full has a ledger");
+        let roster = crate::eventroster::read_roster(&full.join("state").join("events.md"));
+        assert_eq!(roster.len(), 3, "vault-full's three events");
+        let fetched = roster.iter().map(|e| DiscoveredEvent { source: "localist".into(), ..e.clone() });
+        let events: Vec<DiscoveredEvent> = roster.iter().cloned().chain(fetched).collect();
+        let (lines, warnings, _) = carry(&full, &events);
+        assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+        assert_eq!(ledger_bytes(&full), frozen);
+
+        // An accepted series whose every instance is on its card: no ledger, then one with lines.
+        let listed = tmp("pq3-all-listed");
+        answered_card(&listed, "event-weekly-meeting-2026-10-06.md", "executed", "obligation", "lx:77", &["lx:77:1", "lx:77:2"], ID_A);
+        let events = [
+            instance("lx:77:1", "lx:77", at(10, 6, 19, 0), at(10, 6, 21, 0)),
+            instance("lx:77:2", "lx:77", at(10, 13, 0, 0), at(10, 14, 0, 0)),
+        ];
+        assert_eq!(carry(&listed, &events).0, 0);
+        assert_eq!(ledger_bytes(&listed), None, "still absent");
+        for event in &events {
+            record_verdict(&listed, &event.uid, &event.title, date(2026, 9, 24), "obligation", "", "", "").unwrap();
+            crate::eventledger::record_proposed(&listed, &event.uid, date(2026, 9, 24)).unwrap();
+        }
+        let seeded = ledger_bytes(&listed);
+        assert_eq!(carry(&listed, &events).0, 0);
+        assert_eq!(ledger_bytes(&listed), seeded, "byte-identical");
+    }
+
+    #[test]
+    fn a_card_without_an_id_books_but_writes_no_line() {
+        let vault = tmp("pq3-no-id");
+        let name = "event-weekly-meeting-2026-10-06.md";
+        answered_card(&vault, name, "executed", "obligation", "lx:77", &["lx:77:1"], ID_A);
+        let path = vault.join("archive").join(name);
+        let text = pystr::read_text(&path).unwrap().replace(&format!("id: {ID_A}\n"), "");
+        pystr::write_text(&path, &text).unwrap();
+        let on = |uid: &str, day: i8| instance(uid, "lx:77", at(10, day, 19, 0), at(10, day, 21, 0));
+        let events = [on("lx:77:1", 6), on("lx:77:2", 13), on("lx:77:3", 20)];
+        let (lines, warnings, ledger) = carry(&vault, &events);
+        let warned = format!("carry: archive/{name} has no id; its dates are booked but not listed");
+        assert_eq!((lines, warnings), (0, vec![warned]), "one warning names the card");
+        let mut rows = booked(&vault); // file-name order: `weekly-meeting-2.md` sorts first
+        rows.sort();
+        assert_eq!(rows, [row("lx:77:2", "hard"), row("lx:77:3", "hard")], "the dates are booked");
+        assert_eq!((ledger_text(&vault), ledger.len()), (None, 0), "no line");
+
+        // An `event-check` card whose `id:` `ids::is_id` refuses: the same.
+        let check = tmp("pq3-check-bad-id");
+        let first = instance("lx:9:1", "lx:9", at(10, 6, 19, 0), at(10, 6, 21, 0));
+        check_card(&check, "event-check-weekly-a.md", "executed", "lx:9", &[&first], true, "not-an-id");
+        let events = [first.clone(), instance("lx:9:2", "lx:9", at(10, 13, 0, 0), at(10, 14, 0, 0))];
+        let (lines, warnings, _) = carry(&check, &events);
+        let warned = "carry: archive/event-check-weekly-a.md has no id; its dates are booked but not listed";
+        assert_eq!((lines, warnings), (0, vec![warned.to_string()]));
+        assert_eq!(ledger_text(&check), None);
+    }
+
+    #[test]
+    fn the_carrys_lines_are_deterministic() {
+        // P14: two runs over copies of one vault, the events given in opposite orders. Two series
+        // (one per card kind) share a start, so the uid breaks the tie.
+        let (vault, mut events) = pq3_vault("pq3-determinism-a");
+        let first = instance("lx:9:1", "lx:9", at(10, 6, 19, 0), at(10, 6, 21, 0));
+        check_card(&vault, "event-check-weekly-a.md", "executed", "lx:9", &[&first], true, ID_B);
+        events.extend([
+            first,
+            instance("lx:9:2", "lx:9", at(10, 13, 19, 0), at(10, 13, 21, 0)),
+            instance("lx:9:3", "lx:9", at(10, 20, 0, 0), at(10, 21, 0, 0)),
+        ]);
+        let copy = tmp("pq3-determinism-b");
+        copy_tree(&vault, &copy);
+        carry(&vault, &events);
+        let reversed: Vec<DiscoveredEvent> = events.iter().rev().cloned().collect();
+        carry(&copy, &reversed);
+        assert_eq!(carry_lines(&vault).len(), 5, "three dates of lx:77 and two of lx:9");
+        assert_eq!(ledger_bytes(&vault), ledger_bytes(&copy));
+    }
+
+    #[test]
+    fn a_uid_the_ledger_cannot_read_back_gets_no_carry_line() {
+        // Written anyway, such a line would be written again on every `rank` (as `decline`'s rule):
+        // a uid outside the ledger's class, or a span end in a negative year (`-0001-…` is no
+        // `\d{4}` year, so the line reads as no carry line). `verdict:` inside a uid does not break
+        // an answer line, so that one is carried.
+        let vault = tmp("pq3-unreadable-uid");
+        answered_card(&vault, "event-weekly-meeting-2026-10-06.md", "executed", "opportunity", "lx:77", &["lx:77:1"], ID_A);
+        let all_day = |uid: &str, day: i8| instance(uid, "lx:77", at(10, day, 0, 0), at(10, day + 1, 0, 0));
+        let broken_end = instance("lx:77:9", "lx:77", at(10, 27, 19, 0), date(-1, 1, 1).at(0, 0, 0, 0));
+        let events = [all_day("lx:77 bad", 13), all_day("lx:77:verdict:2", 20), broken_end];
+        let warned: Vec<String> = ["lx:77 bad", "lx:77:9"]
+            .iter()
+            .map(|uid| format!("carry: no line for {uid:?}: the ledger cannot read it back"))
+            .collect();
+        let (lines, warnings, ledger) = carry(&vault, &events);
+        assert_eq!((lines, &warnings), (1, &warned));
+        assert_eq!(carry_lines(&vault), [carry_line(&events[1], "opportunity", ID_A)]);
+        assert_eq!(ledger["lx:77:verdict:2"].carry, the_carry(ID_A, &events[1]));
+        let before = ledger_text(&vault);
+        let (lines, warnings, _) = carry(&vault, &events);
+        assert_eq!((lines, &warnings), (0, &warned));
+        assert_eq!(ledger_text(&vault), before);
+    }
+
+    #[test]
+    fn a_title_the_ledger_cannot_read_back_gets_no_carry_line() {
+        // Review of T2b.5: the feed's title sits right after `- <uid> · `, so a title that starts
+        // with a field head forges that field (`load_ledger` reads each field's leftmost match),
+        // and a line boundary in it splits the line. Written anyway, such a line reads as no entry
+        // (re-written on every `rank`), as a machine's `drop`, as a human answer by `appointment`
+        // (judge-once broken), or with another card or span. A title that forges nothing is carried.
+        let vault = tmp("pq3-forged-title");
+        answered_card(&vault, "event-weekly-meeting-2026-10-06.md", "executed", "opportunity", "lx:77", &["lx:77:1"], ID_A);
+        let titled = |day: i8, title: &str| {
+            let mut event = instance(&format!("lx:77:{day}"), "lx:77", at(10, day, 19, 0), at(10, day, 21, 0));
+            event.title = title.to_string();
+            event
+        };
+        let events = [
+            titled(10, "verdict:tbd Weekly meeting"),
+            titled(11, "verdict:drop Weekly meeting"),
+            titled(12, "by:appointment Advising hours"),
+            titled(13, "from:appr_abcdef0123 Weekly meeting"),
+            titled(14, "end:2026-01-01T00:00:00 Weekly meeting"),
+            titled(15, "Weekly\u{2028}meeting"),
+            titled(20, "Weekly · verdict:tbd"), // the `·` is cleaned to `-`: no field head
+            titled(21, "proposed Weekly meeting"),
+            titled(22, "task:lab Weekly meeting"), // no reader reads a `task:` field
+        ];
+        let refused = ["lx:77:10", "lx:77:11", "lx:77:12", "lx:77:13", "lx:77:14", "lx:77:15"];
+        let warned: Vec<String> =
+            refused.iter().map(|uid| format!("carry: no line for {uid:?}: the ledger cannot read it back")).collect();
+        let (lines, warnings, ledger) = carry(&vault, &events);
+        assert_eq!((lines, &warnings), (3, &warned));
+        for uid in refused {
+            assert_eq!(lines_for(&vault, uid), Vec::<String>::new(), "{uid}: no line");
+            assert!(!ledger.contains_key(uid), "{uid}: no entry");
+        }
+        assert_eq!(carry_lines(&vault).len(), 3, "the three controls' lines");
+        for event in &events[6..] {
+            let entry = &ledger[&event.uid];
+            assert_eq!(entry.verdict.as_deref(), Some("opportunity"), "{}", event.uid);
+            assert_eq!(entry.answered_by, CARRY_ACTOR, "{}", event.uid);
+            assert_eq!(entry.carry, the_carry(ID_A, event), "{}", event.uid);
+        }
+        assert_eq!(ledger, load_ledger(&vault, None));
+        assert_eq!(booked(&vault).len(), events.len(), "every date is booked all the same");
+        let before = ledger_text(&vault);
+        let (lines, warnings, _) = carry(&vault, &events);
+        assert_eq!((lines, &warnings), (0, &warned), "a second run writes nothing");
+        assert_eq!(ledger_text(&vault), before);
+    }
+
+    #[test]
+    fn a_carried_opportunity_date_is_never_in_the_digest() {
+        // Review of T2b.5: with `event_cards` off, T4's `rank` files the digest after the carry,
+        // over the map the carry updated. A carried date of an accepted `opportunity` series reads
+        // `verdict:opportunity` with no `proposed` marker, and the digest must not ask about it
+        // again (never ask twice, spec §11.1 item 5). Nor about one a machine judged `opportunity`
+        // before the answer, whose carry stands beside its verdict. An unanswered opportunity is
+        // the control.
+        let vault = tmp("pq3-digest");
+        answered_card(&vault, "event-weekly-meeting-2026-10-06.md", "executed", "opportunity", "lx:77", &["lx:77:1"], ID_A);
+        let judged = instance("lx:77:3", "lx:77", at(10, 9, 19, 0), at(10, 9, 21, 0));
+        let mut fair = instance("lx:5:1", "lx:5", at(10, 10, 12, 0), at(10, 10, 14, 0));
+        fair.title = "Career fair".to_string();
+        for event in [&judged, &fair] {
+            record_verdict(&vault, &event.uid, &event.title, date(2026, 9, 30), "opportunity", "", "", "").unwrap();
+        }
+        let events = [
+            instance("lx:77:1", "lx:77", at(10, 6, 19, 0), at(10, 6, 21, 0)),
+            instance("lx:77:2", "lx:77", at(10, 8, 19, 0), at(10, 8, 21, 0)),
+            judged,
+            fair,
+        ];
+        let (lines, warnings, ledger) = carry(&vault, &events);
+        assert_eq!((lines, warnings), (2, Vec::<String>::new()), "the carry's lines for :2 and :3");
+        assert_eq!(ledger["lx:77:3"].answered_by, "", "a confident machine verdict stands under its carry");
+        let config = crate::events::EventsConfig::default();
+        let eligible = crate::eventemit::eligible_events(&events, &ledger, &config, TODAY, &BTreeSet::new());
+        let uids: Vec<&str> = eligible.iter().map(|e| e.uid.as_str()).collect();
+        assert_eq!(uids, ["lx:5:1"], "the control alone");
+        let mut journal = Journal::new(&vault);
+        let (digest, count) =
+            crate::eventemit::emit_digest(&vault, &events, &ledger, &config, TODAY, None, None, &mut journal);
+        assert_eq!(count, 1, "the control alone");
+        let text = pystr::read_text(&digest.unwrap()).unwrap();
+        assert!(text.contains("uid: \"lx:5:1\"") && !text.contains("lx:77:"), "{text}");
+        for uid in ["lx:77:2", "lx:77:3"] {
+            let proposed = lines_for(&vault, uid).iter().filter(|l| l.contains(" · proposed ")).count();
+            assert_eq!(proposed, 0, "{uid}: never proposed");
+        }
+    }
+
+    // --- T2b.6: PQ5 (b2), the carry records a moved lane span -----------------------------------
+
+    /// An all-day instance of `series` from Oct `first`, `days` days long.
+    fn all_day(uid: &str, series: &str, first: i8, days: i8) -> DiscoveredEvent {
+        instance(uid, series, at(10, first, 0, 0), at(10, first + days, 0, 0))
+    }
+
+    /// PQ5's vault: `pq3_vault`'s card for `lx:77` (`opportunity`, `ID_A`, listing `lx:77:1`) and the
+    /// carry line T2b.5 wrote for `lx:77:3`, all-day Fri 9 to Sat 10 Oct. Returns that date too.
+    fn pq5_vault(name: &str) -> (PathBuf, DiscoveredEvent) {
+        let vault = tmp(name);
+        answered_card(&vault, "event-weekly-meeting-2026-10-06.md", "executed", "opportunity", "lx:77", &["lx:77:1"], ID_A);
+        let fri_sat = all_day("lx:77:3", "lx:77", 9, 2);
+        let (lines, warnings, _) = carry(&vault, std::slice::from_ref(&fri_sat));
+        assert_eq!((lines, warnings), (1, Vec::<String>::new()), "T2b.5's line");
+        assert_eq!(carry_lines(&vault), [carry_line(&fri_sat, "opportunity", ID_A)]);
+        (vault, fri_sat)
+    }
+
+    #[test]
+    fn the_carry_records_a_moved_lane_span_once() {
+        let (vault, fri_sat) = pq5_vault("pq5-moved");
+        let copy = tmp("pq5-moved-copy");
+        copy_tree(&vault, &copy);
+        let listed = instance("lx:77:1", "lx:77", at(10, 6, 19, 0), at(10, 6, 21, 0));
+        let sat_sun = all_day("lx:77:3", "lx:77", 10, 2);
+        let moved = vec![listed.clone(), sat_sun.clone()];
+        let (lines, warnings, ledger) = carry(&vault, &moved);
+        assert_eq!((lines, warnings), (1, Vec::<String>::new()));
+        let both = [carry_line(&fri_sat, "opportunity", ID_A), carry_line(&sat_sun, "opportunity", ID_A)];
+        assert_eq!(lines_for(&vault, "lx:77:3"), both, "one more line, in the carry's shape");
+        let read = load_ledger(&vault, None);
+        let entry = &read["lx:77:3"];
+        assert_eq!(entry.carry, the_carry(ID_A, &sat_sun), "the new span, from the same card");
+        assert_eq!((entry.verdict.as_deref(), entry.answered_by.as_str()), (Some("opportunity"), CARRY_ACTOR));
+        assert_eq!(ledger, read, "the map reads as `load_ledger` reads the file");
+        // P14: a copy of the vault, the feed in the opposite order, gives the same bytes.
+        carry(&copy, &moved.iter().rev().cloned().collect::<Vec<_>>());
+        assert_eq!(ledger_bytes(&copy), ledger_bytes(&vault));
+
+        // The same feed again: nothing.
+        let before = ledger_bytes(&vault);
+        assert_eq!(carry(&vault, &moved).0, 0);
+        assert_eq!(ledger_bytes(&vault), before);
+        // Moved back to Fri to Sat: one line with that span.
+        let (lines, warnings, _) = carry(&vault, &[listed.clone(), fri_sat.clone()]);
+        assert_eq!((lines, warnings), (1, Vec::<String>::new()));
+        let mut three = both.to_vec();
+        three.push(carry_line(&fri_sat, "opportunity", ID_A));
+        assert_eq!(lines_for(&vault, "lx:77:3"), three);
+        assert_eq!(load_ledger(&vault, None)["lx:77:3"].carry, the_carry(ID_A, &fri_sat));
+        // Then a human `drop` answer clears `carry` (T2b.4's rule), and a move writes nothing more.
+        let human = crate::journal::read_human_actor(&vault).unwrap();
+        record_answer(&vault, "lx:77:3", "Weekly meeting", TODAY, "drop", human, None).unwrap();
+        let entry = load_ledger(&vault, None).remove("lx:77:3").unwrap();
+        assert_eq!((entry.verdict.as_deref(), entry.answered_by.as_str(), entry.carry), (Some("drop"), human, None));
+        let before = ledger_bytes(&vault);
+        assert_eq!(carry(&vault, &moved).0, 0);
+        assert_eq!(ledger_bytes(&vault), before, "never over a human answer");
+        assert_eq!(journal_text(&vault), "", "no journal record at any step");
+
+        // Each in its own vault writes no line and leaves the ledger's bytes unchanged.
+        // P17's removal: a `declined` line for the date.
+        let (declined, _) = pq5_vault("pq5-moved-declined");
+        crate::eventledger::record_declined(&declined, "lx:77:3", TODAY).unwrap();
+        // A run built from the roster `rank` wrote from the moved feed (every feed failing).
+        let (roster, _) = pq5_vault("pq5-moved-roster");
+        let path = roster.join("state").join("events.md");
+        let config = crate::events::EventsConfig::default();
+        crate::eventroster::write_roster(&path, &moved, &load_ledger(&roster, None), &config, TODAY, &[]).unwrap();
+        let read_back = crate::eventroster::read_roster(&path);
+        assert!(read_back.iter().any(|e| e.uid == "lx:77:3"), "the roster lists the moved date: {read_back:?}");
+        // A span that starts before today.
+        let (past, _) = pq5_vault("pq5-moved-past");
+        let wednesday = instance("lx:77:3", "lx:77", at(9, 30, 0, 0), at(10, 1, 0, 0));
+        let cases = [(&declined, moved.clone()), (&roster, read_back), (&past, vec![listed.clone(), wednesday])];
+        for (vault, events) in cases {
+            let before = (ledger_bytes(vault), journal_text(vault));
+            let (lines, warnings, _) = carry(vault, &events);
+            assert_eq!((lines, warnings), (0, Vec::<String>::new()), "{}", vault.display());
+            assert_eq!((ledger_bytes(vault), journal_text(vault)), before, "{}", vault.display());
+            assert_eq!(booked(vault), Vec::<(String, String)>::new(), "{}: no commitment either", vault.display());
+        }
+
+        // PQ7 (c), in its own vault: moved to clock hours, Sat 10:00 to 15:00. One line with the
+        // timed span, and the date booked at its new hours, at the series' level, journal first.
+        let (timed, _) = pq5_vault("pq5-moved-timed");
+        let hours = instance("lx:77:3", "lx:77", at(10, 10, 10, 0), at(10, 10, 15, 0));
+        let to_hours = vec![listed.clone(), hours.clone()];
+        let (lines, warnings, ledger) = carry(&timed, &to_hours);
+        assert_eq!((lines, warnings), (1, Vec::<String>::new()));
+        let both = [carry_line(&fri_sat, "opportunity", ID_A), carry_line(&hours, "opportunity", ID_A)];
+        assert_eq!(lines_for(&timed, "lx:77:3"), both, "one more line, in the carry's shape");
+        let read = load_ledger(&timed, None);
+        let entry = &read["lx:77:3"];
+        assert_eq!(entry.carry, the_carry(ID_A, &hours), "the timed span, from the same card");
+        assert_eq!((entry.verdict.as_deref(), entry.answered_by.as_str()), (Some("opportunity"), CARRY_ACTOR));
+        assert_eq!(ledger, read, "the map reads as `load_ledger` reads the file");
+        assert_eq!(booked(&timed), [row("lx:77:3", "soft")], "one commitment, at its new hours");
+        let records = Journal::new(&timed).read(None, None);
+        let ops: Vec<(&str, &str)> = records.iter().map(|r| (r["op"].as_str().unwrap(), r["actor"].as_str().unwrap())).collect();
+        assert_eq!(ops, [("create", crate::commitments::CARD_ACTOR)], "one journal `create`");
+        // The same feed again, then moved back to Fri to Sat all-day: nothing either time. A carried
+        // timed date is not followed (PQ5's *Not covered*), and its note is ever written.
+        let (commitments, before) = (notes(&timed, crate::commitments::FOLDER), (ledger_bytes(&timed), journal_text(&timed)));
+        for feed in [to_hours, vec![listed, fri_sat.clone()]] {
+            let (lines, warnings, _) = carry(&timed, &feed);
+            assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+            assert_eq!((ledger_bytes(&timed), journal_text(&timed)), before);
+            assert_eq!(notes(&timed, crate::commitments::FOLDER), commitments, "nothing booked");
+        }
+    }
+
+    /// An executed `event-accept` card in `archive/` in the emitter's shape, `instances:` included,
+    /// for `listed` (the first its primary). An empty `id` writes `id: ''`.
+    fn accept_card_with_instances(vault: &Path, name: &str, verdict: &str, series: &str, listed: &[&DiscoveredEvent], id: &str) {
+        use crate::yamlemit::Node;
+        let pairs = vec![
+            ("id", Node::text(id)),
+            ("type", Node::text("approval")),
+            ("kind", Node::text(EVENT_ACCEPT)),
+            ("title", Node::text(&crate::eventemit::what_and_when(listed[0]))),
+            ("status", Node::text("executed")),
+            ("verdict", Node::text(verdict)),
+            ("source_uid", Node::text(&listed[0].uid)),
+            ("series_uid", Node::text(series)),
+            ("events", Node::Seq(listed.iter().map(|e| Node::text(&e.uid)).collect())),
+            ("instances", Node::Seq(listed.iter().map(|e| Instance::from_event(e).to_node()).collect())),
+            ("proposed_at", Node::Date(date(2026, 9, 24))),
+            ("first_proposed_at", Node::Date(date(2026, 9, 24))),
+            ("expires", Node::Date(listed[0].start().date())),
+            ("snooze_until", Node::Null),
+            ("created_by", Node::text("events")),
+        ];
+        let text = format!("---\n{}---\n\nbody\n", crate::yamlemit::safe_dump_block(&Node::map(pairs)));
+        fs::create_dir_all(vault.join("archive")).unwrap();
+        pystr::write_text(&vault.join("archive").join(name), &text).unwrap();
+    }
+
+    #[test]
+    fn a_card_listed_date_moved_by_the_feed_gets_a_carry_line() {
+        let name = "event-open-day-2026-10-09.md";
+        let (fri, sat) = (all_day("lx:88:1", "lx:88", 9, 1), all_day("lx:88:1", "lx:88", 10, 1));
+        let listed_vault = |dir: &str, id: &str| {
+            let vault = tmp(dir);
+            accept_card_with_instances(&vault, name, "obligation", "lx:88", &[&fri], id);
+            record_verdict(&vault, "lx:88:1", &fri.title, date(2026, 9, 24), "obligation", "", "", "").unwrap();
+            vault
+        };
+        let vault = listed_vault("pq5-card-listed", ID_A);
+        // The feed as the card has it: no line.
+        let before = ledger_bytes(&vault);
+        assert_eq!(carry(&vault, std::slice::from_ref(&fri)).0, 0);
+        assert_eq!(ledger_bytes(&vault), before);
+        // Moved to Sat: one carry line, from the card, and the verdict stays.
+        let (lines, warnings, ledger) = carry(&vault, std::slice::from_ref(&sat));
+        assert_eq!((lines, warnings), (1, Vec::<String>::new()));
+        assert_eq!(carry_lines(&vault), [carry_line(&sat, "obligation", ID_A)]);
+        let read = load_ledger(&vault, None);
+        assert_eq!(read["lx:88:1"].verdict.as_deref(), Some("obligation"));
+        assert_eq!(read["lx:88:1"].carry, the_carry(ID_A, &sat));
+        assert_eq!(ledger, read);
+        // A second run writes nothing, and no step books or journals anything.
+        let before = ledger_bytes(&vault);
+        assert_eq!(carry(&vault, std::slice::from_ref(&sat)).0, 0);
+        assert_eq!(ledger_bytes(&vault), before);
+        assert_eq!(journal_text(&vault), "");
+        assert!(!vault.join(crate::commitments::FOLDER).exists());
+
+        // A card with an empty `id:`: no line, and T2b.5's warning.
+        let no_id = listed_vault("pq5-card-listed-no-id", "");
+        let before = ledger_bytes(&no_id);
+        let warned = format!("carry: archive/{name} has no id; its dates are booked but not listed");
+        assert_eq!(carry(&no_id, std::slice::from_ref(&sat)).1, [warned]);
+        assert_eq!(ledger_bytes(&no_id), before);
+
+        // An executed `event-check` card's own uid, lane-shaped and moved, holding the student's
+        // answer line from `settle_event_check`: no line (§13's *Not covered*). The control, the
+        // same vault without that line, gets one.
+        let check = tmp("pq5-check-own-uid");
+        let (fair_fri, fair_sat) = (all_day("lx:99:1", "lx:99", 9, 1), all_day("lx:99:1", "lx:99", 10, 1));
+        check_card(&check, "event-check-fair-a.md", "executed", "lx:99", &[&fair_fri], true, ID_B);
+        let control = tmp("pq5-check-own-uid-control");
+        copy_tree(&check, &control);
+        let human = crate::journal::read_human_actor(&check).unwrap();
+        record_answer(&check, "lx:99:1", &fair_fri.title, date(2026, 9, 30), "obligation", human, None).unwrap();
+        let before = ledger_bytes(&check);
+        assert_eq!(carry(&check, std::slice::from_ref(&fair_sat)).0, 0);
+        assert_eq!(ledger_bytes(&check), before);
+        assert_eq!(carry(&control, std::slice::from_ref(&fair_sat)).0, 1, "the control");
+        assert_eq!(carry_lines(&control), [carry_line(&fair_sat, "obligation", ID_B)]);
+    }
+
+    // --- T2b.6b: PQ7 (c), a carried lane date moved to clock hours is booked and followed -------
+
+    #[test]
+    fn a_card_listed_date_moved_to_clock_hours_gets_no_line() {
+        // The carry never books a card-listed date (its card's settlement does), so a timed line
+        // would leave it out of the lane and unbooked. It stays drawn where it was (PQ5's *Not
+        // covered*, narrowed by PQ7 (c) to card-listed dates), and P17's removal is the answer.
+        let (fri, sat) = (all_day("lx:88:1", "lx:88", 9, 1), all_day("lx:88:1", "lx:88", 10, 1));
+        let hours = instance("lx:88:1", "lx:88", at(10, 10, 10, 0), at(10, 10, 15, 0));
+        let vault = tmp("pq7-card-listed-hours");
+        accept_card_with_instances(&vault, "event-open-day-2026-10-09.md", "obligation", "lx:88", &[&fri], ID_A);
+        record_verdict(&vault, "lx:88:1", &fri.title, date(2026, 9, 24), "obligation", "", "", "").unwrap();
+        let nothing = |vault: &Path, label: &str| {
+            let before = ledger_bytes(vault);
+            let (lines, warnings, _) = carry(vault, std::slice::from_ref(&hours));
+            assert_eq!((lines, warnings), (0, Vec::<String>::new()), "{label}");
+            assert_eq!(ledger_bytes(vault), before, "{label}: no line");
+            assert_eq!(journal_text(vault), "", "{label}: no journal record");
+            assert!(!vault.join(crate::commitments::FOLDER).exists(), "{label}: no commitment");
+        };
+        nothing(&vault, "as the card has it");
+        // The same once a lane move gave it a carry line (T2b.6): a `carry` on a card-listed date
+        // does not make the date the carry's to book, so clock hours still get no line.
+        let (lines, warnings, _) = carry(&vault, std::slice::from_ref(&sat));
+        assert_eq!((lines, warnings), (1, Vec::<String>::new()), "T2b.6's line");
+        nothing(&vault, "after a lane move");
+        assert_eq!(load_ledger(&vault, None)["lx:88:1"].carry, the_carry(ID_A, &sat), "still drawn on Sat");
+    }
+
+    #[test]
+    fn a_failed_booking_still_follows_the_move() {
+        // PQ7 (c)'s timed move with the create failing, as in
+        // `a_failed_booking_still_gets_its_line_and_is_rebooked_next_run`: the line is written all
+        // the same, and the next run books the date and writes no second line.
+        let (vault, fri_sat) = pq5_vault("pq7-failed-booking");
+        let hours = instance("lx:77:3", "lx:77", at(10, 10, 10, 0), at(10, 10, 15, 0));
+        let fault = break_the_journal(&vault);
+        let (lines, warnings, _) = carry(&vault, std::slice::from_ref(&hours));
+        assert_eq!(lines, 1, "the line");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("carry: lx:77:3 not booked ("), "{warnings:?}");
+        let both = [carry_line(&fri_sat, "opportunity", ID_A), carry_line(&hours, "opportunity", ID_A)];
+        assert_eq!(lines_for(&vault, "lx:77:3"), both);
+        assert_eq!(booked(&vault), Vec::<(String, String)>::new(), "no commitment");
+
+        // The fault gone: booked, journal record first, and no second line.
+        fs::remove_file(&fault).unwrap();
+        let before = ledger_bytes(&vault);
+        let (lines, warnings, _) = carry(&vault, std::slice::from_ref(&hours));
+        assert_eq!((lines, warnings), (0, Vec::<String>::new()));
+        assert_eq!(booked(&vault), [row("lx:77:3", "soft")]);
+        let records = Journal::new(&vault).read(None, None);
+        let ops: Vec<(&str, &str)> = records.iter().map(|r| (r["op"].as_str().unwrap(), r["actor"].as_str().unwrap())).collect();
+        assert_eq!(ops, [("create", crate::commitments::CARD_ACTOR)]);
+        assert_eq!(ledger_bytes(&vault), before, "no second line");
+    }
+
+    /// What a second desktop sees (W's finding 2, plan §8). Two desktops on one account each run
+    /// `rank` before either syncs, so each books the carried date under its own random `cmt_` id:
+    /// spec §9 hands deterministic ids for these notes to the two-desktop stream, and the cloud
+    /// design keeps one computer per student until Launch. This pins the MVP's bounds: the same
+    /// file name on both, no third note once the other's has synced, `commitments::load` counting
+    /// one of two (commitment-model §2.5), and a delete that must be made once per copy.
+    #[test]
+    fn a_date_two_desktops_carry_is_counted_once() {
+        use crate::commitments::{load, FOLDER};
+        let event = instance("lx:77:5", "lx:77", at(10, 1, 10, 0), at(10, 1, 11, 0));
+        let (a, b) = (tmp("two-desktops-a"), tmp("two-desktops-b"));
+        for vault in [&a, &b] {
+            // The archived card syncs, so both desktops read one answer.
+            answered_card(vault, "event-weekly-meeting-2026-10-06.md", "executed", "obligation", "lx:77", &["lx:77:1"], "appr_00000000f1");
+            assert_eq!(carry(vault, std::slice::from_ref(&event)).1, Vec::<String>::new());
+        }
+        let (theirs, mine) = (notes(&a, FOLDER), notes(&b, FOLDER));
+        assert_eq!((theirs.len(), mine.len()), (1, 1));
+        assert_eq!(theirs[0].0, mine[0].0, "the same file name: a pull keeps this desktop's own");
+        let (their_id, my_id) = (card_text(&theirs[0].1, "id"), card_text(&mine[0].1, "id"));
+        assert_ne!(their_id, my_id, "two random ids");
+
+        // Where the names differ (another note took this one first on a desktop), a pull lands
+        // the other desktop's note beside this one's.
+        let stem = mine[0].0.trim_end_matches(".md");
+        let pulled = b.join(FOLDER).join(format!("{stem}-2.md"));
+        fs::copy(a.join(FOLDER).join(&theirs[0].0), &pulled).unwrap();
+        let counted = |vault: &Path| -> (Vec<String>, Vec<String>) {
+            let read = load(vault);
+            let ids = read.confirmed.iter().filter(|n| n.source_uid.as_deref() == Some("lx:77:5")).map(|n| n.id.clone()).collect();
+            (ids, read.warnings.into_iter().filter(|w| w.starts_with("duplicate source_uid lx:77:5:")).collect())
+        };
+        let (ids, warned) = counted(&b);
+        assert_eq!(ids, [their_id.clone().min(my_id.clone())], "the lowest id is the one counted");
+        assert_eq!(warned.len(), 1, "one warning names the pair");
+        let journal = journal_text(&b);
+        assert_eq!(carry(&b, std::slice::from_ref(&event)).0, 0);
+        assert_eq!(journal_text(&b), journal, "no third note");
+
+        // The student deletes the counted copy: the other is counted next, and still no rank books.
+        let kept = if their_id < my_id { format!("{stem}-2.md") } else { mine[0].0.clone() };
+        let mut student_journal = Journal::new(&b);
+        crate::write::delete(&b, &format!("{FOLDER}/{kept}"), &student(&b), &mut student_journal).unwrap();
+        assert_eq!(counted(&b), (vec![their_id.max(my_id)], Vec::new()), "a delete per copy");
+        let journal = journal_text(&b);
+        assert_eq!(carry(&b, std::slice::from_ref(&event)).0, 0);
+        assert_eq!(journal_text(&b), journal);
+    }
+
+    // --- T4d: P17, the student removes an accepted lane date ------------------------------------
+
+    /// The removal's day, Sat 3 Oct: not `TODAY` (nor the real date), so the line shows the day
+    /// the call was given and nothing else.
+    const REMOVED: Date = Date::constant(2026, 10, 3);
+    const REMOVED_ON: &str = "declined 2026-10-03";
+
+    /// Every file under `vault`, keyed by its path relative to `vault`, with its bytes.
+    fn tree(vault: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            let Ok(entries) = fs::read_dir(dir) else { return };
+            for entry in entries.map(Result::unwrap) {
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    out.insert(path.strip_prefix(root).unwrap().to_path_buf(), fs::read(&path).unwrap());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(vault, vault, &mut out);
+        out
+    }
+
+    /// `remove_lane_date` as the console calls it: as the student, on [`REMOVED`].
+    fn remove(vault: &Path, uid: &str) -> Result<bool, String> {
+        remove_lane_date(vault, uid, REMOVED, &student(vault))
+    }
+
+    /// P17's write, checked in full: `Ok(true)`; the ledger's bytes are its old bytes, then exactly
+    /// one `declined` line; `load_ledger` reads the old entry, declined; every other file, the
+    /// journal's included, is byte-identical.
+    fn removes_with_one_line(vault: &Path, uid: &str) {
+        let ledger = Path::new("state").join("events-seen.md");
+        let mut rest = tree(vault);
+        let old = rest.remove(&ledger).expect("the vault has a ledger");
+        let (entry, journal) = (load_ledger(vault, None).remove(uid).expect("an entry"), journal_text(vault));
+        assert_eq!(remove(vault, uid), Ok(true), "{uid}");
+        let mut after = tree(vault);
+        let mut want = old;
+        want.extend(format!("- {uid} · {REMOVED_ON}{NEWLINE}").as_bytes());
+        assert_eq!(after.remove(&ledger), Some(want), "{uid}: the old bytes, then exactly one line");
+        assert_eq!(after, rest, "{uid}: every other file is byte-identical");
+        assert_eq!(journal_text(vault), journal, "{uid}: no journal file created or changed");
+        let read = load_ledger(vault, None).remove(uid).unwrap();
+        assert_eq!(read, LedgerEntry { declined: true, ..entry }, "{uid}: its verdict, answered_by and carry as before");
+    }
+
+    #[test]
+    fn removing_a_carried_lane_date_appends_one_declined_line() {
+        // `pq5_vault`: an executed `event-accept` card with an `id:`, and the carry's line for the
+        // later two-day all-day `lx:77:3`.
+        let (vault, _) = pq5_vault("p17-carried");
+        let entry = load_ledger(&vault, None).remove("lx:77:3").unwrap();
+        assert!(entry.carry.is_some() && !entry.declined, "a carried lane date: {entry:?}");
+        removes_with_one_line(&vault, "lx:77:3");
+    }
+
+    #[test]
+    fn removing_a_card_listed_lane_date_appends_one_declined_line() {
+        // A one-day all-day instance on an executed `event-accept` card's `instances:`, with the
+        // emitter's verdict and `proposed` lines.
+        let accept = tmp("p17-card-listed");
+        let open_day = all_day("lx:88:1", "lx:88", 9, 1);
+        accept_card_with_instances(&accept, "event-open-day-2026-10-09.md", "obligation", "lx:88", &[&open_day], ID_A);
+        record_verdict(&accept, &open_day.uid, &open_day.title, date(2026, 9, 24), "obligation", "", "", "").unwrap();
+        crate::eventledger::record_proposed(&accept, &open_day.uid, date(2026, 9, 24)).unwrap();
+        removes_with_one_line(&accept, "lx:88:1");
+        // D11: one on an executed `event-check` card's `instances:`, beside the student's answer
+        // line its settlement wrote.
+        let check = tmp("p17-check-listed");
+        let fair = all_day("lx:99:1", "lx:99", 10, 1);
+        check_card(&check, "event-check-fair-a.md", "executed", "lx:99", &[&fair], true, ID_B);
+        let human = crate::journal::read_human_actor(&check).unwrap();
+        record_answer(&check, &fair.uid, &fair.title, date(2026, 9, 30), "obligation", human, None).unwrap();
+        removes_with_one_line(&check, "lx:99:1");
+    }
+
+    #[test]
+    fn a_second_removal_writes_nothing() {
+        let (vault, _) = pq5_vault("p17-twice");
+        assert_eq!(remove(&vault, "lx:77:3"), Ok(true));
+        let before = tree(&vault);
+        assert_eq!(remove(&vault, "lx:77:3"), Ok(false));
+        assert_eq!(tree(&vault), before, "the ledger's bytes, and every other file's, unchanged");
+        let declined: Vec<String> = lines_for(&vault, "lx:77:3").into_iter().filter(|l| l.ends_with(REMOVED_ON)).collect();
+        assert_eq!(declined.len(), 1, "{declined:?}");
+    }
+
+    /// One refused call: an error that is one line naming the uid and holding each of `why`, and
+    /// no file changed in the vault.
+    fn refused(vault: &Path, uid: &str, ctx: &WriteContext, why: &[&str]) {
+        let before = tree(vault);
+        let err = remove_lane_date(vault, uid, REMOVED, ctx).expect_err(&format!("{uid} as {:?}", ctx.actor));
+        assert!(err.contains(&format!("{uid:?}")) && !err.contains('\n'), "one line naming {uid:?}: {err}");
+        for part in why {
+            assert!(err.contains(part), "{part:?} in {err:?}");
+        }
+        assert_eq!(tree(vault), before, "{uid} as {:?}: no file changed", ctx.actor);
+    }
+
+    #[test]
+    fn only_the_student_removes_a_date() {
+        use crate::journal::{create_actor_file, read_human_actor, ACTOR_FILE, HUMAN_ACTOR, LEGACY_HUMAN_ACTOR};
+        // Each vault holds a date the student can remove, so only the actor is refused.
+        let (agent, _) = pq5_vault("p17-gate-agent");
+        refused(&agent, "lx:77:3", &rank_ctx(), &["only the student", "\"agent:approvals\""]);
+        let (system, _) = pq5_vault("p17-gate-system");
+        let migration = WriteContext::new("system:migration", "cli");
+        refused(&system, "lx:77:3", &migration, &["only the student", "\"system:migration\""]);
+        // A human actor that is not the vault's own token, built from the two tokens as `write.rs`'
+        // gate tests build one: each way round, a legacy vault and a `student` one.
+        for (name, file) in [("p17-gate-legacy", None), ("p17-gate-student", Some(HUMAN_ACTOR))] {
+            let (vault, _) = pq5_vault(name);
+            if let Some(token) = file {
+                create_actor_file(&vault, token).unwrap();
+            }
+            let own = read_human_actor(&vault).unwrap();
+            let other = if own == HUMAN_ACTOR { LEGACY_HUMAN_ACTOR } else { HUMAN_ACTOR };
+            let quoted = format!("{other:?}");
+            refused(&vault, "lx:77:3", &WriteContext::new(other, "dashboard"), &[ACTOR_FILE, own, quoted.as_str()]);
+        }
+        // Any actor, in a vault whose `config/actor.yaml` is invalid: the reader's named line.
+        let (invalid, _) = pq5_vault("p17-gate-invalid");
+        fs::create_dir_all(invalid.join(ACTOR_FILE).parent().unwrap()).unwrap();
+        pystr::write_text(&invalid.join(ACTOR_FILE), &format!("human_actor: {CARRY_ACTOR}\n")).unwrap();
+        let line = read_human_actor(&invalid).unwrap_err().to_string();
+        for actor in [HUMAN_ACTOR, LEGACY_HUMAN_ACTOR, CARRY_ACTOR] {
+            refused(&invalid, "lx:77:3", &WriteContext::new(actor, "dashboard"), &[&line]);
+        }
+        // The control: the student's own call removes the date the agent could not.
+        assert_eq!(remove(&agent, "lx:77:3"), Ok(true));
+    }
+
+    #[test]
+    fn only_an_accepted_lane_date_is_removed() {
+        // `pq3_vault` carried: `lx:77:2` timed and booked, `lx:77:3` two-day and `lx:77:4`
+        // zero-length, both lane dates.
+        let (vault, events) = pq3_vault("p17-only-lane");
+        assert_eq!(carry(&vault, &events).1, Vec::<String>::new());
+        assert_eq!(booked(&vault), [row("lx:77:2", "soft")], "a carried timed date");
+        record_verdict(&vault, "lx:50:1", "Career fair", date(2026, 9, 30), "obligation", "", "", "").unwrap();
+        // A lane date on a `rejected` card and one on an `expired` card, of each card kind.
+        let lane = |series: &str, uid: &str, first: i8| all_day(uid, series, first, 1);
+        for (name, status, series, id) in [
+            ("event-a-rejected.md", "rejected", "lx:61", "appr_6100000000"),
+            ("event-b-expired.md", "expired", "lx:62", "appr_6200000000"),
+        ] {
+            accept_card_with_instances(&vault, name, "obligation", series, &[&lane(series, &format!("{series}:1"), 12)], id);
+            let path = vault.join("archive").join(name);
+            let text = pystr::read_text(&path).unwrap().replace("status: executed\n", &format!("status: {status}\n"));
+            pystr::write_text(&path, &text).unwrap();
+        }
+        for (name, status, series, id) in [
+            ("event-check-c-rejected.md", "rejected", "lx:63", "appr_6300000000"),
+            ("event-check-d-expired.md", "expired", "lx:64", "appr_6400000000"),
+        ] {
+            check_card(&vault, name, status, series, &[&lane(series, &format!("{series}:1"), 13)], true, id);
+        }
+        // Two uids the ledger cannot read back, each a lane date on an executed card's
+        // `instances:`, so only the read-back check can refuse them.
+        let unreadable = [lane("lx:70", "a b", 14), lane("lx:70", "lx:70:verdict:2", 15)];
+        let listed = [&unreadable[0], &unreadable[1]];
+        accept_card_with_instances(&vault, "event-e-unreadable.md", "obligation", "lx:70", &listed, "appr_7000000000");
+        let ledger = load_ledger(&vault, None);
+        let drawn: Vec<String> = crate::surface::accepted_events(&vault, &ledger).lane.into_iter().map(|l| l.uid).collect();
+        assert_eq!(drawn, ["a b", "lx:70:verdict:2", "lx:77:3", "lx:77:4"], "the lane's own reader");
+
+        let as_student = student(&vault);
+        for uid in ["lx:77:2", "lx:50:1", "lx:404:1", "lx:61:1", "lx:62:1", "lx:63:1", "lx:64:1"] {
+            refused(&vault, uid, &as_student, &["not an accepted all-day date"]);
+        }
+        for uid in ["a b", "lx:70:verdict:2"] {
+            refused(&vault, uid, &as_student, &["the event ledger cannot read"]);
+        }
+        // The control: a lane date of the same vault is removed.
+        removes_with_one_line(&vault, "lx:77:4");
+    }
+
+    #[test]
+    fn removal_is_deterministic_and_leaves_existing_vaults_alone() {
+        let (vault, _) = pq5_vault("p17-determinism");
+        let copy = tmp("p17-determinism-copy");
+        copy_tree(&vault, &copy);
+        for v in [&vault, &copy] {
+            assert_eq!(remove(v, "lx:77:3"), Ok(true), "{}", v.display());
+        }
+        assert_eq!(tree(&copy), tree(&vault), "P14: the line holds only the uid and the day");
+
+        // `vault-full`, copied first and never used in place. It has no accepted lane date.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vault-full");
+        let full = tmp("p17-vault-full");
+        copy_tree(&fixture, &full);
+        let ledger = load_ledger(&full, None);
+        assert_eq!(ledger.len(), 3, "vault-full's three ledger uids");
+        assert!(crate::surface::accepted_events(&full, &ledger).lane.is_empty());
+        let before = tree(&full);
+        let as_student = student(&full);
+        for uid in ledger.keys() {
+            refused(&full, uid, &as_student, &["not an accepted all-day date"]);
+        }
+        assert_eq!(tree(&full), before, "no byte of the copy changes");
+    }
+}
