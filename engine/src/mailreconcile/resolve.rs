@@ -12,8 +12,8 @@
 //! second `new_item` naming it is a change, never a second note (test 24). [`super::plan`] and
 //! [`to_ask`] take the same walk, so what is asked is what the plan finds ambiguous; an answer never
 //! changes what a later claim resolves to, since an answered claim's actions only set a field or file
-//! a card under its own uid, neither of which resolution reads, and only a `New` claim adds an item
-//! (T5.3–T5.5's rules keep it so).
+//! an amend card under its own uid, neither of which resolution reads (an amend card only by its
+//! uid), and only a `New` claim adds an item or a task card (T5.3–T5.6's rules keep it so).
 //!
 //! **The steps, in order.**
 //! 1. The claim's uid (`mail:<h>:<n>`, [`ClaimRef::uid`]) already on a note or card in `tasks/`,
@@ -32,6 +32,9 @@
 //!    One with no due is [`Resolved::Restated`] and changes nothing: no due means "no date known",
 //!    never "date removed" (spec risk 1; §4.8 step 2 is silent on it, so it waits on Quinn's ruling).
 //!    A due naming no real day is no due ([`super::NewItem::known_due`]), so never a change to it.
+//!    A new note an open mail `kind: task` card in the course already proposes, by normalised title,
+//!    is [`Resolved::Carded`] ([`Working::carded`]; PQ8 (ii), plan T5.6): the same mail reached
+//!    Knowlu by another route, and `rules.rs` decides what it writes.
 //!
 //! **Words.** An *item note* is a note in `tasks/` or `archive/`, never a card in `approvals/`, in
 //! the vault or *planned* (filed by an earlier claim's action in this plan, [`Target::Planned`]). An
@@ -63,6 +66,10 @@ pub enum Resolved<'v> {
     AlreadyApplied,
     /// A `new_item` naming no active note in its course: a new note (§4.9's `new_item` rows).
     New,
+    /// A `new_item` naming no active note in its course, whose normalised title an open mail
+    /// `kind: task` card in that course already proposes ([`Working::carded`]): the same mail by
+    /// another route (PQ8 (ii), plan T5.6). Live, it files nothing; a backfill takes `New`'s rows.
+    Carded,
     /// A change to one field of `target`: a `change` claim's `field` and `value`, or a dated
     /// `new_item` read as a change to the note's `due`, to the item's due (test 24).
     Change { target: Target<'v>, field: ClaimField, value: Option<String> },
@@ -181,7 +188,10 @@ impl Working {
             Found::One(target) if claim.kind == ClaimKind::Receipt => Resolved::Receipt { target },
             Found::One(target) if claim.kind == ClaimKind::NewItem && value.is_none() => Resolved::Restated { target },
             Found::One(target) => Resolved::Change { target, field, value },
-            Found::Zero if claim.kind == ClaimKind::NewItem => Resolved::New,
+            Found::Zero if claim.kind == ClaimKind::NewItem => match &claim.item {
+                Some(item) if self.carded(claim.course.as_deref(), &item.title) => Resolved::Carded,
+                _ => Resolved::New,
+            },
             Found::Zero | Found::Many => Resolved::Ambiguous,
         }
     }
@@ -201,17 +211,18 @@ impl Working {
         let (filed_note, by) = match action {
             Action::Create { claim, note } => {
                 let (folder, status) = if note.imported_past { ("archive", "archived") } else { ("tasks", "active") };
-                let mut created = filed(claim, folder, status, &note.title, note.course.clone(), note.due.clone());
+                let mut created = filed(claim, folder, None, status, &note.title, note.course.clone(), note.due.clone());
                 created.mail_asof.extend(note.mail_asof.map(|asof| ("due".to_string(), asof)));
                 created.archived_reason = note.imported_past.then(|| crate::ingest::IMPORTED_PAST.to_string());
                 (created, claim)
             }
             Action::TaskCard { claim, note, proposal } => {
-                (filed(claim, "approvals", card(proposal.status), &note.title, note.course.clone(), note.due.clone()), claim)
+                let status = card(proposal.status);
+                (filed(claim, "approvals", Some("task"), status, &note.title, note.course.clone(), note.due.clone()), claim)
             }
             Action::AmendCard { claim, target, proposal, .. } => {
                 let (title, course) = self.note_in(target).map(|n| (n.title.clone(), n.course.clone())).unwrap_or_default();
-                (filed(claim, "approvals", card(proposal.status), &title, course, None), claim)
+                (filed(claim, "approvals", Some("amend"), card(proposal.status), &title, course, None), claim)
             }
             Action::Set { target, field, to, mail_asof, .. } => {
                 if let Some((note, _)) = self.notes.iter_mut().find(|entry| names(entry, target)) {
@@ -238,13 +249,22 @@ fn names((note, by): &(NoteView, Option<ClaimRef>), place: &Place) -> bool {
 }
 
 /// A note or card an action files, as the working vault holds it until `mail.rs` writes it: no `id`
-/// or `path` yet (see [`Target::Planned`]), `created_by: mail` and the claim's uid as `source_uid`
-/// (§5.2, D20), and no field a human set.
-fn filed(claim: &ClaimRef, folder: &str, status: &str, title: &str, course: Option<String>, due: Option<String>) -> NoteView {
+/// or `path` yet (see [`Target::Planned`]), a card's `kind`, `created_by: mail` and the claim's uid
+/// as `source_uid` (§5.2, D20), and no field a human set.
+fn filed(
+    claim: &ClaimRef,
+    folder: &str,
+    kind: Option<&str>,
+    status: &str,
+    title: &str,
+    course: Option<String>,
+    due: Option<String>,
+) -> NoteView {
     NoteView {
         id: String::new(),
         path: String::new(),
         folder: folder.to_string(),
+        kind: kind.map(str::to_string),
         course,
         title: title.to_string(),
         due: due.map(Value::String).unwrap_or(Value::Null),
@@ -320,6 +340,26 @@ impl Working {
         one(self.items().filter(equal))
     }
 
+    /// PQ8 (ii) (plan T5.6): whether an open mail `kind: task` card already proposes `title` in
+    /// `course`, in the vault or filed earlier in this plan. A card in `approvals/` with `kind: task`,
+    /// `created_by: mail` and `status: pending` or `snoozed` (an open decision, §9.5's reading for
+    /// amend cards: a first-day card is written snoozed, R16), in the same course, whose normalised
+    /// title equals the claim's. Exact on both keys, as [`Working::by_title`] is: a match too loose
+    /// would drop a real task with no card (spec risk 1), so no course matches no card.
+    fn carded(&self, course: Option<&str>, title: &str) -> bool {
+        let title = normalise(title);
+        let open = |n: &NoteView| matches!(n.status.as_deref(), Some("pending" | "snoozed"));
+        self.notes.iter().any(|(n, _)| {
+            n.folder == "approvals"
+                && n.kind.as_deref() == Some("task")
+                && n.created_by.as_deref() == Some(super::rules::MAIL)
+                && open(n)
+                && in_course(n, course)
+                && !title.is_empty()
+                && normalise(&n.title) == title
+        })
+    }
+
     /// The item notes, in the vault and then planned, in the order they were added.
     fn items(&self) -> impl Iterator<Item = Target<'_>> {
         let items = self.notes.iter().filter(|(n, _)| ITEM_FOLDERS.contains(&n.folder.as_str()));
@@ -367,6 +407,7 @@ mod tests {
             id: id.to_string(),
             path: format!("{folder}/{id}.md"),
             folder: folder.to_string(),
+            kind: None,
             course: Some(course.to_string()),
             title: title.to_string(),
             due: json!("2026-10-08"),

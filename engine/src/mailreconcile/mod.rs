@@ -57,6 +57,11 @@ pub struct NoteView {
     pub path: String,
     /// `tasks`, `archive`, `approvals`, …
     pub folder: String,
+    /// `kind:` as the frontmatter holds it, `None` when absent: a card's kind in `approvals/`
+    /// (`task`, `amend`, …). PQ8 (ii) (plan T5.6) reads it to find an open mail `kind: task` card,
+    /// whose `title` and `course` are those of the task it proposes (the course from its fenced task
+    /// payload, `write_gmail_card`'s shape). T6.3 fills it.
+    pub kind: Option<String>,
     pub course: Option<String>,
     pub title: String,
     /// `due:` as the frontmatter holds it, `Value::Null` when absent or null. Compared in the
@@ -386,7 +391,8 @@ pub enum SkipReason {
     Superseded,
     /// A live event already past (D24).
     Past,
-    /// Its uid is already on a note or card, another desktop's write (§4.8 step 4).
+    /// Its uid is already on a note or card, another desktop's write (§4.8 step 4); or a live
+    /// `new_item` an open mail task card already proposes, the same mail by another route (PQ8 (ii)).
     AlreadyApplied,
     /// The note already holds the value.
     Equal,
@@ -443,9 +449,10 @@ fn planned_steps<'m>(view: &VaultView, messages: &'m [Message], today: Date, vau
 /// may rewrite its steps' actions against the vault as it stood before the run (§4.9's two-value
 /// row), and the working vault is then rebuilt from that point with the run's final actions. A
 /// rewrite only exchanges members' sets and cards for skips and one card under one member's uid; it
-/// adds and removes no item, resolution reads no `due`, and it reads a card only for its own
-/// claim's uid, so a claim delivered once resolves the same for it. A claim delivered twice does
-/// not: its later copy resolved against the first copy's actions, which a rewrite may change, so
+/// adds and removes no item, resolution reads no `due`, and it reads an amend card only for its own
+/// claim's uid (a task card, which it also reads by title, is never a member's), so a claim
+/// delivered once resolves the same for it. A claim delivered twice does not: its later copy
+/// resolved against the first copy's actions, which a rewrite may change, so
 /// `settle` plans each claim once, by its first copy, and skips each later copy as already applied
 /// (§4.8 step 4), as a later copy delivered in another pull reads the first's card.
 fn walk<'m>(
@@ -595,6 +602,7 @@ mod tests {
             id: id.to_string(),
             path: format!("tasks/{id}.md"),
             folder: "tasks".to_string(),
+            kind: None,
             course: Some("CS 101".to_string()),
             title: title.to_string(),
             due: json!(due),

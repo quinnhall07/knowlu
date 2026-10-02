@@ -50,6 +50,11 @@
 //!   matches are notices (D13, D12), written in both phases and never held.
 //! - D24: no action names a note in `commitments/`; a claim's target is only ever an item note.
 //!
+//! **T5.6: the same mail by two routes (PQ8 (ii), Quinn 2026-10-02).** A live `new_item` an open
+//! mail `kind: task` card already proposes ([`Resolved::Carded`]: normalised title and course, the
+//! card `pending` or `snoozed`) files nothing, skipped as already applied, before any `new_item`
+//! row. Nothing is written, so it needs no Undo and no notice. A backfill keeps T5.3's rows.
+//!
 //! **Past** is a due whose date is strictly before `today`, never before *now*: the module has no
 //! clock, and `ingest` and `coursework` archive `imported-past` by the same rule, since an item due
 //! at 23:59 today is today's work.
@@ -74,7 +79,7 @@ use crate::approvals::AMENDABLE_FOLDERS;
 use crate::write;
 
 /// The `created_by` of a note the mail pass made (D20): the only note mail may write directly.
-const MAIL: &str = "mail";
+pub(super) const MAIL: &str = "mail";
 
 /// P10: the creators whose notes an authoritative feed supplies, and so owns (§4.9 rows 7 and 8).
 pub(super) const FEEDS: [&str; 3] = ["blackboard", "zybooks", "vhl"];
@@ -99,7 +104,11 @@ pub(super) fn rule(
 ) -> Vec<Action> {
     let skip = |claim, reason| vec![Action::Skip { claim, reason }];
     match (resolved, &claim.item) {
-        (Resolved::New, Some(item)) => vec![new_item(message, at, claim, item, today, vault_day)],
+        // PQ8 (ii), plan T5.6: live, an item an open mail task card already proposes files nothing,
+        // counted with the already-applied skips, and the student decides the one card. Before every
+        // `new_item` row, so whatever the item's kind or due; a backfill keeps T5.3's rows.
+        (Resolved::Carded, _) if message.phase == Phase::Live => skip(at, SkipReason::AlreadyApplied),
+        (Resolved::New | Resolved::Carded, Some(item)) => vec![new_item(message, at, claim, item, today, vault_day)],
         (Resolved::Change { target, field, value }, _) => {
             vec![change(message, at, claim, *target, *field, value.as_deref(), today, proposal(today, vault_day))]
         }
@@ -761,6 +770,7 @@ mod tests {
             id: "task-lab5".to_string(),
             path: PATH.to_string(),
             folder: "tasks".to_string(),
+            kind: None,
             course: Some("CS 101".to_string()),
             title: "Lab 5".to_string(),
             due: json!("2026-10-12"),
@@ -1817,5 +1827,174 @@ mod tests {
                 assert_eq!(on(&no_status, phase, authenticity, &cancelled(), 9), skip(SkipReason::NotAmendable), "{created_by:?} {phase:?}");
             }
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // T5.6: PQ8 (ii), a live task already pending as a mail card files nothing
+    // -----------------------------------------------------------------------------------------
+
+    /// The first route's copy (S0 capture 5's shape, synthetic): the message as it reached Knowlu
+    /// through one connected mailbox, whose claim filed the card.
+    const ROUTED: &str = "mail:1e1e2d2d3c3c4b4b5a5a69697878f0f0";
+
+    /// A mail `kind: task` card in `approvals/` with `status`, proposing "Lab 5" in CS 101, filed by
+    /// [`ROUTED`]'s claim.
+    fn proposing(status: &str) -> NoteView {
+        NoteView {
+            id: "card-lab5".to_string(),
+            path: "approvals/task-lab-5.md".to_string(),
+            folder: "approvals".to_string(),
+            kind: Some("task".to_string()),
+            status: Some(status.to_string()),
+            source_uid: Some(first_of(ROUTED).uid()),
+            ..lab(Some("mail"), &[])
+        }
+    }
+
+    /// PQ8 (ii) (Quinn 2026-10-02): a rule forward ("FW:") of a course mail reaches Knowlu through a
+    /// second connected mailbox as a new message with a new Message-ID, so intake's dedup cannot see
+    /// it. Its live `new_item` naming the task an open mail card already proposes (normalised title,
+    /// same course) files nothing: one skip, already applied, whatever its due, item kind or
+    /// authenticity. Alone, the same claim plans its own row; the card is what silences it.
+    #[test]
+    fn a_live_new_item_matching_a_pending_mail_task_card_files_nothing() {
+        let card = proposing("pending");
+        for claim in [
+            item("Lab 5", Some("2026-10-12"), Task),
+            item("lab-5", Some("2026-10-14T23:59"), Task),
+            item("  LAB #5. ", None, Task),
+            item("Lab 5", Some("2026-09-20"), Task),
+            item("Lab 5", Some("2026-10-20T09:00"), Exam),
+            item("Lab 5", Some("2026-10-05T18:00"), Event),
+            item("Lab 5", Some("2026-09-25T18:00"), Event),
+        ] {
+            for authenticity in [Aligned, Unaligned] {
+                let forwarded = message(Live, authenticity, vec![claim.clone()]);
+                let got = against(vec![card.clone()], &[forwarded.clone()], 9);
+                assert_eq!(got, vec![skip(SkipReason::AlreadyApplied)], "{:?} {authenticity:?}", claim.item);
+                assert_ne!(against(vec![], &[forwarded], 9), got, "alone: {:?}", claim.item);
+            }
+        }
+    }
+
+    /// The plan's reading of "pending" (T5.6): a card is an open decision while `pending` or
+    /// `snoozed`, as §9.5's open-decision rule reads an amend card. A first-day mail card is written
+    /// snoozed to day 2 (R16), so a second route's copy meets a snoozed card on day 1, and on a later
+    /// day may meet one the budget or the student snoozed. Either blocks, in the vault or filed
+    /// earlier in the same plan.
+    #[test]
+    fn a_snoozed_mail_task_card_blocks_it_too() {
+        let (posted, forwarded) = (item("Lab 5", Some("2026-10-12"), Task), item("LAB 5", Some("2026-10-12"), Task));
+        for day in [1, 2] {
+            let got = against(vec![proposing("snoozed")], &[message(Live, Aligned, vec![forwarded.clone()])], day);
+            assert_eq!(got, vec![skip(SkipReason::AlreadyApplied)], "vault day {day}");
+        }
+        let first = sent(ROUTED, "2026-09-28T09:00:00Z", Live, Aligned, vec![posted.clone()]);
+        let second = sent(UID, "2026-09-28T09:05:00Z", Live, Aligned, vec![forwarded]);
+        let filed = NewNote { mail_asof: Some(first.ordering_date), ..note(&posted, false) };
+        let card = Action::TaskCard { claim: first_of(ROUTED), note: filed, proposal: held() };
+        assert_eq!(against(vec![], &[second, first], 1), vec![card, skip(SkipReason::AlreadyApplied)], "vault day 1, one plan");
+    }
+
+    /// The match is exact on both keys (T5.2's normalisation; the course equal), since a match too
+    /// loose drops a real task with no card (spec risk 1): another course, no course, or a title that
+    /// only shares words with the card's each file their card, exactly as with no card at all.
+    #[test]
+    fn another_course_or_another_normalised_title_still_files_its_card() {
+        let card = proposing("pending");
+        let named = |course: Option<&str>, title: &str| Claim { course: course.map(str::to_string), ..item(title, Some("2026-10-12"), Task) };
+        for claim in [
+            named(Some("MATH 220"), "Lab 5"),
+            named(Some("CS 1010"), "Lab 5"),
+            named(None, "Lab 5"),
+            named(Some("CS 101"), "Lab 5 report"),
+            named(Some("CS 101"), "Pre-lab 5"),
+            named(Some("CS 101"), "Lab 6"),
+            named(Some("CS 101"), "Lab"),
+            named(Some("CS 101"), "Lab 05"),
+        ] {
+            let forwarded = message(Live, Aligned, vec![claim.clone()]);
+            let got = against(vec![card.clone()], &[forwarded.clone()], 9);
+            assert_eq!(got, vec![carded(&claim, pending())], "{:?} {:?}", claim.course, claim.item);
+            assert_eq!(got, against(vec![], &[forwarded], 9), "as with no card");
+        }
+        let (courseless, claim) = (NoteView { course: None, ..card.clone() }, named(None, "Lab 5"));
+        let got = against(vec![courseless], &[message(Live, Aligned, vec![claim.clone()])], 9);
+        assert_eq!(got, vec![carded(&claim, pending())], "no course matches no card, as T5.2's title match");
+        let same = named(Some("CS 101"), "lab: 5");
+        assert_eq!(against(vec![card], &[message(Live, Aligned, vec![same])], 9), vec![skip(SkipReason::AlreadyApplied)], "the same task");
+    }
+
+    /// Only an open mail decision on the task blocks it (PQ8 (ii)): a rejected or expired mail task
+    /// card (moved to `archive/`), an approved one, a Gmail task card and a mail amend card, each with
+    /// the same title and course, block nothing, alone or together.
+    #[test]
+    fn only_an_open_mail_task_card_blocks() {
+        let open = proposing("pending");
+        let gone = |status: &str| NoteView { folder: "archive".to_string(), path: "archive/task-lab-5.md".to_string(), ..proposing(status) };
+        let closed = [
+            gone("rejected"),
+            gone("expired"),
+            proposing("approved"),
+            NoteView { created_by: Some("gmail".to_string()), source_uid: Some("gmail:18c2f0a1".to_string()), ..open.clone() },
+            NoteView { kind: Some("amend".to_string()), path: "approvals/amend-lab-5.md".to_string(), ..open.clone() },
+        ];
+        let claim = item("Lab 5", Some("2026-10-12"), Task);
+        let forwarded = message(Live, Aligned, vec![claim.clone()]);
+        let filed = vec![carded(&claim, pending())];
+        for card in &closed {
+            let got = against(vec![card.clone()], &[forwarded.clone()], 9);
+            assert_eq!(got, filed, "{} {:?} {:?} {:?}", card.folder, card.kind, card.status, card.created_by);
+        }
+        assert_eq!(against(closed.to_vec(), &[forwarded.clone()], 9), filed, "all of them together");
+        assert_eq!(against([closed.to_vec(), vec![open]].concat(), &[forwarded], 9), vec![skip(SkipReason::AlreadyApplied)]);
+    }
+
+    /// Two live copies of one item by two routes (S0 capture 5): planned whole, the later claim meets
+    /// the card the earlier one plans; delivered over two pulls, it meets that card in the vault. One
+    /// card either way, for the copy §4.8's order takes first, and the same plan whatever order the
+    /// pulls deliver (spec test 18), at two ordering dates or at one.
+    #[test]
+    fn two_matching_live_items_file_one_card_whole_or_split() {
+        let (posted, forwarded) = (item("Lab 5", Some("2026-10-12"), Task), item("lab 5", Some("2026-10-12"), Task));
+        let applied = |uid: &str| Action::Skip { claim: first_of(uid), reason: SkipReason::AlreadyApplied };
+        for forwarded_at in ["2026-09-28T09:05:00Z", "2026-09-28T09:00:00Z"] {
+            let first = sent(ROUTED, "2026-09-28T09:00:00Z", Live, Aligned, vec![posted.clone()]);
+            let second = sent(UID, forwarded_at, Live, Aligned, vec![forwarded.clone()]);
+            let filed = NewNote { mail_asof: Some(first.ordering_date), ..note(&posted, false) };
+            let card = Action::TaskCard { claim: first_of(ROUTED), note: filed, proposal: pending() };
+            for delivered in [[first.clone(), second.clone()], [second.clone(), first.clone()]] {
+                assert_eq!(against(vec![], &delivered, 9), vec![card.clone(), applied(UID)], "whole, {forwarded_at}");
+            }
+            // Split: pull one files the card, which syncs into the vault as a card; pull two meets it
+            // there, whether or not it delivers the first copy again.
+            assert_eq!(against(vec![], &[first.clone()], 9), vec![card], "pull one, {forwarded_at}");
+            assert_eq!(against(vec![proposing("pending")], &[second.clone()], 9), vec![applied(UID)], "pull two");
+            assert_eq!(against(vec![proposing("pending")], &[second, first], 9), vec![applied(ROUTED), applied(UID)]);
+        }
+    }
+
+    /// The rule is live only (plan T5.6): with an open mail task card for "Lab 5" in the vault, a
+    /// backfill `new_item` for it, aligned or not, takes T5.3's rows exactly as with no card. A
+    /// recovered message reads as live (plan T5's rules), so its copy files nothing.
+    #[test]
+    fn a_backfill_new_item_keeps_its_rows() {
+        let card = proposing("pending");
+        for claim in [
+            item("Lab 5", Some("2026-10-12"), Task),
+            item("Lab 5", None, Task),
+            item("Lab 5", Some("2026-09-20"), Task),
+            item("Lab 5", Some("2026-10-05T18:00"), Event),
+            item("Lab 5", Some("2026-09-25T18:00"), Event),
+        ] {
+            for authenticity in [Aligned, Unaligned] {
+                let backfilled = message(Backfill, authenticity, vec![claim.clone()]);
+                let alone = against(vec![], &[backfilled.clone()], 9);
+                assert_eq!(against(vec![card.clone()], &[backfilled], 9), alone, "{:?} {authenticity:?}", claim.item);
+            }
+        }
+        let recover: Phase = serde_json::from_value(json!("recover")).unwrap();
+        let recovered = message(recover, Aligned, vec![item("Lab 5", Some("2026-10-12"), Task)]);
+        assert_eq!(against(vec![card], &[recovered], 9), vec![skip(SkipReason::AlreadyApplied)], "recover reads as live");
     }
 }
