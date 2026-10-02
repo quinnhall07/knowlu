@@ -989,3 +989,23 @@ fn a_chosen_school_becomes_campus_yaml_and_a_timezone_suggestion() {
         assert!(jiff::tz::TimeZone::get(tz).is_ok(), "{st} maps to {tz}, which the tz database does not have");
     }
 }
+
+// ---- T14: the mail columns of `Curated` (email spec §4.1, D7) -------------------------------------
+
+#[test]
+fn every_curated_row_names_a_known_mail_provider() {
+    for row in CAMPUSES.iter() {
+        assert!(["m365", "google", "other"].contains(&row.mail_provider), "{}: {}", row.label, row.mail_provider);
+    }
+}
+
+#[test]
+fn a_mail_domain_is_set_only_for_m365_or_google() {
+    for row in CAMPUSES.iter() {
+        match (row.mail_provider, row.mail_domain) {
+            ("other", d) => assert!(d.is_none(), "{}: an `other` row names no domain", row.label),
+            (_, Some(d)) => assert!(d.contains('.') && !d.contains('@') && d == d.to_lowercase(), "{}: {d}", row.label),
+            (p, None) => panic!("{}: a {p} row needs a mail domain", row.label),
+        }
+    }
+}
