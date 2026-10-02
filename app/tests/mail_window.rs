@@ -135,6 +135,26 @@ fn the_popup_opens_only_for_about_blank_and_the_providers_own_hosts() {
     }
 }
 
+/// S1b, on the popup's own window (no window opens in a test, so this reads `src/mail.rs`): every
+/// navigation in the popup passes [`popup_allowed`], the popup opens no popup of its own, and its
+/// `window.close()` destroys the Tauri window. wry's own close handler destroys only the webview's
+/// container, which left an empty frame in the spike, so `popup_open` would stay true.
+#[test]
+fn the_popup_is_filtered_opens_nothing_and_closes_its_window() {
+    let src = std::fs::read_to_string("src/mail.rs").unwrap().replace("\r\n", "\n");
+    let start = src.find("fn open_popup(").expect("src/mail.rs has open_popup");
+    let body = &src[start..];
+    let body = &body[..body.find("\n}\n").expect("open_popup ends")];
+    let builder = &body[body.find("WebviewWindowBuilder::new(app, POPUP").expect("the popup's builder")..];
+    let builder = &builder[..builder.find(".build()").expect("the popup's builder builds")];
+    assert!(builder.contains(".on_navigation(move |u| popup_allowed(provider, u.as_str()))"), "the popup navigates unfiltered");
+    assert!(builder.contains(".on_new_window(|_, _| NewWindowResponse::Deny)"), "the popup may open popups");
+    assert!(body.contains("destroy_on_close_request("), "open_popup leaves window.close() to wry");
+    let hook = &src[src.find("fn destroy_on_close_request(").expect("the close hook")..];
+    let hook = &hook[..hook.find("\n}\n").expect("the close hook ends")];
+    assert!(hook.contains("add_WindowCloseRequested") && hook.contains(".destroy()"), "the close hook does not destroy the window");
+}
+
 // ---- test 33: the origin check (S1c) ---------------------------------------------------------
 
 /// D5 and S1c: a script runs only while the top-level page is on the provider's mail hosts, checked

@@ -319,7 +319,8 @@ fn poll_js(hosts: &str, id: u64) -> String {
 //
 // Built only on a profile folder `mail_session::is_session_dir` accepts. Visible to sign in; hidden
 // and out of the taskbar while steps run (S2 passed both that and off-screen; hidden is grades'
-// mode). No navigation filter: a school's own sign-in can be on any host, and nothing runs there.
+// mode). The mail window has no navigation filter: a school's own sign-in can be on any host, and
+// nothing runs there. The popup has one ([`popup_allowed`], S1b).
 use crate::mail_session::is_session_dir;
 use std::path::Path;
 use tauri::webview::{NewWindowFeatures, NewWindowResponse};
@@ -394,7 +395,8 @@ fn open(app: &tauri::AppHandle, data_dir: &Path, profile: &Path, provider: Provi
 /// S1b: Google's "verify it's you" popup, in the opener's environment (so its profile), with its
 /// own window features. Its first request is `about:blank`; only [`popup_allowed`] URLs open, one
 /// popup at a time, and the mail window comes back with it, because the site needs the student.
-/// The popup closes itself (`window.close()`; WebView2's close request destroys its window).
+/// Every navigation in the popup passes [`popup_allowed`] too, and it opens no popup of its own.
+/// It closes itself (`window.close()`): [`destroy_on_close_request`] destroys its Tauri window.
 fn open_popup(app: &tauri::AppHandle, provider: Provider, url: &tauri::Url, features: NewWindowFeatures) -> NewWindowResponse<tauri::Wry> {
     if !popup_allowed(provider, url.as_str()) || app.get_webview_window(POPUP).is_some() {
         return NewWindowResponse::Deny;
@@ -404,10 +406,13 @@ fn open_popup(app: &tauri::AppHandle, provider: Provider, url: &tauri::Url, feat
         .window_features(features)
         .title("Confirm it's you")
         .initialization_script(INIT_SCRIPT)
+        .on_navigation(move |u| popup_allowed(provider, u.as_str()))
+        .on_new_window(|_, _| NewWindowResponse::Deny)
         .build();
     match built {
         Ok(window) => {
             refuse_external_schemes(&window);
+            destroy_on_close_request(app, &window);
             let _ = come_back(app);
             NewWindowResponse::Create { window }
         }
@@ -470,3 +475,28 @@ fn refuse_external_schemes(w: &tauri::WebviewWindow) {
 
 #[cfg(not(windows))]
 fn refuse_external_schemes(_w: &tauri::WebviewWindow) {}
+
+/// S1b: the popup's `window.close()` destroys its Tauri window. wry's own handler destroys only the
+/// webview's container, which left an empty frame in the spike (and [`popup_open`] true). The
+/// destroy runs off the WebView2 callback, on its own thread, as the spike verified.
+#[cfg(windows)]
+fn destroy_on_close_request(app: &tauri::AppHandle, w: &tauri::WebviewWindow) {
+    let app = app.clone();
+    let _ = w.with_webview(move |pw| unsafe {
+        let Ok(core) = pw.controller().CoreWebView2() else { return };
+        let handler = webview2_com::WindowCloseRequestedEventHandler::create(Box::new(move |_, _| {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                if let Some(popup) = app.get_webview_window(POPUP) {
+                    let _ = popup.destroy();
+                }
+            });
+            Ok(())
+        }));
+        let mut token = 0i64;
+        let _ = core.add_WindowCloseRequested(&handler, &mut token);
+    });
+}
+
+#[cfg(not(windows))]
+fn destroy_on_close_request(_app: &tauri::AppHandle, _w: &tauri::WebviewWindow) {}

@@ -1585,6 +1585,9 @@ for `mail.json`.
 - `no_capability_names_a_mail_window_or_a_remote_url` (33; Quinn's IPC ruling 2026-10-02: fails if any
   `app/capabilities/*.json` names a mail window label or remote URL)
 - `one_mail_window_at_a_time` (33)
+- `the_popup_is_filtered_opens_nothing_and_closes_its_window` (S1b; T9.2 review): reads `src/mail.rs`,
+  since no window opens in a test: the popup's builder filters every navigation through `popup_allowed`
+  and denies its own popups, and its `WindowCloseRequested` destroys the Tauri window
 - `the_runner_refuses_a_page_off_the_providers_origins` (33, a synthetic SSO origin)
 - `the_runner_runs_only_compiled_in_scripts` (D19)
 - `the_sign_in_detector_reads_m365_and_gmail_titles`
@@ -1597,6 +1600,10 @@ the popup per S1b; the protocol prompt per S3; the result channel per S1a, with 
 
 **Outlook's origins** include `outlook.cloud.microsoft` (`outlook.office.com` redirects there, S1c), besides
 `outlook.office.com` and the sign-in origins.
+
+**Live checks for T11 and T18c** (the window half has not run live; T9.2 review): Gmail's popup
+closes itself after the phone tap and `popup_open` turns false, so a later popup opens; a navigation
+in the popup off the provider's hosts is cancelled (it stays on the page it was on).
 
 ### T10. Step machines and step scripts, in five dispatches
 
