@@ -13,13 +13,28 @@
  * - **Batch send:** From the mailbox's hint, with a passing DKIM signature aligned with the hint's domain,
  *   whose covered Subject carries the nonce of one of this mailbox's open batches.
  *
- * Anything else is `other`; T2f adds the live forward and the unbound case. Every value that binds is
- * read from the fields a passing signature covers, never from a field the signature leaves out
- * (`unsignedExtra`). Results are fixed words, ids and the confirm link: no address, header value or
- * nonce leaves this file, and nothing here logs. The caller (T2g.2) acts on the result.
+ * Part 2 (email plan T2f; step 5's live case and "anything else", and step 6):
+ *
+ * - **Live forward:** bound only by what the provider's own forwarding hop added. Check (i): the topmost
+ *   ARC set is sealed and its AMS signed by the provider (`google.com`, `microsoft.com`) and verifies, no
+ *   forwarding header has an unsigned twin of a signed instance, and for M365 the ForwardingLoop names
+ *   the mailbox and its `forward_hint` tenant. Check (ii): SES's SPF verdict passed on an envelope sender
+ *   that is the provider's forwarding return path for this mailbox (Gmail's
+ *   `<local>+caf_=<our address, @ as =>@<domain>`, Microsoft's SRS `<local>+SRS=…@<domain>`). PQ2's
+ *   interop check (2026-10-02) found that no provider's AMS covers X-Forwarded-For, X-Forwarded-To or
+ *   the ForwardingLoop, so X-Forwarded-* never bind, and the envelope carries the binding with the seal.
+ * - **Unbound:** anything else.
+ * - **Authenticity** (`aligned` or `unaligned`): for a live forward, only the verified hop's
+ *   ARC-Authentication-Results; for a backfilled or recovered original (`originalAuthenticity`), the
+ *   provider's own verifying topmost ARC set, else its delivery stamp, the topmost Authentication-Results.
+ *
+ * Every value that binds is read from the fields a passing signature covers, or from the envelope SES
+ * reported, never from a field a signature leaves out (`unsignedExtra`). Results are fixed words, ids and
+ * the confirm link: no address, header value or nonce leaves this file, and nothing here logs or throws.
+ * The caller (T2g.2) acts on the result.
  */
-import { type DkimDeps, type SignatureResult, verifyDkim } from "./dkim.ts";
-import { bodyText, decodeWords, type MailInput, parseHeaders } from "./mime.ts";
+import { type ArcResult, type DkimDeps, type SignatureResult, verifyArc, verifyDkim } from "./dkim.ts";
+import { bodyText, decodeWords, type MailHeaders, type MailInput, parseHeaders } from "./mime.ts";
 
 export interface BindBatch {
   id: string;
@@ -40,6 +55,8 @@ export interface BindMailbox {
   mailboxHint: string | null;
   /** Epoch ms; Gmail's confirm window ends here (P21). */
   confirmUntil: number | null;
+  /** The M365 tenant id a canary recorded (`mail_addresses.forward_hint`); live M365 mail binds only to it. */
+  forwardHint: string | null;
   batches: BindBatch[];
   canaries: BindCanary[];
 }
@@ -51,13 +68,25 @@ export interface BindDeps extends DkimDeps {
   /** A nonce as `mail_batches.nonce_hmac` and `mail_canaries.nonce_hmac` hold it. */
   nonceHmac: (nonce: string) => Promise<string>;
 }
+/** The SMTP envelope as the verified SES notification states it (T2g.1 reads it, never the message). */
+export interface BindEnvelope {
+  /** `mail.source`: the envelope sender (MAIL FROM); `null` for a null sender. */
+  mailFrom: string | null;
+  /** `receipt.spfVerdict.status` is `PASS`: SES's SPF check passed for `mailFrom`'s domain. */
+  spfPass: boolean;
+  /** The address in `receipt.recipients` whose token found this mailbox (a retired one in its grace too). */
+  recipient: string;
+}
+/** §4.6 step 6's two words; the only thing about authentication a work item records. */
+export type Authenticity = "aligned" | "unaligned";
 export type ConfirmRefusal = "dkim" | "hint_null" | "hint_mismatch" | "requester" | "window" | "link";
 export type Arrival =
   | { kind: "canary"; canaryId: string; replay: boolean; forwardHint: string | null }
   | { kind: "gmail_confirm"; link: string }
   | { kind: "gmail_confirm_refused"; reason: ConfirmRefusal }
   | { kind: "batch"; batchId: string; phase: "backfill" | "recover" }
-  | { kind: "other" };
+  | { kind: "live"; authenticity: Authenticity }
+  | { kind: "unbound" };
 
 export const GMAIL_CONFIRM_SENDER = "forwarding-noreply@google.com";
 /** Hosts Google's `vf-` confirmation link is served from; the form's action (T2g.2) uses the same list. */
@@ -156,15 +185,24 @@ async function byNonce<T extends { nonceHmac: string }>(
 
 /** The M365 tenant id the topmost `X-MS-Exchange-ForwardingLoop` names, when that field names this
  * mailbox; `null` for any other provider or anything else. */
-function forwardHint(input: MailInput, mailbox: BindMailbox): string | null {
-  const hint = mailbox.mailboxHint?.trim().toLowerCase();
-  if (mailbox.provider !== "m365" || !hint) return null;
-  const loop = parseHeaders(input).headers.find((h) =>
-    h.name.toLowerCase() === "x-ms-exchange-forwardingloop"
-  );
-  if (loop === undefined || loop.value.length > 500) return null;
-  const [who, tenant, ...rest] = loop.value.split(";").map((s) => s.trim().toLowerCase());
-  return rest.length === 0 && who === hint && TENANT.test(tenant ?? "") ? tenant : null;
+function forwardHint(head: MailHeaders, mailbox: BindMailbox): string | null {
+  const hint = hintOf(mailbox);
+  if (mailbox.provider !== "m365" || hint === null) return null;
+  const loop = loopOf(topField(head, LOOP_FIELD));
+  return loop !== null && loop.who === hint ? loop.tenant : null;
+}
+
+const LOOP_FIELD = "x-ms-exchange-forwardingloop";
+const hintOf = (mailbox: BindMailbox) => mailbox.mailboxHint?.trim().toLowerCase() || null;
+/** The topmost field of a (lower-case) name. */
+const topField = (head: MailHeaders, name: string) =>
+  head.headers.find((h) => h.name.trim().toLowerCase() === name)?.value ?? null;
+
+/** A ForwardingLoop value, `<mailbox>;<tenant GUID>` and nothing more, lower-cased. */
+function loopOf(value: string | null): { who: string; tenant: string } | null {
+  if (value === null || value.length > 500) return null;
+  const [who, tenant, ...rest] = value.split(";").map((s) => s.trim().toLowerCase());
+  return rest.length === 0 && TENANT.test(tenant ?? "") ? { who, tenant } : null;
 }
 
 const refuse = (reason: ConfirmRefusal): Arrival => ({ kind: "gmail_confirm_refused", reason });
@@ -195,34 +233,208 @@ function gmailConfirm(
   return { kind: "gmail_confirm", link: [...links][0] };
 }
 
-/** Which of §4.6 step 5's first three cases a message is, for the mailbox its recipient token found. */
+// ---------------------------------------------------------------- part 2: the live forward
+
+/** The domain each provider's forwarding hop seals its ARC set and signs its AMS with (S0, 2026-10-02). */
+const PROVIDER_ARC: Partial<Record<BindMailbox["provider"], string>> = {
+  google: "google.com",
+  m365: "microsoft.com",
+};
+/** Fields that would name a mailbox. They never bind (no provider's AMS covers them), but a signed
+ * instance with an unsigned twin means a sender seeded one, and nothing in that message binds. */
+const FORWARD_FIELDS = ["x-forwarded-for", "x-forwarded-to", LOOP_FIELD];
+type ArcPass = Extract<ArcResult, { result: "pass" }>;
+
+const split = (address: string): [string, string] | null => {
+  const at = address.lastIndexOf("@");
+  return at > 0 ? [address.slice(0, at), address.slice(at + 1)] : null;
+};
+
+/** The topmost ARC set when the mailbox's provider sealed and signed it and it verifies; else `null`. */
+async function providerArc(input: MailInput, provider: BindMailbox["provider"], deps: DkimDeps) {
+  const domain = PROVIDER_ARC[provider];
+  if (domain === undefined) return null;
+  let arc: ArcResult;
+  try {
+    arc = await verifyArc(input, deps);
+  } catch {
+    return null;
+  }
+  return arc.result === "pass" && arc.sealDomain === domain && arc.amsDomain === domain ? arc : null;
+}
+
+/** Check (ii): SES passed SPF on the provider's forwarding return path for this mailbox and address. */
+function envelopeBinds(mailbox: BindMailbox, hint: string, envelope: BindEnvelope): boolean {
+  const from = envelope.mailFrom?.trim().toLowerCase() ?? "";
+  const own = split(hint);
+  const env = from.length <= 512 && ADDRESS.test(from) ? split(from) : null;
+  if (!envelope.spfPass || own === null || env === null || env[1] !== own[1]) return false;
+  if (mailbox.provider === "google") {
+    const to = envelope.recipient.trim().toLowerCase();
+    return ADDRESS.test(to) && env[0] === `${own[0]}+caf_=${to.replace("@", "=")}`;
+  }
+  const srs = `${own[0]}+srs=`;
+  return mailbox.provider === "m365" && env[0].length > srs.length && env[0].startsWith(srs);
+}
+
+/** Check (i) beyond the seal: no seeded forwarding field, and for M365 the loop naming mailbox and tenant
+ * (the covered instance were the AMS to cover it; the topmost, which Microsoft's hop adds, otherwise). */
+function hopNames(arc: ArcPass, head: MailHeaders, mailbox: BindMailbox, hint: string): boolean {
+  if (arc.unsignedExtra.some((n) => FORWARD_FIELDS.includes(n))) return false;
+  if (mailbox.provider !== "m365") return true;
+  const loop = loopOf(
+    arc.signedHeaders.includes(LOOP_FIELD)
+      ? arc.covered.find((f) => f.name === LOOP_FIELD)?.value ?? null
+      : topField(head, LOOP_FIELD),
+  );
+  return loop !== null && mailbox.forwardHint !== null && loop.who === hint &&
+    loop.tenant === mailbox.forwardHint.trim().toLowerCase();
+}
+
+/** §4.6 step 5's live case: both checks, then step 6 on the verified hop's own record. */
+async function liveForward(
+  input: MailInput,
+  head: MailHeaders,
+  mailbox: BindMailbox,
+  envelope: BindEnvelope,
+  deps: DkimDeps,
+): Promise<Arrival> {
+  const hint = hintOf(mailbox);
+  if (hint === null || !envelopeBinds(mailbox, hint, envelope)) return { kind: "unbound" };
+  const arc = await providerArc(input, mailbox.provider, deps);
+  if (arc === null || !hopNames(arc, head, mailbox, hint)) return { kind: "unbound" };
+  return { kind: "live", authenticity: verdict(arc.authResults, soleFromDomain(head), "arc") };
+}
+
+// ---------------------------------------------------------------- part 2: authenticity (step 6)
+
+/** The authserv-id each provider's delivery stamp carries; `null` where it writes none (Microsoft's EOP
+ * writes `Authentication-Results: spf=…; dkim=…; dmarc=…` with no authserv-id). */
+const DELIVERY_STAMP: Partial<Record<BindMailbox["provider"], string | null>> = {
+  google: "mx.google.com",
+  m365: null,
+};
+const MAX_RESULTS = 16_384;
+const DOMAIN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
+/** DMARC's relaxed alignment without a public-suffix list: the From domain, a parent of it (never a bare
+ * label), or a domain under it. */
+const relaxed = (d: string, from: string) => DOMAIN.test(d) && (aligned(d, from) || d.endsWith("." + from));
+const domainOf = (s: string | undefined) => s?.slice(s.lastIndexOf("@") + 1);
+
+/** The From domain when the message has exactly one From field with one address; else `null`. */
+function soleFromDomain(head: MailHeaders): string | null {
+  const froms = head.headers.filter((h) => h.name.trim().toLowerCase() === "from").length;
+  return froms === 1 && head.fromAddress !== null ? domainOf(head.fromAddress) ?? null : null;
+}
+
+/** An Authentication-Results value's elements (RFC 8601), comments and quoted strings removed; `null`
+ * when it is too long or a comment does not close. */
+function elements(value: string): string[] | null {
+  if (value.length > MAX_RESULTS) return null;
+  let v = value.replace(/"(?:[^"\\]|\\.)*"/g, " ");
+  for (let i = 0; i < 8 && v.includes("("); i++) v = v.replace(/\([^()]*\)/g, " ");
+  return /[()"]/.test(v) ? null : v.split(";").map((s) => s.trim());
+}
+
+/** Whether these result elements show `dmarc=pass` for the From domain, or an aligned dkim or spf pass. */
+function shows(results: string[], domain: string): boolean {
+  for (const element of results) {
+    const [method, ...props] = element.split(/\s+/);
+    const m = /^([a-z0-9-]+)(?:\/[0-9]+)?=([a-z]+)$/.exec(method.toLowerCase());
+    if (m === null || m[2] !== "pass") continue;
+    const p = new Map<string, string>();
+    for (const t of props) {
+      const eq = t.indexOf("=");
+      const key = t.slice(0, eq).toLowerCase();
+      if (eq > 0 && !p.has(key)) p.set(key, t.slice(eq + 1).toLowerCase());
+    }
+    if (m[1] === "dmarc" && p.get("header.from") === domain) return true;
+    const d = m[1] === "dkim"
+      ? p.get("header.d") ?? domainOf(p.get("header.i"))
+      : m[1] === "spf"
+      ? domainOf(p.get("smtp.mailfrom"))
+      : undefined;
+    if (d !== undefined && relaxed(d, domain)) return true;
+  }
+  return false;
+}
+
+/** Step 6 on the one record that counts: a verified ARC set's ARC-Authentication-Results (`arc`, its first
+ * element the authserv-id), or a provider's delivery stamp, read only when its authserv-id is the
+ * provider's own (or, for EOP, absent). */
+function verdict(
+  value: string,
+  domain: string | null,
+  record: "arc" | BindMailbox["provider"],
+): Authenticity {
+  const el = elements(value);
+  if (el === null || domain === null) return "unaligned";
+  const id = el[0].split(/\s+/)[0].toLowerCase();
+  let results: string[];
+  if (record === "arc") {
+    results = el.slice(1);
+  } else {
+    const stamp = DELIVERY_STAMP[record];
+    if (stamp === undefined || (stamp === null ? !id.includes("=") : id !== stamp)) return "unaligned";
+    results = stamp === null ? el : el.slice(1);
+  }
+  return shows(results, domain) ? "aligned" : "unaligned";
+}
+
+/**
+ * §4.6 step 6 for a backfilled or recovered original (one `message/rfc822` attachment of a batch send),
+ * delivered to a mailbox of `provider`: the provider's own topmost ARC set when it verifies, else the
+ * provider's delivery stamp, the topmost `Authentication-Results`. Nothing else in the message is read,
+ * and the outer send's DKIM says nothing here. Never throws.
+ */
+export async function originalAuthenticity(
+  original: MailInput,
+  provider: BindMailbox["provider"],
+  deps: DkimDeps,
+): Promise<Authenticity> {
+  try {
+    const head = parseHeaders(original);
+    const domain = soleFromDomain(head);
+    if (domain === null || DELIVERY_STAMP[provider] === undefined) return "unaligned";
+    const arc = await providerArc(original, provider, deps);
+    if (arc !== null) return verdict(arc.authResults, domain, "arc");
+    const stamp = topField(head, "authentication-results");
+    return stamp === null ? "unaligned" : verdict(stamp, domain, provider);
+  } catch {
+    return "unaligned";
+  }
+}
+
+/** Which case of §4.6 step 5 a message is, for the mailbox its recipient token found, with step 6's word
+ * for a live forward. `envelope` is what the verified SES notification states. */
 export async function classifyArrival(
   input: MailInput,
   mailbox: BindMailbox,
   config: BindConfig,
+  envelope: BindEnvelope,
   deps: BindDeps,
 ): Promise<Arrival> {
-  const from = parseHeaders(input).fromAddress;
-  if (from === null) return { kind: "other" };
+  const head = parseHeaders(input);
+  const from = head.fromAddress;
   let verified: SignatureResult[] | null = null;
   const dkim = async () => verified ??= await verifyDkim(input, deps);
 
-  if (from === config.canaryFrom.trim().toLowerCase()) {
+  if (from !== null && from === config.canaryFrom.trim().toLowerCase()) {
     const sig = signedBy(await dkim(), from);
     const canary = sig && await byNonce(subjectOf(sig), mailbox.canaries, deps);
     if (canary) {
       const replay = canary.arrivedAt !== null;
-      return { kind: "canary", canaryId: canary.id, replay, forwardHint: forwardHint(input, mailbox) };
+      return { kind: "canary", canaryId: canary.id, replay, forwardHint: forwardHint(head, mailbox) };
     }
   }
   if (from === GMAIL_CONFIRM_SENDER) {
     return gmailConfirm(input, mailbox, await dkim(), (deps.now ?? Date.now)());
   }
-  if (from === mailbox.mailboxHint?.trim().toLowerCase()) {
+  if (from !== null && from === hintOf(mailbox)) {
     const sig = signedBy(await dkim(), from);
     const open = mailbox.batches.filter((b) => b.closedAt === null);
     const batch = sig && await byNonce(subjectOf(sig), open, deps);
     if (batch) return { kind: "batch", batchId: batch.id, phase: batch.phase };
   }
-  return { kind: "other" };
+  return await liveForward(input, head, mailbox, envelope, deps);
 }

@@ -1390,6 +1390,26 @@ is the one signed, and an unsigned instance of the same name means the binding i
 - **A forward-as-attachment from Gmail or Outlook keeps the original whole** (its Received lines,
   Authentication-Results, DKIM and Message-ID), so T2g.2 reads the original's own delivery stamp.
 
+**The branch taken (2026-10-02, after PQ2's interop check).** No provider's topmost AMS covers
+`X-Forwarded-For`, `X-Forwarded-To` or `X-MS-Exchange-ForwardingLoop`, so `mail_bind.ts` binds this way:
+- **Check (ii) carries the binding on both providers.** The envelope is the verified SNS
+  notification's (`mail.source`, `receipt.spfVerdict` `PASS`, and the recipient whose token found the
+  mailbox), never the message's `Return-Path`. Gmail: `<hint local>+caf_=<recipient, @ as =>@<hint
+  domain>`, so a Workspace mailbox works too. M365: `<hint local>+SRS=…@<hint domain>`.
+- **Check (i)** is Google's or Microsoft's topmost seal and AMS, verifying. A signed forwarding field
+  with an unsigned twin refuses the message. For M365, the topmost ForwardingLoop (or the covered one, if
+  the AMS ever covers it) must name the hint and the canary's `forward_hint`. A null `forward_hint`
+  binds nothing.
+- **X-Forwarded-\* never bind.** For Gmail, check (i) cannot name the mailbox. The attacker's-own-Gmail
+  forgery is stopped by (ii) alone, and the seeded forgery by each check alone. Risk 10 holds for M365 in
+  full.
+- **Step 6.** A live forward reads the verified hop's AAR. An original reads the provider's verifying
+  topmost ARC set, else the topmost `Authentication-Results`, counted only with `mx.google.com` (Google)
+  or no authserv-id (EOP's form). One From field only. `other` reads nothing and is `unaligned`.
+- **Arrival kinds.** T2e's `other` is now `unbound`, and `live` carries the word.
+- **Checkpoint B reads:** whether EOP SRS-rewrites an **intra-school** forward. S0 did not record case
+  4's envelope. If it does not, live intra-school mail is unbound.
+
 #### T2g.1. The handler: verify, find, entitle, fetch, dedup, hand off (`mail-inbound`)
 
 **Tests first** (spec tests 1, 2, 7, 15 and 16, the intake halves):

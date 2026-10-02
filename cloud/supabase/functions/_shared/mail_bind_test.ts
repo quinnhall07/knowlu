@@ -1,18 +1,22 @@
-// Email plan T2e (spec §4.6 step 5's first three cases; tests 4, 5 and 6, the recognition halves). Every
-// key is made here and served by an injected resolver, so no test queries DNS; the nonce HMAC is a fake.
-// Every domain, address, nonce and link is invented for these tests.
+// Email plan T2e (spec §4.6 step 5's first three cases; tests 4, 5 and 6, the recognition halves) and T2f
+// (step 5's live case and "anything else", step 6; tests 2's forgeries and 3). Every key is made here and
+// served by an injected resolver, so no test queries DNS; the nonce HMAC is a fake. Every domain, address,
+// nonce, envelope and link is invented for these tests: no real capture is used.
 import { assert, assertEquals } from "@std/assert";
 import { canonicalBody, canonicalHeader, type TxtResolver } from "./dkim.ts";
 import {
   type Arrival,
+  type Authenticity,
   type BindConfig,
   type BindDeps,
+  type BindEnvelope,
   type BindMailbox,
   classifyArrival,
   type ConfirmRefusal,
   confirmUrlAllowed,
   newNonce,
   nonceTag,
+  originalAuthenticity,
 } from "./mail_bind.ts";
 
 const RSA = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as const;
@@ -26,6 +30,7 @@ const KNOWLU = await rsaKey(); // s1._domainkey.knowlu.test
 const GOOGLE = await rsaKey(); // s1._domainkey.google.com (a test key; the name only mirrors production)
 const GMAIL = await rsaKey(); // s1._domainkey.gmail.com
 const EVIL = await rsaKey(); // s1._domainkey.evil.test
+const MICROSOFT = await rsaKey(); // s1._domainkey.microsoft.com (a test key, as GOOGLE)
 
 const bytes = (bin: string) => Uint8Array.from(bin, (c) => c.charCodeAt(0) & 0xff);
 const b64 = (b: Uint8Array) => btoa(String.fromCharCode(...b));
@@ -38,6 +43,7 @@ const ZONE: Record<string, string[][]> = {
   "s1._domainkey.google.com": await keyRecord(GOOGLE),
   "s1._domainkey.gmail.com": await keyRecord(GMAIL),
   "s1._domainkey.evil.test": await keyRecord(EVIL),
+  "s1._domainkey.microsoft.com": await keyRecord(MICROSOFT),
 };
 const resolveTxt: TxtResolver = (name) => Promise.resolve(ZONE[name] ?? []);
 
@@ -47,6 +53,7 @@ const CONFIG: BindConfig = { canaryFrom: "check@knowlu.test" };
 const NONCE = "0123456789abcdef0123456789abcdef";
 const OTHER_NONCE = "fedcba9876543210fedcba9876543210";
 const TENANT = "72f988bf-86f1-41af-91ab-2d7cd011db47";
+const TENANT2 = "0d5f1a7c-1111-4abc-9def-0123456789ab";
 
 function mailbox(over: Partial<BindMailbox> = {}): BindMailbox {
   return {
@@ -54,11 +61,16 @@ function mailbox(over: Partial<BindMailbox> = {}): BindMailbox {
     provider: "google",
     mailboxHint: "jane@gmail.com",
     confirmUntil: NOW + 10 * 60_000,
+    forwardHint: null,
     batches: [],
     canaries: [],
     ...over,
   };
 }
+
+/** The Knowlu address SES delivered to, and the envelope a direct send to it has. */
+const KNOWLU_ADDR = "tok@in.knowlu.test";
+const DIRECT: BindEnvelope = { mailFrom: "bounce@sender.test", spfPass: true, recipient: KNOWLU_ADDR };
 
 interface Signer {
   key: CryptoKeyPair;
@@ -72,9 +84,15 @@ async function signed(head: string[], body: string, s: Signer): Promise<string[]
   const bh = await sha(canonicalBody(body, "relaxed"));
   const sig = `DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=${s.d}; s=s1; h=${s.h.join(":")};` +
     ` bh=${bh}; b=`;
+  const data = picked(head, s.h) + canonicalHeader(sig, "relaxed");
+  return [sig + await signData(s.key, data), ...head];
+}
+
+/** The relaxed lines of the fields `names` selects, bottom-up, each ending CRLF. */
+function picked(head: string[], names: string[]): string {
   const left = [...head];
   let data = "";
-  for (const name of s.h) {
+  for (const name of names) {
     for (let i = left.length - 1; i >= 0; i--) {
       if (left[i].slice(0, left[i].indexOf(":")).trim().toLowerCase() !== name) continue;
       data += canonicalHeader(left[i], "relaxed") + "\r\n";
@@ -82,15 +100,21 @@ async function signed(head: string[], body: string, s: Signer): Promise<string[]
       break;
     }
   }
-  data += canonicalHeader(sig, "relaxed");
-  const b = b64(new Uint8Array(await crypto.subtle.sign(RSA, s.key.privateKey, bytes(data))));
-  return [sig + b, ...head];
+  return data;
 }
+
+const signData = async (key: CryptoKeyPair, data: string) =>
+  b64(new Uint8Array(await crypto.subtle.sign(RSA, key.privateKey, bytes(data))));
 
 const assemble = (head: string[], body: string) => head.join("\r\n") + "\r\n\r\n" + body;
 
-function classify(raw: string, box: BindMailbox = mailbox(), config = CONFIG): Promise<Arrival> {
-  return classifyArrival(raw, box, config, DEPS);
+function classify(
+  raw: string,
+  box: BindMailbox = mailbox(),
+  config = CONFIG,
+  envelope: BindEnvelope = DIRECT,
+): Promise<Arrival> {
+  return classifyArrival(raw, box, config, envelope, DEPS);
 }
 
 // ---------------------------------------------------------------- the batch send (test 4)
@@ -130,10 +154,10 @@ Deno.test("a_send_from_the_mailbox_with_aligned_outer_dkim_and_an_open_nonce_is_
   // Not a batch send: a closed batch's nonce, no nonce, and a nonce only in an unsigned Subject above
   // the signed one.
   const closed = mailbox({ batches: [{ ...OPEN, closedAt: NOW - 1 }] });
-  assertEquals((await classify(await batchSend(), closed)).kind, "other");
-  assertEquals((await classify(await batchSend({ subject: "Fwd: three messages" }), box)).kind, "other");
+  assertEquals((await classify(await batchSend(), closed)).kind, "unbound");
+  assertEquals((await classify(await batchSend({ subject: "Fwd: three messages" }), box)).kind, "unbound");
   const seeded = await batchSend({ subject: "Fwd: three messages", above: [`Subject: ${nonceTag(NONCE)}`] });
-  assertEquals((await classify(seeded, box)).kind, "other");
+  assertEquals((await classify(seeded, box)).kind, "unbound");
 });
 
 Deno.test("a_wrong_outer_sender_is_not_a_batch_send", async () => {
@@ -142,18 +166,18 @@ Deno.test("a_wrong_outer_sender_is_not_a_batch_send", async () => {
   const evil: Signer = { key: EVIL, d: "evil.test", h: ["from", "to", "subject"] };
   assertEquals(
     (await classify(await batchSend({ from: "mallory@evil.test", signer: evil }), box)).kind,
-    "other",
+    "unbound",
   );
   // The mailbox's address, signed by a domain it is not aligned with, or not signed at all.
-  assertEquals((await classify(await batchSend({ signer: evil }), box)).kind, "other");
-  assertEquals((await classify(await batchSend({ signer: null }), box)).kind, "other");
+  assertEquals((await classify(await batchSend({ signer: evil }), box)).kind, "unbound");
+  assertEquals((await classify(await batchSend({ signer: null }), box)).kind, "unbound");
   // Another Gmail user's signed send, with the mailbox's address in an unsigned From above it.
   const other = await batchSend({ from: "mallory@gmail.com", above: ["From: jane@gmail.com"] });
-  assertEquals((await classify(other, box)).kind, "other");
+  assertEquals((await classify(other, box)).kind, "unbound");
   // No hint yet: nothing can be the mailbox's own send.
   assertEquals(
     (await classify(await batchSend(), mailbox({ mailboxHint: null, batches: [OPEN] }))).kind,
-    "other",
+    "unbound",
   );
 });
 
@@ -220,7 +244,7 @@ Deno.test("a_sender_other_than_googles_exact_sender_or_without_aligned_dkim_is_r
     const from of ["forwarding-noreply@google.com.evil.test", "noreply@google.com", "forwarding@evil.test"]
   ) {
     const signer = from.endsWith("@google.com") ? GOOGLE_SIGNS : evil;
-    assertEquals((await classify(await confirmation({ from, signer }))).kind, "other", from);
+    assertEquals((await classify(await confirmation({ from, signer }))).kind, "unbound", from);
   }
   // Google's exact sender without Google's aligned signature: refused.
   assertEquals(await classify(await confirmation({ signer: evil })), refused("dkim"));
@@ -318,19 +342,425 @@ Deno.test("a_canary_with_its_nonce_and_knowlus_dkim_is_recognised_with_its_forwa
   const gmail = mailbox({ canaries: SCHOOL.canaries });
   assertEquals(await classify(await canary(), gmail), { ...want, forwardHint: null });
   // A nonce that is not this mailbox's canary is not a canary.
-  assertEquals((await classify(await canary({ nonce: OTHER_NONCE }), SCHOOL)).kind, "other");
+  assertEquals((await classify(await canary({ nonce: OTHER_NONCE }), SCHOOL)).kind, "unbound");
 });
 
 Deno.test("a_canary_from_a_wrong_sender_domain_is_not_a_canary", async () => {
   const evil: Signer = { ...KNOWLU_SIGNS, key: EVIL, d: "evil.test" };
   for (const from of ["check@knowlu.test.evil.test", "check@evil.test", "other@knowlu.test"]) {
     const signer = from.endsWith("@knowlu.test") ? KNOWLU_SIGNS : evil;
-    assertEquals((await classify(await canary({ from, signer }), SCHOOL)).kind, "other", from);
+    assertEquals((await classify(await canary({ from, signer }), SCHOOL)).kind, "unbound", from);
   }
   // Knowlu's sender, signed by another domain or with another key under Knowlu's name.
-  assertEquals((await classify(await canary({ signer: evil }), SCHOOL)).kind, "other");
+  assertEquals((await classify(await canary({ signer: evil }), SCHOOL)).kind, "unbound");
   assertEquals(
     (await classify(await canary({ signer: { ...KNOWLU_SIGNS, key: EVIL } }), SCHOOL)).kind,
-    "other",
+    "unbound",
   );
+});
+
+// ---------------------------------------------------------------- live forwards (T2f; tests 2 and 3)
+
+/** One forwarding hop: the fields it adds on top, then its ARC set (AMS over `h` picked bottom-up and the
+ * body; the seal over every set so far), as Gmail and Microsoft add theirs. */
+interface Hop {
+  key: CryptoKeyPair;
+  d: string;
+  h: string[];
+  aar: string;
+  adds?: string[];
+}
+interface Fwd {
+  head: string[];
+  body: string;
+  /** The relaxed lines of every ARC set so far, in instance order. */
+  sets: string;
+  n: number;
+}
+async function hop(m: Fwd, o: Hop): Promise<Fwd> {
+  const i = m.n + 1;
+  const head = [...(o.adds ?? []), ...m.head];
+  const bh = await sha(canonicalBody(m.body, "relaxed"));
+  const amsHead = `ARC-Message-Signature: i=${i}; a=rsa-sha256; c=relaxed/relaxed; d=${o.d}; s=s1;` +
+    ` h=${o.h.join(":")}; bh=${bh}; b=`;
+  const ams = amsHead + await signData(o.key, picked(head, o.h) + canonicalHeader(amsHead, "relaxed"));
+  const aar = `ARC-Authentication-Results: i=${i}; ${o.aar}`;
+  const asHead = `ARC-Seal: i=${i}; a=rsa-sha256; t=1790000000; cv=${i === 1 ? "none" : "pass"}; d=${o.d};` +
+    " s=s1; b=";
+  const set = canonicalHeader(aar, "relaxed") + "\r\n" + canonicalHeader(ams, "relaxed") + "\r\n";
+  const as = asHead + await signData(o.key, m.sets + set + canonicalHeader(asHead, "relaxed"));
+  return {
+    head: [as, ams, aar, ...head],
+    body: m.body,
+    sets: m.sets + set + canonicalHeader(as, "relaxed") + "\r\n",
+    n: i,
+  };
+}
+
+const LIVE_BODY = "Lab 5 is now due Friday at noon.\r\n";
+/** The original as the professor sent it; `below` is what a sender writes into it. */
+const original = (from = "Prof Example <prof@school.test>", below: string[] = []): Fwd => ({
+  head: [
+    ...below,
+    `From: ${from}`,
+    "To: jane@gmail.com",
+    "Subject: Lab 5 moved",
+    "Date: Fri, 02 Oct 2026 09:00:00 -0500",
+    "Message-ID: <m1@school.test>",
+  ],
+  body: LIVE_BODY,
+  sets: "",
+  n: 0,
+});
+
+const XFF_JANE = `X-Forwarded-For: jane@gmail.com ${KNOWLU_ADDR}`;
+const XFT = `X-Forwarded-To: ${KNOWLU_ADDR}`;
+const GOOGLE_AAR = "mx.google.com; dkim=pass header.i=@school.test header.s=s1 header.b=AbCd;" +
+  " spf=pass (google.com: domain of prof@school.test designates 192.0.2.1 as permitted sender)" +
+  " smtp.mailfrom=prof@school.test; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=school.test";
+/** Google's hop as S0 saw it: X-Forwarded-* added on top, its AMS covering neither. */
+const GOOGLE_HOP: Hop = {
+  key: GOOGLE,
+  d: "google.com",
+  h: ["subject", "to", "from"],
+  aar: GOOGLE_AAR,
+  adds: [XFF_JANE, XFT],
+};
+async function gmailForward(o: Partial<Hop> & { from?: string; below?: string[]; above?: string[] } = {}) {
+  const m = await hop(original(o.from, o.below), { ...GOOGLE_HOP, ...o });
+  return assemble([...(o.above ?? []), ...m.head], m.body);
+}
+const GMAIL_BOX = mailbox({ confirmUntil: null });
+/** Gmail's forwarding envelope: the mailbox's local part, `+caf_=`, our address with `@` as `=`. */
+const CAF: BindEnvelope = {
+  mailFrom: "jane+caf_=tok=in.knowlu.test@gmail.com",
+  spfPass: true,
+  recipient: KNOWLU_ADDR,
+};
+const LIVE_ALIGNED: Arrival = { kind: "live", authenticity: "aligned" };
+const UNBOUND: Arrival = { kind: "unbound" };
+
+const MS_AAR = "mx.microsoft.com 1; spf=pass (sender ip is 192.0.2.7) smtp.rcpttodomain=school.test" +
+  " smtp.mailfrom=friend.test; dmarc=pass (p=none sp=none pct=100) action=none header.from=friend.test;" +
+  " dkim=pass (signature was verified) header.d=friend.test; arc=pass (0 oda=1 ltdi=1" +
+  " spf=[1,1,smtp.mailfrom=friend.test] dkim=[1,1,header.d=friend.test] dmarc=[1,1,header.from=friend.test])";
+/** Microsoft's hop as S0 saw it: ForwardingLoop added on top, its AMS not covering it. */
+const MS_HOP: Hop = {
+  key: MICROSOFT,
+  d: "microsoft.com",
+  h: ["from", "date", "subject", "message-id"],
+  aar: MS_AAR,
+  adds: [LOOP],
+};
+async function m365Forward(o: Partial<Hop> & { below?: string[] } = {}) {
+  const m = await hop(original("Pat <pat@friend.test>", o.below), { ...MS_HOP, ...o });
+  return assemble(m.head, m.body);
+}
+const MS_BOX: BindMailbox = { ...SCHOOL, forwardHint: TENANT };
+/** Microsoft's SRS envelope on the mailbox's own domain. */
+const SRS: BindEnvelope = {
+  mailFrom: "jdoe+SRS=Ab1C=2Q=friend.test=pat@school.test",
+  spfPass: true,
+  recipient: KNOWLU_ADDR,
+};
+const live = (raw: string, box: BindMailbox, envelope: BindEnvelope) => classify(raw, box, CONFIG, envelope);
+
+Deno.test("a_gmail_forward_binds_by_googles_arc_seal_and_its_caf_return_path", async () => {
+  const fwd = await gmailForward();
+  assertEquals(await live(fwd, GMAIL_BOX, CAF), LIVE_ALIGNED);
+  // The envelope is compared case-folded; a Workspace mailbox's envelope is on its own domain.
+  const upper = { ...CAF, mailFrom: "Jane+CAF_=Tok=In.Knowlu.Test@Gmail.com" };
+  assertEquals(await live(fwd, GMAIL_BOX, upper), LIVE_ALIGNED);
+  const workspace = mailbox({ mailboxHint: "jdoe@school.test", confirmUntil: null });
+  const wsEnv = { ...CAF, mailFrom: "jdoe+caf_=tok=in.knowlu.test@school.test" };
+  assertEquals(await live(fwd, workspace, wsEnv), LIVE_ALIGNED);
+
+  // Check (ii): SES's SPF pass on exactly this mailbox's forwarding envelope to exactly this address.
+  for (
+    const env of [
+      { ...CAF, spfPass: false },
+      { ...CAF, mailFrom: null },
+      { ...CAF, mailFrom: "jane@gmail.com" },
+      { ...CAF, mailFrom: "jane+caf_=tok=in.knowlu.test@gmail.test" },
+      { ...CAF, mailFrom: "jane+caf_=other=in.knowlu.test@gmail.com" },
+      { ...CAF, mailFrom: "xjane+caf_=tok=in.knowlu.test@gmail.com" },
+      { ...CAF, mailFrom: "jane+caf_=tok=in.knowlu.test.evil.test@gmail.com" },
+      { ...CAF, recipient: "tok2@in.knowlu.test" },
+    ]
+  ) {
+    assertEquals(await live(fwd, GMAIL_BOX, env), UNBOUND, String(env.mailFrom));
+  }
+  // Check (i): Google's own topmost seal, verifying.
+  assertEquals(await live(await gmailForward({ key: EVIL, d: "evil.test" }), GMAIL_BOX, CAF), UNBOUND);
+  assertEquals(await live(await gmailForward({ key: EVIL }), GMAIL_BOX, CAF), UNBOUND);
+  assertEquals(await live(fwd.replace("noon", "dusk"), GMAIL_BOX, CAF), UNBOUND); // the AMS fails
+  const bare = assemble(original().head, LIVE_BODY);
+  assertEquals(await live(bare, GMAIL_BOX, CAF), UNBOUND);
+  // A Microsoft seal does not bind a Gmail mailbox; nothing binds without a hint or for `other`.
+  assertEquals(
+    await live(await gmailForward({ key: MICROSOFT, d: "microsoft.com" }), GMAIL_BOX, CAF),
+    UNBOUND,
+  );
+  assertEquals(await live(fwd, mailbox({ mailboxHint: null }), CAF), UNBOUND);
+  assertEquals(await live(fwd, mailbox({ provider: "other" }), CAF), UNBOUND);
+});
+
+Deno.test("an_m365_forward_binds_by_microsofts_arc_forwardingloop_and_srs_return_path", async () => {
+  const fwd = await m365Forward();
+  assertEquals(await live(fwd, MS_BOX, SRS), LIVE_ALIGNED);
+  const upper = { ...SRS, mailFrom: "JDoe+srs=Ab1C=2Q=friend.test=pat@School.Test" };
+  assertEquals(await live(fwd, MS_BOX, upper), LIVE_ALIGNED);
+  // Were Microsoft's AMS to cover the ForwardingLoop, the covered instance is the one read.
+  assertEquals(
+    await live(await m365Forward({ h: [...MS_HOP.h, "x-ms-exchange-forwardingloop"] }), MS_BOX, SRS),
+    LIVE_ALIGNED,
+  );
+
+  // Check (ii): SES's SPF pass on the mailbox's own SRS envelope.
+  for (
+    const env of [
+      { ...SRS, spfPass: false },
+      { ...SRS, mailFrom: null },
+      { ...SRS, mailFrom: "jdoe@school.test" },
+      { ...SRS, mailFrom: "pat@friend.test" },
+      { ...SRS, mailFrom: "other+SRS=Ab1C=2Q=friend.test=pat@school.test" },
+      { ...SRS, mailFrom: "jdoe+SRS=Ab1C=2Q=friend.test=pat@school.test.evil.test" },
+      { ...SRS, mailFrom: "jdoe+SRS=Ab1C=2Q=friend.test=pat@evil.test" },
+    ]
+  ) {
+    assertEquals(await live(fwd, MS_BOX, env), UNBOUND, String(env.mailFrom));
+  }
+  // Check (i): Microsoft's verifying seal, and the topmost ForwardingLoop naming the mailbox and its tenant.
+  assertEquals(await live(await m365Forward({ key: GOOGLE, d: "google.com" }), MS_BOX, SRS), UNBOUND);
+  assertEquals(await live(await m365Forward({ key: EVIL }), MS_BOX, SRS), UNBOUND);
+  assertEquals(await live(await m365Forward({ adds: [] }), MS_BOX, SRS), UNBOUND);
+  const otherBox = await m365Forward({ adds: [`X-MS-Exchange-ForwardingLoop: other@school.test;${TENANT}`] });
+  assertEquals(await live(otherBox, MS_BOX, SRS), UNBOUND);
+  // No tenant recorded yet (no canary has arrived): nothing binds.
+  assertEquals(await live(fwd, { ...MS_BOX, forwardHint: null }, SRS), UNBOUND);
+  assertEquals(await live(fwd, { ...MS_BOX, provider: "google" }, SRS), UNBOUND);
+});
+
+Deno.test("a_direct_send_with_a_forged_x_forwarded_for_is_unbound", async () => {
+  // A stranger who learnt the address writes Gmail's forwarding fields, and even a DKIM signature of their own.
+  const head = [XFF_JANE, XFT, ...original("Prof Example <prof@school.test>").head];
+  const evil: Signer = { key: EVIL, d: "evil.test", h: ["from", "subject", "x-forwarded-for"] };
+  for (const raw of [assemble(head, LIVE_BODY), assemble(await signed(head, LIVE_BODY, evil), LIVE_BODY)]) {
+    assertEquals(await live(raw, GMAIL_BOX, { ...CAF, mailFrom: "mallory@evil.test" }), UNBOUND);
+    // Writing Gmail's envelope from the stranger's own server fails gmail.com's SPF at SES.
+    assertEquals(await live(raw, GMAIL_BOX, { ...CAF, spfPass: false }), UNBOUND);
+    // Even with an envelope SES passed: no provider seal, no binding.
+    assertEquals(await live(raw, GMAIL_BOX, CAF), UNBOUND);
+  }
+  // The same for Microsoft's field.
+  const ms = assemble([LOOP, ...original("Pat <pat@friend.test>").head], LIVE_BODY);
+  assertEquals(await live(ms, MS_BOX, SRS), UNBOUND);
+});
+
+Deno.test("a_forward_sealed_by_google_from_an_attackers_own_gmail_is_unbound", async () => {
+  // Mallory points her own Gmail at Jane's address. Google seals it honestly, and here its AMS even covers
+  // an X-Forwarded-For naming Jane: Gmail's fields never bind, and the envelope is Mallory's.
+  const fwd = await gmailForward({ adds: [XFF_JANE, XFT], h: ["x-forwarded-for", "x-forwarded-to", "from"] });
+  const mallory = { ...CAF, mailFrom: "mallory+caf_=tok=in.knowlu.test@gmail.com" };
+  assertEquals(await live(fwd, GMAIL_BOX, mallory), UNBOUND);
+  // Mallory's own M365 tenant: Microsoft names her mailbox, her tenant and her domain.
+  const ms = await m365Forward({ adds: [`X-MS-Exchange-ForwardingLoop: mallory@evil.test;${TENANT2}`] });
+  const msEnv = { ...SRS, mailFrom: "mallory+SRS=Ab1C=2Q=friend.test=pat@evil.test" };
+  assertEquals(await live(ms, MS_BOX, msEnv), UNBOUND);
+  // Each check alone stops it: her envelope with Jane's loop, and Jane's envelope with her loop.
+  const janeLoop = await m365Forward();
+  assertEquals(await live(janeLoop, MS_BOX, msEnv), UNBOUND);
+  assertEquals(await live(ms, MS_BOX, SRS), UNBOUND);
+});
+
+Deno.test("a_sender_seeded_x_forwarded_for_below_googles_own_is_unbound", async () => {
+  // Google adds its own X-Forwarded-For above the one the sender wrote, and its AMS signs the bottom one.
+  const xff = ["x-forwarded-for", "subject", "to", "from"];
+  const control = await gmailForward({ h: xff });
+  assertEquals(await live(control, GMAIL_BOX, CAF), LIVE_ALIGNED);
+  const seeded = await gmailForward({
+    h: xff,
+    adds: [`X-Forwarded-For: mallory@gmail.com ${KNOWLU_ADDR}`, XFT],
+    below: [XFF_JANE],
+  });
+  // Check (ii) is met here; check (i) alone refuses, because the signed instance has an unsigned twin.
+  assertEquals(await live(seeded, GMAIL_BOX, CAF), UNBOUND);
+  // And check (ii) alone refuses the same message with Mallory's envelope.
+  const mallory = { ...CAF, mailFrom: "mallory+caf_=tok=in.knowlu.test@gmail.com" };
+  assertEquals(await live(seeded, GMAIL_BOX, mallory), UNBOUND);
+  // Microsoft's field seeded below its own, were its AMS to cover it.
+  const ms = await m365Forward({ h: [...MS_HOP.h, "x-ms-exchange-forwardingloop"], below: [LOOP] });
+  assertEquals(await live(ms, MS_BOX, SRS), UNBOUND);
+});
+
+Deno.test("an_m365_forward_naming_another_tenant_than_forward_hint_is_unbound", async () => {
+  const other = await m365Forward({ adds: [`X-MS-Exchange-ForwardingLoop: jdoe@school.test;${TENANT2}`] });
+  assertEquals(await live(other, MS_BOX, SRS), UNBOUND);
+  // The recorded tenant matches case-folded; a malformed or extended loop field is not a tenant.
+  const upper = await m365Forward({
+    adds: [`X-MS-Exchange-ForwardingLoop: JDoe@School.test;${TENANT.toUpperCase()}`],
+  });
+  assertEquals(await live(upper, MS_BOX, SRS), LIVE_ALIGNED);
+  for (
+    const loop of [
+      `jdoe@school.test;${TENANT};x`,
+      "jdoe@school.test;not-a-tenant",
+      `jdoe@school.test ${TENANT}`,
+    ]
+  ) {
+    const raw = await m365Forward({ adds: [`X-MS-Exchange-ForwardingLoop: ${loop}`] });
+    assertEquals(await live(raw, MS_BOX, SRS), UNBOUND, loop);
+  }
+  // Only the topmost loop is read: the hop that handed the message to SES.
+  const twice = await m365Forward({
+    adds: [`X-MS-Exchange-ForwardingLoop: jdoe@school.test;${TENANT2}`, LOOP],
+  });
+  assertEquals(await live(twice, MS_BOX, SRS), UNBOUND);
+});
+
+// ---------------------------------------------------------------- authenticity (test 3)
+
+const LIVE_UNALIGNED: Arrival = { kind: "live", authenticity: "unaligned" };
+const gmailLive = async (o: Parameters<typeof gmailForward>[0]) =>
+  live(await gmailForward(o), GMAIL_BOX, CAF);
+
+Deno.test("a_dmarc_failing_original_with_an_aligned_provider_hop_result_is_aligned", async () => {
+  // SES's own result on the forwarded copy fails DMARC (the forward broke SPF); only Google's hop counts.
+  const ses = "Authentication-Results: amazonses.com; spf=fail smtp.mailfrom=gmail.com; dmarc=fail" +
+    " header.from=school.test";
+  assertEquals(await gmailLive({ above: [ses] }), LIVE_ALIGNED);
+  // An aligned DKIM or SPF pass alone, on the From domain or a domain under it, is aligned too.
+  for (
+    const aar of [
+      "mx.google.com; dkim=pass header.i=@school.test header.s=s1",
+      "mx.google.com; dkim=pass header.d=mail.school.test; dmarc=fail header.from=school.test",
+      "mx.google.com; spf=pass smtp.mailfrom=bounce@lists.school.test",
+      "mx.google.com; spf=pass smtp.mailfrom=school.test",
+      "mx.google.com;dmarc=pass header.from=SCHOOL.TEST",
+    ]
+  ) {
+    assertEquals(await gmailLive({ aar }), LIVE_ALIGNED, aar);
+  }
+  // Microsoft's form (an `n` version after the authserv-id; `;` without a space) reads the same.
+  assertEquals(await live(await m365Forward(), MS_BOX, SRS), LIVE_ALIGNED);
+  const msDkim = "mx.microsoft.com 1; spf=fail smtp.mailfrom=other.test;dkim=pass (signature was verified)" +
+    " header.d=friend.test;dmarc=fail action=none header.from=friend.test";
+  assertEquals(await live(await m365Forward({ aar: msDkim }), MS_BOX, SRS), LIVE_ALIGNED);
+});
+
+Deno.test("a_pass_only_in_a_sender_written_authentication_results_is_unaligned", async () => {
+  const failing = "mx.google.com; dkim=none; spf=softfail (google.com: domain of transitioning x@evil.test" +
+    " does not designate 192.0.2.9 as permitted sender) smtp.mailfrom=x@evil.test; dmarc=fail (p=NONE)" +
+    " header.from=school.test";
+  const written = [
+    "Authentication-Results: mx.google.com; dmarc=pass header.from=school.test",
+    "Authentication-Results: school.test; dkim=pass header.d=school.test; spf=pass smtp.mailfrom=school.test",
+  ];
+  assertEquals(await gmailLive({ aar: failing, below: written }), LIVE_UNALIGNED);
+  // A pass the hop's record states for another domain, inside a comment, or for an unaligned domain.
+  for (
+    const aar of [
+      "mx.google.com; dmarc=pass header.from=evil.test",
+      "mx.google.com; dkim=pass header.d=school.test.evil.test",
+      "mx.google.com; dkim=pass header.d=test",
+      "mx.google.com; spf=pass smtp.mailfrom=x@notschool.test",
+      "mx.google.com; arc=pass (i=1 dmarc=pass header.from=school.test dkim=pass header.d=school.test)",
+      "mx.google.com; dmarc=passed header.from=school.test",
+      "mx.google.com; dmarc=pass",
+      "mx.google.com; none",
+      "dmarc=pass header.from=school.test",
+    ]
+  ) {
+    assertEquals(await gmailLive({ aar }), LIVE_UNALIGNED, aar);
+  }
+  // Two From fields: which one the record speaks for is not ours to guess.
+  assertEquals(await gmailLive({ below: ["From: prof@school.test"] }), LIVE_UNALIGNED);
+});
+
+const STAMP_G = "Authentication-Results: mx.google.com; dkim=pass header.i=@school.test header.s=s1;" +
+  " spf=pass smtp.mailfrom=prof@school.test; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=school.test";
+const STAMP_M = "Authentication-Results: spf=pass (sender IP is 192.0.2.7) smtp.mailfrom=school.test;" +
+  " dkim=pass (signature was verified) header.d=school.test;dmarc=pass action=none" +
+  " header.from=school.test;compauth=pass reason=100";
+const RECEIVED = "Received: from mail.school.test by mx.provider.test; Fri, 02 Oct 2026 07:00:01 -0700";
+/** An original as the student's provider stored it: its delivery fields on top of what the sender wrote. */
+const stored = (top: string[], o: { from?: string; below?: string[] } = {}) =>
+  assemble([...top, RECEIVED, ...original(o.from, o.below).head], LIVE_BODY);
+const sealedBy = async (h: Partial<Hop>, top: string[] = []) => {
+  const m = await hop(original(), { ...GOOGLE_HOP, adds: [], ...h });
+  return assemble([...top, ...m.head], m.body);
+};
+const auth = (raw: string | Uint8Array, provider: BindMailbox["provider"]): Promise<Authenticity> =>
+  originalAuthenticity(raw, provider, DEPS);
+
+Deno.test("a_backfilled_original_reads_only_the_providers_delivery_stamp_or_arc", async () => {
+  // Gmail's stamp (`mx.google.com`), the topmost Authentication-Results, as text or as attached bytes.
+  assertEquals(await auth(stored([STAMP_G]), "google"), "aligned");
+  assertEquals(await auth(new TextEncoder().encode(stored([STAMP_G])), "google"), "aligned");
+  const written = "Authentication-Results: mx.google.com; dmarc=pass header.from=school.test";
+  const failing = "Authentication-Results: mx.google.com; dkim=none; dmarc=fail header.from=school.test";
+  for (
+    const raw of [
+      stored([failing], { below: [written] }), // the sender's pass, below the provider's fail
+      stored(["Authentication-Results: mx.evil.test; dmarc=pass header.from=school.test"], {
+        below: [written],
+      }),
+      stored([STAMP_M]), // Microsoft's form, on a Gmail mailbox
+      stored([STAMP_G], { from: "Pat <pat@friend.test>" }), // a pass for another domain than the From
+      stored([STAMP_G], { below: ["From: prof@school.test"] }), // two From fields
+    ]
+  ) {
+    assertEquals(await auth(raw, "google"), "unaligned");
+  }
+  // Microsoft's stamp, written without an authserv-id.
+  assertEquals(await auth(stored([STAMP_M]), "m365"), "aligned");
+  // Only the topmost counts: a sender's copy of Microsoft's form below another stamp is never read.
+  for (const top of [STAMP_G, "Authentication-Results: mx.evil.test; spf=pass smtp.mailfrom=school.test"]) {
+    assertEquals(await auth(stored([top], { below: [STAMP_M] }), "m365"), "unaligned", top);
+  }
+  // Or the provider's own verifying ARC set at delivery, when it is the topmost.
+  assertEquals(await auth(await sealedBy({}), "google"), "aligned");
+  assertEquals(await auth(await sealedBy({ key: MICROSOFT, d: "microsoft.com" }), "m365"), "aligned");
+  assertEquals(await auth(await sealedBy({ key: MICROSOFT, d: "microsoft.com" }), "google"), "unaligned");
+  assertEquals(await auth(await sealedBy({ key: EVIL, d: "evil.test" }), "google"), "unaligned");
+  assertEquals(await auth(await sealedBy({ key: EVIL }), "google"), "unaligned"); // google.com, wrong key
+  // A seal that no longer verifies (a rotated key, a re-wrapped copy) leaves the stamp to speak.
+  const broken = (await sealedBy({})).replace("noon", "dusk");
+  assertEquals(await auth(broken, "google"), "unaligned");
+  assertEquals(await auth(broken.replace("ARC-Seal:", `${STAMP_G}\r\nARC-Seal:`), "google"), "aligned");
+  // A provider Knowlu reads no stamp for has none.
+  assertEquals(await auth(stored([STAMP_G]), "other"), "unaligned");
+});
+
+Deno.test("no_authentication_result_ever_produces_a_non_2xx_answer", async () => {
+  // Nothing a message carries makes binding or authenticity throw: each is a word the handler records.
+  const hostile = [
+    "",
+    "\r\n\r\n",
+    "Authentication-Results:\r\n\r\n",
+    `Authentication-Results: mx.google.com; ${
+      "dmarc=pass header.from=".repeat(20_000)
+    }\r\nFrom: a@b.test\r\n\r\n`,
+    `Authentication-Results: ${"(".repeat(50_000)}dmarc=pass header.from=b.test\r\nFrom: a@b.test\r\n\r\n`,
+    `Authentication-Results: mx.google.com;${";".repeat(100_000)}\r\nFrom: a@b.test\r\n\r\n`,
+    "Authentication-Results: mx.google.com; dmarc=pass header.from=\u0000ÿ\r\nFrom: a@ÿ\r\n\r\n",
+    `ARC-Authentication-Results: i=1; ${"x".repeat(100_000)}\r\nARC-Seal: i=1; cv=none\r\n\r\n`,
+    await gmailForward({ aar: `mx.google.com; ${"dkim=pass header.d=(school.test; ".repeat(2_000)}` }),
+  ];
+  const throwing: BindDeps = { ...DEPS, resolveTxt: () => Promise.reject(new Error("dns down")) };
+  const kinds = new Set(["unbound", "live"]);
+  for (const raw of [...hostile, await gmailForward(), stored([STAMP_G])]) {
+    for (const input of [raw, Uint8Array.from(raw, (c) => c.charCodeAt(0) & 0xff)]) {
+      for (const deps of [DEPS, throwing]) {
+        const a = await classifyArrival(input, GMAIL_BOX, CONFIG, CAF, deps);
+        assert(kinds.has(a.kind), a.kind);
+        for (const p of ["google", "m365", "other"] as const) {
+          const w = await originalAuthenticity(input, p, deps);
+          assert(w === "aligned" || w === "unaligned", w);
+        }
+      }
+    }
+  }
+  // An unreachable key server is never a pass: the live forward is unbound, not failed.
+  assertEquals(await classifyArrival(await gmailForward(), GMAIL_BOX, CONFIG, CAF, throwing), UNBOUND);
 });
