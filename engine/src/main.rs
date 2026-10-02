@@ -36,6 +36,15 @@ enum Command {
         #[arg(long = "run-id")]
         run_id: Option<String>,
     },
+    /// Print what forwarded mail wrote (`agent:knowlu.mail`), joined to each note's current value,
+    /// as JSON. Never writes and is never entitlement-gated, like `surface` (email spec §4.14).
+    MailApplied {
+        #[arg(long, default_value = ".")]
+        vault: PathBuf,
+        /// Only records at or after this timestamp. Without it, from the first mail record.
+        #[arg(long)]
+        since: Option<String>,
+    },
     /// Print the console's read model as JSON. Never writes. Ports nothing — S2's read model was
     /// designed in Python and built here first (console spec §4.6).
     Surface {
@@ -467,6 +476,10 @@ fn main() -> ExitCode {
                     ExitCode::from(err.exit_code())
                 }
             }
+        }
+        Command::MailApplied { vault, since } => {
+            println!("{}", knowlu_engine::mailapplied::run(&vault, since.as_deref()));
+            ExitCode::SUCCESS
         }
         Command::Surface { vault, view, today, now, seen_at, build_sha, window } => {
             let Some(view) = knowlu_engine::surface::View::parse(&view) else { eprintln!("knowlu-engine: unknown view {view:?}"); return ExitCode::from(2); };
