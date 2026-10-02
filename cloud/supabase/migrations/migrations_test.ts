@@ -969,3 +969,190 @@ Deno.test("the original google migration is unchanged", async () => {
   const hex = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
   assertEquals(hex, "c86e118dc0bed63875b4785870ccc1bfed15e5299599bd48ce4c2b7d18feeda0");
 });
+
+// Email forwarding T1.1 (spec §5.1; test 14's RLS half). The seven mail tables hold a student's mail
+// metadata, the address tokens and the claims, so only the service role reaches them, and every row
+// goes when its account goes. Textual, like the pins above: nothing here applies SQL (plan P7).
+const MAIL_TABLES = [
+  "mail_accounts",
+  "mail_addresses",
+  "mail_batches",
+  "mail_canaries",
+  "mail_seen",
+  "mail_work",
+  "mail_claims",
+];
+
+/** The one `<stamp>_mail.sql`, comment-stripped. */
+async function mailMigration(): Promise<{ name: string; sql: string }> {
+  const files = (await everyMigrationFile()).filter(([n]) => /^\d{14}_mail\.sql$/.test(n));
+  assertEquals(files.length, 1, "exactly one <stamp>_mail.sql (spec §5.1)");
+  return { name: files[0][0], sql: stripLineComments(files[0][1]) };
+}
+
+/** Each column or table constraint of `create table … <table> ( … );`, split at top-level commas,
+ * whitespace-normalised and lower-cased. */
+function tableItems(sql: string, table: string): string[] {
+  const head = new RegExp(`create\\s+table\\s+(?:if\\s+not\\s+exists\\s+)?${identPattern(table)}\\s*\\(`, "i");
+  const m = head.exec(sql);
+  assert(m !== null, `no create table for ${table}`);
+  const items: string[] = [];
+  let depth = 0;
+  let cur = "";
+  for (const ch of sql.slice(m.index + m[0].length)) {
+    if (ch === "(") depth++;
+    if (ch === ")" && depth-- === 0) break;
+    if (ch === "," && depth === 0) {
+      items.push(cur);
+      cur = "";
+    } else cur += ch;
+  }
+  items.push(cur);
+  return items.map((s) => s.replace(/\s+/g, " ").trim().toLowerCase()).filter((s) => s.length > 0);
+}
+
+/** The column definitions of `table`, by name (table constraints left out). */
+function tableColumns(sql: string, table: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const item of tableItems(sql, table)) {
+    if (/^(primary key|unique|foreign key|check|constraint)\b/.test(item)) continue;
+    out.set(item.split(" ")[0], item);
+  }
+  return out;
+}
+
+Deno.test("every_mail_table_has_rls_on_and_no_anon_or_authenticated_grant", async () => {
+  const { name, sql } = await mailMigration();
+  const created = [...sql.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:public\.)?(\w+)/gi)]
+    .map((m) => m[1].toLowerCase()).sort();
+  assertEquals(created, [...MAIL_TABLES].sort(), `${name}: the seven tables of §5.1, and only those`);
+  const flat = sql.replace(/\s+/g, " ").toLowerCase();
+  for (const t of MAIL_TABLES) {
+    assert(flat.includes(`alter table public.${t} enable row level security;`), `${name}: ${t} needs RLS on`);
+    const revokes = [...flat.matchAll(new RegExp(`revoke all on (?:table )?public\\.${t} from ([^;]+);`, "g"))];
+    assert(
+      revokes.some((r) => /\banon\b/.test(r[1]) && /\bauthenticated\b/.test(r[1])),
+      `${name}: ${t} must revoke Supabase's default anon and authenticated grants`,
+    );
+  }
+  // No migration, this one or any later one, grants a mail table to a client role or opens a policy
+  // on one: only the service role reads them, as `google_accounts` (§5.1).
+  for (const [file, raw] of await everyMigrationFile()) {
+    const text = stripLineComments(raw).replace(/\s+/g, " ").toLowerCase();
+    for (const t of MAIL_TABLES) {
+      for (const g of text.matchAll(new RegExp(`grant [^;]*\\bon (?:table )?(?:public\\.)?${t}\\b([^;]*);`, "g"))) {
+        assert(!/\bto\b[^;]*\b(anon|authenticated|public)\b/.test(g[1]), `${file}: grants ${t} to a client role`);
+      }
+      assert(!new RegExp(`create policy [^;]*\\bon (?:public\\.)?${t}\\b`).test(text), `${file}: a policy on ${t}`);
+    }
+  }
+});
+
+Deno.test("every_mail_account_id_cascades_from_accounts", async () => {
+  const { name, sql } = await mailMigration();
+  const cascades = /\breferences public\.accounts ?\( ?id ?\) on delete cascade\b/;
+  // Five tables carry the account; batches and canaries reach it through their mailbox.
+  for (const t of ["mail_accounts", "mail_addresses", "mail_seen", "mail_work", "mail_claims"]) {
+    const col = tableColumns(sql, t).get("account_id");
+    assert(col !== undefined, `${name}: ${t} has no account_id`);
+    assert(col.startsWith("account_id uuid "), `${name}: ${t}.account_id is a uuid`);
+    assert(/\bnot null\b|\bprimary key\b/.test(col), `${name}: ${t}.account_id is never null`);
+    assert(cascades.test(col), `${name}: ${t}.account_id must reference accounts(id) on delete cascade`);
+  }
+  const viaMailbox = /\breferences public\.mail_addresses ?\( ?id ?\) on delete cascade\b/;
+  for (const t of ["mail_batches", "mail_canaries"]) {
+    const cols = tableColumns(sql, t);
+    assert(!cols.has("account_id"), `${name}: ${t} is scoped by its mailbox (§5.1)`);
+    const col = cols.get("address_id");
+    assert(col !== undefined && /\bnot null\b/.test(col), `${name}: ${t}.address_id is never null`);
+    assert(viaMailbox.test(col!), `${name}: ${t}.address_id must cascade from mail_addresses`);
+  }
+  // Where a row names both, they are one account's: a mailbox of another account cannot be named.
+  for (const t of ["mail_seen", "mail_work", "mail_claims"]) {
+    const items = tableItems(sql, t);
+    assert(
+      items.includes(
+        "foreign key (address_id, account_id) references public.mail_addresses (id, account_id) on delete cascade",
+      ),
+      `${name}: ${t}'s mailbox must belong to its account`,
+    );
+    assert(/^address_id uuid not null$/.test(tableColumns(sql, t).get("address_id") ?? ""), `${name}: ${t}.address_id`);
+  }
+  assert(tableItems(sql, "mail_addresses").includes("unique (id, account_id)"), `${name}: the composite key's target`);
+  // Nothing in the file reaches another account's data through a looser key.
+  assert(!/on delete (set null|no action|restrict)[^,]*account/i.test(sql), `${name}: an account key that does not cascade`);
+});
+
+Deno.test("mail_seen_is_keyed_by_account_and_msg_hash_and_token_hmac_is_unique", async () => {
+  const { name, sql } = await mailMigration();
+  const seen = tableItems(sql, "mail_seen");
+  assert(seen.includes("primary key (account_id, msg_hash)"), `${name}: mail_seen's key is (account_id, msg_hash)`);
+  const cols = tableColumns(sql, "mail_seen");
+  for (const c of ["msg_hash", "fp_hash", "received_minute"]) {
+    assert(/\bnot null\b/.test(cols.get(c) ?? ""), `${name}: mail_seen.${c} is never null`);
+  }
+  const token = tableColumns(sql, "mail_addresses").get("token_hmac") ?? "";
+  assert(/^token_hmac text not null unique$/.test(token), `${name}: token_hmac is text, not null and unique: ${token}`);
+  const retired = tableColumns(sql, "mail_addresses").get("retired_token_hmac") ?? "";
+  assert(/^retired_token_hmac text unique$/.test(retired), `${name}: a retired token is looked up as the live one is`);
+});
+
+Deno.test("the_mail_tables_have_section_5_1s_columns_and_words", async () => {
+  // Spec §5.1, column for column. Two columns §5.1's table implies rather than names:
+  // `mail_addresses.account_id` (its header: every account_id cascades) and the ciphertext/IV pairs.
+  const { name, sql } = await mailMigration();
+  const want: Record<string, string[]> = {
+    mail_accounts: [
+      "account_id", "fp_key_ciphertext", "fp_key_iv", "digest", "allowance_term_start", "allowance_left",
+      "allowance_usd", "allowance_until", "mints_30d",
+    ],
+    mail_addresses: [
+      "id", "account_id", "provider", "token_hmac", "token_ciphertext", "token_iv", "retired_token_hmac",
+      "retired_until", "mailbox_hint", "forward_hint", "status", "lapsed_since", "reenabled_at", "confirm_until",
+      "term_start", "last_received_at", "last_canary_sent_at", "last_canary_ok_at", "canaries_today", "unbound",
+      "unauthenticated", "expired",
+    ],
+    mail_batches: [
+      "id", "address_id", "phase", "nonce_hmac", "since", "expected", "sent", "received", "opened_at", "sent_at",
+      "closed_at",
+    ],
+    mail_canaries: ["id", "address_id", "nonce_hmac", "sent_at", "arrived_at"],
+    mail_seen: ["account_id", "msg_hash", "fp_hash", "received_minute", "address_id", "phase", "seen_at"],
+    mail_work: [
+      "id", "account_id", "address_id", "batch_id", "s3_key", "phase", "authenticity", "arrived_at", "attempts",
+      "next_attempt_at",
+    ],
+    mail_claims: [
+      "id", "account_id", "address_id", "batch_id", "uid", "message_date", "ordering_date", "sender_name",
+      "sender_addr", "phase", "authenticity", "claims", "judgment_id", "queued_at", "delivered_at",
+    ],
+  };
+  for (const t of MAIL_TABLES) {
+    assertEquals([...tableColumns(sql, t).keys()].sort(), [...want[t]].sort(), `${name}: ${t}'s columns`);
+  }
+  const words = (t: string, c: string) => (tableColumns(sql, t).get(c) ?? "").replace(/"/g, "'");
+  const oneOf = (t: string, c: string, vals: string[]) =>
+    assert(
+      words(t, c).includes(`check (${c} in (${vals.map((v) => `'${v}'`).join(", ")}))`),
+      `${name}: ${t}.${c} must be one of ${vals.join(", ")}: ${words(t, c)}`,
+    );
+  oneOf("mail_addresses", "provider", ["m365", "google", "other"]);
+  oneOf("mail_addresses", "status", [
+    "pending", "confirmed", "active", "quiet", "blocked", "off", "paused_send", "lapsed", "revoked",
+  ]);
+  oneOf("mail_batches", "phase", ["backfill", "recover"]);
+  for (const t of ["mail_seen", "mail_work", "mail_claims"]) oneOf(t, "phase", ["live", "backfill", "recover"]);
+  for (const t of ["mail_work", "mail_claims"]) oneOf(t, "authenticity", ["aligned", "unaligned"]);
+  assert(/\bdefault false\b/.test(words("mail_accounts", "digest")), `${name}: digest defaults to false (D13)`);
+  assert(/^claims jsonb not null\b/.test(words("mail_claims", "claims")), `${name}: claims is jsonb`);
+  assert(
+    /references public\.judgments ?\( ?id ?\) on delete set null/.test(words("mail_claims", "judgment_id")),
+    `${name}: a claim outlives nothing it should not, and never blocks a judgment's deletion`,
+  );
+  // Nothing here holds a body, a subject, a header or a raw token: hashes, words and the claims only.
+  for (const t of MAIL_TABLES) {
+    for (const c of tableColumns(sql, t).keys()) {
+      assert(!/(body|subject|header|^token$|nonce$|^message_id$|^text$)/.test(c), `${name}: ${t}.${c}`);
+    }
+  }
+});
