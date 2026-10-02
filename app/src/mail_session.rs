@@ -1,4 +1,262 @@
 //! The mail setup's kept browser profiles and `mail.json` (email-forwarding plan T9.1, spec §5.4
-//! and D15). Doc-only until T9.1 fills it: the module is declared first (hand-off H3a) so the
-//! gate stays green with no unused code. It will follow `grades`'s `is_session_dir` rule and the
-//! `grades.json` precedent for `mail.json`, which is its own file and never a `Settings` field.
+//! and D15). Pure file work: nothing here opens a window, reaches a network or logs.
+//!
+//! **The profiles.** One kept WebView2 profile per mailbox, `<data_dir>\mail-session-<address_id>`,
+//! and with the saved sign-in off one throwaway `<data_dir>\mail-setup`. [`is_session_dir`] is the
+//! one guard every delete passes, grades' rule widened to these two shapes: the exact child of an
+//! absolute `data_dir` with no `..`, named `mail-setup` or `mail-session-` plus an address id. An
+//! address id is the service's opaque mailbox id, never the address: 1 to 64 ASCII lowercase
+//! letters, digits or `-` (a UUID fits), so no id can name a separator, a `..` or a second folder.
+//! A delete that fails is recorded in `mail.json`'s `pending_deletes` and retried by
+//! [`start_up_sweep`], which also removes a `mail-setup` a crash left.
+//!
+//! **`mail.json`** sits beside `settings.json` and is never a field in it (the `grades.json`
+//! precedent). Unlike `grades.json`, an unreadable file is an error, never the default: its
+//! `turned_off` only grows (§13 Q11), so reading a corrupt file as "nothing turned off" could turn
+//! back on a mailbox the student turned off, and every save refuses rather than overwrite it.
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
+
+const SESSION_PREFIX: &str = "mail-session-";
+const SETUP_DIR: &str = "mail-setup";
+const MAIL_JSON: &str = "mail.json";
+const MAX_ADDRESS_ID: usize = 64;
+
+/// `grades`'s patience: WebView2 lets go of a profile a moment after its window is gone.
+const WIPE_TRIES: u32 = 12;
+const WIPE_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Serialises every read-modify-write of `mail.json` in this process.
+static MAIL_JSON_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock() -> MutexGuard<'static, ()> {
+    MAIL_JSON_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Whether `id` can be an address id: 1 to 64 of `a-z`, `0-9` and `-`.
+pub fn valid_address_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ADDRESS_ID
+        && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// `<data_dir>\mail-session-<address_id>`, or `None` for an id [`valid_address_id`] refuses.
+pub fn session_dir(data_dir: &Path, address_id: &str) -> Option<PathBuf> {
+    valid_address_id(address_id).then(|| data_dir.join(format!("{SESSION_PREFIX}{address_id}")))
+}
+
+/// `<data_dir>\mail-setup`: setup's profile while the saved sign-in is off.
+pub fn setup_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(SETUP_DIR)
+}
+
+fn is_profile_name(name: &str) -> bool {
+    name == SETUP_DIR || name.strip_prefix(SESSION_PREFIX).is_some_and(valid_address_id)
+}
+
+fn sound(data_dir: &Path) -> bool {
+    data_dir.is_absolute() && !data_dir.components().any(|c| c == Component::ParentDir)
+}
+
+/// The only folders this module deletes: exactly `data_dir`'s child `mail-setup` or
+/// `mail-session-<address_id>`, for an absolute `data_dir` with no `..`. A grandchild, a sibling,
+/// another profile's folder, another case or a relative path is refused.
+pub fn is_session_dir(data_dir: &Path, dir: &Path) -> bool {
+    sound(data_dir)
+        && dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| is_profile_name(n) && dir == data_dir.join(n))
+}
+
+// ---- `mail.json` (§5.4) -----------------------------------------------------------------------
+
+/// `<data_dir>\mail.json`. A field a file written before it existed lacks reads as its default.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct MailState {
+    /// The saved sign-in switch, on by default (D15).
+    pub keep_session: bool,
+    /// Each mailbox's last reconcile, by address id.
+    pub last_reconcile: BTreeMap<String, String>,
+    /// Profile folder names whose delete failed, retried at start-up.
+    pub pending_deletes: Vec<String>,
+    /// Mailboxes the student turned off in Knowlu's Settings; only grows (§13 Q11).
+    pub turned_off: Vec<String>,
+}
+
+impl Default for MailState {
+    fn default() -> MailState {
+        MailState { keep_session: true, last_reconcile: BTreeMap::new(), pending_deletes: Vec::new(), turned_off: Vec::new() }
+    }
+}
+
+fn mail_json(data_dir: &Path) -> PathBuf {
+    data_dir.join(MAIL_JSON)
+}
+
+impl MailState {
+    /// A missing file is the default; a file that is not one JSON object of these fields is an
+    /// error, never the default (the module doc says why).
+    pub fn load(data_dir: &Path) -> Result<MailState, String> {
+        let text = match std::fs::read_to_string(mail_json(data_dir)) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(MailState::default()),
+            Err(e) => return Err(format!("mail.json unreadable: {}", e.kind())),
+        };
+        let bad = |e: serde_json::Error| format!("mail.json unreadable: {:?}", e.classify());
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(bad)?;
+        if !value.is_object() {
+            return Err("mail.json unreadable: not an object".into());
+        }
+        serde_json::from_value(value).map_err(bad)
+    }
+
+    pub fn is_turned_off(&self, address_id: &str) -> bool {
+        self.turned_off.iter().any(|id| id == address_id)
+    }
+
+    /// Writes this state, keeping every `turned_off` id already on disk (a stale copy can never
+    /// shrink it), and refuses while the file on disk is unreadable.
+    pub fn save(&self, data_dir: &Path) -> Result<(), String> {
+        let _held = lock();
+        self.write_merged(data_dir)
+    }
+
+    fn write_merged(&self, data_dir: &Path) -> Result<(), String> {
+        let mut merged = MailState::load(data_dir)?.turned_off;
+        for id in &self.turned_off {
+            if !merged.contains(id) {
+                merged.push(id.clone());
+            }
+        }
+        let out = MailState { turned_off: merged, ..self.clone() };
+        std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
+        let v = serde_json::to_value(&out).map_err(|e| e.to_string())?;
+        let tmp = data_dir.join(format!("{MAIL_JSON}.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, knowlu_engine::ledger::dumps_value(&v)).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, mail_json(data_dir)).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            e.to_string()
+        })
+    }
+
+    /// Load, change and save under one lock; `change` returns whether it changed anything, and
+    /// nothing is written when it did not.
+    pub fn update(data_dir: &Path, change: impl FnOnce(&mut MailState) -> bool) -> Result<MailState, String> {
+        let _held = lock();
+        let mut state = MailState::load(data_dir)?;
+        if change(&mut state) {
+            state.write_merged(data_dir)?;
+        }
+        Ok(state)
+    }
+}
+
+/// Record `address_id` in `turned_off` (Disconnect's step 0, before anything else). An id
+/// [`valid_address_id`] refuses, or an unreadable `mail.json`, is an error and writes nothing.
+pub fn turn_off(data_dir: &Path, address_id: &str) -> Result<(), String> {
+    if !valid_address_id(address_id) {
+        return Err("not an address id".into());
+    }
+    MailState::update(data_dir, |s| {
+        let new = !s.is_turned_off(address_id);
+        if new {
+            s.turned_off.push(address_id.to_string());
+        }
+        new
+    })
+    .map(|_| ())
+}
+
+// ---- deleting profiles (D15, §4.12, §4.13) ------------------------------------------------------
+
+/// Delete `dir` patiently; `true` once it is gone (or was never there). `symlink_metadata`, not
+/// `exists`: a dangling link still counts as there.
+fn wipe(dir: &Path) -> bool {
+    let gone = |d: &Path| std::fs::symlink_metadata(d).is_err();
+    for attempt in 0..WIPE_TRIES {
+        if gone(dir) || std::fs::remove_dir_all(dir).is_ok() {
+            return true;
+        }
+        if attempt + 1 < WIPE_TRIES {
+            std::thread::sleep(WIPE_BACKOFF);
+        }
+    }
+    gone(dir)
+}
+
+/// Delete the profile folder `name` under `data_dir` through the guard, and keep
+/// `pending_deletes` true to the result: a failure is added, a success removed. A refused path is
+/// `false` and records nothing.
+fn forget_named(data_dir: &Path, name: &str) -> bool {
+    let dir = data_dir.join(name);
+    if !is_session_dir(data_dir, &dir) {
+        return false;
+    }
+    let gone = wipe(&dir);
+    // An unreadable mail.json cannot record the failure; the delete itself stands.
+    let _ = MailState::update(data_dir, |s| {
+        let listed = s.pending_deletes.iter().any(|n| n == name);
+        if gone && listed {
+            s.pending_deletes.retain(|n| n != name);
+        } else if !gone && !listed {
+            s.pending_deletes.push(name.to_string());
+        }
+        gone == listed
+    });
+    gone
+}
+
+/// **Forget one mailbox's saved sign-in**: delete `mail-session-<address_id>` and nothing else.
+/// Closing the window first is the caller's. A failure is retried by [`start_up_sweep`].
+pub fn forget(data_dir: &Path, address_id: &str) -> bool {
+    valid_address_id(address_id) && forget_named(data_dir, &format!("{SESSION_PREFIX}{address_id}"))
+}
+
+/// Delete `mail-setup` (setup with the saved sign-in off, when its window closes).
+pub fn forget_setup(data_dir: &Path) -> bool {
+    forget_named(data_dir, SETUP_DIR)
+}
+
+/// **Every mail profile of this Knowlu profile** (sign-out, §4.13): each `mail-session-<id>` and
+/// `mail-setup`, and nothing else in `data_dir`. `true` when all are gone.
+pub fn forget_all(data_dir: &Path) -> bool {
+    if !sound(data_dir) {
+        return false;
+    }
+    let entries = match std::fs::read_dir(data_dir) {
+        Ok(entries) => entries,
+        Err(e) => return e.kind() == std::io::ErrorKind::NotFound,
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| is_profile_name(n))
+        .collect();
+    names.sort();
+    names.iter().fold(true, |all, n| forget_named(data_dir, n) && all)
+}
+
+/// **At start-up** (H4): remove a `mail-setup` a crash left and retry every delete that failed
+/// before. Returns the folder names still pending. A pending name that is not a mail profile's is
+/// dropped, never deleted.
+pub fn start_up_sweep(data_dir: &Path) -> Vec<String> {
+    if !sound(data_dir) {
+        return Vec::new();
+    }
+    forget_setup(data_dir);
+    let pending = MailState::load(data_dir).map(|s| s.pending_deletes).unwrap_or_default();
+    for name in &pending {
+        if is_profile_name(name) {
+            forget_named(data_dir, name);
+        }
+    }
+    let _ = MailState::update(data_dir, |s| {
+        let before = s.pending_deletes.len();
+        s.pending_deletes.retain(|n| is_profile_name(n));
+        s.pending_deletes.len() != before
+    });
+    MailState::load(data_dir).map(|s| s.pending_deletes).unwrap_or_default()
+}
