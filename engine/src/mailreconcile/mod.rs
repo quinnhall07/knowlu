@@ -15,11 +15,12 @@
 //!
 //! T5.1 holds the types, the order and the noise screen; T5.2's [`resolve`] holds §4.8 steps 2 and
 //! 4, what a claim's target is, read against the vault the earlier claims' actions leave (D10).
-//! `rules.rs` holds §4.9's table: T5.3's `new_item` rows, authenticity and the first day, and
-//! T5.4's `change` rows for mail, the student, other notes, `cancelled` and two values at one
-//! ordering date, for a vault note and a note the same plan files alike ([`Place::Planned`], plan
-//! §9.5's planned-note amendment). Every other claim that passes the screen and is not already
-//! applied (a `course_info`, an unresolved claim) is unmatched until T5.5 fills in its row.
+//! `rules.rs` holds §4.9's table: T5.3's `new_item` rows, authenticity and the first day; T5.4's
+//! `change` rows for mail, the student, other notes, `cancelled` and two values at one ordering
+//! date, for a vault note and a note the same plan files alike ([`Place::Planned`], plan §9.5's
+//! planned-note amendment); and T5.5's feed and template rows, supersession by `mail_asof`, F3
+//! (b)'s cards, receipts (PQ4) and notices. A claim still ambiguous at plan time with a course waits
+//! on `mail-resolve` and writes nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -62,6 +63,10 @@ pub struct NoteView {
     /// vault's literal form (`write::to_literal`), so a date and a date-time never compare equal.
     pub due: Value,
     pub status: Option<String>,
+    /// `archived_reason:`, `imported-past` (`ingest::IMPORTED_PAST`) for an item archived because
+    /// its due had passed when it arrived. Approving a mail card that gives such a note a due on or
+    /// after the approval day un-archives it (F3 (b), plan T8c), so the rules read it.
+    pub archived_reason: Option<String>,
     pub source_uid: Option<String>,
     /// Whose note it is: a feed (`blackboard`, …), `mail`, `gmail`, `events`, or `None` by hand.
     pub created_by: Option<String>,
@@ -146,6 +151,10 @@ pub enum ClaimKind {
     Change,
     CourseInfo,
     Noise,
+    /// A submission receipt (PQ4, Quinn 2026-10-02; §5.1's dated marker): `target` names the
+    /// item, and `field`, `value`, `item` and `topic` are null. Only a template emits one
+    /// (`source: template`); the device re-checks both ([`is_noise`]).
+    Receipt,
 }
 
 /// A `change`'s field. `cancelled` is always a card proposing `status: active → archived` (§4.9).
@@ -194,6 +203,29 @@ pub enum Topic {
     OfficeHours,
     Policy,
     Other,
+}
+
+impl Topic {
+    /// The wire word (§5.1), which a notice's `close_key` carries (D13).
+    pub fn word(self) -> &'static str {
+        match self {
+            Topic::Schedule => "schedule",
+            Topic::Room => "room",
+            Topic::Instructor => "instructor",
+            Topic::OfficeHours => "office_hours",
+            Topic::Policy => "policy",
+            Topic::Other => "other",
+        }
+    }
+
+    /// The words a notice's title shows (D13: "titled by course and topic").
+    pub fn label(self) -> &'static str {
+        match self {
+            Topic::OfficeHours => "office hours",
+            Topic::Other => "course news",
+            topic => topic.word(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -256,13 +288,14 @@ pub enum Action {
     /// other card. A field T5.1's action list did not have, recorded in plan §9.5.
     AmendCard { claim: ClaimRef, target: Place, changes: Vec<Change>, proposal: Proposal, also: Vec<Claimed> },
     /// An `info/` item: `kind` is one of `info::KINDS`, and a later notice with the same
-    /// `close_key` supersedes it (D13).
+    /// `close_key` supersedes it (D13). `about` says which count the run line puts it in.
     Notice {
         claim: ClaimRef,
         kind: &'static str,
         close_key: Option<String>,
         title: String,
         body_line: String,
+        about: NoticeAbout,
     },
     /// A submission receipt: `completion::propose_done` on `target`.
     ProposeDone { claim: ClaimRef, target: Place },
@@ -334,10 +367,22 @@ pub enum CardStatus {
     Snoozed,
 }
 
+/// What a notice tells, so §4.8 step 7's line counts it once: `J notices` or `U unmatched`. A field
+/// T5.1's action list did not have, recorded in plan §9.5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeAbout {
+    /// A `course_info` claim (D13).
+    CourseInfo,
+    /// A claim no item matched after resolve (§4.9's unmatched row, D12).
+    Unmatched,
+}
+
 /// Why a claim writes nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
-    /// Not later than the field's `mail_asof`, or a feed holds the newer value (§4.8 step 5, §4.9).
+    /// Ordered before the field's `mail_asof` (§4.8 step 5; a stamp at the claim's own ordering date
+    /// is its own run's, plan §9.5), a feed holds the newer value (§4.9 row 8), or another claim of
+    /// a two-value run makes the card (P20).
     Superseded,
     /// A live event already past (D24).
     Past,
@@ -350,12 +395,12 @@ pub enum SkipReason {
     Noise,
     /// No note matched (§4.8 step 2).
     Unmatched,
-    /// A card row whose card `approvals::validate_amendment` would refuse: its note is outside
-    /// `tasks/`, or holds no value in the field to amend from (a null `from`). The feed's rule for
-    /// the same refusal (plan §10, R14): the note keeps its value and no card is filed. A seventh
-    /// reason beyond T5.1's six, and it drops a live date for a note needing one: what it becomes (a
-    /// notice, or a card `approvals` accepts) and how T6.3's run line counts it wait on the ruling
-    /// plan §9.5 records.
+    /// A card row whose card `approvals::validate_amendment` would refuse even with T8c's two arms
+    /// (F3 (b), Quinn 2026-10-02): a note the student archived (in `archive/` without `archived_reason:
+    /// imported-past`), a `cancelled` for a note with no `status:` line, a collection `from`, or a due
+    /// still before today for an `imported-past` note. The feed's rule for the same refusal (plan §10,
+    /// R14): the note keeps its value and no card is filed. A seventh reason beyond T5.1's six; T6.3
+    /// counts it as PQ7 rules.
     NotAmendable,
 }
 
@@ -462,15 +507,22 @@ fn order(messages: &[Message]) -> Vec<(&Message, usize)> {
 /// and is no due here ([`NewItem::known_due`]), never noise: the item needs a date and is counted.
 /// A `change`'s value is held to its field's shape the same way (§5.1): a `due` value off the wire
 /// shape, or a `cancelled` value other than `"true"`, is noise; a null due names no date, and the
-/// rules write nothing for it.
+/// rules write nothing for it. T5.5 holds two more kinds to §5.1's shape: a `course_info` needs a
+/// topic, which keys its notice (D13), and a receipt comes only from a template and carries no
+/// `field`, `value`, `item` or `topic` (PQ4). A course is written into a notice's title and key, so
+/// one that would break a line is noise too.
 fn is_noise(message: &Message, claim: &Claim) -> bool {
     let title = claim.item.as_ref().map(|item| item.title.as_str());
     let sender = [message.sender.name.as_deref(), Some(message.sender.address.as_str())];
-    let texts = [title, Some(claim.why.as_str()), Some(claim.evidence.as_str())];
+    let texts = [title, claim.course.as_deref(), Some(claim.why.as_str()), Some(claim.evidence.as_str())];
     let due = claim.item.as_ref().and_then(|item| item.due.as_deref());
     let off_shape = match (claim.kind, claim.field) {
         (ClaimKind::Change, Some(ClaimField::Due)) => claim.value.as_deref().is_some_and(|due| !rules::wire_shaped(due)),
         (ClaimKind::Change, Some(ClaimField::Cancelled)) => claim.value.as_deref() != Some("true"),
+        (ClaimKind::CourseInfo, _) => claim.topic.is_none(),
+        (ClaimKind::Receipt, field) => {
+            claim.source != ClaimSource::Template || field.is_some() || claim.value.is_some() || claim.item.is_some() || claim.topic.is_some()
+        }
         _ => false,
     };
     claim.kind == ClaimKind::Noise
@@ -547,6 +599,7 @@ mod tests {
             title: title.to_string(),
             due: json!(due),
             status: Some("active".to_string()),
+            archived_reason: None,
             source_uid: created_by.map(|by| format!("{by}:{id}")),
             created_by: created_by.map(str::to_string),
             mail_asof: BTreeMap::new(),
@@ -648,7 +701,9 @@ mod tests {
         }
     }
 
-    /// §5.1's names are the wire's; `recover` reads as live; an unknown kind is refused.
+    /// §5.1's names are the wire's; `recover` reads as live; an unknown kind is refused. PQ4 made
+    /// `receipt` a kind (Quinn 2026-10-02), so it deserializes, and the unknown-kind probe is
+    /// `completed`, the field value PQ4 declined (plan §9.5's sanctioned change).
     #[test]
     fn a_claim_in_the_wire_shape_deserializes_and_recover_reads_as_live() {
         let wire = json!({
@@ -668,8 +723,15 @@ mod tests {
         }))
         .unwrap();
         assert_eq!((parsed.item.unwrap().item_kind, parsed.topic), (ItemKind::Exam, Some(Topic::OfficeHours)));
+        let receipt = json!({
+            "kind": "receipt", "course": "CS 101", "target": "Lab 5", "field": null, "value": null,
+            "item": null, "topic": null, "evidence": "Submission received", "why": "The platform confirmed it",
+            "confidence": 1.0, "source": "template", "resolution": null
+        });
+        let parsed: Claim = serde_json::from_value(receipt).unwrap();
+        assert_eq!((parsed.kind, parsed.target.as_deref(), parsed.field), (ClaimKind::Receipt, Some("Lab 5"), None));
         let mut unknown = wire;
-        unknown["kind"] = json!("receipt");
+        unknown["kind"] = json!("completed");
         assert!(serde_json::from_value::<Claim>(unknown).is_err());
         let phase = |w: &str| serde_json::from_value::<Phase>(json!(w)).unwrap();
         assert_eq!([phase("backfill"), phase("live"), phase("recover")], [Phase::Backfill, Phase::Live, Phase::Live]);

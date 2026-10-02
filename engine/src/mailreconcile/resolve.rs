@@ -22,10 +22,11 @@
 //! 2. A stored answer wins (D12): a `target_id` naming an item note in the vault resolves to it; a
 //!    stored "none", or an id naming none, is unmatched. Never a guess. (The call offers the vault's
 //!    notes, so an answer never names a note this plan has yet to write.)
-//! 3. A `change`'s `target` (§4.8 step 2): equal to an item note's `source_uid` or LMS id; else equal,
-//!    normalised, to the title of an item note in the claim's course; else the one active note in the
-//!    course whose title holds every token of it. At each step one match resolves, two or more are
-//!    ambiguous and none goes on to the next; none at the last is ambiguous.
+//! 3. A `change`'s `target`, or a receipt's (PQ4), as §4.8 step 2 reads it: equal to an item
+//!    note's `source_uid` or LMS id; else equal, normalised, to the title of an item note in the
+//!    claim's course; else the one active note in the course whose title holds every token of it.
+//!    At each step one match resolves, two or more are ambiguous and none goes on to the next; none
+//!    at the last is ambiguous.
 //! 4. A `new_item` whose normalised title equals an active note in its course is a change to that
 //!    note's `due`, never a duplicate (test 24); two such notes are ambiguous; none is a new note.
 //!    One with no due is [`Resolved::Restated`] and changes nothing: no due means "no date known",
@@ -68,6 +69,8 @@ pub enum Resolved<'v> {
     /// A `new_item` with no due naming `target`, an active note in its course: the mail restates an
     /// item the vault holds and knows no date for it, so nothing changes and nothing is duplicated.
     Restated { target: Target<'v> },
+    /// A submission receipt naming `target`, resolved as a `change`'s target is (PQ4, D12).
+    Receipt { target: Target<'v> },
     /// Zero deterministic matches, or two or more, and no stored answer: listed by [`to_ask`]
     /// for `mail-resolve` (§4.8 step 3).
     Ambiguous,
@@ -152,10 +155,12 @@ impl Working {
     /// card was filed groups exactly as it did the first time ([`super::rules::settle`]).
     pub(super) fn resolve_target(&self, claim: &Claim) -> Resolved<'_> {
         // What the claim changes, and what names its target. A change with no field, or a new_item
-        // with no item, has nothing to change: unmatched, so it is shown and never guessed at.
+        // with no item, has nothing to change: unmatched, so it is shown and never guessed at. A
+        // receipt changes no field; its target is named and resolved as a change's (PQ4).
         let (field, value, named) = match (claim.kind, claim.field, &claim.item) {
             (ClaimKind::Change, Some(field), _) => (field, claim.value.clone(), Named::Target(claim.target.as_deref())),
             (ClaimKind::NewItem, _, Some(item)) => (ClaimField::Due, item.known_due().map(str::to_string), Named::Title(&item.title)),
+            (ClaimKind::Receipt, _, _) => (ClaimField::Due, None, Named::Target(claim.target.as_deref())),
             (ClaimKind::Change, None, _) | (ClaimKind::NewItem, _, None) => return Resolved::Unmatched,
             (ClaimKind::CourseInfo | ClaimKind::Noise, _, _) => return Resolved::NoTarget,
         };
@@ -173,6 +178,7 @@ impl Working {
             },
         };
         match found {
+            Found::One(target) if claim.kind == ClaimKind::Receipt => Resolved::Receipt { target },
             Found::One(target) if claim.kind == ClaimKind::NewItem && value.is_none() => Resolved::Restated { target },
             Found::One(target) => Resolved::Change { target, field, value },
             Found::Zero if claim.kind == ClaimKind::NewItem => Resolved::New,
@@ -181,8 +187,9 @@ impl Working {
     }
 
     /// Advance past one planned action, as `mail.rs` will write it: a created note is an item in
-    /// `tasks/`, or in `archive/` and archived when imported past (R-OB-3's folder; either is an item
-    /// and neither active, so resolution reads them alike); a task or amend card sits in
+    /// `tasks/`, or in `archive/`, archived and `archived_reason: imported-past`, when imported past
+    /// (R-OB-3's folder; either is an item and neither active, so resolution reads them alike, and
+    /// the rules read the reason as T8c does); a task or amend card sits in
     /// `approvals/` under its claim's uid; a set moves the field (mail sets only `due` directly,
     /// §4.9) and stamps its `mail_asof`. A notice (`info/`), a propose-done and a skip leave
     /// nothing resolution reads. Each note and card carries `created_by: mail` and the claim's uid.
@@ -196,6 +203,7 @@ impl Working {
                 let (folder, status) = if note.imported_past { ("archive", "archived") } else { ("tasks", "active") };
                 let mut created = filed(claim, folder, status, &note.title, note.course.clone(), note.due.clone());
                 created.mail_asof.extend(note.mail_asof.map(|asof| ("due".to_string(), asof)));
+                created.archived_reason = note.imported_past.then(|| crate::ingest::IMPORTED_PAST.to_string());
                 (created, claim)
             }
             Action::TaskCard { claim, note, proposal } => {
@@ -241,6 +249,7 @@ fn filed(claim: &ClaimRef, folder: &str, status: &str, title: &str, course: Opti
         title: title.to_string(),
         due: due.map(Value::String).unwrap_or(Value::Null),
         status: Some(status.to_string()),
+        archived_reason: None,
         source_uid: Some(claim.uid()),
         created_by: Some("mail".to_string()),
         mail_asof: BTreeMap::new(),
@@ -362,6 +371,7 @@ mod tests {
             title: title.to_string(),
             due: json!("2026-10-08"),
             status: Some(status.to_string()),
+            archived_reason: None,
             source_uid: source_uid.map(str::to_string),
             created_by: None,
             mail_asof: BTreeMap::new(),
