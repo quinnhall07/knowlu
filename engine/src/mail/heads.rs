@@ -4,7 +4,8 @@
 //! the pass keeps **one** `heads-up` item (`close_key: mail-source:<address_id>`), closed when the mailbox
 //! is active again, and names the state in one run line. When the saved session turned forwarding back on
 //! (`reenabled_at`), one `mail-reenabled:<address_id>` item says so, once per stamp: the stamp is
-//! recorded in `state/ingest-seen.md`, so a student's dismissal sticks. No address, no token and no mail
+//! recorded in `state/ingest-seen.md` once the item is written, so a student's dismissal sticks and a failed
+//! write is tried again. No address, no token and no mail
 //! text is written or printed; the words below are fixed.
 
 use std::path::Path;
@@ -62,8 +63,9 @@ pub(super) fn keep(writer: &mut Writer<'_>, vault: &Path, boxes: &[&MailboxRepor
         if let Some(at) = mailbox.reenabled_at {
             let (key, stamped) = (format!("mail-reenabled:{id}"), format!("mail-reenabled:{id}:{at}"));
             if !is_open(vault, &key) && !ingest::load_seen(vault).contains(&stamped) {
-                note(writer, &mut lines, &key, "Email forwarding was turned back on", REENABLED_TEXT);
-                if ingest::record_seen(vault, &stamped, "(email)", stamp).is_err() {
+                // Stamped only once the item is written: a failed write is tried again next pass.
+                let written = note(writer, &mut lines, &key, "Email forwarding was turned back on", REENABLED_TEXT);
+                if written && ingest::record_seen(vault, &stamped, "(email)", stamp).is_err() {
                     lines.push("mail: the seen ledger was not written".to_string());
                 }
             }
@@ -72,8 +74,11 @@ pub(super) fn keep(writer: &mut Writer<'_>, vault: &Path, boxes: &[&MailboxRepor
     lines
 }
 
-fn note(writer: &mut Writer<'_>, lines: &mut Vec<String>, key: &str, title: &str, body: &str) {
-    if writer.notice("heads-up", Some(key), title, body).is_err() {
+/// Write one heads-up; `false` (and one line) when the write failed.
+fn note(writer: &mut Writer<'_>, lines: &mut Vec<String>, key: &str, title: &str, body: &str) -> bool {
+    let written = writer.notice("heads-up", Some(key), title, body).is_ok();
+    if !written {
         lines.push("mail: a heads-up could not be written".to_string());
     }
+    written
 }

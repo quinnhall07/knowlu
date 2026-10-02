@@ -10,7 +10,10 @@
 //! recorded in `state/ingest-seen.md` (under the fixed title `(email)`, never a mail-derived one: plan
 //! §10, R11) only when every claim of it was written or deliberately skipped. A write that failed, or a
 //! claim still ambiguous with a course (it waits on `mail-resolve`, T6.4), holds its message: nothing is
-//! acknowledged, so it comes back, and a claim written before is `AlreadyApplied` when it does.
+//! acknowledged, so it comes back, and a claim written before is `AlreadyApplied` when it does. The server
+//! returns an undelivered claim on every later pull, so a held message that comes back in the same pass is
+//! skipped (not planned, written or counted again), and a page of nothing but held messages ends the pass:
+//! it would be returned unchanged until acked.
 //!
 //! **The line.** `mail: N new, M changed, K proposed, J notices, P past, S superseded, U unmatched`
 //! (§4.8 step 7), printed when a mailbox is connected or a message arrived, and never otherwise. A
@@ -42,7 +45,7 @@ pub fn pull_mail(vault: &Path, client: &CloudClient, opts: &Options<'_>, budget:
 pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budget: Duration, today: Date) -> Vec<String> {
     let started = Instant::now();
     let mut journal = Journal::new(vault);
-    let mut run = Run { vault, opts, today, tally: Tally::default(), boxes: BTreeMap::new(), connected: false };
+    let mut run = Run { vault, opts, today, tally: Tally::default(), boxes: BTreeMap::new(), connected: false, held: BTreeSet::new() };
     let (mut ack, mut round, mut batch, mut more) = (Vec::<String>::new(), 0usize, false, false);
     let mut failure: Option<String> = None;
     loop {
@@ -64,8 +67,9 @@ pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budg
         round += 1;
         more = pulled.more;
         batch = pulled.messages.iter().any(|m| m.phase == Phase::Backfill);
-        run.round(&pulled, &mut journal, &mut ack);
-        if !more {
+        let stalled = run.round(&pulled, &mut journal, &mut ack);
+        // A page of nothing but held messages comes back unchanged until it is acked: no progress.
+        if !more || stalled {
             break;
         }
     }
@@ -99,19 +103,27 @@ struct Run<'a> {
     boxes: BTreeMap<String, MailboxReport>,
     /// A mailbox was reported or a message arrived: the line prints.
     connected: bool,
+    /// The uids held unacked this pass. The server returns an undelivered claim on every later pull, so a
+    /// held message that comes back is neither planned, written nor counted again (a notice written for
+    /// it would otherwise be closed and reopened, and counted in `J` each round).
+    held: BTreeSet<String>,
 }
 
 impl Run<'_> {
     /// Apply one answer: its mailboxes noted, its messages planned, written and (when whole) acked.
-    fn round(&mut self, pulled: &MailPull, journal: &mut Journal, ack: &mut Vec<String>) {
+    /// Returns `true` when the answer held nothing but messages this pass already holds (no progress).
+    fn round(&mut self, pulled: &MailPull, journal: &mut Journal, ack: &mut Vec<String>) -> bool {
         self.connected |= !pulled.mailboxes.is_empty() || !pulled.messages.is_empty();
         self.tally.unreadable += pulled.unreadable;
         for mailbox in &pulled.mailboxes {
             self.boxes.insert(mailbox.address_id.clone(), mailbox.clone());
         }
         // A message already recorded is acknowledged again and planned no more (an ack that never arrived).
+        let stalled = !pulled.messages.is_empty() && pulled.messages.iter().all(|m| self.held.contains(&m.uid));
         let seen = ingest::load_seen(self.vault);
         let (done, fresh): (Vec<&Message>, Vec<&Message>) = pulled.messages.iter().partition(|m| seen.contains(&m.uid));
+        // A message this pass already holds is skipped whole: its claims were planned and written once.
+        let fresh: Vec<&Message> = fresh.into_iter().filter(|m| !self.held.contains(&m.uid)).collect();
         let mut acked: BTreeSet<String> = BTreeSet::new();
         for message in done {
             if acked.insert(message.uid.clone()) {
@@ -119,10 +131,11 @@ impl Run<'_> {
             }
         }
         if fresh.is_empty() {
-            return;
+            return stalled;
         }
         let fresh: Vec<Message> = fresh.into_iter().cloned().collect();
         let held = self.write_plan(&fresh, pulled, journal);
+        self.held.extend(held.iter().cloned());
         let stamp = self.today.to_string();
         for message in &fresh {
             if held.contains(&message.uid) || !acked.insert(message.uid.clone()) {
@@ -131,9 +144,13 @@ impl Run<'_> {
             match ingest::record_seen(self.vault, &message.uid, "(email)", &stamp) {
                 Ok(()) => ack.push(message.uid.clone()),
                 // Not acknowledged: it comes back, and every claim of it is already applied.
-                Err(_) => self.tally.failed += 1,
+                Err(_) => {
+                    self.tally.failed += 1;
+                    self.held.insert(message.uid.clone());
+                }
             }
         }
+        false
     }
 
     /// Plan `fresh` against the vault now and write the actions in order. Returns the uids of the

@@ -698,3 +698,84 @@ fn an_ambiguous_claim_holds_its_message_unacknowledged_and_unrecorded() {
     assert!(files(&vault, "approvals").is_empty());
     let _ = std::fs::remove_dir_all(&vault);
 }
+
+/// Two vault files named `Lab 5` and `Lab 6`, so a claim naming `Lab` is ambiguous.
+fn two_labs(vault: &Path) {
+    for title in ["Lab 5", "Lab 6"] {
+        let name = title.to_lowercase().replace(' ', "-");
+        file(vault, &format!("tasks/{name}.md"), &format!("---\ntitle: {title}\ncourse: CS 101\ndue: 2030-01-01\nstatus: active\n---\n\nx\n"), "agent:knowlu.test");
+    }
+}
+
+fn journal_lines(vault: &Path) -> usize {
+    journal_bytes(vault).iter().map(|(_, bytes)| bytes.iter().filter(|b| **b == b'\n').count()).sum()
+}
+
+/// A message held on `mail-resolve` comes back on every later pull, so the pass plans it once: one open
+/// notice, the same `info/` files and one `J`, however many rounds deliver it (plan §9's T5.5 notices row).
+#[test]
+fn a_held_message_delivered_in_two_rounds_is_planned_once() {
+    let held_row = |today: Date| row("mail:aa11", T1, "live", vec![change("Lab", "CS 101", &ahead(today, 9)), course_info("CS 101")]);
+    let control = scratch("held-control");
+    let today = vault_today(&control);
+    two_labs(&control);
+    let lines = run(&control, &pulls(vec![pull(vec![held_row(today)], json!([]), false)]), today);
+    assert_eq!(lines, ["mail: 0 new, 0 changed, 0 proposed, 1 notices, 0 past, 0 superseded, 0 unmatched".to_string()]);
+    let (one_info, one_journal) = (files(&control, "info").len(), journal_lines(&control));
+
+    let vault = scratch("held");
+    two_labs(&vault);
+    let rounds = vec![
+        pull(vec![held_row(today)], json!([]), true),
+        pull(vec![held_row(today)], json!([]), true),
+        pull(vec![held_row(today)], json!([]), false),
+    ];
+    let mut server = pulls(rounds);
+    let lines = run(&vault, &server, today);
+    assert_eq!(lines[0], "mail: 0 new, 0 changed, 0 proposed, 1 notices, 0 past, 0 superseded, 0 unmatched", "{lines:?}");
+    assert_eq!(files(&vault, "info").len(), one_info, "one notice file, never closed and reopened");
+    assert!(files(&vault, "archive").is_empty(), "no notice was closed into archive/");
+    assert_eq!(journal_lines(&vault), one_journal, "the same journal records as one round");
+    assert_eq!(open_items(&vault, "mail:CS 101:room").len(), 1);
+    assert!(!knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"));
+    assert_eq!(server.requests().len(), 2, "the second round held nothing new, so the pass stopped");
+    for v in [&control, &vault] {
+        let _ = std::fs::remove_dir_all(v);
+    }
+}
+
+/// A page of nothing but held messages makes no progress (the server returns it until it is acked), so the
+/// drain stops rather than spend its budget re-reading it.
+#[test]
+fn a_page_of_only_held_messages_ends_the_drain() {
+    let vault = scratch("held-page");
+    two_labs(&vault);
+    let today = vault_today(&vault);
+    let held_row = row("mail:aa11", T1, "backfill", vec![change("Lab", "CS 101", &ahead(today, 9))]);
+    let page = pull(vec![held_row], json!([]), true);
+    let mut server = pulls(vec![page.clone(), page.clone(), page.clone(), page.clone(), page]);
+    let lines = run(&vault, &server, today);
+    assert_eq!(server.requests().len(), 2, "the second page held nothing new, so the drain stopped: {lines:?}");
+    assert!(lines.iter().any(|l| l.contains("more is waiting")), "{lines:?}");
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// §4.11 step 2: a heads-up that failed to write must not stamp `reenabled_at` as seen, or the student is
+/// never told. Here `info/` is a plain file, so the write fails; the next pass, with `info/` back, opens it.
+#[test]
+fn a_reenabled_heads_up_that_failed_to_write_is_not_stamped_seen() {
+    let vault = scratch("reenabled-fail");
+    let today = vault_today(&vault);
+    std::fs::remove_dir_all(vault.join("info")).unwrap();
+    std::fs::write(vault.join("info"), "not a folder").unwrap();
+    let boxes = json!([mailbox("addr-1", "active", Some("2026-10-01T12:00:00Z"))]);
+    let lines = only_boxes(&vault, today, boxes.clone());
+    assert!(lines.iter().any(|l| l.contains("heads-up could not be written")), "{lines:?}");
+    assert!(!knowlu_engine::ingest::load_seen(&vault).contains("mail-reenabled:addr-1:2026-10-01T12:00:00Z"), "an unwritten item is never stamped");
+
+    std::fs::remove_file(vault.join("info")).unwrap();
+    std::fs::create_dir_all(vault.join("info")).unwrap();
+    only_boxes(&vault, today, boxes);
+    assert_eq!(open_items(&vault, "mail-reenabled:addr-1").len(), 1, "the next pass opens it");
+    let _ = std::fs::remove_dir_all(&vault);
+}
