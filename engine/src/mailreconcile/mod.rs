@@ -15,9 +15,11 @@
 //!
 //! T5.1 holds the types, the order and the noise screen; T5.2's [`resolve`] holds §4.8 steps 2 and
 //! 4, what a claim's target is, read against the vault the earlier claims' actions leave (D10).
-//! `rules.rs` holds §4.9's table: T5.3's `new_item` rows, authenticity and the first day. Every
-//! other claim that passes the screen and is not already applied is unmatched until T5.4 and T5.5
-//! fill in their rows.
+//! `rules.rs` holds §4.9's table: T5.3's `new_item` rows, authenticity and the first day, and
+//! T5.4's `change` rows for mail, the student, other notes, `cancelled` and two values at one
+//! ordering date. Every other claim that passes the screen and is not already applied (a
+//! `course_info`, an unresolved claim, a change to a note this plan files) is unmatched until T5.5
+//! and the open plan amendment for planned notes fill in their rows.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -235,8 +237,11 @@ pub enum Action {
     },
     /// A `kind: task` card proposing a new note.
     TaskCard { claim: ClaimRef, note: NewNote, proposal: Proposal },
-    /// A `kind: amend` card against `target` (D11 (3)).
-    AmendCard { claim: ClaimRef, target: String, changes: Vec<Change>, proposal: Proposal },
+    /// A `kind: amend` card against `target` (D11 (3)). `also` holds the other claims a two-value
+    /// card names (§4.9's row for two claims at one ordering date, P20), in plan order, each with
+    /// the value it claims and its sender; the card's own claim, whose value is `to`, sorts after
+    /// them all. Empty on every other card.
+    AmendCard { claim: ClaimRef, target: String, changes: Vec<Change>, proposal: Proposal, also: Vec<Claimed> },
     /// An `info/` item: `kind` is one of `info::KINDS`, and a later notice with the same
     /// `close_key` supersedes it (D13).
     Notice {
@@ -290,6 +295,14 @@ pub struct Change {
     pub to: Value,
 }
 
+/// What one claim says a field should be, named on a two-value card's body with its sender (P20).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Claimed {
+    pub claim: ClaimRef,
+    pub value: Value,
+    pub sender: Sender,
+}
+
 /// A card's place in the deck (§4.8 step 5, plan §10 R16). `approvals::transition_note` wakes only
 /// `snoozed`, so a card held to day 2 is written `snoozed`, never `pending`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,6 +337,10 @@ pub enum SkipReason {
     Noise,
     /// No note matched (§4.8 step 2).
     Unmatched,
+    /// A card row whose card `approvals::validate_amendment` would refuse: its note is outside
+    /// `tasks/`, or holds no value in the field to amend from (a null `from`). The feed's rule for
+    /// the same refusal (plan §10, R14): the note keeps its value and no card is filed.
+    NotAmendable,
 }
 
 // ---------------------------------------------------------------------------
@@ -335,40 +352,69 @@ pub fn plan(view: &VaultView, messages: &[Message], today: Date, vault_day: i64)
     planned_steps(view, messages, today, vault_day).into_iter().flat_map(|step| step.actions).collect()
 }
 
-/// One claim of a walk: which it is, whether the plan left it ambiguous, and what it plans.
+/// One claim of a walk: which it is, whether the plan left it ambiguous, what it says a vault note's
+/// field should be (applied or not, for §4.9's two-value row), and what it plans.
 struct Step<'m> {
     at: ClaimRef,
+    message: &'m Message,
     claim: &'m Claim,
     ambiguous: bool,
+    said: Option<rules::Said>,
     actions: Vec<Action>,
 }
 
 /// The walk [`plan`] and [`resolve::to_ask`] share, with the rules: one function, so what is asked
 /// is exactly what the plan finds ambiguous.
 fn planned_steps<'m>(view: &VaultView, messages: &'m [Message], today: Date, vault_day: i64) -> Vec<Step<'m>> {
-    walk(view, messages, |resolved, message, at, claim| rules::rule(resolved, message, at, claim, today, vault_day))
+    walk(
+        view,
+        messages,
+        |resolved, message, at, claim| rules::rule(resolved, message, at, claim, today, vault_day),
+        |before, run| rules::settle(before, run, today, vault_day),
+    )
 }
 
 /// Every claim in §4.8's order, each resolved against the vault the earlier claims' actions leave
 /// ([`resolve::Working`], D10), so a batch plans as its claims would one pull at a time. A noise
 /// claim is skipped before it is resolved. `rule` turns a resolution into actions.
+///
+/// Claims sharing an ordering date are one *run*: once a run of two or more is planned, `settle`
+/// may rewrite its steps' actions against the vault as it stood before the run (§4.9's two-value
+/// row), and the working vault is then rebuilt from that point with the run's final actions. A
+/// rewrite only exchanges members' sets and cards for skips and one card under the last member's
+/// uid; it adds and removes no item, and resolution reads a card only for its own claim's uid, so
+/// no claim in the run resolves differently for it.
 fn walk<'m>(
     view: &VaultView,
     messages: &'m [Message],
     mut rule: impl FnMut(&Resolved<'_>, &Message, ClaimRef, &Claim) -> Vec<Action>,
+    mut settle: impl FnMut(&Working, &mut [Step<'m>]) -> bool,
 ) -> Vec<Step<'m>> {
     let mut working = Working::new(view);
-    let mut steps = Vec::new();
-    for (message, index) in order(messages) {
-        let (claim, at) = (&message.claims[index], ClaimRef { message: message.uid.clone(), index });
-        let (ambiguous, actions) = if is_noise(message, claim) {
-            (false, vec![Action::Skip { claim: at.clone(), reason: SkipReason::Noise }])
-        } else {
-            let resolved = working.resolve(&at, claim);
-            (resolved == Resolved::Ambiguous, rule(&resolved, message, at.clone(), claim))
-        };
-        actions.iter().for_each(|action| working.apply(action));
-        steps.push(Step { at, claim, ambiguous, actions });
+    let mut steps: Vec<Step<'m>> = Vec::new();
+    for run in order(messages).chunk_by(|(a, _), (b, _)| a.ordering_date == b.ordering_date) {
+        let (before, start) = ((run.len() > 1).then(|| working.clone()), steps.len());
+        for &(message, index) in run {
+            let (claim, at) = (&message.claims[index], ClaimRef { message: message.uid.clone(), index });
+            let (ambiguous, said, actions) = if is_noise(message, claim) {
+                (false, None, vec![Action::Skip { claim: at.clone(), reason: SkipReason::Noise }])
+            } else {
+                let resolved = working.resolve(&at, claim);
+                let said = match resolved {
+                    Resolved::AlreadyApplied => rules::said(&working.resolve_target(claim)),
+                    ref resolved => rules::said(resolved),
+                };
+                (resolved == Resolved::Ambiguous, said, rule(&resolved, message, at.clone(), claim))
+            };
+            actions.iter().for_each(|action| working.apply(action));
+            steps.push(Step { at, message, claim, ambiguous, said, actions });
+        }
+        if let Some(before) = before {
+            if settle(&before, &mut steps[start..]) {
+                working = before;
+                steps[start..].iter().flat_map(|step| &step.actions).for_each(|action| working.apply(action));
+            }
+        }
     }
     steps
 }
@@ -390,14 +436,23 @@ fn order(messages: &[Message]) -> Vec<(&Message, usize)> {
 /// server's shape check refuses it, so the claim never passed validation, and such a due can
 /// neither be ordered against today nor written. A shaped due naming no real day passes the server
 /// and is no due here ([`NewItem::known_due`]), never noise: the item needs a date and is counted.
+/// A `change`'s value is held to its field's shape the same way (§5.1): a `due` value off the wire
+/// shape, or a `cancelled` value other than `"true"`, is noise; a null due names no date, and the
+/// rules write nothing for it.
 fn is_noise(message: &Message, claim: &Claim) -> bool {
     let title = claim.item.as_ref().map(|item| item.title.as_str());
     let sender = [message.sender.name.as_deref(), Some(message.sender.address.as_str())];
     let texts = [title, Some(claim.why.as_str()), Some(claim.evidence.as_str())];
     let due = claim.item.as_ref().and_then(|item| item.due.as_deref());
+    let off_shape = match (claim.kind, claim.field) {
+        (ClaimKind::Change, Some(ClaimField::Due)) => claim.value.as_deref().is_some_and(|due| !rules::wire_shaped(due)),
+        (ClaimKind::Change, Some(ClaimField::Cancelled)) => claim.value.as_deref() != Some("true"),
+        _ => false,
+    };
     claim.kind == ClaimKind::Noise
         || sender.into_iter().chain(texts).flatten().any(|text| write::single_line_problem(text).is_some())
         || due.is_some_and(|due| !rules::wire_shaped(due))
+        || off_shape
 }
 
 #[cfg(test)]

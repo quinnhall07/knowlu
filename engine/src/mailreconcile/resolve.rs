@@ -83,8 +83,9 @@ pub enum Target<'v> {
     /// A note in the vault: an action names it by its `path`.
     Note(&'v NoteView),
     /// A note the action of an earlier claim in this plan (`by`) files, not written yet: its `id`
-    /// and `path` are empty, so an action can name it only through `by`. How an action does is the
-    /// plan amendment T5.4's change rows wait on (T5.3's rows act only on [`Resolved::New`]); this
+    /// and `path` are empty, so an action can name it only through `by`. How an action does is an
+    /// open plan amendment (T5.2's review); until it lands, T5.4's change rows act only on a
+    /// [`Target::Note`] and plan a change to a planned note as unmatched, writing nothing. This
     /// variant keeps a rule from taking it for a vault note.
     Planned { by: &'v ClaimRef, note: &'v NoteView },
 }
@@ -129,6 +130,18 @@ impl Working {
         if self.notes.iter().any(applied) {
             return Resolved::AlreadyApplied;
         }
+        self.resolve_target(claim)
+    }
+
+    /// The vault note at `path`, as the plan leaves it so far; never a note this plan files.
+    pub(super) fn note_at(&self, path: &str) -> Option<&NoteView> {
+        self.notes.iter().find(|(n, by)| by.is_none() && n.path == path).map(|(n, _)| n)
+    }
+
+    /// Steps 2 to 4 alone: what the claim's target would be were its uid not yet applied. §4.9's
+    /// two-value row reads it for an applied claim too, so a message delivered again after its
+    /// card was filed groups exactly as it did the first time ([`super::rules::settle`]).
+    pub(super) fn resolve_target(&self, claim: &Claim) -> Resolved<'_> {
         // What the claim changes, and what names its target. A change with no field, or a new_item
         // with no item, has nothing to change: unmatched, so it is shown and never guessed at.
         let (field, value, named) = match (claim.kind, claim.field, &claim.item) {
@@ -180,8 +193,7 @@ impl Working {
                 (filed(claim, "approvals", card(proposal.status), &note.title, note.course.clone(), note.due.clone()), claim)
             }
             Action::AmendCard { claim, target, proposal, .. } => {
-                let amended = self.notes.iter().find(|(n, by)| by.is_none() && &n.path == target).map(|(n, _)| n);
-                let (title, course) = amended.map(|n| (n.title.clone(), n.course.clone())).unwrap_or_default();
+                let (title, course) = self.note_at(target).map(|n| (n.title.clone(), n.course.clone())).unwrap_or_default();
                 (filed(claim, "approvals", card(proposal.status), &title, course, None), claim)
             }
             Action::Set { target, field, to, mail_asof, .. } => {
@@ -641,7 +653,7 @@ mod tests {
             backfill("mail:aaaa", "2026-09-02T09:00:00Z", vec![dated("HW 5", Some("2026-10-08"))]),
         ];
         let mut seen = Vec::new();
-        let steps = crate::mailreconcile::walk(&VaultView::default(), &batch, |r, m, at, c| stand_in(&mut seen, r, m, at, c));
+        let steps = crate::mailreconcile::walk(&VaultView::default(), &batch, |r, m, at, c| stand_in(&mut seen, r, m, at, c), |_, _| false);
         let a = "planned mail:aaaa:0";
         let want = ["New".to_string(), format!("change {a} to 2026-10-10"), format!("change {a} to 2026-10-10"), format!("restated {a}")];
         assert_eq!(seen, want);
@@ -652,7 +664,7 @@ mod tests {
         let mut written = note("task-hw-5", "tasks", "CS 101", "HW 5", Some("mail:aaaa:0"));
         written.created_by = Some("mail".to_string());
         let mut later = Vec::new();
-        crate::mailreconcile::walk(&view(vec![written]), &batch[..2], |r, m, at, c| stand_in(&mut later, r, m, at, c));
+        crate::mailreconcile::walk(&view(vec![written]), &batch[..2], |r, m, at, c| stand_in(&mut later, r, m, at, c), |_, _| false);
         let n = "note mail:aaaa:0";
         assert_eq!(later, [format!("change {n} to 2026-10-10"), format!("change {n} to 2026-10-10"), format!("restated {n}")]);
     }
@@ -678,7 +690,7 @@ mod tests {
         let (quiz, lab) = (ClaimRef { message: "mail:aaaa".to_string(), index: 0 }, ClaimRef { message: "mail:bbbb".to_string(), index: 0 });
         working.apply(&Action::Create { claim: quiz.clone(), note: filed("Quiz 3", true) });
         working.apply(&Action::TaskCard { claim: lab.clone(), note: filed("Lab 4", false), proposal });
-        working.apply(&Action::AmendCard { claim: at(6), target: "tasks/task-e2.md".to_string(), changes: vec![], proposal });
+        working.apply(&Action::AmendCard { claim: at(6), target: "tasks/task-e2.md".to_string(), changes: vec![], proposal, also: vec![] });
         let stamp: jiff::Timestamp = "2026-09-09T09:00:00Z".parse().unwrap();
         let (target, field, body_line) = ("tasks/task-e2.md".to_string(), "due".to_string(), String::new());
         working.apply(&Action::Set { claim: at(5), target, field, to: json!("2026-10-10"), mail_asof: stamp, body_line });
