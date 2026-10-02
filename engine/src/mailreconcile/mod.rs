@@ -14,8 +14,9 @@
 //! message's uid, then the claim's index in the message, whatever order the pulls delivered them in.
 //!
 //! T5.1 holds the types, the order and the noise screen; T5.2's [`resolve`] holds §4.8 steps 2 and
-//! 4, what a claim's target is. Every claim that passes the screen and is not already applied goes
-//! to a rule stub until T5.3–T5.5 fill in §4.9's table.
+//! 4, what a claim's target is, read against the vault the earlier claims' actions leave (D10).
+//! Every claim that passes the screen and is not already applied goes to a rule stub until
+//! T5.3–T5.5 fill in §4.9's table.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,6 +28,8 @@ use serde_json::Value;
 use crate::write;
 
 pub mod resolve;
+
+use resolve::{Resolved, Working};
 
 // ---------------------------------------------------------------------------
 // The input: the vault view and the messages
@@ -316,17 +319,45 @@ pub enum SkipReason {
 
 /// Plan every claim of `messages` against `view` (§4.8 steps 2, 4 and 5; §4.9).
 pub fn plan(view: &VaultView, messages: &[Message], today: Date, vault_day: i64) -> Vec<Action> {
-    let mut actions = Vec::new();
+    planned_steps(view, messages, today, vault_day).into_iter().flat_map(|step| step.actions).collect()
+}
+
+/// One claim of a walk: which it is, whether the plan left it ambiguous, and what it plans.
+struct Step<'m> {
+    at: ClaimRef,
+    claim: &'m Claim,
+    ambiguous: bool,
+    actions: Vec<Action>,
+}
+
+/// The walk [`plan`] and [`resolve::to_ask`] share, with the rules: one function, so what is asked
+/// is exactly what the plan finds ambiguous.
+fn planned_steps<'m>(view: &VaultView, messages: &'m [Message], today: Date, vault_day: i64) -> Vec<Step<'m>> {
+    walk(view, messages, |resolved, message, at, claim| rule(resolved, message, at, claim, today, vault_day))
+}
+
+/// Every claim in §4.8's order, each resolved against the vault the earlier claims' actions leave
+/// ([`resolve::Working`], D10), so a batch plans as its claims would one pull at a time. A noise
+/// claim is skipped before it is resolved. `rule` turns a resolution into actions.
+fn walk<'m>(
+    view: &VaultView,
+    messages: &'m [Message],
+    mut rule: impl FnMut(&Resolved<'_>, &Message, ClaimRef, &Claim) -> Vec<Action>,
+) -> Vec<Step<'m>> {
+    let mut working = Working::new(view);
+    let mut steps = Vec::new();
     for (message, index) in order(messages) {
-        let claim = &message.claims[index];
-        let at = ClaimRef { message: message.uid.clone(), index };
-        if is_noise(message, claim) {
-            actions.push(Action::Skip { claim: at, reason: SkipReason::Noise });
-            continue;
-        }
-        actions.extend(rule(view, message, at, claim, today, vault_day));
+        let (claim, at) = (&message.claims[index], ClaimRef { message: message.uid.clone(), index });
+        let (ambiguous, actions) = if is_noise(message, claim) {
+            (false, vec![Action::Skip { claim: at.clone(), reason: SkipReason::Noise }])
+        } else {
+            let resolved = working.resolve(&at, claim);
+            (resolved == Resolved::Ambiguous, rule(&resolved, message, at.clone(), claim))
+        };
+        actions.iter().for_each(|action| working.apply(action));
+        steps.push(Step { at, claim, ambiguous, actions });
     }
-    actions
+    steps
 }
 
 /// §4.8's order: `(message, claim index)` by ordering date, then uid, then claim index, whatever
@@ -350,19 +381,21 @@ fn is_noise(message: &Message, claim: &Claim) -> bool {
         || sender.into_iter().chain(texts).flatten().any(|text| write::single_line_problem(text).is_some())
 }
 
-/// The rules. §4.8 step 4 is in place (T5.2): a claim already applied on another desktop writes
-/// nothing. Every other claim that passes the noise screen is unmatched until T5.3–T5.5 fill in
-/// §4.9's table from [`resolve::resolve`]. Spec test 18 runs unchanged over each of them.
+/// The rules, from the walk's resolution. §4.8 step 4 is in place (T5.2): a claim already applied
+/// writes nothing, and an undated `new_item` that restates a note writes nothing either (counted
+/// equal; it never clears a due, spec risk 1). Every other claim that passes the noise screen is
+/// unmatched until T5.3–T5.5 fill in §4.9's table. Spec test 18 runs unchanged over each of them.
 fn rule(
-    view: &VaultView,
+    resolved: &Resolved<'_>,
     _message: &Message,
     at: ClaimRef,
-    claim: &Claim,
+    _claim: &Claim,
     _today: Date,
     _vault_day: i64,
 ) -> Vec<Action> {
-    let reason = match resolve::resolve(view, &at, claim) {
-        resolve::Resolved::AlreadyApplied => SkipReason::AlreadyApplied,
+    let reason = match resolved {
+        Resolved::AlreadyApplied => SkipReason::AlreadyApplied,
+        Resolved::Restated { .. } => SkipReason::Equal,
         _ => SkipReason::Unmatched,
     };
     vec![Action::Skip { claim: at, reason }]
