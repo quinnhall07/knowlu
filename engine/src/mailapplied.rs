@@ -7,8 +7,8 @@
 //! The journal is the only source of what mail did. A direct change is a `set` record followed by
 //! the `append_body` record of its `<date> · <sender>: <why> — "<evidence>"` line (§5.2), which is
 //! where the row's sender and date come from. `mail_asof` is the pass's own bookkeeping and never a
-//! row. A row's `changed_since` is true when its note is gone or no longer holds what mail left
-//! there; the app then shows no Undo (§4.14).
+//! row. A row's `changed_since` is true when its note is gone, a non-agent has written to it since
+//! mail's create, or it no longer holds what mail left there; the app then shows no Undo (§4.14).
 //!
 //! Output, per course (a notice has none, so its group has `course: null` and comes last):
 //! `{since, courses: [{course, created, changed, archived: {count, items}, notices}]}`.
@@ -22,6 +22,7 @@ use crate::ids;
 use crate::journal::Journal;
 use crate::ledger::Record;
 use crate::mail::MAIL_ACTOR;
+use crate::provenance;
 use crate::yaml;
 
 #[cfg(test)]
@@ -60,13 +61,19 @@ struct Notes {
     course: BTreeMap<String, Option<String>>,
     /// The last value mail itself set per `(id, field)`.
     mail_set: BTreeMap<(String, String), Value>,
+    /// The journal position of the last record by someone who is not an agent, per note id.
+    last_human: BTreeMap<String, usize>,
 }
 
 impl Notes {
     fn read(records: &[Record]) -> Notes {
-        let mut notes = Notes { home: BTreeMap::new(), course: BTreeMap::new(), mail_set: BTreeMap::new() };
-        for rec in records {
+        let mut notes =
+            Notes { home: BTreeMap::new(), course: BTreeMap::new(), mail_set: BTreeMap::new(), last_human: BTreeMap::new() };
+        for (at, rec) in records.iter().enumerate() {
             let Some(id) = text(rec, "id").filter(|id| !id.is_empty()) else { continue };
+            if text(rec, "actor").is_some_and(|actor| !provenance::is_agent(actor)) {
+                notes.last_human.insert(id.to_string(), at);
+            }
             match text(rec, "op") {
                 Some("create") => {
                     notes.home.insert(id.to_string(), text(rec, "path").map(str::to_string));
@@ -79,9 +86,16 @@ impl Notes {
                 Some("delete") => {
                     notes.home.insert(id.to_string(), None);
                 }
-                Some("set") if is_mail(rec) => {
-                    if let Some(name) = text(rec, "field") {
-                        notes.mail_set.insert((id.to_string(), name.to_string()), field(rec, "new"));
+                Some(op @ ("set" | "append_body")) => {
+                    // A note with no create or move record (a hand-made one given an id, or one
+                    // renamed outside the app) is found by the path its latest record carries.
+                    if let Some(path) = text(rec, "path") {
+                        notes.home.insert(id.to_string(), Some(path.to_string()));
+                    }
+                    if op == "set" && is_mail(rec) {
+                        if let Some(name) = text(rec, "field") {
+                            notes.mail_set.insert((id.to_string(), name.to_string()), field(rec, "new"));
+                        }
                     }
                 }
                 _ => {}
@@ -166,7 +180,7 @@ pub fn applied(vault: &Path, since: Option<&str>) -> Value {
         let (key, row, kind) = match text(rec, "op") {
             Some("create") if path.starts_with("info/") => notice_row(rec, id, path, stamp, now.as_ref()),
             Some("create") if path.starts_with("tasks/") || path.starts_with("archive/") => {
-                created_row(rec, id, path, stamp, now.as_ref(), &notes)
+                created_row(rec, at, id, path, stamp, now.as_ref(), &notes)
             }
             Some("set") if !path.starts_with("approvals/") && !path.starts_with("info/") => {
                 let Some(name) = text(rec, "field").filter(|f| *f != "mail_asof") else { continue };
@@ -209,13 +223,16 @@ enum Kind {
 type Row = (Option<String>, Value, Kind);
 type Now = (String, serde_yaml_ng::Mapping);
 
-fn created_row(rec: &Record, id: &str, path: &str, stamp: &str, now: Option<&Now>, notes: &Notes) -> Row {
+fn created_row(rec: &Record, at: usize, id: &str, path: &str, stamp: &str, now: Option<&Now>, notes: &Notes) -> Row {
     let new = rec.get("new").and_then(Value::as_object).cloned().unwrap_or_default();
     let said = |name: &str| new.get(name).cloned().unwrap_or(Value::Null);
     // Mail's own later sets on the note are expected there; anything else is a change since.
     let expected = |name: &str| notes.mail_set.get(&(id.to_string(), name.to_string())).cloned().unwrap_or_else(|| said(name));
     let (title, due) = (current_of(now, "title"), current_of(now, "due"));
-    let changed_since = now.is_none() || title != expected("title") || due != expected("due");
+    // Any later record by a non-agent (the student's status, body, course or rename) is a change
+    // too, whatever field it touched; the journal is the witness, not a field-by-field compare.
+    let edited = notes.last_human.get(id).is_some_and(|last| *last > at);
+    let changed_since = now.is_none() || edited || title != expected("title") || due != expected("due");
     let current = now.map(|_| json!({"title": title, "due": due, "status": current_of(now, "status")}));
     let row = json!({
         "path": now.map_or(path, |(rel, _)| rel.as_str()), "id": id, "uid": said("source_uid"),

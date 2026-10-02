@@ -248,3 +248,33 @@ fn a_body_line_reads_back_its_date_and_sender() {
     assert_eq!(sender.as_deref(), Some("ps@example.edu"));
     assert_eq!(pair("no separator"), (None, None));
 }
+
+#[test]
+fn a_student_edit_other_than_title_or_due_reads_changed_since() {
+    let vault = scratch("other-edit");
+    mail_writes(&vault, &[Action::Create { claim: at(0), note: new_note("Lab 6", "2026-10-20", false) }]);
+    let out = applied(&vault, None);
+    assert_eq!(course(&out, Some("CS 101"))["created"][0]["changed_since"], json!(false), "untouched: {out}");
+
+    // The student marks it done: title and due still match what mail wrote.
+    student_sets(&vault, "tasks/cs-101-lab-6.md", "status", "done");
+    let out = applied(&vault, None);
+    let row = &course(&out, Some("CS 101"))["created"][0];
+    assert_eq!((&row["current"]["title"], &row["current"]["due"]), (&json!("Lab 6"), &json!("2026-10-20")));
+    assert_eq!(row["changed_since"], json!(true), "a changed status must hide Undo: {row}");
+}
+
+#[test]
+fn a_note_with_no_create_record_is_found_by_the_path_mail_set_carries() {
+    let vault = scratch("no-create");
+    // A note the student wrote by hand (an id, no journal create).
+    let text = "---\nid: task_aabbccddee\ntitle: Essay\ncourse: CS 101\ndomain: school\ndue: 2026-10-05\nimportance: 3\nstatus: active\n---\n\nMine.\n";
+    std::fs::write(vault.join("tasks/essay.md"), text).unwrap();
+    mail_writes(&vault, &[set_due("tasks/essay.md", "2026-10-07")]);
+
+    let out = applied(&vault, None);
+    let row = &course(&out, Some("CS 101"))["changed"][0];
+    assert_eq!(row["current"], json!("2026-10-07"), "{row}");
+    assert_eq!(row["path"], json!("tasks/essay.md"));
+    assert_eq!(row["changed_since"], json!(false), "a valid, unchanged mail edit keeps Undo: {row}");
+}
