@@ -13,8 +13,9 @@
 //! **The order (§4.8, D10).** [`plan`] takes every claim by its message's ordering date, then the
 //! message's uid, then the claim's index in the message, whatever order the pulls delivered them in.
 //!
-//! T5.1 holds the types, the order and the noise screen. Every claim that passes the screen goes to
-//! a rule stub until T5.2–T5.5 fill in §4.8 step 2 and §4.9's table.
+//! T5.1 holds the types, the order and the noise screen; T5.2's [`resolve`] holds §4.8 steps 2 and
+//! 4, what a claim's target is. Every claim that passes the screen and is not already applied goes
+//! to a rule stub until T5.3–T5.5 fill in §4.9's table.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,6 +25,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::write;
+
+pub mod resolve;
 
 // ---------------------------------------------------------------------------
 // The input: the vault view and the messages
@@ -347,17 +350,22 @@ fn is_noise(message: &Message, claim: &Claim) -> bool {
         || sender.into_iter().chain(texts).flatten().any(|text| write::single_line_problem(text).is_some())
 }
 
-/// The rule stub (T5.1): a claim that passes the noise screen is unmatched until T5.2–T5.5 fill in
-/// §4.8 step 2 and §4.9's table. Spec test 18 runs unchanged over each of them.
+/// The rules. §4.8 step 4 is in place (T5.2): a claim already applied on another desktop writes
+/// nothing. Every other claim that passes the noise screen is unmatched until T5.3–T5.5 fill in
+/// §4.9's table from [`resolve::resolve`]. Spec test 18 runs unchanged over each of them.
 fn rule(
-    _view: &VaultView,
+    view: &VaultView,
     _message: &Message,
     at: ClaimRef,
-    _claim: &Claim,
+    claim: &Claim,
     _today: Date,
     _vault_day: i64,
 ) -> Vec<Action> {
-    vec![Action::Skip { claim: at, reason: SkipReason::Unmatched }]
+    let reason = match resolve::resolve(view, &at, claim) {
+        resolve::Resolved::AlreadyApplied => SkipReason::AlreadyApplied,
+        _ => SkipReason::Unmatched,
+    };
+    vec![Action::Skip { claim: at, reason }]
 }
 
 #[cfg(test)]
