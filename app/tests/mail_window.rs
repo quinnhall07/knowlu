@@ -300,6 +300,22 @@ fn the_m365_scripts_run_for_m365_only() {
     }
 }
 
+/// T10.2b: Microsoft 365's four mailbox scripts (search, list, forward as attachment, Sent cleanup) are
+/// compiled in and run for that provider alone.
+#[test]
+fn the_m365_mailbox_scripts_run_for_m365_only() {
+    let on = "https://outlook.cloud.microsoft/mail/";
+    for name in ["m365/search.js", "m365/list.js", "m365/forward.js", "m365/sent_cleanup.js"] {
+        assert!(script(name).is_some(), "{name} is compiled in");
+        let gmail = Fake::at("https://mail.google.com/mail/u/0/").says(json!({ "state": "started" }));
+        assert_eq!(run(&gmail, Provider::Gmail, name, &json!({}), WAIT), Err(Refusal::NotForProvider), "{name}");
+        assert!(gmail.evals.borrow().is_empty(), "{name} was evaluated for Gmail");
+        let page = Fake::at(on).says(json!({ "state": "started" })).says(json!({ "state": "done", "value": { "result": "ok" } }));
+        assert_eq!(run(&page, Provider::M365, name, &json!({ "nonce": "n-1" }), WAIT), Ok(json!({ "result": "ok" })), "{name}");
+        assert!(page.evals.borrow()[0].contains(script(name).unwrap().source()), "{name}: the compiled-in source runs");
+    }
+}
+
 // ---- X2's title signal -----------------------------------------------------------------------
 
 #[test]

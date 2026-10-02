@@ -152,13 +152,17 @@ macro_rules! compiled {
 }
 
 /// Every step script there is. T10 adds each provider's under `m365/` and `gmail/`: so far Microsoft
-/// 365's sign-in probe and forwarding scripts (T10.2a).
+/// 365's sign-in probe and forwarding scripts (T10.2a) and its mailbox scripts (T10.2b).
 static SCRIPTS: &[Script] = compiled![
     "ready.js",
     "m365/signin.js",
     "m365/forwarding_read.js",
     "m365/forwarding_set.js",
     "m365/forwarding_off.js",
+    "m365/search.js",
+    "m365/list.js",
+    "m365/forward.js",
+    "m365/sent_cleanup.js",
 ];
 
 pub fn scripts() -> &'static [Script] {

@@ -1605,6 +1605,18 @@ the popup per S1b; the protocol prompt per S3; the result channel per S1a, with 
 closes itself after the phone tap and `popup_open` turns false, so a later popup opens; a navigation
 in the popup off the provider's hosts is cancelled (it stays on the page it was on).
 
+**Live checks for T11 and T18c, Microsoft 365 mailbox scripts** (T10.2b; the synthetic page models the
+spikes' selectors, it is not Outlook): (1) `search.js` types `received>=<day> NOT folder:"Junk Email" NOT
+folder:"Deleted Items"`; the real search box must read that syntax and leave out both folders, and
+`aria-setsize` must be the result count. (2) `list.js` reads only the rows drawn: the routine (T11.2) must
+scroll or narrow the virtualised list to reach the rest, and `forward.js` finds a row only among the rows
+drawn. (3) `forward.js` finds Forward's dropdown (a button named Forward with `aria-haspopup`), the menu
+item "Forward as attachment", the To, subject and Send controls by their names, and sends the subject
+exactly `Knowlu <nonce>`; `sent_cleanup.js` deletes only a Sent Items row whose subject is exactly that
+and whose recipients are Knowlu's address alone, and only while Sent Items is the selected folder.
+(4) The result `{result: "refused", reason}` is the "first send failure" the step machine stops on.
+`received_at` is the page's own reading of the time element's title (its locale, the system's zone).
+
 ### T10. Step machines and step scripts, in five dispatches
 
 **Agent, all five:** `implementer` (Sonnet, high). **Why:** pure state machines, and DOM scripts tested
