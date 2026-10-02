@@ -1887,7 +1887,11 @@
     EL("set-google-disconnect-1").hidden = !(revoked || live);
     EL("set-google-retry").hidden = !(g && !g.ok);
     EL("set-google-disconnect-2").hidden = !(SET.confirming && (revoked || live));
-    ["set-google-connect", "set-google-reconnect", "set-google-disconnect-1", "set-google-disconnect-2", "set-google-retry", "set-google-check"].forEach(function (id) { EL(id).disabled = busy || SET.leaving; });
+    ["set-google-connect", "set-google-reconnect", "set-google-disconnect-1", "set-google-disconnect-2", "set-google-retry", "set-google-check"].forEach(function (id) {
+      // Connect and Reconnect stay live during the ten-minute poll: pressing one again mints a new link.
+      var retry = id === "set-google-connect" || id === "set-google-reconnect";
+      EL(id).disabled = SET.leaving || (busy && !retry);
+    });
   }
   function loadGoogleRow() {
     var seq = ++SET.googleSeq;

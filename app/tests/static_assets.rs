@@ -1940,6 +1940,18 @@ fn the_google_row_poll_is_cancelled_when_settings_closes() {
     assert!(!js.contains("gmail.readonly"), "no scope string on the page");
 }
 
+/// The poll runs ten minutes; a student who cancelled on Google's page must be able to mint a new
+/// link, so Connect and Reconnect stay enabled while polling (only a disconnect in flight locks them).
+#[test]
+fn the_google_row_connect_buttons_stay_enabled_while_polling() {
+    let js = read("console.js");
+    let start = js.find("function renderGoogleRow(").expect("renderGoogleRow");
+    let end = start + js[start..].find("\n  }\n").expect("end of renderGoogleRow");
+    let f = &js[start..end];
+    assert!(f.contains("var retry = id === \"set-google-connect\" || id === \"set-google-reconnect\""), "{f}");
+    assert!(f.contains("EL(id).disabled = SET.leaving || (busy && !retry)"), "{f}");
+}
+
 /// Gmail connect T9c (spec section 8.4 item 4, D6): step 1 names Calendar, step 2 is the only call
 /// to `google_disconnect`, and closing Settings puts the confirm away.
 #[test]
