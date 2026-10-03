@@ -656,3 +656,10 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .mp-row.mp-needs_you .mp-state, .mp-row.mp-failed .mp-state { color: var(--warn); }
 .mp-row .mp-why { flex-basis: 100%; color: var(--t3); font-size: 12px; }
 #mp-ask .set-row input[type="text"] { flex: 1 1 18ch; }
+/* T15.2 (email spec §4.12): Settings -> Email, one row per mailbox. */
+.em-box { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: baseline; padding: var(--s2) 0; border-top: 1px solid var(--hair); }
+.em-box .em-name { flex: 1 1 auto; color: var(--t2); }
+.em-box .em-line { flex-basis: 100%; color: var(--t3); font-size: 12px; }
+.em-box code { font: 500 11.5px/1.4 var(--mono); color: var(--t2); }
+.em-amber { color: var(--warn); }
+.em-box .em-confirm { flex-basis: 100%; color: var(--t2); font-size: 12px; }

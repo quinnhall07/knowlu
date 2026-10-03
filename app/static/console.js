@@ -2284,6 +2284,7 @@
       EL("set-email-state").textContent = !p ? "Not connected here." : p.status === "ended" ? (p.line || "Setup ended.") : (p.sentence || "Setting up.");
       EL("set-email-open").hidden = !p;
       EL("set-email-start").hidden = !!(r && r.active);
+      return mailBoxesRow();
     }).catch(function () {});
   }
   EL("mail-progress").addEventListener("click", function (e) {
@@ -2305,6 +2306,100 @@
     invoke("mail_setup_start", { provider: "school" }).then(function (r) { if (r && r.ok) { openMailProgress(); } }).catch(function () {});
   });
   // ---- end mail progress view ----
+  // ---- mail settings (email spec §4.12, §4.13, D15, T15.2). A mailbox row is the service's status joined to what
+  // this device keeps. Everything the rows show reaches the DOM through h(); nothing here reports to the app log. ----
+  var SETM = { s: null, confirming: null, notes: [], busy: false };
+  var EM_STATE = { pending: "Setting up.", confirmed: "Confirmed; waiting for the first message.", active: "Forwarding is working.",
+    quiet: "No mail has come through for a while.", blocked: "The test message did not arrive. Your school may be blocking forwarding.",
+    off: "Forwarding is off or goes to another address.", paused_send: "Forwarding paused — Microsoft refused a send.",
+    lapsed: "Paused because your subscription lapsed.", revoked: "Disconnected." };
+  var EM_PROVIDER = { m365: "School email", google: "Google mail", other: "School email" };
+  var EM_TURN_OFF_CONFIRM = "Knowlu turns off forwarding in this mailbox, stops reading it and deletes what it holds to serve it. What it already added stays in your plan.";
+  var EM_FORWARD_SENTENCE = "If Knowlu cannot turn forwarding off, your mail keeps going to Knowlu's address and is deleted unread; you can turn it off in your mail settings.";
+  var EM_STILL = "Knowlu’s forwarding address is still in your Gmail forwarding list. Remove it by hand: in Gmail, open Settings, then See all settings, then Forwarding and POP/IMAP, and remove it there.";
+  function emBtn(label, act, id, extra) { return '<button class="b' + (extra || "") + '" data-em-act="' + act + '" data-em-id="' + h(id) + '">' + h(label) + "</button>"; }
+  function emCopy(key, address) { return '<span class="em-line"><code>' + h(address) + '</code> <button class="b" data-em-copy="' + h(key) + '">Copy</button></span>'; }
+  function mailDeleteSentence() {
+    var s = SETM.s;
+    return !s || !s.ok || (s.mailboxes || []).length ? " " + EM_FORWARD_SENTENCE : "";
+  }
+  function mailBoxRow(m) {
+    var id = m.address_id, ask = SETM.confirming === id;
+    var resumable = !m.turned_off && (m.open_backfill || ["off", "quiet", "blocked", "paused_send"].indexOf(m.state) >= 0);
+    var say = m.turned_off ? "Turned off in Knowlu." : (EM_STATE[m.state] || "");
+    if (m.open_backfill && !m.turned_off) { say += " Still bringing in recent mail; Resume carries on."; }
+    var line = m.unbound_reason ? '<span class="em-line em-amber">' + h(m.unbound_note || "") + " (" + h(m.unbound_since_live) + ")" +
+      (m.suggest_rotate === true && !m.turned_off ? " " + emBtn("Rotate", "rotate", id) : "") + "</span>" : "";
+    var rotate = m.suggest_rotate !== true && !m.turned_off ? emBtn("Rotate", "rotate", id) : "";
+    return '<div class="em-box"><span class="em-name">' + h(EM_PROVIDER[m.provider] || "Email") + "</span>" +
+      (resumable ? emBtn("Resume", "resume", id) : "") + rotate + emBtn("Turn off email", "off1", id) +
+      '<span class="em-line">' + h(say) + "</span>" + (m.address ? emCopy("m:" + id, m.address) : "") + line +
+      (ask ? '<span class="em-confirm">' + h(EM_TURN_OFF_CONFIRM) + "</span>" + emBtn("Yes, turn off email", "off2", id, " crit") + emBtn("Cancel", "cancel", id) : "") + "</div>";
+  }
+  function renderMailBoxes() {
+    var s = SETM.s, html = "";
+    if (s && s.ok && s.mailboxes) { s.mailboxes.forEach(function (m) { html += mailBoxRow(m); }); }
+    else if (s) { html = '<div class="em-box"><span class="em-line">Knowlu could not read your mailboxes just now.</span></div>'; }
+    SETM.notes.forEach(function (n, i) {
+      html += '<div class="em-box"><span class="em-line">' + n.lines.map(h).join(" ") + "</span>" + (n.address ? emCopy("n:" + i, n.address) : "") + "</div>";
+    });
+    EL("set-email-boxes").innerHTML = html;
+    EL("set-email-keep").checked = !s || s.keep_session !== false;
+    EL("set-email-profile").hidden = !(s && s.profile_delete_pending);
+    EL("set-email-profile-note").textContent = "A saved email sign-in could not be deleted from this computer yet. Knowlu tries again each time it starts.";
+  }
+  function mailBoxesRow() {
+    return invoke("mail_status", {}).then(function (s) { SETM.s = s || null; renderMailBoxes(); }).catch(function () {});
+  }
+  function emNote(r) {
+    var lines = [], still = false;
+    (r.steps || []).forEach(function (st) {
+      if (st.step === "remove_address" && st.state === "needs_you") { still = true; lines.push(EM_STILL); }
+      else if (st.message) { lines.push(st.message); }
+    });
+    if (!r.ok) { lines.unshift("Email could not be turned off yet" + (r.error ? ": " + r.error + "." : ".") + " Turn off email again to retry."); }
+    else if (!r.needs_you) { lines.unshift("Email is turned off for this mailbox. What Knowlu already added stays in your plan."); }
+    return { lines: lines, address: r.needs_you || still ? r.address || null : null };
+  }
+  EL("set-email-boxes").addEventListener("click", function (e) {
+    var cp = e.target.closest("[data-em-copy]");
+    if (cp) {
+      var key = cp.getAttribute("data-em-copy"), addr = null;
+      if (key.indexOf("n:") === 0) { addr = (SETM.notes[Number(key.slice(2))] || {}).address; }
+      else { addr = ((SETM.s && SETM.s.mailboxes) || []).filter(function (m) { var mid = m.address_id; return "m:" + mid === key; }).map(function (m) { return m.address; })[0]; }
+      if (addr && navigator.clipboard) { navigator.clipboard.writeText(addr).catch(function () {}); }
+      return;
+    }
+    var b = e.target.closest("[data-em-act]"); if (!b || SETM.busy) { return; }
+    var act = b.getAttribute("data-em-act"), id = b.getAttribute("data-em-id");
+    if (act === "off1") { SETM.confirming = id; renderMailBoxes(); return; }
+    if (act === "cancel") { SETM.confirming = null; renderMailBoxes(); return; }
+    SETM.busy = true;
+    var done = function () { SETM.busy = false; };
+    if (act === "off2") {
+      SETM.confirming = null;
+      invoke("mail_disconnect", { addressId: id }).then(function (r) { SETM.notes = [emNote(r || {})]; done(); return mailBoxesRow(); })
+        .catch(function () { SETM.notes = [{ lines: ["Email could not be turned off yet. Turn off email again to retry."], address: null }]; done(); return mailBoxesRow(); });
+    } else if (act === "resume") {
+      invoke("mail_sign_in", { addressId: id }).then(function (r) {
+        SETM.notes = r && r.ok ? [] : [{ lines: [(r && r.error) || "Could not sign in to your mail."], address: null }]; done(); return mailBoxesRow();
+      }).catch(function () { done(); });
+    } else if (act === "rotate") {
+      invoke("mail_rotate", { addressId: id }).then(function (r) {
+        done();
+        if (r && r.ok) { SETM.notes = []; return openMailProgress(); }
+        SETM.notes = [{ lines: [(r && r.error) || "Could not start a new address."], address: null }]; renderMailBoxes();
+      }).catch(function () { done(); });
+    } else { done(); }
+  });
+  EL("set-email-keep").addEventListener("change", function () {
+    invoke("mail_keep_session", { on: EL("set-email-keep").checked }).then(function (r) {
+      EL("set-email-keep-note").textContent = !r || !r.ok ? ((r && r.error) || "could not change it") :
+        r.profiles_left ? "Some saved email sign-in could not be deleted yet; Knowlu tries again when it starts." : "";
+      return mailBoxesRow();
+    }).catch(function () { return mailBoxesRow(); });
+  });
+  // ---- end mail settings ----
   function openSettings() {
     EL("settings").hidden = false;
     loadPrefs(); loadInterests();
@@ -2422,7 +2517,7 @@
   // with it. The first press only reveals the second.
   EL("set-delete-1").addEventListener("click", function () {
     EL("set-delete-2").hidden = false;
-    EL("set-delete-note").textContent = "This deletes your vault, your backups, your account and everything we hold. It cannot be undone.";
+    EL("set-delete-note").textContent = "This deletes your vault, your backups, your account and everything we hold. It cannot be undone." + mailDeleteSentence();
   });
   EL("set-delete-2").addEventListener("click", function () {
     EL("set-delete-2").disabled = true;

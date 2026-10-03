@@ -2601,3 +2601,100 @@ fn the_progress_view_never_reaches_ui_event_and_every_string_goes_through_h() {
     assert!(!v.contains("ui_event") && !v.contains("ev("), "no usage events from the mail view");
     assert!(!v.contains("innerHTML = p.") && !v.contains("+ p.sentence"), "the engine's sentence is set as text");
 }
+
+// ---- T15.2: Settings -> Email (email spec §4.12, §4.13, D15) ----------------------------------------
+
+fn mail_settings(js: &str) -> &str {
+    let at = js.find("// ---- mail settings").expect("the Settings -> Email section");
+    let end = js[at..].find("// ---- end mail settings").expect("its end marker");
+    &js[at..at + end]
+}
+
+#[test]
+fn settings_email_lists_each_mailbox_with_its_state_and_its_address_with_copy() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let v = mail_settings(&js);
+    assert!(html.contains("id=\"set-email-boxes\"") && html.contains("id=\"set-email-keep\""));
+    assert!(v.contains("invoke(\"mail_status\"") && v.contains("s.mailboxes.forEach"), "one row per mailbox");
+    for st in ["pending", "confirmed", "active", "quiet", "blocked", "off", "paused_send", "lapsed", "revoked"] {
+        assert!(v.contains(&format!("{st}:")), "a sentence for state {st}");
+    }
+    assert!(v.contains("m.address") && v.contains("data-em-copy") && v.contains("navigator.clipboard.writeText"), "the address with Copy");
+    assert!(v.contains("m.turned_off") && v.contains("m.open_backfill"));
+    assert!(v.contains("Mail from the last 120 days") || v.contains("recent mail"), "an open backfill is said");
+}
+
+#[test]
+fn resume_rotate_and_the_saved_sign_in_switch_invoke_their_commands() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("invoke(\"mail_sign_in\", { addressId: id })"), "Resume");
+    assert!(v.contains("invoke(\"mail_rotate\", { addressId: id })"), "Rotate");
+    assert!(v.contains("invoke(\"mail_keep_session\", { on: "), "the switch");
+    assert!(v.contains("profiles_left"), "a profile the switch could not delete is named");
+    let rows = v.find("function mailBoxRow(").map(|i| &v[i..]).expect("the row builder");
+    assert!(rows.contains("emBtn(\"Resume\", \"resume\"") && rows.contains("emBtn(\"Rotate\", \"rotate\"")); 
+}
+
+#[test]
+fn turn_off_email_is_two_steps_with_the_confirm_text() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("Knowlu turns off forwarding in this mailbox, stops reading it and deletes what it holds to serve it. What it already added stays in your plan."));
+    assert!(v.contains("emBtn(\"Turn off email\", \"off1\"") && v.contains("emBtn(\"Yes, turn off email\", \"off2\""));
+    assert_eq!(v.matches("invoke(\"mail_disconnect\", { addressId: id })").count(), 1, "only the second press invokes it");
+    let first = v.split("act === \"off1\"").nth(1).unwrap().split("act ===").next().unwrap();
+    assert!(!first.contains("mail_disconnect"), "the first press only reveals the second");
+}
+
+#[test]
+fn turn_off_email_names_a_forwarding_address_it_left_for_the_student() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("remove_address") && v.contains("needs_you"));
+    assert!(v.contains("Knowlu’s forwarding address is still in your Gmail forwarding list"), "says it is still there");
+    assert!(v.contains("Settings, then See all settings, then Forwarding and POP/IMAP"), "names where to remove it");
+    assert!(v.contains("r.address") && v.contains("data-em-copy"), "the address is shown to find it");
+}
+
+#[test]
+fn delete_my_data_confirm_adds_the_forwarding_sentence() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("If Knowlu cannot turn forwarding off, your mail keeps going to Knowlu's address and is deleted unread; you can turn it off in your mail settings."));
+    let d = js.split("EL(\"set-delete-1\").addEventListener").nth(1).unwrap().split("EL(\"set-delete-2\").addEventListener").next().unwrap();
+    assert!(d.contains("This deletes your vault, your backups, your account and everything we hold. It cannot be undone."));
+    assert!(d.contains("mailDeleteSentence("), "the sentence is added to the first press's confirm");
+}
+
+#[test]
+fn a_failed_profile_delete_is_named_until_it_succeeds() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("s.profile_delete_pending"), "read from mail_status every time Settings opens");
+    assert!(v.contains("could not be deleted from this computer yet"));
+    assert!(fn_body(&js, "function openSettings(").contains("mailSettingsRow("));
+}
+
+#[test]
+fn the_google_row_and_the_email_row_sit_side_by_side() {
+    let html = read("index.html");
+    let g = html.find("id=\"set-google\"").unwrap();
+    let e = html.find("id=\"set-email\"").unwrap();
+    let between = &html[g..e];
+    assert!(e > g && between.matches("class=\"set-row\"").count() == 1, "the email row follows the Google row directly");
+    assert!(html.find("id=\"set-email-boxes\"").unwrap() > e && html.find("id=\"set-email-boxes\"").unwrap() < html.find("id=\"set-grades\"").unwrap());
+}
+
+#[test]
+fn an_unbound_reason_shows_amber_with_its_count_and_rotate_only_when_suggested() {
+    let js = read("console.js");
+    let css = read("console.css");
+    let v = mail_settings(&js);
+    assert!(v.contains("m.unbound_reason") && v.contains("m.unbound_note") && v.contains("m.unbound_since_live"));
+    assert!(v.contains("em-amber") && css.contains(".em-amber"));
+    assert!(v.contains("m.suggest_rotate === true") && v.contains("m.suggest_rotate !== true"), "Rotate sits in the amber line only when suggested");
+    assert!(!v.contains("ui_event") && !v.contains("ev("), "nothing mail-derived reaches usage events");
+    assert!(!v.contains("innerHTML = m.") && !v.contains("innerHTML += m."), "every mail string goes through h()");
+}
