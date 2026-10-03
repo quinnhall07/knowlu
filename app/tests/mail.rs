@@ -1430,6 +1430,8 @@ struct Sv {
     /// Set by a resume test: what the row says about the backfill.
     backfill_since: Option<String>,
     provider: String,
+    /// `POST /addresses/<id>/rotate` answers 429 (the mint limit).
+    rotate_refused: bool,
 }
 
 fn setup_service(sv: &Arc<Mutex<Sv>>, ev: &Events) -> Service {
@@ -1456,6 +1458,9 @@ fn setup_service(sv: &Arc<Mutex<Sv>>, ev: &Events) -> Service {
             }
             ("POST", p) if p.ends_with("/rotate") => {
                 note("rotate");
+                if s.rotate_refused {
+                    return (429, r#"{"error":"limit"}"#.to_string());
+                }
                 (200, json!({ "address_id": A, "address": KNOWLU_NEW, "provider": s.provider, "status": "pending" }).to_string())
             }
             ("POST", p) if p.ends_with("/hint") => {
@@ -2540,8 +2545,8 @@ fn a_rotate_asks_the_service_for_a_new_address_and_runs_the_forwarding_step_with
     assert_eq!((p.ended, p.line), (Some("finished"), Some("setup finished")));
     let ev = r.events();
     let at = |e: &str| position(&ev, e);
-    assert!(at("svc rotate") < at("window visible") && at("window visible") < at("aside"));
-    assert!(at("aside") < at("script m365/forwarding_set.js") && at("script m365/forwarding_set.js") < at("svc canary"));
+    assert!(at("window visible") < at("aside") && at("aside") < at("svc rotate"), "the address is rotated only once the sign-in has taken");
+    assert!(at("svc rotate") < at("script m365/forwarding_set.js") && at("script m365/forwarding_set.js") < at("svc canary"));
     assert_eq!(r.calls("m365/forwarding_set.js")[0]["address"], json!(KNOWLU_NEW), "the step carries the new address");
     for never in ["svc mint", "svc hint", "svc delete address", "svc batch"] {
         assert!(!ev.contains(&never.to_string()), "a rotate never does `{never}`: {ev:?}");
@@ -2562,5 +2567,36 @@ fn a_rotate_asks_the_service_for_a_new_address_and_runs_the_forwarding_step_with
     let p = wait(&c.start(kind, true));
     assert_eq!(p.ended, Some("cancelled"));
     assert!(!c.events().contains(&"svc delete address".to_string()), "the mailbox is not deleted");
+    assert!(!c.events().contains(&"svc rotate".to_string()), "a rotate that never signed in changed nothing on the service: {:?}", c.events());
     assert!(c.dir.join(format!("mail-session-{A}")).exists(), "and its profile is not either");
+}
+
+#[test]
+fn a_rotate_that_stops_after_rotating_ends_needs_you_naming_the_old_addresss_grace() {
+    let r = rig("t114-rotate-stop");
+    profile(&r.dir, &format!("mail-session-{A}"));
+    r.sv.lock().unwrap().provider = "m365".into();
+    let setups = r.setups.clone();
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if name == "m365/forwarding_set.js" {
+            setups.current().expect("a setup is running").stop();
+        }
+    }));
+    let kind = Kind::Rotate { address_id: A.to_string(), provider: "m365".to_string() };
+    let p = wait(&r.start(kind, true));
+    assert_eq!(p.ended, Some("needs_you"), "the address was rotated: that is never a plain stop or cancel");
+    assert!(p.line.is_some_and(|l| l.contains("7 days")), "the line names the old address's grace: {:?}", p.line);
+    assert!(r.events().contains(&"svc rotate".to_string()));
+    assert!(!r.events().contains(&"svc delete address".to_string()), "the mailbox is not deleted");
+    assert!(r.dir.join(format!("mail-session-{A}")).exists(), "the kept profile stays");
+
+    // The service refusing the rotate changes nothing: a named failure, not a needs-you.
+    let f = rig("t114-rotate-refused");
+    profile(&f.dir, &format!("mail-session-{A}"));
+    f.sv.lock().unwrap().provider = "m365".into();
+    f.sv.lock().unwrap().rotate_refused = true;
+    let kind = Kind::Rotate { address_id: A.to_string(), provider: "m365".to_string() };
+    let p = wait(&f.start(kind, true));
+    assert_eq!(p.ended, Some("failed"));
+    assert!(f.scripts().is_empty(), "no forwarding step ran on an address that was never rotated: {:?}", f.scripts());
 }

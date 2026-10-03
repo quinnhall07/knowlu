@@ -18,6 +18,11 @@
 //! **A closed sign-in window is "setup cancelled"**: nothing changed, so the address minted for it is
 //! revoked and its profile deleted. **Stop** ends after the step in hand and names what was done.
 //!
+//! **A rotate asks for its new address late.** The service's rotate retires the old address and cannot be
+//! undone, so it is called only once the sign-in has taken, right before the forwarding step. A rotate that
+//! ends any way but finished after that is `needs_you` naming the old address's 7-day grace, never
+//! `cancelled` or `stopped`; the new address is the mailbox's row on the service, which Settings reads.
+//!
 //! **Privacy.** No address, hint, URL, selector or page text is logged, kept in [`Progress`] or sent
 //! anywhere but where its step says: the typed school address contributes only its domain to the MX lookup
 //! (and is the mailbox's own address only for a guided provider, which has no page to read it from).
@@ -54,7 +59,13 @@ enum End {
     Cancelled,
     /// A fixed word, or a service error's name.
     Failed(&'static str),
+    /// A rotate that got its new address and did not finish moving the mailbox's forwarding to it.
+    NeedsYou(&'static str),
 }
+
+/// What a rotate that did not finish says: the mailbox forwards to the old address, which the service stops
+/// accepting after its grace (spec §4.6, a retired token).
+const ROTATED_LINE: &str = "forwarding still goes to your old address, which stops working in 7 days: finish the new address";
 
 enum Probe {
     Hint(String),
@@ -79,6 +90,8 @@ struct Runner<'a> {
     gave_up: bool,
     /// The profile is the mailbox's kept one (so it stays); `false` is the throwaway `mail-setup`.
     keep: bool,
+    /// A rotate has asked the service for the new address: the old one is retired and will stop working.
+    rotated: bool,
 }
 
 fn host(env: &Env) -> &dyn Host {
@@ -91,11 +104,18 @@ pub(super) fn run_setup(plan: &Plan, env: &Env, sh: &Shared) {
         Ok(mut r) => {
             let end = r.go();
             r.wrap_up(&end);
-            end
+            // The mailbox still forwards to the old address unless the forwarding step finished: whatever
+            // else ended the run, the student is told, never "cancelled" or "stopped" as if nothing changed.
+            match end {
+                End::Finished => End::Finished,
+                _ if r.rotated => End::NeedsYou(ROTATED_LINE),
+                end => end,
+            }
         }
         Err(end) => end,
     };
     let (ended, line) = match end {
+        End::NeedsYou(line) => ("needs_you", line),
         End::Finished => ("finished", "setup finished"),
         End::Stopped => ("stopped", "setup stopped"),
         End::Cancelled => ("cancelled", "setup cancelled"),
@@ -120,16 +140,20 @@ impl<'a> Runner<'a> {
     /// Which provider, the address minted for it, and the first progress. `Err` is a run that never began.
     fn begin(plan: &'a Plan, env: &'a Env, sh: &'a Shared) -> Result<Runner<'a>, End> {
         let (provider, typed) = Runner::resolve(plan, env, sh)?;
-        // A rotate asks for a new address on the mailbox it has; every other setup mints a mailbox.
-        let (minted, keep) = match &plan.kind {
+        // A rotate keeps the mailbox it has and asks for its new address later (`rotate_now`, once the
+        // sign-in has taken, so a window closed first changes nothing on the service); every other setup
+        // mints a mailbox now.
+        let ((id, knowlu), keep) = match &plan.kind {
             Kind::Rotate { address_id, .. } => {
                 let kept = session_dir(&plan.data_dir, address_id).is_some_and(|d| d.is_dir());
-                (env.client.rotate_address(address_id).map(|v| (address_id.clone(), v)), kept)
+                ((address_id.clone(), String::new()), kept)
             }
-            _ => (env.client.mint_address(provider_name(provider)).map(|v| (answers(&v, "address_id").unwrap_or_default(), v)), plan.keep_session),
+            _ => {
+                let v = env.client.mint_address(provider_name(provider)).map_err(|e| End::Failed(e.name()))?;
+                let Some(knowlu) = answers(&v, "address") else { return Err(End::Failed("bad-reply")) };
+                ((answers(&v, "address_id").unwrap_or_default(), knowlu), plan.keep_session)
+            }
         };
-        let (id, minted) = minted.map_err(|e| End::Failed(e.name()))?;
-        let Some(knowlu) = answers(&minted, "address") else { return Err(End::Failed("bad-reply")) };
         let profile = match keep {
             true => session_dir(&plan.data_dir, &id),
             false => Some(setup_dir(&plan.data_dir)),
@@ -137,7 +161,7 @@ impl<'a> Runner<'a> {
         let Some(profile) = profile.filter(|_| valid_address_id(&id)) else { return Err(End::Failed("bad-reply")) };
         env.host.use_provider(provider);
         let machine = Setup::new(provider, plan.setup_day, None);
-        let r = Runner { plan, env, sh, provider, machine, id, knowlu, profile, opened: false, canary_ok: false, said_no: false, gave_up: false, keep };
+        let r = Runner { plan, env, sh, provider, machine, id, knowlu, profile, opened: false, canary_ok: false, said_no: false, gave_up: false, keep, rotated: false };
         // A guided provider has no page to read the mailbox's own address from: the one the student typed.
         if let (Provider::Guided, Some(t)) = (provider, typed) {
             if r.client().set_hint(&r.id, &t).is_err() {
@@ -240,6 +264,16 @@ impl<'a> Runner<'a> {
         let _ = mark_open(&self.plan.data_dir, &self.id, false);
     }
 
+    /// A rotate's call to the service. It cannot be undone (the old address is retired after its grace and
+    /// one of the month's mints is used), so it is made only once the sign-in has taken and the forwarding
+    /// step is next. Once it has been asked, `rotated` holds even if the reply is unusable.
+    fn rotate_now(&mut self) -> Result<(), End> {
+        let v = self.client().rotate_address(&self.id).map_err(|e| End::Failed(e.name()))?;
+        self.rotated = true;
+        self.knowlu = answers(&v, "address").ok_or(End::Failed("bad-reply"))?;
+        Ok(())
+    }
+
     fn finished_end(&self) -> End {
         if self.sh.stopping() || self.said_no || self.gave_up { End::Stopped } else { End::Finished }
     }
@@ -251,6 +285,13 @@ impl<'a> Runner<'a> {
                 self.machine.request_stop();
             }
             let action = self.machine.next_action();
+            // A rotate asks for its new address right before the step that carries it, and not before.
+            let carries = matches!(action, Action::Run { step: Step::Forwarding | Step::AddAddress, .. } | Action::Guide { step: Step::Forwarding });
+            if carries && self.rotating() && !self.rotated {
+                if let Err(end) = self.rotate_now() {
+                    return end;
+                }
+            }
             self.publish();
             match action {
                 Action::Finished => return self.finished_end(),

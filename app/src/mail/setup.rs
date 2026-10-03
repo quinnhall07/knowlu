@@ -126,7 +126,8 @@ pub struct Backfill {
 pub struct Progress {
     /// `running`, `asking` or `ended`.
     pub status: &'static str,
-    /// `finished`, `stopped`, `cancelled` or `failed` once it has ended.
+    /// `finished`, `stopped`, `cancelled`, `failed` or `needs_you` once it has ended (`needs_you`: a rotate
+    /// got its new address and did not finish moving the forwarding to it; the old one stops in 7 days).
     pub ended: Option<&'static str>,
     /// `m365`, `google` or `other` once known.
     pub provider: &'static str,
