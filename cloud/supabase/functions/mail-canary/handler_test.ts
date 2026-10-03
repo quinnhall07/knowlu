@@ -9,6 +9,7 @@ import {
   type JobConfig,
   type Outstanding,
 } from "./handler.ts";
+import { candidatesQuery } from "./query.ts";
 
 const TOKEN = "test-jobs-token-0000";
 const CFG: JobConfig = { jobsToken: TOKEN };
@@ -243,6 +244,30 @@ Deno.test("a_mailbox_quiet_past_both_gets_one", async () => {
   assertEquals(await sends(WED, [{ status: "quiet", lastReceivedAt: iso(WED - 3 * DAY) }]), 1);
 });
 
+Deno.test("a_quiet_mailbox_still_receiving_bound_mail_is_sent_one_72_hours_after_its_last", async () => {
+  // Bound mail an hour ago does not clear `quiet` (only a canary's arrival does), so the silence rule
+  // would never let one go: a quiet mailbox is sent one every 72 hours until one comes back.
+  const busy = { lastReceivedAt: iso(WED - HOUR) };
+  assertEquals(await sends(WED, [{ ...busy, status: "quiet", lastCanarySentAt: iso(WED - 73 * HOUR) }]), 1);
+  assertEquals(await sends(WED, [{ ...busy, status: "quiet", lastCanarySentAt: iso(WED - 71 * HOUR) }]), 0);
+  // An active mailbox with bound mail is still left alone, and P9's one email a day still holds.
+  assertEquals(await sends(WED, [{ ...busy, lastCanarySentAt: iso(WED - 73 * HOUR) }]), 0);
+  const reminded = world(WED, [{ ...busy, status: "quiet", lastCanarySentAt: iso(WED - 73 * HOUR) }]);
+  reminded.store.reminded["acct-1"] = iso(Date.UTC(2026, 9, 7, 0, 30));
+  await reminded.run();
+  assertEquals(reminded.sent.length, 0);
+});
+
+Deno.test("the_stores_candidates_query_lets_a_quiet_mailbox_past_the_silence_rule", () => {
+  const q = decodeURIComponent(candidatesQuery("2026-10-04T15:11:00.000Z", "2026-10-06T15:11:00.000Z"));
+  assert(q.includes("status=in.(active,quiet)"), q);
+  assert(q.includes('or(last_canary_sent_at.is.null,last_canary_sent_at.lt."2026-10-04T15:11:00.000Z")'), q);
+  assert(
+    q.includes('or(status.eq.quiet,last_received_at.is.null,last_received_at.lt."2026-10-06T15:11:00.000Z")'),
+    q,
+  );
+});
+
 Deno.test("only_an_entitled_active_or_quiet_mailbox_with_its_address_is_sent_one", async () => {
   const due = { lastReceivedAt: iso(WED - 5 * DAY) };
   for (const status of ["pending", "confirmed", "blocked", "off", "paused_send", "lapsed", "revoked"]) {
@@ -281,7 +306,8 @@ Deno.test("an_unarrived_setup_canary_sets_blocked_and_an_unarrived_periodic_one_
     // Arrived: nothing to judge.
     { ...busy, accountId: "acct-6" },
   ]);
-  const canary = (addressId: string, ago: number, arrivedAt: string | null = null) =>
+  // Each canary is its mailbox's last, as the turn it took wrote `last_canary_sent_at`.
+  const canary = (addressId: string, ago: number, arrivedAt: string | null = null) => {
     w.store.canaries.push({
       id: `c-${addressId}`,
       addressId,
@@ -289,6 +315,8 @@ Deno.test("an_unarrived_setup_canary_sets_blocked_and_an_unarrived_periodic_one_
       sentAt: iso(WED - ago),
       arrivedAt,
     });
+    w.store.box(addressId).lastCanarySentAt = iso(WED - ago);
+  };
   canary("addr-1", 4 * MINUTE);
   canary("addr-2", 50 * MINUTE);
   canary("addr-3", 2 * MINUTE);

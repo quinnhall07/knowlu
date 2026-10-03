@@ -15,7 +15,9 @@
  *    - it is `active` or `quiet` (a `quiet` one's arrival is what turns it `active` again), has its hint, and
  *      its account is entitled;
  *    - no bound mail for 24 hours, or 48 when the silence touches a Saturday or Sunday (UTC; the service
- *      knows no student's zone), read from `last_received_at`;
+ *      knows no student's zone), read from `last_received_at`. A `quiet` mailbox is exempt: bound mail does
+ *      not clear `quiet`, only a canary's arrival does, so it is sent one every 72 hours until one comes
+ *      back, whatever its bound mail (else a lost canary leaves it `quiet` for good while mail flows);
  *    - at least 72 hours since that mailbox's last canary (`last_canary_sent_at`, setup's included);
  *    - the student has had no Knowlu email this UTC day: no canary to any of the account's mailboxes and
  *      no annual reminder (`billing_reminders.last_reminded_at`), and none sent earlier in this run (P9).
@@ -87,8 +89,9 @@ export interface CanaryStore {
     sentAt: string,
   ): Promise<boolean>;
   /** The mailboxes that may be due: a superset of what the run sends to, which re-checks every rule. The
-   * real store answers `active` and `quiet` mailboxes with a hint whose last canary and last bound mail are
-   * older than `canaryBefore` and `silentBefore` (or absent). */
+   * real store answers `active` and `quiet` mailboxes with a hint whose last canary is older than
+   * `canaryBefore` and whose last bound mail is older than `silentBefore` (or absent, or the mailbox is
+   * `quiet`); its query is `query.ts`'s `candidatesQuery`. */
   candidates(canaryBefore: string, silentBefore: string): Promise<CanaryMailbox[]>;
   /** Knowlu's mail to the account: each of its mailboxes' last canary, and its last annual reminder. */
   accountMail(accountId: string): Promise<{ canariesSentAt: (string | null)[]; remindedAt: string | null }>;
@@ -194,7 +197,8 @@ async function send(deps: CanaryDeps, now: number, counts: RunCounts): Promise<v
   const due = (await deps.store.candidates(iso(now - CANARY_GAP_MS), iso(now - WEEKDAY_SILENCE_MS)))
     .filter((b) =>
       SENDABLE.includes(b.status) && b.mailboxHint !== null &&
-      !(at(b.lastCanarySentAt) > now - CANARY_GAP_MS) && quietLongEnough(b.lastReceivedAt, now)
+      !(at(b.lastCanarySentAt) > now - CANARY_GAP_MS) &&
+      (b.status === "quiet" || quietLongEnough(b.lastReceivedAt, now))
     )
     .sort((a, b) =>
       (at(a.lastCanarySentAt) || 0) - (at(b.lastCanarySentAt) || 0) || a.id.localeCompare(b.id)

@@ -13,14 +13,8 @@ import { type Rest, restFromEnv } from "../_shared/db.ts";
 import { isActive, lookupFrom } from "../_shared/entitlement.ts";
 import { asResponse, fail } from "../_shared/http.ts";
 import { hmacKeyFromBase64, nonceHmac } from "../mail-inbound/keys.ts";
-import {
-  type CanaryDeps,
-  type CanaryMailbox,
-  type CanaryStore,
-  handle,
-  type JobConfig,
-  SENDABLE,
-} from "./handler.ts";
+import { type CanaryDeps, type CanaryMailbox, type CanaryStore, handle, type JobConfig } from "./handler.ts";
+import { candidatesQuery, SENDABLE_IN } from "./query.ts";
 
 function env(name: string): string {
   const v = Deno.env.get(name);
@@ -52,8 +46,6 @@ const tree = (s: string) => encodeURIComponent(s);
 const DAY = 86_400_000;
 /** Canaries are pruned at 30 days (P7); nothing older is read. */
 const KEPT_DAYS = 30;
-/** The most mailboxes one run reads as candidates, the longest-unchecked first. */
-const CANDIDATES = 500;
 const OUTSTANDING = 1000;
 
 interface OutstandingDb {
@@ -71,7 +63,6 @@ interface CandidateDb {
   last_canary_sent_at: string | null;
   canaries_today: number;
 }
-const SENDABLE_IN = `in.(${SENDABLE.join(",")})`;
 
 function storeOver(rest: Rest): CanaryStore {
   const patched = async (what: string, table: string, query: string, body: unknown) => {
@@ -101,13 +92,7 @@ function storeOver(rest: Rest): CanaryStore {
       return await patched("judge", "mail_addresses", q, { status: to }) > 0;
     },
     async candidates(canaryBefore, silentBefore) {
-      const due = tree(
-        `(or(last_canary_sent_at.is.null,last_canary_sent_at.lt."${canaryBefore}"),` +
-          `or(last_received_at.is.null,last_received_at.lt."${silentBefore}"))`,
-      );
-      const q = `status=${SENDABLE_IN}&mailbox_hint=not.is.null&and=${due}` +
-        "&select=id,account_id,status,mailbox_hint,last_received_at,last_canary_sent_at,canaries_today" +
-        `&order=last_canary_sent_at.asc.nullsfirst,id.asc&limit=${CANDIDATES}`;
+      const q = candidatesQuery(canaryBefore, silentBefore);
       return (await rows<CandidateDb>(await call(rest, "candidates", `mail_addresses?${q}`)))
         .map((r): CanaryMailbox => ({
           id: r.id,
