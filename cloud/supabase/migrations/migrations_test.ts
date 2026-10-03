@@ -322,8 +322,15 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // counted by hand against today's corpus: C3′ adds six, C1c one and D14 one, on top of the 21
   // both streams inherited (the C3′ merge of main, PR #13); plus F1's `refund_call` in
   // 20261002000100 (writing, non-definer, revoked from `public, anon, authenticated` in the same
-  // file — live proof 2026-10-02).
-  assertEquals(parsed, 30, "today's corpus should parse exactly 30 function creations");
+  // file — live proof 2026-10-02); plus email forwarding T1.2's three
+  // re-issues in 20261002000200_mail.sql (`export_training_rows`, non-writing; `backfill_correction_judgments`
+  // and `promote_rules`, writing, each revoked from `public, anon, authenticated` again in that file),
+  // plus T1.3's three in the same file (`delete_mail_address`, SECURITY DEFINER; `charge_allowance`
+  // and the re-issued `enforce_budget`, writing; each revoked from `public, anon, authenticated`),
+  // plus the T1.3 review's `refund_allowance` (writing, revoked the same way), plus T2g.1's two
+  // (`mail_hand_off` and `count_mail_arrival`, writing, each revoked from `public, anon,
+  // authenticated`), plus T3e's `expire_mail_work` (writing, revoked the same way).
+  assertEquals(parsed, 40, "today's corpus should parse exactly 40 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -709,12 +716,17 @@ async function providerSwapFiles(dir: URL = HERE): Promise<Array<[string, string
  *  order (earliest to latest) so a later re-pin overwrites an earlier one — exactly what applying
  *  the migrations in order would do to the row. Group 1 (the block) excludes the `update … set`
  *  and `where …;` wrapper so a caller can search its assignments alone. */
-function lastModelPinBlocks(files: Array<[string, string]>): Partial<Record<"task" | "event" | "email", string>> {
-  const blocks: Partial<Record<"task" | "event" | "email", string>> = {};
-  const re = /update\s+models\s+set([\s\S]*?)where\s+kind\s*=\s*'(task|event|email)'\s*;/gi;
+/** Every kind a `models` row may carry: the three device kinds and, since email forwarding T1.2
+ *  (spec §5.1, plan P8), the mail kinds. */
+type PinKind = "task" | "event" | "email" | "mail_claim" | "mail_resolve" | "mail_digest";
+
+function lastModelPinBlocks(files: Array<[string, string]>): Partial<Record<PinKind, string>> {
+  const blocks: Partial<Record<PinKind, string>> = {};
+  const re =
+    /update\s+(?:public\.)?models\s+set([\s\S]*?)where\s+kind\s*=\s*'(task|event|email|mail_claim|mail_resolve|mail_digest)'\s*;/gi;
   for (const [, sql] of files) {
-    for (const m of sql.matchAll(re)) {
-      blocks[m[2] as "task" | "event" | "email"] = m[1];
+    for (const m of stripLineComments(sql).matchAll(re)) {
+      blocks[m[2] as PinKind] = m[1];
     }
   }
   return blocks;
@@ -825,7 +837,9 @@ Deno.test("the email_due_resolver migration re-pins only the email row, to email
   assert(/where\s+kind\s*=\s*'email'\s*$/i.test(updates[0].trim()), updates[0]);
 });
 
-Deno.test("the last definition of export_training_rows excludes both gmail_api and events origins", async () => {
+Deno.test("the last definition of export_training_rows excludes the gmail_api, events and forward origins", async () => {
+  // Email forwarding T1.2 (spec §5.1, §8): a forwarded mail's judgment never becomes a training row.
+  // Moved to the new last definition and naming all three origins, so stronger, never looser.
   // Google's Limited Use policy binds Calendar-API data exactly as it binds Gmail's, and `origin`
   // cannot yet tell a Google-Calendar event from an ICS one — so every `events` row is excluded
   // too, on top of the original `gmail_api` exclusion, until an origin split exists (a C4
@@ -841,9 +855,9 @@ Deno.test("the last definition of export_training_rows excludes both gmail_api a
   }
   assert(last !== undefined, "no migration defines export_training_rows");
   assert(
-    last!.body.includes("origin not in ('gmail_api', 'events')"),
-    `${last!.name}: the LAST export_training_rows definition must exclude both origins ` +
-      `(cloud design §5.3/§9, provider swap Task 2)`,
+    last!.body.includes("origin not in ('gmail_api', 'events', 'forward')"),
+    `${last!.name}: the LAST export_training_rows definition must exclude all three origins ` +
+      `(cloud design §5.3/§9, provider swap Task 2, email forwarding spec §5.1)`,
   );
 });
 
@@ -970,6 +984,699 @@ Deno.test("the original google migration is unchanged", async () => {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   const hex = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
   assertEquals(hex, "c86e118dc0bed63875b4785870ccc1bfed15e5299599bd48ce4c2b7d18feeda0");
+});
+
+// Email forwarding T1.1 (spec §5.1; test 14's RLS half). The seven mail tables hold a student's mail
+// metadata, the address tokens and the claims, so only the service role reaches them, and every row
+// goes when its account goes. Textual, like the pins above: nothing here applies SQL (plan P7).
+const MAIL_TABLES = [
+  "mail_accounts",
+  "mail_addresses",
+  "mail_batches",
+  "mail_canaries",
+  "mail_seen",
+  "mail_work",
+  "mail_claims",
+];
+
+/** The one `<stamp>_mail.sql`, comment-stripped. */
+async function mailMigration(): Promise<{ name: string; sql: string }> {
+  const files = (await everyMigrationFile()).filter(([n]) => /^\d{14}_mail\.sql$/.test(n));
+  assertEquals(files.length, 1, "exactly one <stamp>_mail.sql (spec §5.1)");
+  return { name: files[0][0], sql: stripLineComments(files[0][1]) };
+}
+
+/** Each column or table constraint of `create table … <table> ( … );`, split at top-level commas,
+ * whitespace-normalised and lower-cased. */
+function tableItems(sql: string, table: string): string[] {
+  const head = new RegExp(`create\\s+table\\s+(?:if\\s+not\\s+exists\\s+)?${identPattern(table)}\\s*\\(`, "i");
+  const m = head.exec(sql);
+  assert(m !== null, `no create table for ${table}`);
+  const items: string[] = [];
+  let depth = 0;
+  let cur = "";
+  for (const ch of sql.slice(m.index + m[0].length)) {
+    if (ch === "(") depth++;
+    if (ch === ")" && depth-- === 0) break;
+    if (ch === "," && depth === 0) {
+      items.push(cur);
+      cur = "";
+    } else cur += ch;
+  }
+  items.push(cur);
+  return items.map((s) => s.replace(/\s+/g, " ").trim().toLowerCase()).filter((s) => s.length > 0);
+}
+
+/** The column definitions of `table`, by name (table constraints left out). */
+function tableColumns(sql: string, table: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const item of tableItems(sql, table)) {
+    if (/^(primary key|unique|foreign key|check|constraint)\b/.test(item)) continue;
+    out.set(item.split(" ")[0], item);
+  }
+  return out;
+}
+
+Deno.test("every_mail_table_has_rls_on_and_no_anon_or_authenticated_grant", async () => {
+  const { name, sql } = await mailMigration();
+  const created = [...sql.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:public\.)?(\w+)/gi)]
+    .map((m) => m[1].toLowerCase()).sort();
+  assertEquals(created, [...MAIL_TABLES].sort(), `${name}: the seven tables of §5.1, and only those`);
+  const flat = sql.replace(/\s+/g, " ").toLowerCase();
+  for (const t of MAIL_TABLES) {
+    assert(flat.includes(`alter table public.${t} enable row level security;`), `${name}: ${t} needs RLS on`);
+    const revokes = [...flat.matchAll(new RegExp(`revoke all on (?:table )?public\\.${t} from ([^;]+);`, "g"))];
+    assert(
+      revokes.some((r) => /\banon\b/.test(r[1]) && /\bauthenticated\b/.test(r[1])),
+      `${name}: ${t} must revoke Supabase's default anon and authenticated grants`,
+    );
+  }
+  // No migration, this one or any later one, grants a mail table to a client role or opens a policy
+  // on one: only the service role reads them, as `google_accounts` (§5.1).
+  for (const [file, raw] of await everyMigrationFile()) {
+    const text = stripLineComments(raw).replace(/\s+/g, " ").toLowerCase();
+    for (const t of MAIL_TABLES) {
+      for (const g of text.matchAll(new RegExp(`grant [^;]*\\bon (?:table )?(?:public\\.)?${t}\\b([^;]*);`, "g"))) {
+        assert(!/\bto\b[^;]*\b(anon|authenticated|public)\b/.test(g[1]), `${file}: grants ${t} to a client role`);
+      }
+      assert(!new RegExp(`create policy [^;]*\\bon (?:public\\.)?${t}\\b`).test(text), `${file}: a policy on ${t}`);
+    }
+  }
+});
+
+Deno.test("every_mail_account_id_cascades_from_accounts", async () => {
+  const { name, sql } = await mailMigration();
+  const cascades = /\breferences public\.accounts ?\( ?id ?\) on delete cascade\b/;
+  // Five tables carry the account; batches and canaries reach it through their mailbox.
+  for (const t of ["mail_accounts", "mail_addresses", "mail_seen", "mail_work", "mail_claims"]) {
+    const col = tableColumns(sql, t).get("account_id");
+    assert(col !== undefined, `${name}: ${t} has no account_id`);
+    assert(col.startsWith("account_id uuid "), `${name}: ${t}.account_id is a uuid`);
+    assert(/\bnot null\b|\bprimary key\b/.test(col), `${name}: ${t}.account_id is never null`);
+    assert(cascades.test(col), `${name}: ${t}.account_id must reference accounts(id) on delete cascade`);
+  }
+  const viaMailbox = /\breferences public\.mail_addresses ?\( ?id ?\) on delete cascade\b/;
+  for (const t of ["mail_batches", "mail_canaries"]) {
+    const cols = tableColumns(sql, t);
+    assert(!cols.has("account_id"), `${name}: ${t} is scoped by its mailbox (§5.1)`);
+    const col = cols.get("address_id");
+    assert(col !== undefined && /\bnot null\b/.test(col), `${name}: ${t}.address_id is never null`);
+    assert(viaMailbox.test(col!), `${name}: ${t}.address_id must cascade from mail_addresses`);
+  }
+  // Where a row names both, they are one account's: a mailbox of another account cannot be named.
+  for (const t of ["mail_seen", "mail_work", "mail_claims"]) {
+    const items = tableItems(sql, t);
+    assert(
+      items.includes(
+        "foreign key (address_id, account_id) references public.mail_addresses (id, account_id) on delete cascade",
+      ),
+      `${name}: ${t}'s mailbox must belong to its account`,
+    );
+    assert(/^address_id uuid not null$/.test(tableColumns(sql, t).get("address_id") ?? ""), `${name}: ${t}.address_id`);
+  }
+  assert(tableItems(sql, "mail_addresses").includes("unique (id, account_id)"), `${name}: the composite key's target`);
+  // Nothing in the file reaches another account's data through a looser key.
+  assert(!/on delete (set null|no action|restrict)[^,]*account/i.test(sql), `${name}: an account key that does not cascade`);
+});
+
+Deno.test("mail_seen_is_keyed_by_account_and_msg_hash_and_token_hmac_is_unique", async () => {
+  const { name, sql } = await mailMigration();
+  const seen = tableItems(sql, "mail_seen");
+  assert(seen.includes("primary key (account_id, msg_hash)"), `${name}: mail_seen's key is (account_id, msg_hash)`);
+  const cols = tableColumns(sql, "mail_seen");
+  for (const c of ["msg_hash", "fp_hash", "received_minute"]) {
+    assert(/\bnot null\b/.test(cols.get(c) ?? ""), `${name}: mail_seen.${c} is never null`);
+  }
+  const token = tableColumns(sql, "mail_addresses").get("token_hmac") ?? "";
+  assert(/^token_hmac text not null unique$/.test(token), `${name}: token_hmac is text, not null and unique: ${token}`);
+  const retired = tableColumns(sql, "mail_addresses").get("retired_token_hmac") ?? "";
+  assert(/^retired_token_hmac text unique$/.test(retired), `${name}: a retired token is looked up as the live one is`);
+});
+
+Deno.test("the_mail_tables_have_section_5_1s_columns_and_words", async () => {
+  // Spec §5.1, column for column. Two columns §5.1's table implies rather than names:
+  // `mail_addresses.account_id` (its header: every account_id cascades) and the ciphertext/IV pairs.
+  const { name, sql } = await mailMigration();
+  const want: Record<string, string[]> = {
+    mail_accounts: [
+      "account_id", "fp_key_ciphertext", "fp_key_iv", "digest", "allowance_opened_at", "allowance_left",
+      "allowance_usd", "allowance_until", "mints_30d",
+    ],
+    mail_addresses: [
+      "id", "account_id", "provider", "token_hmac", "token_ciphertext", "token_iv", "retired_token_hmac",
+      "retired_until", "mailbox_hint", "forward_hint", "status", "lapsed_since", "reenabled_at", "confirm_until",
+      "backfill_since", "last_received_at", "last_canary_sent_at", "last_canary_ok_at", "canaries_today", "unbound",
+      "unauthenticated", "expired", "unbound_own_since_live", "unbound_foreign_since_live",
+    ],
+    mail_batches: [
+      "id", "address_id", "phase", "nonce_hmac", "since", "expected", "sent", "received", "opened_at", "sent_at",
+      "closed_at",
+    ],
+    mail_canaries: ["id", "address_id", "nonce_hmac", "sent_at", "arrived_at"],
+    mail_seen: ["account_id", "msg_hash", "fp_hash", "received_minute", "address_id", "phase", "seen_at"],
+    mail_work: [
+      "id", "account_id", "address_id", "batch_id", "s3_key", "phase", "authenticity", "arrived_at", "attempts",
+      "next_attempt_at", "msg_hash",
+    ],
+    mail_claims: [
+      "id", "account_id", "address_id", "batch_id", "uid", "message_date", "ordering_date", "sender_name",
+      "sender_addr", "phase", "authenticity", "claims", "judgment_id", "queued_at", "delivered_at",
+    ],
+  };
+  for (const t of MAIL_TABLES) {
+    assertEquals([...tableColumns(sql, t).keys()].sort(), [...want[t]].sort(), `${name}: ${t}'s columns`);
+  }
+  const words = (t: string, c: string) => (tableColumns(sql, t).get(c) ?? "").replace(/"/g, "'");
+  const oneOf = (t: string, c: string, vals: string[]) =>
+    assert(
+      words(t, c).includes(`check (${c} in (${vals.map((v) => `'${v}'`).join(", ")}))`),
+      `${name}: ${t}.${c} must be one of ${vals.join(", ")}: ${words(t, c)}`,
+    );
+  oneOf("mail_addresses", "provider", ["m365", "google", "other"]);
+  oneOf("mail_addresses", "status", [
+    "pending", "confirmed", "active", "quiet", "blocked", "off", "paused_send", "lapsed", "revoked",
+  ]);
+  oneOf("mail_batches", "phase", ["backfill", "recover"]);
+  for (const t of ["mail_seen", "mail_work", "mail_claims"]) oneOf(t, "phase", ["live", "backfill", "recover"]);
+  for (const t of ["mail_work", "mail_claims"]) oneOf(t, "authenticity", ["aligned", "unaligned"]);
+  assert(/\bdefault false\b/.test(words("mail_accounts", "digest")), `${name}: digest defaults to false (D13)`);
+  // PQ6 (a) and BW (T1.3's renames): the allowance's key is a moment, the mailbox's window start a day.
+  assertEquals(words("mail_accounts", "allowance_opened_at"), "allowance_opened_at timestamptz", `${name}: PQ6 (a)`);
+  assertEquals(words("mail_addresses", "backfill_since"), "backfill_since date", `${name}: BW's window start`);
+  // Neither old name survives anywhere in cloud/ (spelt in halves so this file does not match itself).
+  const old = new RegExp(`\\b(?:allowance_)?${"term"}_${"start"}\\b`);
+  const walk = async (dir: URL): Promise<void> => {
+    for await (const e of Deno.readDir(dir)) {
+      if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+      const at = new URL(e.isDirectory ? `${e.name}/` : e.name, dir);
+      if (e.isDirectory) await walk(at);
+      else if (/\.(ts|sql|md|toml|json)$/.test(e.name)) {
+        assert(!old.test(await Deno.readTextFile(at)), `${at.pathname}: an old allowance or window column name`);
+      }
+    }
+  };
+  await walk(new URL("../../", HERE));
+  assert(/^claims jsonb not null\b/.test(words("mail_claims", "claims")), `${name}: claims is jsonb`);
+  assert(
+    /references public\.judgments ?\( ?id ?\) on delete set null/.test(words("mail_claims", "judgment_id")),
+    `${name}: a claim outlives nothing it should not, and never blocks a judgment's deletion`,
+  );
+  // Nothing here holds a body, a subject, a header or a raw token: hashes, words and the claims only.
+  for (const t of MAIL_TABLES) {
+    for (const c of tableColumns(sql, t).keys()) {
+      assert(!/(body|subject|header|^token$|nonce$|^message_id$|^text$)/.test(c), `${name}: ${t}.${c}`);
+    }
+  }
+});
+
+// Email forwarding T1.2 (spec §5.1's "Changes to existing objects", constraint by constraint; test 14's
+// constraint half; plan P8). Textual, like every pin above: the words the LAST definition of each
+// check admits, read in the order Postgres applies the corpus (file by file, top to bottom).
+const DEVICE_KINDS = ["task", "event", "email"];
+const MAIL_KINDS = ["mail_claim", "mail_resolve", "mail_digest"];
+
+/** The text between the `(` that ends at `start` and its matching `)`. */
+function parenBody(sql: string, start: number): string {
+  let depth = 0;
+  let out = "";
+  for (const ch of sql.slice(start)) {
+    if (ch === "(") depth++;
+    if (ch === ")" && depth-- === 0) break;
+    out += ch;
+  }
+  return out;
+}
+
+/** Where `check (<column> in (…))` on `table` is defined in one comment-stripped file, in text order:
+ *  the inline column check of `create table` (Postgres names it `<table>_<column>_check`), a column
+ *  added with its check, or a re-issue under that default name. Each entry is [offset, how, list]. */
+function checkDefinitions(sql: string, table: string, column: string): Array<[number, string, string]> {
+  const t = identPattern(table);
+  const inList = `check\\s*\\(\\s*${column}\\s+in\\s*\\(([^)]*)\\)\\s*\\)`;
+  const found: Array<[number, string, string]> = [];
+  for (const m of sql.matchAll(new RegExp(`create\\s+table\\s+(?:if\\s+not\\s+exists\\s+)?${t}\\s*\\(`, "gi"))) {
+    const body = parenBody(sql, m.index! + m[0].length);
+    const c = new RegExp(`(?:^|,)\\s*${column}\\s[^,]*?${inList}`, "i").exec(body);
+    if (c) found.push([m.index!, "create", c[1]]);
+  }
+  const added = `alter\\s+table\\s+${t}\\s+add\\s+column\\s+(?:if\\s+not\\s+exists\\s+)?${column}\\s[^;]*?${inList}`;
+  for (const m of sql.matchAll(new RegExp(added, "gi"))) found.push([m.index!, "add column", m[1]]);
+  const reissued = `alter\\s+table\\s+${t}\\s+add\\s+constraint\\s+${table}_${column}_check\\s+${inList}`;
+  for (const m of sql.matchAll(new RegExp(reissued, "gi"))) found.push([m.index!, "add constraint", m[1]]);
+  return found.sort((a, b) => a[0] - b[0]);
+}
+
+/** The words the corpus's LAST definition of `<table>_<column>_check` admits, and its file. */
+async function lastCheckWords(table: string, column: string): Promise<{ name: string; words: string[] }> {
+  let last: { name: string; words: string[] } | undefined;
+  for (const [name, raw] of await everyMigrationFile()) {
+    const defs = checkDefinitions(stripLineComments(raw), table, column);
+    if (defs.length > 0) {
+      last = { name, words: [...defs[defs.length - 1][2].matchAll(/'([^']*)'/g)].map((m) => m[1]) };
+    }
+  }
+  assert(last !== undefined, `no migration defines ${table}.${column}'s check`);
+  return last!;
+}
+
+/** A re-issued check must drop the old one first, or the `add` fails on the name it already holds. */
+function assertDroppedBeforeReadded(name: string, sql: string, table: string, column: string): void {
+  const re = checkDefinitions(sql, table, column).filter(([, how]) => how === "add constraint");
+  assertEquals(re.length, 1, `${name}: ${table}_${column}_check is re-issued exactly once`);
+  const drop = new RegExp(
+    `alter\\s+table\\s+${identPattern(table)}\\s+drop\\s+constraint\\s+if\\s+exists\\s+${table}_${column}_check\\s*;`,
+    "i",
+  ).exec(sql);
+  assert(drop !== null && drop.index < re[0][0], `${name}: ${table}_${column}_check is dropped before it is re-added`);
+}
+
+Deno.test("models_usage_daily_and_judgments_accept_the_three_mail_kinds", async () => {
+  // Without `usage_daily`, `charge_call` answers 23514, `capStore.charge` reads it as capped, and every
+  // claim would be `capped` (spec §5.1); without `models`, no pin and no `monthly_spend` price.
+  const { name, sql } = await mailMigration();
+  for (const table of ["models", "usage_daily", "judgments"]) {
+    const last = await lastCheckWords(table, "kind");
+    assertEquals(last.name, name, `${table}.kind: the mail migration re-issues the check`);
+    assertEquals([...last.words].sort(), [...DEVICE_KINDS, ...MAIL_KINDS].sort(), `${table}.kind's words`);
+    assertDroppedBeforeReadded(name, sql, table, "kind");
+  }
+});
+
+Deno.test("judgments_origin_accepts_forward", async () => {
+  const { name, sql } = await mailMigration();
+  const last = await lastCheckWords("judgments", "origin");
+  assertEquals(last.name, name, "judgments.origin: the mail migration re-issues the check");
+  assertEquals([...last.words].sort(), ["device", "events", "forward", "gmail_api"], "judgments.origin's words");
+  assertDroppedBeforeReadded(name, sql, "judgments", "origin");
+});
+
+Deno.test("corrections_rules_and_both_eval_tables_still_refuse_mail_kinds", async () => {
+  // Deliberately not widened (spec §5.1): a mail judgment never becomes a rule, a correction or an
+  // eval row, so a mail kind arriving at any of these is a 23514, never a silent row.
+  const { name } = await mailMigration();
+  const cases: Array<[string, string]> = [
+    ["corrections", "judgment_kind"],
+    ["rules", "kind"],
+    ["eval_cases", "kind"],
+    ["eval_runs", "kind"],
+  ];
+  for (const [table, column] of cases) {
+    const last = await lastCheckWords(table, column);
+    assert(last.name !== name, `${table}.${column}: the mail migration must not re-issue it`);
+    assertEquals([...last.words].sort(), [...DEVICE_KINDS].sort(), `${table}.${column} admits the device kinds only`);
+  }
+  for (const [file, raw] of await everyMigrationFile()) {
+    const text = stripLineComments(raw);
+    for (const [table] of cases) {
+      const re = new RegExp(`alter\\s+table\\s+${identPattern(table)}\\s[^;]*\\bmail_`, "i");
+      assert(!re.test(text), `${file}: ${table} must never name a mail kind`);
+    }
+  }
+});
+
+/** The LAST definition of function `fn` across the corpus: its file and its comment-stripped text. */
+async function lastFunction(fn: string): Promise<{ name: string; text: string }> {
+  let last: { name: string; text: string } | undefined;
+  for (const [name, raw] of await everyMigrationFile()) {
+    for (const m of stripLineComments(raw).matchAll(FUNCTION_DEFINITION)) {
+      if (m[2].toLowerCase() === fn) last = { name, text: m[0] };
+    }
+  }
+  assert(last !== undefined, `no migration defines ${fn}`);
+  return last!;
+}
+
+Deno.test("promote_rules_and_the_corrections_backfill_pass_over_forward_judgments", async () => {
+  // Otherwise `judgment_features` would offer a `mail_claim` feature and the `rules` insert would abort
+  // the whole nightly promotion for every account; the back-fill would write a mail kind into
+  // `corrections.judgment_kind` and abort the same nightly job (spec §5.1).
+  const { name, sql } = await mailMigration();
+  for (const fn of ["promote_rules", "backfill_correction_judgments"]) {
+    const last = await lastFunction(fn);
+    assertEquals(last.name, name, `${fn}: the mail migration re-issues it`);
+    const aliases = [...last.text.matchAll(/\b(?:public\.)?judgments\s+(\w+)/gi)].map((m) => m[1]);
+    assert(aliases.length > 0, `${fn} reads judgments`);
+    const filters = [...last.text.matchAll(/\b(\w+)\.origin\s*<>\s*'forward'/gi)].map((m) => m[1]);
+    assertEquals(filters.sort(), [...aliases].sort(), `${fn}: every read of judgments passes over 'forward'`);
+    assert(!/security\s+definer/i.test(last.text), `${fn} stays security invoker`);
+    const revoke = new RegExp(
+      `revoke\\s+execute\\s+on\\s+function\\s+public\\.${fn}\\(\\)\\s+from\\s+public,\\s*anon,\\s*authenticated;`,
+      "i",
+    );
+    assert(revoke.test(sql), `${name}: ${fn} is revoked again beside its re-issue`);
+    assert(new RegExp(`grant\\s+execute\\s+on\\s+function\\s+public\\.${fn}\\(\\)\\s+to\\s+service_role;`, "i").test(sql));
+  }
+});
+
+const PIN_KEYS = ["provider", "model_id", "precision", "usd_per_m_in", "usd_per_m_out", "sampling", "route"];
+
+/** A kind's pin as the corpus leaves it: each key's value from the LAST `update models` that sets it,
+ *  folded file by file, so a later re-pin of one key (email-3's prompt version) keeps the others. */
+function currentPin(files: Array<[string, string]>, kind: PinKind): Record<string, string> {
+  const pin: Record<string, string> = {};
+  for (const file of files) {
+    const block = lastModelPinBlocks([file])[kind];
+    if (block === undefined) continue;
+    for (const key of PIN_KEYS) {
+      const m = new RegExp(`\\b${key}\\s*=\\s*('(?:[^']|'')*'(?:::jsonb)?|[0-9.]+)`, "i").exec(block);
+      if (m) pin[key] = m[1];
+    }
+  }
+  return pin;
+}
+
+Deno.test("mail_claim_and_mail_resolve_are_pinned_provisionally_to_the_email_models_route", async () => {
+  // Plan P8: email's current model, route and zero-retention provider, marked provisional in a SQL
+  // comment; test 17's live check (T18a) confirms each pin or a one-statement migration re-pins it.
+  const files = await everyMigrationFile();
+  const { name, sql } = await mailMigration();
+  const raw = files.find(([n]) => n === name)![1];
+  const email = currentPin(files, "email");
+  assertEquals(Object.keys(email).sort(), [...PIN_KEYS].sort(), "email's pin is fully read");
+  const inserts = [...sql.matchAll(/insert\s+into\s+(?:public\.)?models\s*\(([^)]*)\)\s*values([\s\S]*?);/gi)];
+  assertEquals(inserts.length, 1, `${name}: one insert into models`);
+  assert(/on\s+conflict\s*\(\s*kind\s*\)\s*do\s+nothing\s*$/i.test(inserts[0][2]), `${name}: a re-run inserts nothing`);
+  const blocks = lastModelPinBlocks([[name, raw]]);
+  for (const kind of ["mail_claim", "mail_resolve"] as const) {
+    assert(new RegExp(`\\(\\s*'${kind}'\\s*,`).test(inserts[0][2]), `${name}: a models row for ${kind}`);
+    assert(blocks[kind] !== undefined, `${name}: ${kind} is pinned by its own update`);
+    assert(/since\s*=\s*current_date/i.test(blocks[kind]!), `${kind}: since is stamped`);
+    const pin = currentPin(files, kind);
+    for (const key of PIN_KEYS) assertEquals(pin[key], email[key], `${kind}.${key} is email's`);
+    assert(pin.route.includes(`"zdr": true`) && pin.route.includes(`"allow_fallbacks": false`), `${kind}: ZDR only`);
+  }
+  // `mail_digest` gets a row only if T16 is built.
+  for (const [file, text] of files) {
+    const code = stripLineComments(text);
+    for (const m of code.matchAll(/insert\s+into\s+(?:public\.)?models\b[^;]*;/gi)) {
+      assert(!m[0].includes("'mail_digest'"), `${file}: no models row for mail_digest until T16`);
+    }
+    assert(lastModelPinBlocks([[file, text]]).mail_digest === undefined, `${file}: mail_digest is not pinned`);
+  }
+  // The comment block directly above the insert says so, not merely some line of the file.
+  const lines = raw.split("\n");
+  let at = lines.findIndex((l) => /^\s*insert\s+into\s+(?:public\.)?models\b/i.test(l));
+  assert(at > 0, `${name}: the models insert starts a line`);
+  const above: string[] = [];
+  while (--at >= 0 && lines[at].trim().startsWith("--")) above.unshift(lines[at]);
+  assert(/\bprovisional\b/i.test(above.join("\n")), `${name}: the pins are marked provisional in a SQL comment`);
+});
+
+// Email forwarding T1.3 (spec §5.1's RPCs and cron, test 14's RPC half and 11's database half; D17,
+// D23 as amended 2026-10-02 by PQ6 (a); plan P7). Textual: the behaviour is smoke-tested on staging.
+
+/** A definition's header (through `as $tag$`) and body (inside the tags), whitespace-normalised and
+ *  lower-cased, from the LAST definition of `fn`, which must be the mail migration's. */
+async function mailFunction(fn: string): Promise<{ name: string; sql: string; header: string; body: string }> {
+  const { name, sql } = await mailMigration();
+  const last = await lastFunction(fn);
+  assertEquals(last.name, name, `${fn}: the mail migration's definition governs`);
+  const m = new RegExp(FUNCTION_DEFINITION.source, "i").exec(last.text)!;
+  const rest = m[0].slice(m[1].length);
+  const flat = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  return { name, sql: flat(sql), header: flat(m[1]), body: flat(rest.slice(0, rest.indexOf(m[3]))) };
+}
+
+function assertServiceRoleOnly(f: { name: string; sql: string }, fn: string, args: string): void {
+  assert(
+    f.sql.includes(`revoke execute on function public.${fn}(${args}) from public, anon, authenticated;`),
+    `${f.name}: ${fn} is revoked from every client role`,
+  );
+  assert(f.sql.includes(`grant execute on function public.${fn}(${args}) to service_role;`), `${f.name}: ${fn}`);
+}
+
+Deno.test("delete_mail_address_revokes_then_deletes_one_mailboxs_rows_delivered_claims_included", async () => {
+  const f = await mailFunction("delete_mail_address");
+  assert(/delete_mail_address\s*\(\s*p_address uuid\s*\)/.test(f.header), `${f.name}: delete_mail_address(p_address uuid)`);
+  assert(f.header.includes("returns void"), `${f.name}: returns void`);
+  assert(f.header.includes("security definer"), `${f.name}: security definer (spec §5.1)`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "delete_mail_address", "uuid");
+  // Revoke first, then each child table, filtered on the one mailbox and nothing else (so delivered
+  // claims go too), then the row itself.
+  const steps = [
+    "update public.mail_addresses set status = 'revoked' where id = p_address;",
+    "delete from public.mail_seen where address_id = p_address;",
+    "delete from public.mail_work where address_id = p_address;",
+    "delete from public.mail_claims where address_id = p_address;",
+    "delete from public.mail_batches where address_id = p_address;",
+    "delete from public.mail_canaries where address_id = p_address;",
+    "delete from public.mail_addresses where id = p_address;",
+  ];
+  let at = -1;
+  for (const s of steps) {
+    const next = f.body.indexOf(s);
+    assert(next > at, `${f.name}: '${s}' in order (revoke, children, then the row)`);
+    at = next;
+  }
+  const writes = f.body.match(/\b(insert|update|delete)\b/g) ?? [];
+  assertEquals(writes.length, steps.length, `${f.name}: no other write`);
+  assert(!/delivered_at|mail_accounts|judgments|account_id/.test(f.body), `${f.name}: one mailbox, never the account`);
+});
+
+// The opening test of PQ6 (a): no allowance yet, or the last one opened 120 days or more ago.
+const OPENS = "(allowance_opened_at is null or allowance_opened_at <= now() - interval '120 days')";
+
+Deno.test("charge_allowance_is_one_statement_like_charge_call", async () => {
+  const f = await mailFunction("charge_allowance");
+  assert(/charge_allowance\s*\(\s*p_account uuid\s*\)/.test(f.header), `${f.name}: charge_allowance(p_account uuid)`);
+  assert(f.header.includes("returns boolean"), `${f.name}: answers charged or not, as charge_call`);
+  assert(!f.header.includes("security definer"), `${f.name}: security invoker, as charge_call`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "charge_allowance", "uuid");
+  // One statement: two concurrent charges serialise on the row, so neither can open twice or overdraw.
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 1, `${f.name}: one write`);
+  assertEquals((f.body.match(/\bselect\b/g) ?? []).length, 0, `${f.name}: no read before the write`);
+  assert(f.body.includes("update public.mail_accounts set"), `${f.name}: the write is mail_accounts'`);
+  // Opening sets the period's start, 14 days, $1.00 and 2,000 judgments; then the one charge.
+  for (const set of [
+    `allowance_opened_at = case when ${OPENS} then now() else allowance_opened_at end`,
+    `allowance_until = case when ${OPENS} then now() + interval '14 days' else allowance_until end`,
+    `allowance_usd = case when ${OPENS} then 1.00 else allowance_usd end`,
+    `allowance_left = case when ${OPENS} then 2000 else allowance_left end - 1`,
+  ]) assert(f.body.includes(set), `${f.name}: ${set}`);
+  // Otherwise only what is left, and nothing after allowance_until.
+  assert(
+    f.body.includes(`where account_id = p_account and (${OPENS} or (allowance_until > now() and allowance_left > 0))`),
+    `${f.name}: charges only on opening, or while the allowance is open and not spent`,
+  );
+  assert(f.body.includes("returning true into charged;"), `${f.name}: charged only when the row was written`);
+  assert(f.body.includes("return coalesce(charged, false);"), `${f.name}: no row written answers false`);
+});
+
+Deno.test("refund_allowance_gives_one_judgment_back_only_while_the_allowance_is_open", async () => {
+  // Review of T1.3, after F1 (20261002000100_refund_failed_call.sql): `charge_allowance` charges
+  // before the call, so without a refund a provider outage during a first backfill would spend the
+  // whole allowance on calls the model never answered, and the backfill would trickle at the daily
+  // cap for 120 days: the outcome D23 exists to prevent.
+  const f = await mailFunction("refund_allowance");
+  assert(/refund_allowance\s*\(\s*p_account uuid\s*\)/.test(f.header), `${f.name}: refund_allowance(p_account uuid)`);
+  assert(f.header.includes("returns boolean"), `${f.name}: answers refunded or not, as refund_call`);
+  assert(!f.header.includes("security definer"), `${f.name}: security invoker, as charge_allowance`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "refund_allowance", "uuid");
+  // One guarded statement: concurrent refunds and charges serialise on the row, and the `where` is
+  // re-checked on the locked row, so the allowance never passes 2,000.
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 1, `${f.name}: one write`);
+  assertEquals((f.body.match(/\bselect\b/g) ?? []).length, 0, `${f.name}: no read before the write`);
+  assert(
+    f.body.includes(
+      "update public.mail_accounts set allowance_left = allowance_left + 1 " +
+        "where account_id = p_account and allowance_until > now() and allowance_left < 2000",
+    ),
+    `${f.name}: one judgment back, only inside allowance_until and never above 2,000`,
+  );
+  // It never opens, extends or re-prices an allowance: only `allowance_left` is set.
+  assert(!/allowance_opened_at|allowance_usd|allowance_until =|case when/.test(f.body), `${f.name}: sets nothing else`);
+  assert(f.body.includes("returning true into done;"), `${f.name}: refunded only when the row was written`);
+  assert(f.body.includes("return coalesce(done, false);"), `${f.name}: no row written answers false`);
+});
+
+Deno.test("the_allowance_period_is_keyed_on_allowance_opened_at_and_never_on_a_mailbox", async () => {
+  const charge = await mailFunction("charge_allowance");
+  const budget = await mailFunction("enforce_budget");
+  const refund = await mailFunction("refund_allowance");
+  for (const f of [charge, budget, refund]) {
+    assert(!/mail_addresses|mail_batches|backfill_since|address/.test(f.body), `${f.name}: reads no mailbox`);
+  }
+  assert(charge.body.includes(OPENS), `${charge.name}: the period opens on allowance_opened_at alone`);
+  // Disconnect deletes nothing the opening test reads.
+  const del = await mailFunction("delete_mail_address");
+  assert(!/mail_accounts|allowance/.test(del.body), `${del.name}: Disconnect never touches the allowance`);
+});
+
+Deno.test("enforce_budget_raises_the_ceiling_by_the_allowance_only_while_it_is_open", async () => {
+  const f = await mailFunction("enforce_budget");
+  assert(/enforce_budget\s*\(\s*p_account uuid, p_ceiling numeric\s*\)/.test(f.header), `${f.name}: same signature`);
+  assert(f.header.includes("returns boolean") && !f.header.includes("security definer"), `${f.name}: as before`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "enforce_budget", "uuid, numeric");
+  assert(
+    f.body.includes(
+      "select coalesce(sum(allowance_usd), 0) into raised from public.mail_accounts " +
+        "where account_id = p_account and allowance_until > now();",
+    ),
+    `${f.name}: the allowance's dollars, only inside its 14 days`,
+  );
+  assert(f.body.includes("if spent < p_ceiling + raised then return true;"), `${f.name}: the raised ceiling`);
+  assert(!/spent < p_ceiling then/.test(f.body), `${f.name}: no comparison against the bare ceiling`);
+  assert(
+    f.body.includes("from public.monthly_spend where account_id = p_account and month = date_trunc('month', current_date)"),
+    `${f.name}: still this month's spend, allowance calls' tokens included`,
+  );
+  assertEquals((f.body.match(/insert into public\.budget_alerts/g) ?? []).length, 1, `${f.name}: one alert insert`);
+});
+
+/** Every `cron.schedule('<job>', '<when>', $tag$ … $tag$)` in `sql`: name, schedule and command. */
+function cronJobs(sql: string): Array<{ job: string; when: string; command: string }> {
+  const re = /cron\.schedule\(\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*(\$\w*\$)([\s\S]*?)\3\s*\)/gi;
+  return [...sql.matchAll(re)].map((m) => ({ job: m[1], when: m[2], command: m[4].replace(/\s+/g, " ").trim() }));
+}
+
+Deno.test("the_mail_cron_jobs_use_the_vault_token", async () => {
+  // Spec §5.1's cron and §6.3's auth; plan P7 (the sweep is a mode of mail-process). As the billing
+  // job's guard (20260910000700): the URL and the token come from Vault, a missing one raises, and
+  // the request carries the token in `x-knowlu-job-token`, never a literal.
+  const { name, sql } = await mailMigration();
+  const jobs = cronJobs(sql);
+  const want: Record<string, { when: RegExp; url: string; body: string }> = {
+    "knowlu-mail-process": { when: /^\* \* \* \* \*$/, url: "mail_process_url", body: "'{}'::jsonb" },
+    "knowlu-mail-canary": { when: /^\d{1,2} \* \* \* \*$/, url: "mail_canary_url", body: "'{}'::jsonb" },
+    "knowlu-mail-sweep": { when: /^\d{1,2} \d{1,2} \* \* \*$/, url: "mail_process_url", body: `'{"mode": "sweep"}'::jsonb` },
+  };
+  assertEquals(jobs.map((j) => j.job).sort(), Object.keys(want).sort(), `${name}: the three mail jobs`);
+  for (const j of jobs) {
+    const w = want[j.job];
+    assert(w.when.test(j.when), `${name}: ${j.job} runs at '${j.when}'`);
+    const c = j.command.toLowerCase();
+    const secret = (s: string) =>
+      `(select decrypted_secret from vault.decrypted_secrets where name = '${s}' order by created_at desc limit 1)`;
+    assert(c.includes(`v_url text := ${secret(w.url)};`), `${name}: ${j.job}'s URL is Vault's ${w.url}`);
+    assert(c.includes(`v_token text := ${secret("mail_jobs_token")};`), `${name}: ${j.job}'s token is Vault's`);
+    assert(c.includes("if v_url is null or v_token is null then raise exception"), `${name}: ${j.job} fails loudly`);
+    assert(c.includes("'x-knowlu-job-token', v_token"), `${name}: ${j.job} sends the Vault token`);
+    assert(c.includes("perform net.http_post("), `${name}: ${j.job} calls through pg_net`);
+    assert(c.includes(`body := ${w.body}`), `${name}: ${j.job}'s body is ${w.body}`);
+    assert(/timeout_milliseconds := \d+/.test(c), `${name}: ${j.job} waits for the function`);
+    assertEquals((c.match(/'x-knowlu-job-token'/g) ?? []).length, 1, `${name}: ${j.job}: one token header`);
+  }
+  // The nightly sweep shares no minute with another nightly job in the corpus.
+  const sweep = jobs.find((j) => j.job === "knowlu-mail-sweep")!.when;
+  for (const [file, raw] of await everyMigrationFile()) {
+    for (const j of cronJobs(stripLineComments(raw))) {
+      if (j.job !== "knowlu-mail-sweep") assert(j.when !== sweep, `${file}: ${j.job} shares the sweep's '${sweep}'`);
+    }
+  }
+});
+
+// Email forwarding T2g.1 (spec §4.6 steps 5 and 8, D8): intake's two writes PostgREST cannot make alone.
+
+Deno.test("mail_hand_off_writes_the_seen_row_then_the_work_row_in_one_transaction", async () => {
+  // Spec §4.6 step 8: only after the put, the `mail_work` and `mail_seen` rows in one transaction. A
+  // function body is one transaction: a failed work insert takes the seen row back, and a concurrent
+  // delivery of the same Message-ID loses on the primary key and writes nothing.
+  const f = await mailFunction("mail_hand_off");
+  const args = "p_account uuid, p_address uuid, p_batch uuid, p_s3_key text, p_phase text, " +
+    "p_authenticity text, p_msg_hash text, p_fp_hash text, p_received_minute timestamptz";
+  assert(f.header.includes(`mail_hand_off( ${args} )`) || f.header.includes(`mail_hand_off(${args})`), f.header);
+  assert(f.header.includes("returns boolean"), `${f.name}: answers queued or duplicate`);
+  assert(!f.header.includes("security definer"), `${f.name}: security invoker, as charge_call`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "mail_hand_off", "uuid, uuid, uuid, text, text, text, text, text, timestamptz");
+  const steps = [
+    // Checkpoint B (minor): only a live mailbox takes work. The share lock holds Disconnect's `revoke` until
+    // this transaction ends, so its `mail_work` key read sees this row; once `revoked`, nothing is written,
+    // the caller deletes its put, and no object is left with nothing pointing at it.
+    "perform 1 from public.mail_addresses where id = p_address and account_id = p_account " +
+    "and status <> 'revoked' for share;",
+    "if not found then return false; end if;",
+    "insert into public.mail_seen (account_id, msg_hash, fp_hash, received_minute, address_id, phase) " +
+    "values (p_account, p_msg_hash, p_fp_hash, date_trunc('minute', p_received_minute), p_address, p_phase) " +
+    "on conflict (account_id, msg_hash) do nothing returning true into fresh;",
+    "if fresh is null then return false; end if;",
+    "insert into public.mail_work (account_id, address_id, batch_id, s3_key, phase, authenticity, msg_hash) " +
+    "values (p_account, p_address, p_batch, p_s3_key, p_phase, p_authenticity, p_msg_hash);",
+    "return true;",
+  ];
+  let at = -1;
+  for (const s of steps) {
+    const next = f.body.indexOf(s);
+    assert(next > at, `${f.name}: '${s}' in order (live mailbox, seen, the duplicate's way out, work)`);
+    at = next;
+  }
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 2, `${f.name}: the two inserts only`);
+});
+
+Deno.test("mail_claims_holds_one_row_per_mailbox_and_uid", async () => {
+  // Checkpoint B (minor): `mail-process` queues before it deletes the work row, so a failed delete runs the
+  // item again. The key makes the second queue a no-op (`on_conflict=address_id,uid`, ignore-duplicates).
+  const { name, sql } = await mailMigration();
+  const flat = sql.replace(/\s+/g, " ").toLowerCase();
+  assert(
+    flat.includes("create unique index if not exists mail_claims_uid on public.mail_claims (address_id, uid);"),
+    `${name}: mail_claims is unique on (address_id, uid), a whole-table index PostgREST's on_conflict can name`,
+  );
+});
+
+Deno.test("count_mail_arrival_adds_one_to_one_mailboxs_unbound_or_unauthenticated", async () => {
+  // Spec §4.6 steps 5 and 6: unbound and unauthenticated mail is counted on the address, by one
+  // statement, so two deliveries at once both count. Quinn's unbound-display ruling (2026-10-03): an
+  // unbound live forward also runs one of two counts since the last bound live forward (`unbound_own`,
+  // `unbound_foreign`), and a bound one (`live`, or `unauthenticated`: it bound, then failed step 6) sets
+  // both back to 0, writing nothing when they already are.
+  const f = await mailFunction("count_mail_arrival");
+  assert(/count_mail_arrival\s*\(\s*p_address uuid, p_counter text\s*\)/.test(f.header), f.header);
+  assert(f.header.includes("returns void") && !f.header.includes("security definer"), `${f.name}: invoker`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "count_mail_arrival", "uuid, text");
+  const bound = "p_counter in ('live', 'unauthenticated')";
+  assert(
+    f.body.includes(
+      "update public.mail_addresses set " +
+        "unbound = unbound + (p_counter in ('unbound', 'unbound_own', 'unbound_foreign'))::int, " +
+        "unauthenticated = unauthenticated + (p_counter = 'unauthenticated')::int, " +
+        `unbound_own_since_live = case when ${bound} then 0 ` +
+        "else unbound_own_since_live + (p_counter = 'unbound_own')::int end, " +
+        `unbound_foreign_since_live = case when ${bound} then 0 ` +
+        "else unbound_foreign_since_live + (p_counter = 'unbound_foreign')::int end " +
+        "where id = p_address " +
+        "and (p_counter <> 'live' or unbound_own_since_live + unbound_foreign_since_live > 0);",
+    ),
+    `${f.name}: one statement, one mailbox, the named counter only`,
+  );
+  const cols = tableColumns((await mailMigration()).sql, "mail_addresses");
+  for (const c of ["unbound_own_since_live", "unbound_foreign_since_live"]) {
+    const def = (cols.get(c) ?? "").replace(/\s+/g, " ");
+    assertEquals(def, `${c} integer not null default 0 check (${c} >= 0)`, `${f.name}: ${c} is a count`);
+  }
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 1, `${f.name}: one write`);
+});
+
+// Email forwarding T3e (spec §4.7 step 5, D8, test 7's expiry half): an item whose object expired first
+// is counted `expired` and loses its `mail_seen` row, so recover's re-forward of it is accepted.
+
+Deno.test("expire_mail_work_deletes_the_work_row_and_its_seen_row_and_counts_expired_in_one_transaction", async () => {
+  const f = await mailFunction("expire_mail_work");
+  assert(/expire_mail_work\s*\(\s*p_work bigint\s*\)/.test(f.header), `${f.name}: expire_mail_work(p_work bigint)`);
+  assert(f.header.includes("returns boolean"), `${f.name}: answers expired, or already gone`);
+  assert(!f.header.includes("security definer"), `${f.name}: security invoker, as mail_hand_off`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertServiceRoleOnly(f, "expire_mail_work", "bigint");
+  // The work row names its seen row by the keyed hash intake wrote into both (`mail_hand_off`).
+  const steps = [
+    "delete from public.mail_work where id = p_work returning account_id, address_id, msg_hash into gone;",
+    "if not found then return false; end if;",
+    "delete from public.mail_seen where account_id = gone.account_id and msg_hash = gone.msg_hash;",
+    "update public.mail_addresses set expired = expired + 1 where id = gone.address_id;",
+    "return true;",
+  ];
+  let at = -1;
+  for (const s of steps) {
+    const next = f.body.indexOf(s);
+    assert(next > at, `${f.name}: '${s}' in order (work, the second caller's way out, seen, the count)`);
+    at = next;
+  }
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 3, `${f.name}: the three writes only`);
 });
 
 Deno.test("F1: refund_call gives one call back in one guarded statement, bounded, and is revoked", async () => {
