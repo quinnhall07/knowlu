@@ -3454,7 +3454,7 @@
     EL("wiz-school-hits").innerHTML = "";
   });
   EL("wiz-school-free").addEventListener("input", function () {
-    WIZ.campus = { unitid: "", name: EL("wiz-school-name").value.trim(), state: EL("wiz-school-state").value.trim().toUpperCase(), lms: WIZ.campus.lms || "" };
+    WIZ.campus = { unitid: "", name: EL("wiz-school-name").value.trim(), state: EL("wiz-school-state").value.trim().toUpperCase(), lms: WIZ.campus.unitid ? "" : (WIZ.campus.lms || "") };
     // Ruling 2026-10-02: a hand-typed school is asked its LMS directly, once name and state are both in.
     var typed = !!(WIZ.campus.name && WIZ.campus.state);
     EL("wiz-lms-kind").hidden = !(typed && !WIZ.campus.lms);

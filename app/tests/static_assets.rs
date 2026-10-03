@@ -514,6 +514,7 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     assert!(free.contains("var typed = !!(WIZ.campus.name && WIZ.campus.state);"), "…keyed on both fields");
     assert!(free.contains("WIZ.icsNote = typed ?") && free.contains("paste your calendar link below"), "…with the paste-link note, cleared otherwise");
     assert!(free.contains("unitid: \"\""), "free entry keeps the unitid empty, so sign-in stays disabled");
+    assert!(free.contains("lms: WIZ.campus.unitid ? \"\" : (WIZ.campus.lms || \"\")"), "a curated school's lms is never carried into a free entry");
     assert!(!html.contains("name=\"campus\""), "no campus radios anywhere on the page");
     assert!(!js.contains("input[name=\\\"campus\\\"]"), "…and nothing reads one");
     assert!(js.contains("function schoolHits(") && js.contains("\"campus_search\""), "the typeahead asks Rust");
