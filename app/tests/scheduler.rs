@@ -2064,6 +2064,16 @@ fn a_forwarding_found_off_is_turned_back_on_and_reported_reenabled() {
 }
 
 #[test]
+fn a_failed_forwarding_read_never_moves_last_known_on_forward() {
+    let p = Pass::new("unchecked", "quiet", json!({ "result": "error" }));
+    p.last_reconcile(rig::NOW - 10 * rig::DAY);
+    p.mail(&[("Newer notice", rig::NOW - 3600)]);
+    assert_eq!(p.run().as_deref(), Some("mail: forwarding not checked, 1 recovered"));
+    assert_eq!(p.svc.bodies("/reconcile")[0]["since"], json!(rig::iso(rig::NOW - 3 * rig::DAY)));
+    assert_eq!(MailState::load(&p.d).unwrap().last_reconcile[rig::ID], rig::iso(rig::NOW - 10 * rig::DAY), "an unconfirmed forwarding is not a last-known-on");
+}
+
+#[test]
 fn recovery_reaches_back_three_days_when_forwarding_is_on() {
     let p = Pass::new("on", "active", rig::fwd("on", "ours"));
     p.mail(&[("Older notice", rig::NOW - 8 * rig::DAY), ("Newer notice", rig::NOW - 3600)]);

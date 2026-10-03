@@ -161,8 +161,10 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
     };
     let mut routine = seed_routine(env.data_dir, provider, id, now);
     let out = run_pass(env.host, env.client, env.clock, &mut routine, &job);
-    // Only a whole pass moves the day on: one that stopped early is due again at the next slot.
-    if out.stop == Stop::Done {
+    // Only a whole pass moves the day on: one that stopped early is due again at the next slot. And only one
+    // that read the forwarding setting: a failed read is no proof forwarding was on, so it must not move
+    // "last known on" forward (§4.11: recovery reaches back to when it last was).
+    if out.stop == Stop::Done && !matches!(fwd, Fwd::Unchecked) {
         let at = jiff::Timestamp::from_second(now).map(|t| t.to_string()).unwrap_or_default();
         let _ = MailState::update(env.data_dir, |s| {
             s.last_reconcile.insert(id.to_string(), at);
