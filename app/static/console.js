@@ -2698,6 +2698,8 @@
     // the window opens would read the identity provider's page, not the school's — the student has
     // not signed in yet, and the answer would be "finish signing in first" every time.
     EL("wiz-lms-capture").hidden = !WIZ.lmsOpen;
+    // F4: the sign-in page is looked up by school, so the button waits for one to be picked.
+    EL("wiz-lms-open").disabled = !WIZ.campus.unitid;
     EL("wiz-ics-note").textContent = WIZ.ics && !ICS_OK.test(WIZ.ics) ? "That does not look like a calendar feed link." : "";
     EL("wiz-cal-note").textContent = WIZ.calNote;
     // A-5: driven entirely by WIZ state, so returning to this panel (or any other re-render while
@@ -3134,6 +3136,8 @@
       return;
     }
     if (e.target.closest("#wiz-lms-open")) {
+      // F4: no school picked, no sign-in page to open. The button is disabled then; this is the backstop.
+      if (!WIZ.campus.unitid) { return; }
       WIZ.icsNote = "Opening your school’s sign-in page…";
       renderWizard();
       invoke("open_lms_window", { unitid: WIZ.campus.unitid }).then(function (r) {
@@ -3450,8 +3454,13 @@
     EL("wiz-school-hits").innerHTML = "";
   });
   EL("wiz-school-free").addEventListener("input", function () {
-    WIZ.campus = { unitid: "", name: EL("wiz-school-name").value.trim(), state: EL("wiz-school-state").value.trim().toUpperCase(), lms: "" };
+    WIZ.campus = { unitid: "", name: EL("wiz-school-name").value.trim(), state: EL("wiz-school-state").value.trim().toUpperCase(), lms: WIZ.campus.unitid ? "" : (WIZ.campus.lms || "") };
+    // Ruling 2026-10-02: a hand-typed school is asked its LMS directly, once name and state are both in.
+    var typed = !!(WIZ.campus.name && WIZ.campus.state);
+    EL("wiz-lms-kind").hidden = !(typed && !WIZ.campus.lms);
+    WIZ.icsNote = typed ? "Sign-in isn’t available for schools that aren’t listed yet - paste your calendar link below." : "";
     EL("wiz-school-picked").textContent = "";
+    renderWizard();
   });
   // The two-button fallback for a school whose LMS nothing established — shown by the sign-in handler
   // when `open_lms_window` says it does not know where to go.
