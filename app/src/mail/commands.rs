@@ -205,9 +205,9 @@ pub fn run_engine(argv: &[String]) -> Result<String, String> {
 /// How long the sign-in may take (the school's SSO, Duo, the phone tap), as the runner waits.
 const SIGN_IN_WAIT: i64 = 15 * 60;
 /// How long a hidden window on a saved sign-in is given to read as the mailbox before the student is asked.
-const SILENT_WAIT: i64 = 30;
+pub(super) const SILENT_WAIT: i64 = 30;
 /// How long a closed window is waited for to be gone before the next one opens.
-const GONE_WAIT: i64 = 10;
+pub(super) const GONE_WAIT: i64 = 10;
 
 /// `mail_sign_in(address_id)`, a repair: the visible window on the mailbox's kept profile until the page
 /// reads as a signed-in mailbox, then it closes and the sign-in is kept for the next slot. A window the
@@ -232,7 +232,7 @@ pub fn sign_in_with(host: &dyn Host, clock: &dyn Clock, data_dir: &Path, provide
 }
 
 /// Polls until the page reads as the mailbox (`true`), the window is gone or `limit` seconds pass.
-fn wait_signed_in(host: &dyn Host, clock: &dyn Clock, limit: i64) -> bool {
+pub(super) fn wait_signed_in(host: &dyn Host, clock: &dyn Clock, limit: i64) -> bool {
     let end = clock.now() + limit;
     loop {
         if host.signed_in() {
@@ -381,7 +381,7 @@ fn run_steps(d: &Disconnect, provider: Provider, address: &str) -> Vec<Value> {
 
 /// One step script, run again once with `reloaded: true` when a Gmail page reloads under it (as the setup
 /// runner does); `None` when the window refused. A second reload is the page's answer, which is no `ok`.
-fn run_script(host: &dyn Host, provider: Provider, script: &str, mut args: Value) -> Option<Value> {
+pub(super) fn run_script(host: &dyn Host, provider: Provider, script: &str, mut args: Value) -> Option<Value> {
     for attempt in 0..2 {
         let r = host.script(script, &args);
         let reloading = match &r {

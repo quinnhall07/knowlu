@@ -27,6 +27,7 @@ pub mod live;
 pub mod recover;
 mod runner;
 pub mod setup;
+pub mod slot;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
