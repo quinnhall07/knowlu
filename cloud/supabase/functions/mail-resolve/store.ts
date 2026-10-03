@@ -39,9 +39,10 @@ export function storeOver(rest: Rest): ResolveStore {
       return await (await call(rest, "rows", `mail_claims?${q}`)).json() as ClaimRowRef[];
     },
     async answer(accountId, rowId, open, claims) {
-      // The compare-and-set: the write lands only while each claim it fills still has no resolution
-      // (`->>` reads a JSON null and a missing key alike as SQL null). Answers are only ever added, so a
-      // claim still unanswered means the row is as it was read.
+      // The compare-and-set: the write lands only while every claim unanswered at the caller's read still
+      // has no resolution (`->>` reads a JSON null and a missing key alike as SQL null). The PATCH carries
+      // the whole array, and answers are only ever added, so with each of them still unanswered the row is
+      // as it was read and no answer another call stored, on any claim, is erased.
       const unanswered = open.map((i) => `claims->${Math.trunc(i)}->>resolution=is.null`).join("&");
       const q = `id=eq.${Math.trunc(rowId)}&${account(accountId)}&${unanswered}&select=id`;
       const res = await call(
@@ -89,5 +90,13 @@ export function resolveCharges(db: Db): ResolveCharges {
         // As `capStore.recordTokens`: the next `enforce_budget` still reads every call that did record.
       }
     },
+    refundDaily: (account) =>
+      yes(
+        db.rpc("refund_call", {
+          p_account: account,
+          p_kind: "mail_resolve",
+          p_cap: MAIL_DAILY_CAP.mail_resolve,
+        }),
+      ),
   };
 }

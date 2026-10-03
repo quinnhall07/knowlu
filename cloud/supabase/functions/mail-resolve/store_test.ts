@@ -42,7 +42,7 @@ Deno.test("the_rows_read_is_the_accounts_own_and_short", async () => {
   assertEquals(empty.seen, []);
 });
 
-Deno.test("an_answer_lands_only_while_each_claim_it_fills_is_unanswered", async () => {
+Deno.test("an_answer_lands_only_while_each_claim_unanswered_at_its_read_still_is", async () => {
   const claims = [{ kind: "change", resolution: { target_id: "n-1" } }, { kind: "change", resolution: null }];
   const won = recording(() => new Response(JSON.stringify([{ id: 42 }]), { status: 200 }));
   assertEquals(await won.store.answer(ACCT, 42, [0, 1], claims), true);
@@ -85,4 +85,20 @@ Deno.test("the_charges_are_mail_resolves_and_an_unreachable_one_refuses", async 
   assertEquals(await charges.withinBudget(ACCT), false);
   assertEquals(await charges.charge(ACCT), false);
   await charges.recordTokens(ACCT, 1, 1); // never throws
+});
+
+Deno.test("a_daily_cap_refund_is_main_f1s_refund_call_for_mail_resolve_and_an_unreachable_one_refuses", async () => {
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  let fail = false;
+  const db = {
+    rpc: (name: string, args: Record<string, unknown>) => {
+      calls.push([name, args]);
+      return fail ? Promise.reject(new Error("down")) : Promise.resolve(true);
+    },
+  } as unknown as Db;
+  const charges = resolveCharges(db);
+  assertEquals(await charges.refundDaily(ACCT), true);
+  assertEquals(calls, [["refund_call", { p_account: ACCT, p_kind: "mail_resolve", p_cap: 20 }]]);
+  fail = true;
+  assertEquals(await charges.refundDaily(ACCT), false);
 });

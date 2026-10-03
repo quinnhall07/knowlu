@@ -92,6 +92,15 @@ class FakeStore implements ResolveStore {
     if (row === undefined) return Promise.resolve(false);
     const stillOpen = open.every((i) => (row.claims[i] as Record<string, unknown>)?.resolution == null);
     if (!stillOpen) return Promise.resolve(false);
+    // The SQL writes the whole array as given; a landed write that drops a stored answer is the bug this
+    // fake exists to catch, so it fails the test rather than modelling the loss quietly.
+    row.claims.forEach((c, i) => {
+      const was = (c as Record<string, unknown>)?.resolution;
+      const now = (claims[i] as Record<string, unknown>)?.resolution;
+      if (was != null && JSON.stringify(was) !== JSON.stringify(now)) {
+        throw new Error(`a landed write erased claim ${i}'s stored answer`);
+      }
+    });
     row.claims = structuredClone(claims);
     return Promise.resolve(true);
   }
@@ -135,6 +144,7 @@ function world(replies: Array<Record<string, unknown> | Error> = [], status: Ent
     withinBudget: () => (w.events.push("budget"), Promise.resolve(w.budget)),
     charge: () => (w.events.push("charge"), Promise.resolve(w.cap)),
     recordTokens: () => (w.events.push("tokens"), Promise.resolve()),
+    refundDaily: () => (w.events.push("refund"), Promise.resolve(true)),
   };
   const handler = resolveHandler({
     entitle: gate(status),
@@ -387,6 +397,29 @@ Deno.test("a_failed_model_call_stores_nothing_and_answers_its_cause_by_name", as
   }
 });
 
+Deno.test("a_model_failure_gives_its_daily_cap_charge_back_and_a_refusal_or_truncation_keeps_it", async () => {
+  // Main's F1 rule (PR #33): a call the model never answered is given back by refund_call; a refusal or a
+  // truncation reached the model and stays charged.
+  const cases: Array<[Error, string, string[]]> = [
+    [new Error("upstream 503"), "model failed", ["budget", "charge", "model", "refund"]],
+    [new ModelRefused("refusal"), "refused", ["budget", "charge", "model"]],
+    [new Error("stop_reason max_tokens"), "truncated", ["budget", "charge", "model"]],
+  ];
+  for (const [error, cause, events] of cases) {
+    const w = world([error]);
+    w.store.add(ACCT, 1, [change("Lab 3")]);
+    const res = await w.post({ claims: [key(1, 0)], candidates: CANDIDATES });
+    assertEquals(res.status, 502, cause);
+    await res.body?.cancel();
+    assertEquals(w.events, events, cause);
+  }
+  // An answered call keeps its charge.
+  const ok = world([{ answers: [{ claim: key(1, 0), target_id: "n-101" }] }]);
+  ok.store.add(ACCT, 1, [change("Lab 3")]);
+  await answers(await ok.post({ claims: [key(1, 0)], candidates: CANDIDATES }));
+  assert(!ok.events.includes("refund"));
+});
+
 Deno.test("a_batch_with_nothing_to_ask_makes_no_call_and_no_charge", async () => {
   const w = world([]);
   w.store.add(ACCT, 1, [change("Lab 3"), info()]);
@@ -419,6 +452,26 @@ Deno.test("an_answer_stored_by_another_call_first_wins", async () => {
   assertEquals(got, [{ claim: key(1, 0), target_id: "n-102" }, { claim: key(1, 1), target_id: "n-103" }]);
   assertEquals(w.store.resolution(1, 0), { target_id: "n-102" });
   assertEquals(w.store.resolution(1, 1), { target_id: "n-103" });
+});
+
+Deno.test("an_answer_another_call_stored_on_a_claim_this_call_does_not_fill_survives", async () => {
+  // One message, two course batches sent at once: this call asks claim 0 (CS101's) while another stores
+  // claim 1's (MATH200's) answer between this call's read and its write.
+  const w = world([{ answers: [{ claim: key(1, 0), target_id: "n-101" }] }]);
+  const row = w.store.add(ACCT, 1, [change("Lab 3"), change("Quiz 2", { course: "MATH-200" })]);
+  let once = true;
+  w.store.beforeAnswer = () => {
+    if (!once) return;
+    once = false;
+    (row.claims[1] as Record<string, unknown>).resolution = { target_id: "n-7" };
+  };
+  assertEquals(await answers(await w.post({ claims: [key(1, 0)], candidates: CANDIDATES })), [
+    { claim: key(1, 0), target_id: "n-101" },
+  ]);
+  // Both answers are held: the other call's is never erased by this call's older copy of the row.
+  assertEquals(w.store.resolution(1, 0), { target_id: "n-101" });
+  assertEquals(w.store.resolution(1, 1), { target_id: "n-7" });
+  assertEquals(w.model.seen.length, 1);
 });
 
 Deno.test("the_resolve_needs_a_session_an_entitlement_post_and_a_bounded_batch", async () => {

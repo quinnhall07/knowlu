@@ -23,8 +23,10 @@
  * **What is stored** (D12: the model's answer is data): `resolution: {target_id}` on each asked claim of an
  * answered call, the model's nones included. A capped, over-budget, failed, refused or truncated call stores
  * nothing (429 `capped` / `over budget`, 502 with the cause), so the device asks again at a later slot. A
- * stored answer is never overwritten: a write lands only while every claim it fills is still unanswered,
- * and an answer another call stored first wins.
+ * `model failed` call gives its day's-cap charge back by main's F1 `refund_call`; a refusal or a truncation
+ * reached the model and stays charged (F1's rule, plan §9.5). A stored answer is never overwritten or
+ * erased: the write carries the whole claims array, so it lands only while every claim unanswered at its
+ * read is still unanswered, and an answer another call stored first, on any claim, wins and is kept.
  *
  * **Privacy:** nothing here logs; the judgment row holds counts, never a title, target or id.
  */
@@ -55,8 +57,8 @@ export interface ClaimRowRef {
 export interface ResolveStore {
   /** The account's rows whose uid is listed, in id order. */
   rows(accountId: string, uids: string[]): Promise<ClaimRowRef[]>;
-  /** Writes `claims` over the account's row `id` only while each index in `open` still has no resolution;
-   * false, with nothing written, otherwise. */
+  /** Writes `claims` over the account's row `id` only while each index in `open` (every claim that had no
+   * resolution when the row was read) still has none; false, with nothing written, otherwise. */
   answer(accountId: string, id: number, open: number[], claims: unknown[]): Promise<boolean>;
 }
 /** The pipeline's guards for `mail_resolve`, each one statement in SQL; an unreachable one refuses. */
@@ -67,6 +69,9 @@ export interface ResolveCharges {
   charge(account: string): Promise<boolean>;
   /** `record_tokens` for `mail_resolve`; never throws. */
   recordTokens(account: string, inTokens: number, outTokens: number): Promise<void>;
+  /** Main's F1 `refund_call` for `mail_resolve`: one call back after a call the model never answered. Not in
+   * this branch's base, so until main is merged it fails and refuses, keeping the charge (§9.5, T17). */
+  refundDaily(account: string): Promise<boolean>;
 }
 export interface ResolveDeps {
   /** A session and an active entitlement (`requireActiveEntitlement`). */
@@ -160,6 +165,12 @@ function askable(claim: unknown): { names: string; due: string | null } | null {
   return null;
 }
 
+/** True while a stored claim has no resolution at all, as the SQL's `claims->i->>resolution is null` reads
+ * it (a JSON null, a missing key, or an element that is no object). */
+function unresolved(claim: unknown): boolean {
+  return !isRecord(claim) || claim.resolution === null || claim.resolution === undefined;
+}
+
 /** A claim's stored answer, `{target_id: <id> | null}`; undefined while it has none. */
 function storedAnswer(claim: unknown): Answer | undefined {
   if (!isRecord(claim) || !isRecord(claim.resolution)) return undefined;
@@ -192,13 +203,16 @@ async function storeAnswers(
     let lost = false;
     for (const row of rows) {
       const claims = structuredClone(row.claims);
-      const open: number[] = [];
+      // Every claim unanswered at this read, filled here or not: the write carries the whole array, so an
+      // answer another call stores on any of them in between must refuse it, never be erased by it.
+      const open = claims.flatMap((c, i) => unresolved(c) ? [i] : []);
+      let filled = false;
       for (const [i, answer] of fills) {
-        if (!isRecord(claims[i]) || storedAnswer(claims[i]) !== undefined) continue;
+        if (!isRecord(claims[i]) || !unresolved(claims[i])) continue;
         claims[i] = { ...claims[i], resolution: answer };
-        open.push(i);
+        filled = true;
       }
-      if (open.length > 0 && !await deps.store.answer(account, row.id, open, claims)) lost = true;
+      if (filled && !await deps.store.answer(account, row.id, open, claims)) lost = true;
     }
     if (!lost) break;
     rows = await deps.store.rows(account, [uid]);
@@ -277,6 +291,8 @@ async function askModel(
     // The error's text is never carried anywhere: a provider's message is where a prompt can come back.
     const cause = failureCause(e);
     await record({ ...pinned, outcome: "low confidence", cause });
+    // No answer: the day's-cap charge is given back (main's F1 rule); a refusal or truncation keeps it.
+    if (cause === "model failed") await deps.charges.refundDaily(account);
     return fail(502, cause);
   }
   await deps.charges.recordTokens(account, reply.inputTokens, reply.outputTokens);
