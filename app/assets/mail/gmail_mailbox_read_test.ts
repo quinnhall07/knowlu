@@ -109,6 +109,15 @@ Deno.test("gmail_the_list_reads_sender_subject_and_received_time_in_s2s_form", a
   const t = mailbox([{ ...MAIL[0], also: ["bo.chen@school.example.invalid"] }]);
   const row = (await run("gmail/list.js", t.page, FAST)).rows[0];
   assertEquals([row.sender, row.thread], ["bo.chen@school.example.invalid", true]);
+  assertEquals(row.messages, null, "no count shown, so none read");
+  // Quinn 2026-10-02: a row that shows a message count is a thread even when one person wrote them all,
+  // and the count is read (the routine opens it and reads each message, thread.js).
+  const counted = mailbox([{ ...MAIL[0], count: 3 }, MAIL[1]]);
+  const rows = (await run("gmail/list.js", counted.page, FAST)).rows;
+  const named = rows.find((r: { subject: string }) => r.subject === "Quiz 3 moved");
+  assertEquals([named.thread, named.messages], [true, 3]);
+  const plain = rows.find((r: { subject: string }) => r.subject === "Lab report due");
+  assertEquals([plain.thread, "messages" in plain], [false, false]);
 });
 
 Deno.test("gmail_the_list_names_a_row_it_cannot_read_and_a_page_with_no_list", async () => {

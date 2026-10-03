@@ -49,6 +49,42 @@ Deno.test("gmail_forward_as_attachment_keeps_each_send_under_25_mb_with_the_nonc
   assertEquals(drive.sent, []);
 });
 
+Deno.test("gmail_forward_of_a_conversation_row_expects_one_attachment_per_message_in_it", async () => {
+  // T11.2: a conversation row of three messages, forwarded with the row's count, attaches three; the plain
+  // row beside it attaches one. Four attachments for two rows is what the page is expected to show.
+  const small = MAIL.map((m) => ({ ...m, size: 1_000_000 }));
+  const convo = {
+    ...small[1],
+    count: 3,
+    convo: [small[1], small[1], small[1]].map((m) => ({ who: m.who, at: m.at })),
+  };
+  const box = mailbox([small[0], convo]);
+  const r = await run("gmail/forward.js", box.page, {
+    ...TARGET,
+    rows: [row(MAIL[0]), { ...row(MAIL[1]), messages: 3 }],
+  });
+  assertEquals(r, { result: "ok", sent: true, count: 4 });
+  assertEquals(box.sent[0].attached, ["m1", "m2#0", "m2#1", "m2#2"]);
+  // Without the count the same send is refused: three attachments for one row is not what was asked.
+  const blind = mailbox([small[0], convo]);
+  assertEquals(await run("gmail/forward.js", blind.page, { ...TARGET, rows: [row(MAIL[0]), row(MAIL[1])] }), {
+    result: "failed",
+    reason: "attachments do not match the rows",
+  });
+  assertEquals([blind.sent, blind.discards, blind.checked()], [[], 1, []]);
+  // If "Forward as attachment" attaches only the newest message of a conversation, the count does not
+  // match, nothing is sent and the draft is discarded: the routine leaves that row (T18c's gate).
+  const newest = mailbox([small[0], convo], { newestOnly: true });
+  assertEquals(
+    await run("gmail/forward.js", newest.page, {
+      ...TARGET,
+      rows: [row(MAIL[0]), { ...row(MAIL[1]), messages: 3 }],
+    }),
+    { result: "failed", reason: "attachments do not match the rows" },
+  );
+  assertEquals([newest.sent, newest.discards, newest.checked()], [[], 1, []]);
+});
+
 Deno.test("gmail_forward_names_a_message_or_control_that_is_not_on_the_page_and_sends_nothing", async () => {
   const gone = mailbox(MAIL);
   const missing = { ...row(MAIL[1]), subject: "Something else" };

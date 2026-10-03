@@ -2,13 +2,15 @@
 // Junk Email, Deleted Items, Sent Items and Drafts, and read the number of results from the list's
 // aria-setsize (spec 4.2 step 5, 4.11 step 3). The caller has Outlook's mail view open. Like every step
 // script it is the body of an async function of `args`: `args.since` is a day, `YYYY-MM-DD`;
+// `args.until` is optional, a later day, `YYYY-MM-DD`, before which the mail must have been received (so
+// `[since, until)`: the routine narrows a window to a span the virtualised list can draw whole, T11.2);
 // `args.wait_ms` (default 10000) bounds the wait for the page to answer. It returns one of
 //   { result: "ok", count: number }          (the list is virtualised: the count is aria-setsize, never
 //                                             the number of rows drawn)
 //   { result: "not found", control: "search" | "result count" }
 //   { result: "failed", reason: "bad date" | "search did not settle" }
-// The query is `received>=<since>` with `NOT folder:"Junk Email" NOT folder:"Deleted Items"
-// NOT folder:"Sent Items" NOT folder:"Drafts"`, so the results are mail the mailbox received and nothing
+// The query is `received>=<since>` (and `received<<until>` when given) with `NOT folder:"Junk Email"
+// NOT folder:"Deleted Items" NOT folder:"Sent Items" NOT folder:"Drafts"`, so the results are mail the mailbox received and nothing
 // else: Exchange gives a Sent Items row a received time, and the student's own replies, or a Knowlu copy a
 // failed cleanup left there, must never be forwarded as "missing". Whether Outlook reads that syntax is a live
 // check (plan T11, T18c), not a thing the synthetic page can say.
@@ -45,13 +47,15 @@ const press = (el, key) => {
   }
 };
 
+const isDay = (v) => {
+  const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  const real = parts && new Date(Date.UTC(+parts[1], +parts[2] - 1, +parts[3]));
+  return !!real && real.getUTCFullYear() === +parts[1] && real.getUTCMonth() === +parts[2] - 1 &&
+    real.getUTCDate() === +parts[3];
+};
 const since = String((args && args.since) || "");
-const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(since);
-const real = parts && new Date(Date.UTC(+parts[1], +parts[2] - 1, +parts[3]));
-if (
-  !real || real.getUTCFullYear() !== +parts[1] || real.getUTCMonth() !== +parts[2] - 1 ||
-  real.getUTCDate() !== +parts[3]
-) {
+const before = args && args.until !== undefined && args.until !== null ? String(args.until) : "";
+if (!isDay(since) || (before !== "" && (!isDay(before) || before <= since))) {
   return { result: "failed", reason: "bad date" };
 }
 const waitMs = Number(args.wait_ms) >= 0 ? Number(args.wait_ms) : 10000;
@@ -73,8 +77,8 @@ const none = () =>
 const was = new Set(rows());
 const hadNone = none();
 
-const query = `received>=${since} NOT folder:"Junk Email" NOT folder:"Deleted Items"` +
-  ` NOT folder:"Sent Items" NOT folder:"Drafts"`;
+const query = `received>=${since}${before ? ` received<${before}` : ""} NOT folder:"Junk Email"` +
+  ` NOT folder:"Deleted Items" NOT folder:"Sent Items" NOT folder:"Drafts"`;
 setValue(box, query);
 if (go) go.click();
 else press(box, "Enter");

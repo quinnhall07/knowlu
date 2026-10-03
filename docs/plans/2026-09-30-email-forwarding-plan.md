@@ -1658,8 +1658,10 @@ subject from `.bog`, time from the `[title]` that holds a clock time, and each r
 at the real pager's name (the routine, T11.2, reads the oldest page with `go: "oldest"`, then `"newer"`; a
 missing "Oldest" on a multi-page result is `not found` `pager` and the step's guided fallback). Gmail lists
 conversations, not messages: a row with several senders is read as its newest and `thread: true`. This is
-a named gate (T18c, "Gmail conversation rows"; T11.2's `a_gmail_thread_row_is_left_for_guided_never_sent`),
-not a note. Three consequences: (a) `list.js` reads a conversation's newest sender and time only, so
+a named gate (T18c, "Gmail conversation rows"; T11.2's `a_gmail_thread_row_is_opened_and_every_message_in_it_is_fingerprinted`),
+not a note. **Superseded in part (Quinn, 2026-10-02, T11.2):** `list.js` now reads the count and the
+routine opens a thread row and fingerprints each message, so (a) and (b) below describe what T10.3b
+built, not what the routine does. Three consequences: (a) `list.js` reads a conversation's newest sender and time only, so
 reconcile never fingerprints its older messages and a missing older message is never recovered; and
 `thread` is true only when the row shows two or more different senders, so a conversation of several
 messages from one sender reads `thread: false` (the live run must show whether the row carries a count to
@@ -1772,27 +1774,50 @@ never writes the vault here: the vault changes only through the engine's `judge`
 - `no_token_or_address_reaches_an_error_string`
 - `a_timeout_is_a_named_outcome`
 
-#### T11.2. Reconcile and recover (`app/src/mail.rs`)
+#### T11.2. Reconcile and recover (`app/src/mail.rs`, in `app/src/mail/recover.rs`)
 
-**Tests first** (spec §4.11 steps 3–4 and test 32's pace half, as plan tests):
+**Built** (2026-10-02). **Tests first** (spec §4.11 steps 3–4 and test 32's pace half, as plan tests, in
+`app/tests/mail.rs`):
 - `a_listed_message_is_held_when_its_hmac_matches_within_fifteen_minutes`
 - `nothing_about_an_unheld_message_is_sent_to_the_service`
 - `recover_forwards_oldest_first_and_at_most_30_a_slot_when_no_backfill_is_open`
 - `an_open_backfill_ignores_the_slot_cap_and_keeps_microsofts_pace`
 - `the_window_is_three_days_or_back_to_lapsed_since_at_most_30_or_to_when_last_known_on`
 - `the_batch_closes_with_the_count_sent_and_the_sent_copies_are_cleaned`
-- `a_gmail_thread_row_is_left_for_guided_never_sent`
+- `a_gmail_thread_row_is_opened_and_every_message_in_it_is_fingerprinted` (replaces
+  `a_gmail_thread_row_is_left_for_guided_never_sent`; Quinn's ruling below)
 - `on_gmail_expected_and_the_progress_count_are_conversations`
+- `a_microsoft_window_too_large_to_draw_is_narrowed_and_one_day_too_large_is_left` (T10.2b's live check
+  (2): the routine narrows the virtualised list), `a_guided_mailbox_runs_nothing`
 
-**Behaviour for Gmail conversation rows** (T10.3b review; until the T18c gate "Gmail conversation rows"
-says otherwise). The routine sends only the rows `list.js` returns with `thread: false`, one message
-each. A `thread: true` row is never ticked, so `forward.js` is never handed a page whose attachments
-cannot match its rows; it is counted, and named in the batch's closing view as "left for you" (the number
-of conversations skipped, never their senders or subjects). The batch's `expected` is the pager's
-conversation total and its progress compares conversations handled (sent or left) against it. This
-narrows what Gmail backfill promises: a conversation with more than one sender is not backfilled by the
-routine. **Ask Quinn** before T11.2 is dispatched whether that is acceptable or the routine should open
-a thread and fingerprint each message instead; the answer changes this task's size.
+**Gmail conversation rows: open each thread** (Quinn, 2026-10-02; replaces the T10.3b review's "left for
+guided" behaviour, which this section carried until now). For a list row that shows a message count
+(`list.js` returns `thread: true` and `messages`: the count beside the sender names, or two or more
+senders), the hidden window **opens the conversation** (`gmail/thread.js`, new) and fingerprints **every
+message in it**: sender is the address from `span[email]`, received time the time element's `title`
+(full date and time), subject the conversation's (a later message is also tried as `Re: <subject>`). The
+rows are opened only inside the window. A conversation whose messages are all held is done. One with a
+missing message is forwarded **alone** through `forward.js`, which now takes a per-row `messages` count and
+expects that many attachments; the batch's `sent` counts each message in it. If Gmail attaches fewer
+(T18c's gate (2)) `forward.js` refuses ("attachments do not match the rows"), the draft is discarded and
+the conversation is **left** (counted, never named, never retried); the same for a conversation that will
+not draw whole ("not every message drawn"). The batch's `expected` is still the pager's conversation
+total and progress compares conversations handled against it, while `sent` is messages.
+
+**Microsoft 365's list is virtualised** (T10.2b's live check (2)): `search.js` gains an optional `until`
+(`received<until`, a day), and the routine searches the whole window first, then halves a span the list
+does not draw whole until it does, down to one day; a day still too large is sent as far as it draws and
+the rest counted as left. Rows go oldest first within a span, and spans run oldest first.
+
+**Rulings in the build.** (1) `until` is 15 minutes before the pass: mail that has just arrived is still on
+the live path and would read as missing. (2) The saved session's window reaches back to when forwarding
+was last known on at most as far as the 120-day backfill window, which is as far as the service lets
+reconcile and recover go. (3) A listed row whose time the page would not read cannot be fingerprinted and
+is left, never forwarded. (4) The Gmail Inbox look for a non-delivery report between sends (T10.3b live
+check (4)) is not done: `forward.js` reads only the page it is given and checks its rows after its own
+guards, so it cannot probe an Inbox; a bounce is seen on the next pass's pages and by the canary. (5)
+`expected` is the search count in both phases, and a recover batch opens at its first send, a backfill
+batch before the list.
 
 #### T11.3. The setup runner (`app/src/mail.rs`)
 
@@ -2048,7 +2073,7 @@ controller's (spec T18; HANDOFF §2's controller rules).
   tap. Until S6 confirms the pace, the school backfill stays under 600. Afterwards, clean up per the
   standing rule and restore the school mailbox's forwarding.
   **Gate, Gmail conversation rows** (T10.3b review; a result recorded in the proof record, and T11.2's
-  `a_gmail_thread_row_is_left_for_guided_never_sent` stays until a commit records it): on a scratch Gmail
+  `a_gmail_thread_row_is_opened_and_every_message_in_it_is_fingerprinted` stays until a commit records it): on a scratch Gmail
   mailbox holding a conversation of several messages from one sender and one of several senders, see
   live (1) what the list row shows (a count beside the name, several `span[email]`), and that `thread`
   is true for both; (2) what "Forward as attachment" attaches for a conversation row (every message or

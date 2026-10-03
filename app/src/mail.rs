@@ -19,6 +19,8 @@
 //! debugging port.
 use crate::mail_steps::Provider;
 use serde_json::Value;
+
+pub mod recover;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -153,7 +155,7 @@ macro_rules! compiled {
 
 /// Every step script there is. T10 adds each provider's under `m365/` and `gmail/`: so far Microsoft
 /// 365's sign-in probe and forwarding scripts (T10.2a) and its mailbox scripts (T10.2b), and Gmail's
-/// forwarding scripts (T10.3a) and mailbox scripts (T10.3b).
+/// forwarding scripts (T10.3a) and mailbox scripts (T10.3b), and Gmail's conversation reader (T11.2).
 static SCRIPTS: &[Script] = compiled![
     "ready.js",
     "m365/signin.js",
@@ -174,6 +176,7 @@ static SCRIPTS: &[Script] = compiled![
     "gmail/list.js",
     "gmail/forward.js",
     "gmail/sent_cleanup.js",
+    "gmail/thread.js",
 ];
 
 pub fn scripts() -> &'static [Script] {

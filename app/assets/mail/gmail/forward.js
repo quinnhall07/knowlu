@@ -3,10 +3,13 @@
 // 13). The caller has the mail view open on a page of results (list.js) and passes that page's rows as
 // list.js read them. Like every step script it is the body of an async function of `args`:
 // `args.address` is this mailbox's Knowlu forwarding address, `args.nonce` the open batch's nonce,
-// `args.rows` the messages to send ([{ sender, subject, received }], at most 100, all on this page),
+// `args.rows` the rows to send ([{ sender, subject, received, messages? }], at most 100, all on this page;
+// `messages` is a conversation row's message count from list.js, which "Forward as attachment" is expected
+// to attach as that many attachments, T11.2),
 // `args.max_bytes` (default 25000000) the most the attachments may add up to, and `args.wait_ms` (default
 // 5000) bounds each wait. It returns one of
-//   { result: "ok", sent: true, count: number }
+//   { result: "ok", sent: true, count: number }   (count: the attachments sent, a conversation row's
+//      messages each)
 //   { result: "refused", reason: "send failure" | "non-delivery report" }   (the routine stops: nothing is
 //      sent again until the next day)
 //   { result: "not found", control: "message" | "more menu" | "forward as attachment" | "send" | "to" |
@@ -62,6 +65,8 @@ if (!nonce || /\s/.test(nonce)) return { result: "failed", reason: "no nonce" };
 const wanted = Array.isArray(args.rows) ? args.rows : [];
 if (wanted.length === 0) return { result: "failed", reason: "no rows" };
 if (wanted.length > 100) return { result: "failed", reason: "too many rows" };
+// A plain row is one attachment; a conversation row is as many as the messages list.js counted in it.
+const expected = wanted.reduce((n, w) => n + (Number.isInteger(w && w.messages) && w.messages > 1 ? w.messages : 1), 0);
 const waitMs = Number(args.wait_ms) >= 0 ? Number(args.wait_ms) : 5000;
 const maxBytes = Number(args.max_bytes) > 0 ? Number(args.max_bytes) : 25000000;
 
@@ -149,7 +154,7 @@ if (!subject) return await bail({ result: "not found", control: "subject" });
 
 const attachments = [...compose.querySelectorAll('[aria-label^="Attachment:"]')];
 if (attachments.length === 0) return await bail({ result: "failed", reason: "no attachment" });
-if (attachments.length !== targets.length) {
+if (attachments.length !== expected) {
   return await bail({ result: "failed", reason: "attachments do not match the rows" });
 }
 let total = 0;
@@ -186,4 +191,4 @@ await until(() => !document.contains(sendButton) || refusal() !== null, waitMs);
 const after = refusal();
 if (after) return { result: "refused", reason: after };
 if (document.contains(sendButton)) return { result: "failed", reason: "send did not settle" };
-return { result: "ok", sent: true, count: targets.length };
+return { result: "ok", sent: true, count: attachments.length };

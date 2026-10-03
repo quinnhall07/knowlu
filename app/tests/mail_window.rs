@@ -343,12 +343,12 @@ fn the_gmail_forwarding_scripts_run_for_gmail_only() {
     }
 }
 
-/// T10.3b: Gmail's four mailbox scripts (search, list, forward as attachment, Sent cleanup) are compiled in
-/// and run for that provider alone.
+/// T10.3b: Gmail's four mailbox scripts (search, list, forward as attachment, Sent cleanup), and T11.2's
+/// conversation reader, are compiled in and run for that provider alone.
 #[test]
 fn the_gmail_mailbox_scripts_run_for_gmail_only() {
     let on = "https://mail.google.com/mail/u/0/#inbox";
-    for name in ["gmail/search.js", "gmail/list.js", "gmail/forward.js", "gmail/sent_cleanup.js"] {
+    for name in ["gmail/search.js", "gmail/list.js", "gmail/forward.js", "gmail/sent_cleanup.js", "gmail/thread.js"] {
         assert!(script(name).is_some(), "{name} is compiled in");
         let m365 = Fake::at("https://outlook.cloud.microsoft/mail/").says(json!({ "state": "started" }));
         assert_eq!(run(&m365, Provider::M365, name, &json!({}), WAIT), Err(Refusal::NotForProvider), "{name}");
@@ -401,6 +401,11 @@ fn no_os_input_and_no_debugging_port_in_mail_sources() {
         })
         .collect();
     assert!(files.iter().any(|p| p.ends_with("mail.rs")), "src/mail.rs was not read");
+    // mail.rs's own submodules (T11.2's recover.rs) are mail code too.
+    for e in std::fs::read_dir("src/mail").unwrap().flatten() {
+        files.push(e.path());
+    }
+    assert!(files.iter().any(|p| p.ends_with("recover.rs")), "src/mail/recover.rs was not read");
     js_files(Path::new("assets/mail"), &mut files);
     for f in &files {
         let text = std::fs::read_to_string(f).unwrap();

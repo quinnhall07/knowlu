@@ -14,9 +14,11 @@
 // a display name about as often as an address, so the text is never read. `received` is the time element's
 // title attribute, the full date and time as the page writes it, and `received_at` is the instant that
 // names (the page's own reading of it, so its locale and zone), or null. A row that is a conversation
-// lists several senders: the last (the newest) is read and `thread` is true. A row it cannot read fails the
-// whole read, to the guided fallback, rather than leaving a message out. The text of a message is never read,
-// and never leaves the page.
+// lists several senders, or shows a message count beside the sender names ("Name (3)"): the last sender (the
+// newest) is read, `thread` is true, and `messages` is the count shown, or null when the row shows none.
+// (Non-thread rows have no `messages`.) The routine opens a thread row and reads every message in it
+// (thread.js, plan T11.2). A row it cannot read fails the whole read, to the guided fallback, rather than
+// leaving a message out. The text of a message is never read, and never leaves the page.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => (el.getAttribute("aria-label") || "").trim();
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -76,13 +78,20 @@ for (const row of rowEls()) {
     return { result: "not found", control: "list row" };
   }
   const at = new Date(stamp);
-  rows.push({
+  // The message count Gmail draws beside the sender names, in the cell that holds them.
+  const cell = row.querySelector("span[email]").closest("td");
+  const shown = cell && /\((\d+)\)\s*$/.exec(text(cell));
+  const count = shown ? Number(shown[1]) : null;
+  const thread = new Set(senders).size > 1 || (count !== null && count > 1);
+  const item = {
     sender,
     subject: text(subjectEl),
     received: stamp.replace(/\s+/g, " "),
     received_at: isNaN(at.getTime()) ? null : at.toISOString(),
-    thread: new Set(senders).size > 1,
-  });
+    thread,
+  };
+  if (thread) item.messages = count;
+  rows.push(item);
 }
 const page = readRange();
 if (!page) {

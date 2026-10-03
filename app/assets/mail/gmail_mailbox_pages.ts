@@ -30,6 +30,11 @@ export interface Msg {
   size: number;
   /** Other participants of a conversation: the row lists them too. */
   also?: string[];
+  /** The message count Gmail draws beside the sender names: "Name (3)". */
+  count?: number;
+  /** The conversation's messages, oldest first, newest last (the row is the newest). Opening the row draws
+   * them; a conversation of more than two shows only the first and the newest until "Expand all". */
+  convo?: { who: string; at: string }[];
 }
 
 export interface Opts {
@@ -57,6 +62,12 @@ export interface Opts {
   swap?: { id: string; as: string };
   /** The page shows no "1–50 of 123" range. */
   blind?: boolean;
+  /** "Forward as attachment" on a conversation row attaches only its newest message. */
+  newestOnly?: boolean;
+  /** An opened conversation has no "Back to ..." button. */
+  noBack?: boolean;
+  /** "Expand all" draws nothing more. */
+  stuck?: boolean;
 }
 
 export interface Sent {
@@ -120,7 +131,8 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       <div role="button" id="older" aria-label="Older">Older</div>
       ${o.noOldest ? "" : `<div role="button" id="oldest" aria-label="Oldest">Oldest</div>`}
     </div>
-    <table role="grid" id="grid"><tbody id="list"></tbody></table><div id="over"></div>`);
+    <table role="grid" id="grid"><tbody id="list"></tbody></table><div id="over"></div>
+    <div role="main" id="convo"></div>`);
   const d = page.document;
   const loc = { hash: o.view === "sent" ? "#sent" : "#inbox", host: "mail.google.com", reload() {} };
   page.location = loc;
@@ -166,7 +178,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       <tr role="row" data-id="${m.id}"><td><div role="checkbox" aria-checked="false"></div></td>
         <td><span email="${esc(m.who)}">${esc(m.shown ?? m.who)}</span>${
         (m.also ?? []).map((a) => `, <span email="${esc(a)}">${esc(a.split("@")[0])}</span>`).join("")
-      }</td>
+      }${m.count ? ` (${m.count})` : ""}</td>
         <td><span class="bog">${esc(m.subject)}</span><span class="y2"> - ${
         esc(m.snippet ?? "a preview")
       }</span></td>
@@ -183,6 +195,12 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     ) {
       b.el(id)?.setAttribute("aria-disabled", String(off));
     }
+    for (const tr of d.querySelectorAll('tr[role="row"]')) {
+      tr.addEventListener("click", (e: El) => {
+        if (e.target?.closest?.('[role="checkbox"]')) return;
+        open(tr.getAttribute("data-id"));
+      });
+    }
     for (const c of d.querySelectorAll('[role="checkbox"]')) {
       c.addEventListener("click", () => {
         c.setAttribute("aria-checked", String(c.getAttribute("aria-checked") !== "true"));
@@ -197,6 +215,40 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       });
     }
   };
+  // Opening a conversation row: the list hides and the conversation draws, first and newest only when it
+  // has more than two messages, until "Expand all"; "Back to ..." returns to the list.
+  function open(id: string) {
+    const m = b.msgs.find((x) => x.id === id);
+    if (!m?.convo) return;
+    const list = d.getElementById("grid");
+    list.setAttribute("hidden", "");
+    const all = m.convo;
+    const draw = (full: boolean) => {
+      const shownMsgs = full || all.length <= 2 ? all : [all[0], all[all.length - 1]];
+      b.el("convo").innerHTML = `<h2 class="hP">${esc(m.subject)}</h2>
+        ${
+        all.length > 2 && !full
+          ? `<div role="button" id="expand" aria-label="Expand all">Expand all</div>`
+          : ""
+      }
+        ${
+        shownMsgs.map((x, i) =>
+          `<div data-message-id="${m.id}-${i}"><span class="gD" email="${esc(x.who)}">${
+            esc(x.who.split("@")[0])
+          }</span><span class="g3" title="${x.at}">Oct</span></div>`
+        ).join("")
+      }
+        ${o.noBack ? "" : `<div role="button" id="back" aria-label="Back to Inbox">Back</div>`}`;
+      b.el("expand")?.addEventListener("click", () => {
+        if (!o.stuck) draw(true);
+      });
+      b.el("back")?.addEventListener("click", () => {
+        b.el("convo").innerHTML = "";
+        list.removeAttribute("hidden");
+      });
+    };
+    draw(false);
+  }
   const go = (id: string, to: () => number) =>
     b.el(id)?.addEventListener("click", () => {
       if (b.el(id).getAttribute("aria-disabled") === "true") return;
@@ -243,7 +295,11 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
 
   function compose(ids: string[]) {
     const picked = b.msgs.filter((m) => ids.includes(m.id));
-    const files = o.bare ? [] : o.short ? picked.slice(1) : picked;
+    // A conversation row attaches every message in it (or only the newest, `newestOnly`).
+    const attach = picked.flatMap((m) =>
+      m.convo && !o.newestOnly ? m.convo.map((_, i) => ({ ...m, id: `${m.id}#${i}` })) : [m]
+    );
+    const files = o.bare ? [] : o.short ? attach.slice(1) : attach;
     const total = files.reduce((n, m) => n + m.size, 0);
     const chip = (v: string) => `<span email="${esc(v)}">${esc(v)}</span>`;
     b.el("over").innerHTML = `<div role="dialog" aria-label="New Message">

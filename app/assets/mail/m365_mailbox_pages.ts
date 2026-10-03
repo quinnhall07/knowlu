@@ -128,8 +128,12 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     b.queries.push(q);
     if (o.deaf) return;
     const since = /received>=(\d{4}-\d{2}-\d{2})/.exec(q)?.[1] ?? "0000-00-00";
+    const until = /received<(\d{4}-\d{2}-\d{2})/.exec(q)?.[1] ?? "9999-99-99";
     const out = [...q.matchAll(/NOT folder:"([^"]+)"/g)].map((m) => m[1]);
-    setTimeout(() => fill(b.msgs.filter((m) => m.day >= since && !out.includes(m.folder))), 20);
+    setTimeout(
+      () => fill(b.msgs.filter((m) => m.day >= since && m.day < until && !out.includes(m.folder))),
+      20,
+    );
   });
   b.el("del").addEventListener("click", () => {
     if (!selected) return;

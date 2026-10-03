@@ -1,0 +1,106 @@
+// Gmail: open ONE conversation row and read every message in it in the form the fingerprint uses, then go
+// back to the list (plan T11.2, Quinn's ruling of 2026-10-02: a row that shows a message count is opened and
+// each message fingerprinted; spec 4.11 step 3). The caller has the mail view open on a page of results
+// (list.js) and passes the row as list.js read it. Like every step script it is the body of an async
+// function of `args`: `args.sender`, `args.subject` and `args.received` the row's three fields,
+// `args.messages` (optional) the count list.js read from the row, and `args.wait_ms` (default 5000) bounds
+// each wait. It returns one of
+//   { result: "ok", messages: [{ sender, subject, received, received_at }] }   (oldest first; the page is
+//      back on its list)
+//   { result: "not found", control: "list" | "message" | "back" }
+//   { result: "failed", reason: "conversation did not open" | "list did not return" | "no messages" |
+//      "not every message drawn" }   (fewer messages drawn than the row's count: a partial read would
+//      call a held message missing, so nothing is returned)
+// `sender` is the address from the message header's `email` attribute, lower case: the visible text is a
+// display name about as often as an address, so the text is never read. `received` is the time element's
+// title attribute, the full date and time as the page writes it, and `received_at` is the instant that names
+// (the page's own reading of it), or null. `subject` is the conversation's subject (the page shows one for
+// all of it; the routine also tries the "Re: " form of it for a later message). A conversation shows only
+// its first and newest messages open: "Expand all" is clicked until every message is drawn. The text of a
+// message is never read, and never leaves the page. It clicks the row, never its checkbox, and ticks,
+// sends and deletes nothing.
+const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
+const nameOf = (el) => (el.getAttribute("aria-label") || "").trim();
+const norm = (v) => String(v || "").trim().toLowerCase();
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+const until = async (ready, ms) => {
+  for (let waited = 0; !ready() && waited < ms; waited += 50) await sleep(50);
+  return ready();
+};
+const buttons = () => [...document.querySelectorAll('[role="button"], button')];
+const ADDRESS = /^[^\s@<>;,"']+@[^\s@<>;,"']+$/;
+const TIMED = /\d{1,2}:\d{2}/;
+const waitMs = Number(args && args.wait_ms) >= 0 ? Number(args.wait_ms) : 5000;
+const want = {
+  sender: norm(args && args.sender),
+  subject: String((args && args.subject) || "").replace(/\s+/g, " ").trim(),
+  received: String((args && args.received) || "").replace(/\s+/g, " ").trim(),
+};
+
+const grid = document.querySelector('table[role="grid"]');
+const listShowing = () => {
+  const g = document.querySelector('table[role="grid"]');
+  return !!g && !g.hasAttribute("hidden") && g.querySelectorAll('tr[role="row"]').length > 0;
+};
+if (!grid) return { result: "not found", control: "list" };
+
+// The row, by the three fields list.js read from it (the newest sender, as list.js reads it).
+const read = (row) => {
+  const senders = [...row.querySelectorAll("span[email]")].map((el) => norm(el.getAttribute("email")));
+  const stamp = [...row.querySelectorAll("[title]")].map((el) => (el.getAttribute("title") || "").trim())
+    .find((t) => TIMED.test(t) && /\d/.test(t));
+  const subject = row.querySelector(".bog");
+  if (row.querySelector('[role="checkbox"]') === null || senders.length === 0 || !stamp || !subject) return null;
+  return { sender: senders[senders.length - 1], subject: text(subject), received: stamp.replace(/\s+/g, " ") };
+};
+const row = [...grid.querySelectorAll('tr[role="row"]')].find((r) => {
+  const f = read(r);
+  return f && f.sender === want.sender && f.subject === want.subject && f.received === want.received;
+});
+if (!row) return { result: "not found", control: "message" };
+
+const messageEls = () => [...document.querySelectorAll('[role="main"] [data-message-id]')];
+row.click();
+if (!(await until(() => messageEls().length > 0, waitMs))) {
+  return { result: "failed", reason: "conversation did not open" };
+}
+
+// Open every message: click "Expand all" while it is offered and the count is still growing.
+const expand = () => buttons().find((b) => /^expand all$/i.test(nameOf(b) || text(b)));
+for (let round = 0; round < 3 && expand(); round++) {
+  const seen = messageEls().length;
+  expand().click();
+  await until(() => messageEls().length > seen, Math.min(waitMs, 1000));
+}
+
+const messages = [];
+const subjectEl = document.querySelector('[role="main"] h2');
+const subject = subjectEl ? text(subjectEl) : want.subject;
+for (const m of messageEls()) {
+  const who = m.querySelector("span[email]");
+  const sender = who ? norm(who.getAttribute("email")) : "";
+  const stamp = [...m.querySelectorAll("[title]")].map((el) => (el.getAttribute("title") || "").trim())
+    .find((t) => TIMED.test(t) && /\d/.test(t));
+  if (!ADDRESS.test(sender) || !stamp) return await back({ result: "not found", control: "message" });
+  const at = new Date(stamp);
+  messages.push({
+    sender,
+    subject,
+    received: stamp.replace(/\s+/g, " "),
+    received_at: isNaN(at.getTime()) ? null : at.toISOString(),
+  });
+}
+
+async function back(result) {
+  const button = buttons().find((b) => /^back to /i.test(nameOf(b)));
+  if (!button) return { result: "not found", control: "back" };
+  button.click();
+  if (!(await until(listShowing, waitMs))) return { result: "failed", reason: "list did not return" };
+  return result;
+}
+if (messages.length === 0) return await back({ result: "failed", reason: "no messages" });
+const counted = Number(args.messages);
+if (Number.isInteger(counted) && counted > messages.length) {
+  return await back({ result: "failed", reason: "not every message drawn" });
+}
+return await back({ result: "ok", messages });

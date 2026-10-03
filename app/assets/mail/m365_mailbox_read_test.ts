@@ -47,6 +47,25 @@ Deno.test("m365_search_leaves_out_sent_items_and_drafts_which_are_not_mail_recei
   );
 });
 
+Deno.test("m365_search_until_narrows_the_window_to_since_inclusive_until_exclusive", async () => {
+  // T11.2: the routine narrows a window so the virtualised list can draw all of it. The span is
+  // [since, until): m1 (day 2) and m2 (day 5) are in [2, 9), m3a (day 9) is not.
+  const box = mailbox(MAIL);
+  const r = await run("m365/search.js", box.page, { since: "2026-10-02", until: "2026-10-09" });
+  assertEquals(r, { result: "ok", count: 2 });
+  const q = box.queries[0];
+  assert(q.includes("received>=2026-10-02 received<2026-10-09 NOT folder"), q);
+  // An until that is not a later day is a bad date, and nothing is typed.
+  const ok = mailbox(MAIL);
+  for (const until of ["2026-10-02", "2026-10-01", "10/09/2026", "2026-13-40", "2026-10-09 OR x"]) {
+    assertEquals(await run("m365/search.js", ok.page, { since: "2026-10-02", until }), {
+      result: "failed",
+      reason: "bad date",
+    });
+  }
+  assertEquals(ok.queries, []);
+});
+
 Deno.test("m365_search_reports_no_results_as_zero_and_a_deaf_page_as_not_settled", async () => {
   const none = mailbox(MAIL);
   assertEquals(await run("m365/search.js", none.page, { since: "2026-12-01" }), { result: "ok", count: 0 });
