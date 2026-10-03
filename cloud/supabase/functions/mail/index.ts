@@ -180,6 +180,8 @@ function storeOver(rest: Rest): MailStore {
         token_iv: next.tokenIv,
         retired_token_hmac: fromHmac,
         retired_until: next.retiredUntil,
+        unbound_own_since_live: next.unboundOwnSinceLive,
+        unbound_foreign_since_live: next.unboundForeignSinceLive,
         ...(next.status === null ? {} : { status: next.status }),
       }) > 0;
     },

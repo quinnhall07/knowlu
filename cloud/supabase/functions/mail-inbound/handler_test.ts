@@ -713,6 +713,31 @@ Deno.test("unbound_live_forwards_count_own_or_foreign_since_the_last_bound_live_
   });
 });
 
+Deno.test("an_unbound_arrival_through_a_retired_token_runs_no_since_live_count", async () => {
+  // §9.5's Rotate row (2026-10-03, open for Quinn): Rotate zeroed the counts since the last bound live
+  // forward, so mail still reaching the old address in its grace (the leak the student just rotated away
+  // from) must not raise "Rotate gives it a new one" again. It counts on the cumulative `unbound` alone.
+  await withWorld(async (w) => {
+    const spam = { recipients: [at(RETIRED)], source: "bounce@sender.test" };
+    await w.arrive(directForgery(), { ...spam, key: "inbound/x1" });
+    await w.arrive(directForgery(), { ...spam, key: "inbound/x2" });
+    assertEquals(w.store.sinceLive, { "addr-1": { own: 0, foreign: 0 } });
+    assertEquals(w.store.counters, { "addr-1:unbound": 2 });
+    // The same mail through the current token still runs its count.
+    await w.arrive(directForgery(), { ...spam, recipients: [at(TOK1)], key: "inbound/x3" });
+    assertEquals(w.store.sinceLive["addr-1"], { own: 0, foreign: 1 });
+    assertEquals(w.store.counters, { "addr-1:unbound": 3 });
+    // A bound live forward through the retired token is still bound: it binds and zeroes as before.
+    await w.arrive(await gmailForward({ to: at(RETIRED) }), {
+      key: "inbound/x4",
+      recipients: [at(RETIRED)],
+      source: caf("jane", RETIRED),
+    });
+    assertEquals(w.store.sinceLive["addr-1"], { own: 0, foreign: 0 });
+    assertEquals(w.store.workRows.map((x) => [x.addressId, x.phase]), [["addr-1", "live"]]);
+  });
+});
+
 // ---------------------------------------------------------------- test 7: dedup and the hand-off
 
 const JANE = (key: string): Delivery => ({ key, recipients: [at(TOK1)], source: caf("jane", TOK1) });

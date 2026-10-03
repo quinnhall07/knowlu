@@ -26,7 +26,8 @@
  *    - a live `aligned` forward is handed off; a live `unaligned` one is deleted and counted
  *      `unauthenticated`; `unbound` is deleted and counted on the address, as `own` or `foreign`
  *      (`unboundOrigin`), and a bound live forward zeroes those runs (Quinn's unbound-display ruling,
- *      2026-10-03: the Settings row names skipped mail apart from a leaked address).
+ *      2026-10-03: the Settings row names skipped mail apart from a leaked address). Through a retired
+ *      token in its Rotate grace it counts on `unbound` alone and runs neither (§9.5's Rotate row).
  * 7. **Dedup** on `mail_seen`'s keyed `msg_hash` (`keys.ts`): already there, deleted, done.
  * 8. **Hand off**: put the original under `work/`; only after the put, `store.handOff` writes the
  *    `mail_work` and `mail_seen` rows in one transaction (the `mail_hand_off` RPC; it answers false when a
@@ -352,8 +353,11 @@ async function arrive(
   const arrival = await classifyArrival(raw, mailbox, { canaryFrom: cfg.canaryFrom }, envelope, deps.bind);
   switch (arrival.kind) {
     case "unbound": {
-      const origin = await unboundOrigin(raw, mailbox, deps.bind);
-      await deps.store.count(f.row.id, origin === "own" ? "unbound_own" : "unbound_foreign");
+      // Through a retired token, the cumulative count alone: Rotate zeroed the runs since the last bound
+      // live forward, and the old address's mail must not raise its reason again (§9.5's Rotate row).
+      const origin = f.current ? await unboundOrigin(raw, mailbox, deps.bind) : null;
+      const counter = origin === null ? "unbound" : origin === "own" ? "unbound_own" : "unbound_foreign";
+      await deps.store.count(f.row.id, counter);
       log("unbound, deleted");
       return 0;
     }

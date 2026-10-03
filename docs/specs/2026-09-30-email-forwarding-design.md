@@ -390,7 +390,9 @@ the recipients from it, and logs nothing from it.
      forward) while the canary binds (`active` or `quiet`), or **leaked** when that many were foreign,
      whatever the status. Settings suggests Rotate only for **leaked**. The From is a sender's to write,
      so a stranger can make a leak read as skipped; the cost is a Rotate not suggested, never mail let
-     in.)*
+     in.)* *(unsigned, 2026-10-03, built and open for Quinn (plan §9.5's Rotate row): Rotate zeroes both
+     counts in the update that retires the old token, and an unbound arrival through a retired token in
+     its grace counts on `unbound` alone, so a rotated row stops suggesting Rotate.)*
 6. **Authenticity, as the provider saw it at delivery.** Only one record counts: for a live forward, the
    ARC-Authentication-Results of the provider's hop that step 5 verified; for a backfilled or recovered
    original, the provider's own `Authentication-Results` stamped at delivery (Gmail's `mx.google.com`;

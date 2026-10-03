@@ -15,7 +15,8 @@
  *   filtering gateway's MX still fits) and that none of the account's other mailboxes holds.
  * - `POST /addresses/<id>/rotate` mints a new token for the mailbox and retires the old one for seven
  *   days (D3); intake ends that grace early when a canary comes back through the new address. On Gmail
- *   the mailbox reads `pending` again, since the new address needs its own confirm (§4.3 steps 3–5).
+ *   the mailbox reads `pending` again, since the new address needs its own confirm (§4.3 steps 3–5). The
+ *   same update zeroes both since-live counts, so a `leaked` row stops suggesting Rotate once rotated.
  * - `DELETE /addresses/<id>` revokes and purges (§4.12 step 2, D17): revoke, read the mailbox's `work/`
  *   keys, delete those objects, then `delete_mail_address`.
  *
@@ -104,6 +105,15 @@ export interface MailRow {
   /** The same, from anywhere else. */
   unboundForeignSinceLive: number;
 }
+/** What Rotate writes in one update. Both since-live counts go back to 0 with the old token (§9.5's Rotate
+ * row, open for Quinn): they described the old address, and leaving them would keep "Rotate gives it a new
+ * one" on the row after the student has rotated. The cumulative `unbound` stays. */
+export type RotateNext = NewToken & {
+  retiredUntil: string;
+  status: string | null;
+  unboundOwnSinceLive: 0;
+  unboundForeignSinceLive: 0;
+};
 /** A `mail_batches` row as `POST /batches/<id>/sent` reads it (never its nonce's HMAC). */
 export interface BatchRow {
   id: string;
@@ -154,14 +164,10 @@ export interface MailStore {
   insertAddress(accountId: string, provider: MailProvider, token: NewToken): Promise<string>;
   /** Sets the hint only while it is null; false, with nothing written, otherwise. */
   setHint(accountId: string, id: string, hint: string): Promise<boolean>;
-  /** Retires `fromHmac` until `retiredUntil` and keeps `next` (and `status`, when not null) only while the
-   * row's token is still `fromHmac`; false, with nothing written, otherwise (a concurrent Rotate won). */
-  rotate(
-    accountId: string,
-    id: string,
-    fromHmac: string,
-    next: NewToken & { retiredUntil: string; status: string | null },
-  ): Promise<boolean>;
+  /** Retires `fromHmac` until `retiredUntil` and keeps `next` (its token, both since-live counts, and
+   * `status` when not null) only while the row's token is still `fromHmac`; false, with nothing written,
+   * otherwise (a concurrent Rotate won). */
+  rotate(accountId: string, id: string, fromHmac: string, next: RotateNext): Promise<boolean>;
   /** `status = 'revoked'`. */
   revoke(accountId: string, id: string): Promise<void>;
   /** The mailbox's `mail_work` S3 keys, all of them. */
@@ -348,6 +354,8 @@ async function rotate(accountId: string, id: string, deps: MailDeps): Promise<Re
     ...await keep(token, deps),
     retiredUntil: until,
     status: row.provider === "google" ? "pending" : null,
+    unboundOwnSinceLive: 0 as const,
+    unboundForeignSinceLive: 0 as const,
   };
   if (!await deps.store.rotate(accountId, row.id, row.tokenHmac, next)) {
     throw fail(409, "the mailbox's address changed meanwhile; try again");

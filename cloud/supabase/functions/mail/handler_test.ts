@@ -22,6 +22,7 @@ import {
   type NewBatch,
   type NewToken,
   ROTATE_GRACE_MS,
+  type RotateNext,
   type StatePatch,
   UNBOUND_LEAKED,
   UNBOUND_SKIPPED,
@@ -96,7 +97,7 @@ class FakeStore implements MailStore {
     accountId: string,
     id: string,
     fromHmac: string,
-    next: NewToken & { retiredUntil: string; status: string | null },
+    next: RotateNext,
   ) {
     this.calls.push("rotate");
     const r = this.rows.find((x) => x.id === id && x.accountId === accountId && x.tokenHmac === fromHmac);
@@ -107,6 +108,8 @@ class FakeStore implements MailStore {
       tokenHmac: next.tokenHmac,
       tokenCiphertext: next.tokenCiphertext,
       tokenIv: next.tokenIv,
+      unboundOwnSinceLive: next.unboundOwnSinceLive,
+      unboundForeignSinceLive: next.unboundForeignSinceLive,
     });
     if (next.status !== null) r.status = next.status;
     return Promise.resolve(true);
@@ -513,6 +516,26 @@ Deno.test("rotate_keeps_the_old_token_until_the_new_canary_or_seven_days", async
   // Another account's mailbox, or none, reads as not found.
   assertEquals((await g.call("POST", `/addresses/${B1}/rotate`)).status, 404);
   assertEquals((await g.call("POST", `/addresses/not-an-id/rotate`)).status, 404);
+});
+
+Deno.test("a_rotate_clears_the_leaked_reason", async () => {
+  // §9.5's Rotate row (2026-10-03, open for Quinn): the counts since the last bound live forward belong to
+  // the old address. Rotate zeroes both in the same write that retires it, so the row stops saying
+  // "Rotate gives it a new one" the moment the student has done so; intake keeps the retired token's
+  // unbound arrivals out of them for the grace (`mail-inbound/handler_test.ts`:
+  // `an_unbound_arrival_through_a_retired_token_runs_no_since_live_count`).
+  const w = await world();
+  const row = w.store.rows.find((r) => r.id === A1)!;
+  Object.assign(row, { status: "active", unboundOwnSinceLive: 1, unboundForeignSinceLive: 2, unbound: 9 });
+  const reason = async () => {
+    const [a] = (await (await w.call("GET", "/addresses")).json()).addresses;
+    return [a.unbound_reason, a.unbound_since_live, a.suggest_rotate, a.unbound];
+  };
+  assertEquals(await reason(), ["leaked", 3, true, 9]);
+  assertEquals((await w.call("POST", `/addresses/${A1}/rotate`)).status, 200);
+  assertEquals([row.unboundOwnSinceLive, row.unboundForeignSinceLive], [0, 0]);
+  // The cumulative counter is history, not an instruction: it stays.
+  assertEquals(await reason(), [null, 0, false, 9]);
 });
 
 Deno.test("delete_reads_work_keys_deletes_their_objects_then_calls_delete_mail_address", async () => {
