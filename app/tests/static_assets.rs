@@ -2490,6 +2490,9 @@ fn a_gmail_card_shows_its_gmail_attribution_and_never_a_sender() {
     // `mailCardLine` and nowhere else, which draws nothing when none is there. So a Gmail card never
     // shows a sender.
     assert!(!js.contains("c.sender"), "never the sender");
+    // The Gmail label itself names no sender in any spelling (`c["evidence"]` included), beside the count below.
+    let label = fn_body(&js, "function sourceLabel(c)");
+    assert!(!label.contains("c.from") && !label.contains("mail_date") && !label.contains("evidence"), "the Gmail label never names a sender");
     let line = fn_body(&js, "function mailCardLine(c)");
     assert!(line.contains("if (!c.from && !c.mail_date && !c.evidence) { return \"\"; }"), "no keys, no line: {line}");
     for key in ["c.from", "c.mail_date", "c.evidence"] {
