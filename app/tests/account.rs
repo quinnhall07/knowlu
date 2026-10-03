@@ -291,18 +291,20 @@ fn moving_a_session_that_does_not_exist_to_a_destination_that_also_does_not_name
 fn signing_out_a_profile_reports_whether_it_had_a_session_and_removes_it() {
     let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _api = ApiBase::set(&closed_loopback_base());
-    use knowlu::account::{save_session, session_target, sign_out, Session};
+    // `sign_out` is the Tauri command (it takes the app's handle to close the mail window, T12);
+    // `sign_out_with` is everything it does, with the mail window's close as a closure.
+    use knowlu::account::{save_session, session_target, sign_out_with, Session};
     let id = format!("test-signout-{}-{}", std::process::id(), line!());
     let target = session_target(&id);
     let _cleanup = Cleanup(vec![target.clone()]);
 
-    let out = sign_out(Some(id.clone())).expect("sign out with nothing to sign out of");
+    let out = sign_out_with(Some(id.clone()), None, |_: &std::path::Path| {}).expect("sign out with nothing to sign out of");
     assert_eq!(out["ok"], true);
     assert_eq!(out["had_session"], false);
 
     let s = Session { access_token: "at".into(), refresh_token: "rt".into(), expires_at: 99, email: "a@example.invalid".into() };
     save_session(&target, "acc-1", &s).expect("write a session to sign out of");
-    let out = sign_out(Some(id)).expect("sign out with a real session");
+    let out = sign_out_with(Some(id), None, |_: &std::path::Path| {}).expect("sign out with a real session");
     assert_eq!(out["ok"], true);
     assert_eq!(out["had_session"], true);
     assert!(!knowlu::credentials::exists(&target), "the credential must be gone after sign-out");
@@ -1845,4 +1847,271 @@ fn google_disconnect_in_reports_a_502_and_changes_nothing_locally() {
         assert_the_profiles_request(s, "DELETE /functions/v1/google-connect");
     }
     let _ = std::fs::remove_dir_all(&vault);
+}
+
+// ---- Delete my data and sign-out: the mail steps (email-forwarding T12, spec §4.13, test 38) ----
+//
+// `delete_my_data` is a Tauri command, so its order is driven through `delete_my_data_with` and a
+// recording `DeleteSteps`; the live steps are the command's own. No window opens here, nothing leaves
+// the machine (the wire test's server is this file's loopback), and every mailbox is synthetic.
+
+use knowlu::account::{delete_my_data_with, DeleteSteps, SavedMailbox, FORWARDING_OFF_BOUND};
+use std::time::{Duration, Instant};
+
+/// A scratch profile folder (absolute, under the temp dir) with a kept sign-in for each id in `kept`.
+fn mail_data_dir(tag: &str, kept: &[&str]) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("knowlu-t12-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for id in kept {
+        std::fs::create_dir_all(dir.join(format!("mail-session-{id}"))).unwrap();
+    }
+    dir
+}
+
+/// `GET /mail/addresses`'s reply: two mailboxes with a kept sign-in (Microsoft 365, then Gmail), a
+/// guided one, and a Microsoft 365 one whose sign-in this machine does not keep.
+fn four_mailboxes() -> serde_json::Value {
+    serde_json::json!({ "addresses": [
+        { "address_id": "mbx-school", "provider": "m365", "address": "k1@in.example.invalid", "status": "active" },
+        { "address_id": "mbx-gmail", "provider": "google", "address": "k2@in.example.invalid", "status": "active" },
+        { "address_id": "mbx-other", "provider": "other", "address": "k3@in.example.invalid", "status": "active" },
+        { "address_id": "mbx-unkept", "provider": "m365", "address": "k4@in.example.invalid", "status": "active" },
+    ]})
+}
+
+fn rows_of(v: &serde_json::Value) -> Vec<serde_json::Value> {
+    v["addresses"].as_array().expect("an addresses array").clone()
+}
+
+/// A `DeleteSteps` that records each call in order; each step's behaviour is a closure, all succeeding
+/// by default (an empty mailbox list, a forwarding turned off, a deleted account).
+struct Steps<'a> {
+    log: Vec<String>,
+    /// Per mailbox tried: (id, provider, the Knowlu address handed to the script, the profile folder).
+    tried: Vec<(String, knowlu::mail_steps::Provider, String, std::path::PathBuf)>,
+    /// Per mailbox tried: (when the call began, the deadline it was given).
+    bounds: Vec<(Instant, Instant)>,
+    list: Box<dyn FnMut() -> Result<Vec<serde_json::Value>, String> + 'a>,
+    off: Box<dyn FnMut(&SavedMailbox) -> Result<(), &'static str> + 'a>,
+    delete: Box<dyn FnMut() -> Result<(), String> + 'a>,
+    close: Box<dyn FnMut() + 'a>,
+    local: Box<dyn FnMut() + 'a>,
+}
+
+impl<'a> Steps<'a> {
+    fn new() -> Steps<'a> {
+        Steps {
+            log: Vec::new(),
+            tried: Vec::new(),
+            bounds: Vec::new(),
+            list: Box::new(|| Ok(Vec::new())),
+            off: Box::new(|_| Ok(())),
+            delete: Box::new(|| Ok(())),
+            close: Box::new(|| {}),
+            local: Box::new(|| {}),
+        }
+    }
+}
+
+impl DeleteSteps for Steps<'_> {
+    fn mailboxes(&mut self) -> Result<Vec<serde_json::Value>, String> {
+        self.log.push("list".into());
+        (self.list)()
+    }
+    fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: Instant) -> Result<(), &'static str> {
+        let began = Instant::now();
+        self.log.push(format!("off {}", mailbox.address_id));
+        self.tried.push((mailbox.address_id.clone(), mailbox.provider, mailbox.address().to_string(), mailbox.profile.clone()));
+        let r = (self.off)(mailbox);
+        self.bounds.push((began, deadline));
+        r
+    }
+    fn delete_account(&mut self) -> Result<(), String> {
+        self.log.push("delete".into());
+        (self.delete)()
+    }
+    fn close_mail_windows(&mut self) {
+        self.log.push("close".into());
+        (self.close)()
+    }
+    fn delete_local_data(&mut self) {
+        self.log.push("local".into());
+        (self.local)()
+    }
+}
+
+/// Spec §4.13: before its server call, *Delete my data* tries to turn forwarding off in each mailbox
+/// with a saved sign-in, a minute each. Driven on the wire: the mailbox list (`GET /mail/addresses`)
+/// and `DELETE /account` are the real calls against this file's loopback, so the order is the order
+/// the service sees. Only the two mailboxes with a kept profile are tried, in the service's order and
+/// each with its own Knowlu address; a guided mailbox and one with no kept sign-in are not.
+#[test]
+fn delete_my_data_runs_the_forwarding_off_pre_step_before_the_server_call() {
+    let data_dir = mail_data_dir("order", &["mbx-school", "mbx-gmail"]);
+    let (base, handle) = loopback(vec![(200, four_mailboxes().to_string()), (200, r#"{"deleted":true}"#.to_string())]);
+    let api_base = format!("{base}/functions/v1");
+    let client = knowlu::mail_client::MailClient::with_token_fn(&api_base, Box::new(|| Ok("tok".to_string()))).expect("a loopback client");
+    let mut steps = Steps::new();
+    steps.list = Box::new(|| client.list_addresses().map_err(|e| e.name().to_string()));
+    steps.delete = Box::new(|| knowlu::account::delete_account_at(&api_base, "tok"));
+
+    let out = delete_my_data_with(&mut steps, &data_dir, FORWARDING_OFF_BOUND);
+    let seen = handle.join().expect("server thread");
+
+    assert_eq!(out, serde_json::json!({ "ok": true, "error": null }));
+    assert_eq!(steps.log, ["list", "off mbx-school", "off mbx-gmail", "delete", "close", "local"]);
+    assert_eq!(seen.len(), 2, "one list, one delete, nothing else");
+    assert!(seen[0].starts_with("GET /functions/v1/mail/addresses "), "{}", seen[0]);
+    assert!(seen[1].starts_with("DELETE /functions/v1/account "), "{}", seen[1]);
+    use knowlu::mail_steps::Provider;
+    let tried: Vec<_> = steps.tried.iter().map(|(id, p, a, dir)| (id.as_str(), *p, a.as_str(), dir.clone())).collect();
+    assert_eq!(
+        tried,
+        [
+            ("mbx-school", Provider::M365, "k1@in.example.invalid", data_dir.join("mail-session-mbx-school")),
+            ("mbx-gmail", Provider::Gmail, "k2@in.example.invalid", data_dir.join("mail-session-mbx-gmail")),
+        ]
+    );
+    assert_eq!(FORWARDING_OFF_BOUND, Duration::from_secs(60), "a minute per mailbox");
+    for (began, deadline) in &steps.bounds {
+        assert!(*deadline > *began && *deadline <= *began + FORWARDING_OFF_BOUND, "each mailbox is bounded to its minute");
+    }
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// Spec §4.13: the pre-step is best effort. A mailbox list that cannot be read skips it; a mailbox whose
+/// forwarding could not be turned off (signed out, a page that changed, its minute spent) is passed
+/// over and the next one is still tried; and the deletion goes ahead in every case. A slow mailbox
+/// never takes the next one's minute: each deadline is set when its own mailbox starts.
+#[test]
+fn a_failing_pre_step_never_blocks_the_deletion() {
+    let data_dir = mail_data_dir("failing", &["mbx-school", "mbx-gmail"]);
+    let rows = rows_of(&four_mailboxes());
+    let deleted = serde_json::json!({ "ok": true, "error": null });
+
+    let mut s = Steps::new();
+    s.list = Box::new(|| Err("unreachable".to_string()));
+    assert_eq!(delete_my_data_with(&mut s, &data_dir, FORWARDING_OFF_BOUND), deleted);
+    assert_eq!(s.log, ["list", "delete", "close", "local"], "an unreadable list skips the pre-step, nothing more");
+
+    let mut s = Steps::new();
+    let listed = rows.clone();
+    s.list = Box::new(move || Ok(listed.clone()));
+    s.off = Box::new(|_| Err("needs sign-in"));
+    assert_eq!(delete_my_data_with(&mut s, &data_dir, FORWARDING_OFF_BOUND), deleted);
+    assert_eq!(s.log, ["list", "off mbx-school", "off mbx-gmail", "delete", "close", "local"]);
+
+    let bound = Duration::from_millis(200);
+    let mut s = Steps::new();
+    s.list = Box::new(move || Ok(rows.clone()));
+    s.off = Box::new(move |_| {
+        std::thread::sleep(bound);
+        Err("out of time")
+    });
+    assert_eq!(delete_my_data_with(&mut s, &data_dir, bound), deleted);
+    assert_eq!(s.log, ["list", "off mbx-school", "off mbx-gmail", "delete", "close", "local"]);
+    for (began, deadline) in &s.bounds {
+        assert!(*deadline > *began && *deadline <= *began + bound, "each mailbox has its own bound");
+    }
+    assert!(s.bounds[1].1 >= s.bounds[0].1 + bound, "the second mailbox's minute starts when it does");
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// Spec §4.13: the mail windows close before `delete_local_data` removes the profile folder and every
+/// kept mail profile with it. A refused server call stops before either (nothing on this machine is
+/// touched, the windows included); a deleted account closes them while every kept profile is still
+/// there, and then the real local wipe takes the profiles with the folder.
+#[test]
+fn the_mail_windows_close_before_delete_local_data() {
+    let root = std::env::temp_dir().join(format!("knowlu-t12-close-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let vault = root.join("vault");
+    std::fs::create_dir_all(vault.join("tasks")).unwrap();
+    std::fs::write(vault.join("tasks").join("a.md"), "mine").unwrap();
+    let data_dir = root.join("data");
+    for kept in ["mail-session-mbx-school", "mail-session-mbx-gmail", "mail-setup"] {
+        std::fs::create_dir_all(data_dir.join(kept)).unwrap();
+    }
+    std::fs::write(data_dir.join("settings.json"), "{}").unwrap();
+    let profiles_there = || ["mail-session-mbx-school", "mail-session-mbx-gmail", "mail-setup"].iter().all(|n| data_dir.join(n).is_dir());
+    // No profile id and no session target: this wipe never reaches Credential Manager, so no lock.
+    let wipe = || knowlu::account::delete_local_data(&vault, &data_dir, None, "", None, "");
+
+    let refused = "your account could not be deleted (no) — nothing on this machine was touched";
+    let mut s = Steps::new();
+    s.delete = Box::new(|| Err(refused.to_string()));
+    s.local = Box::new(wipe);
+    assert_eq!(delete_my_data_with(&mut s, &data_dir, FORWARDING_OFF_BOUND), serde_json::json!({ "ok": false, "error": refused }));
+    assert_eq!(s.log, ["list", "delete"], "a refused deletion closes nothing and wipes nothing");
+    assert!(profiles_there() && vault.join("tasks").join("a.md").is_file());
+
+    let at_close = std::cell::Cell::new(None);
+    let mut s = Steps::new();
+    s.close = Box::new(|| at_close.set(Some(profiles_there())));
+    s.local = Box::new(wipe);
+    assert_eq!(delete_my_data_with(&mut s, &data_dir, FORWARDING_OFF_BOUND), serde_json::json!({ "ok": true, "error": null }));
+    assert_eq!(s.log, ["list", "delete", "close", "local"]);
+    assert_eq!(at_close.get(), Some(true), "the windows closed while the kept profiles were still there");
+    assert!(!data_dir.exists(), "the local wipe took the profile folder and every kept mail profile in it");
+    assert!(!vault.exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Spec §4.13: Knowlu sign-out closes the mail window and deletes every `mail-session-*` profile and the
+/// `mail-setup` profile of THAT Knowlu profile: a signed-out Knowlu keeps no signed-in mailbox. Nothing
+/// else in its folder goes (its settings, the grades kept session, a folder that only looks like a mail
+/// profile), and a second profile on the machine keeps its own. The window closes first, while the
+/// profiles are still there.
+#[cfg(windows)]
+#[test]
+fn sign_out_deletes_this_profiles_mail_session_and_mail_setup_profiles_and_no_others() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let root = std::env::temp_dir().join(format!("knowlu-t12-signout-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&root);
+    let app_root = root.join("appdata");
+    let (my_id, their_id) = (knowlu::profiles::id_for(&root.join("Mine")), knowlu::profiles::id_for(&root.join("Theirs")));
+    let _cleanup = Cleanup(vec![knowlu::account::session_target(&my_id)]);
+    let (mine, theirs) = (knowlu::profiles::profile_dir(&app_root, &my_id), knowlu::profiles::profile_dir(&app_root, &their_id));
+    let mail = ["mail-session-mbx-school", "mail-session-mbx-gmail", "mail-setup"];
+    let kept = ["lms-session", "mail-session-NOT-AN-ID", "mail-sessions"];
+    for n in mail.iter().chain(kept.iter()) {
+        std::fs::create_dir_all(mine.join(n)).unwrap();
+    }
+    std::fs::write(mine.join("settings.json"), "{}").unwrap();
+    for n in ["mail-session-mbx-theirs", "mail-setup"] {
+        std::fs::create_dir_all(theirs.join(n)).unwrap();
+    }
+
+    let closed = std::cell::RefCell::new(Vec::new());
+    let out = knowlu::account::sign_out_with(Some(my_id.clone()), Some(&app_root), |dir: &std::path::Path| {
+        closed.borrow_mut().push((dir.to_path_buf(), mail.iter().all(|n| dir.join(n).is_dir())));
+    })
+    .expect("sign out");
+
+    assert_eq!(out["ok"], true);
+    assert_eq!(out["mail_profiles_left"], false);
+    assert_eq!(closed.into_inner(), [(mine.clone(), true)], "the window closed once, for this profile, before any delete");
+    for n in mail {
+        assert!(!mine.join(n).exists(), "{n} survived sign-out");
+    }
+    for n in kept {
+        assert!(mine.join(n).is_dir(), "{n} is not a mail profile and must survive");
+    }
+    assert!(mine.join("settings.json").is_file());
+    assert!(theirs.join("mail-session-mbx-theirs").is_dir() && theirs.join("mail-setup").is_dir(), "another profile's mail profiles were deleted");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The pre-step opens Microsoft 365's Forwarding page itself, under its own deadline, so it keeps its
+/// own copy of the URL the setup runner's `WindowMailbox` opens for `Place::Forwarding`. Both must
+/// name the same page.
+#[test]
+fn the_pre_steps_forwarding_page_is_the_setup_runners() {
+    let page = "\"https://outlook.office.com/mail/options/mail/forwarding\"";
+    let account = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let recover = std::fs::read_to_string("src/mail/recover.rs").expect("src/mail/recover.rs");
+    assert!(account.contains(page), "account.rs's pre-step does not open Microsoft 365's Forwarding page");
+    assert!(recover.contains(page), "the setup runner's Forwarding page moved; move the pre-step's with it");
 }

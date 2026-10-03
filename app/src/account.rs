@@ -637,17 +637,48 @@ pub fn open_policy(which: String) -> Value {
 /// the user believes they signed out of. `had_session` is the local delete's own answer — `false`
 /// for a target that never held one — so a repeated sign-out reports honestly as a no-op instead of
 /// a silent "ok".
+///
+/// **A signed-out Knowlu keeps no signed-in mailbox** (email-forwarding spec §4.13, T12): signing a
+/// profile out also closes the mail window and deletes every `mail-session-*` profile and the
+/// `mail-setup` profile of that Knowlu profile ([`sign_out_with`]). Forwarding is untouched.
 #[tauri::command(async)]
-pub fn sign_out(profile_id: Option<String>) -> Result<Value, String> {
+pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Value, String> {
+    // The one mail window is this console's profile's: it closes only when that profile signs out.
+    let close = |dir: &std::path::Path| {
+        use tauri::Manager;
+        if app.try_state::<crate::state::ConsoleState>().is_some_and(|cs| cs.data_dir == dir) {
+            close_mail_windows(&app);
+        }
+    };
+    sign_out_with(profile_id, crate::state::app_data_root().as_deref(), close)
+}
+
+/// [`sign_out`] without the app's handle. `close_mail_window` is called with the profile's folder
+/// before any mail profile in it is deleted (WebView2 holds a profile while its window is open); the
+/// deletion itself is `mail_session::forget_all`'s, through its guard, so nothing but `mail-setup` and
+/// `mail-session-<address_id>` goes. `None` (the pending session), an id that is not
+/// [`is_profile_id`]-shaped and an unknown `app_root` name no folder, so nothing is deleted.
+/// `mail_profiles_left` is `true` when a mail profile is still on disk: recorded for the start-up
+/// retry, or, when `mail.json` could not record it, not.
+pub fn sign_out_with(
+    profile_id: Option<String>,
+    app_root: Option<&std::path::Path>,
+    close_mail_window: impl FnOnce(&std::path::Path),
+) -> Result<Value, String> {
     let target = match &profile_id {
         Some(id) => session_target(id),
         None => PENDING_TARGET.to_string(),
     };
     let token = load_session(&target).ok().map(|(_, s)| s.access_token);
     let had_session = crate::credentials::exists(&target);
-    if had_session {
-        crate::credentials::delete(&target)?;
+    let forgotten = if had_session { crate::credentials::delete(&target) } else { Ok(()) };
+    let mut mail_profiles_left = false;
+    if let (Some(id), Some(root)) = (profile_id.as_deref().filter(|id| is_profile_id(id)), app_root) {
+        let dir = crate::profiles::profile_dir(root, id);
+        close_mail_window(&dir);
+        mail_profiles_left = crate::mail_session::forget_all(&dir) != Ok(true);
     }
+    forgotten?;
     if let (Some(t), Ok(auth)) = (token, auth_base(&api_base())) {
         let _ = agent()
             .post(&format!("{auth}/logout"))
@@ -655,7 +686,7 @@ pub fn sign_out(profile_id: Option<String>) -> Result<Value, String> {
             .header("authorization", &format!("Bearer {t}"))
             .send_empty();
     }
-    Ok(json!({ "ok": true, "had_session": had_session }))
+    Ok(json!({ "ok": true, "had_session": had_session, "mail_profiles_left": mail_profiles_left }))
 }
 
 /// The four keys `config/cloud.yaml` carries — the contract with C2, in this order.
@@ -1229,6 +1260,11 @@ pub fn open_portal(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
 /// Best effort throughout: a file held open by another process must not stop the rest of the wipe,
 /// and there is nothing a user could do with the error anyway — the account is already deleted by
 /// the time this runs.
+///
+/// **The kept mail profiles go first, patiently** (email-forwarding spec §4.13): the mail windows
+/// were closed a moment ago, and WebView2 lets go of a profile folder a second or so after its window
+/// is gone, so a single `remove_dir_all` could leave a signed-in mailbox behind. They are inside
+/// `data_dir`, so this names nothing new.
 pub fn delete_local_data(
     vault: &std::path::Path,
     data_dir: &std::path::Path,
@@ -1238,6 +1274,7 @@ pub fn delete_local_data(
     session_credential_target: &str,
 ) {
     let _ = std::fs::remove_dir_all(vault);
+    let _ = crate::mail_session::forget_all(data_dir);
     let _ = std::fs::remove_dir_all(data_dir);
     if !session_credential_target.is_empty() {
         let _ = crate::credentials::delete(session_credential_target);
@@ -1266,55 +1303,305 @@ pub fn delete_local_data(
     }
 }
 
-/// Spec §4.1: *Delete my data* removes the vault, the snapshots, the app data **and** calls
-/// `DELETE /account`. The server call goes FIRST: a local wipe that ran before it would leave an
-/// account nobody can reach to delete, and the deletion right is the one that matters here.
-///
-/// **A refusal is also a stop**, not only a transport failure: the agent is built with
-/// `http_status_as_error(false)`, so a 401 or a 500 arrives as `Ok`, and wiping the machine on one
-/// would destroy the vault while the account it was supposed to delete is still there. Nothing local
-/// is touched unless the server answered 2xx — `cloud/…/account/handler.ts` answers
-/// `200 {deleted:true}` — **or 404** (R-C1-57, M1): an account that is already gone is the one
-/// refusal that must not lock a user out of deleting their own machine's copy, which is otherwise
-/// exactly what a half-finished first attempt would do.
-#[tauri::command(async)]
-pub fn delete_my_data(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
-    let cfg = match cloud_config(&cs.vault) { Ok(c) => c, Err(e) => return json!({ "ok": false, "error": e }) };
-    let auth = match auth_base(&cfg.api_base) { Ok(a) => a, Err(e) => return json!({ "ok": false, "error": e }) };
-    let token = match valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now_unix()) { Ok(t) => t, Err(e) => return json!({ "ok": false, "error": e }) };
+/// `DELETE /account` with `token` (spec §4.1). **A refusal is also a stop**, not only a transport
+/// failure: the agent is built with `http_status_as_error(false)`, so a 401 or a 500 arrives as `Ok`,
+/// and wiping the machine on one would destroy the vault while the account it was supposed to delete
+/// is still there. `Ok` only on 2xx — `cloud/…/account/handler.ts` answers `200 {deleted:true}` —
+/// **or 404** (R-C1-57, M1): an account that is already gone is the one refusal that must not lock a
+/// user out of deleting their own machine's copy, which is otherwise exactly what a half-finished
+/// first attempt would do. `Err` is the sentence the page shows, and it says nothing local was touched.
+pub fn delete_account_at(api_base: &str, token: &str) -> Result<(), String> {
     let untouched = "nothing on this machine was touched";
     let res = agent()
-        .delete(&format!("{}/account", cfg.api_base.trim_end_matches('/')))
+        .delete(&format!("{}/account", api_base.trim_end_matches('/')))
         .header("authorization", &format!("Bearer {token}"))
         .call();
-    let mut res = match res {
-        Ok(r) => r,
-        Err(e) => return json!({ "ok": false, "error": format!("your account could not be deleted ({e}) — {untouched}") }),
-    };
+    let mut res = res.map_err(|e| format!("your account could not be deleted ({e}) — {untouched}"))?;
     let status = res.status().as_u16();
     if !(200..300).contains(&status) && status != 404 {
         let text = res.body_mut().with_config().limit(1 << 16).read_to_string().unwrap_or_default();
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-        return json!({ "ok": false, "error": format!("your account could not be deleted ({}) — {untouched}", provider_error(status, &v)) });
+        return Err(format!("your account could not be deleted ({}) — {untouched}", provider_error(status, &v)));
     }
-    let backup = cs.settings.lock().map(|s| s.backup_dir.clone()).unwrap_or_default();
-    let profile_id = profile_id_of(&cs);
-    delete_local_data(
-        &cs.vault,
-        &cs.data_dir,
-        backup.as_deref(),
-        &profile_id,
-        crate::state::app_data_root().as_deref(),
-        &cfg.session_credential_target,
-    );
-    // The envelope goes back first and the process ends a moment later, on another thread: a page
-    // whose `.then` never runs cannot say "Deleted", and the settings row's own copy promises it will.
-    let h = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        h.exit(0);
-    });
+    Ok(())
+}
+
+/// Spec §4.1: *Delete my data* removes the vault, the snapshots, the app data **and** calls
+/// `DELETE /account`. The server call goes FIRST: a local wipe that ran before it would leave an
+/// account nobody can reach to delete, and the deletion right is the one that matters here. Nothing
+/// local is touched unless [`delete_account_at`] says the account is gone.
+///
+/// **The mail steps** (email-forwarding spec §4.13, T12) are [`delete_my_data_with`]'s order: the
+/// forwarding-off pre-step before the server call, the mail windows closed after it, then the local
+/// wipe. A console with no usable session stops here before any of it, so forwarding is never turned
+/// off for a deletion that could not even be asked for.
+#[tauri::command(async)]
+pub fn delete_my_data(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    let cfg = match cloud_config(&cs.vault) { Ok(c) => c, Err(e) => return json!({ "ok": false, "error": e }) };
+    let auth = match auth_base(&cfg.api_base) { Ok(a) => a, Err(e) => return json!({ "ok": false, "error": e }) };
+    if let Err(e) = valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now_unix()) {
+        return json!({ "ok": false, "error": e });
+    }
+    let mut steps = LiveDelete { app: &app, cs: &cs, cfg, auth, window: None, window_busy: false };
+    let out = delete_my_data_with(&mut steps, &cs.data_dir, FORWARDING_OFF_BOUND);
+    drop(steps);
+    if out["ok"] == true {
+        // The envelope goes back first and the process ends a moment later, on another thread: a page
+        // whose `.then` never runs cannot say "Deleted", and the settings row's own copy promises it will.
+        let h = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            h.exit(0);
+        });
+    }
+    out
+}
+
+// ---- Delete my data and sign-out: the mail steps (email-forwarding spec §4.13, T12) ----
+//
+// *Delete my data* tries, before its server call, to turn forwarding off in each mailbox with a saved
+// sign-in on this machine: hidden, a minute each, and never in a way that can stop the deletion. After
+// the server call the mail windows close, and only then does `delete_local_data` remove the profile
+// folder and every kept mail profile in it. The order is `delete_my_data_with`'s, behind `DeleteSteps`,
+// so a test drives it without a window; `LiveDelete` is the console's. Nothing here logs, keeps or
+// returns a mailbox address: the Knowlu address goes into the step script's arguments and nowhere else.
+
+/// How long the pre-step may spend on one mailbox (spec §4.13: "bounded to a minute each").
+pub const FORWARDING_OFF_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One mailbox the pre-step can turn forwarding off in: a saved sign-in kept on this machine, and a
+/// provider Knowlu has a script for. Not `Debug`: it holds the mailbox's Knowlu address.
+pub struct SavedMailbox {
+    pub address_id: String,
+    pub provider: crate::mail_steps::Provider,
+    /// `<data_dir>\mail-session-<address_id>`, which exists.
+    pub profile: std::path::PathBuf,
+    address: String,
+}
+
+impl SavedMailbox {
+    /// The mailbox's Knowlu forwarding address: the step script's argument, and nothing else's.
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+}
+
+/// The mailboxes of `rows` (`GET /mail/addresses`, in the service's order) the pre-step can reach: a
+/// valid address id, Microsoft 365 or Gmail, an address, and a kept profile. A guided mailbox has no
+/// script and one with no kept profile has no saved sign-in; the confirm's sentence covers both.
+fn saved_mailboxes(data_dir: &std::path::Path, rows: &[Value]) -> Vec<SavedMailbox> {
+    use crate::mail_steps::Provider;
+    rows.iter()
+        .filter_map(|r| {
+            let id = r["address_id"].as_str()?;
+            let provider = Provider::from_service(r["provider"].as_str().unwrap_or(""));
+            let address = r["address"].as_str().filter(|a| !a.is_empty())?;
+            let profile = crate::mail_session::session_dir(data_dir, id).filter(|p| p.is_dir())?;
+            let saved = SavedMailbox { address_id: id.to_string(), provider, profile, address: address.to_string() };
+            (provider != Provider::Guided).then_some(saved)
+        })
+        .collect()
+}
+
+/// What *Delete my data* asks of the world, one call per step (spec test 38).
+pub trait DeleteSteps {
+    /// `GET /mail/addresses`: the mailboxes, read while the account still has them.
+    fn mailboxes(&mut self) -> Result<Vec<Value>, String>;
+    /// Turn forwarding off in `mailbox` with its saved sign-in, hidden, giving up at `deadline`.
+    fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: std::time::Instant) -> Result<(), &'static str>;
+    /// [`delete_account_at`]; `Err` is the page's sentence.
+    fn delete_account(&mut self) -> Result<(), String>;
+    /// Close the mail window and its popup, and stop whatever drives them.
+    fn close_mail_windows(&mut self);
+    /// [`delete_local_data`].
+    fn delete_local_data(&mut self);
+}
+
+/// *Delete my data* in spec §4.13's order: the forwarding-off pre-step, the server call, the mail
+/// windows, the local wipe. The pre-step is best effort, and nothing it does or fails to do changes
+/// what follows: a list that cannot be read skips it, a mailbox that fails is passed over, and each
+/// mailbox's `bound` starts when that mailbox does. A refused server call stops before anything
+/// local, the windows included.
+pub fn delete_my_data_with(steps: &mut dyn DeleteSteps, data_dir: &std::path::Path, bound: std::time::Duration) -> Value {
+    if let Ok(rows) = steps.mailboxes() {
+        for mailbox in saved_mailboxes(data_dir, &rows) {
+            let _ = steps.forwarding_off(&mailbox, std::time::Instant::now() + bound);
+        }
+    }
+    if let Err(e) = steps.delete_account() {
+        return json!({ "ok": false, "error": e });
+    }
+    steps.close_mail_windows();
+    steps.delete_local_data();
     json!({ "ok": true, "error": Value::Null })
+}
+
+/// The console's [`DeleteSteps`]: its vault and profile folder, the account's session, the windows.
+struct LiveDelete<'a> {
+    app: &'a tauri::AppHandle,
+    cs: &'a crate::state::ConsoleState,
+    cfg: CloudConfig,
+    auth: String,
+    /// The one mail window (spec §5.4), held from the pre-step's first mailbox to the end of the wipe.
+    window: Option<crate::mail::MailWindow>,
+    /// The window could not be had once; the next mailbox does not wait for it again.
+    window_busy: bool,
+}
+
+impl DeleteSteps for LiveDelete<'_> {
+    fn mailboxes(&mut self) -> Result<Vec<Value>, String> {
+        let c = &self.cfg;
+        let client = crate::mail_client::MailClient::for_session(&c.api_base, &c.anon_key, &c.session_credential_target);
+        client.and_then(|m| m.list_addresses()).map_err(|e| e.name().to_string())
+    }
+
+    fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: std::time::Instant) -> Result<(), &'static str> {
+        if self.window.is_none() && !self.window_busy {
+            self.window = take_mail_window(self.app, deadline);
+            self.window_busy = self.window.is_none();
+        }
+        if self.window.is_none() {
+            return Err("the mail window is busy");
+        }
+        let r = forwarding_off_in_window(self.app, &self.cs.data_dir, mailbox, deadline);
+        crate::mail::close(self.app);
+        r
+    }
+
+    fn delete_account(&mut self) -> Result<(), String> {
+        // Read again: the pre-step can outlast the two minutes `valid_access_token_at` refreshes within.
+        let token = valid_access_token_at(&self.auth, &self.cfg.anon_key, &self.cfg.session_credential_target, now_unix())?;
+        delete_account_at(&self.cfg.api_base, &token)
+    }
+
+    fn close_mail_windows(&mut self) {
+        close_mail_windows(self.app);
+        // Held to the end of the wipe, so nothing opens a mail window on a profile being deleted.
+        if self.window.is_none() {
+            self.window = crate::mail::MailWindow::try_take();
+        }
+    }
+
+    fn delete_local_data(&mut self) {
+        let backup = self.cs.settings.lock().map(|s| s.backup_dir.clone()).unwrap_or_default();
+        let profile_id = profile_id_of(self.cs);
+        let root = crate::state::app_data_root();
+        delete_local_data(&self.cs.vault, &self.cs.data_dir, backup.as_deref(), &profile_id, root.as_deref(), &self.cfg.session_credential_target);
+    }
+}
+
+/// The one mail window for the pre-step. A setup, a resume or a slot's mail step that holds it is
+/// stopped and its window closed (the student has confirmed the deletion), and the hold is waited
+/// for until `deadline`.
+fn take_mail_window(app: &tauri::AppHandle, deadline: std::time::Instant) -> Option<crate::mail::MailWindow> {
+    let mut asked = false;
+    loop {
+        if let Some(w) = crate::mail::MailWindow::try_take() {
+            return Some(w);
+        }
+        if !asked {
+            close_mail_windows(app);
+            asked = true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+/// Stops a running mail setup or resume after its step and closes the mail window and its popup
+/// (spec §4.13): nothing may go on driving a profile that is about to be deleted.
+fn close_mail_windows(app: &tauri::AppHandle) {
+    if let Some(run) = crate::mail::setup::SETUPS.current() {
+        run.stop();
+    }
+    crate::mail::close(app);
+}
+
+/// Microsoft 365's Forwarding page, where its `forwarding_off.js` expects to be: the page the setup
+/// runner's `WindowMailbox` opens for `Place::Forwarding` (a test pins the two together). Gmail's
+/// script goes to its section by hash from the inbox the window opens at.
+const M365_FORWARDING: &str = "https://outlook.office.com/mail/options/mail/forwarding";
+
+/// One mailbox's forwarding, off, in the hidden mail window on its kept profile, before `deadline`:
+/// open it, wait for the saved sign-in, go to the Forwarding page (Microsoft 365), and run the
+/// provider's `forwarding_off.js` with the Knowlu address; a Gmail page that reloads is run once more,
+/// as the setup runner does. The script leaves forwarding to any other address alone. The caller
+/// closes the window, whatever happened. Every `Err` is a fixed word.
+fn forwarding_off_in_window(app: &tauri::AppHandle, data_dir: &std::path::Path, mb: &SavedMailbox, deadline: std::time::Instant) -> Result<(), &'static str> {
+    use crate::mail::{open_hidden, run_in_window, window_signed_in, Refusal, WINDOW};
+    use crate::mail_steps::Provider;
+    use tauri::Manager;
+    let left = || deadline.saturating_duration_since(std::time::Instant::now());
+    let nap = |most: u64| std::thread::sleep(left().min(std::time::Duration::from_millis(most)));
+    // The last mailbox's window goes a moment after it is closed.
+    while app.get_webview_window(WINDOW).is_some() {
+        if left().is_zero() {
+            return Err("the mail window is busy");
+        }
+        nap(100);
+    }
+    open_hidden(app, data_dir, &mb.profile, mb.provider).map_err(|_| "the mail window would not open")?;
+    while !window_signed_in(app, mb.provider) {
+        if left().is_zero() {
+            return Err("needs sign-in");
+        }
+        nap(500);
+    }
+    let script = match mb.provider {
+        Provider::M365 => "m365/forwarding_off.js",
+        Provider::Gmail => "gmail/forwarding_off.js",
+        Provider::Guided => return Err("this mailbox is set up by hand"),
+    };
+    if mb.provider == Provider::M365 {
+        let w = app.get_webview_window(WINDOW).ok_or(Refusal::NoPage.as_str())?;
+        w.navigate(M365_FORWARDING.parse().map_err(|_| Refusal::Unreadable.as_str())?).map_err(|_| Refusal::Lost.as_str())?;
+        page_ready(app, mb.provider, deadline)?;
+    }
+    let mut args = json!({ "address": mb.address() });
+    let mut reloaded = false;
+    loop {
+        if left().is_zero() {
+            return Err(Refusal::TimedOut.as_str());
+        }
+        let r = run_in_window(app, mb.provider, script, &args, left());
+        let reloading = match &r {
+            Ok(v) => v["result"].as_str() == Some("reloading"),
+            Err(Refusal::Lost) => mb.provider == Provider::Gmail,
+            Err(_) => false,
+        };
+        if reloading && !reloaded {
+            reloaded = true;
+            args["reloaded"] = json!(true);
+            page_ready(app, mb.provider, deadline)?;
+            continue;
+        }
+        return match r {
+            Ok(v) if v["result"].as_str() == Some("ok") => Ok(()),
+            Ok(_) => Err("forwarding was not turned off"),
+            Err(refusal) => Err(refusal.as_str()),
+        };
+    }
+}
+
+/// Waits, until `deadline`, for the mail window's document (`ready.js`), then a beat for the page to
+/// draw: `WindowMailbox::open`'s wait, under the pre-step's deadline.
+fn page_ready(app: &tauri::AppHandle, provider: crate::mail_steps::Provider, deadline: std::time::Instant) -> Result<(), &'static str> {
+    use std::time::{Duration, Instant};
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(crate::mail::Refusal::TimedOut.as_str());
+        }
+        std::thread::sleep(left.min(Duration::from_millis(250)));
+        let wait = deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(5));
+        let state = crate::mail::run_in_window(app, provider, "ready.js", &json!({}), wait);
+        if state.ok().as_ref().and_then(Value::as_str) == Some("complete") {
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(2)));
+            return Ok(());
+        }
+    }
 }
 
 // ---- Gmail connect (spec §4.2, D3): the three pure cores ----
