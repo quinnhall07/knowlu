@@ -464,17 +464,34 @@ pub fn grades_step(
 /// The slot's mail inputs that only the caller knows (plan P18), beside [`GradesSeam`]. `run_slot_inner`
 /// builds it from the vault and the app handle; a test builds it from closures.
 pub struct MailSeam<'a> {
-    /// The account's mailboxes as the service lists them, or `None` when it cannot be asked (no account, no
-    /// session, no app handle, offline): nothing is known to report, so no row.
-    pub mailboxes: &'a dyn Fn() -> Option<Vec<serde_json::Value>>,
-    /// The hidden-window pass over the mailboxes that are due, answering its row; `None` from it is "the mail
-    /// window was taken meanwhile". `None` here is a run with no app handle (`--run-slot-once`): no window.
-    pub pass: Option<&'a dyn Fn(&[serde_json::Value]) -> Option<String>>,
+    /// The account's mailboxes as the service lists them: `Ok` with none when there is no account (no mailbox
+    /// can exist) or no app handle. `Err` (the client's error name) is a service that could not be asked or
+    /// did not answer with a list (no session, offline, a 5xx, a bad reply): a mailbox may be there, so the
+    /// step names it and is never silent (Checkpoint D).
+    pub mailboxes: &'a dyn Fn() -> Result<Vec<serde_json::Value>, &'static str>,
+    /// The hidden-window pass over the mailboxes that are due, answering its row; `Err` is why it did not run,
+    /// in a skip's words ([`mail_pass`]). `None` here is a run with no app handle (`--run-slot-once`): no window.
+    pub pass: Option<&'a dyn Fn(&[serde_json::Value]) -> Result<String, &'static str>>,
     /// The mail window exists right now (a setup, a repair sign-in).
     pub window_open: bool,
 }
 
-fn no_mailboxes() -> Option<Vec<serde_json::Value>> { None }
+fn no_mailboxes() -> Result<Vec<serde_json::Value>, &'static str> { Ok(Vec::new()) }
+
+/// A pass that did not run because the mail window was taken meanwhile (a setup, a repair sign-in).
+pub const MAIL_WINDOW_OPEN: &str = "mail window open";
+/// A pass that did not run because the account's client could not be had: no session on this device.
+pub const MAIL_NO_SESSION: &str = "no session";
+
+/// The slot's pass behind [`MailSeam::pass`], in its order: the one mail window taken, then the account's
+/// client, then `run` over them while the window is held; `run`'s `None` (nothing ran) is
+/// `mail: nothing to check`. Each `Err` is its own skip's words, so a lost window and a lost session never
+/// read as each other (Checkpoint D).
+pub fn mail_pass<W, C, E>(take_window: impl FnOnce() -> Option<W>, client: impl FnOnce() -> Result<C, E>, run: impl FnOnce(&C) -> Option<String>) -> Result<String, &'static str> {
+    let _window = take_window().ok_or(MAIL_WINDOW_OPEN)?;
+    let client = client().map_err(|_| MAIL_NO_SESSION)?;
+    Ok(run(&client).unwrap_or_else(|| "mail: nothing to check".to_string()))
+}
 
 impl MailSeam<'static> {
     /// No mailboxes and no window: the step adds no row.
@@ -484,13 +501,18 @@ impl MailSeam<'static> {
 /// **The slot's mail decision** (spec §4.11, test 36): the whole `RunSummary` row, or `None` for no row.
 /// With no mailbox connected (none listed, or only revoked, guided or turned-off ones) there is no row; with
 /// one, a named skip at exit 0 in this order: no entitlement, saved sign-in off, not due, mail window open;
-/// else the pass. Never a failure, and never a line in `state/runner-log.md` (the skip filter in
+/// else the pass, whose own skip is `mail window open` or `no session` ([`mail_pass`]). A list the service
+/// could not give is `could not read your mailboxes`, before all of them: it is no proof there is no
+/// mailbox. Never a failure, and never a line in `state/runner-log.md` (the skip filter in
 /// `run_slot_with` names no mail step), so the step writes nothing in the vault.
 pub fn mail_step(est: crate::account::EntitlementState, data_dir: &Path, now: i64, mail: &MailSeam) -> Option<String> {
     use crate::mail_session::{valid_address_id, MailState};
     let pass = mail.pass?;
+    let skip = |why: &str| Some(format!("mail (skipped: {why})"));
+    // A list the service could not give is no proof there is no mailbox: named, never silent (Checkpoint D).
+    let Ok(listed) = (mail.mailboxes)() else { return skip("could not read your mailboxes") };
     let state = MailState::load(data_dir);
-    let rows: Vec<serde_json::Value> = (mail.mailboxes)()?
+    let rows: Vec<serde_json::Value> = listed
         .into_iter()
         .filter(|r| {
             let id = r["address_id"].as_str().filter(|i| valid_address_id(i));
@@ -503,7 +525,6 @@ pub fn mail_step(est: crate::account::EntitlementState, data_dir: &Path, now: i6
     if rows.is_empty() {
         return None;
     }
-    let skip = |why: &str| Some(format!("mail (skipped: {why})"));
     // An unreadable `mail.json` cannot say what the student turned off, so nothing runs (§13 Q11).
     let Ok(state) = state else { return skip("mail.json unreadable") };
     if est == crate::account::EntitlementState::NotEntitled {
@@ -523,9 +544,9 @@ pub fn mail_step(est: crate::account::EntitlementState, data_dir: &Path, now: i6
         return skip("not due");
     }
     if mail.window_open {
-        return skip("mail window open");
+        return skip(MAIL_WINDOW_OPEN);
     }
-    pass(&due).or_else(|| skip("mail window open"))
+    Some(pass(&due).unwrap_or_else(|why| format!("mail (skipped: {why})")))
 }
 
 /// sync → coursework → **ingest** → **grades** → **judge** → rank, as child processes of the sibling
@@ -767,20 +788,25 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
         window_open: tray_app.is_some_and(|app| app.get_webview_window(crate::grades::WINDOW).is_some()),
     };
     // The mail step: the service's mailboxes and the hidden-window pass, only with an app handle. The pass takes
-    // the one mail window itself, so a setup that holds it is a named skip and never a second window.
-    let mail_client = || crate::mail::live::client_for(&cs.vault).ok();
-    let mail_rows = || tray_app.and_then(|_| mail_client()).and_then(|c| c.list_addresses().ok());
-    let mail_pass = |due: &[serde_json::Value]| -> Option<String> {
-        let app = tray_app?;
-        let _window = crate::mail::MailWindow::try_take()?;
-        let client = mail_client()?;
-        let host = crate::mail::live::WindowHost::new(app.clone(), cs.data_dir.clone());
-        let env = crate::mail::slot::SlotEnv { host: &host, client: &client, clock: &crate::mail::recover::SystemClock, data_dir: &cs.data_dir };
-        Some(crate::mail::slot::run_step(&env, due).unwrap_or_else(|| "mail: nothing to check".to_string()))
+    // the one mail window itself, so a setup that holds it is a named skip and never a second window. No
+    // account (no `cloud.yaml` to name one) has no mailbox, so no row; a list the service could not give is
+    // the step's named skip.
+    let mail_client = || crate::mail::live::client_for(&cs.vault);
+    let mail_rows = || match tray_app.map(|_| mail_client()) {
+        Some(Ok(client)) => client.list_addresses().map_err(|e| e.name()),
+        _ => Ok(Vec::new()),
+    };
+    let pass = |due: &[serde_json::Value]| {
+        let app = tray_app.expect("only called with an app handle");
+        mail_pass(crate::mail::MailWindow::try_take, mail_client, |client| {
+            let host = crate::mail::live::WindowHost::new(app.clone(), cs.data_dir.clone());
+            let env = crate::mail::slot::SlotEnv { host: &host, client, clock: &crate::mail::recover::SystemClock, data_dir: &cs.data_dir };
+            crate::mail::slot::run_step(&env, due)
+        })
     };
     let mail = MailSeam {
         mailboxes: &mail_rows,
-        pass: tray_app.map(|_| &mail_pass as &dyn Fn(&[serde_json::Value]) -> Option<String>),
+        pass: tray_app.map(|_| &pass as &dyn Fn(&[serde_json::Value]) -> Result<String, &'static str>),
         window_open: tray_app.is_some_and(|app| app.get_webview_window(crate::mail::WINDOW).is_some()),
     };
     run_slot_with(cs, sch, tray_app, late, &seam, &mail)

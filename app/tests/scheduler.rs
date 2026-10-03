@@ -1753,11 +1753,11 @@ fn second_row() -> Value {
 #[test]
 fn the_mail_row_and_each_named_skip_exit_zero() {
     let d = mail_dir("skips");
-    let rows = || Some(vec![rig::row("active", "m365")]);
+    let rows = || Ok(vec![rig::row("active", "m365")]);
     let ran = Cell::new(0);
     let pass = |_: &[Value]| {
         ran.set(ran.get() + 1);
-        Some("mail: forwarding on, 2 recovered".to_string())
+        Ok("mail: forwarding on, 2 recovered".to_string())
     };
     let seam = |window_open| MailSeam { mailboxes: &rows, pass: Some(&pass), window_open };
     let ok = EntitlementState::Entitled;
@@ -1794,6 +1794,86 @@ fn the_mail_row_and_each_named_skip_exit_zero() {
     assert!(s.engine_ok && s.ok, "a skip is not a failure: {:?}", s.steps);
     let _ = std::fs::remove_dir_all(&cs.data_dir);
     let _ = std::fs::remove_dir_all(&v);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Checkpoint D (spec §4.11: one `mail` row or a named skip): a mailbox list the service could not give (an
+/// expired session, a 5xx, no network) is no proof there is no mailbox, so it is a named skip at exit 0, before
+/// every other one, and never the silence of a student with none. A list that answered with none is still no row.
+#[test]
+fn a_mailbox_list_the_service_could_not_give_is_a_named_skip_never_silence() {
+    let d = mail_dir("unlisted");
+    let ran = Cell::new(0);
+    let pass = |_: &[Value]| {
+        ran.set(ran.get() + 1);
+        Ok("mail: forwarding on, 0 recovered".to_string())
+    };
+    let failed = || Err("server");
+    let none = || Ok(Vec::new());
+    let named = Some("mail (skipped: could not read your mailboxes)");
+    let step = |est, mailboxes: &dyn Fn() -> Result<Vec<Value>, &'static str>, window_open| {
+        mail_step(est, &d, rig::NOW, &MailSeam { mailboxes, pass: Some(&pass), window_open })
+    };
+    assert_eq!(step(EntitlementState::Entitled, &failed, false).as_deref(), named);
+    assert_eq!(step(EntitlementState::NotEntitled, &failed, true).as_deref(), named, "named before entitlement and the window");
+    assert_eq!(step(EntitlementState::Entitled, &none, false), None, "a list of none is still no row");
+    assert_eq!(ran.get(), 0, "nothing ran");
+    // With no app handle there is no pass and nothing to ask: no row, as before.
+    assert_eq!(mail_step(EntitlementState::Entitled, &d, rig::NOW, &MailSeam { mailboxes: &failed, pass: None, window_open: false }), None);
+
+    // In a slot it is a row at exit 0 that never paints the tray amber.
+    let (v, cs) = app_slot_vault("mail-unlisted");
+    let sch = Scheduler::default();
+    let s = run_mail_slot(&cs, &sch, &MailSeam { mailboxes: &failed, pass: Some(&pass), window_open: false });
+    assert!(s.steps.contains(&("mail (skipped: could not read your mailboxes)".to_string(), 0)), "{:?}", s.steps);
+    assert!(s.engine_ok && s.ok, "a skip is not a failure: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&cs.data_dir);
+    let _ = std::fs::remove_dir_all(&v);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Checkpoint D: the pass names why it did not run. The mail window taken meanwhile is `mail window open`;
+/// the account's client that cannot be had (the session gone between the list and the pass) is `no session`,
+/// never the window, so nobody looks for a window that is not there. The window is held for the whole run.
+#[test]
+fn a_pass_whose_client_cannot_be_had_is_no_session_never_the_window() {
+    use knowlu::scheduler::mail_pass;
+    struct Hold<'a>(&'a Cell<bool>);
+    impl Drop for Hold<'_> {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+    let ran = Cell::new(0);
+    let run = |_: &()| {
+        ran.set(ran.get() + 1);
+        Some("mail: forwarding on, 0 recovered".to_string())
+    };
+    assert_eq!(mail_pass(|| Some(()), || Err::<(), _>("no account"), run), Err("no session"));
+    let asked = Cell::new(false);
+    let client = || {
+        asked.set(true);
+        Ok::<(), ()>(())
+    };
+    assert_eq!(mail_pass(|| None::<()>, client, run), Err("mail window open"));
+    assert!(!asked.get(), "with the window taken the client is never asked");
+    assert_eq!(ran.get(), 0, "neither ran the pass");
+    let released = Cell::new(false);
+    let held = |_: &()| {
+        assert!(!released.get(), "the run holds the mail window");
+        None
+    };
+    assert_eq!(mail_pass(|| Some(Hold(&released)), || Ok::<(), ()>(()), held), Ok("mail: nothing to check".to_string()));
+    assert!(released.get(), "and lets it go when it is done");
+
+    // Through the step, each is its own named skip.
+    let d = mail_dir("pass-reason");
+    let rows = || Ok(vec![rig::row("active", "m365")]);
+    let no_session = |_: &[Value]| mail_pass(|| Some(()), || Err::<(), _>("no account"), |_: &()| Some("mail: ran".to_string()));
+    let taken = |_: &[Value]| mail_pass(|| None::<()>, || Ok::<(), ()>(()), |_: &()| Some("mail: ran".to_string()));
+    let step = |pass: &dyn Fn(&[Value]) -> Result<String, &'static str>| mail_step(EntitlementState::Entitled, &d, rig::NOW, &MailSeam { mailboxes: &rows, pass: Some(pass), window_open: false });
+    assert_eq!(step(&no_session).as_deref(), Some("mail (skipped: no session)"));
+    assert_eq!(step(&taken).as_deref(), Some("mail (skipped: mail window open)"));
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -1843,11 +1923,11 @@ fn reconcile_follows_reconcile_cadence_in_both_modes() {
         true
     })
     .unwrap();
-    let rows = || Some(vec![rig::row("active", "m365"), second_row()]);
+    let rows = || Ok(vec![rig::row("active", "m365"), second_row()]);
     let seen = std::cell::RefCell::new(Vec::new());
     let pass = |due: &[Value]| {
         seen.borrow_mut().extend(due.iter().map(|r| r["address_id"].as_str().unwrap().to_string()));
-        Some("mail: ran".to_string())
+        Ok("mail: ran".to_string())
     };
     let seam = MailSeam { mailboxes: &rows, pass: Some(&pass), window_open: false };
     assert!(mail_step(EntitlementState::Entitled, &d, rig::NOW, &seam).is_some());
@@ -1884,10 +1964,10 @@ fn the_mail_step_runs_after_the_grades_capture_and_before_sync() {
         Ok(bundle())
     };
     let dated = test_row("blackboard", Some("2026-10-01"));
-    let rows = || Some(vec![rig::row("active", "m365")]);
+    let rows = || Ok(vec![rig::row("active", "m365")]);
     let pass = |_: &[Value]| {
         events.borrow_mut().push("mail");
-        Some("mail: forwarding on, 0 recovered".to_string())
+        Ok("mail: forwarding on, 0 recovered".to_string())
     };
     let sch = Scheduler::default();
     let fake = std::env::temp_dir().join(format!("qo-sched-mail-order-{}", std::process::id()));
@@ -1912,24 +1992,28 @@ fn no_mailbox_records_no_mail_row_and_no_mail_step_name_reaches_the_runner_log()
     let (v, cs) = app_slot_vault("mail-log");
     let sch = Scheduler::default();
     let mail_rows = |s: &knowlu::scheduler::RunSummary| s.steps.iter().filter(|(n, _)| n.starts_with("mail")).count();
-    let pass = |_: &[Value]| Some("mail (needs sign-in)".to_string());
-    // No mailbox connected: nothing is asked of the window and no row is added, whatever the service said.
-    let none = || Some(Vec::new());
-    let unreadable = || None;
-    let revoked = || Some(vec![rig::row("revoked", "m365")]);
-    for mailboxes in [&none as &dyn Fn() -> Option<Vec<Value>>, &unreadable, &revoked] {
+    let pass = |_: &[Value]| Ok("mail (needs sign-in)".to_string());
+    // No mailbox connected: nothing is asked of the window and no row is added, whatever the service listed.
+    let none = || Ok(Vec::new());
+    let revoked = || Ok(vec![rig::row("revoked", "m365")]);
+    for mailboxes in [&none as &dyn Fn() -> Result<Vec<Value>, &'static str>, &revoked] {
         let s = run_mail_slot(&cs, &sch, &MailSeam { mailboxes, pass: Some(&pass), window_open: false });
         assert_eq!(mail_rows(&s), 0, "{:?}", s.steps);
     }
+    // A list the service could not give is one named row (Checkpoint D), and no line in the runner log either.
+    let unreadable = || Err("server");
+    let mut summary = run_mail_slot(&cs, &sch, &MailSeam { mailboxes: &unreadable, pass: Some(&pass), window_open: false });
+    assert_eq!(mail_rows(&summary), 1, "{:?}", summary.steps);
     // One connected: every named outcome is a row in the summary, and none is a line in the runner log.
     MailState::update(&cs.data_dir, |s| {
         s.keep_session = false;
         true
     })
     .unwrap();
-    let one = || Some(vec![rig::row("active", "m365")]);
-    let mut summary = run_mail_slot(&cs, &sch, &MailSeam { mailboxes: &one, pass: Some(&pass), window_open: false });
-    assert_eq!(mail_rows(&summary), 1, "{:?}", summary.steps);
+    let one = || Ok(vec![rig::row("active", "m365")]);
+    let s = run_mail_slot(&cs, &sch, &MailSeam { mailboxes: &one, pass: Some(&pass), window_open: false });
+    assert_eq!(mail_rows(&s), 1, "{:?}", s.steps);
+    summary.steps.extend(s.steps);
     MailState::update(&cs.data_dir, |s| {
         s.keep_session = true;
         true
@@ -1940,7 +2024,9 @@ fn no_mailbox_records_no_mail_row_and_no_mail_step_name_reaches_the_runner_log()
         assert_eq!(mail_rows(&s), 1);
         summary.steps.extend(s.steps);
     }
-    assert!(summary.steps.iter().any(|(n, _)| n == "mail (needs sign-in)") && summary.steps.iter().any(|(n, _)| n == "mail (skipped: saved sign-in off)"));
+    for row in ["mail (needs sign-in)", "mail (skipped: saved sign-in off)", "mail (skipped: could not read your mailboxes)"] {
+        assert!(summary.steps.iter().any(|(n, _)| n == row), "{row} in {:?}", summary.steps);
+    }
     let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap_or_default();
     assert!(!log.lines().any(|l| l.contains("local ok mail") || l.contains("mail (") || l.contains("mail:")), "a mail step reached the runner log:\n{log}");
     let _ = std::fs::remove_dir_all(&cs.data_dir);
@@ -1968,10 +2054,10 @@ fn the_grades_capture_and_the_mail_step_never_run_at_once() {
         hold(&grades_ran);
         Ok(bundle())
     };
-    let rows = || Some(vec![rig::row("active", "m365")]);
+    let rows = || Ok(vec![rig::row("active", "m365")]);
     let pass = |_: &[Value]| {
         hold(&runs);
-        Some("mail: forwarding on, 0 recovered".to_string())
+        Ok("mail: forwarding on, 0 recovered".to_string())
     };
     let dated = test_row("blackboard", Some("2026-10-01"));
     let sch = Scheduler::default();
@@ -2096,11 +2182,11 @@ fn a_turned_off_mailbox_is_never_turned_back_on_even_after_a_failed_disconnect()
     assert_eq!(p.host.st.lock().unwrap().fwd["forwarding"], json!("off"));
     let (scripts, opens, calls) = (p.host.scripts(), p.host.opens(), p.svc.calls());
     // The mailbox is still listed, `off`, with a kept profile: the slot never touches it.
-    let rows = || client.list_addresses().ok();
+    let rows = || client.list_addresses().map_err(|e| e.name());
     let ran = Cell::new(0);
     let pass = |due: &[Value]| {
         ran.set(ran.get() + 1);
-        run_step(&SlotEnv { host: &p.host, client: &client, clock: &p.clk, data_dir: &p.d }, due)
+        run_step(&SlotEnv { host: &p.host, client: &client, clock: &p.clk, data_dir: &p.d }, due).ok_or("nothing ran")
     };
     let seam = MailSeam { mailboxes: &rows, pass: Some(&pass), window_open: false };
     assert_eq!(mail_step(EntitlementState::Entitled, &p.d, rig::NOW, &seam), None, "no row for a mailbox the student turned off");
@@ -2184,8 +2270,8 @@ fn no_file_or_log_of_knowlus_own_holds_the_address_or_token() {
 
     let client = svc.client();
     let clk = rig::Clk::at(rig::NOW);
-    let rows = || client.list_addresses().ok();
-    let pass = |due: &[Value]| Some(run_step(&SlotEnv { host: &host, client: &client, clock: &clk, data_dir: &cs.data_dir }, due).unwrap_or_default());
+    let rows = || client.list_addresses().map_err(|e| e.name());
+    let pass = |due: &[Value]| Ok(run_step(&SlotEnv { host: &host, client: &client, clock: &clk, data_dir: &cs.data_dir }, due).unwrap_or_default());
     let sch = Scheduler::default();
     let s = run_mail_slot(&cs, &sch, &MailSeam { mailboxes: &rows, pass: Some(&pass), window_open: false });
     assert!(s.steps.iter().any(|(n, _)| n.starts_with("mail: forwarding on")), "the slot's pass ran: {:?}", s.steps);

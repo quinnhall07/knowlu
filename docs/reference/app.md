@@ -138,9 +138,11 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   - **The slot's `mail` step** runs after the grades capture and before the child-process chain
     (`scheduler::run_slot_with`, `mail::slot::run_step`). A mailbox is left out when it is turned off,
     guided, `revoked`, or not due (`RECONCILE_CADENCE` is `Daily`: due once a day when `active`, at
-    once when it needs repair). The named skips: `mail (skipped: no entitlement)`, `(saved sign-in
-    off)`, `(mail.json unreadable)`, `(not due)`, `(mail window open)`; no mailbox connected adds no
-    row. A kept profile that does not read as signed in is `needs sign-in`, never shown. The row is
+    once when it needs repair). The named skips: `mail (skipped: could not read your mailboxes)` (the
+    service's list failed: no proof there is no mailbox), `(no entitlement)`, `(saved sign-in off)`,
+    `(mail.json unreadable)`, `(not due)`, `(mail window open)`, `(no session)` (the pass could not
+    have the account's client); no mailbox connected adds no row, and neither does a vault with no
+    account. A kept profile that does not read as signed in is `needs sign-in`, never shown. The row is
     fixed words and counts, never an address, subject or sender, and stays out of
     `state/runner-log.md`. Pace constants `MAX_PER_MINUTE` (10) and `MAX_PER_DAY` (600) in
     `app/src/mail_steps.rs` are **provisional, pending S6**; the backfill window is `BACKFILL_DAYS`
