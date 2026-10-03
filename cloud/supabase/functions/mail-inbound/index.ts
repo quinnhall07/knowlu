@@ -19,6 +19,7 @@ import { dnsTxtResolver } from "../_shared/dkim.ts";
 import { isActive, lookupFrom } from "../_shared/entitlement.ts";
 import { asResponse, fail } from "../_shared/http.ts";
 import { s3Client } from "../_shared/s3.ts";
+import { mxResolver } from "../mail/provider.ts";
 import {
   type AddressRow,
   handle,
@@ -126,7 +127,11 @@ async function wire(): Promise<{ cfg: InboundConfig; deps: InboundDeps }> {
   const deps: InboundDeps = {
     sns: { fetch: globalThis.fetch },
     s3,
-    bind: { resolveTxt: dnsTxtResolver(), nonceHmac: (n) => nonceHmac(addressKey, n) },
+    bind: {
+      resolveTxt: dnsTxtResolver(),
+      resolveMx: mxResolver(),
+      nonceHmac: (n) => nonceHmac(addressKey, n),
+    },
     tokenHmac: (t) => tokenHmac(addressKey, t),
     now: () => Date.now(),
     store: {

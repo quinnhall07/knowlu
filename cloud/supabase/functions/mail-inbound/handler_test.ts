@@ -505,7 +505,12 @@ async function withWorld(fn: (w: World) => Promise<void>): Promise<void> {
     sns: { fetch: local },
     s3,
     store,
-    bind: { resolveTxt, now: () => NOW, nonceHmac: (x) => nonceHmac(ADDRESS_KEY, x) },
+    bind: {
+      resolveTxt,
+      resolveMx: () => Promise.resolve([]),
+      now: () => NOW,
+      nonceHmac: (x) => nonceHmac(ADDRESS_KEY, x),
+    },
     tokenHmac: (tok) => tokenHmac(ADDRESS_KEY, tok),
     now: () => NOW,
     workKey: () => `work/item-${++n}`,

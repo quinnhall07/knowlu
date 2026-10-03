@@ -180,10 +180,12 @@ export interface Forwarding {
   mailboxes: Array<{ hint: string | null; status: string }>;
 }
 
-/** P22: the statuses under which a forwarding no longer counts. Every other one does, `quiet`
- * included: recover brings a quiet mailbox's gap in, and reading both paths would file every
- * message twice. */
-const FORWARDING_ENDED = ["revoked", "off"];
+/** P22 as amended by PQ11 (Quinn, 2026-10-02): an allow-list of the statuses under which mail
+ * arrives by the forwarding, the only ones that count. `quiet` is in: recover brings a quiet
+ * mailbox's gap in, and reading both paths would file every message twice. `confirmed` is in: it
+ * lasts only the setup canary's wait. `pending` (setup never finished) and `blocked` (the setup
+ * canary never came) are out, so the OAuth read goes on; so is every other status, known or not. */
+const FORWARDING_COUNTS: readonly string[] = ["confirmed", "active", "quiet"];
 
 /**
  * Email forwarding D22 under P22: does the OAuth Gmail address have an active forwarding to
@@ -194,7 +196,7 @@ export function forwardingCounts(gmail: string | null, mailboxes: Forwarding["ma
   const fold = (a: string | null) => a?.trim().toLowerCase() || null;
   const address = fold(gmail);
   if (address === null) return false;
-  return mailboxes.some((m) => fold(m.hint) === address && !FORWARDING_ENDED.includes(m.status));
+  return mailboxes.some((m) => fold(m.hint) === address && FORWARDING_COUNTS.includes(m.status));
 }
 
 export interface ReadDeps {

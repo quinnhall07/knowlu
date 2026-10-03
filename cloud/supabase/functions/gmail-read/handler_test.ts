@@ -793,12 +793,15 @@ Deno.test("a_gmail_address_with_a_forwarding_gets_a_non_quiet_answer_with_its_un
 });
 
 Deno.test("a_gmail_address_without_a_forwarding_reads_exactly_as_today", async () => {
-  // Three shapes of "no active forwarding": none at all, one that is off or revoked, and one for a
-  // different address on the same account. Each reads, judges and answers as before, with no
-  // `via_forward` field at all.
+  // Shapes of "no active forwarding": none at all, one that is off or revoked, a setup still pending or
+  // blocked (PQ11), and one for a different address on the same account. Each reads, judges and
+  // answers as before, with no `via_forward` field at all.
   const cases: Array<{ gmail: string | null; mailboxes: Array<{ hint: string | null; status: string }> }> = [
     { gmail: GMAIL_ADDRESS, mailboxes: [] },
     { gmail: GMAIL_ADDRESS, mailboxes: [{ hint: GMAIL_ADDRESS, status: "off" }, { hint: GMAIL_ADDRESS, status: "revoked" }] },
+    // PQ11: a setup that never finished (`pending`) or whose canary never came (`blocked`) keeps reading.
+    { gmail: GMAIL_ADDRESS, mailboxes: [{ hint: GMAIL_ADDRESS, status: "pending" }] },
+    { gmail: GMAIL_ADDRESS, mailboxes: [{ hint: GMAIL_ADDRESS, status: "blocked" }] },
     { gmail: GMAIL_ADDRESS, mailboxes: [{ hint: "student@school.example.invalid", status: "active" }] },
   ];
   for (const forwarding of cases) {
@@ -814,11 +817,13 @@ Deno.test("a_gmail_address_without_a_forwarding_reads_exactly_as_today", async (
   }
 });
 
-Deno.test("P22: a forwarding counts while its row is neither revoked nor off, quiet included", () => {
-  for (const status of ["pending", "confirmed", "active", "quiet", "blocked", "paused_send", "lapsed"]) {
+// P22 as amended by PQ11 (Quinn, 2026-10-02): an allow-list. A forwarding counts only while mail arrives
+// by it; a stalled (`blocked`) or abandoned (`pending`) setup keeps the Gmail OAuth read.
+Deno.test("P22: a forwarding counts only while confirmed, active or quiet", () => {
+  for (const status of ["confirmed", "active", "quiet"]) {
     assertEquals(forwardingCounts(GMAIL_ADDRESS, [{ hint: GMAIL_ADDRESS, status }]), true, status);
   }
-  for (const status of ["revoked", "off"]) {
+  for (const status of ["pending", "blocked", "paused_send", "lapsed", "revoked", "off", "", "Active"]) {
     assertEquals(forwardingCounts(GMAIL_ADDRESS, [{ hint: GMAIL_ADDRESS, status }]), false, status);
   }
 });

@@ -47,8 +47,27 @@ const ZONE: Record<string, string[][]> = {
 };
 const resolveTxt: TxtResolver = (name) => Promise.resolve(ZONE[name] ?? []);
 
+/** MX records by domain (PQ9: a Workspace mailbox binds only when its domain's MX is Google's). No test
+ * queries DNS; every lookup is recorded so a test can say none was made. */
+const MX: Record<string, string[]> = {
+  "school.test": ["aspmx.l.google.com", "alt1.aspmx.l.google.com"],
+  "other-school.test": ["smtp.google.com"],
+  "gateway.test": ["mx1.filter.example"],
+  "m365.test": ["m365-test.mail.protection.outlook.com"],
+};
+const mxAsked: string[] = [];
+const resolveMx = (domain: string) => {
+  mxAsked.push(domain);
+  if (domain === "dnsfail.test") return Promise.reject(new Error("dns"));
+  return Promise.resolve(MX[domain] ?? []);
+};
 const NOW = Date.UTC(2026, 9, 2, 12);
-const DEPS: BindDeps = { resolveTxt, now: () => NOW, nonceHmac: (n) => Promise.resolve(`hmac:${n}`) };
+const DEPS: BindDeps = {
+  resolveTxt,
+  resolveMx,
+  now: () => NOW,
+  nonceHmac: (n) => Promise.resolve(`hmac:${n}`),
+};
 const CONFIG: BindConfig = { canaryFrom: "check@knowlu.test" };
 const NONCE = "0123456789abcdef0123456789abcdef";
 const OTHER_NONCE = "fedcba9876543210fedcba9876543210";
@@ -471,11 +490,8 @@ Deno.test("a_gmail_forward_binds_by_googles_arc_seal_and_its_caf_return_path", a
   // The envelope is compared case-folded.
   const upper = { ...CAF, mailFrom: "Jane+CAF_=Tok=In.Knowlu.Test@Gmail.com" };
   assertEquals(await live(fwd, GMAIL_BOX, upper), LIVE_ALIGNED);
-  // Spec §4.6 step 5 (ii): Gmail's return path is `@gmail.com`. A Workspace mailbox's `+caf_=` envelope on
-  // its own domain does not bind until Quinn rules on it (Checkpoint B; the plan's T2f section).
-  const workspace = mailbox({ mailboxHint: "jdoe@school.test", confirmUntil: null });
-  const wsEnv = { ...CAF, mailFrom: "jdoe+caf_=tok=in.knowlu.test@school.test" };
-  assertEquals(await live(fwd, workspace, wsEnv), UNBOUND);
+  // A gmail.com mailbox is Google's own: no MX lookup (PQ9, amended 2026-10-02).
+  assertEquals(mxAsked.includes("gmail.com"), false);
 
   // Check (ii): SES's SPF pass on exactly this mailbox's forwarding envelope to exactly this address.
   for (
@@ -541,6 +557,73 @@ Deno.test("an_m365_forward_binds_by_microsofts_arc_forwardingloop_and_srs_return
   // No tenant recorded yet (no canary has arrived): nothing binds.
   assertEquals(await live(fwd, { ...MS_BOX, forwardHint: null }, SRS), UNBOUND);
   assertEquals(await live(fwd, { ...MS_BOX, provider: "google" }, SRS), UNBOUND);
+});
+
+// PQ9 (Quinn, 2026-10-02): a Google Workspace mailbox on its own domain binds on Google's verifying seal and
+// SES's SPF pass on its `+caf_=` envelope at that same domain, when the domain's MX is Google's.
+const WS_BOX = mailbox({ mailboxHint: "jdoe@school.test", confirmUntil: null });
+const WS_CAF: BindEnvelope = { ...CAF, mailFrom: "jdoe+caf_=tok=in.knowlu.test@school.test" };
+
+Deno.test("a_workspace_forward_binds_by_googles_seal_its_own_domain_caf_return_path_and_google_mx", async () => {
+  const fwd = await gmailForward();
+  assertEquals(await live(fwd, WS_BOX, WS_CAF), LIVE_ALIGNED);
+  const upper = { ...WS_CAF, mailFrom: "JDoe+CAF_=Tok=In.Knowlu.Test@School.Test" };
+  assertEquals(await live(fwd, WS_BOX, upper), LIVE_ALIGNED);
+  // Google's newer single MX host reads as Google too.
+  const other = mailbox({ mailboxHint: "pat@other-school.test", confirmUntil: null });
+  const otherEnv = { ...CAF, mailFrom: "pat+caf_=tok=in.knowlu.test@other-school.test" };
+  assertEquals(await live(fwd, other, otherEnv), LIVE_ALIGNED);
+
+  // Check (ii) is still exactly this mailbox's envelope at its own domain, SPF-passed, to this address.
+  for (
+    const env of [
+      { ...WS_CAF, spfPass: false },
+      { ...WS_CAF, mailFrom: "jdoe+caf_=tok=in.knowlu.test@gmail.com" },
+      { ...WS_CAF, mailFrom: "jdoe+caf_=tok=in.knowlu.test@other-school.test" },
+      { ...WS_CAF, mailFrom: "xjdoe+caf_=tok=in.knowlu.test@school.test" },
+      { ...WS_CAF, mailFrom: "jdoe@school.test" },
+      { ...WS_CAF, recipient: "tok2@in.knowlu.test" },
+    ]
+  ) {
+    assertEquals(await live(fwd, WS_BOX, env), UNBOUND, String(env.mailFrom));
+  }
+  // Check (i) is still Google's verifying seal.
+  assertEquals(await live(await gmailForward({ key: EVIL, d: "evil.test" }), WS_BOX, WS_CAF), UNBOUND);
+  assertEquals(
+    await live(await gmailForward({ key: MICROSOFT, d: "microsoft.com" }), WS_BOX, WS_CAF),
+    UNBOUND,
+  );
+  // A message no provider sealed never reaches DNS.
+  mxAsked.length = 0;
+  assertEquals(await live(assemble(original().head, LIVE_BODY), WS_BOX, WS_CAF), UNBOUND);
+  assertEquals(mxAsked, []);
+  // An M365 mailbox on the same domain never binds by Gmail's envelope.
+  assertEquals(await live(fwd, { ...WS_BOX, provider: "m365", forwardHint: TENANT }, WS_CAF), UNBOUND);
+});
+
+Deno.test("a_workspace_caf_envelope_on_a_domain_whose_mx_is_not_google_is_unbound", async () => {
+  const fwd = await gmailForward();
+  // A filtering gateway, Microsoft's MX, no MX at all, and a DNS failure: none is a Google-hosted domain.
+  for (const domain of ["gateway.test", "m365.test", "nomx.test", "dnsfail.test"]) {
+    const box = mailbox({ mailboxHint: `jdoe@${domain}`, confirmUntil: null });
+    const env = { ...CAF, mailFrom: `jdoe+caf_=tok=in.knowlu.test@${domain}` };
+    mxAsked.length = 0;
+    assertEquals(await live(fwd, box, env), UNBOUND, domain);
+    assertEquals(mxAsked, [domain], domain);
+  }
+});
+
+Deno.test("a_googlemail_hint_expects_a_gmail_com_caf_return_path", async () => {
+  const fwd = await gmailForward();
+  const box = mailbox({ mailboxHint: "jane@googlemail.com", confirmUntil: null });
+  mxAsked.length = 0;
+  assertEquals(await live(fwd, box, CAF), LIVE_ALIGNED);
+  const onGooglemail = { ...CAF, mailFrom: "jane+caf_=tok=in.knowlu.test@googlemail.com" };
+  assertEquals(await live(fwd, box, onGooglemail), UNBOUND);
+  assertEquals(await live(fwd, box, { ...CAF, spfPass: false }), UNBOUND);
+  assertEquals(await live(fwd, box, { ...CAF, mailFrom: "joan+caf_=tok=in.knowlu.test@gmail.com" }), UNBOUND);
+  // Google's own two domains are never looked up.
+  assertEquals(mxAsked, []);
 });
 
 Deno.test("a_direct_send_with_a_forged_x_forwarded_for_is_unbound", async () => {

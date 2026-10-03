@@ -234,9 +234,11 @@ Briefs cite functions and headings, never line numbers.
     §4.3 step 3.
 
   Neither adds a column or data class.
-- **P22. "An active forwarding" (D22)** means a `mail_addresses` row for that Gmail address that is
-  neither `revoked` nor `off`. A `quiet` forwarding still counts: recover brings its gap in, and
-  reading both paths would file every message twice.
+- **P22. "An active forwarding" (D22)** means a `mail_addresses` row for that Gmail address whose
+  status is `confirmed`, `active` or `quiet` (an allow-list; amended 2026-10-02 by Quinn's PQ11
+  answer, which replaced "neither `revoked` nor `off`"). A `quiet` forwarding still counts: recover
+  brings its gap in, and reading both paths would file every message twice. `pending` and `blocked`
+  do not count, so a stalled or abandoned setup keeps the Gmail OAuth read.
 
 ## 4. Open questions (each with a recommendation)
 
@@ -404,6 +406,30 @@ Briefs cite functions and headings, never line numbers.
     campus row. Until the answer, Workspace live mail is unbound.
   - *Blocks:* nothing before Checkpoint B. The ruling is recorded in the spec's amendments, then the
     code is kept or narrowed.
+  - **Answered 2026-10-02 (Quinn): amend, and accept all of Workspace.** Gmail live mail binds on
+    Google's verifying seal plus SES's SPF pass on the `+caf_=` envelope naming the mailbox at
+    `gmail.com`. A `googlemail.com` hint expects that `gmail.com` envelope. A `google` mailbox on its
+    own domain binds on Google's seal plus SES's SPF pass on the `+caf_=` envelope at that domain naming
+    the hint, only when the domain's MX reads Google (`mail/provider.ts`'s `providerOf`, injected as
+    `BindDeps.resolveMx`; a DNS failure is unbound, like a DKIM key lookup failure). No curated-row
+    condition: the server never sees the row. The residual risk (a leaked address plus a sender able to
+    set that MAIL FROM on Google's relay) is accepted; Rotate mitigates it, and T18a probes it. The
+    spec's §4.6 step 5 carries the amendment. Tests: `a_workspace_forward_binds_by_googles_seal_its_own_domain_caf_return_path_and_google_mx`,
+    `a_workspace_caf_envelope_on_a_domain_whose_mx_is_not_google_is_unbound`,
+    `a_googlemail_hint_expects_a_gmail_com_caf_return_path`.
+  - **M365, answered 2026-10-02 (Quinn): find a sealed signal, else accept the risk.** The question was
+    whether the topmost `microsoft.com` ARC-Authentication-Results, which the seal covers, records the
+    original delivery or recipient domain (`smtp.rcpttodomain=`, or a recipient field). `s0-captures.md`
+    records each ARC chain's instances, seal domains and `cv`, and the AMS `h=` lists, but not the AAR's
+    fields, and the raw captures were deleted after PQ2's check. So no sealed recipient field is
+    established, and the M365 binding stays as built (the SRS envelope with SES's SPF pass, Microsoft's
+    verifying seal, and the topmost ForwardingLoop naming the mailbox and `forward_hint`, though that
+    field is unsealed). The residual risk, recorded in the spec: a sender on another Microsoft tenant who
+    can write the school domain's SRS envelope and an unsealed ForwardingLoop naming the mailbox and
+    tenant. T18a's second-tenant probe records the AAR's fields. If the topmost AAR names the hint's
+    domain on the real forward and not on the probe, a `cloud-engineer` task adds it as a third check.
+    (The test fixture `MS_AAR` has carried a synthetic `smtp.rcpttodomain=school.test` since T2f. It is
+    not an S0 record, and nothing reads it.)
 - **PQ10. D9's notification rows deferred until real captures exist (T3a's review, 2026-10-02; for
   Checkpoint B).** D9 names "Blackboard, Canvas and zyBooks notifications, as data rows beside
   `RECEIPT_TEMPLATES`", and §4.7 step 3 lists new assignment, due soon, due date changed and
@@ -439,6 +465,12 @@ Briefs cite functions and headings, never line numbers.
   - *If Quinn keeps P22 as written:* the §9.5 row stays as the record of the trade-off (a stalled or
     abandoned setup silently stops the Gmail read), so Checkpoint D does not raise it again.
   - *Blocks:* nothing before Checkpoint B. The code is unchanged until the answer.
+  - **Answered 2026-10-02 (Quinn): the allow-list.** A forwarding counts, and the Gmail OAuth read
+    steps aside, only while the row is `confirmed`, `active` or `quiet`. `pending` and `blocked` keep the
+    OAuth read, and so does any other status, known or not. `FORWARDING_ENDED` became
+    `FORWARDING_COUNTS` in `functions/gmail-read/handler.ts`. P22 and the spec's D22 carry the amendment.
+    The P22 status test now reads `P22: a forwarding counts only while confirmed, active or quiet`, and
+    `a_gmail_address_without_a_forwarding_reads_exactly_as_today` gains a pending case and a blocked case.
 
 ## 5. Tasks
 
@@ -1442,14 +1474,15 @@ is the one signed, and an unsigned instance of the same name means the binding i
 - **A forward-as-attachment from Gmail or Outlook keeps the original whole** (its Received lines,
   Authentication-Results, DKIM and Message-ID), so T2g.2 reads the original's own delivery stamp.
 
-**The branch built (2026-10-02, after PQ2's interop check; not authority until Quinn answers PQ9 at
-Checkpoint B).** No provider's topmost AMS covers `X-Forwarded-For`, `X-Forwarded-To` or
+**The branch built (2026-10-02, after PQ2's interop check; signed by Quinn's PQ9 answer of
+2026-10-02, §4).** No provider's topmost AMS covers `X-Forwarded-For`, `X-Forwarded-To` or
 `X-MS-Exchange-ForwardingLoop`, so `mail_bind.ts` binds this way:
 - **Check (ii) carries the binding on both providers.** The envelope is the verified SNS
   notification's (`mail.source`, `receipt.spfVerdict` `PASS`, and the recipient whose token found the
-  mailbox), never the message's `Return-Path`. Gmail: `<hint local>+caf_=<recipient, @ as =>@gmail.com`,
-  as the spec says; a Workspace mailbox's envelope on its own domain is unbound until PQ9's open half is
-  answered. M365: `<hint local>+SRS=…@<hint domain>`.
+  mailbox), never the message's `Return-Path`. Gmail: `<hint local>+caf_=<recipient, @ as =>@gmail.com`
+  for a `gmail.com` or `googlemail.com` hint. Workspace (PQ9): the same local part at the hint's own
+  domain, and only after the seal passes, that domain's MX must read Google (`BindDeps.resolveMx`).
+  M365: `<hint local>+SRS=…@<hint domain>`.
 - **Check (i)** is Google's or Microsoft's topmost seal and AMS, verifying. A signed forwarding field
   with an unsigned twin refuses the message. For M365, the topmost ForwardingLoop (or the covered one, if
   the AMS ever covers it) must name the hint and the canary's `forward_hint`. A null `forward_hint`
@@ -1464,7 +1497,9 @@ Checkpoint B).** No provider's topmost AMS covers `X-Forwarded-For`, `X-Forwarde
 - **Step 6's alignment** is from the safe side: a dkim or spf pass aligns when its domain is the From
   domain or a parent of it; a domain under the From aligns only through the provider's own `dmarc=pass
   header.from=`. A From on a bare label never aligns (T2f's review, 2026-10-02).
-- **Checkpoint B reads:** PQ9 (the Gmail binding, and the Workspace `+caf_=` envelope), and whether EOP
+- **PQ9's M365 outcome (2026-10-02, §4):** no sealed recipient field is on record, so the M365 binding
+  above is kept, with its residual risk and T18a's second-tenant probe.
+- **Checkpoint B reads:** PQ9 (answered 2026-10-02, §4), and whether EOP
   SRS-rewrites an **intra-school** forward. S0 did not record case
   4's envelope. If it does not, live intra-school mail is unbound.
 
@@ -1725,8 +1760,8 @@ service reads the school address domain's MX.
   (`read: 0`, `more: false`, `via_forward: true`)
 - `a_gmail_address_without_a_forwarding_reads_exactly_as_today`
 
-**Behaviour.** D22, read under P22: a forwarding counts while its `mail_addresses` row is neither
-`revoked` nor `off`. It is never `quiet` (spec §1: the merged device reads any unknown quiet reason as
+**Behaviour.** D22, read under P22 as amended by PQ11 (2026-10-02): a forwarding counts only while its
+`mail_addresses` row is `confirmed`, `active` or `quiet`. The answer is never `quiet` (spec §1: the merged device reads any unknown quiet reason as
 "re-connect from settings"). Calendar is untouched, and nothing on the device changes.
 
 ### Checkpoint B. Cloud review of T1–T4b
@@ -2157,6 +2192,17 @@ controller's (spec T18; HANDOFF §2's controller rules).
   - Point SNS's HTTPS subscription at `mail-inbound` and confirm it.
   - Smoke by OTP session (at most two OTPs an hour): a canary round trip, one synthetic forward, and
     the controller's count-only query.
+  - **PQ9's two probes** (2026-10-02). Each uses a founder-owned test mailbox and records header facts
+    only, as S0 did.
+    - *Workspace relay:* a message sent through a Workspace SMTP relay tenant the founder controls, with
+      a `+caf_=` MAIL FROM at a Google-hosted test domain naming a scratch mailbox. Record whether SES
+      passes SPF and whether it binds. Binding is the accepted residual risk; the record sizes it.
+    - *M365 second tenant:* a message from a second Microsoft tenant (S6's test tenant), with the school
+      domain's SRS-shaped MAIL FROM and a hand-written ForwardingLoop naming a scratch mailbox and
+      tenant. Record SES's SPF verdict, whether it binds, and, on the probe and on a real forward, the
+      topmost `microsoft.com` ARC-Authentication-Results' fields (`smtp.rcpttodomain=` above all). If
+      the real forward's names the hint's domain and the probe's does not, PQ9's third check becomes a
+      `cloud-engineer` task.
 - **T18b. The pin check** (spec test 17). About twenty synthetic messages go through `mail_claim` and
   `mail_resolve` on staging, and their answers are recorded in
   `docs/reports/<date>-email-forwarding-pin-check.md`. Each pin is then confirmed, or re-pinned by a
@@ -2504,7 +2550,7 @@ spec text moves. A row marked **open** waits on Quinn or the planner.
 | The allowance refund (T1.3's review, 2026-10-02). `refund_allowance(p_account)` is added to the still-unapplied `20261002000200_mail.sql`: one `update` of `mail_accounts` that gives one judgment back only while `allowance_until > now()` and never above 2,000, service-role only, and never opens, extends or re-prices an allowance. T3e calls it on `model failed` alone (F1's rule: a refusal, a truncation or a failed validation reached the model and stays charged) and routes the item through wait-and-retry. Chosen over "a failed backfill item is never counted" because charge-before-call is the hot-loop guard and stays, as F1 kept it for `charge_call`. Unlike `refund_call`, refunds are not counted: the caller is the server's cron worker, so request volume is bounded by the item's retry schedule, and dollars by `enforce_budget`'s raised ceiling. Spec §5.1's RPC list names two; this third is the plan's. | `charge_allowance` charges before the call, as `charge_call` did before F1 (main's `20261002000100_refund_failed_call.sql`, PR #33). A first backfill during a provider outage would spend 2,000 judgments in seconds on calls the model never answered, then trickle at the daily cap for the 120-day period: D23's failure. | T1.3, T3e; `refund_allowance_gives_one_judgment_back_only_while_the_allowance_is_open`, `a_model_failure_on_a_backfill_item_refunds_…`. The function-count pin is 36 here; merging main (PR #33's `refund_call`) moves it to 37, not 36. | recorded, for the planner; T3e must not build past it |
 | SNS signature version (T2a's review, 2026-10-02). `verifySns` accepts only `SignatureVersion` 2 (RSA with SHA-256) and refuses version 1 (SHA-1) before any fetch. An SNS topic signs with version 1 by default, and S0's topic was built with the default. So T18a now sets the topic's `SignatureVersion` attribute to 2 and reads it back before the subscribe step, and T13b's runbook carries the same step. `sns.ts` is unchanged. | Without the step, the SubscriptionConfirmation is refused with the same bare 403 as every other refusal and leaves no log line. The subscription stays PendingConfirmation, no mail arrives, and nothing points at the cause. That costs a live deploy, but it fails closed. | T18a, T13b; T2a's version test in `sns_test.ts` | **carried (controller):** T18a's attribute step; T13b's runbook line |
 | PQ8 (ii) only. T5.6 is added before T6.1 and T6.2: a live `new_item` matching an open mail task card by normalised title and course files nothing (`AlreadyApplied`). "Open" is read as `pending` or `snoozed`, since a first-day card is snoozed (R16). (i) is declined: T3d keeps "From is the mailbox itself". | Quinn, 2026-10-02. The device rule catches S0 capture 5's rule-forward duplicate without dropping a note the student mails themselves. | T5.6, T3d; T5.6's tests, `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` | **Answered 2026-10-02 (Quinn)**; the "snoozed" reading is the plan's, for Quinn's read with T5.6's addendum |
-| PQ9 (T2f's review, 2026-10-02). On Gmail, check (i) does not name the mailbox (no AMS covers `X-Forwarded-*`), and the `+caf_=` envelope is `@gmail.com` only, so Workspace live mail is unbound. Step 6 aligns a child of the From domain only through the provider's DMARC pass. | Spec §4.6 step 5 cannot be met as written on Gmail; widening to the hint's domain was not signed. | T2f; `a_gmail_forward_binds_by_googles_arc_seal_and_its_caf_return_path`, `a_from_on_a_bare_label_or_public_suffix_never_aligns_with_a_signer_under_it`; Checkpoint B | **open (Quinn):** PQ9 |
+| PQ9 (T2f's review, 2026-10-02). On Gmail, check (i) does not name the mailbox (no AMS covers `X-Forwarded-*`), and the `+caf_=` envelope is `@gmail.com` only, so Workspace live mail is unbound. Step 6 aligns a child of the From domain only through the provider's DMARC pass. | Spec §4.6 step 5 cannot be met as written on Gmail; widening to the hint's domain was not signed. | T2f; `a_gmail_forward_binds_by_googles_arc_seal_and_its_caf_return_path`, `a_from_on_a_bare_label_or_public_suffix_never_aligns_with_a_signer_under_it`; Checkpoint B | **Answered 2026-10-02 (Quinn), PQ9 (§4):** the amendment is signed in spec §4.6 step 5; Workspace binds on its own-domain `+caf_=` envelope when the domain's MX is Google's (three new tests); M365 kept as built, no sealed recipient field on record; T18a probes both residual risks. |
 | D9's notification rows deferred until real captures exist (T3a's review, 2026-10-02). T3a shipped `MAIL_TEMPLATES` empty: no Blackboard, Canvas or zyBooks notification has been captured, and rows are never guessed. Until T3a.2, every such mail goes to the `mail_claim` model, spends the daily cap and the allowance, and takes §4.9's model rows (in backfill, a card where a template change to a note no feed supplies would write directly). | Departing from D9 as signed is Quinn's call; the implementer ruled alone. | T3a.2; PQ10; Checkpoint B | **open (Quinn)** |
 | T3e's schema (T3e's review, 2026-10-02). `mail_work.msg_hash`, written by `mail_hand_off`, and a fourth mail RPC, `expire_mail_work` (the work row, its `mail_seen` row and one `expired`, in one transaction; service-role only), in the still-unapplied `20261002000200_mail.sql`. Spec §5.1 lists neither, and T3e's files were `functions/mail-process/**`; `the_mail_tables_have_section_5_1s_columns_and_words` now lists the column. | D8's "an expired item loses its seen row" needs a link from a work row to its seen row once the object is gone; the HMAC is already in `mail_seen`. Nothing is applied until T18. | T3e; the migration tests and `an_expired_item_loses_its_seen_row_…` | **open (planner, then Quinn):** a §5.1 marker for the column and the RPC. T3e is accepted pending this ruling; Checkpoint B reads the schema with it |
 | An allowance judgment charged over budget is given back (T3e's review). When `charge_allowance` passes and `enforce_budget` then refuses, no call is made, so T3e calls `refund_allowance`. This widens the refund row above ("on `model failed` alone") to "no call was made". A charge that opened the allowance while over budget still opens its 120-day period and its 14 days. A day's-cap charge taken over budget (a live or recover item, or a backfill item past the allowance) is not given back. | D23 and `judge_pipeline.ts`'s rule: an account over budget must not spend its allowance. Without it, about 667 over-budget items times three attempts empty the 2,000 judgments with no call. | T3e; `an_over_budget_backfill_item_gives_its_allowance_judgment_back` | **open (planner):** confirm the widening; rule whether an over-budget day's-cap charge is refunded too (by `refund_call`, once main is merged) or the order changes for live items (budget before `charge_call`, as the pipeline does) |
@@ -2514,7 +2560,7 @@ spec text moves. A row marked **open** waits on Quinn or the planner.
 | A `mail-resolve` call's `model failed` gives its day's-cap charge back by main's F1 `refund_call` (kind `mail_resolve`, cap `MAIL_DAILY_CAP.mail_resolve`), through `ResolveCharges.refundDaily` (T4.5's review, 2026-10-02). A refusal or a truncation reached the model and stays charged. As for T3e, the call is wired on this base, where the RPC does not exist yet: it fails, refuses and leaves the charge. | Main's F1 rule (PR #33). Without it, an hour-long provider outage spends the 20-call `mail_resolve` cap on calls the model never answered, and every ambiguous claim that day waits behind T5.5's `Skip(Unmatched)` with nothing shown. | T4.5; `a_model_failure_gives_its_daily_cap_charge_back_and_a_refusal_or_truncation_keeps_it`, `a_daily_cap_refund_is_main_f1s_refund_call_for_mail_resolve_…` (the fake models main's SQL); **T17:** after merging main, confirm `refund_call(uuid, text, integer)` is applied before T18 and accepts kind `mail_resolve`, and re-run both tests against it | recorded; T17 carries the check |
 | Account deletion goes on past a failed `work/` object delete (T4.6, 2026-10-02). `purgeMailboxes` (`functions/account/mail.ts`) deletes each mailbox's objects by key, logs a failure by its error class and count only (never a key, an id or a message), then calls `delete_mail_address` regardless. Disconnect's `purgeAddress` (`functions/mail/handler.ts`) does the opposite: it answers 502 before the RPC, so the revoked row stays and a retry finishes. D17 says deletion "calls the same purge" and does not say which way a failure goes. | The account's right to delete wins, as it does for the Google grant (`google_delete.ts`): a deletion held up by S3 would keep every row, not just the object. A straggler is mail text with no row pointing at it, and D2's one-day expiry on `work/` removes it. | T4.6; `a failed object delete never blocks the account's deletion, and logs no key`, `deletion_purges_each_mailbox_by_delete_mail_address_after_deleting_its_objects_by_key` | recorded. **Cost if wrong:** after a deletion whose object deletes failed, the student's forwarded mail text can stay in `work/` for up to about 2 days (S3 runs a one-day expiry rule once a day), with no row left to find it. Checkpoint B confirms the ruling; **T17 and the privacy page:** the deletion paragraph must not say mail text is deleted at once. It says "removed within about 2 days" unless the ruling is reversed |
 | The export carries two tables, on fixed column lists (T4.6, 2026-10-02): `mail_addresses` as `MAILBOX_EXPORT_COLUMNS` (id, provider, `mailbox_hint`, status, its dates and counters; not `forward_hint`, `retired_until` or any token column) and every `mail_claims` row held for the account, delivered or not, as `CLAIM_EXPORT_COLUMNS` (all but `account_id`). Left out: `mail_accounts` (the fingerprint key ciphertext, the allowance, the mint times and the `digest` setting), `mail_batches`, `mail_canaries`, `mail_seen` and `mail_work`. | D17 names "its mailboxes … and its queued claims; never the token, its HMAC, a key or a hash". Batches and canaries hold nonce HMACs and service counts, `mail_seen` holds HMACs and `mail_work` holds object keys. A fixed column list (not `select *`) keeps a column added later out of the export until someone names it. | T4.6; `the_export_carries_mailboxes_and_queued_claims_and_never_a_token_key_or_hash` | recorded. **Cost if wrong:** the student's export omits the digest setting, the allowance state, the mailbox's `forward_hint` and the batch and canary history. If a portability reading counts these as the student's data, a later task adds a projected `mail_accounts` row (digest and allowance only) and the batch counts without their nonce HMACs. **Open (Checkpoint B):** whether `mail_claims` exports delivered rows (D17 says "queued"; built: all held) |
-| T4b reads "an active forwarding" (D22) as P22 states it: every status but `revoked` and `off`, so `pending`, `confirmed`, `blocked`, `paused_send` and `lapsed` stop the Gmail OAuth read (T4b's review, 2026-10-02). A Gmail student whose forwarding setup stalls (`blocked`) or is abandoned (`pending`) after P21 set the hint gets `read: 0`, `quiet: false`, no reason, from the next slot: neither path reads that Gmail and the tray stays green. Backfill recovers the gap only if forwarding later becomes active. | P22 is literal; D14 defines `blocked` as mail not reaching Knowlu, so the reading loses items silently (VISION: silence is never ambiguous). | T4b; `P22: a forwarding counts while its row is neither revoked nor off, quiet included` | **Open (Checkpoint B, PQ11):** recommended amendment counts only `confirmed`, `active` and `quiet` (an allow-list; the test moves `pending` and `blocked`). If Quinn keeps P22, this row is the record of the trade-off. |
+| T4b reads "an active forwarding" (D22) as P22 states it: every status but `revoked` and `off`, so `pending`, `confirmed`, `blocked`, `paused_send` and `lapsed` stop the Gmail OAuth read (T4b's review, 2026-10-02). A Gmail student whose forwarding setup stalls (`blocked`) or is abandoned (`pending`) after P21 set the hint gets `read: 0`, `quiet: false`, no reason, from the next slot: neither path reads that Gmail and the tray stays green. Backfill recovers the gap only if forwarding later becomes active. | P22 is literal; D14 defines `blocked` as mail not reaching Knowlu, so the reading loses items silently (VISION: silence is never ambiguous). | T4b; `P22: a forwarding counts while its row is neither revoked nor off, quiet included` | **Answered 2026-10-02 (Quinn), PQ11 (§4):** the allow-list `confirmed`, `active`, `quiet` (`FORWARDING_COUNTS`); the P22 test moves `pending` and `blocked`; P22 and spec D22 amended. |
 
 ## 10. Review revisions (2026-09-30)
 

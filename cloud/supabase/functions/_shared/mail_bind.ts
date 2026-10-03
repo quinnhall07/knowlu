@@ -23,8 +23,11 @@
  *   `<local>+caf_=<our address, @ as =>@gmail.com`, Microsoft's SRS `<local>+SRS=…@<domain>`). PQ2's
  *   interop check (2026-10-02) found that no provider's AMS covers X-Forwarded-For, X-Forwarded-To or
  *   the ForwardingLoop, so X-Forwarded-* never bind, and the envelope carries the binding with the seal.
- *   On Gmail check (i) therefore cannot name the mailbox, a departure from the spec that waits on Quinn's
- *   ruling at Checkpoint B (the plan's T2f section, PQ9).
+ *   Quinn's PQ9 amendment (2026-10-02) accepts that: on Gmail check (i) is the seal alone and check (ii)
+ *   names the mailbox. A Workspace mailbox (a `google` mailbox on its own domain) binds the same way on a
+ *   `+caf_=` envelope at its own domain, only when that domain's MX is Google's (`BindDeps.resolveMx`); a
+ *   `googlemail.com` mailbox's envelope is at `gmail.com`. The residual risk (a leaked address plus a
+ *   sender able to set that MAIL FROM on Google's relay) is accepted; Rotate mitigates it.
  * - **Unbound:** anything else.
  * - **Authenticity** (`aligned` or `unaligned`): for a live forward, only the verified hop's
  *   ARC-Authentication-Results; for a backfilled or recovered original (`originalAuthenticity`), the
@@ -37,6 +40,7 @@
  */
 import { type ArcResult, type DkimDeps, type SignatureResult, verifyArc, verifyDkim } from "./dkim.ts";
 import { bodyText, decodeWords, type MailHeaders, type MailInput, parseHeaders } from "./mime.ts";
+import { GMAIL_DOMAINS, providerOf, type ResolveMx } from "../mail/provider.ts";
 
 export interface BindBatch {
   id: string;
@@ -69,6 +73,8 @@ export interface BindConfig {
 export interface BindDeps extends DkimDeps {
   /** A nonce as `mail_batches.nonce_hmac` and `mail_canaries.nonce_hmac` hold it. */
   nonceHmac: (nonce: string) => Promise<string>;
+  /** MX exchanges for a Workspace mailbox's domain (PQ9); production passes `provider.ts`'s `mxResolver()`. */
+  resolveMx: ResolveMx;
 }
 /** The SMTP envelope as the verified SES notification states it (T2g.1 reads it, never the message). */
 export interface BindEnvelope {
@@ -266,20 +272,35 @@ async function providerArc(input: MailInput, provider: BindMailbox["provider"], 
 }
 
 /** Check (ii): SES passed SPF on the provider's forwarding return path for this mailbox and address.
- * Gmail's is `@gmail.com` only, as spec §4.6 step 5 states; a Workspace domain's `+caf_=` envelope waits
- * on Quinn's ruling at Checkpoint B (the plan's T2f section). */
+ * Gmail's `+caf_=` envelope is at `gmail.com` for a `gmail.com` or `googlemail.com` mailbox, and at the
+ * mailbox's own domain for a Workspace mailbox (PQ9, amended 2026-10-02; `liveForward` then also requires
+ * that domain's MX to be Google's). Microsoft's SRS envelope is at the mailbox's own domain. */
 function envelopeBinds(mailbox: BindMailbox, hint: string, envelope: BindEnvelope): boolean {
   const from = envelope.mailFrom?.trim().toLowerCase() ?? "";
   const own = split(hint);
   const env = from.length <= 512 && ADDRESS.test(from) ? split(from) : null;
-  if (!envelope.spfPass || own === null || env === null || env[1] !== own[1]) return false;
+  if (!envelope.spfPass || own === null || env === null) return false;
   if (mailbox.provider === "google") {
-    if (env[1] !== "gmail.com") return false;
+    if (env[1] !== (GMAIL_DOMAINS.includes(own[1]) ? "gmail.com" : own[1])) return false;
     const to = envelope.recipient.trim().toLowerCase();
     return ADDRESS.test(to) && env[0] === `${own[0]}+caf_=${to.replace("@", "=")}`;
   }
   const srs = `${own[0]}+srs=`;
-  return mailbox.provider === "m365" && env[0].length > srs.length && env[0].startsWith(srs);
+  return mailbox.provider === "m365" && env[1] === own[1] && env[0].length > srs.length &&
+    env[0].startsWith(srs);
+}
+
+/** PQ9's Workspace condition: a `google` mailbox off Google's own two domains binds only when its domain's
+ * MX reads Google (`provider.ts`'s one table). No MX, another host, or DNS failing to answer is `false`;
+ * called only once the envelope and Google's seal have passed, so a forgery never reaches DNS. */
+async function googleHosted(hint: string, mailbox: BindMailbox, deps: BindDeps): Promise<boolean> {
+  const domain = hint.slice(hint.lastIndexOf("@") + 1);
+  if (mailbox.provider !== "google" || GMAIL_DOMAINS.includes(domain)) return true;
+  try {
+    return await providerOf(domain, deps.resolveMx) === "google";
+  } catch {
+    return false;
+  }
 }
 
 /** Check (i) beyond the seal: no seeded forwarding field, and for M365 the loop naming mailbox and tenant
@@ -302,12 +323,13 @@ async function liveForward(
   head: MailHeaders,
   mailbox: BindMailbox,
   envelope: BindEnvelope,
-  deps: DkimDeps,
+  deps: BindDeps,
 ): Promise<Arrival> {
   const hint = hintOf(mailbox);
   if (hint === null || !envelopeBinds(mailbox, hint, envelope)) return { kind: "unbound" };
   const arc = await providerArc(input, mailbox.provider, deps);
   if (arc === null || !hopNames(arc, head, mailbox, hint)) return { kind: "unbound" };
+  if (!(await googleHosted(hint, mailbox, deps))) return { kind: "unbound" };
   return { kind: "live", authenticity: verdict(arc.authResults, soleFromDomain(head), "arc") };
 }
 
