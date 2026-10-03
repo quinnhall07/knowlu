@@ -2866,25 +2866,52 @@ fn mail_derived_text_renders_inert() {
     }
 }
 
+/// One read of an untrusted field is safe when it sits directly inside `h(`, is the
+/// fallback `h(c.why || ...)`, or is only a test (`!c.x`, or `c.x ? ...`). `upto` is the line up
+/// to the end of the read; `line` is the whole line.
+fn read_is_safe(line: &str, upto: &str) -> bool {
+    let var_len = upto.len() - upto.rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.')).map_or(0, |i| i + 1);
+    let pre = &upto[..upto.len() - var_len];
+    let post = &line[upto.len()..];
+    let in_h = |p: &str| p.strip_suffix("h(").is_some_and(|b| !b.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.'));
+    in_h(pre) || pre.strip_suffix("c.why || ").is_some_and(in_h) || pre.ends_with('!') || post.starts_with(" ? ")
+}
+
 #[test]
 fn no_mail_field_reaches_the_dom_without_h() {
     let js = read("console.js");
     let mut checked = 0;
-    for (n, line, _) in field_reads(&js, &MAIL_FIELDS) {
-        if line.trim_start().starts_with("if (!c.") { continue; }   // a presence test, not a render
+    for (n, line, upto) in field_reads(&js, &MAIL_FIELDS) {
         checked += 1;
-        assert!(line.contains("h(c.") || line.contains("h(x.") || line.contains("h(m.") || line.contains(".map(h)"), "line {n}: a mail field outside h(): {}", line.trim());
-        assert!(!line.contains("innerHTML = c.") && !line.contains("innerHTML = x.") && !line.contains("innerHTML += c."), "line {n}: raw into innerHTML");
+        assert!(read_is_safe(line, &upto), "line {n}: a mail field outside h(): {}", line.trim());
     }
     assert!(checked >= 4, "the scan found the card line and the applied rows ({checked})");
-    // Title and why of a card or a row are mail-derived too: each read sits inside h(…), or is a test.
+    // Title and why of a card or a row are mail-derived too: every read of one sits inside h(...) or is a test.
     for (n, line, upto) in field_reads(&js, &["title", "why"]) {
-        let t = upto.trim_end();
-        let var = t.rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.')).next().unwrap_or("");
+        let var = upto.rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.')).next().unwrap_or("");
         if !(var.starts_with("c.") || var.starts_with("x.")) { continue; }
-        let pre = &t[..t.len() - var.len()];
-        let safe = pre.ends_with("h(") || pre.ends_with("h(c.why || ") || pre.ends_with("&& ") || pre.ends_with("if (") || pre.ends_with("! ") || pre.ends_with("=== ") || pre.ends_with("|| ") || pre.ends_with("== ") || pre.ends_with("!") || pre.ends_with("push(") || pre.ends_with("= ") && !line.contains("innerHTML");
-        assert!(safe, "line {n}: {var} not inside h(): {}", line.trim());
+        // noteTitleFor() keeps a title in a local, `found`, for a toast's textContent, never markup.
+        let kept = upto[..upto.len() - var.len()].ends_with("found = ") && !line.contains("innerHTML");
+        assert!(kept || read_is_safe(line, &upto), "line {n}: {var} not inside h(): {}", line.trim());
+    }
+}
+
+#[test]
+fn the_untrusted_text_scan_rejects_a_bad_line() {
+    for bad in [
+        "r = '<div>' + h(c.from) + ' · ' + c.evidence + '</div>';",
+        "r = h(c.from) + x.sender;",
+        "list.push(c.title);",
+        "t = \"\" || c.title;",
+        "el.innerHTML = c.title;",
+        "r = h(m.x) + c.evidence;",
+    ] {
+        let reads = field_reads(bad, &["from", "evidence", "sender", "title"]);
+        assert!(reads.iter().any(|(_, l, u)| !read_is_safe(l, u)), "should be rejected: {bad}");
+    }
+    for good in ["r = h(c.from) + h(c.evidence);", "r = c.from ? h(c.from) : \"\";", "if (!c.from && !c.evidence) { return; }", "h(c.why || c.kind)"] {
+        let reads = field_reads(good, &["from", "evidence", "why"]);
+        assert!(reads.iter().all(|(_, l, u)| read_is_safe(l, u)), "should pass: {good}");
     }
 }
 
