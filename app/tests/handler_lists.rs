@@ -65,6 +65,36 @@ fn the_console_list_names_remove_lane_date_and_the_wizard_list_does_not() {
     assert!(!wizard.iter().any(|n| n == "commands::remove_lane_date"), "the wizard list must not name commands::remove_lane_date");
 }
 
+/// Email spec test 37 (plan T11.4; H5 puts the names in the list, §10 R5): the ten `mail_*` commands are
+/// in the console's list and none in the wizard's. The wizard has no profile folder and no `ConsoleState`.
+const MAIL: [&str; 10] = [
+    "mail::mail_status",
+    "mail::mail_setup_start",
+    "mail::mail_setup_progress",
+    "mail::mail_setup_answer",
+    "mail::mail_setup_stop",
+    "mail::mail_sign_in",
+    "mail::mail_disconnect",
+    "mail::mail_rotate",
+    "mail::mail_keep_session",
+    "mail::mail_applied",
+];
+
+#[test]
+fn the_ten_mail_commands_are_in_the_console_list_and_none_in_the_wizards() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let lists = handler_lists(&src);
+    let console = list_with(&lists, "commands::state");
+    let wizard = list_with(&lists, "onboarding::finish_onboarding");
+    for name in MAIL {
+        assert!(console.iter().any(|n| n == name), "the console list must name {name}");
+        assert!(!wizard.iter().any(|n| n == name), "the wizard list must not name {name}");
+    }
+    let named = console.iter().filter(|n| n.starts_with("mail::")).count();
+    assert_eq!(named, MAIL.len(), "the console list names exactly the ten mail commands, no more");
+}
+
 #[test]
 fn the_parser_reads_a_list_by_its_names() {
     let text = "x.invoke_handler(tauri::generate_handler![a::one, b::two,\n c::three])\n\
