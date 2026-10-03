@@ -2185,6 +2185,37 @@
     return m >= 60 ? " · about " + Math.round(m / 60) + " h left" : " · about " + m + " min left";
   }
   function mpBtn(label, choice, extra) { return '<button class="b' + (extra || "") + '" data-mp-choice="' + h(choice) + '">' + h(label) + "</button>"; }
+  // A guided step's directions (spec §4.4): the provider's own path to the setting, four lines at most, keyed on
+  // the provider and the step, never on a school. The address comes from mail_status by the setup's opaque id.
+  var MP_PATH = {
+    m365: ["Open Outlook on the web and choose Settings.", "Go to Mail, then Forwarding.", "Turn forwarding on and paste the address above.", "Save, then come back here."],
+    google: ["Open Gmail and choose Settings, then See all settings.", "Open Forwarding and POP/IMAP.", "Choose Add a forwarding address and paste the address above.", "Confirm it, turn forwarding on, then come back here."],
+    other: ["Open your mail provider’s settings.", "Find Forwarding (sometimes under Mail or Rules).", "Forward a copy of every message to the address above.", "Save, then come back here."]
+  };
+  var MP_PATH_CONFIRM = ["Open the confirmation message your provider sent.", "Follow its link or enter its code.", "Then come back here."];
+  var MPA = { id: null, address: null, busy: false };
+  function mpGuided(p) {
+    return p.rows.some(function (x) { return x.state === "needs_you" || x.state === "failed" || (x.guided && x.state === "working"); });
+  }
+  function mpAddressFor(p) {
+    var want = p.address_id;
+    if (!want || MPA.busy || MPA.id === want) { return; }
+    MPA.busy = true;
+    invoke("mail_status", {}).then(function (s) {
+      var m = ((s && s.mailboxes) || []).filter(function (x) { return x["address_id"] === want; })[0];
+      MPA.id = want; MPA.address = m ? m.address || null : null; MPA.busy = false;
+      if (MP.last) { renderMailProgress({ progress: MP.last }); }
+    }).catch(function () { MPA.busy = false; });
+  }
+  function mpGuide(p) {
+    if (p.status === "ended" || !mpGuided(p)) { return ""; }
+    mpAddressFor(p);
+    var row = p.rows.filter(function (x) { return x.state === "needs_you" || x.state === "failed" || x.guided; })[0] || {};
+    var lines = row.step === "confirm_address" ? MP_PATH_CONFIRM : (MP_PATH[p.provider] || MP_PATH.other);
+    var addr = MPA.id === p.address_id && MPA.address ? '<div class="set-row"><code class="mp-addr">' + h(MPA.address) + "</code>" +
+      '<button class="b" data-mp-copy>Copy</button></div>' : "";
+    return '<div class="mp-guide">' + addr + "<ol>" + lines.map(function (l) { return "<li>" + h(l) + "</li>"; }).join("") + "</ol></div>";
+  }
   function renderMailProgress(r) {
     var p = r && r.progress; MP.last = p || null;
     if (!p) {
@@ -2204,7 +2235,7 @@
     var b = p.backfill;
     EL("mp-backfill").textContent = b ? "Backfill: mail from the last 120 days, since " + mpDate(b.since) + " — " + b.handled + " of " + b.expected +
       mpLeft(b.eta_secs) + (b.paused ? " (paused)" : "") : "";
-    var ask = "";
+    var ask = mpGuide(p);
     if (p.ask === "school_address") {
       ask = '<div class="set-row"><input type="text" id="mp-addr" placeholder="Your school email address">' + mpBtn("Continue", "school_address", " pri y") + "</div>";
     } else if (p.ask === "forwarding_elsewhere") {
@@ -2259,6 +2290,7 @@
     if (e.target.closest("#mp-leave")) { mailLeave(); return; }
     if (e.target.closest("#mp-stop")) { invoke("mail_setup_stop", {}).then(pollMailProgress).catch(function () {}); return; }
     if (e.target.closest("#mp-gmail")) { invoke("mail_setup_start", { provider: "gmail" }).then(function (r) { if (r && r.ok) { openMailProgress(); } }).catch(function () {}); return; }
+    if (e.target.closest("[data-mp-copy]")) { if (MPA.address && navigator.clipboard) { navigator.clipboard.writeText(MPA.address).catch(function () {}); } return; }
     var c = e.target.closest("[data-mp-choice]"); if (!c) { return; }
     var k = c.getAttribute("data-mp-choice"), a;
     if (k === "school_address") { a = invoke("mail_setup_answer", { choice: { school_address: EL("mp-addr").value.trim() } }); }

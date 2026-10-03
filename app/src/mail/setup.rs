@@ -131,6 +131,9 @@ pub struct Progress {
     pub ended: Option<&'static str>,
     /// `m365`, `google` or `other` once known.
     pub provider: &'static str,
+    /// The mailbox's opaque id on the service (never the address itself): a guided step's view reads the
+    /// Knowlu address from `mail_status`'s row with this id (spec §5.4).
+    pub address_id: Option<String>,
     pub rows: Vec<Row>,
     /// One fixed sentence of what is happening now.
     pub sentence: &'static str,

@@ -1615,6 +1615,18 @@ fn one_setup_at_a_time() {
 }
 
 #[test]
+fn progress_carries_the_mailbox_id_and_never_the_address() {
+    let r = rig("t151-addr-id");
+    let shared = r.start(curated_m365(), true);
+    until("the mailbox id", || shared.progress().address_id.is_some());
+    shared.stop();
+    let p = wait(&shared);
+    assert_eq!(p.address_id.as_deref(), Some(A));
+    let json = serde_json::to_string(&p).unwrap();
+    assert!(!json.contains(KNOWLU) && !json.contains("in.example"), "no address in the progress");
+}
+
+#[test]
 fn a_closed_sign_in_window_is_setup_cancelled_and_nothing_changed() {
     let r = rig("t113-cancel");
     {

@@ -2528,6 +2528,22 @@ fn needs_you_names_its_reason_and_offers_its_answers() {
 }
 
 #[test]
+fn a_guided_step_shows_the_address_with_copy_and_its_path() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("data-mp-copy") && v.contains("navigator.clipboard.writeText"), "the address with a Copy button");
+    assert!(v.contains("invoke(\"mail_status\"") && v.contains("p.address_id"), "the address is read from the service by id");
+    assert!(v.contains("MP_PATH[p.provider]") && v.contains("row.step"), "the path is keyed on provider and step");
+    for prov in ["m365:", "google:", "other:"] {
+        assert!(v.contains(prov), "a path for {prov}");
+    }
+    let paths = &v[v.find("var MP_PATH = {").unwrap()..v.find("var MP_PATH_CONFIRM").unwrap()];
+    for line in paths.lines().filter(|l| l.contains('[')) {
+        assert!(line.matches("\", \"").count() + 1 <= 4, "four lines or fewer: {line}");
+    }
+}
+
+#[test]
 fn the_backfill_row_names_its_start_date_and_asks_nothing() {
     let js = read("console.js");
     let v = mail_progress_fn(&js);

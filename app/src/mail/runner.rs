@@ -169,7 +169,10 @@ impl<'a> Runner<'a> {
                 return Err(End::Failed("refused"));
             }
         }
-        r.sh.update(|p| p.provider = provider_name(provider));
+        r.sh.update(|p| {
+            p.provider = provider_name(provider);
+            p.address_id = Some(r.id.clone()).filter(|i| !i.is_empty());
+        });
         r.publish();
         Ok(r)
     }
