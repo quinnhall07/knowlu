@@ -428,12 +428,12 @@ fn the_picker_is_in_the_page_and_carries_no_data_id() {
 }
 
 #[test]
-fn the_wizard_has_nine_panels_and_the_privacy_words_and_no_live_fetch() {
+fn the_wizard_has_ten_panels_and_the_privacy_words_and_no_live_fetch() {
     let html = read("index.html");
     assert!(html.contains("id=\"wizard\""));
     // Spec §4.2, in order. **No `wiz-backup`, and no folder anywhere**: the app creates
     // `%USERPROFILE%\Knowlu\<name>` and `Backups` beside it (§4.1, §11a).
-    for p in ["wiz-welcome", "wiz-account", "wiz-subscribe", "wiz-vault", "wiz-calendars", "wiz-logins", "wiz-gmail", "wiz-slots", "wiz-finish"] {
+    for p in ["wiz-welcome", "wiz-account", "wiz-subscribe", "wiz-mail", "wiz-vault", "wiz-calendars", "wiz-logins", "wiz-gmail", "wiz-slots", "wiz-finish"] {
         assert!(html.contains(&format!("id=\"{p}\"")), "panel {p}");
     }
     assert!(!html.contains("id=\"wiz-backup\""), "the backup-folder panel is gone");
@@ -442,7 +442,7 @@ fn the_wizard_has_nine_panels_and_the_privacy_words_and_no_live_fetch() {
     for f in ["startWizard", "renderWizard", "wizGo", "wizFinish"] {
         assert!(js.contains(&format!("function {f}(")), "missing {f}");
     }
-    assert!(js.contains("var PANELS = [\"welcome\", \"account\", \"subscribe\", \"vault\", \"calendars\", \"logins\", \"gmail\", \"slots\", \"finish\"];"));
+    assert!(js.contains("var PANELS = [\"welcome\", \"account\", \"subscribe\", \"mail\", \"vault\", \"calendars\", \"logins\", \"gmail\", \"slots\", \"finish\"];"));
     // No live fetch in onboarding: the ICS shape is matched, never requested, by the PAGE. The
     // escape keeps the network-reference rule true.
     assert!(js.contains("/^https:\\/\\/"), "the ICS check is an escaped regex");
@@ -2697,4 +2697,48 @@ fn an_unbound_reason_shows_amber_with_its_count_and_rotate_only_when_suggested()
     assert!(v.contains("m.suggest_rotate === true") && v.contains("m.suggest_rotate !== true"), "Rotate sits in the amber line only when suggested");
     assert!(!v.contains("ui_event") && !v.contains("ev("), "nothing mail-derived reaches usage events");
     assert!(!v.contains("innerHTML = m.") && !v.contains("innerHTML += m."), "every mail string goes through h()");
+}
+
+/// T15.3 (email spec D6, risk 12, section 9): the panel right after sign-in and subscription
+/// announces school mail setup; nothing is set up in the wizard.
+fn mail_panel(html: &str) -> &str {
+    html.split("id=\"wiz-mail\"").nth(1).and_then(|s| s.split("id=\"wiz-vault\"").next()).expect("the mail panel")
+}
+
+#[test]
+fn the_panel_after_sign_in_reads_next_connect_your_school_email() {
+    let html = read("index.html");
+    assert!(html.find("id=\"wiz-mail\"").unwrap() > html.find("id=\"wiz-subscribe\"").unwrap());
+    assert!(html.find("id=\"wiz-mail\"").unwrap() < html.find("id=\"wiz-vault\"").unwrap());
+    assert!(mail_panel(&html).contains("Next: connect your school email"));
+    let js = read("console.js");
+    assert!(js.contains("var PANELS = [\"welcome\", \"account\", \"subscribe\", \"mail\", \"vault\", \"calendars\", \"logins\", \"gmail\", \"slots\", \"finish\"];"));
+}
+
+#[test]
+fn not_now_carries_the_school_rules_sentence() {
+    let html = read("index.html");
+    let p = mail_panel(&html);
+    assert!(p.contains("id=\"wiz-mail-notnow\""), "a one-click Not now");
+    let at = p.find("id=\"wiz-mail-notnow\"").unwrap();
+    let rule = p.find("If your school's rules don't allow forwarding your school email, skip this.")
+        .or_else(|| p.find("If your school&rsquo;s rules don&rsquo;t allow forwarding your school email, skip this."))
+        .expect("risk 12's sentence");
+    assert!(rule > at, "the sentence sits under Not now");
+    let js = read("console.js");
+    assert!(fn_body(&js, "function wizNotNow(").contains("WIZ.mailOffer = false"));
+}
+
+#[test]
+fn finish_sends_offer_mail() {
+    let js = read("console.js");
+    assert!(js.contains("offer_mail: WIZ.mailOffer"), "the plan carries the choice");
+    assert!(js.contains("mailOffer: true"), "the announcement defaults to on");
+    assert!(!fn_body(&js, "function wizFinish(").contains("ui_event"));
+}
+
+#[test]
+fn the_gmail_panel_button_reads_connect_gmail_directly_google_testers_only() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"wiz-gmail-connect\">Connect Gmail directly (Google testers only)</button>"));
 }

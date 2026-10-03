@@ -2792,11 +2792,11 @@
     invoke("launch_state", {}).then(function (l) { startWizard(l || {}); }).catch(function () {});
   });
 
-  // ---- C1 Task 17: onboarding (cloud design §4.2). NINE panels in this same document — no second
+  // ---- C1 Task 17: onboarding (cloud design §4.2). TEN panels in this same document — no second
   // webview, no bundler. NOTHING reaches this machine's disk until Finish, except the account (which
   // is not this machine) and the coursework credentials, written the moment the user leaves panel 6
   // (decision 3).
-  var PANELS = ["welcome", "account", "subscribe", "vault", "calendars", "logins", "gmail", "slots", "finish"];
+  var PANELS = ["welcome", "account", "subscribe", "mail", "vault", "calendars", "logins", "gmail", "slots", "finish"];
   // **One string, two languages.** `account::UNREACHABLE` is the first clause of every transport
   // failure the Rust side emits, and this is the page's copy of it. They are pinned to each other by
   // `static_assets.rs::the_unreachable_clause_is_one_string_on_both_sides`, the same way `PRIVACY` is
@@ -2812,7 +2812,7 @@
   // spec §4.1 — the app creates the folder and nobody is asked about it. It is still in WIZ because
   // `dest()` is what the credential target is derived from, and a rename on the vault panel has to
   // move the coursework logins with it (R-P4a-23).
-  var WIZ = { step: 0, parent: "", name: "Knowlu", email: "", accountId: "", entitled: false,
+  var WIZ = { mailOffer: true, step: 0, parent: "", name: "Knowlu", email: "", accountId: "", entitled: false,
               // The Google round trip runs in the system browser and can take a minute; `busy` is
               // what disables #wiz-google-signin meanwhile and `accountNote` is the status line —
               // both painted by `renderWizard`, the file's own A-5 rule (state lives on WIZ, never
@@ -2920,6 +2920,8 @@
     // not. The file's own A-5 rule, applied to the last field that escaped it.
     EL("wiz-next").disabled = WIZ.busy;
     EL("wiz-error").textContent = WIZ.error;
+    EL("wiz-mail-note").textContent = WIZ.mailOffer ? "" : "Skipped. You can connect it any time in Settings.";
+    EL("wiz-mail-notnow").hidden = !WIZ.mailOffer;
     EL("wiz-account-note").textContent = WIZ.accountId ? "Signed in as " + WIZ.email : WIZ.accountNote;
     EL("wiz-google-signin").disabled = WIZ.busy;
     // F10: the emailed-code door spends the same 20/hour budget as the Google button, so two quick
@@ -3023,7 +3025,7 @@
     WIZ.error = "";
     if (WIZ.step === 1 && !WIZ.accountId) { WIZ.error = "Sign in first."; }
     if (WIZ.step === 2 && !WIZ.entitled) { WIZ.error = "Finish the payment page in your browser, then come back."; }
-    if (WIZ.step === 3) {
+    if (WIZ.step === 4) {
       var n = WIZ.name.trim();
       if (!n) { WIZ.error = "Give this setup a name."; }
       else if (/[\\/:]/.test(n)) { WIZ.error = "A name has no slashes or colons."; }
@@ -3034,8 +3036,8 @@
     // Panel 4 is the calendars panel. Neither feed is compulsory — a student with no personal
     // calendar still gets a ranked day, and one whose school defeats the capture can come back — but
     // a link that is there and malformed is caught here rather than at Finish.
-    if (WIZ.step === 4 && WIZ.ics && !ICS_OK.test(WIZ.ics)) { WIZ.error = "That does not look like a calendar feed link."; }
-    if (WIZ.step === 4 && WIZ.cal && !ICS_OK.test(WIZ.cal)) { WIZ.error = "That does not look like a secret iCal address."; }
+    if (WIZ.step === 5 && WIZ.ics && !ICS_OK.test(WIZ.ics)) { WIZ.error = "That does not look like a calendar feed link."; }
+    if (WIZ.step === 5 && WIZ.cal && !ICS_OK.test(WIZ.cal)) { WIZ.error = "That does not look like a secret iCal address."; }
     return !WIZ.error;
   }
 
@@ -3062,11 +3064,11 @@
     // a red line about a field that is no longer on screen.
     if (n < WIZ.step) { WIZ.error = ""; }
     var leaving = WIZ.step;
-    if (leaving === 7) { readSlotsPanel(); }
+    if (leaving === 8) { readSlotsPanel(); }
     // Leaving the calendar panel closes the sign-in window and deletes its session, whether or not a
     // link was captured: a campus login must not outlive the panel that opened it. R-C1-40/R-C1-42 —
     // no argument: the app knows which directory it opened, and the page never holds a temp path.
-    if (leaving === 4 && WIZ.lmsOpen) {
+    if (leaving === 5 && WIZ.lmsOpen) {
       invoke("close_lms_window", {}).catch(function () {});
       WIZ.lmsOpen = false;
     }
@@ -3074,17 +3076,17 @@
     // its own next wake and stops touching the page. Only the "still polling" flag is cleared here
     // (not `googleNote`): a consent that already finished, or one still open in the browser, is
     // still true when the student comes back to this panel, and the note should still say so.
-    if (leaving === 4 && WIZ.googlePolling) {
+    if (leaving === 5 && WIZ.googlePolling) {
       WIZ.googleSeq += 1;
       WIZ.googlePolling = false;
     }
     // D11: the same for the Gmail panel (step 6); a connect that already finished stays true.
-    if (leaving === 6 && WIZ.gmailPolling) {
+    if (leaving === 7 && WIZ.gmailPolling) {
       WIZ.gmailSeq += 1;
       WIZ.gmailPolling = false;
     }
     WIZ.step = Math.max(0, Math.min(PANELS.length - 1, n));
-    if (leaving === 5 && n > leaving) {
+    if (leaving === 6 && n > leaving) {
       // R-C1-55, I3: one discovery at a time. `discover_coursework` spawns the engine and logs into
       // zyBooks and VHL; a second Next while the first is in flight starts a second child, with two
       // more vendor logins racing the first, and the two `WIZ.map` assignments decide the panel
@@ -3176,9 +3178,16 @@
     WIZ.zy = false;
     WIZ.vhl = false;
     WIZ.credVault = "";
-    WIZ.step = 5;
+    WIZ.step = 6;
     WIZ.busy = false;
     renderWizard();
+  }
+
+  // D6, risk 12: Not now is the whole of the choice. Nothing is set up in the wizard; the marker
+  // `offer_mail` writes at Finish is all the console's first open reads.
+  function wizNotNow() {
+    WIZ.mailOffer = false;
+    return wizGo(WIZ.step + 1);
   }
 
   function wizFinish() {
@@ -3221,7 +3230,7 @@
       var plan = { ics_url: WIZ.ics || null, personal_calendar: WIZ.cal || null,
                    ics_validated: icsFlags.validated, ics_stored: icsFlags.stored,
                    personal_calendar_validated: calFlags.validated, personal_calendar_stored: calFlags.stored,
-                   google_calendar: googleCalendar,
+                   google_calendar: googleCalendar, offer_mail: WIZ.mailOffer,
                    timezone: WIZ.tz, slots: WIZ.slots,
                    zybooks: WIZ.zy, vhl: WIZ.vhl, autostart: WIZ.autostart,
                    campus_choice: WIZ.campus,
@@ -3297,6 +3306,7 @@
   }
 
   EL("wizard").addEventListener("click", function (e) {
+    if (e.target.closest("#wiz-mail-notnow")) { wizNotNow(); return; }
     if (e.target.closest("#wiz-back")) { wizGo(WIZ.step - 1); return; }
     if (e.target.closest("#wiz-next")) { if (WIZ.step === PANELS.length - 1) { wizFinish(); } else { wizGo(WIZ.step + 1); } return; }
     // Spec D1. One command, no arguments: the URL, the loopback port, the verifier and both tokens
