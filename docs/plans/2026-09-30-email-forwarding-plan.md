@@ -419,6 +419,26 @@ Briefs cite functions and headings, never line numbers.
     Checkpoint B. If no capture can be had by then, Quinn accepts the model path until the pilot, and
     T3a.2 lands before the pilot.
   - *Blocks:* Checkpoint B's D9 reading. Nothing built before it waits.
+- **PQ11. Which forwarding statuses stop the Gmail OAuth read (T4b's review, 2026-10-02; for
+  Checkpoint B).** P22 counts a forwarding under every status except `revoked` and `off`, and T4b
+  built that literally (`FORWARDING_ENDED` in `functions/gmail-read/handler.ts`). That set includes
+  `pending` (setup started, never finished), `confirmed` (Gmail's confirm done, the setup canary not
+  yet back) and `blocked` (D14: the setup canary never arrived, so mail is not reaching Knowlu).
+  - *The failing case:* a student whose Gmail is connected by OAuth starts forwarding setup. P21's
+    route sets `mailbox_hint`, and then the canary never arrives (`blocked`) or the student abandons
+    setup (`pending`). From the next slot, `gmail-read` answers `read: 0`, `quiet: false`, with no
+    reason, so the tray stays green while neither path reads that Gmail. The 120-day backfill fills
+    the gap only if forwarding later becomes active, and an abandoned `pending` row never does.
+  - *Recommend:* amend P22 so a forwarding counts only while mail arrives by it: `confirmed`,
+    `active` or `quiet`. `quiet` stays in, since recover fills its gap and reading both paths would
+    file every message twice. `confirmed` stays in because it lasts only the canary's three-minute
+    wait before it becomes `active` or `blocked`. `pending` and `blocked` drop out. `paused_send` and
+    `lapsed` do not matter here: `paused_send` is Microsoft's (a Gmail hint never sits on a Microsoft
+    row, P21), and `gmail-read` is itself entitlement-gated. If amended, `FORWARDING_ENDED` becomes an
+    allow-list and the P22 status test moves `pending` and `blocked` to the not-counting side.
+  - *If Quinn keeps P22 as written:* the §9.5 row stays as the record of the trade-off (a stalled or
+    abandoned setup silently stops the Gmail read), so Checkpoint D does not raise it again.
+  - *Blocks:* nothing before Checkpoint B. The code is unchanged until the answer.
 
 ## 5. Tasks
 
@@ -1721,7 +1741,9 @@ D14, D17, D22, D23 and P5–P9, P21 and P22. It reads in particular:
 - that charge and budget always run before the model;
 - the per-route authentication and every `config.toml` section;
 - PQ10 put to Quinn: D9's notification rows (T3a.2) landed from real captures, or the model path
-  accepted until the pilot.
+  accepted until the pilot;
+- PQ11 put to Quinn as a P22 amendment: which forwarding statuses stop the Gmail OAuth read, with
+  `pending` and `blocked` the open cases.
 
 Fixes go back to `cloud-engineer`. The cloud sub-branch merges into the lane when no Critical or
 Important finding is open.
@@ -2492,6 +2514,7 @@ spec text moves. A row marked **open** waits on Quinn or the planner.
 | A `mail-resolve` call's `model failed` gives its day's-cap charge back by main's F1 `refund_call` (kind `mail_resolve`, cap `MAIL_DAILY_CAP.mail_resolve`), through `ResolveCharges.refundDaily` (T4.5's review, 2026-10-02). A refusal or a truncation reached the model and stays charged. As for T3e, the call is wired on this base, where the RPC does not exist yet: it fails, refuses and leaves the charge. | Main's F1 rule (PR #33). Without it, an hour-long provider outage spends the 20-call `mail_resolve` cap on calls the model never answered, and every ambiguous claim that day waits behind T5.5's `Skip(Unmatched)` with nothing shown. | T4.5; `a_model_failure_gives_its_daily_cap_charge_back_and_a_refusal_or_truncation_keeps_it`, `a_daily_cap_refund_is_main_f1s_refund_call_for_mail_resolve_…` (the fake models main's SQL); **T17:** after merging main, confirm `refund_call(uuid, text, integer)` is applied before T18 and accepts kind `mail_resolve`, and re-run both tests against it | recorded; T17 carries the check |
 | Account deletion goes on past a failed `work/` object delete (T4.6, 2026-10-02). `purgeMailboxes` (`functions/account/mail.ts`) deletes each mailbox's objects by key, logs a failure by its error class and count only (never a key, an id or a message), then calls `delete_mail_address` regardless. Disconnect's `purgeAddress` (`functions/mail/handler.ts`) does the opposite: it answers 502 before the RPC, so the revoked row stays and a retry finishes. D17 says deletion "calls the same purge" and does not say which way a failure goes. | The account's right to delete wins, as it does for the Google grant (`google_delete.ts`): a deletion held up by S3 would keep every row, not just the object. A straggler is mail text with no row pointing at it, and D2's one-day expiry on `work/` removes it. | T4.6; `a failed object delete never blocks the account's deletion, and logs no key`, `deletion_purges_each_mailbox_by_delete_mail_address_after_deleting_its_objects_by_key` | recorded. **Cost if wrong:** after a deletion whose object deletes failed, the student's forwarded mail text can stay in `work/` for up to about 2 days (S3 runs a one-day expiry rule once a day), with no row left to find it. Checkpoint B confirms the ruling; **T17 and the privacy page:** the deletion paragraph must not say mail text is deleted at once. It says "removed within about 2 days" unless the ruling is reversed |
 | The export carries two tables, on fixed column lists (T4.6, 2026-10-02): `mail_addresses` as `MAILBOX_EXPORT_COLUMNS` (id, provider, `mailbox_hint`, status, its dates and counters; not `forward_hint`, `retired_until` or any token column) and every `mail_claims` row held for the account, delivered or not, as `CLAIM_EXPORT_COLUMNS` (all but `account_id`). Left out: `mail_accounts` (the fingerprint key ciphertext, the allowance, the mint times and the `digest` setting), `mail_batches`, `mail_canaries`, `mail_seen` and `mail_work`. | D17 names "its mailboxes … and its queued claims; never the token, its HMAC, a key or a hash". Batches and canaries hold nonce HMACs and service counts, `mail_seen` holds HMACs and `mail_work` holds object keys. A fixed column list (not `select *`) keeps a column added later out of the export until someone names it. | T4.6; `the_export_carries_mailboxes_and_queued_claims_and_never_a_token_key_or_hash` | recorded. **Cost if wrong:** the student's export omits the digest setting, the allowance state, the mailbox's `forward_hint` and the batch and canary history. If a portability reading counts these as the student's data, a later task adds a projected `mail_accounts` row (digest and allowance only) and the batch counts without their nonce HMACs. **Open (Checkpoint B):** whether `mail_claims` exports delivered rows (D17 says "queued"; built: all held) |
+| T4b reads "an active forwarding" (D22) as P22 states it: every status but `revoked` and `off`, so `pending`, `confirmed`, `blocked`, `paused_send` and `lapsed` stop the Gmail OAuth read (T4b's review, 2026-10-02). A Gmail student whose forwarding setup stalls (`blocked`) or is abandoned (`pending`) after P21 set the hint gets `read: 0`, `quiet: false`, no reason, from the next slot: neither path reads that Gmail and the tray stays green. Backfill recovers the gap only if forwarding later becomes active. | P22 is literal; D14 defines `blocked` as mail not reaching Knowlu, so the reading loses items silently (VISION: silence is never ambiguous). | T4b; `P22: a forwarding counts while its row is neither revoked nor off, quiet included` | **Open (Checkpoint B, PQ11):** recommended amendment counts only `confirmed`, `active` and `quiet` (an allow-list; the test moves `pending` and `blocked`). If Quinn keeps P22, this row is the record of the trade-off. |
 
 ## 10. Review revisions (2026-09-30)
 
