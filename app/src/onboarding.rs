@@ -196,8 +196,8 @@ fn campus_list() -> &'static [(u64, String, String, String)] {
 /// name (it is *The* University of Alabama) still gets there. Under two characters is no answer at
 /// all: one letter matches a thousand schools and none of them usefully.
 ///
-/// Returns `[unitid, name, city, state]` per hit — the host is in the asset and is not shown, so it
-/// does not cross the IPC either.
+/// Returns `[unitid, name, city, state, lms]` per hit — `lms` is the curated kind or `""`; the host
+/// is in the asset and is not shown, so it does not cross the IPC either.
 #[tauri::command]
 pub fn campus_search(query: String) -> Value {
     let needle = query.trim().to_lowercase();
@@ -210,7 +210,13 @@ pub fn campus_search(query: String) -> Value {
             format!("{name} {city} {state}").to_lowercase().contains(&needle)
         })
         .take(10)
-        .map(|(id, name, city, state)| json!([id, name, city, state]))
+        .map(|(id, name, city, state)| {
+            // The curated LMS kind, "" for a school nobody has curated: the wizard pre-answers its
+            // "which LMS?" question from this and asks only when it is empty. Read from the curated
+            // table, never named here.
+            let lms = crate::scaffold::curated(&id.to_string()).map(|c| c.lms_kind).unwrap_or("");
+            json!([id, name, city, state, lms])
+        })
         .collect();
     json!({ "ok": true, "error": Value::Null, "hits": hits })
 }

@@ -86,6 +86,8 @@ function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"], me
         rules: { lookup: () => Promise.resolve(null) },
         caps: {
           charge: () => Promise.resolve(true),
+          refund: () => Promise.resolve(),
+          tripped: () => false,
           withinBudget: () => Promise.resolve(true),
           recordTokens: () => Promise.resolve(),
         },
