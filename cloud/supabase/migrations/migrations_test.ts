@@ -320,16 +320,17 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // connect D14's `create or replace function delete_google_grant` in 20260929000200 (SECURITY
   // DEFINER, revoked from `public, anon, authenticated` again in the same file) —
   // counted by hand against today's corpus: C3′ adds six, C1c one and D14 one, on top of the 21
-  // both streams inherited (the C3′ merge of main, PR #13); plus email forwarding T1.2's three
-  // re-issues in <stamp>_mail.sql (`export_training_rows`, non-writing; `backfill_correction_judgments`
+  // both streams inherited (the C3′ merge of main, PR #13); plus F1's `refund_call` in
+  // 20261002000100 (writing, non-definer, revoked from `public, anon, authenticated` in the same
+  // file — live proof 2026-10-02); plus email forwarding T1.2's three
+  // re-issues in 20261002000200_mail.sql (`export_training_rows`, non-writing; `backfill_correction_judgments`
   // and `promote_rules`, writing, each revoked from `public, anon, authenticated` again in that file),
   // plus T1.3's three in the same file (`delete_mail_address`, SECURITY DEFINER; `charge_allowance`
   // and the re-issued `enforce_budget`, writing; each revoked from `public, anon, authenticated`),
-  // plus the T1.3 review's `refund_allowance` (writing, revoked the same way; main's F1 `refund_call`
-  // arrives with the merge of PR #33 and moves this by one), plus T2g.1's two (`mail_hand_off` and
-  // `count_mail_arrival`, writing, each revoked from `public, anon, authenticated`), plus T3e's
-  // `expire_mail_work` (writing, revoked the same way).
-  assertEquals(parsed, 39, "today's corpus should parse exactly 39 function creations");
+  // plus the T1.3 review's `refund_allowance` (writing, revoked the same way), plus T2g.1's two
+  // (`mail_hand_off` and `count_mail_arrival`, writing, each revoked from `public, anon,
+  // authenticated`), plus T3e's `expire_mail_work` (writing, revoked the same way).
+  assertEquals(parsed, 40, "today's corpus should parse exactly 40 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -479,7 +480,7 @@ Deno.test("the three cap-store functions are revoked, not marked — R-C2-E48 fi
   // them for real instead. This asserts the marker is gone and the guard found a real revoke for
   // all three — not that they are silently exempt either way.
   const { exemptedByMarker } = assertExecuteRevoked(await everyMigrationFile());
-  for (const fn of ["charge_call", "record_tokens", "enforce_budget"]) {
+  for (const fn of ["charge_call", "record_tokens", "enforce_budget", "refund_call"]) {
     assert(!exemptedByMarker.includes(fn), `${fn} must be revoked, not marker-exempt: ${exemptedByMarker}`);
   }
   // No genuine C0/C1 app-called function ever carried this marker (confirmed by hand against
@@ -1645,4 +1646,29 @@ Deno.test("expire_mail_work_deletes_the_work_row_and_its_seen_row_and_counts_exp
     at = next;
   }
   assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 3, `${f.name}: the three writes only`);
+});
+
+Deno.test("F1: refund_call gives one call back in one guarded statement, bounded, and is revoked", async () => {
+  // Live proof 2026-10-02: a dead provider key charged 160 failed event judgments to one account.
+  // `refund_call` gives a failed call back. What this pins, since nothing here runs SQL:
+  //   * it is the LATEST migration's own file, stamped after every other one (forward-only);
+  //   * one `update` (row-locked, so two concurrent refunds cannot both read the same `calls`),
+  //     never an insert — a refund can never create a usage row or push `calls` below zero;
+  //   * it is bounded by `refunds`, so a hot loop of failing calls is still stopped by the day;
+  //   * it never touches `in_tokens`/`out_tokens`, which `monthly_spend` prices.
+  const files = await everyMigrationFile();
+  const [name, sql] = files.filter(([n]) => n.includes("refund_failed_call"))[0] ?? ["", ""];
+  assert(name !== "", "the refund migration exists");
+  const code = stripLineComments(sql);
+  assert(/add\s+column\s+if\s+not\s+exists\s+refunds\s+integer\s+not\s+null\s+default\s+0/i.test(code));
+  assert(/create\s+or\s+replace\s+function\s+refund_call\s*\(\s*p_account\s+uuid\s*,\s*p_kind\s+text\s*,\s*p_cap\s+integer\s*\)/i.test(code));
+  assert(/update\s+usage_daily/i.test(code), "a refund is an update");
+  assert(!/insert\s+into/i.test(code), "a refund never inserts");
+  assert(/greatest\s*\(\s*u?\.?calls\s*-\s*1\s*,\s*0\s*\)/i.test(code), "calls never goes below 0");
+  assert(/calls\s*>\s*0/i.test(code), "nothing to refund, nothing counted as refunded");
+  assert(/refunds\s*<\s*allowance/i.test(code), "refunds are bounded by the day's allowance");
+  assert(!/in_tokens|out_tokens/i.test(code), "the tokens a call spent are never refunded");
+  assert(!/security\s+definer/i.test(code));
+  assert(/revoke\s+execute\s+on\s+function\s+public\.refund_call\(uuid,\s*text,\s*integer\)\s+from\s+public,\s*anon,\s*authenticated/i.test(code));
+  assert(/grant\s+execute\s+on\s+function\s+public\.refund_call\(uuid,\s*text,\s*integer\)\s+to\s+service_role/i.test(code));
 });

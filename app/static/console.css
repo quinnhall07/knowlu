@@ -175,6 +175,7 @@ aside { border-left: 1px solid var(--hair); padding: var(--s5) var(--s5) var(--s
 .deck-foot .adv { margin-left: auto; }
 .card .t { font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; margin-bottom: var(--s1); }
 .card .w { color: var(--t3); font-size: 12.5px; margin-bottom: var(--s3); }
+.card .w .src, .row.dec .why .src { color: var(--t4); margin-left: var(--s2); }
 .card .cf { display: flex; gap: var(--s2); align-items: flex-start; font-family: var(--mono); font-size: 10.5px; line-height: 1.55; color: var(--warn); background: var(--warn-dim); border-radius: var(--r1); padding: var(--s2); margin-bottom: var(--s3); }
 .acts { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
 button.b { font-family: var(--sans); font-size: 12.5px; font-weight: 500; border-radius: var(--r2); padding: 4px 10px; cursor: pointer; border: 1px solid var(--hair-2); background: var(--s2c); color: var(--t2); }

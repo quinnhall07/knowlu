@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
-import { ScriptedModel } from "./judge_anthropic.ts";
+import { ModelRefused, ScriptedModel } from "./judge_anthropic.ts";
 import {
   type CapStore,
   DAILY_CAP,
@@ -35,11 +35,23 @@ class Sink implements JudgmentSink {
 
 class Caps implements CapStore {
   charged: Array<[string, string]> = [];
+  refunded: Array<[string, string]> = [];
   tokens: Array<[string, string, number, number]> = [];
-  constructor(private readonly allow = true, private readonly budget = true) {}
+  constructor(
+    private readonly allow = true,
+    private readonly budget = true,
+    private readonly open = false,
+  ) {}
   charge(account: string, kind: "task" | "event" | "email"): Promise<boolean> {
     this.charged.push([account, kind]);
     return Promise.resolve(this.allow);
+  }
+  refund(account: string, kind: "task" | "event" | "email"): Promise<void> {
+    this.refunded.push([account, kind]);
+    return Promise.resolve();
+  }
+  tripped(): boolean {
+    return this.open;
   }
   withinBudget(): Promise<boolean> {
     return Promise.resolve(this.budget);
@@ -278,6 +290,101 @@ Deno.test("a model that throws is a low-confidence outcome, never a write", asyn
   assertEquals(reply.cause, "model failed");
   assertEquals(reply.verdict, null);
   assertEquals(log.rows[0].outcome, "low confidence");
+  assertEquals(log.rows[0].cause, "model failed");
+});
+
+// F1 (live proof 2026-10-02): a dead provider key failed all 160 event judgments of a first day,
+// every one was charged, and the account was `capped` for the rest of the day. A call the model
+// never answered is refunded; a call it did answer (a verdict, a refusal, a truncation) is not.
+for (
+  const [label, failure] of [
+    ["an auth error", new Error("the model service answered HTTP 401")],
+    ["a transport error", new TypeError("error sending request: connection refused")],
+    ["a timeout", new Error("the model call timed out after 120000 ms")],
+    ["a 2xx error envelope", new Error("the model service answered a 2xx with an error envelope")],
+    ["an unparseable reply", new Error("the model's reply did not parse as JSON (12 chars)")],
+  ] as const
+) {
+  Deno.test(`F1: ${label} is refunded, so a failed call leaves the day's cap untouched`, async () => {
+    const caps = new Caps();
+    const reply = await judge(
+      "acct-1",
+      { kind: "event", item: ITEM, heuristics_seed: SEED },
+      deps(new ScriptedModel([failure]), new Sink(), caps),
+    );
+    assertEquals(reply.cause, "model failed");
+    assertEquals(caps.charged, [["acct-1", "event"]], "still charged BEFORE the call: the hot-loop guard");
+    assertEquals(caps.refunded, [["acct-1", "event"]], "and given back once the call failed");
+    assertEquals(caps.tokens, [], "no reply, no tokens: the monthly ceiling sees nothing");
+  });
+}
+
+Deno.test("F1: a refusal or a truncation reached the model, so it stays charged", async () => {
+  for (const failure of [new ModelRefused("the model declined"), new Error("the reply hit max_tokens (256)")]) {
+    const caps = new Caps();
+    const reply = await judge(
+      "acct-1",
+      { kind: "task", item: ITEM, heuristics_seed: SEED },
+      deps(new ScriptedModel([failure]), new Sink(), caps),
+    );
+    assert(reply.cause === "refused" || reply.cause === "truncated", `got ${reply.cause}`);
+    assertEquals(caps.charged.length, 1);
+    assertEquals(caps.refunded, []);
+  }
+});
+
+Deno.test("F1: a success still charges and is never refunded", async () => {
+  const caps = new Caps();
+  const reply = await judge(
+    "acct-1",
+    { kind: "task", item: ITEM, heuristics_seed: SEED },
+    deps(new ScriptedModel([ANSWER]), new Sink(), caps),
+  );
+  assertEquals(reply.outcome, "answered");
+  assertEquals(caps.charged, [["acct-1", "task"]]);
+  assertEquals(caps.refunded, []);
+});
+
+Deno.test("F1: an answer the model gave that fails validation stays charged", async () => {
+  const caps = new Caps();
+  const reply = await judge(
+    "acct-1",
+    { kind: "task", item: ITEM, heuristics_seed: SEED },
+    deps(new ScriptedModel([{ ...ANSWER, confidence: 0.1 }]), new Sink(), caps),
+  );
+  assertEquals(reply.outcome, "low confidence");
+  assertEquals(caps.charged.length, 1);
+  assertEquals(caps.refunded, [], "the model answered and billed; only an unanswered call is refunded");
+});
+
+Deno.test("F1: concurrent failures each charge once and refund once, never twice", async () => {
+  const caps = new Caps();
+  const failures = Array.from({ length: 8 }, () => new Error("the model service answered HTTP 401"));
+  const model = new ScriptedModel(failures);
+  const replies = await Promise.all(
+    failures.map(() =>
+      judge("acct-1", { kind: "event", item: ITEM, heuristics_seed: SEED }, deps(model, new Sink(), caps))
+    ),
+  );
+  assert(replies.every((r) => r.cause === "model failed"));
+  assertEquals(caps.charged.length, 8);
+  assertEquals(caps.refunded.length, 8);
+});
+
+Deno.test("F1: an open breaker answers model failed without charging and without calling the model", async () => {
+  const caps = new Caps(true, true, true);
+  const model = new ScriptedModel([ANSWER]);
+  const log = new Sink();
+  const reply = await judge("acct-1", { kind: "email", item: ITEM, heuristics_seed: SEED }, deps(model, log, caps));
+  assertEquals(reply.verdict, null);
+  assertEquals(reply.outcome, "low confidence");
+  assertEquals(reply.cause, "model failed");
+  assertEquals(reply.tier, 0, "tier 0: nothing was asked of the model");
+  assertEquals(model.seen.length, 0);
+  assertEquals(caps.charged, []);
+  assertEquals(caps.refunded, []);
+  assertEquals(log.rows.length, 1);
+  assertEquals(log.rows[0].tier, 0);
   assertEquals(log.rows[0].cause, "model failed");
 });
 
