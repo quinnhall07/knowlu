@@ -2400,6 +2400,65 @@
     }).catch(function () { return mailBoxesRow(); });
   });
   // ---- end mail settings ----
+  // ---- mail applied (email spec §4.14, D10, T15.4). What the backfill added, by course, each row with Undo through
+  // the console's own writers. Every string from a message goes through h(); no usage event is sent from here. ----
+  var MA = { rows: [], note: "" };
+  function maRow(x, kind) {
+    var i = MA.rows.push({ kind: kind, row: x }) - 1, main, from = "";
+    if (kind === "changed") {
+      main = h(x.title) + " · " + h(x.field) + ": " + h(x.old == null ? "none" : x.old) + " → " + h(x.new == null ? "none" : x.new);
+      from = [x.sender, x.date].filter(function (t) { return t; }).map(h).join(" · ");
+    } else if (kind === "notice") {
+      main = h(x.title) + (x.opened_at ? " · " + h(x.opened_at) : "");
+    } else {
+      main = h(x.title) + (x.due ? " · due " + h(x.due) : "");
+    }
+    return '<div class="ma-row"><span class="ma-main">' + main + "</span>" + (from ? '<span class="ma-from">' + from + "</span>" : "") +
+      (x.changed_since ? '<span class="ma-since">changed since</span>' : '<button class="b" data-ma-undo="' + i + '">Undo</button>') + "</div>";
+  }
+  function maSection(title, rows, kind) {
+    return rows.length ? "<h4>" + h(title) + "</h4>" + rows.map(function (x) { return maRow(x, kind); }).join("") : "";
+  }
+  function renderMailApplied(r) {
+    MA.rows = [];
+    var html = "";
+    if (!r || r.ok === false || !r.courses) {
+      EL("ma-body").innerHTML = '<p class="meta">Knowlu could not read what came from your email just now.</p>';
+      return;
+    }
+    r.courses.forEach(function (g) {
+      var arch = g.archived.items.length ? "<details><summary>" + h("Past items archived (" + g.archived.count + ")") + "</summary>" +
+        g.archived.items.map(function (x) { return maRow(x, "archived"); }).join("") + "</details>" : "";
+      html += '<div class="ma-course"><h3>' + h(g.course == null ? "Notices" : g.course) + "</h3>" +
+        maSection("Items created", g.created, "created") + maSection("Fields changed", g.changed, "changed") + arch +
+        maSection("Notices opened", g.notices, "notice") + "</div>";
+    });
+    if (!r.courses.length) { html = '<p class="meta">Nothing has come in from your email yet.</p>'; }
+    EL("ma-body").innerHTML = (MA.note ? '<p class="meta">' + h(MA.note) + "</p>" : "") + html;
+  }
+  function loadMailApplied() {
+    return invoke("mail_applied", {}).then(renderMailApplied).catch(function () { renderMailApplied(null); });
+  }
+  function openMailApplied() {
+    MA.note = ""; EL("mail-applied").hidden = false;
+    return loadMailApplied();
+  }
+  EL("ma-close").addEventListener("click", function () { EL("mail-applied").hidden = true; });
+  EL("ma-body").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-ma-undo]"); if (!b) { return; }
+    var at = MA.rows[Number(b.getAttribute("data-ma-undo"))]; if (!at) { return; }
+    var row = at.row, p;
+    if (at.kind === "changed") { var fields = {}; fields[row.field] = row.old; p = invoke("set_fields", { view: stateView(), id: row.id, fields: fields }); }
+    else if (at.kind === "notice") { p = invoke("close_info", { view: stateView(), id: row.id }); }
+    else { p = invoke("delete_note", { view: stateView(), id: row.id }); }
+    p.then(function (env) {
+      applyEnvelope(env, function (msg) { MA.note = "Could not undo that: " + msg; });
+      return loadMailApplied();
+    }).catch(function () {});
+  });
+  EL("mp-applied").addEventListener("click", openMailApplied);
+  EL("set-email-applied").addEventListener("click", openMailApplied);
+  // ---- end mail applied ----
   function openSettings() {
     EL("settings").hidden = false;
     loadPrefs(); loadInterests();

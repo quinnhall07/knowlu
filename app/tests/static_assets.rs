@@ -2742,3 +2742,61 @@ fn the_gmail_panel_button_reads_connect_gmail_directly_google_testers_only() {
     let html = read("index.html");
     assert!(html.contains("id=\"wiz-gmail-connect\">Connect Gmail directly (Google testers only)</button>"));
 }
+
+// ---- T15.4: "From your email" (email spec §4.14, D10) ------------------------------------------------
+
+fn mail_applied_fn(js: &str) -> &str {
+    let at = js.find("// ---- mail applied").expect("the From your email section");
+    let end = js[at..].find("// ---- end mail applied").expect("its end marker");
+    &js[at..at + end]
+}
+
+#[test]
+fn from_your_email_lists_by_course_items_created_fields_changed_past_archived_and_notices() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let v = mail_applied_fn(&js);
+    for id in ["mail-applied", "ma-body", "ma-close"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
+    }
+    assert!(v.contains("invoke(\"mail_applied\""), "the engine's read-only list");
+    assert!(v.contains("r.courses.forEach") && v.contains("g.course"), "by course");
+    assert!(v.contains("g.created") && v.contains("g.changed") && v.contains("g.archived.count") && v.contains("g.archived.items") && v.contains("g.notices"));
+    assert!(v.contains("<details") && v.contains("<summary"), "the archived count expands");
+    for part in ["Items created", "Fields changed", "Past items archived", "Notices opened"] {
+        assert!(v.contains(part), "heading {part}");
+    }
+    assert!(v.contains("x.sender") && v.contains("x.date") && v.contains("x.old") && v.contains("x.new") && v.contains("x.due"));
+    assert!(!v.contains("innerHTML = x.") && !v.contains("innerHTML += x."), "every mail string goes through h()");
+}
+
+#[test]
+fn undo_invokes_delete_note_set_fields_with_the_old_value_or_close_info() {
+    let js = read("console.js");
+    let v = mail_applied_fn(&js);
+    assert!(v.contains("invoke(\"delete_note\", { view: stateView(), id: row.id })"), "a created item");
+    assert!(v.contains("invoke(\"set_fields\"") && v.contains("fields[row.field] = row.old"), "a changed field, the journal's old value");
+    assert!(v.contains("invoke(\"close_info\", { view: stateView(), id: row.id })"), "a notice");
+    assert!(v.contains("applyEnvelope("), "the console repaints from the envelope");
+    assert!(!v.contains("ui_event") && !v.contains("ev("), "no usage event carries mail text");
+}
+
+#[test]
+fn a_changed_since_row_shows_no_undo() {
+    let js = read("console.js");
+    let v = mail_applied_fn(&js);
+    assert!(v.contains("x.changed_since ?") && v.contains("changed since"), "the fixed words");
+    assert!(v.contains("data-ma-undo"), "the Undo button");
+    let row = fn_body(v, "function maRow(");
+    assert!(row.contains("changed_since") && row.find("changed since").unwrap() < row.find("data-ma-undo").unwrap(), "the branch picks one or the other");
+}
+
+#[test]
+fn from_your_email_opens_from_the_last_progress_row_and_from_settings() {
+    let js = read("console.js");
+    let html = read("index.html");
+    assert!(html.contains("id=\"mp-applied\"") && html.contains("id=\"set-email-applied\""));
+    assert!(js.contains("EL(\"mp-applied\").addEventListener(\"click\", openMailApplied)"));
+    assert!(js.contains("EL(\"set-email-applied\").addEventListener(\"click\", openMailApplied)"));
+    assert!(read("console.css").contains(".ma-row"));
+}
