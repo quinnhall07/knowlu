@@ -486,7 +486,9 @@ def check(url, fixture_name, out, bad):
 
         # A poll that never finishes: timers are collapsed so twenty 3 s waits take no time.
         page.evaluate("window.__realST = window.__realST || window.setTimeout.bind(window); "
-                      "window.setTimeout = function (f) { return window.__realST(f, 0); };")
+                      "window.__now = window.__now || Date.now.bind(Date); window.__skew = 0; "
+                      "Date.now = function () { return window.__now() + window.__skew; }; "
+                      "window.setTimeout = function (f, ms) { window.__skew += (ms || 0); return window.__realST(f, 0); };")
         open_google(G_CAL)
         page.click("#set-google-connect")
         page.wait_for_timeout(1500)
