@@ -166,6 +166,10 @@ fn run_console(p: profiles::Profile, root: std::path::PathBuf) -> ! {
             use tauri_plugin_autostart::ManagerExt;
             let al = app.autolaunch();
             if autostart { let _ = al.enable(); } else { let _ = al.disable(); }
+            // H4 (email plan): the mail launch sweep, retried profile deletes and an open backfill's
+            // resume, on its own thread. After `manage(cs)` (it reads `ConsoleState`) and before the
+            // scheduler, so a slot never meets a leftover `mail-setup`.
+            knowlu::mail::live::on_start(app.handle());
             // The scheduler's tick and housekeeping threads (Task 12) — inert unless
             // `config/runners.yaml`'s `local` entry says `scheduler: app`.
             scheduler::spawn(app.handle().clone());

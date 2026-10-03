@@ -2146,3 +2146,34 @@ fn the_progress_never_holds_an_address_or_a_token() {
         assert!(!text.contains(secret), "the progress holds {secret}: {text}");
     }
 }
+
+// ---- H4: the launch hook ------------------------------------------------------------------------
+
+/// `main.rs`'s `.setup` closures, as source text: `[0]` is the vault-less shell's, `[1]` the console's.
+/// (The same stand-in `handler_lists.rs` uses: a call left out compiles and shows only at a launch.)
+fn setup_bodies(src: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(at) = rest.find(".setup(move |app|") {
+        let body = &rest[at..];
+        let end = body[1..].find(".setup(").or_else(|| body[1..].find(".run(")).map_or(body.len(), |e| e + 1);
+        out.push(&body[..end]);
+        rest = &body[end..];
+    }
+    out
+}
+
+#[test]
+fn the_console_setup_calls_the_mail_launch_hook_after_it_manages_the_console_state() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let bodies = setup_bodies(&src);
+    assert_eq!(bodies.len(), 2, "main.rs has the wizard's setup and the console's");
+    let console = bodies.iter().find(|b| b.contains("app.manage(cs)")).expect("the console's setup manages ConsoleState");
+    let wizard = bodies.iter().find(|b| b.contains("onboarding::Onboarding")).expect("the wizard's setup");
+
+    let hook = console.find("knowlu::mail::live::on_start(app.handle())").expect("the console's setup calls mail::live::on_start");
+    assert!(hook > console.find("app.manage(cs)").unwrap(), "on_start reads ConsoleState with try_state, so it comes after the manage");
+    assert!(hook < console.find("scheduler::spawn").unwrap(), "the sweep starts before the scheduler can run a slot");
+    assert!(!wizard.contains("on_start"), "the vault-less shell has no vault to resume a backfill in");
+}
