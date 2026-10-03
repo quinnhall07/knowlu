@@ -4,8 +4,8 @@ use knowlu::state::{resolve_vault, ConsoleState};
 use knowlu::commands::{
     answer_card_inner, backup_now_inner, close_info_inner, console_ctx, create_task_inner, decide_inner,
     delete_note_inner, get_settings_inner, mark_seen_inner, note_inner, open_issue_inner,
-    resolve_issue_inner, set_fields_inner, set_settings_inner, state_inner, sync_inner,
-    ui_event_inner,
+    dropped_events_inner, profile_inner, resolve_issue_inner, set_body_inner, set_fields_inner, set_interests_inner,
+    set_preferences_inner, set_settings_inner, state_inner, sync_inner, ui_event_inner, remove_lane_date_inner,
 };
 use knowlu::scheduler::{lock, LiveSlot, RunSummary, Scheduler};
 
@@ -1033,4 +1033,230 @@ fn a_multi_line_or_dashed_answer_writes_nothing_and_the_card_stays_answerable() 
     assert_eq!(env["ok"], true, "{env}");
     let note = std::fs::read_to_string(v.join("commitments/bui-100.md")).unwrap();
     assert!(note.contains("days: [tue]"), "{note}");
+}
+
+/// The set_body records in a vault's journal, parsed.
+fn body_records(v: &Path) -> Vec<serde_json::Value> {
+    journal_records(v).into_iter().filter(|r| r["op"] == "set_body").collect()
+}
+
+fn open_scratch(name: &str) -> (PathBuf, ConsoleState) {
+    let v = scratch(name);
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-{name}-data-{}", std::process::id())));
+    (v, cs)
+}
+
+/// M2 spec test 23: the record's actor and via come from the console's own context, and it holds
+/// two digests and two byte counts and none of the text.
+#[test]
+fn set_body_edits_a_task_body_and_returns_fresh_state() {
+    let (v, cs) = open_scratch("setbody");
+    let id = first_id(&cs);
+    let lf = |s: String| s.replace("\r\n", "\n");
+    let before = lf(std::fs::read_to_string(v.join("tasks/ph-106-exam-1-prep.md")).unwrap());
+    let env = set_body_inner(&cs, "today", &id, "", "Read chapters 3 and 4.\nDo the practice set.").unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    assert!(env.get("conflict").is_none() || env["conflict"] == false, "{env}");
+    assert_eq!(env["state"]["schema"], 1);
+    let after = lf(std::fs::read_to_string(v.join("tasks/ph-106-exam-1-prep.md")).unwrap());
+    assert!(after.starts_with(before.trim_end_matches('\n')), "the head is untouched");
+    assert!(after.ends_with("Read chapters 3 and 4.\nDo the practice set.\n"), "{after}");
+    let recs = body_records(&v);
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    let ctx = console_ctx(&v).unwrap();
+    assert_eq!((recs[0]["actor"].as_str(), recs[0]["via"].as_str()), (Some(ctx.actor.as_str()), Some("dashboard")), "{}", recs[0]);
+    assert_eq!(recs[0]["id"], id);
+    let new_body = "Read chapters 3 and 4.\nDo the practice set.\n";
+    assert_eq!(recs[0]["new"]["sha256"], knowlu_engine::write::body_sha256(new_body));
+    assert_eq!(recs[0]["new"]["bytes"], new_body.len());
+    assert!(recs[0]["old"]["sha256"].is_string() && recs[0]["old"]["bytes"].is_number());
+    assert!(!recs[0].to_string().contains("practice set"), "no text in the record: {}", recs[0]);
+}
+
+/// M2 spec test 24, with Checkpoint A's CF2: only `tasks/` and `courses/`, reached by id. An
+/// approval, an issue and a path-shaped id are refused by name, and nothing is journalled.
+#[test]
+fn set_body_refuses_an_approval_and_an_issue_by_name() {
+    let (v, cs) = open_scratch("setbody-refuse");
+    knowlu_engine::journal::create_actor_file(&v, knowlu_engine::journal::HUMAN_ACTOR).unwrap();
+    std::fs::create_dir_all(v.join("issues")).unwrap();
+    std::fs::write(v.join("issues/flag.md"), "---\nid: iss_0123456789\nstatus: open\n---\n\nA flag.\n").unwrap();
+    let approval = std::fs::read_to_string(v.join("approvals/task-freshman-forum.md")).unwrap().lines().find_map(|l| l.strip_prefix("id: ").map(|s| s.trim().to_string())).unwrap();
+    let snapshot = |p: &str| std::fs::read(v.join(p)).unwrap();
+    let (a0, i0, c0) = (snapshot("approvals/task-freshman-forum.md"), snapshot("issues/flag.md"), snapshot("config/actor.yaml"));
+    let before = journal_records(&v).len();
+    for (target, folder) in [(approval.as_str(), "approvals"), ("iss_0123456789", "issues"), ("config/actor.yaml", "config")] {
+        let env = set_body_inner(&cs, "today", target, "", "New text.").unwrap();
+        assert_eq!(env["ok"], false, "{target}: {env}");
+        assert!(env["error"].as_str().unwrap().contains(folder), "{target}: the error names the folder: {env}");
+        assert!(env["state"].is_object(), "a refusal carries the state: {env}");
+    }
+    assert_eq!(journal_records(&v).len(), before, "nothing was journalled");
+    assert_eq!((snapshot("approvals/task-freshman-forum.md"), snapshot("issues/flag.md"), snapshot("config/actor.yaml")), (a0, i0, c0));
+}
+
+/// M2 spec test 25: a stale `expected` is a conflict the page can see without reading the error.
+#[test]
+fn set_body_conflict_carries_conflict_true_and_the_state() {
+    let (v, cs) = open_scratch("setbody-conflict");
+    let id = first_id(&cs);
+    assert_eq!(set_body_inner(&cs, "today", &id, "", "First.").unwrap()["ok"], true);
+    let note = std::fs::read(v.join("tasks/ph-106-exam-1-prep.md")).unwrap();
+    let env = set_body_inner(&cs, "today", &id, "Something older.\n", "Second.").unwrap();
+    assert_eq!((env["ok"].clone(), env["conflict"].clone()), (json!(false), json!(true)), "{env}");
+    assert!(env["state"].is_object() && env["error"].is_string(), "{env}");
+    assert_eq!(std::fs::read(v.join("tasks/ph-106-exam-1-prep.md")).unwrap(), note, "the file is untouched");
+    assert_eq!(body_records(&v).len(), 1, "no second record");
+    let other = set_body_inner(&cs, "today", "task_0000000000", "", "x").unwrap();
+    assert_eq!(other["ok"], false);
+    assert!(other.get("conflict").is_none() || other["conflict"] == false, "only a Conflict sets the flag: {other}");
+}
+
+/// M2 spec test 26: preferences, then interests, then the read; and a block list is refused by
+/// name with the file and the journal untouched.
+#[test]
+fn profile_commands_round_trip() {
+    let (v, cs) = open_scratch("profile-rt");
+    std::fs::remove_dir_all(v.join("profile")).unwrap();
+    let env = profile_inner(&cs).unwrap();
+    assert_eq!((env["ok"].clone(), env["profile"]["preferences"].clone(), env["profile"]["interests_editable"].clone()), (json!(true), json!(""), json!(true)), "{env}");
+    let env = set_preferences_inner(&cs, "today", "", "I work best at night.").unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    let items = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let env = set_interests_inner(&cs, "today", items(&[" AI talks ", "", "AI talks", "research"]), items(&["music"]), items(&[]), items(&["chess club"])).unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    let env = profile_inner(&cs).unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    let p = &env["profile"];
+    assert_eq!(p["preferences"], "I work best at night.\n");
+    assert_eq!((p["strong"].clone(), p["mild"].clone(), p["never"].clone(), p["clubs"].clone()), (json!(["AI talks", "research"]), json!(["music"]), json!([]), json!(["chess club"])), "{p}");
+    assert_eq!(p["interests_editable"], true);
+    let stale = set_preferences_inner(&cs, "today", "Not what is there.", "Again.").unwrap();
+    assert_eq!((stale["ok"].clone(), stale["conflict"].clone()), (json!(false), json!(true)), "{stale}");
+
+    let (v2, cs2) = open_scratch("profile-block");
+    let env = profile_inner(&cs2).unwrap();
+    assert_eq!(env["profile"]["interests_editable"], false, "the fixture's block lists: {env}");
+    let (file, before) = (std::fs::read(v2.join("profile/interests.md")).unwrap(), journal_records(&v2).len());
+    let env = set_interests_inner(&cs2, "today", items(&["x"]), items(&[]), items(&[]), items(&[])).unwrap();
+    assert_eq!(env["ok"], false, "{env}");
+    assert!(env["state"].is_object());
+    assert_eq!((std::fs::read(v2.join("profile/interests.md")).unwrap(), journal_records(&v2).len()), (file, before));
+}
+
+/// Every file under `dir` with its bytes, in path order: the whole vault, to prove a read wrote nothing.
+fn tree_bytes(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() { out.extend(tree_bytes(&p)); } else { out.push((p.clone(), std::fs::read(&p).unwrap())); }
+    }
+    out.sort();
+    out
+}
+
+/// M2 plan T4b: the roster's audit drops come back as `{ok, dropped}`, Coming up is not among them,
+/// and the vault's bytes (the journal included) are the same afterwards.
+#[test]
+fn dropped_events_lists_the_audit_drops_and_writes_nothing() {
+    let (v, cs) = open_scratch("dropped-events");
+    let roster = v.join("state/events.md");
+    let text = std::fs::read_to_string(&roster).unwrap().replace(
+        "- Nothing else in the window.",
+        "- Fri 2026-09-04 18:30 · Pep Rally · Spirit Club · @ Gym `localist:pep` · filtered",
+    );
+    std::fs::write(&roster, text).unwrap();
+    let before = tree_bytes(&v);
+    let env = dropped_events_inner(&cs).unwrap();
+    assert_eq!((env["ok"].clone(), env["error"].clone()), (json!(true), json!(null)), "{env}");
+    assert_eq!(env["dropped"], json!([{ "uid": "localist:pep", "title": "Pep Rally", "date": "2026-09-04", "time": "18:30", "reason": "filtered by your interests" }]), "{env}");
+    assert_eq!(tree_bytes(&v), before, "nothing was written");
+}
+
+/// Spec test 28: accepting an `event-accept` card in the console books the event before the call
+/// returns, the way approving a task card puts the task in the returned state. The card is
+/// hand-built (spec §5.1's shape); every title, place and uid is invented.
+#[test]
+fn decide_accepting_an_event_card_books_it_before_returning() {
+    let (v, cs) = open_scratch("decide-event");
+    cs.set_test_today(Some("2026-10-01".parse().unwrap()));
+    std::fs::write(
+        v.join("approvals/event-career-fair-2026-10-01.md"),
+        "---\nid: appr_00000000e1\ntype: approval\nkind: event-accept\ntitle: \"Required · Career fair · Thu 1 Oct 10am–3pm\"\n\
+         status: pending\nverdict: obligation\nsource_uid: \"lx:77:1\"\nseries_uid: \"lx:77\"\nevents: [\"lx:77:1\"]\ninstances:\n  \
+         - {uid: \"lx:77:1\", title: \"Career fair\", start: '2026-10-01T10:00:00', end: '2026-10-01T15:00:00', location: \"Ferguson Center\", \
+         registration: false, registration_deadline: null}\njudgment_kind: event\nproposed_at: 2026-09-24\nfirst_proposed_at: 2026-09-24\n\
+         expires: 2026-10-01\nsnooze_until: null\ncreated_by: events\n---\n\nInvented.\n",
+    )
+    .unwrap();
+    let env = decide_inner(&cs, "today", "appr_00000000e1", "approved", "", None).unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    assert_eq!(env["decision"]["executed"], json!(["event-career-fair-2026-10-01"]), "{env}");
+
+    let notes: Vec<_> = std::fs::read_dir(v.join("commitments")).unwrap().flatten().collect();
+    assert_eq!(notes.len(), 1, "the commitment exists before the call returned");
+    let text = std::fs::read_to_string(notes[0].path()).unwrap().replace("\r\n", "\n");
+    assert!(text.contains("source_uid: lx:77:1") || text.contains("source_uid: \"lx:77:1\""), "{text}");
+    let note_id = text.lines().find_map(|l| l.strip_prefix("id: ")).unwrap().trim().to_string();
+
+    let records = journal_records(&v);
+    let status_rec = records.iter().find(|r| r["op"] == "set" && r["field"] == "status" && r["id"] == json!("appr_00000000e1")).expect("the card's status record");
+    assert!(!knowlu_engine::provenance::is_agent(status_rec["actor"].as_str().unwrap()), "the decision is the student's: {status_rec}");
+    let create_rec = records.iter().find(|r| r["op"] == "create" && r["id"] == json!(note_id)).expect("the commitment's create record");
+    assert!(knowlu_engine::provenance::is_agent(create_rec["actor"].as_str().unwrap()), "the booking is the system's: {create_rec}");
+}
+
+/// P17: "Remove from my day" takes an accepted all-day date off the day, in the returned state,
+/// with one `declined` ledger line. Tested through the call the console sends once the Undo toast
+/// has closed (PQ6 (b)); there is no toast here.
+#[test]
+fn remove_lane_date_takes_the_date_off_the_day_before_returning() {
+    let (v, cs) = open_scratch("remove-lane-date");
+    let day = "2026-10-09";
+    cs.set_test_today(Some(day.parse().unwrap()));
+    let card = "appr_0123456789";
+    std::fs::create_dir_all(v.join("archive")).unwrap();
+    std::fs::write(
+        v.join("archive/event-weekly-meeting-2026-10-06.md"),
+        format!(
+            "---\nid: {card}\ntype: approval\nkind: event-accept\ntitle: \"Weekly meeting\"\nstatus: executed\nverdict: opportunity\n\
+             source_uid: \"lx:77:1\"\nseries_uid: \"lx:77\"\nevents: [\"lx:77:1\"]\ninstances:\n  \
+             - {{uid: \"lx:77:1\", title: \"Weekly meeting\", start: '2026-10-06T19:00:00', end: '2026-10-06T21:00:00', location: \"Hall\", \
+             registration: false, registration_deadline: null}}\nproposed_at: 2026-09-24\nfirst_proposed_at: 2026-09-24\n\
+             expires: 2026-10-06\nsnooze_until: null\ncreated_by: events\n---\n\nInvented.\n"
+        ),
+    )
+    .unwrap();
+    let dt = |s: &str| -> jiff::civil::DateTime { s.parse().unwrap() };
+    knowlu_engine::eventledger::record_carried_answer(
+        &v, "lx:77:3", "Open house", "2026-10-01".parse().unwrap(), "opportunity", card, dt("2026-10-09T00:00:00"), dt("2026-10-10T00:00:00"),
+    )
+    .unwrap();
+    let ledger_path = v.join("state/events-seen.md");
+    let ledger = || std::fs::read(&ledger_path).unwrap();
+    let declined_lines = || String::from_utf8(ledger()).unwrap().lines().filter(|l| l.starts_with("- lx:77:3 ") && l.contains("declined")).count();
+    let carry_pos = String::from_utf8(ledger()).unwrap().find("verdict:opportunity").unwrap();
+
+    let s = state_inner(&cs, "today").unwrap();
+    assert!(s["state"]["the_day"]["all_day"].as_array().unwrap().contains(&json!("Open house")), "{}", s["state"]["the_day"]);
+    assert!(s["state"]["the_day"]["all_day_uids"].as_array().unwrap().contains(&json!("lx:77:3")), "{}", s["state"]["the_day"]);
+
+    let env = remove_lane_date_inner(&cs, "today", "lx:77:3").unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    let the_day = &env["state"]["the_day"];
+    assert!(!the_day["all_day"].as_array().unwrap().contains(&json!("Open house")), "{the_day}");
+    assert!(the_day.get("all_day_uids").is_none(), "{the_day}");
+    assert_eq!(declined_lines(), 1);
+    let text = String::from_utf8(ledger()).unwrap();
+    assert!(text.find(&format!("- lx:77:3 · declined {day}")).unwrap() > carry_pos, "the declined line comes after the carry line");
+
+    let before = ledger();
+    let again = remove_lane_date_inner(&cs, "today", "lx:77:3").unwrap();
+    assert_eq!(again["ok"], true, "{again}");
+    assert_eq!(ledger(), before, "a second removal writes nothing");
+
+    let nope = remove_lane_date_inner(&cs, "today", "lx:nothing:1").unwrap();
+    assert_eq!(nope["ok"], false, "{nope}");
+    assert!(nope["error"].as_str().unwrap().contains("lx:nothing:1") && nope["state"].is_object(), "{nope}");
+    assert_eq!(ledger(), before, "a refusal writes nothing");
 }

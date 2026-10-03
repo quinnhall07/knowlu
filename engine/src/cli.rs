@@ -24,7 +24,7 @@ use jiff::Timestamp;
 
 use crate::approvals::{count_proposals_created, defer_over_budget, process_approvals};
 use crate::calfeed::load_calendar_events;
-use crate::eventemit::{emit_digest, emit_event_checks, inherit_series_answers};
+use crate::eventemit::{emit_digest, emit_event_accepts, emit_event_checks, inherit_series_answers};
 use crate::eventfeed::load_discovered_events;
 use crate::eventfilter::prefilter_events;
 use crate::eventledger::load_ledger;
@@ -461,16 +461,25 @@ pub fn run_with(
 
         let mut ledger_warnings: Vec<String> = Vec::new();
         let mut ledger = load_ledger(vault, Some(&mut ledger_warnings));
-        // A settled series card answers the series' later instances (F2) — before the roster and
-        // the digest, so this run's roster already shows the inherited verdict.
+        // The events pass's order is the contract (events spec §6.1, with P16): every step below
+        // reads what the ones before it wrote, and every step is handed this same `candidates`, so
+        // a run built from the roster carries nothing and files no card from its lossy read-back.
+        //
+        // 1. D9's rebuild of a rejected card's declines, then the series carry and its one ledger
+        //    line per carried date (PQ3), before any card is filed, so nothing is asked again.
+        let (_, carry_warnings) = crate::eventcarry::run(vault, &candidates, &mut ledger, today, &ctx, &mut journal);
+        ledger_warnings.extend(carry_warnings);
+        // 2. A settled series card answers the series' later instances (F2) — after the carry
+        //    (P16), so it skips every date the carry answered; before the roster and the cards, so
+        //    this run's roster already shows the inherited verdict.
         let (_, inherit_warnings) = inherit_series_answers(vault, &candidates, &mut ledger, today);
         ledger_warnings.extend(inherit_warnings);
         for w in ledger_warnings {
             event_warnings.push(format!("ledger: {w}"));
         }
 
-        // The pre-filter's drops go to the roster too: an unreachable drop is an unauditable one
-        // (spec §2/§5).
+        // 3. The pre-filter's drops go to the roster too: an unreachable drop is an unauditable
+        // one (spec §2/§5).
         if let Err(err) = write_roster(
             &roster_path,
             &candidates,
@@ -482,29 +491,40 @@ pub fn run_with(
             event_warnings.push(format!("roster unwritable ({err})"));
         }
 
-        let (_, emitted) = emit_digest(
-            vault,
-            &candidates,
-            &ledger,
-            &events_config,
-            today,
-            Some(remaining_budget),
-            Some(&ctx.with_actor("agent:events")),
-            &mut journal,
+        // 4-7. The cards (D7: obligations, then the `unsure` checks, then opportunities), each
+        // sized to what the ones before it left of the day's budget, and each counted pending.
+        let events_ctx = ctx.with_actor("agent:events");
+        let mut left = remaining_budget;
+        // 4. One `event-accept` card per obligation.
+        let (_, obligations) = emit_event_accepts(
+            vault, &candidates, &ledger, &events_config, today, left, "obligation", &events_ctx, &mut journal,
         );
-        approvals.events_in_digest += emitted as i64;
-        // The "Does this apply to you?" cards (F2), sized to what the digest left of the budget.
+        approvals.pending += obligations as i64;
+        left = left.saturating_sub(obligations as i64).max(0);
+        // 5. The digest only with the switch off (D6). With no obligation card filed (the
+        // `vault-full` case) it is sized exactly as before, which keeps `golden-today-full.md`.
+        if !events_config.event_cards {
+            let (_, emitted) = emit_digest(
+                vault, &candidates, &ledger, &events_config, today, Some(left), Some(&events_ctx), &mut journal,
+            );
+            approvals.events_in_digest += emitted as i64;
+            left = left.saturating_sub(emitted as i64).max(0);
+        }
+        // 6. The "Does this apply to you?" cards (F2).
         let (_, checks) = emit_event_checks(
-            vault,
-            &candidates,
-            &ledger,
-            &events_config,
-            today,
-            (remaining_budget - emitted as i64).max(0),
-            &ctx.with_actor("agent:events"),
-            &mut journal,
+            vault, &candidates, &ledger, &events_config, today, left, &events_ctx, &mut journal,
         );
         approvals.pending += checks as i64;
+        left = left.saturating_sub(checks as i64).max(0);
+        // 7. One `event-accept` card per opportunity, only with the switch on (D6;
+        // `emit_event_accepts` reads the switch itself and files none with it off).
+        if events_config.event_cards {
+            let (_, opportunities) = emit_event_accepts(
+                vault, &candidates, &ledger, &events_config, today, left, "opportunity", &events_ctx, &mut journal,
+            );
+            approvals.pending += opportunities as i64;
+        }
+        // 8. Coming up (unchanged).
         coming_up = relevant_events(&candidates, &ledger)
             .into_iter()
             .map(|e| {
@@ -2185,6 +2205,547 @@ Bring questions.
         let _ = std::fs::remove_dir_all(&vault);
     }
 
+    // --- T4: the events pass's order and budgets (events spec §6.1's `cli.rs` row, P16) --------
+
+    const EV_TODAY: &str = "2026-10-01";
+    const EV_DAY: Date = Date::constant(2026, 10, 1);
+    const EV_JID: &str = "1a2b3c4d-0000-4000-8000-00000000000a";
+    const ACCEPT_ID: &str = "appr_0123456789";
+    const CHECK_ID: &str = "appr_abcdef0123";
+    const OLD_CHECK_ID: &str = "appr_5555555555";
+
+    /// `scaffold`'s week (09:00–17:00) with one enabled Localist source; `extra` is appended to
+    /// `config/events.yaml` (`"event_cards: true\n"`, or nothing for the switch off).
+    fn events_vault(name: &str, extra: &str) -> PathBuf {
+        let vault = scaffold(name);
+        let config = format!(
+            "sources:\n  - name: campus\n    type: localist\n    url: unreachable://x\n    enabled: true\n{extra}"
+        );
+        pystr::write_text(&vault.join("config").join("events.yaml"), &config).unwrap();
+        vault
+    }
+
+    /// One Localist event: `id`, `title`, and its instances as `(instance id, start, end)` in
+    /// offset ISO form (Central daylight time is `-05:00` all October).
+    fn lx(id: i64, title: &str, instances: &[(i64, &str, &str)]) -> serde_json::Value {
+        let instances: Vec<serde_json::Value> = instances
+            .iter()
+            .map(|(n, start, end)| serde_json::json!({"event_instance": {"id": n, "start": start, "end": end}}))
+            .collect();
+        serde_json::json!({"event": {"id": id, "title": title, "event_instances": instances}})
+    }
+
+    fn lx_feed(events: Vec<serde_json::Value>) -> String {
+        serde_json::json!({ "events": events }).to_string()
+    }
+
+    /// The feed's events exactly as `rank` reads them, so a hand-built card names the same uids
+    /// and spans the feed gives.
+    fn lx_events(feed: &str) -> Vec<crate::events::DiscoveredEvent> {
+        let json: serde_json::Value = serde_json::from_str(feed).unwrap();
+        let tz = TimeZone::get("America/Chicago").unwrap();
+        crate::eventfeed::parse_localist(&json, "campus", &tz).0
+    }
+
+    fn uid_of<'a>(events: &'a [crate::events::DiscoveredEvent], uid: &str) -> &'a crate::events::DiscoveredEvent {
+        events.iter().find(|e| e.uid == uid).unwrap_or_else(|| panic!("no {uid} in the feed"))
+    }
+
+    /// One `rank` on `day` over `feed`; `None` makes every feed fail.
+    fn rank_events(vault: &Path, day: &str, feed: Option<&str>) -> RunOutcome {
+        let fetch = |_: &str| match feed {
+            Some(text) => Ok(text.to_string()),
+            None => Err("offline".to_string()),
+        };
+        let fetchers = Fetchers { calendar: None, events: Some(&fetch), series: None };
+        run_with(vault, Some(day), "manual", None, fetchers).unwrap()
+    }
+
+    /// An answered event card in `archive/`, as the settlement leaves it (spec §5.1): `verdict`
+    /// for an `event-accept` card, `None` for an `event-check` one; `events:` lists `listed`, the
+    /// first its primary, and `instances:` carries them unless `with_instances` is false (an
+    /// `event-check` card filed before this lane).
+    #[allow(clippy::too_many_arguments)]
+    fn archived_card(
+        vault: &Path,
+        name: &str,
+        kind: &str,
+        status: &str,
+        verdict: Option<&str>,
+        listed: &[&crate::events::DiscoveredEvent],
+        with_instances: bool,
+        id: &str,
+    ) {
+        use crate::yamlemit::Node;
+        let mut pairs = vec![
+            ("id", Node::text(id)),
+            ("type", Node::text("approval")),
+            ("kind", Node::text(kind)),
+            ("title", Node::text(&crate::eventemit::what_and_when(listed[0]))),
+            ("status", Node::text(status)),
+        ];
+        if let Some(verdict) = verdict {
+            pairs.push(("verdict", Node::text(verdict)));
+        }
+        pairs.extend([
+            ("source_uid", Node::text(&listed[0].uid)),
+            ("series_uid", Node::text(&listed[0].series_uid)),
+            ("events", Node::Seq(listed.iter().map(|e| Node::text(&e.uid)).collect())),
+        ]);
+        if with_instances {
+            let instances = listed.iter().map(|e| crate::eventaccept::Instance::from_event(e).to_node()).collect();
+            pairs.push(("instances", Node::Seq(instances)));
+        }
+        pairs.extend([
+            ("proposed_at", Node::Date(Date::constant(2026, 9, 24))),
+            ("first_proposed_at", Node::Date(Date::constant(2026, 9, 24))),
+            ("expires", Node::Date(listed[0].start().date())),
+            ("snooze_until", Node::Null),
+            ("created_by", Node::text("events")),
+        ]);
+        let text = format!("---\n{}---\n\nbody\n", crate::yamlemit::safe_dump_block(&Node::map(pairs)));
+        std::fs::create_dir_all(vault.join("archive")).unwrap();
+        pystr::write_text(&vault.join("archive").join(name), &text).unwrap();
+    }
+
+    /// The student's answer line for each uid an `event-check` card listed, as its settlement
+    /// wrote it, under the vault's own token (rule 1: no literal).
+    fn answered_by_student(vault: &Path, listed: &[&crate::events::DiscoveredEvent]) {
+        let human = crate::journal::read_human_actor(vault).unwrap();
+        for event in listed {
+            let day = Date::constant(2026, 9, 25);
+            crate::eventledger::record_answer(vault, &event.uid, &event.title, day, "obligation", human, None).unwrap();
+        }
+    }
+
+    fn ledger_bytes(vault: &Path) -> Vec<u8> {
+        std::fs::read(vault.join("state").join("events-seen.md")).unwrap_or_default()
+    }
+
+    /// Every ledger line for `uid`, in file order.
+    fn ledger_lines_for(vault: &Path, uid: &str) -> Vec<String> {
+        let head = format!("- {uid} · ");
+        let text = pystr::read_text(&vault.join("state").join("events-seen.md")).unwrap_or_default();
+        text.lines().filter(|l| l.starts_with(&head)).map(str::to_string).collect()
+    }
+
+    /// The carry's line for `event` (P15), answered on `EV_TODAY`.
+    fn carry_line(event: &crate::events::DiscoveredEvent, word: &str, from: &str) -> String {
+        let span = |at: DateTime| at.strftime("%Y-%m-%dT%H:%M:%S").to_string();
+        let (start, end) = (span(event.start()), span(event.end()));
+        let by = crate::eventledger::CARRY_ACTOR;
+        format!("- {} · {} · verdict:{word} · by:{by} · from:{from} · start:{start} · end:{end} · answered {EV_TODAY}", event.uid, event.title)
+    }
+
+    /// `(source_uid, level)` of every note in `commitments/`, sorted.
+    fn booked_events(vault: &Path) -> Vec<(String, String)> {
+        let mut rows: Vec<(String, String)> = md_names(&vault.join(crate::commitments::FOLDER), "")
+            .iter()
+            .map(|n| vault.join(crate::commitments::FOLDER).join(n))
+            .map(|p| (meta_str(&p, "source_uid"), meta_str(&p, "level")))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// Every journal file's bytes, in file-name order.
+    fn journal_bytes(vault: &Path) -> Vec<u8> {
+        let mut out = Vec::new();
+        let dir = vault.join("state").join("journal");
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .map(|rd| rd.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        files.sort();
+        for file in files {
+            out.extend(std::fs::read(file).unwrap());
+        }
+        out
+    }
+
+    /// Spec test 19 at `rank` level (P13): D9 rebuilds a rejected card's declines on an empty
+    /// ledger, before any card is filed, so nothing is asked again and Coming up never lists them.
+    #[test]
+    fn rank_rebuilds_declines_from_a_rejected_card() {
+        let vault = events_vault("t4-d9", "");
+        let feed = lx_feed(vec![
+            lx(78, "Film night", &[(1, "2026-10-08T19:00:00-05:00", "2026-10-08T21:00:00-05:00"), (2, "2026-10-15T19:00:00-05:00", "2026-10-15T21:00:00-05:00")]),
+            // The control: a series no card answered.
+            lx(82, "Book club", &[(1, "2026-10-09T18:00:00-05:00", "2026-10-09T19:00:00-05:00")]),
+        ]);
+        let events = lx_events(&feed);
+        let film = [uid_of(&events, "localist:78:1"), uid_of(&events, "localist:78:2")];
+        archived_card(&vault, "event-film-night-2026-10-08.md", "event-accept", "rejected", Some("obligation"), &film, true, ACCEPT_ID);
+        assert!(ledger_bytes(&vault).is_empty(), "an empty ledger (a restored vault: state/ never syncs)");
+
+        rank_events(&vault, EV_TODAY, Some(&feed));
+        let text = pystr::read_text(&vault.join("state").join("events-seen.md")).unwrap();
+        let lines: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(lines, ["- localist:78:1 · declined 2026-10-01", "- localist:78:2 · declined 2026-10-01"], "{text}");
+
+        // A judge later gives every one of them a verdict that would earn a card and a Coming up
+        // slot: the declines still hold, and the control shows both paths are live.
+        for event in &events {
+            crate::eventledger::record_judged_verdict(&vault, &event.uid, &event.title, EV_DAY, "obligation", "Required.", None).unwrap();
+        }
+        rank_events(&vault, EV_TODAY, Some(&feed));
+        let cards = md_names(&vault.join("approvals"), "event");
+        assert_eq!(cards, ["event-book-club-2026-10-09.md"], "no new card for a declined uid");
+        let now = EV_DAY.at(8, 0, 0, 0);
+        let shown: Vec<String> = crate::surface::coming_up(&vault, EV_DAY, now).into_iter().map(|e| e.uid).collect();
+        assert_eq!(shown, ["localist:82:1"], "Coming up lists none of the declined uids");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Two accepted series, one per card kind: `localist:77` on an executed `event-accept` card
+    /// (`verdict`, id `ACCEPT_ID`) and `localist:9` on an executed `event-check` card with
+    /// `instances:` (id `CHECK_ID`, PQ1 (a)), each listing its first instance. Returns the feed.
+    fn two_accepted_series(vault: &Path, verdict: &str, extra: Vec<serde_json::Value>) -> String {
+        let mut events = vec![
+            lx(77, "Weekly meeting", &[
+                (1, "2026-10-06T19:00:00-05:00", "2026-10-06T21:00:00-05:00"),
+                (2, "2026-10-13T19:00:00-05:00", "2026-10-13T21:00:00-05:00"),
+                (3, "2026-10-20T00:00:00-05:00", "2026-10-22T00:00:00-05:00"),
+            ]),
+            lx(9, "Lab hours", &[
+                (1, "2026-10-07T10:00:00-05:00", "2026-10-07T12:00:00-05:00"),
+                (2, "2026-10-14T10:00:00-05:00", "2026-10-14T12:00:00-05:00"),
+                (3, "2026-10-24T00:00:00-05:00", "2026-10-26T00:00:00-05:00"),
+            ]),
+        ];
+        events.extend(extra);
+        let feed = lx_feed(events);
+        let parsed = lx_events(&feed);
+        let meeting = [uid_of(&parsed, "localist:77:1")];
+        archived_card(vault, "event-weekly-meeting-2026-10-06.md", "event-accept", "executed", Some(verdict), &meeting, true, ACCEPT_ID);
+        let lab = [uid_of(&parsed, "localist:9:1")];
+        archived_card(vault, "event-check-lab-hours-2026-10-07.md", "event-check", "executed", None, &lab, true, CHECK_ID);
+        answered_by_student(vault, &lab);
+        feed
+    }
+
+    /// Spec test 20a at `rank` level (P13, P9): a carried commitment, and the primary's register
+    /// task, once deleted, stay deleted across two more runs, for both kinds of accepted series.
+    #[test]
+    fn rank_twice_never_rebooks_a_deleted_carried_note() {
+        let vault = events_vault("t4-delete-sticks", "");
+        let feed = two_accepted_series(&vault, "obligation", Vec::new());
+        let events = lx_events(&feed);
+        // The settlement's register task, for the primary only (spec §4.2).
+        let mut primary = uid_of(&events, "localist:77:1").clone();
+        primary.registration = true;
+        let (stem, text) = crate::eventaccept::register_task(&crate::eventaccept::Instance::from_event(&primary)).unwrap();
+        let settle = WriteContext { actor: "agent:approvals".into(), via: "cli".into(), run_id: None };
+        crate::write::create(&vault, &format!("tasks/{stem}.md"), &text, &settle, &mut Journal::new(&vault), None).unwrap();
+
+        rank_events(&vault, EV_TODAY, Some(&feed));
+        let hard = |uid: &str| (uid.to_string(), "hard".to_string());
+        assert_eq!(booked_events(&vault), [hard("localist:77:2"), hard("localist:9:2")], "P7: both hard");
+        // The `event-check` series' later timed instance: one commitment and one line, the carry's
+        // (P16: inheritance runs after the carry and leaves it alone). The all-day `:3`s have none.
+        let lab = uid_of(&events, "localist:9:2");
+        assert_eq!(ledger_lines_for(&vault, &lab.uid), [carry_line(lab, "obligation", CHECK_ID)]);
+        let meeting = uid_of(&events, "localist:77:2");
+        assert_eq!(ledger_lines_for(&vault, &meeting.uid), [carry_line(meeting, "obligation", ACCEPT_ID)]);
+        let records = Journal::new(&vault).read(None, None);
+        let creates = records
+            .iter()
+            .filter(|r| r["op"] == "create" && r["actor"] == crate::commitments::CARD_ACTOR)
+            .count();
+        assert_eq!(creates, 2, "one journal create per carried commitment");
+
+        // The student deletes both commitments and the primary's register task.
+        let student = WriteContext::new(crate::journal::read_human_actor(&vault).unwrap(), "dashboard");
+        let mut journal = Journal::new(&vault);
+        let notes = md_names(&vault.join(crate::commitments::FOLDER), "");
+        for rel in notes.iter().map(|n| format!("commitments/{n}")).chain([format!("tasks/{stem}.md")]) {
+            crate::write::delete(&vault, &rel, &student, &mut journal).unwrap();
+        }
+        let (journal_after, ledger_after) = (journal_bytes(&vault), ledger_bytes(&vault));
+        for _ in 0..2 {
+            rank_events(&vault, EV_TODAY, Some(&feed));
+        }
+        assert_eq!(booked_events(&vault), Vec::<(String, String)>::new(), "the deleted commitments stay deleted");
+        assert_eq!(md_names(&vault.join("tasks"), ""), Vec::<String>::new(), "the register task is never re-created");
+        assert!(journal_bytes(&vault) == journal_after, "no journal record for either uid");
+        assert!(ledger_bytes(&vault) == ledger_after, "no second ledger line");
+        assert_eq!(md_names(&vault.join("approvals"), "event"), Vec::<String>::new(), "no card for them");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// PQ3 (b-prime) with its span, through `rank` (P15, P16): every carried date of both accepted
+    /// kinds gets the carry's one line and no inherited one; a series answered on a card filed
+    /// before this lane keeps `inherit_series_answers`' line; the roster lists all five.
+    #[test]
+    fn rank_gives_each_carried_date_the_carrys_line_and_lists_it() {
+        let vault = events_vault("t4-pq3", "");
+        let briefing = lx(5, "Safety briefing", &[
+            (1, "2026-10-05T15:00:00-05:00", "2026-10-05T16:00:00-05:00"),
+            (2, "2026-10-12T15:00:00-05:00", "2026-10-12T16:00:00-05:00"),
+        ]);
+        let feed = two_accepted_series(&vault, "opportunity", vec![briefing]);
+        let events = lx_events(&feed);
+        // The third series: an executed `event-check` card filed before this lane (no `instances:`).
+        let first = [uid_of(&events, "localist:5:1")];
+        archived_card(&vault, "event-check-safety-briefing-2026-10-05.md", "event-check", "executed", None, &first, false, OLD_CHECK_ID);
+        answered_by_student(&vault, &first);
+
+        rank_events(&vault, EV_TODAY, Some(&feed));
+        for (uid, word, from) in [
+            ("localist:77:2", "opportunity", ACCEPT_ID),
+            ("localist:77:3", "opportunity", ACCEPT_ID),
+            ("localist:9:2", "obligation", CHECK_ID),
+            ("localist:9:3", "obligation", CHECK_ID),
+        ] {
+            let event = uid_of(&events, uid);
+            assert_eq!(ledger_lines_for(&vault, uid), [carry_line(event, word, from)], "{uid}: the carry's line alone");
+        }
+        let human = crate::journal::read_human_actor(&vault).unwrap();
+        let inherited = format!("- localist:5:2 · Safety briefing · verdict:obligation · by:{human} · answered {EV_TODAY}");
+        assert_eq!(ledger_lines_for(&vault, "localist:5:2"), [inherited], "inheritance, as today, and no carry line");
+        let roster = pystr::read_text(&vault.join("state").join("events.md")).unwrap();
+        let relevant = roster.split("## Everything else").next().unwrap_or("");
+        for uid in ["localist:77:2", "localist:77:3", "localist:9:2", "localist:9:3", "localist:5:2"] {
+            assert!(relevant.contains(&format!("`{uid}`")), "{uid} is not in the relevant section:\n{roster}");
+        }
+
+        let ledger = ledger_bytes(&vault);
+        rank_events(&vault, EV_TODAY, Some(&feed));
+        assert!(ledger_bytes(&vault) == ledger, "a second rank adds no line");
+        rank_events(&vault, EV_TODAY, None);
+        assert!(ledger_bytes(&vault) == ledger, "a rank on the roster alone leaves the ledger's bytes unchanged");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// The feed-failure run (§2, T2b.2): `rank` swaps its candidates for `read_roster`'s lossy
+    /// read-back, so it carries nothing and files no `event-accept` card. The next run that
+    /// fetches the feed does both.
+    #[test]
+    fn a_rank_on_the_roster_alone_carries_nothing() {
+        let vault = events_vault("t4-roster-run", "");
+        let feed = lx_feed(vec![
+            lx(77, "Weekly meeting", &[
+                (1, "2026-10-06T19:00:00-05:00", "2026-10-06T21:00:00-05:00"),
+                (3, "2026-10-20T19:00:00-05:00", "2026-10-20T21:00:00-05:00"),
+            ]),
+            lx(40, "Transfer orientation", &[(1, "2026-10-08T10:00:00-05:00", "2026-10-08T12:00:00-05:00")]),
+        ]);
+        let events = lx_events(&feed);
+        let meeting = [uid_of(&events, "localist:77:1")];
+        archived_card(&vault, "event-weekly-meeting-2026-10-06.md", "event-accept", "executed", Some("obligation"), &meeting, true, ACCEPT_ID);
+        // A later instance a model judged before the answer, and an obligation nobody asked about:
+        // both in the roster's relevant section, as an earlier run left it.
+        for uid in ["localist:77:3", "localist:40:1"] {
+            let event = uid_of(&events, uid);
+            crate::eventledger::record_judged_verdict(&vault, uid, &event.title, EV_DAY, "obligation", "Required.", Some(EV_JID)).unwrap();
+        }
+        let roster = vault.join("state").join("events.md");
+        let ledger = crate::eventledger::load_ledger(&vault, None);
+        let config = crate::events::EventsConfig::default();
+        write_roster(&roster, &events, &ledger, &config, EV_DAY, &[]).unwrap();
+        assert_eq!(read_roster(&roster).iter().map(|e| e.uid.as_str()).collect::<Vec<_>>(), ["localist:40:1", "localist:77:3"]);
+        let before = ledger_bytes(&vault);
+
+        rank_events(&vault, EV_TODAY, None);
+        assert_eq!(booked_events(&vault), Vec::<(String, String)>::new(), "no commitment");
+        assert!(ledger_bytes(&vault) == before, "no ledger line");
+        assert_eq!(md_names(&vault.join("approvals"), "event"), Vec::<String>::new(), "no event-accept card");
+
+        rank_events(&vault, EV_TODAY, Some(&feed));
+        assert_eq!(booked_events(&vault), [("localist:77:3".to_string(), "hard".to_string())]);
+        let later = uid_of(&events, "localist:77:3");
+        assert!(ledger_lines_for(&vault, &later.uid).contains(&carry_line(later, "obligation", ACCEPT_ID)));
+        let cards = md_names(&vault.join("approvals"), "event");
+        assert_eq!(cards, ["event-transfer-orientation-2026-10-08.md"], "the obligation's card, now from the feed");
+        assert_eq!(meta_str(&vault.join("approvals").join(&cards[0]), "kind"), "event-accept");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// A pending `kind: task` proposal in `approvals/`, stamped `proposed_at` (and first proposed)
+    /// on `day`.
+    fn task_proposal(vault: &Path, stem: &str, day: &str) {
+        std::fs::create_dir_all(vault.join("approvals")).unwrap();
+        let text = format!(
+            "---\ntype: approval\nkind: task\ntitle: t\nstatus: pending\nproposed_at: {day}\n\
+             first_proposed_at: {day}\nexpires: 2026-10-30\nsnooze_until: null\n---\n\nb\n"
+        );
+        pystr::write_text(&vault.join("approvals").join(format!("{stem}.md")), &text).unwrap();
+    }
+
+    fn pending_count(vault: &Path) -> serde_json::Value {
+        let records = run_records(vault);
+        step_of(records.last().unwrap(), "approvals")["counts"]["pending"].clone()
+    }
+
+    /// `(name, status)` of every note in `approvals/`.
+    fn statuses(vault: &Path) -> Vec<(String, String)> {
+        let names = md_names(&vault.join("approvals"), "");
+        names.iter().map(|n| (n.clone(), meta_str(&vault.join("approvals").join(n), "status"))).collect()
+    }
+
+    /// Spec test 18: obligations, then the `unsure` checks, then opportunities (D7), each sized to
+    /// what the ones before it left of the day's budget (P10), with the digest off under the switch.
+    #[test]
+    fn rank_files_the_right_event_cards_within_the_budget() {
+        let vault = events_vault("t4-budget", "event_cards: true\n");
+        pystr::write_text(&vault.join("config").join("planning.yaml"), "daily_approval_budget: 5\n").unwrap();
+        // Seven same-day proposals against a budget of 5, and one from the day before.
+        for i in 0..7 {
+            task_proposal(&vault, &format!("task-{i}"), EV_TODAY);
+        }
+        task_proposal(&vault, "task-old", "2026-09-30");
+        let at = |day: i8, from: i8, to: i8| (format!("2026-10-{day:02}T{from:02}:00:00-05:00"), format!("2026-10-{day:02}T{to:02}:00:00-05:00"));
+        let (s1, s2, s3, o, u, p) = (at(6, 18, 19), at(9, 18, 19), at(13, 18, 19), at(8, 10, 12), at(7, 10, 15), at(10, 19, 21));
+        let feed = lx_feed(vec![
+            lx(77, "Study group", &[(1, &s1.0, &s1.1), (2, &s2.0, &s2.1), (3, &s3.0, &s3.1)]),
+            lx(40, "Transfer orientation", &[(1, &o.0, &o.1)]),
+            lx(50, "Career fair", &[(1, &u.0, &u.1)]),
+            lx(60, "Film night", &[(1, &p.0, &p.1)]),
+        ]);
+        for event in lx_events(&feed) {
+            let verdict = match event.series_uid.as_str() {
+                "localist:50" => "unsure",
+                "localist:60" => "opportunity",
+                _ => "obligation",
+            };
+            crate::eventledger::record_judged_verdict(&vault, &event.uid, &event.title, EV_DAY, verdict, "Why.", Some(EV_JID)).unwrap();
+        }
+
+        // Day 1: the same-day overflow is snoozed, the day before's is not, and nothing is left.
+        rank_events(&vault, EV_TODAY, Some(&feed));
+        let snoozed: Vec<String> = statuses(&vault).into_iter().filter(|(_, s)| s == "snoozed").map(|(n, _)| n).collect();
+        assert_eq!(snoozed, ["task-5.md", "task-6.md"], "only same-day overflow");
+        assert_eq!(meta_str(&vault.join("approvals").join("task-old.md"), "status"), "pending");
+        assert_eq!(md_names(&vault.join("approvals"), "event"), Vec::<String>::new(), "the budget is spent");
+        assert_eq!(count_proposals_created(&vault, EV_DAY), 5);
+
+        // Day 2: the two woken proposals charge today, leaving 3: both obligation cards (the
+        // series grouped on one), then the check; the opportunity waits, and no digest is filed.
+        let day2 = Date::constant(2026, 10, 2);
+        rank_events(&vault, "2026-10-02", Some(&feed));
+        let cards = md_names(&vault.join("approvals"), "event");
+        let filed = [
+            "event-check-career-fair-2026-10-07.md",
+            "event-study-group-2026-10-06.md",
+            "event-transfer-orientation-2026-10-08.md",
+        ];
+        assert_eq!(cards, filed);
+        let card = |name: &str| vault.join("approvals").join(name);
+        for name in &filed[1..] {
+            assert_eq!(meta_str(&card(name), "verdict"), "obligation", "{name}");
+        }
+        let meta = crate::ids::read_meta(&card(filed[1])).unwrap();
+        let listed = crate::eventemit::card_event_uids(&meta);
+        assert_eq!(listed, ["localist:77:1", "localist:77:2", "localist:77:3"], "one card for the series");
+        assert_eq!(pending_count(&vault), serde_json::json!(8 + 3), "8 seeded, raised by the 3 cards");
+        assert_eq!(count_proposals_created(&vault, day2), 5, "the budget is respected");
+        assert!(statuses(&vault).iter().all(|(_, s)| s == "pending"), "nothing over the budget to snooze");
+
+        // The same day again: nothing new, nothing snoozed.
+        rank_events(&vault, "2026-10-02", Some(&feed));
+        assert_eq!(md_names(&vault.join("approvals"), "event"), filed);
+        assert!(statuses(&vault).iter().all(|(_, s)| s == "pending"), "the cards were never overflow");
+
+        // Day 3: yesterday's cards are not same-day, so nothing is snoozed; the opportunity is filed.
+        rank_events(&vault, "2026-10-03", Some(&feed));
+        let opportunity = "event-film-night-2026-10-10.md";
+        let mut expected: Vec<&str> = filed.to_vec();
+        expected.push(opportunity);
+        expected.sort();
+        assert_eq!(md_names(&vault.join("approvals"), "event"), expected);
+        assert_eq!(meta_str(&card(opportunity), "verdict"), "opportunity");
+        assert!(statuses(&vault).iter().all(|(_, s)| s == "pending"));
+        assert_eq!(pending_count(&vault), serde_json::json!(8 + 3 + 1));
+        assert_eq!(md_names(&vault.join("approvals"), "events-digest-"), Vec::<String>::new(), "D6: no digest");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// An accepted `event-accept` series and one `rank` that carries its later instance. Returns
+    /// the vault, a `seen_at` stamped just before that run, and the run's outcome.
+    fn carried_once(name: &str) -> (PathBuf, String, RunOutcome) {
+        let vault = events_vault(name, "");
+        let feed = lx_feed(vec![lx(77, "Weekly meeting", &[
+            (1, "2026-10-06T19:00:00-05:00", "2026-10-06T21:00:00-05:00"),
+            (2, "2026-10-13T19:00:00-05:00", "2026-10-13T21:00:00-05:00"),
+        ])]);
+        let events = lx_events(&feed);
+        let listed = [uid_of(&events, "localist:77:1")];
+        archived_card(&vault, "event-weekly-meeting-2026-10-06.md", "event-accept", "executed", Some("obligation"), &listed, true, ACCEPT_ID);
+        let earlier = Timestamp::now() - jiff::SignedDuration::from_millis(1);
+        let seen_at = crate::journal::now_ts(Some(earlier));
+        let outcome = rank_events(&vault, EV_TODAY, Some(&feed));
+        assert_eq!(booked_events(&vault), [("localist:77:2".to_string(), "hard".to_string())], "the run carried it");
+        (vault, seen_at, outcome)
+    }
+
+    /// Spec test 20b: the read model lists the carry, a journal `create` like any other, when
+    /// the page last looked before the carrying run started.
+    #[test]
+    fn the_carry_is_listed_in_the_delta_with_a_seen_at() {
+        let (vault, seen_at, outcome) = carried_once("t4-delta-seen");
+        let start = run_records(&vault).into_iter().find(|r| r["phase"] == "start").unwrap();
+        assert!(seen_at.as_str() < start["ts"].as_str().unwrap(), "{seen_at} is before the run's start");
+        let note = format!("commitments/{}", md_names(&vault.join(crate::commitments::FOLDER), "")[0]);
+        let delta = crate::surface::delta(&vault, EV_DAY.at(8, 0, 0, 0), Some(&seen_at), &mut Journal::new(&vault));
+        assert_eq!(delta.since_kind, "seen");
+        assert!(delta.summary.contains("1 create by agent"), "{}", delta.summary);
+        let creates: Vec<&crate::surface::DeltaRecord> = delta.records.iter().filter(|r| r.op == "create").collect();
+        assert_eq!(creates.len(), 1, "{:?}", delta.records);
+        assert_eq!(creates[0].path, note, "names the carried commitment");
+        assert_eq!(creates[0].run_id.as_deref(), Some(outcome.run_id.as_str()), "and the run id");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Spec test 20c: pins today's `delta`. With no `seen_at` it diffs against the newest run's
+    /// `end`, so the carrying run's own `create` is not listed. If this fails, `delta` changed: it
+    /// goes to Quinn, and nobody edits `delta` to pass 20b.
+    #[test]
+    fn the_delta_fallback_is_pinned_without_a_seen_at() {
+        let (vault, _, outcome) = carried_once("t4-delta-run");
+        let end = run_records(&vault).into_iter().find(|r| r["phase"] == "end").unwrap();
+        assert_eq!(end["run_id"].as_str(), Some(outcome.run_id.as_str()), "the carrying run is the newest");
+        let delta = crate::surface::delta(&vault, EV_DAY.at(8, 0, 0, 0), None, &mut Journal::new(&vault));
+        assert_eq!(delta.since.as_deref(), end["ts"].as_str(), "since is that run's end");
+        assert_eq!(delta.since_kind, "run");
+        assert!(!delta.records.iter().any(|r| r.op == "create"), "{:?}", delta.records);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Spec test 22: `rank` files an obligation as an ordinary deck card, its `why` the card's
+    /// first paragraph; the student's Accept, once settled, draws the commitment on the event's day.
+    #[test]
+    fn an_event_card_is_an_ordinary_deck_card_and_accept_draws_the_block() {
+        let vault = events_vault("t4-deck", "");
+        let feed = lx_feed(vec![lx(40, "Transfer orientation", &[(1, "2026-10-08T10:00:00-05:00", "2026-10-08T12:00:00-05:00")])]);
+        let why = "Every transfer student must attend.";
+        crate::eventledger::record_judged_verdict(&vault, "localist:40:1", "Transfer orientation", EV_DAY, "obligation", why, Some(EV_JID)).unwrap();
+        rank_events(&vault, EV_TODAY, Some(&feed));
+
+        let read = crate::surface::read_approvals(&vault, EV_DAY);
+        assert_eq!(read.cards.len(), 1, "{:?}", read.cards);
+        let card = &read.cards[0];
+        assert_eq!((card.kind.as_str(), card.source_uid.as_deref()), ("event-accept", Some("localist:40:1")));
+        assert_eq!(card.why, format!("**Knowlu thinks this is required of you.** {why}"));
+        assert_eq!(read.pending, 1);
+        let day = Date::constant(2026, 10, 8);
+        let drawn = |vault: &Path| -> Vec<(String, String, String)> {
+            let l = crate::surface::load(vault, day);
+            let blocks = crate::surface::the_day(&l, day).blocks;
+            blocks.into_iter().filter(|b| b.label == "Transfer orientation").map(|b| (b.start, b.end, b.kind)).collect()
+        };
+        assert_eq!(drawn(&vault), Vec::<(String, String, String)>::new(), "nothing is drawn before the Accept");
+
+        // The student's Accept, as `decide` writes it, then the settlement in the next `rank`.
+        let student = WriteContext::new(crate::journal::read_human_actor(&vault).unwrap(), "dashboard");
+        let rel = format!("approvals/{}.md", card.slug);
+        let literals = [("status".to_string(), "approved".to_string())];
+        write_literals(&vault, &rel, &literals, &student, &mut Journal::new(&vault), &WriteOpts::default()).unwrap();
+        rank_events(&vault, EV_TODAY, Some(&feed));
+        assert_eq!(booked_events(&vault), [("localist:40:1".to_string(), "hard".to_string())]);
+        let block = ("10:00".to_string(), "12:00".to_string(), "busy".to_string());
+        assert_eq!(drawn(&vault), [block], "the commitment's block on the event's day");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
     // --- run records ------------------------------------------------------------------------
 
     #[test]
@@ -3575,6 +4136,71 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
             // A whitelist, not a blacklist against the literal endpoint text (see the doc comment
             // above): every request this run made was the calendar transport and nothing else.
             assert!(r.contains("/ingest-calendar"), "unexpected request, not the calendar transport: {r}");
+        }
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// P17 (T4d) at `rank` level: once the student removes an accepted lane date, no `rank` brings
+    /// it back, from the feed or from the roster alone: a carried date of one series and a
+    /// card-listed date of a second.
+    #[test]
+    fn rank_never_brings_a_removed_date_back() {
+        const OPEN_DAY_ID: &str = "appr_8888888888";
+        let vault = events_vault("t4d-removed", "event_cards: true\n");
+        let feed = lx_feed(vec![
+            lx(77, "Weekly meeting", &[
+                (1, "2026-10-06T19:00:00-05:00", "2026-10-06T21:00:00-05:00"),
+                (3, "2026-10-20T00:00:00-05:00", "2026-10-22T00:00:00-05:00"),
+            ]),
+            lx(88, "Open day", &[(1, "2026-10-09T00:00:00-05:00", "2026-10-10T00:00:00-05:00")]),
+        ]);
+        let events = lx_events(&feed);
+        let meeting = [uid_of(&events, "localist:77:1")];
+        archived_card(&vault, "event-weekly-meeting-2026-10-06.md", "event-accept", "executed", Some("obligation"), &meeting, true, ACCEPT_ID);
+        // The second series' one date is on its executed card's `instances:`, judged first.
+        let open_day = uid_of(&events, "localist:88:1");
+        let judged = Date::constant(2026, 9, 24);
+        crate::eventledger::record_judged_verdict(&vault, &open_day.uid, &open_day.title, judged, "obligation", "Required.", Some(EV_JID)).unwrap();
+        archived_card(&vault, "event-open-day-2026-10-09.md", "event-accept", "executed", Some("obligation"), &[open_day], true, OPEN_DAY_ID);
+
+        rank_events(&vault, EV_TODAY, Some(&feed));
+        let carried = uid_of(&events, "localist:77:3");
+        assert_eq!(ledger_lines_for(&vault, &carried.uid), [carry_line(carried, "obligation", ACCEPT_ID)]);
+        let days: [(&crate::events::DiscoveredEvent, &[i8]); 2] = [(carried, &[20, 21]), (open_day, &[9])];
+        let drawn = |event: &crate::events::DiscoveredEvent, day: i8| {
+            let day = Date::constant(2026, 10, day);
+            let the_day = crate::surface::the_day(&crate::surface::load(&vault, day), day);
+            the_day.all_day_uids.contains(&Some(event.uid.clone())) || the_day.all_day.contains(&event.title)
+        };
+        let now = EV_DAY.at(8, 0, 0, 0);
+        let listed = || -> Vec<String> { crate::surface::coming_up(&vault, EV_DAY, now).into_iter().map(|e| e.uid).collect() };
+        for (event, on) in days {
+            assert!(on.iter().all(|&day| drawn(event, day)), "{} is drawn before the removal", event.uid);
+            assert!(listed().contains(&event.uid), "{} is listed before the removal", event.uid);
+        }
+
+        let student = WriteContext::new(crate::journal::read_human_actor(&vault).unwrap(), "dashboard");
+        for event in [carried, open_day] {
+            assert_eq!(crate::eventcarry::remove_lane_date(&vault, &event.uid, EV_DAY, &student), Ok(true), "{}", event.uid);
+        }
+        let removed = ledger_bytes(&vault);
+        for (run, feed) in [("a second rank", Some(feed.as_str())), ("a third rank", Some(feed.as_str())), ("a rank on the roster alone", None)] {
+            rank_events(&vault, EV_TODAY, feed);
+            assert!(ledger_bytes(&vault) == removed, "{run} changed the ledger's bytes");
+        }
+        let declined = |uid: &str| format!("- {uid} · declined {EV_TODAY}");
+        let carried_lines = [carry_line(carried, "obligation", ACCEPT_ID), declined(&carried.uid)];
+        assert_eq!(ledger_lines_for(&vault, &carried.uid), carried_lines, "no second carry line, answer or decline");
+        let open_lines = ledger_lines_for(&vault, &open_day.uid);
+        assert_eq!(open_lines.len(), 2, "the judged line, then the one decline: {open_lines:?}");
+        assert_eq!(open_lines[1], declined(&open_day.uid));
+        for name in md_names(&vault.join("approvals"), "") {
+            let text = pystr::read_text(&vault.join("approvals").join(&name)).unwrap();
+            assert!(!text.contains(&carried.uid) && !text.contains(&open_day.uid), "approvals/{name} names a removed date");
+        }
+        for (event, on) in days {
+            assert!(on.iter().all(|&day| !drawn(event, day)), "{} is still drawn", event.uid);
+            assert!(!listed().contains(&event.uid), "{} is still listed", event.uid);
         }
         let _ = std::fs::remove_dir_all(&vault);
     }

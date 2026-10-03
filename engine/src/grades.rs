@@ -447,6 +447,10 @@ fn error_kind(e: &WriteError) -> &'static str {
         WriteError::Provenance(_) => "block-style",
         WriteError::Io(_) => "io",
         WriteError::Actor(_) => "actor",
+        // M2's body and list writes; grades makes neither, so these arms only keep the match whole.
+        WriteError::Conflict(_) => "conflict",
+        WriteError::Body(_) => "body",
+        WriteError::MultiLine(_) => "multi-line",
     }
 }
 

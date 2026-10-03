@@ -248,15 +248,35 @@
     bindTracks(host);
   }
 
+  var pendingLaneRemovals = {};
   function renderTheDay(state) {
     var d = state.the_day;
     EL("dayopen").textContent = fmtH(d.open_hours) + " open";
-    EL("allday").innerHTML = d.all_day.map(function (t) { return "<div>(all day) " + h(t) + "</div>"; }).join("");
+    // P17: an accepted lane date carries its uid in `all_day_uids` (same index); a pending removal
+    // is skipped while its Undo toast shows.
+    var uids = d.all_day_uids || [];
+    EL("allday").innerHTML = d.all_day.map(function (t, i) {
+      var uid = uids[i];
+      if (uid && pendingLaneRemovals[uid]) { return ""; }
+      return "<div>(all day) " + h(t) + (uid ? ' <button class="b" type="button" data-lane-remove="' + h(uid) + '" data-title="' + h(t) + '">Remove from my day</button>' : "") + "</div>";
+    }).join("");
     EL("theday").innerHTML = d.blocks.map(function (b) {
       var takes = b.takes.map(function (t) { return '<span class="sl"><span>' + h(t.title) + "</span><span>" + h(fmtH(t.hours)) + (t.of_hours - t.hours > 0.005 ? " of " + h(fmtH(t.of_hours)) : "") + "</span></span>"; }).join("");
       return '<div class="blk ' + h(b.kind) + '"><span class="t">' + h(b.start) + "–" + h(b.end) + '</span><span class="w">' + h(b.label) + '</span><span class="h">' + h(fmtH(b.hours)) + "</span>" + takes + "</div>";
     }).join("") + (d.empty_text ? '<div class="empty">' + h(d.empty_text) + "</div>" : "");
     EL("commitments").innerHTML = d.commitments.map(function (c) { return '<div class="commit"><span>' + h(c.name) + " · recurring</span><span>" + h(fmtH(c.hours)) + "</span></div>"; }).join("");
+  }
+
+  // Spec §6.3: an event card reads Accept and Decline; the verdicts sent are unchanged.
+  function verdictLabels(kind) {
+    if (kind === "event-accept" || kind === "event-check") { return { pri: "Accept", sec: "Decline" }; }
+    return { pri: "Approve", sec: "Reject" };
+  }
+
+  // Gmail spec D15: a card from Gmail says so (its source_uid prefix, the same key the task chip
+  // reads) beside the model's reason; never the sender, which the card does not carry.
+  function sourceLabel(c) {
+    return c.source_uid && String(c.source_uid).indexOf("gmail:") === 0 ? ' <span class="src">from Gmail</span>' : "";
   }
 
   function renderDeck(state) {
@@ -304,9 +324,9 @@
     var tomorrow = state.ahead.buckets[1].date;
     d.cards.slice(0, 1).forEach(function (c) {
       // Q11-b: a commitment-ask card is answered in the Decisions view's form, not approved here.
-      var approve = c.kind === "commitment-ask" ? '<button class="b pri y" type="button" data-answer-in>Answer&hellip;</button>' : '<button class="b pri y" data-verdict="approved">Approve</button>';
-      deck.innerHTML += '<div class="card" data-id="' + h(c.id) + '" data-kind="approval"><button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button><div class="t">' + h(c.title) + '</div><div class="w">' + h(c.why || c.kind) + "</div>" +
-        '<div class="nb"><input type="text" placeholder="Note (optional)"></div><div class="acts">' + approve + '<button class="b n" data-verdict="rejected">Reject</button><button class="b" data-verdict="snoozed">&hellip;</button><input type="date" hidden value="' + h(tomorrow) + '"></div></div>';
+      var approve = c.kind === "commitment-ask" ? '<button class="b pri y" type="button" data-answer-in>Answer&hellip;</button>' : '<button class="b pri y" data-verdict="approved">' + verdictLabels(c.kind).pri + '</button>';
+      deck.innerHTML += '<div class="card" data-id="' + h(c.id) + '" data-kind="approval"><button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button><div class="t">' + h(c.title) + '</div><div class="w">' + h(c.why || c.kind) + sourceLabel(c) + "</div>" +
+        '<div class="nb"><input type="text" placeholder="Note (optional)"></div><div class="acts">' + approve + '<button class="b n" data-verdict="rejected">' + verdictLabels(c.kind).sec + '</button><button class="b" data-verdict="snoozed">&hellip;</button><input type="date" hidden value="' + h(tomorrow) + '"></div></div>';
     });
     var newCard = deck.querySelector(".card[data-id]");
     if (newCard && prevId && newCard.getAttribute("data-id") === prevId) {
@@ -331,8 +351,23 @@
   function renderComingUp(state) {
     var cu = state.coming_up;
     EL("cu-n").textContent = cu.length ? cu.length + " accepted" : "";
-    EL("cu").innerHTML = cu.length ? cu.map(function (e) { return '<div class="ln"><span class="k lp">' + h(e.when) + "</span><span>" + h(e.title) + (e.location ? " · " + h(e.location) : "") + '</span><span class="rt">' + h(e.organizer) + "</span></div>"; }).join("") : '<div class="empty">' + h(state.texts.coming_up) + "</div>";
+    EL("cu").innerHTML = cu.length ? cu.map(function (e) { return '<div class="ln"><span class="k lp">' + h(e.when) + "</span><span>" + h(e.title) + (e.location ? " · " + h(e.location) : "") + (e.provenance ? ' <span class="k lp">' + h(e.provenance) + "</span>" : (e.accepted ? ' <span class="k lp">' + h("Accepted") + "</span>" : "")) + '</span><span class="rt">' + h(e.organizer) + "</span></div>"; }).join("") : '<div class="empty">' + h(state.texts.coming_up) + "</div>";
+    renderNotShown();
   }
+
+  // M2 T7: Not shown (N) under Coming up, read-only, from dropped_events (events the engine dropped, each with its reason).
+  function renderNotShown() {
+    var box = EL("cu-ns");
+    return invoke("dropped_events", {}).then(function (r) {
+      var list = (r && r.ok && r.dropped) || null;
+      if (!r || !r.ok) { box.innerHTML = '<div class="empty">Not shown is unavailable right now.</div>'; return; }
+      if (!list || !list.length) { box.innerHTML = ""; return; }
+      box.innerHTML = '<details class="notshown"><summary>Not shown (' + list.length + ")</summary>" + list.map(function (d) {
+        return '<div class="ln"><span class="k lp">' + h(d.date) + "</span><span>" + h(d.title) + '</span><span class="rt">' + h(d.reason) + "</span></div>";
+      }).join("") + "</details>";
+    }).catch(function () { box.innerHTML = '<div class="empty">Not shown is unavailable right now.</div>'; });
+  }
+  // M2 T7 end
 
   function renderGoodToKnow(state) {
     var g = state.good_to_know;
@@ -500,9 +535,9 @@
         return '<div class="row dec" data-id="' + h(c.id) + '" data-kind="approval">' +
           '<button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button>' +
           '<div class="ttl"><span class="a">' + h(c.title) + '</span><span class="meta">' + h(meta.join(" · ")) + "</span>" +
-          '<div class="why">' + h(c.why) + "</div>" + changes + "</div>" +
+          '<div class="why">' + h(c.why) + sourceLabel(c) + "</div>" + changes + "</div>" +
           '<div class="acts"><input type="text" class="dnote" placeholder="Note (optional)" value="' + h(notes[c.id] || "") + '">' +
-          '<button class="b pri y" data-verdict="approved">Approve</button><button class="b n" data-verdict="rejected">Reject</button>' +
+          '<button class="b pri y" data-verdict="approved">' + verdictLabels(c.kind).pri + '</button><button class="b n" data-verdict="rejected">' + verdictLabels(c.kind).sec + '</button>' +
           '<button class="b" data-verdict="snoozed" data-snooze="' + h(tomorrow) + '">Snooze</button></div></div>';
       }).join("") + (d.empty_text && !d.cards.length ? '<div class="empty">' + h(d.empty_text) + "</div>" : "");
     });
@@ -984,6 +1019,7 @@
   }
   // Read-only: the breakdown never edits, creates or deletes a note.
   function openGradesDrawer(slug) {
+    dropSavedToast();
     var d = EL("drawer"), c = null, groups = [], html;
     GRADES.list.forEach(function (x) { if (x.course === slug) { c = x; } });
     if (!c) { return; }
@@ -1000,11 +1036,13 @@
     });
     d.innerHTML = html + gradesFooterHtml(c);
     d.hidden = false; d.removeAttribute("data-id"); d.setAttribute("data-kind", "grades"); d.setAttribute("data-grades-open", c.course);
-    d.querySelector(".close").addEventListener("click", function () { d.hidden = true; d.removeAttribute("data-grades-open"); });
+    d.querySelector(".close").addEventListener("click", function () { dropSavedToast(); d.hidden = true; d.removeAttribute("data-grades-open"); });
   }
+  // M2 9.1: a background repaint never closes, rebuilds or refills an open body editor.
+  function editorOpen() { return !!document.querySelector("#drawer [data-open-editor]"); }
   function refreshGradesDrawer() {
     var d = EL("drawer"), open = d && !d.hidden && d.getAttribute("data-kind") === "grades" ? d.getAttribute("data-grades-open") : null;
-    if (open) { openGradesDrawer(open); }
+    if (open && !editorOpen()) { openGradesDrawer(open); }
   }
   function gradesSay(text) { GRADES.note = text || ""; drawGrades(); refreshGradesDrawer(); }
   // A capture's answer is a named outcome, never an error line; the strip re-reads its own state after
@@ -1220,6 +1258,7 @@
   var DRAWER_RO = { id: 1, source_uid: 1, also_uids: 1, judgment: 1 };
 
   function openDrawer(id) {
+    dropSavedToast();
     invoke("note", { id: id }).then(function (env) {
       var d = EL("drawer");
       if (!env.ok) { d.innerHTML = '<button class="close">&times;</button><h2>Not found</h2><p>' + h(env.error) + "</p>"; d.hidden = false; d.removeAttribute("data-id"); d.removeAttribute("data-grades-open"); return; }
@@ -1231,14 +1270,115 @@
       });
       var hist = (n.history || []).map(function (r) { return "<div>" + h(r.ts.slice(0, 16).replace("T", " ")) + " · " + h(r.text) + "</div>"; }).join("") || "<div>no journal history</div>";
       clearStaleEditing(d);
-      d.innerHTML = '<button class="close">&times;</button><h2>' + h(title) + '</h2><dl data-id="' + h(id) + '" data-kind="' + h(n.folder) + '">' + dl + "</dl>" + (n.body ? "<pre>" + h(n.body) + "</pre>" : "") +
+      d.innerHTML = '<button class="close">&times;</button><h2>' + h(title) + '</h2><dl data-id="' + h(id) + '" data-kind="' + h(n.folder) + '">' + dl + "</dl>" + bodyViewHtml(n) +
         '<button class="b crit" data-del="' + h(id) + '" data-title="' + h(title) + '">Delete&hellip;</button>' +
         '<div class="hist"><b>history</b>' + hist + "</div>";
       // The note's own kind (its folder — tasks/approvals/issues/info/courses) rides on the
       // outer panel too, since it also carries data-id and is what the observer actually sees
       // fill the viewport.
       d.hidden = false; d.setAttribute("data-id", id); d.setAttribute("data-kind", n.folder || ""); d.removeAttribute("data-grades-open");
-      d.querySelector(".close").addEventListener("click", function () { d.hidden = true; });
+      d.querySelector(".close").addEventListener("click", function () { dropSavedToast(); d.hidden = true; });
+      var be = d.querySelector("[data-body-edit]");
+      if (be) { be.addEventListener("click", function () { openBodyEditor(d, id, n.body || ""); }); }
+    });
+  }
+
+  // M2 9.1: only a note in tasks/ or courses/ has an editable body. The text reaches the DOM as
+  // escaped text (<pre>) or a textarea's value, never as markup, and never reaches a ui_event.
+  var BODY_FOLDERS = { tasks: 1, courses: 1 };
+  function bodyViewHtml(n) {
+    var pre = n.body ? "<pre>" + h(n.body) + "</pre>" : "";
+    if (!BODY_FOLDERS[n.folder]) { return pre; }
+    return '<div class="bodyed">' + pre + '<button class="b" data-body-edit>' + (n.body ? "Edit" : "Add notes") + "</button></div>";
+  }
+  function openBodyEditor(d, id, expected) {
+    var host = d.querySelector(".bodyed"); if (!host) { return; }
+    host.setAttribute("data-open-editor", "body");
+    host.innerHTML = '<textarea class="bodyta" rows="10"></textarea><div class="bodybtns"><button class="b" data-body-save>Save</button> <button class="b" data-body-cancel>Cancel</button></div>';
+    var ta = host.querySelector("textarea"), sv = host.querySelector("[data-body-save]"), cn = host.querySelector("[data-body-cancel]");
+    ta.value = expected; ta.focus();
+    ev("edit_started", id, "body");
+    function lock(on) { ta.disabled = on; sv.disabled = on; cn.disabled = on; }
+    function conflictState() {
+      if (host.querySelector("[data-body-conflict]")) { return; }
+      var c = document.createElement("div"); c.setAttribute("data-body-conflict", ""); c.className = "bodyconf";
+      c.innerHTML = "<p>This note changed since you opened it. Your text is still here. Copy it, then reload to see the new version.</p>" +
+        '<button class="b" data-body-copy>Copy</button> <button class="b" data-body-reload>Reload</button>';
+      host.appendChild(c);
+      c.querySelector("[data-body-copy]").addEventListener("click", function () { invoke("copy_text", { text: ta.value }).catch(function () {}); });
+      c.querySelector("[data-body-reload]").addEventListener("click", function () {
+        if (ta.value !== expected && !confirm("Reload and discard your text?")) { return; }
+        ev("edit_cancelled", id, "body"); openDrawer(id);
+      });
+    }
+    function save() {
+      lock(true);
+      var before = expected;
+      invoke("set_body", { view: stateView(), id: id, expected: expected, body: ta.value }).then(function (env) {
+        if (env.conflict) { applyEnvelope(env, function () {}); lock(false); conflictState(); return; }
+        if (applyEnvelope(env, function (m) { lock(false); showRefusal(null, m, id, "body"); })) { ev("edit_committed", id, "body"); openDrawer(id); offerBodyUndo(id, before); }
+      }).catch(function (e) { lock(false); showRefusal(null, "refused: " + e, id, "body"); });
+    }
+    function cancel() { ev("edit_cancelled", id, "body"); openDrawer(id); }
+    sv.addEventListener("click", save); cn.addEventListener("click", cancel);
+    ta.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
+      else if (e.key === "Escape") { e.preventDefault(); cancel(); }
+    });
+  }
+
+  // M2 D8: Saved - Undo for 10 seconds. Undo is a second set_body whose `expected` is the body of
+  // the re-read note (never the textarea) and whose body is the text loaded before the edit.
+  // The toast belongs to the drawer it was raised from: closing it or opening another note drops it.
+  function dropSavedToast() {
+    Array.prototype.forEach.call(document.querySelectorAll(".savedtoast"), function (x) { x.remove(); });
+  }
+  function offerBodyUndo(id, before) {
+    invoke("note", { id: id }).then(function (env) {
+      if (!env.ok || !env.note) { return; }
+      var dr = EL("drawer");
+      if (!dr || dr.hidden || dr.getAttribute("data-id") !== id) { return; }
+      dropSavedToast();
+      var t = document.createElement("div"); t.className = "savedtoast";
+      t.innerHTML = '<span>Saved</span> &middot; <button class="b" data-body-undo>Undo</button>';
+      document.body.appendChild(t);
+      var gone = setTimeout(function () { t.remove(); }, 10000);
+      t.querySelector("[data-body-undo]").addEventListener("click", function () {
+        clearTimeout(gone); t.querySelector("[data-body-undo]").disabled = true;
+        invoke("set_body", { view: stateView(), id: id, expected: env.note.body || "", body: before }).then(function (r) {
+          if (applyEnvelope(r, function (m) {
+            showRefusal(null, m, id, "body");
+            t.innerHTML = '<button class="b" data-body-prev>Copy previous text</button>';
+            t.querySelector("[data-body-prev]").addEventListener("click", function () { invoke("copy_text", { text: before }).catch(function () {}); });
+            setTimeout(function () { t.remove(); }, 10000);
+          })) { t.remove(); ev("edit_committed", id, "body"); var d = EL("drawer"); if (d && d.getAttribute("data-id") === id && !editorOpen()) { openDrawer(id); } }
+        }).catch(function () { t.remove(); });
+      });
+    }).catch(function () {});
+  }
+
+  // P17, PQ6 (b): "Remove from my day" acts at once in the UI; the engine call waits for the
+  // 10-second Removed - Undo toast to close. Undo cancels it, so nothing is sent and the date returns.
+  function removeFromMyDay(uid, title) {
+    if (pendingLaneRemovals[uid]) { return; }
+    pendingLaneRemovals[uid] = true;
+    if (current.state) { renderTheDay(current.state); }
+    var t = document.createElement("div"); t.className = "lanetoast";
+    t.style.bottom = "calc(var(--s4) + " + (document.querySelectorAll(".lanetoast").length * 44) + "px)";
+    t.innerHTML = '<span>Removed</span> &middot; <button class="b" data-lane-undo>Undo</button>';
+    document.body.appendChild(t);
+    var timer = setTimeout(function () {
+      t.remove();
+      invoke("remove_lane_date", { view: stateView(), uid: uid }).then(function (env) {
+        delete pendingLaneRemovals[uid];
+        if (current.state) { renderTheDay(current.state); }
+        applyEnvelope(env, function (m) { showRefusal(null, m); });
+      }).catch(function () { delete pendingLaneRemovals[uid]; if (current.state) { renderTheDay(current.state); } });
+    }, 10000);
+    t.querySelector("[data-lane-undo]").addEventListener("click", function () {
+      clearTimeout(timer); t.remove();
+      delete pendingLaneRemovals[uid];
+      if (current.state) { renderTheDay(current.state); }
     });
   }
 
@@ -1462,7 +1602,7 @@
 
   function confirmDelete(id, title) {
     if (!window.confirm("Archive \"" + title + "\"? Nothing is deleted — it moves to archive/ and shows in CLOSED THIS WEEK.")) { return; }
-    invoke("delete_note", { view: stateView(), id: id }).then(function (env) { if (applyEnvelope(env)) { EL("drawer").hidden = true; } });
+    invoke("delete_note", { view: stateView(), id: id }).then(function (env) { if (applyEnvelope(env)) { dropSavedToast(); EL("drawer").hidden = true; } });
   }
 
   // ----- the deck: approve/reject/snooze (Knowlu plan 1, Task 14). One click commits — the
@@ -1612,6 +1752,7 @@
   document.addEventListener("click", function (e) {
     var a = e.target.closest("#navlinks a"); if (a) { e.preventDefault(); location.hash = a.getAttribute("href"); return; }
     var nt = e.target.closest("#newtask"); if (nt) { renderNewTaskRow(); return; }
+    var rml = e.target.closest("[data-lane-remove]"); if (rml) { removeFromMyDay(rml.getAttribute("data-lane-remove"), rml.getAttribute("data-title")); return; }
     var del = e.target.closest("[data-del]"); if (del) { confirmDelete(del.getAttribute("data-del"), del.getAttribute("data-title")); return; }
     // [data-flag]/[data-close-info] route before the .row[data-id] drawer branch below — a flag
     // or close click must never also open the drawer underneath it.
@@ -1722,6 +1863,132 @@
     // shell, or a build from before Task 18) leaves the row exactly as visible as it always was.
     EL("set-judge").hidden = !!(a && a.ok && !a.needs_account);
   }
+  // Gmail connect T9a (spec §4.4, D1, D10, D12): the Google row. `SET` is the settings panel's own
+  // state; the row keeps no cache, it asks `google_status` every time Settings opens. `googleSeq` is
+  // bumped on close and on every new load, so a stale reply never repaints the row. The buttons are
+  // wired in T9b (Connect, Reconnect) and T9c (Disconnect).
+  var SET = { googleSeq: 0, google: null, googleNote: "", googlePolling: false, googleWaitedOut: false, confirming: false, leaving: false };
+  var GOOGLE_TESTING = "While Google reviews Knowlu, this works only for invited testers, and the connection needs renewing about once a week.";
+  // T9c (D6, D14): Disconnect is two steps, like Delete my data. Step 1 shows this and step 2.
+  var GOOGLE_DISCONNECT_CONFIRM = "This disconnects Google Calendar too — Google keeps them as one permission. Knowlu stops reading both and deletes the proposals from your mail it had not delivered yet. What it already added stays in your vault, and your calendar stops updating.";
+  var GOOGLE_DISCLOSURE = "Google also tells Knowlu which Google account you connected, so this row can show it.";
+  function googleSentence(g) {
+    if (!g) { return "Checking Google…"; }
+    if (!g.ok) { return g.error || "Knowlu could not reach Google just now."; }
+    var who = g.email ? " (as " + g.email + ")" : "";
+    if (g.state === "revoked") { return "Google stopped answering for Knowlu. While Google reviews Knowlu, connections expire after seven days."; }
+    if (g.state === "none") { return "Gmail is not connected. Knowlu can read your inbox for things you have to do and propose each one for you to approve."; }
+    if (g.gmail) { return "Gmail is connected" + who + ", read-only. Knowlu proposes what it finds; nothing is added without you."; }
+    return "Google Calendar is connected" + who + ". Gmail is not.";
+  }
+  function renderGoogleRow() {
+    var g = SET.google, busy = SET.googlePolling;
+    var known = !!(g && g.ok), none = known && g.state === "none", revoked = known && g.state === "revoked";
+    var live = known && !none && !revoked;
+    EL("set-google-state").textContent = busy ? GOOGLE_POLLING : (SET.googleWaitedOut ? GOOGLE_NO_ANSWER + " " : "") + googleSentence(g);
+    EL("set-google-check").hidden = !SET.googleWaitedOut;
+    EL("set-google-note").textContent = (SET.confirming ? GOOGLE_DISCONNECT_CONFIRM + " " : "") + (SET.googleNote ? SET.googleNote + " " : "") + GOOGLE_TESTING + " " + GOOGLE_DISCLOSURE;
+    EL("set-google-connect").hidden = !(none || (live && !g.gmail));
+    EL("set-google-reconnect").hidden = !revoked;
+    EL("set-google-disconnect-1").hidden = !(revoked || live);
+    EL("set-google-retry").hidden = !(g && !g.ok);
+    EL("set-google-disconnect-2").hidden = !(SET.confirming && (revoked || live));
+    ["set-google-connect", "set-google-reconnect", "set-google-disconnect-1", "set-google-disconnect-2", "set-google-retry", "set-google-check"].forEach(function (id) {
+      // Connect and Reconnect stay live during the ten-minute poll: pressing one again mints a new link.
+      var retry = id === "set-google-connect" || id === "set-google-reconnect";
+      EL(id).disabled = SET.leaving || (busy && !retry);
+    });
+  }
+  function loadGoogleRow() {
+    var seq = ++SET.googleSeq;
+    SET.google = null; SET.googleNote = ""; SET.googlePolling = false; SET.googleWaitedOut = false; SET.confirming = false;
+    EL("set-google").hidden = false;
+    renderGoogleRow();
+    return invoke("google_status", {}).then(function (g) {
+      if (seq !== SET.googleSeq) { return; }
+      SET.google = g || { ok: false, error: UNREACHABLE };
+      renderGoogleRow();
+    }).catch(function () {
+      if (seq !== SET.googleSeq) { return; }
+      SET.google = { ok: false, error: UNREACHABLE };
+      renderGoogleRow();
+    });
+  }
+  // T9b: Connect ("gmail") and Reconnect ("reconnect"). The browser opens from Rust; the page only
+  // polls google_status until the consent link's own lifetime is up (the server's nonce dies ten
+  // minutes after minting), starting at 3 s and backing off to 10 s. Then the row says Google was
+  // not heard from and offers "Check again", which re-reads the status and never mints a new link.
+  // `mySeq` is taken on every click and Settings close bumps `SET.googleSeq`, so a stale poll never
+  // repaints the row (as `WIZ.googleSeq` does).
+  var GOOGLE_POLLING = "Waiting for Google… finish in your browser.";
+  var GOOGLE_LINK_LIFETIME_MS = 600000;
+  var GOOGLE_NO_ANSWER = "Didn’t hear back from Google.";
+  var GOOGLE_TIMEOUT = "Google did not finish connecting. If Google said Knowlu is not verified, this Google account is not on the tester list yet.";
+  function googleDone(g, scope) { return !!(g && g.ok && (scope === "reconnect" ? g.state === "active" : g.gmail === true)); }
+  async function connectGoogle(scope) {
+    var mySeq = ++SET.googleSeq;
+    SET.googlePolling = true; SET.googleWaitedOut = false; SET.googleScope = scope; SET.googleNote = ""; SET.confirming = false;
+    renderGoogleRow();
+    var started = await invoke("google_connect", { scope: scope }).catch(function () { return { ok: false, error: UNREACHABLE }; });
+    if (SET.googleSeq !== mySeq) { return; }
+    if (!started || !started.ok) {
+      SET.googlePolling = false; SET.googleNote = (started && started.error) || UNREACHABLE;
+      renderGoogleRow();
+      return;
+    }
+    var deadline = Date.now() + GOOGLE_LINK_LIFETIME_MS, delay = 3000;
+    while (Date.now() < deadline) {
+      await new Promise(function (r) { setTimeout(r, delay); });
+      if (SET.googleSeq !== mySeq) { return; }
+      delay = Math.min(Math.round(delay * 1.25), 10000);
+      var g = await invoke("google_status", {}).catch(function () { return null; });
+      if (SET.googleSeq !== mySeq) { return; }
+      if (googleDone(g, scope)) {
+        SET.google = g; SET.googlePolling = false; SET.googleNote = "";
+        renderGoogleRow();
+        return;
+      }
+    }
+    var fresh = await invoke("google_status", {}).catch(function () { return null; });
+    if (SET.googleSeq !== mySeq) { return; }
+    SET.google = fresh || { ok: false, error: UNREACHABLE };
+    SET.googlePolling = false; SET.googleNote = GOOGLE_TIMEOUT;
+    SET.googleWaitedOut = !googleDone(SET.google, scope);
+    renderGoogleRow();
+  }
+  // "Check again": one status read, no google_connect, so no new link is minted.
+  async function checkGoogleAgain() {
+    var mySeq = ++SET.googleSeq;
+    SET.googlePolling = true;
+    renderGoogleRow();
+    var g = await invoke("google_status", {}).catch(function () { return null; });
+    if (SET.googleSeq !== mySeq) { return; }
+    SET.googlePolling = false;
+    if (g) { SET.google = g; }
+    if (googleDone(g, SET.googleScope)) { SET.googleWaitedOut = false; SET.googleNote = ""; }
+    renderGoogleRow();
+  }
+  // T9c: step 2. On ok: false the row keeps its previous state and shows the error under it; on ok
+  // the row is asked afresh. A close or a new click bumps the token, so a late reply repaints nothing.
+  async function disconnectGoogle() {
+    var mySeq = ++SET.googleSeq;
+    SET.leaving = true;
+    renderGoogleRow();
+    var r = await invoke("google_disconnect", {}).catch(function () { return { ok: false, error: UNREACHABLE }; });
+    if (SET.googleSeq !== mySeq) { return; }
+    SET.leaving = false;
+    if (r && r.ok) { loadGoogleRow(); return; }
+    SET.confirming = false; SET.googleNote = (r && r.error) || UNREACHABLE;
+    renderGoogleRow();
+  }
+  // Signed-in students only: `account_status` says `needs_account` (or nothing) and the row is hidden.
+  function gateGoogleRow(a) {
+    // checkAccount also runs at launch; the row asks google_status only while Settings is open.
+    if (EL("settings").hidden) { return; }
+    if (a && a.ok && !a.needs_account) { loadGoogleRow(); return; }
+    SET.googleSeq += 1; EL("set-google").hidden = true;
+  }
+  function closeSettings() { SET.googleSeq += 1; SET.googlePolling = false; SET.googleWaitedOut = false; SET.confirming = false; SET.leaving = false; EL("settings").hidden = true; }
   // The account row and the upgrade overlay's gate, from ONE reply — `account_status` answers from
   // this machine only (no network call), and asking twice for the same three fields is two answers
   // that can disagree. A failed call is treated as "not reachable", not as "no account": the overlay
@@ -1731,11 +1998,176 @@
   function checkAccount() {
     return invoke("account_status", {}).then(function (s) {
       renderAccountRow(s);
+      gateGoogleRow(s);
       maybeUpgrade(s);
-    }).catch(function () { renderAccountRow(null); EL("upgrade").hidden = true; });
+    }).catch(function () { renderAccountRow(null); gateGoogleRow(null); EL("upgrade").hidden = true; });
   }
+  // M2 T5b.1: Settings, "How you like to work". PREFS.loaded is the text `profile` last returned,
+  // the `expected` of a save. Events carry the object kind only, never the text (D15).
+  var PREFS = { loaded: "", started: false };
+  function prefsDirty() { return EL("set-prefs-ta").value !== PREFS.loaded; }
+  function prefsCount() {
+    var n = Array.from(EL("set-prefs-ta").value).length, c = EL("set-prefs-count");
+    c.textContent = n + " / 600";
+    c.classList.toggle("over", n > 600);
+  }
+  function prefsFill(p) {
+    PREFS.loaded = p.preferences || ""; PREFS.started = false;
+    EL("set-prefs-ta").value = PREFS.loaded; prefsCount();
+    var c = document.querySelector("[data-prefs-conflict]"); if (c) { c.remove(); }
+  }
+  function loadPrefs() {
+    if (prefsDirty()) { return Promise.resolve(); }
+    return invoke("profile", {}).then(function (env) {
+      if (env.ok && env.profile && !prefsDirty()) { prefsFill(env.profile); }
+    }).catch(function () {});
+  }
+  function prefsLock(on) { EL("set-prefs-ta").disabled = on; EL("set-prefs-save").disabled = on; EL("set-prefs-cancel").disabled = on; }
+  function prefsConflict() {
+    if (document.querySelector("[data-prefs-conflict]")) { return; }
+    var c = document.createElement("div"); c.setAttribute("data-prefs-conflict", ""); c.className = "prefsconf";
+    c.innerHTML = "<p>This changed since you opened it. Your text is still here. Copy it, then reload to see the new version.</p>" +
+      '<button class="b" data-prefs-copy>Copy</button> <button class="b" data-prefs-reload>Reload</button>';
+    EL("set-prefs").appendChild(c);
+    c.querySelector("[data-prefs-copy]").addEventListener("click", function () { invoke("copy_text", { text: EL("set-prefs-ta").value }).catch(function () {}); });
+    c.querySelector("[data-prefs-reload]").addEventListener("click", function () {
+      if (prefsDirty() && !confirm("Reload and discard your text?")) { return; }
+      ev("edit_cancelled", null, "preferences");
+      invoke("profile", {}).then(function (env) { if (env.ok && env.profile) { prefsFill(env.profile); } }).catch(function () {});
+    });
+  }
+  function savePrefs() {
+    var before = PREFS.loaded;
+    prefsLock(true);
+    invoke("set_preferences", { view: stateView(), expected: PREFS.loaded, text: EL("set-prefs-ta").value }).then(function (env) {
+      if (env.conflict) { applyEnvelope(env, function () {}); prefsLock(false); prefsConflict(); return; }
+      if (!applyEnvelope(env, function (m) { prefsLock(false); showRefusal(null, m, null, "preferences"); })) { return; }
+      ev("edit_committed", null, "preferences");
+      return invoke("profile", {}).then(function (p) {
+        prefsLock(false);
+        if (!p.ok || !p.profile) { return; }
+        prefsFill(p.profile); offerPrefsUndo(before, PREFS.loaded);
+      });
+    }).catch(function (e) { prefsLock(false); showRefusal(null, "refused: " + e, null, "preferences"); });
+  }
+  function offerPrefsUndo(before, after) {
+    Array.prototype.forEach.call(document.querySelectorAll(".settoast"), function (x) { x.remove(); });
+    var t = document.createElement("div"); t.className = "settoast";
+    t.innerHTML = '<span>Saved</span> &middot; <button class="b" data-prefs-undo>Undo</button>';
+    document.body.appendChild(t);
+    var gone = setTimeout(function () { t.remove(); }, 10000);
+    t.querySelector("[data-prefs-undo]").addEventListener("click", function () {
+      clearTimeout(gone); t.querySelector("[data-prefs-undo]").disabled = true;
+      invoke("set_preferences", { view: stateView(), expected: after, text: before }).then(function (r) {
+        if (applyEnvelope(r, function (m) {
+          showRefusal(null, m, null, "preferences");
+          t.innerHTML = '<button class="b" data-prefs-prev>Copy previous text</button>';
+          t.querySelector("[data-prefs-prev]").addEventListener("click", function () { invoke("copy_text", { text: before }).catch(function () {}); });
+          setTimeout(function () { t.remove(); }, 10000);
+        })) {
+          t.remove(); ev("edit_committed", null, "preferences");
+          invoke("profile", {}).then(function (p) { if (p.ok && p.profile) { prefsFill(p.profile); } }).catch(function () {});
+        }
+      }).catch(function () { t.remove(); });
+    });
+  }
+  EL("set-prefs-ta").addEventListener("input", function () {
+    var first = !PREFS.started;
+    PREFS.started = true;
+    if (first) { ev("edit_started", null, "preferences"); }
+    prefsCount();
+  });
+  EL("set-prefs-save").addEventListener("click", savePrefs);
+  EL("set-prefs-cancel").addEventListener("click", function () {
+    if (prefsDirty()) { ev("edit_cancelled", null, "preferences"); }
+    EL("set-prefs-ta").value = PREFS.loaded; PREFS.started = false; prefsCount();
+  });
+  EL("set-prefs-ta").addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); savePrefs(); }
+  });
+  // M2 T5b.1 end
+  // M2 T5b.2: Settings, "Campus events". INT.loaded is the four lists `profile` last returned; undo
+  // sends the ones held before the save. Events carry the object kind only, never an item (D15).
+  var INT_KEYS = ["strong", "mild", "never", "clubs"];
+  var INT = { loaded: null, started: false, editable: true };
+  function intRead() {
+    var out = {};
+    INT_KEYS.forEach(function (k) {
+      out[k] = EL("set-int-" + k).value.split("\n").map(function (s) { return s.trim(); }).filter(function (s) { return s; });
+    });
+    return out;
+  }
+  function intDirty() { return !!INT.loaded && JSON.stringify(intRead()) !== JSON.stringify(INT.loaded); }
+  function intLock(on) {
+    INT_KEYS.forEach(function (k) { EL("set-int-" + k).disabled = on; });
+    EL("set-int-save").disabled = on || !INT.editable; EL("set-int-cancel").disabled = on;
+  }
+  function intFill(p) {
+    INT.loaded = {}; INT.started = false; INT.editable = p.interests_editable !== false;
+    INT_KEYS.forEach(function (k) {
+      INT.loaded[k] = (p[k] || []).slice();
+      var ta = EL("set-int-" + k); ta.value = INT.loaded[k].join("\n"); ta.readOnly = !INT.editable;
+    });
+    EL("set-int-save").disabled = !INT.editable; EL("set-int-cancel").disabled = !INT.editable;
+    var n = EL("set-int-reason"), r = "Knowlu can only edit a list written on one line. Yours continues onto following lines, so it is shown here to read only.";
+    if (!INT.editable && !n) {
+      n = document.createElement("p"); n.id = "set-int-reason"; n.className = "meta set-prefs-copy"; n.textContent = r;
+      EL("set-int-note").parentNode.insertBefore(n, EL("set-int-note"));
+    }
+    if (INT.editable && n) { n.remove(); }
+  }
+  function loadInterests() {
+    if (intDirty()) { return Promise.resolve(); }
+    return invoke("profile", {}).then(function (env) {
+      if (env.ok && env.profile && !intDirty()) { intFill(env.profile); }
+    }).catch(function () {});
+  }
+  function saveInterests() {
+    var held = INT.loaded;
+    var sent = intRead();
+    intLock(true);
+    invoke("set_interests", { view: stateView(), strong: sent.strong, mild: sent.mild, never: sent.never, clubs: sent.clubs }).then(function (env) {
+      if (!applyEnvelope(env, function (m) { intLock(false); showRefusal(null, m, null, "interests"); })) { return; }
+      ev("edit_committed", null, "interests");
+      return invoke("profile", {}).then(function (p) {
+        intLock(false);
+        if (!p.ok || !p.profile) { return; }
+        intFill(p.profile); offerIntUndo(held);
+      });
+    }).catch(function (e) { intLock(false); showRefusal(null, "refused: " + e, null, "interests"); });
+  }
+  function offerIntUndo(before) {
+    Array.prototype.forEach.call(document.querySelectorAll(".settoast"), function (x) { x.remove(); });
+    var t = document.createElement("div"); t.className = "settoast";
+    t.innerHTML = '<span>Saved</span> &middot; <button class="b" data-int-undo>Undo</button>';
+    document.body.appendChild(t);
+    var gone = setTimeout(function () { t.remove(); }, 10000);
+    t.querySelector("[data-int-undo]").addEventListener("click", function () {
+      clearTimeout(gone); t.querySelector("[data-int-undo]").disabled = true;
+      invoke("set_interests", { view: stateView(), strong: before.strong, mild: before.mild, never: before.never, clubs: before.clubs }).then(function (r) {
+        if (applyEnvelope(r, function (m) { t.remove(); showRefusal(null, m, null, "interests"); })) {
+          t.remove(); ev("edit_committed", null, "interests");
+          invoke("profile", {}).then(function (p) { if (p.ok && p.profile) { intFill(p.profile); } }).catch(function () {});
+        }
+      }).catch(function () { t.remove(); });
+    });
+  }
+  INT_KEYS.forEach(function (k) {
+    EL("set-int-" + k).addEventListener("input", function () {
+      var first = !INT.started;
+      INT.started = true;
+      if (first) { ev("edit_started", null, "interests"); }
+    });
+  });
+  EL("set-int-save").addEventListener("click", saveInterests);
+  EL("set-int-cancel").addEventListener("click", function () {
+    if (intDirty()) { ev("edit_cancelled", null, "interests"); }
+    if (INT.loaded) { intFill({ strong: INT.loaded.strong, mild: INT.loaded.mild, never: INT.loaded.never, clubs: INT.loaded.clubs, interests_editable: INT.editable }); }
+  });
+  // M2 T5b.2 end
   function openSettings() {
     EL("settings").hidden = false;
+    loadPrefs(); loadInterests();
     checkAccount();
     gradesStatus();
     invoke("settings_context", {}).then(function (c) {
@@ -1747,7 +2179,13 @@
   window.KNOWLU_OPEN_SETTINGS = openSettings;
 
   EL("settings").addEventListener("click", function (e) {
-    if (e.target.closest("#set-close")) { EL("settings").hidden = true; return; }
+    if (e.target.closest("#set-close")) { closeSettings(); return; }
+    if (e.target.closest("#set-google-connect")) { connectGoogle("gmail"); return; }
+    if (e.target.closest("#set-google-reconnect")) { connectGoogle("reconnect"); return; }
+    if (e.target.closest("#set-google-retry")) { loadGoogleRow(); return; }
+    if (e.target.closest("#set-google-check")) { checkGoogleAgain(); return; }
+    if (e.target.closest("#set-google-disconnect-1")) { SET.confirming = true; SET.googleNote = ""; renderGoogleRow(); return; }
+    if (e.target.closest("#set-google-disconnect-2")) { disconnectGoogle(); return; }
     if (e.target.closest("#set-name-save")) {
       invoke("set_profile_name", { name: EL("set-name-in").value }).then(function (r) {
         EL("set-diag-note").textContent = r.ok ? "saved" : r.error;
@@ -1806,7 +2244,7 @@
     // The report overlay is the same `.setpanel` shape over the same page, so it gets the page's own
     // way out (R-C1-55, M3). Tested before the settings panel because it opens on top of it.
     if (e.key === "Escape" && !EL("report").hidden) { EL("report").hidden = true; return; }
-    if (e.key === "Escape" && !EL("settings").hidden) { EL("settings").hidden = true; }
+    if (e.key === "Escape" && !EL("settings").hidden) { closeSettings(); }
   });
   // ---- C1 Task 17: the issue report (legal note §9). **The text the user reads is the payload** —
   // `report.rs` builds and scrubs it, the textarea shows it, and the send posts exactly what is on
@@ -2158,6 +2596,9 @@
               // cancellation token `wizGo` bumps on leaving the panel, the same shape
               // `schoolSeq` uses for the typeahead.
               google: false, googleNote: "", googlePolling: false, googleSeq: 0,
+              // The Gmail panel's own flow (D11): the same shape, its own token. Nothing here reaches
+              // the plan — Next never waits on it and Finish never reads it.
+              gmail: false, gmailNote: "", gmailPolling: false, gmailSeq: 0,
               // R-OB-4: the school the student picked — a unitid, a name, a state and (once
               // something establishes it) an LMS kind. The LIST is never here: `campus_search` is a
               // command, and the page holds only the ten rows it is showing.
@@ -2257,12 +2698,16 @@
     // the window opens would read the identity provider's page, not the school's — the student has
     // not signed in yet, and the answer would be "finish signing in first" every time.
     EL("wiz-lms-capture").hidden = !WIZ.lmsOpen;
+    // F4: the sign-in page is looked up by school, so the button waits for one to be picked.
+    EL("wiz-lms-open").disabled = !WIZ.campus.unitid;
     EL("wiz-ics-note").textContent = WIZ.ics && !ICS_OK.test(WIZ.ics) ? "That does not look like a calendar feed link." : "";
     EL("wiz-cal-note").textContent = WIZ.calNote;
     // A-5: driven entirely by WIZ state, so returning to this panel (or any other re-render while
     // on it) always shows the truth — connected, mid-poll, or neither — never a stale DOM write.
     EL("wiz-google-note").textContent = WIZ.googleNote;
     EL("wiz-google").disabled = WIZ.google || WIZ.googlePolling;
+    EL("wiz-gmail-note").textContent = WIZ.gmailNote;
+    EL("wiz-gmail-connect").disabled = WIZ.gmail || WIZ.gmailPolling;
     EL("wiz-summary").textContent = dest() + ", looking at " + WIZ.slots.join(" and ") + " " + WIZ.tz + ".";
     // M1 (fix round 1): painted from WIZ, like every other wizard field — blank until `wizFinish`
     // has an actual answer from `restore_into`, never a claim made before Finish has even run.
@@ -2394,6 +2839,11 @@
     if (leaving === 4 && WIZ.googlePolling) {
       WIZ.googleSeq += 1;
       WIZ.googlePolling = false;
+    }
+    // D11: the same for the Gmail panel (step 6); a connect that already finished stays true.
+    if (leaving === 6 && WIZ.gmailPolling) {
+      WIZ.gmailSeq += 1;
+      WIZ.gmailPolling = false;
     }
     WIZ.step = Math.max(0, Math.min(PANELS.length - 1, n));
     if (leaving === 5 && n > leaving) {
@@ -2686,6 +3136,8 @@
       return;
     }
     if (e.target.closest("#wiz-lms-open")) {
+      // F4: no school picked, no sign-in page to open. The button is disabled then; this is the backstop.
+      if (!WIZ.campus.unitid) { return; }
       WIZ.icsNote = "Opening your school’s sign-in page…";
       renderWizard();
       invoke("open_lms_window", { unitid: WIZ.campus.unitid }).then(function (r) {
@@ -2899,6 +3351,36 @@
     renderWizard();
   });
 
+  // ---- D11: the Gmail panel's Connect Gmail. The wizard's own commands with `scope: "gmail"`, the
+  // calendar button's poll shape and its own token (`WIZ.gmailSeq`, bumped by `wizGo`). Skip is the
+  // default path: Next is never gated on this, and nothing about it is written to the plan.
+  document.getElementById("wiz-gmail-connect").addEventListener("click", async () => {
+    var got = await invoke("google_connect_url", { scope: "gmail" });
+    if (!got.ok) { showWizardError(got.error); return; }
+    var opened = await invoke("open_external", { url: got.url });
+    if (!opened.ok) { showWizardError(opened.error); return; }
+    var mySeq = ++WIZ.gmailSeq;
+    WIZ.gmailPolling = true;
+    WIZ.gmailNote = "Finish signing in to Google in your browser — this may take a moment.";
+    renderWizard();
+    for (var i = 0; i < 20; i++) {
+      await new Promise(function (r) { setTimeout(r, 3000); });
+      if (WIZ.gmailSeq !== mySeq) { return; }
+      var status = await invoke("google_connected");
+      if (WIZ.gmailSeq !== mySeq) { return; }
+      if (status.ok && status.gmail) {
+        WIZ.gmail = true;
+        WIZ.gmailPolling = false;
+        WIZ.gmailNote = "Gmail is connected.";
+        renderWizard();
+        return;
+      }
+    }
+    WIZ.gmailPolling = false;
+    WIZ.gmailNote = GOOGLE_TIMEOUT;
+    renderWizard();
+  });
+
   // ---- R-OB-4: the school typeahead.
   //
   // **The page never holds the list and never fetches it.** `app/tauri.conf.json`'s CSP names the IPC
@@ -2919,7 +3401,7 @@
 
   function renderSchoolHits(hits) {
     EL("wiz-school-hits").innerHTML = hits.map(function (r, i) {
-      // [unitid, name, city, state]
+      // [unitid, name, city, state, lms]
       return '<div class="hit" data-school="' + i + '" tabindex="0">' + h(r[1]) +
              '<span class="meta"> &middot; ' + h(r[2]) + ", " + h(r[3]) + "</span></div>";
     }).join("");
@@ -2927,7 +3409,9 @@
   }
 
   function pickSchool(r) {
-    WIZ.campus = { unitid: String(r[0]), name: r[1], state: r[3], lms: "" };
+    // r[4] is the curated LMS kind, "" for an uncurated school: a curated school is never asked.
+    WIZ.campus = { unitid: String(r[0]), name: r[1], state: r[3], lms: r[4] || "" };
+    EL("wiz-lms-kind").hidden = true;
     EL("wiz-school").value = r[1];
     EL("wiz-school-hits").innerHTML = "";
     EL("wiz-school-free").hidden = true;
@@ -2970,8 +3454,13 @@
     EL("wiz-school-hits").innerHTML = "";
   });
   EL("wiz-school-free").addEventListener("input", function () {
-    WIZ.campus = { unitid: "", name: EL("wiz-school-name").value.trim(), state: EL("wiz-school-state").value.trim().toUpperCase(), lms: "" };
+    WIZ.campus = { unitid: "", name: EL("wiz-school-name").value.trim(), state: EL("wiz-school-state").value.trim().toUpperCase(), lms: WIZ.campus.unitid ? "" : (WIZ.campus.lms || "") };
+    // Ruling 2026-10-02: a hand-typed school is asked its LMS directly, once name and state are both in.
+    var typed = !!(WIZ.campus.name && WIZ.campus.state);
+    EL("wiz-lms-kind").hidden = !(typed && !WIZ.campus.lms);
+    WIZ.icsNote = typed ? "Sign-in isn’t available for schools that aren’t listed yet - paste your calendar link below." : "";
     EL("wiz-school-picked").textContent = "";
+    renderWizard();
   });
   // The two-button fallback for a school whose LMS nothing established — shown by the sign-in handler
   // when `open_lms_window` says it does not know where to go.

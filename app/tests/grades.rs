@@ -4,7 +4,10 @@
 //! **Task 5a: the gate.** Grades are offered only for a curated campus row whose `lms_kind` is
 //! `blackboard` and which carries `policy_read` (spec §4; cloud design ruling 12). One predicate,
 //! `grades::availability`, decides it. The date-and-bump test keeps any such date off `main` until
-//! privacy bump #1 has put spec §11's sentences on the page.
+//! privacy bump #1 has put spec §11's sentences on the page. **Ruling 12's read is suspended** until
+//! 20 paying users (cloud design Amendment 2026-09-30, A13; email spec D25, T19): `POLICY_READ_GATE`
+//! is `Suspended`, so every caller sees a curated Blackboard row available, dated or not, and the
+//! `Enforced` arm is tested only at `availability_with`.
 //!
 //! Every row a test needs is built by `test_row` and nothing else — never by editing
 //! `scaffold::CAMPUSES` and never as a full `Curated` literal, so a field another lane adds to
@@ -18,9 +21,9 @@
 //! wrappers over seams that take the curated row as input; the window and the session are injected
 //! closures, so a refusal is shown to open no window and read no session.
 use knowlu::grades::{
-    assemble_bundle, availability, campus_of, connect_with, forget, forget_with, is_session_dir, next_page, read_list,
-    refresh_with, session_dir, set_signed_out, signed_in, status_for, step_answer, Availability, CaptureHead, CourseCalls,
-    GradesPrefs, MAX_PAGES, NOT_AVAILABLE, NOT_BLACKBOARD,
+    assemble_bundle, availability, availability_with, campus_of, connect_with, forget, forget_with, is_session_dir, next_page,
+    read_list, refresh_with, session_dir, set_signed_out, signed_in, status_for, step_answer, Availability, CaptureHead,
+    CourseCalls, Gate, GradesPrefs, MAX_PAGES, NOT_AVAILABLE, NOT_BLACKBOARD, POLICY_READ_GATE,
 };
 use std::cell::Cell;
 use knowlu::scaffold::{create_vault, Curated, VaultPlan, CAMPUSES};
@@ -85,46 +88,89 @@ fn a_new_vault_is_born_with_a_grades_folder() {
 }
 
 // ---- the predicate ---------------------------------------------------------------------------
+//
+// Both arms (email spec T19, test 39; Amendment 2026-09-30, A13). `Enforced` is ruling 12's gate and
+// is reached only here, through `availability_with`, so restoring it needs no new predicate test;
+// `Suspended` is what `availability`, and so every caller, sees while `POLICY_READ_GATE` says so.
 
 #[test]
 fn a_dated_blackboard_row_is_available_with_its_own_host() {
     let row = test_row("blackboard", Some("2026-10-01"));
-    assert_eq!(availability(Some(&row), "blackboard"), Availability::Available { host: "lms.example.test" });
+    assert_eq!(availability_with(Gate::Enforced, Some(&row), "blackboard"), Availability::Available { host: "lms.example.test" });
     // The row decides the host and the kind; the vault's own `lms` does not override it.
+    assert_eq!(availability_with(Gate::Enforced, Some(&row), ""), Availability::Available { host: "lms.example.test" });
+    // Suspended: the same.
+    assert_eq!(availability(Some(&row), "blackboard"), Availability::Available { host: "lms.example.test" });
     assert_eq!(availability(Some(&row), ""), Availability::Available { host: "lms.example.test" });
 }
 
 #[test]
-fn an_undated_blackboard_row_is_not_available_yet() {
+fn an_undated_blackboard_row_waits_for_a_read_only_while_the_gate_is_enforced() {
     let row = test_row("blackboard", None);
-    assert_eq!(availability(Some(&row), "blackboard"), Availability::NotAvailableYet);
+    assert_eq!(availability_with(Gate::Enforced, Some(&row), "blackboard"), Availability::NotAvailableYet);
+    // Suspended: available with its own host, as a dated row is.
+    assert_eq!(availability(Some(&row), "blackboard"), Availability::Available { host: "lms.example.test" });
+    assert_eq!(availability(Some(&row), ""), Availability::Available { host: "lms.example.test" });
 }
 
-/// No address entry (spec §4): an uncurated Blackboard school waits for a curated row with a read.
+/// No address entry (spec §4): an uncurated Blackboard school waits for a curated row with a read,
+/// and, with the gate suspended, still waits for a curated row (D25: the host comes only from one).
 #[test]
 fn an_uncurated_blackboard_school_is_not_available_yet() {
+    assert_eq!(availability_with(Gate::Enforced, None, "blackboard"), Availability::NotAvailableYet);
     assert_eq!(availability(None, "blackboard"), Availability::NotAvailableYet);
 }
 
 #[test]
 fn a_curated_canvas_row_is_not_a_blackboard_school() {
     // Dated or not, and whatever the vault's `lms` says: the curated row's kind wins.
+    assert_eq!(availability_with(Gate::Enforced, Some(&test_row("canvas", None)), "canvas"), Availability::NotBlackboard);
+    assert_eq!(availability_with(Gate::Enforced, Some(&test_row("canvas", Some("2026-10-01"))), "blackboard"), Availability::NotBlackboard);
     assert_eq!(availability(Some(&test_row("canvas", None)), "canvas"), Availability::NotBlackboard);
+    assert_eq!(availability(Some(&test_row("canvas", None)), "blackboard"), Availability::NotBlackboard);
     assert_eq!(availability(Some(&test_row("canvas", Some("2026-10-01"))), "blackboard"), Availability::NotBlackboard);
 }
 
 /// A vault with no `unitid` has no curated row and no `lms` (`config/campus.yaml` absent or blank).
 #[test]
 fn no_school_is_not_a_blackboard_school() {
+    assert_eq!(availability_with(Gate::Enforced, None, ""), Availability::NotBlackboard);
+    assert_eq!(availability_with(Gate::Enforced, None, "canvas"), Availability::NotBlackboard);
     assert_eq!(availability(None, ""), Availability::NotBlackboard);
     assert_eq!(availability(None, "canvas"), Availability::NotBlackboard);
 }
 
-/// The real rows, as they stand on this branch: nothing is available anywhere.
+/// The real rows, as they stand on this branch: with the gate enforced nothing is available anywhere;
+/// suspended, every curated Blackboard row is, on its own host, and no other row is.
 #[test]
-fn no_real_campus_is_available_on_this_branch() {
+fn no_real_campus_is_available_while_enforced_and_every_blackboard_one_is_while_suspended() {
     for c in CAMPUSES {
-        assert_ne!(availability(Some(&c), c.lms_kind), Availability::Available { host: c.lms_host }, "{}", c.key);
+        assert_ne!(availability_with(Gate::Enforced, Some(&c), c.lms_kind), Availability::Available { host: c.lms_host }, "{}", c.key);
+        let suspended = availability(Some(&c), c.lms_kind);
+        if c.lms_kind == "blackboard" {
+            assert_eq!(suspended, Availability::Available { host: c.lms_host }, "{}", c.key);
+        } else {
+            assert_eq!(suspended, Availability::NotBlackboard, "{}", c.key);
+        }
+    }
+    assert!(CAMPUSES.iter().any(|c| c.lms_kind == "blackboard"), "a curated Blackboard row to prove the suspension on");
+}
+
+/// One constant decides the gate, the same in every build (D25): no `cfg`, feature or environment
+/// variable reaches it. The scan covers the gate's source, from `pub enum Gate` to the end of
+/// `availability`, comments aside.
+#[test]
+fn the_gate_is_one_constant_suspended_in_every_build() {
+    assert_eq!(POLICY_READ_GATE, Gate::Suspended);
+    let src = std::fs::read_to_string("src/grades.rs").unwrap().replace("\r\n", "\n");
+    let start = src.find("pub enum Gate").expect("the Gate enum");
+    let avail = src.find("pub fn availability(").expect("availability");
+    let end = avail + src[avail..].find("\n}\n").expect("availability's end");
+    let code: String = src[start..end].lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+    assert!(code.contains("pub const POLICY_READ_GATE: Gate = Gate::Suspended;"), "{code}");
+    assert!(code.contains("availability_with(POLICY_READ_GATE, row, campus_lms)"), "{code}");
+    for banned in ["cfg", "feature", "std::env", "env!", "option_env!"] {
+        assert!(!code.contains(banned), "`{banned}` reaches the gate:\n{code}");
     }
 }
 
@@ -484,21 +530,24 @@ fn campus_of_reads_unitid_and_lms_from_config_campus_yaml() {
     assert_eq!(campus_of(&v).unitid, "", "an unreadable file is no school");
 }
 
-/// `grades_status`: with a date, the connected, signed-out, host and last-fetched fields; with none,
+/// `grades_status`: where available (a curated Blackboard row, dated or not while the gate is
+/// suspended, A13), the connected, signed-out, host and last-fetched fields; for an uncurated school,
 /// *not available* whatever session directory exists.
 #[test]
-fn grades_status_reports_the_gate_and_with_a_date_the_session() {
+fn grades_status_reports_the_gate_and_when_available_the_session() {
     let (v, d) = vault_and_data("status");
     std::fs::create_dir_all(session_dir(&d)).unwrap();
-    set_signed_out(&d, true);
     std::fs::write(v.join("state").join("grades.json"), r#"{"fetched_at": "2026-09-29T14:02:11Z", "host": "lms.example.test"}"#).unwrap();
     let [dated, undated, uncurated] = three_cases();
-    let s = status_for(dated.0.as_ref(), dated.1, &d, &v);
-    assert_eq!((&s["available"], &s["reason"], &s["host"]), (&json!(true), &Value::Null, &json!("lms.example.test")));
-    assert_eq!((&s["connected"], &s["signed_out"], &s["fetched_at"]), (&json!(true), &json!(true), &json!("2026-09-29T14:02:11Z")));
-    set_signed_out(&d, false);
-    assert_eq!(status_for(dated.0.as_ref(), dated.1, &d, &v)["signed_out"], json!(false));
-    for (row, lms) in [undated, uncurated] {
+    for (row, lms) in [&dated, &undated] {
+        set_signed_out(&d, true);
+        let s = status_for(row.as_ref(), lms, &d, &v);
+        assert_eq!((&s["available"], &s["reason"], &s["host"]), (&json!(true), &Value::Null, &json!("lms.example.test")), "{s}");
+        assert_eq!((&s["connected"], &s["signed_out"], &s["fetched_at"]), (&json!(true), &json!(true), &json!("2026-09-29T14:02:11Z")), "{s}");
+        set_signed_out(&d, false);
+        assert_eq!(status_for(row.as_ref(), lms, &d, &v)["signed_out"], json!(false));
+    }
+    for (row, lms) in [uncurated] {
         let s = status_for(row.as_ref(), lms, &d, &v);
         assert_eq!((&s["available"], &s["reason"]), (&json!(false), &json!(NOT_AVAILABLE)), "{s}");
         assert_eq!((&s["connected"], &s["signed_out"], &s["host"]), (&json!(false), &json!(false), &Value::Null), "{s}");
@@ -512,11 +561,12 @@ fn grades_status_reports_the_gate_and_with_a_date_the_session() {
 }
 
 /// `grades_connect`: a refusal is exactly the slot's reason, and neither the window-opening nor the
-/// session-reading action is called. With a date both run, in that order, on the row's own host.
+/// session-reading action is called. Where available (a curated Blackboard row, dated or not while
+/// the gate is suspended, A13) both run, in that order, on the row's own host.
 #[test]
-fn grades_connect_refuses_without_a_date_and_opens_nothing() {
+fn grades_connect_refuses_where_not_available_and_opens_nothing() {
     let [dated, undated, uncurated] = three_cases();
-    for (row, lms) in [undated, uncurated] {
+    for (row, lms) in [uncurated] {
         let (opened, read) = (Cell::new(false), Cell::new(false));
         let r = connect_with(row.as_ref(), lms, |_| { opened.set(true); Ok(()) }, |_| { read.set(true); json!({ "ok": true }) });
         assert_eq!((&r["ok"], &r["error"]), (&json!(false), &json!("not available at your school yet")), "{r}");
@@ -525,13 +575,15 @@ fn grades_connect_refuses_without_a_date_and_opens_nothing() {
     let (opened, read) = (Cell::new(false), Cell::new(false));
     let r = connect_with(None, "", |_| { opened.set(true); Ok(()) }, |_| { read.set(true); json!({}) });
     assert_eq!((&r["error"], opened.get(), read.get()), (&json!(NOT_BLACKBOARD), false, false));
-    let order = std::cell::RefCell::new(Vec::new());
-    let r = connect_with(dated.0.as_ref(), dated.1, |h| { order.borrow_mut().push(format!("open {h}")); Ok(()) }, |h| {
-        order.borrow_mut().push(format!("read {h}"));
-        json!({ "ok": true, "error": null })
-    });
-    assert_eq!(r, json!({ "ok": true, "error": null }));
-    assert_eq!(*order.borrow(), ["open lms.example.test", "read lms.example.test"]);
+    for (row, lms) in [&dated, &undated] {
+        let order = std::cell::RefCell::new(Vec::new());
+        let r = connect_with(row.as_ref(), lms, |h| { order.borrow_mut().push(format!("open {h}")); Ok(()) }, |h| {
+            order.borrow_mut().push(format!("read {h}"));
+            json!({ "ok": true, "error": null })
+        });
+        assert_eq!(r, json!({ "ok": true, "error": null }));
+        assert_eq!(*order.borrow(), ["open lms.example.test", "read lms.example.test"]);
+    }
     // A window that would not open reads no session.
     let read = Cell::new(false);
     let r = connect_with(dated.0.as_ref(), dated.1, |_| Err("no window".into()), |_| { read.set(true); json!({}) });
@@ -539,25 +591,28 @@ fn grades_connect_refuses_without_a_date_and_opens_nothing() {
 }
 
 /// `grades_refresh`: the same gate, then `not connected` when no session was ever saved — again
-/// without opening a window. With a date and a saved session, both actions run.
+/// without opening a window. Where available (dated or not while the gate is suspended, A13) and with
+/// a saved session, both actions run.
 #[test]
-fn grades_refresh_refuses_without_a_date_and_reads_no_session() {
+fn grades_refresh_refuses_where_not_available_and_reads_no_session() {
     let (_, d) = vault_and_data("refresh");
     std::fs::create_dir_all(session_dir(&d)).unwrap();
     let [dated, undated, uncurated] = three_cases();
-    for (row, lms) in [undated, uncurated] {
+    for (row, lms) in [uncurated] {
         let (opened, read) = (Cell::new(false), Cell::new(false));
         let r = refresh_with(row.as_ref(), lms, &d, |_| { opened.set(true); Ok(()) }, |_| { read.set(true); json!({ "ok": true }) });
         assert_eq!((&r["ok"], &r["error"]), (&json!(false), &json!("not available at your school yet")), "{r}");
         assert!(!opened.get() && !read.get(), "a refusal opens no window and reads no session");
     }
-    let (opened, read) = (Cell::new(0), Cell::new(0));
-    let r = refresh_with(dated.0.as_ref(), dated.1, &d, |h| { assert_eq!(h, "lms.example.test"); opened.set(1); Ok(()) }, |h| {
-        assert_eq!(h, "lms.example.test");
-        read.set(opened.get() + 1);
-        json!({ "ok": true, "error": null })
-    });
-    assert_eq!((r, opened.get(), read.get()), (json!({ "ok": true, "error": null }), 1, 2));
+    for (row, lms) in [&dated, &undated] {
+        let (opened, read) = (Cell::new(0), Cell::new(0));
+        let r = refresh_with(row.as_ref(), lms, &d, |h| { assert_eq!(h, "lms.example.test"); opened.set(1); Ok(()) }, |h| {
+            assert_eq!(h, "lms.example.test");
+            read.set(opened.get() + 1);
+            json!({ "ok": true, "error": null })
+        });
+        assert_eq!((r, opened.get(), read.get()), (json!({ "ok": true, "error": null }), 1, 2));
+    }
     let (_, never) = vault_and_data("refresh-never");
     let (opened, read) = (Cell::new(false), Cell::new(false));
     let r = refresh_with(dated.0.as_ref(), dated.1, &never, |_| { opened.set(true); Ok(()) }, |_| { read.set(true); json!({}) });

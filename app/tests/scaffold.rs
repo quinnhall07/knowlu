@@ -347,6 +347,20 @@ fn the_campus_preset_is_the_shape_the_engine_already_reads() {
     assert!(warnings.is_empty() && cfg.sources.is_empty());
 }
 
+/// Spec section 5.5, D6, Q5 (c): both presets switch event cards on, and the engine never writes `events.yaml`.
+#[test]
+fn either_preset_scaffolds_event_cards_on() {
+    for campus in ["none", "university-of-alabama"] {
+        let v = temp(&format!("cards-{campus}")).join("Vault");
+        let mut p = plan_for(&v);
+        p.campus = campus.into();
+        create_vault(&v, &p).unwrap();
+        let (cfg, warnings) = knowlu_engine::events::load_events_config(&v.join("config").join("events.yaml"));
+        assert!(warnings.is_empty(), "{campus}: {warnings:?}");
+        assert!(cfg.event_cards, "{campus} scaffolds event_cards on");
+    }
+}
+
 /// I2 (final review): **the read model over a vault the wizard has just made.** The console's first
 /// poll happens seconds after *Finish*, on a vault where nothing has ever run: no `state/today.md`,
 /// no `state/runs/`, no `state/runner-log.md`, not even a git repository. Every view the console

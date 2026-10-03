@@ -3,6 +3,12 @@ import type { Kind } from "./judge_validate.ts";
 
 export interface CapStore {
   charge(account: string, kind: Kind): Promise<boolean>;
+  /** Gives back the call `charge` counted, after a call the model never answered (F1, live proof
+   *  2026-10-02). Never throws. Also counts one more consecutive failure toward `tripped`. */
+  refund(account: string, kind: Kind): Promise<void>;
+  /** True once `BREAKER_FAILURES` calls in a row failed in this store's life (one invocation) with
+   *  no reply between: the pipeline then stops sending and answers `model failed` uncharged. */
+  tripped(): boolean;
   withinBudget(account: string): Promise<boolean>;
   recordTokens(account: string, kind: Kind, inTokens: number, outTokens: number): Promise<void>;
 }
@@ -59,10 +65,20 @@ export const DAILY_CAP: Record<Kind, number> = { task: 60, event: 80, email: 120
  */
 export const MONTHLY_CEILING_USD = 2.0;
 
+/**
+ * F1 (live proof 2026-10-02): how many model calls in a row may fail inside one invocation before
+ * the rest of it stops sending. Only `gmail-read` judges many items in one invocation; for it, a
+ * dead key or an upstream outage ends the round's model calls after three, not after every email
+ * on the list. Each `judge-*` request is its own invocation and its own store, so across requests
+ * the bound on a failing loop is `refund_call`'s daily refund allowance instead.
+ */
+export const BREAKER_FAILURES = 3;
+
 export function capStore(db: Db): CapStore {
   // One budget check per account per invocation is enough: an edge function handles one request,
   // and `gmail-read` (Task 11) is the only caller that judges many items in one — it memoises.
   const budget = new Map<string, boolean>();
+  let failures = 0;
   return {
     async charge(account, kind) {
       // One statement (`charge_call`), so two concurrent calls cannot both read `calls` below the
@@ -74,6 +90,20 @@ export function capStore(db: Db): CapStore {
       } catch {
         return false;
       }
+    },
+    async refund(account, kind) {
+      failures += 1;
+      // Never throws: a refund that cannot land leaves the call charged, which is exactly the
+      // pre-F1 behaviour — recoverable, and never an uncapped loop. `refund_call` bounds itself
+      // (migration `20261002000100`), so this needs no bound of its own.
+      try {
+        await db.rpc("refund_call", { p_account: account, p_kind: kind, p_cap: DAILY_CAP[kind] });
+      } catch {
+        // Counted nowhere on purpose, as `recordTokens` below.
+      }
+    },
+    tripped() {
+      return failures >= BREAKER_FAILURES;
     },
     async withinBudget(account) {
       const cached = budget.get(account);
@@ -88,6 +118,8 @@ export function capStore(db: Db): CapStore {
       return ok;
     },
     async recordTokens(account, kind, inTokens, outTokens) {
+      // A reply arrived, so the provider is answering: the breaker's streak starts again.
+      failures = 0;
       // Never throws: the tokens are the bill's record, and a failure to write them must not lose
       // a judgment that already happened.
       try {

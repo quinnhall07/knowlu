@@ -3,7 +3,9 @@
 //! **The gate** (spec §4; cloud design ruling 12). [`availability`] is the one predicate that decides
 //! whether grades are offered, and its four callers — `grades_status`, `grades_connect`,
 //! `grades_refresh` and the scheduler's grades step — check it and never re-derive it. No build
-//! skips it: no `cfg`, feature or environment variable reaches this function.
+//! skips it: no `cfg`, feature or environment variable reaches this function. Ruling 12's
+//! policy-read requirement is **suspended** until 20 paying users by one constant,
+//! [`POLICY_READ_GATE`] (cloud design Amendment 2026-09-30, A13; email spec D25, T19).
 //!
 //! **The pure pieces** (Task 5b): `grades.json`, paging, sign-in detection, the bundle's assembly
 //! and the kept session's directory. None opens a window or makes a call; the one network call is
@@ -30,23 +32,46 @@ pub enum Availability {
     NotAvailableYet,
 }
 
-/// **Whether grades are available**, from the vault's curated row (`scaffold::curated` of
-/// `config/campus.yaml`'s `unitid`, `None` for an uncurated school or no `unitid`) and that file's
-/// `lms`.
-///
-/// Available only for a curated row whose `lms_kind` is `blackboard` and which carries
-/// `policy_read`. A curated row's kind wins over the vault's `lms`; `lms` only tells an uncurated
-/// Blackboard school (not available yet) from anything else (not a Blackboard school).
-pub fn availability(row: Option<&Curated>, campus_lms: &str) -> Availability {
+/// Ruling 12's university-policy-read gate, on or off. The one branch it decides is a curated
+/// `blackboard` row without `policy_read`; nothing else in the predicate depends on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    /// Ruling 12 as signed: a curated Blackboard row is available only with a recorded read.
+    Enforced,
+    /// A curated Blackboard row is available with or without a read.
+    Suspended,
+}
+
+/// **The gate, the same in every build.** Suspended by Quinn's ruling (cloud design Amendment
+/// 2026-09-30, A13; email spec D25, T19) until Knowlu has 20 paying users (an `active` paid
+/// subscription); at the 20th, Quinn rules again before the next release. Restoring ruling 12 is this
+/// one constant set to `Enforced`, with that arm's predicate tests already written and T19's diff
+/// recording the caller tests' undated cases that go back with it. No `cfg`, feature or environment
+/// variable reaches it (pinned by `app/tests/grades.rs`).
+pub const POLICY_READ_GATE: Gate = Gate::Suspended;
+
+/// **The predicate, with the gate as input** — pure, and the only place the `Enforced` arm is reached
+/// (its tests call it directly). A curated row's kind wins over the vault's `lms`; `lms` only tells
+/// an uncurated Blackboard school (not available yet, whatever the gate: the host comes only from a
+/// curated row) from anything else (not a Blackboard school).
+pub fn availability_with(gate: Gate, row: Option<&Curated>, campus_lms: &str) -> Availability {
     match row {
         Some(c) if c.lms_kind != "blackboard" => Availability::NotBlackboard,
-        Some(c) => match c.policy_read {
-            Some(_) => Availability::Available { host: c.lms_host },
-            None => Availability::NotAvailableYet,
+        Some(c) => match (c.policy_read, gate) {
+            (Some(_), _) | (None, Gate::Suspended) => Availability::Available { host: c.lms_host },
+            (None, Gate::Enforced) => Availability::NotAvailableYet,
         },
         None if campus_lms.trim() == "blackboard" => Availability::NotAvailableYet,
         None => Availability::NotBlackboard,
     }
+}
+
+/// **Whether grades are available**, from the vault's curated row (`scaffold::curated` of
+/// `config/campus.yaml`'s `unitid`, `None` for an uncurated school or no `unitid`) and that file's
+/// `lms`: [`availability_with`] under [`POLICY_READ_GATE`]. While the gate is suspended, a curated
+/// `blackboard` row is available with or without `policy_read`; enforced, only with it.
+pub fn availability(row: Option<&Curated>, campus_lms: &str) -> Availability {
+    availability_with(POLICY_READ_GATE, row, campus_lms)
 }
 
 // ---- the pure pieces (Task 5b): no window, no Tauri item, no network ------------------------

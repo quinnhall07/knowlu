@@ -30,7 +30,7 @@ older under `docs/` is history or design authority from the previous repository 
   - The engine gate (`engine/src/entitle.rs`) names `sync`, `coursework`, `ingest` and `judge` as skips past the 72-hour grace. `rank` keeps running.
   - The LMS feed and the personal calendar URL leave the vault for any account (`ics_url: ''`, `cloud:personal`).
   - The privacy page is version **2026-09-24**, and `PRIVACY_VERSION` moves with it. Its wording is the controller's, delegated by Quinn. Both prod accounts that accepted the 2026-09-16 version are Quinn's, so no re-ask screen is needed.
-  - Staging carries C3′'s four `20260912*` migrations and `sync-push`/`sync-pull`.
+  - Staging carries (2026-09-30) the four migrations `20260922120100`, `20260922120200`, `20260926000100` and `20260929000100`, plus `20260929000200` (Gmail); `judge-task`, `judge-event`, `judge-email`, `gmail-read`, `sync-push`, `ingest-calendar` and `google-connect` were redeployed 2026-09-30; smokes S1-S8 passed (Integrate's staging gate passed 2026-09-30).
   - Every task was reviewed. The final whole-branch review (opus) was followed by one fix wave (18 rows), and its re-review reads **ready with residuals, no open rows**.
   - The gate on the merge: 1451 / 0 / 4, 0 other; deno 461/0; wizard-check and settings-check ok.
   - The ledger, the whole-branch review with its fix wave and merge report, and Task 12's stream report are preserved as `docs/reports/2026-09-25-c3-account-vault-{sdd-ledger,whole-branch-review,stream-report}.md`. C1b's, C1c's and the runner's are beside them (`2026-09-24-c1b-sign-in-*`, `2026-09-24-c1c-first-day-*`, `2026-09-23-ci-self-hosted-sdd-ledger.md`). All four streams are closed: worktrees and branches deleted, and the PRs keep the record.
@@ -86,7 +86,9 @@ older under `docs/` is history or design authority from the previous repository 
 
 ## 2. What gets built, and how it is kept apart
 
-**The lanes now (2026-09-29, from `git branch -a`, `gh pr list` and `git worktree list`).** `main` is
+**The lanes, 2026-09-30 (from the ledgers, after the Gmail merge):** Gmail connect MERGED (#26, `199cd1f`; T12 staging deploy done, T13 live proof is Quinn's). M2 editing MERGED (#27, `30b6fb7`; T10 live proof is Quinn's). Events lane: building, plan on branch `events`. Email forwarding to Knowlu: spec signed 2026-09-30, amendments and plan on main (branch `email-forwarding`); staging receiver (SES, us-east-2) being set up. Docs-only PRs now report the required checks (#28). B1 closed (event-4 did not ship). The table below is the 2026-09-29 record.
+
+**The lanes then (2026-09-29, from `git branch -a`, `gh pr list` and `git worktree list`).** `main` is
 `86a3431` and carries Integrate's merges (#11, #12, #14, #16, #17, #18). Commits ahead are `git rev-list --count main..<branch>`.
 
 | Lane | Branch, worktree | Ahead of `main` | State | Stage |
@@ -164,7 +166,7 @@ The dev app is Quinn's live staging profile (`Test`), left as it is until cut da
 | Stage | The student gets | Exit (all must hold) |
 |---|---|---|
 | **Integrate** | Nothing new: one trunk that every later build comes from. | #17, #11, #12, #14, #16 and #18 merged with CI green on `main` and 0 other warnings; the Credential Manager flake fixed; ruling 11's human token in place; staging's applied migrations equal the repo's list and the staging smokes pass; Amendment 2026-09-29 signed; §3–§4 in stages. |
-| **MVP** | Everything the founder's quinn-ops did, plus grades from Blackboard, proven on a founder-owned scratch profile and test account on staging, with no second person. | The parity audit re-run shows no open row; Quinn has recorded UA's university-policy read; the founder's grades proof has passed through the app's real gate on a dev build from the proof branch that carries UA's date; Quinn says "MVP reached". UA's date on `main` is not needed. |
+| **MVP** | Everything the founder's quinn-ops did, plus grades from Blackboard, proven on a founder-owned scratch profile and test account on staging, with no second person. | The parity audit re-run shows no open row; the founder's grades proof has passed through the app's real gate on a dev build of `main` (the policy-read gate is suspended until 20 paying users: Amendment 2026-09-30, A13; no read or date is needed); Quinn says "MVP reached". |
 | **Pilot** | A few undergraduates other than the founder, on the released app, one computer each, needing nothing from anyone. | Everything under "Pilot" below has shipped, and the measure Quinn sets at entry is met (proposed by the controller; ruling 10 names no exit, an open question below). |
 | **Launch** | Any US undergraduate can pay $9.99 and use Knowlu on more than one desktop. | Everything under "Launch" below is done (proposed by the controller; ruling 10 names no Launch exit, an open question below). |
 | **Beyond** | Each VISION phase that makes the morning answer better. | No stage-wide gate. Per feature: a signed spec, a plan, a review, a merge and a live proof. |
@@ -180,6 +182,39 @@ and the VISION fixes). `main` is `86a3431`. Required checks on `main` since the 
 `cloud`, `eval-gate` (strict off; admins not enforced, so a docs-only direct push still works; never
 merge with `--admin`). `p3-registrar` and `two-desktop` are open as draft PRs #19 and #20, as a record
 only. `m1-grades` is pushed with no PR.
+
+**Merged 2026-10-01 (facts from `git log origin/main` and the ultracode run ledger):** #28 (the docs-only
+CI fix: docs go by PR again), #29 (the grades policy-read gate suspended until 20 paying users, A13), #30
+(docs) and #31 (events, MVP). The MVP lanes now on `main`: Gmail connect, M2 editing, events and grades.
+The remaining MVP lane is email forwarding to Knowlu (item 2a below).
+
+**Proven 2026-10-02 (live proofs on a dev build of `main` `376e8ba`, scratch profile, proof account,
+staging; facts from the run ledger; each row closed by Quinn's word 2026-10-02):**
+- **Gmail connect** (T13): all seven checks passed (no Gmail step in onboarding, Connect, a slot that
+  proposed 11 cards, approve, revoke at Google then Reconnect, two-step Disconnect with grants 0, queue
+  and seen sets 0, cleanup). Two findings, both fixed in the proof-fixes PR: the
+  consent poll stopped before a ~3 minute consent finished (`49debd0`, `b167e73`), and the deck card
+  did not show its Gmail attribution, D15 (`0aad6d5`).
+- **M2 editing** (T10): all six checks passed (body edit and Undo, conflict refusal with the draft kept,
+  preferences, interests, sync carries no `profile/` records, Not shown 34).
+- **Events** (T10): passed with recorded gaps. No obligation card appeared in the feed, no carried
+  series date existed (every date was card-listed), and no accepted all-day date fell on the proof day;
+  the T4, T4c, T4d and T7 tests stand for those. Findings: failed model calls were charged to the
+  first-day event allowance (event cap 80 a day, doubled to 160 on an account's first two judging days;
+  fixed in the proof-fixes PR, `65c5e43`), and the wizard showed the "Blackboard or Canvas?" chooser
+  after a curated pick (F4, fixed in the proof-fixes PR, `f680445`). Root cause of F4: the reviewer was
+  right about the mechanism, but the chooser was stale and F4 does fix what the proof saw. On `main`
+  `376e8ba` the chooser becomes visible only when an `open_lms_window` call fails (`console.js:3111`, in
+  the `!r.ok` branch of the `#wiz-lms-open` handler, call at `:3106`). It ships `hidden`
+  (`index.html:148`), `.wiz-row[hidden]` keeps CSS from leaking it (`console.css:445`, `:450`),
+  `renderWizard` and `pickSchool` (`:3374-3387`) never touch it, and `lms_link.rs:230-231` answers every
+  `ok:false` with a non-empty error. So a curated pick could not show it; what was seen was a chooser
+  left over from an earlier failed call that the pick did not hide, and F4 now knows the curated
+  campus's LMS in the wizard.
+- **Grades** (A13, through the suspended gate): connect, capture, refresh (2 courses, 12 changed items),
+  silent refresh and forget passed. Not run: an uncurated school's "not available" check (it needs a
+  second onboarding). A scheduled slot's capture was not observed (run-slot-once cannot reach the kept
+  session), and two courses answered 403.
 
 **Left** (each merge or deploy on Quinn's word at the time, asked in one line with the evidence):
 1. **The Credential Manager flake** (worktree `fix-credman-flake`). `app/src/account.rs`'s
@@ -216,19 +251,20 @@ in this order (gap ids from the vision program note):
    semantic updates no conflict shows: `migrations_sync_test.ts`'s newest-migration assertion and the
    backup-folder count test), the grades spec's signed edits 3–5, Tasks 2–8, then Task 9's whole-branch
    review at xhigh. **Merge** on that review, green CI and Quinn's word; then `20260929000100` goes to
-   staging. Ruling 12 binds the lane: one predicate in `app/src/grades.rs` gates Connect, refresh and
-   the slot on a curated campus row's `policy_read` date; the date-and-bump test keeps every date off
-   `main` until privacy bump #1; M1 drafts its privacy sentences in the grades spec's §11, never in
+   staging (applied 2026-09-30). Ruling 12's gate is suspended until 20 paying users (A13). The one predicate in
+   `app/src/grades.rs` still gates Connect, refresh and the slot, and while `POLICY_READ_GATE` is
+   `Suspended` it admits every curated Blackboard row, dated or not. The date-and-bump test still keeps
+   any date off `main` until privacy bump #1; M1 drafts its privacy sentences in the grades spec's §11, never in
    `site/privacy.html`, and never moves `PRIVACY_VERSION`. Grades keep `ids::derived_id`
    (path-deterministic, so every desktop derives the same id); two-desktop may move them onto its
    `import_id` when it resumes. **The founder's live proof** follows the merge, with Quinn at the
-   machine in the Blackboard sign-in window (the proof harness cannot drive it), on a dev build from a
-   proof branch that carries UA's date and is never merged ahead of bump #1; then the scratch profile
+   machine in the Blackboard sign-in window (the proof harness cannot drive it), on a dev build of
+   `main` that waits on no policy read (A13: the gate is suspended); then the scratch profile
    is cleaned up. **What privacy bump #1 owes from M1** (the branch touches none of it): spec §11's two
    sentences on `site/privacy.html`, its Effective date, `PRIVACY_VERSION`, the sentence pins,
    `PRIVACY_BUMP_1` in `app/tests/grades.rs` set to that version, and the lawyer-packet delta; the
-   Pilot's re-consent screen (R-PS-4) is still owed before a second account. UA's `policy_read` date
-   reaches `main` only in bump #1's PR or after it. `20260929000100` is applied to staging before any
+   Pilot's re-consent screen (R-PS-4) is still owed before a second account. No `policy_read` date is
+   recorded while A13's suspension holds. `20260929000100` is applied to staging before any
    release that writes `grades/`.
 2. **Gmail connect in the app** (P3, taken out of C4): the settings row's Connect and Disconnect (H9
    phase (b); `set_google_calendar` does not exist yet, so the command and its row are written
@@ -236,6 +272,20 @@ in this order (gap ids from the vision program note):
    checks what C2's `google-connect` and `gmail-read` and the wizard's phase (a) already cover) → spec
    → Quinn signs → plan → build → merge. Gmail stays in Google's Testing mode until `gmail.readonly`
    verification (Launch): 100 test users, refresh tokens that die after seven days.
+   **MERGED 2026-09-30 (#26, `199cd1f`); T12 staging deploy done, T13 the founder's live proof is Quinn's.** Earlier state (2026-09-30):
+   spec signed 2026-09-29 (`docs/specs/2026-09-29-gmail-connect-design.md`) and
+   plan (`docs/plans/2026-09-29-gmail-connect-plan.md`); built on branch `gmail-connect`, not merged:
+   the cloud lane (`gmail-read`, `google-connect`, migration `20260929000200_gmail_disconnect_purge.sql`),
+   the app commands `google_status`, `google_connect` and `google_disconnect` (console list 54 on `main`,
+   73 distinct), the engine's D4 gate and D7 task-to-card routing,
+   and the page (Settings row, two-step Disconnect, wizard Connect Gmail button). Waiting: the transport
+   stop (T8, on PQ1's answer), the staging deploy (the controller's), the founder's live proof and the
+   whole-branch review; merge needs Quinn's word and the code push is asked. No release is cut from
+   this branch before privacy bump #1 (the Pilot's release gate).
+2a. **Email: email forwarding to Knowlu** (spec `docs/specs/2026-09-30-email-forwarding-design.md`,
+   signed 2026-09-30, amendments A1-A13; plan `docs/plans/2026-09-30-email-forwarding-plan.md`). Built
+   in its own worktrees (`email-engine`, `email-app`, `email-cloud`; build started 2026-10-01); the staging
+   receiver is in SES us-east-2 and the S0 DMARC gate passed 2026-10-01; no release is cut from a `main` carrying it before privacy bump #1 (D18).
 3. **M2, body and profile editing** (P5): a body write through `write`, the drawer's body editor, and
    profile editing (interests, preferences). Sized M/L, not small: the engine can only append a body
    line today, so replacing a body is new `write` and journal semantics, and a journal record that
@@ -248,9 +298,9 @@ in this order (gap ids from the vision program note):
 5. **P6, the small parity items:** a producer for Good to know items, conflict flags, opportunity
    proposals expiring after 14 days, the dropped-event audit list. Sized as a list; Quinn marks each do
    or cut; small "do" items go to `mechanical`.
-6. **UA's university-policy read** (ruling 12), recorded by Quinn. The MVP's grades proof waits on it.
-   If UA's policy forbids a kept SSO session, the MVP cannot exit as item 9 defines it, and Quinn
-   rules again on grades.
+6. **UA's university-policy read leaves the MVP** (ruling 12, suspended until 20 paying users:
+   Amendment 2026-09-30, A13). The grades proof waits on no read. A13's review trigger is the 20th
+   paying account (§4).
 
 **This session's cut line** (focus report §5): M1 merged is a must; Gmail connect and M2 are should
 (Gmail first if time is short); the events spec (signed, not built), P6's sized list and the rewritten
@@ -272,8 +322,10 @@ It holds:
   `ShellExecuteW`; the app build blanking `target\<profile>\knowlu-engine.exe`.
 - **Privacy bump #1, with one lawyer read:** the page names ruling 12's kept Blackboard session and
   the grades the account holds; its text, its Effective date and `PRIVACY_VERSION` move in one PR
-  (`app/src/account.rs` requires it), no later than the first release that records a `policy_read`
-  date. **The re-consent screen** for a `privacy_version` change (R-PS-4) ships with it.
+  (`app/src/account.rs` requires it), no later than the first release from a main carrying the
+  suspended grades gate, the Gmail row or email forwarding (the release guard below). The page text
+  also covers spec §7's "kept sign-ins at every school, for now" paragraph, part of bump #1's §7
+  drafts, which T13a still owes. **The re-consent screen** for a `privacy_version` change (R-PS-4) ships with it.
 - **The UA registrar** (the commitment model's phase 3; draft PR #19, `p3-registrar`): its spec
   (`docs/specs/2026-09-26-commitment-model-phase3-design.md`, on the branch) revised to apply-and-list
   (ruling 3's consequence, tested by `journal::human_edited`), the R0 spike with Quinn at the machine,
@@ -284,15 +336,22 @@ It holds:
 - **Two issues shown in the app:** OpenRouter's 402 (payment required) as a named issue instead of
   quiet model failures, and "source went quiet" (`google_accounts.status = 'quiet'` after 14 days,
   modelled server-side, nothing shows it yet; the Issues panel is its home).
+- **The sender on a Gmail card** (Gmail connect spec, Q7 (c), D15): the MVP card shows its Gmail
+  attribution and the model's reason, no sender; storing and showing the sender's display name lands
+  with privacy bump #1, whose page then adds "and who the message was from" (spec §6 item 5).
 - **`calendar.readonly` verification submitted** (a sensitive scope: lighter review, no CASA).
-- **The university-policy read for each other pilot student's university.** Until it is recorded,
-  that student joins without grades from Blackboard; the app enforces this.
+- **The university-policy read for each other pilot student's university: SUSPENDED until 20 paying
+  users** (Amendment 2026-09-30, A13). While it holds, the kept Blackboard session is offered at every
+  curated Blackboard school; the review at the 20th paying account decides.
 
 **Gate:** no non-founder account exists before the re-consent screen, privacy bump #1 (after its
-lawyer read) and ruling 11's token have shipped; the token is done in Integrate. No pilot student
-uses the kept Blackboard session before their own university's read is recorded.
-**Release gate:** no release is cut from a main carrying the Gmail settings row until privacy bump #1
-merges (Gmail connect spec, Q8, signed 2026-09-29).
+lawyer read) and ruling 11's token have shipped; the token is done in Integrate. The
+condition that no pilot student uses the kept Blackboard session before their own university's read
+is recorded is suspended until 20 paying users (A13).
+**Release gate:** no release is cut from a `main` carrying the Gmail settings row, email forwarding to
+Knowlu, or the suspended grades gate (`POLICY_READ_GATE = Suspended`, which offers the kept Blackboard
+session at every curated Blackboard school) until privacy bump #1 merges (Gmail connect spec, Q8,
+signed 2026-09-29; email forwarding spec D18 and D25, signed 2026-09-30).
 
 **Open question for Quinn, at Pilot entry:** ruling 10 names the Pilot's contents, entry and gate but
 no exit. This section reads the exit as "the measure set at entry is met, and Quinn says so".
@@ -316,9 +375,9 @@ It holds:
   file stamped after every existing one and restates the full union, so Plan 2's `000200` re-stamps.
 - **Privacy bump #2.**
 - **`gmail.readonly` verification and the annual CASA**, or Quinn accepts the 100-user cap.
-- **Lawyer sign-off** (unless it moved to Pilot entry); each university-policy read not done in the MVP
-  or the Pilot (UK's, unless a pilot student is at UK) and the widening checklist that decides how
-  reads cover every university Launch opens to; tax registration; code signing (Azure, §4); the
+- **Lawyer sign-off** (unless it moved to Pilot entry); each university-policy read and the widening checklist that decides how
+  reads cover every university Launch opens to (suspended until 20 paying users: Amendment
+  2026-09-30, A13); tax registration; code signing (Azure, §4); the
   private-repository decision (ruling 13; the laptop runner comes back only once it is private).
 - **From C4:** the telemetry class-(c) toggle UI (the eval seed stays empty until it ships), and a
   custom functions domain or a redirect to a page on `knowlu.com` for the Google callback's pages
@@ -365,17 +424,19 @@ a spend is asked at the time.
 | Stage | Ask | Context to give them |
 |---|---|---|
 | Integrate | **Merge the flake-fix PR, then the token PR** | Asked one at a time at merge time, each in one line with the evidence (the contract-reviewer's verdict, green CI). §3's Integrate items 1–2. |
+| Integrate | **Push migration `20261002000100` (`refund_call`) to staging (`db push --include-all`) BEFORE redeploying `judge-task`, `judge-event`, `judge-email` and `gmail-read`; then to prod on Quinn's word** | Refunds fail silently without it: the functions call `refund_call`, and a missing function is not an error the student sees. The controller runs it; production waits for Quinn. |
 | Integrate | **Go for the staging deploy** | Asked once the staging runbook is reviewed; the order is §3's Integrate item 3. The controller runs it; nothing touches production. |
 | MVP | **Sign the Gmail-connect and M2 specs** (one sitting), later the events spec | Each after its research and spec review. W1's research left 13 questions for these specs; they are asked inside the specs, not separately. |
-| MVP | **Merge M1**, then **the founder's grades proof** at the machine | Merge on Task 9's whole-branch review and green CI; `20260929000100` then goes to staging. Bump #1 owes the privacy page, its date, `PRIVACY_VERSION` and `PRIVACY_BUMP_1`; UA's date reaches `main` only with or after it. The proof runs in the Blackboard sign-in window on a dev build from the proof branch that carries UA's date (§3's MVP lane 1). |
-| MVP | **Record UA's university-policy read** (ruling 12) | The MVP's grades proof waits on it. If UA forbids a kept SSO session, Quinn rules again on grades; the pilot may then start without them. |
+| MVP | **Merge M1**, then **the founder's grades proof** at the machine | Merge on Task 9's whole-branch review and green CI; `20260929000100` then goes to staging. Bump #1 owes the privacy page, its date, `PRIVACY_VERSION` and `PRIVACY_BUMP_1`; The proof runs in the Blackboard sign-in window on a dev build of `main` and waits on no policy read (A13; §3's MVP lane 1). |
+| Review | **A13's review at the 20th paying account** | Ruling 12's policy-read gate is suspended until then (A13); the controller checks a count-only query at each milestone and asks. "Record UA's university-policy read" has left the MVP queue. |
 | MVP | **Mark each P6 item do or cut** | The four items are in §3's MVP lane 5, sized as a list first. |
+| MVP | **Roll staging's `OPENROUTER_API_KEY`** | Staging's secret holds Quinn's temporary key (set 2026-10-02, after the old key of 09-16 proved dead and every event judgment failed). When that key is rolled, update staging again, and the GitHub secret the eval gate reads too if it is still the old key. |
 | MVP | **Say "MVP reached"** | Once the parity audit re-run shows no open row and the grades proof has passed. |
 | Pilot entry | **The pilot's shape** | Ruling 10: the number of students and their universities, the length, a measure from VISION's successes 1, 2, 5 and 6, and whether pilot students pay (if they do, the lawyer gate moves from Launch to Pilot entry). Also the Pilot's and Launch's exits, which ruling 10 leaves unnamed (§3). |
 | Pilot, before parity | **Roll the prod database password and the Resend key** (both pasted in chat on 2026-09-14; moved here from "before launch", because non-founder accounts start in the Pilot) | Database: reset at `https://supabase.com/dashboard/project/jxthohvwrijwtuwlglan/settings/database`; nothing else references it. Resend: create the new key, then on **both** projects `supabase secrets set EMAIL_API_KEY=… SMTP_PASSWORD=… --project-ref <ref>` and `$env:SMTP_PASSWORD=…; supabase config push --workdir cloud` while linked to each (`link --project-ref <ref> --password ""`), **then** delete the old key — the other order breaks sign-in mail. `BILLING_JOBS_TOKEN` and `SOURCES_ENC_KEY` on prod were generated on this machine and never shown; they need no roll. |
-| Pilot | **Production parity** (rewritten 2026-09-29): production holds C1's seven migrations and eight functions of 2026-09-14, live billing, and nothing later that this file records | **The checklist, in order.** The controller runs it with Quinn's secrets, from a scratch copy of `cloud/supabase` linked to `jxthohvwrijwtuwlglan`; Integrate's staging runbook is its rehearsal.<br>**(1) Read prod's `migration list`, then one ordered push** (`db push --include-all`) of everything missing, in filename order: C2's `20260911000100`–`000900`; C3′'s `20260912000100`–`000400`; the provider swap's `20260916000100`; `20260917000100` (C1b) and `20260922000100`/`000200`, if the list lacks them (the checklist of 2026-09-24 did not name them, so they may already be there); J's `20260922120100` and `120200`; C1c's `20260923000100`; the commitment model's `20260926000100`; M1's `20260929000100` once M1 merges.<br>**(2) Functions** (`functions deploy … --use-api`), each only after the migrations it reads:<br>• C2's eleven, with `gmail-read` never before `20260922120200`, and `judge-task`, `judge-event`, `judge-email` and `gmail-read` together straight after J's two;<br>• C1b's changed ones;<br>• `account`, redeployed after the migrations;<br>• `sync-push` and `sync-pull`;<br>• `ingest-coursework`;<br>• the telemetry handler (#12's F7) before any release whose engine carries F8.<br>**(3) Prod settings and secrets, which Quinn owns:** `OPENROUTER_API_KEY`; the Gmail project's `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` with the prod callback added; C1b's two auth settings (the next row).<br>**(4) Privacy bump #1** live on `knowlu.com`, after its lawyer read, before any release that uploads note text and before the first non-founder account; the re-consent screen ships with it.<br>**(5) Proofs:**<br>• the staging smokes repeated on prod;<br>• a staging proof that a slot and *Sync now* run **more than an hour** after the last session refresh and sync rather than say "signed out" (confirm prod's `jwt_expiry` is 3600).<br>The two-desktop live proof that stood here moved to Launch (ruling 10).<br>**(6)** Then the 0.1.1 tag, on Quinn's word. |
+| Pilot | **Production parity** (rewritten 2026-09-29): production holds C1's seven migrations and eight functions of 2026-09-14, live billing, and nothing later that this file records | **The checklist, in order.** The controller runs it with Quinn's secrets, from a scratch copy of `cloud/supabase` linked to `jxthohvwrijwtuwlglan`; Integrate's staging runbook is its rehearsal.<br>**(1) Read prod's `migration list`, then one ordered push** (`db push --include-all`) of everything missing, in filename order: C2's `20260911000100`–`000900`; C3′'s `20260912000100`–`000400`; the provider swap's `20260916000100`; `20260917000100` (C1b) and `20260922000100`/`000200`, if the list lacks them (the checklist of 2026-09-24 did not name them, so they may already be there); J's `20260922120100` and `120200`; C1c's `20260923000100`; the commitment model's `20260926000100`; M1's `20260929000100` (M1 merged); the Gmail connect stream's `20260929000200_gmail_disconnect_purge.sql` (it sorts after J's `20260922120200` and, in filename order, after M1's), which must reach production before the first release that carries the Gmail settings row, or a production Disconnect keeps `gmail_queue` and `gmail_seen` rows while bump #1's page says they are deleted.<br>**Checked against staging runbook §9** (2026-09-30): this list already names C1b's three (runbook rows 22-24), J's two (25-26), p1's one (28), M1's (29) and Gmail's (30); the push carries rows 8-30.<br>**(2) Functions** (`functions deploy … --use-api`), each only after the migrations it reads:<br>• C2's eleven, with `gmail-read` never before `20260922120200`, and `judge-task`, `judge-event`, `judge-email` and `gmail-read` together straight after J's two;<br>• C1b's changed ones;<br>• `account`, redeployed after the migrations;<br>• `gmail-read` and `google-connect`, redeployed after `20260929000200` (the Gmail connect stream changed both);<br>• `sync-push` and `sync-pull`;<br>• `ingest-coursework`;<br>• the telemetry handler (#12's F7) before any release whose engine carries F8.<br>**(3) Privacy bump #1** live on `knowlu.com`, after its lawyer read, before any release that uploads note text, before the first non-founder account **and before step (4) sets the Gmail project's `GOOGLE_CLIENT_ID`** (Gmail connect spec §6: the released 0.1.0 can connect Calendar the moment that secret exists, and the page must disclose the stored connection first); the re-consent screen ships with it.<br>**(4) Prod settings and secrets, which Quinn owns:** `OPENROUTER_API_KEY`; the Gmail project's `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` with the prod callback added, only after step (3); C1b's two auth settings (the next row).<br>**(5) Proofs:**<br>• the staging smokes repeated on prod;<br>• a staging proof that a slot and *Sync now* run **more than an hour** after the last session refresh and sync rather than say "signed out" (confirm prod's `jwt_expiry` is 3600).<br>The two-desktop live proof that stood here moved to Launch (ruling 10).<br>**(6)** Then the 0.1.1 tag, on Quinn's word. |
 | Pilot | **C1b's open sign-in settings** | From the record's C1b row: (6) on **both** projects, Authentication → Providers → Email → *Confirm email* OFF and Authentication → Rate Limits → *Emails sent* 20 per hour (still open 2026-09-22: the API showed both unchanged; the project default of 2 an hour blocks a pilot); confirm the sign-in Google client is in the new project with publishing status In production; and the two decisions ruled by the controller pending Quinn's word — the card stays required at checkout (R-C1b-2), and whether to turn on `[auth.captcha]` for the sign-in endpoints. |
-| Pilot | **Privacy bump #1: the lawyer read, with P5's eleven facts** | The page names ruling 12's kept Blackboard session and the grades the account holds (M1's sentences, drafted in the grades spec's §11). `docs/reports/2026-09-10-c1-quinn-packets.md` (P5 section) lists what only Quinn can settle in the drafted `site/privacy.html` and `site/terms.html`: the legal entity's name, the `support@` and `security@` mailboxes (they forward, §1), Alabama as governing law, that the draft carries **no arbitration clause** (informal resolution then the courts — the lawyer's call), and the Stripe Dashboard settings the terms assume. Hand the two pages to the lawyer with that list. **The interests sentence** (M2 editing spec §5, Q8, signed 2026-09-29): the page's list of what travels to a model must also carry, or say in the same facts, *"…your stated preferences and grade weights, and, when a campus event is judged, the event's listing and up to the first 600 characters of the interests you have told Knowlu."* Interests reach the event judge for the first time with M2's editor and no code gates it; this sentence is the guard. |
+| Pilot | **Privacy bump #1: the lawyer read, with P5's eleven facts** | The page names ruling 12's kept Blackboard session and the grades the account holds (M1's sentences, drafted in the grades spec's §11). `docs/reports/2026-09-10-c1-quinn-packets.md` (P5 section) lists what only Quinn can settle in the drafted `site/privacy.html` and `site/terms.html`: the legal entity's name, the `support@` and `security@` mailboxes (they forward, §1), Alabama as governing law, that the draft carries **no arbitration clause** (informal resolution then the courts — the lawyer's call), and the Stripe Dashboard settings the terms assume. Hand the two pages to the lawyer with that list. **The interests sentence** (M2 editing spec §5, Q8, signed 2026-09-29): the page's list of what travels to a model must also carry, or say in the same facts, *"…your stated preferences and grade weights, and, when a campus event is judged, the event's listing and up to the first 600 characters of the interests you have told Knowlu."* Interests reach the event judge for the first time with M2's editor and no code gates it; this sentence is the guard. **The Gmail connect sentences** (Gmail connect spec §6, Q8 (a1) and Q9 (a)(ii), signed 2026-09-29; drafted there, never written into the page by that stream, which leaves `site/privacy.html` and `PRIVACY_VERSION` untouched): (1) the parenthesis "(Gmail is not connected in this version of Knowlu; the app will say when it is.)" goes, and the disconnect sentence becomes "Disconnecting (in Settings, at any time) revokes our access at Google and deletes the stored connection, our list of which emails we have already read, and any proposals from your mail that had not reached your computer yet. The record of what Knowlu decided about each email, including its message id, stays until you delete your account. Google holds Calendar and Gmail as one permission, so disconnecting one disconnects both."; (2) "What we collect" gains *Your Google connection, if you make one*: the permission Google gave us (stored encrypted, never sent to your computer), the Google account's id and email address (so the app can show which account is connected), which of Calendar and Gmail you allowed, when you connected, and whether the connection still works; deleted when you disconnect or delete your account; (4) "How long we keep it" gains a Gmail bullet: our list of the emails we have read for 30 days, a proposal waiting to reach your computer until it does and then 7 days, both deleted at once by a disconnect or an account deletion, and the record of each decision, message id included, kept until you delete your account (the PR re-reads the 30 and 7 days in `20260911000900_final_review_fixes.sql` before quoting them). (Item 3 needs no page edit: the engine now proposes every Gmail item, so the page's existing sentence is true.) **The four page tests** (spec §8.5): (a) the page no longer contains "Gmail is not connected in this version"; (b) the disconnect sentence names Calendar and what the migration deletes, says the record of each decision stays until the account is deleted, and no sentence says a disconnect deletes message ids; (c) "What we collect" has the Google-connection entry and "How long we keep it" has the Gmail bullet; (d) the page's date equals `account::PRIVACY_VERSION` (already pinned by `app/tests/static_assets.rs`, which stays green). |
 | Pilot | **Submit `calendar.readonly` verification** | The sensitive scope: lighter review, no CASA. The homepage and privacy URLs are live. The P4 texts are in `docs/reports/2026-09-10-c1-quinn-packets.md`. |
 | Pilot | **The registrar's R0 spike, at the machine** | Only when `p3-registrar` resumes; it needs Quinn's own university sign-in, which the proof harness cannot drive. |
 | Pilot, ongoing | **Keep the OpenRouter account funded, with its low-balance email** | OpenRouter is prepaid credit: an empty balance answers 402 on every call, which the device reports today as `model failed` for every item. Quinn enabled auto-top-up on 2026-09-16; the $2 per-account ceiling stays as the runaway guard. The in-app 402 issue is Pilot work (§3). Rotating the OpenRouter key is Quinn's call. |
@@ -384,6 +445,7 @@ a spend is asked at the time.
 | Launch | **`gmail.readonly` verification and the annual CASA, or accept the 100-user cap** | The restricted scope; Gmail stays in Testing mode (seven-day refresh tokens) until it lands. |
 | Launch | **The two-desktop live proof** (moved from production parity's step (5) by ruling 10) | Two computers on one account, after Plans 1–3 merge (§3's Launch). |
 | Launch | **Lawyer sign-off, tax registration, the private-repository decision** | The lawyer's open call includes whether the annual reminder must name the next charge date (R-C1-18). The repository is public (ruling 13); while it is, no self-hosted runner is registered. |
+| Any time (trigger, set 2026-09-30) | **Rule again on ruling 12's suspended policy-read gate at the 20th paying account** (email forwarding spec D25, A13) | Counted as an `active` paid subscription (`trialing` and founder-owned test accounts not counted); the controller's count-only query checks it at each milestone HANDOFF update, and Quinn rules before the next release tagged after it. Restoring the gate is one constant, `POLICY_READ_GATE = Enforced` in `app/src/grades.rs`, with its predicate tests already written. |
 | Any time | **Rotate the Blackboard token and the Google Calendar capability URL** | Neither was regenerated as far as this file knows; both sat in a OneDrive mirror. |
 | Any time | **Delete the old local copies** | `%LOCALAPPDATA%\quinn-ops\{dual,rehearsal,scratch,shots,…}` and the old `KnowluBackup\profile_*` mirrors, after two clean slots. |
 | Later | **A co-founder** | Unowned, and VISION's only open decision with no next action. |

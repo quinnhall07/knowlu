@@ -24,7 +24,10 @@ use serde_json::{Map, Value};
 
 use crate::ledger::{JsonlLedger, Record};
 
-pub const OPS: [&str; 6] = ["set", "create", "delete", "move", "append_body", "supersede"];
+/// `set_body` (M2 D2) is its own op with `field: null`: judge-once, `verify_tail` and `reconcile`
+/// select `set`/`create` records, so none of them sees a body edit. New ops are appended, never
+/// inserted.
+pub const OPS: [&str; 7] = ["set", "create", "delete", "move", "append_body", "supersede", "set_body"];
 
 /// Declared in Python and, notably, **never enforced** — `make_record` validates `op` but not
 /// `via`. Preserved: a typo'd `via` is written without complaint, exactly as today.
@@ -501,6 +504,20 @@ mod tests {
         // Preserved quirk: VIAS is declared and never enforced.
         let spec = NewRecord::new("set", "tasks/x.md", "quinn", "not-a-real-via");
         assert!(make_record(spec).is_ok());
+    }
+
+    #[test]
+    fn ops_include_set_body() {
+        // M2 D2 (spec test 14): one op appended, the six before it unmoved and unrenamed.
+        assert_eq!(OPS, ["set", "create", "delete", "move", "append_body", "supersede", "set_body"]);
+        let mut spec = NewRecord::new("set_body", "tasks/x.md", HUMAN_ACTOR, "dashboard");
+        spec.id = Some("task_0123456789");
+        let rec = make_record(spec).expect("set_body is a known op");
+        assert_eq!(rec["op"], "set_body");
+        assert_eq!(rec["field"], Value::Null, "no field-keyed reader may see a body edit");
+        // Still validated: a near miss is refused by name.
+        let spec = NewRecord::new("set_bodies", "tasks/x.md", HUMAN_ACTOR, "dashboard");
+        assert_eq!(make_record(spec).unwrap_err(), JournalError::UnknownOp("set_bodies".into()));
     }
 
     #[test]

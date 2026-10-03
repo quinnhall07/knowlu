@@ -1,10 +1,18 @@
+import { requireUser } from "../_shared/auth.ts";
+import { authGetUser, restFromEnv } from "../_shared/db.ts";
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
 import { sharedDb } from "../_shared/judge_deps.ts";
 import { revokeGoogleToken } from "../_shared/google_revoke.ts";
 import { connectHandler } from "./handler.ts";
+import type { GoogleGrant } from "./handler.ts";
 import { disconnectGrant } from "./disconnect.ts";
 
 Deno.serve(connectHandler(requireActiveEntitlement, {
+  // `?status=1` and `DELETE`: a valid session, no subscription check (handler.ts, `authenticate`).
+  async authenticate(req) {
+    const rest = restFromEnv();
+    return { account_id: (await requireUser(req, (token) => authGetUser(rest, token))).id };
+  },
   clientId: Deno.env.get("GOOGLE_CLIENT_ID") ?? "",
   redirectUri: `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/google-callback`,
   async saveState(accountId) {
@@ -12,11 +20,15 @@ Deno.serve(connectHandler(requireActiveEntitlement, {
     await sharedDb().insert("google_state", { nonce, account_id: accountId }, false);
     return nonce;
   },
-  async grantedScopes(accountId) {
+  async grant(accountId) {
+    // No status filter (Gmail connect §4.1): a revoked row is what `?status=1` names "revoked"
+    // and what `?scope=reconnect` re-asks for. The account filter is the whole access control.
     const rows = await sharedDb().select(
-      `google_accounts?account_id=eq.${accountId}&status=neq.revoked&select=scopes`,
-    ) as Array<{ scopes: string[] }>;
-    return rows[0]?.scopes ?? [];
+      `google_accounts?account_id=eq.${accountId}&select=scopes,status,email_hint`,
+    ) as Array<{ scopes: string[] | null; status: GoogleGrant["status"]; email_hint: string | null }>;
+    const row = rows[0];
+    if (row === undefined) return null;
+    return { scopes: row.scopes ?? [], status: row.status, email: row.email_hint ?? null };
   },
   async disconnect(accountId) {
     const db = sharedDb();

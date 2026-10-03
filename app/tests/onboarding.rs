@@ -1555,8 +1555,22 @@ fn typing_a_school_name_finds_it_and_typing_one_letter_finds_nothing() {
     let rows = hits["hits"].as_array().expect("hits");
     assert!(!rows.is_empty() && rows.len() <= 10, "{} hits", rows.len());
     assert!(rows.iter().any(|r| r[0].as_u64() == Some(100751)), "{rows:?}");
-    // A row is [unitid, name, city, state] — the web host stays in the asset, unshown and uncrossed.
-    assert_eq!(rows[0].as_array().map(Vec::len), Some(4));
+    // A row is [unitid, name, city, state, lms] — the web host stays in the asset, unshown and uncrossed.
+    // `lms` is the curated kind (`scaffold::CAMPUSES`) or "" for a school nobody has curated: it lets
+    // the wizard pre-answer "which LMS does your school use?" (live proof 2026-10-02: a curated
+    // Blackboard school was asked Blackboard or Canvas).
+    assert_eq!(rows[0].as_array().map(Vec::len), Some(5));
+    for r in rows {
+        let want = knowlu::scaffold::curated(&r[0].to_string()).map(|c| c.lms_kind).unwrap_or("");
+        assert_eq!(r[4].as_str(), Some(want), "{r:?}");
+    }
+    for c in knowlu::scaffold::CAMPUSES {
+        let found = campus_search(c.label.into());
+        let row = found["hits"].as_array().and_then(|h| h.iter().find(|r| r[0].to_string() == c.unitid)).unwrap_or_else(|| panic!("{} not found", c.label));
+        assert_eq!(row[4].as_str(), Some(c.lms_kind), "a curated school's hit carries its LMS kind");
+    }
+    let tusc = campus_search("tuscaloosa".into());
+    assert!(tusc["hits"].as_array().unwrap().iter().any(|r| r[4].as_str() == Some("")), "an uncurated school's lms is empty, so the wizard still asks");
     // City and state match too, or a student who knows where they go and not what it is called is stuck.
     assert!(campus_search("tuscaloosa".into())["hits"].as_array().map(|r| !r.is_empty()).unwrap_or(false));
 }

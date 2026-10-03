@@ -52,6 +52,8 @@ pub mod eventfilter;
 pub mod eventfeed;
 pub mod eventroster;
 pub mod eventemit;
+pub mod eventaccept;
+pub mod eventcarry;
 
 // Wave 6 - coursework: zyBooks and VHL.
 pub mod coursework;
@@ -81,6 +83,10 @@ pub mod cli;
 // The read model for the desktop console (plan 2026-09-02): read-only, computed from the vault
 // `cli` already knows how to load, never written to it.
 pub mod surface;
+
+// The student's profile (M2 spec §7.6, hand-off H1): `profile/preferences.md` and
+// `profile/interests.md` read into plain data and written through `write`, never parsed and re-dumped.
+pub mod profile;
 
 // The commitment model (spec 2026-09-23): the notes in `commitments/`, read into plain data for
 // `weekcal` and the piece-2 overlap API. Pure but for `load`'s reads; never a model or the network.

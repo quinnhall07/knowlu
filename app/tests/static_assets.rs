@@ -504,6 +504,17 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     assert!(panel.contains("id=\"wiz-school\"") && panel.contains("id=\"wiz-school-hits\""), "the school typeahead");
     assert!(panel.contains("id=\"wiz-school-none\"") && panel.contains("id=\"wiz-school-free\""), "…and the free-text fallback");
     assert!(panel.contains("id=\"wiz-lms-kind\""), "…and the two-button LMS question for an uncurated school");
+    // F4: "Sign in to my school" waits for a picked school; pressing it with no unitid used to fail
+    // and unhide the LMS chooser. Disabled in renderWizard, early return in the handler, chooser
+    // hidden when free entry starts.
+    assert!(js.contains("EL(\"wiz-lms-open\").disabled = !WIZ.campus.unitid;"), "the sign-in button waits for a school");
+    assert!(js.contains("if (!WIZ.campus.unitid) { return; }"), "the handler returns early with no school");
+    let free = js.split("EL(\"wiz-school-free\").addEventListener(\"input\"").nth(1).and_then(|s| s.split("});").next()).expect("the free-entry handler");
+    assert!(free.contains("EL(\"wiz-lms-kind\").hidden = !(typed && !WIZ.campus.lms);"), "free entry asks the LMS once name and state are filled");
+    assert!(free.contains("var typed = !!(WIZ.campus.name && WIZ.campus.state);"), "…keyed on both fields");
+    assert!(free.contains("WIZ.icsNote = typed ?") && free.contains("paste your calendar link below"), "…with the paste-link note, cleared otherwise");
+    assert!(free.contains("unitid: \"\""), "free entry keeps the unitid empty, so sign-in stays disabled");
+    assert!(free.contains("lms: WIZ.campus.unitid ? \"\" : (WIZ.campus.lms || \"\")"), "a curated school's lms is never carried into a free entry");
     assert!(!html.contains("name=\"campus\""), "no campus radios anywhere on the page");
     assert!(!js.contains("input[name=\\\"campus\\\"]"), "…and nothing reads one");
     assert!(js.contains("function schoolHits(") && js.contains("\"campus_search\""), "the typeahead asks Rust");
@@ -511,6 +522,9 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     // a `fetch` of a bundled asset is refused — and that file is the controller's. The search is a
     // command; the page holds ten rows.
     assert!(!js.contains("campuses.json"), "the page never names the asset; `campus_search` reads it");
+    // A curated school's LMS kind comes in the hit (`r[4]`) and is the pick's answer, so the chooser is
+    // for an uncurated school only (live proof 2026-10-02). The page names no school.
+    assert!(js.contains("lms: r[4] || \"\""), "pickSchool takes the curated LMS kind from the hit");
     // Spec §11a: **both** calendars, on this one panel, before coursework logins and Gmail — the
     // personal one is what makes today's page know the day is already half full.
     assert!(panel.contains("id=\"wiz-cal-ics\"") && panel.contains("id=\"wiz-cal-note\""), "the personal calendar's field");
@@ -593,6 +607,53 @@ fn the_wizard_google_flow_keeps_its_state_on_wiz_and_renders_it() {
         busy_write < google_connected_call.unwrap(),
         "wiz-next is disabled before the google_connected await, not after it"
     );
+}
+
+/// Gmail connect D11: the wizard's Gmail panel has a Connect Gmail button whose state follows the
+/// same A-5 rule as the calendar button's (`WIZ`, `renderWizard()`, a token `wizGo` bumps).
+#[test]
+fn the_wizard_gmail_flow_keeps_its_state_on_wiz_and_renders_it() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let panel = html.split("id=\"wiz-gmail\"").nth(1).and_then(|s| s.split("id=\"wiz-slots\"").next()).expect("the Gmail panel");
+    assert!(panel.contains("id=\"wiz-gmail-connect\""), "the panel has the button");
+    assert!(panel.contains("id=\"wiz-gmail-note\""), "the status line has its own element");
+    assert!(!panel.contains("Skip it for now"), "the old copy-only text is gone");
+    assert!(panel.contains("While Google reviews Knowlu, this works only for invited testers"), "the Testing sentence");
+    assert!(panel.contains("Knowlu can read your Gmail for things you have to do and propose each one for you to approve. You can skip this and connect later in Settings."), "the plan's what-it-does sentence");
+    assert_eq!(panel.matches("read your").count(), 1, "one what-it-does sentence");
+    assert!(js.contains("WIZ.gmailNote = \"Gmail is connected.\";"), "the plan's success note");
+    assert!(js.contains("WIZ.gmailNote = GOOGLE_TIMEOUT;"), "the Settings timeout sentence, unchanged");
+    assert!(js.contains("gmail: false") && js.contains("gmailNote:") && js.contains("gmailPolling: false") && js.contains("gmailSeq: 0"), "WIZ carries the flow's state");
+    assert!(js.contains("EL(\"wiz-gmail-note\").textContent = WIZ.gmailNote"), "renderWizard paints the note");
+    assert!(js.contains("EL(\"wiz-gmail-connect\").disabled = WIZ.gmail || WIZ.gmailPolling"), "disabled is derived from WIZ");
+    let go = js.find("function wizGo(").map(|i| &js[i..]).expect("wizGo");
+    assert!(
+        go.find("WIZ.gmailSeq").map(|i| i < go.find("function wizFinish(").unwrap_or(usize::MAX)).unwrap_or(false),
+        "wizGo bumps the token on leaving the panel"
+    );
+}
+
+#[test]
+fn the_wizard_gmail_button_uses_the_wizard_commands() {
+    let js = read("console.js");
+    let h = js.split("getElementById(\"wiz-gmail-connect\")").nth(1).and_then(|s| s.split("// ---- R-OB-4").next()).expect("the Gmail handler");
+    assert!(h.contains("invoke(\"google_connect_url\", { scope: \"gmail\" })"), "the wizard command, scope gmail");
+    assert!(h.contains("invoke(\"open_external\""), "the wizard's opener");
+    assert!(h.contains("invoke(\"google_connected\")"), "polls the wizard's status command");
+    for console_only in ["google_status", "google_connect\"", "google_disconnect"] {
+        assert!(!h.contains(console_only), "no console-only command: {console_only}");
+    }
+}
+
+#[test]
+fn next_never_waits_on_gmail() {
+    let js = read("console.js");
+    let render = js.split("function renderWizard(").nth(1).and_then(|s| s.split("function clearCredentialFields").next()).expect("renderWizard");
+    assert!(render.contains("EL(\"wiz-next\").disabled = WIZ.busy;"), "Next depends on busy alone");
+    assert!(!render.contains("wiz-next\").disabled = WIZ.busy ||") && !render.contains("gmailPolling ||  WIZ.busy"), "not on polling");
+    let finish = js.split("function wizFinish(").nth(1).and_then(|s| s.split("\n  // The Checkout page").next()).expect("wizFinish");
+    assert!(!finish.contains("gmail"), "nothing about Gmail reaches the plan");
 }
 
 /// R-OB-1: the wizard that takes a coursework password must also say what the work is for. Quinn's
@@ -1806,6 +1867,124 @@ fn the_picker_offers_a_local_backup_restore_link_and_says_it_is_not_the_account(
     assert!(after_open_profile.contains("EL(\"pick-lede\").textContent = o.error"), "…and its message is shown: {after_open_profile}");
 }
 
+/// Gmail connect T9a (spec §8.4 item 1): the Google row sits after Account, inside Settings, with
+/// every id T9b and T9c bind to.
+#[test]
+fn the_google_row_sits_after_account_with_its_ids() {
+    let html = read("index.html");
+    let js = read("console.js");
+    let open = html.find("id=\"settings\"").expect("#settings");
+    let close = open + html[open..].find("</aside>").expect("end of #settings");
+    let acct = html.find("id=\"set-account\"").expect("#set-account");
+    let google = html.find("id=\"set-google\"").expect("#set-google");
+    assert!(open < acct && acct < google && google < close, "#set-google is inside #settings, after #set-account");
+    for id in [
+        "set-google-state", "set-google-connect", "set-google-reconnect",
+        "set-google-disconnect-1", "set-google-disconnect-2", "set-google-note",
+    ] {
+        let at = html.find(&format!("id=\"{id}\"")).unwrap_or_else(|| panic!("index.html has no #{id}"));
+        assert!(google < at && at < close, "#{id} is inside the Google row");
+        assert!(js.contains(&format!("\"{id}\"")), "console.js never names #{id}");
+    }
+    assert!(js.contains("\"google_status\""), "the row asks google_status");
+}
+
+/// The launch-time `checkAccount` (upgrade overlay) must not reach `google_status`: the row loads
+/// only while Settings is open (spec section 4.4).
+#[test]
+fn the_launch_account_check_does_not_reach_google_status() {
+    let js = read("console.js");
+    let start = js.find("function gateGoogleRow").expect("gateGoogleRow");
+    let end = start + js[start..].find("function closeSettings").expect("closeSettings");
+    let gate = &js[start..end];
+    let guard = gate.find("EL(\"settings\").hidden").expect("gateGoogleRow checks that Settings is open");
+    let load = gate.find("loadGoogleRow()").expect("gateGoogleRow loads the row");
+    assert!(guard < load, "the Settings-open guard comes before loadGoogleRow");
+}
+
+/// Gmail connect T9b (spec section 8.4 item 2): the console invokes the three Google commands, and
+/// `open_external` is invoked only inside the wizard's Google handler. Its `google_disconnect` half
+/// is red until T9c wires the two-step Disconnect.
+#[test]
+fn the_console_invokes_the_three_google_commands_and_never_open_external_outside_the_wizard() {
+    let js = read("console.js");
+    for cmd in ["google_status", "google_connect", "google_disconnect"] {
+        assert!(js.contains(&format!("invoke(\"{cmd}\"")), "console.js never invokes {cmd}");
+    }
+    // The wizard's two handlers (calendar, and Gmail per D11) are the only places it may be invoked.
+    let spans: Vec<(usize, usize)> = ["wiz-google", "wiz-gmail-connect"].iter().map(|id| {
+        let start = js.find(&format!("getElementById(\"{id}\").addEventListener")).unwrap_or_else(|| panic!("the wizard's {id} handler"));
+        (start, start + js[start..].find("
+  });").expect("end of the handler"))
+    }).collect();
+    for (at, _) in js.match_indices("invoke(\"open_external\"") {
+        assert!(spans.iter().any(|&(a, b)| a < at && at < b), "open_external is invoked outside the wizard's handlers");
+    }
+}
+
+/// Gmail connect plan section 4: while polling, the state line (not the note) reads the plan's
+/// exact sentence.
+#[test]
+fn the_google_row_shows_the_plan_polling_sentence_in_the_state_line() {
+    let js = read("console.js");
+    assert!(js.contains("var GOOGLE_POLLING = \"Waiting for Google\u{2026} finish in your browser.\";"));
+    let start = js.find("function renderGoogleRow(").expect("renderGoogleRow");
+    let end = start + js[start..].find("\n  }\n").expect("end of renderGoogleRow");
+    let f = &js[start..end];
+    assert!(f.contains("EL(\"set-google-state\").textContent = busy ? GOOGLE_POLLING : (SET.googleWaitedOut"), "{f}");
+    let c = js.find("function connectGoogle(").expect("connectGoogle");
+    let c_end = c + js[c..].find("\n  }\n").expect("end of connectGoogle");
+    assert!(!js[c..c_end].contains("SET.googleNote = GOOGLE_POLLING"), "the note stays empty while polling");
+}
+
+/// Gmail connect T9b (spec section 8.4 item 3): the row's poll carries `SET.googleSeq`, bumped on
+/// Settings close and on every new click.
+#[test]
+fn the_google_row_poll_is_cancelled_when_settings_closes() {
+    let js = read("console.js");
+    let start = js.find("function connectGoogle(").expect("connectGoogle");
+    let end = start + js[start..].find("\n  }\n").expect("end of connectGoogle");
+    let f = &js[start..end];
+    assert!(f.contains("var mySeq = ++SET.googleSeq"), "every click takes a new token: {f}");
+    assert!(f.matches("SET.googleSeq !== mySeq").count() >= 2, "the loop checks the token after each await: {f}");
+    assert!(f.contains("SET.googlePolling = true") && f.contains("SET.googlePolling = false"), "{f}");
+    let close = js.find("function closeSettings(").map(|i| &js[i..i + 160]).expect("closeSettings");
+    assert!(close.contains("SET.googleSeq += 1"), "closing Settings bumps the token: {close}");
+    assert!(js.contains("\"google_connect\", { scope:"), "the row starts the flow with google_connect");
+    assert!(!js.contains("gmail.readonly"), "no scope string on the page");
+}
+
+/// The poll runs ten minutes; a student who cancelled on Google's page must be able to mint a new
+/// link, so Connect and Reconnect stay enabled while polling (only a disconnect in flight locks them).
+#[test]
+fn the_google_row_connect_buttons_stay_enabled_while_polling() {
+    let js = read("console.js");
+    let start = js.find("function renderGoogleRow(").expect("renderGoogleRow");
+    let end = start + js[start..].find("\n  }\n").expect("end of renderGoogleRow");
+    let f = &js[start..end];
+    assert!(f.contains("var retry = id === \"set-google-connect\" || id === \"set-google-reconnect\""), "{f}");
+    assert!(f.contains("EL(id).disabled = SET.leaving || (busy && !retry)"), "{f}");
+}
+
+/// Gmail connect T9c (spec section 8.4 item 4, D6): step 1 names Calendar, step 2 is the only call
+/// to `google_disconnect`, and closing Settings puts the confirm away.
+#[test]
+fn the_disconnect_confirm_names_calendar() {
+    let js = read("console.js");
+    assert!(js.contains("Google Calendar too"), "the step-1 text names Calendar");
+    let text = js.find("var GOOGLE_DISCONNECT_CONFIRM").expect("the confirm text is one constant");
+    assert!(js[text..text + 400].contains("This disconnects Google Calendar too"), "step 1 opens with the spec's sentence");
+    assert!(js.contains("\"#set-google-disconnect-1\"") && js.contains("\"#set-google-disconnect-2\""), "both steps are wired");
+    let step2 = js.find("closest(\"#set-google-disconnect-2\")").expect("step 2 handler");
+    assert!(js[step2..step2 + 120].contains("disconnectGoogle()"), "step 2 runs disconnectGoogle");
+    let f = js.find("function disconnectGoogle(").expect("disconnectGoogle");
+    let call = js.find("invoke(\"google_disconnect\"").expect("google_disconnect is invoked");
+    assert!(f < call && call < f + 400, "google_disconnect is called from disconnectGoogle only");
+    assert_eq!(js.matches("invoke(\"google_disconnect\"").count(), 1);
+    let close = js.find("function closeSettings(").map(|i| js[i..].lines().next().unwrap()).expect("closeSettings");
+    assert!(close.contains("SET.confirming = false"), "closing Settings hides step 2: {close}");
+}
+
 // ---- M1 grades (spec 2026-09-29-grades-design §2 and §9; plan Task 7) ------------------------------
 
 /// The console's grades code: everything between the two markers in `console.js`.
@@ -1955,4 +2134,355 @@ fn a_note_drawer_is_never_hijacked_by_a_grades_repaint() {
     let rest = &js[at + 1..];
     let body = &js[at..at + 1 + rest.find("\n  function ").unwrap_or(rest.len())];
     assert!(body.matches("removeAttribute(\"data-grades-open\")").count() >= 2, "openDrawer clears the marker on both its found and not-found paths: {body}");
+}
+
+// M2 T5a.1 (spec tests 27 and 28, the drawer halves).
+#[test]
+fn the_drawer_saves_a_body_with_expected() {
+    let js = read("console.js");
+    let at = js.find("function openBodyEditor(").expect("the drawer's body editor");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    let ed = &js[at..end];
+    assert!(ed.contains("invoke(\"set_body\"") && ed.contains("id: id") && ed.contains("expected: expected") && ed.contains("body: ta.value"), "set_body carries id, expected and body");
+    assert!(js.contains("Add notes") && js.contains("data-body-edit"), "an empty body offers Add notes");
+    assert!(ed.contains("ctrlKey") && ed.contains("Escape"), "Ctrl+Enter saves, Esc cancels");
+    assert!(ed.contains("lock(true)") && ed.contains("lock(false)"), "controls stay disabled until the envelope returns");
+    assert!(js.contains("tasks") && js.contains("BODY_FOLDERS"), "only tasks and courses are editable");
+}
+
+#[test]
+fn no_ui_event_carries_body_text() {
+    let js = read("console.js");
+    assert!(js.contains("\"edit_started\", id, \"body\"") && js.contains("\"edit_committed\", id, \"body\"") && js.contains("\"edit_cancelled\", id, \"body\""), "body events use object_kind body");
+    let at = js.find("function openBodyEditor(").expect("the drawer's body editor");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    for line in js[at..end].lines().filter(|l| l.contains("ui_event") || l.contains("ev(")) {
+        assert!(!line.contains("ta.value") && !line.contains("expected") && !line.contains("body:"), "a ui event carries body text: {line}");
+    }
+}
+
+// M2 T5a.2 (spec tests 29 and 32, the drawer halves, and the plan's conflict test).
+#[test]
+fn a_poll_leaves_an_open_editor_alone() {
+    let js = read("console.js");
+    assert!(js.contains("data-open-editor"), "an open editor is marked");
+    let at = js.find("function refreshGradesDrawer(").expect("the one background drawer rewrite");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    assert!(js[at..end].contains("editorOpen()"), "a background repaint of the drawer skips an open editor");
+    let p = js.find("function paint(").unwrap();
+    let pe = js[p..].find("\n  }\n").map(|i| p + i).unwrap();
+    assert!(!js[p..pe].contains("openDrawer(") && !js[p..pe].contains("EL(\"drawer\").innerHTML"), "paint never rebuilds the drawer");
+    let q = js.find("function poll(").unwrap();
+    let qe = js[q..].find("\n  }\n").map(|i| q + i).unwrap();
+    assert!(!js[q..qe].contains("openDrawer("), "poll never reopens the drawer");
+}
+
+#[test]
+fn body_undo_sends_the_reread_body_as_expected() {
+    let js = read("console.js");
+    let at = js.find("function offerBodyUndo(").expect("the Saved - Undo toast");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    let u = &js[at..end];
+    assert!(u.contains("Saved") && u.contains("Undo") && u.contains("10000"), "a 10-second Saved - Undo toast");
+    assert!(u.contains("invoke(\"note\"") && u.contains("expected: env.note.body") && u.contains("body: before"), "undo's expected is the re-read body, its body the pre-edit text");
+    assert!(!u.contains("ta.value"), "never the textarea's value");
+    assert!(js.contains("edit_cancelled") && !u.contains("ev(\"edit_undone"), "no new telemetry action");
+}
+
+#[test]
+fn the_saved_toast_dies_with_its_drawer() {
+    let js = read("console.js");
+    assert!(js.contains("function dropSavedToast(") && js.contains(".savedtoast"), "one helper removes the toast");
+    for f in ["function openDrawer(", "function openGradesDrawer("] {
+        let at = js.find(f).unwrap();
+        let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap();
+        assert!(js[at..end].contains("dropSavedToast()"), "{f} drops the toast of the previous note");
+    }
+    let at = js.find("function openDrawer(").unwrap();
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap();
+    assert!(js[at..end].contains("click\", function () { dropSavedToast(); d.hidden = true;"), "closing the drawer drops the toast");
+    let u = js.find("function offerBodyUndo(").unwrap();
+    assert!(js[u..u + 600].contains("data-id") && js[u..u + 600].contains("!== id"), "a toast is only raised for the open drawer");
+}
+
+#[test]
+fn a_body_conflict_keeps_the_draft() {
+    let js = read("console.js");
+    let at = js.find("function openBodyEditor(").expect("the drawer's body editor");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    let ed = &js[at..end];
+    assert!(ed.contains("env.conflict"), "a conflict envelope has its own state");
+    assert!(ed.contains("This note changed since you opened it. Your text is still here. Copy it, then reload to see the new version."), "the spec's line");
+    assert!(ed.contains("copy_text") && ed.contains("data-body-copy") && ed.contains("data-body-reload"), "Copy and Reload");
+    assert!(ed.contains("confirm("), "Reload asks before it discards the draft");
+    let c = ed.find("env.conflict").unwrap();
+    assert!(!ed[c..c + 600].contains("ta.value = "), "the draft is never refilled");
+}
+
+// M2 T5b.1 (spec tests 27, 28 and 32, the preferences halves).
+fn prefs_js() -> String {
+    let js = read("console.js");
+    let at = js.find("// M2 T5b.1").expect("the preferences section");
+    let end = js[at..].find("// M2 T5b.1 end").map(|i| at + i).expect("its end marker");
+    js[at..end].to_string()
+}
+
+#[test]
+fn settings_reads_and_saves_preferences() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"set-prefs-ta\"") && html.contains("id=\"set-prefs-save\"") && html.contains("id=\"set-prefs-count\""), "a textarea, a counter and its own Save");
+    assert!(html.contains("Your preferences") && html.contains("How you like to work"), "the section and its part");
+    for fact in ["600 characters", "one call", "keep them", "stays on this computer"] {
+        assert!(html.contains(fact), "the copy keeps its fact: {fact}");
+    }
+    let p = prefs_js();
+    assert!(p.contains("invoke(\"profile\""), "the panel reads profile");
+    assert!(p.contains("invoke(\"set_preferences\"") && p.contains("expected: PREFS.loaded"), "Save sends expected");
+    assert!(p.contains("env.conflict") && p.contains("data-prefs-conflict") && p.contains("Your text is still here"), "a conflict keeps the draft");
+    assert!(p.contains("showRefusal("), "other refusals use showRefusal");
+    let js = read("console.js");
+    let o = js.find("function openSettings(").unwrap();
+    let oe = js[o..].find("\n  }\n").map(|i| o + i).unwrap();
+    assert!(js[o..oe].contains("loadPrefs("), "opening Settings loads the preferences");
+}
+
+#[test]
+fn no_settings_ui_event_carries_preferences_text() {
+    let p = prefs_js();
+    assert!(p.contains("\"edit_started\", null, \"preferences\"") && p.contains("\"edit_committed\", null, \"preferences\"") && p.contains("\"edit_cancelled\", null, \"preferences\""), "preferences events use object_kind preferences");
+    for line in p.lines().filter(|l| l.contains("ui_event") || l.contains("ev(")) {
+        for bad in ["ta.value", "PREFS", "before", "after", "text", "expected", "draft"] {
+            assert!(!line.contains(bad), "a ui event carries preferences text ({bad}): {line}");
+        }
+    }
+}
+
+#[test]
+fn settings_offers_undo_for_preferences() {
+    let p = prefs_js();
+    let at = p.find("function offerPrefsUndo(").expect("the Saved - Undo toast");
+    let end = p[at..].find("\n  }\n").map(|i| at + i).unwrap_or(p.len());
+    let u = &p[at..end];
+    assert!(u.contains("Saved") && u.contains("Undo") && u.contains("10000"), "a 10-second Saved - Undo toast");
+    assert!(u.contains("invoke(\"set_preferences\"") && u.contains("expected: after") && u.contains("text: before"), "undo's expected is the text profile returned after the save");
+    assert!(p.contains("invoke(\"profile\"") && p.contains("offerPrefsUndo(before, PREFS.loaded)"), "after is the re-read text");
+    assert!(!u.contains("ta.value"), "never the textarea's value");
+}
+
+// M2 T5b.2 (spec tests 27, 28 and 32, the interests halves; plan addition for D10).
+fn ints_js() -> String {
+    let js = read("console.js");
+    let at = js.find("// M2 T5b.2").expect("the interests section");
+    let end = js[at..].find("// M2 T5b.2 end").map(|i| at + i).expect("its end marker");
+    js[at..end].to_string()
+}
+
+#[test]
+fn settings_reads_and_saves_interests() {
+    let html = read("index.html");
+    for id in ["set-int-strong", "set-int-mild", "set-int-never", "set-int-clubs", "set-int-save"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
+    }
+    for label in ["Campus events", "Always show me", "Maybe", "Never show me", "Clubs I&rsquo;m in"] {
+        assert!(html.contains(label), "the section keeps: {label}");
+    }
+    let n = html.find("id=\"set-int-note\"").expect("the interests note");
+    let note = &html[n..n + html[n..].find("</p>").expect("note end")];
+    // Spec 9.2 / plan T5b: every fixed fact, on this line, not only on the preferences line.
+    for fact in ["600", "one call", "each event it judges", "neither we nor the model&rsquo;s host keep", "stay on this computer"] {
+        assert!(note.contains(fact), "the interests note keeps the disclosure: {fact}");
+    }
+    let p = ints_js();
+    assert!(p.contains("invoke(\"set_interests\"") && p.contains("strong:") && p.contains("mild:") && p.contains("never:") && p.contains("clubs:"), "Save sends the four lists");
+    assert!(p.contains("showRefusal("), "a refusal is shown, the draft kept");
+    let js = read("console.js");
+    let o = js.find("function openSettings(").unwrap();
+    let oe = js[o..].find("\n  }\n").map(|i| o + i).unwrap();
+    assert!(js[o..oe].contains("loadInterests("), "opening Settings loads the lists");
+}
+
+#[test]
+fn no_settings_ui_event_carries_interests_text() {
+    let p = ints_js();
+    assert!(p.contains("\"edit_started\", null, \"interests\"") && p.contains("\"edit_committed\", null, \"interests\"") && p.contains("\"edit_cancelled\", null, \"interests\""), "interests events use object_kind interests");
+    for line in p.lines().filter(|l| l.contains("ui_event") || l.contains("ev(")) {
+        for bad in ["value", "INT", "before", "after", "lists", "draft", "strong", "clubs"] {
+            assert!(!line.contains(bad), "a ui event carries interests text ({bad}): {line}");
+        }
+    }
+}
+
+#[test]
+fn settings_offers_undo_for_interests() {
+    let p = ints_js();
+    let at = p.find("function offerIntUndo(").expect("the Saved - Undo toast");
+    let end = p[at..].find("\n  }\n").map(|i| at + i).unwrap_or(p.len());
+    let u = &p[at..end];
+    assert!(u.contains("Saved") && u.contains("Undo") && u.contains("10000"), "a 10-second Saved - Undo toast");
+    assert!(u.contains("invoke(\"set_interests\"") && u.contains("before.strong") && u.contains("before.clubs"), "undo sends the four lists held before the save");
+}
+
+#[test]
+fn interests_are_read_only_when_not_editable() {
+    let p = ints_js();
+    assert!(p.contains("interests_editable"), "the page reads the flag");
+    assert!(p.contains("readOnly") && p.contains("set-int-save"), "the lists lock and Save is disabled");
+    assert!(p.contains("Knowlu can only edit a list written on one line"), "D10's reason is shown");
+}
+
+fn notshown_js() -> String {
+    let js = read("console.js");
+    let at = js.find("// M2 T7").expect("the Not shown section");
+    let end = js[at..].find("// M2 T7 end").map(|i| at + i).expect("its end marker");
+    js[at..end].to_string()
+}
+
+#[test]
+fn coming_up_offers_a_not_shown_list_from_dropped_events() {
+    let n = notshown_js();
+    assert!(read("index.html").contains("id=\"cu-ns\""), "the container sits under Coming up");
+    assert!(n.contains("invoke(\"dropped_events\""), "the page reads dropped_events");
+    assert!(n.contains("Not shown (") && n.contains("<details"), "a collapsed list titled Not shown (N)");
+    for f in ["d.title", "d.date", "d.reason"] {
+        assert!(n.contains(&format!("h({f}")), "{f} is escaped text");
+    }
+    assert!(n.contains("!list.length") || n.contains("list.length === 0"), "an empty list renders nothing");
+    assert!(n.contains(".catch(") && n.contains("Not shown is unavailable"), "a refusal is one quiet line");
+    assert!(!n.contains("data-") && !n.contains("<button") && !n.contains("invoke(\"ui_event\""), "read-only: no write action: {n}");
+    // Fetched when Coming up renders, not on every poll.
+    let render = read("console.js");
+    let at = render.find("function renderComingUp(").unwrap();
+    let body = &render[at..at + render[at..].find("\n  }\n").unwrap()];
+    assert!(body.contains("renderNotShown("), "renderComingUp triggers it");
+    assert!(!render[render.find("function poll(").unwrap()..].split("// Task 13").next().unwrap().contains("dropped_events"), "poll does not fetch it");
+}
+
+// events T5 (spec test 26, P8, PQ3, P17, PQ6 (b)).
+fn fn_body<'a>(js: &'a str, head: &str) -> &'a str {
+    let at = js.find(head).unwrap_or_else(|| panic!("{head}"));
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    &js[at..end]
+}
+
+#[test]
+fn event_cards_read_accept_and_decline_and_send_the_same_verdicts() {
+    let js = read("console.js");
+    let l = fn_body(&js, "function verdictLabels(");
+    assert!(l.contains("event-accept") && l.contains("event-check") && l.contains("Accept") && l.contains("Decline"), "one switch names both kinds");
+    assert!(l.contains("Approve") && l.contains("Reject"), "other kinds keep Approve and Reject");
+    for f in ["function renderDeck(", "function renderDecisionsView("] {
+        let b = js.split(f).nth(1).unwrap().split("\n  function ").next().unwrap();
+        assert!(b.contains("verdictLabels(c.kind)"), "{f} reads the switch");
+        assert!(b.contains("data-verdict=\"approved\"") && b.contains("data-verdict=\"rejected\""), "{f} still sends approved and rejected");
+        assert!(!b.contains(">Approve<") && !b.contains(">Reject<"), "{f} has no fixed label");
+    }
+    assert!(js.contains("data-answer-in>Answer&hellip;"), "commitment-ask keeps Answer");
+}
+
+#[test]
+fn coming_up_shows_accepted_events() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function renderComingUp(");
+    assert!(b.contains("e.accepted") && b.contains("Accepted"), "the tag");
+    assert!(b.contains("h(e.provenance)"), "the carry's provenance, escaped, as the engine gives it");
+    assert!(b.contains("e.provenance ?") || b.contains("e.provenance)"), "provenance replaces the plain tag");
+}
+
+#[test]
+fn coming_up_shows_the_carrys_provenance() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function renderComingUp(");
+    let p = b.find("e.provenance").unwrap();
+    let a = b.find("\"Accepted\"").unwrap();
+    assert!(p < a, "provenance is tried first; plain Accepted is the fallback");
+}
+
+#[test]
+fn the_lane_offers_remove_on_accepted_dates_only() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function renderTheDay(");
+    assert!(b.contains("all_day_uids"), "reads the uids");
+    assert!(b.contains("Remove from my day") && b.contains("data-lane-remove=\"") && b.contains("data-title=\""), "the button carries uid and title");
+    assert!(b.contains("(all day) "), "an entry without a uid renders as today");
+    assert!(b.contains("h(uid)") && b.contains("h(t)"), "escaped");
+    assert!(b.contains("pendingLaneRemovals"), "a pending uid is skipped");
+}
+
+#[test]
+fn remove_from_my_day_hides_at_once_and_calls_when_the_undo_toast_closes() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function removeFromMyDay(");
+    assert!(b.contains("pendingLaneRemovals[") && b.contains("renderTheDay("), "hidden at once");
+    assert!(b.contains("Removed") && b.contains("Undo") && b.contains("10000"), "Removed - Undo for 10 seconds");
+    assert!(b.contains("className = \"lanetoast\"") && !b.contains("savedtoast"), "its own class, which dropSavedToast leaves alone");
+    assert!(read("console.css").contains(".savedtoast, .settoast, .lanetoast"), "styled by the existing rule");
+    assert!(b.contains("invoke(\"remove_lane_date\", { view: stateView(), uid: uid })"), "the one invoke, with the view and uid");
+    assert!(b.contains("applyEnvelope("), "the envelope goes to applyEnvelope");
+    assert!(!js.contains("confirm(\"Remove"), "no window.confirm");
+    let call = b.find("invoke(\"remove_lane_date\"").unwrap();
+    let to = b.find("setTimeout(").unwrap();
+    assert!(to < call, "the call sits behind the timer");
+    assert!(js.contains("[data-lane-remove]") && js.contains("removeFromMyDay("), "the delegated handler");
+    assert!(!b.contains("ev("), "no telemetry row of its own (D12)");
+}
+
+#[test]
+fn a_refused_removal_repaints_the_lane() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function removeFromMyDay(");
+    let d = b.find("delete pendingLaneRemovals[uid];").unwrap();
+    let r = b[d..].find("renderTheDay(").expect("the .then branch re-renders");
+    let a = b[d..].find("applyEnvelope(").unwrap();
+    assert!(r < a, "the lane is repainted before the envelope is applied, state or not");
+    assert!(b.contains("querySelectorAll(\".lanetoast\")"), "a second pending toast is offset, not stacked on the first");
+}
+
+#[test]
+fn undo_within_the_toast_never_calls_remove_lane_date() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function removeFromMyDay(");
+    let u = b.find("data-lane-undo").expect("an Undo button");
+    assert!(b.contains("clearTimeout("), "undo cancels the timer");
+    assert!(b[u..].contains("delete pendingLaneRemovals["), "undo clears the pending uid");
+    assert_eq!(js.matches("invoke(\"remove_lane_date\"").count(), 1, "one call site, behind the timer");
+}
+
+/// Live proof 2026-10-02 (F2): the row keeps polling until the consent link's own lifetime (the
+/// server's nonce dies ten minutes after minting), backing off gently, then offers "Check again",
+/// which re-reads the status and never mints a new link. Reconnect shares the same code.
+#[test]
+fn the_google_row_waits_out_the_link_lifetime_then_offers_check_again() {
+    let js = read("console.js");
+    let html = read("index.html");
+    assert!(js.contains("var GOOGLE_LINK_LIFETIME_MS = 600000;"), "ten minutes, the nonce's lifetime");
+    assert!(js.contains("var GOOGLE_NO_ANSWER = \"Didn\u{2019}t hear back from Google.\";"));
+    let start = js.find("async function connectGoogle(").expect("connectGoogle");
+    let end = start + js[start..].find("\n  }\n").expect("end of connectGoogle");
+    let f = &js[start..end];
+    assert!(!f.contains("i < 20"), "no fixed count of polls: {f}");
+    assert!(f.contains("GOOGLE_LINK_LIFETIME_MS") && f.contains("Date.now()"), "{f}");
+    assert!(f.contains("delay = Math.min("), "the wait grows between polls: {f}");
+    assert!(f.contains("SET.googleWaitedOut = !googleDone("), "{f}");
+    assert!(html.contains("id=\"set-google-check\"") && html.contains(">Check again</button>"));
+    let r = js.find("function renderGoogleRow(").expect("renderGoogleRow");
+    let r_end = r + js[r..].find("\n  }\n").expect("end");
+    assert!(js[r..r_end].contains("EL(\"set-google-check\").hidden = !SET.googleWaitedOut"), "shown only after the wait ran out");
+    assert!(js[r..r_end].contains("GOOGLE_NO_ANSWER"));
+    let c = js.find("function checkGoogleAgain(").expect("checkGoogleAgain");
+    let c_end = c + js[c..].find("\n  }\n").expect("end");
+    assert!(js[c..c_end].contains("invoke(\"google_status\"") && !js[c..c_end].contains("google_connect"), "re-polls status, never re-mints");
+    assert!(js.contains("closest(\"#set-google-check\")) { checkGoogleAgain(); return; }"));
+    assert_eq!(js.matches("invoke(\"google_connect\", { scope: scope })").count(), 1, "only connectGoogle mints a link");
+}
+
+#[test]
+fn a_gmail_card_shows_its_gmail_attribution_and_never_a_sender() {
+    let js = read("console.js");
+    assert!(js.contains("function sourceLabel(c)"), "one helper names a card's source");
+    assert!(js.contains("from Gmail"), "the label words");
+    let deck = js.split("function renderDeck(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(deck.contains("sourceLabel(c)"), "the deck card carries the label");
+    let view = js.split("function renderDecisionsView(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(view.contains("sourceLabel(c)"), "so does the decisions row");
+    assert!(!js.contains("c.sender") && !js.contains("c.from"), "never the sender");
 }

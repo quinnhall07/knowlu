@@ -28,7 +28,7 @@
 // the same thing from the schema's side).
 import { fieldsOf, judge, type JudgeReply, type PipelineDeps } from "../_shared/judge_pipeline.ts";
 import type { Entitle } from "../_shared/judge_handler.ts";
-import { GOOGLE_NOT_CONFIGURED } from "../_shared/google_scopes.ts";
+import { GMAIL_SCOPE, GOOGLE_NOT_CONFIGURED } from "../_shared/google_scopes.ts";
 import { notCompletionEvidence, receiptVerdict } from "../_shared/lms_receipts.ts";
 
 export const WINDOW = "newer_than:7d";
@@ -127,6 +127,46 @@ export async function pagedList(
  * has one but never took the later, incremental Gmail step answers `missing: "scope"`, and that
  * must never call `markRevoked` on a perfectly good calendar grant (R-C2-E41's whole point). */
 export type TokenLookup = { token: string } | { missing: "scope" | "grant" | "config" };
+
+/** The account's one `google_accounts` row, read WITHOUT a status filter (Gmail connect §4.1). */
+export interface GrantRow {
+  status: string;
+  scopes: string[];
+}
+
+/** What the row alone decides: a reason there is no token, or "take the token path". */
+export type RowLookup = { missing: "scope" | "grant" } | { tokenPath: true };
+
+/**
+ * Gmail connect §4.1. Pure, so a test drives every case directly. The old lookup read the row with
+ * `status=neq.revoked` and took "no row" to mean a dead grant, so an account that never connected
+ * Google (or whose row Disconnect deleted) was answered `revoked` and marked. Now:
+ *  - no row: the student never granted anything, so `missing: "scope"`, the silent answer;
+ *  - a `revoked` row: the one dead grant, `missing: "grant"` (and `markRevoked` stays idempotent);
+ *  - any other row without the Gmail scope: a calendar-only grant, `missing: "scope"` (R-C2-E41);
+ *  - otherwise the token path, unchanged.
+ */
+export function lookupFromRow(row: GrantRow | null): RowLookup {
+  if (row === null) return { missing: "scope" };
+  if (row.status === "revoked") return { missing: "grant" };
+  if (!(row.scopes ?? []).includes(GMAIL_SCOPE)) return { missing: "scope" };
+  return { tokenPath: true };
+}
+
+/** What `lookupToken` reads: whether a Google client is configured, the row, and the token path. */
+export interface LookupSources {
+  clientConfigured: boolean;
+  row(accountId: string): Promise<GrantRow | null>;
+  /** The Vault-held refresh token exchanged for an access token: `index.ts`'s token path. */
+  token(accountId: string): Promise<TokenLookup>;
+}
+
+/** `accessTokenFor`, composed: config first (never a DB round trip), then the row, then the token. */
+export async function lookupToken(accountId: string, sources: LookupSources): Promise<TokenLookup> {
+  if (!sources.clientConfigured) return { missing: "config" };
+  const decided = lookupFromRow(await sources.row(accountId));
+  return "missing" in decided ? decided : await sources.token(accountId);
+}
 
 export interface ReadDeps {
   api: GmailApi;

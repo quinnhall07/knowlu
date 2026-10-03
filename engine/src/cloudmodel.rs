@@ -698,25 +698,51 @@ pub fn pull_gmail_queue(
     Ok(GmailPull { items: out, more, deferred })
 }
 
+/// What one probe found, with the transport case told apart (Gmail connect spec §4.3, Q1 (a′)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeOutcome {
+    /// The arm may run: a 2xx, and every answer that is neither fatal nor transport — a 404 from a
+    /// deployment without `judge-rules`, a 429, a 5xx, an unreadable body.
+    Clear,
+    /// 401, 402 or 403, which answer every item the same way. `model.fatal()` is set to this label.
+    Fatal(&'static str),
+    /// No HTTP answer at all (`CloudError::Transport`, already scrubbed of the bearer). Sets
+    /// nothing on `model.fatal()`.
+    Transport(CloudError),
+}
+
 impl CloudModel<'_> {
     /// Ask once, before the batch, whether this account can be judged at all.
     ///
     /// `Some(reason)` for the three answers that will not change item by item — no session, no
-    /// entitlement, not allowed — and `None` for everything else, including "no network", because
-    /// a flaky connection is per-item and the batch should try. The probe is `GET /judge-rules`,
-    /// which every account may call, costs no model tokens and charges no cap.
+    /// entitlement, not allowed — and `None` for everything else, including "no network". The
+    /// probe is `GET /judge-rules`, which every account may call, costs no model tokens and
+    /// charges no cap. This answer, and its effect on `fatal()`, are unchanged by Q1 (a′):
+    /// [`CloudModel::probe_outcome`] is the same call with the transport case reported on its own,
+    /// and it is what the cloud arm in `enrich::run_lines_with` asks.
     ///
     /// **Before Task 12 deploys `judge-rules`, this is a 404** — which is not `fatal()`, so it
     /// answers `None` and the batch proceeds exactly as it would have. That is deliberate: the
     /// probe is an optimisation for the two answers that repeat, never a gate.
     pub fn probe(&self) -> Option<&'static str> {
+        match self.probe_outcome() {
+            ProbeOutcome::Fatal(reason) => Some(reason),
+            ProbeOutcome::Clear | ProbeOutcome::Transport(_) => None,
+        }
+    }
+
+    /// [`CloudModel::probe`], with a transport failure reported as [`ProbeOutcome::Transport`]
+    /// rather than folded into "carry on" (Q1 (a′)). A fatal status sets `fatal()` exactly as
+    /// `probe()` always has; a transport failure, a 429 or a 5xx sets nothing.
+    pub fn probe_outcome(&self) -> ProbeOutcome {
         match self.client.get("/judge-rules") {
-            Ok(_) => None,
+            Ok(_) => ProbeOutcome::Clear,
             Err(e) if e.fatal() => {
                 self.fatal.set(Some(e.label()));
-                Some(e.label())
+                ProbeOutcome::Fatal(e.label())
             }
-            Err(_) => None,
+            Err(e @ CloudError::Transport(_)) => ProbeOutcome::Transport(e),
+            Err(_) => ProbeOutcome::Clear,
         }
     }
 }
@@ -854,4 +880,73 @@ fn urlencode_component(value: &str) -> String {
             other => other.encode_utf8(&mut [0u8; 4]).bytes().map(|b| format!("%{b:02X}")).collect(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client_at(base: String) -> CloudClient {
+        let cfg = CloudConfig {
+            api_base: base,
+            anon_key: "anon".into(),
+            session_credential_target: "knowlu/test/session".into(),
+            account_id: "acct-1".into(),
+        };
+        CloudClient::new(&cfg, "jwt-not-a-secret")
+    }
+
+    /// One `127.0.0.1:0` listener that answers a single request with `code` and an empty JSON
+    /// body, then closes. No egress, no name resolution.
+    fn one_reply(code: u16) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            let Ok((mut stream, _)) = listener.accept() else { return };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" || line == "\n" {
+                    break;
+                }
+            }
+            let reply = format!(
+                "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}"
+            );
+            let _ = stream.write_all(reply.as_bytes());
+            let _ = stream.flush();
+        });
+        (format!("http://127.0.0.1:{port}/functions/v1"), handle)
+    }
+
+    /// Q1 (a′) guard: 401, 402 and 403 on the probe still set `model.fatal()` to their label and
+    /// answer it from `probe()`; a transport failure does not, and is reported on its own.
+    #[test]
+    fn a_fatal_probe_still_sets_model_fatal() {
+        for (code, label) in [(401, "no session"), (402, "no entitlement"), (403, "not allowed")] {
+            let (base, handle) = one_reply(code);
+            let client = client_at(base);
+            let model = CloudModel::new(&client);
+            assert_eq!(model.probe(), Some(label), "HTTP {code}");
+            assert_eq!(model.fatal(), Some(label), "HTTP {code}");
+            handle.join().expect("the listener thread did not panic");
+        }
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let client = client_at(format!("http://127.0.0.1:{port}/functions/v1"));
+        let model = CloudModel::new(&client);
+        assert_eq!(model.probe(), None, "a transport failure is not fatal");
+        assert_eq!(model.fatal(), None);
+        match model.probe_outcome() {
+            ProbeOutcome::Transport(e) => {
+                assert_eq!(e.label(), "no network");
+                assert!(!e.to_string().contains("jwt-not-a-secret"), "{e}");
+            }
+            other => panic!("expected a transport outcome, got {other:?}"),
+        }
+        assert_eq!(model.fatal(), None, "reporting transport sets nothing on fatal()");
+    }
 }

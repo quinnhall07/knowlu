@@ -1547,7 +1547,8 @@ fn slot_argv_places_grades_after_ingest_and_before_judge_only_with_a_bundle() {
     let _ = std::fs::remove_dir_all(&v);
 }
 
-/// The gate's fourth caller: with a saved session in every case, only a dated Blackboard row captures.
+/// The gate's fourth caller: with a saved session in every case, only a curated Blackboard row
+/// captures — dated or not while ruling 12's read is suspended (cloud design Amendment 2026-09-30, A13).
 #[test]
 fn the_grades_decision_asks_the_predicate_and_never_rederives_it() {
     let calls = Cell::new(0);
@@ -1565,8 +1566,16 @@ fn the_grades_decision_asks_the_predicate_and_never_rederives_it() {
     assert!(p.is_file(), "the bundle is on disk for the engine step");
     let _ = std::fs::remove_dir_all(&d);
 
-    for (row, lms) in [(Some(&undated), "blackboard"), (None, "blackboard")] {
-        let d = with_session("undated");
+    let d = with_session("undated");
+    let GradesStep::Captured(p) = grades_step(Some(&undated), "blackboard", EntitlementState::Entitled, &d, false, Some(&capture)) else {
+        panic!("an undated row captures while the gate is suspended")
+    };
+    assert!(p.is_file());
+    assert_eq!(calls.get(), 2);
+    let _ = std::fs::remove_dir_all(&d);
+
+    for (row, lms) in [(None, "blackboard")] {
+        let d = with_session("uncurated");
         let got = grades_step(row, lms, EntitlementState::Entitled, &d, false, Some(&capture));
         assert_eq!(skip_of(got), "grades (skipped: not available at your school yet)");
         assert!(!grades_app::bundle_path(&d).exists());
@@ -1576,7 +1585,7 @@ fn the_grades_decision_asks_the_predicate_and_never_rederives_it() {
     assert_eq!(skip_of(grades_step(Some(&canvas), "canvas", EntitlementState::Entitled, &d, false, Some(&capture))), "grades (skipped: not a Blackboard school)");
     assert_eq!(skip_of(grades_step(None, "canvas", EntitlementState::Entitled, &d, false, Some(&capture))), "grades (skipped: not a Blackboard school)");
     let _ = std::fs::remove_dir_all(&d);
-    assert_eq!(calls.get(), 1, "the capture ran for the dated row only");
+    assert_eq!(calls.get(), 2, "the capture ran for the dated and undated rows only");
 }
 
 /// One test per adjacent pair: the earlier skip wins when both hold.
@@ -1584,7 +1593,7 @@ fn the_grades_decision_asks_the_predicate_and_never_rederives_it() {
 fn the_skip_order_is_school_then_availability_then_entitlement_then_session_then_window() {
     let calls = Cell::new(0);
     let capture = |_h: &'static str| { calls.set(calls.get() + 1); Ok(bundle()) };
-    let (dated, undated, canvas) = (test_row("blackboard", Some("2026-10-01")), test_row("blackboard", None), test_row("canvas", None));
+    let (dated, canvas) = (test_row("blackboard", Some("2026-10-01")), test_row("canvas", None));
     let no_session = std::env::temp_dir().join(format!("qo-sched-grades-nosession-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&no_session);
     let with = with_session("order");
@@ -1593,8 +1602,8 @@ fn the_skip_order_is_school_then_availability_then_entitlement_then_session_then
 
     // not a Blackboard school beats not available yet
     assert_eq!(skip_of(grades_step(Some(&canvas), "canvas", lapsed, &no_session, true, Some(&capture))), "grades (skipped: not a Blackboard school)");
-    // not available yet beats no entitlement
-    assert_eq!(skip_of(grades_step(Some(&undated), "blackboard", lapsed, &no_session, true, Some(&capture))), "grades (skipped: not available at your school yet)");
+    // not available yet (an uncurated Blackboard school) beats no entitlement
+    assert_eq!(skip_of(grades_step(None, "blackboard", lapsed, &no_session, true, Some(&capture))), "grades (skipped: not available at your school yet)");
     // no entitlement beats not connected
     assert_eq!(skip_of(grades_step(Some(&dated), "blackboard", lapsed, &no_session, true, Some(&capture))), "grades (skipped: no entitlement)");
     // not connected beats sign-in window open
@@ -1680,11 +1689,12 @@ fn the_slot_records_the_grades_skip_and_runs_and_cleans_up_the_grades_step() {
     let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
     std::fs::create_dir_all(grades_app::session_dir(&cs.data_dir)).unwrap();
 
-    // Undated row: the named skip, exit 0, in the runner log as `ok`, and the capture is never called.
+    // An uncurated Blackboard school (no curated row; the vault's `campus.yaml` says `blackboard`): the
+    // named skip, exit 0, in the runner log as `ok`, and the capture is never called.
+    std::fs::write(v.join("config").join("campus.yaml"), "unitid: '999999'\r\nlms: 'blackboard'\r\n").unwrap();
     let calls = Cell::new(0);
     let capture = |_h: &'static str| { calls.set(calls.get() + 1); Ok(bundle()) };
-    let undated = test_row("blackboard", None);
-    let s = run_slot_with(&cs, &sch, None, false, &GradesSeam { row: Some(&undated), capture: Some(&capture), window_open: false });
+    let s = run_slot_with(&cs, &sch, None, false, &GradesSeam { row: None, capture: Some(&capture), window_open: false });
     let skip = s.steps.iter().find(|(n, _)| n.starts_with("grades (skipped")).expect("a named grades skip");
     assert_eq!(skip, &("grades (skipped: not available at your school yet)".to_string(), 0));
     assert!(s.engine_ok, "a skip never paints the tray amber: {:?}", s.steps);

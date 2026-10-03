@@ -45,7 +45,8 @@ BEFORE_FINISH_OK = {"launch_state", "pick_folder", "google_sign_in", "send_magic
                     "open_lms_window", "capture_calendar_link", "capture_courses",
                     "paste_calendar_link", "close_lms_window", "discover_coursework",
                     "campus_search", "timezone_for_state",
-                    "store_credentials", "retarget_credentials"}
+                    "store_credentials", "retarget_credentials",
+                    "google_connect_url", "google_connected", "open_external"}
 # A raw string: the JavaScript below is the page's, backslashes and all.
 FAKE = r"""
 window.__TAURI__ = { core: { invoke: function (cmd, args) {
@@ -55,6 +56,9 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
       default_backup: 'C:\\Users\\Ada\\Knowlu\\Backups',
       }); }
   if (cmd === 'google_sign_in') { return Promise.resolve({ ok: true, error: null, account_id: 'acc-1', email: 'a@example.invalid' }); }
+  if (cmd === 'google_connect_url') { return Promise.resolve({ ok: true, error: null, url: 'https://accounts.example.invalid/o/' + args.scope }); }
+  if (cmd === 'open_external') { return Promise.resolve({ ok: true, error: null }); }
+  if (cmd === 'google_connected') { return Promise.resolve({ ok: true, error: null, connected: false, calendar: false, gmail: false }); }
   if (cmd === 'send_magic_link') { return Promise.resolve({ ok: true, error: null }); }
   if (cmd === 'verify_email_code') { return Promise.resolve({ ok: true, error: null, account_id: 'acc-1', email: 'a@example.invalid' }); }
   if (cmd === 'open_checkout') { return Promise.resolve({ ok: true, error: null }); }
@@ -356,8 +360,15 @@ def check(page) -> list:
     cred_vault = page.evaluate("(window.__CALLS.filter(c => c[0] === 'store_credentials').slice(-1)[0] || [null, {}])[1].vault || ''")
     if cred_vault != DEST_OLD: bad.append(f"store_credentials named {cred_vault!r}, not {DEST_OLD!r}")
 
-    # 7. Gmail is honest and does nothing; slots are live and the summary follows them.
-    if "test user" not in page.inner_text("#wiz-gmail"): bad.append("the Gmail panel does not say it is testing-mode only")
+    # 7. Gmail is honest, has its Connect button, and never gates Next (D11); slots are live and the
+    # summary follows them.
+    if "invited testers" not in page.inner_text("#wiz-gmail"): bad.append("the Gmail panel does not say it is testing-mode only")
+    if not page.query_selector("#wiz-gmail-connect:not([disabled])"): bad.append("the Gmail panel has no live Connect Gmail button")
+    page.click("#wiz-gmail-connect"); page.wait_for_timeout(300)
+    ga = first_args(page, "google_connect_url") or {}
+    if ga.get("scope") != "gmail": bad.append(f"Connect Gmail asked for scope {ga.get('scope')!r}")
+    if not page.query_selector("#wiz-gmail-connect[disabled]"): bad.append("the Connect Gmail button was not disabled while polling")
+    if page.query_selector("#wiz-next[disabled]"): bad.append("Next waited on Gmail")
     page.click("#wiz-next"); page.wait_for_timeout(150)
     if page.is_hidden("#wiz-slots"): bad.append("Next did not reach the slots panel")
     page.fill("#wiz-slot1", "09:00"); page.wait_for_timeout(120)

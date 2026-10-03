@@ -3900,7 +3900,7 @@ fn create_confirmed_as(
         fields.push(("window", Field::Flow(meets_json(&p.meets))));
         (
             PLANNING_DAY.to_string(),
-            "The part of each day Knowlu plans in: from when you are up to when you stop.\n",
+            "The part of each day Knowlu plans in: from when you are up to when you stop.\n".to_string(),
         )
     } else {
         fields.push(("level", Field::Scalar(Node::text(p.level.as_str()))));
@@ -3919,12 +3919,19 @@ fn create_confirmed_as(
             fields.push(("until", Field::Scalar(Node::Date(until))));
         }
         let key = single_line(source_uid).trim().to_string();
-        let body = if key.starts_with("gcal-series:") {
-            "Found as a weekly series on your Google Calendar.\n"
+        // A `kind: event` note is tested first (events spec §4.2, P6): an accepted campus event, not a
+        // series. `ends` (the past-midnight true end) is read here and never reaches the frontmatter.
+        let body = if p.kind == "event" {
+            match opt_field(commitment, "ends") {
+                Some(ends) => format!("You accepted this from your campus events. Ends at {ends}.\n"),
+                None => "You accepted this from your campus events.\n".to_string(),
+            }
+        } else if key.starts_with("gcal-series:") {
+            "Found as a weekly series on your Google Calendar.\n".to_string()
         } else if key.starts_with("card:") {
-            "You told Knowlu when this class meets.\n"
+            "You told Knowlu when this class meets.\n".to_string()
         } else {
-            "Found as a weekly series on your calendar.\n"
+            "Found as a weekly series on your calendar.\n".to_string()
         };
         if !key.is_empty() {
             fields.push(("source_uid", Field::Scalar(Node::text(&key))));
@@ -6320,6 +6327,34 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(!codes.contains_key("FA26"), "{codes:?}");
         assert_eq!(codes.get("CS100"), Some(&"cs-100".to_string()));
+    }
+
+    #[test]
+    fn a_kind_event_commitment_says_it_was_accepted() {
+        let v = vault("event-body");
+        let ctx = crate::write::WriteContext::new("agent:test", "test");
+        let mut journal = crate::journal::Journal::new(v.as_path());
+        let plain = crate::yaml::mapping_of(
+            "kind: event\nlevel: hard\ntitle: Career fair\n\
+             meets: [{days: [thu], start: '10:00', end: '15:00'}]\nfrom: 2026-10-01\nuntil: 2026-10-01\n",
+        );
+        let late = crate::yaml::mapping_of(
+            "kind: event\nlevel: soft\ntitle: Late show\nends: 1am the next day\n\
+             meets: [{days: [fri], start: '22:00', end: '23:59'}]\nfrom: 2026-10-02\nuntil: 2026-10-02\n",
+        );
+        let today = jiff::civil::date(2026, 9, 30);
+        let a = create_confirmed(&v, &plain, "localist:77:1", today, &ctx, &mut journal).unwrap();
+        let b = create_confirmed(&v, &late, "localist:78:1", today, &ctx, &mut journal).unwrap();
+        let a = pystr::read_text(&a).unwrap();
+        let b = pystr::read_text(&b).unwrap();
+        assert!(a.ends_with("---\n\nYou accepted this from your campus events.\n"), "{a}");
+        assert!(
+            b.ends_with("---\n\nYou accepted this from your campus events. Ends at 1am the next day.\n"),
+            "{b}"
+        );
+        assert!(!a.contains("weekly series") && !b.contains("weekly series"));
+        assert!(!a.contains("\nends:") && !b.contains("\nends:"), "{b}");
+        let _ = std::fs::remove_dir_all(&v);
     }
 }
 

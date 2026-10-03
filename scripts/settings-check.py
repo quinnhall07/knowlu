@@ -79,10 +79,41 @@ ACTION_ERROR = {"ok": True, "error": None, "version": "0.1.0", "staged": None, "
                 "last_check": "2026-09-06T12:30:00Z", "last_error": None,
                 "action_error": "a slot is running — the update will be offered when it finishes"}
 
+# Gmail connect T9c: the Google row's states. Copy is spec section 4.4's table, verbatim.
+ACCOUNT = {"ok": True, "error": None, "needs_account": False, "email": "ada@example.test", "status": "active", "plan": "monthly"}
+G_TESTING = "While Google reviews Knowlu, this works only for invited testers, and the connection needs renewing about once a week."
+G_TIMEOUT = "Google did not finish connecting. If Google said Knowlu is not verified, this Google account is not on the tester list yet."
+G_NONE = {"ok": True, "error": None, "state": "none", "calendar": False, "gmail": False, "email": None}
+G_CAL = {"ok": True, "error": None, "state": "active", "calendar": True, "gmail": False, "email": "ada@example.test"}
+G_GMAIL = {"ok": True, "error": None, "state": "active", "calendar": True, "gmail": True, "email": "ada@example.test"}
+G_REVOKED = {"ok": True, "error": None, "state": "revoked", "calendar": True, "gmail": True, "email": "ada@example.test"}
+G_ERROR = {"ok": False, "error": "Knowlu could not reach Google just now."}
+G_CAL_SAYS = "Google Calendar is connected (as ada@example.test). Gmail is not."
+G_BUTTONS = ["#set-google-connect", "#set-google-reconnect", "#set-google-disconnect-1", "#set-google-retry"]
+G_STATES = [
+    (G_NONE, "Gmail is not connected. Knowlu can read your inbox for things you have to do and propose each one for you to approve.",
+     ["#set-google-connect"]),
+    (G_CAL, G_CAL_SAYS, ["#set-google-connect", "#set-google-disconnect-1"]),
+    (G_GMAIL, "Gmail is connected (as ada@example.test), read-only. Knowlu proposes what it finds; nothing is added without you.",
+     ["#set-google-disconnect-1"]),
+    (G_REVOKED, "Google stopped answering for Knowlu. While Google reviews Knowlu, connections expire after seven days.",
+     ["#set-google-reconnect", "#set-google-disconnect-1"]),
+    (G_ERROR, G_ERROR["error"], ["#set-google-retry"]),
+]
+
+# M2 T5b.3: what `profile` answers. The typed strings below are distinctive on purpose: the walk
+# proves no `ui_event` argument ever contains them (spec test 28, run against the live page).
+PROFILE = {"preferences": "Mornings are best.", "strong": ["robotics"], "mild": [], "never": ["golf"],
+           "clubs": ["chess"], "interests_editable": True}
+TYPED_PREFS = "ZQPREF I study after dinner"
+TYPED_INT = "zqint underwater basketry"
+
 FAKE = """
 window.__CALLS = [];
+window.__ALLCALLS = [];
 window.__TAURI__ = { core: { invoke: function (cmd, args) {
   window.__CALLS.push([cmd, args || {}]);
+  window.__ALLCALLS.push([cmd, args || {}]);
   var S = window.__SETTINGS;
   switch (cmd) {
     case "launch_state":     return Promise.resolve({ ok: true, error: null, mode: "console" });
@@ -101,6 +132,22 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
     case "check_for_updates": return Promise.resolve(window.__UPDATE);
     case "install_update":   window.__INSTALLED = true;
                              return Promise.resolve(window.__INSTALL_RESULT || { ok: true, error: null });
+    // Gmail connect T9c: the Google row. `window.__ACCOUNT` unset keeps the vault-less shell's
+    // behaviour (the command is not registered, the row stays hidden).
+    case "account_status":   return window.__ACCOUNT ? Promise.resolve(window.__ACCOUNT)
+                                                     : Promise.reject(new Error("no account_status"));
+    case "google_status":    return Promise.resolve(window.__GSTATUS);
+    case "google_connect":   return Promise.resolve({ ok: true, error: null });
+    case "google_disconnect": return Promise.resolve(window.__GDISCONNECT || { ok: true, error: null });
+    // M2 T5b.3: the profile. `window.__PROFILE` is the file's truth; a save checks `expected`
+    // against it the way the engine does, and `window.__CONFLICT` forces the refusal.
+    case "profile":          return Promise.resolve({ ok: true, error: null, profile: window.__PROFILE });
+    case "set_preferences":  if (window.__CONFLICT || args.expected !== window.__PROFILE.preferences)
+                               return Promise.resolve({ ok: false, conflict: true, error: "changed since you opened it" });
+                             window.__PROFILE.preferences = args.text;
+                             return Promise.resolve({ ok: true, error: null });
+    case "set_interests":    ["strong", "mild", "never", "clubs"].forEach(function (k) { window.__PROFILE[k] = args[k]; });
+                             return Promise.resolve({ ok: true, error: null });
     case "switch_profile":
     case "copy_text":
     case "copy_diagnostics":
@@ -133,6 +180,7 @@ def check(url, fixture_name, out, bad):
             f"window.__CTX = {json.dumps(CTX)};"
             f"window.__SETTINGS = {json.dumps(SETTINGS)};"
             f"window.__PICKED = {json.dumps(PICKED)};"
+            f"window.__PROFILE = {json.dumps(PROFILE)};"
             f"window.__UPDATE = {json.dumps(UNREACHABLE)};" + FAKE)
         # A broken page must produce a LIST of failures, not a 30 s hang and a traceback from the
         # first click on something that is not there.
@@ -338,6 +386,191 @@ def check(url, fixture_name, out, bad):
             bad.append("the offer was hidden without being cleared")
         if page.locator("#upd [data-install]").count() != 0:
             bad.append("a dead Restart to update button was left in the page")
+
+        # 6c. Gmail connect T9c (spec section 4.4): the Google row's states with a stubbed invoke,
+        #     the poll timeout, and the two-step Disconnect. Copy is asserted verbatim from the spec.
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(200)
+        page.evaluate(f"window.__ACCOUNT = {json.dumps(ACCOUNT)};")
+
+        def open_google(status):
+            page.evaluate(f"window.__GSTATUS = {json.dumps(status)}; window.__CALLS = [];")
+            page.evaluate("window.KNOWLU_OPEN_SETTINGS()")
+            page.wait_for_timeout(400)
+
+        def shown(sel):
+            return not page.is_hidden(sel)
+
+        for status, says, buttons in G_STATES:
+            open_google(status)
+            got = page.inner_text("#set-google-state")
+            if says not in got:
+                bad.append(f"the Google row says {got!r}, wanted {says!r}")
+            for sel in G_BUTTONS:
+                if shown(sel) != (sel in buttons):
+                    bad.append(f"the Google row ({says[:24]!r}) shows {sel} = {shown(sel)}")
+            note = page.inner_text("#set-google-note")
+            if G_TESTING not in note:
+                bad.append(f"the Google row lacks the Testing sentence ({note!r})")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(100)
+
+        # A poll that never finishes: timers are collapsed so twenty 3 s waits take no time.
+        page.evaluate("window.__realST = window.__realST || window.setTimeout.bind(window); "
+                      "window.setTimeout = function (f) { return window.__realST(f, 0); };")
+        open_google(G_CAL)
+        page.click("#set-google-connect")
+        page.wait_for_timeout(1500)
+        if calls(page, "google_connect") != [{"scope": "gmail"}]:
+            bad.append(f"Connect Gmail payload: {calls(page, 'google_connect')}")
+        if G_TIMEOUT not in page.inner_text("#set-google-note"):
+            bad.append(f"the poll timeout sentence is missing ({page.inner_text('#set-google-note')!r})")
+        if G_CAL_SAYS not in page.inner_text("#set-google-state"):
+            bad.append("the row did not repaint from one fresh status after the timeout")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(100)
+
+        # Two-step Disconnect: step 2 is hidden until step 1, step 1 names Calendar and calls nothing.
+        open_google(G_GMAIL)
+        if shown("#set-google-disconnect-2"):
+            bad.append("Yes, disconnect is visible before step 1")
+        page.click("#set-google-disconnect-1")
+        page.wait_for_timeout(200)
+        if "Google Calendar too" not in page.inner_text("#set-google-note") or not shown("#set-google-disconnect-2"):
+            bad.append("step 1 did not reveal the Calendar confirm and Yes, disconnect")
+        if calls(page, "google_disconnect"):
+            bad.append("step 1 disconnected already")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(100)
+        page.evaluate("window.KNOWLU_OPEN_SETTINGS()")
+        page.wait_for_timeout(400)
+        if shown("#set-google-disconnect-2"):
+            bad.append("closing Settings did not hide step 2")
+        # ok: false keeps the row and shows the error under it.
+        page.evaluate("window.__GDISCONNECT = { ok: false, error: 'Google could not be reached.' };")
+        page.click("#set-google-disconnect-1")
+        page.click("#set-google-disconnect-2")
+        page.wait_for_timeout(400)
+        if calls(page, "google_disconnect") != [{}]:
+            bad.append(f"Yes, disconnect payload: {calls(page, 'google_disconnect')}")
+        if "Google could not be reached." not in page.inner_text("#set-google-note"):
+            bad.append("a refused disconnect showed no error")
+        if "Gmail is connected" not in page.inner_text("#set-google-state"):
+            bad.append("a refused disconnect changed the row")
+        # ok: the row asks again and shows the new truth.
+        page.evaluate(f"window.__GDISCONNECT = null; window.__GSTATUS = {json.dumps(G_NONE)};")
+        page.click("#set-google-disconnect-1")
+        page.click("#set-google-disconnect-2")
+        page.wait_for_timeout(400)
+        if "Gmail is not connected" not in page.inner_text("#set-google-state"):
+            bad.append(f"the row did not repaint after Disconnect ({page.inner_text('#set-google-state')!r})")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(100)
+        page.evaluate("window.__ACCOUNT = null;")
+
+        # 6d. M2 T5b.3 (spec test 33): "Your preferences" with a stubbed profile. Timers were
+        #     collapsed above; the toast's 10 s life needs the real one back.
+        page.evaluate("window.setTimeout = window.__realST || window.setTimeout;")
+
+        def reopen():
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(100)
+            page.evaluate("window.__CALLS = []; window.KNOWLU_OPEN_SETTINGS()")
+            page.wait_for_timeout(400)
+
+        def drop_toasts():
+            page.evaluate("document.querySelectorAll('.settoast, .refusal').forEach(function (n) { n.remove(); });")
+
+        reopen()
+        if calls(page, "profile") == []:
+            bad.append("opening Settings did not invoke profile")
+        if page.input_value("#set-prefs-ta") != PROFILE["preferences"]:
+            bad.append(f"preferences did not come from profile ({page.input_value('#set-prefs-ta')!r})")
+        if page.input_value("#set-int-strong") != "robotics" or page.input_value("#set-int-clubs") != "chess":
+            bad.append("the interests lists did not come from profile")
+
+        # Preferences: save, then Undo.
+        page.fill("#set-prefs-ta", TYPED_PREFS)
+        page.evaluate("window.__CALLS = []")
+        page.click("#set-prefs-save")
+        page.wait_for_timeout(400)
+        want = [{"view": "today", "expected": PROFILE["preferences"], "text": TYPED_PREFS}]
+        if calls(page, "set_preferences") != want:
+            bad.append(f"set_preferences payload: {calls(page, 'set_preferences')}")
+        if page.locator(".settoast [data-prefs-undo]").count() != 1 or "Saved" not in page.inner_text(".settoast"):
+            bad.append("a saved preference did not offer Saved · Undo")
+        else:
+            page.evaluate("window.__CALLS = []")
+            page.click(".settoast [data-prefs-undo]")
+            page.wait_for_timeout(400)
+            got = calls(page, "set_preferences")
+            if got != [{"view": "today", "expected": TYPED_PREFS, "text": PROFILE["preferences"]}]:
+                bad.append(f"preferences Undo payload (expected must be the re-read text): {got}")
+            if page.input_value("#set-prefs-ta") != PROFILE["preferences"]:
+                bad.append("preferences Undo did not restore the text")
+            if page.locator(".settoast").count() != 0:
+                bad.append("the toast stayed after the preferences Undo")
+        drop_toasts()
+
+        # Interests: save, then Undo.
+        page.fill("#set-int-strong", "robotics\n" + TYPED_INT)
+        page.evaluate("window.__CALLS = []")
+        page.click("#set-int-save")
+        page.wait_for_timeout(400)
+        sent = {"view": "today", "strong": ["robotics", TYPED_INT], "mild": [], "never": ["golf"], "clubs": ["chess"]}
+        if calls(page, "set_interests") != [sent]:
+            bad.append(f"set_interests payload: {calls(page, 'set_interests')}")
+        if page.locator(".settoast [data-int-undo]").count() != 1:
+            bad.append("saved interests did not offer Saved · Undo")
+        else:
+            page.evaluate("window.__CALLS = []")
+            page.click(".settoast [data-int-undo]")
+            page.wait_for_timeout(400)
+            back = {"view": "today", "strong": ["robotics"], "mild": [], "never": ["golf"], "clubs": ["chess"]}
+            if calls(page, "set_interests") != [back]:
+                bad.append(f"interests Undo must send the four lists held before the save: {calls(page, 'set_interests')}")
+            if page.input_value("#set-int-strong") != "robotics":
+                bad.append("interests Undo did not restore the list")
+        drop_toasts()
+
+        # A conflict keeps the draft and says so; nothing is discarded.
+        page.evaluate("window.__CONFLICT = true;")
+        page.fill("#set-prefs-ta", TYPED_PREFS)
+        page.click("#set-prefs-save")
+        page.wait_for_timeout(400)
+        if page.locator("[data-prefs-conflict]").count() != 1:
+            bad.append("a conflicting preferences save showed no conflict notice")
+        if page.input_value("#set-prefs-ta") != TYPED_PREFS:
+            bad.append("a conflict did not keep the draft")
+        if page.locator(".settoast").count() != 0:
+            bad.append("a conflicting save offered Undo")
+        page.evaluate("window.__CONFLICT = false;")
+        page.click("#set-prefs-cancel")
+        drop_toasts()
+
+        # The read-only block-list state: D10's reason is shown, nothing can be saved.
+        page.evaluate("window.__PROFILE.interests_editable = false;")
+        reopen()
+        if not all(page.evaluate(f"document.getElementById('set-int-{k}').readOnly") for k in ("strong", "mild", "never", "clubs")):
+            bad.append("a block-list interests file left a list editable")
+        if not page.is_disabled("#set-int-save"):
+            bad.append("Save is live for a block-list interests file")
+        if "one line" not in page.inner_text("#set-int-reason"):
+            bad.append("the read-only interests state did not give its reason")
+        page.evaluate("window.__PROFILE.interests_editable = true;")
+
+        # Test 28 against the live page: no ui_event argument carries what was typed.
+        events = [c for c in page.evaluate("window.__ALLCALLS") if c[0] == "ui_event"]
+        if not any((e[1].get("objectKind") == "preferences") for e in events):
+            bad.append("no preferences ui_event was sent")
+        if not any((e[1].get("objectKind") == "interests") for e in events):
+            bad.append("no interests ui_event was sent")
+        blob = json.dumps(events)
+        for secret in (TYPED_PREFS, TYPED_INT, "robotics", "golf", "chess", PROFILE["preferences"]):
+            if secret in blob:
+                bad.append(f"a ui_event argument carried profile text ({secret!r})")
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(100)
 
         # 7. Both ways out, and the tray's one way in.
         page.keyboard.press("Escape")
