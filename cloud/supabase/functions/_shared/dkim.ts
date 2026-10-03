@@ -3,7 +3,8 @@
  * steps 5 and 6). Our own small verifier, scoped to what binding needs and nothing more:
  *
  * - `verifyDkim`: every `DKIM-Signature` (RFC 6376), rsa-sha256 only, `simple` and `relaxed`
- *   canonicalisation, `l=` honoured, `x=` checked against the injected clock.
+ *   canonicalisation, `l=` accepted only when it names the whole body, `x=` checked against the injected
+ *   clock.
  * - `verifyArc` (RFC 8617): the **topmost** ARC instance only (the highest `i=`, sealed by the provider
  *   that handed the message to SES). Its `ARC-Seal` is verified over every set from 1 to N, and its
  *   `ARC-Message-Signature` over the headers its `h=` lists and the body. A lower instance is never read
@@ -477,7 +478,9 @@ async function verifySignature(
     if (!/^\d{1,12}$/.test(x)) return out;
     if (Number(x) * 1000 < (ctx.deps.now ?? Date.now)()) return done("fail", "expired");
   }
-  if (length !== null && length > bodyCanon(ctx, c.body).length) return done("permerror", "body_length");
+  // `l=` must name the whole canonical body (Checkpoint B): text past a shorter length would verify unsigned
+  // and be judged as the signer's. Longer than the body is malformed, as RFC 6376 says.
+  if (length !== null && length !== bodyCanon(ctx, c.body).length) return done("permerror", "body_length");
   if (!sameBytes(await bodyHash(ctx, c.body, length), bh)) return done("fail", "body_hash");
   const k = await lookupKey(ctx, s, d);
   if (!("key" in k)) return done(k.result, k.reason);

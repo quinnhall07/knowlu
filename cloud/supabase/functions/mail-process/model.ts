@@ -2,7 +2,10 @@
  * `mail-process`'s model path (email plan T3e; spec §4.7 steps 4–6, D8, D9, D23 as amended by PQ6 (a)): an
  * item no screen or template decided. In this order, and never another:
  *
- * 5. **Charge, before the model.** A `backfill` item charges the account's allowance (`charge_allowance`,
+ * 5. **Charge, before the model.** A `backfill` item first reads the budget at the ceiling the allowance
+ *    would raise (`MONTHLY_CEILING_USD + ALLOWANCE_USD`): over even that, no allowance could serve it, so it
+ *    is over budget with nothing charged and no allowance opened (Checkpoint B). Then it charges the
+ *    account's allowance (`charge_allowance`,
  *    which opens one when none was opened in the last 120 days); when that refuses, it charges the day's
  *    `mail_claim` cap as a `live` or `recover` item always does (`charge_call`). Then `enforce_budget`,
  *    whose ceiling is raised by the allowance's dollars while it is open, must pass. Capped or over budget:
@@ -59,6 +62,10 @@ export interface MailCharges {
   refundDaily(account: string): Promise<boolean>;
   /** `enforce_budget` at `MONTHLY_CEILING_USD` (the SQL adds an open allowance's dollars). Read per item. */
   withinBudget(account: string): Promise<boolean>;
+  /** `enforce_budget` at `MONTHLY_CEILING_USD + ALLOWANCE_USD`, read before a backfill item's allowance
+   * charge: false means no allowance, opened or not, could let its call through. An open allowance's
+   * dollars are added again by the SQL, which only loosens this read; `withinBudget` still decides. */
+  allowanceCouldServe(account: string): Promise<boolean>;
   /** `record_tokens` for `mail_claim`; never throws. */
   recordTokens(account: string, inTokens: number, outTokens: number): Promise<void>;
 }
@@ -84,6 +91,8 @@ export function mailCharges(db: Db): MailCharges {
       ),
     withinBudget: (account) =>
       yes(db.rpc("enforce_budget", { p_account: account, p_ceiling: MONTHLY_CEILING_USD })),
+    allowanceCouldServe: (account) =>
+      yes(db.rpc("enforce_budget", { p_account: account, p_ceiling: MONTHLY_CEILING_USD + ALLOWANCE_USD })),
     async recordTokens(account, inTokens, outTokens) {
       try {
         await db.rpc("record_tokens", {
@@ -108,6 +117,9 @@ export interface ModelPathDeps {
   /** The `mail_claim` pin and its client, read once and kept. */
   pin(): Promise<{ row: ModelRow; model: JudgeModel }>;
 }
+
+/** The dollars an open allowance raises the ceiling by: `charge_allowance`'s `1.00` (D23 as amended). */
+export const ALLOWANCE_USD = 1.0;
 
 /** §4.7 step 5's "at most three attempts". */
 export const MAX_ATTEMPTS = 3;
@@ -174,7 +186,14 @@ export function modelPath(deps: ModelPathDeps): (input: ModelInput) => Promise<v
     await deps.store.wait(item.id, nextUtcDay(deps.now()), item.attempts + 1);
 
     // Step 5, before any call: the allowance for a backfill item while it lasts, else the day's cap; then the
-    // budget, raised by the allowance while it is open.
+    // budget, raised by the allowance while it is open. A backfill item reads the budget first at the ceiling
+    // an allowance would raise: over even that, opening one would spend the account's once-per-120-days
+    // allowance on an item that cannot be judged (Checkpoint B), so nothing is charged or opened.
+    if (item.phase === "backfill" && !(await deps.charges.allowanceCouldServe(account))) {
+      await record({});
+      await waitOrExpire(item, deps, "over budget");
+      return;
+    }
     const fromAllowance = item.phase === "backfill" && await deps.charges.allowance(account);
     const charged = fromAllowance || await deps.charges.daily(account);
     if (!charged || !(await deps.charges.withinBudget(account))) {

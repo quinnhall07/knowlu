@@ -7,6 +7,8 @@ import { type SnsFetch, verifySns } from "./sns.ts";
 
 const TOPIC = "arn:aws:sns:us-east-2:000000000000:mail-test-topic";
 const OTHER_TOPIC = "arn:aws:sns:us-east-2:000000000000:someone-elses-topic";
+/** Thirty seconds after every fixture's `Timestamp`. */
+const NOW = () => Date.UTC(2026, 9, 2, 12, 0, 30);
 const CERT_URL = "https://sns.us-east-2.amazonaws.com/SimpleNotificationService-00test.pem";
 const SUBSCRIBE_URL =
   "https://sns.us-east-2.amazonaws.com/?Action=ConfirmSubscription&TopicArn=t&Token=tok-test";
@@ -170,13 +172,17 @@ Deno.test("a_valid_signature_from_the_local_cert_host_is_accepted", async () => 
   await withHost(certPem(await spkiOf(keys)), async (fetcher, asked) => {
     const got = await verifySns(post(await signed(keys, notification())), { topicArn: TOPIC }, {
       fetch: fetcher,
+      now: NOW,
     });
     assertEquals(got, { kind: "notification", message: MESSAGE });
     assertEquals(asked, [CERT_URL]);
     // A notification without a Subject is signed without one, and still verifies.
     const bare = notification();
     delete bare.Subject;
-    const got2 = await verifySns(post(await signed(keys, bare)), { topicArn: TOPIC }, { fetch: fetcher });
+    const got2 = await verifySns(post(await signed(keys, bare)), { topicArn: TOPIC }, {
+      fetch: fetcher,
+      now: NOW,
+    });
     assertEquals(got2, { kind: "notification", message: MESSAGE });
   });
 });
@@ -185,7 +191,10 @@ Deno.test("a_wrong_topic_is_refused", async () => {
   const keys = await keyPair();
   await withHost(certPem(await spkiOf(keys)), async (fetcher, asked) => {
     const body = await signed(keys, notification({ TopicArn: OTHER_TOPIC }));
-    assertEquals(await statusOf(verifySns(post(body), { topicArn: TOPIC }, { fetch: fetcher })), 403);
+    assertEquals(
+      await statusOf(verifySns(post(body), { topicArn: TOPIC }, { fetch: fetcher, now: NOW })),
+      403,
+    );
     // Refused before anything is read: not even the certificate is fetched.
     assertEquals(asked, []);
   });
@@ -196,7 +205,7 @@ Deno.test("a_bad_signature_is_refused", async () => {
   const stranger = await keyPair();
   await withHost(certPem(await spkiOf(keys)), async (fetcher, asked) => {
     const cfg = { topicArn: TOPIC };
-    const deps = { fetch: fetcher };
+    const deps = { fetch: fetcher, now: NOW };
     // Signed by a key the certificate does not hold.
     assertEquals(await statusOf(verifySns(post(await signed(stranger, notification())), cfg, deps)), 403);
     // Signed by the right key, then one field changed.
@@ -223,7 +232,10 @@ Deno.test("a_bad_signature_is_refused", async () => {
   // A certificate host that serves something other than a certificate is a refusal too.
   await withHost("not a certificate", async (fetcher) => {
     const body = await signed(keys, notification());
-    assertEquals(await statusOf(verifySns(post(body), { topicArn: TOPIC }, { fetch: fetcher })), 403);
+    assertEquals(
+      await statusOf(verifySns(post(body), { topicArn: TOPIC }, { fetch: fetcher, now: NOW })),
+      403,
+    );
   });
 });
 
@@ -244,12 +256,16 @@ Deno.test("a_cert_url_outside_https_sns_region_amazonaws_com_is_refused", async 
   await withHost(certPem(await spkiOf(keys)), async (fetcher, asked) => {
     for (const url of outside) {
       const body = await signed(keys, notification({ SigningCertURL: url }));
-      assertEquals(await statusOf(verifySns(post(body), { topicArn: TOPIC }, { fetch: fetcher })), 403, url);
+      assertEquals(
+        await statusOf(verifySns(post(body), { topicArn: TOPIC }, { fetch: fetcher, now: NOW })),
+        403,
+        url,
+      );
     }
     assertEquals(asked, []);
     // The same message from the allowed host passes, so the host is what was refused.
     const ok = await signed(keys, notification());
-    assertEquals(await statusOf(verifySns(post(ok), { topicArn: TOPIC }, { fetch: fetcher })), 200);
+    assertEquals(await statusOf(verifySns(post(ok), { topicArn: TOPIC }, { fetch: fetcher, now: NOW })), 200);
   });
 });
 
@@ -258,7 +274,7 @@ Deno.test("a_subscription_handshake_is_confirmed_only_for_the_configured_topic",
   const stranger = await keyPair();
   await withHost(certPem(await spkiOf(keys)), async (fetcher, asked) => {
     const cfg = { topicArn: TOPIC };
-    const deps = { fetch: fetcher };
+    const deps = { fetch: fetcher, now: NOW };
     // Another topic: refused, and the SubscribeURL is never visited.
     const wrong = await signed(keys, handshake({ TopicArn: OTHER_TOPIC }));
     assertEquals(await statusOf(verifySns(post(wrong), cfg, deps)), 403);
@@ -282,6 +298,30 @@ Deno.test("a_subscription_handshake_is_confirmed_only_for_the_configured_topic",
         ? Promise.resolve(new Response("", { status: 503 }))
         : fetcher(raw, init);
     const right = await signed(keys, handshake());
-    assert((await statusOf(verifySns(post(right), { topicArn: TOPIC }, { fetch: failing }))) === 500);
+    assert(
+      (await statusOf(verifySns(post(right), { topicArn: TOPIC }, { fetch: failing, now: NOW }))) === 500,
+    );
+  });
+});
+
+Deno.test("a_notification_older_than_an_hour_or_with_no_readable_timestamp_is_refused", async () => {
+  // Checkpoint B (minor): a captured notification replayed later is refused on its signed Timestamp, before
+  // any certificate is fetched, so a replay costs no S3 GET and no 500.
+  const keys = await keyPair();
+  await withHost(certPem(await spkiOf(keys)), async (fetcher, asked) => {
+    const cfg = { topicArn: TOPIC };
+    const at = (iso: string) => ({ fetch: fetcher, now: () => Date.parse(iso) });
+    const n = await signed(keys, notification());
+    assertEquals(await statusOf(verifySns(post(n), cfg, at("2026-10-02T13:00:00.001Z"))), 403);
+    assertEquals(await statusOf(verifySns(post(n), cfg, at("2026-10-03T12:00:00.000Z"))), 403);
+    const h = await signed(keys, handshake());
+    assertEquals(await statusOf(verifySns(post(h), cfg, at("2026-10-02T13:00:00.001Z"))), 403);
+    for (const Timestamp of ["", "yesterday", "2026-13-40T99:00:00Z"]) {
+      const bad = await signed(keys, notification({ Timestamp }));
+      assertEquals(await statusOf(verifySns(post(bad), cfg, at("2026-10-02T12:00:30.000Z"))), 403, Timestamp);
+    }
+    assertEquals(asked, [], "refused before the certificate is fetched");
+    // Inside the hour (SNS's retries of one delivery keep its Timestamp), it verifies.
+    assertEquals(await statusOf(verifySns(post(n), cfg, at("2026-10-02T12:59:59.000Z"))), 200);
   });
 });

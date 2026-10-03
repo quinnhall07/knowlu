@@ -436,3 +436,19 @@ Deno.test("a_call_without_the_job_token_is_refused_and_reads_nothing", async () 
     assertEquals(keysUnder(w, "work/"), ["work/item-1"]);
   });
 });
+
+Deno.test("a_second_queue_of_one_message_is_a_no_op_on_mail_claims_unique_key", async () => {
+  // Checkpoint B (minor): the queue runs before the work row's delete, so a failed delete runs the item
+  // again. `index.ts` is never loaded by `deno test`, so its wiring is pinned by its text (as `account`'s
+  // index test does): the insert names the (address_id, uid) key and ignores a duplicate.
+  const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const queue = text.slice(text.indexOf("async queue("), text.indexOf("async finish("));
+  assert(
+    queue.includes('"mail_claims?on_conflict=address_id,uid"'),
+    "the queue names mail_claims_uid's columns",
+  );
+  assert(
+    queue.includes('"resolution=ignore-duplicates,return=minimal"'),
+    "a duplicate is ignored, not a 409",
+  );
+});

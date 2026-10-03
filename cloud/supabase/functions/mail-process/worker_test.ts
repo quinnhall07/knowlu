@@ -21,7 +21,8 @@ import {
   type SweepStore,
   type WorkItem,
 } from "./handler.ts";
-import { mailCharges, modelPath } from "./model.ts";
+import { ALLOWANCE_USD, mailCharges, modelPath } from "./model.ts";
+import { MONTHLY_CEILING_USD } from "../_shared/judge_caps.ts";
 
 const BUCKET = "mail-test-bucket";
 const DAY = 86_400_000;
@@ -72,6 +73,8 @@ class FakeDb implements Db {
   refunds = new Map<string, number>();
   /** This month's spend outside `usage_daily`'s mail rows, in dollars (`monthly_spend`'s other kinds). */
   otherSpend = 0;
+  /** Each `enforce_budget` call's `p_ceiling`, in order. */
+  ceilings: number[] = [];
   judgments: Record<string, unknown>[] = [];
   constructor(readonly clock: { now: number }, readonly events: string[]) {
     // An account judging for a while: `charge_call`'s first-two-days doubling is behind it.
@@ -145,6 +148,7 @@ class FakeDb implements Db {
       return Promise.resolve(null);
     }
     if (fn === "enforce_budget") {
+      this.ceilings.push(Number(args.p_ceiling));
       const raised = a !== undefined && a.until !== null && a.until > now ? a.usd : 0;
       return Promise.resolve(this.spent(account) < Number(args.p_ceiling) + raised);
     }
@@ -515,7 +519,13 @@ Deno.test("a_model_failure_on_a_backfill_item_refunds_its_allowance_judgment_and
     w.model.script = () => new Error("upstream 503");
     const item = w.put(mail(), BACKFILL);
     await w.run();
-    assertEquals(w.events, ["charge_allowance", "enforce_budget", "model", "refund_allowance"]);
+    assertEquals(w.events, [
+      "enforce_budget",
+      "charge_allowance",
+      "enforce_budget",
+      "model",
+      "refund_allowance",
+    ]);
     assertEquals(allowance(w)?.left, 2000, "the judgment the model never answered is given back");
     assertEquals(w.store.work.map((r) => [r.id, r.attempts, r.nextAttemptAt]), [[item.id, 1, midnight(T0)]]);
     assertEquals(objects(w), [item.s3Key]);
@@ -574,24 +584,62 @@ Deno.test("a_model_failure_on_a_live_item_refunds_its_daily_cap_charge_and_waits
   });
 });
 
-Deno.test("an_over_budget_backfill_item_gives_its_allowance_judgment_back", async () => {
+Deno.test("an_account_over_budget_by_more_than_the_allowance_never_opens_it", async () => {
   await withWorld(async (w) => {
-    // Over the ceiling even raised by the allowance's $1.00: no call, and no judgment spent (D23).
+    // Checkpoint B (minor): over the ceiling even raised by the allowance's $1.00, the allowance would serve
+    // no call, so the budget is read first (at the raised ceiling) and the allowance is never opened: its
+    // once-per-120-days opening is not spent on an item that cannot be judged (D23).
     w.db.otherSpend = 10;
     const item = w.put(mail(), BACKFILL);
     await w.run();
-    assertEquals(w.events, ["charge_allowance", "enforce_budget", "refund_allowance"]);
-    assertEquals(allowance(w)?.left, 2000);
+    assertEquals(w.events, ["enforce_budget"]);
+    assertEquals(w.db.ceilings, [MONTHLY_CEILING_USD + ALLOWANCE_USD]);
+    assertEquals(allowance(w)?.openedAt, null, "the allowance is still closed");
     // Every attempt the same, down to its expiry: the allowance and the day's cap are both untouched.
     for (let day = 1; day <= 2; day++) {
       w.clock.now = T0 + day * DAY;
       await w.run();
     }
     assertEquals(modelCalls(w), 0);
-    assertEquals(allowance(w)?.left, 2000);
-    assertEquals(charged(w), ["charge_allowance", "charge_allowance", "charge_allowance"]);
+    assertEquals(charged(w), []);
+    assertEquals([allowance(w)?.openedAt, w.db.calls("mail_claim").calls], [null, 0]);
     assertEquals([work(w), w.store.counters], [[], { "addr-1:expired": 1 }]);
     assertEquals(w.store.seen.has(`acct-1|h-${item.id}`), false);
+  });
+});
+
+Deno.test("an_account_within_the_allowances_dollars_opens_it_and_is_judged", async () => {
+  await withWorld(async (w) => {
+    // Over the bare ceiling, inside it raised by the allowance: the read passes, the allowance opens, the
+    // budget read again at the bare ceiling (the SQL adds the open allowance's dollars) passes, and the call
+    // is made.
+    w.db.otherSpend = MONTHLY_CEILING_USD + ALLOWANCE_USD / 2;
+    w.put(mail(), BACKFILL);
+    await w.run();
+    assertEquals(w.events, [
+      "enforce_budget",
+      "charge_allowance",
+      "enforce_budget",
+      "model",
+      "record_tokens",
+    ]);
+    assertEquals(w.db.ceilings, [MONTHLY_CEILING_USD + ALLOWANCE_USD, MONTHLY_CEILING_USD]);
+    assertEquals(allowance(w)?.left, 1999);
+  });
+});
+
+Deno.test("an_over_budget_backfill_item_on_an_open_allowance_gives_its_judgment_back", async () => {
+  await withWorld(async (w) => {
+    // The allowance is open, and this month's spend is past the ceiling it raises but inside the first read's
+    // (which counts the open allowance's dollars on top): the charge is taken, the budget refuses, no call is
+    // made, and the judgment is given back (D23).
+    assert(await mailCharges(w.db).allowance("acct-1"));
+    w.db.otherSpend = MONTHLY_CEILING_USD + ALLOWANCE_USD * 1.5;
+    w.events.length = 0;
+    w.put(mail(), BACKFILL);
+    await w.run();
+    assertEquals(w.events, ["enforce_budget", "charge_allowance", "enforce_budget", "refund_allowance"]);
+    assertEquals([modelCalls(w), allowance(w)?.left], [0, 1999]);
   });
 });
 
@@ -623,7 +671,13 @@ Deno.test("charge_and_enforce_budget_run_before_the_spy_model", async () => {
   await withWorld(async (w) => {
     w.put(mail(), BACKFILL);
     await w.run();
-    assertEquals(w.events, ["charge_allowance", "enforce_budget", "model", "record_tokens"]);
+    assertEquals(w.events, [
+      "enforce_budget",
+      "charge_allowance",
+      "enforce_budget",
+      "model",
+      "record_tokens",
+    ]);
     w.events.length = 0;
     w.put(mail());
     await w.run();
@@ -900,4 +954,14 @@ Deno.test("the_sweep_closes_timed_out_batches_and_prunes_by_age", async () => {
     assertEquals(modelCalls(w), 0);
     for (const line of w.logs) assert(!line.includes("mail:") && !line.includes("acct-1"), line);
   });
+});
+
+Deno.test("allowance_usd_is_the_dollars_charge_allowance_opens_with", async () => {
+  // The first budget read's raise must be the SQL's own, or it would refuse an item the allowance could serve.
+  const dir = new URL("../../migrations/", import.meta.url);
+  const name = [...Deno.readDirSync(dir)].map((e) => e.name).find((n) => /^\d{14}_mail\.sql$/.test(n))!;
+  const sql = (await Deno.readTextFile(new URL(name, dir))).replace(/\s+/g, " ");
+  const opened = /allowance_usd = case when .*? then ([\d.]+) else allowance_usd end/.exec(sql);
+  assert(opened !== null, "charge_allowance sets allowance_usd when it opens one");
+  assertEquals(Number(opened[1]), ALLOWANCE_USD);
 });

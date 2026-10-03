@@ -559,6 +559,24 @@ Deno.test("an_m365_forward_binds_by_microsofts_arc_forwardingloop_and_srs_return
   assertEquals(await live(fwd, { ...MS_BOX, provider: "google" }, SRS), UNBOUND);
 });
 
+Deno.test("an_intra_school_m365_forward_without_an_srs_envelope_is_unbound", async () => {
+  // Checkpoint B's open item (plan T2f): whether EOP SRS-rewrites a forward whose sender is on the school's
+  // own domain is unrecorded. Unrewritten, the envelope is the colleague's own address with SES's SPF pass,
+  // under Microsoft's verifying seal and a ForwardingLoop naming the mailbox and tenant: nothing a sender on
+  // any tenant could not also write, so it binds nothing (risk 10). It is unbound, never live.
+  const aar = "mx.microsoft.com 1; spf=pass (sender ip is 192.0.2.7) smtp.rcpttodomain=school.test" +
+    " smtp.mailfrom=school.test; dmarc=pass action=none header.from=school.test;" +
+    " dkim=pass (signature was verified) header.d=school.test";
+  const m = await hop(original("Prof Example <prof@school.test>"), { ...MS_HOP, aar });
+  const fwd = assemble(m.head, m.body);
+  for (const mailFrom of ["prof@school.test", "PROF@School.Test", "jdoe@school.test"]) {
+    assertEquals(await live(fwd, MS_BOX, { ...SRS, mailFrom }), UNBOUND, mailFrom);
+  }
+  // Rewritten by SRS, the same intra-school forward binds, and is aligned on the school's own record.
+  const srs = { ...SRS, mailFrom: "jdoe+SRS=Ab1C=2Q=school.test=prof@school.test" };
+  assertEquals(await live(fwd, MS_BOX, srs), LIVE_ALIGNED);
+});
+
 // PQ9 (Quinn, 2026-10-02): a Google Workspace mailbox on its own domain binds on Google's verifying seal and
 // SES's SPF pass on its `+caf_=` envelope at that same domain, when the domain's MX is Google's.
 const WS_BOX = mailbox({ mailboxHint: "jdoe@school.test", confirmUntil: null });

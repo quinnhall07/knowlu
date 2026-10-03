@@ -1584,6 +1584,12 @@ Deno.test("mail_hand_off_writes_the_seen_row_then_the_work_row_in_one_transactio
   assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
   assertServiceRoleOnly(f, "mail_hand_off", "uuid, uuid, uuid, text, text, text, text, text, timestamptz");
   const steps = [
+    // Checkpoint B (minor): only a live mailbox takes work. The share lock holds Disconnect's `revoke` until
+    // this transaction ends, so its `mail_work` key read sees this row; once `revoked`, nothing is written,
+    // the caller deletes its put, and no object is left with nothing pointing at it.
+    "perform 1 from public.mail_addresses where id = p_address and account_id = p_account " +
+    "and status <> 'revoked' for share;",
+    "if not found then return false; end if;",
     "insert into public.mail_seen (account_id, msg_hash, fp_hash, received_minute, address_id, phase) " +
     "values (p_account, p_msg_hash, p_fp_hash, date_trunc('minute', p_received_minute), p_address, p_phase) " +
     "on conflict (account_id, msg_hash) do nothing returning true into fresh;",
@@ -1595,10 +1601,21 @@ Deno.test("mail_hand_off_writes_the_seen_row_then_the_work_row_in_one_transactio
   let at = -1;
   for (const s of steps) {
     const next = f.body.indexOf(s);
-    assert(next > at, `${f.name}: '${s}' in order (seen, the duplicate's way out, work)`);
+    assert(next > at, `${f.name}: '${s}' in order (live mailbox, seen, the duplicate's way out, work)`);
     at = next;
   }
   assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 2, `${f.name}: the two inserts only`);
+});
+
+Deno.test("mail_claims_holds_one_row_per_mailbox_and_uid", async () => {
+  // Checkpoint B (minor): `mail-process` queues before it deletes the work row, so a failed delete runs the
+  // item again. The key makes the second queue a no-op (`on_conflict=address_id,uid`, ignore-duplicates).
+  const { name, sql } = await mailMigration();
+  const flat = sql.replace(/\s+/g, " ").toLowerCase();
+  assert(
+    flat.includes("create unique index if not exists mail_claims_uid on public.mail_claims (address_id, uid);"),
+    `${name}: mail_claims is unique on (address_id, uid), a whole-table index PostgREST's on_conflict can name`,
+  );
 });
 
 Deno.test("count_mail_arrival_adds_one_to_one_mailboxs_unbound_or_unauthenticated", async () => {

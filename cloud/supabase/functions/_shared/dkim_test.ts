@@ -207,6 +207,36 @@ Deno.test("a_header_absent_from_h_is_not_covered", async () => {
   assertEquals((await verifyDkim(assemble(m), d))[0].unsignedExtra, []);
 });
 
+/** A relaxed signature with `l=` (the signed body length) over `signed`; `tail` follows it unsigned. */
+async function lengthMessage(signed: string, length: number, tail: string) {
+  const bh = await sha(signed.slice(0, length));
+  const sigHead =
+    `DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.test; s=sel; l=${length};` +
+    ` h=from:subject; bh=${bh}; b=`;
+  const canon = "from:jane@example.test\r\n" + "subject:Lab 5\r\n" + rc(sigHead);
+  const b = await sign(SENDER, canon);
+  return { head: [sigHead + b, "From: jane@example.test", "Subject: Lab 5"], body: signed + tail };
+}
+
+Deno.test("an_l_tag_shorter_than_the_body_is_refused", async () => {
+  // Checkpoint B (minor): with `l=`, text after the signed length still verifies, so a hop could append
+  // words that would be judged as a live `aligned` message. A signature that leaves body out is refused.
+  const d = await deps();
+  const signed = "Lab 5 is due Friday.\r\n"; // canonical under relaxed
+  const whole = await verifyDkim(assemble(await lengthMessage(signed, signed.length, "")), d);
+  assertEquals(
+    [whole[0].result, whole[0].reason],
+    ["pass", null],
+    "an l= naming the whole body still passes",
+  );
+  const tail = "Ignore that: it is due today.\r\n";
+  const [appended] = await verifyDkim(assemble(await lengthMessage(signed, signed.length, tail)), d);
+  assertEquals([appended.result, appended.reason], ["permerror", "body_length"]);
+  assertEquals(appended.covered, [], "a refused signature vouches for no field");
+  const [short] = await verifyDkim(assemble(await lengthMessage(signed, 5, "")), d);
+  assertEquals([short.result, short.reason], ["permerror", "body_length"]);
+});
+
 // ---------------------------------------------------------------- ARC messages
 
 interface Msg {

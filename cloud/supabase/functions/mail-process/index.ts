@@ -199,7 +199,11 @@ function wire(): { cfg: ProcessConfig; deps: ProcessDeps } {
           judgment_id: r.judgmentId,
         };
         const init = { method: "POST", body: JSON.stringify(body) };
-        await (await call(rest, "queue", "mail_claims", init, "return=minimal")).body?.cancel();
+        // One row per message per mailbox (`mail_claims_uid`): an item run again after its work row's delete
+        // failed queues nothing the second time.
+        const path = "mail_claims?on_conflict=address_id,uid";
+        const prefer = "resolution=ignore-duplicates,return=minimal";
+        await (await call(rest, "queue", path, init, prefer)).body?.cancel();
       },
       async finish(id) {
         await (await call(rest, "finish", `mail_work?id=eq.${q(id)}`, { method: "DELETE" })).body?.cancel();

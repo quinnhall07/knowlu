@@ -14,8 +14,10 @@
  * job; this file reads only its public key. The fetcher is injected so a test can serve the
  * certificate from 127.0.0.1:0; production passes the platform's `fetch`.
  *
- * Replay: a captured notification verifies again, but it names an S3 object the first delivery
- * deleted, and `mail_seen` keys every message (§4.6), so a replay does no new work.
+ * Replay: a notification whose signed `Timestamp` is more than `MAX_SNS_AGE_MS` old, or unreadable, is
+ * refused before the certificate is fetched (Checkpoint B). Inside the hour a captured notification verifies
+ * again, but it names an S3 object the first delivery deleted, and `mail_seen` keys every message (§4.6),
+ * so a replay does no new work.
  */
 import { fail } from "./http.ts";
 
@@ -25,6 +27,8 @@ export interface SnsConfig {
   topicArn: string;
 }
 export interface SnsDeps {
+  /** Epoch milliseconds: the replay bound reads it (`MAX_SNS_AGE_MS`). */
+  now: () => number;
   fetch: SnsFetch;
 }
 /** A verified notification gives back only its `Message` (SES's JSON, unparsed here). */
@@ -33,6 +37,9 @@ export type SnsVerified = { kind: "notification"; message: string } | { kind: "c
 export const MAX_SNS_BODY_CHARS = 512 * 1024; // SNS's own message cap is 256 KiB.
 const MAX_CERT_BYTES = 16 * 1024;
 const FETCH_TIMEOUT_MS = 10_000;
+/** A notification older than this is a replay. SNS keeps one message's `Timestamp` across its retries, and
+ * an HTTPS delivery policy's retries end within 3,600 seconds, so the hour holds every genuine retry. */
+export const MAX_SNS_AGE_MS = 60 * 60_000;
 
 /** The fields AWS signs, in AWS's order, per type. `Subject` is signed only when present. */
 const SIGNED_FIELDS: Record<string, readonly string[]> = {
@@ -199,6 +206,10 @@ export async function verifySns(req: Request, cfg: SnsConfig, deps: SnsDeps): Pr
   if (msg.TopicArn !== cfg.topicArn) throw refused();
   if (msg.SignatureVersion !== "2") throw refused();
   if (msg.SigningCertURL === undefined || !allowedCertUrl(msg.SigningCertURL, region)) throw refused();
+  const sentAt = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(msg.Timestamp ?? "")
+    ? Date.parse(msg.Timestamp!)
+    : NaN;
+  if (!Number.isFinite(sentAt) || deps.now() - sentAt > MAX_SNS_AGE_MS) throw refused();
   const handshake = msg.Type === "SubscriptionConfirmation";
   if (handshake && (msg.SubscribeURL === undefined || onSnsHost(msg.SubscribeURL, region) === null)) {
     throw refused();

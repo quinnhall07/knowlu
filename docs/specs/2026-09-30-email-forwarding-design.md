@@ -663,8 +663,8 @@ them, as `google_accounts` does. Every `account_id` references `accounts(id) on 
 | `mail_batches` | `id`, `address_id`, `phase` (`backfill`, `recover`), the nonce's HMAC, `since`, `expected`, `sent` (the device's count at close), `received`, `opened_at`, `sent_at`, `closed_at` | 30 days after closing |
 | `mail_canaries` | `id`, `address_id`, the nonce's HMAC, `sent_at`, `arrived_at` | 30 days |
 | `mail_seen` | `account_id`, `msg_hash` and `fp_hash` (both HMACs under the account's key, §4.6 step 7), `received_minute`, `address_id`, `phase`, `seen_at`; primary key `(account_id, msg_hash)`; written with its `mail_work` row, deleted if that item expires | 180 days, pruned nightly (a term and its overlap) |
-| `mail_work` | `id`, `account_id`, `address_id`, `batch_id`, the S3 key, `phase`, the authenticity word, `arrived_at`, `attempts`, `next_attempt_at` | until processed, or until its object expires (then counted `expired`) |
-| `mail_claims` | `id`, `account_id`, `address_id`, `batch_id`, `uid`, `message_date`, `ordering_date`, `sender_name`, `sender_addr`, `phase`, `authenticity`, `claims` (jsonb, below), `judgment_id`, `queued_at`, `delivered_at` | delivered: 7 days; undelivered: 30 days, then deleted and counted; all of a mailbox's rows on its Disconnect |
+| `mail_work` | `id`, `account_id`, `address_id`, `batch_id`, the S3 key, `phase`, the authenticity word, `arrived_at`, `attempts`, `next_attempt_at`; `msg_hash` *(amended 2026-10-02, Checkpoint B, recording the build: the keyed hash of its `mail_seen` row, written by intake's hand-off, so an item that expires takes that row with it once its object is gone, D8)* | until processed, or until its object expires (then counted `expired`) |
+| `mail_claims` | `id`, `account_id`, `address_id`, `batch_id`, `uid`, `message_date`, `ordering_date`, `sender_name`, `sender_addr`, `phase`, `authenticity`, `claims` (jsonb, below), `judgment_id`, `queued_at`, `delivered_at`; unique on `(address_id, uid)` *(amended 2026-10-02, Checkpoint B, recording the build: an item run again after a failed finish queues no second row)* | delivered: 7 days; undelivered: 30 days, then deleted and counted; all of a mailbox's rows on its Disconnect |
 
 **Changes to existing objects, in the same migration, constraint by constraint** (§1's list; each is
 pinned by test 14):
@@ -691,6 +691,11 @@ pinned by test 14):
   (revoke, then delete the mailbox's `mail_seen`, `mail_work`, all its `mail_claims`, batches
   and canaries, then the row; `security definer`, pinned `search_path`). Its callers (Disconnect and
   the account purge) first read the mailbox's `work/` keys from `mail_work` and delete those objects.
+  *(Amended 2026-10-02, Checkpoint B, recording the build: also `expire_mail_work(p_work)`, which deletes
+  an expired or capped item's `mail_work` row, then the `mail_seen` row named by its `msg_hash`, then adds
+  one `expired` on its mailbox, in one transaction; `security invoker`, pinned `search_path`, service role
+  only. A second caller finds no row and counts nothing. The plan's other RPCs (`refund_allowance`,
+  `mail_hand_off`, `count_mail_arrival`) are recorded in its §9.5.)*
 - Cron (pg_net, the Vault token, as the existing jobs): `mail-process` every minute;
   `mail-canary` hourly; `mail-sweep` nightly (expire work and delete the expired items' seen rows,
   close timed-out batches, prune seen, sweep claims, batches and canaries).

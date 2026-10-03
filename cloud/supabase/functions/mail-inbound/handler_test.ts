@@ -639,6 +639,25 @@ Deno.test("no_forgery_moves_last_received_at_or_charges_a_cap", async () => {
   });
 });
 
+Deno.test("an_intra_school_forward_microsoft_did_not_srs_rewrite_is_counted_unbound_never_live", async () => {
+  // Checkpoint B's open item (plan T2f): S0 did not record whether EOP SRS-rewrites a forward whose original
+  // sender is on the school's own domain. If it does not, the envelope is the professor's own address: check
+  // (ii) cannot name the mailbox, so the message is unbound (deleted, counted on the mailbox, the count the
+  // Settings row shows), never a silent live item, and it never moves `last_received_at`.
+  await withWorld(async (w) => {
+    const raw = await m365Forward(TENANT);
+    const d = { key: "inbound/i1", recipients: [at(TOK_M365)], source: "prof@school.test" };
+    assertEquals((await w.arrive(raw, d)).status, 200);
+    assertEquals([w.store.workRows, w.store.seenRows, w.store.receivedAt], [[], [], {}]);
+    assertEquals(w.store.counters, { "addr-4:unbound": 1 });
+    assertEquals([keysUnder(w, "inbound/"), keysUnder(w, "work/")], [[], []]);
+    // The same message with the SRS envelope binds: it is the envelope alone that refuses it.
+    await w.arrive(raw, { ...d, key: "inbound/i2", source: SRS });
+    const bound = w.store.workRows.map((x) => [x.addressId, x.phase, x.authenticity]);
+    assertEquals(bound, [["addr-4", "live", "aligned"]]);
+  });
+});
+
 // ---------------------------------------------------------------- test 7: dedup and the hand-off
 
 const JANE = (key: string): Delivery => ({ key, recipients: [at(TOK1)], source: caf("jane", TOK1) });

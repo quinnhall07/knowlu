@@ -176,6 +176,9 @@ alter table public.mail_claims enable row level security;
 revoke all on public.mail_claims from anon, authenticated;
 create index if not exists mail_claims_undelivered on public.mail_claims (account_id, queued_at) where delivered_at is null;
 create index if not exists mail_claims_address on public.mail_claims (address_id);
+-- One row per message per mailbox (Checkpoint B): `mail-process` queues before it deletes the work row, so
+-- an item whose delete failed runs again, and its second queue is a no-op (`on_conflict`, ignore-duplicates).
+create unique index if not exists mail_claims_uid on public.mail_claims (address_id, uid);
 
 -- T1.2: the existing objects, constraint by constraint (spec §5.1's "Changes to existing objects").
 -- Each check below is the inline one of 20260911000100_judgment_service.sql, under the name Postgres
@@ -485,7 +488,10 @@ grant execute on function public.enforce_budget(uuid, numeric) to service_role;
 -- The hand-off. `mail-inbound` calls it only after its `work/` put succeeded; the seen row and the work
 -- row are written in this one transaction, or neither is. A Message-ID the account already holds (a
 -- concurrent delivery of the same message) writes nothing and answers false, and the caller deletes its
--- put. The received minute is truncated here as well as by the caller.
+-- put. The received minute is truncated here as well as by the caller. A mailbox that is gone or `revoked`
+-- also writes nothing and answers false (Checkpoint B): Disconnect revokes, then reads the mailbox's work
+-- keys, and the share lock makes its revoke wait for a hand-off already past this check, so the key read
+-- sees that row and no `work/` object is left with nothing pointing at it.
 create or replace function public.mail_hand_off(
   p_account uuid, p_address uuid, p_batch uuid, p_s3_key text, p_phase text,
   p_authenticity text, p_msg_hash text, p_fp_hash text, p_received_minute timestamptz
@@ -498,6 +504,12 @@ as $$
 declare
   fresh boolean;
 begin
+  perform 1 from public.mail_addresses
+   where id = p_address and account_id = p_account and status <> 'revoked'
+     for share;
+  if not found then
+    return false;
+  end if;
   insert into public.mail_seen (account_id, msg_hash, fp_hash, received_minute, address_id, phase)
        values (p_account, p_msg_hash, p_fp_hash, date_trunc('minute', p_received_minute), p_address, p_phase)
   on conflict (account_id, msg_hash) do nothing

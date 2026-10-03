@@ -106,7 +106,8 @@ export interface InboundStore {
   /** The account's fingerprint key, decrypted. */
   fpKey(accountId: string): Promise<CryptoKey>;
   seen(accountId: string, msgHash: string): Promise<boolean>;
-  /** Both rows in one transaction; false (and nothing written) when the `mail_seen` row exists. */
+  /** Both rows in one transaction; false (and nothing written) when the `mail_seen` row exists, or the
+   * mailbox is gone or `revoked` (a Disconnect under way). */
   handOff(work: WorkRow, seen: SeenRow): Promise<boolean>;
   count(addressId: string, counter: "unbound" | "unauthenticated"): Promise<void>;
   /** `last_received_at`. */
@@ -132,7 +133,8 @@ export interface InboundStore {
   batchReceived(batchId: string, addressId: string, n: number): Promise<void>;
 }
 export interface InboundDeps {
-  sns: SnsDeps;
+  /** The certificate fetch; the replay bound reads `now` below, one clock for the whole delivery. */
+  sns: Pick<SnsDeps, "fetch">;
   s3: S3Client;
   store: InboundStore;
   bind: BindDeps;
@@ -315,7 +317,7 @@ async function handOff(
   }
   if (!queued) {
     await deps.s3.delete(key);
-    log("duplicate, deleted");
+    log("duplicate or revoked, deleted");
   }
   return queued;
 }
@@ -464,7 +466,7 @@ export async function handle(req: Request, cfg: InboundConfig, deps: InboundDeps
   if (req.method !== "POST") return methodNotAllowed(["POST"]);
   let verified;
   try {
-    verified = await verifySns(req, { topicArn: cfg.topicArn }, deps.sns);
+    verified = await verifySns(req, { topicArn: cfg.topicArn }, { fetch: deps.sns.fetch, now: deps.now });
   } catch (e) {
     const status = e instanceof Response ? e.status : 403;
     log(status === 403 ? "notification refused" : "subscription confirmation failed");
@@ -490,4 +492,3 @@ export async function handle(req: Request, cfg: InboundConfig, deps: InboundDeps
   if (queued > 0 && deps.kick !== undefined) await kickProcess(deps.kick);
   return done();
 }
-
