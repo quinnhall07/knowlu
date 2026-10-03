@@ -504,6 +504,13 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     assert!(panel.contains("id=\"wiz-school\"") && panel.contains("id=\"wiz-school-hits\""), "the school typeahead");
     assert!(panel.contains("id=\"wiz-school-none\"") && panel.contains("id=\"wiz-school-free\""), "…and the free-text fallback");
     assert!(panel.contains("id=\"wiz-lms-kind\""), "…and the two-button LMS question for an uncurated school");
+    // F4: "Sign in to my school" waits for a picked school; pressing it with no unitid used to fail
+    // and unhide the LMS chooser. Disabled in renderWizard, early return in the handler, chooser
+    // hidden when free entry starts.
+    assert!(js.contains("EL(\"wiz-lms-open\").disabled = !WIZ.campus.unitid;"), "the sign-in button waits for a school");
+    assert!(js.contains("if (!WIZ.campus.unitid) { return; }"), "the handler returns early with no school");
+    let free = js.split("EL(\"wiz-school-free\").addEventListener(\"input\"").nth(1).and_then(|s| s.split("});").next()).expect("the free-entry handler");
+    assert!(free.contains("EL(\"wiz-lms-kind\").hidden = true;"), "free entry hides the LMS chooser");
     assert!(!html.contains("name=\"campus\""), "no campus radios anywhere on the page");
     assert!(!js.contains("input[name=\\\"campus\\\"]"), "…and nothing reads one");
     assert!(js.contains("function schoolHits(") && js.contains("\"campus_search\""), "the typeahead asks Rust");
