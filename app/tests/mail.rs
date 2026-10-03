@@ -1,11 +1,15 @@
 //! The email lane's app half (spec `2026-09-30-email-forwarding-design.md`). Nothing here opens a
-//! window or reaches a network.
+//! window or reaches past the loopback.
 //!
 //! **T9.1: the kept profiles and `mail.json`** (spec test 32's session half, §5.4, D15). One kept
 //! WebView2 profile per mailbox, `<data_dir>\mail-session-<address_id>`, and one throwaway
 //! `<data_dir>\mail-setup` when the saved sign-in is off; both behind `is_session_dir`, the grades
 //! rule. `mail.json` sits beside `settings.json`, never in it; its `turned_off` only grows (§13 Q11).
 //! Every address id here is synthetic.
+//!
+//! **T11.1: the service client** (plan P15, spec §6.3, test 16b's device half) runs against a loopback
+//! server this file stands up on `127.0.0.1:0`; nothing leaves the machine. Every address, hint and
+//! token in it is synthetic.
 use knowlu::mail_session::{
     forget, forget_all, is_session_dir, session_dir, setup_dir, start_up_sweep, turn_off, MailState,
 };
@@ -241,4 +245,311 @@ fn mail_json_is_its_own_file_and_settings_json_is_untouched() {
         std::fs::write(d.join("mail.json"), bad).unwrap();
         assert!(MailState::load(&d).is_err(), "{bad:?}");
     }
+}
+
+// ---- T11.1: the service client over loopback ------------------------------------------------
+
+use knowlu::mail_client::{MailClient, MailError, Phase, State};
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
+
+/// A token and an address no real account holds; every error string below is searched for both.
+const TOKEN: &str = "synthetic-bearer-0123456789";
+const HINT: &str = "student.one@school.example";
+const MAILBOX: &str = "abcdefghijklmnopqrstuvwxyz@in.example";
+
+/// What the loopback server saw of one request.
+#[derive(Debug, Clone)]
+struct Seen {
+    method: String,
+    path: String,
+    bearer: Option<String>,
+    body: String,
+}
+
+/// A loopback service on `127.0.0.1:0` that answers every request with `reply(&Seen)`, records it,
+/// and stops when dropped. `stall` makes it read the request and then say nothing.
+struct Service {
+    base: String,
+    seen: Arc<Mutex<Vec<Seen>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Service {
+    fn start(stall: bool, reply: impl Fn(&Seen) -> (u16, String) + Send + 'static) -> Service {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let base = format!("http://127.0.0.1:{}/functions/v1", listener.local_addr().unwrap().port());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (seen2, stop2) = (seen.clone(), stop.clone());
+        let thread = std::thread::spawn(move || {
+            while !stop2.load(std::sync::atomic::Ordering::SeqCst) {
+                let mut stream = match listener.accept() {
+                    Ok((s, _)) => s,
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let Some(req) = read_request(&mut stream) else { continue };
+                seen2.lock().unwrap().push(req.clone());
+                if stall {
+                    let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                    while !stop2.load(std::sync::atomic::Ordering::SeqCst) && std::time::Instant::now() < until {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    continue;
+                }
+                let (status, body) = reply(&req);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        Service { base, seen, stop, thread: Some(thread) }
+    }
+
+    fn requests(&self) -> Vec<Seen> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+fn read_request(stream: &mut std::net::TcpStream) -> Option<Seen> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let head_end = loop {
+        let n = stream.read(&mut chunk).ok()?;
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+    let want: usize = head
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+        .and_then(|l| l.split(':').nth(1)?.trim().parse().ok())
+        .unwrap_or(0);
+    while buf.len() < head_end + want {
+        let n = stream.read(&mut chunk).ok()?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    let mut first = head.lines().next()?.split(' ');
+    let (method, path) = (first.next()?.to_string(), first.next()?.to_string());
+    let bearer = head
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+        .map(|l| l.split_once(':').unwrap().1.trim().to_string());
+    Some(Seen { method, path, bearer, body: String::from_utf8_lossy(&buf[head_end..]).to_string() })
+}
+
+fn client(svc: &Service) -> MailClient {
+    MailClient::with_token_fn(&svc.base, Box::new(|| Ok(TOKEN.to_string()))).expect("a loopback base")
+}
+
+#[test]
+fn every_route_sends_the_session_bearer_and_maps_failures_to_named_outcomes() {
+    let svc = Service::start(false, |_| (200, r#"{"ok":true,"addresses":[]}"#.to_string()));
+    let c = client(&svc);
+    let id = A;
+    c.list_addresses().expect("list");
+    c.mint_address("google").expect("mint");
+    c.set_hint(id, HINT).expect("hint");
+    c.rotate_address(id).expect("rotate");
+    c.delete_address(id).expect("delete");
+    c.canary(id).expect("canary");
+    c.open_batch(id, Phase::Backfill, "2026-06-04", 12).expect("backfill batch");
+    c.open_batch(id, Phase::Recover, "2026-10-01T09:00:00Z", 3).expect("recover batch");
+    c.batch_sent(B, 7).expect("sent");
+    c.reconcile(id, "2026-09-29T00:00:00Z", "2026-10-02T00:00:00Z").expect("reconcile");
+    c.set_state(id, State::Reenabled).expect("state");
+    c.provider("school.example").expect("provider");
+    let seen = svc.requests();
+    let m = "/functions/v1/mail";
+    let want: Vec<(&str, String, Option<serde_json::Value>)> = vec![
+        ("GET", format!("{m}/addresses"), None),
+        ("POST", format!("{m}/addresses"), Some(json!({"provider": "google"}))),
+        ("POST", format!("{m}/addresses/{id}/hint"), Some(json!({"hint": HINT}))),
+        ("POST", format!("{m}/addresses/{id}/rotate"), None),
+        ("DELETE", format!("{m}/addresses/{id}"), None),
+        ("POST", format!("{m}/canary"), Some(json!({"address_id": id}))),
+        (
+            "POST",
+            format!("{m}/batches"),
+            Some(json!({"address_id": id, "phase": "backfill", "since": "2026-06-04", "expected": 12})),
+        ),
+        (
+            "POST",
+            format!("{m}/batches"),
+            Some(json!({"address_id": id, "phase": "recover", "since": "2026-10-01T09:00:00Z", "expected": 3})),
+        ),
+        ("POST", format!("{m}/batches/{B}/sent"), Some(json!({"sent": 7}))),
+        (
+            "POST",
+            format!("{m}/reconcile"),
+            Some(json!({"address_id": id, "since": "2026-09-29T00:00:00Z", "until": "2026-10-02T00:00:00Z"})),
+        ),
+        ("POST", format!("{m}/addresses/{id}/state"), Some(json!({"state": "reenabled"}))),
+        ("GET", format!("{m}/provider?domain=school.example"), None),
+    ];
+    assert_eq!(seen.len(), want.len());
+    for (got, (method, path, body)) in seen.iter().zip(want) {
+        assert_eq!((got.method.as_str(), &got.path), (method, &path));
+        assert_eq!(got.bearer.as_deref(), Some(format!("Bearer {TOKEN}").as_str()), "{path}");
+        match body {
+            // The body is exactly these keys: a reconcile or a batch carries nothing else (§4.11 step 3).
+            Some(b) => assert_eq!(serde_json::from_str::<serde_json::Value>(&got.body).unwrap(), b, "{path}"),
+            None => assert!(got.body.is_empty(), "{path}: {}", got.body),
+        }
+    }
+    for (s, state) in [("off", State::Off), ("elsewhere", State::Elsewhere), ("confirming", State::Confirming)] {
+        c.set_state(id, state).unwrap();
+        let last = svc.requests().pop().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&last.body).unwrap(), json!({"state": s}));
+    }
+    // The failures, one status each, by name.
+    let named: [(u16, &str); 8] = [
+        (400, "refused"),
+        (401, "sign-in"),
+        (402, "lapsed"),
+        (404, "not-found"),
+        (409, "refused"),
+        (429, "refused"),
+        (503, "server"),
+        (200, "bad-reply"),
+    ];
+    for (status, name) in named {
+        let body = if status == 200 { "not json".to_string() } else { r#"{"error":"a fixed sentence"}"#.to_string() };
+        let svc = Service::start(false, move |_| (status, body.clone()));
+        let e = client(&svc).rotate_address(A).expect_err("a failure");
+        assert_eq!(e.name(), name, "{status}: {e}");
+    }
+    // A refusal carries the service's sentence (the caps are shown as they are), never more.
+    let cap = "this account has made six mail addresses in the last 30 days";
+    let svc = Service::start(false, move |_| (429, format!(r#"{{"error":"{cap}"}}"#)));
+    match client(&svc).mint_address("google").expect_err("429") {
+        MailError::Refused { status, reason } => assert_eq!((status, reason.as_str()), (429, cap)),
+        e => panic!("{e:?}"),
+    }
+    // A port nobody listens on is unreachable, by name.
+    assert_eq!(client_on_a_closed_port().list_addresses().expect_err("closed port").name(), "unreachable");
+}
+
+fn client_on_a_closed_port() -> MailClient {
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://127.0.0.1:{}/functions/v1", dead.local_addr().unwrap().port());
+    drop(dead);
+    MailClient::with_token_fn(&base, Box::new(|| Ok(TOKEN.into()))).unwrap()
+}
+
+#[test]
+fn a_402_on_an_entitled_route_reads_lapsed_while_get_and_delete_still_work() {
+    // 16b, the device half: the service answers 402 to every route but the list and the delete.
+    let svc = Service::start(false, |r| {
+        let ungated = (r.method == "GET" && r.path.ends_with("/mail/addresses")) || r.method == "DELETE";
+        if ungated {
+            (200, r#"{"addresses":[{"address_id":"x"}],"deleted":true}"#.to_string())
+        } else {
+            (402, r#"{"error":"this account has no active subscription"}"#.to_string())
+        }
+    });
+    let c = client(&svc);
+    assert_eq!(c.list_addresses().expect("a canceled account sees its mailboxes").len(), 1);
+    c.delete_address(A).expect("and can disconnect one");
+    let lapsed = [
+        c.mint_address("m365").map(drop),
+        c.set_hint(A, HINT).map(drop),
+        c.rotate_address(A).map(drop),
+        c.canary(A).map(drop),
+        c.open_batch(A, Phase::Backfill, "2026-06-04", 0).map(drop),
+        c.batch_sent(B, 0).map(drop),
+        c.reconcile(A, "2026-09-29T00:00:00Z", "2026-10-02T00:00:00Z").map(drop),
+        c.set_state(A, State::Off).map(drop),
+        c.provider("school.example").map(drop),
+    ];
+    for r in lapsed {
+        assert!(matches!(r, Err(MailError::Lapsed)), "{r:?}");
+    }
+    // On the two routes that never need an entitlement a 402 is not "lapsed": it is a refusal.
+    let svc = Service::start(false, |_| (402, r#"{"error":"odd"}"#.to_string()));
+    let c = client(&svc);
+    assert_eq!(c.list_addresses().expect_err("402").name(), "refused");
+    assert_eq!(c.delete_address(A).expect_err("402").name(), "refused");
+}
+
+#[test]
+fn no_token_or_address_reaches_an_error_string() {
+    // A service that echoes the bearer, the mailbox address and the hint back in its error.
+    let svc = Service::start(false, |r| {
+        let bearer = r.bearer.clone().unwrap_or_default();
+        (409, format!(r#"{{"error":"bad {bearer} for {MAILBOX} and {HINT}"}}"#))
+    });
+    let c = client(&svc);
+    let mut errs = vec![c.set_hint(A, HINT).expect_err("409"), c.mint_address("google").expect_err("409")];
+    // A sentence that names an address but not the bearer is dropped too: the `@` alone is enough.
+    let svc2 = Service::start(false, |_| (409, format!(r#"{{"error":"{HINT} is held by {MAILBOX}"}}"#)));
+    errs.push(client(&svc2).set_hint(A, HINT).expect_err("409"));
+    assert_eq!(errs.last().unwrap().to_string(), "the account service refused the request (409)");
+    // A transport failure: the URL, the token and the address stay out of it.
+    errs.push(client_on_a_closed_port().set_hint(A, HINT).expect_err("closed port"));
+    let no_session = MailClient::with_token_fn(&svc.base, Box::new(|| Err(format!("the store said {TOKEN}"))));
+    errs.push(no_session.unwrap().list_addresses().expect_err("no session"));
+    for e in &errs {
+        for text in [e.to_string(), format!("{e:?}")] {
+            for secret in [TOKEN, MAILBOX, HINT, "student.one", "school.example", "127.0.0.1"] {
+                assert!(!text.contains(secret), "{secret} reached: {text}");
+            }
+            assert!(!text.contains('@'), "{text}");
+        }
+    }
+    // The client's own Debug redacts what it holds.
+    let shown = format!("{c:?}");
+    assert!(!shown.contains(TOKEN) && !shown.contains("127.0.0.1"), "{shown}");
+    // A request that could not be a route (a path injected through an id) is refused before it is sent.
+    let before = svc.requests().len();
+    assert_eq!(c.rotate_address("../../addresses").expect_err("bad id").name(), "invalid");
+    assert_eq!(c.provider("school.example/../x").expect_err("bad domain").name(), "invalid");
+    assert_eq!(svc.requests().len(), before, "nothing was sent");
+}
+
+#[test]
+fn a_timeout_is_a_named_outcome() {
+    let svc = Service::start(true, |_| (200, "{}".into()));
+    let c = client(&svc).with_timeout(std::time::Duration::from_millis(300));
+    let started = std::time::Instant::now();
+    let e = c.list_addresses().expect_err("the service never answers");
+    assert_eq!(e.name(), "timed-out", "{e}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3), "the timeout is the client's own");
+    assert!(!e.to_string().contains("127.0.0.1"));
+}
+
+#[test]
+fn no_session_is_a_named_outcome_and_nothing_is_sent() {
+    let svc = Service::start(false, |_| (200, "{}".into()));
+    let c = MailClient::with_token_fn(&svc.base, Box::new(|| Err("nothing stored".into()))).unwrap();
+    assert_eq!(c.list_addresses().expect_err("no session").name(), "no-session");
+    assert!(svc.requests().is_empty());
+    // An api_base that is not https:// (or the test loopback) is refused at construction.
+    assert!(MailClient::with_token_fn("http://example.test/functions/v1", Box::new(|| Ok("t".into()))).is_err());
 }
