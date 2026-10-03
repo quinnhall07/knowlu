@@ -2115,3 +2115,213 @@ fn the_pre_steps_forwarding_page_is_the_setup_runners() {
     assert!(account.contains(page), "account.rs's pre-step does not open Microsoft 365's Forwarding page");
     assert!(recover.contains(page), "the setup runner's Forwarding page moved; move the pre-step's with it");
 }
+
+/// Checkpoint D (minor 3): the pre-step runs before `DELETE /account`, so a refused deletion can follow a
+/// forwarding it already turned off. The page's sentence then says so, with the count and the way back,
+/// singular or plural; with nothing turned off it says nothing more. Nothing local is touched either way.
+#[test]
+fn a_refused_deletion_says_where_forwarding_was_already_turned_off() {
+    let data_dir = mail_data_dir("refused-off", &["mbx-school", "mbx-gmail"]);
+    let rows = rows_of(&four_mailboxes());
+    let refused = "your account could not be deleted (server error) — nothing on this machine was touched";
+    let after = |n: &str| {
+        format!("{refused}. Forwarding to Knowlu was turned off in {n} before this failed; you can turn it back on in Settings → Email.")
+    };
+    let cases: [(fn(&SavedMailbox) -> Result<(), &'static str>, Option<String>); 3] = [
+        (|_| Ok(()), Some(after("2 mailboxes"))),
+        (|m| if m.address_id == "mbx-school" { Ok(()) } else { Err("needs sign-in") }, Some(after("1 mailbox"))),
+        (|_| Err("needs sign-in"), None),
+    ];
+    for (off, sentence) in cases {
+        let mut s = Steps::new();
+        let listed = rows.clone();
+        s.list = Box::new(move || Ok(listed.clone()));
+        s.off = Box::new(off);
+        s.delete = Box::new(|| Err(refused.to_string()));
+        let out = delete_my_data_with(&mut s, &data_dir, FORWARDING_OFF_BOUND);
+        assert_eq!(out, serde_json::json!({ "ok": false, "error": sentence.unwrap_or_else(|| refused.to_string()) }));
+        assert_eq!(s.log, ["list", "off mbx-school", "off mbx-gmail", "delete"], "a refused deletion closes nothing and wipes nothing");
+    }
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// The live half of the stop, which needs the app's handle, so no test drives it: `close_mail_windows`
+/// calls `mail::stop_runs` before it closes the window; sign-out closes and then takes the mail window,
+/// within its bound, as what its close hands `sign_out_with`; the wipe waits for the window the same way.
+#[test]
+fn the_live_close_stops_runs_first_and_sign_out_and_the_wipe_wait_for_the_window() {
+    let src = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let body = |head: &str| {
+        let at = src.find(head).unwrap_or_else(|| panic!("{head}"));
+        &src[at..at + src[at..].find("\n}\n").expect("the end of its body")]
+    };
+    let close = body("fn close_mail_windows(app: &tauri::AppHandle) {");
+    let (stop, shut) = (close.find("crate::mail::stop_runs();"), close.find("crate::mail::close(app);"));
+    assert!(stop.is_some() && stop < shut, "close_mail_windows sets the stop before it closes the window: {close}");
+    // Split so this file's compiled-in-project guard does not read a search string as a call to sign_out.
+    let sign_out = body(concat!("pub fn sign_out", "(app: tauri::AppHandle"));
+    let (closes, takes) = (sign_out.find("close_mail_windows(&app);"), sign_out.find("take_mail_window(&app, std::time::Instant::now() + MAIL_STOP_BOUND)"));
+    assert!(closes.is_some() && closes < takes, "sign-out closes, then takes the mail window within its bound: {sign_out}");
+    assert!(body("impl DeleteSteps for LiveDelete").contains("take_mail_window(self.app, std::time::Instant::now() + MAIL_STOP_BOUND)"));
+    assert!(body("fn take_mail_window(").contains("MailWindow::take_by(deadline, || close_mail_windows(app))"));
+}
+
+// ---- the slot's mail step against a sign-out's close (Checkpoint D, finding 1; spec §4.13) ----
+//
+// The slot's mail step holds the one mail window across every due mailbox, opening each one's kept profile in
+// turn. A sign-out or a deletion closes the mail window and then deletes every kept profile, so once the close
+// has run the step must open no further profile, and the closer must hold the window until the profiles are gone.
+
+#[cfg(windows)]
+#[path = "support/slot_rig.rs"]
+mod slot_rig;
+
+/// A slot-shaped mail window. Each profile it opens is held, a file open with no sharing as WebView2 holds its
+/// profile, until the window closes. A script waits while the window is open (a long reconcile) and then answers
+/// as a vanished window does, so a pass ends only once its window is closed under it.
+#[cfg(windows)]
+struct HeldWindow {
+    st: std::sync::Arc<std::sync::Mutex<Held>>,
+    opened: std::sync::mpsc::Sender<String>,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct Held {
+    open: Option<std::fs::File>,
+    /// Every profile opened, by folder name.
+    opens: Vec<String>,
+}
+
+#[cfg(windows)]
+impl HeldWindow {
+    fn is_open(&self) -> bool {
+        self.st.lock().unwrap().open.is_some()
+    }
+}
+
+#[cfg(windows)]
+impl knowlu::mail::recover::Mailbox for HeldWindow {
+    fn script(&self, _: &str, _: &serde_json::Value) -> Result<serde_json::Value, knowlu::mail::Refusal> {
+        let began = Instant::now();
+        while self.is_open() && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err(knowlu::mail::Refusal::NoPage)
+    }
+    fn open(&self, _: knowlu::mail::recover::Place) -> Result<(), knowlu::mail::Refusal> {
+        if self.is_open() { Ok(()) } else { Err(knowlu::mail::Refusal::NoPage) }
+    }
+}
+
+#[cfg(windows)]
+impl knowlu::mail::host::Host for HeldWindow {
+    fn use_provider(&self, _: knowlu::mail_steps::Provider) {}
+    fn open_window(&self, profile: &std::path::Path, _visible: bool) -> Result<(), String> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = std::fs::OpenOptions::new().write(true).create(true).truncate(true).share_mode(0).open(profile.join("held"));
+        let name = profile.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let mut s = self.st.lock().unwrap();
+        s.open = Some(held.map_err(|e| e.to_string())?);
+        s.opens.push(name.clone());
+        drop(s);
+        let _ = self.opened.send(name);
+        Ok(())
+    }
+    fn window_open(&self) -> bool {
+        self.is_open()
+    }
+    fn signed_in(&self) -> bool {
+        self.is_open()
+    }
+    fn title_address(&self) -> Option<String> {
+        None
+    }
+    fn popup_open(&self) -> bool {
+        false
+    }
+    fn step_aside(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn come_back(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn close_window(&self) {
+        self.st.lock().unwrap().open = None;
+    }
+}
+
+/// What the test's sign-out close hands back to `sign_out_with`: the mail window's hold and, when it is let
+/// go, whether any `mail-session-*` profile was still on disk.
+#[cfg(windows)]
+struct Kept<'a> {
+    _hold: Option<knowlu::mail::MailWindow>,
+    dir: std::path::PathBuf,
+    left_at_release: &'a std::cell::Cell<Option<bool>>,
+}
+
+#[cfg(windows)]
+impl Drop for Kept<'_> {
+    fn drop(&mut self) {
+        let left = std::fs::read_dir(&self.dir).map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with("mail-session-")));
+        self.left_at_release.set(Some(left.unwrap_or(false)));
+    }
+}
+
+/// Spec §4.13, Checkpoint D finding 1: a slot's mail step holds the mail window on the first of three
+/// mailboxes when the student signs out. The sign-out's close (as `account::close_mail_windows` does it: the
+/// stop, then the window) ends that mailbox's pass; the step then tries the next mailbox and is refused, so no
+/// second profile opens. The sign-out takes the hold within its time limit, keeps it until every
+/// `mail-session-<id>` is deleted, and lets it go only then.
+#[cfg(windows)]
+#[test]
+fn a_slot_holding_the_mail_window_opens_no_profile_after_the_sign_out_closes_it() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let root = std::env::temp_dir().join(format!("knowlu-t12-slot-stop-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&root);
+    let app_root = root.join("appdata");
+    let id = knowlu::profiles::id_for(&root.join("Mine"));
+    let _cleanup = Cleanup(vec![knowlu::account::session_target(&id)]);
+    let dir = knowlu::profiles::profile_dir(&app_root, &id);
+    let ids = ["mbx-a", "mbx-b", "mbx-c"];
+    for m in ids {
+        std::fs::create_dir_all(dir.join(format!("mail-session-{m}"))).unwrap();
+    }
+    let rows: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|m| serde_json::json!({ "address_id": m, "provider": "m365", "address": slot_rig::KNOWLU, "status": "active", "lapsed_since": null }))
+        .collect();
+    let st = std::sync::Arc::new(std::sync::Mutex::new(Held::default()));
+    let (opened, first) = std::sync::mpsc::channel();
+    let window = HeldWindow { st: st.clone(), opened };
+    let (svc, slot_dir, due) = (slot_rig::Svc::start(rows.clone()), dir.clone(), rows.clone());
+    let slot = std::thread::spawn(move || {
+        let _hold = knowlu::mail::MailWindow::try_take().expect("the slot's mail step holds the mail window");
+        let (client, clock) = (svc.client(), slot_rig::Clk::at(slot_rig::NOW));
+        knowlu::mail::slot::run_step(&knowlu::mail::slot::SlotEnv { host: &window, client: &client, clock: &clock, data_dir: &slot_dir }, &due)
+    });
+    assert_eq!(first.recv_timeout(Duration::from_secs(60)).expect("the slot opened its first mailbox"), "mail-session-mbx-a");
+
+    let left_at_release = std::cell::Cell::new(None);
+    let out = knowlu::account::sign_out_with(Some(id.clone()), Some(&app_root), |d: &std::path::Path| {
+        let close = || {
+            knowlu::mail::stop_runs();
+            st.lock().unwrap().open = None;
+        };
+        let hold = knowlu::mail::MailWindow::take_by(Instant::now() + Duration::from_secs(30), close);
+        assert!(hold.is_some(), "the sign-out took the mail window within its time limit");
+        Kept { _hold: hold, dir: d.to_path_buf(), left_at_release: &left_at_release }
+    })
+    .expect("sign out");
+    slot.join().expect("the slot's thread");
+
+    assert_eq!(st.lock().unwrap().opens, ["mail-session-mbx-a"], "a mail profile was opened after the sign-out's close");
+    assert_eq!((out["ok"].clone(), out["mail_profiles_left"].clone()), (serde_json::json!(true), serde_json::json!(false)), "{out}");
+    for m in ids {
+        assert!(!dir.join(format!("mail-session-{m}")).exists(), "mail-session-{m} survived sign-out");
+    }
+    assert_eq!(left_at_release.get(), Some(false), "the mail window was let go before every mail profile was gone");
+    assert!(knowlu::mail::MailWindow::try_take().is_some(), "the sign-out let the mail window go when it was done");
+    let _ = std::fs::remove_dir_all(&root);
+}

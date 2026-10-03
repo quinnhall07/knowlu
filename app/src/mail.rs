@@ -113,11 +113,57 @@ impl MailWindow {
     pub fn try_take() -> Option<MailWindow> {
         HELD.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).ok().map(|_| MailWindow(()))
     }
+
+    /// The mail window for a sign-out or a deletion (spec §4.13): taken now when it is free; otherwise
+    /// `stop_holder` is called (it stops and closes whatever holds the window) and the hold is asked for
+    /// again every 250 ms, with the stop called again on every miss, until `deadline`. `None` once the
+    /// deadline passes with the window still held.
+    pub fn take_by(deadline: Instant, mut stop_holder: impl FnMut()) -> Option<MailWindow> {
+        loop {
+            if let Some(w) = MailWindow::try_take() {
+                return Some(w);
+            }
+            stop_holder();
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(250)));
+        }
+    }
 }
 
 impl Drop for MailWindow {
     fn drop(&mut self) {
         HELD.store(false, Ordering::SeqCst);
+    }
+}
+
+// ---- the stop (spec §4.13) ----------------------------------------------------------------------------
+
+static STOPS: AtomicU64 = AtomicU64::new(0);
+
+/// Spec §4.13: a sign-out or a deletion closes the mail windows before it deletes every kept mail profile,
+/// and nothing may open one in between. `account`'s `close_mail_windows` calls this before it closes them:
+/// a run that began earlier ([`Run`], the slot's mail step) opens no further mailbox's profile. A setup or
+/// a resume has its own stop (`setup::SETUPS`), which the same close sets.
+pub fn stop_runs() {
+    STOPS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// When a run that opens mail profiles began, against [`stop_runs`]: taken at its start, asked before
+/// every window it opens and again right after.
+#[derive(Debug, Clone, Copy)]
+pub struct Run(u64);
+
+impl Run {
+    pub fn begin() -> Run {
+        Run(STOPS.load(Ordering::SeqCst))
+    }
+
+    /// Whether [`stop_runs`] was called since this run began: a stopped run opens no mail window.
+    pub fn stopped(self) -> bool {
+        STOPS.load(Ordering::SeqCst) != self.0
     }
 }
 

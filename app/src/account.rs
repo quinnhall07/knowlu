@@ -643,27 +643,32 @@ pub fn open_policy(which: String) -> Value {
 /// `mail-setup` profile of that Knowlu profile ([`sign_out_with`]). Forwarding is untouched.
 #[tauri::command(async)]
 pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Value, String> {
-    // The one mail window is this console's profile's: it closes only when that profile signs out.
+    // The one mail window is this console's profile's: it closes only when that profile signs out, and
+    // its hold is taken, within the bound, and kept until every mail profile is deleted, as the wipe does.
     let close = |dir: &std::path::Path| {
         use tauri::Manager;
-        if app.try_state::<crate::state::ConsoleState>().is_some_and(|cs| cs.data_dir == dir) {
-            close_mail_windows(&app);
+        if !app.try_state::<crate::state::ConsoleState>().is_some_and(|cs| cs.data_dir == dir) {
+            return None;
         }
+        close_mail_windows(&app);
+        take_mail_window(&app, std::time::Instant::now() + MAIL_STOP_BOUND)
     };
     sign_out_with(profile_id, crate::state::app_data_root().as_deref(), close)
 }
 
 /// [`sign_out`] without the app's handle. `close_mail_window` is called with the profile's folder
-/// before any mail profile in it is deleted (WebView2 holds a profile while its window is open); the
-/// deletion itself is `mail_session::forget_all`'s, through its guard, so nothing but `mail-setup` and
+/// before any mail profile in it is deleted (WebView2 holds a profile while its window is open), and
+/// what it hands back (the console's: the mail window's hold) is kept until the deletion is done, so
+/// nothing opens a mail profile in between (spec §4.13). The deletion itself is
+/// `mail_session::forget_all`'s, through its guard, so nothing but `mail-setup` and
 /// `mail-session-<address_id>` goes. `None` (the pending session), an id that is not
 /// [`is_profile_id`]-shaped and an unknown `app_root` name no folder, so nothing is deleted.
 /// `mail_profiles_left` is `true` when a mail profile is still on disk: recorded for the start-up
 /// retry, or, when `mail.json` could not record it, not.
-pub fn sign_out_with(
+pub fn sign_out_with<Held>(
     profile_id: Option<String>,
     app_root: Option<&std::path::Path>,
-    close_mail_window: impl FnOnce(&std::path::Path),
+    close_mail_window: impl FnOnce(&std::path::Path) -> Held,
 ) -> Result<Value, String> {
     let target = match &profile_id {
         Some(id) => session_target(id),
@@ -675,8 +680,9 @@ pub fn sign_out_with(
     let mut mail_profiles_left = false;
     if let (Some(id), Some(root)) = (profile_id.as_deref().filter(|id| is_profile_id(id)), app_root) {
         let dir = crate::profiles::profile_dir(root, id);
-        close_mail_window(&dir);
+        let held = close_mail_window(&dir);
         mail_profiles_left = crate::mail_session::forget_all(&dir) != Ok(true);
+        drop(held);
     }
     forgotten?;
     if let (Some(t), Ok(auth)) = (token, auth_base(&api_base())) {
@@ -1421,19 +1427,32 @@ pub trait DeleteSteps {
 /// windows, the local wipe. The pre-step is best effort, and nothing it does or fails to do changes
 /// what follows: a list that cannot be read skips it, a mailbox that fails is passed over, and each
 /// mailbox's `bound` starts when that mailbox does. A refused server call stops before anything
-/// local, the windows included.
+/// local, the windows included, and its sentence says in how many mailboxes forwarding was already
+/// turned off, and how to turn it back on (`turned_off_sentence`).
 pub fn delete_my_data_with(steps: &mut dyn DeleteSteps, data_dir: &std::path::Path, bound: std::time::Duration) -> Value {
+    let mut turned_off = 0usize;
     if let Ok(rows) = steps.mailboxes() {
         for mailbox in saved_mailboxes(data_dir, &rows) {
-            let _ = steps.forwarding_off(&mailbox, std::time::Instant::now() + bound);
+            turned_off += usize::from(steps.forwarding_off(&mailbox, std::time::Instant::now() + bound).is_ok());
         }
     }
     if let Err(e) = steps.delete_account() {
-        return json!({ "ok": false, "error": e });
+        let error = match turned_off {
+            0 => e,
+            n => format!("{}. {}", e.trim_end_matches('.'), turned_off_sentence(n)),
+        };
+        return json!({ "ok": false, "error": error });
     }
     steps.close_mail_windows();
     steps.delete_local_data();
     json!({ "ok": true, "error": Value::Null })
+}
+
+/// A refused deletion's second sentence when the pre-step had already turned forwarding off in `n`
+/// mailboxes (Checkpoint D; the controller's copy, 2026-10-03, while Quinn is away).
+fn turned_off_sentence(n: usize) -> String {
+    let mailboxes = if n == 1 { "1 mailbox".to_string() } else { format!("{n} mailboxes") };
+    format!("Forwarding to Knowlu was turned off in {mailboxes} before this failed; you can turn it back on in Settings → Email.")
 }
 
 /// The console's [`DeleteSteps`]: its vault and profile folder, the account's session, the windows.
@@ -1476,9 +1495,10 @@ impl DeleteSteps for LiveDelete<'_> {
 
     fn close_mail_windows(&mut self) {
         close_mail_windows(self.app);
-        // Held to the end of the wipe, so nothing opens a mail window on a profile being deleted.
+        // Held to the end of the wipe, so nothing opens a mail window on a profile being deleted; a
+        // holder still finishing its mailbox (a slot's mail step) is waited for, within the bound.
         if self.window.is_none() {
-            self.window = crate::mail::MailWindow::try_take();
+            self.window = take_mail_window(self.app, std::time::Instant::now() + MAIL_STOP_BOUND);
         }
     }
 
@@ -1490,29 +1510,22 @@ impl DeleteSteps for LiveDelete<'_> {
     }
 }
 
-/// The one mail window for the pre-step. A setup, a resume or a slot's mail step that holds it is
-/// stopped and its window closed (the student has confirmed the deletion), and the hold is waited
-/// for until `deadline`.
+/// The one mail window for the pre-step, the wipe and sign-out. A setup, a resume or a slot's mail
+/// step that holds it is stopped and its window closed (the student has confirmed the deletion or the
+/// sign-out), again at every miss, and the hold is waited for until `deadline`.
 fn take_mail_window(app: &tauri::AppHandle, deadline: std::time::Instant) -> Option<crate::mail::MailWindow> {
-    let mut asked = false;
-    loop {
-        if let Some(w) = crate::mail::MailWindow::try_take() {
-            return Some(w);
-        }
-        if !asked {
-            close_mail_windows(app);
-            asked = true;
-        }
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
+    crate::mail::MailWindow::take_by(deadline, || close_mail_windows(app))
 }
 
-/// Stops a running mail setup or resume after its step and closes the mail window and its popup
-/// (spec §4.13): nothing may go on driving a profile that is about to be deleted.
+/// How long sign-out and the wipe wait for whatever drives the mail window (a slot's mail step that
+/// is finishing its mailbox, a setup) to stop and let go of it: the pre-step's minute.
+pub const MAIL_STOP_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Stops every run that drives the mail window and closes the window and its popup (spec §4.13):
+/// nothing may go on driving a profile that is about to be deleted, or open another. The slot's mail
+/// step opens no further profile once `stop_runs` is called; a setup or resume stops after its step.
 fn close_mail_windows(app: &tauri::AppHandle) {
+    crate::mail::stop_runs();
     if let Some(run) = crate::mail::setup::SETUPS.current() {
         run.stop();
     }

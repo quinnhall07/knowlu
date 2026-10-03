@@ -95,10 +95,17 @@ fn label(p: Provider) -> &'static str {
 
 /// The `RunSummary` row for the mailboxes that ran: spec §4.11 step 5's line, or `mail (needs sign-in)`.
 /// `None` when nothing ran (every mailbox was one the step leaves alone).
+///
+/// **A sign-out or a deletion stops it** (spec §4.13): once their close has called `mail::stop_runs`, the step
+/// opens no further mailbox's profile, so nothing is open on a profile they are about to delete.
 pub fn run_step(env: &SlotEnv, due: &[Value]) -> Option<String> {
+    let run = crate::mail::Run::begin();
     let mut parts: Vec<(Provider, Part)> = Vec::new();
     for row in due {
-        let Some(done) = mailbox(env, row) else { continue };
+        if run.stopped() {
+            break;
+        }
+        let Some(done) = mailbox(env, row, run) else { continue };
         parts.push(done);
         // The next profile opens only once this window is gone.
         let end = env.clock.now() + GONE_WAIT;
@@ -122,7 +129,9 @@ pub fn run_step(env: &SlotEnv, due: &[Value]) -> Option<String> {
 
 /// One mailbox, §4.11 steps 1 to 5. `None` is a mailbox the step leaves alone: turned off, guided, or a row
 /// it cannot read. A `mail.json` that cannot be read is also left alone, never guessed at (`turned_off`).
-fn mailbox(env: &SlotEnv, row: &Value) -> Option<(Provider, Part)> {
+/// A stopped `run` opens nothing; a stop that comes while the window opens closes it again before anything
+/// runs in it, and before the step lets go of the mail window.
+fn mailbox(env: &SlotEnv, row: &Value, run: crate::mail::Run) -> Option<(Provider, Part)> {
     let id = row["address_id"].as_str().filter(|i| valid_address_id(i))?;
     let provider = Provider::from_service(row["provider"].as_str().unwrap_or(""));
     let state = MailState::load(env.data_dir).ok()?;
@@ -132,9 +141,16 @@ fn mailbox(env: &SlotEnv, row: &Value) -> Option<(Provider, Part)> {
     let knowlu = row["address"].as_str().filter(|a| !a.is_empty())?;
     let Some(profile) = session_dir(env.data_dir, id).filter(|p| p.is_dir()) else { return Some((provider, Part::NeedsSignIn)) };
     env.host.use_provider(provider);
+    if run.stopped() {
+        return None;
+    }
     // Hidden, always: a signed-out profile is a row and a Settings repair, never a window on the desktop.
     if env.host.open_window(&profile, false).is_err() {
         return Some((provider, Part::Line("the mail window would not open".to_string())));
+    }
+    if run.stopped() {
+        env.host.close_window();
+        return None;
     }
     let part = if wait_signed_in(env.host, env.clock, SILENT_WAIT) {
         Part::Line(pass(env, id, provider, knowlu, row, &state))
