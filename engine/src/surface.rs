@@ -1334,6 +1334,18 @@ pub struct Card {
     pub snooze_until: Option<String>,
     pub target: Option<String>,
     pub changes: serde_json::Value,
+    /// A mail card's sender as its card writer wrote it, `Name <address>` or the address alone
+    /// (email spec D21, §5.2). These three keys are read as literals, untrusted text the page renders
+    /// only through `h()`. On a card without one, the key is left out, never `null`, so such a card
+    /// serializes as it did before (T15.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The mail's day, `YYYY-MM-DD` (D21).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail_date: Option<String>,
+    /// The verbatim quote the claim rests on (D9, §5.2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1507,6 +1519,9 @@ pub fn read_approvals(vault: &Path, today: Date) -> ApprovalsRead {
                 changes: crate::yaml::get(&meta, "changes")
                     .map(crate::yaml::to_json)
                     .unwrap_or(serde_json::Value::Null),
+                from: meta_text(Some(&meta), "from"),
+                mail_date: meta_text(Some(&meta), "mail_date"),
+                evidence: meta_text(Some(&meta), "evidence"),
             });
         }
     }
@@ -2977,6 +2992,59 @@ mod tests {
         let d_clear = decisions(&clear, TODAY, &ar_clear, &l.planning);
         assert!(d_clear.empty_text.is_some());
         let _ = std::fs::remove_dir_all(&clear);
+    }
+
+    /// T15.0 (email spec D21, §5.2, §6.2): a mail card's `from`, `mail_date` and `evidence` reach
+    /// the deck as the literals the card writer wrote (`mail/text.rs`'s `source_lines`, through
+    /// `write::to_literal`): a colon, a quote and markup stay text, and the change's own nested
+    /// `from` is not the sender.
+    #[test]
+    fn a_mail_card_carries_its_from_mail_date_and_evidence_as_literals() {
+        let dir = std::env::temp_dir().join(format!("qo-approvals-mail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("approvals")).unwrap();
+        let lit = |s: &str| crate::write::to_literal(&serde_yaml_ng::Value::String(s.to_string()));
+        let (from, day) = ("Dr. Ada Byron <ada@uni.example>", "2026-08-27");
+        let quote = "Essay 2: now due \"Monday\" <img src=x onerror=alert(1)>";
+        let card = format!(
+            "---\ntype: approval\nkind: amend\ntitle: {}\nstatus: pending\ntarget: tasks/essay-2.md\n\
+             proposed_at: 2026-08-27\nfirst_proposed_at: 2026-08-27\nexpires: null\nsnooze_until: null\n\
+             created_by: mail\nsource_uid: {}\nfrom: {}\nmail_date: {}\nevidence: {}\nchanges:\n  due:\n    \
+             from: 2026-09-01\n    to: 2026-09-07\n---\n\n**Why proposed:** The instructor moved it\n",
+            lit("Email changed due for Essay 2"),
+            lit("mail:abc:0"),
+            lit(from),
+            lit(day),
+            lit(quote),
+        );
+        crate::pystr::write_text(&dir.join("approvals").join("amend-essay-2-due.md"), &card).unwrap();
+        let ar = read_approvals(&dir, TODAY);
+        assert_eq!(ar.cards.len(), 1);
+        let v = serde_json::to_value(&ar.cards[0]).unwrap();
+        assert_eq!(
+            (v["from"].as_str(), v["mail_date"].as_str(), v["evidence"].as_str()),
+            (Some(from), Some(day), Some(quote))
+        );
+        assert_eq!(v["changes"]["due"]["from"], "2026-09-01", "the change's own `from` is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T15.0: a card without the mail fields serializes byte for byte as it did before them: the
+    /// three keys are omitted, never `null`, so `surface_oracle.rs`'s references stay frozen.
+    #[test]
+    fn a_card_without_mail_fields_serializes_exactly_as_before() {
+        let dir = std::env::temp_dir().join(format!("qo-approvals-nomail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("approvals")).unwrap();
+        let note = "---\ntype: approval\nkind: task\ntitle: \"Something\"\nstatus: pending\nsource_uid: \"gmail:xyz\"\nproposed_at: 2026-08-27\nfirst_proposed_at: 2026-08-27\nexpires: 2026-09-30\nsnooze_until: null\ncreated_by: gmail\n---\n\nBody text.\n";
+        crate::pystr::write_text(&dir.join("approvals").join("task-something.md"), note).unwrap();
+        let ar = read_approvals(&dir, TODAY);
+        let got = crate::ledger::dumps_value(&serde_json::to_value(&ar.cards[0]).unwrap());
+        assert_eq!(
+            got,
+            r#"{"age_days": 1, "changes": null, "expires": "2026-09-30", "first_proposed_at": "2026-08-27", "id": "task-something", "kind": "task", "slug": "task-something", "snooze_until": null, "source_uid": "gmail:xyz", "target": null, "title": "Something", "urgency": null, "why": "Body text."}"#
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------------------------

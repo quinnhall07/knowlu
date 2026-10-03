@@ -516,6 +516,7 @@ marks a task that needs Quinn's word, presence, a secret or a spend. **WT** is t
 | C | `contract-reviewer` (Opus, xhigh) | yes | — | `docs/reports/…-email-forwarding-contract-review-c.md` | T12, T6.2 | — |
 | T11.4 | `implementer` (Sonnet, high) | no | — | `app/src/mail.rs` (commands), `app/tests/mail.rs` | C, `email-engine` merged in; then H5 | app |
 | T11.5 | `implementer` (Sonnet, high) | no | — | `app/src/scheduler.rs`, `app/tests/scheduler.rs` | T11.4 | app |
+| T15.0 (added 2026-10-03 by the controller) | controller's dispatch (Opus) | yes | — (logged as a guess; D21, §5.2, §6.2) | `engine/src/surface.rs`, `docs/surface/anatomy.md`, this plan | T11.5 | app |
 | T15.1–T15.5 | `console-ui` (Sonnet, medium) | no | — | `app/static/{index.html,console.js,console.css}`, `app/tests/static_assets.rs`, `scripts/{wizard,settings}-check.py` | T11.5, the M2 check | app |
 | T16 | `cloud-engineer` (Opus, high) | yes | PQ3 | `functions/mail-digest/**`, its pin | B, PQ3 | cloud |
 | T13b | `docs-keeper` (Sonnet, medium) | no | — | `HANDOFF.md`, `docs/reference/{app,engine-commands}.md`, `cloud/supabase/README.md`, the legal note, the vision-program note | T15.5, B | lane |
@@ -2128,6 +2129,17 @@ R2).
 - No `ui_event` call passes a mail-derived value or a variable holding one (VISION as amended by A12).
 - The copy keeps the spec's fixed sentences word for word.
 
+#### T15.0. The read model carries a mail card's sender, date and quote (added 2026-10-03 by the controller)
+
+An engine task, not one of the five `console-ui` dispatches. The controller logged it as a guess while
+Quinn was away, because D21, §5.2 and §6.2 put the card's `from`, `mail_date` and `evidence` on the
+deck and no task carried them to the read model. **Files:** `engine/src/surface.rs`,
+`docs/surface/anatomy.md`. `surface::Card` gains three optional strings. Each is read as a literal
+from the card note's key of the same name (T6.2's `source_lines`) and left out of the JSON when
+absent. `surface_oracle.rs` runs unchanged, and its three references stay byte-identical.
+**Tests first:** `a_mail_card_carries_its_from_mail_date_and_evidence_as_literals` and
+`a_card_without_mail_fields_serializes_exactly_as_before`.
+
 #### T15.1. The progress view (§4.5)
 
 **Tests first:**
@@ -2461,7 +2473,7 @@ numbers are spec §12's; named tests are this plan's (§5).
 | D18: no `PRIVACY_VERSION` or `site/` change; no release before bump #1 | T13a, D | the guard line on `main` with T19; Checkpoint D |
 | D19: the step scripts compiled in | T9.2, T10.2a–T10.3b | `the_runner_runs_only_compiled_in_scripts` |
 | D20: the actor, `created_by: mail`, `mail:` uids, `ingest-seen` | T2c, T5.1, T6.2, T6.3 | `seen_records_mail_uids_…`, `a_message_without_a_message_id_keys_…`; Checkpoint A |
-| D21, §13 Q10: sender and date on mail cards, notices and applied changes | T3e, T6.2, T15.5 | `…_carries_from_mail_date_and_evidence`, `a_mail_card_shows_its_sender_date_and_quote` |
+| D21, §13 Q10: sender and date on mail cards, notices and applied changes | T3e, T6.2, T15.0, T15.5 | `…_carries_from_mail_date_and_evidence`, `a_mail_card_carries_its_from_mail_date_and_evidence_as_literals`, `a_mail_card_shows_its_sender_date_and_quote` |
 | D22: one mailbox, one path; never `quiet` | T4b | test 16c; P22 |
 | D23 and decision 8 as amended 2026-10-02 (PQ6 (a)), §13 Q1: 2,000 judgments and $1.00 per account per 120-day period, opened at the first backfill, keyed on `allowance_opened_at`; reconnecting renews nothing | T1.1, T1.3, T3e | test 11; `charge_allowance_is_one_statement_…`, `the_allowance_period_is_keyed_on_allowance_opened_at_…`, `a_second_backfill_inside_120_days_…`, `a_backfill_120_days_or_more_after_…`; the renamed column test |
 | D24: events and schedules stay the student's; nothing written to `commitments/` | T5.3, T5.5 | test 23; `no_action_ever_targets_commitments` |

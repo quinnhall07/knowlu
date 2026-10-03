@@ -352,6 +352,15 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
   Decisions view; there the card is a form — day toggles, start/end time pickers, *add another
   time*, **Save times** (→ `answer_card`, which writes `answer_meets` and approves the card in one
   call) and **No set times** (→ reject).
+- **A mail card names its sender, its date and its quote** (email spec D21, §5.2, §6.2). A card the
+  mail pass files (`created_by: mail`, `kind: amend` or `task`) carries three frontmatter keys:
+  `from` (`Name <address>`, or the address alone), `mail_date` (`YYYY-MM-DD`) and `evidence` (the
+  verbatim quote). `surface::read_approvals` copies each one onto the card's JSON under the same
+  name, as the literal the card writer wrote. A key the note lacks is left out, never `null`, so
+  every other card's JSON is unchanged, and so are the three `surface-today-*.json` references.
+  All three are untrusted text, and the page renders them only through `h()` (email plan T15.5). An
+  amend card's own `changes.<field>.from` is the old value, not the sender. *(Added 2026-10-03,
+  email plan T15.0.)*
 
 ### 3.10 AHEAD
 
