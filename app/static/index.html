@@ -200,6 +200,7 @@
   <div class="set-row" id="set-updates"><span class="k">Updates</span><span class="meta" id="set-update-state"></span><button class="b" id="set-update-check">Check now</button></div>
   <div class="set-row" id="set-account"><span class="k">Account</span><span class="meta" id="set-account-state"></span><button class="b" id="set-portal">Manage subscription</button></div>
   <div class="set-row" id="set-google" hidden><span class="k">Google</span><span class="meta" id="set-google-state"></span><button class="b" id="set-google-retry" hidden>Try again</button> <button class="b" id="set-google-check" hidden>Check again</button><button class="b" id="set-google-connect" hidden>Connect Gmail</button><button class="b" id="set-google-reconnect" hidden>Reconnect</button><button class="b" id="set-google-disconnect-1" hidden>Disconnect Google</button><button class="b crit" id="set-google-disconnect-2" hidden>Yes, disconnect</button><span class="meta" id="set-google-note"></span></div>
+  <div class="set-row" id="set-email"><span class="k">Email</span><span class="meta" id="set-email-state"></span><button class="b" id="set-email-open" hidden>Show progress</button><button class="b" id="set-email-start" hidden>Connect school email</button></div>
   <div class="set-row" id="set-grades"><span class="k">Blackboard sign-in</span><span class="meta" id="set-grades-note"></span><button class="b" id="set-grades-forget">Forget Blackboard sign-in</button></div>
   <div class="set-row" id="set-grades-hide"><span class="k">Hide grades</span><input type="checkbox" id="set-grades-hide-in"></div>
   <div class="set-sec" id="set-prefs-sec"><h3>Your preferences</h3>
@@ -222,6 +223,15 @@
   <div class="set-row" id="set-delete"><span class="k">Delete my data</span><span class="meta" id="set-delete-note"></span><button class="b" id="set-delete-1">Delete everything</button><button class="b crit" id="set-delete-2" hidden>Yes, delete it all</button></div>
   <div class="set-row" id="set-judge"><span class="k">Local judgment</span><span class="meta" id="set-judge-state"></span><button class="b" id="set-judge-download">Download</button><button class="b" id="set-judge-file">Install from a file&hellip;</button><button class="b" id="set-judge-remove" hidden>Remove model</button></div>
   <div class="set-row" id="set-diag"><span class="k">Diagnostics</span><button class="b" id="set-diag-copy">Copy diagnostics</button><span class="meta" id="set-diag-note"></span></div>
+</aside>
+<aside class="setpanel" id="mail-progress" hidden>
+  <div class="set-hd"><h2>Connecting your email</h2><button class="b" id="mp-leave">Leave</button></div>
+  <p class="meta" id="mp-sentence"></p>
+  <div id="mp-rows"></div>
+  <p class="meta" id="mp-backfill"></p>
+  <div id="mp-ask"></div>
+  <p class="meta" id="mp-end"></p>
+  <div class="set-row"><button class="b" id="mp-stop">Stop</button></div>
 </aside>
 <aside class="setpanel" id="report" hidden>
   <div class="set-hd"><h2>Report an issue</h2><button class="b" id="report-cancel">Close</button></div>

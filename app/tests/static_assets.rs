@@ -2486,3 +2486,102 @@ fn a_gmail_card_shows_its_gmail_attribution_and_never_a_sender() {
     assert!(view.contains("sourceLabel(c)"), "so does the decisions row");
     assert!(!js.contains("c.sender") && !js.contains("c.from"), "never the sender");
 }
+
+// ---- T15.1: the mail progress view (email spec §4.5, D6, BW) ----------------------------------------
+
+fn mail_progress_fn(js: &str) -> &str {
+    let at = js.find("// ---- mail progress view").expect("the progress view's section");
+    let end = js[at..].find("// ---- end mail progress view").expect("its end marker");
+    &js[at..at + end]
+}
+
+#[test]
+fn the_progress_view_shows_one_row_per_step_with_its_state() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let v = mail_progress_fn(&js);
+    for id in ["mail-progress", "mp-sentence", "mp-rows", "mp-backfill", "mp-ask", "mp-end", "mp-leave", "mp-stop"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
+    }
+    for step in ["sign_in", "step_aside", "forwarding", "add_address", "confirm_address", "turn_on", "canary", "backfill", "finish"] {
+        assert!(v.contains(&format!("{step}:")), "label for {step}");
+    }
+    for st in ["waiting", "working", "done", "needs_you", "done_by_hand", "skipped", "failed"] {
+        assert!(v.contains(&format!("{st}:")), "label for state {st}");
+    }
+    assert!(v.contains("p.rows.forEach") && v.contains("class=\"mp-row mp-"), "one row per step, the state as a class");
+    assert!(v.contains("invoke(\"mail_setup_progress\""), "polled");
+}
+
+#[test]
+fn needs_you_names_its_reason_and_offers_its_answers() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    for r in ["guided", "forwarding_elsewhere", "not_found", "script_failed", "blocked"] {
+        assert!(v.contains(&format!("{r}:")), "reason {r}");
+    }
+    assert!(v.contains("row.reason") && v.contains("MP_REASON["));
+    assert!(v.contains("invoke(\"mail_setup_answer\", { choice: \"done\" })"), "I've done this");
+    assert!(v.contains("{ choice: \"retry\" }") && v.contains("{ choice: \"replace\" }") && v.contains("{ choice: \"stop\" }"));
+    assert!(v.contains("{ choice: { school_address:"), "the one question of an uncurated school");
+    assert!(v.contains("personal_gmail") && v.contains("invoke(\"mail_setup_start\", { provider: \"gmail\" })"));
+}
+
+#[test]
+fn the_backfill_row_names_its_start_date_and_asks_nothing() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("mail from the last 120 days, since "), "the plan's copy");
+    assert!(v.contains("b.since"));
+    assert!(!v.contains("type=\"date\"") && !v.contains("term start") && !v.contains("confirm the date"), "no date is asked");
+}
+
+#[test]
+fn leave_closes_the_panel_and_settings_carries_the_progress() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("function mailLeave(") && fn_body(&js, "function mailLeave(").contains("EL(\"mail-progress\").hidden = true"));
+    assert!(!fn_body(&js, "function mailLeave(").contains("mail_setup_stop"), "leaving never stops the setup");
+    assert!(html.contains("id=\"set-email\"") && html.contains("id=\"set-email-state\"") && html.contains("id=\"set-email-open\""));
+    assert!(fn_body(&js, "function openSettings(").contains("mailSettingsRow("));
+    assert!(fn_body(&js, "function mailSettingsRow(").contains("mail_setup_progress"));
+}
+
+#[test]
+fn stop_invokes_mail_setup_stop_and_shows_what_was_done() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert_eq!(v.matches("invoke(\"mail_setup_stop\"").count(), 1);
+    assert!(v.contains("p.done") && v.contains("p.left") && v.contains("not_brought_in_before"));
+    assert!(v.contains(" was not brought in"));
+    assert!(v.contains("closest(\"#mp-stop\")"));
+}
+
+#[test]
+fn backfill_shows_n_of_m_and_a_time_left() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("b.handled") && v.contains("b.expected") && v.contains(" of "));
+    assert!(v.contains("b.eta_secs") && v.contains(" left"));
+    assert!(v.contains("b.paused"));
+}
+
+#[test]
+fn the_consoles_first_open_starts_school_mail_setup_when_offer_pending() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function bootConsole(");
+    assert!(b.contains("mailFirstOpen()"));
+    let f = fn_body(&js, "function mailFirstOpen(");
+    assert!(f.contains("invoke(\"mail_status\"") && f.contains("offer_pending") && f.contains("setup_running"));
+    assert!(f.contains("invoke(\"mail_setup_start\", { provider: \"school\" })"));
+    assert_eq!(js.matches("invoke(\"mail_setup_start\", { provider: \"school\" })").count(), 2, "first open and the Settings offer");
+}
+
+#[test]
+fn the_progress_view_never_reaches_ui_event_and_every_string_goes_through_h() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(!v.contains("ui_event") && !v.contains("ev("), "no usage events from the mail view");
+    assert!(!v.contains("innerHTML = p.") && !v.contains("+ p.sentence"), "the engine's sentence is set as text");
+}

@@ -2165,11 +2165,120 @@
     if (INT.loaded) { intFill({ strong: INT.loaded.strong, mild: INT.loaded.mild, never: INT.loaded.never, clubs: INT.loaded.clubs, interests_editable: INT.editable }); }
   });
   // M2 T5b.2 end
+  // ---- mail progress view (email spec §4.5, D6, BW). Every string here is a fixed sentence of the engine's
+  // or this page's: no mailbox text reaches it, and it reports nothing to the app log. ----
+  var MP = { timer: null, last: null };
+  var MP_STEP = { sign_in: "Sign in", step_aside: "Step aside", forwarding: "Open forwarding", add_address: "Add Knowlu’s address",
+    confirm_address: "Confirm the address", turn_on: "Turn forwarding on", canary: "Test message", backfill: "Bring in recent mail", finish: "Finish" };
+  var MP_STATE = { waiting: "waiting", working: "working", done: "done", needs_you: "needs you", done_by_hand: "done by hand", skipped: "skipped", failed: "failed" };
+  var MP_REASON = { guided: "Do this one yourself, then say you have.", forwarding_elsewhere: "This mailbox already forwards somewhere else.",
+    not_found: "Knowlu could not find the setting on the page.", script_failed: "That step did not work.",
+    blocked: "The test message did not arrive. Your school may be blocking forwarding." };
+  var MP_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  function mpDate(iso) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
+    return m ? Number(m[3]) + " " + MP_MONTHS[Number(m[2]) - 1] : String(iso || "");
+  }
+  function mpLeft(secs) {
+    if (secs == null) { return ""; }
+    var m = Math.max(1, Math.round(secs / 60));
+    return m >= 60 ? " · about " + Math.round(m / 60) + " h left" : " · about " + m + " min left";
+  }
+  function mpBtn(label, choice, extra) { return '<button class="b' + (extra || "") + '" data-mp-choice="' + h(choice) + '">' + h(label) + "</button>"; }
+  function renderMailProgress(r) {
+    var p = r && r.progress; MP.last = p || null;
+    if (!p) {
+      EL("mp-sentence").textContent = "No email setup is running.";
+      EL("mp-rows").innerHTML = ""; EL("mp-backfill").textContent = ""; EL("mp-ask").innerHTML = ""; EL("mp-end").textContent = "";
+      EL("mp-stop").hidden = true;
+      return;
+    }
+    EL("mp-sentence").textContent = p.sentence || "";
+    var html = "";
+    p.rows.forEach(function (row) {
+      var why = row.reason && MP_REASON[row.reason] ? '<span class="mp-why">' + h(MP_REASON[row.reason]) + "</span>" : "";
+      html += '<div class="mp-row mp-' + h(row.state) + '"><span class="mp-step">' + h(MP_STEP[row.step] || row.step) +
+        '</span><span class="mp-state">' + h(MP_STATE[row.state] || row.state) + "</span>" + why + "</div>";
+    });
+    EL("mp-rows").innerHTML = html;
+    var b = p.backfill;
+    EL("mp-backfill").textContent = b ? "Backfill: mail from the last 120 days, since " + mpDate(b.since) + " — " + b.handled + " of " + b.expected +
+      mpLeft(b.eta_secs) + (b.paused ? " (paused)" : "") : "";
+    var ask = "";
+    if (p.ask === "school_address") {
+      ask = '<div class="set-row"><input type="text" id="mp-addr" placeholder="Your school email address">' + mpBtn("Continue", "school_address", " pri y") + "</div>";
+    } else if (p.ask === "forwarding_elsewhere") {
+      ask = '<div class="set-row">' + mpBtn("Forward to Knowlu instead", "replace") + mpBtn("Keep it as it is", "stop") + "</div>";
+    } else if (p.status !== "ended" && p.rows.some(function (x) { return x.state === "needs_you" || x.state === "failed"; })) {
+      ask = '<div class="set-row">' + mpBtn("I’ve done this", "done", " pri y") + (p.blocked ? mpBtn("Try again", "retry") : "") + "</div>";
+    }
+    if (p.blocked && (p.offers || []).indexOf("personal_gmail") >= 0) { ask += '<div class="set-row"><button class="b" id="mp-gmail">Connect personal Gmail instead</button></div>'; }
+    EL("mp-ask").innerHTML = ask;
+    var end = "";
+    if (p.status === "ended") {
+      end = p.line || "";
+      if (p.done && p.done.length) { end += " Done: " + p.done.map(function (s) { return MP_STEP[s] || s; }).join(", ") + "."; }
+      if (p.left && p.left.length) { end += " Not done: " + p.left.map(function (s) { return MP_STEP[s] || s; }).join(", ") + "."; }
+      if (p.not_brought_in_before) { end += " Mail before " + mpDate(p.not_brought_in_before) + " was not brought in."; }
+    }
+    EL("mp-end").textContent = end.trim();
+    EL("mp-stop").hidden = p.status === "ended";
+  }
+  function pollMailProgress() {
+    return invoke("mail_setup_progress", {}).then(function (r) {
+      renderMailProgress(r);
+      if (!r || !r.active) { clearInterval(MP.timer); MP.timer = null; }
+      return r;
+    }).catch(function () {});
+  }
+  function openMailProgress() {
+    EL("mail-progress").hidden = false;
+    if (!MP.timer) { MP.timer = setInterval(pollMailProgress, 1500); }
+    return pollMailProgress();
+  }
+  function mailLeave() {
+    EL("mail-progress").hidden = true;
+    clearInterval(MP.timer); MP.timer = null;
+  }
+  function mailFirstOpen() {
+    return invoke("mail_status", {}).then(function (s) {
+      if (s && s.offer_pending && !s.setup_running) {
+        return invoke("mail_setup_start", { provider: "school" }).then(function (r) { if (r && r.ok) { return openMailProgress(); } });
+      }
+    }).catch(function () {});
+  }
+  function mailSettingsRow() {
+    return invoke("mail_setup_progress", {}).then(function (r) {
+      var p = r && r.progress;
+      EL("set-email-state").textContent = !p ? "Not connected here." : p.status === "ended" ? (p.line || "Setup ended.") : (p.sentence || "Setting up.");
+      EL("set-email-open").hidden = !p;
+      EL("set-email-start").hidden = !!(r && r.active);
+    }).catch(function () {});
+  }
+  EL("mail-progress").addEventListener("click", function (e) {
+    if (e.target.closest("#mp-leave")) { mailLeave(); return; }
+    if (e.target.closest("#mp-stop")) { invoke("mail_setup_stop", {}).then(pollMailProgress).catch(function () {}); return; }
+    if (e.target.closest("#mp-gmail")) { invoke("mail_setup_start", { provider: "gmail" }).then(function (r) { if (r && r.ok) { openMailProgress(); } }).catch(function () {}); return; }
+    var c = e.target.closest("[data-mp-choice]"); if (!c) { return; }
+    var k = c.getAttribute("data-mp-choice"), a;
+    if (k === "school_address") { a = invoke("mail_setup_answer", { choice: { school_address: EL("mp-addr").value.trim() } }); }
+    else if (k === "done") { a = invoke("mail_setup_answer", { choice: "done" }); }
+    else if (k === "retry") { a = invoke("mail_setup_answer", { choice: "retry" }); }
+    else if (k === "replace") { a = invoke("mail_setup_answer", { choice: "replace" }); }
+    else { a = invoke("mail_setup_answer", { choice: "stop" }); }
+    a.then(pollMailProgress).catch(function () {});
+  });
+  EL("set-email-open").addEventListener("click", openMailProgress);
+  EL("set-email-start").addEventListener("click", function () {
+    invoke("mail_setup_start", { provider: "school" }).then(function (r) { if (r && r.ok) { openMailProgress(); } }).catch(function () {});
+  });
+  // ---- end mail progress view ----
   function openSettings() {
     EL("settings").hidden = false;
     loadPrefs(); loadInterests();
     checkAccount();
     gradesStatus();
+    mailSettingsRow();
     invoke("settings_context", {}).then(function (c) {
       current.vaultPath = c.vault; current.version = c.version; current.profileName = c.profile_name;
       current.registryError = c.registry_error || "";
@@ -2472,6 +2581,8 @@
     // launch after C1 for an install that already existed. Once per launch, never on a timer — an
     // install that has an account never sees it, and one that dismissed it is asked again tomorrow.
     checkAccount();
+    // D6: the wizard's announcement was taken and setup has not begun: it begins now, in this window.
+    mailFirstOpen();
   }
 
   function renderPicker(l) {
