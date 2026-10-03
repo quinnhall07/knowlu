@@ -4,6 +4,8 @@
 // The order matters:
 //   1. acknowledge what the LAST pull actually wrote (so a crash between reply and write costs a
 //      repeat, never a lost task);
+//   1b. a Gmail address with an active forwarding to Knowlu stops here with a non-quiet empty
+//      read (email forwarding D22): one mailbox, one path;
 //   2. get an access token from the Vault-held refresh token — a revoked grant, an account with no
 //      Gmail scope at all, and a deployment with no Google client configured are three different
 //      answers, and only one of them (a revoked grant) is ever treated as a failure (R-C2-E41);
@@ -168,6 +170,33 @@ export async function lookupToken(accountId: string, sources: LookupSources): Pr
   return "missing" in decided ? decided : await sources.token(accountId);
 }
 
+/**
+ * Email forwarding D22's inputs: `google_accounts.email_hint` (the address the OAuth grant names)
+ * and each of the account's `mail_addresses` rows as its `mailbox_hint` and `status`. Addresses
+ * only; no mail, no token, nothing that reaches a log line.
+ */
+export interface Forwarding {
+  gmail: string | null;
+  mailboxes: Array<{ hint: string | null; status: string }>;
+}
+
+/** P22: the statuses under which a forwarding no longer counts. Every other one does, `quiet`
+ * included: recover brings a quiet mailbox's gap in, and reading both paths would file every
+ * message twice. */
+const FORWARDING_ENDED = ["revoked", "off"];
+
+/**
+ * Email forwarding D22 under P22: does the OAuth Gmail address have an active forwarding to
+ * Knowlu? The two addresses are compared whole, trimmed and case-folded (never as a substring:
+ * `notjane@` is not `jane@`); an absent or empty address on either side never matches.
+ */
+export function forwardingCounts(gmail: string | null, mailboxes: Forwarding["mailboxes"]): boolean {
+  const fold = (a: string | null) => a?.trim().toLowerCase() || null;
+  const address = fold(gmail);
+  if (address === null) return false;
+  return mailboxes.some((m) => fold(m.hint) === address && !FORWARDING_ENDED.includes(m.status));
+}
+
 export interface ReadDeps {
   api: GmailApi;
   /** A fresh access token, or which of the three reasons there is none. */
@@ -188,6 +217,8 @@ export interface ReadDeps {
   ): Promise<Array<{ uid: string; tier: string; payload: Record<string, unknown>; judgment_id: string | null }>>;
   deliver(accountId: string, uids: string[]): Promise<void>;
   knownCourses(accountId: string): Promise<string[]>;
+  /** Email forwarding D22: the account's OAuth Gmail address and its forwarding mailboxes. */
+  forwarding(accountId: string): Promise<Forwarding>;
   pipeline(): Promise<PipelineDeps>;
   budgetMs: number;
   clock: () => number;
@@ -258,6 +289,16 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
         console.error(`gmail-read: ack dropped ${shaped.length - ACK_CAP} entries past the ${ACK_CAP} cap`);
       }
       if (ack.length > 0) await deps.deliver(account_id, ack);
+
+      // Email forwarding D22: one mailbox, one path. A Gmail address that forwards to Knowlu is
+      // read by forwarding alone, so this reads nothing new: no token exchange, no Gmail call, no
+      // revoke. Already-queued items are still delivered and acked. NEVER `quiet` — the merged
+      // device reads every unknown quiet reason as "re-connect from settings" and stops before
+      // reading items (`cloudmodel.rs:667-675`); `via_forward` is a field today's device ignores.
+      const forwarding = await deps.forwarding(account_id);
+      if (forwardingCounts(forwarding.gmail, forwarding.mailboxes)) {
+        return Response.json({ items: await undelivered(), read: 0, quiet: false, more: false, via_forward: true });
+      }
 
       const lookup = await deps.accessTokenFor(account_id);
       if ("missing" in lookup) {
