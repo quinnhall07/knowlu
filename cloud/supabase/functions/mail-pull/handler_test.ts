@@ -48,10 +48,16 @@ class FakeStore implements PullStore {
   rows: Row[] = [];
   calls: string[] = [];
   delivered: string[][] = [];
+  /** Runs at the start of every call, given the call's name and its index in `calls`: other writers. */
+  beforeCall?: (name: string, index: number) => void;
   private n = 0;
 
+  private note(name: string) {
+    this.beforeCall?.(name, this.calls.length);
+    this.calls.push(name);
+  }
   deliver(accountId: string, uids: string[], atIso: string) {
-    this.calls.push("deliver");
+    this.note("deliver");
     this.delivered.push([...uids]);
     for (const r of this.rows) {
       if (r.accountId === accountId && uids.includes(r.uid) && r.deliveredAt === null) r.deliveredAt = atIso;
@@ -59,32 +65,32 @@ class FakeStore implements PullStore {
     return Promise.resolve();
   }
   mailboxes(accountId: string) {
-    this.calls.push("mailboxes");
+    this.note("mailboxes");
     return Promise.resolve(
       this.boxes.filter((b) => b.accountId === accountId).map(({ accountId: _, ...b }) => ({ ...b })),
     );
   }
   batches(addressIds: string[]) {
-    this.calls.push("batches");
+    this.note("batches");
     return Promise.resolve(
       this.batchRows.filter((b) => addressIds.includes(b.addressId)).map((b) => ({ ...b })),
     );
   }
   pendingWork(accountId: string, batchIds: string[]) {
-    this.calls.push("pendingWork");
+    this.note("pendingWork");
     return Promise.resolve(
       batchIds.filter((b) => this.work.some((w) => w.accountId === accountId && w.batchId === b)),
     );
   }
   closeBatch(id: string, atIso: string) {
-    this.calls.push("closeBatch");
+    this.note("closeBatch");
     const b = this.batchRows.find((x) => x.id === id);
     if (b === undefined || b.closedAt !== null) return Promise.resolve(false);
     b.closedAt = atIso;
     return Promise.resolve(true);
   }
   undelivered(accountId: string): Promise<ClaimHead[]> {
-    this.calls.push("undelivered");
+    this.note("undelivered");
     return Promise.resolve(
       this.rows.filter((r) => r.accountId === accountId && r.deliveredAt === null)
         .sort((a, b) => a.id - b.id)
@@ -99,7 +105,7 @@ class FakeStore implements PullStore {
     );
   }
   claims(accountId: string, ids: number[]) {
-    this.calls.push("claims");
+    this.note("claims");
     return Promise.resolve(
       this.rows.filter((r) => r.accountId === accountId && ids.includes(r.id))
         .map(({ accountId: _a, deliveredAt: _d, ...r }) => ({ ...r })),
@@ -382,6 +388,86 @@ Deno.test("live_claims_queued_during_an_open_batch_come_after_it", async () => {
   const closed = await w.answer([uid(1), uid(40)]);
   assertEquals(uids(closed), [uid(21), uid(20), uid(22), uid(32), uid(31)]);
   assertEquals(closed.draining, false);
+});
+
+Deno.test("a_ready_batch_waits_behind_an_earlier_batch_of_its_mailbox_that_is_not_ready", async () => {
+  const sentAt = iso(NOW - 10 * MINUTE);
+  const cases: Array<[string, Partial<PullBatch>, boolean]> = [
+    ["the earlier one still open", { received: 1 }, false],
+    ["the earlier one closed with work waiting", { sent: 1, received: 1, sentAt }, true],
+  ];
+  for (const [why, early, waiting] of cases) {
+    const w = world();
+    w.store.batch(B1, NOW - 3 * HOUR, early);
+    w.store.batch(B2, NOW - 2 * HOUR, { phase: "recover", sent: 1, received: 1, sentAt });
+    if (waiting) w.store.work = [{ accountId: ACCT, batchId: B1 }];
+    w.store.add({ n: 1, ordering: NOW - 4 * HOUR }); // before both opened
+    w.store.add({ n: 11, ordering: NOW - 50 * DAY, queued: NOW - 150 * MINUTE, batch: B1 });
+    w.store.add({ n: 30, ordering: NOW - 140 * MINUTE }); // between the two openings
+    w.store.add({ n: 21, ordering: NOW - 90 * DAY, queued: NOW - 90 * MINUTE, batch: B2, phase: "recover" });
+    w.store.add({ n: 40, ordering: NOW - HOUR }); // after both
+    w.store.add({ n: 50, ordering: NOW - 30 * MINUTE, address: M2 });
+    // The later batch is ready, and still waits: delivered first, its claims could not meet the items the
+    // earlier batch's claims create.
+    const first = uids(await w.answer());
+    assertEquals(first, [uid(1), uid(50)], why);
+    Object.assign(w.store.batchRows[0], { sent: 1, received: 1, sentAt });
+    w.store.work = [];
+    // Then the earlier one with the live mail that waited behind it, then the later one with its own.
+    assertEquals(uids(await w.answer(first)), [uid(11), uid(30), uid(21), uid(40)], why);
+  }
+});
+
+Deno.test("an_item_finished_between_two_of_the_pulls_reads_never_splits_its_batch", async () => {
+  // mail-process queues an item's claim, then deletes its work row. Wherever that lands among the pull's
+  // own calls, the batch goes out whole with that claim in it, or waits; never without it.
+  const held = [uid(1)];
+  const whole = [uid(1), uid(11), uid(12), uid(13), uid(14), uid(20)];
+  for (let k = 0; k < 8; k++) {
+    const w = backfill({ sent: 4, received: 4, sentAt: iso(NOW - 5 * MINUTE) });
+    w.store.work = [{ accountId: ACCT, batchId: B1 }];
+    w.store.add({ n: 20, ordering: NOW - 20 * MINUTE }); // live, queued while the batch was open
+    let moved = false;
+    const finish = () => {
+      w.store.add({ n: 14, ordering: NOW - 5 * DAY, queued: NOW - MINUTE, batch: B1 });
+      w.store.work = [];
+      moved = true;
+    };
+    w.store.beforeCall = (_, i) => {
+      if (i === k) finish();
+    };
+    const a = uids(await w.answer());
+    assert(
+      JSON.stringify(a) === JSON.stringify(held) || JSON.stringify(a) === JSON.stringify(whole),
+      `finished before call ${k}: ${a.join(" ")}`,
+    );
+    if (k === 0) assertEquals(a, whole);
+    // The next pull, the item long finished, delivers whatever is left in the same order.
+    w.store.beforeCall = undefined;
+    if (!moved) finish();
+    const rest = uids(await w.answer(a));
+    assertEquals([...a, ...rest], whole, `call ${k}`);
+  }
+});
+
+Deno.test("a_batch_opened_after_the_pull_read_its_batches_never_reorders_its_mailbox", async () => {
+  // Opened, sent, received and processed between the pull's read of batches and its read of claims: the
+  // pull does not know the batch yet, so the mailbox's mail waits for the next pull rather than going out
+  // in pieces.
+  const w = world();
+  w.store.add({ n: 1, ordering: NOW - 3 * HOUR });
+  w.store.add({ n: 50, ordering: NOW - 2 * HOUR, address: M2 });
+  w.store.beforeCall = (name) => {
+    if (name !== "undelivered" || w.store.batchRows.length > 0) return;
+    w.store.batch(B1, NOW - 2 * MINUTE, { sent: 1, received: 1, sentAt: iso(NOW - MINUTE) });
+    w.store.add({ n: 11, ordering: NOW - 40 * DAY, queued: NOW - MINUTE, batch: B1 });
+    w.store.add({ n: 20, ordering: NOW - MINUTE / 2 });
+  };
+  const first = uids(await w.answer());
+  // Another mailbox is never held by it.
+  assert(first.includes(uid(50)));
+  const second = uids(await w.answer(first));
+  assertEquals([...first, ...second].filter((u) => u !== uid(50)), [uid(1), uid(11), uid(20)]);
 });
 
 // ---------------------------------------------------------------- ack

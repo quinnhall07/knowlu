@@ -13,9 +13,11 @@
  *    ones nobody pulled.
  * 3. **Withhold.** A batch's messages are delivered only once it is closed **and none of its items still
  *    waits in `mail_work`**: received counts arrivals at intake, before `mail-process` has queued their
- *    claims, so a batch closed by count can still be missing claims. Delivered then, it comes whole. A
- *    mailbox's live messages queued at or after the opening of one of its batches that is not yet
- *    delivered wait behind it, and then come after it.
+ *    claims, so a batch closed by count can still be missing claims. The work is read before the claims
+ *    (`mail-process` queues a claim before it deletes the work row), so delivered, it comes whole. A
+ *    mailbox's live messages queued at or after the opening of one of its batches that is not yet ready,
+ *    and its later batches, ready or not, wait behind it, and then come after it. A claim of a batch
+ *    opened after the read holds its whole mailbox until the next pull.
  * 4. **Order.** Every answer is in (ordering date, uid) order (the ordering date is `mail-process`'s, the
  *    earlier of the Date header and the received time, so a message dated 2099 orders at its arrival). A
  *    delivered batch is one block, placed at its opening and holding its messages in that order, then the
@@ -149,27 +151,31 @@ export function arrange(
 ): Placed[] {
   const known = new Map(batches.map((b) => [b.id, b]));
   const ready = new Set(batches.filter((b) => isClosed(b, now) && !pending.has(b.id)).map((b) => b.id));
-  // Each mailbox holds its live mail from the earliest opening of a batch that is not yet ready.
+  // Each mailbox holds everything from the earliest opening of a batch that is not yet ready: its live
+  // mail and any later batch, ready or not.
   const holdFrom = new Map<string, number>();
-  for (const b of batches) {
-    if (ready.has(b.id)) continue;
-    const opened = at(b.openedAt);
-    const from = holdFrom.get(b.addressId);
-    if (from === undefined || opened < from) holdFrom.set(b.addressId, opened);
-  }
+  const hold = (address: string, from: number) => {
+    const was = holdFrom.get(address);
+    if (was === undefined || from < was) holdFrom.set(address, from);
+  };
+  for (const b of batches) if (!ready.has(b.id)) hold(b.addressId, at(b.openedAt));
+  // A claim of a batch the read did not hold (a pruned batch's claims have a null batch, so this one opened
+  // after the read): its opening is unknown, so its whole mailbox waits for the next pull.
+  for (const h of heads) if (h.batchId !== null && !known.has(h.batchId)) hold(h.addressId, -Infinity);
   const blocks = new Map<string, Block>();
   const loose: ClaimHead[] = [];
   for (const h of heads) {
     if (!mailboxes.has(h.addressId)) continue;
-    const b = h.batchId === null ? undefined : known.get(h.batchId);
-    if (b !== undefined) {
-      if (!ready.has(b.id)) continue;
+    const from = holdFrom.get(h.addressId) ?? Infinity;
+    if (h.batchId !== null) {
+      const b = known.get(h.batchId);
+      if (b === undefined || !ready.has(b.id) || at(b.openedAt) >= from) continue;
       const block = blocks.get(b.id) ?? { batch: b, own: [], tail: [] };
       blocks.set(b.id, block);
       block.own.push(h);
       continue;
     }
-    if (at(h.queuedAt) >= (holdFrom.get(h.addressId) ?? Infinity)) continue;
+    if (at(h.queuedAt) >= from) continue;
     loose.push(h);
   }
   // A live message queued at or after a delivered block's opening comes after the latest such block of
@@ -253,19 +259,18 @@ export function pullHandler(deps: PullDeps): (req: Request) => Promise<Response>
       if (ack.length > 0) await deps.store.deliver(account_id, ack, iso(now));
       const boxes = (await deps.store.mailboxes(account_id)).filter((b) => b.status !== "revoked");
       const mailboxes = new Set(boxes.map((b) => b.id));
-      const heads = mailboxes.size === 0 ? [] : await deps.store.undelivered(account_id);
-      const batches = heads.length === 0 ? [] : await deps.store.batches([...mailboxes]);
+      // Batches and their waiting work are read before the claims: mail-process queues an item's claim
+      // before it deletes the item's work row, so an item whose work is gone by the time `pendingWork`
+      // answers has its claim in `undelivered`'s read, which comes after.
+      const batches = mailboxes.size === 0 ? [] : await deps.store.batches([...mailboxes]);
       const closed = batches.filter((b) => isClosed(b, now));
       for (const b of closed) {
         if (b.closedAt === null) await deps.store.closeBatch(b.id, iso(now));
       }
-      // Only a closed batch that could deliver or hold something is asked about its waiting work.
-      const asked = closed.filter((b) =>
-        heads.some((h) => h.addressId === b.addressId && at(h.queuedAt) >= at(b.openedAt))
-      );
       const pending = new Set(
-        asked.length === 0 ? [] : await deps.store.pendingWork(account_id, asked.map((b) => b.id)),
+        closed.length === 0 ? [] : await deps.store.pendingWork(account_id, closed.map((b) => b.id)),
       );
+      const heads = mailboxes.size === 0 ? [] : await deps.store.undelivered(account_id);
       const placed = arrange(now, batches, pending, heads, mailboxes);
       const page = placed.slice(0, PAGE);
       const rows = page.length === 0 ? [] : await deps.store.claims(account_id, page.map((p) => p.head.id));
