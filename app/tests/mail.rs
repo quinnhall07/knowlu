@@ -533,6 +533,60 @@ fn no_token_or_address_reaches_an_error_string() {
     assert_eq!(svc.requests().len(), before, "nothing was sent");
 }
 
+/// T11.1 review: a sentence with no `@` that still carries the bearer, and one too long to be a fixed
+/// sentence, are both dropped to an empty reason (the Display then names only the status).
+#[test]
+fn a_refusal_reason_is_dropped_when_it_holds_the_bearer_or_is_too_long() {
+    let svc = Service::start(false, |r| {
+        let bearer = r.bearer.clone().unwrap_or_default();
+        (409, format!(r#"{{"error":"bad {bearer}"}}"#))
+    });
+    match client(&svc).set_hint(A, HINT).expect_err("409") {
+        MailError::Refused { status, reason } => assert_eq!((status, reason.as_str()), (409, ""), "the bearer, no @"),
+        e => panic!("{e:?}"),
+    }
+    let long = "a fixed sentence ".repeat(13);
+    assert!(long.len() > 200 && !long.contains('@'));
+    let svc = Service::start(false, move |_| (409, format!(r#"{{"error":"{long}"}}"#)));
+    let e = client(&svc).set_hint(A, HINT).expect_err("409");
+    match &e {
+        MailError::Refused { status, reason } => assert_eq!((*status, reason.as_str()), (409, ""), "201+ chars, no @"),
+        e => panic!("{e:?}"),
+    }
+    assert_eq!(e.to_string(), "the account service refused the request (409)");
+    // Exactly 200 characters is still kept.
+    let edge = "x".repeat(200);
+    let kept = edge.clone();
+    let svc = Service::start(false, move |_| (409, format!(r#"{{"error":"{edge}"}}"#)));
+    match client(&svc).set_hint(A, HINT).expect_err("409") {
+        MailError::Refused { reason, .. } => assert_eq!(reason, kept),
+        e => panic!("{e:?}"),
+    }
+}
+
+/// T11.1 review: the session is read on every request, never kept: each call asks the token function
+/// again, so a token that changes between calls is the one the service sees.
+#[test]
+fn the_token_function_is_called_on_every_request() {
+    let svc = Service::start(false, |_| (200, r#"{"addresses":[]}"#.to_string()));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = calls.clone();
+    let c = MailClient::with_token_fn(
+        &svc.base,
+        Box::new(move || Ok(format!("token-{}", counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst)))),
+    )
+    .expect("a loopback base");
+    for _ in 0..3 {
+        c.list_addresses().expect("list");
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3, "once per request");
+    let bearers: Vec<_> = svc.requests().into_iter().map(|r| r.bearer.unwrap_or_default()).collect();
+    assert_eq!(bearers, ["Bearer token-0", "Bearer token-1", "Bearer token-2"]);
+    // A request refused before it is built (a bad id) never asks for the session.
+    assert_eq!(c.rotate_address("../x").expect_err("bad id").name(), "invalid");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
 #[test]
 fn a_timeout_is_a_named_outcome() {
     let svc = Service::start(true, |_| (200, "{}".into()));
