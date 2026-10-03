@@ -1413,8 +1413,9 @@ fn saved_mailboxes(data_dir: &std::path::Path, rows: &[Value]) -> Vec<SavedMailb
 pub trait DeleteSteps {
     /// `GET /mail/addresses`: the mailboxes, read while the account still has them.
     fn mailboxes(&mut self) -> Result<Vec<Value>, String>;
-    /// Turn forwarding off in `mailbox` with its saved sign-in, hidden, giving up at `deadline`.
-    fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: std::time::Instant) -> Result<(), &'static str>;
+    /// Turn forwarding off in `mailbox` with its saved sign-in, hidden, giving up at `deadline`. `Ok(true)`
+    /// when this call turned it off, `Ok(false)` when it was already off (the script's `changed: false`).
+    fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: std::time::Instant) -> Result<bool, &'static str>;
     /// [`delete_account_at`]; `Err` is the page's sentence.
     fn delete_account(&mut self) -> Result<(), String>;
     /// Close the mail window and its popup, and stop whatever drives them.
@@ -1427,13 +1428,14 @@ pub trait DeleteSteps {
 /// windows, the local wipe. The pre-step is best effort, and nothing it does or fails to do changes
 /// what follows: a list that cannot be read skips it, a mailbox that fails is passed over, and each
 /// mailbox's `bound` starts when that mailbox does. A refused server call stops before anything
-/// local, the windows included, and its sentence says in how many mailboxes forwarding was already
-/// turned off, and how to turn it back on (`turned_off_sentence`).
+/// local, the windows included, and its sentence says in how many mailboxes the pre-step turned
+/// forwarding off (one that was already off is not counted), and how to turn it back on
+/// (`turned_off_sentence`).
 pub fn delete_my_data_with(steps: &mut dyn DeleteSteps, data_dir: &std::path::Path, bound: std::time::Duration) -> Value {
     let mut turned_off = 0usize;
     if let Ok(rows) = steps.mailboxes() {
         for mailbox in saved_mailboxes(data_dir, &rows) {
-            turned_off += usize::from(steps.forwarding_off(&mailbox, std::time::Instant::now() + bound).is_ok());
+            turned_off += usize::from(steps.forwarding_off(&mailbox, std::time::Instant::now() + bound) == Ok(true));
         }
     }
     if let Err(e) = steps.delete_account() {
@@ -1474,7 +1476,7 @@ impl DeleteSteps for LiveDelete<'_> {
         client.and_then(|m| m.list_addresses()).map_err(|e| e.name().to_string())
     }
 
-    fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: std::time::Instant) -> Result<(), &'static str> {
+    fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: std::time::Instant) -> Result<bool, &'static str> {
         if self.window.is_none() && !self.window_busy {
             self.window = take_mail_window(self.app, deadline);
             self.window_busy = self.window.is_none();
@@ -1541,8 +1543,10 @@ const M365_FORWARDING: &str = "https://outlook.office.com/mail/options/mail/forw
 /// open it, wait for the saved sign-in, go to the Forwarding page (Microsoft 365), and run the
 /// provider's `forwarding_off.js` with the Knowlu address; a Gmail page that reloads is run once more,
 /// as the setup runner does. The script leaves forwarding to any other address alone. The caller
-/// closes the window, whatever happened. Every `Err` is a fixed word.
-fn forwarding_off_in_window(app: &tauri::AppHandle, data_dir: &std::path::Path, mb: &SavedMailbox, deadline: std::time::Instant) -> Result<(), &'static str> {
+/// closes the window, whatever happened. `Ok(false)` only for the script's explicit `changed: false`
+/// (it was already off); an `ok` without that word counts as turned off, since a refused deletion's
+/// sentence must not hide a forwarding this step stopped. Every `Err` is a fixed word.
+fn forwarding_off_in_window(app: &tauri::AppHandle, data_dir: &std::path::Path, mb: &SavedMailbox, deadline: std::time::Instant) -> Result<bool, &'static str> {
     use crate::mail::{open_hidden, run_in_window, window_signed_in, Refusal, WINDOW};
     use crate::mail_steps::Provider;
     use tauri::Manager;
@@ -1591,7 +1595,7 @@ fn forwarding_off_in_window(app: &tauri::AppHandle, data_dir: &std::path::Path, 
             continue;
         }
         return match r {
-            Ok(v) if v["result"].as_str() == Some("ok") => Ok(()),
+            Ok(v) if v["result"].as_str() == Some("ok") => Ok(v["changed"].as_bool() != Some(false)),
             Ok(_) => Err("forwarding was not turned off"),
             Err(refusal) => Err(refusal.as_str()),
         };

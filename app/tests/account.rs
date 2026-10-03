@@ -1893,7 +1893,7 @@ struct Steps<'a> {
     /// Per mailbox tried: (when the call began, the deadline it was given).
     bounds: Vec<(Instant, Instant)>,
     list: Box<dyn FnMut() -> Result<Vec<serde_json::Value>, String> + 'a>,
-    off: Box<dyn FnMut(&SavedMailbox) -> Result<(), &'static str> + 'a>,
+    off: Box<dyn FnMut(&SavedMailbox) -> Result<bool, &'static str> + 'a>,
     delete: Box<dyn FnMut() -> Result<(), String> + 'a>,
     close: Box<dyn FnMut() + 'a>,
     local: Box<dyn FnMut() + 'a>,
@@ -1906,7 +1906,7 @@ impl<'a> Steps<'a> {
             tried: Vec::new(),
             bounds: Vec::new(),
             list: Box::new(|| Ok(Vec::new())),
-            off: Box::new(|_| Ok(())),
+            off: Box::new(|_| Ok(true)),
             delete: Box::new(|| Ok(())),
             close: Box::new(|| {}),
             local: Box::new(|| {}),
@@ -1919,7 +1919,7 @@ impl DeleteSteps for Steps<'_> {
         self.log.push("list".into());
         (self.list)()
     }
-    fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: Instant) -> Result<(), &'static str> {
+    fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: Instant) -> Result<bool, &'static str> {
         let began = Instant::now();
         self.log.push(format!("off {}", mailbox.address_id));
         self.tried.push((mailbox.address_id.clone(), mailbox.provider, mailbox.address().to_string(), mailbox.profile.clone()));
@@ -2118,7 +2118,9 @@ fn the_pre_steps_forwarding_page_is_the_setup_runners() {
 
 /// Checkpoint D (minor 3): the pre-step runs before `DELETE /account`, so a refused deletion can follow a
 /// forwarding it already turned off. The page's sentence then says so, with the count and the way back,
-/// singular or plural; with nothing turned off it says nothing more. Nothing local is touched either way.
+/// singular or plural; with nothing turned off it says nothing more. A mailbox whose forwarding was already
+/// off (the script's `changed: false`) was not turned off by the pre-step and is not counted (Checkpoint D
+/// re-check). Nothing local is touched either way.
 #[test]
 fn a_refused_deletion_says_where_forwarding_was_already_turned_off() {
     let data_dir = mail_data_dir("refused-off", &["mbx-school", "mbx-gmail"]);
@@ -2127,10 +2129,14 @@ fn a_refused_deletion_says_where_forwarding_was_already_turned_off() {
     let after = |n: &str| {
         format!("{refused}. Forwarding to Knowlu was turned off in {n} before this failed; you can turn it back on in Settings → Email.")
     };
-    let cases: [(fn(&SavedMailbox) -> Result<(), &'static str>, Option<String>); 3] = [
-        (|_| Ok(()), Some(after("2 mailboxes"))),
-        (|m| if m.address_id == "mbx-school" { Ok(()) } else { Err("needs sign-in") }, Some(after("1 mailbox"))),
+    let cases: [(fn(&SavedMailbox) -> Result<bool, &'static str>, Option<String>); 5] = [
+        (|_| Ok(true), Some(after("2 mailboxes"))),
+        (|m| if m.address_id == "mbx-school" { Ok(true) } else { Err("needs sign-in") }, Some(after("1 mailbox"))),
         (|_| Err("needs sign-in"), None),
+        // Gmail's forwarding was already off: only the school mailbox's was turned off.
+        (|m| Ok(m.address_id == "mbx-school"), Some(after("1 mailbox"))),
+        // Both already off: nothing was turned off, so the sentence adds nothing.
+        (|_| Ok(false), None),
     ];
     for (off, sentence) in cases {
         let mut s = Steps::new();
@@ -2277,6 +2283,7 @@ impl Drop for Kept<'_> {
 #[test]
 fn a_slot_holding_the_mail_window_opens_no_profile_after_the_sign_out_closes_it() {
     let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _runs = MAIL_RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _api = ApiBase::set(&closed_loopback_base());
     let root = std::env::temp_dir().join(format!("knowlu-t12-slot-stop-{}-{}", std::process::id(), line!()));
     let _ = std::fs::remove_dir_all(&root);
@@ -2323,5 +2330,148 @@ fn a_slot_holding_the_mail_window_opens_no_profile_after_the_sign_out_closes_it(
     }
     assert_eq!(left_at_release.get(), Some(false), "the mail window was let go before every mail profile was gone");
     assert!(knowlu::mail::MailWindow::try_take().is_some(), "the sign-out let the mail window go when it was done");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---- a stop that lands while the slot opens a mailbox's window (Checkpoint D re-check; spec §4.13) ----
+
+/// `mail::stop_runs` and the mail window's hold are process-wide: the slot runs in this file take this lock,
+/// so one test's stop never lands in another's run.
+#[cfg(windows)]
+static MAIL_RUN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Where a sign-out's close (`mail::stop_runs`) lands in the slot's mailbox: while the provider is chosen,
+/// just before the window opens, or while the window opens.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum StopIn {
+    UseProvider,
+    OpenWindow,
+}
+
+/// How many more looks a closed window still answers as open: WebView2 destroys a window asynchronously.
+#[cfg(windows)]
+const GOING_LOOKS: u32 = 3;
+
+/// A mail window whose destroy lags, as WebView2's does, and on which a sign-out's close lands at `stop_in`.
+/// It records every profile opened and everything run in it.
+#[cfg(windows)]
+struct LaggingWindow {
+    stop_in: StopIn,
+    st: std::sync::Mutex<Lagging>,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct Lagging {
+    open: bool,
+    /// Looks at `window_open` the closed window still answers `true` to.
+    going: u32,
+    closed: u32,
+    /// Every profile opened, by folder name.
+    opens: Vec<String>,
+    /// Every script run and every place opened in the window.
+    ran: Vec<String>,
+}
+
+#[cfg(windows)]
+impl knowlu::mail::recover::Mailbox for LaggingWindow {
+    fn script(&self, path: &str, _: &serde_json::Value) -> Result<serde_json::Value, knowlu::mail::Refusal> {
+        self.st.lock().unwrap().ran.push(path.to_string());
+        Err(knowlu::mail::Refusal::NoPage)
+    }
+    fn open(&self, place: knowlu::mail::recover::Place) -> Result<(), knowlu::mail::Refusal> {
+        self.st.lock().unwrap().ran.push(format!("open {place:?}"));
+        Err(knowlu::mail::Refusal::NoPage)
+    }
+}
+
+#[cfg(windows)]
+impl knowlu::mail::host::Host for LaggingWindow {
+    fn use_provider(&self, _: knowlu::mail_steps::Provider) {
+        if self.stop_in == StopIn::UseProvider {
+            knowlu::mail::stop_runs();
+        }
+    }
+    fn open_window(&self, profile: &std::path::Path, _visible: bool) -> Result<(), String> {
+        let mut s = self.st.lock().unwrap();
+        s.open = true;
+        s.opens.push(profile.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+        drop(s);
+        if self.stop_in == StopIn::OpenWindow {
+            knowlu::mail::stop_runs();
+        }
+        Ok(())
+    }
+    fn window_open(&self) -> bool {
+        let mut s = self.st.lock().unwrap();
+        if s.going > 0 {
+            s.going -= 1;
+            return true;
+        }
+        s.open
+    }
+    fn signed_in(&self) -> bool {
+        self.st.lock().unwrap().open
+    }
+    fn title_address(&self) -> Option<String> {
+        None
+    }
+    fn popup_open(&self) -> bool {
+        false
+    }
+    fn step_aside(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn come_back(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn close_window(&self) {
+        let mut s = self.st.lock().unwrap();
+        if s.open {
+            s.open = false;
+            s.closed += 1;
+            s.going = GOING_LOOKS;
+        }
+    }
+}
+
+/// Spec §4.13, Checkpoint D re-check: a sign-out's close can land while the slot's mail step opens a
+/// mailbox's window. The step closes that window before anything runs in it and then waits until the window is
+/// gone before it ends, which is when the scheduler's pass lets go of the mail window: otherwise the sign-out's
+/// `forget_all` can find the profile still held and leave a signed-in profile on disk. A close that lands just
+/// before the open opens nothing. Either way no further mailbox opens and the run reports nothing.
+#[cfg(windows)]
+#[test]
+fn a_stop_while_a_window_opens_closes_it_and_waits_until_it_is_gone_before_the_hold_goes() {
+    let _runs = MAIL_RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = std::env::temp_dir().join(format!("knowlu-t12-stop-opening-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&root);
+    let ids = ["mbx-a", "mbx-b"];
+    for m in ids {
+        std::fs::create_dir_all(root.join(format!("mail-session-{m}"))).unwrap();
+    }
+    let rows: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|m| serde_json::json!({ "address_id": m, "provider": "m365", "address": slot_rig::KNOWLU, "status": "active", "lapsed_since": null }))
+        .collect();
+    let svc = slot_rig::Svc::start(rows.clone());
+    for (stop_in, opened) in [(StopIn::OpenWindow, vec!["mail-session-mbx-a"]), (StopIn::UseProvider, vec![])] {
+        let window = LaggingWindow { stop_in, st: Default::default() };
+        let (client, clock) = (svc.client(), slot_rig::Clk::at(slot_rig::NOW));
+        let hold = knowlu::mail::MailWindow::try_take().expect("the slot's mail step holds the mail window");
+        let env = knowlu::mail::slot::SlotEnv { host: &window, client: &client, clock: &clock, data_dir: &root };
+        let out = knowlu::mail::slot::run_step(&env, &rows);
+        // `run_step` has returned: this is where the scheduler's pass lets go of the hold.
+        let s = window.st.lock().unwrap();
+        assert_eq!(s.opens, opened, "{stop_in:?}: only the window the stop caught opening, and no further mailbox");
+        assert!(s.ran.is_empty(), "{stop_in:?}: something ran in a window a stop had closed: {:?}", s.ran);
+        assert_eq!(s.closed as usize, opened.len(), "{stop_in:?}: the window the stop caught opening was closed");
+        assert!(!s.open && s.going == 0, "{stop_in:?}: the step let go of the mail window while its window was still going");
+        drop(s);
+        drop(hold);
+        assert_eq!(out, None, "{stop_in:?}: a stopped run reports nothing");
+    }
+    assert!(svc.calls().is_empty(), "a stopped run asks nothing of the service: {:?}", svc.calls());
     let _ = std::fs::remove_dir_all(&root);
 }

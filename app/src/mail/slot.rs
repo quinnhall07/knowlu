@@ -105,12 +105,16 @@ pub fn run_step(env: &SlotEnv, due: &[Value]) -> Option<String> {
         if run.stopped() {
             break;
         }
-        let Some(done) = mailbox(env, row, run) else { continue };
-        parts.push(done);
-        // The next profile opens only once this window is gone.
+        let done = mailbox(env, row, run);
+        // The next profile opens, and the step lets go of the mail window, only once this window is gone: after a
+        // pass, and after a stop that closed a window the moment it opened (WebView2 destroys a window
+        // asynchronously, and a sign-out deletes the profile as soon as it has the hold, spec §4.13).
         let end = env.clock.now() + GONE_WAIT;
         while env.host.window_open() && env.clock.now() < end {
             env.clock.sleep(1);
+        }
+        if let Some(done) = done {
+            parts.push(done);
         }
     }
     match parts.as_slice() {
@@ -130,7 +134,7 @@ pub fn run_step(env: &SlotEnv, due: &[Value]) -> Option<String> {
 /// One mailbox, §4.11 steps 1 to 5. `None` is a mailbox the step leaves alone: turned off, guided, or a row
 /// it cannot read. A `mail.json` that cannot be read is also left alone, never guessed at (`turned_off`).
 /// A stopped `run` opens nothing; a stop that comes while the window opens closes it again before anything
-/// runs in it, and before the step lets go of the mail window.
+/// runs in it, and [`run_step`] waits until it is gone before the step lets go of the mail window.
 fn mailbox(env: &SlotEnv, row: &Value, run: crate::mail::Run) -> Option<(Provider, Part)> {
     let id = row["address_id"].as_str().filter(|i| valid_address_id(i))?;
     let provider = Provider::from_service(row["provider"].as_str().unwrap_or(""));
