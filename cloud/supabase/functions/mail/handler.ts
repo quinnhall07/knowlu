@@ -3,7 +3,9 @@
  * canary, batches, reconcile, the state and the provider) live in `routes.ts` and are dispatched here.
  *
  * - `GET /addresses` lists the account's mailboxes, each with its own address so Settings can show it
- *   again (D3), and never a token's HMAC, ciphertext or IV.
+ *   again (D3), and never a token's HMAC, ciphertext or IV. Each row carries its unbound reason (Quinn's
+ *   unbound-display ruling, 2026-10-03): `unbound_reason` (`skipped`, `leaked` or null), `unbound_note`
+ *   (the sentence), `unbound_since_live` and `suggest_rotate` (`unboundReason`).
  * - `POST /addresses {provider}` mints one (§4.1 step 2): 128 random bits in lower-case base32, kept as
  *   `keys.ts`'s HMAC under `MAIL_ADDRESS_KEY` and as AES-GCM ciphertext under `MAIL_ENC_KEY`. A fourth live
  *   address (409, `LIVE_CAP`) or a seventh mint in 30 days (429, `MINT_CAP`) is refused by name. The first
@@ -38,6 +40,39 @@ export const MAX_MINTS = 6;
 export const MINT_WINDOW_MS = 30 * 86_400_000;
 /** Rotate's grace (D3): the old token binds until the new address's canary, at most this long. */
 export const ROTATE_GRACE_MS = 7 * 86_400_000;
+/** Quinn's unbound-display ruling (2026-10-03): this many unbound live forwards with no bound live forward
+ * between give the row a reason. */
+export const UNBOUND_STREAK = 2;
+/** The reason when they came from the student's own school or provider, while the canary binds. */
+export const UNBOUND_SKIPPED = "some forwarded mail could not be verified and was skipped";
+/** The reason when `UNBOUND_STREAK` of them came from outside: the address may have leaked. */
+export const UNBOUND_LEAKED =
+  "mail that did not come through your forwarding is reaching this address; Rotate gives it a new one";
+/** The statuses in which a canary has come back through the forwarding (D14). */
+const CANARY_BINDS = ["active", "quiet"];
+
+/**
+ * The row's unbound reason (Quinn's unbound-display ruling, 2026-10-03). `leaked`, the only one that
+ * suggests Rotate, when `UNBOUND_STREAK` unbound live forwards from outside the student's own school or
+ * provider arrived with no bound one between, whatever the forwarding's state. Else `skipped` when that
+ * many arrived from anywhere while the canary binds (`active`, `quiet`); before it binds, or once
+ * forwarding is off or lapsed, the status is the explanation. The count is every unbound live forward
+ * since the last bound one.
+ */
+function unboundReason(r: MailRow) {
+  const since = r.unboundOwnSinceLive + r.unboundForeignSinceLive;
+  const reason = r.unboundForeignSinceLive >= UNBOUND_STREAK
+    ? "leaked" as const
+    : since >= UNBOUND_STREAK && CANARY_BINDS.includes(r.status)
+    ? "skipped" as const
+    : null;
+  return {
+    unbound_reason: reason,
+    unbound_note: reason === "leaked" ? UNBOUND_LEAKED : reason === "skipped" ? UNBOUND_SKIPPED : null,
+    unbound_since_live: since,
+    suggest_rotate: reason === "leaked",
+  };
+}
 
 /** A `mail_addresses` row as this function reads it; times are ISO strings, as PostgREST answers them. */
 export interface MailRow {
@@ -64,6 +99,10 @@ export interface MailRow {
   unbound: number;
   unauthenticated: number;
   expired: number;
+  /** Unbound live forwards since the last bound one, from the student's own school or provider. */
+  unboundOwnSinceLive: number;
+  /** The same, from anywhere else. */
+  unboundForeignSinceLive: number;
 }
 /** A `mail_batches` row as `POST /batches/<id>/sent` reads it (never its nonce's HMAC). */
 export interface BatchRow {
@@ -267,6 +306,7 @@ async function view(r: MailRow, deps: MailDeps) {
     unbound: r.unbound,
     unauthenticated: r.unauthenticated,
     expired: r.expired,
+    ...unboundReason(r),
   };
 }
 

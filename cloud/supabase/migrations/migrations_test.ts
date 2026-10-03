@@ -1126,7 +1126,7 @@ Deno.test("the_mail_tables_have_section_5_1s_columns_and_words", async () => {
       "id", "account_id", "provider", "token_hmac", "token_ciphertext", "token_iv", "retired_token_hmac",
       "retired_until", "mailbox_hint", "forward_hint", "status", "lapsed_since", "reenabled_at", "confirm_until",
       "backfill_since", "last_received_at", "last_canary_sent_at", "last_canary_ok_at", "canaries_today", "unbound",
-      "unauthenticated", "expired",
+      "unauthenticated", "expired", "unbound_own_since_live", "unbound_foreign_since_live",
     ],
     mail_batches: [
       "id", "address_id", "phase", "nonce_hmac", "since", "expected", "sent", "received", "opened_at", "sent_at",
@@ -1620,21 +1620,35 @@ Deno.test("mail_claims_holds_one_row_per_mailbox_and_uid", async () => {
 
 Deno.test("count_mail_arrival_adds_one_to_one_mailboxs_unbound_or_unauthenticated", async () => {
   // Spec §4.6 steps 5 and 6: unbound and unauthenticated mail is counted on the address, by one
-  // statement, so two deliveries at once both count.
+  // statement, so two deliveries at once both count. Quinn's unbound-display ruling (2026-10-03): an
+  // unbound live forward also runs one of two counts since the last bound live forward (`unbound_own`,
+  // `unbound_foreign`), and a bound one (`live`, or `unauthenticated`: it bound, then failed step 6) sets
+  // both back to 0, writing nothing when they already are.
   const f = await mailFunction("count_mail_arrival");
   assert(/count_mail_arrival\s*\(\s*p_address uuid, p_counter text\s*\)/.test(f.header), f.header);
   assert(f.header.includes("returns void") && !f.header.includes("security definer"), `${f.name}: invoker`);
   assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
   assertServiceRoleOnly(f, "count_mail_arrival", "uuid, text");
+  const bound = "p_counter in ('live', 'unauthenticated')";
   assert(
     f.body.includes(
       "update public.mail_addresses set " +
-        "unbound = unbound + (p_counter = 'unbound')::int, " +
-        "unauthenticated = unauthenticated + (p_counter = 'unauthenticated')::int " +
-        "where id = p_address;",
+        "unbound = unbound + (p_counter in ('unbound', 'unbound_own', 'unbound_foreign'))::int, " +
+        "unauthenticated = unauthenticated + (p_counter = 'unauthenticated')::int, " +
+        `unbound_own_since_live = case when ${bound} then 0 ` +
+        "else unbound_own_since_live + (p_counter = 'unbound_own')::int end, " +
+        `unbound_foreign_since_live = case when ${bound} then 0 ` +
+        "else unbound_foreign_since_live + (p_counter = 'unbound_foreign')::int end " +
+        "where id = p_address " +
+        "and (p_counter <> 'live' or unbound_own_since_live + unbound_foreign_since_live > 0);",
     ),
     `${f.name}: one statement, one mailbox, the named counter only`,
   );
+  const cols = tableColumns((await mailMigration()).sql, "mail_addresses");
+  for (const c of ["unbound_own_since_live", "unbound_foreign_since_live"]) {
+    const def = (cols.get(c) ?? "").replace(/\s+/g, " ");
+    assertEquals(def, `${c} integer not null default 0 check (${c} >= 0)`, `${f.name}: ${c} is a count`);
+  }
   assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 1, `${f.name}: one write`);
 });
 

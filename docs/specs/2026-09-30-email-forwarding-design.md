@@ -360,11 +360,13 @@ the recipients from it, and logs nothing from it.
      mailbox as written. On Gmail, (i) is Google's verifying topmost seal and AMS with no seeded forwarding
      field, and (ii) names the mailbox: SES's SPF pass on `<local>+caf_=<your Knowlu address, @ as =>` at
      `gmail.com`, for a `gmail.com` or `googlemail.com` mailbox. A Google Workspace mailbox (provider
-     `google` on its own domain) binds the same way on that envelope at its own domain, only when the
-     domain's MX is Google's; no MX, another host or a DNS failure leaves it unbound. (That MX clause
-     is the controller's record of Quinn's answer; PQ9 as asked did not raise it. Its cost, that a
-     Workspace school behind a filtering gateway passes setup and then has its live mail go unbound, is
-     put to Quinn as plan PQ12, and the clause is not signed until they answer.) Accepted residual
+     `google` on its own domain) binds the same way on that envelope at its own domain, when the
+     domain's MX reads Google's or another host's (a Proofpoint, Mimecast or campus-relay gateway in
+     front of Google), as `hintFits` reads it; Microsoft's MX, no MX or a DNS failure leaves it unbound.
+     (Amended 2026-10-03, Quinn, plan PQ12 answer (a): the controller had recorded PQ9 as binding only
+     on a Google MX, which PQ9 as asked did not raise; a Workspace school behind a gateway would then
+     pass setup and have every live forward go unbound. The gateway case now binds. T18a's
+     Workspace-relay probe also runs on a gateway domain.) Accepted residual
      risk: a sender who has the leaked address and can set that MAIL FROM on Google's relay (a Workspace
      SMTP-relay tenant) binds; Rotate mitigates it, and T18 probes it. X-Forwarded-\* never bind.
      M365, the sealed-signal check: (ii) is the SRS envelope at the mailbox's own domain with SES's SPF
@@ -378,6 +380,17 @@ the recipients from it, and logs nothing from it.
      amendment adds it as a third check.)*
    - **Anything else** is unbound: deleted and counted on the address. A rising count means the address
      has leaked, and Settings offers **Rotate** (D3). Unbound mail never touches `last_received_at`.
+     *(amended 2026-10-03, Quinn, the unbound display: an unbound arrival is also counted by where it
+     came from, since the last bound live forward. It is **own** when its original From domain matches
+     the hint's domain (that domain, a name under it, or a name it sits under) or its topmost ARC seal is
+     the mailbox's own provider's and verifies, else **foreign**. A bound live forward, aligned or not,
+     zeroes both counts. `GET /addresses` gives each row a named reason once
+     `UNBOUND_STREAK` (2) unbound live forwards arrive with no bound one between: **skipped** ("some
+     forwarded mail could not be verified and was skipped", with the count since the last bound live
+     forward) while the canary binds (`active` or `quiet`), or **leaked** when that many were foreign,
+     whatever the status. Settings suggests Rotate only for **leaked**. The From is a sender's to write,
+     so a stranger can make a leak read as skipped; the cost is a Rotate not suggested, never mail let
+     in.)*
 6. **Authenticity, as the provider saw it at delivery.** Only one record counts: for a live forward, the
    ARC-Authentication-Results of the provider's hop that step 5 verified; for a backfilled or recovered
    original, the provider's own `Authentication-Results` stamped at delivery (Gmail's `mx.google.com`;
@@ -659,7 +672,7 @@ them, as `google_accounts` does. Every `account_id` references `accounts(id) on 
 | Table | Holds | Kept |
 |---|---|---|
 | `mail_accounts` | `account_id`; the per-account fingerprint key, encrypted; `digest` (D13, default false); the allowance (D23): `allowance_opened_at`, `allowance_left`, `allowance_usd`, `allowance_until`; `mints_30d` (D3) *(amended 2026-10-02: `allowance_opened_at` was `allowance_term_start`; D23's marker)* | until the account goes |
-| `mail_addresses` | `id`; `provider` (`m365`, `google`, `other`); `token_hmac` (unique) and the token encrypted with its IV; `retired_token_hmac` and `retired_until` (Rotate's grace, D3); `mailbox_hint`; `forward_hint` (§4.6 step 5); `status` (`pending`, `confirmed`, `active`, `quiet`, `blocked`, `off`, `paused_send`, `lapsed`, `revoked`); `lapsed_since`; `reenabled_at` (§4.11 step 2); `confirm_until`; `backfill_since` *(amended 2026-10-02: was `term_start`; the mailbox's fixed window start, set once by its first backfill batch, D7's marker)*; `last_received_at`, `last_canary_sent_at`, `last_canary_ok_at`, `canaries_today`; counters `unbound`, `unauthenticated`, `expired` | until Disconnect (then the row is deleted) or the account goes |
+| `mail_addresses` | `id`; `provider` (`m365`, `google`, `other`); `token_hmac` (unique) and the token encrypted with its IV; `retired_token_hmac` and `retired_until` (Rotate's grace, D3); `mailbox_hint`; `forward_hint` (§4.6 step 5); `status` (`pending`, `confirmed`, `active`, `quiet`, `blocked`, `off`, `paused_send`, `lapsed`, `revoked`); `lapsed_since`; `reenabled_at` (§4.11 step 2); `confirm_until`; `backfill_since` *(amended 2026-10-02: was `term_start`; the mailbox's fixed window start, set once by its first backfill batch, D7's marker)*; `last_received_at`, `last_canary_sent_at`, `last_canary_ok_at`, `canaries_today`; counters `unbound`, `unauthenticated`, `expired`; `unbound_own_since_live` and `unbound_foreign_since_live` *(amended 2026-10-03, Quinn, the unbound display, §4.6 step 5: unbound live forwards since the last bound one, by where they came from)* | until Disconnect (then the row is deleted) or the account goes |
 | `mail_batches` | `id`, `address_id`, `phase` (`backfill`, `recover`), the nonce's HMAC, `since`, `expected`, `sent` (the device's count at close), `received`, `opened_at`, `sent_at`, `closed_at` | 30 days after closing |
 | `mail_canaries` | `id`, `address_id`, the nonce's HMAC, `sent_at`, `arrived_at` | 30 days |
 | `mail_seen` | `account_id`, `msg_hash` and `fp_hash` (both HMACs under the account's key, §4.6 step 7), `received_minute`, `address_id`, `phase`, `seen_at`; primary key `(account_id, msg_hash)`; written with its `mail_work` row, deleted if that item expires | 180 days, pruned nightly (a term and its overlap) |

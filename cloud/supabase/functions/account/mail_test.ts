@@ -199,6 +199,8 @@ Deno.test("the_export_carries_mailboxes_and_queued_claims_and_never_a_token_key_
     unbound: 2,
     unauthenticated: 3,
     expired: 4,
+    unbound_own_since_live: 1,
+    unbound_foreign_since_live: 0,
     token_hmac: "SECRET-HMAC",
     token_ciphertext: "SECRET-CIPHERTEXT",
     token_iv: "SECRET-IV-123456",
@@ -246,6 +248,8 @@ Deno.test("the_export_carries_mailboxes_and_queued_claims_and_never_a_token_key_
       "last_received_at",
       "unbound",
       "expired",
+      "unbound_own_since_live",
+      "unbound_foreign_since_live",
     ]
   ) assert(Object.hasOwn(box, k), `the mailbox export lacks ${k}`);
   assertEquals(box.mailbox_hint, "student@school.example.invalid");

@@ -24,7 +24,9 @@
  *      with step 6's word from the original alone (`unaligned` is kept), and all of them count toward the
  *      batch's `received`; nothing else in the send is parsed;
  *    - a live `aligned` forward is handed off; a live `unaligned` one is deleted and counted
- *      `unauthenticated`; `unbound` is deleted and counted on the address.
+ *      `unauthenticated`; `unbound` is deleted and counted on the address, as `own` or `foreign`
+ *      (`unboundOrigin`), and a bound live forward zeroes those runs (Quinn's unbound-display ruling,
+ *      2026-10-03: the Settings row names skipped mail apart from a leaked address).
  * 7. **Dedup** on `mail_seen`'s keyed `msg_hash` (`keys.ts`): already there, deleted, done.
  * 8. **Hand off**: put the original under `work/`; only after the put, `store.handOff` writes the
  *    `mail_work` and `mail_seen` rows in one transaction (the `mail_hand_off` RPC; it answers false when a
@@ -45,6 +47,7 @@ import {
   type BindMailbox,
   classifyArrival,
   originalAuthenticity,
+  unboundOrigin,
 } from "../_shared/mail_bind.ts";
 import { attachedMessages, parseHeaders } from "../_shared/mime.ts";
 import { allowedKey, type S3Client, S3Error } from "../_shared/s3.ts";
@@ -78,6 +81,8 @@ export interface AddressRow {
   forwardHint: string | null;
 }
 export type Phase = "live" | "backfill" | "recover";
+/** The words `count_mail_arrival` reads. */
+export type Counter = "unbound" | "unbound_own" | "unbound_foreign" | "unauthenticated" | "live";
 export interface WorkRow {
   accountId: string;
   addressId: string;
@@ -109,7 +114,10 @@ export interface InboundStore {
   /** Both rows in one transaction; false (and nothing written) when the `mail_seen` row exists, or the
    * mailbox is gone or `revoked` (a Disconnect under way). */
   handOff(work: WorkRow, seen: SeenRow): Promise<boolean>;
-  count(addressId: string, counter: "unbound" | "unauthenticated"): Promise<void>;
+  /** `count_mail_arrival`: one more `unbound` or `unauthenticated` on the mailbox; `unbound_own` and
+   * `unbound_foreign` also run their count since the last bound live forward, which `live` and
+   * `unauthenticated` zero (Quinn's unbound-display ruling, 2026-10-03). */
+  count(addressId: string, counter: Counter): Promise<void>;
   /** `last_received_at`. */
   received(addressId: string, iso: string): Promise<void>;
   /** Marks the canary arrived at `iso` only while it is unarrived; false, with nothing written, when it
@@ -343,16 +351,20 @@ async function arrive(
   const envelope = { mailFrom: n.mailFrom, spfPass: n.spfPass, recipient: f.recipient };
   const arrival = await classifyArrival(raw, mailbox, { canaryFrom: cfg.canaryFrom }, envelope, deps.bind);
   switch (arrival.kind) {
-    case "unbound":
-      await deps.store.count(f.row.id, "unbound");
+    case "unbound": {
+      const origin = await unboundOrigin(raw, mailbox, deps.bind);
+      await deps.store.count(f.row.id, origin === "own" ? "unbound_own" : "unbound_foreign");
       log("unbound, deleted");
       return 0;
+    }
     case "live": {
+      // Counting `unauthenticated` zeroes the unbound runs too: the forward bound, then failed step 6.
       if (arrival.authenticity !== "aligned") {
         await deps.store.count(f.row.id, "unauthenticated");
         log("unauthenticated, deleted");
         return 0;
       }
+      await deps.store.count(f.row.id, "live");
       const item = { batchId: null, phase: "live" as const, authenticity: arrival.authenticity };
       if (await handOff(raw, f.row, { ...item, receivedAt: n.arrivedAt }, deps)) {
         await deps.store.received(f.row.id, new Date(n.arrivedAt).toISOString());

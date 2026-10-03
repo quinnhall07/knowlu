@@ -17,6 +17,7 @@ import {
   newNonce,
   nonceTag,
   originalAuthenticity,
+  unboundOrigin,
 } from "./mail_bind.ts";
 
 const RSA = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as const;
@@ -47,7 +48,8 @@ const ZONE: Record<string, string[][]> = {
 };
 const resolveTxt: TxtResolver = (name) => Promise.resolve(ZONE[name] ?? []);
 
-/** MX records by domain (PQ9: a Workspace mailbox binds only when its domain's MX is Google's). No test
+/** MX records by domain (PQ9 and PQ12: a Workspace mailbox binds when its domain's MX is Google's or a
+ * gateway's, never Microsoft's, none, or unanswered). No test
  * queries DNS; every lookup is recorded so a test can say none was made. */
 const MX: Record<string, string[]> = {
   "school.test": ["aspmx.l.google.com", "alt1.aspmx.l.google.com"],
@@ -578,11 +580,12 @@ Deno.test("an_intra_school_m365_forward_without_an_srs_envelope_is_unbound", asy
 });
 
 // PQ9 (Quinn, 2026-10-02): a Google Workspace mailbox on its own domain binds on Google's verifying seal and
-// SES's SPF pass on its `+caf_=` envelope at that same domain, when the domain's MX is Google's.
+// SES's SPF pass on its `+caf_=` envelope at that same domain. PQ12 (Quinn, 2026-10-03, answer (a)): the
+// domain's MX reads Google or another host (a filtering gateway in front of Google), as `hintFits` reads it.
 const WS_BOX = mailbox({ mailboxHint: "jdoe@school.test", confirmUntil: null });
 const WS_CAF: BindEnvelope = { ...CAF, mailFrom: "jdoe+caf_=tok=in.knowlu.test@school.test" };
 
-Deno.test("a_workspace_forward_binds_by_googles_seal_its_own_domain_caf_return_path_and_google_mx", async () => {
+Deno.test("a_workspace_forward_binds_by_googles_seal_its_own_domain_caf_return_path_and_a_google_or_gateway_mx", async () => {
   const fwd = await gmailForward();
   assertEquals(await live(fwd, WS_BOX, WS_CAF), LIVE_ALIGNED);
   const upper = { ...WS_CAF, mailFrom: "JDoe+CAF_=Tok=In.Knowlu.Test@School.Test" };
@@ -591,6 +594,12 @@ Deno.test("a_workspace_forward_binds_by_googles_seal_its_own_domain_caf_return_p
   const other = mailbox({ mailboxHint: "pat@other-school.test", confirmUntil: null });
   const otherEnv = { ...CAF, mailFrom: "pat+caf_=tok=in.knowlu.test@other-school.test" };
   assertEquals(await live(fwd, other, otherEnv), LIVE_ALIGNED);
+  // A Proofpoint, Mimecast or campus-relay gateway in front of Google binds too (PQ12): its MX reads `other`.
+  const gateway = mailbox({ mailboxHint: "jdoe@gateway.test", confirmUntil: null });
+  const gatewayEnv = { ...CAF, mailFrom: "jdoe+caf_=tok=in.knowlu.test@gateway.test" };
+  mxAsked.length = 0;
+  assertEquals(await live(fwd, gateway, gatewayEnv), LIVE_ALIGNED);
+  assertEquals(mxAsked, ["gateway.test"]);
 
   // Check (ii) is still exactly this mailbox's envelope at its own domain, SPF-passed, to this address.
   for (
@@ -619,11 +628,11 @@ Deno.test("a_workspace_forward_binds_by_googles_seal_its_own_domain_caf_return_p
   assertEquals(await live(fwd, { ...WS_BOX, provider: "m365", forwardHint: TENANT }, WS_CAF), UNBOUND);
 });
 
-Deno.test("a_workspace_caf_envelope_on_a_domain_whose_mx_is_not_google_is_unbound", async () => {
+Deno.test("a_workspace_caf_envelope_on_a_domain_whose_mx_is_microsoft_missing_or_unanswered_is_unbound", async () => {
   const fwd = await gmailForward();
-  // A filtering gateway, Microsoft's MX, no MX at all, and a DNS failure: none is a Google-hosted domain.
-  // The gateway case is plan PQ12's open question: if Quinn widens the rule to match `hintFits`, it binds.
-  for (const domain of ["gateway.test", "m365.test", "nomx.test", "dnsfail.test"]) {
+  // Microsoft's MX, no MX at all, and a DNS failure: only these refuse (PQ12, answer (a)). A gateway's MX
+  // binds, in the test above.
+  for (const domain of ["m365.test", "nomx.test", "dnsfail.test"]) {
     const box = mailbox({ mailboxHint: `jdoe@${domain}`, confirmUntil: null });
     const env = { ...CAF, mailFrom: `jdoe+caf_=tok=in.knowlu.test@${domain}` };
     mxAsked.length = 0;
@@ -642,6 +651,43 @@ Deno.test("a_googlemail_hint_expects_a_gmail_com_caf_return_path", async () => {
   assertEquals(await live(fwd, box, { ...CAF, spfPass: false }), UNBOUND);
   assertEquals(await live(fwd, box, { ...CAF, mailFrom: "joan+caf_=tok=in.knowlu.test@gmail.com" }), UNBOUND);
   // Google's own two domains are never looked up.
+  assertEquals(mxAsked, []);
+});
+
+// Quinn's unbound-display ruling (2026-10-03): an unbound message whose original From domain matches the
+// hint's domain, or whose topmost seal is the mailbox's own provider's and verifies, is `own` (Settings'
+// "skipped" reason); anything else is `foreign` (the "leaked" reason, the only one that suggests Rotate).
+Deno.test("an_unbound_message_is_own_when_from_the_hints_domain_or_sealed_by_the_mailboxs_provider_else_foreign", async () => {
+  const origin = (raw: string, box: BindMailbox) => unboundOrigin(raw, box, DEPS);
+  const unsealed = (from: string) => assemble(original(from).head, LIVE_BODY);
+  mxAsked.length = 0;
+  // The provider's own verifying seal: Google's on a Gmail mailbox, Microsoft's on an M365 one.
+  assertEquals(await origin(await gmailForward(), GMAIL_BOX), "own");
+  assertEquals(await origin(await m365Forward(), MS_BOX), "own");
+  // Another provider's seal, or a seal that is not a provider's, says nothing.
+  assertEquals(await origin(await m365Forward({ key: GOOGLE, d: "google.com" }), MS_BOX), "foreign");
+  assertEquals(await origin(await gmailForward({ key: EVIL, d: "evil.test" }), GMAIL_BOX), "foreign");
+  assertEquals(await origin(await gmailForward(), { ...GMAIL_BOX, provider: "other" }), "foreign");
+  // A school mailbox: the hint's domain, a domain under it, or one it sits under.
+  assertEquals(await origin(unsealed("Prof <prof@school.test>"), WS_BOX), "own");
+  assertEquals(await origin(unsealed("prof@dept.school.test"), WS_BOX), "own");
+  const crimson = mailbox({ mailboxHint: "jdoe@crimson.school.test", confirmUntil: null });
+  assertEquals(await origin(unsealed("prof@school.test"), crimson), "own");
+  assertEquals(await origin(unsealed("prof@school.test"), { ...WS_BOX, provider: "other" }), "own");
+  for (const from of ["prof@notschool.test", "prof@school.test.evil.test", "prof@test"]) {
+    assertEquals(await origin(unsealed(from), WS_BOX), "foreign", from);
+  }
+  // A Gmail mailbox's own domain is gmail.com, read as the ruling words it.
+  assertEquals(await origin(unsealed("pal@gmail.com"), GMAIL_BOX), "own");
+  assertEquals(await origin(unsealed("prof@school.test"), GMAIL_BOX), "foreign");
+  // No hint: only the seal can say `own`. Two From fields, or no message at all, are `foreign`.
+  const bare = mailbox({ mailboxHint: null, confirmUntil: null });
+  assertEquals(await origin(unsealed("prof@school.test"), bare), "foreign");
+  assertEquals(await origin(await gmailForward(), bare), "own");
+  const twice = assemble(["From: prof@school.test", ...original("prof@school.test").head], LIVE_BODY);
+  assertEquals(await origin(twice, WS_BOX), "foreign");
+  assertEquals(await origin("\u0000not mail", WS_BOX), "foreign");
+  // It reads no MX: the answer names a reason on the Settings row and binds nothing.
   assertEquals(mxAsked, []);
 });
 

@@ -118,6 +118,8 @@ export const MAILBOX_EXPORT_COLUMNS = [
   "unbound",
   "unauthenticated",
   "expired",
+  "unbound_own_since_live",
+  "unbound_foreign_since_live",
 ] as const;
 
 /** The claim columns the export carries: everything a queued claim holds but its account id. */

@@ -413,12 +413,13 @@ Briefs cite functions and headings, never line numbers.
     the hint, only when the domain's MX reads Google (`mail/provider.ts`'s `providerOf`, injected as
     `BindDeps.resolveMx`; a DNS failure is unbound, like a DKIM key lookup failure). The MX clause is
     the controller's record of Quinn's answer (progress ledger, 2026-10-02); this question never raised
-    it, so it is not signed until PQ12 is answered. No curated-row
+    it. **PQ12 (answered 2026-10-03) widened it:** the domain's MX reads Google or another host (a
+    gateway), and only Microsoft's MX, no MX or a DNS failure refuse. No curated-row
     condition: the server never sees the row. The residual risk (a leaked address plus a sender able to
     set that MAIL FROM on Google's relay) is accepted; Rotate mitigates it, and T18a probes it. The
-    spec's §4.6 step 5 carries the amendment. Tests: `a_workspace_forward_binds_by_googles_seal_its_own_domain_caf_return_path_and_google_mx`,
-    `a_workspace_caf_envelope_on_a_domain_whose_mx_is_not_google_is_unbound`,
-    `a_googlemail_hint_expects_a_gmail_com_caf_return_path`.
+    spec's §4.6 step 5 carries the amendment. Tests: `a_workspace_forward_binds_by_googles_seal_its_own_domain_caf_return_path_and_a_google_or_gateway_mx`,
+    `a_workspace_caf_envelope_on_a_domain_whose_mx_is_microsoft_missing_or_unanswered_is_unbound`
+    (both renamed by PQ12), `a_googlemail_hint_expects_a_gmail_com_caf_return_path`.
   - **M365, answered 2026-10-02 (Quinn): find a sealed signal, else accept the risk.** The question was
     whether the topmost `microsoft.com` ARC-Authentication-Results, which the seal covers, records the
     original delivery or recipient domain (`smtp.rcpttodomain=`, or a recipient field). `s0-captures.md`
@@ -495,6 +496,38 @@ Briefs cite functions and headings, never line numbers.
     loss visible: the canary refuses a `google` mailbox whose domain's MX is not Google's, with a named
     reason, so setup stops instead of passing.
   - *Blocks:* nothing before Checkpoint B. The code keeps the MX clause until the answer (§9.5).
+  - **Answered 2026-10-03 (Quinn): (a).** A Workspace own-domain `+caf_=` envelope binds when
+    `providerOf` reads `google` or `other` (a gateway such as Proofpoint or Mimecast); only `m365`, no MX
+    or a DNS failure refuse. `googleHosted` in `_shared/mail_bind.ts` reads that; the gateway case moved
+    to the binding test, now `a_workspace_forward_binds_by_googles_seal_its_own_domain_caf_return_path_and_a_google_or_gateway_mx`,
+    and the refusing test is `a_workspace_caf_envelope_on_a_domain_whose_mx_is_microsoft_missing_or_unanswered_is_unbound`.
+    T18a's Workspace-relay probe also runs on a gateway domain. Spec §4.6 step 5 carries the amendment.
+  - **The unbound display, ruled the same day (Quinn, 2026-10-03; no PQ asked it).** When live forwards
+    keep arriving unbound while the canary binds, the mailbox state the app reads (`GET /addresses` in
+    `functions/mail`) carries a named reason with the count since the last bound live forward, and Rotate
+    is suggested only for mail from outside the student's own school or provider.
+    - *Where it came from:* intake classifies each unbound arrival with `unboundOrigin`
+      (`_shared/mail_bind.ts`): **own** when its sole From domain matches the hint's domain (equal, a name
+      under it, or a name it sits under) or its topmost ARC seal is the mailbox's own provider's and
+      verifies; else **foreign**. It counts `unbound_own` or `unbound_foreign` through
+      `count_mail_arrival`, which also adds to the cumulative `unbound`. A bound live forward (`live`, or
+      `unauthenticated`: bound, then failed step 6) zeroes both runs. A refused Gmail confirmation still
+      counts `unbound` alone.
+    - *The columns:* `mail_addresses.unbound_own_since_live` and `unbound_foreign_since_live`, added in
+      the still-unapplied `20261002000200_mail.sql` (T1.3's precedent). Both are in D17's export.
+    - *The row:* each `GET /addresses` row gains `unbound_reason` (`skipped`, `leaked` or null),
+      `unbound_note` (the sentence), `unbound_since_live` and `suggest_rotate`. The threshold is
+      `UNBOUND_STREAK = 2`: that many unbound live forwards with no bound one between. **leaked**
+      (`UNBOUND_LEAKED`, `suggest_rotate: true`) when that many were foreign, whatever the status.
+      Otherwise **skipped** (`UNBOUND_SKIPPED`, "some forwarded mail could not be verified and was
+      skipped") when that many arrived from anywhere while the status is `active` or `quiet`.
+    - *Tests:* `an_unbound_message_is_own_when_from_the_hints_domain_or_sealed_by_the_mailboxs_provider_else_foreign`,
+      `unbound_live_forwards_count_own_or_foreign_since_the_last_bound_live_forward`,
+      `the_mailbox_state_names_skipped_mail_after_two_unbound_live_forwards_and_offers_rotate_only_for_foreign_mail`,
+      and the updated `count_mail_arrival_adds_one_to_one_mailboxs_unbound_or_unauthenticated` and
+      `the_mail_tables_have_section_5_1s_columns_and_words`.
+    - *T15.2 renders it* (Settings amber with the sentence and count; Rotate offered only when
+      `suggest_rotate`). Spec §4.6 step 5 and §5.1 carry the amendment.
 
 ## 5. Tasks
 
@@ -1505,8 +1538,8 @@ is the one signed, and an unsigned instance of the same name means the binding i
   notification's (`mail.source`, `receipt.spfVerdict` `PASS`, and the recipient whose token found the
   mailbox), never the message's `Return-Path`. Gmail: `<hint local>+caf_=<recipient, @ as =>@gmail.com`
   for a `gmail.com` or `googlemail.com` hint. Workspace (PQ9): the same local part at the hint's own
-  domain, and only after the seal passes, that domain's MX must read Google (`BindDeps.resolveMx`;
-  this clause is open, PQ12).
+  domain, and only after the seal passes, that domain's MX must read Google or another host, a gateway
+  (`BindDeps.resolveMx`; PQ12 (a), answered 2026-10-03); Microsoft's MX, no MX or a DNS failure refuse.
   M365: `<hint local>+SRS=…@<hint domain>`.
 - **Check (i)** is Google's or Microsoft's topmost seal and AMS, verifying. A signed forwarding field
   with an unsigned twin refuses the message. For M365, the topmost ForwardingLoop (or the covered one, if
@@ -2099,6 +2132,9 @@ R2).
 - `delete_my_data_confirm_adds_the_forwarding_sentence`: §4.13's sentence, word for word.
 - `a_failed_profile_delete_is_named_until_it_succeeds`
 - `the_google_row_and_the_email_row_sit_side_by_side` (§9)
+- `an_unbound_reason_shows_amber_with_its_count_and_rotate_only_when_suggested` (the unbound display,
+  Quinn 2026-10-03, §4 PQ12): a row whose `unbound_reason` is set shows `unbound_note` and
+  `unbound_since_live` in amber; Rotate is offered from that line only when `suggest_rotate` is true.
 
 #### T15.3. The wizard's announcement (D6, risk 12, §9)
 
@@ -2222,6 +2258,13 @@ controller's (spec T18; HANDOFF §2's controller rules).
     - *Workspace relay:* a message sent through a Workspace SMTP relay tenant the founder controls, with
       a `+caf_=` MAIL FROM at a Google-hosted test domain naming a scratch mailbox. Record whether SES
       passes SPF and whether it binds. Binding is the accepted residual risk; the record sizes it.
+    - *Workspace relay on a gateway domain* (PQ12, 2026-10-03): the same probe with the `+caf_=` MAIL
+      FROM at a test domain whose MX is a filtering gateway in front of Google (`providerOf` reads
+      `other`), since PQ12 (a) binds such a domain too. Record SES's SPF verdict and whether it binds.
+    - *Intra-school live and the unbound reason* (the unbound display, 2026-10-03): with a canary
+      bound, two forwards that do not bind (for M365, case 4's intra-school message if EOP does not
+      SRS-rewrite it) give `GET /addresses` the `skipped` reason and no Rotate suggestion; a bound live
+      forward clears it. Count-only, as every staging read.
     - *M365 second tenant:* a message from a second Microsoft tenant (S6's test tenant), with the school
       domain's SRS-shaped MAIL FROM and a hand-written ForwardingLoop naming a scratch mailbox and
       tenant. Record SES's SPF verdict, whether it binds, and, on the probe and on a real forward, the
@@ -2586,13 +2629,13 @@ spec text moves. A row marked **open** waits on Quinn or the planner.
 | Account deletion goes on past a failed `work/` object delete (T4.6, 2026-10-02). `purgeMailboxes` (`functions/account/mail.ts`) deletes each mailbox's objects by key, logs a failure by its error class and count only (never a key, an id or a message), then calls `delete_mail_address` regardless. Disconnect's `purgeAddress` (`functions/mail/handler.ts`) does the opposite: it answers 502 before the RPC, so the revoked row stays and a retry finishes. D17 says deletion "calls the same purge" and does not say which way a failure goes. | The account's right to delete wins, as it does for the Google grant (`google_delete.ts`): a deletion held up by S3 would keep every row, not just the object. A straggler is mail text with no row pointing at it, and D2's one-day expiry on `work/` removes it. | T4.6; `a failed object delete never blocks the account's deletion, and logs no key`, `deletion_purges_each_mailbox_by_delete_mail_address_after_deleting_its_objects_by_key` | recorded. **Cost if wrong:** after a deletion whose object deletes failed, the student's forwarded mail text can stay in `work/` for up to about 2 days (S3 runs a one-day expiry rule once a day), with no row left to find it. Checkpoint B confirms the ruling; **T17 and the privacy page:** the deletion paragraph must not say mail text is deleted at once. It says "removed within about 2 days" unless the ruling is reversed |
 | The export carries two tables, on fixed column lists (T4.6, 2026-10-02): `mail_addresses` as `MAILBOX_EXPORT_COLUMNS` (id, provider, `mailbox_hint`, status, its dates and counters; not `forward_hint`, `retired_until` or any token column) and every `mail_claims` row held for the account, delivered or not, as `CLAIM_EXPORT_COLUMNS` (all but `account_id`). Left out: `mail_accounts` (the fingerprint key ciphertext, the allowance, the mint times and the `digest` setting), `mail_batches`, `mail_canaries`, `mail_seen` and `mail_work`. | D17 names "its mailboxes … and its queued claims; never the token, its HMAC, a key or a hash". Batches and canaries hold nonce HMACs and service counts, `mail_seen` holds HMACs and `mail_work` holds object keys. A fixed column list (not `select *`) keeps a column added later out of the export until someone names it. | T4.6; `the_export_carries_mailboxes_and_queued_claims_and_never_a_token_key_or_hash` | recorded. **Cost if wrong:** the student's export omits the digest setting, the allowance state, the mailbox's `forward_hint` and the batch and canary history. If a portability reading counts these as the student's data, a later task adds a projected `mail_accounts` row (digest and allowance only) and the batch counts without their nonce HMACs. **Open (Checkpoint D; B-minors, 2026-10-02):** whether `mail_claims` exports delivered rows. D17 and §4.13 say "its queued claims", which does not clearly cover a delivered row (held 7 days); built: every held row, delivered or not, on the same columns. Left as built, since narrowing an export is the change that needs the ruling |
 | T4b reads "an active forwarding" (D22) as P22 states it: every status but `revoked` and `off`, so `pending`, `confirmed`, `blocked`, `paused_send` and `lapsed` stop the Gmail OAuth read (T4b's review, 2026-10-02). A Gmail student whose forwarding setup stalls (`blocked`) or is abandoned (`pending`) after P21 set the hint gets `read: 0`, `quiet: false`, no reason, from the next slot: neither path reads that Gmail and the tray stays green. Backfill recovers the gap only if forwarding later becomes active. | P22 is literal; D14 defines `blocked` as mail not reaching Knowlu, so the reading loses items silently (VISION: silence is never ambiguous). | T4b; `P22: a forwarding counts while its row is neither revoked nor off, quiet included` | **Answered 2026-10-02 (Quinn), PQ11 (§4):** the allow-list `confirmed`, `active`, `quiet` (`FORWARDING_COUNTS`); the P22 test moves `pending` and `blocked`; P22 and spec D22 amended. |
-| PQ9's Workspace MX clause (B-rulings review, 2026-10-02). `googleHosted` binds a `google` mailbox on its own domain only when the domain's MX reads Google, which is stricter than `hintFits` (an `other` MX fits). A Workspace school behind a Proofpoint, Mimecast or campus-relay gateway passes setup (the canary never reads MX), then every live forward is unbound and counted as a leak; the row goes `quiet` and the periodic canary calls it healthy. With Gmail OAuth on the same address, PQ11 steps the OAuth read aside, so neither path reads it. | The clause is in the controller's record of Quinn's PQ9 answer, but PQ9 never raised MX or gateways, so the consequence was never put to Quinn. Widening without an answer would override that record. | `_shared/mail_bind.ts` `googleHosted`; `a_workspace_caf_envelope_on_a_domain_whose_mx_is_not_google_is_unbound` (`gateway.test`); spec §4.6 step 5 carries the unsigned marker | **open (Quinn), PQ12 (§4):** the code keeps the clause; recommend (a), match `hintFits`. |
+| PQ9's Workspace MX clause (B-rulings review, 2026-10-02). `googleHosted` binds a `google` mailbox on its own domain only when the domain's MX reads Google, which is stricter than `hintFits` (an `other` MX fits). A Workspace school behind a Proofpoint, Mimecast or campus-relay gateway passes setup (the canary never reads MX), then every live forward is unbound and counted as a leak; the row goes `quiet` and the periodic canary calls it healthy. With Gmail OAuth on the same address, PQ11 steps the OAuth read aside, so neither path reads it. | The clause is in the controller's record of Quinn's PQ9 answer, but PQ9 never raised MX or gateways, so the consequence was never put to Quinn. Widening without an answer would override that record. | `_shared/mail_bind.ts` `googleHosted`; `a_workspace_caf_envelope_on_a_domain_whose_mx_is_not_google_is_unbound` (`gateway.test`); spec §4.6 step 5 carries the unsigned marker | **Answered 2026-10-03 (Quinn), PQ12 (a) (§4):** `googleHosted` binds on a `google` or `other` MX; `gateway.test` moved to `a_workspace_forward_binds_by_googles_seal_its_own_domain_caf_return_path_and_a_google_or_gateway_mx`, and the refusing test is `a_workspace_caf_envelope_on_a_domain_whose_mx_is_microsoft_missing_or_unanswered_is_unbound`; T18a's gateway-domain probe; spec §4.6 step 5 amended. |
 | `mail_hand_off` writes only for a live mailbox (B-minors, 2026-10-02). Its first statement is `perform 1 from mail_addresses where id = p_address and account_id = p_account and status <> 'revoked' for share`; not found answers false, and the caller deletes its put (logged `duplicate or revoked, deleted`). | Checkpoint B (minor): Disconnect revokes, reads the mailbox's `work/` keys, deletes them, then calls `delete_mail_address`. A hand-off landing between the key read and the delete left an object with no row until the bucket's expiry. The share lock makes the revoke wait for a hand-off already past the check, so the key read sees its row. | B-minors; `mail_hand_off_writes_the_seen_row_then_the_work_row_in_one_transaction` (the live check first) | recorded |
 | `mail_claims` is unique on `(address_id, uid)` (`mail_claims_uid`, a whole-table index), and `mail-process` queues with `on_conflict=address_id,uid` and `resolution=ignore-duplicates` (B-minors, 2026-10-02). | Checkpoint B (minor): the queue runs before the work row's delete, so a failed delete ran the item again and queued a second row for the same uid (up to three), which the device pulled as duplicates. The re-run's charge is still spent (at most `MAX_ATTEMPTS`, as before); only the duplicate claim is gone. Chosen over one RPC for queue and finish as the smaller change. | B-minors; `mail_claims_holds_one_row_per_mailbox_and_uid`, `a_second_queue_of_one_message_is_a_no_op_on_mail_claims_unique_key` | recorded |
 | `l=` must name the whole canonical body (B-minors, 2026-10-02). `verifySignature` answers `permerror body_length` when `l=` differs from the body's canonical length, for a DKIM signature and an AMS alike. | Checkpoint B (minor): with `l=` honoured, text appended after the signed length verified, and would be judged as part of a live `aligned` message. Neither Google nor Microsoft is known to sign with `l=`, so nothing that binds today is lost. | B-minors; `an_l_tag_shorter_than_the_body_is_refused` | recorded. **Cost if wrong:** a sender who signs with `l=` reads unaligned (a live item is then deleted and counted `unauthenticated`) |
 | SNS replay bound (B-minors, 2026-10-02). `verifySns` refuses a notification or handshake whose signed `Timestamp` is unreadable or more than `MAX_SNS_AGE_MS` (one hour) before `now`, before the certificate is fetched. `SnsDeps` gains a required `now`; `mail-inbound` passes its own clock. | Checkpoint B (minor): a replayed notification made intake GET a deleted object and answer 500. SNS keeps a message's `Timestamp` across its retries, and an HTTPS delivery policy's retries end within 3,600 seconds, so the hour holds every genuine retry. No MessageId store is added. | B-minors; `a_notification_older_than_an_hour_or_with_no_readable_timestamp_is_refused` | recorded. **Cost if wrong:** a custom delivery policy longer than an hour (AWS's maximum is 3,600 seconds) would lose its last retries |
 | A multi-mailbox delivery that fails partway is retried whole (B-minors, 2026-10-02; accepted, not changed). An earlier mailbox's `batchReceived` or its `unbound` or `unauthenticated` count then runs a second time on SNS's retry; `handOff` stays deduped, so no item is queued twice. | Checkpoint B (minor), whose fix offered "accept and record". Idempotent counters would need a per-key record of each count. A doubled `received` can only close a batch early by the device's own count, and a doubled `unbound` overstates a leak by one. | B-minors; no test (accepted) | recorded. **Cost if wrong:** a batch closed early is delivered without its stragglers, which the next reconcile lists as missing and recover re-sends |
-| Intra-school M365 forwards and SRS (Checkpoint B's open item, B-minors, 2026-10-02). If EOP does not SRS-rewrite a forward whose sender is on the school's own domain, the envelope is the colleague's own address, check (ii) cannot name the mailbox, and the message is unbound: deleted, counted on the mailbox's `unbound` (the count the Settings row shows), never live, never moving `last_received_at`. | Plan T2f: "If it does not, live intra-school mail is unbound." Binding on that envelope would let any Microsoft tenant's sender bind (risk 10). Pinned so it can never become a silent live item. What it does not do: the canary (sent from Knowlu's own domain, so SRS-rewritten) still binds and keeps the mailbox `active`, so Settings shows green with a rising `unbound` and offers Rotate, which reads as a leak. With saved sign-in on, the daily reconcile lists the missing messages and recover re-sends them (§4.11); with it off, they are lost. | B-minors; `an_intra_school_m365_forward_without_an_srs_envelope_is_unbound`, `an_intra_school_forward_microsoft_did_not_srs_rewrite_is_counted_unbound_never_live` | **open (Quinn, T18a):** T18a records case 4's envelope. If EOP does not rewrite, decide how Settings names "school mail Knowlu cannot verify" apart from a leak (a separate counter, and a Settings line instead of Rotate) |
+| Intra-school M365 forwards and SRS (Checkpoint B's open item, B-minors, 2026-10-02). If EOP does not SRS-rewrite a forward whose sender is on the school's own domain, the envelope is the colleague's own address, check (ii) cannot name the mailbox, and the message is unbound: deleted, counted on the mailbox's `unbound` (the count the Settings row shows), never live, never moving `last_received_at`. | Plan T2f: "If it does not, live intra-school mail is unbound." Binding on that envelope would let any Microsoft tenant's sender bind (risk 10). Pinned so it can never become a silent live item. What it does not do: the canary (sent from Knowlu's own domain, so SRS-rewritten) still binds and keeps the mailbox `active`, so Settings shows green with a rising `unbound` and offers Rotate, which reads as a leak. With saved sign-in on, the daily reconcile lists the missing messages and recover re-sends them (§4.11); with it off, they are lost. | B-minors; `an_intra_school_m365_forward_without_an_srs_envelope_is_unbound`, `an_intra_school_forward_microsoft_did_not_srs_rewrite_is_counted_unbound_never_live` | **Answered 2026-10-03 (Quinn), the unbound display (§4, under PQ12):** an unbound arrival from the hint's domain or under the provider's seal runs `unbound_own_since_live`, so after two with no bound live forward between, an `active` or `quiet` row reads `skipped` ("some forwarded mail could not be verified and was skipped", with the count) and Rotate is not suggested; only foreign mail reads `leaked` and suggests Rotate. T18a still records case 4's envelope and checks the reason live. |
 
 ## 10. Review revisions (2026-09-30)
 
@@ -2847,7 +2890,8 @@ the plan has been edited to match, and each edit names its R number.
 
 *(2026-10-02: PQ5 was answered (c) at T0.0 and built in T8. PQ6, PQ7 and PQ8 were answered later
 the same day, and Checkpoint A passed with the plan's reading of F3 under T8c confirmed (§4's "Asked
-after the rulings of 2026-10-02"). What is still open is §6's list.)*
+after the rulings of 2026-10-02"). What is still open is §6's list.)* *(2026-10-03: PQ12 was answered
+(a), and the unbound display was ruled the same day; both are built, §4 PQ12.)*
 
 - **PQ5 (blocks T8 and T8b).** How a feed card for `title` becomes approvable. The recommendation is
   (c): `title` is amendable only on a `created_by: blackboard` card, `AMENDABLE_FIELDS` stays nine, and

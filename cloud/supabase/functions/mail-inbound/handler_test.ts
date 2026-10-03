@@ -7,7 +7,14 @@ import { assert, assertEquals } from "@std/assert";
 import { canonicalBody, canonicalHeader, type TxtResolver } from "../_shared/dkim.ts";
 import { type BindBatch, type BindCanary, nonceTag } from "../_shared/mail_bind.ts";
 import { s3Client } from "../_shared/s3.ts";
-import { type AddressRow, handle, type InboundConfig, type InboundDeps, type InboundStore } from "./handler.ts";
+import {
+  type AddressRow,
+  type Counter,
+  handle,
+  type InboundConfig,
+  type InboundDeps,
+  type InboundStore,
+} from "./handler.ts";
 import { hmacKey, nonceHmac, tokenHmac } from "./keys.ts";
 
 const TOPIC = "arn:aws:sns:us-east-2:000000000000:mail-test-topic";
@@ -337,9 +344,18 @@ class FakeStore implements InboundStore {
     this.workRows.push(work);
     return Promise.resolve(true);
   }
-  count(addressId: string, counter: "unbound" | "unauthenticated") {
+  /** `unbound_own_since_live` and `unbound_foreign_since_live`, by address id, as `count_mail_arrival`
+   * runs them; `counters` keeps the cumulative `unbound` and `unauthenticated` columns. */
+  sinceLive: Record<string, { own: number; foreign: number }> = {};
+  count(addressId: string, counter: Counter) {
     this.calls.push("count");
-    this.counters[`${addressId}:${counter}`] = (this.counters[`${addressId}:${counter}`] ?? 0) + 1;
+    const run = this.sinceLive[addressId] ??= { own: 0, foreign: 0 };
+    if (counter === "live" || counter === "unauthenticated") Object.assign(run, { own: 0, foreign: 0 });
+    if (counter === "unbound_own") run.own++;
+    if (counter === "unbound_foreign") run.foreign++;
+    if (counter === "live") return Promise.resolve();
+    const column = counter.startsWith("unbound") ? "unbound" : counter;
+    this.counters[`${addressId}:${column}`] = (this.counters[`${addressId}:${column}`] ?? 0) + 1;
     return Promise.resolve();
   }
   received(addressId: string, iso: string) {
@@ -655,6 +671,45 @@ Deno.test("an_intra_school_forward_microsoft_did_not_srs_rewrite_is_counted_unbo
     await w.arrive(raw, { ...d, key: "inbound/i2", source: SRS });
     const bound = w.store.workRows.map((x) => [x.addressId, x.phase, x.authenticity]);
     assertEquals(bound, [["addr-4", "live", "aligned"]]);
+  });
+});
+
+Deno.test("unbound_live_forwards_count_own_or_foreign_since_the_last_bound_live_forward", async () => {
+  // Quinn's unbound-display ruling (2026-10-03): each unbound arrival runs one of two counts on its mailbox
+  // since the last bound live forward. `own`: its From is on the hint's domain, or the mailbox's provider
+  // sealed it (the "skipped" reason); `foreign`: anything else (the "leaked" reason, which offers Rotate).
+  await withWorld(async (w) => {
+    const intra = await m365Forward(TENANT); // From prof@school.test, Microsoft-sealed, no SRS envelope
+    const noSrs = { recipients: [at(TOK_M365)], source: "prof@school.test" };
+    await w.arrive(intra, { ...noSrs, key: "inbound/u1" });
+    await w.arrive(intra, { ...noSrs, key: "inbound/u2" });
+    // To a Gmail mailbox: a direct send from a school address, unsealed, is from outside.
+    await w.arrive(directForgery(), {
+      key: "inbound/u3",
+      recipients: [at(TOK1)],
+      source: "bounce@sender.test",
+    });
+    // Google-sealed, from another Gmail's forwarding: the provider's seal, so `own`.
+    await w.arrive(await gmailForward(), {
+      key: "inbound/u4",
+      recipients: [at(TOK1)],
+      source: caf("mallory", TOK1),
+    });
+    assertEquals(w.store.sinceLive, { "addr-4": { own: 2, foreign: 0 }, "addr-1": { own: 1, foreign: 1 } });
+    // The cumulative column counts every one of them, as before.
+    assertEquals(w.store.counters, { "addr-4:unbound": 2, "addr-1:unbound": 2 });
+    // A bound live forward sets the mailbox's counts back to 0; the other mailbox's stay.
+    await w.arrive(intra, { recipients: [at(TOK_M365)], source: SRS, key: "inbound/u5" });
+    assertEquals(w.store.sinceLive["addr-4"], { own: 0, foreign: 0 });
+    assertEquals(w.store.sinceLive["addr-1"], { own: 1, foreign: 1 });
+    // A forward that binds and then fails step 6 is still a bound live forward: deleted, counted
+    // unauthenticated, and the counts restart.
+    const unaligned = await gmailForward({ aar: FAIL_AAR, messageId: false });
+    await w.arrive(unaligned, { key: "inbound/u6", recipients: [at(TOK1)], source: caf("jane", TOK1) });
+    assertEquals(w.store.sinceLive["addr-1"], { own: 0, foreign: 0 });
+    assertEquals(w.store.counters["addr-1:unauthenticated"], 1);
+    // The log lines stay fixed phrases: neither the origin nor any address is in them.
+    assert(w.logs.every((l) => !l.includes("@") && !/\bown\b|\bforeign\b/.test(l)), w.logs.join("\n"));
   });
 });
 

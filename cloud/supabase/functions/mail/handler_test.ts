@@ -23,6 +23,9 @@ import {
   type NewToken,
   ROTATE_GRACE_MS,
   type StatePatch,
+  UNBOUND_LEAKED,
+  UNBOUND_SKIPPED,
+  UNBOUND_STREAK,
 } from "./handler.ts";
 import { hintFits, type MailProvider, type ResolveMx } from "./provider.ts";
 import {
@@ -239,6 +242,8 @@ function blank(id: string, accountId: string, provider: MailRow["provider"], tok
     unbound: 0,
     unauthenticated: 0,
     expired: 0,
+    unboundOwnSinceLive: 0,
+    unboundForeignSinceLive: 0,
   };
 }
 
@@ -665,6 +670,48 @@ Deno.test("get_and_delete_addresses_succeed_for_a_canceled_account", async () =>
   assertEquals((await w.call("GET", "/addresses", undefined, "nobody")).status, 401);
   assertEquals((await w.call("DELETE", `/addresses/${A1}`, undefined, "nobody")).status, 401);
   assertEquals(w.store.rows.length, 2);
+});
+
+Deno.test("the_mailbox_state_names_skipped_mail_after_two_unbound_live_forwards_and_offers_rotate_only_for_foreign_mail", async () => {
+  // Quinn's unbound-display ruling (2026-10-03): while the canary binds (`active` or `quiet`), live forwards
+  // that keep arriving unbound give the row a named reason and the count since the last bound live forward;
+  // Rotate is suggested only when that mail came from outside the student's own school or provider.
+  assertEquals(UNBOUND_STREAK, 2);
+  assertEquals(UNBOUND_SKIPPED, "some forwarded mail could not be verified and was skipped");
+  const w = await world();
+  const row = w.store.rows.find((r) => r.id === A1)!;
+  const state = async (over: Partial<MailRow>) => {
+    Object.assign(row, over);
+    const [a] = (await (await w.call("GET", "/addresses")).json()).addresses;
+    return [a.unbound_reason, a.unbound_note, a.unbound_since_live, a.suggest_rotate];
+  };
+  const none = (n: number) => [null, null, n, false];
+  const skipped = (n: number) => ["skipped", UNBOUND_SKIPPED, n, false];
+  const leaked = (n: number) => ["leaked", UNBOUND_LEAKED, n, true];
+  assertEquals(await state({ status: "active" }), none(0));
+  assertEquals(await state({ unboundOwnSinceLive: 1 }), none(1));
+  // Two from the student's own school or provider, with no bound live forward between: skipped, no Rotate.
+  assertEquals(await state({ unboundOwnSinceLive: 2 }), skipped(2));
+  assertEquals(await state({ status: "quiet" }), skipped(2));
+  assertEquals(await state({ unboundOwnSinceLive: 1, unboundForeignSinceLive: 1 }), skipped(2));
+  // Before the canary binds, or once forwarding is off or lapsed, the row's status is the explanation.
+  for (const status of ["pending", "confirmed", "blocked", "off", "paused_send", "lapsed"]) {
+    assertEquals(await state({ status }), none(2), status);
+  }
+  // Two from outside: the address may have leaked, whatever the forwarding's state, and Rotate is offered.
+  assertEquals(
+    await state({ status: "active", unboundOwnSinceLive: 3, unboundForeignSinceLive: 2 }),
+    leaked(5),
+  );
+  assertEquals(await state({ status: "blocked" }), leaked(5));
+  assertEquals(
+    await state({ status: "active", unboundOwnSinceLive: 0, unboundForeignSinceLive: 1 }),
+    none(1),
+  );
+  // The cumulative counters ride on the row as before.
+  Object.assign(row, { unbound: 7 });
+  const [a] = (await (await w.call("GET", "/addresses")).json()).addresses;
+  assertEquals([a.unbound, a.unauthenticated, a.expired], [7, 0, 0]);
 });
 
 Deno.test("every_other_mail_route_answers_402_without_entitlement", async () => {

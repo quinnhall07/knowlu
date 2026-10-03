@@ -68,6 +68,11 @@ create table if not exists public.mail_addresses (
   unbound             integer not null default 0 check (unbound >= 0),
   unauthenticated     integer not null default 0 check (unauthenticated >= 0),
   expired             integer not null default 0 check (expired >= 0),
+  -- Quinn's unbound-display ruling (2026-10-03): unbound live forwards since the last bound one, by
+  -- where they came from (`own`: the hint's domain or the provider's seal; `foreign`: anything else).
+  -- Settings names "skipped" mail, or a leaked address, from these; a bound live forward zeroes both.
+  unbound_own_since_live     integer not null default 0 check (unbound_own_since_live >= 0),
+  unbound_foreign_since_live integer not null default 0 check (unbound_foreign_since_live >= 0),
   check ((retired_token_hmac is null) = (retired_until is null)),
   unique (id, account_id)
 );
@@ -525,8 +530,12 @@ $$;
 revoke execute on function public.mail_hand_off(uuid, uuid, uuid, text, text, text, text, text, timestamptz) from public, anon, authenticated;
 grant execute on function public.mail_hand_off(uuid, uuid, uuid, text, text, text, text, text, timestamptz) to service_role;
 
--- Unbound and unauthenticated mail, counted on its address in one statement (a rising `unbound` means
--- the address leaked, and Settings offers Rotate). Any other counter name adds nothing.
+-- Unbound and unauthenticated mail, counted on its address in one statement. `unbound` (a refused Gmail
+-- confirmation), `unbound_own` and `unbound_foreign` (an unbound live forward, by where it came from) all
+-- add to the cumulative `unbound`; the last two also run their count since the last bound live forward
+-- (Quinn's unbound-display ruling, 2026-10-03). `live` (a bound forward) and `unauthenticated` (bound,
+-- then failed step 6) zero both runs; `live` writes nothing when they already are. Any other counter
+-- name changes nothing.
 create or replace function public.count_mail_arrival(p_address uuid, p_counter text)
 returns void
 language plpgsql
@@ -535,9 +544,14 @@ set search_path = public, extensions
 as $$
 begin
   update public.mail_addresses set
-    unbound         = unbound + (p_counter = 'unbound')::int,
-    unauthenticated = unauthenticated + (p_counter = 'unauthenticated')::int
-   where id = p_address;
+    unbound                    = unbound + (p_counter in ('unbound', 'unbound_own', 'unbound_foreign'))::int,
+    unauthenticated            = unauthenticated + (p_counter = 'unauthenticated')::int,
+    unbound_own_since_live     = case when p_counter in ('live', 'unauthenticated') then 0
+                                      else unbound_own_since_live + (p_counter = 'unbound_own')::int end,
+    unbound_foreign_since_live = case when p_counter in ('live', 'unauthenticated') then 0
+                                      else unbound_foreign_since_live + (p_counter = 'unbound_foreign')::int end
+   where id = p_address
+     and (p_counter <> 'live' or unbound_own_since_live + unbound_foreign_since_live > 0);
 end;
 $$;
 revoke execute on function public.count_mail_arrival(uuid, text) from public, anon, authenticated;

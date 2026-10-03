@@ -78,10 +78,13 @@ interface AddressDb {
   unbound: number;
   unauthenticated: number;
   expired: number;
+  unbound_own_since_live: number;
+  unbound_foreign_since_live: number;
 }
 const COLUMNS = "id,account_id,provider,status,token_hmac,token_ciphertext,token_iv,retired_token_hmac," +
   "retired_until,mailbox_hint,lapsed_since,reenabled_at,backfill_since,last_received_at,last_canary_ok_at," +
-  "last_canary_sent_at,canaries_today,confirm_until,unbound,unauthenticated,expired";
+  "last_canary_sent_at,canaries_today,confirm_until,unbound,unauthenticated,expired,unbound_own_since_live," +
+  "unbound_foreign_since_live";
 const fromDb = (r: AddressDb): MailRow => ({
   id: r.id,
   accountId: r.account_id,
@@ -104,6 +107,8 @@ const fromDb = (r: AddressDb): MailRow => ({
   unbound: r.unbound,
   unauthenticated: r.unauthenticated,
   expired: r.expired,
+  unboundOwnSinceLive: r.unbound_own_since_live,
+  unboundForeignSinceLive: r.unbound_foreign_since_live,
 });
 
 function storeOver(rest: Rest): MailStore {

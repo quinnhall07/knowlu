@@ -25,10 +25,12 @@
  *   the ForwardingLoop, so X-Forwarded-* never bind, and the envelope carries the binding with the seal.
  *   Quinn's PQ9 amendment (2026-10-02) accepts that: on Gmail check (i) is the seal alone and check (ii)
  *   names the mailbox. A Workspace mailbox (a `google` mailbox on its own domain) binds the same way on a
- *   `+caf_=` envelope at its own domain, only when that domain's MX is Google's (`BindDeps.resolveMx`); a
- *   `googlemail.com` mailbox's envelope is at `gmail.com`. The residual risk (a leaked address plus a
- *   sender able to set that MAIL FROM on Google's relay) is accepted; Rotate mitigates it.
- * - **Unbound:** anything else.
+ *   `+caf_=` envelope at its own domain, when that domain's MX reads Google or a gateway's (PQ12, answer
+ *   (a), 2026-10-03; `BindDeps.resolveMx`), never Microsoft's, none, or unanswered; a `googlemail.com`
+ *   mailbox's envelope is at `gmail.com`. The residual risk (a leaked address plus a sender able to set
+ *   that MAIL FROM on Google's relay) is accepted; Rotate mitigates it.
+ * - **Unbound:** anything else. `unboundOrigin` then says, for the Settings row only, whether it came from
+ *   the student's own school or provider (`own`) or from outside (`foreign`).
  * - **Authenticity** (`aligned` or `unaligned`): for a live forward, only the verified hop's
  *   ARC-Authentication-Results; for a backfilled or recovered original (`originalAuthenticity`), the
  *   provider's own verifying topmost ARC set, else its delivery stamp, the topmost Authentication-Results.
@@ -73,7 +75,8 @@ export interface BindConfig {
 export interface BindDeps extends DkimDeps {
   /** A nonce as `mail_batches.nonce_hmac` and `mail_canaries.nonce_hmac` hold it. */
   nonceHmac: (nonce: string) => Promise<string>;
-  /** MX exchanges for a Workspace mailbox's domain (PQ9); production passes `provider.ts`'s `mxResolver()`. */
+  /** MX exchanges for a Workspace mailbox's domain (PQ9, PQ12); production passes `provider.ts`'s
+   * `mxResolver()`. */
   resolveMx: ResolveMx;
 }
 /** The SMTP envelope as the verified SES notification states it (T2g.1 reads it, never the message). */
@@ -274,7 +277,8 @@ async function providerArc(input: MailInput, provider: BindMailbox["provider"], 
 /** Check (ii): SES passed SPF on the provider's forwarding return path for this mailbox and address.
  * Gmail's `+caf_=` envelope is at `gmail.com` for a `gmail.com` or `googlemail.com` mailbox, and at the
  * mailbox's own domain for a Workspace mailbox (PQ9, amended 2026-10-02; `liveForward` then also requires
- * that domain's MX to be Google's). Microsoft's SRS envelope is at the mailbox's own domain. */
+ * that domain's MX to read Google or a gateway, PQ12). Microsoft's SRS envelope is at the mailbox's own
+ * domain. */
 function envelopeBinds(mailbox: BindMailbox, hint: string, envelope: BindEnvelope): boolean {
   const from = envelope.mailFrom?.trim().toLowerCase() ?? "";
   const own = split(hint);
@@ -290,17 +294,18 @@ function envelopeBinds(mailbox: BindMailbox, hint: string, envelope: BindEnvelop
     env[0].startsWith(srs);
 }
 
-/** PQ9's Workspace condition: a `google` mailbox off Google's own two domains binds only when its domain's
- * MX reads Google (`provider.ts`'s one table). No MX, another host, or DNS failing to answer is `false`;
- * called only once the envelope and Google's seal have passed, so a forgery never reaches DNS.
- * Open (plan PQ12): the MX clause is the controller's record of Quinn's PQ9 answer, which PQ9 as asked did
- * not raise. It is stricter than `hintFits`, which lets an `other` MX (a Proofpoint or Mimecast gateway in
- * front of Google) fit a `google` mailbox, so such a school's canary binds and its live mail does not. */
+/** PQ9's Workspace condition as PQ12 answered it (Quinn, 2026-10-03, answer (a)): a `google` mailbox off
+ * Google's own two domains binds when its domain's MX reads Google or another host (`provider.ts`'s one
+ * table), as `hintFits` reads it: an `other` MX is a Proofpoint, Mimecast or campus-relay gateway in front
+ * of Google, and refusing it would need a per-school exception (rule 1). Microsoft's MX, no MX, or DNS
+ * failing to answer is `false`. Called only once the envelope and Google's seal have passed, so a forgery
+ * never reaches DNS. */
 async function googleHosted(hint: string, mailbox: BindMailbox, deps: BindDeps): Promise<boolean> {
   const domain = hint.slice(hint.lastIndexOf("@") + 1);
   if (mailbox.provider !== "google" || GMAIL_DOMAINS.includes(domain)) return true;
   try {
-    return await providerOf(domain, deps.resolveMx) === "google";
+    const read = await providerOf(domain, deps.resolveMx);
+    return read === "google" || read === "other";
   } catch {
     return false;
   }
@@ -435,6 +440,39 @@ export async function originalAuthenticity(
     return stamp === null ? "unaligned" : verdict(stamp, domain, provider);
   } catch {
     return "unaligned";
+  }
+}
+
+/** Where an unbound message came from, for the Settings row's reason only (Quinn's unbound-display ruling,
+ * 2026-10-03): `own` reads as "some forwarded mail could not be verified and was skipped", `foreign` as a
+ * leaked address, the only reason that suggests Rotate. */
+export type UnboundOrigin = "own" | "foreign";
+
+/** Whether `a` is `b` or a dotted name under it. */
+const atOrUnder = (a: string, b: string) => a === b || a.endsWith(`.${b}`);
+
+/**
+ * Quinn's unbound-display ruling (2026-10-03), for a message `classifyArrival` called unbound: `own` when its
+ * one From address is on the hint's domain (that domain, a name under it, or a name it sits under), or when
+ * its topmost ARC set is the mailbox's own provider's seal and verifies; else `foreign`. The From arm is read
+ * first and needs no DNS. This binds nothing and moves nothing: the message is deleted either way, and the
+ * word only picks which count it runs on its mailbox (`count_mail_arrival`). A sender can write the From,
+ * so a stranger can make a leak read as skipped mail; the cost is a Rotate not suggested, never mail let in.
+ * Never throws: anything unreadable is `foreign`.
+ */
+export async function unboundOrigin(
+  input: MailInput,
+  mailbox: BindMailbox,
+  deps: DkimDeps,
+): Promise<UnboundOrigin> {
+  try {
+    const from = soleFromDomain(parseHeaders(input));
+    const hint = hintOf(mailbox);
+    const own = hint === null ? null : hint.slice(hint.lastIndexOf("@") + 1);
+    if (from !== null && own !== null && (atOrUnder(from, own) || atOrUnder(own, from))) return "own";
+    return await providerArc(input, mailbox.provider, deps) === null ? "foreign" : "own";
+  } catch {
+    return "foreign";
   }
 }
 
