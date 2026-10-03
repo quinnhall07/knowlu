@@ -1828,6 +1828,21 @@ batch before the list.
 
 #### T11.3. The setup runner (`app/src/mail.rs`)
 
+**Built** (2026-10-02), in `app/src/mail/{setup,runner,backfill,host,live}.rs`. **Rulings in the build.** (1) The
+open-backfill marker is a mailbox id in `mail.json`'s `open_backfills`, written only while one is open (the
+field is skipped when empty, so a file with none is byte-for-byte spec §5.4's shape); the spec names no other
+store and the service's address view says nothing of a batch being whole. Cost if wrong: one line moves to a
+sibling file. (2) A closed sign-in window revokes the address minted for it and deletes its profile ("setup
+cancelled, nothing changed"); a Stop mid-backfill clears the marker, a quit leaves it. (3) A guided step's
+"I've done this" runs a canary check for forwarding steps, the server's confirm for the Gmail address, and
+passes the guided backfill unchecked (no route counts a hand-forwarded backfill). (4) Retry after a blocked
+canary that arrives marks the backfill open for the next launch rather than reopening the window. (5) The
+pace's day count restarts at 0 on a resume after a restart on the same UTC day (nothing stores it). (6)
+`Job` gained `watch` (counts, and a stop) and `Stop::Stopped`; `Place` gained `Forwarding`. **Live checks:** the
+M365 forwarding page is opened at `outlook.office.com/mail/options/mail/forwarding` (the path is from memory,
+not from a spike); the Gmail window title's address for a Workspace mailbox; the popup wait (`popup_open` turns
+false after the tap).
+
 **Tests first** (§4.1–§4.5, D6, D7 as BW amends it, D15 and D16, as plan tests):
 - `one_setup_at_a_time`
 - `a_closed_sign_in_window_is_setup_cancelled_and_nothing_changed`

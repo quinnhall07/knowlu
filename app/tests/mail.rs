@@ -876,7 +876,7 @@ fn routine(provider: Provider) -> Routine {
 }
 
 fn job(provider: Provider, phase: Phase, window: Window, cap: Option<u32>) -> Job<'static> {
-    Job { provider, address_id: A, knowlu_address: KNOWLU, phase, window, cap }
+    Job { provider, address_id: A, knowlu_address: KNOWLU, phase, window, cap, watch: None }
 }
 
 fn pass(fake: &Fake, svc: &Service, routine: &mut Routine, job: &Job) -> knowlu::mail::recover::Outcome {
@@ -1205,4 +1205,803 @@ fn a_guided_mailbox_runs_nothing() {
     let out = pass(&mb, &svc, &mut routine(Provider::Guided), &job(Provider::Guided, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
     assert_eq!(out.stop, Stop::Guided);
     assert!(mb.log.borrow().is_empty() && svc.requests().is_empty());
+}
+
+// ---- T11.3: the setup runner ------------------------------------------------------------------------
+//
+// The runner drives T10.1's step machine through a fake window host (the compiled-in scripts' JSON,
+// answered from a model of the mailbox), the real client over the loopback service, and a clock that
+// moves only when the runner waits. Every address is synthetic. The answers a student gives arrive from
+// the test thread; the runner is on its own thread, as it is in the app.
+
+use knowlu::mail::host::Host;
+use knowlu::mail::setup::{Answer, Ask, Env, Kind, Plan, Progress, Setups, Shared};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::time::Duration;
+
+/// What the page shows as the mailbox's own address.
+const HINT_PAGE: &str = "student.one@school.example.invalid";
+/// What the student types when asked for the school address.
+const TYPED: &str = "typed.person@school.example.invalid";
+
+type Events = Arc<Mutex<Vec<String>>>;
+
+struct SClk(AtomicI64);
+
+impl SClk {
+    fn at(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+struct ClkRef(Arc<SClk>);
+
+impl Clock for ClkRef {
+    fn now(&self) -> i64 {
+        self.0.at()
+    }
+    fn sleep(&self, secs: i64) {
+        self.0 .0.fetch_add(secs, Ordering::SeqCst);
+    }
+}
+
+fn today() -> jiff::civil::Date {
+    jiff::Timestamp::from_second(NOW).unwrap().to_zoned(jiff::tz::TimeZone::UTC).date()
+}
+
+/// The first day of the backfill window for a setup today: a fixed 120 days (BW).
+fn since_day() -> String {
+    knowlu_engine::scheduling::add_days(today(), -120).to_string()
+}
+
+#[derive(Default)]
+struct HState {
+    opens: Vec<(PathBuf, bool)>,
+    window: bool,
+    student_closed: bool,
+    signed_in: bool,
+    title_address: Option<String>,
+    popup_polls: u32,
+    aside: u32,
+    back: u32,
+    closed: u32,
+    log: Vec<(String, Value)>,
+    /// Scripted answers by script name; the last one repeats.
+    queued: HashMap<String, VecDeque<Value>>,
+    /// The mailbox: (sender, subject, instant).
+    msgs: Vec<(String, String, i64)>,
+    on_script: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+}
+
+struct SHost {
+    st: Arc<Mutex<HState>>,
+    ev: Events,
+    provider: Mutex<Provider>,
+}
+
+impl SHost {
+    fn rows(s: &HState) -> Vec<Value> {
+        s.msgs
+            .iter()
+            .map(|(who, subject, at)| json!({ "sender": who, "subject": subject, "received": received(*at), "received_at": iso(*at) }))
+            .collect()
+    }
+}
+
+impl Mailbox for SHost {
+    fn open(&self, place: Place) -> Result<(), Refusal> {
+        self.st.lock().unwrap().log.push((format!("open {place:?}"), Value::Null));
+        self.ev.lock().unwrap().push(format!("open {place:?}"));
+        Ok(())
+    }
+
+    fn script(&self, path: &str, args: &Value) -> Result<Value, Refusal> {
+        let hook = {
+            let mut s = self.st.lock().unwrap();
+            s.log.push((path.to_string(), args.clone()));
+            s.on_script.clone()
+        };
+        self.ev.lock().unwrap().push(format!("script {path}"));
+        if let Some(h) = hook {
+            h(path);
+        }
+        let mut s = self.st.lock().unwrap();
+        if let Some(q) = s.queued.get_mut(path) {
+            let v = if q.len() > 1 { q.pop_front().unwrap() } else { q.front().cloned().unwrap() };
+            return Ok(v);
+        }
+        let ours = json!({ "result": "ok", "forwarding": "on", "to": "ours", "keep_copy": true, "changed": true });
+        Ok(match path {
+            "m365/signin.js" => json!({ "result": "ok", "signed_in": true, "mailbox_hint": HINT_PAGE }),
+            "m365/forwarding_set.js" | "gmail/forwarding_set.js" | "m365/forwarding_read.js" | "gmail/forwarding_read.js" => ours,
+            "gmail/forwarding_add.js" => json!({ "result": "ok", "stage": "asked", "changed": true }),
+            "gmail/forwarding_add_done.js" => json!({ "result": "ok", "sent": true }),
+            "m365/search.js" | "gmail/search.js" => json!({ "result": "ok", "count": s.msgs.len() }),
+            "m365/list.js" => json!({ "result": "ok", "total": s.msgs.len(), "rows": SHost::rows(&s) }),
+            "gmail/list.js" => {
+                let n = s.msgs.len();
+                json!({ "result": "ok", "page": { "from": 1, "to": n, "total": n }, "moved": false, "rows": SHost::rows(&s) })
+            }
+            "m365/forward.js" => json!({ "result": "ok", "sent": true }),
+            "gmail/forward.js" => {
+                let n = args["rows"].as_array().map_or(1, |r| r.len());
+                json!({ "result": "ok", "sent": true, "count": n })
+            }
+            "m365/sent_cleanup.js" | "gmail/sent_cleanup.js" => json!({ "result": "ok", "deleted": 1 }),
+            other => panic!("the runner ran {other}"),
+        })
+    }
+}
+
+impl Host for SHost {
+    fn use_provider(&self, p: Provider) {
+        *self.provider.lock().unwrap() = p;
+    }
+    fn open_window(&self, profile: &Path, visible: bool) -> Result<(), String> {
+        std::fs::create_dir_all(profile.join("Default")).unwrap();
+        std::fs::write(profile.join("Default").join("Cookies"), "synthetic").unwrap();
+        let mut s = self.st.lock().unwrap();
+        s.opens.push((profile.to_path_buf(), visible));
+        s.window = true;
+        self.ev.lock().unwrap().push(format!("window {}", if visible { "visible" } else { "hidden" }));
+        Ok(())
+    }
+    fn window_open(&self) -> bool {
+        let s = self.st.lock().unwrap();
+        s.window && !s.student_closed
+    }
+    fn signed_in(&self) -> bool {
+        self.st.lock().unwrap().signed_in
+    }
+    fn title_address(&self) -> Option<String> {
+        self.st.lock().unwrap().title_address.clone()
+    }
+    fn popup_open(&self) -> bool {
+        let mut s = self.st.lock().unwrap();
+        let open = s.popup_polls > 0;
+        s.popup_polls = s.popup_polls.saturating_sub(1);
+        open
+    }
+    fn step_aside(&self) -> Result<(), String> {
+        self.st.lock().unwrap().aside += 1;
+        self.ev.lock().unwrap().push("aside".to_string());
+        Ok(())
+    }
+    fn come_back(&self) -> Result<(), String> {
+        self.st.lock().unwrap().back += 1;
+        Ok(())
+    }
+    fn close_window(&self) {
+        let mut s = self.st.lock().unwrap();
+        s.window = false;
+        s.closed += 1;
+    }
+}
+
+#[derive(Default)]
+struct Sv {
+    /// What `GET /provider` answers for any domain.
+    provider_of: String,
+    /// The setup canary comes back through forwarding.
+    canary_arrives: bool,
+    canary_sent: bool,
+    confirming: bool,
+    hint: Option<String>,
+    /// The `since` of each backfill batch opened.
+    batches: Vec<String>,
+    /// Set by a resume test: what the row says about the backfill.
+    backfill_since: Option<String>,
+    provider: String,
+}
+
+fn setup_service(sv: &Arc<Mutex<Sv>>, ev: &Events) -> Service {
+    let (sv, ev) = (sv.clone(), ev.clone());
+    Service::start(false, move |r| {
+        let path = r.path.split("/mail").nth(1).unwrap_or("").to_string();
+        let body: Value = serde_json::from_str(&r.body).unwrap_or(Value::Null);
+        let mut s = sv.lock().unwrap();
+        let note = |what: &str| ev.lock().unwrap().push(format!("svc {what}"));
+        match (r.method.as_str(), path.as_str()) {
+            ("POST", "/addresses") => {
+                note("mint");
+                s.provider = body["provider"].as_str().unwrap_or("").to_string();
+                (201, json!({ "address_id": A, "address": KNOWLU, "provider": s.provider, "status": "pending" }).to_string())
+            }
+            ("GET", "/addresses") => {
+                let ok_at = (s.canary_sent && s.canary_arrives).then(|| "2026-10-02T10:00:40Z");
+                let status = if ok_at.is_some() { "active" } else if s.confirming { "confirmed" } else { "pending" };
+                let row = json!({
+                    "address_id": A, "provider": s.provider, "address": KNOWLU, "mailbox_hint": s.hint,
+                    "status": status, "backfill_since": s.backfill_since, "last_canary_ok_at": ok_at,
+                });
+                (200, json!({ "addresses": [row] }).to_string())
+            }
+            ("POST", p) if p.ends_with("/hint") => {
+                note("hint");
+                s.hint = body["hint"].as_str().map(str::to_string);
+                (200, json!({ "address_id": A, "mailbox_hint": s.hint }).to_string())
+            }
+            ("POST", p) if p.ends_with("/state") => {
+                let state = body["state"].as_str().unwrap_or("");
+                note(&format!("state {state}"));
+                s.confirming |= state == "confirming";
+                (200, json!({ "address_id": A, "state": state, "status": "pending" }).to_string())
+            }
+            ("POST", "/canary") => {
+                note("canary");
+                s.canary_sent = true;
+                (201, json!({ "canary_id": "c-1", "address_id": A, "sent_at": "2026-10-02T10:00:00Z" }).to_string())
+            }
+            ("POST", "/batches") => {
+                note("batch");
+                s.batches.push(body["since"].as_str().unwrap_or("").to_string());
+                (201, json!({ "batch_id": "batch-1", "nonce": NONCE, "phase": body["phase"], "since": body["since"] }).to_string())
+            }
+            ("POST", p) if p.starts_with("/batches/") && p.ends_with("/sent") => {
+                note("batch sent");
+                (200, r#"{"ok":true}"#.to_string())
+            }
+            ("POST", "/reconcile") => (200, json!({ "address_id": A, "key": FPKEY_B64, "held": [] }).to_string()),
+            ("DELETE", p) if p.starts_with("/addresses/") => {
+                note("delete address");
+                (200, r#"{"deleted":true}"#.to_string())
+            }
+            ("GET", p) if p.starts_with("/provider") => (200, json!({ "domain": "x", "provider": s.provider_of }).to_string()),
+            _ => (404, r#"{"error":"no such route"}"#.to_string()),
+        }
+    })
+}
+
+struct Rig {
+    dir: PathBuf,
+    host: Arc<Mutex<HState>>,
+    ev: Events,
+    sv: Arc<Mutex<Sv>>,
+    svc: Service,
+    clk: Arc<SClk>,
+    closed: Arc<AtomicU32>,
+    setups: Arc<Setups>,
+}
+
+fn rig(tag: &str) -> Rig {
+    let host = Arc::new(Mutex::new(HState { signed_in: true, ..Default::default() }));
+    let ev = Events::default();
+    let sv = Arc::new(Mutex::new(Sv { provider_of: "m365".into(), canary_arrives: true, ..Default::default() }));
+    Rig {
+        dir: temp(tag),
+        svc: setup_service(&sv, &ev),
+        host,
+        ev,
+        sv,
+        clk: Arc::new(SClk(AtomicI64::new(NOW))),
+        closed: Default::default(),
+        setups: Arc::new(Setups::new()),
+    }
+}
+
+impl Rig {
+    fn env(&self) -> Env {
+        let (closed, ev) = (self.closed.clone(), self.ev.clone());
+        Env {
+            host: Box::new(SHost { st: self.host.clone(), ev: self.ev.clone(), provider: Mutex::new(Provider::Guided) }),
+            client: MailClient::with_token_fn(&self.svc.base, Box::new(|| Ok(TOKEN.to_string()))).expect("a loopback base"),
+            clock: Box::new(ClkRef(self.clk.clone())),
+            on_closed: Box::new(move || {
+                closed.fetch_add(1, Ordering::SeqCst);
+                ev.lock().unwrap().push("slot now".to_string());
+            }),
+            guard: None,
+        }
+    }
+
+    fn plan(&self, kind: Kind, keep: bool) -> Plan {
+        Plan { kind, data_dir: self.dir.clone(), keep_session: keep, setup_day: today() }
+    }
+
+    fn start(&self, kind: Kind, keep: bool) -> Arc<Shared> {
+        self.setups.start(self.plan(kind, keep), self.env()).expect("a setup started")
+    }
+
+    fn events(&self) -> Vec<String> {
+        self.ev.lock().unwrap().clone()
+    }
+
+    fn scripts(&self) -> Vec<String> {
+        self.host.lock().unwrap().log.iter().filter(|(p, _)| p.contains(".js")).map(|(p, _)| p.clone()).collect()
+    }
+
+    fn calls(&self, name: &str) -> Vec<Value> {
+        self.host.lock().unwrap().log.iter().filter(|(p, _)| p == name).map(|(_, a)| a.clone()).collect()
+    }
+}
+
+/// A curated school whose mail is Microsoft 365 (the table is data; nothing here names one).
+fn curated_m365() -> Kind {
+    let row = knowlu::scaffold::CAMPUSES.iter().find(|c| c.mail_provider == "m365").expect("a curated m365 row");
+    Kind::School { unitid: Some(row.unitid.to_string()), address: None }
+}
+
+/// A school no curated row names: the setup asks once for its address.
+fn uncurated() -> Kind {
+    Kind::School { unitid: Some("0".to_string()), address: None }
+}
+
+fn wait(shared: &Shared) -> Progress {
+    assert!(shared.wait_done(Duration::from_secs(30)), "the setup did not end");
+    shared.progress()
+}
+
+fn until(what: &str, f: impl Fn() -> bool) {
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while !f() {
+        assert!(std::time::Instant::now() < end, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn row<'a>(p: &'a Progress, step: &str) -> &'a knowlu::mail::setup::Row {
+    p.rows.iter().find(|r| r.step == step).unwrap_or_else(|| panic!("no row {step}"))
+}
+
+/// Whether a step's row reads `state` now (false while the rows are not yet published).
+fn has(shared: &Shared, step: &str, state: &str) -> bool {
+    shared.progress().rows.iter().any(|r| r.step == step && r.state == state)
+}
+
+fn ana_mail(n: usize) -> Vec<(String, String, i64)> {
+    (0..n).map(|i| (ANA.to_string(), format!("Notice {i}"), NOW - 5 * DAY + i as i64 * 600)).collect()
+}
+
+#[test]
+fn one_setup_at_a_time() {
+    let r = rig("t113-one");
+    let first = r.start(uncurated(), true);
+    until("the first setup's question", || first.progress().ask == Some("school_address"));
+    assert!(r.setups.start(r.plan(uncurated(), true), r.env()).is_err(), "a second setup while the first runs");
+    assert!(r.setups.current().is_some_and(|c| Arc::ptr_eq(&c, &first)));
+    first.stop();
+    assert_eq!(wait(&first).ended, Some("stopped"));
+    let again = r.setups.start(r.plan(uncurated(), true), r.env()).expect("a new one once the first has ended");
+    again.stop();
+    wait(&again);
+    assert!(!r.events().contains(&"svc mint".to_string()), "it was asked, never minted");
+}
+
+#[test]
+fn a_closed_sign_in_window_is_setup_cancelled_and_nothing_changed() {
+    let r = rig("t113-cancel");
+    {
+        let mut h = r.host.lock().unwrap();
+        h.signed_in = false;
+        h.student_closed = true;
+    }
+    let p = wait(&r.start(Kind::Gmail, true));
+    assert_eq!(p.ended, Some("cancelled"));
+    assert_eq!(p.line, Some("setup cancelled"));
+    assert_eq!(row(&p, "sign_in").state, "skipped");
+    let ev = r.events();
+    for never in ["svc hint", "svc canary", "svc batch", "svc state confirming"] {
+        assert!(!ev.contains(&never.to_string()), "{never}");
+    }
+    assert!(r.scripts().is_empty(), "no script ran: {:?}", r.scripts());
+    assert!(ev.contains(&"svc delete address".to_string()), "the address minted for it is revoked");
+    assert!(!session_dir(&r.dir, A).unwrap().exists(), "its profile is gone");
+    assert!(MailState::load(&r.dir).unwrap().open_backfills.is_empty());
+}
+
+#[test]
+fn stop_ends_after_the_current_step_and_names_what_was_done() {
+    let r = rig("t113-stop");
+    let setups = r.setups.clone();
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if name == "m365/forwarding_set.js" {
+            setups.current().expect("a setup is running").stop();
+        }
+    }));
+    let p = wait(&r.start(curated_m365(), true));
+    assert_eq!(p.ended, Some("stopped"));
+    assert_eq!(p.line, Some("setup stopped"));
+    assert_eq!(p.done, ["sign_in", "step_aside", "forwarding"], "the step in hand finished");
+    assert_eq!(p.not_brought_in_before, Some(since_day()), "what the stop says was not brought in");
+    for later in ["canary", "backfill", "finish"] {
+        assert_eq!(row(&p, later).state, "skipped", "{later}");
+    }
+    let ev = r.events();
+    assert!(!ev.contains(&"svc canary".to_string()) && !ev.contains(&"svc batch".to_string()));
+    assert!(r.host.lock().unwrap().closed >= 1, "the window is closed");
+    assert!(session_dir(&r.dir, A).unwrap().exists(), "nothing the student kept is undone");
+}
+
+#[test]
+fn a_canary_not_back_in_three_minutes_leaves_blocked_with_retry_and_offers_what_remains() {
+    let r = rig("t113-blocked");
+    r.sv.lock().unwrap().canary_arrives = false;
+    r.host.lock().unwrap().msgs = ana_mail(2);
+    let shared = r.start(curated_m365(), true);
+    until("the blocked state", || shared.progress().blocked);
+    let p = shared.progress();
+    assert_eq!(row(&p, "canary").state, "failed");
+    assert_eq!(row(&p, "backfill").state, "failed");
+    assert_eq!(row(&p, "backfill").reason, Some("blocked"));
+    assert!(row(&p, "backfill").guided);
+    for offer in ["retry", "personal_gmail", "guided_steps"] {
+        assert!(p.offers.contains(&offer), "{offer}: {:?}", p.offers);
+    }
+    let waited = r.clk.at() - NOW;
+    assert!((180..240).contains(&waited), "it waited the three minutes and no longer: {waited}");
+    assert!(!r.scripts().iter().any(|s| s.ends_with("search.js")), "no backfill is read while forwarding does not arrive");
+    assert!(!r.events().contains(&"svc batch".to_string()));
+    // Retry: the school's setting is fixed and the canary comes back.
+    r.sv.lock().unwrap().canary_arrives = true;
+    assert!(shared.answer(Answer::Retry));
+    until("the canary done by hand", || has(&shared, "canary", "done_by_hand"));
+    assert_eq!(MailState::load(&r.dir).unwrap().open_backfills, [A], "the backfill resumes at the next launch");
+    shared.stop();
+    wait(&shared);
+}
+
+fn answer_address(shared: &Shared) {
+    until("the question", || shared.progress().ask == Some("school_address"));
+    // An answer to a different question is not taken.
+    assert!(!shared.answer(Answer::Replace(true)));
+    assert!(shared.answer(Answer::SchoolAddress(TYPED.to_string())));
+}
+
+#[test]
+fn an_uncurated_school_asks_once_for_the_address_and_the_service_decides_the_provider() {
+    let r = rig("t113-ask");
+    let shared = r.start(uncurated(), true);
+    answer_address(&shared);
+    let p = wait(&shared);
+    assert_eq!((p.ended, p.provider), (Some("finished"), "m365"));
+    assert_eq!(shared.asked(), ["school_address"], "asked once");
+    let all = seen(&r.svc);
+    assert!(all.iter().any(|(m, path, _)| m == "GET" && path == "/provider?domain=school.example.invalid"), "{all:?}");
+    assert!(all.iter().any(|(m, path, b)| m == "POST" && path == "/addresses" && b == r#"{"provider":"m365"}"#), "{all:?}");
+    assert!(
+        all.iter().any(|(_, path, b)| path.ends_with("/hint") && b.contains(HINT_PAGE)),
+        "the hint is the address the page shows"
+    );
+    assert!(!format!("{all:?}").contains("typed.person"), "only the typed address's domain left the device");
+
+    // A curated school is never asked and no lookup is made.
+    let c = rig("t113-ask-curated");
+    let p = wait(&c.start(curated_m365(), true));
+    assert_eq!(p.ended, Some("finished"));
+    let all = seen(&c.svc);
+    assert!(!all.iter().any(|(_, path, _)| path.starts_with("/provider")), "no lookup for a curated row");
+    assert!(all.iter().any(|(_, path, b)| path == "/addresses" && b == r#"{"provider":"m365"}"#));
+
+    // An unknown provider is guided: the typed address is the mailbox's own, since no page can show it.
+    let g = rig("t113-ask-other");
+    g.sv.lock().unwrap().provider_of = "other".into();
+    let shared = g.start(uncurated(), true);
+    answer_address(&shared);
+    until("the guided step", || has(&shared, "forwarding", "needs_you"));
+    let p = shared.progress();
+    assert_eq!(p.provider, "other");
+    assert!(row(&p, "forwarding").guided);
+    assert!(g.scripts().is_empty(), "a guided mailbox runs no script");
+    assert!(seen(&g.svc).iter().any(|(_, path, b)| path.ends_with("/hint") && b.contains(TYPED)));
+    shared.stop();
+    wait(&shared);
+}
+
+#[test]
+fn a_google_workspace_school_is_offered_forwarding_through_gmails_steps() {
+    let r = rig("t113-workspace");
+    r.sv.lock().unwrap().provider_of = "google".into();
+    r.host.lock().unwrap().title_address = Some(HINT_PAGE.to_string());
+    let shared = r.start(uncurated(), true);
+    answer_address(&shared);
+    let p = wait(&shared);
+    assert_eq!((p.ended, p.provider), (Some("finished"), "google"));
+    assert_eq!(row(&p, "add_address").state, "done");
+    assert!(seen(&r.svc).iter().any(|(_, path, b)| path.ends_with("/hint") && b.contains(HINT_PAGE)));
+}
+
+#[test]
+fn no_date_is_asked_and_every_school_reads_the_same_120_days() {
+    for (tag, kind, typed) in [("t113-date-a", curated_m365(), false), ("t113-date-b", uncurated(), true)] {
+        let r = rig(tag);
+        r.host.lock().unwrap().msgs = ana_mail(1);
+        let shared = r.start(kind, true);
+        if typed {
+            answer_address(&shared);
+        }
+        let p = wait(&shared);
+        assert_eq!(p.ended, Some("finished"), "{tag}");
+        assert_eq!(r.sv.lock().unwrap().batches, [since_day()], "{tag}: the batch opens on the fixed window start");
+        assert_eq!(p.backfill.as_ref().map(|b| b.since.clone()), Some(since_day()), "{tag}");
+        assert!(shared.asked().iter().all(|a| *a == "school_address"), "{tag}: only the address is ever asked");
+    }
+    assert_eq!(Ask::ALL.map(Ask::name), ["school_address", "forwarding_elsewhere"], "no ask is about a date");
+}
+
+/// Whether `text` holds `word` as a whole word (not inside a longer run of letters or digits).
+fn names(text: &str, word: &str) -> bool {
+    text.match_indices(word).any(|(i, w)| {
+        let before = text[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+        let after = text[i + w.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+        before && after
+    })
+}
+
+fn files_under(dir: &Path, exts: &[&str], out: &mut Vec<PathBuf>) {
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            files_under(&p, exts, out);
+        } else if p.extension().and_then(|x| x.to_str()).is_some_and(|x| exts.contains(&x)) {
+            out.push(p);
+        }
+    }
+}
+
+#[test]
+fn the_mail_code_names_no_school() {
+    let mut words: Vec<&str> = Vec::new();
+    for c in knowlu::scaffold::CAMPUSES.iter() {
+        words.extend([c.unitid, c.key]);
+        words.extend(c.mail_domain);
+    }
+    assert!(words.len() >= 4, "the curated table was read");
+    let mut files: Vec<PathBuf> = Vec::new();
+    for e in std::fs::read_dir("src").unwrap().flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with("mail") && name.ends_with(".rs") {
+            files.push(e.path());
+        }
+    }
+    files_under(Path::new("src/mail"), &["rs"], &mut files);
+    files_under(Path::new("assets/mail"), &["js", "ts", "json"], &mut files);
+    assert!(files.iter().any(|f| f.ends_with("setup.rs")), "src/mail/setup.rs was read");
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        for w in &words {
+            assert!(!names(&text, w), "{} names a school: {w}", f.display());
+        }
+    }
+}
+
+#[test]
+fn a_closed_backfill_batch_starts_a_slot_now() {
+    let r = rig("t113-slot");
+    r.host.lock().unwrap().msgs = ana_mail(2);
+    let p = wait(&r.start(curated_m365(), true));
+    assert_eq!(p.ended, Some("finished"));
+    let ev = r.events();
+    let at = |e: &str| ev.iter().position(|x| x == e).unwrap_or_else(|| panic!("no {e}: {ev:?}"));
+    assert!(at("svc batch sent") < at("slot now"), "the slot starts once the batch is closed");
+    assert_eq!(r.closed.load(Ordering::SeqCst), 1, "one closed batch starts one slot");
+    // The app's own hook runs the slot through the scheduler (§4.8 step 1).
+    assert!(include_str!("../src/mail/live.rs").contains("scheduler::run_slot"));
+}
+
+#[test]
+fn with_the_saved_sign_in_off_setup_uses_mail_setup_and_wipes_it_on_close() {
+    let off = rig("t113-keep-off");
+    let p = wait(&off.start(curated_m365(), false));
+    assert_eq!(p.ended, Some("finished"));
+    assert_eq!(off.host.lock().unwrap().opens, [(setup_dir(&off.dir), true)]);
+    assert!(!setup_dir(&off.dir).exists(), "mail-setup is wiped when the window closes");
+    assert!(!session_dir(&off.dir, A).unwrap().exists());
+    assert!(MailState::load(&off.dir).unwrap().pending_deletes.is_empty());
+
+    let on = rig("t113-keep-on");
+    let p = wait(&on.start(curated_m365(), true));
+    assert_eq!(p.ended, Some("finished"));
+    assert_eq!(on.host.lock().unwrap().opens, [(session_dir(&on.dir, A).unwrap(), true)]);
+    assert!(session_dir(&on.dir, A).unwrap().exists(), "the kept profile stays");
+    assert!(!setup_dir(&on.dir).exists());
+}
+
+/// A mailbox whose first backfill began and was cut off: the service holds its window start, the kept
+/// profile is on disk, and `mail.json` marks it open.
+fn open_backfill_rig(tag: &str, n: usize) -> Rig {
+    let r = rig(tag);
+    {
+        let mut s = r.sv.lock().unwrap();
+        s.provider = "m365".into();
+        s.hint = Some(HINT_PAGE.into());
+        s.backfill_since = Some("2026-06-04".into());
+        s.canary_sent = true;
+    }
+    r.host.lock().unwrap().msgs = ana_mail(n);
+    profile(&r.dir, &format!("mail-session-{A}"));
+    MailState::update(&r.dir, |s| {
+        s.open_backfills.push(A.to_string());
+        true
+    })
+    .unwrap();
+    r
+}
+
+#[test]
+fn an_open_backfill_resumes_at_launch() {
+    let r = open_backfill_rig("t113-resume", 2);
+    assert_eq!(open_backfills(&r.dir), [A]);
+    let shared = r.setups.start_resume(r.dir.clone(), vec![A.to_string()], r.env()).expect("a resume started");
+    let p = wait(&shared);
+    assert_eq!(p.ended, Some("finished"));
+    assert_eq!(r.host.lock().unwrap().opens, [(session_dir(&r.dir, A).unwrap(), false)], "hidden, on the kept profile");
+    assert_eq!(r.sv.lock().unwrap().batches, ["2026-06-04"], "the window the first backfill fixed, never recomputed");
+    assert_eq!(r.calls("m365/forward.js").len(), 2);
+    assert!(MailState::load(&r.dir).unwrap().open_backfills.is_empty(), "a finished backfill is not resumed again");
+    assert_eq!(r.closed.load(Ordering::SeqCst), 1);
+    assert!(r.host.lock().unwrap().closed >= 1 && session_dir(&r.dir, A).unwrap().exists());
+
+    // A mailbox the student turned off in Knowlu's Settings is never resumed.
+    let t = open_backfill_rig("t113-resume-off", 1);
+    turn_off(&t.dir, A).unwrap();
+    assert!(open_backfills(&t.dir).is_empty());
+
+    // Signed out: no window is shown, nothing is read, and the marker stays for the next launch.
+    let s = open_backfill_rig("t113-resume-out", 1);
+    s.host.lock().unwrap().signed_in = false;
+    let shared = s.setups.start_resume(s.dir.clone(), vec![A.to_string()], s.env()).unwrap();
+    let p = wait(&shared);
+    assert_eq!(p.line, Some("needs sign-in"));
+    assert!(s.host.lock().unwrap().opens.iter().all(|(_, visible)| !visible));
+    assert!(s.sv.lock().unwrap().batches.is_empty());
+    assert_eq!(open_backfills(&s.dir), [A]);
+}
+
+#[test]
+fn an_open_backfill_resumes_again_as_its_pace_allows() {
+    let r = open_backfill_rig("t113-pace", 3);
+    let env = r.env();
+    let shared = Shared::new();
+    // 599 sent today: one more fits, then the day's 600 are spent.
+    let mut routine = Routine::new(Provider::M365, NOW.div_euclid(DAY), 599);
+    let next_day = (NOW.div_euclid(DAY) + 1) * DAY;
+    let d = Drive {
+        mb: &*env.host,
+        client: &env.client,
+        clock: &*env.clock,
+        provider: Provider::M365,
+        address_id: A,
+        knowlu_address: KNOWLU,
+        since: "2026-06-04".parse().unwrap(),
+        shared: &shared,
+        on_closed: &*env.on_closed,
+        data_dir: &r.dir,
+    };
+    let end = drive_backfill(&d, &mut routine);
+    assert_eq!(end, Drove::Done);
+    assert!(r.clk.at() >= next_day, "it waited for the next UTC day");
+    assert_eq!(r.calls("m365/forward.js").len(), 1 + 3, "one before the day's limit, the window again after it");
+    assert_eq!(r.sv.lock().unwrap().batches, ["2026-06-04", "2026-06-04"], "each pass is a backfill batch on the same window");
+    assert_eq!(r.closed.load(Ordering::SeqCst), 2, "each closed batch starts a slot");
+    assert!(MailState::load(&r.dir).unwrap().open_backfills.is_empty());
+}
+
+use knowlu::mail::backfill::{drive_backfill, open_backfills, Drive, Drove};
+
+fn position(ev: &[String], e: &str) -> usize {
+    ev.iter().position(|x| x == e).unwrap_or_else(|| panic!("no {e}: {ev:?}"))
+}
+
+#[test]
+fn a_school_microsoft_mailbox_sets_up_in_order() {
+    let r = rig("t113-m365");
+    r.host.lock().unwrap().msgs = ana_mail(2);
+    let p = wait(&r.start(curated_m365(), true));
+    assert_eq!(p.ended, Some("finished"));
+    assert_eq!(p.line, Some("setup finished"));
+    for step in ["sign_in", "step_aside", "forwarding", "canary", "backfill", "finish"] {
+        assert_eq!(row(&p, step).state, "done", "{step}");
+    }
+    let ev = r.events();
+    let at = |e: &str| position(&ev, e);
+    assert!(at("svc mint") < at("window visible") && at("window visible") < at("script m365/signin.js"));
+    assert!(at("script m365/signin.js") < at("svc hint") && at("svc hint") < at("aside"));
+    assert!(at("aside") < at("script m365/forwarding_set.js"));
+    assert!(at("script m365/forwarding_set.js") < at("script m365/forwarding_read.js"), "read back after navigating away and back");
+    assert!(at("script m365/forwarding_read.js") < at("svc canary") && at("svc canary") < at("svc batch"));
+    assert!(at("svc batch") < at("svc batch sent") && at("svc batch sent") < at("slot now"));
+    let set = &r.calls("m365/forwarding_set.js")[0];
+    assert_eq!((set["address"].clone(), set["replace"].clone()), (json!(KNOWLU), json!(false)));
+    let places: Vec<&String> = ev.iter().filter(|e| e.starts_with("open ")).collect();
+    assert_eq!(places[..3], ["open Forwarding", "open Inbox", "open Forwarding"], "away and back: {places:?}");
+    assert_eq!(r.calls("m365/sent_cleanup.js").len(), 1);
+    let h = r.host.lock().unwrap();
+    assert_eq!((h.aside, h.closed >= 1), (1, true));
+}
+
+#[test]
+fn a_gmail_setup_opens_the_confirm_window_before_adding_the_address_and_waits_out_the_popup() {
+    let r = rig("t113-gmail");
+    {
+        let mut h = r.host.lock().unwrap();
+        h.title_address = Some(HINT_PAGE.to_string());
+        h.popup_polls = 4;
+        h.msgs = ana_mail(1);
+    }
+    let p = wait(&r.start(Kind::Gmail, true));
+    assert_eq!((p.ended, p.provider), (Some("finished"), "google"));
+    for step in ["sign_in", "step_aside", "add_address", "confirm_address", "turn_on", "canary", "backfill", "finish"] {
+        assert_eq!(row(&p, step).state, "done", "{step}");
+    }
+    let ev = r.events();
+    let at = |e: &str| position(&ev, e);
+    assert!(at("svc hint") < at("svc state confirming"), "the mailbox's own address is set first");
+    assert!(at("svc state confirming") < at("script gmail/forwarding_add.js"), "the 15-minute confirm window opens before Google mails");
+    assert!(at("script gmail/forwarding_add.js") < at("script gmail/forwarding_add_done.js"));
+    assert!(at("script gmail/forwarding_add_done.js") < at("script gmail/forwarding_set.js"));
+    assert!(at("script gmail/forwarding_set.js") < at("svc canary") && at("svc canary") < at("svc batch"));
+    let asides: Vec<usize> = ev.iter().enumerate().filter(|(_, e)| *e == "aside").map(|(i, _)| i).collect();
+    assert_eq!(asides.len(), 2, "the window steps aside, and again once the popup has closed");
+    assert!(at("script gmail/forwarding_add.js") < asides[1] && asides[1] < at("script gmail/forwarding_add_done.js"));
+    assert!(r.host.lock().unwrap().popup_polls == 0, "the runner waited the popup out");
+}
+
+fn queue(r: &Rig, script: &str, answers: Vec<Value>) {
+    r.host.lock().unwrap().queued.insert(script.to_string(), answers.into());
+}
+
+#[test]
+fn forwarding_elsewhere_is_asked_and_only_a_yes_replaces_it() {
+    let ours = json!({ "result": "ok", "forwarding": "on", "to": "ours", "keep_copy": true, "changed": true });
+    let r = rig("t113-else");
+    queue(&r, "m365/forwarding_set.js", vec![json!({ "result": "elsewhere" }), ours]);
+    let shared = r.start(curated_m365(), true);
+    until("the question", || shared.progress().ask == Some("forwarding_elsewhere"));
+    assert_eq!(row(&shared.progress(), "forwarding").state, "needs_you");
+    assert!(shared.answer(Answer::Replace(true)));
+    assert_eq!(wait(&shared).ended, Some("finished"));
+    let sets = r.calls("m365/forwarding_set.js");
+    assert_eq!((sets.len(), sets[0]["replace"].clone(), sets[1]["replace"].clone()), (2, json!(false), json!(true)));
+    assert_eq!(shared.asked(), ["forwarding_elsewhere"]);
+
+    let n = rig("t113-else-no");
+    queue(&n, "m365/forwarding_set.js", vec![json!({ "result": "elsewhere" })]);
+    let shared = n.start(curated_m365(), true);
+    until("the question", || shared.progress().ask == Some("forwarding_elsewhere"));
+    assert!(shared.answer(Answer::Replace(false)));
+    assert_eq!(wait(&shared).ended, Some("stopped"));
+    assert_eq!(n.calls("m365/forwarding_set.js").len(), 1, "nothing replaces it without a yes");
+    assert!(!n.events().contains(&"svc canary".to_string()));
+}
+
+#[test]
+fn a_gmail_script_that_reloads_is_run_again_once_with_reloaded_set() {
+    let ours = json!({ "result": "ok", "forwarding": "on", "to": "ours", "keep_copy": true, "changed": true });
+    let reloading = json!({ "result": "reloading" });
+    let r = rig("t113-reload");
+    r.host.lock().unwrap().title_address = Some(HINT_PAGE.to_string());
+    queue(&r, "gmail/forwarding_set.js", vec![reloading.clone(), ours]);
+    let p = wait(&r.start(Kind::Gmail, true));
+    assert_eq!(row(&p, "turn_on").state, "done");
+    let sets = r.calls("gmail/forwarding_set.js");
+    assert_eq!(sets.len(), 2);
+    assert_ne!(sets[0]["reloaded"], json!(true));
+    assert_eq!(sets[1]["reloaded"], json!(true));
+
+    // A second miss is "not found", and the step falls to its guided version.
+    let t = rig("t113-reload-twice");
+    t.host.lock().unwrap().title_address = Some(HINT_PAGE.to_string());
+    queue(&t, "gmail/forwarding_set.js", vec![reloading]);
+    let shared = t.start(Kind::Gmail, true);
+    until("the failed step", || has(&shared, "turn_on", "failed"));
+    let p = shared.progress();
+    assert_eq!((row(&p, "turn_on").reason, row(&p, "turn_on").guided), (Some("not_found"), true));
+    assert_eq!(t.calls("gmail/forwarding_set.js").len(), 2, "run again once, never in a loop");
+    shared.stop();
+    wait(&shared);
+}
+
+#[test]
+fn the_progress_never_holds_an_address_or_a_token() {
+    let r = rig("t113-private");
+    r.host.lock().unwrap().msgs = ana_mail(1);
+    let shared = r.start(uncurated(), true);
+    answer_address(&shared);
+    let p = wait(&shared);
+    assert_eq!(p.ended, Some("finished"));
+    let text = serde_json::to_string(&p).unwrap();
+    for secret in [KNOWLU, HINT_PAGE, TYPED, TOKEN, ANA, "school.example", "@"] {
+        assert!(!text.contains(secret), "the progress holds {secret}: {text}");
+    }
 }

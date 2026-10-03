@@ -88,11 +88,22 @@ pub struct MailState {
     pub pending_deletes: Vec<String>,
     /// Mailboxes the student turned off in Knowlu's Settings; only grows (§13 Q11).
     pub turned_off: Vec<String>,
+    /// Mailboxes whose backfill began and has not finished: the app resumes each at launch (§4.11, T11.3).
+    /// An address id only; the window's start is the service's `backfill_since`. Written only while one
+    /// is open, so a file with none is byte-for-byte what spec §5.4 lists.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub open_backfills: Vec<String>,
 }
 
 impl Default for MailState {
     fn default() -> MailState {
-        MailState { keep_session: true, last_reconcile: BTreeMap::new(), pending_deletes: Vec::new(), turned_off: Vec::new() }
+        MailState {
+            keep_session: true,
+            last_reconcile: BTreeMap::new(),
+            pending_deletes: Vec::new(),
+            turned_off: Vec::new(),
+            open_backfills: Vec::new(),
+        }
     }
 }
 

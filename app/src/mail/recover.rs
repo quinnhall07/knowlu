@@ -223,6 +223,9 @@ pub enum Place {
     Inbox,
     /// Sent (Sent Items), where `sent_cleanup.js` runs.
     Sent,
+    /// Settings, Forwarding (T11.3): Microsoft 365's scripts expect the page already open; Gmail's go to
+    /// their section by hash from wherever the window is, so for Gmail this is the Inbox.
+    Forwarding,
 }
 
 /// The mailbox's window as the routine drives it: a compiled-in script by name, and a place to be.
@@ -265,7 +268,8 @@ impl Mailbox for WindowMailbox<'_> {
         let url = match (self.provider, place) {
             (Provider::M365, Place::Inbox) => "https://outlook.office.com/mail/inbox",
             (Provider::M365, Place::Sent) => "https://outlook.office.com/mail/sentitems",
-            (Provider::Gmail, Place::Inbox) => "https://mail.google.com/mail/u/0/#inbox",
+            (Provider::M365, Place::Forwarding) => "https://outlook.office.com/mail/options/mail/forwarding",
+            (Provider::Gmail, Place::Inbox | Place::Forwarding) => "https://mail.google.com/mail/u/0/#inbox",
             (Provider::Gmail, Place::Sent) => "https://mail.google.com/mail/u/0/#sent",
             (Provider::Guided, _) => return Err(Refusal::NotForProvider),
         };
@@ -296,6 +300,9 @@ pub struct Job<'a> {
     pub window: Window,
     /// `Some(SLOT_CAP)` in a slot with no backfill open; `None` while a backfill is open (§4.11).
     pub cap: Option<u32>,
+    /// Told `(expected, handled, sent)` as the pass goes (counts only); `false` stops the pass at its next
+    /// send as [`Stop::Stopped`]. The setup runner's progress and its Stop (T11.3).
+    pub watch: Option<&'a dyn Fn(u32, u32, u32) -> bool>,
 }
 
 /// Why a pass ended. A fixed word or a service error's name: nothing the page or a message said.
@@ -311,6 +318,8 @@ pub enum Stop {
     Paused(Paused),
     /// A guided mailbox has no scripts to run.
     Guided,
+    /// The student stopped the setup (the job's `watch` said so).
+    Stopped,
     /// A step could not run or finish (a refusal's wording, or a fixed word).
     Script(&'static str),
     /// A service call failed ([`MailError::name`]).
@@ -463,8 +472,17 @@ impl Pass<'_> {
         Ok(taken)
     }
 
+    /// Reports the counts so far; `Stopped` when the job's watcher says to stop.
+    fn tick(&self) -> Step<()> {
+        match self.job.watch {
+            Some(w) if !w(self.out.expected, self.out.handled, self.out.sent) => Err(Stop::Stopped),
+            _ => Ok(()),
+        }
+    }
+
     /// The slot's room: stops the pass at the cap.
     fn room(&self) -> Step<u32> {
+        self.tick()?;
         match self.job.cap {
             Some(cap) if self.out.sent >= cap => Err(Stop::SlotCap),
             Some(cap) => Ok(cap - self.out.sent),
@@ -544,7 +562,7 @@ impl Pass<'_> {
         } else {
             self.send_m365(row)?;
         }
-        Ok(())
+        self.tick()
     }
 
     fn send_m365(&mut self, row: &Row) -> Step<()> {
@@ -638,6 +656,7 @@ impl Pass<'_> {
             };
             self.out.handled += u32::from(done);
         }
+        self.tick()?;
         self.send_gmail(cands)
     }
 
