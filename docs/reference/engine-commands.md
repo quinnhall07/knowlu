@@ -69,6 +69,19 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   are normal outcomes. The account is the source of truth and the folder is its mirror (cloud design,
   amendment 2026-09-17, ruling 2); the service can read what it stores, says so on the privacy page,
   and deletes it with the account.
+- `mail-applied --vault <v> [--since <timestamp>]` — read-only: what forwarded mail wrote, as one JSON
+  object through `ledger::dumps_value`. Never writes and is never gated (like `surface`); always exits 0.
+  The journal is the only source: records by `agent:knowlu.mail` (`mail::MAIL_ACTOR`) at or after
+  `--since` (else from the first mail record), joined to each note's current value. Shape:
+  `{since, courses: [{course, created, changed, archived: {count, items}, notices}]}`, one group per
+  course, and a group with `course: null` (the notices) last. A `created` or `archived` row carries
+  `path`, `id`, `uid`, `title`, `due`, `ts`, `current` and `changed_since`; a `changed` row carries
+  `path`, `id`, `title`, `field`, `old`, `new`, `current`, `sender`, `date`, `ts` and `changed_since`
+  (sender and date are read back from the `<date> · <sender>: <why> — "<evidence>"` body line);
+  a notice row carries `path`, `id`, `kind`, `title`, `opened_at`, `ts` and `changed_since`.
+  `changed_since` is true when the note is gone, a non-agent has written to it since mail's create, or
+  it no longer holds what mail left; the app then offers no Undo. `mail_asof` is the pass's own
+  bookkeeping and never a row. The app's `mail_applied` command runs it.
 - **The engine gates itself** (ruling 3): `coursework`, `ingest`, `judge` and `sync` do not run past the
   72-hour entitlement grace the app caches — `engine/src/entitle.rs` reads
   `%LOCALAPPDATA%\knowlu\profiles\<id>\entitlement.json` and the refusal is a named line at exit 0.
@@ -105,10 +118,36 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   the silent `no_gmail_scope`, a revoked one prints `gmail: skipped (gmail is not connected;
   re-connect from settings)`). Every Gmail item is a proposal: `task` items file a card like
   `borderline`, `event` and `opportunity` ones, and only approving the card makes the note, so the
-  summary reads `gmail: 0 task(s), N proposed, …`. **The transport stop** (spec Q1 (a′), which lands
-  with T8 and waits on the plan's PQ1, so it is not yet in this branch): a probe that failed in
-  transport ends the cloud arm with `judge: skipped (no network (…))` at exit 0; whether tier 1's
-  answers are still written first is what PQ1 decides. Recount this paragraph when T8 lands.
+  summary reads `gmail: 0 task(s), N proposed, …`. **The transport stop** (spec Q1 (a′), PQ1 answer (i), on branch
+  `email-forwarding`): a probe that failed in transport ends the cloud arm's network passes
+  (events, Gmail, mail, rules, labels) with one leading `judge: skipped (no network (…))` line at
+  exit 0; tier 1's answers are still written first (`enrich_with` with the service marked missing).
+- **Forwarded mail (email spec 2026-09-30; `engine/src/mail/`).** `judge`'s cloud arm runs the mail
+  pass (`mail::pull_mail`) after the Gmail pull and before the rules pass, inside the same entitlement
+  gate, so a lapsed account pulls nothing; it is not a new command and `rank` never reaches it. Per
+  slot it takes up to `enrich::PULL_ROUNDS` pulls from `POST /mail-pull` (a closed backfill batch drains
+  past them, inside the budget), plans each page with the pure `mailreconcile::plan` (the one place
+  card or direct is decided), asks `/mail-resolve` once per course for ambiguous claims, and writes as
+  `agent:knowlu.mail` through `write`, journal first. A message is acknowledged on the next pull, and
+  recorded in `state/ingest-seen.md` under the fixed title `(email)`, only when every claim of it was
+  written or deliberately skipped; a held one comes back. No mail text, address or session enters a
+  log, the journal or telemetry. **Run line**, printed when a mailbox is connected or a message arrived
+  and never otherwise: `mail: N new, M changed, K proposed, J notices, P past, S superseded, U
+  unmatched`, with `, X not written` and `, Y unreadable` on the end when non-zero. Other lines are
+  named failures: `mail: skipped (<why>)`, `mail: N written but not acknowledged (<why>); they will
+  come back next slot`, `mail: could not ask which item (<why>); left for the next slot`, `mail: more
+  is waiting, left for the next slot`, `mail: mailbox <id> is <state>` (a heads-up item for a mailbox
+  that stopped delivering). A mail card on the vault's first day is filed `snoozed` to day 2 and
+  `pending` from then on (`mailreconcile::proposal` over `commitments::vault_day`); a due that came
+  from mail is recorded in the note's `mail_asof`.
+- **`ingest`'s ruling-3 card** (ruling 3 and email spec D11 (5); `ingest::propose_feed_value`). When the
+  feed changes a `title` or `due` the student edited by hand (`Journal::human_edited`), the note keeps
+  its value and `ingest` files one `kind: amend` card from the note's value to the feed's, created by
+  the feed's own name (`approvals::TITLE_CARD_CREATOR`), with no `source_uid` and no judgment field,
+  pending from today and charged to the 15-a-day budget. It files nothing when the note's side is null
+  or a collection, a value would not fit on one line, a pending or snoozed amend card for that note and
+  field already exists, or the student rejected a card proposing this same value. Every other field the
+  feed changed is written as before.
 - `runs`, `info`, `issues`, `write` (`--actor`, `--via` from `journal::VIAS`) — run records, info
   items, issue notes, journaled note edits. A human `--actor` (and `--opened-by`/`--closed-by`)
   defaults to the vault's token (`config/actor.yaml`; absent means `quinn`); `write` refuses a human

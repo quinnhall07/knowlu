@@ -47,6 +47,72 @@ time, so `deno test` needs no environment at all.
 - The migration and both functions reach staging before a device build with the D4 gate runs a slot
   there (`db push --include-all`).
 
+## Forwarded mail (`mail`, `mail-inbound`, `mail-process`, `mail-canary`, `mail-pull`, `mail-resolve`)
+
+Spec `docs/specs/2026-09-30-email-forwarding-design.md`, plan `docs/plans/2026-09-30-email-forwarding-plan.md`.
+Migration `20261002000200_mail.sql`; not on production, and no release is cut from a `main` carrying it
+before privacy bump #1. All six functions are `verify_jwt = false` in `config.toml`; each authenticates
+itself as named below.
+
+- **`mail-inbound`**: SES stores each message in S3 and SNS posts here. Authenticated by the SNS
+  signature (`_shared/sns.ts`); only `SignatureVersion` 2 is accepted, and a refusal is a bare 403.
+  Finds the mailbox by the address token's HMAC, checks entitlement, fetches the object once, classifies
+  it (canary, Gmail's confirmation, batch send, live mail), dedups and hands live mail off under `work/`.
+  Mail for no known mailbox is deleted unread.
+- **`mail-process`**: the worker over `mail_work`, called by cron every minute and kicked by intake, with
+  `x-knowlu-job-token`. Parse, screen (no model), templates (no model), then the model for the rest; each
+  item's object and row are deleted when it is done. `{mode: "sweep"}` runs the nightly sweep.
+- **`mail-canary`**: hourly cron, same header. Judges delivery checks that did not return and sends one to
+  a mailbox that has gone quiet, under the limits of spec §4.10.
+- **`mail`** (device routes, session JWT): `GET`/`POST /addresses`, `POST /addresses/<id>/hint`,
+  `/rotate` and `/state`, `DELETE /addresses/<id>`, `POST /canary`, `POST /batches` and
+  `/batches/<id>/sent`, `POST /reconcile`, `GET /provider?domain=`. The list and the delete need a session
+  only, so a lapsed account can always see and disconnect its mailboxes; every other route passes the
+  entitlement gate. `DELETE` revokes, deletes the mailbox's `work/` objects, then `delete_mail_address`
+  purges every row that serves it.
+- **`mail-pull`** (session plus entitlement): acks, closes finished batches, withholds a batch until it is
+  whole, and answers one page of queued `mail_claims` in (ordering date, uid) order.
+- **`mail-resolve`** (session plus entitlement): one course's ambiguous claims against its candidates;
+  the server reads each claim from the account's own row, never from the request.
+- **Tables** (all with RLS on, no policy; the service role only): `mail_accounts`, `mail_addresses`,
+  `mail_batches`, `mail_canaries`, `mail_seen`, `mail_work`, `mail_claims`. `models`, `usage_daily` and
+  `judgments` gain the kinds `mail_claim`, `mail_resolve` and `mail_digest`, and `judgments` the origin
+  `forward`. RPCs: `delete_mail_address`, `charge_allowance`, `refund_allowance`, `enforce_budget`,
+  `mail_hand_off`, `count_mail_arrival`, `expire_mail_work`. `mail_digest` has a kind and no function
+  yet (T16 is Quinn's call at Checkpoint D).
+- **Cron** (pg_cron + pg_net, guarded: a missing Vault secret raises into `cron.job_run_details`):
+  `knowlu-mail-process` every minute, `knowlu-mail-canary` at :11 each hour, `knowlu-mail-sweep` at
+  07:47 UTC daily.
+
+### The AWS runbook (spec §5.1; staging region `us-east-2`)
+
+The receiver is SES inbound on a subdomain of the product domain (MX on it). One receipt rule set holds one
+rule with one action: the S3 action, with its own `TopicArn` set and nothing else (no separate SNS action,
+no bounce). The bucket blocks public access, encrypts at rest and expires `inbound/` and `work/` objects
+after one day. The topic allows publish from SES only. Mail that fails DMARC is stored and judged later,
+never rejected at the door (S0, `docs/reports/2026-10-01-email-forwarding-t0-gates.md`).
+
+Secrets, by name only; each is set from the owner's own shell and never printed:
+
+| Where | Names |
+|---|---|
+| Function secrets (`supabase secrets set`) | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (the IAM key pair, Quinn's shell), `AWS_REGION`, `MAIL_BUCKET`, `MAIL_DOMAIN`, `MAIL_SNS_TOPIC_ARN`, `MAIL_ADDRESS_KEY`, `MAIL_ENC_KEY` (generated blind), `MAIL_JOBS_TOKEN`, plus the existing `EMAIL_API_URL` and `EMAIL_API_KEY` |
+| Vault (SQL editor, once per project) | `mail_process_url`, `mail_canary_url`, `mail_jobs_token` (the same string as `MAIL_JOBS_TOKEN`) |
+
+Order, per project:
+
+1. `supabase db push` (`--include-all` only when an older stamp is pending), then set the secrets and the
+   Vault entries.
+2. `supabase functions deploy <name> --use-api --project-ref <ref>` for all six.
+3. Set the topic to sign with SHA-256 **before** subscribing, because a topic signs with version 1 by
+   default and `verifySns` refuses it: `aws sns set-topic-attributes --topic-arn <MAIL_SNS_TOPIC_ARN>
+   --attribute-name SignatureVersion --attribute-value 2`, then read it back with `aws sns
+   get-topic-attributes`. Skipped, the SubscriptionConfirmation gets a bare 403 and the subscription
+   stays `PendingConfirmation` with no log.
+4. Point the topic's HTTPS subscription at `mail-inbound` and confirm it.
+5. Smoke by a staging session (at most two one-time codes an hour): a canary round trip, one synthetic
+   forward and a count-only query. Production gets its own domain, bucket, topic and rule set.
+
 ## Testing
 
 ```powershell
