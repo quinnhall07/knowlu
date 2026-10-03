@@ -18,7 +18,7 @@ working title appears nowhere in this plan, the code, the tests or the copy.
 **Status:** in build. T5.1–T5.4, T8, T8b, T8c, T5.5 and both Checkpoint A fix rounds are on
 `email-engine` (HEAD `4194817`). Checkpoint A passed on 2026-10-02 (Quinn). PQ6, PQ7 and PQ8 were
 answered the same day (§4). T5.6 is built (`d0abe3e`); its addendum read opened PQ9 (§4) and
-amended T6.3. The ledger is
+amended T6.3. PQ9 is still open; T6.2 through H2 were built past its block, and §9.5 records it. The ledger is
 `.superpowers/sdd/2026-09-30-email-forwarding/progress.md`.
 
 ## 1. Goal, and what must not move
@@ -416,7 +416,8 @@ Briefs cite functions and headings, never line numbers.
     argument that "resolution reads no `due`" is re-checked, since `carded` would read a task card's
     due.
   - *Blocks:* T6.2, by T5.6's rule that no Important finding from its read is open. T6.3 fills a
-    card's `due` either way.
+    card's `due` either way. *(2026-10-03: T6.2 through H2 were built with PQ9 open and merged into
+    `email-app`. The block now falls on Checkpoint D and T18, before any live mail pass; §9.5.)*
 
 ## 5. Tasks
 
@@ -470,7 +471,7 @@ marks a task that needs Quinn's word, presence, a secret or a spend. **WT** is t
 | T8c | `contract-engineer` (Opus, xhigh) | yes | F3 (answered) | `engine/src/approvals.rs` CL | T8b | engine |
 | T5.5 | `contract-engineer` (Opus, xhigh) | yes | PQ4, PQ7 (answered) | `engine/src/mailreconcile/{mod,resolve,rules}.rs` | T8c | engine |
 | A | `contract-reviewer` (Opus, xhigh) | yes | diffs to Quinn | `docs/reports/…-email-forwarding-contract-review-a.md` | T5.5 and both fix rounds; **passed 2026-10-02** | — |
-| T5.6 | `contract-engineer` (Opus, xhigh) | yes | PQ8 (answered: (ii)); PQ9 (open) for its read's fix | `engine/src/mailreconcile/{resolve,rules}.rs` | A | engine |
+| T5.6 | `contract-engineer` (Opus, xhigh) | yes | PQ8 (answered: (ii)); PQ9 (open; built past, §9.5) for its read's fix | `engine/src/mailreconcile/{resolve,rules}.rs` | A | engine |
 | T6.1 | `implementer` (Sonnet, high) | no | — | `engine/src/cloudmodel.rs`, `engine/tests/mail_pass.rs` (new) | T5.6 | engine |
 | T6.2 | `implementer` (Sonnet, high) | no | — | `engine/src/mail.rs` (new), `engine/tests/mail_pass.rs` | A, T5.6's read, T6.1, H1b | engine |
 | T6.3 | `implementer` (Sonnet, high) | no | PQ7 (answered) | `engine/src/mail.rs`, `engine/tests/mail_pass.rs` | T6.2 | engine |
@@ -2326,7 +2327,8 @@ account, the region (`us-east-2`), DNS and the DMARC sender (S0); PQ2, PQ4, F3, 
 ((ii) only) (2026-10-02, later the same day). T19 merged as #29 (§9.5).
 Still open:
 - the plan's reading of "pending" in T5.6 (open or snoozed), read with T5.6's addendum;
-- PQ9, a new due for a task a pending mail card proposes (T5.6's addendum; blocks T6.2);
+- PQ9, a new due for a task a pending mail card proposes (T5.6's addendum). It blocked T6.2, but T6.2
+  through H2 were built past it, so it now blocks Checkpoint D and T18 (§9.5);
 - PQ10, whether and when a claim `mail-resolve` never answers is given up and acked (T6.4 built hold
   only; the T5.5 ledger row in §9.5 names the effect);
 - the sign-ins at the machine (S1–S3);
@@ -2346,7 +2348,7 @@ R19. Every other task starts on Sonnet, and a second failure moves it to Opus at
 - **Checkpoint A:** the contract review of T5, T8, T8b and T8c, with the diffs and the plan's reading
   of F3. Passed 2026-10-02; T5.6's addendum goes to Quinn only if it opens a finding or the
   "pending" reading is questioned. It opened one: PQ9.
-- **Checkpoint D:** the whole-branch review, before T18, with PQ3.
+- **Checkpoint D:** the whole-branch review, before T18, with PQ3, and PQ9 if it is still open (§9.5).
 - **The merge word** at T18d.
 - **Outside this lane:** A13's review trigger at the 20th paying account. T13a puts it in Quinn's
   queue.
@@ -2629,6 +2631,7 @@ spec text moves. A row marked **open** waits on Quinn or the planner.
 | Checkpoint A passed. T8c's two arms are keyed on the card's `created_by: mail`, so arm (1) fills any dateless task, hand-made too, and never checks the target's `created_by`. | Quinn confirmed the plan's reading at Checkpoint A. The re-read covered both fix rounds through `4194817` (`fa980a1` and `4194817` added to the list). | T8c, T5.5; Checkpoint A's report | **Answered 2026-10-02 (Quinn)** |
 | PQ6 (a). The allowance is per account per 120-day period on `mail_accounts.allowance_opened_at`. T1.1 was built before the answer with `allowance_term_start` and `term_start`; T1.3 renames them to `allowance_opened_at` (`timestamptz`) and `backfill_since` in the still-unapplied `20261002000200_mail.sql`, and updates `the_mail_tables_have_section_5_1s_columns_and_words`. `term_start` is renamed, not dropped: T4.2 and T10.1 read the window start, and T15.1 shows it. The opening rule sits in `charge_allowance`'s one statement, so the period opens at the first backfill charge, not at the batch route. | Quinn, 2026-10-02, amending decision 8 and D23 (markers at decision 8, D23 and §5.1). Renaming in the unapplied file keeps one mail migration; nothing is applied until T18. Opening in the charge keeps T4.2 unchanged; the two moments differ by minutes. | T1.3, T3e; the renamed column test, T1.3's and T3e's allowance tests | **Answered 2026-10-02 (Quinn)**; the column and opening details are the plan's |
 | PQ8 (ii) only. T5.6 is added before T6.1 and T6.2: a live `new_item` matching an open mail task card by normalised title and course files nothing (`AlreadyApplied`). "Open" is read as `pending` or `snoozed`, since a first-day card is snoozed (R16). (i) is declined: T3d keeps "From is the mailbox itself". | Quinn, 2026-10-02. The device rule catches S0 capture 5's rule-forward duplicate without dropping a note the student mails themselves. | T5.6, T3d; T5.6's tests, `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` | **Answered 2026-10-02 (Quinn)**; the "snoozed" reading is the plan's, for Quinn's read with T5.6's addendum. Built `d0abe3e`. The addendum read amended T6.3: the view fills `kind`, and a task card's `title`, `course` and `due` come from its fenced payload. **Open: PQ9** (a different due, §4) |
+| T6.2, T6.3, T6.4, H1b, H1c, T7 and H2 were built on `email-engine` (`de36f56` through `5cd68ff`, 2026-10-02) with PQ9 open, past PQ9's "Blocks: T6.2" (§4). No answer or waiver was recorded; the T6.2 review fix's ledger line (`157ab49`) named the gate and the work went on. The branch was then merged into `email-app` (`3e39742`, 2026-10-03). Until PQ9 is answered, a live `new_item` with another due for a task a pending or snoozed mail card proposes plans `[Skip(AlreadyApplied)]`, and T6.3 acks it: the date is lost with no card and no notice (`a_live_new_item_matching_a_pending_mail_task_card_files_nothing` pins it). Not the `email-cloud` plan's PQ9 (the Gmail live binding), answered 2026-10-02: the two branches numbered PQ9 and PQ10 apart, so a record of "Quinn's PQ9 answer" there answers nothing here. | Recorded 2026-10-03 (Checkpoint C's engine-merge review). The work built past the gate is unaffected by either answer: T6.3's view reads a task card's `due` from its payload either way (`mail/view.rs`), and T6.2–H2 only carry out the plan's actions. So (b) stays a fix to T5.6's two files (`mailreconcile/{resolve,rules}.rs`) and the five cases of that one test. The loss happens only in a live mail pass on a student's vault, and none runs before T18. | T5.6, T6.3; PQ9's (b) test `a_live_new_item_with_another_due_files_its_own_card` | **open (Quinn), PQ9:** the block moves from T6.2 to Checkpoint D and T18. If (b), `contract-engineer` lands the fix on `email-engine` and `email-engine` is merged into `email-app` again before T18. T11.4 is not blocked, since mail-applied's shape does not change. |
 
 ## 10. Review revisions (2026-09-30)
 
