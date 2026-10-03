@@ -2484,11 +2484,18 @@ fn a_gmail_card_shows_its_gmail_attribution_and_never_a_sender() {
     assert!(deck.contains("sourceLabel(c)"), "the deck card carries the label");
     let view = js.split("function renderDecisionsView(").nth(1).unwrap().split("\n  function ").next().unwrap();
     assert!(view.contains("sourceLabel(c)"), "so does the decisions row");
-    // D21 (T15.5): a mail card, `created_by: mail`, names its sender through `mailCardLine`; the Gmail label
-    // stays D15's, and the Gmail path never reads one.
+    // D21 (T15.5) and Checkpoint D (minor 4): only a mail card names a sender. `surface` sends `from`,
+    // `mail_date` and `evidence` only on a `created_by: mail` card (the engine's
+    // a_card_not_written_by_the_mail_pass_never_carries_a_sender), and the page reads the three in
+    // `mailCardLine` and nowhere else, which draws nothing when none is there. So a Gmail card never
+    // shows a sender.
     assert!(!js.contains("c.sender"), "never the sender");
-    let label = fn_body(&js, "function sourceLabel(c)");
-    assert!(!label.contains("c.from") && !label.contains("mail_date") && !label.contains("evidence"), "the Gmail label never names a sender");
+    let line = fn_body(&js, "function mailCardLine(c)");
+    assert!(line.contains("if (!c.from && !c.mail_date && !c.evidence) { return \"\"; }"), "no keys, no line: {line}");
+    for key in ["c.from", "c.mail_date", "c.evidence"] {
+        assert!(line.contains(key), "mailCardLine reads {key}");
+        assert_eq!(js.matches(key).count(), line.matches(key).count(), "{key} is read outside mailCardLine");
+    }
 }
 
 // ---- T15.1: the mail progress view (email spec §4.5, D6, BW) ----------------------------------------
