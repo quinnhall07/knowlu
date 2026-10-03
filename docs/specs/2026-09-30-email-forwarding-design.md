@@ -361,7 +361,10 @@ the recipients from it, and logs nothing from it.
      field, and (ii) names the mailbox: SES's SPF pass on `<local>+caf_=<your Knowlu address, @ as =>` at
      `gmail.com`, for a `gmail.com` or `googlemail.com` mailbox. A Google Workspace mailbox (provider
      `google` on its own domain) binds the same way on that envelope at its own domain, only when the
-     domain's MX is Google's; no MX, another host or a DNS failure leaves it unbound. Accepted residual
+     domain's MX is Google's; no MX, another host or a DNS failure leaves it unbound. (That MX clause
+     is the controller's record of Quinn's answer; PQ9 as asked did not raise it. Its cost, that a
+     Workspace school behind a filtering gateway passes setup and then has its live mail go unbound, is
+     put to Quinn as plan PQ12, and the clause is not signed until they answer.) Accepted residual
      risk: a sender who has the leaked address and can set that MAIL FROM on Google's relay (a Workspace
      SMTP-relay tenant) binds; Rotate mitigates it, and T18 probes it. X-Forwarded-\* never bind.
      M365, the sealed-signal check: (ii) is the SRS envelope at the mailbox's own domain with SES's SPF

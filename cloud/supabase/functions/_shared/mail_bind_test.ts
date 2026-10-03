@@ -604,6 +604,7 @@ Deno.test("a_workspace_forward_binds_by_googles_seal_its_own_domain_caf_return_p
 Deno.test("a_workspace_caf_envelope_on_a_domain_whose_mx_is_not_google_is_unbound", async () => {
   const fwd = await gmailForward();
   // A filtering gateway, Microsoft's MX, no MX at all, and a DNS failure: none is a Google-hosted domain.
+  // The gateway case is plan PQ12's open question: if Quinn widens the rule to match `hintFits`, it binds.
   for (const domain of ["gateway.test", "m365.test", "nomx.test", "dnsfail.test"]) {
     const box = mailbox({ mailboxHint: `jdoe@${domain}`, confirmUntil: null });
     const env = { ...CAF, mailFrom: `jdoe+caf_=tok=in.knowlu.test@${domain}` };

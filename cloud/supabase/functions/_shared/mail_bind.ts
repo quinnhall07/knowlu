@@ -292,7 +292,10 @@ function envelopeBinds(mailbox: BindMailbox, hint: string, envelope: BindEnvelop
 
 /** PQ9's Workspace condition: a `google` mailbox off Google's own two domains binds only when its domain's
  * MX reads Google (`provider.ts`'s one table). No MX, another host, or DNS failing to answer is `false`;
- * called only once the envelope and Google's seal have passed, so a forgery never reaches DNS. */
+ * called only once the envelope and Google's seal have passed, so a forgery never reaches DNS.
+ * Open (plan PQ12): the MX clause is the controller's record of Quinn's PQ9 answer, which PQ9 as asked did
+ * not raise. It is stricter than `hintFits`, which lets an `other` MX (a Proofpoint or Mimecast gateway in
+ * front of Google) fit a `google` mailbox, so such a school's canary binds and its live mail does not. */
 async function googleHosted(hint: string, mailbox: BindMailbox, deps: BindDeps): Promise<boolean> {
   const domain = hint.slice(hint.lastIndexOf("@") + 1);
   if (mailbox.provider !== "google" || GMAIL_DOMAINS.includes(domain)) return true;

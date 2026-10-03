@@ -411,7 +411,9 @@ Briefs cite functions and headings, never line numbers.
     `gmail.com`. A `googlemail.com` hint expects that `gmail.com` envelope. A `google` mailbox on its
     own domain binds on Google's seal plus SES's SPF pass on the `+caf_=` envelope at that domain naming
     the hint, only when the domain's MX reads Google (`mail/provider.ts`'s `providerOf`, injected as
-    `BindDeps.resolveMx`; a DNS failure is unbound, like a DKIM key lookup failure). No curated-row
+    `BindDeps.resolveMx`; a DNS failure is unbound, like a DKIM key lookup failure). The MX clause is
+    the controller's record of Quinn's answer (progress ledger, 2026-10-02); this question never raised
+    it, so it is not signed until PQ12 is answered. No curated-row
     condition: the server never sees the row. The residual risk (a leaked address plus a sender able to
     set that MAIL FROM on Google's relay) is accepted; Rotate mitigates it, and T18a probes it. The
     spec's §4.6 step 5 carries the amendment. Tests: `a_workspace_forward_binds_by_googles_seal_its_own_domain_caf_return_path_and_google_mx`,
@@ -471,6 +473,28 @@ Briefs cite functions and headings, never line numbers.
     `FORWARDING_COUNTS` in `functions/gmail-read/handler.ts`. P22 and the spec's D22 carry the amendment.
     The P22 status test now reads `P22: a forwarding counts only while confirmed, active or quiet`, and
     `a_gmail_address_without_a_forwarding_reads_exactly_as_today` gains a pending case and a blocked case.
+- **PQ12. PQ9's MX clause and Workspace schools behind a gateway (B-rulings review, 2026-10-02; for
+  Checkpoint B).** The controller's record of Quinn's PQ9 answer binds a Workspace mailbox only when its
+  domain's MX reads Google (`googleHosted` in `_shared/mail_bind.ts`). PQ9 as asked never raised MX.
+  `hintFits` (`mail/provider.ts`) lets an `other` MX fit a `google` mailbox, since refusing a Proofpoint,
+  Mimecast or campus-relay gateway in front of Google would need a per-school exception (rule 1).
+  - *The failing case:* a student at a Workspace school behind a Proofpoint MX sets up a `google`
+    mailbox. The hint fits, and the setup canary binds by Knowlu's DKIM and nonce, which never reads
+    MX, so the row goes `active`. Every real forward is then unbound: deleted, counted as unbound, and
+    Settings suggests a leaked address and offers Rotate. `last_received_at` never moves, the row goes
+    `quiet`, and the periodic canary marks it healthy again. If the same address is also connected by
+    Gmail OAuth, PQ11 counts the row and `gmail-read` steps aside, so neither path reads that mailbox.
+    VISION does not allow that silence.
+  - *What MX adds:* little. SES's SPF pass on the school's own domain already needs that domain's SPF to
+    authorise the relay, and the residual risk (a Workspace SMTP-relay tenant on Google's shared ranges)
+    is the same whether or not a gateway receives the school's mail.
+  - *Recommend:* (a) match `hintFits`. Bind when `providerOf` reads `google` or `other`, and refuse
+    `m365`, no MX or a DNS failure. The `gateway.test` case in
+    `a_workspace_caf_envelope_on_a_domain_whose_mx_is_not_google_is_unbound` moves to the binding side,
+    and T18a's Workspace-relay probe also runs on a gateway domain. (b) Keep the clause and make the
+    loss visible: the canary refuses a `google` mailbox whose domain's MX is not Google's, with a named
+    reason, so setup stops instead of passing.
+  - *Blocks:* nothing before Checkpoint B. The code keeps the MX clause until the answer (§9.5).
 
 ## 5. Tasks
 
@@ -1481,7 +1505,8 @@ is the one signed, and an unsigned instance of the same name means the binding i
   notification's (`mail.source`, `receipt.spfVerdict` `PASS`, and the recipient whose token found the
   mailbox), never the message's `Return-Path`. Gmail: `<hint local>+caf_=<recipient, @ as =>@gmail.com`
   for a `gmail.com` or `googlemail.com` hint. Workspace (PQ9): the same local part at the hint's own
-  domain, and only after the seal passes, that domain's MX must read Google (`BindDeps.resolveMx`).
+  domain, and only after the seal passes, that domain's MX must read Google (`BindDeps.resolveMx`;
+  this clause is open, PQ12).
   M365: `<hint local>+SRS=…@<hint domain>`.
 - **Check (i)** is Google's or Microsoft's topmost seal and AMS, verifying. A signed forwarding field
   with an unsigned twin refuses the message. For M365, the topmost ForwardingLoop (or the covered one, if
@@ -2561,6 +2586,7 @@ spec text moves. A row marked **open** waits on Quinn or the planner.
 | Account deletion goes on past a failed `work/` object delete (T4.6, 2026-10-02). `purgeMailboxes` (`functions/account/mail.ts`) deletes each mailbox's objects by key, logs a failure by its error class and count only (never a key, an id or a message), then calls `delete_mail_address` regardless. Disconnect's `purgeAddress` (`functions/mail/handler.ts`) does the opposite: it answers 502 before the RPC, so the revoked row stays and a retry finishes. D17 says deletion "calls the same purge" and does not say which way a failure goes. | The account's right to delete wins, as it does for the Google grant (`google_delete.ts`): a deletion held up by S3 would keep every row, not just the object. A straggler is mail text with no row pointing at it, and D2's one-day expiry on `work/` removes it. | T4.6; `a failed object delete never blocks the account's deletion, and logs no key`, `deletion_purges_each_mailbox_by_delete_mail_address_after_deleting_its_objects_by_key` | recorded. **Cost if wrong:** after a deletion whose object deletes failed, the student's forwarded mail text can stay in `work/` for up to about 2 days (S3 runs a one-day expiry rule once a day), with no row left to find it. Checkpoint B confirms the ruling; **T17 and the privacy page:** the deletion paragraph must not say mail text is deleted at once. It says "removed within about 2 days" unless the ruling is reversed |
 | The export carries two tables, on fixed column lists (T4.6, 2026-10-02): `mail_addresses` as `MAILBOX_EXPORT_COLUMNS` (id, provider, `mailbox_hint`, status, its dates and counters; not `forward_hint`, `retired_until` or any token column) and every `mail_claims` row held for the account, delivered or not, as `CLAIM_EXPORT_COLUMNS` (all but `account_id`). Left out: `mail_accounts` (the fingerprint key ciphertext, the allowance, the mint times and the `digest` setting), `mail_batches`, `mail_canaries`, `mail_seen` and `mail_work`. | D17 names "its mailboxes … and its queued claims; never the token, its HMAC, a key or a hash". Batches and canaries hold nonce HMACs and service counts, `mail_seen` holds HMACs and `mail_work` holds object keys. A fixed column list (not `select *`) keeps a column added later out of the export until someone names it. | T4.6; `the_export_carries_mailboxes_and_queued_claims_and_never_a_token_key_or_hash` | recorded. **Cost if wrong:** the student's export omits the digest setting, the allowance state, the mailbox's `forward_hint` and the batch and canary history. If a portability reading counts these as the student's data, a later task adds a projected `mail_accounts` row (digest and allowance only) and the batch counts without their nonce HMACs. **Open (Checkpoint B):** whether `mail_claims` exports delivered rows (D17 says "queued"; built: all held) |
 | T4b reads "an active forwarding" (D22) as P22 states it: every status but `revoked` and `off`, so `pending`, `confirmed`, `blocked`, `paused_send` and `lapsed` stop the Gmail OAuth read (T4b's review, 2026-10-02). A Gmail student whose forwarding setup stalls (`blocked`) or is abandoned (`pending`) after P21 set the hint gets `read: 0`, `quiet: false`, no reason, from the next slot: neither path reads that Gmail and the tray stays green. Backfill recovers the gap only if forwarding later becomes active. | P22 is literal; D14 defines `blocked` as mail not reaching Knowlu, so the reading loses items silently (VISION: silence is never ambiguous). | T4b; `P22: a forwarding counts while its row is neither revoked nor off, quiet included` | **Answered 2026-10-02 (Quinn), PQ11 (§4):** the allow-list `confirmed`, `active`, `quiet` (`FORWARDING_COUNTS`); the P22 test moves `pending` and `blocked`; P22 and spec D22 amended. |
+| PQ9's Workspace MX clause (B-rulings review, 2026-10-02). `googleHosted` binds a `google` mailbox on its own domain only when the domain's MX reads Google, which is stricter than `hintFits` (an `other` MX fits). A Workspace school behind a Proofpoint, Mimecast or campus-relay gateway passes setup (the canary never reads MX), then every live forward is unbound and counted as a leak; the row goes `quiet` and the periodic canary calls it healthy. With Gmail OAuth on the same address, PQ11 steps the OAuth read aside, so neither path reads it. | The clause is in the controller's record of Quinn's PQ9 answer, but PQ9 never raised MX or gateways, so the consequence was never put to Quinn. Widening without an answer would override that record. | `_shared/mail_bind.ts` `googleHosted`; `a_workspace_caf_envelope_on_a_domain_whose_mx_is_not_google_is_unbound` (`gateway.test`); spec §4.6 step 5 carries the unsigned marker | **open (Quinn), PQ12 (§4):** the code keeps the clause; recommend (a), match `hintFits`. |
 
 ## 10. Review revisions (2026-09-30)
 
