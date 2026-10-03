@@ -14,11 +14,11 @@
 //! off is never resumed ([`open_backfills`]).
 //!
 //! **Privacy.** Counts, dates and fixed words only.
-use super::recover::{backfill_window, run_pass, Clock, Job, Mailbox, Stop};
+use super::recover::{backfill_window, run_pass, Clock, Job, Mailbox, Outcome, Stop};
 use super::setup::{Backfill, Env, Row, Shared};
 use crate::mail_client::{MailClient, Phase};
-use crate::mail_session::{session_dir, MailState};
-use crate::mail_steps::{Provider, Routine};
+use crate::mail_session::{session_dir, BackfillPace, MailState};
+use crate::mail_steps::{Provider, Routine, Send};
 use jiff::civil::Date;
 use std::path::Path;
 
@@ -77,6 +77,32 @@ pub(super) fn mark_open(data_dir: &Path, id: &str, open: bool) -> Result<(), Str
     .map(|_| ())
 }
 
+/// The send pace a mailbox's backfill starts with at unix second `now`: what `mail.json` kept for today
+/// (the count, and a pause a refused send began), else a fresh day. A relaunch or a re-run the same UTC day
+/// carries on from it (spec §4.2 step 5); a pace from an earlier day counts for nothing.
+pub(super) fn seed_routine(data_dir: &Path, provider: Provider, id: &str, now: i64) -> Routine {
+    let day = now.div_euclid(DAY);
+    let kept = MailState::load(data_dir).ok().and_then(|s| s.backfill_pace.get(id).cloned()).filter(|p| p.day == day);
+    match kept {
+        Some(p) => {
+            let routine = Routine::new(provider, day, p.sent_today);
+            if p.paused_until.is_some_and(|t| t > now) { routine.paused() } else { routine }
+        }
+        None => Routine::new(provider, day, 0),
+    }
+}
+
+/// Keeps a mailbox's day count (and pause) in `mail.json`, and drops every pace whose day is past. Best
+/// effort: a pace that could not be written costs a relaunch its memory, never the backfill.
+fn save_pace(data_dir: &Path, id: &str, pace: BackfillPace, today: i64) {
+    let _ = MailState::update(data_dir, |s| {
+        let before = s.backfill_pace.clone();
+        s.backfill_pace.retain(|_, p| p.day >= today);
+        s.backfill_pace.insert(id.to_string(), pace);
+        s.backfill_pace != before
+    });
+}
+
 /// Waits (a clock's sleeps, a stop between them) until unix second `t`; `false` if the student stopped it.
 fn wait_until(d: &Drive, t: i64) -> bool {
     loop {
@@ -100,66 +126,52 @@ pub fn drive_backfill(d: &Drive, routine: &mut Routine) -> Drove {
     let since_idx = knowlu_engine::scheduling::days_between(d.since, jiff::civil::date(1970, 1, 1));
     let since = d.since.to_string();
     let started = d.clock.now();
+    let blank = || Backfill { since: since.clone(), expected: 0, handled: 0, sent: 0, left: 0, eta_secs: None, resumes_at: None, paused: None };
     for _ in 0..MAX_PASSES {
         if d.shared.stopping() {
             let _ = mark_open(d.data_dir, d.address_id, false);
             return Drove::Stopped;
         }
         let now = d.clock.now();
-        let watch = |expected: u32, handled: u32, sent: u32| -> bool {
-            let elapsed = (d.clock.now() - started).max(0);
-            let eta = (handled > 0 && expected > handled).then(|| i64::from(expected - handled) * elapsed / i64::from(handled));
-            d.shared.update(|p| {
-                p.backfill = Some(Backfill { since: since.clone(), expected, handled, sent, left: 0, eta_secs: eta, resumes_at: None, paused: None });
-            });
-            !d.shared.stopping()
+        let today = now.div_euclid(DAY);
+        let next_day = (today + 1) * DAY;
+        // A day already spent, or paused by a refused send (this run's, or a relaunch's carried from
+        // `mail.json`): wait for the next UTC day before a pass lists or opens anything.
+        let held = match routine.next(now) {
+            Send::DayLimit { next_day_at } => Some((next_day_at, None)),
+            Send::Paused(p) => Some((next_day, Some(p.line()))),
+            _ => None,
         };
-        let job = Job {
-            provider: d.provider,
-            address_id: d.address_id,
-            knowlu_address: d.knowlu_address,
-            phase: Phase::Backfill,
-            window: backfill_window(since_idx, now),
-            cap: None,
-            watch: Some(&watch),
+        let held = match held {
+            Some(h) => Some(h),
+            None => {
+                let out = run_one(d, routine, &since, since_idx, now, started);
+                save_pace(d.data_dir, d.address_id, pace_of(routine), today);
+                if out.closed {
+                    (d.on_closed)();
+                }
+                match out.stop {
+                    Stop::Done => {
+                        let _ = mark_open(d.data_dir, d.address_id, false);
+                        return Drove::Done;
+                    }
+                    Stop::DayLimit { next_day_at } => Some((next_day_at, None)),
+                    Stop::Paused(p) => Some((next_day, Some(p.line()))),
+                    Stop::Stopped => {
+                        let _ = mark_open(d.data_dir, d.address_id, false);
+                        return Drove::Stopped;
+                    }
+                    Stop::Service(name) => return Drove::Failed(name),
+                    Stop::Script(word) => return Drove::Failed(word),
+                    Stop::Guided | Stop::SlotCap => return Drove::Failed("this mailbox is set up by hand"),
+                }
+            }
         };
-        let out = run_pass(d.mb, d.client, d.clock, routine, &job);
+        let Some(wait) = held else { continue };
         d.shared.update(|p| {
-            p.backfill = Some(Backfill {
-                since: since.clone(),
-                expected: out.expected,
-                handled: out.handled,
-                sent: out.sent,
-                left: out.left,
-                eta_secs: None,
-                resumes_at: None,
-                paused: None,
-            });
-        });
-        if out.closed {
-            (d.on_closed)();
-        }
-        let next_day = (now.div_euclid(DAY) + 1) * DAY;
-        let wait = match out.stop {
-            Stop::Done => {
-                let _ = mark_open(d.data_dir, d.address_id, false);
-                return Drove::Done;
-            }
-            Stop::DayLimit { next_day_at } => (next_day_at, None),
-            Stop::Paused(p) => (next_day, Some(p.line())),
-            Stop::Stopped => {
-                let _ = mark_open(d.data_dir, d.address_id, false);
-                return Drove::Stopped;
-            }
-            Stop::Service(name) => return Drove::Failed(name),
-            Stop::Script(word) => return Drove::Failed(word),
-            Stop::Guided | Stop::SlotCap => return Drove::Failed("this mailbox is set up by hand"),
-        };
-        d.shared.update(|p| {
-            if let Some(b) = p.backfill.as_mut() {
-                b.resumes_at = Some(wait.0);
-                b.paused = wait.1;
-            }
+            let b = p.backfill.get_or_insert_with(&blank);
+            b.resumes_at = Some(wait.0);
+            b.paused = wait.1;
         });
         if !wait_until(d, wait.0) {
             let _ = mark_open(d.data_dir, d.address_id, false);
@@ -167,6 +179,48 @@ pub fn drive_backfill(d: &Drive, routine: &mut Routine) -> Drove {
         }
     }
     Drove::Failed("the backfill did not finish")
+}
+
+/// What `mail.json` keeps of `routine`'s day: its count, and the next day's start while a refused send
+/// holds it.
+fn pace_of(routine: &Routine) -> BackfillPace {
+    let day = routine.day();
+    BackfillPace { day, sent_today: routine.sent_today(), paused_until: routine.is_paused().then_some((day + 1) * DAY) }
+}
+
+/// One pass over the fixed window: progress as it goes, the day's count kept as each batch of forwards is
+/// taken (so a quit mid-pass still remembers what went), and its final counts published.
+fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i64, started: i64) -> Outcome {
+    let today = now.div_euclid(DAY);
+    // The routine rolls its day lazily: a count from an earlier day is nothing today.
+    let base = if routine.day() == today { routine.sent_today() } else { 0 };
+    let watch = |expected: u32, handled: u32, sent: u32| -> bool {
+        let at = d.clock.now();
+        let elapsed = (at - started).max(0);
+        let eta = (handled > 0 && expected > handled).then(|| i64::from(expected - handled) * elapsed / i64::from(handled));
+        d.shared.update(|p| {
+            p.backfill = Some(Backfill { since: since.to_string(), expected, handled, sent, left: 0, eta_secs: eta, resumes_at: None, paused: None });
+        });
+        // Past midnight mid-pass the day's own count is not known here: the pass's, an upper bound.
+        let sent_today = if at.div_euclid(DAY) == today { base + sent } else { sent };
+        let pace = BackfillPace { day: at.div_euclid(DAY), sent_today, paused_until: None };
+        save_pace(d.data_dir, d.address_id, pace, at.div_euclid(DAY));
+        !d.shared.stopping()
+    };
+    let job = Job {
+        provider: d.provider,
+        address_id: d.address_id,
+        knowlu_address: d.knowlu_address,
+        phase: Phase::Backfill,
+        window: backfill_window(since_idx, now),
+        cap: None,
+        watch: Some(&watch),
+    };
+    let out = run_pass(d.mb, d.client, d.clock, routine, &job);
+    d.shared.update(|p| {
+        p.backfill = Some(Backfill { since: since.to_string(), expected: out.expected, handled: out.handled, sent: out.sent, left: out.left, eta_secs: None, resumes_at: None, paused: None });
+    });
+    out
 }
 
 // ---- resuming at launch (§4.11) ------------------------------------------------------------------
@@ -198,7 +252,7 @@ fn resume_one(data_dir: &Path, id: &str, env: &Env, sh: &Shared) -> Result<(), &
         }
         env.clock.sleep(1);
     }
-    let mut routine = Routine::new(provider, env.clock.now().div_euclid(DAY), 0);
+    let mut routine = seed_routine(data_dir, provider, id, env.clock.now());
     let d = Drive {
         mb: &*env.host,
         client: &env.client,

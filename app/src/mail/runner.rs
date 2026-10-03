@@ -21,7 +21,7 @@
 //! **Privacy.** No address, hint, URL, selector or page text is logged, kept in [`Progress`] or sent
 //! anywhere but where its step says: the typed school address contributes only its domain to the MX lookup
 //! (and is the mailbox's own address only for a guided provider, which has no page to read it from).
-use super::backfill::{drive_backfill, mark_open, Drive, Drove};
+use super::backfill::{drive_backfill, mark_open, seed_routine, Drive, Drove};
 use super::host::Host;
 use super::recover::{Clock, Place};
 use super::setup::{
@@ -30,7 +30,7 @@ use super::setup::{
 use super::Refusal;
 use crate::mail_client::{MailClient, State as SvcState};
 use crate::mail_session::{forget, forget_setup, session_dir, setup_dir, valid_address_id};
-use crate::mail_steps::{Action, Mode, Outcome, Provider, Reason, Routine, Setup, State, Step};
+use crate::mail_steps::{Action, Mode, Outcome, Provider, Reason, Setup, State, Step};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -45,7 +45,6 @@ const POLL: i64 = 5;
 /// Google's popup is waited for this long to appear, and this long to close.
 const POPUP_APPEAR: i64 = 30;
 const POPUP_WAIT: i64 = 5 * 60;
-const DAY: i64 = 86_400;
 
 /// Why a run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -531,8 +530,7 @@ impl Runner<'_> {
     /// §4.2 step 5: the recover routine over the fixed window, as the pace allows ([`drive_backfill`]).
     fn backfill(&mut self) -> Outcome {
         self.say("bringing in your mail");
-        let routine_day = self.clock().now().div_euclid(DAY);
-        let mut routine = Routine::new(self.provider, routine_day, 0);
+        let mut routine = seed_routine(&self.plan.data_dir, self.provider, &self.id, self.clock().now());
         let d = Drive {
             mb: self.host(),
             client: self.client(),
@@ -588,6 +586,7 @@ impl Runner<'_> {
         }
         self.publish();
         match self.sh.wait_answer(Waiting::Student, IDLE) {
+            Some(Answer::Retry) if self.open_step() == Some(Step::Backfill) && self.machine.rearm_backfill() => {}
             Some(Answer::Done | Answer::Retry) => self.check_open(),
             _ => {
                 self.gave_up = true;
@@ -597,13 +596,21 @@ impl Runner<'_> {
     }
 
     /// §4.4: "I've done this" runs the step's check (a canary for forwarding, the server's confirm for the
-    /// Gmail address); a pass makes it done by hand, a fail leaves it as it was.
+    /// Gmail address); a pass makes it done by hand, a fail leaves it as it was. A backfill has no check:
+    /// no count of a manual forward-as-attachment exists, so a tap cannot make it done. The setup ends
+    /// naming the day before which mail was not brought in, and the backfill stays open in `mail.json` if
+    /// it ever started. Retry on a backfill that failed is the way to run it again.
     fn check_open(&mut self) {
         let Some(step) = self.open_step() else { return };
+        if step == Step::Backfill {
+            self.say("mail before the start of the window was not brought in");
+            self.gave_up = true;
+            self.machine.request_stop();
+            return;
+        }
         self.say("checking");
         let ok = match step {
             Step::AddAddress | Step::ConfirmAddress => self.address_confirmed(),
-            Step::Backfill => true,
             _ => {
                 let ok = self.canary_ok || self.canary_check();
                 self.canary_ok |= ok;
@@ -611,10 +618,9 @@ impl Runner<'_> {
             }
         };
         self.machine.guided_checked(step, ok);
-        // A canary that arrives late (Retry): the backfill was not run, so it is open for the next launch.
-        let backfilled = matches!(self.machine.state(Step::Backfill), State::Done | State::DoneByHand);
-        if ok && step == Step::Canary && !backfilled {
-            let _ = mark_open(&self.plan.data_dir, &self.id, true);
+        // A canary that arrives late (Retry) unblocks the backfill (D16): it runs on this run (§4.2 step 4).
+        if ok && step == Step::Canary {
+            self.machine.rearm_backfill();
         }
     }
 }

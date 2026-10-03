@@ -11,7 +11,7 @@
 //! server this file stands up on `127.0.0.1:0`; nothing leaves the machine. Every address, hint and
 //! token in it is synthetic.
 use knowlu::mail_session::{
-    forget, forget_all, is_session_dir, session_dir, setup_dir, start_up_sweep, turn_off, MailState,
+    forget, forget_all, is_session_dir, session_dir, setup_dir, start_up_sweep, turn_off, BackfillPace, MailState,
 };
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -1636,9 +1636,14 @@ fn a_canary_not_back_in_three_minutes_leaves_blocked_with_retry_and_offers_what_
     r.sv.lock().unwrap().canary_arrives = true;
     assert!(shared.answer(Answer::Retry));
     until("the canary done by hand", || has(&shared, "canary", "done_by_hand"));
-    assert_eq!(MailState::load(&r.dir).unwrap().open_backfills, [A], "the backfill resumes at the next launch");
-    shared.stop();
-    wait(&shared);
+    // The canary arriving re-arms the backfill and it runs on this run (§4.2 step 4), not at some later launch.
+    let p = wait(&shared);
+    assert_eq!(p.ended, Some("finished"));
+    assert_eq!(row(&p, "backfill").state, "done");
+    assert!(!p.blocked && p.not_brought_in_before.is_none(), "{p:?}");
+    assert_eq!(r.sv.lock().unwrap().batches, [since_day()], "the backfill ran after the Retry");
+    assert_eq!(r.calls("m365/forward.js").len(), 2);
+    assert!(MailState::load(&r.dir).unwrap().open_backfills.is_empty());
 }
 
 fn answer_address(shared: &Shared) {
@@ -1878,6 +1883,142 @@ fn an_open_backfill_resumes_again_as_its_pace_allows() {
 }
 
 use knowlu::mail::backfill::{drive_backfill, open_backfills, Drive, Drove};
+
+/// Runs the driver on `routine` with the first forward stopping it (a quit mid-day), and returns how it ended.
+fn quit_after_first_forward(r: &Rig, routine: &mut Routine) -> Drove {
+    let env = r.env();
+    let shared = Arc::new(Shared::new());
+    let stopper = shared.clone();
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if name == "m365/forward.js" {
+            stopper.stop();
+        }
+    }));
+    let d = Drive {
+        mb: &*env.host,
+        client: &env.client,
+        clock: &*env.clock,
+        provider: Provider::M365,
+        address_id: A,
+        knowlu_address: KNOWLU,
+        since: "2026-06-04".parse().unwrap(),
+        shared: &shared,
+        on_closed: &*env.on_closed,
+        data_dir: &r.dir,
+    };
+    drive_backfill(&d, routine)
+}
+
+/// Resumes the open backfill and returns the clock at each forward it sent.
+fn resume_and_time_forwards(r: &Rig) -> Vec<i64> {
+    let times = Arc::new(Mutex::new(Vec::new()));
+    let (t, clk) = (times.clone(), r.clk.clone());
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if name == "m365/forward.js" {
+            t.lock().unwrap().push(clk.at());
+        }
+    }));
+    MailState::update(&r.dir, |s| {
+        if !s.open_backfills.iter().any(|i| i == A) {
+            s.open_backfills.push(A.to_string());
+        }
+        true
+    })
+    .unwrap();
+    let shared = r.setups.start_resume(r.dir.clone(), vec![A.to_string()], r.env()).expect("a resume started");
+    wait(&shared);
+    let out = times.lock().unwrap().clone();
+    out
+}
+
+#[test]
+fn a_relaunch_on_the_same_utc_day_never_sends_past_the_days_600() {
+    // Spec 4.2 step 5: at most 600 a mailbox a UTC day. 599 were sent, one more went (600), the app quit;
+    // the relaunch the same UTC day sends nothing until the next day.
+    let r = open_backfill_rig("t113-relaunch-day", 3);
+    let next_day = (NOW.div_euclid(DAY) + 1) * DAY;
+    let mut routine = Routine::new(Provider::M365, NOW.div_euclid(DAY), 599);
+    assert_eq!(quit_after_first_forward(&r, &mut routine), Drove::Stopped);
+    assert_eq!(r.calls("m365/forward.js").len(), 1);
+    r.clk.0.fetch_add(3_600, Ordering::SeqCst);
+    let times = resume_and_time_forwards(&r);
+    assert_eq!(times.len(), 3, "the window is forwarded once the day turns: {times:?}");
+    assert!(times.iter().all(|t| *t >= next_day), "nothing went before the next UTC day: {times:?} vs {next_day}");
+}
+
+#[test]
+fn a_resume_after_a_refused_send_waits_for_the_next_utc_day() {
+    // The pause after a refused send (an NDR) survives a relaunch: nothing retries until the next day.
+    let r = open_backfill_rig("t113-relaunch-paused", 2);
+    let day = NOW.div_euclid(DAY);
+    let next_day = (day + 1) * DAY;
+    MailState::update(&r.dir, |s| {
+        s.backfill_pace.insert(A.to_string(), BackfillPace { day, sent_today: 41, paused_until: Some(next_day) });
+        true
+    })
+    .unwrap();
+    let times = resume_and_time_forwards(&r);
+    assert_eq!(times.len(), 2);
+    assert!(times.iter().all(|t| *t >= next_day), "{times:?} vs {next_day}");
+    // A pace from an earlier day counts for nothing.
+    let old = open_backfill_rig("t113-relaunch-old-pace", 2);
+    MailState::update(&old.dir, |s| {
+        s.backfill_pace.insert(A.to_string(), BackfillPace { day: day - 1, sent_today: 600, paused_until: Some(day * DAY) });
+        true
+    })
+    .unwrap();
+    assert!(resume_and_time_forwards(&old).iter().all(|t| *t < next_day), "yesterday's limit does not hold today");
+}
+
+#[test]
+fn the_pace_is_kept_beside_the_open_marker_and_costs_nothing_when_empty() {
+    let r = open_backfill_rig("t113-pace-file", 3);
+    let mut routine = Routine::new(Provider::M365, NOW.div_euclid(DAY), 599);
+    quit_after_first_forward(&r, &mut routine);
+    let pace = MailState::load(&r.dir).unwrap().backfill_pace;
+    assert_eq!(pace.get(A), Some(&BackfillPace { day: NOW.div_euclid(DAY), sent_today: 600, paused_until: None }));
+    // With none kept, mail.json is the spec's bytes: the field is not written.
+    let clean = rig("t113-pace-empty");
+    MailState::update(&clean.dir, |s| {
+        s.keep_session = false;
+        true
+    })
+    .unwrap();
+    let text = std::fs::read_to_string(clean.dir.join("mail.json")).unwrap();
+    assert!(!text.contains("backfill_pace") && !text.contains("open_backfills"), "{text}");
+}
+
+#[test]
+fn a_guided_backfill_the_student_says_is_done_never_clears_what_was_not_brought_in() {
+    // No count route exists for a manual forward-as-attachment, so "I've done this" cannot pass the
+    // backfill: the setup ends honestly, naming the day before which mail was not brought in.
+    let g = rig("t113-guided-backfill");
+    g.sv.lock().unwrap().provider_of = "other".into();
+    let shared = g.start(uncurated(), true);
+    answer_address(&shared);
+    until("the forwarding step", || has(&shared, "forwarding", "needs_you"));
+    assert!(shared.answer(Answer::Done));
+    until("the backfill step", || has(&shared, "backfill", "needs_you"));
+    assert!(shared.answer(Answer::Done));
+    let p = wait(&shared);
+    assert_eq!(p.not_brought_in_before, Some(since_day()));
+    assert_ne!(row(&p, "backfill").state, "done_by_hand");
+    assert!(!p.done.contains(&"backfill"), "{:?}", p.done);
+}
+
+#[test]
+fn retry_runs_a_failed_scripted_backfill_again_and_the_marker_stays_open_until_then() {
+    let r = rig("t113-failed-backfill");
+    r.host.lock().unwrap().msgs = ana_mail(2);
+    queue(&r, "m365/list.js", vec![json!({ "result": "not found", "control": "list" }), json!({ "result": "ok", "total": 2, "rows": SHost::rows(&r.host.lock().unwrap()) })]);
+    let shared = r.start(curated_m365(), true);
+    until("the backfill failed", || has(&shared, "backfill", "failed"));
+    assert_eq!(MailState::load(&r.dir).unwrap().open_backfills, [A], "still open, so the next launch resumes it");
+    assert!(shared.answer(Answer::Retry));
+    let p = wait(&shared);
+    assert_eq!((p.ended, row(&p, "backfill").state), (Some("finished"), "done"));
+    assert!(p.not_brought_in_before.is_none());
+}
 
 fn position(ev: &[String], e: &str) -> usize {
     ev.iter().position(|x| x == e).unwrap_or_else(|| panic!("no {e}: {ev:?}"))

@@ -93,6 +93,21 @@ pub struct MailState {
     /// is open, so a file with none is byte-for-byte what spec §5.4 lists.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub open_backfills: Vec<String>,
+    /// Each open backfill's send pace for its UTC day, by address id: the day's count and any pause, so a
+    /// relaunch the same day carries on from them (spec §4.2 step 5: at most 600 a mailbox a UTC day, and
+    /// nothing retries the same day after Microsoft refuses a send). Counts and days only; written while a
+    /// backfill has one, dropped once its day is past, and not written at all when empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub backfill_pace: BTreeMap<String, BackfillPace>,
+}
+
+/// One mailbox's backfill pace on one UTC day (`unix seconds / 86400`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BackfillPace {
+    pub day: i64,
+    pub sent_today: u32,
+    /// Set after a refused send: the unix second the next UTC day starts, before which nothing sends.
+    pub paused_until: Option<i64>,
 }
 
 impl Default for MailState {
@@ -103,6 +118,7 @@ impl Default for MailState {
             pending_deletes: Vec::new(),
             turned_off: Vec::new(),
             open_backfills: Vec::new(),
+            backfill_pace: BTreeMap::new(),
         }
     }
 }

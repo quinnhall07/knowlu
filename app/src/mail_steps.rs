@@ -358,6 +358,22 @@ impl Setup {
         }
     }
 
+    /// Retry on a backfill that did not run (the canary was blocked, D16) or did not finish: scripted again
+    /// and waiting to run. Only for a scripted provider, and only once the canary has arrived. `false`
+    /// when there is nothing to re-arm.
+    pub fn rearm_backfill(&mut self) -> bool {
+        let canary_ok = self.at(Canary).is_none() || self.resolved(Canary);
+        let failed = matches!(self.state(Backfill), State::Failed(_));
+        if self.provider == Provider::Guided || !failed || !canary_ok || self.stop || self.ended {
+            return false;
+        }
+        self.set(Backfill, State::Waiting);
+        if let Some(i) = self.at(Backfill) {
+            self.steps[i].2 = Mode::Scripted;
+        }
+        true
+    }
+
     /// Stop after the current step (§4.5): a running step finishes, nothing later starts.
     pub fn request_stop(&mut self) {
         self.stop = true;
@@ -461,5 +477,21 @@ impl Routine {
 
     pub fn sent_today(&self) -> u32 {
         self.sent_today
+    }
+
+    /// The UTC day the count is for.
+    pub fn day(&self) -> i64 {
+        self.day
+    }
+
+    /// Whether a refused send has paused today's sends.
+    pub fn is_paused(&self) -> bool {
+        self.paused_on.is_some()
+    }
+
+    /// This routine with today's sends paused: a resume of a day a refused send already ended.
+    pub fn paused(mut self) -> Routine {
+        self.paused_on = Some(self.day);
+        self
     }
 }

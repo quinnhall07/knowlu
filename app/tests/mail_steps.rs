@@ -273,3 +273,22 @@ fn a_failed_canary_leaves_only_guided_steps() {
         assert_eq!(s.state(Step::Backfill), State::DoneByHand);
     }
 }
+
+#[test]
+fn a_retry_re_arms_a_backfill_only_once_the_canary_has_arrived() {
+    for p in [Provider::M365, Provider::Gmail] {
+        let mut s = setup(p);
+        drive(&mut s, |st| if st == Step::Canary { Outcome::Failed } else { Outcome::Done });
+        assert!(!s.rearm_backfill(), "{p:?}: the canary is still failed");
+        s.guided_checked(Step::Canary, true);
+        assert!(s.rearm_backfill());
+        assert_eq!((s.state(Step::Backfill), s.mode(Step::Backfill)), (State::Waiting, Mode::Scripted));
+        assert!(matches!(s.next_action(), Action::Run { step: Step::Backfill, .. }), "{p:?} runs it now");
+    }
+    // A guided mailbox's backfill is the student's; nothing re-arms it.
+    let mut g = setup(Provider::Guided);
+    assert!(!g.rearm_backfill());
+    // A pace carries a pause and a count.
+    let r = Routine::new(Provider::M365, 9, 41).paused();
+    assert_eq!((r.day(), r.sent_today(), r.is_paused()), (9, 41, true));
+}
