@@ -175,6 +175,8 @@ aside { border-left: 1px solid var(--hair); padding: var(--s5) var(--s5) var(--s
 .deck-foot .adv { margin-left: auto; }
 .card .t { font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; margin-bottom: var(--s1); }
 .card .w { color: var(--t3); font-size: 12.5px; margin-bottom: var(--s3); }
+.card .mail-from, .row.dec .mail-from { color: var(--t3); font-size: 12px; margin-top: var(--s2); overflow-wrap: anywhere; }
+.card .mail-quote, .row.dec .mail-quote { color: var(--t3); font-size: 12px; font-style: italic; margin-top: var(--s2); overflow-wrap: anywhere; }
 .card .w .src, .row.dec .why .src { color: var(--t4); margin-left: var(--s2); }
 .card .cf { display: flex; gap: var(--s2); align-items: flex-start; font-family: var(--mono); font-size: 10.5px; line-height: 1.55; color: var(--warn); background: var(--warn-dim); border-radius: var(--r1); padding: var(--s2); margin-bottom: var(--s3); }
 .acts { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }

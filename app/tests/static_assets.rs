@@ -2484,7 +2484,11 @@ fn a_gmail_card_shows_its_gmail_attribution_and_never_a_sender() {
     assert!(deck.contains("sourceLabel(c)"), "the deck card carries the label");
     let view = js.split("function renderDecisionsView(").nth(1).unwrap().split("\n  function ").next().unwrap();
     assert!(view.contains("sourceLabel(c)"), "so does the decisions row");
-    assert!(!js.contains("c.sender") && !js.contains("c.from"), "never the sender");
+    // D21 (T15.5): a mail card, `created_by: mail`, names its sender through `mailCardLine`; the Gmail label
+    // stays D15's, and the Gmail path never reads one.
+    assert!(!js.contains("c.sender"), "never the sender");
+    let label = fn_body(&js, "function sourceLabel(c)");
+    assert!(!label.contains("c.from") && !label.contains("mail_date") && !label.contains("evidence"), "the Gmail label never names a sender");
 }
 
 // ---- T15.1: the mail progress view (email spec §4.5, D6, BW) ----------------------------------------
@@ -2799,4 +2803,116 @@ fn from_your_email_opens_from_the_last_progress_row_and_from_settings() {
     assert!(js.contains("EL(\"mp-applied\").addEventListener(\"click\", openMailApplied)"));
     assert!(js.contains("EL(\"set-email-applied\").addEventListener(\"click\", openMailApplied)"));
     assert!(read("console.css").contains(".ma-row"));
+}
+
+// ---- T15.5: the deck, untrusted text and telemetry (email spec D21, §5.2, §12.4) -----------------------
+
+/// Every occurrence of `.field` (a property read, not `Array.from`) in `js`, with its line.
+fn field_reads<'a>(js: &'a str, fields: &[&str]) -> Vec<(usize, &'a str, String)> {
+    let mut out = Vec::new();
+    for (n, line) in js.lines().enumerate() {
+        let b = line.as_bytes();
+        for f in fields {
+            let pat = format!(".{f}");
+            let mut from = 0;
+            while let Some(i) = line[from..].find(&pat) {
+                let at = from + i;
+                let after = b.get(at + pat.len()).copied().unwrap_or(b' ');
+                let ident_after = after.is_ascii_alphanumeric() || after == b'_';
+                let on_ident = at > 0 && (b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'_');
+                if !ident_after && on_ident && !line[..at].ends_with("Array") {
+                    out.push((n + 1, line, line[..at + pat.len()].to_string()));
+                }
+                from = at + pat.len();
+            }
+        }
+    }
+    out
+}
+
+const MAIL_FIELDS: [&str; 4] = ["from", "mail_date", "evidence", "sender"];
+
+#[test]
+fn a_mail_card_shows_its_sender_date_and_quote() {
+    let js = read("console.js");
+    let css = read("console.css");
+    let f = fn_body(&js, "function mailCardLine(");
+    assert!(f.contains("c.from") && f.contains("c.mail_date") && f.contains("c.evidence"), "the three read-model fields");
+    assert!(f.contains("class=\"mail-from\"") && f.contains("class=\"mail-quote\""), "its two lines");
+    assert!(f.contains("<q>") || f.contains("<blockquote"), "the quote reads as a quote");
+    assert!(f.contains("if (!c.from && !c.mail_date && !c.evidence) { return \"\"; }"), "a card without them is as before");
+    assert!(css.contains(".mail-from") && css.contains(".mail-quote"), "styled");
+    let deck = fn_body(&js, "function renderDeck(");
+    assert!(deck.contains("mailCardLine(c)"), "the deck card");
+    assert!(js.matches("mailCardLine(c)").count() >= 2, "the Decisions view's row too");
+}
+
+#[test]
+fn mail_derived_text_renders_inert() {
+    let js = read("console.js");
+    let f = fn_body(&js, "function mailCardLine(");
+    for part in ["h(c.from)", "h(c.mail_date)", "h(c.evidence)"] {
+        assert!(f.contains(part), "{part}");
+    }
+    assert!(!f.contains("innerHTML") && !f.contains("insertAdjacentHTML"), "the helper builds a string, never writes the DOM");
+    let deck = fn_body(&js, "function renderDeck(");
+    assert!(deck.contains("h(c.title)") && deck.contains("h(c.why || c.kind)"), "title and why through h()");
+    let v = mail_applied_fn(&js);
+    assert!(v.contains("h(x.title)") && v.contains("h(x.sender)") && v.contains("h(x.date)"), "a From your email row, its notices too");
+    // h() itself escapes the five characters that open a tag or an attribute.
+    let hdef = js.lines().find(|l| l.starts_with("  var h = function")).expect("h");
+    for ch in ["&amp;", "&lt;", "&gt;", "&quot;", "&#39;"] {
+        assert!(hdef.contains(ch), "h escapes {ch}");
+    }
+}
+
+#[test]
+fn no_mail_field_reaches_the_dom_without_h() {
+    let js = read("console.js");
+    let mut checked = 0;
+    for (n, line, _) in field_reads(&js, &MAIL_FIELDS) {
+        if line.trim_start().starts_with("if (!c.") { continue; }   // a presence test, not a render
+        checked += 1;
+        assert!(line.contains("h(c.") || line.contains("h(x.") || line.contains("h(m.") || line.contains(".map(h)"), "line {n}: a mail field outside h(): {}", line.trim());
+        assert!(!line.contains("innerHTML = c.") && !line.contains("innerHTML = x.") && !line.contains("innerHTML += c."), "line {n}: raw into innerHTML");
+    }
+    assert!(checked >= 4, "the scan found the card line and the applied rows ({checked})");
+    // Title and why of a card or a row are mail-derived too: each read sits inside h(…), or is a test.
+    for (n, line, upto) in field_reads(&js, &["title", "why"]) {
+        let t = upto.trim_end();
+        let var = t.rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.')).next().unwrap_or("");
+        if !(var.starts_with("c.") || var.starts_with("x.")) { continue; }
+        let pre = &t[..t.len() - var.len()];
+        let safe = pre.ends_with("h(") || pre.ends_with("h(c.why || ") || pre.ends_with("&& ") || pre.ends_with("if (") || pre.ends_with("! ") || pre.ends_with("=== ") || pre.ends_with("|| ") || pre.ends_with("== ") || pre.ends_with("!") || pre.ends_with("push(") || pre.ends_with("= ") && !line.contains("innerHTML");
+        assert!(safe, "line {n}: {var} not inside h(): {}", line.trim());
+    }
+}
+
+fn is_ev_call(line: &str) -> bool {
+    let mut from = 0;
+    while let Some(i) = line[from..].find("ev(") {
+        let at = from + i;
+        if at == 0 || !(line.as_bytes()[at - 1].is_ascii_alphanumeric() || line.as_bytes()[at - 1] == b'_') { return true; }
+        from = at + 3;
+    }
+    false
+}
+
+#[test]
+fn no_ui_event_carries_mail_text() {
+    let js = read("console.js");
+    // Every mail section, the progress view to "From your email", sends no usage event at all.
+    let at = js.find("// ---- mail progress view").expect("the mail sections");
+    let end = js.find("// ---- end mail applied").expect("their end");
+    for (n, line) in js[at..end].lines().enumerate() {
+        assert!(!line.contains("ui_event") && !is_ev_call(line), "mail section line {n}: a usage event: {}", line.trim());
+    }
+    // And no usage event anywhere names a mail field, a card's words or a mailbox address.
+    for (n, line) in js.lines().enumerate().filter(|(_, l)| l.contains("ui_event") || is_ev_call(l)) {
+        for bad in [".from", ".mail_date", ".evidence", ".sender", ".why", ".title", ".address", "mpAddr", "mp-addr"] {
+            assert!(!line.contains(bad) || line.contains("Array.from"), "line {n}: a usage event carries {bad}: {}", line.trim());
+        }
+    }
+    // Rendering a card sends nothing: the deck and Decisions renderers hold no event call.
+    assert!(!fn_body(&js, "function mailCardLine(").contains("ev("), "the card line is markup only");
 }

@@ -108,6 +108,28 @@ PROFILE = {"preferences": "Mornings are best.", "strong": ["robotics"], "mild": 
 TYPED_PREFS = "ZQPREF I study after dinner"
 TYPED_INT = "zqint underwater basketry"
 
+# T15.5 (spec §5.2, §5.4, §12.4): mail-derived text that must render inert, and a Knowlu address that must never
+# reach a ui_event. The walk puts them on a deck card, a Settings -> Email row, the progress view and "From your email".
+MAIL_MARK = "ZQMAIL"
+MAIL_EVIL = MAIL_MARK + ' <img src=x onerror="window.__PWNED=1">'
+MAIL_ADDR = "zqaddr7k3m@forward.example"
+MAIL_CARD = {"id": "approvals/zq-mail-card", "kind": "amend", "title": MAIL_EVIL + " title", "why": MAIL_EVIL + " why",
+             "from": MAIL_EVIL + " <a@b.example>", "mail_date": "2026-09-30", "evidence": MAIL_EVIL + " quote",
+             "source_uid": "mail:zq", "age_days": 0, "changes": {}}
+MAIL = {
+    "status": {"ok": True, "error": None, "keep_session": True, "mailboxes": [
+        {"address_id": "a1", "address": MAIL_ADDR, "provider": "m365", "state": "active", "turned_off": False}]},
+    "progress": {"ok": True, "active": True, "progress": {
+        "status": "working", "sentence": "Turning forwarding on.", "address_id": "a1", "provider": "m365",
+        "rows": [{"step": "turn_on", "state": "needs_you", "guided": True}]}},
+    "applied": {"ok": True, "courses": [{"course": MAIL_EVIL + " course",
+        "created": [{"id": "tasks/x", "title": MAIL_EVIL + " item", "due": "2026-10-01"}],
+        "changed": [{"id": "tasks/y", "title": MAIL_EVIL + " moved", "field": "due", "old": "2026-10-01", "new": "2026-10-03",
+                     "sender": MAIL_EVIL + " <c@d.example>", "date": "2026-09-30"}],
+        "archived": {"count": 1, "items": [{"id": "tasks/z", "title": MAIL_EVIL + " past"}]},
+        "notices": [{"id": "info/n", "title": MAIL_EVIL + " notice", "opened_at": "2026-09-30"}]}]},
+}
+
 FAKE = """
 window.__CALLS = [];
 window.__ALLCALLS = [];
@@ -148,6 +170,10 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
                              return Promise.resolve({ ok: true, error: null });
     case "set_interests":    ["strong", "mild", "never", "clubs"].forEach(function (k) { window.__PROFILE[k] = args[k]; });
                              return Promise.resolve({ ok: true, error: null });
+    // T15.5: the mail commands answer only when a walk sets `window.__MAIL`; otherwise they reject as before.
+    case "mail_status":      return window.__MAIL ? Promise.resolve(window.__MAIL.status) : Promise.reject(new Error("no mail_status"));
+    case "mail_setup_progress": return window.__MAIL ? Promise.resolve(window.__MAIL.progress) : Promise.reject(new Error("no mail_setup_progress"));
+    case "mail_applied":     return window.__MAIL ? Promise.resolve(window.__MAIL.applied) : Promise.reject(new Error("no mail_applied"));
     case "switch_profile":
     case "copy_text":
     case "copy_diagnostics":
@@ -168,6 +194,49 @@ def boxes_overlap(a, b):
         return False
     return not (a["x"] + a["width"] <= b["x"] or b["x"] + b["width"] <= a["x"]
                 or a["y"] + a["height"] <= b["y"] or b["y"] + b["height"] <= a["y"])
+
+
+def check_mail(page, bad):
+    """T15.5: the deck card, Settings -> Email, the progress view and "From your email" with a stubbed `invoke`."""
+    def inert(where):
+        if page.evaluate("window.__PWNED === 1"):
+            bad.append(f"mail text ran as script on {where}")
+        if page.locator("img[src='x']").count():
+            bad.append(f"mail text became an element on {where}")
+    page.add_init_script("window.__MAIL = " + json.dumps(MAIL) + ";")   # the reload would drop an evaluate()d value
+    page.reload()
+    page.wait_for_timeout(900)
+    card = page.inner_text("#deck .card")
+    for part in (MAIL_MARK, "<img", "2026-09-30", "a@b.example"):
+        if part not in card:
+            bad.append(f"the deck's mail card does not show {part!r}")
+    if page.locator("#deck .card .mail-quote q").count() != 1:
+        bad.append("the deck's mail card does not quote its evidence")
+    inert("the deck card")
+    page.evaluate("window.KNOWLU_OPEN_SETTINGS()")
+    page.wait_for_timeout(500)
+    if MAIL_ADDR not in page.inner_text("#set-email-boxes"):
+        bad.append("Settings -> Email does not show the mailbox address")
+    page.click("#set-email-open")
+    page.wait_for_timeout(1200)
+    if page.is_hidden("#mail-progress"):
+        bad.append("Show progress did not open the progress view")
+    elif MAIL_ADDR not in page.inner_text("#mail-progress"):
+        bad.append("the guided step does not show the address")
+    page.click("#mp-leave")
+    page.click("#set-email-applied")
+    page.wait_for_timeout(500)
+    body = page.inner_text("#ma-body")
+    for part in (MAIL_MARK, "<img", "c@d.example", "Items created", "Fields changed", "Notices opened"):
+        if part not in body:
+            bad.append(f"From your email does not show {part!r}")
+    inert("From your email")
+    page.click("#ma-close")
+    events = [c for c in page.evaluate("window.__ALLCALLS") if c[0] == "ui_event"]
+    blob = json.dumps(events)
+    for secret in (MAIL_MARK, MAIL_ADDR, "a@b.example", "c@d.example", "quote"):
+        if secret in blob:
+            bad.append(f"a ui_event argument carried mail text or the Knowlu address ({secret!r})")
 
 
 def check(url, fixture_name, out, bad):
@@ -585,6 +654,7 @@ def check(url, fixture_name, out, bad):
         page.wait_for_timeout(200)
         if not page.is_hidden("#settings"):
             bad.append("Close did not close the overlay")
+        check_mail(page, bad)
         browser.close()
 
 
@@ -598,6 +668,11 @@ def main(argv):
         shutil.copytree(REPO / "app" / "static", tmp / "app" / "static")
         (tmp / "fixtures").mkdir()
         shutil.copy2(fixture, tmp / "fixtures" / fixture.name)
+        # The temp copy only (the repo's fixture is frozen): a mail card on top of the deck.
+        state = json.loads((tmp / "fixtures" / fixture.name).read_text(encoding="utf-8"))
+        state["decisions"]["cards"].insert(0, MAIL_CARD)
+        state["decisions"]["pending"] = len(state["decisions"]["cards"])
+        (tmp / "fixtures" / fixture.name).write_text(json.dumps(state), encoding="utf-8")
 
         # Quiet, and stopped on the way out: the default handler logs every GET to stderr, and a
         # `serve_forever` thread whose socket is closed under it prints a traceback after the

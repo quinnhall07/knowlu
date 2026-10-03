@@ -279,6 +279,14 @@
     return c.source_uid && String(c.source_uid).indexOf("gmail:") === 0 ? ' <span class="src">from Gmail</span>' : "";
   }
 
+  // Email spec D21, §5.2 (T15.5): a mail card names its sender and the mail's day and quotes the evidence. All three are
+  // the sender's own text, untrusted: each goes through h() and nowhere else, and none is ever sent as a usage event.
+  function mailCardLine(c) {
+    if (!c.from && !c.mail_date && !c.evidence) { return ""; }
+    var who = [c.from ? h(c.from) : "", c.mail_date ? h(c.mail_date) : ""].filter(function (t) { return t; }).join(" · ");
+    return (who ? '<div class="mail-from">' + who + "</div>" : "") + (c.evidence ? '<div class="mail-quote"><q>' + h(c.evidence) + "</q></div>" : "");
+  }
+
   function renderDeck(state) {
     var d = state.decisions, deck = EL("deck");
     if (!d.pending && !d.events_in_digest) {
@@ -325,7 +333,7 @@
     d.cards.slice(0, 1).forEach(function (c) {
       // Q11-b: a commitment-ask card is answered in the Decisions view's form, not approved here.
       var approve = c.kind === "commitment-ask" ? '<button class="b pri y" type="button" data-answer-in>Answer&hellip;</button>' : '<button class="b pri y" data-verdict="approved">' + verdictLabels(c.kind).pri + '</button>';
-      deck.innerHTML += '<div class="card" data-id="' + h(c.id) + '" data-kind="approval"><button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button><div class="t">' + h(c.title) + '</div><div class="w">' + h(c.why || c.kind) + sourceLabel(c) + "</div>" +
+      deck.innerHTML += '<div class="card" data-id="' + h(c.id) + '" data-kind="approval"><button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button><div class="t">' + h(c.title) + '</div><div class="w">' + h(c.why || c.kind) + sourceLabel(c) + "</div>" + mailCardLine(c) +
         '<div class="nb"><input type="text" placeholder="Note (optional)"></div><div class="acts">' + approve + '<button class="b n" data-verdict="rejected">' + verdictLabels(c.kind).sec + '</button><button class="b" data-verdict="snoozed">&hellip;</button><input type="date" hidden value="' + h(tomorrow) + '"></div></div>';
     });
     var newCard = deck.querySelector(".card[data-id]");
@@ -535,7 +543,7 @@
         return '<div class="row dec" data-id="' + h(c.id) + '" data-kind="approval">' +
           '<button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button>' +
           '<div class="ttl"><span class="a">' + h(c.title) + '</span><span class="meta">' + h(meta.join(" · ")) + "</span>" +
-          '<div class="why">' + h(c.why) + sourceLabel(c) + "</div>" + changes + "</div>" +
+          '<div class="why">' + h(c.why) + sourceLabel(c) + "</div>" + mailCardLine(c) + changes + "</div>" +
           '<div class="acts"><input type="text" class="dnote" placeholder="Note (optional)" value="' + h(notes[c.id] || "") + '">' +
           '<button class="b pri y" data-verdict="approved">' + verdictLabels(c.kind).pri + '</button><button class="b n" data-verdict="rejected">' + verdictLabels(c.kind).sec + '</button>' +
           '<button class="b" data-verdict="snoozed" data-snooze="' + h(tomorrow) + '">Snooze</button></div></div>';
@@ -2241,7 +2249,7 @@
     } else if (p.ask === "forwarding_elsewhere") {
       ask = '<div class="set-row">' + mpBtn("Forward to Knowlu instead", "replace") + mpBtn("Keep it as it is", "stop") + "</div>";
     } else if (p.status !== "ended" && p.rows.some(function (x) { return x.state === "needs_you" || x.state === "failed"; })) {
-      ask = '<div class="set-row">' + mpBtn("I’ve done this", "done", " pri y") + (p.blocked ? mpBtn("Try again", "retry") : "") + "</div>";
+      ask += '<div class="set-row">' + mpBtn("I’ve done this", "done", " pri y") + (p.blocked ? mpBtn("Try again", "retry") : "") + "</div>";
     }
     if (p.blocked && (p.offers || []).indexOf("personal_gmail") >= 0) { ask += '<div class="set-row"><button class="b" id="mp-gmail">Connect personal Gmail instead</button></div>'; }
     EL("mp-ask").innerHTML = ask;
@@ -2407,7 +2415,7 @@
     var i = MA.rows.push({ kind: kind, row: x }) - 1, main, from = "";
     if (kind === "changed") {
       main = h(x.title) + " · " + h(x.field) + ": " + h(x.old == null ? "none" : x.old) + " → " + h(x.new == null ? "none" : x.new);
-      from = [x.sender, x.date].filter(function (t) { return t; }).map(h).join(" · ");
+      from = [x.sender ? h(x.sender) : "", x.date ? h(x.date) : ""].filter(function (t) { return t; }).join(" · ");
     } else if (kind === "notice") {
       main = h(x.title) + (x.opened_at ? " · " + h(x.opened_at) : "");
     } else {
