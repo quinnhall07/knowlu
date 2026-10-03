@@ -10,7 +10,14 @@
 // off-diagonal pair of either kind is missing from `COST` at all.
 import { assert, assertEquals } from "@std/assert";
 import { EMAIL_TIERS, EVENT_VERDICTS } from "../supabase/functions/_shared/judge_validate.ts";
-import { COST, providerError, UNSCORED_ALLOWED_FRACTION, UNSCORED_ALLOWED_MIN, unscoredAllowed } from "./score.ts";
+import {
+  COST,
+  MIN_SCORED_FRACTION,
+  providerError,
+  UNSCORED_ALLOWED_FRACTION,
+  UNSCORED_ALLOWED_MIN,
+  unscoredAllowed,
+} from "./score.ts";
 
 // The event 4x4 (obligation, opportunity, drop, unsure), 12 off-diagonal cells.
 // obligation/opportunity/drop are `docs/notes/2026-09-22-cost-matrices.md` §3 (ratified); the six
@@ -132,6 +139,16 @@ Deno.test("unscored cases within the bound are not a provider error; past it, or
   // A kind with nothing left to score is never a pass, however small the corpus.
   assertEquals(providerError(1, 1), true);
   assertEquals(providerError(2, 2), true);
-  assertEquals(providerError(2, 3), false);
   assert(!providerError(0, 0));
+});
+
+// Review follow-up to PR #34, approved by Quinn 2026-10-02: a kind is gated only when at least
+// half its cases were scored, so a 3-case kind with 2 unscored is an outage, not a 1-case result.
+Deno.test("a kind with fewer than half its cases scored is a provider error", () => {
+  assertEquals(MIN_SCORED_FRACTION, 0.5);
+  assertEquals(providerError(2, 3), true);
+  assertEquals(providerError(1, 3), false);
+  assertEquals(providerError(2, 26), false);
+  assertEquals(providerError(3, 26), true);
+  assertEquals(providerError(13, 26), true);
 });

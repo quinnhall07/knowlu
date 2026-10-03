@@ -175,10 +175,13 @@ export function score(kind: Kind, cases: Case[], answers: Array<Record<string, u
  *
  * A few unscored cases are noise and the kind is scored on the rest. More than
  * `UNSCORED_ALLOWED_MIN` cases or `UNSCORED_ALLOWED_FRACTION` of them, whichever is larger, is an
- * outage: the gate fails as a provider error, never quietly passes on what is left.
+ * outage: the gate fails as a provider error, never quietly passes on what is left. So is a kind
+ * with fewer than `MIN_SCORED_FRACTION` of its cases scored, so a small kind is never gated on a
+ * remnant (3 cases with 2 unscored is an outage, not a 1-case result; Quinn, 2026-10-02).
  */
 export const UNSCORED_ALLOWED_MIN = 2;
 export const UNSCORED_ALLOWED_FRACTION = 0.1;
+export const MIN_SCORED_FRACTION = 0.5;
 
 /** How many of `total` cases may go unscored before the kind is a provider error. */
 export function unscoredAllowed(total: number): number {
@@ -186,10 +189,12 @@ export function unscoredAllowed(total: number): number {
 }
 
 /** Whether `unscored` of `total` cases is an outage rather than a quality result: past the bound,
- * or nothing left to score at all (a one-case kind whose case failed must not pass vacuously). */
+ * fewer than `MIN_SCORED_FRACTION` of the cases scored, or nothing left to score at all (a
+ * one-case kind whose case failed must not pass vacuously). */
 export function providerError(unscored: number, total: number): boolean {
   if (unscored <= 0) return false;
-  return unscored > unscoredAllowed(total) || unscored >= total;
+  const scored = total - unscored;
+  return unscored > unscoredAllowed(total) || scored < total * MIN_SCORED_FRACTION || unscored >= total;
 }
 
 /**
