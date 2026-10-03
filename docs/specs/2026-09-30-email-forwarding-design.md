@@ -838,6 +838,11 @@ approved **task** card, and the card's own status bookkeeping, are executed as t
   journal, so a later feed move is a card again.
 - **Unchanged:** `rank` (it never calls a model and never sees a claim), `surface`, `write`, the `gmail`
   pass, every frozen reference. `judge` still exits 0 on every failure shape.
+  *(controller default 2026-10-03, Quinn to confirm (plan §9.5's T15.0 row, Q2): `surface` gains three
+  optional card fields, `from`, `mail_date` and `evidence`, present only on a mail card and left out
+  everywhere else, so every other card and the three `surface-today-*.json` references serialize byte
+  for byte as before; `schema` stays 1 and `surface` still never writes. If Quinn reverts it, the deck
+  reads the three keys through `note_detail` instead.)*
 
 ### 6.2 App (`knowlu`)
 

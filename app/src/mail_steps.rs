@@ -30,9 +30,12 @@ use std::collections::VecDeque;
 
 /// The backfill window, in days before the setup day. One constant for every school (BW).
 pub const BACKFILL_DAYS: i64 = 120;
-/// Exchange Online allows 30 a minute; the routine keeps to a third of it (provisional, S6).
+/// Exchange Online allows 30 a minute; the routine keeps to a third of it. **Provisional, pending
+/// S6** (the M365 test-tenant run, never a real school account): S6 blocks this number, not the
+/// code (email plan §6, T17 step 6, §9.5), so T17 merged it unconfirmed on 2026-10-03.
 pub const MAX_PER_MINUTE: usize = 10;
-/// Forwards per mailbox per UTC day (provisional, S6).
+/// Forwards per mailbox per UTC day. **Provisional, pending S6**, as [`MAX_PER_MINUTE`]; until S6
+/// confirms it, T18's live proof keeps the school backfill under 600.
 pub const MAX_PER_DAY: u32 = 600;
 
 const DAY_SECS: i64 = 86_400;
