@@ -161,3 +161,5 @@ verify_jwt = false
 verify_jwt = false
 [functions.mail-pull]
 verify_jwt = false
+[functions.mail-resolve]
+verify_jwt = false
