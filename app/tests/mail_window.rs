@@ -2,6 +2,7 @@
 //! report). Every page here is a fake that records what it was asked to evaluate: no window opens
 //! and nothing reaches a network. Names, addresses and school hosts are synthetic (`.invalid`).
 use knowlu::mail::{popup_allowed, run, script, scripts, signed_in, MailWindow, Page, Refusal, INIT_SCRIPT, POPUP, WINDOW};
+use knowlu::mail::live::sweep_at_launch;
 use knowlu::mail_steps::Provider;
 use serde_json::{json, Value};
 use std::cell::RefCell;
@@ -104,13 +105,40 @@ fn no_capability_names_a_mail_window_or_a_remote_url() {
     }
 }
 
+/// `MailWindow` is one flag for the whole process: the tests here that take it run one at a time.
+static WINDOW_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn one_mail_window_at_a_time() {
+    let _one = WINDOW_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let first = MailWindow::try_take().expect("the first taker gets the mail window");
     assert!(MailWindow::try_take().is_none(), "a second mail window while one is held");
     drop(first);
     let again = MailWindow::try_take().expect("released when the holder is dropped");
     drop(again);
+}
+
+/// Checkpoint C (spec §5.4): the launch sweep deletes `mail-setup` only while it holds the mail window,
+/// so a setup the student starts at launch cannot open WebView2 on a folder being deleted; with the
+/// window already held it sweeps nothing. It hands the window on to the resume.
+#[test]
+fn the_launch_sweep_runs_only_while_it_holds_the_mail_window() {
+    let _one = WINDOW_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let d = std::env::temp_dir().join(format!("knowlu-mail-window-sweep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let net = knowlu::mail_session::setup_dir(&d).join("Default").join("Network");
+    std::fs::create_dir_all(&net).unwrap();
+    std::fs::write(net.join("Cookies"), "synthetic").unwrap();
+    let busy = MailWindow::try_take().expect("a setup holds the mail window");
+    assert!(sweep_at_launch(&d, MailWindow::try_take()).is_none(), "the window is busy: no sweep");
+    assert!(net.join("Cookies").exists(), "the open window's profile is left alone");
+    drop(busy);
+    let held = sweep_at_launch(&d, MailWindow::try_take()).expect("the sweep hands its window on");
+    assert!(!knowlu::mail_session::setup_dir(&d).exists(), "the leftover mail-setup is swept");
+    assert!(MailWindow::try_take().is_none(), "the window is still held after the sweep");
+    drop(held);
+    assert!(MailWindow::try_take().is_some());
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// S1b: the popup's first request is `about:blank`; then only the provider's own hosts.

@@ -6,8 +6,8 @@
 //   { result: "elsewhere" }   (forwarding goes to another address: that is the student's and is left on)
 //   { result: "reloading" }
 //   { result: "not found", control: "section" | "forwarding radio" | "address list" | "save" }
-//      (address list: forwarding is on and the list that says where to cannot be found, so it cannot be told
-//      whether the student's own is there)
+//      (address list: forwarding is on and the list that says where to cannot be found, or shows no address,
+//      so it cannot be told whether the student's own is there)
 //   { result: "failed", reason: "no address" | "save did not settle" | "read back differed" }
 // It removes nothing from the list of addresses (forwarding_remove_address.js does that, after this).
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
@@ -85,7 +85,10 @@ if (ron.checked !== true) return { result: "ok", forwarding: "off", changed: fal
 const list = toSelect();
 if (!list) return { result: "not found", control: "address list" };
 const now = selectedOf(list);
-if (now && norm(now.value || text(now)) !== "" && !optionIs(now, address)) return { result: "elsewhere" };
+// Only our address, read, is turned off: a list that shows no address (none, or a blank one drawn before it
+// is filled in) may hide the student's own, so it is named and nothing is clicked (Checkpoint C, R4).
+if (!now || norm(now.value || text(now)) === "") return { result: "not found", control: "address list" };
+if (!optionIs(now, address)) return { result: "elsewhere" };
 if (!saveEl()) return { result: "not found", control: "save" };
 
 roff.click();

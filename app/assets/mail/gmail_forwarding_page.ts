@@ -43,6 +43,8 @@ export interface Gmail {
   removed: string[];
   /** Clicks on look-alike controls that are not input buttons. */
   decoy: number;
+  /** Clicks on any control the page draws, enabled or not: a script that must click nothing leaves it 0. */
+  clicks: number;
   /** Google's verify popup closes and the opener shows its "confirmation link sent" dialog. */
   verified(): void;
   el(id: string): El;
@@ -76,6 +78,7 @@ export function gmail(o: Opts = {}): Gmail {
     hashes: [],
     removed: [],
     decoy: 0,
+    clicks: 0,
     verified: () =>
       dialog(
         `<p>Confirmation link sent</p><p>A confirmation link was sent to the address.</p>${
@@ -146,6 +149,7 @@ export function gmail(o: Opts = {}): Gmail {
     };
     const on = (id: string, fn: () => void) =>
       fresh(g.el(id))?.addEventListener("click", () => {
+        g.clicks++;
         if (g.el(id).hasAttribute("disabled")) return;
         fn();
       });

@@ -49,6 +49,11 @@ pub const MATCH_SECS: i64 = 15 * 60;
 pub const LAG_SECS: i64 = 15 * 60;
 /// One step's wait for the page, longer than the runner's polling.
 const STEP: Duration = Duration::from_secs(90);
+/// `sent_cleanup.js`'s wait, and the most one call deletes: its worst case (two waits a deleted row, one
+/// for each of the five skips it allows, 65 s here) stays inside [`STEP`] (Checkpoint C).
+const CLEANUP_WAIT_MS: u64 = 5_000;
+const CLEANUP_ROWS: u32 = 4;
+const _: () = assert!(CLEANUP_WAIT_MS * (2 * CLEANUP_ROWS as u64 + 5) < STEP.as_millis() as u64);
 const DAY: i64 = 86_400;
 
 // ---- the window -----------------------------------------------------------------------------------
@@ -780,8 +785,23 @@ impl Pass<'_> {
         if self.attempts == 0 || self.mb.open(Place::Sent).is_err() {
             return;
         }
-        let args = json!({ "address": self.job.knowlu_address, "nonce": batch.nonce, "max": self.attempts + 5 });
-        let cleaned = self.mb.script(&self.path("sent_cleanup.js"), &args).ok();
-        self.out.cleaned = cleaned.as_ref().and_then(|v| count(v, "deleted")).unwrap_or(0);
+        // Each call is asked for no more than it can finish inside one STEP, so none is still running in
+        // the page after the runner gives up (Gmail's places share one document); then it is called again
+        // while a call deleted all it was asked for, up to the attempts and five.
+        let mut left = self.attempts + 5;
+        while left > 0 {
+            let max = left.min(CLEANUP_ROWS);
+            let args = json!({
+                "address": self.job.knowlu_address, "nonce": batch.nonce, "max": max, "wait_ms": CLEANUP_WAIT_MS,
+            });
+            let cleaned = self.mb.script(&self.path("sent_cleanup.js"), &args).ok();
+            let deleted = cleaned.as_ref().and_then(|v| count(v, "deleted")).unwrap_or(0);
+            self.out.cleaned += deleted;
+            let whole = cleaned.as_ref().and_then(|v| v.get("result")).and_then(Value::as_str) == Some("ok");
+            if !whole || deleted < max {
+                return;
+            }
+            left -= max;
+        }
     }
 }

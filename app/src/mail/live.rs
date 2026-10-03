@@ -139,12 +139,16 @@ pub fn start_setup(app: &AppHandle, kind: Kind) -> Result<Arc<Shared>, &'static 
 
 /// H4, at launch: sweeps a leftover `mail-setup` and retries deletes that failed, then resumes every open
 /// backfill whose profile is kept. Never blocks the app's start: it runs on its own thread.
+/// The mail window is taken on the calling thread, before the sweep's thread starts, and held across the
+/// sweep and the resume (spec §5.4), so a setup started at launch is refused rather than opening WebView2
+/// on a folder being deleted.
 pub fn on_start(app: &AppHandle) {
     let Some(cs) = app.try_state::<ConsoleState>() else { return };
     let (vault, data_dir) = (cs.vault.clone(), cs.data_dir.clone());
     let app = app.clone();
+    let window = MailWindow::try_take();
     std::thread::spawn(move || {
-        let _ = crate::mail_session::start_up_sweep(&data_dir);
+        let Some(guard) = sweep_at_launch(&data_dir, window) else { return };
         if !MailState::load(&data_dir).is_ok_and(|s| s.keep_session) {
             return;
         }
@@ -153,8 +157,16 @@ pub fn on_start(app: &AppHandle) {
             return;
         }
         let Ok(client) = client_for(&vault) else { return };
-        let Some(guard) = MailWindow::try_take() else { return };
         let env = real_env(&app, &data_dir, client, guard);
         let _ = SETUPS.start_resume(data_dir, ids, env);
     });
+}
+
+/// The start-up sweep (`mail_session::start_up_sweep`), run only while `window` holds the mail window:
+/// `None` (another holder has it) sweeps nothing and hands nothing back; a held window is handed back
+/// for the resume. Its outcome is the sweep's own to record (`pending_deletes`).
+pub fn sweep_at_launch(data_dir: &Path, window: Option<MailWindow>) -> Option<MailWindow> {
+    let window = window?;
+    let _ = crate::mail_session::start_up_sweep(data_dir);
+    Some(window)
 }

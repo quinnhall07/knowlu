@@ -689,6 +689,8 @@ struct Fake {
     /// A Gmail send of more rows than this is "over 25 MB".
     over_rows: Option<usize>,
     cleanup_fails: bool,
+    /// Sent copies the cleanup has deleted so far: each call deletes at most its `max`.
+    cleaned: Cell<usize>,
 }
 
 fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
@@ -707,6 +709,7 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         mismatch: false,
         over_rows: None,
         cleanup_fails: false,
+        cleaned: Cell::new(0),
     }
 }
 
@@ -846,7 +849,11 @@ impl Mailbox for Fake {
                 if self.cleanup_fails {
                     return Err(Refusal::TimedOut);
                 }
-                json!({ "result": "ok", "deleted": self.forwards.borrow().len() })
+                let max = args["max"].as_u64().expect("the cleanup names its most") as usize;
+                let left = self.forwards.borrow().len() - self.cleaned.get();
+                let deleted = left.min(max);
+                self.cleaned.set(self.cleaned.get() + deleted);
+                json!({ "result": "ok", "deleted": deleted })
             }
             other => panic!("the routine ran {other}"),
         })
@@ -1073,6 +1080,28 @@ fn the_batch_closes_with_the_count_sent_and_the_sent_copies_are_cleaned() {
     let paths: Vec<_> = seen(&svc).into_iter().map(|(_, p, b)| (p, b)).collect();
     assert_eq!(paths.last().unwrap(), &("/batches/batch-1/sent".to_string(), r#"{"sent":0}"#.to_string()));
     assert!(quiet.calls("sent_cleanup.js").is_empty(), "nothing was forwarded, so nothing to clean");
+}
+
+#[test]
+fn each_sent_cleanup_call_fits_inside_one_step() {
+    // Checkpoint C: a cleanup still running in the page after the runner's step gives up survives Gmail's
+    // hash navigation and unticks the next script's rows. Each call is asked for no more than its worst
+    // case (two waits a deleted row, one for each of the five skips it allows) can do inside the step's
+    // 90 s, and the cleanup is called again while a call deleted all it was asked for.
+    let w = window(NOW, None, None);
+    let svc = holding(&[]);
+    let mb = fake(Provider::M365, unheld(10));
+    let out = pass(&mb, &svc, &mut routine(Provider::M365), &job(Provider::M365, Phase::Recover, w, Some(SLOT_CAP)));
+    assert_eq!((out.stop.clone(), out.sent, out.cleaned), (Stop::Done, 10, 10));
+    let calls = mb.calls("sent_cleanup.js");
+    assert!(calls.len() > 1, "ten copies take more than one call: {calls:?}");
+    for c in &calls {
+        let (max, wait) = (c["max"].as_u64().unwrap(), c["wait_ms"].as_u64().expect("the call names its wait"));
+        assert!(wait * (2 * max + 5) < 90_000, "a call that can outlast its step: {c}");
+        assert_eq!((c["address"].as_str(), c["nonce"].as_str()), (Some(KNOWLU), Some(NONCE)));
+    }
+    let asked: u64 = calls.iter().map(|c| c["max"].as_u64().unwrap()).sum();
+    assert!(asked <= 10 + 5, "never more than the attempts and five: {asked}");
 }
 
 #[test]

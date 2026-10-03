@@ -207,6 +207,20 @@ Deno.test("gmail_forwarding_off_turns_it_off_and_reads_it_back", async () => {
   assertEquals(g.saves, 0);
 });
 
+Deno.test("gmail_forwarding_off_leaves_forwarding_whose_address_it_cannot_read", async () => {
+  // Checkpoint C, R4: forwarding is on but the list shows no address (no option, or a blank one drawn
+  // before it is filled in). It may be the student's own, so nothing is clicked and the list is named.
+  for (const addresses of [[], ["", OURS]]) {
+    const f = gmail({ addresses, on: true, to: "" });
+    const before = f.snap();
+    const r = await run("gmail/forwarding_off.js", f.page, { address: OURS, ...FAST });
+    assertEquals(r, NOT_FOUND("address list"), JSON.stringify(addresses));
+    assertEquals(f.clicks, 0);
+    assertEquals(f.saves, 0);
+    assertEquals(f.snap(), before);
+  }
+});
+
 Deno.test("gmail_remove_address_removes_it", async () => {
   const f = gmail({ addresses: [OURS] });
   const r = await run("gmail/forwarding_remove_address.js", f.page, { address: OURS, ...FAST });
@@ -224,9 +238,9 @@ Deno.test("gmail_remove_address_removes_it", async () => {
 });
 
 Deno.test("gmail_remove_address_leaves_every_other_forwarding_address", async () => {
-  // Forwarding is off and the list shows another address: the script selects ours before it presses
-  // Remove, so Remove acts on ours and on nothing else (§10, R4).
-  const f = gmail({ addresses: [OTHER, OURS, THIRD], on: false, to: OTHER, disp: "read" });
+  // Forwarding is off (forwarding_off.js has run) and the list already shows ours: Remove acts on ours and
+  // on nothing else (§10, R4).
+  const f = gmail({ addresses: [OTHER, OURS, THIRD], on: false, to: OURS, disp: "read" });
   const r = await run("gmail/forwarding_remove_address.js", f.page, { address: OURS, ...FAST });
   assertEquals(r, { result: "ok", removed: true, changed: true });
   assertEquals(f.removed, [OURS]);
@@ -238,7 +252,7 @@ Deno.test("gmail_remove_address_leaves_every_other_forwarding_address", async ()
   assertEquals(g.removed, [OURS]);
   assertEquals(g.model.addresses, [OTHER, THIRD]);
   // Remove's button cannot be found: nothing is clicked, nothing is removed.
-  const h = gmail({ addresses: [OTHER, OURS], without: "remove" });
+  const h = gmail({ addresses: [OTHER, OURS], to: OURS, without: "remove" });
   assertEquals(
     await run("gmail/forwarding_remove_address.js", h.page, { address: OURS, ...FAST }),
     NOT_FOUND("remove"),
@@ -257,6 +271,39 @@ Deno.test("gmail_remove_address_does_nothing_while_forwarding_goes_to_another_ad
   assertEquals(f.removed, []);
   assertEquals(f.saves, 0);
   assertEquals(f.snap(), before);
+});
+
+Deno.test("gmail_remove_address_never_changes_the_selection_before_remove", async () => {
+  // Checkpoint C, R4: until the T18c live run passes, it is unverified whether Remove acts on the list's
+  // selected option or on the saved forward-to address. So the script acts only when ours is already the
+  // selected option, or the only one; it never selects ours itself. Forwarding is off and the student's
+  // own address is the one the list shows (setup added ours but failed before turning forwarding on, or
+  // the student switched back and turned forwarding off): needs-you, and nothing is clicked or selected.
+  const f = gmail({ addresses: [OTHER, OURS, THIRD], on: false, to: OTHER, disp: "read" });
+  const before = f.snap();
+  const r = await run("gmail/forwarding_remove_address.js", f.page, { address: OURS, ...FAST });
+  assertEquals(r, { result: "needs you", reason: "another address is selected" });
+  assertEquals(f.clicks, 0);
+  assertEquals(f.removed, []);
+  assertEquals(f.el("dlg"), null);
+  assertEquals(f.el("to").value, OTHER, "the list's selection is left as it was");
+  assertEquals(f.snap(), before);
+  // Nothing saved and the list shows its first option, which is not ours: the same.
+  const g = gmail({ addresses: [OTHER, OURS], on: false });
+  assertEquals(await run("gmail/forwarding_remove_address.js", g.page, { address: OURS, ...FAST }), {
+    result: "needs you",
+    reason: "another address is selected",
+  });
+  assertEquals(g.clicks, 0);
+  assertEquals(g.model.addresses, [OTHER, OURS]);
+  // Ours is the only option: Remove can act on nothing else, so it is removed.
+  const h = gmail({ addresses: [OURS], on: false });
+  assertEquals(await run("gmail/forwarding_remove_address.js", h.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    removed: true,
+    changed: true,
+  });
+  assertEquals(h.removed, [OURS]);
 });
 
 Deno.test("gmail_a_script_without_an_address_changes_nothing", async () => {

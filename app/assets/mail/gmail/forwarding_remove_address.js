@@ -1,15 +1,17 @@
 // Gmail, Settings > Forwarding and POP/IMAP: remove Knowlu's address from the list of forwarding addresses
-// (spec 4.12 step 1; no re-authentication was needed, X3b). Run after forwarding_off.js. The page's Remove
-// button acts on the address the list has selected, so the script selects our address first, checks the
-// list shows it selected, and only then presses Remove and confirms: every other forwarding address is
-// left in the list (spec 10, R4). A body of an async function of `args`: `args.address` is the Knowlu
-// forwarding address; `args.wait_ms` and `args.reloaded` are as in forwarding_read.js. It returns one of
+// (spec 4.12 step 1; no re-authentication was needed, X3b). Run after forwarding_off.js, which leaves our
+// address the list's selected one. The script never changes the list's selection: it presses Remove only
+// when our address is already selected, or is the only one listed, and then confirms; every other
+// forwarding address is left in the list (spec 10, R4). A body of an async function of `args`:
+// `args.address` is the Knowlu forwarding address; `args.wait_ms` and `args.reloaded` are as in
+// forwarding_read.js. It returns one of
 //   { result: "ok", removed: true, changed: true }     (it is gone and every other address is still listed)
 //   { result: "ok", removed: false, changed: false }   (it was not in the list: nothing clicked)
-//   { result: "needs you", reason: "forwarding goes to another address" }   (nothing clicked, see below)
+//   { result: "needs you", reason: "forwarding goes to another address" | "another address is selected" }
+//      (nothing clicked or selected, see below)
 //   { result: "reloading" }
 //   { result: "not found", control: "section" | "address list" | "remove" }
-//   { result: "failed", reason: "no address" | "could not select it" | "read back differed" }
+//   { result: "failed", reason: "no address" | "read back differed" }
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => {
   const aria = el.getAttribute("aria-label");
@@ -63,11 +65,6 @@ const roundTrip = async () => {
   location.hash = SECTION;
   return await until(addEl, waitMs);
 };
-const choose = (sel, option) => {
-  for (const o of sel.options) o.selected = o === option;
-  sel.value = option.value;
-  sel.dispatchEvent(new Event("change", { bubbles: true }));
-};
 const names = (sel) => [...sel.options].map((o) => norm(o.value || text(o)));
 
 const address = norm(args && args.address);
@@ -81,21 +78,23 @@ if (!list) return { result: "not found", control: "address list" };
 const ours = [...list.options].find((o) => optionIs(o, address));
 if (!ours) return { result: "ok", removed: false, changed: false };
 // Whether Remove acts on the list's selected-but-unsaved address, or on the saved forward-to address, is
-// not verified on real Gmail (plan, live checks for T11 and T18c). While forwarding is saved to an address
-// that is not ours, a wrong guess would delete the student's own address and switch their forwarding off,
-// so nothing is clicked and the student is asked (R4). Until a scratch-mailbox run has passed, only a list
-// whose saved address is ours, or forwarding that is off, is acted on.
+// not verified on real Gmail (plan, live checks for T11 and T18c). A wrong guess would delete the student's
+// own address (and, while forwarding is on, switch their forwarding off), so until a scratch-mailbox run has
+// passed the selection is never changed before Remove (Checkpoint C, R4). The script acts only when ours is
+// already the list's selected option, read before anything is touched, or is the only option; otherwise
+// nothing is clicked or selected and the student is asked.
 const radioNow = radioOn();
-const saved = radioNow && radioNow.checked === true ? selectedOf(list) : null;
-if (saved && norm(saved.value || text(saved)) !== "" && !optionIs(saved, address)) {
-  return { result: "needs you", reason: "forwarding goes to another address" };
+const shown = selectedOf(list);
+if (shown !== ours && list.options.length !== 1) {
+  const on = radioNow && radioNow.checked === true;
+  return {
+    result: "needs you",
+    reason: on ? "forwarding goes to another address" : "another address is selected",
+  };
 }
 const remove = byValue(document, /^remove forwarding address$/i);
 if (!remove) return { result: "not found", control: "remove" };
 const others = names(list).filter((n) => n !== address);
-
-choose(list, ours);
-if (selectedOf(list) !== ours) return { result: "failed", reason: "could not select it" };
 remove.click();
 // Gmail asks to confirm; the confirmation names the removal, and it is pressed only if it does.
 const confirm = () => {

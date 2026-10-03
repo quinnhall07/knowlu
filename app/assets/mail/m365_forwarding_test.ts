@@ -229,6 +229,16 @@ Deno.test("m365_forwarding_off_turns_it_off_and_reads_it_back", async () => {
   assertEquals(g.saves, 0);
 });
 
+Deno.test("m365_forwarding_off_leaves_forwarding_whose_address_is_empty", async () => {
+  // Checkpoint C, R4: the switch is on and the "Forward to" field is drawn empty (Outlook fills it in
+  // after it draws). Forwarding may go to the student's own address, so nothing is clicked.
+  const f = forwarding({ on: true, to: "", keep: true });
+  const before = f.snap();
+  assertEquals(await run("m365/forwarding_off.js", f.page, { address: OURS }), NOT_FOUND("address"));
+  assertEquals(f.saves, 0);
+  assertEquals(f.snap(), before);
+});
+
 Deno.test("m365_a_save_that_does_not_settle_is_reported_failed", async () => {
   const f = forwarding({ on: false, sticky: true });
   const r = await run("m365/forwarding_set.js", f.page, { address: OURS, settle_ms: 200 });
