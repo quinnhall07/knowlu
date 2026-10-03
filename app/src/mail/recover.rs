@@ -23,7 +23,8 @@
 //! conversations there). A row that shows a message count is **opened** (Quinn 2026-10-02): `thread.js`
 //! reads every message in it, each is fingerprinted, and a conversation with a missing message is
 //! forwarded alone, expecting one attachment per message. If Gmail attaches fewer, `forward.js` refuses
-//! and the conversation is left (T18c's gate "Gmail conversation rows").
+//! and the conversation is left (T18c's gate "Gmail conversation rows"). A message the mailbox itself sent
+//! (`own`, which `thread.js` reads from the account chip) is never judged: the service never holds it.
 //!
 //! **Privacy.** No sender, subject, address, nonce or page text is kept past the pass, logged or put in a
 //! [`Stop`]; every stop is a fixed word or a service error's name.
@@ -189,6 +190,9 @@ pub struct Row {
     /// Gmail: the row is a conversation, and how many messages it counts (`None` when it shows no count).
     pub thread: bool,
     pub messages: Option<u32>,
+    /// Gmail, inside an opened conversation: the signed-in account sent this message. The service never
+    /// receives the student's own mail, so it is never judged missing (spec 4.11 step 3).
+    pub own: bool,
 }
 
 impl Row {
@@ -201,6 +205,7 @@ impl Row {
             at: v.get("received_at").and_then(Value::as_str).and_then(parse_instant),
             thread: v.get("thread").and_then(Value::as_bool).unwrap_or(false),
             messages: v.get("messages").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()),
+            own: v.get("own").and_then(Value::as_bool).unwrap_or(false),
         })
     }
 
@@ -646,7 +651,7 @@ impl Pass<'_> {
         let named = |k: &str| v.get(k).and_then(Value::as_str);
         match (result, named("control"), named("reason")) {
             (Some("ok"), _, _) => {}
-            (Some("not found"), Some("message"), _) => return Ok(Convo::Left),
+            (Some("not found"), Some("message" | "account"), _) => return Ok(Convo::Left),
             (Some("failed"), _, Some("not every message drawn" | "no messages" | "conversation did not open")) => {
                 return Ok(Convo::Left);
             }
@@ -659,9 +664,15 @@ impl Pass<'_> {
         if messages.iter().any(|m| m.at.is_none()) {
             return Ok(Convo::Left);
         }
-        let missing = messages.iter().filter_map(|m| m.at.map(|at| (m, at))).filter(|(_, at)| self.in_window(*at)).any(
-            |(m, at)| !held.holds(&m.sender, &m.subject, at) && !held.holds(&m.sender, &format!("Re: {}", m.subject), at),
-        );
+        // The student's own replies are never judged: the service never received them, so they would read
+        // as missing on every pass (they still count in `messages.len()`, which Gmail attaches).
+        let missing = messages
+            .iter()
+            .filter_map(|m| m.at.map(|at| (m, at)))
+            .filter(|(m, at)| !m.own && self.in_window(*at))
+            .any(|(m, at)| {
+                !held.holds(&m.sender, &m.subject, at) && !held.holds(&m.sender, &format!("Re: {}", m.subject), at)
+            });
         Ok(if missing { Convo::Missing(messages.len() as u32) } else { Convo::Held })
     }
 

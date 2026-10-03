@@ -5,9 +5,9 @@
 // function of `args`: `args.sender`, `args.subject` and `args.received` the row's three fields,
 // `args.messages` (optional) the count list.js read from the row, and `args.wait_ms` (default 5000) bounds
 // each wait. It returns one of
-//   { result: "ok", messages: [{ sender, subject, received, received_at }] }   (oldest first; the page is
+//   { result: "ok", messages: [{ sender, subject, received, received_at, own? }] }   (oldest first; the page is
 //      back on its list)
-//   { result: "not found", control: "list" | "message" | "back" }
+//   { result: "not found", control: "list" | "message" | "back" | "account" }
 //   { result: "failed", reason: "conversation did not open" | "list did not return" | "no messages" |
 //      "not every message drawn" }   (fewer messages drawn than the row's count: a partial read would
 //      call a held message missing, so nothing is returned)
@@ -19,6 +19,10 @@
 // its first and newest messages open: "Expand all" is clicked until every message is drawn. The text of a
 // message is never read, and never leaves the page. It clicks the row, never its checkbox, and ticks,
 // sends and deletes nothing.
+// A message the signed-in account itself sent (a reply, a draft) carries `own: true` and no other message
+// carries the key: the service never receives the student's own mail, so the routine must not call it
+// missing. The account is the address in the account chip's label ("Google Account: <name> (<address>)");
+// with no chip to read it, nothing is opened and the answer is { result: "not found", control: "account" }.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => (el.getAttribute("aria-label") || "").trim();
 const norm = (v) => String(v || "").trim().toLowerCase();
@@ -43,6 +47,16 @@ const listShowing = () => {
   return !!g && !g.hasAttribute("hidden") && g.querySelectorAll('tr[role="row"]').length > 0;
 };
 if (!grid) return { result: "not found", control: "list" };
+
+// Whose mailbox this is: the last parenthesised address of the account chip's label.
+const own = (() => {
+  for (const el of document.querySelectorAll('[aria-label^="Google Account"]')) {
+    const found = (el.getAttribute("aria-label") || "").match(/\(([^()\s]+@[^()\s]+)\)\s*$/);
+    if (found) return norm(found[1]);
+  }
+  return "";
+})();
+if (!own) return { result: "not found", control: "account" };
 
 // The row, by the three fields list.js read from it (the newest sender, as list.js reads it).
 const read = (row) => {
@@ -83,12 +97,14 @@ for (const m of messageEls()) {
     .find((t) => TIMED.test(t) && /\d/.test(t));
   if (!ADDRESS.test(sender) || !stamp) return await back({ result: "not found", control: "message" });
   const at = new Date(stamp);
-  messages.push({
+  const one = {
     sender,
     subject,
     received: stamp.replace(/\s+/g, " "),
     received_at: isNaN(at.getTime()) ? null : at.toISOString(),
-  });
+  };
+  if (sender === own) one.own = true;
+  messages.push(one);
 }
 
 async function back(result) {

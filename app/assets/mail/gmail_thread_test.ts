@@ -2,7 +2,7 @@
 // shows a message count is opened and every message in it fingerprinted): `gmail/thread.js` against the
 // synthetic mailbox in `gmail_mailbox_pages.ts`. No address is real.
 import { assert, assertEquals } from "@std/assert";
-import { mailbox, msg, when } from "./gmail_mailbox_pages.ts";
+import { mailbox, msg, SELF, when } from "./gmail_mailbox_pages.ts";
 import { run } from "./test_dom.ts";
 
 const FAST = { wait_ms: 300 };
@@ -83,4 +83,33 @@ Deno.test("gmail_thread_names_a_conversation_that_will_not_open_or_a_list_that_w
     result: "not found",
     control: "back",
   });
+});
+
+Deno.test("gmail_thread_marks_the_students_own_messages_and_says_so_only_for_them", async () => {
+  // The student's own reply is in the conversation but the service never received it (it was never
+  // forwarded to the student's own mailbox): the routine must not judge it missing.
+  const replied = {
+    ...msg("t1", SELF.toUpperCase(), "Group project", 9),
+    count: 2,
+    convo: [{ who: ANA, at: when(2) }, { who: SELF.toUpperCase(), at: when(9) }],
+  };
+  const box = mailbox([replied]);
+  const row = { sender: SELF, subject: "Group project", received: when(9) };
+  const r = await run("gmail/thread.js", box.page, { ...row, messages: 2, ...FAST });
+  assertEquals(r.result, "ok");
+  assertEquals(r.messages.map((m: { sender: string; own?: boolean }) => [m.sender, m.own]), [
+    [ANA, undefined],
+    [SELF, true],
+  ]);
+  assertEquals(Object.keys(r.messages[0]), ["sender", "subject", "received", "received_at"]);
+});
+
+Deno.test("gmail_thread_reads_nothing_when_it_cannot_tell_whose_account_it_is", async () => {
+  // Without the account chip the student's replies cannot be told from received mail: nothing is opened.
+  const box = mailbox([thread()], { account: null });
+  assertEquals(await run("gmail/thread.js", box.page, { ...ROW, messages: 3, ...FAST }), {
+    result: "not found",
+    control: "account",
+  });
+  assert(!box.el("grid").hasAttribute("hidden"), "the list is still showing");
 });

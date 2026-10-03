@@ -631,6 +631,8 @@ const KNOWLU: &str = "box-1@in.example.invalid";
 const NONCE: &str = "bk7f3a9c2e41";
 const ANA: &str = "ana.lopez@school.example.invalid";
 const BO: &str = "bo.chen@school.example.invalid";
+/// The mailbox's own address: the page flags what it sent.
+const ME: &str = "me.student@school.example.invalid";
 
 fn iso(secs: i64) -> String {
     jiff::Timestamp::from_second(secs).unwrap().to_string()
@@ -806,7 +808,13 @@ impl Mailbox for Fake {
                 let messages: Vec<Value> = m
                     .convo
                     .iter()
-                    .map(|(who, at)| json!({ "sender": who, "subject": m.subject, "received": received(*at), "received_at": iso(*at) }))
+                    .map(|(who, at)| {
+                        let mut v = json!({ "sender": who, "subject": m.subject, "received": received(*at), "received_at": iso(*at) });
+                        if who == ME {
+                            v["own"] = json!(true);
+                        }
+                        v
+                    })
                     .collect();
                 json!({ "result": "ok", "messages": messages })
             }
@@ -1133,6 +1141,28 @@ fn a_gmail_thread_row_is_opened_and_every_message_in_it_is_fingerprinted() {
     let out = pass(&thin, &holding(&[]), &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
     assert_eq!((out.stop.clone(), out.sent, out.left, out.handled), (Stop::Done, 0, 1, 1));
     assert_eq!(thin.forwards.borrow().len(), 1, "one attempt");
+}
+
+#[test]
+fn a_conversation_of_a_held_message_and_the_students_own_reply_is_held_and_sends_nothing() {
+    let since = window(NOW, None, None).since;
+    let t = |h: i64| since + h * 3_600;
+    // A professor writes (held), the student replies (never received by the service, so never held).
+    let mut talk = mail(ME, "Office hours", t(6));
+    talk.count = Some(2);
+    talk.convo = vec![(ANA.into(), t(4)), (ME.into(), t(6))];
+    let svc = holding(&[(ANA, "Office hours", t(4))]);
+    let mb = fake(Provider::Gmail, vec![talk.clone()]);
+    let w = window(NOW, None, None);
+    let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, w, Some(SLOT_CAP)));
+    assert_eq!((out.stop.clone(), out.sent, out.held, out.left, out.handled), (Stop::Done, 0, 1, 0, 1));
+    assert!(mb.forwards.borrow().is_empty(), "the student's reply alone never makes a conversation missing");
+    // The same conversation with the professor's message not held is forwarded whole (Gmail attaches every
+    // message in it, the reply included), expecting one attachment each.
+    let mb = fake(Provider::Gmail, vec![talk]);
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, w, Some(SLOT_CAP)));
+    assert_eq!((out.stop.clone(), out.sent, out.held), (Stop::Done, 2, 0));
+    assert_eq!(mb.forwards.borrow()[0].1["rows"][0]["messages"], 2);
 }
 
 #[test]

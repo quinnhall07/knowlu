@@ -10,6 +10,8 @@ import { El, load, Page } from "./test_dom.ts";
 
 export const OURS = "box-1@in.example.invalid";
 export const NONCE = "bk7f3a9c2e41";
+/** The signed-in account the synthetic page's account chip names. */
+export const SELF = "me.student@school.example.invalid";
 
 export type Folder = "Inbox" | "Spam" | "Trash" | "Sent";
 
@@ -68,6 +70,8 @@ export interface Opts {
   noBack?: boolean;
   /** "Expand all" draws nothing more. */
   stuck?: boolean;
+  /** The account chip names this address (default `SELF`); `null` draws no chip. */
+  account?: string | null;
 }
 
 export interface Sent {
@@ -119,7 +123,13 @@ const LIMIT = 25_000_000;
 
 export function mailbox(all: Msg[], o: Opts = {}): Box {
   const size = o.size ?? 50;
+  const account = o.account === undefined ? SELF : o.account;
+  // Gmail's account chip: the label is "Google Account: <name>" then the address in parentheses.
+  const chip = account === null
+    ? ""
+    : `<a href="#account" aria-label="Google Account: Student Name\n(${account})">S</a>`;
   const page = load(`
+    ${chip}
     <div role="navigation"><a href="#inbox">Inbox</a><a href="#sent">Sent</a></div>
     <div role="search"><input type="text" id="q" name="q" aria-label="Search mail"></div>
     <div role="toolbar" id="bar">

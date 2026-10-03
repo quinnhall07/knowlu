@@ -1815,7 +1815,14 @@ was last known on at most as far as the 120-day backfill window, which is as far
 reconcile and recover go. (3) A listed row whose time the page would not read cannot be fingerprinted and
 is left, never forwarded. (4) The Gmail Inbox look for a non-delivery report between sends (T10.3b live
 check (4)) is not done: `forward.js` reads only the page it is given and checks its rows after its own
-guards, so it cannot probe an Inbox; a bounce is seen on the next pass's pages and by the canary. (5)
+guards, so it cannot probe an Inbox; a bounce is seen on the next pass's pages and by the canary. **Review (2026-10-02): this drop conflicts with
+spec §4.2 step 5 and T10.3b's note (4), and no ruling covers it; it is Quinn's to rule, recorded as the T18c
+gate "Gmail non-delivery report between sends" with options (a) accept and (b) build the Inbox look.** (4a) A
+message the mailbox itself sent (a reply) is never judged missing: `thread.js` flags it `own: true` from the
+account chip, the routine skips it, and a conversation whose only unheld messages are the student's own is
+held; a conversation with a missing message is still forwarded whole, replies included (Gmail attaches every
+message), which puts the student's own outgoing mail on the wire: **QUINN: does the privacy page need a line
+for that, or should the forward be limited to received messages (T18c gate (2) decides what is possible)?** (5)
 `expected` is the search count in both phases, and a recover batch opens at its first send, a backfill
 batch before the list.
 
@@ -2079,6 +2086,22 @@ controller's (spec T18; HANDOFF §2's controller rules).
   is true for both; (2) what "Forward as attachment" attaches for a conversation row (every message or
   the newest), and whether `forward.js` then refuses; (3) that the pager's total is a conversation count.
   Backfill on Gmail is not called proven until this gate has a recorded result.
+  **Gate, Gmail own replies** (T11.2 review): `thread.js` flags a message the signed-in account sent
+  (`own: true`) by the address in the account chip's label ("Google Account: <name> (<address>)"); the
+  routine never judges such a message missing. On the scratch Gmail mailbox, with a conversation the
+  student has replied to, see live (1) that the chip's `aria-label` has that shape (else every conversation
+  row is left, `control: "account"`, never forwarded); (2) that the student's reply reads `own: true`,
+  also from a send-as alias (an alias is not recognised and would read as received: if it matters,
+  Quinn's call); (3) that "Forward as attachment" on such a conversation attaches the reply too, which
+  puts the student's own mail on the wire (see QUINN below).
+  **Gate, Gmail non-delivery report between sends** (T11.2 review; **QUINN's ruling pending**): spec §4.2
+  step 5 and risk 15 stop at the first non-delivery report, and T10.3b's note (4) said the routine would
+  look at the Inbox between sends. T11.2 does not (`forward.js` cannot probe an Inbox: it reads the page
+  it is given), so a bounce is seen only on the next pass's pages and by the canary, and a backfill could
+  send up to 600 bounced forwards in a day. Quinn rules: (a) accept that, with this gate recording a
+  live bounce (rotate the address, send one forward, see where the report lands and whether a
+  nonce-bearing row exists), or (b) the routine opens `Place::Inbox` every N sends and stops on a row
+  carrying the batch nonce and a delivery-failure phrase (a new `gmail/bounce.js`, then `refusal()`).
 - **T18d. The PR.** CI green and Quinn's word to merge; the merge carries H0. No release is tagged
   before privacy bump #1 (D18). The controller's HANDOFF milestone update follows.
 
