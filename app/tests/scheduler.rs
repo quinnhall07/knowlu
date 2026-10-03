@@ -1694,7 +1694,7 @@ fn the_slot_records_the_grades_skip_and_runs_and_cleans_up_the_grades_step() {
     std::fs::write(v.join("config").join("campus.yaml"), "unitid: '999999'\r\nlms: 'blackboard'\r\n").unwrap();
     let calls = Cell::new(0);
     let capture = |_h: &'static str| { calls.set(calls.get() + 1); Ok(bundle()) };
-    let s = run_slot_with(&cs, &sch, None, false, &GradesSeam { row: None, capture: Some(&capture), window_open: false });
+    let s = run_slot_with(&cs, &sch, None, false, &GradesSeam { row: None, capture: Some(&capture), window_open: false }, &MailSeam::empty());
     let skip = s.steps.iter().find(|(n, _)| n.starts_with("grades (skipped")).expect("a named grades skip");
     assert_eq!(skip, &("grades (skipped: not available at your school yet)".to_string(), 0));
     assert!(s.engine_ok, "a skip never paints the tray amber: {:?}", s.steps);
@@ -1705,7 +1705,7 @@ fn the_slot_records_the_grades_skip_and_runs_and_cleans_up_the_grades_step() {
 
     // Dated row: captured, the engine step runs between coursework and rank, and the bundle is gone.
     let dated = test_row("blackboard", Some("2026-10-01"));
-    let s = run_slot_with(&cs, &sch, None, false, &GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false });
+    let s = run_slot_with(&cs, &sch, None, false, &GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false }, &MailSeam::empty());
     let names: Vec<&str> = s.steps.iter().map(|(n, _)| n.as_str()).collect();
     let at = names.iter().position(|n| *n == "grades").unwrap_or_else(|| panic!("{names:?}"));
     assert!(names.iter().position(|n| *n == "coursework").unwrap() < at && at < names.iter().position(|n| *n == "rank").unwrap(), "{names:?}");
@@ -1714,12 +1714,493 @@ fn the_slot_records_the_grades_skip_and_runs_and_cleans_up_the_grades_step() {
 
     // A failing engine step (a path that cannot be spawned) deletes it too.
     unsafe { std::env::set_var("KNOWLU_ENGINE_EXE", r"C:\knowlu-test-no-such-dir\knowlu-engine.exe") };
-    let s = run_slot_with(&cs, &sch, None, false, &GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false });
+    let s = run_slot_with(&cs, &sch, None, false, &GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false }, &MailSeam::empty());
     assert_eq!(calls.get(), 2);
     assert!(s.steps.iter().any(|(n, c)| n == "grades" && *c != 0), "{:?}", s.steps);
     assert!(no_bundles_left(&cs.data_dir), "the bundle is deleted whatever the exit code");
 
     let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&cs.data_dir);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+// ---- T11.5: the `mail` step in the slot (spec test 36, plan P18, R7, R17) -------------------------------------
+//
+// The decision (`mail_step`) is tested through its seam with closures, the way `grades_step` is; the pass behind
+// it (`mail::slot::run_step`) over a fake window and a loopback service in `support/slot_rig.rs`, whose address
+// and bearer are unique markers. Nothing here opens a real window or leaves the machine.
+
+use knowlu::mail::slot::{reconcile_due_with, run_step, Cadence, SlotEnv, RECONCILE_CADENCE};
+use knowlu::mail_session::MailState;
+use knowlu::scheduler::{mail_step, MailSeam};
+
+#[path = "support/slot_rig.rs"]
+mod rig;
+
+fn mail_dir(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("qo-sched-mail-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn second_row() -> Value {
+    let mut b = rig::row("active", "m365");
+    b["address_id"] = json!("0b0e5b2c-2222-4aaa-8bbb-000000000002");
+    b
+}
+
+#[test]
+fn the_mail_row_and_each_named_skip_exit_zero() {
+    let d = mail_dir("skips");
+    let rows = || Some(vec![rig::row("active", "m365")]);
+    let ran = Cell::new(0);
+    let pass = |_: &[Value]| {
+        ran.set(ran.get() + 1);
+        Some("mail: forwarding on, 2 recovered".to_string())
+    };
+    let seam = |window_open| MailSeam { mailboxes: &rows, pass: Some(&pass), window_open };
+    let ok = EntitlementState::Entitled;
+    let step = |est, window_open| mail_step(est, &d, rig::NOW, &seam(window_open));
+    assert_eq!(step(ok, false).as_deref(), Some("mail: forwarding on, 2 recovered"));
+    assert_eq!(ran.get(), 1);
+    assert_eq!(step(EntitlementState::NotEntitled, false).as_deref(), Some("mail (skipped: no entitlement)"));
+    assert_eq!(step(ok, true).as_deref(), Some("mail (skipped: mail window open)"));
+    MailState::update(&d, |s| {
+        s.last_reconcile.insert(rig::ID.to_string(), rig::iso(rig::NOW - 3600));
+        true
+    })
+    .unwrap();
+    assert_eq!(step(ok, false).as_deref(), Some("mail (skipped: not due)"));
+    MailState::update(&d, |s| {
+        s.keep_session = false;
+        true
+    })
+    .unwrap();
+    assert_eq!(step(ok, false).as_deref(), Some("mail (skipped: saved sign-in off)"));
+    assert_eq!(step(EntitlementState::NotEntitled, false).as_deref(), Some("mail (skipped: no entitlement)"), "no entitlement is named before the switch");
+    assert_eq!(ran.get(), 1, "no skip ran the pass");
+
+    // In a slot every one of them is a step at exit 0 and never paints the tray amber.
+    let (v, cs) = app_slot_vault("mail-skips");
+    MailState::update(&cs.data_dir, |s| {
+        s.keep_session = false;
+        true
+    })
+    .unwrap();
+    let sch = Scheduler::default();
+    let s = run_mail_slot(&cs, &sch, &MailSeam { mailboxes: &rows, pass: Some(&pass), window_open: false });
+    assert!(s.steps.contains(&("mail (skipped: saved sign-in off)".to_string(), 0)), "{:?}", s.steps);
+    assert!(s.engine_ok && s.ok, "a skip is not a failure: {:?}", s.steps);
+    let _ = std::fs::remove_dir_all(&cs.data_dir);
+    let _ = std::fs::remove_dir_all(&v);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A slot on the stand-in engine (`cmd`) and a throwaway `LOCALAPPDATA`, as the grades slot test runs one.
+fn run_mail_slot(cs: &ConsoleState, sch: &Scheduler, mail: &MailSeam) -> knowlu::scheduler::RunSummary {
+    let fake = std::env::temp_dir().join(format!("qo-sched-mail-localappdata-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let nothing = GradesSeam { row: None, capture: None, window_open: false };
+    let s = run_slot_with(cs, sch, None, false, &nothing, mail);
+    let _ = std::fs::remove_dir_all(&fake);
+    s
+}
+
+#[test]
+fn reconcile_follows_reconcile_cadence_in_both_modes() {
+    assert_eq!(RECONCILE_CADENCE, Cadence::Daily, "the shipped value, until S4's revisit changes only the value");
+    let ago = |h: i64| Some(rig::iso(rig::NOW - h * 3600));
+    let due = |mode, last: Option<String>, status: &str| reconcile_due_with(mode, last.as_deref(), status, rig::NOW);
+    // Daily: an active mailbox at most once a day.
+    assert!(due(Cadence::Daily, None, "active"), "never reconciled");
+    assert!(!due(Cadence::Daily, ago(1), "active"));
+    assert!(!due(Cadence::Daily, ago(19), "active"));
+    assert!(due(Cadence::Daily, ago(21), "active"), "a day later");
+    // Daily still repairs a mailbox that needs it at the next slot (spec 4.10), however recent the last pass.
+    for status in ["quiet", "off", "lapsed"] {
+        assert!(due(Cadence::Daily, ago(1), status), "{status}");
+    }
+    // RepairOnly: only a mailbox that needs repair, and an active one never.
+    assert!(!due(Cadence::RepairOnly, None, "active"));
+    assert!(!due(Cadence::RepairOnly, ago(500), "active"));
+    for status in ["quiet", "off", "lapsed"] {
+        assert!(due(Cadence::RepairOnly, ago(1), status), "{status}");
+    }
+    // A mailbox still in setup (or blocked, or paused by a refused send) is the setup's, never the slot's.
+    for mode in [Cadence::Daily, Cadence::RepairOnly] {
+        for status in ["pending", "confirmed", "blocked", "paused_send"] {
+            assert!(!due(mode, ago(1), status), "{status}");
+        }
+    }
+    // The slot hands the pass only the mailboxes that are due.
+    let d = mail_dir("cadence");
+    MailState::update(&d, |s| {
+        s.last_reconcile.insert(rig::ID.to_string(), rig::iso(rig::NOW - 3600));
+        true
+    })
+    .unwrap();
+    let rows = || Some(vec![rig::row("active", "m365"), second_row()]);
+    let seen = std::cell::RefCell::new(Vec::new());
+    let pass = |due: &[Value]| {
+        seen.borrow_mut().extend(due.iter().map(|r| r["address_id"].as_str().unwrap().to_string()));
+        Some("mail: ran".to_string())
+    };
+    let seam = MailSeam { mailboxes: &rows, pass: Some(&pass), window_open: false };
+    assert!(mail_step(EntitlementState::Entitled, &d, rig::NOW, &seam).is_some());
+    assert_eq!(*seen.borrow(), vec!["0b0e5b2c-2222-4aaa-8bbb-000000000002".to_string()]);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn slot_argv_is_unchanged() {
+    let v = scratch("argv-unchanged");
+    let exe = Path::new(r"C:\bin\knowlu-engine.exe");
+    let vault = v.to_string_lossy().to_string();
+    let bundle = PathBuf::from(r"C:\data\grades-capture.json");
+    let ja = JudgeArgs { runtime: PathBuf::from("rt.exe"), model: PathBuf::from("m.gguf"), log_dir: PathBuf::from("logs") };
+    // The six steps, in the order and with the arguments they had before the mail step existed.
+    let argv = slot_argv(&v, exe, &JudgePlan::Local(ja), Some(&bundle));
+    let first: Vec<&str> = argv.iter().map(|(_, a)| a[0].as_str()).collect();
+    assert_eq!(first, ["sync", "coursework", "grades", "judge", "rank"], "no feed on this vault, so no ingest");
+    assert_eq!(argv[0].1, ["sync", "--vault", vault.as_str(), "--via", "local-runner"]);
+    assert_eq!(argv[1].1, ["coursework", "--vault", vault.as_str(), "--via", "local-runner"]);
+    assert_eq!(argv[4].1, ["rank", "--vault", vault.as_str(), "--runner", "local"]);
+    assert!(argv.iter().all(|(e, a)| e == exe && !a[0].contains("mail")), "the mail step is the app's, never a child: {argv:?}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn the_mail_step_runs_after_the_grades_capture_and_before_sync() {
+    let (v, cs) = app_slot_vault("mail-order");
+    std::fs::create_dir_all(grades_app::session_dir(&cs.data_dir)).unwrap();
+    std::fs::write(v.join("config").join("campus.yaml"), "unitid: '999999'\r\nlms: 'blackboard'\r\n").unwrap();
+    let events = std::cell::RefCell::new(Vec::new());
+    let capture = |_h: &'static str| {
+        events.borrow_mut().push("grades capture");
+        Ok(bundle())
+    };
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let rows = || Some(vec![rig::row("active", "m365")]);
+    let pass = |_: &[Value]| {
+        events.borrow_mut().push("mail");
+        Some("mail: forwarding on, 0 recovered".to_string())
+    };
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-mail-order-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false };
+    let s = run_slot_with(&cs, &sch, None, false, &grades, &MailSeam { mailboxes: &rows, pass: Some(&pass), window_open: false });
+    assert_eq!(*events.borrow(), ["grades capture", "mail"], "the capture first, then the mail pass");
+    let at = |name: &str| s.steps.iter().position(|(n, _)| n == name).unwrap_or_else(|| panic!("{name} in {:?}", s.steps));
+    let (mail, sync) = (at("mail: forwarding on, 0 recovered"), at("sync"));
+    assert!(mail < sync, "before the child-process loop starts with sync: {:?}", s.steps);
+    assert!(s.steps.iter().all(|(n, c)| !n.starts_with("mail") || *c == 0));
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&cs.data_dir);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn no_mailbox_records_no_mail_row_and_no_mail_step_name_reaches_the_runner_log() {
+    let (v, cs) = app_slot_vault("mail-log");
+    let sch = Scheduler::default();
+    let mail_rows = |s: &knowlu::scheduler::RunSummary| s.steps.iter().filter(|(n, _)| n.starts_with("mail")).count();
+    let pass = |_: &[Value]| Some("mail (needs sign-in)".to_string());
+    // No mailbox connected: nothing is asked of the window and no row is added, whatever the service said.
+    let none = || Some(Vec::new());
+    let unreadable = || None;
+    let revoked = || Some(vec![rig::row("revoked", "m365")]);
+    for mailboxes in [&none as &dyn Fn() -> Option<Vec<Value>>, &unreadable, &revoked] {
+        let s = run_mail_slot(&cs, &sch, &MailSeam { mailboxes, pass: Some(&pass), window_open: false });
+        assert_eq!(mail_rows(&s), 0, "{:?}", s.steps);
+    }
+    // One connected: every named outcome is a row in the summary, and none is a line in the runner log.
+    MailState::update(&cs.data_dir, |s| {
+        s.keep_session = false;
+        true
+    })
+    .unwrap();
+    let one = || Some(vec![rig::row("active", "m365")]);
+    let mut summary = run_mail_slot(&cs, &sch, &MailSeam { mailboxes: &one, pass: Some(&pass), window_open: false });
+    assert_eq!(mail_rows(&summary), 1, "{:?}", summary.steps);
+    MailState::update(&cs.data_dir, |s| {
+        s.keep_session = true;
+        true
+    })
+    .unwrap();
+    for window_open in [false, true] {
+        let s = run_mail_slot(&cs, &sch, &MailSeam { mailboxes: &one, pass: Some(&pass), window_open });
+        assert_eq!(mail_rows(&s), 1);
+        summary.steps.extend(s.steps);
+    }
+    assert!(summary.steps.iter().any(|(n, _)| n == "mail (needs sign-in)") && summary.steps.iter().any(|(n, _)| n == "mail (skipped: saved sign-in off)"));
+    let log = knowlu_engine::pystr::read_text(&v.join("state").join("runner-log.md")).unwrap_or_default();
+    assert!(!log.lines().any(|l| l.contains("local ok mail") || l.contains("mail (") || l.contains("mail:")), "a mail step reached the runner log:\n{log}");
+    let _ = std::fs::remove_dir_all(&cs.data_dir);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn the_grades_capture_and_the_mail_step_never_run_at_once() {
+    let (v, cs) = app_slot_vault("mail-once");
+    std::fs::create_dir_all(grades_app::session_dir(&cs.data_dir)).unwrap();
+    std::fs::write(v.join("config").join("campus.yaml"), "unitid: '999999'\r\nlms: 'blackboard'\r\n").unwrap();
+    let busy = Cell::new(false);
+    let overlaps = Cell::new(0);
+    let runs = Cell::new(0);
+    let hold = |who: &Cell<u32>| {
+        if busy.replace(true) {
+            overlaps.set(overlaps.get() + 1);
+        }
+        who.set(who.get() + 1);
+        std::thread::sleep(Duration::from_millis(30));
+        busy.set(false);
+    };
+    let grades_ran = Cell::new(0);
+    let capture = |_h: &'static str| {
+        hold(&grades_ran);
+        Ok(bundle())
+    };
+    let rows = || Some(vec![rig::row("active", "m365")]);
+    let pass = |_: &[Value]| {
+        hold(&runs);
+        Some("mail: forwarding on, 0 recovered".to_string())
+    };
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let sch = Scheduler::default();
+    let fake = std::env::temp_dir().join(format!("qo-sched-mail-once-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")), ("LOCALAPPDATA", fake.as_os_str())]);
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false };
+    let _ = run_slot_with(&cs, &sch, None, false, &grades, &MailSeam { mailboxes: &rows, pass: Some(&pass), window_open: false });
+    assert_eq!((grades_ran.get(), runs.get(), overlaps.get()), (1, 1, 0), "one after the other, never at once");
+    // And the mail window's own hold is one at a time: while a slot's pass holds it, nothing else takes it.
+    let held = knowlu::mail::MailWindow::try_take().expect("free");
+    assert!(knowlu::mail::MailWindow::try_take().is_none());
+    drop(held);
+    assert!(knowlu::mail::MailWindow::try_take().is_some());
+    let _ = std::fs::remove_dir_all(&fake);
+    let _ = std::fs::remove_dir_all(&cs.data_dir);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// One mailbox's pass over the fake window and the loopback service: the line it reports, and the rig.
+struct Pass {
+    d: PathBuf,
+    svc: rig::Svc,
+    host: rig::FakeHost,
+    clk: rig::Clk,
+}
+
+impl Pass {
+    /// A mailbox with `status` whose forwarding page reads `fwd`, and a saved sign-in on disk.
+    fn new(tag: &str, status: &str, fwd: Value) -> Pass {
+        let d = mail_dir(tag);
+        std::fs::create_dir_all(knowlu::mail_session::session_dir(&d, rig::ID).unwrap()).unwrap();
+        Pass { d, svc: rig::Svc::start(vec![rig::row(status, "m365")]), host: rig::FakeHost::new(fwd), clk: rig::Clk::at(rig::NOW) }
+    }
+
+    fn rows(&self) -> Vec<Value> {
+        self.svc.client().list_addresses().unwrap()
+    }
+
+    fn run(&self) -> Option<String> {
+        let client = self.svc.client();
+        run_step(&SlotEnv { host: &self.host, client: &client, clock: &self.clk, data_dir: &self.d }, &self.rows())
+    }
+
+    fn last_reconcile(&self, secs: i64) {
+        MailState::update(&self.d, |s| {
+            s.last_reconcile.insert(rig::ID.to_string(), rig::iso(secs));
+            true
+        })
+        .unwrap();
+    }
+
+    fn mail(&self, msgs: &[(&str, i64)]) {
+        self.host.st.lock().unwrap().msgs = msgs.iter().map(|(subject, at)| ("ana.lopez@school.example.invalid".to_string(), subject.to_string(), *at)).collect();
+    }
+
+    fn at(&self, call: &str) -> usize {
+        let calls = self.svc.calls();
+        calls.iter().position(|c| c == call).unwrap_or_else(|| panic!("{call} in {calls:?}"))
+    }
+}
+
+impl Drop for Pass {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.d);
+    }
+}
+
+#[test]
+fn a_forwarding_found_off_is_turned_back_on_and_reported_reenabled() {
+    let p = Pass::new("reenable", "quiet", rig::fwd("off", "none"));
+    p.last_reconcile(rig::NOW - 10 * rig::DAY);
+    // One message from eight days ago (the forwarding was off since) and one from the last hour.
+    p.mail(&[("Older notice", rig::NOW - 8 * rig::DAY), ("Newer notice", rig::NOW - 3600)]);
+    assert_eq!(p.run().as_deref(), Some("mail: forwarding was off, turned back on, 2 recovered"));
+    let scripts = p.host.scripts();
+    assert_eq!(&scripts[..3], ["m365/forwarding_read.js", "m365/forwarding_set.js", "m365/forwarding_read.js"], "{scripts:?}");
+    assert_eq!(p.host.calls("m365/forwarding_set.js"), [json!({ "address": rig::KNOWLU, "replace": false })], "never replaces another address");
+    let id = rig::ID;
+    let (off, canary, reenabled) = (p.at(&format!("POST /addresses/{id}/state off")), p.at("POST /canary"), p.at(&format!("POST /addresses/{id}/state reenabled")));
+    assert!(off < canary && canary < reenabled, "{:?}", p.svc.calls());
+    assert!(p.at("POST /reconcile") > reenabled, "the reconcile follows the repair");
+    // It reaches back to when forwarding was last known on, not three days.
+    assert_eq!(p.svc.bodies("/reconcile")[0]["since"], json!(rig::iso(rig::NOW - 10 * rig::DAY)));
+    assert!(p.host.opens().iter().all(|(_, visible)| !visible) && p.host.st.lock().unwrap().back == 0, "no window is shown");
+    assert!(p.host.st.lock().unwrap().closed >= 1);
+    assert_eq!(MailState::load(&p.d).unwrap().last_reconcile[rig::ID], rig::iso(rig::NOW), "a whole pass is the next last-known-on");
+}
+
+#[test]
+fn a_failed_forwarding_read_never_moves_last_known_on_forward() {
+    let p = Pass::new("unchecked", "quiet", json!({ "result": "error" }));
+    p.last_reconcile(rig::NOW - 10 * rig::DAY);
+    p.mail(&[("Newer notice", rig::NOW - 3600)]);
+    assert_eq!(p.run().as_deref(), Some("mail: forwarding not checked, 1 recovered"));
+    assert_eq!(p.svc.bodies("/reconcile")[0]["since"], json!(rig::iso(rig::NOW - 3 * rig::DAY)));
+    assert_eq!(MailState::load(&p.d).unwrap().last_reconcile[rig::ID], rig::iso(rig::NOW - 10 * rig::DAY), "an unconfirmed forwarding is not a last-known-on");
+}
+
+#[test]
+fn recovery_reaches_back_three_days_when_forwarding_is_on() {
+    let p = Pass::new("on", "active", rig::fwd("on", "ours"));
+    p.mail(&[("Older notice", rig::NOW - 8 * rig::DAY), ("Newer notice", rig::NOW - 3600)]);
+    assert_eq!(p.run().as_deref(), Some("mail: forwarding on, 1 recovered"));
+    assert_eq!(p.host.calls("m365/forwarding_set.js").len(), 0);
+    assert!(!p.svc.calls().iter().any(|c| c.contains("state") || c.contains("canary")), "nothing to report: {:?}", p.svc.calls());
+    assert_eq!(p.svc.bodies("/reconcile")[0]["since"], json!(rig::iso(rig::NOW - 3 * rig::DAY)));
+}
+
+#[test]
+fn a_turned_off_mailbox_is_never_turned_back_on_even_after_a_failed_disconnect() {
+    use knowlu::mail::commands::{disconnect_with, Disconnect};
+    let p = Pass::new("turnedoff", "off", rig::fwd("on", "ours"));
+    p.svc.st.lock().unwrap().delete_status = 500;
+    let client = p.svc.client();
+    // Disconnect: step 0 records the mailbox, forwarding goes off, and the server call then fails.
+    let out = disconnect_with(&Disconnect { host: &p.host, client: &client, clock: &p.clk, data_dir: &p.d }, rig::ID);
+    assert_eq!(out["ok"], json!(false), "{out}");
+    assert!(MailState::load(&p.d).unwrap().is_turned_off(rig::ID));
+    assert_eq!(p.host.st.lock().unwrap().fwd["forwarding"], json!("off"));
+    let (scripts, opens, calls) = (p.host.scripts(), p.host.opens(), p.svc.calls());
+    // The mailbox is still listed, `off`, with a kept profile: the slot never touches it.
+    let rows = || client.list_addresses().ok();
+    let ran = Cell::new(0);
+    let pass = |due: &[Value]| {
+        ran.set(ran.get() + 1);
+        run_step(&SlotEnv { host: &p.host, client: &client, clock: &p.clk, data_dir: &p.d }, due)
+    };
+    let seam = MailSeam { mailboxes: &rows, pass: Some(&pass), window_open: false };
+    assert_eq!(mail_step(EntitlementState::Entitled, &p.d, rig::NOW, &seam), None, "no row for a mailbox the student turned off");
+    assert_eq!(ran.get(), 0);
+    // Even handed the row directly, the pass opens nothing and runs nothing.
+    assert_eq!(p.run(), None);
+    assert_eq!((p.host.scripts(), p.host.opens()), (scripts, opens), "no window, no script");
+    assert!(p.svc.calls()[calls.len()..].iter().all(|c| c == "GET /addresses"), "{:?}", p.svc.calls());
+    assert_eq!(p.host.st.lock().unwrap().fwd["forwarding"], json!("off"));
+}
+
+#[test]
+fn a_forwarding_pointing_elsewhere_is_left_unchanged_and_asked_about() {
+    let p = Pass::new("elsewhere", "quiet", rig::fwd("on", "elsewhere"));
+    assert_eq!(p.run().as_deref(), Some("mail: forwarding goes to another address, 0 recovered"));
+    assert!(!p.host.scripts().iter().any(|s| s.contains("forwarding_set") || s.contains("forwarding_off")), "{:?}", p.host.scripts());
+    let id = rig::ID;
+    p.at(&format!("POST /addresses/{id}/state elsewhere"));
+    assert!(!p.svc.calls().iter().any(|c| c.contains("reenabled") || c.contains("canary")), "{:?}", p.svc.calls());
+    // Off with another address typed in is the same: never replaced in a hidden step.
+    let q = Pass::new("elsewhere-off", "off", rig::fwd("off", "elsewhere"));
+    assert_eq!(q.run().as_deref(), Some("mail: forwarding goes to another address, 0 recovered"));
+    assert!(!q.host.scripts().iter().any(|s| s.contains("forwarding_set")));
+}
+
+#[test]
+fn a_signed_out_profile_records_needs_sign_in_and_shows_no_window() {
+    let p = Pass::new("signedout", "active", rig::fwd("on", "ours"));
+    p.host.st.lock().unwrap().signed_in = false;
+    assert_eq!(p.run().as_deref(), Some("mail (needs sign-in)"));
+    let opens = p.host.opens();
+    assert!(!opens.is_empty() && opens.iter().all(|(_, visible)| !visible), "the window is opened hidden: {opens:?}");
+    assert_eq!(p.host.st.lock().unwrap().back, 0, "and never brought to the front");
+    assert!(p.host.scripts().is_empty(), "no script ran on a signed-out page");
+    assert!(p.svc.calls().iter().all(|c| c == "GET /addresses"), "nothing else was asked of the service: {:?}", p.svc.calls());
+    assert!(!p.host.st.lock().unwrap().window, "the window is closed again");
+    // A mailbox with no saved sign-in on this device (connected elsewhere) opens no window at all.
+    let q = Pass::new("nodevice", "active", rig::fwd("on", "ours"));
+    std::fs::remove_dir_all(knowlu::mail_session::session_dir(&q.d, rig::ID).unwrap()).unwrap();
+    assert_eq!(q.run().as_deref(), Some("mail (needs sign-in)"));
+    assert!(q.host.opens().is_empty());
+}
+
+/// Every file under `dir` except the provider's own browser profiles, which are WebView2's and not Knowlu's.
+fn knowlus_own_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let (p, name) = (e.path(), e.file_name().to_string_lossy().to_string());
+        if p.is_dir() {
+            if !(name.starts_with("mail-session-") || name == "mail-setup") {
+                knowlus_own_files(&p, out);
+            }
+        } else {
+            out.push(p);
+        }
+    }
+}
+
+/// Spec 5.4 and the plan's R17: a setup and a slot over a service whose address and bearer are unique
+/// markers. A byte search of every file Knowlu writes (the data folder and the vault), the slot's summary and
+/// its runner log then finds neither. The progress view may show the address, from the in-memory answer.
+#[test]
+fn no_file_or_log_of_knowlus_own_holds_the_address_or_token() {
+    use knowlu::mail::setup::{Env, Kind, Plan, Setups};
+    let (v, cs) = app_slot_vault("mail-markers");
+    let svc = rig::Svc::start(vec![rig::row("active", "m365")]);
+    let host = rig::FakeHost::new(rig::fwd("on", "ours"));
+    let curated = knowlu::scaffold::CAMPUSES.iter().find(|c| c.mail_provider == "m365").expect("a curated m365 row");
+    let today = jiff::Timestamp::from_second(rig::NOW).unwrap().to_zoned(jiff::tz::TimeZone::UTC).date();
+    let plan = Plan { kind: Kind::School { unitid: Some(curated.unitid.to_string()), address: None }, data_dir: cs.data_dir.clone(), keep_session: true, setup_day: today };
+    let env = Env {
+        host: Box::new(rig::FakeHost { st: host.st.clone() }),
+        client: svc.client(),
+        clock: Box::new(rig::Clk::at(rig::NOW)),
+        on_closed: Box::new(|| {}),
+        guard: None,
+    };
+    let setups = Setups::new();
+    let run = setups.start(plan, env).expect("a setup started");
+    assert!(run.wait_done(Duration::from_secs(30)), "the setup ended");
+    assert!(host.scripts().contains(&"m365/forwarding_set.js".to_string()), "it really ran: {:?}", host.scripts());
+
+    let client = svc.client();
+    let clk = rig::Clk::at(rig::NOW);
+    let rows = || client.list_addresses().ok();
+    let pass = |due: &[Value]| Some(run_step(&SlotEnv { host: &host, client: &client, clock: &clk, data_dir: &cs.data_dir }, due).unwrap_or_default());
+    let sch = Scheduler::default();
+    let s = run_mail_slot(&cs, &sch, &MailSeam { mailboxes: &rows, pass: Some(&pass), window_open: false });
+    assert!(s.steps.iter().any(|(n, _)| n.starts_with("mail: forwarding on")), "the slot's pass ran: {:?}", s.steps);
+
+    let mut files = Vec::new();
+    knowlus_own_files(&cs.data_dir, &mut files);
+    knowlus_own_files(&v, &mut files);
+    assert!(files.iter().any(|f| f.file_name().is_some_and(|n| n == "mail.json")), "mail.json is among them: {files:?}");
+    let mut texts: Vec<(String, Vec<u8>)> = files.iter().map(|f| (f.display().to_string(), std::fs::read(f).unwrap_or_default())).collect();
+    texts.push(("the RunSummary".to_string(), format!("{s:?}{}", serde_json::to_string(&s).unwrap()).into_bytes()));
+    for (what, bytes) in &texts {
+        for marker in [rig::KNOWLU, rig::TOKEN, "marker-address-qzx7731", "marker-bearer-qzx7731"] {
+            assert!(!bytes.windows(marker.len()).any(|w| w == marker.as_bytes()), "{what} holds {marker}");
+        }
+    }
     let _ = std::fs::remove_dir_all(&cs.data_dir);
     let _ = std::fs::remove_dir_all(&v);
 }

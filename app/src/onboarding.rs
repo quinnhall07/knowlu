@@ -287,6 +287,12 @@ pub fn offer_marker(profile_dir: &Path) -> PathBuf {
     profile_dir.join("offer-inference")
 }
 
+/// The wizard's *forward my school mail after setup* marker: a file beside [`offer_marker`], for the
+/// same reason (never a `Settings` field), set from `offer_mail` on the same three finishing paths.
+pub fn mail_offer_marker(profile_dir: &Path) -> PathBuf {
+    profile_dir.join("offer-mail")
+}
+
 /// Drop or clear the marker for one profile folder, from whichever of the three finishing paths
 /// got here — CREATE and RESTORE go through [`finish_profile_in`], ADOPT through
 /// [`apply_profile_settings`], and the finish panel's checkbox is the same element on all three
@@ -300,6 +306,15 @@ fn set_offer_marker(dir: &Path, offer: bool) {
         let _ = std::fs::write(offer_marker(dir), b"");
     } else {
         let _ = std::fs::remove_file(offer_marker(dir));
+    }
+}
+
+/// [`set_offer_marker`] for the mail offer.
+fn set_mail_offer_marker(dir: &Path, offer: bool) {
+    if offer {
+        let _ = std::fs::write(mail_offer_marker(dir), b"");
+    } else {
+        let _ = std::fs::remove_file(mail_offer_marker(dir));
     }
 }
 
@@ -473,6 +488,9 @@ pub struct WizardPlan {
     /// only drops a marker the console reads once on its first launch.
     #[serde(default)]
     pub offer_inference: bool,
+    /// The finish panel's *Forward my school mail* offer; like `offer_inference`, a marker only.
+    #[serde(default)]
+    pub offer_mail: bool,
     #[serde(default)]
     pub zybooks_courses: Vec<crate::scaffold::BookMapping>,
     #[serde(default)]
@@ -896,6 +914,7 @@ pub fn apply_profile_settings_in(root: &Path, id: &str, plan: &WizardPlan, backu
     match settings.save(&dir.join("settings.json")) {
         Ok(()) => {
             set_offer_marker(&dir, plan.offer_inference);
+            set_mail_offer_marker(&dir, plan.offer_mail);
             json!({ "ok": true, "error": Value::Null })
         }
         Err(e) => json!({ "ok": false, "error": e }),
@@ -969,6 +988,7 @@ fn finish_profile_in(root: &Path, vault: &Path, name: Option<String>, plan: &Wiz
         return json!({ "ok": false, "error": format!("{}: {e}", path.display()), "profile": Value::Null });
     }
     set_offer_marker(&dir, plan.offer_inference);
+    set_mail_offer_marker(&dir, plan.offer_mail);
     let label = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| profiles::default_name(vault));
     match profiles::register(root, &label, vault) {
         Ok(p) => json!({ "ok": true, "error": Value::Null, "profile": serde_json::to_value(p).unwrap_or(Value::Null) }),

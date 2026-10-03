@@ -211,7 +211,7 @@ def check(page) -> list:
     bad = []
     # 1. The wizard is what a zero-profile launch shows, on panel 1 of nine.
     if page.is_hidden("#wizard") or page.is_hidden("#wiz-welcome"): bad.append("wizard did not open on panel 1")
-    if "of 9" not in page.inner_text("#wiz-step"): bad.append(f"step counter says {page.inner_text('#wiz-step')!r}")
+    if "of 10" not in page.inner_text("#wiz-step"): bad.append(f"step counter says {page.inner_text('#wiz-step')!r}")
 
     # 2. Panel 2 is the account. Continue with Google leads it, there is no password field anywhere,
     #    and neither door opens until both boxes are ticked (spec §9's minors row).
@@ -245,7 +245,15 @@ def check(page) -> list:
     if "Finish the payment page" not in page.inner_text("#wiz-error"): bad.append("Next's re-ask did not say what was still missing")
     page.evaluate("window.__ENTITLED = true")
     page.click("#wiz-next"); page.wait_for_timeout(400)
-    if page.is_hidden("#wiz-vault"): bad.append("an entitled account did not advance to the name panel")
+    # D6 / risk 12: the panel right after the subscription announces school mail, and Not now sits
+    # above the school-rules sentence. Next keeps the offer on.
+    if page.is_hidden("#wiz-mail"): bad.append("an entitled account did not advance to the school mail announcement")
+    if "Next: connect your school email" not in page.inner_text("#wiz-mail"): bad.append("the announcement does not read 'Next: connect your school email'")
+    if not page.is_visible("#wiz-mail-notnow"): bad.append("the announcement has no Not now")
+    if "If your school's rules don't allow forwarding your school email, skip this." not in page.inner_text("#wiz-mail"):
+        bad.append("the announcement lacks the school-rules sentence")
+    page.click("#wiz-next"); page.wait_for_timeout(200)
+    if page.is_hidden("#wiz-vault"): bad.append("Next off the announcement did not advance to the name panel")
     if names(page).count("open_checkout") != 1: bad.append("a second Next press opened a second Checkout page")
 
     # 4. Panel 4 names the setup. NO folder is picked, and the path is shown before Finish.
@@ -362,6 +370,7 @@ def check(page) -> list:
 
     # 7. Gmail is honest, has its Connect button, and never gates Next (D11); slots are live and the
     # summary follows them.
+    if page.inner_text("#wiz-gmail-connect") != "Connect Gmail directly (Google testers only)": bad.append("the Gmail button is not labelled as the testers-only direct path")
     if "invited testers" not in page.inner_text("#wiz-gmail"): bad.append("the Gmail panel does not say it is testing-mode only")
     if not page.query_selector("#wiz-gmail-connect:not([disabled])"): bad.append("the Gmail panel has no live Connect Gmail button")
     page.click("#wiz-gmail-connect"); page.wait_for_timeout(300)
@@ -408,6 +417,7 @@ def check(page) -> list:
         if created.get("name") != "Spring 2027": bad.append(f"create_vault got name {created.get('name')!r}")
         if "parent" in created: bad.append("create_vault still takes a parent folder")
         if "backup_dir" in plan: bad.append("the plan still carries a backup folder")
+        if plan.get("offer_mail") is not True: bad.append(f"Finish did not send offer_mail true: {plan.get('offer_mail')!r}")
         if not str(plan.get("ics_url") or "").endswith(".ics"): bad.append("the plan did not carry the captured feed")
         if not str(plan.get("personal_calendar") or "").endswith(".ics"): bad.append("the plan did not carry the personal calendar")
         if ((plan.get("campus_choice") or {}).get("unitid")) != "100751": bad.append("the plan did not carry the school")

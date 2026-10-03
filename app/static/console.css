@@ -175,6 +175,8 @@ aside { border-left: 1px solid var(--hair); padding: var(--s5) var(--s5) var(--s
 .deck-foot .adv { margin-left: auto; }
 .card .t { font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; margin-bottom: var(--s1); }
 .card .w { color: var(--t3); font-size: 12.5px; margin-bottom: var(--s3); }
+.card .mail-from, .row.dec .mail-from { color: var(--t3); font-size: 12px; margin-top: var(--s2); overflow-wrap: anywhere; }
+.card .mail-quote, .row.dec .mail-quote { color: var(--t3); font-size: 12px; font-style: italic; margin-top: var(--s2); overflow-wrap: anywhere; }
 .card .w .src, .row.dec .why .src { color: var(--t4); margin-left: var(--s2); }
 .card .cf { display: flex; gap: var(--s2); align-items: flex-start; font-family: var(--mono); font-size: 10.5px; line-height: 1.55; color: var(--warn); background: var(--warn-dim); border-radius: var(--r1); padding: var(--s2); margin-bottom: var(--s3); }
 .acts { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
@@ -648,3 +650,26 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .set-sec h3 { margin: var(--s3) 0 0; color: var(--t2); font-size: 12px; }
 .notshown { margin-top: var(--s3); }
 .notshown summary { font-size: 12.5px; color: var(--t3); cursor: pointer; }
+/* T15.1 (email spec §4.5): the mail progress view. A `.setpanel`, so `[hidden]` is already handled. */
+.mp-row { display: flex; gap: var(--s2); align-items: baseline; padding: var(--s1) 0; border-top: 1px solid var(--hair); }
+.mp-row .mp-step { flex: 1 1 auto; color: var(--t2); }
+.mp-row .mp-state { color: var(--t4); font: 500 11px/1.4 var(--mono); }
+.mp-row.mp-working .mp-state { color: var(--acc); }
+.mp-row.mp-needs_you .mp-state, .mp-row.mp-failed .mp-state { color: var(--warn); }
+.mp-row .mp-why { flex-basis: 100%; color: var(--t3); font-size: 12px; }
+#mp-ask .set-row input[type="text"] { flex: 1 1 18ch; }
+/* T15.2 (email spec §4.12): Settings -> Email, one row per mailbox. */
+.em-box { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: baseline; padding: var(--s2) 0; border-top: 1px solid var(--hair); }
+.em-box .em-name { flex: 1 1 auto; color: var(--t2); }
+.em-box .em-line { flex-basis: 100%; color: var(--t3); font-size: 12px; }
+.em-box code { font: 500 11.5px/1.4 var(--mono); color: var(--t2); }
+.em-amber { color: var(--warn); }
+.em-box .em-confirm { flex-basis: 100%; color: var(--t2); font-size: 12px; }
+/* T15.4 (email spec §4.14): "From your email". A `.setpanel`. */
+.ma-course h3 { margin: var(--s3) 0 0; color: var(--t2); font-size: 12px; }
+.ma-course h4 { margin: var(--s2) 0 0; color: var(--t3); font-size: 11.5px; font-weight: 500; }
+.ma-row { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: baseline; padding: var(--s1) 0; border-top: 1px solid var(--hair); }
+.ma-row .ma-main { flex: 1 1 auto; color: var(--t2); }
+.ma-row .ma-from { flex-basis: 100%; color: var(--t3); font-size: 12px; }
+.ma-row .ma-since { color: var(--t4); font: 500 11px/1.4 var(--mono); }
+.ma-course summary { font-size: 12.5px; color: var(--t3); cursor: pointer; }

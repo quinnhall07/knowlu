@@ -461,6 +461,73 @@ pub fn grades_step(
     }
 }
 
+/// The slot's mail inputs that only the caller knows (plan P18), beside [`GradesSeam`]. `run_slot_inner`
+/// builds it from the vault and the app handle; a test builds it from closures.
+pub struct MailSeam<'a> {
+    /// The account's mailboxes as the service lists them, or `None` when it cannot be asked (no account, no
+    /// session, no app handle, offline): nothing is known to report, so no row.
+    pub mailboxes: &'a dyn Fn() -> Option<Vec<serde_json::Value>>,
+    /// The hidden-window pass over the mailboxes that are due, answering its row; `None` from it is "the mail
+    /// window was taken meanwhile". `None` here is a run with no app handle (`--run-slot-once`): no window.
+    pub pass: Option<&'a dyn Fn(&[serde_json::Value]) -> Option<String>>,
+    /// The mail window exists right now (a setup, a repair sign-in).
+    pub window_open: bool,
+}
+
+fn no_mailboxes() -> Option<Vec<serde_json::Value>> { None }
+
+impl MailSeam<'static> {
+    /// No mailboxes and no window: the step adds no row.
+    pub fn empty() -> MailSeam<'static> { MailSeam { mailboxes: &no_mailboxes, pass: None, window_open: false } }
+}
+
+/// **The slot's mail decision** (spec §4.11, test 36): the whole `RunSummary` row, or `None` for no row.
+/// With no mailbox connected (none listed, or only revoked, guided or turned-off ones) there is no row; with
+/// one, a named skip at exit 0 in this order: no entitlement, saved sign-in off, not due, mail window open;
+/// else the pass. Never a failure, and never a line in `state/runner-log.md` (the skip filter in
+/// `run_slot_with` names no mail step), so the step writes nothing in the vault.
+pub fn mail_step(est: crate::account::EntitlementState, data_dir: &Path, now: i64, mail: &MailSeam) -> Option<String> {
+    use crate::mail_session::{valid_address_id, MailState};
+    let pass = mail.pass?;
+    let state = MailState::load(data_dir);
+    let rows: Vec<serde_json::Value> = (mail.mailboxes)()?
+        .into_iter()
+        .filter(|r| {
+            let id = r["address_id"].as_str().filter(|i| valid_address_id(i));
+            let provider = crate::mail_steps::Provider::from_service(r["provider"].as_str().unwrap_or(""));
+            id.is_some_and(|i| !state.as_ref().is_ok_and(|s| s.is_turned_off(i)))
+                && r["status"].as_str() != Some("revoked")
+                && provider != crate::mail_steps::Provider::Guided
+        })
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let skip = |why: &str| Some(format!("mail (skipped: {why})"));
+    // An unreadable `mail.json` cannot say what the student turned off, so nothing runs (§13 Q11).
+    let Ok(state) = state else { return skip("mail.json unreadable") };
+    if est == crate::account::EntitlementState::NotEntitled {
+        return skip("no entitlement");
+    }
+    if !state.keep_session {
+        return skip("saved sign-in off");
+    }
+    let due: Vec<serde_json::Value> = rows
+        .into_iter()
+        .filter(|r| {
+            let last = r["address_id"].as_str().and_then(|i| state.last_reconcile.get(i)).map(String::as_str);
+            crate::mail::slot::reconcile_due(last, r["status"].as_str().unwrap_or(""), now)
+        })
+        .collect();
+    if due.is_empty() {
+        return skip("not due");
+    }
+    if mail.window_open {
+        return skip("mail window open");
+    }
+    pass(&due).or_else(|| skip("mail window open"))
+}
+
 /// sync → coursework → **ingest** → **grades** → **judge** → rank, as child processes of the sibling
 /// engine exe. `ingest` is included only when the vault has a feed; `grades` only when the slot's
 /// capture wrote a bundle (`grades_bundle`, see [`grades_step`]); `judge` only when a runtime and a
@@ -699,12 +766,30 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
         capture: tray_app.map(|_| &capture as &dyn Fn(&'static str) -> Result<serde_json::Value, crate::grades::CaptureError>),
         window_open: tray_app.is_some_and(|app| app.get_webview_window(crate::grades::WINDOW).is_some()),
     };
-    run_slot_with(cs, sch, tray_app, late, &seam)
+    // The mail step: the service's mailboxes and the hidden-window pass, only with an app handle. The pass takes
+    // the one mail window itself, so a setup that holds it is a named skip and never a second window.
+    let mail_client = || crate::mail::live::client_for(&cs.vault).ok();
+    let mail_rows = || tray_app.and_then(|_| mail_client()).and_then(|c| c.list_addresses().ok());
+    let mail_pass = |due: &[serde_json::Value]| -> Option<String> {
+        let app = tray_app?;
+        let _window = crate::mail::MailWindow::try_take()?;
+        let client = mail_client()?;
+        let host = crate::mail::live::WindowHost::new(app.clone(), cs.data_dir.clone());
+        let env = crate::mail::slot::SlotEnv { host: &host, client: &client, clock: &crate::mail::recover::SystemClock, data_dir: &cs.data_dir };
+        Some(crate::mail::slot::run_step(&env, due).unwrap_or_else(|| "mail: nothing to check".to_string()))
+    };
+    let mail = MailSeam {
+        mailboxes: &mail_rows,
+        pass: tray_app.map(|_| &mail_pass as &dyn Fn(&[serde_json::Value]) -> Option<String>),
+        window_open: tray_app.is_some_and(|app| app.get_webview_window(crate::mail::WINDOW).is_some()),
+    };
+    run_slot_with(cs, sch, tray_app, late, &seam, &mail)
 }
 
 /// `run_slot_inner`'s body, with the grades step's inputs (the curated row, the capture, the window
-/// question) handed in so a test can drive a dated row without editing `scaffold::CAMPUSES`.
-pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHandle>, late: bool, grades: &GradesSeam) -> RunSummary {
+/// question) and the mail step's (the mailboxes, the pass, the window question) handed in so a test can drive a
+/// dated row without editing `scaffold::CAMPUSES` and a mailbox without a window.
+pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHandle>, late: bool, grades: &GradesSeam, mail: &MailSeam) -> RunSummary {
     if mode(&cs.vault) != SchedulerMode::App {
         return refuse(sch, late, "scheduler is script on this vault");
     }
@@ -854,6 +939,14 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
             None
         }
     };
+    // The mail step, after the grades capture and before the child-process loop starts with `sync` (spec §4.11, F6):
+    // one hidden window at a time, so the two never run at once. No mailbox connected adds no row. Its rows are
+    // the Settings page's and stay out of the runner-log filter below: the step writes nothing in the vault.
+    steps.start("mail");
+    match mail_step(est, &cs.data_dir, jiff::Timestamp::now().as_second(), mail) {
+        Some(row) => steps.push((row, 0)),
+        None => steps.idle(),
+    }
     let judge = judge_plan_for(est, cs);
     if let JudgePlan::Skip(note) = &judge {
         steps.push(((*note).to_string(), 0));

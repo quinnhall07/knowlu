@@ -428,12 +428,12 @@ fn the_picker_is_in_the_page_and_carries_no_data_id() {
 }
 
 #[test]
-fn the_wizard_has_nine_panels_and_the_privacy_words_and_no_live_fetch() {
+fn the_wizard_has_ten_panels_and_the_privacy_words_and_no_live_fetch() {
     let html = read("index.html");
     assert!(html.contains("id=\"wizard\""));
     // Spec §4.2, in order. **No `wiz-backup`, and no folder anywhere**: the app creates
     // `%USERPROFILE%\Knowlu\<name>` and `Backups` beside it (§4.1, §11a).
-    for p in ["wiz-welcome", "wiz-account", "wiz-subscribe", "wiz-vault", "wiz-calendars", "wiz-logins", "wiz-gmail", "wiz-slots", "wiz-finish"] {
+    for p in ["wiz-welcome", "wiz-account", "wiz-subscribe", "wiz-mail", "wiz-vault", "wiz-calendars", "wiz-logins", "wiz-gmail", "wiz-slots", "wiz-finish"] {
         assert!(html.contains(&format!("id=\"{p}\"")), "panel {p}");
     }
     assert!(!html.contains("id=\"wiz-backup\""), "the backup-folder panel is gone");
@@ -442,7 +442,7 @@ fn the_wizard_has_nine_panels_and_the_privacy_words_and_no_live_fetch() {
     for f in ["startWizard", "renderWizard", "wizGo", "wizFinish"] {
         assert!(js.contains(&format!("function {f}(")), "missing {f}");
     }
-    assert!(js.contains("var PANELS = [\"welcome\", \"account\", \"subscribe\", \"vault\", \"calendars\", \"logins\", \"gmail\", \"slots\", \"finish\"];"));
+    assert!(js.contains("var PANELS = [\"welcome\", \"account\", \"subscribe\", \"mail\", \"vault\", \"calendars\", \"logins\", \"gmail\", \"slots\", \"finish\"];"));
     // No live fetch in onboarding: the ICS shape is matched, never requested, by the PAGE. The
     // escape keeps the network-reference rule true.
     assert!(js.contains("/^https:\\/\\/"), "the ICS check is an escaped regex");
@@ -2484,5 +2484,462 @@ fn a_gmail_card_shows_its_gmail_attribution_and_never_a_sender() {
     assert!(deck.contains("sourceLabel(c)"), "the deck card carries the label");
     let view = js.split("function renderDecisionsView(").nth(1).unwrap().split("\n  function ").next().unwrap();
     assert!(view.contains("sourceLabel(c)"), "so does the decisions row");
-    assert!(!js.contains("c.sender") && !js.contains("c.from"), "never the sender");
+    // D21 (T15.5): a mail card, `created_by: mail`, names its sender through `mailCardLine`; the Gmail label
+    // stays D15's, and the Gmail path never reads one.
+    assert!(!js.contains("c.sender"), "never the sender");
+    let label = fn_body(&js, "function sourceLabel(c)");
+    assert!(!label.contains("c.from") && !label.contains("mail_date") && !label.contains("evidence"), "the Gmail label never names a sender");
+}
+
+// ---- T15.1: the mail progress view (email spec §4.5, D6, BW) ----------------------------------------
+
+fn mail_progress_fn(js: &str) -> &str {
+    let at = js.find("// ---- mail progress view").expect("the progress view's section");
+    let end = js[at..].find("// ---- end mail progress view").expect("its end marker");
+    &js[at..at + end]
+}
+
+#[test]
+fn the_progress_view_shows_one_row_per_step_with_its_state() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let v = mail_progress_fn(&js);
+    for id in ["mail-progress", "mp-sentence", "mp-rows", "mp-backfill", "mp-ask", "mp-end", "mp-leave", "mp-stop"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
+    }
+    for step in ["sign_in", "step_aside", "forwarding", "add_address", "confirm_address", "turn_on", "canary", "backfill", "finish"] {
+        assert!(v.contains(&format!("{step}:")), "label for {step}");
+    }
+    for st in ["waiting", "working", "done", "needs_you", "done_by_hand", "skipped", "failed"] {
+        assert!(v.contains(&format!("{st}:")), "label for state {st}");
+    }
+    assert!(v.contains("p.rows.forEach") && v.contains("class=\"mp-row mp-"), "one row per step, the state as a class");
+    assert!(v.contains("invoke(\"mail_setup_progress\""), "polled");
+}
+
+#[test]
+fn needs_you_names_its_reason_and_offers_its_answers() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    for r in ["guided", "forwarding_elsewhere", "not_found", "script_failed", "blocked"] {
+        assert!(v.contains(&format!("{r}:")), "reason {r}");
+    }
+    assert!(v.contains("row.reason") && v.contains("MP_REASON["));
+    assert!(v.contains("invoke(\"mail_setup_answer\", { choice: \"done\" })"), "I've done this");
+    assert!(v.contains("{ choice: \"retry\" }") && v.contains("{ choice: \"replace\" }") && v.contains("{ choice: \"stop\" }"));
+    assert!(v.contains("{ choice: { school_address:"), "the one question of an uncurated school");
+    assert!(v.contains("personal_gmail") && v.contains("invoke(\"mail_setup_start\", { provider: \"gmail\" })"));
+}
+
+#[test]
+fn a_guided_step_shows_the_address_with_copy_and_its_path() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("data-mp-copy") && v.contains("navigator.clipboard.writeText"), "the address with a Copy button");
+    assert!(v.contains("invoke(\"mail_status\"") && v.contains("p.address_id"), "the address is read from the service by id");
+    assert!(v.contains("MP_PATH[p.provider]") && v.contains("row.step"), "the path is keyed on provider and step");
+    for prov in ["m365:", "google:", "other:"] {
+        assert!(v.contains(prov), "a path for {prov}");
+    }
+    let paths = &v[v.find("var MP_PATH = {").unwrap()..v.find("var MP_PATH_CONFIRM").unwrap()];
+    for line in paths.lines().filter(|l| l.contains('[')) {
+        assert!(line.matches("\", \"").count() + 1 <= 4, "four lines or fewer: {line}");
+    }
+}
+
+#[test]
+fn the_backfill_row_names_its_start_date_and_asks_nothing() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("mail from the last 120 days, since "), "the plan's copy");
+    assert!(v.contains("b.since"));
+    assert!(!v.contains("type=\"date\"") && !v.contains("term start") && !v.contains("confirm the date"), "no date is asked");
+}
+
+#[test]
+fn leave_closes_the_panel_and_settings_carries_the_progress() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("function mailLeave(") && fn_body(&js, "function mailLeave(").contains("EL(\"mail-progress\").hidden = true"));
+    assert!(!fn_body(&js, "function mailLeave(").contains("mail_setup_stop"), "leaving never stops the setup");
+    assert!(html.contains("id=\"set-email\"") && html.contains("id=\"set-email-state\"") && html.contains("id=\"set-email-open\""));
+    assert!(fn_body(&js, "function openSettings(").contains("mailSettingsRow("));
+    assert!(fn_body(&js, "function mailSettingsRow(").contains("mail_setup_progress"));
+}
+
+#[test]
+fn stop_invokes_mail_setup_stop_and_shows_what_was_done() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert_eq!(v.matches("invoke(\"mail_setup_stop\"").count(), 1);
+    assert!(v.contains("p.done") && v.contains("p.left") && v.contains("not_brought_in_before"));
+    assert!(v.contains(" was not brought in"));
+    assert!(v.contains("closest(\"#mp-stop\")"));
+}
+
+#[test]
+fn backfill_shows_n_of_m_and_a_time_left() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("b.handled") && v.contains("b.expected") && v.contains(" of "));
+    assert!(v.contains("b.eta_secs") && v.contains(" left"));
+    assert!(v.contains("b.paused"));
+}
+
+#[test]
+fn the_consoles_first_open_starts_school_mail_setup_when_offer_pending() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function bootConsole(");
+    assert!(b.contains("mailFirstOpen()"));
+    let f = fn_body(&js, "function mailFirstOpen(");
+    assert!(f.contains("invoke(\"mail_status\"") && f.contains("offer_pending") && f.contains("setup_running"));
+    assert!(f.contains("invoke(\"mail_setup_start\", { provider: \"school\" })"));
+    assert_eq!(js.matches("invoke(\"mail_setup_start\", { provider: \"school\" })").count(), 2, "first open and the Settings offer");
+}
+
+#[test]
+fn the_progress_view_never_reaches_ui_event_and_every_string_goes_through_h() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(!v.contains("ui_event") && !v.contains("ev("), "no usage events from the mail view");
+    assert!(!v.contains("innerHTML = p.") && !v.contains("+ p.sentence"), "the engine's sentence is set as text");
+}
+
+// ---- T15.2: Settings -> Email (email spec §4.12, §4.13, D15) ----------------------------------------
+
+fn mail_settings(js: &str) -> &str {
+    let at = js.find("// ---- mail settings").expect("the Settings -> Email section");
+    let end = js[at..].find("// ---- end mail settings").expect("its end marker");
+    &js[at..at + end]
+}
+
+#[test]
+fn settings_email_lists_each_mailbox_with_its_state_and_its_address_with_copy() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let v = mail_settings(&js);
+    assert!(html.contains("id=\"set-email-boxes\"") && html.contains("id=\"set-email-keep\""));
+    assert!(v.contains("invoke(\"mail_status\"") && v.contains("s.mailboxes.forEach"), "one row per mailbox");
+    for st in ["pending", "confirmed", "active", "quiet", "blocked", "off", "paused_send", "lapsed", "revoked"] {
+        assert!(v.contains(&format!("{st}:")), "a sentence for state {st}");
+    }
+    assert!(v.contains("m.address") && v.contains("data-em-copy") && v.contains("navigator.clipboard.writeText"), "the address with Copy");
+    assert!(v.contains("m.turned_off") && v.contains("m.open_backfill"));
+    assert!(v.contains("Mail from the last 120 days") || v.contains("recent mail"), "an open backfill is said");
+}
+
+#[test]
+fn resume_rotate_and_the_saved_sign_in_switch_invoke_their_commands() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("invoke(\"mail_sign_in\", { addressId: id })"), "Resume");
+    assert!(v.contains("invoke(\"mail_rotate\", { addressId: id })"), "Rotate");
+    assert!(v.contains("invoke(\"mail_keep_session\", { on: "), "the switch");
+    assert!(v.contains("profiles_left"), "a profile the switch could not delete is named");
+    let rows = v.find("function mailBoxRow(").map(|i| &v[i..]).expect("the row builder");
+    assert!(rows.contains("emBtn(\"Resume\", \"resume\"") && rows.contains("emBtn(\"Rotate\", \"rotate\"")); 
+}
+
+#[test]
+fn turn_off_email_is_two_steps_with_the_confirm_text() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("Knowlu turns off forwarding in this mailbox, stops reading it and deletes what it holds to serve it. What it already added stays in your plan."));
+    assert!(v.contains("emBtn(\"Turn off email\", \"off1\"") && v.contains("emBtn(\"Yes, turn off email\", \"off2\""));
+    assert_eq!(v.matches("invoke(\"mail_disconnect\", { addressId: id })").count(), 1, "only the second press invokes it");
+    let first = v.split("act === \"off1\"").nth(1).unwrap().split("act ===").next().unwrap();
+    assert!(!first.contains("mail_disconnect"), "the first press only reveals the second");
+}
+
+#[test]
+fn turn_off_email_names_a_forwarding_address_it_left_for_the_student() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("remove_address") && v.contains("needs_you"));
+    assert!(v.contains("Knowlu’s forwarding address is still in your Gmail forwarding list"), "says it is still there");
+    assert!(v.contains("Settings, then See all settings, then Forwarding and POP/IMAP"), "names where to remove it");
+    assert!(v.contains("r.address") && v.contains("data-em-copy"), "the address is shown to find it");
+}
+
+#[test]
+fn delete_my_data_confirm_adds_the_forwarding_sentence() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("If Knowlu cannot turn forwarding off, your mail keeps going to Knowlu's address and is deleted unread; you can turn it off in your mail settings."));
+    let d = js.split("EL(\"set-delete-1\").addEventListener").nth(1).unwrap().split("EL(\"set-delete-2\").addEventListener").next().unwrap();
+    assert!(d.contains("This deletes your vault, your backups, your account and everything we hold. It cannot be undone."));
+    assert!(d.contains("mailDeleteSentence("), "the sentence is added to the first press's confirm");
+}
+
+#[test]
+fn a_failed_profile_delete_is_named_until_it_succeeds() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("s.profile_delete_pending"), "read from mail_status every time Settings opens");
+    assert!(v.contains("could not be deleted from this computer yet"));
+    assert!(fn_body(&js, "function openSettings(").contains("mailSettingsRow("));
+}
+
+#[test]
+fn the_google_row_and_the_email_row_sit_side_by_side() {
+    let html = read("index.html");
+    let g = html.find("id=\"set-google\"").unwrap();
+    let e = html.find("id=\"set-email\"").unwrap();
+    let between = &html[g..e];
+    assert!(e > g && between.matches("class=\"set-row\"").count() == 1, "the email row follows the Google row directly");
+    assert!(html.find("id=\"set-email-boxes\"").unwrap() > e && html.find("id=\"set-email-boxes\"").unwrap() < html.find("id=\"set-grades\"").unwrap());
+}
+
+#[test]
+fn an_unbound_reason_shows_amber_with_its_count_and_rotate_only_when_suggested() {
+    let js = read("console.js");
+    let css = read("console.css");
+    let v = mail_settings(&js);
+    assert!(v.contains("m.unbound_reason") && v.contains("m.unbound_note") && v.contains("m.unbound_since_live"));
+    assert!(v.contains("em-amber") && css.contains(".em-amber"));
+    assert!(v.contains("m.suggest_rotate === true") && v.contains("m.suggest_rotate !== true"), "Rotate sits in the amber line only when suggested");
+    assert!(!v.contains("ui_event") && !v.contains("ev("), "nothing mail-derived reaches usage events");
+    assert!(!v.contains("innerHTML = m.") && !v.contains("innerHTML += m."), "every mail string goes through h()");
+}
+
+/// T15.3 (email spec D6, risk 12, section 9): the panel right after sign-in and subscription
+/// announces school mail setup; nothing is set up in the wizard.
+fn mail_panel(html: &str) -> &str {
+    html.split("id=\"wiz-mail\"").nth(1).and_then(|s| s.split("id=\"wiz-vault\"").next()).expect("the mail panel")
+}
+
+#[test]
+fn the_panel_after_sign_in_reads_next_connect_your_school_email() {
+    let html = read("index.html");
+    assert!(html.find("id=\"wiz-mail\"").unwrap() > html.find("id=\"wiz-subscribe\"").unwrap());
+    assert!(html.find("id=\"wiz-mail\"").unwrap() < html.find("id=\"wiz-vault\"").unwrap());
+    assert!(mail_panel(&html).contains("Next: connect your school email"));
+    let js = read("console.js");
+    assert!(js.contains("var PANELS = [\"welcome\", \"account\", \"subscribe\", \"mail\", \"vault\", \"calendars\", \"logins\", \"gmail\", \"slots\", \"finish\"];"));
+}
+
+#[test]
+fn not_now_carries_the_school_rules_sentence() {
+    let html = read("index.html");
+    let p = mail_panel(&html);
+    assert!(p.contains("id=\"wiz-mail-notnow\""), "a one-click Not now");
+    let at = p.find("id=\"wiz-mail-notnow\"").unwrap();
+    let rule = p.find("If your school's rules don't allow forwarding your school email, skip this.")
+        .or_else(|| p.find("If your school&rsquo;s rules don&rsquo;t allow forwarding your school email, skip this."))
+        .expect("risk 12's sentence");
+    assert!(rule > at, "the sentence sits under Not now");
+    let js = read("console.js");
+    assert!(fn_body(&js, "function wizNotNow(").contains("WIZ.mailOffer = false"));
+}
+
+#[test]
+fn finish_sends_offer_mail() {
+    let js = read("console.js");
+    assert!(js.contains("offer_mail: WIZ.mailOffer"), "the plan carries the choice");
+    assert!(js.contains("mailOffer: true"), "the announcement defaults to on");
+    assert!(!fn_body(&js, "function wizFinish(").contains("ui_event"));
+}
+
+#[test]
+fn the_gmail_panel_button_reads_connect_gmail_directly_google_testers_only() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"wiz-gmail-connect\">Connect Gmail directly (Google testers only)</button>"));
+}
+
+// ---- T15.4: "From your email" (email spec §4.14, D10) ------------------------------------------------
+
+fn mail_applied_fn(js: &str) -> &str {
+    let at = js.find("// ---- mail applied").expect("the From your email section");
+    let end = js[at..].find("// ---- end mail applied").expect("its end marker");
+    &js[at..at + end]
+}
+
+#[test]
+fn from_your_email_lists_by_course_items_created_fields_changed_past_archived_and_notices() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let v = mail_applied_fn(&js);
+    for id in ["mail-applied", "ma-body", "ma-close"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
+    }
+    assert!(v.contains("invoke(\"mail_applied\""), "the engine's read-only list");
+    assert!(v.contains("r.courses.forEach") && v.contains("g.course"), "by course");
+    assert!(v.contains("g.created") && v.contains("g.changed") && v.contains("g.archived.count") && v.contains("g.archived.items") && v.contains("g.notices"));
+    assert!(v.contains("<details") && v.contains("<summary"), "the archived count expands");
+    for part in ["Items created", "Fields changed", "Past items archived", "Notices opened"] {
+        assert!(v.contains(part), "heading {part}");
+    }
+    assert!(v.contains("x.sender") && v.contains("x.date") && v.contains("x.old") && v.contains("x.new") && v.contains("x.due"));
+    assert!(!v.contains("innerHTML = x.") && !v.contains("innerHTML += x."), "every mail string goes through h()");
+}
+
+#[test]
+fn undo_invokes_delete_note_set_fields_with_the_old_value_or_close_info() {
+    let js = read("console.js");
+    let v = mail_applied_fn(&js);
+    assert!(v.contains("invoke(\"delete_note\", { view: stateView(), id: row.id })"), "a created item");
+    assert!(v.contains("invoke(\"set_fields\"") && v.contains("fields[row.field] = row.old"), "a changed field, the journal's old value");
+    assert!(v.contains("invoke(\"close_info\", { view: stateView(), id: row.id })"), "a notice");
+    assert!(v.contains("applyEnvelope("), "the console repaints from the envelope");
+    assert!(!v.contains("ui_event") && !v.contains("ev("), "no usage event carries mail text");
+}
+
+#[test]
+fn a_changed_since_row_shows_no_undo() {
+    let js = read("console.js");
+    let v = mail_applied_fn(&js);
+    assert!(v.contains("x.changed_since ?") && v.contains("changed since"), "the fixed words");
+    assert!(v.contains("data-ma-undo"), "the Undo button");
+    let row = fn_body(v, "function maRow(");
+    assert!(row.contains("changed_since") && row.find("changed since").unwrap() < row.find("data-ma-undo").unwrap(), "the branch picks one or the other");
+}
+
+#[test]
+fn from_your_email_opens_from_the_last_progress_row_and_from_settings() {
+    let js = read("console.js");
+    let html = read("index.html");
+    assert!(html.contains("id=\"mp-applied\"") && html.contains("id=\"set-email-applied\""));
+    assert!(js.contains("EL(\"mp-applied\").addEventListener(\"click\", openMailApplied)"));
+    assert!(js.contains("EL(\"set-email-applied\").addEventListener(\"click\", openMailApplied)"));
+    assert!(read("console.css").contains(".ma-row"));
+}
+
+// ---- T15.5: the deck, untrusted text and telemetry (email spec D21, §5.2, §12.4) -----------------------
+
+/// Every occurrence of `.field` (a property read, not `Array.from`) in `js`, with its line.
+fn field_reads<'a>(js: &'a str, fields: &[&str]) -> Vec<(usize, &'a str, String)> {
+    let mut out = Vec::new();
+    for (n, line) in js.lines().enumerate() {
+        let b = line.as_bytes();
+        for f in fields {
+            let pat = format!(".{f}");
+            let mut from = 0;
+            while let Some(i) = line[from..].find(&pat) {
+                let at = from + i;
+                let after = b.get(at + pat.len()).copied().unwrap_or(b' ');
+                let ident_after = after.is_ascii_alphanumeric() || after == b'_';
+                let on_ident = at > 0 && (b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'_');
+                if !ident_after && on_ident && !line[..at].ends_with("Array") {
+                    out.push((n + 1, line, line[..at + pat.len()].to_string()));
+                }
+                from = at + pat.len();
+            }
+        }
+    }
+    out
+}
+
+const MAIL_FIELDS: [&str; 4] = ["from", "mail_date", "evidence", "sender"];
+
+#[test]
+fn a_mail_card_shows_its_sender_date_and_quote() {
+    let js = read("console.js");
+    let css = read("console.css");
+    let f = fn_body(&js, "function mailCardLine(");
+    assert!(f.contains("c.from") && f.contains("c.mail_date") && f.contains("c.evidence"), "the three read-model fields");
+    assert!(f.contains("class=\"mail-from\"") && f.contains("class=\"mail-quote\""), "its two lines");
+    assert!(f.contains("<q>") || f.contains("<blockquote"), "the quote reads as a quote");
+    assert!(f.contains("if (!c.from && !c.mail_date && !c.evidence) { return \"\"; }"), "a card without them is as before");
+    assert!(css.contains(".mail-from") && css.contains(".mail-quote"), "styled");
+    let deck = fn_body(&js, "function renderDeck(");
+    assert!(deck.contains("mailCardLine(c)"), "the deck card");
+    assert!(js.matches("mailCardLine(c)").count() >= 2, "the Decisions view's row too");
+}
+
+#[test]
+fn mail_derived_text_renders_inert() {
+    let js = read("console.js");
+    let f = fn_body(&js, "function mailCardLine(");
+    for part in ["h(c.from)", "h(c.mail_date)", "h(c.evidence)"] {
+        assert!(f.contains(part), "{part}");
+    }
+    assert!(!f.contains("innerHTML") && !f.contains("insertAdjacentHTML"), "the helper builds a string, never writes the DOM");
+    let deck = fn_body(&js, "function renderDeck(");
+    assert!(deck.contains("h(c.title)") && deck.contains("h(c.why || c.kind)"), "title and why through h()");
+    let v = mail_applied_fn(&js);
+    assert!(v.contains("h(x.title)") && v.contains("h(x.sender)") && v.contains("h(x.date)"), "a From your email row, its notices too");
+    // h() itself escapes the five characters that open a tag or an attribute.
+    let hdef = js.lines().find(|l| l.starts_with("  var h = function")).expect("h");
+    for ch in ["&amp;", "&lt;", "&gt;", "&quot;", "&#39;"] {
+        assert!(hdef.contains(ch), "h escapes {ch}");
+    }
+}
+
+/// One read of an untrusted field is safe when it sits directly inside `h(`, is the
+/// fallback `h(c.why || ...)`, or is only a test (`!c.x`, or `c.x ? ...`). `upto` is the line up
+/// to the end of the read; `line` is the whole line.
+fn read_is_safe(line: &str, upto: &str) -> bool {
+    let var_len = upto.len() - upto.rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.')).map_or(0, |i| i + 1);
+    let pre = &upto[..upto.len() - var_len];
+    let post = &line[upto.len()..];
+    let in_h = |p: &str| p.strip_suffix("h(").is_some_and(|b| !b.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.'));
+    in_h(pre) || pre.strip_suffix("c.why || ").is_some_and(in_h) || pre.ends_with('!') || post.starts_with(" ? ")
+}
+
+#[test]
+fn no_mail_field_reaches_the_dom_without_h() {
+    let js = read("console.js");
+    let mut checked = 0;
+    for (n, line, upto) in field_reads(&js, &MAIL_FIELDS) {
+        checked += 1;
+        assert!(read_is_safe(line, &upto), "line {n}: a mail field outside h(): {}", line.trim());
+    }
+    assert!(checked >= 4, "the scan found the card line and the applied rows ({checked})");
+    // Title and why of a card or a row are mail-derived too: every read of one sits inside h(...) or is a test.
+    for (n, line, upto) in field_reads(&js, &["title", "why"]) {
+        let var = upto.rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.')).next().unwrap_or("");
+        if !(var.starts_with("c.") || var.starts_with("x.")) { continue; }
+        // noteTitleFor() keeps a title in a local, `found`, for a toast's textContent, never markup.
+        let kept = upto[..upto.len() - var.len()].ends_with("found = ") && !line.contains("innerHTML");
+        assert!(kept || read_is_safe(line, &upto), "line {n}: {var} not inside h(): {}", line.trim());
+    }
+}
+
+#[test]
+fn the_untrusted_text_scan_rejects_a_bad_line() {
+    for bad in [
+        "r = '<div>' + h(c.from) + ' · ' + c.evidence + '</div>';",
+        "r = h(c.from) + x.sender;",
+        "list.push(c.title);",
+        "t = \"\" || c.title;",
+        "el.innerHTML = c.title;",
+        "r = h(m.x) + c.evidence;",
+    ] {
+        let reads = field_reads(bad, &["from", "evidence", "sender", "title"]);
+        assert!(reads.iter().any(|(_, l, u)| !read_is_safe(l, u)), "should be rejected: {bad}");
+    }
+    for good in ["r = h(c.from) + h(c.evidence);", "r = c.from ? h(c.from) : \"\";", "if (!c.from && !c.evidence) { return; }", "h(c.why || c.kind)"] {
+        let reads = field_reads(good, &["from", "evidence", "why"]);
+        assert!(reads.iter().all(|(_, l, u)| read_is_safe(l, u)), "should pass: {good}");
+    }
+}
+
+fn is_ev_call(line: &str) -> bool {
+    let mut from = 0;
+    while let Some(i) = line[from..].find("ev(") {
+        let at = from + i;
+        if at == 0 || !(line.as_bytes()[at - 1].is_ascii_alphanumeric() || line.as_bytes()[at - 1] == b'_') { return true; }
+        from = at + 3;
+    }
+    false
+}
+
+#[test]
+fn no_ui_event_carries_mail_text() {
+    let js = read("console.js");
+    // Every mail section, the progress view to "From your email", sends no usage event at all.
+    let at = js.find("// ---- mail progress view").expect("the mail sections");
+    let end = js.find("// ---- end mail applied").expect("their end");
+    for (n, line) in js[at..end].lines().enumerate() {
+        assert!(!line.contains("ui_event") && !is_ev_call(line), "mail section line {n}: a usage event: {}", line.trim());
+    }
+    // And no usage event anywhere names a mail field, a card's words or a mailbox address.
+    for (n, line) in js.lines().enumerate().filter(|(_, l)| l.contains("ui_event") || is_ev_call(l)) {
+        for bad in [".from", ".mail_date", ".evidence", ".sender", ".why", ".title", ".address", "mpAddr", "mp-addr"] {
+            assert!(!line.contains(bad) || line.contains("Array.from"), "line {n}: a usage event carries {bad}: {}", line.trim());
+        }
+    }
+    // Rendering a card sends nothing: the deck and Decisions renderers hold no event call.
+    assert!(!fn_body(&js, "function mailCardLine(").contains("ev("), "the card line is markup only");
 }

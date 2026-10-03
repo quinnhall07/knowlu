@@ -279,6 +279,14 @@
     return c.source_uid && String(c.source_uid).indexOf("gmail:") === 0 ? ' <span class="src">from Gmail</span>' : "";
   }
 
+  // Email spec D21, §5.2 (T15.5): a mail card names its sender and the mail's day and quotes the evidence. All three are
+  // the sender's own text, untrusted: each goes through h() and nowhere else, and none is ever sent as a usage event.
+  function mailCardLine(c) {
+    if (!c.from && !c.mail_date && !c.evidence) { return ""; }
+    var who = [c.from ? h(c.from) : "", c.mail_date ? h(c.mail_date) : ""].filter(function (t) { return t; }).join(" · ");
+    return (who ? '<div class="mail-from">' + who + "</div>" : "") + (c.evidence ? '<div class="mail-quote"><q>' + h(c.evidence) + "</q></div>" : "");
+  }
+
   function renderDeck(state) {
     var d = state.decisions, deck = EL("deck");
     if (!d.pending && !d.events_in_digest) {
@@ -325,7 +333,7 @@
     d.cards.slice(0, 1).forEach(function (c) {
       // Q11-b: a commitment-ask card is answered in the Decisions view's form, not approved here.
       var approve = c.kind === "commitment-ask" ? '<button class="b pri y" type="button" data-answer-in>Answer&hellip;</button>' : '<button class="b pri y" data-verdict="approved">' + verdictLabels(c.kind).pri + '</button>';
-      deck.innerHTML += '<div class="card" data-id="' + h(c.id) + '" data-kind="approval"><button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button><div class="t">' + h(c.title) + '</div><div class="w">' + h(c.why || c.kind) + sourceLabel(c) + "</div>" +
+      deck.innerHTML += '<div class="card" data-id="' + h(c.id) + '" data-kind="approval"><button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button><div class="t">' + h(c.title) + '</div><div class="w">' + h(c.why || c.kind) + sourceLabel(c) + "</div>" + mailCardLine(c) +
         '<div class="nb"><input type="text" placeholder="Note (optional)"></div><div class="acts">' + approve + '<button class="b n" data-verdict="rejected">' + verdictLabels(c.kind).sec + '</button><button class="b" data-verdict="snoozed">&hellip;</button><input type="date" hidden value="' + h(tomorrow) + '"></div></div>';
     });
     var newCard = deck.querySelector(".card[data-id]");
@@ -535,7 +543,7 @@
         return '<div class="row dec" data-id="' + h(c.id) + '" data-kind="approval">' +
           '<button class="flag" data-flag="' + h(c.id) + '" title="agent-authored — flag it">&#9873;</button>' +
           '<div class="ttl"><span class="a">' + h(c.title) + '</span><span class="meta">' + h(meta.join(" · ")) + "</span>" +
-          '<div class="why">' + h(c.why) + sourceLabel(c) + "</div>" + changes + "</div>" +
+          '<div class="why">' + h(c.why) + sourceLabel(c) + "</div>" + mailCardLine(c) + changes + "</div>" +
           '<div class="acts"><input type="text" class="dnote" placeholder="Note (optional)" value="' + h(notes[c.id] || "") + '">' +
           '<button class="b pri y" data-verdict="approved">' + verdictLabels(c.kind).pri + '</button><button class="b n" data-verdict="rejected">' + verdictLabels(c.kind).sec + '</button>' +
           '<button class="b" data-verdict="snoozed" data-snooze="' + h(tomorrow) + '">Snooze</button></div></div>';
@@ -2165,11 +2173,306 @@
     if (INT.loaded) { intFill({ strong: INT.loaded.strong, mild: INT.loaded.mild, never: INT.loaded.never, clubs: INT.loaded.clubs, interests_editable: INT.editable }); }
   });
   // M2 T5b.2 end
+  // ---- mail progress view (email spec §4.5, D6, BW). Every string here is a fixed sentence of the engine's
+  // or this page's: no mailbox text reaches it, and it reports nothing to the app log. ----
+  var MP = { timer: null, last: null };
+  var MP_STEP = { sign_in: "Sign in", step_aside: "Step aside", forwarding: "Open forwarding", add_address: "Add Knowlu’s address",
+    confirm_address: "Confirm the address", turn_on: "Turn forwarding on", canary: "Test message", backfill: "Bring in recent mail", finish: "Finish" };
+  var MP_STATE = { waiting: "waiting", working: "working", done: "done", needs_you: "needs you", done_by_hand: "done by hand", skipped: "skipped", failed: "failed" };
+  var MP_REASON = { guided: "Do this one yourself, then say you have.", forwarding_elsewhere: "This mailbox already forwards somewhere else.",
+    not_found: "Knowlu could not find the setting on the page.", script_failed: "That step did not work.",
+    blocked: "The test message did not arrive. Your school may be blocking forwarding." };
+  var MP_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  function mpDate(iso) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
+    return m ? Number(m[3]) + " " + MP_MONTHS[Number(m[2]) - 1] : String(iso || "");
+  }
+  function mpLeft(secs) {
+    if (secs == null) { return ""; }
+    var m = Math.max(1, Math.round(secs / 60));
+    return m >= 60 ? " · about " + Math.round(m / 60) + " h left" : " · about " + m + " min left";
+  }
+  function mpBtn(label, choice, extra) { return '<button class="b' + (extra || "") + '" data-mp-choice="' + h(choice) + '">' + h(label) + "</button>"; }
+  // A guided step's directions (spec §4.4): the provider's own path to the setting, four lines at most, keyed on
+  // the provider and the step, never on a school. The address comes from mail_status by the setup's opaque id.
+  var MP_PATH = {
+    m365: ["Open Outlook on the web and choose Settings.", "Go to Mail, then Forwarding.", "Turn forwarding on and paste the address above.", "Save, then come back here."],
+    google: ["Open Gmail and choose Settings, then See all settings.", "Open Forwarding and POP/IMAP.", "Choose Add a forwarding address and paste the address above.", "Confirm it, turn forwarding on, then come back here."],
+    other: ["Open your mail provider’s settings.", "Find Forwarding (sometimes under Mail or Rules).", "Forward a copy of every message to the address above.", "Save, then come back here."]
+  };
+  var MP_PATH_CONFIRM = ["Open the confirmation message your provider sent.", "Follow its link or enter its code.", "Then come back here."];
+  var MPA = { id: null, address: null, busy: false };
+  function mpGuided(p) {
+    return p.rows.some(function (x) { return x.state === "needs_you" || x.state === "failed" || (x.guided && x.state === "working"); });
+  }
+  function mpAddressFor(p) {
+    var want = p.address_id;
+    if (!want || MPA.busy || MPA.id === want) { return; }
+    MPA.busy = true;
+    invoke("mail_status", {}).then(function (s) {
+      var m = ((s && s.mailboxes) || []).filter(function (x) { return x["address_id"] === want; })[0];
+      MPA.id = want; MPA.address = m ? m.address || null : null; MPA.busy = false;
+      if (MP.last) { renderMailProgress({ progress: MP.last }); }
+    }).catch(function () { MPA.busy = false; });
+  }
+  function mpGuide(p) {
+    if (p.status === "ended" || !mpGuided(p)) { return ""; }
+    mpAddressFor(p);
+    var row = p.rows.filter(function (x) { return x.state === "needs_you" || x.state === "failed" || x.guided; })[0] || {};
+    var lines = row.step === "confirm_address" ? MP_PATH_CONFIRM : (MP_PATH[p.provider] || MP_PATH.other);
+    var addr = MPA.id === p.address_id && MPA.address ? '<div class="set-row"><code class="mp-addr">' + h(MPA.address) + "</code>" +
+      '<button class="b" data-mp-copy>Copy</button></div>' : "";
+    return '<div class="mp-guide">' + addr + "<ol>" + lines.map(function (l) { return "<li>" + h(l) + "</li>"; }).join("") + "</ol></div>";
+  }
+  function renderMailProgress(r) {
+    var p = r && r.progress; MP.last = p || null;
+    if (!p) {
+      EL("mp-sentence").textContent = "No email setup is running.";
+      EL("mp-rows").innerHTML = ""; EL("mp-backfill").textContent = ""; EL("mp-ask").innerHTML = ""; EL("mp-end").textContent = "";
+      EL("mp-stop").hidden = true;
+      return;
+    }
+    EL("mp-sentence").textContent = p.sentence || "";
+    var html = "";
+    p.rows.forEach(function (row) {
+      var why = row.reason && MP_REASON[row.reason] ? '<span class="mp-why">' + h(MP_REASON[row.reason]) + "</span>" : "";
+      html += '<div class="mp-row mp-' + h(row.state) + '"><span class="mp-step">' + h(MP_STEP[row.step] || row.step) +
+        '</span><span class="mp-state">' + h(MP_STATE[row.state] || row.state) + "</span>" + why + "</div>";
+    });
+    EL("mp-rows").innerHTML = html;
+    var b = p.backfill;
+    EL("mp-backfill").textContent = b ? "Backfill: mail from the last 120 days, since " + mpDate(b.since) + " — " + b.handled + " of " + b.expected +
+      mpLeft(b.eta_secs) + (b.paused ? " (paused)" : "") : "";
+    var ask = mpGuide(p);
+    if (p.ask === "school_address") {
+      ask = '<div class="set-row"><input type="text" id="mp-addr" placeholder="Your school email address">' + mpBtn("Continue", "school_address", " pri y") + "</div>";
+    } else if (p.ask === "forwarding_elsewhere") {
+      ask = '<div class="set-row">' + mpBtn("Forward to Knowlu instead", "replace") + mpBtn("Keep it as it is", "stop") + "</div>";
+    } else if (p.status !== "ended" && p.rows.some(function (x) { return x.state === "needs_you" || x.state === "failed"; })) {
+      ask += '<div class="set-row">' + mpBtn("I’ve done this", "done", " pri y") + (p.blocked ? mpBtn("Try again", "retry") : "") + "</div>";
+    }
+    if (p.blocked && (p.offers || []).indexOf("personal_gmail") >= 0) { ask += '<div class="set-row"><button class="b" id="mp-gmail">Connect personal Gmail instead</button></div>'; }
+    EL("mp-ask").innerHTML = ask;
+    var end = "";
+    if (p.status === "ended") {
+      end = p.line || "";
+      if (p.done && p.done.length) { end += " Done: " + p.done.map(function (s) { return MP_STEP[s] || s; }).join(", ") + "."; }
+      if (p.left && p.left.length) { end += " Not done: " + p.left.map(function (s) { return MP_STEP[s] || s; }).join(", ") + "."; }
+      if (p.not_brought_in_before) { end += " Mail before " + mpDate(p.not_brought_in_before) + " was not brought in."; }
+    }
+    EL("mp-end").textContent = end.trim();
+    EL("mp-stop").hidden = p.status === "ended";
+  }
+  function pollMailProgress() {
+    return invoke("mail_setup_progress", {}).then(function (r) {
+      renderMailProgress(r);
+      if (!r || !r.active) { clearInterval(MP.timer); MP.timer = null; }
+      return r;
+    }).catch(function () {});
+  }
+  function openMailProgress() {
+    EL("mail-progress").hidden = false;
+    if (!MP.timer) { MP.timer = setInterval(pollMailProgress, 1500); }
+    return pollMailProgress();
+  }
+  function mailLeave() {
+    EL("mail-progress").hidden = true;
+    clearInterval(MP.timer); MP.timer = null;
+  }
+  function mailFirstOpen() {
+    return invoke("mail_status", {}).then(function (s) {
+      if (s && s.offer_pending && !s.setup_running) {
+        return invoke("mail_setup_start", { provider: "school" }).then(function (r) { if (r && r.ok) { return openMailProgress(); } });
+      }
+    }).catch(function () {});
+  }
+  function mailSettingsRow() {
+    return invoke("mail_setup_progress", {}).then(function (r) {
+      var p = r && r.progress;
+      EL("set-email-state").textContent = !p ? "Not connected here." : p.status === "ended" ? (p.line || "Setup ended.") : (p.sentence || "Setting up.");
+      EL("set-email-open").hidden = !p;
+      EL("set-email-start").hidden = !!(r && r.active);
+      return mailBoxesRow();
+    }).catch(function () {});
+  }
+  EL("mail-progress").addEventListener("click", function (e) {
+    if (e.target.closest("#mp-leave")) { mailLeave(); return; }
+    if (e.target.closest("#mp-stop")) { invoke("mail_setup_stop", {}).then(pollMailProgress).catch(function () {}); return; }
+    if (e.target.closest("#mp-gmail")) { invoke("mail_setup_start", { provider: "gmail" }).then(function (r) { if (r && r.ok) { openMailProgress(); } }).catch(function () {}); return; }
+    if (e.target.closest("[data-mp-copy]")) { if (MPA.address && navigator.clipboard) { navigator.clipboard.writeText(MPA.address).catch(function () {}); } return; }
+    var c = e.target.closest("[data-mp-choice]"); if (!c) { return; }
+    var k = c.getAttribute("data-mp-choice"), a;
+    if (k === "school_address") { a = invoke("mail_setup_answer", { choice: { school_address: EL("mp-addr").value.trim() } }); }
+    else if (k === "done") { a = invoke("mail_setup_answer", { choice: "done" }); }
+    else if (k === "retry") { a = invoke("mail_setup_answer", { choice: "retry" }); }
+    else if (k === "replace") { a = invoke("mail_setup_answer", { choice: "replace" }); }
+    else { a = invoke("mail_setup_answer", { choice: "stop" }); }
+    a.then(pollMailProgress).catch(function () {});
+  });
+  EL("set-email-open").addEventListener("click", openMailProgress);
+  EL("set-email-start").addEventListener("click", function () {
+    invoke("mail_setup_start", { provider: "school" }).then(function (r) { if (r && r.ok) { openMailProgress(); } }).catch(function () {});
+  });
+  // ---- end mail progress view ----
+  // ---- mail settings (email spec §4.12, §4.13, D15, T15.2). A mailbox row is the service's status joined to what
+  // this device keeps. Everything the rows show reaches the DOM through h(); nothing here reports to the app log. ----
+  var SETM = { s: null, confirming: null, notes: [], busy: false };
+  var EM_STATE = { pending: "Setting up.", confirmed: "Confirmed; waiting for the first message.", active: "Forwarding is working.",
+    quiet: "No mail has come through for a while.", blocked: "The test message did not arrive. Your school may be blocking forwarding.",
+    off: "Forwarding is off or goes to another address.", paused_send: "Forwarding paused — Microsoft refused a send.",
+    lapsed: "Paused because your subscription lapsed.", revoked: "Disconnected." };
+  var EM_PROVIDER = { m365: "School email", google: "Google mail", other: "School email" };
+  var EM_TURN_OFF_CONFIRM = "Knowlu turns off forwarding in this mailbox, stops reading it and deletes what it holds to serve it. What it already added stays in your plan.";
+  var EM_FORWARD_SENTENCE = "If Knowlu cannot turn forwarding off, your mail keeps going to Knowlu's address and is deleted unread; you can turn it off in your mail settings.";
+  var EM_STILL = "Knowlu’s forwarding address is still in your Gmail forwarding list. Remove it by hand: in Gmail, open Settings, then See all settings, then Forwarding and POP/IMAP, and remove it there.";
+  function emBtn(label, act, id, extra) { return '<button class="b' + (extra || "") + '" data-em-act="' + act + '" data-em-id="' + h(id) + '">' + h(label) + "</button>"; }
+  function emCopy(key, address) { return '<span class="em-line"><code>' + h(address) + '</code> <button class="b" data-em-copy="' + h(key) + '">Copy</button></span>'; }
+  function mailDeleteSentence() {
+    var s = SETM.s;
+    return !s || !s.ok || (s.mailboxes || []).length ? " " + EM_FORWARD_SENTENCE : "";
+  }
+  function mailBoxRow(m) {
+    var id = m.address_id, ask = SETM.confirming === id;
+    var resumable = !m.turned_off && (m.open_backfill || ["off", "quiet", "blocked", "paused_send"].indexOf(m.state) >= 0);
+    var say = m.turned_off ? "Turned off in Knowlu." : (EM_STATE[m.state] || "");
+    if (m.open_backfill && !m.turned_off) { say += " Still bringing in recent mail; Resume carries on."; }
+    var line = m.unbound_reason ? '<span class="em-line em-amber">' + h(m.unbound_note || "") + " (" + h(m.unbound_since_live) + ")" +
+      (m.suggest_rotate === true && !m.turned_off ? " " + emBtn("Rotate", "rotate", id) : "") + "</span>" : "";
+    var rotate = m.suggest_rotate !== true && !m.turned_off ? emBtn("Rotate", "rotate", id) : "";
+    return '<div class="em-box"><span class="em-name">' + h(EM_PROVIDER[m.provider] || "Email") + "</span>" +
+      (resumable ? emBtn("Resume", "resume", id) : "") + rotate + emBtn("Turn off email", "off1", id) +
+      '<span class="em-line">' + h(say) + "</span>" + (m.address ? emCopy("m:" + id, m.address) : "") + line +
+      (ask ? '<span class="em-confirm">' + h(EM_TURN_OFF_CONFIRM) + "</span>" + emBtn("Yes, turn off email", "off2", id, " crit") + emBtn("Cancel", "cancel", id) : "") + "</div>";
+  }
+  function renderMailBoxes() {
+    var s = SETM.s, html = "";
+    if (s && s.ok && s.mailboxes) { s.mailboxes.forEach(function (m) { html += mailBoxRow(m); }); }
+    else if (s) { html = '<div class="em-box"><span class="em-line">Knowlu could not read your mailboxes just now.</span></div>'; }
+    SETM.notes.forEach(function (n, i) {
+      html += '<div class="em-box"><span class="em-line">' + n.lines.map(h).join(" ") + "</span>" + (n.address ? emCopy("n:" + i, n.address) : "") + "</div>";
+    });
+    EL("set-email-boxes").innerHTML = html;
+    EL("set-email-keep").checked = !s || s.keep_session !== false;
+    EL("set-email-profile").hidden = !(s && s.profile_delete_pending);
+    EL("set-email-profile-note").textContent = "A saved email sign-in could not be deleted from this computer yet. Knowlu tries again each time it starts.";
+  }
+  function mailBoxesRow() {
+    return invoke("mail_status", {}).then(function (s) { SETM.s = s || null; renderMailBoxes(); }).catch(function () {});
+  }
+  function emNote(r) {
+    var lines = [], still = false;
+    (r.steps || []).forEach(function (st) {
+      if (st.step === "remove_address" && st.state === "needs_you") { still = true; lines.push(EM_STILL); }
+      else if (st.message) { lines.push(st.message); }
+    });
+    if (!r.ok) { lines.unshift("Email could not be turned off yet" + (r.error ? ": " + r.error + "." : ".") + " Turn off email again to retry."); }
+    else if (!r.needs_you) { lines.unshift("Email is turned off for this mailbox. What Knowlu already added stays in your plan."); }
+    return { lines: lines, address: r.needs_you || still ? r.address || null : null };
+  }
+  EL("set-email-boxes").addEventListener("click", function (e) {
+    var cp = e.target.closest("[data-em-copy]");
+    if (cp) {
+      var key = cp.getAttribute("data-em-copy"), addr = null;
+      if (key.indexOf("n:") === 0) { addr = (SETM.notes[Number(key.slice(2))] || {}).address; }
+      else { addr = ((SETM.s && SETM.s.mailboxes) || []).filter(function (m) { var mid = m.address_id; return "m:" + mid === key; }).map(function (m) { return m.address; })[0]; }
+      if (addr && navigator.clipboard) { navigator.clipboard.writeText(addr).catch(function () {}); }
+      return;
+    }
+    var b = e.target.closest("[data-em-act]"); if (!b || SETM.busy) { return; }
+    var act = b.getAttribute("data-em-act"), id = b.getAttribute("data-em-id");
+    if (act === "off1") { SETM.confirming = id; renderMailBoxes(); return; }
+    if (act === "cancel") { SETM.confirming = null; renderMailBoxes(); return; }
+    SETM.busy = true;
+    var done = function () { SETM.busy = false; };
+    if (act === "off2") {
+      SETM.confirming = null;
+      invoke("mail_disconnect", { addressId: id }).then(function (r) { SETM.notes = [emNote(r || {})]; done(); return mailBoxesRow(); })
+        .catch(function () { SETM.notes = [{ lines: ["Email could not be turned off yet. Turn off email again to retry."], address: null }]; done(); return mailBoxesRow(); });
+    } else if (act === "resume") {
+      invoke("mail_sign_in", { addressId: id }).then(function (r) {
+        SETM.notes = r && r.ok ? [] : [{ lines: [(r && r.error) || "Could not sign in to your mail."], address: null }]; done(); return mailBoxesRow();
+      }).catch(function () { done(); });
+    } else if (act === "rotate") {
+      invoke("mail_rotate", { addressId: id }).then(function (r) {
+        done();
+        if (r && r.ok) { SETM.notes = []; return openMailProgress(); }
+        SETM.notes = [{ lines: [(r && r.error) || "Could not start a new address."], address: null }]; renderMailBoxes();
+      }).catch(function () { done(); });
+    } else { done(); }
+  });
+  EL("set-email-keep").addEventListener("change", function () {
+    invoke("mail_keep_session", { on: EL("set-email-keep").checked }).then(function (r) {
+      EL("set-email-keep-note").textContent = !r || !r.ok ? ((r && r.error) || "could not change it") :
+        r.profiles_left ? "Some saved email sign-in could not be deleted yet; Knowlu tries again when it starts." : "";
+      return mailBoxesRow();
+    }).catch(function () { return mailBoxesRow(); });
+  });
+  // ---- end mail settings ----
+  // ---- mail applied (email spec §4.14, D10, T15.4). What the backfill added, by course, each row with Undo through
+  // the console's own writers. Every string from a message goes through h(); no usage event is sent from here. ----
+  var MA = { rows: [], note: "" };
+  function maRow(x, kind) {
+    var i = MA.rows.push({ kind: kind, row: x }) - 1, main, from = "";
+    if (kind === "changed") {
+      main = h(x.title) + " · " + h(x.field) + ": " + h(x.old == null ? "none" : x.old) + " → " + h(x.new == null ? "none" : x.new);
+      from = [x.sender ? h(x.sender) : "", x.date ? h(x.date) : ""].filter(function (t) { return t; }).join(" · ");
+    } else if (kind === "notice") {
+      main = h(x.title) + (x.opened_at ? " · " + h(x.opened_at) : "");
+    } else {
+      main = h(x.title) + (x.due ? " · due " + h(x.due) : "");
+    }
+    return '<div class="ma-row"><span class="ma-main">' + main + "</span>" + (from ? '<span class="ma-from">' + from + "</span>" : "") +
+      (x.changed_since ? '<span class="ma-since">changed since</span>' : '<button class="b" data-ma-undo="' + i + '">Undo</button>') + "</div>";
+  }
+  function maSection(title, rows, kind) {
+    return rows.length ? "<h4>" + h(title) + "</h4>" + rows.map(function (x) { return maRow(x, kind); }).join("") : "";
+  }
+  function renderMailApplied(r) {
+    MA.rows = [];
+    var html = "";
+    if (!r || r.ok === false || !r.courses) {
+      EL("ma-body").innerHTML = '<p class="meta">Knowlu could not read what came from your email just now.</p>';
+      return;
+    }
+    r.courses.forEach(function (g) {
+      var arch = g.archived.items.length ? "<details><summary>" + h("Past items archived (" + g.archived.count + ")") + "</summary>" +
+        g.archived.items.map(function (x) { return maRow(x, "archived"); }).join("") + "</details>" : "";
+      html += '<div class="ma-course"><h3>' + h(g.course == null ? "Notices" : g.course) + "</h3>" +
+        maSection("Items created", g.created, "created") + maSection("Fields changed", g.changed, "changed") + arch +
+        maSection("Notices opened", g.notices, "notice") + "</div>";
+    });
+    if (!r.courses.length) { html = '<p class="meta">Nothing has come in from your email yet.</p>'; }
+    EL("ma-body").innerHTML = (MA.note ? '<p class="meta">' + h(MA.note) + "</p>" : "") + html;
+  }
+  function loadMailApplied() {
+    return invoke("mail_applied", {}).then(renderMailApplied).catch(function () { renderMailApplied(null); });
+  }
+  function openMailApplied() {
+    MA.note = ""; EL("mail-applied").hidden = false;
+    return loadMailApplied();
+  }
+  EL("ma-close").addEventListener("click", function () { EL("mail-applied").hidden = true; });
+  EL("ma-body").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-ma-undo]"); if (!b) { return; }
+    var at = MA.rows[Number(b.getAttribute("data-ma-undo"))]; if (!at) { return; }
+    var row = at.row, p;
+    if (at.kind === "changed") { var fields = {}; fields[row.field] = row.old; p = invoke("set_fields", { view: stateView(), id: row.id, fields: fields }); }
+    else if (at.kind === "notice") { p = invoke("close_info", { view: stateView(), id: row.id }); }
+    else { p = invoke("delete_note", { view: stateView(), id: row.id }); }
+    p.then(function (env) {
+      applyEnvelope(env, function (msg) { MA.note = "Could not undo that: " + msg; });
+      return loadMailApplied();
+    }).catch(function () {});
+  });
+  EL("mp-applied").addEventListener("click", openMailApplied);
+  EL("set-email-applied").addEventListener("click", openMailApplied);
+  // ---- end mail applied ----
   function openSettings() {
     EL("settings").hidden = false;
     loadPrefs(); loadInterests();
     checkAccount();
     gradesStatus();
+    mailSettingsRow();
     invoke("settings_context", {}).then(function (c) {
       current.vaultPath = c.vault; current.version = c.version; current.profileName = c.profile_name;
       current.registryError = c.registry_error || "";
@@ -2281,7 +2584,7 @@
   // with it. The first press only reveals the second.
   EL("set-delete-1").addEventListener("click", function () {
     EL("set-delete-2").hidden = false;
-    EL("set-delete-note").textContent = "This deletes your vault, your backups, your account and everything we hold. It cannot be undone.";
+    EL("set-delete-note").textContent = "This deletes your vault, your backups, your account and everything we hold. It cannot be undone." + mailDeleteSentence();
   });
   EL("set-delete-2").addEventListener("click", function () {
     EL("set-delete-2").disabled = true;
@@ -2472,6 +2775,8 @@
     // launch after C1 for an install that already existed. Once per launch, never on a timer — an
     // install that has an account never sees it, and one that dismissed it is asked again tomorrow.
     checkAccount();
+    // D6: the wizard's announcement was taken and setup has not begun: it begins now, in this window.
+    mailFirstOpen();
   }
 
   function renderPicker(l) {
@@ -2554,11 +2859,11 @@
     invoke("launch_state", {}).then(function (l) { startWizard(l || {}); }).catch(function () {});
   });
 
-  // ---- C1 Task 17: onboarding (cloud design §4.2). NINE panels in this same document — no second
+  // ---- C1 Task 17: onboarding (cloud design §4.2). TEN panels in this same document — no second
   // webview, no bundler. NOTHING reaches this machine's disk until Finish, except the account (which
   // is not this machine) and the coursework credentials, written the moment the user leaves panel 6
   // (decision 3).
-  var PANELS = ["welcome", "account", "subscribe", "vault", "calendars", "logins", "gmail", "slots", "finish"];
+  var PANELS = ["welcome", "account", "subscribe", "mail", "vault", "calendars", "logins", "gmail", "slots", "finish"];
   // **One string, two languages.** `account::UNREACHABLE` is the first clause of every transport
   // failure the Rust side emits, and this is the page's copy of it. They are pinned to each other by
   // `static_assets.rs::the_unreachable_clause_is_one_string_on_both_sides`, the same way `PRIVACY` is
@@ -2574,7 +2879,7 @@
   // spec §4.1 — the app creates the folder and nobody is asked about it. It is still in WIZ because
   // `dest()` is what the credential target is derived from, and a rename on the vault panel has to
   // move the coursework logins with it (R-P4a-23).
-  var WIZ = { step: 0, parent: "", name: "Knowlu", email: "", accountId: "", entitled: false,
+  var WIZ = { mailOffer: true, step: 0, parent: "", name: "Knowlu", email: "", accountId: "", entitled: false,
               // The Google round trip runs in the system browser and can take a minute; `busy` is
               // what disables #wiz-google-signin meanwhile and `accountNote` is the status line —
               // both painted by `renderWizard`, the file's own A-5 rule (state lives on WIZ, never
@@ -2682,6 +2987,8 @@
     // not. The file's own A-5 rule, applied to the last field that escaped it.
     EL("wiz-next").disabled = WIZ.busy;
     EL("wiz-error").textContent = WIZ.error;
+    EL("wiz-mail-note").textContent = WIZ.mailOffer ? "" : "Skipped. You can connect it any time in Settings.";
+    EL("wiz-mail-notnow").hidden = !WIZ.mailOffer;
     EL("wiz-account-note").textContent = WIZ.accountId ? "Signed in as " + WIZ.email : WIZ.accountNote;
     EL("wiz-google-signin").disabled = WIZ.busy;
     // F10: the emailed-code door spends the same 20/hour budget as the Google button, so two quick
@@ -2785,7 +3092,7 @@
     WIZ.error = "";
     if (WIZ.step === 1 && !WIZ.accountId) { WIZ.error = "Sign in first."; }
     if (WIZ.step === 2 && !WIZ.entitled) { WIZ.error = "Finish the payment page in your browser, then come back."; }
-    if (WIZ.step === 3) {
+    if (WIZ.step === 4) {
       var n = WIZ.name.trim();
       if (!n) { WIZ.error = "Give this setup a name."; }
       else if (/[\\/:]/.test(n)) { WIZ.error = "A name has no slashes or colons."; }
@@ -2796,8 +3103,8 @@
     // Panel 4 is the calendars panel. Neither feed is compulsory — a student with no personal
     // calendar still gets a ranked day, and one whose school defeats the capture can come back — but
     // a link that is there and malformed is caught here rather than at Finish.
-    if (WIZ.step === 4 && WIZ.ics && !ICS_OK.test(WIZ.ics)) { WIZ.error = "That does not look like a calendar feed link."; }
-    if (WIZ.step === 4 && WIZ.cal && !ICS_OK.test(WIZ.cal)) { WIZ.error = "That does not look like a secret iCal address."; }
+    if (WIZ.step === 5 && WIZ.ics && !ICS_OK.test(WIZ.ics)) { WIZ.error = "That does not look like a calendar feed link."; }
+    if (WIZ.step === 5 && WIZ.cal && !ICS_OK.test(WIZ.cal)) { WIZ.error = "That does not look like a secret iCal address."; }
     return !WIZ.error;
   }
 
@@ -2824,11 +3131,11 @@
     // a red line about a field that is no longer on screen.
     if (n < WIZ.step) { WIZ.error = ""; }
     var leaving = WIZ.step;
-    if (leaving === 7) { readSlotsPanel(); }
+    if (leaving === 8) { readSlotsPanel(); }
     // Leaving the calendar panel closes the sign-in window and deletes its session, whether or not a
     // link was captured: a campus login must not outlive the panel that opened it. R-C1-40/R-C1-42 —
     // no argument: the app knows which directory it opened, and the page never holds a temp path.
-    if (leaving === 4 && WIZ.lmsOpen) {
+    if (leaving === 5 && WIZ.lmsOpen) {
       invoke("close_lms_window", {}).catch(function () {});
       WIZ.lmsOpen = false;
     }
@@ -2836,17 +3143,17 @@
     // its own next wake and stops touching the page. Only the "still polling" flag is cleared here
     // (not `googleNote`): a consent that already finished, or one still open in the browser, is
     // still true when the student comes back to this panel, and the note should still say so.
-    if (leaving === 4 && WIZ.googlePolling) {
+    if (leaving === 5 && WIZ.googlePolling) {
       WIZ.googleSeq += 1;
       WIZ.googlePolling = false;
     }
     // D11: the same for the Gmail panel (step 6); a connect that already finished stays true.
-    if (leaving === 6 && WIZ.gmailPolling) {
+    if (leaving === 7 && WIZ.gmailPolling) {
       WIZ.gmailSeq += 1;
       WIZ.gmailPolling = false;
     }
     WIZ.step = Math.max(0, Math.min(PANELS.length - 1, n));
-    if (leaving === 5 && n > leaving) {
+    if (leaving === 6 && n > leaving) {
       // R-C1-55, I3: one discovery at a time. `discover_coursework` spawns the engine and logs into
       // zyBooks and VHL; a second Next while the first is in flight starts a second child, with two
       // more vendor logins racing the first, and the two `WIZ.map` assignments decide the panel
@@ -2938,9 +3245,16 @@
     WIZ.zy = false;
     WIZ.vhl = false;
     WIZ.credVault = "";
-    WIZ.step = 5;
+    WIZ.step = 6;
     WIZ.busy = false;
     renderWizard();
+  }
+
+  // D6, risk 12: Not now is the whole of the choice. Nothing is set up in the wizard; the marker
+  // `offer_mail` writes at Finish is all the console's first open reads.
+  function wizNotNow() {
+    WIZ.mailOffer = false;
+    return wizGo(WIZ.step + 1);
   }
 
   function wizFinish() {
@@ -2983,7 +3297,7 @@
       var plan = { ics_url: WIZ.ics || null, personal_calendar: WIZ.cal || null,
                    ics_validated: icsFlags.validated, ics_stored: icsFlags.stored,
                    personal_calendar_validated: calFlags.validated, personal_calendar_stored: calFlags.stored,
-                   google_calendar: googleCalendar,
+                   google_calendar: googleCalendar, offer_mail: WIZ.mailOffer,
                    timezone: WIZ.tz, slots: WIZ.slots,
                    zybooks: WIZ.zy, vhl: WIZ.vhl, autostart: WIZ.autostart,
                    campus_choice: WIZ.campus,
@@ -3059,6 +3373,7 @@
   }
 
   EL("wizard").addEventListener("click", function (e) {
+    if (e.target.closest("#wiz-mail-notnow")) { wizNotNow(); return; }
     if (e.target.closest("#wiz-back")) { wizGo(WIZ.step - 1); return; }
     if (e.target.closest("#wiz-next")) { if (WIZ.step === PANELS.length - 1) { wizFinish(); } else { wizGo(WIZ.step + 1); } return; }
     // Spec D1. One command, no arguments: the URL, the loopback port, the verifier and both tokens
