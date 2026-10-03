@@ -628,6 +628,7 @@ const NOW: i64 = 1_790_000_000;
 const FPKEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 const FPKEY_B64: &str = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
 const KNOWLU: &str = "box-1@in.example.invalid";
+const KNOWLU_NEW: &str = "box-2@in.example.invalid";
 const NONCE: &str = "bk7f3a9c2e41";
 const ANA: &str = "ana.lopez@school.example.invalid";
 const BO: &str = "bo.chen@school.example.invalid";
@@ -1292,6 +1293,8 @@ struct HState {
     signed_in: bool,
     title_address: Option<String>,
     popup_polls: u32,
+    /// The visible window is where the student signs in: opening it signs them in.
+    sign_in_on_visible: bool,
     aside: u32,
     back: u32,
     closed: u32,
@@ -1358,6 +1361,8 @@ impl Mailbox for SHost {
                 json!({ "result": "ok", "sent": true, "count": n })
             }
             "m365/sent_cleanup.js" | "gmail/sent_cleanup.js" => json!({ "result": "ok", "deleted": 1 }),
+            "m365/forwarding_off.js" | "gmail/forwarding_off.js" => json!({ "result": "ok", "forwarding": "off", "changed": true }),
+            "gmail/forwarding_remove_address.js" => json!({ "result": "ok", "removed": true, "changed": true }),
             other => panic!("the runner ran {other}"),
         })
     }
@@ -1373,6 +1378,9 @@ impl Host for SHost {
         let mut s = self.st.lock().unwrap();
         s.opens.push((profile.to_path_buf(), visible));
         s.window = true;
+        if visible && s.sign_in_on_visible {
+            s.signed_in = true;
+        }
         self.ev.lock().unwrap().push(format!("window {}", if visible { "visible" } else { "hidden" }));
         Ok(())
     }
@@ -1445,6 +1453,10 @@ fn setup_service(sv: &Arc<Mutex<Sv>>, ev: &Events) -> Service {
                     "status": status, "backfill_since": s.backfill_since, "last_canary_ok_at": ok_at,
                 });
                 (200, json!({ "addresses": [row] }).to_string())
+            }
+            ("POST", p) if p.ends_with("/rotate") => {
+                note("rotate");
+                (200, json!({ "address_id": A, "address": KNOWLU_NEW, "provider": s.provider, "status": "pending" }).to_string())
             }
             ("POST", p) if p.ends_with("/hint") => {
                 note("hint");
@@ -2205,4 +2217,350 @@ fn the_console_setup_calls_the_mail_launch_hook_after_it_manages_the_console_sta
     assert!(hook > console.find("app.manage(cs)").unwrap(), "on_start reads ConsoleState with try_state, so it comes after the manage");
     assert!(hook < console.find("scheduler::spawn").unwrap(), "the sweep starts before the scheduler can run a slot");
     assert!(!wizard.contains("on_start"), "the vault-less shell has no vault to resume a backfill in");
+}
+
+// ---- T11.4: the ten commands' seams (spec §6.2, §4.12) -------------------------------------------------
+//
+// Each command is a thin wrapper over a seam in `mail::commands`; these tests drive the seams with the
+// setup runner's fake window and a loopback service. Test 37 (the console's list names the ten, the
+// wizard's none) is `handler_lists.rs`'s and waits for H5 (plan §10, R5).
+use knowlu::mail::commands::{
+    answer_with, applied_argv, applied_with, disconnect_with, keep_session_with, progress_of, setup_start_with,
+    sign_in_with, status_for, stop_with, Disconnect,
+};
+
+fn row_for(provider: &str) -> Value {
+    json!({ "address_id": A, "provider": provider, "address": KNOWLU, "status": "active", "mailbox_hint": HINT_PAGE })
+}
+
+#[test]
+fn mail_status_reports_offer_pending_until_setup_starts_or_not_now() {
+    let d = temp("t114-offer");
+    let marker = knowlu::onboarding::mail_offer_marker(&d);
+    // Not now: the wizard wrote no marker, so there is nothing to offer.
+    assert_eq!(status_for(Ok(vec![]), &d, false)["offer_pending"], json!(false));
+    // The wizard's announcement left its marker: the console's first open offers setup.
+    std::fs::write(&marker, b"").unwrap();
+    assert_eq!(status_for(Ok(vec![]), &d, false)["offer_pending"], json!(true));
+    // A setup that did not start leaves the offer standing, and a name the page cannot start is refused.
+    let busy = setup_start_with(&d, "school", Some("1".into()), |_| Err("a mail setup is already running"));
+    assert_eq!((busy["ok"].clone(), busy["error"].clone()), (json!(false), json!("a mail setup is already running")));
+    let bad = setup_start_with(&d, "yahoo", None, |_| panic!("nothing starts for an unknown provider"));
+    assert_eq!(bad["ok"], json!(false));
+    assert_eq!(status_for(Ok(vec![]), &d, false)["offer_pending"], json!(true));
+    // Starting the setup is what answers the offer.
+    let got = RefCell::new(None);
+    let ok = setup_start_with(&d, "school", Some("1".into()), |k| {
+        *got.borrow_mut() = Some(k);
+        Ok(())
+    });
+    assert_eq!(ok["ok"], json!(true));
+    assert_eq!(got.into_inner(), Some(Kind::School { unitid: Some("1".into()), address: None }));
+    assert!(!marker.exists());
+    assert_eq!(status_for(Ok(vec![]), &d, false)["offer_pending"], json!(false));
+    let gmail = RefCell::new(None);
+    setup_start_with(&d, "gmail", None, |k| {
+        *gmail.borrow_mut() = Some(k);
+        Ok(())
+    });
+    assert_eq!(gmail.into_inner(), Some(Kind::Gmail));
+}
+
+#[test]
+fn mail_status_lists_each_mailbox_with_what_this_device_knows_and_names_a_failed_read() {
+    let d = temp("t114-status");
+    profile(&d, &format!("mail-session-{A}"));
+    turn_off(&d, B).unwrap();
+    MailState::update(&d, |s| {
+        s.open_backfills.push(A.to_string());
+        true
+    })
+    .unwrap();
+    let mut other = row_for("google");
+    other["address_id"] = json!(B);
+    let s = status_for(Ok(vec![row_for("m365"), other]), &d, true);
+    assert_eq!((s["ok"].clone(), s["keep_session"].clone(), s["setup_running"].clone()), (json!(true), json!(true), json!(true)));
+    let rows = s["mailboxes"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        (rows[0]["state"].clone(), rows[0]["open_backfill"].clone(), rows[0]["saved_sign_in"].clone()),
+        (json!("active"), json!(true), json!(true))
+    );
+    assert_eq!((rows[1]["turned_off"].clone(), rows[1]["saved_sign_in"].clone()), (json!(true), json!(false)));
+    // The service lapsed or was unreachable: the device's own facts still come, and the reason is a name.
+    let down = status_for(Err("unreachable".into()), &d, false);
+    assert_eq!((down["ok"].clone(), down["error"].clone(), down["mailboxes"].clone()), (json!(false), json!("unreachable"), json!([])));
+    assert_eq!(down["keep_session"], json!(true));
+}
+
+#[test]
+fn mail_keep_session_off_deletes_every_mail_profile() {
+    let d = temp("t114-keep");
+    for name in [format!("mail-session-{A}"), format!("mail-session-{B}"), "mail-setup".to_string(), "grades-session".to_string(), "other".to_string()] {
+        profile(&d, &name);
+    }
+    let closed = Cell::new(0);
+    let on = keep_session_with(&d, true, || closed.set(closed.get() + 1));
+    assert_eq!((on["ok"].clone(), on["keep_session"].clone()), (json!(true), json!(true)));
+    assert!(d.join(format!("mail-session-{A}")).exists(), "turning it on deletes nothing");
+    assert_eq!(closed.get(), 0, "and closes nothing");
+
+    let off = keep_session_with(&d, false, || closed.set(closed.get() + 1));
+    assert_eq!((off["ok"].clone(), off["keep_session"].clone(), off["profiles_left"].clone()), (json!(true), json!(false), json!(false)));
+    assert_eq!(closed.get(), 1, "the mail window closes before its profiles are deleted");
+    assert!(!MailState::load(&d).unwrap().keep_session);
+    for gone in [format!("mail-session-{A}"), format!("mail-session-{B}"), "mail-setup".to_string()] {
+        assert!(!d.join(&gone).exists(), "{gone} is deleted");
+    }
+    for kept in ["grades-session", "other"] {
+        assert!(d.join(kept).exists(), "{kept} is not a mail profile");
+    }
+    // An unreadable mail.json is named and deletes nothing: the switch cannot be recorded.
+    let bad = temp("t114-keep-bad");
+    profile(&bad, &format!("mail-session-{A}"));
+    std::fs::write(bad.join("mail.json"), "not json").unwrap();
+    let out = keep_session_with(&bad, false, || {});
+    assert_eq!(out["ok"], json!(false));
+    assert!(bad.join(format!("mail-session-{A}")).exists());
+}
+
+#[test]
+fn mail_applied_passes_the_engines_json_through_unchanged() {
+    let raw = r#"{"since": "2026-06-01", "courses": [{"course": "CS 101", "created": [], "changed": [{"old": 1, "new": 2.50, "note": "n"}], "archived": {"count": 0, "items": []}, "notices": []}]}"#;
+    let vault = Path::new("V");
+    let ran = RefCell::new(Vec::new());
+    let got = applied_with(vault, Some("2026-06-01T00:00:00Z"), |argv| {
+        *ran.borrow_mut() = argv.to_vec();
+        Ok(raw.to_string())
+    });
+    assert_eq!(got, serde_json::from_str::<Value>(raw).unwrap(), "no key added, none dropped, none computed");
+    assert_eq!(ran.into_inner(), ["mail-applied", "--vault", "V", "--since", "2026-06-01T00:00:00Z"]);
+    assert_eq!(applied_argv(vault, None), ["mail-applied", "--vault", "V"]);
+    for failed in [Err("could not run the engine".to_string()), Ok("not json".to_string()), Ok("[1]".to_string())] {
+        let out = applied_with(vault, None, |_| failed);
+        assert_eq!(out["ok"], json!(false));
+        assert!(out["error"].as_str().is_some_and(|e| !e.is_empty()));
+    }
+}
+
+#[test]
+fn the_progress_the_answer_and_stop_read_the_run_that_is_there_and_say_so_when_none_is() {
+    assert_eq!(progress_of(None)["active"], json!(false));
+    assert_eq!(stop_with(None)["ok"], json!(false));
+    assert_eq!(answer_with(None, &json!("replace"))["ok"], json!(false));
+    let r = rig("t114-answer");
+    let shared = r.start(uncurated(), true);
+    until("the question", || shared.progress().ask == Some("school_address"));
+    let p = progress_of(r.setups.current());
+    assert_eq!((p["active"].clone(), p["progress"]["ask"].clone()), (json!(true), json!("school_address")));
+    // A choice the open question cannot take is refused and changes nothing.
+    assert_eq!(answer_with(r.setups.current(), &json!("replace"))["ok"], json!(false));
+    assert_eq!(answer_with(r.setups.current(), &json!("nonsense"))["ok"], json!(false));
+    assert_eq!(answer_with(r.setups.current(), &json!({ "school_address": TYPED }))["ok"], json!(true));
+    assert_eq!(stop_with(r.setups.current())["ok"], json!(true));
+    wait(&shared);
+}
+
+// ---- §4.12 Disconnect and the repair sign-in ------------------------------------------------------------
+
+/// A service for Disconnect: it lists one mailbox of `provider` and answers the delete with
+/// `delete_status`. Each request lands in the rig's events with whether `mail.json` already listed the
+/// mailbox as turned off when it arrived (the service's thread reads the file as the request comes in).
+fn disc_service(r: &Rig, provider: &str, delete_status: u16) -> Service {
+    let (ev, dir, provider) = (r.ev.clone(), r.dir.clone(), provider.to_string());
+    Service::start(false, move |req| {
+        let path = req.path.split("/mail").nth(1).unwrap_or("").to_string();
+        let off = MailState::load(&dir).is_ok_and(|s| s.is_turned_off(A));
+        ev.lock().unwrap().push(format!("svc {} {} turned_off={off}", req.method, path.split('/').nth(1).unwrap_or("")));
+        match (req.method.as_str(), path.as_str()) {
+            ("GET", "/addresses") => (200, json!({ "addresses": [row_for(&provider)] }).to_string()),
+            ("DELETE", p) if p.starts_with("/addresses/") => (delete_status, r#"{"deleted":true}"#.to_string()),
+            _ => (404, r#"{"error":"no such route"}"#.to_string()),
+        }
+    })
+}
+
+fn disconnect(r: &Rig, svc: &Service) -> Value {
+    let host = SHost { st: r.host.clone(), ev: r.ev.clone(), provider: Mutex::new(Provider::Guided) };
+    let client = MailClient::with_token_fn(&svc.base, Box::new(|| Ok(TOKEN.to_string()))).expect("a loopback base");
+    let clock = ClkRef(r.clk.clone());
+    disconnect_with(&Disconnect { host: &host, client: &client, clock: &clock, data_dir: &r.dir }, A)
+}
+
+fn step<'a>(out: &'a Value, name: &str) -> &'a Value {
+    out["steps"].as_array().and_then(|s| s.iter().find(|x| x["step"] == name)).unwrap_or_else(|| panic!("no step {name}: {out}"))
+}
+
+#[test]
+fn mail_disconnect_writes_turned_off_before_anything_else() {
+    let r = rig("t114-order");
+    profile(&r.dir, &format!("mail-session-{A}"));
+    let svc = disc_service(&r, "m365", 200);
+    let out = disconnect(&r, &svc);
+    assert_eq!(out["ok"], json!(true), "{out}");
+    let ev = r.events();
+    assert!(ev[0].starts_with("svc GET addresses"), "the first thing is the read of the mailbox: {ev:?}");
+    for e in ev.iter().filter(|e| e.starts_with("svc ")) {
+        assert!(e.ends_with("turned_off=true"), "{e}: no request left before the mailbox was recorded as turned off");
+    }
+    let at = |e: &str| position(&ev, e);
+    assert!(at("svc GET addresses turned_off=true") < at("window hidden"));
+    assert!(at("window hidden") < at("script m365/forwarding_off.js"));
+    assert!(at("script m365/forwarding_off.js") < at("svc DELETE addresses turned_off=true"));
+    assert_eq!(r.scripts(), ["m365/forwarding_off.js"], "Disconnect never turns forwarding on, and a Microsoft mailbox has no address to remove");
+    assert_eq!(r.calls("m365/forwarding_off.js")[0]["address"], json!(KNOWLU));
+    assert_eq!((step(&out, "forwarding_off")["state"].clone(), step(&out, "revoke")["state"].clone()), (json!("done"), json!("done")));
+    assert_eq!(out["needs_you"], json!(false));
+    assert!(!r.dir.join(format!("mail-session-{A}")).exists(), "step 3: the mailbox's profile is deleted");
+    assert!(r.host.lock().unwrap().closed >= 1, "and its window closed first");
+    assert!(MailState::load(&r.dir).unwrap().is_turned_off(A), "turned_off only grows");
+
+    // A server call that fails leaves it recorded, leaves the profile to try again, and says so.
+    let f = rig("t114-order-fail");
+    profile(&f.dir, &format!("mail-session-{A}"));
+    let svc = disc_service(&f, "m365", 500);
+    let out = disconnect(&f, &svc);
+    assert_eq!((out["ok"].clone(), step(&out, "revoke")["state"].clone()), (json!(false), json!("failed")));
+    assert!(MailState::load(&f.dir).unwrap().is_turned_off(A));
+    assert!(f.dir.join(format!("mail-session-{A}")).exists());
+    assert_eq!(f.calls("m365/forwarding_set.js").len(), 0);
+
+    // mail.json that cannot be read cannot record it: nothing at all is done.
+    let u = rig("t114-order-bad");
+    std::fs::write(u.dir.join("mail.json"), "not json").unwrap();
+    let svc = disc_service(&u, "m365", 200);
+    let out = disconnect(&u, &svc);
+    assert_eq!(out["ok"], json!(false));
+    assert!(u.events().is_empty(), "no window, script or call: {:?}", u.events());
+}
+
+#[test]
+fn mail_disconnect_gmail_removal_waits_for_the_live_remove_check() {
+    let r = rig("t114-gmail");
+    profile(&r.dir, &format!("mail-session-{A}"));
+    let needs_you = json!({ "result": "needs you", "reason": "another address is selected" });
+    queue(&r, "gmail/forwarding_remove_address.js", vec![needs_you]);
+    let svc = disc_service(&r, "google", 200);
+    let out = disconnect(&r, &svc);
+    assert_eq!(r.scripts(), ["gmail/forwarding_off.js", "gmail/forwarding_remove_address.js"], "one remove, no retry, no other click");
+    assert_eq!(r.calls("gmail/forwarding_remove_address.js")[0]["address"], json!(KNOWLU));
+    let s = step(&out, "remove_address");
+    assert_eq!(s["state"], json!("needs_you"), "never done: {out}");
+    assert!(s["message"].as_str().is_some_and(|m| m.contains("Gmail")), "it says the address is still in Gmail: {s}");
+    assert_eq!((out["needs_you"].clone(), out["address"].clone()), (json!(true), json!(KNOWLU)), "the address is shown so it can be found");
+    // The step before it did its work, and the rest of Disconnect still runs.
+    assert_eq!(step(&out, "forwarding_off")["state"], json!("done"));
+    assert_eq!((out["ok"].clone(), step(&out, "revoke")["state"].clone()), (json!(true), json!("done")));
+
+    // Removed for real: done, and nothing is asked of the student.
+    let ok = rig("t114-gmail-ok");
+    profile(&ok.dir, &format!("mail-session-{A}"));
+    let svc = disc_service(&ok, "google", 200);
+    let out = disconnect(&ok, &svc);
+    assert_eq!((step(&out, "remove_address")["state"].clone(), out["needs_you"].clone(), out["address"].clone()), (json!("done"), json!(false), Value::Null));
+
+    // A page that will not give the section up falls to the guided steps, with the address shown.
+    let g = rig("t114-gmail-guided");
+    profile(&g.dir, &format!("mail-session-{A}"));
+    queue(&g, "gmail/forwarding_off.js", vec![json!({ "result": "not found", "control": "section" })]);
+    let svc = disc_service(&g, "google", 200);
+    let out = disconnect(&g, &svc);
+    assert_eq!((step(&out, "forwarding_off")["state"].clone(), out["address"].clone()), (json!("guided"), json!(KNOWLU)));
+    assert!(g.calls("gmail/forwarding_remove_address.js").is_empty(), "nothing is removed after a step that did not run");
+    assert_eq!(step(&out, "revoke")["state"], json!("done"));
+}
+
+#[test]
+fn a_signed_out_mailbox_asks_for_a_visible_sign_in_and_a_declined_one_falls_to_the_guided_steps() {
+    let r = rig("t114-signin");
+    profile(&r.dir, &format!("mail-session-{A}"));
+    r.host.lock().unwrap().signed_in = false;
+    // The student signs in as soon as the visible window is up.
+    r.host.lock().unwrap().sign_in_on_visible = true;
+    let svc = disc_service(&r, "m365", 200);
+    let out = disconnect(&r, &svc);
+    let opens: Vec<bool> = r.host.lock().unwrap().opens.iter().map(|(_, v)| *v).collect();
+    assert_eq!(opens, [false, true], "hidden first, then the visible window for the sign-in");
+    assert_eq!(step(&out, "forwarding_off")["state"], json!("done"));
+
+    // Declined: the student closes the visible window. The guided steps, and the rest still runs.
+    let d = rig("t114-signin-no");
+    profile(&d.dir, &format!("mail-session-{A}"));
+    {
+        let mut h = d.host.lock().unwrap();
+        h.signed_in = false;
+        h.student_closed = true;
+    }
+    let svc = disc_service(&d, "m365", 200);
+    let out = disconnect(&d, &svc);
+    assert_eq!((step(&out, "forwarding_off")["state"].clone(), out["address"].clone()), (json!("guided"), json!(KNOWLU)));
+    assert!(d.scripts().is_empty());
+    assert_eq!(step(&out, "revoke")["state"], json!("done"));
+}
+
+#[test]
+fn the_repair_sign_in_opens_the_visible_window_on_the_kept_profile_and_leaves_it_kept() {
+    let r = rig("t114-repair");
+    profile(&r.dir, &format!("mail-session-{A}"));
+    r.host.lock().unwrap().signed_in = true;
+    let host = SHost { st: r.host.clone(), ev: r.ev.clone(), provider: Mutex::new(Provider::Guided) };
+    let clock = ClkRef(r.clk.clone());
+    let out = sign_in_with(&host, &clock, &r.dir, Provider::M365, A);
+    assert_eq!((out["ok"].clone(), out["signed_in"].clone()), (json!(true), json!(true)));
+    let h = r.host.lock().unwrap();
+    assert_eq!(h.opens, [(r.dir.join(format!("mail-session-{A}")), true)]);
+    assert!(h.closed >= 1, "the window closes once the sign-in has taken");
+    assert!(r.dir.join(format!("mail-session-{A}")).exists(), "the profile is the kept sign-in");
+    drop(h);
+
+    // A window the student closes is a sign-in that did not happen, named, and the profile stays.
+    let c = rig("t114-repair-closed");
+    profile(&c.dir, &format!("mail-session-{A}"));
+    {
+        let mut h = c.host.lock().unwrap();
+        h.signed_in = false;
+        h.student_closed = true;
+    }
+    let host = SHost { st: c.host.clone(), ev: c.ev.clone(), provider: Mutex::new(Provider::Guided) };
+    let out = sign_in_with(&host, &ClkRef(c.clk.clone()), &c.dir, Provider::M365, A);
+    assert_eq!((out["ok"].clone(), out["signed_in"].clone()), (json!(false), json!(false)));
+    assert!(c.dir.join(format!("mail-session-{A}")).exists());
+    // A guided mailbox has no window to open.
+    let out = sign_in_with(&host, &ClkRef(c.clk.clone()), &c.dir, Provider::Guided, A);
+    assert_eq!(out["ok"], json!(false));
+}
+
+#[test]
+fn a_rotate_asks_the_service_for_a_new_address_and_runs_the_forwarding_step_with_it() {
+    let r = rig("t114-rotate");
+    profile(&r.dir, &format!("mail-session-{A}"));
+    r.sv.lock().unwrap().provider = "m365".into();
+    let kind = Kind::Rotate { address_id: A.to_string(), provider: "m365".to_string() };
+    let p = wait(&r.start(kind.clone(), true));
+    assert_eq!((p.ended, p.line), (Some("finished"), Some("setup finished")));
+    let ev = r.events();
+    let at = |e: &str| position(&ev, e);
+    assert!(at("svc rotate") < at("window visible") && at("window visible") < at("aside"));
+    assert!(at("aside") < at("script m365/forwarding_set.js") && at("script m365/forwarding_set.js") < at("svc canary"));
+    assert_eq!(r.calls("m365/forwarding_set.js")[0]["address"], json!(KNOWLU_NEW), "the step carries the new address");
+    for never in ["svc mint", "svc hint", "svc delete address", "svc batch"] {
+        assert!(!ev.contains(&never.to_string()), "a rotate never does `{never}`: {ev:?}");
+    }
+    assert_eq!(r.calls("m365/signin.js").len(), 0, "the mailbox's own address is set once, at its setup");
+    assert!(p.backfill.is_none(), "mail already brought in is not brought in again");
+    assert!(r.dir.join(format!("mail-session-{A}")).exists(), "the kept profile stays");
+
+    // A window the student closes cancels the rotate and never revokes the mailbox.
+    let c = rig("t114-rotate-closed");
+    profile(&c.dir, &format!("mail-session-{A}"));
+    c.sv.lock().unwrap().provider = "m365".into();
+    {
+        let mut h = c.host.lock().unwrap();
+        h.signed_in = false;
+        h.student_closed = true;
+    }
+    let p = wait(&c.start(kind, true));
+    assert_eq!(p.ended, Some("cancelled"));
+    assert!(!c.events().contains(&"svc delete address".to_string()), "the mailbox is not deleted");
+    assert!(c.dir.join(format!("mail-session-{A}")).exists(), "and its profile is not either");
 }

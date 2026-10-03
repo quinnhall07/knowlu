@@ -29,6 +29,10 @@ pub enum Kind {
     School { unitid: Option<String>, address: Option<String> },
     /// Personal Gmail, offered beside the school mailbox and skippable.
     Gmail,
+    /// Rotate (D3, `mail_rotate`): a new address for a mailbox that is already set up, then the forwarding
+    /// step with it. `provider` is the service's own word for the mailbox (`m365`, `google` or `other`).
+    /// It signs in again only to reach the page, mints and revokes nothing, and brings in no mail.
+    Rotate { address_id: String, provider: String },
 }
 
 /// One setup's inputs. The backfill window is fixed from `setup_day` (BW): there is no date to give.

@@ -77,6 +77,8 @@ struct Runner<'a> {
     canary_ok: bool,
     said_no: bool,
     gave_up: bool,
+    /// The profile is the mailbox's kept one (so it stays); `false` is the throwaway `mail-setup`.
+    keep: bool,
 }
 
 fn host(env: &Env) -> &dyn Host {
@@ -118,18 +120,24 @@ impl<'a> Runner<'a> {
     /// Which provider, the address minted for it, and the first progress. `Err` is a run that never began.
     fn begin(plan: &'a Plan, env: &'a Env, sh: &'a Shared) -> Result<Runner<'a>, End> {
         let (provider, typed) = Runner::resolve(plan, env, sh)?;
-        let minted = env.client.mint_address(provider_name(provider)).map_err(|e| End::Failed(e.name()))?;
-        let (Some(id), Some(knowlu)) = (answers(&minted, "address_id"), answers(&minted, "address")) else {
-            return Err(End::Failed("bad-reply"));
+        // A rotate asks for a new address on the mailbox it has; every other setup mints a mailbox.
+        let (minted, keep) = match &plan.kind {
+            Kind::Rotate { address_id, .. } => {
+                let kept = session_dir(&plan.data_dir, address_id).is_some_and(|d| d.is_dir());
+                (env.client.rotate_address(address_id).map(|v| (address_id.clone(), v)), kept)
+            }
+            _ => (env.client.mint_address(provider_name(provider)).map(|v| (answers(&v, "address_id").unwrap_or_default(), v)), plan.keep_session),
         };
-        let profile = match plan.keep_session {
+        let (id, minted) = minted.map_err(|e| End::Failed(e.name()))?;
+        let Some(knowlu) = answers(&minted, "address") else { return Err(End::Failed("bad-reply")) };
+        let profile = match keep {
             true => session_dir(&plan.data_dir, &id),
             false => Some(setup_dir(&plan.data_dir)),
         };
         let Some(profile) = profile.filter(|_| valid_address_id(&id)) else { return Err(End::Failed("bad-reply")) };
         env.host.use_provider(provider);
         let machine = Setup::new(provider, plan.setup_day, None);
-        let r = Runner { plan, env, sh, provider, machine, id, knowlu, profile, opened: false, canary_ok: false, said_no: false, gave_up: false };
+        let r = Runner { plan, env, sh, provider, machine, id, knowlu, profile, opened: false, canary_ok: false, said_no: false, gave_up: false, keep };
         // A guided provider has no page to read the mailbox's own address from: the one the student typed.
         if let (Provider::Guided, Some(t)) = (provider, typed) {
             if r.client().set_hint(&r.id, &t).is_err() {
@@ -144,7 +152,11 @@ impl<'a> Runner<'a> {
 
     /// §4.1 step 1: the curated row's provider (data), else one question and the service's MX lookup.
     fn resolve(plan: &Plan, env: &Env, sh: &Shared) -> Result<(Provider, Option<String>), End> {
-        let Kind::School { unitid, address } = &plan.kind else { return Ok((Provider::Gmail, None)) };
+        let (unitid, address) = match &plan.kind {
+            Kind::School { unitid, address } => (unitid, address),
+            Kind::Rotate { provider, .. } => return Ok((Provider::from_service(provider), None)),
+            Kind::Gmail => return Ok((Provider::Gmail, None)),
+        };
         let curated = unitid.as_deref().and_then(crate::scaffold::curated).map(|c| Provider::from_service(c.mail_provider));
         if let Some(p) = curated.filter(|p| *p != Provider::Guided) {
             return Ok((p, address.clone()));
@@ -194,7 +206,7 @@ impl<'a> Runner<'a> {
             p.rows = rows;
             p.blocked = blocked;
             p.offers = if blocked { ["retry"].into_iter().chain(personal.then_some("personal_gmail")).chain(["guided_steps"]).collect() } else { vec![] };
-            if p.backfill.is_none() && matches!(self.machine.state(Step::Backfill), State::Working | State::Done | State::DoneByHand) {
+            if p.backfill.is_none() && !self.rotating() && matches!(self.machine.state(Step::Backfill), State::Working | State::Done | State::DoneByHand) {
                 p.backfill = Some(Backfill { since, expected: 0, handled: 0, sent: 0, left: 0, eta_secs: None, resumes_at: None, paused: None });
             }
         });
@@ -204,13 +216,27 @@ impl<'a> Runner<'a> {
         self.sh.update(|p| p.sentence = sentence);
     }
 
-    /// Revokes the address this setup minted and deletes its profile: a setup that changed nothing.
+    fn rotating(&self) -> bool {
+        matches!(self.plan.kind, Kind::Rotate { .. })
+    }
+
+    /// Revokes the address this setup minted and deletes its profile: a setup that changed nothing. A rotate
+    /// minted no mailbox: the mailbox, its kept profile and its open backfill are not this run's to undo.
     fn revoke(&self) {
+        if self.rotating() {
+            if self.opened {
+                self.host().close_window();
+            }
+            if !self.keep {
+                let _ = forget_setup(&self.plan.data_dir);
+            }
+            return;
+        }
         let _ = self.client().delete_address(&self.id);
         if self.opened {
             self.host().close_window();
         }
-        let _ = if self.plan.keep_session { forget(&self.plan.data_dir, &self.id) } else { forget_setup(&self.plan.data_dir) };
+        let _ = if self.keep { forget(&self.plan.data_dir, &self.id) } else { forget_setup(&self.plan.data_dir) };
         let _ = mark_open(&self.plan.data_dir, &self.id, false);
     }
 
@@ -248,7 +274,7 @@ impl<'a> Runner<'a> {
     fn wrap_up(&mut self, end: &End) {
         if self.opened {
             self.host().close_window();
-            if !self.plan.keep_session && !matches!(end, End::Cancelled) {
+            if !self.keep && !matches!(end, End::Cancelled) {
                 let _ = forget_setup(&self.plan.data_dir);
             }
         }
@@ -286,11 +312,13 @@ impl Runner<'_> {
                     Outcome::Failed
                 }
             }
+            // A rotate changes where mail goes, not what has been brought in.
+            Step::Backfill if self.rotating() => Outcome::Done,
             Step::Backfill => self.backfill(),
             Step::Finish => {
                 self.say("finishing");
                 self.host().close_window();
-                if !self.plan.keep_session {
+                if !self.keep {
                     let _ = forget_setup(&self.plan.data_dir);
                 }
                 Outcome::Done
@@ -312,6 +340,9 @@ impl Runner<'_> {
                 return Outcome::Cancelled;
             }
             if self.host().signed_in() {
+                if self.rotating() {
+                    return Outcome::Done;
+                }
                 match self.probe() {
                     Probe::Hint(h) => {
                         return if self.client().set_hint(&self.id, &h).is_ok() { Outcome::Done } else { Outcome::Failed };

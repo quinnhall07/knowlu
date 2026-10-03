@@ -18,9 +18,10 @@
 //! script evaluation only; nothing here simulates a keyboard or a mouse, and the window has no
 //! debugging port.
 use crate::mail_steps::Provider;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 pub mod backfill;
+pub mod commands;
 pub mod host;
 pub mod live;
 pub mod recover;
@@ -530,3 +531,120 @@ fn destroy_on_close_request(app: &tauri::AppHandle, w: &tauri::WebviewWindow) {
 
 #[cfg(not(windows))]
 fn destroy_on_close_request(_app: &tauri::AppHandle, _w: &tauri::WebviewWindow) {}
+
+// ---- the ten console commands (spec section 6.2; email plan T11.4) -------------------------------------
+//
+// Thin wrappers: each gathers what its seam in [`commands`] needs from `ConsoleState` and the live window and
+// calls it, and computes nothing. They are named in the console's `generate_handler!` list and not in the
+// wizard's (H5, the controller's hand-off): the wizard has no profile folder and no vault. A command that
+// waits on a window is `async`, so it never blocks the main thread (grades' rule).
+use crate::state::ConsoleState;
+use tauri::State;
+
+/// The service's mailbox rows, or the name of why they could not be read.
+fn listed(vault: &Path) -> Result<Vec<Value>, String> {
+    live::client_for(vault).map_err(String::from).and_then(|c| c.list_addresses().map_err(|e| e.name().to_string()))
+}
+
+fn row_of(rows: Vec<Value>, id: &str) -> Option<Value> {
+    rows.into_iter().find(|r| r["address_id"].as_str() == Some(id))
+}
+
+fn setup_running() -> bool {
+    setup::SETUPS.current().is_some_and(|s| !s.is_done())
+}
+
+/// The mail window, waited for up to a minute (a setup or resume being stopped lets go of it).
+fn take_window() -> Option<MailWindow> {
+    for _ in 0..240 {
+        if let Some(w) = MailWindow::try_take() {
+            return Some(w);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    None
+}
+
+#[tauri::command(async)]
+pub fn mail_status(cs: State<'_, ConsoleState>) -> Value {
+    commands::status_for(listed(&cs.vault), &cs.data_dir, setup_running())
+}
+
+#[tauri::command(async)]
+pub fn mail_setup_start(app: tauri::AppHandle, cs: State<'_, ConsoleState>, provider: String) -> Value {
+    let unitid = Some(crate::grades::campus_of(&cs.vault).unitid).filter(|u| !u.is_empty());
+    commands::setup_start_with(&cs.data_dir, &provider, unitid, |kind| live::start_setup(&app, kind).map(|_| ()))
+}
+
+#[tauri::command]
+pub fn mail_setup_progress() -> Value {
+    commands::progress_of(setup::SETUPS.current())
+}
+
+#[tauri::command]
+pub fn mail_setup_answer(choice: Value) -> Value {
+    commands::answer_with(setup::SETUPS.current(), &choice)
+}
+
+#[tauri::command]
+pub fn mail_setup_stop() -> Value {
+    commands::stop_with(setup::SETUPS.current())
+}
+
+#[tauri::command(async)]
+pub fn mail_sign_in(app: tauri::AppHandle, cs: State<'_, ConsoleState>, address_id: String) -> Value {
+    let rows = match listed(&cs.vault) {
+        Ok(rows) => rows,
+        Err(name) => return json!({ "ok": false, "signed_in": false, "error": name }),
+    };
+    let Some(row) = row_of(rows, &address_id) else { return json!({ "ok": false, "signed_in": false, "error": "no such mailbox" }) };
+    if crate::mail_session::MailState::load(&cs.data_dir).is_ok_and(|s| s.is_turned_off(&address_id)) {
+        return json!({ "ok": false, "signed_in": false, "error": "email is turned off for this mailbox" });
+    }
+    let provider = Provider::from_service(row["provider"].as_str().unwrap_or(""));
+    let Some(_window) = MailWindow::try_take() else { return json!({ "ok": false, "signed_in": false, "error": "a mail window is already open" }) };
+    let host = live::WindowHost::new(app.clone(), cs.data_dir.clone());
+    commands::sign_in_with(&host, &recover::SystemClock, &cs.data_dir, provider, &address_id)
+}
+
+#[tauri::command(async)]
+pub fn mail_disconnect(app: tauri::AppHandle, cs: State<'_, ConsoleState>, address_id: String) -> Value {
+    // Step 0 is first here as well as in the seam: the window below can take a while to be had, and nothing
+    // in that while may turn this mailbox's forwarding back on.
+    if crate::mail_session::turn_off(&cs.data_dir, &address_id).is_err() {
+        return json!({ "ok": false, "error": "could not record the mailbox as turned off; nothing was changed", "steps": [], "needs_you": false, "address": Value::Null });
+    }
+    if let Some(run) = setup::SETUPS.current() {
+        run.stop();
+    }
+    let Some(_window) = take_window() else {
+        return json!({ "ok": false, "error": "a mail window is already open", "steps": [], "needs_you": false, "address": Value::Null });
+    };
+    let client = match live::client_for(&cs.vault) {
+        Ok(c) => c,
+        Err(name) => return json!({ "ok": false, "error": name, "steps": [], "needs_you": false, "address": Value::Null }),
+    };
+    let host = live::WindowHost::new(app.clone(), cs.data_dir.clone());
+    commands::disconnect_with(&commands::Disconnect { host: &host, client: &client, clock: &recover::SystemClock, data_dir: &cs.data_dir }, &address_id)
+}
+
+#[tauri::command(async)]
+pub fn mail_rotate(app: tauri::AppHandle, cs: State<'_, ConsoleState>, address_id: String) -> Value {
+    let row = listed(&cs.vault).ok().and_then(|rows| row_of(rows, &address_id));
+    commands::rotate_with(&cs.data_dir, &address_id, row.as_ref(), |kind| live::start_setup(&app, kind).map(|_| ()))
+}
+
+#[tauri::command(async)]
+pub fn mail_keep_session(app: tauri::AppHandle, cs: State<'_, ConsoleState>, on: bool) -> Value {
+    commands::keep_session_with(&cs.data_dir, on, || {
+        if let Some(run) = setup::SETUPS.current() {
+            run.stop();
+        }
+        close(&app);
+    })
+}
+
+#[tauri::command(async)]
+pub fn mail_applied(cs: State<'_, ConsoleState>, since: Option<String>) -> Value {
+    commands::applied_with(&cs.vault, since.as_deref(), commands::run_engine)
+}
