@@ -5,11 +5,11 @@
 // scheme. Nothing here reads the page, and nothing is logged.
 (function () {
   try {
-    var noop = function () {};
+    const noop = function () {};
     if (typeof Navigator !== "undefined" && Navigator.prototype) {
       Object.defineProperty(Navigator.prototype, "registerProtocolHandler", { value: noop, configurable: false, writable: false });
     }
-  } catch (e) {
+  } catch {
     // A page that froze the prototype first keeps its own; the host-side cancel still holds.
   }
 })();
