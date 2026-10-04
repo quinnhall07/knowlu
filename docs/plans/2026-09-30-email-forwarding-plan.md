@@ -571,7 +571,13 @@ Briefs cite functions and headings, never line numbers.
     no readable due matches only a copy with no due. The five cases moved as written above (four
     cards; the past event is counted past, D24), and the named test also pins a weekly "Quiz" whole
     and split. `walk`'s argument holds: a `due` is read only on a task card, which no set or rewrite
-    touches. The two costs above are accepted, not fixed.
+    touches. The two costs above are accepted, not fixed. (b)'s "no due" clause brings a third,
+    unnamed when it was asked (PQ13 fix round, 2026-10-04): a weekly item reusing an open card's
+    title that arrives with no due (this week's "Quiz", announced with no date while last week's card
+    is open) is read as that card's copy, skipped as already applied and acked, with no card and no
+    notice, so it surfaces only if later mail names it again. It follows the ruling's words, so it
+    stays unless Quinn rules otherwise. The fix round also pins that the card comes before D24: a
+    past copy on the card's own due day is already applied, never counted past or carded again.
 
 ## 5. Tasks
 
@@ -1082,7 +1088,10 @@ second card. If Quinn meant `pending` alone, the snoozed test below flips.
 - PQ13 (b) (answered 2026-10-03, built `79c1742`): the first test keeps only its same-day and no-due
   cases as the skip; its five other-day cases take their own rows. New:
   `a_live_new_item_with_another_due_files_its_own_card` (the 2026-10-14T23:59 case, both day
-  boundaries, an undated card, and a weekly "Quiz" with next week's due, whole and split).
+  boundaries, an undated card, and a weekly "Quiz" with next week's due, whole and split). The fix
+  round adds a past event and task on a past card's own due day to the first test: already applied,
+  so the card comes before D24 (a mutation that let a past copy reach `new_item` passed every test
+  before them).
 
 **Behaviour.** One rule, beside T5.2's new-item-to-change match and before §4.9's live task row.
 - Normalisation is T5.2's (case, punctuation and whitespace folded); the course must be equal.

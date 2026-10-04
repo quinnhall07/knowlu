@@ -1904,6 +1904,23 @@ mod tests {
                 assert_eq!(against(vec![], &[forwarded], 9), want, "as with no card: {:?}", claim.item);
             }
         }
+        // The card comes before D24: a past copy on the card's own due day is that card's, already
+        // applied, never counted past (the event) or carded again (the task), as each is alone.
+        for gone in [json!("2026-09-25"), json!("2026-09-25T09:00")] {
+            let gone = NoteView { due: gone, ..card.clone() };
+            for (claim, alone) in [
+                (item("Lab 5", Some("2026-09-25T18:00"), Event), Some(past())),
+                (item("Lab 5", Some("2026-09-25"), Task), None),
+            ] {
+                for authenticity in [Aligned, Unaligned] {
+                    let forwarded = message(Live, authenticity, vec![claim.clone()]);
+                    let got = against(vec![gone.clone()], &[forwarded.clone()], 9);
+                    assert_eq!(got, vec![skip(SkipReason::AlreadyApplied)], "past: {:?} {authenticity:?} {}", claim.item, gone.due);
+                    let alone = alone.clone().unwrap_or_else(|| carded(&claim, pending()));
+                    assert_eq!(against(vec![], &[forwarded], 9), vec![alone], "alone: {:?}", claim.item);
+                }
+            }
+        }
     }
 
     /// PQ13 (b) (Quinn 2026-10-03): a live `new_item` whose due falls on another day than the open
@@ -1912,7 +1929,11 @@ mod tests {
     /// 23:59, and a date for a card that has none. A weekly "Quiz" reusing its title with next week's
     /// due files its own card too, and a second route's copy of next week's then meets that card,
     /// whole or split. Accepted costs, not pinned here: two copies the model reads two dates from
-    /// file two cards, and a time moved within the card's due day is not caught while it is open.
+    /// file two cards, and a time moved within the card's due day is not caught while it is open. A
+    /// third follows from (b)'s "no due" clause, and the first test's no-due row pins its mechanism:
+    /// a weekly item reusing an open card's title that arrives with no due (this week's "Quiz",
+    /// announced with no date while last week's card is open) is read as that card's copy, skipped
+    /// and acked with no card and no notice, so it surfaces only if later mail names it again.
     #[test]
     fn a_live_new_item_with_another_due_files_its_own_card() {
         let card = proposing("pending");
