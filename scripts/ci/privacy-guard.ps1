@@ -15,6 +15,9 @@
 # PowerShell 5.1: no &&, no ||, no ternary, no ??.
 param([string]$Root = ".")
 $ErrorActionPreference = "Stop"
+# Absolute from PowerShell's location: the .NET file API below would resolve a relative path against
+# the process directory, which Set-Location does not move. A root that does not exist stops here.
+$Root = (Resolve-Path -LiteralPath $Root).Path
 $preBump = "2026-09-24"
 $markers = @("cloud\supabase\functions\mail-inbound", "app\src\mail_steps.rs", "engine\src\mailreconcile")
 $present = @($markers | Where-Object { Test-Path -LiteralPath (Join-Path $Root $_) })

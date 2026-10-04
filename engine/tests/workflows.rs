@@ -367,3 +367,20 @@ fn the_privacy_guard_blocks_mail_code_at_or_before_the_pre_bump_version() {
     let (ok, out) = privacy_guard(&root());
     assert_eq!(ok, !(mail && version <= "2026-09-24"), "this tree (mail {mail}, PRIVACY_VERSION {version}):\n{out}");
 }
+
+/// The default `-Root "."` is PowerShell's location, not the process's working directory: run by
+/// hand after `Set-Location` into the repo from a session started elsewhere, the guard still reads
+/// `account.rs` (the .NET file API resolves a relative path against the process directory).
+#[test]
+fn the_privacy_guard_reads_a_relative_root_from_the_powershell_location() {
+    let t = tree("relative", Some("2026-10-15"), &MAIL_MARKERS);
+    let script = root().join("scripts").join("ci").join("privacy-guard.ps1");
+    let command = format!("Set-Location -LiteralPath '{}'; & '{}'; exit $LASTEXITCODE", t.0.display(), script.display());
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &command])
+        .current_dir(std::env::temp_dir())
+        .output()
+        .expect("powershell");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success() && text.contains("is past 2026-09-24"), "a relative root after Set-Location must read the tree's account.rs:\n{text}");
+}
