@@ -286,7 +286,7 @@ in this order (gap ids from the vision program note):
 2a. **Email: email forwarding to Knowlu** (spec `docs/specs/2026-09-30-email-forwarding-design.md`,
    signed 2026-09-30, amendments A1-A13; plan `docs/plans/2026-09-30-email-forwarding-plan.md`). Built
    in its own worktrees (`email-engine`, `email-app`, `email-cloud`; build started 2026-10-01); the staging
-   receiver is in SES us-east-2 and the S0 DMARC gate passed 2026-10-01; no release is cut from a `main` carrying it before privacy bump #1 (D18).
+   receiver is in SES us-east-2 and the S0 DMARC gate passed 2026-10-01; no release is cut from a `main` carrying it before privacy bump #1 (D18; `scripts/ci/privacy-guard.ps1` fails such a release, 2026-10-04).
    **2026-10-03:** the lane is integrated at `156ee3e` (T17; its ledger row holds the gate counts) and its
    reference docs are written (`docs/reference/app.md`'s Email bullet, `engine-commands.md`'s `mail-applied`
    and mail-pass bullets, `cloud/supabase/README.md`'s mail section and AWS runbook). PQ10 is
@@ -364,7 +364,7 @@ is recorded is suspended until 20 paying users (A13).
 **Release gate:** no release is cut from a `main` carrying the Gmail settings row, email forwarding to
 Knowlu, or the suspended grades gate (`POLICY_READ_GATE = Suspended`, which offers the kept Blackboard
 session at every curated Blackboard school) until privacy bump #1 merges (Gmail connect spec, Q8,
-signed 2026-09-29; email forwarding spec D18 and D25, signed 2026-09-30).
+signed 2026-09-29; email forwarding spec D18 and D25, signed 2026-09-30). The email forwarding half is mechanical (D18, ruled 2026-10-04): `release.yml`'s first build step, `scripts/ci/privacy-guard.ps1`, fails the release while the mail code is in the tree and `PRIVACY_VERSION` is on or before `2026-09-24` (`engine/tests/workflows.rs` runs it); the Gmail row and the grades suspension are still held by hand.
 
 **Open question for Quinn, at Pilot entry:** ruling 10 names the Pilot's contents, entry and gate but
 no exit. This section reads the exit as "the measure set at entry is met, and Quinn says so".

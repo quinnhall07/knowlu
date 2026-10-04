@@ -104,7 +104,8 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   migration `20260929000100` must be applied to the server.
 - **Email forwarding (the mail window)** (spec `docs/specs/2026-09-30-email-forwarding-design.md`;
   plan `docs/plans/2026-09-30-email-forwarding-plan.md`). Built on branch `email-forwarding`, not
-  merged; no release is cut from a `main` carrying it before privacy bump #1 (D18). The app sets up
+  merged; no release is cut from a `main` carrying it before privacy bump #1 (D18), and `release.yml`'s
+  first build step, `scripts/ci/privacy-guard.ps1`, fails one that tries. The app sets up
   forwarding from the student's school mailbox to a secret address the service mints, drives the
   mailbox's web page for it, and never reads a message. Recounted 2026-10-03 from the code.
   - **The ten commands** (`app/src/mail.rs`, thin wrappers over seams in `app/src/mail/commands.rs`;

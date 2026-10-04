@@ -888,6 +888,11 @@ and T11.5 no longer wait on it.
 `main` with the suspension (spec T19). **Edits, by heading, never by line:**
 - **§3, Pilot, *Release gate*.** No release is cut from a `main` carrying the Gmail settings row,
   email forwarding to Knowlu, or the suspended grades gate until privacy bump #1 merges (D18).
+  **2026-10-04 (Quinn's D18 ruling):** the email forwarding half is mechanical. `release.yml`'s first
+  build step runs `scripts/ci/privacy-guard.ps1`, which fails the release while any mail marker
+  (`mail-inbound`, `app/src/mail_steps.rs`, `engine/src/mailreconcile`) is in the tree and
+  `PRIVACY_VERSION` is on or before `2026-09-24`; `engine/tests/workflows.rs` pins the step and runs
+  the script. The lane may merge to `main` before bump #1; a release may not ship it.
 - **§3, MVP.**
   - Lanes 1 and 6 and the MVP exit row: UA's read leaves the MVP, and the grades proof runs on a dev
     build of `main` (A13).
@@ -2790,7 +2795,8 @@ is single-owner too, but the signed spec gives it to T8b, which this plan follow
   and by Checkpoint C's contract read of every destructive script (§10, R4).
 - **Real mail or names in the repo** (rule 1). Guarded by T0's placeholder rule, synthetic fixtures,
   and Checkpoint D's grep.
-- **A release cut too early.** T13a's guard reaches `main` with T19 (D18).
+- **A release cut too early.** T13a's guard reaches `main` with T19 (D18), and since 2026-10-04
+  `scripts/ci/privacy-guard.ps1` fails any release carrying the mail code before bump #1.
 - **The live proof touches the founder's own school mailbox.** Only copies carrying the nonce are
   deleted, the forwarding is restored afterwards, and S6 runs on a test tenant (§13 Q8).
 - **Staging spend.** Bounded by the caps, the allowance and the per-account ceiling. OpenRouter stays
@@ -2832,7 +2838,7 @@ numbers are spec §12's; named tests are this plan's (§5).
 | D15, §13 Q6: one saved session per mailbox, on by default; reconcile, recover, re-enable; every deletion path; a retried delete | T9.1, T11.2, T11.4, T11.5, T12 | tests 32, 36 and 38; `mail_keep_session_off_deletes_…`; proof steps 6–7 |
 | D16, Q7: no contact with school IT; a blocking tenant is named | T11.3, T15.1 | `a_canary_not_back_in_three_minutes_leaves_blocked_…` |
 | D17: Disconnect and deletion purge everything that serves the connection; the export | T1.3, T4.1, T4.6, T11.4, T12 | test 14's purge and export half; `delete_reads_work_keys_…`; proof step 7 |
-| D18: no `PRIVACY_VERSION` or `site/` change; no release before bump #1 | T13a, D | the guard line on `main` with T19; Checkpoint D |
+| D18: no `PRIVACY_VERSION` or `site/` change; no release before bump #1 | T13a, D | the guard line on `main` with T19; `release_refuses_mail_code_until_privacy_bump_1`, `the_privacy_guard_blocks_mail_code_at_or_before_the_pre_bump_version` (mechanical, 2026-10-04); Checkpoint D |
 | D19: the step scripts compiled in | T9.2, T10.2a–T10.3b | `the_runner_runs_only_compiled_in_scripts` |
 | D20: the actor, `created_by: mail`, `mail:` uids, `ingest-seen` | T2c, T5.1, T6.2, T6.3 | `seen_records_mail_uids_…`, `a_message_without_a_message_id_keys_…`; Checkpoint A |
 | D21, §13 Q10: sender and date on mail cards, notices and applied changes | T3e, T6.2, T15.0, T15.5 | `…_carries_from_mail_date_and_evidence`, `a_mail_card_carries_its_from_mail_date_and_evidence_as_literals`, `a_mail_card_shows_its_sender_date_and_quote` |

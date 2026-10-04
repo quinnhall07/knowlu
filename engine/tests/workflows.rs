@@ -259,3 +259,111 @@ fn docs_only_changes_still_report_the_three_required_checks() {
         assert!(block.contains("needs.changes.outputs.code"), "{job}: heavy steps must key on needs.changes.outputs.code");
     }
 }
+
+/// D18, as Quinn ruled it on 2026-10-04 (session 4): email forwarding may merge to `main` before
+/// privacy bump #1, but no release may ship it until the page discloses it. The guard is
+/// mechanical: `scripts/ci/privacy-guard.ps1` is the build job's first step after checkout, runs
+/// unconditionally, and fails the release while any mail marker is in the tree and
+/// `account::PRIVACY_VERSION` is on or before `2026-09-24`, the version the lane was signed against.
+#[test]
+fn release_refuses_mail_code_until_privacy_bump_1() {
+    let r = workflow("release.yml");
+    let build = job_block(&r, "build");
+    let call = r".\scripts\ci\privacy-guard.ps1";
+    assert_eq!(r.matches(call).count(), 1, "release.yml must run {call} exactly once");
+    let at = build.find(call).expect("the guard must run in the build job, before anything is built");
+    for later in [r".\scripts\ci\toolchain.ps1", "name: tauri-cli", r".\scripts\release.ps1", "actions/upload-artifact@"] {
+        let l = build.find(later).unwrap_or_else(|| panic!("build job lost {later}"));
+        assert!(at < l, "the guard must run before {later}");
+    }
+    // The step itself: from its `- name:` to the next step. No `if:` may skip it.
+    let start = build[..at].rfind("      - ").expect("the guard is a step");
+    let end = build[at..].find("\n      - ").map_or(build.len(), |e| at + e);
+    let step = &build[start..end];
+    assert!(step.contains("name: privacy guard (D18)"), "the step is named for D18: {step}");
+    assert!(!step.contains("if:") && !step.contains("continue-on-error"), "the guard is never skipped or softened: {step}");
+}
+
+fn root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+/// Runs the guard against `tree`; `(passed, output)`.
+fn privacy_guard(tree: &Path) -> (bool, String) {
+    let script = root().join("scripts").join("ci").join("privacy-guard.ps1");
+    assert!(script.is_file(), "{} is missing", script.display());
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&script)
+        .arg("-Root")
+        .arg(tree)
+        .output()
+        .expect("powershell");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
+}
+
+/// A synthetic tree under the system temp directory: `account.rs` (when `version` is `Some`) and
+/// the named marker paths. Removed on drop.
+struct Tree(std::path::PathBuf);
+impl Drop for Tree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+fn tree(tag: &str, version: Option<&str>, markers: &[&str]) -> Tree {
+    let dir = std::env::temp_dir().join(format!("knowlu-privacy-guard-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("app").join("src")).unwrap();
+    if let Some(v) = version {
+        let account = format!("pub const TOS_VERSION: &str = \"2026-09-16\";\npub const PRIVACY_VERSION: &str = \"{v}\";\n");
+        std::fs::write(dir.join("app").join("src").join("account.rs"), account).unwrap();
+    }
+    for m in markers {
+        let p = dir.join(m);
+        if m.ends_with(".rs") {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "// marker\n").unwrap();
+        } else {
+            std::fs::create_dir_all(&p).unwrap();
+        }
+    }
+    Tree(dir)
+}
+
+const MAIL_MARKERS: [&str; 3] = ["cloud/supabase/functions/mail-inbound", "app/src/mail_steps.rs", "engine/src/mailreconcile"];
+
+/// The guard's condition, run for real against synthetic trees: each mail marker alone blocks a
+/// release at or before `2026-09-24`; a later version or a tree without mail code passes; an
+/// unreadable version blocks (fail closed); and on this very tree the verdict is the one the rule
+/// gives, so a moved marker or `account.rs` cannot quietly turn the guard into a pass.
+#[test]
+fn the_privacy_guard_blocks_mail_code_at_or_before_the_pre_bump_version() {
+    for (i, m) in MAIL_MARKERS.iter().enumerate() {
+        for v in ["2026-09-24", "2026-09-16"] {
+            let t = tree(&format!("m{i}-{v}"), Some(v), &[m]);
+            let (ok, out) = privacy_guard(&t.0);
+            assert!(!ok, "{m} with PRIVACY_VERSION {v} must block the release:\n{out}");
+            assert!(out.contains("D18") && out.contains(v), "the refusal names D18 and the version:\n{out}");
+        }
+    }
+    let t = tree("bumped", Some("2026-10-15"), &MAIL_MARKERS);
+    let (ok, out) = privacy_guard(&t.0);
+    assert!(ok, "a version past 2026-09-24 lets mail code ship:\n{out}");
+    let t = tree("no-mail", Some("2026-09-24"), &[]);
+    let (ok, out) = privacy_guard(&t.0);
+    assert!(ok, "a tree without mail code is not D18's business:\n{out}");
+    let t = tree("no-account", None, &[MAIL_MARKERS[0]]);
+    let (ok, out) = privacy_guard(&t.0);
+    assert!(!ok, "no readable PRIVACY_VERSION must block, never pass:\n{out}");
+    let t = tree("bad-version", Some("soon"), &[MAIL_MARKERS[0]]);
+    let (ok, out) = privacy_guard(&t.0);
+    assert!(!ok, "a PRIVACY_VERSION that is not YYYY-MM-DD must block:\n{out}");
+
+    // This tree.
+    let account = std::fs::read_to_string(root().join("app").join("src").join("account.rs")).unwrap();
+    let version = account.split("pub const PRIVACY_VERSION: &str = \"").nth(1).and_then(|s| s.split('"').next()).unwrap();
+    let mail = MAIL_MARKERS.iter().any(|m| root().join(m).exists());
+    let (ok, out) = privacy_guard(&root());
+    assert_eq!(ok, !(mail && version <= "2026-09-24"), "this tree (mail {mail}, PRIVACY_VERSION {version}):\n{out}");
+}
