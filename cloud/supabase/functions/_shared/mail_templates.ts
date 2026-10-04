@@ -93,9 +93,42 @@ const TITLE_CHARS = 200;
 // vendor rows: begin
 /** The notification rows (§4.7 step 3: new assignment, due soon, due date changed, announcement). A row is
  * written from a real message's exact sender, subject and body, never guessed, so this list grows as real
- * notifications are captured. Until then such mail goes to the model, which costs a call but writes
- * nothing a template would not. */
-export const MAIL_TEMPLATES: readonly MailTemplate[] = [];
+ * notifications are captured. A kind with no row goes to the model, which costs a call but writes nothing
+ * a template would not.
+ *
+ * **Blackboard** (T3a.2, from 23 real notifications captured 2026-10-04). Its text/plain part (and its
+ * HTML, reduced) is a style block, then a course id, the course name, a marker line, the item's title and
+ * `Due <weekday>, <month> <day>, <year> <h:mm:ss> <AM|PM> <zone>`. The title may itself say "Due" (a due
+ * restated in its name), so it runs to the first `Due <weekday>,`. The course is found by scanning the
+ * subject and text (its name may hold spaces, and a cross-listed course names two sections). The `due`
+ * group stops before the zone: the vendor writes the time on the recipient's clock and stamps its Date
+ * in UTC, and `mail-process` has no account timezone, so a zoned due would land on the UTC clock (11:59
+ * PM as the next morning). Only these two markers were seen; another marker ("Test due soon") has no row.
+ * Not rows, by design: announcements (free text, and one may itself move a due: the model reads it),
+ * "New content", "New grade and feedback", "Gradable item is overdue" (not D9 kinds). The receipt is
+ * `lms_receipts.ts`'s row. Effort and importance are fixed (D9): an hour, and the default importance 3. */
+const BLACKBOARD_DUE =
+  "Due (?<due>(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), [A-Z][a-z]+ \\d{1,2}, \\d{4} " +
+  "\\d{1,2}:\\d{2}:\\d{2} [AP]M) [A-Z]{2,5}\\b";
+
+export const MAIL_TEMPLATES: readonly MailTemplate[] = [
+  {
+    label: "Blackboard",
+    senders: ["do-not-reply@blackboard.com"],
+    subject: /^New gradable item added to \S.*$/,
+    body: new RegExp(`\\bNew gradable item (?<title>.+?) ${BLACKBOARD_DUE}`),
+    claim: { kind: "new_item", item_kind: "task", effort_hours: 1, importance: 3 },
+    why: "new gradable item",
+  },
+  {
+    label: "Blackboard",
+    senders: ["do-not-reply@blackboard.com"],
+    subject: /^\S.* is due soon in \S.*$/,
+    body: new RegExp(`\\bAssignment due soon (?<title>.+?) ${BLACKBOARD_DUE}`),
+    claim: { kind: "new_item", item_kind: "task", effort_hours: 1, importance: 3 },
+    why: "assignment due soon",
+  },
+];
 
 /** The LMS and homework-platform vendors' own sending domains: the vendor half of §4.7 step 2's allow-list
  * (`mail-process/screen.ts`). Its own list, not the rows' senders, so a vendor with no row yet (every

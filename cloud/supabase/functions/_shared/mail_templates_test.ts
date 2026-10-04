@@ -1,8 +1,13 @@
-// Email plan T3a (spec §4.7 step 3, test 9; §5.1's `receipt` kind as amended 2026-10-02, PQ4). Every
-// fixture is FABRICATED: the "Example LMS" row below, its address, courses, titles and dates are invented
-// for these tests, and the receipt body is lms_receipts_test.ts's own invented shape. No real mail is used.
+// Email plan T3a (spec §4.7 step 3, test 9; §5.1's `receipt` kind as amended 2026-10-02, PQ4) and T3a.2
+// (D9's notification rows, PQ10). Every fixture is FABRICATED: the "Example LMS" row below, its address,
+// courses, titles and dates are invented for these tests, and the receipt body is lms_receipts_test.ts's
+// own invented shape. The T3a.2 messages copy only the vendor's layout (its sender, its subject wording,
+// its marker lines); every course, title, name, address and date in them is invented. No real mail is used.
 import { assert, assertEquals } from "@std/assert";
+import { mailPromptText } from "./judge_prompts.ts";
+import { validateMailClaims } from "./judge_validate.ts";
 import { RECEIPT_TEMPLATES } from "./lms_receipts.ts";
+import { scrubForPrompt } from "./scrub.ts";
 import {
   MAIL_TEMPLATES,
   type MailClaim,
@@ -288,5 +293,183 @@ Deno.test("the_code_names_no_vendor", async () => {
   }
   for (const name of names) {
     if (name.length >= 3) assert(!code.includes(name), `the code outside the vendor rows names "${name}"`);
+  }
+});
+
+// --- T3a.2: Blackboard's notification rows (D9, PQ10) ---------------------------------------------------
+// The vendor's layout, as its real notifications carry it: a style block first, then one indented line
+// each for a course id, the course name, a marker ("New gradable item", "Assignment due soon"), the item's
+// title, and "Due <weekday>, <month> <day>, <year> <h:mm:ss> <AM|PM> <zone>". Everything named is invented.
+
+const BB_COURSE = "300010-QX-210-002";
+const BB_CONTEXT = { knownCourses: ["qx-210", "yy-202"], timeZone: "America/Chicago" };
+const BB_DUE_LINE = "Due Wednesday, November 11, 2026 11:59:00 PM CST";
+
+/** A text/plain part in the vendor's shape: its style block, then each line indented as the vendor does. */
+function bbText(lines: readonly string[]): string {
+  const style = ["  body {", "    font-size: 14px;", "  }", "  #user-defined-description th {", "  }"];
+  const tail = ["Email brought to you by", "Want to change how you receive these emails?"];
+  return [...style, "", ...["90001.300010", BB_COURSE, ...lines, ...tail].map((l) => `          ${l}`)]
+    .join("\n");
+}
+
+function bbNotice(
+  subject: string,
+  lines: readonly string[],
+  over: Partial<TemplateMessage> = {},
+): TemplateMessage {
+  return {
+    from: "do-not-reply@blackboard.com",
+    subject,
+    text: bbText(lines),
+    date: "Thu, 5 Nov 2026 06:00:00 +0000",
+    authenticity: "aligned",
+    ...over,
+  };
+}
+
+const BB_NEW_ITEM = () =>
+  bbNotice(`New gradable item added to ${BB_COURSE}`, [
+    "New gradable item",
+    "Problem Set 4: Vectors",
+    BB_DUE_LINE,
+  ]);
+
+/** A due-soon title may itself say "Due": the item is read up to the first "Due <weekday>,". */
+const BB_DUE_SOON_TITLE = "Field Report 2 (Due Nov. 11th by 11:59 pm CST)";
+const BB_DUE_SOON = () =>
+  bbNotice(`${BB_DUE_SOON_TITLE} is due soon in ${BB_COURSE}`, [
+    "Assignment due soon",
+    BB_DUE_SOON_TITLE,
+    BB_DUE_LINE,
+    "View",
+  ]);
+
+function bbNewItem(title: string, why: string, evidence: string): MailClaim {
+  return {
+    kind: "new_item",
+    course: "qx-210",
+    target: null,
+    field: null,
+    value: null,
+    item: { title, due: "2026-11-11T23:59", item_kind: "task", effort_hours: 1, importance: 3 },
+    topic: null,
+    evidence,
+    why,
+    confidence: 1,
+    source: "template",
+    resolution: null,
+  };
+}
+
+Deno.test("an_aligned_blackboard_new_gradable_item_mail_yields_a_new_item_with_its_resolved_due", () => {
+  assertEquals(templateClaims(BB_NEW_ITEM(), BB_CONTEXT), [
+    bbNewItem(
+      "Problem Set 4: Vectors",
+      "Blackboard new gradable item",
+      "New gradable item Problem Set 4: Vectors Due Wednesday, November 11, 2026 11:59:00 PM",
+    ),
+  ]);
+});
+
+Deno.test("the_same_new_gradable_item_mail_unaligned_yields_nothing", () => {
+  assertEquals(templateClaims({ ...BB_NEW_ITEM(), authenticity: "unaligned" }, BB_CONTEXT), null);
+});
+
+Deno.test("an_aligned_blackboard_due_soon_mail_yields_a_new_item_with_its_resolved_due", () => {
+  assertEquals(templateClaims(BB_DUE_SOON(), BB_CONTEXT), [
+    bbNewItem(
+      BB_DUE_SOON_TITLE,
+      "Blackboard assignment due soon",
+      `Assignment due soon ${BB_DUE_SOON_TITLE} Due Wednesday, November 11, 2026 11:59:00 PM`,
+    ),
+  ]);
+});
+
+Deno.test("the_same_due_soon_mail_unaligned_yields_nothing", () => {
+  assertEquals(templateClaims({ ...BB_DUE_SOON(), authenticity: "unaligned" }, BB_CONTEXT), null);
+});
+
+Deno.test("a_blackboard_due_is_the_wall_clock_the_mail_shows_whatever_zone_the_context_has", () => {
+  // The vendor writes the due on the recipient's clock and stamps its Date in UTC. `mail-process` has no
+  // account timezone (its context says null), so a due read with its zone would land on the UTC clock:
+  // 11:59 PM CST as 05:59 the next morning. The rows read the date and time the mail shows, zone left out.
+  for (const timeZone of [null, "America/Chicago"]) {
+    for (const message of [BB_NEW_ITEM(), BB_DUE_SOON()]) {
+      const got = templateClaims(message, { ...BB_CONTEXT, timeZone });
+      assertEquals(got?.[0].item?.due, "2026-11-11T23:59", `${message.subject} (${timeZone})`);
+    }
+  }
+});
+
+Deno.test("a_blackboard_row_matches_only_the_vendors_address_its_subject_and_its_marker", () => {
+  const misses: Array<[string, TemplateMessage]> = [
+    ["another address", { ...BB_NEW_ITEM(), from: "do-not-reply@lms.example.invalid" }],
+    ["a subdomain of the vendor", { ...BB_NEW_ITEM(), from: "do-not-reply@mail.blackboard.com" }],
+    ["a reply's subject", { ...BB_NEW_ITEM(), subject: `Re: New gradable item added to ${BB_COURSE}` }],
+    ["the due-soon subject on a new-item body", { ...BB_NEW_ITEM(), subject: BB_DUE_SOON().subject }],
+    ["no Due line", bbNotice(BB_NEW_ITEM().subject, ["New gradable item", "Problem Set 4: Vectors"])],
+    ["another marker", bbNotice(BB_DUE_SOON().subject, ["Test due soon", "Quiz 6", BB_DUE_LINE])],
+  ];
+  for (const [name, message] of misses) assertEquals(templateClaims(message, BB_CONTEXT), null, name);
+  // A professor's announcement comes from the same address under their display name: still the vendor.
+  const named = {
+    ...BB_NEW_ITEM(),
+    from: `"Pat Example - pat@school.example.invalid" <do-not-reply@blackboard.com>`,
+  };
+  assertEquals(templateClaims(named, BB_CONTEXT)?.[0].item?.title, "Problem Set 4: Vectors");
+});
+
+Deno.test("the_vendors_other_notifications_stay_on_the_model_path", () => {
+  // D9's rows are new assignment and due soon; these carry no item a row could read without a guess (an
+  // announcement is free text, and may itself move a due), or are not D9 kinds at all.
+  const others: Array<[string, TemplateMessage]> = [
+    [
+      "overdue",
+      bbNotice(`Gradable item is overdue in ${BB_COURSE}`, ["Overdue gradable item", "Quiz 6", BB_DUE_LINE]),
+    ],
+    ["new content", bbNotice(`New content in ${BB_COURSE}`, ["New content", "Week 9 slides.pdf", "View"])],
+    [
+      "a grade",
+      bbNotice(`New grade and feedback for Quiz 6 in ${BB_COURSE}`, [
+        "New grade and feedback",
+        "Quiz 6",
+        "View grades",
+      ]),
+    ],
+    [
+      "an announcement",
+      bbNotice(`New announcement in ${BB_COURSE}`, [
+        "New announcement",
+        "Room change",
+        "We now meet in Hall 4.",
+      ]),
+    ],
+    [
+      "a professor's announcement",
+      bbNotice(`${BB_COURSE}: Problem Set 4 moved`, [
+        "New announcement from Pat Example",
+        "Problem Set 4 moved",
+        "Problem Set 4 is now due November 13 at 11:59 PM.",
+      ], { from: `"Pat Example - pat@school.example.invalid" <do-not-reply@blackboard.com>` }),
+    ],
+  ];
+  for (const [name, message] of others) assertEquals(templateClaims(message, BB_CONTEXT), null, name);
+});
+
+Deno.test("a_blackboard_rows_claim_passes_the_handlers_check_against_the_cut_scrubbed_text", () => {
+  // `mail-process` holds a template's claims to the model's checks against `mailPromptText` (§4.7 step 1).
+  for (const message of [BB_NEW_ITEM(), BB_DUE_SOON()]) {
+    const claims = templateClaims(message, BB_CONTEXT);
+    assert(claims !== null, message.subject);
+    const checked = validateMailClaims({ claims }, {
+      from: message.from,
+      subject: scrubForPrompt(message.subject),
+      text: mailPromptText(message.text),
+      date: message.date,
+      ...BB_CONTEXT,
+    }, "template");
+    assertEquals(checked.refused, [], message.subject);
+    assertEquals(checked.claims, claims, message.subject);
   }
 });

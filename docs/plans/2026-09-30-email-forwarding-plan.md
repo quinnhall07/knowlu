@@ -633,7 +633,7 @@ marks a task that needs Quinn's word, presence, a secret or a spend. **WT** is t
 | T2g.1 | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-inbound/**` (new), `config.toml` | T2f | cloud |
 | T2g.2 | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-inbound/**` | T2g.1 | cloud |
 | T3a | `cloud-engineer` (Opus, high) | yes | PQ4 (answered) | `functions/_shared/mail_templates.ts` (new) | T2g.2 | cloud |
-| T3a.2 | `cloud-engineer` (Opus, high) | yes | PQ10 | `functions/_shared/mail_templates.ts` (the vendor rows region) and its test | T3a, real captures | cloud |
+| T3a.2 | `cloud-engineer` (Opus, high) | yes | PQ10 (ruled 2026-10-04: capture now) | `functions/_shared/mail_templates.ts` (the vendor rows region) and its test | T3a, real captures | cloud; **built 2026-10-04**: Blackboard new gradable item and due soon; Canvas, zyBooks and due-date-changed not captured |
 | T3b | `cloud-engineer` (Opus, high) | yes | PQ4 (answered) | `functions/_shared/judge_validate.ts` (mail region) | T3a | cloud |
 | T3c | `cloud-engineer` (Opus, high) | yes | — | `functions/_shared/judge_prompts.ts`, `judge_caps.ts` | T3b | cloud |
 | T3d | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-process/**` (new), `functions/mail-inbound/handler.ts` (D8's kick), `config.toml` | T3c | cloud |
@@ -1708,6 +1708,17 @@ capture gets no row, and its mail stays on the model path.
 
 **When:** before Checkpoint B, or before the pilot if Quinn accepts the model path until then (PQ10).
 
+**Built (2026-10-04, PQ10 ruled "capture now"):** two Blackboard rows from 23 real notifications Quinn
+forwarded (the captures stayed outside the repo; the tests use invented messages in the vendor's layout).
+`New gradable item added to <course>` and `<item> is due soon in <course>` (marker `Assignment due soon`)
+each yield a `new_item` task with the item's title, its due through `judge_due.ts` (date and clock time
+as the mail shows them, zone left out: `mail-process` passes no timezone, and a zoned due would land on
+the UTC clock), the course by scan, and a fixed effort of 1 hour and importance 3. Not rows: Blackboard
+announcements, course-subject or professor-sent (free text, and one sample itself moves a due: the model
+reads it); `New content`, `New grade and feedback` and `Gradable item is overdue` (not D9 kinds);
+`Submission received` stays `lms_receipts.ts`'s row. **Not covered (no capture):** a due-date-changed
+notification from any vendor, and every Canvas and zyBooks notification; those stay on the model path.
+
 #### T3b. Validation (`_shared/judge_validate.ts`, the mail region)
 
 **Before it:** the disjointness check is repeated for `j-events`, which edits `judge_validate.ts` and
@@ -2747,7 +2758,7 @@ numbers are spec §12's; named tests are this plan's (§5).
 | PQ7 (2026-10-02): a residual `NotAmendable` counts in `U`; §4.8 step 7's line unchanged | T5.5, T6.3 | `the_mail_run_line_is_exact` |
 | PQ8 (2026-10-02): (ii) a live `new_item` matching an open mail task card files nothing; (i) declined, the screen keeps "From is the mailbox itself" | T5.6, T6.3, T3d | T5.6's tests; `a_rule_forward_in_a_later_pull_files_no_second_card` (T6.3's view of a card); `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` |
 | D8: two-stage intake and a separate queue; `seen` written with work after the put; an expired item loses `seen`; `mail-process` on a cron every minute and kicked by intake (the kick is T3d's: T2g.1 shipped without it) | T1.1, T2g.1, T3d, T3e, T4.4 | tests 7 and 16; `an_expired_item_loses_its_seen_row_…`; `a_hand_off_kicks_mail_process_once_with_the_job_token`, `a_failed_or_slow_kick_still_answers_200_and_keeps_the_work` |
-| D9: claims cheapest first; templates; a small model with a fixed schema; verbatim evidence; the 0.6 floor | T3a–T3e, T3a.2 | tests 8, 9 and 10; T3a.2's per-row tests. **Open (PQ10):** the Blackboard, Canvas and zyBooks rows are deferred until real captures exist; `MAIL_TEMPLATES` is empty at `5ce22b4` |
+| D9: claims cheapest first; templates; a small model with a fixed schema; verbatim evidence; the 0.6 floor | T3a–T3e, T3a.2 | tests 8, 9 and 10; T3a.2's per-row tests. **PQ10 (ruled 2026-10-04, capture now):** `MAIL_TEMPLATES` was empty at `5ce22b4`; T3a.2 (2026-10-04) adds Blackboard's new-gradable-item and due-soon rows. Canvas, zyBooks and any due-date-changed row wait for a real capture |
 | D10: deterministic reconcile in `judge`; the ordering date; batches whole; backfill applies and lists, live proposes; Undo | T4.4, T5.1–T5.5, T6.3, T7, T15.4 | tests 12, 18, 19 and 29; `undo_invokes_…`; proof step 3 |
 | D11 (1)–(3): card or direct decided from `human_set`; the mail card writer after `find_pending_amendment` | T5.4, T5.5, T6.2 | tests 20, 21 and 22; `a_mail_amend_card_passes_validate_amendment_…`; `a_human_set_landing_between_plan_and_apply_…` (§10, R10); Checkpoints A and C |
 | D11 (4): an approved mail amend writes as the human actor; a bad actor file stops it | T8 | test 31; Checkpoint A |
