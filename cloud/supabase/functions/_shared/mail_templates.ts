@@ -16,13 +16,23 @@
 // its tokens, and none or more than one reads null. A title or evidence carrying a control character, DEL,
 // U+0085 or a line separator makes no claim (T3b refuses those in any claim, §10 R11).
 //
+// **A claim the model's view leaves out is no claim.** `mail-process` holds a template's claims to the
+// model's checks against `mailPromptText` (scrubbed, then cut to `MAIL_TEXT_CHARS`), and a refused claim
+// deletes the mail unread. So a claim whose evidence the scrub keeps but the cut leaves out (a marker
+// within the evidence's 140 characters of the cut, as a longer preamble would put it) reads null here,
+// and the mail goes to the model, which sees the same cut. A long title alone cannot do it: it moves the
+// due past the cut but not the evidence, and its due is read from the whole text. Evidence the scrub
+// changes (an address in a title) stays a claim, for that check to refuse.
+//
 // Nothing here logs, and the claim carries only the title, the resolved due, the course and a verbatim
 // evidence span cut at the end of the last field read, so text after it (a confirmation number) is never
 // in a claim.
 import { resolveDue } from "./judge_due.ts";
+import { mailPromptText } from "./judge_prompts.ts";
 import { MAX_REASON_CHARS, oneLine } from "./judge_validate.ts";
 import { RECEIPT_TEMPLATES } from "./lms_receipts.ts";
 import type { Authenticity } from "./mail_bind.ts";
+import { scrubForPrompt } from "./scrub.ts";
 
 export type Topic = "schedule" | "room" | "instructor" | "office_hours" | "policy" | "other";
 
@@ -97,13 +107,14 @@ const TITLE_CHARS = 200;
  * a template would not.
  *
  * **Blackboard** (T3a.2, from 23 real notifications captured 2026-10-04). Its text/plain part (and its
- * HTML, reduced) is a style block, then a course id, the course name, a marker line, the item's title and
+ * HTML, reduced) is a style block, then a numeric id (`NNNNN.YYYYTT`), the course section code (there is
+ * no course-name line), a marker line, the item's title and
  * `Due <weekday>, <month> <day>, <year> <h:mm:ss> <AM|PM> <zone>`. The title may itself say "Due" (a due
  * restated in its name), so it runs to the first `Due <weekday>,`. The course is found by scanning the
  * subject and text (its name may hold spaces, and a cross-listed course names two sections). The `due`
  * group stops before the zone: the vendor writes the time on the recipient's clock and stamps its Date
  * in UTC, and `mail-process` has no account timezone, so a zoned due would land on the UTC clock (11:59
- * PM as the next morning). Only these two markers were seen; another marker ("Test due soon") has no row.
+ * PM as the next morning). Only these two markers were seen; any other marker has no row.
  * Not rows, by design: announcements (free text, and one may itself move a due: the model reads it),
  * "New content", "New grade and feedback", "Gradable item is overdue" (not D9 kinds). The receipt is
  * `lms_receipts.ts`'s row. Effort and importance are fixed (D9): an hour, and the default importance 3. */
@@ -280,7 +291,16 @@ export function templateClaims(
   for (const t of templates) {
     if (!t.senders.includes(sender) || !fresh(t.subject).test(subject)) continue;
     const claim = claimFrom(t, message, folded, context);
-    if (claim !== null) return [claim];
+    if (claim !== null) return cutOff(claim, message) ? null : [claim];
   }
   return null;
+}
+
+/** True when the scrub keeps the claim's evidence but `mailPromptText`'s cut leaves it out: the handler's
+ * check would refuse it, so the first matching row makes no claim and the model is asked. */
+function cutOff(claim: MailClaim, message: TemplateMessage): boolean {
+  const fold = (text: string) => text.replace(/\s+/g, " ").trim();
+  const shown = [fold(mailPromptText(message.text)), fold(scrubForPrompt(message.subject))];
+  if (shown.some((text) => text.includes(claim.evidence))) return false;
+  return fold(scrubForPrompt(message.text.trim())).includes(claim.evidence);
 }

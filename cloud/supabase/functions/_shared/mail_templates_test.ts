@@ -4,11 +4,12 @@
 // own invented shape. The T3a.2 messages copy only the vendor's layout (its sender, its subject wording,
 // its marker lines); every course, title, name, address and date in them is invented. No real mail is used.
 import { assert, assertEquals } from "@std/assert";
-import { mailPromptText } from "./judge_prompts.ts";
+import { MAIL_TEXT_CHARS, mailPromptText } from "./judge_prompts.ts";
 import { validateMailClaims } from "./judge_validate.ts";
 import { RECEIPT_TEMPLATES } from "./lms_receipts.ts";
 import { scrubForPrompt } from "./scrub.ts";
 import {
+  EVIDENCE_CHARS,
   MAIL_TEMPLATES,
   type MailClaim,
   type MailTemplate,
@@ -297,20 +298,88 @@ Deno.test("the_code_names_no_vendor", async () => {
 });
 
 // --- T3a.2: Blackboard's notification rows (D9, PQ10) ---------------------------------------------------
-// The vendor's layout, as its real notifications carry it: a style block first, then one indented line
-// each for a course id, the course name, a marker ("New gradable item", "Assignment due soon"), the item's
-// title, and "Due <weekday>, <month> <day>, <year> <h:mm:ss> <AM|PM> <zone>". Everything named is invented.
+// The vendor's layout, at the scale its real notifications carry it: a style block of 80 lines and about
+// 1,360 characters, then one indented line each for a numeric id (NNNNN.YYYYTT), the course section code,
+// a marker ("New gradable item", "Assignment due soon"), the item's title and "Due <weekday>, <month>
+// <day>, <year> <h:mm:ss> <AM|PM> <zone>", each field after a run of indented blank lines. In the captures
+// the due (its zone included) ends 1,825 to 1,883 characters into the trimmed text, 1,768 to 1,826 once
+// the scrub shortens the style block's link: inside `mailPromptText`'s 2,000-character cut by less than
+// 240. The fields' strings are invented; only the shape and the lengths are the vendor's.
 
 const BB_COURSE = "300010-QX-210-002";
 const BB_CONTEXT = { knownCourses: ["qx-210", "yy-202"], timeZone: "America/Chicago" };
 const BB_DUE_LINE = "Due Wednesday, November 11, 2026 11:59:00 PM CST";
 
-/** A text/plain part in the vendor's shape: its style block, then each line indented as the vendor does. */
+/** The style block: generic CSS shaped like the vendor's (an import with a link, rules, then indented
+ * blank lines), 80 lines. */
+const BB_STYLE: readonly string[] = (() => {
+  const rule = (
+    selector: string,
+    props: readonly string[],
+  ) => [`  ${selector} {`, ...props.map((p) => `    ${p};`), "  }", ""];
+  const lines = [
+    "@import url(https://fonts.example.invalid/css?family=Open+Sans:400,600,700);",
+    "",
+    "  /* Take care of image borders and formatting in every mail client */",
+    "",
+    ...rule("img", [
+      "max-width: 600px",
+      "outline: none",
+      "text-decoration: none",
+      "-ms-interpolation-mode: bicubic",
+    ]),
+    ...rule("a", ["text-decoration: underline", "border: 0", "outline: none"]),
+    ...rule("a img", ["border: none"]),
+    "  /* General styling, shared by every block below */",
+    "",
+    ...rule("td", ["text-align: center"]),
+    ...rule("body", [
+      "-webkit-font-smoothing: antialiased",
+      "-webkit-text-size-adjust: none",
+      "-ms-text-size-adjust: 100%",
+      "width: 100%",
+      "height: 100%",
+      "background: #ffffff",
+      "font-size: 14px",
+      "font-family: 'Open Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif",
+    ]),
+    "  /* Prevent the mail client from adding extra spacing to its tables. */",
+    ...rule("table,\n  td", ["mso-table-lspace: 0pt !important", "mso-table-rspace: 0pt !important"]),
+    ...rule("#user-defined-description table", [
+      "border: 1px solid #cdcdcd",
+      "border-collapse: collapse",
+      "width: 100%",
+      "table-layout: fixed",
+    ]),
+    ...rule("#user-defined-description td, th", ["border: 1px solid #cdcdcd", "padding: 12px 16px"]),
+    ...rule("#user-defined-description th", ["background: #f8f8f8"]),
+  ].join("\n").split("\n");
+  const indents = [2, 0, 0, 0, 0, 2, 4, 6, 8, 10, 12, 14, 34, 0, 0, 2, 4, 6, 8];
+  return [...lines, ...indents.map((n) => " ".repeat(n))];
+})();
+
+/** The indented blank lines the vendor writes before each field after the first (the course section
+ * code, the marker, the title, the due), and after the due, as the captures have them. */
+const BB_GAPS: readonly (readonly number[])[] = [
+  [8, 8, 8],
+  [8, 6, 4, 2, 0, 0, 0, 0, 2, 4, 6, 8],
+  [8, 6, 4, 2, 0, 0, 0, 2, 4, 6, 8, 8, 0, 8, 10, 12, 12, 14],
+  [14, 12, 0, 12, 24, 12, 14],
+  [14, 12, 22, 8, 6, 4, 2, 0, 0, 0, 0],
+];
+const BB_INDENTS = [10, 10, 10, 16, 16];
+
+/** A text/plain part in the vendor's shape: its style block, then each field indented as the vendor does,
+ * the numeric id and the section code first. */
 function bbText(lines: readonly string[]): string {
-  const style = ["  body {", "    font-size: 14px;", "  }", "  #user-defined-description th {", "  }"];
   const tail = ["Email brought to you by", "Want to change how you receive these emails?"];
-  return [...style, "", ...["90001.300010", BB_COURSE, ...lines, ...tail].map((l) => `          ${l}`)]
-    .join("\n");
+  const fields = ["90001.300010", BB_COURSE, ...lines, ...tail];
+  const out = [...BB_STYLE];
+  fields.forEach((field, i) => {
+    if (i > 0) out.push(...BB_GAPS[Math.min(i - 1, BB_GAPS.length - 1)].map((n) => " ".repeat(n)));
+    out.push(`${" ".repeat(BB_INDENTS[i] ?? 26)}${field}`);
+  });
+  return out.join("\n");
 }
 
 function bbNotice(
@@ -362,6 +431,25 @@ function bbNewItem(title: string, why: string, evidence: string): MailClaim {
   };
 }
 
+/** Where the due line (its zone included) ends in the text as `mailPromptText` trims it, in characters. */
+function bbDueEnd(message: TemplateMessage): number {
+  const text = [...message.text.trim()].join("");
+  const at = text.indexOf(BB_DUE_LINE);
+  return at < 0 ? -1 : [...text.slice(0, at)].length + BB_DUE_LINE.length;
+}
+
+Deno.test("the_blackboard_fixtures_are_at_the_captures_scale", () => {
+  // The captures' style block is 80 lines and 1,360 characters, and their due ends 1,825 to 1,883
+  // characters into the trimmed text. A fixture far shorter could not show a field the cut leaves out.
+  assertEquals(BB_STYLE.length, 80);
+  const style = BB_STYLE.join("\n").length;
+  assert(style >= 1300 && style <= 1420, `the style block is ${style} characters`);
+  for (const message of [BB_NEW_ITEM(), BB_DUE_SOON()]) {
+    const end = bbDueEnd(message);
+    assert(end >= 1800 && end <= 1900, `${message.subject}: the due ends at ${end}`);
+  }
+});
+
 Deno.test("an_aligned_blackboard_new_gradable_item_mail_yields_a_new_item_with_its_resolved_due", () => {
   assertEquals(templateClaims(BB_NEW_ITEM(), BB_CONTEXT), [
     bbNewItem(
@@ -409,6 +497,7 @@ Deno.test("a_blackboard_row_matches_only_the_vendors_address_its_subject_and_its
     ["a reply's subject", { ...BB_NEW_ITEM(), subject: `Re: New gradable item added to ${BB_COURSE}` }],
     ["the due-soon subject on a new-item body", { ...BB_NEW_ITEM(), subject: BB_DUE_SOON().subject }],
     ["no Due line", bbNotice(BB_NEW_ITEM().subject, ["New gradable item", "Problem Set 4: Vectors"])],
+    // A hypothetical marker: no capture has one but the two the rows read.
     ["another marker", bbNotice(BB_DUE_SOON().subject, ["Test due soon", "Quiz 6", BB_DUE_LINE])],
   ];
   for (const [name, message] of misses) assertEquals(templateClaims(message, BB_CONTEXT), null, name);
@@ -472,4 +561,86 @@ Deno.test("a_blackboard_rows_claim_passes_the_handlers_check_against_the_cut_scr
     assertEquals(checked.refused, [], message.subject);
     assertEquals(checked.claims, claims, message.subject);
   }
+});
+
+/** Where the due line ends in the text the model is shown (scrubbed, before the cut), up to "PM": the end
+ * of a short-titled claim's evidence. */
+function bbShownDueEnd(message: TemplateMessage): number {
+  const text = [...scrubForPrompt(message.text.trim())].join("");
+  const at = text.indexOf(BB_DUE_LINE);
+  return [...text.slice(0, at)].length + BB_DUE_LINE.length - " CST".length;
+}
+
+/** The new-gradable-item mail with a deeper run of indentation before its marker (what a longer preamble,
+ * a cross-listed course's extra lines say, would do), so its evidence ends `past` characters after
+ * `mailPromptText`'s cut, or before it when `past` is negative. */
+function bbAtCut(past: number): TemplateMessage {
+  const base = BB_NEW_ITEM();
+  const pad = MAIL_TEXT_CHARS - bbShownDueEnd(base) + past;
+  assert(pad >= 1, `the base mail already ends at ${bbShownDueEnd(base)}`);
+  const lines = base.text.split("\n");
+  lines.splice(lines.findIndex((l) => l.trim() === "New gradable item"), 0, " ".repeat(pad - 1));
+  const message = { ...base, text: lines.join("\n") };
+  assertEquals(bbShownDueEnd(message), MAIL_TEXT_CHARS + past);
+  return message;
+}
+
+/** The handler's check (`mail-process`, §4.7 step 1): the claims against the cut, scrubbed text. */
+function handlersCheck(message: TemplateMessage, claims: MailClaim[]) {
+  return validateMailClaims({ claims }, {
+    from: message.from,
+    subject: scrubForPrompt(message.subject),
+    text: mailPromptText(message.text),
+    date: message.date,
+    ...BB_CONTEXT,
+  }, "template");
+}
+
+Deno.test("a_blackboard_item_whose_evidence_ends_at_the_cut_is_read_and_passes_the_handlers_check", () => {
+  // At 0 the zone falls past the cut; the evidence stops before it, so the claim is still whole.
+  for (const past of [-100, 0]) {
+    const message = bbAtCut(past);
+    const claims = templateClaims(message, BB_CONTEXT);
+    assert(claims !== null, `${past}: a claim`);
+    assertEquals(claims[0].item?.due, "2026-11-11T23:59", `${past}: its due`);
+    const checked = handlersCheck(message, claims);
+    assertEquals(checked.refused, [], `${past}: refused`);
+    assertEquals(checked.claims, claims, `${past}: kept`);
+  }
+});
+
+Deno.test("a_blackboard_item_whose_evidence_runs_past_the_cut_goes_to_the_model", () => {
+  // The model is shown the cut text (`mailPromptText`). A claim whose evidence runs past it would be
+  // refused by the handler's check and the mail deleted unread, so the row makes none and the model is
+  // asked: `mail-process` hands a null to the model.
+  for (const past of [1, 60]) {
+    assertEquals(templateClaims(bbAtCut(past), BB_CONTEXT), null, `${past} past the cut`);
+  }
+});
+
+Deno.test("a_long_title_moves_the_due_past_the_cut_but_never_the_evidence", () => {
+  // The evidence stops 140 characters after the marker, so a title long enough to put the due past the
+  // cut (in the captures' layout, about 175 to 230 characters longer than their titles of 13 to 71) leaves the
+  // evidence inside it. The claim stands, its title cut to 200 characters and its due read from the
+  // whole text, and the handler's check keeps it.
+  const title = `Problem Set 4: Vectors, ${"and the review questions for chapters nine to twelve ".repeat(5)}`
+    .trim();
+  const message = bbNotice(BB_NEW_ITEM().subject, ["New gradable item", title, BB_DUE_LINE]);
+  assert(bbShownDueEnd(message) > MAIL_TEXT_CHARS, `the due ends at ${bbShownDueEnd(message)}`);
+  const claims = templateClaims(message, BB_CONTEXT);
+  assert(claims !== null);
+  assertEquals(claims[0].item?.title, [...title].slice(0, 200).join("").trim());
+  assertEquals(claims[0].item?.due, "2026-11-11T23:59");
+  assertEquals([...claims[0].evidence].length, EVIDENCE_CHARS);
+  assertEquals(handlersCheck(message, claims).claims, claims);
+});
+
+Deno.test("evidence_the_scrub_changes_is_still_a_claim_for_the_handlers_check_to_refuse", () => {
+  // Not the cut: a title naming an address. The row still claims, and the handler's check refuses it, so
+  // no span the scrub would change reaches the device (mail-process's handler_test holds the deletion).
+  const title = "Lab 6 for pat@school.example.invalid";
+  const message = bbNotice(BB_NEW_ITEM().subject, ["New gradable item", title, BB_DUE_LINE]);
+  const claims = templateClaims(message, BB_CONTEXT);
+  assertEquals(claims?.[0].item?.title, title);
+  assertEquals(handlersCheck(message, claims ?? []).claims, []);
 });
