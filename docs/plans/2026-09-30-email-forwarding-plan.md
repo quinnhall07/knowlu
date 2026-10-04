@@ -1741,9 +1741,31 @@ each yield a `new_item` task with the item's title, its due through `judge_due.t
 as the mail shows them, zone left out: `mail-process` passes no timezone, and a zoned due would land on
 the UTC clock), the course by scan, and a fixed effort of 1 hour and importance 3. Not rows: Blackboard
 announcements, course-subject or professor-sent (free text, and one sample itself moves a due: the model
-reads it); `New content`, `New grade and feedback` and `Gradable item is overdue` (not D9 kinds);
-`Submission received` stays `lms_receipts.ts`'s row. **Not covered (no capture):** a due-date-changed
-notification from any vendor, and every Canvas and zyBooks notification; those stay on the model path.
+reads it); `New content`, `New grade and feedback` and `Gradable item is overdue` (not D9 kinds; noise
+rows since the follow-up below); `Submission received` stays `lms_receipts.ts`'s row. **Not covered (no
+capture):** a due-date-changed notification from any vendor, and every Canvas and zyBooks notification;
+those stay on the model path.
+
+**Follow-up (2026-10-04, Quinn's rulings before T18):** (1) **A template's claims are checked against the
+whole text.** `mail-process` validates a `source: template` claim against the text scrubbed but never cut
+(the scrub check on evidence stands, so an address in a title is still refused); only the model's claims
+are held to the 2,000-character cut it was shown. Fix round eeb49ef's `cutOff` (a template claim the cut
+left out went to the model) and its two cut tests are gone; in their place a Blackboard fixture whose
+style block is 400+ characters longer than the captures', its evidence wholly past the cut, still yields
+its claim and passes the handler's check, and `handler_test.ts`
+(`a_template_claim_is_checked_against_the_whole_scrubbed_text_and_a_model_claim_against_the_cut`, with
+the real `model.ts` path) pins both: a past-the-cut template claim queued with no model call, an address
+past the cut refused, a model claim past the cut refused, one inside it queued. (2) **Vendor noise rows.**
+`NOISE_TEMPLATES` (data, between the vendor markers): Blackboard's `New content in <course>`, `New grade
+and feedback for <item> in <course>` and `Gradable item is overdue in <course>`, from
+`do-not-reply@blackboard.com`, matched on the exact address and the whole subject shape only (anchored,
+case-sensitive, no body pattern), `aligned` mail only. Checked as the screen's rule 5 (`screen.ts`,
+`vendor noise`), not as a `TemplateClaim` kind: the screen's noise path is already the no-model, no-charge,
+no-write ack (the row and the object deleted, counted `noise`), where a noise claim would have needed an
+evidence span, a validation bypass and a special case for the all-noise result. A subject any claim row
+reads (the D9 rows, the receipt) is never noise, so an item titled like a noise subject keeps its row;
+announcements (`New announcement in <course>`, a professor's `<course>: <title>`) match no shape and stay
+on the model path.
 
 #### T3b. Validation (`_shared/judge_validate.ts`, the mail region)
 

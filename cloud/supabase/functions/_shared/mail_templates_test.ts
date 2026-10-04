@@ -4,7 +4,7 @@
 // own invented shape. The T3a.2 messages copy only the vendor's layout (its sender, its subject wording,
 // its marker lines); every course, title, name, address and date in them is invented. No real mail is used.
 import { assert, assertEquals } from "@std/assert";
-import { MAIL_TEXT_CHARS, mailPromptText } from "./judge_prompts.ts";
+import { MAIL_TEXT_CHARS } from "./judge_prompts.ts";
 import { validateMailClaims } from "./judge_validate.ts";
 import { RECEIPT_TEMPLATES } from "./lms_receipts.ts";
 import { scrubForPrompt } from "./scrub.ts";
@@ -14,8 +14,10 @@ import {
   type MailClaim,
   type MailTemplate,
   matchCourse,
+  NOISE_TEMPLATES,
   templateClaims,
   type TemplateMessage,
+  templateNoise,
   TEMPLATES,
   VENDOR_DOMAINS,
 } from "./mail_templates.ts";
@@ -192,6 +194,13 @@ Deno.test("every row is data of the right shape, and the receipts are lms_receip
     }
     if (t.claim.kind === "course_info") assert(topics.includes(t.claim.topic));
   }
+  // A noise row is a sender and a whole subject shape, anchored at both ends, and nothing else.
+  for (const n of NOISE_TEMPLATES) {
+    assert(n.label !== "" && n.senders.length > 0, "a noise row needs a label and a sender");
+    for (const s of n.senders) assertEquals(s, s.toLowerCase(), `${n.label}: senders are lower-case`);
+    assert(n.subject.source.startsWith("^") && n.subject.source.endsWith("$"), `${n.subject}: anchored`);
+    assertEquals(n.subject.flags, "", `${n.subject}: no flags (an exact, case-sensitive shape)`);
+  }
   assertEquals(TEMPLATES.length, MAIL_TEMPLATES.length + RECEIPT_TEMPLATES.length);
   for (const r of RECEIPT_TEMPLATES) {
     assert(TEMPLATES.some((t) => t.claim.kind === "receipt" && t.label === r.label && t.body === r.body));
@@ -206,7 +215,7 @@ Deno.test("the_vendor_domains_are_bare_lower_case_domains_and_cover_every_rows_s
     assert(!d.endsWith(".edu"), `"${d}": any .edu is already allowed`);
   }
   // A row's vendor is a vendor: its sender's domain is a vendor domain or a subdomain of one.
-  for (const t of TEMPLATES) {
+  for (const t of [...TEMPLATES, ...NOISE_TEMPLATES]) {
     for (const s of t.senders) {
       const domain = s.split("@")[1] ?? "";
       assert(
@@ -283,7 +292,7 @@ Deno.test("the_code_names_no_vendor", async () => {
     names.add(d);
     names.add(d.split(".").slice(-2)[0]);
   }
-  for (const t of TEMPLATES) {
+  for (const t of [...TEMPLATES, ...NOISE_TEMPLATES]) {
     names.add(t.label.toLowerCase());
     for (const s of t.senders) {
       names.add(s);
@@ -509,55 +518,126 @@ Deno.test("a_blackboard_row_matches_only_the_vendors_address_its_subject_and_its
   assertEquals(templateClaims(named, BB_CONTEXT)?.[0].item?.title, "Problem Set 4: Vectors");
 });
 
-Deno.test("the_vendors_other_notifications_stay_on_the_model_path", () => {
-  // D9's rows are new assignment and due soon; these carry no item a row could read without a guess (an
-  // announcement is free text, and may itself move a due), or are not D9 kinds at all.
-  const others: Array<[string, TemplateMessage]> = [
-    [
-      "overdue",
+/** The vendor's notifications that carry no D9 item: read by no claim row, and vendor noise (the screen's
+ * rule 5, `mail-process`), on sender and subject alone. Their marker lines are invented. */
+const BB_NO_ITEM: ReadonlyArray<[string, () => TemplateMessage]> = [
+  [
+    "overdue",
+    () =>
       bbNotice(`Gradable item is overdue in ${BB_COURSE}`, ["Overdue gradable item", "Quiz 6", BB_DUE_LINE]),
-    ],
-    ["new content", bbNotice(`New content in ${BB_COURSE}`, ["New content", "Week 9 slides.pdf", "View"])],
-    [
-      "a grade",
+  ],
+  [
+    "new content",
+    () => bbNotice(`New content in ${BB_COURSE}`, ["New content", "Week 9 slides.pdf", "View"]),
+  ],
+  [
+    "a grade",
+    () =>
       bbNotice(`New grade and feedback for Quiz 6 in ${BB_COURSE}`, [
         "New grade and feedback",
         "Quiz 6",
         "View grades",
       ]),
-    ],
-    [
-      "an announcement",
+  ],
+];
+
+/** Announcements: free text, and one may itself move a due, so the model reads them. */
+const BB_ANNOUNCEMENTS: ReadonlyArray<[string, () => TemplateMessage]> = [
+  [
+    "an announcement",
+    () =>
       bbNotice(`New announcement in ${BB_COURSE}`, [
         "New announcement",
         "Room change",
         "We now meet in Hall 4.",
       ]),
-    ],
-    [
-      "a professor's announcement",
+  ],
+  [
+    "a professor's announcement",
+    () =>
       bbNotice(`${BB_COURSE}: Problem Set 4 moved`, [
         "New announcement from Pat Example",
         "Problem Set 4 moved",
         "Problem Set 4 is now due November 13 at 11:59 PM.",
       ], { from: `"Pat Example - pat@school.example.invalid" <do-not-reply@blackboard.com>` }),
-    ],
-  ];
-  for (const [name, message] of others) assertEquals(templateClaims(message, BB_CONTEXT), null, name);
+  ],
+];
+
+Deno.test("the_vendors_other_notifications_make_no_template_claim", () => {
+  // D9's rows are new assignment and due soon; these carry no item a row could read without a guess (an
+  // announcement is free text, and may itself move a due), or are not D9 kinds at all.
+  for (const [name, message] of [...BB_NO_ITEM, ...BB_ANNOUNCEMENTS]) {
+    assertEquals(templateClaims(message(), BB_CONTEXT), null, name);
+  }
 });
 
-Deno.test("a_blackboard_rows_claim_passes_the_handlers_check_against_the_cut_scrubbed_text", () => {
-  // `mail-process` holds a template's claims to the model's checks against `mailPromptText` (§4.7 step 1).
+Deno.test("an_aligned_blackboard_notification_with_no_d9_item_is_vendor_noise", () => {
+  for (const [name, message] of BB_NO_ITEM) {
+    assert(templateNoise(message()), name);
+    // A display name is still the vendor's address.
+    assert(templateNoise({ ...message(), from: `"Pat Example" <do-not-reply@blackboard.com>` }), name);
+  }
+});
+
+Deno.test("vendor_noise_is_the_vendors_exact_address_and_subject_shape_on_aligned_mail_only", () => {
+  for (const [name, message] of BB_NO_ITEM) {
+    const misses: Array<[string, TemplateMessage]> = [
+      ["unaligned", { ...message(), authenticity: "unaligned" }],
+      ["another address", { ...message(), from: "do-not-reply@lms.example.invalid" }],
+      ["a subdomain of the vendor", { ...message(), from: "do-not-reply@mail.blackboard.com" }],
+      ["a reply's subject", { ...message(), subject: `Re: ${message().subject}` }],
+      ["a forward's subject", { ...message(), subject: `Fwd: ${message().subject}` }],
+      ["another case", { ...message(), subject: message().subject.toUpperCase() }],
+    ];
+    for (const [miss, m] of misses) assert(!templateNoise(m), `${name}: ${miss}`);
+  }
+});
+
+Deno.test("vendor_noise_never_swallows_a_d9_row_a_receipt_or_an_announcement", () => {
+  const kept: Array<[string, TemplateMessage]> = [
+    ["new gradable item", BB_NEW_ITEM()],
+    ["due soon", BB_DUE_SOON()],
+    ["the receipt", bbNotice("Submission received", ["Assessment submitted", "Quiz 6"])],
+    ...BB_ANNOUNCEMENTS.map(([name, m]): [string, TemplateMessage] => [name, m()]),
+    // A title that reads like a noise subject: a claim row reads the subject first, so it is never noise.
+    [
+      "a due-soon item named like a grade",
+      bbNotice(`New grade and feedback for Quiz 6 is due soon in ${BB_COURSE}`, []),
+    ],
+    [
+      "a due-soon item named like overdue",
+      bbNotice(`Gradable item is overdue in X is due soon in ${BB_COURSE}`, []),
+    ],
+    [
+      "a new item in a course named like content",
+      bbNotice("New gradable item added to New content in X", []),
+    ],
+    // Not the vendor's captured shape: an item named overdue stays on the model path.
+    ["an item-named overdue", bbNotice(`Quiz 6 is overdue in ${BB_COURSE}`, [])],
+    ["a bare marker", bbNotice("New content in ", [])],
+  ];
+  for (const [name, message] of kept) assert(!templateNoise(message), name);
+  // With no claim row, the precedence is the caller's rows: an empty list reads the shape alone.
+  assert(templateNoise(BB_NO_ITEM[0][1](), []));
+});
+
+/** The handler's check (`mail-process`, §4.7 step 3): a template's claims against the whole text, scrubbed
+ * and never cut (Quinn's ruling of 2026-10-04). Only a model's claims are checked against the cut. */
+function handlersCheck(message: TemplateMessage, claims: MailClaim[]) {
+  return validateMailClaims({ claims }, {
+    from: message.from,
+    subject: scrubForPrompt(message.subject),
+    text: scrubForPrompt(message.text.trim()),
+    date: message.date,
+    ...BB_CONTEXT,
+  }, "template");
+}
+
+Deno.test("a_blackboard_rows_claim_passes_the_handlers_check_against_the_scrubbed_text", () => {
   for (const message of [BB_NEW_ITEM(), BB_DUE_SOON()]) {
     const claims = templateClaims(message, BB_CONTEXT);
     assert(claims !== null, message.subject);
-    const checked = validateMailClaims({ claims }, {
-      from: message.from,
-      subject: scrubForPrompt(message.subject),
-      text: mailPromptText(message.text),
-      date: message.date,
-      ...BB_CONTEXT,
-    }, "template");
+    const checked = handlersCheck(message, claims);
     assertEquals(checked.refused, [], message.subject);
     assertEquals(checked.claims, claims, message.subject);
   }
@@ -571,58 +651,38 @@ function bbShownDueEnd(message: TemplateMessage): number {
   return [...text.slice(0, at)].length + BB_DUE_LINE.length - " CST".length;
 }
 
-/** The new-gradable-item mail with a deeper run of indentation before its marker (what a longer preamble,
- * a cross-listed course's extra lines say, would do), so its evidence ends `past` characters after
- * `mailPromptText`'s cut, or before it when `past` is negative. */
-function bbAtCut(past: number): TemplateMessage {
-  const base = BB_NEW_ITEM();
-  const pad = MAIL_TEXT_CHARS - bbShownDueEnd(base) + past;
-  assert(pad >= 1, `the base mail already ends at ${bbShownDueEnd(base)}`);
-  const lines = base.text.split("\n");
-  lines.splice(lines.findIndex((l) => l.trim() === "New gradable item"), 0, " ".repeat(pad - 1));
-  const message = { ...base, text: lines.join("\n") };
-  assertEquals(bbShownDueEnd(message), MAIL_TEXT_CHARS + past);
-  return message;
-}
-
-/** The handler's check (`mail-process`, §4.7 step 1): the claims against the cut, scrubbed text. */
-function handlersCheck(message: TemplateMessage, claims: MailClaim[]) {
-  return validateMailClaims({ claims }, {
-    from: message.from,
-    subject: scrubForPrompt(message.subject),
-    text: mailPromptText(message.text),
-    date: message.date,
-    ...BB_CONTEXT,
-  }, "template");
-}
-
-Deno.test("a_blackboard_item_whose_evidence_ends_at_the_cut_is_read_and_passes_the_handlers_check", () => {
-  // At 0 the zone falls past the cut; the evidence stops before it, so the claim is still whole.
-  for (const past of [-100, 0]) {
-    const message = bbAtCut(past);
-    const claims = templateClaims(message, BB_CONTEXT);
-    assert(claims !== null, `${past}: a claim`);
-    assertEquals(claims[0].item?.due, "2026-11-11T23:59", `${past}: its due`);
-    const checked = handlersCheck(message, claims);
-    assertEquals(checked.refused, [], `${past}: refused`);
-    assertEquals(checked.claims, claims, `${past}: kept`);
+/** `message` with `extra` characters of invented CSS rules added to the end of its style block. */
+function bbLongerStyle(message: TemplateMessage, extra: number): TemplateMessage {
+  const rules: string[] = [];
+  for (let i = 0; rules.join("\n").length < extra; i++) {
+    rules.push(`  .block-${i} td { padding: 0 ${i}px; border-collapse: collapse; }`);
   }
-});
+  const style = BB_STYLE.join("\n");
+  assert(message.text.startsWith(style));
+  return { ...message, text: `${style}\n${rules.join("\n")}${message.text.slice(style.length)}` };
+}
 
-Deno.test("a_blackboard_item_whose_evidence_runs_past_the_cut_goes_to_the_model", () => {
-  // The model is shown the cut text (`mailPromptText`). A claim whose evidence runs past it would be
-  // refused by the handler's check and the mail deleted unread, so the row makes none and the model is
-  // asked: `mail-process` hands a null to the model.
-  for (const past of [1, 60]) {
-    assertEquals(templateClaims(bbAtCut(past), BB_CONTEXT), null, `${past} past the cut`);
+Deno.test("a_blackboard_mail_whose_style_block_is_400_characters_longer_still_yields_its_claim", () => {
+  // The captures' style block runs to about 1,360 characters and their due ends inside the model's 2,000-
+  // character cut by less than 240. A style block 400 or more characters longer puts the whole evidence
+  // past the cut. The row reads the whole text, and the handler checks a template's claims against the
+  // whole scrubbed text, so the claim stands with no model call.
+  for (const base of [BB_NEW_ITEM(), BB_DUE_SOON()]) {
+    const message = bbLongerStyle(base, 420);
+    assert(message.text.length - base.text.length >= 400, base.subject);
+    const evidenceStart = bbShownDueEnd(message) - templateClaims(base, BB_CONTEXT)![0].evidence.length;
+    assert(evidenceStart > MAIL_TEXT_CHARS, `${base.subject}: the evidence starts at ${evidenceStart}`);
+    const claims = templateClaims(message, BB_CONTEXT);
+    assertEquals(claims, templateClaims(base, BB_CONTEXT), base.subject);
+    const checked = handlersCheck(message, claims!);
+    assertEquals(checked.refused, [], base.subject);
+    assertEquals(checked.claims, claims, base.subject);
   }
 });
 
 Deno.test("a_long_title_moves_the_due_past_the_cut_but_never_the_evidence", () => {
-  // The evidence stops 140 characters after the marker, so a title long enough to put the due past the
-  // cut (in the captures' layout, about 175 to 230 characters longer than their titles of 13 to 71) leaves the
-  // evidence inside it. The claim stands, its title cut to 200 characters and its due read from the
-  // whole text, and the handler's check keeps it.
+  // The evidence stops 140 characters after the marker, however long the title. The claim stands, its title
+  // cut to 200 characters and its due read from the whole text, and the handler's check keeps it.
   const title = `Problem Set 4: Vectors, ${"and the review questions for chapters nine to twelve ".repeat(5)}`
     .trim();
   const message = bbNotice(BB_NEW_ITEM().subject, ["New gradable item", title, BB_DUE_LINE]);
@@ -636,11 +696,17 @@ Deno.test("a_long_title_moves_the_due_past_the_cut_but_never_the_evidence", () =
 });
 
 Deno.test("evidence_the_scrub_changes_is_still_a_claim_for_the_handlers_check_to_refuse", () => {
-  // Not the cut: a title naming an address. The row still claims, and the handler's check refuses it, so
-  // no span the scrub would change reaches the device (mail-process's handler_test holds the deletion).
+  // A title naming an address. The row still claims, and the handler's check (scrubbed, uncut) refuses it,
+  // so no span the scrub would change reaches the device, past the cut or not (mail-process's handler_test
+  // holds the deletion).
   const title = "Lab 6 for pat@school.example.invalid";
-  const message = bbNotice(BB_NEW_ITEM().subject, ["New gradable item", title, BB_DUE_LINE]);
-  const claims = templateClaims(message, BB_CONTEXT);
-  assertEquals(claims?.[0].item?.title, title);
-  assertEquals(handlersCheck(message, claims ?? []).claims, []);
+  for (const extra of [0, 420]) {
+    const message = bbLongerStyle(
+      bbNotice(BB_NEW_ITEM().subject, ["New gradable item", title, BB_DUE_LINE]),
+      extra,
+    );
+    const claims = templateClaims(message, BB_CONTEXT);
+    assertEquals(claims?.[0].item?.title, title, `${extra}`);
+    assertEquals(handlersCheck(message, claims ?? []).claims, [], `${extra}`);
+  }
 });

@@ -4,6 +4,8 @@
 // model path (T3e's) is a spy that counts the items it was handed. Every address, domain, course and
 // message here is invented for these tests: no real capture is used.
 import { assert, assertEquals } from "@std/assert";
+import type { JudgeModel, ModelRequest } from "../_shared/judge_anthropic.ts";
+import type { ModelRow } from "../_shared/judge_models.ts";
 import type { RuleTable } from "../_shared/judge_rules.ts";
 import { VENDOR_DOMAINS } from "../_shared/mail_templates.ts";
 import { mailUid, parseHeaders } from "../_shared/mime.ts";
@@ -19,6 +21,7 @@ import {
   type SweepStore,
   type WorkItem,
 } from "./handler.ts";
+import { modelPath } from "./model.ts";
 
 const BUCKET = "mail-test-bucket";
 const NOW = Date.UTC(2026, 9, 2, 15, 0, 0);
@@ -451,4 +454,152 @@ Deno.test("a_second_queue_of_one_message_is_a_no_op_on_mail_claims_unique_key", 
     queue.includes('"resolution=ignore-duplicates,return=minimal"'),
     "a duplicate is ignored, not a 409",
   );
+});
+
+// ---------------------------------------------------------------- the vendor's no-item notifications
+
+const BB = "Blackboard <do-not-reply@blackboard.com>";
+const BB_COURSE = "202640-XX-101-001";
+const BATCH: Partial<WorkItem> = { phase: "backfill", batchId: "b-1" };
+
+Deno.test("a_blackboard_notification_with_no_d9_item_is_noise_with_no_model_call_and_no_write", async () => {
+  await withWorld(async (w) => {
+    // Noise (screen rule 5): the vendor's list header passes the allow-list, then its subject is noise.
+    w.put(mail({ from: BB, subject: `New content in ${BB_COURSE}`, extra: [UNSUB] }));
+    w.put(mail({ from: BB, subject: `New grade and feedback for Lab 5 in ${BB_COURSE}` }));
+    w.put(mail({ from: BB, subject: `Gradable item is overdue in ${BB_COURSE}` }), BATCH);
+    // Each of these goes on: unaligned (a batch item may be), an announcement, a professor's announcement,
+    // and a D9 row's subject a noise shape would also read (its body has no marker, so the model reads it).
+    w.put(mail({ from: BB, subject: `Gradable item is overdue in ${BB_COURSE}` }), {
+      ...BATCH,
+      authenticity: "unaligned",
+    });
+    w.put(mail({ from: BB, subject: `New announcement in ${BB_COURSE}` }));
+    w.put(mail({ from: BB, subject: `${BB_COURSE}: Lab 5 moved` }));
+    w.put(mail({ from: BB, subject: `New grade and feedback for Lab 5 is due soon in ${BB_COURSE}` }));
+    const res = await w.run();
+    const counts = await res.json();
+    assertEquals([counts.noise, counts.model, counts.template, counts.refused], [3, 4, 0, 0]);
+    // Acked as any noise is: the work row and the object deleted, nothing queued, nothing counted, and the
+    // model path (its charge, its allowance, its call) never handed the item.
+    assertEquals(w.store.done, ["1", "2", "3"]);
+    assertEquals(w.modelled.map((m) => m.item.id), ["4", "5", "6", "7"]);
+    assertEquals(w.store.claims, []);
+    assertEquals(w.store.counters, {});
+    assertEquals(keysUnder(w, "work/"), ["work/item-4", "work/item-5", "work/item-6", "work/item-7"]);
+    assertEquals(w.logs.filter((l) => l === "mail-process: noise (vendor noise), deleted").length, 3);
+  });
+});
+
+// ---------------------------------------------------------------- a template's check, and the model's
+
+/** Invented CSS rules, at least `chars` characters: a preamble that puts what follows past the model's cut. */
+const preamble = (chars: number) => {
+  const rules: string[] = [];
+  for (let i = 0; rules.join("\r\n").length < chars; i++) {
+    rules.push(`  .block-${i} td { padding: 0 ${i}px; }`);
+  }
+  return rules.join("\r\n");
+};
+/** A Blackboard new-gradable-item notification in the vendor's layout, after a preamble of `pad`. */
+const bbNewItem = (title: string, pad: number) =>
+  mail({
+    from: BB,
+    subject: `New gradable item added to ${BB_COURSE}`,
+    body: [
+      preamble(pad),
+      "90001.202640",
+      BB_COURSE,
+      "New gradable item",
+      title,
+      "Due Wednesday, October 14, 2026 11:59:00 PM CDT",
+      `View ${MARKER}`,
+    ].join("\r\n"),
+  });
+
+/** The real model path (`model.ts`) with every charge granted and a model that answers `claims`: what
+ * the handler hands it is checked as production checks it. */
+function realModelPath(w: World, claims: Array<Record<string, unknown>>): ModelRequest[] {
+  const asked: ModelRequest[] = [];
+  const yes = () => Promise.resolve(true);
+  const model: JudgeModel = {
+    complete(req) {
+      asked.push(req);
+      return Promise.resolve({ json: { claims }, inputTokens: 300, outputTokens: 50 });
+    },
+  };
+  const row: ModelRow = {
+    kind: "mail_claim",
+    provider: "openrouter",
+    model_id: "test/mail-model",
+    prompt_version: "mail_claim-1",
+    grammar_version: "mail_claim-1",
+    max_tokens: 640,
+    sampling: { temperature: 0 },
+    route: {},
+    precision: "fp8",
+    usd_per_m_in: 0.14,
+    usd_per_m_out: 1.0,
+  };
+  w.deps.model = modelPath({
+    store: w.store,
+    s3: w.deps.s3,
+    now: w.deps.now,
+    charges: {
+      allowance: yes,
+      refundAllowance: yes,
+      daily: yes,
+      refundDaily: yes,
+      withinBudget: yes,
+      allowanceCouldServe: yes,
+      recordTokens: () => Promise.resolve(),
+    },
+    log: { write: () => Promise.resolve("judgment-1") },
+    pin: () => Promise.resolve({ row, model }),
+  });
+  return asked;
+}
+
+Deno.test("a_template_claim_is_checked_against_the_whole_scrubbed_text_and_a_model_claim_against_the_cut", async () => {
+  // Quinn's ruling (2026-10-04): a template reads the whole text, so its claims are checked against the
+  // whole text, scrubbed; only what the model was shown (scrubbed, then cut to 2,000 characters) holds
+  // the model's claims. The scrub check stands on both: an address in a title is refused, cut or not.
+  await withWorld(async (w) => {
+    const asked = realModelPath(w, [{
+      kind: "change",
+      course: "xx-101",
+      target: "Lab 5",
+      field: "due",
+      value: "2026-10-09T12:00",
+      item: null,
+      topic: null,
+      evidence: "Lab 5 is now due Friday at noon",
+      why: "the deadline moved",
+      confidence: 0.9,
+    }]);
+    w.put(bbNewItem("Lab 7: Optics", 2400)); // 1: template, its evidence past the cut: queued
+    w.put(bbNewItem("Lab 8 for jdoe@school.test", 2400)); // 2: template, the scrub changes it: refused
+    const moved = `Lab 5 is now due Friday at noon. ${MARKER}`;
+    w.put(mail({ from: PROF, body: `${preamble(2400)}\r\n${moved}` })); // 3: the model's, past the cut
+    w.put(mail({ from: PROF, body: moved })); // 4: the model's, inside the cut: queued
+    const counts = await (await w.run()).json();
+    assertEquals([counts.template, counts.refused, counts.model], [1, 1, 2]);
+    // Only the two items no template read reached the model, and the long one was shown its cut.
+    assertEquals(asked.length, 2);
+    assert(!asked[0].user.includes("Lab 5 is now due"), "the model was shown past the cut");
+    assert(asked[1].user.includes("Lab 5 is now due"));
+    assertEquals(w.store.claims.map((r) => r.claims.map((c) => [c.kind, c.source, c.course])), [
+      [["new_item", "template", "xx-101"]],
+      [["change", "model", "xx-101"]],
+    ]);
+    assertEquals(w.store.claims[0].claims[0].item, {
+      title: "Lab 7: Optics",
+      due: "2026-10-14T23:59",
+      item_kind: "task",
+      effort_hours: 1,
+      importance: 3,
+    });
+    assertEquals(w.store.done, ["1", "2", "3", "4"]);
+    assertEquals(keysUnder(w, "work/"), []);
+  });
 });

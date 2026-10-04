@@ -9,12 +9,14 @@
  *    attachment is opened.
  * 2. **Screen, no model** (`screen.ts`), in order, the first that fires deciding: bulk or list mail from a
  *    sender off the allow-list; Microsoft's bulk score at 7 or above; the account's promoted email rules
- *    answering noise; the student's own mail outside a batch (From is this mailbox itself; PQ8 (ii) only).
- *    `noise`: the object and the row are deleted.
+ *    answering noise; the student's own mail outside a batch (From is this mailbox itself; PQ8 (ii) only);
+ *    a vendor's notification that carries no D9 item (`NOISE_TEMPLATES`: sender and subject, `aligned`
+ *    only). `noise`: the object and the row are deleted.
  *    A live item that is not `aligned` never reaches the screen: intake deletes those, and one that is here
  *    anyway is deleted and counted `unauthenticated`.
  * 3. **Templates, no model** (`mail_templates.ts`): a row's claims, checked by `validateMailClaims` against
- *    the text as the model would see it (cut and scrubbed). Kept: one `mail_claims` row is queued
+ *    the whole text, scrubbed and never cut (a row reads the whole text; only the model's claims are held to
+ *    the model's 2,000-character cut, Quinn's ruling of 2026-10-04). Kept: one `mail_claims` row is queued
  *    (`template-only`). All refused: `refused`. Either way the object and the row are deleted.
  * 4. Everything else goes to `deps.model`, §4.7 steps 4–6 (T3e, `model.ts`: charge, model, queue, and its
  *    deletes, or a wait to the next UTC day and, at the third attempt, expiry).
@@ -31,7 +33,6 @@
  * token is logged, put in an error or answered; the text is never written anywhere.
  */
 import { fail, json, methodNotAllowed } from "../_shared/http.ts";
-import { mailPromptText } from "../_shared/judge_prompts.ts";
 import type { RuleTable } from "../_shared/judge_rules.ts";
 import { validateMailClaims } from "../_shared/judge_validate.ts";
 import type { Authenticity } from "../_shared/mail_bind.ts";
@@ -282,6 +283,7 @@ async function processItem(
   const message = parse(raw);
   const acct = await account(item.accountId);
   const mailbox = acct.mailboxes.find((m) => m.id === item.addressId) ?? { mailboxHint: null };
+  const templates = deps.templates ?? TEMPLATES;
   const reason = await screen({
     headers: message.headers,
     from: message.from,
@@ -289,25 +291,29 @@ async function processItem(
     phase: item.phase,
     mailbox,
     allow: acct.allow,
+    subject: message.subject,
+    authenticity: item.authenticity,
+    templates,
   }, deps.rules);
   if (reason !== null) {
     await finishItem(item, deps);
     log(`noise (${reason}), deleted`);
     return "noise";
   }
-  const templates = deps.templates ?? TEMPLATES;
   const context = { knownCourses: acct.knownCourses, timeZone: null };
   const fromTemplate = templateClaims({ ...message, authenticity: item.authenticity }, context, templates);
   if (fromTemplate === null) {
     await deps.model({ item, message, knownCourses: acct.knownCourses });
     return "model";
   }
-  // A template's claims meet the model's checks, against the text as the model would see it: an evidence
-  // span the scrub would change (an address, a link, a token) is refused, so none reaches the device.
+  // A template's claims meet the model's checks against the whole text, scrubbed: a row reads the whole
+  // text, so the model's cut never refuses one (Quinn, 2026-10-04), and an evidence span the scrub would
+  // change (an address, a link, a token) is still refused, so none reaches the device. The model path keeps
+  // its claims to the cut it was shown (`model.ts`).
   const checked = validateMailClaims({ claims: fromTemplate }, {
     from: message.from,
     subject: scrubForPrompt(message.subject),
-    text: mailPromptText(message.text),
+    text: scrubForPrompt(message.text.trim()),
     date: message.date,
     ...context,
   }, "template");

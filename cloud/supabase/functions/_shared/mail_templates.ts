@@ -16,23 +16,24 @@
 // its tokens, and none or more than one reads null. A title or evidence carrying a control character, DEL,
 // U+0085 or a line separator makes no claim (T3b refuses those in any claim, §10 R11).
 //
-// **A claim the model's view leaves out is no claim.** `mail-process` holds a template's claims to the
-// model's checks against `mailPromptText` (scrubbed, then cut to `MAIL_TEXT_CHARS`), and a refused claim
-// deletes the mail unread. So a claim whose evidence the scrub keeps but the cut leaves out (a marker
-// within the evidence's 140 characters of the cut, as a longer preamble would put it) reads null here,
-// and the mail goes to the model, which sees the same cut. A long title alone cannot do it: it moves the
-// due past the cut but not the evidence, and its due is read from the whole text. Evidence the scrub
-// changes (an address in a title) stays a claim, for that check to refuse.
+// **A row reads the whole text, and is checked against the whole text.** `mail-process` holds a template's
+// claims to the model's checks against the text scrubbed but never cut (Quinn's ruling of 2026-10-04): the
+// model's 2,000-character cut (`MAIL_TEXT_CHARS`) bounds what a model is shown, not what a row may read, so
+// a vendor's longer preamble never sends its mail to the model. Evidence the scrub changes (an address in a
+// title) stays a claim here, for that check to refuse, and a refused claim deletes the mail unread.
+//
+// **A notification that carries no D9 item is noise** (`NOISE_TEMPLATES`, read by `templateNoise`): the
+// screen's last rule (`mail-process/screen.ts`) deletes it with no model call. It matches on the vendor's
+// exact address and the whole subject shape only, on `aligned` mail only, and never a subject a claim row
+// reads.
 //
 // Nothing here logs, and the claim carries only the title, the resolved due, the course and a verbatim
 // evidence span cut at the end of the last field read, so text after it (a confirmation number) is never
 // in a claim.
 import { resolveDue } from "./judge_due.ts";
-import { mailPromptText } from "./judge_prompts.ts";
 import { MAX_REASON_CHARS, oneLine } from "./judge_validate.ts";
 import { RECEIPT_TEMPLATES } from "./lms_receipts.ts";
 import type { Authenticity } from "./mail_bind.ts";
-import { scrubForPrompt } from "./scrub.ts";
 
 export type Topic = "schedule" | "room" | "instructor" | "office_hours" | "policy" | "other";
 
@@ -57,6 +58,18 @@ export interface MailTemplate {
   claim: TemplateClaim;
   /** The rest of the claim's `why`, after the label: fixed text, never anything of the message. */
   why: string;
+}
+
+/** A vendor's notification that carries no D9 item (§4.7 step 3's kinds): noise, read on the sender and
+ * the subject alone. Never a body pattern: a noise row deletes the mail unread, and the captures it is
+ * written from keep only their subjects. */
+export interface NoiseTemplate {
+  /** The vendor's name (the code-names-no-vendor test reads it). */
+  label: string;
+  /** The vendor's own sending addresses, lower-case, compared exactly against the From address. */
+  senders: readonly string[];
+  /** The whole trimmed subject's shape: anchored at both ends, no flags. */
+  subject: RegExp;
 }
 
 /** §5.1's claim, as amended 2026-10-02 (five kinds). A template's is always `source: template`. */
@@ -115,8 +128,9 @@ const TITLE_CHARS = 200;
  * group stops before the zone: the vendor writes the time on the recipient's clock and stamps its Date
  * in UTC, and `mail-process` has no account timezone, so a zoned due would land on the UTC clock (11:59
  * PM as the next morning). Only these two markers were seen; any other marker has no row.
- * Not rows, by design: announcements (free text, and one may itself move a due: the model reads it),
- * "New content", "New grade and feedback", "Gradable item is overdue" (not D9 kinds). The receipt is
+ * Not rows, by design: announcements, "New announcement in <course>" or a professor's "<course>: <title>"
+ * (free text, and one may itself move a due: the model reads it). "New content", "New grade and feedback"
+ * and "Gradable item is overdue" carry no D9 item: they are `NOISE_TEMPLATES` rows. The receipt is
  * `lms_receipts.ts`'s row. Effort and importance are fixed (D9): an hour, and the default importance 3. */
 const BLACKBOARD_DUE =
   "Due (?<due>(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), [A-Z][a-z]+ \\d{1,2}, \\d{4} " +
@@ -138,6 +152,23 @@ export const MAIL_TEMPLATES: readonly MailTemplate[] = [
     body: new RegExp(`\\bAssignment due soon (?<title>.+?) ${BLACKBOARD_DUE}`),
     claim: { kind: "new_item", item_kind: "task", effort_hours: 1, importance: 3 },
     why: "assignment due soon",
+  },
+];
+
+/** The vendors' notifications that carry no D9 item, from their real subjects (T3a.2's follow-up, Quinn's
+ * 2026-10-04 captures: Blackboard's "New content in <course>", "New grade and feedback for <item> in
+ * <course>" and "Gradable item is overdue in <course>"). Sender and subject shape only. */
+export const NOISE_TEMPLATES: readonly NoiseTemplate[] = [
+  { label: "Blackboard", senders: ["do-not-reply@blackboard.com"], subject: /^New content in \S.*$/ },
+  {
+    label: "Blackboard",
+    senders: ["do-not-reply@blackboard.com"],
+    subject: /^New grade and feedback for \S.* in \S.*$/,
+  },
+  {
+    label: "Blackboard",
+    senders: ["do-not-reply@blackboard.com"],
+    subject: /^Gradable item is overdue in \S.*$/,
   },
 ];
 
@@ -291,16 +322,25 @@ export function templateClaims(
   for (const t of templates) {
     if (!t.senders.includes(sender) || !fresh(t.subject).test(subject)) continue;
     const claim = claimFrom(t, message, folded, context);
-    if (claim !== null) return cutOff(claim, message) ? null : [claim];
+    if (claim !== null) return [claim];
   }
   return null;
 }
 
-/** True when the scrub keeps the claim's evidence but `mailPromptText`'s cut leaves it out: the handler's
- * check would refuse it, so the first matching row makes no claim and the model is asked. */
-function cutOff(claim: MailClaim, message: TemplateMessage): boolean {
-  const fold = (text: string) => text.replace(/\s+/g, " ").trim();
-  const shown = [fold(mailPromptText(message.text)), fold(scrubForPrompt(message.subject))];
-  if (shown.some((text) => text.includes(claim.evidence))) return false;
-  return fold(scrubForPrompt(message.text.trim())).includes(claim.evidence);
+/**
+ * Vendor noise: an `aligned` message from a noise row's exact address whose whole subject is that row's
+ * shape, and which no claim row (`templates`, sender and subject) would read. A claim row's subject wins
+ * so a title that happens to read like a noise subject never loses its item.
+ */
+export function templateNoise(
+  message: Pick<TemplateMessage, "from" | "subject" | "authenticity">,
+  templates: readonly MailTemplate[] = TEMPLATES,
+  noise: readonly NoiseTemplate[] = NOISE_TEMPLATES,
+): boolean {
+  if (message.authenticity !== "aligned") return false;
+  const sender = senderAddress(message.from);
+  const subject = message.subject.trim();
+  const reads = (t: { senders: readonly string[]; subject: RegExp }) =>
+    t.senders.includes(sender) && fresh(t.subject).test(subject);
+  return noise.some(reads) && !templates.some(reads);
 }

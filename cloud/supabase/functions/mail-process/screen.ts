@@ -1,5 +1,5 @@
 /**
- * §4.7 step 2, the screen (email plan T3d): four rules, no model, in order; the first that fires decides
+ * §4.7 step 2, the screen (email plan T3d): five rules, no model, in order; the first that fires decides
  * and the item is `noise`. Nothing here logs, and nothing of the message leaves it but the reason.
  *
  * 1. **Bulk or list mail** (`List-Unsubscribe`, or `Precedence: bulk` or `list`) from a sender off the
@@ -15,12 +15,17 @@
  * 4. **The student's own mail coming back**: From is this mailbox's own address, outside a batch. Only
  *    this mailbox: mail from another of the account's mailboxes passes (PQ8 (ii) only; the device catches
  *    that duplicate, T5.6).
+ * 5. **A vendor's notification that carries no D9 item** (`mail_templates.ts`'s `NOISE_TEMPLATES`, through
+ *    `templateNoise`; T3a.2's follow-up, Quinn's ruling of 2026-10-04): an `aligned` message from the
+ *    vendor's exact address whose whole subject is a noise row's shape, and no claim row's. Sender and
+ *    subject only; an announcement is never one, and goes on to the model.
  */
 import type { RuleTable } from "../_shared/judge_rules.ts";
-import type { MailTemplate } from "../_shared/mail_templates.ts";
+import type { Authenticity } from "../_shared/mail_bind.ts";
+import { type MailTemplate, type NoiseTemplate, templateNoise } from "../_shared/mail_templates.ts";
 import type { MailHeaders } from "../_shared/mime.ts";
 
-export type NoiseReason = "bulk" | "bulk score" | "rule" | "own mail";
+export type NoiseReason = "bulk" | "bulk score" | "rule" | "own mail" | "vendor noise";
 /** Microsoft's bulk complaint level at which mail is noise. */
 export const BULK_SCORE_NOISE = 7;
 /** Google's personal-mail domains: a mailbox there is never the school's (provider-level, no school). */
@@ -40,6 +45,13 @@ export interface ScreenInput {
   mailbox: ScreenMailbox;
   /** `allowDomains` for the account. */
   allow: readonly string[];
+  /** The decoded Subject, and the work item's authenticity word: rule 5 reads `aligned` mail only. */
+  subject: string;
+  authenticity: Authenticity;
+  /** The claim rows (`TEMPLATES` by default): a subject one of them reads is never vendor noise. */
+  templates?: readonly MailTemplate[];
+  /** The vendor noise rows (`NOISE_TEMPLATES` by default). */
+  noise?: readonly NoiseTemplate[];
 }
 
 /** The domain of `local@domain`, lower-cased; null without one. */
@@ -105,7 +117,7 @@ async function ruleSaysNoise(input: ScreenInput, rules: RuleTable): Promise<bool
   }
 }
 
-/** The four rules in order: the first that fires, or null when the item goes on. */
+/** The five rules in order: the first that fires, or null when the item goes on. */
 export async function screen(input: ScreenInput, rules: RuleTable): Promise<NoiseReason | null> {
   const from = input.headers.fromAddress;
   if (bulk(input.headers) && !allowed(from, input.allow)) return "bulk";
@@ -116,5 +128,6 @@ export async function screen(input: ScreenInput, rules: RuleTable): Promise<Nois
   if (input.phase === "live" && from !== null && own !== null && own !== "" && from === own) {
     return "own mail";
   }
+  if (templateNoise(input, input.templates, input.noise)) return "vendor noise";
   return null;
 }
