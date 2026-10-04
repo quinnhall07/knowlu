@@ -4,7 +4,9 @@
 - Branch: `email-forwarding`, HEAD 33be65c
 - Reviewers: `reviewer` (Opus, high) for the non-contract half, `contract-reviewer` (Opus, xhigh) for the contract half
 - Source of round-by-round facts: `.superpowers/sdd/2026-09-30-email-forwarding/progress.md` (rows dated 2026-10-03)
-- Verdict: **Checkpoint D is NOT closed.** It closes when Quinn rules PQ13 (and its fix lands if the ruling is (b)).
+- Verdict (2026-10-03): Checkpoint D was NOT closed; it closed when Quinn ruled PQ13 and its fix landed.
+  **Update 2026-10-04: Checkpoint D is closed on PQ13 (b)** at `c99785f` (`79c1742` plus its fix round; the
+  review and the contract re-check both PASSED). Still open after it: PQ3 (the digest, T16) and T18.
   Everything else is fixed or recorded.
 
 ## Gates
@@ -68,5 +70,8 @@ restated here because no source for them was given to this report; the reviewers
 
 ## Next
 
-Quinn rules PQ13. If (b), the fix lands on `email-engine`, merges into `email-app`, and Checkpoint D is re-run on
-that diff only. If (a), the plan records the loss as accepted and Checkpoint D closes. T18 follows either way.
+2026-10-04: Quinn ruled PQ13 (b). The fix landed on `email-forwarding` directly (the lane was already merged),
+`79c1742` and `c99785f`, and the contract re-check of that diff passed, so Checkpoint D is closed on PQ13 (b).
+Also ruled 2026-10-04: PQ14 (3 slots, then the unmatched notice; built `2adf0c9`), D18 (a release-time check;
+built `5470cd2`), G2 (T15.0 kept), G3 (pace constants provisional, S6 in the pilot), G4 (deletion-refused copy
+kept) and PQ10. T18 follows, with PQ3.

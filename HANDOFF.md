@@ -292,12 +292,14 @@ in this order (gap ids from the vision program note):
    and mail-pass bullets, `cloud/supabase/README.md`'s mail section and AWS runbook). PQ10 is
    ruled (2026-10-04: Blackboard rows built; the model path until the pilot for Canvas, zyBooks and
    due-date-changed; pilot task T3a.3 writes their rows from pilot students' real mail) and Checkpoint B is
-   closed at `0aea395`. Still open: S6 (the M365 test tenant: `MAX_PER_MINUTE` 10 and `MAX_PER_DAY` 600 in `app/src/mail_steps.rs`
-   stay provisional, and T18c keeps a school backfill under 600 until it runs), PQ3 (the digest, T16:
-   Quinn at Checkpoint D), PQ13 (a new due for a task a pending mail card proposes: blocks Checkpoint D
-   and T18) and PQ14 (whether an unanswered `mail-resolve` claim is given up). Q2 is taken as a
-   controller default, 2026-10-03, Quinn to confirm: T15.0's optional `surface` card fields (`from`,
-   `mail_date`, `evidence`) stay (spec §6.1's dated marker). T14 (UA's mail fields) is not built. T18
+   closed at `0aea395`. **Resolved 2026-10-04:** PQ13 (b), due-aware, built (`79c1742`, `c99785f`), so
+   Checkpoint D is closed on it; PQ14, an unanswered `mail-resolve` claim held 3 slots then given up with
+   the unmatched notice, built (`2adf0c9`); D18, the release-time check, built (`5470cd2`); Q2/G2 signed
+   (T15.0's `surface` fields stay); G3 (the pace constants stay provisional, S6 runs in the pilot); G4
+   (the deletion-refused copy stays as written). Still open: PQ10's Canvas and zyBooks templates, pending
+   Quinn's forwarded sample emails (T3a.3); S6 (`MAX_PER_MINUTE` 10 and `MAX_PER_DAY` 600 in
+   `app/src/mail_steps.rs` stay provisional, and T18c keeps a school backfill under 600 until it runs);
+   PQ3 (the digest, T16). T14 (UA's mail fields) is not built. T18
    needs Quinn: the staging secrets, the sign-ins at the machine (S1-S3) and the merge word.
 3. **M2, body and profile editing** (P5): a body write through `write`, the drawer's body editor, and
    profile editing (interests, preferences). Sized M/L, not small: the engine can only append a body
@@ -442,7 +444,7 @@ a spend is asked at the time.
 | MVP | **Sign the Gmail-connect and M2 specs** (one sitting), later the events spec | Each after its research and spec review. W1's research left 13 questions for these specs; they are asked inside the specs, not separately. |
 | MVP | **Merge M1**, then **the founder's grades proof** at the machine | Merge on Task 9's whole-branch review and green CI; `20260929000100` then goes to staging. Bump #1 owes the privacy page, its date, `PRIVACY_VERSION` and `PRIVACY_BUMP_1`; The proof runs in the Blackboard sign-in window on a dev build of `main` and waits on no policy read (A13; §3's MVP lane 1). |
 | Review | **A13's review at the 20th paying account** | Ruling 12's policy-read gate is suspended until then (A13); the controller checks a count-only query at each milestone and asks. "Record UA's university-policy read" has left the MVP queue. |
-| MVP | **Email forwarding: Checkpoint D, then T18** | Quinn: (1) PQ3, whether to build the digest (T16); (2) PQ13 and PQ14; (3) confirm Q2's controller default (the three optional `surface` fields); (4) the staging secrets, from their own shell (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`; the controller generates `MAIL_ADDRESS_KEY` and `MAIL_ENC_KEY` blind), the sign-ins at the machine, and the merge word. Also open: S6 (M365 test tenant; pace constants provisional). The runbook is `cloud/supabase/README.md`'s mail section. |
+| MVP | **Email forwarding: Checkpoint D, then T18** | Quinn: (1) PQ3, whether to build the digest (T16); (2) PQ10's templates, pending Quinn's forwarded sample emails (PQ13, PQ14, D18 and Q2 resolved 2026-10-04); (3) the staging secrets, from their own shell (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`; the controller generates `MAIL_ADDRESS_KEY` and `MAIL_ENC_KEY` blind), the sign-ins at the machine, and the merge word. Also open: S6 (M365 test tenant; pace constants provisional). The runbook is `cloud/supabase/README.md`'s mail section. |
 | MVP | **Mark each P6 item do or cut** | The four items are in §3's MVP lane 5, sized as a list first. |
 | MVP | **Roll staging's `OPENROUTER_API_KEY`** | Staging's secret holds Quinn's temporary key (set 2026-10-02, after the old key of 09-16 proved dead and every event judgment failed). When that key is rolled, update staging again, and the GitHub secret the eval gate reads too if it is still the old key. |
 | MVP | **Say "MVP reached"** | Once the parity audit re-run shows no open row and the grades proof has passed. |
