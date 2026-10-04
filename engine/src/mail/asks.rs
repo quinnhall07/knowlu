@@ -9,7 +9,8 @@
 //! nothing and its message is held, so it is asked again next slot. A course the service refuses for
 //! itself (a 4xx other than 401, 402, 403, 408 and 429) is skipped and the next course is still asked; any
 //! other failure (session, entitlement, rate, 5xx, no network, no time) ends the asking for the pass.
-//! There is no give-up path: a claim the service never answers stays held (plan ledger, T5.5 row).
+//! A claim the service never answers is held for [`super::held::GIVE_UP_SLOTS`] slots, then given up on
+//! (`held`, PQ14): the pass stores "none" on it and the plan's unmatched notice does the rest.
 
 use std::collections::BTreeMap;
 
@@ -23,6 +24,9 @@ pub(super) struct Unsettled {
     pub ended: Option<&'static str>,
     /// A course the service refused for itself and was skipped: the courses after it were still asked.
     pub refused: Option<&'static str>,
+    /// The claims a call was made about, answered or not: the ones that count as a slot (PQ14). A claim
+    /// whose course the asking never reached is not in it.
+    pub tried: Vec<ClaimRef>,
 }
 
 /// A refusal of one batch (a 4xx that is not about the session, the entitlement, the rate or the clock):
@@ -53,6 +57,7 @@ pub(super) fn settle(
             unsettled.ended = Some("out of time");
             return unsettled;
         }
+        unsettled.tried.extend(claims.iter().cloned());
         let batch = ResolveBatch { candidates: candidates(view, &course), course, claims };
         let answers = match cloudmodel::resolve_mail(client, &batch) {
             Ok(answers) => answers,

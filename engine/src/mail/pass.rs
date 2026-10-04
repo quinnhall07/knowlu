@@ -14,7 +14,9 @@
 //! acknowledged, so it comes back, and a claim written before is `AlreadyApplied` when it does. The server
 //! returns an undelivered claim on every later pull, so a held message that comes back in the same pass is
 //! skipped (not planned, written or counted again), and a page of nothing but held messages ends the pass:
-//! it would be returned unchanged until acked.
+//! it would be returned unchanged until acked. A claim `mail-resolve` never answers is held for at most
+//! three slots ([`super::held`], PQ14): at the third the pass stores "none" on it, so the plan opens the
+//! unmatched notice, and the message is acked and the drain goes on.
 //!
 //! **The line.** `mail: N new, M changed, K proposed, J notices, P past, S superseded, U unmatched`
 //! (§4.8 step 7), printed when a mailbox is connected or a message arrived, and never otherwise. A
@@ -31,8 +33,9 @@ use crate::cloudmodel::{self, CloudClient, MailPull, MailboxReport, CALL_TIMEOUT
 use crate::enrich::{Options, PULL_ROUNDS};
 use crate::ingest;
 use crate::journal::Journal;
-use crate::mailreconcile::{self, resolve, Action, ClaimRef, Message, NoticeAbout, Phase, SkipReason};
+use crate::mailreconcile::{self, resolve, Action, ClaimRef, Message, NoticeAbout, Phase, Resolution, SkipReason};
 
+use super::held::{Held, GIVE_UP_SLOTS};
 use super::{asks, heads, view, Source, Why, Wrote, Writer};
 
 /// The pass over the vault's own clock (`config/ingest.yaml`'s zone, else the machine's), which is the
@@ -59,6 +62,10 @@ pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budg
         held: BTreeSet::new(),
         asking_failed: None,
         asking_refused: None,
+        slots: Held::load(vault),
+        struck: BTreeSet::new(),
+        gave_up: 0,
+        waiting: false,
     };
     let (mut ack, mut round, mut batch, mut more) = (Vec::<String>::new(), 0usize, false, false);
     let mut failure: Option<String> = None;
@@ -100,8 +107,13 @@ pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budg
     let held = mailreconcile::proposal(today, crate::commitments::vault_day(vault, today));
     let mut writer = Writer::new(vault, opts.via, opts.run_id, &mut journal, today, held);
     lines.extend(heads::keep(&mut writer, vault, &boxes, &today.to_string()));
-    if let Some(why) = run.asking_failed.or(run.asking_refused) {
+    // Only when a claim still waits: one given up on is a notice, not "left for the next slot".
+    if let Some(why) = run.asking_failed.or(run.asking_refused).filter(|_| run.waiting) {
         lines.push(format!("mail: could not ask which item ({why}); left for the next slot"));
+    }
+    if run.gave_up > 0 {
+        let s = if run.gave_up == 1 { "" } else { "s" };
+        lines.push(format!("mail: gave up asking which item for {} claim{s} after {GIVE_UP_SLOTS} slots; each is an unmatched notice", run.gave_up));
     }
     if more && failure.is_none() {
         lines.push("mail: more is waiting, left for the next slot".to_string());
@@ -133,6 +145,14 @@ struct Run<'a> {
     /// A course the service refused for itself was skipped: later courses were still asked, and its
     /// claims wait for the next slot. Named like `asking_failed`.
     asking_refused: Option<&'static str>,
+    /// Slots each unanswered claim has been held, on disk (PQ14, [`super::held`]).
+    slots: Held,
+    /// The claims already counted as a slot this pass: a claim is counted once however many rounds run.
+    struck: BTreeSet<String>,
+    /// Claims given up on this pass (the line names them).
+    gave_up: usize,
+    /// Some claim still waits on `mail-resolve` after this pass's asking.
+    waiting: bool,
 }
 
 impl Run<'_> {
@@ -179,6 +199,30 @@ impl Run<'_> {
         false
     }
 
+    /// PQ14: count one slot against each claim that was `tried` and is still unanswered, and give up on
+    /// the one that reaches [`GIVE_UP_SLOTS`] by storing "none" on it (the plan then opens D12's
+    /// unmatched notice and the message is acked). An answered claim, and one no longer asked, drops its
+    /// count. A claim `asked` but not `tried` (the asking ended before it) is held without a count.
+    fn count_slots(&mut self, fresh: &mut [Message], asked: &[ClaimRef], tried: &[ClaimRef]) {
+        for message in fresh.iter_mut() {
+            for index in 0..message.claims.len() {
+                let at = ClaimRef { message: message.uid.clone(), index };
+                let uid = at.uid();
+                let claim = &mut message.claims[index];
+                if !asked.contains(&at) || claim.resolution.is_some() {
+                    self.slots.clear(&uid);
+                } else if tried.contains(&at) && self.struck.insert(uid.clone()) {
+                    if self.slots.strike(&uid) >= GIVE_UP_SLOTS {
+                        claim.resolution = Some(Resolution { target_id: None });
+                        self.slots.clear(&uid);
+                        self.gave_up += 1;
+                    }
+                }
+            }
+        }
+        self.slots.save();
+    }
+
     /// Plan `fresh` against the vault now and write the actions in order. Returns the uids of the
     /// messages that must not be acknowledged yet.
     fn write_plan(&mut self, fresh: &[Message], pulled: &MailPull, journal: &mut Journal) -> BTreeSet<String> {
@@ -188,15 +232,19 @@ impl Run<'_> {
         // before the plan reads them. What stays ambiguous (unanswered, or asking failed) waits.
         let mut fresh = fresh.to_vec();
         let asked: Vec<ClaimRef> = resolve::to_ask(&view, &fresh, self.today, vault_day).into_iter().map(|(at, _)| at).collect();
+        let mut tried: Vec<ClaimRef> = Vec::new();
         if !asked.is_empty() && self.asking_failed.is_none() {
             let (started, budget) = (self.started, self.budget);
             let unsettled = asks::settle(self.client, &view, &mut fresh, &asked, || started.elapsed() + CALL_TIMEOUT <= budget);
             self.asking_failed = unsettled.ended;
             self.asking_refused = self.asking_refused.or(unsettled.refused);
+            tried = unsettled.tried;
         }
+        self.count_slots(&mut fresh, &asked, &tried);
         let fresh = &fresh[..];
         let waiting: BTreeSet<ClaimRef> =
             resolve::to_ask(&view, fresh, self.today, vault_day).into_iter().map(|(at, _)| at).collect();
+        self.waiting |= !waiting.is_empty();
         let actions = mailreconcile::plan(&view, fresh, self.today, vault_day);
         let proposal = mailreconcile::proposal(self.today, vault_day);
         let mut writer = Writer::new(self.vault, self.opts.via, self.opts.run_id, journal, self.today, proposal);

@@ -130,12 +130,16 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   card or direct is decided), asks `/mail-resolve` once per course for ambiguous claims, and writes as
   `agent:knowlu.mail` through `write`, journal first. A message is acknowledged on the next pull, and
   recorded in `state/ingest-seen.md` under the fixed title `(email)`, only when every claim of it was
-  written or deliberately skipped; a held one comes back. No mail text, address or session enters a
+  written or deliberately skipped; a held one comes back. A claim `/mail-resolve` never answers (no
+  answer, or the call fails) is held for at most 3 slots, counted once per pass that asked, in
+  `state/mail-resolve-held.json`; at the 3rd its message is acked and D12's "Knowlu could not match this
+  to an item" notice is opened, keyed by the claim's own uid (PQ14). No mail text, address or session enters a
   log, the journal or telemetry. **Run line**, printed when a mailbox is connected or a message arrived
   and never otherwise: `mail: N new, M changed, K proposed, J notices, P past, S superseded, U
   unmatched`, with `, X not written` and `, Y unreadable` on the end when non-zero. Other lines are
   named failures: `mail: skipped (<why>)`, `mail: N written but not acknowledged (<why>); they will
-  come back next slot`, `mail: could not ask which item (<why>); left for the next slot`, `mail: more
+  come back next slot`, `mail: could not ask which item (<why>); left for the next slot`, `mail: gave
+  up asking which item for N claim(s) after 3 slots; each is an unmatched notice`, `mail: more
   is waiting, left for the next slot`, `mail: mailbox <id> is <state>` (a heads-up item for a mailbox
   that stopped delivering). A mail card on the vault's first day is filed `snoozed` to day 2 and
   `pending` from then on (`mailreconcile::proposal` over `commitments::vault_day`); a due that came

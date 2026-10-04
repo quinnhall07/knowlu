@@ -1062,3 +1062,161 @@ fn judge_runs_the_mail_pass_after_the_gmail_pull_and_exits_zero_on_every_mail_fa
         let _ = std::fs::remove_dir_all(&vault);
     }
 }
+
+// ---------------------------------------------------------------------------
+// PQ14 (Quinn, 2026-10-04): a claim `mail-resolve` never answers is held three slots, then given up
+// ---------------------------------------------------------------------------
+
+/// `state/mail-resolve-held.json`: each claim uid still unanswered, with the slots that asked and got
+/// no answer. `Null` when the file is absent.
+fn held_slots(vault: &Path) -> Value {
+    std::fs::read_to_string(vault.join("state/mail-resolve-held.json"))
+        .map(|text| serde_json::from_str(&text).expect("the held-slot file is JSON"))
+        .unwrap_or(Value::Null)
+}
+
+fn lab_claim_row(uid: &str, today: Date) -> Value {
+    row(uid, T1, "live", vec![change("Lab", "CS 101", &ahead(today, 9))])
+}
+
+const GAVE_UP: &str = "mail: gave up asking which item for 1 claim after 3 slots; each is an unmatched notice";
+
+/// A scripted `mail-resolve` that fails (503) and a pull that returns `pulled` every time.
+fn resolve_down(pulled: &Value) -> Loop {
+    let body = knowlu_engine::ledger::dumps_value(pulled);
+    serve(move |request, _| {
+        if request.starts_with("POST /functions/v1/mail-resolve ") {
+            (503, r#"{"error":"down"}"#.to_string())
+        } else {
+            (200, body.clone())
+        }
+    })
+}
+
+/// Held at most 3 slots: the first two slots hold the message (nothing acked, nothing written, one more
+/// slot counted); the third asks once more, gets no answer, acks the message and opens the unmatched
+/// notice keyed by the claim's own uid. The run line names the give-up.
+#[test]
+fn an_unanswered_claim_is_held_twice_and_given_up_on_the_third_slot() {
+    let vault = scratch("giveup");
+    two_labs(&vault);
+    let today = vault_today(&vault);
+    for (slot, count) in [(1, 1), (2, 2)] {
+        let mut server = pulls(vec![pull(vec![lab_claim_row("mail:aa11", today)], json!([]), false)]);
+        let lines = run(&vault, &server, today);
+        assert!(lines[0].ends_with("0 unmatched"), "slot {slot}: {lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("gave up")), "slot {slot}: {lines:?}");
+        assert!(!knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"), "slot {slot}: held");
+        assert!(open_items(&vault, "mail:aa11:0").is_empty(), "slot {slot}: no notice yet");
+        assert_eq!(held_slots(&vault), json!({ "mail:aa11:0": count }), "slot {slot}");
+        assert_eq!(server.calls("mail-resolve").len(), 1, "slot {slot}");
+    }
+    let mut server = pulls(vec![pull(vec![lab_claim_row("mail:aa11", today)], json!([]), false)]);
+    let lines = run(&vault, &server, today);
+    assert_eq!(lines[0], "mail: 0 new, 0 changed, 0 proposed, 0 notices, 0 past, 0 superseded, 1 unmatched", "{lines:?}");
+    assert!(lines.iter().any(|l| l == GAVE_UP), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.contains("could not ask")), "nothing is left for the next slot: {lines:?}");
+    let notices = open_items(&vault, "mail:aa11:0");
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].2, "agent:knowlu.mail");
+    assert_eq!(field(&vault, &notices[0].0, "title").unwrap(), "Knowlu could not match this to an item");
+    assert_eq!(field(&vault, "tasks/lab-5.md", "due").unwrap(), "2030-01-01", "never a guess");
+    assert_eq!(field(&vault, "tasks/lab-6.md", "due").unwrap(), "2030-01-01", "never a guess");
+    assert!(knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"), "given up on, so recorded");
+    assert_eq!(server.calls("mail-resolve").len(), 1, "the third slot still asked once");
+    assert_eq!(server.ack_of(1), ["mail:aa11"], "and acked");
+    assert_eq!(held_slots(&vault), Value::Null, "nothing left to count");
+    // The fourth slot: the server no longer returns it, and nothing is asked or opened again.
+    let mut server = pulls(vec![]);
+    let lines = run(&vault, &server, today);
+    assert!(!lines.iter().any(|l| l.contains("gave up")), "{lines:?}");
+    assert!(server.calls("mail-resolve").is_empty());
+    assert_eq!(open_items(&vault, "mail:aa11:0").len(), 1);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// An answer on slot 2 resolves the claim and drops only its own count: a second claim that stays
+/// unanswered keeps its two slots and is given up on at its own third.
+#[test]
+fn an_answer_on_slot_two_resolves_and_leaves_the_other_claims_count() {
+    let vault = scratch("giveup-answer");
+    two_labs(&vault);
+    let today = vault_today(&vault);
+    let both = || pull(vec![lab_claim_row("mail:aa11", today), lab_claim_row("mail:bb22", today)], json!([]), false);
+    let lines = run(&vault, &pulls(vec![both()]), today);
+    assert!(lines[0].ends_with("0 unmatched"), "{lines:?}");
+    assert_eq!(held_slots(&vault), json!({ "mail:aa11:0": 1, "mail:bb22:0": 1 }));
+    let lab_6 = field(&vault, "tasks/lab-6.md", "id").unwrap();
+    let server = resolving(vec![both()], move |body| {
+        let answers: Vec<Value> = body["claims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["uid"] == "mail:aa11")
+            .map(|c| json!({ "uid": c["uid"], "index": c["index"], "target_id": lab_6 }))
+            .collect();
+        json!({ "answers": answers })
+    });
+    let lines = run(&vault, &server, today);
+    assert_eq!(lines[0], "mail: 0 new, 0 changed, 1 proposed, 0 notices, 0 past, 0 superseded, 0 unmatched", "{lines:?}");
+    assert_eq!(files(&vault, "approvals").len(), 1, "the answer landed as the one card for Lab 6");
+    assert!(knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"));
+    assert_eq!(held_slots(&vault), json!({ "mail:bb22:0": 2 }), "only the answered claim's count is dropped");
+    let lines = run(&vault, &pulls(vec![pull(vec![lab_claim_row("mail:bb22", today)], json!([]), false)]), today);
+    assert!(lines.iter().any(|l| l == GAVE_UP), "{lines:?}");
+    assert_eq!(open_items(&vault, "mail:bb22:0").len(), 1);
+    assert!(open_items(&vault, "mail:aa11:0").is_empty(), "the answered claim opens no notice");
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// The count is generated state on disk, so a restart (a new process, nothing in memory) carries it: a
+/// file already at two slots gives up on the next failed one; a call that fails (503) counts as no answer.
+#[test]
+fn the_count_survives_a_restart_and_a_failed_call_counts() {
+    let vault = scratch("giveup-restart");
+    two_labs(&vault);
+    let today = vault_today(&vault);
+    std::fs::write(vault.join("state/mail-resolve-held.json"), "{\"mail:aa11:0\": 2}\n").unwrap();
+    let mut server = resolve_down(&pull(vec![lab_claim_row("mail:aa11", today)], json!([]), false));
+    let lines = run(&vault, &server, today);
+    assert_eq!(server.calls("mail-resolve").len(), 1);
+    assert!(lines.iter().any(|l| l == GAVE_UP), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.contains("could not ask")), "{lines:?}");
+    assert_eq!(open_items(&vault, "mail:aa11:0").len(), 1);
+    assert!(knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"));
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// A claim the asking never reached (a failed call ended it earlier in the pass) was not tried, so it
+/// is not counted.
+#[test]
+fn a_claim_never_asked_this_pass_is_not_counted() {
+    let vault = scratch("giveup-untried");
+    labs_and_quizzes(&vault);
+    let today = vault_today(&vault);
+    let server = resolve_down(&pull(vec![ambiguous_message(today)], json!([]), false));
+    let lines = run(&vault, &server, today);
+    assert!(lines.iter().any(|l| l.contains("could not ask which item")), "the claims still wait: {lines:?}");
+    assert_eq!(held_slots(&vault), json!({ "mail:aa11:0": 1, "mail:aa11:1": 1 }), "CS 101's claims were tried; MATH 220's were not");
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// The drain is unblocked: a page of one held message ends the drain (above), but once the claim is
+/// given up the message is acked and the next page is read in the same pass.
+#[test]
+fn the_drain_continues_past_a_claim_given_up_on() {
+    let vault = scratch("giveup-drain");
+    two_labs(&vault);
+    let today = vault_today(&vault);
+    std::fs::write(vault.join("state/mail-resolve-held.json"), "{\"mail:aa11:0\": 2}\n").unwrap();
+    let held = row("mail:aa11", T1, "backfill", vec![change("Lab", "CS 101", &ahead(today, 9))]);
+    let next = row("mail:cc33", T2, "backfill", vec![course_info("CS 101")]);
+    let mut server = pulls(vec![pull(vec![held], json!([]), true), pull(vec![next], json!([]), false)]);
+    let lines = run(&vault, &server, today);
+    assert_eq!(lines[0], "mail: 0 new, 0 changed, 0 proposed, 1 notices, 0 past, 0 superseded, 1 unmatched", "{lines:?}");
+    assert!(!lines.iter().any(|l| l.contains("more is waiting")), "{lines:?}");
+    let seen = knowlu_engine::ingest::load_seen(&vault);
+    assert!(seen.contains("mail:aa11") && seen.contains("mail:cc33"), "{seen:?}");
+    assert_eq!(server.ack_of(1), ["mail:aa11"]);
+    let _ = std::fs::remove_dir_all(&vault);
+}
