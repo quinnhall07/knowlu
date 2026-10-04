@@ -433,11 +433,17 @@ Per work item, within the worker's wall-clock budget, oldest arrival first:
    - Microsoft's bulk score, where the header exists, at 7 or above is `noise`;
    - the account's promoted rules (`judge_rules.ts`, tier 2) answering noise;
    - the student's own mail coming back (From is the mailbox itself, outside a batch) is `noise`.
+   *(amended 2026-10-04, Quinn, before T18: a fifth rule, `vendor noise`: an `aligned` message from a
+   vendor's exact sending address whose whole subject matches a `NOISE_TEMPLATES` row (Blackboard's
+   "New content in", "New grade and feedback for … in" and "Gradable item is overdue in") is `noise`,
+   on sender and subject alone; a subject any step-3 claim row reads is never vendor noise.)*
 3. **Templates, no model.** Data rows beside `RECEIPT_TEMPLATES` for the LMS and homework platforms'
    notification mail (new assignment, due soon, due date changed, announcement, submission received),
    each matched on the vendor's exact sending address, its subject and its body, and **only when the
    item is `aligned`** (§4.6 step 6) for the vendor's domain. A template's claims are marked
-   `source: template` (§4.9 says what that changes). Due dates go through `judge_due.ts`; course codes are matched against the known courses.
+   `source: template` (§4.9 says what that changes). *(amended 2026-10-04, Quinn: a template reads the whole
+   text, and its claims are validated against that text scrubbed but never cut; the 2,000-character
+   cut is the model's alone. A vendor notification that carries no item is screened out by step 2's rule 5.)* Due dates go through `judge_due.ts`; course codes are matched against the known courses.
    Adding a vendor is a data row; the code never names one.
 4. **The small model** for everything left: kind `mail_claim`, pinned in `models` like every kind
    (prompt and grammar `mail-1`), with the subject, sender, date, text, the account's known courses

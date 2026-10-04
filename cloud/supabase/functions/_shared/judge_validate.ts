@@ -212,8 +212,9 @@ const ITEM_KINDS = ["task", "exam", "event"] as const;
 export interface MailValidateContext {
   /** The From header as parsed, display name and address. A line break in it refuses the whole reply. */
   from: string;
-  /** The subject and the text the model saw (§4.7 step 1: cut and scrubbed), so the evidence is checked
-   * against what was read. Evidence must lie inside one of the two, never across them. */
+  /** The subject and the text the claim is checked against: cut and scrubbed for the model (§4.7 step 1),
+   * scrubbed only for a template (§4.7 step 3), so the evidence is checked against what was read.
+   * Evidence must lie inside one of the two, never across them. */
   subject: string;
   text: string;
   /** The Date header: `judge_due.ts`'s reference. */
