@@ -1125,7 +1125,7 @@ fn an_unanswered_claim_is_held_twice_and_given_up_on_the_third_slot() {
     assert!(knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"), "given up on, so recorded");
     assert_eq!(server.calls("mail-resolve").len(), 1, "the third slot still asked once");
     assert_eq!(server.ack_of(1), ["mail:aa11"], "and acked");
-    assert_eq!(held_slots(&vault), Value::Null, "nothing left to count");
+    assert_eq!(held_slots(&vault), Value::Null, "acked, so nothing left to count");
     // The fourth slot: the server no longer returns it, and nothing is asked or opened again.
     let mut server = pulls(vec![]);
     let lines = run(&vault, &server, today);
@@ -1218,5 +1218,44 @@ fn the_drain_continues_past_a_claim_given_up_on() {
     let seen = knowlu_engine::ingest::load_seen(&vault);
     assert!(seen.contains("mail:aa11") && seen.contains("mail:cc33"), "{seen:?}");
     assert_eq!(server.ack_of(1), ["mail:aa11"]);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// The give-up is durable until the message is acked (PQ14 fix round): when the ack of the give-up slot
+/// fails the marker stays at the cap, and a message that comes back with no record of having been
+/// recorded (the crash window between the notice and the seen ledger) is given up on again without being
+/// asked, with no second notice. Once its ack goes through the marker is dropped.
+#[test]
+fn a_give_up_stays_marked_until_the_message_is_acked() {
+    let vault = scratch("giveup-durable");
+    two_labs(&vault);
+    let today = vault_today(&vault);
+    std::fs::write(vault.join("state/mail-resolve-held.json"), "{\"mail:aa11:0\": 2}\n").unwrap();
+    let body = knowlu_engine::ledger::dumps_value(&pull(vec![lab_claim_row("mail:aa11", today)], json!([]), false));
+    let pulled = AtomicUsize::new(0);
+    let mut server = serve(move |request, _| {
+        if request.starts_with("POST /functions/v1/mail-resolve ") {
+            (200, r#"{"answers":[]}"#.to_string())
+        } else if pulled.fetch_add(1, Ordering::SeqCst) == 0 {
+            (200, body.clone())
+        } else {
+            (503, r#"{"error":"down"}"#.to_string())
+        }
+    });
+    let lines = run(&vault, &server, today);
+    assert!(lines.iter().any(|l| l == GAVE_UP), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("written but not acknowledged")), "{lines:?}");
+    assert_eq!(server.calls("mail-resolve").len(), 1);
+    assert_eq!(held_slots(&vault), json!({ "mail:aa11:0": 3 }), "given up on, but not yet acked: the marker stays");
+    assert_eq!(open_items(&vault, "mail:aa11:0").len(), 1);
+    // The record that it was seen is lost; the message comes back.
+    let _ = std::fs::remove_file(vault.join("state/ingest-seen.md"));
+    let mut server = pulls(vec![pull(vec![lab_claim_row("mail:aa11", today)], json!([]), false)]);
+    let lines = run(&vault, &server, today);
+    assert!(lines.iter().any(|l| l == GAVE_UP), "{lines:?}");
+    assert!(server.calls("mail-resolve").is_empty(), "a claim already given up on is not asked again");
+    assert_eq!(open_items(&vault, "mail:aa11:0").len(), 1, "one notice, never two");
+    assert_eq!(server.ack_of(1), ["mail:aa11"], "and acked this time");
+    assert_eq!(held_slots(&vault), Value::Null, "acked, so the marker goes");
     let _ = std::fs::remove_dir_all(&vault);
 }

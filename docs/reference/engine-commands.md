@@ -133,7 +133,7 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   written or deliberately skipped; a held one comes back. A claim `/mail-resolve` never answers (no
   answer, or the call fails) is held for at most 3 slots, counted once per pass that asked, in
   `state/mail-resolve-held.json`; at the 3rd its message is acked and D12's "Knowlu could not match this
-  to an item" notice is opened, keyed by the claim's own uid (PQ14). No mail text, address or session enters a
+  to an item" notice is opened, keyed by the claim's own uid (PQ14); the entry stays at 3 until the message is acked, so a message that returns first is given up on again without being asked. No mail text, address or session enters a
   log, the journal or telemetry. **Run line**, printed when a mailbox is connected or a message arrived
   and never otherwise: `mail: N new, M changed, K proposed, J notices, P past, S superseded, U
   unmatched`, with `, X not written` and `, Y unreadable` on the end when non-zero. Other lines are

@@ -10,7 +10,9 @@
 //! the pass makes. The count lives in `state/mail-resolve-held.json`, generated state a restart reads
 //! back: one JSON object, claim uid (`mail:<h>:<n>`) to slots, written through `ledger::dumps_value`
 //! beside and renamed over, never a note and never through `write`. An entry goes when its claim is
-//! answered, given up on, or no longer asked. A missing or unreadable file is empty: the worst a lost
+//! answered or no longer asked. A claim given up on keeps its count at the cap until its message is
+//! acknowledged (or is found already recorded): if the message comes back first, the claim is given up
+//! on again without being asked, so the give-up is durable and never opens a second notice. A missing or unreadable file is empty: the worst a lost
 //! file costs is three more slots of holding.
 
 use std::collections::BTreeMap;
@@ -48,7 +50,12 @@ impl Held {
         *slots
     }
 
-    /// `uid` is answered, given up on or no longer asked: its count goes.
+    /// `uid` was given up on (its count reached the cap) and is not cleared yet: it is not asked again.
+    pub fn given_up(&self, uid: &str) -> bool {
+        self.slots.get(uid).is_some_and(|slots| *slots >= GIVE_UP_SLOTS)
+    }
+
+    /// `uid` is answered, acked after a give-up, or no longer asked: its count goes.
     pub fn clear(&mut self, uid: &str) {
         self.changed |= self.slots.remove(uid).is_some();
     }

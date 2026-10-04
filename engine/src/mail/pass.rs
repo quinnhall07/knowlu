@@ -33,7 +33,7 @@ use crate::cloudmodel::{self, CloudClient, MailPull, MailboxReport, CALL_TIMEOUT
 use crate::enrich::{Options, PULL_ROUNDS};
 use crate::ingest;
 use crate::journal::Journal;
-use crate::mailreconcile::{self, resolve, Action, ClaimRef, Message, NoticeAbout, Phase, Resolution, SkipReason};
+use crate::mailreconcile::{self, resolve, Action, Claim, ClaimRef, Message, NoticeAbout, Phase, Resolution, SkipReason};
 
 use super::held::{Held, GIVE_UP_SLOTS};
 use super::{asks, heads, view, Source, Why, Wrote, Writer};
@@ -65,6 +65,7 @@ pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budg
         slots: Held::load(vault),
         struck: BTreeSet::new(),
         gave_up: 0,
+        marked: Vec::new(),
         waiting: false,
     };
     let (mut ack, mut round, mut batch, mut more) = (Vec::<String>::new(), 0usize, false, false);
@@ -84,6 +85,7 @@ pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budg
                 break;
             }
         };
+        run.acked(&ack);
         ack.clear();
         round += 1;
         more = pulled.more;
@@ -95,8 +97,11 @@ pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budg
         }
     }
     if !ack.is_empty() && failure.is_none() {
-        if let Err(e) = cloudmodel::pull_mail_claims(client, &ack) {
-            failure = Some(format!("mail: {} written but not acknowledged ({e}); they will come back next slot", ack.len()));
+        match cloudmodel::pull_mail_claims(client, &ack) {
+            Ok(_) => run.acked(&ack),
+            Err(e) => {
+                failure = Some(format!("mail: {} written but not acknowledged ({e}); they will come back next slot", ack.len()));
+            }
         }
     }
     let mut lines = Vec::new();
@@ -151,6 +156,8 @@ struct Run<'a> {
     struck: BTreeSet<String>,
     /// Claims given up on this pass (the line names them).
     gave_up: usize,
+    /// Given-up claims (message uid, claim uid) whose marker in `slots` stays until the message is acked.
+    marked: Vec<(String, String)>,
     /// Some claim still waits on `mail-resolve` after this pass's asking.
     waiting: bool,
 }
@@ -175,7 +182,12 @@ impl Run<'_> {
             if acked.insert(message.uid.clone()) {
                 ack.push(message.uid.clone());
             }
+            // Recorded, so whole: no claim of it is counted or marked any more.
+            for index in 0..message.claims.len() {
+                self.slots.clear(&ClaimRef { message: message.uid.clone(), index }.uid());
+            }
         }
+        self.slots.save();
         if fresh.is_empty() {
             return stalled;
         }
@@ -199,23 +211,43 @@ impl Run<'_> {
         false
     }
 
+    /// The messages in `ack` were acknowledged: the markers of the claims given up on in them go.
+    fn acked(&mut self, ack: &[String]) {
+        let marked = std::mem::take(&mut self.marked);
+        let (gone, kept): (Vec<_>, Vec<_>) = marked.into_iter().partition(|(message, _)| ack.contains(message));
+        self.marked = kept;
+        for (_, uid) in gone {
+            self.slots.clear(&uid);
+        }
+        self.slots.save();
+    }
+
+    /// Store "none" on a claim given up on (the plan then opens D12's unmatched notice and the message
+    /// is acked). Its marker stays on disk until the message is acknowledged.
+    fn give_up(&mut self, message: &str, index: usize, claim: &mut Claim) {
+        claim.resolution = Some(Resolution { target_id: None });
+        self.marked.push((message.to_string(), ClaimRef { message: message.to_string(), index }.uid()));
+        self.gave_up += 1;
+    }
+
     /// PQ14: count one slot against each claim that was `tried` and is still unanswered, and give up on
-    /// the one that reaches [`GIVE_UP_SLOTS`] by storing "none" on it (the plan then opens D12's
-    /// unmatched notice and the message is acked). An answered claim, and one no longer asked, drops its
-    /// count. A claim `asked` but not `tried` (the asking ended before it) is held without a count.
+    /// the one that reaches [`GIVE_UP_SLOTS`]. An answered claim, and one no longer asked, drops its
+    /// count. A claim `asked` but not `tried` (the asking ended before it) is held without a count. A
+    /// claim already at the cap (given up on, its message not yet acked) is given up on again, unasked.
     fn count_slots(&mut self, fresh: &mut [Message], asked: &[ClaimRef], tried: &[ClaimRef]) {
         for message in fresh.iter_mut() {
             for index in 0..message.claims.len() {
                 let at = ClaimRef { message: message.uid.clone(), index };
                 let uid = at.uid();
                 let claim = &mut message.claims[index];
-                if !asked.contains(&at) || claim.resolution.is_some() {
+                let capped = self.slots.given_up(&uid);
+                if !asked.contains(&at) || (claim.resolution.is_some() && !capped) {
                     self.slots.clear(&uid);
+                } else if claim.resolution.is_none() && capped && !tried.contains(&at) {
+                    self.give_up(&message.uid, index, claim);
                 } else if tried.contains(&at) && self.struck.insert(uid.clone()) {
                     if self.slots.strike(&uid) >= GIVE_UP_SLOTS {
-                        claim.resolution = Some(Resolution { target_id: None });
-                        self.slots.clear(&uid);
-                        self.gave_up += 1;
+                        self.give_up(&message.uid, index, claim);
                     }
                 }
             }
@@ -233,9 +265,10 @@ impl Run<'_> {
         let mut fresh = fresh.to_vec();
         let asked: Vec<ClaimRef> = resolve::to_ask(&view, &fresh, self.today, vault_day).into_iter().map(|(at, _)| at).collect();
         let mut tried: Vec<ClaimRef> = Vec::new();
-        if !asked.is_empty() && self.asking_failed.is_none() {
+        let to_settle: Vec<ClaimRef> = asked.iter().filter(|at| !self.slots.given_up(&at.uid())).cloned().collect();
+        if !to_settle.is_empty() && self.asking_failed.is_none() {
             let (started, budget) = (self.started, self.budget);
-            let unsettled = asks::settle(self.client, &view, &mut fresh, &asked, || started.elapsed() + CALL_TIMEOUT <= budget);
+            let unsettled = asks::settle(self.client, &view, &mut fresh, &to_settle, || started.elapsed() + CALL_TIMEOUT <= budget);
             self.asking_failed = unsettled.ended;
             self.asking_refused = self.asking_refused.or(unsettled.refused);
             tried = unsettled.tried;
