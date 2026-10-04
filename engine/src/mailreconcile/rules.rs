@@ -52,8 +52,10 @@
 //!
 //! **T5.6: the same mail by two routes (PQ8 (ii), Quinn 2026-10-02).** A live `new_item` an open
 //! mail `kind: task` card already proposes ([`Resolved::Carded`]: normalised title and course, the
-//! card `pending` or `snoozed`) files nothing, skipped as already applied, before any `new_item`
-//! row. Nothing is written, so it needs no Undo and no notice. A backfill keeps T5.3's rows.
+//! card `pending` or `snoozed`, and no known due or one on the card's due day, PQ13 (b), Quinn
+//! 2026-10-03) files nothing, skipped as already applied, before any `new_item` row. Nothing is
+//! written, so it needs no Undo and no notice. Another due day takes its own row, a card, so a
+//! date is never lost unseen. A backfill keeps T5.3's rows.
 //!
 //! **Past** is a due whose date is strictly before `today`, never before *now*: the module has no
 //! clock, and `ingest` and `coursework` archive `imported-past` by the same rule, since an item due
@@ -104,9 +106,10 @@ pub(super) fn rule(
 ) -> Vec<Action> {
     let skip = |claim, reason| vec![Action::Skip { claim, reason }];
     match (resolved, &claim.item) {
-        // PQ8 (ii), plan T5.6: live, an item an open mail task card already proposes files nothing,
-        // counted with the already-applied skips, and the student decides the one card. Before every
-        // `new_item` row, so whatever the item's kind or due; a backfill keeps T5.3's rows.
+        // PQ8 (ii), plan T5.6: live, an item an open mail task card already proposes for its due day
+        // (PQ13 (b)) files nothing, counted with the already-applied skips, and the student decides
+        // the one card. Before every `new_item` row, so whatever the item's kind; a backfill keeps
+        // T5.3's rows.
         (Resolved::Carded, _) if message.phase == Phase::Live => skip(at, SkipReason::AlreadyApplied),
         (Resolved::New | Resolved::Carded, Some(item)) => vec![new_item(message, at, claim, item, today, vault_day)],
         (Resolved::Change { target, field, value }, _) => {
@@ -1859,27 +1862,96 @@ mod tests {
     /// PQ8 (ii) (Quinn 2026-10-02): a rule forward ("FW:") of a course mail reaches Knowlu through a
     /// second connected mailbox as a new message with a new Message-ID, so intake's dedup cannot see
     /// it. Its live `new_item` naming the task an open mail card already proposes (normalised title,
-    /// same course) files nothing: one skip, already applied, whatever its due, item kind or
-    /// authenticity. Alone, the same claim plans its own row; the card is what silences it.
+    /// same course) files nothing: one skip, already applied, whatever its item kind or authenticity,
+    /// when it has no known due or its due falls on the card's due day (PQ13 (b), Quinn 2026-10-03).
+    /// The day is the calendar day of the floating wall-clock due, the date and the date-time alike,
+    /// on the card's side too. Alone, the same claim plans its own row; the card is what silences it.
     #[test]
     fn a_live_new_item_matching_a_pending_mail_task_card_files_nothing() {
         let card = proposing("pending");
+        let timed = NoteView { due: json!("2026-10-12T08:00"), ..card.clone() };
         for claim in [
             item("Lab 5", Some("2026-10-12"), Task),
-            item("lab-5", Some("2026-10-14T23:59"), Task),
+            item("lab-5", Some("2026-10-12T23:59"), Task),
+            item("Lab 5", Some("2026-10-12T00:00"), Exam),
+            item("Lab 5", Some("2026-10-12T18:00"), Event),
             item("  LAB #5. ", None, Task),
-            item("Lab 5", Some("2026-09-20"), Task),
-            item("Lab 5", Some("2026-10-20T09:00"), Exam),
-            item("Lab 5", Some("2026-10-05T18:00"), Event),
-            item("Lab 5", Some("2026-09-25T18:00"), Event),
+            item("Lab 5", Some("2026-09-31"), Task),
         ] {
             for authenticity in [Aligned, Unaligned] {
                 let forwarded = message(Live, authenticity, vec![claim.clone()]);
-                let got = against(vec![card.clone()], &[forwarded.clone()], 9);
-                assert_eq!(got, vec![skip(SkipReason::AlreadyApplied)], "{:?} {authenticity:?}", claim.item);
-                assert_ne!(against(vec![], &[forwarded], 9), got, "alone: {:?}", claim.item);
+                for card in [&card, &timed] {
+                    let got = against(vec![card.clone()], &[forwarded.clone()], 9);
+                    assert_eq!(got, vec![skip(SkipReason::AlreadyApplied)], "{:?} {authenticity:?} {}", claim.item, card.due);
+                    assert_ne!(against(vec![], &[forwarded.clone()], 9), got, "alone: {:?}", claim.item);
+                }
             }
         }
+        // PQ13 (b), Quinn 2026-10-03: these five carried another due day and moved from the skip to
+        // their own rows, exactly as with no card (before T5.6): a card each, and a live event
+        // already past is counted past (D24).
+        for (claim, filed) in [
+            (item("lab-5", Some("2026-10-14T23:59"), Task), None),
+            (item("Lab 5", Some("2026-09-20"), Task), None),
+            (item("Lab 5", Some("2026-10-20T09:00"), Exam), None),
+            (item("Lab 5", Some("2026-10-05T18:00"), Event), None),
+            (item("Lab 5", Some("2026-09-25T18:00"), Event), Some(past())),
+        ] {
+            for authenticity in [Aligned, Unaligned] {
+                let forwarded = message(Live, authenticity, vec![claim.clone()]);
+                let want = vec![filed.clone().unwrap_or_else(|| carded(&claim, pending()))];
+                assert_eq!(against(vec![card.clone()], &[forwarded.clone()], 9), want, "{:?} {authenticity:?}", claim.item);
+                assert_eq!(against(vec![], &[forwarded], 9), want, "as with no card: {:?}", claim.item);
+            }
+        }
+    }
+
+    /// PQ13 (b) (Quinn 2026-10-03): a live `new_item` whose due falls on another day than the open
+    /// mail card's files its own card, as before T5.6, so a moved date is never lost unseen: the
+    /// addendum read's "Lab 5" due 2026-10-14T23:59 against a card due 2026-10-12, the day before at
+    /// 23:59, and a date for a card that has none. A weekly "Quiz" reusing its title with next week's
+    /// due files its own card too, and a second route's copy of next week's then meets that card,
+    /// whole or split. Accepted costs, not pinned here: two copies the model reads two dates from
+    /// file two cards, and a time moved within the card's due day is not caught while it is open.
+    #[test]
+    fn a_live_new_item_with_another_due_files_its_own_card() {
+        let card = proposing("pending");
+        let undated = NoteView { due: Value::Null, ..card.clone() };
+        let cases = [
+            (&card, item("lab-5", Some("2026-10-14T23:59"), Task)),
+            (&card, item("Lab 5", Some("2026-10-11T23:59"), Task)),
+            (&card, item("Lab 5", Some("2026-10-13T00:00"), Exam)),
+            (&undated, item("Lab 5", Some("2026-10-12"), Task)),
+        ];
+        for (card, claim) in cases {
+            let got = against(vec![card.clone()], &[message(Live, Aligned, vec![claim.clone()])], 9);
+            assert_eq!(got, vec![carded(&claim, pending())], "{:?} against {}", claim.item, card.due);
+        }
+        let none = against(vec![undated], &[message(Live, Aligned, vec![item("Lab 5", None, Task)])], 9);
+        assert_eq!(none, vec![skip(SkipReason::AlreadyApplied)], "no due on either side: the same task");
+
+        // Last week's card came from last week's mail, so neither copy below is applied by its uid.
+        let last_mail = Some(first_of("mail:0b0b1c1c2d2d3e3e4f4f5a5a6b6b7c7c").uid());
+        let quiz = |due: &str| NoteView {
+            title: "Quiz".to_string(),
+            path: "approvals/task-quiz.md".to_string(),
+            due: json!(due),
+            source_uid: last_mail.clone(),
+            ..card.clone()
+        };
+        let (this_week, forward) = (item("Quiz", Some("2026-10-12T09:00"), Task), item("quiz", Some("2026-10-12T09:00"), Task));
+        let posted = sent(UID, "2026-10-01T08:00:00Z", Live, Aligned, vec![this_week.clone()]);
+        let routed = sent(ROUTED, "2026-10-01T08:05:00Z", Live, Aligned, vec![forward]);
+        let filed = Action::TaskCard { claim: at(), note: NewNote { mail_asof: Some(posted.ordering_date), ..note(&this_week, false) }, proposal: pending() };
+        let applied = Action::Skip { claim: first_of(ROUTED), reason: SkipReason::AlreadyApplied };
+        let last_week = quiz("2026-10-05T09:00");
+        for delivered in [[posted.clone(), routed.clone()], [routed.clone(), posted.clone()]] {
+            assert_eq!(against(vec![last_week.clone()], &delivered, 9), vec![filed.clone(), applied.clone()], "whole");
+        }
+        assert_eq!(against(vec![last_week.clone()], &[posted], 9), vec![filed], "pull one: next week's card");
+        let next_week = NoteView { path: "approvals/task-quiz-2.md".to_string(), source_uid: Some(at().uid()), ..quiz("2026-10-12T09:00") };
+        let both = vec![last_week, next_week];
+        assert_eq!(against(both, &[routed], 9), vec![applied], "pull two meets next week's card");
     }
 
     /// The plan's reading of "pending" (T5.6): a card is an open decision while `pending` or

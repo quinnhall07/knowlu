@@ -395,7 +395,8 @@ pub enum SkipReason {
     /// A live event already past (D24).
     Past,
     /// Its uid is already on a note or card, another desktop's write (§4.8 step 4); or a live
-    /// `new_item` an open mail task card already proposes, the same mail by another route (PQ8 (ii)).
+    /// `new_item` an open mail task card already proposes for its due day, the same mail by another
+    /// route (PQ8 (ii), PQ13 (b)).
     AlreadyApplied,
     /// The note already holds the value.
     Equal,
@@ -452,8 +453,9 @@ fn planned_steps<'m>(view: &VaultView, messages: &'m [Message], today: Date, vau
 /// may rewrite its steps' actions against the vault as it stood before the run (§4.9's two-value
 /// row), and the working vault is then rebuilt from that point with the run's final actions. A
 /// rewrite only exchanges members' sets and cards for skips and one card under one member's uid; it
-/// adds and removes no item, resolution reads no `due`, and it reads an amend card only for its own
-/// claim's uid (a task card, which it also reads by title, is never a member's), so a claim
+/// adds and removes no item, resolution reads a `due` only on a task card (PQ13 (b)), which a set
+/// never names (a set names an item note), and it reads an amend card only for its own claim's uid
+/// (a task card, which it also reads by title and due day, is never a member's), so a claim
 /// delivered once resolves the same for it. A claim delivered twice does not: its later copy
 /// resolved against the first copy's actions, which a rewrite may change, so
 /// `settle` plans each claim once, by its first copy, and skips each later copy as already applied

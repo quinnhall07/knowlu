@@ -11,9 +11,10 @@
 //! at a time: a due that mail moves later in the batch that created the item reaches that item, and a
 //! second `new_item` naming it is a change, never a second note (test 24). [`super::plan`] and
 //! [`to_ask`] take the same walk, so what is asked is what the plan finds ambiguous; an answer never
-//! changes what a later claim resolves to, since an answered claim's actions only set a field or file
-//! an amend card under its own uid, neither of which resolution reads (an amend card only by its
-//! uid), and only a `New` claim adds an item or a task card (T5.3–T5.6's rules keep it so).
+//! changes what a later claim resolves to, since an answered claim's actions only set an item note's
+//! field or file an amend card under its own uid, neither of which resolution reads (an amend card
+//! only by its uid; a `due` only on a task card, PQ13 (b)), and only a `New` claim adds an item or a
+//! task card (T5.3–T5.6's rules keep it so).
 //!
 //! **The steps, in order.**
 //! 1. The claim's uid (`mail:<h>:<n>`, [`ClaimRef::uid`]) already on a note or card in `tasks/`,
@@ -33,8 +34,9 @@
 //!    never "date removed" (spec risk 1; §4.8 step 2 is silent on it, so it waits on Quinn's ruling).
 //!    A due naming no real day is no due ([`super::NewItem::known_due`]), so never a change to it.
 //!    A new note an open mail `kind: task` card in the course already proposes, by normalised title,
-//!    is [`Resolved::Carded`] ([`Working::carded`]; PQ8 (ii), plan T5.6): the same mail reached
-//!    Knowlu by another route, and `rules.rs` decides what it writes.
+//!    with no due or one on the card's due day, is [`Resolved::Carded`] ([`Working::carded`]; PQ8
+//!    (ii), plan T5.6; PQ13 (b)): the same mail reached Knowlu by another route, and `rules.rs`
+//!    decides what it writes. Another due day is `New`, its own card.
 //!
 //! **Words.** An *item note* is a note in `tasks/` or `archive/`, never a card in `approvals/`, in
 //! the vault or *planned* (filed by an earlier claim's action in this plan, [`Target::Planned`]). An
@@ -67,8 +69,9 @@ pub enum Resolved<'v> {
     /// A `new_item` naming no active note in its course: a new note (§4.9's `new_item` rows).
     New,
     /// A `new_item` naming no active note in its course, whose normalised title an open mail
-    /// `kind: task` card in that course already proposes ([`Working::carded`]): the same mail by
-    /// another route (PQ8 (ii), plan T5.6). Live, it files nothing; a backfill takes `New`'s rows.
+    /// `kind: task` card in that course already proposes, and with no known due or one on the card's
+    /// due day ([`Working::carded`]): the same mail by another route (PQ8 (ii), plan T5.6; PQ13 (b),
+    /// Quinn 2026-10-03). Live, it files nothing; a backfill takes `New`'s rows.
     Carded,
     /// A change to one field of `target`: a `change` claim's `field` and `value`, or a dated
     /// `new_item` read as a change to the note's `due`, to the item's due (test 24).
@@ -189,7 +192,7 @@ impl Working {
             Found::One(target) if claim.kind == ClaimKind::NewItem && value.is_none() => Resolved::Restated { target },
             Found::One(target) => Resolved::Change { target, field, value },
             Found::Zero if claim.kind == ClaimKind::NewItem => match &claim.item {
-                Some(item) if self.carded(claim.course.as_deref(), &item.title) => Resolved::Carded,
+                Some(item) if self.carded(claim.course.as_deref(), &item.title, item.known_due()) => Resolved::Carded,
                 _ => Resolved::New,
             },
             Found::Zero | Found::Many => Resolved::Ambiguous,
@@ -341,14 +344,24 @@ impl Working {
     }
 
     /// PQ8 (ii) (plan T5.6): whether an open mail `kind: task` card already proposes `title` in
-    /// `course`, in the vault or filed earlier in this plan. A card in `approvals/` with `kind: task`,
-    /// `created_by: mail` and `status: pending` or `snoozed` (an open decision, §9.5's reading for
-    /// amend cards: a first-day card is written snoozed, R16), in the same course, whose normalised
-    /// title equals the claim's. Exact on both keys, as [`Working::by_title`] is: a match too loose
-    /// would drop a real task with no card (spec risk 1), so no course matches no card.
-    fn carded(&self, course: Option<&str>, title: &str) -> bool {
+    /// `course` for `due`'s day, in the vault or filed earlier in this plan. A card in `approvals/`
+    /// with `kind: task`, `created_by: mail` and `status: pending` or `snoozed` (an open decision,
+    /// §9.5's reading for amend cards: a first-day card is written snoozed, R16), in the same course,
+    /// whose normalised title equals the claim's. Exact on both keys, as [`Working::by_title`] is: a
+    /// match too loose would drop a real task with no card (spec risk 1), so no course matches no card.
+    ///
+    /// PQ13 (b) (Quinn 2026-10-03): and only when the claim knows no due ([`super::NewItem::known_due`]),
+    /// or its due falls on the card's due day, so a date the card does not hold always files its own
+    /// card. A day is the calendar day a due in §5.1's wire shape names ([`super::rules::due_date`]):
+    /// a floating wall-clock date or date-time carrying no zone or offset (`judge_due.ts` writes it),
+    /// so none is applied and `2026-10-12` and `2026-10-12T23:59` share a day. A card whose `due`
+    /// names no such day (none, or a hand-edited value) has no due day, so a claim with a due files
+    /// its own card. Unlike a change's equality, this is never the vault's literal form.
+    fn carded(&self, course: Option<&str>, title: &str, due: Option<&str>) -> bool {
         let title = normalise(title);
+        let day = due.and_then(super::rules::due_date);
         let open = |n: &NoteView| matches!(n.status.as_deref(), Some("pending" | "snoozed"));
+        let on_day = |n: &NoteView| day.is_none() || n.due.as_str().and_then(super::rules::due_date) == day;
         self.notes.iter().any(|(n, _)| {
             n.folder == "approvals"
                 && n.kind.as_deref() == Some("task")
@@ -357,6 +370,7 @@ impl Working {
                 && in_course(n, course)
                 && !title.is_empty()
                 && normalise(&n.title) == title
+                && on_day(n)
         })
     }
 
