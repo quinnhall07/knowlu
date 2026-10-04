@@ -450,6 +450,10 @@ Briefs cite functions and headings, never line numbers.
     Checkpoint B. If no capture can be had by then, Quinn accepts the model path until the pilot, and
     T3a.2 lands before the pilot.
   - *Blocks:* Checkpoint B's D9 reading. Nothing built before it waits.
+  - **Ruled 2026-10-04 (Quinn).** Blackboard's rows were built from real captures (T3a.2: `bac3159`,
+    `eeb49ef`; follow-up `0aea395`, review PASS). For the rest, the model path is accepted for Canvas,
+    zyBooks and due-date-changed notifications until the pilot. T3a.3 (�9.5) writes their template rows
+    from pilot students' real mail, forwarded as attachments, never guessed. PQ10 is closed.
 - **PQ11. Which forwarding statuses stop the Gmail OAuth read (T4b's review, 2026-10-02; for
   Checkpoint B).** P22 counts a forwarding under every status except `revoked` and `off`, and T4b
   built that literally (`FORWARDING_ENDED` in `functions/gmail-read/handler.ts`). That set includes
@@ -650,6 +654,7 @@ marks a task that needs Quinn's word, presence, a secret or a spend. **WT** is t
 | T2g.2 | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-inbound/**` | T2g.1 | cloud |
 | T3a | `cloud-engineer` (Opus, high) | yes | PQ4 (answered) | `functions/_shared/mail_templates.ts` (new) | T2g.2 | cloud |
 | T3a.2 | `cloud-engineer` (Opus, high) | yes | PQ10 (ruled 2026-10-04: capture now) | `functions/_shared/mail_templates.ts` (the vendor rows region) and its test | T3a, real captures | cloud; **built 2026-10-04**: Blackboard new gradable item and due soon; Canvas, zyBooks and due-date-changed not captured |
+| T3a.3 | `cloud-engineer` (Opus, high) | yes | PQ10 (ruled 2026-10-04: model path until the pilot) | `functions/_shared/mail_templates.ts` (the vendor rows region) and its test | T3a.2, pilot students' real mail (forwarded as attachments) | cloud; **pilot task**: Canvas, zyBooks and due-date-changed rows, written from real captures only, never guessed |
 | T3b | `cloud-engineer` (Opus, high) | yes | PQ4 (answered) | `functions/_shared/judge_validate.ts` (mail region) | T3a | cloud |
 | T3c | `cloud-engineer` (Opus, high) | yes | — | `functions/_shared/judge_prompts.ts`, `judge_caps.ts` | T3b | cloud |
 | T3d | `cloud-engineer` (Opus, high) | yes | — | `functions/mail-process/**` (new), `functions/mail-inbound/handler.ts` (D8's kick), `config.toml` | T3c | cloud |
@@ -2011,6 +2016,11 @@ D14, D17, D22, D23 and P5–P9, P21 and P22. It reads in particular:
 Fixes go back to `cloud-engineer`. The cloud sub-branch merges into the lane when no Critical or
 Important finding is open.
 
+**Status (2026-10-04): closed at `0aea395`.** Re-read dated 2026-10-04: the template path is sound and
+deterministic, and nothing un-sampled is guessed (Blackboard's two rows come from 23 real captures; Canvas,
+zyBooks and due-date-changed stay on the model path). PQ10 is ruled (�4). No cloud-review report file
+exists for this checkpoint; its rulings and minors are recorded in �4 and the decisions log (�12).
+
 ### T14. Campus rows and the wizard's marker (`scaffold.rs`, `onboarding.rs`)
 
 **Agent:** `mechanical` (Sonnet, low). **Why:** two struct fields and one marker, fully fixed here.
@@ -2608,6 +2618,10 @@ controller's (spec T18; HANDOFF §2's controller rules).
       bound, two forwards that do not bind (for M365, case 4's intra-school message if EOP does not
       SRS-rewrite it) give `GET /addresses` the `skipped` reason and no Rotate suggestion; a bound live
       forward clears it. Count-only, as every staging read.
+    - *Blackboard DKIM alignment* (PQ10, 2026-10-04): all 23 captures read `dmarc=pass` with
+      `header.from=blackboard.com`, but the DKIM `d=` was not preserved by forward-as-attachment. On a
+      real Blackboard notification, check live that the signing domain aligns with the From domain, so
+      the Blackboard rows' `aligned` gate holds on live mail.
     - *M365 second tenant:* a message from a second Microsoft tenant (S6's test tenant), with the school
       domain's SRS-shaped MAIL FROM and a hand-written ForwardingLoop naming a scratch mailbox and
       tenant. Record SES's SPF verdict, whether it binds, and, on the probe and on a real forward, the
@@ -2689,8 +2703,8 @@ Still open:
   only; the T5.5 ledger row in §9.5 names the effect);
 - the sign-ins at the machine (S1–S3);
 - the M365 test tenant (S6); T10.1's pace constants are merged provisional pending it (§9.5);
-- PQ10, D9's notification rows (T3a.2, from real captured notifications; Checkpoint B finishes after
-  they land);
+- PQ10 is no longer open: ruled 2026-10-04 (Blackboard rows built; the model path until the pilot for
+  the rest; T3a.3 at the pilot), and Checkpoint B is closed (�4);
 - Q2, T15.0's optional `surface` fields: kept as a controller default (2026-10-03), Quinn to confirm
   (spec §6.1's dated marker, §9.5's T15.0 row);
 - UA's mail fields (T14);
@@ -2995,7 +3009,7 @@ spec text moves. A row marked **open** waits on Quinn or the planner.
 | SNS signature version (T2a's review, 2026-10-02). `verifySns` accepts only `SignatureVersion` 2 (RSA with SHA-256) and refuses version 1 (SHA-1) before any fetch. An SNS topic signs with version 1 by default, and S0's topic was built with the default. So T18a now sets the topic's `SignatureVersion` attribute to 2 and reads it back before the subscribe step, and T13b's runbook carries the same step. `sns.ts` is unchanged. | Without the step, the SubscriptionConfirmation is refused with the same bare 403 as every other refusal and leaves no log line. The subscription stays PendingConfirmation, no mail arrives, and nothing points at the cause. That costs a live deploy, but it fails closed. | T18a, T13b; T2a's version test in `sns_test.ts` | **carried (controller):** T18a's attribute step; T13b's runbook line |
 | PQ8 (ii) only. T5.6 is added before T6.1 and T6.2: a live `new_item` matching an open mail task card by normalised title and course files nothing (`AlreadyApplied`). "Open" is read as `pending` or `snoozed`, since a first-day card is snoozed (R16). (i) is declined: T3d keeps "From is the mailbox itself". | Quinn, 2026-10-02. The device rule catches S0 capture 5's rule-forward duplicate without dropping a note the student mails themselves. | T5.6, T3d; T5.6's tests, `mail_from_another_of_the_accounts_mailboxes_is_not_screened_as_own_mail` | **Answered 2026-10-02 (Quinn)**; the "snoozed" reading is the plan's, for Quinn's read with T5.6's addendum. Built `d0abe3e`. The addendum read amended T6.3: the view fills `kind`, and a task card's `title`, `course` and `due` come from its fenced payload. PQ13 (a different due, §4): **answered (b) 2026-10-03 (Quinn), built `79c1742`**; the match now also needs no known due or the card's due day |
 | PQ9 (T2f's review, 2026-10-02). On Gmail, check (i) does not name the mailbox (no AMS covers `X-Forwarded-*`), and the `+caf_=` envelope is `@gmail.com` only, so Workspace live mail is unbound. Step 6 aligns a child of the From domain only through the provider's DMARC pass. | Spec §4.6 step 5 cannot be met as written on Gmail; widening to the hint's domain was not signed. | T2f; `a_gmail_forward_binds_by_googles_arc_seal_and_its_caf_return_path`, `a_from_on_a_bare_label_or_public_suffix_never_aligns_with_a_signer_under_it`; Checkpoint B | **Answered 2026-10-02 (Quinn), PQ9 (§4):** the amendment is signed in spec §4.6 step 5; Workspace binds on its own-domain `+caf_=` envelope when the domain's MX is Google's (three new tests); M365 kept as built, no sealed recipient field on record; T18a probes both residual risks. |
-| D9's notification rows deferred until real captures exist (T3a's review, 2026-10-02). T3a shipped `MAIL_TEMPLATES` empty: no Blackboard, Canvas or zyBooks notification has been captured, and rows are never guessed. Until T3a.2, every such mail goes to the `mail_claim` model, spends the daily cap and the allowance, and takes §4.9's model rows (in backfill, a card where a template change to a note no feed supplies would write directly). | Departing from D9 as signed is Quinn's call; the implementer ruled alone. | T3a.2; PQ10; Checkpoint B | **open (Quinn)** |
+| D9's notification rows deferred until real captures exist (T3a's review, 2026-10-02). T3a shipped `MAIL_TEMPLATES` empty: no Blackboard, Canvas or zyBooks notification has been captured, and rows are never guessed. Until T3a.2, every such mail goes to the `mail_claim` model, spends the daily cap and the allowance, and takes §4.9's model rows (in backfill, a card where a template change to a note no feed supplies would write directly). | Departing from D9 as signed is Quinn's call; the implementer ruled alone. | T3a.2; PQ10; Checkpoint B | **ruled 2026-10-04 (Quinn), PQ10 (�4):** Blackboard rows built (T3a.2); the model path is accepted for Canvas, zyBooks and due-date-changed notifications until the pilot; T3a.3 writes their rows from pilot students' real mail. |
 | T3e's schema (T3e's review, 2026-10-02). `mail_work.msg_hash`, written by `mail_hand_off`, and a fourth mail RPC, `expire_mail_work` (the work row, its `mail_seen` row and one `expired`, in one transaction; service-role only), in the still-unapplied `20261002000200_mail.sql`. Spec §5.1 lists neither, and T3e's files were `functions/mail-process/**`; `the_mail_tables_have_section_5_1s_columns_and_words` now lists the column. | D8's "an expired item loses its seen row" needs a link from a work row to its seen row once the object is gone; the HMAC is already in `mail_seen`. Nothing is applied until T18. | T3e; the migration tests and `an_expired_item_loses_its_seen_row_…` | **recorded in spec §5.1 (B-minors, 2026-10-02):** a dated marker on the `mail_work` row and the RPC list names `msg_hash` and `expire_mail_work` as built, with `mail_claims_uid` (row below). It records the build, not a Quinn ruling; Checkpoint D reads it |
 | An allowance judgment charged over budget is given back (T3e's review). When `charge_allowance` passes and `enforce_budget` then refuses, no call is made, so T3e calls `refund_allowance`. This widens the refund row above ("on `model failed` alone") to "no call was made". A charge that opened the allowance while over budget still opens its 120-day period and its 14 days. A day's-cap charge taken over budget (a live or recover item, or a backfill item past the allowance) is not given back. | D23 and `judge_pipeline.ts`'s rule: an account over budget must not spend its allowance. Without it, about 667 over-budget items times three attempts empty the 2,000 judgments with no call. | T3e; `an_over_budget_backfill_item_on_an_open_allowance_gives_its_judgment_back`. **B-minors (2026-10-02):** the opening cost is closed. A backfill item first reads `enforce_budget` at `MONTHLY_CEILING_USD + ALLOWANCE_USD` (`MailCharges.allowanceCouldServe`); over even that, it is over budget with nothing charged and no allowance opened (`an_account_over_budget_by_more_than_the_allowance_never_opens_it`, `an_account_within_the_allowances_dollars_opens_it_and_is_judged`; `ALLOWANCE_USD` pinned to the SQL's `1.00`). Cost: one more `enforce_budget` read per backfill item, and its refusal upserts the month's `budget_alerts` row as the second read would | **open (planner):** confirm the widening; rule whether an over-budget day's-cap charge is refunded too (by `refund_call`, once main is merged) or the order changes for live items (budget before `charge_call`, as the pipeline does) |
 | The attempt is counted before the charge (T3e's review). The model path writes `attempts + 1` and the next UTC day as its wait before any charge, and expires, uncharged, an item that arrives with its attempts spent. | Charge-before-call is the hot-loop guard (D23, F1). Counted only after the call, a store write refused every time after the call (a `mail_claims` check constraint) re-charged and re-called the item at every five-minute lease, up to about 500 calls before the object expired. | T3e; `a_store_failure_after_the_call_charges_and_calls_at_most_three_times` | recorded, for the planner |
