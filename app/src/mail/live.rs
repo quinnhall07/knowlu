@@ -9,7 +9,7 @@
 use super::host::Host;
 use super::recover::{Mailbox, Place, SystemClock, WindowMailbox};
 use super::setup::{Env, Kind, Plan, Shared, SETUPS};
-use super::{close, come_back, open_hidden, open_visible, popup_open, step_aside, window_signed_in, MailWindow, Refusal, WINDOW};
+use super::{close, come_back, open_hidden, open_visible, page_title, popup_open, step_aside, window_signed_in, MailWindow, Refusal, WINDOW};
 use crate::mail_client::MailClient;
 use crate::mail_session::MailState;
 use crate::mail_steps::Provider;
@@ -50,7 +50,7 @@ impl Mailbox for WindowHost {
     }
 }
 
-/// The address a Gmail window's title names: `<folder> - <address> - Gmail` (a Workspace mailbox ends with
+/// The address a Gmail page's title names ([`page_title`], never the native window's): `<folder> - <address> - Gmail` (a Workspace mailbox ends with
 /// its organisation's name instead). Lower case; read for the hint and kept nowhere.
 fn address_in_title(title: &str) -> Option<String> {
     let parts: Vec<&str> = title.split(" - ").collect();
@@ -82,7 +82,7 @@ impl Host for WindowHost {
     }
 
     fn title_address(&self) -> Option<String> {
-        address_in_title(&self.app.get_webview_window(WINDOW)?.title().ok()?)
+        address_in_title(&page_title(&self.app)?)
     }
 
     fn popup_open(&self) -> bool {

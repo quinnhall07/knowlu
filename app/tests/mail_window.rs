@@ -1,7 +1,7 @@
 //! **T9.2: the mail window and the script runner** (spec tests 33 and 34, D5, D19; the T0.S1-S3
 //! report). Every page here is a fake that records what it was asked to evaluate: no window opens
 //! and nothing reaches a network. Names, addresses and school hosts are synthetic (`.invalid`).
-use knowlu::mail::{popup_allowed, run, script, scripts, signed_in, MailWindow, Page, Refusal, INIT_SCRIPT, POPUP, WINDOW};
+use knowlu::mail::{popup_allowed, run, script, scripts, signed_in, MailWindow, Page, PageTitle, Refusal, INIT_SCRIPT, POPUP, WINDOW};
 use knowlu::mail::live::sweep_at_launch;
 use knowlu::mail_steps::Provider;
 use serde_json::{json, Value};
@@ -413,6 +413,57 @@ fn the_sign_in_detector_reads_m365_and_gmail_titles() {
     ] {
         assert!(!signed_in(p, url, title), "{p:?} at {url:?} titled {title:?}");
     }
+}
+
+/// The page title X2 reads is the current mail window's latest document title: a new window starts
+/// with none, and a title from a window that is gone (a late event) is dropped.
+#[test]
+fn the_page_title_store_keeps_the_current_windows_latest_title_only() {
+    let store = PageTitle::new();
+    assert_eq!(store.get(), None, "no window, no title");
+    let first = store.begin();
+    assert_eq!(store.get(), None, "a new window has no title until its page names one");
+    store.set(first, "Sign in to your account".into());
+    store.set(first, "Mail - Sam Student - Outlook".into());
+    assert_eq!(store.get().as_deref(), Some("Mail - Sam Student - Outlook"), "the latest title");
+    let second = store.begin();
+    assert_eq!(store.get(), None, "the last window's title is gone");
+    store.set(first, "Inbox - old@example.invalid - Gmail".into());
+    assert_eq!(store.get(), None, "a closed window's late title is dropped");
+    store.set(second, "Inbox - student@example.invalid - Gmail".into());
+    assert_eq!(store.get().as_deref(), Some("Inbox - student@example.invalid - Gmail"));
+    store.clear();
+    assert_eq!(store.get(), None, "closing the window forgets its title");
+    store.set(second, "Inbox - student@example.invalid - Gmail".into());
+    assert_eq!(store.get(), None, "a closed window's late title is dropped");
+}
+
+/// Found live in T18c (2026-10-05): `WebviewWindow::title` is the NATIVE title the app set in
+/// `open` ("Sign in to your email"), never the page's, so a signed-in mailbox read as signed out
+/// forever. Every title a mail detector reads is the page's document title, from
+/// `on_document_title_changed` on the mail window's builder, and no mail source reads the native one.
+#[test]
+fn the_sign_in_detector_is_fed_the_page_title_never_the_native_window_title() {
+    let mut files = vec![PathBuf::from("src/mail.rs")];
+    files.extend(std::fs::read_dir("src/mail").unwrap().flatten().map(|e| e.path()));
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        assert!(!text.contains(".title()"), "{} reads the native window title", f.display());
+    }
+    let src = std::fs::read_to_string("src/mail.rs").unwrap().replace("\r\n", "\n");
+    let open = &src[src.find("\nfn open(").expect("src/mail.rs has open")..];
+    let open = &open[..open.find("\n}\n").expect("open ends")];
+    assert!(open.contains("PAGE_TITLE.begin()"), "a new mail window keeps the last one's title");
+    let builder = &open[open.find("WebviewWindowBuilder::new(app, WINDOW").expect("the mail window's builder")..];
+    let builder = &builder[..builder.find(".build()").expect("the mail window's builder builds")];
+    assert!(builder.contains(".on_document_title_changed("), "the mail window's page title is never read");
+    let detector = &src[src.find("pub fn window_signed_in(").expect("window_signed_in")..];
+    let detector = &detector[..detector.find("\n}\n").expect("window_signed_in ends")];
+    assert!(detector.contains("page_title("), "the detector is not fed the page title");
+    let close = &src[src.find("pub fn close(").expect("close")..];
+    assert!(close[..close.find("\n}\n").unwrap()].contains("PAGE_TITLE.clear()"), "a closed window's title is kept");
+    let live = std::fs::read_to_string("src/mail/live.rs").unwrap();
+    assert!(live.contains("address_in_title(&page_title("), "Gmail's address hint is not read from the page title");
 }
 
 // ---- test 34: no OS input, no debugging port --------------------------------------------------

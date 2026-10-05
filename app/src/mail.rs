@@ -86,8 +86,8 @@ pub fn start_url(provider: Provider) -> Option<&'static str> {
 /// X2's signal: the page is on a mail host and its title reads as a signed-in mailbox. Outlook's is
 /// `<folder> - <name> - Outlook`; Gmail's is `<folder> - <address> - Gmail` (a Google Workspace
 /// mailbox ends with its organisation's name instead), so for Gmail a middle part must be an
-/// address. A step-script probe confirms it before anything acts (D5). The title is read here and
-/// nowhere kept.
+/// address. A step-script probe confirms it before anything acts (D5). `title` is the page's
+/// document title ([`PageTitle`]), never the native window's.
 pub fn signed_in(provider: Provider, url: Option<&str>, title: &str) -> bool {
     if !url.is_some_and(|u| on_mail_host(provider, u)) {
         return false;
@@ -100,6 +100,58 @@ pub fn signed_in(provider: Provider, url: Option<&str>, title: &str) -> bool {
         Provider::Guided => false,
     }
 }
+
+/// The open mail window's page title: WebView2's document title, which is the only title X2 reads.
+/// `WebviewWindow::title` is the native window's title (the one [`open`] sets, "Sign in to your
+/// email"), never the page's; feeding it to [`signed_in`] kept setup on "Sign in" forever (T18c,
+/// 2026-10-05). The mail window's `on_document_title_changed` writes here under the generation
+/// [`PageTitle::begin`] gave it, so a late title from a window that is gone is dropped. Held in
+/// memory only while that window is open; never logged, written or sent.
+pub struct PageTitle(std::sync::Mutex<(u64, Option<String>)>);
+
+impl PageTitle {
+    pub const fn new() -> PageTitle {
+        PageTitle(std::sync::Mutex::new((0, None)))
+    }
+
+    fn slot(&self) -> std::sync::MutexGuard<'_, (u64, Option<String>)> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// A new mail window: the last one's title is gone. The generation its title handler writes under.
+    pub fn begin(&self) -> u64 {
+        let mut s = self.slot();
+        *s = (s.0 + 1, None);
+        s.0
+    }
+
+    /// The page of the window of `generation` now has `title`; ignored for any other window.
+    pub fn set(&self, generation: u64, title: String) {
+        let mut s = self.slot();
+        if s.0 == generation {
+            s.1 = Some(title);
+        }
+    }
+
+    pub fn get(&self) -> Option<String> {
+        self.slot().1.clone()
+    }
+
+    /// The window is closed: its title is forgotten and its late titles are dropped.
+    pub fn clear(&self) {
+        let mut s = self.slot();
+        *s = (s.0 + 1, None);
+    }
+}
+
+impl Default for PageTitle {
+    fn default() -> PageTitle {
+        PageTitle::new()
+    }
+}
+
+/// The one mail window's page title.
+pub static PAGE_TITLE: PageTitle = PageTitle::new();
 
 // ---- one mail window at a time (spec §5.4) -----------------------------------------------------
 
@@ -424,11 +476,17 @@ pub fn run_in_window(app: &tauri::AppHandle, provider: Provider, path: &str, arg
     run(&Window(w), provider, path, args, timeout)
 }
 
-/// [`signed_in`] for the open mail window, now.
+/// The open mail window's page title ([`PAGE_TITLE`]); `None` with no mail window.
+pub fn page_title(app: &tauri::AppHandle) -> Option<String> {
+    app.get_webview_window(WINDOW)?;
+    PAGE_TITLE.get()
+}
+
+/// [`signed_in`] for the open mail window, now: its URL and its page's title.
 pub fn window_signed_in(app: &tauri::AppHandle, provider: Provider) -> bool {
     let Some(w) = app.get_webview_window(WINDOW) else { return false };
     let url = w.url().ok().map(|u| u.to_string());
-    signed_in(provider, url.as_deref(), &w.title().unwrap_or_default())
+    signed_in(provider, url.as_deref(), &page_title(app).unwrap_or_default())
 }
 
 /// The sign-in window: `mail`, visible and centred, at the provider's mailbox, on `profile`.
@@ -454,6 +512,7 @@ fn open(app: &tauri::AppHandle, data_dir: &Path, profile: &Path, provider: Provi
         .map_err(|_| "the mailbox address is not a URL".to_string())?;
     std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
     let opener = app.clone();
+    let generation = PAGE_TITLE.begin();
     let w = WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(url))
         .title(if visible { "Sign in to your email" } else { "Knowlu email setup" })
         .inner_size(1000.0, 760.0)
@@ -464,6 +523,11 @@ fn open(app: &tauri::AppHandle, data_dir: &Path, profile: &Path, provider: Provi
         .data_directory(profile.to_path_buf())
         .initialization_script(INIT_SCRIPT)
         .on_new_window(move |url, features| open_popup(&opener, provider, &url, features))
+        .on_document_title_changed(move |w, title| {
+            if w.label() == WINDOW {
+                PAGE_TITLE.set(generation, title);
+            }
+        })
         .build()
         .map_err(|e| e.to_string())?;
     refuse_external_schemes(&w);
@@ -529,6 +593,7 @@ pub fn close(app: &tauri::AppHandle) {
             let _ = w.destroy();
         }
     }
+    PAGE_TITLE.clear();
 }
 
 /// S3: a page's launch of an external scheme (`mailto:`, an app's own) is cancelled, so no
