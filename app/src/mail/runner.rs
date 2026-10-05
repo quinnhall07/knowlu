@@ -465,8 +465,8 @@ impl Runner<'_> {
 
     /// §4.2 step 1, §4.3 step 1: the visible window until the page reads as a signed-in mailbox; the
     /// mailbox's own address is its hint. A window the student closes is a cancelled setup. The title
-    /// turns before the page has drawn the address (T18c), so a page that reads signed in with no address
-    /// is read again each second for [`SIGN_IN_READ`] before the step ends `not found`.
+    /// turns before the page has drawn the address (T18c), so the page is read again each second for
+    /// [`SIGN_IN_READ`] from the title first reading signed in before the step ends `not found`.
     fn sign_in(&mut self) -> Outcome {
         self.say("sign in to your email");
         if self.host().open_window(&self.profile, true).is_err() {
@@ -484,6 +484,9 @@ impl Runner<'_> {
             } else if self.rotating() {
                 return Outcome::Done;
             } else {
+                // The read's clock starts when the title first reads signed in, so a page that errs while
+                // Outlook finishes navigating (`Wait`) near the limit still gets its read (T18c review).
+                let by = *read_by.get_or_insert(self.clock().now() + SIGN_IN_READ);
                 match self.probe() {
                     // The service's refusal is named by its status and sentence (T18c): another of the
                     // account's mailboxes holding this address is not a sign-in that did not finish.
@@ -498,7 +501,6 @@ impl Runner<'_> {
                         };
                     }
                     Probe::NotFound => {
-                        let by = *read_by.get_or_insert(self.clock().now() + SIGN_IN_READ);
                         if self.clock().now() >= by {
                             return Outcome::NotFound;
                         }

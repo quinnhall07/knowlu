@@ -7,7 +7,8 @@
 //   { result: "not found", control: "switch" | "address" | "save" }   (address: forwarding is on and the
 //      field that says where to cannot be found or is empty, so it cannot be told whether the student's own
 //      is there; save: no Save came after the switch was turned off, which is then turned back on)
-//   { result: "failed", reason: "no address" | "save did not settle" | "read back differed" }
+//   { result: "failed", reason: "no address" | "switch changed" | "save did not settle" | "read back differed" }
+//      (switch changed: the switch was redrawn off while the address was read, so nothing was clicked)
 // Live Outlook (T18c) draws the dialog after the document is complete and shows no Save until something
 // is changed, so Save is looked for only after the switch is turned off.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
@@ -60,7 +61,7 @@ if (norm(there.value) !== address) return { result: "elsewhere" };
 // Re-read at click time: the dialog may have redrawn the switch during the field's wait.
 const sw = switchEl();
 if (!sw) return { result: "not found", control: "switch" };
-if (sw.checked !== true) return { result: "failed", reason: "read back differed" };
+if (sw.checked !== true) return { result: "failed", reason: "switch changed" };
 sw.click();
 if (!(await until(() => saveEl() && !disabled(saveEl()), waitMs))) {
   // Only the click made here is undone: the switch goes back on, so no unsaved change is left.

@@ -379,6 +379,30 @@ Deno.test("m365_forwarding_off_leaves_forwarding_whose_address_is_empty", async 
   assertEquals(f.snap(), before);
 });
 
+Deno.test("m365_forwarding_off_rereads_the_switch_at_click_time", async () => {
+  // The dialog redraws while the address field is waited for: the switch read on, before the wait, is
+  // swapped for a new one that is off. The script reads the switch again before it clicks, so it clicks
+  // nothing, saves nothing, and names what it saw rather than a read-back (nothing was written).
+  const f = forwarding({ on: true, to: OURS, keep: true });
+  await drawn();
+  f.el("to").value = "";
+  setTimeout(() => {
+    const fresh = f.page.document.createElement("input");
+    fresh.setAttribute("type", "checkbox");
+    fresh.setAttribute("role", "switch");
+    fresh.checked = false;
+    fresh.addEventListener("click", () => f.clicks.push({ id: "fwd-new", before: f.snap() }));
+    f.el("fwd").replaceWith(fresh);
+    fresh.id = "fwd";
+  }, 50);
+  setTimeout(() => (f.el("to").value = OURS), 120);
+  const r = await run("m365/forwarding_off.js", f.page, { address: OURS, wait_ms: 1000 });
+  assertEquals(r, { result: "failed", reason: "switch changed" });
+  assertEquals(f.clicks.length, 0);
+  assertEquals(f.saves, 0);
+  assertEquals(f.snap(), { on: false, to: OURS, keep: true });
+});
+
 Deno.test("m365_a_save_that_does_not_settle_is_reported_failed", async () => {
   const f = forwarding({ on: false, sticky: true });
   const r = await run("m365/forwarding_set.js", f.page, { address: OURS, settle_ms: 200 });

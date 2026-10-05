@@ -2220,6 +2220,29 @@ fn a_sign_in_that_takes_in_the_last_seconds_still_gets_its_read_and_names_why() 
 }
 
 #[test]
+fn a_sign_in_whose_page_is_still_navigating_at_the_limit_still_gets_its_read() {
+    // T18c review: the 45 s read starts when the title first reads signed in, not on the first `not found`.
+    // Here the title turns 10 s before the limit and the script errs for 15 s while Outlook finishes
+    // navigating (a `Wait`), past the limit; the page then reads, so the step names why, never cancelled.
+    let r = rig("t18c-late-navigating");
+    {
+        let mut h = r.host.lock().unwrap();
+        h.signed_in = false;
+        h.signed_in_from = Some((r.clk.clone(), NOW + 15 * 60 - 10));
+    }
+    let mut answers = vec![json!({ "result": "failed", "reason": "page not ready" }); 15];
+    answers.push(address_not_drawn());
+    queue(&r, "m365/signin.js", answers);
+    let p = wait(&r.start(curated_m365(), true));
+    assert_eq!((p.ended, p.line), (Some("failed"), Some("sign-in")));
+    let s = row(&p, "sign_in");
+    assert_eq!((s.state, s.reason), ("failed", Some("not_found")));
+    assert!(r.calls("m365/signin.js").len() > 15, "the page was read after it stopped erring");
+    let waited = r.clk.at() - NOW;
+    assert!((15 * 60 - 10 + 45..=15 * 60 + 60).contains(&waited), "the read ran 45 s from the title: {waited} s");
+}
+
+#[test]
 fn forwarding_elsewhere_is_asked_and_only_a_yes_replaces_it() {
     let ours = json!({ "result": "ok", "forwarding": "on", "to": "ours", "keep_copy": true, "changed": true });
     let r = rig("t113-else");
