@@ -1,7 +1,9 @@
 // Microsoft 365, Settings > Mail > Forwarding: read the forwarding setting and change nothing (spec 4.2
 // step 3's check, 4.11 step 2). The caller has already navigated to the Forwarding page (never a reload).
 // Like every step script it is the body of an async function of `args`; `args.address` is this mailbox's
-// Knowlu forwarding address. It returns one of
+// Knowlu forwarding address; `args.draw_ms` (default 15000) bounds the wait for the dialog to draw its
+// switch and `args.wait_ms` (default 5000) the wait for the address field while forwarding is on (live
+// Outlook draws both after the document is complete, T18c). It returns one of
 //   { result: "ok", forwarding: "on" | "off", to: "none" | "ours" | "elsewhere", keep_copy: boolean }
 //   { result: "not found", control: "switch" | "address" }   (the page lacks a control: guided steps)
 //   { result: "failed", reason: "no address" }
@@ -29,10 +31,22 @@ const norm = (v) => String(v || "").trim().toLowerCase();
 const address = norm(args && args.address);
 if (!address) return { result: "failed", reason: "no address" };
 
-const sw = named('input[role="switch"]', /forward/i);
-if (!sw) return { result: "not found", control: "switch" };
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+const until = async (ready, ms) => {
+  for (let waited = 0; !ready() && waited < ms; waited += 50) await sleep(50);
+  return ready();
+};
+const switchEl = () => named('input[role="switch"]', /forward/i);
+const fieldEl = () => named('input[type="text"], input[type="email"], input:not([type])', /forward.*\bto\b/i);
+const drawMs = Number(args.draw_ms) >= 0 ? Number(args.draw_ms) : 15000;
+const waitMs = Number(args.wait_ms) >= 0 ? Number(args.wait_ms) : 5000;
+
+if (!(await until(() => switchEl(), drawMs))) return { result: "not found", control: "switch" };
+const sw = switchEl();
 const on = sw.checked === true;
-const field = named('input[type="text"], input[type="email"], input:not([type])', /forward.*\bto\b/i);
+// A field drawn empty may be filled in a moment later: while forwarding is on, it is given the wait.
+if (on) await until(() => fieldEl() && norm(fieldEl().value) !== "", waitMs);
+const field = fieldEl();
 if (on && !field) return { result: "not found", control: "address" };
 const typed = field ? norm(field.value) : "";
 const keep = named('input[type="checkbox"]', /keep a copy/i);

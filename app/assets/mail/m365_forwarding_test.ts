@@ -3,7 +3,7 @@
 // spikes' selectors (research note 6: the switch is `input[role=switch]`, read by `checked`); the rest
 // of its controls are found by their visible names, which the page here carries. No address is real.
 import { assert, assertEquals } from "@std/assert";
-import { disable, El, load, Page, run } from "./test_dom.ts";
+import { El, load, Page, run } from "./test_dom.ts";
 
 const OURS = "box-1@in.example.invalid";
 const OTHER = "someone@elsewhere.example.invalid";
@@ -15,8 +15,12 @@ interface Opts {
   /** aria-checked as the page left it, which is not what the switch holds. */
   aria?: "true" | "false";
   without?: "switch" | "address" | "keep" | "save";
-  /** The Save button stays enabled after a click: the page never says it saved. */
+  /** The Save button stays after a click: the page never says it saved. */
   sticky?: boolean;
+  /** How long after the page loads the dialog draws its controls (T18c: Outlook draws it lazily). */
+  draw_ms?: number;
+  /** How long after the switch turns on the address field and keep-a-copy are drawn. */
+  reveal_ms?: number;
 }
 
 interface Snap {
@@ -33,71 +37,96 @@ interface Forwarding {
   el(id: string): El;
 }
 
+// The page as live Outlook draws it (T18c, 2026-10-05, read on a university tenant): a Settings dialog with
+// a "Forwarding" heading, drawn after the page loads; the switch is `input type=checkbox role=switch`
+// labelled "Enable forwarding" by a <label>; the address field and keep-a-copy are drawn only while the
+// switch is on; and there is **no Save button until something is changed**, so a clean page, on or off,
+// has none. A save takes the change and the Save button goes away.
 function forwarding(o: Opts = {}): Forwarding {
-  const on = o.on ?? false;
   const w = o.without;
-  const aria = o.aria ?? (on ? "true" : "false");
   const page = load(`
-    <div role="main"><h2>Forwarding</h2>
+    <div role="dialog"><div role="heading">Forwarding</div>
+      <button type="button">Layout</button><button type="button">Compose and reply</button>
+      <button type="button">clear</button><button type="button" aria-label="Close settings">x</button>
       <div><input id="convo" type="checkbox" role="switch" aria-checked="true" checked>
         <label for="convo">Group messages by conversation</label></div>
-      ${
-    w === "switch"
-      ? ""
-      : `<div><input id="fwd" type="checkbox" role="switch" aria-checked="${aria}" ${on ? "checked" : ""}>
-        <label for="fwd">Enable forwarding</label></div>`
-  }
-      ${
-    w === "address" ? "" : `<div><label for="to">Forward my email to:</label>
-        <input id="to" type="text" value="${o.to ?? ""}"></div>`
-  }
-      ${
-    w === "keep" ? "" : `<div><input id="keep" type="checkbox" ${o.keep ? "checked" : ""}>
-        <label for="keep">Keep a copy of forwarded messages</label></div>`
-  }
-      ${w === "save" ? "" : `<button id="save" type="button">Save</button>`}
-      <button id="discard" type="button">Discard</button></div>`);
+      <div id="body"></div><div id="foot"></div></div>`);
   const d = page.document;
   const f: Forwarding = {
     page,
     saves: 0,
     saved: null,
     el: (id) => d.getElementById(id),
-    snap: () => ({
-      on: !!f.el("fwd")?.checked,
-      to: f.el("to")?.value ?? "",
-      keep: !!f.el("keep")?.checked,
-    }),
+    snap: () => ({ on: !!f.el("fwd")?.checked, to: f.el("to")?.value ?? "", keep: !!f.el("keep")?.checked }),
   };
+  let held: Snap = { on: o.on ?? false, to: o.to ?? "", keep: o.keep ?? false };
   let dirty = false;
-  const sync = () => {
-    const live = !!f.el("fwd")?.checked;
-    if (f.el("to")) disable(f.el("to"), !live);
-    if (f.el("keep")) disable(f.el("keep"), !live && !f.el("keep").checked);
-    if (f.el("save")) disable(f.el("save"), !dirty);
-  };
-  // What a browser does with a click on a checkbox: it toggles `checked` and leaves aria-checked alone.
-  for (const box of d.querySelectorAll('input[type="checkbox"]')) {
-    box.addEventListener("click", () => {
-      box.checked = !box.checked;
-      dirty = true;
-      sync();
-    });
-  }
-  f.el("to")?.addEventListener("input", () => {
+  const changed = () => {
     dirty = true;
-    sync();
-  });
-  f.el("save")?.addEventListener("click", () => {
-    if (f.el("save").hasAttribute("disabled")) return;
-    f.saves++;
-    f.saved = f.snap();
-    dirty = o.sticky ? dirty : false;
-    sync();
-  });
-  sync();
+    footer();
+  };
+  const footer = () => {
+    if (w === "save") return;
+    if (dirty && !f.el("save")) {
+      f.el("foot").insertAdjacentHTML("beforeend", `<button id="save" type="button">Save</button>`);
+      f.el("save").addEventListener("click", () => {
+        f.saves++;
+        f.saved = f.snap();
+        held = f.saved;
+        if (o.sticky) return;
+        dirty = false;
+        f.el("save").remove();
+      });
+    }
+  };
+  const box = (el: El) =>
+    el.addEventListener("click", () => {
+      // What a browser does with a click on a checkbox: it toggles `checked` and leaves aria-checked alone.
+      el.checked = !el.checked;
+      if (el.id === "fwd") reveal();
+      changed();
+    });
+  const reveal = () => {
+    if (!f.el("fwd").checked) {
+      f.el("rest")?.remove();
+      return;
+    }
+    setTimeout(() => {
+      if (!f.el("fwd")?.checked || f.el("rest")) return;
+      const field = w === "address" ? "" : `<div><label for="to">Forward my email to:</label>
+        <input id="to" type="text"></div>`;
+      const keep = w === "keep" ? "" : `<div><input id="keep" type="checkbox">
+        <label for="keep">Keep a copy of forwarded messages</label></div>`;
+      f.el("body").insertAdjacentHTML("beforeend", `<div id="rest">${field}${keep}</div>`);
+      if (f.el("to")) {
+        f.el("to").value = held.to;
+        f.el("to").addEventListener("input", changed);
+      }
+      if (f.el("keep")) {
+        f.el("keep").checked = held.keep;
+        box(f.el("keep"));
+      }
+    }, o.reveal_ms ?? 30);
+  };
+  box(f.el("convo"));
+  if (w !== "switch") {
+    setTimeout(() => {
+      const aria = o.aria ?? (held.on ? "true" : "false");
+      f.el("body").insertAdjacentHTML(
+        "afterbegin",
+        `<div><input id="fwd" type="checkbox" role="switch" aria-checked="${aria}">
+          <label for="fwd">Enable forwarding</label></div>`,
+      );
+      f.el("fwd").checked = held.on;
+      box(f.el("fwd"));
+      if (held.on) reveal();
+    }, o.draw_ms ?? 30);
+  }
   return f;
 }
+
+/** Waits until the synthetic page has drawn what it draws on load. */
+const drawn = () => new Promise((done) => setTimeout(done, 120));
 
 const NOT_FOUND = (control: string) => ({ result: "not found", control });
 
@@ -109,6 +138,62 @@ Deno.test("m365_forwarding_set_turns_it_on_with_keep_copy_and_reads_it_back", as
   assertEquals(f.saved, { on: true, to: OURS, keep: true });
   // The decoy switch on the same page is not the forwarding switch and is left alone.
   assert(f.el("convo").checked);
+});
+
+Deno.test("m365_the_live_page_has_no_save_until_the_switch_is_turned_on", async () => {
+  // T18c: Outlook shows no Save while forwarding is off and nothing has changed. The switch is all a
+  // script may require up front; Save is waited for once the change is made.
+  const f = forwarding({ on: false });
+  await drawn();
+  assertEquals(f.el("save"), null, "a clean page has no Save");
+  const r = await run("m365/forwarding_set.js", f.page, { address: OURS });
+  assertEquals(r, { result: "ok", forwarding: "on", to: "ours", keep_copy: true, changed: true });
+  assertEquals(f.saves, 1);
+  assertEquals(f.saved, { on: true, to: OURS, keep: true });
+});
+
+Deno.test("m365_a_dialog_drawn_late_is_waited_for", async () => {
+  // The scripts start as soon as the document is complete; the Settings dialog draws after that.
+  const a = forwarding({ on: false, draw_ms: 400, reveal_ms: 300 });
+  const set = await run("m365/forwarding_set.js", a.page, { address: OURS });
+  assertEquals(set, { result: "ok", forwarding: "on", to: "ours", keep_copy: true, changed: true });
+  const b = forwarding({ on: true, to: OURS, keep: true, draw_ms: 400, reveal_ms: 300 });
+  const read = await run("m365/forwarding_read.js", b.page, { address: OURS });
+  assertEquals(read, { result: "ok", forwarding: "on", to: "ours", keep_copy: true });
+  const c = forwarding({ on: true, to: OURS, keep: true, draw_ms: 400, reveal_ms: 300 });
+  assertEquals(await run("m365/forwarding_off.js", c.page, { address: OURS }), {
+    result: "ok",
+    forwarding: "off",
+    changed: true,
+  });
+  assertEquals(c.saved?.on, false);
+});
+
+Deno.test("m365_forwarding_off_waits_for_save_after_the_change_and_puts_the_switch_back_without_one", async () => {
+  // On, ours and clean: no Save yet. Turning it off draws one.
+  const f = forwarding({ on: true, to: OURS, keep: true });
+  await drawn();
+  assertEquals(f.el("save"), null, "a clean page has no Save");
+  // A page that never draws Save: the switch is put back, nothing is left unsaved, nothing is saved.
+  const g = forwarding({ on: true, to: OURS, keep: true, without: "save" });
+  await drawn();
+  const before = g.snap();
+  assertEquals(await run("m365/forwarding_off.js", g.page, { address: OURS, wait_ms: 100 }), NOT_FOUND("save"));
+  await drawn();
+  assertEquals(g.snap(), before);
+  assertEquals(g.saves, 0);
+});
+
+Deno.test("m365_forwarding_set_puts_back_every_change_when_save_never_comes", async () => {
+  // Forwarding on to another address, the student said replace: the address and keep-copy are changed,
+  // then Save never draws. Both are put back, so the page holds no unsaved change.
+  const f = forwarding({ on: true, to: OTHER, keep: false, without: "save" });
+  await drawn();
+  const before = f.snap();
+  const r = await run("m365/forwarding_set.js", f.page, { address: OURS, replace: true, wait_ms: 100 });
+  assertEquals(r, NOT_FOUND("save"));
+  assertEquals(f.snap(), before);
+  assertEquals(f.saves, 0);
 });
 
 Deno.test("m365_forwarding_set_on_a_page_already_set_saves_nothing", async () => {
@@ -159,7 +244,8 @@ Deno.test("m365_forwarding_elsewhere_is_reported_not_replaced", async () => {
 Deno.test("m365_a_missing_control_returns_not_found", async () => {
   for (const script of ["forwarding_read.js", "forwarding_set.js", "forwarding_off.js"]) {
     const f = forwarding({ without: "switch" });
-    assertEquals(await run(`m365/${script}`, f.page, { address: OURS }), NOT_FOUND("switch"), script);
+    // The switch is waited for (the dialog draws late); `draw_ms` bounds the wait on a page that has none.
+    assertEquals(await run(`m365/${script}`, f.page, { address: OURS, draw_ms: 200 }), NOT_FOUND("switch"), script);
     assertEquals(f.saves, 0, script);
   }
   // A control only a write needs: the script says which, and leaves the page as it found it.
@@ -167,6 +253,7 @@ Deno.test("m365_a_missing_control_returns_not_found", async () => {
     const [without, control] of [["address", "address"], ["keep", "keep copy"], ["save", "save"]] as const
   ) {
     const f = forwarding({ on: false, without });
+    await drawn();
     const before = f.snap();
     assertEquals(
       await run("m365/forwarding_set.js", f.page, { address: OURS, wait_ms: 50 }),
@@ -179,13 +266,14 @@ Deno.test("m365_a_missing_control_returns_not_found", async () => {
   // Forwarding is on but the address field cannot be found (a renamed label): turning it off could switch
   // off forwarding that points elsewhere, so the script says what it cannot find and clicks nothing.
   const g = forwarding({ on: true, to: OTHER, without: "address" });
+  await drawn();
   const kept = g.snap();
-  assertEquals(await run("m365/forwarding_off.js", g.page, { address: OURS }), NOT_FOUND("address"));
+  assertEquals(await run("m365/forwarding_off.js", g.page, { address: OURS, wait_ms: 50 }), NOT_FOUND("address"));
   assertEquals(g.saves, 0);
   assertEquals(g.snap(), kept);
   // An empty page (a sign-in or error page that answered on the mail origin) has no control either.
   assertEquals(
-    await run("m365/forwarding_read.js", { ...load("<p>Oops</p>") }, { address: OURS }),
+    await run("m365/forwarding_read.js", { ...load("<p>Oops</p>") }, { address: OURS, draw_ms: 200 }),
     NOT_FOUND("switch"),
   );
 });
@@ -233,6 +321,7 @@ Deno.test("m365_forwarding_off_leaves_forwarding_whose_address_is_empty", async 
   // Checkpoint C, R4: the switch is on and the "Forward to" field is drawn empty (Outlook fills it in
   // after it draws). Forwarding may go to the student's own address, so nothing is clicked.
   const f = forwarding({ on: true, to: "", keep: true });
+  await drawn();
   const before = f.snap();
   assertEquals(await run("m365/forwarding_off.js", f.page, { address: OURS }), NOT_FOUND("address"));
   assertEquals(f.saves, 0);
