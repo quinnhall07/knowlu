@@ -16,7 +16,8 @@
 //! WebView2's script-completion value (S1a), never IPC. Every refusal is a fixed word: no page text,
 //! address, URL or session ever reaches an error, a log or telemetry. Setup drives the page by
 //! script evaluation only; nothing here simulates a keyboard or a mouse, and the window has no
-//! debugging port.
+//! debugging port (a debug build's diagnostic hook aside, `crate::debug_port`, which no release
+//! build contains).
 use crate::mail_steps::Provider;
 use serde_json::{json, Value};
 
@@ -513,7 +514,7 @@ fn open(app: &tauri::AppHandle, data_dir: &Path, profile: &Path, provider: Provi
     std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
     let opener = app.clone();
     let generation = PAGE_TITLE.begin();
-    let w = WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(url))
+    let builder = WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(url))
         .title(if visible { "Sign in to your email" } else { "Knowlu email setup" })
         .inner_size(1000.0, 760.0)
         .center()
@@ -527,9 +528,14 @@ fn open(app: &tauri::AppHandle, data_dir: &Path, profile: &Path, provider: Provi
             if w.label() == WINDOW {
                 PAGE_TITLE.set(generation, title);
             }
-        })
-        .build()
-        .map_err(|e| e.to_string())?;
+        });
+    // A debug build's diagnostic port, never a release's (`crate::debug_port`).
+    #[cfg(debug_assertions)]
+    let builder = match crate::debug_port::mail_browser_args() {
+        Some(args) => builder.additional_browser_args(&args),
+        None => builder,
+    };
+    let w = builder.build().map_err(|e| e.to_string())?;
     refuse_external_schemes(&w);
     Ok(())
 }
