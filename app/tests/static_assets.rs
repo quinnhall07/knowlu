@@ -2570,6 +2570,20 @@ fn a_sign_in_the_service_refuses_says_so_and_points_at_settings() {
 }
 
 #[test]
+fn a_refused_sign_in_never_promises_that_starting_again_fixes_it() {
+    // T18c review: a 422 (the address does not fit the provider) or a 409 refuses every retry the same way,
+    // so the row names the service's reason (the ended line, shown below the rows) and promises nothing.
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    let words = v.split("var MP_STEP_REASON = { sign_in: {").nth(1).expect("sign-in's own reasons").split("} };").next().unwrap();
+    let refused = words.split("refused:").nth(1).expect("refused has words").split("\"").nth(1).unwrap();
+    assert!(!refused.contains("again"), "{refused}");
+    assert!(refused.contains("below"), "it points at the service's reason: {refused}");
+    // already_connected's row says what its ended line says: the line is not shown a second time.
+    assert!(v.contains("if (p.rows.some(function (x) { return x.reason === \"already_connected\"; })) { end = \"\"; }"), "the already_connected line is dropped");
+}
+
+#[test]
 fn an_ended_setup_never_shows_the_same_sentence_twice() {
     // T18c (2026-10-05): a refused mint ends with the service's sentence as both the view's sentence and
     // the ended line (Settings reads the line); the view shows it once.

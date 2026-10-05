@@ -1439,6 +1439,8 @@ struct Sv {
     mint_refused: Option<(u16, String)>,
     /// `POST /addresses/<id>/hint` answers this status and `{"error": <sentence>}`.
     hint_refused: Option<(u16, String)>,
+    /// `DELETE /addresses/<id>` answers 502 (the mailbox's stored mail could not be deleted).
+    delete_refused: bool,
 }
 
 fn setup_service(sv: &Arc<Mutex<Sv>>, ev: &Events) -> Service {
@@ -1504,6 +1506,9 @@ fn setup_service(sv: &Arc<Mutex<Sv>>, ev: &Events) -> Service {
             ("POST", "/reconcile") => (200, json!({ "address_id": A, "key": FPKEY_B64, "held": [] }).to_string()),
             ("DELETE", p) if p.starts_with("/addresses/") => {
                 note("delete address");
+                if s.delete_refused {
+                    return (502, r#"{"error":"the mailbox's stored mail could not be deleted"}"#.to_string());
+                }
                 (200, r#"{"deleted":true}"#.to_string())
             }
             ("GET", p) if p.starts_with("/provider") => (200, json!({ "domain": "x", "provider": s.provider_of }).to_string()),
@@ -2265,6 +2270,13 @@ fn a_mailbox_another_setup_already_holds_fails_sign_in_as_already_connected() {
     assert_eq!((p.ended, p.line), (Some("failed"), Some(other)));
     assert_eq!(row(&p, "sign_in").reason, Some("refused"));
     assert!(o.events().contains(&"svc delete address".to_string()));
+
+    // The hint route's other 409 is a sentence the device knows too (T18c review).
+    let set = "this mailbox's own address is already set";
+    let a = rig("t18c-hint-set");
+    a.sv.lock().unwrap().hint_refused = Some((409, set.to_string()));
+    let p = wait(&a.start(curated_m365(), true));
+    assert_eq!((p.ended, p.line), (Some("failed"), Some(set)));
 }
 
 #[test]
@@ -2294,17 +2306,42 @@ fn a_setup_that_ends_before_forwarding_was_set_removes_its_new_address() {
     // T18c (2026-10-05): a setup stopped at a forwarding step whose script changed nothing left its address
     // pending and holding the mailbox's hint, so the next setup of that mailbox was refused. Nothing was
     // set in the mailbox, so the address goes, as a closed sign-in window's does.
+    // Removed: the forwarding script found nothing, and Stop came while it ran, so no guided step (the
+    // address with Copy) was ever shown.
     let not_found = json!({ "result": "not found", "control": "switch" });
     let r = rig("t18c-withdrawn");
     queue(&r, "m365/forwarding_set.js", vec![not_found.clone()]);
-    let shared = r.start(curated_m365(), true);
-    until("the guided forwarding", || has(&shared, "forwarding", "failed"));
-    shared.stop();
-    let p = wait(&shared);
+    let setups = r.setups.clone();
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if name == "m365/forwarding_set.js" {
+            setups.current().expect("a setup is running").stop();
+        }
+    }));
+    let p = wait(&r.start(curated_m365(), true));
     assert_eq!(p.ended, Some("stopped"));
-    assert!(p.line.is_some_and(|l| l.contains("removed")), "it says the address went: {:?}", p.line);
+    assert!(p.line.is_some_and(|l| l.contains("was removed")), "it says the address went: {:?}", p.line);
     assert!(r.events().contains(&"svc delete address".to_string()), "{:?}", r.events());
     assert!(!session_dir(&r.dir, A).unwrap().exists(), "its profile is gone");
+
+    // Kept (T18c review): the failed forwarding fell to its guided step, which shows the address with Copy;
+    // the student may have pasted it into the mailbox's settings without saying so.
+    let s = rig("t18c-kept-shown");
+    queue(&s, "m365/forwarding_set.js", vec![not_found.clone()]);
+    let shared = s.start(curated_m365(), true);
+    until("the guided forwarding", || has(&shared, "forwarding", "failed"));
+    shared.stop();
+    assert_eq!(wait(&shared).line, Some("setup stopped"));
+    assert!(!s.events().contains(&"svc delete address".to_string()), "the guided step showed the address");
+
+    // Kept: a guided provider shows the address with Copy from its first step.
+    let gd = rig("t18c-kept-guided");
+    gd.sv.lock().unwrap().provider_of = "other".into();
+    let shared = gd.start(uncurated(), true);
+    answer_address(&shared);
+    until("the guided forwarding", || has(&shared, "forwarding", "needs_you"));
+    shared.stop();
+    assert_eq!(wait(&shared).line, Some("setup stopped"));
+    assert!(!gd.events().contains(&"svc delete address".to_string()), "a guided step's address may be in use");
 
     // Kept: the student said they did the guided step, even though its check failed.
     let k = rig("t18c-kept-by-hand");
@@ -2336,6 +2373,45 @@ fn a_setup_that_ends_before_forwarding_was_set_removes_its_new_address() {
     assert!(shared.answer(Answer::Replace(false)));
     assert_eq!(wait(&shared).ended, Some("stopped"));
     assert!(n.events().contains(&"svc delete address".to_string()));
+}
+
+#[test]
+fn a_setup_whose_backfill_began_never_removes_its_address() {
+    // T18c review: revoking an address purges the mail stored under it (`mail/handler.ts` purgeAddress). A
+    // forwarding that found nothing does not hold the backfill back, so a Stop during that backfill must
+    // not revoke the address the mail was brought in under.
+    let r = rig("t18c-backfilled-kept");
+    r.host.lock().unwrap().msgs = ana_mail(2);
+    queue(&r, "m365/forwarding_set.js", vec![json!({ "result": "not found", "control": "switch" })]);
+    let setups = r.setups.clone();
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if name == "m365/forward.js" {
+            setups.current().expect("a setup is running").stop();
+        }
+    }));
+    let p = wait(&r.start(curated_m365(), true));
+    assert_eq!((p.ended, p.line), (Some("stopped"), Some("setup stopped")));
+    let ev = r.events();
+    assert!(ev.contains(&"svc batch".to_string()), "the backfill began: {ev:?}");
+    assert!(!ev.contains(&"svc delete address".to_string()), "the mail brought in is kept: {ev:?}");
+}
+
+#[test]
+fn a_withdrawal_the_service_refuses_never_says_the_address_was_removed() {
+    // T18c review: the DELETE failed (502, or offline), yet the line said the address was removed. It says
+    // it could not be, and points at Settings → Email to turn it off.
+    let r = rig("t18c-withdraw-refused");
+    r.sv.lock().unwrap().delete_refused = true;
+    queue(&r, "m365/forwarding_set.js", vec![json!({ "result": "elsewhere" })]);
+    let shared = r.start(curated_m365(), true);
+    until("the question", || shared.progress().ask == Some("forwarding_elsewhere"));
+    assert!(shared.answer(Answer::Replace(false)));
+    let p = wait(&shared);
+    assert!(r.events().contains(&"svc delete address".to_string()), "the delete was asked");
+    assert_eq!(p.ended, Some("stopped"));
+    let line = p.line.expect("a line");
+    assert!(!line.contains("was removed"), "{line}");
+    assert!(line.contains("could not be removed") && line.contains("Settings") && line.contains("Email"), "{line}");
 }
 
 #[test]

@@ -112,6 +112,7 @@ impl MailError {
             MailError::Refused { status: 429, reason } if reason == MINT_CAP => MINT_CAP,
             MailError::Refused { status: 409, reason } if reason == HINT_HELD => HINT_HELD,
             MailError::Refused { status: 422, reason } if reason == HINT_MISFIT => HINT_MISFIT,
+            MailError::Refused { status: 409, reason } if reason == HINT_SET => HINT_SET,
             MailError::Refused { .. } => "the account service refused the request",
             MailError::NoSession => "there is no signed-in session on this device",
             MailError::SignIn => "the account service did not accept this sign-in; sign in again",
@@ -128,6 +129,8 @@ impl MailError {
 
 /// The hint route's refusal of an address that does not fit the mailbox's provider (`mail/handler.ts`).
 const HINT_MISFIT: &str = "this address does not fit the mailbox's provider";
+/// The hint route's refusal when this mailbox's own address is already set (`mail/handler.ts` `ALREADY`).
+const HINT_SET: &str = "this mailbox's own address is already set";
 
 /// A backfill batch opens a window on a date; a recover batch on an instant (spec §6.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

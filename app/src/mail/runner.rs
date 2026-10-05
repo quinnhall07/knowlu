@@ -19,9 +19,10 @@
 //! **A closed sign-in window is "setup cancelled"**: nothing changed, so the address minted for it is
 //! revoked and its profile deleted. **Stop** ends after the step in hand and names what was done. A setup
 //! that ends before its address was ever put in the mailbox (no forwarding script that could change it
-//! answered anything but `not found` or `elsewhere`, and the student never said a step was done) is undone
-//! the same way and says so, so a stalled setup never holds the mailbox's hint against the next one or
-//! counts toward D3's three live addresses (T18c). A sign-in whose address the service refuses names the
+//! answered anything but `not found` or `elsewhere`, no guided step ever showed the address with Copy, the
+//! student never said a step was done, and no backfill began under it) is undone the same way and says so,
+//! so a stalled setup never holds the mailbox's hint against the next one or counts toward D3's three live
+//! addresses (T18c). A removal the service refuses is said as such, never as done. A sign-in whose address the service refuses names the
 //! refusal (`already_connected` when another of the account's mailboxes holds it), and a refused mint shows
 //! the service's own sentence (D3's caps).
 //!
@@ -73,6 +74,8 @@ enum End {
     NeedsYou(&'static str),
     /// Stopped before the Knowlu address was ever put in the mailbox: the address made for it is gone.
     Withdrawn,
+    /// As [`End::Withdrawn`], but the service did not take the delete: the address is still there.
+    NotWithdrawn,
 }
 
 /// A sign-in whose mailbox another of the account's setups already holds (T18c): the service refused its
@@ -80,6 +83,9 @@ enum End {
 const ALREADY_LINE: &str = "this mailbox is already set up in Knowlu: open Settings, then Email, to resume it or turn it off";
 /// A setup that stopped before its address was ever put in the mailbox (T18c).
 const WITHDRAWN_LINE: &str = "setup stopped before forwarding was set, so the Knowlu address made for it was removed";
+/// The same stop, when the service did not take the delete (a 5xx, or no network): it is never said as done.
+const NOT_WITHDRAWN_LINE: &str =
+    "setup stopped before forwarding was set, but the Knowlu address made for it could not be removed: open Settings, then Email, and turn it off";
 
 /// What a rotate that did not finish says: the mailbox forwards to the old address, which the service stops
 /// accepting after its grace (spec §4.6, a retired token).
@@ -111,8 +117,11 @@ struct Runner<'a> {
     /// A rotate has asked the service for the new address: the old one is retired and will stop working.
     rotated: bool,
     /// The Knowlu address may be in the mailbox: a step script that could change the mailbox answered
-    /// anything but `not found` or `elsewhere` (both change nothing), or the student said a step was done.
+    /// anything but `not found` or `elsewhere` (both change nothing), a guided step showed the address with
+    /// Copy, or the student said a step was done.
     placed: bool,
+    /// A backfill began under this address: revoking it would purge the mail brought in (T18c review).
+    backfilled: bool,
     /// The address this setup minted has been revoked.
     revoked: bool,
     /// The service's sentence when it refused the mailbox's address at sign-in.
@@ -137,7 +146,8 @@ pub(super) fn run_setup(plan: &Plan, env: &Env, sh: &Shared) {
                 // Nothing was put in the mailbox: the address goes, so it neither holds the mailbox's hint
                 // against the next setup nor counts as live (T18c).
                 end => match (r.withdraw(), end) {
-                    (true, End::Stopped) => End::Withdrawn,
+                    (Some(true), End::Stopped) => End::Withdrawn,
+                    (Some(false), End::Stopped) => End::NotWithdrawn,
                     (_, end) => end,
                 },
             }
@@ -149,6 +159,7 @@ pub(super) fn run_setup(plan: &Plan, env: &Env, sh: &Shared) {
         End::Finished => ("finished", "setup finished"),
         End::Stopped => ("stopped", "setup stopped"),
         End::Withdrawn => ("stopped", WITHDRAWN_LINE),
+        End::NotWithdrawn => ("stopped", NOT_WITHDRAWN_LINE),
         End::Cancelled => ("cancelled", "setup cancelled"),
         End::Failed(word) => ("failed", word),
     };
@@ -200,7 +211,7 @@ impl<'a> Runner<'a> {
         let machine = Setup::new(provider, plan.setup_day, None);
         let mut r = Runner {
             plan, env, sh, provider, machine, id, knowlu, profile, opened: false, canary_ok: false, said_no: false, gave_up: false, keep,
-            rotated: false, placed: false, revoked: false, refusal: "",
+            rotated: false, placed: false, backfilled: false, revoked: false, refusal: "",
         };
         // A guided provider has no page to read the mailbox's own address from: the one the student typed.
         if let (Provider::Guided, Some(t)) = (provider, typed) {
@@ -289,7 +300,8 @@ impl<'a> Runner<'a> {
 
     /// Revokes the address this setup minted and deletes its profile: a setup that changed nothing. A rotate
     /// minted no mailbox: the mailbox, its kept profile and its open backfill are not this run's to undo.
-    fn revoke(&mut self) {
+    /// `true` when the service took the delete.
+    fn revoke(&mut self) -> bool {
         if self.rotating() {
             if self.opened {
                 self.host().close_window();
@@ -297,26 +309,35 @@ impl<'a> Runner<'a> {
             if !self.keep {
                 let _ = forget_setup(&self.plan.data_dir);
             }
-            return;
+            return false;
         }
-        let _ = self.client().delete_address(&self.id);
+        let deleted = self.client().delete_address(&self.id).is_ok();
         self.revoked = true;
         if self.opened {
             self.host().close_window();
         }
         let _ = if self.keep { forget(&self.plan.data_dir, &self.id) } else { forget_setup(&self.plan.data_dir) };
         let _ = mark_open(&self.plan.data_dir, &self.id, false);
+        deleted
     }
 
     /// A setup that ended any way but finished, whose address was never put in the mailbox, revokes it as a
-    /// closed sign-in window does (§4.2 step 1: nothing changed). `true` when it did so now. A rotate's
-    /// address is the mailbox's own, never this run's to undo.
-    fn withdraw(&mut self) -> bool {
-        if self.rotating() || self.placed || self.revoked {
-            return false;
+    /// closed sign-in window does (§4.2 step 1: nothing changed). `Some` when it tried now, `true` when the
+    /// service took the delete. A rotate's address is the mailbox's own, never this run's to undo, and an
+    /// address a backfill began under holds mail that a revoke would purge.
+    fn withdraw(&mut self) -> Option<bool> {
+        if self.rotating() || self.placed || self.backfilled || self.revoked {
+            return None;
         }
-        self.revoke();
-        true
+        Some(self.revoke())
+    }
+
+    /// The progress view shows a guided step, the Knowlu address with Copy, beside any failed row or a row
+    /// that needs the student's own hand (`console.js` `mpGuide`); the forwarding-elsewhere question's
+    /// buttons replace it.
+    fn guide_shown(&self) -> bool {
+        let shown = |s: &Step| matches!(self.machine.state(*s), State::Failed(_) | State::NeedsYou(Reason::Guided));
+        self.provider.steps().iter().any(shown)
     }
 
     /// Notes a run of a script that could put the Knowlu address in the mailbox: only `not found` and
@@ -353,6 +374,11 @@ impl<'a> Runner<'a> {
                 if let Err(end) = self.rotate_now() {
                     return end;
                 }
+            }
+            // From the first publish that shows the address with Copy, the student may have put it in the mailbox
+            // by hand without saying so: it is never withdrawn (T18c review).
+            if action != Action::Finished && self.guide_shown() {
+                self.placed = true;
             }
             self.publish();
             match action {
@@ -422,7 +448,10 @@ impl Runner<'_> {
             }
             // A rotate changes where mail goes, not what has been brought in.
             Step::Backfill if self.rotating() => Outcome::Done,
-            Step::Backfill => self.backfill(),
+            Step::Backfill => {
+                self.backfilled = true;
+                self.backfill()
+            }
             Step::Finish => {
                 self.say("finishing");
                 self.host().close_window();
