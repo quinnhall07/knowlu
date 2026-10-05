@@ -1382,6 +1382,46 @@ Deno.test("mail_claim_and_mail_resolve_are_pinned_provisionally_to_the_email_mod
   assert(/\bprovisional\b/i.test(above.join("\n")), `${name}: the pins are marked provisional in a SQL comment`);
 });
 
+/** Each kind's `max_tokens` as the whole corpus leaves it: the value its `insert into models` row seeded,
+ *  then every later `update models … max_tokens = N … where kind = '<kind>';`, file by file in order. */
+function currentMaxTokens(files: Array<[string, string]>): Partial<Record<PinKind, number>> {
+  const out: Partial<Record<PinKind, number>> = {};
+  const seed = /\(\s*'(task|event|email|mail_claim|mail_resolve|mail_digest)'\s*,(?:\s*'[^']*'\s*,){4}\s*(\d+)\s*\)/gi;
+  for (const [, raw] of files) {
+    const sql = stripLineComments(raw);
+    for (const m of sql.matchAll(/insert\s+into\s+(?:public\.)?models\b[^;]*;/gi)) {
+      for (const row of m[0].matchAll(seed)) out[row[1] as PinKind] ??= Number(row[2]);
+    }
+    for (const m of sql.matchAll(/update\s+(?:public\.)?models\s+set([^;]*?)where\s+kind\s*=\s*'(\w+)'\s*;/gi)) {
+      const set = /\bmax_tokens\s*=\s*(\d+)/i.exec(m[1]);
+      if (set) out[m[2] as PinKind] = Number(set[1]);
+    }
+  }
+  return out;
+}
+
+const MAIL_CLAIM_MAX_TOKENS = "20261005000100_mail_claim_max_tokens.sql";
+
+Deno.test("mail_claim_alone_is_re_pinned_to_1024_max_tokens_by_one_statement", async () => {
+  // Quinn, 2026-10-05, before T18b's pin check (P8's re-pin path): five claims at the prompt's limits
+  // (title 200, evidence 140, why 140 chars) need ~690+ output tokens, past email's 640, and a
+  // `max_tokens` stop drops every claim as `truncated`. 20261002000200_mail.sql is applied and stays.
+  const files = await everyMigrationFile();
+  const raw = files.find(([n]) => n === MAIL_CLAIM_MAX_TOKENS)?.[1];
+  assert(raw !== undefined, `expected ${MAIL_CLAIM_MAX_TOKENS}`);
+  const { name: mail } = await mailMigration();
+  assert(MAIL_CLAIM_MAX_TOKENS > mail, `stamped after ${mail}, the row's seed`);
+  const statements = stripLineComments(raw!).split(";").filter((s) => s.trim() !== "");
+  assertEquals(statements.length, 1, `${MAIL_CLAIM_MAX_TOKENS}: one statement`);
+  assertEquals(
+    statements[0].replace(/\s+/g, " ").trim(),
+    "update public.models set max_tokens = 1024, since = current_date where kind = 'mail_claim'",
+  );
+  assertEquals(currentMaxTokens(files), { task: 256, event: 256, email: 640, mail_claim: 1024, mail_resolve: 640 });
+  const before = files.filter(([n]) => n < MAIL_CLAIM_MAX_TOKENS);
+  assertEquals(currentMaxTokens(before).mail_claim, 640, "the applied mail migration's seed is unchanged");
+});
+
 // Email forwarding T1.3 (spec §5.1's RPCs and cron, test 14's RPC half and 11's database half; D17,
 // D23 as amended 2026-10-02 by PQ6 (a); plan P7). Textual: the behaviour is smoke-tested on staging.
 
