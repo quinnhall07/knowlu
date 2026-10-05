@@ -129,6 +129,10 @@ pub enum Reason {
     /// The canary did not arrive: the school may be blocking forwarding (D16). Names the steps that
     /// cannot go on as script.
     Blocked,
+    /// Sign-in: another of the account's mailboxes already holds this mailbox's address (T18c).
+    AlreadyConnected,
+    /// Sign-in: the service refused this mailbox's address for another reason.
+    Refused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +157,10 @@ pub enum Outcome {
     ForwardingElsewhere,
     /// The student closed the window, or sign-in did not complete: setup ends, nothing changed.
     Cancelled,
+    /// The service refused the mailbox's address because another of the account's mailboxes holds it.
+    AlreadyConnected,
+    /// The service refused the mailbox's address for any other reason.
+    Refused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,6 +317,8 @@ impl Setup {
             Outcome::ForwardingElsewhere if elsewhere_ok => (State::NeedsYou(Reason::ForwardingElsewhere), false),
             Outcome::NotFound => (State::Failed(Reason::NotFound), true),
             Outcome::Failed | Outcome::ForwardingElsewhere => (State::Failed(Reason::ScriptFailed), true),
+            Outcome::AlreadyConnected => (State::Failed(Reason::AlreadyConnected), true),
+            Outcome::Refused => (State::Failed(Reason::Refused), true),
             Outcome::Cancelled => {
                 self.set(step, State::Skipped);
                 self.end();

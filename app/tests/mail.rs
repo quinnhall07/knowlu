@@ -1435,6 +1435,10 @@ struct Sv {
     provider: String,
     /// `POST /addresses/<id>/rotate` answers 429 (the mint limit).
     rotate_refused: bool,
+    /// `POST /addresses` answers this status and `{"error": <sentence>}` (D3's caps).
+    mint_refused: Option<(u16, String)>,
+    /// `POST /addresses/<id>/hint` answers this status and `{"error": <sentence>}`.
+    hint_refused: Option<(u16, String)>,
 }
 
 fn setup_service(sv: &Arc<Mutex<Sv>>, ev: &Events) -> Service {
@@ -1447,6 +1451,9 @@ fn setup_service(sv: &Arc<Mutex<Sv>>, ev: &Events) -> Service {
         match (r.method.as_str(), path.as_str()) {
             ("POST", "/addresses") => {
                 note("mint");
+                if let Some((status, why)) = &s.mint_refused {
+                    return (*status, json!({ "error": why }).to_string());
+                }
                 s.provider = body["provider"].as_str().unwrap_or("").to_string();
                 (201, json!({ "address_id": A, "address": KNOWLU, "provider": s.provider, "status": "pending" }).to_string())
             }
@@ -1468,6 +1475,9 @@ fn setup_service(sv: &Arc<Mutex<Sv>>, ev: &Events) -> Service {
             }
             ("POST", p) if p.ends_with("/hint") => {
                 note("hint");
+                if let Some((status, why)) = &s.hint_refused {
+                    return (*status, json!({ "error": why }).to_string());
+                }
                 s.hint = body["hint"].as_str().map(str::to_string);
                 (200, json!({ "address_id": A, "mailbox_hint": s.hint }).to_string())
             }
@@ -2226,6 +2236,106 @@ fn forwarding_elsewhere_is_asked_and_only_a_yes_replaces_it() {
     assert_eq!(wait(&shared).ended, Some("stopped"));
     assert_eq!(n.calls("m365/forwarding_set.js").len(), 1, "nothing replaces it without a yes");
     assert!(!n.events().contains(&"svc canary".to_string()));
+}
+
+/// The service's fixed sentence for a hint another of the account's mailboxes holds (`mail/handler.ts`).
+const HINT_HELD: &str = "another of this account's mailboxes has this address";
+
+#[test]
+fn a_mailbox_another_setup_already_holds_fails_sign_in_as_already_connected() {
+    // T18c (2026-10-05): the service refused the page's address because a stalled earlier setup held it,
+    // and the view said "Signing in did not finish". It names the refusal and points at Settings.
+    let r = rig("t18c-held");
+    r.sv.lock().unwrap().hint_refused = Some((409, HINT_HELD.to_string()));
+    let p = wait(&r.start(curated_m365(), true));
+    assert_eq!(p.ended, Some("failed"));
+    let line = p.line.expect("a line");
+    assert!(line.contains("already set up in Knowlu") && line.contains("Settings"), "{line}");
+    let s = row(&p, "sign_in");
+    assert_eq!((s.state, s.reason), ("failed", Some("already_connected")));
+    let ev = r.events();
+    assert!(ev.contains(&"svc delete address".to_string()), "the address minted for it is revoked: {ev:?}");
+    assert!(!r.scripts().iter().any(|s| s != "m365/signin.js"), "no step ran after it: {:?}", r.scripts());
+
+    // Any other refusal of the hint is its own reason, and the line is the service's fixed sentence.
+    let other = "this address does not fit the mailbox's provider";
+    let o = rig("t18c-hint-refused");
+    o.sv.lock().unwrap().hint_refused = Some((422, other.to_string()));
+    let p = wait(&o.start(curated_m365(), true));
+    assert_eq!((p.ended, p.line), (Some("failed"), Some(other)));
+    assert_eq!(row(&p, "sign_in").reason, Some("refused"));
+    assert!(o.events().contains(&"svc delete address".to_string()));
+}
+
+#[test]
+fn a_refused_mint_shows_the_services_sentence() {
+    // T18c (2026-10-05): a refused `POST /addresses` showed the bare word "refused". D3's caps are fixed
+    // sentences the device shows as they are (`mail/handler.ts` LIVE_CAP, MINT_CAP).
+    for (status, cap) in [
+        (409, "this account already has three live mail addresses"),
+        (429, "this account has made six mail addresses in the last 30 days"),
+    ] {
+        let r = rig(&format!("t18c-cap-{status}"));
+        r.sv.lock().unwrap().mint_refused = Some((status, cap.to_string()));
+        let p = wait(&r.start(curated_m365(), true));
+        assert_eq!((p.ended, p.sentence, p.line), (Some("failed"), cap, Some(cap)), "{status}");
+        assert!(r.host.lock().unwrap().opens.is_empty(), "no window opens");
+    }
+    // A refusal whose sentence the device does not know is still a sentence, never a bare word.
+    let r = rig("t18c-cap-other");
+    r.sv.lock().unwrap().mint_refused = Some((400, "something new".to_string()));
+    let p = wait(&r.start(curated_m365(), true));
+    assert_eq!(p.ended, Some("failed"));
+    assert!(p.sentence.contains(' ') && p.line.is_some_and(|l| l.contains(' ')), "{p:?}");
+}
+
+#[test]
+fn a_setup_that_ends_before_forwarding_was_set_removes_its_new_address() {
+    // T18c (2026-10-05): a setup stopped at a forwarding step whose script changed nothing left its address
+    // pending and holding the mailbox's hint, so the next setup of that mailbox was refused. Nothing was
+    // set in the mailbox, so the address goes, as a closed sign-in window's does.
+    let not_found = json!({ "result": "not found", "control": "switch" });
+    let r = rig("t18c-withdrawn");
+    queue(&r, "m365/forwarding_set.js", vec![not_found.clone()]);
+    let shared = r.start(curated_m365(), true);
+    until("the guided forwarding", || has(&shared, "forwarding", "failed"));
+    shared.stop();
+    let p = wait(&shared);
+    assert_eq!(p.ended, Some("stopped"));
+    assert!(p.line.is_some_and(|l| l.contains("removed")), "it says the address went: {:?}", p.line);
+    assert!(r.events().contains(&"svc delete address".to_string()), "{:?}", r.events());
+    assert!(!session_dir(&r.dir, A).unwrap().exists(), "its profile is gone");
+
+    // Kept: the student said they did the guided step, even though its check failed.
+    let k = rig("t18c-kept-by-hand");
+    k.sv.lock().unwrap().canary_arrives = false;
+    queue(&k, "m365/forwarding_set.js", vec![not_found]);
+    let shared = k.start(curated_m365(), true);
+    until("the guided forwarding", || has(&shared, "forwarding", "failed"));
+    until("I've done this is taken", || shared.answer(Answer::Done));
+    until("the check", || k.events().contains(&"svc canary".to_string()));
+    shared.stop();
+    assert_eq!(wait(&shared).line, Some("setup stopped"));
+    assert!(!k.events().contains(&"svc delete address".to_string()), "the student may have set it by hand");
+
+    // Kept: on Gmail the address was added before turning forwarding on failed.
+    let g = rig("t18c-kept-gmail");
+    g.host.lock().unwrap().title_address = Some(HINT_PAGE.to_string());
+    queue(&g, "gmail/forwarding_set.js", vec![json!({ "result": "not found", "control": "save" })]);
+    let shared = g.start(Kind::Gmail, true);
+    until("the guided turn-on", || has(&shared, "turn_on", "failed"));
+    shared.stop();
+    assert_eq!(wait(&shared).line, Some("setup stopped"));
+    assert!(!g.events().contains(&"svc delete address".to_string()), "Google's list holds the address");
+
+    // Removed: the student kept a forwarding that goes elsewhere.
+    let n = rig("t18c-withdrawn-else");
+    queue(&n, "m365/forwarding_set.js", vec![json!({ "result": "elsewhere" })]);
+    let shared = n.start(curated_m365(), true);
+    until("the question", || shared.progress().ask == Some("forwarding_elsewhere"));
+    assert!(shared.answer(Answer::Replace(false)));
+    assert_eq!(wait(&shared).ended, Some("stopped"));
+    assert!(n.events().contains(&"svc delete address".to_string()));
 }
 
 #[test]

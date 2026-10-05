@@ -316,3 +316,22 @@ fn a_sign_in_that_fails_names_its_reason_and_ends_the_setup() {
     drive(&mut c, |_| Outcome::Cancelled);
     assert_eq!(c.state(Step::SignIn), State::Skipped);
 }
+
+#[test]
+fn a_sign_in_whose_address_the_service_refuses_names_the_refusal_on_its_row() {
+    // T18c (2026-10-05): the page signed in, but the service refused its address as the mailbox's hint.
+    // Another of the account's mailboxes holding it is `already_connected`; any other refusal is `refused`.
+    // Neither reads as a sign-in that did not finish.
+    for (out, why) in [(Outcome::AlreadyConnected, Reason::AlreadyConnected), (Outcome::Refused, Reason::Refused)] {
+        for p in [Provider::M365, Provider::Gmail] {
+            let mut s = setup(p);
+            assert_eq!(drive(&mut s, |_| out), vec![Step::SignIn], "{p:?} {out:?}");
+            assert_eq!(s.state(Step::SignIn), State::Failed(why), "{p:?} {out:?}");
+            assert_eq!(s.mode(Step::SignIn), Mode::Scripted);
+            assert_eq!(s.next_action(), Action::Finished);
+            for st in &p.steps()[1..] {
+                assert_eq!(s.state(*st), State::Skipped, "{p:?} {st:?}");
+            }
+        }
+    }
+}

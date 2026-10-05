@@ -2185,7 +2185,9 @@
   // A step's own words for a reason, read before MP_REASON: sign-in's not_found is the mailbox address the
   // page never showed, not a setting.
   var MP_STEP_REASON = { sign_in: { not_found: "Knowlu could not read your mailbox’s address from the page. Start setup again.",
-    script_failed: "Signing in did not finish. Start setup again." } };
+    script_failed: "Signing in did not finish. Start setup again.",
+    already_connected: "This mailbox is already set up in Knowlu. Open Settings, then Email, to resume it or turn it off there.",
+    refused: "Knowlu’s service did not accept this mailbox. Start setup again." } };
   var MP_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
   function mpDate(iso) {
     var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
@@ -2260,7 +2262,7 @@
     EL("mp-ask").innerHTML = ask;
     var end = "";
     if (p.status === "ended") {
-      end = p.line || "";
+      end = p.line && p.line !== p.sentence ? p.line : "";
       if (p.done && p.done.length) { end += " Done: " + p.done.map(function (s) { return MP_STEP[s] || s; }).join(", ") + "."; }
       if (p.left && p.left.length) { end += " Not done: " + p.left.map(function (s) { return MP_STEP[s] || s; }).join(", ") + "."; }
       if (p.not_brought_in_before) { end += " Mail before " + mpDate(p.not_brought_in_before) + " was not brought in."; }

@@ -92,6 +92,43 @@ impl std::fmt::Display for MailError {
 
 impl std::error::Error for MailError {}
 
+/// D3's caps and the hint route's refusal, as `mail/handler.ts` sends them: the device shows these
+/// sentences as they are, and matches a refusal by its status and sentence, never by a guess.
+pub const LIVE_CAP: &str = "this account already has three live mail addresses";
+pub const MINT_CAP: &str = "this account has made six mail addresses in the last 30 days";
+pub const HINT_HELD: &str = "another of this account's mailboxes has this address";
+
+impl MailError {
+    /// 409 with [`HINT_HELD`]: another of the account's mailboxes already holds this mailbox's address.
+    pub fn hint_held(&self) -> bool {
+        matches!(self, MailError::Refused { status: 409, reason } if reason == HINT_HELD)
+    }
+
+    /// One fixed sentence for the progress view: a refusal whose status and sentence the service is known
+    /// to send is that sentence; anything else is this client's own words for the failure.
+    pub fn fixed_sentence(&self) -> &'static str {
+        match self {
+            MailError::Refused { status: 409, reason } if reason == LIVE_CAP => LIVE_CAP,
+            MailError::Refused { status: 429, reason } if reason == MINT_CAP => MINT_CAP,
+            MailError::Refused { status: 409, reason } if reason == HINT_HELD => HINT_HELD,
+            MailError::Refused { status: 422, reason } if reason == HINT_MISFIT => HINT_MISFIT,
+            MailError::Refused { .. } => "the account service refused the request",
+            MailError::NoSession => "there is no signed-in session on this device",
+            MailError::SignIn => "the account service did not accept this sign-in; sign in again",
+            MailError::Lapsed => "this account has no active subscription",
+            MailError::NotFound => "the account service has no such mailbox",
+            MailError::Server(_) => "the account service failed; try again",
+            MailError::TimedOut => "the account service did not answer in time",
+            MailError::Unreachable => "the account service could not be reached",
+            MailError::BadReply => "the account service's reply could not be read",
+            MailError::Invalid => "the request could not be made",
+        }
+    }
+}
+
+/// The hint route's refusal of an address that does not fit the mailbox's provider (`mail/handler.ts`).
+const HINT_MISFIT: &str = "this address does not fit the mailbox's provider";
+
 /// A backfill batch opens a window on a date; a recover batch on an instant (spec §6.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {

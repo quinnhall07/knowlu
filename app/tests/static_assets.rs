@@ -2556,6 +2556,29 @@ fn a_failed_sign_in_row_says_why_in_its_own_words() {
 }
 
 #[test]
+fn a_sign_in_the_service_refuses_says_so_and_points_at_settings() {
+    // T18c (2026-10-05): a mailbox another of the account's setups already holds read "Signing in did not
+    // finish". It has its own words, naming Settings → Email, and any other refusal its own.
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    let words = v.split("var MP_STEP_REASON = { sign_in: {").nth(1).expect("sign-in's own reasons").split("} };").next().unwrap();
+    let already = words.split("already_connected:").nth(1).expect("already_connected has words").split("\",").next().unwrap();
+    assert!(already.contains("already set up in Knowlu"), "{already}");
+    assert!(already.contains("Settings") && already.contains("Email"), "it points at Settings → Email: {already}");
+    assert!(already.contains("resume") && already.contains("turn it off"), "{already}");
+    assert!(words.contains("refused:"), "a refusal of another kind has words too");
+}
+
+#[test]
+fn an_ended_setup_never_shows_the_same_sentence_twice() {
+    // T18c (2026-10-05): a refused mint ends with the service's sentence as both the view's sentence and
+    // the ended line (Settings reads the line); the view shows it once.
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("end = p.line && p.line !== p.sentence ? p.line : \"\";"), "the line is shown only when it adds something");
+}
+
+#[test]
 fn a_guided_step_shows_the_address_with_copy_and_its_path() {
     let js = read("console.js");
     let v = mail_progress_fn(&js);

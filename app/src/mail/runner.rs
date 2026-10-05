@@ -17,7 +17,13 @@
 //! open for the next launch (§4.11).
 //!
 //! **A closed sign-in window is "setup cancelled"**: nothing changed, so the address minted for it is
-//! revoked and its profile deleted. **Stop** ends after the step in hand and names what was done.
+//! revoked and its profile deleted. **Stop** ends after the step in hand and names what was done. A setup
+//! that ends before its address was ever put in the mailbox (no forwarding script that could change it
+//! answered anything but `not found` or `elsewhere`, and the student never said a step was done) is undone
+//! the same way and says so, so a stalled setup never holds the mailbox's hint against the next one or
+//! counts toward D3's three live addresses (T18c). A sign-in whose address the service refuses names the
+//! refusal (`already_connected` when another of the account's mailboxes holds it), and a refused mint shows
+//! the service's own sentence (D3's caps).
 //!
 //! **A rotate asks for its new address late.** The service's rotate retires the old address and cannot be
 //! undone, so it is called only once the sign-in has taken, right before the forwarding step. A rotate that
@@ -65,7 +71,15 @@ enum End {
     Failed(&'static str),
     /// A rotate that got its new address and did not finish moving the mailbox's forwarding to it.
     NeedsYou(&'static str),
+    /// Stopped before the Knowlu address was ever put in the mailbox: the address made for it is gone.
+    Withdrawn,
 }
+
+/// A sign-in whose mailbox another of the account's setups already holds (T18c): the service refused its
+/// address as this one's hint.
+const ALREADY_LINE: &str = "this mailbox is already set up in Knowlu: open Settings, then Email, to resume it or turn it off";
+/// A setup that stopped before its address was ever put in the mailbox (T18c).
+const WITHDRAWN_LINE: &str = "setup stopped before forwarding was set, so the Knowlu address made for it was removed";
 
 /// What a rotate that did not finish says: the mailbox forwards to the old address, which the service stops
 /// accepting after its grace (spec §4.6, a retired token).
@@ -96,6 +110,13 @@ struct Runner<'a> {
     keep: bool,
     /// A rotate has asked the service for the new address: the old one is retired and will stop working.
     rotated: bool,
+    /// The Knowlu address may be in the mailbox: a step script that could change the mailbox answered
+    /// anything but `not found` or `elsewhere` (both change nothing), or the student said a step was done.
+    placed: bool,
+    /// The address this setup minted has been revoked.
+    revoked: bool,
+    /// The service's sentence when it refused the mailbox's address at sign-in.
+    refusal: &'static str,
 }
 
 fn host(env: &Env) -> &dyn Host {
@@ -113,7 +134,12 @@ pub(super) fn run_setup(plan: &Plan, env: &Env, sh: &Shared) {
             match end {
                 End::Finished => End::Finished,
                 _ if r.rotated => End::NeedsYou(ROTATED_LINE),
-                end => end,
+                // Nothing was put in the mailbox: the address goes, so it neither holds the mailbox's hint
+                // against the next setup nor counts as live (T18c).
+                end => match (r.withdraw(), end) {
+                    (true, End::Stopped) => End::Withdrawn,
+                    (_, end) => end,
+                },
             }
         }
         Err(end) => end,
@@ -122,6 +148,7 @@ pub(super) fn run_setup(plan: &Plan, env: &Env, sh: &Shared) {
         End::NeedsYou(line) => ("needs_you", line),
         End::Finished => ("finished", "setup finished"),
         End::Stopped => ("stopped", "setup stopped"),
+        End::Withdrawn => ("stopped", WITHDRAWN_LINE),
         End::Cancelled => ("cancelled", "setup cancelled"),
         End::Failed(word) => ("failed", word),
     };
@@ -134,6 +161,12 @@ fn provider_name(p: Provider) -> &'static str {
         Provider::Gmail => "google",
         Provider::Guided => "other",
     }
+}
+
+/// A run the service refused: its fixed sentence is the view's sentence and the ended line.
+fn refused(sh: &Shared, sentence: &'static str) -> End {
+    sh.update(|p| p.sentence = sentence);
+    End::Failed(sentence)
 }
 
 fn answers(v: &Value, key: &str) -> Option<String> {
@@ -153,7 +186,7 @@ impl<'a> Runner<'a> {
                 ((address_id.clone(), String::new()), kept)
             }
             _ => {
-                let v = env.client.mint_address(provider_name(provider)).map_err(|e| End::Failed(e.name()))?;
+                let v = env.client.mint_address(provider_name(provider)).map_err(|e| refused(sh, e.fixed_sentence()))?;
                 let Some(knowlu) = answers(&v, "address") else { return Err(End::Failed("bad-reply")) };
                 ((answers(&v, "address_id").unwrap_or_default(), knowlu), plan.keep_session)
             }
@@ -165,12 +198,15 @@ impl<'a> Runner<'a> {
         let Some(profile) = profile.filter(|_| valid_address_id(&id)) else { return Err(End::Failed("bad-reply")) };
         env.host.use_provider(provider);
         let machine = Setup::new(provider, plan.setup_day, None);
-        let r = Runner { plan, env, sh, provider, machine, id, knowlu, profile, opened: false, canary_ok: false, said_no: false, gave_up: false, keep, rotated: false };
+        let mut r = Runner {
+            plan, env, sh, provider, machine, id, knowlu, profile, opened: false, canary_ok: false, said_no: false, gave_up: false, keep,
+            rotated: false, placed: false, revoked: false, refusal: "",
+        };
         // A guided provider has no page to read the mailbox's own address from: the one the student typed.
         if let (Provider::Guided, Some(t)) = (provider, typed) {
-            if r.client().set_hint(&r.id, &t).is_err() {
+            if let Err(e) = r.client().set_hint(&r.id, &t) {
                 r.revoke();
-                return Err(End::Failed("refused"));
+                return Err(refused(sh, if e.hint_held() { ALREADY_LINE } else { e.fixed_sentence() }));
             }
         }
         r.sh.update(|p| {
@@ -253,7 +289,7 @@ impl<'a> Runner<'a> {
 
     /// Revokes the address this setup minted and deletes its profile: a setup that changed nothing. A rotate
     /// minted no mailbox: the mailbox, its kept profile and its open backfill are not this run's to undo.
-    fn revoke(&self) {
+    fn revoke(&mut self) {
         if self.rotating() {
             if self.opened {
                 self.host().close_window();
@@ -264,11 +300,30 @@ impl<'a> Runner<'a> {
             return;
         }
         let _ = self.client().delete_address(&self.id);
+        self.revoked = true;
         if self.opened {
             self.host().close_window();
         }
         let _ = if self.keep { forget(&self.plan.data_dir, &self.id) } else { forget_setup(&self.plan.data_dir) };
         let _ = mark_open(&self.plan.data_dir, &self.id, false);
+    }
+
+    /// A setup that ended any way but finished, whose address was never put in the mailbox, revokes it as a
+    /// closed sign-in window does (§4.2 step 1: nothing changed). `true` when it did so now. A rotate's
+    /// address is the mailbox's own, never this run's to undo.
+    fn withdraw(&mut self) -> bool {
+        if self.rotating() || self.placed || self.revoked {
+            return false;
+        }
+        self.revoke();
+        true
+    }
+
+    /// Notes a run of a script that could put the Knowlu address in the mailbox: only `not found` and
+    /// `elsewhere` are answered with nothing changed (each script's contract); anything else, an error
+    /// included, may have changed it.
+    fn note_placed(&mut self, v: &Option<Value>) {
+        self.placed |= !matches!(Runner::result(v), "not found" | "elsewhere");
     }
 
     /// A rotate's call to the service. It cannot be undone (the old address is retired after its grace and
@@ -309,7 +364,12 @@ impl<'a> Runner<'a> {
                     self.machine.finished(step, out);
                     if step == Step::SignIn && out != Outcome::Done {
                         self.revoke();
-                        return if out == Outcome::Cancelled { End::Cancelled } else { End::Failed("sign-in") };
+                        return match out {
+                            Outcome::Cancelled => End::Cancelled,
+                            Outcome::AlreadyConnected => End::Failed(ALREADY_LINE),
+                            Outcome::Refused => End::Failed(self.refusal),
+                            _ => End::Failed("sign-in"),
+                        };
                     }
                 }
                 Action::Guide { step: Step::Canary } if self.canary_ok => self.machine.guided_checked(Step::Canary, true),
@@ -396,8 +456,17 @@ impl Runner<'_> {
                 return Outcome::Done;
             } else {
                 match self.probe() {
+                    // The service's refusal is named by its status and sentence (T18c): another of the
+                    // account's mailboxes holding this address is not a sign-in that did not finish.
                     Probe::Hint(h) => {
-                        return if self.client().set_hint(&self.id, &h).is_ok() { Outcome::Done } else { Outcome::Failed };
+                        return match self.client().set_hint(&self.id, &h) {
+                            Ok(_) => Outcome::Done,
+                            Err(e) if e.hint_held() => Outcome::AlreadyConnected,
+                            Err(e) => {
+                                self.refusal = e.fixed_sentence();
+                                Outcome::Refused
+                            }
+                        };
                     }
                     Probe::NotFound => {
                         let by = *read_by.get_or_insert(self.clock().now() + SIGN_IN_READ);
@@ -506,6 +575,7 @@ impl Runner<'_> {
         }
         let args = json!({ "address": self.knowlu, "replace": replace });
         let set = self.run("m365/forwarding_set.js", args);
+        self.note_placed(&set);
         match Runner::outcome(&set) {
             Outcome::Done => {}
             other => return other,
@@ -526,6 +596,7 @@ impl Runner<'_> {
             return Outcome::Failed;
         }
         let v = self.run("gmail/forwarding_add.js", json!({ "address": self.knowlu, "replace": replace }));
+        self.note_placed(&v);
         if Runner::result(&v) != "ok" {
             return Runner::outcome(&v);
         }
@@ -589,6 +660,7 @@ impl Runner<'_> {
     fn turn_on(&mut self, replace: bool) -> Outcome {
         self.say("turning forwarding on");
         let v = self.run("gmail/forwarding_set.js", json!({ "address": self.knowlu, "replace": replace }));
+        self.note_placed(&v);
         Runner::outcome(&v)
     }
 
@@ -697,6 +769,8 @@ impl Runner<'_> {
             self.machine.request_stop();
             return;
         }
+        // The student says this step is done: the address may be in the mailbox whatever the check reads.
+        self.placed = true;
         self.say("checking");
         let ok = match step {
             Step::AddAddress | Step::ConfirmAddress => self.address_confirmed(),

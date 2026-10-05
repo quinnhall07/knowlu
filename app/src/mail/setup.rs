@@ -174,6 +174,8 @@ pub(super) fn reason_name(r: Reason) -> &'static str {
         Reason::NotFound => "not_found",
         Reason::ScriptFailed => "script_failed",
         Reason::Blocked => "blocked",
+        Reason::AlreadyConnected => "already_connected",
+        Reason::Refused => "refused",
     }
 }
 
