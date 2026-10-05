@@ -292,3 +292,27 @@ fn a_retry_re_arms_a_backfill_only_once_the_canary_has_arrived() {
     let r = Routine::new(Provider::M365, 9, 41).paused();
     assert_eq!((r.day(), r.sent_today(), r.is_paused()), (9, 41, true));
 }
+
+#[test]
+fn a_sign_in_that_fails_names_its_reason_and_ends_the_setup() {
+    // T18c (2026-10-05): a sign-in that did not take must say why on its own row. Every row "skipped"
+    // with no reason left a failed setup indistinguishable from one that never began.
+    for (out, why) in [(Outcome::NotFound, Reason::NotFound), (Outcome::Failed, Reason::ScriptFailed)] {
+        for p in [Provider::M365, Provider::Gmail] {
+            let mut s = setup(p);
+            let ran = drive(&mut s, |_| out);
+            assert_eq!(ran, vec![Step::SignIn], "{p:?} {out:?}: nothing runs after a failed sign-in");
+            assert_eq!(s.state(Step::SignIn), State::Failed(why), "{p:?} {out:?}");
+            assert_eq!(s.mode(Step::SignIn), Mode::Scripted, "sign-in has no guided version");
+            assert_eq!(s.next_action(), Action::Finished);
+            for st in &p.steps()[1..] {
+                assert_eq!(s.state(*st), State::Skipped, "{p:?} {st:?}");
+            }
+            assert!(s.summary().done.is_empty());
+        }
+    }
+    // A cancelled sign-in (the window closed, or the sign-in wait ran out) is not a failure: skipped.
+    let mut c = setup(Provider::M365);
+    drive(&mut c, |_| Outcome::Cancelled);
+    assert_eq!(c.state(Step::SignIn), State::Skipped);
+}

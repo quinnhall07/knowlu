@@ -2182,6 +2182,10 @@
   var MP_REASON = { guided: "Do this one yourself, then say you have.", forwarding_elsewhere: "This mailbox already forwards somewhere else.",
     not_found: "Knowlu could not find the setting on the page.", script_failed: "That step did not work.",
     blocked: "The test message did not arrive. Your school may be blocking forwarding." };
+  // A step's own words for a reason, read before MP_REASON: sign-in's not_found is the mailbox address the
+  // page never showed, not a setting.
+  var MP_STEP_REASON = { sign_in: { not_found: "Knowlu could not read your mailbox’s address from the page. Start setup again.",
+    script_failed: "Signing in did not finish. Start setup again." } };
   var MP_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
   function mpDate(iso) {
     var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
@@ -2235,7 +2239,8 @@
     EL("mp-sentence").textContent = p.sentence || "";
     var html = "";
     p.rows.forEach(function (row) {
-      var why = row.reason && MP_REASON[row.reason] ? '<span class="mp-why">' + h(MP_REASON[row.reason]) + "</span>" : "";
+      var said = row.reason && ((MP_STEP_REASON[row.step] || {})[row.reason] || MP_REASON[row.reason]);
+      var why = said ? '<span class="mp-why">' + h(said) + "</span>" : "";
       html += '<div class="mp-row mp-' + h(row.state) + '"><span class="mp-step">' + h(MP_STEP[row.step] || row.step) +
         '</span><span class="mp-state">' + h(MP_STATE[row.state] || row.state) + "</span>" + why + "</div>";
     });

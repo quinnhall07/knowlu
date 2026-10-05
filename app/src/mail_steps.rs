@@ -315,9 +315,10 @@ impl Setup {
                 return;
             }
         };
-        // Sign-in has no guided version: not signed in means setup ends with nothing changed.
+        // Sign-in has no guided version: not signed in means setup ends with nothing changed. Its row keeps
+        // the failure and its reason (T18c), so a failed sign-in never reads as one that never ran.
         if step == SignIn && state != State::Done {
-            self.set(step, State::Skipped);
+            self.set(step, state);
             self.end();
             return;
         }

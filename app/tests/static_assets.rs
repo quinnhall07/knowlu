@@ -2542,6 +2542,20 @@ fn needs_you_names_its_reason_and_offers_its_answers() {
 }
 
 #[test]
+fn a_failed_sign_in_row_says_why_in_its_own_words() {
+    // T18c (2026-10-05): a sign-in that fails is a failed row with a reason; "could not find the setting"
+    // is the forwarding steps' sentence and misleads on a sign-in, so sign-in has its own.
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    let words = v.split("var MP_STEP_REASON = { sign_in: {").nth(1).expect("sign-in's own reasons").split("} };").next().unwrap();
+    for r in ["not_found:", "script_failed:"] {
+        assert!(words.contains(r), "sign-in reason {r}");
+    }
+    assert!(words.contains("address"), "not_found on sign-in names the mailbox address it could not read");
+    assert!(v.contains("(MP_STEP_REASON[row.step] || {})[row.reason] || MP_REASON[row.reason]"), "a row reads its step's own reasons first");
+}
+
+#[test]
 fn a_guided_step_shows_the_address_with_copy_and_its_path() {
     let js = read("console.js");
     let v = mail_progress_fn(&js);

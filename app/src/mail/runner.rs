@@ -8,7 +8,8 @@
 //! steps aside; the provider's forwarding steps; the setup canary (three minutes, D14); the backfill over a
 //! fixed 120 days (BW; [`super::backfill`]); finish. A scripted step that cannot go on falls to its guided
 //! version and the student's "I've done this" runs its check (§4.4); nothing is retried in a loop, except
-//! that a Gmail script that reloads its page is run again once with `reloaded: true`.
+//! that a Gmail script that reloads its page is run again once with `reloaded: true`, and sign-in reads a
+//! page still drawing its folder pane again for up to [`SIGN_IN_READ`].
 //!
 //! **A canary that does not come back** (D16) leaves the mailbox blocked: the backfill is not run (old mail
 //! would arrive while new mail never does), Retry sends another canary, and what remains is offered:
@@ -41,6 +42,9 @@ use std::path::PathBuf;
 
 /// How long the sign-in may take (the school's SSO, Duo, the phone tap).
 const SIGN_IN_WAIT: i64 = 15 * 60;
+/// Once the title reads signed in, how long the page has to draw the mailbox's own address (T18c: Outlook
+/// draws its folder pane a few seconds after the title changes).
+const SIGN_IN_READ: i64 = 45;
 /// D14: the setup canary is waited for up to three minutes.
 const CANARY_WAIT: i64 = 3 * 60;
 /// The Gmail address confirm is open for 15 minutes (§4.6 step 5).
@@ -371,7 +375,9 @@ impl Runner<'_> {
     }
 
     /// §4.2 step 1, §4.3 step 1: the visible window until the page reads as a signed-in mailbox; the
-    /// mailbox's own address is its hint. A window the student closes is a cancelled setup.
+    /// mailbox's own address is its hint. A window the student closes is a cancelled setup. The title
+    /// turns before the page has drawn the address (T18c), so a page that reads signed in with no address
+    /// is read again each second for [`SIGN_IN_READ`] before the step ends `not found`.
     fn sign_in(&mut self) -> Outcome {
         self.say("sign in to your email");
         if self.host().open_window(&self.profile, true).is_err() {
@@ -379,19 +385,26 @@ impl Runner<'_> {
         }
         self.opened = true;
         let deadline = self.clock().now() + SIGN_IN_WAIT;
+        let mut read_by: Option<i64> = None;
         loop {
             if !self.host().window_open() || self.sh.stopping() {
                 return Outcome::Cancelled;
             }
-            if self.host().signed_in() {
-                if self.rotating() {
-                    return Outcome::Done;
-                }
+            if !self.host().signed_in() {
+                read_by = None;
+            } else if self.rotating() {
+                return Outcome::Done;
+            } else {
                 match self.probe() {
                     Probe::Hint(h) => {
                         return if self.client().set_hint(&self.id, &h).is_ok() { Outcome::Done } else { Outcome::Failed };
                     }
-                    Probe::NotFound => return Outcome::NotFound,
+                    Probe::NotFound => {
+                        let by = *read_by.get_or_insert(self.clock().now() + SIGN_IN_READ);
+                        if self.clock().now() >= by {
+                            return Outcome::NotFound;
+                        }
+                    }
                     Probe::Wait => {}
                 }
             }

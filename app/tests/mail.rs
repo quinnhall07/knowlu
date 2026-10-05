@@ -2140,6 +2140,49 @@ fn queue(r: &Rig, script: &str, answers: Vec<Value>) {
     r.host.lock().unwrap().queued.insert(script.to_string(), answers.into());
 }
 
+/// `m365/signin.js` on an Outlook page whose mail list is drawn and whose folder pane is not yet.
+fn address_not_drawn() -> Value {
+    json!({ "result": "not found", "control": "mailbox address" })
+}
+
+#[test]
+fn a_microsoft_folder_pane_drawn_after_the_title_still_signs_in() {
+    // T18c (2026-10-05): the title reads signed in a second or two before Outlook draws its folder pane,
+    // so the first reads find no address. The step waits for the page instead of ending on the first.
+    let r = rig("t18c-late-pane");
+    r.host.lock().unwrap().msgs = ana_mail(1);
+    let mut answers = vec![address_not_drawn(); 20];
+    answers.push(json!({ "result": "ok", "signed_in": true, "mailbox_hint": HINT_PAGE }));
+    queue(&r, "m365/signin.js", answers);
+    let p = wait(&r.start(curated_m365(), true));
+    assert_eq!((p.ended, p.line), (Some("finished"), Some("setup finished")));
+    assert_eq!(row(&p, "sign_in").state, "done");
+    assert_eq!(r.calls("m365/signin.js").len(), 21, "read again until the address was drawn");
+    assert_eq!(r.sv.lock().unwrap().hint.as_deref(), Some(HINT_PAGE));
+    assert!(!r.events().contains(&"svc delete address".to_string()));
+}
+
+#[test]
+fn a_microsoft_address_never_drawn_fails_sign_in_naming_why_within_a_bound() {
+    let r = rig("t18c-no-address");
+    queue(&r, "m365/signin.js", vec![address_not_drawn()]);
+    let p = wait(&r.start(curated_m365(), true));
+    assert_eq!((p.status, p.ended, p.line), ("ended", Some("failed"), Some("sign-in")));
+    let s = row(&p, "sign_in");
+    assert_eq!((s.state, s.reason, s.guided), ("failed", Some("not_found"), false), "the failure is on its own row");
+    for step in ["step_aside", "forwarding", "canary", "backfill", "finish"] {
+        assert_eq!((row(&p, step).state, row(&p, step).reason), ("skipped", None), "{step}");
+    }
+    assert!(p.left.contains(&"sign_in") && p.done.is_empty());
+    // Bounded: well past the page's drawing time, far short of the sign-in's fifteen minutes.
+    let waited = r.clk.at() - NOW;
+    assert!((30..=120).contains(&waited), "waited {waited} s for the address");
+    assert!(r.calls("m365/signin.js").len() > 1, "read more than once");
+    let ev = r.events();
+    assert!(!ev.contains(&"svc hint".to_string()) && ev.contains(&"svc delete address".to_string()), "nothing kept: {ev:?}");
+    assert!(!r.scripts().iter().any(|s| s != "m365/signin.js"), "no step ran after it: {:?}", r.scripts());
+}
+
 #[test]
 fn forwarding_elsewhere_is_asked_and_only_a_yes_replaces_it() {
     let ours = json!({ "result": "ok", "forwarding": "on", "to": "ours", "keep_copy": true, "changed": true });
