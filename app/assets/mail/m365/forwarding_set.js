@@ -36,8 +36,10 @@ const named = (selector, pattern) =>
 const norm = (v) => String(v || "").trim().toLowerCase();
 const disabled = (el) => el.disabled === true || el.getAttribute("aria-disabled") === "true";
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+// A deadline on the clock, never a count of turns: a hidden window may throttle its timers (T18c review).
 const until = async (ready, ms) => {
-  for (let waited = 0; !ready() && waited < ms; waited += 50) await sleep(50);
+  const end = Date.now() + ms;
+  while (!ready() && Date.now() < end) await sleep(Math.min(50, end - Date.now()));
   return ready();
 };
 const setValue = (el, v) => {
@@ -62,20 +64,21 @@ const settleMs = Number(args.settle_ms) >= 0 ? Number(args.settle_ms) : 5000;
 const replace = args.replace === true;
 
 if (!(await until(() => switchEl(), drawMs))) return { result: "not found", control: "switch" };
-const sw = switchEl();
-if (sw.checked === true) {
+if (switchEl().checked === true) {
   // A field drawn empty may be filled in a moment later with the student's own address: give it the wait.
   await until(() => fieldEl() && norm(fieldEl().value) !== "", waitMs);
   const there = fieldEl();
   if (!there) return { result: "not found", control: "address" };
-  if (!replace && norm(there.value) !== "" && norm(there.value) !== address) return { result: "elsewhere" };
+  // A switch that is on always has an address: still blank, it is not drawn yet and may be the student's.
+  if (!replace && norm(there.value) === "") return { result: "not found", control: "address" };
+  if (!replace && norm(there.value) !== address) return { result: "elsewhere" };
 }
 
 let flipped = false;
 let typed = null;
 let ticked = false;
-if (sw.checked !== true) {
-  sw.click();
+if (switchEl() && switchEl().checked !== true) {
+  switchEl().click();
   flipped = true;
 }
 const putBack = () => {

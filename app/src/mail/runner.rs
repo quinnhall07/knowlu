@@ -408,7 +408,8 @@ impl Runner<'_> {
                     Probe::Wait => {}
                 }
             }
-            if self.clock().now() >= deadline {
+            // A read under way finishes even past the sign-in's limit, so its failure is named, never cancelled.
+            if self.clock().now() >= read_by.map_or(deadline, |by| by.max(deadline)) {
                 return Outcome::Cancelled;
             }
             self.clock().sleep(1);

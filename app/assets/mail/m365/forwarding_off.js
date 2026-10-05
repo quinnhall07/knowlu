@@ -30,8 +30,10 @@ const named = (selector, pattern) =>
 const norm = (v) => String(v || "").trim().toLowerCase();
 const disabled = (el) => el.disabled === true || el.getAttribute("aria-disabled") === "true";
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+// A deadline on the clock, never a count of turns: a hidden window may throttle its timers (T18c review).
 const until = async (ready, ms) => {
-  for (let waited = 0; !ready() && waited < ms; waited += 50) await sleep(50);
+  const end = Date.now() + ms;
+  while (!ready() && Date.now() < end) await sleep(Math.min(50, end - Date.now()));
   return ready();
 };
 const switchEl = () => named('input[role="switch"]', /forward/i);
@@ -46,8 +48,7 @@ const waitMs = Number(args.wait_ms) >= 0 ? Number(args.wait_ms) : 5000;
 const settleMs = Number(args.settle_ms) >= 0 ? Number(args.settle_ms) : 5000;
 
 if (!(await until(() => switchEl(), drawMs))) return { result: "not found", control: "switch" };
-const sw = switchEl();
-if (sw.checked !== true) return { result: "ok", forwarding: "off", changed: false };
+if (switchEl().checked !== true) return { result: "ok", forwarding: "off", changed: false };
 await until(() => fieldEl() && norm(fieldEl().value) !== "", waitMs);
 const there = fieldEl();
 if (!there) return { result: "not found", control: "address" };
@@ -56,8 +57,13 @@ if (!there) return { result: "not found", control: "address" };
 if (norm(there.value) === "") return { result: "not found", control: "address" };
 if (norm(there.value) !== address) return { result: "elsewhere" };
 
+// Re-read at click time: the dialog may have redrawn the switch during the field's wait.
+const sw = switchEl();
+if (!sw) return { result: "not found", control: "switch" };
+if (sw.checked !== true) return { result: "failed", reason: "read back differed" };
 sw.click();
 if (!(await until(() => saveEl() && !disabled(saveEl()), waitMs))) {
+  // Only the click made here is undone: the switch goes back on, so no unsaved change is left.
   if (switchEl() && switchEl().checked !== true) switchEl().click();
   return { result: "not found", control: "save" };
 }

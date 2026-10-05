@@ -32,8 +32,10 @@ const address = norm(args && args.address);
 if (!address) return { result: "failed", reason: "no address" };
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+// A deadline on the clock, never a count of turns: a hidden window may throttle its timers (T18c review).
 const until = async (ready, ms) => {
-  for (let waited = 0; !ready() && waited < ms; waited += 50) await sleep(50);
+  const end = Date.now() + ms;
+  while (!ready() && Date.now() < end) await sleep(Math.min(50, end - Date.now()));
   return ready();
 };
 const switchEl = () => named('input[role="switch"]', /forward/i);

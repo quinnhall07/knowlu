@@ -35,6 +35,8 @@ interface Forwarding {
   saved: Snap | null;
   snap(): Snap;
   el(id: string): El;
+  /** Every checkbox click, in order: which box, and what the page held just before it. */
+  clicks: Array<{ id: string; before: Snap }>;
 }
 
 // The page as live Outlook draws it (T18c, 2026-10-05, read on a university tenant): a Settings dialog with
@@ -55,6 +57,7 @@ function forwarding(o: Opts = {}): Forwarding {
   const f: Forwarding = {
     page,
     saves: 0,
+    clicks: [],
     saved: null,
     el: (id) => d.getElementById(id),
     snap: () => ({ on: !!f.el("fwd")?.checked, to: f.el("to")?.value ?? "", keep: !!f.el("keep")?.checked }),
@@ -81,6 +84,7 @@ function forwarding(o: Opts = {}): Forwarding {
   };
   const box = (el: El) =>
     el.addEventListener("click", () => {
+      f.clicks.push({ id: el.id, before: f.snap() });
       // What a browser does with a click on a checkbox: it toggles `checked` and leaves aria-checked alone.
       el.checked = !el.checked;
       if (el.id === "fwd") reveal();
@@ -194,6 +198,53 @@ Deno.test("m365_forwarding_set_puts_back_every_change_when_save_never_comes", as
   assertEquals(r, NOT_FOUND("save"));
   assertEquals(f.snap(), before);
   assertEquals(f.saves, 0);
+});
+
+Deno.test("m365_forwarding_set_from_off_puts_back_every_change_switch_last_when_save_never_comes", async () => {
+  // Off: the switch is flipped, the address typed and keep-a-copy ticked, then Save never draws. Every
+  // change is put back, keep-a-copy and the address while they are still on the page, the switch last.
+  const f = forwarding({ on: false, keep: false, without: "save" });
+  await drawn();
+  const r = await run("m365/forwarding_set.js", f.page, { address: OURS, wait_ms: 100 });
+  assertEquals(r, NOT_FOUND("save"));
+  assertEquals(f.saves, 0);
+  assertEquals(f.clicks.map((c) => c.id), ["fwd", "keep", "keep", "fwd"]);
+  const last = f.clicks[3].before;
+  assertEquals(last, { on: true, to: "", keep: false }, "the address and keep-a-copy were put back before the switch");
+  assertEquals(f.snap(), { on: false, to: "", keep: false });
+});
+
+Deno.test("m365_forwarding_set_never_replaces_an_address_not_yet_drawn", async () => {
+  // A switch that is on always has an address: a field still blank after the wait is not drawn yet, and
+  // may hold the student's own forwarding. Without the student's yes nothing is changed.
+  const f = forwarding({ on: true, to: "", keep: false });
+  await drawn();
+  const before = f.snap();
+  const r = await run("m365/forwarding_set.js", f.page, { address: OURS, wait_ms: 100 });
+  assertEquals(r, NOT_FOUND("address"));
+  assertEquals(f.saves, 0);
+  assertEquals(f.clicks.length, 0);
+  assertEquals(f.snap(), before);
+});
+
+Deno.test("m365_the_waits_are_bounded_by_wall_time_not_by_turns", async () => {
+  // A hidden WebView2 may throttle timers: each 50 ms sleep can take far longer. The bound is a deadline
+  // on the clock, so a page with no switch is given up on at draw_ms, not after draw_ms / 50 slow turns.
+  const real = globalThis.setTimeout;
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).setTimeout = (fn: () => void, ms?: number) => real(fn, Math.max(ms ?? 0, 0) * 10);
+  try {
+    for (const script of ["forwarding_read.js", "forwarding_set.js", "forwarding_off.js"]) {
+      const started = Date.now();
+      const r = await run(`m365/${script}`, { ...load("<p>Oops</p>") }, { address: OURS, draw_ms: 300 });
+      const took = Date.now() - started;
+      assertEquals(r, NOT_FOUND("switch"), script);
+      // Turn-counted, six throttled sleeps of 500 ms each: 3 s. On the clock: one or two sleeps.
+      assert(took < 1600, `${script} waited ${took} ms for a 300 ms bound`);
+    }
+  } finally {
+    globalThis.setTimeout = real;
+  }
 });
 
 Deno.test("m365_forwarding_set_on_a_page_already_set_saves_nothing", async () => {

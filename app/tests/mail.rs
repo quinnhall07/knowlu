@@ -1304,6 +1304,8 @@ struct HState {
     /// The mailbox: (sender, subject, instant).
     msgs: Vec<(String, String, i64)>,
     on_script: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    /// The title turns signed in once the clock reaches this second.
+    signed_in_from: Option<(Arc<SClk>, i64)>,
 }
 
 struct SHost {
@@ -1389,7 +1391,8 @@ impl Host for SHost {
         s.window && !s.student_closed
     }
     fn signed_in(&self) -> bool {
-        self.st.lock().unwrap().signed_in
+        let s = self.st.lock().unwrap();
+        s.signed_in || s.signed_in_from.as_ref().is_some_and(|(clk, at)| clk.at() >= *at)
     }
     fn title_address(&self) -> Option<String> {
         self.st.lock().unwrap().title_address.clone()
@@ -2181,6 +2184,24 @@ fn a_microsoft_address_never_drawn_fails_sign_in_naming_why_within_a_bound() {
     let ev = r.events();
     assert!(!ev.contains(&"svc hint".to_string()) && ev.contains(&"svc delete address".to_string()), "nothing kept: {ev:?}");
     assert!(!r.scripts().iter().any(|s| s != "m365/signin.js"), "no step ran after it: {:?}", r.scripts());
+}
+
+#[test]
+fn a_sign_in_that_takes_in_the_last_seconds_still_gets_its_read_and_names_why() {
+    // T18c review: the title turns signed in 10 s before the fifteen-minute sign-in limit. The page still
+    // gets its full read of the address, so a failure says why instead of reading as a cancelled setup.
+    let r = rig("t18c-late-sign-in");
+    {
+        let mut h = r.host.lock().unwrap();
+        h.signed_in = false;
+        h.signed_in_from = Some((r.clk.clone(), NOW + 15 * 60 - 10));
+    }
+    queue(&r, "m365/signin.js", vec![address_not_drawn()]);
+    let p = wait(&r.start(curated_m365(), true));
+    assert_eq!((p.ended, p.line), (Some("failed"), Some("sign-in")));
+    let s = row(&p, "sign_in");
+    assert_eq!((s.state, s.reason), ("failed", Some("not_found")));
+    assert!(r.clk.at() - NOW >= 15 * 60 - 10 + 45, "the read had its 45 s");
 }
 
 #[test]
