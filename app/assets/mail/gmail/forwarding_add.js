@@ -68,10 +68,18 @@ const inDialog = (pattern) => {
   }
   return null;
 };
+// The type a browser gives an input: an absent or unknown type attribute reads as "text" (T18c's audit:
+// live Outlook drew a box with no type attribute, which a `[type=...]` selector never matches).
+const kind = (el) => String(el.type || el.getAttribute("type") || "text").toLowerCase();
 const emailField = () => {
   for (const d of dialogs()) {
     const f = d.querySelector('input[type="email"]');
     if (f) return f;
+    // Else the dialog's one text box, typed or not.
+    const boxes = [...d.querySelectorAll("input")].filter((el) =>
+      kind(el) === "text" || kind(el) === "email"
+    );
+    if (boxes.length === 1) return boxes[0];
   }
   return null;
 };

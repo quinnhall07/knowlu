@@ -41,6 +41,8 @@ export interface Opts {
   bare?: boolean;
   /** The page never answers the search. */
   deaf?: boolean;
+  /** The search box is drawn this many ms after the script starts (T18c: Outlook redirects mid-load). */
+  searchLate?: number;
   /** After the first Delete the list is virtualised again: the node that drew `node` is reused to draw `as`. */
   recycle?: { node: string; as: string };
 }
@@ -87,7 +89,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       `<div role="treeitem" aria-label="${f}" aria-selected="${f === folder}">${f}</div>`
     ).join("")
   }</div>
-    <div role="search"><input type="search" id="q" aria-label="Search mail"><button type="button" id="go" aria-label="Search">Search</button></div>
+    <div role="search" id="searchbar"></div>
     <div id="bar"><button type="button" id="fwd" aria-label="Forward" aria-haspopup="menu">Forward</button>
       <button type="button" id="del" aria-label="Delete">Delete</button></div>
     <div role="listbox" id="list" aria-label="Message list"></div><div id="over"></div>`);
@@ -123,7 +125,17 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
   const inFolder = () => b.msgs.filter((m) => m.folder === folder);
   fill(inFolder());
 
-  b.el("go").addEventListener("click", () => {
+  // T18c (2026-10-07, live): the box is an `input role=combobox` with NO type attribute (its .type is
+  // "text"), named by its aria-label, with a placeholder. The search button is kept as before.
+  const drawSearch = () => {
+    b.el("searchbar").innerHTML = `<input role="combobox" id="q" aria-label="Search for email, meetings, ` +
+      `files and more." placeholder="Search"><button type="button" id="go" aria-label="Search">Search</button>`;
+    b.el("go").addEventListener("click", onSearch);
+  };
+  if (o.searchLate === undefined) drawSearch();
+  else setTimeout(drawSearch, o.searchLate);
+
+  function onSearch() {
     const q = b.el("q").value;
     b.queries.push(q);
     if (o.deaf) return;
@@ -134,7 +146,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       () => fill(b.msgs.filter((m) => m.day >= since && m.day < until && !out.includes(m.folder))),
       20,
     );
-  });
+  }
   b.el("del").addEventListener("click", () => {
     if (!selected) return;
     b.deleted.push(selected);

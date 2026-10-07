@@ -4,7 +4,8 @@
 // script it is the body of an async function of `args`: `args.since` is a day, `YYYY-MM-DD`;
 // `args.until` is optional, a later day, `YYYY-MM-DD`, before which the mail must have been received (so
 // `[since, until)`: the routine narrows a window to a span the virtualised list can draw whole, T11.2);
-// `args.wait_ms` (default 10000) bounds the wait for the page to answer. It returns one of
+// `args.draw_ms` (default 15000) bounds the wait for the search box to be drawn; `args.wait_ms` (default
+// 10000) bounds the wait for the page to answer. It returns one of
 //   { result: "ok", count: number }          (the list is virtualised: the count is aria-setsize, never
 //                                             the number of rows drawn)
 //   { result: "not found", control: "search" | "result count" }
@@ -14,6 +15,10 @@
 // else: Exchange gives a Sent Items row a received time, and the student's own replies, or a Knowlu copy a
 // failed cleanup left there, must never be forwarded as "missing". Whether Outlook reads that syntax is a live
 // check (plan T11, T18c), not a thing the synthetic page can say.
+// Live Outlook (T18c, 2026-10-07) draws the box as `<input role="combobox">` with NO type attribute (its
+// `.type` is "text"), and redirects outlook.office.com to outlook.cloud.microsoft mid-load, so the box is
+// briefly absent: any input whose type is text or search (an untyped one included) is a candidate, and the
+// box is waited for.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => {
   const aria = el.getAttribute("aria-label");
@@ -26,8 +31,10 @@ const nameOf = (el) => {
   return "";
 };
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+// A deadline on the clock, never a count of turns: a hidden window may throttle its timers (T18c review).
 const until = async (ready, ms) => {
-  for (let waited = 0; !ready() && waited < ms; waited += 50) await sleep(50);
+  const end = Date.now() + ms;
+  while (!ready() && Date.now() < end) await sleep(Math.min(50, end - Date.now()));
   return ready();
 };
 const setValue = (el, v) => {
@@ -59,12 +66,16 @@ if (!isDay(since) || (before !== "" && (!isDay(before) || before <= since))) {
   return { result: "failed", reason: "bad date" };
 }
 const waitMs = Number(args.wait_ms) >= 0 ? Number(args.wait_ms) : 10000;
+const drawMs = Number(args.draw_ms) >= 0 ? Number(args.draw_ms) : 15000;
 
-const box = [
-  ...document.querySelectorAll('input[type="search"], input[role="searchbox"], input[type="text"]'),
-]
-  .find((el) => /search/i.test(nameOf(el)));
-if (!box) return { result: "not found", control: "search" };
+// The type a browser gives the input: an absent or unknown type attribute reads as "text".
+const kind = (el) => String(el.type || el.getAttribute("type") || "text").toLowerCase();
+const boxEl = () =>
+  [...document.querySelectorAll("input")].find((el) =>
+    (kind(el) === "text" || kind(el) === "search") && /search/i.test(nameOf(el))
+  );
+if (!(await until(boxEl, drawMs))) return { result: "not found", control: "search" };
+const box = boxEl();
 const go = [...document.querySelectorAll('button, [role="button"]')].find((b) =>
   /^search$/i.test(nameOf(b) || text(b))
 );

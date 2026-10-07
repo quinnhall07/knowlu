@@ -29,6 +29,16 @@ Deno.test("gmail_add_address_clicks_input_buttons_by_value", async () => {
   assertEquals(f.decoy, 0);
 });
 
+Deno.test("gmail_add_address_finds_an_address_box_with_no_type_attribute", async () => {
+  // T18c (2026-10-07): live Outlook drew its search box with no type attribute, which `[type=...]` never
+  // matches. The audit found this dialog's box was taken only as `input[type="email"]`: an untyped box (a
+  // browser reads its type as "text"), the dialog's one text box, is the address box too.
+  const f = gmail({ untypedEmail: true });
+  const r = await run("gmail/forwarding_add.js", f.page, { address: OURS, ...FAST });
+  assertEquals(r, { result: "ok", stage: "asked", changed: true });
+  assertEquals(f.typed, [OURS]);
+});
+
 Deno.test("gmail_add_address_presses_proceed_when_the_dialog_asks", async () => {
   const f = gmail({ proceed: true });
   const r = await run("gmail/forwarding_add.js", f.page, { address: OURS, ...FAST });

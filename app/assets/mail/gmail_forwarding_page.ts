@@ -27,6 +27,8 @@ export interface Opts extends Partial<Model> {
   proceed?: boolean;
   /** Save never settles: the button stays enabled. */
   sticky?: boolean;
+  /** The add dialog's address box has no type attribute (T18c's audit: a type-less input reads as text). */
+  untypedEmail?: boolean;
 }
 
 export interface Gmail {
@@ -170,8 +172,12 @@ export function gmail(o: Opts = {}): Gmail {
     on(
       "add",
       () =>
-        dialog(`<p>Add a forwarding address</p>${w === "email" ? "" : `<input type="email" id="email">`}
-      ${input("Next", "next")}${input("Cancel", "cancel-dlg")}`),
+        dialog(
+          `<p>Add a forwarding address</p>${
+            w === "email" ? "" : o.untypedEmail ? `<input id="email">` : `<input type="email" id="email">`
+          }
+      ${input("Next", "next")}${input("Cancel", "cancel-dlg")}`,
+        ),
     );
     on("next", () => {
       g.typed.push(g.el("email")?.value ?? "");

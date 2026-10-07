@@ -75,10 +75,25 @@ Deno.test("m365_search_reports_no_results_as_zero_and_a_deaf_page_as_not_settled
   assertEquals(r, { result: "failed", reason: "search did not settle" });
 });
 
+Deno.test("m365_search_finds_the_live_type_less_combobox_drawn_after_the_script_starts", async () => {
+  // T18c (2026-10-07, live): the box is `<input role="combobox">` with no type attribute, and Outlook
+  // redirects mid-load (outlook.office.com to outlook.cloud.microsoft), so it is briefly absent. A checkbox
+  // whose name says "search" is never the box.
+  const box = mailbox(MAIL, { searchLate: 300 });
+  box.el("searchbar").insertAdjacentHTML(
+    "beforebegin",
+    `<input type="checkbox" aria-label="Search all folders">`,
+  );
+  const r = await run("m365/search.js", box.page, { since: "2026-10-02" });
+  assertEquals(r, { result: "ok", count: 3 });
+  assertEquals(box.queries.length, 1);
+  assertEquals(box.el("q").getAttribute("type"), null, "the page's box has no type attribute");
+});
+
 Deno.test("m365_search_names_a_missing_control_and_refuses_a_bad_date", async () => {
   const box = mailbox(MAIL);
   box.el("q").remove();
-  assertEquals(await run("m365/search.js", box.page, { since: "2026-10-02" }), {
+  assertEquals(await run("m365/search.js", box.page, { since: "2026-10-02", draw_ms: 200 }), {
     result: "not found",
     control: "search",
   });
