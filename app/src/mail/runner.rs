@@ -27,6 +27,10 @@
 //! refusal (`already_connected` when another of the account's mailboxes holds it), and a refused mint shows
 //! the service's own sentence (D3's caps).
 //!
+//! **A setup the app quit mid-run** (Quinn, 2026-10-06): while a run holds an address it minted, `mail.json`
+//! records the id and the facts above (`placed` written before a script that could set it runs), cleared
+//! when the run ends; the next start removes one never placed ([`super::setup::clean_unfinished`]).
+//!
 //! **A rotate asks for its new address late.** The service's rotate retires the old address and cannot be
 //! undone, so it is called only once the sign-in has taken, right before the forwarding step. A rotate that
 //! ends any way but finished after that is `needs_you` naming the old address's 7-day grace, never
@@ -39,11 +43,12 @@ use super::backfill::{drive_backfill, mark_open, seed_routine, Drive, Drove};
 use super::host::Host;
 use super::recover::{Clock, Place};
 use super::setup::{
-    state_name, step_name, Answer, Ask, Backfill, Env, Kind, Plan, Progress, Row, Shared, Waiting, IDLE,
+    clear_pending, note_pending, state_name, step_name, Answer, Ask, Backfill, Env, Kind, Plan, Progress, Row, Shared, Waiting, IDLE,
 };
 use super::Refusal;
 use crate::mail_client::{MailClient, State as SvcState};
 use crate::mail_session::{forget, forget_setup, session_dir, setup_dir, valid_address_id};
+use crate::mail_session::PendingSetup;
 use crate::mail_steps::{Action, Mode, Outcome, Provider, Reason, Setup, State, Step};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -150,7 +155,7 @@ pub(super) fn run_setup(plan: &Plan, env: &Env, sh: &Shared) {
             r.wrap_up(&end);
             // The mailbox still forwards to the old address unless the forwarding step finished: whatever
             // else ended the run, the student is told, never "cancelled" or "stopped" as if nothing changed.
-            match end {
+            let end = match end {
                 End::Finished => End::Finished,
                 _ if r.rotated => End::NeedsYou(ROTATED_LINE),
                 // Nothing was put in the mailbox: the address goes, so it neither holds the mailbox's hint
@@ -160,7 +165,13 @@ pub(super) fn run_setup(plan: &Plan, env: &Env, sh: &Shared) {
                     (Some(false), End::Stopped) => End::NotWithdrawn,
                     (_, end) => end,
                 },
+            };
+            // The run handled its address: kept with its facts, or revoked (a revoke the service refused
+            // keeps its record, for the next start). A rotate never wrote one.
+            if !r.revoked && !r.rotating() {
+                clear_pending(&plan.data_dir, &r.id);
             }
+            end
         }
         Err(end) => end,
     };
@@ -223,6 +234,8 @@ impl<'a> Runner<'a> {
             plan, env, sh, provider, machine, id, knowlu, profile, opened: false, canary_ok: false, said_no: false, gave_up: false, keep,
             rotated: false, placed: false, backfilled: false, revoked: false, refusal: "", forwarding_set_at: None,
         };
+        // A quit from here on leaves the address this device minted named, for the next start (2026-10-06).
+        r.persist(false);
         // A guided provider has no page to read the mailbox's own address from: the one the student typed.
         if let (Provider::Guided, Some(t)) = (provider, typed) {
             if let Err(e) = r.client().set_hint(&r.id, &t) {
@@ -323,6 +336,10 @@ impl<'a> Runner<'a> {
         }
         let deleted = self.client().delete_address(&self.id).is_ok();
         self.revoked = true;
+        // A delete the service did not take stays recorded (never placed), so the next start tries again.
+        if deleted {
+            clear_pending(&self.plan.data_dir, &self.id);
+        }
         if self.opened {
             self.host().close_window();
         }
@@ -355,6 +372,18 @@ impl<'a> Runner<'a> {
     /// included, may have changed it.
     fn note_placed(&mut self, v: &Option<Value>) {
         self.placed |= !matches!(Runner::result(v), "not found" | "elsewhere");
+        self.persist(false);
+    }
+
+    /// Writes this setup's record in `mail.json`: its address id, `placed` (or `placing`: a script that could
+    /// set it is about to run, so a quit mid-script counts as placed) and `backfilled`. A rotate minted
+    /// nothing, and a revoked address has nothing left to clean.
+    fn persist(&self, placing: bool) {
+        if self.rotating() || self.revoked {
+            return;
+        }
+        let rec = PendingSetup { address_id: self.id.clone(), placed: self.placed || placing, backfilled: self.backfilled };
+        note_pending(&self.plan.data_dir, rec);
     }
 
     /// A rotate's call to the service. It cannot be undone (the old address is retired after its grace and
@@ -387,8 +416,9 @@ impl<'a> Runner<'a> {
             }
             // From the first publish that shows the address with Copy, the student may have put it in the mailbox
             // by hand without saying so: it is never withdrawn (T18c review).
-            if action != Action::Finished && self.guide_shown() {
+            if action != Action::Finished && self.guide_shown() && !self.placed {
                 self.placed = true;
+                self.persist(false);
             }
             self.publish();
             match action {
@@ -460,6 +490,7 @@ impl Runner<'_> {
             Step::Backfill if self.rotating() => Outcome::Done,
             Step::Backfill => {
                 self.backfilled = true;
+                self.persist(false);
                 self.backfill()
             }
             Step::Finish => {
@@ -615,6 +646,7 @@ impl Runner<'_> {
             return Outcome::Failed;
         }
         let args = json!({ "address": self.knowlu, "replace": replace });
+        self.persist(true);
         let set = self.run("m365/forwarding_set.js", args);
         self.note_placed(&set);
         match Runner::outcome(&set) {
@@ -639,6 +671,7 @@ impl Runner<'_> {
         if self.client().set_state(&self.id, SvcState::Confirming).is_err() {
             return Outcome::Failed;
         }
+        self.persist(true);
         let v = self.run("gmail/forwarding_add.js", json!({ "address": self.knowlu, "replace": replace }));
         self.note_placed(&v);
         if Runner::result(&v) != "ok" {
@@ -703,6 +736,7 @@ impl Runner<'_> {
 
     fn turn_on(&mut self, replace: bool) -> Outcome {
         self.say("turning forwarding on");
+        self.persist(true);
         let v = self.run("gmail/forwarding_set.js", json!({ "address": self.knowlu, "replace": replace }));
         self.note_placed(&v);
         Runner::outcome(&v)
@@ -849,6 +883,7 @@ impl Runner<'_> {
         }
         // The student says this step is done: the address may be in the mailbox whatever the check reads.
         self.placed = true;
+        self.persist(false);
         self.say("checking");
         let ok = match step {
             Step::AddAddress | Step::ConfirmAddress => self.address_confirmed(),

@@ -137,8 +137,9 @@ pub fn start_setup(app: &AppHandle, kind: Kind) -> Result<Arc<Shared>, &'static 
     SETUPS.start(plan, env).map_err(|_| "a mail setup is already running")
 }
 
-/// H4, at launch: sweeps a leftover `mail-setup` and retries deletes that failed, then resumes every open
-/// backfill whose profile is kept. Never blocks the app's start: it runs on its own thread.
+/// H4, at launch: sweeps a leftover `mail-setup` and retries deletes that failed, removes the address of a
+/// setup the app quit before it was placed (`setup::clean_unfinished`), then resumes every open backfill
+/// whose profile is kept. Never blocks the app's start: it runs on its own thread.
 /// The mail window is taken on the calling thread, before the sweep's thread starts, and held across the
 /// sweep and the resume (spec §5.4), so a setup started at launch is refused rather than opening WebView2
 /// on a folder being deleted.
@@ -149,6 +150,11 @@ pub fn on_start(app: &AppHandle) {
     let window = MailWindow::try_take();
     std::thread::spawn(move || {
         let Some(guard) = sweep_at_launch(&data_dir, window) else { return };
+        // A setup the app quit mid-run, under the mail window and before any resume (2026-10-06).
+        let client = client_for(&vault);
+        if let Ok(client) = &client {
+            let _ = super::setup::clean_unfinished(&data_dir, client);
+        }
         if !MailState::load(&data_dir).is_ok_and(|s| s.keep_session) {
             return;
         }
@@ -156,7 +162,7 @@ pub fn on_start(app: &AppHandle) {
         if ids.is_empty() {
             return;
         }
-        let Ok(client) = client_for(&vault) else { return };
+        let Ok(client) = client else { return };
         let env = real_env(&app, &data_dir, client, guard);
         let _ = SETUPS.start_resume(data_dir, ids, env);
     });

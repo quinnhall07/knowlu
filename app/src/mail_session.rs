@@ -99,6 +99,23 @@ pub struct MailState {
     /// backfill has one, dropped once its day is past, and not written at all when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub backfill_pace: BTreeMap<String, BackfillPace>,
+    /// Each setup in flight on this device whose address this device minted (Quinn, 2026-10-06): written
+    /// once the address exists, its facts written before each act that may set them, cleared when the run
+    /// ends. One left at start-up is a setup the app quit mid-run (`mail::setup::clean_unfinished`). Not
+    /// written at all when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending_setups: Vec<PendingSetup>,
+}
+
+/// One in-flight setup's address and `withdraw`'s facts (`runner.rs`): ids and flags only.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingSetup {
+    pub address_id: String,
+    /// The Knowlu address may be in the mailbox (a script that could set it began, a guide showed it, or
+    /// the student said a step was done).
+    pub placed: bool,
+    /// A backfill began under it.
+    pub backfilled: bool,
 }
 
 /// One mailbox's backfill pace on one UTC day (`unix seconds / 86400`).
@@ -119,6 +136,7 @@ impl Default for MailState {
             turned_off: Vec::new(),
             open_backfills: Vec::new(),
             backfill_pace: BTreeMap::new(),
+            pending_setups: Vec::new(),
         }
     }
 }

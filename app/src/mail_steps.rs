@@ -8,9 +8,11 @@
 //! Microsoft 365 and Gmail is guided only (§4.4): its steps never run as script.
 //!
 //! **Falling back.** A scripted step that fails becomes `Failed` and guided, for that step only. The
-//! steps after it continue scripted unless they need it (the canary needs forwarding on; Gmail's
-//! steps run in a chain). A failed canary (D16, a school that blocks forwarding) ends the scripted
-//! backfill: it becomes `Failed(Blocked)` and guided; Finish only closes the window and still runs.
+//! steps after it continue scripted unless they need it (the canary needs forwarding on, the backfill
+//! the canary; Gmail's steps run in a chain). Finish waits while an earlier step is still to run, so a
+//! forwarding set by hand runs its canary and backfill before the window closes. A failed canary (D16,
+//! a school that blocks forwarding) ends the scripted backfill: it becomes `Failed(Blocked)` and guided;
+//! Finish only closes the window and still runs.
 //! The machine hands each step out once: there is no retry here, only
 //! the student's own "I've done this" ([`Setup::guided_checked`]).
 //!
@@ -107,6 +109,9 @@ fn requires(step: Step) -> &'static [Step] {
         ConfirmAddress => &[AddAddress],
         TurnOn => &[ConfirmAddress],
         Canary => &[Forwarding, AddAddress, ConfirmAddress, TurnOn],
+        // Quinn, 2026-10-06 (D16): a backfill while forwarding or the canary failed brings in old mail while
+        // new mail never arrives. It waits for the canary, done by script or by hand.
+        Backfill => &[Canary],
         _ => &[],
     }
 }
@@ -253,6 +258,12 @@ impl Setup {
 
     fn ready(&self, index: usize) -> bool {
         let step = self.steps[index].0;
+        // Finish closes the window (and wipes a throwaway profile): it waits while an earlier step is still to
+        // run, held behind a guided one, so a by-hand forwarding's canary and backfill keep the window (D16).
+        // A failed step does not hold it.
+        if step == Finish && self.steps[..index].iter().any(|(_, s, _)| *s == State::Waiting) {
+            return false;
+        }
         self.steps[..index].iter().all(|(s, _, _)| !self.blocks(*s))
             && requires(step).iter().filter(|r| self.at(**r).is_some()).all(|r| self.resolved(*r))
     }

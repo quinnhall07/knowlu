@@ -10,10 +10,11 @@
 use super::host::Host;
 use super::recover::Clock;
 use super::MailWindow;
-use crate::mail_client::MailClient;
+use crate::mail_client::{MailClient, MailError};
+use crate::mail_session::{forget, MailState, PendingSetup};
 use crate::mail_steps::{Reason, State, Step};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -340,6 +341,68 @@ impl Drop for Closer {
     fn drop(&mut self) {
         self.0.close();
     }
+}
+
+// ---- a setup the app quit mid-run (Quinn, 2026-10-06) ------------------------------------------
+
+/// Writes (or rewrites) an in-flight setup's record in `mail.json`. Best effort: a record that could not be
+/// written costs a quit its clean-up, never the setup.
+pub(super) fn note_pending(data_dir: &Path, rec: PendingSetup) {
+    let _ = MailState::update(data_dir, |s| match s.pending_setups.iter_mut().find(|p| p.address_id == rec.address_id) {
+        Some(p) if *p == rec => false,
+        Some(p) => {
+            *p = rec;
+            true
+        }
+        None => {
+            s.pending_setups.push(rec);
+            true
+        }
+    });
+}
+
+/// Clears an in-flight setup's record: its run ended, and handled its address itself.
+pub(super) fn clear_pending(data_dir: &Path, address_id: &str) {
+    let _ = MailState::update(data_dir, |s| {
+        let before = s.pending_setups.len();
+        s.pending_setups.retain(|p| p.address_id != address_id);
+        s.pending_setups.len() != before
+    });
+}
+
+/// **At start-up**, under the mail window: each setup the app quit mid-run. One whose facts say its address
+/// was never put in the mailbox (no script that could set it began, no guide showed it, no "I've done this"
+/// or Retry, no backfill began, none open) and whose row on the service still reads `pending` is removed as
+/// `withdraw` would have: `DELETE /addresses/<id>`, then its profile through the `is_session_dir` guard. A row
+/// Settings shows as set up (any other status) and a placed one are never touched. A row the service no
+/// longer lists is gone already: only its profile goes. A list or delete that fails keeps the record for the
+/// next start. Returns the ids still recorded.
+pub fn clean_unfinished(data_dir: &Path, client: &MailClient) -> Vec<String> {
+    let Ok(state) = MailState::load(data_dir) else { return Vec::new() };
+    if state.pending_setups.is_empty() {
+        return Vec::new();
+    }
+    let Ok(rows) = client.list_addresses() else {
+        return state.pending_setups.into_iter().map(|p| p.address_id).collect();
+    };
+    for rec in &state.pending_setups {
+        let id = rec.address_id.as_str();
+        let placed = rec.placed || rec.backfilled || state.open_backfills.iter().any(|o| o == id);
+        let status = rows.iter().find(|r| r["address_id"].as_str() == Some(id)).map(|r| r["status"].as_str().unwrap_or(""));
+        let gone = match status {
+            _ if placed => false,
+            None => true,
+            Some("pending") => matches!(client.delete_address(id), Ok(_) | Err(MailError::NotFound)),
+            Some(_) => false,
+        };
+        if gone {
+            let _ = forget(data_dir, id);
+        } else if !placed && status == Some("pending") {
+            continue;
+        }
+        clear_pending(data_dir, id);
+    }
+    MailState::load(data_dir).map(|s| s.pending_setups.into_iter().map(|p| p.address_id).collect()).unwrap_or_default()
 }
 
 // ---- one at a time -----------------------------------------------------------------------------

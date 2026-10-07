@@ -58,6 +58,7 @@ fn each_provider_has_its_step_list_in_order() {
 fn a_failed_step_falls_back_to_guided_for_that_step_only_and_later_steps_continue() {
     let mut s = setup(Provider::Gmail);
     let ran = drive(&mut s, |st| if st == Step::Backfill { Outcome::NotFound } else { Outcome::Done });
+    assert!(ran.contains(&Step::Backfill), "the canary was done, so the backfill ran: {ran:?}");
     assert_eq!(s.state(Step::Backfill), State::Failed(Reason::NotFound));
     assert_eq!(s.mode(Step::Backfill), Mode::Guided, "the failed step is guided now");
     for st in [Step::SignIn, Step::TurnOn, Step::Canary] {
@@ -65,19 +66,56 @@ fn a_failed_step_falls_back_to_guided_for_that_step_only_and_later_steps_continu
     }
     assert_eq!(*ran.last().unwrap(), Step::Finish, "the step after the failure still ran scripted");
 
-    // A failure in the middle: the later steps that do not need it carry on, the one that does waits.
+    // A failure in the middle: the canary needs forwarding and the backfill needs the canary (Quinn,
+    // 2026-10-06), so both hold, and Finish, which closes the window, waits for them (D16's guided path).
     let mut s = setup(Provider::M365);
     let ran = drive(&mut s, |st| if st == Step::Forwarding { Outcome::NotFound } else { Outcome::Done });
     assert_eq!(s.state(Step::Forwarding), State::Failed(Reason::NotFound));
     assert_eq!(s.mode(Step::Forwarding), Mode::Guided);
-    assert_eq!(s.state(Step::Canary), State::Waiting, "the canary needs forwarding, so it holds");
-    assert!(ran.contains(&Step::Backfill) && ran.contains(&Step::Finish), "{ran:?}");
+    assert_eq!(ran, vec![Step::SignIn, Step::StepAside, Step::Forwarding], "nothing after it runs yet");
+    for st in [Step::Canary, Step::Backfill, Step::Finish] {
+        assert_eq!(s.state(st), State::Waiting, "{st:?} holds");
+    }
     assert_eq!(s.next_action(), Action::Wait, "only the student's guided step is left");
-    // "I've done this" runs the step's check: a pass makes it done by hand and releases the canary.
+    // "I've done this" runs the step's check: a pass makes it done by hand and releases the rest in order.
     s.guided_checked(Step::Forwarding, true);
     assert_eq!(s.state(Step::Forwarding), State::DoneByHand);
     let ran = drive(&mut s, |_| Outcome::Done);
-    assert_eq!(ran, vec![Step::Canary]);
+    assert_eq!(ran, vec![Step::Canary, Step::Backfill, Step::Finish]);
+}
+
+#[test]
+fn the_backfill_waits_for_the_canary_and_a_failed_canary_never_runs_it() {
+    // Quinn, 2026-10-06: a backfill run while forwarding or the canary failed brings in old mail while new
+    // mail never arrives (D16). It runs only once the canary is done, by script or by hand.
+    let is_backfill = |a: &Action| matches!(a, Action::Run { step: Step::Backfill, .. } | Action::Guide { step: Step::Backfill });
+    // Forwarding (M365) or turning it on (Gmail) failed, and the student gave up: the backfill never ran.
+    for (p, failing) in [(Provider::M365, Step::Forwarding), (Provider::Gmail, Step::TurnOn), (Provider::Gmail, Step::AddAddress)] {
+        let mut s = setup(p);
+        let ran = drive(&mut s, |st| if st == failing { Outcome::Failed } else { Outcome::Done });
+        assert!(!ran.contains(&Step::Backfill), "{p:?} {failing:?}: {ran:?}");
+        assert!(!is_backfill(&s.next_action()));
+        s.request_stop();
+        assert_eq!(s.next_action(), Action::Finished);
+        assert_eq!(s.state(Step::Backfill), State::Skipped, "{p:?} {failing:?}");
+        assert_eq!(s.summary().mail_not_brought_in_before, Some(date(2026, 6, 4)));
+    }
+    // Forwarding set by hand, then the canary failed: the backfill is blocked, named, and not run.
+    let mut s = setup(Provider::M365);
+    drive(&mut s, |st| if st == Step::Forwarding { Outcome::NotFound } else { Outcome::Done });
+    s.guided_checked(Step::Forwarding, true);
+    let ran = drive(&mut s, |st| if st == Step::Canary { Outcome::Failed } else { Outcome::Done });
+    assert!(!ran.contains(&Step::Backfill), "{ran:?}");
+    assert_eq!(s.state(Step::Backfill), State::Failed(Reason::Blocked));
+    // A guided mailbox: the backfill's guide is shown only once the canary is done by hand.
+    let mut g = setup(Provider::Guided);
+    assert_eq!(g.next_action(), Action::Guide { step: Step::Forwarding });
+    assert_eq!(g.next_action(), Action::Wait);
+    g.guided_checked(Step::Forwarding, true);
+    assert_eq!(g.next_action(), Action::Guide { step: Step::Canary });
+    assert_eq!(g.next_action(), Action::Wait, "no backfill while the canary is the student's");
+    g.guided_checked(Step::Canary, true);
+    assert_eq!(g.next_action(), Action::Guide { step: Step::Backfill });
 }
 
 #[test]

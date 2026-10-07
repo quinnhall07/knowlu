@@ -2560,12 +2560,11 @@ fn a_setup_that_ends_before_forwarding_was_set_removes_its_new_address() {
 
 #[test]
 fn a_setup_whose_backfill_began_never_removes_its_address() {
-    // T18c review: revoking an address purges the mail stored under it (`mail/handler.ts` purgeAddress). A
-    // forwarding that found nothing does not hold the backfill back, so a Stop during that backfill must
-    // not revoke the address the mail was brought in under.
+    // T18c review: revoking an address purges the mail stored under it (`mail/handler.ts` purgeAddress), so a
+    // Stop during a backfill must not revoke the address the mail was brought in under. Since 2026-10-06 the
+    // backfill waits for the canary, so it begins only once forwarding was set.
     let r = rig("t18c-backfilled-kept");
     r.host.lock().unwrap().msgs = ana_mail(2);
-    queue(&r, "m365/forwarding_set.js", vec![json!({ "result": "not found", "control": "switch" })]);
     let setups = r.setups.clone();
     r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
         if name == "m365/forward.js" {
@@ -2595,6 +2594,171 @@ fn a_withdrawal_the_service_refuses_never_says_the_address_was_removed() {
     let line = p.line.expect("a line");
     assert!(!line.contains("was removed"), "{line}");
     assert!(line.contains("could not be removed") && line.contains("Settings") && line.contains("Email"), "{line}");
+}
+
+#[test]
+fn a_forwarding_set_by_hand_holds_the_backfill_until_the_canary_arrives() {
+    // Quinn, 2026-10-06: the backfill ran while forwarding had failed (`requires(Backfill)` was empty). It
+    // waits for the canary, and Finish waits for it, so D16's guided path keeps its order and its window:
+    // forwarding by hand, "I've done this", the canary, then the backfill.
+    let r = rig("t1006-held-backfill");
+    r.host.lock().unwrap().msgs = ana_mail(2);
+    queue(&r, "m365/forwarding_set.js", vec![json!({ "result": "not found", "control": "switch" })]);
+    // Whether the backfill read a mailbox whose window Finish had already closed.
+    let read_closed = Arc::new(AtomicU32::new(0));
+    let (seen, host) = (read_closed.clone(), r.host.clone());
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if name == "m365/search.js" && !host.lock().unwrap().window {
+            seen.fetch_add(1, Ordering::SeqCst);
+        }
+    }));
+    let shared = r.start(curated_m365(), true);
+    until("the guided forwarding", || has(&shared, "forwarding", "failed"));
+    // "I've done this" is taken only once the runner waits on the student: by then a backfill not held
+    // would already have run, and Finish closed the window.
+    until("I've done this is taken", || shared.answer(Answer::Done));
+    let p = wait(&shared);
+    assert_eq!(p.ended, Some("finished"), "{p:?}");
+    assert_eq!(row(&p, "forwarding").state, "done_by_hand");
+    assert_eq!((row(&p, "canary").state, row(&p, "backfill").state, row(&p, "finish").state), ("done", "done", "done"));
+    let ev = r.events();
+    assert!(position(&ev, "svc canary") < position(&ev, "svc batch"), "the canary came back before any backfill: {ev:?}");
+    assert_eq!(r.sv.lock().unwrap().batches, [since_day()]);
+    assert!(r.calls("m365/search.js").len() >= 1);
+    assert_eq!(read_closed.load(Ordering::SeqCst), 0, "Finish waited: the backfill read an open window");
+}
+
+use knowlu::mail::setup::clean_unfinished;
+use knowlu::mail_session::PendingSetup;
+
+fn pending(id: &str, placed: bool, backfilled: bool) -> PendingSetup {
+    PendingSetup { address_id: id.to_string(), placed, backfilled }
+}
+
+fn record(dir: &Path, list: Vec<PendingSetup>) {
+    MailState::update(dir, |s| {
+        s.pending_setups = list;
+        true
+    })
+    .unwrap();
+}
+
+fn pendings(dir: &Path) -> Vec<PendingSetup> {
+    MailState::load(dir).unwrap().pending_setups
+}
+
+#[test]
+fn a_setup_in_flight_keeps_its_address_and_whether_it_was_placed_on_this_device() {
+    // Quinn, 2026-10-06: a setup ended by quitting the app mid-run left its new address pending. The device
+    // keeps, while a setup runs, its address id and the facts `withdraw` reads, written before the act.
+    let r = rig("t1006-in-flight");
+    r.host.lock().unwrap().msgs = ana_mail(2);
+    let seen: Arc<Mutex<Vec<(String, Vec<PendingSetup>)>>> = Default::default();
+    let (log, dir) = (seen.clone(), r.dir.clone());
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if ["m365/signin.js", "m365/forwarding_set.js", "m365/search.js"].contains(&name) {
+            log.lock().unwrap().push((name.to_string(), pendings(&dir)));
+        }
+    }));
+    assert_eq!(wait(&r.start(curated_m365(), true)).ended, Some("finished"));
+    let at = |name: &str| seen.lock().unwrap().iter().find(|(n, _)| n == name).expect(name).1.clone();
+    assert_eq!(at("m365/signin.js"), [pending(A, false, false)]);
+    assert_eq!(at("m365/forwarding_set.js"), [pending(A, true, false)], "written before a script that may set it");
+    assert_eq!(at("m365/search.js"), [pending(A, true, true)]);
+    assert!(pendings(&r.dir).is_empty(), "an ended setup leaves no record");
+    let text = std::fs::read_to_string(r.dir.join("mail.json")).unwrap();
+    assert!(!text.contains("pending_setups"), "none costs mail.json nothing: {text}");
+}
+
+#[test]
+fn at_start_up_an_unfinished_setup_never_placed_has_its_address_removed() {
+    let r = rig("t1006-start-up");
+    let client = || MailClient::with_token_fn(&r.svc.base, Box::new(|| Ok(TOKEN.to_string()))).unwrap();
+    let deletes = || r.events().iter().filter(|e| *e == "svc delete address").count();
+    let kept = format!("mail-session-{A}");
+    // Never placed, the row still pending: DELETE, the profile goes through the guard, the record clears.
+    record(&r.dir, vec![pending(A, false, false)]);
+    profile(&r.dir, &kept);
+    assert!(clean_unfinished(&r.dir, &client()).is_empty());
+    assert_eq!(deletes(), 1);
+    assert!(!session_dir(&r.dir, A).unwrap().exists());
+    assert!(pendings(&r.dir).is_empty());
+    // Placed, backfilled, or an open backfill: nothing is touched, and the record clears.
+    for (rec, open) in [(pending(A, true, false), false), (pending(A, false, true), false), (pending(A, false, false), true)] {
+        record(&r.dir, vec![rec.clone()]);
+        MailState::update(&r.dir, |s| {
+            s.open_backfills = if open { vec![A.to_string()] } else { vec![] };
+            true
+        })
+        .unwrap();
+        profile(&r.dir, &kept);
+        assert!(clean_unfinished(&r.dir, &client()).is_empty(), "{rec:?}");
+        assert_eq!(deletes(), 1, "{rec:?}: never deleted");
+        assert!(session_dir(&r.dir, A).unwrap().exists() && pendings(&r.dir).is_empty(), "{rec:?}");
+    }
+    MailState::update(&r.dir, |s| std::mem::take(&mut s.open_backfills).len() > 0).unwrap();
+    // A row Settings shows as set up (confirmed, active, quiet...) is never touched.
+    for set_up in ["confirmed", "active"] {
+        {
+            let mut s = r.sv.lock().unwrap();
+            s.confirming = set_up == "confirmed";
+            s.canary_sent = set_up == "active";
+        }
+        record(&r.dir, vec![pending(A, false, false)]);
+        assert!(clean_unfinished(&r.dir, &client()).is_empty(), "{set_up}");
+        assert_eq!(deletes(), 1, "{set_up}: never deleted");
+        assert!(session_dir(&r.dir, A).unwrap().exists() && pendings(&r.dir).is_empty(), "{set_up}");
+    }
+    {
+        let mut s = r.sv.lock().unwrap();
+        (s.confirming, s.canary_sent) = (false, false);
+    }
+    // The list cannot be read, or the delete is refused: the record and the profile stay for the next start.
+    record(&r.dir, vec![pending(A, false, false)]);
+    assert_eq!(clean_unfinished(&r.dir, &client_on_a_closed_port()), [A]);
+    assert_eq!(deletes(), 1);
+    r.sv.lock().unwrap().delete_refused = true;
+    assert_eq!(clean_unfinished(&r.dir, &client()), [A]);
+    assert_eq!(deletes(), 2, "the delete was asked");
+    assert!(session_dir(&r.dir, A).unwrap().exists() && pendings(&r.dir) == [pending(A, false, false)]);
+    // The next start's delete is taken.
+    r.sv.lock().unwrap().delete_refused = false;
+    assert!(clean_unfinished(&r.dir, &client()).is_empty());
+    assert_eq!(deletes(), 3);
+    assert!(!session_dir(&r.dir, A).unwrap().exists() && pendings(&r.dir).is_empty());
+    // An address the service no longer lists is already gone: its profile goes, nothing is asked.
+    record(&r.dir, vec![pending(B, false, false)]);
+    profile(&r.dir, &format!("mail-session-{B}"));
+    assert!(clean_unfinished(&r.dir, &client()).is_empty());
+    assert_eq!(deletes(), 3);
+    assert!(!session_dir(&r.dir, B).unwrap().exists() && pendings(&r.dir).is_empty());
+}
+
+#[test]
+fn a_withdrawal_the_service_refused_is_tried_again_at_the_next_start() {
+    let r = rig("t1006-withdraw-later");
+    r.sv.lock().unwrap().delete_refused = true;
+    queue(&r, "m365/forwarding_set.js", vec![json!({ "result": "elsewhere" })]);
+    let shared = r.start(curated_m365(), true);
+    until("the question", || shared.progress().ask == Some("forwarding_elsewhere"));
+    assert!(shared.answer(Answer::Replace(false)));
+    assert!(wait(&shared).line.is_some_and(|l| l.contains("could not be removed")));
+    assert_eq!(pendings(&r.dir), [pending(A, false, false)], "kept for the next start");
+    r.sv.lock().unwrap().delete_refused = false;
+    let client = MailClient::with_token_fn(&r.svc.base, Box::new(|| Ok(TOKEN.to_string()))).unwrap();
+    assert!(clean_unfinished(&r.dir, &client).is_empty());
+    assert!(pendings(&r.dir).is_empty());
+}
+
+#[test]
+fn the_launch_hook_cleans_unfinished_setups_under_the_mail_window_before_any_resume() {
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("mail").join("live.rs")).unwrap();
+    let body = &src[src.find("pub fn on_start").expect("on_start")..];
+    let body = &body[..body.find("\n}\n").unwrap()];
+    let (sweep, clean) = (body.find("sweep_at_launch(").unwrap(), body.find("clean_unfinished(").expect("on_start cleans"));
+    let resume = body.find("start_resume(").unwrap();
+    assert!(sweep < clean && clean < resume, "{body}");
+    assert!(clean < body.find("keep_session").unwrap(), "cleaned whatever the saved sign-in switch says");
 }
 
 #[test]
