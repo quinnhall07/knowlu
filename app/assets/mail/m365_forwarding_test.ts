@@ -3,7 +3,7 @@
 // spikes' selectors (research note 6: the switch is `input[role=switch]`, read by `checked`); the rest
 // of its controls are found by their visible names, which the page here carries. No address is real.
 import { assert, assertEquals } from "@std/assert";
-import { El, load, Page, run } from "./test_dom.ts";
+import { disable, El, load, Page, run } from "./test_dom.ts";
 
 const OURS = "box-1@in.example.invalid";
 const OTHER = "someone@elsewhere.example.invalid";
@@ -44,11 +44,17 @@ interface Forwarding {
 // labelled "Enable forwarding" by a <label>; the address field and keep-a-copy are drawn only while the
 // switch is on; and there is **no Save button until something is changed**, so a clean page, on or off,
 // has none. A save takes the change and the Save button goes away.
+// Read again on 2026-10-06 with the switch on: the address field is `input type=text` with the placeholder
+// "Enter an email address" and no aria-label, aria-labelledby, label[for] or enclosing label. Its visible
+// label "Forward my email to:" is an unlinked sibling <label> in the same `div[role=group]`, before it in
+// document order. Save is drawn disabled while forwarding is on with no address, and keep-a-copy is drawn
+// already checked when the switch is turned on from off. A "Search settings" box sits outside any group.
 function forwarding(o: Opts = {}): Forwarding {
   const w = o.without;
   const page = load(`
     <div role="dialog"><div role="heading">Forwarding</div>
       <button type="button">Layout</button><button type="button">Compose and reply</button>
+      <input id="search" type="text" placeholder="Search settings">
       <button type="button">clear</button><button type="button" aria-label="Close settings">x</button>
       <div><input id="convo" type="checkbox" role="switch" aria-checked="true" checked>
         <label for="convo">Group messages by conversation</label></div>
@@ -63,6 +69,8 @@ function forwarding(o: Opts = {}): Forwarding {
     snap: () => ({ on: !!f.el("fwd")?.checked, to: f.el("to")?.value ?? "", keep: !!f.el("keep")?.checked }),
   };
   let held: Snap = { on: o.on ?? false, to: o.to ?? "", keep: o.keep ?? false };
+  // Keep-a-copy as drawn when the switch is turned on from off: live Outlook draws it checked.
+  const flippedKeep = o.keep ?? true;
   let dirty = false;
   const changed = () => {
     dirty = true;
@@ -70,6 +78,8 @@ function forwarding(o: Opts = {}): Forwarding {
   };
   const footer = () => {
     if (w === "save") return;
+    // Live: Save is drawn disabled while forwarding is on and no address is typed.
+    const refresh = () => f.el("save") && disable(f.el("save"), !!f.el("fwd")?.checked && !f.el("to")?.value);
     if (dirty && !f.el("save")) {
       f.el("foot").insertAdjacentHTML("beforeend", `<button id="save" type="button">Save</button>`);
       f.el("save").addEventListener("click", () => {
@@ -81,6 +91,7 @@ function forwarding(o: Opts = {}): Forwarding {
         f.el("save").remove();
       });
     }
+    refresh();
   };
   const box = (el: El) =>
     el.addEventListener("click", () => {
@@ -97,8 +108,9 @@ function forwarding(o: Opts = {}): Forwarding {
     }
     setTimeout(() => {
       if (!f.el("fwd")?.checked || f.el("rest")) return;
-      const field = w === "address" ? "" : `<div><label for="to">Forward my email to:</label>
-        <input id="to" type="text"></div>`;
+      const field = w === "address" ? "" : `<div role="group"><div><label>Forward my email to:</label></div>
+        <div><div><span><input id="to" type="text" placeholder="Enter an email address"
+          aria-describedby="to-message"></span></div></div><div id="to-message"></div></div>`;
       const keep = w === "keep" ? "" : `<div><input id="keep" type="checkbox">
         <label for="keep">Keep a copy of forwarded messages</label></div>`;
       f.el("body").insertAdjacentHTML("beforeend", `<div id="rest">${field}${keep}</div>`);
@@ -107,9 +119,10 @@ function forwarding(o: Opts = {}): Forwarding {
         f.el("to").addEventListener("input", changed);
       }
       if (f.el("keep")) {
-        f.el("keep").checked = held.keep;
+        f.el("keep").checked = held.on ? held.keep : flippedKeep;
         box(f.el("keep"));
       }
+      footer();
     }, o.reveal_ms ?? 30);
   };
   box(f.el("convo"));
@@ -154,6 +167,65 @@ Deno.test("m365_the_live_page_has_no_save_until_the_switch_is_turned_on", async 
   assertEquals(r, { result: "ok", forwarding: "on", to: "ours", keep_copy: true, changed: true });
   assertEquals(f.saves, 1);
   assertEquals(f.saved, { on: true, to: OURS, keep: true });
+});
+
+Deno.test("m365_the_address_field_is_named_by_the_unlinked_label_in_its_group", async () => {
+  // T18c, 2026-10-06: the field's only visible name is a sibling <label> with no `for`, in the same
+  // `div[role=group]`. Keep-a-copy is drawn already checked when the switch turns on: it is left checked,
+  // never clicked, and the search box outside the group is never typed into.
+  const f = forwarding({ on: false });
+  const r = await run("m365/forwarding_set.js", f.page, { address: OURS });
+  assertEquals(r, { result: "ok", forwarding: "on", to: "ours", keep_copy: true, changed: true });
+  assertEquals(f.saved, { on: true, to: OURS, keep: true });
+  assertEquals(f.clicks.map((c) => c.id), ["fwd"], "keep-a-copy, drawn checked, is not clicked");
+  assertEquals(f.el("search").value, "");
+  const g = forwarding({ on: true, to: OURS, keep: true });
+  assertEquals(await run("m365/forwarding_read.js", g.page, { address: OURS }), {
+    result: "ok",
+    forwarding: "on",
+    to: "ours",
+    keep_copy: true,
+  });
+  const h = forwarding({ on: true, to: OURS, keep: true });
+  assertEquals(await run("m365/forwarding_off.js", h.page, { address: OURS }), {
+    result: "ok",
+    forwarding: "off",
+    changed: true,
+  });
+});
+
+Deno.test("m365_a_group_label_never_names_a_field_outside_it_or_one_of_two", async () => {
+  // The search box sits outside any group: with the address field missing, it is never taken for it.
+  const f = forwarding({ on: true, to: OTHER, without: "address" });
+  await drawn();
+  assertEquals(await run("m365/forwarding_read.js", f.page, { address: OURS, wait_ms: 50 }), NOT_FOUND("address"));
+  assertEquals(f.el("search").value, "");
+  // A group holding two text fields names neither by its label: which one is the address is not known,
+  // so even with the student's answer to replace, nothing is typed.
+  const g = forwarding({ on: true, to: OTHER, without: "address" });
+  await drawn();
+  g.el("body").insertAdjacentHTML(
+    "beforeend",
+    `<div role="group"><label>Forward my email to:</label><input id="a" type="text"><input id="b" type="text"></div>`,
+  );
+  const args = { address: OURS, replace: true, wait_ms: 50 };
+  assertEquals(await run("m365/forwarding_set.js", g.page, args), NOT_FOUND("address"));
+  assertEquals([g.el("a").value, g.el("b").value, g.el("search").value], ["", "", ""]);
+  assertEquals(g.saves, 0);
+});
+
+Deno.test("m365_the_three_forwarding_scripts_name_controls_alike", async () => {
+  // Each script is compiled in on its own, so each carries the naming helper: the copies stay identical.
+  const helper = async (name: string) => {
+    const text = await Deno.readTextFile(new URL(`m365/${name}`, import.meta.url));
+    const start = text.indexOf("const text = ");
+    const end = text.indexOf("const named = ");
+    assert(start >= 0 && end > start, name);
+    return text.slice(start, end);
+  };
+  const set = await helper("forwarding_set.js");
+  assertEquals(await helper("forwarding_read.js"), set);
+  assertEquals(await helper("forwarding_off.js"), set);
 });
 
 Deno.test("m365_a_dialog_drawn_late_is_waited_for", async () => {

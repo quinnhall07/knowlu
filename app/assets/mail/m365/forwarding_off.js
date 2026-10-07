@@ -12,6 +12,7 @@
 // Live Outlook (T18c) draws the dialog after the document is complete and shows no Save until something
 // is changed, so Save is looked for only after the switch is turned off.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
+const TEXTY = 'input[type="text"], input[type="email"], input[type="search"], input:not([type]), textarea';
 const nameOf = (el) => {
   const aria = el.getAttribute("aria-label");
   if (aria) return aria.trim();
@@ -24,7 +25,20 @@ const nameOf = (el) => {
     for (const l of document.querySelectorAll("label")) if (l.getAttribute("for") === el.id) return text(l);
   }
   const wrap = el.closest ? el.closest("label") : null;
-  return wrap ? text(wrap) : "";
+  if (wrap) return text(wrap);
+  // Live Outlook (T18c, 2026-10-06) names its address field only by an unlinked <label> beside it in a
+  // role=group: such a label names a text field that is the only one in its nearest group. Then the
+  // placeholder. A control outside any group, or one of two text fields, is never named by a group label.
+  if (!el.matches || !el.matches(TEXTY)) return "";
+  const group = el.closest('[role="group"]');
+  if (group && group.querySelectorAll(TEXTY).length === 1) {
+    const free = [...group.querySelectorAll("label")].filter(
+      (l) => !l.getAttribute("for") && !l.querySelector("input, select, textarea, button"),
+    );
+    const t = free.map(text).filter(Boolean).join(" ");
+    if (t) return t;
+  }
+  return (el.getAttribute("placeholder") || "").trim();
 };
 const named = (selector, pattern) =>
   [...document.querySelectorAll(selector)].find((el) => pattern.test(nameOf(el)));
