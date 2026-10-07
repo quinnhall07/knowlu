@@ -19,6 +19,10 @@
 //! **Microsoft 365** draws a virtualised list: the rows are the ones drawn. The routine narrows the window
 //! with `search.js`'s `until` (halving a span that does not draw whole, down to one day) so each span is
 //! listed whole; a single day too large to draw is counted as left for the student, never guessed at.
+//! Outlook's conversation view (T18c) draws a conversation as one row: `list.js` opens it and reads each
+//! message in it, as Gmail's are (Quinn 2026-10-02); each is judged once a pass (the student's own never,
+//! a later one under its "Re: " subject too) and a missing one is forwarded alone. A conversation counts
+//! once in `expected` and `handled`; one the page could not read whole is left.
 //! **Gmail** lists conversations oldest page first ([`Outcome::expected`] and [`Outcome::handled`] are
 //! conversations there). A row that shows a message count is **opened** (Quinn 2026-10-02): `thread.js`
 //! reads every message in it, each is fingerprinted, and a conversation with a missing message is
@@ -33,7 +37,7 @@ use crate::mail_client::{MailClient, MailError, Phase};
 use crate::mail_steps::{Paused, Provider, Routine, Send, BACKFILL_DAYS};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 /// At most this many forwards in one slot when no backfill is open (§4.11 step 4).
@@ -198,6 +202,9 @@ pub struct Row {
     /// Gmail, inside an opened conversation: the signed-in account sent this message. The service never
     /// receives the student's own mail, so it is never judged missing (spec 4.11 step 3).
     pub own: bool,
+    /// Microsoft 365: `list.js` read this message inside the conversation it numbers (T18c, conversation
+    /// view); `forward.js` opens conversations to find it.
+    pub conversation: Option<u32>,
 }
 
 impl Row {
@@ -211,12 +218,17 @@ impl Row {
             thread: v.get("thread").and_then(Value::as_bool).unwrap_or(false),
             messages: v.get("messages").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()),
             own: v.get("own").and_then(Value::as_bool).unwrap_or(false),
+            conversation: v.get("conversation").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()),
         })
     }
 
     /// The args `forward.js` takes for this row.
     fn forward_args(&self) -> Value {
-        json!({ "sender": self.sender, "subject": self.subject, "received": self.received })
+        let mut v = json!({ "sender": self.sender, "subject": self.subject, "received": self.received });
+        if self.conversation.is_some() {
+            v["in_conversation"] = json!(true);
+        }
+        v
     }
 }
 
@@ -361,7 +373,7 @@ impl Outcome {
 /// One pass: lists, diffs, forwards, closes. A pass never writes the vault and never fails as a whole:
 /// it ends as a [`Stop`] with the counts so far.
 pub fn run_pass(mb: &dyn Mailbox, client: &MailClient, clock: &dyn Clock, routine: &mut Routine, job: &Job) -> Outcome {
-    let mut pass = Pass { mb, client, clock, routine, job, out: Outcome::new(), batch: None, attempts: 0 };
+    let mut pass = Pass { mb, client, clock, routine, job, out: Outcome::new(), batch: None, attempts: 0, judged: HashSet::new() };
     pass.out.stop = pass.go().err().unwrap_or(Stop::Done);
     pass.finish();
     pass.out
@@ -384,6 +396,9 @@ struct Pass<'a> {
     batch: Option<Batch>,
     /// Forward scripts run (each can leave a copy in Sent).
     attempts: u32,
+    /// Microsoft 365: the conversation messages judged this pass. A conversation is found by any message in
+    /// it, so spans may list it twice; each message is judged once.
+    judged: HashSet<(String, String, String)>,
 }
 
 /// A missing Gmail row: one message, or a conversation of `n` messages sent alone.
@@ -535,42 +550,64 @@ impl Pass<'_> {
             for r in list.get("rows").and_then(Value::as_array).into_iter().flatten() {
                 rows.push(Row::from_json(r).ok_or(Stop::Script("a listed message could not be read"))?);
             }
-            if (rows.len() as u32) < total && b - a > 1 {
+            // The list's own rows read (a conversation is one, however many messages it holds), and the
+            // conversations among them it could not read whole (T18c).
+            let drawn = count(&list, "drawn").unwrap_or(rows.len() as u32);
+            let unread = count(&list, "left").unwrap_or(0);
+            if drawn < total && b - a > 1 {
                 let mid = a + (b - a) / 2;
                 spans.push_front((mid, b));
                 spans.push_front((a, mid));
                 continue;
             }
             // One day too large to draw: what the list does not show is left, never guessed at.
-            let unseen = total.saturating_sub(rows.len() as u32);
+            let unseen = total.saturating_sub(drawn) + unread;
             self.out.left += unseen;
             self.out.handled += unseen;
             rows.sort_by_key(|r| r.at.unwrap_or(i64::MAX));
+            // `handled` is in the search's unit: a conversation counts once, at its last message judged.
+            let mut remaining: HashMap<u32, u32> = HashMap::new();
+            for k in rows.iter().filter_map(|r| r.conversation) {
+                *remaining.entry(k).or_default() += 1;
+            }
             for row in rows {
-                self.m365_row(&row, held)?;
+                let weight = match row.conversation.and_then(|k| remaining.get_mut(&k)) {
+                    Some(n) => {
+                        *n -= 1;
+                        u32::from(*n == 0)
+                    }
+                    None => 1,
+                };
+                self.m365_row(&row, held, weight)?;
             }
         }
         Ok(())
     }
 
-    fn m365_row(&mut self, row: &Row, held: &Held) -> Step<()> {
+    /// Judges one message; `weight` is what it adds to `handled` (0 for a conversation's message that is not
+    /// its last). A conversation's message is held under its subject or the "Re: " form of it, as a Gmail
+    /// conversation's is; the student's own and one already judged this pass are never judged.
+    fn m365_row(&mut self, row: &Row, held: &Held, weight: u32) -> Step<()> {
         let Some(at) = row.at else {
             self.out.left += 1;
-            self.out.handled += 1;
+            self.out.handled += weight;
             return Ok(());
         };
-        if !self.in_window(at) {
-            self.out.handled += 1;
-        } else if held.holds(&row.sender, &row.subject, at) {
+        let again = row.conversation.is_some()
+            && !self.judged.insert((row.sender.clone(), row.subject.clone(), row.received.clone()));
+        let holds = |subject: &str| held.holds(&row.sender, subject, at);
+        if row.own || again || !self.in_window(at) {
+            self.out.handled += weight;
+        } else if holds(&row.subject) || (row.conversation.is_some() && holds(&format!("Re: {}", row.subject))) {
             self.out.held += 1;
-            self.out.handled += 1;
+            self.out.handled += weight;
         } else {
-            self.send_m365(row)?;
+            self.send_m365(row, weight)?;
         }
         self.tick()
     }
 
-    fn send_m365(&mut self, row: &Row) -> Step<()> {
+    fn send_m365(&mut self, row: &Row, weight: u32) -> Step<()> {
         self.room()?;
         self.reserve(1)?;
         self.open_batch()?;
@@ -586,7 +623,7 @@ impl Pass<'_> {
             Some("not found") => self.out.left += 1,
             _ => return Err(Stop::Script("a forward did not finish")),
         }
-        self.out.handled += 1;
+        self.out.handled += weight;
         Ok(())
     }
 }

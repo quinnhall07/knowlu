@@ -657,12 +657,15 @@ struct Mail {
     subject: String,
     at: i64,
     /// Gmail: the count the row shows, and the conversation's messages (sender, instant), oldest first.
+    /// Microsoft 365: a non-empty `convo` is a conversation row, which `list.js` opens (T18c).
     count: Option<u32>,
     convo: Vec<(String, i64)>,
+    /// Microsoft 365: `list.js` could not read this conversation whole, and counts it `left`.
+    unreadable: bool,
 }
 
 fn mail(sender: &str, subject: &str, at: i64) -> Mail {
-    Mail { sender: sender.into(), subject: subject.into(), at, count: None, convo: vec![] }
+    Mail { sender: sender.into(), subject: subject.into(), at, count: None, convo: vec![], unreadable: false }
 }
 
 fn received(at: i64) -> String {
@@ -771,10 +774,14 @@ impl Mailbox for Fake {
                 let since = args["since"].as_str().unwrap();
                 let before = args.get("until").and_then(Value::as_str);
                 assert!(m365 || before.is_none(), "Gmail's search takes no until");
+                // A conversation is found by any message in it (Microsoft 365's conversation view).
                 let mut idx: Vec<usize> = (0..self.msgs.len())
                     .filter(|&i| {
-                        let day = iso(self.msgs[i].at)[..10].to_string();
-                        day.as_str() >= since && before.is_none_or(|u| day.as_str() < u)
+                        let m = &self.msgs[i];
+                        std::iter::once(m.at).chain(m.convo.iter().map(|c| c.1)).any(|at| {
+                            let day = iso(at)[..10].to_string();
+                            day.as_str() >= since && before.is_none_or(|u| day.as_str() < u)
+                        })
                     })
                     .collect();
                 idx.sort_by_key(|&i| self.msgs[i].at);
@@ -787,9 +794,30 @@ impl Mailbox for Fake {
                 json!({ "result": "ok", "count": n })
             }
             "list.js" if m365 => {
+                // A conversation row is opened and each message in it read (T18c), numbered by conversation.
                 let cur = self.current.borrow();
-                let rows: Vec<Value> = cur.iter().take(self.drawn).map(|&i| self.row(i, false)).collect();
-                json!({ "result": "ok", "total": cur.len(), "rows": rows })
+                let (mut rows, mut convos, mut left) = (Vec::new(), 0, 0);
+                for &i in cur.iter().take(self.drawn) {
+                    let m = &self.msgs[i];
+                    if m.convo.is_empty() {
+                        rows.push(self.row(i, false));
+                        continue;
+                    }
+                    convos += 1;
+                    if m.unreadable {
+                        left += 1;
+                        continue;
+                    }
+                    for (who, at) in &m.convo {
+                        let mut v = json!({ "sender": who, "subject": m.subject, "received": received(*at), "received_at": iso(*at), "conversation": convos });
+                        if who == ME {
+                            v["own"] = json!(true);
+                        }
+                        rows.push(v);
+                    }
+                }
+                let drawn = cur.len().min(self.drawn);
+                json!({ "result": "ok", "total": cur.len(), "drawn": drawn, "left": left, "rows": rows })
             }
             "list.js" => {
                 let cur = self.current.borrow();
@@ -827,7 +855,16 @@ impl Mailbox for Fake {
                 let n = self.forwards.borrow().len();
                 let rows: Vec<Value> = args.get("rows").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![args.clone()]);
                 for r in &rows {
-                    self.find(r["sender"].as_str().unwrap(), r["subject"].as_str().unwrap(), r["received"].as_str().unwrap());
+                    let (who, subject, text) = (r["sender"].as_str().unwrap(), r["subject"].as_str().unwrap(), r["received"].as_str().unwrap());
+                    // A message read inside a Microsoft 365 conversation is asked for as one (forward.js opens them).
+                    if m365 && r.get("in_conversation") == Some(&json!(true)) {
+                        let held = self.msgs.iter().any(|m| {
+                            m.subject == subject && m.convo.iter().any(|(s, at)| s == who && received(*at) == text)
+                        });
+                        assert!(held, "the routine asked for a conversation message the page does not show");
+                    } else {
+                        self.find(who, subject, text);
+                    }
                 }
                 self.forwards.borrow_mut().push((self.clk.now(), args.clone()));
                 if self.refuse_on.get() == Some(n) {
@@ -1128,6 +1165,53 @@ fn a_microsoft_window_too_large_to_draw_is_narrowed_and_one_day_too_large_is_lef
     crowded.drawn = 3;
     let out = pass(&crowded, &holding(&[]), &mut routine(Provider::M365), &job(Provider::M365, Phase::Backfill, w, None));
     assert_eq!((out.stop.clone(), out.sent, out.left, out.handled, out.expected), (Stop::Done, 3, 2, 5, 5));
+}
+
+#[test]
+fn a_microsoft_conversation_row_is_opened_and_every_message_in_it_is_judged() {
+    // T18c (2026-10-07, live): Outlook's conversation view. `list.js` opens a conversation row and reads each
+    // message in it (Quinn's ruling for Gmail threads, 2026-10-02); the routine judges each one: the
+    // student's own reply never, a later message under its "Re: " subject too, a missing one forwarded alone,
+    // asked for as a message inside a conversation. A conversation the page could not read whole is left,
+    // never a failed pass. `handled` stays in the search's unit: a conversation is one.
+    let since = window(NOW, None, None).since;
+    let t = |h: i64| since + h * 3_600;
+    let single = mail(BO, "Lab report due", t(2));
+    let mut talk = mail(ANA, "Group project", t(10));
+    talk.convo = vec![(ANA.into(), t(4)), (ME.into(), t(6)), (BO.into(), t(8)), (ANA.into(), t(10))];
+    let mut broken = mail(ANA, "Seminar room", t(20));
+    broken.convo = vec![(ANA.into(), t(19)), (BO.into(), t(20))];
+    broken.unreadable = true;
+    let svc = holding(&[(ANA, "Group project", t(4)), (BO, "Re: Group project", t(8))]);
+    let mb = fake(Provider::M365, vec![broken, talk, single]);
+    let out = pass(&mb, &svc, &mut routine(Provider::M365), &job(Provider::M365, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
+    assert_eq!(out.stop, Stop::Done);
+    assert_eq!((out.expected, out.handled, out.held, out.sent, out.left), (3, 3, 2, 2, 1));
+    let sends: Vec<Value> = mb.forwards.borrow().iter().map(|(_, a)| a.clone()).collect();
+    assert_eq!(mb.forwarded(), [received(t(2)), received(t(10))], "oldest first; never the student's own reply");
+    assert!(sends[0].get("in_conversation").is_none(), "a single row is asked for as before: {}", sends[0]);
+    assert_eq!((sends[1]["sender"].as_str(), sends[1]["in_conversation"].as_bool()), (Some(ANA), Some(true)));
+}
+
+#[test]
+fn a_microsoft_conversation_found_in_two_spans_is_judged_once() {
+    // A conversation's search finds it by any message in it, so a window narrowed into spans may list it in
+    // two of them: each message in it is judged, and a missing one forwarded, once a pass.
+    let w = backfill_window(NOW.div_euclid(DAY) - 5, NOW);
+    let day = |d: i64, k: i64| (NOW.div_euclid(DAY) - 4 + d) * DAY + 3_600 * (k + 1);
+    let mut msgs: Vec<Mail> = (1..3).flat_map(|d| (0..2).map(move |k| (d, k))).map(|(d, k)| mail(BO, &format!("Day {d} mail {k}"), day(d, k))).collect();
+    let mut talk = mail(ANA, "Group project", day(3, 0));
+    talk.convo = vec![(ANA.into(), day(0, 0)), (ANA.into(), day(3, 0))];
+    msgs.push(talk);
+    let mut mb = fake(Provider::M365, msgs);
+    mb.drawn = 2;
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::M365), &job(Provider::M365, Phase::Backfill, w, None));
+    assert_eq!((out.stop.clone(), out.sent, out.left), (Stop::Done, 6, 0));
+    let mut sent = mb.forwarded();
+    let all = sent.len();
+    sent.sort();
+    sent.dedup();
+    assert_eq!(sent.len(), all, "nothing forwarded twice: {:?}", mb.forwarded());
 }
 
 #[test]

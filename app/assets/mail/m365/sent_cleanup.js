@@ -47,28 +47,36 @@ if (!folder || !/^sent items$/i.test(nameOf(folder) || text(folder))) {
 }
 
 // A row's recipients and subject, from its title attributes (the sender slot of Sent Items holds who it went to).
+// Titles on or inside a button are never read, and the subject is the first title after the recipients'
+// that is not the time's: live rows put a title before the address and button titles among their own (T18c).
 const read = (row) => {
-  const recipients = new Set();
-  let subject = null;
-  for (const el of row.querySelectorAll("[title]")) {
-    const t = (el.getAttribute("title") || "").trim();
-    const parts = t.split(/\s*[;,]\s*/).filter((p) => p !== "");
-    if (parts.length > 0 && parts.every((p) => ADDRESS.test(p))) {
-      parts.forEach((p) => recipients.add(p.toLowerCase()));
-    } else if (!(TIMED.test(t) && /\d/.test(t)) && subject === null && t !== "") {
-      subject = t.replace(/\s+/g, " ");
-    }
-  }
-  return { recipients: [...recipients], subject };
+  const inButton = (el) => {
+    const b = el.closest('button, [role="button"]');
+    return !!b && row.contains(b);
+  };
+  const t = [...row.querySelectorAll("[title]")].filter((el) => !inButton(el))
+    .map((el) => (el.getAttribute("title") || "").trim());
+  const listed = (v) => {
+    const parts = v.split(/\s*[;,]\s*/).filter((p) => p !== "");
+    return parts.length > 0 && parts.every((p) => ADDRESS.test(p)) ? parts : null;
+  };
+  const recipients = new Set(t.flatMap((v) => listed(v) || []).map((p) => p.toLowerCase()));
+  const first = t.findIndex((v) => listed(v));
+  const subject = first < 0
+    ? null
+    : (t.slice(first + 1).find((v) => v !== "" && !listed(v) && !(TIMED.test(v) && /\d/.test(v))) ?? null);
+  return { recipients: [...recipients], subject: subject === null ? null : subject.replace(/\s+/g, " ") };
 };
 const ours = (row) => {
   const f = read(row);
   return f.subject === `Knowlu ${nonce}` && f.recipients.length === 1 && f.recipients[0] === address;
 };
 const mine = [...document.querySelectorAll('[role="listbox"] [role="option"]')].filter(ours).slice(0, max);
+// The toolbar's Delete, never a row's own (live rows carry Delete buttons of their own, T18c: clicking one
+// would delete that row's message, whichever it is).
 const del = () =>
   [...document.querySelectorAll('button, [role="button"]')].find((b) =>
-    /^delete$/i.test(nameOf(b) || text(b))
+    !b.closest('[role="option"]') && /^delete$/i.test(nameOf(b) || text(b))
   );
 if (mine.length > 0 && !del()) return { result: "not found", control: "delete" };
 

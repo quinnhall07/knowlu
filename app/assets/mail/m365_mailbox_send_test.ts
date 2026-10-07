@@ -2,7 +2,7 @@
 // 4.11 step 4, 10 and R4): one forward-as-attachment per call with the batch's nonce, a refusal seen in
 // the page, and the Sent Items cleanup that touches only the copies Knowlu made. Synthetic pages only.
 import { assert, assertEquals } from "@std/assert";
-import { Box, mailbox, Msg, msg, NONCE, OURS } from "./m365_mailbox_pages.ts";
+import { Box, convo, mailbox, Msg, msg, NONCE, OURS } from "./m365_mailbox_pages.ts";
 import { run } from "./test_dom.ts";
 
 const MAIL = [
@@ -29,6 +29,41 @@ Deno.test("m365_forward_as_attachment_sends_one_message_with_the_nonce_in_the_su
   assert(box.sent[0].subject.includes(NONCE), box.sent[0].subject);
   assert(!box.sent[0].subject.includes("Lab report"), box.sent[0].subject);
   assertEquals(box.el("over").innerHTML, "", "the compose window closed");
+});
+
+Deno.test("m365_a_message_inside_a_conversation_is_found_by_opening_it_and_forwarded_alone", async () => {
+  // T18c (2026-10-07, live): conversation view. list.js read the message inside the conversation, with the
+  // conversation's subject; forward.js opens conversations to find it, sends that one message, and puts the
+  // conversation away again. A conversation that does not hold it is put away at once.
+  const other = convo("c0", "Seminar room", [
+    msg("c0a", "ana.lopez@school.example.invalid", "Seminar room", 1),
+    msg("c0b", "bo.chen@school.example.invalid", "Seminar room", 2),
+  ]);
+  const talk = convo("c1", "Group project", [
+    msg("c1a", "ana.lopez@school.example.invalid", "Group project", 3),
+    msg("c1b", "bo.chen@school.example.invalid", "Group project", 6),
+  ]);
+  const box = mailbox([MAIL[0], other, talk]);
+  const child = { ...TARGET, subject: "Group project", received: "Thu 10/6/2026 3:04 PM" };
+  // Without `in_conversation` nothing is opened: a single row that is not there is simply not found.
+  assertEquals(await run("m365/forward.js", box.page, child), { result: "not found", control: "message" });
+  assertEquals(box.expands, []);
+  const r = await run("m365/forward.js", box.page, { ...child, in_conversation: true });
+  assertEquals(r, { result: "ok", sent: true });
+  assertEquals(box.sent.length, 1);
+  assertEquals(box.sent[0].attached, "c1b", "the one message asked for, not its conversation");
+  assertEquals(box.sent[0].to, [OURS]);
+  assertEquals(box.expands, ["c0", "c0", "c1", "c1"], "each opened, and each put away again");
+  assertEquals(box.rows().length, 3);
+  // A message no conversation holds is not found, and every conversation is put away.
+  const none = await run("m365/forward.js", box.page, {
+    ...child,
+    received: "Fri 10/9/2026 3:04 PM",
+    in_conversation: true,
+  });
+  assertEquals(none, { result: "not found", control: "message" });
+  assertEquals(box.rows().length, 3);
+  assertEquals(box.sent.length, 1);
 });
 
 Deno.test("m365_forward_names_a_message_or_control_that_is_not_on_the_page_and_sends_nothing", async () => {

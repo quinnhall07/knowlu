@@ -9,6 +9,8 @@ import { El, load, Page } from "./test_dom.ts";
 
 export const OURS = "box-1@in.example.invalid";
 export const NONCE = "bk7f3a9c2e41";
+/** The signed-in mailbox, as the folder pane names it. */
+export const ME = "me.student@school.example.invalid";
 
 export type Folder = "Inbox" | "Junk Email" | "Deleted Items" | "Sent Items" | "Drafts";
 
@@ -24,6 +26,10 @@ export interface Msg {
   /** The day, as the search's `received>=` compares it. */
   day: string;
   folder: Folder;
+  /** A conversation (T18c live: conversation view): its messages, oldest first. The row shows no address. */
+  children?: Msg[];
+  /** A message inside a conversation: the subject its own row shows, when it shows one. */
+  ownSubject?: string;
 }
 
 export interface Opts {
@@ -45,6 +51,8 @@ export interface Opts {
   searchLate?: number;
   /** After the first Delete the list is virtualised again: the node that drew `node` is reused to draw `as`. */
   recycle?: { node: string; as: string };
+  /** The folder pane names no mailbox address. */
+  noAccount?: boolean;
 }
 
 export interface Sent {
@@ -60,6 +68,8 @@ export interface Box {
   sent: Sent[];
   queries: string[];
   deleted: string[];
+  /** Clicks on a conversation's Expand or Collapse button, by its id. */
+  expands: string[];
   el(id: string): El;
   rows(): El[];
 }
@@ -80,6 +90,40 @@ export function msg(id: string, who: string, subject: string, day: number, folde
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 
+/** A conversation of `children` (oldest first): the row's time is the newest message's. */
+export function convo(id: string, subject: string, children: Msg[], folder: Folder = "Inbox"): Msg {
+  const last = children[children.length - 1];
+  return { id, who: "", subject, at: last.at, day: last.day, folder, children };
+}
+
+// A row in the live order (T18c, 2026-10-07): titles are other, empty, the address, three others (here a
+// button, the subject and a button), the time, other; buttons inside the row carry titles. A conversation's
+// row has no address title, an aria-label of its senders joined by ";" and an "Expand conversation" button.
+const rowHtml = (m: Msg, setsize: number, child: boolean) => {
+  const kids = m.children ?? [];
+  const label = kids.length ? `${kids.map((k) => k.shown ?? k.who).join("; ")} ${m.subject}` : "";
+  const subject = child ? m.ownSubject : m.subject;
+  return `
+      <div role="option" id="r-${m.id}" aria-selected="false" aria-setsize="${setsize}"${
+    label ? ` aria-label="${esc(label)}"` : ""
+  }${child ? ` data-child="1"` : ""}>
+        <div title="${esc(m.shown ?? m.who)}"></div><span title=""></span>
+        ${
+    kids.length
+      ? `<span>${esc(label)}</span>`
+      : `<span data-f="who" title="${esc(m.who)}">${esc(m.shown ?? m.who)}</span>`
+  }
+        <button type="button" title="Mark as read" aria-label="Mark as read"></button>
+        ${
+    subject === undefined ? "" : `<span data-f="subject" title="${esc(subject)}">${esc(subject)}</span>`
+  }
+        <button type="button" title="Flag this message" aria-label="Flag this message"></button>
+        ${m.at ? `<span data-f="at" title="${m.at}">3:04 PM</span>` : ""}<span>a preview of the body</span>
+        <button type="button" title="Delete" aria-label="Delete"></button>${
+    kids.length ? `<button type="button" data-x="1" aria-label="Expand conversation"></button>` : ""
+  }</div>`;
+};
+
 export function mailbox(all: Msg[], o: Opts = {}): Box {
   const folder = o.folder ?? "Inbox";
   const page = load(`
@@ -88,7 +132,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     ["Inbox", "Sent Items", "Junk Email"].map((f) =>
       `<div role="treeitem" aria-label="${f}" aria-selected="${f === folder}">${f}</div>`
     ).join("")
-  }</div>
+  }${o.noAccount ? "" : `<div role="treeitem" aria-selected="false" title="${ME}">${ME}</div>`}</div>
     <div role="search" id="searchbar"></div>
     <div id="bar"><button type="button" id="fwd" aria-label="Forward" aria-haspopup="menu">Forward</button>
       <button type="button" id="del" aria-label="Delete">Delete</button></div>
@@ -100,6 +144,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     sent: [],
     queries: [],
     deleted: [],
+    expands: [],
     el: (id) => d.getElementById(id),
     rows: () => [...d.querySelectorAll('[role="option"]')],
   };
@@ -108,19 +153,41 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     selected = null;
     const drawn = shown.slice(0, o.drawn ?? shown.length);
     const list = b.el("list");
-    list.innerHTML = shown.length === 0 ? `<div role="status">No results</div>` : drawn.map((m, i) => `
-      <div role="option" id="r-${m.id}" aria-selected="false" aria-setsize="${shown.length}" aria-posinset="${
-      i + 1
-    }">
-        <span title="${esc(m.who)}">${esc(m.shown ?? m.who)}</span>
-        <span title="${esc(m.subject)}">${esc(m.subject)}</span>
-        <span title="${m.at}">3:04 PM</span><span>a preview of the body</span></div>`).join("");
-    for (const row of b.rows()) {
-      row.addEventListener("click", () => {
-        for (const r of b.rows()) r.setAttribute("aria-selected", String(r === row));
-        selected = row.getAttribute("id").slice(2);
-      });
-    }
+    // Live, the first row carries the list's aria-setsize and the others "0".
+    list.innerHTML = shown.length === 0
+      ? `<div role="status">No results</div>`
+      : drawn.map((m, i) => rowHtml(m, i === 0 ? shown.length : 0, false)).join("");
+    for (const row of b.rows()) wire(row);
+  };
+  const wire = (row: El) => {
+    row.addEventListener("click", () => {
+      for (const r of b.rows()) r.setAttribute("aria-selected", String(r === row));
+      selected = row.getAttribute("id").slice(2);
+    });
+    const x = row.querySelector("[data-x]");
+    if (!x) return;
+    // Expand draws the messages as rows after the conversation's, a moment later; Collapse takes them away.
+    x.addEventListener("click", (e: El) => {
+      e.stopPropagation?.();
+      const m = b.msgs.find((k) => `r-${k.id}` === row.getAttribute("id"));
+      if (!m?.children) return;
+      b.expands.push(m.id);
+      if (x.getAttribute("aria-label") === "Collapse conversation") {
+        for (const k of m.children) b.el(`r-${k.id}`)?.remove();
+        x.setAttribute("aria-label", "Expand conversation");
+        row.removeAttribute("aria-expanded");
+        return;
+      }
+      x.setAttribute("aria-label", "Collapse conversation");
+      row.setAttribute("aria-expanded", "true");
+      setTimeout(() => {
+        row.insertAdjacentHTML(
+          "afterend",
+          [...m.children!].reverse().map((k) => rowHtml(k, 0, true)).join(""),
+        );
+        for (const k of m.children!) wire(b.el(`r-${k.id}`));
+      }, 20);
+    });
   };
   const inFolder = () => b.msgs.filter((m) => m.folder === folder);
   fill(inFolder());
@@ -160,7 +227,8 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       // The same DOM node now shows another message; the row that drew it before leaves the list.
       b.el(`r-${as.id}`)?.remove();
       node.setAttribute("id", `r-${as.id}`);
-      const [who, subject, at] = [...node.querySelectorAll("[title]")];
+      const f = (k: string) => node.querySelector(`[data-f="${k}"]`);
+      const [who, subject, at] = [f("who"), f("subject"), f("at")];
       who.setAttribute("title", as.who);
       subject.setAttribute("title", as.subject);
       at.setAttribute("title", as.at);
@@ -182,7 +250,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     );
   };
   function compose(attached: string | null) {
-    const m = b.msgs.find((x) => x.id === attached);
+    const m = b.msgs.flatMap((x) => [x, ...(x.children ?? [])]).find((x) => x.id === attached);
     b.el("over").innerHTML = `<div role="dialog" aria-label="Message compose">
       <input type="text" id="to" aria-label="To"><span id="pills">${
       o.prefill ? `<span title="${esc(o.prefill)}">${esc(o.prefill)}</span>` : ""

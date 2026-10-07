@@ -3,7 +3,7 @@
 // the form the fingerprint uses (S2). Each test runs the compiled-in text from `m365/` against the
 // synthetic mailbox in `m365_mailbox_pages.ts`.
 import { assert, assertEquals } from "@std/assert";
-import { mailbox, msg } from "./m365_mailbox_pages.ts";
+import { convo, mailbox, ME, msg } from "./m365_mailbox_pages.ts";
 import { run } from "./test_dom.ts";
 
 const MAIL = [
@@ -112,6 +112,9 @@ Deno.test("m365_the_list_reads_sender_subject_and_received_time_in_s2s_form", as
   const at = (n: number) => new Date(2026, 9, n, 15, 4).toISOString();
   // The address comes from the sender element's title, whether the row shows a name or the address,
   // folded to lower case; the time is the time element's title, with the instant it names.
+  // The conversation's messages come in the page's order. A message whose row shows no subject has the
+  // conversation's; one that shows its own keeps it. The mailbox's own reply (the folder pane names the
+  // mailbox) is marked, never judged.
   assertEquals(r.rows, [
     {
       sender: "ana.lopez@school.example.invalid",
@@ -149,4 +152,104 @@ Deno.test("m365_the_list_names_a_row_it_cannot_read_and_a_page_with_no_list", as
   const bare = mailbox(MAIL);
   bare.el("list").remove();
   assertEquals(await run("m365/list.js", bare.page), { result: "not found", control: "list" });
+});
+
+// T18c (2026-10-07, live): the inbox is in conversation view. A conversation's row shows no address, so the
+// list read failed whole on it. Quinn's ruling for Gmail threads (2026-10-02) applies: it is opened and every
+// message in it is read and fingerprinted.
+const at = (n: number, h = 15, mi = 4) => new Date(2026, 9, n, h, mi).toISOString();
+const TALK = convo("c1", "Group project", [
+  msg("c1a", "ana.lopez@school.example.invalid", "Group project", 3),
+  { ...msg("c1b", ME, "Group project", 4), ownSubject: "RE: Group project" },
+  msg("c1c", "bo.chen@school.example.invalid", "Group project", 6),
+]);
+
+Deno.test("m365_a_conversation_row_is_expanded_and_every_message_in_it_is_read", async () => {
+  const box = mailbox([MAIL[0], TALK, MAIL[1]]);
+  const before = box.rows().length;
+  const r = await run("m365/list.js", box.page);
+  assertEquals(r.result, "ok");
+  assertEquals(r.total, 3, "the list's aria-setsize counts the conversation once");
+  assertEquals(r.drawn, 3);
+  assertEquals(r.left, 0);
+  assertEquals(r.rows, [
+    {
+      sender: "ana.lopez@school.example.invalid",
+      subject: "Quiz 3 moved",
+      received: "Thu 10/2/2026 3:04 PM",
+      received_at: at(2),
+    },
+    {
+      sender: "bo.chen@school.example.invalid",
+      subject: "Lab report due",
+      received: "Thu 10/5/2026 3:04 PM",
+      received_at: at(5),
+    },
+    {
+      sender: "bo.chen@school.example.invalid",
+      subject: "Group project",
+      received: "Thu 10/6/2026 3:04 PM",
+      received_at: at(6),
+      conversation: 1,
+    },
+    {
+      sender: ME,
+      subject: "RE: Group project",
+      received: "Thu 10/4/2026 3:04 PM",
+      received_at: at(4),
+      conversation: 1,
+      own: true,
+    },
+    {
+      sender: "ana.lopez@school.example.invalid",
+      subject: "Group project",
+      received: "Thu 10/3/2026 3:04 PM",
+      received_at: at(3),
+      conversation: 1,
+    },
+  ]);
+  // It is collapsed again: the list is as it was found.
+  assertEquals(box.expands, ["c1", "c1"]);
+  assertEquals(box.rows().length, before);
+  assertEquals(box.el("r-c1").querySelector("[data-x]").getAttribute("aria-label"), "Expand conversation");
+  // No button's title is ever a subject, and the display names never leave the page.
+  const out = JSON.stringify(r);
+  for (const word of ["Mark as read", "Flag this message", "Delete", "ana lopez", "bo chen"]) {
+    assert(!out.includes(word), word);
+  }
+});
+
+Deno.test("m365_a_conversation_it_cannot_read_whole_is_left_and_never_fails_the_read", async () => {
+  // A message drawn with no time cannot be fingerprinted: the conversation is counted left, the rest is read.
+  const broken = convo("c2", "Office hours", [
+    msg("c2a", "ana.lopez@school.example.invalid", "Office hours", 3),
+    { ...msg("c2b", "bo.chen@school.example.invalid", "Office hours", 4), at: "" },
+  ]);
+  const box = mailbox([MAIL[0], broken]);
+  const r = await run("m365/list.js", box.page);
+  assertEquals([r.result, r.total, r.drawn, r.left, r.rows.length], ["ok", 2, 2, 1, 1]);
+  assertEquals(box.rows().length, 2, "collapsed again");
+  // With no mailbox address in the folder pane, its own messages cannot be told apart: a conversation is
+  // left rather than read with the student's own replies in it as if they were received mail.
+  const anon = mailbox([MAIL[0], TALK], { noAccount: true });
+  const a = await run("m365/list.js", anon.page);
+  assertEquals([a.result, a.drawn, a.left, a.rows.length], ["ok", 2, 1, 1]);
+  assertEquals(anon.expands, [], "nothing is expanded");
+  // A conversation whose messages never draw is left, within the wait.
+  const deaf = mailbox([TALK]);
+  const x = deaf.el("r-c1").querySelector("[data-x]");
+  x.replaceWith(x.cloneNode(true));
+  const d = await run("m365/list.js", deaf.page, { wait_ms: 200 });
+  assertEquals([d.result, d.left, d.rows.length], ["ok", 1, 0]);
+});
+
+Deno.test("m365_a_conversation_the_page_shows_open_is_put_away_before_the_list_is_read", async () => {
+  // Its messages' rows are not the list's own: read as rows of the list they would fail the read whole.
+  const box = mailbox([MAIL[0], TALK]);
+  box.el("r-c1").querySelector("[data-x]").click();
+  await new Promise((done) => setTimeout(done, 60));
+  assertEquals(box.rows().length, 5, "the page opened it");
+  const r = await run("m365/list.js", box.page);
+  assertEquals([r.result, r.total, r.drawn, r.left, r.rows.length], ["ok", 2, 2, 0, 4]);
+  assertEquals(box.rows().length, 2, "and leaves it put away");
 });
