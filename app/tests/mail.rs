@@ -1510,6 +1510,11 @@ struct Sv {
     /// The setup canary comes back through forwarding.
     canary_arrives: bool,
     canary_sent: bool,
+    /// Canaries sent, and how many more the day's limit takes (`None`: no limit; then 429, §4.10).
+    canaries: usize,
+    canaries_left: Option<usize>,
+    /// Called as each canary is asked for (the test reads the progress and the clock there).
+    on_canary: Option<Box<dyn Fn() + Send>>,
     confirming: bool,
     hint: Option<String>,
     /// The `since` of each backfill batch opened.
@@ -1575,6 +1580,14 @@ fn setup_service(sv: &Arc<Mutex<Sv>>, ev: &Events) -> Service {
             }
             ("POST", "/canary") => {
                 note("canary");
+                if let Some(f) = &s.on_canary {
+                    f();
+                }
+                if s.canaries_left == Some(0) {
+                    return (429, r#"{"error":"this mailbox has had three delivery checks today"}"#.to_string());
+                }
+                s.canaries_left = s.canaries_left.map(|n| n - 1);
+                s.canaries += 1;
                 s.canary_sent = true;
                 (201, json!({ "canary_id": "c-1", "address_id": A, "sent_at": "2026-10-02T10:00:00Z" }).to_string())
             }
@@ -1777,6 +1790,10 @@ fn stop_ends_after_the_current_step_and_names_what_was_done() {
 fn a_canary_not_back_in_three_minutes_leaves_blocked_with_retry_and_offers_what_remains() {
     let r = rig("t113-blocked");
     r.sv.lock().unwrap().canary_arrives = false;
+    // Forwarding was already on to Knowlu (nothing changed): one canary, waited three minutes (D14). A
+    // forwarding set in this run is waited for first (T18c, 2026-10-07): the next test.
+    let kept = json!({ "result": "ok", "forwarding": "on", "to": "ours", "keep_copy": true, "changed": false });
+    queue(&r, "m365/forwarding_set.js", vec![kept]);
     r.host.lock().unwrap().msgs = ana_mail(2);
     let shared = r.start(curated_m365(), true);
     until("the blocked state", || shared.progress().blocked);
@@ -1804,6 +1821,65 @@ fn a_canary_not_back_in_three_minutes_leaves_blocked_with_retry_and_offers_what_
     assert_eq!(r.sv.lock().unwrap().batches, [since_day()], "the backfill ran after the Retry");
     assert_eq!(r.calls("m365/forward.js").len(), 2);
     assert!(MailState::load(&r.dir).unwrap().open_backfills.is_empty());
+}
+
+/// Each canary asked for: the clock, and the sentence the setup showed at that moment.
+fn watch_canaries(r: &Rig) -> Arc<Mutex<Vec<(i64, &'static str)>>> {
+    let seen: Arc<Mutex<Vec<(i64, &'static str)>>> = Default::default();
+    let (log, clk, setups) = (seen.clone(), r.clk.clone(), r.setups.clone());
+    r.sv.lock().unwrap().on_canary = Some(Box::new(move || {
+        let sentence = setups.current().map(|c| c.progress().sentence).unwrap_or("");
+        log.lock().unwrap().push((clk.at(), sentence));
+    }));
+    seen
+}
+
+#[test]
+fn a_forwarding_just_set_is_given_time_to_start_and_a_second_canary_before_the_step_fails() {
+    // T18c (2026-10-07, live): the first canary went the second Outlook's Save took and never came back (no
+    // non-delivery report); a Retry seven minutes later came back at once. Outlook had not begun forwarding.
+    // So once this run has set forwarding, the canary waits FORWARD_SETTLE first, saying so, and one that does
+    // not come back is followed by one more before the step fails: two of the day's three (§4.10).
+    let r = rig("t18c-settle");
+    r.sv.lock().unwrap().canary_arrives = false;
+    let seen = watch_canaries(&r);
+    let shared = r.start(curated_m365(), true);
+    until("the blocked state", || shared.progress().blocked);
+    let p = shared.progress();
+    assert_eq!(row(&p, "canary").state, "failed");
+    assert_eq!(r.sv.lock().unwrap().canaries, 2, "one more, never a third");
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen[0].0 - NOW >= 120, "the first waited for forwarding to start: {seen:?}");
+    assert!(seen[1].0 - seen[0].0 >= 180, "the second after the first's three minutes: {seen:?}");
+    assert_eq!(seen[1].1, "waiting for Outlook to start forwarding", "the wait says why");
+    let waited = r.clk.at() - NOW;
+    assert!((480..600).contains(&waited), "bounded: {waited}");
+    assert!(!r.events().contains(&"svc batch".to_string()), "no backfill while forwarding does not arrive");
+    shared.stop();
+    wait(&shared);
+
+    // A canary that comes back takes one: the second is never sent.
+    let ok = rig("t18c-settle-ok");
+    let seen = watch_canaries(&ok);
+    let p = wait(&ok.start(curated_m365(), true));
+    assert_eq!(p.ended, Some("finished"));
+    assert_eq!(ok.sv.lock().unwrap().canaries, 1);
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen[0].0 - NOW >= 120, "{seen:?}");
+
+    // The day's limit refuses the second: the step fails as before, and nothing asks again.
+    let capped = rig("t18c-settle-cap");
+    {
+        let mut sv = capped.sv.lock().unwrap();
+        sv.canary_arrives = false;
+        sv.canaries_left = Some(1);
+    }
+    let shared = capped.start(curated_m365(), true);
+    until("the blocked state", || shared.progress().blocked);
+    assert_eq!(row(&shared.progress(), "canary").state, "failed");
+    assert_eq!(capped.events().iter().filter(|e| *e == "svc canary").count(), 2, "asked twice, refused once");
+    shared.stop();
+    wait(&shared);
 }
 
 fn answer_address(shared: &Shared) {

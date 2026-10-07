@@ -5,7 +5,8 @@
 //!
 //! **The flow.** Which provider (the curated row's `mail_provider`, else one question and the service's MX
 //! lookup; §4.1); mint the mailbox's address; sign in (the window is visible only for this); the window
-//! steps aside; the provider's forwarding steps; the setup canary (three minutes, D14); the backfill over a
+//! steps aside; the provider's forwarding steps; the setup canary (three minutes, D14; once this run has set
+//! Outlook's forwarding, Outlook is given two minutes to begin and a second canary, T18c); the backfill over a
 //! fixed 120 days (BW; [`super::backfill`]); finish. A scripted step that cannot go on falls to its guided
 //! version and the student's "I've done this" runs its check (§4.4); nothing is retried in a loop, except
 //! that a Gmail script that reloads its page is run again once with `reloaded: true`, and sign-in reads a
@@ -54,6 +55,12 @@ const SIGN_IN_WAIT: i64 = 15 * 60;
 const SIGN_IN_READ: i64 = 45;
 /// D14: the setup canary is waited for up to three minutes.
 const CANARY_WAIT: i64 = 3 * 60;
+/// Once this run has set Outlook's forwarding, how long Outlook is given to begin forwarding before the first
+/// canary (T18c, 2026-10-07: a canary sent the second the Save took never came back; one seven minutes later
+/// did). A canary that still does not come back is followed by one more ([`Runner::canary_after_set`]).
+const FORWARD_SETTLE: i64 = 2 * 60;
+/// What the setup says while it gives Outlook that time.
+const SETTLING: &str = "waiting for Outlook to start forwarding";
 /// The Gmail address confirm is open for 15 minutes (§4.6 step 5).
 const CONFIRM_WAIT: i64 = 15 * 60;
 /// Seconds between polls of the service.
@@ -126,6 +133,9 @@ struct Runner<'a> {
     revoked: bool,
     /// The service's sentence when it refused the mailbox's address at sign-in.
     refusal: &'static str,
+    /// When this run's `m365/forwarding_set.js` changed the mailbox's forwarding (T18c): Outlook may take
+    /// minutes to begin forwarding, so the canary waits for it and has a second try.
+    forwarding_set_at: Option<i64>,
 }
 
 fn host(env: &Env) -> &dyn Host {
@@ -211,7 +221,7 @@ impl<'a> Runner<'a> {
         let machine = Setup::new(provider, plan.setup_day, None);
         let mut r = Runner {
             plan, env, sh, provider, machine, id, knowlu, profile, opened: false, canary_ok: false, said_no: false, gave_up: false, keep,
-            rotated: false, placed: false, backfilled: false, revoked: false, refusal: "",
+            rotated: false, placed: false, backfilled: false, revoked: false, refusal: "", forwarding_set_at: None,
         };
         // A guided provider has no page to read the mailbox's own address from: the one the student typed.
         if let (Provider::Guided, Some(t)) = (provider, typed) {
@@ -439,7 +449,7 @@ impl Runner<'_> {
             Step::TurnOn => self.turn_on(replace),
             Step::Canary => {
                 self.say("waiting for the test message");
-                if self.canary_ok || self.canary_check() {
+                if self.canary_ok || self.canary_after_set() {
                     self.canary_ok = true;
                     Outcome::Done
                 } else {
@@ -611,6 +621,9 @@ impl Runner<'_> {
             Outcome::Done => {}
             other => return other,
         }
+        if set.as_ref().is_some_and(|v| v["changed"] == true) {
+            self.forwarding_set_at = Some(self.clock().now());
+        }
         if self.host().open(Place::Inbox).is_err() || self.host().open(Place::Forwarding).is_err() {
             return Outcome::Failed;
         }
@@ -697,8 +710,42 @@ impl Runner<'_> {
 
     /// D14: sends one canary and waits up to three minutes for it to come back through forwarding.
     fn canary_check(&mut self) -> bool {
-        let Ok(sent) = self.client().canary(&self.id) else { return false };
-        let sent_at = sent["sent_at"].as_str().and_then(|s| s.parse::<jiff::Timestamp>().ok());
+        match self.send_canary() {
+            Some(sent_at) => self.canary_back(sent_at),
+            None => false,
+        }
+    }
+
+    /// The setup's canary step. When this run has just set Outlook's forwarding (T18c), Outlook is first given
+    /// [`FORWARD_SETTLE`] to begin forwarding, and a canary that does not come back in its three minutes is
+    /// followed by one more, waited for as long: two of the service's three a day (§4.10), so one is left for
+    /// the student's Retry. A second the service refuses (its daily limit) fails the step as before. Either
+    /// canary coming back is enough.
+    fn canary_after_set(&mut self) -> bool {
+        let Some(set_at) = self.forwarding_set_at else { return self.canary_check() };
+        if self.clock().now() < set_at + FORWARD_SETTLE {
+            self.say(SETTLING);
+            while self.clock().now() < set_at + FORWARD_SETTLE {
+                self.clock().sleep(POLL.min(set_at + FORWARD_SETTLE - self.clock().now()));
+            }
+            self.say("waiting for the test message");
+        }
+        let Some(first) = self.send_canary() else { return false };
+        if self.canary_back(first) {
+            return true;
+        }
+        self.say(SETTLING);
+        self.send_canary().is_some() && self.canary_back(first)
+    }
+
+    /// Asks the service for one canary; `None` when it would not send one. The inner value is its sent time.
+    fn send_canary(&mut self) -> Option<Option<jiff::Timestamp>> {
+        let sent = self.client().canary(&self.id).ok()?;
+        Some(sent["sent_at"].as_str().and_then(|s| s.parse::<jiff::Timestamp>().ok()))
+    }
+
+    /// Waits up to [`CANARY_WAIT`] for a canary sent at or after `sent_at` to come back.
+    fn canary_back(&mut self, sent_at: Option<jiff::Timestamp>) -> bool {
         let deadline = self.clock().now() + CANARY_WAIT;
         loop {
             if let Some(row) = self.row() {
