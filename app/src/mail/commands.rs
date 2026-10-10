@@ -40,6 +40,28 @@ pub fn status_for(list: Result<Vec<Value>, String>, data_dir: &Path, setup_runni
         Ok(rows) => (true, Value::Null, rows),
         Err(name) => (false, json!(name), Vec::new()),
     };
+    // An address handed to the console (Settings' Copy, a guided step's line) may be put in the mailbox by
+    // hand (review of a7f1ca0). With no setup running, a record a quit setup left that says never placed is the
+    // start-up clean's to remove, and this read can come first (the console reads it at every launch): its
+    // address is withheld, so Settings offers no Copy. While a setup runs, its guided step needs the address:
+    // it is handed out, and the record is marked so the start-up clean never touches it.
+    let unplaced = |id: &str| state.pending_setups.iter().any(|p| p.address_id == id && !(p.placed || p.backfilled || p.shown));
+    let id_of = |r: &Value| r["address_id"].as_str().unwrap_or("").to_string();
+    let rows: Vec<Value> = if setup_running {
+        let ids: Vec<String> = rows.iter().filter(|r| r["address"].as_str().is_some_and(|a| !a.is_empty())).map(id_of).collect();
+        if ids.iter().any(|id| unplaced(id)) {
+            super::setup::mark_shown(data_dir, ids.iter().map(String::as_str));
+        }
+        rows
+    } else {
+        let withhold = |mut r: Value| {
+            if unplaced(&id_of(&r)) {
+                r["address"] = Value::Null;
+            }
+            r
+        };
+        rows.into_iter().map(withhold).collect()
+    };
     let mailboxes: Vec<Value> = rows
         .into_iter()
         .map(|row| {

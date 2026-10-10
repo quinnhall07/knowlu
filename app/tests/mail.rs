@@ -2632,7 +2632,7 @@ use knowlu::mail::setup::clean_unfinished;
 use knowlu::mail_session::PendingSetup;
 
 fn pending(id: &str, placed: bool, backfilled: bool) -> PendingSetup {
-    PendingSetup { address_id: id.to_string(), placed, backfilled }
+    PendingSetup { address_id: id.to_string(), placed, backfilled, shown: false }
 }
 
 fn record(dir: &Path, list: Vec<PendingSetup>) {
@@ -3208,4 +3208,52 @@ fn a_rotate_that_stops_after_rotating_ends_needs_you_naming_the_old_addresss_gra
     let p = wait(&f.start(kind, true));
     assert_eq!(p.ended, Some("failed"));
     assert!(f.scripts().is_empty(), "no forwarding step ran on an address that was never rotated: {:?}", f.scripts());
+}
+
+#[test]
+fn a_rotate_of_a_recorded_address_keeps_it_from_the_start_up_clean() {
+    // Review of a7f1ca0: Settings' Rotate on a pending row puts the (new) address in the mailbox, yet the
+    // record still said never placed, so the next start deleted it. A rotate marks the record.
+    let r = rig("t1006-rotate-recorded");
+    profile(&r.dir, &format!("mail-session-{A}"));
+    r.sv.lock().unwrap().provider = "m365".into();
+    record(&r.dir, vec![pending(A, false, false)]);
+    let kind = Kind::Rotate { address_id: A.to_string(), provider: "m365".to_string() };
+    assert_eq!(wait(&r.start(kind, true)).ended, Some("finished"));
+    // The row reads pending again, as a Gmail rotate leaves it.
+    r.sv.lock().unwrap().canary_sent = false;
+    let client = MailClient::with_token_fn(&r.svc.base, Box::new(|| Ok(TOKEN.to_string()))).unwrap();
+    assert!(clean_unfinished(&r.dir, &client).is_empty());
+    assert!(!r.events().contains(&"svc delete address".to_string()), "{:?}", r.events());
+    assert!(session_dir(&r.dir, A).unwrap().exists() && pendings(&r.dir).is_empty());
+}
+
+#[test]
+fn an_address_settings_has_shown_is_kept_from_the_start_up_clean() {
+    // Review of a7f1ca0: Settings shows a pending row's address with Copy, and the student may paste it into
+    // the mailbox by hand. With no setup running (the console reads the status at every launch, before the
+    // start-up clean may have run), a recorded never-placed row's address is withheld, so Settings offers no
+    // Copy; while a setup runs, a status read hands it out and marks the record.
+    let r = rig("t1006-settings-shown");
+    record(&r.dir, vec![pending(A, false, false), pending(B, false, false)]);
+    let rows = || {
+        vec![
+            json!({ "address_id": A, "provider": "m365", "address": KNOWLU, "status": "pending" }),
+            json!({ "address_id": B, "provider": "m365", "address": null, "status": "pending" }),
+            json!({ "address_id": "0b0e5b2c-3333-4aaa-8bbb-000000000003", "provider": "m365", "address": KNOWLU_NEW, "status": "active" }),
+        ]
+    };
+    let idle = status_for(Ok(rows()), &r.dir, false);
+    let box_a = &idle["mailboxes"][0];
+    assert_eq!((box_a["address_id"].as_str(), box_a["address"].is_null()), (Some(A), true), "withheld: {idle}");
+    assert_eq!(idle["mailboxes"][2]["address"], json!(KNOWLU_NEW), "an unrecorded row keeps its address");
+    assert!(pendings(&r.dir).iter().all(|p| !p.shown), "nothing was handed out");
+    let running = status_for(Ok(rows()), &r.dir, true);
+    assert_eq!(running["mailboxes"][0]["address"], json!(KNOWLU), "a running setup's guided step reads it");
+    let shown: Vec<(String, bool)> = pendings(&r.dir).into_iter().map(|p| (p.address_id, p.shown)).collect();
+    assert_eq!(shown, [(A.to_string(), true), (B.to_string(), false)], "only a row whose address was handed out");
+    let client = MailClient::with_token_fn(&r.svc.base, Box::new(|| Ok(TOKEN.to_string()))).unwrap();
+    clean_unfinished(&r.dir, &client);
+    assert!(!r.events().contains(&"svc delete address".to_string()), "{:?}", r.events());
+    assert!(pendings(&r.dir).is_empty());
 }

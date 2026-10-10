@@ -116,6 +116,11 @@ pub struct PendingSetup {
     pub placed: bool,
     /// A backfill began under it.
     pub backfilled: bool,
+    /// Outside the run, the address was handed out or used: Settings' status read gave it to the console
+    /// (with Copy), or a rotate began for it. The device can no longer tell it was never placed. Only grows:
+    /// the run's own writes keep it.
+    #[serde(default)]
+    pub shown: bool,
 }
 
 /// One mailbox's backfill pace on one UTC day (`unix seconds / 86400`).

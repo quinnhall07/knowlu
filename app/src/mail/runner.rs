@@ -43,7 +43,7 @@ use super::backfill::{drive_backfill, mark_open, seed_routine, Drive, Drove};
 use super::host::Host;
 use super::recover::{Clock, Place};
 use super::setup::{
-    clear_pending, note_pending, state_name, step_name, Answer, Ask, Backfill, Env, Kind, Plan, Progress, Row, Shared, Waiting, IDLE,
+    clear_pending, mark_shown, note_pending, state_name, step_name, Answer, Ask, Backfill, Env, Kind, Plan, Progress, Row, Shared, Waiting, IDLE,
 };
 use super::Refusal;
 use crate::mail_client::{MailClient, State as SvcState};
@@ -214,6 +214,8 @@ impl<'a> Runner<'a> {
         // mints a mailbox now.
         let ((id, knowlu), keep) = match &plan.kind {
             Kind::Rotate { address_id, .. } => {
+                // A rotate puts its address in the mailbox: a record a quit setup left for it is placed now.
+                mark_shown(&plan.data_dir, [address_id.as_str()]);
                 let kept = session_dir(&plan.data_dir, address_id).is_some_and(|d| d.is_dir());
                 ((address_id.clone(), String::new()), kept)
             }
@@ -382,7 +384,7 @@ impl<'a> Runner<'a> {
         if self.rotating() || self.revoked {
             return;
         }
-        let rec = PendingSetup { address_id: self.id.clone(), placed: self.placed || placing, backfilled: self.backfilled };
+        let rec = PendingSetup { address_id: self.id.clone(), placed: self.placed || placing, backfilled: self.backfilled, shown: false };
         note_pending(&self.plan.data_dir, rec);
     }
 

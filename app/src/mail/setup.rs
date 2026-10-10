@@ -347,17 +347,33 @@ impl Drop for Closer {
 
 /// Writes (or rewrites) an in-flight setup's record in `mail.json`. Best effort: a record that could not be
 /// written costs a quit its clean-up, never the setup.
-pub(super) fn note_pending(data_dir: &Path, rec: PendingSetup) {
+pub(super) fn note_pending(data_dir: &Path, mut rec: PendingSetup) {
     let _ = MailState::update(data_dir, |s| match s.pending_setups.iter_mut().find(|p| p.address_id == rec.address_id) {
-        Some(p) if *p == rec => false,
         Some(p) => {
+            // `shown` is Settings' and a rotate's to set, never the run's to take back.
+            rec.shown |= p.shown;
+            let changed = *p != rec;
             *p = rec;
-            true
+            changed
         }
         None => {
             s.pending_setups.push(rec);
             true
         }
+    });
+}
+
+/// Marks the records of `ids` shown (review of a7f1ca0): Settings handed the address out with Copy, or a
+/// rotate began for it, so the student may have put it in the mailbox. Only an existing record is marked.
+pub(super) fn mark_shown<'a>(data_dir: &Path, ids: impl IntoIterator<Item = &'a str>) {
+    let ids: Vec<&str> = ids.into_iter().collect();
+    let _ = MailState::update(data_dir, |s| {
+        let mut changed = false;
+        for p in s.pending_setups.iter_mut().filter(|p| !p.shown && ids.contains(&p.address_id.as_str())) {
+            p.shown = true;
+            changed = true;
+        }
+        changed
     });
 }
 
@@ -372,7 +388,8 @@ pub(super) fn clear_pending(data_dir: &Path, address_id: &str) {
 
 /// **At start-up**, under the mail window: each setup the app quit mid-run. One whose facts say its address
 /// was never put in the mailbox (no script that could set it began, no guide showed it, no "I've done this"
-/// or Retry, no backfill began, none open) and whose row on the service still reads `pending` is removed as
+/// or Retry, no backfill began, none open, never handed out by Settings or rotated) and whose row on the
+/// service still reads `pending` is removed as
 /// `withdraw` would have: `DELETE /addresses/<id>`, then its profile through the `is_session_dir` guard. A row
 /// Settings shows as set up (any other status) and a placed one are never touched. A row the service no
 /// longer lists is gone already: only its profile goes. A list or delete that fails keeps the record for the
@@ -387,7 +404,7 @@ pub fn clean_unfinished(data_dir: &Path, client: &MailClient) -> Vec<String> {
     };
     for rec in &state.pending_setups {
         let id = rec.address_id.as_str();
-        let placed = rec.placed || rec.backfilled || state.open_backfills.iter().any(|o| o == id);
+        let placed = rec.placed || rec.backfilled || rec.shown || state.open_backfills.iter().any(|o| o == id);
         let status = rows.iter().find(|r| r["address_id"].as_str() == Some(id)).map(|r| r["status"].as_str().unwrap_or(""));
         let gone = match status {
             _ if placed => false,
