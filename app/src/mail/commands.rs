@@ -49,7 +49,8 @@ pub fn status_for(list: Result<Vec<Value>, String>, data_dir: &Path, setup_runni
     let id_of = |r: &Value| r["address_id"].as_str().unwrap_or("").to_string();
     let rows: Vec<Value> = if setup_running {
         let ids: Vec<String> = rows.iter().filter(|r| r["address"].as_str().is_some_and(|a| !a.is_empty())).map(id_of).collect();
-        if ids.iter().any(|id| unplaced(id)) {
+        // Whatever `placed` reads now: a run lowers it again after a script that changed nothing.
+        if state.pending_setups.iter().any(|p| !p.shown && ids.contains(&p.address_id)) {
             super::setup::mark_shown(data_dir, ids.iter().map(String::as_str));
         }
         rows

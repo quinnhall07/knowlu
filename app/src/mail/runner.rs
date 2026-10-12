@@ -48,7 +48,7 @@ use super::setup::{
 use super::Refusal;
 use crate::mail_client::{MailClient, State as SvcState};
 use crate::mail_session::{forget, forget_setup, session_dir, setup_dir, valid_address_id};
-use crate::mail_session::PendingSetup;
+use crate::mail_session::{MailState, PendingSetup};
 use crate::mail_steps::{Action, Mode, Outcome, Provider, Reason, Setup, State, Step};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -356,6 +356,13 @@ impl<'a> Runner<'a> {
     /// address a backfill began under holds mail that a revoke would purge.
     fn withdraw(&mut self) -> Option<bool> {
         if self.rotating() || self.placed || self.backfilled || self.revoked {
+            return None;
+        }
+        // Settings handed the address out while this run went on (`shown`): the student may have pasted it into
+        // the mailbox. An unreadable `mail.json` reads as shown: never a guess toward deleting.
+        let shown = MailState::load(&self.plan.data_dir)
+            .map_or(true, |s| s.pending_setups.iter().any(|p| p.address_id == self.id && p.shown));
+        if shown {
             return None;
         }
         Some(self.revoke())

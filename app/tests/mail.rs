@@ -3257,3 +3257,27 @@ fn an_address_settings_has_shown_is_kept_from_the_start_up_clean() {
     assert!(!r.events().contains(&"svc delete address".to_string()), "{:?}", r.events());
     assert!(pendings(&r.dir).is_empty());
 }
+
+#[test]
+fn an_address_settings_handed_out_during_a_setup_is_never_withdrawn() {
+    // Re-check of 472da74: Settings opened while a setup runs hands its address out with Copy and marks the
+    // record shown; the student may paste it into the mailbox. A stop that would otherwise withdraw keeps it,
+    // and the run's own later writes never take the mark back.
+    let r = rig("t1006-shown-no-withdraw");
+    queue(&r, "m365/forwarding_set.js", vec![json!({ "result": "elsewhere" })]);
+    let dir = r.dir.clone();
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if name == "m365/forwarding_set.js" {
+            let row = json!({ "address_id": A, "provider": "m365", "address": KNOWLU, "status": "pending" });
+            status_for(Ok(vec![row]), &dir, true);
+        }
+    }));
+    let shared = r.start(curated_m365(), true);
+    until("the question", || shared.progress().ask == Some("forwarding_elsewhere"));
+    // The run wrote its record again after the script (`placed` back to false): `shown` holds.
+    assert_eq!(pendings(&r.dir).iter().map(|p| (p.placed, p.shown)).collect::<Vec<_>>(), [(false, true)]);
+    assert!(shared.answer(Answer::Replace(false)));
+    let p = wait(&shared);
+    assert_eq!((p.ended, p.line), (Some("stopped"), Some("setup stopped")));
+    assert!(!r.events().contains(&"svc delete address".to_string()), "{:?}", r.events());
+}
