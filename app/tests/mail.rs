@@ -1528,6 +1528,8 @@ struct Sv {
     mint_refused: Option<(u16, String)>,
     /// `POST /addresses/<id>/hint` answers this status and `{"error": <sentence>}`.
     hint_refused: Option<(u16, String)>,
+    /// Called as each hint is posted, before its answer (a test reads Settings' status there).
+    on_hint: Option<Box<dyn Fn() + Send>>,
     /// `DELETE /addresses/<id>` answers 502 (the mailbox's stored mail could not be deleted).
     delete_refused: bool,
 }
@@ -1566,6 +1568,9 @@ fn setup_service(sv: &Arc<Mutex<Sv>>, ev: &Events) -> Service {
             }
             ("POST", p) if p.ends_with("/hint") => {
                 note("hint");
+                if let Some(f) = &s.on_hint {
+                    f();
+                }
                 if let Some((status, why)) = &s.hint_refused {
                     return (*status, json!({ "error": why }).to_string());
                 }
@@ -3280,4 +3285,53 @@ fn an_address_settings_handed_out_during_a_setup_is_never_withdrawn() {
     let p = wait(&shared);
     assert_eq!((p.ended, p.line), (Some("stopped"), Some("setup stopped")));
     assert!(!r.events().contains(&"svc delete address".to_string()), "{:?}", r.events());
+}
+
+/// Settings' status read while a setup runs: it hands the address out with Copy and marks the record shown.
+fn settings_reads_status(dir: &Path) {
+    let row = json!({ "address_id": A, "provider": "m365", "address": KNOWLU, "status": "pending" });
+    status_for(Ok(vec![row]), dir, true);
+}
+
+#[test]
+fn a_cancelled_sign_in_never_deletes_an_address_settings_handed_out() {
+    // Review of 6e82a5c: the student opens Settings mid-sign-in (the address is handed out and marked shown),
+    // pastes it into the mailbox's forwarding by hand, then closes the sign-in window. The cancel keeps the
+    // address and says so, never "setup cancelled" as if nothing changed.
+    let r = rig("t1012-shown-cancel");
+    queue(&r, "m365/signin.js", vec![json!({ "result": "not found" })]);
+    let (dir, host) = (r.dir.clone(), r.host.clone());
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if name == "m365/signin.js" {
+            settings_reads_status(&dir);
+            host.lock().unwrap().student_closed = true;
+        }
+    }));
+    let p = wait(&r.start(curated_m365(), true));
+    assert!(!r.events().contains(&"svc delete address".to_string()), "{:?}", r.events());
+    assert_eq!(p.ended, Some("cancelled"));
+    assert!(p.line.is_some_and(|l| l != "setup cancelled" && l.contains("kept")), "{:?}", p.line);
+    assert!(pendings(&r.dir).is_empty(), "the run handled its address: kept");
+    assert!(r.host.lock().unwrap().closed >= 1, "the window is closed");
+}
+
+#[test]
+fn a_refused_hint_never_deletes_an_address_settings_handed_out() {
+    // The same for the guided provider's typed hint: a refusal after Settings handed the address out keeps it.
+    let r = rig("t1012-shown-hint");
+    let dir = r.dir.clone();
+    {
+        let mut s = r.sv.lock().unwrap();
+        s.provider_of = "other".into();
+        s.hint_refused = Some((500, "boom".into()));
+        s.on_hint = Some(Box::new(move || settings_reads_status(&dir)));
+    }
+    let kind = Kind::School { unitid: Some("0".to_string()), address: Some("student@school.example".to_string()) };
+    let p = wait(&r.start(kind, true));
+    assert!(r.events().contains(&"svc hint".to_string()), "{:?}", r.events());
+    assert!(!r.events().contains(&"svc delete address".to_string()), "{:?}", r.events());
+    assert_eq!(p.ended, Some("failed"));
+    assert!(p.line.is_some_and(|l| l.contains("kept")), "{:?}", p.line);
+    assert!(!p.sentence.is_empty(), "the refusal is still named");
+    assert!(pendings(&r.dir).is_empty(), "the run handled its address: kept");
 }

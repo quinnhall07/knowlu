@@ -18,7 +18,9 @@
 //! open for the next launch (§4.11).
 //!
 //! **A closed sign-in window is "setup cancelled"**: nothing changed, so the address minted for it is
-//! revoked and its profile deleted. **Stop** ends after the step in hand and names what was done. A setup
+//! revoked and its profile deleted, unless Settings handed the address out while the run went on (`shown`):
+//! then no route deletes it, and the end line says it was kept (2026-10-12). **Stop** ends after the step in
+//! hand and names what was done. A setup
 //! that ends before its address was ever put in the mailbox (no forwarding script that could change it
 //! answered anything but `not found` or `elsewhere`, no guided step ever showed the address with Copy, the
 //! student never said a step was done, and no backfill began under it) is undone the same way and says so,
@@ -88,6 +90,10 @@ enum End {
     Withdrawn,
     /// As [`End::Withdrawn`], but the service did not take the delete: the address is still there.
     NotWithdrawn,
+    /// A cancelled sign-in whose address Settings handed out while it ran: kept, never deleted (2026-10-12).
+    KeptCancelled,
+    /// A failure (its word) after which the address would have gone, kept because Settings handed it out.
+    KeptFailed(&'static str),
 }
 
 /// A sign-in whose mailbox another of the account's setups already holds (T18c): the service refused its
@@ -98,6 +104,11 @@ const WITHDRAWN_LINE: &str = "setup stopped before forwarding was set, so the Kn
 /// The same stop, when the service did not take the delete (a 5xx, or no network): it is never said as done.
 const NOT_WITHDRAWN_LINE: &str =
     "setup stopped before forwarding was set, but the Knowlu address made for it could not be removed: open Settings, then Email, and turn it off";
+
+/// A setup that ended where its address would have been removed, but Settings handed it out while it ran: the
+/// student may have put it in the mailbox's forwarding by hand, so it is kept, and the line says so (2026-10-12).
+const KEPT_CANCELLED_LINE: &str = "setup cancelled, but the Knowlu address made for it was kept because Settings showed it: if your mailbox does not forward to it, open Settings, then Email, and turn it off";
+const KEPT_FAILED_LINE: &str = "setup did not finish, but the Knowlu address made for it was kept because Settings showed it: if your mailbox does not forward to it, open Settings, then Email, and turn it off";
 
 /// What a rotate that did not finish says: the mailbox forwards to the old address, which the service stops
 /// accepting after its grace (spec §4.6, a retired token).
@@ -136,6 +147,8 @@ struct Runner<'a> {
     backfilled: bool,
     /// The address this setup minted has been revoked.
     revoked: bool,
+    /// A revoke found the address handed out by Settings (or `mail.json` unreadable) and kept it.
+    kept: bool,
     /// The service's sentence when it refused the mailbox's address at sign-in.
     refusal: &'static str,
     /// When this run's `m365/forwarding_set.js` changed the mailbox's forwarding (T18c): Outlook may take
@@ -163,6 +176,8 @@ pub(super) fn run_setup(plan: &Plan, env: &Env, sh: &Shared) {
                 end => match (r.withdraw(), end) {
                     (Some(true), End::Stopped) => End::Withdrawn,
                     (Some(false), End::Stopped) => End::NotWithdrawn,
+                    (_, End::Cancelled) if r.kept => End::KeptCancelled,
+                    (_, End::Failed(word)) if r.kept => End::KeptFailed(word),
                     (_, end) => end,
                 },
             };
@@ -182,7 +197,13 @@ pub(super) fn run_setup(plan: &Plan, env: &Env, sh: &Shared) {
         End::Withdrawn => ("stopped", WITHDRAWN_LINE),
         End::NotWithdrawn => ("stopped", NOT_WITHDRAWN_LINE),
         End::Cancelled => ("cancelled", "setup cancelled"),
+        End::KeptCancelled => ("cancelled", KEPT_CANCELLED_LINE),
         End::Failed(word) => ("failed", word),
+        End::KeptFailed(word) => {
+            // The failure stays named as the view's sentence; the line says the address was kept.
+            sh.update(|p| p.sentence = word);
+            ("failed", KEPT_FAILED_LINE)
+        }
     };
     sh.end(ended, line);
 }
@@ -234,15 +255,23 @@ impl<'a> Runner<'a> {
         let machine = Setup::new(provider, plan.setup_day, None);
         let mut r = Runner {
             plan, env, sh, provider, machine, id, knowlu, profile, opened: false, canary_ok: false, said_no: false, gave_up: false, keep,
-            rotated: false, placed: false, backfilled: false, revoked: false, refusal: "", forwarding_set_at: None,
+            rotated: false, placed: false, backfilled: false, revoked: false, kept: false, refusal: "", forwarding_set_at: None,
         };
         // A quit from here on leaves the address this device minted named, for the next start (2026-10-06).
         r.persist(false);
         // A guided provider has no page to read the mailbox's own address from: the one the student typed.
         if let (Provider::Guided, Some(t)) = (provider, typed) {
             if let Err(e) = r.client().set_hint(&r.id, &t) {
-                r.revoke();
-                return Err(refused(sh, if e.hint_held() { ALREADY_LINE } else { e.fixed_sentence() }));
+                let removed = r.revoke();
+                let end = refused(sh, if e.hint_held() { ALREADY_LINE } else { e.fixed_sentence() });
+                return Err(match (removed, end) {
+                    // Kept: the run handled its address, so its record goes (as `run_setup` clears one).
+                    (None, End::Failed(word)) => {
+                        clear_pending(&plan.data_dir, &r.id);
+                        End::KeptFailed(word)
+                    }
+                    (_, end) => end,
+                });
             }
         }
         r.sh.update(|p| {
@@ -323,49 +352,58 @@ impl<'a> Runner<'a> {
         matches!(self.plan.kind, Kind::Rotate { .. })
     }
 
-    /// Revokes the address this setup minted and deletes its profile: a setup that changed nothing. A rotate
-    /// minted no mailbox: the mailbox, its kept profile and its open backfill are not this run's to undo.
-    /// `true` when the service took the delete.
-    fn revoke(&mut self) -> bool {
-        if self.rotating() {
-            if self.opened {
-                self.host().close_window();
-            }
-            if !self.keep {
-                let _ = forget_setup(&self.plan.data_dir);
-            }
-            return false;
-        }
-        let deleted = self.client().delete_address(&self.id).is_ok();
-        self.revoked = true;
-        // A delete the service did not take stays recorded (never placed), so the next start tries again.
-        if deleted {
-            clear_pending(&self.plan.data_dir, &self.id);
+    /// Revokes the address this setup minted and deletes its profile: a setup that changed nothing. Every
+    /// delete a setup makes comes through here. `Some(true)` when the service took the delete, `Some(false)`
+    /// when it did not, `None` when nothing was asked of it: a rotate minted no mailbox (the mailbox, its kept
+    /// profile and its open backfill are not this run's to undo), and an address Settings handed out while
+    /// the run went on (`shown`; the student may have pasted it into the mailbox) is kept (`kept`). An
+    /// unreadable `mail.json` reads as shown: never a guess toward deleting. The check and the delete are
+    /// made under `mail.json`'s lock, so a status read marks the record either before (kept) or after (the
+    /// record is gone with the address).
+    fn revoke(&mut self) -> Option<bool> {
+        let mut deleted = None;
+        if !self.rotating() {
+            let (client, id) = (self.client(), self.id.as_str());
+            let _ = MailState::update(&self.plan.data_dir, |s| {
+                if s.pending_setups.iter().any(|p| p.address_id == id && p.shown) {
+                    return false;
+                }
+                let ok = client.delete_address(id).is_ok();
+                deleted = Some(ok);
+                // A delete the service did not take stays recorded (never placed), so the next start tries again.
+                let before = s.pending_setups.len();
+                if ok {
+                    s.pending_setups.retain(|p| p.address_id != id);
+                }
+                s.pending_setups.len() != before
+            });
         }
         if self.opened {
             self.host().close_window();
         }
+        let Some(ok) = deleted else {
+            self.kept = !self.rotating();
+            if !self.keep {
+                let _ = forget_setup(&self.plan.data_dir);
+            }
+            return None;
+        };
+        self.revoked = true;
         let _ = if self.keep { forget(&self.plan.data_dir, &self.id) } else { forget_setup(&self.plan.data_dir) };
         let _ = mark_open(&self.plan.data_dir, &self.id, false);
-        deleted
+        Some(ok)
     }
 
     /// A setup that ended any way but finished, whose address was never put in the mailbox, revokes it as a
-    /// closed sign-in window does (§4.2 step 1: nothing changed). `Some` when it tried now, `true` when the
-    /// service took the delete. A rotate's address is the mailbox's own, never this run's to undo, and an
-    /// address a backfill began under holds mail that a revoke would purge.
+    /// closed sign-in window does (§4.2 step 1: nothing changed). `Some` when it asked the service now, `true`
+    /// when the service took the delete. A rotate's address is the mailbox's own, never this run's to undo,
+    /// an address a backfill began under holds mail that a revoke would purge, and one Settings handed out is
+    /// [`Runner::revoke`]'s to keep.
     fn withdraw(&mut self) -> Option<bool> {
-        if self.rotating() || self.placed || self.backfilled || self.revoked {
+        if self.rotating() || self.placed || self.backfilled || self.revoked || self.kept {
             return None;
         }
-        // Settings handed the address out while this run went on (`shown`): the student may have pasted it into
-        // the mailbox. An unreadable `mail.json` reads as shown: never a guess toward deleting.
-        let shown = MailState::load(&self.plan.data_dir)
-            .map_or(true, |s| s.pending_setups.iter().any(|p| p.address_id == self.id && p.shown));
-        if shown {
-            return None;
-        }
-        Some(self.revoke())
+        self.revoke()
     }
 
     /// The progress view shows a guided step, the Knowlu address with Copy, beside any failed row or a row
