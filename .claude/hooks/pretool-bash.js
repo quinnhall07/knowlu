@@ -23,9 +23,14 @@ function deny(reason) {
   out({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
 }
 
-const norm = (s) => s.replace(/\\/g, '/');
+// Windows paths are case-insensitive and tolerate `//` and `/./`, so compare a normalized form.
+const norm = (s) => s.replace(/\\/g, '/').replace(/\/(\.\/)+/g, '/').replace(/\/{2,}/g, '/').toLowerCase();
 const isFixture = (s) => /tests\/fixtures(\/|$)/.test(norm(s));
 const isFrozen = (s) => isFixture(s) && FROZEN.some((f) => norm(s).includes('tests/fixtures/' + f));
+const FROZEN_NAMES = FROZEN.map((f) => f.split('/').pop());
+// Anything that can write a file without naming it as a plain argument: a directory change
+// followed by a relative path, or an interpreter running inline code.
+const OPAQUE_WRITER = /\b(cd|pushd|python3?|py|node|deno|perl|ruby|sh|bash|pwsh|powershell)\b|>|\b(sed|tee|cp|mv|rm|truncate|install|rsync|dos2unix|unix2dos)\b|Set-Content|Out-File|Copy-Item|Move-Item/i;
 
 // Returns the paths a shell segment writes, as far as a conservative reading can tell.
 function bashWriteTargets(seg) {
@@ -45,6 +50,13 @@ function bashWriteTargets(seg) {
 
 function guard(input) {
   const cmd = String((input.tool_input || {}).command || '');
+  // A frozen reference's file name in a command that could write it by any route is denied
+  // outright, whatever the path looks like (cd into the folder, an interpreter, a relative name).
+  const n = norm(cmd);
+  if (FROZEN_NAMES.some((f) => n.includes(f)) && OPAQUE_WRITER.test(cmd) && !/^\s*(git\s+(diff|log|show|status)|cat|head|tail|grep|rg|diff|wc|ls)\b/.test(cmd)) {
+    deny('Blocked by .claude/hooks/pretool-bash.js: this command names a frozen reference and can write files. ' +
+      'CLAUDE.md rule 2: never regenerate a frozen reference. To read one, use Read, or cat/diff/git diff on their own.');
+  }
   if (!isFixture(cmd)) return;
   let targets = [];
   if (input.tool_name === 'PowerShell') {

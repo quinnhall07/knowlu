@@ -4,8 +4,7 @@
   "maxEffortLevel": "xhigh",
   "env": {
     "CARGO_BUILD_JOBS": "2",
-    "ENABLE_CODE_SECURITY_REVIEW": "0",
-    "ENABLE_COMMIT_REVIEW": "0"
+    "ENABLE_CODE_SECURITY_REVIEW": "0"
   },
   "permissions": {
     "allow": [
