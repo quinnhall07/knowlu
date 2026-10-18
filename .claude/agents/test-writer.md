@@ -6,7 +6,7 @@ description: >-
   regression tests once a bug is root-caused. Do not use to decide what the behavior should be (use
   planner), to root-cause a failure (use debugger), or to write tests that touch frozen fixtures or the
   Credential Manager without contract-engineer sign-off.
-model: sonnet
+model: claude-sonnet-5-5
 effort: medium
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---

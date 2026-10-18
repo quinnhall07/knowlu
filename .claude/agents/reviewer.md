@@ -3,7 +3,7 @@ name: reviewer
 description: >-
   Adversarial pre-push review of the current diff against CLAUDE.md's two overriding rules and the
   engine and app invariants. Use before pushing any change to engine/, app/ or cloud/, before opening
-  a PR, and after any cheaper-model agent (mechanical, test-writer, console-ui, implementer) has
+  a PR, and after any cheaper-model agent (mechanical, test-writer, console-ui, implementer, docs-keeper) has
   edited code. Also reviews a spec or plan before anyone executes it (spec/plan mode, selected by
   the dispatch). Reports findings with a concrete failure scenario; never edits. Do not use to
   implement fixes, or for a diff that touches the contract list (contract-reviewer).

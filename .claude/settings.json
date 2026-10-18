@@ -3,7 +3,9 @@
   "effortLevel": "medium",
   "maxEffortLevel": "xhigh",
   "env": {
-    "CARGO_BUILD_JOBS": "2"
+    "CARGO_BUILD_JOBS": "2",
+    "ENABLE_CODE_SECURITY_REVIEW": "0",
+    "ENABLE_COMMIT_REVIEW": "0"
   },
   "permissions": {
     "allow": [
@@ -18,9 +20,8 @@
     "deny": [
       "Edit(engine/tests/fixtures/**)",
       "Write(engine/tests/fixtures/**)",
-      "Edit(**/engine/tests/fixtures/*.*)",
-      "Edit(**/engine/tests/fixtures/vault-*/**)",
-      "Edit(**/engine/tests/fixtures/registrar/banner-ua-registration.json)",
+      "Edit(**/engine/tests/fixtures/**)",
+      "Write(**/engine/tests/fixtures/**)",
       "Bash(cargo tauri build:*)",
       "Bash(cargo test --release:*)",
       "Bash(git stash:*)",
@@ -29,6 +30,21 @@
       "Bash(git push origin --force:*)",
       "Bash(git push origin -f:*)",
       "Bash(cargo test --workspace --release:*)"
+    ]
+  },
+  "subagentPromptCacheTtl": "1h",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|PowerShell)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/pretool-bash.js\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

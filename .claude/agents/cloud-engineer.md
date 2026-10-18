@@ -5,7 +5,7 @@ description: >-
   ingest-*, judge-*, sync-pull, sync-push, telemetry, gmail-read, google-*), migrations and row-level
   security, the judgment eval (cloud/eval), and the client side that talks to them (cloudmodel.rs). Use for anything involving auth, billing, entitlement, sync storage, the pinned judgment
   model or its prompts and schemas, or user data at rest. Security- and money-sensitive. Do not use for
-  desktop-only engine or app work (use contract-engineer or the main session).
+  desktop-only engine or app work (use contract-engineer or the main session). Use instead of stripe:* agents for billing code.
 model: claude-opus-5-5
 effort: high
 tools: Read, Grep, Glob, Edit, Write, Bash

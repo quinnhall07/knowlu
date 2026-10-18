@@ -9,7 +9,7 @@ description: >-
   - product and market questions.
   Use before planner writes a spec. Do not use for design decisions (planner), code review
   (reviewer), merges (integrator) or anything that edits.
-model: sonnet
+model: claude-sonnet-5-5
 effort: medium
 tools: Read, Grep, Glob, Bash, WebSearch, WebFetch
 ---
