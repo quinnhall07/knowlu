@@ -170,8 +170,6 @@ fn run_console(p: profiles::Profile, root: std::path::PathBuf) -> ! {
             // resume, on its own thread. After `manage(cs)` (it reads `ConsoleState`) and before the
             // scheduler, so a slot never meets a leftover `mail-setup`.
             knowlu::mail::live::on_start(app.handle());
-            #[cfg(debug_assertions)]
-            knowlu::debug_port::hold_hidden(app.handle());
             // The scheduler's tick and housekeeping threads (Task 12) — inert unless
             // `config/runners.yaml`'s `local` entry says `scheduler: app`.
             scheduler::spawn(app.handle().clone());
