@@ -43,7 +43,7 @@ const READ_ONLY = /^\s*(git\s+(-C\s+\S+\s+)?(diff|log|show|status|blame)|cat|hea
 // A leading `cd <plain path> &&` is allowed (the usual way into a worktree).
 const isReadOnly = (cmd) => {
   const c = cmd.trim().replace(/^cd\s+[\w./:\\-]+\s*&&\s*/, '');
-  return !/;|&&|\|\||\n|\r|>/.test(c) && c.split('|').every((s) => READ_ONLY.test(s));
+  return !/;|&&|\|\||\n|\r|>|--output|--pre\b|\s-o\b/.test(c) && c.split('|').every((s) => READ_ONLY.test(s));
 };
 // One writer registry for both shells, so the lists cannot drift apart.
 const PS_WRITERS = 'Set-Content|Add-Content|Out-File|Copy-Item|Move-Item|Remove-Item|New-Item|Rename-Item|Clear-Content|Set-ItemProperty|WriteAllText|WriteAllBytes|WriteAllLines';
@@ -148,6 +148,15 @@ function guardResearcher(input) {
 // (RUSTC_WRAPPER=<anything> would run any binary).
 // slot.sh must be the project's own: relative, or under CLAUDE_PROJECT_DIR (lanes in worktrees call
 // the main checkout's copy by absolute path). A copy planted anywhere else is not auto-allowed.
+function projectRoots() {
+  const root = norm(process.env.CLAUDE_PROJECT_DIR || '').replace(/\/$/, '');
+  return root ? [root, root.replace(/^([a-z]):/, (_, d) => '/' + d)] : []; // C:/x and Git Bash /c/x
+}
+function insideProject(dir) {
+  const n = norm(dir).replace(/\/$/, '');
+  if (n.split('/').includes('..')) return false;
+  return projectRoots().some((r) => n === r || n.startsWith(r + '/'));
+}
 // A relative path counts only when nothing moved the shell (no cd prefix) and its cwd is the root.
 function slotIsOurs(p, cdPrefix, cwd) {
   const rel = /^(\.\/)?\.superpowers\/sdd\/(?!\.\.?\/)[\w.-]+\/slot\.sh$/;
@@ -173,6 +182,10 @@ function trim(input) {
   const body = m ? m[2] : cmd.trim();
   if (!CARGO.test(body)) return;
   if (/[;|&<>`$"'*?(){}\[\]\n\r]/.test(body)) return;
+  // Flags that run other programs or another crate's build script stay with the permission rules.
+  if (/(^|\s)(--config|-Z|--manifest-path|\+\S)/.test(body)) return;
+  // A cd target must be inside the project (a worktree or the root): cargo runs the build scripts it finds there.
+  if (m && !insideProject(m[1])) return;
   const slot = /^bash\s+(\S+)\s+/.exec(body);
   if (slot && !slotIsOurs(slot[1], Boolean(m), input.cwd)) return;
   const filter = path.join(__dirname, 'trim-cargo-output.js').replace(/\\/g, '/');
