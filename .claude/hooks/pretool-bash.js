@@ -43,7 +43,9 @@ const READ_ONLY = /^\s*(git\s+(-C\s+\S+\s+)?(diff|log|show|status|blame)|cat|hea
 // A leading `cd <plain path> &&` is allowed (the usual way into a worktree).
 const isReadOnly = (cmd) => {
   const c = cmd.trim().replace(/^cd\s+[\w./:\\-]+\s*&&\s*/, '');
-  return !/;|&&|\|\||\n|\r|>|--output|--pre\b|\s-o\b/.test(c) && c.split('|').every((s) => READ_ONLY.test(s));
+  // Quoting, escapes or expansion could hide a writing flag, so such a command is never a plain read.
+  if (/["'\\$`]/.test(c)) return false;
+  return !/;|&&|\|\||\n|\r|>|(^|\s)(--out|--pre|-o|--ext-diff|--textconv)/.test(c) && c.split('|').every((s) => READ_ONLY.test(s));
 };
 // One writer registry for both shells, so the lists cannot drift apart.
 const PS_WRITERS = 'Set-Content|Add-Content|Out-File|Copy-Item|Move-Item|Remove-Item|New-Item|Rename-Item|Clear-Content|Set-ItemProperty|WriteAllText|WriteAllBytes|WriteAllLines';

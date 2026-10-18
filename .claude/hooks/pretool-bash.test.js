@@ -87,6 +87,8 @@ const CASES = [
   ['pass', bash('cargo build --manifest-path /tmp/evil/Cargo.toml'), '--manifest-path'],
   ['pass', bash('cargo +nightly test'), '+toolchain'],
   ['deny', bash('cd engine/tests/fixtures && git diff --output golden-today-s1.md'), 'cd then git diff --output into a frozen file'],
+  ['deny', bash('cd engine/tests/fixtures && git diff "--output" golden-today-s1.md'), 'quoted --output'],
+  ['deny', bash('cd engine/tests/fixtures && git diff --out=golden-today-s1.md'), 'abbreviated --out'],
   ['pass', bash('bash /c/proj/.superpowers/sdd/../x/slot.sh cargo test'), '.. segment'],
   ['allow', bash('RUST_BACKTRACE=1 cargo test -p knowlu'), 'harmless variable'],
   ['pass', bash('RUSTC_WRAPPER=C:/x/evil.exe cargo build'), 'RUSTC_WRAPPER is not auto-allowed'],
