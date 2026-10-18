@@ -21,7 +21,9 @@ const FROZEN = [
   'vault-full/state/events.md', 'zybooks-parsed-reference.json', 'vhl-parsed-reference.json',
   'run-records-reference.json', 'pyyaml-safe-dump-reference.json',
 ];
-const FROZEN_NAMES = FROZEN.map((f) => f.split('/').pop());
+// Names searched for in shell text. events.md is too common (every vault has state/events.md),
+// so it is matched together with its fixture folder.
+const FROZEN_NAMES = FROZEN.map((f) => (f.endsWith('events.md') ? 'vault-full/state/events.md' : f.split('/').pop()));
 
 function out(obj) { process.stdout.write(JSON.stringify(obj)); process.exit(0); }
 function decide(permissionDecision, reason) {
@@ -36,15 +38,21 @@ const isFrozenPath = (s) => isFixture(s) && FROZEN.some((f) => norm(s).endsWith(
 // A subagent carries agent_type and agent_id; the main session carries neither.
 const subagentOf = (input) => (input.agent_type || input.agent_id ? String(input.agent_type || 'unknown') : '');
 
-const READ_ONLY = /^\s*(git\s+(diff|log|show|status|blame)|cat|head|tail|grep|rg|diff|wc|ls|sha256sum|md5sum|od|xxd)\b[^<>]*$/;
+const READ_ONLY = /^\s*(git\s+(-C\s+\S+\s+)?(diff|log|show|status|blame)|cat|head|tail|grep|rg|diff|wc|ls|sha256sum|md5sum|od|xxd)\b[^<>]*$/;
 // Read-only only if every piece is: no ;, &&, || or newlines, and each |-stage is a reader.
-const isReadOnly = (cmd) => !/;|&&|\|\||\n|>/.test(cmd) && cmd.split('|').every((s) => READ_ONLY.test(s));
+// A leading `cd <plain path> &&` is allowed (the usual way into a worktree).
+const isReadOnly = (cmd) => {
+  const c = cmd.trim().replace(/^cd\s+[\w./:\\-]+\s*&&\s*/, '');
+  return !/;|&&|\|\||\n|\r|>/.test(c) && c.split('|').every((s) => READ_ONLY.test(s));
+};
 // One writer registry for both shells, so the lists cannot drift apart.
 const PS_WRITERS = 'Set-Content|Add-Content|Out-File|Copy-Item|Move-Item|Remove-Item|New-Item|Rename-Item|Clear-Content|Set-ItemProperty|WriteAllText|WriteAllBytes|WriteAllLines';
 const CHDIR = 'cd|chdir|pushd|Set-Location|Push-Location|sl';
-// Anything that can write without naming the file as a plain argument.
-const OPAQUE_WRITER = new RegExp(`\\b(${CHDIR}|python3?|py|node|deno|perl|ruby|sh|bash|pwsh|powershell|patch|awk|xargs)\\b|>|` +
-  `\\b(sed|tee|cp|mv|rm|truncate|install|rsync|dos2unix|unix2dos)\\b|git\\s+(apply|checkout|restore|am)\\b|\\b(${PS_WRITERS})\\b`, 'i');
+// Anything that can write without naming the file as a plain argument. Word edges exclude
+// - . and / so hyphenated names (m1-install-flow) and path pieces do not match.
+const W0 = '(?<![\\w./-])', W1 = '(?![\\w-])';
+const OPAQUE_WRITER = new RegExp(`${W0}(${CHDIR}|python3?|py|node|deno|perl|ruby|sh|bash|pwsh|powershell|patch|awk|xargs)${W1}|>|` +
+  `${W0}(sed|tee|cp|mv|rm|truncate|install|rsync|dos2unix|unix2dos|curl|wget|tar|unzip)${W1}|--output\\b|git\\s+(apply|checkout|restore|am)\\b|${W0}(${PS_WRITERS})${W1}`, 'i');
 const PS_WRITE = new RegExp(`\\b(${PS_WRITERS}|${CHDIR})\\b|>`, 'i');
 
 // The paths a shell segment writes, as far as a conservative reading can tell.
@@ -58,7 +66,12 @@ function bashWriteTargets(seg) {
   if ((cmd === 'sed' || cmd === 'perl') && words.some((w) => /^-[a-z]*i|^--in-place/.test(w))) targets.push(...args);
   if (['tee', 'rm', 'truncate', 'dos2unix', 'unix2dos', 'touch', 'chmod', 'rmdir', 'patch'].includes(cmd)) targets.push(...args);
   if (['cp', 'mv', 'install', 'rsync', 'ln'].includes(cmd) && args.length) targets.push(args[args.length - 1]);
-  for (const w of words) { const o = /^--output=(.+)/.exec(w); if (o) targets.push(o[1]); }
+  words.forEach((w, i) => {
+    const o = /^--output=(.+)/.exec(w);
+    if (o) targets.push(o[1]);
+    if (w === '--output' && words[i + 1]) targets.push(words[i + 1]);
+    if (((cmd === 'curl' && w === '-o') || (cmd === 'wget' && w === '-O')) && words[i + 1]) targets.push(words[i + 1]);
+  });
   if (cmd === 'git' && ['checkout', 'restore', 'rm', 'mv', 'apply', 'am'].includes(words[1])) targets.push(...args.slice(1));
   return targets;
 }
@@ -99,7 +112,7 @@ function guardFixtures(input) {
 }
 
 const OUTWARD = [
-  [/\bgit\b[^\n]*\bpush\b[^\n]*(--tags|--follow-tags|--mirror|refs\/tags\/|(^|[\s:+])v\d)/i, 'pushes a tag (a v* tag ships a release to every installed tester)'],
+  [/\bgit\b[^\n]*\bpush\b[^\n]*(--tags|--follow-tags|--mirror|refs\/tags\/|(^|[\s:+])v\d+\.\d+)/i, 'pushes a tag (a v* tag ships a release to every installed tester)'],
   [/\bgit\b[^\n]*\bpush\b[^\n]*(\s-f\b|\s-[a-z]*f[a-z]*\b|--force|\s\+\S)/i, 'force-pushes'],
   [/\bgit\b[^\n]*\bpush\b[^\n]*(--delete|\s:\S)/i, 'deletes a remote ref'],
   [/\bgh\s+(release|secret|variable|ruleset)\s+(create|delete|edit|set|upload)\b/i, 'changes a GitHub release, secret, variable or ruleset'],
@@ -116,7 +129,7 @@ function guardOutward(input) {
   }
 }
 
-const RESEARCHER_OK = /^\s*(git\s+(log|show|diff|blame|status|rev-parse|merge-base|ls-files|ls-tree|cat-file|for-each-ref|describe|shortlog)\b|gh\s+(pr|issue|run|release)\s+(view|list|diff|checks)\b|gh\s+repo\s+view\b)[^;&|<>`$]*$/;
+const RESEARCHER_OK = /^\s*(git\s+(log|show|diff|blame|status|rev-parse|merge-base|ls-files|ls-tree|cat-file|for-each-ref|describe|shortlog)\b|gh\s+(pr|issue|run|release)\s+(view|list|diff|checks)\b|gh\s+repo\s+view\b)[^;&|<>`$\n\r]*$/;
 
 function guardResearcher(input) {
   if (subagentOf(input) !== 'researcher' || input.tool_name !== 'Bash') return;
@@ -129,7 +142,9 @@ function guardResearcher(input) {
   }
 }
 
-const CARGO = /^(?:bash\s+\S*slot\.sh\s+)?(?:\w+=\S*\s+)*cargo\s+(?:\+\S+\s+)?(?:build|check|clippy|test|nextest)\b/;
+// Only the repo's own slot.sh and a short list of harmless variables keep the auto-allow
+// (RUSTC_WRAPPER=<anything> would run any binary).
+const CARGO = /^(?:bash\s+(?:[\w.:\/\\-]*\/)?\.superpowers\/sdd\/[\w.-]+\/slot\.sh\s+)?(?:(?:CARGO_BUILD_JOBS|CARGO_TERM_COLOR|CARGO_INCREMENTAL|RUST_BACKTRACE|RUST_LOG|RUST_TEST_THREADS)=[\w.,:=-]*\s+)*cargo\s+(?:\+\S+\s+)?(?:build|check|clippy|test|nextest)\b/;
 
 function trim(input) {
   if (input.tool_name !== 'Bash') return;
@@ -145,7 +160,7 @@ function trim(input) {
   if (!CARGO.test(body)) return;
   if (/[;|&<>`$"'*?(){}\[\]\n\r]/.test(body)) return;
   const filter = path.join(__dirname, 'trim-cargo-output.js').replace(/\\/g, '/');
-  const wrapped = `{ ${cmd.trim()}\n} 2>&1 | node "${filter}"; exit \${PIPESTATUS[0]}`;
+  const wrapped = `{ ${cmd.trim()}\n} 2>&1 | node "${filter}"; (exit \${PIPESTATUS[0]})`;
   out({ hookSpecificOutput: {
     hookEventName: 'PreToolUse', permissionDecision: 'allow',
     permissionDecisionReason: 'cargo output trimmed by .claude/hooks/trim-cargo-output.js',
@@ -159,9 +174,14 @@ process.stdin.on('end', () => {
   try {
     const input = JSON.parse(raw);
     guardFixtures(input);
-    guardOutward(input);
     guardResearcher(input);
+    guardOutward(input);
     trim(input);
-  } catch (_) { /* never block on a hook bug */ }
+  } catch (_) {
+    // A hook bug never blocks a call, except a file edit under the fixtures: fail closed there.
+    if (/"tool_name"\s*:\s*"(Edit|Write|MultiEdit|NotebookEdit)"/.test(raw) && isFixture(raw)) {
+      deny('the guard hit an internal error on a fixture edit, so it refuses rather than allow it.');
+    }
+  }
   process.exit(0);
 });

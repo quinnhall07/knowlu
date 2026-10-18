@@ -36,7 +36,7 @@ process.stdin.on('data', (d) => {
 });
 process.stdin.on('end', () => {
   if (fd !== null) { try { fs.closeSync(fd); } catch (_) { /* ignore */ } }
-  const lines = raw.split('\n');
+  const lines = raw.split(/\r?\n/);
   if (lines.length <= PASS_THROUGH) { process.stdout.write(raw); return; }
 
   const keep = new Array(lines.length).fill(false);
