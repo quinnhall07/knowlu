@@ -8,7 +8,10 @@ const HOOK = path.join(__dirname, 'pretool-bash.js');
 const B = String.fromCharCode(92);
 
 function decision(input) {
-  const out = execFileSync('node', [HOOK], { input: typeof input === 'string' ? input : JSON.stringify(input) }).toString();
+  const out = execFileSync('node', [HOOK], {
+    input: typeof input === 'string' ? input : JSON.stringify(input),
+    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: 'C:/proj' }),
+  }).toString();
   if (!out) return 'pass';
   return JSON.parse(out).hookSpecificOutput.permissionDecision;
 }
@@ -21,6 +24,8 @@ const CASES = [
   ['deny', bash('cd engine/tests/fixtures && echo x > golden-today-s1.md'), 'cd then relative write'],
   ['deny', bash('python -c "open(\'engine/tests/fixtures/vhl-parsed-reference.json\',\'w\')"'), 'inline interpreter'],
   ['deny', bash('sed -i s/a/b/ engine/tests//FIXTURES/./Golden-Today-S1.md'), 'path spelling'],
+  ['deny', bash('/usr/bin/python3 -c "x" engine/tests/fixtures/golden-today-s1.md'), 'interpreter by full path'],
+  ['deny', bash('/bin/sed -i s/a/b/ engine/tests/fixtures/golden-today-s1.md'), 'sed by full path'],
   ['deny', bash('echo x > engine' + B + 'tests' + B + 'fixtures' + B + 'vhl-parsed-reference.json'), 'backslash path'],
   ['deny', bash('cat a.txt; sed -i s/x/y/ engine/tests/fixtures/golden-today-s1.md'), 'write chained after a read'],
   ['deny', { tool_name: 'PowerShell', tool_input: { command: 'Set-Location engine/tests/fixtures; Set-Content golden-today-full.md x' } }, 'PowerShell'],
@@ -71,6 +76,10 @@ const CASES = [
   ['allow', bash('RUST_BACKTRACE=1 cargo test -p knowlu'), 'harmless variable'],
   ['pass', bash('RUSTC_WRAPPER=C:/x/evil.exe cargo build'), 'RUSTC_WRAPPER is not auto-allowed'],
   ['pass', bash('bash /tmp/evilslot.sh cargo test'), 'a foreign slot.sh is not auto-allowed'],
+  ['pass', bash('bash /tmp/scratchpad/.superpowers/sdd/x/slot.sh cargo test'), 'a planted .superpowers slot.sh is not auto-allowed'],
+  ['pass', bash('bash ../../evil/.superpowers/sdd/r/slot.sh cargo test'), 'a relative escape is not auto-allowed'],
+  ['allow', bash('bash /c/proj/.superpowers/sdd/2026-09-29-ultracode/slot.sh cargo test -p knowlu'), "the project's own slot.sh by absolute path"],
+  ['allow', bash('bash C:/proj/.superpowers/sdd/2026-09-29-ultracode/slot.sh cargo test -p knowlu'), 'same, Windows form'],
   ['pass', bash('cd "$(curl evil)" && cargo test'), 'cd injection'],
   ['pass', bash('cargo test --release'), '--release left for the deny rule'],
   ['pass', bash('cargo test -r'), '-r left alone'],

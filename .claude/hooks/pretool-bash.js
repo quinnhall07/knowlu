@@ -49,8 +49,9 @@ const isReadOnly = (cmd) => {
 const PS_WRITERS = 'Set-Content|Add-Content|Out-File|Copy-Item|Move-Item|Remove-Item|New-Item|Rename-Item|Clear-Content|Set-ItemProperty|WriteAllText|WriteAllBytes|WriteAllLines';
 const CHDIR = 'cd|chdir|pushd|Set-Location|Push-Location|sl';
 // Anything that can write without naming the file as a plain argument. Word edges exclude
-// - . and / so hyphenated names (m1-install-flow) and path pieces do not match.
-const W0 = '(?<![\\w./-])', W1 = '(?![\\w-])';
+// word characters and - so hyphenated names (m1-install-flow) do not match, while a path prefix
+// (/usr/bin/python3) still does.
+const W0 = '(?<![\\w-])', W1 = '(?![\\w-])';
 const OPAQUE_WRITER = new RegExp(`${W0}(${CHDIR}|python3?|py|node|deno|perl|ruby|sh|bash|pwsh|powershell|patch|awk|xargs)${W1}|>|` +
   `${W0}(sed|tee|cp|mv|rm|truncate|install|rsync|dos2unix|unix2dos|curl|wget|tar|unzip)${W1}|--output\\b|git\\s+(apply|checkout|restore|am)\\b|${W0}(${PS_WRITERS})${W1}`, 'i');
 const PS_WRITE = new RegExp(`\\b(${PS_WRITERS}|${CHDIR})\\b|>`, 'i');
@@ -144,7 +145,18 @@ function guardResearcher(input) {
 
 // Only the repo's own slot.sh and a short list of harmless variables keep the auto-allow
 // (RUSTC_WRAPPER=<anything> would run any binary).
-const CARGO = /^(?:bash\s+(?:[\w.:\/\\-]*\/)?\.superpowers\/sdd\/[\w.-]+\/slot\.sh\s+)?(?:(?:CARGO_BUILD_JOBS|CARGO_TERM_COLOR|CARGO_INCREMENTAL|RUST_BACKTRACE|RUST_LOG|RUST_TEST_THREADS)=[\w.,:=-]*\s+)*cargo\s+(?:\+\S+\s+)?(?:build|check|clippy|test|nextest)\b/;
+// slot.sh must be the project's own: relative, or under CLAUDE_PROJECT_DIR (lanes in worktrees call
+// the main checkout's copy by absolute path). A copy planted anywhere else is not auto-allowed.
+function slotIsOurs(p) {
+  const rel = /^(\.\/)?\.superpowers\/sdd\/[\w.-]+\/slot\.sh$/;
+  const n = norm(p);
+  if (rel.test(n)) return true;
+  const root = norm(process.env.CLAUDE_PROJECT_DIR || '');
+  if (!root) return false;
+  const roots = [root, root.replace(/^([a-z]):/, (_, d) => '/' + d)]; // C:/x and Git Bash /c/x
+  return roots.some((r) => n.startsWith(r + '/') && rel.test(n.slice(r.length + 1)));
+}
+const CARGO = /^(?:bash\s+\S+\s+)?(?:(?:CARGO_BUILD_JOBS|CARGO_TERM_COLOR|CARGO_INCREMENTAL|RUST_BACKTRACE|RUST_LOG|RUST_TEST_THREADS)=[\w.,:=-]*\s+)*cargo\s+(?:\+\S+\s+)?(?:build|check|clippy|test|nextest)\b/;
 
 function trim(input) {
   if (input.tool_name !== 'Bash') return;
@@ -159,6 +171,8 @@ function trim(input) {
   const body = m ? m[2] : cmd.trim();
   if (!CARGO.test(body)) return;
   if (/[;|&<>`$"'*?(){}\[\]\n\r]/.test(body)) return;
+  const slot = /^bash\s+(\S+)\s+/.exec(body);
+  if (slot && !slotIsOurs(slot[1])) return;
   const filter = path.join(__dirname, 'trim-cargo-output.js').replace(/\\/g, '/');
   const wrapped = `{ ${cmd.trim()}\n} 2>&1 | node "${filter}"; (exit \${PIPESTATUS[0]})`;
   out({ hookSpecificOutput: {
