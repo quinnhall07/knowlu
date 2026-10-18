@@ -58,6 +58,7 @@ function bashWriteTargets(seg) {
   if ((cmd === 'sed' || cmd === 'perl') && words.some((w) => /^-[a-z]*i|^--in-place/.test(w))) targets.push(...args);
   if (['tee', 'rm', 'truncate', 'dos2unix', 'unix2dos', 'touch', 'chmod', 'rmdir', 'patch'].includes(cmd)) targets.push(...args);
   if (['cp', 'mv', 'install', 'rsync', 'ln'].includes(cmd) && args.length) targets.push(args[args.length - 1]);
+  for (const w of words) { const o = /^--output=(.+)/.exec(w); if (o) targets.push(o[1]); }
   if (cmd === 'git' && ['checkout', 'restore', 'rm', 'mv', 'apply', 'am'].includes(words[1])) targets.push(...args.slice(1));
   return targets;
 }
@@ -98,12 +99,13 @@ function guardFixtures(input) {
 }
 
 const OUTWARD = [
-  [/\bgit\b[^\n]*\bpush\b[^\n]*(--tags|--follow-tags|--mirror|\s(refs\/tags\/|v\d))/i, 'pushes a tag (a v* tag ships a release to every installed tester)'],
+  [/\bgit\b[^\n]*\bpush\b[^\n]*(--tags|--follow-tags|--mirror|refs\/tags\/|(^|[\s:+])v\d)/i, 'pushes a tag (a v* tag ships a release to every installed tester)'],
   [/\bgit\b[^\n]*\bpush\b[^\n]*(\s-f\b|\s-[a-z]*f[a-z]*\b|--force|\s\+\S)/i, 'force-pushes'],
   [/\bgit\b[^\n]*\bpush\b[^\n]*(--delete|\s:\S)/i, 'deletes a remote ref'],
   [/\bgh\s+(release|secret|variable|ruleset)\s+(create|delete|edit|set|upload)\b/i, 'changes a GitHub release, secret, variable or ruleset'],
   [/\bgh\s+repo\s+(edit|delete|rename|archive)\b/i, 'changes the GitHub repository'],
-  [/\bgh\s+api\b[^\n]*(-X|--method)\s*(PUT|PATCH|DELETE)/i, 'writes through the GitHub API'],
+  [/\bgh\s+api\b[^\n]*((-X|--method)[\s=]*(?!GET\b)\w|\s-[fF]\b|--field|--raw-field|--input)/i, 'writes through the GitHub API'],
+  [/\bgh\s+workflow\s+(run|enable|disable)\b/i, 'starts or changes a GitHub workflow'],
 ];
 
 function guardOutward(input) {
@@ -114,12 +116,14 @@ function guardOutward(input) {
   }
 }
 
-const RESEARCHER_OK = /^\s*(git\s+(log|show|diff|blame|status|branch|rev-parse|merge-base|ls-files|ls-tree|cat-file|for-each-ref|describe|shortlog)\b|gh\s+(pr|issue|run|release)\s+(view|list|diff|checks)\b|gh\s+repo\s+view\b)[^;&|<>`$]*$/;
+const RESEARCHER_OK = /^\s*(git\s+(log|show|diff|blame|status|rev-parse|merge-base|ls-files|ls-tree|cat-file|for-each-ref|describe|shortlog)\b|gh\s+(pr|issue|run|release)\s+(view|list|diff|checks)\b|gh\s+repo\s+view\b)[^;&|<>`$]*$/;
 
 function guardResearcher(input) {
   if (subagentOf(input) !== 'researcher' || input.tool_name !== 'Bash') return;
   const cmd = String((input.tool_input || {}).command || '');
-  if (!RESEARCHER_OK.test(cmd)) {
+  // git options that write files or run programs, even on a read-only subcommand
+  const writesOrRuns = /\s(--output|-o\b|--ext-diff|--textconv|--exec|--upload-pack|--receive-pack|-c\s|--config-env)/.test(cmd);
+  if (!RESEARCHER_OK.test(cmd) || writesOrRuns) {
     deny('researcher reads untrusted web pages, so its shell is limited to one read-only git or gh command ' +
       '(git log/show/diff/blame/status..., gh pr|issue|run view/list). No pipes, redirects or chaining.');
   }
