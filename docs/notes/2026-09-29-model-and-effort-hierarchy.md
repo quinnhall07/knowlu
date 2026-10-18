@@ -53,19 +53,20 @@ secondary sources (the original pages could not be fetched); re-check before quo
 
 - `.claude/settings.json`: default model `claude-opus-5-5` (pinned so a new Opus release does not change
   the default silently), `effortLevel: medium`, `maxEffortLevel: xhigh` (no accidental `max`). Permissions
-  deny Edit/Write of the eight frozen references by name (rule 2) and a hand-run `cargo tauri build`
-  (unsupported per CLAUDE.md), ask before any prod Supabase MCP call or `supabase` CLI command, and allow
+  deny Edit/Write of the eight frozen references by name (rule 2), a hand-run `cargo tauri build`
+  (unsupported per CLAUDE.md), `cargo test --release`, `git stash` and force pushes; they ask before any prod Supabase MCP call or `supabase` CLI command, and allow
   the read-only git and routine cargo commands. `subagentPromptCacheTtl: 1h` keeps a subagent's cache
   warm while it waits for a build slot.
 - `.claude/hooks/pretool-bash.js` (PR #37, 2026-10-18): the frozen references are refused by every
   route; other `engine/tests/fixtures/**` paths are open only to contract-engineer and the main
-  session; tag pushes, force pushes and GitHub release/secret/variable changes ask; researcher's shell
+  session; tag pushes, force pushes and GitHub release/secret/variable/ruleset/repo/workflow changes ask; researcher's shell
   is one read-only git or gh command; plain cargo commands are trimmed to failures and warnings.
 - `.claude/agents/`: fourteen roles, listed with the routing rubric for undefined roles in `CLAUDE.md`
-  ("Model and effort"), which loads every session. Each `description:` says when to use it and when not,
-  and which built-in or plugin agent it replaces. Models are pinned (`claude-opus-5-5`,
-  `claude-sonnet-5-5`, `claude-haiku-5-5`). No user-level `modelSettings` override them (removed
-  2026-10-18), so each agent's `effort:` is what runs.
+  ("Model and effort"), which loads every session. Each `description:` says when to use it and when not;
+  the five that overlap a built-in or plugin agent (explorer, planner, console-ui, cloud-engineer,
+  contract-reviewer) also say which one they replace. Models are pinned (`claude-opus-5-5`,
+  `claude-sonnet-5-5`, `claude-haiku-5-5`). The user-level Opus, Sonnet and Haiku `modelSettings`
+  entries were removed 2026-10-18 (only Fable's remains), so each agent's `effort:` is what runs.
 - Open: this note says Sonnet stays at low or medium, but CLAUDE.md's table and `implementer.md` run
   implementer at Sonnet high. CLAUDE.md wins until Quinn rules on it.
 
