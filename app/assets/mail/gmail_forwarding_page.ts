@@ -29,6 +29,18 @@ export interface Opts extends Partial<Model> {
   sticky?: boolean;
   /** The add dialog's address box has no type attribute (T18c's audit: a type-less input reads as text). */
   untypedEmail?: boolean;
+  /**
+   * Live 2026-10-18: a Gmail with no forwarding address yet draws only the Add button, no forwarding radios
+   * and no Remove button (the POP section is still there).
+   */
+  fresh?: boolean;
+  /** An address added but not yet verified: it is not an option of the list; the page shows a verify text. */
+  unverified?: string;
+  /**
+   * The older markup, where each radio sits inside a wrapping <label> in one block. The live page is the
+   * default: a table row per radio, the "Forward a copy" radio with no label of its own.
+   */
+  labelled?: boolean;
 }
 
 export interface Gmail {
@@ -111,25 +123,40 @@ export function gmail(o: Opts = {}): Gmail {
     ).join("");
   const section = () => {
     const none = model.addresses.length === 0 ? " disabled" : "";
+    const live = !o.labelled;
+    const rows = w === "radios" || o.fresh ? "" : live
+      // The live shape: each radio in its own first TD. "Disable forwarding" has a label[for]; the "Forward a
+      // copy" radio has none, its text sits in the next TD of the row, which also holds both selects.
+      ? `<tr><td><input type="radio" name="sx_em" id="r-off"${
+        model.on ? "" : " checked"
+      }></td><td><label for="r-off">Disable forwarding</label></td></tr>
+        <tr><td><input type="radio" name="sx_em" id="r-on"${model.on ? " checked" : ""}${none}></td><td>
+          Forward a copy of incoming mail to
+          ${w === "to" ? "" : `<select id="to"${none}>${options()}</select>`}
+          and ${w === "disp" ? "" : `<select id="disp"${none}>${dispOptions()}</select>`}</td></tr>`
+      : `<tr><td>&nbsp;</td><td><div><label><input type="radio" name="fwd" id="r-off"${
+        model.on ? "" : " checked"
+      }> Disable forwarding</label></div>
+        <div><label><input type="radio" name="fwd" id="r-on"${
+        model.on ? " checked" : ""
+      }${none}> Forward a copy of incoming mail to</label>
+          ${w === "to" ? "" : `<select id="to"${none}>${options()}</select>`}
+          and ${w === "disp" ? "" : `<select id="disp"${none}>${dispOptions()}</select>`}</div></td></tr>`;
+    const verify = o.unverified
+      ? `<div>A verification email was sent to ${o.unverified}. It is not yet verified.</div>`
+      : "";
     return `<div id="fwdandpop"><table>
       <tr><td>Forwarding:</td><td>
-        ${input("Add a forwarding address", "add")}
-        ${
-      w === "radios"
-        ? ""
-        : `<div><label><input type="radio" name="fwd" id="r-off"${
-          model.on ? "" : " checked"
-        }> Disable forwarding</label></div>
-        <div><label><input type="radio" name="fwd" id="r-on"${
-          model.on ? " checked" : ""
-        }${none}> Forward a copy of incoming mail to</label>
-          ${w === "to" ? "" : `<select id="to"${none}>${options()}</select>`}
-          and ${w === "disp" ? "" : `<select id="disp"${none}>${dispOptions()}</select>`}</div>`
+        ${input("Add a forwarding address", "add")}${
+      o.fresh ? "" : input("Remove forwarding address", "remove")
     }
-        ${input("Remove forwarding address", "remove")}
+        ${verify}
       </td></tr>
+      ${rows}
       <tr><td>POP download:</td><td><label><input type="radio" name="pop" id="p-off" checked> Disable POP</label>
-        <label><input type="radio" name="pop" id="p-on"> Enable POP for all mail</label></td></tr></table>
+        <label><input type="radio" name="pop" id="p-on"> Enable POP for all mail</label></td></tr>
+      <tr><td></td><td>When messages are accessed with POP
+        <select id="pop-disp">${dispOptions()}</select></td></tr></table>
       ${w === "save" ? "" : `<button id="save" type="button" disabled>Save Changes</button>`}
       <button id="cancel" type="button">Cancel</button></div>
       <button id="decoy-next" type="button">Next</button>

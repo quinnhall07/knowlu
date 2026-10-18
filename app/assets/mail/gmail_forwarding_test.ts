@@ -165,7 +165,7 @@ Deno.test("gmail_a_missing_control_returns_not_found", async () => {
   // A control a read needs, then the controls only a write needs: the script names the one it cannot find
   // and changes nothing, because it looks for every control before it clicks any.
   const rows = [
-    ["radios", ["read", "set", "off", "add"], "forwarding radio"],
+    ["radios", ["read", "set", "off"], "forwarding radio"],
     ["to", ["read"], "address list"],
     ["to", ["set"], "address list"],
     ["disp", ["set"], "keep copy"],
@@ -327,4 +327,99 @@ Deno.test("gmail_a_script_without_an_address_changes_nothing", async () => {
     assertEquals(f.snap(), before, script);
     assertEquals(f.saves + f.popups + f.removed.length, 0, script);
   }
+});
+
+// Live 2026-10-18 (T18c step 4), read from Gmail's real Settings > Forwarding and POP/IMAP page.
+
+Deno.test("gmail_add_address_on_a_fresh_gmail_with_only_the_add_button_presses_add", async () => {
+  // No forwarding address yet: the section shows only the Add button, no forwarding radios.
+  const f = gmail({ fresh: true });
+  assertEquals(f.page.document.querySelectorAll('input[name="sx_em"]').length, 0);
+  assert(f.el("add"), "the Add button is there");
+  const r = await run("gmail/forwarding_add.js", f.page, { address: OURS, ...FAST });
+  assertEquals(r, { result: "ok", stage: "asked", changed: true });
+  assertEquals(f.typed, [OURS]);
+  assertEquals(f.popups, 1);
+  assertEquals(f.decoy, 0);
+  f.verified();
+  assertEquals(await run("gmail/forwarding_add_done.js", f.page, FAST), { result: "ok", sent: true });
+});
+
+Deno.test("gmail_the_other_scripts_find_no_forwarding_radio_on_a_fresh_gmail_and_change_nothing", async () => {
+  for (const script of ["read", "set", "off"]) {
+    const f = gmail({ fresh: true });
+    const r = await run(`gmail/forwarding_${script}.js`, f.page, { address: OURS, ...FAST });
+    assertEquals(r, NOT_FOUND("forwarding radio"), script);
+    assertEquals(f.saves + f.popups + f.removed.length, 0, script);
+  }
+});
+
+Deno.test("gmail_the_forward_a_copy_radio_is_found_by_its_row_text_on_the_live_shape", async () => {
+  // The "Forward a copy" radio has no label[for], no aria-label and no wrapping label: its text is in the next
+  // TD of its row, which also holds both selects. The POP section has a select with the same options.
+  const f = gmail({ addresses: [OTHER, OURS], on: true, to: OURS, disp: "read" });
+  const on = f.el("r-on");
+  assertEquals(on.getAttribute("name"), "sx_em");
+  assertEquals(on.getAttribute("aria-label"), null);
+  assertEquals(on.closest("label"), null);
+  assertEquals(f.page.document.querySelectorAll('label[for="r-on"]').length, 0);
+  // read: on, ours, the copy is not kept (the POP select's "keep" is never taken for the row's).
+  assertEquals(await run("gmail/forwarding_read.js", f.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    forwarding: "on",
+    to: "ours",
+    keep_copy: false,
+    listed: true,
+  });
+  // set fixes the copy; off turns it off; remove then takes the address out. All on the live shape.
+  assertEquals(await run("gmail/forwarding_set.js", f.page, { address: OURS, ...FAST }), {
+    ...KEPT,
+    changed: true,
+  });
+  assertEquals(f.model.disp, "keep");
+  assertEquals(await run("gmail/forwarding_off.js", f.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    forwarding: "off",
+    changed: true,
+  });
+  assertEquals(f.model.on, false);
+  assertEquals(await run("gmail/forwarding_remove_address.js", f.page, { address: OTHER, ...FAST }), {
+    result: "needs you",
+    reason: "another address is selected",
+  });
+  const g = gmail({ addresses: [OURS], on: true, to: OURS });
+  await run("gmail/forwarding_off.js", g.page, { address: OURS, ...FAST });
+  const r = await run("gmail/forwarding_remove_address.js", g.page, { address: OURS, ...FAST });
+  assertEquals(r, { result: "ok", removed: true, changed: true });
+  assertEquals(g.removed, [OURS]);
+  // The add script reads the same radio: forwarding is on to another address.
+  const h = gmail({ addresses: [OTHER, OURS], on: true, to: OTHER });
+  assertEquals(await run("gmail/forwarding_add.js", h.page, { address: OURS, ...FAST }), {
+    result: "elsewhere",
+  });
+});
+
+Deno.test("gmail_an_address_added_but_not_verified_is_not_listed", async () => {
+  // The forward-to select has 0 options; the page shows a verify text instead.
+  const f = gmail({ unverified: OURS });
+  assertEquals(f.page.document.querySelectorAll("#to option").length, 0);
+  const r = await run("gmail/forwarding_read.js", f.page, { address: OURS, ...FAST });
+  assertEquals(r, { result: "ok", forwarding: "off", to: "none", keep_copy: true, listed: false });
+  // Set cannot pick an address that is not an option: it is not found, nothing saved.
+  assertEquals(
+    await run("gmail/forwarding_set.js", f.page, { address: OURS, ...FAST }),
+    NOT_FOUND("address list"),
+  );
+  assertEquals(f.saves, 0);
+});
+
+Deno.test("gmail_the_older_wrapping_label_shape_is_still_read", async () => {
+  const f = gmail({ labelled: true, addresses: [OURS], on: true, to: OURS });
+  assertEquals(await run("gmail/forwarding_read.js", f.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    forwarding: "on",
+    to: "ours",
+    keep_copy: true,
+    listed: true,
+  });
 });

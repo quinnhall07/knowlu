@@ -124,10 +124,11 @@ const LIMIT = 25_000_000;
 export function mailbox(all: Msg[], o: Opts = {}): Box {
   const size = o.size ?? 50;
   const account = o.account === undefined ? SELF : o.account;
-  // Gmail's account chip: the label is "Google Account: <name>" then the address in parentheses.
+  // Gmail's account chip, as read live 2026-10-18: "Google Account: <name> (<address>), Google membership".
+  // The address is in parentheses but does not end the label.
   const chip = account === null
     ? ""
-    : `<a href="#account" aria-label="Google Account: Student Name\n(${account})">S</a>`;
+    : `<a href="#account" aria-label="Google Account: Student Name (${account}), Google membership">S</a>`;
   const page = load(`
     ${chip}
     <div role="navigation"><a href="#inbox">Inbox</a><a href="#sent">Sent</a></div>

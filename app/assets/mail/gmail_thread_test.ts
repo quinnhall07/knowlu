@@ -113,3 +113,26 @@ Deno.test("gmail_thread_reads_nothing_when_it_cannot_tell_whose_account_it_is", 
   });
   assert(!box.el("grid").hasAttribute("hidden"), "the list is still showing");
 });
+
+Deno.test("gmail_thread_reads_the_account_from_the_live_chip_label_that_continues_after_the_address", async () => {
+  // Live 2026-10-18: "Google Account: <name> (<address>), Google membership". The address does not end the
+  // label, and it is the last parenthesised address that names the account.
+  const box = mailbox([thread()]);
+  const chip = box.page.document.querySelector('[aria-label^="Google Account"]');
+  assertEquals(
+    chip.getAttribute("aria-label"),
+    `Google Account: Student Name (${SELF}), Google membership`,
+  );
+  const r = await run("gmail/thread.js", box.page, { ...ROW, messages: 3, ...FAST });
+  assertEquals(r.result, "ok");
+  // A name with its own parentheses before the address: the last one counts.
+  chip.setAttribute("aria-label", `Google Account: Sam (they/them) (${SELF}), Google membership`);
+  const again = mailbox([thread()]);
+  again.page.document.querySelector('[aria-label^="Google Account"]').setAttribute(
+    "aria-label",
+    `Google Account: Sam (sam@other.example.invalid) (${SELF}), Google membership`,
+  );
+  const s = await run("gmail/thread.js", again.page, { ...ROW, messages: 3, ...FAST });
+  assertEquals(s.result, "ok");
+  assertEquals(s.messages.map((m: { own?: boolean }) => m.own), [undefined, undefined, undefined]);
+});

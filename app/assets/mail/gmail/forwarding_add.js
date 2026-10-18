@@ -7,6 +7,9 @@
 // "forward to Knowlu instead"; `args.wait_ms` and `args.reloaded` are as in forwarding_read.js. It returns
 //   { result: "ok", stage: "asked", changed: true }    (the popup has been asked for)
 //   { result: "ok", stage: "listed", changed: false }  (the address is already a confirmed one: no dialog)
+// On a Gmail with no forwarding address yet the section has only the Add button and no forwarding radios;
+// that is the first state, not an error: Add is pressed. An address added but not yet verified is not an
+// option of the forward-to list, so it is not "listed" and Add is pressed again.
 //   { result: "elsewhere" }   (forwarding is on to another address and `args.replace` is not true: asked first)
 //   { result: "reloading" }
 //   { result: "not found", control: "section" | "forwarding radio" | "email field" | "next" }
@@ -20,7 +23,12 @@ const nameOf = (el) => {
     for (const l of document.querySelectorAll("label")) if (l.getAttribute("for") === el.id) return text(l);
   }
   const wrap = el.closest ? el.closest("label") : null;
-  return wrap ? text(wrap) : "";
+  if (wrap) return text(wrap);
+  // Live Gmail (2026-10-18): the "Forward a copy of incoming mail to" radio has no label of any kind; its
+  // text is in the next cell of the same table row, the row that also holds the two selects.
+  const cell = el.closest ? el.closest("td") : null;
+  const next = cell ? cell.nextElementSibling : null;
+  return next && String(next.tagName).toLowerCase() === "td" ? text(next) : "";
 };
 const norm = (v) => String(v || "").trim().toLowerCase();
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -99,9 +107,13 @@ if (drew === "reload") return { result: "reloading" };
 if (drew === "missing") return { result: "not found", control: "section" };
 
 const ron = radioOn();
-if (!ron || !radioOff()) return { result: "not found", control: "forwarding radio" };
-const list = toSelect();
-if (ron.checked === true && list) {
+// A Gmail with no forwarding address yet draws only the Add button and no forwarding radios at all (live
+// 2026-10-18): that is the fresh state, so the checks on what is set and listed are skipped and Add is pressed.
+// One radio without the other is a page this script does not know: not found.
+const fresh = !ron && !radioOff();
+if (!fresh && (!ron || !radioOff())) return { result: "not found", control: "forwarding radio" };
+const list = fresh ? null : toSelect();
+if (!fresh && ron.checked === true && list) {
   const now = selectedOf(list);
   if (args.replace !== true && now && norm(now.value || text(now)) !== "" && !optionIs(now, address)) {
     return { result: "elsewhere" };

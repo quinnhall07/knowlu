@@ -19,7 +19,12 @@ const nameOf = (el) => {
     for (const l of document.querySelectorAll("label")) if (l.getAttribute("for") === el.id) return text(l);
   }
   const wrap = el.closest ? el.closest("label") : null;
-  return wrap ? text(wrap) : "";
+  if (wrap) return text(wrap);
+  // Live Gmail (2026-10-18): the "Forward a copy of incoming mail to" radio has no label of any kind; its
+  // text is in the next cell of the same table row, the row that also holds the two selects.
+  const cell = el.closest ? el.closest("td") : null;
+  const next = cell ? cell.nextElementSibling : null;
+  return next && String(next.tagName).toLowerCase() === "td" ? text(next) : "";
 };
 const norm = (v) => String(v || "").trim().toLowerCase();
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));

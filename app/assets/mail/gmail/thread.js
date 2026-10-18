@@ -21,7 +21,8 @@
 // sends and deletes nothing.
 // A message the signed-in account itself sent (a reply, a draft) carries `own: true` and no other message
 // carries the key: the service never receives the student's own mail, so the routine must not call it
-// missing. The account is the address in the account chip's label ("Google Account: <name> (<address>)");
+// missing. The account is the address in the account chip's label ("Google Account: <name> (<address>), Google membership": the last
+// parenthesised address anywhere in the label);
 // with no chip to read it, nothing is opened and the answer is { result: "not found", control: "account" }.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => (el.getAttribute("aria-label") || "").trim();
@@ -51,7 +52,8 @@ if (!grid) return { result: "not found", control: "list" };
 // Whose mailbox this is: the last parenthesised address of the account chip's label.
 const own = (() => {
   for (const el of document.querySelectorAll('[aria-label^="Google Account"]')) {
-    const found = (el.getAttribute("aria-label") || "").match(/\(([^()\s]+@[^()\s]+)\)\s*$/);
+    // Live (2026-10-18): "Google Account: <name> (<address>), Google membership"; the address does not end it.
+    const found = [...(el.getAttribute("aria-label") || "").matchAll(/\(([^()\s]+@[^()\s]+)\)/g)].pop();
     if (found) return norm(found[1]);
   }
   return "";
