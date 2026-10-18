@@ -2154,6 +2154,26 @@ fn a_forwarding_found_off_is_turned_back_on_and_reported_reenabled() {
 }
 
 #[test]
+fn a_microsoft_forwarding_found_off_is_turned_back_on_and_reported_reenabled_with_no_recover_pass() {
+    // D13: Microsoft's forwarding repair is not retired and still runs; its recover pass is held while C3 is built.
+    let p = Pass::with_provider("reenable-m365", "m365", "quiet", rig::fwd("off", "none"));
+    p.last_reconcile(rig::NOW - 10 * rig::DAY);
+    p.mail(&[("Older notice", rig::NOW - 8 * rig::DAY), ("Newer notice", rig::NOW - 3600)]);
+    assert_eq!(p.run().as_deref(), Some("mail: forwarding was off, turned back on"));
+    assert_eq!(p.host.scripts(), ["m365/forwarding_read.js", "m365/forwarding_set.js", "m365/forwarding_read.js"], "nothing else ran");
+    for retired in ["m365/search.js", "m365/list.js", "m365/forward.js", "m365/sent_cleanup.js"] {
+        assert!(p.host.calls(retired).is_empty(), "{retired} ran");
+    }
+    assert_eq!(p.host.calls("m365/forwarding_set.js"), [json!({ "address": rig::KNOWLU, "replace": false })], "never replaces another address");
+    let id = rig::ID;
+    let (off, canary, reenabled) = (p.at(&format!("POST /addresses/{id}/state off")), p.at("POST /canary"), p.at(&format!("POST /addresses/{id}/state reenabled")));
+    assert!(off < canary && canary < reenabled, "{:?}", p.svc.calls());
+    assert!(!p.svc.calls().iter().any(|c| c.contains("reconcile") || c.contains("batch")), "{:?}", p.svc.calls());
+    assert_eq!(MailState::load(&p.d).unwrap().last_reconcile[rig::ID], rig::iso(rig::NOW - 10 * rig::DAY), "no pass was made, so none is recorded");
+    assert!(p.host.opens().iter().all(|(_, visible)| !visible) && p.host.st.lock().unwrap().back == 0, "no window is shown");
+}
+
+#[test]
 fn a_failed_forwarding_read_never_moves_last_known_on_forward() {
     let p = Pass::new("unchecked", "quiet", json!({ "result": "error" }));
     p.last_reconcile(rig::NOW - 10 * rig::DAY);
