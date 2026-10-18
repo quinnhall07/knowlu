@@ -124,13 +124,14 @@ const OUTWARD = [
 
 function guardOutward(input) {
   if (input.tool_name !== 'Bash' && input.tool_name !== 'PowerShell') return;
-  const cmd = String((input.tool_input || {}).command || '');
+  // Quotes and backslash escapes do not change what git or gh receive, so match without them.
+  const cmd = String((input.tool_input || {}).command || '').replace(/["'\\]/g, '');
   for (const [re, what] of OUTWARD) {
     if (re.test(cmd)) decide('ask', `.claude/hooks/pretool-bash.js: this command ${what}. Releases, tags and force pushes need Quinn's go.`);
   }
 }
 
-const RESEARCHER_OK = /^\s*(git\s+(log|show|diff|blame|status|rev-parse|merge-base|ls-files|ls-tree|cat-file|for-each-ref|describe|shortlog)\b|gh\s+(pr|issue|run|release)\s+(view|list|diff|checks)\b|gh\s+repo\s+view\b)[^;&|<>`$\n\r]*$/;
+const RESEARCHER_OK = /^\s*(git\s+(log|show|diff|blame|status|rev-parse|merge-base|ls-files|ls-tree|cat-file|for-each-ref|describe|shortlog)\b|gh\s+(pr|issue|run|release)\s+(view|list|diff|checks)\b|gh\s+repo\s+view\b)[^;&|<>`$\n\r"'\\]*$/;
 
 function guardResearcher(input) {
   if (subagentOf(input) !== 'researcher' || input.tool_name !== 'Bash') return;
