@@ -148,13 +148,14 @@ function guardResearcher(input) {
 // (RUSTC_WRAPPER=<anything> would run any binary).
 // slot.sh must be the project's own: relative, or under CLAUDE_PROJECT_DIR (lanes in worktrees call
 // the main checkout's copy by absolute path). A copy planted anywhere else is not auto-allowed.
-function slotIsOurs(p) {
-  const rel = /^(\.\/)?\.superpowers\/sdd\/[\w.-]+\/slot\.sh$/;
+// A relative path counts only when nothing moved the shell (no cd prefix) and its cwd is the root.
+function slotIsOurs(p, cdPrefix, cwd) {
+  const rel = /^(\.\/)?\.superpowers\/sdd\/(?!\.\.?\/)[\w.-]+\/slot\.sh$/;
   const n = norm(p);
-  if (rel.test(n)) return true;
-  const root = norm(process.env.CLAUDE_PROJECT_DIR || '');
+  const root = norm(process.env.CLAUDE_PROJECT_DIR || '').replace(/\/$/, '');
   if (!root) return false;
   const roots = [root, root.replace(/^([a-z]):/, (_, d) => '/' + d)]; // C:/x and Git Bash /c/x
+  if (rel.test(n)) return !cdPrefix && roots.includes(norm(cwd || '').replace(/\/$/, ''));
   return roots.some((r) => n.startsWith(r + '/') && rel.test(n.slice(r.length + 1)));
 }
 const CARGO = /^(?:bash\s+\S+\s+)?(?:(?:CARGO_BUILD_JOBS|CARGO_TERM_COLOR|CARGO_INCREMENTAL|RUST_BACKTRACE|RUST_LOG|RUST_TEST_THREADS)=[\w.,:=-]*\s+)*cargo\s+(?:\+\S+\s+)?(?:build|check|clippy|test|nextest)\b/;
@@ -173,7 +174,7 @@ function trim(input) {
   if (!CARGO.test(body)) return;
   if (/[;|&<>`$"'*?(){}\[\]\n\r]/.test(body)) return;
   const slot = /^bash\s+(\S+)\s+/.exec(body);
-  if (slot && !slotIsOurs(slot[1])) return;
+  if (slot && !slotIsOurs(slot[1], Boolean(m), input.cwd)) return;
   const filter = path.join(__dirname, 'trim-cargo-output.js').replace(/\\/g, '/');
   const wrapped = `{ ${cmd.trim()}\n} 2>&1 | node "${filter}"; (exit \${PIPESTATUS[0]})`;
   out({ hookSpecificOutput: {

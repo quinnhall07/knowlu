@@ -77,7 +77,11 @@ const CASES = [
   ['deny', bash('gh release create v1', 'researcher'), 'researcher release is a deny, not an ask'],
   // cargo trim rewrite
   ['allow', bash('cargo test --workspace'), 'plain cargo test'],
-  ['allow', bash('cd /c/x && bash .superpowers/sdd/2026-09-29-ultracode/slot.sh cargo test -p knowlu-engine -j 2'), 'cd + slot.sh'],
+  ['pass', bash('cd /tmp/x && bash .superpowers/sdd/2026-09-29-ultracode/slot.sh cargo test -p knowlu-engine -j 2'), 'cd then a relative slot.sh is not auto-allowed'],
+  ['allow', Object.assign(bash('bash .superpowers/sdd/2026-09-29-ultracode/slot.sh cargo test -p knowlu'), { cwd: 'C:/proj' }), 'relative slot.sh from the project root'],
+  ['pass', Object.assign(bash('bash .superpowers/sdd/2026-09-29-ultracode/slot.sh cargo test -p knowlu'), { cwd: 'C:/elsewhere' }), 'relative slot.sh from another cwd'],
+  ['allow', bash('cd /c/wt/lane && bash /c/proj/.superpowers/sdd/2026-09-29-ultracode/slot.sh cargo test -p knowlu'), 'worktree lane with absolute slot.sh'],
+  ['pass', bash('bash /c/proj/.superpowers/sdd/../x/slot.sh cargo test'), '.. segment'],
   ['allow', bash('RUST_BACKTRACE=1 cargo test -p knowlu'), 'harmless variable'],
   ['pass', bash('RUSTC_WRAPPER=C:/x/evil.exe cargo build'), 'RUSTC_WRAPPER is not auto-allowed'],
   ['pass', bash('bash /tmp/evilslot.sh cargo test'), 'a foreign slot.sh is not auto-allowed'],
