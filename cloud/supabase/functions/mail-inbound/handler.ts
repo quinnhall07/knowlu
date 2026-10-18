@@ -442,7 +442,7 @@ async function batchSend(
     const item = {
       batchId: batch.batchId,
       phase: batch.phase,
-      authenticity: await originalAuthenticity(original, row.provider, deps.bind),
+      authenticity: await originalAuthenticity(original, row, deps.bind),
       receivedAt: delivered === null ? n.arrivedAt : Math.min(delivered, n.arrivedAt),
     };
     if (await handOff(original, row, item, deps)) queued++;

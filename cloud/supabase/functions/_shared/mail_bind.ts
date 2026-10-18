@@ -33,7 +33,8 @@
  *   the student's own school or provider (`own`) or from outside (`foreign`).
  * - **Authenticity** (`aligned` or `unaligned`): for a live forward, only the verified hop's
  *   ARC-Authentication-Results; for a backfilled or recovered original (`originalAuthenticity`), the
- *   provider's own verifying topmost ARC set, else its delivery stamp, the topmost Authentication-Results.
+ *   provider's own verifying topmost ARC set, else its delivery stamp, the topmost Authentication-Results,
+ *   else, for M365 only, Exchange's `AuthAs: Internal` on a From at the hint's domain (Quinn, 2026-10-18).
  *
  * Every value that binds is read from the fields a passing signature covers, or from the envelope SES
  * reported, never from a field a signature leaves out (`unsignedExtra`). Results are fixed words, ids and
@@ -204,7 +205,8 @@ function forwardHint(head: MailHeaders, mailbox: BindMailbox): string | null {
 }
 
 const LOOP_FIELD = "x-ms-exchange-forwardingloop";
-const hintOf = (mailbox: BindMailbox) => mailbox.mailboxHint?.trim().toLowerCase() || null;
+const hintOf = (mailbox: Pick<BindMailbox, "mailboxHint">) =>
+  mailbox.mailboxHint?.trim().toLowerCase() || null;
 /** The topmost field of a (lower-case) name. */
 const topField = (head: MailHeaders, name: string) =>
   head.headers.find((h) => h.name.trim().toLowerCase() === name)?.value ?? null;
@@ -343,12 +345,16 @@ async function liveForward(
 
 // ---------------------------------------------------------------- part 2: authenticity (step 6)
 
-/** The authserv-id each provider's delivery stamp carries; `null` where it writes none (Microsoft's EOP
- * writes `Authentication-Results: spf=…; dkim=…; dmarc=…` with no authserv-id). */
-const DELIVERY_STAMP: Partial<Record<BindMailbox["provider"], string | null>> = {
+/** The authserv-id each provider's delivery stamp carries. Exchange Online writes `mx.microsoft.com 1`
+ * (RFC 8601's version, which may be absent) on mail from outside the tenant, as W8 read it in OWA's stored
+ * MIME (2026-10-18); EOP has also written the stamp with no authserv-id (`spf=…; dkim=…; dmarc=…`), and
+ * for m365 that form reads too. */
+const DELIVERY_STAMP: Partial<Record<BindMailbox["provider"], string>> = {
   google: "mx.google.com",
-  m365: null,
+  m365: "mx.microsoft.com",
 };
+/** Microsoft's authserv-id, alone or with version 1, and nothing else in the first element. */
+const MS_STAMP_ID = /^mx\.microsoft\.com(?:\s+1)?$/i;
 const MAX_RESULTS = 16_384;
 const DOMAIN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
 /** DMARC's relaxed alignment from the safe side, without a public-suffix list: the From domain or a parent
@@ -397,9 +403,20 @@ function shows(results: string[], domain: string): boolean {
   return false;
 }
 
+/** A delivery stamp's result elements, read only when its authserv-id is the provider's own: Gmail's
+ * `mx.google.com` (its first word), Microsoft's `mx.microsoft.com` with or without version 1 (the whole
+ * first element), or for m365 none at all, the first element already a result. Else `null`. */
+function stampResults(el: string[], provider: BindMailbox["provider"]): string[] | null {
+  const stamp = DELIVERY_STAMP[provider];
+  const id = el[0].split(/\s+/)[0].toLowerCase();
+  if (provider === "google") return id === stamp ? el.slice(1) : null;
+  if (provider !== "m365") return null;
+  if (MS_STAMP_ID.test(el[0])) return el.slice(1);
+  return id.includes("=") ? el : null;
+}
+
 /** Step 6 on the one record that counts: a verified ARC set's ARC-Authentication-Results (`arc`, its first
- * element the authserv-id), or a provider's delivery stamp, read only when its authserv-id is the
- * provider's own (or, for EOP, absent). */
+ * element the authserv-id), or a provider's delivery stamp (`stampResults`). */
 function verdict(
   value: string,
   domain: string | null,
@@ -407,37 +424,47 @@ function verdict(
 ): Authenticity {
   const el = elements(value);
   if (el === null || domain === null) return "unaligned";
-  const id = el[0].split(/\s+/)[0].toLowerCase();
-  let results: string[];
-  if (record === "arc") {
-    results = el.slice(1);
-  } else {
-    const stamp = DELIVERY_STAMP[record];
-    if (stamp === undefined || (stamp === null ? !id.includes("=") : id !== stamp)) return "unaligned";
-    results = stamp === null ? el : el.slice(1);
-  }
-  return shows(results, domain) ? "aligned" : "unaligned";
+  const results = record === "arc" ? el.slice(1) : stampResults(el, record);
+  return results !== null && shows(results, domain) ? "aligned" : "unaligned";
+}
+
+/** Exchange's mark on mail sent inside the tenant (Quinn's ruling, 2026-10-18). Exchange strips
+ * `X-MS-Exchange-Organization-*` from mail arriving from outside, so a sender cannot write it. */
+const AUTH_AS = "x-ms-exchange-organization-authas";
+
+/** Whether an m365 original that carries no stamp is the tenant's own mail: exactly one AuthAs field, its
+ * value `Internal`, and the sole From domain on the hint's (that domain, a name under it, or a name it sits
+ * under, as `unboundOrigin` reads "own": a school's students often sit under its staff's domain). */
+function internalToTenant(head: MailHeaders, from: string, hint: string | null): boolean {
+  const own = hint === null ? null : split(hint)?.[1] ?? null;
+  const marks = head.headers.filter((h) => h.name.trim().toLowerCase() === AUTH_AS);
+  return own !== null && DOMAIN.test(own) && marks.length === 1 &&
+    marks[0].value.trim().toLowerCase() === "internal" && (atOrUnder(from, own) || atOrUnder(own, from));
 }
 
 /**
  * §4.6 step 6 for a backfilled or recovered original (one `message/rfc822` attachment of a batch send),
  * delivered to a mailbox of `provider`: the provider's own topmost ARC set when it verifies, else the
- * provider's delivery stamp, the topmost `Authentication-Results`. Nothing else in the message is read,
- * and the outer send's DKIM says nothing here. Never throws.
+ * provider's delivery stamp, the topmost `Authentication-Results`; and for m365 with neither, mail sent
+ * inside the tenant (`internalToTenant`, which needs the mailbox's hint). A stamp present decides, so a
+ * failing one never falls through to the tenant rule. Nothing else in the message is read, and the outer
+ * send's DKIM says nothing here. Never throws.
  */
 export async function originalAuthenticity(
   original: MailInput,
-  provider: BindMailbox["provider"],
+  mailbox: Pick<BindMailbox, "provider" | "mailboxHint">,
   deps: DkimDeps,
 ): Promise<Authenticity> {
   try {
+    const { provider } = mailbox;
     const head = parseHeaders(original);
     const domain = soleFromDomain(head);
     if (domain === null || DELIVERY_STAMP[provider] === undefined) return "unaligned";
     const arc = await providerArc(original, provider, deps);
     if (arc !== null) return verdict(arc.authResults, domain, "arc");
     const stamp = topField(head, "authentication-results");
-    return stamp === null ? "unaligned" : verdict(stamp, domain, provider);
+    if (stamp !== null) return verdict(stamp, domain, provider);
+    return provider === "m365" && internalToTenant(head, domain, hintOf(mailbox)) ? "aligned" : "unaligned";
   } catch {
     return "unaligned";
   }

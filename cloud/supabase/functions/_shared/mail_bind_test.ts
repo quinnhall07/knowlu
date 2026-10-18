@@ -845,8 +845,12 @@ const sealedBy = async (h: Partial<Hop>, top: string[] = []) => {
   const m = await hop(original(), { ...GOOGLE_HOP, adds: [], ...h });
   return assemble([...top, ...m.head], m.body);
 };
-const auth = (raw: string | Uint8Array, provider: BindMailbox["provider"]): Promise<Authenticity> =>
-  originalAuthenticity(raw, provider, DEPS);
+/** `originalAuthenticity` for a mailbox of `provider` whose hint is `hint` (SCHOOL's, by default). */
+const auth = (
+  raw: string | Uint8Array,
+  provider: BindMailbox["provider"],
+  hint: string | null = "jdoe@school.test",
+): Promise<Authenticity> => originalAuthenticity(raw, { provider, mailboxHint: hint }, DEPS);
 
 Deno.test("a_backfilled_original_reads_only_the_providers_delivery_stamp_or_arc", async () => {
   // Gmail's stamp (`mx.google.com`), the topmost Authentication-Results, as text or as attached bytes.
@@ -887,6 +891,103 @@ Deno.test("a_backfilled_original_reads_only_the_providers_delivery_stamp_or_arc"
   assertEquals(await auth(stored([STAMP_G]), "other"), "unaligned");
 });
 
+/** W8 (2026-10-18): Exchange Online's stored MIME (OWA `GetItem`) carries no ARC set, and its delivery stamp
+ * on mail from outside the tenant names the authserv-id `mx.microsoft.com` with RFC 8601's version `1`. */
+const STAMP_EOP = "Authentication-Results: mx.microsoft.com 1; spf=pass (sender IP is 192.0.2.7)" +
+  " smtp.mailfrom=school.test; dkim=pass (signature was verified) header.d=school.test;dkim=pass" +
+  " (signature was verified) header.d=relay.example;dmarc=pass action=none header.from=school.test;" +
+  "compauth=pass reason=100";
+
+Deno.test("an_m365_original_reads_exchanges_mx_microsoft_com_stamp", async () => {
+  assertEquals(await auth(stored([STAMP_EOP]), "m365"), "aligned");
+  // Without the version, and case-folded.
+  assertEquals(await auth(stored([STAMP_EOP.replace(" 1;", ";")]), "m365"), "aligned");
+  assertEquals(
+    await auth(stored([STAMP_EOP.replace("mx.microsoft.com", "MX.Microsoft.COM")]), "m365"),
+    "aligned",
+  );
+  // The form with no authserv-id still reads.
+  assertEquals(await auth(stored([STAMP_M]), "m365"), "aligned");
+  // DMARC fails and nothing passes aligned with the From: the relay's own DKIM pass is not the From's.
+  const failing = "Authentication-Results: mx.microsoft.com 1; spf=fail (sender IP is 192.0.2.9)" +
+    " smtp.mailfrom=school.test; dkim=pass (signature was verified) header.d=relay.example;dmarc=fail" +
+    " action=quarantine header.from=school.test;compauth=fail reason=000";
+  assertEquals(await auth(stored([failing]), "m365"), "unaligned");
+  // Another authserv-id, a name around Microsoft's, another version, or anything after the version.
+  for (
+    const id of [
+      "mx.evil.test 1",
+      "mx.evil.test",
+      "mx.microsoft.com.evil.test 1",
+      "evil.mx.microsoft.com",
+      "mx.microsoft.com 2",
+      "mx.microsoft.com 1 x",
+    ]
+  ) {
+    assertEquals(await auth(stored([STAMP_EOP.replace("mx.microsoft.com 1", id)]), "m365"), "unaligned", id);
+  }
+  // Only the topmost counts: Microsoft's stamp a sender wrote below a failing one is never read.
+  assertEquals(await auth(stored([failing], { below: [STAMP_EOP] }), "m365"), "unaligned");
+  // Microsoft's stamp says nothing on a Gmail mailbox.
+  assertEquals(await auth(stored([STAMP_EOP]), "google"), "unaligned");
+});
+
+/** Exchange's marks on mail sent inside the tenant, which carries no Authentication-Results and no ARC. */
+const INTERNAL = [
+  "X-MS-Exchange-Organization-AuthAs: Internal",
+  "X-MS-Exchange-Organization-AuthMechanism: 04",
+  "X-MS-Exchange-Organization-AuthSource: mbx1.school.test",
+];
+const authAs = (value: string) =>
+  INTERNAL.map((f) => f.endsWith(": Internal") ? f.replace("Internal", value) : f);
+
+Deno.test("an_m365_original_marked_internal_aligns_only_on_the_hints_domain", async () => {
+  // Quinn's ruling (2026-10-18): Exchange's AuthAs Internal, and the sole From on the hint's domain.
+  assertEquals(await auth(stored(INTERNAL), "m365"), "aligned");
+  assertEquals(await auth(stored(authAs("  internal ")), "m365"), "aligned");
+  assertEquals(await auth(stored(INTERNAL, { from: "Lab <lab@cs.school.test>" }), "m365"), "aligned");
+  // A student on a subdomain, a professor on the apex: the hint's domain under the From's.
+  assertEquals(await auth(stored(INTERNAL), "m365", "jdoe@students.school.test"), "aligned");
+  // From another domain, a look-alike, or a name around the hint's domain.
+  for (const from of ["Pat <pat@friend.test>", "x@notschool.test", "x@school.test.evil.test", "x@test"]) {
+    assertEquals(await auth(stored(INTERNAL, { from }), "m365"), "unaligned", from);
+  }
+  // Any other AuthAs value, or none.
+  for (const value of ["Anonymous", "Partner", "External", "Internal; x", ""]) {
+    assertEquals(await auth(stored(authAs(value)), "m365"), "unaligned", value);
+  }
+  assertEquals(await auth(stored(INTERNAL.slice(1)), "m365"), "unaligned");
+  // Two AuthAs fields, agreeing or not.
+  for (const second of ["Internal", "Anonymous"]) {
+    const twice = [...INTERNAL, `X-MS-Exchange-Organization-AuthAs: ${second}`];
+    assertEquals(await auth(stored(twice), "m365"), "unaligned", second);
+    assertEquals(
+      await auth(stored(INTERNAL, { below: [`X-MS-Exchange-Organization-AuthAs: ${second}`] }), "m365"),
+      "unaligned",
+    );
+  }
+  // A stamp present decides: a failing or foreign one never falls through to the internal rule.
+  const failing = "Authentication-Results: mx.microsoft.com 1; spf=fail smtp.mailfrom=school.test;" +
+    " dkim=none; dmarc=fail action=quarantine header.from=school.test";
+  for (const stamp of [failing, "Authentication-Results: mx.evil.test; dmarc=pass header.from=school.test"]) {
+    assertEquals(await auth(stored([...INTERNAL, stamp]), "m365"), "unaligned", stamp);
+    assertEquals(await auth(stored([stamp, ...INTERNAL]), "m365"), "unaligned", stamp);
+  }
+  assertEquals(await auth(stored([...INTERNAL, STAMP_EOP]), "m365"), "aligned");
+  // Microsoft's own verifying ARC set decides too.
+  const msFail = {
+    key: MICROSOFT,
+    d: "microsoft.com",
+    aar: "mx.microsoft.com 1; dmarc=fail header.from=school.test",
+  };
+  assertEquals(await auth(await sealedBy(msFail, INTERNAL), "m365"), "unaligned");
+  // Another provider, no hint, or no single From.
+  assertEquals(await auth(stored(INTERNAL), "google"), "unaligned");
+  assertEquals(await auth(stored(INTERNAL), "other"), "unaligned");
+  assertEquals(await auth(stored(INTERNAL), "m365", null), "unaligned");
+  assertEquals(await auth(stored(INTERNAL, { below: ["From: prof@school.test"] }), "m365"), "unaligned");
+});
+
 Deno.test("no_authentication_result_ever_produces_a_non_2xx_answer", async () => {
   // Nothing a message carries makes binding or authenticity throw: each is a word the handler records.
   const hostile = [
@@ -910,7 +1011,7 @@ Deno.test("no_authentication_result_ever_produces_a_non_2xx_answer", async () =>
         const a = await classifyArrival(input, GMAIL_BOX, CONFIG, CAF, deps);
         assert(kinds.has(a.kind), a.kind);
         for (const p of ["google", "m365", "other"] as const) {
-          const w = await originalAuthenticity(input, p, deps);
+          const w = await originalAuthenticity(input, { provider: p, mailboxHint: "jdoe@school.test" }, deps);
           assert(w === "aligned" || w === "unaligned", w);
         }
       }
