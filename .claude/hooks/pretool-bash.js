@@ -73,9 +73,13 @@ function trim(input) {
   if (/KNOWLU_RAW_OUTPUT=1/.test(cmd)) return;
   // Leave anything a deny rule should see untouched: the rewrite changes the command's prefix.
   if (/--release\b|cargo\s+tauri\b/.test(cmd)) return;
-  const body = cmd.trim().replace(/^cd\s+("[^"]+"|'[^']+'|\S+)\s*&&\s*/, '');
+  // The rewrite is auto-allowed, so the whole command must be inert: an optional `cd <plain path> &&`,
+  // then one cargo command made only of plain words. No quotes, `$`, backticks, globs or
+  // metacharacters anywhere, including the cd target and any VAR=value prefix.
+  const m = /^cd\s+([\w./:\\-]+)\s*&&\s*(.*)$/s.exec(cmd.trim());
+  const body = m ? m[2] : cmd.trim();
   if (!CARGO.test(body)) return;
-  if (/[;|&<>`]|\$\(|\n/.test(body)) return; // only a single plain command, nothing chained or redirected
+  if (/[;|&<>`$"'*?(){}\[\]\n\r]/.test(body)) return;
   const filter = norm(path.join(__dirname, 'trim-cargo-output.js'));
   const wrapped = `{ ${cmd.trim()}\n} 2>&1 | node "${filter}"; exit \${PIPESTATUS[0]}`;
   out({ hookSpecificOutput: {
