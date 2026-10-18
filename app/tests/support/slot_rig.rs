@@ -269,6 +269,16 @@ impl Mailbox for FakeHost {
                 json!({ "result": "ok", "total": rows.len(), "rows": rows })
             }
             "m365/forward.js" => json!({ "result": "ok", "sent": true }),
+            "gmail/list.js" => {
+                let rows: Vec<Value> = s
+                    .msgs
+                    .iter()
+                    .map(|(who, subject, at)| json!({ "sender": who, "subject": subject, "received": format!("at-{at}"), "received_at": iso(*at) }))
+                    .collect();
+                let n = rows.len();
+                json!({ "result": "ok", "page": { "from": 1, "to": n, "total": n }, "moved": false, "rows": rows })
+            }
+            "gmail/forward.js" => json!({ "result": "ok", "sent": true, "count": args["rows"].as_array().map_or(1, |r| r.len()) }),
             "m365/sent_cleanup.js" | "gmail/sent_cleanup.js" => json!({ "result": "ok", "deleted": 1 }),
             "ready.js" => json!("complete"),
             other => panic!("the mail step ran {other}"),

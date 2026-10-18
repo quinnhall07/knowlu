@@ -1693,8 +1693,17 @@ fn uncurated() -> Kind {
     Kind::School { unitid: Some("0".to_string()), address: None }
 }
 
+/// Waits for the setup to end. D13: a Microsoft 365 setup stops at the guided backfill step while C3 is built,
+/// and the student's "I've done this" (sent here once) closes it; every other state is left to the test.
 fn wait(shared: &Shared) -> Progress {
-    assert!(shared.wait_done(Duration::from_secs(30)), "the setup did not end");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut closed_guide = false;
+    while !shared.wait_done(Duration::from_millis(20)) {
+        assert!(std::time::Instant::now() < deadline, "the setup did not end");
+        if !closed_guide && shared.progress().provider == "m365" && has(shared, "backfill", "needs_you") {
+            closed_guide = shared.answer(Answer::Done);
+        }
+    }
     shared.progress()
 }
 
@@ -1812,19 +1821,21 @@ fn a_canary_not_back_in_three_minutes_leaves_blocked_with_retry_and_offers_what_
     }
     let waited = r.clk.at() - NOW;
     assert!((180..240).contains(&waited), "it waited the three minutes and no longer: {waited}");
-    assert!(!r.scripts().iter().any(|s| s.ends_with("search.js")), "no backfill is read while forwarding does not arrive");
+    assert!(ran_retired(&r).is_empty(), "no backfill is read while forwarding does not arrive");
     assert!(!r.events().contains(&"svc batch".to_string()));
     // Retry: the school's setting is fixed and the canary comes back.
     r.sv.lock().unwrap().canary_arrives = true;
     assert!(shared.answer(Answer::Retry));
     until("the canary done by hand", || has(&shared, "canary", "done_by_hand"));
-    // The canary arriving re-arms the backfill and it runs on this run (§4.2 step 4), not at some later launch.
+    // D13: the canary arriving does not re-arm a Microsoft backfill (it is held while C3 is built); it stays the
+    // guided step, and the student's "I've done this" ends the setup naming the day mail was not brought in from.
+    assert_eq!(row(&shared.progress(), "backfill").state, "failed");
+    assert!(shared.answer(Answer::Done));
     let p = wait(&shared);
-    assert_eq!(p.ended, Some("finished"));
-    assert_eq!(row(&p, "backfill").state, "done");
-    assert!(!p.blocked && p.not_brought_in_before.is_none(), "{p:?}");
-    assert_eq!(r.sv.lock().unwrap().batches, [since_day()], "the backfill ran after the Retry");
-    assert_eq!(r.calls("m365/forward.js").len(), 2);
+    assert_eq!(p.ended, Some("stopped"));
+    assert_eq!(p.not_brought_in_before, Some(since_day()));
+    assert!(ran_retired(&r).is_empty(), "{:?}", r.scripts());
+    assert!(r.sv.lock().unwrap().batches.is_empty(), "no backfill ran after the Retry");
     assert!(MailState::load(&r.dir).unwrap().open_backfills.is_empty());
 }
 
@@ -1867,7 +1878,7 @@ fn a_forwarding_just_set_is_given_time_to_start_and_a_second_canary_before_the_s
     let ok = rig("t18c-settle-ok");
     let seen = watch_canaries(&ok);
     let p = wait(&ok.start(curated_m365(), true));
-    assert_eq!(p.ended, Some("finished"));
+    assert_eq!(p.ended, Some("stopped"), "D13: a Microsoft setup ends at the guided backfill");
     assert_eq!(ok.sv.lock().unwrap().canaries, 1);
     let seen = seen.lock().unwrap().clone();
     assert!(seen[0].0 - NOW >= 120, "{seen:?}");
@@ -1900,7 +1911,7 @@ fn an_uncurated_school_asks_once_for_the_address_and_the_service_decides_the_pro
     let shared = r.start(uncurated(), true);
     answer_address(&shared);
     let p = wait(&shared);
-    assert_eq!((p.ended, p.provider), (Some("finished"), "m365"));
+    assert_eq!((p.ended, p.provider), (Some("stopped"), "m365"), "D13: a Microsoft setup ends at the guided backfill");
     assert_eq!(shared.asked(), ["school_address"], "asked once");
     let all = seen(&r.svc);
     assert!(all.iter().any(|(m, path, _)| m == "GET" && path == "/provider?domain=school.example.invalid"), "{all:?}");
@@ -1914,7 +1925,7 @@ fn an_uncurated_school_asks_once_for_the_address_and_the_service_decides_the_pro
     // A curated school is never asked and no lookup is made.
     let c = rig("t113-ask-curated");
     let p = wait(&c.start(curated_m365(), true));
-    assert_eq!(p.ended, Some("finished"));
+    assert_eq!(p.ended, Some("stopped"));
     let all = seen(&c.svc);
     assert!(!all.iter().any(|(_, path, _)| path.starts_with("/provider")), "no lookup for a curated row");
     assert!(all.iter().any(|(_, path, b)| path == "/addresses" && b == r#"{"provider":"m365"}"#));
@@ -1949,17 +1960,28 @@ fn a_google_workspace_school_is_offered_forwarding_through_gmails_steps() {
 
 #[test]
 fn no_date_is_asked_and_every_school_reads_the_same_120_days() {
-    for (tag, kind, typed) in [("t113-date-a", curated_m365(), false), ("t113-date-b", uncurated(), true)] {
+    for (tag, kind, typed) in [("t113-date-a", curated_m365(), false), ("t113-date-b", uncurated(), true), ("t113-date-c", Kind::Gmail, false)] {
         let r = rig(tag);
-        r.host.lock().unwrap().msgs = ana_mail(1);
-        let shared = r.start(kind, true);
+        {
+            let mut h = r.host.lock().unwrap();
+            h.title_address = Some(HINT_PAGE.to_string());
+            h.msgs = ana_mail(1);
+        }
+        let shared = r.start(kind.clone(), true);
         if typed {
             answer_address(&shared);
         }
         let p = wait(&shared);
-        assert_eq!(p.ended, Some("finished"), "{tag}");
-        assert_eq!(r.sv.lock().unwrap().batches, [since_day()], "{tag}: the batch opens on the fixed window start");
-        assert_eq!(p.backfill.as_ref().map(|b| b.since.clone()), Some(since_day()), "{tag}");
+        if kind == Kind::Gmail {
+            assert_eq!(p.ended, Some("finished"), "{tag}");
+            assert_eq!(r.sv.lock().unwrap().batches, [since_day()], "{tag}: the batch opens on the fixed window start");
+            assert_eq!(p.backfill.as_ref().map(|b| b.since.clone()), Some(since_day()), "{tag}");
+        } else {
+            // D13: Microsoft's backfill is the guided step; the window start is still the fixed 120 days.
+            assert_eq!(p.ended, Some("stopped"), "{tag}");
+            assert!(r.sv.lock().unwrap().batches.is_empty(), "{tag}: no backfill batch opens");
+            assert_eq!(p.not_brought_in_before, Some(since_day()), "{tag}");
+        }
         assert!(shared.asked().iter().all(|a| *a == "school_address"), "{tag}: only the address is ever asked");
     }
     assert_eq!(Ask::ALL.map(Ask::name), ["school_address", "forwarding_elsewhere"], "no ask is about a date");
@@ -2014,8 +2036,13 @@ fn the_mail_code_names_no_school() {
 #[test]
 fn a_closed_backfill_batch_starts_a_slot_now() {
     let r = rig("t113-slot");
-    r.host.lock().unwrap().msgs = ana_mail(2);
-    let p = wait(&r.start(curated_m365(), true));
+    // Gmail: Microsoft 365's backfill is held while C3 is built (D13).
+    {
+        let mut h = r.host.lock().unwrap();
+        h.title_address = Some(HINT_PAGE.to_string());
+        h.msgs = ana_mail(2);
+    }
+    let p = wait(&r.start(Kind::Gmail, true));
     assert_eq!(p.ended, Some("finished"));
     let ev = r.events();
     let at = |e: &str| ev.iter().position(|x| x == e).unwrap_or_else(|| panic!("no {e}: {ev:?}"));
@@ -2029,7 +2056,7 @@ fn a_closed_backfill_batch_starts_a_slot_now() {
 fn with_the_saved_sign_in_off_setup_uses_mail_setup_and_wipes_it_on_close() {
     let off = rig("t113-keep-off");
     let p = wait(&off.start(curated_m365(), false));
-    assert_eq!(p.ended, Some("finished"));
+    assert_eq!(p.ended, Some("stopped"), "D13: ends at the guided backfill");
     assert_eq!(off.host.lock().unwrap().opens, [(setup_dir(&off.dir), true)]);
     assert!(!setup_dir(&off.dir).exists(), "mail-setup is wiped when the window closes");
     assert!(!session_dir(&off.dir, A).unwrap().exists());
@@ -2037,19 +2064,20 @@ fn with_the_saved_sign_in_off_setup_uses_mail_setup_and_wipes_it_on_close() {
 
     let on = rig("t113-keep-on");
     let p = wait(&on.start(curated_m365(), true));
-    assert_eq!(p.ended, Some("finished"));
+    assert_eq!(p.ended, Some("stopped"), "D13: ends at the guided backfill");
     assert_eq!(on.host.lock().unwrap().opens, [(session_dir(&on.dir, A).unwrap(), true)]);
     assert!(session_dir(&on.dir, A).unwrap().exists(), "the kept profile stays");
     assert!(!setup_dir(&on.dir).exists());
 }
 
-/// A mailbox whose first backfill began and was cut off: the service holds its window start, the kept
+/// A Gmail mailbox (Microsoft 365's backfill is held while C3 is built, D13) whose first backfill began and was
+/// cut off: the service holds its window start, the kept
 /// profile is on disk, and `mail.json` marks it open.
 fn open_backfill_rig(tag: &str, n: usize) -> Rig {
     let r = rig(tag);
     {
         let mut s = r.sv.lock().unwrap();
-        s.provider = "m365".into();
+        s.provider = "google".into();
         s.hint = Some(HINT_PAGE.into());
         s.backfill_since = Some("2026-06-04".into());
         s.canary_sent = true;
@@ -2073,7 +2101,9 @@ fn an_open_backfill_resumes_at_launch() {
     assert_eq!(p.ended, Some("finished"));
     assert_eq!(r.host.lock().unwrap().opens, [(session_dir(&r.dir, A).unwrap(), false)], "hidden, on the kept profile");
     assert_eq!(r.sv.lock().unwrap().batches, ["2026-06-04"], "the window the first backfill fixed, never recomputed");
-    assert_eq!(r.calls("m365/forward.js").len(), 2);
+    // Gmail forwards a page of messages in one call: one call, both messages.
+    let calls = r.calls("gmail/forward.js");
+    assert_eq!((calls.len(), calls.iter().map(|c| c["rows"].as_array().map_or(1, |r| r.len())).sum::<usize>()), (1, 2));
     assert!(MailState::load(&r.dir).unwrap().open_backfills.is_empty(), "a finished backfill is not resumed again");
     assert_eq!(r.closed.load(Ordering::SeqCst), 1);
     assert!(r.host.lock().unwrap().closed >= 1 && session_dir(&r.dir, A).unwrap().exists());
@@ -2155,7 +2185,7 @@ fn resume_and_time_forwards(r: &Rig) -> Vec<i64> {
     let times = Arc::new(Mutex::new(Vec::new()));
     let (t, clk) = (times.clone(), r.clk.clone());
     r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
-        if name == "m365/forward.js" {
+        if name == "gmail/forward.js" {
             t.lock().unwrap().push(clk.at());
         }
     }));
@@ -2183,7 +2213,7 @@ fn a_relaunch_on_the_same_utc_day_never_sends_past_the_days_600() {
     assert_eq!(r.calls("m365/forward.js").len(), 1);
     r.clk.0.fetch_add(3_600, Ordering::SeqCst);
     let times = resume_and_time_forwards(&r);
-    assert_eq!(times.len(), 3, "the window is forwarded once the day turns: {times:?}");
+    assert_eq!(times.len(), 1, "the window (one Gmail call for its three messages) is forwarded once the day turns: {times:?}");
     assert!(times.iter().all(|t| *t >= next_day), "nothing went before the next UTC day: {times:?} vs {next_day}");
 }
 
@@ -2199,7 +2229,7 @@ fn a_resume_after_a_refused_send_waits_for_the_next_utc_day() {
     })
     .unwrap();
     let times = resume_and_time_forwards(&r);
-    assert_eq!(times.len(), 2);
+    assert_eq!(times.len(), 1, "one Gmail call for both messages: {times:?}");
     assert!(times.iter().all(|t| *t >= next_day), "{times:?} vs {next_day}");
     // A pace from an earlier day counts for nothing.
     let old = open_backfill_rig("t113-relaunch-old-pace", 2);
@@ -2249,10 +2279,16 @@ fn a_guided_backfill_the_student_says_is_done_never_clears_what_was_not_brought_
 
 #[test]
 fn retry_runs_a_failed_scripted_backfill_again_and_the_marker_stays_open_until_then() {
+    // Gmail: Microsoft 365's backfill is held while C3 is built (D13) and is never failed or retried.
     let r = rig("t113-failed-backfill");
-    r.host.lock().unwrap().msgs = ana_mail(2);
-    queue(&r, "m365/list.js", vec![json!({ "result": "not found", "control": "list" }), json!({ "result": "ok", "total": 2, "rows": SHost::rows(&r.host.lock().unwrap()) })]);
-    let shared = r.start(curated_m365(), true);
+    {
+        let mut h = r.host.lock().unwrap();
+        h.title_address = Some(HINT_PAGE.to_string());
+        h.msgs = ana_mail(2);
+    }
+    let ok = json!({ "result": "ok", "page": { "from": 1, "to": 2, "total": 2 }, "moved": false, "rows": SHost::rows(&r.host.lock().unwrap()) });
+    queue(&r, "gmail/list.js", vec![json!({ "result": "not found", "control": "list" }), ok]);
+    let shared = r.start(Kind::Gmail, true);
     until("the backfill failed", || has(&shared, "backfill", "failed"));
     assert_eq!(MailState::load(&r.dir).unwrap().open_backfills, [A], "still open, so the next launch resumes it");
     assert!(shared.answer(Answer::Retry));
@@ -2261,33 +2297,95 @@ fn retry_runs_a_failed_scripted_backfill_again_and_the_marker_stays_open_until_t
     assert!(p.not_brought_in_before.is_none());
 }
 
+/// The Microsoft DOM backfill scripts C3 retires: while it is built (D13) none of them runs, for any reason.
+const RETIRED: [&str; 4] = ["m365/search.js", "m365/list.js", "m365/forward.js", "m365/sent_cleanup.js"];
+
+fn ran_retired(r: &Rig) -> Vec<String> {
+    r.scripts().into_iter().filter(|s| RETIRED.contains(&s.as_str())).collect()
+}
+
+#[test]
+fn a_microsoft_setup_ends_at_a_guided_backfill_and_runs_none_of_the_retired_scripts() {
+    // D13 (Quinn, 2026-10-11): forwarding and the canary run as script; the backfill is the guided step.
+    let r = rig("d13-setup");
+    r.host.lock().unwrap().msgs = ana_mail(2);
+    let shared = r.start(curated_m365(), true);
+    until("the backfill step", || has(&shared, "backfill", "needs_you"));
+    let p = shared.progress();
+    assert!(row(&p, "backfill").guided, "shown as the guided step");
+    for step in ["sign_in", "step_aside", "forwarding", "canary"] {
+        assert_eq!(row(&p, step).state, "done", "{step}");
+    }
+    assert!(shared.answer(Answer::Done));
+    let p = wait(&shared);
+    assert_eq!(p.not_brought_in_before, Some(since_day()), "the end names the day before which mail was not brought in");
+    assert!(p.done.contains(&"canary") && !p.done.contains(&"backfill") && p.left.contains(&"backfill"), "{:?} {:?}", p.done, p.left);
+    assert_ne!(row(&p, "backfill").state, "done_by_hand");
+    assert!(ran_retired(&r).is_empty(), "{:?}", r.scripts());
+    assert!(!r.events().iter().any(|e| e == "svc batch"), "no backfill batch was opened: {:?}", r.events());
+    assert!(MailState::load(&r.dir).unwrap().open_backfills.is_empty(), "no backfill was begun");
+    assert_eq!(r.closed.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn an_open_microsoft_backfill_is_left_open_and_not_driven_at_launch() {
+    // D13: the resume opens no window and runs no script for Microsoft 365; the marker stays for C3.
+    let r = open_backfill_rig("d13-resume", 2);
+    r.sv.lock().unwrap().provider = "m365".into();
+    let shared = r.setups.start_resume(r.dir.clone(), vec![A.to_string()], r.env()).expect("a resume started");
+    let p = wait(&shared);
+    assert_eq!((p.ended, p.line), (Some("failed"), Some("this mailbox is set up by hand")));
+    assert!(r.host.lock().unwrap().opens.is_empty(), "no window");
+    assert!(r.scripts().is_empty(), "no script: {:?}", r.scripts());
+    assert!(r.sv.lock().unwrap().batches.is_empty());
+    assert_eq!(open_backfills(&r.dir), [A], "left open so C3 can resume it");
+    assert_eq!(r.closed.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn an_open_gmail_backfill_still_resumes_at_launch() {
+    let r = open_backfill_rig("d13-resume-gmail", 2);
+    let shared = r.setups.start_resume(r.dir.clone(), vec![A.to_string()], r.env()).expect("a resume started");
+    let p = wait(&shared);
+    assert_eq!(p.ended, Some("finished"), "{:?}", p.line);
+    assert_eq!(r.host.lock().unwrap().opens, [(session_dir(&r.dir, A).unwrap(), false)], "hidden, on the kept profile");
+    assert_eq!(r.sv.lock().unwrap().batches, ["2026-06-04"]);
+    assert!(!r.calls("gmail/forward.js").is_empty());
+    assert!(ran_retired(&r).is_empty());
+    assert!(open_backfills(&r.dir).is_empty());
+}
+
 fn position(ev: &[String], e: &str) -> usize {
     ev.iter().position(|x| x == e).unwrap_or_else(|| panic!("no {e}: {ev:?}"))
 }
 
 #[test]
 fn a_school_microsoft_mailbox_sets_up_in_order() {
+    // D13: forwarding and the canary run as script; the backfill is the guided step, "I've done this" ends the
+    // setup, and none of the retired scripts runs.
     let r = rig("t113-m365");
     r.host.lock().unwrap().msgs = ana_mail(2);
     let p = wait(&r.start(curated_m365(), true));
-    assert_eq!(p.ended, Some("finished"));
-    assert_eq!(p.line, Some("setup finished"));
-    for step in ["sign_in", "step_aside", "forwarding", "canary", "backfill", "finish"] {
+    assert_eq!(p.ended, Some("stopped"));
+    assert_eq!(p.line, Some("setup stopped"));
+    for step in ["sign_in", "step_aside", "forwarding", "canary"] {
         assert_eq!(row(&p, step).state, "done", "{step}");
     }
+    assert_eq!((row(&p, "backfill").state, row(&p, "finish").state), ("skipped", "skipped"));
+    assert_eq!(p.not_brought_in_before, Some(since_day()));
+    assert!(ran_retired(&r).is_empty(), "{:?}", r.scripts());
     let ev = r.events();
     let at = |e: &str| position(&ev, e);
     assert!(at("svc mint") < at("window visible") && at("window visible") < at("script m365/signin.js"));
     assert!(at("script m365/signin.js") < at("svc hint") && at("svc hint") < at("aside"));
     assert!(at("aside") < at("script m365/forwarding_set.js"));
     assert!(at("script m365/forwarding_set.js") < at("script m365/forwarding_read.js"), "read back after navigating away and back");
-    assert!(at("script m365/forwarding_read.js") < at("svc canary") && at("svc canary") < at("svc batch"));
-    assert!(at("svc batch") < at("svc batch sent") && at("svc batch sent") < at("slot now"));
+    assert!(at("script m365/forwarding_read.js") < at("svc canary"));
+    assert!(!ev.iter().any(|e| e == "svc batch" || e == "slot now"), "no backfill batch, so no slot: {ev:?}");
     let set = &r.calls("m365/forwarding_set.js")[0];
     assert_eq!((set["address"].clone(), set["replace"].clone()), (json!(KNOWLU), json!(false)));
     let places: Vec<&String> = ev.iter().filter(|e| e.starts_with("open ")).collect();
     assert_eq!(places[..3], ["open Forwarding", "open Inbox", "open Forwarding"], "away and back: {places:?}");
-    assert_eq!(r.calls("m365/sent_cleanup.js").len(), 1);
     let h = r.host.lock().unwrap();
     assert_eq!((h.aside, h.closed >= 1), (1, true));
 }
@@ -2338,7 +2436,8 @@ fn a_microsoft_folder_pane_drawn_after_the_title_still_signs_in() {
     answers.push(json!({ "result": "ok", "signed_in": true, "mailbox_hint": HINT_PAGE }));
     queue(&r, "m365/signin.js", answers);
     let p = wait(&r.start(curated_m365(), true));
-    assert_eq!((p.ended, p.line), (Some("finished"), Some("setup finished")));
+    // D13: a Microsoft setup ends at the guided backfill step, which closes as the student's "I've done this".
+    assert_eq!((p.ended, p.line), (Some("stopped"), Some("setup stopped")));
     assert_eq!(row(&p, "sign_in").state, "done");
     assert_eq!(r.calls("m365/signin.js").len(), 21, "read again until the address was drawn");
     assert_eq!(r.sv.lock().unwrap().hint.as_deref(), Some(HINT_PAGE));
@@ -2416,7 +2515,7 @@ fn forwarding_elsewhere_is_asked_and_only_a_yes_replaces_it() {
     until("the question", || shared.progress().ask == Some("forwarding_elsewhere"));
     assert_eq!(row(&shared.progress(), "forwarding").state, "needs_you");
     assert!(shared.answer(Answer::Replace(true)));
-    assert_eq!(wait(&shared).ended, Some("finished"));
+    assert_eq!(wait(&shared).ended, Some("stopped"));
     let sets = r.calls("m365/forwarding_set.js");
     assert_eq!((sets.len(), sets[0]["replace"].clone(), sets[1]["replace"].clone()), (2, json!(false), json!(true)));
     assert_eq!(shared.asked(), ["forwarding_elsewhere"]);
@@ -2567,16 +2666,21 @@ fn a_setup_that_ends_before_forwarding_was_set_removes_its_new_address() {
 fn a_setup_whose_backfill_began_never_removes_its_address() {
     // T18c review: revoking an address purges the mail stored under it (`mail/handler.ts` purgeAddress), so a
     // Stop during a backfill must not revoke the address the mail was brought in under. Since 2026-10-06 the
-    // backfill waits for the canary, so it begins only once forwarding was set.
+    // backfill waits for the canary, so it begins only once forwarding was set. Gmail: Microsoft 365's
+    // backfill is held while C3 is built (D13), so it never begins.
     let r = rig("t18c-backfilled-kept");
-    r.host.lock().unwrap().msgs = ana_mail(2);
+    {
+        let mut h = r.host.lock().unwrap();
+        h.title_address = Some(HINT_PAGE.to_string());
+        h.msgs = ana_mail(2);
+    }
     let setups = r.setups.clone();
     r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
-        if name == "m365/forward.js" {
+        if name == "gmail/forward.js" {
             setups.current().expect("a setup is running").stop();
         }
     }));
-    let p = wait(&r.start(curated_m365(), true));
+    let p = wait(&r.start(Kind::Gmail, true));
     assert_eq!((p.ended, p.line), (Some("stopped"), Some("setup stopped")));
     let ev = r.events();
     assert!(ev.contains(&"svc batch".to_string()), "the backfill began: {ev:?}");
@@ -2605,32 +2709,27 @@ fn a_withdrawal_the_service_refuses_never_says_the_address_was_removed() {
 fn a_forwarding_set_by_hand_holds_the_backfill_until_the_canary_arrives() {
     // Quinn, 2026-10-06: the backfill ran while forwarding had failed (`requires(Backfill)` was empty). It
     // waits for the canary, and Finish waits for it, so D16's guided path keeps its order and its window:
-    // forwarding by hand, "I've done this", the canary, then the backfill.
+    // forwarding by hand, "I've done this", the canary, then the backfill. D13: Microsoft's backfill is the
+    // guided step, shown once the canary is done and holding the window open until the student closes it.
     let r = rig("t1006-held-backfill");
     r.host.lock().unwrap().msgs = ana_mail(2);
     queue(&r, "m365/forwarding_set.js", vec![json!({ "result": "not found", "control": "switch" })]);
-    // Whether the backfill read a mailbox whose window Finish had already closed.
-    let read_closed = Arc::new(AtomicU32::new(0));
-    let (seen, host) = (read_closed.clone(), r.host.clone());
-    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
-        if name == "m365/search.js" && !host.lock().unwrap().window {
-            seen.fetch_add(1, Ordering::SeqCst);
-        }
-    }));
     let shared = r.start(curated_m365(), true);
     until("the guided forwarding", || has(&shared, "forwarding", "failed"));
     // "I've done this" is taken only once the runner waits on the student: by then a backfill not held
     // would already have run, and Finish closed the window.
     until("I've done this is taken", || shared.answer(Answer::Done));
+    until("the guided backfill", || has(&shared, "backfill", "needs_you"));
+    assert!(r.host.lock().unwrap().window, "Finish waited: the window is still open at the guided backfill");
+    assert!(shared.answer(Answer::Done));
     let p = wait(&shared);
-    assert_eq!(p.ended, Some("finished"), "{p:?}");
+    assert_eq!(p.ended, Some("stopped"), "{p:?}");
     assert_eq!(row(&p, "forwarding").state, "done_by_hand");
-    assert_eq!((row(&p, "canary").state, row(&p, "backfill").state, row(&p, "finish").state), ("done", "done", "done"));
+    assert_eq!((row(&p, "canary").state, row(&p, "backfill").state), ("done", "skipped"));
+    assert_eq!(p.not_brought_in_before, Some(since_day()));
     let ev = r.events();
-    assert!(position(&ev, "svc canary") < position(&ev, "svc batch"), "the canary came back before any backfill: {ev:?}");
-    assert_eq!(r.sv.lock().unwrap().batches, [since_day()]);
-    assert!(r.calls("m365/search.js").len() >= 1);
-    assert_eq!(read_closed.load(Ordering::SeqCst), 0, "Finish waited: the backfill read an open window");
+    assert!(!ev.iter().any(|e| e == "svc batch"), "no backfill batch: {ev:?}");
+    assert!(ran_retired(&r).is_empty(), "{:?}", r.scripts());
 }
 
 use knowlu::mail::setup::clean_unfinished;
@@ -2661,15 +2760,17 @@ fn a_setup_in_flight_keeps_its_address_and_whether_it_was_placed_on_this_device(
     let seen: Arc<Mutex<Vec<(String, Vec<PendingSetup>)>>> = Default::default();
     let (log, dir) = (seen.clone(), r.dir.clone());
     r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
-        if ["m365/signin.js", "m365/forwarding_set.js", "m365/search.js"].contains(&name) {
+        if ["m365/signin.js", "m365/forwarding_set.js"].contains(&name) {
             log.lock().unwrap().push((name.to_string(), pendings(&dir)));
         }
     }));
-    assert_eq!(wait(&r.start(curated_m365(), true)).ended, Some("finished"));
+    let shared = r.start(curated_m365(), true);
+    until("the guided backfill", || has(&shared, "backfill", "needs_you"));
+    assert_eq!(pendings(&r.dir), [pending(A, true, false)], "D13: a guided backfill is not a begun one");
+    assert_eq!(wait(&shared).ended, Some("stopped"));
     let at = |name: &str| seen.lock().unwrap().iter().find(|(n, _)| n == name).expect(name).1.clone();
     assert_eq!(at("m365/signin.js"), [pending(A, false, false)]);
     assert_eq!(at("m365/forwarding_set.js"), [pending(A, true, false)], "written before a script that may set it");
-    assert_eq!(at("m365/search.js"), [pending(A, true, true)]);
     assert!(pendings(&r.dir).is_empty(), "an ended setup leaves no record");
     let text = std::fs::read_to_string(r.dir.join("mail.json")).unwrap();
     assert!(!text.contains("pending_setups"), "none costs mail.json nothing: {text}");
@@ -2800,7 +2901,7 @@ fn the_progress_never_holds_an_address_or_a_token() {
     let shared = r.start(uncurated(), true);
     answer_address(&shared);
     let p = wait(&shared);
-    assert_eq!(p.ended, Some("finished"));
+    assert_eq!(p.ended, Some("stopped"));
     let text = serde_json::to_string(&p).unwrap();
     for secret in [KNOWLU, HINT_PAGE, TYPED, TOKEN, ANA, "school.example", "@"] {
         assert!(!text.contains(secret), "the progress holds {secret}: {text}");

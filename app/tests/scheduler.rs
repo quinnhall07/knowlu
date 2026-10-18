@@ -2090,9 +2090,13 @@ struct Pass {
 impl Pass {
     /// A mailbox with `status` whose forwarding page reads `fwd`, and a saved sign-in on disk.
     fn new(tag: &str, status: &str, fwd: Value) -> Pass {
+        Pass::with_provider(tag, "google", status, fwd)
+    }
+
+    fn with_provider(tag: &str, provider: &str, status: &str, fwd: Value) -> Pass {
         let d = mail_dir(tag);
         std::fs::create_dir_all(knowlu::mail_session::session_dir(&d, rig::ID).unwrap()).unwrap();
-        Pass { d, svc: rig::Svc::start(vec![rig::row(status, "m365")]), host: rig::FakeHost::new(fwd), clk: rig::Clk::at(rig::NOW) }
+        Pass { d, svc: rig::Svc::start(vec![rig::row(status, provider)]), host: rig::FakeHost::new(fwd), clk: rig::Clk::at(rig::NOW) }
     }
 
     fn rows(&self) -> Vec<Value> {
@@ -2136,8 +2140,8 @@ fn a_forwarding_found_off_is_turned_back_on_and_reported_reenabled() {
     p.mail(&[("Older notice", rig::NOW - 8 * rig::DAY), ("Newer notice", rig::NOW - 3600)]);
     assert_eq!(p.run().as_deref(), Some("mail: forwarding was off, turned back on, 2 recovered"));
     let scripts = p.host.scripts();
-    assert_eq!(&scripts[..3], ["m365/forwarding_read.js", "m365/forwarding_set.js", "m365/forwarding_read.js"], "{scripts:?}");
-    assert_eq!(p.host.calls("m365/forwarding_set.js"), [json!({ "address": rig::KNOWLU, "replace": false })], "never replaces another address");
+    assert_eq!(&scripts[..3], ["gmail/forwarding_read.js", "gmail/forwarding_set.js", "gmail/forwarding_read.js"], "{scripts:?}");
+    assert_eq!(p.host.calls("gmail/forwarding_set.js"), [json!({ "address": rig::KNOWLU, "replace": false })], "never replaces another address");
     let id = rig::ID;
     let (off, canary, reenabled) = (p.at(&format!("POST /addresses/{id}/state off")), p.at("POST /canary"), p.at(&format!("POST /addresses/{id}/state reenabled")));
     assert!(off < canary && canary < reenabled, "{:?}", p.svc.calls());
@@ -2164,7 +2168,7 @@ fn recovery_reaches_back_three_days_when_forwarding_is_on() {
     let p = Pass::new("on", "active", rig::fwd("on", "ours"));
     p.mail(&[("Older notice", rig::NOW - 8 * rig::DAY), ("Newer notice", rig::NOW - 3600)]);
     assert_eq!(p.run().as_deref(), Some("mail: forwarding on, 1 recovered"));
-    assert_eq!(p.host.calls("m365/forwarding_set.js").len(), 0);
+    assert_eq!(p.host.calls("gmail/forwarding_set.js").len(), 0);
     assert!(!p.svc.calls().iter().any(|c| c.contains("state") || c.contains("canary")), "nothing to report: {:?}", p.svc.calls());
     assert_eq!(p.svc.bodies("/reconcile")[0]["since"], json!(rig::iso(rig::NOW - 3 * rig::DAY)));
 }
@@ -2172,7 +2176,7 @@ fn recovery_reaches_back_three_days_when_forwarding_is_on() {
 #[test]
 fn a_turned_off_mailbox_is_never_turned_back_on_even_after_a_failed_disconnect() {
     use knowlu::mail::commands::{disconnect_with, Disconnect};
-    let p = Pass::new("turnedoff", "off", rig::fwd("on", "ours"));
+    let p = Pass::with_provider("turnedoff", "m365", "off", rig::fwd("on", "ours"));
     p.svc.st.lock().unwrap().delete_status = 500;
     let client = p.svc.client();
     // Disconnect: step 0 records the mailbox, forwarding goes off, and the server call then fails.
@@ -2230,6 +2234,30 @@ fn a_signed_out_profile_records_needs_sign_in_and_shows_no_window() {
     assert!(q.host.opens().is_empty());
 }
 
+#[test]
+fn a_microsoft_mailbox_is_never_recovered_while_c3_is_built_and_a_gmail_one_still_is() {
+    // D13 and C3 (Quinn, 2026-10-11 and 2026-10-13): no Microsoft path searches, lists, forwards or cleans
+    // Sent. The forwarding check is not retired, so it still runs; the recover pass after it does not,
+    // whether or not a backfill is open for the mailbox.
+    let m = Pass::with_provider("d13-slot-m365", "m365", "quiet", rig::fwd("on", "ours"));
+    m.mail(&[("Older notice", rig::NOW - 8 * rig::DAY), ("Newer notice", rig::NOW - 3600)]);
+    MailState::update(&m.d, |s| {
+        s.open_backfills.push(rig::ID.to_string());
+        true
+    })
+    .unwrap();
+    assert_eq!(m.run().as_deref(), Some("mail: forwarding on"));
+    assert_eq!(m.host.scripts(), ["m365/forwarding_read.js"], "only the forwarding check ran");
+    assert!(!m.svc.calls().iter().any(|c| c.contains("reconcile") || c.contains("batch")), "{:?}", m.svc.calls());
+    assert!(MailState::load(&m.d).unwrap().last_reconcile.is_empty(), "no pass was made, so none is recorded");
+    assert_eq!(MailState::load(&m.d).unwrap().open_backfills, [rig::ID], "an open backfill stays open for C3");
+    // Gmail's recover is unchanged.
+    let g = Pass::with_provider("d13-slot-gmail", "google", "quiet", rig::fwd("on", "ours"));
+    g.mail(&[("Newer notice", rig::NOW - 3600)]);
+    assert_eq!(g.run().as_deref(), Some("mail: forwarding on, 1 recovered"));
+    assert!(g.svc.calls().iter().any(|c| c.contains("reconcile")));
+}
+
 /// Every file under `dir` except the provider's own browser profiles, which are WebView2's and not Knowlu's.
 fn knowlus_own_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -2265,6 +2293,13 @@ fn no_file_or_log_of_knowlus_own_holds_the_address_or_token() {
     };
     let setups = Setups::new();
     let run = setups.start(plan, env).expect("a setup started");
+    // D13: a Microsoft setup ends at the guided backfill step, which the student closes with "I've done this".
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while !run.progress().rows.iter().any(|r| r.step == "backfill" && r.state == "needs_you") {
+        assert!(std::time::Instant::now() < until, "the guided backfill step was shown");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(run.answer(knowlu::mail::setup::Answer::Done));
     assert!(run.wait_done(Duration::from_secs(30)), "the setup ended");
     assert!(host.scripts().contains(&"m365/forwarding_set.js".to_string()), "it really ran: {:?}", host.scripts());
 

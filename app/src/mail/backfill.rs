@@ -13,12 +13,16 @@
 //! no window is shown, nothing is read and the marker stays (§4.11 step 1). A mailbox the student turned
 //! off is never resumed ([`open_backfills`]).
 //!
+//! **Held for Microsoft 365 (D13, temporary).** While C3 is built, [`resume_one`] returns before any window opens
+//! for a Microsoft 365 mailbox and leaves its marker open; the setup shows its Backfill as the guided step
+//! and the slot makes no recover pass ([`crate::mail_steps::backfill_held_for_c3`]).
+//!
 //! **Privacy.** Counts, dates and fixed words only.
 use super::recover::{backfill_window, run_pass, Clock, Job, Mailbox, Outcome, Stop};
 use super::setup::{Backfill, Env, Row, Shared};
 use crate::mail_client::{MailClient, Phase};
 use crate::mail_session::{session_dir, BackfillPace, MailState};
-use crate::mail_steps::{Provider, Routine, Send};
+use crate::mail_steps::{backfill_held_for_c3, Provider, Routine, Send};
 use jiff::civil::Date;
 use std::path::Path;
 
@@ -231,7 +235,9 @@ fn resume_one(data_dir: &Path, id: &str, env: &Env, sh: &Shared) -> Result<(), &
     let rows = env.client.list_addresses().map_err(|e| e.name())?;
     let row = rows.iter().find(|r| r["address_id"].as_str() == Some(id)).ok_or("no such mailbox")?;
     let provider = Provider::from_service(row["provider"].as_str().unwrap_or(""));
-    if provider == Provider::Guided {
+    // D13: Microsoft 365's retired routine is never driven while C3 is built. Before any window opens, with the
+    // marker left in `mail.json` for C3 to resume. The guided word is the one a mailbox set up by hand gets.
+    if provider == Provider::Guided || backfill_held_for_c3(provider) {
         return Err("this mailbox is set up by hand");
     }
     if matches!(row["status"].as_str(), Some("lapsed" | "revoked")) {

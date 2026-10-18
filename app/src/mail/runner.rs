@@ -252,7 +252,7 @@ impl<'a> Runner<'a> {
         };
         let Some(profile) = profile.filter(|_| valid_address_id(&id)) else { return Err(End::Failed("bad-reply")) };
         env.host.use_provider(provider);
-        let machine = Setup::new(provider, plan.setup_day, None);
+        let machine = if matches!(plan.kind, Kind::Rotate { .. }) { Setup::new_rotate(provider, plan.setup_day) } else { Setup::new(provider, plan.setup_day, None) };
         let mut r = Runner {
             plan, env, sh, provider, machine, id, knowlu, profile, opened: false, canary_ok: false, said_no: false, gave_up: false, keep,
             rotated: false, placed: false, backfilled: false, revoked: false, kept: false, refusal: "", forwarding_set_at: None,

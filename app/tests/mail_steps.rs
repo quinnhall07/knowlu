@@ -2,7 +2,7 @@
 //! T10.1, spec test 32's step half). Pure data and transitions: no window, no network, no log.
 use jiff::civil::date;
 use knowlu::mail_steps::{
-    backfill_since, backfill_window, Action, Mode, Outcome, Paused, Provider, Reason, Routine, Send, Setup, State,
+    backfill_held_for_c3, backfill_since, backfill_window, Action, Mode, Outcome, Paused, Provider, Reason, Routine, Send, Setup, State,
     Step, BACKFILL_DAYS, MAX_PER_DAY, MAX_PER_MINUTE,
 };
 
@@ -47,11 +47,11 @@ fn each_provider_has_its_step_list_in_order() {
     for other in ["other", "", "yahoo", "outlook.com"] {
         assert_eq!(Provider::from_service(other), Provider::Guided, "{other:?} is guided only");
     }
-    let mut s = setup(Provider::M365);
+    let mut s = setup(Provider::Gmail);
     let ran = drive(&mut s, |_| Outcome::Done);
-    assert_eq!(ran, Provider::M365.steps(), "a clean run goes through the list in order");
+    assert_eq!(ran, Provider::Gmail.steps(), "a clean run goes through the list in order");
     assert_eq!(s.next_action(), Action::Finished);
-    assert!(Provider::M365.steps().iter().all(|st| s.state(*st) == State::Done));
+    assert!(Provider::Gmail.steps().iter().all(|st| s.state(*st) == State::Done));
 }
 
 #[test]
@@ -81,7 +81,10 @@ fn a_failed_step_falls_back_to_guided_for_that_step_only_and_later_steps_continu
     s.guided_checked(Step::Forwarding, true);
     assert_eq!(s.state(Step::Forwarding), State::DoneByHand);
     let ran = drive(&mut s, |_| Outcome::Done);
-    assert_eq!(ran, vec![Step::Canary, Step::Backfill, Step::Finish]);
+    // D13: the canary runs as script; Microsoft 365's backfill is the guided step, and Finish waits behind it.
+    assert_eq!(ran, vec![Step::Canary]);
+    assert_eq!((s.state(Step::Backfill), s.mode(Step::Backfill)), (State::NeedsYou(Reason::Guided), Mode::Guided));
+    assert_eq!(s.state(Step::Finish), State::Waiting);
 }
 
 #[test]
@@ -285,7 +288,7 @@ fn stop_after_the_current_step_says_what_was_done() {
     assert_eq!(sum.mail_not_brought_in_before, Some(date(2026, 6, 4)), "forwarding is on; mail before this was not brought in");
 
     // Had the backfill finished, nothing is left out.
-    let mut full = setup(Provider::M365);
+    let mut full = setup(Provider::Gmail);
     drive(&mut full, |_| Outcome::Done);
     full.request_stop();
     let sum = full.summary();
@@ -314,7 +317,8 @@ fn a_failed_canary_leaves_only_guided_steps() {
 
 #[test]
 fn a_retry_re_arms_a_backfill_only_once_the_canary_has_arrived() {
-    for p in [Provider::M365, Provider::Gmail] {
+    // Microsoft 365's backfill is held while C3 is built (D13): see the test of that name below.
+    for p in [Provider::Gmail] {
         let mut s = setup(p);
         drive(&mut s, |st| if st == Step::Canary { Outcome::Failed } else { Outcome::Done });
         assert!(!s.rearm_backfill(), "{p:?}: the canary is still failed");
@@ -372,4 +376,33 @@ fn a_sign_in_whose_address_the_service_refuses_names_the_refusal_on_its_row() {
             }
         }
     }
+}
+
+#[test]
+fn the_microsoft_backfill_is_the_guided_step_while_c3_is_built_and_is_never_re_armed() {
+    // D13 (Quinn, 2026-10-11): the retired DOM backfill never runs for Microsoft 365. The Backfill step is
+    // shown as the guided step, after forwarding and the canary have run as script; Gmail is unchanged.
+    assert!(backfill_held_for_c3(Provider::M365));
+    assert!(!backfill_held_for_c3(Provider::Gmail) && !backfill_held_for_c3(Provider::Guided));
+    let mut s = setup(Provider::M365);
+    let ran = drive(&mut s, |_| Outcome::Done);
+    assert_eq!(ran, [Step::SignIn, Step::StepAside, Step::Forwarding, Step::Canary], "no scripted backfill, and no Finish before the guide");
+    assert_eq!((s.state(Step::Backfill), s.mode(Step::Backfill)), (State::NeedsYou(Reason::Guided), Mode::Guided));
+    assert_eq!(s.state(Step::Canary), State::Done);
+    assert_eq!(s.summary().mail_not_brought_in_before, Some(date(2026, 6, 4)), "the end names the day before which mail was not brought in");
+    assert!(!s.rearm_backfill(), "a guided backfill is not failed, so Retry has nothing to re-arm");
+    // A blocked backfill (the canary failed) is no different once the canary arrives late: Retry never re-arms it.
+    let mut b = setup(Provider::M365);
+    drive(&mut b, |st| if st == Step::Canary { Outcome::Failed } else { Outcome::Done });
+    assert_eq!(b.state(Step::Backfill), State::Failed(Reason::Blocked));
+    b.guided_checked(Step::Canary, true);
+    assert!(!b.rearm_backfill());
+    assert_eq!((b.state(Step::Backfill), b.mode(Step::Backfill)), (State::Failed(Reason::Blocked), Mode::Guided));
+    // A rotate carries no backfill: it keeps its no-op scripted step.
+    let mut r = Setup::new_rotate(Provider::M365, today());
+    let ran = drive(&mut r, |_| Outcome::Done);
+    assert_eq!(ran.last(), Some(&Step::Finish), "{ran:?}");
+    // Gmail still runs its backfill as script.
+    let mut g = setup(Provider::Gmail);
+    assert!(drive(&mut g, |_| Outcome::Done).contains(&Step::Backfill));
 }

@@ -24,7 +24,7 @@ use super::host::Host;
 use super::recover::{run_pass, window, Clock, Job, Outcome, Place, Stop, SLOT_CAP};
 use crate::mail_client::{MailClient, Phase, State};
 use crate::mail_session::{session_dir, valid_address_id, MailState};
-use crate::mail_steps::Provider;
+use crate::mail_steps::{backfill_held_for_c3, Provider};
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -168,6 +168,12 @@ fn mailbox(env: &SlotEnv, row: &Value, run: crate::mail::Run) -> Option<(Provide
 fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, state: &MailState) -> String {
     let now = env.clock.now();
     let fwd = forwarding(env, id, provider, knowlu);
+    // D13 and C3: no Microsoft 365 recover pass while the retired routine is the only one there is. The
+    // forwarding check above is not retired; the pass, its reconcile and its "last known on" are not made, and
+    // an open backfill stays open in `mail.json` for C3.
+    if backfill_held_for_c3(provider) {
+        return fwd.text().to_string();
+    }
     let last_known_on = state.last_reconcile.get(id).and_then(|t| instant(t)).filter(|_| fwd.was_not_on());
     let job = Job {
         provider,

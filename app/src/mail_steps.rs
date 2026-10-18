@@ -53,6 +53,17 @@ pub fn backfill_window(stored: Option<Date>, today: Date) -> Date {
     stored.unwrap_or_else(|| backfill_since(today))
 }
 
+/// **Temporary.** Whether `provider`'s backfill and recover are held while C3 is built: Microsoft 365's
+/// retired DOM routine (`m365/search.js`, `list.js`, `forward.js`, `sent_cleanup.js`) forwards mail from the
+/// student's mailbox and deletes Sent copies, and C3 ("the mailbox is never sent from", ruled 2026-10-13)
+/// replaces it with read-and-upload. D13 (ruled 2026-10-11): the M365 backfill step is shown as the guided
+/// step meanwhile, and nothing else (a setup, a launch's resume, a slot's recover, a Retry) drives that
+/// routine. Redesign note `docs/specs/2026-10-10-m365-backfill-redesign.md` §4.10: "removed when C3 ships".
+/// Gmail is unchanged.
+pub fn backfill_held_for_c3(provider: Provider) -> bool {
+    provider == Provider::M365
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     M365,
@@ -202,10 +213,22 @@ pub struct Setup {
 
 impl Setup {
     /// A setup on `setup_day`. `stored_since` is the mailbox's `backfill_since` when this is a resume.
+    /// While C3 is built (D13), a Microsoft 365 setup's Backfill step is the guided step ([`backfill_held_for_c3`]).
     pub fn new(provider: Provider, setup_day: Date, stored_since: Option<Date>) -> Setup {
         let mode = if provider == Provider::Guided { Mode::Guided } else { Mode::Scripted };
-        let steps = provider.steps().iter().map(|s| (*s, State::Waiting, mode)).collect();
+        let held = |s: &Step| if *s == Backfill && backfill_held_for_c3(provider) { Mode::Guided } else { mode };
+        let steps = provider.steps().iter().map(|s| (*s, State::Waiting, held(s))).collect();
         Setup { provider, since: backfill_window(stored_since, setup_day), steps, replace_ok: None, stop: false, ended: false }
+    }
+
+    /// A rotate's machine: it carries no backfill (the runner's Backfill step is a no-op for it), so the D13
+    /// hold does not apply and the step stays scripted.
+    pub fn new_rotate(provider: Provider, setup_day: Date) -> Setup {
+        let mut s = Setup::new(provider, setup_day, None);
+        if let (true, Some(i)) = (backfill_held_for_c3(provider), s.at(Backfill)) {
+            s.steps[i].2 = Mode::Scripted;
+        }
+        s
     }
 
     pub fn provider(&self) -> Provider {
@@ -384,12 +407,12 @@ impl Setup {
     }
 
     /// Retry on a backfill that did not run (the canary was blocked, D16) or did not finish: scripted again
-    /// and waiting to run. Only for a scripted provider, and only once the canary has arrived. `false`
+    /// and waiting to run. Only for a scripted provider (never a held one, D13), and only once the canary has arrived. `false`
     /// when there is nothing to re-arm.
     pub fn rearm_backfill(&mut self) -> bool {
         let canary_ok = self.at(Canary).is_none() || self.resolved(Canary);
         let failed = matches!(self.state(Backfill), State::Failed(_));
-        if self.provider == Provider::Guided || !failed || !canary_ok || self.stop || self.ended {
+        if self.provider == Provider::Guided || backfill_held_for_c3(self.provider) || !failed || !canary_ok || self.stop || self.ended {
             return false;
         }
         self.set(Backfill, State::Waiting);
