@@ -432,14 +432,44 @@ function verdict(
  * `X-MS-Exchange-Organization-*` from mail arriving from outside, so a sender cannot write it. */
 const AUTH_AS = "x-ms-exchange-organization-authas";
 
+/** Two-label public suffixes common for schools. With any single label (`edu`, `com`, `uk`), these are the
+ * suffixes `registrable` knows; it is a floor for the AuthAs rule, not a public-suffix list. */
+const SCHOOL_SUFFIXES: ReadonlySet<string> = new Set([
+  "ac.uk",
+  "edu.au",
+  "ac.nz",
+  "ac.jp",
+  "edu.cn",
+  "ac.in",
+  "edu.mx",
+  "ac.za",
+  "edu.br",
+  "ac.kr",
+  "edu.sg",
+  "edu.hk",
+  "ac.il",
+]);
+
+/** A (lower-case, dotted) domain's registrable domain: its known suffix plus one label (`crimson.ua.edu` is
+ * under `ua.edu`, `students.uni.ac.uk` under `uni.ac.uk`); `null` when the domain is itself a suffix. */
+function registrable(domain: string): string | null {
+  const labels = domain.split(".");
+  const n = SCHOOL_SUFFIXES.has(labels.slice(-2).join(".")) ? 3 : 2;
+  return labels.length < n ? null : labels.slice(-n).join(".");
+}
+
 /** Whether an m365 original that carries no stamp is the tenant's own mail: exactly one AuthAs field, its
- * value `Internal`, and the sole From domain on the hint's (that domain, a name under it, or a name it sits
- * under, as `unboundOrigin` reads "own": a school's students often sit under its staff's domain). */
+ * value `Internal`, and the sole From domain the hint's, a name under it, or a parent of it bounded at the
+ * school's registrable domain, never a public suffix (Quinn's ruling, 2026-10-18: for hint `crimson.ua.edu`,
+ * `ua.edu` counts and `edu` does not; a sibling such as `cs.ua.edu` is not a parent). Stricter than
+ * `unboundOrigin`'s "own", which binds nothing. */
 function internalToTenant(head: MailHeaders, from: string, hint: string | null): boolean {
   const own = hint === null ? null : split(hint)?.[1] ?? null;
+  const school = own !== null && DOMAIN.test(own) ? registrable(own) : null;
   const marks = head.headers.filter((h) => h.name.trim().toLowerCase() === AUTH_AS);
-  return own !== null && DOMAIN.test(own) && marks.length === 1 &&
-    marks[0].value.trim().toLowerCase() === "internal" && (atOrUnder(from, own) || atOrUnder(own, from));
+  return own !== null && school !== null && marks.length === 1 &&
+    marks[0].value.trim().toLowerCase() === "internal" &&
+    (atOrUnder(from, own) || (atOrUnder(own, from) && atOrUnder(from, school)));
 }
 
 /**

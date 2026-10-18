@@ -948,6 +948,27 @@ Deno.test("an_m365_original_marked_internal_aligns_only_on_the_hints_domain", as
   assertEquals(await auth(stored(INTERNAL, { from: "Lab <lab@cs.school.test>" }), "m365"), "aligned");
   // A student on a subdomain, a professor on the apex: the hint's domain under the From's.
   assertEquals(await auth(stored(INTERNAL), "m365", "jdoe@students.school.test"), "aligned");
+  // Quinn's ruling (2026-10-18): a parent of the hint's domain counts only down from the school's
+  // registrable domain, never a public suffix; a sibling under it is not a parent.
+  const bounded: [string, string, Authenticity][] = [
+    ["jdoe@crimson.ua.edu", "x@ua.edu", "aligned"],
+    ["jdoe@crimson.ua.edu", "x@crimson.ua.edu", "aligned"],
+    ["jdoe@crimson.ua.edu", "x@lab.crimson.ua.edu", "aligned"],
+    ["jdoe@crimson.ua.edu", "x@edu", "unaligned"],
+    ["jdoe@crimson.ua.edu", "x@cs.ua.edu", "unaligned"],
+    ["jdoe@students.uni.ac.uk", "x@uni.ac.uk", "aligned"],
+    ["jdoe@students.uni.ac.uk", "x@ac.uk", "unaligned"],
+    ["jdoe@a.b.uni.edu.au", "x@uni.edu.au", "aligned"],
+    ["jdoe@a.b.uni.edu.au", "x@edu.au", "unaligned"],
+    ["jdoe@mail.uni.AC.NZ", "x@ac.nz", "unaligned"],
+    ["jdoe@mail.school.com", "x@com", "unaligned"],
+    // A hint on a public suffix itself has no school to bound at.
+    ["jdoe@ac.uk", "x@evil.ac.uk", "unaligned"],
+    ["jdoe@ac.uk", "x@ac.uk", "unaligned"],
+  ];
+  for (const [hint, from, want] of bounded) {
+    assertEquals(await auth(stored(INTERNAL, { from }), "m365", hint), want, `${hint} ${from}`);
+  }
   // From another domain, a look-alike, or a name around the hint's domain.
   for (const from of ["Pat <pat@friend.test>", "x@notschool.test", "x@school.test.evil.test", "x@test"]) {
     assertEquals(await auth(stored(INTERNAL, { from }), "m365"), "unaligned", from);
