@@ -43,7 +43,9 @@
       "Bash(cargo test --workspace --release:*)"
     ],
     "ask": [
-      "mcp__supabase-prod__*"
+      "mcp__supabase-prod__*",
+      "Bash(supabase:*)",
+      "Bash(npx supabase:*)"
     ]
   },
   "subagentPromptCacheTtl": "1h",
