@@ -1011,6 +1011,20 @@ pub fn run_lines(
     run_id: Option<&str>,
     fetch: Option<&dyn Fn(&str) -> Result<String, String>>,
 ) -> (i32, Vec<String>) {
+    run_lines_on(vault, via, run_id, fetch, None)
+}
+
+/// [`run_lines`] with `sync_tasks`'s `today` seam exposed. Production passes `None` (the local
+/// date). A test over `tests/fixtures/blackboard.ics` must pin it: on a first run R-OB-3 archives
+/// everything due before today, so an unpinned run stops creating tasks once the wall clock passes
+/// the fixture's dates.
+fn run_lines_on(
+    vault: &Path,
+    via: &str,
+    run_id: Option<&str>,
+    fetch: Option<&dyn Fn(&str) -> Result<String, String>>,
+    today: Option<Date>,
+) -> (i32, Vec<String>) {
     let ctx = crate::write::WriteContext {
         actor: "agent:ingest.blackboard".to_string(),
         via: via.to_string(),
@@ -1084,7 +1098,7 @@ pub fn run_lines(
         .map(|m| m.iter().filter_map(|(k, v)| Some((k.as_str()?.to_string(), v.as_str()?.to_string()))).collect())
         .unwrap_or_default();
     let mut journal = crate::journal::Journal::new(vault);
-    let mut log = sync_tasks(&events, vault, &course_map, Some(&ctx), &mut journal, None, first_run);
+    let mut log = sync_tasks(&events, vault, &course_map, Some(&ctx), &mut journal, today, first_run);
     if first_run {
         log.push(format!("ingest: first run — {} item(s) already past were archived",
             log.iter().filter(|l| l.starts_with("archived (imported-past)")).count()));
@@ -1684,6 +1698,10 @@ mod tests {
     fn feed() -> impl Fn(&str) -> Result<String, String> {
         |_: &str| pystr::read_text(Path::new("tests/fixtures/blackboard.ics")).map_err(|e| e.to_string())
     }
+    /// The day the two feed tests below run on. Every course item in `blackboard.ics` is due after
+    /// it, so a first run (no `today.md`) creates them; unpinned, the wall clock passed the last of
+    /// them (2026-10-15) and R-OB-3 archived every one.
+    const FEED_DAY: Date = Date::constant(2026, 8, 29);
     const ONE_COURSE: &str = "ics_url: \"https://example.invalid/learn.ics\"\ntimezone: America/Chicago\ncourse_map:\n  PH-106: ph-106\n  GN-103: gn-103\n  CS-100: cs-100\n";
 
     fn records_of(vault: &Path) -> Vec<serde_json::Value> {
@@ -1736,7 +1754,7 @@ mod tests {
     fn ingest_main_journals_under_the_runners_via_and_run_id() {
         let v = ingest_vault("via", ONE_COURSE);
         let f = feed();
-        let (code, lines) = run_lines(&v, "local-runner", Some("local-2026-08-29T17:00:00Z"), Some(&f));
+        let (code, lines) = run_lines_on(&v, "local-runner", Some("local-2026-08-29T17:00:00Z"), Some(&f), Some(FEED_DAY));
         assert_eq!(code, 0);
         assert!(lines.last().unwrap().starts_with("ingest: "), "{lines:?}");
         let records = records_of(&v);
@@ -1755,7 +1773,7 @@ mod tests {
     fn ingest_main_defaults_to_cli_via_and_creates_tasks_from_the_feed() {
         let v = ingest_vault("happy", ONE_COURSE);
         let f = feed();
-        let (code, lines) = run_lines(&v, "cli", None, Some(&f));
+        let (code, lines) = run_lines_on(&v, "cli", None, Some(&f), Some(FEED_DAY));
         assert_eq!(code, 0);
         let records = records_of(&v);
         for r in &records { assert_eq!(r["via"], "cli"); assert!(r["run_id"].is_null()); }
@@ -1764,7 +1782,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("created ")), "{lines:?}");
         assert!(v.join("state").join("ingest-seen.md").is_file(), "the seen ledger is written");
         // A second run over the same feed is idempotent: the ledger stops every uid.
-        let (code2, lines2) = run_lines(&v, "cli", None, Some(&f));
+        let (code2, lines2) = run_lines_on(&v, "cli", None, Some(&f), Some(FEED_DAY));
         assert_eq!(code2, 0);
         assert!(!lines2.iter().any(|l| l.starts_with("created ")), "{lines2:?}");
         let _ = std::fs::remove_dir_all(&v);
