@@ -7,7 +7,7 @@ description: >-
   The caller must state exactly what to change. Do not use for anything on CLAUDE.md's contract list,
   plus cloud/supabase/**, for new behavior, or for tests that encode new behavior; use
   contract-engineer, cloud-engineer or test-writer.
-model: sonnet
+model: claude-sonnet-5-5
 effort: low
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---

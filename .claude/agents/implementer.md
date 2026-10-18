@@ -4,11 +4,11 @@ description: >-
   Implements one specified, test-checked feature task off the contract list, TDD-first, in a named
   worktree, and commits it on that branch: engine commands and read-model code (grades, surface,
   week, scheduler glue), app commands, onboarding and Tauri wiring. Use for SDD tasks a plan
-  specifies and behavior a signed spec already decides; escalate to model:'opus' after two failed
+  specifies and behavior a signed spec already decides; escalate to model:'claude-opus-5-5' (effort high) after two failed
   attempts. Do not use for the contract list (contract-engineer), cloud/ (cloud-engineer),
   app/static or site/ (console-ui), tasks whose code the plan writes out in full (mechanical), open
   design choices (planner) or an unknown cause (debugger).
-model: sonnet
+model: claude-sonnet-5-5
 effort: high
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---

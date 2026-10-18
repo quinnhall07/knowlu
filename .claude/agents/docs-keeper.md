@@ -12,7 +12,7 @@ description: >-
   Use at the end of a wave, a merge train or a stream. Do not use for specs or plans (planner), for
   rule changes to CLAUDE.md or VISION.md (Quinn's), for the privacy page's wording without reviewer
   and Quinn, or for code.
-model: sonnet
+model: claude-sonnet-5-5
 effort: medium
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
