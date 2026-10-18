@@ -29,12 +29,17 @@ secondary sources (the original pages could not be fetched); re-check before quo
               Opus 5.5 Max  ->  Fable 5.1
               one session, then drop back
 
-   Side lane: Haiku 4.5 / Sonnet Low subagents for read-only exploration
+   Side lane: Haiku 5.5 / Sonnet Low subagents for read-only exploration
 ```
 
 ## Why
 
-- Opus 5.5 costs $4 / $20 per MTok, Sonnet 5.5 $2 / $10, Haiku 4.5 $1 / $5, Fable 5.1 $10 / $50.
+- Opus 5.5 costs $4 / $20 per MTok, Sonnet 5.5 $2 / $10, Haiku 5.5 $0.10 / $0.50 (prompts up to 100K
+  tokens; $0.50 / $2.50 above), Fable 5.1 $10 / $50.
+- Haiku 5.5 (2026-10-18 check): Terminal-Bench 4.0 39.2% against Sonnet 5.5's 70.6%; Anthropic names it
+  for "narrow tasks such as compaction, summarization, and subagent work" and Sonnet/Opus for complex
+  agentic coding (anthropic.com/claude-haiku-5-5). So Haiku stays on read-only search (`explorer`); TDD,
+  implementation and debugging stay on Sonnet or Opus.
 - Artificial Analysis Intelligence Index: Opus 5.5 max 58, xhigh 56, high 54, medium 51, low 42; Sonnet 5.5
   max 56; Fable 5.1 53. Opus 5.5 cost per task: about $0.55 low, $1.34 medium, $5.98 max.
 - Sonnet 5.5 used the most output tokens per task Artificial Analysis had measured (about 193K at max
@@ -48,10 +53,21 @@ secondary sources (the original pages could not be fetched); re-check before quo
 
 - `.claude/settings.json`: default model `claude-opus-5-5` (pinned so a new Opus release does not change
   the default silently), `effortLevel: medium`, `maxEffortLevel: xhigh` (no accidental `max`). Permissions
-  deny edits to `engine/tests/fixtures/**` (rule 2, deterministically) and a hand-run `cargo tauri build`
-  (unsupported per CLAUDE.md), and allow the read-only git and routine cargo commands.
-- `.claude/agents/`: nine roles, listed with the routing rubric for undefined roles in `CLAUDE.md`
-  ("Model and effort"), which loads every session. Each `description:` says when to use it and when not.
+  deny Edit/Write of the eight frozen references by name (rule 2) and a hand-run `cargo tauri build`
+  (unsupported per CLAUDE.md), ask before any prod Supabase MCP call or `supabase` CLI command, and allow
+  the read-only git and routine cargo commands. `subagentPromptCacheTtl: 1h` keeps a subagent's cache
+  warm while it waits for a build slot.
+- `.claude/hooks/pretool-bash.js` (PR #37, 2026-10-18): the frozen references are refused by every
+  route; other `engine/tests/fixtures/**` paths are open only to contract-engineer and the main
+  session; tag pushes, force pushes and GitHub release/secret/variable changes ask; researcher's shell
+  is one read-only git or gh command; plain cargo commands are trimmed to failures and warnings.
+- `.claude/agents/`: fourteen roles, listed with the routing rubric for undefined roles in `CLAUDE.md`
+  ("Model and effort"), which loads every session. Each `description:` says when to use it and when not,
+  and which built-in or plugin agent it replaces. Models are pinned (`claude-opus-5-5`,
+  `claude-sonnet-5-5`, `claude-haiku-5-5`). No user-level `modelSettings` override them (removed
+  2026-10-18), so each agent's `effort:` is what runs.
+- Open: this note says Sonnet stays at low or medium, but CLAUDE.md's table and `implementer.md` run
+  implementer at Sonnet high. CLAUDE.md wins until Quinn rules on it.
 
 Claude Code has no automatic task-based routing and hooks cannot change the model, so routing to a
 subagent is Claude's choice from each `description:`, and the session default is the only hard setting.
@@ -73,9 +89,7 @@ Naming the agent in the prompt is the reliable way to force it.
 - Whether `availableModels` with `enforceAvailableModels: true` from project settings blocks `fable`; if it
   is managed-settings only, leave it out. `deniedModels` is managed-settings only.
 - The subagent `effort:` frontmatter field is honoured on your Claude Code version.
-- The permission rules take effect: an edit under `engine/tests/fixtures/**` is refused. The deny also
-  blocks the one legitimate case, regenerating `surface-today-*.json` (console spec 4.6); do that from a
-  shell (`cargo test` with the oracle's regenerate flow), not through an edit tool, in a commit that
-  says why.
+- Regenerating `surface-today-*.json` (console spec 4.6) is allowed to contract-engineer and the main
+  session, through the oracle's regenerate flow, in a commit that says why.
 - Then run the same two or three real tasks (for example a `sync` change and a `surface` view) on Opus 5.5
   medium and Sonnet 5.5 medium and compare tokens, turns and test-gate passes. Revise the tiers from that.
