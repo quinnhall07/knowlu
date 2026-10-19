@@ -51,7 +51,7 @@ use super::Refusal;
 use crate::mail_client::{MailClient, State as SvcState};
 use crate::mail_session::{forget, forget_setup, session_dir, setup_dir, valid_address_id};
 use crate::mail_session::{MailState, PendingSetup};
-use crate::mail_steps::{Action, Mode, Outcome, Provider, Reason, Setup, State, Step};
+use crate::mail_steps::{backfill_held_for_c3, Action, Mode, Outcome, Provider, Reason, Setup, State, Step};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
@@ -82,6 +82,9 @@ const POPUP_WAIT: i64 = 5 * 60;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum End {
     Finished,
+    /// A Microsoft 365 setup whose forwarding is set and whose canary arrived, ended by hand at the guided
+    /// backfill (held for C3): a success, not a stop (Quinn, 2026-10-19).
+    ForwardingSet,
     Stopped,
     Cancelled,
     /// A fixed word, or a service error's name.
@@ -101,6 +104,8 @@ enum End {
 /// A sign-in whose mailbox another of the account's setups already holds (T18c): the service refused its
 /// address as this one's hint.
 const ALREADY_LINE: &str = "this mailbox is already set up in Knowlu: open Settings, then Email, to resume it or turn it off";
+/// The line of a Microsoft 365 setup that is done as far as it can go while C3 is built.
+const FORWARDING_SET_LINE: &str = "Forwarding is set. New mail is arriving.";
 /// A setup that stopped before its address was ever put in the mailbox (T18c).
 const WITHDRAWN_LINE: &str = "setup stopped before forwarding was set, so the Knowlu address made for it was removed";
 /// The same stop, when the service did not take the delete (a 5xx, or no network): it is never said as done.
@@ -172,6 +177,7 @@ pub(super) fn run_setup(plan: &Plan, env: &Env, sh: &Shared) {
             // else ended the run, the student is told, never "cancelled" or "stopped" as if nothing changed.
             let end = match end {
                 End::Finished => End::Finished,
+                End::ForwardingSet => End::ForwardingSet,
                 _ if r.rotated => End::NeedsYou(ROTATED_LINE),
                 // Nothing was put in the mailbox: the address goes, so it neither holds the mailbox's hint
                 // against the next setup nor counts as live (T18c).
@@ -195,6 +201,7 @@ pub(super) fn run_setup(plan: &Plan, env: &Env, sh: &Shared) {
     let (ended, line) = match end {
         End::NeedsYou(line) => ("needs_you", line),
         End::Finished => ("finished", "setup finished"),
+        End::ForwardingSet => ("finished", FORWARDING_SET_LINE),
         End::Stopped => ("stopped", "setup stopped"),
         End::Withdrawn => ("stopped", WITHDRAWN_LINE),
         End::NotWithdrawn => ("stopped", NOT_WITHDRAWN_LINE),
@@ -452,7 +459,20 @@ impl<'a> Runner<'a> {
     }
 
     fn finished_end(&self) -> End {
-        if self.sh.stopping() || self.said_no || self.gave_up { End::Stopped } else { End::Finished }
+        if self.sh.stopping() || self.said_no {
+            return End::Stopped;
+        }
+        if self.gave_up {
+            // Microsoft 365's backfill is the guided step while C3 is built, so ending there by hand is the
+            // designed end: with forwarding set and the canary arrived it is a success. A setup that never
+            // got that far (or a rotate) stays a stop.
+            let set = matches!(self.machine.state(Step::Forwarding), State::Done | State::DoneByHand);
+            if backfill_held_for_c3(self.provider) && !self.rotating() && self.canary_ok && set {
+                return End::ForwardingSet;
+            }
+            return End::Stopped;
+        }
+        End::Finished
     }
 
     /// The loop: the machine hands out a step, the runner runs it, the machine takes its outcome.

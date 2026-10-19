@@ -67,6 +67,21 @@ pub fn open_backfills(data_dir: &Path) -> Vec<String> {
     }
 }
 
+/// The open backfills a launch resumes: `ids` without the mailboxes whose backfill is held while C3 is built
+/// (Microsoft 365, [`backfill_held_for_c3`]). Knowlu stops trying to resume what it cannot run yet (Quinn,
+/// 2026-10-19), so a launch with only such markers starts no run: no failed line, no amber. Their markers
+/// stay in `mail.json` for C3 to resume. If the service cannot be asked, every id is kept and the resume says
+/// what it finds, as before.
+pub fn launch_resumable(ids: Vec<String>, client: &MailClient) -> Vec<String> {
+    let Ok(rows) = client.list_addresses() else { return ids };
+    let held = |id: &String| {
+        rows.iter()
+            .find(|r| r["address_id"].as_str() == Some(id.as_str()))
+            .is_some_and(|r| backfill_held_for_c3(Provider::from_service(r["provider"].as_str().unwrap_or(""))))
+    };
+    ids.into_iter().filter(|id| !held(id)).collect()
+}
+
 /// Marks (or unmarks) a mailbox's backfill open in `mail.json`.
 pub(super) fn mark_open(data_dir: &Path, id: &str, open: bool) -> Result<(), String> {
     MailState::update(data_dir, |s| {
@@ -301,9 +316,14 @@ fn resume_one(data_dir: &Path, id: &str, env: &Env, sh: &Shared) -> Result<(), &
     let rows = env.client.list_addresses().map_err(|e| e.name())?;
     let row = rows.iter().find(|r| r["address_id"].as_str() == Some(id)).ok_or("no such mailbox")?;
     let provider = Provider::from_service(row["provider"].as_str().unwrap_or(""));
-    // D13: Microsoft 365's retired routine is never driven while C3 is built. Before any window opens, with the
-    // marker left in `mail.json` for C3 to resume. The guided word is the one a mailbox set up by hand gets.
-    if provider == Provider::Guided || backfill_held_for_c3(provider) {
+    // D13: Microsoft 365's retired routine is never driven while C3 is built. A launch does not pick such a
+    // mailbox ([`launch_resumable`]); one that reaches here is skipped before any window opens, with no failure
+    // and its marker left in `mail.json` for C3 to resume. The guided word is the one a mailbox set up by hand
+    // gets.
+    if backfill_held_for_c3(provider) {
+        return Ok(());
+    }
+    if provider == Provider::Guided {
         return Err("this mailbox is set up by hand");
     }
     if matches!(row["status"].as_str(), Some("lapsed" | "revoked")) {

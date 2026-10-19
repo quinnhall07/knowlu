@@ -163,6 +163,11 @@ pub fn on_start(app: &AppHandle) {
             return;
         }
         let Ok(client) = client else { return };
+        // Microsoft 365's backfill is held for C3: its marker stays, and nothing runs or shows for it.
+        let ids = super::backfill::launch_resumable(ids, &client);
+        if ids.is_empty() {
+            return;
+        }
         let env = real_env(&app, &data_dir, client, guard);
         let _ = SETUPS.start_resume(data_dir, ids, env);
     });
