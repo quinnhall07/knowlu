@@ -187,7 +187,9 @@ pub fn match_course<'a>(course: &BundleCourse, notes: &'a [CourseRef]) -> Option
 /// item) as the fields of a grade note. `due` is converted into `zone`, the vault's.
 pub fn column_to_fields(column: &Value, row: Option<&Value>, zone: &TimeZone) -> GradeFields {
     let text = |v: &Value| v.as_str().unwrap_or("").to_string();
-    // The instructor's override (top-level `score`) wins, whatever the status. Else what the student
+    // A top-level `score` wins, whatever the status. The v2 rows seen live never carry one (0 of 107);
+    // an instructor override there shows as `overridden`, its value already under `displayGrade`, so
+    // the fallback below reads it, under its gates, and no `overridden` branch is needed. Else what the student
     // sees in the v2 row, `displayGrade.score`, only where it is points and final: a `Score` or
     // `CompleteIncomplete` column (full points or 0), on a row that is Graded or has no status. A
     // NeedsGrading or InProgress row's number is an auto-score (a test with manual questions), and
