@@ -163,6 +163,28 @@ fn the_popup_opens_only_for_about_blank_and_the_providers_own_hosts() {
     }
 }
 
+/// T18c (live, 2026-10-18): once the phone approves, Google's verify popup passes through YouTube's
+/// `SetSID` to carry the session across Google's domains; a refused hop leaves the popup on "Loading".
+/// That one path is allowed for Gmail, and nothing else on that host or for another provider.
+#[test]
+fn the_gmail_popup_may_pass_through_googles_cross_domain_sign_in_hop_only() {
+    assert!(popup_allowed(Provider::Gmail, "https://accounts.youtube.com/accounts/SetSID"));
+    assert!(popup_allowed(Provider::Gmail, "https://accounts.youtube.com/accounts/SetSID?ssdc=1&sidt=x&continue=y"));
+    for (p, url) in [
+        (Provider::M365, "https://accounts.youtube.com/accounts/SetSID"),
+        (Provider::Gmail, "https://accounts.youtube.com/"),
+        (Provider::Gmail, "https://accounts.youtube.com/accounts/SetSIDx"),
+        (Provider::Gmail, "https://accounts.youtube.com/accounts/SetSID/more"),
+        (Provider::Gmail, "https://www.youtube.com/accounts/SetSID"),
+        (Provider::Gmail, "http://accounts.youtube.com/accounts/SetSID"),
+        (Provider::Gmail, "https://accounts.youtube.com:8443/accounts/SetSID"),
+        (Provider::Gmail, "https://u@accounts.youtube.com/accounts/SetSID"),
+        (Provider::Gmail, "https://accounts.youtube.com.example.invalid/accounts/SetSID"),
+    ] {
+        assert!(!popup_allowed(p, url), "{p:?} allowed a popup at {url}");
+    }
+}
+
 /// S1b, on the popup's own window (no window opens in a test, so this reads `src/mail.rs`): every
 /// navigation in the popup passes [`popup_allowed`], the popup opens no popup of its own, and its
 /// `window.close()` destroys the Tauri window. wry's own close handler destroys only the webview's

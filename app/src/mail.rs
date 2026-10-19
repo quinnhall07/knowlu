@@ -70,7 +70,32 @@ pub fn popup_allowed(provider: Provider, url: &str) -> bool {
     if mail_hosts(provider).is_empty() {
         return false;
     }
-    url == "about:blank" || on_mail_host(provider, url) || sign_in_hosts(provider).iter().any(|h| crate::grades::on_host(url, h))
+    url == "about:blank"
+        || on_mail_host(provider, url)
+        || sign_in_hosts(provider).iter().any(|h| crate::grades::on_host(url, h))
+        || sign_in_hops(provider).iter().any(|&(host, path)| on_hop(url, host, path))
+}
+
+/// Single pages on another host that the provider's sign-in passes through. T18c (live, 2026-10-18): once
+/// the phone approves, Google's verify popup goes by YouTube's `SetSID` to carry the session across
+/// Google's domains, and a refused hop leaves the popup on "Loading". The path, not the host, is allowed.
+fn sign_in_hops(provider: Provider) -> &'static [(&'static str, &'static str)] {
+    match provider {
+        Provider::Gmail => &[("accounts.youtube.com", "/accounts/SetSID")],
+        Provider::M365 | Provider::Guided => &[],
+    }
+}
+
+/// `https://<host><path>` exactly, any query: no user part, no port, the host case-blind.
+fn on_hop(url: &str, host: &str, path: &str) -> bool {
+    tauri::Url::parse(url).is_ok_and(|u| {
+        u.scheme() == "https"
+            && u.username().is_empty()
+            && u.password().is_none()
+            && u.port().is_none()
+            && u.host_str().is_some_and(|h| h.eq_ignore_ascii_case(host))
+            && u.path() == path
+    })
 }
 
 /// Where setup's window opens: the provider's mailbox, which sends a signed-out student to sign in.
