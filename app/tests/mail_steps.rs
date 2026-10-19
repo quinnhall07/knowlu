@@ -3,7 +3,8 @@
 use jiff::civil::date;
 use knowlu::mail_steps::{
     backfill_held_for_c3, backfill_since, backfill_window, Action, Mode, Outcome, Paused, Provider, Reason, Routine, Send, Setup, State,
-    Step, BACKFILL_DAYS, MAX_PAGE_LOADS_PER_DAY, MAX_PER_DAY, MAX_PER_MINUTE,
+    Step, BACKFILL_DAYS, max_per_day, GMAIL_MAX_MESSAGES_PER_DAY, GMAIL_MAX_PER_DAY, MAX_PAGE_LOADS_PER_DAY, MAX_PER_DAY,
+    MAX_PER_MINUTE,
 };
 
 const DAY: i64 = 86_400;
@@ -180,7 +181,7 @@ fn a_resumed_backfill_keeps_its_first_window_start() {
 }
 
 #[test]
-fn the_pace_is_at_most_10_a_minute_and_600_a_mailbox_a_day() {
+fn the_pace_is_at_most_10_a_minute_and_600_a_microsoft_mailbox_a_day() {
     assert_eq!((MAX_PER_MINUTE, MAX_PER_DAY), (10, 600));
     let t0 = 5 * DAY + 3_600;
     let mut r = Routine::new(Provider::M365, t0.div_euclid(DAY), 0);
@@ -195,17 +196,58 @@ fn the_pace_is_at_most_10_a_minute_and_600_a_mailbox_a_day() {
     r.sent(t0 + 60);
     assert_eq!(r.next(t0 + 60), Send::WaitUntil(t0 + 61), "ten sends are again inside the minute");
 
-    // 600 in a UTC day, then nothing until the next UTC day.
+    // 600 in a UTC day, then nothing until the next UTC day. Microsoft 365's: Gmail's day is larger (Quinn,
+    // 2026-10-19), and the test that pins it is below.
     let start = 9 * DAY;
-    let mut r = Routine::new(Provider::Gmail, 9, 599);
+    let mut r = Routine::new(Provider::M365, 9, 599);
     assert_eq!(r.next(start + 100), Send::Now);
     r.sent(start + 100);
     assert_eq!(r.next(start + 1_000), Send::DayLimit { next_day_at: 10 * DAY });
     assert_eq!(r.next(10 * DAY - 1), Send::DayLimit { next_day_at: 10 * DAY });
     assert_eq!(r.next(10 * DAY), Send::Now, "the new UTC day starts at zero");
     // A resume on the same day counts what was already sent.
-    let mut resumed = Routine::new(Provider::Gmail, 9, 600);
+    let mut resumed = Routine::new(Provider::M365, 9, 600);
     assert!(matches!(resumed.next(start + 5), Send::DayLimit { .. }));
+}
+
+#[test]
+fn gmail_sends_at_most_1500_originals_in_300_messages_a_mailbox_a_utc_day() {
+    // Quinn, 2026-10-19: "increase the day cap". Gmail's day is 1,500 originals (a 1,485-row 120-day backfill fits
+    // in about one), sent as at most 300 Gmail messages: one forward is one message of up to ten originals, and
+    // Gmail's consumer limit is about 500 a day with the student's own mail, past which sending stops for up to
+    // 24 h. Microsoft 365 keeps its 600 (provisional, S6) and has no message count.
+    assert_eq!((GMAIL_MAX_PER_DAY, GMAIL_MAX_MESSAGES_PER_DAY, MAX_PER_DAY), (1_500, 300, 600));
+    assert_eq!((max_per_day(Provider::Gmail), max_per_day(Provider::M365)), (1_500, 600));
+    let start = 9 * DAY;
+    // 600 is no limit for Gmail; 1,499 sent, one more fits, then the day's originals are spent.
+    assert_eq!(Routine::new(Provider::Gmail, 9, 600).next(start + 5), Send::Now);
+    let mut g = Routine::new(Provider::Gmail, 9, 1_499);
+    assert_eq!(g.next(start + 100), Send::Now);
+    g.sent(start + 100);
+    assert_eq!(g.next(start + 1_000), Send::DayLimit { next_day_at: 10 * DAY });
+    // Messages: each forward reserves one first. The 300th spends the day whatever originals are left.
+    let mut m = Routine::new(Provider::Gmail, 9, 0);
+    for i in 0..300 {
+        assert!(m.reserve_message(start + i), "message {i}");
+    }
+    assert_eq!((m.messages_today(), m.sent_today()), (300, 0));
+    assert!(!m.reserve_message(start + 400), "the 301st is refused");
+    assert_eq!(m.messages_today(), 300, "a refused reservation counts nothing");
+    assert_eq!(m.next(start + 400), Send::DayLimit { next_day_at: 10 * DAY });
+    // A send that did not go gives its message back.
+    m.release_message();
+    assert_eq!((m.messages_today(), m.next(start + 401)), (299, Send::Now));
+    // A resume carries the day's messages; the next UTC day starts from none.
+    let mut resumed = Routine::new(Provider::Gmail, 9, 10).with_messages(300);
+    assert_eq!(resumed.next(start + 5), Send::DayLimit { next_day_at: 10 * DAY });
+    assert_eq!(resumed.next(10 * DAY), Send::Now);
+    assert_eq!((resumed.messages_today(), resumed.day()), (0, 10));
+    // Microsoft 365 counts no messages: 300 reservations do not hold its sends.
+    let mut s = Routine::new(Provider::M365, 9, 0);
+    for i in 0..300 {
+        s.reserve_message(start + i);
+    }
+    assert_eq!(s.next(start + 400), Send::Now);
 }
 
 #[test]
@@ -433,22 +475,22 @@ fn a_routine_remembers_when_its_last_forward_answered_ok() {
 }
 
 #[test]
-fn a_routine_counts_its_page_loads_for_the_utc_day_up_to_300() {
+fn a_routine_counts_its_page_loads_for_the_utc_day_up_to_600() {
     // The Gmail backfill's page budget (design 2026-10-19): every open, search and pager press is a page load,
-    // at most 300 a mailbox a UTC day, about twice a 1,485-row day's need.
-    assert_eq!(MAX_PAGE_LOADS_PER_DAY, 300);
+    // at most 600 a mailbox a UTC day since Quinn's day-cap ruling of 2026-10-19 (300 before it).
+    assert_eq!(MAX_PAGE_LOADS_PER_DAY, 600);
     let t0 = 9 * DAY + 100;
     let mut r = Routine::new(Provider::Gmail, 9, 0);
-    assert_eq!(r.loads_left(t0), 300);
+    assert_eq!(r.loads_left(t0), 600);
     r.loaded(t0, 40);
     r.loaded(t0 + 5, 2);
-    assert_eq!((r.loads_today(), r.loads_left(t0 + 5)), (42, 258));
+    assert_eq!((r.loads_today(), r.loads_left(t0 + 5)), (42, 558));
     // A resume carries the day's count; past the budget nothing is left, never a wrap.
-    let mut seeded = Routine::new(Provider::Gmail, 9, 10).with_loads(299);
+    let mut seeded = Routine::new(Provider::Gmail, 9, 10).with_loads(599);
     seeded.loaded(t0, 5);
-    assert_eq!((seeded.loads_today(), seeded.loads_left(t0)), (304, 0));
+    assert_eq!((seeded.loads_today(), seeded.loads_left(t0)), (604, 0));
     // The next UTC day starts from none, as the sends do, and the two counts are separate.
-    assert_eq!(seeded.loads_left(10 * DAY), 300);
+    assert_eq!(seeded.loads_left(10 * DAY), 600);
     assert_eq!((seeded.loads_today(), seeded.sent_today(), seeded.day()), (0, 0, 10));
     let mut sends = Routine::new(Provider::Gmail, 9, 0);
     sends.sent(t0);

@@ -1,6 +1,6 @@
 //! The backfill's driver (email-forwarding plan T11.3; spec §4.2 step 5, §4.11 "an open backfill is not
 //! bound by the slot", §4.8 step 1). [`drive_backfill`] is T11.2's recover routine over the fixed window
-//! (BW: 120 days before setup, never recomputed), run again as the pace allows: the day's 600 spent, or
+//! (BW: 120 days before setup, never recomputed), run again as the pace allows: the day's sends spent, or
 //! Microsoft's refusal, ends a pass, and the driver waits for the next UTC day and runs the window again
 //! (what was sent is held by then, so the next pass forwards only what is still missing). Each pass opens
 //! a `backfill` batch before it lists and closes it with the count sent; **a closed batch starts a slot at
@@ -110,7 +110,7 @@ pub(super) fn seed_routine(data_dir: &Path, provider: Provider, id: &str, now: i
     let kept = state.as_ref().and_then(|s| s.backfill_pace.get(id).cloned()).filter(|p| p.day == day);
     let mut routine = match kept {
         Some(p) => {
-            let routine = Routine::new(provider, day, p.sent_today).with_loads(p.loads_today);
+            let routine = Routine::new(provider, day, p.sent_today).with_loads(p.loads_today).with_messages(p.messages_today);
             if p.paused_until.is_some_and(|t| t > now) { routine.paused() } else { routine }
         }
         None => Routine::new(provider, day, 0),
@@ -128,7 +128,7 @@ pub(super) fn save_look(data_dir: &Path, id: &str, at: i64) {
     let _ = MailState::update(data_dir, |s| s.last_look.insert(id.to_string(), at) != Some(at));
 }
 
-/// Keeps a mailbox's day count, page loads and pause in `mail.json`, and drops every pace whose day is past.
+/// Keeps a mailbox's day count, page loads, Gmail messages and pause in `mail.json`, and drops every pace whose day is past.
 /// A pace for the day already kept is merged, never lowered: each count by its larger, a pause kept (a
 /// progress note knows the sends but not the loads, a look's note the loads but not the sends). `create`
 /// false only merges into a pace kept for the same day. Best effort: a pace that could not be written costs
@@ -144,6 +144,7 @@ pub(super) fn keep_pace(data_dir: &Path, id: &str, pace: BackfillPace, create: b
                 sent_today: old.sent_today.max(pace.sent_today),
                 paused_until: pace.paused_until.or(old.paused_until),
                 loads_today: old.loads_today.max(pace.loads_today),
+                messages_today: old.messages_today.max(pace.messages_today),
             },
             _ if !create => return s.backfill_pace != before,
             _ => pace,
@@ -262,6 +263,7 @@ fn pace_of(routine: &Routine) -> BackfillPace {
         sent_today: routine.sent_today(),
         paused_until: routine.is_paused().then_some((day + 1) * DAY),
         loads_today: routine.loads_today(),
+        messages_today: routine.messages_today(),
     }
 }
 
@@ -280,13 +282,13 @@ fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i
         });
         // Past midnight mid-pass the day's own count is not known here: the pass's, an upper bound.
         let sent_today = if at.div_euclid(DAY) == today { base + sent } else { sent };
-        let pace = BackfillPace { day: at.div_euclid(DAY), sent_today, paused_until: None, loads_today: 0 };
+        let pace = BackfillPace { day: at.div_euclid(DAY), sent_today, paused_until: None, loads_today: 0, messages_today: 0 };
         keep_pace(d.data_dir, d.address_id, pace, true);
         !d.shared.stopping()
     };
     let look = |at: i64| save_look(d.data_dir, d.address_id, at);
-    let load = |day: i64, loads: u32| {
-        let pace = BackfillPace { day, sent_today: 0, paused_until: None, loads_today: loads };
+    let load = |day: i64, loads: u32, messages: u32| {
+        let pace = BackfillPace { day, sent_today: 0, paused_until: None, loads_today: loads, messages_today: messages };
         keep_pace(d.data_dir, d.address_id, pace, true);
     };
     let job = Job {

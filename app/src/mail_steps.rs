@@ -24,7 +24,8 @@
 //! it back ([`backfill_window`]).
 //!
 //! **The pace** ([`Routine`]) is Microsoft's: at most [`MAX_PER_MINUTE`] a minute and
-//! [`MAX_PER_DAY`] a mailbox a UTC day (provisional until S6), and the first send failure stops the
+//! [`MAX_PER_DAY`] a mailbox a UTC day (provisional until S6); Gmail's day is [`GMAIL_MAX_PER_DAY`] originals in at
+//! most [`GMAIL_MAX_MESSAGES_PER_DAY`] messages (Quinn, 2026-10-19). The first send failure stops the
 //! routine for the rest of that UTC day with a named outcome ([`Paused::line`]).
 use jiff::civil::Date;
 use knowlu_engine::scheduling::add_days;
@@ -36,13 +37,32 @@ pub const BACKFILL_DAYS: i64 = 120;
 /// S6** (the M365 test-tenant run, never a real school account): S6 blocks this number, not the
 /// code (email plan §6, T17 step 6, §9.5), so T17 merged it unconfirmed on 2026-10-03.
 pub const MAX_PER_MINUTE: usize = 10;
-/// Forwards per mailbox per UTC day. **Provisional, pending S6**, as [`MAX_PER_MINUTE`]; until S6
-/// confirms it, T18's live proof keeps the school backfill under 600.
+/// Microsoft 365's forwards per mailbox per UTC day. **Provisional, pending S6**, as [`MAX_PER_MINUTE`]; until S6
+/// confirms it, T18's live proof keeps the school backfill under 600. Gmail's is [`GMAIL_MAX_PER_DAY`].
 pub const MAX_PER_DAY: u32 = 600;
-/// Gmail page loads per mailbox per UTC day: every open of a place, every search and every pager press (the
-/// Gmail backfill's page-press budget, design of 2026-10-19). A backstop at about twice a 1,485-row day's
-/// need (about 125): the routine plans well inside it, and a pass that reaches it stops until the next day.
-pub const MAX_PAGE_LOADS_PER_DAY: u32 = 300;
+/// Gmail's originals forwarded per mailbox per UTC day: 1,500 (Quinn, 2026-10-19, "increase the day cap",
+/// superseding "Keep 600" for Gmail), so a 1,485-row 120-day backfill fits in about one day. Gmail sends them
+/// as at most [`GMAIL_MAX_MESSAGES_PER_DAY`] messages.
+pub const GMAIL_MAX_PER_DAY: u32 = 1_500;
+/// Gmail messages sent per mailbox per UTC day (2026-10-19, with the day cap): one `forward.js` send is one
+/// message whatever its number of originals (up to ten). Gmail's consumer limit is about 500 messages a day
+/// counting the student's own mail, and passing it stops the account sending for up to 24 hours, so the
+/// backfill keeps to 300 and leaves the rest of the day to the student.
+pub const GMAIL_MAX_MESSAGES_PER_DAY: u32 = 300;
+/// Gmail page loads per mailbox per UTC day: every open of a place (a fresh Inbox is two, the navigation and
+/// the reload), every search, every pager press and every conversation opened (the Gmail backfill's page-press
+/// budget, design of 2026-10-19). 600 since the day-cap ruling of 2026-10-19 (300 before it): a 1,500-original
+/// day makes about twice the looks and restarts of a 600 one. A backstop: the routine plans well inside it, and
+/// a pass that reaches it stops until the next day.
+pub const MAX_PAGE_LOADS_PER_DAY: u32 = 600;
+
+/// The originals a mailbox of `provider` may forward in a UTC day.
+pub fn max_per_day(provider: Provider) -> u32 {
+    match provider {
+        Provider::Gmail => GMAIL_MAX_PER_DAY,
+        _ => MAX_PER_DAY,
+    }
+}
 
 const DAY_SECS: i64 = 86_400;
 
@@ -466,7 +486,8 @@ pub enum Send {
     Now,
     /// The unix second the next send may go.
     WaitUntil(i64),
-    /// 600 are sent for the day; the unix second the next UTC day starts.
+    /// The day's sends are spent ([`max_per_day`] originals, or Gmail's [`GMAIL_MAX_MESSAGES_PER_DAY`] messages); the unix
+    /// second the next UTC day starts.
     DayLimit { next_day_at: i64 },
     Paused(Paused),
 }
@@ -488,12 +509,15 @@ pub struct Routine {
     last_forward: Option<i64>,
     /// Page loads made on `day` ([`MAX_PAGE_LOADS_PER_DAY`]); a resume carries it (`mail.json`).
     loads_today: u32,
+    /// Gmail messages sent (or reserved for a send under way) on `day` ([`GMAIL_MAX_MESSAGES_PER_DAY`]); a resume
+    /// carries it (`mail.json`).
+    messages_today: u32,
 }
 
 impl Routine {
     /// A routine on UTC day `day` that has already sent `sent_today` (a resume carries the count).
     pub fn new(provider: Provider, day: i64, sent_today: u32) -> Routine {
-        Routine { provider, day, sent_today, recent: VecDeque::new(), paused_on: None, last_look: None, last_forward: None, loads_today: 0 }
+        Routine { provider, day, sent_today, recent: VecDeque::new(), paused_on: None, last_look: None, last_forward: None, loads_today: 0, messages_today: 0 }
     }
 
     fn roll(&mut self, now: i64) {
@@ -503,6 +527,7 @@ impl Routine {
             self.sent_today = 0;
             self.paused_on = None;
             self.loads_today = 0;
+            self.messages_today = 0;
         }
     }
 
@@ -512,7 +537,7 @@ impl Routine {
         if self.paused_on.is_some() {
             return Send::Paused(Paused(self.provider));
         }
-        if self.sent_today >= MAX_PER_DAY {
+        if self.sent_today >= max_per_day(self.provider) || self.messages_spent() {
             return Send::DayLimit { next_day_at: (self.day + 1) * DAY_SECS };
         }
         while self.recent.front().is_some_and(|t| *t <= now - 60) {
@@ -592,6 +617,39 @@ impl Routine {
     pub fn loads_left(&mut self, now: i64) -> u32 {
         self.roll(now);
         MAX_PAGE_LOADS_PER_DAY.saturating_sub(self.loads_today)
+    }
+
+    /// Whether a Gmail mailbox's messages for the day are spent (Microsoft 365 counts none).
+    fn messages_spent(&self) -> bool {
+        self.provider == Provider::Gmail && self.messages_today >= GMAIL_MAX_MESSAGES_PER_DAY
+    }
+
+    /// Reserves one Gmail message for a send about to go at `now`; `false` (nothing counted) when the day's
+    /// [`GMAIL_MAX_MESSAGES_PER_DAY`] are spent. A send that answers ok keeps it; one that did not go gives it back
+    /// ([`Routine::release_message`]).
+    pub fn reserve_message(&mut self, now: i64) -> bool {
+        self.roll(now);
+        if self.messages_spent() {
+            return false;
+        }
+        self.messages_today += 1;
+        true
+    }
+
+    /// A send the message was reserved for did not go.
+    pub fn release_message(&mut self) {
+        self.messages_today = self.messages_today.saturating_sub(1);
+    }
+
+    /// The messages sent (or reserved) on the routine's day.
+    pub fn messages_today(&self) -> u32 {
+        self.messages_today
+    }
+
+    /// This routine having already sent `n` messages on its day: a resume carries the count.
+    pub fn with_messages(mut self, n: u32) -> Routine {
+        self.messages_today = n;
+        self
     }
 
     /// This routine with today's sends paused: a resume of a day a refused send already ended.

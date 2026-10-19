@@ -177,10 +177,10 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
     let last_known_on = state.last_reconcile.get(id).and_then(|t| instant(t)).filter(|_| fwd.was_not_on());
     let look = |at: i64| save_look(env.data_dir, id, at);
     let backfilling = state.open_backfills.iter().any(|i| i == id);
-    // The page loads go only into a pace this day already keeps (a backfill's, or a slot's that sent), so a
+    // The page loads and messages go only into a pace this day already keeps (a backfill's, or a slot's that sent), so a
     // mailbox that only recovers adds nothing to `mail.json` for them.
-    let load = |day: i64, loads: u32| {
-        let pace = BackfillPace { day, sent_today: 0, paused_until: None, loads_today: loads };
+    let load = |day: i64, loads: u32, messages: u32| {
+        let pace = BackfillPace { day, sent_today: 0, paused_until: None, loads_today: loads, messages_today: messages };
         keep_pace(env.data_dir, id, pace, false);
     };
     let job = Job {
@@ -199,7 +199,7 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
     let mut routine = seed_routine(env.data_dir, provider, id, now);
     let out = run_pass(env.host, env.client, env.clock, &mut routine, &job);
     // The day's sends count for the mailbox whoever made them: a backfill seeds its pace from here, so a slot's
-    // sends are kept beside it (they once were not, and a slot and a backfill could pass the 600 together).
+    // sends are kept beside it (they once were not, and a slot and a backfill could pass the day's cap together).
     if out.sent > 0 || backfilling {
         let day = routine.day();
         let pace = BackfillPace {
@@ -207,6 +207,7 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
             sent_today: routine.sent_today(),
             paused_until: routine.is_paused().then_some((day + 1) * 86_400),
             loads_today: routine.loads_today(),
+            messages_today: routine.messages_today(),
         };
         keep_pace(env.data_dir, id, pace, true);
     }

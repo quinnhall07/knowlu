@@ -13,8 +13,9 @@
 //!
 //! **The scripts are the seam.** The routine speaks `app/assets/mail/` scripts' JSON ([`Mailbox`]); the
 //! window half ([`WindowMailbox`]) is the one real one. It sends one pass over **at most 30 messages a
-//! slot** unless a backfill is open ([`Job::cap`]), always at the pace of [`Routine`] (10 a minute, 600 a
-//! UTC day, the first refusal stops it for the day), and deletes the Sent copies it made.
+//! slot** unless a backfill is open ([`Job::cap`]), always at the pace of [`Routine`] (10 a minute; a UTC day's
+//! 600 for Microsoft 365, and for Gmail 1,500 originals in at most 300 messages, Quinn 2026-10-19; the first
+//! refusal stops it for the day), and deletes the Sent copies it made.
 //!
 //! **Microsoft 365** draws a virtualised list: the rows are the ones drawn. The routine narrows the window
 //! with `search.js`'s `until` (halving a span that does not draw whole, down to one day) so each span is
@@ -362,10 +363,11 @@ pub struct Job<'a> {
     /// it where the next pass seeds its routine from (`mail.json`). Best effort: a note that is not kept costs
     /// the next pass a longer reach-back, never a look.
     pub on_look: Option<&'a dyn Fn(i64)>,
-    /// Told the routine's UTC day and its page loads that day at each look and at the pass's end (Gmail's page
-    /// budget, [`crate::mail_steps::MAX_PAGE_LOADS_PER_DAY`]), so the caller can keep them in `mail.json` and a quit does not reset
-    /// the day's budget. Best effort, like `on_look`.
-    pub on_load: Option<&'a dyn Fn(i64, u32)>,
+    /// Told the routine's UTC day, its page loads that day and its Gmail messages that day at each look and at the
+    /// pass's end (Gmail's page budget, [`crate::mail_steps::MAX_PAGE_LOADS_PER_DAY`], and its message cap,
+    /// [`crate::mail_steps::GMAIL_MAX_MESSAGES_PER_DAY`]), so the caller can keep them in `mail.json` and a quit does
+    /// not reset the day's budget. Best effort, like `on_look`.
+    pub on_load: Option<&'a dyn Fn(i64, u32, u32)>,
     /// Gmail, a backfill after its first day: the UTC day (days since 1970-01-01) the search starts from, the
     /// day before the oldest mail a pass found still missing (Quinn 2026-10-19: "Yes, search from there"). The
     /// search starts from the later of it and the window's first day; mail dated before it is not looked at.
@@ -379,7 +381,8 @@ pub enum Stop {
     Done,
     /// The slot's 30 are sent.
     SlotCap,
-    /// 600 are sent for the UTC day; the next day starts at this unix second.
+    /// The UTC day's sends are spent (Microsoft 365's 600, Gmail's 1,500 originals or its 300 messages,
+    /// [`crate::mail_steps::max_per_day`]); the next day starts at this unix second.
     DayLimit { next_day_at: i64 },
     /// Gmail: the UTC day's page loads are spent ([`crate::mail_steps::MAX_PAGE_LOADS_PER_DAY`]); the next day starts at this
     /// unix second.
@@ -1053,7 +1056,7 @@ impl Pass<'_> {
     /// Tells the job's caller the day's page loads so far, so `mail.json` keeps them.
     fn note_loads(&self) {
         if let Some(note) = self.job.on_load {
-            note(self.routine.day(), self.routine.loads_today());
+            note(self.routine.day(), self.routine.loads_today(), self.routine.messages_today());
         }
     }
 
@@ -1275,8 +1278,18 @@ impl Pass<'_> {
         if slow {
             args["upload_ms"] = json!(SLOW_UPLOAD_MS);
         }
+        // One send is one Gmail message, whatever its originals (Quinn's day-cap ruling, 2026-10-19): reserved
+        // before it goes, kept when it answers ok, given back when it did not go. A call with no answer keeps it:
+        // the send may have gone.
+        let now = self.clock.now();
+        if !self.routine.reserve_message(now) {
+            return Err(Stop::DayLimit { next_day_at: (now.div_euclid(DAY) + 1) * DAY });
+        }
         self.attempts += 1;
         let v = self.mb.script(&self.path("forward.js"), &args).map_err(refused)?;
+        if v.get("result").and_then(Value::as_str) != Some("ok") {
+            self.routine.release_message();
+        }
         let reason = v.get("reason").and_then(Value::as_str);
         let control = v.get("control").and_then(Value::as_str);
         match (v.get("result").and_then(Value::as_str), reason, control) {

@@ -2001,15 +2001,15 @@ fn a_report_seen_once_does_not_pause_the_routine_again_at_a_later_days_look() {
 
 #[test]
 fn a_result_that_never_ends_stops_the_gmail_pass_at_the_days_page_limit() {
-    // Each "newer" is a page load: the day's 300 run out long before the 5,000-page backstop, and the pass stops
-    // as a page limit, never Done, with the end's own loads kept.
+    // Each "newer" is a page load: the day's 600 (300 before the day-cap ruling of 2026-10-19) run out long before
+    // the 5,000-page backstop, and the pass stops as a page limit, never Done, with the end's own loads kept.
     let mut mb = fake(Provider::Gmail, unheld(1));
     mb.endless = true;
     let mut r = routine(Provider::Gmail);
     let out = pass(&mb, &holding(&[]), &mut r, &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
     assert_eq!(out.stop, Stop::PageLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY });
-    assert!(mb.calls("list.js").len() < 300, "{}", mb.calls("list.js").len());
-    assert!(r.loads_today() <= 300 && u64::from(r.loads_today()) == mb.loads(), "{} vs {}", r.loads_today(), mb.loads());
+    assert!(mb.calls("list.js").len() < 600, "{}", mb.calls("list.js").len());
+    assert!(r.loads_today() <= 600 && u64::from(r.loads_today()) == mb.loads(), "{} vs {}", r.loads_today(), mb.loads());
 }
 
 /// `n` messages from `who`, `per_day` a day from the start of UTC day `first`, oldest first.
@@ -2111,12 +2111,13 @@ fn a_re_aim_across_a_gap_in_the_mail_longer_than_its_span_moves_its_bound_forwar
 }
 
 #[test]
-fn no_restart_is_made_once_the_days_600_sends_are_spent() {
-    // 570 sent already today: the third group of ten brings the day to 600 and the count since the look to 30.
-    // The look runs, but the walk does not start over: no fresh Inbox, no search, nothing listed.
+fn no_restart_is_made_once_the_days_1500_sends_are_spent() {
+    // 1,470 sent already today: the third group of ten brings the day to Gmail's 1,500 (Quinn, 2026-10-19; 600
+    // before) and the count since the look to 30. The look runs, but the walk does not start over: no fresh Inbox,
+    // no search, nothing listed.
     let mut mb = fake(Provider::Gmail, unheld(60));
     mb.size = 20;
-    let mut r = Routine::new(Provider::Gmail, NOW.div_euclid(DAY), 570);
+    let mut r = Routine::new(Provider::Gmail, NOW.div_euclid(DAY), 1_470);
     let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
     assert_eq!((out.stop, out.sent), (Stop::DayLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 30));
     assert_eq!(*mb.places.borrow(), [Place::FreshInbox, Place::Inbox, Place::Sent], "the look, then the batch's end");
@@ -2126,20 +2127,48 @@ fn no_restart_is_made_once_the_days_600_sends_are_spent() {
 }
 
 #[test]
+fn gmails_300_messages_a_day_stop_a_pass_whose_every_forward_is_a_single_original() {
+    // Quinn's day-cap ruling (2026-10-19): one forward is one Gmail message whatever its originals, and the day
+    // sends at most 300 (Gmail's consumer limit is about 500 with the student's own mail). Every group of two or
+    // more is "over 25 MB", so it is halved down to single rows and each send is one original: the message cap,
+    // not the 1,500 originals, ends the pass, as a day limit. A send that did not go counts no message.
+    let mut mb = fake(Provider::Gmail, unheld(320));
+    mb.over_rows = Some(1);
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop, out.sent), (Stop::DayLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 300));
+    assert_eq!(r.messages_today(), 300);
+    assert!(r.sent_today() < 1_500, "{}", r.sent_today());
+    let fwd = mb.forwards.borrow();
+    let went = fwd.iter().filter(|(_, a)| a["rows"].as_array().unwrap().len() == 1).count();
+    assert_eq!(went, 300, "every send that went was one original, and no more went than the day's messages");
+    assert!(fwd.len() > 300, "the halved groups were refused and counted nothing: {}", fwd.len());
+    let mut once: Vec<String> = fwd.iter().filter(|(_, a)| a["rows"].as_array().unwrap().len() == 1).flat_map(|(_, a)| row_texts(a)).collect();
+    once.sort();
+    once.dedup();
+    assert_eq!(once.len(), 300, "each original that went, went once");
+    drop(fwd);
+    // The next pass the same day sends nothing: the routine waits for the next UTC day.
+    let again = fake(Provider::Gmail, unheld(5));
+    let out = pass(&again, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop, again.forwards.borrow().len()), (Stop::DayLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 0));
+}
+
+#[test]
 fn a_newer_press_the_days_pages_cannot_pay_for_ends_the_pass_as_a_page_limit_never_done() {
-    // 292 of the day's 300 loads spent: the open, the search and its two presses leave none for "newer" beyond the
+    // 592 of the day's 600 loads spent: the open, the search and its two presses leave none for "newer" beyond the
     // end's own four. list.js answers "no presses left" (never `moved: false`, which reads as the newest page), and
     // the pass ends as a page limit with its end still run.
     let mut mb = fake(Provider::Gmail, unheld(30));
     mb.size = 10;
-    let mut r = routine(Provider::Gmail).with_loads(292);
+    let mut r = routine(Provider::Gmail).with_loads(592);
     let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
     assert_eq!((out.stop, out.sent), (Stop::PageLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 10));
     let last = mb.calls("list.js").last().cloned().unwrap();
     assert_eq!((last["go"].as_str(), last["max_presses"].as_u64()), (Some("newer"), Some(0)), "{last}");
     assert!(out.closed && sent_at_each_look(&mb) == [10], "the look and the batch's close still ran");
-    assert_eq!(u64::from(r.loads_today()), 292 + mb.loads());
-    assert!(r.loads_today() <= 300, "{}", r.loads_today());
+    assert_eq!(u64::from(r.loads_today()), 592 + mb.loads());
+    assert!(r.loads_today() <= 600, "{}", r.loads_today());
 }
 
 #[test]
@@ -2165,15 +2194,17 @@ fn the_pass_end_waits_out_undo_send_after_the_last_send_however_the_pass_stopped
 }
 
 #[test]
-fn a_1485_message_backfill_is_done_on_its_third_day_and_no_day_makes_more_than_160_page_loads() {
-    // The design's sizing (2026-10-19): 1,485 messages over a 120-day window, 45 to a page, 600 sends a day. Each
-    // day is one pass from the frontier the last kept (forward only), against a service that holds what went.
+fn a_1485_message_backfill_is_done_on_its_first_day_in_under_400_page_loads() {
+    // The design's sizing (2026-10-19): 1,485 messages over a 120-day window, 45 to a page. Quinn's day-cap ruling
+    // (2026-10-19) gives Gmail 1,500 originals in at most 300 messages and 600 page loads a day: the whole window
+    // goes on the first day, in groups of ten (149 messages). Each day is one pass from the frontier the last kept
+    // (forward only), against a service that holds what went; a second day would find nothing left.
     let first = NOW.div_euclid(DAY) - 120;
     let msgs: Vec<Mail> = (0..1_485).map(|i| mail(ANA, &format!("Notice {i}"), first * DAY + 3_600 + i * 6_900)).collect();
     let mut sent: Vec<String> = Vec::new();
     let mut frontier: Option<i64> = None;
     let mut days = Vec::new();
-    for d in 0..3 {
+    for d in 0..2 {
         let start = NOW + d * DAY;
         let went: std::collections::HashSet<String> = sent.iter().cloned().collect();
         let held: Vec<(&str, &str, i64)> =
@@ -2190,16 +2221,15 @@ fn a_1485_message_backfill_is_done_on_its_third_day_and_no_day_makes_more_than_1
         }
         assert_eq!(u64::from(r.loads_today()), mb.loads(), "day {d}");
         sent.extend(mb.forwarded());
-        days.push((out.stop, out.sent, mb.loads(), mb.presses.get()));
+        days.push((out.stop, out.sent, r.messages_today(), mb.loads(), mb.presses.get()));
     }
-    let next = |d: i64| (NOW.div_euclid(DAY) + d + 1) * DAY;
     let stops: Vec<(Stop, u32)> = days.iter().map(|d| (d.0.clone(), d.1)).collect();
-    assert_eq!(stops, [(Stop::DayLimit { next_day_at: next(0) }, 600), (Stop::DayLimit { next_day_at: next(1) }, 600), (Stop::Done, 285)]);
-    // The design put a day at about 146 loads with 20 looks; a look comes at 25 to 29 sends (a group ends with its
-    // page), so 600 sends make 24, each three loads (the look's Inbox, the fresh Inbox, the narrowed search) and
-    // about two presses. With the first search's count walk (32 presses) and, from the second day, the walk
-    // through the pages the last day sent (13), a day comes to about 160: measured 149, 159 and 93.
-    assert!(days.iter().all(|d| d.2 <= 160), "{days:?}");
+    assert_eq!(stops, [(Stop::Done, 1_485), (Stop::Done, 0)], "{days:?}");
+    // Measured (2026-10-19): 293 messages, 320 loads and 139 presses on the first day. A look comes every 25 to 30
+    // sends, so about 50 restarts, each the look's Inbox, the fresh Inbox, the narrowed search and a press or two,
+    // with the first search's count walk (40 presses). Groups fall to five after the first look: the minute's ten
+    // slots free in two halves. The bar sits a little above the measure, as the 160 one did.
+    assert!(days[0].2 <= 300 && days[0].3 <= 340, "{days:?}");
     let mut once = sent.clone();
     once.sort();
     once.dedup();
@@ -3203,13 +3233,15 @@ fn an_open_backfill_resumes_again_as_its_pace_allows() {
 
 use knowlu::mail::backfill::{drive_backfill, launch_resumable, open_backfills, Drive, Drove};
 
-/// Runs the driver on `routine` with the first forward stopping it (a quit mid-day), and returns how it ended.
-fn quit_after_first_forward(r: &Rig, routine: &mut Routine) -> Drove {
+/// Runs the driver on `routine` (its provider's scripts) with the first forward stopping it (a quit mid-day), and
+/// returns how it ended.
+fn quit_after_first_forward(r: &Rig, provider: Provider, routine: &mut Routine) -> Drove {
     let env = r.env();
     let shared = Arc::new(Shared::new());
     let stopper = shared.clone();
+    let forward = if provider == Provider::Gmail { "gmail/forward.js" } else { "m365/forward.js" };
     r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
-        if name == "m365/forward.js" {
+        if name == forward {
             stopper.stop();
         }
     }));
@@ -3217,7 +3249,7 @@ fn quit_after_first_forward(r: &Rig, routine: &mut Routine) -> Drove {
         mb: &*env.host,
         client: &env.client,
         clock: &*env.clock,
-        provider: Provider::M365,
+        provider,
         address_id: A,
         knowlu_address: KNOWLU,
         since: "2026-06-04".parse().unwrap(),
@@ -3251,14 +3283,17 @@ fn resume_and_time_forwards(r: &Rig) -> Vec<i64> {
 }
 
 #[test]
-fn a_relaunch_on_the_same_utc_day_never_sends_past_the_days_600() {
-    // Spec 4.2 step 5: at most 600 a mailbox a UTC day. 599 were sent, one more went (600), the app quit;
-    // the relaunch the same UTC day sends nothing until the next day.
+fn a_relaunch_on_the_same_utc_day_never_sends_past_the_days_1500() {
+    // Spec 4.2 step 5: a mailbox's day cap, Gmail's 1,500 since Quinn's ruling of 2026-10-19 (the mailbox is
+    // Gmail's, so its pass is too; this test ran a Microsoft pass at 600 before). 1,499 were sent, one Gmail call
+    // went (its row brings the day to 1,500), the app quit; the relaunch the same UTC day sends nothing until the
+    // next day.
     let r = open_backfill_rig("t113-relaunch-day", 3);
     let next_day = (NOW.div_euclid(DAY) + 1) * DAY;
-    let mut routine = Routine::new(Provider::M365, NOW.div_euclid(DAY), 599);
-    assert_eq!(quit_after_first_forward(&r, &mut routine), Drove::Stopped);
-    assert_eq!(r.calls("m365/forward.js").len(), 1);
+    let mut routine = Routine::new(Provider::Gmail, NOW.div_euclid(DAY), 1_499);
+    assert_eq!(quit_after_first_forward(&r, Provider::Gmail, &mut routine), Drove::Stopped);
+    assert_eq!(r.calls("gmail/forward.js").len(), 1);
+    assert_eq!(MailState::load(&r.dir).unwrap().backfill_pace[A].sent_today, 1_500);
     r.clk.0.fetch_add(3_600, Ordering::SeqCst);
     let times = resume_and_time_forwards(&r);
     assert_eq!(times.len(), 1, "the window (one Gmail call for its three messages) is forwarded once the day turns: {times:?}");
@@ -3272,7 +3307,7 @@ fn a_resume_after_a_refused_send_waits_for_the_next_utc_day() {
     let day = NOW.div_euclid(DAY);
     let next_day = (day + 1) * DAY;
     MailState::update(&r.dir, |s| {
-        s.backfill_pace.insert(A.to_string(), BackfillPace { day, sent_today: 41, paused_until: Some(next_day), loads_today: 0 });
+        s.backfill_pace.insert(A.to_string(), BackfillPace { day, sent_today: 41, paused_until: Some(next_day), loads_today: 0, messages_today: 0 });
         true
     })
     .unwrap();
@@ -3282,7 +3317,7 @@ fn a_resume_after_a_refused_send_waits_for_the_next_utc_day() {
     // A pace from an earlier day counts for nothing.
     let old = open_backfill_rig("t113-relaunch-old-pace", 2);
     MailState::update(&old.dir, |s| {
-        s.backfill_pace.insert(A.to_string(), BackfillPace { day: day - 1, sent_today: 600, paused_until: Some(day * DAY), loads_today: 0 });
+        s.backfill_pace.insert(A.to_string(), BackfillPace { day: day - 1, sent_today: 600, paused_until: Some(day * DAY), loads_today: 0, messages_today: 0 });
         true
     })
     .unwrap();
@@ -3291,13 +3326,13 @@ fn a_resume_after_a_refused_send_waits_for_the_next_utc_day() {
 
 #[test]
 fn a_resume_on_a_day_whose_page_loads_are_spent_waits_for_the_next_utc_day() {
-    // The day's 300 Gmail page loads kept in mail.json survive a relaunch: the backfill opens nothing and sends
+    // The day's 600 Gmail page loads kept in mail.json survive a relaunch: the backfill opens nothing and sends
     // nothing until the next UTC day, then goes on.
     let r = open_backfill_rig("loads-relaunch-spent", 2);
     let day = NOW.div_euclid(DAY);
     let next_day = (day + 1) * DAY;
     MailState::update(&r.dir, |s| {
-        s.backfill_pace.insert(A.to_string(), BackfillPace { day, sent_today: 41, paused_until: None, loads_today: 300 });
+        s.backfill_pace.insert(A.to_string(), BackfillPace { day, sent_today: 41, paused_until: None, loads_today: 600, messages_today: 0 });
         true
     })
     .unwrap();
@@ -3307,13 +3342,71 @@ fn a_resume_on_a_day_whose_page_loads_are_spent_waits_for_the_next_utc_day() {
 }
 
 #[test]
+fn a_resume_on_a_day_whose_300_gmail_messages_are_spent_waits_for_the_next_utc_day() {
+    // The day's Gmail messages (2026-10-19: at most 300) kept in mail.json survive a relaunch, as its sends and
+    // loads do: with 41 originals sent but 300 messages, the backfill sends nothing until the next UTC day.
+    let r = open_backfill_rig("messages-relaunch-spent", 2);
+    let day = NOW.div_euclid(DAY);
+    let next_day = (day + 1) * DAY;
+    MailState::update(&r.dir, |s| {
+        s.backfill_pace.insert(A.to_string(), BackfillPace { day, sent_today: 41, paused_until: None, loads_today: 0, messages_today: 300 });
+        true
+    })
+    .unwrap();
+    let times = resume_and_time_forwards(&r);
+    assert_eq!(times.len(), 1, "one Gmail call for both messages: {times:?}");
+    assert!(times.iter().all(|t| *t >= next_day), "{times:?} vs {next_day}");
+}
+
+#[test]
+fn a_backfill_keeps_its_days_gmail_messages_in_mail_json_merged_never_lowered() {
+    // A pass keeps the messages it sent beside its sends and loads; a same-day pace merges each by the larger, so
+    // the 5 a relaunch carried in are never lowered by a progress note (which knows the sends only).
+    let r = open_backfill_rig("messages-merge", 2);
+    let day = NOW.div_euclid(DAY);
+    MailState::update(&r.dir, |s| {
+        s.backfill_pace.insert(A.to_string(), BackfillPace { day, sent_today: 3, paused_until: None, loads_today: 0, messages_today: 5 });
+        true
+    })
+    .unwrap();
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let (k, dir) = (kept.clone(), r.dir.clone());
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if ["gmail/forward.js", "gmail/bounce.js", "gmail/sent_cleanup.js"].contains(&name) {
+            k.lock().unwrap().push(MailState::load(&dir).unwrap().backfill_pace[A].clone());
+        }
+    }));
+    let env = r.env();
+    let shared = Shared::new();
+    let mut routine = Routine::new(Provider::Gmail, day, 3).with_messages(5);
+    let d = Drive {
+        mb: &*env.host,
+        client: &env.client,
+        clock: &*env.clock,
+        provider: Provider::Gmail,
+        address_id: A,
+        knowlu_address: KNOWLU,
+        since: "2026-06-04".parse().unwrap(),
+        shared: &shared,
+        on_closed: &*env.on_closed,
+        data_dir: &r.dir,
+    };
+    assert_eq!(drive_backfill(&d, &mut routine), Drove::Done);
+    assert_eq!(routine.messages_today(), 6, "the one Gmail call is one message");
+    let kept = kept.lock().unwrap().clone();
+    assert!(!kept.is_empty() && kept.iter().all(|p| p.messages_today >= 5), "{kept:?}");
+    // The final look's note (after the send, before Sent is cleaned) already carries the pass's message.
+    assert!(kept.iter().any(|p| p.messages_today == 6), "{kept:?}");
+}
+
+#[test]
 fn the_days_page_loads_kept_in_mail_json_are_never_lowered_by_a_progress_note() {
     // A progress note knows the sends but not the loads (it writes none): a same-day pace merges by the larger
     // of each count, so the 50 loads a relaunch carried in stay while the pass sends, and its own are added.
     let r = open_backfill_rig("loads-merge", 2);
     let day = NOW.div_euclid(DAY);
     MailState::update(&r.dir, |s| {
-        s.backfill_pace.insert(A.to_string(), BackfillPace { day, sent_today: 3, paused_until: None, loads_today: 50 });
+        s.backfill_pace.insert(A.to_string(), BackfillPace { day, sent_today: 3, paused_until: None, loads_today: 50, messages_today: 0 });
         true
     })
     .unwrap();
@@ -3380,9 +3473,9 @@ fn a_mail_json_written_before_the_page_budget_reads_and_writes_back_byte_for_byt
 fn the_pace_is_kept_beside_the_open_marker_and_costs_nothing_when_empty() {
     let r = open_backfill_rig("t113-pace-file", 3);
     let mut routine = Routine::new(Provider::M365, NOW.div_euclid(DAY), 599);
-    quit_after_first_forward(&r, &mut routine);
+    quit_after_first_forward(&r, Provider::M365, &mut routine);
     let pace = MailState::load(&r.dir).unwrap().backfill_pace;
-    assert_eq!(pace.get(A), Some(&BackfillPace { day: NOW.div_euclid(DAY), sent_today: 600, paused_until: None, loads_today: 0 }));
+    assert_eq!(pace.get(A), Some(&BackfillPace { day: NOW.div_euclid(DAY), sent_today: 600, paused_until: None, loads_today: 0, messages_today: 0 }));
     // With none kept, mail.json is the spec's bytes: the field is not written.
     let clean = rig("t113-pace-empty");
     MailState::update(&clean.dir, |s| {

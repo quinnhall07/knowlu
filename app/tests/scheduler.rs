@@ -2317,7 +2317,7 @@ fn a_slot_pass_keeps_its_sends_beside_the_backfill_pace_so_the_day_never_passes_
     MailState::update(&b.d, |s| {
         s.open_backfills.push(rig::ID.to_string());
         let day = rig::NOW.div_euclid(rig::DAY);
-        s.backfill_pace.insert(rig::ID.to_string(), knowlu::mail_session::BackfillPace { day, sent_today: 41, paused_until: None, loads_today: 7 });
+        s.backfill_pace.insert(rig::ID.to_string(), knowlu::mail_session::BackfillPace { day, sent_today: 41, paused_until: None, loads_today: 7, messages_today: 0 });
         true
     })
     .unwrap();
@@ -2337,7 +2337,7 @@ fn a_slot_pass_on_a_day_whose_pages_are_spent_says_page_limit_reached_and_opens_
     g.mail(&[("Notice", rig::NOW - 3600)]);
     MailState::update(&g.d, |s| {
         let day = rig::NOW.div_euclid(rig::DAY);
-        s.backfill_pace.insert(rig::ID.to_string(), knowlu::mail_session::BackfillPace { day, sent_today: 3, paused_until: None, loads_today: 300 });
+        s.backfill_pace.insert(rig::ID.to_string(), knowlu::mail_session::BackfillPace { day, sent_today: 3, paused_until: None, loads_today: 600, messages_today: 0 });
         true
     })
     .unwrap();

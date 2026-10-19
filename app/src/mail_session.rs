@@ -94,7 +94,8 @@ pub struct MailState {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub open_backfills: Vec<String>,
     /// Each mailbox's send pace for its UTC day, by address id: the day's count, page loads and any pause, so
-    /// a relaunch the same day carries on from them (spec §4.2 step 5: at most 600 a mailbox a UTC day, and
+    /// a relaunch the same day carries on from them (spec §4.2 step 5: a mailbox's day cap, 600 for Microsoft 365
+    /// and 1,500 originals in at most 300 messages for Gmail since 2026-10-19, and
     /// nothing retries the same day after a refused send). Written by a backfill, and by a slot pass that sent
     /// or whose mailbox has a backfill open (a same-day pace is merged, never lowered). Counts and days only;
     /// dropped once its day is past, and not written at all when empty.
@@ -147,6 +148,11 @@ pub struct BackfillPace {
     /// before it existed lacks it and reads as none; not written while none.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub loads_today: u32,
+    /// Gmail messages sent on `day` (`mail_steps::GMAIL_MAX_MESSAGES_PER_DAY`, 2026-10-19): one forward is one
+    /// message of up to ten originals. A file written before it existed lacks it and reads as none; not written
+    /// while none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub messages_today: u32,
 }
 
 fn is_zero(n: &u32) -> bool {
