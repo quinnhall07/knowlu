@@ -101,6 +101,10 @@ export interface Opts {
   account?: string | null;
   /** The toolbar draws Delete only while a row is ticked (live 2026-10-19). */
   deleteOnSelect?: boolean;
+  /** With `deleteOnSelect`, Delete is drawn this many ms after the tick. */
+  deleteAfterMs?: number;
+  /** `swap` happens this many ms after the tick, not at once. */
+  swapAfterMs?: number;
   /** The first view's rows draw this many ms after the page opens (live 2026-10-19, Sent after a pass). */
   lateRowsMs?: number;
 }
@@ -335,10 +339,16 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
         const to = o.swap && row.getAttribute("data-id") === o.swap.id && !swapped &&
           b.msgs.find((m) => m.id === o.swap!.as);
         if (!to) return;
-        // The page draws another message in this row the moment it is ticked.
+        // The page draws another message in this row the moment it is ticked (or a moment later).
         swapped = true;
-        row.querySelector("span[email]").setAttribute("email", to.who);
-        row.querySelector(".bog").textContent = to.subject;
+        // The row is that message now: a Delete takes it.
+        const draw = () => {
+          row.setAttribute("data-id", to.id);
+          row.querySelector("span[email]").setAttribute("email", to.who);
+          row.querySelector(".bog").textContent = to.subject;
+        };
+        if (o.swapAfterMs) setTimeout(draw, o.swapAfterMs);
+        else draw();
       });
     }
   };
@@ -381,7 +391,10 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
   }
   // Live (2026-10-19) Delete is drawn only while a row is ticked.
   function showDelete() {
-    if (o.deleteOnSelect) b.el("del").setAttribute("style", b.checked().length > 0 ? "" : "display: none");
+    if (!o.deleteOnSelect) return;
+    const style = b.checked().length > 0 ? "" : "display: none";
+    if (style === "" && o.deleteAfterMs) setTimeout(() => b.el("del").setAttribute("style", style), o.deleteAfterMs);
+    else b.el("del").setAttribute("style", style);
   }
   newView();
   if (o.lateRowsMs) setTimeout(fill, o.lateRowsMs);

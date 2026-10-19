@@ -108,6 +108,11 @@ for (let tries = 0; deleted < max && tries < max + 5; tries++) {
     boxOf(row).click();
     return { result: "not found", control: "delete" };
   }
+  // And again after that wait, with nothing between it and the press: the page may draw the row anew.
+  if (!picked() || !ours(row)) {
+    for (const r of ticked()) boxOf(r).click();
+    continue;
+  }
   press(del());
   if (!(await until(() => !document.contains(row) || !ours(row), waitMs))) {
     boxOf(row).click();

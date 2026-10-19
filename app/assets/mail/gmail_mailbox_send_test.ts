@@ -2,7 +2,7 @@
 // 10 and R4): a page's missing messages forwarded as attachments in one send under 25 MB with the batch's
 // nonce, a refusal seen in the page, and the Sent cleanup that touches only the copies Knowlu made.
 // Synthetic pages only.
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { Box, mailbox, Msg, msg, NONCE, OURS } from "./gmail_mailbox_pages.ts";
 import { run } from "./test_dom.ts";
 
@@ -415,6 +415,19 @@ Deno.test("gmail_sent_cleanup_ticks_a_row_before_it_looks_for_delete", async () 
     deleted: 2,
   });
   assertEquals([[...live.deleted].sort(), live.checked()], [["c1", "c2"], []]);
+});
+
+Deno.test("gmail_sent_cleanup_reads_the_row_again_after_waiting_for_delete", async () => {
+  // Review of 4ea8228: Delete draws a moment after the tick, and meanwhile the page draws the student's own
+  // "Lunch on Friday" (k3) in the row ticked. The row is read again after the wait, so it is let go: the
+  // student's mail is never deleted.
+  const box = mailbox([
+    COPY("c1", OURS, `Knowlu ${NONCE}`),
+    COPY("k3", OURS, "Lunch on Friday"),
+  ], { view: "sent", deleteOnSelect: true, deleteAfterMs: 200, swap: { id: "c1", as: "k3" }, swapAfterMs: 100 });
+  await run("gmail/sent_cleanup.js", box.page, { address: OURS, nonce: NONCE, wait_ms: 1000 });
+  assert(!box.deleted.includes("k3"), `the student's own mail was deleted: ${box.deleted}`);
+  assertEquals(box.checked(), []);
 });
 
 Deno.test("gmail_sent_cleanup_waits_for_sent_to_draw_its_rows", async () => {
