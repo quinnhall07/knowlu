@@ -4,7 +4,9 @@
 // (list.js) and passes the row as list.js read it. Like every step script it is the body of an async
 // function of `args`: `args.sender`, `args.subject` and `args.received` the row's three fields,
 // `args.messages` (optional) the count list.js read from the row, and `args.wait_ms` (default 5000) bounds
-// each wait. It returns one of
+// each wait. Every answer carries `presses`, the page loads this call made, failures too (review of c8806b3:
+// the routine charges them to the day's page budget): the row's open, each "Expand all" and the back press. It
+// returns one of
 //   { result: "ok", messages: [{ sender, subject, received, received_at, own? }] }   (oldest first; the page is
 //      back on its list)
 //   { result: "not found", control: "list" | "message" | "back" | "account" }
@@ -38,6 +40,8 @@ const until = async (ready, ms) => {
   return ready();
 };
 const buttons = () => [...document.querySelectorAll('[role="button"], button')].filter(shown);
+let presses = 0;
+const answer = (r) => ({ ...r, presses });
 // Shown: live, a hidden view's elements have no offsetParent.
 function shown(el) {
   return !!el && el.offsetParent !== null;
@@ -83,7 +87,7 @@ const listShowing = () => {
   const g = shownGrid();
   return !!g && g.querySelectorAll('tr[role="row"]').length > 0;
 };
-if (!grid) return { result: "not found", control: "list" };
+if (!grid) return answer({ result: "not found", control: "list" });
 
 // Whose mailbox this is: the last parenthesised address of the account chip's label.
 const own = (() => {
@@ -94,7 +98,7 @@ const own = (() => {
   }
   return "";
 })();
-if (!own) return { result: "not found", control: "account" };
+if (!own) return answer({ result: "not found", control: "account" });
 
 // The row, by the three fields list.js read from it (the newest sender, as list.js reads it).
 const read = (row) => {
@@ -115,12 +119,13 @@ const row = [...grid.querySelectorAll('tr[role="row"]')].find((r) => {
   const f = read(r);
   return f && f.sender === want.sender && f.subject === want.subject && f.received === want.received;
 });
-if (!row) return { result: "not found", control: "message" };
+if (!row) return answer({ result: "not found", control: "message" });
 
 const messageEls = () => [...document.querySelectorAll('[role="main"] [data-message-id]')];
 row.click();
+presses++;
 if (!(await until(() => messageEls().length > 0, waitMs))) {
-  return { result: "failed", reason: "conversation did not open" };
+  return answer({ result: "failed", reason: "conversation did not open" });
 }
 
 // Open every message: press "Expand all" while it is offered and the count is still growing.
@@ -128,6 +133,7 @@ const expand = () => buttons().find((b) => /^expand all$/i.test(nameOf(b) || tex
 for (let round = 0; round < 3 && expand(); round++) {
   const seen = messageEls().length;
   press(expand());
+  presses++;
   await until(() => messageEls().length > seen, Math.min(waitMs, 1000));
 }
 
@@ -155,10 +161,11 @@ async function back(result) {
   const button = buttons().find((b) =>
     /^back to /i.test(nameOf(b)) || /^back to /i.test((b.getAttribute("title") || "").trim())
   );
-  if (!button) return { result: "not found", control: "back" };
+  if (!button) return answer({ result: "not found", control: "back" });
   press(button);
-  if (!(await until(listShowing, waitMs))) return { result: "failed", reason: "list did not return" };
-  return result;
+  presses++;
+  if (!(await until(listShowing, waitMs))) return answer({ result: "failed", reason: "list did not return" });
+  return answer(result);
 }
 if (messages.length === 0) return await back({ result: "failed", reason: "no messages" });
 const counted = Number(args.messages);

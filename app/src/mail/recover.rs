@@ -45,15 +45,22 @@
 //! skips the rows it decided before; the pass looks once more when it ends, before the batch closes and Sent
 //! is cleaned, if anything was sent since the last look.
 //!
-//! **Gmail's page budget** (the design of 2026-10-19). Every open, search and pager press is a page load,
-//! charged to the routine's UTC day (failures too) up to `MAX_PAGE_LOADS_PER_DAY`, with [`FINISH_RESERVE`]
-//! kept for the pass's end; a press the day cannot pay for is "no presses left", which ends the pass as
-//! [`Stop::PageLimit`], never as the newest page. A restart (`Pass::aim`) reloads the Inbox (`FreshInbox`),
+//! **Gmail's page budget** (the design of 2026-10-19). Every open (a fresh Inbox is two), search, pager press
+//! and conversation opened (its open, any "Expand all", its back) is a page load, charged to the routine's UTC day
+//! (failures too, and a call with no answer at the bound it was given) up to `MAX_PAGE_LOADS_PER_DAY`, with
+//! [`FINISH_RESERVE`] kept for the pass's end; a press the day cannot pay for is "no presses left", which ends the
+//! pass as [`Stop::PageLimit`], never as the newest page. A restart (`Pass::aim`) reloads the Inbox (`FreshInbox`),
 //! searches the same day narrowed with `before:` a few days past the row the walk goes on from, without a count
-//! walk, and presses "older" until the page's oldest row is strictly older than that row; it is never made once
-//! the day's sends are spent. A narrowed search's newest page is aimed past with a later bound (at least a day
-//! later, its span doubled) until the search is whole: only the whole search's newest page ends the pass. A
-//! backfill keeps its pass's frontier in `mail.json` and its next pass searches from there.
+//! walk, and presses "older" until the page's oldest row is strictly older than that row, across as many calls as
+//! it takes (only the day's pages end it); it is never made once the day's sends are spent. A page whose range
+//! cannot be read is never the end ([`RANGE_UNREADABLE`]). A narrowed search's newest page is aimed past with a
+//! later bound (at least a day later, its span doubled) until the search is whole: only the whole search's newest
+//! page ends the pass. A backfill keeps its pass's frontier in `mail.json` and its next pass searches from there;
+//! a row that was left never holds it back.
+//!
+//! **A lone row that never attaches** (review of c8806b3) stalls a pass when nothing is sent around it. The
+//! caller counts the separate UTC days a pass ends stalled on it alone ([`Outcome::stalled_at`], `mail.json`'s
+//! `lone_stall`, its received minute only) and from the third passes it in [`Job::stuck`] to be left at once.
 //!
 //! **Privacy.** No sender, subject, address, nonce or page text is kept past the pass, logged or put in a
 //! [`Stop`]; every stop is a fixed word or a service error's name.
@@ -123,6 +130,11 @@ fn iso(secs: i64) -> String {
 /// `YYYY-MM-DD` of the UTC day with this index.
 fn day_str(day: i64) -> String {
     iso(day * DAY).chars().take(10).collect()
+}
+
+/// The whole minute an instant falls in (unix seconds).
+fn minute(at: i64) -> i64 {
+    at - at.rem_euclid(60)
 }
 
 fn parse_instant(s: &str) -> Option<i64> {
@@ -372,6 +384,16 @@ pub struct Job<'a> {
     /// day before the oldest mail a pass found still missing (Quinn 2026-10-19: "Yes, search from there"). The
     /// search starts from the later of it and the window's first day; mail dated before it is not looked at.
     pub frontier: Option<i64>,
+    /// Gmail: the lone row `mail.json` names as stalling passes (review of c8806b3), by its received minute, and
+    /// whether it is now left at once when it will not attach (from the third separate day).
+    pub stuck: Option<Stuck>,
+}
+
+/// A lone Gmail row that stalled passes: its received minute (unix seconds), and whether to leave it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stuck {
+    pub at: i64,
+    pub leave: bool,
 }
 
 /// Why a pass ended. A fixed word or a service error's name: nothing the page or a message said.
@@ -418,28 +440,33 @@ pub struct Outcome {
     pub cleaned: u32,
     /// The batch was closed with the count sent.
     pub closed: bool,
-    /// Gmail: the UTC day before the oldest row this pass judged missing (sent, left or waiting: a bounced batch
-    /// is searched again) or, when that is later, before the row the walk would go on from. `None` when the pass
-    /// met no row. A backfill keeps it as its next pass's [`Job::frontier`], only ever moving it forward.
+    /// Gmail: the UTC day before the oldest row this pass sent or left waiting (a bounced batch is searched again)
+    /// or, when that is older, before the row the walk would go on from. A row that was left is never retried
+    /// (plan T11.2), so it never holds the frontier back (review of c8806b3). `None` when the pass met no row. A
+    /// backfill keeps it as its next pass's [`Job::frontier`], only ever moving it forward.
     pub frontier: Option<i64>,
+    /// Gmail: the pass ended stalled on one lone row that would not attach, received in this minute (unix seconds).
+    pub stalled_at: Option<i64>,
+    /// Gmail: a row received in the job's [`Job::stuck`] minute was sent or held.
+    pub stuck_cleared: bool,
 }
 
 impl Outcome {
     fn new() -> Outcome {
-        Outcome { stop: Stop::Done, expected: 0, handled: 0, held: 0, sent: 0, left: 0, cleaned: 0, closed: false, frontier: None }
+        Outcome { stop: Stop::Done, expected: 0, handled: 0, held: 0, sent: 0, left: 0, cleaned: 0, closed: false, frontier: None, stalled_at: None, stuck_cleared: false }
     }
 }
 
-/// Gmail: whether `routine`'s day has too few page loads left at `now` for a pass to open anything (the open
-/// and the search, past the end's reserve): a pass would stop at once as [`Stop::PageLimit`].
+/// Gmail: whether `routine`'s day has too few page loads left at `now` for a pass to open anything (the fresh
+/// Inbox and the search, past the end's reserve): a pass would stop at once as [`Stop::PageLimit`].
 pub fn pages_spent(routine: &mut Routine, now: i64) -> bool {
-    routine.loads_left(now).saturating_sub(FINISH_RESERVE) < 2
+    routine.loads_left(now).saturating_sub(FINISH_RESERVE) < FRESH_LOADS + 1
 }
 
 /// One pass: lists, diffs, forwards, closes. A pass never writes the vault and never fails as a whole:
 /// it ends as a [`Stop`] with the counts so far.
 pub fn run_pass(mb: &dyn Mailbox, client: &MailClient, clock: &dyn Clock, routine: &mut Routine, job: &Job) -> Outcome {
-    let mut pass = Pass { mb, client, clock, routine, job, out: Outcome::new(), batch: None, attempts: 0, judged: HashSet::new(), decided: HashMap::new(), walk: HashMap::new(), since_look: 0, restart: false, sent_since_lone: false, lone_seen: false, waiting: 0, since_day: 0, bound: i64::MIN, base_span: MIN_SPAN_DAYS, span: MIN_SPAN_DAYS, aim_at: 0, at_of: HashMap::new(), first_missing: None };
+    let mut pass = Pass { mb, client, clock, routine, job, out: Outcome::new(), batch: None, attempts: 0, judged: HashSet::new(), decided: HashMap::new(), walk: HashMap::new(), since_look: 0, restart: false, sent_since_lone: false, lone_seen: false, waiting: 0, since_day: 0, bound: i64::MIN, base_span: MIN_SPAN_DAYS, span: MIN_SPAN_DAYS, aim_at: 0, at_of: HashMap::new(), first_kept: None, waiting_at: None };
     pass.out.stop = pass.go().err().unwrap_or(Stop::Done);
     pass.out.frontier = pass.frontier();
     pass.finish();
@@ -506,8 +533,10 @@ struct Pass<'a> {
     aim_at: i64,
     /// Gmail: each row met in the walk now under way, by key: its instant.
     at_of: HashMap<RowKey, i64>,
-    /// Gmail: the oldest instant of a row this pass judged missing.
-    first_missing: Option<i64>,
+    /// Gmail: the oldest instant of a row this pass sent (never one it left).
+    first_kept: Option<i64>,
+    /// Gmail: the instant of the lone row `waiting` counts.
+    waiting_at: Option<i64>,
 }
 
 /// A missing Gmail row: one message, or a conversation of `n` messages sent alone.
@@ -529,8 +558,14 @@ fn count(v: &Value, key: &str) -> Option<u32> {
 }
 
 const UNFINISHED: Stop = Stop::Script("a mailbox step did not finish");
-/// Gmail: a restart's seek toward where the walk goes on needed more than one call's presses.
-const FRONTIER_UNREACHED: Stop = Stop::Script("the frontier could not be reached");
+/// Gmail: `list.js` was asked to move on a page whose range it could not read and whose pager drew no button that
+/// way: nothing proves the page is the end, so it is never read as one (review of c8806b3).
+const RANGE_UNREADABLE: Stop = Stop::Script("the page range could not be read");
+/// Gmail: a fresh Inbox's page loads, the navigation and the reload (review of c8806b3).
+const FRESH_LOADS: u32 = 2;
+/// Gmail: the most page loads one `thread.js` call makes, the row's open, three "Expand all" and the back: a
+/// conversation is opened only with this much page room, and a call with no answer is charged it.
+const THREAD_LOADS: u32 = 5;
 /// Gmail: the most pager presses one `search.js` or `list.js` call may make (`max_presses`).
 const PRESSES_PER_CALL: u32 = 40;
 /// Gmail: a restart's narrowed search reaches about this many rows past where the walk goes on: its span in
@@ -584,12 +619,23 @@ impl Pass<'_> {
     /// A script's `ok` answer; anything else ends the pass with a fixed word. The pager presses it says it
     /// made are page loads, charged before the answer is read (a failure's too); "no presses left" is the
     /// day's page budget spent ([`Stop::PageLimit`]), never a page the walk reached.
+    /// A call that gives no answer (it ran out its step, perhaps after pressing) is charged the presses it was
+    /// allowed, `max_presses` (none for a search that does not walk): the bound, since nothing says fewer (review
+    /// of c8806b3). "page range unreadable" is a page whose end nothing can prove: the pass stops by name.
     fn ok(&mut self, name: &str, args: Value) -> Step<Value> {
-        let v = self.mb.script(&self.path(name), &args).map_err(refused)?;
+        let v = match self.mb.script(&self.path(name), &args) {
+            Ok(v) => v,
+            Err(r) => {
+                let walks = args.get("walk") != Some(&json!(false));
+                self.charge(if walks { count(&args, "max_presses").unwrap_or(0) } else { 0 });
+                return Err(refused(r));
+            }
+        };
         self.charge(count(&v, "presses").unwrap_or(0));
         match (v.get("result").and_then(Value::as_str), v.get("reason").and_then(Value::as_str)) {
             (Some("ok"), _) => Ok(v),
             (Some("failed"), Some("no presses left")) => Err(self.page_limit()),
+            (Some("failed"), Some("page range unreadable")) => Err(RANGE_UNREADABLE),
             _ => Err(UNFINISHED),
         }
     }
@@ -601,9 +647,10 @@ impl Pass<'_> {
         }
     }
 
-    /// Opens a place: one page load.
+    /// Opens a place: one page load, and a fresh Inbox two (Gmail navigates, then reloads the window; review of
+    /// c8806b3).
     fn open(&mut self, place: Place) -> Result<(), Refusal> {
-        self.charge(1);
+        self.charge(if place == Place::FreshInbox { FRESH_LOADS } else { 1 });
         self.mb.open(place)
     }
 
@@ -629,8 +676,8 @@ impl Pass<'_> {
         // Gmail searches in a freshly loaded document: a window kept across passes (a backfill's) still holds the
         // last pass's cached search view, which a search with the same words would be answered from.
         if j.provider == Provider::Gmail {
-            // A day whose pages are spent opens nothing (the open and the search are two loads).
-            if self.page_room() < 2 {
+            // A day whose pages are spent opens nothing (the fresh Inbox and the search are three loads).
+            if self.page_room() < FRESH_LOADS + 1 {
                 return Err(self.page_limit());
             }
             self.since_day = j.window.since.div_euclid(DAY).max(j.frontier.unwrap_or(i64::MIN));
@@ -665,8 +712,10 @@ impl Pass<'_> {
         self.span = self.base_span;
         self.gmail(&held, &found)?;
         // A lone row that would not attach, with no send after it to show the page works: nothing proves it is
-        // the row's, so it is not left (the next pass tries it again).
+        // the row's, so it is not left (the next pass tries it again). Its minute goes back to the caller, which
+        // counts the separate days it stalls a pass alone (`mail.json`'s `lone_stall`).
         if self.waiting > 0 {
+            self.out.stalled_at = self.waiting_at.map(minute);
             return Err(STALLED);
         }
         Ok(())
@@ -913,13 +962,17 @@ impl Pass<'_> {
         open.or_else(|| self.at_of.values().copied().max()).unwrap_or(self.aim_at)
     }
 
-    /// The UTC day a backfill's next pass may search from: the day before the oldest row this pass judged
-    /// missing, or before where the walk would go on when that is older. `None` when no row was met.
+    /// The UTC day a backfill's next pass may search from: the day before the oldest row this pass sent or left
+    /// waiting, or before where the walk would go on when that is older. `None` when no row was met.
     fn frontier(&self) -> Option<i64> {
-        if self.job.provider != Provider::Gmail || (self.at_of.is_empty() && self.first_missing.is_none()) {
+        let kept = match (self.first_kept, self.waiting_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        if self.job.provider != Provider::Gmail || (self.at_of.is_empty() && kept.is_none()) {
             return None;
         }
-        let at = match self.first_missing {
+        let at = match kept {
             Some(m) => m.min(self.resume_at()),
             None => self.resume_at(),
         };
@@ -939,7 +992,7 @@ impl Pass<'_> {
             Send::Paused(p) => return Err(Stop::Paused(p)),
             Send::Now | Send::WaitUntil(_) => {}
         }
-        if self.page_room() < 2 {
+        if self.page_room() < FRESH_LOADS + 1 {
             return Err(self.page_limit());
         }
         let floor = if grow { self.bound.saturating_add(1) } else { self.bound };
@@ -955,24 +1008,22 @@ impl Pass<'_> {
         self.walk.clear();
         self.at_of.clear();
         let mut v = self.ok("list.js", json!({}))?;
-        let mut presses = 0;
-        loop {
+        // The seek goes on across calls, each press charged, however far it is (review of c8806b3: one call's 40
+        // presses once ended the backfill); the day's page budget ends it as a page limit ("no presses left").
+        for _ in 0..WALK_PAGES {
             let rows = v.get("rows").and_then(Value::as_array).into_iter().flatten();
             let oldest = rows.filter_map(|r| r.get("received_at").and_then(Value::as_str).and_then(parse_instant)).min();
             if oldest.is_some_and(|t| t < at) {
                 return Ok(v);
             }
-            if presses >= PRESSES_PER_CALL {
-                return Err(FRONTIER_UNREACHED);
-            }
             let max = self.press_room();
             let older = self.ok("list.js", json!({ "go": "older", "max_presses": max }))?;
-            presses += 1;
             if older.get("moved").and_then(Value::as_bool) != Some(true) {
                 return Ok(older);
             }
             v = older;
         }
+        Err(NO_END)
     }
 
     /// Whether the search now under way is narrowed by an `until` (the first search and an unbounded one are not).
@@ -1041,6 +1092,13 @@ impl Pass<'_> {
 
     fn decide(&mut self, key: RowKey) {
         *self.decided.entry(key).or_default() += 1;
+    }
+
+    /// A row received at `at` was sent or held: if it is in the job's stuck minute, the record can go.
+    fn clears_stuck(&mut self, at: i64) {
+        if self.job.stuck.is_some_and(|s| s.at == minute(at)) {
+            self.out.stuck_cleared = true;
+        }
     }
 
     /// A look read the Inbox: the routine remembers when, and the job's caller is told so it can keep it.
@@ -1116,8 +1174,9 @@ impl Pass<'_> {
                 true
             } else if !row.thread {
                 let known = held.holds(&row.sender, &row.subject, at);
-                if !known {
-                    self.first_missing = Some(self.first_missing.map_or(at, |m| m.min(at)));
+                if known {
+                    self.clears_stuck(at);
+                } else {
                     cands.push(Cand::One(row.clone()));
                 }
                 self.out.held += u32::from(known);
@@ -1126,10 +1185,10 @@ impl Pass<'_> {
                 match self.read_thread(&row, held)? {
                     Convo::Held => {
                         self.out.held += 1;
+                        self.clears_stuck(at);
                         true
                     }
                     Convo::Missing(n) => {
-                        self.first_missing = Some(self.first_missing.map_or(at, |m| m.min(at)));
                         cands.push(Cand::Thread(row.clone(), n));
                         false
                     }
@@ -1150,11 +1209,23 @@ impl Pass<'_> {
     }
 
     /// Opens a conversation row and fingerprints every message in the window (Quinn 2026-10-02). A later
-    /// message reads with the conversation subject, so its "Re: " form is tried too.
+    /// message reads with the conversation subject, so its "Re: " form is tried too. Its page loads (the open, any
+    /// "Expand all", the back) are charged to the day's page budget like the pager's (review of c8806b3): one is
+    /// opened only with [`THREAD_LOADS`] of page room, and a call with no answer is charged that.
     fn read_thread(&mut self, row: &Row, held: &Held) -> Step<Convo> {
+        if self.job.provider == Provider::Gmail && self.page_room() < THREAD_LOADS {
+            return Err(self.page_limit());
+        }
         let mut args = row.forward_args();
         args["messages"] = json!(row.messages);
-        let v = self.mb.script(&self.path("thread.js"), &args).map_err(refused)?;
+        let v = match self.mb.script(&self.path("thread.js"), &args) {
+            Ok(v) => v,
+            Err(r) => {
+                self.charge(THREAD_LOADS);
+                return Err(refused(r));
+            }
+        };
+        self.charge(count(&v, "presses").unwrap_or(0));
         let result = v.get("result").and_then(Value::as_str);
         let named = |k: &str| v.get(k).and_then(Value::as_str);
         match (result, named("control"), named("reason")) {
@@ -1243,13 +1314,25 @@ impl Pass<'_> {
     /// short): left when a send went since the lone failure before it (or since the pass began). The pass's first
     /// one with nothing sent before it waits for the next send; any other stops the pass, leaving nothing (review
     /// of fd702e6: a Gmail-wide stall must not leave every row).
+    /// The lone row `mail.json` says stalled passes on two separate days before today is left at once (review of
+    /// c8806b3), and touches nothing else: it proves nothing about the page.
     fn lone_failed(&mut self, rows: &[Row]) -> Step<()> {
         let n = rows.len() as u32;
+        let stuck = self.job.stuck.filter(|s| s.leave).map(|s| s.at);
+        if let ([row], Some(at)) = (rows, stuck) {
+            if row.at.map(minute) == Some(at) {
+                self.out.left += 1;
+                self.out.handled += 1;
+                self.decide(key_of(row));
+                return Ok(());
+            }
+        }
         if self.sent_since_lone {
             self.out.left += n;
             self.out.handled += n;
         } else if !self.lone_seen {
             self.waiting += n;
+            self.waiting_at = rows.iter().filter_map(|r| r.at).min();
         } else {
             return Err(STALLED);
         }
@@ -1301,12 +1384,17 @@ impl Pass<'_> {
                 self.out.handled += rows.len() as u32;
                 for r in &rows {
                     self.decide(key_of(r));
+                    if let Some(at) = r.at {
+                        self.first_kept = Some(self.first_kept.map_or(at, |k| k.min(at)));
+                        self.clears_stuck(at);
+                    }
                 }
                 // The page works: a lone row that was waiting for a send is the row's, and left.
                 self.sent_since_lone = true;
                 self.out.left += self.waiting;
                 self.out.handled += self.waiting;
                 self.waiting = 0;
+                self.waiting_at = None;
                 // Every 25 sends the Inbox is looked in, at once: a report stops the pass, and the walk (which
                 // the look left) starts over.
                 if self.since_look >= BOUNCE_EVERY {

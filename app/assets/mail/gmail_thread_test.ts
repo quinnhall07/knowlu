@@ -32,6 +32,8 @@ Deno.test("gmail_thread_reads_every_message_oldest_first_and_goes_back_to_the_li
       { sender: BO.toLowerCase(), subject: "Group project", received: when(5), received_at: at(5) },
       { sender: ANA, subject: "Group project", received: when(9), received_at: at(9) },
     ],
+    // The row's open, one Expand all and the back press: each a page load the routine charges (review of c8806b3).
+    presses: 3,
   });
   // The list is back, nothing is ticked, nothing was sent or deleted.
   assertEquals(box.rows().length, 2);
@@ -71,6 +73,7 @@ Deno.test("gmail_thread_of_two_needs_no_expanding_and_a_wrong_row_is_not_found",
   assertEquals(await run("gmail/thread.js", box.page, { ...ROW, subject: "Another", ...FAST }), {
     result: "not found",
     control: "message",
+    presses: 0,
   });
   // Nothing was opened for the wrong row, and the list is still showing.
   assert(!box.el("grid").hasAttribute("hidden"));
@@ -79,6 +82,7 @@ Deno.test("gmail_thread_of_two_needs_no_expanding_and_a_wrong_row_is_not_found",
   assertEquals(await run("gmail/thread.js", bare.page, { ...ROW, ...FAST }), {
     result: "not found",
     control: "list",
+    presses: 0,
   });
 });
 
@@ -86,7 +90,8 @@ Deno.test("gmail_thread_returns_nothing_when_fewer_messages_draw_than_the_row_co
   // A partial read would call a held message missing and forward the whole conversation again.
   const box = mailbox([thread()], { stuck: true });
   const r = await run("gmail/thread.js", box.page, { ...ROW, messages: 3, ...FAST });
-  assertEquals(r, { result: "failed", reason: "not every message drawn" });
+  // Failures count their presses too: the open, three Expand all that drew nothing, and the back.
+  assertEquals(r, { result: "failed", reason: "not every message drawn", presses: 5 });
   assert(!box.el("grid").hasAttribute("hidden"), "and the list is back");
   // Without a count to check, what drew is what is read.
   const blind = mailbox([thread()], { stuck: true });
@@ -99,11 +104,13 @@ Deno.test("gmail_thread_names_a_conversation_that_will_not_open_or_a_list_that_w
   assertEquals(await run("gmail/thread.js", flat.page, { ...ROW, ...FAST }), {
     result: "failed",
     reason: "conversation did not open",
+    presses: 1,
   });
   const noBack = mailbox([thread()], { noBack: true });
   assertEquals(await run("gmail/thread.js", noBack.page, { ...ROW, ...FAST }), {
     result: "not found",
     control: "back",
+    presses: 2,
   });
 });
 
@@ -132,6 +139,7 @@ Deno.test("gmail_thread_reads_nothing_when_it_cannot_tell_whose_account_it_is", 
   assertEquals(await run("gmail/thread.js", box.page, { ...ROW, messages: 3, ...FAST }), {
     result: "not found",
     control: "account",
+    presses: 0,
   });
   assert(!box.el("grid").hasAttribute("hidden"), "the list is still showing");
 });

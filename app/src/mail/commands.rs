@@ -323,12 +323,16 @@ pub fn disconnect_with(d: &Disconnect, address_id: &str) -> Value {
     }
     d.host.close_window();
     let _ = MailState::update(d.data_dir, |s| {
-        let before = (s.open_backfills.len(), s.backfill_pace.len(), s.last_reconcile.len(), s.last_look.len());
+        // Every per-mailbox entry goes (review of c8806b3: the frontier was once left behind); the day's Gmail
+        // message count lives in the pace.
+        let before = s.clone();
         s.open_backfills.retain(|i| i != address_id);
         s.backfill_pace.remove(address_id);
         s.last_reconcile.remove(address_id);
         s.last_look.remove(address_id);
-        before != (s.open_backfills.len(), s.backfill_pace.len(), s.last_reconcile.len(), s.last_look.len())
+        s.backfill_frontier.remove(address_id);
+        s.lone_stall.remove(address_id);
+        *s != before
     });
     steps.push(match forget(d.data_dir, address_id) {
         Ok(true) => step("profile", "done", None),

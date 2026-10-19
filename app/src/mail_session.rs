@@ -113,6 +113,13 @@ pub struct MailState {
     /// as none (the whole window). Not written when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub backfill_frontier: BTreeMap<String, i64>,
+    /// Each Gmail mailbox's lone row that will not attach, by address id (review of c8806b3): its received minute
+    /// only (no sender, subject or text), the separate UTC days a pass ended stalled on it alone, and the last of
+    /// them. From the third such day the row is left in every pass (`mail::backfill::stuck_for`). Cleared when a
+    /// row at that minute is sent or held, when the backfill closes and on disconnect. A file written before it
+    /// existed lacks it and reads as none. Not written when empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub lone_stall: BTreeMap<String, LoneStall>,
     /// Each setup in flight on this device whose address this device minted (Quinn, 2026-10-06): written
     /// once the address exists, its facts written before each act that may set them, cleared when the run
     /// ends. One left at start-up is a setup the app quit mid-run (`mail::setup::clean_unfinished`). Not
@@ -135,6 +142,17 @@ pub struct PendingSetup {
     /// the run's own writes keep it.
     #[serde(default)]
     pub shown: bool,
+}
+
+/// A lone Gmail row that stalled passes (see [`MailState::lone_stall`]): unix seconds and day indexes only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LoneStall {
+    /// The row's received minute, unix seconds (a whole minute).
+    pub at: i64,
+    /// The separate UTC days a pass ended stalled on this row alone.
+    pub days: u32,
+    /// The last of them (days since 1970-01-01).
+    pub last_day: i64,
 }
 
 /// One mailbox's backfill pace on one UTC day (`unix seconds / 86400`).
@@ -170,6 +188,7 @@ impl Default for MailState {
             backfill_pace: BTreeMap::new(),
             last_look: BTreeMap::new(),
             backfill_frontier: BTreeMap::new(),
+            lone_stall: BTreeMap::new(),
             pending_setups: Vec::new(),
         }
     }

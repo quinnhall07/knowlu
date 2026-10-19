@@ -16,13 +16,15 @@
 //      "of many". `at_oldest` comes with `go: "oldest"` only: false when the walk ran out of `max_ms` or
 //      `max_presses` short of the oldest page, and the page read is where it stopped; the caller asks again)
 //   { result: "not found", control: "list" | "list row" | "pager" | "page range" }
-//   { result: "failed", reason: "bad direction" | "page did not change" | "no presses left" }
+//   { result: "failed", reason: "bad direction" | "page did not change" | "no presses left" |
+//      "page range unreadable" }   (the last: a move was asked on a page whose range cannot be read and whose
+//      pager draws no button that way, so nothing can say whether it is the end)
 // The pager, as live 2026-10-18/19 (WebView2 155): a folder has "Newer"/"Older" (and "Newest"/"Oldest" when
 // drawn); a search has "Previous results"/"Next results" and no Oldest or Newest. "older" is "Older" or "Next
 // results", "newer" is "Newer" or "Previous results"; "oldest" is "Oldest" when drawn, else a walk of
 // "older" until it is aria-disabled, inside `max_ms`; "newest" is "Newest" when drawn, else a walk of
 // "newer" (to the page as far as `max_ms` allows). The end is the exact total when the range has one, else
-// the button's aria-disabled. A page is never reached by URL (`#search/<q>/p30` draws page 1's rows under a
+// the button's aria-disabled; a range that cannot be read is never the end by itself. A page is never reached by URL (`#search/<q>/p30` draws page 1's rows under a
 // p30 range). The pager ignores `click()`: a press is pointerdown, mousedown, pointerup, mouseup and click on
 // the button. Gmail keeps a previous view's grid and range in the document, hidden (offsetParent null): only
 // the SHOWN grid and range are read.
@@ -104,14 +106,17 @@ const button = (dir) =>
     BUTTONS[dir].some((label) => nameOf(b).toLowerCase() === label.toLowerCase())
   );
 const off = (b) => b.getAttribute("aria-disabled") === "true";
-// Nothing to move to: no results, or the end that direction is already showing.
+// Nothing to move to: the end that direction is already showing. A range that cannot be read is never the end
+// (review of c8806b3: a page mid-redraw read as the end let a seek stop short): the button toward `dir` being
+// aria-disabled proves it then, and with no button either nothing can, which is `null`.
 const atEnd = (dir) => {
   const here = readRange();
-  if (!here) return true;
-  if (dir === "newer" || dir === "newest") return here.from <= 1;
-  if (here.total !== null) return here.to >= here.total;
-  const b = button("older");
-  return !!b && off(b);
+  const newer = dir === "newer" || dir === "newest";
+  if (here && newer) return here.from <= 1;
+  if (here && here.total !== null) return here.to >= here.total;
+  const b = button(newer ? "newer" : "older");
+  if (b && off(b)) return true;
+  return here || b ? false : null;
 };
 // One press of `b`: the shown grid's first row changes (a new row, or the same row drawn with another
 // message), then the range is given a moment to follow.
@@ -134,6 +139,9 @@ if (args && args.go !== undefined && args.go !== null) {
   const go = String(args.go);
   if (!BUTTONS[go]) return answer({ result: "failed", reason: "bad direction" });
   const toward = go === "oldest" || go === "older" ? "older" : "newer";
+  // A range not drawn yet is given the wait to draw; one still unreadable with no button to say is refused.
+  if (!readRange()) await until(() => readRange() !== null, waitMs);
+  if (atEnd(go) === null) return answer({ result: "failed", reason: "page range unreadable" });
   if (!atEnd(go) && maxPresses < 1) return answer({ result: "failed", reason: "no presses left" });
   if (!atEnd(go)) {
     const jump = (go === "oldest" || go === "newest") && button(go);
@@ -155,7 +163,7 @@ if (args && args.go !== undefined && args.go !== null) {
       }
     }
   }
-  if (go === "oldest") atOldest = atEnd("oldest");
+  if (go === "oldest") atOldest = atEnd("oldest") === true;
 }
 
 const rows = [];

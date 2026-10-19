@@ -2332,6 +2332,27 @@ fn a_slot_pass_keeps_its_sends_beside_the_backfill_pace_so_the_day_never_passes_
 }
 
 #[test]
+fn a_slot_whose_only_missing_row_never_attaches_stalls_two_days_and_leaves_it_on_the_third() {
+    // Review of c8806b3: the lone row that stalls a backfill stalls every slot too. The slots count its days in
+    // mail.json as the backfill does (its received minute only), and from the third the row is left.
+    let g = Pass::with_provider("slot-lone-stall", "google", "active", rig::fwd("on", "ours"));
+    let at = rig::NOW - 3_600 - rig::NOW.rem_euclid(60);
+    g.mail(&[("Stuck", at)]);
+    g.host.st.lock().unwrap().no_chip = Some("Stuck".into());
+    for d in 0..2 {
+        g.clk.0.store(rig::NOW + d * rig::DAY, std::sync::atomic::Ordering::SeqCst);
+        let line = g.run().expect("a line");
+        assert!(line.ends_with("0 recovered, stopped: the attachments would not attach"), "day {d}: {line}");
+        let r = MailState::load(&g.d).unwrap().lone_stall[rig::ID];
+        assert_eq!((r.at, r.days, r.last_day), (at, d as u32 + 1, (rig::NOW + d * rig::DAY).div_euclid(rig::DAY)), "day {d}");
+    }
+    g.clk.0.store(rig::NOW + 2 * rig::DAY, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(g.run().as_deref(), Some("mail: forwarding on, 0 recovered"));
+    assert_eq!(g.host.calls("gmail/forward.js").len(), 3, "tried once a day");
+    assert!(MailState::load(&g.d).unwrap().lone_stall.contains_key(rig::ID), "kept until the row is sent or held");
+}
+
+#[test]
 fn a_slot_pass_on_a_day_whose_pages_are_spent_says_page_limit_reached_and_opens_nothing() {
     let g = Pass::with_provider("slot-page-limit", "google", "active", rig::fwd("on", "ours"));
     g.mail(&[("Notice", rig::NOW - 3600)]);

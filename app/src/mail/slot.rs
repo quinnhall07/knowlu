@@ -18,7 +18,7 @@
 //! recover follow either way, reaching back to when forwarding was last known on after it was found off.
 //!
 //! **Privacy.** A line holds fixed words and counts. No address, subject, sender, URL or page text enters one.
-use super::backfill::{keep_pace, save_look, seed_routine};
+use super::backfill::{keep_pace, note_stall, save_look, seed_routine, stuck_for};
 use super::commands::{run_script, wait_signed_in, GONE_WAIT, SILENT_WAIT};
 use super::host::Host;
 use super::recover::{run_pass, window, Clock, Job, Outcome, Place, Stop, SLOT_CAP};
@@ -195,9 +195,12 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
         on_look: Some(&look),
         on_load: Some(&load),
         frontier: None,
+        // A lone row that stalled passes is watched here too, and left from its third day (review of c8806b3).
+        stuck: stuck_for(state, id, now.div_euclid(86_400)),
     };
     let mut routine = seed_routine(env.data_dir, provider, id, now);
     let out = run_pass(env.host, env.client, env.clock, &mut routine, &job);
+    note_stall(env.data_dir, id, &out, env.clock.now().div_euclid(86_400));
     // The day's sends count for the mailbox whoever made them: a backfill seeds its pace from here, so a slot's
     // sends are kept beside it (they once were not, and a slot and a backfill could pass the day's cap together).
     if out.sent > 0 || backfilling {

@@ -11,7 +11,7 @@
 //! server this file stands up on `127.0.0.1:0`; nothing leaves the machine. Every address, hint and
 //! token in it is synthetic.
 use knowlu::mail_session::{
-    forget, forget_all, is_session_dir, session_dir, setup_dir, start_up_sweep, turn_off, BackfillPace, MailState,
+    forget, forget_all, is_session_dir, session_dir, setup_dir, start_up_sweep, turn_off, BackfillPace, LoneStall, MailState,
 };
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -615,7 +615,7 @@ fn no_session_is_a_named_outcome_and_nothing_is_sent() {
 // the routine waits. Every sender, subject and address is synthetic.
 
 use knowlu::mail::recover::{
-    backfill_window, fingerprint, run_pass, window, Clock, Held, Job, Mailbox, Place, Stop, Window, SLOT_CAP,
+    backfill_window, fingerprint, run_pass, window, Clock, Held, Job, Mailbox, Place, Stop, Stuck, Window, SLOT_CAP,
 };
 use knowlu::mail::Refusal;
 use knowlu::mail_steps::{Paused, Provider, Routine};
@@ -739,6 +739,11 @@ struct Fake {
     zone: i64,
     /// Gmail: the pager presses the scripts reported.
     presses: Cell<u64>,
+    /// Gmail: the next `go: "older"` finds no range and no button to say (list.js: "page range unreadable").
+    range_unreadable: Cell<bool>,
+    /// Gmail: the next `go: "newer"` (or the next conversation read) runs out its step with no answer.
+    newer_times_out: Cell<bool>,
+    thread_times_out: Cell<bool>,
 }
 
 fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
@@ -776,6 +781,9 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         opened_at: Default::default(),
         zone: 0,
         presses: Cell::new(0),
+        range_unreadable: Cell::new(false),
+        newer_times_out: Cell::new(false),
+        thread_times_out: Cell::new(false),
     }
 }
 
@@ -843,6 +851,12 @@ impl Mailbox for Fake {
 
     fn script(&self, path: &str, args: &Value) -> Result<Value, Refusal> {
         self.log.borrow_mut().push((path.to_string(), args.clone()));
+        let timed_out = |flag: &Cell<bool>| flag.replace(false);
+        if (path.ends_with("list.js") && args["go"] == "newer" && timed_out(&self.newer_times_out))
+            || (path.ends_with("thread.js") && timed_out(&self.thread_times_out))
+        {
+            return Err(Refusal::TimedOut);
+        }
         let v = self.answer(path, args)?;
         self.presses.set(self.presses.get() + v.get("presses").and_then(Value::as_u64).unwrap_or(0));
         Ok(v)
@@ -850,9 +864,11 @@ impl Mailbox for Fake {
 }
 
 impl Fake {
-    /// Page loads as the routine counts them: every open, every search and every pager press.
+    /// Page loads as the routine counts them: every open (a fresh Inbox is two, the navigation and the reload),
+    /// every search and every press a script reported (the pager's, and a conversation's open and back).
     fn loads(&self) -> u64 {
-        self.opened_at.borrow().len() as u64 + self.calls("search.js").len() as u64 + self.presses.get()
+        let fresh = self.opened_at.borrow().iter().filter(|(p, _)| *p == Place::FreshInbox).count() as u64;
+        self.opened_at.borrow().len() as u64 + fresh + self.calls("search.js").len() as u64 + self.presses.get()
     }
 
     /// The local day of an instant, as Gmail's `after:` and `before:` compare it.
@@ -941,6 +957,9 @@ impl Fake {
                 json!({ "result": "ok", "total": cur.len(), "drawn": drawn, "left": left, "rows": rows })
             }
             "list.js" if self.stale.get() => json!({ "result": "failed", "reason": "page did not change" }),
+            "list.js" if args["go"] == "older" && self.range_unreadable.replace(false) => {
+                json!({ "result": "failed", "reason": "page range unreadable", "presses": 0 })
+            }
             "list.js" if self.endless && args["go"] == "newer" => {
                 if args["max_presses"] == 0 {
                     return Ok(json!({ "result": "failed", "reason": "no presses left", "presses": 0 }));
@@ -991,7 +1010,8 @@ impl Fake {
                         v
                     })
                     .collect();
-                json!({ "result": "ok", "messages": messages })
+                // The row's open and the back press, each a page load (thread.js counts them).
+                json!({ "result": "ok", "messages": messages, "presses": 2 })
             }
             "forward.js" => {
                 assert_eq!(args["address"], KNOWLU);
@@ -1101,7 +1121,7 @@ fn routine(provider: Provider) -> Routine {
 }
 
 fn job(provider: Provider, phase: Phase, window: Window, cap: Option<u32>) -> Job<'static> {
-    Job { provider, address_id: A, knowlu_address: KNOWLU, phase, window, cap, watch: None, on_look: None, on_load: None, frontier: None }
+    Job { provider, address_id: A, knowlu_address: KNOWLU, phase, window, cap, watch: None, on_look: None, on_load: None, frontier: None, stuck: None }
 }
 
 fn pass(fake: &Fake, svc: &Service, routine: &mut Routine, job: &Job) -> knowlu::mail::recover::Outcome {
@@ -1526,19 +1546,58 @@ fn a_gmail_count_walk_cut_short_is_aimed_at_the_first_day_and_its_rows_are_not_j
 }
 
 #[test]
-fn a_seek_that_needs_more_than_one_calls_presses_stops_the_pass_and_sends_nothing() {
-    // The seek toward the row a walk goes on from is one call's presses at most (40): 43 pages of one row and no
-    // time to count them leave 42 presses to the oldest. The pass stops by name; nothing was judged.
+fn a_seek_longer_than_one_calls_presses_goes_on_across_calls_and_ends_only_at_the_days_page_limit() {
+    // Review of c8806b3: a seek toward the row a walk goes on from that needed more than one call's 40 presses
+    // ended the pass (and the backfill) by name. It goes on across calls instead, each press charged: 43 pages of
+    // one row and no time to count them take 42 presses to the oldest, and every row goes once, oldest first.
     let since = window(NOW, None, None).since;
     let msgs: Vec<Mail> = (0..43).map(|i| mail(ANA, &format!("Note {i}"), since + 3_600 * (i + 1))).collect();
-    let svc = holding(&[]);
-    let mut mb = fake(Provider::Gmail, msgs);
+    let want: Vec<String> = msgs.iter().map(|m| received(m.at)).collect();
+    let mut mb = fake(Provider::Gmail, msgs.clone());
     mb.size = 1;
     mb.oldest_walk = Some(0);
-    let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
-    assert_eq!(out.stop, Stop::Script("the frontier could not be reached"));
-    assert_eq!(gos(&mb).iter().filter(|g| *g == "older").count(), 40);
-    assert!(mb.forwards.borrow().is_empty());
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop, out.sent), (Stop::Done, 43));
+    assert_eq!(mb.forwarded(), want);
+    // The first seek, from page 1 to the oldest page: 42 presses, and one more call that finds the pager's end (no
+    // row is older than the window's first day). A look's restart seeks again later.
+    assert_eq!(gos(&mb).iter().skip(1).take_while(|g| *g == "older").count(), 43, "{:?}", gos(&mb));
+    assert_eq!(u64::from(r.loads_today()), mb.loads());
+    // With the day's pages nearly spent the seek ends as a page limit, never a stop by name, and nothing is sent.
+    let mut short = fake(Provider::Gmail, msgs);
+    short.size = 1;
+    short.oldest_walk = Some(0);
+    let mut r = routine(Provider::Gmail).with_loads(570);
+    let out = pass(&short, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop, out.sent), (Stop::PageLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 0));
+    assert!(r.loads_today() <= 600, "{}", r.loads_today());
+}
+
+#[test]
+fn a_3000_row_window_mostly_held_is_walked_to_its_end_past_a_seek_of_more_than_40_pages() {
+    // Review of c8806b3: over held mail a narrowed search's span doubles at each re-aim, and a seek past one call's
+    // 40 presses ended the backfill by name. Spread evenly over 120 days, 3,000 rows keep every seek under 40 pages
+    // (measured 2026-10-19); packed into the window's last 60 days (a quiet first half), the re-aims cross the empty
+    // days at a doubling span, and the whole search's seek from its newest page back to day 64 is about 62 pages.
+    // The seek goes on across calls; the pass reaches the end, sends what is missing and stays inside the day's pages.
+    let first = NOW.div_euclid(DAY) - 120;
+    let msgs: Vec<Mail> = (0..3_000).map(|i| mail(ANA, &format!("Notice {i}"), (first + 60) * DAY + 3_600 + i * 1_700)).collect();
+    let missing: Vec<usize> = vec![1_500, 2_996, 2_997, 2_998, 2_999];
+    let held: Vec<(&str, &str, i64)> = msgs
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !missing.contains(i))
+        .map(|(_, m)| (m.sender.as_str(), m.subject.as_str(), m.at))
+        .collect();
+    let want: Vec<String> = missing.iter().map(|&i| received(msgs[i].at)).collect();
+    let mut mb = fake(Provider::Gmail, msgs.clone());
+    mb.size = 45;
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&mb, &holding(&held), &mut r, &job(Provider::Gmail, Phase::Backfill, backfill_window(first, NOW), None));
+    assert_eq!((out.stop, out.sent, out.held), (Stop::Done, 5, 2_995));
+    assert_eq!(mb.forwarded(), want);
+    assert!(r.loads_today() <= 600 && u64::from(r.loads_today()) == mb.loads(), "{} vs {}", r.loads_today(), mb.loads());
 }
 
 #[test]
@@ -2156,18 +2215,19 @@ fn gmails_300_messages_a_day_stop_a_pass_whose_every_forward_is_a_single_origina
 
 #[test]
 fn a_newer_press_the_days_pages_cannot_pay_for_ends_the_pass_as_a_page_limit_never_done() {
-    // 592 of the day's 600 loads spent: the open, the search and its two presses leave none for "newer" beyond the
+    // 591 of the day's 600 loads spent: the fresh Inbox (two loads since the review of c8806b3; this test held 592
+    // when it was one), the search and its two presses leave none for "newer" beyond the
     // end's own four. list.js answers "no presses left" (never `moved: false`, which reads as the newest page), and
     // the pass ends as a page limit with its end still run.
     let mut mb = fake(Provider::Gmail, unheld(30));
     mb.size = 10;
-    let mut r = routine(Provider::Gmail).with_loads(592);
+    let mut r = routine(Provider::Gmail).with_loads(591);
     let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
     assert_eq!((out.stop, out.sent), (Stop::PageLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 10));
     let last = mb.calls("list.js").last().cloned().unwrap();
     assert_eq!((last["go"].as_str(), last["max_presses"].as_u64()), (Some("newer"), Some(0)), "{last}");
     assert!(out.closed && sent_at_each_look(&mb) == [10], "the look and the batch's close still ran");
-    assert_eq!(u64::from(r.loads_today()), 592 + mb.loads());
+    assert_eq!(u64::from(r.loads_today()), 591 + mb.loads());
     assert!(r.loads_today() <= 600, "{}", r.loads_today());
 }
 
@@ -2225,15 +2285,114 @@ fn a_1485_message_backfill_is_done_on_its_first_day_in_under_400_page_loads() {
     }
     let stops: Vec<(Stop, u32)> = days.iter().map(|d| (d.0.clone(), d.1)).collect();
     assert_eq!(stops, [(Stop::Done, 1_485), (Stop::Done, 0)], "{days:?}");
-    // Measured (2026-10-19): 293 messages, 320 loads and 139 presses on the first day. A look comes every 25 to 30
-    // sends, so about 50 restarts, each the look's Inbox, the fresh Inbox, the narrowed search and a press or two,
-    // with the first search's count walk (40 presses). Groups fall to five after the first look: the minute's ten
-    // slots free in two halves. The bar sits a little above the measure, as the 160 one did.
-    assert!(days[0].2 <= 300 && days[0].3 <= 340, "{days:?}");
+    // Measured (2026-10-19): 293 messages, 380 loads and 139 presses on the first day (320 loads while a fresh
+    // Inbox was charged one load; it is two since the review of c8806b3). A look comes every 25 to 30 sends, so about
+    // 60 restarts, each the look's Inbox, the fresh Inbox (two), the narrowed search and a press or two, with the first
+    // search's count walk (40 presses). Groups fall to five after the first look: the minute's ten slots free in two
+    // halves. The bar sits a little above the measure, as the 160 one did.
+    assert!(days[0].2 <= 300 && days[0].3 <= 400, "{days:?}");
     let mut once = sent.clone();
     once.sort();
     once.dedup();
     assert_eq!((once.len(), sent.len()), (1_485, 1_485), "every message went once");
+}
+
+#[test]
+fn a_fresh_inbox_is_two_page_loads_and_every_conversation_opened_is_charged() {
+    // Review of c8806b3: a fresh Inbox is a navigation and a reload, two loads, not one; and opening a conversation
+    // (thread.js: the row's open, any Expand all, the back press) is page loads too, charged to the same day's
+    // budget as the pager's. Ten conversations of three messages, a page of ten.
+    let mut mb = fake(Provider::Gmail, convos(10, 3));
+    mb.size = 10;
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop, out.sent), (Stop::Done, 30));
+    let fresh = mb.places.borrow().iter().filter(|p| **p == Place::FreshInbox).count() as u64;
+    assert!(fresh >= 2 && mb.calls("thread.js").len() >= 10, "{fresh}");
+    assert_eq!(u64::from(r.loads_today()), mb.loads(), "fresh opens at two, and the conversations' presses");
+    // A conversation the day's pages cannot pay for (its open, three Expand all and its back) is not opened: the
+    // pass ends as a page limit.
+    let mut tight = fake(Provider::Gmail, convos(3, 3));
+    tight.size = 10;
+    let mut r = routine(Provider::Gmail).with_loads(590);
+    let out = pass(&tight, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!(out.stop, Stop::PageLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY });
+    assert!(tight.calls("thread.js").is_empty());
+    assert!(r.loads_today() <= 600, "{}", r.loads_today());
+}
+
+#[test]
+fn a_page_script_that_gives_no_answer_is_charged_what_it_may_have_pressed() {
+    // Review of c8806b3: a call that ran out its step after pressing charged nothing. With no answer the routine
+    // charges the bound it gave the call: a "newer" its max_presses, a conversation's read five (its open, three
+    // Expand all, its back).
+    let mut mb = fake(Provider::Gmail, unheld(30));
+    mb.size = 10;
+    mb.newer_times_out.set(true);
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!(out.stop, Stop::Script(Refusal::TimedOut.as_str()));
+    let newer = mb.calls("list.js").into_iter().rfind(|a| a["go"] == "newer").expect("a newer was asked");
+    let allowed = newer["max_presses"].as_u64().unwrap();
+    assert!(allowed > 0);
+    assert_eq!(u64::from(r.loads_today()), mb.loads() + allowed);
+    let convo = fake(Provider::Gmail, convos(2, 3));
+    convo.thread_times_out.set(true);
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&convo, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!(out.stop, Stop::Script(Refusal::TimedOut.as_str()));
+    assert_eq!(u64::from(r.loads_today()), convo.loads() + 5);
+}
+
+#[test]
+fn a_list_whose_range_cannot_be_read_stops_the_pass_by_name_and_is_never_its_end() {
+    // Review of c8806b3: list.js read a page with no range as the end, so a seek could stop short and the pass end
+    // Done past pages it never read. list.js now refuses by name; the pass stops there, never Done, sends nothing
+    // and keeps the row it was seeking as its frontier's bound.
+    let since = window(NOW, None, None).since;
+    let msgs: Vec<Mail> = (0..10).map(|i| mail(ANA, &format!("Note {i}"), since + 3_600 * (i + 1))).collect();
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.size = 2;
+    mb.oldest_walk = Some(0);
+    mb.range_unreadable.set(true);
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &gmail_backfill());
+    assert_eq!((out.stop, out.sent, out.handled), (Stop::Script("the page range could not be read"), 0, 0));
+    assert!(out.frontier.is_none_or(|f| f < since.div_euclid(DAY)), "{:?}", out.frontier);
+}
+
+#[test]
+fn a_left_row_never_holds_the_frontier_back_and_a_sent_one_does() {
+    // Review of c8806b3 (plan :2314: a left row is never retried): the frontier keeps the oldest row sent (a bounced
+    // batch is searched again) and drops rows that were left. A conversation that will not attach, three days before
+    // the first single, is left; the day's sends run out after ten singles.
+    let first = NOW.div_euclid(DAY) - 20;
+    let mut convo = mail(ANA, "Group project", (first + 2) * DAY + 7_200);
+    convo.count = Some(2);
+    convo.convo = vec![(ANA.to_string(), (first + 2) * DAY + 3_600), (ANA.to_string(), (first + 2) * DAY + 7_200)];
+    let mut msgs = daily(BO, "Notice", first + 5, 30, 5);
+    msgs.insert(0, convo);
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.size = 50;
+    mb.mismatch = true;
+    // 1,488 sent today: the conversation takes two of the day's originals, the singles the last ten.
+    let mut r = Routine::new(Provider::Gmail, NOW.div_euclid(DAY), 1_488);
+    let out = pass(&mb, &holding(&[]), &mut r, &job(Provider::Gmail, Phase::Backfill, backfill_window(first, NOW), None));
+    assert_eq!((out.stop, out.sent, out.left), (Stop::DayLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 10, 1));
+    assert_eq!(out.frontier, Some(first + 5 - 1), "the day before the first single sent, not before the left conversation");
+    // A lone row mail.json says stalled two days is left at once from the third (it will not attach), and no more
+    // holds the frontier back than a conversation left.
+    let stuck_at = (first + 2) * DAY + 3_600;
+    let mut msgs = daily(BO, "Notice", first + 5, 30, 5);
+    msgs.insert(0, mail(ANA, "Stuck", stuck_at));
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.size = 50;
+    mb.no_chip = Some("Stuck");
+    let mut r = Routine::new(Provider::Gmail, NOW.div_euclid(DAY), 1_489);
+    let j = Job { stuck: Some(Stuck { at: stuck_at, leave: true }), ..job(Provider::Gmail, Phase::Backfill, backfill_window(first, NOW), None) };
+    let out = pass(&mb, &holding(&[]), &mut r, &j);
+    assert_eq!((out.stop, out.sent, out.left), (Stop::DayLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 10, 1));
+    assert_eq!(out.frontier, Some(first + 5 - 1));
+    assert_eq!(out.stalled_at, None);
 }
 
 #[test]
@@ -3453,6 +3612,94 @@ fn a_bounced_backfill_pass_keeps_its_frontier_at_or_before_what_it_sent_and_the_
     assert!(st.open_backfills.is_empty() && st.backfill_frontier.is_empty(), "{st:?}");
 }
 
+/// One run of a Gmail mailbox's backfill driver over the Fake, from `mail.json` in `dir`, on the window from UTC
+/// day `first`, at the Fake's clock; `on_closed` is told each closed batch.
+fn drive_fake(mb: &Fake, svc: &Service, dir: &Path, first: i64, on_closed: &dyn Fn()) -> Drove {
+    let shared = Shared::new();
+    let client = client(svc);
+    let since: jiff::civil::Date = iso(first * DAY)[..10].parse().unwrap();
+    let d = Drive {
+        mb,
+        client: &client,
+        clock: &*mb.clk,
+        provider: Provider::Gmail,
+        address_id: A,
+        knowlu_address: KNOWLU,
+        since,
+        shared: &shared,
+        on_closed,
+        data_dir: dir,
+    };
+    let mut r = Routine::new(Provider::Gmail, mb.clk.now().div_euclid(DAY), 0);
+    drive_backfill(&d, &mut r)
+}
+
+/// A mailbox whose only missing mail is one lone row, "Stuck", two days into a ten-day window; four rows after it
+/// are held. Returns the rows, the service and the row's instant (a whole minute).
+fn one_stuck_row(first: i64) -> (Vec<Mail>, Service, i64) {
+    let stuck_at = (first + 2) * DAY + 3_600;
+    let others: Vec<Mail> = (0..4).map(|i| mail(BO, &format!("Held {i}"), (first + 3 + i) * DAY + 600)).collect();
+    let held: Vec<(&str, &str, i64)> = others.iter().map(|m| (m.sender.as_str(), m.subject.as_str(), m.at)).collect();
+    let svc = holding(&held);
+    let mut msgs = others.clone();
+    msgs.insert(0, mail(ANA, "Stuck", stuck_at));
+    (msgs, svc, stuck_at)
+}
+
+#[test]
+fn a_lone_row_that_never_attaches_stalls_two_days_and_is_left_on_the_third_and_the_backfill_completes() {
+    // Review of c8806b3: a lone row that never attaches, with nothing sent around it, ended every pass stalled and
+    // held the frontier on it for good. mail.json counts the separate UTC days a pass ended stalled on it alone (its
+    // received minute only); from the third, the row is left and the backfill goes on.
+    let dir = temp("lone-stall-three-days");
+    let first = NOW.div_euclid(DAY) - 10;
+    let (msgs, svc, stuck_at) = one_stuck_row(first);
+    let stall = || MailState::load(&dir).unwrap().lone_stall.get(A).copied();
+    let today = NOW.div_euclid(DAY);
+    // Day 1, twice (a second run the same day counts no new day), then day 2.
+    for (at, days, last_day) in [(NOW, 1, today), (NOW + 3_600, 1, today), (NOW + DAY, 2, today + 1)] {
+        let mut mb = fake(Provider::Gmail, msgs.clone());
+        mb.no_chip = Some("Stuck");
+        mb.clk.0.set(at);
+        assert_eq!(drive_fake(&mb, &svc, &dir, first, &|| {}), Drove::Failed("the attachments would not attach"), "{at}");
+        assert_eq!(stall(), Some(LoneStall { at: stuck_at, days, last_day }), "{at}");
+        assert_eq!(mb.forwards.borrow().len(), 1, "{at}: the row was tried once");
+    }
+    // Day 3: tried once more, and left at once when it will not attach. The backfill is done, and closing it
+    // drops the record with the open marker and the frontier.
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.no_chip = Some("Stuck");
+    mb.clk.0.set(NOW + 2 * DAY);
+    assert_eq!(drive_fake(&mb, &svc, &dir, first, &|| {}), Drove::Done);
+    assert_eq!(mb.forwards.borrow().len(), 1);
+    let st = MailState::load(&dir).unwrap();
+    assert!(st.open_backfills.is_empty() && st.lone_stall.is_empty() && st.backfill_frontier.is_empty(), "{st:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_stalled_lone_row_that_attaches_later_clears_its_record_when_it_is_sent() {
+    let dir = temp("lone-stall-cleared");
+    let first = NOW.div_euclid(DAY) - 10;
+    let (msgs, svc, stuck_at) = one_stuck_row(first);
+    let stall = || MailState::load(&dir).unwrap().lone_stall.get(A).copied();
+    let mut mb = fake(Provider::Gmail, msgs.clone());
+    mb.no_chip = Some("Stuck");
+    assert_eq!(drive_fake(&mb, &svc, &dir, first, &|| {}), Drove::Failed("the attachments would not attach"));
+    assert_eq!(stall(), Some(LoneStall { at: stuck_at, days: 1, last_day: NOW.div_euclid(DAY) }));
+    // The next day it attaches: the record is gone as soon as the pass that sent it ends (the batch's close is told
+    // after mail.json is written, before the backfill itself closes).
+    let mb = fake(Provider::Gmail, msgs);
+    mb.clk.0.set(NOW + DAY);
+    let at_close = RefCell::new(Vec::new());
+    let probe = || at_close.borrow_mut().push(MailState::load(&dir).unwrap());
+    assert_eq!(drive_fake(&mb, &svc, &dir, first, &probe), Drove::Done);
+    assert_eq!(mb.forwarded(), [received(stuck_at)]);
+    let at_close = at_close.borrow();
+    assert!(at_close.len() == 1 && at_close[0].open_backfills == [A] && at_close[0].lone_stall.is_empty(), "{at_close:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_mail_json_written_before_the_page_budget_reads_and_writes_back_byte_for_byte() {
     // mail.json is a contract with existing installs: a file with a pace and no loads, and no frontier, is read
@@ -4448,6 +4695,41 @@ fn mail_disconnect_writes_turned_off_before_anything_else() {
     let out = disconnect(&u, &svc);
     assert_eq!(out["ok"], json!(false));
     assert!(u.events().is_empty(), "no window, script or call: {:?}", u.events());
+}
+
+#[test]
+fn mail_disconnect_removes_every_per_mailbox_entry_for_that_mailbox_and_no_other() {
+    // Review of c8806b3: disconnect left the backfill's frontier behind (and now the lone-stall record and the
+    // day's Gmail message count, which lives in the pace). Every per-mailbox entry of the disconnected mailbox goes,
+    // and the other mailbox's stay.
+    let r = rig("disconnect-entries");
+    profile(&r.dir, &format!("mail-session-{A}"));
+    let day = NOW.div_euclid(DAY);
+    MailState::update(&r.dir, |s| {
+        for id in [A, B] {
+            s.open_backfills.push(id.to_string());
+            s.backfill_pace.insert(id.to_string(), BackfillPace { day, sent_today: 9, paused_until: None, loads_today: 40, messages_today: 2 });
+            s.last_reconcile.insert(id.to_string(), iso(NOW));
+            s.last_look.insert(id.to_string(), NOW);
+            s.backfill_frontier.insert(id.to_string(), day - 30);
+            s.lone_stall.insert(id.to_string(), LoneStall { at: NOW - 60, days: 1, last_day: day });
+        }
+        true
+    })
+    .unwrap();
+    let svc = disc_service(&r, "m365", 200);
+    assert_eq!(disconnect(&r, &svc)["ok"], json!(true));
+    let st = MailState::load(&r.dir).unwrap();
+    assert_eq!(st.open_backfills, [B]);
+    for (name, keys) in [
+        ("backfill_pace", st.backfill_pace.keys().cloned().collect::<Vec<_>>()),
+        ("last_reconcile", st.last_reconcile.keys().cloned().collect()),
+        ("last_look", st.last_look.keys().cloned().collect()),
+        ("backfill_frontier", st.backfill_frontier.keys().cloned().collect()),
+        ("lone_stall", st.lone_stall.keys().cloned().collect()),
+    ] {
+        assert_eq!(keys, [B], "{name}");
+    }
 }
 
 #[test]

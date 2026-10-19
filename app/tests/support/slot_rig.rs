@@ -200,6 +200,8 @@ pub struct HostState {
     pub msgs: Vec<(String, String, i64)>,
     /// Gmail: a non-delivery report landed in the Inbox at this instant; a look reading from before it finds it.
     pub report_at: Option<i64>,
+    /// Gmail: the message with this subject never attaches (`forward.js` alone: "no attachment").
+    pub no_chip: Option<String>,
 }
 
 pub fn fwd(forwarding: &str, to: &str) -> Value {
@@ -224,6 +226,7 @@ impl FakeHost {
                 set_fails: false,
                 msgs: vec![],
                 report_at: None,
+                no_chip: None,
             })),
         }
     }
@@ -280,6 +283,9 @@ impl Mailbox for FakeHost {
                     .collect();
                 let n = rows.len();
                 json!({ "result": "ok", "page": { "from": 1, "to": n, "total": n }, "moved": false, "rows": rows })
+            }
+            "gmail/forward.js" if s.no_chip.as_ref().is_some_and(|c| args["rows"].as_array().is_some_and(|r| r.iter().any(|x| x["subject"] == c.as_str()))) => {
+                json!({ "result": "failed", "reason": "no attachment" })
             }
             "gmail/forward.js" => json!({ "result": "ok", "sent": true, "count": args["rows"].as_array().map_or(1, |r| r.len()) }),
             "m365/sent_cleanup.js" | "gmail/sent_cleanup.js" => json!({ "result": "ok", "deleted": 1 }),

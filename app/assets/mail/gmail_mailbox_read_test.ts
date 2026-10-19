@@ -254,6 +254,35 @@ Deno.test("gmail_list_max_presses_bounds_its_walks_and_a_move_with_none_left_is_
   assertEquals([end.result, end.moved, end.at_oldest, end.presses], ["ok", false, true, 0]);
 });
 
+Deno.test("gmail_list_never_reads_a_range_it_cannot_read_as_the_end", async () => {
+  // Review of c8806b3: a page whose range could not be read (mid-redraw, no rows drawn yet) was the end, so
+  // "older" answered `moved: false` over pages still to come and the routine's seek stopped on the page it stood
+  // on. With no range the end is proven only by the button's aria-disabled; with no button either, it is a
+  // named failure.
+  const mail = [1, 2, 3].map((n) => msg(`u${n}`, `s${n}@school.example.invalid`, `Subject ${n}`, n + 10));
+  const box = mailbox(mail, { size: 1, blind: true });
+  await run("gmail/search.js", box.page, { since: "2026-10-01", walk: false, ...FAST });
+  const blank = () => box.el("grid").querySelector("tbody").innerHTML = "";
+  blank();
+  const older = await run("gmail/list.js", box.page, { go: "older", ...FAST });
+  assert(!(older.result === "ok" && older.moved === false), JSON.stringify(older));
+  assertEquals([older.presses, box.presses], [1, 1], "the enabled Next results was pressed");
+  // On the last page "Next results" is aria-disabled: that proves the end, range or none.
+  await run("gmail/list.js", box.page, { go: "older", ...FAST });
+  blank();
+  const end = await run("gmail/list.js", box.page, { go: "older", ...FAST });
+  assertEquals([end.result, end.moved, end.presses, box.presses], ["ok", false, 0, 2]);
+  // Neither a range nor a button to say: refused by name, never `moved: false`.
+  for (const b of box.page.document.querySelectorAll("[data-go]")) b.remove();
+  for (const go of ["older", "newer", "oldest"]) {
+    assertEquals(await run("gmail/list.js", box.page, { go, ...FAST }), {
+      result: "failed",
+      reason: "page range unreadable",
+      presses: 0,
+    }, go);
+  }
+});
+
 Deno.test("gmail_the_list_reads_sender_subject_and_received_time_in_s2s_form", async () => {
   const box = mailbox(MAIL.slice(0, 4));
   const r = await run("gmail/list.js", box.page, FAST);

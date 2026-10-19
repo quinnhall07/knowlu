@@ -18,10 +18,10 @@
 //! and the slot makes no recover pass ([`crate::mail_steps::backfill_held_for_c3`]).
 //!
 //! **Privacy.** Counts, dates and fixed words only.
-use super::recover::{backfill_window, pages_spent, run_pass, Clock, Job, Mailbox, Outcome, Stop};
+use super::recover::{backfill_window, pages_spent, run_pass, Clock, Job, Mailbox, Outcome, Stop, Stuck};
 use super::setup::{Backfill, Env, Row, Shared};
 use crate::mail_client::{MailClient, Phase};
-use crate::mail_session::{session_dir, BackfillPace, MailState};
+use crate::mail_session::{session_dir, BackfillPace, LoneStall, MailState};
 use crate::mail_steps::{backfill_held_for_c3, Provider, Routine, Send};
 use jiff::civil::Date;
 use std::path::Path;
@@ -89,12 +89,16 @@ pub(super) fn mark_open(data_dir: &Path, id: &str, open: bool) -> Result<(), Str
         match (open, listed) {
             (true, false) => s.open_backfills.push(id.to_string()),
             (false, true) => s.open_backfills.retain(|i| i != id),
-            // A closed backfill keeps no frontier.
-            (false, false) => return s.backfill_frontier.remove(id).is_some(),
+            // A closed backfill keeps no frontier and no lone-stall record.
+            (false, false) => {
+                let frontier = s.backfill_frontier.remove(id).is_some();
+                return s.lone_stall.remove(id).is_some() || frontier;
+            }
             _ => return false,
         }
         if !open {
             s.backfill_frontier.remove(id);
+            s.lone_stall.remove(id);
         }
         true
     })
@@ -171,6 +175,40 @@ fn advance_frontier(data_dir: &Path, id: &str, day: i64) {
     });
 }
 
+/// A pass ends stalled on separate UTC days before a lone row is left: from the third, it is left at once.
+const STALL_DAYS: u32 = 3;
+
+/// The lone row `state` says stalls `id`'s passes, for a pass on UTC day `today`: left at once when today makes
+/// the [`STALL_DAYS`]th separate day (review of c8806b3), else only watched (a send or a hold clears it).
+pub(super) fn stuck_for(state: &MailState, id: &str, today: i64) -> Option<Stuck> {
+    let r = state.lone_stall.get(id)?;
+    Some(Stuck { at: r.at, leave: r.days + u32::from(today > r.last_day) >= STALL_DAYS })
+}
+
+/// Keeps what a pass that ended on UTC day `today` says of a lone row in `mail.json`: a row in the watched minute
+/// sent or held drops the record; a pass that ended stalled on one lone row alone counts `today` for it once (a
+/// row in another minute starts a new record). Best effort, like [`keep_pace`].
+pub(super) fn note_stall(data_dir: &Path, id: &str, out: &Outcome, today: i64) {
+    let _ = MailState::update(data_dir, |s| {
+        let old = s.lone_stall.get(id).copied();
+        let new = match (out.stuck_cleared, out.stalled_at, old) {
+            (true, _, _) => None,
+            (false, Some(at), Some(r)) if r.at == at && today > r.last_day => Some(LoneStall { at, days: r.days + 1, last_day: today }),
+            (false, Some(at), Some(r)) if r.at == at => Some(r),
+            (false, Some(at), _) => Some(LoneStall { at, days: 1, last_day: today }),
+            (false, None, old) => old,
+        };
+        if new == old {
+            return false;
+        }
+        match new {
+            Some(r) => s.lone_stall.insert(id.to_string(), r),
+            None => s.lone_stall.remove(id),
+        };
+        true
+    });
+}
+
 /// Waits (a clock's sleeps, a stop between them) until unix second `t`; `false` if the student stopped it.
 fn wait_until(d: &Drive, t: i64) -> bool {
     loop {
@@ -220,6 +258,7 @@ pub fn drive_backfill(d: &Drive, routine: &mut Routine) -> Drove {
                 if let Some(day) = out.frontier.filter(|_| out.stop != Stop::Done) {
                     advance_frontier(d.data_dir, d.address_id, day);
                 }
+                note_stall(d.data_dir, d.address_id, &out, d.clock.now().div_euclid(DAY));
                 if out.closed {
                     (d.on_closed)();
                 }
@@ -302,6 +341,7 @@ fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i
         on_look: Some(&look),
         on_load: Some(&load),
         frontier: frontier(d.data_dir, d.address_id),
+        stuck: MailState::load(d.data_dir).ok().and_then(|s| stuck_for(&s, d.address_id, today)),
     };
     let out = run_pass(d.mb, d.client, d.clock, routine, &job);
     d.shared.update(|p| {
