@@ -2580,7 +2580,8 @@ fn a_refused_sign_in_never_promises_that_starting_again_fixes_it() {
     assert!(!refused.contains("again"), "{refused}");
     assert!(refused.contains("below"), "it points at the service's reason: {refused}");
     // already_connected's row says what its ended line says: the line is not shown a second time.
-    assert!(v.contains("if (p.rows.some(function (x) { return x.reason === \"already_connected\"; })) { end = \"\"; }"), "the already_connected line is dropped");
+    // ... unless the setup kept its address: that line is said only there.
+    assert!(v.contains("if (!kept && p.rows.some(function (x) { return x.reason === \"already_connected\"; })) { end = \"\"; }"), "the already_connected line is dropped");
 }
 
 #[test]
