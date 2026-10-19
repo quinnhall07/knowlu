@@ -21,7 +21,7 @@
 use super::backfill::{keep_messages, keep_pace, left_for, note_stall, save_look, seed_routine, stuck_for};
 use super::commands::{run_script, wait_signed_in, GONE_WAIT, SILENT_WAIT};
 use super::host::Host;
-use super::recover::{run_pass, window, Clock, Job, Outcome, Place, Stop, SLOT_CAP};
+use super::recover::{run_pass, window, Clock, Job, Outcome, Place, Stop, Window, LAPSE_DAYS, SLOT_CAP};
 use crate::mail_client::{MailClient, Phase, State};
 use crate::mail_session::{session_dir, valid_address_id, BackfillPace, MailState};
 use crate::mail_steps::{backfill_held_for_c3, Provider};
@@ -66,6 +66,17 @@ pub fn reconcile_due_with(cadence: Cadence, last: Option<&str>, status: &str, no
         // A last pass dated in the future is a clock that moved: due, never stuck until then.
         Cadence::Daily => status == "active" && last.and_then(instant).is_none_or(|t| t > now || now - t >= DAILY_GAP),
     }
+}
+
+/// Whether a pass covered the gap of a lapse stamped at `lapsed_since` (unix seconds; §4.11 step 3, amended
+/// 2026-10-19): it ended done, its window began at or before the later of `lapsed_since` and [`LAPSE_DAYS`] before
+/// `now` (the instant its window was chosen at), and recover sent everything it found missing: no row left, and a
+/// batch it opened closed with its count.
+pub fn covers_gap(out: &Outcome, window: Window, lapsed_since: i64, now: i64) -> bool {
+    out.stop == Stop::Done
+        && window.since <= lapsed_since.max(now - LAPSE_DAYS * 86_400)
+        && out.left == 0
+        && (out.sent == 0 || out.closed)
 }
 
 /// [`reconcile_due_with`] at the shipped cadence.
@@ -185,12 +196,17 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
         keep_pace(env.data_dir, id, pace, messages > 0);
         keep_messages(env.data_dir, id, times, env.clock.now());
     };
+    // The lapse's two stamps, verbatim as the mailbox list answered them before the pass (§4.11 step 3, amended
+    // 2026-10-19): `covered` echoes these, never a later read, so a lapse that opens meanwhile keeps its gap.
+    let lapsed_since = row["lapsed_since"].as_str();
+    let gap = lapsed_since.and_then(instant);
+    let window = window(now, gap, last_known_on);
     let job = Job {
         provider,
         address_id: id,
         knowlu_address: knowlu,
         phase: Phase::Recover,
-        window: window(now, row["lapsed_since"].as_str().and_then(instant), last_known_on),
+        window,
         // An open backfill is not bound by the slot (§4.11); any other pass sends at most 30.
         cap: (!backfilling).then_some(SLOT_CAP),
         watch: None,
@@ -228,6 +244,14 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
             s.last_reconcile.insert(id.to_string(), at);
             true
         });
+    }
+    // A whole pass over a mailbox no longer `lapsed` says the gap is covered, so the service can stop reaching back.
+    // Best effort: a refusal, a failure or `cleared: false` changes nothing here, and the next pass reaches back again.
+    let last_lapsed_at = row["last_lapsed_at"].as_str();
+    if let (Some(since), Some(last), Some(at)) = (lapsed_since, last_lapsed_at, gap) {
+        if row["status"] != "lapsed" && covers_gap(&out, window, at, now) {
+            let _ = env.client.covered(id, since, last);
+        }
     }
     format!("{}, {}", fwd.text(), recovered(&out))
 }

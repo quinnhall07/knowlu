@@ -2193,6 +2193,121 @@ fn recovery_reaches_back_three_days_when_forwarding_is_on() {
     assert_eq!(p.svc.bodies("/reconcile")[0]["since"], json!(rig::iso(rig::NOW - 3 * rig::DAY)));
 }
 
+// ---- spec §4.11 step 3, amended 2026-10-19: a whole pass over a lapse's gap reports it `covered` ---------------
+
+/// The stamps as the service answers them, with microseconds and an offset, so a reparse would show. `SINCE` is
+/// ten days before the rig's `NOW`.
+const SINCE: &str = "2026-09-11T09:13:20.123456-05:00";
+const LAST: &str = "2026-09-13T00:00:00.654321+00:00";
+
+impl Pass {
+    /// A Gmail mailbox with `status`, forwarding on, whose lapse the service stamped `since` and `last`.
+    fn lapsed(tag: &str, status: &str, since: &str, last: &str) -> Pass {
+        let p = Pass::new(tag, status, rig::fwd("on", "ours"));
+        {
+            let mut st = p.svc.st.lock().unwrap();
+            st.rows[0]["lapsed_since"] = json!(since);
+            st.rows[0]["last_lapsed_at"] = json!(last);
+        }
+        p
+    }
+
+    /// The bodies of every `covered` report sent.
+    fn covered(&self) -> Vec<Value> {
+        self.svc.bodies(&format!("/addresses/{}/state", rig::ID)).into_iter().filter(|b| b["state"] == "covered").collect()
+    }
+}
+
+#[test]
+fn a_whole_pass_over_the_gap_reports_it_covered_with_the_stamps_read_before_the_pass() {
+    let p = Pass::lapsed("covered", "quiet", SINCE, LAST);
+    p.mail(&[("Dropped while lapsed", rig::NOW - 8 * rig::DAY), ("Newer notice", rig::NOW - 3600)]);
+    let (client, rows) = (p.svc.client(), p.rows());
+    // A lapse while the pass runs moves the service's stamps on: the report still carries the ones read before it.
+    p.svc.st.lock().unwrap().rows[0]["last_lapsed_at"] = json!("2026-09-21T12:00:00Z");
+    let line = run_step(&SlotEnv { host: &p.host, client: &client, clock: &p.clk, data_dir: &p.d }, &rows);
+    assert_eq!(line.as_deref(), Some("mail: forwarding on, 2 recovered"));
+    assert_eq!(p.svc.bodies("/reconcile")[0]["since"], json!(rig::iso(rig::NOW - 10 * rig::DAY)), "the window reached the gap");
+    assert_eq!(p.covered(), [json!({ "state": "covered", "lapsed_since": SINCE, "last_lapsed_at": LAST })], "verbatim, once");
+    let state = &p.svc.bodies(&format!("/addresses/{}/state", rig::ID))[0];
+    assert!(state.to_string().contains(SINCE) && state.to_string().contains(LAST), "byte for byte: {state}");
+    assert!(p.at(&format!("POST /addresses/{}/state covered", rig::ID)) > p.at("POST /batches/batch-1/sent"), "after the batch closed");
+    assert_eq!(p.svc.calls().iter().filter(|c| *c == "GET /addresses").count(), 1, "never a later read: {:?}", p.svc.calls());
+}
+
+#[test]
+fn no_covered_report_after_a_pass_that_stopped_early_fell_short_of_the_gap_or_left_a_row() {
+    let at = rig::NOW - 3_600 - rig::NOW.rem_euclid(60);
+    // Stopped early: the only missing row will not attach.
+    let p = Pass::lapsed("covered-stopped", "quiet", SINCE, LAST);
+    p.mail(&[("Stuck", at)]);
+    p.host.st.lock().unwrap().no_chip = Some("Stuck".into());
+    assert!(p.run().unwrap().ends_with("stopped: the attachments would not attach"));
+    assert!(p.covered().is_empty(), "{:?}", p.svc.calls());
+    // Ended done, but a row was left (kept as left from its third stalled day): recover did not send all it found missing.
+    let q = Pass::lapsed("covered-left", "quiet", SINCE, LAST);
+    q.mail(&[("Stuck", at)]);
+    q.host.st.lock().unwrap().no_chip = Some("Stuck".into());
+    MailState::update(&q.d, |s| s.lone_left.insert(rig::ID.to_string(), vec![at]).is_none()).unwrap();
+    assert_eq!(q.run().as_deref(), Some("mail: forwarding on, 0 recovered"));
+    assert!(q.covered().is_empty(), "{:?}", q.svc.calls());
+    // A stamp the device cannot read as an instant: the window is the usual three days, short of any gap.
+    let r = Pass::lapsed("covered-short", "quiet", "not an instant", LAST);
+    r.mail(&[("Newer notice", rig::NOW - 3600)]);
+    assert_eq!(r.run().as_deref(), Some("mail: forwarding on, 1 recovered"));
+    assert_eq!(r.svc.bodies("/reconcile")[0]["since"], json!(rig::iso(rig::NOW - 3 * rig::DAY)));
+    assert!(r.covered().is_empty(), "{:?}", r.svc.calls());
+}
+
+#[test]
+fn no_covered_report_while_the_mailbox_is_still_lapsed() {
+    let p = Pass::lapsed("covered-still-lapsed", "lapsed", SINCE, LAST);
+    p.mail(&[("Dropped while lapsed", rig::NOW - 8 * rig::DAY)]);
+    assert_eq!(p.run().as_deref(), Some("mail: forwarding on, 1 recovered"));
+    assert_eq!(p.svc.bodies("/reconcile")[0]["since"], json!(rig::iso(rig::NOW - 10 * rig::DAY)), "the gap is still recovered");
+    assert!(p.covered().is_empty(), "{:?}", p.svc.calls());
+}
+
+#[test]
+fn a_refused_failed_or_uncleared_covered_report_leaves_the_slot_as_it_was() {
+    let run = |tag: &str, reply: Option<(u16, String)>| {
+        let p = Pass::lapsed(tag, "quiet", SINCE, LAST);
+        p.mail(&[("Dropped while lapsed", rig::NOW - 8 * rig::DAY)]);
+        p.svc.st.lock().unwrap().covered = reply;
+        let line = p.run();
+        assert_eq!(p.covered().len(), 1, "{tag}: sent once, never retried in the slot");
+        (line, MailState::load(&p.d).unwrap())
+    };
+    let cleared = run("covered-ok", None);
+    assert_eq!(cleared.0.as_deref(), Some("mail: forwarding on, 1 recovered"));
+    let uncleared = json!({ "address_id": rig::ID, "state": "covered", "status": "quiet", "cleared": false }).to_string();
+    for (tag, reply) in [
+        ("covered-400", (400, r#"{"error":"lapsed_since and last_lapsed_at must be the mailbox's own, each an instant with its zone"}"#.to_string())),
+        ("covered-500", (500, r#"{"error":"failed"}"#.to_string())),
+        ("covered-false", (200, uncleared.clone())),
+    ] {
+        assert_eq!(run(tag, Some(reply)), cleared, "{tag}: the same line and the same mail.json");
+    }
+}
+
+#[test]
+fn a_pass_covers_the_gap_only_when_done_whole_and_reaching_back_to_it() {
+    use knowlu::mail::recover::{window, Outcome, Stop, Window};
+    use knowlu::mail::slot::covers_gap;
+    let (now, l) = (rig::NOW, rig::NOW - 10 * rig::DAY);
+    let w = window(now, Some(l), None);
+    let done = Outcome { stop: Stop::Done, expected: 2, handled: 2, held: 0, sent: 2, left: 0, cleaned: 2, closed: true, frontier: None, stalled_at: None, stuck_cleared: false, left_cleared: vec![], left_at_once: vec![] };
+    assert!(covers_gap(&done, w, l, now));
+    let old = now - 90 * rig::DAY;
+    assert!(covers_gap(&done, window(now, Some(old), None), old, now), "30 days back is enough for an older lapse");
+    assert!(!covers_gap(&done, Window { since: l + 1, ..w }, l, now), "a second short of the gap");
+    assert!(!covers_gap(&done, window(now, None, None), l, now), "the usual three days");
+    assert!(!covers_gap(&Outcome { stop: Stop::SlotCap, ..done.clone() }, w, l, now));
+    assert!(!covers_gap(&Outcome { left: 1, ..done.clone() }, w, l, now));
+    assert!(!covers_gap(&Outcome { closed: false, ..done.clone() }, w, l, now), "a batch not closed with its count");
+    assert!(covers_gap(&Outcome { sent: 0, cleaned: 0, closed: false, ..done.clone() }, w, l, now), "nothing missing, no batch");
+}
+
 #[test]
 fn a_turned_off_mailbox_is_never_turned_back_on_even_after_a_failed_disconnect() {
     use knowlu::mail::commands::{disconnect_with, Disconnect};
