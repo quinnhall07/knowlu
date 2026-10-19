@@ -127,10 +127,10 @@ pub struct MailState {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub recover_stall: BTreeMap<String, LoneStall>,
     /// Each Gmail mailbox's lone rows that reached their third stalled day, by address id (review round 2 of
-    /// e7ae803): received minutes only. Each is left in every pass until the backfill closes or the mailbox is
-    /// disconnected, so `lone_stall` is free to count the next row that stalls (one record let two stuck rows
-    /// replace each other for good). A file written before it existed lacks it and reads as none. Not written
-    /// when empty.
+    /// e7ae803): received minutes only. Each is left in every pass until a row in its minute is sent or held (review
+    /// of 5f71623..6a8e738, #3), the backfill closes or the mailbox is disconnected, so the stall records are free to
+    /// count the next row that stalls (one record let two stuck rows replace each other for good). A file written
+    /// before it existed lacks it and reads as none. Not written when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub lone_left: BTreeMap<String, Vec<i64>>,
     /// Each Gmail mailbox's messages of the last 24 hours, by address id: unix seconds, oldest first (review round
