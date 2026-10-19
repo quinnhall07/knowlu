@@ -656,7 +656,7 @@ Per mailbox, with the mailbox's own kept profile:
    stamp for the next pass. A still-lapsed mailbox keeps its stamp, and a retry is a harmless `cleared:
    false`. Corrected 2026-10-19 after review: the first version matched `lapsed_since` alone, and a
    lapse during a pass that spanned slots was wiped. The cloud half is built; the app's half, sending
-   `covered` with both stamps, is not yet.)*
+   `covered` with both stamps, is not yet. Accepted for the MVP (Quinn, 2026-10-19): a mailbox that lapses while `confirmed` or `blocked` (forward on, no canary yet) comes back `pending`, so gmail-read reads its gap by OAuth; if recover later reaches back over the same gap, a message can be filed twice, once as `gmail:<id>` and once as `mail:<hash>`, since the two paths share no key and only an equal normalised title in the same course folds the second. Testers are comped and do not lapse, so the window is left open. The follow-up after the MVP is one shared key: gmail-read derives the forward path's Message-ID hash, which ends every cross-path duplicate, this one included.)*
 4. **Recover.** Open a `recover` batch and forward the missing messages as attachments, **oldest first**,
    at most 30 a slot when no backfill is open, at Microsoft's pace, deleting the Sent copies it created;
    close the batch with the count sent (§4.8 holds it until it is whole).
