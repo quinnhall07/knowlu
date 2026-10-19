@@ -18,7 +18,7 @@
 //! and the slot makes no recover pass ([`crate::mail_steps::backfill_held_for_c3`]).
 //!
 //! **Privacy.** Counts, dates and fixed words only.
-use super::recover::{backfill_window, run_pass, Clock, Job, Mailbox, Outcome, Stop};
+use super::recover::{backfill_window, pages_spent, run_pass, Clock, Job, Mailbox, Outcome, Stop};
 use super::setup::{Backfill, Env, Row, Shared};
 use crate::mail_client::{MailClient, Phase};
 use crate::mail_session::{session_dir, BackfillPace, MailState};
@@ -74,7 +74,12 @@ pub(super) fn mark_open(data_dir: &Path, id: &str, open: bool) -> Result<(), Str
         match (open, listed) {
             (true, false) => s.open_backfills.push(id.to_string()),
             (false, true) => s.open_backfills.retain(|i| i != id),
+            // A closed backfill keeps no frontier.
+            (false, false) => return s.backfill_frontier.remove(id).is_some(),
             _ => return false,
+        }
+        if !open {
+            s.backfill_frontier.remove(id);
         }
         true
     })
@@ -90,7 +95,7 @@ pub(super) fn seed_routine(data_dir: &Path, provider: Provider, id: &str, now: i
     let kept = state.as_ref().and_then(|s| s.backfill_pace.get(id).cloned()).filter(|p| p.day == day);
     let mut routine = match kept {
         Some(p) => {
-            let routine = Routine::new(provider, day, p.sent_today);
+            let routine = Routine::new(provider, day, p.sent_today).with_loads(p.loads_today);
             if p.paused_until.is_some_and(|t| t > now) { routine.paused() } else { routine }
         }
         None => Routine::new(provider, day, 0),
@@ -103,19 +108,50 @@ pub(super) fn seed_routine(data_dir: &Path, provider: Provider, id: &str, now: i
 }
 
 /// Keeps a look at the Inbox in `mail.json` for the next pass to be seeded from (see [`seed_routine`]). Best
-/// effort, like [`save_pace`].
+/// effort, like [`keep_pace`].
 pub(super) fn save_look(data_dir: &Path, id: &str, at: i64) {
     let _ = MailState::update(data_dir, |s| s.last_look.insert(id.to_string(), at) != Some(at));
 }
 
-/// Keeps a mailbox's day count (and pause) in `mail.json`, and drops every pace whose day is past. Best
-/// effort: a pace that could not be written costs a relaunch its memory, never the backfill.
-fn save_pace(data_dir: &Path, id: &str, pace: BackfillPace, today: i64) {
+/// Keeps a mailbox's day count, page loads and pause in `mail.json`, and drops every pace whose day is past.
+/// A pace for the day already kept is merged, never lowered: each count by its larger, a pause kept (a
+/// progress note knows the sends but not the loads, a look's note the loads but not the sends). `create`
+/// false only merges into a pace kept for the same day. Best effort: a pace that could not be written costs
+/// a relaunch its memory, never the backfill.
+pub(super) fn keep_pace(data_dir: &Path, id: &str, pace: BackfillPace, create: bool) {
+    let today = pace.day;
     let _ = MailState::update(data_dir, |s| {
         let before = s.backfill_pace.clone();
         s.backfill_pace.retain(|_, p| p.day >= today);
-        s.backfill_pace.insert(id.to_string(), pace);
+        let merged = match s.backfill_pace.get(id) {
+            Some(old) if old.day == pace.day => BackfillPace {
+                day: pace.day,
+                sent_today: old.sent_today.max(pace.sent_today),
+                paused_until: pace.paused_until.or(old.paused_until),
+                loads_today: old.loads_today.max(pace.loads_today),
+            },
+            _ if !create => return s.backfill_pace != before,
+            _ => pace,
+        };
+        s.backfill_pace.insert(id.to_string(), merged);
         s.backfill_pace != before
+    });
+}
+
+/// The day an open backfill's next pass searches from, if a pass has found one.
+fn frontier(data_dir: &Path, id: &str) -> Option<i64> {
+    MailState::load(data_dir).ok().and_then(|s| s.backfill_frontier.get(id).copied())
+}
+
+/// Keeps a pass's frontier for the next: it only moves forward (Quinn 2026-10-19).
+fn advance_frontier(data_dir: &Path, id: &str, day: i64) {
+    let _ = MailState::update(data_dir, |s| {
+        let old = s.backfill_frontier.get(id).copied();
+        if old.is_some_and(|o| o >= day) {
+            return false;
+        }
+        s.backfill_frontier.insert(id.to_string(), day);
+        true
     });
 }
 
@@ -156,13 +192,18 @@ pub fn drive_backfill(d: &Drive, routine: &mut Routine) -> Drove {
         let held = match routine.next(now) {
             Send::DayLimit { next_day_at } => Some((next_day_at, None)),
             Send::Paused(p) => Some((next_day, Some(p.line()))),
+            // The day's page loads spent: a pass would open nothing.
+            _ if d.provider == Provider::Gmail && pages_spent(routine, now) => Some((next_day, None)),
             _ => None,
         };
         let held = match held {
             Some(h) => Some(h),
             None => {
                 let out = run_one(d, routine, &since, since_idx, now, started);
-                save_pace(d.data_dir, d.address_id, pace_of(routine), today);
+                keep_pace(d.data_dir, d.address_id, pace_of(routine), true);
+                if let Some(day) = out.frontier.filter(|_| out.stop != Stop::Done) {
+                    advance_frontier(d.data_dir, d.address_id, day);
+                }
                 if out.closed {
                     (d.on_closed)();
                 }
@@ -171,7 +212,7 @@ pub fn drive_backfill(d: &Drive, routine: &mut Routine) -> Drove {
                         let _ = mark_open(d.data_dir, d.address_id, false);
                         return Drove::Done;
                     }
-                    Stop::DayLimit { next_day_at } => Some((next_day_at, None)),
+                    Stop::DayLimit { next_day_at } | Stop::PageLimit { next_day_at } => Some((next_day_at, None)),
                     Stop::Paused(p) => Some((next_day, Some(p.line()))),
                     Stop::Stopped => {
                         let _ = mark_open(d.data_dir, d.address_id, false);
@@ -201,7 +242,12 @@ pub fn drive_backfill(d: &Drive, routine: &mut Routine) -> Drove {
 /// holds it.
 fn pace_of(routine: &Routine) -> BackfillPace {
     let day = routine.day();
-    BackfillPace { day, sent_today: routine.sent_today(), paused_until: routine.is_paused().then_some((day + 1) * DAY) }
+    BackfillPace {
+        day,
+        sent_today: routine.sent_today(),
+        paused_until: routine.is_paused().then_some((day + 1) * DAY),
+        loads_today: routine.loads_today(),
+    }
 }
 
 /// One pass over the fixed window: progress as it goes, the day's count kept as each batch of forwards is
@@ -219,11 +265,15 @@ fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i
         });
         // Past midnight mid-pass the day's own count is not known here: the pass's, an upper bound.
         let sent_today = if at.div_euclid(DAY) == today { base + sent } else { sent };
-        let pace = BackfillPace { day: at.div_euclid(DAY), sent_today, paused_until: None };
-        save_pace(d.data_dir, d.address_id, pace, at.div_euclid(DAY));
+        let pace = BackfillPace { day: at.div_euclid(DAY), sent_today, paused_until: None, loads_today: 0 };
+        keep_pace(d.data_dir, d.address_id, pace, true);
         !d.shared.stopping()
     };
     let look = |at: i64| save_look(d.data_dir, d.address_id, at);
+    let load = |day: i64, loads: u32| {
+        let pace = BackfillPace { day, sent_today: 0, paused_until: None, loads_today: loads };
+        keep_pace(d.data_dir, d.address_id, pace, true);
+    };
     let job = Job {
         provider: d.provider,
         address_id: d.address_id,
@@ -233,6 +283,8 @@ fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i
         cap: None,
         watch: Some(&watch),
         on_look: Some(&look),
+        on_load: Some(&load),
+        frontier: frontier(d.data_dir, d.address_id),
     };
     let out = run_pass(d.mb, d.client, d.clock, routine, &job);
     d.shared.update(|p| {

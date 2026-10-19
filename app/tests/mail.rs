@@ -732,6 +732,13 @@ struct Fake {
     fresh_refuses_after: Option<usize>,
     /// The clock at each open of the fresh Inbox.
     fresh_at: RefCell<Vec<i64>>,
+    /// Every open, with the clock when it ran.
+    opened_at: RefCell<Vec<(Place, i64)>>,
+    /// Gmail: the account's zone, in seconds east of UTC: `after:` and `before:` compare the local day (live
+    /// 2026-10-19: `before:` cuts at the account's local midnight).
+    zone: i64,
+    /// Gmail: the pager presses the scripts reported.
+    presses: Cell<u64>,
 }
 
 fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
@@ -766,6 +773,9 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         stale: Cell::new(false),
         fresh_refuses_after: None,
         fresh_at: Default::default(),
+        opened_at: Default::default(),
+        zone: 0,
+        presses: Cell::new(0),
     }
 }
 
@@ -812,6 +822,7 @@ fn row_texts(args: &Value) -> Vec<String> {
 impl Mailbox for Fake {
     fn open(&self, place: Place) -> Result<(), Refusal> {
         self.places.borrow_mut().push(place);
+        self.opened_at.borrow_mut().push((place, self.clk.now()));
         self.log.borrow_mut().push((format!("open {place:?}"), Value::Null));
         if place == Place::FreshInbox {
             self.fresh_at.borrow_mut().push(self.clk.now());
@@ -832,22 +843,39 @@ impl Mailbox for Fake {
 
     fn script(&self, path: &str, args: &Value) -> Result<Value, Refusal> {
         self.log.borrow_mut().push((path.to_string(), args.clone()));
+        let v = self.answer(path, args)?;
+        self.presses.set(self.presses.get() + v.get("presses").and_then(Value::as_u64).unwrap_or(0));
+        Ok(v)
+    }
+}
+
+impl Fake {
+    /// Page loads as the routine counts them: every open, every search and every pager press.
+    fn loads(&self) -> u64 {
+        self.opened_at.borrow().len() as u64 + self.calls("search.js").len() as u64 + self.presses.get()
+    }
+
+    /// The local day of an instant, as Gmail's `after:` and `before:` compare it.
+    fn local_day(&self, at: i64) -> String {
+        iso(at + if self.provider == Provider::Gmail { self.zone } else { 0 })[..10].to_string()
+    }
+
+    fn answer(&self, path: &str, args: &Value) -> Result<Value, Refusal> {
         let (dir, name) = path.split_once('/').unwrap();
         assert_eq!(dir, if self.provider == Provider::Gmail { "gmail" } else { "m365" }, "{path}");
         let m365 = self.provider == Provider::M365;
         Ok(match name {
-            "search.js" if self.stale.get() => json!({ "result": "ok", "count": 5130 }),
+            "search.js" if self.stale.get() => json!({ "result": "ok", "count": 5130, "presses": 0 }),
             "search.js" => {
                 self.searched.set(true);
                 let since = args["since"].as_str().unwrap();
                 let before = args.get("until").and_then(Value::as_str);
-                assert!(m365 || before.is_none(), "Gmail's search takes no until");
                 // A conversation is found by any message in it (Microsoft 365's conversation view).
                 let mut idx: Vec<usize> = (0..self.msgs.len())
                     .filter(|&i| {
                         let m = &self.msgs[i];
                         std::iter::once(m.at).chain(m.convo.iter().map(|c| c.1)).any(|at| {
-                            let day = iso(at)[..10].to_string();
+                            let day = self.local_day(at);
                             day.as_str() >= since && before.is_none_or(|u| day.as_str() < u)
                         })
                     })
@@ -857,9 +885,34 @@ impl Mailbox for Fake {
                     idx.reverse();
                 }
                 let n = idx.len();
-                self.page.set(if self.oldest_walk.is_some() { n.div_ceil(self.size).max(1) - 1 } else { 0 });
                 *self.current.borrow_mut() = idx;
-                json!({ "result": "ok", "count": n })
+                if m365 {
+                    self.page.set(0);
+                    return Ok(json!({ "result": "ok", "count": n }));
+                }
+                // Gmail lands on page 1, the newest; an "of many" result is walked to the oldest page within
+                // `max_presses` (and `oldest_walk`, its time), unless `walk` is false.
+                let newest = n.div_ceil(self.size).max(1) - 1;
+                let walk = args.get("walk") != Some(&json!(false));
+                let max = args.get("max_presses").and_then(Value::as_u64).unwrap_or(40) as usize;
+                let on = |page: usize| (page * self.size).min(n)..((page + 1) * self.size).min(n);
+                if newest == 0 {
+                    self.page.set(0);
+                    json!({ "result": "ok", "count": n, "exact": true, "presses": 0 })
+                } else if !walk {
+                    self.page.set(newest);
+                    json!({ "result": "ok", "count": on(newest).len(), "exact": false, "at_oldest": false, "presses": 0 })
+                } else {
+                    let can = max.min(self.oldest_walk.unwrap_or(usize::MAX));
+                    if can >= newest {
+                        self.page.set(0);
+                        json!({ "result": "ok", "count": n, "exact": true, "at_oldest": true, "presses": newest })
+                    } else {
+                        self.page.set(newest - can);
+                        let counted: usize = (newest - can..=newest).map(|p| on(p).len()).sum();
+                        json!({ "result": "ok", "count": counted, "exact": false, "at_oldest": false, "presses": can })
+                    }
+                }
             }
             "list.js" if m365 => {
                 // A conversation row is opened and each message in it read (T18c), numbered by conversation.
@@ -889,22 +942,36 @@ impl Mailbox for Fake {
             }
             "list.js" if self.stale.get() => json!({ "result": "failed", "reason": "page did not change" }),
             "list.js" if self.endless && args["go"] == "newer" => {
-                json!({ "result": "ok", "page": { "from": 9, "to": 9, "total": 9 }, "moved": true, "rows": [] })
+                if args["max_presses"] == 0 {
+                    return Ok(json!({ "result": "failed", "reason": "no presses left", "presses": 0 }));
+                }
+                json!({ "result": "ok", "page": { "from": 9, "to": 9, "total": 9 }, "moved": true, "rows": [], "presses": 1 })
             }
             "list.js" => {
                 let cur = self.current.borrow();
                 let pages = cur.len().div_ceil(self.size).max(1);
                 let before = self.page.get();
-                match args["go"].as_str() {
-                    Some("oldest") => self.page.set(self.oldest_walk.map_or(0, |k| before.saturating_sub(k))),
-                    Some("newer") if before + 1 < pages => self.page.set(before + 1),
-                    _ => {}
+                let max = args.get("max_presses").and_then(Value::as_u64).unwrap_or(40) as usize;
+                let to = match args["go"].as_str() {
+                    Some("oldest") => before.saturating_sub(max.min(self.oldest_walk.unwrap_or(usize::MAX))),
+                    Some("newer") if before + 1 < pages => before + 1,
+                    Some("older") if before > 0 => before - 1,
+                    _ => before,
+                };
+                let needed = match args["go"].as_str() {
+                    Some("oldest" | "older") => before > 0,
+                    Some("newer") => before + 1 < pages,
+                    _ => false,
+                };
+                if needed && max == 0 {
+                    return Ok(json!({ "result": "failed", "reason": "no presses left", "presses": 0 }));
                 }
+                self.page.set(to);
                 let at = self.page.get();
                 let (start, end) = (at * self.size, ((at + 1) * self.size).min(cur.len()));
                 let rows: Vec<Value> = cur[start..end].iter().map(|&i| self.row(i, true)).collect();
                 let page = json!({ "from": cur.len() - end + 1 + usize::from(self.endless), "to": cur.len() - start, "total": cur.len() });
-                let mut v = json!({ "result": "ok", "page": page, "moved": at != before, "rows": rows });
+                let mut v = json!({ "result": "ok", "page": page, "moved": at != before, "rows": rows, "presses": at.abs_diff(before) });
                 if args["go"] == "oldest" {
                     v["at_oldest"] = json!(at == 0);
                 }
@@ -1034,7 +1101,7 @@ fn routine(provider: Provider) -> Routine {
 }
 
 fn job(provider: Provider, phase: Phase, window: Window, cap: Option<u32>) -> Job<'static> {
-    Job { provider, address_id: A, knowlu_address: KNOWLU, phase, window, cap, watch: None, on_look: None }
+    Job { provider, address_id: A, knowlu_address: KNOWLU, phase, window, cap, watch: None, on_look: None, on_load: None, frontier: None }
 }
 
 fn pass(fake: &Fake, svc: &Service, routine: &mut Routine, job: &Job) -> knowlu::mail::recover::Outcome {
@@ -1434,10 +1501,11 @@ fn on_gmail_expected_and_the_progress_count_are_conversations() {
 }
 
 #[test]
-fn a_gmail_walk_short_of_the_oldest_page_is_asked_again_and_its_rows_are_not_judged() {
-    // Live 2026-10-19: a search has no Oldest button, so list.js walks "Next results" inside its step's
-    // budget. Ten single messages, two to a page (five pages), one page walked a call: three answers say
-    // `at_oldest: false` and are not judged; the fourth is the oldest page, and the pass goes newer from it.
+fn a_gmail_count_walk_cut_short_is_aimed_at_the_first_day_and_its_rows_are_not_judged_twice() {
+    // Live 2026-10-19: a search has no Oldest button, so search.js walks "Next results" inside its budget. Ten
+    // single messages, two to a page (five pages), and time for one page: the count is a lower bound and the page
+    // is not the oldest. The design of 2026-10-19 never walks on from there: a fresh search that does not walk,
+    // page 1 read, "older" pressed to the oldest page (none is older than the first day), then newer.
     let since = window(NOW, None, None).since;
     let msgs: Vec<Mail> = (0..10).map(|i| mail(ANA, &format!("Note {i}"), since + 3_600 * (i + 1))).collect();
     let svc = holding(&[]);
@@ -1446,27 +1514,30 @@ fn a_gmail_walk_short_of_the_oldest_page_is_asked_again_and_its_rows_are_not_jud
     mb.oldest_walk = Some(1);
     let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Backfill, backfill_window(NOW.div_euclid(DAY) - 5, NOW), None));
     assert_eq!(out.stop, Stop::Done);
-    let go: Vec<_> = mb.calls("list.js").iter().map(|a| a["go"].as_str().unwrap().to_string()).collect();
-    assert_eq!(go, ["oldest", "oldest", "oldest", "oldest", "newer", "newer", "newer", "newer"]);
-    // Every message forwarded once, oldest first: the pages walked past were never judged.
+    assert_eq!(gos(&mb), ["read", "older", "older", "older", "older", "older", "newer", "newer", "newer", "newer"]);
+    let searches = mb.calls("search.js");
+    assert_eq!((searches.len(), &searches[1]["walk"]), (2, &json!(false)));
+    // Every message forwarded once, oldest first: the pages the seek passed were never judged.
     let sent = mb.forwarded();
     let want: Vec<String> = (0..10).map(|i| received(since + 3_600 * (i + 1))).collect();
     assert_eq!(sent, want);
-    assert_eq!((out.expected, out.handled, out.sent), (10, 10, 10));
+    // The batch's expected is the cut walk's lower bound (two pages counted), never a guess.
+    assert_eq!((out.expected, out.handled, out.sent), (4, 10, 10));
 }
 
 #[test]
-fn a_gmail_walk_that_cannot_reach_the_oldest_page_stops_the_pass_and_sends_nothing() {
-    // A walk that says `at_oldest: false` without moving would leave the older pages unread.
+fn a_seek_that_needs_more_than_one_calls_presses_stops_the_pass_and_sends_nothing() {
+    // The seek toward the row a walk goes on from is one call's presses at most (40): 43 pages of one row and no
+    // time to count them leave 42 presses to the oldest. The pass stops by name; nothing was judged.
     let since = window(NOW, None, None).since;
-    let msgs: Vec<Mail> = (0..6).map(|i| mail(ANA, &format!("Note {i}"), since + 3_600 * (i + 1))).collect();
+    let msgs: Vec<Mail> = (0..43).map(|i| mail(ANA, &format!("Note {i}"), since + 3_600 * (i + 1))).collect();
     let svc = holding(&[]);
     let mut mb = fake(Provider::Gmail, msgs);
-    mb.size = 2;
+    mb.size = 1;
     mb.oldest_walk = Some(0);
     let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
-    assert_eq!(out.stop, Stop::Script("the oldest page could not be reached"));
-    assert_eq!(mb.calls("list.js").len(), 1);
+    assert_eq!(out.stop, Stop::Script("the frontier could not be reached"));
+    assert_eq!(gos(&mb).iter().filter(|g| *g == "older").count(), 40);
     assert!(mb.forwards.borrow().is_empty());
 }
 
@@ -1617,6 +1688,11 @@ fn gmail_backfill() -> Job<'static> {
     job(Provider::Gmail, Phase::Backfill, backfill_window(NOW.div_euclid(DAY) - 5, NOW), None)
 }
 
+/// Each `list.js` call's direction, in order; "read" for a read of the page as it is.
+fn gos(mb: &Fake) -> Vec<String> {
+    mb.calls("list.js").iter().map(|a| a["go"].as_str().unwrap_or("read").to_string()).collect()
+}
+
 /// The scripts and places the routine used, in order ("open Inbox" is a place).
 fn steps(mb: &Fake) -> Vec<String> {
     mb.log.borrow().iter().map(|(n, _)| n.clone()).collect()
@@ -1667,14 +1743,18 @@ fn a_gmail_backfill_looks_in_the_inbox_every_25_sends_and_walks_again_without_se
     let looks = mb.calls("bounce.js");
     assert_eq!(looks[0]["since"], json!(iso(NOW - 24 * 3_600)));
     assert_eq!(looks[1]["since"], json!(iso(mb.looked_at.borrow()[0])));
-    // The search is asked again with the same words and walked from the oldest page. Page 3 is the newest, and
-    // the look after its last send finds every row decided, so no walk follows it. The rows the first walk
-    // decided (page 1 and the first half of page 2) are read again but not judged.
+    // The restart searches again from the same day, never walking its count (the design of 2026-10-19: no walk to
+    // the oldest page and back), reads page 1 and presses "older" until the page's oldest row is older than the
+    // row the walk goes on from (the 31st), then walks newer. Its span (6 days past it) reaches past the window's
+    // end, so it has no `until`. Page 3 is the newest, and the look after its last send finds every row decided,
+    // so no walk follows it. The rows the first walk decided (the first half of page 2) are read again but not
+    // judged.
     let searches = mb.calls("search.js");
     assert_eq!(searches.len(), 2);
-    assert_eq!(searches[0], searches[1]);
-    let go: Vec<_> = mb.calls("list.js").iter().map(|a| a["go"].as_str().unwrap().to_string()).collect();
-    assert_eq!(go, ["oldest", "newer", "oldest", "newer", "newer"]);
+    assert_eq!(searches[0]["since"], searches[1]["since"]);
+    assert_eq!((searches[0].get("walk"), &searches[1]["walk"]), (None, &json!(false)));
+    assert!(searches[1].get("until").is_none(), "{}", searches[1]);
+    assert_eq!(gos(&mb), ["oldest", "newer", "read", "older", "newer"]);
     assert_eq!(mb.calls("forward.js").len(), 6, "six groups of ten, each sent once");
     // The batch's expected stays the first search's count, and it closes with what was sent.
     let open: Value = serde_json::from_str(&seen(&svc).iter().find(|(_, p, _)| p == "/batches").unwrap().2).unwrap();
@@ -1853,8 +1933,8 @@ fn a_look_follows_the_forward_that_reaches_25_and_a_conversation_adds_each_of_it
     assert_eq!(sent_at_each_look(&mb), [25, 50], "a conversation counts each of its messages, and the look is not held to the page's end");
     let want: Vec<String> = (0..10).map(|i| received(since + 3_600 * (i + 1) + 240)).collect();
     assert_eq!(mb.forwarded(), want, "each conversation once, oldest first");
-    let go: Vec<_> = mb.calls("list.js").iter().map(|a| a["go"].as_str().unwrap().to_string()).collect();
-    assert_eq!(go, ["oldest", "oldest"]);
+    // The restart reads the one page as its search left it: no oldest walk.
+    assert_eq!(gos(&mb), ["oldest", "read"]);
     assert_eq!(mb.calls("search.js").len(), 2);
     assert_eq!(mb.calls("thread.js").len(), 15, "the ten read, then the five that were not sent");
     assert_eq!(out.held, 0);
@@ -1920,12 +2000,210 @@ fn a_report_seen_once_does_not_pause_the_routine_again_at_a_later_days_look() {
 }
 
 #[test]
-fn a_result_that_never_ends_stops_the_gmail_pass_with_a_fixed_word() {
+fn a_result_that_never_ends_stops_the_gmail_pass_at_the_days_page_limit() {
+    // Each "newer" is a page load: the day's 300 run out long before the 5,000-page backstop, and the pass stops
+    // as a page limit, never Done, with the end's own loads kept.
     let mut mb = fake(Provider::Gmail, unheld(1));
     mb.endless = true;
-    let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
-    assert_eq!(out.stop, Stop::Script("the results did not end"));
-    assert_eq!(mb.calls("list.js").len(), 5_000, "a walk is at most 5,000 pages");
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&mb, &holding(&[]), &mut r, &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
+    assert_eq!(out.stop, Stop::PageLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY });
+    assert!(mb.calls("list.js").len() < 300, "{}", mb.calls("list.js").len());
+    assert!(r.loads_today() <= 300 && u64::from(r.loads_today()) == mb.loads(), "{} vs {}", r.loads_today(), mb.loads());
+}
+
+/// `n` messages from `who`, `per_day` a day from the start of UTC day `first`, oldest first.
+fn daily(who: &str, tag: &str, first: i64, n: usize, per_day: i64) -> Vec<Mail> {
+    let gap = 20 * 3_600 / per_day;
+    (0..n as i64).map(|i| mail(who, &format!("{tag} {i}"), first * DAY + 3_600 + (i / per_day) * DAY + (i % per_day) * gap)).collect()
+}
+
+/// Each search's `until`, in order (`None`: the whole search).
+fn untils(mb: &Fake) -> Vec<Option<String>> {
+    mb.calls("search.js").iter().map(|a| a.get("until").and_then(Value::as_str).map(str::to_string)).collect()
+}
+
+#[test]
+fn a_gmail_restart_searches_narrowed_from_where_the_walk_goes_on_and_never_walks_to_the_oldest_page() {
+    // The design of 2026-10-19: a restart after a look reloads (FreshInbox), searches the same day narrowed with
+    // `before:` a few days past the row the walk goes on from, does not walk the count, and presses "older" a page
+    // or two to that row. 300 messages over 30 days of a 40-day window, 20 to a page: ten looks.
+    let first = NOW.div_euclid(DAY) - 40;
+    let msgs = daily(ANA, "Notice", first + 5, 300, 10);
+    let want: Vec<String> = msgs.iter().map(|m| received(m.at)).collect();
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.size = 20;
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&mb, &holding(&[]), &mut r, &job(Provider::Gmail, Phase::Backfill, backfill_window(first, NOW), None));
+    assert_eq!((out.stop, out.handled, out.sent, out.left), (Stop::Done, 300, 300, 0));
+    assert_eq!(mb.forwarded(), want, "every row once, oldest first");
+    // Only the pass's first search walks its count to the oldest page; no restart's does, and none walks there.
+    let searches = mb.calls("search.js");
+    assert_eq!(searches.len(), 11, "the first search and one a look");
+    assert!(searches[0].get("walk").is_none() && searches[0].get("until").is_none(), "{}", searches[0]);
+    assert!(searches[1..].iter().all(|s| s["walk"] == json!(false) && s["since"] == searches[0]["since"]), "{searches:?}");
+    assert_eq!(gos(&mb).iter().filter(|g| *g == "oldest").count(), 1);
+    // Every restart inside the window is narrowed, and a bound never goes back; once whole, a search stays whole.
+    let bounds = untils(&mb);
+    assert!(bounds[1].is_some(), "{bounds:?}");
+    let narrowed: Vec<&String> = bounds[1..].iter().map_while(Option::as_ref).collect();
+    assert!(narrowed.windows(2).all(|w| w[0] <= w[1]), "{bounds:?}");
+    assert!(bounds[1 + narrowed.len()..].iter().all(Option::is_none), "{bounds:?}");
+    // Each seek passes at most the span's rows (9 days of 10, five pages of 20) where the old restart walked all
+    // 15 pages to the oldest and back.
+    let go = gos(&mb);
+    let seeks: Vec<usize> = go.split(|g| g == "read").skip(1).map(|s| s.iter().take_while(|g| *g == "older").count()).collect();
+    assert!(seeks.len() == 10 && seeks.iter().all(|n| *n <= 5), "{go:?}");
+    assert_eq!(u64::from(r.loads_today()), mb.loads(), "the routine counted every load the page made");
+}
+
+#[test]
+fn a_restart_lands_on_a_page_older_than_the_row_it_goes_on_from_so_that_rows_twin_is_still_judged() {
+    // Rows 29 and 30 read alike (sender, subject, instant) and fall on two pages of ten. The look after the 30th
+    // send restarts the walk from row 29 (every row met is decided: the newest met). The seek lands on the first
+    // page whose oldest row is strictly older than it (rows 20-29), not on the one whose oldest row is its twin, so
+    // the walk meets row 29 again before the twin, and the twin is judged and sent.
+    let since = window(NOW, None, None).since;
+    let msgs: Vec<Mail> = (0..60)
+        .map(|i| {
+            let k = if i == 30 { 29 } else { i };
+            mail(ANA, &format!("Notice {k}"), since + 3_600 + k * 600)
+        })
+        .collect();
+    let twin = received(since + 3_600 + 29 * 600);
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.size = 10;
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &gmail_backfill());
+    assert_eq!((out.stop, out.handled, out.sent), (Stop::Done, 60, 60));
+    assert_eq!(mb.forwarded().iter().filter(|t| **t == twin).count(), 2, "both twins went");
+    assert_eq!(sent_at_each_look(&mb), [30, 60]);
+    // The restart reads its newest page (rows 50-59) and presses older past rows 40-49 and 30-39 to rows 20-29.
+    let go = gos(&mb);
+    assert_eq!(go[..7], ["oldest", "newer", "newer", "read", "older", "older", "older"], "{go:?}");
+}
+
+#[test]
+fn a_re_aim_across_a_gap_in_the_mail_longer_than_its_span_moves_its_bound_forward_until_the_search_is_whole() {
+    // The judge's loop (2026-10-19): a narrowed search whose newest page is reached is aimed again with a later
+    // bound (at least a day past the last, its span doubled). Mail on days 1-5 of a 40-day window, none for 30
+    // days, then mail on days 36-39 whose last five are missing: the re-aims cross the gap, and only the whole
+    // search's newest page ends the pass.
+    let first = NOW.div_euclid(DAY) - 40;
+    let a: Vec<Mail> = (0..100).map(|i| mail(ANA, &format!("A {i}"), (first + 1) * DAY + i * 4_320)).collect();
+    let b: Vec<Mail> = (0..105).map(|i| mail(BO, &format!("B {i}"), (first + 36) * DAY + i * 3_000)).collect();
+    let held: Vec<(&str, &str, i64)> = a[30..].iter().chain(&b[..100]).map(|m| (m.sender.as_str(), m.subject.as_str(), m.at)).collect();
+    let svc = holding(&held);
+    let mut mb = fake(Provider::Gmail, a.iter().chain(&b).cloned().collect());
+    mb.size = 20;
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&mb, &svc, &mut r, &job(Provider::Gmail, Phase::Backfill, backfill_window(first, NOW), None));
+    assert_eq!((out.stop, out.handled, out.held, out.sent), (Stop::Done, 205, 170, 35));
+    let want: Vec<String> = a[..30].iter().chain(&b[100..]).map(|m| received(m.at)).collect();
+    assert_eq!(mb.forwarded(), want, "the gap's far side was reached and its missing mail sent");
+    // The first search is whole; then the look's restart and each re-aim are narrowed with strictly later bounds,
+    // until one reaches past the window's end and the search runs whole again, and its newest page ends the pass.
+    let bounds = untils(&mb);
+    assert!(bounds.first() == Some(&None) && bounds.last() == Some(&None), "{bounds:?}");
+    let narrowed: Vec<&String> = bounds[1..bounds.len() - 1].iter().map(|b| b.as_ref().expect("narrowed")).collect();
+    assert!(narrowed.len() >= 2, "{bounds:?}");
+    assert!(narrowed.windows(2).all(|w| w[0] < w[1]), "{bounds:?}");
+    assert_eq!(u64::from(r.loads_today()), mb.loads());
+}
+
+#[test]
+fn no_restart_is_made_once_the_days_600_sends_are_spent() {
+    // 570 sent already today: the third group of ten brings the day to 600 and the count since the look to 30.
+    // The look runs, but the walk does not start over: no fresh Inbox, no search, nothing listed.
+    let mut mb = fake(Provider::Gmail, unheld(60));
+    mb.size = 20;
+    let mut r = Routine::new(Provider::Gmail, NOW.div_euclid(DAY), 570);
+    let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop, out.sent), (Stop::DayLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 30));
+    assert_eq!(*mb.places.borrow(), [Place::FreshInbox, Place::Inbox, Place::Sent], "the look, then the batch's end");
+    let names = steps(&mb);
+    let look = names.iter().position(|n| n.ends_with("bounce.js")).unwrap();
+    assert!(names[look..].iter().all(|n| !n.ends_with("search.js") && !n.ends_with("list.js")), "{names:?}");
+}
+
+#[test]
+fn a_newer_press_the_days_pages_cannot_pay_for_ends_the_pass_as_a_page_limit_never_done() {
+    // 292 of the day's 300 loads spent: the open, the search and its two presses leave none for "newer" beyond the
+    // end's own four. list.js answers "no presses left" (never `moved: false`, which reads as the newest page), and
+    // the pass ends as a page limit with its end still run.
+    let mut mb = fake(Provider::Gmail, unheld(30));
+    mb.size = 10;
+    let mut r = routine(Provider::Gmail).with_loads(292);
+    let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop, out.sent), (Stop::PageLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 10));
+    let last = mb.calls("list.js").last().cloned().unwrap();
+    assert_eq!((last["go"].as_str(), last["max_presses"].as_u64()), (Some("newer"), Some(0)), "{last}");
+    assert!(out.closed && sent_at_each_look(&mb) == [10], "the look and the batch's close still ran");
+    assert_eq!(u64::from(r.loads_today()), 292 + mb.loads());
+    assert!(r.loads_today() <= 300, "{}", r.loads_today());
+}
+
+#[test]
+fn the_pass_end_waits_out_undo_send_after_the_last_send_however_the_pass_stopped() {
+    // Gmail holds a send for its Undo Send delay: the look's Inbox, the batch's close and Sent come at least 31 s
+    // after the last send that went, whether the pass was done, stopped by the student or paused by a refusal.
+    // Two groups of three go in the same minute, so nothing else spaces them.
+    let stop_after_one = |_: u32, _: u32, sent: u32| sent == 0;
+    let watch: &dyn Fn(u32, u32, u32) -> bool = &stop_after_one;
+    let cases = [(None, None, Stop::Done), (None, Some(watch), Stop::Stopped), (Some(1), None, Stop::Paused(Paused::new(Provider::Gmail)))];
+    for (refuse, watch, want) in cases {
+        let mut mb = fake(Provider::Gmail, unheld(6));
+        mb.size = 3;
+        mb.refuse_on.set(refuse);
+        let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &Job { watch, ..gmail_backfill() });
+        assert_eq!(out.stop, want);
+        let fwd = mb.forwards.borrow();
+        let last_ok = fwd.iter().enumerate().filter(|(i, _)| Some(*i) != refuse).map(|(_, (t, _))| *t).max().unwrap();
+        let ends: Vec<(Place, i64)> = mb.opened_at.borrow().iter().filter(|(p, _)| matches!(p, Place::Inbox | Place::Sent)).copied().collect();
+        assert!(ends.iter().any(|(p, _)| *p == Place::Sent), "{want:?}: {ends:?}");
+        assert!(ends.iter().all(|(_, t)| *t >= last_ok + 31), "{want:?}: {ends:?} vs the last send at {last_ok}");
+    }
+}
+
+#[test]
+fn a_1485_message_backfill_is_done_on_its_third_day_and_no_day_makes_more_than_160_page_loads() {
+    // The design's sizing (2026-10-19): 1,485 messages over a 120-day window, 45 to a page, 600 sends a day. Each
+    // day is one pass from the frontier the last kept (forward only), against a service that holds what went.
+    let first = NOW.div_euclid(DAY) - 120;
+    let msgs: Vec<Mail> = (0..1_485).map(|i| mail(ANA, &format!("Notice {i}"), first * DAY + 3_600 + i * 6_900)).collect();
+    let mut sent: Vec<String> = Vec::new();
+    let mut frontier: Option<i64> = None;
+    let mut days = Vec::new();
+    for d in 0..3 {
+        let start = NOW + d * DAY;
+        let went: std::collections::HashSet<String> = sent.iter().cloned().collect();
+        let held: Vec<(&str, &str, i64)> =
+            msgs.iter().filter(|m| went.contains(&received(m.at))).map(|m| (m.sender.as_str(), m.subject.as_str(), m.at)).collect();
+        let svc = holding(&held);
+        let mut mb = fake(Provider::Gmail, msgs.clone());
+        mb.size = 45;
+        mb.clk.0.set(start);
+        let mut r = Routine::new(Provider::Gmail, start.div_euclid(DAY), 0);
+        let j = Job { frontier, ..job(Provider::Gmail, Phase::Backfill, backfill_window(first, start), None) };
+        let out = pass(&mb, &svc, &mut r, &j);
+        if let Some(f) = out.frontier.filter(|_| out.stop != Stop::Done) {
+            frontier = Some(frontier.map_or(f, |o| o.max(f)));
+        }
+        assert_eq!(u64::from(r.loads_today()), mb.loads(), "day {d}");
+        sent.extend(mb.forwarded());
+        days.push((out.stop, out.sent, mb.loads(), mb.presses.get()));
+    }
+    let next = |d: i64| (NOW.div_euclid(DAY) + d + 1) * DAY;
+    let stops: Vec<(Stop, u32)> = days.iter().map(|d| (d.0.clone(), d.1)).collect();
+    assert_eq!(stops, [(Stop::DayLimit { next_day_at: next(0) }, 600), (Stop::DayLimit { next_day_at: next(1) }, 600), (Stop::Done, 285)]);
+    // The design put a day at about 146 loads with 20 looks; a look comes at 25 to 29 sends (a group ends with its
+    // page), so 600 sends make 24, each three loads (the look's Inbox, the fresh Inbox, the narrowed search) and
+    // about two presses. With the first search's count walk (32 presses) and, from the second day, the walk
+    // through the pages the last day sent (13), a day comes to about 160: measured 149, 159 and 93.
+    assert!(days.iter().all(|d| d.2 <= 160), "{days:?}");
+    let mut once = sent.clone();
+    once.sort();
+    once.dedup();
+    assert_eq!((once.len(), sent.len()), (1_485, 1_485), "every message went once");
 }
 
 #[test]
@@ -2994,7 +3272,7 @@ fn a_resume_after_a_refused_send_waits_for_the_next_utc_day() {
     let day = NOW.div_euclid(DAY);
     let next_day = (day + 1) * DAY;
     MailState::update(&r.dir, |s| {
-        s.backfill_pace.insert(A.to_string(), BackfillPace { day, sent_today: 41, paused_until: Some(next_day) });
+        s.backfill_pace.insert(A.to_string(), BackfillPace { day, sent_today: 41, paused_until: Some(next_day), loads_today: 0 });
         true
     })
     .unwrap();
@@ -3004,11 +3282,98 @@ fn a_resume_after_a_refused_send_waits_for_the_next_utc_day() {
     // A pace from an earlier day counts for nothing.
     let old = open_backfill_rig("t113-relaunch-old-pace", 2);
     MailState::update(&old.dir, |s| {
-        s.backfill_pace.insert(A.to_string(), BackfillPace { day: day - 1, sent_today: 600, paused_until: Some(day * DAY) });
+        s.backfill_pace.insert(A.to_string(), BackfillPace { day: day - 1, sent_today: 600, paused_until: Some(day * DAY), loads_today: 0 });
         true
     })
     .unwrap();
     assert!(resume_and_time_forwards(&old).iter().all(|t| *t < next_day), "yesterday's limit does not hold today");
+}
+
+#[test]
+fn a_resume_on_a_day_whose_page_loads_are_spent_waits_for_the_next_utc_day() {
+    // The day's 300 Gmail page loads kept in mail.json survive a relaunch: the backfill opens nothing and sends
+    // nothing until the next UTC day, then goes on.
+    let r = open_backfill_rig("loads-relaunch-spent", 2);
+    let day = NOW.div_euclid(DAY);
+    let next_day = (day + 1) * DAY;
+    MailState::update(&r.dir, |s| {
+        s.backfill_pace.insert(A.to_string(), BackfillPace { day, sent_today: 41, paused_until: None, loads_today: 300 });
+        true
+    })
+    .unwrap();
+    let times = resume_and_time_forwards(&r);
+    assert_eq!(times.len(), 1, "one Gmail call for both messages: {times:?}");
+    assert!(times.iter().all(|t| *t >= next_day), "{times:?} vs {next_day}");
+}
+
+#[test]
+fn the_days_page_loads_kept_in_mail_json_are_never_lowered_by_a_progress_note() {
+    // A progress note knows the sends but not the loads (it writes none): a same-day pace merges by the larger
+    // of each count, so the 50 loads a relaunch carried in stay while the pass sends, and its own are added.
+    let r = open_backfill_rig("loads-merge", 2);
+    let day = NOW.div_euclid(DAY);
+    MailState::update(&r.dir, |s| {
+        s.backfill_pace.insert(A.to_string(), BackfillPace { day, sent_today: 3, paused_until: None, loads_today: 50 });
+        true
+    })
+    .unwrap();
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let (k, dir) = (kept.clone(), r.dir.clone());
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if name == "gmail/forward.js" {
+            k.lock().unwrap().push(MailState::load(&dir).unwrap().backfill_pace[A].clone());
+        }
+    }));
+    let shared = r.setups.start_resume(r.dir.clone(), vec![A.to_string()], r.env()).expect("a resume started");
+    assert_eq!(wait(&shared).ended, Some("finished"));
+    let kept = kept.lock().unwrap().clone();
+    assert!(!kept.is_empty() && kept.iter().all(|p| p.loads_today >= 50 && p.sent_today >= 3), "{kept:?}");
+    // The pass kept no pace once done (the backfill closed), but while it ran the loads only grew.
+}
+
+#[test]
+fn a_bounced_backfill_pass_keeps_its_frontier_at_or_before_what_it_sent_and_the_done_backfill_drops_it() {
+    // Quinn 2026-10-19: a backfill pass searches from its frontier, the day before the oldest mail a pass found
+    // missing, sent mail included, so a batch a report stopped is searched and sent again. It only moves forward:
+    // here it already stands on the mail's own day, and the bounced pass (whose rows are on that day) leaves it.
+    let r = open_backfill_rig("frontier-bounce", 3);
+    let on = (NOW - 5 * DAY).div_euclid(DAY);
+    MailState::update(&r.dir, |s| s.backfill_frontier.insert(A.to_string(), on).is_none()).unwrap();
+    queue(&r, "gmail/bounce.js", vec![json!({ "result": "refused", "reason": "non-delivery report" }), json!({ "result": "ok", "rows": 0 })]);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (s, dir) = (seen.clone(), r.dir.clone());
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if name == "gmail/search.js" {
+            s.lock().unwrap().push(MailState::load(&dir).unwrap().backfill_frontier.get(A).copied());
+        }
+    }));
+    let shared = r.setups.start_resume(r.dir.clone(), vec![A.to_string()], r.env()).expect("a resume started");
+    assert_eq!(wait(&shared).ended, Some("finished"));
+    // The bounced pass sent its three, and the next day's pass searched from the same day and sent them again.
+    assert_eq!(r.calls("gmail/forward.js").len(), 2, "one Gmail call a pass");
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen.len() >= 2 && seen.iter().all(|f| *f == Some(on)), "{seen:?}");
+    let day_of = |d: i64| jiff::Timestamp::from_second(d * DAY).unwrap().to_string()[..10].to_string();
+    assert!(r.calls("gmail/search.js").iter().all(|a| a["since"] == json!(day_of(on))), "{:?}", r.calls("gmail/search.js"));
+    // Done: the open marker and the frontier went together.
+    let st = MailState::load(&r.dir).unwrap();
+    assert!(st.open_backfills.is_empty() && st.backfill_frontier.is_empty(), "{st:?}");
+}
+
+#[test]
+fn a_mail_json_written_before_the_page_budget_reads_and_writes_back_byte_for_byte() {
+    // mail.json is a contract with existing installs: a file with a pace and no loads, and no frontier, is read
+    // and written again unchanged (the new fields are not written while 0 or empty).
+    let r = rig("loads-old-file");
+    let old = json!({
+        "keep_session": true, "last_reconcile": {}, "pending_deletes": [], "turned_off": [], "open_backfills": [A],
+        "backfill_pace": { A: { "day": 20_000, "sent_today": 41, "paused_until": null } }, "last_look": { A: NOW },
+    });
+    let text = knowlu_engine::ledger::dumps_value(&old);
+    std::fs::write(r.dir.join("mail.json"), &text).unwrap();
+    let st = MailState::update(&r.dir, |_| true).unwrap();
+    assert_eq!((st.backfill_pace[A].loads_today, st.backfill_frontier.len()), (0, 0));
+    assert_eq!(std::fs::read_to_string(r.dir.join("mail.json")).unwrap(), text);
 }
 
 #[test]
@@ -3017,7 +3382,7 @@ fn the_pace_is_kept_beside_the_open_marker_and_costs_nothing_when_empty() {
     let mut routine = Routine::new(Provider::M365, NOW.div_euclid(DAY), 599);
     quit_after_first_forward(&r, &mut routine);
     let pace = MailState::load(&r.dir).unwrap().backfill_pace;
-    assert_eq!(pace.get(A), Some(&BackfillPace { day: NOW.div_euclid(DAY), sent_today: 600, paused_until: None }));
+    assert_eq!(pace.get(A), Some(&BackfillPace { day: NOW.div_euclid(DAY), sent_today: 600, paused_until: None, loads_today: 0 }));
     // With none kept, mail.json is the spec's bytes: the field is not written.
     let clean = rig("t113-pace-empty");
     MailState::update(&clean.dir, |s| {

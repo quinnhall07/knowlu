@@ -2287,14 +2287,62 @@ fn a_report_that_lands_after_one_slots_last_look_stops_the_next_slot_at_its_firs
     assert_eq!(g.run().as_deref(), Some("mail: forwarding on, 1 recovered"));
     // A mailbox with no saved look reaches back a day before its batch opened.
     assert_eq!(g.host.calls("gmail/bounce.js")[0]["since"], json!(rig::iso(rig::NOW - 24 * 3600)));
-    assert_eq!(MailState::load(&g.d).unwrap().last_look.get(rig::ID), Some(&rig::NOW), "the final look was saved");
+    // The final look waits out Gmail's Undo Send delay after the forward (31 s), whatever ends the pass.
+    assert_eq!(MailState::load(&g.d).unwrap().last_look.get(rig::ID), Some(&(rig::NOW + 31)), "the final look was saved");
     // A report lands an hour later; the next slot is 13 hours after the first.
     g.host.st.lock().unwrap().report_at = Some(rig::NOW + 3600);
     g.clk.0.store(rig::NOW + 13 * 3600, std::sync::atomic::Ordering::SeqCst);
     let line = g.run().expect("a line");
     assert!(line.contains("paused: a send was refused"), "{line}");
-    assert_eq!(g.host.calls("gmail/bounce.js")[1]["since"], json!(rig::iso(rig::NOW)), "it read from the saved look");
-    assert_eq!(MailState::load(&g.d).unwrap().last_look.get(rig::ID), Some(&(rig::NOW + 13 * 3600)), "a refused look is saved too");
+    assert_eq!(g.host.calls("gmail/bounce.js")[1]["since"], json!(rig::iso(rig::NOW + 31)), "it read from the saved look");
+    assert_eq!(MailState::load(&g.d).unwrap().last_look.get(rig::ID), Some(&(rig::NOW + 13 * 3600 + 31)), "a refused look is saved too");
+}
+
+fn pace(d: &Path) -> Option<knowlu::mail_session::BackfillPace> {
+    MailState::load(d).unwrap().backfill_pace.get(rig::ID).cloned()
+}
+
+#[test]
+fn a_slot_pass_keeps_its_sends_beside_the_backfill_pace_so_the_day_never_passes_600() {
+    // The bug the 2026-10-19 design named: a slot pass seeded its pace from mail.json but never saved it, so a
+    // backfill resumed later the same UTC day started from a count without the slot's sends.
+    let g = Pass::with_provider("slot-keeps-pace", "google", "active", rig::fwd("on", "ours"));
+    g.mail(&[("Notice", rig::NOW - 3600)]);
+    assert_eq!(g.run().as_deref(), Some("mail: forwarding on, 1 recovered"));
+    let kept = pace(&g.d).expect("the slot's sends are kept");
+    assert_eq!((kept.day, kept.sent_today), (rig::NOW.div_euclid(rig::DAY), 1));
+    // A backfill's own count for the day is kept and added to, never lowered.
+    let b = Pass::with_provider("slot-adds-to-pace", "google", "active", rig::fwd("on", "ours"));
+    b.mail(&[("Notice", rig::NOW - 3600)]);
+    MailState::update(&b.d, |s| {
+        s.open_backfills.push(rig::ID.to_string());
+        let day = rig::NOW.div_euclid(rig::DAY);
+        s.backfill_pace.insert(rig::ID.to_string(), knowlu::mail_session::BackfillPace { day, sent_today: 41, paused_until: None, loads_today: 7 });
+        true
+    })
+    .unwrap();
+    assert_eq!(b.run().as_deref(), Some("mail: forwarding on, 1 recovered"));
+    let kept = pace(&b.d).unwrap();
+    assert_eq!(kept.sent_today, 42);
+    assert!(kept.loads_today > 7, "the slot's page loads are kept too: {kept:?}");
+    // A pass that sent nothing, for a mailbox with no backfill, writes no pace at all.
+    let quiet = Pass::with_provider("slot-quiet-pace", "google", "active", rig::fwd("on", "ours"));
+    assert_eq!(quiet.run().as_deref(), Some("mail: forwarding on, 0 recovered"));
+    assert_eq!(pace(&quiet.d), None);
+}
+
+#[test]
+fn a_slot_pass_on_a_day_whose_pages_are_spent_says_page_limit_reached_and_opens_nothing() {
+    let g = Pass::with_provider("slot-page-limit", "google", "active", rig::fwd("on", "ours"));
+    g.mail(&[("Notice", rig::NOW - 3600)]);
+    MailState::update(&g.d, |s| {
+        let day = rig::NOW.div_euclid(rig::DAY);
+        s.backfill_pace.insert(rig::ID.to_string(), knowlu::mail_session::BackfillPace { day, sent_today: 3, paused_until: None, loads_today: 300 });
+        true
+    })
+    .unwrap();
+    assert_eq!(g.run().as_deref(), Some("mail: forwarding on, 0 recovered, page limit reached"));
+    assert!(g.host.calls("gmail/search.js").is_empty(), "no search was made");
 }
 
 #[test]
@@ -2309,7 +2357,8 @@ fn a_report_seen_once_does_not_pause_the_next_days_first_slot_again() {
     g.clk.0.store(rig::NOW + 13 * 3600, std::sync::atomic::Ordering::SeqCst);
     assert_ne!((rig::NOW + 13 * 3600).div_euclid(rig::DAY), rig::NOW.div_euclid(rig::DAY));
     assert_eq!(g.run().as_deref(), Some("mail: forwarding on, 1 recovered"));
-    assert_eq!(g.host.calls("gmail/bounce.js")[1]["since"], json!(rig::iso(rig::NOW)));
+    // The first slot's look ran once Gmail's Undo Send delay had passed after its forward.
+    assert_eq!(g.host.calls("gmail/bounce.js")[1]["since"], json!(rig::iso(rig::NOW + 31)));
 }
 
 /// Every file under `dir` except the provider's own browser profiles, which are WebView2's and not Knowlu's.

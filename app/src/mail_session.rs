@@ -93,10 +93,11 @@ pub struct MailState {
     /// is open, so a file with none is byte-for-byte what spec §5.4 lists.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub open_backfills: Vec<String>,
-    /// Each open backfill's send pace for its UTC day, by address id: the day's count and any pause, so a
-    /// relaunch the same day carries on from them (spec §4.2 step 5: at most 600 a mailbox a UTC day, and
-    /// nothing retries the same day after Microsoft refuses a send). Counts and days only; written while a
-    /// backfill has one, dropped once its day is past, and not written at all when empty.
+    /// Each mailbox's send pace for its UTC day, by address id: the day's count, page loads and any pause, so
+    /// a relaunch the same day carries on from them (spec §4.2 step 5: at most 600 a mailbox a UTC day, and
+    /// nothing retries the same day after a refused send). Written by a backfill, and by a slot pass that sent
+    /// or whose mailbox has a backfill open (a same-day pace is merged, never lowered). Counts and days only;
+    /// dropped once its day is past, and not written at all when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub backfill_pace: BTreeMap<String, BackfillPace>,
     /// Each Gmail mailbox's last look at the Inbox for a non-delivery report, by address id: a unix second.
@@ -105,6 +106,12 @@ pub struct MailState {
     /// the slots are. A file written before it existed lacks it and reads as none. Not written when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub last_look: BTreeMap<String, i64>,
+    /// Each open Gmail backfill's frontier, by address id: the UTC day (days since 1970-01-01) its next pass
+    /// searches from, the day before the oldest mail a pass found still missing (Quinn 2026-10-19). It only
+    /// moves forward and is removed with the open marker. A file written before it existed lacks it and reads
+    /// as none (the whole window). Not written when empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub backfill_frontier: BTreeMap<String, i64>,
     /// Each setup in flight on this device whose address this device minted (Quinn, 2026-10-06): written
     /// once the address exists, its facts written before each act that may set them, cleared when the run
     /// ends. One left at start-up is a setup the app quit mid-run (`mail::setup::clean_unfinished`). Not
@@ -136,6 +143,14 @@ pub struct BackfillPace {
     pub sent_today: u32,
     /// Set after a refused send: the unix second the next UTC day starts, before which nothing sends.
     pub paused_until: Option<i64>,
+    /// Gmail page loads made on `day` (the page budget, `mail_steps::MAX_PAGE_LOADS_PER_DAY`). A file written
+    /// before it existed lacks it and reads as none; not written while none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub loads_today: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl Default for MailState {
@@ -148,6 +163,7 @@ impl Default for MailState {
             open_backfills: Vec::new(),
             backfill_pace: BTreeMap::new(),
             last_look: BTreeMap::new(),
+            backfill_frontier: BTreeMap::new(),
             pending_setups: Vec::new(),
         }
     }

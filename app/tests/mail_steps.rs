@@ -3,7 +3,7 @@
 use jiff::civil::date;
 use knowlu::mail_steps::{
     backfill_held_for_c3, backfill_since, backfill_window, Action, Mode, Outcome, Paused, Provider, Reason, Routine, Send, Setup, State,
-    Step, BACKFILL_DAYS, MAX_PER_DAY, MAX_PER_MINUTE,
+    Step, BACKFILL_DAYS, MAX_PAGE_LOADS_PER_DAY, MAX_PER_DAY, MAX_PER_MINUTE,
 };
 
 const DAY: i64 = 86_400;
@@ -430,4 +430,27 @@ fn a_routine_remembers_when_its_last_forward_answered_ok() {
     r.forwarded(1_400);
     assert_eq!(r.last_forward(), Some(1_400));
     assert_eq!(r.clone().paused().last_forward(), Some(1_400));
+}
+
+#[test]
+fn a_routine_counts_its_page_loads_for_the_utc_day_up_to_300() {
+    // The Gmail backfill's page budget (design 2026-10-19): every open, search and pager press is a page load,
+    // at most 300 a mailbox a UTC day, about twice a 1,485-row day's need.
+    assert_eq!(MAX_PAGE_LOADS_PER_DAY, 300);
+    let t0 = 9 * DAY + 100;
+    let mut r = Routine::new(Provider::Gmail, 9, 0);
+    assert_eq!(r.loads_left(t0), 300);
+    r.loaded(t0, 40);
+    r.loaded(t0 + 5, 2);
+    assert_eq!((r.loads_today(), r.loads_left(t0 + 5)), (42, 258));
+    // A resume carries the day's count; past the budget nothing is left, never a wrap.
+    let mut seeded = Routine::new(Provider::Gmail, 9, 10).with_loads(299);
+    seeded.loaded(t0, 5);
+    assert_eq!((seeded.loads_today(), seeded.loads_left(t0)), (304, 0));
+    // The next UTC day starts from none, as the sends do, and the two counts are separate.
+    assert_eq!(seeded.loads_left(10 * DAY), 300);
+    assert_eq!((seeded.loads_today(), seeded.sent_today(), seeded.day()), (0, 0, 10));
+    let mut sends = Routine::new(Provider::Gmail, 9, 0);
+    sends.sent(t0);
+    assert_eq!((sends.sent_today(), sends.loads_today()), (1, 0));
 }

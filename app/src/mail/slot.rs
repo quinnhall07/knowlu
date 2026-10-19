@@ -18,12 +18,12 @@
 //! recover follow either way, reaching back to when forwarding was last known on after it was found off.
 //!
 //! **Privacy.** A line holds fixed words and counts. No address, subject, sender, URL or page text enters one.
-use super::backfill::{save_look, seed_routine};
+use super::backfill::{keep_pace, save_look, seed_routine};
 use super::commands::{run_script, wait_signed_in, GONE_WAIT, SILENT_WAIT};
 use super::host::Host;
 use super::recover::{run_pass, window, Clock, Job, Outcome, Place, Stop, SLOT_CAP};
 use crate::mail_client::{MailClient, Phase, State};
-use crate::mail_session::{session_dir, valid_address_id, MailState};
+use crate::mail_session::{session_dir, valid_address_id, BackfillPace, MailState};
 use crate::mail_steps::{backfill_held_for_c3, Provider};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -176,6 +176,13 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
     }
     let last_known_on = state.last_reconcile.get(id).and_then(|t| instant(t)).filter(|_| fwd.was_not_on());
     let look = |at: i64| save_look(env.data_dir, id, at);
+    let backfilling = state.open_backfills.iter().any(|i| i == id);
+    // The page loads go only into a pace this day already keeps (a backfill's, or a slot's that sent), so a
+    // mailbox that only recovers adds nothing to `mail.json` for them.
+    let load = |day: i64, loads: u32| {
+        let pace = BackfillPace { day, sent_today: 0, paused_until: None, loads_today: loads };
+        keep_pace(env.data_dir, id, pace, false);
+    };
     let job = Job {
         provider,
         address_id: id,
@@ -183,12 +190,26 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
         phase: Phase::Recover,
         window: window(now, row["lapsed_since"].as_str().and_then(instant), last_known_on),
         // An open backfill is not bound by the slot (§4.11); any other pass sends at most 30.
-        cap: (!state.open_backfills.iter().any(|i| i == id)).then_some(SLOT_CAP),
+        cap: (!backfilling).then_some(SLOT_CAP),
         watch: None,
         on_look: Some(&look),
+        on_load: Some(&load),
+        frontier: None,
     };
     let mut routine = seed_routine(env.data_dir, provider, id, now);
     let out = run_pass(env.host, env.client, env.clock, &mut routine, &job);
+    // The day's sends count for the mailbox whoever made them: a backfill seeds its pace from here, so a slot's
+    // sends are kept beside it (they once were not, and a slot and a backfill could pass the 600 together).
+    if out.sent > 0 || backfilling {
+        let day = routine.day();
+        let pace = BackfillPace {
+            day,
+            sent_today: routine.sent_today(),
+            paused_until: routine.is_paused().then_some((day + 1) * 86_400),
+            loads_today: routine.loads_today(),
+        };
+        keep_pace(env.data_dir, id, pace, true);
+    }
     // Only a whole pass moves the day on: one that stopped early is due again at the next slot. And only one
     // that read the forwarding setting: a failed read is no proof forwarding was on, so it must not move
     // "last known on" forward (§4.11: recovery reaches back to when it last was).
@@ -208,6 +229,7 @@ fn recovered(out: &Outcome) -> String {
         Stop::Done | Stop::Guided | Stop::Stopped => n,
         Stop::SlotCap => format!("{n}, more next slot"),
         Stop::DayLimit { .. } => format!("{n}, daily limit reached"),
+        Stop::PageLimit { .. } => format!("{n}, page limit reached"),
         Stop::Paused(_) => format!("{n}, paused: a send was refused"),
         Stop::Script(word) | Stop::Service(word) => format!("{n}, stopped: {word}"),
     }

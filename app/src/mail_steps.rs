@@ -39,6 +39,10 @@ pub const MAX_PER_MINUTE: usize = 10;
 /// Forwards per mailbox per UTC day. **Provisional, pending S6**, as [`MAX_PER_MINUTE`]; until S6
 /// confirms it, T18's live proof keeps the school backfill under 600.
 pub const MAX_PER_DAY: u32 = 600;
+/// Gmail page loads per mailbox per UTC day: every open of a place, every search and every pager press (the
+/// Gmail backfill's page-press budget, design of 2026-10-19). A backstop at about twice a 1,485-row day's
+/// need (about 125): the routine plans well inside it, and a pass that reaches it stops until the next day.
+pub const MAX_PAGE_LOADS_PER_DAY: u32 = 300;
 
 const DAY_SECS: i64 = 86_400;
 
@@ -482,12 +486,14 @@ pub struct Routine {
     /// reloads the window (`Place::FreshInbox`) waits out Gmail's Undo Send delay after it, even when the send
     /// was the previous pass's.
     last_forward: Option<i64>,
+    /// Page loads made on `day` ([`MAX_PAGE_LOADS_PER_DAY`]); a resume carries it (`mail.json`).
+    loads_today: u32,
 }
 
 impl Routine {
     /// A routine on UTC day `day` that has already sent `sent_today` (a resume carries the count).
     pub fn new(provider: Provider, day: i64, sent_today: u32) -> Routine {
-        Routine { provider, day, sent_today, recent: VecDeque::new(), paused_on: None, last_look: None, last_forward: None }
+        Routine { provider, day, sent_today, recent: VecDeque::new(), paused_on: None, last_look: None, last_forward: None, loads_today: 0 }
     }
 
     fn roll(&mut self, now: i64) {
@@ -496,6 +502,7 @@ impl Routine {
             self.day = day;
             self.sent_today = 0;
             self.paused_on = None;
+            self.loads_today = 0;
         }
     }
 
@@ -562,6 +569,29 @@ impl Routine {
     /// When the last look that read the Inbox was, if this routine has made one since the app started.
     pub fn last_look(&self) -> Option<i64> {
         self.last_look
+    }
+
+    /// This routine having already made `loads` page loads on its day: a resume carries the count.
+    pub fn with_loads(mut self, loads: u32) -> Routine {
+        self.loads_today = loads;
+        self
+    }
+
+    /// `n` page loads were made at `now`.
+    pub fn loaded(&mut self, now: i64, n: u32) {
+        self.roll(now);
+        self.loads_today = self.loads_today.saturating_add(n);
+    }
+
+    /// The page loads made on the routine's day.
+    pub fn loads_today(&self) -> u32 {
+        self.loads_today
+    }
+
+    /// The page loads left at `now` for its UTC day, never below none.
+    pub fn loads_left(&mut self, now: i64) -> u32 {
+        self.roll(now);
+        MAX_PAGE_LOADS_PER_DAY.saturating_sub(self.loads_today)
     }
 
     /// This routine with today's sends paused: a resume of a day a refused send already ended.
