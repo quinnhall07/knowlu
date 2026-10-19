@@ -165,7 +165,7 @@ Deno.test("gmail_a_missing_control_returns_not_found", async () => {
   // A control a read needs, then the controls only a write needs: the script names the one it cannot find
   // and changes nothing, because it looks for every control before it clicks any.
   const rows = [
-    ["radios", ["read", "set", "off"], "forwarding radio"],
+    ["radios", ["read", "set", "off", "add"], "forwarding radio"],
     ["to", ["read"], "address list"],
     ["to", ["set"], "address list"],
     ["disp", ["set"], "keep copy"],
@@ -179,6 +179,7 @@ Deno.test("gmail_a_missing_control_returns_not_found", async () => {
       assertEquals(r, NOT_FOUND(control), `${script} without ${without}`);
       assertEquals(f.snap(), before, `${script} without ${without}: nothing changed`);
       assertEquals(f.saves, 0);
+      assertEquals(f.clicks + f.popups + f.typed.length, 0, `${script} without ${without}: nothing pressed`);
     }
   }
   // The add dialog's own controls, and the confirmation's OK.
@@ -429,7 +430,14 @@ Deno.test("gmail_the_older_wrapping_label_shape_is_still_read", async () => {
 Deno.test("gmail_add_address_presses_button_elements_in_the_dialogs", async () => {
   for (const proceed of [false, true]) {
     const f = gmail({ buttonDialogs: true, proceed });
-    assertEquals(f.page.document.querySelectorAll('[role="dialog"] button').length, 0);
+    // The dialog as it is drawn: <button> elements named by their text, no <input type=button> (the page's
+    // hidden dialog is a decoy, so only the drawn one, #dlg, is looked at).
+    f.el("add").click();
+    assertEquals(f.page.document.querySelectorAll('#dlg input[type="button"]').length, 0);
+    assertEquals(
+      [...f.page.document.querySelectorAll("#dlg button")].map((b: { textContent: string }) => b.textContent),
+      ["Next", "Cancel"],
+    );
     const r = await run("gmail/forwarding_add.js", f.page, { address: OURS, ...FAST });
     assertEquals(r, { result: "ok", stage: "asked", changed: true }, `proceed ${proceed}`);
     assertEquals(f.typed, [OURS]);
@@ -474,4 +482,70 @@ Deno.test("gmail_remove_address_confirms_a_button_element_dialog", async () => {
   assertEquals(r, { result: "ok", removed: true, changed: true });
   assertEquals(f.removed, [OURS]);
   assertEquals(f.model.addresses, []);
+});
+
+// Review of ceae879/35c7738 (T18c, 2026-10-18).
+
+Deno.test("gmail_add_address_on_a_page_with_radios_it_does_not_know_is_not_fresh_and_presses_nothing", async () => {
+  // No Remove control, no Forward-a-copy radio, but a radio of the section that is not one of ours: that is
+  // not the fresh state (which has no radio, no select and no Remove control), so Add is not pressed.
+  const f = gmail({ fresh: true, strangeRadios: true });
+  assertEquals(
+    await run("gmail/forwarding_add.js", f.page, { address: OURS, ...FAST }),
+    NOT_FOUND("forwarding radio"),
+  );
+  assertEquals(f.clicks + f.popups + f.typed.length, 0);
+  assert(f.el("dlg") === null, "no dialog was opened");
+  // Both radios named, only one of them: still a page the script does not know.
+  const g = gmail({ addresses: [OURS], strangeRadios: true, without: "radios" });
+  assertEquals(
+    await run("gmail/forwarding_add.js", g.page, { address: OURS, ...FAST }),
+    NOT_FOUND("forwarding radio"),
+  );
+  assertEquals(g.clicks + g.popups + g.typed.length, 0);
+});
+
+Deno.test("gmail_add_address_on_an_unverified_address_presses_add_again", async () => {
+  // The address was added but not verified: it is not an option of the forward-to list (0 options), so it is
+  // not listed, and Add is pressed again to ask for the popup (header comment of forwarding_add.js).
+  for (const buttonDialogs of [false, true]) {
+    const f = gmail({ unverified: OURS, buttonDialogs });
+    assertEquals(f.page.document.querySelectorAll("#to option").length, 0);
+    const r = await run("gmail/forwarding_add.js", f.page, { address: OURS, ...FAST });
+    assertEquals(r, { result: "ok", stage: "asked", changed: true }, `buttonDialogs ${buttonDialogs}`);
+    assertEquals(f.typed, [OURS]);
+    assertEquals(f.popups, 1);
+    assertEquals(f.decoy, 0);
+  }
+});
+
+Deno.test("gmail_add_address_presses_buttons_only_in_the_dialog_it_opened", async () => {
+  // A [role=dialog] with its own Next, Cancel and Proceed sits on the page before the add dialog, ahead of it
+  // in the DOM. It is never clicked: Next and Cancel are the add dialog's, and Proceed is a dialog that
+  // appeared after Add and names forwarding or confirming.
+  const hidden = (f: ReturnType<typeof gmail>) => f.page.document.getElementById("decoy-dlg");
+  for (const buttonDialogs of [false, true]) {
+    for (const proceed of [false, true]) {
+      const f = gmail({ buttonDialogs, proceed });
+      const before = hidden(f);
+      assert(before !== null, "the page has a dialog of its own before Add");
+      assert(before.compareDocumentPosition(f.el("add")) & 4, "and it is ahead of the section in the DOM");
+      const r = await run("gmail/forwarding_add.js", f.page, { address: OURS, ...FAST });
+      const why = `buttonDialogs ${buttonDialogs} proceed ${proceed}`;
+      assertEquals(r, { result: "ok", stage: "asked", changed: true }, why);
+      assertEquals(f.typed, [OURS], why);
+      assertEquals(f.popups, 1, why);
+      assertEquals(f.decoy, 0, why);
+      assert(hidden(f) === before, `${why}: the page's own dialog is untouched`);
+    }
+  }
+  // Next missing from the add dialog: its own Cancel is pressed, and the decoy's Next and Cancel are not.
+  for (const buttonDialogs of [false, true]) {
+    const f = gmail({ buttonDialogs, without: "next" });
+    assertEquals(await run("gmail/forwarding_add.js", f.page, { address: OURS, ...FAST }), NOT_FOUND("next"));
+    assertEquals(f.popups, 0);
+    assert(f.el("dlg") === null, "the add dialog was cancelled");
+    assertEquals(f.decoy, 0);
+    assert(hidden(f) !== null, "the page's own dialog is still there");
+  }
 });

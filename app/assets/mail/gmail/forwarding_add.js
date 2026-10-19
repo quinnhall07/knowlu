@@ -16,7 +16,11 @@
 //   { result: "failed", reason: "no address" }
 // The section's buttons are <input type=button value=...>, found by their value. The dialogs' buttons are
 // <button> elements named by their text on live Gmail (2026-10-18; older layouts drew inputs), so inside a
-// dialog either form is accepted, and only inside a dialog.
+// dialog either form is accepted, and only inside a dialog: Next and Cancel in the dialog that holds the
+// address box, Proceed in that dialog or a follow-up one that names forwarding or confirming, never in a
+// dialog that was already on the page before Add was pressed.
+// Fresh (the Forwarding section has no radio, no select and no Remove control) is positive: radios the script
+// cannot name are { result: "not found", control: "forwarding radio" }, and nothing is pressed.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => {
   const aria = el.getAttribute("aria-label");
@@ -80,27 +84,38 @@ const dialogButton = (d, pattern) => {
     pattern.test((b.getAttribute("aria-label") || "").trim() || text(b))
   );
 };
-const inDialog = (pattern) => {
-  for (const d of dialogs()) {
-    const b = dialogButton(d, pattern);
-    if (b) return b;
-  }
-  return null;
-};
 // The type a browser gives an input: an absent or unknown type attribute reads as "text" (T18c's audit:
 // live Outlook drew a box with no type attribute, which a `[type=...]` selector never matches).
 const kind = (el) => String(el.type || el.getAttribute("type") || "text").toLowerCase();
-const emailField = () => {
+// The address box and the dialog that holds it. Next and Cancel are looked for in that dialog only: a page
+// keeps other dialogs of its own, and their buttons are never ours to press.
+const emailBox = () => {
   for (const d of dialogs()) {
     const f = d.querySelector('input[type="email"]');
-    if (f) return f;
+    if (f) return { dialog: d, field: f };
     // Else the dialog's one text box, typed or not.
     const boxes = [...d.querySelectorAll("input")].filter((el) =>
       kind(el) === "text" || kind(el) === "email"
     );
-    if (boxes.length === 1) return boxes[0];
+    if (boxes.length === 1) return { dialog: d, field: boxes[0] };
   }
   return null;
+};
+// The Forwarding section is the table the Add button sits in; a row about POP or IMAP is not part of it.
+const aboutPopOrImap = (el) => /\b(pop|imap)\b/i.test(text(el.closest("tr") || el));
+const isFresh = () => {
+  const add = addEl();
+  const section = add ? add.closest("table") || add.parentElement : null;
+  if (!section) return false;
+  // Fresh is positive: the section draws no radio, no select and no Remove control (live 2026-10-18). A radio
+  // this script cannot name is a page it does not know, not a fresh one.
+  const own = [...section.querySelectorAll('input[type="radio"], select')].filter((el) =>
+    !aboutPopOrImap(el)
+  );
+  const remove = [...section.querySelectorAll('input[type="button"], button, [role="button"], a, span')].some(
+    (el) => /\bremove\b/i.test(el.getAttribute("value") || text(el)),
+  );
+  return own.length === 0 && !remove;
 };
 const setValue = (el, v) => {
   if (el.focus) el.focus();
@@ -118,10 +133,11 @@ if (drew === "reload") return { result: "reloading" };
 if (drew === "missing") return { result: "not found", control: "section" };
 
 const ron = radioOn();
-// A Gmail with no forwarding address yet draws only the Add button and no forwarding radios at all (live
-// 2026-10-18): that is the fresh state, so the checks on what is set and listed are skipped and Add is pressed.
-// One radio without the other is a page this script does not know: not found.
-const fresh = !ron && !radioOff();
+// A Gmail with no forwarding address yet draws only the Add button in its Forwarding section: no radio, no
+// select and no Remove control (live 2026-10-18). That is the fresh state, so the checks on what is set and
+// listed are skipped and Add is pressed. Fresh is positive: a section with a radio this script cannot name is
+// not fresh, and neither is one with only one of the two radios. Both are a page it does not know: not found.
+const fresh = !ron && !radioOff() && isFresh();
 if (!fresh && (!ron || !radioOff())) return { result: "not found", control: "forwarding radio" };
 const list = fresh ? null : toSelect();
 if (!fresh && ron.checked === true && list) {
@@ -134,16 +150,29 @@ if (list && [...list.options].some((o) => optionIs(o, address))) {
   return { result: "ok", stage: "listed", changed: false };
 }
 
+// A page keeps dialogs of its own (hidden ones, other prompts): the ones there before Add is pressed are
+// never searched for Next, Cancel or Proceed.
+const before = new Set(dialogs());
 addEl().click();
-if (!(await until(emailField, waitMs))) return { result: "not found", control: "email field" };
-setValue(emailField(), String(args.address).trim());
-const next = inDialog(/^next$/i);
+if (!(await until(emailBox, waitMs))) return { result: "not found", control: "email field" };
+const box = emailBox();
+setValue(box.field, String(args.address).trim());
+const next = dialogButton(box.dialog, /^next$/i);
 if (!next) {
-  const cancel = inDialog(/^cancel$/i);
+  const cancel = dialogButton(box.dialog, /^cancel$/i);
   if (cancel) cancel.click();
   return { result: "not found", control: "next" };
 }
 next.click();
-// Some dialogs ask again before the popup; the popup itself is the host's.
-if (await until(() => inDialog(/^proceed$/i), waitMs)) inDialog(/^proceed$/i).click();
+// Some dialogs ask again before the popup (a follow-up dialog that names forwarding or confirming, or the add
+// dialog itself); the popup itself is the host's.
+const proceed = () => {
+  for (const d of dialogs()) {
+    if (d !== box.dialog && (before.has(d) || !/forward|confirm/i.test(text(d)))) continue;
+    const b = dialogButton(d, /^proceed$/i);
+    if (b) return b;
+  }
+  return null;
+};
+if (await until(proceed, waitMs)) proceed().click();
 return { result: "ok", stage: "asked", changed: true };

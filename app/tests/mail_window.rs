@@ -183,6 +183,25 @@ fn the_popup_is_filtered_opens_nothing_and_closes_its_window() {
     assert!(hook.contains("add_WindowCloseRequested") && hook.contains(".destroy()"), "the close hook does not destroy the window");
 }
 
+/// Google's "Confirm it's you" popup shows the number the student matches on their phone (live,
+/// 2026-10-18), so it must be the topmost, focused window while it is open: above the mail window that
+/// `come_back` brings forward with it. No window opens in a test, so this reads `src/mail.rs`: the popup is
+/// built `always_on_top` and `focused`, the mail window still comes back, and the popup takes focus after it.
+#[test]
+fn the_popup_is_on_top_and_focused_above_the_mail_window_that_comes_back() {
+    let src = std::fs::read_to_string("src/mail.rs").unwrap().replace("\r\n", "\n");
+    let start = src.find("fn open_popup(").expect("src/mail.rs has open_popup");
+    let body = &src[start..];
+    let body = &body[..body.find("\n}\n").expect("open_popup ends")];
+    let builder = &body[body.find("WebviewWindowBuilder::new(app, POPUP").expect("the popup's builder")..];
+    let builder = &builder[..builder.find(".build()").expect("the popup's builder builds")];
+    assert!(builder.contains(".always_on_top(true)"), "the popup can be hidden behind the mail window");
+    assert!(builder.contains(".focused(true)"), "the popup is not built focused");
+    let back = body.find("come_back(app)").expect("the mail window still comes back with the popup");
+    let focus = body.find("window.set_focus()").expect("the popup is not focused after the mail window comes back");
+    assert!(back < focus, "the popup must take focus after come_back, or the mail window ends up on top of it");
+}
+
 // ---- test 33: the origin check (S1c) ---------------------------------------------------------
 
 /// D5 and S1c: a script runs only while the top-level page is on the provider's mail hosts, checked

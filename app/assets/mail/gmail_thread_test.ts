@@ -125,14 +125,24 @@ Deno.test("gmail_thread_reads_the_account_from_the_live_chip_label_that_continue
   );
   const r = await run("gmail/thread.js", box.page, { ...ROW, messages: 3, ...FAST });
   assertEquals(r.result, "ok");
-  // A name with its own parentheses before the address: the last one counts.
-  chip.setAttribute("aria-label", `Google Account: Sam (they/them) (${SELF}), Google membership`);
-  const again = mailbox([thread()]);
+  // A name with its own parenthesised address before the real one: the last one counts. The label is set
+  // before the script runs, and the conversation holds a message from each address.
+  const DECOY = "sam@other.example.invalid";
+  const both = {
+    ...msg("t1", ANA, "Group project", 9),
+    count: 3,
+    convo: [{ who: ANA, at: when(2) }, { who: DECOY, at: when(5) }, { who: SELF, at: when(9) }],
+  };
+  const again = mailbox([both]);
   again.page.document.querySelector('[aria-label^="Google Account"]').setAttribute(
     "aria-label",
-    `Google Account: Sam (sam@other.example.invalid) (${SELF}), Google membership`,
+    `Google Account: Sam (${DECOY}) (they/them) (${SELF}), Google membership`,
   );
   const s = await run("gmail/thread.js", again.page, { ...ROW, messages: 3, ...FAST });
   assertEquals(s.result, "ok");
-  assertEquals(s.messages.map((m: { own?: boolean }) => m.own), [undefined, undefined, undefined]);
+  assertEquals(s.messages.map((m: { sender: string; own?: boolean }) => [m.sender, m.own]), [
+    [ANA, undefined],
+    [DECOY, undefined],
+    [SELF, true],
+  ]);
 });

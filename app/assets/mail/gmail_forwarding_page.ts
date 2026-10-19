@@ -39,6 +39,11 @@ export interface Opts extends Partial<Model> {
    * and no Remove button (the POP section is still there).
    */
   fresh?: boolean;
+  /**
+   * A forwarding radio this script does not know (no Remove control, so it would read as fresh without the
+   * radio): the section is not fresh, and Add is not pressed.
+   */
+  strangeRadios?: boolean;
   /** An address added but not yet verified: it is not an option of the list; the page shows a verify text. */
   unverified?: string;
   /**
@@ -151,17 +156,25 @@ export function gmail(o: Opts = {}): Gmail {
       }${none}> Forward a copy of incoming mail to</label>
           ${w === "to" ? "" : `<select id="to"${none}>${options()}</select>`}
           and ${w === "disp" ? "" : `<select id="disp"${none}>${dispOptions()}</select>`}</div></td></tr>`;
+    const odd = o.strangeRadios
+      ? `<tr><td><input type="radio" name="sx_em" id="r-odd"></td><td>Send mail to the archive</td></tr>`
+      : "";
     const verify = o.unverified
       ? `<div>A verification email was sent to ${o.unverified}. It is not yet verified.</div>`
       : "";
-    return `<div id="fwdandpop"><table>
+    // A [role=dialog] that was on the page before Add is pressed, ahead of the add dialog in DOM order (Gmail keeps
+    // hidden dialogs of its own around): its Next, Cancel and Proceed are never the script's to press.
+    const hidden = `<div role="dialog" id="decoy-dlg"><p>Forwarding settings changed. Confirm?</p>
+      <button type="button" id="decoy-dlg-next">Next</button><input type="button" value="Cancel" id="decoy-dlg-cancel">
+      <button type="button" id="decoy-dlg-proceed">Proceed</button></div>`;
+    return `${hidden}<div id="fwdandpop"><table>
       <tr><td>Forwarding:</td><td>
         ${input("Add a forwarding address", "add")}${
       o.fresh ? "" : input("Remove forwarding address", "remove")
     }
         ${verify}
       </td></tr>
-      ${rows}
+      ${rows}${odd}
       <tr><td>POP download:</td><td><label><input type="radio" name="pop" id="p-off" checked> Disable POP</label>
         <label><input type="radio" name="pop" id="p-on"> Enable POP for all mail</label></td></tr>
       <tr><td></td><td>When messages are accessed with POP
@@ -205,6 +218,7 @@ export function gmail(o: Opts = {}): Gmail {
     for (const id of ["to", "disp"]) fresh(g.el(id))?.addEventListener("change", edit);
     on("decoy-next", () => g.decoy++);
     on("decoy-add", () => g.decoy++);
+    for (const id of ["decoy-dlg-next", "decoy-dlg-cancel", "decoy-dlg-proceed"]) on(id, () => g.decoy++);
     on(
       "add",
       () =>

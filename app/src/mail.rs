@@ -553,6 +553,10 @@ fn open_popup(app: &tauri::AppHandle, provider: Provider, url: &tauri::Url, feat
     let built = WebviewWindowBuilder::new(app, POPUP, WebviewUrl::External(blank))
         .window_features(features)
         .title("Confirm it's you")
+        // The popup shows the number the student matches on their phone (live, 2026-10-18), so it is the
+        // topmost, focused window while it is open, above the mail window that comes back with it.
+        .always_on_top(true)
+        .focused(true)
         .initialization_script(INIT_SCRIPT)
         .on_navigation(move |u| popup_allowed(provider, u.as_str()))
         .on_new_window(|_, _| NewWindowResponse::Deny)
@@ -562,6 +566,9 @@ fn open_popup(app: &tauri::AppHandle, provider: Provider, url: &tauri::Url, feat
             refuse_external_schemes(&window);
             destroy_on_close_request(app, &window);
             let _ = come_back(app);
+            // After come_back, which focuses the mail window: the popup takes focus back, or the number it
+            // shows sits behind the mail window and the student never sees it.
+            let _ = window.set_focus();
             NewWindowResponse::Create { window }
         }
         Err(_) => NewWindowResponse::Deny,
