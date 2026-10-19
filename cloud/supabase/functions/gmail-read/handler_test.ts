@@ -2,6 +2,7 @@ import { assert, assertEquals } from "@std/assert";
 import { ScriptedModel } from "../_shared/judge_anthropic.ts";
 import type { JudgmentRow } from "../_shared/judge_pipeline.ts";
 import { CALENDAR_SCOPE, GMAIL_SCOPE } from "../_shared/google_scopes.ts";
+import { fail } from "../_shared/http.ts";
 import {
   forDevice,
   forwardingCounts,
@@ -76,6 +77,7 @@ function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"], me
     },
     knownCourses: () => Promise.resolve(["ph-106"]),
     // D22: by default the account forwards nothing, so every older test reads as it always did.
+    unlapse: () => Promise.resolve(),
     forwarding: () => Promise.resolve({ gmail: null, mailboxes: [] }),
     pipeline: () =>
       Promise.resolve({
@@ -836,6 +838,59 @@ Deno.test("a_mailbox_unlapsed_to_quiet_counts_as_forwarding", () => {
   assertEquals(forwardingCounts(GMAIL_ADDRESS, box("lapsed")), false, "while lapsed");
   assertEquals(forwardingCounts(GMAIL_ADDRESS, box("quiet")), true, "unlapsed, a canary once reached it");
   assertEquals(forwardingCounts(GMAIL_ADDRESS, box("pending")), false, "unlapsed, no canary ever reached it");
+});
+
+// Review of the lapsed fix, #2: the judge step calls `gmail-read` before `mail-pull`, so in the first
+// entitled slot after a renewal `gmail-read` met a mailbox still `lapsed`, read the gap by OAuth, and the
+// device's recover then forwarded the same messages. It is past the entitlement gate too, so it moves the
+// account's lapsed mailboxes on itself, before it reads the forwarding (the same compare-and-sets).
+Deno.test("a_lapsed_forwarding_is_unlapsed_before_the_forwarding_read_so_the_gap_is_never_read_twice", async () => {
+  for (const [canary, forwarded] of [[true, true], [false, false]] as const) {
+    const { deps, asked } = fakes([TASK_ANSWER]);
+    const box = { hint: GMAIL_ADDRESS, status: "lapsed", canaryOk: canary };
+    const order: string[] = [];
+    let tokens = 0;
+    const body = await (await readHandler(OK, {
+      ...deps,
+      unlapse: (account) => {
+        assertEquals(account, "acct-1");
+        order.push("unlapse");
+        if (box.status === "lapsed") box.status = box.canaryOk ? "quiet" : "pending";
+        return Promise.resolve();
+      },
+      forwarding: () => {
+        order.push("forwarding");
+        return Promise.resolve({ gmail: GMAIL_ADDRESS, mailboxes: [{ hint: box.hint, status: box.status }] });
+      },
+      accessTokenFor: (a) => {
+        tokens += 1;
+        return deps.accessTokenFor(a);
+      },
+    })(post())).json();
+    assertEquals(order, ["unlapse", "forwarding"], `canary ${canary}`);
+    if (forwarded) {
+      // A canary once reached it: `quiet`, so forwarding alone reads it and recover brings the gap in.
+      assertEquals([body.via_forward, body.read, tokens, asked.length], [true, 0, 0, 0]);
+    } else {
+      // No canary ever did: `pending`, setup never finished, and the OAuth read goes on.
+      assertEquals([("via_forward" in body), body.read, tokens, asked.length], [false, 1, 1, 1]);
+    }
+  }
+});
+
+Deno.test("an_unentitled_read_unlapses_nothing", async () => {
+  const { deps } = fakes([]);
+  let unlapsed = 0;
+  const refuse = () => Promise.reject(fail(402, "no entitlement"));
+  const res = await readHandler(refuse, {
+    ...deps,
+    unlapse: () => {
+      unlapsed += 1;
+      return Promise.resolve();
+    },
+  })(post());
+  assertEquals([res.status, unlapsed], [402, 0]);
+  await res.body?.cancel();
 });
 
 Deno.test("P22: the address is matched whole and case-folded, never as a substring", () => {

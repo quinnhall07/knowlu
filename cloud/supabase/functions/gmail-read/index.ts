@@ -1,4 +1,6 @@
+import { restFromEnv } from "../_shared/db.ts";
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
+import { unlapseAccount } from "../_shared/mail_unlapse.ts";
 import { liveDeps, sharedDb } from "../_shared/judge_deps.ts";
 import { accessTokenFromRefresh } from "../_shared/google_token.ts";
 import { GMAIL_SCOPE } from "../_shared/google_scopes.ts";
@@ -178,6 +180,8 @@ Deno.serve(readHandler(requireActiveEntitlement, {
     }
     return [...out];
   },
+  // Past the entitlement gate: the same compare-and-sets `mail-pull` makes, whichever reader comes first.
+  unlapse: (accountId) => unlapseAccount(restFromEnv(), accountId),
   async forwarding(accountId): Promise<Forwarding> {
     // Email forwarding D22: the OAuth grant's address and the account's forwarding mailboxes, both
     // scoped by the caller's account. The handler's `forwardingCounts` decides (P22); this reads.

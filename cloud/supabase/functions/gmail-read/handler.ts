@@ -5,7 +5,8 @@
 //   1. acknowledge what the LAST pull actually wrote (so a crash between reply and write costs a
 //      repeat, never a lost task);
 //   1b. a Gmail address with an active forwarding to Knowlu stops here with a non-quiet empty
-//      read (email forwarding D22): one mailbox, one path;
+//      read (email forwarding D22): one mailbox, one path; a mailbox lapsed while the account was
+//      not entitled leaves `lapsed` first, as `mail-pull` moves it, so this reads it as it now is;
 //   2. get an access token from the Vault-held refresh token — a revoked grant, an account with no
 //      Gmail scope at all, and a deployment with no Google client configured are three different
 //      answers, and only one of them (a revoked grant) is ever treated as a failure (R-C2-E41);
@@ -219,6 +220,9 @@ export interface ReadDeps {
   ): Promise<Array<{ uid: string; tier: string; payload: Record<string, unknown>; judgment_id: string | null }>>;
   deliver(accountId: string, uids: string[]): Promise<void>;
   knownCourses(accountId: string): Promise<string[]>;
+  /** Email forwarding §4.6 step 3 (amended 2026-10-19): the account's `lapsed` mailboxes read `quiet`
+   * (a canary once reached them) or `pending`, as `mail-pull` moves them (`_shared/mail_unlapse.ts`). */
+  unlapse(accountId: string): Promise<void>;
   /** Email forwarding D22: the account's OAuth Gmail address and its forwarding mailboxes. */
   forwarding(accountId: string): Promise<Forwarding>;
   pipeline(): Promise<PipelineDeps>;
@@ -297,6 +301,10 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
       // revoke. Already-queued items are still delivered and acked. NEVER `quiet` — the merged
       // device reads every unknown quiet reason as "re-connect from settings" and stops before
       // reading items (`cloudmodel.rs:667-675`); `via_forward` is a field today's device ignores.
+      // The account is entitled, so a mailbox lapsed while it was not leaves `lapsed` first: the judge
+      // step calls this before `mail-pull`, and a forwarding read as `lapsed` here would be read by OAuth
+      // and then recovered by forwarding, filed twice (review of the lapsed fix, #2).
+      await deps.unlapse(account_id);
       const forwarding = await deps.forwarding(account_id);
       if (forwardingCounts(forwarding.gmail, forwarding.mailboxes)) {
         return Response.json({ items: await undelivered(), read: 0, quiet: false, more: false, via_forward: true });
