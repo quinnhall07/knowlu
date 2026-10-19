@@ -699,7 +699,7 @@ struct Fake {
     /// toward the oldest, saying `at_oldest` (a search has no Oldest button; `list.js` walks in a budget).
     oldest_walk: Option<usize>,
     /// Gmail: every forward's attachments fail to upload.
-    attach_fails: bool,
+    attach_fails: Option<&'static str>,
 }
 
 fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
@@ -720,7 +720,7 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         cleanup_fails: false,
         cleaned: Cell::new(0),
         oldest_walk: None,
-        attach_fails: false,
+        attach_fails: None,
     }
 }
 
@@ -884,8 +884,8 @@ impl Mailbox for Fake {
                 if m365 {
                     return Ok(json!({ "result": "ok", "sent": true }));
                 }
-                if self.attach_fails {
-                    return Ok(json!({ "result": "failed", "reason": "attachment failed" }));
+                if let Some(reason) = self.attach_fails {
+                    return Ok(json!({ "result": "failed", "reason": reason }));
                 }
                 let want: u64 = rows.iter().map(|r| r["messages"].as_u64().unwrap_or(1)).sum();
                 if self.over_rows.is_some_and(|k| rows.len() > k) {
@@ -1370,9 +1370,23 @@ fn a_gmail_attachment_that_does_not_upload_stops_the_pass_with_a_fixed_word() {
     let since = window(NOW, None, None).since;
     let svc = holding(&[]);
     let mut mb = fake(Provider::Gmail, vec![mail(ANA, "Quiz 3 moved", since + 3_600), mail(BO, "Lab report due", since + 7_200)]);
-    mb.attach_fails = true;
+    mb.attach_fails = Some("attachment failed");
     let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
     assert_eq!(out.stop, Stop::Script("an attachment did not upload"));
+    assert_eq!((out.sent, out.left), (0, 0));
+    assert_eq!(mb.forwards.borrow().len(), 1, "one forward was tried, and none after it");
+}
+
+#[test]
+fn a_gmail_attachment_still_uploading_at_the_bound_stops_the_pass_with_its_own_word() {
+    // Live (ef24, 2026-10-19): forward.js now tells a chip still uploading when upload_ms runs out apart from
+    // one that failed. Nothing was sent either way, and the pass stops naming which it was.
+    let since = window(NOW, None, None).since;
+    let svc = holding(&[]);
+    let mut mb = fake(Provider::Gmail, vec![mail(ANA, "Quiz 3 moved", since + 3_600), mail(BO, "Lab report due", since + 7_200)]);
+    mb.attach_fails = Some("attachment still uploading");
+    let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
+    assert_eq!(out.stop, Stop::Script("an attachment was still uploading"));
     assert_eq!((out.sent, out.left), (0, 0));
     assert_eq!(mb.forwards.borrow().len(), 1, "one forward was tried, and none after it");
 }

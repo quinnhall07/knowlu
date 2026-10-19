@@ -16,10 +16,11 @@
 //   { result: "not found", control: "message" | "more menu" | "forward as attachment" | "send" | "to" |
 //      "subject" }
 //   { result: "failed", reason: "no address" | "no nonce" | "no rows" | "too many rows" |
-//      "rows already selected" | "rows not selected" | "attachment failed" | "no attachment" |
-//      "attachments do not match the rows" | "attachment size unreadable" | "over 25 MB" |
+//      "rows already selected" | "rows not selected" | "attachment failed" | "attachment still uploading" |
+//      "no attachment" | "attachments do not match the rows" | "attachment size unreadable" | "over 25 MB" |
 //      "recipient not accepted" | "subject not set" | "send did not settle" }   ("attachments do not match
-//      the rows" also carries `attached` and `expected`, the counts it compared)
+//      the rows" and "attachment still uploading" also carry `attached` and `expected`, the counts it
+//      compared or had seen attach; "recipient not accepted" carries `recipients`, how many it read)
 // It sends one message to that one address and nothing else: the subject is exactly `Knowlu <nonce>`
 // (sent_cleanup.js deletes by that same subject), the originals' words are not in it, and a compose window
 // with no attachment, a count of attachments that is not the rows', more than the size limit, Gmail's offer
@@ -35,7 +36,8 @@
 // pointermove, mousemove, then the press); Send and Discard are pressed the same way. An attachment chip is
 // a `div.dL`: "Uploading of attachment: <name>" while it uploads (waited for, inside `upload_ms`), "Uploading
 // of attachment: <name> failed. Press enter to retry" when the upload failed ("attachment failed": the
-// draft is discarded; so is a chip still uploading when `upload_ms` runs out), and "Attachment: <name>"
+// draft is discarded; so is a chip still uploading when `upload_ms` runs out, "attachment still
+// uploading"), and "Attachment: <name>"
 // when attached, its own text "<name>.eml (6K)" with the size a leaf inside it: the size is read after the
 // name, never from it (a subject may hold "(3)").
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
@@ -214,7 +216,15 @@ const attached = () => [...compose.querySelectorAll('[aria-label^="Attachment:"]
 // count holding steady for a while is not the end of it.
 await until(() => uploadFailed() || (!uploading() && attached().length >= expected), uploadMs);
 // A chip still uploading at the bound is neither counted nor sized: it is never sent.
-if (uploadFailed() || uploading()) return await bail({ result: "failed", reason: "attachment failed" });
+if (uploadFailed()) return await bail({ result: "failed", reason: "attachment failed" });
+if (uploading()) {
+  return await bail({
+    result: "failed",
+    reason: "attachment still uploading",
+    attached: attached().length,
+    expected,
+  });
+}
 
 const attachments = attached();
 if (attachments.length === 0) return await bail({ result: "failed", reason: "no attachment" });
@@ -260,7 +270,7 @@ press(to, "Enter");
 await until(() => recipients().length > 0, waitMs);
 const got = recipients();
 if (got.length !== 1 || got[0] !== address) {
-  return await bail({ result: "failed", reason: "recipient not accepted" });
+  return await bail({ result: "failed", reason: "recipient not accepted", recipients: got.length });
 }
 
 const line = `Knowlu ${nonce}`;

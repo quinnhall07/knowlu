@@ -114,11 +114,14 @@ Deno.test("gmail_forward_gives_uploads_longer_than_a_step_wait_and_names_the_cou
     await run("gmail/forward.js", short.page, { ...TARGET, wait_ms: 100, upload_ms: 200 }),
     { result: "failed", reason: "attachments do not match the rows", attached: 1, expected: 2 },
   );
-  // Still uploading when the bound runs out is a failed upload, never a count.
+  // Still uploading when the bound runs out is never sent and never a count; live (ef24, 2026-10-19) it is
+  // told apart from a chip that failed, with what had attached by then.
   const stalled = mailbox(MAIL, { upload: "slow", uploadMs: 400 });
   assertEquals(await run("gmail/forward.js", stalled.page, { ...TARGET, wait_ms: 100, upload_ms: 200 }), {
     result: "failed",
-    reason: "attachment failed",
+    reason: "attachment still uploading",
+    attached: 0,
+    expected: 2,
   });
 });
 
@@ -128,7 +131,9 @@ Deno.test("gmail_forward_never_sends_with_a_chip_still_uploading_at_the_bound", 
   const box = mailbox(MAIL, { stuckChip: true });
   assertEquals(await run("gmail/forward.js", box.page, { ...TARGET, upload_ms: 300 }), {
     result: "failed",
-    reason: "attachment failed",
+    reason: "attachment still uploading",
+    attached: 2,
+    expected: 2,
   });
   assertEquals([box.sent, box.discards, box.checked()], [[], 1, []]);
 });
@@ -247,10 +252,12 @@ Deno.test("gmail_forward_names_a_message_or_control_that_is_not_on_the_page_and_
 
 Deno.test("gmail_forward_never_sends_a_compose_with_another_recipient_or_the_wrong_attachments", async () => {
   // Gmail offers someone else on the To line: the one address it may send to is Knowlu's.
+  // It says how many recipients it read (a count, never an address): live (ef24) none and another differ.
   const other = mailbox(MAIL, { prefill: "friend@elsewhere.example.invalid" });
   assertEquals(await run("gmail/forward.js", other.page, TARGET), {
     result: "failed",
     reason: "recipient not accepted",
+    recipients: 2,
   });
   const bare = mailbox(MAIL, { bare: true });
   assertEquals(await run("gmail/forward.js", bare.page, { ...TARGET, upload_ms: 300 }), {

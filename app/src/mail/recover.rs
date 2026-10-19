@@ -830,6 +830,9 @@ impl Pass<'_> {
             // Gmail could not upload the attachments (live 2026-10-19): nothing was sent and the draft is
             // discarded. It is the page's, not these rows', so the pass stops and says so.
             (Some("failed"), Some("attachment failed"), _) => return Err(Stop::Script("an attachment did not upload")),
+            (Some("failed"), Some("attachment still uploading"), _) => {
+                return Err(Stop::Script("an attachment was still uploading"))
+            }
             (Some("failed"), Some("over 25 MB"), _) if rows.len() > 1 => {
                 let (a, b) = rows.split_at(rows.len() / 2);
                 self.forward_gmail(a.to_vec(), None)?;
