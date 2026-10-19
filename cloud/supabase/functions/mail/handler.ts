@@ -27,6 +27,7 @@
  * fixed sentence (`_shared/http.ts`).
  */
 import type { SendCanary } from "../_shared/canary_send.ts";
+import type { BatchClock } from "../_shared/mail_batch.ts";
 import type { Entitle } from "../_shared/judge_handler.ts";
 import { asResponse, fail, json, methodNotAllowed, readJson, subPath } from "../_shared/http.ts";
 import type { S3Client } from "../_shared/s3.ts";
@@ -126,6 +127,10 @@ export interface BatchRow {
   sentAt: string | null;
   closedAt: string | null;
 }
+/** A `mail_batches` row as the open-batch cap reads it. */
+export interface OpenBatch extends BatchClock {
+  id: string;
+}
 export interface NewBatch {
   addressId: string;
   phase: "backfill" | "recover";
@@ -187,8 +192,12 @@ export interface MailStore {
   deleteCanary(addressId: string, id: string): Promise<void>;
   /** Sets `backfill_since` (a date) only while it is null; false, with nothing written, otherwise. */
   setBackfillSince(accountId: string, id: string, since: string): Promise<boolean>;
-  /** How many of the mailbox's batches are open (`closed_at` null). */
-  openBatches(addressId: string): Promise<number>;
+  /** The mailbox's batches with `closed_at` null, oldest first, at most `limit`, as §4.8's rules read them
+   * (`_shared/mail_batch.ts`): some may be closed by those rules and not yet stamped. */
+  unstampedBatches(addressId: string, limit: number): Promise<OpenBatch[]>;
+  /** Stamps `closed_at` on the mailbox's batch only while it is null; false, with nothing written,
+   * otherwise. */
+  closeBatch(addressId: string, id: string, atIso: string): Promise<boolean>;
   insertBatch(b: NewBatch): Promise<string>;
   /** One batch by id, whichever account's: the caller checks its mailbox is the account's. */
   batch(id: string): Promise<BatchRow | null>;

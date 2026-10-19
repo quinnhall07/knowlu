@@ -14,9 +14,11 @@
  *   earlier than `backfill_since` (or, before the first backfill, that backfill's own bound), so a device
  *   bug cannot forward mail from before the window; and no more than 180 days back, the `mail_seen`
  *   horizon, past which nothing could be told apart from what was already processed. At most ten open
- *   batches a mailbox (intake reads twenty).
+ *   batches a mailbox (intake reads twenty), open by §4.8's rules at the time (`_shared/mail_batch.ts`):
+ *   the ones those rules close are stamped `closed_at` here, as the pull stamps them.
  * - `POST /batches/<id>/sent {sent}` records the device's count once (`sent`, `sent_at`); the batch stays
- *   open for intake until the pull sees it whole or the sweep times it out.
+ *   open for intake until the pull (or the mailbox's next `POST /batches`) sees it closed, or the sweep
+ *   times it out.
  * - `POST /reconcile {address_id, since, until}` answers the account's fingerprint key and the held
  *   `(fp_hash, received_minute)` pairs in the window widened by the 15-minute match (§4.11 step 3). The
  *   window starts no earlier than a recover may, and spans at most 181 days. The body may carry nothing
@@ -29,6 +31,7 @@
  */
 import { newNonce } from "../_shared/mail_bind.ts";
 import { fail, json, readJson } from "../_shared/http.ts";
+import { isClosed } from "../_shared/mail_batch.ts";
 import type { MailDeps, MailRow, StatePatch } from "./handler.ts";
 import { DOMAIN, hintFits, providerOf } from "./provider.ts";
 
@@ -45,6 +48,8 @@ export const RECOVER_BEFORE_WINDOW = "a recover starts no earlier than this mail
 export const RECONCILE_BEFORE_WINDOW = "a reconcile starts no earlier than this mailbox's backfill window";
 export const MAX_OPEN_BATCHES = 10;
 export const OPEN_BATCH_CAP = "this mailbox has ten open batches";
+/** The most unstamped batches the cap reads; the cap keeps a mailbox's set to ten. */
+export const OPEN_READ = 100;
 export const MAX_COUNT = 100_000;
 export const CONFIRM_WINDOW_MS = 15 * 60_000;
 /** §4.11 step 3: a listed message is held when a held entry's minute is within this of its own. */
@@ -188,6 +193,24 @@ async function windowStart(
   return iso(day);
 }
 
+/**
+ * How many of the mailbox's batches are open at `now` by §4.8's rules (`_shared/mail_batch.ts`), the same
+ * ones the pull reads: a backfill opens and closes many batches between two slots, so `closed_at` alone
+ * would refuse a mailbox whose batches have all closed. Each one found closed is stamped as the pull stamps
+ * it, before the cap is read, so the mailbox's unstamped set stays within the cap and intake's read of
+ * twenty sees every batch that can still bind. The set is read oldest first, so were it ever past
+ * `OPEN_READ` (a race between opens), the oldest, the likeliest closed, are the ones stamped.
+ */
+async function openBatches(address: string, now: number, deps: MailDeps): Promise<number> {
+  const unstamped = await deps.store.unstampedBatches(address, OPEN_READ);
+  let open = 0;
+  for (const b of unstamped) {
+    if (isClosed(b, now)) await deps.store.closeBatch(address, b.id, iso(now));
+    else open++;
+  }
+  return open;
+}
+
 export async function openBatch(req: Request, accountId: string, deps: MailDeps): Promise<Response> {
   const b = await body(req, ["address_id", "phase", "since", "expected"]);
   const phase = b.phase;
@@ -197,7 +220,7 @@ export async function openBatch(req: Request, accountId: string, deps: MailDeps)
   const row = await own(accountId, b.address_id, deps);
   // A batch binds by its sends' From, the mailbox's own address: without it nothing could ever bind.
   if (row.mailboxHint === null) throw fail(409, NO_HINT);
-  if (await deps.store.openBatches(row.id) >= MAX_OPEN_BATCHES) throw fail(409, OPEN_BATCH_CAP);
+  if (await openBatches(row.id, now, deps) >= MAX_OPEN_BATCHES) throw fail(409, OPEN_BATCH_CAP);
   const since = await windowStart(accountId, row, phase, b.since, now, deps);
   const nonce = (deps.newNonce ?? newNonce)();
   const id = await deps.store.insertBatch({

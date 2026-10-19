@@ -32,6 +32,10 @@
  */
 import type { Entitle } from "../_shared/judge_handler.ts";
 import { asResponse, fail, json, methodNotAllowed } from "../_shared/http.ts";
+import { type BatchClock, isClosed } from "../_shared/mail_batch.ts";
+
+/** §4.8's rules live in `_shared/mail_batch.ts`, which `mail`'s open-batch cap reads too. */
+export { isClosed, OPEN_LIMIT_MS, SENT_GRACE_MS } from "../_shared/mail_batch.ts";
 
 /** D20's message uid, the only shape an ack entry may have. */
 export const ACK_SHAPE = /^mail:[0-9a-f]{32}$/;
@@ -39,9 +43,6 @@ export const ACK_SHAPE = /^mail:[0-9a-f]{32}$/;
 export const ACK_CAP = 500;
 /** The most messages one answer carries. */
 export const PAGE = 100;
-/** §4.8's timeouts: after the device closed the send, and after the batch opened. */
-export const SENT_GRACE_MS = 2 * 3_600_000;
-export const OPEN_LIMIT_MS = 14 * 86_400_000;
 /** A body is an ack of at most `ACK_CAP` uids; anything much larger is refused unread. */
 const BODY_LIMIT = 64 * 1024;
 
@@ -58,15 +59,10 @@ export interface PullMailbox {
   expired: number;
 }
 /** A `mail_batches` row, never its nonce's HMAC. */
-export interface PullBatch {
+export interface PullBatch extends BatchClock {
   id: string;
   addressId: string;
   phase: "backfill" | "recover";
-  sent: number | null;
-  received: number;
-  openedAt: string;
-  sentAt: string | null;
-  closedAt: string | null;
 }
 /** What the order needs of an undelivered `mail_claims` row. */
 export interface ClaimHead {
@@ -112,14 +108,6 @@ export interface PullDeps {
 
 const iso = (ms: number) => new Date(ms).toISOString();
 const at = (s: string | null) => s === null ? NaN : Date.parse(s);
-
-/** §4.8's three ways a batch closes, read at `now`; a stamped `closed_at` is closed already. */
-export function isClosed(b: PullBatch, now: number): boolean {
-  if (b.closedAt !== null) return true;
-  if (b.sent !== null && b.received >= b.sent) return true;
-  if (b.sentAt !== null && now - at(b.sentAt) >= SENT_GRACE_MS) return true;
-  return now - at(b.openedAt) >= OPEN_LIMIT_MS;
-}
 
 /** One delivered message in the answer's order, and whether it came from a batch. */
 export interface Placed {

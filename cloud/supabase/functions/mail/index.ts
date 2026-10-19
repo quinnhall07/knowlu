@@ -26,7 +26,6 @@ import {
   type MailStore,
 } from "./handler.ts";
 import { mxResolver } from "./provider.ts";
-import { MAX_OPEN_BATCHES } from "./routes.ts";
 
 function env(name: string): string {
   const v = Deno.env.get(name);
@@ -240,9 +239,21 @@ function storeOver(rest: Rest): MailStore {
       const q = `${mine(accountId, address)}&backfill_since=is.null&select=id`;
       return await patched("backfill window", "mail_addresses", q, { backfill_since: since }) > 0;
     },
-    async openBatches(address) {
-      const q = `address_id=eq.${id(address)}&closed_at=is.null&select=id&limit=${MAX_OPEN_BATCHES + 1}`;
-      return (await rows<{ id: string }>(await call(rest, "open batches", `mail_batches?${q}`))).length;
+    async unstampedBatches(address, limit) {
+      const q = `address_id=eq.${id(address)}&closed_at=is.null` +
+        `&select=id,sent,received,opened_at,sent_at,closed_at&order=opened_at,id&limit=${limit}`;
+      return (await rows<OpenBatchDb>(await call(rest, "open batches", `mail_batches?${q}`))).map((r) => ({
+        id: r.id,
+        sent: r.sent,
+        received: r.received,
+        openedAt: r.opened_at,
+        sentAt: r.sent_at,
+        closedAt: r.closed_at,
+      }));
+    },
+    async closeBatch(address, batch, atIso) {
+      const q = `id=eq.${id(batch)}&address_id=eq.${id(address)}&closed_at=is.null&select=id`;
+      return await patched("close", "mail_batches", q, { closed_at: atIso }) > 0;
     },
     async insertBatch(b) {
       const body = JSON.stringify({
@@ -313,6 +324,14 @@ function storeOver(rest: Rest): MailStore {
   };
 }
 
+interface OpenBatchDb {
+  id: string;
+  sent: number | null;
+  received: number;
+  opened_at: string;
+  sent_at: string | null;
+  closed_at: string | null;
+}
 interface BatchDb {
   id: string;
   address_id: string;

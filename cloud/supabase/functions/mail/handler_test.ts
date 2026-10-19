@@ -10,6 +10,7 @@ import { CANARY_FROM, CANARY_HEADER, CANARY_SUBJECT, canarySender } from "../_sh
 import { nonceTag } from "../_shared/mail_bind.ts";
 import { MAIL_CANARY_FROM } from "../mail-inbound/handler.ts";
 import { hmacKey, nonceHmac, tokenHmac } from "../mail-inbound/keys.ts";
+import { OPEN_LIMIT_MS, SENT_GRACE_MS } from "../_shared/mail_batch.ts";
 import {
   type BatchRow,
   type HeldRow,
@@ -132,7 +133,9 @@ class FakeStore implements MailStore {
     return Promise.resolve();
   }
   // T4.2's half: canaries, batches, the held set, the state.
-  batches: (BatchRow & { nonceHmac: string })[] = [];
+  batches: (BatchRow & { nonceHmac: string; openedAt: string })[] = [];
+  /** The database's `now()`, for `opened_at`; `world` points it at the test's clock. */
+  now: () => number = () => NOW;
   canaries: { id: string; addressId: string; nonceHmac: string; sentAt: string }[] = [];
   seen: (HeldRow & { accountId: string })[] = [];
   heldAsked: string[][] = [];
@@ -172,23 +175,47 @@ class FakeStore implements MailStore {
     r.backfillSince = since;
     return Promise.resolve(true);
   }
-  openBatches(addressId: string) {
-    this.calls.push("openBatches");
-    return Promise.resolve(
-      this.batches.filter((b) => b.addressId === addressId && b.closedAt === null).length,
-    );
+  unstampedBatches(addressId: string, limit: number) {
+    this.calls.push("unstampedBatches");
+    const unstamped = this.batches
+      .filter((b) => b.addressId === addressId && b.closedAt === null)
+      .sort((a, b) => Date.parse(a.openedAt) - Date.parse(b.openedAt) || (a.id < b.id ? -1 : 1))
+      .slice(0, limit);
+    return Promise.resolve(unstamped.map(({ id, sent, received, openedAt, sentAt, closedAt }) => ({
+      id,
+      sent,
+      received,
+      openedAt,
+      sentAt,
+      closedAt,
+    })));
+  }
+  closeBatch(addressId: string, id: string, atIso: string) {
+    this.calls.push("closeBatch");
+    const b = this.batches.find((x) => x.id === id && x.addressId === addressId && x.closedAt === null);
+    if (b === undefined) return Promise.resolve(false);
+    b.closedAt = atIso;
+    return Promise.resolve(true);
   }
   insertBatch(b: NewBatch) {
     this.calls.push("insertBatch");
     const id = crypto.randomUUID();
-    this.batches.push({ ...b, id, sent: null, received: 0, sentAt: null, closedAt: null });
+    this.batches.push({
+      ...b,
+      id,
+      sent: null,
+      received: 0,
+      openedAt: iso(this.now()),
+      sentAt: null,
+      closedAt: null,
+    });
     return Promise.resolve(id);
   }
   batch(id: string) {
     this.calls.push("batch");
     const b = this.batches.find((x) => x.id === id);
     if (b === undefined) return Promise.resolve(null);
-    const { nonceHmac: _, ...row } = b;
+    const { nonceHmac: _, openedAt: _o, ...row } = b;
     return Promise.resolve(row);
   }
   markSent(addressId: string, id: string, sent: number, sentAt: string) {
@@ -337,6 +364,7 @@ async function world(status: EntitlementStatus = "active"): Promise<World> {
     failSend: false,
     clock: NOW,
   } as World;
+  store.now = () => w.clock;
   const resolveMx: ResolveMx = (domain) => {
     w.lookups.push(domain);
     if (domain === "dnsdown.test") return Promise.reject(new Error("dns"));
@@ -967,6 +995,127 @@ Deno.test("post_batches_opens_a_batch_of_its_phase_and_answers_its_nonce_once", 
   assertEquals(await capped.json(), { error: OPEN_BATCH_CAP });
   w.store.batches[0].closedAt = iso(NOW);
   assertEquals((await recover(A1)).status, 201);
+});
+
+// The cap counts what §4.8 calls open at `now` (mail-pull's `isClosed`), not what the pull or the sweep has
+// stamped yet: a backfill runs many passes between slots, each opening a batch and closing its send.
+type SeedBatch = Partial<FakeStore["batches"][number]>;
+/** `MAX_OPEN_BATCHES` batches of `address` that `mail_batches` still reads as open, each shaped by `shape`. */
+function seedTen(w: World, shape: (i: number) => SeedBatch, address = A1) {
+  for (let i = 0; i < MAX_OPEN_BATCHES; i++) {
+    w.store.batches.push({
+      id: crypto.randomUUID(),
+      addressId: address,
+      phase: "backfill",
+      nonceHmac: `${address}-${i}`,
+      since: `${dayOf(TODAY - 100 * DAY)}T00:00:00.000Z`,
+      expected: 5,
+      sent: null,
+      received: 0,
+      openedAt: iso(NOW),
+      sentAt: null,
+      closedAt: null,
+      ...shape(i),
+    });
+  }
+}
+const openRecover = (w: World) =>
+  w.call("POST", "/batches", { address_id: A1, phase: "recover", since: iso(NOW - 3 * DAY), expected: 1 });
+const stamps = (w: World, address = A1) =>
+  w.store.batches.filter((b) => b.addressId === address).map((b) => b.closedAt);
+
+Deno.test("the_open_batch_cap_skips_batches_whose_sends_were_all_received", async () => {
+  const w = await world();
+  // Ten backfill passes, each sent and received whole (one over: a forward can arrive twice).
+  seedTen(
+    w,
+    (i) => ({ sent: 5, received: i === 0 ? 6 : 5, openedAt: iso(NOW - 600_000), sentAt: iso(NOW - 60_000) }),
+  );
+  const res = await openRecover(w);
+  assertEquals(res.status, 201);
+  // Stamped as the pull would stamp them, so intake's read of open batches holds only the open ones.
+  assertEquals(stamps(w), [...Array(MAX_OPEN_BATCHES).fill(iso(NOW)), null]);
+});
+
+Deno.test("the_open_batch_cap_skips_batches_sent_past_the_grace", async () => {
+  const w = await world();
+  assertEquals(SENT_GRACE_MS, 2 * 3_600_000);
+  // Sent two hours ago or more (the first exactly at the bound), and still short of their count.
+  seedTen(
+    w,
+    (i) => ({ sent: 5, received: 1, openedAt: iso(NOW - DAY), sentAt: iso(NOW - SENT_GRACE_MS - i) }),
+  );
+  assertEquals((await openRecover(w)).status, 201);
+  assertEquals(stamps(w), [...Array(MAX_OPEN_BATCHES).fill(iso(NOW)), null]);
+});
+
+Deno.test("the_open_batch_cap_skips_batches_opened_past_the_limit_and_never_sent", async () => {
+  const w = await world();
+  assertEquals(OPEN_LIMIT_MS, 14 * DAY);
+  seedTen(w, (i) => ({ openedAt: iso(NOW - OPEN_LIMIT_MS - i) }));
+  assertEquals((await openRecover(w)).status, 201);
+  assertEquals(stamps(w), [...Array(MAX_OPEN_BATCHES).fill(iso(NOW)), null]);
+});
+
+Deno.test("the_open_batch_cap_still_refuses_ten_batches_open_by_the_rules", async () => {
+  const w = await world();
+  // Each just inside a rule: unsent and opened now; sent short of its count a millisecond inside the grace;
+  // unsent a millisecond inside the 14 days.
+  seedTen(
+    w,
+    (i) =>
+      i < 4
+        ? {}
+        : i < 7
+        ? { sent: 5, received: 4, openedAt: iso(NOW - DAY), sentAt: iso(NOW - SENT_GRACE_MS + 1) }
+        : { openedAt: iso(NOW - OPEN_LIMIT_MS + 1) },
+  );
+  const capped = await openRecover(w);
+  assertEquals(capped.status, 409);
+  assertEquals(await capped.json(), { error: OPEN_BATCH_CAP });
+  assertEquals(w.store.batches.length, MAX_OPEN_BATCHES);
+  assertEquals(stamps(w), Array(MAX_OPEN_BATCHES).fill(null));
+});
+
+Deno.test("the_open_batch_cap_stamps_only_the_closed_and_only_the_mailboxs_own", async () => {
+  const w = await world();
+  // Ten open, then three closed by each rule: still refused, and the three are stamped all the same.
+  seedTen(w, () => ({}));
+  w.store.batches.push(
+    {
+      ...w.store.batches[0],
+      id: crypto.randomUUID(),
+      nonceHmac: "c1",
+      sent: 2,
+      received: 2,
+      sentAt: iso(NOW),
+    },
+    {
+      ...w.store.batches[0],
+      id: crypto.randomUUID(),
+      nonceHmac: "c2",
+      sent: 2,
+      sentAt: iso(NOW - SENT_GRACE_MS),
+    },
+    { ...w.store.batches[0], id: crypto.randomUUID(), nonceHmac: "c3", openedAt: iso(NOW - OPEN_LIMIT_MS) },
+  );
+  // Another account's mailbox, closed by count: never this route's to stamp.
+  seedTen(w, () => ({ sent: 1, received: 1 }), B1);
+  assertEquals((await openRecover(w)).status, 409);
+  assertEquals(stamps(w), [...Array(MAX_OPEN_BATCHES).fill(null), iso(NOW), iso(NOW), iso(NOW)]);
+  assertEquals(stamps(w, B1), Array(MAX_OPEN_BATCHES).fill(null));
+  // A stamp is never moved: an hour on, with one open batch received whole, only that one is stamped.
+  Object.assign(w.store.batches[0], { sent: 0, sentAt: iso(NOW) });
+  w.clock = NOW + 3_600_000;
+  assertEquals((await openRecover(w)).status, 201);
+  assertEquals(stamps(w), [
+    iso(NOW + 3_600_000),
+    ...Array(MAX_OPEN_BATCHES - 1).fill(null),
+    iso(NOW),
+    iso(NOW),
+    iso(NOW),
+    null,
+  ]);
 });
 
 Deno.test("a_backfill_batch_reaching_more_than_120_days_before_its_opening_is_refused", async () => {
