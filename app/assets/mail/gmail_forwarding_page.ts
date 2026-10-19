@@ -58,7 +58,8 @@ export interface Opts extends Partial<Model> {
   silentPopup?: boolean;
   /**
    * The older markup, where each radio sits inside a wrapping <label> in one block. The live page is the
-   * default: a table row per radio, the "Forward a copy" radio with no label of its own.
+   * default: a table row per radio, the "Forward a copy" radio with no label of its own. It also draws the
+   * older forward-to list: each option's value is the address, with no separator and no Remove options.
    */
   labelled?: boolean;
 }
@@ -141,10 +142,34 @@ export function gmail(o: Opts = {}): Gmail {
   let verifying = o.verifyRow ?? "";
   const wired = new WeakSet();
 
-  const options = () =>
-    model.addresses.map((a) => `<option value="${a}"${a === model.to ? " selected" : ""}>${a}</option>`).join(
-      "",
-    );
+  // Live Gmail (2026-10-18): the forward-to list's option values are indexes, never the address. The text is the
+  // bare address, then a "--" separator, then one "Remove <address>" option per address. Once forwarding is on to
+  // an address Gmail appends " (in use)" to its option and to its Remove option. `labelled` draws the older list.
+  const options = () => {
+    const n = model.addresses.length;
+    if (o.labelled || n === 0) {
+      return model.addresses.map((a) =>
+        `<option value="${a}"${a === model.to ? " selected" : ""}>${a}</option>`
+      )
+        .join("");
+    }
+    const use = (a: string) => model.on && a === model.to ? " (in use)" : "";
+    const named = model.addresses.map((a, i) => ({ a, i }));
+    return [
+      ...named.map(({ a, i }) =>
+        `<option value="${i}"${a === model.to ? " selected" : ""}>${a}${use(a)}</option>`
+      ),
+      `<option value="${n}">--</option>`,
+      ...named.filter(({ a }) => a !== "").map(({ a, i }) =>
+        `<option value="${n + 1 + i}">Remove ${a}${use(a)}</option>`
+      ),
+    ].join("");
+  };
+  // The address the forward-to select shows: an index on the live shape, the address on the older one.
+  const chosen = () => {
+    const v: string = g.el("to")?.value ?? "";
+    return o.labelled ? v : model.addresses[Number(v)] ?? "";
+  };
   const dispOptions = () =>
     Object.entries(DISP).map(([k, t]) =>
       `<option value="${k}"${k === model.disp ? " selected" : ""}>${t}</option>`
@@ -278,13 +303,13 @@ export function gmail(o: Opts = {}): Gmail {
     on("save", () => {
       g.saves++;
       model.on = !!g.el("r-on").checked;
-      if (model.on && g.el("to")) model.to = g.el("to").value;
+      if (model.on && g.el("to")) model.to = chosen();
       if (g.el("disp")) model.disp = g.el("disp").value;
       dirty = o.sticky ? dirty : false;
       sync();
     });
     on("remove", () => {
-      pendingRemove = g.el("to")?.value ?? "";
+      pendingRemove = chosen();
       dialog(
         `<p>Are you sure you want to remove this forwarding address?</p>${dlgButton("OK", "confirm-remove")}${
           dlgButton("Cancel", "cancel-dlg")

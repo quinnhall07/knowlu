@@ -11,6 +11,9 @@
 //   { result: "failed", reason: "no address" }
 // An address that is not ours is never returned, only named "elsewhere". Gmail's buttons are
 // <input type=button value=...>, found by their value.
+// Live 2026-10-18: the forward-to list's options are matched by the one address their text names (values are
+// indexes; Gmail appends " (in use)" once forwarding is on to an address; "--" and "Remove ..." options are
+// never targets).
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => {
   const aria = el.getAttribute("aria-label");
@@ -63,7 +66,28 @@ const isKeep = (o) => /keep gmail.s copy in the inbox/i.test(text(o));
 const dispSelect = () => selectsOf().find((s) => [...s.options].some(isKeep));
 const toSelect = () => selectsOf().find((s) => s !== dispSelect());
 const selectedOf = (sel) => [...sel.options].find((o) => o.selected) || sel.options[0] || null;
-const optionIs = (o, a) => norm(o.value) === a || norm(text(o)) === a;
+// Live Gmail (2026-10-18, real mailbox): the forward-to list's option values are indexes, never the address. The
+// options are the confirmed addresses (text = the bare address), a "--" separator, then one "Remove <address>"
+// option per address. Once forwarding is on to an address Gmail appends " (in use)" to its option and to its
+// Remove option. So an option is matched by the one address its text names, case-blind, with any trailing
+// parenthesised status ignored; a value that is the address still matches (older layouts); "--" and Remove
+// options are never forward targets.
+const label = (o) => text(o).replace(/(\s*\([^)]*\))+$/, "").trim();
+const removeOf = (o) => /^remove\s/i.test(label(o));
+const isTarget = (o) => !removeOf(o) && !/^[-\u2013\u2014]+$/.test(label(o));
+const ADDR = /[^\s<>()"',;]+@[^\s<>()"',;]+/g;
+const addressIn = (s) => {
+  const found = String(s).match(ADDR);
+  return found && found.length === 1 ? norm(found[0]) : "";
+};
+const addressOf = (o) => {
+  if (!isTarget(o)) return "";
+  const v = norm(o.value);
+  return addressIn(label(o)) || (v.includes("@") ? v : "");
+};
+const optionIs = (o, a) => addressOf(o) === a;
+// What the option shows, for "is anything selected": its address, else its label ("" for a blank option).
+const shown = (o) => addressOf(o) || norm(label(o));
 
 const address = norm(args && args.address);
 if (!address) return { result: "failed", reason: "no address" };
@@ -81,11 +105,7 @@ const kept = disp ? selectedOf(disp) : null;
 return {
   result: "ok",
   forwarding: on ? "on" : "off",
-  to: !there || norm(there.value || text(there)) === ""
-    ? "none"
-    : optionIs(there, address)
-    ? "ours"
-    : "elsewhere",
+  to: !there || shown(there) === "" ? "none" : optionIs(there, address) ? "ours" : "elsewhere",
   keep_copy: !!kept && isKeep(kept),
   listed: !!list && [...list.options].some((o) => optionIs(o, address)),
 };

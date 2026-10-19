@@ -16,6 +16,9 @@
 // address that is already an option of the forward-to list is already confirmed; both are ok. Anything else
 // stays "not found / confirmation dialog". The read-back never presses Re-send email or Remove address, or
 // anything else: it only reads.
+// Live 2026-10-18: the forward-to list's options are matched by the one address their text names (values are
+// indexes; Gmail appends " (in use)" once forwarding is on to an address; "--" and "Remove ..." options are
+// never targets).
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const norm = (v) => String(v || "").trim().toLowerCase();
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -37,10 +40,22 @@ const drawn = () =>
   );
 const address = norm(args && args.address);
 const verifyRow = () =>
-  [...document.querySelectorAll("tr")].some((r) => /^verify\b/i.test(text(r)) && norm(text(r)).includes(address));
+  [...document.querySelectorAll("tr")].some((r) =>
+    /^verify\b/i.test(text(r)) && norm(text(r)).includes(address)
+  );
+// Live Gmail (2026-10-18): the forward-to list's option values are indexes; the text is the bare address, or
+// "<address> (in use)" once forwarding is on to it, then a "--" separator and "Remove <address>" options. An
+// option is matched by the one address its text names (trailing parenthesised status ignored); "--" and Remove
+// options are not addresses. A value that is the address still matches (older layouts).
+const label = (o) => text(o).replace(/(\s*\([^)]*\))+$/, "").trim();
+const isTarget = (o) => !/^remove\s/i.test(label(o)) && !/^[-\u2013\u2014]+$/.test(label(o));
+const addressIn = (s) => {
+  const found = String(s).match(/[^\s<>()"',;]+@[^\s<>()"',;]+/g);
+  return found && found.length === 1 ? norm(found[0]) : "";
+};
 const listed = () =>
   [...document.querySelectorAll("select option")].some((o) =>
-    norm(o.value) === address || norm(text(o)) === address
+    isTarget(o) && (addressIn(label(o)) === address || norm(o.value) === address)
   );
 const readBack = async () => {
   if (!address) return "none";
@@ -66,11 +81,12 @@ if (!(await until(sentDialog, waitMs))) {
 }
 const dialog = sentDialog();
 const isOk = (s) => /^ok$/i.test(s);
-const ok = [...dialog.querySelectorAll('input[type="button"], input[type="submit"]')].find((b) =>
-  isOk(String(b.getAttribute("value") || "").trim())
-) || [...dialog.querySelectorAll('button, [role="button"]')].find((b) =>
-  isOk((b.getAttribute("aria-label") || "").trim() || text(b))
-);
+const ok =
+  [...dialog.querySelectorAll('input[type="button"], input[type="submit"]')].find((b) =>
+    isOk(String(b.getAttribute("value") || "").trim())
+  ) || [...dialog.querySelectorAll('button, [role="button"]')].find((b) =>
+    isOk((b.getAttribute("aria-label") || "").trim() || text(b))
+  );
 if (!ok) return { result: "not found", control: "ok" };
 ok.click();
 if (!(await until(() => !document.contains(dialog), waitMs))) {

@@ -2,13 +2,19 @@
 // compiled-in script text from `gmail/` against a synthetic Settings > Forwarding and POP/IMAP page
 // (gmail_forwarding_page.ts). No address is real.
 import { assert, assertEquals } from "@std/assert";
-import { gmail, SECTION } from "./gmail_forwarding_page.ts";
+import { type Gmail, gmail, SECTION } from "./gmail_forwarding_page.ts";
 import { run } from "./test_dom.ts";
 
 const OURS = "box-1@in.example.invalid";
 const OTHER = "someone@elsewhere.example.invalid";
 const THIRD = "third@elsewhere.example.invalid";
 const FAST = { wait_ms: 50, settle_ms: 200 };
+
+// The text of the forward-to list's selected option (its value is an index on the live shape).
+const selectedText = (f: Gmail) =>
+  ([...f.el("to").options].find((o: { selected: boolean }) => o.selected) ?? f.el("to").options[0])
+    .textContent;
+const optionTexts = (f: Gmail) => [...f.el("to").options].map((o: { textContent: string }) => o.textContent);
 
 const NOT_FOUND = (control: string) => ({ result: "not found", control });
 const KEPT = { result: "ok", forwarding: "on", to: "ours", keep_copy: true };
@@ -297,7 +303,7 @@ Deno.test("gmail_remove_address_never_changes_the_selection_before_remove", asyn
   assertEquals(f.clicks, 0);
   assertEquals(f.removed, []);
   assertEquals(f.el("dlg"), null);
-  assertEquals(f.el("to").value, OTHER, "the list's selection is left as it was");
+  assertEquals(selectedText(f), OTHER, "the list's selection is left as it was");
   assertEquals(f.snap(), before);
   // Nothing saved and the list shows its first option, which is not ours: the same.
   const g = gmail({ addresses: [OTHER, OURS], on: false });
@@ -647,4 +653,170 @@ Deno.test("gmail_add_done_readback_goes_to_the_section_and_follows_the_reload_co
     NOT_FOUND("confirmation dialog"),
   );
   assertEquals(h.reloads, 0);
+});
+
+// Live Gmail (2026-10-18, real mailbox, structure only): the forward-to list's option values are indexes; the
+// text is the bare address, then "--", then "Remove <address>" per address; once forwarding is on to an address
+// its option reads "<address> (in use)" and its Remove option "Remove <address> (in use)". An option is matched
+// by the one address its text names.
+Deno.test("gmail_the_page_draws_the_live_forward_to_list_with_in_use_on_the_address_forwarding_goes_to", () => {
+  const f = gmail({ addresses: [OTHER, OURS], on: true, to: OURS });
+  assertEquals(optionTexts(f), [
+    OTHER,
+    `${OURS} (in use)`,
+    "--",
+    `Remove ${OTHER}`,
+    `Remove ${OURS} (in use)`,
+  ]);
+  assertEquals([...f.el("to").options].map((o: { value: string }) => o.value), ["0", "1", "2", "3", "4"]);
+  assertEquals(optionTexts(gmail({ addresses: [OURS] })), [OURS, "--", `Remove ${OURS}`]);
+});
+
+Deno.test("gmail_forwarding_set_turns_on_and_reads_back_ok_with_the_in_use_suffix", async () => {
+  const f = gmail({ addresses: [OTHER, OURS], on: false, disp: "archive" });
+  assertEquals(await run("gmail/forwarding_set.js", f.page, { address: OURS, ...FAST }), {
+    ...KEPT,
+    changed: true,
+  });
+  assertEquals(f.model, { addresses: [OTHER, OURS], on: true, to: OURS, disp: "keep" });
+  assertEquals(selectedText(f), `${OURS} (in use)`, "the read-back saw the suffix");
+  // Again, ours is the one in use: nothing to change, nothing saved.
+  assertEquals(await run("gmail/forwarding_set.js", f.page, { address: OURS, ...FAST }), {
+    ...KEPT,
+    changed: false,
+  });
+  assertEquals(f.saves, 1);
+  // The address is matched blind to case.
+  const g = gmail({ addresses: [OURS.toUpperCase()], on: true, to: OURS.toUpperCase(), disp: "trash" });
+  assertEquals(await run("gmail/forwarding_set.js", g.page, { address: OURS, ...FAST }), {
+    ...KEPT,
+    changed: true,
+  });
+});
+
+Deno.test("gmail_forwarding_read_reports_ours_and_listed_when_forwarding_is_on_to_ours_in_use", async () => {
+  const f = gmail({ addresses: [OTHER, OURS], on: true, to: OURS });
+  assertEquals(await run("gmail/forwarding_read.js", f.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    forwarding: "on",
+    to: "ours",
+    keep_copy: true,
+    listed: true,
+  });
+  // Off, the list still names ours (not in use): listed, to none.
+  const g = gmail({ addresses: [OURS], on: false });
+  assertEquals(await run("gmail/forwarding_read.js", g.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    forwarding: "off",
+    to: "none",
+    keep_copy: true,
+    listed: true,
+  });
+});
+
+Deno.test("gmail_forwarding_read_reports_elsewhere_for_a_different_address_in_use_and_still_lists_ours", async () => {
+  const f = gmail({ addresses: [OTHER, OURS], on: true, to: OTHER });
+  const r = await run("gmail/forwarding_read.js", f.page, { address: OURS, ...FAST });
+  assertEquals(r, { result: "ok", forwarding: "on", to: "elsewhere", keep_copy: true, listed: true });
+  // set, off and add all stop at elsewhere and touch nothing.
+  for (const script of ["set", "off", "add"]) {
+    const before = f.snap();
+    assertEquals(await run(`gmail/forwarding_${script}.js`, f.page, { address: OURS, ...FAST }), {
+      result: "elsewhere",
+    }, script);
+    assertEquals(f.snap(), before, script);
+    assertEquals(f.saves + f.popups + f.typed.length, 0, script);
+  }
+});
+
+Deno.test("gmail_forwarding_add_returns_listed_when_ours_is_confirmed_and_in_use_and_presses_no_add", async () => {
+  const f = gmail({ addresses: [OTHER, OURS], on: true, to: OURS });
+  assertEquals(await run("gmail/forwarding_add.js", f.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    stage: "listed",
+    changed: false,
+  });
+  assertEquals(f.clicks + f.popups + f.typed.length, 0);
+  assert(f.el("dlg") === null, "no dialog opened");
+});
+
+Deno.test("gmail_forwarding_off_turns_it_off_when_the_option_reads_in_use", async () => {
+  const f = gmail({ addresses: [OTHER, OURS], on: true, to: OURS });
+  assertEquals(await run("gmail/forwarding_off.js", f.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    forwarding: "off",
+    changed: true,
+  });
+  assertEquals(f.saves, 1);
+  assertEquals(f.model.on, false);
+});
+
+Deno.test("gmail_forwarding_remove_address_removes_ours_when_its_remove_option_reads_in_use", async () => {
+  const f = gmail({ addresses: [OTHER, OURS, THIRD], on: true, to: OURS });
+  assert(optionTexts(f).includes(`Remove ${OURS} (in use)`));
+  assertEquals(await run("gmail/forwarding_remove_address.js", f.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    removed: true,
+    changed: true,
+  });
+  assertEquals(f.removed, [OURS]);
+  assertEquals(f.model.addresses, [OTHER, THIRD]);
+  assert(!optionTexts(f).some((t: string) => t.includes(OURS)), "no option names ours any longer");
+  // Ours is the only address: the list has its Remove and separator options too, yet it is the only target.
+  const g = gmail({ addresses: [OURS], on: true, to: OURS });
+  assertEquals(await run("gmail/forwarding_remove_address.js", g.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    removed: true,
+    changed: true,
+  });
+  assertEquals(g.removed, [OURS]);
+  // Another address in use: the script still asks the student and clicks nothing.
+  const h = gmail({ addresses: [OTHER, OURS], on: true, to: OTHER });
+  assertEquals(await run("gmail/forwarding_remove_address.js", h.page, { address: OURS, ...FAST }), {
+    result: "needs you",
+    reason: "forwarding goes to another address",
+  });
+  assertEquals(h.clicks, 0);
+});
+
+Deno.test("gmail_a_separator_or_a_remove_option_is_never_a_forward_target", async () => {
+  // Ours is not a confirmed address; a "--" option carries it as its value and a "Remove" option names it.
+  const f = gmail({ addresses: [OTHER] });
+  f.el("to").insertAdjacentHTML(
+    "beforeend",
+    `<option value="${OURS}">--</option><option value="9">Remove ${OURS}</option>` +
+      `<option value="${OURS}">Remove ${OURS} (in use)</option>`,
+  );
+  const args = { address: OURS, ...FAST };
+  assertEquals((await run("gmail/forwarding_read.js", f.page, args)).listed, false);
+  assertEquals(await run("gmail/forwarding_set.js", f.page, args), NOT_FOUND("address list"));
+  assertEquals(await run("gmail/forwarding_remove_address.js", f.page, args), {
+    result: "ok",
+    removed: false,
+    changed: false,
+  });
+  assertEquals(f.saves + f.removed.length, 0);
+  // add does not take it for confirmed: it presses Add.
+  assertEquals(await run("gmail/forwarding_add.js", f.page, args), {
+    result: "ok",
+    stage: "asked",
+    changed: true,
+  });
+  assertEquals(f.typed, [OURS]);
+});
+
+Deno.test("gmail_add_done_readback_accepts_an_address_that_is_confirmed_and_in_use", async () => {
+  const f = gmail({ addresses: [OTHER, OURS], on: true, to: OURS });
+  assertEquals(await run("gmail/forwarding_add_done.js", f.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    sent: true,
+  });
+  assertEquals(f.clicks, 0);
+  // A Remove option naming it is not a confirmation.
+  const g = gmail({ addresses: [OTHER] });
+  g.el("to").insertAdjacentHTML("beforeend", `<option value="9">Remove ${OURS}</option>`);
+  assertEquals(
+    await run("gmail/forwarding_add_done.js", g.page, { address: OURS, ...FAST }),
+    NOT_FOUND("confirmation dialog"),
+  );
 });
