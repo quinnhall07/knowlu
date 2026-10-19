@@ -20,9 +20,11 @@ pub fn parse_port(raw: &str) -> Option<u16> {
     raw.parse::<u16>().ok().filter(|&p| p != 0)
 }
 
-/// Wry's defaults plus the port, with CDP's origin check open to the loopback page only.
+/// The mail window's own arguments ([`crate::mail::MAIL_BROWSER_ARGS`]) plus the port, with CDP's origin
+/// check open to the loopback page only.
 pub fn browser_args(port: u16) -> String {
-    format!("{WRY_DEFAULT_ARGS} --remote-debugging-port={port} --remote-allow-origins=http://127.0.0.1:{port}")
+    let own = crate::mail::MAIL_BROWSER_ARGS;
+    format!("{own} --remote-debugging-port={port} --remote-allow-origins=http://127.0.0.1:{port}")
 }
 
 /// The mail window's browser arguments when [`MAIL_PORT_VAR`] names a port; `None` leaves wry's

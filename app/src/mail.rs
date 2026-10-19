@@ -525,6 +525,14 @@ pub fn open_hidden(app: &tauri::AppHandle, data_dir: &Path, profile: &Path, prov
     open(app, data_dir, profile, provider, false)
 }
 
+/// The mail window's WebView2 arguments: wry 0.55's defaults (setting the window's arguments replaces
+/// them, so they are repeated) and Chromium 155's `AvoidCorsURLLoaderRestartOnRedirect` turned off. With it on, a
+/// same-origin request redirected cross-site loses its Origin header while the host intercepts requests:
+/// live (2026-10-19, T18c) Gmail's "Forward as attachment" fetch of the message, which mail.google.com
+/// redirects to mail-attachment.googleusercontent.com, got no Access-Control-Allow-Origin and failed.
+pub const MAIL_BROWSER_ARGS: &str =
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,AvoidCorsURLLoaderRestartOnRedirect";
+
 fn open(app: &tauri::AppHandle, data_dir: &Path, profile: &Path, provider: Provider, visible: bool) -> Result<(), String> {
     if app.get_webview_window(WINDOW).is_some() {
         return Err("the mail window is already open".into());
@@ -554,12 +562,13 @@ fn open(app: &tauri::AppHandle, data_dir: &Path, profile: &Path, provider: Provi
                 PAGE_TITLE.set(generation, title);
             }
         });
-    // A debug build's diagnostic port, never a release's (`crate::debug_port`).
+    // A debug build's diagnostic port on top of the mail window's own arguments, never a release's
+    // (`crate::debug_port`).
     #[cfg(debug_assertions)]
-    let builder = match crate::debug_port::mail_browser_args() {
-        Some(args) => builder.additional_browser_args(&args),
-        None => builder,
-    };
+    let args = crate::debug_port::mail_browser_args();
+    #[cfg(not(debug_assertions))]
+    let args: Option<String> = None;
+    let builder = builder.additional_browser_args(args.as_deref().unwrap_or(MAIL_BROWSER_ARGS));
     let w = builder.build().map_err(|e| e.to_string())?;
     refuse_external_schemes(&w);
     Ok(())

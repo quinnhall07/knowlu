@@ -5,6 +5,7 @@
 //! mail sources still name no debugging port (spec D5, test 34 in `mail_window.rs`).
 #![cfg(debug_assertions)]
 use knowlu::debug_port::{browser_args, parse_port, MAIL_PORT_VAR, WRY_DEFAULT_ARGS};
+use knowlu::mail::MAIL_BROWSER_ARGS;
 
 fn src(path: &str) -> String {
     std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
@@ -24,11 +25,25 @@ fn the_port_parser_takes_only_a_port_number() {
 fn the_args_keep_wrys_defaults_and_allow_only_the_loopback_origin() {
     // Wry 0.55's own default, which `additional_browser_args` replaces rather than extends.
     assert_eq!(WRY_DEFAULT_ARGS, "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection");
+    // The debug port goes on top of the mail window's own arguments, never in place of them.
     assert_eq!(
         browser_args(9334),
-        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-         --remote-debugging-port=9334 --remote-allow-origins=http://127.0.0.1:9334"
+        format!("{MAIL_BROWSER_ARGS} --remote-debugging-port=9334 --remote-allow-origins=http://127.0.0.1:9334")
     );
+}
+
+#[test]
+fn the_mail_window_keeps_wrys_defaults_and_turns_off_chromium_155s_redirect_change() {
+    // Live 2026-10-19 (T18c): with Chromium 155's AvoidCorsURLLoaderRestartOnRedirect on, Gmail's
+    // same-origin attachment request is redirected to mail-attachment.googleusercontent.com with no Origin
+    // header, so the reply carries no Access-Control-Allow-Origin and "Forward as attachment" fails.
+    assert_eq!(MAIL_BROWSER_ARGS, format!("{WRY_DEFAULT_ARGS},AvoidCorsURLLoaderRestartOnRedirect"));
+    let mail = src("src/mail.rs");
+    let open = &mail[mail.find("\nfn open(").expect("src/mail.rs has open")..];
+    let open = &open[..open.find("\n}\n").expect("open ends")];
+    let set = open.find(".additional_browser_args(").expect("open sets the mail window's browser args");
+    assert!(open[set..].starts_with(".additional_browser_args(args.as_deref().unwrap_or(MAIL_BROWSER_ARGS))"));
+    assert!(set < open.find(".build()").unwrap(), "the args are set after build");
 }
 
 #[test]
@@ -64,6 +79,6 @@ fn the_hook_is_debug_only_and_reads_one_variable() {
     let call = open.find("debug_port::mail_browser_args()").expect("open calls the hook");
     let before: Vec<&str> = open[..call].lines().collect();
     assert_eq!(before[before.len() - 2].trim(), "#[cfg(debug_assertions)]", "the call is not debug-only");
-    assert!(open[call..].contains(".additional_browser_args(&args)"), "the args are not on the mail builder");
+    assert!(open[call..].contains(".additional_browser_args(args.as_deref()"), "the args are not on the mail builder");
     assert!(open.find("debug_port::").unwrap() < open.find(".build()").unwrap(), "the hook runs after build");
 }
