@@ -828,6 +828,16 @@ Deno.test("P22: a forwarding counts only while confirmed, active or quiet", () =
   }
 });
 
+// The lapsed-mailbox fix (2026-10-19): a lapsed mailbox leaves `lapsed` on its account's first entitled
+// pull, as `quiet` when a canary ever reached it. Forwarding still delivers then, so the OAuth read must
+// stop again or every message is filed twice; one never reached reads `pending` and the read goes on.
+Deno.test("a_mailbox_unlapsed_to_quiet_counts_as_forwarding", () => {
+  const box = (status: string) => [{ hint: GMAIL_ADDRESS, status }];
+  assertEquals(forwardingCounts(GMAIL_ADDRESS, box("lapsed")), false, "while lapsed");
+  assertEquals(forwardingCounts(GMAIL_ADDRESS, box("quiet")), true, "unlapsed, a canary once reached it");
+  assertEquals(forwardingCounts(GMAIL_ADDRESS, box("pending")), false, "unlapsed, no canary ever reached it");
+});
+
 Deno.test("P22: the address is matched whole and case-folded, never as a substring", () => {
   assertEquals(forwardingCounts(" Student@GMAIL.example.invalid ", [{ hint: GMAIL_ADDRESS, status: "active" }]), true);
   assertEquals(forwardingCounts(GMAIL_ADDRESS, [{ hint: `not${GMAIL_ADDRESS}`, status: "active" }]), false);
