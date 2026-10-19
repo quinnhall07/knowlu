@@ -2349,7 +2349,15 @@ fn a_slot_whose_only_missing_row_never_attaches_stalls_two_days_and_leaves_it_on
     g.clk.0.store(rig::NOW + 2 * rig::DAY, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(g.run().as_deref(), Some("mail: forwarding on, 0 recovered"));
     assert_eq!(g.host.calls("gmail/forward.js").len(), 3, "tried once a day");
-    assert!(MailState::load(&g.d).unwrap().lone_stall.contains_key(rig::ID), "kept until the row is sent or held");
+    // Review round 2 of e7ae803, #1: the row left at once is kept as left (it was the record, kept until the row was
+    // sent or held, which the next stuck row could replace), and the record is free for the next one.
+    let st = MailState::load(&g.d).unwrap();
+    assert_eq!(st.lone_left.get(rig::ID).cloned(), Some(vec![at]), "{st:?}");
+    assert!(!st.lone_stall.contains_key(rig::ID), "{st:?}");
+    // It stays left on the days after.
+    g.clk.0.store(rig::NOW + 3 * rig::DAY, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(g.run().as_deref(), Some("mail: forwarding on, 0 recovered"));
+    assert_eq!(MailState::load(&g.d).unwrap().lone_left.get(rig::ID).cloned(), Some(vec![at]));
 }
 
 #[test]
