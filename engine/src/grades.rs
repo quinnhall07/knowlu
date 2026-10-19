@@ -187,7 +187,9 @@ pub fn match_course<'a>(course: &BundleCourse, notes: &'a [CourseRef]) -> Option
 /// item) as the fields of a grade note. `due` is converted into `zone`, the vault's.
 pub fn column_to_fields(column: &Value, row: Option<&Value>, zone: &TimeZone) -> GradeFields {
     let text = |v: &Value| v.as_str().unwrap_or("").to_string();
-    let score = row.and_then(|r| r["score"].as_f64());
+    // The instructor's override (top-level `score`) wins; else what the student sees in the v2
+    // row, `displayGrade.score` (Score, Percent, CompleteIncomplete and Tabular carry one; Text does not).
+    let score = row.and_then(|r| r["score"].as_f64().or_else(|| r["displayGrade"]["score"].as_f64()));
     let status = match row {
         None => Status::NotSubmitted,
         Some(r) if r["exempt"].as_bool() == Some(true) => Status::Exempt,
@@ -943,6 +945,57 @@ mod tests {
         let row = json!({"columnId": "_1_1", "status": "Graded", "text": "Pass"});
         let f = column_to_fields(&col, Some(&row), &chicago());
         assert_eq!((f.status, f.score), (Status::Graded, None));
+    }
+
+    /// A v2 gradebook row (`v2/courses/{id}/gradebook/users/{user_id}`) in the shape the live check
+    /// saw: no top-level `score`, the student's number under `displayGrade`. Invented data.
+    fn v2_row(display_grade: Value) -> Value {
+        json!({"columnId": "_9_1", "userId": "_77_1", "status": "Graded", "exempt": false,
+               "displayGrade": display_grade})
+    }
+
+    fn v2_fields(display_grade: Value) -> GradeFields {
+        let col = json!({"id": "_9_1", "name": "XX-101 Quiz", "score": {"possible": 40.0}});
+        column_to_fields(&col, Some(&v2_row(display_grade)), &chicago())
+    }
+
+    #[test]
+    fn a_v2_score_scale_row_takes_display_grade_score() {
+        let f = v2_fields(json!({"scaleType": "Score", "score": 31.5, "possible": 40.0}));
+        assert_eq!((f.status, f.score, f.possible), (Status::Graded, Some(31.5), Some(40.0)));
+    }
+
+    #[test]
+    fn a_v2_percent_row_takes_display_grade_score() {
+        let f = v2_fields(json!({"scaleType": "Percent", "score": 27.0, "possible": 40.0}));
+        assert_eq!((f.status, f.score), (Status::Graded, Some(27.0)));
+    }
+
+    #[test]
+    fn a_v2_complete_incomplete_row_takes_display_grade_score() {
+        let f = v2_fields(json!({"scaleType": "CompleteIncomplete", "score": 40.0, "possible": 40.0, "text": "Complete"}));
+        assert_eq!((f.status, f.score), (Status::Graded, Some(40.0)));
+    }
+
+    #[test]
+    fn a_v2_tabular_row_takes_display_grade_score() {
+        let f = v2_fields(json!({"scaleType": "Tabular", "score": 36.0, "possible": 40.0, "text": "B"}));
+        assert_eq!((f.status, f.score), (Status::Graded, Some(36.0)));
+    }
+
+    #[test]
+    fn a_v2_text_row_has_no_score() {
+        let f = v2_fields(json!({"scaleType": "Text", "text": "Well argued"}));
+        assert_eq!((f.status, f.score), (Status::Graded, None));
+    }
+
+    #[test]
+    fn a_top_level_score_override_wins_over_display_grade() {
+        let col = json!({"id": "_9_1", "name": "XX-101 Quiz", "score": {"possible": 40.0}});
+        let mut row = v2_row(json!({"scaleType": "Score", "score": 31.5, "possible": 40.0}));
+        row["score"] = json!(38.0);
+        let f = column_to_fields(&col, Some(&row), &chicago());
+        assert_eq!((f.status, f.score), (Status::Graded, Some(38.0)));
     }
 
     #[test]
