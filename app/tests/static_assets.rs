@@ -2692,6 +2692,7 @@ fn settings_email_lists_each_mailbox_with_its_state_and_its_address_with_copy() 
     assert!(v.contains("m.address") && v.contains("data-em-copy") && v.contains("navigator.clipboard.writeText"), "the address with Copy");
     assert!(v.contains("m.turned_off") && v.contains("m.open_backfill"));
     assert!(v.contains("Mail from the last 120 days") || v.contains("recent mail"), "an open backfill is said");
+    assert!(v.contains("m.provider === \"m365\"") && v.contains("New mail is arriving. Knowlu will bring in older Outlook mail on a later run."), "a Microsoft 365 backfill says so and offers no Resume");
 }
 
 #[test]

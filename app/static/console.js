@@ -2343,9 +2343,11 @@
   }
   function mailBoxRow(m) {
     var id = m.address_id, ask = SETM.confirming === id;
-    var resumable = !m.turned_off && (m.open_backfill || ["off", "quiet", "blocked", "paused_send"].indexOf(m.state) >= 0);
+    var m365Backfill = m.open_backfill && m.provider === "m365";
+    var resumable = !m.turned_off && ((m.open_backfill && !m365Backfill) || ["off", "quiet", "blocked", "paused_send"].indexOf(m.state) >= 0);
     var say = m.turned_off ? "Turned off in Knowlu." : (EM_STATE[m.state] || "");
-    if (m.open_backfill && !m.turned_off) { say += " Still bringing in recent mail; Resume carries on."; }
+    if (m365Backfill && !m.turned_off) { say += " New mail is arriving. Knowlu will bring in older Outlook mail on a later run."; }
+    else if (m.open_backfill && !m.turned_off) { say += " Still bringing in recent mail; Resume carries on."; }
     var line = m.unbound_reason ? '<span class="em-line em-amber">' + h(m.unbound_note || "") + " (" + h(m.unbound_since_live) + ")" +
       (m.suggest_rotate === true && !m.turned_off ? " " + emBtn("Rotate", "rotate", id) : "") + "</span>" : "";
     var rotate = m.suggest_rotate !== true && !m.turned_off ? emBtn("Rotate", "rotate", id) : "";
