@@ -198,6 +198,8 @@ pub struct HostState {
     pub set_fails: bool,
     /// The mailbox: (sender, subject, instant).
     pub msgs: Vec<(String, String, i64)>,
+    /// Gmail: a non-delivery report landed in the Inbox at this instant; a look reading from before it finds it.
+    pub report_at: Option<i64>,
 }
 
 pub fn fwd(forwarding: &str, to: &str) -> Value {
@@ -221,6 +223,7 @@ impl FakeHost {
                 fwd: fwd_now,
                 set_fails: false,
                 msgs: vec![],
+                report_at: None,
             })),
         }
     }
@@ -281,7 +284,14 @@ impl Mailbox for FakeHost {
             "gmail/forward.js" => json!({ "result": "ok", "sent": true, "count": args["rows"].as_array().map_or(1, |r| r.len()) }),
             "m365/sent_cleanup.js" | "gmail/sent_cleanup.js" => json!({ "result": "ok", "deleted": 1 }),
             // Gmail looks in the Inbox for a non-delivery report between sends and once at the end.
-            "gmail/bounce.js" => json!({ "result": "ok", "rows": 0 }),
+            "gmail/bounce.js" => {
+                let since = args["since"].as_str().and_then(|t| t.parse::<jiff::Timestamp>().ok()).map_or(0, |t| t.as_second());
+                if s.report_at.is_some_and(|t| t >= since) {
+                    json!({ "result": "refused", "reason": "non-delivery report" })
+                } else {
+                    json!({ "result": "ok", "rows": 0 })
+                }
+            }
             "ready.js" => json!("complete"),
             other => panic!("the mail step ran {other}"),
         })

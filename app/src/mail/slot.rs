@@ -18,7 +18,7 @@
 //! recover follow either way, reaching back to when forwarding was last known on after it was found off.
 //!
 //! **Privacy.** A line holds fixed words and counts. No address, subject, sender, URL or page text enters one.
-use super::backfill::seed_routine;
+use super::backfill::{save_look, seed_routine};
 use super::commands::{run_script, wait_signed_in, GONE_WAIT, SILENT_WAIT};
 use super::host::Host;
 use super::recover::{run_pass, window, Clock, Job, Outcome, Place, Stop, SLOT_CAP};
@@ -175,6 +175,7 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
         return fwd.text().to_string();
     }
     let last_known_on = state.last_reconcile.get(id).and_then(|t| instant(t)).filter(|_| fwd.was_not_on());
+    let look = |at: i64| save_look(env.data_dir, id, at);
     let job = Job {
         provider,
         address_id: id,
@@ -184,6 +185,7 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
         // An open backfill is not bound by the slot (§4.11); any other pass sends at most 30.
         cap: (!state.open_backfills.iter().any(|i| i == id)).then_some(SLOT_CAP),
         watch: None,
+        on_look: Some(&look),
     };
     let mut routine = seed_routine(env.data_dir, provider, id, now);
     let out = run_pass(env.host, env.client, env.clock, &mut routine, &job);

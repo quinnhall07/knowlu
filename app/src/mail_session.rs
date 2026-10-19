@@ -99,6 +99,12 @@ pub struct MailState {
     /// backfill has one, dropped once its day is past, and not written at all when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub backfill_pace: BTreeMap<String, BackfillPace>,
+    /// Each Gmail mailbox's last look at the Inbox for a non-delivery report, by address id: a unix second.
+    /// Every look that read the Inbox, clean or refused, writes it, and a slot or backfill pass seeds its
+    /// `Routine` from it, so the next look reads from there and a report is counted once, however far apart
+    /// the slots are. A file written before it existed lacks it and reads as none. Not written when empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_look: BTreeMap<String, i64>,
     /// Each setup in flight on this device whose address this device minted (Quinn, 2026-10-06): written
     /// once the address exists, its facts written before each act that may set them, cleared when the run
     /// ends. One left at start-up is a setup the app quit mid-run (`mail::setup::clean_unfinished`). Not
@@ -141,6 +147,7 @@ impl Default for MailState {
             turned_off: Vec::new(),
             open_backfills: Vec::new(),
             backfill_pace: BTreeMap::new(),
+            last_look: BTreeMap::new(),
             pending_setups: Vec::new(),
         }
     }

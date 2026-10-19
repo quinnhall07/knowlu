@@ -86,14 +86,26 @@ pub(super) fn mark_open(data_dir: &Path, id: &str, open: bool) -> Result<(), Str
 /// carries on from it (spec §4.2 step 5); a pace from an earlier day counts for nothing.
 pub(super) fn seed_routine(data_dir: &Path, provider: Provider, id: &str, now: i64) -> Routine {
     let day = now.div_euclid(DAY);
-    let kept = MailState::load(data_dir).ok().and_then(|s| s.backfill_pace.get(id).cloned()).filter(|p| p.day == day);
-    match kept {
+    let state = MailState::load(data_dir).ok();
+    let kept = state.as_ref().and_then(|s| s.backfill_pace.get(id).cloned()).filter(|p| p.day == day);
+    let mut routine = match kept {
         Some(p) => {
             let routine = Routine::new(provider, day, p.sent_today);
             if p.paused_until.is_some_and(|t| t > now) { routine.paused() } else { routine }
         }
         None => Routine::new(provider, day, 0),
+    };
+    // The last look at the Inbox is not a day's fact: it carries over days, so the next look reads from it.
+    if let Some(at) = state.and_then(|s| s.last_look.get(id).copied()) {
+        routine.looked(at);
     }
+    routine
+}
+
+/// Keeps a look at the Inbox in `mail.json` for the next pass to be seeded from (see [`seed_routine`]). Best
+/// effort, like [`save_pace`].
+pub(super) fn save_look(data_dir: &Path, id: &str, at: i64) {
+    let _ = MailState::update(data_dir, |s| s.last_look.insert(id.to_string(), at) != Some(at));
 }
 
 /// Keeps a mailbox's day count (and pause) in `mail.json`, and drops every pace whose day is past. Best
@@ -211,6 +223,7 @@ fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i
         save_pace(d.data_dir, d.address_id, pace, at.div_euclid(DAY));
         !d.shared.stopping()
     };
+    let look = |at: i64| save_look(d.data_dir, d.address_id, at);
     let job = Job {
         provider: d.provider,
         address_id: d.address_id,
@@ -219,6 +232,7 @@ fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i
         window: backfill_window(since_idx, now),
         cap: None,
         watch: Some(&watch),
+        on_look: Some(&look),
     };
     let out = run_pass(d.mb, d.client, d.clock, routine, &job);
     d.shared.update(|p| {

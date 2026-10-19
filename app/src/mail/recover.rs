@@ -332,6 +332,10 @@ pub struct Job<'a> {
     /// Told `(expected, handled, sent)` as the pass goes (counts only); `false` stops the pass at its next
     /// send as [`Stop::Stopped`]. The setup runner's progress and its Stop (T11.3).
     pub watch: Option<&'a dyn Fn(u32, u32, u32) -> bool>,
+    /// Told the clock at each look at the Inbox that read it, clean or refused (Gmail), so the caller can keep
+    /// it where the next pass seeds its routine from (`mail.json`). Best effort: a note that is not kept costs
+    /// the next pass a longer reach-back, never a look.
+    pub on_look: Option<&'a dyn Fn(i64)>,
 }
 
 /// Why a pass ended. A fixed word or a service error's name: nothing the page or a message said.
@@ -396,7 +400,8 @@ type Step<T> = Result<T, Stop>;
 struct Batch {
     id: String,
     nonce: String,
-    /// When the batch opened (unix seconds): a run's first look reads back from [`BOUNCE_LOOKBACK_SECS`] before.
+    /// When the batch opened (unix seconds): with no saved look, the first look reads back from
+    /// [`BOUNCE_FIRST_LOOKBACK_SECS`] before.
     opened: i64,
 }
 
@@ -460,9 +465,10 @@ const OLDEST_WALKS: usize = 200;
 const BOUNCE_EVERY: u32 = 25;
 /// `bounce.js`'s wait for the Inbox's list (it waits twice at most, well inside a [`STEP`]).
 const BOUNCE_WAIT_MS: u64 = 5_000;
-/// A run's first look has no earlier look to read from, so it reaches back this far before the batch opened:
-/// over the gap since the previous slot. A report older than that is the canary's, not this batch's.
-const BOUNCE_LOOKBACK_SECS: i64 = 6 * 3_600;
+/// A mailbox with no saved look (a new one, or one saved before the field existed) reaches back this far before
+/// its batch opened. Two slots are up to about 13 hours apart (07:00 and 18:00), and a day covers the gap with
+/// margin; a report older than that is the canary's, not this batch's.
+const BOUNCE_FIRST_LOOKBACK_SECS: i64 = 24 * 3_600;
 /// Gmail: the most pages one walk reads before it is called endless (a result of hundreds of thousands of
 /// pages is not a mailbox). A walk that starts over after a look counts from its restart.
 const WALK_PAGES: usize = 5_000;
@@ -769,12 +775,22 @@ impl Pass<'_> {
         *self.decided.entry(key).or_default() += 1;
     }
 
+    /// A look read the Inbox: the routine remembers when, and the job's caller is told so it can keep it.
+    fn looked(&mut self) {
+        let now = self.clock.now();
+        self.routine.looked(now);
+        if let Some(note) = self.job.on_look {
+            note(now);
+        }
+    }
+
     /// Opens the Inbox and reads it for a non-delivery report of this batch (`bounce.js`). A report ends the
     /// pass as the first send failure does; a list that cannot be read ends it with a fixed word.
     fn look_for_bounce(&mut self) -> Step<()> {
         let Some(batch) = &self.batch else { return Err(INBOX_UNREADABLE) };
-        // From the routine's last look, so a report is counted once; the first of a run reaches back over the gap.
-        let since = self.routine.last_look().unwrap_or(batch.opened - BOUNCE_LOOKBACK_SECS);
+        // From the routine's last look (seeded from `mail.json`), so a report is counted once; with none saved the
+        // first look reaches back a day before the batch opened.
+        let since = self.routine.last_look().unwrap_or(batch.opened - BOUNCE_FIRST_LOOKBACK_SECS);
         let args = json!({
             "address": self.job.knowlu_address, "nonce": batch.nonce, "since": iso(since), "wait_ms": BOUNCE_WAIT_MS,
         });
@@ -783,12 +799,12 @@ impl Pass<'_> {
         match v.get("result").and_then(Value::as_str) {
             Some("ok") => {
                 self.since_look = 0;
-                self.routine.looked(self.clock.now());
+                self.looked();
                 Ok(())
             }
             Some("refused") => {
                 self.since_look = 0;
-                self.routine.looked(self.clock.now());
+                self.looked();
                 Err(self.refusal())
             }
             _ => Err(INBOX_UNREADABLE),

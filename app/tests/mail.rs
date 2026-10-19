@@ -979,7 +979,7 @@ fn routine(provider: Provider) -> Routine {
 }
 
 fn job(provider: Provider, phase: Phase, window: Window, cap: Option<u32>) -> Job<'static> {
-    Job { provider, address_id: A, knowlu_address: KNOWLU, phase, window, cap, watch: None }
+    Job { provider, address_id: A, knowlu_address: KNOWLU, phase, window, cap, watch: None, on_look: None }
 }
 
 fn pass(fake: &Fake, svc: &Service, routine: &mut Routine, job: &Job) -> knowlu::mail::recover::Outcome {
@@ -1484,10 +1484,10 @@ fn a_gmail_backfill_looks_in_the_inbox_every_25_sends_and_walks_again_without_se
     let first = names.iter().position(|n| n.ends_with("bounce.js")).unwrap();
     assert_eq!((names[first - 1].as_str(), names[first + 1].as_str()), ("open Inbox", "gmail/search.js"));
     // The look is told the batch it is about: the address, the nonce, and how far back to read. The first look
-    // of a run has no earlier look to start from, so it reaches back six hours before the batch opened; the next
-    // starts at the look before it, so a report is counted once.
+    // of a mailbox with no saved look reaches back a day before the batch opened (slots are up to about 13 hours
+    // apart); the next starts at the look before it, so a report is counted once.
     let looks = mb.calls("bounce.js");
-    assert_eq!(looks[0]["since"], json!(iso(NOW - 6 * 3_600)));
+    assert_eq!(looks[0]["since"], json!(iso(NOW - 24 * 3_600)));
     assert_eq!(looks[1]["since"], json!(iso(mb.looked_at.borrow()[0])));
     // The search is asked again with the same words and walked from the oldest page. Page 3 is the newest, and
     // the look after its last send finds every row decided, so no walk follows it. The rows the first walk
@@ -1748,6 +1748,69 @@ fn a_result_that_never_ends_stops_the_gmail_pass_with_a_fixed_word() {
     let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
     assert_eq!(out.stop, Stop::Script("the results did not end"));
     assert_eq!(mb.calls("list.js").len(), 5_000, "a walk is at most 5,000 pages");
+}
+
+#[test]
+fn every_look_that_read_the_inbox_is_told_to_the_job_clean_or_refused_and_an_unreadable_one_is_not() {
+    // The job's `on_look` is how a look reaches `mail.json`; it hears the clock at each look that read the Inbox.
+    let told = RefCell::new(Vec::new());
+    let cb = |t: i64| told.borrow_mut().push(t);
+    let mut mb = fake(Provider::Gmail, unheld(60));
+    mb.size = 10;
+    mb.bounce_after = Some(6);
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &Job { on_look: Some(&cb), ..gmail_backfill() });
+    // Looks after 30 (clean) and 60 (a report, refused): both are told, in the order they ran.
+    assert_eq!(out.stop, Stop::Paused(Paused::new(Provider::Gmail)));
+    assert_eq!(*told.borrow(), *mb.looked_at.borrow());
+    assert_eq!(told.borrow().len(), 2);
+    let blind = RefCell::new(Vec::new());
+    let cb = |t: i64| blind.borrow_mut().push(t);
+    let mut mb = fake(Provider::Gmail, unheld(12));
+    mb.inbox_unreadable = true;
+    pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &Job { on_look: Some(&cb), ..gmail_backfill() });
+    assert!(blind.borrow().is_empty(), "a look that could not read the Inbox is no look");
+}
+
+#[test]
+fn a_mail_json_from_before_last_look_loads_with_none_and_writes_none_until_there_is_one() {
+    let dir = temp("last-look-old-file");
+    let old = r#"{"keep_session":true,"last_reconcile":{"0b0e5b2c-1111-4aaa-8bbb-000000000001":"2026-10-02T10:00:40Z"},"pending_deletes":[],"turned_off":[]}"#;
+    std::fs::write(dir.join("mail.json"), old).unwrap();
+    let s = MailState::load(&dir).expect("an older file loads");
+    assert!(s.last_look.is_empty() && s.last_look.get(A).is_none());
+    assert_eq!(s.last_reconcile.len(), 1, "what it did hold is read");
+    // Written only once a look exists, beside the other per-mailbox facts, and kept by an update of another field.
+    MailState::update(&dir, |s| {
+        s.keep_session = false;
+        true
+    })
+    .unwrap();
+    assert!(!std::fs::read_to_string(dir.join("mail.json")).unwrap().contains("last_look"));
+    MailState::update(&dir, |s| {
+        s.last_look.insert(A.to_string(), NOW);
+        true
+    })
+    .unwrap();
+    assert_eq!(MailState::load(&dir).unwrap().last_look.get(A), Some(&NOW));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_resumed_backfill_saves_its_looks_and_starts_from_the_last_one_saved() {
+    let r = open_backfill_rig("last-look-backfill", 2);
+    resume_and_time_forwards(&r);
+    let saved = *MailState::load(&r.dir).unwrap().last_look.get(A).expect("the final look was saved");
+    assert!(saved >= NOW, "{saved}");
+    assert_eq!(r.calls("gmail/bounce.js")[0]["since"], json!(iso(NOW - 24 * 3_600)), "none saved: a day before the batch opened");
+    // A relaunch seeds the routine from it: the first look reads from there, and nothing reaches back further.
+    let again = open_backfill_rig("last-look-backfill-again", 2);
+    MailState::update(&again.dir, |s| {
+        s.last_look.insert(A.to_string(), NOW - 100);
+        true
+    })
+    .unwrap();
+    resume_and_time_forwards(&again);
+    assert_eq!(again.calls("gmail/bounce.js")[0]["since"], json!(iso(NOW - 100)));
 }
 
 #[test]

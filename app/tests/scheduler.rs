@@ -2278,6 +2278,40 @@ fn a_microsoft_mailbox_is_never_recovered_while_c3_is_built_and_a_gmail_one_stil
     assert!(g.svc.calls().iter().any(|c| c.contains("reconcile")));
 }
 
+#[test]
+fn a_report_that_lands_after_one_slots_last_look_stops_the_next_slot_at_its_first_look() {
+    // Slots run about 11 and 13 hours apart, each with a Routine seeded from `mail.json`: the look reads back to
+    // the last one saved, not to a fixed number of hours before the batch.
+    let g = Pass::with_provider("last-look-slots", "google", "quiet", rig::fwd("on", "ours"));
+    g.mail(&[("Notice", rig::NOW - 3600)]);
+    assert_eq!(g.run().as_deref(), Some("mail: forwarding on, 1 recovered"));
+    // A mailbox with no saved look reaches back a day before its batch opened.
+    assert_eq!(g.host.calls("gmail/bounce.js")[0]["since"], json!(rig::iso(rig::NOW - 24 * 3600)));
+    assert_eq!(MailState::load(&g.d).unwrap().last_look.get(rig::ID), Some(&rig::NOW), "the final look was saved");
+    // A report lands an hour later; the next slot is 13 hours after the first.
+    g.host.st.lock().unwrap().report_at = Some(rig::NOW + 3600);
+    g.clk.0.store(rig::NOW + 13 * 3600, std::sync::atomic::Ordering::SeqCst);
+    let line = g.run().expect("a line");
+    assert!(line.contains("paused: a send was refused"), "{line}");
+    assert_eq!(g.host.calls("gmail/bounce.js")[1]["since"], json!(rig::iso(rig::NOW)), "it read from the saved look");
+    assert_eq!(MailState::load(&g.d).unwrap().last_look.get(rig::ID), Some(&(rig::NOW + 13 * 3600)), "a refused look is saved too");
+}
+
+#[test]
+fn a_report_seen_once_does_not_pause_the_next_days_first_slot_again() {
+    let g = Pass::with_provider("last-look-next-day", "google", "quiet", rig::fwd("on", "ours"));
+    g.mail(&[("Notice", rig::NOW - 3600)]);
+    g.host.st.lock().unwrap().report_at = Some(rig::NOW - 60);
+    let line = g.run().expect("a line");
+    assert!(line.contains("paused: a send was refused"), "{line}");
+    // The next slot is on the next UTC day, 13 hours later; the same report is still in the Inbox, and a day's
+    // reach-back would find it again: it was seen at the look before, so it is not counted twice.
+    g.clk.0.store(rig::NOW + 13 * 3600, std::sync::atomic::Ordering::SeqCst);
+    assert_ne!((rig::NOW + 13 * 3600).div_euclid(rig::DAY), rig::NOW.div_euclid(rig::DAY));
+    assert_eq!(g.run().as_deref(), Some("mail: forwarding on, 1 recovered"));
+    assert_eq!(g.host.calls("gmail/bounce.js")[1]["since"], json!(rig::iso(rig::NOW)));
+}
+
 /// Every file under `dir` except the provider's own browser profiles, which are WebView2's and not Knowlu's.
 fn knowlus_own_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
