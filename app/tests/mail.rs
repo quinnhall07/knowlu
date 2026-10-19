@@ -1044,7 +1044,9 @@ impl Fake {
                     return Ok(json!({ "result": "failed", "reason": "over 25 MB" }));
                 }
                 if self.mismatch && want > rows.len() as u64 {
-                    return Ok(json!({ "result": "failed", "reason": "attachments do not match the rows" }));
+                    // G1 (live, ef25 2026-10-19): a conversation's "Forward as attachment" draws one chip of its many.
+                    let reason = "attachments do not match the rows";
+                    return Ok(json!({ "result": "failed", "reason": reason, "attached": 1, "expected": want }));
                 }
                 if self.no_chip.is_some_and(|s| rows.iter().any(|r| r["subject"] == s)) {
                     // One row whose chips never draw (a message, or a conversation's) is a compose with no
@@ -1457,12 +1459,32 @@ fn a_gmail_thread_row_is_opened_and_every_message_in_it_is_fingerprinted() {
     let out = pass(&thin, &holding(&[]), &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
     assert_eq!((out.stop.clone(), out.sent, out.left, out.handled), (Stop::Done, 1, 1, 2));
     assert_eq!(thin.forwards.borrow().len(), 2, "one attempt each");
-    // Alone in its pass, with no send to show the page works, it stops the pass and is not left.
+    // Alone in its pass it is left too (review round 1 of e7ae803): a chip that drew shows the page works, so the
+    // shortfall is the conversation's (G1), never a stall.
     let mut alone = fake(Provider::Gmail, vec![one.clone()]);
     alone.mismatch = true;
     let out = pass(&alone, &holding(&[]), &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
-    assert_eq!((out.stop.clone(), out.sent, out.left), (Stop::Script("the attachments would not attach"), 0, 0));
+    assert_eq!((out.stop.clone(), out.sent, out.left), (Stop::Done, 0, 1));
     assert_eq!(alone.forwards.borrow().len(), 1, "one attempt");
+}
+
+#[test]
+fn missing_gmail_conversations_side_by_side_at_the_walks_end_are_each_left_and_the_backfill_is_done() {
+    // Review round 1 of e7ae803: under G1 every missing conversation answers "attachments do not match the rows"
+    // with one chip attached. Two such lone rows with no send between them stopped the pass as a stall that no day
+    // count reached, so the backfill stopped at the first of them on every launch. Each is the row's own, and left.
+    for single in [false, true] {
+        let mut msgs = convos(3, 2);
+        if single {
+            msgs.insert(0, mail(BO, "Lab report due", window(NOW, None, None).since + 60));
+        }
+        let mut mb = fake(Provider::Gmail, msgs);
+        mb.mismatch = true;
+        let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &gmail_backfill());
+        let sent = u32::from(single);
+        assert_eq!((out.stop.clone(), out.sent, out.left, out.handled), (Stop::Done, sent, 3, 3 + sent), "single: {single}");
+        assert_eq!(mb.forwards.borrow().len(), 3 + sent as usize, "single: {single}: one attempt each");
+    }
 }
 
 #[test]

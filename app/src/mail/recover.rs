@@ -1437,8 +1437,18 @@ impl Pass<'_> {
                     self.decide(key_of(r));
                 }
             }
+            // A lone row one short with a chip that drew (a conversation, under G1: Gmail attaches one of its
+            // messages) is the row's own: the drawn chip shows the page works, so it is left at once and the
+            // breaker below is neither armed nor reset (review round 1 of e7ae803: two side by side stalled every pass).
+            (Some("failed"), Some("attachments do not match the rows"), _)
+                if rows.len() == 1 && count(&v, "attached").is_some_and(|a| a >= 1) =>
+            {
+                self.out.left += 1;
+                self.out.handled += 1;
+                self.decide(key_of(&rows[0]));
+            }
             // A lone row that would not attach: a message or a conversation whose chip never draws (forward.js
-            // checks that before the count, so the halving ends here), a conversation one short, or a chip still
+            // checks that before the count, so the halving ends here), one short with no chip counted, or a chip still
             // uploading after its longer try. Left only while sends show the page works ([`Pass::lone_failed`]).
             // With several rows, no attachment at all is an empty compose, which is the page's: the pass stops.
             (Some("failed"), Some("no attachment" | "attachments do not match the rows" | "attachment still uploading"), _)
