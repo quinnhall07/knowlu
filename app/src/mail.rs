@@ -308,6 +308,7 @@ static SCRIPTS: &[Script] = compiled![
     "gmail/forward.js",
     "gmail/sent_cleanup.js",
     "gmail/thread.js",
+    "gmail/bounce.js",
 ];
 
 pub fn scripts() -> &'static [Script] {
