@@ -62,7 +62,8 @@
 //! caller counts the separate UTC days a pass ends stalled on it alone ([`Outcome::stalled_at`], `mail.json`'s
 //! `lone_stall` for a backfill's passes and `recover_stall` for a slot's, its received minute only) and from the third
 //! passes it in [`Job::stuck`] to be left at once. A row
-//! that reached its third day is then kept as left (`lone_left`, [`Job::left`]) until the backfill closes, so the
+//! that reached its third day is then kept as left (`lone_left`, [`Job::left`]) until its minute is sent or held, or the
+//! backfill closes or stops, or the mailbox is revoked, so the
 //! record counts the next stuck row (review round 2 of e7ae803).
 //!
 //! **Privacy.** No sender, subject, address, nonce or page text is kept past the pass, logged or put in a
