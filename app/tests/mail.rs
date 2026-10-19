@@ -706,6 +706,9 @@ struct Fake {
     inbox_unreadable: bool,
     /// Gmail: the single message with this subject never attaches, so any send carrying it is one short.
     no_chip: Option<&'static str>,
+    /// Gmail: the single message with this subject's chip never finishes uploading, so any send carrying it
+    /// answers "attachment still uploading" (live: one huge message).
+    slow_chip: Option<&'static str>,
     /// Gmail: a non-delivery report landed in the Inbox at this instant; a look whose `since` is at or before it
     /// finds it (a look after it does not: it was seen).
     report_at: Cell<Option<i64>>,
@@ -747,6 +750,7 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         bounce_after: None,
         inbox_unreadable: false,
         no_chip: None,
+        slow_chip: None,
         report_at: Cell::new(None),
         looked_at: Default::default(),
         endless: false,
@@ -948,7 +952,16 @@ impl Mailbox for Fake {
                     return Ok(json!({ "result": "failed", "reason": "attachments do not match the rows" }));
                 }
                 if self.no_chip.is_some_and(|s| rows.iter().any(|r| r["subject"] == s)) {
+                    // One row whose chip never draws is a compose with no attachment (forward.js checks that
+                    // before the count); beside others the group is one short.
+                    if rows.len() == 1 && rows[0].get("messages").is_none() {
+                        return Ok(json!({ "result": "failed", "reason": "no attachment" }));
+                    }
                     let reason = "attachments do not match the rows";
+                    return Ok(json!({ "result": "failed", "reason": reason, "attached": want - 1, "expected": want }));
+                }
+                if self.slow_chip.is_some_and(|s| rows.iter().any(|r| r["subject"] == s)) {
+                    let reason = "attachment still uploading";
                     return Ok(json!({ "result": "failed", "reason": reason, "attached": want - 1, "expected": want }));
                 }
                 json!({ "result": "ok", "sent": true, "count": want })
@@ -1454,17 +1467,66 @@ fn a_gmail_attachment_that_does_not_upload_stops_the_pass_with_a_fixed_word() {
 }
 
 #[test]
-fn a_gmail_attachment_still_uploading_at_the_bound_stops_the_pass_with_its_own_word() {
-    // Live (ef24, 2026-10-19): forward.js now tells a chip still uploading when upload_ms runs out apart from
-    // one that failed. Nothing was sent either way, and the pass stops naming which it was.
+fn a_gmail_group_with_a_chip_still_uploading_is_halved_and_the_lone_row_is_left() {
+    // Live (ef24, 2026-10-19): a chip still uploading when upload_ms runs out is told apart from one that
+    // failed. Controller ruling: one huge message must never stop every pass at the same place, so a group is
+    // halved like a mismatch until the row is alone, and the lone row is left. Nothing is sent for it.
     let since = window(NOW, None, None).since;
-    let svc = holding(&[]);
-    let mut mb = fake(Provider::Gmail, vec![mail(ANA, "Quiz 3 moved", since + 3_600), mail(BO, "Lab report due", since + 7_200)]);
-    mb.attach_fails = Some("attachment still uploading");
-    let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
-    assert_eq!(out.stop, Stop::Script("an attachment was still uploading"));
-    assert_eq!((out.sent, out.left), (0, 0));
-    assert_eq!(mb.forwards.borrow().len(), 1, "one forward was tried, and none after it");
+    let subjects = ["Quiz 3 moved", "Lab report due", "Huge scan", "Reading list", "Office hours", "Exam room"];
+    let msgs = subjects.iter().enumerate().map(|(i, s)| mail(ANA, s, since + 600 * (i as i64 + 1))).collect();
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.slow_chip = Some("Huge scan");
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
+    assert_eq!((out.stop, out.sent, out.left, out.handled), (Stop::Done, 5, 1, 6));
+    let tried = |subject: &str| mb.forwards.borrow().iter().flat_map(|(_, a)| a["rows"].as_array().unwrap().clone()).filter(|r| r["subject"] == subject).count();
+    assert_eq!(tried("Huge scan"), 4, "6, then 3, then 2, then alone");
+    assert_eq!(tried("Quiz 3 moved"), 3, "tried in the 6, the 3 and then alone, where it went");
+}
+
+#[test]
+fn a_lone_gmail_row_whose_chip_is_still_uploading_or_never_draws_is_left_and_the_pass_goes_on() {
+    // A page of one row each, so every send is a lone row: the second never attaches, and the first and third go.
+    let since = window(NOW, None, None).since;
+    for (slow, reason) in [(true, "still uploading"), (false, "never draws")] {
+        let msgs = vec![mail(ANA, "Quiz 3 moved", since + 600), mail(ANA, "Huge scan", since + 1_200), mail(BO, "Lab report due", since + 1_800)];
+        let mut mb = fake(Provider::Gmail, msgs);
+        mb.size = 1;
+        if slow {
+            mb.slow_chip = Some("Huge scan");
+        } else {
+            mb.no_chip = Some("Huge scan");
+        }
+        let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
+        assert_eq!((out.stop.clone(), out.sent, out.left, out.handled), (Stop::Done, 2, 1, 3), "{reason}");
+        assert_eq!(mb.forwards.borrow().len(), 3, "{reason}: each row tried once");
+    }
+}
+
+#[test]
+fn no_attachment_on_a_group_or_a_conversation_and_a_compose_left_open_still_stop_the_pass() {
+    let since = window(NOW, None, None).since;
+    let two = || vec![mail(ANA, "Quiz 3 moved", since + 600), mail(BO, "Lab report due", since + 1_200)];
+    let recover = || job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP));
+    // Several rows and no attachment at all is an empty compose: not a row's fault.
+    let mut group = fake(Provider::Gmail, two());
+    group.attach_fails = Some("no attachment");
+    let out = pass(&group, &holding(&[]), &mut routine(Provider::Gmail), &recover());
+    assert_eq!((out.stop, out.left), (Stop::Script("a forward did not finish"), 0));
+    assert_eq!(group.forwards.borrow().len(), 1);
+    // A conversation is one row, but it is not a lone message: it still stops.
+    let mut convo = mail(ANA, "Group project", since + 1_800);
+    convo.count = Some(2);
+    convo.convo = vec![(ANA.to_string(), since + 1_000), (ANA.to_string(), since + 1_800)];
+    let mut thread = fake(Provider::Gmail, vec![convo]);
+    thread.attach_fails = Some("no attachment");
+    let out = pass(&thread, &holding(&[]), &mut routine(Provider::Gmail), &recover());
+    assert_eq!((out.stop, out.left), (Stop::Script("a forward did not finish"), 0));
+    // A compose still open from an earlier try is the page's state: the pass stops naming it.
+    let mut open = fake(Provider::Gmail, two());
+    open.attach_fails = Some("compose still open");
+    let out = pass(&open, &holding(&[]), &mut routine(Provider::Gmail), &recover());
+    assert_eq!((out.stop, out.left), (Stop::Script("a draft was still open"), 0));
+    assert_eq!(open.forwards.borrow().len(), 1, "no second try over it");
 }
 
 // ---- Gmail: the Inbox look for a non-delivery report (Quinn's ruling 2026-10-19, option b) ---------------

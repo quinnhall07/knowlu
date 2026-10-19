@@ -454,3 +454,62 @@ Deno.test("gmail_sent_cleanup_rechecks_the_row_before_each_delete_when_the_page_
   assertEquals(box.deleted, ["c2", "c1"]);
   assertEquals(box.checked(), []);
 });
+
+Deno.test("gmail_forward_of_one_row_whose_chip_never_draws_answers_no_attachment", async () => {
+  // Live (ef25, 2026-10-19): a row Gmail will not attach draws no chip. Alone, that is a compose with no
+  // attachment (the check runs before the count check), never "attachments do not match the rows"; the caller
+  // halves a group down to this row and leaves it. Nothing is sent and the draft is discarded.
+  const lone = mailbox(MAIL, { noChip: "m1" });
+  assertEquals(
+    await run("gmail/forward.js", lone.page, {
+      ...TARGET,
+      rows: [row(MAIL[0])],
+      wait_ms: 100,
+      upload_ms: 200,
+    }),
+    { result: "failed", reason: "no attachment" },
+  );
+  assertEquals([lone.sent, lone.discards, lone.checked()], [[], 1, []]);
+  // Beside a row that does attach, the group is one short.
+  const pair = mailbox(MAIL, { noChip: "m1" });
+  assertEquals(await run("gmail/forward.js", pair.page, { ...TARGET, wait_ms: 100, upload_ms: 200 }), {
+    result: "failed",
+    reason: "attachments do not match the rows",
+    attached: 1,
+    expected: 2,
+  });
+  assertEquals([pair.sent, pair.discards, pair.checked()], [[], 1, []]);
+});
+
+Deno.test("gmail_forward_failure_cleanup_waits_for_the_compose_to_close", async () => {
+  // The cleanup pressed Discard and returned at once; the next try then found the dialog still up. It waits
+  // (bounded by wait_ms) until the compose is gone, so the page is clean when the answer comes back.
+  const slow = mailbox(MAIL, { upload: "fails", discardMs: 120 });
+  assertEquals(await run("gmail/forward.js", slow.page, { ...TARGET, wait_ms: 400 }), {
+    result: "failed",
+    reason: "attachment failed",
+  });
+  assertEquals(slow.el("over").innerHTML, "", "the compose is gone when the answer comes back");
+  assertEquals(slow.checked(), []);
+  // A Discard that never closes it does not hold the answer past wait_ms.
+  const stuck = mailbox(MAIL, { upload: "fails", stuckDiscard: true });
+  const started = Date.now();
+  assertEquals(await run("gmail/forward.js", stuck.page, { ...TARGET, wait_ms: 200 }), {
+    result: "failed",
+    reason: "attachment failed",
+  });
+  const took = Date.now() - started;
+  assert(took < 1_000, `the cleanup waited ${took} ms`);
+  assertEquals(stuck.discards, 1);
+});
+
+Deno.test("gmail_forward_refuses_to_start_with_a_compose_still_open", async () => {
+  // The next try never goes looking for the More menu over a draft: it names the state and touches nothing.
+  const box = mailbox(MAIL, { openCompose: true });
+  assertEquals(await run("gmail/forward.js", box.page, TARGET), {
+    result: "failed",
+    reason: "compose still open",
+  });
+  assertEquals([box.sent, box.discards, box.checked()], [[], 0, []]);
+  assert(box.el("over").innerHTML.includes("New Message"), "the draft is left as it was");
+});

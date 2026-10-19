@@ -18,9 +18,16 @@
 //   { result: "failed", reason: "no address" | "no nonce" | "no rows" | "too many rows" |
 //      "rows already selected" | "rows not selected" | "attachment failed" | "attachment still uploading" |
 //      "no attachment" | "attachments do not match the rows" | "attachment size unreadable" | "over 25 MB" |
-//      "recipient not accepted" | "subject not set" | "send did not settle" }   ("attachments do not match
-//      the rows" and "attachment still uploading" also carry `attached` and `expected`, the counts it
-//      compared or had seen attach; "recipient not accepted" carries `recipients`, how many it read)
+//      "recipient not accepted" | "subject not set" | "send did not settle" | "compose still open" }
+//      ("compose still open" is a compose window already up when the script starts: nothing is touched;
+//      "no attachment" is checked before the count, so a lone row whose chip never draws answers it, not
+//      "attachments do not match the rows"; "attachments do not match the rows" and "attachment still
+//      uploading" also carry `attached` and `expected`, the counts it compared or had seen attach; "recipient
+//      not accepted" carries `recipients`, how many it read)
+// Worst case, inside the host's 90 s step with the default waits (5 s each, 30 s for the upload): the rows
+// ticked 5, the menu item 5, Send 5, the upload 30, then a failure's cleanup (the compose to go 5, the rows to
+// let go 5) is 55 s; a recipient not accepted adds that wait (5) before its cleanup, 60 s; a send that settles
+// is 60 s as well (the same waits, then the Send's own 5 and the rows 5).
 // It sends one message to that one address and nothing else: the subject is exactly `Knowlu <nonce>`
 // (sent_cleanup.js deletes by that same subject), the originals' words are not in it, and a compose window
 // with no attachment, a count of attachments that is not the rows', more than the size limit, Gmail's offer
@@ -130,6 +137,14 @@ const refusal = () => {
 };
 const before = refusal();
 if (before) return { result: "refused", reason: before };
+// A compose window is a dialog with a Send button in it. One still open at the start is a draft an earlier try
+// did not get rid of (or the student's own): the menu is not looked for over it, and nothing is touched.
+const composeOpen = () =>
+  [...document.querySelectorAll('[role="dialog"]')].some((d) =>
+    (shown(d) || d.getBoundingClientRect().height > 0) &&
+    [...d.querySelectorAll('[role="button"], button')].some((b) => /^send\b/i.test(nameOf(b) || text(b)))
+  );
+if (composeOpen()) return { result: "failed", reason: "compose still open" };
 
 const grid = () => [...document.querySelectorAll('table[role="grid"]')].filter(shown).pop() || null;
 const rowEls = () => (grid() ? [...grid().querySelectorAll('tr[role="row"]')] : []);
@@ -165,10 +180,12 @@ for (const w of wanted) {
 }
 if (ticked().length > 0) return { result: "failed", reason: "rows already selected" };
 
-// Whatever happens next, a failure lets go of the selection and discards the draft it opened.
+// Whatever happens next, a failure lets go of the selection and discards the draft it opened, and waits (at
+// most `wait_ms`) for the compose window to go, so the next try starts on a clean page.
 const bail = async (result) => {
   const discard = buttons().find((b) => /^discard draft/i.test(nameOf(b)));
   if (discard) pointAt(discard);
+  await until(() => !composeOpen(), waitMs);
   for (const r of ticked()) boxOf(r).click();
   await until(() => ticked().length === 0, waitMs);
   return result;

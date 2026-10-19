@@ -1031,14 +1031,17 @@ impl Pass<'_> {
             // Gmail could not upload the attachments (live 2026-10-19): nothing was sent and the draft is
             // discarded. It is the page's, not these rows', so the pass stops and says so.
             (Some("failed"), Some("attachment failed"), _) => return Err(Stop::Script("an attachment did not upload")),
-            (Some("failed"), Some("attachment still uploading"), _) => {
-                return Err(Stop::Script("an attachment was still uploading"))
-            }
-            // A group of single rows one short (live, ef25 2026-10-19: 6 rows, 5 attached) is halved too, so
-            // only the row that will not attach is left; nothing was sent. A conversation is one row.
-            (Some("failed"), Some("over 25 MB"), _) | (Some("failed"), Some("attachments do not match the rows"), _)
-                if rows.len() > 1 =>
-            {
+            // A compose left open by an earlier try is the page's state, not a row's: the pass stops and says so.
+            (Some("failed"), Some("compose still open"), _) => return Err(Stop::Script("a draft was still open")),
+            // A group of single rows one short (live, ef25 2026-10-19: 6 rows, 5 attached), or one with a chip
+            // still uploading when the bound ran out (controller ruling 2026-10-19: one huge message must never
+            // stop every pass at the same place), is halved like "over 25 MB", so only the row that will not
+            // attach is left; nothing was sent. A conversation is one row.
+            (
+                Some("failed"),
+                Some("over 25 MB" | "attachments do not match the rows" | "attachment still uploading"),
+                _,
+            ) if rows.len() > 1 => {
                 let (a, b) = rows.split_at(rows.len() / 2);
                 self.forward_gmail(a.to_vec(), None)?;
                 if self.restart {
@@ -1048,13 +1051,21 @@ impl Pass<'_> {
             }
             // The page would not take these as sent (too big alone, a row gone, a conversation whose
             // attachments did not match its count): nothing was sent, and they are left.
-            (Some("failed"), Some("over 25 MB" | "attachments do not match the rows"), _)
+            (Some("failed"), Some("over 25 MB" | "attachments do not match the rows" | "attachment still uploading"), _)
             | (Some("not found"), _, Some("message")) => {
                 self.out.left += rows.len() as u32;
                 self.out.handled += rows.len() as u32;
                 for r in &rows {
                     self.decide(key_of(r));
                 }
+            }
+            // A lone message whose chip never draws is a compose with no attachment (the halving ends here, as
+            // forward.js checks that before the count): the row is left. With several rows, or a conversation,
+            // it is an empty compose, which is the page's, and the pass stops.
+            (Some("failed"), Some("no attachment"), _) if rows.len() == 1 && messages.is_none() => {
+                self.out.left += 1;
+                self.out.handled += 1;
+                self.decide(key_of(&rows[0]));
             }
             _ => return Err(Stop::Script("a forward did not finish")),
         }

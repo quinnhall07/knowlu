@@ -85,6 +85,14 @@ export interface Opts {
   staggerMs?: number;
   /** One more chip than the rows', still uploading and never finishing, beside the attached ones. */
   stuckChip?: boolean;
+  /** The message with this id never draws a chip (live, ef25 2026-10-19: six rows, five attached). */
+  noChip?: string;
+  /** Discard closes the compose this many ms after it is pressed (default: at once). */
+  discardMs?: number;
+  /** Discard is pressed and the compose never closes. */
+  stuckDiscard?: boolean;
+  /** A compose is already open when the script starts (a failed try's draft that did not go). */
+  openCompose?: boolean;
   /** The row of `id` shows the message `as` once it is ticked. */
   swap?: { id: string; as: string };
   /** The page shows no "1–50 of 123" range. */
@@ -448,7 +456,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     const attach = picked.flatMap((m) =>
       m.convo && !o.newestOnly ? m.convo.map((_, i) => ({ ...m, id: `${m.id}#${i}` })) : [m]
     );
-    const files = o.bare ? [] : o.short ? attach.slice(1) : attach;
+    const files = o.bare ? [] : o.short ? attach.slice(1) : attach.filter((m) => m.id !== o.noChip);
     const total = files.reduce((n, m) => n + m.size, 0);
     // Live 2026-10-19: an accepted recipient is a `div[role=option]` naming the address in data-hovercard-id.
     const chip = (v: string) => `<div role="option" data-hovercard-id="${esc(v)}"><span>${esc(v)}</span></div>`;
@@ -505,7 +513,9 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       );
     onPress(button("Discard"), () => {
       b.discards++;
-      b.el("over").innerHTML = "";
+      if (o.stuckDiscard) return;
+      if (o.discardMs) setTimeout(() => (b.el("over").innerHTML = ""), o.discardMs);
+      else b.el("over").innerHTML = "";
     });
     onPress(button("Send"), () => {
       const to = [...d.querySelectorAll('#chips [role="option"]')].map((x: El) => x.getAttribute("data-hovercard-id"));
@@ -534,6 +544,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       }
     });
   }
+  if (o.openCompose) compose([]);
   return b;
 }
 
