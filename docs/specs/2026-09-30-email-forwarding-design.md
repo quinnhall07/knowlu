@@ -330,6 +330,16 @@ the recipients from it, and logs nothing from it.
    nothing for good while the saved session works: when the account is entitled again, the next
    reconcile covers from `lapsed_since`, at most 30 days back, and recover brings in what was dropped
    (§4.11).
+   *(unsigned, 2026-10-19, built and open for Quinn: how a mailbox leaves `lapsed`. Until now nothing
+   moved it on, so a renewed account's mailbox read `lapsed` for good and repair ran every slot. Intake's
+   mark is one compare-and-set each way on a mailbox neither `lapsed` nor `revoked`: the status alone
+   when `lapsed_since` is already set (an earlier gap the device has not yet covered is kept), status
+   and `lapsed_since` together when it is null. The account's first entitled `mail-pull` moves each of
+   its `lapsed` mailboxes to `quiet` when a canary ever reached it, else to `pending`, never to `active`
+   (nothing proves the forward survived the lapse); the canary and repair take it from there, and a
+   canary arriving through the current token now lifts a `lapsed` mailbox to `active` too, since intake
+   reaches a canary only for an entitled account. Neither touches `lapsed_since`: it clears only on the
+   device's `covered` report (§4.11 step 3).)*
 4. **Fetch** the object from S3 with a key scoped to the bucket (get, put, delete; nothing else).
 5. **Classify the arrival:**
    - **Canary:** from Knowlu's canary sender, DKIM passing for Knowlu's domain, carrying the nonce of an
@@ -624,6 +634,16 @@ Per mailbox, with the mailbox's own kept profile:
    about a message the service does not hold leaves the device. The window is the last three days
    (§13 Q3), reaching back to `lapsed_since` after a lapse (§4.6 step 3) and, after forwarding was found
    off, to when it was last known on.
+   *(unsigned, 2026-10-19, built and open for Quinn: when `lapsed_since` clears. Only the device knows
+   a gap is covered, so it says so: after a whole pass over a mailbox that is no longer `lapsed` (the
+   pass ended done, its reconcile window began at or before the later of `lapsed_since` and 30 days
+   ago, and recover sent everything it found missing), it posts `POST /mail/addresses/<id>/state
+   {state: covered, lapsed_since: <the stamp the pull answered, verbatim>}`. The service sets
+   `lapsed_since` null only while it is still that instant and the mailbox is neither `lapsed` nor
+   `revoked`, and answers `cleared` true or false; a missing or malformed stamp is a 400 before any read.
+   A newer lapse's stamp is never wiped by a report about an older gap, a still-lapsed mailbox keeps its
+   stamp, and a retry is a harmless `cleared: false`. The cloud half is built; the app's half, sending
+   `covered`, is not yet.)*
 4. **Recover.** Open a `recover` batch and forward the missing messages as attachments, **oldest first**,
    at most 30 a slot when no backfill is open, at Microsoft's pace, deleting the Sent copies it created;
    close the batch with the count sent (§4.8 holds it until it is whole).
