@@ -337,9 +337,17 @@ the recipients from it, and logs nothing from it.
      case-folded, **equal** to the mailbox's `mailbox_hint` (never a substring: `notjane@gmail.com` is
      not `jane@gmail.com`); refused while the hint is null; inside the mailbox's confirm window (15
      minutes from setup's step 3); its link's host and path on a fixed allow-list. The page is fetched
-     cookie-less with `redirect: manual` (a redirect is refused), and its one form is submitted only when
+     cookie-less with `redirect: manual` ~~(a redirect is refused)~~, and its one form is submitted only when
      the form's action is on the same allow-list. Anything else is refused and counted: a stranger
      cannot point their Gmail at a student's forwarding.
+     *(amended 2026-10-18, Quinn, R2, "follow on-list hops": the live proof's confirmation was answered
+     with a 3xx. At most three redirects are now followed, across the page and the POST's
+     Post/Redirect/Get together, each still cookie-less (`credentials: omit`, no cookie header, no jar,
+     `redirect: manual`, the same timeout) and only when every target is on the same allow-list; the form's
+     action resolves against the page's final URL. A hop off the list (a sign-in page, any query) is refused
+     as `redirect_off_list`, a fourth hop as `redirect` (`post_redirect` after the POST), and each hop,
+     followed or refused, logs its host and path, never its query or fragment (a `(query)` marker only)
+     and never the `vf-` code.)*
    - **Backfill or recover send:** the outer From is the mailbox's `mailbox_hint`, the outer message
      passes DKIM aligned with that address's domain, and the subject carries an open batch nonce for this
      mailbox. Each `message/rfc822` attachment becomes one work item with the batch's id and phase
@@ -1308,7 +1316,8 @@ test; no real mail, address or name enters the repo (rule 1). No test touches `e
    GET and POST to a local fake page. Refused, each its own case: `notjane@gmail.com` when the hint is
    `jane@gmail.com`; a null hint; a closed window; a sender other than Google's exact forwarding sender,
    or without aligned DKIM; a link off the allow-list; a redirect (`redirect: manual`); a form whose
-   action is off the allow-list.
+   action is off the allow-list. *(amended 2026-10-18, R2, §4.6 step 5's marker: on-list redirects within
+   three hops are followed, so the refused cases are an off-list hop and a fourth hop.)*
 6. Canary: a matching nonce marks it arrived and records `forward_hint`; a replay changes nothing; a
    wrong sender domain is unbound. `POST /canary` refuses a hint outside the provider's domains and a
    fourth canary for one address in a UTC day. `mail-canary` (§13 Q2) sends none to a mailbox with
@@ -1973,7 +1982,8 @@ the export gains the mailboxes and claims and never a token, key or hash (D17, �
 
 **R35** (minor; Gmail confirm). *Accepted.* Exact case-folded equality, refusal on a null hint,
 `redirect: manual`, the form action on the allow-list, Google's exact sender with aligned DKIM (§4.6 step
-5, test 5's cases).
+5, test 5's cases). *(Redirects amended 2026-10-18, R2: up to three on-list hops are followed; §4.6
+step 5's marker.)*
 
 **R36** (minor; stale citations). *Accepted.* §1's `enrich.rs`, `gmail-read` and `migrations_test.ts`
 lines are re-verified at `199cd1f`; the moved assertion checks

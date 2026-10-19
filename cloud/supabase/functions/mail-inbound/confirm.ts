@@ -1,19 +1,28 @@
 /**
- * Completing Gmail's forwarding confirmation server-side (email plan T2g.2; spec §4.3 step 4, §4.6 step 5,
- * E3). `mail_bind.ts` has already decided the message is Google's confirmation for this mailbox's own
- * requester inside its window, and handed over its one allowed link. Here:
+ * Completing Gmail's forwarding confirmation server-side (email plan T2g.2; spec §4.3 step 4, §4.6 step 5
+ * as amended 2026-10-18 by R2, E3). `mail_bind.ts` has already decided the message is Google's
+ * confirmation for this mailbox's own requester inside its window, and handed over its one allowed link.
+ * Here:
  *
  * 1. The link is checked again against `confirmUrlAllowed`.
  * 2. The page is fetched cookie-less (`credentials: "omit"`, no cookie header, no jar) with
- *    `redirect: "manual"`: any 3xx is refused, never followed.
- * 3. The page must hold exactly one `<form>` posting by POST, whose action, resolved against the link, is
- *    on the same allow-list. Its named `hidden` and `submit` inputs are sent, nothing else.
- * 4. The form is posted the same way, cookie-less with `redirect: "manual"`; only a 2xx answer completes.
- *    A 3xx here is not followed either, and reads `post_redirect`, apart from the page's `redirect`: §4.6
- *    step 5 refuses only the page's redirect, so whether Google answers the POST with a
- *    Post/Redirect/Get, and so whether this refusal stays, is the live proof's step 4 to decide.
+ *    `redirect: "manual"`. A 3xx is followed only to a target, resolved against the current URL, that is
+ *    on the same allow-list (`redirect_off_list` otherwise, a missing Location included), each hop sent
+ *    the same way; nothing a response sets is carried to the next request.
+ * 3. The page must hold exactly one `<form>` posting by POST, whose action, resolved against the page's
+ *    final URL, is on the same allow-list. Its named `hidden` and `submit` inputs are sent, nothing else.
+ * 4. The form is posted the same way; a 2xx answer completes. A 3xx is Google's Post/Redirect/Get: it is
+ *    followed by a body-less GET under the same rule, and the final page's 2xx completes; an off-list or
+ *    over-budget POST redirect reads `post_redirect`.
  *
- * Every outcome is a fixed word; no link, page or field leaves this file, and nothing here logs or throws.
+ * **One budget of three hops** (`MAX_HOPS`) covers the page and the POST together; the hop past it reads
+ * `redirect` on the page and `post_redirect` after the POST.
+ *
+ * Every outcome is a fixed word, and nothing here throws. The only lines it logs, through the caller's
+ * `log`, are each hop's (`confirm hop <n>: …`, `confirm hop off list: …`, `confirm hop too many: …`): the
+ * target's host and path (`hopShape`), never its query or fragment, which read as the markers `(query)`
+ * and `(fragment)`; a `vf-` code reads `vf-(code)`, an address-bearing segment `(address)` and a long
+ * opaque one `(long)`. No page, form field or link value leaves this file.
  */
 import { confirmUrlAllowed } from "../_shared/mail_bind.ts";
 
@@ -21,16 +30,23 @@ export type ConfirmOutcome =
   | "confirmed"
   | "link"
   | "redirect"
+  | "redirect_off_list"
   | "page"
   | "form"
   | "action"
   | "post"
   | "post_redirect";
 export type ConfirmFetch = (url: string, init: RequestInit) => Promise<Response>;
+/** Where a hop line goes; the caller's fixed-prefix logger. */
+export type ConfirmLog = (line: string) => void;
 
 const TIMEOUT_MS = 8_000;
 const MAX_PAGE = 256 * 1024;
 const MAX_FIELDS = 32;
+/** R2: at most three redirects, across the page and the POST together. */
+const MAX_HOPS = 3;
+const MAX_SEGMENT = 32;
+const MAX_SHAPE = 200;
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
 
 /** HTML character references in an attribute value, decoded once. */
@@ -113,33 +129,105 @@ const init = (method: string, extra: RequestInit = {}): RequestInit => ({
   ...extra,
 });
 
-/** Completes Google's forwarding confirmation at `link`; `confirmed`, or the word for why not. */
-export async function completeConfirmation(link: string, fetchImpl: ConfirmFetch): Promise<ConfirmOutcome> {
-  if (!confirmUrlAllowed(link)) return "link";
-  try {
-    const page = await fetchImpl(link, init("GET", { headers: { accept: "text/html" } }));
-    if (page.status >= 300 && page.status < 400) {
-      await page.body?.cancel();
-      return "redirect";
+/** A hop's target as a log line may carry it: the host and path (the scheme only when it is not https),
+ * never the user info, query or fragment, whose presence reads as a marker. A `vf-` segment's code, an
+ * address-bearing segment and a long opaque one are replaced; the whole is capped at `MAX_SHAPE`. */
+export function hopShape(target: URL | null): string {
+  if (target === null) return "(no location)";
+  // A `data:` or `javascript:` target's "path" is its payload: the scheme alone is named.
+  if (target.protocol !== "https:" && target.protocol !== "http:") return `${target.protocol} (not http)`;
+  const path = target.pathname.split("/").map((seg) =>
+    seg.startsWith("vf-")
+      ? "vf-(code)"
+      : /@|%40/i.test(seg)
+      ? "(address)"
+      : seg.length > MAX_SEGMENT
+      ? "(long)"
+      : seg
+  ).join("/");
+  const scheme = target.protocol === "https:" ? "" : `${target.protocol}//`;
+  let shape = `${scheme}${target.host}${path}`;
+  if (shape.length > MAX_SHAPE) shape = `${shape.slice(0, MAX_SHAPE)}(cut)`;
+  const marks = [
+    target.username !== "" || target.password !== "" ? " (userinfo)" : "",
+    target.href.split("#")[0].includes("?") ? " (query)" : "",
+    target.href.includes("#") ? " (fragment)" : "",
+  ];
+  return shape + marks.join("");
+}
+
+const isRedirect = (res: Response) => res.status >= 300 && res.status < 400;
+const getPage = (url: string, fetchImpl: ConfirmFetch) =>
+  fetchImpl(url, init("GET", { headers: { accept: "text/html" } }));
+
+/** Follows `res`'s redirects from `url` while the shared budget lasts, each target on the allow-list and
+ * fetched by `getPage`; the last answer and its URL, or why the chain was refused. */
+async function follow(
+  res: Response,
+  url: string,
+  fetchImpl: ConfirmFetch,
+  hops: { used: number },
+  log: ConfirmLog,
+): Promise<{ res: Response; url: string } | "too_many" | "off_list"> {
+  while (isRedirect(res)) {
+    await res.body?.cancel();
+    const location = res.headers.get("location");
+    let target: URL | null = null;
+    try {
+      target = location === null ? null : new URL(location, url);
+    } catch {
+      log("confirm hop off list: (unparsable)");
+      return "off_list";
     }
+    if (hops.used >= MAX_HOPS) {
+      log(`confirm hop too many: ${hopShape(target)}`);
+      return "too_many";
+    }
+    if (target === null || !confirmUrlAllowed(target.href)) {
+      log(`confirm hop off list: ${hopShape(target)}`);
+      return "off_list";
+    }
+    hops.used++;
+    log(`confirm hop ${hops.used}: ${hopShape(target)}`);
+    url = target.href;
+    res = await getPage(url, fetchImpl);
+  }
+  return { res, url };
+}
+
+/** Completes Google's forwarding confirmation at `link`; `confirmed`, or the word for why not. Each
+ * redirect followed or refused is one line to `log` (`hopShape`); without one, nothing is logged. */
+export async function completeConfirmation(
+  link: string,
+  fetchImpl: ConfirmFetch,
+  log: ConfirmLog = () => {},
+): Promise<ConfirmOutcome> {
+  if (!confirmUrlAllowed(link)) return "link";
+  const hops = { used: 0 };
+  try {
+    const reached = await follow(await getPage(link, fetchImpl), link, fetchImpl, hops, log);
+    if (reached === "too_many") return "redirect";
+    if (reached === "off_list") return "redirect_off_list";
+    const page = reached.res;
     if (!page.ok) {
       await page.body?.cancel();
       return "page";
     }
     const html = await boundedText(page);
     if (html === null) return "page";
-    const form = theForm(html, link);
+    const form = theForm(html, reached.url);
     if (typeof form === "string") return form;
-    const res = await fetchImpl(
+    const posted = await fetchImpl(
       form.action,
       init("POST", {
         headers: { "content-type": "application/x-www-form-urlencoded" },
         body: form.fields.toString(),
       }),
     );
-    await res.body?.cancel();
-    if (res.status >= 300 && res.status < 400) return "post_redirect";
-    return res.ok ? "confirmed" : "post";
+    const after = await follow(posted, form.action, fetchImpl, hops, log);
+    if (typeof after === "string") return "post_redirect";
+    await after.res.body?.cancel();
+    return after.res.ok ? "confirmed" : "post";
   } catch {
     return "page";
   }

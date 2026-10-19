@@ -17,9 +17,9 @@
  *    - a **canary** is marked arrived once (the store refuses a second marking), recording the mailbox's
  *      `forward_hint` and `last_canary_ok_at` and reading `active` (through a token retired by Rotate the
  *      status stays: the new address is not proven yet); a replay changes nothing;
- *    - **Gmail's confirmation** is completed by a cookie-less GET and POST (`confirm.ts`), and the mailbox
- *      reads `confirmed` with its window closed; a refusal, the classifier's or the page's, is counted
- *      `unbound`;
+ *    - **Gmail's confirmation** is completed by a cookie-less GET and POST (`confirm.ts`), following at
+ *      most three on-list redirects (R2, 2026-10-18), and the mailbox reads `confirmed` with its window
+ *      closed; a refusal, the classifier's or the page's, is counted `unbound`;
  *    - a **batch send**'s `message/rfc822` attachments each go through steps 7 and 8 as the batch's phase,
  *      with step 6's word from the original alone (`unaligned` is kept), and all of them count toward the
  *      batch's `received`; nothing else in the send is parsed;
@@ -37,8 +37,10 @@
  *    A delivery that queued new work then kicks `mail-process` once (D8, T3d): fire-and-forget, bounded in
  *    time, and a failed kick is one fixed line; the every-minute cron is the backstop.
  *
- * **Privacy:** every log line is a fixed phrase. No address, token, key, header value, subject, body or
- * object key is logged, put in an error or answered; a store or S3 failure is logged by its kind only.
+ * **Privacy:** every log line is a fixed phrase, apart from `confirm.ts`'s hop lines, which carry a
+ * redirect target's host and path with any code, address or long segment replaced and never its query
+ * (R2). No address, token, key, header value, subject, body or object key is logged, put in an error or
+ * answered; a store or S3 failure is logged by its kind only.
  */
 import {
   type Arrival,
@@ -413,7 +415,7 @@ async function gmailConfirm(
   deps: InboundDeps,
 ): Promise<void> {
   const outcome = arrival.kind === "gmail_confirm"
-    ? await completeConfirmation(arrival.link, deps.confirmFetch)
+    ? await completeConfirmation(arrival.link, deps.confirmFetch, log)
     : arrival.reason;
   if (outcome === "confirmed") {
     await deps.store.confirmed(row.id);

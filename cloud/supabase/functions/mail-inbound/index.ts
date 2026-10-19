@@ -5,9 +5,9 @@
  * `MAIL_BUCKET`, `MAIL_SNS_TOPIC_ARN`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`; and
  * `MAIL_JOBS_TOKEN` for D8's kick (T3d).
  *
- * The other outbound fetches are Gmail's confirmation (`confirm.ts`, T2g.2), which reaches only a link
- * and a form action on `mail_bind.ts`'s fixed Google allow-list, and D8's kick to this project's own
- * `mail-process` (T3d).
+ * The other outbound fetches are Gmail's confirmation (`confirm.ts`, T2g.2), which reaches only a link,
+ * at most three redirect targets and a form action on `mail_bind.ts`'s fixed Google allow-list, and D8's
+ * kick to this project's own `mail-process` (T3d).
  *
  * The store logs nothing: a failed call throws `store <what> <status>`, the database's answer is
  * cancelled unread (a constraint error can echo a hash), and the handler logs only that a store call

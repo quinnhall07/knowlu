@@ -400,9 +400,10 @@ const confirmHtml = (action: string) =>
   `<form method="POST" action="${action}"><input type="hidden" name="vf" value="ANGjdJ&amp;x7">` +
   `<input type="submit" value="Confirm"></form></body></html>`;
 
-/** The fake answers by `w.confirm.mode`: the page (setting a cookie a browser would send back), a
- * redirect, or a page whose form posts off the allow-list; a POST answers Google's success page, or a
- * 303 to it under `post_redirect` (a Post/Redirect/Get answer). */
+/** The fake answers by `w.confirm.mode`: the page (setting a cookie a browser would send back), an
+ * on-list redirect to itself on every GET (`redirect`, a loop past the three-hop budget), a redirect to
+ * Google's sign-in page (`signin`), or a page whose form posts off the allow-list; a POST answers Google's
+ * success page, or under `post_redirect` a 303 to an on-list page that answers 200 (a Post/Redirect/Get). */
 function confirmPage(w: World, req: Request, path: string, body: string): Response {
   w.confirm.requests.push({
     method: req.method,
@@ -419,8 +420,12 @@ function confirmPage(w: World, req: Request, path: string, body: string): Respon
     return new Response("<p>Confirmation Success!</p>", { status: 200 });
   }
   if (w.confirm.mode === "redirect") {
-    // Relative, so a fetch that followed it would come back to this listener, never leave the machine.
+    // Relative and on the list, so each followed hop comes back to this listener, never leaving the machine.
     return new Response(null, { status: 302, headers: { location: `${new URL(CONFIRM_LINK).pathname}-2` } });
+  }
+  if (w.confirm.mode === "signin") {
+    const location = "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmail.google.com%2Fq";
+    return new Response(null, { status: 302, headers: { location } });
   }
   const action = w.confirm.mode === "offlist" ? "https://evil.test/mail/vf-collect" : CONFIRM_LINK;
   return new Response(confirmHtml(action), {
@@ -457,7 +462,7 @@ interface World {
   failPut: boolean;
   logs: string[];
   /** Google's confirmation page, faked on the same listener: how it answers, and what reached it. */
-  confirm: { mode: "ok" | "redirect" | "post_redirect" | "offlist"; requests: ConfirmRequest[] };
+  confirm: { mode: "ok" | "redirect" | "signin" | "post_redirect" | "offlist"; requests: ConfirmRequest[] };
   /** D8's kick, faked: how `mail-process` answers, and each POST intake sent it. */
   kick: { mode: "ok" | "fail" | "slow"; sent: KickRequest[] };
   deps: InboundDeps;
@@ -1040,35 +1045,54 @@ Deno.test("the_confirmation_is_completed_by_a_cookieless_get_and_post_to_a_local
   });
 });
 
-Deno.test("a_confirmation_redirect_is_refused", async () => {
+Deno.test("a_confirmation_redirect_past_three_hops_is_refused_and_each_hop_is_logged", async () => {
   await withWorld(async (w) => {
     const jane = confirming(w);
     w.confirm.mode = "redirect";
     assertEquals((await w.arrive(await confirmation(), GOOGLE_SENDS("inbound/v3"))).status, 200);
-    // The redirect is not followed and nothing is posted.
-    assertEquals(w.confirm.requests.map((r) => r.method), ["GET"]);
+    // R2 (2026-10-18): three on-list hops are followed, the fourth is refused, and nothing is posted.
+    assertEquals(w.confirm.requests.map((r) => r.method), ["GET", "GET", "GET", "GET"]);
+    assertEquals(w.confirm.requests.map((r) => r.cookie), [null, null, null, null]);
     assertEquals(jane.status, "pending");
     assert(jane.confirmUntil !== null);
     assertEquals(w.store.counters, { "addr-1:unbound": 1 });
     assertEquals(keysUnder(w, "inbound/"), []);
-    const named = w.logs.some((l) => l.includes("gmail confirmation refused (redirect)"));
-    assert(named, "the page redirect is named");
+    const hop = "mail-inbound: confirm hop 1: mail-settings.google.com/mail/vf-(code)";
+    assert(w.logs.includes(hop), w.logs.join(" | "));
+    assert(w.logs.some((l) => l.startsWith("mail-inbound: confirm hop too many: ")), "the fourth hop is named");
+    assert(w.logs.some((l) => l.includes("gmail confirmation refused (redirect)")), "too many hops is named");
+    for (const line of w.logs) assert(!line.includes("ANGjdJ"), "a log line carries the link's code");
   });
 });
 
-Deno.test("a_redirect_after_the_post_is_refused_and_named", async () => {
+Deno.test("a_confirmation_redirect_to_the_sign_in_page_is_refused_off_list", async () => {
+  await withWorld(async (w) => {
+    const jane = confirming(w);
+    w.confirm.mode = "signin";
+    assertEquals((await w.arrive(await confirmation(), GOOGLE_SENDS("inbound/v3a"))).status, 200);
+    assertEquals(w.confirm.requests.map((r) => r.method), ["GET"]);
+    assertEquals(jane.status, "pending");
+    assertEquals(w.store.counters, { "addr-1:unbound": 1 });
+    const hop = "mail-inbound: confirm hop off list: accounts.google.com/ServiceLogin (query)";
+    assert(w.logs.includes(hop), w.logs.join(" | "));
+    assert(w.logs.some((l) => l.includes("gmail confirmation refused (redirect_off_list)")), "named apart");
+    for (const line of w.logs) assert(!line.includes("continue"), "a log line carries the query");
+  });
+});
+
+Deno.test("a_post_redirect_get_to_an_on_list_page_completes_the_confirmation", async () => {
   await withWorld(async (w) => {
     const jane = confirming(w);
     w.confirm.mode = "post_redirect";
     assertEquals((await w.arrive(await confirmation(), GOOGLE_SENDS("inbound/v3b"))).status, 200);
-    // The 303 is not followed: one GET, one POST, nothing after.
-    assertEquals(w.confirm.requests.map((r) => r.method), ["GET", "POST"]);
-    // Refused until the live proof (step 4) shows what Google answers; named apart from a page redirect.
-    assertEquals(jane.status, "pending");
-    assertEquals(w.store.counters, { "addr-1:unbound": 1 });
-    const named = w.logs.some((l) => l.includes("gmail confirmation refused (post_redirect)"));
-    assert(named, "the POST's 3xx is named");
-    assert(!w.logs.some((l) => l.includes("refused (redirect)")), "a POST's 3xx reads as a page redirect");
+    // R2: the POST's 303 is followed by one cookie-less GET, and its 200 completes the confirmation.
+    assertEquals(w.confirm.requests.map((r) => r.method), ["GET", "POST", "GET"]);
+    assertEquals(w.confirm.requests.map((r) => r.cookie), [null, null, null]);
+    assertEquals(w.confirm.requests[2].path, `${new URL(CONFIRM_LINK).pathname}-done`);
+    assertEquals(jane.status, "confirmed");
+    assertEquals(w.store.counters, {});
+    assert(w.logs.includes("mail-inbound: confirm hop 1: mail-settings.google.com/mail/vf-(code)"));
+    assert(w.logs.includes("mail-inbound: gmail confirmation completed"));
   });
 });
 
