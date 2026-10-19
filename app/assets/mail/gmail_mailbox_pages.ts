@@ -489,7 +489,12 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
           snippet: `Your message wasn't delivered. Subject: ${subject}`,
         });
       }
+      // Live 2026-10-19: after a send the rows that were forwarded stay ticked.
+      const kept = b.checked();
       fill();
+      for (const id of kept) {
+        cur()?.querySelector(`tr[role="row"][data-id="${id}"] [role="checkbox"]`)?.setAttribute("aria-checked", "true");
+      }
     });
   }
   return b;

@@ -259,4 +259,7 @@ await until(() => !document.contains(sendButton) || refusal() !== null, waitMs);
 const after = refusal();
 if (after) return { result: "refused", reason: after };
 if (document.contains(sendButton)) return { result: "failed", reason: "send did not settle" };
+// Live (2026-10-19) the forwarded rows stay ticked after the send; the next forward starts from none.
+for (const r of ticked()) boxOf(r).click();
+await until(() => ticked().length === 0, waitMs);
 return { result: "ok", sent: true, count: attachments.length };
