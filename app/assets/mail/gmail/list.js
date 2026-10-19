@@ -3,16 +3,20 @@
 // after a search or on a folder. Like every step script it is the body of an async function of `args`:
 // `args.go` is optional, one of "oldest" | "newer" | "older" | "newest" (the pager's own buttons, moved before
 // the read; the routine reads the oldest page first, then "newer" a page at a time), `args.wait_ms`
-// (default 5000) bounds the wait for each page to redraw, and `args.max_ms` (default 75000, inside the host's
-// 90 s step) bounds a walk. It returns one of
+// (default 5000) bounds the wait for each page to redraw, `args.max_ms` (default 75000, inside the host's
+// 90 s step) bounds a walk, and `args.max_presses` (default 40) bounds the pager presses the call may make (each
+// one a page load: the routine's day has a budget of them). Every answer carries `presses`, the presses this
+// call made, failures too. A move that is needed when no press is left is refused by name, "no presses left",
+// never answered `moved: false`: the caller reads "newer" with `moved: false` as the newest page reached. It
+// returns one of
 //   { result: "ok", page: { from, to, total }, moved: boolean, at_oldest?: boolean,
 //     rows: [{ sender, subject, received, received_at, thread }] }   (rows are OLDEST FIRST: Gmail draws
 //      a page newest first, so the page's rows are read in reverse. `moved` is false when `go` had nowhere
 //      to go, and the page read is the one already showing. `total` is null while a search's range reads
-//      "of many". `at_oldest` comes with `go: "oldest"` only: false when the walk ran out of `max_ms`
-//      short of the oldest page, and the page read is where it stopped; the caller asks again)
+//      "of many". `at_oldest` comes with `go: "oldest"` only: false when the walk ran out of `max_ms` or
+//      `max_presses` short of the oldest page, and the page read is where it stopped; the caller asks again)
 //   { result: "not found", control: "list" | "list row" | "pager" | "page range" }
-//   { result: "failed", reason: "bad direction" | "page did not change" }
+//   { result: "failed", reason: "bad direction" | "page did not change" | "no presses left" }
 // The pager, as live 2026-10-18/19 (WebView2 155): a folder has "Newer"/"Older" (and "Newest"/"Oldest" when
 // drawn); a search has "Previous results"/"Next results" and no Oldest or Newest. "older" is "Older" or "Next
 // results", "newer" is "Newer" or "Previous results"; "oldest" is "Oldest" when drawn, else a walk of
@@ -80,9 +84,12 @@ const BUTTONS = {
 };
 const waitMs = Number(args && args.wait_ms) >= 0 ? Number(args.wait_ms) : 5000;
 const maxMs = Number(args && args.max_ms) >= 0 ? Number(args.max_ms) : 75000;
+const maxPresses = Number(args && args.max_presses) >= 0 ? Number(args.max_presses) : 40;
+let presses = 0;
+const answer = (r) => ({ ...r, presses });
 
 const grid = () => [...document.querySelectorAll('table[role="grid"]')].filter(shown).pop() || null;
-if (!grid()) return { result: "not found", control: "list" };
+if (!grid()) return answer({ result: "not found", control: "list" });
 const rowEls = () => (grid() ? [...grid().querySelectorAll('tr[role="row"]')] : []);
 const rangeText = () =>
   [...document.querySelectorAll("span")].filter(shown).map(text).find((t) => RANGE.test(t)) || "";
@@ -113,35 +120,37 @@ const step = async (b) => {
   const firstText = first ? text(first) : "";
   const range = rangeText();
   press(b);
+  presses++;
   const changed = () => rowEls().length > 0 && (rowEls()[0] !== first || text(rowEls()[0]) !== firstText);
   if (!(await until(changed, waitMs))) return false;
   await until(() => rangeText() !== range, Math.min(waitMs, 3000));
   return true;
 };
-const NOT_CHANGED = { result: "failed", reason: "page did not change" };
+const NOT_CHANGED = () => answer({ result: "failed", reason: "page did not change" });
 
 let moved = false;
 let atOldest;
 if (args && args.go !== undefined && args.go !== null) {
   const go = String(args.go);
-  if (!BUTTONS[go]) return { result: "failed", reason: "bad direction" };
+  if (!BUTTONS[go]) return answer({ result: "failed", reason: "bad direction" });
   const toward = go === "oldest" || go === "older" ? "older" : "newer";
+  if (!atEnd(go) && maxPresses < 1) return answer({ result: "failed", reason: "no presses left" });
   if (!atEnd(go)) {
     const jump = (go === "oldest" || go === "newest") && button(go);
     if (jump || go === "older" || go === "newer") {
       const b = jump || button(go);
-      if (!b || off(b)) return { result: "not found", control: "pager" };
-      if (!(await step(b))) return NOT_CHANGED;
+      if (!b || off(b)) return answer({ result: "not found", control: "pager" });
+      if (!(await step(b))) return NOT_CHANGED();
       moved = true;
     } else {
-      // No Oldest (or Newest) drawn: walk a page at a time, inside the budget.
-      while (!atEnd(go) && Date.now() - started < maxMs) {
+      // No Oldest (or Newest) drawn: walk a page at a time, inside the budgets.
+      while (!atEnd(go) && Date.now() - started < maxMs && presses < maxPresses) {
         const b = button(toward);
         if (!b || off(b)) {
           if (moved) break;
-          return { result: "not found", control: "pager" };
+          return answer({ result: "not found", control: "pager" });
         }
-        if (!(await step(b))) return NOT_CHANGED;
+        if (!(await step(b))) return NOT_CHANGED();
         moved = true;
       }
     }
@@ -160,7 +169,7 @@ for (const row of rowEls()) {
     .find((t) => TIMED.test(t) && /\d/.test(t));
   const subjectEl = row.querySelector(".bog");
   if (!sender || !ADDRESS.test(sender) || !stamp || !subjectEl) {
-    return { result: "not found", control: "list row" };
+    return answer({ result: "not found", control: "list row" });
   }
   const at = new Date(stamp);
   // The message count Gmail draws after the sender names: live, digits alone in a span.bx0; else "(3)" at
@@ -184,7 +193,7 @@ const page = readRange();
 const end = atOldest === undefined ? {} : { at_oldest: atOldest };
 if (!page) {
   return rows.length === 0
-    ? { result: "ok", page: { from: 0, to: 0, total: 0 }, moved, ...end, rows }
-    : { result: "not found", control: "page range" };
+    ? answer({ result: "ok", page: { from: 0, to: 0, total: 0 }, moved, ...end, rows })
+    : answer({ result: "not found", control: "page range" });
 }
-return { result: "ok", page, moved, ...end, rows: rows.reverse() };
+return answer({ result: "ok", page, moved, ...end, rows: rows.reverse() });

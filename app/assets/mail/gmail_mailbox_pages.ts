@@ -39,7 +39,7 @@ export interface Msg {
   snippet?: string;
   /** The time element's title. */
   at: string;
-  /** The day, as the search's `after:` compares it. */
+  /** The day, as the search's `after:` and `before:` compare it (`before:` excludes its own day). */
   day: string;
   folder: Folder;
   /** The size of the message as an attachment, in bytes. */
@@ -137,6 +137,8 @@ export interface Box {
   queries: string[];
   deleted: string[];
   discards: number;
+  /** Presses of the pager's enabled buttons (live, each one is a page load), whether or not the page moved. */
+  presses: number;
   el(id: string): El;
   rows(): El[];
   checked(): string[];
@@ -251,6 +253,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     queries: [],
     deleted: [],
     discards: 0,
+    presses: 0,
     // "grid" and "rangebox" are the showing view's; every other id is the page's own.
     el: (id) =>
       id === "grid"
@@ -265,7 +268,12 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       ) => c.closest("tr").getAttribute("data-id")),
     range: () => (b.el("rangebox")?.textContent || "").replace(/\s+/g, " ").trim(),
   };
-  let view: { kind: Kind; since: string; out: string[] } = { kind: o.view ?? "inbox", since: "", out: [] };
+  let view: { kind: Kind; since: string; until: string; out: string[] } = {
+    kind: o.view ?? "inbox",
+    since: "",
+    until: "",
+    out: [],
+  };
   let at = 0;
   let swapped = false;
   // A new view: the one showing is hidden and kept, as live, and the new one draws after it.
@@ -287,7 +295,9 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       const btn = v.querySelector(`[data-go="${go}"]`);
       if (!btn) return;
       onPress(btn, () => {
-        if (btn.getAttribute("aria-disabled") === "true" || o.stuckPager) return;
+        if (btn.getAttribute("aria-disabled") === "true") return;
+        b.presses++;
+        if (o.stuckPager) return;
         at = to();
         hash = at === 0 ? base : `${base}/p${at + 1}`;
         setTimeout(fill, 20);
@@ -304,7 +314,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
         ? m.folder === "Inbox"
         : view.kind === "sent"
         ? m.folder === "Sent"
-        : m.day >= view.since && !view.out.includes(m.folder);
+        : m.day >= view.since && (view.until === "" || m.day < view.until) && !view.out.includes(m.folder);
     return b.msgs.filter(keep).sort((x, y) => (x.day < y.day ? 1 : x.day > y.day ? -1 : 0));
   };
   const pages = () => Math.max(1, Math.ceil(shown().length / size));
@@ -424,6 +434,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     b.queries.push(q);
     if (o.deaf) return;
     const since = /after:(\d{4})\/(\d{2})\/(\d{2})/.exec(q);
+    const until = /before:(\d{4})\/(\d{2})\/(\d{2})/.exec(q);
     const out = [["spam", "Spam"], ["trash", "Trash"], ["sent", "Sent"]].filter(([k]) =>
       q.includes(`-in:${k}`)
     );
@@ -431,6 +442,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       view = {
         kind: "search",
         since: since ? `${since[1]}-${since[2]}-${since[3]}` : "0000-00-00",
+        until: until ? `${until[1]}-${until[2]}-${until[3]}` : "",
         out: out.map((x) => x[1]),
       };
       base = `#search/${hit[1]}`;
