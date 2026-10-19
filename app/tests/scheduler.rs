@@ -2359,7 +2359,8 @@ fn a_slot_whose_only_missing_row_never_attaches_stalls_two_days_and_leaves_it_on
         g.clk.0.store(rig::NOW + d * rig::DAY, std::sync::atomic::Ordering::SeqCst);
         let line = g.run().expect("a line");
         assert!(line.ends_with("0 recovered, stopped: the attachments would not attach"), "day {d}: {line}");
-        let r = MailState::load(&g.d).unwrap().lone_stall[rig::ID];
+        // The slot's own record since the review of 5f71623..6a8e738, #2 (`lone_stall` is the backfill's).
+        let r = MailState::load(&g.d).unwrap().recover_stall[rig::ID];
         assert_eq!((r.at, r.days, r.last_day), (at, d as u32 + 1, (rig::NOW + d * rig::DAY).div_euclid(rig::DAY)), "day {d}");
     }
     g.clk.0.store(rig::NOW + 2 * rig::DAY, std::sync::atomic::Ordering::SeqCst);
@@ -2369,11 +2370,70 @@ fn a_slot_whose_only_missing_row_never_attaches_stalls_two_days_and_leaves_it_on
     // sent or held, which the next stuck row could replace), and the record is free for the next one.
     let st = MailState::load(&g.d).unwrap();
     assert_eq!(st.lone_left.get(rig::ID).cloned(), Some(vec![at]), "{st:?}");
-    assert!(!st.lone_stall.contains_key(rig::ID), "{st:?}");
+    assert!(!st.recover_stall.contains_key(rig::ID) && !st.lone_stall.contains_key(rig::ID), "{st:?}");
     // It stays left on the days after.
     g.clk.0.store(rig::NOW + 3 * rig::DAY, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(g.run().as_deref(), Some("mail: forwarding on, 0 recovered"));
     assert_eq!(MailState::load(&g.d).unwrap().lone_left.get(rig::ID).cloned(), Some(vec![at]));
+}
+
+#[test]
+fn a_backfill_and_a_slot_stalled_on_different_lone_rows_each_count_their_days_and_both_rows_are_left_on_the_third() {
+    // Review of 5f71623..6a8e738, #2: a backfill pass and a slot pass shared one lone-stall record. Row A, old, stalls
+    // every backfill pass with nothing newer sent after it; row C, recent, stalls every slot. Each day the backfill set
+    // the record to A at one day and the slot set it to C at one day, so neither reached three and both failed every
+    // day for good. Each kind of pass keeps its own record: both count to three and are left.
+    use knowlu::mail::backfill::{drive_backfill, Drive, Drove};
+    use knowlu::mail::setup::Shared;
+    use knowlu::mail_steps::{Provider, Routine};
+    use std::sync::atomic::Ordering::SeqCst;
+    let g = Pass::with_provider("lone-stall-backfill-and-slot", "google", "active", rig::fwd("on", "ours"));
+    let minute = |t: i64| t - t.rem_euclid(60);
+    let (a, c) = (minute(rig::NOW - 30 * rig::DAY), minute(rig::NOW - 3_600));
+    g.mail(&[("Stuck A", a), ("Stuck C", c)]);
+    g.host.st.lock().unwrap().no_chips = vec!["Stuck A".into(), "Stuck C".into()];
+    let since: jiff::civil::Date = rig::iso(rig::NOW - 40 * rig::DAY)[..10].parse().unwrap();
+    let backfill = |at: i64| {
+        g.clk.0.store(at, SeqCst);
+        let (client, shared) = (g.svc.client(), Shared::new());
+        let d = Drive {
+            mb: &g.host,
+            client: &client,
+            clock: &g.clk,
+            provider: Provider::Gmail,
+            address_id: rig::ID,
+            knowlu_address: rig::KNOWLU,
+            since,
+            shared: &shared,
+            on_closed: &|| {},
+            data_dir: &g.d,
+        };
+        drive_backfill(&d, &mut Routine::new(Provider::Gmail, at.div_euclid(rig::DAY), 0))
+    };
+    let slot = |at: i64| {
+        g.clk.0.store(at, SeqCst);
+        g.run().expect("a line")
+    };
+    let stuck = "0 recovered, stopped: the attachments would not attach";
+    for d in 0..2 {
+        let day = rig::NOW + d * rig::DAY;
+        assert_eq!(backfill(day), Drove::Failed("the attachments would not attach"), "day {d}");
+        let line = slot(day + 3_600);
+        assert!(line.ends_with(stuck), "day {d}: {line}");
+        let st = MailState::load(&g.d).unwrap();
+        assert_eq!(st.lone_stall.get(rig::ID).map(|r| (r.at, r.days)), Some((a, d as u32 + 1)), "day {d}: {st:?}");
+        assert_eq!(st.recover_stall.get(rig::ID).map(|r| (r.at, r.days)), Some((c, d as u32 + 1)), "day {d}: {st:?}");
+    }
+    // Day 3: the backfill leaves A at once and then stalls on C, which the slot leaves at once. Both are kept as left.
+    let day = rig::NOW + 2 * rig::DAY;
+    assert_eq!(backfill(day), Drove::Failed("the attachments would not attach"));
+    assert_eq!(slot(day + 3_600), "mail: forwarding on, 0 recovered");
+    assert_eq!(MailState::load(&g.d).unwrap().lone_left.get(rig::ID).cloned(), Some(vec![a, c]));
+    // Day 4: the backfill leaves both and is done.
+    assert_eq!(backfill(day + rig::DAY), Drove::Done);
+    let tries = g.host.calls("gmail/forward.js");
+    let tried = |s: &str| tries.iter().filter(|t| t["rows"].as_array().is_some_and(|r| r.len() == 1 && r[0]["subject"] == s)).count();
+    assert_eq!((tried("Stuck A"), tried("Stuck C")), (4, 7), "alone, A once a backfill pass and C once a pass of each kind");
 }
 
 #[test]

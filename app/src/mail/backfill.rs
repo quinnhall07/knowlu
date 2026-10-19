@@ -215,10 +215,22 @@ fn advance_frontier(data_dir: &Path, id: &str, day: i64) {
 /// A pass ends stalled on separate UTC days before a lone row is left: from the third, it is left at once.
 const STALL_DAYS: u32 = 3;
 
-/// The lone row `state` says stalls `id`'s passes, for a pass on UTC day `today`: left at once when today makes
-/// the [`STALL_DAYS`]th separate day (review of c8806b3), else only watched (a send or a hold clears it).
-pub(super) fn stuck_for(state: &MailState, id: &str, today: i64) -> Option<Stuck> {
-    let r = state.lone_stall.get(id)?;
+/// The record of a lone row that stalls passes of `phase`: a backfill's (`lone_stall`) or a slot's recover passes'
+/// (`recover_stall`). Each kind keeps its own, so the two never replace each other (review of 5f71623..6a8e738, #2).
+fn stalls(state: &mut MailState, phase: Phase) -> &mut std::collections::BTreeMap<String, LoneStall> {
+    match phase {
+        Phase::Backfill => &mut state.lone_stall,
+        Phase::Recover => &mut state.recover_stall,
+    }
+}
+
+/// The lone row `state` says stalls `id`'s passes of `phase`, for a pass on UTC day `today`: left at once when today
+/// makes the [`STALL_DAYS`]th separate day (review of c8806b3), else only watched (a send or a hold clears it).
+pub(super) fn stuck_for(state: &MailState, id: &str, today: i64, phase: Phase) -> Option<Stuck> {
+    let r = match phase {
+        Phase::Backfill => state.lone_stall.get(id)?,
+        Phase::Recover => state.recover_stall.get(id)?,
+    };
     Some(Stuck { at: r.at, leave: leaves(r, today) })
 }
 
@@ -232,16 +244,17 @@ pub(super) fn left_for(state: &MailState, id: &str) -> Vec<i64> {
     state.lone_left.get(id).cloned().unwrap_or_default()
 }
 
-/// Keeps what a pass that ended on UTC day `today` says of a lone row in `mail.json`: a row in the watched minute
+/// Keeps what a pass of `phase` that ended on UTC day `today` says of a lone row in `mail.json`, in that kind's own
+/// record ([`stalls`]): a row in the watched minute
 /// sent or held drops the record; a pass that ended stalled on one lone row alone counts `today` for it once (a
 /// row in another minute starts a new record). The stall wins over a row sent or held in its own minute (review
 /// round 1 of e7ae803: a held row from the same burst must not reset the count of a pass that stalled there).
 /// A record whose row is left at once today moves to `lone_left` first, kept there until the backfill closes, so
 /// the next stuck row starts its own count and never undoes it (review round 2 of e7ae803).
 /// Best effort, like [`keep_pace`].
-pub(super) fn note_stall(data_dir: &Path, id: &str, out: &Outcome, today: i64) {
+pub(super) fn note_stall(data_dir: &Path, id: &str, out: &Outcome, today: i64, phase: Phase) {
     let _ = MailState::update(data_dir, |s| {
-        let before = (s.lone_stall.get(id).copied(), s.lone_left.get(id).cloned());
+        let before = (stalls(s, phase).get(id).copied(), s.lone_left.get(id).cloned());
         let mut old = before.0;
         if let Some(r) = old.filter(|r| leaves(r, today)) {
             let left = s.lone_left.entry(id.to_string()).or_default();
@@ -260,10 +273,10 @@ pub(super) fn note_stall(data_dir: &Path, id: &str, out: &Outcome, today: i64) {
             (None, old) => old,
         };
         match new {
-            Some(r) => s.lone_stall.insert(id.to_string(), r),
-            None => s.lone_stall.remove(id),
+            Some(r) => stalls(s, phase).insert(id.to_string(), r),
+            None => stalls(s, phase).remove(id),
         };
-        (s.lone_stall.get(id).copied(), s.lone_left.get(id).cloned()) != before
+        (stalls(s, phase).get(id).copied(), s.lone_left.get(id).cloned()) != before
     });
 }
 
@@ -317,7 +330,7 @@ pub fn drive_backfill(d: &Drive, routine: &mut Routine) -> Drove {
                 if let Some(day) = out.frontier.filter(|_| out.stop != Stop::Done) {
                     advance_frontier(d.data_dir, d.address_id, day);
                 }
-                note_stall(d.data_dir, d.address_id, &out, d.clock.now().div_euclid(DAY));
+                note_stall(d.data_dir, d.address_id, &out, d.clock.now().div_euclid(DAY), Phase::Backfill);
                 if out.closed {
                     (d.on_closed)();
                 }
@@ -409,7 +422,7 @@ fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i
         on_look: Some(&look),
         on_load: Some(&load),
         frontier: frontier(d.data_dir, d.address_id),
-        stuck: state.as_ref().and_then(|s| stuck_for(s, d.address_id, today)),
+        stuck: state.as_ref().and_then(|s| stuck_for(s, d.address_id, today, Phase::Backfill)),
         left: state.as_ref().map(|s| left_for(s, d.address_id)).unwrap_or_default(),
     };
     let out = run_pass(d.mb, d.client, d.clock, routine, &job);

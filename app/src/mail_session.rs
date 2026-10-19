@@ -113,13 +113,19 @@ pub struct MailState {
     /// as none (the whole window). Not written when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub backfill_frontier: BTreeMap<String, i64>,
-    /// Each Gmail mailbox's lone row that will not attach, by address id (review of c8806b3): its received minute
-    /// only (no sender, subject or text), the separate UTC days a pass ended stalled on it alone, and the last of
-    /// them. From the third such day the row is left in every pass (`mail::backfill::stuck_for`). Cleared when a
-    /// row at that minute is sent or held, when the backfill closes and on disconnect. A file written before it
-    /// existed lacks it and reads as none. Not written when empty.
+    /// Each Gmail mailbox's lone row that will not attach in its backfill's passes, by address id (review of
+    /// c8806b3): its received minute only (no sender, subject or text), the separate UTC days a backfill pass ended
+    /// stalled on it alone, and the last of them. From the third such day the row is left in every backfill pass
+    /// (`mail::backfill::stuck_for`). Cleared when a row at that minute is sent or held, when the backfill closes
+    /// and on disconnect. A file written before it existed lacks it and reads as none. Not written when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub lone_stall: BTreeMap<String, LoneStall>,
+    /// The same record for a slot's recover passes (review of 5f71623..6a8e738, #2): a backfill pass and a slot pass
+    /// that stalled on different rows replaced each other's record every day, so neither reached its third. Cleared
+    /// when a row at that minute is sent or held and on disconnect; a backfill's close leaves it. A file written
+    /// before it existed lacks it and reads as none. Not written when empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub recover_stall: BTreeMap<String, LoneStall>,
     /// Each Gmail mailbox's lone rows that reached their third stalled day, by address id (review round 2 of
     /// e7ae803): received minutes only. Each is left in every pass until the backfill closes or the mailbox is
     /// disconnected, so `lone_stall` is free to count the next row that stalls (one record let two stuck rows
@@ -206,6 +212,7 @@ impl Default for MailState {
             last_look: BTreeMap::new(),
             backfill_frontier: BTreeMap::new(),
             lone_stall: BTreeMap::new(),
+            recover_stall: BTreeMap::new(),
             lone_left: BTreeMap::new(),
             gmail_messages: BTreeMap::new(),
             pending_setups: Vec::new(),

@@ -5018,6 +5018,7 @@ fn mail_disconnect_removes_every_per_mailbox_entry_for_that_mailbox_and_no_other
             s.last_look.insert(id.to_string(), NOW);
             s.backfill_frontier.insert(id.to_string(), day - 30);
             s.lone_stall.insert(id.to_string(), LoneStall { at: NOW - 60, days: 1, last_day: day });
+            s.recover_stall.insert(id.to_string(), LoneStall { at: NOW - 240, days: 2, last_day: day });
             s.lone_left.insert(id.to_string(), vec![NOW - 120]);
             s.gmail_messages.insert(id.to_string(), vec![NOW - 180]);
         }
@@ -5034,6 +5035,7 @@ fn mail_disconnect_removes_every_per_mailbox_entry_for_that_mailbox_and_no_other
         ("last_look", st.last_look.keys().cloned().collect()),
         ("backfill_frontier", st.backfill_frontier.keys().cloned().collect()),
         ("lone_stall", st.lone_stall.keys().cloned().collect()),
+        ("recover_stall", st.recover_stall.keys().cloned().collect()),
         ("lone_left", st.lone_left.keys().cloned().collect()),
         ("gmail_messages", st.gmail_messages.keys().cloned().collect()),
     ] {

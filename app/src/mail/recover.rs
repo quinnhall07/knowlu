@@ -60,7 +60,8 @@
 //!
 //! **A lone row that never attaches** (review of c8806b3) stalls a pass when nothing is sent around it. The
 //! caller counts the separate UTC days a pass ends stalled on it alone ([`Outcome::stalled_at`], `mail.json`'s
-//! `lone_stall`, its received minute only) and from the third passes it in [`Job::stuck`] to be left at once. A row
+//! `lone_stall` for a backfill's passes and `recover_stall` for a slot's, its received minute only) and from the third
+//! passes it in [`Job::stuck`] to be left at once. A row
 //! that reached its third day is then kept as left (`lone_left`, [`Job::left`]) until the backfill closes, so the
 //! record counts the next stuck row (review round 2 of e7ae803).
 //!

@@ -332,6 +332,7 @@ pub fn disconnect_with(d: &Disconnect, address_id: &str) -> Value {
         s.last_look.remove(address_id);
         s.backfill_frontier.remove(address_id);
         s.lone_stall.remove(address_id);
+        s.recover_stall.remove(address_id);
         s.lone_left.remove(address_id);
         s.gmail_messages.remove(address_id);
         *s != before

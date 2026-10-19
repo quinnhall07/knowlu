@@ -200,8 +200,10 @@ pub struct HostState {
     pub msgs: Vec<(String, String, i64)>,
     /// Gmail: a non-delivery report landed in the Inbox at this instant; a look reading from before it finds it.
     pub report_at: Option<i64>,
-    /// Gmail: the message with this subject never attaches (`forward.js` alone: "no attachment").
+    /// Gmail: the message with this subject never attaches (`forward.js` alone: "no attachment"; in a group, one short).
     pub no_chip: Option<String>,
+    /// Gmail: the messages with these subjects never attach either, as `no_chip`.
+    pub no_chips: Vec<String>,
     /// When set, `mail.json` in this folder is read at each Gmail look (`bounce.js`) and kept in `probed`, as text.
     pub probe_dir: Option<PathBuf>,
     pub probed: Vec<String>,
@@ -230,6 +232,7 @@ impl FakeHost {
                 msgs: vec![],
                 report_at: None,
                 no_chip: None,
+                no_chips: vec![],
                 probe_dir: None,
                 probed: vec![],
             })),
@@ -289,8 +292,14 @@ impl Mailbox for FakeHost {
                 let n = rows.len();
                 json!({ "result": "ok", "page": { "from": 1, "to": n, "total": n }, "moved": false, "rows": rows })
             }
-            "gmail/forward.js" if s.no_chip.as_ref().is_some_and(|c| args["rows"].as_array().is_some_and(|r| r.iter().any(|x| x["subject"] == c.as_str()))) => {
-                json!({ "result": "failed", "reason": "no attachment" })
+            "gmail/forward.js"
+                if s.no_chip.iter().chain(&s.no_chips).any(|c| args["rows"].as_array().is_some_and(|r| r.iter().any(|x| x["subject"] == c.as_str()))) =>
+            {
+                // Alone, a compose with no attachment; beside others, the group is one short (as `forward.js` says).
+                match args["rows"].as_array().map_or(1, |r| r.len()) {
+                    1 => json!({ "result": "failed", "reason": "no attachment" }),
+                    n => json!({ "result": "failed", "reason": "attachments do not match the rows", "attached": n - 1, "expected": n }),
+                }
             }
             "gmail/forward.js" => json!({ "result": "ok", "sent": true, "count": args["rows"].as_array().map_or(1, |r| r.len()) }),
             "m365/sent_cleanup.js" | "gmail/sent_cleanup.js" => json!({ "result": "ok", "deleted": 1 }),

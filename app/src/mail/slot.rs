@@ -197,13 +197,14 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
         on_look: Some(&look),
         on_load: Some(&load),
         frontier: None,
-        // A lone row that stalled passes is watched here too, and left from its third day (review of c8806b3).
-        stuck: stuck_for(state, id, now.div_euclid(86_400)),
+        // A lone row that stalled passes is watched here too, and left from its third day (review of c8806b3), in the
+        // slot's own record: a backfill's never replaces it (review of 5f71623..6a8e738, #2).
+        stuck: stuck_for(state, id, now.div_euclid(86_400), Phase::Recover),
         left: left_for(state, id),
     };
     let mut routine = seed_routine(env.data_dir, provider, id, now);
     let out = run_pass(env.host, env.client, env.clock, &mut routine, &job);
-    note_stall(env.data_dir, id, &out, env.clock.now().div_euclid(86_400));
+    note_stall(env.data_dir, id, &out, env.clock.now().div_euclid(86_400), Phase::Recover);
     // The day's sends count for the mailbox whoever made them: a backfill seeds its pace from here, so a slot's
     // sends are kept beside it (they once were not, and a slot and a backfill could pass the day's cap together).
     if out.sent > 0 || backfilling {
