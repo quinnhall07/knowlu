@@ -40,9 +40,11 @@ export async function everyMigrationFile(dir: URL = HERE): Promise<Array<[string
  * `public."foo"`, `"public"."foo"`). `name` is either `(\w+)` — a capturing group, for parsing an
  * unknown name out of a definition — or an already-known literal name, for searching a revoke
  * statement for it; either way the NAME ALONE compares unquoted, so a definition and a revoke that
- * spell the same function differently still match (R-C2-E37c). */
+ * spell the same function differently still match (R-C2-E37c). The schema may be `public` or
+ * `admin` (friends-testers §8.7) and nothing wider, so a function in a third schema still fails the
+ * parse-count check loud. */
 function identPattern(name: string): string {
-  return `(?:"?public"?\\s*\\.\\s*)?"?${name}"?`;
+  return `(?:"?(?:public|admin)"?\\s*\\.\\s*)?"?${name}"?`;
 }
 
 /**
@@ -1882,4 +1884,72 @@ Deno.test("mail_addresses_gains_last_lapsed_at_backfilled_from_lapsed_since_and_
     "alter table public.mail_addresses add constraint mail_addresses_last_lapse_stamped " +
     "check (lapsed_since is null or last_lapsed_at is not null)",
   ]);
+});
+
+// L8 S2a0 (friends-testers spec §8.7, §9 layer i): the guards must see the `admin` schema before any
+// `admin.*` SQL exists. Synthetic strings only, never the corpus; `identPattern` admits `public` or
+// `admin` and nothing wider, so a third schema still fails loud.
+function thrownMessage(fn: () => unknown): string {
+  const err = assertThrows(fn, Error);
+  return err instanceof Error ? err.message : String(err);
+}
+
+const ADMIN_DEFINER = `
+create function admin.x() returns int as $$ select 1 $$ language sql security definer;
+`;
+
+Deno.test("S2a0: an unrevoked admin.x definer function parses as x and is reported", () => {
+  const message = thrownMessage(() => assertExecuteRevoked([["synthetic-admin-fn.sql", ADMIN_DEFINER]]));
+  assert(message.includes(": x is SECURITY DEFINER with no 'revoke execute"), message);
+});
+
+Deno.test("S2a0: admin.x revoked from anon and authenticated passes, parsed as one definition", () => {
+  const sql = ADMIN_DEFINER + "revoke execute on function admin.x() from public, anon, authenticated;\n";
+  const { parsed } = assertExecuteRevoked([["synthetic-admin-fn-revoked.sql", sql]]);
+  assertEquals(parsed, 1);
+});
+
+Deno.test("S2a0: admin.v parses as v, not admin; its revoke is found and its absence reported", () => {
+  const view = "create view admin.v as select 1;\n";
+  const ok = assertViewsGuarded([
+    ["synthetic-admin-view.sql", view + "revoke all on admin.v from anon, authenticated;\n"],
+  ]);
+  assertEquals(ok.revoked, ["v"]);
+  assertEquals(ok.parsed, 1);
+  const message = thrownMessage(() => assertViewsGuarded([["synthetic-admin-view-bare.sql", view]]));
+  assert(message.includes("the view v declares no"), message);
+});
+
+Deno.test("S2a0: quoted admin forms behave as the quoted public forms do", () => {
+  const fn = `
+create or replace function "admin"."qx"(p_account uuid)
+returns text
+language sql
+security definer
+as $$
+  select 'x';
+$$;
+revoke execute on function admin."qx"(uuid) from public, anon, authenticated;
+`;
+  assertEquals(assertExecuteRevoked([["synthetic-admin-quoted-fn.sql", fn]]).parsed, 1);
+  const unrevoked = fn.slice(0, fn.indexOf("revoke"));
+  const fnMessage = thrownMessage(() => assertExecuteRevoked([["synthetic-admin-quoted-fn-bare.sql", unrevoked]]));
+  assert(fnMessage.includes(": qx is SECURITY DEFINER"), fnMessage);
+  const view = assertViewsGuarded([
+    ["synthetic-admin-quoted-view.sql", `create view "admin"."qv" as select 1;\nrevoke all on "admin".qv from anon, authenticated;\n`],
+  ]);
+  assertEquals(view.revoked, ["qv"]);
+});
+
+Deno.test("S2a0: a function in any third schema still fails loud, so the widening admits only admin", () => {
+  const sql = `
+create function other.x() returns int as $$ select 1 $$ language sql security definer;
+revoke execute on function other.x() from public, anon, authenticated;
+`;
+  const message = thrownMessage(() => assertExecuteRevoked([["synthetic-other-fn.sql", sql]]));
+  assert(message.includes("found 1") && message.includes("parsed 0"), message);
+  // A view in a third schema is never silently guarded either: it reads as a view named after the
+  // schema, and no revoke can name that, so it is reported.
+  const viewSql = "create view other.v as select 1;\nrevoke all on other.v from anon, authenticated;\n";
+  thrownMessage(() => assertViewsGuarded([["synthetic-other-view.sql", viewSql]]));
 });
