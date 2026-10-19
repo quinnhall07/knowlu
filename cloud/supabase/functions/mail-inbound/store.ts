@@ -98,8 +98,9 @@ export function storeOver(rest: Rest, encKey: CryptoKey, now: () => number = Dat
       // a stamp and an earlier stamp is kept (its gap may still be uncovered). The stamped write goes
       // first: a `covered` can clear the stamp only while the row is not lapsed, so if it clears it
       // between the two, the second write finds the row unstamped and stamps it now. An already lapsed
-      // or revoked mailbox matches neither.
-      const live = `id=eq.${id(address)}&status=not.in.(lapsed,revoked)`;
+      // or revoked mailbox matches neither, nor does an `off` one: the student's choice outlives a lapse
+      // (its mail is deleted unread meanwhile all the same), where `lapsed` would come back `quiet`.
+      const live = `id=eq.${id(address)}&status=not.in.(lapsed,revoked,off)`;
       if (
         await patched("lapsed", "mail_addresses", `${live}&lapsed_since=not.is.null`, { status: "lapsed" }) >
           0

@@ -11,8 +11,8 @@
  *    counted globally (a fixed log line), never per account.
  * 3. **Entitlement**: a mailbox whose account is not `active` or `trialing` is marked `lapsed` (with
  *    `lapsed_since`, kept from an earlier lapse the device has not yet reported covered; a pull or a
- *    canary once the account is entitled again moves it on); with no entitled mailbox left the message
- *    is deleted unread and no `mail_seen` row is written.
+ *    canary once the account is entitled again moves it on; an `off` mailbox stays `off`); with no
+ *    entitled mailbox left the message is deleted unread and no `mail_seen` row is written.
  * 4. **Fetch** the object once.
  * 5. **Classify** per mailbox, then act (T2g.2 for the first three):
  *    - a **canary** is marked arrived once (the store refuses a second marking), recording the mailbox's
@@ -108,8 +108,9 @@ export interface InboundStore {
   /** The row whose `token_hmac` or `retired_token_hmac` is `hmac`, whatever its status; else null. */
   addressByTokenHmac(hmac: string): Promise<AddressRow | null>;
   entitled(accountId: string): Promise<boolean>;
-  /** `status = 'lapsed'` unless it is `lapsed` or `revoked`, and `lapsed_since = now()` in the same write
-   * only when it is null (an earlier stamp's gap may not be covered yet). */
+  /** `status = 'lapsed'` unless it is `lapsed`, `revoked` or `off` (the student's choice outlives a lapse),
+   * and `lapsed_since = now()` in the same write only when it is null (an earlier stamp's gap may not be
+   * covered yet). */
   markLapsed(addressId: string): Promise<void>;
   /** The mailbox's open batches and its recent canaries, for `classifyArrival`. */
   bindRows(addressId: string): Promise<{ batches: BindBatch[]; canaries: BindCanary[] }>;

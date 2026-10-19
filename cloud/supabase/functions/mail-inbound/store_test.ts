@@ -44,7 +44,7 @@ async function recording(answer: (path: string) => unknown[] = () => []) {
   return { seen, store };
 }
 
-const live = `mail_addresses?id=eq.${ADDR}&status=not.in.(lapsed,revoked)`;
+const live = `mail_addresses?id=eq.${ADDR}&status=not.in.(lapsed,revoked,off)`;
 
 Deno.test("mark_lapsed_keeps_an_earlier_stamp_and_sets_status_in_the_same_write", async () => {
   // A mailbox unlapsed whose gap the device has not yet covered still holds its stamp: it lapses again
@@ -76,9 +76,11 @@ Deno.test("mark_lapsed_stamps_a_first_lapse_with_its_status_in_one_write", async
   ]);
 });
 
-Deno.test("mark_lapsed_changes_nothing_on_a_lapsed_or_revoked_mailbox", async () => {
-  // Both writes are filtered on `status=not.in.(lapsed,revoked)`: an already lapsed mailbox keeps its
-  // stamp, and a revoked one is never brought back.
+Deno.test("mark_lapsed_changes_nothing_on_a_lapsed_revoked_or_off_mailbox", async () => {
+  // Both writes are filtered on `status=not.in.(lapsed,revoked,off)`: an already lapsed mailbox keeps its
+  // stamp, a revoked one is never brought back, and an `off` one keeps the student's choice (review of
+  // the lapsed fix, #3): its mail is deleted unread while the account is unentitled anyway, and a pull
+  // after renewal would otherwise read it `quiet`.
   const { seen, store } = await recording();
   await store.markLapsed(ADDR);
   assertEquals(seen.length, 2);

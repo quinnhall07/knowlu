@@ -315,7 +315,7 @@ class FakeStore implements InboundStore {
   markLapsed(addressId: string) {
     this.calls.push("markLapsed");
     const a = this.addresses.find((x) => x.id === addressId)!;
-    if (a.status === "lapsed" || a.status === "revoked") return Promise.resolve();
+    if (a.status === "lapsed" || a.status === "revoked" || a.status === "off") return Promise.resolve();
     a.status = "lapsed";
     a.lapsedSince ??= new Date(NOW).toISOString();
     return Promise.resolve();
@@ -611,6 +611,24 @@ Deno.test("a_lapsed_accounts_message_is_deleted_unread_with_no_seen_row_and_laps
     assertEquals(box.status, "lapsed");
     assertEquals(box.lapsedSince, new Date(NOW).toISOString());
     assert(!w.store.calls.includes("fpKey") && !w.store.calls.includes("seen"), w.store.calls.join());
+  });
+});
+
+Deno.test("a_lapsed_accounts_off_mailbox_stays_off_and_its_message_is_deleted_unread", async () => {
+  // Review of the lapsed fix, #3: a mailbox the student set `off` (or `elsewhere`) whose old forward still
+  // delivers keeps that choice through a lapse; marked `lapsed`, a pull after renewal would read it `quiet`.
+  await withWorld(async (w) => {
+    const box = w.store.addresses.find((a) => a.id === "addr-5")!;
+    box.status = "off";
+    const res = await w.arrive(await gmailForward({ to: at(TOK_LAPSED) }), {
+      key: "inbound/l2",
+      recipients: [at(TOK_LAPSED)],
+      source: caf("sam", TOK_LAPSED),
+    });
+    assertEquals(res.status, 200);
+    assertEquals([w.gets, w.store.seenRows, w.store.workRows], [0, [], []]);
+    assertEquals(keysUnder(w, "inbound/"), []);
+    assertEquals([box.status, box.lapsedSince], ["off", null]);
   });
 });
 
