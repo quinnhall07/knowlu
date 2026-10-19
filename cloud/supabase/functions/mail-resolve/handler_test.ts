@@ -255,6 +255,7 @@ function pullOver(store: FakeStore): PullStore {
     expired: 0,
   };
   return {
+    unlapse: () => Promise.resolve(),
     deliver: () => Promise.resolve(),
     mailboxes: () => Promise.resolve([mailbox]),
     batches: () => Promise.resolve([]),
