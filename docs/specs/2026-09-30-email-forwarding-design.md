@@ -252,6 +252,10 @@ steps below as they run.
    forward is sent, the device closes the batch with the number it sent (`POST /mail/batches/<id>/sent`).
    Each forward leaves a copy in Sent Items; **the script deletes only the copies it created** (matched
    by the nonce and email forwarding to Knowlu recipient) and the view says it will.
+   *(Amended 2026-10-19, Quinn's ruling "increase the day cap" (session-5 ledger, RULING row of 2026-10-19,
+   superseding "Keep 600" for Gmail): a Gmail mailbox's day is at most 1,500 originals in at most 300 sent
+   messages (one forward is one Gmail message of up to ten originals) and at most 600 page loads per UTC day;
+   Microsoft 365 keeps 600 a day, provisional pending S6.)*
 6. **Finish.** With the saved session on (the default, D15) the window closes and the mailbox's profile
    stays; with it off, the `mail-setup` profile is deleted. A backfill still running when the student
    quits **resumes the next time the app is open** with the saved session (it is the same recover
@@ -1859,7 +1863,7 @@ the LMS is dropped unread, and every other message, personal mail from people in
 the model host. The table gains `mailbox_hint` and the SNS headers row.
 
 **R11** (important; §11). *Accepted.* New risk 15. Backfill and recover forward at most 10 a minute and
-600 a mailbox a day (provisional), stop at the first non-delivery report or send failure with the named
+600 a mailbox a day (provisional; Gmail amended 2026-10-19, §4.2 step 5), stop at the first non-delivery report or send failure with the named
 outcome and the `paused_send` state (§4.2 step 5, D14), and T0 gains S6 to measure the pace. S6 must not
 risk the founder's own school account: **§13 Q8** asks where it runs.
 
