@@ -31,6 +31,40 @@ Deno.test("gmail_search_uses_after_date_minus_spam_minus_trash", async () => {
   assert(q.includes("-in:sent") && q.includes("-in:drafts"), q);
 });
 
+Deno.test("gmail_search_runs_by_url_and_never_types_into_the_box", async () => {
+  // Live 2026-10-18: the search box is labelled "Ask Gmail" and may route to Gemini, so the script sets the
+  // hash instead: `#search/` + the query, percent-encoded with spaces as plus signs.
+  const box = mailbox(MAIL);
+  const label = box.el("q").getAttribute("aria-label");
+  assertEquals(label, "Ask Gmail");
+  const r = await run("gmail/search.js", box.page, { since: "2026-10-02", ...FAST });
+  assertEquals(r, { result: "ok", count: 3 });
+  assertEquals(
+    box.page.location.hash,
+    "#search/after%3A2026%2F10%2F02+-in%3Aspam+-in%3Atrash+-in%3Asent+-in%3Adrafts",
+  );
+  assertEquals(box.el("q").value ?? "", "", "nothing was typed into the box");
+  // The same search again leaves the hash where it is (no hashchange, no redraw): it still answers.
+  assertEquals(await run("gmail/search.js", box.page, { since: "2026-10-02", ...FAST }), {
+    result: "ok",
+    count: 3,
+  });
+  assertEquals(box.queries.length, 1, "the page searched once");
+  // A different day after a search is a new search.
+  assertEquals(await run("gmail/search.js", box.page, { since: "2026-10-06", ...FAST }), {
+    result: "ok",
+    count: 1,
+  });
+});
+
+Deno.test("gmail_search_does_not_read_the_previous_views_range_as_its_count", async () => {
+  // The rows redraw at once but the range text follows later; the inbox's "1-4 of 4" must not be read.
+  const box = mailbox(MAIL, { slowRange: true });
+  assertEquals(box.range().includes("of 4"), true, "the inbox shows its own range first");
+  const r = await run("gmail/search.js", box.page, { since: "2026-10-05", ...FAST });
+  assertEquals(r, { result: "ok", count: 2 });
+});
+
 Deno.test("gmail_search_reports_no_results_as_zero_and_a_deaf_page_as_not_settled", async () => {
   const none = mailbox(MAIL);
   assertEquals(await run("gmail/search.js", none.page, { since: "2026-12-01", ...FAST }), {
@@ -45,10 +79,11 @@ Deno.test("gmail_search_reports_no_results_as_zero_and_a_deaf_page_as_not_settle
   });
 });
 
-Deno.test("gmail_search_names_a_missing_control_and_refuses_a_bad_date", async () => {
-  const box = mailbox(MAIL);
-  box.el("q").remove();
-  assertEquals(await run("gmail/search.js", box.page, { since: "2026-10-02", ...FAST }), {
+Deno.test("gmail_search_names_a_missing_list_and_refuses_a_bad_date", async () => {
+  // No grid ever draws: the page has no list to search into.
+  const box = mailbox(MAIL, { deaf: true });
+  box.el("grid").remove();
+  assertEquals(await run("gmail/search.js", box.page, { since: "2026-10-02", wait_ms: 200 }), {
     result: "not found",
     control: "search",
   });
@@ -56,7 +91,7 @@ Deno.test("gmail_search_names_a_missing_control_and_refuses_a_bad_date", async (
   for (const since of ["", "10/02/2026", "2026-13-40", "2026-10-02 OR x"]) {
     assertEquals(await run("gmail/search.js", ok.page, { since }), { result: "failed", reason: "bad date" });
   }
-  assertEquals(ok.queries, [], "nothing was typed for a bad date");
+  assertEquals(ok.queries, [], "nothing was searched for a bad date");
   // Results with no count to read are not a count of zero.
   const blind = mailbox(MAIL, { blind: true });
   assertEquals(await run("gmail/search.js", blind.page, { since: "2026-10-02", ...FAST }), {

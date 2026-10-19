@@ -3,43 +3,24 @@
 // mail view open. Like every step script it is the body of an async function of `args`: `args.since` is a
 // day, `YYYY-MM-DD`; `args.wait_ms` (default 10000) bounds the wait for the page to answer. It returns one of
 //   { result: "ok", count: number }          (the pager's total, never the number of rows drawn)
-//   { result: "not found", control: "search" | "result count" }
+//   { result: "not found", control: "search" | "result count" }   ("search": no list ever drew)
 //   { result: "failed", reason: "bad date" | "search did not settle" }
 // The query is `after:<yyyy/mm/dd> -in:spam -in:trash -in:sent -in:drafts`: Gmail's default search already
 // leaves out Spam and Trash and the terms say so, and Sent and Drafts are the student's own mail, not mail
 // received, so they are never listed for a forward. Whether Gmail reads every term is a live check (plan
 // T11, T18c), not a thing the synthetic page can say.
+// The search runs by URL, not by typing: live 2026-10-18 Gmail's box is labelled "Ask Gmail" (no input is
+// named "Search mail"), and it may route to Gemini rather than search. Setting
+// `location.hash = "#search/" + encodeURIComponent(query)` (spaces as `+`) ran the real search: 50 rows and
+// "1-50 of 2,819". The hash is set at once, so the search has answered only when the grid has redrawn (a
+// new first row, or "no messages matched" newly drawn) or the range text has changed; the old view's range
+// is never read as this search's count. A hash already on this search does not change, so Gmail does not
+// redraw: the page is read as it is.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
-const nameOf = (el) => {
-  const aria = el.getAttribute("aria-label");
-  if (aria) return aria.trim();
-  const by = el.getAttribute("aria-labelledby");
-  if (by) {
-    const t = by.split(/\s+/).map((id) => document.getElementById(id)).filter(Boolean).map(text).join(" ");
-    if (t) return t;
-  }
-  return "";
-};
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const until = async (ready, ms) => {
   for (let waited = 0; !ready() && waited < ms; waited += 50) await sleep(50);
   return ready();
-};
-const setValue = (el, v) => {
-  if (el.focus) el.focus();
-  const d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value");
-  if (d && d.set) d.set.call(el, v);
-  else el.value = v;
-  el.dispatchEvent(new Event("input", { bubbles: true }));
-  el.dispatchEvent(new Event("change", { bubbles: true }));
-};
-const press = (el, key) => {
-  const K = typeof KeyboardEvent === "function" ? KeyboardEvent : Event;
-  for (const type of ["keydown", "keypress", "keyup"]) {
-    const e = new K(type, { key, code: key, keyCode: 13, which: 13, bubbles: true, cancelable: true });
-    if (e.key !== key) Object.defineProperty(e, "key", { value: key });
-    el.dispatchEvent(e);
-  }
 };
 
 const since = String((args && args.since) || "");
@@ -53,28 +34,44 @@ if (
 }
 const waitMs = Number(args.wait_ms) >= 0 ? Number(args.wait_ms) : 10000;
 
-const box = [...document.querySelectorAll('input[type="text"], input[type="search"], input:not([type])')]
-  .find((el) => /^search mail$/i.test(nameOf(el)));
-if (!box) return { result: "not found", control: "search" };
-
+const RANGE = /^([\d,]+)\s*[-–]\s*([\d,]+)\s+of\s+(.+)$/i;
+const grid = () => document.querySelector('table[role="grid"]');
 const rows = () => [...document.querySelectorAll('table[role="grid"] tr[role="row"]')];
-const none = () =>
-  [...document.querySelectorAll('table[role="grid"] td')].some((el) =>
+const nones = () =>
+  [...document.querySelectorAll('table[role="grid"] td')].filter((el) =>
     /^no messages matched/i.test(text(el))
   );
+const rangeSpan = () => [...document.querySelectorAll("span")].map(text).find((t) => RANGE.test(t)) || "";
 const was = new Set(rows());
-const hadNone = none();
+const wasNone = new Set(nones());
+const wasRange = rangeSpan();
 
-setValue(box, `after:${parts[1]}/${parts[2]}/${parts[3]} -in:spam -in:trash -in:sent -in:drafts`);
-press(box, "Enter");
+const query = `after:${parts[1]}/${parts[2]}/${parts[3]} -in:spam -in:trash -in:sent -in:drafts`;
+const target = "#search/" + encodeURIComponent(query).replace(/%20/g, "+");
+const already = String(location.hash || "") === target;
+if (!already) location.hash = target;
 
-const answered = () => (none() && !hadNone) || (rows().length > 0 && !was.has(rows()[0]));
+const onSearch = () => String(location.hash || "").startsWith("#search/");
+const answered = () =>
+  already && grid() !== null ||
+  onSearch() && (
+      (rows().length > 0 && !was.has(rows()[0])) ||
+      nones().some((el) => !wasNone.has(el)) ||
+      rangeSpan() !== wasRange
+    );
 await until(answered, waitMs);
-if (!answered() && !(hadNone && none())) return { result: "failed", reason: "search did not settle" };
-if (none() && rows().length === 0) return { result: "ok", count: 0 };
+if (!answered()) {
+  return grid()
+    ? { result: "failed", reason: "search did not settle" }
+    : { result: "not found", control: "search" };
+}
+if (nones().length > 0 && rows().length === 0) return { result: "ok", count: 0 };
 
-const RANGE = /^([\d,]+)\s*[-–]\s*([\d,]+)\s+of\s+(.+)$/i;
-const range = [...document.querySelectorAll("span")].map(text).map((t) => RANGE.exec(t)).find(Boolean);
+// The rows may redraw before the range text does: give the range the rest of the wait to change from the
+// previous view's, so that view's total is not read as this search's. A search that gives the very same
+// range (a degenerate repeat of the view) just reads it after the wait.
+if (!already) await until(() => rangeSpan() !== wasRange, Math.min(waitMs, 3000));
+const range = RANGE.exec(rangeSpan());
 const total = range && /^[\d,]+$/.test(range[3]) ? Number(range[3].replace(/,/g, "")) : null;
 if (total === null) return { result: "not found", control: "result count" };
 return { result: "ok", count: total };

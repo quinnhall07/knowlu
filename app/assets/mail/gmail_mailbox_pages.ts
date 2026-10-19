@@ -3,7 +3,9 @@
 // `div[role=checkbox]`, the sender as a `span[email]` whose `email` attribute is the address (the visible
 // text is a display name or the address), the subject as a `span.bog`, and the time as a `span[title]`
 // whose title is the full date and time. The pager reads "1–50 of 123" with Newer/Older/Newest/Oldest
-// buttons; the toolbar has Delete and More. The page is a model of what the scripts rely on, not a copy of
+// buttons; the toolbar has Delete and More. Setting `location.hash` to `#search/<query>` (the query percent-
+// encoded, spaces as plus signs) runs a search, as live; the search box is labelled "Ask Gmail" and does
+// nothing here (live 2026-10-18). The page is a model of what the scripts rely on, not a copy of
 // Gmail; the live checks (T11, T18c) say whether the real page agrees. Every name, address and subject here
 // is synthetic.
 import { El, load, Page } from "./test_dom.ts";
@@ -64,6 +66,8 @@ export interface Opts {
   swap?: { id: string; as: string };
   /** The page shows no "1–50 of 123" range. */
   blind?: boolean;
+  /** After a search the range text updates later than the rows, the previous view's range standing till then. */
+  slowRange?: boolean;
   /** "Forward as attachment" on a conversation row attaches only its newest message. */
   newestOnly?: boolean;
   /** An opened conversation has no "Back to ..." button. */
@@ -132,7 +136,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
   const page = load(`
     ${chip}
     <div role="navigation"><a href="#inbox">Inbox</a><a href="#sent">Sent</a></div>
-    <div role="search"><input type="text" id="q" name="q" aria-label="Search mail"></div>
+    <div role="search"><input type="text" id="q" name="q" aria-label="Ask Gmail"></div>
     <div role="toolbar" id="bar">
       <div role="button" id="del" aria-label="Delete">Delete</div>
       <div role="button" id="more" aria-label="More" aria-haspopup="true">More</div>
@@ -145,7 +149,21 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     <table role="grid" id="grid"><tbody id="list"></tbody></table><div id="over"></div>
     <div role="main" id="convo"></div>`);
   const d = page.document;
-  const loc = { hash: o.view === "sent" ? "#sent" : "#inbox", host: "mail.google.com", reload() {} };
+  // Setting the hash to `#search/...` is a search, as live (2026-10-18); setting it to what it already is
+  // does nothing, as in a browser (no hashchange).
+  let hash = o.view === "sent" ? "#sent" : "#inbox";
+  const loc = {
+    get hash() {
+      return hash;
+    },
+    set hash(v: string) {
+      if (v === hash) return;
+      hash = v;
+      onHash(v);
+    },
+    host: "mail.google.com",
+    reload() {},
+  };
   page.location = loc;
   const b: Box = {
     page,
@@ -195,9 +213,14 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       }</span></td>
         <td class="xW"><span title="${m.at}">Oct ${Number(m.day.slice(8))}</span></td></tr>`).join("");
     const n = (v: number) => `<span class="ts">${v}</span>`;
-    d.getElementById("rangebox").innerHTML = all.length === 0 || o.blind
-      ? ""
-      : `<span class="Dj">${n(at * size + 1)}–${n(at * size + rows.length)} of ${n(all.length)}</span>`;
+    const drawRange = () => {
+      d.getElementById("rangebox").innerHTML = all.length === 0 || o.blind
+        ? ""
+        : `<span class="Dj">${n(at * size + 1)}–${n(at * size + rows.length)} of ${n(all.length)}</span>`;
+    };
+    // `slowRange`: after a search the rows redraw first and the range text follows, the old one left standing.
+    if (o.slowRange && view.kind === "search") setTimeout(drawRange, 80);
+    else drawRange();
     for (
       const [id, off] of [["newest", at === 0], ["newer", at === 0], ["older", at >= pages() - 1], [
         "oldest",
@@ -272,9 +295,11 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
   go("oldest", () => pages() - 1);
   fill();
 
-  b.el("q").addEventListener("keydown", (e: El) => {
-    if (e.key !== "Enter") return;
-    const q = b.el("q").value;
+  // The box does nothing here: live, "Ask Gmail" may go to Gemini, so no script types into it.
+  function onHash(h: string) {
+    const hit = /^#search\/(.*)$/.exec(h);
+    if (!hit) return;
+    const q = decodeURIComponent(hit[1].replace(/\+/g, " "));
     b.queries.push(q);
     if (o.deaf) return;
     const since = /after:(\d{4})\/(\d{2})\/(\d{2})/.exec(q);
@@ -286,10 +311,9 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       since: since ? `${since[1]}-${since[2]}-${since[3]}` : "0000-00-00",
       out: out.map((x) => x[1]),
     };
-    loc.hash = `#search/${encodeURIComponent(q)}`;
     at = 0;
     setTimeout(fill, 20);
-  });
+  }
   b.el("del").addEventListener("click", () => {
     const ids = b.checked();
     if (ids.length === 0) return;
