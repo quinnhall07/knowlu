@@ -616,6 +616,9 @@ const INBOX_UNREADABLE: Stop = Stop::Script("the inbox could not be read");
 /// Gmail: lone rows failed to attach with nothing sent between them (review of fd702e6): the page, not the rows.
 /// The pass stops rather than leave every row, so the next pass tries them again.
 const STALLED: Stop = Stop::Script("the attachments would not attach");
+/// Gmail: a forward's compose did not take Knowlu's address as its one recipient, after its one more try when
+/// none was drawn (live, ef28 2026-10-19). Nothing was sent.
+const ADDRESS_REFUSED: Stop = Stop::Script("the forward's address was not accepted");
 /// `forward.js`'s waits other than the upload, at their defaults (5 s each): Knowlu's own leftover compose to
 /// go, the rows ticked, the menu item, Send, the recipient, the Send's settling and the rows let go (its header).
 /// The recipient's second try in place waits only what the upload left of `upload_ms`, so it adds nothing here.
@@ -1476,10 +1479,12 @@ impl Pass<'_> {
             // Gmail drew no recipient for Knowlu's address even after forward.js's second try in place (live, ef28
             // 2026-10-19: a page's first forward). The draft was discarded before Send, so nothing went and its
             // message is given back above: the same forward gets one more try, charged as any send, before the
-            // pass stops.
-            (Some("failed"), Some("recipient not accepted"), _) if !again => {
+            // pass stops. Another address drawn (recipients 1 or more) is never a miss to try again, as in forward.js.
+            (Some("failed"), Some("recipient not accepted"), _) if !again && count(&v, "recipients") == Some(0) => {
                 return self.forward_gmail_once(rows, messages, slow, true);
             }
+            // Missed again, or another address drawn: nothing was sent, and the pass stops naming it.
+            (Some("failed"), Some("recipient not accepted"), _) => return Err(ADDRESS_REFUSED),
             // Too big alone, or the row gone from the page: nothing was sent, and it is left.
             (Some("failed"), Some("over 25 MB"), _) | (Some("not found"), _, Some("message")) => {
                 self.out.left += rows.len() as u32;

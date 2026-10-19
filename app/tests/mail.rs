@@ -735,6 +735,8 @@ struct Fake {
     attach_fails: Option<&'static str>,
     /// Gmail: this many forwards from now draw no recipient ("recipient not accepted", none read; live ef28).
     recipient_misses: Cell<u32>,
+    /// Gmail: a `recipient_misses` forward read another address drawn (recipients 1, no second try in place).
+    other_recipient: bool,
     /// Gmail: the Inbox holds a non-delivery report for the batch once this many forwards have run.
     bounce_after: Option<usize>,
     /// Gmail: the Inbox draws no list (`bounce.js` says `not found`).
@@ -808,6 +810,7 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         oldest_walk: None,
         attach_fails: None,
         recipient_misses: Cell::new(0),
+        other_recipient: false,
         bounce_after: None,
         inbox_unreadable: false,
         no_chip: None,
@@ -1092,6 +1095,9 @@ impl Fake {
                 }
                 if self.recipient_misses.get() > 0 {
                     self.recipient_misses.set(self.recipient_misses.get() - 1);
+                    if self.other_recipient {
+                        return Ok(json!({ "result": "failed", "reason": "recipient not accepted", "recipients": 1 }));
+                    }
                     return Ok(json!({ "result": "failed", "reason": "recipient not accepted", "recipients": 0, "retried": "kept" }));
                 }
                 let want: u64 = rows.iter().map(|r| r["messages"].as_u64().unwrap_or(1)).sum();
@@ -4046,13 +4052,24 @@ fn a_gmail_recipient_not_accepted_is_tried_once_more_and_each_miss_gives_its_mes
     let fwd = once.forwards.borrow();
     assert_eq!(fwd.len(), 2, "the missed forward, then the same one once more");
     assert_eq!(fwd[0].1, fwd[1].1, "the same rows and args");
-    // Missed on its second try too: the pass stops as before, with nothing sent, left or counted.
+    // Missed on its second try too: the pass stops naming it (review of ae3d428: its own word, not the catch-all),
+    // with nothing sent, left or counted.
     let twice = fake(Provider::Gmail, two());
     twice.recipient_misses.set(2);
     let mut r = routine(Provider::Gmail);
     let out = pass(&twice, &holding(&[]), &mut r, &gmail_backfill());
-    assert_eq!((out.stop, out.sent, out.left, r.messages_today()), (Stop::Script("a forward did not finish"), 0, 0, 0));
+    let refused = Stop::Script("the forward's address was not accepted");
+    assert_eq!((out.stop, out.sent, out.left, r.messages_today()), (refused.clone(), 0, 0, 0));
     assert_eq!(twice.forwards.borrow().len(), 2, "one more try, never a third");
+    // Review of ae3d428 (M1): another address drawn is never a miss to try again, here as in forward.js. The
+    // pass stops at once, after one forward, with its message given back.
+    let mut other = fake(Provider::Gmail, two());
+    other.recipient_misses.set(1);
+    other.other_recipient = true;
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&other, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop, out.sent, out.left, r.messages_today()), (refused, 0, 0, 0));
+    assert_eq!(other.forwards.borrow().len(), 1, "no second forward over another recipient");
 }
 
 #[test]
