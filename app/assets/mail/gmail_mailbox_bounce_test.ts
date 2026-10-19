@@ -67,6 +67,8 @@ Deno.test("gmail_bounce_reads_only_the_shown_grid", async () => {
     2,
     "the Inbox's grid is kept",
   );
+  // The Inbox shows again (the hash is back at #inbox) over the search's grid, which is the one shown.
+  box.page.location.hash = "#inbox";
   assertEquals(await run("gmail/bounce.js", box.page, ARGS), { result: "ok", rows: 2 });
   // And a hidden grid drawn after the shown one (the order is Gmail's to choose) is not read either.
   const late = mailbox(MAIL);
@@ -146,4 +148,41 @@ Deno.test("gmail_bounce_and_forward_read_one_list_of_failure_phrases", async () 
   assert(forward, "forward.js names its phrases");
   assertEquals(await phrases("bounce.js"), forward);
   assert(new RegExp(forward.slice(1, -2), "i").test("Address not found"), "Gmail's own heading");
+});
+
+const GRID = (row: string) =>
+  `<div><table role="grid"><tbody><tr role="row"><td><div role="checkbox"></div></td>${row}</tr></tbody></table></div>`;
+
+Deno.test("gmail_bounce_reads_every_shown_grid_not_the_last", async () => {
+  // "Unread first", "Important first" and Priority Inbox draw several grids, all shown.
+  const box = mailbox([...MAIL, QUOTING(2)]);
+  box.el("views").insertAdjacentHTML(
+    "beforeend",
+    GRID(`<td><span class="bog">Quiz 4 moved</span> a preview</td>`),
+  );
+  assertEquals(box.page.document.querySelectorAll('table[role="grid"]').length, 2);
+  assertEquals(await run("gmail/bounce.js", box.page, ARGS), REFUSED);
+  // With no report in either, it counts the rows of both.
+  const clean = mailbox(MAIL);
+  clean.el("views").insertAdjacentHTML("beforeend", GRID(`<td><span class="bog">Quiz 4 moved</span></td>`));
+  assertEquals(await run("gmail/bounce.js", clean.page, ARGS), { result: "ok", rows: 4 });
+});
+
+Deno.test("gmail_bounce_reads_only_the_inbox", async () => {
+  // A search, Sent or a thread is not the Inbox, whatever grid is shown: nothing is read.
+  const box = mailbox([...MAIL, QUOTING(2)]);
+  box.page.location.hash = "#search/after%3A2026%2F10%2F01";
+  await new Promise((done) => setTimeout(done, 100));
+  const none = { result: "not found", control: "inbox" };
+  assertEquals(await run("gmail/bounce.js", box.page, ARGS), none);
+  for (const hash of ["#sent", "#label/School", "#inboxes", "", "#category/updates"]) {
+    box.page.location.hash = hash;
+    assertEquals(await run("gmail/bounce.js", box.page, ARGS), none, hash);
+  }
+  // The Inbox, its pages and an open view of it (a thread hides the list: no grid is shown then).
+  for (const hash of ["#inbox", "#inbox/p2", "#inbox?compose=new"]) {
+    const inbox = mailbox([...MAIL, QUOTING(2)]);
+    inbox.page.location.hash = hash;
+    assertEquals(await run("gmail/bounce.js", inbox.page, ARGS), REFUSED, hash);
+  }
 });

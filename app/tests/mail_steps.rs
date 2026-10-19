@@ -406,3 +406,18 @@ fn the_microsoft_backfill_is_the_guided_step_while_c3_is_built_and_is_never_re_a
     let mut g = setup(Provider::Gmail);
     assert!(drive(&mut g, |_| Outcome::Done).contains(&Step::Backfill));
 }
+
+#[test]
+fn a_routine_remembers_when_it_last_read_the_inbox_for_a_report() {
+    // In memory only: the instant of the last look at the Inbox, so the next look reads from there.
+    let mut r = Routine::new(Provider::Gmail, 9, 0);
+    assert_eq!(r.last_look(), None);
+    r.looked(1_000);
+    assert_eq!(r.last_look(), Some(1_000));
+    r.looked(2_500);
+    assert_eq!(r.last_look(), Some(2_500));
+    // A paused day, a resumed count and a clone all keep it; a refused send does not clear it.
+    let mut paused = r.clone().paused();
+    paused.send_failed(3_000);
+    assert_eq!(paused.last_look(), Some(2_500));
+}

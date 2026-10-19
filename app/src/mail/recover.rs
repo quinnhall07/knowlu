@@ -384,7 +384,7 @@ impl Outcome {
 /// One pass: lists, diffs, forwards, closes. A pass never writes the vault and never fails as a whole:
 /// it ends as a [`Stop`] with the counts so far.
 pub fn run_pass(mb: &dyn Mailbox, client: &MailClient, clock: &dyn Clock, routine: &mut Routine, job: &Job) -> Outcome {
-    let mut pass = Pass { mb, client, clock, routine, job, out: Outcome::new(), batch: None, attempts: 0, judged: HashSet::new(), decided: HashMap::new(), walk: HashMap::new(), since_look: 0 };
+    let mut pass = Pass { mb, client, clock, routine, job, out: Outcome::new(), batch: None, attempts: 0, judged: HashSet::new(), decided: HashMap::new(), walk: HashMap::new(), since_look: 0, restart: false };
     pass.out.stop = pass.go().err().unwrap_or(Stop::Done);
     pass.finish();
     pass.out
@@ -395,12 +395,16 @@ type Step<T> = Result<T, Stop>;
 struct Batch {
     id: String,
     nonce: String,
-    /// When the batch opened (ISO instant): `bounce.js` counts a report naming the address since then.
-    opened: String,
+    /// When the batch opened (unix seconds): a run's first look reads back from [`BOUNCE_LOOKBACK_SECS`] before.
+    opened: i64,
 }
 
 /// A Gmail row as `list.js` reads it: sender, subject and time as the page writes them.
 type RowKey = (String, String, String);
+
+fn key_of(r: &Row) -> RowKey {
+    (r.sender.clone(), r.subject.clone(), r.received.clone())
+}
 
 struct Pass<'a> {
     mb: &'a dyn Mailbox,
@@ -422,6 +426,9 @@ struct Pass<'a> {
     walk: HashMap<RowKey, u32>,
     /// Gmail: originals sent since the last look at the Inbox.
     since_look: u32,
+    /// Gmail: a look at the Inbox left the search page, so the walk must start over. Set by `forward_gmail`,
+    /// returned early on by `flush`/`send_gmail`, and acted on (and cleared) by `gmail`; never a [`Stop`].
+    restart: bool,
 }
 
 /// A missing Gmail row: one message, or a conversation of `n` messages sent alone.
@@ -452,6 +459,13 @@ const OLDEST_WALKS: usize = 200;
 const BOUNCE_EVERY: u32 = 25;
 /// `bounce.js`'s wait for the Inbox's list (it waits twice at most, well inside a [`STEP`]).
 const BOUNCE_WAIT_MS: u64 = 5_000;
+/// A run's first look has no earlier look to read from, so it reaches back this far before the batch opened:
+/// over the gap since the previous slot. A report older than that is the canary's, not this batch's.
+const BOUNCE_LOOKBACK_SECS: i64 = 6 * 3_600;
+/// Gmail: the most pages one walk reads before it is called endless (a result of hundreds of thousands of
+/// pages is not a mailbox). A walk that starts over after a look counts from its restart.
+const WALK_PAGES: usize = 5_000;
+const NO_END: Stop = Stop::Script("the results did not end");
 /// Gmail: `bounce.js` could not read the Inbox (no list, or an answer that was neither "ok" nor "refused").
 const INBOX_UNREADABLE: Stop = Stop::Script("the inbox could not be read");
 
@@ -506,7 +520,7 @@ impl Pass<'_> {
             Phase::Backfill => day_str(j.window.since.div_euclid(DAY)),
             Phase::Recover => iso(j.window.since),
         };
-        let opened = iso(self.clock.now());
+        let opened = self.clock.now();
         let v = svc(self.client.open_batch(j.address_id, j.phase, &since, self.out.expected))?;
         let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         let (Some(id), Some(nonce)) = (text("batch_id"), text("nonce")) else { return Err(Stop::Service("bad-reply")) };
@@ -707,80 +721,99 @@ impl Pass<'_> {
     fn gmail(&mut self, held: &Held) -> Step<()> {
         let mut first = Some(self.gmail_oldest()?);
         let mut go = "oldest";
-        // A result of hundreds of thousands of pages is not a mailbox: stop before it is a loop.
-        for _ in 0..5_000 {
+        let mut pages = 0;
+        while pages < WALK_PAGES {
+            pages += 1;
             let v = match first.take() {
                 Some(v) => v,
                 None => self.ok("list.js", json!({ "go": go }))?,
             };
             if go == "newer" && v.get("moved").and_then(Value::as_bool) != Some(true) {
-                break;
+                return Ok(());
             }
             let mut rows = Vec::new();
             for r in v.get("rows").and_then(Value::as_array).into_iter().flatten() {
                 rows.push(Row::from_json(r).ok_or(Stop::Script("a listed message could not be read"))?);
             }
             let newest_page = v.pointer("/page/from").and_then(Value::as_u64).is_some_and(|from| from <= 1);
-            self.gmail_page(rows, held)?;
-            let look = self.since_look >= BOUNCE_EVERY;
-            if look {
-                self.look_for_bounce()?;
-            }
-            if newest_page {
-                break;
-            }
-            if look {
-                // The look left the search: ask it again and walk from the oldest page. What the pages
-                // already decided is skipped, so nothing is read twice as a message or sent twice.
+            let keys = self.gmail_page(rows, held)?;
+            if self.restart {
+                self.restart = false;
+                // A look left the search. On the newest page with every row decided there is nothing to walk to;
+                // otherwise ask the search again and walk from the oldest page: what is decided is skipped, and
+                // what the look interrupted (rows judged missing but not yet sent) is handled now.
+                if newest_page && self.page_decided(&keys) {
+                    return Ok(());
+                }
                 self.search()?;
                 first = Some(self.gmail_oldest()?);
                 self.walk.clear();
                 go = "oldest";
+                pages = 0;
+            } else if newest_page {
+                return Ok(());
             } else {
                 go = "newer";
             }
         }
-        Ok(())
+        Err(NO_END)
+    }
+
+    /// Whether every row met on a page so far in this walk is decided.
+    fn page_decided(&self, keys: &[RowKey]) -> bool {
+        keys.iter().all(|k| self.decided.get(k).copied().unwrap_or(0) >= self.walk.get(k).copied().unwrap_or(0))
+    }
+
+    fn decide(&mut self, key: RowKey) {
+        *self.decided.entry(key).or_default() += 1;
     }
 
     /// Opens the Inbox and reads it for a non-delivery report of this batch (`bounce.js`). A report ends the
     /// pass as the first send failure does; a list that cannot be read ends it with a fixed word.
     fn look_for_bounce(&mut self) -> Step<()> {
         let Some(batch) = &self.batch else { return Err(INBOX_UNREADABLE) };
+        // From the routine's last look, so a report is counted once; the first of a run reaches back over the gap.
+        let since = self.routine.last_look().unwrap_or(batch.opened - BOUNCE_LOOKBACK_SECS);
         let args = json!({
-            "address": self.job.knowlu_address, "nonce": batch.nonce, "since": batch.opened, "wait_ms": BOUNCE_WAIT_MS,
+            "address": self.job.knowlu_address, "nonce": batch.nonce, "since": iso(since), "wait_ms": BOUNCE_WAIT_MS,
         });
         self.mb.open(Place::Inbox).map_err(refused)?;
         let v = self.mb.script(&self.path("bounce.js"), &args).map_err(refused)?;
         match v.get("result").and_then(Value::as_str) {
             Some("ok") => {
                 self.since_look = 0;
+                self.routine.looked(self.clock.now());
                 Ok(())
             }
             Some("refused") => {
                 self.since_look = 0;
+                self.routine.looked(self.clock.now());
                 Err(self.refusal())
             }
             _ => Err(INBOX_UNREADABLE),
         }
     }
 
-    fn gmail_page(&mut self, rows: Vec<Row>, held: &Held) -> Step<()> {
+    /// Judges a page's rows and sends the missing ones. A row is decided (and so skipped by a walk that starts
+    /// over after an Inbox look) the moment it is held, left, out of the window or sent; a missing row not yet
+    /// sent when a look interrupts the page stays undecided. Returns the keys of the page's rows.
+    fn gmail_page(&mut self, rows: Vec<Row>, held: &Held) -> Step<Vec<RowKey>> {
         let mut cands = Vec::new();
-        let mut decided = Vec::new();
+        let mut keys = Vec::new();
         for row in rows {
-            // A row an earlier walk of this pass decided (the walk starts over after an Inbox look) is skipped
-            // whole: no count, no conversation read, no forward. Each of two rows that read alike counts once.
-            let key = (row.sender.clone(), row.subject.clone(), row.received.clone());
+            // A row an earlier walk of this pass decided is skipped whole: no count, no conversation read, no
+            // forward. Each of two rows that read alike counts once.
+            let key = key_of(&row);
             let met = self.walk.entry(key.clone()).or_default();
             *met += 1;
+            keys.push(key.clone());
             if *met <= self.decided.get(&key).copied().unwrap_or(0) {
                 continue;
             }
-            decided.push(key);
             let Some(at) = row.at else {
                 self.out.left += 1;
                 self.out.handled += 1;
+                self.decide(key);
                 continue;
             };
             let done = if !self.in_window(at) {
@@ -808,14 +841,14 @@ impl Pass<'_> {
                     }
                 }
             };
-            self.out.handled += u32::from(done);
+            if done {
+                self.out.handled += 1;
+                self.decide(key);
+            }
         }
         self.tick()?;
         self.send_gmail(cands)?;
-        for key in decided {
-            *self.decided.entry(key).or_default() += 1;
-        }
-        Ok(())
+        Ok(keys)
     }
 
     /// Opens a conversation row and fingerprints every message in the window (Quinn 2026-10-02). A later
@@ -854,7 +887,8 @@ impl Pass<'_> {
     }
 
     /// Sends a page's missing rows oldest first: consecutive single messages together (at most a minute's
-    /// worth at a time), a conversation alone.
+    /// worth at a time), a conversation alone. Returns early, leaving the rest undecided, when a look at the
+    /// Inbox set `restart`.
     fn send_gmail(&mut self, cands: Vec<Cand>) -> Step<()> {
         let mut group: Vec<Row> = Vec::new();
         for c in cands {
@@ -863,16 +897,25 @@ impl Pass<'_> {
                     group.push(r);
                     if group.len() >= crate::mail_steps::MAX_PER_MINUTE {
                         self.flush(&mut group)?;
+                        if self.restart {
+                            return Ok(());
+                        }
                     }
                 }
                 Cand::Thread(r, n) => {
                     self.flush(&mut group)?;
+                    if self.restart {
+                        return Ok(());
+                    }
                     self.room()?;
                     let mut got = 0;
                     while got < n {
                         got += self.reserve(n - got)?;
                     }
                     self.forward_gmail(vec![r], Some(n))?;
+                    if self.restart {
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -885,6 +928,9 @@ impl Pass<'_> {
             let k = self.reserve(want)? as usize;
             let rows: Vec<Row> = group.drain(..k).collect();
             self.forward_gmail(rows, None)?;
+            if self.restart {
+                return Ok(());
+            }
         }
         Ok(())
     }
@@ -914,6 +960,15 @@ impl Pass<'_> {
                 self.out.sent += sent;
                 self.since_look += sent;
                 self.out.handled += rows.len() as u32;
+                for r in &rows {
+                    self.decide(key_of(r));
+                }
+                // Every 25 sends the Inbox is looked in, at once: a report stops the pass, and the walk (which
+                // the look left) starts over.
+                if self.since_look >= BOUNCE_EVERY {
+                    self.look_for_bounce()?;
+                    self.restart = true;
+                }
             }
             (Some("refused"), _, _) => return Err(self.refusal()),
             // Gmail could not upload the attachments (live 2026-10-19): nothing was sent and the draft is
@@ -929,6 +984,9 @@ impl Pass<'_> {
             {
                 let (a, b) = rows.split_at(rows.len() / 2);
                 self.forward_gmail(a.to_vec(), None)?;
+                if self.restart {
+                    return Ok(());
+                }
                 self.forward_gmail(b.to_vec(), None)?;
             }
             // The page would not take these as sent (too big alone, a row gone, a conversation whose
@@ -937,6 +995,9 @@ impl Pass<'_> {
             | (Some("not found"), _, Some("message")) => {
                 self.out.left += rows.len() as u32;
                 self.out.handled += rows.len() as u32;
+                for r in &rows {
+                    self.decide(key_of(r));
+                }
             }
             _ => return Err(Stop::Script("a forward did not finish")),
         }

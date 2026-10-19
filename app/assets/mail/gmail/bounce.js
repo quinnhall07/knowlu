@@ -17,9 +17,12 @@
 // never counts by its address. A report from an earlier batch, or any other row, is not ours. It reads the
 // rows and nothing else: it clicks and opens nothing, and returns counts and fixed words only, never a row's
 // text, an address or a subject.
-// Live 2026-10-18/19 (WebView2 155): only the SHOWN grid's rows are read (Gmail keeps a previous view's grid
-// in the document, hidden, offsetParent null), as list.js reads them; a row's time is the `title` of the
-// element beside it that holds a clock time.
+// Live 2026-10-18/19 (WebView2 155): only the SHOWN grids' rows are read (Gmail keeps a previous view's grid
+// in the document, hidden, offsetParent null), as list.js reads them, except that EVERY shown grid is read:
+// "Unread first", "Important first" and Priority Inbox draw several. It runs only at the Inbox (the hash
+// `#inbox`, with or without a page or query after it); anywhere else it answers `not found`, since a search or
+// a label would show some other list. A row's time is the `title` of the element beside it that holds a clock
+// time.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 // Shown: live, a hidden view's elements have no offsetParent.
 const shown = (el) => !!el && el.offsetParent !== null;
@@ -43,10 +46,13 @@ const waitMs = Number(args.wait_ms) >= 0 ? Number(args.wait_ms) : 5000;
 const opened = args.since ? new Date(String(args.since)) : null;
 const since = opened && !isNaN(opened.getTime()) ? Math.floor(opened.getTime() / 60000) * 60000 : null;
 
-const grid = () => [...document.querySelectorAll('table[role="grid"]')].filter(shown).pop() || null;
+if (!/^#inbox(?:[/?]|$)/.test(String(location.hash || ""))) return { result: "not found", control: "inbox" };
+const grids = () => [...document.querySelectorAll('table[role="grid"]')].filter(shown);
 const rowEls = () =>
-  grid() ? [...grid().querySelectorAll('tr[role="row"]')].filter((r) => r.querySelector('[role="checkbox"]')) : [];
-if (!(await until(grid, waitMs))) return { result: "not found", control: "inbox" };
+  grids().flatMap((g) => [...g.querySelectorAll('tr[role="row"]')]).filter((r) =>
+    r.querySelector('[role="checkbox"]')
+  );
+if (!(await until(() => grids().length > 0, waitMs))) return { result: "not found", control: "inbox" };
 // The list may be drawn before its rows are.
 await until(() => rowEls().length > 0, waitMs);
 
