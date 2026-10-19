@@ -86,6 +86,16 @@ const head = (r: HeadDb): ClaimHead => ({
 export function storeOver(rest: Rest): PullStore {
   const account = (accountId: string) => `account_id=eq.${id(accountId)}`;
   return {
+    async unlapse(accountId) {
+      // Two compare-and-sets on `status=eq.lapsed`, split on whether a canary ever arrived; neither names
+      // `lapsed_since`. A row intake lapses again between them is simply lapsed: the next pull moves it.
+      const lapsed = `mail_addresses?${account(accountId)}&status=eq.lapsed`;
+      for (const [ok, status] of [["not.is.null", "quiet"], ["is.null", "pending"]]) {
+        const init = { method: "PATCH", body: JSON.stringify({ status }) };
+        await (await call(rest, "unlapse", `${lapsed}&last_canary_ok_at=${ok}`, init, "return=minimal"))
+          .body?.cancel();
+      }
+    },
     async deliver(accountId, uids, atIso) {
       // In parts, so no request line passes a gateway's limit; each part is idempotent on its own, so a
       // pull that fails part way is finished by the device's next ack.

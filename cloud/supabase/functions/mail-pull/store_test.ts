@@ -10,10 +10,14 @@ const MAX_URL = 6 * 1024;
 const uid = (n: number) => `mail:${n.toString(16).padStart(32, "0")}`;
 
 function recording() {
-  const seen: Array<{ method: string; url: string }> = [];
+  const seen: Array<{ method: string; url: string; body?: string }> = [];
   const fetch = (input: string | URL | Request, init?: RequestInit) => {
     const method = init?.method ?? "GET";
-    seen.push({ method, url: String(input) });
+    seen.push({
+      method,
+      url: String(input),
+      ...(init?.body === undefined ? {} : { body: String(init.body) }),
+    });
     return Promise.resolve(
       method === "PATCH" ? new Response(null, { status: 204 }) : new Response("[]", { status: 200 }),
     );
@@ -53,4 +57,17 @@ Deno.test("a_full_page_of_claims_is_read_in_a_short_url", async () => {
   await store.claims(ACCT, Array.from({ length: PAGE }, (_, i) => 9_000_000_000 + i));
   assertEquals(seen.length, 1);
   assert(seen[0].url.length <= MAX_URL, `a ${seen[0].url.length}-character URL`);
+});
+
+// 2026-10-19: a lapsed mailbox leaves `lapsed` on its account's first entitled pull.
+Deno.test("unlapse_patches_only_the_accounts_lapsed_rows", async () => {
+  const { seen, store } = recording();
+  await store.unlapse(ACCT);
+  const base = `http://127.0.0.1:9/rest/v1/mail_addresses?account_id=eq.${ACCT}&status=eq.lapsed`;
+  // One compare-and-set each way: a mailbox a canary ever reached reads `quiet`, one never reached
+  // `pending`. Neither touches `lapsed_since`, which only the device's `covered` clears.
+  assertEquals(seen, [
+    { method: "PATCH", url: `${base}&last_canary_ok_at=not.is.null`, body: '{"status":"quiet"}' },
+    { method: "PATCH", url: `${base}&last_canary_ok_at=is.null`, body: '{"status":"pending"}' },
+  ]);
 });

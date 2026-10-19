@@ -38,6 +38,8 @@ interface Row extends ClaimRow {
 }
 interface Box extends PullMailbox {
   accountId: string;
+  /** Stored, never answered: what `unlapse` splits on. */
+  lastCanaryOkAt?: string | null;
 }
 
 /** The database as `mail-pull` sees it; every call is recorded by name. */
@@ -64,10 +66,20 @@ class FakeStore implements PullStore {
     }
     return Promise.resolve();
   }
+  unlapse(accountId: string) {
+    this.note("unlapse");
+    for (const b of this.boxes) {
+      if (b.accountId !== accountId || b.status !== "lapsed") continue;
+      b.status = (b.lastCanaryOkAt ?? null) === null ? "pending" : "quiet";
+    }
+    return Promise.resolve();
+  }
   mailboxes(accountId: string) {
     this.note("mailboxes");
     return Promise.resolve(
-      this.boxes.filter((b) => b.accountId === accountId).map(({ accountId: _, ...b }) => ({ ...b })),
+      this.boxes.filter((b) => b.accountId === accountId).map((
+        { accountId: _a, lastCanaryOkAt: _c, ...b },
+      ) => ({ ...b })),
     );
   }
   batches(addressIds: string[]) {
@@ -566,6 +578,54 @@ Deno.test("each_mailboxs_state_and_reenabled_at_ride_on_the_answer", async () =>
   assertEquals(await w.answer(), { messages: [], mailboxes: [], more: false, draining: false });
 });
 
+// ---------------------------------------------------------------- leaving `lapsed` (2026-10-19)
+
+const statusOf = (a: Answer, id: string) => a.mailboxes.find((m) => m.address_id === id)?.status;
+
+Deno.test("a_lapsed_mailbox_reads_quiet_once_its_account_pulls_entitled", async () => {
+  const w = world();
+  const since = iso(NOW - 5 * DAY);
+  w.store.boxes = [box(M1, { status: "lapsed", lapsedSince: since, lastCanaryOkAt: iso(NOW - 9 * DAY) })];
+  const a = await w.answer();
+  // `quiet`, never `active`: nothing proves the forward survived the lapse, so the canary comes back and
+  // the device runs repair; `lapsed_since` is the window repair reaches back to, so it stays.
+  assertEquals(statusOf(a, M1), "quiet");
+  assertEquals(a.mailboxes[0].lapsed_since, since);
+  // Before the read, so the same answer carries it.
+  assertEquals(w.store.calls.slice(0, 2), ["unlapse", "mailboxes"]);
+  assertEquals(w.store.boxes[0].lapsedSince, since);
+});
+
+Deno.test("a_never_active_lapsed_mailbox_reads_pending", async () => {
+  const w = world();
+  const since = iso(NOW - 2 * DAY);
+  w.store.boxes = [box(M1, { status: "lapsed", lapsedSince: since, lastCanaryOkAt: null })];
+  const a = await w.answer();
+  // No canary ever arrived: its setup never finished, so it goes back to the start of setup.
+  assertEquals(statusOf(a, M1), "pending");
+  assertEquals(a.mailboxes[0].lapsed_since, since);
+});
+
+Deno.test("unlapse_leaves_lapsed_since_and_other_accounts_alone", async () => {
+  const w = world();
+  const since = iso(NOW - 3 * DAY);
+  const ok = iso(NOW - 4 * DAY);
+  w.store.boxes = [
+    box(M1, { status: "lapsed", lapsedSince: since, lastCanaryOkAt: ok }),
+    box(M2, { status: "off", lapsedSince: since, lastCanaryOkAt: ok }),
+    box(M3, { status: "revoked", lapsedSince: since, lastCanaryOkAt: ok }),
+    box(MO, { accountId: OTHER, status: "lapsed", lapsedSince: since, lastCanaryOkAt: ok }),
+  ];
+  await w.answer();
+  assertEquals(w.store.boxes.map((b) => [b.status, b.lapsedSince]), [
+    ["quiet", since],
+    ["off", since],
+    ["revoked", since],
+    // The other account's mailbox is its own pull's to move.
+    ["lapsed", since],
+  ]);
+});
+
 // ---------------------------------------------------------------- pages and the gate
 
 Deno.test("an_answer_holds_at_most_a_page_and_says_more_and_whether_a_closed_batch_is_draining", async () => {
@@ -592,11 +652,14 @@ Deno.test("an_answer_holds_at_most_a_page_and_says_more_and_whether_a_closed_bat
 Deno.test("the_pull_needs_a_session_an_entitlement_and_post", async () => {
   const w = world("canceled");
   w.store.add({ n: 1, ordering: NOW - HOUR });
+  w.store.boxes[0].status = "lapsed";
+  w.store.boxes[0].lapsedSince = iso(NOW - DAY);
   assertEquals((await w.pull([uid(1)])).status, 402);
   assertEquals((await w.pull([uid(1)], "nobody")).status, 401);
-  // Nothing was read or written for either, the ack included.
+  // Nothing was read or written for either, the ack included; a lapsed mailbox stays lapsed.
   assertEquals(w.store.calls, []);
   assertEquals(w.store.rows[0].deliveredAt, null);
+  assertEquals(w.store.boxes[0].status, "lapsed");
   const ok = world();
   const get = await ok.pull(undefined, "session", "GET");
   assertEquals(get.status, 405);
@@ -614,6 +677,8 @@ Deno.test("the_pull_needs_a_session_an_entitlement_and_post", async () => {
   const notJson = await post("{not json");
   assertEquals(notJson.status, 400);
   await notJson.body?.cancel();
+  // A refused body writes nothing either.
+  assertEquals(ok.store.calls.includes("unlapse"), false);
   const empty = await post("");
   assertEquals(empty.status, 200);
   assertEquals((await empty.json()).messages, []);

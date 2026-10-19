@@ -26,6 +26,11 @@
  *    `draining` says some of them belong to a closed batch, which the device drains past its three live
  *    rounds (§4.8 step 1).
  *
+ * 0. **Leave `lapsed`** (spec §4.6 step 3, amended 2026-10-19). The pull is entitled, so each of the
+ *    account's `lapsed` mailboxes reads `quiet` when a canary ever reached it, else `pending`: nothing
+ *    proves the forward survived the lapse, so the canary and the device's repair take it from there.
+ *    `lapsed_since` stays until the device reports the gap covered (`mail`'s `covered` state word).
+ *
  * Each of the account's mailboxes but a revoked one rides on every answer, with its status, `reenabled_at`
  * and counters (§4.10's *Shown*); a revoked mailbox's messages are never delivered. No token, hash, hint
  * or key is in the answer. **Nothing here logs** a uid, a sender or a claim.
@@ -84,6 +89,9 @@ export interface ClaimRow extends ClaimHead {
   judgmentId: string | null;
 }
 export interface PullStore {
+  /** Each of the account's `lapsed` mailboxes reads `quiet` when a canary ever reached it
+   * (`last_canary_ok_at` set) and `pending` when none did; `lapsed_since` is left as it is. */
+  unlapse(accountId: string): Promise<void>;
   /** Stamps `delivered_at` on the account's undelivered rows whose uid is listed. */
   deliver(accountId: string, uids: string[], atIso: string): Promise<void>;
   /** Every `mail_addresses` row of the account, whatever its status, in a stable order. */
@@ -245,6 +253,9 @@ export function pullHandler(deps: PullDeps): (req: Request) => Promise<Response>
       const ack = await readAck(req);
       const now = deps.now();
       if (ack.length > 0) await deps.store.deliver(account_id, ack, iso(now));
+      // The account is entitled again, so a mailbox lapsed while it was not leaves `lapsed` here, before
+      // the read, so this answer carries it.
+      await deps.store.unlapse(account_id);
       const boxes = (await deps.store.mailboxes(account_id)).filter((b) => b.status !== "revoked");
       const mailboxes = new Set(boxes.map((b) => b.id));
       // Batches and their waiting work are read before the claims: mail-process queues an item's claim
