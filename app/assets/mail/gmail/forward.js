@@ -9,8 +9,9 @@
 // `args.max_bytes` (default 25000000) the most the attachments may add up to, `args.wait_ms` (default
 // 5000) bounds each wait, and `args.upload_ms` (default 30000, never less than `wait_ms`) bounds the wait for
 // the attachments to upload. It returns one of
-//   { result: "ok", sent: true, count: number }   (count: the attachments sent, a conversation row's
-//      messages each)
+//   { result: "ok", sent: true, count: number, retried? }   (count: the attachments sent, a conversation row's
+//      messages each; `retried`, "kept" | "retyped" | "redrawn" | "gone", only when the recipient took a second
+//      try in place, and what that try found)
 //   { result: "refused", reason: "send failure" | "non-delivery report" }   (the routine stops: nothing is
 //      sent again until the next day)
 //   { result: "not found", control: "message" | "more menu" | "forward as attachment" | "send" | "to" |
@@ -26,20 +27,22 @@
 //      "no attachment" is checked before the count, so a lone row whose chip never draws answers it, not
 //      "attachments do not match the rows"; "attachments do not match the rows" and "attachment still
 //      uploading" also carry `attached` and `expected`, the counts it compared or had seen attach; "recipient
-//      not accepted" carries `recipients`, how many it read)
+//      not accepted" carries `recipients`, how many it read, and `retried` as above when it took a second try)
 // Worst case, inside the host's 90 s step with the default waits (5 s each, 30 s for the upload): Knowlu's own
 // leftover compose to go 5, the rows ticked 5, the menu item 5, Send 5, the upload 30, then a failure's cleanup
 // (the compose to go 5, the rows to let go 5) is 60 s; a recipient not accepted adds that wait (5) before its
 // cleanup, 65 s; a send that settles is 65 s as well (the same waits, then the Send's own 5 and the rows 5).
-// So every wait but the upload is 35 s at most, and an `upload_ms` of U is 35 s + U: the routine's one longer try
-// for a lone slow row (recover.rs SLOW_UPLOAD_MS, 50 s) is 85 s, inside the step.
+// The recipient's second try waits `wait_ms` or what the upload left of its bound, the less, so the upload and
+// it together are U at most. So every wait but the upload is 35 s at most, and an `upload_ms` of U is 35 s + U:
+// the routine's one longer try for a lone slow row (recover.rs SLOW_UPLOAD_MS, 50 s) is 85 s, inside the step.
 // It sends one message to that one address and nothing else: the subject is exactly `Knowlu <nonce>`
 // (sent_cleanup.js deletes by that same subject), the originals' words are not in it, and a compose window
 // with no attachment, a count of attachments that is not the rows', more than the size limit, Gmail's offer
 // of Google Drive links, another recipient or the wrong subject is never sent: the draft is discarded and the
 // selection let go. Over the limit is the caller's to halve; a send is never split here. It looks for a
 // refusal before it acts, so a report already on the page stops the next forward, and again after the Send.
-// Nothing here retries: "send did not settle" is not a reason to press Send again.
+// Send is pressed once at most: "send did not settle" is not a reason to press it again. The one thing tried
+// twice is the To line, before Send, when no recipient drew.
 // Live 2026-10-18/19 (WebView2 155): only the SHOWN grid's rows are read (Gmail keeps a previous view's grid
 // in the document, hidden, offsetParent null); a row's checkbox toggles on `click()`. The toolbar's More is
 // aria-label "More email options" (aria-haspopup "false") and opens on a press (pointerdown, mousedown,
@@ -269,7 +272,10 @@ const attached = () => [...compose.querySelectorAll('[aria-label^="Attachment:"]
 // Uploads have their own bound: live (2026-10-19) several rows' chips attach one at a time, seconds apart,
 // for longer than a step's wait. A compose that attached fewer is known only when the bound runs out: a
 // count holding steady for a while is not the end of it.
+const uploadFrom = Date.now();
 await until(() => uploadFailed() || (!uploading() && attached().length >= expected), uploadMs);
+// What the upload left of its bound: the recipient's second wait, if it needs one, comes out of it.
+const uploadLeft = Math.max(0, uploadMs - (Date.now() - uploadFrom));
 // A chip still uploading at the bound is neither counted nor sized: it is never sent.
 if (uploadFailed()) return await bail({ result: "failed", reason: "attachment failed" });
 if (uploading()) {
@@ -309,12 +315,30 @@ const offer = [...compose.querySelectorAll('[role="alert"], [role="alertdialog"]
 if (total >= maxBytes || offer) return await bail({ result: "failed", reason: "over 25 MB" });
 
 const recipients = () => recipientsIn(compose);
-setValue(to, String(args.address).trim());
+const typed = String(args.address).trim();
+setValue(to, typed);
 press(to, "Enter");
 await until(() => recipients().length > 0, waitMs);
+// Live (ef28, 2026-10-19): a page's first forward drew no recipient and the pass stopped. With none drawn after
+// the first wait, the To field is found again and tried once more in place: a field drawn anew ("redrawn") or
+// one whose text is gone ("retyped") is typed into again, text still in it is committed again ("kept"); "gone":
+// no To field is left. The answer names which, `retried`. Another recipient drawn is never a miss to retry.
+let retried = null;
+if (recipients().length === 0) {
+  const again = fieldIn(compose, TO);
+  retried = !again ? "gone" : again !== to ? "redrawn" : norm(again.value) === address ? "kept" : "retyped";
+  if (again) {
+    if (retried === "kept") {
+      if (again.focus) again.focus();
+    } else setValue(again, typed);
+    press(again, "Enter");
+    await until(() => recipients().length > 0, Math.min(waitMs, uploadLeft));
+  }
+}
+const tried = retried ? { retried } : {};
 const got = recipients();
 if (got.length !== 1 || got[0] !== address) {
-  return await bail({ result: "failed", reason: "recipient not accepted", recipients: got.length });
+  return await bail({ result: "failed", reason: "recipient not accepted", recipients: got.length, ...tried });
 }
 
 const line = `Knowlu ${nonce}`;
@@ -329,4 +353,4 @@ if (document.contains(sendButton)) return { result: "failed", reason: "send did 
 // Live (2026-10-19) the forwarded rows stay ticked after the send; the next forward starts from none.
 for (const r of ticked()) boxOf(r).click();
 await until(() => ticked().length === 0, waitMs);
-return { result: "ok", sent: true, count: attachments.length };
+return { result: "ok", sent: true, count: attachments.length, ...tried };

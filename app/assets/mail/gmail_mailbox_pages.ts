@@ -64,6 +64,11 @@ export interface Opts {
   noAttachmentItem?: boolean;
   /** The compose window opens already addressed to someone else. */
   prefill?: string;
+  /** The To line draws no recipient for the first address committed to it (live, ef28 2026-10-19: none on a
+   * page's first forward): its first Enter is taken and the text kept ("enter"), or the text taken and no
+   * recipient drawn ("lost"); or the field is drawn again when the attachments go in, the one found before gone
+   * ("redrawn", with `upload`); "never": no recipient is ever drawn. */
+  toMiss?: "enter" | "lost" | "redrawn" | "never";
   /** "Forward as attachment" opens a compose with no attachment. */
   bare?: boolean;
   /** The compose carries one attachment fewer than the rows selected. */
@@ -509,6 +514,31 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     }
       <div role="button" aria-label="Send ‪(Ctrl-Enter)‬" data-tooltip="Send">Send</div>
       <div role="button" aria-label="Discard draft ‪(Ctrl-Shift-D)‬">Discard</div></div>`;
+    // Enter on the To line draws the typed address as a recipient (`toMiss`: not the first time, or never).
+    let misses = o.toMiss === "enter" || o.toMiss === "lost" ? 1 : 0;
+    const accepts = (input: El) =>
+      input.addEventListener("keydown", (e: El) => {
+        const v = input.value.trim();
+        // A field drawn over is not the page's any more: nothing typed into it reaches the compose.
+        if (e.key !== "Enter" || !v || o.toMiss === "never" || !d.contains(input)) return;
+        if (misses > 0) {
+          misses--;
+          if (o.toMiss === "lost") input.value = "";
+          return;
+        }
+        b.el("chips").insertAdjacentHTML("beforeend", chip(v));
+        input.value = "";
+      });
+    accepts(b.el("to"));
+    const redrawTo = () => {
+      if (o.toMiss !== "redrawn" || !b.el("to")) return;
+      const fresh = d.createElement("input");
+      for (const [k, v] of [["type", "text"], ["id", "to"], ["aria-label", "To recipients"]]) {
+        fresh.setAttribute(k, v);
+      }
+      b.el("to").replaceWith(fresh);
+      accepts(fresh);
+    };
     if (o.staggerMs) {
       files.forEach((m, i) =>
         setTimeout(() => b.el("files")?.insertAdjacentHTML("beforeend", attached(m)), o.staggerMs! * (i + 1))
@@ -517,14 +547,9 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       setTimeout(() => {
         const box = b.el("files");
         if (box) box.innerHTML = files.map(o.upload === "fails" ? failed : attached).join("");
+        redrawTo();
       }, o.uploadMs ?? 100);
     }
-    b.el("to").addEventListener("keydown", (e: El) => {
-      const v = b.el("to").value.trim();
-      if (e.key !== "Enter" || !v) return;
-      b.el("chips").insertAdjacentHTML("beforeend", chip(v));
-      b.el("to").value = "";
-    });
     const button = (label: string) =>
       [...b.el("over").querySelectorAll('[role="button"]')].find((x: El) =>
         (x.getAttribute("aria-label") || "").startsWith(label)
