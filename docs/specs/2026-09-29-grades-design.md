@@ -160,7 +160,7 @@ calls failed carries `"error": "<status or reason>"` and empty arrays; the engin
   | `source`, `source_uid` | `blackboard`, the column id |
   | `kind` | `item`, or `overall` for the `externalGrade` column |
   | `possible` | `score.possible`, or absent |
-  | `score` | the row's numeric `score`, absent until graded |
+  | `score` | the row's numeric `score`; else (2026-10-19) `displayGrade.score` when `displayGrade.scaleType` is `Score` or `CompleteIncomplete` and the row's `status` is `Graded` or absent. Percent and Tabular are not taken until one live row of each is compared with the column's points. Absent until graded |
   | `status` | `graded` (a numeric score), `needs-grading`, `in-progress`, `not-submitted` (no row), `exempt`, or `removed` (the column no longer comes back) |
   | `counts` | `includeInCalculations` |
   | `category` | the category title when known, else absent |
