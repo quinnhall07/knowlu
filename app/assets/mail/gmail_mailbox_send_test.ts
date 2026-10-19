@@ -108,11 +108,29 @@ Deno.test("gmail_forward_gives_uploads_longer_than_a_step_wait_and_names_the_cou
   // that settled on a count holding steady sent nothing and left the rows.
   const staggered = mailbox(MAIL, { staggerMs: 2200 });
   assertEquals(await run("gmail/forward.js", staggered.page, TARGET), { result: "ok", sent: true, count: 2 });
-  const newest = mailbox(MAIL, { upload: "slow", uploadMs: 400 });
+  // A compose that really attached fewer says what it counted once the bound runs out.
+  const short = mailbox(MAIL, { short: true });
   assertEquals(
-    await run("gmail/forward.js", newest.page, { ...TARGET, wait_ms: 100, upload_ms: 200 }),
-    { result: "failed", reason: "attachments do not match the rows", attached: 0, expected: 2 },
+    await run("gmail/forward.js", short.page, { ...TARGET, wait_ms: 100, upload_ms: 200 }),
+    { result: "failed", reason: "attachments do not match the rows", attached: 1, expected: 2 },
   );
+  // Still uploading when the bound runs out is a failed upload, never a count.
+  const stalled = mailbox(MAIL, { upload: "slow", uploadMs: 400 });
+  assertEquals(await run("gmail/forward.js", stalled.page, { ...TARGET, wait_ms: 100, upload_ms: 200 }), {
+    result: "failed",
+    reason: "attachment failed",
+  });
+});
+
+Deno.test("gmail_forward_never_sends_with_a_chip_still_uploading_at_the_bound", async () => {
+  // Review of 1ed1b7c: the rows' chips attached and one more still uploads when upload_ms runs out. That chip
+  // is neither counted nor sized, so nothing is sent: the draft is discarded and the rows let go.
+  const box = mailbox(MAIL, { stuckChip: true });
+  assertEquals(await run("gmail/forward.js", box.page, { ...TARGET, upload_ms: 300 }), {
+    result: "failed",
+    reason: "attachment failed",
+  });
+  assertEquals([box.sent, box.discards, box.checked()], [[], 1, []]);
 });
 
 Deno.test("gmail_forward_reads_the_size_inside_the_chip_never_the_name", async () => {

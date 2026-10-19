@@ -83,6 +83,8 @@ export interface Opts {
   uploadMs?: number;
   /** The compose draws no chip at first, then one attached chip every this many ms (live 2026-10-19). */
   staggerMs?: number;
+  /** One more chip than the rows', still uploading and never finishing, beside the attached ones. */
+  stuckChip?: boolean;
   /** The row of `id` shows the message `as` once it is ticked. */
   swap?: { id: string; as: string };
   /** The page shows no "1–50 of 123" range. */
@@ -446,7 +448,9 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       <input type="text" id="subj" name="subjectbox" aria-label="Subject" value="Fwd: ${
       esc(picked[0]?.subject ?? "")
     }">
-      <div id="files">${o.upload === "late" || o.staggerMs ? "" : files.map(o.upload ? uploading : attached).join("")}</div>
+      <div id="files">${o.upload === "late" || o.staggerMs ? "" : files.map(o.upload ? uploading : attached).join("")}${
+        o.stuckChip && files[0] ? uploading(files[0]) : ""
+      }</div>
       ${
       o.driveOffer || total > LIMIT
         ? `<div role="alertdialog">The files you attached are over 25 MB. Send them as Google Drive links?</div>`

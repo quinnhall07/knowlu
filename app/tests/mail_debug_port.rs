@@ -43,7 +43,7 @@ fn the_mail_window_keeps_wrys_defaults_and_turns_off_chromium_155s_redirect_chan
     let open = &open[..open.find("\n}\n").expect("open ends")];
     let set = open.find(".additional_browser_args(").expect("open sets the mail window's browser args");
     assert!(open[set..].starts_with(".additional_browser_args(args.as_deref().unwrap_or(MAIL_BROWSER_ARGS))"));
-    assert!(set < open.find(".build()").unwrap(), "the args are set after build");
+    assert!(set < open.find(".build()").unwrap(), "the args are not set before build");
 }
 
 #[test]
