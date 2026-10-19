@@ -1794,6 +1794,21 @@ pub fn main_with_sources(
     fetchers: Option<&[(&str, Fetcher)]>,
     completions: Option<&CompletionSink>,
 ) -> i32 {
+    main_with_sources_on(vault, dry_run, via, run_id, fetchers, completions, None)
+}
+
+/// [`main_with_sources`] with the day `sync_coursework` judges "already past" against exposed.
+/// `None` is the vault's own clock and the only value production passes; a test pins a day so an
+/// item's due date cannot drift past the cutoff and change which folder it lands in.
+fn main_with_sources_on(
+    vault: &Path,
+    dry_run: bool,
+    via: &str,
+    run_id: Option<&str>,
+    fetchers: Option<&[(&str, Fetcher)]>,
+    completions: Option<&CompletionSink>,
+    sync_today: Option<Date>,
+) -> i32 {
     let own_sink = CompletionSink::default();
     let sink = completions.unwrap_or(&own_sink);
     let zybooks_into = |cfg: &Mapping, tz: &TimeZone, warnings: &mut Vec<String>| {
@@ -1864,7 +1879,7 @@ pub fn main_with_sources(
         if !assignments.is_empty() {
             // R-C1c-6: `sync_coursework` now judges the archive per source group, computed from
             // `assignments` and the vault's own `known`/`seen` state — no first-run flag to pass.
-            log.extend(sync_coursework(&assignments, vault, None, dry_run, Some(&ctx), None)?);
+            log.extend(sync_coursework(&assignments, vault, sync_today, dry_run, Some(&ctx), None)?);
         }
         // Stream J T8: after the sync, so a note created this run can be proposed this run. Its
         // log lines (`proposed done: …`) start with none of the sync step's counted prefixes.
@@ -3479,16 +3494,25 @@ mod tests {
             Ok(vec![plain()])
         };
         let fetchers: [(&str, Fetcher); 1] = [("zybooks", &ok)];
+        // Pinned, as 4123749 pinned the ingest feed tests: `plain()` is due 2026-08-26, so on the
+        // vault's real clock it is imported-past and goes to `archive/`.
         assert_eq!(
-            main_with_fetchers(
+            main_with_sources_on(
                 &vault,
                 false,
                 "local-runner",
                 Some("local-2026-08-29T17:00:00Z"),
-                Some(&fetchers)
+                Some(&fetchers),
+                None,
+                Some(date(2026, 8, 20)),
             ),
             0
         );
+        // The item must reach the create path into `tasks/`, which is the path this test is about.
+        // An item due before the day the run reads goes to `archive/` (R-C1c-6 / R-OB-3) and the
+        // journal would look the same, so the folder is asserted, not inferred.
+        let in_dir = |d: &str| std::fs::read_dir(vault.join(d)).map(|r| r.count()).unwrap_or(0);
+        assert_eq!((in_dir("tasks"), in_dir("archive")), (1, 0), "created into tasks/, not archived");
         let records = journal_records(&vault);
         assert!(!records.is_empty(), "coursework created a note but journalled nothing");
         assert!(records
@@ -3583,10 +3607,13 @@ mod tests {
             Ok(vec![plain()])
         };
         let fetchers: [(&str, Fetcher); 1] = [("zybooks", &ok)];
+        // Pinned day: `plain()` is due 2026-08-26, past on the vault's real clock (see
+        // `main_journals_under_the_runners_via_and_run_id`), where it would archive instead.
         assert_eq!(
-            main_with_fetchers(&vault, false, "cli", None, Some(&fetchers)),
+            main_with_sources_on(&vault, false, "cli", None, Some(&fetchers), None, Some(date(2026, 8, 20))),
             0
         );
+        assert_eq!(std::fs::read_dir(vault.join("tasks")).unwrap().count(), 1, "created into tasks/");
         let records = journal_records(&vault);
         assert!(!records.is_empty());
         assert!(records.iter().all(|r| r["via"] == serde_json::json!("cli")));
@@ -3605,12 +3632,15 @@ mod tests {
             Ok(vec![plain()])
         };
         let fetchers: [(&str, Fetcher); 1] = [("zybooks", &ok)];
+        // Pinned day, so the item is one a live run would create into `tasks/`; without it the
+        // empty `tasks/` below would be true of a live run too (it would archive).
         assert_eq!(
-            main_with_fetchers(&vault, true, "cli", None, Some(&fetchers)),
+            main_with_sources_on(&vault, true, "cli", None, Some(&fetchers), None, Some(date(2026, 8, 20))),
             0
         );
         assert!(!vault.join("state").join("runner-log.md").exists());
         assert_eq!(std::fs::read_dir(vault.join("tasks")).unwrap().count(), 0);
+        assert!(!vault.join("archive").exists() || std::fs::read_dir(vault.join("archive")).unwrap().count() == 0);
         let _ = std::fs::remove_dir_all(&vault);
     }
 
