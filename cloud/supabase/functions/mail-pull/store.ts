@@ -42,6 +42,7 @@ interface MailboxDb {
   status: string;
   reenabled_at: string | null;
   lapsed_since: string | null;
+  last_lapsed_at: string | null;
   last_received_at: string | null;
   unbound: number;
   unauthenticated: number;
@@ -100,8 +101,8 @@ export function storeOver(rest: Rest): PullStore {
     },
     async mailboxes(accountId) {
       const q =
-        `${account(accountId)}&select=id,provider,status,reenabled_at,lapsed_since,last_received_at,` +
-        `unbound,unauthenticated,expired&order=id`;
+        `${account(accountId)}&select=id,provider,status,reenabled_at,lapsed_since,last_lapsed_at,` +
+        `last_received_at,unbound,unauthenticated,expired&order=id`;
       return (await rows<MailboxDb>(await call(rest, "mailboxes", `mail_addresses?${q}`))).map((
         r,
       ): PullMailbox => ({
@@ -110,6 +111,7 @@ export function storeOver(rest: Rest): PullStore {
         status: r.status,
         reenabledAt: r.reenabled_at,
         lapsedSince: r.lapsed_since,
+        lastLapsedAt: r.last_lapsed_at,
         lastReceivedAt: r.last_received_at,
         unbound: r.unbound,
         unauthenticated: r.unauthenticated,

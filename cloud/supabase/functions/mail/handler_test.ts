@@ -249,11 +249,12 @@ class FakeStore implements MailStore {
     if (patch.confirmUntil !== undefined) r.confirmUntil = patch.confirmUntil;
     return Promise.resolve(true);
   }
-  clearLapsed(accountId: string, id: string, stamp: string) {
+  clearLapsed(accountId: string, id: string, stamp: string, last: string) {
     this.calls.push("clearLapsed");
     const r = this.mine(accountId, id);
-    // `lapsed_since=eq.<stamp>` compares instants, as Postgres does.
-    const same = r?.lapsedSince != null && Date.parse(r.lapsedSince) === Date.parse(stamp);
+    // `lapsed_since=eq.<stamp>` and `last_lapsed_at=eq.<last>` compare instants, as Postgres does.
+    const at = (v: string | null | undefined, x: string) => v != null && Date.parse(v) === Date.parse(x);
+    const same = at(r?.lapsedSince, stamp) && at(r?.lastLapsedAt, last);
     if (r === undefined || !same || r.status === "lapsed" || r.status === "revoked") {
       return Promise.resolve(false);
     }
@@ -273,6 +274,7 @@ function blank(id: string, accountId: string, provider: MailRow["provider"], tok
     retiredUntil: null,
     mailboxHint: null,
     lapsedSince: null,
+    lastLapsedAt: null,
     reenabledAt: null,
     backfillSince: null,
     lastReceivedAt: null,
@@ -1394,36 +1396,39 @@ Deno.test("state_confirming_opens_a_fifteen_minute_confirm_window", async () => 
 // ---------------------------------------------------------------- `covered` (2026-10-19)
 
 const SINCE = "2026-09-28T08:15:00.123+00:00";
+/** The latest lapse; the device echoes it with `lapsed_since` (review of the lapsed fix, #1). */
+const LAST = "2026-10-01T10:00:00.456+00:00";
 
-Deno.test("covered_clears_lapsed_since_only_for_the_stamp_given", async () => {
+Deno.test("covered_clears_lapsed_since_only_for_the_stamps_given", async () => {
   const w = await world();
   const row = () => w.store.rows.find((r) => r.id === A1)!;
   // Unlapsed by a pull, its gap not yet covered.
   row().status = "quiet";
   row().lapsedSince = SINCE;
-  const covered = (stamp: unknown, id = A1) =>
-    w.call("POST", `/addresses/${id}/state`, { state: "covered", lapsed_since: stamp });
-  // A stamp that is not the mailbox's (an older lapse's, or a newer one's) clears nothing.
+  row().lastLapsedAt = LAST;
+  const covered = (stamp: unknown, last: unknown = LAST, id = A1) =>
+    w.call("POST", `/addresses/${id}/state`, { state: "covered", lapsed_since: stamp, last_lapsed_at: last });
+  const no = { address_id: A1, state: "covered", status: "quiet", cleared: false };
+  // A stamp that is not the mailbox's (an older lapse's, or a newer one's) clears nothing, nor does a
+  // latest lapse that is not the mailbox's.
   const other = await covered("2026-09-20T00:00:00.000Z");
   assertEquals(other.status, 200);
-  assertEquals(await other.json(), { address_id: A1, state: "covered", status: "quiet", cleared: false });
+  assertEquals(await other.json(), no);
+  assertEquals(await (await covered(SINCE, SINCE)).json(), no);
   assertEquals(row().lapsedSince, SINCE);
-  // Its own stamp, as the pull answered it: cleared.
-  const own = await covered(SINCE);
+  // Its own stamps, as the pull answered them (the same instants, written another way): cleared.
+  const own = await covered("2026-09-28T03:15:00.123-05:00", "2026-10-01T10:00:00.456Z");
   assertEquals(own.status, 200);
-  assertEquals(await own.json(), { address_id: A1, state: "covered", status: "quiet", cleared: true });
-  assertEquals([row().status, row().lapsedSince], ["quiet", null]);
+  assertEquals(await own.json(), { ...no, cleared: true });
+  // `last_lapsed_at` stays: it records the lapse, not the gap.
+  assertEquals([row().status, row().lapsedSince, row().lastLapsedAt], ["quiet", null, LAST]);
   // Sent again (a retry): nothing left to clear, and still a 200.
-  assertEquals(await (await covered(SINCE)).json(), {
-    address_id: A1,
-    state: "covered",
-    status: "quiet",
-    cleared: false,
-  });
+  assertEquals(await (await covered(SINCE)).json(), no);
   // Another account's mailbox is not found, and its stamp stays.
   const theirs = w.store.rows.find((r) => r.id === B1)!;
   theirs.lapsedSince = SINCE;
-  assertEquals((await covered(SINCE, B1)).status, 404);
+  theirs.lastLapsedAt = LAST;
+  assertEquals((await covered(SINCE, LAST, B1)).status, 404);
   assertEquals(theirs.lapsedSince, SINCE);
 });
 
@@ -1432,42 +1437,68 @@ Deno.test("covered_while_still_lapsed_changes_nothing", async () => {
   const row = w.store.rows.find((r) => r.id === A1)!;
   row.status = "lapsed";
   row.lapsedSince = SINCE;
-  const res = await w.call("POST", `/addresses/${A1}/state`, { state: "covered", lapsed_since: SINCE });
+  row.lastLapsedAt = LAST;
+  const body = { state: "covered", lapsed_since: SINCE, last_lapsed_at: LAST };
+  const res = await w.call("POST", `/addresses/${A1}/state`, body);
   assertEquals(res.status, 200);
   assertEquals(await res.json(), { address_id: A1, state: "covered", status: "lapsed", cleared: false });
   // The gap is still open while the mailbox is lapsed: the stamp and the status stay.
   assertEquals([row.status, row.lapsedSince], ["lapsed", SINCE]);
 });
 
-Deno.test("covered_without_a_valid_stamp_is_400", async () => {
+Deno.test("a_relapse_between_the_pull_and_covered_keeps_the_gap", async () => {
+  // Review of the lapsed fix, #1. A pull unlapses the mailbox to `quiet` and answers (SINCE, LAST); the
+  // device starts a pass that spans slots. The card goes past due, message M arrives and is deleted
+  // unread: intake lapses the mailbox again, keeping SINCE (the first gap is not covered yet) and
+  // recording this lapse in `last_lapsed_at`. The card retry succeeds, a second pull unlapses to `quiet`.
+  // Then the pass ends and posts `covered` with the stamps it read before it started.
   const w = await world();
   const row = w.store.rows.find((r) => r.id === A1)!;
+  Object.assign(row, { status: "quiet", lapsedSince: SINCE, lastLapsedAt: LAST });
+  // The device's list carries both stamps, as the pull does.
+  const [a] = (await (await w.call("GET", "/addresses")).json()).addresses;
+  assertEquals([a.lapsed_since, a.last_lapsed_at], [SINCE, LAST]);
+  const relapse = "2026-10-03T12:00:00.000Z";
+  // Intake's re-lapse (`markLapsed`'s stamped write), then the second pull's unlapse.
+  Object.assign(row, { status: "lapsed", lastLapsedAt: relapse });
+  assertEquals(row.lapsedSince, SINCE);
   row.status = "quiet";
-  row.lapsedSince = SINCE;
+  const body = { state: "covered", lapsed_since: SINCE, last_lapsed_at: LAST };
+  const res = await w.call("POST", `/addresses/${A1}/state`, body);
+  assertEquals(await res.json(), { address_id: A1, state: "covered", status: "quiet", cleared: false });
+  // SINCE stands, so the next pass reaches back over M's gap too; the stamp equal to SINCE alone no
+  // longer wipes it.
+  assertEquals([row.lapsedSince, row.lastLapsedAt], [SINCE, relapse]);
+  // A pass that started after the second pull echoes the new latest lapse, and clears it.
+  const later = await w.call("POST", `/addresses/${A1}/state`, { ...body, last_lapsed_at: relapse });
+  assertEquals((await later.json()).cleared, true);
+  assertEquals(row.lapsedSince, null);
+});
+
+Deno.test("covered_without_valid_stamps_is_400", async () => {
+  const w = await world();
+  const row = w.store.rows.find((r) => r.id === A1)!;
+  Object.assign(row, { status: "quiet", lapsedSince: SINCE, lastLapsedAt: LAST });
   const calls = w.store.calls.length;
   const post = (body: unknown) => w.call("POST", `/addresses/${A1}/state`, body);
-  for (
-    const stamp of [
-      undefined,
-      null,
-      "",
-      1,
-      "yesterday",
-      "2026-09-28",
-      "2026-09-28T08:15",
-      "2026-13-45T08:15:00Z",
-    ]
-  ) {
-    const body = stamp === undefined ? { state: "covered" } : { state: "covered", lapsed_since: stamp };
-    assertEquals((await post(body)).status, 400, String(stamp));
+  const bad = [undefined, null, "", 1, "yesterday", "2026-09-28", "2026-09-28T08:15", "2026-13-45T08:15:00Z"];
+  for (const stamp of bad) {
+    // Either stamp missing or malformed: refused, whatever the other one is.
+    const since = stamp === undefined ? {} : { lapsed_since: stamp };
+    const last = stamp === undefined ? {} : { last_lapsed_at: stamp };
+    const one = await post({ state: "covered", ...since, last_lapsed_at: LAST });
+    assertEquals(one.status, 400, `lapsed_since ${String(stamp)}`);
+    const two = await post({ state: "covered", lapsed_since: SINCE, ...last });
+    assertEquals(two.status, 400, `last_lapsed_at ${String(stamp)}`);
   }
-  // A stamp is `covered`'s alone.
+  // The stamps are `covered`'s alone.
   assertEquals((await post({ state: "off", lapsed_since: SINCE })).status, 400);
+  assertEquals((await post({ state: "off", last_lapsed_at: LAST })).status, 400);
   // Each refused before a read, and the stamp stays.
   assertEquals(w.store.calls.length, calls);
   assertEquals([row.status, row.lapsedSince], ["quiet", SINCE]);
-  // The same body with the mailbox's stamp is taken.
-  assertEquals((await post({ state: "covered", lapsed_since: SINCE })).status, 200);
+  // The same body with the mailbox's stamps is taken.
+  assertEquals((await post({ state: "covered", lapsed_since: SINCE, last_lapsed_at: LAST })).status, 200);
   assertEquals(row.lapsedSince, null);
 });
 

@@ -1743,3 +1743,31 @@ Deno.test("F1: refund_call gives one call back in one guarded statement, bounded
   assert(/revoke\s+execute\s+on\s+function\s+public\.refund_call\(uuid,\s*text,\s*integer\)\s+from\s+public,\s*anon,\s*authenticated/i.test(code));
   assert(/grant\s+execute\s+on\s+function\s+public\.refund_call\(uuid,\s*text,\s*integer\)\s+to\s+service_role/i.test(code));
 });
+
+// Review of the lapsed fix (2026-10-19), #1: `lapsed_since` keeps the FIRST lapse's instant, so a lapse
+// that opens while a `covered` report is in flight is stored under the same stamp, and `covered` keyed on
+// that stamp alone wiped it. `last_lapsed_at` records each lapse separately: intake sets it on every move
+// into `lapsed`, the device echoes the one it read before its pass, and `covered` clears only while both
+// stamps are still the ones it echoes.
+const MAIL_LAST_LAPSED_AT = "20261019000100_mail_last_lapsed_at.sql";
+
+Deno.test("mail_addresses_gains_last_lapsed_at_backfilled_from_lapsed_since_and_never_null_beside_a_stamp", async () => {
+  const files = await everyMigrationFile();
+  const raw = files.find(([n]) => n === MAIL_LAST_LAPSED_AT)?.[1];
+  assert(raw !== undefined, `expected ${MAIL_LAST_LAPSED_AT}`);
+  // Forward-only: a new file after every applied one; the mail migration is never edited.
+  assertEquals(files.map(([n]) => n).filter((n) => n > MAIL_LAST_LAPSED_AT), [], "stamped after every other file");
+  const { name: mail, sql: mailSql } = await mailMigration();
+  assert(!tableColumns(mailSql, "mail_addresses").has("last_lapsed_at"), `${mail} stays as applied`);
+  const statements = stripLineComments(raw!).split(";").map((s) => s.replace(/\s+/g, " ").trim().toLowerCase())
+    .filter((s) => s !== "");
+  assertEquals(statements, [
+    // Nullable: a mailbox that never lapsed has none.
+    "alter table public.mail_addresses add column if not exists last_lapsed_at timestamptz",
+    // A row lapsed before this file keeps its one known instant, so a `covered` for it can still match.
+    "update public.mail_addresses set last_lapsed_at = lapsed_since where lapsed_since is not null and last_lapsed_at is null",
+    // A stamped gap always names its last lapse, or `covered` could never clear it.
+    "alter table public.mail_addresses add constraint mail_addresses_last_lapse_stamped " +
+    "check (lapsed_since is null or last_lapsed_at is not null)",
+  ]);
+});

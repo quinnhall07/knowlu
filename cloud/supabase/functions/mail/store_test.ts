@@ -29,17 +29,20 @@ function recording(changed: number) {
 
 Deno.test("covered_patches_only_the_stamp_given_on_a_mailbox_no_longer_lapsed", async () => {
   const stamp = "2026-09-28T08:15:00.123456+00:00";
+  const last = "2026-10-01T10:00:00.456+00:00";
   const { seen, store } = recording(1);
-  assertEquals(await store.clearLapsed(ACCT, ADDR, stamp), true);
-  // The stamp goes through whole and encoded (its `+` would read as a space), compared by Postgres as an
-  // instant; a newer lapse's stamp, or a mailbox still lapsed, matches nothing.
+  assertEquals(await store.clearLapsed(ACCT, ADDR, stamp, last), true);
+  // Both stamps go through whole and encoded (a `+` would read as a space), compared by Postgres as
+  // instants; a newer lapse (`last_lapsed_at` moved), or a mailbox still lapsed, matches nothing (review
+  // of the lapsed fix, #1).
   assertEquals(seen, [{
     method: "PATCH",
     path: `mail_addresses?id=eq.${ADDR}&account_id=eq.${ACCT}` +
-      `&lapsed_since=eq.2026-09-28T08%3A15%3A00.123456%2B00%3A00&status=not.in.(lapsed,revoked)&select=id`,
+      `&lapsed_since=eq.2026-09-28T08%3A15%3A00.123456%2B00%3A00` +
+      `&last_lapsed_at=eq.2026-10-01T10%3A00%3A00.456%2B00%3A00&status=not.in.(lapsed,revoked)&select=id`,
     body: { lapsed_since: null },
     prefer: "return=representation",
   }]);
   // No row changed: false.
-  assertEquals(await recording(0).store.clearLapsed(ACCT, ADDR, stamp), false);
+  assertEquals(await recording(0).store.clearLapsed(ACCT, ADDR, stamp, last), false);
 });

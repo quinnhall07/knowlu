@@ -110,7 +110,7 @@ export interface InboundStore {
   entitled(accountId: string): Promise<boolean>;
   /** `status = 'lapsed'` unless it is `lapsed`, `revoked` or `off` (the student's choice outlives a lapse),
    * and `lapsed_since = now()` in the same write only when it is null (an earlier stamp's gap may not be
-   * covered yet). */
+   * covered yet); `last_lapsed_at = now()` in either write, so each lapse is recorded apart. */
   markLapsed(addressId: string): Promise<void>;
   /** The mailbox's open batches and its recent canaries, for `classifyArrival`. */
   bindRows(addressId: string): Promise<{ batches: BindBatch[]; canaries: BindCanary[] }>;

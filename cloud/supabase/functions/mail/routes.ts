@@ -25,10 +25,10 @@
  *   else, so nothing about a message the service does not hold reaches it.
  * - `POST /addresses/<id>/state {state}`: `off` and `elsewhere` set `off`, `reenabled` stamps
  *   `reenabled_at`, `confirming` opens a Gmail mailbox's 15-minute confirm window (P21). `{state:
- *   "covered", lapsed_since}` is the device's report that a whole pass reached back over the lapse
- *   stamped `lapsed_since` (spec §4.11 step 3, amended 2026-10-19): the stamp is cleared only while it is
- *   still that instant and the mailbox is no longer `lapsed`; otherwise nothing changes and `cleared` is
- *   false.
+ *   "covered", lapsed_since, last_lapsed_at}` is the device's report that a whole pass reached back over
+ *   the lapse stamped `lapsed_since` (spec §4.11 step 3, amended 2026-10-19): the stamp is cleared only
+ *   while both are still the instants the device read before its pass (no lapse since) and the mailbox
+ *   is no longer `lapsed`; otherwise nothing changes and `cleared` is false.
  * - `GET /provider?domain=` reads the domain's MX (PS: the device asks only when no curated row names it).
  *
  * **Nothing here logs.** Refusals are fixed sentences; none echoes a body, a hint, a nonce or a key.
@@ -304,7 +304,10 @@ export async function reconcile(req: Request, accountId: string, deps: MailDeps)
 // ---------------------------------------------------------------- POST /addresses/<id>/state
 
 const STATES = ["off", "elsewhere", "reenabled", "confirming", "covered"] as const;
-const BAD_STAMP = "lapsed_since must be the mailbox's lapsed_since, an instant with its zone";
+const BAD_STAMP = "lapsed_since and last_lapsed_at must be the mailbox's own, each an instant with its zone";
+const STAMPS = ["lapsed_since", "last_lapsed_at"] as const;
+const isInstant = (v: unknown): v is string =>
+  typeof v === "string" && INSTANT.test(v) && instantMs(v) !== null;
 
 export async function setState(
   req: Request,
@@ -312,22 +315,23 @@ export async function setState(
   id: string,
   deps: MailDeps,
 ): Promise<Response> {
-  const b = await body(req, ["state", "lapsed_since"]);
+  const b = await body(req, ["state", ...STAMPS]);
   const state = b.state;
   if (typeof state !== "string" || !(STATES as readonly string[]).includes(state)) {
     throw fail(400, "state must be 'off', 'elsewhere', 'reenabled', 'confirming' or 'covered'");
   }
-  if (state !== "covered" && Object.hasOwn(b, "lapsed_since")) {
+  if (state !== "covered" && STAMPS.some((k) => Object.hasOwn(b, k))) {
     throw fail(400, "the body carries a field this route does not take");
   }
   if (state === "covered") {
-    // The stamp is passed through whole (Postgres compares instants), so a microsecond is never lost.
+    // Both stamps, as the device read them before its pass, are passed through whole (Postgres compares
+    // instants), so a microsecond is never lost. `last_lapsed_at` is what tells a lapse since then from
+    // the gap the pass covered (review of the lapsed fix, #1).
     const stamp = b.lapsed_since;
-    if (typeof stamp !== "string" || !INSTANT.test(stamp) || instantMs(stamp) === null) {
-      throw fail(400, BAD_STAMP);
-    }
+    const last = b.last_lapsed_at;
+    if (!isInstant(stamp) || !isInstant(last)) throw fail(400, BAD_STAMP);
     const row = await own(accountId, id, deps);
-    const cleared = await deps.store.clearLapsed(accountId, row.id, stamp);
+    const cleared = await deps.store.clearLapsed(accountId, row.id, stamp, last);
     return json(200, { address_id: row.id, state, status: row.status, cleared });
   }
   const row = await own(accountId, id, deps);

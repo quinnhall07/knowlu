@@ -108,6 +108,7 @@ export const MAILBOX_EXPORT_COLUMNS = [
   "mailbox_hint",
   "status",
   "lapsed_since",
+  "last_lapsed_at",
   "reenabled_at",
   "confirm_until",
   "backfill_since",

@@ -29,7 +29,8 @@
  * 0. **Leave `lapsed`** (spec §4.6 step 3, amended 2026-10-19). The pull is entitled, so each of the
  *    account's `lapsed` mailboxes reads `quiet` when a canary ever reached it, else `pending`: nothing
  *    proves the forward survived the lapse, so the canary and the device's repair take it from there.
- *    `lapsed_since` stays until the device reports the gap covered (`mail`'s `covered` state word).
+ *    `lapsed_since` stays until the device reports the gap covered (`mail`'s `covered` state word),
+ *    echoing it and `last_lapsed_at` (the latest lapse) as this answer gave them.
  *
  * Each of the account's mailboxes but a revoked one rides on every answer, with its status, `reenabled_at`
  * and counters (§4.10's *Shown*); a revoked mailbox's messages are never delivered. No token, hash, hint
@@ -58,6 +59,8 @@ export interface PullMailbox {
   status: string;
   reenabledAt: string | null;
   lapsedSince: string | null;
+  /** The latest move into `lapsed`; the device echoes it with `lapsedSince` in its `covered` report. */
+  lastLapsedAt: string | null;
   lastReceivedAt: string | null;
   unbound: number;
   unauthenticated: number;
@@ -226,6 +229,7 @@ const mailboxView = (b: PullMailbox) => ({
   status: b.status,
   reenabled_at: b.reenabledAt,
   lapsed_since: b.lapsedSince,
+  last_lapsed_at: b.lastLapsedAt,
   last_received_at: b.lastReceivedAt,
   unbound: b.unbound,
   unauthenticated: b.unauthenticated,

@@ -48,7 +48,9 @@ const live = `mail_addresses?id=eq.${ADDR}&status=not.in.(lapsed,revoked,off)`;
 
 Deno.test("mark_lapsed_keeps_an_earlier_stamp_and_sets_status_in_the_same_write", async () => {
   // A mailbox unlapsed whose gap the device has not yet covered still holds its stamp: it lapses again
-  // with that stamp kept, in one compare-and-set, and nothing else is written.
+  // with that stamp kept, in one compare-and-set, and nothing else is written. This lapse is recorded
+  // apart, in `last_lapsed_at`, so a `covered` in flight for the earlier gap no longer matches (review of
+  // the lapsed fix, #1).
   const { seen, store } = await recording((p) =>
     p.startsWith(`${live}&lapsed_since=not.is.null`) ? [{ id: ADDR }] : []
   );
@@ -57,7 +59,7 @@ Deno.test("mark_lapsed_keeps_an_earlier_stamp_and_sets_status_in_the_same_write"
     method: "PATCH",
     path: `${live}&lapsed_since=not.is.null&select=id`,
     prefer: "return=representation",
-    body: { status: "lapsed" },
+    body: { status: "lapsed", last_lapsed_at: new Date(NOW).toISOString() },
   }]);
 });
 
@@ -68,10 +70,14 @@ Deno.test("mark_lapsed_stamps_a_first_lapse_with_its_status_in_one_write", async
   );
   await store.markLapsed(ADDR);
   assertEquals(seen.map((s) => [s.path, s.body]), [
-    [`${live}&lapsed_since=not.is.null&select=id`, { status: "lapsed" }],
+    [`${live}&lapsed_since=not.is.null&select=id`, {
+      status: "lapsed",
+      last_lapsed_at: new Date(NOW).toISOString(),
+    }],
     [`${live}&lapsed_since=is.null&select=id`, {
       status: "lapsed",
       lapsed_since: new Date(NOW).toISOString(),
+      last_lapsed_at: new Date(NOW).toISOString(),
     }],
   ]);
 });

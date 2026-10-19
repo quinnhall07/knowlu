@@ -249,6 +249,7 @@ function pullOver(store: FakeStore): PullStore {
     status: "active",
     reenabledAt: null,
     lapsedSince: null,
+    lastLapsedAt: null,
     lastReceivedAt: null,
     unbound: 0,
     unauthenticated: 0,

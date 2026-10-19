@@ -100,16 +100,16 @@ export function storeOver(rest: Rest, encKey: CryptoKey, now: () => number = Dat
       // between the two, the second write finds the row unstamped and stamps it now. An already lapsed
       // or revoked mailbox matches neither, nor does an `off` one: the student's choice outlives a lapse
       // (its mail is deleted unread meanwhile all the same), where `lapsed` would come back `quiet`.
+      // Each move into `lapsed` also sets `last_lapsed_at`, so a `covered` the device sent about the gap
+      // before this one no longer matches (review of the lapsed fix, #1).
+      const at = new Date(now()).toISOString();
       const live = `id=eq.${id(address)}&status=not.in.(lapsed,revoked,off)`;
-      if (
-        await patched("lapsed", "mail_addresses", `${live}&lapsed_since=not.is.null`, { status: "lapsed" }) >
-          0
-      ) {
-        return;
-      }
+      const relapse = { status: "lapsed", last_lapsed_at: at };
+      if (await patched("lapsed", "mail_addresses", `${live}&lapsed_since=not.is.null`, relapse) > 0) return;
       await patched("lapsed", "mail_addresses", `${live}&lapsed_since=is.null`, {
         status: "lapsed",
-        lapsed_since: new Date(now()).toISOString(),
+        lapsed_since: at,
+        last_lapsed_at: at,
       });
     },
     async bindRows(address) {

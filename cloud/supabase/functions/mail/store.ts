@@ -42,6 +42,7 @@ interface AddressDb {
   retired_until: string | null;
   mailbox_hint: string | null;
   lapsed_since: string | null;
+  last_lapsed_at: string | null;
   reenabled_at: string | null;
   backfill_since: string | null;
   last_received_at: string | null;
@@ -56,9 +57,9 @@ interface AddressDb {
   unbound_foreign_since_live: number;
 }
 const COLUMNS = "id,account_id,provider,status,token_hmac,token_ciphertext,token_iv,retired_token_hmac," +
-  "retired_until,mailbox_hint,lapsed_since,reenabled_at,backfill_since,last_received_at,last_canary_ok_at," +
-  "last_canary_sent_at,canaries_today,confirm_until,unbound,unauthenticated,expired,unbound_own_since_live," +
-  "unbound_foreign_since_live";
+  "retired_until,mailbox_hint,lapsed_since,last_lapsed_at,reenabled_at,backfill_since,last_received_at," +
+  "last_canary_ok_at,last_canary_sent_at,canaries_today,confirm_until,unbound,unauthenticated,expired," +
+  "unbound_own_since_live,unbound_foreign_since_live";
 const fromDb = (r: AddressDb): MailRow => ({
   id: r.id,
   accountId: r.account_id,
@@ -71,6 +72,7 @@ const fromDb = (r: AddressDb): MailRow => ({
   retiredUntil: r.retired_until,
   mailboxHint: r.mailbox_hint,
   lapsedSince: r.lapsed_since,
+  lastLapsedAt: r.last_lapsed_at,
   reenabledAt: r.reenabled_at,
   backfillSince: r.backfill_since,
   lastReceivedAt: r.last_received_at,
@@ -316,11 +318,13 @@ export function storeOver(rest: Rest): MailStore {
       const q = `${mine(accountId, address)}&status=neq.revoked&select=id`;
       return await patched("state", "mail_addresses", q, body) > 0;
     },
-    async clearLapsed(accountId, address, stamp) {
-      // Postgres compares the stamp as an instant; a newer lapse's stamp, or a mailbox lapsed again, is
-      // never cleared by a report about an older gap.
-      const q = `${mine(accountId, address)}&lapsed_since=eq.${id(stamp)}&status=not.in.(lapsed,revoked)` +
-        `&select=id`;
+    async clearLapsed(accountId, address, stamp, last) {
+      // Postgres compares both stamps as instants. A report about an older gap never clears a newer one:
+      // `lapsed_since` keeps the first lapse's instant, so it is `last_lapsed_at` that moves when the
+      // mailbox lapses again after the device read them (review of the lapsed fix, #1). A mailbox still
+      // lapsed keeps its gap.
+      const q = `${mine(accountId, address)}&lapsed_since=eq.${id(stamp)}&last_lapsed_at=eq.${id(last)}` +
+        `&status=not.in.(lapsed,revoked)&select=id`;
       return await patched("covered", "mail_addresses", q, { lapsed_since: null }) > 0;
     },
   };

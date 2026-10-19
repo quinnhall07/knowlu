@@ -71,3 +71,12 @@ Deno.test("unlapse_patches_only_the_accounts_lapsed_rows", async () => {
     { method: "PATCH", url: `${base}&last_canary_ok_at=is.null`, body: '{"status":"pending"}' },
   ]);
 });
+
+// Review of the lapsed fix, #1: the pull reads each mailbox's latest lapse with the gap's start.
+Deno.test("the_mailbox_read_asks_for_lapsed_since_and_last_lapsed_at", async () => {
+  const { seen, store } = recording();
+  await store.mailboxes(ACCT);
+  assertEquals(seen.length, 1);
+  const select = new URL(seen[0].url).searchParams.get("select")!.split(",");
+  for (const c of ["lapsed_since", "last_lapsed_at"]) assert(select.includes(c), c);
+});

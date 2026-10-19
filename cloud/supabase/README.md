@@ -50,7 +50,8 @@ time, so `deno test` needs no environment at all.
 ## Forwarded mail (`mail`, `mail-inbound`, `mail-process`, `mail-canary`, `mail-pull`, `mail-resolve`)
 
 Spec `docs/specs/2026-09-30-email-forwarding-design.md`, plan `docs/plans/2026-09-30-email-forwarding-plan.md`.
-Migration `20261002000200_mail.sql`; not on production, and no release is cut from a `main` carrying it
+Migrations `20261002000200_mail.sql` and, after it, `20261005000100_mail_claim_max_tokens.sql` and
+`20261019000100_mail_last_lapsed_at.sql` (each lapse recorded apart from the gap's start); not on production, and no release is cut from a `main` carrying it
 before privacy bump #1. All six functions are `verify_jwt = false` in `config.toml`; each authenticates
 itself as named below.
 

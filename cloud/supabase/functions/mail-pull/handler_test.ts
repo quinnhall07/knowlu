@@ -180,6 +180,7 @@ const box = (id: string, o: Partial<Box> = {}): Box => ({
   status: "active",
   reenabledAt: null,
   lapsedSince: null,
+  lastLapsedAt: null,
   lastReceivedAt: iso(NOW - HOUR),
   unbound: 0,
   unauthenticated: 0,
@@ -556,6 +557,7 @@ Deno.test("each_mailboxs_state_and_reenabled_at_ride_on_the_answer", async () =>
       status: "quiet",
       reenabled_at: null,
       lapsed_since: null,
+      last_lapsed_at: null,
       last_received_at: iso(NOW - HOUR),
       unbound: 2,
       unauthenticated: 0,
@@ -567,6 +569,7 @@ Deno.test("each_mailboxs_state_and_reenabled_at_ride_on_the_answer", async () =>
       status: "active",
       reenabled_at: iso(NOW - DAY),
       lapsed_since: null,
+      last_lapsed_at: null,
       last_received_at: iso(NOW - HOUR),
       unbound: 0,
       unauthenticated: 0,
@@ -585,12 +588,17 @@ const statusOf = (a: Answer, id: string) => a.mailboxes.find((m) => m.address_id
 Deno.test("a_lapsed_mailbox_reads_quiet_once_its_account_pulls_entitled", async () => {
   const w = world();
   const since = iso(NOW - 5 * DAY);
-  w.store.boxes = [box(M1, { status: "lapsed", lapsedSince: since, lastCanaryOkAt: iso(NOW - 9 * DAY) })];
+  const last = iso(NOW - 2 * DAY);
+  w.store.boxes = [
+    box(M1, { status: "lapsed", lapsedSince: since, lastLapsedAt: last, lastCanaryOkAt: iso(NOW - 9 * DAY) }),
+  ];
   const a = await w.answer();
   // `quiet`, never `active`: nothing proves the forward survived the lapse, so the canary comes back and
   // the device runs repair; `lapsed_since` is the window repair reaches back to, so it stays.
   assertEquals(statusOf(a, M1), "quiet");
   assertEquals(a.mailboxes[0].lapsed_since, since);
+  // The latest lapse rides too: the device echoes both in its `covered` (review of the lapsed fix, #1).
+  assertEquals(a.mailboxes[0].last_lapsed_at, last);
   // Before the read, so the same answer carries it.
   assertEquals(w.store.calls.slice(0, 2), ["unlapse", "mailboxes"]);
   assertEquals(w.store.boxes[0].lapsedSince, since);

@@ -189,6 +189,7 @@ Deno.test("the_export_carries_mailboxes_and_queued_claims_and_never_a_token_key_
     mailbox_hint: "student@school.example.invalid",
     status: "active",
     lapsed_since: null,
+    last_lapsed_at: "2026-09-12T07:00:00Z",
     reenabled_at: "2026-09-20T10:00:00Z",
     confirm_until: null,
     backfill_since: "2026-06-01",
@@ -244,6 +245,9 @@ Deno.test("the_export_carries_mailboxes_and_queued_claims_and_never_a_token_key_
       "provider",
       "mailbox_hint",
       "status",
+      // The latest lapse is the student's own data like `lapsed_since` (review of the lapsed fix, #1).
+      "lapsed_since",
+      "last_lapsed_at",
       "backfill_since",
       "last_received_at",
       "unbound",
