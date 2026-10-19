@@ -728,7 +728,7 @@ impl Runner<'_> {
             return Outcome::Done;
         }
         self.wait_popup();
-        let done = self.run("gmail/forwarding_add_done.js", json!({}));
+        let done = self.run("gmail/forwarding_add_done.js", json!({ "address": self.knowlu }));
         Runner::outcome(&done)
     }
 

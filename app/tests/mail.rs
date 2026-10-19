@@ -2415,6 +2415,10 @@ fn a_gmail_setup_opens_the_confirm_window_before_adding_the_address_and_waits_ou
     assert_eq!(asides.len(), 2, "the window steps aside, and again once the popup has closed");
     assert!(at("script gmail/forwarding_add.js") < asides[1] && asides[1] < at("script gmail/forwarding_add_done.js"));
     assert!(r.host.lock().unwrap().popup_polls == 0, "the runner waited the popup out");
+    // The read-back of a Verify row (a popup that confirmed with no dialog) needs the address to look for.
+    let done = r.calls("gmail/forwarding_add_done.js");
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0]["address"], json!(KNOWLU), "forwarding_add_done.js is told the Knowlu address");
 }
 
 fn queue(r: &Rig, script: &str, answers: Vec<Value>) {

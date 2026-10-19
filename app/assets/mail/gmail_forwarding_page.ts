@@ -47,6 +47,16 @@ export interface Opts extends Partial<Model> {
   /** An address added but not yet verified: it is not an option of the list; the page shows a verify text. */
   unverified?: string;
   /**
+   * Live 2026-10-18: Gmail's Forwarding section shows a "Verify <address>, Re-send email, Remove address" row
+   * for an address that was added and not yet confirmed. This one is there from the start.
+   */
+  verifyRow?: string;
+  /**
+   * Live 2026-10-18: Google's verify popup did the whole confirmation itself. After Next (and Proceed) the dialog
+   * closes and the opener draws no "confirmation link sent" dialog, only a Verify row for the typed address.
+   */
+  silentPopup?: boolean;
+  /**
    * The older markup, where each radio sits inside a wrapping <label> in one block. The live page is the
    * default: a table row per radio, the "Forward a copy" radio with no label of its own.
    */
@@ -69,6 +79,8 @@ export interface Gmail {
   decoy: number;
   /** Clicks on any control the page draws, enabled or not: a script that must click nothing leaves it 0. */
   clicks: number;
+  /** Clicks on the Verify row's Re-send email and Remove address controls: a read-back leaves both 0. */
+  verifyClicks: number;
   /** Google's verify popup closes and the opener shows its "confirmation link sent" dialog. */
   verified(): void;
   el(id: string): El;
@@ -103,6 +115,7 @@ export function gmail(o: Opts = {}): Gmail {
     removed: [],
     decoy: 0,
     clicks: 0,
+    verifyClicks: 0,
     verified: () =>
       dialog(
         `<p>Confirmation link sent</p><p>A confirmation link was sent to the address.</p>${
@@ -125,6 +138,7 @@ export function gmail(o: Opts = {}): Gmail {
   let drawn = !o.lateDraw;
   let dirty = false;
   let pendingRemove = "";
+  let verifying = o.verifyRow ?? "";
   const wired = new WeakSet();
 
   const options = () =>
@@ -135,6 +149,8 @@ export function gmail(o: Opts = {}): Gmail {
     Object.entries(DISP).map(([k, t]) =>
       `<option value="${k}"${k === model.disp ? " selected" : ""}>${t}</option>`
     ).join("");
+  const verifyHtml = () =>
+    `<tr><td>Verify ${verifying} <input type="button" value="Re-send email" id="resend"> <input type="button" value="Remove address" id="remove-pending"></td></tr>`;
   const section = () => {
     const none = model.addresses.length === 0 ? " disabled" : "";
     const live = !o.labelled;
@@ -167,6 +183,7 @@ export function gmail(o: Opts = {}): Gmail {
     const hidden = `<div role="dialog" id="decoy-dlg"><p>Forwarding settings changed. Confirm?</p>
       <button type="button" id="decoy-dlg-next">Next</button><input type="button" value="Cancel" id="decoy-dlg-cancel">
       <button type="button" id="decoy-dlg-proceed">Proceed</button></div>`;
+    const verifyRow = verifying ? verifyHtml() : "";
     return `${hidden}<div id="fwdandpop"><table>
       <tr><td>Forwarding:</td><td>
         ${input("Add a forwarding address", "add")}${
@@ -174,7 +191,7 @@ export function gmail(o: Opts = {}): Gmail {
     }
         ${verify}
       </td></tr>
-      ${rows}${odd}
+      ${verifyRow}${rows}${odd}
       <tr><td>POP download:</td><td><label><input type="radio" name="pop" id="p-off" checked> Disable POP</label>
         <label><input type="radio" name="pop" id="p-on"> Enable POP for all mail</label></td></tr>
       <tr><td></td><td>When messages are accessed with POP
@@ -229,6 +246,15 @@ export function gmail(o: Opts = {}): Gmail {
       ${dlgButton("Next", "next")}${dlgButton("Cancel", "cancel-dlg")}`,
         ),
     );
+    for (const id of ["resend", "remove-pending"]) on(id, () => g.verifyClicks++);
+    const silent = () => {
+      g.popups++;
+      verifying = g.typed.at(-1) ?? "";
+      closeDialog();
+      // Inserted, not re-rendered: the page keeps the elements it already had (the hidden dialog among them).
+      d.querySelector("#fwdandpop tr").insertAdjacentHTML("afterend", verifyHtml());
+      wire();
+    };
     on("next", () => {
       g.typed.push(g.el("email")?.value ?? "");
       if (o.proceed) {
@@ -237,11 +263,13 @@ export function gmail(o: Opts = {}): Gmail {
             dlgButton("Cancel", "cancel-dlg")
           }`,
         );
+      } else if (o.silentPopup) {
+        silent();
       } else {
         g.popups++;
       }
     });
-    on("proceed", () => g.popups++);
+    on("proceed", () => o.silentPopup ? silent() : g.popups++);
     on("cancel-dlg", closeDialog);
     on("ok", () => {
       g.oks++;

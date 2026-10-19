@@ -2,7 +2,7 @@
 // compiled-in script text from `gmail/` against a synthetic Settings > Forwarding and POP/IMAP page
 // (gmail_forwarding_page.ts). No address is real.
 import { assert, assertEquals } from "@std/assert";
-import { gmail } from "./gmail_forwarding_page.ts";
+import { gmail, SECTION } from "./gmail_forwarding_page.ts";
 import { run } from "./test_dom.ts";
 
 const OURS = "box-1@in.example.invalid";
@@ -548,4 +548,103 @@ Deno.test("gmail_add_address_presses_buttons_only_in_the_dialog_it_opened", asyn
     assertEquals(f.decoy, 0);
     assert(hidden(f) !== null, "the page's own dialog is still there");
   }
+});
+
+Deno.test("gmail_add_done_reads_back_the_verify_row_when_the_popup_confirmed_with_no_dialog", async () => {
+  // Live 2026-10-18: Google's popup did the whole confirmation itself and the opener drew no dialog; the
+  // address was added, and Gmail's Forwarding section shows a "Verify <address>" row with Re-send and Remove.
+  const f = gmail({ silentPopup: true });
+  const r = await run("gmail/forwarding_add.js", f.page, { address: OURS, ...FAST });
+  assertEquals(r, { result: "ok", stage: "asked", changed: true });
+  assertEquals(f.popups, 1);
+  assert(f.el("dlg") === null, "no dialog is drawn");
+  assertEquals(await run("gmail/forwarding_add_done.js", f.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    sent: true,
+  });
+  // Re-send email and Remove address are never pressed, and nothing else is.
+  assertEquals(f.verifyClicks, 0);
+  assertEquals(f.oks, 0);
+  assertEquals(f.removed, []);
+  assertEquals(f.decoy, 0);
+});
+
+Deno.test("gmail_add_done_readback_matches_the_address_blind_to_case_and_spaces", async () => {
+  const f = gmail({ verifyRow: OURS.toUpperCase() });
+  const args = { address: `  ${OURS}  `, ...FAST };
+  assertEquals(await run("gmail/forwarding_add_done.js", f.page, args), { result: "ok", sent: true });
+  assertEquals(f.verifyClicks, 0);
+});
+
+Deno.test("gmail_add_done_readback_ignores_a_verify_row_for_a_different_address", async () => {
+  const f = gmail({ verifyRow: OTHER });
+  const r = await run("gmail/forwarding_add_done.js", f.page, { address: OURS, ...FAST });
+  assertEquals(r, NOT_FOUND("confirmation dialog"));
+  assertEquals(f.verifyClicks, 0);
+  assertEquals(f.clicks, 0);
+});
+
+Deno.test("gmail_add_done_readback_ignores_text_that_names_the_address_but_is_not_a_verify_row", async () => {
+  // The older "verification email was sent" sentence is not a Verify row, and an address in no row is nothing.
+  const f = gmail({ unverified: OURS });
+  assertEquals(
+    await run("gmail/forwarding_add_done.js", f.page, { address: OURS, ...FAST }),
+    NOT_FOUND("confirmation dialog"),
+  );
+  const g = gmail();
+  assertEquals(
+    await run("gmail/forwarding_add_done.js", g.page, { address: OURS, ...FAST }),
+    NOT_FOUND("confirmation dialog"),
+  );
+  assertEquals(g.clicks, 0);
+});
+
+Deno.test("gmail_add_done_readback_accepts_an_address_that_is_already_confirmed", async () => {
+  const f = gmail({ addresses: [OTHER, OURS.toUpperCase()] });
+  assertEquals(await run("gmail/forwarding_add_done.js", f.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    sent: true,
+  });
+  assertEquals(f.clicks, 0);
+});
+
+Deno.test("gmail_add_done_prefers_the_dialog_when_it_shows_even_with_an_address", async () => {
+  const f = gmail({ buttonDialogs: true });
+  f.verified();
+  assertEquals(await run("gmail/forwarding_add_done.js", f.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    sent: true,
+  });
+  assertEquals(f.oks, 1);
+  assert(f.el("dlg") === null, "OK closed the dialog");
+});
+
+Deno.test("gmail_add_done_readback_goes_to_the_section_and_follows_the_reload_contract", async () => {
+  // The opener is elsewhere: the read-back goes to the Forwarding section by the hash.
+  const f = gmail({ at: "#inbox", verifyRow: OURS });
+  assertEquals(await run("gmail/forwarding_add_done.js", f.page, { address: OURS, ...FAST }), {
+    result: "ok",
+    sent: true,
+  });
+  assert(f.hashes.includes(SECTION), "it went to the section");
+  // The section does not draw until a reload: the script asks for it, then reads after it.
+  const g = gmail({ lateDraw: "reload", verifyRow: OURS });
+  assertEquals(await run("gmail/forwarding_add_done.js", g.page, { address: OURS, ...FAST }), {
+    result: "reloading",
+  });
+  assertEquals(g.reloads, 1);
+  assertEquals(
+    await run("gmail/forwarding_add_done.js", g.page, { address: OURS, reloaded: true, ...FAST }),
+    {
+      result: "ok",
+      sent: true,
+    },
+  );
+  // A section that never draws is not found once reloaded.
+  const h = gmail({ lateDraw: "never", verifyRow: OURS });
+  assertEquals(
+    await run("gmail/forwarding_add_done.js", h.page, { address: OURS, reloaded: true, ...FAST }),
+    NOT_FOUND("confirmation dialog"),
+  );
+  assertEquals(h.reloads, 0);
 });
