@@ -512,4 +512,33 @@ Deno.test("gmail_forward_refuses_to_start_with_a_compose_still_open", async () =
   });
   assertEquals([box.sent, box.discards, box.checked()], [[], 0, []]);
   assert(box.el("over").innerHTML.includes("New Message"), "the draft is left as it was");
+  // Someone else's draft, addressed elsewhere under another subject, is never touched either.
+  const foreign = mailbox(MAIL, { leftover: { to: "friend@elsewhere.example.invalid", subject: "Notes" } });
+  assertEquals(await run("gmail/forward.js", foreign.page, TARGET), {
+    result: "failed",
+    reason: "compose still open",
+  });
+  assertEquals([foreign.sent, foreign.discards], [[], 0]);
+});
+
+Deno.test("gmail_forward_discards_its_own_leftover_compose_and_goes_on", async () => {
+  // Review of fd702e6: a draft an earlier try left (To is this mailbox's Knowlu address, or the subject is a
+  // Knowlu batch's) is Knowlu's own: it is discarded and the forward goes on, never a pass stopped over it.
+  for (const leftover of [{ to: OURS }, { subject: "Knowlu bk00000000aa" }]) {
+    const box = mailbox(MAIL, { leftover });
+    assertEquals(await run("gmail/forward.js", box.page, TARGET), { result: "ok", sent: true, count: 2 });
+    assertEquals(box.discards, 1, JSON.stringify(leftover));
+    assertEquals(box.sent.map((s) => [s.to, s.subject]), [[[OURS], `Knowlu ${NONCE}`]]);
+  }
+});
+
+Deno.test("gmail_forward_counts_only_a_drawn_compose_with_to_subject_and_send", async () => {
+  // A dialog of Google's own with "Send feedback" is not a compose, and its button is never the Send pressed.
+  const feedback = mailbox(MAIL, { feedback: true });
+  assertEquals(await run("gmail/forward.js", feedback.page, TARGET), { result: "ok", sent: true, count: 2 });
+  assertEquals(feedback.sent.length, 1);
+  // A compose that is not drawn is not open.
+  const hidden = mailbox(MAIL, { hiddenCompose: true });
+  assertEquals(await run("gmail/forward.js", hidden.page, TARGET), { result: "ok", sent: true, count: 2 });
+  assertEquals([hidden.sent.length, hidden.discards], [1, 0]);
 });

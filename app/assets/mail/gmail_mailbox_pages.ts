@@ -93,6 +93,12 @@ export interface Opts {
   stuckDiscard?: boolean;
   /** A compose is already open when the script starts (a failed try's draft that did not go). */
   openCompose?: boolean;
+  /** A compose already open holding this recipient and subject (an earlier try's draft of Knowlu's, or not). */
+  leftover?: { to?: string; subject?: string };
+  /** The compose already open is hidden (`display: none`): it is not drawn. */
+  hiddenCompose?: boolean;
+  /** A dialog of Google's own is drawn first in the page, with a "Send feedback" button and no To or Subject. */
+  feedback?: boolean;
   /** The row of `id` shows the message `as` once it is ticked. */
   swap?: { id: string; as: string };
   /** The page shows no "1–50 of 123" range. */
@@ -508,7 +514,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       b.el("to").value = "";
     });
     const button = (label: string) =>
-      [...d.querySelectorAll('[role="button"]')].find((x: El) =>
+      [...b.el("over").querySelectorAll('[role="button"]')].find((x: El) =>
         (x.getAttribute("aria-label") || "").startsWith(label)
       );
     onPress(button("Discard"), () => {
@@ -544,7 +550,22 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       }
     });
   }
-  if (o.openCompose) compose([]);
+  if (o.openCompose || o.leftover || o.hiddenCompose) compose([]);
+  if (o.leftover?.to) {
+    b.el("chips").insertAdjacentHTML(
+      "beforeend",
+      `<div role="option" data-hovercard-id="${esc(o.leftover.to)}"><span>${esc(o.leftover.to)}</span></div>`,
+    );
+  }
+  if (o.leftover?.subject !== undefined) b.el("subj").value = o.leftover.subject;
+  if (o.hiddenCompose) b.el("over").firstElementChild.setAttribute("style", "display: none");
+  if (o.feedback) {
+    d.body.insertAdjacentHTML(
+      "afterbegin",
+      `<div role="dialog" aria-label="Send feedback to Google"><textarea aria-label="Describe your issue"></textarea>
+        <div role="button" aria-label="Send feedback">Send feedback</div></div>`,
+    );
+  }
   return b;
 }
 

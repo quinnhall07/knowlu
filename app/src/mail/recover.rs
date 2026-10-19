@@ -30,7 +30,9 @@
 //! upload the forward's attachments) ends the pass too: it is the page's, not a row's. A row that shows a message count is **opened** (Quinn 2026-10-02): `thread.js`
 //! reads every message in it, each is fingerprinted, and a conversation with a missing message is
 //! forwarded alone, expecting one attachment per message. If Gmail attaches fewer, `forward.js` refuses
-//! and the conversation is left (T18c's gate "Gmail conversation rows"). A message the mailbox itself sent
+//! and the conversation is left (T18c's gate "Gmail conversation rows"). A lone row that will not attach is
+//! left only while sends show the page works (review of fd702e6): two such rows with no send between them
+//! stop the pass, and a lone row still uploading first gets one longer try. A message the mailbox itself sent
 //! (`own`, which `thread.js` reads from the account chip) is never judged: the service never holds it.
 //!
 //! **The Inbox look** (Gmail only; Quinn's ruling 2026-10-19 on the T18c gate "Gmail non-delivery report
@@ -402,7 +404,7 @@ impl Outcome {
 /// One pass: lists, diffs, forwards, closes. A pass never writes the vault and never fails as a whole:
 /// it ends as a [`Stop`] with the counts so far.
 pub fn run_pass(mb: &dyn Mailbox, client: &MailClient, clock: &dyn Clock, routine: &mut Routine, job: &Job) -> Outcome {
-    let mut pass = Pass { mb, client, clock, routine, job, out: Outcome::new(), batch: None, attempts: 0, judged: HashSet::new(), decided: HashMap::new(), walk: HashMap::new(), since_look: 0, restart: false };
+    let mut pass = Pass { mb, client, clock, routine, job, out: Outcome::new(), batch: None, attempts: 0, judged: HashSet::new(), decided: HashMap::new(), walk: HashMap::new(), since_look: 0, restart: false, sent_since_lone: false, lone_seen: false, waiting: 0 };
     pass.out.stop = pass.go().err().unwrap_or(Stop::Done);
     pass.finish();
     pass.out
@@ -448,6 +450,13 @@ struct Pass<'a> {
     /// Gmail: a look at the Inbox left the search page, so the walk must start over. Set by `forward_gmail`,
     /// returned early on by `flush`/`send_gmail`, and acted on (and cleared) by `gmail`; never a [`Stop`].
     restart: bool,
+    /// Gmail: a send went since the last lone row that would not attach (or since the pass began).
+    sent_since_lone: bool,
+    /// Gmail: a lone row has failed to attach in this pass.
+    lone_seen: bool,
+    /// Gmail: the pass's first lone failure, when nothing had been sent before it: decided (not tried again this
+    /// pass) and counted left only once a later send goes; a second lone failure before that stops the pass.
+    waiting: u32,
 }
 
 /// A missing Gmail row: one message, or a conversation of `n` messages sent alone.
@@ -492,6 +501,16 @@ const UNDO_SEND_SECS: i64 = 31;
 const NO_END: Stop = Stop::Script("the results did not end");
 /// Gmail: `bounce.js` could not read the Inbox (no list, or an answer that was neither "ok" nor "refused").
 const INBOX_UNREADABLE: Stop = Stop::Script("the inbox could not be read");
+/// Gmail: lone rows failed to attach with nothing sent between them (review of fd702e6): the page, not the rows.
+/// The pass stops rather than leave every row, so the next pass tries them again.
+const STALLED: Stop = Stop::Script("the attachments would not attach");
+/// `forward.js`'s waits other than the upload, at their defaults (5 s each): Knowlu's own leftover compose to
+/// go, the rows ticked, the menu item, Send, the recipient, the Send's settling and the rows let go (its header).
+const FORWARD_OTHER_WAITS_MS: u64 = 35_000;
+/// Gmail: the one longer try a lone row still uploading gets (review of fd702e6), as `upload_ms`: the longest
+/// that keeps `forward.js`'s worst case (35 s + this, 85 s) inside one [`STEP`] with a margin for the page.
+const SLOW_UPLOAD_MS: u64 = 50_000;
+const _: () = assert!(FORWARD_OTHER_WAITS_MS + SLOW_UPLOAD_MS + 5_000 <= STEP.as_millis() as u64);
 
 impl Pass<'_> {
     fn path(&self, name: &str) -> String {
@@ -533,7 +552,16 @@ impl Pass<'_> {
         }
         let answer = svc(self.client.reconcile(j.address_id, &iso(j.window.since), &iso(j.window.until)))?;
         let held = Held::from_answer(&answer).ok_or(Stop::Service("bad-reply"))?;
-        if j.provider == Provider::Gmail { self.gmail(&held) } else { self.m365(&held, n) }
+        if j.provider != Provider::Gmail {
+            return self.m365(&held, n);
+        }
+        self.gmail(&held)?;
+        // A lone row that would not attach, with no send after it to show the page works: nothing proves it is
+        // the row's, so it is not left (the next pass tries it again).
+        if self.waiting > 0 {
+            return Err(STALLED);
+        }
+        Ok(())
     }
 
     /// Opens the Inbox in a freshly loaded document (Gmail), once Gmail's Undo Send delay has passed since the
@@ -994,6 +1022,33 @@ impl Pass<'_> {
     /// One Send of `rows` (a conversation row carries its message count). An `over 25 MB` send is halved,
     /// as `forward.js` leaves to its caller.
     fn forward_gmail(&mut self, rows: Vec<Row>, messages: Option<u32>) -> Step<()> {
+        self.forward_gmail_once(rows, messages, false)
+    }
+
+    /// A lone row that would not attach (no chip, still uploading after its longer try, or a conversation one
+    /// short): left when a send went since the lone failure before it (or since the pass began). The pass's first
+    /// one with nothing sent before it waits for the next send; any other stops the pass, leaving nothing (review
+    /// of fd702e6: a Gmail-wide stall must not leave every row).
+    fn lone_failed(&mut self, rows: &[Row]) -> Step<()> {
+        let n = rows.len() as u32;
+        if self.sent_since_lone {
+            self.out.left += n;
+            self.out.handled += n;
+        } else if !self.lone_seen {
+            self.waiting += n;
+        } else {
+            return Err(STALLED);
+        }
+        self.sent_since_lone = false;
+        self.lone_seen = true;
+        for r in rows {
+            self.decide(key_of(r));
+        }
+        Ok(())
+    }
+
+    /// `slow`: this is a lone row's one longer try at uploading ([`SLOW_UPLOAD_MS`]).
+    fn forward_gmail_once(&mut self, rows: Vec<Row>, messages: Option<u32>, slow: bool) -> Step<()> {
         self.open_batch()?;
         let wire: Vec<Value> = rows
             .iter()
@@ -1005,7 +1060,10 @@ impl Pass<'_> {
                 v
             })
             .collect();
-        let args = json!({ "address": self.job.knowlu_address, "nonce": self.nonce(), "rows": wire });
+        let mut args = json!({ "address": self.job.knowlu_address, "nonce": self.nonce(), "rows": wire });
+        if slow {
+            args["upload_ms"] = json!(SLOW_UPLOAD_MS);
+        }
         self.attempts += 1;
         let v = self.mb.script(&self.path("forward.js"), &args).map_err(refused)?;
         let reason = v.get("reason").and_then(Value::as_str);
@@ -1020,6 +1078,11 @@ impl Pass<'_> {
                 for r in &rows {
                     self.decide(key_of(r));
                 }
+                // The page works: a lone row that was waiting for a send is the row's, and left.
+                self.sent_since_lone = true;
+                self.out.left += self.waiting;
+                self.out.handled += self.waiting;
+                self.waiting = 0;
                 // Every 25 sends the Inbox is looked in, at once: a report stops the pass, and the walk (which
                 // the look left) starts over.
                 if self.since_look >= BOUNCE_EVERY {
@@ -1049,23 +1112,27 @@ impl Pass<'_> {
                 }
                 self.forward_gmail(b.to_vec(), None)?;
             }
-            // The page would not take these as sent (too big alone, a row gone, a conversation whose
-            // attachments did not match its count): nothing was sent, and they are left.
-            (Some("failed"), Some("over 25 MB" | "attachments do not match the rows" | "attachment still uploading"), _)
-            | (Some("not found"), _, Some("message")) => {
+            // Alone, a chip still uploading at forward.js's bound gets one more try with the longest bound a step
+            // allows (review of fd702e6: a big message can take longer than 30 s and still go).
+            (Some("failed"), Some("attachment still uploading"), _) if !slow => {
+                return self.forward_gmail_once(rows, messages, true);
+            }
+            // Too big alone, or the row gone from the page: nothing was sent, and it is left.
+            (Some("failed"), Some("over 25 MB"), _) | (Some("not found"), _, Some("message")) => {
                 self.out.left += rows.len() as u32;
                 self.out.handled += rows.len() as u32;
                 for r in &rows {
                     self.decide(key_of(r));
                 }
             }
-            // A lone message whose chip never draws is a compose with no attachment (the halving ends here, as
-            // forward.js checks that before the count): the row is left. With several rows, or a conversation,
-            // it is an empty compose, which is the page's, and the pass stops.
-            (Some("failed"), Some("no attachment"), _) if rows.len() == 1 && messages.is_none() => {
-                self.out.left += 1;
-                self.out.handled += 1;
-                self.decide(key_of(&rows[0]));
+            // A lone row that would not attach: a message or a conversation whose chip never draws (forward.js
+            // checks that before the count, so the halving ends here), a conversation one short, or a chip still
+            // uploading after its longer try. Left only while sends show the page works ([`Pass::lone_failed`]).
+            // With several rows, no attachment at all is an empty compose, which is the page's: the pass stops.
+            (Some("failed"), Some("no attachment" | "attachments do not match the rows" | "attachment still uploading"), _)
+                if rows.len() == 1 =>
+            {
+                self.lone_failed(&rows)?;
             }
             _ => return Err(Stop::Script("a forward did not finish")),
         }

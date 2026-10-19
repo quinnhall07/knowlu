@@ -19,15 +19,20 @@
 //      "rows already selected" | "rows not selected" | "attachment failed" | "attachment still uploading" |
 //      "no attachment" | "attachments do not match the rows" | "attachment size unreadable" | "over 25 MB" |
 //      "recipient not accepted" | "subject not set" | "send did not settle" | "compose still open" }
-//      ("compose still open" is a compose window already up when the script starts: nothing is touched;
+//      ("compose still open" is a compose window already up when the script starts that is not Knowlu's own
+//      (To this mailbox's Knowlu address alone, or a `Knowlu <nonce>` subject): nothing is touched. Knowlu's own
+//      is discarded first and the forward goes on, unless it will not go. A compose is a drawn dialog holding a
+//      To field, a Subject field and a drawn Send button together; "Send feedback" is not Send;
 //      "no attachment" is checked before the count, so a lone row whose chip never draws answers it, not
 //      "attachments do not match the rows"; "attachments do not match the rows" and "attachment still
 //      uploading" also carry `attached` and `expected`, the counts it compared or had seen attach; "recipient
 //      not accepted" carries `recipients`, how many it read)
-// Worst case, inside the host's 90 s step with the default waits (5 s each, 30 s for the upload): the rows
-// ticked 5, the menu item 5, Send 5, the upload 30, then a failure's cleanup (the compose to go 5, the rows to
-// let go 5) is 55 s; a recipient not accepted adds that wait (5) before its cleanup, 60 s; a send that settles
-// is 60 s as well (the same waits, then the Send's own 5 and the rows 5).
+// Worst case, inside the host's 90 s step with the default waits (5 s each, 30 s for the upload): Knowlu's own
+// leftover compose to go 5, the rows ticked 5, the menu item 5, Send 5, the upload 30, then a failure's cleanup
+// (the compose to go 5, the rows to let go 5) is 60 s; a recipient not accepted adds that wait (5) before its
+// cleanup, 65 s; a send that settles is 65 s as well (the same waits, then the Send's own 5 and the rows 5).
+// So every wait but the upload is 35 s at most, and an `upload_ms` of U is 35 s + U: the routine's one longer try
+// for a lone slow row (recover.rs SLOW_UPLOAD_MS, 50 s) is 85 s, inside the step.
 // It sends one message to that one address and nothing else: the subject is exactly `Knowlu <nonce>`
 // (sent_cleanup.js deletes by that same subject), the originals' words are not in it, and a compose window
 // with no attachment, a count of attachments that is not the rows', more than the size limit, Gmail's offer
@@ -137,14 +142,51 @@ const refusal = () => {
 };
 const before = refusal();
 if (before) return { result: "refused", reason: before };
-// A compose window is a dialog with a Send button in it. One still open at the start is a draft an earlier try
-// did not get rid of (or the student's own): the menu is not looked for over it, and nothing is touched.
-const composeOpen = () =>
-  [...document.querySelectorAll('[role="dialog"]')].some((d) =>
-    (shown(d) || d.getBoundingClientRect().height > 0) &&
-    [...d.querySelectorAll('[role="button"], button')].some((b) => /^send\b/i.test(nameOf(b) || text(b)))
+// Send is the word alone or with its shortcut ("Send ‪(Ctrl-Enter)‬"), never "Send feedback" (Google's own
+// dialog). A dialog may be fixed-position (offsetParent null though drawn): its box says it is drawn.
+const SEND = /^send\b(?!\s+[a-z])/i;
+const TO = /^to( recipients)?$/i;
+const SUBJECT = /^(subject|subjectbox)$/i;
+const drawn = (el) => !!el && (shown(el) || el.getBoundingClientRect().height > 0);
+const fieldIn = (scope, pattern) =>
+  [...scope.querySelectorAll('input, textarea, [role="textbox"]')].find((el) =>
+    pattern.test(nameOf(el) || el.getAttribute("name") || "")
   );
-if (composeOpen()) return { result: "failed", reason: "compose still open" };
+// A recipient Gmail accepted: live (2026-10-19) a `div[role=option]` naming the address in data-hovercard-id;
+// older composes drew an `[email]` element.
+const recipientsIn = (scope) => [
+  ...new Set(
+    [
+      ...[...scope.querySelectorAll("[email]")].map((el) => el.getAttribute("email")),
+      ...[...scope.querySelectorAll('[role="option"][data-hovercard-id]')].map((el) =>
+        el.getAttribute("data-hovercard-id")
+      ),
+    ].map(norm).filter(Boolean),
+  ),
+];
+// A compose window: a drawn dialog holding a To field, a Subject field and a drawn Send button together.
+const composes = () =>
+  [...document.querySelectorAll('[role="dialog"]')].filter((d) =>
+    drawn(d) && fieldIn(d, TO) && fieldIn(d, SUBJECT) &&
+    [...d.querySelectorAll('[role="button"], button')].some((b) => drawn(b) && SEND.test(nameOf(b) || text(b)))
+  );
+const composeOpen = () => composes().length > 0;
+// Knowlu's own draft: addressed to this mailbox's Knowlu address alone, or under a Knowlu batch's subject.
+const ours = (d) => {
+  const to = recipientsIn(d);
+  return /^Knowlu \S+$/.test(String(fieldIn(d, SUBJECT).value || "").trim()) || (to.length === 1 && to[0] === address);
+};
+// A compose still open at the start is a draft an earlier try did not get rid of, or the student's own. The
+// student's (or anyone's but Knowlu's) is never touched: nothing is. Knowlu's own is discarded, and the forward
+// goes on once it has gone (at most `wait_ms`).
+if (composes().some((d) => !ours(d))) return { result: "failed", reason: "compose still open" };
+if (composeOpen()) {
+  for (const d of composes()) {
+    const discard = [...d.querySelectorAll('[role="button"], button')].find((b) => /^discard draft/i.test(nameOf(b)));
+    if (discard) pointAt(discard);
+  }
+  if (!(await until(() => !composeOpen(), waitMs))) return { result: "failed", reason: "compose still open" };
+}
 
 const grid = () => [...document.querySelectorAll('table[role="grid"]')].filter(shown).pop() || null;
 const rowEls = () => (grid() ? [...grid().querySelectorAll('tr[role="row"]')] : []);
@@ -209,17 +251,13 @@ if (!(await until(item, waitMs))) {
 }
 pointAt(item());
 
-const send = () => buttons().find((b) => /^send\b/i.test(nameOf(b) || text(b)));
+const send = () => buttons().find((b) => SEND.test(nameOf(b) || text(b)));
 if (!(await until(send, waitMs))) return await bail({ result: "not found", control: "send" });
 const sendButton = send();
 const compose = sendButton.closest('[role="dialog"]') || document.body;
-const field = (pattern) =>
-  [...compose.querySelectorAll('input, textarea, [role="textbox"]')].find((el) =>
-    pattern.test(nameOf(el) || el.getAttribute("name") || "")
-  );
-const to = field(/^to( recipients)?$/i);
+const to = fieldIn(compose, TO);
 if (!to) return await bail({ result: "not found", control: "to" });
-const subject = field(/^(subject|subjectbox)$/i);
+const subject = fieldIn(compose, SUBJECT);
 if (!subject) return await bail({ result: "not found", control: "subject" });
 
 // The chips upload first: wait while one is still uploading; a failed upload is never sent. Live
@@ -270,18 +308,7 @@ const offer = [...compose.querySelectorAll('[role="alert"], [role="alertdialog"]
 );
 if (total >= maxBytes || offer) return await bail({ result: "failed", reason: "over 25 MB" });
 
-// A recipient Gmail accepted: live (2026-10-19) a `div[role=option]` naming the address in data-hovercard-id;
-// older composes drew an `[email]` element.
-const recipients = () => [
-  ...new Set(
-    [
-      ...[...compose.querySelectorAll("[email]")].map((el) => el.getAttribute("email")),
-      ...[...compose.querySelectorAll('[role="option"][data-hovercard-id]')].map((el) =>
-        el.getAttribute("data-hovercard-id")
-      ),
-    ].map(norm).filter(Boolean),
-  ),
-];
+const recipients = () => recipientsIn(compose);
 setValue(to, String(args.address).trim());
 press(to, "Enter");
 await until(() => recipients().length > 0, waitMs);
