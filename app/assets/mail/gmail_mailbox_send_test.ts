@@ -49,6 +49,76 @@ Deno.test("gmail_forward_as_attachment_keeps_each_send_under_25_mb_with_the_nonc
   assertEquals(drive.sent, []);
 });
 
+Deno.test("gmail_forward_opens_the_menu_item_at_its_point", async () => {
+  // Live: More is "More email options" with aria-haspopup "false", and opens on a press, not click().
+  const box = mailbox(MAIL);
+  const more = box.el("more");
+  assertEquals([more.getAttribute("aria-label"), more.getAttribute("aria-haspopup")], [
+    "More email options",
+    "false",
+  ]);
+  box.rows()[0].querySelector('[role="checkbox"]').click();
+  more.click();
+  assertEquals(box.el("over").innerHTML, "", "click() opens nothing");
+  for (const t of ["mousedown", "mouseup"]) more.dispatchEvent(new box.page.Event(t, { bubbles: true }));
+  const item = box.el("m-att");
+  // The item answers neither click() nor a press without a point: only events at its centre.
+  item.click();
+  for (const t of ["mousedown", "mouseup", "click"]) {
+    item.dispatchEvent(new box.page.Event(t, { bubbles: true }));
+  }
+  assertEquals(box.page.document.querySelector('[role="dialog"]'), null);
+  box.rows()[0].querySelector('[role="checkbox"]').click();
+  box.el("over").innerHTML = "";
+  // The script presses More and sends the at-point sequence to the item: the forward goes.
+  assertEquals(await run("gmail/forward.js", box.page, TARGET), { result: "ok", sent: true, count: 2 });
+  assertEquals(box.sent.length, 1);
+});
+
+Deno.test("gmail_forward_names_a_failed_attachment", async () => {
+  // Live: a chip reads "Uploading of attachment: <name> failed. Press enter to retry"; nothing is sent, the
+  // draft is discarded and the selection let go.
+  const box = mailbox(MAIL, { upload: "fails" });
+  assertEquals(await run("gmail/forward.js", box.page, TARGET), {
+    result: "failed",
+    reason: "attachment failed",
+  });
+  assertEquals([box.sent, box.discards, box.checked()], [[], 1, []]);
+  // Chips still uploading are waited for, and sent once attached.
+  const slow = mailbox(MAIL, { upload: "slow" });
+  assertEquals(await run("gmail/forward.js", slow.page, TARGET), { result: "ok", sent: true, count: 2 });
+});
+
+Deno.test("gmail_forward_reads_the_size_inside_the_chip_never_the_name", async () => {
+  // Live: the chip's own text is "<name>.eml (6K)", the size a leaf inside it. A subject that holds a size
+  // of its own is not the attachment's size.
+  const named = [{ ...MAIL[0], subject: "Notes (30M) for Quiz (3)", size: 6_000 }];
+  const box = mailbox(named);
+  const chipText = () => {
+    const b = mailbox(named);
+    b.rows()[0].querySelector('[role="checkbox"]').click();
+    for (const t of ["mousedown", "mouseup"]) {
+      b.el("more").dispatchEvent(new b.page.Event(t, { bubbles: true }));
+    }
+    const r = b.el("m-att").getBoundingClientRect();
+    const at = (t: string) => {
+      const e = new b.page.Event(t, { bubbles: true });
+      Object.defineProperty(e, "clientX", { value: r.left + 1 });
+      Object.defineProperty(e, "clientY", { value: r.top + 1 });
+      b.el("m-att").dispatchEvent(e);
+    };
+    at("mousedown");
+    at("click");
+    return b.page.document.querySelector('[aria-label^="Attachment:"]').textContent;
+  };
+  assertEquals(chipText(), "Notes (30M) for Quiz (3).eml(6K)");
+  assertEquals(await run("gmail/forward.js", box.page, { ...TARGET, rows: [row(named[0])] }), {
+    result: "ok",
+    sent: true,
+    count: 1,
+  });
+});
+
 Deno.test("gmail_forward_of_a_conversation_row_expects_one_attachment_per_message_in_it", async () => {
   // T11.2: a conversation row of three messages, forwarded with the row's count, attaches three; the plain
   // row beside it attaches one. Four attachments for two rows is what the page is expected to show.

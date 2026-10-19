@@ -15,7 +15,7 @@
 //   { result: "not found", control: "message" | "more menu" | "forward as attachment" | "send" | "to" |
 //      "subject" }
 //   { result: "failed", reason: "no address" | "no nonce" | "no rows" | "too many rows" |
-//      "rows already selected" | "rows not selected" | "no attachment" |
+//      "rows already selected" | "rows not selected" | "attachment failed" | "no attachment" |
 //      "attachments do not match the rows" | "attachment size unreadable" | "over 25 MB" |
 //      "recipient not accepted" | "subject not set" | "send did not settle" }
 // It sends one message to that one address and nothing else: the subject is exactly `Knowlu <nonce>`
@@ -24,9 +24,50 @@
 // of Google Drive links, another recipient or the wrong subject is never sent: the draft is discarded and the
 // selection let go. Over the limit is the caller's to halve; a send is never split here. It looks for a
 // refusal before it acts, so a report already on the page stops the next forward, and again after the Send.
-// Nothing here retries: "send did not settle" is not a reason to click Send again.
+// Nothing here retries: "send did not settle" is not a reason to press Send again.
+// Live 2026-10-18/19 (WebView2 155): only the SHOWN grid's rows are read (Gmail keeps a previous view's grid
+// in the document, hidden, offsetParent null); a row's checkbox toggles on `click()`. The toolbar's More is
+// aria-label "More email options" (aria-haspopup "false") and opens on a press (pointerdown, mousedown,
+// pointerup, mouseup, click), never `click()`. A menu item answers only events carrying its centre's
+// clientX/clientY sent to the innermost element at that point (`pointAt`: pointerover, mouseover,
+// pointermove, mousemove, then the press); Send and Discard are pressed the same way. An attachment chip is
+// a `div.dL`: "Uploading of attachment: <name>" while it uploads (waited for, inside `wait_ms`), "Uploading
+// of attachment: <name> failed. Press enter to retry" when the upload failed ("attachment failed": the
+// draft is discarded), and "Attachment: <name>" when attached, its own text "<name>.eml (6K)" with the size
+// a leaf inside it: the size is read after the name, never from it (a subject may hold "(3)").
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
-const nameOf = (el) => (el.getAttribute("aria-label") || "").trim();
+const nameOf = (el) => (el.getAttribute("aria-label") || el.getAttribute("data-tooltip") || "").trim();
+// Shown: live, a hidden view's elements have no offsetParent.
+const shown = (el) => !!el && el.offsetParent !== null;
+const fire = (el, type, at) => {
+  const C = type.startsWith("pointer") && typeof PointerEvent === "function"
+    ? PointerEvent
+    : typeof MouseEvent === "function"
+    ? MouseEvent
+    : Event;
+  const init = {
+    bubbles: true, cancelable: true, composed: true, button: 0, buttons: type.endsWith("down") ? 1 : 0,
+    pointerId: 1, pointerType: "mouse", isPrimary: true, clientX: at ? at.x : 0, clientY: at ? at.y : 0,
+  };
+  if (typeof window !== "undefined") init.view = window;
+  const e = new C(type, init);
+  for (const k of ["button", "buttons", "clientX", "clientY"]) {
+    if (e[k] !== init[k]) Object.defineProperty(e, k, { value: init[k] });
+  }
+  el.dispatchEvent(e);
+};
+const PRESS = ["pointerdown", "mousedown", "pointerup", "mouseup", "click"];
+const tap = (el) => {
+  for (const type of PRESS) fire(el, type);
+};
+// The whole pointer sequence at the centre of `el`, sent to the innermost element there.
+const pointAt = (el) => {
+  const r = el.getBoundingClientRect();
+  const at = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  const hit = typeof document.elementFromPoint === "function" ? document.elementFromPoint(at.x, at.y) : null;
+  const target = hit && el.contains(hit) ? hit : el;
+  for (const type of ["pointerover", "mouseover", "pointermove", "mousemove", ...PRESS]) fire(target, type, at);
+};
 const norm = (v) => String(v || "").trim().toLowerCase();
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const until = async (ready, ms) => {
@@ -49,7 +90,7 @@ const press = (el, key) => {
     el.dispatchEvent(e);
   }
 };
-const buttons = () => [...document.querySelectorAll('[role="button"], button')];
+const buttons = () => [...document.querySelectorAll('[role="button"], button')].filter(shown);
 const ADDRESS = /^[^\s@<>;,"']+@[^\s@<>;,"']+$/;
 const TIMED = /\d{1,2}:\d{2}/;
 const FAILED =
@@ -84,7 +125,8 @@ const refusal = () => {
 const before = refusal();
 if (before) return { result: "refused", reason: before };
 
-const rowEls = () => [...document.querySelectorAll('table[role="grid"] tr[role="row"]')];
+const grid = () => [...document.querySelectorAll('table[role="grid"]')].filter(shown).pop() || null;
+const rowEls = () => (grid() ? [...grid().querySelectorAll('tr[role="row"]')] : []);
 const boxOf = (row) => row.querySelector('[role="checkbox"]');
 const ticked = () => rowEls().filter((r) => boxOf(r) && boxOf(r).getAttribute("aria-checked") === "true");
 // The row for each wanted message, by the three fields list.js read from it; two wanted messages never
@@ -120,7 +162,7 @@ if (ticked().length > 0) return { result: "failed", reason: "rows already select
 // Whatever happens next, a failure lets go of the selection and discards the draft it opened.
 const bail = async (result) => {
   const discard = buttons().find((b) => /^discard draft/i.test(nameOf(b)));
-  if (discard) discard.click();
+  if (discard) pointAt(discard);
   for (const r of ticked()) boxOf(r).click();
   await until(() => ticked().length === 0, waitMs);
   return result;
@@ -129,15 +171,20 @@ for (const r of targets) boxOf(r).click();
 const picked = () => ticked().length === targets.length && targets.every((r) => ticked().includes(r));
 if (!(await until(picked, waitMs))) return await bail({ result: "failed", reason: "rows not selected" });
 
-const more = buttons().find((b) => /^more$/i.test(nameOf(b) || text(b)) && b.getAttribute("aria-haspopup"));
+const more = buttons().find((b) => /^more( email options)?$/i.test(nameOf(b) || text(b)));
 if (!more) return await bail({ result: "not found", control: "more menu" });
-more.click();
+tap(more);
 const item = () =>
-  [...document.querySelectorAll('[role="menuitem"]')].find((i) => /^forward as attachment$/i.test(text(i)));
+  // A menu may be fixed-position (offsetParent null though drawn): its box says it is drawn.
+  [...document.querySelectorAll('[role="menuitem"]')].filter((i) =>
+    shown(i) || i.getBoundingClientRect().height > 0
+  ).find((i) =>
+    /^forward as attachment$/i.test(text(i))
+  );
 if (!(await until(item, waitMs))) {
   return await bail({ result: "not found", control: "forward as attachment" });
 }
-item().click();
+pointAt(item());
 
 const send = () => buttons().find((b) => /^send\b/i.test(nameOf(b) || text(b)));
 if (!(await until(send, waitMs))) return await bail({ result: "not found", control: "send" });
@@ -152,15 +199,27 @@ if (!to) return await bail({ result: "not found", control: "to" });
 const subject = field(/^(subject|subjectbox)$/i);
 if (!subject) return await bail({ result: "not found", control: "subject" });
 
+// The chips upload first: wait while one is still uploading; a failed upload is never sent.
+const chipLabels = () => [...compose.querySelectorAll("[aria-label]")].map(nameOf);
+const uploadFailed = () => chipLabels().some((l) => /^uploading of attachment:.*failed/i.test(l));
+const uploading = () => chipLabels().some((l) => /^uploading of attachment:/i.test(l) && !/failed/i.test(l));
+await until(() => uploadFailed() || !uploading(), waitMs);
+if (uploadFailed()) return await bail({ result: "failed", reason: "attachment failed" });
+
 const attachments = [...compose.querySelectorAll('[aria-label^="Attachment:"]')];
 if (attachments.length === 0) return await bail({ result: "failed", reason: "no attachment" });
 if (attachments.length !== expected) {
   return await bail({ result: "failed", reason: "attachments do not match the rows" });
 }
 let total = 0;
+const SIZE = /\((\d+(?:\.\d+)?)\s*([KMG]?)B?\)/gi;
 for (const a of attachments) {
-  // The size is the chip's text beside the name, never the name itself (a subject may hold "(3)").
-  const m = /\((\d+(?:\.\d+)?)\s*([KMG]?)B?\)/i.exec(text(a.parentElement || a).replace(text(a), ""));
+  // The size is the chip's own text after the name, "<name>.eml (6K)", never the name itself (a subject
+  // may hold "(3)"): the name is the label's, and the last size after it counts.
+  const name = nameOf(a).replace(/^attachment:\s*/i, "");
+  const own = text(a);
+  const after = name && own.startsWith(name) ? own.slice(name.length) : own.replace(/^.*\.eml\b/i, "");
+  const m = [...after.matchAll(SIZE)].pop();
   if (!m) return await bail({ result: "failed", reason: "attachment size unreadable" });
   total += Number(m[1]) * UNITS[m[2].toUpperCase()];
 }
@@ -186,7 +245,7 @@ const line = `Knowlu ${nonce}`;
 setValue(subject, line);
 if (String(subject.value).trim() !== line) return await bail({ result: "failed", reason: "subject not set" });
 
-sendButton.click();
+pointAt(sendButton);
 await until(() => !document.contains(sendButton) || refusal() !== null, waitMs);
 const after = refusal();
 if (after) return { result: "refused", reason: after };

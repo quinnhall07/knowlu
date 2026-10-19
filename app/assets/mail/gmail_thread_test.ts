@@ -3,7 +3,7 @@
 // synthetic mailbox in `gmail_mailbox_pages.ts`. No address is real.
 import { assert, assertEquals } from "@std/assert";
 import { mailbox, msg, SELF, when } from "./gmail_mailbox_pages.ts";
-import { run } from "./test_dom.ts";
+import { El, run } from "./test_dom.ts";
 
 const FAST = { wait_ms: 300 };
 const ANA = "ana.lopez@school.example.invalid";
@@ -39,6 +39,28 @@ Deno.test("gmail_thread_reads_every_message_oldest_first_and_goes_back_to_the_li
   assertEquals([box.checked(), box.sent, box.deleted, box.discards], [[], [], [], 0]);
   // The display names are on the page and never leave it.
   assert(!JSON.stringify(r).includes("ana lopez"));
+});
+
+Deno.test("gmail_thread_goes_back_by_the_titled_back_button", async () => {
+  // Live: on a search the back control is titled "Back to Search Results", has no aria-label, and ignores
+  // click(); a press works.
+  const box = mailbox([thread(), msg("m2", "reg@school.example.invalid", "Registration open", 4)]);
+  await run("gmail/search.js", box.page, { since: "2026-10-01", ...FAST });
+  box.rows().find((r: El) => r.getAttribute("data-id") === "t1").click();
+  const back = box.el("back");
+  assertEquals([back.getAttribute("title"), back.getAttribute("aria-label")], [
+    "Back to Search Results",
+    null,
+  ]);
+  back.click();
+  assert(box.el("grid").hasAttribute("hidden"), "click() did not go back");
+  for (const t of ["mousedown", "mouseup"]) back.dispatchEvent(new box.page.Event(t, { bubbles: true }));
+  assert(!box.el("grid").hasAttribute("hidden"));
+  const r = await run("gmail/thread.js", box.page, { ...ROW, messages: 3, ...FAST });
+  assertEquals([r.result, r.messages.length], ["ok", 3]);
+  assert(!box.el("grid").hasAttribute("hidden"), "the script went back to the results");
+  // The search's grid is the one read: the hidden inbox grid beside it holds the same rows.
+  assertEquals(box.page.document.querySelectorAll('table[role="grid"]').length, 2);
 });
 
 Deno.test("gmail_thread_of_two_needs_no_expanding_and_a_wrong_row_is_not_found", async () => {

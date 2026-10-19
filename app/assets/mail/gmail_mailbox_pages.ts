@@ -2,13 +2,25 @@
 // selectors (research note 6, S2): the list is a `table[role=grid]` of `tr[role=row]`, each with a
 // `div[role=checkbox]`, the sender as a `span[email]` whose `email` attribute is the address (the visible
 // text is a display name or the address), the subject as a `span.bog`, and the time as a `span[title]`
-// whose title is the full date and time. The pager reads "1–50 of 123" with Newer/Older/Newest/Oldest
-// buttons; the toolbar has Delete and More. Setting `location.hash` to `#search/<query>` (the query percent-
-// encoded, spaces as plus signs) runs a search, as live; the search box is labelled "Ask Gmail" and does
-// nothing here (live 2026-10-18). The page is a model of what the scripts rely on, not a copy of
-// Gmail; the live checks (T11, T18c) say whether the real page agrees. Every name, address and subject here
-// is synthetic.
-import { El, load, Page } from "./test_dom.ts";
+// whose title is the full date and time. A conversation row draws its message count as digits alone in a
+// `span.bx0` after the sender names ("Ana, Bo 2"). The toolbar has Delete and "More email options".
+// Setting `location.hash` to `#search/<query>` (the query percent-encoded, spaces as plus signs) runs a
+// search, as live; the search box is labelled "Ask Gmail" and does nothing here (live 2026-10-18).
+// As observed live over CDP (2026-10-18/19, WebView2 155):
+// - A view is its range text, its pager and its grid. A search keeps the previous view in the document,
+//   hidden (`display: none`, so `offsetParent` is null), and draws its own view after it.
+// - A folder's range is exact, "1–50 of 2,819", with Newest/Newer/Older/Oldest. A search's reads "of many"
+//   on every page but the last, which is exact ("1,451–1,493 of 1,493"), with "Previous results", "Next
+//   results" and "Show more messages"; the button at its end is aria-disabled. A page moves the hash to
+//   `.../p2`.
+// - Pager buttons, Delete, More, Send, Discard, "Expand all" and the conversation's titled back button answer
+//   a press (a mousedown then a mouseup), never `click()`. A menu item answers only a mousedown and a click
+//   carrying a point inside its box. A row and a row's checkbox answer `click()`.
+// - An attachment chip is a `div.dL`: "Uploading of attachment: <name>" while it uploads, "... failed.
+//   Press enter to retry" when it fails, "Attachment: <name>" when it is attached, its size a leaf inside it.
+// The page is a model of what the scripts rely on, not a copy of Gmail; the live checks (T11, T18c) say
+// whether the real page agrees. Every name, address and subject here is synthetic.
+import { atPoint, El, load, Page } from "./test_dom.ts";
 
 export const OURS = "box-1@in.example.invalid";
 export const NONCE = "bk7f3a9c2e41";
@@ -34,7 +46,7 @@ export interface Msg {
   size: number;
   /** Other participants of a conversation: the row lists them too. */
   also?: string[];
-  /** The message count Gmail draws beside the sender names: "Name (3)". */
+  /** The message count Gmail draws after the sender names, digits alone in a `span.bx0`: "Name 3". */
   count?: number;
   /** The conversation's messages, oldest first, newest last (the row is the newest). Opening the row draws
    * them; a conversation of more than two shows only the first and the newest until "Expand all". */
@@ -60,8 +72,12 @@ export interface Opts {
   deaf?: boolean;
   /** The compose offers to send Google Drive links, whatever the sizes shown. */
   driveOffer?: boolean;
-  /** The pager has no Oldest button. */
+  /** The folder pager has no Oldest button. */
   noOldest?: boolean;
+  /** The pager's buttons take a press and draw nothing. */
+  stuckPager?: boolean;
+  /** Attachments upload before they attach ("slow"), or the upload fails ("fails"). */
+  upload?: "slow" | "fails";
   /** The row of `id` shows the message `as` once it is ticked. */
   swap?: { id: string; as: string };
   /** The page shows no "1–50 of 123" range. */
@@ -124,6 +140,41 @@ export function msg(
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 const sized = (n: number) => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.max(1, Math.round(n / 1e3))}K`;
 const LIMIT = 25_000_000;
+const num = (v: number) => v.toLocaleString("en-US");
+
+/** A Gmail button: it acts on a mousedown then a mouseup (a press), and `click()` alone does nothing. */
+export function onPress(el: El, act: () => void) {
+  let armed = false;
+  el.addEventListener("mousedown", (e: El) => (armed = (e.button ?? 0) === 0));
+  el.addEventListener("mouseup", () => {
+    if (!armed) return;
+    armed = false;
+    act();
+  });
+}
+
+/** A Gmail menu item: it acts only on a mousedown and then a click that carry a point inside its box. */
+function onPoint(el: El, act: () => void) {
+  let armed = false;
+  el.addEventListener("mousedown", (e: El) => (armed = atPoint(el, e)));
+  el.addEventListener("click", (e: El) => {
+    if (!armed || !atPoint(el, e)) return;
+    armed = false;
+    act();
+  });
+}
+
+type Kind = "inbox" | "sent" | "search";
+const PAGER: Record<Kind, [string, string][]> = {
+  inbox: [["newest", "Newest"], ["newer", "Newer"], ["older", "Older"], ["oldest", "Oldest"]],
+  sent: [["newest", "Newest"], ["newer", "Newer"], ["older", "Older"], ["oldest", "Oldest"]],
+  search: [["newer", "Previous results"], ["older", "Next results"], ["first", "Show more messages"]],
+};
+const BACK: Record<Kind, string> = {
+  inbox: "Back to Inbox",
+  sent: "Back to Sent Mail",
+  search: "Back to Search Results",
+};
 
 export function mailbox(all: Msg[], o: Opts = {}): Box {
   const size = o.size ?? 50;
@@ -138,20 +189,17 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     <div role="navigation"><a href="#inbox">Inbox</a><a href="#sent">Sent</a></div>
     <div role="search"><input type="text" id="q" name="q" aria-label="Ask Gmail"></div>
     <div role="toolbar" id="bar">
-      <div role="button" id="del" aria-label="Delete">Delete</div>
-      <div role="button" id="more" aria-label="More" aria-haspopup="true">More</div>
-      <span id="rangebox"></span>
-      <div role="button" id="newest" aria-label="Newest">Newest</div>
-      <div role="button" id="newer" aria-label="Newer">Newer</div>
-      <div role="button" id="older" aria-label="Older">Older</div>
-      ${o.noOldest ? "" : `<div role="button" id="oldest" aria-label="Oldest">Oldest</div>`}
+      <div role="button" id="del" aria-label="Delete" data-tooltip="Delete">Delete</div>
+      <div role="button" id="more" aria-label="More email options" data-tooltip="More email options"
+        aria-haspopup="false">More</div>
     </div>
-    <table role="grid" id="grid"><tbody id="list"></tbody></table><div id="over"></div>
+    <div id="views"></div><div id="over"></div>
     <div role="main" id="convo"></div>`);
   const d = page.document;
   // Setting the hash to `#search/...` is a search, as live (2026-10-18); setting it to what it already is
-  // does nothing, as in a browser (no hashchange).
-  let hash = o.view === "sent" ? "#sent" : "#inbox";
+  // does nothing, as in a browser (no hashchange). Paging moves the hash to `<view>/p<n>` without a search.
+  let base = o.view === "sent" ? "#sent" : "#inbox";
+  let hash = base;
   const loc = {
     get hash() {
       return hash;
@@ -165,6 +213,8 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     reload() {},
   };
   page.location = loc;
+  // The view showing: the last view drawn (earlier ones stay in the document, hidden).
+  const cur = () => [...d.querySelectorAll("#views > .vw")].pop();
   const b: Box = {
     page,
     msgs: all.map((m) => ({ ...m })),
@@ -172,21 +222,53 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     queries: [],
     deleted: [],
     discards: 0,
-    el: (id) => d.getElementById(id),
-    rows: () => [...d.querySelectorAll('tr[role="row"]')],
+    // "grid" and "rangebox" are the showing view's; every other id is the page's own.
+    el: (id) =>
+      id === "grid"
+        ? cur()?.querySelector('table[role="grid"]') ?? null
+        : id === "rangebox"
+        ? cur()?.querySelector(".rangebox") ?? null
+        : d.getElementById(id),
+    rows: () => [...(cur()?.querySelectorAll('tr[role="row"]') ?? [])],
     checked: () =>
-      [...d.querySelectorAll('tr[role="row"] [role="checkbox"][aria-checked="true"]')].map((c: El) =>
-        c.closest("tr").getAttribute("data-id")
-      ),
-    range: () => (d.getElementById("rangebox").textContent || "").replace(/\s+/g, " ").trim(),
+      [...(cur()?.querySelectorAll('tr[role="row"] [role="checkbox"][aria-checked="true"]') ?? [])].map((
+        c: El,
+      ) => c.closest("tr").getAttribute("data-id")),
+    range: () => (b.el("rangebox")?.textContent || "").replace(/\s+/g, " ").trim(),
   };
-  let view: { kind: "inbox" | "sent" | "search"; since: string; out: string[] } = {
-    kind: o.view ?? "inbox",
-    since: "",
-    out: [],
-  };
+  let view: { kind: Kind; since: string; out: string[] } = { kind: o.view ?? "inbox", since: "", out: [] };
   let at = 0;
   let swapped = false;
+  // A new view: the one showing is hidden and kept, as live, and the new one draws after it.
+  const newView = () => {
+    const was = cur();
+    if (was) was.setAttribute("style", "display: none");
+    const buttons = PAGER[view.kind]
+      .filter(([go]) => !(o.noOldest && go === "oldest"))
+      .map(([go, label]) =>
+        `<div role="button" data-go="${go}" aria-label="${label}" data-tooltip="${label}">${label}</div>`
+      ).join("");
+    d.getElementById("views").insertAdjacentHTML(
+      "beforeend",
+      `<div class="vw"><div class="pager"><span class="rangebox"></span>${buttons}</div>
+        <table role="grid"><tbody></tbody></table></div>`,
+    );
+    const v = cur();
+    const pager = (go: string, to: () => number) => {
+      const btn = v.querySelector(`[data-go="${go}"]`);
+      if (!btn) return;
+      onPress(btn, () => {
+        if (btn.getAttribute("aria-disabled") === "true" || o.stuckPager) return;
+        at = to();
+        hash = at === 0 ? base : `${base}/p${at + 1}`;
+        setTimeout(fill, 20);
+      });
+    };
+    pager("newest", () => 0);
+    pager("newer", () => at - 1);
+    pager("older", () => at + 1);
+    pager("oldest", () => pages() - 1);
+  };
   const shown = () => {
     const keep = (m: Msg) =>
       view.kind === "inbox"
@@ -198,44 +280,43 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
   };
   const pages = () => Math.max(1, Math.ceil(shown().length / size));
   const fill = () => {
+    const v = cur();
     const all = shown();
     at = Math.min(at, pages() - 1);
     const rows = all.slice(at * size, at * size + size);
-    d.getElementById("list").innerHTML = all.length === 0
+    v.querySelector("tbody").innerHTML = all.length === 0
       ? `<tr><td>No messages matched your search.</td></tr>`
       : rows.map((m) => `
       <tr role="row" data-id="${m.id}"><td><div role="checkbox" aria-checked="false"></div></td>
         <td><span email="${esc(m.who)}">${esc(m.shown ?? m.who)}</span>${
         (m.also ?? []).map((a) => `, <span email="${esc(a)}">${esc(a.split("@")[0])}</span>`).join("")
-      }${m.count ? ` (${m.count})` : ""}</td>
+      }${m.count ? ` <span class="bx0">${m.count}</span>` : ""}</td>
         <td><span class="bog">${esc(m.subject)}</span><span class="y2"> - ${
         esc(m.snippet ?? "a preview")
       }</span></td>
         <td class="xW"><span title="${m.at}">Oct ${Number(m.day.slice(8))}</span></td></tr>`).join("");
-    const n = (v: number) => `<span class="ts">${v}</span>`;
+    const n = (x: number) => `<span class="ts">${num(x)}</span>`;
+    // A search's total is "many" until its last page, as live.
+    const last = at >= pages() - 1;
+    const of = view.kind === "search" && !last ? `<span class="ts">many</span>` : n(all.length);
     const drawRange = () => {
-      d.getElementById("rangebox").innerHTML = all.length === 0 || o.blind
+      v.querySelector(".rangebox").innerHTML = all.length === 0 || o.blind
         ? ""
-        : `<span class="Dj">${n(at * size + 1)}–${n(at * size + rows.length)} of ${n(all.length)}</span>`;
+        : `<span class="Dj">${n(at * size + 1)}–${n(at * size + rows.length)} of ${of}</span>`;
     };
-    // `slowRange`: after a search the rows redraw first and the range text follows, the old one left standing.
+    // `slowRange`: after a search the rows redraw first and the range text follows.
     if (o.slowRange && view.kind === "search") setTimeout(drawRange, 80);
     else drawRange();
-    for (
-      const [id, off] of [["newest", at === 0], ["newer", at === 0], ["older", at >= pages() - 1], [
-        "oldest",
-        at >= pages() - 1,
-      ]] as [string, boolean][]
-    ) {
-      b.el(id)?.setAttribute("aria-disabled", String(off));
+    for (const [go, off] of [["newest", at === 0], ["newer", at === 0], ["older", last], ["oldest", last]]) {
+      v.querySelector(`[data-go="${go}"]`)?.setAttribute("aria-disabled", String(off));
     }
-    for (const tr of d.querySelectorAll('tr[role="row"]')) {
+    for (const tr of v.querySelectorAll('tr[role="row"]')) {
       tr.addEventListener("click", (e: El) => {
         if (e.target?.closest?.('[role="checkbox"]')) return;
         open(tr.getAttribute("data-id"));
       });
     }
-    for (const c of d.querySelectorAll('[role="checkbox"]')) {
+    for (const c of v.querySelectorAll('[role="checkbox"]')) {
       c.addEventListener("click", () => {
         c.setAttribute("aria-checked", String(c.getAttribute("aria-checked") !== "true"));
         const row = c.closest("tr");
@@ -250,21 +331,20 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     }
   };
   // Opening a conversation row: the list hides and the conversation draws, first and newest only when it
-  // has more than two messages, until "Expand all"; "Back to ..." returns to the list.
+  // has more than two messages, until "Expand all" (two show "Collapse all"); the back button, titled and
+  // with no aria-label, returns to the list.
   function open(id: string) {
     const m = b.msgs.find((x) => x.id === id);
     if (!m?.convo) return;
-    const list = d.getElementById("grid");
+    const list = b.el("grid");
     list.setAttribute("hidden", "");
     const all = m.convo;
     const draw = (full: boolean) => {
       const shownMsgs = full || all.length <= 2 ? all : [all[0], all[all.length - 1]];
-      b.el("convo").innerHTML = `<h2 class="hP">${esc(m.subject)}</h2>
-        ${
-        all.length > 2 && !full
-          ? `<div role="button" id="expand" aria-label="Expand all">Expand all</div>`
-          : ""
-      }
+      const toggle = all.length > 2 && !full
+        ? `<div role="button" id="expand" aria-label="Expand all" data-tooltip="Expand all">Expand all</div>`
+        : `<div role="button" id="collapse" aria-label="Collapse all">Collapse all</div>`;
+      b.el("convo").innerHTML = `<h2 class="hP">${esc(m.subject)}</h2>${toggle}
         ${
         shownMsgs.map((x, i) =>
           `<div data-message-id="${m.id}-${i}"><span class="gD" email="${esc(x.who)}">${
@@ -272,32 +352,28 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
           }</span><span class="g3" title="${x.at}">Oct</span></div>`
         ).join("")
       }
-        ${o.noBack ? "" : `<div role="button" id="back" aria-label="Back to Inbox">Back</div>`}`;
-      b.el("expand")?.addEventListener("click", () => {
-        if (!o.stuck) draw(true);
-      });
-      b.el("back")?.addEventListener("click", () => {
-        b.el("convo").innerHTML = "";
-        list.removeAttribute("hidden");
-      });
+        ${
+        o.noBack
+          ? ""
+          : `<div role="button" id="back" title="${BACK[view.kind]}"><div class="asa"></div></div>`
+      }`;
+      if (b.el("expand")) onPress(b.el("expand"), () => !o.stuck && draw(true));
+      if (b.el("back")) {
+        onPress(b.el("back"), () => {
+          b.el("convo").innerHTML = "";
+          list.removeAttribute("hidden");
+        });
+      }
     };
     draw(false);
   }
-  const go = (id: string, to: () => number) =>
-    b.el(id)?.addEventListener("click", () => {
-      if (b.el(id).getAttribute("aria-disabled") === "true") return;
-      at = to();
-      setTimeout(fill, 20);
-    });
-  go("newest", () => 0);
-  go("newer", () => at - 1);
-  go("older", () => at + 1);
-  go("oldest", () => pages() - 1);
+  newView();
   fill();
 
-  // The box does nothing here: live, "Ask Gmail" may go to Gemini, so no script types into it.
+  // The box does nothing here: live, "Ask Gmail" may go to Gemini, so no script types into it. A search
+  // keeps the view it leaves, hidden, and draws its own after it, a moment later.
   function onHash(h: string) {
-    const hit = /^#search\/(.*)$/.exec(h);
+    const hit = /^#search\/([^/]*)/.exec(h);
     if (!hit) return;
     const q = decodeURIComponent(hit[1].replace(/\+/g, " "));
     b.queries.push(q);
@@ -306,26 +382,32 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     const out = [["spam", "Spam"], ["trash", "Trash"], ["sent", "Sent"]].filter(([k]) =>
       q.includes(`-in:${k}`)
     );
-    view = {
-      kind: "search",
-      since: since ? `${since[1]}-${since[2]}-${since[3]}` : "0000-00-00",
-      out: out.map((x) => x[1]),
-    };
-    at = 0;
-    setTimeout(fill, 20);
+    setTimeout(() => {
+      view = {
+        kind: "search",
+        since: since ? `${since[1]}-${since[2]}-${since[3]}` : "0000-00-00",
+        out: out.map((x) => x[1]),
+      };
+      base = `#search/${hit[1]}`;
+      at = 0;
+      newView();
+      fill();
+    }, 20);
   }
-  b.el("del").addEventListener("click", () => {
+  onPress(b.el("del"), () => {
     const ids = b.checked();
     if (ids.length === 0) return;
     for (const m of b.msgs) if (ids.includes(m.id)) m.folder = "Trash";
     b.deleted.push(...ids);
     fill();
   });
-  b.el("more").addEventListener("click", () => {
+  onPress(b.el("more"), () => {
     if (b.checked().length === 0) return;
-    const item = o.noAttachmentItem ? "" : `<div role="menuitem" id="m-att">Forward as attachment</div>`;
+    const item = o.noAttachmentItem
+      ? ""
+      : `<div role="menuitem" id="m-att"><div class="J-N-Jz">Forward as attachment</div></div>`;
     b.el("over").innerHTML = `<div role="menu"><div role="menuitem">Mark as read</div>${item}</div>`;
-    b.el("m-att")?.addEventListener("click", () => compose(b.checked()));
+    if (b.el("m-att")) onPoint(b.el("m-att"), () => compose(b.checked()));
   });
 
   function compose(ids: string[]) {
@@ -337,26 +419,41 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     const files = o.bare ? [] : o.short ? attach.slice(1) : attach;
     const total = files.reduce((n, m) => n + m.size, 0);
     const chip = (v: string) => `<span email="${esc(v)}">${esc(v)}</span>`;
+    // Live chips: the name and the size are leaves inside the chip, "<name>.eml (6K)".
+    const attached = (m: Msg) =>
+      `<div class="dL" aria-label="Attachment: ${esc(m.subject)}.eml"><a class="dO"><div class="vI">${
+        esc(m.subject)
+      }.eml</div><div class="SaH2Ve">(${sized(m.size)})</div></a></div>`;
+    const uploading = (m: Msg) =>
+      `<div class="dL" aria-label="Uploading of attachment: ${esc(m.subject)}.eml"><div class="vI">${
+        esc(m.subject)
+      }.eml</div></div>`;
+    const failed = (m: Msg) =>
+      `<div class="dL" aria-label="Uploading of attachment: ${
+        esc(m.subject)
+      }.eml failed. Press enter to retry"><div class="vI">${
+        esc(m.subject)
+      }.eml</div> Attachment failed. <span>Retry</span> <span>Help</span></div>`;
     b.el("over").innerHTML = `<div role="dialog" aria-label="New Message">
       <div id="chips">${o.prefill ? chip(o.prefill) : ""}</div>
       <input type="text" id="to" aria-label="To recipients">
       <input type="text" id="subj" name="subjectbox" aria-label="Subject" value="Fwd: ${
       esc(picked[0]?.subject ?? "")
     }">
-      ${
-      files.map((m) =>
-        `<div class="aZo"><a aria-label="Attachment: ${esc(m.subject)}.eml">${
-          esc(m.subject)
-        }.eml</a><span> (${sized(m.size)})</span></div>`
-      ).join("")
-    }
+      <div id="files">${files.map(o.upload ? uploading : attached).join("")}</div>
       ${
       o.driveOffer || total > LIMIT
         ? `<div role="alertdialog">The files you attached are over 25 MB. Send them as Google Drive links?</div>`
         : ""
     }
-      <div role="button" aria-label="Send (Ctrl-Enter)">Send</div>
-      <div role="button" aria-label="Discard draft (Ctrl-Shift-D)">Discard</div></div>`;
+      <div role="button" aria-label="Send ‪(Ctrl-Enter)‬" data-tooltip="Send">Send</div>
+      <div role="button" aria-label="Discard draft ‪(Ctrl-Shift-D)‬">Discard</div></div>`;
+    if (o.upload) {
+      setTimeout(() => {
+        const box = b.el("files");
+        if (box) box.innerHTML = files.map(o.upload === "fails" ? failed : attached).join("");
+      }, 100);
+    }
     b.el("to").addEventListener("keydown", (e: El) => {
       const v = b.el("to").value.trim();
       if (e.key !== "Enter" || !v) return;
@@ -367,11 +464,11 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       [...d.querySelectorAll('[role="button"]')].find((x: El) =>
         (x.getAttribute("aria-label") || "").startsWith(label)
       );
-    button("Discard").addEventListener("click", () => {
+    onPress(button("Discard"), () => {
       b.discards++;
       b.el("over").innerHTML = "";
     });
-    button("Send").addEventListener("click", () => {
+    onPress(button("Send"), () => {
       const to = [...d.querySelectorAll("#chips [email]")].map((x: El) => x.getAttribute("email"));
       const subject = b.el("subj")?.value ?? "";
       const banner = () =>

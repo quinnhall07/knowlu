@@ -24,7 +24,10 @@
 //! a later one under its "Re: " subject too) and a missing one is forwarded alone. A conversation counts
 //! once in `expected` and `handled`; one the page could not read whole is left.
 //! **Gmail** lists conversations oldest page first ([`Outcome::expected`] and [`Outcome::handled`] are
-//! conversations there). A row that shows a message count is **opened** (Quinn 2026-10-02): `thread.js`
+//! conversations there). A search draws no Oldest button (live 2026-10-19): `list.js` walks "Next
+//! results" inside its step's budget and is asked again, its rows unread, until it says it is on the
+//! oldest page; one that stops short without moving ends the pass. "Attachment failed" (Gmail could not
+//! upload the forward's attachments) ends the pass too: it is the page's, not a row's. A row that shows a message count is **opened** (Quinn 2026-10-02): `thread.js`
 //! reads every message in it, each is fingerprinted, and a conversation with a missing message is
 //! forwarded alone, expecting one attachment per message. If Gmail attaches fewer, `forward.js` refuses
 //! and the conversation is left (T18c's gate "Gmail conversation rows"). A message the mailbox itself sent
@@ -420,6 +423,10 @@ fn count(v: &Value, key: &str) -> Option<u32> {
 }
 
 const UNFINISHED: Stop = Stop::Script("a mailbox step did not finish");
+/// Gmail: `list.js` could not reach the oldest page of the results.
+const SHORT_OF_OLDEST: Stop = Stop::Script("the oldest page could not be reached");
+/// Gmail: the most `list.js` walks toward the oldest page (each one inside a step, about 90 pages).
+const OLDEST_WALKS: usize = 200;
 
 impl Pass<'_> {
     fn path(&self, name: &str) -> String {
@@ -443,6 +450,8 @@ impl Pass<'_> {
         }
         self.mb.open(Place::Inbox).map_err(refused)?;
         let found = self.ok("search.js", json!({ "since": day_str(j.window.since.div_euclid(DAY)) }))?;
+        // Gmail's count is a lower bound when its answer says `exact: false` (an "of many" result whose walk
+        // to the last page ran out of time): the cloud only records `expected`, and nothing here stops at it.
         let n = count(&found, "count").ok_or(UNFINISHED)?;
         self.out.expected = n;
         if n == 0 {
@@ -642,10 +651,30 @@ enum Convo {
 
 impl Pass<'_> {
     fn gmail(&mut self, held: &Held) -> Step<()> {
+        // A search draws no Oldest (live 2026-10-19): `list.js` walks "Next results" inside its own budget
+        // and says `at_oldest: false` when the walk stopped short. It is asked again, its rows unread, until
+        // it is there; a walk that stops short without moving would leave older pages unread, so it stops.
+        let mut first = self.ok("list.js", json!({ "go": "oldest" }))?;
+        for _ in 0..OLDEST_WALKS {
+            if first.get("at_oldest").and_then(Value::as_bool) != Some(false) {
+                break;
+            }
+            if first.get("moved").and_then(Value::as_bool) != Some(true) {
+                return Err(SHORT_OF_OLDEST);
+            }
+            first = self.ok("list.js", json!({ "go": "oldest" }))?;
+        }
+        if first.get("at_oldest").and_then(Value::as_bool) == Some(false) {
+            return Err(SHORT_OF_OLDEST);
+        }
+        let mut first = Some(first);
         let mut go = "oldest";
         // A result of hundreds of thousands of pages is not a mailbox: stop before it is a loop.
         for _ in 0..5_000 {
-            let v = self.ok("list.js", json!({ "go": go }))?;
+            let v = match first.take() {
+                Some(v) => v,
+                None => self.ok("list.js", json!({ "go": go }))?,
+            };
             if go == "newer" && v.get("moved").and_then(Value::as_bool) != Some(true) {
                 break;
             }
@@ -798,6 +827,9 @@ impl Pass<'_> {
                 self.out.handled += rows.len() as u32;
             }
             (Some("refused"), _, _) => return Err(self.refusal()),
+            // Gmail could not upload the attachments (live 2026-10-19): nothing was sent and the draft is
+            // discarded. It is the page's, not these rows', so the pass stops and says so.
+            (Some("failed"), Some("attachment failed"), _) => return Err(Stop::Script("an attachment did not upload")),
             (Some("failed"), Some("over 25 MB"), _) if rows.len() > 1 => {
                 let (a, b) = rows.split_at(rows.len() / 2);
                 self.forward_gmail(a.to_vec(), None)?;

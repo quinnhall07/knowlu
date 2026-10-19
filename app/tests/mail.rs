@@ -695,6 +695,11 @@ struct Fake {
     cleanup_fails: bool,
     /// Sent copies the cleanup has deleted so far: each call deletes at most its `max`.
     cleaned: Cell<usize>,
+    /// Gmail: the search lands on the newest page and each `go: "oldest"` walks at most this many pages
+    /// toward the oldest, saying `at_oldest` (a search has no Oldest button; `list.js` walks in a budget).
+    oldest_walk: Option<usize>,
+    /// Gmail: every forward's attachments fail to upload.
+    attach_fails: bool,
 }
 
 fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
@@ -714,6 +719,8 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         over_rows: None,
         cleanup_fails: false,
         cleaned: Cell::new(0),
+        oldest_walk: None,
+        attach_fails: false,
     }
 }
 
@@ -788,8 +795,8 @@ impl Mailbox for Fake {
                 if m365 {
                     idx.reverse();
                 }
-                self.page.set(0);
                 let n = idx.len();
+                self.page.set(if self.oldest_walk.is_some() { n.div_ceil(self.size).max(1) - 1 } else { 0 });
                 *self.current.borrow_mut() = idx;
                 json!({ "result": "ok", "count": n })
             }
@@ -824,7 +831,7 @@ impl Mailbox for Fake {
                 let pages = cur.len().div_ceil(self.size).max(1);
                 let before = self.page.get();
                 match args["go"].as_str() {
-                    Some("oldest") => self.page.set(0),
+                    Some("oldest") => self.page.set(self.oldest_walk.map_or(0, |k| before.saturating_sub(k))),
                     Some("newer") if before + 1 < pages => self.page.set(before + 1),
                     _ => {}
                 }
@@ -832,7 +839,11 @@ impl Mailbox for Fake {
                 let (start, end) = (at * self.size, ((at + 1) * self.size).min(cur.len()));
                 let rows: Vec<Value> = cur[start..end].iter().map(|&i| self.row(i, true)).collect();
                 let page = json!({ "from": cur.len() - end + 1, "to": cur.len() - start, "total": cur.len() });
-                json!({ "result": "ok", "page": page, "moved": at != before, "rows": rows })
+                let mut v = json!({ "result": "ok", "page": page, "moved": at != before, "rows": rows });
+                if args["go"] == "oldest" {
+                    v["at_oldest"] = json!(at == 0);
+                }
+                v
             }
             "thread.js" => {
                 let i = self.find(args["sender"].as_str().unwrap(), args["subject"].as_str().unwrap(), args["received"].as_str().unwrap());
@@ -872,6 +883,9 @@ impl Mailbox for Fake {
                 }
                 if m365 {
                     return Ok(json!({ "result": "ok", "sent": true }));
+                }
+                if self.attach_fails {
+                    return Ok(json!({ "result": "failed", "reason": "attachment failed" }));
                 }
                 let want: u64 = rows.iter().map(|r| r["messages"].as_u64().unwrap_or(1)).sum();
                 if self.over_rows.is_some_and(|k| rows.len() > k) {
@@ -1310,6 +1324,57 @@ fn on_gmail_expected_and_the_progress_count_are_conversations() {
     // Two pages: the oldest first, then the next newer; no page is read twice.
     let go: Vec<_> = mb.calls("list.js").iter().map(|a| a["go"].as_str().unwrap().to_string()).collect();
     assert_eq!(go, ["oldest", "newer"]);
+}
+
+#[test]
+fn a_gmail_walk_short_of_the_oldest_page_is_asked_again_and_its_rows_are_not_judged() {
+    // Live 2026-10-19: a search has no Oldest button, so list.js walks "Next results" inside its step's
+    // budget. Ten single messages, two to a page (five pages), one page walked a call: three answers say
+    // `at_oldest: false` and are not judged; the fourth is the oldest page, and the pass goes newer from it.
+    let since = window(NOW, None, None).since;
+    let msgs: Vec<Mail> = (0..10).map(|i| mail(ANA, &format!("Note {i}"), since + 3_600 * (i + 1))).collect();
+    let svc = holding(&[]);
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.size = 2;
+    mb.oldest_walk = Some(1);
+    let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Backfill, backfill_window(NOW.div_euclid(DAY) - 5, NOW), None));
+    assert_eq!(out.stop, Stop::Done);
+    let go: Vec<_> = mb.calls("list.js").iter().map(|a| a["go"].as_str().unwrap().to_string()).collect();
+    assert_eq!(go, ["oldest", "oldest", "oldest", "oldest", "newer", "newer", "newer", "newer"]);
+    // Every message forwarded once, oldest first: the pages walked past were never judged.
+    let sent = mb.forwarded();
+    let want: Vec<String> = (0..10).map(|i| received(since + 3_600 * (i + 1))).collect();
+    assert_eq!(sent, want);
+    assert_eq!((out.expected, out.handled, out.sent), (10, 10, 10));
+}
+
+#[test]
+fn a_gmail_walk_that_cannot_reach_the_oldest_page_stops_the_pass_and_sends_nothing() {
+    // A walk that says `at_oldest: false` without moving would leave the older pages unread.
+    let since = window(NOW, None, None).since;
+    let msgs: Vec<Mail> = (0..6).map(|i| mail(ANA, &format!("Note {i}"), since + 3_600 * (i + 1))).collect();
+    let svc = holding(&[]);
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.size = 2;
+    mb.oldest_walk = Some(0);
+    let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
+    assert_eq!(out.stop, Stop::Script("the oldest page could not be reached"));
+    assert_eq!(mb.calls("list.js").len(), 1);
+    assert!(mb.forwards.borrow().is_empty());
+}
+
+#[test]
+fn a_gmail_attachment_that_does_not_upload_stops_the_pass_with_a_fixed_word() {
+    // Live 2026-10-19: Gmail's chip reads "Uploading of attachment: ... failed"; forward.js discards the
+    // draft and says "attachment failed". It is the page's, not the row's: the pass stops and says so.
+    let since = window(NOW, None, None).since;
+    let svc = holding(&[]);
+    let mut mb = fake(Provider::Gmail, vec![mail(ANA, "Quiz 3 moved", since + 3_600), mail(BO, "Lab report due", since + 7_200)]);
+    mb.attach_fails = true;
+    let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
+    assert_eq!(out.stop, Stop::Script("an attachment did not upload"));
+    assert_eq!((out.sent, out.left), (0, 0));
+    assert_eq!(mb.forwards.borrow().len(), 1, "one forward was tried, and none after it");
 }
 
 #[test]
