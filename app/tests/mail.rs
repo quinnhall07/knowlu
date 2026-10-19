@@ -498,6 +498,39 @@ fn a_402_on_an_entitled_route_reads_lapsed_while_get_and_delete_still_work() {
     assert_eq!(c.delete_address(A).expect_err("402").name(), "refused");
 }
 
+/// Spec §4.11 step 3 (amended 2026-10-19): `covered` carries the two stamps exactly as they were read (a reparse
+/// would lose the microseconds and the offset), and nothing else; its answer is whether the service cleared.
+#[test]
+fn covered_posts_both_stamps_verbatim_and_answers_whether_the_service_cleared() {
+    let since = "2026-09-11T09:13:20.123456-05:00";
+    let last = "2026-09-13T00:00:00.654321+00:00";
+    let svc = Service::start(false, |r| {
+        let cleared = r.body.contains("123456");
+        (200, json!({ "address_id": A, "state": "covered", "status": "quiet", "cleared": cleared }).to_string())
+    });
+    let c = client(&svc);
+    assert_eq!(c.covered(A, since, last), Ok(true));
+    assert_eq!(c.covered(A, "2026-09-11T09:13:20-05:00", last), Ok(false), "cleared: false is an answer, not an error");
+    let seen = svc.requests();
+    assert_eq!(seen.len(), 2);
+    assert_eq!((seen[0].method.as_str(), seen[0].path.as_str()), ("POST", format!("/functions/v1/mail/addresses/{A}/state").as_str()));
+    assert_eq!(seen[0].bearer.as_deref(), Some(format!("Bearer {TOKEN}").as_str()));
+    let body: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
+    assert_eq!(body, json!({ "state": "covered", "lapsed_since": since, "last_lapsed_at": last }), "exactly these keys");
+    assert!(seen[0].body.contains(since) && seen[0].body.contains(last), "byte for byte: {}", seen[0].body);
+    // A malformed stamp is the service's 400; a reply with no `cleared` is unreadable; the route needs an entitlement.
+    let bad = Service::start(false, |_| (400, r#"{"error":"lapsed_since and last_lapsed_at must be the mailbox's own, each an instant with its zone"}"#.to_string()));
+    assert!(matches!(client(&bad).covered(A, "x", last), Err(MailError::Refused { status: 400, .. })));
+    let odd = Service::start(false, |_| (200, r#"{"ok":true}"#.to_string()));
+    assert_eq!(client(&odd).covered(A, since, last), Err(MailError::BadReply));
+    let lapsed = Service::start(false, |_| (402, r#"{"error":"this account has no active subscription"}"#.to_string()));
+    assert_eq!(client(&lapsed).covered(A, since, last), Err(MailError::Lapsed));
+    // An id that could change the route is never sent.
+    let quiet = Service::start(false, |_| (200, "{}".to_string()));
+    assert_eq!(client(&quiet).covered("../x", since, last), Err(MailError::Invalid));
+    assert!(quiet.requests().is_empty());
+}
+
 #[test]
 fn no_token_or_address_reaches_an_error_string() {
     // A service that echoes the bearer, the mailbox address and the hint back in its error.

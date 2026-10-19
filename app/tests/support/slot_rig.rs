@@ -58,6 +58,8 @@ pub struct SvcState {
     pub log: Vec<(String, String, String)>,
     /// What `POST /reconcile` says the service holds: `{"fp", "minute"}` entries ([`held`]).
     pub held: Vec<Value>,
+    /// What `POST /addresses/<id>/state {state: covered}` answers; `None` is 200 with `cleared: true`.
+    pub covered: Option<(u16, String)>,
 }
 
 /// A held entry for a message from `sender` with `subject` received at `at`, under the rig's fingerprint key.
@@ -84,7 +86,7 @@ impl Drop for Svc {
 /// A `GET /addresses` row.
 pub fn row(status: &str, provider: &str) -> Value {
     json!({ "address_id": ID, "provider": provider, "address": KNOWLU, "status": status,
-            "lapsed_since": null, "last_canary_ok_at": "2026-10-02T10:00:40Z", "backfill_since": null })
+            "lapsed_since": null, "last_lapsed_at": null, "last_canary_ok_at": "2026-10-02T10:00:40Z", "backfill_since": null })
 }
 
 impl Svc {
@@ -148,6 +150,9 @@ fn answer(st: &Mutex<SvcState>, method: &str, path: &str, body: &str) -> (u16, S
             0 => (200, r#"{"deleted":true}"#.to_string()),
             code => (code, r#"{"error":"failed"}"#.to_string()),
         },
+        ("POST", p) if p.ends_with("/state") && serde_json::from_str::<Value>(body).is_ok_and(|v| v["state"] == "covered") => {
+            s.covered.clone().unwrap_or_else(|| (200, json!({ "address_id": ID, "state": "covered", "status": "quiet", "cleared": true }).to_string()))
+        }
         ("POST", p) if p.ends_with("/hint") || p.ends_with("/state") => (200, r#"{"ok":true}"#.to_string()),
         ("POST", "/canary") => (201, json!({ "canary_id": "c-1", "sent_at": "2026-10-02T10:00:00Z" }).to_string()),
         ("POST", "/reconcile") => (200, json!({ "address_id": ID, "key": FPKEY_B64, "held": s.held }).to_string()),

@@ -265,6 +265,16 @@ impl MailClient {
         self.call("POST", &format!("/addresses/{}/state", self.id(id)?), Some(json!({ "state": state })), true)
     }
 
+    /// `POST /addresses/<id>/state {state: covered, lapsed_since, last_lapsed_at}`: a whole pass reached back over
+    /// the lapse these stamps name (§4.11 step 3, amended 2026-10-19). Both are passed exactly as the mailbox list
+    /// answered them, never reparsed (a reparse loses the microseconds). Answers the service's `cleared`: `false`
+    /// is a lapse since the stamps were read, or a mailbox still `lapsed`, and is no error.
+    pub fn covered(&self, id: &str, lapsed_since: &str, last_lapsed_at: &str) -> Result<bool, MailError> {
+        let body = json!({ "state": "covered", "lapsed_since": lapsed_since, "last_lapsed_at": last_lapsed_at });
+        let v = self.call("POST", &format!("/addresses/{}/state", self.id(id)?), Some(body), true)?;
+        v.get("cleared").and_then(Value::as_bool).ok_or(MailError::BadReply)
+    }
+
     /// `GET /provider?domain=`: the MX fallback when no curated row names the school's provider (PS).
     pub fn provider(&self, domain: &str) -> Result<Value, MailError> {
         if !route_safe(domain, 253) {
