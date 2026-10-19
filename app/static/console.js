@@ -2264,7 +2264,7 @@
     if (p.status === "ended") {
       end = p.line && p.line !== p.sentence ? p.line : "";
       // The row already says it; but a setup that kept its address says so only here (runner.rs KEPT_*_LINE).
-      var kept = (p.ended === "failed" || p.ended === "cancelled") && /\bwas kept because Settings showed it\b/.test(p.line || "");
+      var kept = p.kept === true;
       if (!kept && p.rows.some(function (x) { return x.reason === "already_connected"; })) { end = ""; }
       if (p.done && p.done.length) { end += " Done: " + p.done.map(function (s) { return MP_STEP[s] || s; }).join(", ") + "."; }
       if (p.left && p.left.length) { end += " Not done: " + p.left.map(function (s) { return MP_STEP[s] || s; }).join(", ") + "."; }

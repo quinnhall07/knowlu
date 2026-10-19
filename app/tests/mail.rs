@@ -4109,6 +4109,7 @@ fn an_address_settings_handed_out_during_a_setup_is_never_withdrawn() {
     assert!(shared.answer(Answer::Replace(false)));
     let p = wait(&shared);
     assert_eq!((p.ended, p.line), (Some("stopped"), Some("setup stopped")));
+    assert!(!p.kept, "a stop is not a kept end: the console shows no kept line");
     assert!(!r.events().contains(&"svc delete address".to_string()), "{:?}", r.events());
 }
 
@@ -4136,6 +4137,7 @@ fn a_cancelled_sign_in_never_deletes_an_address_settings_handed_out() {
     assert!(!r.events().contains(&"svc delete address".to_string()), "{:?}", r.events());
     assert_eq!(p.ended, Some("cancelled"));
     assert!(p.line.is_some_and(|l| l != "setup cancelled" && l.contains("kept")), "{:?}", p.line);
+    assert!(p.kept, "the console reads the flag, never the line's words");
     assert!(pendings(&r.dir).is_empty(), "the run handled its address: kept");
     assert!(r.host.lock().unwrap().closed >= 1, "the window is closed");
 }
@@ -4158,5 +4160,6 @@ fn a_refused_hint_never_deletes_an_address_settings_handed_out() {
     assert_eq!(p.ended, Some("failed"));
     assert!(p.line.is_some_and(|l| l.contains("kept")), "{:?}", p.line);
     assert!(!p.sentence.is_empty(), "the refusal is still named");
+    assert!(p.kept);
     assert!(pendings(&r.dir).is_empty(), "the run handled its address: kept");
 }

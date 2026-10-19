@@ -199,11 +199,17 @@ pub(super) fn run_setup(plan: &Plan, env: &Env, sh: &Shared) {
         End::Withdrawn => ("stopped", WITHDRAWN_LINE),
         End::NotWithdrawn => ("stopped", NOT_WITHDRAWN_LINE),
         End::Cancelled => ("cancelled", "setup cancelled"),
-        End::KeptCancelled => ("cancelled", KEPT_CANCELLED_LINE),
+        End::KeptCancelled => {
+            sh.update(|p| p.kept = true);
+            ("cancelled", KEPT_CANCELLED_LINE)
+        }
         End::Failed(word) => ("failed", word),
         End::KeptFailed(word) => {
             // The failure stays named as the view's sentence; the line says the address was kept.
-            sh.update(|p| p.sentence = word);
+            sh.update(|p| {
+                p.sentence = word;
+                p.kept = true;
+            });
             ("failed", KEPT_FAILED_LINE)
         }
     };

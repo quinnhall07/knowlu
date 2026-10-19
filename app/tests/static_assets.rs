@@ -2582,6 +2582,9 @@ fn a_refused_sign_in_never_promises_that_starting_again_fixes_it() {
     // already_connected's row says what its ended line says: the line is not shown a second time.
     // ... unless the setup kept its address: that line is said only there.
     assert!(v.contains("if (!kept && p.rows.some(function (x) { return x.reason === \"already_connected\"; })) { end = \"\"; }"), "the already_connected line is dropped");
+    // Kept is the progress's own flag (runner.rs sets it on a kept end), never a match on the line's words.
+    assert!(v.contains("var kept = p.kept === true;"), "kept reads the flag");
+    assert!(!v.contains("was kept because Settings showed it"), "no text match on the kept line");
 }
 
 #[test]

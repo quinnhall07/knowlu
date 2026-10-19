@@ -152,6 +152,9 @@ pub struct Progress {
     pub not_brought_in_before: Option<String>,
     /// The ended setup's one line (`setup finished`, `setup stopped`, `setup cancelled`, or a named failure).
     pub line: Option<&'static str>,
+    /// The run ended failed or cancelled and kept its Knowlu address because Settings handed it out
+    /// (`runner.rs`'s kept ends): the console says so from this flag, never from the line's words.
+    pub kept: bool,
 }
 
 pub(super) fn step_name(s: Step) -> &'static str {
