@@ -321,14 +321,16 @@ Deno.test("gmail_forward_tries_the_recipient_once_more_in_place_before_it_gives_
 Deno.test("gmail_forward_keeps_the_recipients_second_wait_inside_the_upload_bound", async () => {
   // forward.js's worst case is 35 s + upload_ms (recover.rs keeps it inside one 90 s step): the second try's
   // wait comes out of what the upload left of its bound. An upload that used it all leaves none.
-  const late = mailbox(MAIL, { toMiss: "never", upload: "slow", uploadMs: 400 });
-  const args = { ...TARGET, wait_ms: 2_000, upload_ms: 500 };
+  // The chips attach at 300 ms of a 600 ms bound: 300 ms of margin over the 50 ms polling, so a loaded runner
+  // never answers "attachment still uploading" here (review of 9352639).
+  const late = mailbox(MAIL, { toMiss: "never", upload: "slow", uploadMs: 300 });
+  const args = { ...TARGET, wait_ms: 3_000, upload_ms: 600 };
   const r = await run("gmail/forward.js", late.page, args);
   const done = Date.now();
   assertEquals(r, { result: "failed", reason: "recipient not accepted", recipients: 0, retried: "kept" });
   // Review of 7f33a3a (M2): the second wait alone, from its Enter to the answer (the cleanup after it is
-  // immediate here). The upload left at most upload_ms - uploadMs (100 ms) of its bound; a wait of wait_ms or
-  // half of it (2 s, 1 s) would be ten times this bound, so a slow runner does not blur the two.
+  // immediate here). The upload left at most upload_ms - uploadMs (300 ms) of its bound, under wait_ms / 4
+  // (750 ms); a wait of wait_ms or half of it (3 s, 1.5 s) is at least twice that limit.
   assertEquals(late.toEnters.length, 2, "one Enter, then one more in place");
   const second = done - late.toEnters[1];
   assert(second < args.wait_ms / 4, `the second wait took ${second} ms`);
