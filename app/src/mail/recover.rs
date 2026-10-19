@@ -33,7 +33,8 @@
 //! forwarded alone, expecting one attachment per message. If Gmail attaches fewer, `forward.js` refuses
 //! and the conversation is left (T18c's gate "Gmail conversation rows"). A lone row that will not attach is
 //! left only while sends show the page works (review of fd702e6): two such rows with no send between them
-//! stop the pass, and a lone row still uploading first gets one longer try. A message the mailbox itself sent
+//! stop the pass, and a lone row still uploading first gets one longer try. A forward whose recipient Gmail did
+//! not accept (nothing sent) gets one more try before it stops the pass. A message the mailbox itself sent
 //! (`own`, which `thread.js` reads from the account chip) is never judged: the service never holds it.
 //!
 //! **The Inbox look** (Gmail only; Quinn's ruling 2026-10-19 on the T18c gate "Gmail non-delivery report
@@ -617,6 +618,7 @@ const INBOX_UNREADABLE: Stop = Stop::Script("the inbox could not be read");
 const STALLED: Stop = Stop::Script("the attachments would not attach");
 /// `forward.js`'s waits other than the upload, at their defaults (5 s each): Knowlu's own leftover compose to
 /// go, the rows ticked, the menu item, Send, the recipient, the Send's settling and the rows let go (its header).
+/// The recipient's second try in place waits only what the upload left of `upload_ms`, so it adds nothing here.
 const FORWARD_OTHER_WAITS_MS: u64 = 35_000;
 /// Gmail: the one longer try a lone row still uploading gets (review of fd702e6), as `upload_ms`: the longest
 /// that keeps `forward.js`'s worst case (35 s + this, 85 s) inside one [`STEP`] with a margin for the page.
@@ -1336,7 +1338,7 @@ impl Pass<'_> {
     /// One Send of `rows` (a conversation row carries its message count). An `over 25 MB` send is halved,
     /// as `forward.js` leaves to its caller.
     fn forward_gmail(&mut self, rows: Vec<Row>, messages: Option<u32>) -> Step<()> {
-        self.forward_gmail_once(rows, messages, false)
+        self.forward_gmail_once(rows, messages, false, false)
     }
 
     /// A lone row that would not attach (no chip, still uploading after its longer try, or a conversation one
@@ -1381,8 +1383,9 @@ impl Pass<'_> {
         Ok(())
     }
 
-    /// `slow`: this is a lone row's one longer try at uploading ([`SLOW_UPLOAD_MS`]).
-    fn forward_gmail_once(&mut self, rows: Vec<Row>, messages: Option<u32>, slow: bool) -> Step<()> {
+    /// `slow`: this is a lone row's one longer try at uploading ([`SLOW_UPLOAD_MS`]). `again`: this forward's one
+    /// more try after a recipient not accepted.
+    fn forward_gmail_once(&mut self, rows: Vec<Row>, messages: Option<u32>, slow: bool, again: bool) -> Step<()> {
         self.open_batch()?;
         let wire: Vec<Value> = rows
             .iter()
@@ -1468,7 +1471,14 @@ impl Pass<'_> {
             // Alone, a chip still uploading at forward.js's bound gets one more try with the longest bound a step
             // allows (review of fd702e6: a big message can take longer than 30 s and still go).
             (Some("failed"), Some("attachment still uploading"), _) if !slow => {
-                return self.forward_gmail_once(rows, messages, true);
+                return self.forward_gmail_once(rows, messages, true, again);
+            }
+            // Gmail drew no recipient for Knowlu's address even after forward.js's second try in place (live, ef28
+            // 2026-10-19: a page's first forward). The draft was discarded before Send, so nothing went and its
+            // message is given back above: the same forward gets one more try, charged as any send, before the
+            // pass stops.
+            (Some("failed"), Some("recipient not accepted"), _) if !again => {
+                return self.forward_gmail_once(rows, messages, slow, true);
             }
             // Too big alone, or the row gone from the page: nothing was sent, and it is left.
             (Some("failed"), Some("over 25 MB"), _) | (Some("not found"), _, Some("message")) => {

@@ -700,6 +700,8 @@ struct Fake {
     oldest_walk: Option<usize>,
     /// Gmail: every forward's attachments fail to upload.
     attach_fails: Option<&'static str>,
+    /// Gmail: this many forwards from now draw no recipient ("recipient not accepted", none read; live ef28).
+    recipient_misses: Cell<u32>,
     /// Gmail: the Inbox holds a non-delivery report for the batch once this many forwards have run.
     bounce_after: Option<usize>,
     /// Gmail: the Inbox draws no list (`bounce.js` says `not found`).
@@ -772,6 +774,7 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         cleaned: Cell::new(0),
         oldest_walk: None,
         attach_fails: None,
+        recipient_misses: Cell::new(0),
         bounce_after: None,
         inbox_unreadable: false,
         no_chip: None,
@@ -1053,6 +1056,10 @@ impl Fake {
                 }
                 if let Some(reason) = self.attach_fails {
                     return Ok(json!({ "result": "failed", "reason": reason }));
+                }
+                if self.recipient_misses.get() > 0 {
+                    self.recipient_misses.set(self.recipient_misses.get() - 1);
+                    return Ok(json!({ "result": "failed", "reason": "recipient not accepted", "recipients": 0, "retried": "kept" }));
                 }
                 let want: u64 = rows.iter().map(|r| r["messages"].as_u64().unwrap_or(1)).sum();
                 if self.over_rows.is_some_and(|k| rows.len() > k) {
@@ -3989,6 +3996,30 @@ fn a_gmail_send_that_did_not_settle_keeps_its_message_counted() {
     let mut r = routine(Provider::Gmail);
     let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
     assert_eq!((out.stop, out.sent, r.messages_today()), (Stop::Script("a forward did not finish"), 0, 1));
+}
+
+#[test]
+fn a_gmail_recipient_not_accepted_is_tried_once_more_and_each_miss_gives_its_message_back() {
+    // Live (ef28, 2026-10-19): a page's first forward answered "recipient not accepted" with none drawn, and the
+    // whole backfill pass stopped. forward.js discards that draft before Send, so nothing went: the same forward is
+    // tried once more, its Gmail message reserved again, and the miss gives its own back.
+    let since = window(NOW, None, None).since;
+    let two = || vec![mail(ANA, "Quiz 3 moved", since + 600), mail(BO, "Lab report due", since + 1_200)];
+    let once = fake(Provider::Gmail, two());
+    once.recipient_misses.set(1);
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&once, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop, out.sent, out.left, r.messages_today()), (Stop::Done, 2, 0, 1));
+    let fwd = once.forwards.borrow();
+    assert_eq!(fwd.len(), 2, "the missed forward, then the same one once more");
+    assert_eq!(fwd[0].1, fwd[1].1, "the same rows and args");
+    // Missed on its second try too: the pass stops as before, with nothing sent, left or counted.
+    let twice = fake(Provider::Gmail, two());
+    twice.recipient_misses.set(2);
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&twice, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop, out.sent, out.left, r.messages_today()), (Stop::Script("a forward did not finish"), 0, 0, 0));
+    assert_eq!(twice.forwards.borrow().len(), 2, "one more try, never a third");
 }
 
 #[test]
