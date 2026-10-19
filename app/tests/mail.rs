@@ -713,6 +713,14 @@ struct Fake {
     looked_at: RefCell<Vec<i64>>,
     /// Gmail: every page of the results has a newer one (a result that never ends).
     endless: bool,
+    /// Gmail: a search has run in this document.
+    searched: Cell<bool>,
+    /// Gmail (live 2026-10-19): the Inbox was opened again in the same document after a search, so Gmail
+    /// restores its cached view of the search, "of many", past the real end: a search answers a wrong count and
+    /// the list will not move. Only a fresh load clears it.
+    stale: Cell<bool>,
+    /// The fresh Inbox cannot be opened.
+    fresh_refuses: bool,
 }
 
 fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
@@ -740,6 +748,9 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         report_at: Cell::new(None),
         looked_at: Default::default(),
         endless: false,
+        searched: Cell::new(false),
+        stale: Cell::new(false),
+        fresh_refuses: false,
     }
 }
 
@@ -787,6 +798,20 @@ impl Mailbox for Fake {
     fn open(&self, place: Place) -> Result<(), Refusal> {
         self.places.borrow_mut().push(place);
         self.log.borrow_mut().push((format!("open {place:?}"), Value::Null));
+        match place {
+            Place::FreshInbox if self.fresh_refuses => return Err(Refusal::TimedOut),
+            Place::FreshInbox => {
+                self.stale.set(false);
+                self.page.set(0);
+            }
+            Place::Inbox if self.searched.get() => self.stale.set(true),
+            // The pass is over: the next pass on this fake begins in a document the window loaded fresh.
+            Place::Sent => {
+                self.searched.set(false);
+                self.stale.set(false);
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -796,7 +821,9 @@ impl Mailbox for Fake {
         assert_eq!(dir, if self.provider == Provider::Gmail { "gmail" } else { "m365" }, "{path}");
         let m365 = self.provider == Provider::M365;
         Ok(match name {
+            "search.js" if self.stale.get() => json!({ "result": "ok", "count": 5130 }),
             "search.js" => {
+                self.searched.set(true);
                 let since = args["since"].as_str().unwrap();
                 let before = args.get("until").and_then(Value::as_str);
                 assert!(m365 || before.is_none(), "Gmail's search takes no until");
@@ -845,6 +872,7 @@ impl Mailbox for Fake {
                 let drawn = cur.len().min(self.drawn);
                 json!({ "result": "ok", "total": cur.len(), "drawn": drawn, "left": left, "rows": rows })
             }
+            "list.js" if self.stale.get() => json!({ "result": "failed", "reason": "page did not change" }),
             "list.js" if self.endless && args["go"] == "newer" => {
                 json!({ "result": "ok", "page": { "from": 9, "to": 9, "total": 9 }, "moved": true, "rows": [] })
             }
@@ -1480,10 +1508,16 @@ fn a_gmail_backfill_looks_in_the_inbox_every_25_sends_and_walks_again_without_se
     // The first send to bring the count to 25 or more (the third group of ten, 30 sent) is looked in after, in
     // the middle of the second page, not at its end (40); the next such send is the last (60).
     assert_eq!(sent_at_each_look(&mb), [30, 60]);
-    assert_eq!(*mb.places.borrow(), [Place::Inbox, Place::Inbox, Place::Inbox, Place::Sent]);
+    // The Inbox for the search, for the first look, a fresh one for the restart, for the second look, then Sent.
+    assert_eq!(*mb.places.borrow(), [Place::Inbox, Place::Inbox, Place::FreshInbox, Place::Inbox, Place::Sent]);
     let names = steps(&mb);
     let first = names.iter().position(|n| n.ends_with("bounce.js")).unwrap();
-    assert_eq!((names[first - 1].as_str(), names[first + 1].as_str()), ("open Inbox", "gmail/search.js"));
+    // The look opens the Inbox in the document it is in; the walk that follows starts from a fresh one, before
+    // its search (live 2026-10-19: a cached search view is restored in the old document and walks off its end).
+    assert_eq!(
+        (names[first - 1].as_str(), names[first + 1].as_str(), names[first + 2].as_str()),
+        ("open Inbox", "open FreshInbox", "gmail/search.js")
+    );
     // The look is told the batch it is about: the address, the nonce, and how far back to read. The first look
     // of a mailbox with no saved look reaches back a day before the batch opened (slots are up to about 13 hours
     // apart); the next starts at the look before it, so a report is counted once.
@@ -1812,6 +1846,21 @@ fn a_resumed_backfill_saves_its_looks_and_starts_from_the_last_one_saved() {
     .unwrap();
     resume_and_time_forwards(&again);
     assert_eq!(again.calls("gmail/bounce.js")[0]["since"], json!(iso(NOW - 100)));
+}
+
+#[test]
+fn a_restart_whose_fresh_inbox_will_not_open_stops_the_pass_with_that_refusals_word() {
+    let mut mb = fake(Provider::Gmail, unheld(60));
+    mb.size = 20;
+    mb.fresh_refuses = true;
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &gmail_backfill());
+    assert_eq!(out.stop, Stop::Script(Refusal::TimedOut.as_str()));
+    assert_eq!(out.sent, 30, "it stopped at the first look's restart");
+    let names = steps(&mb);
+    let first = names.iter().position(|n| n.ends_with("bounce.js")).unwrap();
+    assert_eq!(names[first + 1], "open FreshInbox");
+    assert_eq!(mb.calls("search.js").len(), 1, "no search was made over the cached view");
+    assert!(names[first + 2..].iter().all(|n| !n.ends_with("search.js") && !n.ends_with("list.js") && !n.ends_with("forward.js")), "{names:?}");
 }
 
 #[test]

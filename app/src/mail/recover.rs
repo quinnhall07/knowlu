@@ -251,6 +251,11 @@ impl Row {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
     Inbox,
+    /// The Inbox in a freshly loaded document, so Gmail forgets the views it cached (live 2026-10-19: a
+    /// search set again over a cached one lands where the pass left it, "of many", and walks off the end).
+    /// Gmail: navigate, then reload the window. Microsoft 365: as [`Place::Inbox`], whose navigation is
+    /// already a full load.
+    FreshInbox,
     /// Sent (Sent Items), where `sent_cleanup.js` runs.
     Sent,
     /// Settings, Forwarding (T11.3): Microsoft 365's scripts expect the page already open; Gmail's go to
@@ -296,15 +301,22 @@ impl Mailbox for WindowMailbox<'_> {
     fn open(&self, place: Place) -> Result<(), Refusal> {
         use tauri::Manager;
         let url = match (self.provider, place) {
-            (Provider::M365, Place::Inbox) => "https://outlook.office.com/mail/inbox",
+            (Provider::M365, Place::Inbox | Place::FreshInbox) => "https://outlook.office.com/mail/inbox",
             (Provider::M365, Place::Sent) => "https://outlook.office.com/mail/sentitems",
             (Provider::M365, Place::Forwarding) => "https://outlook.office.com/mail/options/mail/forwarding",
-            (Provider::Gmail, Place::Inbox | Place::Forwarding) => "https://mail.google.com/mail/u/0/#inbox",
+            (Provider::Gmail, Place::Inbox | Place::FreshInbox | Place::Forwarding) => "https://mail.google.com/mail/u/0/#inbox",
             (Provider::Gmail, Place::Sent) => "https://mail.google.com/mail/u/0/#sent",
             (Provider::Guided, _) => return Err(Refusal::NotForProvider),
         };
         let w = self.app.get_webview_window(WINDOW).ok_or(Refusal::NoPage)?;
         w.navigate(url.parse().map_err(|_| Refusal::Unreadable)?).map_err(|_| Refusal::Lost)?;
+        if place == Place::FreshInbox && self.provider == Provider::Gmail {
+            // A hash change in the same document lands first, then the reload makes it a new one; `ready.js`
+            // must not be answered by the old document, so it is given a moment to go.
+            std::thread::sleep(Duration::from_secs(1));
+            w.reload().map_err(|_| Refusal::Lost)?;
+            std::thread::sleep(Duration::from_secs(2));
+        }
         // The document settles, then the page draws its list: `ready.js` first, then a beat.
         for _ in 0..120 {
             std::thread::sleep(Duration::from_millis(250));
@@ -753,6 +765,10 @@ impl Pass<'_> {
                 if newest_page && self.page_decided(&keys) {
                     return Ok(());
                 }
+                // The search is set over the Inbox in a freshly loaded document: in the old one Gmail restores its
+                // cached view of the same search where the pass left it (live 2026-10-19), "of many", and the
+                // walk goes past the real end.
+                self.mb.open(Place::FreshInbox).map_err(refused)?;
                 self.search()?;
                 first = Some(self.gmail_oldest()?);
                 self.walk.clear();
