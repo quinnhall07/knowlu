@@ -1427,7 +1427,12 @@ impl Mailbox for SHost {
         let mut s = self.st.lock().unwrap();
         if let Some(q) = s.queued.get_mut(path) {
             let v = if q.len() > 1 { q.pop_front().unwrap() } else { q.front().cloned().unwrap() };
-            return Ok(v);
+            // {"refuse": "lost" | "failed"} is a refusal, not an answer.
+            return match v["refuse"].as_str() {
+                Some("lost") => Err(Refusal::Lost),
+                Some("failed") => Err(Refusal::Failed),
+                _ => Ok(v),
+            };
         }
         let ours = json!({ "result": "ok", "forwarding": "on", "to": "ours", "keep_copy": true, "changed": true });
         Ok(match path {
@@ -2894,6 +2899,34 @@ fn a_gmail_script_that_reloads_is_run_again_once_with_reloaded_set() {
     let p = shared.progress();
     assert_eq!((row(&p, "turn_on").reason, row(&p, "turn_on").guided), (Some("not_found"), true));
     assert_eq!(t.calls("gmail/forwarding_set.js").len(), 2, "run again once, never in a loop");
+    shared.stop();
+    wait(&shared);
+}
+
+#[test]
+fn a_gmail_script_that_throws_on_the_page_still_settling_after_a_reload_gets_one_settled_retry() {
+    // Live 2026-10-18: Save took and Gmail reloaded (Lost); the rerun with reloaded set threw (Failed) on a page
+    // still filling its forward-to list. The same script a moment later read the setting back fine.
+    let ours = json!({ "result": "ok", "forwarding": "on", "to": "ours", "keep_copy": true, "changed": false });
+    let (lost, failed) = (json!({ "refuse": "lost" }), json!({ "refuse": "failed" }));
+    let r = rig("t18c-settled-retry");
+    r.host.lock().unwrap().title_address = Some(HINT_PAGE.to_string());
+    queue(&r, "gmail/forwarding_set.js", vec![lost.clone(), failed.clone(), ours]);
+    let p = wait(&r.start(Kind::Gmail, true));
+    assert_eq!(row(&p, "turn_on").state, "done");
+    let sets = r.calls("gmail/forwarding_set.js");
+    assert_eq!(sets.len(), 3, "run, rerun after the reload, one settled retry");
+    assert_ne!(sets[0]["reloaded"], json!(true));
+    assert_eq!((sets[1]["reloaded"].clone(), sets[2]["reloaded"].clone()), (json!(true), json!(true)));
+    assert_eq!(sets[1], sets[2], "the retry carries the same arguments");
+
+    // A second throw is the failure it is today, and the script is not run a fourth time.
+    let t = rig("t18c-settled-retry-twice");
+    t.host.lock().unwrap().title_address = Some(HINT_PAGE.to_string());
+    queue(&t, "gmail/forwarding_set.js", vec![lost, failed]);
+    let shared = t.start(Kind::Gmail, true);
+    until("the failed step", || has(&shared, "turn_on", "failed"));
+    assert_eq!(t.calls("gmail/forwarding_set.js").len(), 3);
     shared.stop();
     wait(&shared);
 }

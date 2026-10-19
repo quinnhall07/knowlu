@@ -19,7 +19,7 @@
 // Live 2026-10-18: the forward-to list's options are matched by the one address their text names (values are
 // indexes; Gmail appends " (in use)" once forwarding is on to an address; "--" and "Remove ..." options are
 // never targets).
-const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
+const text = (el) => ((el && el.textContent) || "").replace(/\s+/g, " ").trim();
 const norm = (v) => String(v || "").trim().toLowerCase();
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const until = async (ready, ms) => {

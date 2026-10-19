@@ -72,6 +72,8 @@ const SETTLING: &str = "waiting for Outlook to start forwarding";
 const CONFIRM_WAIT: i64 = 15 * 60;
 /// Seconds between polls of the service.
 const POLL: i64 = 5;
+/// Seconds a Gmail script is left to settle before its one retry after it threw on the page reloaded under it.
+const SETTLE: i64 = 4;
 /// Google's popup is waited for this long to appear, and this long to close.
 const POPUP_APPEAR: i64 = 30;
 const POPUP_WAIT: i64 = 5 * 60;
@@ -638,8 +640,12 @@ impl Runner<'_> {
 
     /// Runs a step script with the two repairs a page can ask for: the student's sign-in prompt (once), and
     /// a Gmail page that reloads (once, with `reloaded: true`; a second miss is `not found`).
+    ///
+    /// A Gmail script that throws on that rerun (`Refusal::Failed`) is run once more after `SETTLE` seconds: the
+    /// page reloaded a moment ago may still be filling its forward-to list (live 2026-10-18: the rerun threw,
+    /// the same script minutes later read the setting back fine). A second throw is the failure it is today.
     fn run(&mut self, script: &str, mut args: Value) -> Option<Value> {
-        let (mut reloaded, mut came_back) = (false, false);
+        let (mut reloaded, mut came_back, mut settled) = (false, false, false);
         for _ in 0..4 {
             let r = self.host().script(script, &args);
             let reloading = match &r {
@@ -658,6 +664,10 @@ impl Runner<'_> {
             }
             match r {
                 Ok(v) => return Some(v),
+                Err(Refusal::Failed) if reloaded && !settled && self.provider == Provider::Gmail => {
+                    settled = true;
+                    self.clock().sleep(SETTLE);
+                }
                 Err(Refusal::OffOrigin) if !came_back => {
                     came_back = true;
                     if !self.needs_student() {

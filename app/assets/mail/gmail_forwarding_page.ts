@@ -68,6 +68,13 @@ export interface Opts extends Partial<Model> {
    * Keep it last in `addresses`, so the visible options keep their indexes.
    */
   staleList?: string;
+  /**
+   * Live 2026-10-18: right after a reload the section draws before Gmail fills the forward-to list, so the select is
+   * there with no options. With this many ms it fills in place after each draw of the section; a negative number
+   * never fills it. `lateListSkipFirst` leaves the page's first draw alone (only a reload or a hash round trip is late).
+   */
+  lateList?: number;
+  lateListSkipFirst?: boolean;
 }
 
 export interface Gmail {
@@ -91,6 +98,8 @@ export interface Gmail {
   /** Google's verify popup closes and the opener shows its "confirmation link sent" dialog. */
   verified(): void;
   el(id: string): El;
+  /** Cancels the fill timers of `lateList` (a test that ends before they fire). */
+  stop(): void;
   snap(): { on: boolean; to: string; disp: string; addresses: string[] };
 }
 
@@ -130,6 +139,10 @@ export function gmail(o: Opts = {}): Gmail {
         }`,
       ),
     el: (id) => d.getElementById(id),
+    stop: () => {
+      for (const t of timers) clearTimeout(t);
+      timers.clear();
+    },
     snap: () => ({ on: model.on, to: model.to, disp: model.disp, addresses: [...model.addresses] }),
   };
   const w = o.without;
@@ -148,6 +161,8 @@ export function gmail(o: Opts = {}): Gmail {
   let verifying = o.verifyRow ?? "";
   let stale = o.staleList ?? "";
   const wired = new WeakSet();
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  let draws = 0;
 
   // Live Gmail (2026-10-18): the forward-to list's option values are indexes, never the address. The text is the
   // bare address, then a "--" separator, then one "Remove <address>" option per address. Once forwarding is on to
@@ -185,6 +200,9 @@ export function gmail(o: Opts = {}): Gmail {
   const verifyHtml = () =>
     `<tr><td>Verify ${verifying} <input type="button" value="Re-send email" id="resend"> <input type="button" value="Remove address" id="remove-pending"></td></tr>`;
   const section = () => {
+    const late = o.lateList !== undefined && !(o.lateListSkipFirst && draws === 0);
+    const toOptions = () => late ? "" : options();
+    draws++;
     const none = model.addresses.length === 0 ? " disabled" : "";
     const live = !o.labelled;
     const rows = w === "radios" || o.fresh ? "" : live
@@ -195,7 +213,7 @@ export function gmail(o: Opts = {}): Gmail {
       }></td><td><label for="r-off">Disable forwarding</label></td></tr>
         <tr><td><input type="radio" name="sx_em" id="r-on"${model.on ? " checked" : ""}${none}></td><td>
           Forward a copy of incoming mail to
-          ${w === "to" ? "" : `<select id="to"${none}>${options()}</select>`}
+          ${w === "to" ? "" : `<select id="to"${none}>${toOptions()}</select>`}
           and ${w === "disp" ? "" : `<select id="disp"${none}>${dispOptions()}</select>`}</td></tr>`
       : `<tr><td>&nbsp;</td><td><div><label><input type="radio" name="fwd" id="r-off"${
         model.on ? "" : " checked"
@@ -203,7 +221,7 @@ export function gmail(o: Opts = {}): Gmail {
         <div><label><input type="radio" name="fwd" id="r-on"${
         model.on ? " checked" : ""
       }${none}> Forward a copy of incoming mail to</label>
-          ${w === "to" ? "" : `<select id="to"${none}>${options()}</select>`}
+          ${w === "to" ? "" : `<select id="to"${none}>${toOptions()}</select>`}
           and ${w === "disp" ? "" : `<select id="disp"${none}>${dispOptions()}</select>`}</div></td></tr>`;
     const odd = o.strangeRadios
       ? `<tr><td><input type="radio" name="sx_em" id="r-odd"></td><td>Send mail to the archive</td></tr>`
@@ -364,6 +382,16 @@ export function gmail(o: Opts = {}): Gmail {
       : `<h2>Settings</h2><div>Loading...</div>`;
     browserSelects();
     wire();
+    const sel = g.el("to");
+    if (hash === SECTION && drawn && sel && o.lateList !== undefined && o.lateList >= 0 && !sel.options.length) {
+      const t = setTimeout(() => {
+        timers.delete(t);
+        if (g.el("to") !== sel) return;
+        sel.innerHTML = options();
+        browserSelects();
+      }, o.lateList);
+      timers.add(t);
+    }
   };
 
   const loc = {

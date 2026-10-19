@@ -15,7 +15,7 @@
 // Live 2026-10-18: the forward-to list's options are matched by the one address their text names (values are
 // indexes; Gmail appends " (in use)" once forwarding is on to an address; "--" and "Remove ..." options are
 // never targets).
-const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
+const text = (el) => ((el && el.textContent) || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => {
   const aria = el.getAttribute("aria-label");
   if (aria) return aria.trim();
@@ -49,13 +49,25 @@ const dialogButton = (d, pattern) =>
     pattern.test((b.getAttribute("aria-label") || "").trim() || text(b))
   );
 const addEl = () => byValue(document, /^add a forwarding address$/i);
+// Live 2026-10-18: right after a reload the section draws (its Add button is there) before Gmail fills the
+// forward-to list, so the select is there with no options. With the forwarding radios drawn, wait for the list to
+// have an option; a list that stays empty is carried on with as it is, and the script's own not-found and reload
+// paths decide.
+const listFilled = async () => {
+  await until(() => {
+    if (!radioOn()) return true;
+    const sel = toSelect();
+    return !!sel && sel.options.length > 0;
+  }, waitMs);
+  return "ok";
+};
 const ensureSection = async () => {
   if (location.hash !== SECTION) location.hash = SECTION;
-  if (await until(addEl, waitMs)) return "ok";
+  if (await until(addEl, waitMs)) return await listFilled();
   location.hash = "#inbox";
   await sleep(Math.min(waitMs, 500));
   location.hash = SECTION;
-  if (await until(addEl, waitMs)) return "ok";
+  if (await until(addEl, waitMs)) return await listFilled();
   if (args.reloaded === true) return "missing";
   location.reload();
   return "reload";
@@ -88,7 +100,7 @@ const addressIn = (s) => {
   return found && found.length === 1 ? norm(found[0]) : "";
 };
 const addressOf = (o) => {
-  if (!isTarget(o)) return "";
+  if (!o || !isTarget(o)) return "";
   const v = norm(o.value);
   return addressIn(label(o)) || (v.includes("@") ? v : "");
 };
@@ -100,7 +112,9 @@ const roundTrip = async () => {
   location.hash = "#inbox";
   await sleep(Math.min(waitMs, 500));
   location.hash = SECTION;
-  return await until(addEl, waitMs);
+  if (!(await until(addEl, waitMs))) return false;
+  await listFilled();
+  return true;
 };
 const names = (sel) => [...sel.options].filter(isTarget).map((o) => addressOf(o));
 

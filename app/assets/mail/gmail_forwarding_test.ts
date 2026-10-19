@@ -854,3 +854,69 @@ Deno.test("gmail_forwarding_set_with_a_list_still_stale_after_the_reload_is_not_
   assertEquals(f.reloads, 0);
   assertEquals(f.clicks + f.saves, 0);
 });
+
+// Live 2026-10-18: after a reload the section draws (its Add button is there) before Gmail fills the forward-to
+// list. The scripts wait for the list to have an option, and an option helper handed no option matches nothing.
+const SLOW = { address: OURS, wait_ms: 600, settle_ms: 300 };
+
+Deno.test("gmail_forwarding_set_after_a_reload_waits_for_the_forward_to_list_to_fill", async () => {
+  const f = gmail({ addresses: [OTHER, OURS], on: true, to: OURS, lateList: 120 });
+  assertEquals(f.el("to").options.length, 0, "the list is empty when the section is drawn");
+  assertEquals(await run("gmail/forwarding_set.js", f.page, { ...SLOW, reloaded: true }), {
+    ...KEPT,
+    changed: false,
+  });
+  assertEquals(f.clicks + f.saves, 0);
+  f.stop();
+});
+
+Deno.test("gmail_forwarding_set_reads_back_a_list_that_is_empty_for_a_moment_after_the_save", async () => {
+  // The first draw is whole; Save takes; the hash round trip redraws the section and the list fills 120 ms later.
+  // The read-back used to hand the empty list's null option to the address helper, which threw.
+  const f = gmail({ addresses: [OTHER, OURS], lateList: 120, lateListSkipFirst: true });
+  assertEquals(await run("gmail/forwarding_set.js", f.page, SLOW), { ...KEPT, changed: true });
+  assertEquals(f.model, { addresses: [OTHER, OURS], on: true, to: OURS, disp: "keep" });
+  f.stop();
+});
+
+Deno.test("gmail_forwarding_off_and_read_wait_for_the_forward_to_list_to_fill", async () => {
+  const f = gmail({ addresses: [OTHER, OURS], on: true, to: OURS, lateList: 120 });
+  const r = await run("gmail/forwarding_read.js", f.page, { ...SLOW, reloaded: true });
+  assertEquals(r, { ...KEPT, listed: true });
+  f.stop();
+  const g = gmail({ addresses: [OTHER, OURS], on: true, to: OURS, lateListSkipFirst: true, lateList: 120 });
+  assertEquals(await run("gmail/forwarding_off.js", g.page, SLOW), {
+    result: "ok",
+    forwarding: "off",
+    changed: true,
+  });
+  g.stop();
+});
+
+Deno.test("gmail_forwarding_scripts_on_a_list_that_stays_empty_end_in_their_own_outcomes_not_a_throw", async () => {
+  const mk = () => gmail({ addresses: [OTHER, OURS], on: true, to: OURS, lateList: -1 });
+  const args = { address: OURS, reloaded: true, ...FAST };
+  assertEquals(await run("gmail/forwarding_set.js", mk().page, args), NOT_FOUND("address list"));
+  // Not told it reloaded yet: set reloads, as it does for any list without our address.
+  const f = mk();
+  assertEquals(await run("gmail/forwarding_set.js", f.page, { address: OURS, ...FAST }), {
+    result: "reloading",
+  });
+  assertEquals(f.reloads, 1);
+  assertEquals(await run("gmail/forwarding_off.js", mk().page, args), NOT_FOUND("address list"));
+  assertEquals(await run("gmail/forwarding_read.js", mk().page, args), {
+    result: "ok",
+    forwarding: "on",
+    to: "none",
+    keep_copy: true,
+    listed: false,
+  });
+  assertEquals(await run("gmail/forwarding_remove_address.js", mk().page, args), {
+    result: "ok",
+    removed: false,
+    changed: false,
+  });
+  const a = mk();
+  assertEquals((await run("gmail/forwarding_add.js", a.page, args)).result, "ok");
+  assertEquals(await run("gmail/forwarding_add_done.js", mk().page, args), NOT_FOUND("confirmation dialog"));
+});
