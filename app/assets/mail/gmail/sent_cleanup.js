@@ -18,6 +18,8 @@
 // Live 2026-10-18/19 (WebView2 155): only the SHOWN grid's rows are read (Gmail keeps a previous view's grid
 // in the document, hidden, offsetParent null); a row's checkbox toggles on `click()`; Delete is a
 // `[role=button]` that ignores `click()` and is pressed: pointerdown, mousedown, pointerup, mouseup, click.
+// Gmail draws Delete only once a row is ticked, so it is looked for after the tick, and Sent may draw its rows
+// after the place opens, so the first row of ours is waited for (`wait_ms`) before none is concluded.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => (el.getAttribute("aria-label") || el.getAttribute("data-tooltip") || "").trim();
 // Shown: live, a hidden view's elements have no offsetParent.
@@ -85,7 +87,7 @@ const del = () =>
     /^delete$/i.test(nameOf(b) || text(b))
   );
 const next = () => rowEls().find(ours);
-if (next() && !del()) return { result: "not found", control: "delete" };
+await until(() => !!next(), waitMs);
 
 let deleted = 0;
 for (let tries = 0; deleted < max && tries < max + 5; tries++) {
@@ -102,7 +104,7 @@ for (let tries = 0; deleted < max && tries < max + 5; tries++) {
     boxOf(row).click();
     continue;
   }
-  if (!del()) {
+  if (!(await until(() => !!del(), waitMs))) {
     boxOf(row).click();
     return { result: "not found", control: "delete" };
   }

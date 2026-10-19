@@ -99,6 +99,10 @@ export interface Opts {
   stuck?: boolean;
   /** The account chip names this address (default `SELF`); `null` draws no chip. */
   account?: string | null;
+  /** The toolbar draws Delete only while a row is ticked (live 2026-10-19). */
+  deleteOnSelect?: boolean;
+  /** The first view's rows draw this many ms after the page opens (live 2026-10-19, Sent after a pass). */
+  lateRowsMs?: number;
 }
 
 export interface Sent {
@@ -326,6 +330,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     for (const c of v.querySelectorAll('[role="checkbox"]')) {
       c.addEventListener("click", () => {
         c.setAttribute("aria-checked", String(c.getAttribute("aria-checked") !== "true"));
+        showDelete();
         const row = c.closest("tr");
         const to = o.swap && row.getAttribute("data-id") === o.swap.id && !swapped &&
           b.msgs.find((m) => m.id === o.swap!.as);
@@ -374,8 +379,14 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     };
     draw(false);
   }
+  // Live (2026-10-19) Delete is drawn only while a row is ticked.
+  function showDelete() {
+    if (o.deleteOnSelect) b.el("del").setAttribute("style", b.checked().length > 0 ? "" : "display: none");
+  }
   newView();
-  fill();
+  if (o.lateRowsMs) setTimeout(fill, o.lateRowsMs);
+  else fill();
+  showDelete();
 
   // The box does nothing here: live, "Ask Gmail" may go to Gemini, so no script types into it. A search
   // keeps the view it leaves, hidden, and draws its own after it, a moment later.
@@ -407,6 +418,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     for (const m of b.msgs) if (ids.includes(m.id)) m.folder = "Trash";
     b.deleted.push(...ids);
     fill();
+    showDelete();
   });
   onPress(b.el("more"), () => {
     if (b.checked().length === 0) return;

@@ -1182,7 +1182,7 @@ fn the_batch_closes_with_the_count_sent_and_the_sent_copies_are_cleaned() {
 fn each_sent_cleanup_call_fits_inside_one_step() {
     // Checkpoint C: a cleanup still running in the page after the runner's step gives up survives Gmail's
     // hash navigation and unticks the next script's rows. Each call is asked for no more than its worst
-    // case (two waits a deleted row, one for each of the five skips it allows) can do inside the step's
+    // case (one wait for the first row, three a deleted row, one for each of the five skips it allows) can do inside the step's
     // 90 s, and the cleanup is called again while a call deleted all it was asked for.
     let w = window(NOW, None, None);
     let svc = holding(&[]);
@@ -1193,7 +1193,7 @@ fn each_sent_cleanup_call_fits_inside_one_step() {
     assert!(calls.len() > 1, "ten copies take more than one call: {calls:?}");
     for c in &calls {
         let (max, wait) = (c["max"].as_u64().unwrap(), c["wait_ms"].as_u64().expect("the call names its wait"));
-        assert!(wait * (2 * max + 5) < 90_000, "a call that can outlast its step: {c}");
+        assert!(wait * (3 * max + 6) < 90_000, "a call that can outlast its step: {c}");
         assert_eq!((c["address"].as_str(), c["nonce"].as_str()), (Some(KNOWLU), Some(NONCE)));
     }
     let asked: u64 = calls.iter().map(|c| c["max"].as_u64().unwrap()).sum();

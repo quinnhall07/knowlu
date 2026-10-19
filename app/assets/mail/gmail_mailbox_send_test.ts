@@ -391,6 +391,7 @@ Deno.test("gmail_sent_cleanup_never_runs_outside_sent_and_refuses_a_bad_nonce", 
     result: "not found",
     control: "delete",
   });
+  assertEquals([noDelete.deleted, noDelete.checked()], [[], []], "the row it ticked is let go");
   // A Delete that does nothing is named, with what went before it.
   const stuck = sentItems();
   stuck.el("del").replaceWith(stuck.el("del").cloneNode(true));
@@ -402,6 +403,28 @@ Deno.test("gmail_sent_cleanup_never_runs_outside_sent_and_refuses_a_bad_nonce", 
       deleted: 0,
     },
   );
+});
+
+Deno.test("gmail_sent_cleanup_ticks_a_row_before_it_looks_for_delete", async () => {
+  // Live 2026-10-19 (ef25): Gmail draws Delete only once a row is ticked. Looking for it first answered
+  // "not found" on a Sent page full of copies, and nothing was ever deleted.
+  const box = sentItems();
+  const live = mailbox(box.msgs, { view: "sent", deleteOnSelect: true });
+  assertEquals(await run("gmail/sent_cleanup.js", live.page, { address: OURS, nonce: NONCE, ...FAST }), {
+    result: "ok",
+    deleted: 2,
+  });
+  assertEquals([[...live.deleted].sort(), live.checked()], [["c1", "c2"], []]);
+});
+
+Deno.test("gmail_sent_cleanup_waits_for_sent_to_draw_its_rows", async () => {
+  // Live 2026-10-19 (ef25): at a pass's end the Sent rows drew after the place opened; reading at once found
+  // none of ours and answered "ok" with nothing deleted, every pass.
+  const late = mailbox(sentItems().msgs, { view: "sent", lateRowsMs: 400 });
+  assertEquals(await run("gmail/sent_cleanup.js", late.page, { address: OURS, nonce: NONCE, wait_ms: 1000 }), {
+    result: "ok",
+    deleted: 2,
+  });
 });
 
 Deno.test("gmail_sent_cleanup_rechecks_the_row_before_each_delete_when_the_page_changes_it", async () => {
