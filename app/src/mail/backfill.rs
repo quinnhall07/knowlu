@@ -187,16 +187,18 @@ pub(super) fn stuck_for(state: &MailState, id: &str, today: i64) -> Option<Stuck
 
 /// Keeps what a pass that ended on UTC day `today` says of a lone row in `mail.json`: a row in the watched minute
 /// sent or held drops the record; a pass that ended stalled on one lone row alone counts `today` for it once (a
-/// row in another minute starts a new record). Best effort, like [`keep_pace`].
+/// row in another minute starts a new record). The stall wins over a row sent or held in its own minute (review
+/// round 1 of e7ae803: a held row from the same burst must not reset the count of a pass that stalled there).
+/// Best effort, like [`keep_pace`].
 pub(super) fn note_stall(data_dir: &Path, id: &str, out: &Outcome, today: i64) {
     let _ = MailState::update(data_dir, |s| {
         let old = s.lone_stall.get(id).copied();
-        let new = match (out.stuck_cleared, out.stalled_at, old) {
-            (true, _, _) => None,
-            (false, Some(at), Some(r)) if r.at == at && today > r.last_day => Some(LoneStall { at, days: r.days + 1, last_day: today }),
-            (false, Some(at), Some(r)) if r.at == at => Some(r),
-            (false, Some(at), _) => Some(LoneStall { at, days: 1, last_day: today }),
-            (false, None, old) => old,
+        let new = match (out.stalled_at, old) {
+            (Some(at), Some(r)) if r.at == at && today > r.last_day => Some(LoneStall { at, days: r.days + 1, last_day: today }),
+            (Some(at), Some(r)) if r.at == at => Some(r),
+            (Some(at), _) => Some(LoneStall { at, days: 1, last_day: today }),
+            (None, _) if out.stuck_cleared => None,
+            (None, old) => old,
         };
         if new == old {
             return false;

@@ -3723,6 +3723,35 @@ fn a_stalled_lone_row_that_attaches_later_clears_its_record_when_it_is_sent() {
 }
 
 #[test]
+fn a_held_row_in_the_stuck_minute_does_not_clear_the_record_of_a_pass_that_stalled_on_that_minute() {
+    // Review round 1 of e7ae803, #2: a held row received in the stuck row's minute (a notification burst) cleared
+    // the record on every pass, even one that ended stalled on that minute, so the day count went 1, cleared, 1 and
+    // never reached three. A pass that stalled on the minute counts the day; the row is left on the third.
+    let dir = temp("lone-stall-burst");
+    let first = NOW.div_euclid(DAY) - 10;
+    let (mut msgs, _, stuck_at) = one_stuck_row(first);
+    msgs.insert(1, mail(BO, "Burst", stuck_at + 30));
+    let mut held: Vec<(&str, &str, i64)> = msgs[1..].iter().map(|m| (m.sender.as_str(), m.subject.as_str(), m.at)).collect();
+    held.sort_by_key(|h| h.2);
+    let svc = holding(&held);
+    let stall = || MailState::load(&dir).unwrap().lone_stall.get(A).copied();
+    for (at, days) in [(NOW, 1), (NOW + DAY, 2)] {
+        let mut mb = fake(Provider::Gmail, msgs.clone());
+        mb.no_chip = Some("Stuck");
+        mb.clk.0.set(at);
+        assert_eq!(drive_fake(&mb, &svc, &dir, first, &|| {}), Drove::Failed("the attachments would not attach"), "{at}");
+        assert_eq!(stall(), Some(LoneStall { at: stuck_at, days, last_day: at.div_euclid(DAY) }), "{at}");
+    }
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.no_chip = Some("Stuck");
+    mb.clk.0.set(NOW + 2 * DAY);
+    assert_eq!(drive_fake(&mb, &svc, &dir, first, &|| {}), Drove::Done);
+    assert_eq!(mb.forwards.borrow().len(), 1, "tried once more, then left");
+    assert!(MailState::load(&dir).unwrap().lone_stall.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_mail_json_written_before_the_page_budget_reads_and_writes_back_byte_for_byte() {
     // mail.json is a contract with existing installs: a file with a pace and no loads, and no frontier, is read
     // and written again unchanged (the new fields are not written while 0 or empty).
