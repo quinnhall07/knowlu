@@ -12,6 +12,11 @@
 //      (address list: our address is not among the confirmed ones)
 //   { result: "failed", reason: "no address" | "save did not settle" | "read back differed" }
 // It looks for every control before it clicks any, so a page missing one is left as it was found.
+// A stale list reloads once: the address is confirmed server-side while this page is already open, and a page
+// drawn before that keeps its forward-to list (Gmail's hash round trip does not refetch it; live 2026-10-18). So
+// when ours is not among the options and `args.reloaded` is not true, it reloads, clicking nothing, and returns
+// { result: "reloading" }; the caller runs it again with `reloaded: true`, and a list still without ours then
+// is "not found / address list".
 // Live 2026-10-18: the forward-to list's options are matched by the one address their text names (values are
 // indexes; Gmail appends " (in use)" once forwarding is on to an address; "--" and "Remove ..." options are
 // never targets).
@@ -118,7 +123,11 @@ const ron = radioOn();
 if (!ron || !radioOff()) return { result: "not found", control: "forwarding radio" };
 const list = toSelect();
 const ours = list ? [...list.options].find((o) => optionIs(o, address)) : null;
-if (!ours) return { result: "not found", control: "address list" };
+if (!ours) {
+  if (args.reloaded === true) return { result: "not found", control: "address list" };
+  location.reload();
+  return { result: "reloading" };
+}
 const disp = dispSelect();
 const keep = disp ? [...disp.options].find(isKeep) : null;
 if (!keep) return { result: "not found", control: "keep copy" };

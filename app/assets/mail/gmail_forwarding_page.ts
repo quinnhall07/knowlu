@@ -62,6 +62,12 @@ export interface Opts extends Partial<Model> {
    * older forward-to list: each option's value is the address, with no separator and no Remove options.
    */
   labelled?: boolean;
+  /**
+   * Live 2026-10-18: an address the server confirmed after the page drew its forward-to list. It is in `addresses`
+   * (the saved model) but not among the list's options until the page reloads; a hash round trip does not redraw it.
+   * Keep it last in `addresses`, so the visible options keep their indexes.
+   */
+  staleList?: string;
 }
 
 export interface Gmail {
@@ -140,21 +146,23 @@ export function gmail(o: Opts = {}): Gmail {
   let dirty = false;
   let pendingRemove = "";
   let verifying = o.verifyRow ?? "";
+  let stale = o.staleList ?? "";
   const wired = new WeakSet();
 
   // Live Gmail (2026-10-18): the forward-to list's option values are indexes, never the address. The text is the
   // bare address, then a "--" separator, then one "Remove <address>" option per address. Once forwarding is on to
   // an address Gmail appends " (in use)" to its option and to its Remove option. `labelled` draws the older list.
   const options = () => {
-    const n = model.addresses.length;
+    const shownAddresses = model.addresses.filter((a) => !stale || a !== stale);
+    const n = shownAddresses.length;
     if (o.labelled || n === 0) {
-      return model.addresses.map((a) =>
+      return shownAddresses.map((a) =>
         `<option value="${a}"${a === model.to ? " selected" : ""}>${a}</option>`
       )
         .join("");
     }
     const use = (a: string) => model.on && a === model.to ? " (in use)" : "";
-    const named = model.addresses.map((a, i) => ({ a, i }));
+    const named = shownAddresses.map((a, i) => ({ a, i }));
     return [
       ...named.map(({ a, i }) =>
         `<option value="${i}"${a === model.to ? " selected" : ""}>${a}${use(a)}</option>`
@@ -372,6 +380,7 @@ export function gmail(o: Opts = {}): Gmail {
     },
     reload() {
       g.reloads++;
+      stale = "";
       if (o.lateDraw === "reload") drawn = true;
       render();
     },

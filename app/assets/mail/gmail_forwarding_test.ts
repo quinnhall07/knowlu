@@ -124,13 +124,13 @@ Deno.test("gmail_forwarding_on_keeps_gmails_copy_in_the_inbox_and_reads_it_back"
 Deno.test("gmail_forwarding_set_before_the_address_is_confirmed_is_not_found", async () => {
   const f = gmail({ addresses: [OTHER] });
   assertEquals(
-    await run("gmail/forwarding_set.js", f.page, { address: OURS, ...FAST }),
+    await run("gmail/forwarding_set.js", f.page, { address: OURS, reloaded: true, ...FAST }),
     NOT_FOUND("address list"),
   );
   assertEquals(f.saves, 0);
   const g = gmail();
   assertEquals(
-    await run("gmail/forwarding_set.js", g.page, { address: OURS, ...FAST }),
+    await run("gmail/forwarding_set.js", g.page, { address: OURS, reloaded: true, ...FAST }),
     NOT_FOUND("address list"),
   );
   assertEquals(g.saves, 0);
@@ -181,7 +181,11 @@ Deno.test("gmail_a_missing_control_returns_not_found", async () => {
     for (const script of scripts) {
       const f = gmail({ addresses: [OURS], on: script === "off" || script === "read", to: OURS, without });
       const before = f.snap();
-      const r = await run(`gmail/forwarding_${script}.js`, f.page, { address: OURS, ...FAST });
+      const r = await run(`gmail/forwarding_${script}.js`, f.page, {
+        address: OURS,
+        reloaded: true,
+        ...FAST,
+      });
       assertEquals(r, NOT_FOUND(control), `${script} without ${without}`);
       assertEquals(f.snap(), before, `${script} without ${without}: nothing changed`);
       assertEquals(f.saves, 0);
@@ -414,7 +418,7 @@ Deno.test("gmail_an_address_added_but_not_verified_is_not_listed", async () => {
   assertEquals(r, { result: "ok", forwarding: "off", to: "none", keep_copy: true, listed: false });
   // Set cannot pick an address that is not an option: it is not found, nothing saved.
   assertEquals(
-    await run("gmail/forwarding_set.js", f.page, { address: OURS, ...FAST }),
+    await run("gmail/forwarding_set.js", f.page, { address: OURS, reloaded: true, ...FAST }),
     NOT_FOUND("address list"),
   );
   assertEquals(f.saves, 0);
@@ -787,7 +791,7 @@ Deno.test("gmail_a_separator_or_a_remove_option_is_never_a_forward_target", asyn
     `<option value="${OURS}">--</option><option value="9">Remove ${OURS}</option>` +
       `<option value="${OURS}">Remove ${OURS} (in use)</option>`,
   );
-  const args = { address: OURS, ...FAST };
+  const args = { address: OURS, reloaded: true, ...FAST };
   assertEquals((await run("gmail/forwarding_read.js", f.page, args)).listed, false);
   assertEquals(await run("gmail/forwarding_set.js", f.page, args), NOT_FOUND("address list"));
   assertEquals(await run("gmail/forwarding_remove_address.js", f.page, args), {
@@ -819,4 +823,34 @@ Deno.test("gmail_add_done_readback_accepts_an_address_that_is_confirmed_and_in_u
     await run("gmail/forwarding_add_done.js", g.page, { address: OURS, ...FAST }),
     NOT_FOUND("confirmation dialog"),
   );
+});
+
+Deno.test("gmail_forwarding_set_reloads_once_when_the_forward_to_list_predates_the_confirmation", async () => {
+  // Live 2026-10-18: the page drew its list before the server confirmed our address; a hash round trip does not
+  // redraw it. The first run reloads and clicks nothing; the rerun, told it reloaded, turns forwarding on.
+  const f = gmail({ addresses: [OTHER, OURS], staleList: OURS, disp: "archive" });
+  assertEquals(optionTexts(f), [OTHER, "--", `Remove ${OTHER}`]);
+  assertEquals(await run("gmail/forwarding_set.js", f.page, { address: OURS, ...FAST }), {
+    result: "reloading",
+  });
+  assertEquals(f.reloads, 1);
+  assertEquals(f.clicks + f.saves, 0, "nothing is clicked before the reload");
+  assertEquals(f.model.on, false);
+  assertEquals(await run("gmail/forwarding_set.js", f.page, { address: OURS, reloaded: true, ...FAST }), {
+    ...KEPT,
+    changed: true,
+  });
+  assertEquals(f.model, { addresses: [OTHER, OURS], on: true, to: OURS, disp: "keep" });
+  assertEquals(f.reloads, 1, "it reloads once, never twice");
+});
+
+Deno.test("gmail_forwarding_set_with_a_list_still_stale_after_the_reload_is_not_found", async () => {
+  // The reload brought no fresh list (the address is not confirmed after all): told it reloaded, it stops.
+  const f = gmail({ addresses: [OTHER] });
+  assertEquals(
+    await run("gmail/forwarding_set.js", f.page, { address: OURS, reloaded: true, ...FAST }),
+    NOT_FOUND("address list"),
+  );
+  assertEquals(f.reloads, 0);
+  assertEquals(f.clicks + f.saves, 0);
 });
