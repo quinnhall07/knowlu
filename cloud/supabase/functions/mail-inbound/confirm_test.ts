@@ -4,7 +4,7 @@
 // nothing here reaches the network. Every link and code is invented: the `vf-` codes are synthetic, and a
 // host off Google's list is `example.invalid`.
 import { assert, assertEquals } from "@std/assert";
-import { completeConfirmation, type ConfirmFetch } from "./confirm.ts";
+import { completeConfirmation, type ConfirmFetch, hopShape } from "./confirm.ts";
 
 const CODE = "%5BTESTCODE-0001%5D-AbCdEf";
 const LINK = `https://mail-settings.google.com/mail/vf-${CODE}`;
@@ -126,6 +126,50 @@ Deno.test("an_off_list_paths_address_or_long_opaque_segment_is_not_logged", asyn
   });
   assertEquals(await g.run(), "redirect_off_list");
   assertEquals(g.logs, ["confirm hop off list: example.invalid/u/(address)/(long)/end"]);
+});
+
+// Review of 58723a3: a segment of 32 characters or fewer was logged verbatim, so a token in a short
+// path segment reached the log. Every token below is invented.
+Deno.test("an_off_list_hop_to_a_short_token_segment_logs_the_marker_never_the_token", async () => {
+  const token = "AbCdEf0123456789GhIjKlMnOpQr"; // 28 characters
+  assertEquals(token.length, 28);
+  const g = google({ [`GET ${LINK}`]: () => moved(`https://accounts.google.com/${token}`) });
+  assertEquals(await g.run(), "redirect_off_list");
+  assertEquals(g.logs, ["confirm hop off list: accounts.google.com/(opaque)"]);
+  for (const l of g.logs) assert(!l.includes(token) && !l.includes("0123"), l);
+});
+
+Deno.test("a_mixed_or_opaque_segment_of_any_short_length_reads_as_the_marker", () => {
+  const mixed = "k3J9xQ2mP7vL0aZ8"; // 16 characters, letters and digits
+  assertEquals(mixed.length, 16);
+  assertEquals(
+    hopShape(new URL(`https://accounts.google.com/u/0/${mixed}`)),
+    "accounts.google.com/u/0/(opaque)",
+  );
+  // A letters-only base64url run (no digit to give it away), a long number, a percent-encoded value and
+  // a `-`/`_`/`=` mix are opaque too.
+  for (
+    const seg of [
+      "QwErTyUiOpAsDfGhJkLzXcVbNmQw",
+      "123456789",
+      "%E2%9C%93ok",
+      "ab_cd-9x",
+      "dG9rZW4=",
+      "aB3x9Q",
+    ]
+  ) {
+    assertEquals(
+      hopShape(new URL(`https://example.invalid/a/${seg}/b`)),
+      "example.invalid/a/(opaque)/b",
+      seg,
+    );
+  }
+});
+
+Deno.test("ordinary_short_words_in_a_hops_path_stay_readable", () => {
+  const path = "/accounts/SetSID/u/0/mail/vf/ServiceLogin/v2/2026/signin-options/favicon.ico/CheckCookie";
+  assertEquals(hopShape(new URL(`https://accounts.google.com${path}`)), `accounts.google.com${path}`);
+  assertEquals(hopShape(new URL("https://mail.google.com/mail/u/0/")), "mail.google.com/mail/u/0/");
 });
 
 Deno.test("every_hop_is_cookie_less_and_manual_and_no_set_cookie_reaches_the_next", async () => {

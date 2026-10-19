@@ -21,8 +21,9 @@
  * Every outcome is a fixed word, and nothing here throws. The only lines it logs, through the caller's
  * `log`, are each hop's (`confirm hop <n>: …`, `confirm hop off list: …`, `confirm hop too many: …`): the
  * target's host and path (`hopShape`), never its query or fragment, which read as the markers `(query)`
- * and `(fragment)`; a `vf-` code reads `vf-(code)`, an address-bearing segment `(address)` and a long
- * opaque one `(long)`. No page, form field or link value leaves this file.
+ * and `(fragment)`; a `vf-` code reads `vf-(code)`, an address-bearing segment `(address)`, one over
+ * 32 characters `(long)` and any other that is not an ordinary word `(opaque)`, so a short token never
+ * reaches the log. No page, form field or link value leaves this file.
  */
 import { confirmUrlAllowed } from "../_shared/mail_bind.ts";
 
@@ -47,6 +48,20 @@ const MAX_FIELDS = 32;
 const MAX_HOPS = 3;
 const MAX_SEGMENT = 32;
 const MAX_SHAPE = 200;
+/** A path segment a hop line may show verbatim: 1 to 4 digits (`0`, `2026`), or letter runs joined by
+ * single `-`, `_` or `.`, ending in at most two digits (`mail`, `SetSID`, `v2`, `favicon.ico`). */
+const PLAIN_SEGMENT = /^(?:[0-9]{1,4}|[A-Za-z]+(?:[-_.][A-Za-z]+)*[0-9]{0,2})$/;
+const MAX_WORD = 24;
+
+/** Whether a segment reads as an ordinary word rather than a token: `PLAIN_SEGMENT`, at most `MAX_WORD`
+ * characters, fewer than three lower-to-upper case changes, and, at 12 characters or more, fewer than
+ * four capitals. Anything else, a short mixed letters-and-digits run included, is opaque. */
+function plainSegment(seg: string): boolean {
+  if (seg.length > MAX_WORD || !PLAIN_SEGMENT.test(seg)) return false;
+  const changes = (seg.match(/[a-z][A-Z]/g) ?? []).length;
+  const capitals = (seg.match(/[A-Z]/g) ?? []).length;
+  return changes < 3 && (seg.length < 12 || capitals < 4);
+}
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
 
 /** HTML character references in an attribute value, decoded once. */
@@ -131,7 +146,8 @@ const init = (method: string, extra: RequestInit = {}): RequestInit => ({
 
 /** A hop's target as a log line may carry it: the host and path (the scheme only when it is not https),
  * never the user info, query or fragment, whose presence reads as a marker. A `vf-` segment's code, an
- * address-bearing segment and a long opaque one are replaced; the whole is capped at `MAX_SHAPE`. */
+ * address-bearing segment, a long one and any other that is not an ordinary word (`plainSegment`) are
+ * replaced; the whole is capped at `MAX_SHAPE`. */
 export function hopShape(target: URL | null): string {
   if (target === null) return "(no location)";
   // A `data:` or `javascript:` target's "path" is its payload: the scheme alone is named.
@@ -143,7 +159,9 @@ export function hopShape(target: URL | null): string {
       ? "(address)"
       : seg.length > MAX_SEGMENT
       ? "(long)"
-      : seg
+      : seg === "" || plainSegment(seg)
+      ? seg
+      : "(opaque)"
   ).join("/");
   const scheme = target.protocol === "https:" ? "" : `${target.protocol}//`;
   let shape = `${scheme}${target.host}${path}`;
