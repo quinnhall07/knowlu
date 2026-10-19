@@ -37,8 +37,9 @@
 //!
 //! **The Inbox look** (Gmail only; Quinn's ruling 2026-10-19 on the T18c gate "Gmail non-delivery report
 //! between sends", option b; spec §4.2 step 5, risk 15). A bounce lands in the Inbox, which the search page
-//! the walk stands on does not list, so after the page that brings the sends since the last look to
-//! [`BOUNCE_EVERY`] the pass opens the Inbox and runs `bounce.js`; a report of the batch stops the pass as
+//! the walk stands on does not list, so right after the forward that brings the sends since the last look to
+//! [`BOUNCE_EVERY`] or more (mid-page; groups of ten reach it at 30) the pass opens the Inbox and runs
+//! `bounce.js`; a report of the batch stops the pass as
 //! [`Stop::Paused`], like the first send failure. The look leaves the search, so the walk starts again (the
 //! same search, the oldest page, then newer) and skips the rows it decided before; the pass looks once more
 //! when it ends, before the batch closes and Sent is cleaned, if anything was sent since the last look.
