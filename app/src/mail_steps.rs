@@ -51,6 +51,10 @@ pub const GMAIL_MAX_PER_DAY: u32 = 1_500;
 /// the 300 are too (review round 2 of e7ae803): a message counts until it is a day old, never only to UTC midnight
 /// (which let a capped backfill send 600 in about 12 hours).
 pub const GMAIL_MAX_MESSAGES_PER_DAY: u32 = 300;
+/// A backfill the [`GMAIL_MAX_MESSAGES_PER_DAY`] hold resumes once this many messages have freed, never at the
+/// first (review of 5f71623..6a8e738, #1): one freed message paid a pass's fresh Inbox, search and walk for about
+/// one send, some 60 passes a day. Thirty is a slot's worth ([`crate::mail::recover::SLOT_CAP`]).
+pub const GMAIL_MESSAGES_TO_RESUME: u32 = 30;
 /// Gmail page loads per mailbox per UTC day: every open of a place (a fresh Inbox is two, the navigation and
 /// the reload), every search, every pager press and every conversation opened (the Gmail backfill's page-press
 /// budget, design of 2026-10-19). 600 since the day-cap ruling of 2026-10-19 (300 before it): a 1,500-original
@@ -641,6 +645,16 @@ impl Routine {
         }
         let spent = self.provider == Provider::Gmail && self.message_times.len() >= GMAIL_MAX_MESSAGES_PER_DAY as usize;
         spent.then(|| self.message_times.front().map_or(now, |t| t + DAY_SECS))
+    }
+
+    /// While a Gmail mailbox's messages of the last 24 hours are spent at `now`, the unix second
+    /// [`GMAIL_MESSAGES_TO_RESUME`] of them will have freed: when the 30th oldest kept is a day old (the oldest, when
+    /// fewer are kept); `None` when one may go. A backfill waits for it ([`crate::mail::backfill::drive_backfill`]).
+    pub fn messages_resume_at(&mut self, now: i64) -> Option<i64> {
+        let first = self.messages_free_at(now)?;
+        let over = self.message_times.len().saturating_sub(GMAIL_MAX_MESSAGES_PER_DAY as usize);
+        let nth = over + GMAIL_MESSAGES_TO_RESUME as usize - 1;
+        Some(self.message_times.get(nth).map_or(first, |t| t + DAY_SECS))
     }
 
     /// Reserves one Gmail message for a send about to go at `now`; `false` (nothing counted) while the last 24

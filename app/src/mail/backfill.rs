@@ -302,7 +302,7 @@ pub fn drive_backfill(d: &Drive, routine: &mut Routine) -> Drove {
         // A day already spent, or paused by a refused send (this run's, or a relaunch's carried from
         // `mail.json`): wait for the next UTC day before a pass lists or opens anything.
         let held = match routine.next(now) {
-            Send::DayLimit { next_day_at } => Some((next_day_at, None)),
+            Send::DayLimit { next_day_at } => Some((resume_at(routine, now, next_day_at), None)),
             Send::Paused(p) => Some((next_day, Some(p.line()))),
             // The day's page loads spent: a pass would open nothing.
             _ if d.provider == Provider::Gmail && pages_spent(routine, now) => Some((next_day, None)),
@@ -326,7 +326,8 @@ pub fn drive_backfill(d: &Drive, routine: &mut Routine) -> Drove {
                         let _ = mark_open(d.data_dir, d.address_id, false);
                         return Drove::Done;
                     }
-                    Stop::DayLimit { next_day_at } | Stop::PageLimit { next_day_at } => Some((next_day_at, None)),
+                    Stop::DayLimit { next_day_at } => Some((resume_at(routine, d.clock.now(), next_day_at), None)),
+                    Stop::PageLimit { next_day_at } => Some((next_day_at, None)),
                     Stop::Paused(p) => Some((next_day, Some(p.line()))),
                     Stop::Stopped => {
                         let _ = mark_open(d.data_dir, d.address_id, false);
@@ -350,6 +351,12 @@ pub fn drive_backfill(d: &Drive, routine: &mut Routine) -> Drove {
         }
     }
     Drove::Failed("the backfill did not finish")
+}
+
+/// When a pass held by the day's sends (`next_day_at`, the next send's instant) goes on at `now`: no earlier than
+/// [`crate::mail_steps::GMAIL_MESSAGES_TO_RESUME`] Gmail messages have freed, if the 300 are what hold it (review of 5f71623..6a8e738, #1).
+fn resume_at(routine: &mut Routine, now: i64, next_day_at: i64) -> i64 {
+    routine.messages_resume_at(now).map_or(next_day_at, |at| at.max(next_day_at))
 }
 
 /// What `mail.json` keeps of `routine`'s day: its count, and the next day's start while a refused send

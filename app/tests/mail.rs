@@ -749,6 +749,8 @@ struct Fake {
     /// `mail.json`'s folder: each `forward.js` call records the day's Gmail messages it holds then, in `paces`.
     pace_dir: Option<PathBuf>,
     paces: RefCell<Vec<u32>>,
+    /// Gmail: each original a send that went carries is added here as a held entry (`learning`'s service holds them).
+    learn: Option<Arc<Mutex<Vec<Value>>>>,
 }
 
 fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
@@ -792,6 +794,7 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         thread_times_out: Cell::new(false),
         pace_dir: None,
         paces: Default::default(),
+        learn: None,
     }
 }
 
@@ -1076,6 +1079,13 @@ impl Fake {
                     let reason = "attachment still uploading";
                     return Ok(json!({ "result": "failed", "reason": reason, "attached": want - 1, "expected": want }));
                 }
+                if let Some(learn) = &self.learn {
+                    for r in &rows {
+                        let at: i64 = r["received"].as_str().unwrap().trim_start_matches("at-").parse().unwrap();
+                        let fp = fingerprint(FPKEY, r["sender"].as_str().unwrap(), r["subject"].as_str().unwrap());
+                        learn.lock().unwrap().push(json!({ "fp": fp, "minute": iso(at) }));
+                    }
+                }
                 json!({ "result": "ok", "sent": true, "count": want })
             }
             "bounce.js" => {
@@ -1120,6 +1130,23 @@ fn holding(held: &[(&str, &str, i64)]) -> Service {
     Service::start(false, move |r| {
         if r.path.ends_with("/mail/reconcile") {
             (200, json!({ "address_id": A, "key": FPKEY_B64, "held": entries }).to_string())
+        } else if r.path.ends_with("/mail/batches") {
+            (201, json!({ "batch_id": "batch-1", "nonce": NONCE, "phase": "recover" }).to_string())
+        } else if r.path.ends_with("/mail/batches/batch-1/sent") {
+            (200, r#"{"ok":true}"#.to_string())
+        } else {
+            (404, r#"{"error":"no such route"}"#.to_string())
+        }
+    })
+}
+
+/// A loopback service like [`holding`] whose held entries are what `learned` holds when a pass asks: a [`Fake`]
+/// whose `learn` is the same list adds each original it sends, so the next pass finds it held.
+fn learning(learned: Arc<Mutex<Vec<Value>>>) -> Service {
+    Service::start(false, move |r| {
+        if r.path.ends_with("/mail/reconcile") {
+            let held = learned.lock().unwrap().clone();
+            (200, json!({ "address_id": A, "key": FPKEY_B64, "held": held }).to_string())
         } else if r.path.ends_with("/mail/batches") {
             (201, json!({ "batch_id": "batch-1", "nonce": NONCE, "phase": "recover" }).to_string())
         } else if r.path.ends_with("/mail/batches/batch-1/sent") {
@@ -3877,6 +3904,65 @@ fn a_row_left_at_once_stays_left_while_the_next_stuck_row_counts_its_own_days() 
     mb.clk.0.set(NOW + 4 * DAY);
     assert_eq!(drive_fake(&mb, &svc, &dir, first, &|| {}), Drove::Done);
     assert!(st().lone_stall.is_empty() && st().lone_left.is_empty(), "{:?}", st());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_backfill_held_by_gmails_300_messages_resumes_when_30_have_freed_not_1() {
+    // Review of 5f71623..6a8e738, #1: at the cap the wait ended when the oldest kept message was a day old, which
+    // frees one, so each pass paid a fresh Inbox, a search and its walk to send about one. The 300 went one a minute,
+    // ending a little under a day ago; the relaunch at NOW sends nothing until the 30th oldest is a day old.
+    let r = open_backfill_rig("messages-batch-resume", 2);
+    let oldest = NOW - DAY + 600;
+    let times: Vec<i64> = (0..300).map(|i| oldest + i * 60).collect();
+    MailState::update(&r.dir, |s| s.gmail_messages.insert(A.to_string(), times.clone()).is_none()).unwrap();
+    let thirtieth = times[29] + DAY;
+    let forwards = resume_and_time_forwards(&r);
+    assert!(!forwards.is_empty() && forwards.iter().all(|t| *t >= thirtieth), "{forwards:?} vs {thirtieth} (the oldest frees at {})", oldest + DAY);
+    assert!(forwards[0] < thirtieth + 120, "and no later than that: {forwards:?} vs {thirtieth}");
+}
+
+#[test]
+fn a_2000_message_backfill_whose_every_send_is_halved_to_one_finishes_in_a_few_passes_a_day() {
+    // Review of 5f71623..6a8e738, #1: with every send halved to one original, the day's 300 messages are the limit.
+    // Once they were spent, each pass waited for one to free and paid its fresh Inbox, search and walk for about one
+    // send: some 60 passes a day, past MAX_PASSES (400) in about a week, so the backfill failed undone. A pass now
+    // starts once 30 have freed. The service holds what went, so each pass forwards only what is still missing.
+    let dir = temp("messages-batch-halved");
+    let first = NOW.div_euclid(DAY) - 120;
+    let msgs: Vec<Mail> = (0..2_000).map(|i| mail(ANA, &format!("Notice {i}"), first * DAY + 3_600 + i * 5_000)).collect();
+    let learned = Arc::new(Mutex::new(Vec::new()));
+    let svc = learning(learned.clone());
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.over_rows = Some(1);
+    mb.learn = Some(learned.clone());
+    // Each pass closes its batch: the clock and the page loads so far at each close.
+    let ends = RefCell::new(Vec::new());
+    let probe = || ends.borrow_mut().push((mb.clk.now(), mb.loads()));
+    assert_eq!(drive_fake(&mb, &svc, &dir, first, &probe), Drove::Done);
+    let ends = ends.into_inner();
+    let mut by_day: std::collections::BTreeMap<i64, (u32, u64)> = std::collections::BTreeMap::new();
+    let mut before = 0;
+    for (at, loads) in &ends {
+        let d = by_day.entry(at.div_euclid(DAY)).or_default();
+        d.0 += 1;
+        d.1 += loads - before;
+        before = *loads;
+    }
+    let days = by_day.len() as u32;
+    let passes = ends.len() as u32;
+    // Measured (review of 5f71623..6a8e738): 14 passes over 7 days, at most 8 and 165 page loads on any day; before
+    // the fix, 120 passes over 8 days, up to 33 a day, with the day's 600 loads spent on four of them.
+    assert!((7..=8).contains(&days), "300 messages a day: {by_day:?}");
+    assert!(passes <= 20, "far under MAX_PASSES: {passes}, {by_day:?}");
+    assert!(by_day.values().all(|(n, loads)| *n <= 10 && *loads <= 200), "{by_day:?}");
+    // Every original went once, alone.
+    let fwd = mb.forwards.borrow();
+    let mut once: Vec<String> = fwd.iter().filter(|(_, a)| a["rows"].as_array().unwrap().len() == 1).flat_map(|(_, a)| row_texts(a)).collect();
+    assert_eq!(once.len(), 2_000);
+    once.sort();
+    once.dedup();
+    assert_eq!((once.len(), learned.lock().unwrap().len()), (2_000, 2_000), "each original went once");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
