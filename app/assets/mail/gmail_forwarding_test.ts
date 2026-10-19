@@ -423,3 +423,55 @@ Deno.test("gmail_the_older_wrapping_label_shape_is_still_read", async () => {
     listed: true,
   });
 });
+
+// Live Gmail (2026-10-18): the dialogs' buttons are <button> elements named by their text. The page option
+// `buttonDialogs` draws them so; the section's own controls stay <input type=button>.
+Deno.test("gmail_add_address_presses_button_elements_in_the_dialogs", async () => {
+  for (const proceed of [false, true]) {
+    const f = gmail({ buttonDialogs: true, proceed });
+    assertEquals(f.page.document.querySelectorAll('[role="dialog"] button').length, 0);
+    const r = await run("gmail/forwarding_add.js", f.page, { address: OURS, ...FAST });
+    assertEquals(r, { result: "ok", stage: "asked", changed: true }, `proceed ${proceed}`);
+    assertEquals(f.typed, [OURS]);
+    assertEquals(f.popups, 1);
+    // The look-alike <button>Next</button> outside the dialog is never clicked.
+    assertEquals(f.decoy, 0);
+  }
+});
+
+Deno.test("gmail_add_address_cancels_a_button_dialog_when_next_is_missing", async () => {
+  const f = gmail({ buttonDialogs: true, without: "next" });
+  const r = await run("gmail/forwarding_add.js", f.page, { address: OURS, ...FAST });
+  assertEquals(r, NOT_FOUND("next"));
+  assertEquals(f.popups, 0);
+  assert(f.el("dlg") === null, "Cancel closed the dialog");
+  assertEquals(f.decoy, 0);
+});
+
+Deno.test("gmail_add_address_cancels_an_input_dialog_when_next_is_missing", async () => {
+  const f = gmail({ without: "next" });
+  const r = await run("gmail/forwarding_add.js", f.page, { address: OURS, ...FAST });
+  assertEquals(r, NOT_FOUND("next"));
+  assert(f.el("dlg") === null, "Cancel closed the dialog");
+});
+
+Deno.test("gmail_add_done_presses_a_button_element_ok", async () => {
+  const f = gmail({ buttonDialogs: true });
+  f.verified();
+  assertEquals(f.page.document.querySelectorAll('#dlg input[type="button"]').length, 0);
+  assertEquals(await run("gmail/forwarding_add_done.js", f.page, FAST), { result: "ok", sent: true });
+  assertEquals(f.oks, 1);
+  assert(f.el("dlg") === null, "OK closed the dialog");
+  // A confirmation dialog with no OK of either kind is still not found.
+  const g = gmail({ buttonDialogs: true, without: "ok" });
+  g.verified();
+  assertEquals(await run("gmail/forwarding_add_done.js", g.page, FAST), NOT_FOUND("ok"));
+});
+
+Deno.test("gmail_remove_address_confirms_a_button_element_dialog", async () => {
+  const f = gmail({ buttonDialogs: true, addresses: [OURS] });
+  const r = await run("gmail/forwarding_remove_address.js", f.page, { address: OURS, ...FAST });
+  assertEquals(r, { result: "ok", removed: true, changed: true });
+  assertEquals(f.removed, [OURS]);
+  assertEquals(f.model.addresses, []);
+});

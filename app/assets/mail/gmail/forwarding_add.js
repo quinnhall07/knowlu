@@ -14,7 +14,9 @@
 //   { result: "reloading" }
 //   { result: "not found", control: "section" | "forwarding radio" | "email field" | "next" }
 //   { result: "failed", reason: "no address" }
-// The buttons are <input type=button value=...>, found by their value and only inside the dialog.
+// The section's buttons are <input type=button value=...>, found by their value. The dialogs' buttons are
+// <button> elements named by their text on live Gmail (2026-10-18; older layouts drew inputs), so inside a
+// dialog either form is accepted, and only inside a dialog.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => {
   const aria = el.getAttribute("aria-label");
@@ -69,9 +71,18 @@ const toSelect = () => selectsOf().find((s) => s !== dispSelect());
 const selectedOf = (sel) => [...sel.options].find((o) => o.selected) || sel.options[0] || null;
 const optionIs = (o, a) => norm(o.value) === a || norm(text(o)) === a;
 const dialogs = () => [...document.querySelectorAll('[role="dialog"]')];
+const dialogButton = (d, pattern) => {
+  const input = [...d.querySelectorAll('input[type="button"], input[type="submit"]')].find((b) =>
+    pattern.test(String(b.getAttribute("value") || "").trim())
+  );
+  if (input) return input;
+  return [...d.querySelectorAll('button, [role="button"]')].find((b) =>
+    pattern.test((b.getAttribute("aria-label") || "").trim() || text(b))
+  );
+};
 const inDialog = (pattern) => {
   for (const d of dialogs()) {
-    const b = byValue(d, pattern);
+    const b = dialogButton(d, pattern);
     if (b) return b;
   }
   return null;

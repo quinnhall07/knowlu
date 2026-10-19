@@ -30,6 +30,11 @@ export interface Opts extends Partial<Model> {
   /** The add dialog's address box has no type attribute (T18c's audit: a type-less input reads as text). */
   untypedEmail?: boolean;
   /**
+   * Live 2026-10-18: the buttons inside the dialogs (add, the confirmation, remove's confirm) are `<button>`
+   * elements named by their text, not `<input type=button value=...>`. The section's own controls stay inputs.
+   */
+  buttonDialogs?: boolean;
+  /**
    * Live 2026-10-18: a Gmail with no forwarding address yet draws only the Add button, no forwarding radios
    * and no Remove button (the POP section is still there).
    */
@@ -96,7 +101,7 @@ export function gmail(o: Opts = {}): Gmail {
     verified: () =>
       dialog(
         `<p>Confirmation link sent</p><p>A confirmation link was sent to the address.</p>${
-          input("OK", "ok")
+          dlgButton("OK", "ok")
         }`,
       ),
     el: (id) => d.getElementById(id),
@@ -107,6 +112,10 @@ export function gmail(o: Opts = {}): Gmail {
     value: string,
     id: string,
   ) => (w && id === w ? "" : `<input type="button" value="${value}" id="${id}">`);
+  const dlgButton = (value: string, id: string) =>
+    o.buttonDialogs && !(w && id === w)
+      ? `<button type="button" id="${id}">${value}</button>`
+      : input(value, id);
   let hash = o.at ?? SECTION;
   let drawn = !o.lateDraw;
   let dirty = false;
@@ -203,15 +212,15 @@ export function gmail(o: Opts = {}): Gmail {
           `<p>Add a forwarding address</p>${
             w === "email" ? "" : o.untypedEmail ? `<input id="email">` : `<input type="email" id="email">`
           }
-      ${input("Next", "next")}${input("Cancel", "cancel-dlg")}`,
+      ${dlgButton("Next", "next")}${dlgButton("Cancel", "cancel-dlg")}`,
         ),
     );
     on("next", () => {
       g.typed.push(g.el("email")?.value ?? "");
       if (o.proceed) {
         dialog(
-          `<p>A confirmation will be sent to the address. Proceed?</p>${input("Proceed", "proceed")}${
-            input("Cancel", "cancel-dlg")
+          `<p>A confirmation will be sent to the address. Proceed?</p>${dlgButton("Proceed", "proceed")}${
+            dlgButton("Cancel", "cancel-dlg")
           }`,
         );
       } else {
@@ -235,8 +244,8 @@ export function gmail(o: Opts = {}): Gmail {
     on("remove", () => {
       pendingRemove = g.el("to")?.value ?? "";
       dialog(
-        `<p>Are you sure you want to remove this forwarding address?</p>${input("OK", "confirm-remove")}${
-          input("Cancel", "cancel-dlg")
+        `<p>Are you sure you want to remove this forwarding address?</p>${dlgButton("OK", "confirm-remove")}${
+          dlgButton("Cancel", "cancel-dlg")
         }`,
       );
     });

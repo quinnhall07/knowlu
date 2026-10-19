@@ -38,6 +38,13 @@ const waitMs = Number(args && args.wait_ms) >= 0 ? Number(args.wait_ms) : 3000;
 const buttons = (root) => [...(root || document).querySelectorAll('input[type="button"]')];
 const byValue = (root, pattern) =>
   buttons(root).find((b) => pattern.test(String(b.getAttribute("value") || "").trim()));
+// Live Gmail (2026-10-18): a dialog's buttons are <button> elements named by their text; older layouts drew
+// <input type=button value=...>. Either form is accepted, inside a dialog only.
+const dialogButton = (d, pattern) =>
+  byValue(d, pattern) ||
+  [...d.querySelectorAll('button, [role="button"]')].find((b) =>
+    pattern.test((b.getAttribute("aria-label") || "").trim() || text(b))
+  );
 const addEl = () => byValue(document, /^add a forwarding address$/i);
 const ensureSection = async () => {
   if (location.hash !== SECTION) location.hash = SECTION;
@@ -104,7 +111,7 @@ remove.click();
 // Gmail asks to confirm; the confirmation names the removal, and it is pressed only if it does.
 const confirm = () => {
   for (const d of document.querySelectorAll('[role="dialog"]')) {
-    const b = byValue(d, /^(ok|remove)$/i);
+    const b = dialogButton(d, /^(ok|remove)$/i);
     if (b && /remov/i.test(text(d))) return b;
   }
   return null;

@@ -5,7 +5,8 @@
 //   { result: "ok", sent: true }
 //   { result: "not found", control: "confirmation dialog" | "ok" }
 //   { result: "failed", reason: "dialog stayed" }
-// The button is <input type=button value="OK">, found by its value and only inside that dialog.
+// The button is found only inside that dialog: a <button> named "OK" on live Gmail (2026-10-18), or an
+// <input type=button value="OK"> on older layouts.
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const until = async (ready, ms) => {
@@ -20,8 +21,11 @@ const sentDialog = () =>
 
 if (!(await until(sentDialog, waitMs))) return { result: "not found", control: "confirmation dialog" };
 const dialog = sentDialog();
-const ok = [...dialog.querySelectorAll('input[type="button"]')].find((b) =>
-  /^ok$/i.test(String(b.getAttribute("value") || "").trim())
+const isOk = (s) => /^ok$/i.test(s);
+const ok = [...dialog.querySelectorAll('input[type="button"], input[type="submit"]')].find((b) =>
+  isOk(String(b.getAttribute("value") || "").trim())
+) || [...dialog.querySelectorAll('button, [role="button"]')].find((b) =>
+  isOk((b.getAttribute("aria-label") || "").trim() || text(b))
 );
 if (!ok) return { result: "not found", control: "ok" };
 ok.click();
