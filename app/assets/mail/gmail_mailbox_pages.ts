@@ -79,6 +79,8 @@ export interface Opts {
   /** Attachments upload before they attach ("slow"), the upload fails ("fails"), or the compose draws no chip
    * at first and the attached chips a moment later ("late", live 2026-10-19). */
   upload?: "slow" | "fails" | "late";
+  /** How long an upload takes, in ms (default 100). */
+  uploadMs?: number;
   /** The row of `id` shows the message `as` once it is ticked. */
   swap?: { id: string; as: string };
   /** The page shows no "1–50 of 123" range. */
@@ -454,7 +456,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       setTimeout(() => {
         const box = b.el("files");
         if (box) box.innerHTML = files.map(o.upload === "fails" ? failed : attached).join("");
-      }, 100);
+      }, o.uploadMs ?? 100);
     }
     b.el("to").addEventListener("keydown", (e: El) => {
       const v = b.el("to").value.trim();

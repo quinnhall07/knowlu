@@ -95,6 +95,22 @@ Deno.test("gmail_forward_waits_for_chips_the_compose_draws_after_it_opens", asyn
   assertEquals(await run("gmail/forward.js", late.page, TARGET), { result: "ok", sent: true, count: 2 });
 });
 
+Deno.test("gmail_forward_gives_uploads_longer_than_a_step_wait_and_names_the_counts_it_saw", async () => {
+  // Live 2026-10-19: two of five forwards answered "attachments do not match the rows"; several rows upload
+  // for longer than wait_ms. Uploads have their own bound (upload_ms), and a mismatch says what it counted.
+  const slow = mailbox(MAIL, { upload: "slow", uploadMs: 400 });
+  assertEquals(await run("gmail/forward.js", slow.page, { ...TARGET, wait_ms: 100 }), {
+    result: "ok",
+    sent: true,
+    count: 2,
+  });
+  const newest = mailbox(MAIL, { upload: "slow", uploadMs: 400 });
+  assertEquals(
+    await run("gmail/forward.js", newest.page, { ...TARGET, wait_ms: 100, upload_ms: 200 }),
+    { result: "failed", reason: "attachments do not match the rows", attached: 0, expected: 2 },
+  );
+});
+
 Deno.test("gmail_forward_reads_the_size_inside_the_chip_never_the_name", async () => {
   // Live: the chip's own text is "<name>.eml (6K)", the size a leaf inside it. A subject that holds a size
   // of its own is not the attachment's size.
@@ -146,6 +162,8 @@ Deno.test("gmail_forward_of_a_conversation_row_expects_one_attachment_per_messag
   assertEquals(await run("gmail/forward.js", blind.page, { ...TARGET, rows: [row(MAIL[0]), row(MAIL[1])] }), {
     result: "failed",
     reason: "attachments do not match the rows",
+    attached: 4,
+    expected: 2,
   });
   assertEquals([blind.sent, blind.discards, blind.checked()], [[], 1, []]);
   // If "Forward as attachment" attaches only the newest message of a conversation, the count does not
@@ -156,7 +174,7 @@ Deno.test("gmail_forward_of_a_conversation_row_expects_one_attachment_per_messag
       ...TARGET,
       rows: [row(MAIL[0]), { ...row(MAIL[1]), messages: 3 }],
     }),
-    { result: "failed", reason: "attachments do not match the rows" },
+    { result: "failed", reason: "attachments do not match the rows", attached: 2, expected: 4 },
   );
   assertEquals([newest.sent, newest.discards, newest.checked()], [[], 1, []]);
 });
@@ -220,6 +238,8 @@ Deno.test("gmail_forward_never_sends_a_compose_with_another_recipient_or_the_wro
   assertEquals(await run("gmail/forward.js", short.page, TARGET), {
     result: "failed",
     reason: "attachments do not match the rows",
+    attached: 1,
+    expected: 2,
   });
   for (const b of [other, bare, short]) assertEquals([b.sent, b.discards, b.checked()], [[], 1, []]);
 });

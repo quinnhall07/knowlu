@@ -6,8 +6,9 @@
 // `args.rows` the rows to send ([{ sender, subject, received, messages? }], at most 100, all on this page;
 // `messages` is a conversation row's message count from list.js, which "Forward as attachment" is expected
 // to attach as that many attachments, T11.2),
-// `args.max_bytes` (default 25000000) the most the attachments may add up to, and `args.wait_ms` (default
-// 5000) bounds each wait. It returns one of
+// `args.max_bytes` (default 25000000) the most the attachments may add up to, `args.wait_ms` (default
+// 5000) bounds each wait, and `args.upload_ms` (default 30000, never less than `wait_ms`) bounds the wait for
+// the attachments to upload. It returns one of
 //   { result: "ok", sent: true, count: number }   (count: the attachments sent, a conversation row's
 //      messages each)
 //   { result: "refused", reason: "send failure" | "non-delivery report" }   (the routine stops: nothing is
@@ -17,7 +18,8 @@
 //   { result: "failed", reason: "no address" | "no nonce" | "no rows" | "too many rows" |
 //      "rows already selected" | "rows not selected" | "attachment failed" | "no attachment" |
 //      "attachments do not match the rows" | "attachment size unreadable" | "over 25 MB" |
-//      "recipient not accepted" | "subject not set" | "send did not settle" }
+//      "recipient not accepted" | "subject not set" | "send did not settle" }   ("attachments do not match
+//      the rows" also carries `attached` and `expected`, the counts it compared)
 // It sends one message to that one address and nothing else: the subject is exactly `Knowlu <nonce>`
 // (sent_cleanup.js deletes by that same subject), the originals' words are not in it, and a compose window
 // with no attachment, a count of attachments that is not the rows', more than the size limit, Gmail's offer
@@ -31,7 +33,7 @@
 // pointerup, mouseup, click), never `click()`. A menu item answers only events carrying its centre's
 // clientX/clientY sent to the innermost element at that point (`pointAt`: pointerover, mouseover,
 // pointermove, mousemove, then the press); Send and Discard are pressed the same way. An attachment chip is
-// a `div.dL`: "Uploading of attachment: <name>" while it uploads (waited for, inside `wait_ms`), "Uploading
+// a `div.dL`: "Uploading of attachment: <name>" while it uploads (waited for, inside `upload_ms`), "Uploading
 // of attachment: <name> failed. Press enter to retry" when the upload failed ("attachment failed": the
 // draft is discarded), and "Attachment: <name>" when attached, its own text "<name>.eml (6K)" with the size
 // a leaf inside it: the size is read after the name, never from it (a subject may hold "(3)").
@@ -109,6 +111,7 @@ if (wanted.length > 100) return { result: "failed", reason: "too many rows" };
 // A plain row is one attachment; a conversation row is as many as the messages list.js counted in it.
 const expected = wanted.reduce((n, w) => n + (Number.isInteger(w && w.messages) && w.messages > 1 ? w.messages : 1), 0);
 const waitMs = Number(args.wait_ms) >= 0 ? Number(args.wait_ms) : 5000;
+const uploadMs = Number(args.upload_ms) >= 0 ? Number(args.upload_ms) : Math.max(waitMs, 30000);
 const maxBytes = Number(args.max_bytes) > 0 ? Number(args.max_bytes) : 25000000;
 
 // A send failure in an alert, or a non-delivery report for this batch's nonce in a list.
@@ -205,13 +208,30 @@ const chipLabels = () => [...compose.querySelectorAll("[aria-label]")].map(nameO
 const uploadFailed = () => chipLabels().some((l) => /^uploading of attachment:.*failed/i.test(l));
 const uploading = () => chipLabels().some((l) => /^uploading of attachment:/i.test(l) && !/failed/i.test(l));
 const attached = () => [...compose.querySelectorAll('[aria-label^="Attachment:"]')];
-await until(() => uploadFailed() || (!uploading() && attached().length >= expected), waitMs);
+// Uploads have their own bound: live (2026-10-19) several rows upload for longer than a step's wait.
+// A compose that attached fewer (Gmail attaching only a conversation's newest message) is known once nothing
+// uploads and the count has held for two seconds (five with no chip yet: live, chips draw after Send).
+let held = { n: -1, since: 0 };
+const settled = () => {
+  if (uploadFailed()) return true;
+  if (uploading()) return (held = { n: -1, since: 0 }, false);
+  const n = attached().length;
+  if (n >= expected) return true;
+  if (n !== held.n) held = { n, since: Date.now() };
+  return Date.now() - held.since >= Math.min(n > 0 ? 2000 : 5000, uploadMs);
+};
+await until(settled, uploadMs);
 if (uploadFailed()) return await bail({ result: "failed", reason: "attachment failed" });
 
 const attachments = attached();
-if (attachments.length === 0) return await bail({ result: "failed", reason: "no attachment" });
+if (attachments.length === 0 && !uploading()) return await bail({ result: "failed", reason: "no attachment" });
 if (attachments.length !== expected) {
-  return await bail({ result: "failed", reason: "attachments do not match the rows" });
+  return await bail({
+    result: "failed",
+    reason: "attachments do not match the rows",
+    attached: attachments.length,
+    expected,
+  });
 }
 let total = 0;
 const SIZE = /\((\d+(?:\.\d+)?)\s*([KMG]?)B?\)/gi;
