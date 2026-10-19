@@ -199,14 +199,16 @@ if (!to) return await bail({ result: "not found", control: "to" });
 const subject = field(/^(subject|subjectbox)$/i);
 if (!subject) return await bail({ result: "not found", control: "subject" });
 
-// The chips upload first: wait while one is still uploading; a failed upload is never sent.
+// The chips upload first: wait while one is still uploading; a failed upload is never sent. Live
+// (2026-10-19) Send is drawn before any chip, so the wait lasts until the rows' chips have all attached.
 const chipLabels = () => [...compose.querySelectorAll("[aria-label]")].map(nameOf);
 const uploadFailed = () => chipLabels().some((l) => /^uploading of attachment:.*failed/i.test(l));
 const uploading = () => chipLabels().some((l) => /^uploading of attachment:/i.test(l) && !/failed/i.test(l));
-await until(() => uploadFailed() || !uploading(), waitMs);
+const attached = () => [...compose.querySelectorAll('[aria-label^="Attachment:"]')];
+await until(() => uploadFailed() || (!uploading() && attached().length >= expected), waitMs);
 if (uploadFailed()) return await bail({ result: "failed", reason: "attachment failed" });
 
-const attachments = [...compose.querySelectorAll('[aria-label^="Attachment:"]')];
+const attachments = attached();
 if (attachments.length === 0) return await bail({ result: "failed", reason: "no attachment" });
 if (attachments.length !== expected) {
   return await bail({ result: "failed", reason: "attachments do not match the rows" });

@@ -76,8 +76,9 @@ export interface Opts {
   noOldest?: boolean;
   /** The pager's buttons take a press and draw nothing. */
   stuckPager?: boolean;
-  /** Attachments upload before they attach ("slow"), or the upload fails ("fails"). */
-  upload?: "slow" | "fails";
+  /** Attachments upload before they attach ("slow"), the upload fails ("fails"), or the compose draws no chip
+   * at first and the attached chips a moment later ("late", live 2026-10-19). */
+  upload?: "slow" | "fails" | "late";
   /** The row of `id` shows the message `as` once it is ticked. */
   swap?: { id: string; as: string };
   /** The page shows no "1–50 of 123" range. */
@@ -440,7 +441,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       <input type="text" id="subj" name="subjectbox" aria-label="Subject" value="Fwd: ${
       esc(picked[0]?.subject ?? "")
     }">
-      <div id="files">${files.map(o.upload ? uploading : attached).join("")}</div>
+      <div id="files">${o.upload === "late" ? "" : files.map(o.upload ? uploading : attached).join("")}</div>
       ${
       o.driveOffer || total > LIMIT
         ? `<div role="alertdialog">The files you attached are over 25 MB. Send them as Google Drive links?</div>`

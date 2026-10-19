@@ -89,6 +89,12 @@ Deno.test("gmail_forward_names_a_failed_attachment", async () => {
   assertEquals(await run("gmail/forward.js", slow.page, TARGET), { result: "ok", sent: true, count: 2 });
 });
 
+Deno.test("gmail_forward_waits_for_chips_the_compose_draws_after_it_opens", async () => {
+  // Live 2026-10-19: Send is drawn before any attachment chip; reading the chips then saw none ("no attachment").
+  const late = mailbox(MAIL, { upload: "late" });
+  assertEquals(await run("gmail/forward.js", late.page, TARGET), { result: "ok", sent: true, count: 2 });
+});
+
 Deno.test("gmail_forward_reads_the_size_inside_the_chip_never_the_name", async () => {
   // Live: the chip's own text is "<name>.eml (6K)", the size a leaf inside it. A subject that holds a size
   // of its own is not the attachment's size.
