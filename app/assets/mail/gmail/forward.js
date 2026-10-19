@@ -230,9 +230,16 @@ const offer = [...compose.querySelectorAll('[role="alert"], [role="alertdialog"]
 );
 if (total >= maxBytes || offer) return await bail({ result: "failed", reason: "over 25 MB" });
 
+// A recipient Gmail accepted: live (2026-10-19) a `div[role=option]` naming the address in data-hovercard-id;
+// older composes drew an `[email]` element.
 const recipients = () => [
   ...new Set(
-    [...compose.querySelectorAll("[email]")].map((el) => norm(el.getAttribute("email"))).filter(Boolean),
+    [
+      ...[...compose.querySelectorAll("[email]")].map((el) => el.getAttribute("email")),
+      ...[...compose.querySelectorAll('[role="option"][data-hovercard-id]')].map((el) =>
+        el.getAttribute("data-hovercard-id")
+      ),
+    ].map(norm).filter(Boolean),
   ),
 ];
 setValue(to, String(args.address).trim());

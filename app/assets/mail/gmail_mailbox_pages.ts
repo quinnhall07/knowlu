@@ -419,7 +419,8 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     );
     const files = o.bare ? [] : o.short ? attach.slice(1) : attach;
     const total = files.reduce((n, m) => n + m.size, 0);
-    const chip = (v: string) => `<span email="${esc(v)}">${esc(v)}</span>`;
+    // Live 2026-10-19: an accepted recipient is a `div[role=option]` naming the address in data-hovercard-id.
+    const chip = (v: string) => `<div role="option" data-hovercard-id="${esc(v)}"><span>${esc(v)}</span></div>`;
     // Live chips: the name and the size are leaves inside the chip, "<name>.eml (6K)".
     const attached = (m: Msg) =>
       `<div class="dL" aria-label="Attachment: ${esc(m.subject)}.eml"><a class="dO"><div class="vI">${
@@ -470,7 +471,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       b.el("over").innerHTML = "";
     });
     onPress(button("Send"), () => {
-      const to = [...d.querySelectorAll("#chips [email]")].map((x: El) => x.getAttribute("email"));
+      const to = [...d.querySelectorAll('#chips [role="option"]')].map((x: El) => x.getAttribute("data-hovercard-id"));
       const subject = b.el("subj")?.value ?? "";
       const banner = () =>
         d.getElementById("over").insertAdjacentHTML(
