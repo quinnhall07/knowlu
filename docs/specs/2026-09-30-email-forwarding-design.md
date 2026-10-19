@@ -332,7 +332,7 @@ the recipients from it, and logs nothing from it.
    nothing for good while the saved session works: when the account is entitled again, the next
    reconcile covers from `lapsed_since`, at most 30 days back, and recover brings in what was dropped
    (§4.11).
-   *(unsigned, 2026-10-19, built and open for Quinn: how a mailbox leaves `lapsed`. Until now nothing
+   *(amended 2026-10-19, Quinn: kept away guess G3; `last_lapsed_at` and an `off` mailbox staying off came from its review. How a mailbox leaves `lapsed`. Until now nothing
    moved it on, so a renewed account's mailbox read `lapsed` for good and repair ran every slot. Intake's
    mark is one compare-and-set each way on a mailbox neither `lapsed`, `revoked` nor `off` (the
    student's `off` or `elsewhere` outlives a lapse; its mail is deleted unread meanwhile all the same):
@@ -642,7 +642,7 @@ Per mailbox, with the mailbox's own kept profile:
    about a message the service does not hold leaves the device. The window is the last three days
    (§13 Q3), reaching back to `lapsed_since` after a lapse (§4.6 step 3) and, after forwarding was found
    off, to when it was last known on.
-   *(unsigned, 2026-10-19, built and open for Quinn: when `lapsed_since` clears. Only the device knows
+   *(amended 2026-10-19, Quinn: kept away guess G3; the two stamps came from its review. When `lapsed_since` clears. Only the device knows
    a gap is covered, so it says so: after a whole pass over a mailbox that is no longer `lapsed` (the
    pass ended done, its reconcile window began at or before the later of `lapsed_since` and 30 days
    ago, and recover sent everything it found missing), it posts `POST /mail/addresses/<id>/state
@@ -725,7 +725,7 @@ them, as `google_accounts` does. Every `account_id` references `accounts(id) on 
 | Table | Holds | Kept |
 |---|---|---|
 | `mail_accounts` | `account_id`; the per-account fingerprint key, encrypted; `digest` (D13, default false); the allowance (D23): `allowance_opened_at`, `allowance_left`, `allowance_usd`, `allowance_until`; `mints_30d` (D3) *(amended 2026-10-02: `allowance_opened_at` was `allowance_term_start`; D23's marker)* | until the account goes |
-| `mail_addresses` | `id`; `provider` (`m365`, `google`, `other`); `token_hmac` (unique) and the token encrypted with its IV; `retired_token_hmac` and `retired_until` (Rotate's grace, D3); `mailbox_hint`; `forward_hint` (§4.6 step 5); `status` (`pending`, `confirmed`, `active`, `quiet`, `blocked`, `off`, `paused_send`, `lapsed`, `revoked`); `lapsed_since`; `last_lapsed_at` *(unsigned, 2026-10-19: the latest move into `lapsed`, §4.6 step 3 and §4.11 step 3)*; `reenabled_at` (§4.11 step 2); `confirm_until`; `backfill_since` *(amended 2026-10-02: was `term_start`; the mailbox's fixed window start, set once by its first backfill batch, D7's marker)*; `last_received_at`, `last_canary_sent_at`, `last_canary_ok_at`, `canaries_today`; counters `unbound`, `unauthenticated`, `expired`; `unbound_own_since_live` and `unbound_foreign_since_live` *(amended 2026-10-03, Quinn, the unbound display, §4.6 step 5: unbound live forwards since the last bound one, by where they came from)* | until Disconnect (then the row is deleted) or the account goes |
+| `mail_addresses` | `id`; `provider` (`m365`, `google`, `other`); `token_hmac` (unique) and the token encrypted with its IV; `retired_token_hmac` and `retired_until` (Rotate's grace, D3); `mailbox_hint`; `forward_hint` (§4.6 step 5); `status` (`pending`, `confirmed`, `active`, `quiet`, `blocked`, `off`, `paused_send`, `lapsed`, `revoked`); `lapsed_since`; `last_lapsed_at` *(amended 2026-10-19, Quinn, G3: the latest move into `lapsed`, §4.6 step 3 and §4.11 step 3)*; `reenabled_at` (§4.11 step 2); `confirm_until`; `backfill_since` *(amended 2026-10-02: was `term_start`; the mailbox's fixed window start, set once by its first backfill batch, D7's marker)*; `last_received_at`, `last_canary_sent_at`, `last_canary_ok_at`, `canaries_today`; counters `unbound`, `unauthenticated`, `expired`; `unbound_own_since_live` and `unbound_foreign_since_live` *(amended 2026-10-03, Quinn, the unbound display, §4.6 step 5: unbound live forwards since the last bound one, by where they came from)* | until Disconnect (then the row is deleted) or the account goes |
 | `mail_batches` | `id`, `address_id`, `phase` (`backfill`, `recover`), the nonce's HMAC, `since`, `expected`, `sent` (the device's count at close), `received`, `opened_at`, `sent_at`, `closed_at` | 30 days after closing |
 | `mail_canaries` | `id`, `address_id`, the nonce's HMAC, `sent_at`, `arrived_at` | 30 days |
 | `mail_seen` | `account_id`, `msg_hash` and `fp_hash` (both HMACs under the account's key, §4.6 step 7), `received_minute`, `address_id`, `phase`, `seen_at`; primary key `(account_id, msg_hash)`; written with its `mail_work` row, deleted if that item expires | 180 days, pruned nightly (a term and its overlap) |
