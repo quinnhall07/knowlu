@@ -511,3 +511,18 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
   }
   return b;
 }
+
+/**
+ * A non-delivery report as Gmail draws it in the Inbox: from "Mail Delivery Subsystem", titled "Delivery Status
+ * Notification (Failure)", its preview "Address not found Your message wasn't delivered to <address> because the
+ * address couldn't be found" (live 2026-10-19: the report carries the address, not the sent subject).
+ */
+export function report(id: string, day: number, over: Partial<Msg> = {}): Msg {
+  return {
+    ...msg(id, "mailer-daemon@mail.example.invalid", "Delivery Status Notification (Failure)", day),
+    shown: "Mail Delivery Subsystem",
+    snippet:
+      `Address not found Your message wasn't delivered to ${OURS} because the address couldn't be found`,
+    ...over,
+  };
+}

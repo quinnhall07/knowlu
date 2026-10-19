@@ -101,7 +101,7 @@ const TIMED = /\d{1,2}:\d{2}/;
 const FAILED =
   /message not sent|couldn.?t send|could not be sent|couldn.?t be sent|failed to send|unable to send|can.?t send|sending limit/i;
 const REPORT =
-  /undeliverable|delivery status notification|delivery (has )?failed|wasn.?t delivered|couldn.?t be delivered|not delivered/i;
+  /undeliverable|delivery status notification|delivery (has )?failed|wasn.?t delivered|couldn.?t be delivered|not delivered|address not found/i;
 const UNITS = { "": 1, K: 1e3, M: 1e6, G: 1e9 };
 
 const address = norm(args && args.address);

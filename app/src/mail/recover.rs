@@ -33,6 +33,14 @@
 //! and the conversation is left (T18c's gate "Gmail conversation rows"). A message the mailbox itself sent
 //! (`own`, which `thread.js` reads from the account chip) is never judged: the service never holds it.
 //!
+//! **The Inbox look** (Gmail only; Quinn's ruling 2026-10-19 on the T18c gate "Gmail non-delivery report
+//! between sends", option b; spec §4.2 step 5, risk 15). A bounce lands in the Inbox, which the search page
+//! the walk stands on does not list, so after the page that brings the sends since the last look to
+//! [`BOUNCE_EVERY`] the pass opens the Inbox and runs `bounce.js`; a report of the batch stops the pass as
+//! [`Stop::Paused`], like the first send failure. The look leaves the search, so the walk starts again (the
+//! same search, the oldest page, then newer) and skips the rows it decided before; the pass looks once more
+//! when it ends, before the batch closes and Sent is cleaned, if anything was sent since the last look.
+//!
 //! **Privacy.** No sender, subject, address, nonce or page text is kept past the pass, logged or put in a
 //! [`Stop`]; every stop is a fixed word or a service error's name.
 use super::{run_in_window, Refusal, WINDOW};
@@ -376,7 +384,7 @@ impl Outcome {
 /// One pass: lists, diffs, forwards, closes. A pass never writes the vault and never fails as a whole:
 /// it ends as a [`Stop`] with the counts so far.
 pub fn run_pass(mb: &dyn Mailbox, client: &MailClient, clock: &dyn Clock, routine: &mut Routine, job: &Job) -> Outcome {
-    let mut pass = Pass { mb, client, clock, routine, job, out: Outcome::new(), batch: None, attempts: 0, judged: HashSet::new() };
+    let mut pass = Pass { mb, client, clock, routine, job, out: Outcome::new(), batch: None, attempts: 0, judged: HashSet::new(), decided: HashMap::new(), walk: HashMap::new(), since_look: 0 };
     pass.out.stop = pass.go().err().unwrap_or(Stop::Done);
     pass.finish();
     pass.out
@@ -387,7 +395,12 @@ type Step<T> = Result<T, Stop>;
 struct Batch {
     id: String,
     nonce: String,
+    /// When the batch opened (ISO instant): `bounce.js` counts a report naming the address since then.
+    opened: String,
 }
+
+/// A Gmail row as `list.js` reads it: sender, subject and time as the page writes them.
+type RowKey = (String, String, String);
 
 struct Pass<'a> {
     mb: &'a dyn Mailbox,
@@ -402,6 +415,13 @@ struct Pass<'a> {
     /// Microsoft 365: the conversation messages judged this pass. A conversation is found by any message in
     /// it, so spans may list it twice; each message is judged once.
     judged: HashSet<(String, String, String)>,
+    /// Gmail: the rows each page decided (held, left, out of window, read, forwarded), counted by key: two
+    /// messages can read alike, and each is decided once.
+    decided: HashMap<RowKey, u32>,
+    /// Gmail: the rows met so far in the walk now under way, counted by key; a walk starts over after a look.
+    walk: HashMap<RowKey, u32>,
+    /// Gmail: originals sent since the last look at the Inbox.
+    since_look: u32,
 }
 
 /// A missing Gmail row: one message, or a conversation of `n` messages sent alone.
@@ -427,6 +447,13 @@ const UNFINISHED: Stop = Stop::Script("a mailbox step did not finish");
 const SHORT_OF_OLDEST: Stop = Stop::Script("the oldest page could not be reached");
 /// Gmail: the most `list.js` walks toward the oldest page (each one inside a step, about 90 pages).
 const OLDEST_WALKS: usize = 200;
+/// Gmail: the Inbox is looked in for a non-delivery report once this many originals have been sent since the
+/// last look (Quinn's ruling 2026-10-19, option b of the T18c gate "Gmail non-delivery report between sends").
+const BOUNCE_EVERY: u32 = 25;
+/// `bounce.js`'s wait for the Inbox's list (it waits twice at most, well inside a [`STEP`]).
+const BOUNCE_WAIT_MS: u64 = 5_000;
+/// Gmail: `bounce.js` could not read the Inbox (no list, or an answer that was neither "ok" nor "refused").
+const INBOX_UNREADABLE: Stop = Stop::Script("the inbox could not be read");
 
 impl Pass<'_> {
     fn path(&self, name: &str) -> String {
@@ -449,7 +476,7 @@ impl Pass<'_> {
             return Err(Stop::Guided);
         }
         self.mb.open(Place::Inbox).map_err(refused)?;
-        let found = self.ok("search.js", json!({ "since": day_str(j.window.since.div_euclid(DAY)) }))?;
+        let found = self.search()?;
         // Gmail's count is a lower bound when its answer says `exact: false` (an "of many" result whose walk
         // to the last page ran out of time): the cloud only records `expected`, and nothing here stops at it.
         let n = count(&found, "count").ok_or(UNFINISHED)?;
@@ -465,6 +492,11 @@ impl Pass<'_> {
         if j.provider == Provider::Gmail { self.gmail(&held) } else { self.m365(&held, n) }
     }
 
+    /// The window's search; the same words every time it is asked (Gmail asks again after each Inbox look).
+    fn search(&self) -> Step<Value> {
+        self.ok("search.js", json!({ "since": day_str(self.job.window.since.div_euclid(DAY)) }))
+    }
+
     fn open_batch(&mut self) -> Step<()> {
         if self.batch.is_some() {
             return Ok(());
@@ -474,10 +506,11 @@ impl Pass<'_> {
             Phase::Backfill => day_str(j.window.since.div_euclid(DAY)),
             Phase::Recover => iso(j.window.since),
         };
+        let opened = iso(self.clock.now());
         let v = svc(self.client.open_batch(j.address_id, j.phase, &since, self.out.expected))?;
         let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         let (Some(id), Some(nonce)) = (text("batch_id"), text("nonce")) else { return Err(Stop::Service("bad-reply")) };
-        self.batch = Some(Batch { id, nonce });
+        self.batch = Some(Batch { id, nonce, opened });
         Ok(())
     }
 
@@ -650,10 +683,11 @@ enum Convo {
 }
 
 impl Pass<'_> {
-    fn gmail(&mut self, held: &Held) -> Step<()> {
-        // A search draws no Oldest (live 2026-10-19): `list.js` walks "Next results" inside its own budget
-        // and says `at_oldest: false` when the walk stopped short. It is asked again, its rows unread, until
-        // it is there; a walk that stops short without moving would leave older pages unread, so it stops.
+    /// `list.js` on the oldest page of the results (a search draws no Oldest, live 2026-10-19): it walks "Next
+    /// results" inside its own budget and says `at_oldest: false` when the walk stopped short. It is asked
+    /// again, its rows unread, until it is there; a walk that stops short without moving would leave older
+    /// pages unread, so it stops.
+    fn gmail_oldest(&self) -> Step<Value> {
         let mut first = self.ok("list.js", json!({ "go": "oldest" }))?;
         for _ in 0..OLDEST_WALKS {
             if first.get("at_oldest").and_then(Value::as_bool) != Some(false) {
@@ -667,7 +701,11 @@ impl Pass<'_> {
         if first.get("at_oldest").and_then(Value::as_bool) == Some(false) {
             return Err(SHORT_OF_OLDEST);
         }
-        let mut first = Some(first);
+        Ok(first)
+    }
+
+    fn gmail(&mut self, held: &Held) -> Step<()> {
+        let mut first = Some(self.gmail_oldest()?);
         let mut go = "oldest";
         // A result of hundreds of thousands of pages is not a mailbox: stop before it is a loop.
         for _ in 0..5_000 {
@@ -684,17 +722,62 @@ impl Pass<'_> {
             }
             let newest_page = v.pointer("/page/from").and_then(Value::as_u64).is_some_and(|from| from <= 1);
             self.gmail_page(rows, held)?;
+            let look = self.since_look >= BOUNCE_EVERY;
+            if look {
+                self.look_for_bounce()?;
+            }
             if newest_page {
                 break;
             }
-            go = "newer";
+            if look {
+                // The look left the search: ask it again and walk from the oldest page. What the pages
+                // already decided is skipped, so nothing is read twice as a message or sent twice.
+                self.search()?;
+                first = Some(self.gmail_oldest()?);
+                self.walk.clear();
+                go = "oldest";
+            } else {
+                go = "newer";
+            }
         }
         Ok(())
     }
 
+    /// Opens the Inbox and reads it for a non-delivery report of this batch (`bounce.js`). A report ends the
+    /// pass as the first send failure does; a list that cannot be read ends it with a fixed word.
+    fn look_for_bounce(&mut self) -> Step<()> {
+        let Some(batch) = &self.batch else { return Err(INBOX_UNREADABLE) };
+        let args = json!({
+            "address": self.job.knowlu_address, "nonce": batch.nonce, "since": batch.opened, "wait_ms": BOUNCE_WAIT_MS,
+        });
+        self.mb.open(Place::Inbox).map_err(refused)?;
+        let v = self.mb.script(&self.path("bounce.js"), &args).map_err(refused)?;
+        match v.get("result").and_then(Value::as_str) {
+            Some("ok") => {
+                self.since_look = 0;
+                Ok(())
+            }
+            Some("refused") => {
+                self.since_look = 0;
+                Err(self.refusal())
+            }
+            _ => Err(INBOX_UNREADABLE),
+        }
+    }
+
     fn gmail_page(&mut self, rows: Vec<Row>, held: &Held) -> Step<()> {
         let mut cands = Vec::new();
+        let mut decided = Vec::new();
         for row in rows {
+            // A row an earlier walk of this pass decided (the walk starts over after an Inbox look) is skipped
+            // whole: no count, no conversation read, no forward. Each of two rows that read alike counts once.
+            let key = (row.sender.clone(), row.subject.clone(), row.received.clone());
+            let met = self.walk.entry(key.clone()).or_default();
+            *met += 1;
+            if *met <= self.decided.get(&key).copied().unwrap_or(0) {
+                continue;
+            }
+            decided.push(key);
             let Some(at) = row.at else {
                 self.out.left += 1;
                 self.out.handled += 1;
@@ -728,7 +811,11 @@ impl Pass<'_> {
             self.out.handled += u32::from(done);
         }
         self.tick()?;
-        self.send_gmail(cands)
+        self.send_gmail(cands)?;
+        for key in decided {
+            *self.decided.entry(key).or_default() += 1;
+        }
+        Ok(())
     }
 
     /// Opens a conversation row and fingerprints every message in the window (Quinn 2026-10-02). A later
@@ -823,7 +910,9 @@ impl Pass<'_> {
         let control = v.get("control").and_then(Value::as_str);
         match (v.get("result").and_then(Value::as_str), reason, control) {
             (Some("ok"), _, _) => {
-                self.out.sent += count(&v, "count").unwrap_or(rows.len() as u32);
+                let sent = count(&v, "count").unwrap_or(rows.len() as u32);
+                self.out.sent += sent;
+                self.since_look += sent;
                 self.out.handled += rows.len() as u32;
             }
             (Some("refused"), _, _) => return Err(self.refusal()),
@@ -850,8 +939,16 @@ impl Pass<'_> {
         Ok(())
     }
 
-    /// Closes the batch with the count sent, then deletes the Sent copies this pass made.
+    /// Closes the batch with the count sent, then deletes the Sent copies this pass made. A Gmail pass that
+    /// sent anything since its last look looks in the Inbox first, before either: Gmail may thread a report
+    /// with the Sent copy the cleanup trashes. A report there ends a pass that did not stop as `Paused`; a
+    /// look that fails leaves the pass's stop as it was.
     fn finish(&mut self) {
+        if self.job.provider == Provider::Gmail && self.since_look > 0 && !matches!(self.out.stop, Stop::Paused(_)) {
+            if let Err(stop @ Stop::Paused(_)) = self.look_for_bounce() {
+                self.out.stop = stop;
+            }
+        }
         let Some(batch) = self.batch.take() else { return };
         self.out.closed = self.client.batch_sent(&batch.id, self.out.sent).is_ok();
         if self.attempts == 0 || self.mb.open(Place::Sent).is_err() {

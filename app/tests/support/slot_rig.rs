@@ -280,6 +280,8 @@ impl Mailbox for FakeHost {
             }
             "gmail/forward.js" => json!({ "result": "ok", "sent": true, "count": args["rows"].as_array().map_or(1, |r| r.len()) }),
             "m365/sent_cleanup.js" | "gmail/sent_cleanup.js" => json!({ "result": "ok", "deleted": 1 }),
+            // Gmail looks in the Inbox for a non-delivery report between sends and once at the end.
+            "gmail/bounce.js" => json!({ "result": "ok", "rows": 0 }),
             "ready.js" => json!("complete"),
             other => panic!("the mail step ran {other}"),
         })

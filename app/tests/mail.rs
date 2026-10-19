@@ -700,6 +700,10 @@ struct Fake {
     oldest_walk: Option<usize>,
     /// Gmail: every forward's attachments fail to upload.
     attach_fails: Option<&'static str>,
+    /// Gmail: the Inbox holds a non-delivery report for the batch once this many forwards have run.
+    bounce_after: Option<usize>,
+    /// Gmail: the Inbox draws no list (`bounce.js` says `not found`).
+    inbox_unreadable: bool,
 }
 
 fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
@@ -721,6 +725,8 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         cleaned: Cell::new(0),
         oldest_walk: None,
         attach_fails: None,
+        bounce_after: None,
+        inbox_unreadable: false,
     }
 }
 
@@ -895,6 +901,20 @@ impl Mailbox for Fake {
                     return Ok(json!({ "result": "failed", "reason": "attachments do not match the rows" }));
                 }
                 json!({ "result": "ok", "sent": true, "count": want })
+            }
+            "bounce.js" => {
+                assert!(!m365, "only Gmail looks in the Inbox");
+                assert_eq!(self.places.borrow().last(), Some(&Place::Inbox), "the Inbox is open for the look");
+                assert_eq!((args["address"].as_str(), args["nonce"].as_str()), (Some(KNOWLU), Some(NONCE)));
+                assert!(args["since"].as_str().is_some_and(|s| s.parse::<jiff::Timestamp>().is_ok()), "{args}");
+                assert!(args["wait_ms"].as_u64().is_some_and(|w| w > 0), "{args}");
+                if self.inbox_unreadable {
+                    json!({ "result": "not found", "control": "inbox" })
+                } else if self.bounce_after.is_some_and(|k| self.forwards.borrow().len() >= k) {
+                    json!({ "result": "refused", "reason": "non-delivery report" })
+                } else {
+                    json!({ "result": "ok", "rows": 7 })
+                }
             }
             "sent_cleanup.js" => {
                 assert_eq!(self.places.borrow().last(), Some(&Place::Sent), "Sent is open for the cleanup");
@@ -1391,6 +1411,195 @@ fn a_gmail_attachment_still_uploading_at_the_bound_stops_the_pass_with_its_own_w
     assert_eq!(mb.forwards.borrow().len(), 1, "one forward was tried, and none after it");
 }
 
+// ---- Gmail: the Inbox look for a non-delivery report (Quinn's ruling 2026-10-19, option b) ---------------
+//
+// Spec 4.2 step 5 and risk 15 stop at the first non-delivery report, and a bounce lands in the Inbox, which a
+// search page does not list. The Gmail pass opens the Inbox every 25 sends and once more at its end, and the
+// walk it interrupted starts again with the rows it has decided skipped.
+
+fn gmail_backfill() -> Job<'static> {
+    job(Provider::Gmail, Phase::Backfill, backfill_window(NOW.div_euclid(DAY) - 5, NOW), None)
+}
+
+/// The scripts and places the routine used, in order ("open Inbox" is a place).
+fn steps(mb: &Fake) -> Vec<String> {
+    mb.log.borrow().iter().map(|(n, _)| n.clone()).collect()
+}
+
+/// How many originals had been forwarded when each look at the Inbox ran.
+fn sent_at_each_look(mb: &Fake) -> Vec<usize> {
+    let (mut sent, mut looks) = (0, Vec::new());
+    for (name, args) in mb.log.borrow().iter() {
+        if name.ends_with("forward.js") {
+            sent += row_texts(args).len();
+        } else if name.ends_with("bounce.js") {
+            looks.push(sent);
+        }
+    }
+    looks
+}
+
+#[test]
+fn a_gmail_backfill_looks_in_the_inbox_every_25_sends_and_walks_again_without_sending_twice() {
+    let since = window(NOW, None, None).since;
+    let svc = holding(&[]);
+    let mut mb = fake(Provider::Gmail, unheld(60));
+    mb.size = 10;
+    let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &gmail_backfill());
+    assert_eq!(out.stop, Stop::Done);
+    assert_eq!((out.expected, out.handled, out.held, out.sent, out.left), (60, 60, 0, 60, 0));
+    // Every row went once, oldest first, whatever the walks that read it.
+    let want: Vec<String> = (0..60).map(|i| received(since + 3_600 + i * 600)).collect();
+    assert_eq!(mb.forwarded(), want);
+    // The first page to bring the sends to 25 (the third, 30 sent) is looked in after, and so is the last.
+    assert_eq!(sent_at_each_look(&mb), [30, 60]);
+    assert_eq!(*mb.places.borrow(), [Place::Inbox, Place::Inbox, Place::Inbox, Place::Sent]);
+    let names = steps(&mb);
+    let first = names.iter().position(|n| n.ends_with("bounce.js")).unwrap();
+    assert_eq!((names[first - 1].as_str(), names[first + 1].as_str()), ("open Inbox", "gmail/search.js"));
+    // The look is told the batch it is about: the address, the nonce and when the batch opened.
+    let looks = mb.calls("bounce.js");
+    assert_eq!(looks[0]["since"], json!(iso(NOW)));
+    // The search is asked again with the same words and walked from the oldest page; page 6 is the newest,
+    // so no walk follows the look that comes after it. The first three pages are read again but not judged.
+    let searches = mb.calls("search.js");
+    assert_eq!(searches.len(), 2);
+    assert_eq!(searches[0], searches[1]);
+    let go: Vec<_> = mb.calls("list.js").iter().map(|a| a["go"].as_str().unwrap().to_string()).collect();
+    assert_eq!(go, ["oldest", "newer", "newer", "oldest", "newer", "newer", "newer", "newer", "newer"]);
+    assert_eq!(mb.calls("forward.js").len(), 6, "six pages of ten, each sent once");
+    // The batch's expected stays the first search's count, and it closes with what was sent.
+    let open: Value = serde_json::from_str(&seen(&svc).iter().find(|(_, p, _)| p == "/batches").unwrap().2).unwrap();
+    assert_eq!(open["expected"], 60);
+    assert!(out.closed && seen(&svc).iter().any(|(_, p, b)| p.ends_with("/sent") && b == r#"{"sent":60}"#));
+}
+
+#[test]
+fn a_report_found_at_the_look_stops_the_pass_as_paused_with_nothing_sent_after_it() {
+    let svc = holding(&[]);
+    let mut mb = fake(Provider::Gmail, unheld(60));
+    mb.size = 10;
+    mb.bounce_after = Some(3);
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&mb, &svc, &mut r, &gmail_backfill());
+    assert_eq!(out.stop, Stop::Paused(Paused::new(Provider::Gmail)));
+    assert_eq!((out.sent, mb.forwards.borrow().len()), (30, 3));
+    assert!(r.is_paused(), "nothing sends again until the next UTC day");
+    // The look was the pass's last act on the mailbox before the Sent cleanup: no walk, no forward after it.
+    let names = steps(&mb);
+    let at = names.iter().position(|n| n.ends_with("bounce.js")).unwrap();
+    assert!(names[at..].iter().all(|n| !n.ends_with("forward.js") && !n.ends_with("search.js") && !n.ends_with("list.js")), "{names:?}");
+    assert_eq!(mb.calls("bounce.js").len(), 1, "a look that found the report is not repeated at the end");
+    assert!(out.closed, "the batch is closed with the count sent");
+    // And a second pass the same day sends nothing.
+    let again = pass(&mb, &svc, &mut r, &gmail_backfill());
+    assert_eq!((again.stop, mb.forwards.borrow().len()), (Stop::Paused(Paused::new(Provider::Gmail)), 3));
+}
+
+#[test]
+fn a_final_look_runs_before_the_batch_closes_and_a_report_there_turns_done_into_paused() {
+    // Twelve sends: under 25, so no look between pages; the one at the end is before the Sent cleanup.
+    let svc = holding(&[]);
+    let mut mb = fake(Provider::Gmail, unheld(12));
+    mb.size = 10;
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&mb, &svc, &mut r, &gmail_backfill());
+    assert_eq!((out.stop.clone(), out.sent, out.closed), (Stop::Done, 12, true));
+    assert_eq!(sent_at_each_look(&mb), [12]);
+    let names = steps(&mb);
+    let at = |n: &str| names.iter().position(|x| x.ends_with(n)).unwrap();
+    assert!(at("bounce.js") > names.iter().rposition(|n| n.ends_with("forward.js")).unwrap());
+    assert!(at("bounce.js") < at("open Sent") && at("open Sent") < at("sent_cleanup.js"), "{names:?}");
+    assert!(!r.is_paused());
+    // A report there: the pass ends as Paused, the routine pauses, and the batch is still closed and cleaned.
+    let mut found = fake(Provider::Gmail, unheld(12));
+    found.size = 10;
+    found.bounce_after = Some(2);
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&found, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop.clone(), out.sent, out.closed), (Stop::Paused(Paused::new(Provider::Gmail)), 12, true));
+    assert!(r.is_paused() && out.cleaned > 0, "{out:?}");
+    // A look that cannot read the Inbox at the end leaves the pass's stop as it was.
+    let mut blind = fake(Provider::Gmail, unheld(12));
+    blind.size = 10;
+    blind.inbox_unreadable = true;
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&blind, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop.clone(), out.sent, out.closed), (Stop::Done, 12, true));
+    assert!(!r.is_paused() && out.cleaned > 0, "{out:?}");
+}
+
+#[test]
+fn no_look_is_made_on_a_gmail_pass_that_sent_nothing() {
+    let msgs = unheld(30);
+    let held: Vec<(&str, &str, i64)> = msgs.iter().map(|m| (m.sender.as_str(), m.subject.as_str(), m.at)).collect();
+    let svc = holding(&held);
+    let mut mb = fake(Provider::Gmail, msgs.clone());
+    mb.size = 10;
+    let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &gmail_backfill());
+    assert_eq!((out.stop, out.held, out.sent), (Stop::Done, 30, 0));
+    assert!(mb.calls("bounce.js").is_empty());
+    assert_eq!(*mb.places.borrow(), [Place::Inbox], "the Inbox was opened once, for the search");
+    // Microsoft 365 never looks: it has no scripts for it, and the fake would stop the test.
+    let m365 = fake(Provider::M365, unheld(30));
+    let out = pass(&m365, &holding(&[]), &mut routine(Provider::M365), &job(Provider::M365, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
+    assert_eq!((out.stop, out.sent), (Stop::Done, 30));
+    assert!(m365.calls("bounce.js").is_empty());
+}
+
+#[test]
+fn an_inbox_that_will_not_read_stops_the_gmail_pass_with_a_fixed_word() {
+    let svc = holding(&[]);
+    let mut mb = fake(Provider::Gmail, unheld(60));
+    mb.size = 10;
+    mb.inbox_unreadable = true;
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&mb, &svc, &mut r, &gmail_backfill());
+    assert_eq!(out.stop, Stop::Script("the inbox could not be read"));
+    assert_eq!((out.sent, mb.forwards.borrow().len()), (30, 3), "nothing was sent after the look that failed");
+    assert!(!r.is_paused(), "an unreadable Inbox is not a report");
+    assert!(out.closed);
+}
+
+#[test]
+fn a_row_the_pass_left_is_not_tried_again_when_the_walk_starts_over() {
+    // A conversation whose attachments do not match is left on the first page. The walk that starts over after
+    // the look reads that page again: the conversation is not opened and not forwarded a second time.
+    let since = window(NOW, None, None).since;
+    let mut convo = mail(ANA, "Group project", since + 1_800);
+    convo.count = Some(2);
+    convo.convo = vec![(ANA.to_string(), since + 1_000), (ANA.to_string(), since + 1_800)];
+    let mut msgs = unheld(34);
+    msgs.push(convo);
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.size = 10;
+    mb.mismatch = true;
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &gmail_backfill());
+    assert_eq!(out.stop, Stop::Done);
+    assert_eq!((out.expected, out.handled, out.sent, out.left), (35, 35, 34, 1));
+    assert_eq!(mb.calls("search.js").len(), 2, "the walk did start over");
+    let tried = |subject: &str| mb.forwards.borrow().iter().flat_map(|(_, a)| a["rows"].as_array().unwrap().clone()).filter(|r| r["subject"] == subject).count();
+    assert_eq!((tried("Group project"), mb.calls("thread.js").len()), (1, 1));
+    let singles = mb.forwarded().into_iter().filter(|t| *t != received(since + 1_800)).count();
+    assert_eq!(singles, 34, "each single message went once");
+}
+
+#[test]
+fn two_rows_that_read_alike_on_different_pages_are_both_judged() {
+    // The rows a re-walk skips are keyed by what list.js reads (sender, subject, time), and two messages can
+    // read the same: both are sent, and the walk that starts over sends neither again.
+    let since = window(NOW, None, None).since;
+    let mut msgs = unheld(30);
+    // "Notice 9" is the tenth row, last on the first page; its twin is first on the second.
+    let at = since + 3_600 + 9 * 600;
+    msgs.push(mail(ANA, "Notice 9", at));
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.size = 10;
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &gmail_backfill());
+    assert_eq!((out.stop, out.sent, out.handled, out.expected), (Stop::Done, 31, 31, 31));
+    assert_eq!(mb.forwarded().iter().filter(|t| **t == received(at)).count(), 2);
+}
+
 #[test]
 fn a_guided_mailbox_runs_nothing() {
     let mb = fake(Provider::Guided, vec![]);
@@ -1531,6 +1740,8 @@ impl Mailbox for SHost {
                 json!({ "result": "ok", "sent": true, "count": n })
             }
             "m365/sent_cleanup.js" | "gmail/sent_cleanup.js" => json!({ "result": "ok", "deleted": 1 }),
+            // Gmail looks in the Inbox for a non-delivery report between sends and once at the end.
+            "gmail/bounce.js" => json!({ "result": "ok", "rows": 0 }),
             "m365/forwarding_off.js" | "gmail/forwarding_off.js" => json!({ "result": "ok", "forwarding": "off", "changed": true }),
             "gmail/forwarding_remove_address.js" => json!({ "result": "ok", "removed": true, "changed": true }),
             other => panic!("the runner ran {other}"),
