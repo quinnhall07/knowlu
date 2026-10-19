@@ -378,8 +378,9 @@ fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i
 // ---- resuming at launch (§4.11) ------------------------------------------------------------------
 
 /// A resumed mailbox: opens its kept profile hidden, checks it is signed in and drives its backfill.
-/// `Err` is the line for the run: a fixed word or a service error's name.
-fn resume_one(data_dir: &Path, id: &str, env: &Env, sh: &Shared) -> Result<(), &'static str> {
+/// `Ok(false)` is a mailbox skipped because its backfill is held for C3 (nothing ran); `Err` is the line for the
+/// run: a fixed word or a service error's name.
+fn resume_one(data_dir: &Path, id: &str, env: &Env, sh: &Shared) -> Result<bool, &'static str> {
     let rows = env.client.list_addresses().map_err(|e| e.name())?;
     let row = rows.iter().find(|r| r["address_id"].as_str() == Some(id)).ok_or("no such mailbox")?;
     let provider = Provider::from_service(row["provider"].as_str().unwrap_or(""));
@@ -388,7 +389,7 @@ fn resume_one(data_dir: &Path, id: &str, env: &Env, sh: &Shared) -> Result<(), &
     // and its marker left in `mail.json` for C3 to resume. The guided word is the one a mailbox set up by hand
     // gets.
     if backfill_held_for_c3(provider) {
-        return Ok(());
+        return Ok(false);
     }
     if provider == Provider::Guided {
         return Err("this mailbox is set up by hand");
@@ -427,27 +428,40 @@ fn resume_one(data_dir: &Path, id: &str, env: &Env, sh: &Shared) -> Result<(), &
     let end = drive_backfill(&d, &mut routine);
     env.host.close_window();
     match end {
-        Drove::Done => Ok(()),
+        Drove::Done => Ok(true),
         Drove::Stopped => Err("stopped"),
         Drove::Failed(word) => Err(word),
     }
 }
 
-/// The resume's run: each open mailbox in turn, then the run's closing line.
+/// The resume's run: each open mailbox in turn, then the run's closing line. A run whose every mailbox was
+/// skipped as held for C3 ran nothing: it ends with no outcome, no line and no row (review round 2 of e7ae803),
+/// as a launch that picks none starts no run ([`launch_resumable`]).
 pub(super) fn run_resume(data_dir: &Path, ids: &[String], env: &Env, sh: &Shared) {
     sh.update(|p| {
         p.rows = vec![Row { step: "backfill", state: "working", reason: None, guided: false }];
         p.sentence = "bringing in your mail";
     });
     let mut first: Option<&'static str> = None;
+    let mut ran = false;
     for id in ids {
         if sh.stopping() {
             first.get_or_insert("stopped");
             break;
         }
-        if let Err(line) = resume_one(data_dir, id, env, sh) {
-            first.get_or_insert(line);
+        match resume_one(data_dir, id, env, sh) {
+            Ok(r) => ran |= r,
+            Err(line) => {
+                first.get_or_insert(line);
+            }
         }
+    }
+    if !ran && first.is_none() {
+        sh.update(|p| {
+            p.rows.clear();
+            p.sentence = "";
+        });
+        return;
     }
     sh.update(|p| {
         if let Some(r) = p.rows.first_mut() {

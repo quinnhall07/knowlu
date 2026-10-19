@@ -3993,6 +3993,20 @@ fn a_launch_skips_a_microsoft_open_backfill_silently_and_leaves_its_marker_for_c
 }
 
 #[test]
+fn a_resume_whose_every_mailbox_is_held_for_c3_never_says_the_backfill_finished() {
+    // Review round 2 of e7ae803, #3: a launch that kept a Microsoft 365 id because the service could not be asked,
+    // whose resume then listed it and skipped it, ended "finished" / "backfill finished" though nothing ran. A
+    // resume that only skipped ends with no outcome and no line, and shows no backfill row.
+    let r = open_backfill_rig("d13-resume-all-held", 2);
+    r.sv.lock().unwrap().provider = "m365".into();
+    let shared = r.setups.start_resume(r.dir.clone(), vec![A.to_string()], r.env()).expect("a resume started");
+    let p = wait(&shared);
+    assert_eq!((p.ended, p.line), (None, None));
+    assert!(p.rows.is_empty(), "{:?}", p.rows);
+    assert_eq!(open_backfills(&r.dir), [A], "left open so C3 can resume it");
+}
+
+#[test]
 fn a_microsoft_setup_whose_forwarding_worked_ends_as_a_success_not_a_stop() {
     // Quinn 2026-10-19 (the M365 copy ruling): the guided backfill is held for C3, and ending there by hand
     // is the designed end. Forwarding is set and the canary arrived, so the line says so and the state is
