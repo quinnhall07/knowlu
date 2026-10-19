@@ -1698,9 +1698,20 @@ comment (P5).
 - `a_pdf_attachment_is_ignored` (4)
 - `an_unaligned_backfilled_original_is_kept_unaligned` (4)
 - `the_confirmation_is_completed_by_a_cookieless_get_and_post_to_a_local_fake` (5)
-- `a_confirmation_redirect_is_refused` (5)
-- `a_redirect_after_the_post_is_refused_and_named` (5): a 3xx answer to the form's POST is not followed,
-  is refused, and logs `post_redirect`, never the page's `redirect` (T2g.2 review, ruling 4)
+- `a_confirmation_redirect_past_three_hops_is_refused_and_each_hop_is_logged` (5): three on-list hops
+  are followed, each cookie-less; the fourth is refused as `redirect` and nothing is posted; each hop
+  logs its host and path, never its query or the `vf-` code
+- `a_confirmation_redirect_to_the_sign_in_page_is_refused_off_list` (5): a hop off the allow-list is
+  refused as `redirect_off_list`
+- `a_post_redirect_get_to_an_on_list_page_completes_the_confirmation` (5): a 3xx answer to the form's
+  POST is Google's Post/Redirect/Get, followed by one body-less, cookie-less GET inside the same budget of
+  three hops, and that page's 2xx completes the confirmation. Only an off-list or over-budget redirect
+  after the POST is refused, as `post_redirect`, never the page's `redirect` (`confirm_test.ts`:
+  `a_post_answered_302_off_list_reads_post_redirect`, `the_three_hops_are_one_budget_across_the_page_and_the_post`)
+  *(2026-10-19: renamed to match the build. These were `a_confirmation_redirect_is_refused` and
+  `a_redirect_after_the_post_is_refused_and_named`, under the rule then in force: any redirect refused,
+  and a 3xx after the POST not followed (T2g.2 review, ruling 4). Quinn's R2 (2026-10-18, spec §4.6
+  step 5's amendment) replaced that rule with the three on-list hops above.)*
 - `a_form_action_off_the_allow_list_is_refused` (5)
 - `a_canary_marks_arrived_and_records_forward_hint` (6)
 - `a_replayed_canary_changes_nothing` (6)
@@ -2653,6 +2664,18 @@ controller's (spec T18; HANDOFF §2's controller rules).
   is true for both; (2) what "Forward as attachment" attaches for a conversation row (every message or
   the newest), and whether `forward.js` then refuses; (3) that the pager's total is a conversation count.
   Backfill on Gmail is not called proven until this gate has a recorded result.
+  *Result (2026-10-19; live on a founder-owned mailbox, structure only, and Quinn's hand check):*
+  (1) a conversation row shows its message count as `span.bx0` digits, with no parentheses, and reads
+  `thread: true`; (2) "Forward as attachment" on a two-message conversation attached one `.eml` after the
+  full upload wait, so `forward.js` refused (attached 1, expected 2) and the conversation was left. Quinn's
+  hand check settled what that one file is: **Gmail attaches only the newest message of a
+  conversation.** So a conversation of two or more messages is never forwarded: the refusal-and-leave
+  stands, and the older messages in a conversation stay left (counted, never named, never retried). The
+  live backfill showed exactly that: every single-message row was sent, and the rows left were the
+  conversation rows. (3) The pager's total is a conversation count, read exact only on the last page
+  (earlier pages read "of many"). T11.2's test stays as built. This also corrects §5's T11.2 note (4a),
+  "Gmail attaches every message": it does not, so a student's own reply in a conversation is never put on
+  the wire this way.
   **Gate, Gmail own replies** (T11.2 review): `thread.js` flags a message the signed-in account sent
   (`own: true`) by the address in the account chip's label ("Google Account: <name> (<address>)"); the
   routine never judges such a message missing. On the scratch Gmail mailbox, with a conversation the
@@ -2661,7 +2684,8 @@ controller's (spec T18; HANDOFF §2's controller rules).
   also from a send-as alias (an alias is not recognised and would read as received: if it matters,
   Quinn's call); (3) that "Forward as attachment" on such a conversation attaches the reply too, which
   puts the student's own mail on the wire (see QUINN below).
-  **Gate, Gmail non-delivery report between sends** (T11.2 review; **QUINN's ruling pending**): spec §4.2
+  **Gate, Gmail non-delivery report between sends** (T11.2 review; **ruled (b), Quinn, 2026-10-19**,
+  pending until then): spec §4.2
   step 5 and risk 15 stop at the first non-delivery report, and T10.3b's note (4) said the routine would
   look at the Inbox between sends. T11.2 does not (`forward.js` cannot probe an Inbox: it reads the page
   it is given), so a bounce is seen only on the next pass's pages and by the canary, and a backfill could
@@ -2669,10 +2693,51 @@ controller's (spec T18; HANDOFF §2's controller rules).
   live bounce (rotate the address, send one forward, see where the report lands and whether a
   nonce-bearing row exists), or (b) the routine opens `Place::Inbox` every N sends and stops on a row
   carrying the batch nonce and a delivery-failure phrase (a new `gmail/bounce.js`, then `refusal()`).
+  *Ruled 2026-10-19 (Quinn): (b), with N = 25.* Built in `101224b` and `9729d96`, with review fixes in
+  `dfae851` and `afe8290`. After the forward that brings the originals sent since the last look to 25 or
+  more (`recover.rs` `BOUNCE_EVERY`), the pass opens `Place::Inbox` and runs `gmail/bounce.js`. It looks
+  once more in `finish()`, before the batch closes and Sent is cleaned, if anything was sent since the last
+  look. A report stops the pass as the first send failure does (`refusal()`, nothing sent again until the
+  next UTC day). A look leaves the search, so the walk starts over in a freshly loaded Inbox (`86af779`,
+  `22c570c`) and skips the rows it already decided. `bounce.js` reads every shown grid, and only at
+  `#inbox`; anywhere else it answers `not found` and the pass ends "the inbox could not be read". Live on
+  2026-10-19 the look ran after 25 sends and read the Inbox clean.
+  **The built match is wider than (b) as worded.** A row is a report of ours when it holds a
+  delivery-failure phrase and either (i) the batch's nonce, or (ii) the mailbox's Knowlu address, with a
+  row time at or after `since` (to the minute). `since` is the mailbox's `last_look`: the time of its last
+  look that read the Inbox, clean or refused, kept per address in `mail.json` so that it carries across
+  slots and days. With none saved, `since` is the batch's opening less 24 hours
+  (`BOUNCE_FIRST_LOOKBACK_SECS`). (ii) catches a report that quotes no subject; (b) named only (i).
+  Known behaviour, from the review of the look (2026-10-19):
+  - A quiet mailbox keeps an old `last_look`, so the first look of a later pass may read a long way
+    back. A report found there that names the Knowlu address pauses that pass once (until the next UTC
+    day); the look that read it moves `last_look` on, so it is not counted again.
+  - After an upgrade from a build that kept no `last_look` (a `mail.json` written before the field reads
+    as none), the first look reaches back 24 hours before its batch opened. A report that an earlier
+    build already counted and paused on can then be counted once more: one more paused day. (Read from
+    `mail_session.rs`'s `last_look` and `recover.rs`'s `BOUNCE_FIRST_LOOKBACK_SECS`, not from a ledger
+    row.)
+  **Stranded Sent copies** (Quinn, 2026-10-19: "I delete them"). Earlier proof passes left about 200
+  forward copies in Sent, because `sent_cleanup.js` looked for Delete before ticking a row and deleted
+  none (fixed in `4ea8228`, `8acf944` and `26dcf7a`). Done 2026-10-19: the controller ran the app's
+  `sent_cleanup.js` in the held window, one batch token at a time, and moved **154 copies to Trash**. The
+  call after that refused, because the top Sent row was not a Knowlu copy. The few Knowlu-subject
+  messages left in Sent are older founder test messages, not batch copies, and were left alone.
+  **Gmail daily pace** (Quinn, 2026-10-19: "Keep 600"). The Gmail backfill keeps the spec's 600
+  originals a mailbox per UTC day. The controller had recommended 150, since 600 is above a consumer
+  Gmail account's daily send limit of about 500 recipients. The "Temporary Error" Quinn's Gmail showed
+  that day proved local to their browser profile (Gmail worked in a private window), not an account
+  lock. Before the next live Gmail run a page-press budget goes into the build (ruled 2026-10-19),
+  since nothing yet bounds the page presses one pass makes.
   - Step 4's checklist names **"POST answered 3xx"**: if `mail-inbound` logs `gmail confirmation
     refused (post_redirect)`, Google answered the confirm POST with a Post/Redirect/Get. The server-side
     confirm refuses that today, since §4.6 step 5 rules only on the page's redirect. Quinn decides from
     the proof whether a 3xx after the POST counts as completion; changing it is a `cloud-engineer` task.
+    *(Ruled 2026-10-18, Quinn, R2: the live confirmation's link answered with a 3xx, so on-list hops are
+    followed, at most three across the page and the POST together, and a POST's on-list
+    Post/Redirect/Get completes. Built and deployed to staging; the next live run's confirmation
+    completed through the redirect. `post_redirect` now names only an off-list or over-budget redirect
+    after the POST. See T2g.2's tests.)*
 - **T18d. The PR.** CI green and Quinn's word to merge; the merge carries H0. No release is tagged
   before privacy bump #1 (D18). The controller's HANDOFF milestone update follows.
 
