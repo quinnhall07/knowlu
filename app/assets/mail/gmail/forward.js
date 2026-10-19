@@ -35,8 +35,9 @@
 // pointermove, mousemove, then the press); Send and Discard are pressed the same way. An attachment chip is
 // a `div.dL`: "Uploading of attachment: <name>" while it uploads (waited for, inside `upload_ms`), "Uploading
 // of attachment: <name> failed. Press enter to retry" when the upload failed ("attachment failed": the
-// draft is discarded; so is a chip still uploading when `upload_ms` runs out), and "Attachment: <name>" when attached, its own text "<name>.eml (6K)" with the size
-// a leaf inside it: the size is read after the name, never from it (a subject may hold "(3)").
+// draft is discarded; so is a chip still uploading when `upload_ms` runs out), and "Attachment: <name>"
+// when attached, its own text "<name>.eml (6K)" with the size a leaf inside it: the size is read after the
+// name, never from it (a subject may hold "(3)").
 const text = (el) => (el.textContent || "").replace(/\s+/g, " ").trim();
 const nameOf = (el) => (el.getAttribute("aria-label") || el.getAttribute("data-tooltip") || "").trim();
 // Shown: live, a hidden view's elements have no offsetParent.
@@ -216,7 +217,7 @@ await until(() => uploadFailed() || (!uploading() && attached().length >= expect
 if (uploadFailed() || uploading()) return await bail({ result: "failed", reason: "attachment failed" });
 
 const attachments = attached();
-if (attachments.length === 0 && !uploading()) return await bail({ result: "failed", reason: "no attachment" });
+if (attachments.length === 0) return await bail({ result: "failed", reason: "no attachment" });
 if (attachments.length !== expected) {
   return await bail({
     result: "failed",
