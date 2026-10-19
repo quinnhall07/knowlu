@@ -1286,7 +1286,7 @@ impl Pass<'_> {
                     while got < n {
                         got += self.reserve(n - got)?;
                     }
-                    self.forward_gmail(vec![r], Some(n))?;
+                    self.forward_taken(vec![r], Some(n), n)?;
                     if self.restart {
                         return Ok(());
                     }
@@ -1299,13 +1299,24 @@ impl Pass<'_> {
     fn flush(&mut self, group: &mut Vec<Row>) -> Step<()> {
         while !group.is_empty() {
             let want = u32::try_from(group.len()).unwrap_or(u32::MAX).min(self.room()?);
-            let k = self.reserve(want)? as usize;
-            let rows: Vec<Row> = group.drain(..k).collect();
-            self.forward_gmail(rows, None)?;
+            let k = self.reserve(want)?;
+            let rows: Vec<Row> = group.drain(..k as usize).collect();
+            self.forward_taken(rows, None, k)?;
             if self.restart {
                 return Ok(());
             }
         }
+        Ok(())
+    }
+
+    /// Forwards `rows` for which `taken` of the day's originals were reserved, and gives back to the day those
+    /// that did not go: a row left with nothing sent (a conversation one short under G1, too big alone, gone, or a
+    /// lone row that will not attach) used none (review round 2 of e7ae803). A send that stops the pass keeps them:
+    /// it may have gone ("send did not settle").
+    fn forward_taken(&mut self, rows: Vec<Row>, messages: Option<u32>, taken: u32) -> Step<()> {
+        let (before, day) = (self.out.sent, self.routine.day());
+        self.forward_gmail(rows, messages)?;
+        self.routine.unsent(taken.saturating_sub(self.out.sent - before), day);
         Ok(())
     }
 

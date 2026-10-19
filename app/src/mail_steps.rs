@@ -556,6 +556,14 @@ impl Routine {
         self.recent.push_back(now);
     }
 
+    /// `n` originals taken on UTC day `day` for rows that were left with nothing sent: given back to that day's
+    /// count (a later day's is never touched). The minute's pace keeps them: only the day's count is given back.
+    pub fn unsent(&mut self, n: u32, day: i64) {
+        if day == self.day {
+            self.sent_today = self.sent_today.saturating_sub(n);
+        }
+    }
+
     /// The first non-delivery report or send failure: nothing sends again until the next UTC day.
     pub fn send_failed(&mut self, now: i64) {
         self.roll(now);

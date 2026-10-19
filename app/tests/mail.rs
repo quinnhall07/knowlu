@@ -1500,6 +1500,25 @@ fn missing_gmail_conversations_side_by_side_at_the_walks_end_are_each_left_and_t
 }
 
 #[test]
+fn a_conversation_left_at_once_gives_its_originals_back_to_the_day() {
+    // Review round 2 of e7ae803, #5: a conversation took its messages from the day's 1,500 originals before its send,
+    // and under G1 it is always left, so 200 four-message conversations used 800 of the day on rows that sent
+    // nothing. A row left with nothing sent gives back what it took; what went still counts.
+    for single in [false, true] {
+        let mut msgs = convos(3, 4);
+        if single {
+            msgs.insert(0, mail(BO, "Lab report due", window(NOW, None, None).since + 60));
+        }
+        let mut mb = fake(Provider::Gmail, msgs);
+        mb.mismatch = true;
+        let mut r = routine(Provider::Gmail);
+        let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
+        assert_eq!((out.stop.clone(), out.sent, out.left), (Stop::Done, u32::from(single), 3), "single: {single}");
+        assert_eq!(r.sent_today(), out.sent, "single: {single}: only what went counts for the day");
+    }
+}
+
+#[test]
 fn a_conversation_of_a_held_message_and_the_students_own_reply_is_held_and_sends_nothing() {
     let since = window(NOW, None, None).since;
     let t = |h: i64| since + h * 3_600;
@@ -2408,8 +2427,9 @@ fn a_left_row_never_holds_the_frontier_back_and_a_sent_one_does() {
     let mut mb = fake(Provider::Gmail, msgs);
     mb.size = 50;
     mb.mismatch = true;
-    // 1,488 sent today: the conversation takes two of the day's originals, the singles the last ten.
-    let mut r = Routine::new(Provider::Gmail, NOW.div_euclid(DAY), 1_488);
+    // 1,490 sent today: the singles take the last ten. The conversation sent nothing, so it gives back the two it
+    // took (review round 2 of e7ae803, #5; this test started at 1,488 while it kept them).
+    let mut r = Routine::new(Provider::Gmail, NOW.div_euclid(DAY), 1_490);
     let out = pass(&mb, &holding(&[]), &mut r, &job(Provider::Gmail, Phase::Backfill, backfill_window(first, NOW), None));
     assert_eq!((out.stop, out.sent, out.left), (Stop::DayLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 10, 1));
     assert_eq!(out.frontier, Some(first + 5 - 1), "the day before the first single sent, not before the left conversation");
@@ -2421,7 +2441,8 @@ fn a_left_row_never_holds_the_frontier_back_and_a_sent_one_does() {
     let mut mb = fake(Provider::Gmail, msgs);
     mb.size = 50;
     mb.no_chip = Some("Stuck");
-    let mut r = Routine::new(Provider::Gmail, NOW.div_euclid(DAY), 1_489);
+    // The stuck row left at once gives back its original too (1,489 while it kept it).
+    let mut r = Routine::new(Provider::Gmail, NOW.div_euclid(DAY), 1_490);
     let j = Job { stuck: Some(Stuck { at: stuck_at, leave: true }), ..job(Provider::Gmail, Phase::Backfill, backfill_window(first, NOW), None) };
     let out = pass(&mb, &holding(&[]), &mut r, &j);
     assert_eq!((out.stop, out.sent, out.left), (Stop::DayLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 10, 1));
