@@ -120,6 +120,13 @@ pub struct MailState {
     /// existed lacks it and reads as none. Not written when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub lone_stall: BTreeMap<String, LoneStall>,
+    /// Each Gmail mailbox's lone rows that reached their third stalled day, by address id (review round 2 of
+    /// e7ae803): received minutes only. Each is left in every pass until the backfill closes or the mailbox is
+    /// disconnected, so `lone_stall` is free to count the next row that stalls (one record let two stuck rows
+    /// replace each other for good). A file written before it existed lacks it and reads as none. Not written
+    /// when empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub lone_left: BTreeMap<String, Vec<i64>>,
     /// Each setup in flight on this device whose address this device minted (Quinn, 2026-10-06): written
     /// once the address exists, its facts written before each act that may set them, cleared when the run
     /// ends. One left at start-up is a setup the app quit mid-run (`mail::setup::clean_unfinished`). Not
@@ -189,6 +196,7 @@ impl Default for MailState {
             last_look: BTreeMap::new(),
             backfill_frontier: BTreeMap::new(),
             lone_stall: BTreeMap::new(),
+            lone_left: BTreeMap::new(),
             pending_setups: Vec::new(),
         }
     }

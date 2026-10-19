@@ -92,13 +92,15 @@ pub(super) fn mark_open(data_dir: &Path, id: &str, open: bool) -> Result<(), Str
             // A closed backfill keeps no frontier and no lone-stall record.
             (false, false) => {
                 let frontier = s.backfill_frontier.remove(id).is_some();
-                return s.lone_stall.remove(id).is_some() || frontier;
+                let left = s.lone_left.remove(id).is_some();
+                return s.lone_stall.remove(id).is_some() || frontier || left;
             }
             _ => return false,
         }
         if !open {
             s.backfill_frontier.remove(id);
             s.lone_stall.remove(id);
+            s.lone_left.remove(id);
         }
         true
     })
@@ -182,32 +184,51 @@ const STALL_DAYS: u32 = 3;
 /// the [`STALL_DAYS`]th separate day (review of c8806b3), else only watched (a send or a hold clears it).
 pub(super) fn stuck_for(state: &MailState, id: &str, today: i64) -> Option<Stuck> {
     let r = state.lone_stall.get(id)?;
-    Some(Stuck { at: r.at, leave: r.days + u32::from(today > r.last_day) >= STALL_DAYS })
+    Some(Stuck { at: r.at, leave: leaves(r, today) })
+}
+
+/// Whether the lone row `r` counts is left at once in a pass on UTC day `today`: today makes its third day.
+fn leaves(r: &LoneStall, today: i64) -> bool {
+    r.days + u32::from(today > r.last_day) >= STALL_DAYS
+}
+
+/// The lone rows `state` keeps as left for `id` ([`Job::left`]): received minutes.
+pub(super) fn left_for(state: &MailState, id: &str) -> Vec<i64> {
+    state.lone_left.get(id).cloned().unwrap_or_default()
 }
 
 /// Keeps what a pass that ended on UTC day `today` says of a lone row in `mail.json`: a row in the watched minute
 /// sent or held drops the record; a pass that ended stalled on one lone row alone counts `today` for it once (a
 /// row in another minute starts a new record). The stall wins over a row sent or held in its own minute (review
 /// round 1 of e7ae803: a held row from the same burst must not reset the count of a pass that stalled there).
+/// A record whose row is left at once today moves to `lone_left` first, kept there until the backfill closes, so
+/// the next stuck row starts its own count and never undoes it (review round 2 of e7ae803).
 /// Best effort, like [`keep_pace`].
 pub(super) fn note_stall(data_dir: &Path, id: &str, out: &Outcome, today: i64) {
     let _ = MailState::update(data_dir, |s| {
-        let old = s.lone_stall.get(id).copied();
-        let new = match (out.stalled_at, old) {
+        let before = (s.lone_stall.get(id).copied(), s.lone_left.get(id).cloned());
+        let mut old = before.0;
+        if let Some(r) = old.filter(|r| leaves(r, today)) {
+            let left = s.lone_left.entry(id.to_string()).or_default();
+            if !left.contains(&r.at) {
+                left.push(r.at);
+            }
+            old = None;
+        }
+        // A pass that began before its row was kept as left may still stall on it: that counts for no record.
+        let stalled = out.stalled_at.filter(|at| !s.lone_left.get(id).is_some_and(|l| l.contains(at)));
+        let new = match (stalled, old) {
             (Some(at), Some(r)) if r.at == at && today > r.last_day => Some(LoneStall { at, days: r.days + 1, last_day: today }),
             (Some(at), Some(r)) if r.at == at => Some(r),
             (Some(at), _) => Some(LoneStall { at, days: 1, last_day: today }),
             (None, _) if out.stuck_cleared => None,
             (None, old) => old,
         };
-        if new == old {
-            return false;
-        }
         match new {
             Some(r) => s.lone_stall.insert(id.to_string(), r),
             None => s.lone_stall.remove(id),
         };
-        true
+        (s.lone_stall.get(id).copied(), s.lone_left.get(id).cloned()) != before
     });
 }
 
@@ -328,6 +349,7 @@ fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i
         !d.shared.stopping()
     };
     let look = |at: i64| save_look(d.data_dir, d.address_id, at);
+    let state = MailState::load(d.data_dir).ok();
     let load = |day: i64, loads: u32, messages: u32| {
         let pace = BackfillPace { day, sent_today: 0, paused_until: None, loads_today: loads, messages_today: messages };
         keep_pace(d.data_dir, d.address_id, pace, true);
@@ -343,7 +365,8 @@ fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i
         on_look: Some(&look),
         on_load: Some(&load),
         frontier: frontier(d.data_dir, d.address_id),
-        stuck: MailState::load(d.data_dir).ok().and_then(|s| stuck_for(&s, d.address_id, today)),
+        stuck: state.as_ref().and_then(|s| stuck_for(s, d.address_id, today)),
+        left: state.as_ref().map(|s| left_for(s, d.address_id)).unwrap_or_default(),
     };
     let out = run_pass(d.mb, d.client, d.clock, routine, &job);
     d.shared.update(|p| {

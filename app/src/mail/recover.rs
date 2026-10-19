@@ -60,7 +60,9 @@
 //!
 //! **A lone row that never attaches** (review of c8806b3) stalls a pass when nothing is sent around it. The
 //! caller counts the separate UTC days a pass ends stalled on it alone ([`Outcome::stalled_at`], `mail.json`'s
-//! `lone_stall`, its received minute only) and from the third passes it in [`Job::stuck`] to be left at once.
+//! `lone_stall`, its received minute only) and from the third passes it in [`Job::stuck`] to be left at once. A row
+//! that reached its third day is then kept as left (`lone_left`, [`Job::left`]) until the backfill closes, so the
+//! record counts the next stuck row (review round 2 of e7ae803).
 //!
 //! **Privacy.** No sender, subject, address, nonce or page text is kept past the pass, logged or put in a
 //! [`Stop`]; every stop is a fixed word or a service error's name.
@@ -387,6 +389,9 @@ pub struct Job<'a> {
     /// Gmail: the lone row `mail.json` names as stalling passes (review of c8806b3), by its received minute, and
     /// whether it is now left at once when it will not attach (from the third separate day).
     pub stuck: Option<Stuck>,
+    /// Gmail: the received minutes of lone rows `mail.json` keeps as left (`lone_left`, review round 2 of e7ae803):
+    /// each reached its third stalled day, and is left at once when it will not attach, as a leaving `stuck` is.
+    pub left: Vec<i64>,
 }
 
 /// A lone Gmail row that stalled passes: its received minute (unix seconds), and whether to leave it.
@@ -1315,12 +1320,14 @@ impl Pass<'_> {
     /// one with nothing sent before it waits for the next send; any other stops the pass, leaving nothing (review
     /// of fd702e6: a Gmail-wide stall must not leave every row).
     /// The lone row `mail.json` says stalled passes on two separate days before today is left at once (review of
-    /// c8806b3), and touches nothing else: it proves nothing about the page.
+    /// c8806b3), and so is one it keeps as left ([`Job::left`]); either touches nothing else: it proves nothing
+    /// about the page.
     fn lone_failed(&mut self, rows: &[Row]) -> Step<()> {
         let n = rows.len() as u32;
         let stuck = self.job.stuck.filter(|s| s.leave).map(|s| s.at);
-        if let ([row], Some(at)) = (rows, stuck) {
-            if row.at.map(minute) == Some(at) {
+        if let [row] = rows {
+            let at = row.at.map(minute);
+            if at.is_some() && (at == stuck || at.is_some_and(|m| self.job.left.contains(&m))) {
                 self.out.left += 1;
                 self.out.handled += 1;
                 self.decide(key_of(row));
@@ -1334,6 +1341,9 @@ impl Pass<'_> {
             self.waiting += n;
             self.waiting_at = rows.iter().filter_map(|r| r.at).min();
         } else {
+            // The breaker: the stall is counted on the first waiting row, as at the pass's end (review round 2 of
+            // e7ae803: returning before the minute was set left two stuck rows side by side counted on no day).
+            self.out.stalled_at = self.waiting_at.map(minute);
             return Err(STALLED);
         }
         self.sent_since_lone = false;

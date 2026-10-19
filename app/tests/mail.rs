@@ -706,6 +706,8 @@ struct Fake {
     inbox_unreadable: bool,
     /// Gmail: the single message with this subject never attaches, so any send carrying it is one short.
     no_chip: Option<&'static str>,
+    /// Gmail: the single messages with these subjects never attach either, as `no_chip`.
+    no_chips: Vec<&'static str>,
     /// Gmail: the single message with this subject's chip never finishes uploading, so any send carrying it
     /// answers "attachment still uploading" (live: one huge message).
     slow_chip: Option<&'static str>,
@@ -771,6 +773,7 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         bounce_after: None,
         inbox_unreadable: false,
         no_chip: None,
+        no_chips: Vec::new(),
         slow_chip: None,
         slow_chip_ms: None,
         stall: false,
@@ -1057,7 +1060,7 @@ impl Fake {
                     let reason = "attachments do not match the rows";
                     return Ok(json!({ "result": "failed", "reason": reason, "attached": 1, "expected": want }));
                 }
-                if self.no_chip.is_some_and(|s| rows.iter().any(|r| r["subject"] == s)) {
+                if rows.iter().any(|r| self.no_chip.is_some_and(|s| r["subject"] == s) || self.no_chips.iter().any(|s| r["subject"] == *s)) {
                     // One row whose chips never draw (a message, or a conversation's) is a compose with no
                     // attachment (forward.js checks that before the count); beside others the group is short.
                     if rows.len() == 1 {
@@ -1132,7 +1135,7 @@ fn routine(provider: Provider) -> Routine {
 }
 
 fn job(provider: Provider, phase: Phase, window: Window, cap: Option<u32>) -> Job<'static> {
-    Job { provider, address_id: A, knowlu_address: KNOWLU, phase, window, cap, watch: None, on_look: None, on_load: None, frontier: None, stuck: None }
+    Job { provider, address_id: A, knowlu_address: KNOWLU, phase, window, cap, watch: None, on_look: None, on_load: None, frontier: None, stuck: None, left: Vec::new() }
 }
 
 fn pass(fake: &Fake, svc: &Service, routine: &mut Routine, job: &Job) -> knowlu::mail::recover::Outcome {
@@ -3760,6 +3763,81 @@ fn a_held_row_in_the_stuck_minute_does_not_clear_the_record_of_a_pass_that_stall
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Two lone rows side by side that never attach, "Stuck A" and "Stuck B" a minute apart two days into a ten-day
+/// window, then `newer` unheld rows that must be sent, then the held rows of [`one_stuck_row`]. Returns the rows,
+/// the service and the two instants.
+fn two_stuck_rows(first: i64, newer: i64) -> (Vec<Mail>, Service, i64, i64) {
+    let a = (first + 2) * DAY + 3_600;
+    let others: Vec<Mail> = (0..4).map(|i| mail(BO, &format!("Held {i}"), (first + 3 + i) * DAY + 600)).collect();
+    let held: Vec<(&str, &str, i64)> = others.iter().map(|m| (m.sender.as_str(), m.subject.as_str(), m.at)).collect();
+    let svc = holding(&held);
+    let mut msgs = vec![mail(ANA, "Stuck A", a), mail(ANA, "Stuck B", a + 60)];
+    msgs.extend((0..newer).map(|i| mail(BO, &format!("New {i}"), a + 600 + i * 60)));
+    msgs.extend(others);
+    (msgs, svc, a, a + 60)
+}
+
+/// Whether a forward of `mb` carried only rows whose subject starts "New" (the newer rows, sent together).
+fn sent_the_newer_rows(mb: &Fake) -> bool {
+    mb.forwards.borrow().iter().any(|(_, a)| a["rows"].as_array().is_some_and(|r| r.iter().all(|r| r["subject"].as_str().is_some_and(|s| s.starts_with("New")))))
+}
+
+#[test]
+fn two_lone_rows_side_by_side_that_never_attach_count_their_days_and_the_newer_mail_goes_on_the_third() {
+    // Review round 2 of e7ae803, #1: the second of two lone rows that never attach stopped the pass through the
+    // breaker, which returned before the stalled minute was set, so no day was ever counted and every pass stopped
+    // at the same place: the newer mail never went. The first waiting row's minute counts the day; on the third
+    // it is left at once, the second waits, and the newer rows' send shows the page works, so it is left too.
+    let dir = temp("lone-stall-two-side-by-side");
+    let first = NOW.div_euclid(DAY) - 10;
+    let (msgs, svc, a, _) = two_stuck_rows(first, 3);
+    let stall = || MailState::load(&dir).unwrap().lone_stall.get(A).copied();
+    for (at, days) in [(NOW, 1), (NOW + DAY, 2)] {
+        let mut mb = fake(Provider::Gmail, msgs.clone());
+        mb.no_chips = vec!["Stuck A", "Stuck B"];
+        mb.clk.0.set(at);
+        assert_eq!(drive_fake(&mb, &svc, &dir, first, &|| {}), Drove::Failed("the attachments would not attach"), "{at}");
+        assert_eq!(stall(), Some(LoneStall { at: a, days, last_day: at.div_euclid(DAY) }), "{at}");
+        assert!(!sent_the_newer_rows(&mb), "{at}");
+    }
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.no_chips = vec!["Stuck A", "Stuck B"];
+    mb.clk.0.set(NOW + 2 * DAY);
+    assert_eq!(drive_fake(&mb, &svc, &dir, first, &|| {}), Drove::Done);
+    assert!(sent_the_newer_rows(&mb), "the newer mail went");
+    let st = MailState::load(&dir).unwrap();
+    assert!(st.open_backfills.is_empty() && st.lone_stall.is_empty() && st.lone_left.is_empty(), "{st:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_row_left_at_once_stays_left_while_the_next_stuck_row_counts_its_own_days() {
+    // Review round 2 of e7ae803, #1: with nothing newer to send, the second stuck row stalls the pass on the day the
+    // first is left at once. One record a mailbox let the two replace each other for good (A, then B, then A, each
+    // at one day). A row left at once is kept in mail.json's `lone_left` until the backfill closes, so it stays
+    // left while the next row counts its own three days, and the backfill completes.
+    let dir = temp("lone-stall-left-stays-left");
+    let first = NOW.div_euclid(DAY) - 10;
+    let (msgs, svc, a, b) = two_stuck_rows(first, 0);
+    let st = || MailState::load(&dir).unwrap();
+    let want = [(a, 1, vec![]), (a, 2, vec![]), (b, 1, vec![a]), (b, 2, vec![a])];
+    for (d, (at, days, left)) in want.into_iter().enumerate() {
+        let now = NOW + d as i64 * DAY;
+        let mut mb = fake(Provider::Gmail, msgs.clone());
+        mb.no_chips = vec!["Stuck A", "Stuck B"];
+        mb.clk.0.set(now);
+        assert_eq!(drive_fake(&mb, &svc, &dir, first, &|| {}), Drove::Failed("the attachments would not attach"), "day {d}");
+        assert_eq!(st().lone_stall.get(A).copied(), Some(LoneStall { at, days, last_day: now.div_euclid(DAY) }), "day {d}");
+        assert_eq!(st().lone_left.get(A).cloned().unwrap_or_default(), left, "day {d}");
+    }
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.no_chips = vec!["Stuck A", "Stuck B"];
+    mb.clk.0.set(NOW + 4 * DAY);
+    assert_eq!(drive_fake(&mb, &svc, &dir, first, &|| {}), Drove::Done);
+    assert!(st().lone_stall.is_empty() && st().lone_left.is_empty(), "{:?}", st());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn every_gmail_message_sent_is_in_mail_json_before_the_next_send() {
     // Review round 1 of e7ae803, #3 (b): the day's Gmail messages reached mail.json only at a look and at the pass's
@@ -4798,6 +4876,7 @@ fn mail_disconnect_removes_every_per_mailbox_entry_for_that_mailbox_and_no_other
             s.last_look.insert(id.to_string(), NOW);
             s.backfill_frontier.insert(id.to_string(), day - 30);
             s.lone_stall.insert(id.to_string(), LoneStall { at: NOW - 60, days: 1, last_day: day });
+            s.lone_left.insert(id.to_string(), vec![NOW - 120]);
         }
         true
     })
@@ -4812,6 +4891,7 @@ fn mail_disconnect_removes_every_per_mailbox_entry_for_that_mailbox_and_no_other
         ("last_look", st.last_look.keys().cloned().collect()),
         ("backfill_frontier", st.backfill_frontier.keys().cloned().collect()),
         ("lone_stall", st.lone_stall.keys().cloned().collect()),
+        ("lone_left", st.lone_left.keys().cloned().collect()),
     ] {
         assert_eq!(keys, [B], "{name}");
     }
