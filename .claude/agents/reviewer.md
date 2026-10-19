@@ -23,7 +23,7 @@ Check, in order:
 4. App invariants: computation in `app/src/commands.rs`, vault writes not through the engine's `write`, a Tauri command missing from a `generate_handler!` list, credentials leaving the device.
 5. Cloud (if touched): missing RLS or auth scoping, unverified webhooks, secrets or student content in logs, edited applied migrations.
 6. Gates: 0 warnings, ignored tests still ignored, LF endings (`*.ps1` CRLF), SHA-pinned actions.
-7. Privacy: each new data class is on the privacy page; `PRIVACY_VERSION` moves only in a release PR; telemetry carries no grades or content; no tokens or student content in logs or reports.
+7. Privacy: each new data class is on the privacy page; `PRIVACY_VERSION` moves only in the PR that carries its page, and never ships before a release deploys that page; telemetry carries no grades or content; no tokens or student content in logs or reports.
 
 Report each finding as `path:line`, the rule it breaks, and a concrete failing scenario. Say plainly when you find nothing. Do not pad. Final message, 60 lines at most.
 
