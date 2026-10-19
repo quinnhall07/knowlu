@@ -316,5 +316,12 @@ export function storeOver(rest: Rest): MailStore {
       const q = `${mine(accountId, address)}&status=neq.revoked&select=id`;
       return await patched("state", "mail_addresses", q, body) > 0;
     },
+    async clearLapsed(accountId, address, stamp) {
+      // Postgres compares the stamp as an instant; a newer lapse's stamp, or a mailbox lapsed again, is
+      // never cleared by a report about an older gap.
+      const q = `${mine(accountId, address)}&lapsed_since=eq.${id(stamp)}&status=not.in.(lapsed,revoked)` +
+        `&select=id`;
+      return await patched("covered", "mail_addresses", q, { lapsed_since: null }) > 0;
+    },
   };
 }

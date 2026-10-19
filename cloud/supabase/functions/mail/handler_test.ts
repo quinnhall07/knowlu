@@ -249,6 +249,17 @@ class FakeStore implements MailStore {
     if (patch.confirmUntil !== undefined) r.confirmUntil = patch.confirmUntil;
     return Promise.resolve(true);
   }
+  clearLapsed(accountId: string, id: string, stamp: string) {
+    this.calls.push("clearLapsed");
+    const r = this.mine(accountId, id);
+    // `lapsed_since=eq.<stamp>` compares instants, as Postgres does.
+    const same = r?.lapsedSince != null && Date.parse(r.lapsedSince) === Date.parse(stamp);
+    if (r === undefined || !same || r.status === "lapsed" || r.status === "revoked") {
+      return Promise.resolve(false);
+    }
+    r.lapsedSince = null;
+    return Promise.resolve(true);
+  }
 }
 
 function blank(id: string, accountId: string, provider: MailRow["provider"], token: NewToken): MailRow {
@@ -1378,6 +1389,86 @@ Deno.test("state_confirming_opens_a_fifteen_minute_confirm_window", async () => 
   const nohint = await w.call("POST", `/addresses/${A3}/state`, { state: "confirming" });
   assertEquals(nohint.status, 409);
   assertEquals(await nohint.json(), { error: NO_HINT });
+});
+
+// ---------------------------------------------------------------- `covered` (2026-10-19)
+
+const SINCE = "2026-09-28T08:15:00.123+00:00";
+
+Deno.test("covered_clears_lapsed_since_only_for_the_stamp_given", async () => {
+  const w = await world();
+  const row = () => w.store.rows.find((r) => r.id === A1)!;
+  // Unlapsed by a pull, its gap not yet covered.
+  row().status = "quiet";
+  row().lapsedSince = SINCE;
+  const covered = (stamp: unknown, id = A1) =>
+    w.call("POST", `/addresses/${id}/state`, { state: "covered", lapsed_since: stamp });
+  // A stamp that is not the mailbox's (an older lapse's, or a newer one's) clears nothing.
+  const other = await covered("2026-09-20T00:00:00.000Z");
+  assertEquals(other.status, 200);
+  assertEquals(await other.json(), { address_id: A1, state: "covered", status: "quiet", cleared: false });
+  assertEquals(row().lapsedSince, SINCE);
+  // Its own stamp, as the pull answered it: cleared.
+  const own = await covered(SINCE);
+  assertEquals(own.status, 200);
+  assertEquals(await own.json(), { address_id: A1, state: "covered", status: "quiet", cleared: true });
+  assertEquals([row().status, row().lapsedSince], ["quiet", null]);
+  // Sent again (a retry): nothing left to clear, and still a 200.
+  assertEquals(await (await covered(SINCE)).json(), {
+    address_id: A1,
+    state: "covered",
+    status: "quiet",
+    cleared: false,
+  });
+  // Another account's mailbox is not found, and its stamp stays.
+  const theirs = w.store.rows.find((r) => r.id === B1)!;
+  theirs.lapsedSince = SINCE;
+  assertEquals((await covered(SINCE, B1)).status, 404);
+  assertEquals(theirs.lapsedSince, SINCE);
+});
+
+Deno.test("covered_while_still_lapsed_changes_nothing", async () => {
+  const w = await world();
+  const row = w.store.rows.find((r) => r.id === A1)!;
+  row.status = "lapsed";
+  row.lapsedSince = SINCE;
+  const res = await w.call("POST", `/addresses/${A1}/state`, { state: "covered", lapsed_since: SINCE });
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { address_id: A1, state: "covered", status: "lapsed", cleared: false });
+  // The gap is still open while the mailbox is lapsed: the stamp and the status stay.
+  assertEquals([row.status, row.lapsedSince], ["lapsed", SINCE]);
+});
+
+Deno.test("covered_without_a_valid_stamp_is_400", async () => {
+  const w = await world();
+  const row = w.store.rows.find((r) => r.id === A1)!;
+  row.status = "quiet";
+  row.lapsedSince = SINCE;
+  const calls = w.store.calls.length;
+  const post = (body: unknown) => w.call("POST", `/addresses/${A1}/state`, body);
+  for (
+    const stamp of [
+      undefined,
+      null,
+      "",
+      1,
+      "yesterday",
+      "2026-09-28",
+      "2026-09-28T08:15",
+      "2026-13-45T08:15:00Z",
+    ]
+  ) {
+    const body = stamp === undefined ? { state: "covered" } : { state: "covered", lapsed_since: stamp };
+    assertEquals((await post(body)).status, 400, String(stamp));
+  }
+  // A stamp is `covered`'s alone.
+  assertEquals((await post({ state: "off", lapsed_since: SINCE })).status, 400);
+  // Each refused before a read, and the stamp stays.
+  assertEquals(w.store.calls.length, calls);
+  assertEquals([row.status, row.lapsedSince], ["quiet", SINCE]);
+  // The same body with the mailbox's stamp is taken.
+  assertEquals((await post({ state: "covered", lapsed_since: SINCE })).status, 200);
+  assertEquals(row.lapsedSince, null);
 });
 
 Deno.test("provider_reads_mx_through_an_injected_resolver_as_m365_google_or_other", async () => {

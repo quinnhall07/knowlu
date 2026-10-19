@@ -209,6 +209,9 @@ export interface MailStore {
   held(accountId: string, from: string, to: string): Promise<HeldRow[]>;
   /** Applies `patch` while the mailbox is the account's and not revoked; false otherwise. */
   setState(accountId: string, id: string, patch: StatePatch): Promise<boolean>;
+  /** Sets `lapsed_since` null only while it is still the instant `stamp` and the mailbox is the account's
+   * and neither `lapsed` nor `revoked`; false, with nothing written, otherwise. */
+  clearLapsed(accountId: string, id: string, stamp: string): Promise<boolean>;
 }
 export interface MailDeps {
   /** A session alone: `GET /addresses` and `DELETE /addresses/<id>`. */
