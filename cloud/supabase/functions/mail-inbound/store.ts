@@ -56,8 +56,9 @@ interface AddressDb {
 const ADDRESS_COLUMNS = "id,account_id,provider,status,token_hmac,retired_token_hmac,retired_until," +
   "lapsed_since,mailbox_hint,confirm_until,forward_hint";
 
-/** The store over `rest`; `encKey` (`MAIL_ENC_KEY`) opens each account's fingerprint key. */
-export function storeOver(rest: Rest, encKey: CryptoKey): InboundStore {
+/** The store over `rest`; `encKey` (`MAIL_ENC_KEY`) opens each account's fingerprint key, and `now` stamps
+ * `lapsed_since`. */
+export function storeOver(rest: Rest, encKey: CryptoKey, now: () => number = Date.now): InboundStore {
   const lookup = lookupFrom(rest);
   const patch = async (what: string, query: string, body: unknown) =>
     await (await call(rest, what, `mail_addresses?${query}`, { method: "PATCH", body: JSON.stringify(body) }))
@@ -93,9 +94,22 @@ export function storeOver(rest: Rest, encKey: CryptoKey): InboundStore {
     },
     entitled: async (account) => isActive(await lookup(account)),
     async markLapsed(address) {
-      const now = new Date().toISOString();
-      await patch("lapsed since", `id=eq.${id(address)}&lapsed_since=is.null`, { lapsed_since: now });
-      await patch("lapsed", `id=eq.${id(address)}&status=neq.revoked`, { status: "lapsed" });
+      // Status and stamp in one compare-and-set each way, never apart, so no row reads `lapsed` without
+      // a stamp and an earlier stamp is kept (its gap may still be uncovered). The stamped write goes
+      // first: a `covered` can clear the stamp only while the row is not lapsed, so if it clears it
+      // between the two, the second write finds the row unstamped and stamps it now. An already lapsed
+      // or revoked mailbox matches neither.
+      const live = `id=eq.${id(address)}&status=not.in.(lapsed,revoked)`;
+      if (
+        await patched("lapsed", "mail_addresses", `${live}&lapsed_since=not.is.null`, { status: "lapsed" }) >
+          0
+      ) {
+        return;
+      }
+      await patched("lapsed", "mail_addresses", `${live}&lapsed_since=is.null`, {
+        status: "lapsed",
+        lapsed_since: new Date(now()).toISOString(),
+      });
     },
     async bindRows(address) {
       const b = await rows<{ id: string; phase: "backfill" | "recover"; nonce_hmac: string }>(
@@ -165,11 +179,17 @@ export function storeOver(rest: Rest, encKey: CryptoKey): InboundStore {
           last_canary_ok_at: at,
           ...(hint === null ? {} : { forward_hint: hint }),
         });
-        // Through a retired token the status stays: the forward is not re-pointed yet (D3).
+        // Through a retired token the status stays: the forward is not re-pointed yet (D3). A `lapsed`
+        // mailbox is lifted too: intake reaches a canary only for an entitled account, and the canary
+        // proves the forward survived; `lapsed_since` stays for the device's `covered` (2026-10-19).
         if (current) {
-          await patch("active", `id=eq.${id(address)}&status=in.(pending,confirmed,quiet,blocked,off)`, {
-            status: "active",
-          });
+          await patch(
+            "active",
+            `id=eq.${id(address)}&status=in.(pending,confirmed,quiet,blocked,off,lapsed)`,
+            {
+              status: "active",
+            },
+          );
         }
       } catch (e) {
         await call(rest, "canary undo", `mail_canaries?${mine}`, {

@@ -279,7 +279,7 @@ class FakeStore implements InboundStore {
     const a = this.addresses.find((x) => x.id === addressId)!;
     if (forwardHint !== null) a.forwardHint = forwardHint;
     this.canaryOk[addressId] = iso;
-    const promotes = ["pending", "confirmed", "quiet", "blocked", "off"];
+    const promotes = ["pending", "confirmed", "quiet", "blocked", "off", "lapsed"];
     if (current && promotes.includes(a.status)) a.status = "active";
     return Promise.resolve(true);
   }
@@ -315,6 +315,7 @@ class FakeStore implements InboundStore {
   markLapsed(addressId: string) {
     this.calls.push("markLapsed");
     const a = this.addresses.find((x) => x.id === addressId)!;
+    if (a.status === "lapsed" || a.status === "revoked") return Promise.resolve();
     a.status = "lapsed";
     a.lapsedSince ??= new Date(NOW).toISOString();
     return Promise.resolve();

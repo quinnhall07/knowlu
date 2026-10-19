@@ -10,8 +10,9 @@
  *    live mailbox (a token retired by Rotate counts until `retired_until`). None: **deleted unread**,
  *    counted globally (a fixed log line), never per account.
  * 3. **Entitlement**: a mailbox whose account is not `active` or `trialing` is marked `lapsed` (with
- *    `lapsed_since`, kept from the first lapse); with no entitled mailbox left the message is deleted
- *    unread and no `mail_seen` row is written.
+ *    `lapsed_since`, kept from an earlier lapse the device has not yet reported covered; a pull or a
+ *    canary once the account is entitled again moves it on); with no entitled mailbox left the message
+ *    is deleted unread and no `mail_seen` row is written.
  * 4. **Fetch** the object once.
  * 5. **Classify** per mailbox, then act (T2g.2 for the first three):
  *    - a **canary** is marked arrived once (the store refuses a second marking), recording the mailbox's
@@ -107,7 +108,8 @@ export interface InboundStore {
   /** The row whose `token_hmac` or `retired_token_hmac` is `hmac`, whatever its status; else null. */
   addressByTokenHmac(hmac: string): Promise<AddressRow | null>;
   entitled(accountId: string): Promise<boolean>;
-  /** `status = 'lapsed'`, and `lapsed_since = now()` only when it is null. */
+  /** `status = 'lapsed'` unless it is `lapsed` or `revoked`, and `lapsed_since = now()` in the same write
+   * only when it is null (an earlier stamp's gap may not be covered yet). */
   markLapsed(addressId: string): Promise<void>;
   /** The mailbox's open batches and its recent canaries, for `classifyArrival`. */
   bindRows(addressId: string): Promise<{ batches: BindBatch[]; canaries: BindCanary[] }>;
@@ -126,7 +128,8 @@ export interface InboundStore {
   /** Marks the canary arrived at `iso` only while it is unarrived; false, with nothing written, when it
    * already was (a replay, or a concurrent delivery that won). When it marks, the mailbox records
    * `forwardHint` (when not null) and `last_canary_ok_at`, and, when the canary came through the
-   * mailbox's `current` token, reads `active` unless it is `active`, `paused_send`, `lapsed` or `revoked`.
+   * mailbox's `current` token, reads `active` unless it is `active`, `paused_send` or `revoked` (a `lapsed`
+   * one too, since 2026-10-19: intake reaches a canary only for an entitled account; `lapsed_since` stays).
    * Through a token retired by Rotate the status is left alone: the forward still points at the old
    * address, and a rotated Gmail mailbox stays `pending` until its new address is confirmed (D3). */
   canaryArrived(
