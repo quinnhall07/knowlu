@@ -65,11 +65,12 @@ pub const LAG_SECS: i64 = 15 * 60;
 /// One step's wait for the page, longer than the runner's polling.
 const STEP: Duration = Duration::from_secs(90);
 /// `sent_cleanup.js`'s wait, and the most one call deletes: its worst case (one wait for the first row of
-/// ours, three a deleted row since Delete is drawn only after the tick, live 2026-10-19, and one for each of
-/// the five skips it allows, 75 s here) stays inside [`STEP`] (Checkpoint C).
+/// ours, three a deleted row since Delete is drawn only after the tick, live 2026-10-19, and two for each of
+/// the five skips it allows, a row let go after the wait for Delete; 85 s here) stays inside [`STEP`]
+/// (Checkpoint C).
 const CLEANUP_WAIT_MS: u64 = 5_000;
-const CLEANUP_ROWS: u32 = 3;
-const _: () = assert!(CLEANUP_WAIT_MS * (3 * CLEANUP_ROWS as u64 + 6) < STEP.as_millis() as u64);
+const CLEANUP_ROWS: u32 = 2;
+const _: () = assert!(CLEANUP_WAIT_MS * (3 * CLEANUP_ROWS as u64 + 11) < STEP.as_millis() as u64);
 const DAY: i64 = 86_400;
 
 // ---- the window -----------------------------------------------------------------------------------
