@@ -1362,18 +1362,21 @@ impl Pass<'_> {
             args["upload_ms"] = json!(SLOW_UPLOAD_MS);
         }
         // One send is one Gmail message, whatever its originals (Quinn's day-cap ruling, 2026-10-19): reserved
-        // before it goes, kept when it answers ok, given back when it did not go. A call with no answer keeps it:
-        // the send may have gone.
+        // before it goes, kept when it answers ok, given back when it did not go. A call with no answer keeps it,
+        // and so does "send did not settle", which comes after Send was pressed: the send may have gone. A kept one
+        // is in `mail.json` at once, so a relaunch the same day is never short (review round 1 of e7ae803).
         let now = self.clock.now();
         if !self.routine.reserve_message(now) {
             return Err(Stop::DayLimit { next_day_at: (now.div_euclid(DAY) + 1) * DAY });
         }
         self.attempts += 1;
         let v = self.mb.script(&self.path("forward.js"), &args).map_err(refused)?;
-        if v.get("result").and_then(Value::as_str) != Some("ok") {
+        let reason = v.get("reason").and_then(Value::as_str);
+        if v.get("result").and_then(Value::as_str) == Some("ok") || reason == Some("send did not settle") {
+            self.note_loads();
+        } else {
             self.routine.release_message();
         }
-        let reason = v.get("reason").and_then(Value::as_str);
         let control = v.get("control").and_then(Value::as_str);
         match (v.get("result").and_then(Value::as_str), reason, control) {
             (Some("ok"), _, _) => {

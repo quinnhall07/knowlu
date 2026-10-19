@@ -744,6 +744,9 @@ struct Fake {
     /// Gmail: the next `go: "newer"` (or the next conversation read) runs out its step with no answer.
     newer_times_out: Cell<bool>,
     thread_times_out: Cell<bool>,
+    /// `mail.json`'s folder: each `forward.js` call records the day's Gmail messages it holds then, in `paces`.
+    pace_dir: Option<PathBuf>,
+    paces: RefCell<Vec<u32>>,
 }
 
 fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
@@ -784,6 +787,8 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         range_unreadable: Cell::new(false),
         newer_times_out: Cell::new(false),
         thread_times_out: Cell::new(false),
+        pace_dir: None,
+        paces: Default::default(),
     }
 }
 
@@ -1015,6 +1020,10 @@ impl Fake {
             }
             "forward.js" => {
                 assert_eq!(args["address"], KNOWLU);
+                if let Some(dir) = &self.pace_dir {
+                    let kept = MailState::load(dir).ok().and_then(|s| s.backfill_pace.get(A).map(|p| p.messages_today));
+                    self.paces.borrow_mut().push(kept.unwrap_or(0));
+                }
                 let n = self.forwards.borrow().len();
                 let rows: Vec<Value> = args.get("rows").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![args.clone()]);
                 for r in &rows {
@@ -3749,6 +3758,31 @@ fn a_held_row_in_the_stuck_minute_does_not_clear_the_record_of_a_pass_that_stall
     assert_eq!(mb.forwards.borrow().len(), 1, "tried once more, then left");
     assert!(MailState::load(&dir).unwrap().lone_stall.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn every_gmail_message_sent_is_in_mail_json_before_the_next_send() {
+    // Review round 1 of e7ae803, #3 (b): the day's Gmail messages reached mail.json only at a look and at the pass's
+    // end, and each progress note wrote 0, so an app killed between looks relaunched up to 24 messages short. Three
+    // conversations are three sends: each finds the ones before it kept.
+    let dir = temp("messages-each-send");
+    let mut mb = fake(Provider::Gmail, convos(3, 2));
+    mb.pace_dir = Some(dir.clone());
+    assert_eq!(drive_fake(&mb, &holding(&[]), &dir, NOW.div_euclid(DAY) - 10, &|| {}), Drove::Done);
+    assert_eq!(*mb.paces.borrow(), [0, 1, 2]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_gmail_send_that_did_not_settle_keeps_its_message_counted() {
+    // Review round 1 of e7ae803, #3 (a): "send did not settle" comes after Send was pressed, so the message may
+    // have gone; its reservation is kept, never given back.
+    let since = window(NOW, None, None).since;
+    let mut mb = fake(Provider::Gmail, vec![mail(ANA, "Quiz 3 moved", since + 600)]);
+    mb.attach_fails = Some("send did not settle");
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop, out.sent, r.messages_today()), (Stop::Script("a forward did not finish"), 0, 1));
 }
 
 #[test]
