@@ -306,19 +306,32 @@ Deno.test("gmail_forward_tries_the_recipient_once_more_in_place_before_it_gives_
     recipients: 1,
   });
   assertEquals(other.sent, []);
+  // Review of 7f33a3a (M3): the first address's recipient draws only once the retyped one is committed, so two
+  // recipients name Knowlu's address. They are one recipient: one message is sent, to that address alone.
+  const late = mailbox(MAIL, { toMiss: "late" });
+  assertEquals(await run("gmail/forward.js", late.page, TARGET), {
+    result: "ok",
+    sent: true,
+    count: 2,
+    retried: "retyped",
+  });
+  assertEquals(late.sent.map((s) => [s.to, s.subject]), [[[OURS, OURS], `Knowlu ${NONCE}`]]);
 });
 
 Deno.test("gmail_forward_keeps_the_recipients_second_wait_inside_the_upload_bound", async () => {
   // forward.js's worst case is 35 s + upload_ms (recover.rs keeps it inside one 90 s step): the second try's
   // wait comes out of what the upload left of its bound. An upload that used it all leaves none.
   const late = mailbox(MAIL, { toMiss: "never", upload: "slow", uploadMs: 400 });
-  const started = Date.now();
-  const r = await run("gmail/forward.js", late.page, { ...TARGET, wait_ms: 2_000, upload_ms: 500 });
-  const took = Date.now() - started;
+  const args = { ...TARGET, wait_ms: 2_000, upload_ms: 500 };
+  const r = await run("gmail/forward.js", late.page, args);
+  const done = Date.now();
   assertEquals(r, { result: "failed", reason: "recipient not accepted", recipients: 0, retried: "kept" });
-  // The upload took about 400 of its 500 ms, so the second wait is about 100 ms, never wait_ms (2 s): about
-  // 2.5 s in all, where a second full wait would be 4.5 s.
-  assert(took < 4_000, `the forward took ${took} ms`);
+  // Review of 7f33a3a (M2): the second wait alone, from its Enter to the answer (the cleanup after it is
+  // immediate here). The upload left at most upload_ms - uploadMs (100 ms) of its bound; a wait of wait_ms or
+  // half of it (2 s, 1 s) would be ten times this bound, so a slow runner does not blur the two.
+  assertEquals(late.toEnters.length, 2, "one Enter, then one more in place");
+  const second = done - late.toEnters[1];
+  assert(second < args.wait_ms / 4, `the second wait took ${second} ms`);
 });
 
 Deno.test("gmail_a_send_failure_is_reported", async () => {

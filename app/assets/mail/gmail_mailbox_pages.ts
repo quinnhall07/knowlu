@@ -67,8 +67,9 @@ export interface Opts {
   /** The To line draws no recipient for the first address committed to it (live, ef28 2026-10-19: none on a
    * page's first forward): its first Enter is taken and the text kept ("enter"), or the text taken and no
    * recipient drawn ("lost"); or the field is drawn again when the attachments go in, the one found before gone
-   * ("redrawn", with `upload`); "never": no recipient is ever drawn. */
-  toMiss?: "enter" | "lost" | "redrawn" | "never";
+   * ("redrawn", with `upload`); "never": no recipient is ever drawn; "late": the text is taken and its recipient
+   * drawn only when the next address is committed, beside that one's (two recipients for one address). */
+  toMiss?: "enter" | "lost" | "redrawn" | "never" | "late";
   /** "Forward as attachment" opens a compose with no attachment. */
   bare?: boolean;
   /** The compose carries one attachment fewer than the rows selected. */
@@ -142,6 +143,8 @@ export interface Box {
   queries: string[];
   deleted: string[];
   discards: number;
+  /** The instant (`Date.now()`) of each Enter pressed on a To line. */
+  toEnters: number[];
   /** Presses of the pager's enabled buttons (live, each one is a page load), whether or not the page moved. */
   presses: number;
   el(id: string): El;
@@ -258,6 +261,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     queries: [],
     deleted: [],
     discards: 0,
+    toEnters: [],
     presses: 0,
     // "grid" and "rangebox" are the showing view's; every other id is the page's own.
     el: (id) =>
@@ -515,17 +519,22 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       <div role="button" aria-label="Send ‪(Ctrl-Enter)‬" data-tooltip="Send">Send</div>
       <div role="button" aria-label="Discard draft ‪(Ctrl-Shift-D)‬">Discard</div></div>`;
     // Enter on the To line draws the typed address as a recipient (`toMiss`: not the first time, or never).
-    let misses = o.toMiss === "enter" || o.toMiss === "lost" ? 1 : 0;
+    let misses = o.toMiss === "enter" || o.toMiss === "lost" || o.toMiss === "late" ? 1 : 0;
+    let held: string | null = null;
     const accepts = (input: El) =>
       input.addEventListener("keydown", (e: El) => {
+        if (e.key === "Enter") b.toEnters.push(Date.now());
         const v = input.value.trim();
         // A field drawn over is not the page's any more: nothing typed into it reaches the compose.
         if (e.key !== "Enter" || !v || o.toMiss === "never" || !d.contains(input)) return;
         if (misses > 0) {
           misses--;
-          if (o.toMiss === "lost") input.value = "";
+          if (o.toMiss === "lost" || o.toMiss === "late") input.value = "";
+          if (o.toMiss === "late") held = v;
           return;
         }
+        if (held) b.el("chips").insertAdjacentHTML("beforeend", chip(held));
+        held = null;
         b.el("chips").insertAdjacentHTML("beforeend", chip(v));
         input.value = "";
       });
