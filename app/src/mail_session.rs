@@ -127,6 +127,16 @@ pub struct MailState {
     /// when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub lone_left: BTreeMap<String, Vec<i64>>,
+    /// Each Gmail mailbox's messages of the last 24 hours, by address id: unix seconds, oldest first (review round
+    /// 2 of e7ae803). Gmail's 300 messages are a rolling 24 hours (`mail_steps::GMAIL_MAX_MESSAGES_PER_DAY`), so they
+    /// outlive the UTC day a `backfill_pace` is for; a slot or backfill pass seeds its `Routine` from them. Written
+    /// after each send that kept its message, at each look and at a pass's end, merged never lowered, and pruned to
+    /// the last 24 hours. Instants only: no sender, subject or text. Keyed by address id, so a mailbox disconnected
+    /// and set up again starts from none (the device keeps nothing that names the account). A file written before it
+    /// existed lacks it and reads as none (its `messages_today` then holds until the next UTC day). Not written when
+    /// empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub gmail_messages: BTreeMap<String, Vec<i64>>,
     /// Each setup in flight on this device whose address this device minted (Quinn, 2026-10-06): written
     /// once the address exists, its facts written before each act that may set them, cleared when the run
     /// ends. One left at start-up is a setup the app quit mid-run (`mail::setup::clean_unfinished`). Not
@@ -197,6 +207,7 @@ impl Default for MailState {
             backfill_frontier: BTreeMap::new(),
             lone_stall: BTreeMap::new(),
             lone_left: BTreeMap::new(),
+            gmail_messages: BTreeMap::new(),
             pending_setups: Vec::new(),
         }
     }

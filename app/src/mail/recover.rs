@@ -377,11 +377,12 @@ pub struct Job<'a> {
     /// it where the next pass seeds its routine from (`mail.json`). Best effort: a note that is not kept costs
     /// the next pass a longer reach-back, never a look.
     pub on_look: Option<&'a dyn Fn(i64)>,
-    /// Told the routine's UTC day, its page loads that day and its Gmail messages that day at each look and at the
-    /// pass's end (Gmail's page budget, [`crate::mail_steps::MAX_PAGE_LOADS_PER_DAY`], and its message cap,
+    /// Told the routine's UTC day, its page loads that day, its Gmail messages that day and the instants of its
+    /// Gmail messages in the last 24 hours at each look, after each send that kept its message and at the pass's end
+    /// (Gmail's page budget, [`crate::mail_steps::MAX_PAGE_LOADS_PER_DAY`], and its message cap,
     /// [`crate::mail_steps::GMAIL_MAX_MESSAGES_PER_DAY`]), so the caller can keep them in `mail.json` and a quit does
-    /// not reset the day's budget. Best effort, like `on_look`.
-    pub on_load: Option<&'a dyn Fn(i64, u32, u32)>,
+    /// not reset the budget. Best effort, like `on_look`.
+    pub on_load: Option<&'a dyn Fn(i64, u32, u32, &[i64])>,
     /// Gmail, a backfill after its first day: the UTC day (days since 1970-01-01) the search starts from, the
     /// day before the oldest mail a pass found still missing (Quinn 2026-10-19: "Yes, search from there"). The
     /// search starts from the later of it and the window's first day; mail dated before it is not looked at.
@@ -408,8 +409,9 @@ pub enum Stop {
     Done,
     /// The slot's 30 are sent.
     SlotCap,
-    /// The UTC day's sends are spent (Microsoft 365's 600, Gmail's 1,500 originals or its 300 messages,
-    /// [`crate::mail_steps::max_per_day`]); the next day starts at this unix second.
+    /// The day's sends are spent (Microsoft 365's 600 or Gmail's 1,500 originals a UTC day,
+    /// [`crate::mail_steps::max_per_day`], or Gmail's 300 messages in 24 hours); the next send may go at this unix
+    /// second ([`crate::mail_steps::Send::DayLimit`]).
     DayLimit { next_day_at: i64 },
     /// Gmail: the UTC day's page loads are spent ([`crate::mail_steps::MAX_PAGE_LOADS_PER_DAY`]); the next day starts at this
     /// unix second.
@@ -1119,7 +1121,7 @@ impl Pass<'_> {
     /// Tells the job's caller the day's page loads so far, so `mail.json` keeps them.
     fn note_loads(&self) {
         if let Some(note) = self.job.on_load {
-            note(self.routine.day(), self.routine.loads_today(), self.routine.messages_today());
+            note(self.routine.day(), self.routine.loads_today(), self.routine.messages_today(), &self.routine.message_times());
         }
     }
 
@@ -1388,7 +1390,8 @@ impl Pass<'_> {
         // is in `mail.json` at once, so a relaunch the same day is never short (review round 1 of e7ae803).
         let now = self.clock.now();
         if !self.routine.reserve_message(now) {
-            return Err(Stop::DayLimit { next_day_at: (now.div_euclid(DAY) + 1) * DAY });
+            let next_day_at = self.routine.messages_free_at(now).unwrap_or((now.div_euclid(DAY) + 1) * DAY);
+            return Err(Stop::DayLimit { next_day_at });
         }
         self.attempts += 1;
         let v = self.mb.script(&self.path("forward.js"), &args).map_err(refused)?;

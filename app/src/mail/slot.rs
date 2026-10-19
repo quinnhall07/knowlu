@@ -18,7 +18,7 @@
 //! recover follow either way, reaching back to when forwarding was last known on after it was found off.
 //!
 //! **Privacy.** A line holds fixed words and counts. No address, subject, sender, URL or page text enters one.
-use super::backfill::{keep_pace, left_for, note_stall, save_look, seed_routine, stuck_for};
+use super::backfill::{keep_messages, keep_pace, left_for, note_stall, save_look, seed_routine, stuck_for};
 use super::commands::{run_script, wait_signed_in, GONE_WAIT, SILENT_WAIT};
 use super::host::Host;
 use super::recover::{run_pass, window, Clock, Job, Outcome, Place, Stop, SLOT_CAP};
@@ -177,11 +177,13 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
     let last_known_on = state.last_reconcile.get(id).and_then(|t| instant(t)).filter(|_| fwd.was_not_on());
     let look = |at: i64| save_look(env.data_dir, id, at);
     let backfilling = state.open_backfills.iter().any(|i| i == id);
-    // The page loads and messages go only into a pace this day already keeps (a backfill's, or a slot's that sent), so a
-    // mailbox that only recovers adds nothing to `mail.json` for them.
-    let load = |day: i64, loads: u32, messages: u32| {
+    // The page loads go only into a pace this day already keeps (a backfill's, or a slot's that sent), so a mailbox
+    // that only recovers adds nothing to `mail.json` for them. A message sent starts one, and its instant is kept at
+    // once (review round 2 of e7ae803: a pass killed mid-way once lost the messages of a day with no pace yet).
+    let load = |day: i64, loads: u32, messages: u32, times: &[i64]| {
         let pace = BackfillPace { day, sent_today: 0, paused_until: None, loads_today: loads, messages_today: messages };
-        keep_pace(env.data_dir, id, pace, false);
+        keep_pace(env.data_dir, id, pace, messages > 0);
+        keep_messages(env.data_dir, id, times, env.clock.now());
     };
     let job = Job {
         provider,
@@ -214,6 +216,7 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
             messages_today: routine.messages_today(),
         };
         keep_pace(env.data_dir, id, pace, true);
+        keep_messages(env.data_dir, id, &routine.message_times(), env.clock.now());
     }
     // Only a whole pass moves the day on: one that stopped early is due again at the next slot. And only one
     // that read the forwarding setting: a failed read is no proof forwarding was on, so it must not move

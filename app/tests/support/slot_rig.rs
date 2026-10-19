@@ -202,6 +202,9 @@ pub struct HostState {
     pub report_at: Option<i64>,
     /// Gmail: the message with this subject never attaches (`forward.js` alone: "no attachment").
     pub no_chip: Option<String>,
+    /// When set, `mail.json` in this folder is read at each Gmail look (`bounce.js`) and kept in `probed`, as text.
+    pub probe_dir: Option<PathBuf>,
+    pub probed: Vec<String>,
 }
 
 pub fn fwd(forwarding: &str, to: &str) -> Value {
@@ -227,6 +230,8 @@ impl FakeHost {
                 msgs: vec![],
                 report_at: None,
                 no_chip: None,
+                probe_dir: None,
+                probed: vec![],
             })),
         }
     }
@@ -291,6 +296,10 @@ impl Mailbox for FakeHost {
             "m365/sent_cleanup.js" | "gmail/sent_cleanup.js" => json!({ "result": "ok", "deleted": 1 }),
             // Gmail looks in the Inbox for a non-delivery report between sends and once at the end.
             "gmail/bounce.js" => {
+                if let Some(dir) = s.probe_dir.clone() {
+                    let text = std::fs::read_to_string(dir.join("mail.json")).unwrap_or_default();
+                    s.probed.push(text);
+                }
                 let since = args["since"].as_str().and_then(|t| t.parse::<jiff::Timestamp>().ok()).map_or(0, |t| t.as_second());
                 if s.report_at.is_some_and(|t| t >= since) {
                     json!({ "result": "refused", "reason": "non-delivery report" })

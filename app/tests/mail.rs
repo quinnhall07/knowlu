@@ -2243,12 +2243,14 @@ fn gmails_300_messages_a_day_stop_a_pass_whose_every_forward_is_a_single_origina
     // Quinn's day-cap ruling (2026-10-19): one forward is one Gmail message whatever its originals, and the day
     // sends at most 300 (Gmail's consumer limit is about 500 with the student's own mail). Every group of two or
     // more is "over 25 MB", so it is halved down to single rows and each send is one original: the message cap,
-    // not the 1,500 originals, ends the pass, as a day limit. A send that did not go counts no message.
+    // not the 1,500 originals, ends the pass, as a day limit. A send that did not go counts no message. The limit
+    // holds until the first of the 300 is 24 hours old (review round 2 of e7ae803: a rolling day, never UTC midnight).
     let mut mb = fake(Provider::Gmail, unheld(320));
     mb.over_rows = Some(1);
     let mut r = routine(Provider::Gmail);
     let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
-    assert_eq!((out.stop, out.sent), (Stop::DayLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 300));
+    let first = mb.forwards.borrow().iter().find(|(_, a)| a["rows"].as_array().unwrap().len() == 1).map(|(t, _)| *t).unwrap();
+    assert_eq!((out.stop, out.sent), (Stop::DayLimit { next_day_at: first + DAY }, 300));
     assert_eq!(r.messages_today(), 300);
     assert!(r.sent_today() < 1_500, "{}", r.sent_today());
     let fwd = mb.forwards.borrow();
@@ -2260,10 +2262,10 @@ fn gmails_300_messages_a_day_stop_a_pass_whose_every_forward_is_a_single_origina
     once.dedup();
     assert_eq!(once.len(), 300, "each original that went, went once");
     drop(fwd);
-    // The next pass the same day sends nothing: the routine waits for the next UTC day.
+    // The next pass the same day sends nothing: the routine waits for the first message to be a day old.
     let again = fake(Provider::Gmail, unheld(5));
     let out = pass(&again, &holding(&[]), &mut r, &gmail_backfill());
-    assert_eq!((out.stop, again.forwards.borrow().len()), (Stop::DayLimit { next_day_at: (NOW.div_euclid(DAY) + 1) * DAY }, 0));
+    assert_eq!((out.stop, again.forwards.borrow().len()), (Stop::DayLimit { next_day_at: first + DAY }, 0));
 }
 
 #[test]
@@ -3512,6 +3514,25 @@ fn a_relaunch_on_the_same_utc_day_never_sends_past_the_days_1500() {
     let times = resume_and_time_forwards(&r);
     assert_eq!(times.len(), 1, "the window (one Gmail call for its three messages) is forwarded once the day turns: {times:?}");
     assert!(times.iter().all(|t| *t >= next_day), "nothing went before the next UTC day: {times:?} vs {next_day}");
+}
+
+#[test]
+fn a_relaunch_the_next_utc_day_sends_no_gmail_message_until_the_first_of_the_300_is_a_day_old() {
+    // Review round 2 of e7ae803, #2: Gmail's 300 messages are a rolling 24 hours, kept in mail.json with their
+    // instants. 299 went over the five minutes before NOW (14:13 UTC), the 300th at NOW (the first group of ten of the
+    // window's twelve), and the app quit; the relaunch at 01:00 the next UTC day sends nothing until the first of
+    // them is 24 hours old.
+    let r = open_backfill_rig("messages-rolling-relaunch", 12);
+    let first = NOW - 299;
+    let mut routine = Routine::new(Provider::Gmail, NOW.div_euclid(DAY), 0);
+    for i in 0..299 {
+        assert!(routine.reserve_message(first + i));
+    }
+    assert_eq!(quit_after_first_forward(&r, Provider::Gmail, &mut routine), Drove::Stopped);
+    assert_eq!(routine.messages_today(), 300);
+    r.clk.0.store((NOW.div_euclid(DAY) + 1) * DAY + 3_600, Ordering::SeqCst);
+    let times = resume_and_time_forwards(&r);
+    assert!(!times.is_empty() && times.iter().all(|t| *t >= first + DAY), "{times:?} vs {}", first + DAY);
 }
 
 #[test]
@@ -4912,6 +4933,7 @@ fn mail_disconnect_removes_every_per_mailbox_entry_for_that_mailbox_and_no_other
             s.backfill_frontier.insert(id.to_string(), day - 30);
             s.lone_stall.insert(id.to_string(), LoneStall { at: NOW - 60, days: 1, last_day: day });
             s.lone_left.insert(id.to_string(), vec![NOW - 120]);
+            s.gmail_messages.insert(id.to_string(), vec![NOW - 180]);
         }
         true
     })
@@ -4927,6 +4949,7 @@ fn mail_disconnect_removes_every_per_mailbox_entry_for_that_mailbox_and_no_other
         ("backfill_frontier", st.backfill_frontier.keys().cloned().collect()),
         ("lone_stall", st.lone_stall.keys().cloned().collect()),
         ("lone_left", st.lone_left.keys().cloned().collect()),
+        ("gmail_messages", st.gmail_messages.keys().cloned().collect()),
     ] {
         assert_eq!(keys, [B], "{name}");
     }

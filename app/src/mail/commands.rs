@@ -333,6 +333,7 @@ pub fn disconnect_with(d: &Disconnect, address_id: &str) -> Value {
         s.backfill_frontier.remove(address_id);
         s.lone_stall.remove(address_id);
         s.lone_left.remove(address_id);
+        s.gmail_messages.remove(address_id);
         *s != before
     });
     steps.push(match forget(d.data_dir, address_id) {

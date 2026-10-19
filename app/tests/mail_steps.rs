@@ -251,6 +251,30 @@ fn gmail_sends_at_most_1500_originals_in_300_messages_a_mailbox_a_utc_day() {
 }
 
 #[test]
+fn gmails_300_messages_are_counted_over_a_rolling_24_hours_not_the_utc_day() {
+    // Review round 2 of e7ae803, #2: the 300 reset at UTC midnight, so a backfill capped at 16:30 sent 300 more by
+    // 02:30, 600 in about 12 hours, past Gmail's ~500 a rolling day that the 300 is there to stay under. A message
+    // counts for 24 hours from its send: none goes until the oldest of the 300 is a day old.
+    let first = 9 * DAY + 14 * 3_600;
+    let mut m = Routine::new(Provider::Gmail, 9, 0);
+    for i in 0..300 {
+        assert!(m.reserve_message(first + i * 30), "message {i}");
+    }
+    assert_eq!(m.next(10 * DAY), Send::DayLimit { next_day_at: first + DAY }, "midnight frees nothing");
+    assert!(!m.reserve_message(10 * DAY + 3_600));
+    assert_eq!(m.next(first + DAY - 1), Send::DayLimit { next_day_at: first + DAY });
+    assert_eq!(m.next(first + DAY), Send::Now, "the first is a day old");
+    assert!(m.reserve_message(first + DAY));
+    assert_eq!(m.next(first + DAY + 1), Send::DayLimit { next_day_at: first + 30 + DAY }, "the second frees next");
+    // The day's 1,500 originals still turn at UTC midnight: when both are spent, the later wins.
+    let mut both = Routine::new(Provider::Gmail, 9, 1_500);
+    for i in 0..300 {
+        both.reserve_message(9 * DAY + i);
+    }
+    assert_eq!(both.next(9 * DAY + 400), Send::DayLimit { next_day_at: 10 * DAY });
+}
+
+#[test]
 fn the_first_send_failure_stops_the_routine_with_its_named_outcome() {
     let t0 = 5 * DAY + 100;
     let mut r = Routine::new(Provider::M365, 5, 0);

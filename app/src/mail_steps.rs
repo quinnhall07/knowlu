@@ -44,10 +44,12 @@ pub const MAX_PER_DAY: u32 = 600;
 /// superseding "Keep 600" for Gmail), so a 1,485-row 120-day backfill fits in about one day. Gmail sends them
 /// as at most [`GMAIL_MAX_MESSAGES_PER_DAY`] messages.
 pub const GMAIL_MAX_PER_DAY: u32 = 1_500;
-/// Gmail messages sent per mailbox per UTC day (2026-10-19, with the day cap): one `forward.js` send is one
+/// Gmail messages sent per mailbox in any 24 hours (2026-10-19, with the day cap): one `forward.js` send is one
 /// message whatever its number of originals (up to ten). Gmail's consumer limit is about 500 messages a day
 /// counting the student's own mail, and passing it stops the account sending for up to 24 hours, so the
-/// backfill keeps to 300 and leaves the rest of the day to the student.
+/// backfill keeps to 300 and leaves the rest of the day to the student. Gmail's day is a rolling 24 hours, so
+/// the 300 are too (review round 2 of e7ae803): a message counts until it is a day old, never only to UTC midnight
+/// (which let a capped backfill send 600 in about 12 hours).
 pub const GMAIL_MAX_MESSAGES_PER_DAY: u32 = 300;
 /// Gmail page loads per mailbox per UTC day: every open of a place (a fresh Inbox is two, the navigation and
 /// the reload), every search, every pager press and every conversation opened (the Gmail backfill's page-press
@@ -487,7 +489,8 @@ pub enum Send {
     /// The unix second the next send may go.
     WaitUntil(i64),
     /// The day's sends are spent ([`max_per_day`] originals, or Gmail's [`GMAIL_MAX_MESSAGES_PER_DAY`] messages); the unix
-    /// second the next UTC day starts.
+    /// second the next send may go: the next UTC day's start for the originals, 24 hours after the oldest of the
+    /// last 300 for Gmail's messages, the later when both are spent.
     DayLimit { next_day_at: i64 },
     Paused(Paused),
 }
@@ -509,15 +512,17 @@ pub struct Routine {
     last_forward: Option<i64>,
     /// Page loads made on `day` ([`MAX_PAGE_LOADS_PER_DAY`]); a resume carries it (`mail.json`).
     loads_today: u32,
-    /// Gmail messages sent (or reserved for a send under way) on `day` ([`GMAIL_MAX_MESSAGES_PER_DAY`]); a resume
-    /// carries it (`mail.json`).
+    /// Gmail messages sent (or reserved for a send under way) on `day`; a resume carries it (`mail.json`).
     messages_today: u32,
+    /// The instants of Gmail messages sent (or reserved) in the last 24 hours, oldest first: the
+    /// [`GMAIL_MAX_MESSAGES_PER_DAY`] cap. Never reset at UTC midnight; a resume carries them (`mail.json`).
+    message_times: VecDeque<i64>,
 }
 
 impl Routine {
     /// A routine on UTC day `day` that has already sent `sent_today` (a resume carries the count).
     pub fn new(provider: Provider, day: i64, sent_today: u32) -> Routine {
-        Routine { provider, day, sent_today, recent: VecDeque::new(), paused_on: None, last_look: None, last_forward: None, loads_today: 0, messages_today: 0 }
+        Routine { provider, day, sent_today, recent: VecDeque::new(), paused_on: None, last_look: None, last_forward: None, loads_today: 0, messages_today: 0, message_times: VecDeque::new() }
     }
 
     fn roll(&mut self, now: i64) {
@@ -537,8 +542,9 @@ impl Routine {
         if self.paused_on.is_some() {
             return Send::Paused(Paused(self.provider));
         }
-        if self.sent_today >= max_per_day(self.provider) || self.messages_spent() {
-            return Send::DayLimit { next_day_at: (self.day + 1) * DAY_SECS };
+        let originals = (self.sent_today >= max_per_day(self.provider)).then_some((self.day + 1) * DAY_SECS);
+        if let Some(next_day_at) = originals.max(self.messages_free_at(now)) {
+            return Send::DayLimit { next_day_at };
         }
         while self.recent.front().is_some_and(|t| *t <= now - 60) {
             self.recent.pop_front();
@@ -627,26 +633,47 @@ impl Routine {
         MAX_PAGE_LOADS_PER_DAY.saturating_sub(self.loads_today)
     }
 
-    /// Whether a Gmail mailbox's messages for the day are spent (Microsoft 365 counts none).
-    fn messages_spent(&self) -> bool {
-        self.provider == Provider::Gmail && self.messages_today >= GMAIL_MAX_MESSAGES_PER_DAY
+    /// While a Gmail mailbox's [`GMAIL_MAX_MESSAGES_PER_DAY`] messages of the last 24 hours are spent at `now`, the
+    /// unix second the oldest of them is a day old; `None` when one may go (Microsoft 365 counts none).
+    pub fn messages_free_at(&mut self, now: i64) -> Option<i64> {
+        while self.message_times.front().is_some_and(|t| t + DAY_SECS <= now) {
+            self.message_times.pop_front();
+        }
+        let spent = self.provider == Provider::Gmail && self.message_times.len() >= GMAIL_MAX_MESSAGES_PER_DAY as usize;
+        spent.then(|| self.message_times.front().map_or(now, |t| t + DAY_SECS))
     }
 
-    /// Reserves one Gmail message for a send about to go at `now`; `false` (nothing counted) when the day's
-    /// [`GMAIL_MAX_MESSAGES_PER_DAY`] are spent. A send that answers ok keeps it; one that did not go gives it back
-    /// ([`Routine::release_message`]).
+    /// Reserves one Gmail message for a send about to go at `now`; `false` (nothing counted) while the last 24
+    /// hours' [`GMAIL_MAX_MESSAGES_PER_DAY`] are spent. A send that answers ok keeps it; one that did not go gives it
+    /// back ([`Routine::release_message`]).
     pub fn reserve_message(&mut self, now: i64) -> bool {
         self.roll(now);
-        if self.messages_spent() {
+        if self.messages_free_at(now).is_some() {
             return false;
         }
         self.messages_today += 1;
+        self.message_times.push_back(now);
         true
     }
 
     /// A send the message was reserved for did not go.
     pub fn release_message(&mut self) {
         self.messages_today = self.messages_today.saturating_sub(1);
+        self.message_times.pop_back();
+    }
+
+    /// The instants of the Gmail messages sent (or reserved) in the last 24 hours, oldest first.
+    pub fn message_times(&self) -> Vec<i64> {
+        self.message_times.iter().copied().collect()
+    }
+
+    /// This routine with the Gmail messages a resume carries, by instant (`mail.json`): they replace any
+    /// [`Routine::with_messages`] put in.
+    pub fn with_message_times(mut self, times: &[i64]) -> Routine {
+        let mut times = times.to_vec();
+        times.sort_unstable();
+        self.message_times = times.into();
+        self
     }
 
     /// The messages sent (or reserved) on the routine's day.
@@ -654,9 +681,12 @@ impl Routine {
         self.messages_today
     }
 
-    /// This routine having already sent `n` messages on its day: a resume carries the count.
+    /// This routine having already sent `n` messages on its day: a resume carries the count. A count kept without
+    /// its instants (a `mail.json` written before they were) reads as sent at the day's start, so it holds until
+    /// the next UTC day, as it did then.
     pub fn with_messages(mut self, n: u32) -> Routine {
         self.messages_today = n;
+        self.message_times = std::iter::repeat(self.day * DAY_SECS).take(n as usize).collect();
         self
     }
 

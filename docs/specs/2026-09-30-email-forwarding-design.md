@@ -255,7 +255,9 @@ steps below as they run.
    *(Amended 2026-10-19, Quinn's ruling "increase the day cap" (session-5 ledger, RULING row of 2026-10-19,
    superseding "Keep 600" for Gmail): a Gmail mailbox's day is at most 1,500 originals in at most 300 sent
    messages (one forward is one Gmail message of up to ten originals) and at most 600 page loads per UTC day;
-   Microsoft 365 keeps 600 a day, provisional pending S6.)*
+   Microsoft 365 keeps 600 a day, provisional pending S6. Review round 2 of e7ae803: the 300 messages are counted
+   over a rolling 24 hours, Gmail's own window, so a backfill that runs past UTC midnight never sends 600 inside
+   one day; the 1,500 originals and the 600 page loads stay per UTC day.)*
 6. **Finish.** With the saved session on (the default, D15) the window closes and the mailbox's profile
    stays; with it off, the `mail-setup` profile is deleted. A backfill still running when the student
    quits **resumes the next time the app is open** with the saved session (it is the same recover

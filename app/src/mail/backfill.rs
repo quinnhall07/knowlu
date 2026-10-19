@@ -121,11 +121,46 @@ pub(super) fn seed_routine(data_dir: &Path, provider: Provider, id: &str, now: i
         }
         None => Routine::new(provider, day, 0),
     };
+    // Gmail's messages are a rolling 24 hours: their instants carry over days (a count with none kept holds the day).
+    if let Some(times) = state.as_ref().and_then(|s| s.gmail_messages.get(id)) {
+        routine = routine.with_message_times(times);
+    }
     // The last look at the Inbox is not a day's fact: it carries over days, so the next look reads from it.
     if let Some(at) = state.and_then(|s| s.last_look.get(id).copied()) {
         routine.looked(at);
     }
     routine
+}
+
+/// Keeps a Gmail mailbox's messages of the last 24 hours (`times`, unix seconds) in `mail.json` at unix second
+/// `now`: merged with what is kept, each instant as often as the more of the two has it (a note never lowers what
+/// another kept), and pruned to the 24 hours before `now`. Best effort, like [`keep_pace`].
+pub(super) fn keep_messages(data_dir: &Path, id: &str, times: &[i64], now: i64) {
+    let _ = MailState::update(data_dir, |s| {
+        let old = s.gmail_messages.get(id).cloned().unwrap_or_default();
+        let count = |list: &[i64]| {
+            let mut c = std::collections::BTreeMap::<i64, usize>::new();
+            for t in list.iter().filter(|t| *t + DAY > now) {
+                *c.entry(*t).or_default() += 1;
+            }
+            c
+        };
+        let mut merged = count(&old);
+        for (t, n) in count(times) {
+            let m = merged.entry(t).or_default();
+            *m = (*m).max(n);
+        }
+        let merged: Vec<i64> = merged.into_iter().flat_map(|(t, n)| std::iter::repeat(t).take(n)).collect();
+        if merged == old {
+            return false;
+        }
+        if merged.is_empty() {
+            s.gmail_messages.remove(id);
+        } else {
+            s.gmail_messages.insert(id.to_string(), merged);
+        }
+        true
+    });
 }
 
 /// Keeps a look at the Inbox in `mail.json` for the next pass to be seeded from (see [`seed_routine`]). Best
@@ -278,6 +313,7 @@ pub fn drive_backfill(d: &Drive, routine: &mut Routine) -> Drove {
             None => {
                 let out = run_one(d, routine, &since, since_idx, now, started);
                 keep_pace(d.data_dir, d.address_id, pace_of(routine), true);
+                keep_messages(d.data_dir, d.address_id, &routine.message_times(), d.clock.now());
                 if let Some(day) = out.frontier.filter(|_| out.stop != Stop::Done) {
                     advance_frontier(d.data_dir, d.address_id, day);
                 }
@@ -350,9 +386,10 @@ fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i
     };
     let look = |at: i64| save_look(d.data_dir, d.address_id, at);
     let state = MailState::load(d.data_dir).ok();
-    let load = |day: i64, loads: u32, messages: u32| {
+    let load = |day: i64, loads: u32, messages: u32, times: &[i64]| {
         let pace = BackfillPace { day, sent_today: 0, paused_until: None, loads_today: loads, messages_today: messages };
         keep_pace(d.data_dir, d.address_id, pace, true);
+        keep_messages(d.data_dir, d.address_id, times, d.clock.now());
     };
     let job = Job {
         provider: d.provider,

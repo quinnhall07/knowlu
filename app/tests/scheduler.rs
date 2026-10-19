@@ -2332,6 +2332,22 @@ fn a_slot_pass_keeps_its_sends_beside_the_backfill_pace_so_the_day_never_passes_
 }
 
 #[test]
+fn a_slot_pass_keeps_each_gmail_message_in_mail_json_before_its_end_even_with_no_pace_yet() {
+    // Review round 2 of e7ae803, #4 (a): a slot pass's note after each send only merged into a pace the day already
+    // kept, so on a day with none its messages reached mail.json only at the pass's end, and an app killed mid-pass
+    // lost up to 30. The final look comes after the send and before the end: the message is already kept.
+    let g = Pass::with_provider("slot-messages-each-send", "google", "active", rig::fwd("on", "ours"));
+    g.mail(&[("Notice", rig::NOW - 3600)]);
+    g.host.st.lock().unwrap().probe_dir = Some(g.d.clone());
+    assert_eq!(g.run().as_deref(), Some("mail: forwarding on, 1 recovered"));
+    let probed = g.host.st.lock().unwrap().probed.clone();
+    assert_eq!(probed.len(), 1, "the one look, at the pass's end");
+    // No file yet is nothing kept.
+    let st: MailState = if probed[0].is_empty() { MailState::default() } else { serde_json::from_str(&probed[0]).expect("mail.json at the look") };
+    assert_eq!(st.backfill_pace.get(rig::ID).map(|p| p.messages_today), Some(1), "{}", probed[0]);
+}
+
+#[test]
 fn a_slot_whose_only_missing_row_never_attaches_stalls_two_days_and_leaves_it_on_the_third() {
     // Review of c8806b3: the lone row that stalls a backfill stalls every slot too. The slots count its days in
     // mail.json as the backfill does (its received minute only), and from the third the row is left.
