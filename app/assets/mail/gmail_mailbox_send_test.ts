@@ -104,6 +104,10 @@ Deno.test("gmail_forward_gives_uploads_longer_than_a_step_wait_and_names_the_cou
     sent: true,
     count: 2,
   });
+  // Live 2026-10-19 (on 2afed51): several rows' chips attach one at a time, more than two seconds apart; a wait
+  // that settled on a count holding steady sent nothing and left the rows.
+  const staggered = mailbox(MAIL, { staggerMs: 2200 });
+  assertEquals(await run("gmail/forward.js", staggered.page, TARGET), { result: "ok", sent: true, count: 2 });
   const newest = mailbox(MAIL, { upload: "slow", uploadMs: 400 });
   assertEquals(
     await run("gmail/forward.js", newest.page, { ...TARGET, wait_ms: 100, upload_ms: 200 }),
@@ -159,7 +163,7 @@ Deno.test("gmail_forward_of_a_conversation_row_expects_one_attachment_per_messag
   assertEquals(box.sent[0].attached, ["m1", "m2#0", "m2#1", "m2#2"]);
   // Without the count the same send is refused: three attachments for one row is not what was asked.
   const blind = mailbox([small[0], convo]);
-  assertEquals(await run("gmail/forward.js", blind.page, { ...TARGET, rows: [row(MAIL[0]), row(MAIL[1])] }), {
+  assertEquals(await run("gmail/forward.js", blind.page, { ...TARGET, upload_ms: 300, rows: [row(MAIL[0]), row(MAIL[1])] }), {
     result: "failed",
     reason: "attachments do not match the rows",
     attached: 4,
@@ -172,6 +176,7 @@ Deno.test("gmail_forward_of_a_conversation_row_expects_one_attachment_per_messag
   assertEquals(
     await run("gmail/forward.js", newest.page, {
       ...TARGET,
+      upload_ms: 300,
       rows: [row(MAIL[0]), { ...row(MAIL[1]), messages: 3 }],
     }),
     { result: "failed", reason: "attachments do not match the rows", attached: 2, expected: 4 },
@@ -230,12 +235,12 @@ Deno.test("gmail_forward_never_sends_a_compose_with_another_recipient_or_the_wro
     reason: "recipient not accepted",
   });
   const bare = mailbox(MAIL, { bare: true });
-  assertEquals(await run("gmail/forward.js", bare.page, TARGET), {
+  assertEquals(await run("gmail/forward.js", bare.page, { ...TARGET, upload_ms: 300 }), {
     result: "failed",
     reason: "no attachment",
   });
   const short = mailbox(MAIL, { short: true });
-  assertEquals(await run("gmail/forward.js", short.page, TARGET), {
+  assertEquals(await run("gmail/forward.js", short.page, { ...TARGET, upload_ms: 300 }), {
     result: "failed",
     reason: "attachments do not match the rows",
     attached: 1,

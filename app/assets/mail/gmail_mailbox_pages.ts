@@ -81,6 +81,8 @@ export interface Opts {
   upload?: "slow" | "fails" | "late";
   /** How long an upload takes, in ms (default 100). */
   uploadMs?: number;
+  /** The compose draws no chip at first, then one attached chip every this many ms (live 2026-10-19). */
+  staggerMs?: number;
   /** The row of `id` shows the message `as` once it is ticked. */
   swap?: { id: string; as: string };
   /** The page shows no "1–50 of 123" range. */
@@ -444,7 +446,7 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
       <input type="text" id="subj" name="subjectbox" aria-label="Subject" value="Fwd: ${
       esc(picked[0]?.subject ?? "")
     }">
-      <div id="files">${o.upload === "late" ? "" : files.map(o.upload ? uploading : attached).join("")}</div>
+      <div id="files">${o.upload === "late" || o.staggerMs ? "" : files.map(o.upload ? uploading : attached).join("")}</div>
       ${
       o.driveOffer || total > LIMIT
         ? `<div role="alertdialog">The files you attached are over 25 MB. Send them as Google Drive links?</div>`
@@ -452,7 +454,11 @@ export function mailbox(all: Msg[], o: Opts = {}): Box {
     }
       <div role="button" aria-label="Send ‪(Ctrl-Enter)‬" data-tooltip="Send">Send</div>
       <div role="button" aria-label="Discard draft ‪(Ctrl-Shift-D)‬">Discard</div></div>`;
-    if (o.upload) {
+    if (o.staggerMs) {
+      files.forEach((m, i) =>
+        setTimeout(() => b.el("files")?.insertAdjacentHTML("beforeend", attached(m)), o.staggerMs! * (i + 1))
+      );
+    } else if (o.upload) {
       setTimeout(() => {
         const box = b.el("files");
         if (box) box.innerHTML = files.map(o.upload === "fails" ? failed : attached).join("");

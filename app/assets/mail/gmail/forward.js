@@ -208,19 +208,10 @@ const chipLabels = () => [...compose.querySelectorAll("[aria-label]")].map(nameO
 const uploadFailed = () => chipLabels().some((l) => /^uploading of attachment:.*failed/i.test(l));
 const uploading = () => chipLabels().some((l) => /^uploading of attachment:/i.test(l) && !/failed/i.test(l));
 const attached = () => [...compose.querySelectorAll('[aria-label^="Attachment:"]')];
-// Uploads have their own bound: live (2026-10-19) several rows upload for longer than a step's wait.
-// A compose that attached fewer (Gmail attaching only a conversation's newest message) is known once nothing
-// uploads and the count has held for two seconds (five with no chip yet: live, chips draw after Send).
-let held = { n: -1, since: 0 };
-const settled = () => {
-  if (uploadFailed()) return true;
-  if (uploading()) return (held = { n: -1, since: 0 }, false);
-  const n = attached().length;
-  if (n >= expected) return true;
-  if (n !== held.n) held = { n, since: Date.now() };
-  return Date.now() - held.since >= Math.min(n > 0 ? 2000 : 5000, uploadMs);
-};
-await until(settled, uploadMs);
+// Uploads have their own bound: live (2026-10-19) several rows' chips attach one at a time, seconds apart,
+// for longer than a step's wait. A compose that attached fewer is known only when the bound runs out: a
+// count holding steady for a while is not the end of it.
+await until(() => uploadFailed() || (!uploading() && attached().length >= expected), uploadMs);
 if (uploadFailed()) return await bail({ result: "failed", reason: "attachment failed" });
 
 const attachments = attached();
