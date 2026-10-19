@@ -249,17 +249,29 @@ pub(super) fn left_for(state: &MailState, id: &str) -> Vec<i64> {
 /// sent or held drops the record; a pass that ended stalled on one lone row alone counts `today` for it once (a
 /// row in another minute starts a new record). The stall wins over a row sent or held in its own minute (review
 /// round 1 of e7ae803: a held row from the same burst must not reset the count of a pass that stalled there).
-/// A record whose row is left at once today moves to `lone_left` first, kept there until the backfill closes, so
-/// the next stuck row starts its own count and never undoes it (review round 2 of e7ae803).
+/// A record whose row is left at once today moves to `lone_left` first, kept there until a row in its minute is sent
+/// or held, the backfill closes or the mailbox is disconnected, so the next stuck row starts its own count and never
+/// undoes it (review round 2 of e7ae803). A row sent or held on its third day is not moved, and a kept minute in
+/// which a row was sent or held is dropped (review of 5f71623..6a8e738, #3), unless this pass left a row there at
+/// once: a held row from the same burst never undoes it, as it never resets a stall.
 /// Best effort, like [`keep_pace`].
 pub(super) fn note_stall(data_dir: &Path, id: &str, out: &Outcome, today: i64, phase: Phase) {
     let _ = MailState::update(data_dir, |s| {
         let before = (stalls(s, phase).get(id).copied(), s.lone_left.get(id).cloned());
+        let kept = |m: &i64| out.left_at_once.contains(m);
+        if let Some(left) = s.lone_left.get_mut(id) {
+            left.retain(|m| !out.left_cleared.contains(m) || kept(m));
+            if left.is_empty() {
+                s.lone_left.remove(id);
+            }
+        }
         let mut old = before.0;
         if let Some(r) = old.filter(|r| leaves(r, today)) {
-            let left = s.lone_left.entry(id.to_string()).or_default();
-            if !left.contains(&r.at) {
-                left.push(r.at);
+            if !out.stuck_cleared || kept(&r.at) {
+                let left = s.lone_left.entry(id.to_string()).or_default();
+                if !left.contains(&r.at) {
+                    left.push(r.at);
+                }
             }
             old = None;
         }

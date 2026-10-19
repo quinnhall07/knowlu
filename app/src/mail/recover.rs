@@ -457,11 +457,15 @@ pub struct Outcome {
     pub stalled_at: Option<i64>,
     /// Gmail: a row received in the job's [`Job::stuck`] minute was sent or held.
     pub stuck_cleared: bool,
+    /// Gmail: the minutes of [`Job::left`] in which a row was sent or held (review of 5f71623..6a8e738, #3).
+    pub left_cleared: Vec<i64>,
+    /// Gmail: the minutes in which this pass left a row at once, as a leaving [`Job::stuck`] or one of [`Job::left`].
+    pub left_at_once: Vec<i64>,
 }
 
 impl Outcome {
     fn new() -> Outcome {
-        Outcome { stop: Stop::Done, expected: 0, handled: 0, held: 0, sent: 0, left: 0, cleaned: 0, closed: false, frontier: None, stalled_at: None, stuck_cleared: false }
+        Outcome { stop: Stop::Done, expected: 0, handled: 0, held: 0, sent: 0, left: 0, cleaned: 0, closed: false, frontier: None, stalled_at: None, stuck_cleared: false, left_cleared: Vec::new(), left_at_once: Vec::new() }
     }
 }
 
@@ -1102,10 +1106,15 @@ impl Pass<'_> {
         *self.decided.entry(key).or_default() += 1;
     }
 
-    /// A row received at `at` was sent or held: if it is in the job's stuck minute, the record can go.
+    /// A row received at `at` was sent or held: if it is in the job's stuck minute, the record can go, and if it is in
+    /// a minute kept as left, so can that.
     fn clears_stuck(&mut self, at: i64) {
-        if self.job.stuck.is_some_and(|s| s.at == minute(at)) {
+        let m = minute(at);
+        if self.job.stuck.is_some_and(|s| s.at == m) {
             self.out.stuck_cleared = true;
+        }
+        if self.job.left.contains(&m) && !self.out.left_cleared.contains(&m) {
+            self.out.left_cleared.push(m);
         }
     }
 
@@ -1341,7 +1350,10 @@ impl Pass<'_> {
         let stuck = self.job.stuck.filter(|s| s.leave).map(|s| s.at);
         if let [row] = rows {
             let at = row.at.map(minute);
-            if at.is_some() && (at == stuck || at.is_some_and(|m| self.job.left.contains(&m))) {
+            if let Some(m) = at.filter(|m| Some(*m) == stuck || self.job.left.contains(m)) {
+                if !self.out.left_at_once.contains(&m) {
+                    self.out.left_at_once.push(m);
+                }
                 self.out.left += 1;
                 self.out.handled += 1;
                 self.decide(key_of(row));

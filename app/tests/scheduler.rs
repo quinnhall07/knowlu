@@ -2377,6 +2377,70 @@ fn a_slot_whose_only_missing_row_never_attaches_stalls_two_days_and_leaves_it_on
     assert_eq!(MailState::load(&g.d).unwrap().lone_left.get(rig::ID).cloned(), Some(vec![at]));
 }
 
+/// Runs `g`'s slot `d` days after NOW: its line.
+fn stuck_slot(g: &Pass, d: i64) -> String {
+    g.clk.0.store(rig::NOW + d * rig::DAY, std::sync::atomic::Ordering::SeqCst);
+    g.run().expect("a line")
+}
+
+#[test]
+fn a_lone_row_sent_on_its_third_day_is_not_kept_as_left() {
+    // Review of 5f71623..6a8e738, #3: the record moved to `lone_left` on its third day whether or not the row was
+    // sent or held that day, so a row that attached at last was kept as left: a recover-only mailbox grew a kept
+    // minute for each, and any other single row in that minute that failed once was left at once, never retried.
+    let g = Pass::with_provider("lone-left-sent-third-day", "google", "active", rig::fwd("on", "ours"));
+    let at = rig::NOW - 3_600 - rig::NOW.rem_euclid(60);
+    g.mail(&[("Stuck", at)]);
+    g.host.st.lock().unwrap().no_chip = Some("Stuck".into());
+    for d in 0..2 {
+        assert!(stuck_slot(&g, d).ends_with("stopped: the attachments would not attach"), "day {d}");
+    }
+    g.host.st.lock().unwrap().no_chip = None;
+    assert_eq!(stuck_slot(&g, 2), "mail: forwarding on, 1 recovered");
+    let st = MailState::load(&g.d).unwrap();
+    assert!(st.lone_left.is_empty() && st.recover_stall.is_empty(), "{st:?}");
+}
+
+#[test]
+fn a_row_kept_as_left_is_dropped_once_its_minute_is_sent() {
+    // Review of 5f71623..6a8e738, #3: a row kept as left stayed kept until a backfill closed, which a recover-only
+    // mailbox never has. Once a row in its minute is sent (or held), the minute is no longer kept.
+    let g = Pass::with_provider("lone-left-dropped-when-sent", "google", "active", rig::fwd("on", "ours"));
+    let at = rig::NOW - 3_600 - rig::NOW.rem_euclid(60);
+    g.mail(&[("Stuck", at)]);
+    g.host.st.lock().unwrap().no_chip = Some("Stuck".into());
+    for d in 0..2 {
+        assert!(stuck_slot(&g, d).ends_with("stopped: the attachments would not attach"), "day {d}");
+    }
+    assert_eq!(stuck_slot(&g, 2), "mail: forwarding on, 0 recovered");
+    assert_eq!(MailState::load(&g.d).unwrap().lone_left.get(rig::ID).cloned(), Some(vec![at]));
+    g.host.st.lock().unwrap().no_chip = None;
+    // A later slot the same day (the row is still in the slot's window).
+    assert_eq!(stuck_slot(&g, 2), "mail: forwarding on, 1 recovered");
+    let st = MailState::load(&g.d).unwrap();
+    assert!(st.lone_left.is_empty() && st.recover_stall.is_empty(), "{st:?}");
+}
+
+#[test]
+fn a_row_left_at_once_beside_a_held_row_in_its_minute_stays_left() {
+    // Review round 1 of e7ae803 ruled that the stall wins over a held row from the same burst; the same holds for a
+    // row left at once: a held row in its minute does not undo it, or the stuck row would stall the slot again.
+    let g = Pass::with_provider("lone-left-burst", "google", "active", rig::fwd("on", "ours"));
+    let at = rig::NOW - 3_600 - rig::NOW.rem_euclid(60);
+    let who = "ana.lopez@school.example.invalid";
+    g.mail(&[("Stuck", at), ("Burst", at + 30)]);
+    g.svc.st.lock().unwrap().held = vec![rig::held(who, "Burst", at + 30)];
+    g.host.st.lock().unwrap().no_chip = Some("Stuck".into());
+    for d in 0..2 {
+        assert!(stuck_slot(&g, d).ends_with("stopped: the attachments would not attach"), "day {d}");
+    }
+    // The row stays in the slot's window through day 2; later slots that day leave it at once too.
+    for d in [2, 2, 2] {
+        assert_eq!(stuck_slot(&g, d), "mail: forwarding on, 0 recovered", "day {d}");
+        assert_eq!(MailState::load(&g.d).unwrap().lone_left.get(rig::ID).cloned(), Some(vec![at]), "day {d}");
+    }
+}
+
 #[test]
 fn a_backfill_and_a_slot_stalled_on_different_lone_rows_each_count_their_days_and_both_rows_are_left_on_the_third() {
     // Review of 5f71623..6a8e738, #2: a backfill pass and a slot pass shared one lone-stall record. Row A, old, stalls

@@ -56,6 +56,13 @@ pub struct SvcState {
     pub delete_status: u16,
     /// Each request: (method, path after `/mail`, body).
     pub log: Vec<(String, String, String)>,
+    /// What `POST /reconcile` says the service holds: `{"fp", "minute"}` entries ([`held`]).
+    pub held: Vec<Value>,
+}
+
+/// A held entry for a message from `sender` with `subject` received at `at`, under the rig's fingerprint key.
+pub fn held(sender: &str, subject: &str, at: i64) -> Value {
+    json!({ "fp": knowlu::mail::recover::fingerprint(b"0123456789abcdef0123456789abcdef", sender, subject), "minute": iso(at) })
 }
 
 pub struct Svc {
@@ -143,7 +150,7 @@ fn answer(st: &Mutex<SvcState>, method: &str, path: &str, body: &str) -> (u16, S
         },
         ("POST", p) if p.ends_with("/hint") || p.ends_with("/state") => (200, r#"{"ok":true}"#.to_string()),
         ("POST", "/canary") => (201, json!({ "canary_id": "c-1", "sent_at": "2026-10-02T10:00:00Z" }).to_string()),
-        ("POST", "/reconcile") => (200, json!({ "address_id": ID, "key": FPKEY_B64, "held": [] }).to_string()),
+        ("POST", "/reconcile") => (200, json!({ "address_id": ID, "key": FPKEY_B64, "held": s.held }).to_string()),
         ("POST", "/batches") => (201, json!({ "batch_id": "batch-1", "nonce": NONCE, "phase": "recover" }).to_string()),
         ("POST", p) if p.starts_with("/batches/") && p.ends_with("/sent") => (200, r#"{"ok":true}"#.to_string()),
         _ => (404, r#"{"error":"no such route"}"#.to_string()),
