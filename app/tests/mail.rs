@@ -719,8 +719,10 @@ struct Fake {
     /// restores its cached view of the search, "of many", past the real end: a search answers a wrong count and
     /// the list will not move. Only a fresh load clears it.
     stale: Cell<bool>,
-    /// The fresh Inbox cannot be opened.
-    fresh_refuses: bool,
+    /// The fresh Inbox cannot be opened after this many opens of it.
+    fresh_refuses_after: Option<usize>,
+    /// The clock at each open of the fresh Inbox.
+    fresh_at: RefCell<Vec<i64>>,
 }
 
 fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
@@ -750,7 +752,8 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         endless: false,
         searched: Cell::new(false),
         stale: Cell::new(false),
-        fresh_refuses: false,
+        fresh_refuses_after: None,
+        fresh_at: Default::default(),
     }
 }
 
@@ -798,18 +801,18 @@ impl Mailbox for Fake {
     fn open(&self, place: Place) -> Result<(), Refusal> {
         self.places.borrow_mut().push(place);
         self.log.borrow_mut().push((format!("open {place:?}"), Value::Null));
+        if place == Place::FreshInbox {
+            self.fresh_at.borrow_mut().push(self.clk.now());
+        }
         match place {
-            Place::FreshInbox if self.fresh_refuses => return Err(Refusal::TimedOut),
+            Place::FreshInbox if self.fresh_refuses_after.is_some_and(|n| self.fresh_at.borrow().len() > n) => {
+                return Err(Refusal::TimedOut)
+            }
             Place::FreshInbox => {
                 self.stale.set(false);
                 self.page.set(0);
             }
             Place::Inbox if self.searched.get() => self.stale.set(true),
-            // The pass is over: the next pass on this fake begins in a document the window loaded fresh.
-            Place::Sent => {
-                self.searched.set(false);
-                self.stale.set(false);
-            }
             _ => {}
         }
         Ok(())
@@ -1508,8 +1511,8 @@ fn a_gmail_backfill_looks_in_the_inbox_every_25_sends_and_walks_again_without_se
     // The first send to bring the count to 25 or more (the third group of ten, 30 sent) is looked in after, in
     // the middle of the second page, not at its end (40); the next such send is the last (60).
     assert_eq!(sent_at_each_look(&mb), [30, 60]);
-    // The Inbox for the search, for the first look, a fresh one for the restart, for the second look, then Sent.
-    assert_eq!(*mb.places.borrow(), [Place::Inbox, Place::Inbox, Place::FreshInbox, Place::Inbox, Place::Sent]);
+    // A fresh Inbox for the search, the Inbox for the first look, a fresh one for the restart, the second look, Sent.
+    assert_eq!(*mb.places.borrow(), [Place::FreshInbox, Place::Inbox, Place::FreshInbox, Place::Inbox, Place::Sent]);
     let names = steps(&mb);
     let first = names.iter().position(|n| n.ends_with("bounce.js")).unwrap();
     // The look opens the Inbox in the document it is in; the walk that follows starts from a fresh one, before
@@ -1604,7 +1607,7 @@ fn no_look_is_made_on_a_gmail_pass_that_sent_nothing() {
     let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &gmail_backfill());
     assert_eq!((out.stop, out.held, out.sent), (Stop::Done, 30, 0));
     assert!(mb.calls("bounce.js").is_empty());
-    assert_eq!(*mb.places.borrow(), [Place::Inbox], "the Inbox was opened once, for the search");
+    assert_eq!(*mb.places.borrow(), [Place::FreshInbox], "the Inbox was opened once, fresh, for the search");
     // Microsoft 365 never looks: it has no scripts for it, and the fake would stop the test.
     let m365 = fake(Provider::M365, unheld(30));
     let out = pass(&m365, &holding(&[]), &mut routine(Provider::M365), &job(Provider::M365, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
@@ -1852,7 +1855,7 @@ fn a_resumed_backfill_saves_its_looks_and_starts_from_the_last_one_saved() {
 fn a_restart_whose_fresh_inbox_will_not_open_stops_the_pass_with_that_refusals_word() {
     let mut mb = fake(Provider::Gmail, unheld(60));
     mb.size = 20;
-    mb.fresh_refuses = true;
+    mb.fresh_refuses_after = Some(1);
     let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &gmail_backfill());
     assert_eq!(out.stop, Stop::Script(Refusal::TimedOut.as_str()));
     assert_eq!(out.sent, 30, "it stopped at the first look's restart");
@@ -1861,6 +1864,75 @@ fn a_restart_whose_fresh_inbox_will_not_open_stops_the_pass_with_that_refusals_w
     assert_eq!(names[first + 1], "open FreshInbox");
     assert_eq!(mb.calls("search.js").len(), 1, "no search was made over the cached view");
     assert!(names[first + 2..].iter().all(|n| !n.ends_with("search.js") && !n.ends_with("list.js") && !n.ends_with("forward.js")), "{names:?}");
+    // One that will not open at the start ends the pass before it searches anything.
+    let mut first_open = fake(Provider::Gmail, unheld(5));
+    first_open.fresh_refuses_after = Some(0);
+    let out = pass(&first_open, &holding(&[]), &mut routine(Provider::Gmail), &gmail_backfill());
+    assert_eq!((out.stop, out.sent), (Stop::Script(Refusal::TimedOut.as_str()), 0));
+    assert!(first_open.calls("search.js").is_empty());
+}
+
+#[test]
+fn every_gmail_pass_searches_a_freshly_loaded_inbox_and_microsoft_365_does_not_need_one() {
+    // A backfill keeps one window across its passes (it waits through a day limit or a pause into the next
+    // day), and the last pass's looks left the cached search view standing: a second pass over the same window
+    // would search over it and walk off its end. Each pass starts from a fresh document.
+    let mut mb = fake(Provider::Gmail, unheld(12));
+    mb.size = 10;
+    let svc = holding(&[]);
+    let mut r = routine(Provider::Gmail);
+    let first = pass(&mb, &svc, &mut r, &gmail_backfill());
+    assert_eq!((first.stop, first.expected, first.sent), (Stop::Done, 12, 12));
+    mb.clk.0.set(mb.clk.now() + 600);
+    let second = pass(&mb, &svc, &mut r, &gmail_backfill());
+    assert_eq!((second.stop, second.expected, second.sent), (Stop::Done, 12, 12));
+    let fresh = mb.places.borrow().iter().filter(|p| **p == Place::FreshInbox).count();
+    assert_eq!(fresh, 2, "one for each pass's search");
+    let m365 = fake(Provider::M365, unheld(3));
+    pass(&m365, &holding(&[]), &mut routine(Provider::M365), &job(Provider::M365, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
+    assert!(m365.places.borrow().iter().all(|p| *p == Place::Inbox || *p == Place::Sent), "Microsoft 365 reloads nothing");
+}
+
+#[test]
+fn a_restart_waits_out_gmails_undo_send_delay_after_the_last_send_before_the_fresh_open() {
+    // forward.js answers ok when the compose closes, but Gmail holds the send for the student's Undo Send delay
+    // (30 seconds at most): a reload inside it could cancel the held send or raise a "Leave site?" dialog.
+    let mut mb = fake(Provider::Gmail, unheld(60));
+    mb.size = 20;
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &gmail_backfill());
+    assert_eq!((out.stop, out.sent), (Stop::Done, 60));
+    // The pass started with no send behind it: no wait.
+    assert_eq!(mb.fresh_at.borrow()[0], NOW);
+    // The restart came right after the third forward (the 30th send): the fresh open is 31 seconds after it.
+    let third = mb.forwards.borrow()[2].0;
+    assert_eq!(mb.fresh_at.borrow()[1], third + 31);
+}
+
+#[test]
+fn a_pass_started_soon_after_a_send_waits_and_one_started_long_after_does_not() {
+    let svc = holding(&[]);
+    let mut r = routine(Provider::Gmail);
+    let mut first = fake(Provider::Gmail, unheld(3));
+    first.size = 10;
+    pass(&first, &svc, &mut r, &gmail_backfill());
+    let sent_at = first.forwards.borrow()[0].0;
+    // Five seconds later, a second pass in the same run (the same window) waits for the delay to pass.
+    let mut soon = fake(Provider::Gmail, unheld(3));
+    soon.clk = first.clk.clone();
+    soon.clk.0.set(sent_at + 5);
+    pass(&soon, &svc, &mut r, &gmail_backfill());
+    assert_eq!(soon.fresh_at.borrow()[0], sent_at + 31);
+    // Long after any send there is nothing to wait for.
+    let last = soon.forwards.borrow()[0].0;
+    let mut late = fake(Provider::Gmail, unheld(3));
+    late.clk = first.clk.clone();
+    late.clk.0.set(last + 3_600);
+    pass(&late, &svc, &mut r, &gmail_backfill());
+    assert_eq!(late.fresh_at.borrow()[0], last + 3_600);
+    // And a routine that has not sent anything waits for nothing.
+    let none = fake(Provider::Gmail, unheld(3));
+    pass(&none, &svc, &mut routine(Provider::Gmail), &gmail_backfill());
+    assert_eq!(none.fresh_at.borrow()[0], NOW);
 }
 
 #[test]

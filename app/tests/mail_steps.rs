@@ -421,3 +421,13 @@ fn a_routine_remembers_when_it_last_read_the_inbox_for_a_report() {
     paused.send_failed(3_000);
     assert_eq!(paused.last_look(), Some(2_500));
 }
+
+#[test]
+fn a_routine_remembers_when_its_last_forward_answered_ok() {
+    let mut r = Routine::new(Provider::Gmail, 9, 0);
+    assert_eq!(r.last_forward(), None);
+    r.forwarded(1_000);
+    r.forwarded(1_400);
+    assert_eq!(r.last_forward(), Some(1_400));
+    assert_eq!(r.clone().paused().last_forward(), Some(1_400));
+}

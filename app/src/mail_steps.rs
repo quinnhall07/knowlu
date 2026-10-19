@@ -478,12 +478,16 @@ pub struct Routine {
     /// In memory only: the instant of the last look at the Inbox that read it (Gmail's non-delivery report
     /// check, `recover.rs`), clean or not, so the next look reads from there and a report is counted once.
     last_look: Option<i64>,
+    /// In memory only: the instant of the last forward the mailbox answered ok to (Gmail), so a pass that
+    /// reloads the window (`Place::FreshInbox`) waits out Gmail's Undo Send delay after it, even when the send
+    /// was the previous pass's.
+    last_forward: Option<i64>,
 }
 
 impl Routine {
     /// A routine on UTC day `day` that has already sent `sent_today` (a resume carries the count).
     pub fn new(provider: Provider, day: i64, sent_today: u32) -> Routine {
-        Routine { provider, day, sent_today, recent: VecDeque::new(), paused_on: None, last_look: None }
+        Routine { provider, day, sent_today, recent: VecDeque::new(), paused_on: None, last_look: None, last_forward: None }
     }
 
     fn roll(&mut self, now: i64) {
@@ -538,6 +542,16 @@ impl Routine {
     /// Whether a refused send has paused today's sends.
     pub fn is_paused(&self) -> bool {
         self.paused_on.is_some()
+    }
+
+    /// A forward was answered ok at `now`.
+    pub fn forwarded(&mut self, now: i64) {
+        self.last_forward = Some(now);
+    }
+
+    /// When the last forward answered ok, if this routine has seen one since the app started.
+    pub fn last_forward(&self) -> Option<i64> {
+        self.last_forward
     }
 
     /// A look at the Inbox read it at `now`.

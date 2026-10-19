@@ -485,6 +485,10 @@ const BOUNCE_FIRST_LOOKBACK_SECS: i64 = 24 * 3_600;
 /// Gmail: the most pages one walk reads before it is called endless (a result of hundreds of thousands of
 /// pages is not a mailbox). A walk that starts over after a look counts from its restart.
 const WALK_PAGES: usize = 5_000;
+/// Gmail holds a send for the student's Undo Send delay (30 seconds at most) after the compose closes, which
+/// is when `forward.js` answers ok. Reloading the window inside it could cancel the held send or raise a "Leave
+/// site?" dialog nothing can answer, so a fresh open waits until this long after the last ok forward.
+const UNDO_SEND_SECS: i64 = 31;
 const NO_END: Stop = Stop::Script("the results did not end");
 /// Gmail: `bounce.js` could not read the Inbox (no list, or an answer that was neither "ok" nor "refused").
 const INBOX_UNREADABLE: Stop = Stop::Script("the inbox could not be read");
@@ -509,7 +513,13 @@ impl Pass<'_> {
         if j.provider == Provider::Guided {
             return Err(Stop::Guided);
         }
-        self.mb.open(Place::Inbox).map_err(refused)?;
+        // Gmail searches in a freshly loaded document: a window kept across passes (a backfill's) still holds the
+        // last pass's cached search view, which a search with the same words would be answered from.
+        if j.provider == Provider::Gmail {
+            self.fresh_inbox()?;
+        } else {
+            self.mb.open(Place::Inbox).map_err(refused)?;
+        }
         let found = self.search()?;
         // Gmail's count is a lower bound when its answer says `exact: false` (an "of many" result whose walk
         // to the last page ran out of time): the cloud only records `expected`, and nothing here stops at it.
@@ -524,6 +534,18 @@ impl Pass<'_> {
         let answer = svc(self.client.reconcile(j.address_id, &iso(j.window.since), &iso(j.window.until)))?;
         let held = Held::from_answer(&answer).ok_or(Stop::Service("bad-reply"))?;
         if j.provider == Provider::Gmail { self.gmail(&held) } else { self.m365(&held, n) }
+    }
+
+    /// Opens the Inbox in a freshly loaded document (Gmail), once Gmail's Undo Send delay has passed since the
+    /// last forward this routine saw answered ok, so the reload cannot touch a send still held.
+    fn fresh_inbox(&mut self) -> Step<()> {
+        if let Some(sent) = self.routine.last_forward() {
+            let wait = sent + UNDO_SEND_SECS - self.clock.now();
+            if wait > 0 {
+                self.clock.sleep(wait);
+            }
+        }
+        self.mb.open(Place::FreshInbox).map_err(refused)
     }
 
     /// The window's search; the same words every time it is asked (Gmail asks again after each Inbox look).
@@ -768,7 +790,7 @@ impl Pass<'_> {
                 // The search is set over the Inbox in a freshly loaded document: in the old one Gmail restores its
                 // cached view of the same search where the pass left it (live 2026-10-19), "of many", and the
                 // walk goes past the real end.
-                self.mb.open(Place::FreshInbox).map_err(refused)?;
+                self.fresh_inbox()?;
                 self.search()?;
                 first = Some(self.gmail_oldest()?);
                 self.walk.clear();
@@ -993,6 +1015,7 @@ impl Pass<'_> {
                 let sent = count(&v, "count").unwrap_or(rows.len() as u32);
                 self.out.sent += sent;
                 self.since_look += sent;
+                self.routine.forwarded(self.clock.now());
                 self.out.handled += rows.len() as u32;
                 for r in &rows {
                     self.decide(key_of(r));
