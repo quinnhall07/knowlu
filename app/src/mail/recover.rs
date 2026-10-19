@@ -922,7 +922,11 @@ impl Pass<'_> {
             (Some("failed"), Some("attachment still uploading"), _) => {
                 return Err(Stop::Script("an attachment was still uploading"))
             }
-            (Some("failed"), Some("over 25 MB"), _) if rows.len() > 1 => {
+            // A group of single rows one short (live, ef25 2026-10-19: 6 rows, 5 attached) is halved too, so
+            // only the row that will not attach is left; nothing was sent. A conversation is one row.
+            (Some("failed"), Some("over 25 MB"), _) | (Some("failed"), Some("attachments do not match the rows"), _)
+                if rows.len() > 1 =>
+            {
                 let (a, b) = rows.split_at(rows.len() / 2);
                 self.forward_gmail(a.to_vec(), None)?;
                 self.forward_gmail(b.to_vec(), None)?;

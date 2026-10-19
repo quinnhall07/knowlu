@@ -704,6 +704,8 @@ struct Fake {
     bounce_after: Option<usize>,
     /// Gmail: the Inbox draws no list (`bounce.js` says `not found`).
     inbox_unreadable: bool,
+    /// Gmail: the single message with this subject never attaches, so any send carrying it is one short.
+    no_chip: Option<&'static str>,
 }
 
 fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
@@ -727,6 +729,7 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         attach_fails: None,
         bounce_after: None,
         inbox_unreadable: false,
+        no_chip: None,
     }
 }
 
@@ -899,6 +902,10 @@ impl Mailbox for Fake {
                 }
                 if self.mismatch && want > rows.len() as u64 {
                     return Ok(json!({ "result": "failed", "reason": "attachments do not match the rows" }));
+                }
+                if self.no_chip.is_some_and(|s| rows.iter().any(|r| r["subject"] == s)) {
+                    let reason = "attachments do not match the rows";
+                    return Ok(json!({ "result": "failed", "reason": reason, "attached": want - 1, "expected": want }));
                 }
                 json!({ "result": "ok", "sent": true, "count": want })
             }
@@ -1582,6 +1589,24 @@ fn a_row_the_pass_left_is_not_tried_again_when_the_walk_starts_over() {
     assert_eq!((tried("Group project"), mb.calls("thread.js").len()), (1, 1));
     let singles = mb.forwarded().into_iter().filter(|t| *t != received(since + 1_800)).count();
     assert_eq!(singles, 34, "each single message went once");
+}
+
+#[test]
+fn a_group_of_single_rows_one_short_is_halved_until_the_row_that_will_not_attach_is_alone() {
+    // Live (ef25, 2026-10-19): six single rows sent together attached five. Leaving all six strands five
+    // that would send; the group is halved, as "over 25 MB" is, and only the row that will not attach is left.
+    let since = window(NOW, None, None).since;
+    let subjects = ["Quiz 3 moved", "Lab report due", "Bad chip", "Reading list", "Office hours", "Exam room"];
+    let msgs = subjects.iter().enumerate().map(|(i, s)| mail(ANA, s, since + 600 * (i as i64 + 1))).collect();
+    let mut mb = fake(Provider::Gmail, msgs);
+    mb.no_chip = Some("Bad chip");
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
+    assert_eq!((out.stop, out.sent, out.left, out.handled), (Stop::Done, 5, 1, 6));
+    let sizes: Vec<usize> = mb.forwards.borrow().iter().map(|(_, a)| a["rows"].as_array().unwrap().len()).collect();
+    assert_eq!(sizes[0], 6, "the six went as one group first");
+    let tried = |subject: &str| mb.forwards.borrow().iter().flat_map(|(_, a)| a["rows"].as_array().unwrap().clone()).filter(|r| r["subject"] == subject).count();
+    assert_eq!(tried("Bad chip"), 4, "6, then 3, then 2, then alone");
+    // A conversation one short is still left whole, never split (it is one row).
 }
 
 #[test]
