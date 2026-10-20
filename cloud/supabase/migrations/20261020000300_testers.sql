@@ -86,3 +86,91 @@ select a.id as account_id,
 -- Owner rights, so no client may read it; the service role, which every gated function's lookup
 -- uses, keeps its select (A7).
 revoke all on public.effective_entitlements from public, anon, authenticated;
+
+-- S2c1 (spec §3.3, §3.5): the three grant writers, each by account id, never an address. The owner
+-- runs them from the SQL editor (the admin schema is closed to every API role), after finding the
+-- account by the address the tester gives and running §8.3's checks. Each writes exactly one
+-- comp_audit row on the grant's account in the same transaction, so a refused call writes none
+-- (A1, A2). Security invoker, with an empty search path: they need no right the owner lacks.
+
+-- A new grant. A second open grant for the account, even one past its ends_at that was never ended,
+-- is refused by the partial unique index (P12); an id with no accounts row by the foreign key (P16).
+-- The note is the admin's words, at most 200 characters, shown only to the tester in their export
+-- and never copied into the audit: no name or relationship ("friends cohort, round 1").
+create function admin.comp_grant(p_account_id uuid, p_ends_at timestamptz, p_cohort text, p_note text)
+returns uuid
+language plpgsql
+set search_path = ''
+as $$
+declare
+  v_id uuid;
+begin
+  begin
+    insert into public.comp_grants (account_id, cohort, ends_at, note)
+    values (p_account_id, p_cohort, p_ends_at, p_note)
+    returning id into v_id;
+  exception when unique_violation then
+    raise exception 'an open grant exists for this account; use admin.comp_extend';
+  end;
+  insert into public.comp_audit (grant_id, account_id, action, ends_at, cohort)
+  values (v_id, p_account_id, 'grant', p_ends_at, p_cohort);
+  return v_id;
+end
+$$;
+
+-- A new end date for the open grant, whether or not its ends_at has passed (so an expired grant
+-- that was never ended is extended, not re-granted: P13). Refuses a date not in the future, and an
+-- account with no open grant (none, or only ended ones).
+create function admin.comp_extend(p_account_id uuid, p_ends_at timestamptz)
+returns uuid
+language plpgsql
+set search_path = ''
+as $$
+declare
+  v_id uuid;
+  v_cohort text;
+begin
+  if p_ends_at is null or p_ends_at <= now() then
+    raise exception 'the new ends_at is not in the future';
+  end if;
+  update public.comp_grants set ends_at = p_ends_at
+   where account_id = p_account_id and ended_at is null
+   returning id, cohort into v_id, v_cohort;
+  if v_id is null then
+    raise exception 'no open grant for this account';
+  end if;
+  insert into public.comp_audit (grant_id, account_id, action, ends_at, cohort)
+  values (v_id, p_account_id, 'extend', p_ends_at, v_cohort);
+  return v_id;
+end
+$$;
+
+-- Ends the open grant early, with a one-word reason (done, asked, misuse, other; the table's
+-- check). The row stays for the record until admin.comp_sweep; the audit keeps the end date the
+-- grant had.
+create function admin.comp_end(p_account_id uuid, p_reason text)
+returns uuid
+language plpgsql
+set search_path = ''
+as $$
+declare
+  v_id uuid;
+  v_ends timestamptz;
+  v_cohort text;
+begin
+  update public.comp_grants set ended_at = now(), ended_reason = p_reason
+   where account_id = p_account_id and ended_at is null
+   returning id, ends_at, cohort into v_id, v_ends, v_cohort;
+  if v_id is null then
+    raise exception 'no open grant for this account';
+  end if;
+  insert into public.comp_audit (grant_id, account_id, action, ends_at, cohort)
+  values (v_id, p_account_id, 'end', v_ends, v_cohort);
+  return v_id;
+end
+$$;
+
+-- Closed to every role but the owner, on top of the schema revoke (A7).
+revoke execute on function admin.comp_grant(uuid, timestamptz, text, text) from public, anon, authenticated, service_role;
+revoke execute on function admin.comp_extend(uuid, timestamptz) from public, anon, authenticated, service_role;
+revoke execute on function admin.comp_end(uuid, text) from public, anon, authenticated, service_role;

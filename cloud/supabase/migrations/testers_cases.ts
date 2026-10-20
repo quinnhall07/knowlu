@@ -106,3 +106,75 @@ export const CASES: TesterCase[] = [
   // No account at all: the foreign key refuses the grant, and no grant row is written.
   { id: "P16", given: "comp_grant naming an id with no accounts row", accounts: [], grants: [], calls: [{ fn: "comp_grant", account: "unknown", endsIn: 30, refused: "foreign key" }], expect: [] },
 ];
+
+// S2c1's A rows (§3.5, §9): the audit row each grant function writes, the refusals that write none,
+// the billing job that never lists a comp, and the service role's rights. Every grant here is made
+// by an owner call, never set up by hand. S2c2 appends A3, A3s, A4 and A6.
+/** An owner call. `audit` is this account's `comp_audit` actions after it, compared as a multiset
+ * (one transaction, one `now()`); every row carries the account's id and, but for a refusal, its
+ * grant's id. `refused` is a substring the refusal must carry; absent, the call succeeds. */
+export interface AuditCall {
+  fn: "comp_grant" | "comp_extend" | "comp_end";
+  account: number | "unknown";
+  endsIn?: number;
+  reason?: "done" | "asked" | "misuse" | "other";
+  refused?: string;
+  audit: Array<"grant" | "extend" | "end">;
+}
+/** A7: one statement as `service_role`, each in its own savepoint. */
+export interface RoleStep {
+  op: "insert" | "update" | "delete" | "select" | "call";
+  on: "comp_grants" | "comp_audit" | "effective_entitlements" | "admin.comp_grant";
+  /** For a select on the view: exactly the four columns the gate's lookup reads (§3.2). */
+  columns?: string[];
+  refused?: "permission denied";
+}
+export interface AdminCase {
+  id: string;
+  given: string;
+  accounts: Account[];
+  calls: AuditCall[];
+  /** A7's statements, after the calls. */
+  asServiceRole?: RoleStep[];
+  /** A5: per account, whether `billing_subscribers` lists it at the end. */
+  billingSubscribers?: boolean[];
+  /** The view's answer per account at the end. */
+  expect: Array<Row | null>;
+}
+
+const DENIED = "permission denied" as const;
+const grantNow = (endsIn = 30): AuditCall => ({ fn: "comp_grant", account: 0, endsIn, audit: ["grant"] });
+
+export const ADMIN_CASES: AdminCase[] = [
+  {
+    id: "A1", given: "comp_grant, comp_extend, comp_end: one audit row each, on the grant's account", accounts: signedUp("a1"),
+    calls: [
+      grantNow(),
+      { fn: "comp_extend", account: 0, endsIn: 60, audit: ["grant", "extend"] },
+      { fn: "comp_end", account: 0, reason: "done", audit: ["grant", "extend", "end"] },
+    ],
+    expect: [NONE],
+  },
+  {
+    id: "A2", given: "a refused comp_grant writes no audit row: a second open grant (P12), an unknown id (P16)", accounts: signedUp("a2"),
+    calls: [
+      grantNow(),
+      { fn: "comp_grant", account: 0, endsIn: 60, refused: EXTEND_HINT, audit: ["grant"] },
+      { fn: "comp_grant", account: "unknown", endsIn: 30, refused: "foreign key", audit: [] },
+    ],
+    expect: [tester(30)],
+  },
+  { id: "A5", given: "a comped account is absent from billing_subscribers", accounts: signedUp("a5"), calls: [grantNow()], billingSubscribers: [false], expect: [tester(30)] },
+  {
+    id: "A7", given: "as service_role: each write on both tables and the grant call refused; the three selects succeed", accounts: signedUp("a7"),
+    calls: [grantNow()],
+    asServiceRole: [
+      ...(["comp_grants", "comp_audit"] as const).flatMap((on) => (["insert", "update", "delete"] as const).map((op) => ({ op, on, refused: DENIED }))),
+      { op: "call", on: "admin.comp_grant", refused: DENIED },
+      { op: "select", on: "comp_grants" },
+      { op: "select", on: "comp_audit" },
+      { op: "select", on: "effective_entitlements", columns: ["account_id", "plan", "status", "current_period_end"] },
+    ],
+    expect: [tester(30)],
+  },
+];

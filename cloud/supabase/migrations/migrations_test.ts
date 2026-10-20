@@ -331,8 +331,10 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // and the re-issued `enforce_budget`, writing; each revoked from `public, anon, authenticated`),
   // plus the T1.3 review's `refund_allowance` (writing, revoked the same way), plus T2g.1's two
   // (`mail_hand_off` and `count_mail_arrival`, writing, each revoked from `public, anon,
-  // authenticated`), plus T3e's `expire_mail_work` (writing, revoked the same way).
-  assertEquals(parsed, 40, "today's corpus should parse exactly 40 function creations");
+  // authenticated`), plus T3e's `expire_mail_work` (writing, revoked the same way), plus L8 S2c1's
+  // three in <stamp>_testers.sql (`admin.comp_grant`, `admin.comp_extend`, `admin.comp_end`;
+  // writing, each revoked from `public, anon, authenticated, service_role`).
+  assertEquals(parsed, 43, "today's corpus should parse exactly 43 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -2320,4 +2322,100 @@ Deno.test("S2b: the case table holds §9's live P rows, the none-row cases first
   }
   const text = await Deno.readTextFile(new URL("testers_cases.ts", HERE));
   assert(/\/\/[^\n]*P4, P7, P10 and P11/.test(text), "the retired ids are reserved in a comment");
+});
+
+// L8 S2c1 (friends-testers §3.3, §3.5, §9 layer i, Amendment 2026-10-20): the three grant writers,
+// each by account id. Each writes exactly one audit row on the grant's account and never deletes;
+// nothing updates the audit; P12's refusal names admin.comp_extend; comp_extend takes the open grant
+// alone, refuses a date not in the future, and never tests the grant's own ends_at (P13).
+const GRANT_FNS = [["comp_grant", "uuid, timestamptz, text, text"], ["comp_extend", "uuid, timestamptz"], [
+  "comp_end",
+  "uuid, text",
+]] as const;
+const OPEN_ONE = "where account_id = p_account_id and ended_at is null returning";
+const P12_MESSAGE = "an open grant exists for this account; use admin.comp_extend";
+
+/** The flattened header (outside the body) and `$$` body of `admin.<fn>`; empty when not defined. */
+function adminFunction(flat: string, fn: string): { header: string; body: string } {
+  const m = new RegExp(`create (?:or replace )?function admin\\.${fn}\\([^)]*\\) (.*?) as \\$\\$(.*?)\\$\\$([^;]*);`)
+    .exec(flat);
+  return { header: m ? `${m[1]} ${m[3]}` : "", body: m?.[2] ?? "" };
+}
+
+export function grantFunctionProblems(sql: string): string[] {
+  const flat = flatten(sql);
+  const out: string[] = [];
+  if (/\bupdate (?:only )?(?:"?public"?\s?\.\s?)?"?comp_audit\b/.test(flat)) out.push("an update of comp_audit");
+  for (const [fn, args] of GRANT_FNS) {
+    const { header, body } = adminFunction(flat, fn);
+    if (body === "") {
+      out.push(`no admin.${fn}`);
+      continue;
+    }
+    const audit = `insert into public.comp_audit (grant_id, account_id, action, ends_at, cohort) ` +
+      `values (v_id, p_account_id, '${fn.slice(5)}',`;
+    if ((body.match(/insert into public\.comp_audit\b/g) ?? []).length !== 1 || !body.includes(audit)) {
+      out.push(`${fn}: not exactly one audit row on the grant's account (A1)`);
+    }
+    if (/\bdelete from\b/.test(body)) out.push(`${fn}: deletes`);
+    if (/security definer/.test(header) || !header.includes("set search_path = ''")) out.push(`${fn}: ${header}`);
+    const revoke = `revoke execute on function admin.${fn}(${args}) from public, anon, authenticated, service_role;`;
+    if (!flat.includes(revoke)) out.push(`${fn}: its revoke (A7)`);
+    if (fn === "comp_grant") continue;
+    if (!body.includes(OPEN_ONE) || !body.includes("if v_id is null then raise exception")) {
+      out.push(`${fn}: not the open grant alone, or no refusal without one`);
+    }
+  }
+  const grant = adminFunction(flat, "comp_grant").body;
+  if (!grant.includes(`exception when unique_violation then raise exception '${P12_MESSAGE}';`)) out.push("P12's message");
+  if (grant.indexOf("insert into public.comp_audit") < grant.indexOf("insert into public.comp_grants")) {
+    out.push("comp_grant audits before it grants (A2)");
+  }
+  const extend = adminFunction(flat, "comp_extend").body;
+  if (!extend.includes("if p_ends_at is null or p_ends_at <= now() then raise exception")) out.push("P13: a past date");
+  if (/now\(\) ?<|> ?=? ?now\(\)/.test(extend)) out.push("P13: comp_extend tests a grant's ends_at");
+  return out;
+}
+
+Deno.test("S2c1: comp_grant, comp_extend and comp_end are §3.5's, each auditing once, revoked from every API role", async () => {
+  const { name, sql } = await testersMigration();
+  assertEquals(grantFunctionProblems(sql), [], name);
+});
+
+Deno.test("S2c1: the grant pins refuse an ends_at test, a lost audit, an audit update, a wider revoke and P12's wording", async () => {
+  const flat = flatten((await testersMigration()).sql);
+  for (
+    const [from, to] of [
+      ["and ended_at is null returning id, cohort", "and ended_at is null and now() < ends_at returning id, cohort"],
+      ["values (v_id, p_account_id, 'end',", "select (v_id, p_account_id, 'end',"],
+      ["set ended_at = now(),", "set ended_at = now(), at = now() from public.comp_audit where false; update public.comp_audit set at = now(),"],
+      ["admin.comp_end(uuid, text) from public, anon, authenticated, service_role;", "admin.comp_end(uuid, text) from public, anon, authenticated;"],
+      [P12_MESSAGE, "already granted"],
+      ["set search_path = '' as $$ declare v_id uuid; v_cohort", "security definer set search_path = '' as $$ declare v_id uuid; v_cohort"],
+    ]
+  ) {
+    const bad = flat.replace(from, to);
+    assertNotEquals(bad, flat, `the mutation ${from} must apply to the real functions`);
+    assert(grantFunctionProblems(bad).length > 0, `${from} -> ${to} must be refused`);
+  }
+});
+
+Deno.test("S2c1: the case table's A1, A2, A5 and A7 rows: one audit row per success, none per refusal", async () => {
+  const { ADMIN_CASES } = await import("./testers_cases.ts");
+  const byId = new Map(ADMIN_CASES.map((c) => [c.id, c]));
+  for (const id of ["A1", "A2", "A5", "A7"]) assert(byId.has(id), id);
+  for (const c of ADMIN_CASES) {
+    assert(c.accounts.every((a) => a.email.endsWith("@example.invalid")), c.id);
+    const seen = new Map<number | "unknown", string[]>();
+    for (const call of c.calls) {
+      const prior = seen.get(call.account) ?? [];
+      const want = call.refused === undefined ? [...prior, call.fn.slice(5)] : prior;
+      assertEquals([...call.audit].sort(), want.sort(), `${c.id} ${call.fn}`);
+      seen.set(call.account, call.audit);
+    }
+    for (const s of c.asServiceRole ?? []) assertEquals(s.refused !== undefined, s.op !== "select", `${c.id} ${s.on}`);
+  }
+  assertEquals(byId.get("A2")!.calls.map((c) => c.refused), [undefined, "admin.comp_extend", "foreign key"]);
+  assertEquals(byId.get("A5")!.billingSubscribers, [false]);
+  assertEquals(byId.get("A7")!.asServiceRole?.length, 10, "six writes, the call, three selects");
 });
