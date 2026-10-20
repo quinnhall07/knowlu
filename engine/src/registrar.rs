@@ -304,7 +304,7 @@ pub struct Report {
     pub midnight: usize,
     pub warnings: Vec<String>,
     /// A2 item 11: the confirmed notes of the fetched term whose CRN the answer did not list at all
-    /// (absent from P9's `seen`), by vault-relative path. Named here; close-out B3d ends them.
+    /// (absent from P9's `seen`), by vault-relative path; close-out B3d ends each once (`ended`).
     pub missing: Vec<String>,
     /// A2 items 10, 11 and 13: every row read `unread` or `partial` that a confirmed note holds,
     /// and every `partial` row no note holds, as `(key, note, reading)`. The note is unchanged;
@@ -313,6 +313,9 @@ pub struct Report {
     /// A2 items 8, 9 and 13 (close-out B3b): each field this fetch wrote, as `{day, field, from,
     /// note, to}`, in (note path, field) order. Only writes that succeeded.
     pub applied: Vec<Value>,
+    /// A2 items 11 and 13 (close-out B3d): each note this fetch ended, as `{day, kept_yours, note,
+    /// until}` (`until` the pinned end, written or kept yours), in the block's order.
+    pub ended: Vec<Value>,
     /// A2 item 13 (close-out B3c): `dropped`'s P3 and P6 counts beside `no_time` and `midnight`.
     pub exam: usize,
     pub meeting_type: usize,
@@ -324,7 +327,7 @@ pub struct Report {
 }
 
 impl Report {
-    /// `ended` and `kept` are `[]` until close-out B3d and B3e record them.
+    /// `kept` is `[]` until close-out B3e records it.
     pub fn to_json(&self) -> Value {
         json!({
             "term": self.term, "rows": self.rows, "confirmed": self.confirmed, "proposed": self.proposed,
@@ -333,7 +336,7 @@ impl Report {
                 "no_time": self.no_time, "status": self.not_registered,
             },
             "warnings": self.warnings,
-            "applied": self.applied, "ended": [], "kept": [], "status": self.status, "unread": self.unread_entries,
+            "applied": self.applied, "ended": self.ended, "kept": [], "status": self.status, "unread": self.unread_entries,
         })
     }
 }
@@ -388,7 +391,7 @@ pub fn run_parsed(
     // carried, so `refresh_series` moves it to `ended`; with no previous row nothing is stored.
     let whole: Vec<Series> = parsed.series.iter().filter(|s| read.get(&s.source_uid) == Some(&Reading::Whole)).cloned().collect();
     let (prior, _) = cm::read_series_file(vault);
-    let carried = prior.series.into_iter().filter(|s| {
+    let carried = prior.series.iter().cloned().filter(|s| {
         s.calendar == calendar && notes.contains_key(&s.source_uid) && read.get(&s.source_uid).is_some_and(|how| *how != Reading::Whole)
     });
     let input: Vec<Series> = whole.iter().cloned().chain(carried).collect();
@@ -412,7 +415,45 @@ pub fn run_parsed(
         }
     }
     // A2 item 11: missing only when `seen` holds no row with the note's CRN at all.
-    let missing = notes.iter().filter(|(key, _)| !read.contains_key(*key)).map(|(_, note)| note.clone()).collect();
+    let missing: Vec<String> = notes.iter().filter(|(key, _)| !read.contains_key(*key)).map(|(_, note)| note.clone()).collect();
+    // A2 item 11 (close-out B3d), "Ended once": a note is already ended when its term's block holds
+    // an open `ended` entry for it (a closed one never counts) or, with no block for the term, when
+    // the journal's last `until` record for it is the registrar's and dates before the fetch.
+    let block = prior.registrar.get(&calendar);
+    let open = |path: &str| block.is_some_and(|t| t.ended.iter().any(|e| e["note"] == path && e.get("returned").is_none()));
+    let pinned = today.yesterday().unwrap_or(today);
+    let mut ended = Vec::new();
+    for (key, path) in notes.iter().filter(|(_, path)| missing.contains(path)) {
+        let Some(note) = confirmed.get(key) else { continue };
+        let already = match block {
+            Some(_) => open(path),
+            None => journal.records_for(&note.id, Some("until")).last().is_some_and(|r| {
+                r.get("actor").and_then(Value::as_str) == Some(ACTOR)
+                    && r.get("new").and_then(Value::as_str).and_then(|d| d.parse::<Date>().ok()).is_some_and(|d| d < today)
+            }),
+        };
+        if already {
+            continue;
+        }
+        // "When the student set `until` by hand": nothing is written; it is listed "ended by
+        // myBama, kept yours" and its entry opened all the same (its kept entry and card: B3e).
+        let kept_yours = journal.human_edited(&note.id, "until").is_some();
+        if !kept_yours {
+            // Ruling (B3d): an `until` already on or before the pinned end is never moved later.
+            if note.until.is_some_and(|u| u <= pinned) {
+                continue;
+            }
+            let literal = [("until".to_string(), pinned.to_string())];
+            if crate::write::write_literals(vault, path, &literal, &agent, journal, &crate::write::WriteOpts::default()).is_err() {
+                failed.push(format!("registrar: {path}: until not applied (the write failed)"));
+                continue;
+            }
+        }
+        ended.push(json!({ "day": today.to_string(), "kept_yours": kept_yours, "note": path, "until": pinned.to_string() }));
+    }
+    // "When the CRN comes back": a `whole` row closes the note's open entry, written or not.
+    let returned: Vec<String> =
+        notes.iter().filter(|(key, path)| read.get(*key) == Some(&Reading::Whole) && open(path)).map(|(_, path)| path.clone()).collect();
     let unread: Vec<(String, Option<String>, Reading)> = read
         .iter()
         .filter(|(key, how)| matches!(how, Reading::Partial) || (matches!(how, Reading::Unread) && notes.contains_key(*key)))
@@ -443,12 +484,14 @@ pub fn run_parsed(
     cm::sort_registrar_entries(&mut unread_entries);
     cm::sort_registrar_entries(&mut status);
     cm::sort_registrar_entries(&mut applied);
+    cm::sort_registrar_entries(&mut ended);
     let news = cm::RegistrarFetch {
         calendar: calendar.clone(),
         applied: applied.clone(),
-        ended: Vec::new(),
+        ended: ended.clone(),
         status: status.clone(),
         unread: unread_entries.clone(),
+        returned,
     };
     let (_, mut warnings) = cm::refresh_series_with(vault, &[(calendar, input)], today, Some(&news));
     warnings.extend(parsed.warnings.iter().cloned());
@@ -480,6 +523,7 @@ pub fn run_parsed(
         missing,
         unread,
         applied,
+        ended,
         exam: parsed.exam,
         meeting_type: parsed.meeting_type,
         not_registered: parsed.status,

@@ -1453,6 +1453,9 @@ pub struct RegistrarFetch {
     pub ended: Vec<serde_json::Value>,
     pub status: Vec<serde_json::Value>,
     pub unread: Vec<serde_json::Value>,
+    /// A2 item 11, "When the CRN comes back" (close-out B3d): the note paths whose open `ended`
+    /// entry this fetch closes (it gains `returned`, the fetch day).
+    pub returned: Vec<String>,
 }
 
 /// A2 item 13's list order: `applied` and `ended` by (fetch day, note path, field); `kept`, `status`
@@ -2321,6 +2324,13 @@ pub fn refresh_series_with(
         });
         term.last_fetch = today;
         term.applied.extend(news.applied.iter().cloned());
+        // A come-back sets `returned` on the note's open entry, once; no other entry changes.
+        for note in &news.returned {
+            let open = term.ended.iter_mut().find(|e| e["note"] == note.as_str() && e.get("returned").is_none());
+            if let Some(serde_json::Value::Object(entry)) = open {
+                entry.insert("returned".to_string(), serde_json::Value::String(today.to_string()));
+            }
+        }
         term.ended.extend(news.ended.iter().cloned());
         term.status = news.status.clone();
         term.unread = news.unread.clone();
