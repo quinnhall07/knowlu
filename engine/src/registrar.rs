@@ -64,6 +64,34 @@ pub struct Parsed {
     /// Rows with a meeting across midnight: dropped with a warning (§2.2).
     pub midnight: usize,
     pub warnings: Vec<String>,
+    /// P3: `EXAM` meetings seen (a count of meetings, never a warning).
+    pub exam: usize,
+    /// P3: meetings whose `meetingType` is missing or unknown (meetings, warned).
+    pub meeting_type: usize,
+    /// P6: rows outside the school's registered set (rows, warned).
+    pub status: usize,
+    /// P9: every `courseReferenceNumber` of the answer, once, with how its row was read.
+    pub seen: std::collections::BTreeMap<String, Reading>,
+}
+
+/// P9: how [`parse_banner`] read one row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reading {
+    /// A series, no `CLAS` meeting skipped.
+    Whole,
+    /// A series, but a `CLAS` meeting (P4) or an unknown-type meeting (P3) was skipped.
+    Partial,
+    /// No series: P4 left no usable `CLAS` meeting, or only unknown-type meetings, or midnight.
+    Unread,
+    /// P6: the row's status is outside the registered set.
+    Status,
+}
+
+/// [`parse_banner`] with the school's registered `statusIndicator` set given (P6). An empty set
+/// means every row counts. TEST SKELETON (B4 step 2): the implementer replaces this body and has
+/// `parse_banner` call it with `SCHOOLS`' set.
+pub fn parse_banner_with(json: &Value, school: &str, _registered: &[&str]) -> Result<Parsed, String> {
+    parse_banner(json, school)
 }
 
 const DAY_FIELDS: [(&str, DayKey); 7] = [
@@ -330,17 +358,17 @@ mod tests {
         assert_eq!(engl.meets[0].days, vec!["tue", "thu"]);
         assert_eq!(engl.where_.as_deref(), Some("Pretend Library 210"));
         let mut v = fixture();
-        v["data"][0]["scheduleTypeDescription"] = json!("Collaborative Seminar");
+        v["data"]["registrations"][0]["scheduleDescription"] = json!("Collaborative Seminar");
         assert_eq!(by_crn(&parse_banner(&v, "ua").unwrap(), "40001").title, "CS 100", "a word inside a word is not a lab");
     }
 
     #[test]
     fn where_is_cut_to_80_and_a_row_without_a_building_has_none() {
         let long = "B".repeat(90);
-        let row = |building: Value, room: Value| json!([{ "term": "202640", "courseReferenceNumber": "1", "subject": "ZZT",
-            "courseNumber": "101", "scheduleTypeDescription": "Lecture", "meetingsFaculty": [{ "meetingTime": {
+        let row = |building: Value, room: Value| json!({ "data": { "registrations": [{ "term": "202640", "courseReferenceNumber": "1", "subject": "ZZT",
+            "courseNumber": "101", "scheduleDescription": "Lecture", "meetingTimes": [{ "meetingType": "CLAS", "meetingScheduleType": "LEC",
             "beginTime": "0800", "endTime": "0850", "monday": true, "startDate": "08/19/2026", "endDate": "12/04/2026",
-            "buildingDescription": building, "room": room } }] }]);
+            "buildingDescription": building, "room": room }] }] } });
         let p = parse_banner(&row(json!(long), json!("1")), "ua").unwrap();
         assert_eq!(p.series[0].where_.as_deref().map(|w| w.chars().count()), Some(80));
         let p = parse_banner(&row(Value::Null, Value::Null), "ua").unwrap();
@@ -351,9 +379,10 @@ mod tests {
     fn an_empty_parse_is_a_failure_never_an_empty_semester() {
         assert!(parse_banner(&json!([]), "ua").is_err());
         assert!(parse_banner(&json!({ "data": [] }), "ua").is_err());
+        assert!(parse_banner(&json!({ "data": { "registrations": [] } }), "ua").is_err());
         assert!(parse_banner(&json!({ "nothing": 1 }), "ua").is_err());
-        let online_only = json!([{ "term": "202640", "courseReferenceNumber": "9", "subject": "ZZT", "courseNumber": "150",
-            "meetingsFaculty": [{ "meetingTime": { "beginTime": null, "endTime": null } }] }]);
+        let online_only = json!({ "data": { "registrations": [{ "term": "202640", "courseReferenceNumber": "9", "subject": "ZZT", "courseNumber": "150",
+            "meetingTimes": [{ "meetingType": "CLAS", "beginTime": null, "endTime": null }] }] } });
         let err = parse_banner(&online_only, "ua").unwrap_err();
         assert!(err.contains("1 without times"), "{err}");
     }
@@ -361,7 +390,7 @@ mod tests {
     #[test]
     fn another_term_or_a_repeated_crn_is_skipped_with_a_warning() {
         let mut v = fixture();
-        let rows = v["data"].as_array_mut().unwrap();
+        let rows = v["data"]["registrations"].as_array_mut().unwrap();
         let mut other = rows[0].clone();
         other["term"] = json!("202710");
         other["courseReferenceNumber"] = json!("50001");
@@ -743,5 +772,341 @@ mod run_tests {
         keys.sort();
         assert_eq!(keys, ["registrar:ua:202640-40001", "registrar:ua:202640-40002"]);
         let _ = std::fs::remove_dir_all(&v);
+    }
+}
+
+#[cfg(test)]
+mod parse_rule_tests {
+    //! B4 step 2: the spec's D3 amendment, rules P1-P6 and P9, on the recorded shape (flat
+    //! `meetingTimes[]`, `data.registrations`). The main fixture is the invented stand-in for the
+    //! recorded shape; every edge case here is invented JSON built on it, never added to it.
+    use super::*;
+    use jiff::civil::{date, time};
+    use serde_json::json;
+
+    const ALL_DAYS: [&str; 7] = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+
+    fn fixture() -> Value {
+        serde_json::from_str(super::tests::FIXTURE).unwrap()
+    }
+
+    /// One meeting of `kind` (`CLAS`, `EXAM`, ... ; null leaves the key out) on `days`.
+    fn meeting(kind: Value, sched: &str, begin: Value, end: Value, days: &[&str]) -> Value {
+        let mut m = json!({ "meetingScheduleType": sched, "beginTime": begin, "endTime": end,
+            "startDate": "08/19/2026", "endDate": "12/04/2026", "buildingDescription": "Invented Hall", "room": "7" });
+        if !kind.is_null() {
+            m["meetingType"] = kind;
+        }
+        for d in ALL_DAYS {
+            m[d] = json!(days.contains(&d));
+        }
+        m
+    }
+
+    fn clas(begin: &str, end: &str, days: &[&str]) -> Value {
+        meeting(json!("CLAS"), "LEC", json!(begin), json!(end), days)
+    }
+
+    /// A registered row of `ZZT <number>` with these meetings.
+    fn row(crn: &str, number: &str, meetings: Vec<Value>) -> Value {
+        json!({ "term": "202640", "courseReferenceNumber": crn, "subject": "ZZT", "courseNumber": number,
+            "scheduleDescription": "Lecture", "statusIndicator": "IR", "statusDescription": "Invented Registered",
+            "meetingTimes": meetings })
+    }
+
+    /// The fixture's rows plus these.
+    fn with(extra: Vec<Value>) -> Value {
+        let mut v = fixture();
+        v["data"]["registrations"].as_array_mut().unwrap().extend(extra);
+        v
+    }
+
+    fn only(rows: Vec<Value>) -> Value {
+        json!({ "data": { "registrations": rows } })
+    }
+
+    fn parse(v: &Value) -> Parsed {
+        parse_banner(v, "ua").unwrap()
+    }
+
+    fn series<'a>(p: &'a Parsed, crn: &str) -> Option<&'a Series> {
+        let key = format!("registrar:ua:202640-{crn}");
+        p.series.iter().find(|s| s.source_uid == key)
+    }
+
+    // ---- P1: rows ---------------------------------------------------------------------------
+
+    #[test]
+    fn p1_an_answer_without_data_registrations_is_not_a_list_of_rows() {
+        for v in [json!({ "data": {} }), json!({ "data": [] }), json!({ "success": true }), json!([]), json!({ "data": { "registrations": "x" } })] {
+            let err = parse_banner(&v, "ua").unwrap_err();
+            assert!(err.contains("not a list of registration rows"), "{v}: {err}");
+        }
+    }
+
+    #[test]
+    fn p1_a_present_but_empty_registrations_is_the_empty_parse_not_the_missing_list() {
+        let err = parse_banner(&only(Vec::new()), "ua").unwrap_err();
+        assert!(!err.contains("not a list of registration rows"), "an empty list is a list: {err}");
+        assert!(err.contains("no class with meeting times"), "{err}");
+    }
+
+    // ---- P2: meetings -----------------------------------------------------------------------
+
+    #[test]
+    fn p2_the_meetings_faculty_wrapper_is_not_read() {
+        let mut old = row("60001", "201", Vec::new());
+        old.as_object_mut().unwrap().remove("meetingTimes");
+        old["meetingsFaculty"] = json!([{ "meetingTime": clas("0800", "0850", &["monday"]) }]);
+        let p = parse(&with(vec![old]));
+        assert!(series(&p, "60001").is_none(), "{:?}", p.series);
+        assert_eq!(p.no_time, 2, "the fixture's online row and this one: no CLAS meeting in meetingTimes[]");
+        assert_eq!(p.seen["60001"], Reading::Unread);
+    }
+
+    // ---- P3: only CLAS becomes a series ------------------------------------------------------
+
+    #[test]
+    fn p3_a_final_adds_no_weekday_moves_no_date_and_is_counted() {
+        let p = parse(&fixture());
+        let s = series(&p, "40001").unwrap();
+        assert_eq!(s.meets, vec![Meet { days: vec!["mon", "wed", "fri"], start: time(12, 0, 0, 0), end: time(12, 50, 0, 0) }], "the Tuesday final is not a weekly class");
+        assert_eq!((s.first, s.until), (Some(date(2026, 8, 19)), Some(date(2026, 12, 4))), "the 12/08 final stretches nothing");
+        assert_eq!(s.rule.until, Some(date(2026, 12, 4)));
+        assert_eq!(s.where_.as_deref(), Some("Invented Hall 101"), "the final's room 140 is not the place");
+        assert_eq!(p.exam, 1);
+        assert!(!p.warnings.iter().any(|w| w.to_lowercase().contains("exam") || w.contains("CS 100")), "a final is expected, never warned: {:?}", p.warnings);
+    }
+
+    #[test]
+    fn p3_a_missing_or_unknown_meeting_type_is_skipped_counted_warned_and_never_read_as_clas() {
+        let extra = row("60002", "202", vec![
+            clas("0800", "0850", &["monday"]),
+            meeting(json!("LABX"), "LEC", json!("1300"), json!("1350"), &["tuesday"]),
+            meeting(Value::Null, "LEC", json!("1300"), json!("1350"), &["friday"]),
+        ]);
+        let p = parse(&with(vec![extra]));
+        let s = series(&p, "60002").unwrap();
+        assert_eq!(s.meets.len(), 1, "{:?}", s.meets);
+        assert_eq!(s.meets[0].days, vec!["mon"]);
+        assert_eq!(p.meeting_type, 2);
+        assert!(p.warnings.iter().any(|w| w.contains("ZZT 202")), "{:?}", p.warnings);
+        assert_eq!(p.exam, 1, "the unknown ones are not finals");
+    }
+
+    #[test]
+    fn p3_a_row_with_only_unknown_type_meetings_forms_no_series() {
+        let extra = row("60003", "203", vec![meeting(json!("OTHR"), "LEC", json!("0800"), json!("0850"), &["monday"])]);
+        let p = parse(&with(vec![extra]));
+        assert!(series(&p, "60003").is_none());
+        assert_eq!(p.meeting_type, 1);
+        assert_eq!(p.seen["60003"], Reading::Unread);
+    }
+
+    #[test]
+    fn p3_a_row_whose_meetings_are_all_finals_forms_no_series_and_counts_in_no_time() {
+        let extra = row("60004", "204", vec![meeting(json!("EXAM"), "LEC", json!("0800"), json!("1030"), &["tuesday"])]);
+        let p = parse(&with(vec![extra]));
+        assert!(series(&p, "60004").is_none());
+        assert_eq!((p.exam, p.no_time), (2, 2), "the fixture's final and this one; the fixture's online row and this one");
+        assert!(p.warnings.iter().any(|w| w.contains("ZZT 204")), "P4: a row left with no usable CLAS meeting is named: {:?}", p.warnings);
+        assert_eq!(p.seen["60004"], Reading::Unread);
+    }
+
+    // ---- P4: no time, no day ----------------------------------------------------------------
+
+    #[test]
+    fn p4_a_clas_meeting_with_no_time_or_no_day_is_skipped_never_filled_in() {
+        let mut absent = clas("0800", "0850", &["monday"]);
+        absent.as_object_mut().unwrap().remove("beginTime");
+        let cases = [
+            ("absent begin", absent),
+            ("null end", meeting(json!("CLAS"), "LEC", json!("0800"), Value::Null, &["monday"])),
+            ("empty begin", clas("", "0850", &["monday"])),
+            ("blank end", clas("0800", "  ", &["monday"])),
+            ("no day true", clas("0800", "0850", &[])),
+        ];
+        for (name, m) in cases {
+            let p = parse(&with(vec![row("60005", "205", vec![m])]));
+            assert!(series(&p, "60005").is_none(), "{name}");
+            assert_eq!(p.no_time, 2, "{name}: the fixture's online row and this one");
+            assert!(p.warnings.iter().any(|w| w.contains("ZZT 205")), "{name}: {:?}", p.warnings);
+            assert!(!p.warnings.iter().any(|w| w.contains("across midnight")), "{name}");
+        }
+    }
+
+    #[test]
+    fn p4_the_fixtures_online_row_is_named_by_subject_and_number() {
+        let p = parse(&fixture());
+        assert_eq!(p.no_time, 1);
+        assert!(p.warnings.iter().any(|w| w.contains("HIST 105")), "{:?}", p.warnings);
+        assert!(series(&p, "40004").is_none());
+    }
+
+    #[test]
+    fn p4_a_timeless_meeting_beside_a_timed_one_is_not_filled_in_from_it() {
+        let extra = row("60006", "206", vec![clas("0800", "0850", &["monday"]), clas("", "", &["friday"])]);
+        let p = parse(&with(vec![extra]));
+        let s = series(&p, "60006").unwrap();
+        assert_eq!(s.meets, vec![Meet { days: vec!["mon"], start: time(8, 0, 0, 0), end: time(8, 50, 0, 0) }]);
+        assert_eq!(p.no_time, 1, "the row formed a series, so only the fixture's online row is a dropped row");
+    }
+
+    // ---- P5: lab or class -------------------------------------------------------------------
+
+    fn title_of(sched_description: &str, meeting_type: &str, legacy: Option<(&str, &str)>) -> String {
+        let mut r = row("60007", "207", vec![meeting(json!("CLAS"), meeting_type, json!("0800"), json!("0850"), &["monday"])]);
+        r["scheduleDescription"] = json!(sched_description);
+        if let Some((key, value)) = legacy {
+            r[key] = json!(value);
+        }
+        series(&parse(&with(vec![r])), "60007").unwrap().title.clone()
+    }
+
+    #[test]
+    fn p5_a_lab_meeting_schedule_type_or_a_whole_word_schedule_description_is_a_lab() {
+        assert_eq!(title_of("Lecture", "LAB", None), "ZZT 207 Lab");
+        assert_eq!(title_of("Laboratory", "LEC", None), "ZZT 207 Lab");
+        assert_eq!(title_of("Science lab", "LEC", None), "ZZT 207 Lab");
+        assert_eq!(title_of("Lab", "LEC", None), "ZZT 207 Lab");
+        let p = parse(&fixture());
+        assert_eq!(series(&p, "40002").unwrap().title, "CS 100 Lab", "the fixture's lab row, by scheduleDescription");
+    }
+
+    #[test]
+    fn p5_lec_llb_rct_and_sem_are_classes_and_a_word_inside_a_word_is_not_a_lab() {
+        for t in ["LEC", "LLB", "RCT", "SEM"] {
+            assert_eq!(title_of("Lecture", t, None), "ZZT 207", "{t}");
+        }
+        assert_eq!(title_of("Collaborative Seminar", "LEC", None), "ZZT 207");
+        assert_eq!(title_of("Labor Studies", "LEC", None), "ZZT 207");
+    }
+
+    #[test]
+    fn p5_the_keys_this_call_does_not_carry_are_not_read() {
+        assert_eq!(title_of("Lecture", "LEC", Some(("scheduleTypeDescription", "Laboratory"))), "ZZT 207");
+        assert_eq!(title_of("Lecture", "LEC", Some(("scheduleType", "LAB"))), "ZZT 207");
+    }
+
+    // ---- P6: registration status ------------------------------------------------------------
+
+    fn with_status(v: &mut Value, crn: &str, code: Value, description: &str) {
+        let r = v["data"]["registrations"].as_array_mut().unwrap().iter_mut().find(|r| r["courseReferenceNumber"] == crn).unwrap();
+        r["statusIndicator"] = code;
+        r["statusDescription"] = json!(description);
+    }
+
+    #[test]
+    fn p6_with_an_empty_registered_set_every_row_counts() {
+        let mut v = fixture();
+        with_status(&mut v, "40003", json!("XX"), "Invented Withdrawn");
+        for p in [parse_banner(&v, "ua").unwrap(), parse_banner_with(&v, "ua", &[]).unwrap()] {
+            assert!(series(&p, "40003").is_some());
+            assert_eq!(p.status, 0);
+            assert_eq!(p.seen["40003"], Reading::Whole);
+        }
+    }
+
+    #[test]
+    fn p6_a_row_outside_a_non_empty_set_forms_no_series_is_counted_and_named_with_its_description() {
+        let mut v = fixture();
+        with_status(&mut v, "40003", json!("XX"), "Invented Withdrawn");
+        let p = parse_banner_with(&v, "ua", &["IR"]).unwrap();
+        assert!(series(&p, "40003").is_none());
+        assert_eq!(p.status, 1);
+        assert!(p.warnings.iter().any(|w| w.contains("ENGL 101") && w.contains("Invented Withdrawn")), "{:?}", p.warnings);
+        assert_eq!(p.seen["40003"], Reading::Status);
+        for crn in ["40001", "40002", "40006"] {
+            assert!(series(&p, crn).is_some(), "{crn}: rows inside the set are untouched");
+            assert_eq!(p.seen[crn], Reading::Whole);
+        }
+    }
+
+    #[test]
+    fn p6_a_row_with_no_status_indicator_is_outside_a_non_empty_set() {
+        let mut v = fixture();
+        v["data"]["registrations"][2].as_object_mut().unwrap().remove("statusIndicator");
+        let p = parse_banner_with(&v, "ua", &["IR"]).unwrap();
+        assert!(series(&p, "40003").is_none());
+        assert_eq!((p.status, p.seen["40003"]), (1, Reading::Status));
+    }
+
+    #[test]
+    fn p6_a_set_that_excludes_every_row_is_the_empty_parse() {
+        assert!(parse_banner_with(&fixture(), "ua", &["ZZ"]).is_err());
+    }
+
+    // ---- P9: seen ---------------------------------------------------------------------------
+
+    #[test]
+    fn p9_a_row_whose_only_clas_meeting_has_null_times_is_unread_and_forms_no_series() {
+        let p = parse(&fixture());
+        assert_eq!(p.seen["40004"], Reading::Unread);
+        assert!(series(&p, "40004").is_none());
+    }
+
+    #[test]
+    fn p9_a_row_with_only_unknown_type_meetings_is_unread() {
+        let extra = row("60008", "208", vec![meeting(json!("WEIRD"), "LEC", json!("0800"), json!("0850"), &["monday"])]);
+        assert_eq!(parse(&with(vec![extra])).seen["60008"], Reading::Unread);
+    }
+
+    #[test]
+    fn p9_a_usable_and_a_timeless_clas_meeting_is_partial_with_a_series_from_the_usable_one() {
+        let extra = row("60009", "209", vec![clas("0800", "0850", &["monday"]), clas("", "", &["friday"])]);
+        let p = parse(&with(vec![extra]));
+        assert_eq!(p.seen["60009"], Reading::Partial);
+        assert_eq!(series(&p, "60009").unwrap().meets[0].days, vec!["mon"]);
+    }
+
+    #[test]
+    fn p9_a_usable_and_an_unknown_type_meeting_is_partial() {
+        let extra = row("60010", "210", vec![clas("0800", "0850", &["monday"]), meeting(json!("WEIRD"), "LEC", json!("1300"), json!("1350"), &["friday"])]);
+        assert_eq!(parse(&with(vec![extra])).seen["60010"], Reading::Partial);
+    }
+
+    #[test]
+    fn p9_an_exam_meeting_beside_a_clas_one_leaves_the_row_whole() {
+        let p = parse(&fixture());
+        assert_eq!(p.exam, 1, "the fixture's CS 100 carries its final");
+        assert_eq!(p.seen["40001"], Reading::Whole);
+    }
+
+    #[test]
+    fn p9_a_row_under_a_non_registered_status_is_status_not_unread() {
+        let mut v = fixture();
+        with_status(&mut v, "40001", json!("XX"), "Invented Dropped");
+        let p = parse_banner_with(&v, "ua", &["IR"]).unwrap();
+        assert_eq!(p.seen["40001"], Reading::Status);
+    }
+
+    #[test]
+    fn p9_a_meeting_across_midnight_leaves_no_series_and_the_row_unread() {
+        assert_eq!(parse(&fixture()).seen["40005"], Reading::Unread);
+    }
+
+    #[test]
+    fn p9_every_crn_of_the_answer_is_in_seen_exactly_once() {
+        let p = parse(&fixture());
+        let mut keys: Vec<&str> = p.seen.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["40001", "40002", "40003", "40004", "40005", "40006"]);
+        let readings: Vec<Reading> = ["40001", "40002", "40003", "40004", "40005", "40006"].iter().map(|c| p.seen[*c]).collect();
+        assert_eq!(readings, [Reading::Whole, Reading::Whole, Reading::Whole, Reading::Unread, Reading::Unread, Reading::Whole]);
+        let mut v = fixture();
+        let again = v["data"]["registrations"][1].clone();
+        v["data"]["registrations"].as_array_mut().unwrap().push(again);
+        let twice = parse(&v);
+        assert_eq!(twice.seen.len(), 6, "a CRN listed twice is one entry");
+        assert_eq!(twice.seen["40002"], Reading::Whole, "the first reading stands");
+    }
+
+    #[test]
+    fn p9_a_row_of_the_wrong_term_is_still_seen() {
+        let mut other = row("60011", "211", vec![clas("0800", "0850", &["monday"])]);
+        other["term"] = json!("202710");
+        let p = parse(&with(vec![other]));
+        assert!(p.seen.contains_key("60011"), "{:?}", p.seen);
+        assert!(series(&p, "60011").is_none());
     }
 }

@@ -3391,8 +3391,8 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         let first = crate::registrar::run(&vault, text, "ua", Date::constant(2026, 9, 1), &ctx, &mut Journal::new(&vault)).unwrap();
         assert_eq!((first.confirmed, first.proposed), (2, 2), "CS 100 and its lab; ENGL 101 and ART 110 have no course here");
         let mut later: serde_json::Value = serde_json::from_str(text).unwrap();
-        later["data"].as_array_mut().unwrap().retain(|r| r["courseReferenceNumber"] != "40002");
-        later["data"][0]["meetingsFaculty"][0]["meetingTime"]["room"] = serde_json::json!("102");
+        later["data"]["registrations"].as_array_mut().unwrap().retain(|r| r["courseReferenceNumber"] != "40002");
+        later["data"]["registrations"][0]["meetingTimes"][0]["room"] = serde_json::json!("102");
         crate::registrar::run(&vault, &later.to_string(), "ua", P16_MONDAY, &ctx, &mut Journal::new(&vault)).unwrap();
         rank_p16(&vault, P16_MONDAY, Vec::new());
         let cards: Vec<String> = checks(&vault, "approvals")
