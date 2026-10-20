@@ -4,7 +4,7 @@
 //! promise on both is the same — it is read, never written.
 use knowlu::onboarding::{
     adopt_vault_in, apply_profile_settings_in, create_vault_in, dest_for, finish_or_roll_back,
-    default_folders_in, mail_offer_marker, offer_marker, restore_vault_in, WizardPlan,
+    default_folders_in, mail_offer_marker, restore_vault_in, WizardPlan,
 };
 use std::path::{Path, PathBuf};
 
@@ -159,7 +159,6 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
         zybooks: false,
         vhl: false,
         autostart: true,
-        offer_inference: false,
         offer_mail: false,
         zybooks_courses: Vec::new(),
         vhl_sections: Vec::new(),
@@ -444,10 +443,8 @@ fn a_rename_after_panel_five_moves_the_login_and_leaves_nothing_behind() {
     assert!(exists(&new), "the entry is still there after a no-op move");
 }
 
-/// Knowlu plan 3a Task 10 review, M1: a minimal plan, varying only the checkbox under test. The
-/// finish panel's checkbox is `WizardPlan.offer_inference`, and the fix round this covers found
-/// that the brief's own code wired it into only ONE of the three paths that share this panel.
-fn base_plan(offer_inference: bool) -> WizardPlan {
+/// A minimal plan: every checkbox off, the default campus choice, two slots.
+fn base_plan() -> WizardPlan {
     WizardPlan {
         ics_url: None,
         ics_validated: false,
@@ -467,51 +464,26 @@ fn base_plan(offer_inference: bool) -> WizardPlan {
         courses: Vec::new(),
         zybooks_ignore: Vec::new(),
         autostart: true,
-        offer_inference,
         offer_mail: false,
     }
 }
 
-/// The marker path for one profile — the same join `commands::settings_context` reads and clears.
-fn marker_for(app_data: &Path, id: &str) -> PathBuf {
-    offer_marker(&knowlu::profiles::profile_dir(app_data, id))
-}
-
-/// Task 10 review, M1: the CREATE path (`create_vault_in` → `finish_profile_in`) drops the marker
-/// when the finish panel's checkbox was checked, and only then. This is the path the brief's own
-/// code actually wired the marker into, so this pair is the regression guard for it.
-///
-/// `create_vault_in` reads the account it signed in with off `account::PENDING_TARGET` (C1 Task
-/// 12), so this needs a real pending session — `PendingSession` mints one and cleans it (and the
-/// moved copy) up on drop.
-#[cfg(windows)]
+/// A page cached from an older build still sends `offer_inference`. `WizardPlan` has no
+/// `deny_unknown_fields`, so the key is ignored and the plan is not refused. Green while the field
+/// exists and green after it is gone: it pins the upgrade path, not the field.
 #[test]
-fn create_vault_drops_the_offer_marker_when_the_checkbox_was_checked() {
-    let root = tmp("create-offer-on");
-    let home = root.join("home");
-    let app_data = root.join("appdata");
-    let mut session = PendingSession::new("acc-marker-create-on");
-    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(true));
-    assert_eq!(out["ok"], true, "{out}");
-    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
-    session.expect_move_to(&id);
-    assert!(marker_for(&app_data, &id).is_file(), "the checkbox was checked");
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[cfg(windows)]
-#[test]
-fn create_vault_leaves_no_offer_marker_when_the_checkbox_was_not_checked() {
-    let root = tmp("create-offer-off");
-    let home = root.join("home");
-    let app_data = root.join("appdata");
-    let mut session = PendingSession::new("acc-marker-create-off");
-    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
-    assert_eq!(out["ok"], true, "{out}");
-    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
-    session.expect_move_to(&id);
-    assert!(!marker_for(&app_data, &id).exists(), "the checkbox was left unchecked");
-    let _ = std::fs::remove_dir_all(&root);
+fn a_wizard_plan_that_still_sends_offer_inference_is_accepted() {
+    let plan: WizardPlan = serde_json::from_value(serde_json::json!({
+        "timezone": "America/Chicago",
+        "slots": ["12:00", "18:00"],
+        "zybooks": false,
+        "vhl": false,
+        "autostart": true,
+        "offer_inference": true,
+    }))
+    .expect("an older page's key is ignored, not refused");
+    assert_eq!(plan.timezone, "America/Chicago");
+    assert!(plan.autostart);
 }
 
 /// **The cross-process flake (2026-09-29).** `PENDING_TARGET` is one machine-wide name, and two
@@ -567,7 +539,7 @@ fn create_vault_without_a_pending_session_refuses_and_creates_nothing() {
     let root = tmp("no-pending-session");
     let home = root.join("home");
     let app_data = root.join("appdata");
-    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan());
     assert_eq!(out["ok"], false, "{out}");
     assert!(out["error"].as_str().unwrap().contains("sign in again"), "{out}");
     assert!(!home.join("Knowlu").join("Fall 2026").exists(), "no vault directory was created");
@@ -722,7 +694,7 @@ fn a_finish_whose_account_copy_is_empty_still_keeps_the_vault_and_says_so() {
     let mut session = PendingSession::new("acc-restore-empty");
     let (base, handle) = restore_loopback(r#"{"records":[],"notes":[],"record_cursor":0,"note_cursor":0,"more":false}"#);
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
-    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan());
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     session.expect_move_to(&id);
@@ -770,7 +742,7 @@ fn a_finish_whose_account_copy_has_content_writes_it_into_the_new_vault() {
     });
     let (base, handle) = restore_loopback(&knowlu_engine::ledger::dumps_value(&page));
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
-    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan());
     assert_eq!(out["ok"], true, "{out}");
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     session.expect_move_to(&id);
@@ -827,7 +799,7 @@ fn a_restore_into_an_account_with_quinn_records_writes_quinn() {
     let mut session = PendingSession::new("acc-token-quinn");
     let (base, handle) = restore_loopback(&pull_page(vec![pulled_row("quinn", "task_00000000a1", "2026-08-01T10:00:00.000Z")], 1, false));
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
-    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan());
     assert_eq!(out["ok"], true, "{out}");
     session.expect_move_to(out["profile"]["id"].as_str().expect("a profile id"));
     assert_eq!(out["restored"]["records"], 1, "{out}");
@@ -846,7 +818,7 @@ fn a_new_account_gets_student() {
     let (home, app_data) = (root.join("home"), root.join("appdata"));
     // `PendingSession`'s own `AccountStub` is an empty account.
     let mut session = PendingSession::new("acc-token-new");
-    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan());
     assert_eq!(out["ok"], true, "{out}");
     session.expect_move_to(out["profile"]["id"].as_str().expect("a profile id"));
     let (actor, task, journal) = made(&home);
@@ -868,7 +840,7 @@ fn an_account_with_only_agent_records_gets_student() {
     ];
     let (base, handle) = restore_loopback(&pull_page(rows, 2, false));
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
-    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan());
     assert_eq!(out["ok"], true, "{out}");
     session.expect_move_to(out["profile"]["id"].as_str().expect("a profile id"));
     assert_eq!(made(&home).0, "human_actor: student\n", "no human record: student");
@@ -889,7 +861,7 @@ fn quinn_anywhere_wins_over_earlier_student_records() {
     // The probe's two pages, then the restore's own two.
     let (base, handle) = multi_loopback(vec![(200, first), (200, second), (200, first), (200, second)]);
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
-    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan());
     assert_eq!(out["ok"], true, "{out}");
     session.expect_move_to(out["profile"]["id"].as_str().expect("a profile id"));
     assert_eq!(made(&home).0, "human_actor: quinn\n");
@@ -911,7 +883,7 @@ fn the_token_is_decided_before_anything_is_written() {
     let (refusing, handle) = multi_loopback(vec![(503, "")]);
     for base in [closed_loopback_base(), refusing] {
         unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
-        let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+        let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan());
         assert_eq!(out["ok"], false, "{base}: {out}");
         let err = out["error"].as_str().unwrap();
         assert!(err.contains("could not reach your account") && err.contains("press Finish again"), "{err}");
@@ -923,7 +895,7 @@ fn the_token_is_decided_before_anything_is_written() {
 
     let (base, handle) = restore_loopback(EMPTY_PULL_PAGE);
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
-    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan(false));
+    let out = create_vault_in(&app_data, &home, "Fall 2026", &base_plan());
     assert_eq!(out["ok"], true, "the same Finish, retried once the account answers: {out}");
     session.expect_move_to(out["profile"]["id"].as_str().expect("a profile id"));
     assert_eq!(made(&home).0, "human_actor: student\n");
@@ -956,7 +928,7 @@ fn a_feed_that_failed_at_paste_is_saved_by_the_retry_at_finish() {
         (200, EMPTY_PULL_PAGE),           // the restore's own pull, once the vault exists
     ]);
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
-    let mut plan = base_plan(false);
+    let mut plan = base_plan();
     plan.ics_url = Some("https://x.invalid/a.ics".to_string());
     (plan.ics_validated, plan.ics_stored) = (true, false);
     let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
@@ -986,7 +958,7 @@ fn a_feed_that_fails_the_retry_too_is_kept_on_this_machine() {
         (200, EMPTY_PULL_PAGE),  // the restore still runs — one feed's own save is not the account
     ]);
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
-    let mut plan = base_plan(false);
+    let mut plan = base_plan();
     plan.ics_url = Some("https://x.invalid/b.ics".to_string());
     (plan.ics_validated, plan.ics_stored) = (true, false);
     let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
@@ -1013,7 +985,7 @@ fn a_feed_the_account_already_holds_is_not_sent_again_and_never_touches_the_vaul
     // Ruling 11: the token probe's pull, then the restore's.
     let (base, handle) = multi_loopback(vec![(200, EMPTY_PULL_PAGE), (200, EMPTY_PULL_PAGE)]);
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
-    let mut plan = base_plan(false);
+    let mut plan = base_plan();
     plan.ics_url = Some("https://x.invalid/c.ics".to_string());
     (plan.ics_validated, plan.ics_stored) = (true, true);
     let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
@@ -1042,7 +1014,7 @@ fn a_link_that_failed_validation_never_reaches_the_account() {
     // Ruling 11: the token probe's pull, then the restore's.
     let (base, handle) = multi_loopback(vec![(200, EMPTY_PULL_PAGE), (200, EMPTY_PULL_PAGE)]);
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
-    let mut plan = base_plan(false);
+    let mut plan = base_plan();
     plan.ics_url = Some("https://x.invalid/rejected.ics".to_string());
     (plan.ics_validated, plan.ics_stored) = (false, false);
     let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
@@ -1072,7 +1044,7 @@ fn a_personal_calendar_that_failed_at_paste_is_saved_by_the_retry_and_stays_out_
         (200, EMPTY_PULL_PAGE),
     ]);
     unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
-    let mut plan = base_plan(false);
+    let mut plan = base_plan();
     plan.personal_calendar = Some("https://x.invalid/personal.ics".to_string());
     (plan.personal_calendar_validated, plan.personal_calendar_stored) = (true, false);
     let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
@@ -1111,7 +1083,7 @@ fn a_blank_personal_calendar_writes_no_calendars_entry() {
     let home = root.join("home");
     let app_data = root.join("appdata");
     let mut session = PendingSession::new("acc-cal-blank");
-    let mut plan = base_plan(false);
+    let mut plan = base_plan();
     plan.personal_calendar = Some("   ".to_string());
     let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
     assert_eq!(out["ok"], true, "{out}");
@@ -1130,7 +1102,7 @@ fn a_webcal_personal_calendar_is_rewritten_to_https() {
     let app_data = root.join("appdata");
     let mut session = PendingSession::new("acc-cal-webcal");
     let raw = "webcal://x.invalid/y.ics";
-    let mut plan = base_plan(false);
+    let mut plan = base_plan();
     plan.personal_calendar = Some(raw.to_string());
     // Validated at paste and not stored there, so Finish retries it (N1, R-C3'-exec-41).
     plan.personal_calendar_validated = true;
@@ -1158,7 +1130,7 @@ fn a_non_https_personal_calendar_is_refused_and_creates_no_vault() {
     let home = root.join("home");
     let app_data = root.join("appdata");
     let _session = PendingSession::new("acc-cal-http");
-    let mut plan = base_plan(false);
+    let mut plan = base_plan();
     plan.personal_calendar = Some("http://x.invalid/y.ics".to_string());
     let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
     assert_eq!(out["ok"], false, "{out}");
@@ -1175,7 +1147,7 @@ fn a_padded_personal_calendar_is_trimmed() {
     let app_data = root.join("appdata");
     let mut session = PendingSession::new("acc-cal-padded");
     let raw = "  https://x.invalid/y.ics  ";
-    let mut plan = base_plan(false);
+    let mut plan = base_plan();
     plan.personal_calendar = Some(raw.to_string());
     plan.personal_calendar_validated = true;
     let out = create_vault_in(&app_data, &home, "Fall 2026", &plan);
@@ -1214,7 +1186,7 @@ fn discovered_rows_route_through_create_vault_in_to_the_config_the_engine_reads(
     let home = root.join("home");
     let app_data = root.join("appdata");
     let mut session = PendingSession::new("acc-coursework-mapping");
-    let mut plan = base_plan(false);
+    let mut plan = base_plan();
     plan.zybooks = true;
     plan.vhl = true;
     plan.zybooks_courses = vec![
@@ -1257,74 +1229,6 @@ fn discovered_rows_route_through_create_vault_in_to_the_config_the_engine_reads(
     assert!(text.contains("      - 'HowToUseZyBooks2'\n"), "{text}");
     assert!(text.contains("      - 'SomeOtherBook'\n"), "{text}");
 
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-/// Task 10 review, M1: the RESTORE path. `restore_vault_in` alone only copies the backup mirror
-/// out — it takes no `WizardPlan` — so the marker is `finish_or_roll_back`'s doing, exactly as the
-/// live `restore_vault` command calls it. This is the pair the brief's own code silently missed:
-/// checking the box while restoring a vault would have done nothing.
-#[test]
-fn restore_vault_drops_the_offer_marker_when_the_checkbox_was_checked() {
-    let root = tmp("restore-offer-on");
-    let backup = root.join("backup").join("profile_2222222222").join("vault");
-    copy(Path::new("../engine/tests/fixtures/vault-s1"), &backup);
-    let home = root.join("home");
-    let app_data = root.join("appdata");
-    let dest = restore_vault_in(root.join("backup").to_str().unwrap(), &home, "Fall 2026").expect("restore");
-    let out = finish_or_roll_back(&app_data, &dest, Some("Fall 2026".to_string()), &base_plan(true), None);
-    assert_eq!(out["ok"], true, "{out}");
-    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
-    assert!(marker_for(&app_data, &id).is_file(), "the checkbox was checked");
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn restore_vault_leaves_no_offer_marker_when_the_checkbox_was_not_checked() {
-    let root = tmp("restore-offer-off");
-    let backup = root.join("backup").join("profile_3333333333").join("vault");
-    copy(Path::new("../engine/tests/fixtures/vault-s1"), &backup);
-    let home = root.join("home");
-    let app_data = root.join("appdata");
-    let dest = restore_vault_in(root.join("backup").to_str().unwrap(), &home, "Fall 2026").expect("restore");
-    let out = finish_or_roll_back(&app_data, &dest, Some("Fall 2026".to_string()), &base_plan(false), None);
-    assert_eq!(out["ok"], true, "{out}");
-    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
-    assert!(!marker_for(&app_data, &id).exists(), "the checkbox was left unchecked");
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-/// Task 10 review, M1: the ADOPT path. `adopt_vault_in` alone registers the vault and carries no
-/// `WizardPlan` either — the marker is `apply_profile_settings_in`'s doing, the wizard's own
-/// second half for this path (panel 3's backup folder and panel 6's autostart choice go through
-/// the same call).
-#[test]
-fn adopt_vault_drops_the_offer_marker_when_the_checkbox_was_checked() {
-    let root = tmp("adopt-offer-on");
-    let vault = root.join("vault-s1");
-    copy(Path::new("../engine/tests/fixtures/vault-s1"), &vault);
-    let app_data = root.join("appdata");
-    let out = adopt_vault_in(&app_data, vault.to_str().unwrap(), None);
-    assert_eq!(out["ok"], true, "{out}");
-    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
-    let out2 = apply_profile_settings_in(&app_data, &id, &base_plan(true), None);
-    assert_eq!(out2["ok"], true, "{out2}");
-    assert!(marker_for(&app_data, &id).is_file(), "the checkbox was checked");
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn adopt_vault_leaves_no_offer_marker_when_the_checkbox_was_not_checked() {
-    let root = tmp("adopt-offer-off");
-    let vault = root.join("vault-s1");
-    copy(Path::new("../engine/tests/fixtures/vault-s1"), &vault);
-    let app_data = root.join("appdata");
-    let out = adopt_vault_in(&app_data, vault.to_str().unwrap(), None);
-    assert_eq!(out["ok"], true, "{out}");
-    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
-    let out2 = apply_profile_settings_in(&app_data, &id, &base_plan(false), None);
-    assert_eq!(out2["ok"], true, "{out2}");
-    assert!(!marker_for(&app_data, &id).exists(), "the checkbox was left unchecked");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1588,7 +1492,7 @@ fn create_vault_in_honours_the_pages_course_map_slug_and_falls_back_when_blank()
     let root = tmp("course-map-slug");
     let home = root.join("home");
     let mut session = PendingSession::new("acc-course-map-slug");
-    let mut plan = base_plan(false);
+    let mut plan = base_plan();
     plan.course_map = vec![
         ("CS 100".to_string(), "cs-100-custom".to_string()),
         ("GN 103".to_string(), String::new()),
@@ -1615,7 +1519,7 @@ fn a_page_supplied_course_slug_is_normalised_before_it_names_a_file() {
     let root = tmp("course-slug-normalise");
     let home = root.join("home");
     let mut session = PendingSession::new("acc-course-slug-normalise");
-    let mut plan = base_plan(false);
+    let mut plan = base_plan();
     plan.courses = vec![
         knowlu::scaffold::CourseSeed { code: "CS 100".into(), name: "CS 100".into(), slug: "../../evil".into(), label: String::new() },
         knowlu::scaffold::CourseSeed { code: "GN 103".into(), name: "GN 103".into(), slug: "  has spaces  ".into(), label: String::new() },
@@ -1688,11 +1592,11 @@ fn adopting_a_backup_mirror_is_refused_and_registers_nothing() {
 }
 
 /// T14 (email spec §4.1, D6): the mail offer is its own marker file, set and cleared by the same
-/// three finishing paths, from `offer_mail` alone and independent of `offer_inference`.
+/// three finishing paths, from `offer_mail` alone.
 #[test]
 fn the_mail_offer_marker_is_set_and_cleared_on_create_restore_and_adopt() {
     let mail_marker = |app_data: &Path, id: &str| mail_offer_marker(&knowlu::profiles::profile_dir(app_data, id));
-    let plan = |mail: bool| WizardPlan { offer_mail: mail, ..base_plan(false) };
+    let plan = |mail: bool| WizardPlan { offer_mail: mail, ..base_plan() };
     // ADOPT: set, then cleared by a second finish with the box unchecked.
     let root = tmp("mail-offer-adopt");
     let vault = root.join("vault");
@@ -1702,7 +1606,6 @@ fn the_mail_offer_marker_is_set_and_cleared_on_create_restore_and_adopt() {
     let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
     assert_eq!(apply_profile_settings_in(&app_data, &id, &plan(true), None)["ok"], true);
     assert!(mail_marker(&app_data, &id).is_file(), "adopt, offered");
-    assert!(!marker_for(&app_data, &id).exists(), "the two markers are independent");
     assert_eq!(apply_profile_settings_in(&app_data, &id, &plan(false), None)["ok"], true);
     assert!(!mail_marker(&app_data, &id).exists(), "adopt, not offered");
     let _ = std::fs::remove_dir_all(&root);
@@ -1728,7 +1631,7 @@ fn create_vault_sets_the_mail_offer_marker_only_when_offered() {
         let root = tmp(tag);
         let app_data = root.join("appdata");
         let mut session = PendingSession::new(&format!("acc-marker-mail-{on}"));
-        let out = create_vault_in(&app_data, &root.join("home"), "Fall 2026", &WizardPlan { offer_mail: on, ..base_plan(false) });
+        let out = create_vault_in(&app_data, &root.join("home"), "Fall 2026", &WizardPlan { offer_mail: on, ..base_plan() });
         assert_eq!(out["ok"], true, "{out}");
         let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
         session.expect_move_to(&id);

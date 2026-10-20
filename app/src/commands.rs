@@ -641,17 +641,11 @@ pub fn settings_context(cs: State<'_, ConsoleState>) -> Value {
         Some(Err(e)) => (None, json!(e)),
         None => (None, json!("no app data root — the profile name cannot be read")),
     };
-    // Knowlu plan 3a Task 10: the wizard's offer, read ONCE. Cleared here rather than by a second
-    // command, so the prompt cannot be shown twice by a page that polled twice.
-    let offer = crate::onboarding::offer_marker(&cs.data_dir);
-    let offer_inference = offer.is_file();
-    if offer_inference { let _ = std::fs::remove_file(&offer); }
     json!({
         "ok": true, "error": Value::Null,
         "vault": cs.vault.to_string_lossy(), "version": env!("CARGO_PKG_VERSION"),
         "profile_name": name.unwrap_or_else(|| crate::profiles::default_name(&cs.vault)),
         "registry_error": registry_error,
-        "offer_inference": offer_inference,
     })
 }
 
