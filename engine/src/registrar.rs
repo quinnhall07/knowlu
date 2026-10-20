@@ -529,6 +529,19 @@ pub fn status(file: &SeriesFile, today: Date) -> Value {
     json!({ "school": school_key, "held": held, "current": current, "refresh": refresh })
 }
 
+/// G3 (spec A2 item 15, "Who decides"): the term the app's capture fetches for `school_key` on
+/// `today`. It is [`status`]'s `current` over the vault's series file, so the fetch is the term the
+/// Schedule button names; with no registrar calendar held for this school, [`term_for`]'s month
+/// table. Read only: the series file is never written here.
+pub fn fetch_term(vault: &Path, school_key: &str, today: Date) -> Option<String> {
+    let (file, _) = crate::commitments::read_series_file(vault);
+    let line = status(&file, today);
+    match (line["school"].as_str(), line["current"].as_str()) {
+        (Some(s), Some(term)) if s == school_key => Some(term.to_string()),
+        _ => term_for(school_key, today),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Phase 3 (spec `docs/specs/2026-09-26-commitment-model-phase3-design.md` §3). The fixture is

@@ -4,7 +4,7 @@
 //! spawns the real sibling engine: build it first with `cargo build -p knowlu-engine -j 2`, because
 //! `app/build.rs` leaves a zero-byte placeholder at `target/debug/knowlu-engine.exe`.
 use std::path::{Path, PathBuf};
-use knowlu::registrar::{call_urls, registrar_argv, run_file, school_of, start_url};
+use knowlu::registrar::{call_urls, fetch_term, registrar_argv, run_file, school_of, start_url};
 use knowlu::state::ConsoleState;
 
 const FIXTURE: &str = include_str!("../../engine/tests/fixtures/registrar/banner-ua-registration.json");
@@ -249,4 +249,36 @@ fn every_curated_registrar_school_is_a_key_of_the_engines_schools() {
         }
     }
     assert!(seen >= 1, "at least one curated school carries a registrar");
+}
+
+/// G3 (spec A2 item 15, "Who decides"; B3cR fix 1): once every held term is over, the capture
+/// fetches the engine's next term, not `term_for`'s month table, so the press the lit Schedule
+/// button asks for is the one it gets. A fall term over on 12-15 fetches spring; in session it
+/// fetches the held fall; with no series file the month table still decides.
+#[test]
+fn once_the_held_fall_term_is_over_the_capture_fetches_spring() {
+    let _engine = real_engine();
+    let v = scratch("next");
+    let cs = open(&v, "next");
+    let _gone = Gone(vec![v.clone(), cs.data_dir.clone()]);
+    let reg = school_of(&v).expect("UA's row has a registrar entry");
+    let dec15: jiff::civil::Date = "2026-12-15".parse().unwrap();
+    assert_eq!(fetch_term(&v, reg.school, dec15).as_deref(), Some("202640"), "no series file: the month table");
+    cs.set_test_today(Some("2026-09-01".parse().unwrap()));
+    let env = run_file(&cs, "today", reg.school, FIXTURE.as_bytes(), "2026-09-01".parse().unwrap());
+    assert_eq!(env["ok"], true, "{env}");
+    assert_eq!(fetch_term(&v, reg.school, "2026-11-01".parse().unwrap()).as_deref(), Some("202640"), "in session");
+    let term = fetch_term(&v, reg.school, dec15).expect("a term to fetch");
+    let calls = call_urls(reg, &term);
+    assert!(calls.iter().all(|(_, url, _)| url.contains("term=202710")), "{calls:?}");
+}
+
+/// G3 ("Who decides"): the capture asks the engine for its term and never computes one itself.
+#[test]
+fn the_capture_never_picks_a_term_from_the_month_table() {
+    let src = include_str!("../src/registrar.rs");
+    let capture = src.split("fn capture(").nth(1).unwrap().split("\n}\n").next().unwrap();
+    assert!(capture.contains("fetch_term(") && !capture.contains("term_for"), "{capture}");
+    let ask = src.split("pub fn fetch_term(").nth(1).unwrap().split("\n}\n").next().unwrap();
+    assert!(!ask.contains("term_for"), "the app's fetch_term asks the engine: {ask}");
 }

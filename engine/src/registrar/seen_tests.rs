@@ -183,6 +183,23 @@ fn the_next_term_follows_the_latest_held_one_once_it_is_over() {
     assert_eq!(super::term_for("ua", date(2027, 1, 4)).as_deref(), Some("202710"));
 }
 
+/// B3cR fix 1 (A2 item 15, "Who decides"): `fetch_term` is `status`'s `current` for the vault's
+/// school, and the month table only when no calendar of that school is held. It writes nothing.
+#[test]
+fn the_term_to_fetch_is_the_status_lines_current_term() {
+    let fall = Lab::new("fetch-term", "2026-08-31");
+    fall.fetch(D1, &fx());
+    let before = fall.series_file();
+    assert_eq!(super::fetch_term(&fall.v, "ua", date(2026, 11, 1)).as_deref(), Some("202640"));
+    assert_eq!(super::fetch_term(&fall.v, "ua", date(2026, 12, 15)).as_deref(), Some("202710"));
+    assert_eq!(super::term_for("ua", date(2026, 12, 15)).as_deref(), Some("202640"), "the month table alone keeps fall");
+    assert_eq!(super::fetch_term(&fall.v, "zz", date(2026, 12, 15)), None, "another school's calendars are not this one's");
+    assert_eq!(fall.series_file(), before, "read only");
+    let none = Lab::new("fetch-term-none", "2026-08-31");
+    assert_eq!(super::fetch_term(&none.v, "ua", date(2026, 12, 15)).as_deref(), Some("202640"));
+    assert!(!none.v.join(crate::commitments::SERIES_FILE).exists(), "nothing written");
+}
+
 /// B3a (P9, "With no confirmed note, nothing is carried"; A2 item 20, convergence round 3, "A
 /// dropped elective is not carried", the series part). An unmatched course's row read whole is a
 /// proposal; read in part or under a non-registered status it leaves `series` for `ended` and no

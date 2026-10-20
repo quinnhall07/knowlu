@@ -34,6 +34,13 @@ pub fn start_url(reg: &Registrar) -> String {
     format!("https://{}{}{}", reg.host, reg.prefix, reg.start)
 }
 
+/// The term the capture fetches on `today` (G3, spec A2 item 15, "Who decides"): the engine's
+/// answer over the vault's series file, so a press of the lit Schedule button fetches the term it
+/// names. The app never computes a term itself.
+pub fn fetch_term(vault: &Path, school: &str, today: Date) -> Option<String> {
+    knowlu_engine::registrar::fetch_term(vault, school, today)
+}
+
 /// `(method, url, form)` per call, `{term}` filled in.
 pub fn call_urls(reg: &Registrar, term: &str) -> Vec<(String, String, Option<String>)> {
     reg.calls
@@ -132,7 +139,7 @@ fn capture(app: &tauri::AppHandle, cs: &ConsoleState, view: &str) -> Value {
         return failed(format!("the sign-in window is not open; press Get my class times from {} again", reg.label), true);
     };
     let today = crate::commands::now_in(cs).date();
-    let Some(term) = knowlu_engine::registrar::term_for(reg.school, today) else { return failed(NO_REGISTRAR.into(), false) };
+    let Some(term) = fetch_term(&cs.vault, reg.school, today) else { return failed(NO_REGISTRAR.into(), false) };
     let here = w.url().ok();
     let agent = lms_link::session_agent();
     let mut body = String::new();
