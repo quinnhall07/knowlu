@@ -3,7 +3,7 @@ name: reviewer
 description: >-
   Adversarial pre-push review of the current diff against CLAUDE.md's two overriding rules and the
   engine and app invariants. Use before pushing any change to engine/, app/ or cloud/, before opening
-  a PR, and after any cheaper-model agent (mechanical, test-writer, console-ui, implementer) has
+  a PR, and after any cheaper-model agent (mechanical, test-writer, console-ui, implementer, docs-keeper) has
   edited code. Also reviews a spec or plan before anyone executes it (spec/plan mode, selected by
   the dispatch). Reports findings with a concrete failure scenario; never edits. Do not use to
   implement fixes, or for a diff that touches the contract list (contract-reviewer).
@@ -23,7 +23,7 @@ Check, in order:
 4. App invariants: computation in `app/src/commands.rs`, vault writes not through the engine's `write`, a Tauri command missing from a `generate_handler!` list, credentials leaving the device.
 5. Cloud (if touched): missing RLS or auth scoping, unverified webhooks, secrets or student content in logs, edited applied migrations.
 6. Gates: 0 warnings, ignored tests still ignored, LF endings (`*.ps1` CRLF), SHA-pinned actions.
-7. Privacy: each new data class is on the privacy page; `PRIVACY_VERSION` moves only in a release PR; telemetry carries no grades or content; no tokens or student content in logs or reports.
+7. Privacy: each new data class is on the privacy page; `PRIVACY_VERSION` moves only in the PR that carries its page, and never ships before a release deploys that page; telemetry carries no grades or content; no tokens or student content in logs or reports.
 
 Report each finding as `path:line`, the rule it breaks, and a concrete failing scenario. Say plainly when you find nothing. Do not pad. Final message, 60 lines at most.
 

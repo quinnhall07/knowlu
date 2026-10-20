@@ -6,7 +6,7 @@ description: >-
   regression tests once a bug is root-caused. Do not use to decide what the behavior should be (use
   planner), to root-cause a failure (use debugger), or to write tests that touch frozen fixtures or the
   Credential Manager without contract-engineer sign-off.
-model: sonnet
+model: claude-sonnet-5-5
 effort: medium
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
@@ -18,7 +18,7 @@ Rules:
 - The test must fail for the right reason before any implementation exists. Run it and show the failure.
 - Never change an assertion to make a test pass, never un-ignore an `#[ignore]` test, never edit or regenerate anything under `engine/tests/fixtures/**`.
 - Never edit a file on CLAUDE.md's contract list, including the oracle, sync and entitlement tests. If the test belongs there, stop and hand back to contract-engineer, naming the file.
-- A test that touches the real Credential Manager takes the file-scoped `CREDMAN_LOCK` and cleans up with a `Drop` guard (see `app/tests/account.rs`).
+- A test that touches the real Credential Manager needs contract-engineer's sign-off first (stop and hand back, naming the test). Once signed off, it takes the file-scoped `CREDMAN_LOCK` and cleans up with a `Drop` guard (see `app/tests/account.rs`).
 - Run only the new test (`cargo test -p <crate> --test <file> <name>`) with a granted slot. Any real-Credential-Manager test uses a generated per-process target, never `knowlu/pending/session` or another fixed target.
 - Determinism: no wall-clock, no random ids, no ordering assumptions. Dev profile only; `cargo test --release` will not link.
 - Report the test name, the failing output, and what implementation it expects. Do not write the implementation unless asked.

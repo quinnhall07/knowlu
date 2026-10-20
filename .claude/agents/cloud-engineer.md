@@ -5,7 +5,7 @@ description: >-
   ingest-*, judge-*, sync-pull, sync-push, telemetry, gmail-read, google-*), migrations and row-level
   security, the judgment eval (cloud/eval), and the client side that talks to them (cloudmodel.rs). Use for anything involving auth, billing, entitlement, sync storage, the pinned judgment
   model or its prompts and schemas, or user data at rest. Security- and money-sensitive. Do not use for
-  desktop-only engine or app work (use contract-engineer or the main session).
+  desktop-only engine or app work (use contract-engineer or the main session). Use instead of stripe:* agents for billing code.
 model: claude-opus-5-5
 effort: high
 tools: Read, Grep, Glob, Edit, Write, Bash
@@ -23,7 +23,7 @@ Non-negotiables:
 - Migrations are forward-only and covered by `migrations_test.ts` and `migrations_sync_test.ts`. Never edit an applied migration.
 - Never run the supabase CLI or MCP, staging included. `deno test` and `deno check` are fine. The controller runs `db push` (with `--include-all` for back-dated stamps) and reads staging's applied list.
 - Any migration that redefines `sync_notes_path_check` is a new file stamped after every existing one, and it restates the full union of note folders (plus Plan 2's settings paths once they exist). The `sync_contract` latest-path-check test must pass.
-- A new data class or storage adds a privacy-page sentence. `PRIVACY_VERSION` moves only in a release PR.
+- A new data class or storage adds a privacy-page sentence. `PRIVACY_VERSION` moves only in the PR that carries its page, and never ships before a release deploys that page.
 - Tests first (`deno test`); keep the eval thresholds in `cloud/eval/thresholds.json` honest. Report results faithfully.
 - Never run against production; supabase-prod is off limits without the owner's explicit say-so in this session.
 

@@ -3494,7 +3494,7 @@ mod tests {
             Ok(vec![plain()])
         };
         let fetchers: [(&str, Fetcher); 1] = [("zybooks", &ok)];
-        // Pinned, as 4123749 pinned the ingest feed tests: `plain()` is due 2026-08-26, so on the
+        // Pinned, as FEED_DAY pins the ingest feed tests (`ingest_main_defaults_to_cli_via_and_creates_tasks_from_the_feed`): `plain()` is due 2026-08-26, so on the
         // vault's real clock it is imported-past and goes to `archive/`.
         assert_eq!(
             main_with_sources_on(

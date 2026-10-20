@@ -4,8 +4,8 @@ description: >-
   Read-only search and triage, on the cheapest model. Use FIRST, before editing, to answer where is X
   defined or used, which tests cover Y, what calls Z, what does this file or log say, or to list every
   call site of a function or field a change will touch. Never edits or runs commands. Do not use for design questions, root-causing a bug, or anything
-  that needs judgment; use planner or debugger for those.
-model: haiku
+  that needs judgment; use planner or debugger for those. Use instead of the built-in Explore, which skips CLAUDE.md.
+model: claude-haiku-5-5
 effort: low
 tools: Read, Grep, Glob
 ---
