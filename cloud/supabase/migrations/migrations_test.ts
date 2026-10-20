@@ -353,12 +353,13 @@ Deno.test("every view in every migration is either security_invoker or revoked f
   // `RAW_VIEW_KEYWORD` to see `create materialized view` too; none of the five is a materialized
   // view — today's corpus creates none, not because the scan cannot see one: the synthetic case
   // below proves it can. C3's `sync_limits` (revoked, 20260912000100) is the fifth. L8's
-  // `effective_entitlements` (revoked, <stamp>_testers.sql, friends-testers S2b) is the sixth.
-  assertEquals(parsed, 6, "today's corpus should parse exactly 6 view creations");
+  // `effective_entitlements` (revoked, <stamp>_testers.sql, friends-testers S2b) is the sixth, and
+  // `admin.testers` (revoked, the same file, S2e1) the seventh.
+  assertEquals(parsed, 7, "today's corpus should parse exactly 7 view creations");
   // Asserted by name, not merely counted: the exemption must be seen to fire on a real view rather
   // than papering over a scan that never reached one.
   assertEquals(invoker, ["billing_subscribers"]);
-  assertEquals(revoked, ["telemetry_daily", "correction_rates", "monthly_spend", "sync_limits", "effective_entitlements"]);
+  assertEquals(revoked, ["telemetry_daily", "correction_rates", "monthly_spend", "sync_limits", "effective_entitlements", "testers"]);
 });
 
 Deno.test("a view with neither security_invoker nor a revoke is caught by the view guard", () => {
@@ -2604,4 +2605,93 @@ Deno.test("S2d: the case table's R1 row counts twice, refuses a route outside th
   }
   for (const r of ["judge-task", "a", "x".repeat(40)]) assert(pattern.test(r), r);
   for (const r of ["", "Judge", "1judge", "judge_task", "x".repeat(41), "-x"]) assert(!pattern.test(r), r);
+});
+
+// L8 S2e1 (friends-testers §5, §9 layer i, Amendment 2026-10-20): admin.testers, the list Quinn
+// grants and ends from, one row per grant. Its state is derived at read time in §5's order (ended,
+// expired, live) from the negations of effective_entitlements' own grant match, and `paid` is the
+// complement of the view's grant branch, so a grant is live exactly when it entitles its account
+// unless a paid row wins. The address is read from accounts when the view is read, never stored.
+const TESTERS_ITEMS = [
+  "g.account_id",
+  "a.email",
+  "g.cohort",
+  "case when g.ended_at is not null then 'ended' when now() >= g.ends_at then 'expired' else 'live' end as state",
+  "coalesce(e.status, 'none') in ('active', 'trialing') as paid",
+  "g.granted_at",
+  "g.ends_at",
+  "greatest((select max(u.day) from public.usage_daily u where u.account_id = g.account_id), " +
+  "(select max(r.day) from public.route_daily r where r.account_id = g.account_id)) as last_active_day",
+];
+const TESTERS_FROM = "from public.comp_grants g left join public.accounts a on a.id = g.account_id " +
+  "left join public.entitlements e on e.account_id = g.account_id;";
+/** effective_entitlements' grant predicates (S2b's pins), each beside the negation admin.testers carries. */
+const NEGATED: Array<[string, string]> = [
+  ["g.ended_at is null", "case when g.ended_at is not null then 'ended'"],
+  ["now() < g.ends_at", "when now() >= g.ends_at then 'expired' else 'live'"],
+  ["coalesce(e.status, 'none') not in ('active', 'trialing')", "coalesce(e.status, 'none') in ('active', 'trialing') as paid"],
+];
+const TESTERS_REVOKE = "revoke all on admin.testers from public, anon, authenticated, service_role;";
+
+export function testersViewProblems(sql: string): string[] {
+  const flat = flatten(sql);
+  const stmt = /create (?:or replace )?view admin\.testers as [^;]*;/.exec(flat)?.[0] ?? "";
+  if (stmt === "") return ["no create view admin.testers"];
+  const out: string[] = [];
+  const items = selectItems(stmt);
+  if (items.join(" | ") !== TESTERS_ITEMS.join(" | ")) out.push(`select list ${items.join(" | ")}`);
+  if (stmt !== `create view admin.testers as select ${TESTERS_ITEMS.join(", ")} ${TESTERS_FROM}`) {
+    out.push("not one row per grant: comp_grants left join accounts and entitlements, no where");
+  }
+  const ee = eeStatement(sql);
+  for (const [view, mine] of NEGATED) {
+    if (!ee.includes(view) || !stmt.includes(mine)) out.push(`not the view's own predicate: ${view} / ${mine}`);
+  }
+  if (!flat.includes(TESTERS_REVOKE)) out.push("its revoke");
+  return out;
+}
+
+Deno.test("S2e1: admin.testers is one row per grant, §5's states from the view's own predicates, paid, revoked", async () => {
+  const { name, sql } = await testersMigration();
+  assertEquals(testersViewProblems(sql), [], name);
+  for (const [file, raw] of await everyMigrationFile()) {
+    assert(!/\bgrant [^;]* on (?:table )?admin\.testers\b/.test(flatten(raw)), `${file}: a grant on admin.testers`);
+  }
+});
+
+Deno.test("S2e1: the testers pins refuse a moved state order, a shifted boundary, a narrower paid, a join, a where", async () => {
+  const flat = flatten((await testersMigration()).sql);
+  for (
+    const [from, to] of [
+      ["when g.ended_at is not null then 'ended' when now() >= g.ends_at then 'expired'", "when now() >= g.ends_at then 'expired' when g.ended_at is not null then 'ended'"],
+      ["when now() >= g.ends_at then", "when now() > g.ends_at then"],
+      ["coalesce(e.status, 'none') in ('active', 'trialing') as paid", "e.status = 'active' as paid"],
+      ["left join public.accounts a on a.id = g.account_id", "join public.accounts a on a.id = g.account_id"],
+      ["on e.account_id = g.account_id;", "on e.account_id = g.account_id where g.ended_at is null;"],
+      ["admin.testers from public, anon, authenticated, service_role;", "admin.testers from public;"],
+      ["a.email,", "(select u.email from auth.users u where u.id = g.account_id) as email,"],
+    ]
+  ) {
+    const bad = flat.replace(from, to);
+    assertNotEquals(bad, flat, `the mutation ${from} must apply to the real view`);
+    assert(testersViewProblems(bad).length > 0, `${from} -> ${to} must be refused`);
+  }
+});
+
+Deno.test("S2e1: the case table's state column: P2 live and paid, P8 expired, P9 ended, P13 expired then live", async () => {
+  const { CASES } = await import("./testers_cases.ts");
+  const { grantState, isPaid, run } = await import("./testers_model.ts");
+  const byId = new Map(CASES.map((c) => [c.id, c]));
+  assertEquals(CASES.filter((c) => c.testers !== undefined).map((c) => c.id).sort(), ["P13", "P2", "P8", "P9"]);
+  assertEquals(byId.get("P2")!.testers, [{ state: "live", paid: true }]);
+  assertEquals(byId.get("P8")!.testers, [{ state: "expired", paid: false }]);
+  assertEquals(byId.get("P9")!.testers, [{ state: "ended", paid: false }]);
+  assertEquals(byId.get("P13")!.testersBefore?.map((r) => r.state), ["expired", "ended"]);
+  assertEquals(byId.get("P13")!.testers?.map((r) => r.state), ["live", "ended"]);
+  for (const c of CASES.filter((c) => c.testers !== undefined)) {
+    const out = run(c);
+    const rows = (gs: typeof out.grants) => gs.map((g) => ({ state: grantState(g), paid: isPaid(c.accounts[g.account].row) }));
+    assertEquals(rows(out.grantsBefore), c.testersBefore ?? c.testers, `${c.id} before its calls`);
+    assertEquals(rows(out.grants), c.testers, `${c.id} at the end`);
+  }
 });

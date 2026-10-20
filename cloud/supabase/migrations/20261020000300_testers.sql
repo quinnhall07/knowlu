@@ -233,3 +233,30 @@ $$;
 
 revoke execute on function public.count_route(uuid, text) from public, anon, authenticated;
 grant execute on function public.count_route(uuid, text) to service_role;
+
+-- S2e1 (spec §5, Amendment 2026-10-20): the list Quinn grants and ends from, read in the SQL editor
+-- as the owner. One row per grant, never dropped (left joins, no where). The state is derived when
+-- the view is read, in §5's order, from the negations of effective_entitlements' own grant match:
+-- ended (ended_at set), expired (now() >= ends_at), otherwise live. paid is the complement of the
+-- view's grant branch, so a live grant entitles its account unless a paid Stripe row wins, which
+-- paid then shows (§8.3 steps 4, 5 and 5b read it). The address is the account's current one, read
+-- from accounts here and never stored on the grant. The last active day is the latest day the
+-- account has a usage_daily or route_daily row: counts only, never what a call was about.
+create view admin.testers as
+select g.account_id,
+       a.email,
+       g.cohort,
+       case when g.ended_at is not null then 'ended'
+            when now() >= g.ends_at then 'expired'
+            else 'live' end as state,
+       coalesce(e.status, 'none') in ('active', 'trialing') as paid,
+       g.granted_at,
+       g.ends_at,
+       greatest((select max(u.day) from public.usage_daily u where u.account_id = g.account_id),
+                (select max(r.day) from public.route_daily r where r.account_id = g.account_id)) as last_active_day
+  from public.comp_grants g
+  left join public.accounts a on a.id = g.account_id
+  left join public.entitlements e on e.account_id = g.account_id;
+
+-- Owner rights; the admin schema is already closed to every API role, and so is this view.
+revoke all on admin.testers from public, anon, authenticated, service_role;

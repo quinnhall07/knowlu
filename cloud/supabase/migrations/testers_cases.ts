@@ -5,7 +5,8 @@
 // model's fixed now, the staging script's now()); a negative number is in the past.
 // Retired by the Amendment 2026-10-20, reserved and never reused: P4, P7, P10 and P11 (they tested a
 // password or an address match; the view reads neither). They are never data rows.
-// S2b writes the P rows; S2c1 and S2c2 add the A rows, S2d R1, S2e1 the state column, S2e2 the V rows.
+// S2b writes the P rows; S2c1 and S2c2 add the A rows, S2d R1, S2e1 the state column (P2, P8, P9, P13),
+// S2e2 the V rows.
 
 export type Status = "active" | "trialing" | "past_due" | "canceled" | "none";
 /** An `entitlements` row, or the view's answer: `status` / `plan` / `current_period_end`. */
@@ -49,6 +50,17 @@ export interface TesterCase {
   expectBefore?: Array<Row | null>;
   /** The view's answer per account at the end. */
   expect: Array<Row | null>;
+  /** S2e1: `admin.testers`' row per grant at the end, in `grants` order (§5): its state and the
+   * account's `paid` flag. Set on P2, P8, P9 and P13 (§9). */
+  testers?: TestersRow[];
+  /** As `testers`, before the calls, where it differs (P13). */
+  testersBefore?: TestersRow[];
+}
+/** §5's three states, derived at read time in this order: ended, expired, live. */
+export type GrantState = "ended" | "expired" | "live";
+export interface TestersRow {
+  state: GrantState;
+  paid: boolean;
 }
 
 /** The sign-up row `handle_new_user` writes for every account (§2), and the answer it gives unchanged. */
@@ -64,8 +76,8 @@ const EXTEND_HINT = "admin.comp_extend"; // §3.3: P12's refusal names comp_exte
 export const CASES: TesterCase[] = [
   { id: "P0", given: "sign-up none row, no grant: every unpaid account", accounts: signedUp("p0"), grants: [], expect: [NONE] },
   { id: "P3", given: "sign-up none row, open grant: every real tester", accounts: signedUp("p3"), grants: [{ account: 0, endsIn: 30 }], expect: [tester(30)] },
-  { id: "P8", given: "sign-up none row, grant past ends_at", accounts: signedUp("p8"), grants: [{ account: 0, endsIn: -1 }], expect: [NONE] },
-  { id: "P9", given: "sign-up none row, grant ended early", accounts: signedUp("p9"), grants: [{ account: 0, endsIn: 30, endedAgo: 1 }], expect: [NONE] },
+  { id: "P8", given: "sign-up none row, grant past ends_at", accounts: signedUp("p8"), grants: [{ account: 0, endsIn: -1 }], expect: [NONE], testers: [{ state: "expired", paid: false }] },
+  { id: "P9", given: "sign-up none row, grant ended early", accounts: signedUp("p9"), grants: [{ account: 0, endsIn: 30, endedAgo: 1 }], expect: [NONE], testers: [{ state: "ended", paid: false }] },
   {
     id: "P12", given: "a second grant while one is open, live (first) or expired and never ended (second)",
     accounts: signedUp("p12", 2), grants: [{ account: 0, endsIn: 30 }, { account: 1, endsIn: -1 }],
@@ -84,6 +96,8 @@ export const CASES: TesterCase[] = [
       { fn: "comp_extend", account: 1, endsIn: 45, refused: true },
     ],
     expectBefore: [NONE, NONE], expect: [tester(45), NONE],
+    testersBefore: [{ state: "expired", paid: false }, { state: "ended", paid: false }],
+    testers: [{ state: "live", paid: false }, { state: "ended", paid: false }],
   },
   { id: "P14", given: "two sign-up accounts, a grant on the first only", accounts: signedUp("p14", 2), grants: [{ account: 0, endsIn: 30 }], expect: [tester(30), NONE] },
   {
@@ -100,7 +114,7 @@ export const CASES: TesterCase[] = [
   { id: "P3x", given: "no entitlements row, open grant", accounts: [{ email: "p3x-0@example.invalid", row: null }], grants: [{ account: 0, endsIn: 30 }], expect: [tester(30)] },
   // Stripe rows: paid passes through column for column and wins over a grant; unpaid ones yield to it.
   { id: "P1", given: "Stripe active, no grant: the paying-student guard", accounts: paid("p1", { status: "active", plan: "monthly", periodEnd: 20 }), grants: [], expect: [{ status: "active", plan: "monthly", periodEnd: 20 }] },
-  { id: "P2", given: "Stripe active, open grant: paid wins", accounts: paid("p2", { status: "active", plan: "academic_year", periodEnd: 200 }), grants: [{ account: 0, endsIn: 30 }], expect: [{ status: "active", plan: "academic_year", periodEnd: 200 }] },
+  { id: "P2", given: "Stripe active, open grant: paid wins", accounts: paid("p2", { status: "active", plan: "academic_year", periodEnd: 200 }), grants: [{ account: 0, endsIn: 30 }], expect: [{ status: "active", plan: "academic_year", periodEnd: 200 }], testers: [{ state: "live", paid: true }] },
   { id: "P5", given: "Stripe canceled, open grant", accounts: paid("p5", { status: "canceled", plan: "monthly", periodEnd: -3 }), grants: [{ account: 0, endsIn: 30 }], expect: [tester(30)] },
   { id: "P6", given: "Stripe past_due, open grant", accounts: paid("p6", { status: "past_due", plan: "monthly", periodEnd: 2 }), grants: [{ account: 0, endsIn: 30 }], expect: [tester(30)] },
   // No account at all: the foreign key refuses the grant, and no grant row is written.
