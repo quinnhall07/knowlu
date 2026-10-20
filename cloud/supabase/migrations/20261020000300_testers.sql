@@ -196,3 +196,40 @@ revoke execute on function admin.comp_sweep() from public, anon, authenticated, 
 
 -- Daily, at a minute field no other fixed-minute job in the corpus uses (§3.1).
 select cron.schedule('knowlu-sweep-comp', '29 3 * * *', $c$select admin.comp_sweep();$c$);
+
+-- S2d (spec §3.5, §4, Q5, Q11): a daily count of gated calls per account and route, for every
+-- account, in usage_daily's shape. Counts only: the route is a function's name (judge-task,
+-- ingest-zybooks, sync-push, ...), never what a call was about. Kept while the account lives, like
+-- usage_daily; it goes with the account by the cascade and is in the caller's export. A route
+-- outside §4's pattern is refused by the column's check, whoever writes it.
+create table public.route_daily (
+  account_id uuid not null references public.accounts(id) on delete cascade,
+  day date not null,
+  route text not null check (route ~ '^[a-z][a-z0-9-]{0,39}$'),
+  calls integer not null default 0,
+  primary key (account_id, day, route)
+);
+
+-- No client reads or writes it (RLS on, no policy). The service role keeps its rights, as on
+-- usage_daily: count_route writes through it, and the account function's purge deletes from it.
+-- A stray write here misstates a cost; it never grants access.
+alter table public.route_daily enable row level security;
+revoke all on public.route_daily from public, anon, authenticated;
+
+-- One call counted: one statement, so two concurrent calls never lose one. Called from the gate
+-- (_shared/entitlement.ts) after an entitled lookup, never awaited, its errors swallowed, and only
+-- while the ROUTE_COUNTS secret reads on (§4). Security invoker, with an empty search path; execute
+-- for the service role alone.
+create function public.count_route(p_account uuid, p_route text)
+returns void
+language sql
+set search_path = ''
+as $$
+  insert into public.route_daily (account_id, day, route, calls)
+       values (p_account, current_date, p_route, 1)
+  on conflict (account_id, day, route)
+    do update set calls = route_daily.calls + 1;
+$$;
+
+revoke execute on function public.count_route(uuid, text) from public, anon, authenticated;
+grant execute on function public.count_route(uuid, text) to service_role;

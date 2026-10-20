@@ -334,8 +334,10 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // authenticated`), plus T3e's `expire_mail_work` (writing, revoked the same way), plus L8 S2c1's
   // three in <stamp>_testers.sql (`admin.comp_grant`, `admin.comp_extend`, `admin.comp_end`;
   // writing, each revoked from `public, anon, authenticated, service_role`), plus L8 S2c2's
-  // `admin.comp_sweep` in the same file (writing, revoked the same way).
-  assertEquals(parsed, 44, "today's corpus should parse exactly 44 function creations");
+  // `admin.comp_sweep` in the same file (writing, revoked the same way), plus L8 S2d's
+  // `public.count_route` in the same file (writing, revoked from `public, anon, authenticated`,
+  // granted to `service_role`).
+  assertEquals(parsed, 45, "today's corpus should parse exactly 45 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -2520,4 +2522,86 @@ Deno.test("S2c2: the case table's A3, A3s, A4 and A6 rows agree with the cascade
   }
   const a4 = byId.get("A4")!.sweep!;
   assert(a4.some((s) => s.endedAgo !== undefined && -(s.endsIn ?? 30) > s.endedAgo), "A4: least, not coalesce");
+});
+
+// L8 S2d (friends-testers §3.5, §4, §9 layer i, Q5, Q11): route_daily, a per-account count of gated
+// calls in usage_daily's shape, cascading from accounts; and count_route, its one writer, one
+// insert … on conflict, refusing a route outside §4's pattern (a check on the column), execute for
+// the service role only. The service role keeps its rights on the table: the purge deletes from it.
+const ROUTE_PATTERN = "^[a-z][a-z0-9-]{0,39}$";
+const COUNT_ROUTE = "create function public.count_route(p_account uuid, p_route text) returns void language sql " +
+  "set search_path = '' as $$ insert into public.route_daily (account_id, day, route, calls) " +
+  "values (p_account, current_date, p_route, 1) on conflict (account_id, day, route) " +
+  "do update set calls = route_daily.calls + 1; $$;";
+
+export function routeDailyProblems(sql: string): string[] {
+  const flat = flatten(sql);
+  if (!/create table public\.route_daily \(/.test(flat)) return ["no route_daily"];
+  const out: string[] = [];
+  const cols = tableColumns(flat, "route_daily");
+  if ([...cols.keys()].join() !== "account_id,day,route,calls") out.push(`columns ${[...cols.keys()]}`);
+  if (cols.get("account_id") !== CASCADE) out.push("route_daily.account_id must cascade (A3, A3s)");
+  if (cols.get("route") !== `route text not null check (route ~ '${ROUTE_PATTERN}')`) out.push("the route pattern (R1)");
+  if (cols.get("calls") !== "calls integer not null default 0") out.push(`calls: ${cols.get("calls")}`);
+  if (!tableItems(flat, "route_daily").includes("primary key (account_id, day, route)")) out.push("its key");
+  if (!flat.includes("alter table public.route_daily enable row level security;")) out.push("RLS");
+  if (!flat.includes("revoke all on public.route_daily from public, anon, authenticated;")) out.push("client revoke");
+  if (!flat.includes(COUNT_ROUTE)) out.push("count_route is not one insert … on conflict, security invoker (R1)");
+  if (!flat.includes("revoke execute on function public.count_route(uuid, text) from public, anon, authenticated;")) {
+    out.push("count_route's revoke");
+  }
+  if (!flat.includes("grant execute on function public.count_route(uuid, text) to service_role;")) out.push("its grant");
+  return out;
+}
+
+Deno.test("S2d: route_daily is usage_daily's shape and cascades; count_route is one upsert, the service role's alone", async () => {
+  const { name, sql } = await testersMigration();
+  assertEquals(routeDailyProblems(sql), [], name);
+  for (const [file, raw] of await everyMigrationFile()) {
+    const text = flatten(raw);
+    const on = "on (?:table )?(?:public\.)?route_daily\b";
+    assert(!new RegExp(`\bgrant [^;]*${on}[^;]* to [^;]*\b(anon|authenticated|public)\b`).test(text), `${file}: route_daily granted`);
+    assert(!new RegExp(`create policy [^;]*${on}`).test(text), `${file}: a policy on route_daily`);
+    assert(!new RegExp(`\brevoke [^;]*${on}[^;]* from [^;]*\bservice_role\b`).test(text), `${file}: the purge deletes it`);
+    assert(!/\bgrant execute on function [^;]*count_route\b[^;]* to [^;]*\b(anon|authenticated|public)\b/.test(text), file);
+  }
+});
+
+Deno.test("S2d: the route pins refuse a definer, a second statement, no conflict clause, a looser pattern, no cascade", async () => {
+  const flat = flatten((await testersMigration()).sql);
+  for (
+    const [from, to] of [
+      ["p_route text) returns void language sql set", "p_route text) returns void language sql security definer set"],
+      ["as $$ insert into public.route_daily", "as $$ delete from public.route_daily where false; insert into public.route_daily"],
+      [" do update set calls = route_daily.calls + 1;", " do nothing;"],
+      [ROUTE_PATTERN, "^[a-z0-9_-]+$"],
+      ["references public.accounts(id) on delete cascade, day", "references public.accounts(id), day"],
+      ["count_route(uuid, text) from public, anon, authenticated;", "count_route(uuid, text) from public;"],
+    ]
+  ) {
+    const bad = flat.replace(from, to);
+    assertNotEquals(bad, flat, `the mutation ${from} must apply to the real SQL`);
+    assert(routeDailyProblems(bad).length > 0, `${from} -> ${to} must be refused`);
+  }
+});
+
+Deno.test("S2d: the case table's R1 row counts twice, refuses a route outside the pinned pattern, denies authenticated", async () => {
+  const { ROUTE_CASES } = await import("./testers_cases.ts");
+  assertEquals(ROUTE_CASES.map((c) => c.id), ["R1"]);
+  // The pattern the migration's route column checks, so the row and the SQL cannot drift apart.
+  const check = /\broute text not null check \(route ~ '([^']+)'\)/.exec(flatten((await testersMigration()).sql));
+  assert(check !== null, "route_daily.route carries the route pattern (§4)");
+  const pattern = new RegExp(check[1]);
+  for (const c of ROUTE_CASES) {
+    assert(c.accounts.length === 1 && c.accounts[0].email.endsWith("@example.invalid"), c.id);
+    const counted: Record<string, number> = {};
+    for (const s of c.steps) {
+      const want = s.as === "authenticated" ? "permission denied" : pattern.test(s.route) ? undefined : "check constraint";
+      assertEquals(s.refused, want, `${c.id} ${s.as} ${s.route}`);
+      if (want === undefined) counted[s.route] = (counted[s.route] ?? 0) + 1;
+    }
+    assertEquals(c.calls, counted, c.id);
+  }
+  for (const r of ["judge-task", "a", "x".repeat(40)]) assert(pattern.test(r), r);
+  for (const r of ["", "Judge", "1judge", "judge_task", "x".repeat(41), "-x"]) assert(!pattern.test(r), r);
 });

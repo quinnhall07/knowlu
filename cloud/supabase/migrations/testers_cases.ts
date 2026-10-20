@@ -229,3 +229,33 @@ function deletion(id: "A3" | "A3s", as: "owner" | "service_role"): AdminCase {
     deleteAccount: { account: 0, as }, rows: [kept(0, 0), kept(1, 1, 0, 1)], expect: [null, tester(30)],
   };
 }
+
+// S2d's R1 (§4, §9): count_route, the one writer of route_daily, as the gate's service role calls it.
+/** One `count_route(p_account, p_route)` call on the case's account, each in its own savepoint.
+ * `refused` is a substring the refusal must carry; absent, the call succeeds. */
+export interface RouteStep {
+  route: string;
+  as: "service_role" | "authenticated";
+  refused?: string;
+}
+export interface RouteCase {
+  id: string;
+  given: string;
+  accounts: Account[];
+  steps: RouteStep[];
+  /** The account's `route_daily` rows at the end, today's day: `calls` per route. */
+  calls: Record<string, number>;
+}
+
+export const ROUTE_CASES: RouteCase[] = [
+  {
+    id: "R1", given: "count_route twice, then a bad route, then as authenticated", accounts: signedUp("r1"),
+    steps: [
+      { route: "judge-task", as: "service_role" },
+      { route: "judge-task", as: "service_role" },
+      { route: "Judge_Task", as: "service_role", refused: "check constraint" },
+      { route: "judge-task", as: "authenticated", refused: DENIED },
+    ],
+    calls: { "judge-task": 2 },
+  },
+];
