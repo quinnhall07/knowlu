@@ -185,7 +185,7 @@ controller at merge. Merge order was **C0 → C1 → C2**.
 **Shared files with a single owner:** root `Cargo.toml`/`Cargo.lock`, `app/src/main.rs` (the two
 `generate_handler!` lists), `app/src/lib.rs`, `app/src/commands.rs`, `app/src/tray.rs`,
 `app/src/updates.rs`, `app/src/state.rs`, `app/tauri.conf.json` outside C0's three keys,
-`engine/src/lib.rs`, `engine/src/{main,cli,ingest,runtime,inference}.rs`, `scripts/*.py`. Every plan
+`engine/src/lib.rs`, `engine/src/{main,cli,ingest}.rs`, `scripts/*.py`. Every plan
 lists what it needs there under **"Controller hand-offs"** with exact code; the controller applies
 them at merge. **H9 of C2** (the wizard's Google button, five C1 files) lands as one controller
 commit between C1's and C2's merges, or is deferred whole to C4 (R-X-17).
@@ -439,9 +439,11 @@ built there, not here; they stay listed as ruling 10's original list):
   (ruling 3's consequence, tested by `journal::human_edited`). Done 2026-10-18: the R0 spike, the R24 and G2-G5 rulings. Left: the A1 findings and the
   rest of tasks B1-B9 (L5a's row, §2), with B9's live proof at the machine. The registrar never shares the kept
   Blackboard profile.
-- **The local model runtime removed** (MVP since 2026-10-18, L6): `engine/src/runtime.rs`, `app/src/inference.rs`,
-  `SUPPORTED_RUNTIMES` and the wizard's offer. Until L6 merges they stay and are not extended
-  (CLAUDE.md's "stay until the Pilot's runtime-removal lane" wording is stale on the stage, a rule edit that goes to Quinn with the four-tests line).
+- ~~**The local model runtime removed**~~ (MVP since 2026-10-18, L6): **done in lane L6** (branch `l6-runtime-removal`; PR number,
+  merge sha and date are written here by the controller at the merge, T8). `engine/src/runtime.rs`, `app/src/inference.rs`,
+  `SUPPORTED_RUNTIMES`, the settings row and the wizard's offer are gone; `judge` has one model, `CloudModel`, and no account
+  is `judge (skipped: no account)`. `engine/tests/no_local_runtime.rs` fails if any of it returns. The ignored-test count is
+  three. CLAUDE.md's four sentences stay for Quinn's edit at the merge checkpoint (the lane plan's §10).
 - **Two issues shown in the app** (MVP since 2026-10-18, L7): OpenRouter's 402 (payment required) as a named issue instead of
   quiet model failures, and "source went quiet" (`google_accounts.status = 'quiet'` after 14 days,
   modelled server-side, nothing shows it yet; the Issues panel is its home).
