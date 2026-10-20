@@ -10787,3 +10787,309 @@ status: active
         assert!(detect_in(&v, &file_with(vec![s])).is_empty());
     }
 }
+
+#[cfg(test)]
+mod registrar_hold_tests {
+    //! A1-F1 (close-out plan B4a): the registrar hold of `proposals()` also withdraws a filed
+    //! `commitment-check` card (`withdrawal_reason`, through `approvals::withdraw_stale`) and refuses
+    //! its approval (`settle_approved`). Every title, key, room and time is invented.
+
+    use super::*;
+    use crate::journal::Journal;
+    use crate::write::WriteContext;
+    use jiff::civil::date;
+
+    const TODAY: Date = Date::constant(2026, 9, 10);
+    const REG_CAL: &str = "registrar:ua:202640";
+    const REG_KEY: &str = "registrar:ua:202640-40001";
+    const GOOGLE_CAL: &str = "google:invented";
+
+    /// A scratch vault removed when the test ends, pass or fail.
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A vault whose one course is `cs-100` ("CS 100").
+    fn vault(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("knowlu-hold-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("courses")).unwrap();
+        std::fs::write(dir.join("courses").join("cs-100.md"), "---\ntitle: \"CS 100\"\nslug: cs-100\n---\n\nInvented.\n")
+            .unwrap();
+        Scratch(dir)
+    }
+
+    fn t(h: i8, m: i8) -> Time {
+        Time::new(h, m, 0, 0).unwrap()
+    }
+
+    fn series(uid: &str, cal: &str, title: &str, end_minute: i8, until: Option<Date>) -> Series {
+        let instances = [date(2026, 9, 7), date(2026, 9, 9), date(2026, 9, 11), date(2026, 9, 14)]
+            .into_iter()
+            .map(|d| Instance { date: d, start: Some(t(12, 0)), end: Some(t(12, end_minute)) })
+            .collect();
+        Series {
+            source_uid: uid.to_string(),
+            calendar: cal.to_string(),
+            title: title.to_string(),
+            where_: None,
+            event_type: None,
+            rule: Rule { freq: "WEEKLY".into(), interval: 1, until, count: None },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            instances,
+            meets: vec![Meet { days: vec!["mon", "wed", "fri"], start: t(12, 0), end: t(12, end_minute) }],
+            first: Some(date(2026, 8, 24)),
+            until,
+            last_seen: Some(TODAY),
+        }
+    }
+
+    /// Banner's CS 100 class: 12:00-12:50. Google's copy ends one minute later, so the two have
+    /// different signatures and only the hold can tell them apart.
+    fn registrar_series(title: &str, until: Option<Date>) -> Series {
+        series(REG_KEY, REG_CAL, title, 50, until)
+    }
+
+    fn google_series(uid: &str, title: &str) -> Series {
+        series(uid, GOOGLE_CAL, title, 51, None)
+    }
+
+    fn file_of(series: Vec<Series>) -> SeriesFile {
+        let mut file = SeriesFile::default();
+        for s in &series {
+            file.calendars.insert(s.calendar.clone(), TODAY);
+        }
+        file.series = series;
+        file.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+        file
+    }
+
+    fn write_series_file(v: &Path, file: &SeriesFile) {
+        std::fs::create_dir_all(v.join("state")).unwrap();
+        std::fs::write(v.join(SERIES_FILE), file_bytes(file)).unwrap();
+    }
+
+    /// The card an earlier run filed for Google's series `uid`, `kind` `title`, pending.
+    fn google_card(v: &Path, uid: &str, kind: &str, title: &str) -> PathBuf {
+        let dir = v.join("approvals");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("commitment-check-{uid}.md").replace(':', "-"));
+        let front = format!(
+            "type: approval\nkind: commitment-check\ntitle: {title} · Mon/Wed/Fri 12–12:51pm · a {kind}?\n\
+             status: pending\nsource_uid: {uid}\n\
+             commitment: {{course: cs-100, from: '2026-08-24', kind: {kind}, level: hard, \
+             meets: [{{days: [mon, wed, fri], end: '12:51', start: '12:00'}}], title: {title}, \
+             until: '2026-12-11'}}\n\
+             proposed_at: 2026-09-10\nfirst_proposed_at: 2026-09-10\nexpires: null\nsnooze_until: null\n\
+             created_by: agent:commitments\n"
+        );
+        std::fs::write(&path, format!("---\n{front}---\n\nInvented.\n")).unwrap();
+        path
+    }
+
+    /// A confirmed `registrar:` note for CS 100, `kind`, with an optional `until`.
+    fn registrar_note(v: &Path, kind: &str, until: Option<&str>) {
+        let dir = v.join("commitments");
+        std::fs::create_dir_all(&dir).unwrap();
+        let until = until.map(|u| format!("until: \"{u}\"\n")).unwrap_or_default();
+        let text = format!(
+            "---\nid: cmt_invented01\ntype: commitment\nkind: {kind}\nlevel: hard\ntitle: \"CS 100\"\n\
+             course: cs-100\nmeets: [{{days: [mon, wed, fri], start: \"12:00\", end: \"12:50\"}}]\n\
+             {until}source_uid: \"{REG_KEY}\"\nstatus: confirmed\n---\n\nInvented.\n"
+        );
+        std::fs::write(dir.join(format!("cs-100-{kind}.md")), text).unwrap();
+    }
+
+    fn meta_of(path: &Path) -> Mapping {
+        let raw = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+        split_frontmatter(&raw).unwrap().0
+    }
+
+    fn reason(v: &Path, card: &Path, file: &SeriesFile) -> Option<String> {
+        let set = load(v);
+        let (codes, _) = Codes::load(v);
+        withdrawal_reason(v, &meta_of(card), file, &set, &codes, TODAY)
+    }
+
+    fn ctx() -> WriteContext {
+        WriteContext::new("agent:rank", "cli")
+    }
+
+    fn withdraw(v: &Path, file: &SeriesFile) -> crate::approvals::Withdrawal {
+        let set = load(v);
+        let mut journal = Journal::new(v);
+        crate::approvals::withdraw_stale(v, file, &set, TODAY, &ctx(), &mut journal)
+    }
+
+    fn names(v: &Path, folder: &str) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(v.join(folder)) else { return Vec::new() };
+        let mut out: Vec<String> = entries.map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        out.sort();
+        out
+    }
+
+    /// The `create` records the journal holds for notes under `commitments/`.
+    fn commitment_creates(v: &Path) -> usize {
+        let dir = v.join("state").join("journal");
+        let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
+        entries
+            .flat_map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap().lines().map(str::to_string).collect::<Vec<_>>())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+            .filter(|r| r["op"] == "create" && r["path"].as_str().is_some_and(|p| p.starts_with("commitments/")))
+            .count()
+    }
+
+    fn settle(v: &Path, card: &Path) -> Settled {
+        let mut journal = Journal::new(v);
+        settle_approved(v, &meta_of(card), TODAY, &ctx(), &mut journal).unwrap()
+    }
+
+    // ---- withdrawal ----
+
+    /// Red on the branch: `withdrawal_reason` is `None`, the card stays pending.
+    #[test]
+    fn a_registrar_series_holding_the_course_withdraws_the_google_class_card() {
+        let v = vault("series");
+        let card = google_card(&v, "gcal-series:cs100", "class", "CS 100");
+        let file = file_of(vec![registrar_series("CS 100", None), google_series("gcal-series:cs100", "CS 100")]);
+        let why = reason(&v, &card, &file).expect("the registrar holds CS 100's class");
+        assert!(why.contains("registrar"), "{why}");
+
+        let done = withdraw(&v, &file);
+        assert_eq!(done.withdrawn.len(), 1, "{done:?}");
+        assert_eq!(done.pending, 1, "it was pending on disk");
+        assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+        assert!(names(&v, "approvals").is_empty(), "{:?}", names(&v, "approvals"));
+        let archived = names(&v, "archive");
+        assert_eq!(archived.len(), 1, "{archived:?}");
+        let text = std::fs::read_to_string(v.join("archive").join(&archived[0])).unwrap();
+        assert!(text.contains("status: superseded"), "{text}");
+    }
+
+    /// Red on the branch: the same, with the hold a confirmed in-play `registrar:` note only.
+    #[test]
+    fn a_confirmed_registrar_note_holding_the_course_withdraws_the_google_class_card() {
+        let v = vault("note");
+        registrar_note(&v, "class", None);
+        assert_eq!(load(&v).confirmed.len(), 1, "the note loads");
+        let card = google_card(&v, "gcal-series:cs100", "class", "CS 100");
+        let file = file_of(vec![google_series("gcal-series:cs100", "CS 100")]);
+        assert!(reason(&v, &card, &file).is_some());
+        assert_eq!(withdraw(&v, &file).withdrawn.len(), 1);
+        assert!(names(&v, "approvals").is_empty());
+    }
+
+    #[test]
+    fn a_registrar_class_hold_leaves_a_google_lab_card_pending() {
+        let v = vault("lab");
+        let card = google_card(&v, "gcal-series:cs100lab", "lab", "CS 100 Lab");
+        let file = file_of(vec![registrar_series("CS 100", None), google_series("gcal-series:cs100lab", "CS 100 Lab")]);
+        assert_eq!(reason(&v, &card, &file), None, "a registrar lecture never withdraws a Google lab");
+        assert!(withdraw(&v, &file).withdrawn.is_empty());
+        assert_eq!(names(&v, "approvals").len(), 1);
+    }
+
+    #[test]
+    fn a_registrar_note_or_series_past_its_until_holds_nothing() {
+        let v = vault("past");
+        registrar_note(&v, "class", Some("2026-09-09"));
+        let card = google_card(&v, "gcal-series:cs100", "class", "CS 100");
+        let ended = Some(date(2026, 9, 9));
+        let file = file_of(vec![registrar_series("CS 100", ended), google_series("gcal-series:cs100", "CS 100")]);
+        assert_eq!(reason(&v, &card, &file), None);
+        assert!(withdraw(&v, &file).withdrawn.is_empty());
+        assert_eq!(names(&v, "approvals").len(), 1);
+    }
+
+    /// A guard, green on the branch too: the hold never reaches a card keyed `registrar:`.
+    #[test]
+    fn a_registrar_keyed_card_is_never_withdrawn_by_the_hold() {
+        let v = vault("own");
+        let card = google_card(&v, REG_KEY, "class", "CS 100");
+        let sibling = series("registrar:ua:202640-40009", REG_CAL, "CS 100", 50, None);
+        let file = file_of(vec![registrar_series("CS 100", None), sibling]);
+        assert_eq!(reason(&v, &card, &file), None);
+    }
+
+    // ---- settlement ----
+
+    /// Red on the branch: the approval writes a second hard class note for CS 100.
+    #[test]
+    fn approving_the_google_card_while_the_registrar_holds_the_course_is_superseded() {
+        let v = vault("settle-note");
+        registrar_note(&v, "class", None);
+        let card = google_card(&v, "gcal-series:cs100", "class", "CS 100");
+        write_series_file(&v, &file_of(vec![google_series("gcal-series:cs100", "CS 100")]));
+        let got = settle(&v, &card);
+        let Settled::Superseded(why) = got else { panic!("{got:?}") };
+        assert!(why.contains("registrar") && why.contains("nothing written"), "{why}");
+        assert_eq!(names(&v, "commitments"), ["cs-100-class.md"], "one confirmed class note for CS 100");
+        assert_eq!(commitment_creates(&v), 0, "no create record under commitments/");
+    }
+
+    /// Red on the branch: the hold is a registrar series in the stored file, with no note yet.
+    #[test]
+    fn approving_while_a_registrar_series_holds_the_course_writes_no_note() {
+        let v = vault("settle-series");
+        let card = google_card(&v, "gcal-series:cs100", "class", "CS 100");
+        write_series_file(
+            &v,
+            &file_of(vec![registrar_series("CS 100", None), google_series("gcal-series:cs100", "CS 100")]),
+        );
+        let got = settle(&v, &card);
+        assert!(matches!(got, Settled::Superseded(_)), "{got:?}");
+        assert!(names(&v, "commitments").is_empty(), "{:?}", names(&v, "commitments"));
+        assert_eq!(commitment_creates(&v), 0);
+    }
+
+    /// Guard, green on the branch: a registrar class does not hold a Google lab's approval.
+    #[test]
+    fn approving_a_google_lab_card_while_the_registrar_holds_the_class_still_writes_the_note() {
+        let v = vault("settle-lab");
+        let card = google_card(&v, "gcal-series:cs100lab", "lab", "CS 100 Lab");
+        write_series_file(
+            &v,
+            &file_of(vec![registrar_series("CS 100", None), google_series("gcal-series:cs100lab", "CS 100 Lab")]),
+        );
+        assert_eq!(settle(&v, &card), Settled::Executed);
+        assert_eq!(commitment_creates(&v), 1);
+    }
+
+    // ---- the next rank ----
+
+    /// Red on the branch at the first assertion (the card is never withdrawn). After the
+    /// withdrawal the question is not asked again and nothing is charged against the cap.
+    #[test]
+    fn after_the_withdrawal_the_next_rank_files_no_card_and_charges_nothing() {
+        let v = vault("after");
+        let card = google_card(&v, "gcal-series:cs100", "class", "CS 100");
+        let file = file_of(vec![registrar_series("CS 100", None), google_series("gcal-series:cs100", "CS 100")]);
+        write_series_file(&v, &file);
+        assert_eq!(withdraw(&v, &file).withdrawn.len(), 1, "the card {} is withdrawn", card.display());
+
+        let stored = stored_proposals(&v, TODAY);
+        let keys: Vec<&str> = stored.proposals.iter().map(|p| p.source_uid.as_str()).collect();
+        assert_eq!(keys, [REG_KEY], "the registrar's class is the one question left");
+        let mut journal = Journal::new(&*v);
+        let (paths, filed, warnings) = emit_checks(&v, &stored.proposals, &[], TODAY, 15, &ctx(), &mut journal);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(filed, 1, "only the registrar's own question is charged: {paths:?}");
+        let uids: Vec<String> = paths.iter().map(|p| meta_of(p).get("source_uid").and_then(|v| v.as_str()).unwrap().to_string()).collect();
+        assert_eq!(uids, [REG_KEY]);
+        let again = withdraw(&v, &file);
+        assert!(again.withdrawn.is_empty() && again.pending == 0, "{again:?}");
+    }
+}
