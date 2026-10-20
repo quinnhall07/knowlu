@@ -1979,14 +1979,19 @@ const GRANT_WRITE = new RegExp(
 const ADMIN_COMP_FUNCTION =
   /create\s+(?:or\s+replace\s+)?function\s+"?admin"?\s*\.\s*"?comp_\w+"?\s*\([^)]*\)[\s\S]*?\bas\s+(\$[A-Za-z_]*\$)([\s\S]*?)\1/gi;
 
+/** The `[start, end)` offsets of every `admin.comp_*` function body in comment-stripped SQL. */
+function compBodies(sql: string): Array<[number, number]> {
+  return [...sql.matchAll(ADMIN_COMP_FUNCTION)].map((m) => {
+    const end = (m.index ?? 0) + m[0].length - m[1].length;
+    return [end - m[2].length, end];
+  });
+}
+
 export function grantWriteProblems(files: Array<[string, string]>): string[] {
   const out: string[] = [];
   for (const [name, raw] of files) {
     const sql = stripLineComments(raw);
-    const bodies = [...sql.matchAll(ADMIN_COMP_FUNCTION)].map((m) => {
-      const end = (m.index ?? 0) + m[0].length - m[1].length;
-      return [end - m[2].length, end];
-    });
+    const bodies = compBodies(sql);
     for (const w of sql.matchAll(GRANT_WRITE)) {
       const at = w.index ?? 0;
       if (!bodies.some(([s, e]) => at >= s && at < e)) out.push(`${name}: '${w[0]}' outside an admin.comp_* function`);
@@ -2054,6 +2059,94 @@ Deno.test("S2a tripwire: the whole corpus carries no address-shaped token and no
   const files = await everyMigrationFile();
   assertEquals(addressTokens(files), []);
   assertEquals(grantWriteProblems(files), []);
+});
+
+// L8 S2R-fix-r1 (friends-testers §6, rule 1): (b) sees only the three DML shapes, so a grant
+// written as a call got through. (c) every call to `admin.comp_grant`, `comp_extend` or `comp_end`
+// lies inside an `admin.comp_*` body; a `revoke`/`grant … on function`, `drop`/`alter`/`comment on
+// function` names one and is no call. (d) no uuid-shaped token in any migration's raw text but the
+// nil uuid, so a wrapper `admin.comp_*` that carries a tester's account id is caught too.
+/** A call to the three grant writers, `admin.`-qualified, quoted or bare; group 1 marks a name a
+ * `function` keyword introduces (a definition, a right, a comment), which is no call. */
+const GRANT_CALL = /(\bfunction\s+)?(?:"?admin"?\s*\.\s*)?(?<![\w$])"?comp_(?:grant|extend|end)"?\s*\(/gi;
+/** A statement that only names functions: a later name in its list is no call either. */
+const NAMES_FUNCTIONS =
+  /^\s*(?:(?:revoke|grant)\b[^;]*?\bon\s+function\s|(?:drop|alter|comment\s+on)\s+function\s)/i;
+
+export function grantCallProblems(files: Array<[string, string]>): string[] {
+  const out: string[] = [];
+  for (const [name, raw] of files) {
+    const sql = stripLineComments(raw);
+    const bodies = compBodies(sql);
+    for (const c of sql.matchAll(GRANT_CALL)) {
+      const at = c.index ?? 0;
+      if (c[1] || NAMES_FUNCTIONS.test(sql.slice(sql.lastIndexOf(";", at) + 1, at))) continue;
+      if (!bodies.some(([s, e]) => at >= s && at < e)) {
+        out.push(`${name}: '${c[0]}' outside an admin.comp_* function`);
+      }
+    }
+  }
+  return out;
+}
+
+/** Dashed or undashed, any case; a longer hex run is not one. */
+const UUID_TOKEN =
+  /(?<![0-9a-f])[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}(?![0-9a-f])/gi;
+export function uuidTokens(files: Array<[string, string]>): string[] {
+  return files.flatMap(([name, raw]) =>
+    [...raw.matchAll(UUID_TOKEN)].filter((m) => !/^[0-]+$/.test(m[0])).map((m) => `${name}: ${m[0]}`)
+  );
+}
+
+const ID = "3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6f"; // synthetic, no account's
+const TOP_CALL = `select admin.comp_grant('${ID}'::uuid, now() + interval '90 days', 'friends', null);\n`;
+
+Deno.test("S2R-fix-r1 tripwire: a top-level comp_grant call naming an account id is reported by (c) and (d)", () => {
+  assertEquals(addressTokens([["t.sql", TOP_CALL]]), [], "(a) alone cannot see it");
+  assertEquals(grantWriteProblems([["t.sql", TOP_CALL]]), [], "(b) alone cannot see it");
+  assertEquals(grantCallProblems([["t.sql", TOP_CALL]]).length, 1);
+  assertEquals(uuidTokens([["t.sql", TOP_CALL]]), [`t.sql: ${ID}`]);
+});
+
+Deno.test("S2R-fix-r1 tripwire: calls in a do block, a cron string, a non-comp body or unqualified are reported", () => {
+  for (
+    const sql of [
+      "do $$ begin perform admin.comp_extend(a.id, now()) from public.accounts a; end $$;",
+      "select cron.schedule('x', '1 * * * *', $c$select \"admin\".\"comp_end\" (a.id, 'done')$c$);",
+      "create function public.f() returns void language sql as $$ select admin.comp_grant(null, now()) $$;",
+      "set search_path = admin; select comp_grant(null, now());",
+    ]
+  ) {
+    assertEquals(grantCallProblems([["c.sql", sql]]).length, 1, sql);
+  }
+});
+
+Deno.test("S2R-fix-r1 tripwire: definitions, rights, comments and calls inside admin.comp_* bodies pass", () => {
+  const sql = ADMIN_GRANT_FN + `create function admin.comp_sweep() returns void language sql as $$
+  select admin.comp_end(g.account_id, 'swept') from public.comp_grants g $$;
+revoke execute on function admin.comp_grant(uuid, timestamptz) from public, anon, authenticated;
+grant execute on function admin.comp_extend(uuid, timestamptz), admin.comp_end(uuid, text) to postgres;
+alter function admin.comp_end(uuid, text) set search_path = '';
+comment on function admin.comp_grant(uuid, timestamptz) is 'by account id';
+drop function if exists admin.comp_end(uuid);
+select cron.schedule('knowlu-sweep-comp', '7 3 * * *', 'select admin.comp_sweep()');
+create unique index comp_grants_one_open on public.comp_grants (account_id) where ended_at is null;
+`;
+  assertEquals(grantCallProblems([["fn.sql", sql]]), []);
+  assertEquals(uuidTokens([["fn.sql", sql]]), []);
+});
+
+Deno.test("S2R-fix-r1 tripwire: (d) sees an undashed id and an id in a comment; the nil uuid passes", () => {
+  const undashed = ID.replaceAll("-", "");
+  assertEquals(uuidTokens([["u.sql", `select uuid '${undashed}';\n`]]), [`u.sql: ${undashed}`]);
+  assertEquals(uuidTokens([["u.sql", `-- granted ${ID.toUpperCase()}\n`]]).length, 1);
+  assertEquals(uuidTokens([["n.sql", "select '00000000-0000-0000-0000-000000000000'::uuid;\n"]]), []);
+});
+
+Deno.test("S2R-fix-r1 tripwire: the whole corpus carries no stray grant call and no uuid but the nil one", async () => {
+  const files = await everyMigrationFile();
+  assertEquals(grantCallProblems(files), []);
+  assertEquals(uuidTokens(files), []);
 });
 
 /** The one `<stamp>_testers.sql`, comment-stripped; found by suffix, never by stamp (M4). */
