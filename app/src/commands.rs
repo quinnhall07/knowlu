@@ -641,17 +641,11 @@ pub fn settings_context(cs: State<'_, ConsoleState>) -> Value {
         Some(Err(e)) => (None, json!(e)),
         None => (None, json!("no app data root — the profile name cannot be read")),
     };
-    // Knowlu plan 3a Task 10: the wizard's offer, read ONCE. Cleared here rather than by a second
-    // command, so the prompt cannot be shown twice by a page that polled twice.
-    let offer = crate::onboarding::offer_marker(&cs.data_dir);
-    let offer_inference = offer.is_file();
-    if offer_inference { let _ = std::fs::remove_file(&offer); }
     json!({
         "ok": true, "error": Value::Null,
         "vault": cs.vault.to_string_lossy(), "version": env!("CARGO_PKG_VERSION"),
         "profile_name": name.unwrap_or_else(|| crate::profiles::default_name(&cs.vault)),
         "registry_error": registry_error,
-        "offer_inference": offer_inference,
     })
 }
 
@@ -709,21 +703,6 @@ pub(crate) fn updates_dir() -> Result<std::path::PathBuf, String> {
     crate::state::app_data_root()
         .map(|r| crate::profiles::updates_dir(&r))
         .ok_or_else(|| "LOCALAPPDATA is not set, so there is no private folder to stage an update in".to_string())
-}
-
-/// The install-wide app-data root, where `runtime\` and `models\` live.
-///
-/// **One folder for the whole install, like `updates\` and unlike `judgments\`** — a llama.cpp build
-/// and a `.gguf` are immutable artefacts identical for every profile, and a friend with two vaults
-/// must not download two gigabytes twice. The judgment LOG is per profile, because two vaults are
-/// two different sets of judgments (spec §5.4).
-///
-/// No temp fallback, for the same reason `updates_dir` has none (m4): a runtime is an executable
-/// this app will run with the user's own privileges, and the system temp directory is writable by
-/// every account on the machine. With nowhere private to put it, Knowlu declines and says why.
-pub(crate) fn inference_root() -> Result<std::path::PathBuf, String> {
-    crate::state::app_data_root()
-        .ok_or_else(|| "LOCALAPPDATA is not set, so there is nowhere private to keep a model".to_string())
 }
 
 /// `{ok, error, version, staged, held, last_check, last_error, action_error}` — the page renders it;
@@ -801,77 +780,4 @@ pub async fn install_update(app: tauri::AppHandle, sch: State<'_, Scheduler>, up
         Ok(()) => { crate::updates::clear_action_error(&up); json!({ "ok": true, "error": Value::Null }) }
         Err(e) => { crate::updates::note_error(&up, &e); json!({ "ok": false, "error": e }) }
     })
-}
-
-// ---- Knowlu plan 3a Task 10: local judgment. Every one of these is reached from a click and from
-// nowhere else (spec §5.3: "never automatic"); nothing here computes (spec §3.1) — `inference` does.
-
-/// `{ok, error, runtime, model, model_bytes, root}` — what the settings row renders.
-#[tauri::command]
-pub fn inference_status() -> Value {
-    match inference_root() {
-        Err(e) => json!({ "ok": false, "error": e, "runtime": Value::Null, "model": Value::Null, "model_bytes": 0 }),
-        Ok(root) => {
-            let s = crate::inference::status(&root);
-            json!({
-                "ok": true, "error": Value::Null,
-                "runtime": s.runtime.map(|p| p.to_string_lossy().to_string()),
-                "model": s.model.map(|p| p.to_string_lossy().to_string()),
-                "model_bytes": s.model_bytes,
-                "root": root.to_string_lossy(),
-            })
-        }
-    }
-}
-
-/// One place both install commands turn `kind` into a `Half` and a missing root into an envelope,
-/// so neither of them grows an `else` arm of its own (M7).
-fn half_and_root(kind: &str) -> Result<(crate::inference::Half, std::path::PathBuf), Value> {
-    let half = crate::inference::Half::parse(kind)
-        .ok_or_else(|| json!({ "ok": false, "error": format!("{kind} is not something Knowlu installs") }))?;
-    let root = inference_root().map_err(|e| json!({ "ok": false, "error": e }))?;
-    Ok((half, root))
-}
-
-fn installed(done: Result<std::path::PathBuf, String>) -> Value {
-    match done {
-        Ok(p) => json!({ "ok": true, "error": Value::Null, "path": p.to_string_lossy() }),
-        Err(e) => json!({ "ok": false, "error": e }),
-    }
-}
-
-/// *Install from a file…*, for either half. **The working path until the site exists** (the
-/// manifest endpoint is open item §11), and the better one for a friend on metered wifi or a campus
-/// network that blocks the host: they download once, by hand, and point at it.
-///
-/// **It is not the unverified path** (R-P3a-2): `inference::install_from_file` sends a runtime
-/// through `install_runtime_from_zip`, which checks the file's SHA-256 against the compiled-in
-/// `SUPPORTED_RUNTIMES` before anything is written. A model is taken on the user's own authority,
-/// for the reason the module doc gives.
-///
-/// `(async)` because a two-gigabyte copy and a SHA-256 over it must not run on the webview thread.
-#[tauri::command(async)]
-pub fn install_inference_file(kind: String, path: String) -> Value {
-    let (half, root) = match half_and_root(&kind) { Ok(v) => v, Err(e) => return e };
-    installed(crate::inference::install_from_file(&root, half, std::path::Path::new(&path)))
-}
-
-/// *Download*, for either half. Reached only from the row's button — no tick and no slot calls it
-/// (D8) — and it marshals only: the manifest read, the capped download and the install are one
-/// function in `inference`, because chaining three network-and-disk steps is computation and
-/// `commands.rs` computes nothing (M7).
-#[tauri::command(async)]
-pub fn install_inference_download(kind: String) -> Value {
-    let (half, root) = match half_and_root(&kind) { Ok(v) => v, Err(e) => return e };
-    installed(crate::inference::install_from_manifest(&root, half, crate::inference::MANIFEST_URL))
-}
-
-/// Free the gigabytes. The runtime stays: it is small, and re-downloading it is the annoying half.
-#[tauri::command(async)]
-pub fn remove_inference_model() -> Value {
-    let root = match inference_root() { Ok(r) => r, Err(e) => return json!({ "ok": false, "error": e }) };
-    match crate::inference::remove_model(&root) {
-        Ok(()) => json!({ "ok": true, "error": Value::Null }),
-        Err(e) => json!({ "ok": false, "error": e }),
-    }
 }

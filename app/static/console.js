@@ -1823,53 +1823,10 @@
     // the real thing. The panel's one message line carries it until the next action overwrites it.
     EL("set-diag-note").textContent = current.registryError || "";
   }
-  // Knowlu plan 3a Task 10: the Local judgment row. Four states and every one of them has words —
-  // "not installed" is a normal state (spec §5.3), not an error, so it is never rendered red.
-  //
-  // **Task 10 review, m2**: the Download button's own label changes once both halves are present
-  // — "Replace model…", never "Download" — so replacing an installed model (a legitimate thing to
-  // want) does not look identical to a first-time install with the same wording and no warning
-  // that it re-fetches gigabytes. Reset to "Download" on every other branch so it never gets stuck
-  // on the wrong word if the model is later removed.
-  function renderInference(s) {
-    var el = EL("set-judge-state");
-    // The Remove button is set on EVERY branch, including this one: leaving it in whatever
-    // visibility the last successful render gave it would offer "Remove model" over a status the
-    // page could not read.
-    if (!s || !s.ok) { el.textContent = (s && s.error) || "unavailable"; EL("set-judge-remove").hidden = true; EL("set-judge-download").textContent = "Download"; return; }
-    if (!s.runtime) { el.textContent = "runtime not installed — assignments arrive unestimated"; }
-    else if (!s.model) { el.textContent = "model not installed — assignments arrive unestimated"; }
-    else { el.textContent = "ready — " + (Math.round((s.model_bytes / 1073741824) * 10) / 10) + " GB model"; }
-    EL("set-judge-remove").hidden = !s.model;
-    EL("set-judge-download").textContent = (s.runtime && s.model) ? "Replace model…" : "Download";
-  }
-  function loadInference() {
-    // The status object is handed back to the caller, not just rendered from — **Task 10 review,
-    // m2**: reading which half is missing back out of the row's own rendered text was the actual
-    // defect (a UI string is not state), and it broke the moment the text became "ready — X GB".
-    return invoke("inference_status", {}).then(function (s) { renderInference(s); return s; }).catch(function () { return null; });
-  }
-  function installInference(kind, viaFile) {
-    EL("set-judge-state").textContent = "installing " + kind + "… this can take a while";
-    var step = viaFile
-      ? invoke("pick_file", { title: kind === "model" ? "Choose the model file" : "Choose the runtime archive", extension: kind === "model" ? "gguf" : "zip" })
-          .then(function (p) { if (!p || !p.path) { return null; } return invoke("install_inference_file", { kind: kind, path: p.path }); })
-      : invoke("install_inference_download", { kind: kind });
-    return step.then(function (r) {
-      if (r && !r.ok) { EL("set-judge-state").textContent = r.error; return; }
-      return loadInference();
-    }).catch(function () { EL("set-judge-state").textContent = "that did not finish"; });
-  }
   function renderAccountRow(a) {
     EL("set-account-state").textContent = (!a || !a.ok) ? "" : (a.needs_account
       ? "not attached to an account yet"
       : [a.email || "", a.status || "", a.plan || ""].filter(function (x) { return x; }).join(" · "));
-    // R-C1-59 (M6): an entitled cloud vault never runs the local runtime — `judge_plan` (scheduler.rs)
-    // never passes `--runtime`/`--model` once `config/cloud.yaml` exists — so offering to download a
-    // multi-gigabyte model there is dead weight the student would act on for nothing. Hidden only
-    // once the account status is KNOWN to have an account: a missing or failed reply (the vault-less
-    // shell, or a build from before Task 18) leaves the row exactly as visible as it always was.
-    EL("set-judge").hidden = !!(a && a.ok && !a.needs_account);
   }
   // Gmail connect T9a (spec §4.4, D1, D10, D12): the Google row. `SET` is the settings panel's own
   // state; the row keeps no cache, it asks `google_status` every time Settings opens. `googleSeq` is
@@ -2489,7 +2446,7 @@
       current.vaultPath = c.vault; current.version = c.version; current.profileName = c.profile_name;
       current.registryError = c.registry_error || "";
       return invoke("get_settings", {});
-    }).then(function (r) { if (r.ok) { renderSettings(r.settings); } }).then(loadInference).catch(function () {});
+    }).then(function (r) { if (r.ok) { renderSettings(r.settings); } }).catch(function () {});
   }
   window.KNOWLU_OPEN_SETTINGS = openSettings;
 
@@ -2526,22 +2483,6 @@
     // Plan 4a Task 8: the Updates row's button. `checkForUpdates` repaints this row itself while
     // the panel is open, so there is one place that formats the update line and not two.
     if (e.target.closest("#set-update-check")) { checkForUpdates(); return; }
-    // The runtime first, then the model: the runtime is the prerequisite, and one button does the
-    // next thing rather than two doing halves. **Task 10 review, m2**: which half is missing comes
-    // from the status object `loadInference` hands back, never from re-reading the row's own
-    // rendered text — a UI string ("ready — X GB model") is not state, and once ready it no longer
-    // contains "runtime" at all, so parsing it would silently target "model" forever, including a
-    // stray re-fetch of gigabytes once both halves were already installed.
-    if (e.target.closest("#set-judge-download")) { loadInference().then(function (s) {
-      installInference((s && s.ok && !s.runtime) ? "runtime" : "model", false);
-    }); return; }
-    if (e.target.closest("#set-judge-file")) { loadInference().then(function (s) {
-      installInference((s && s.ok && !s.runtime) ? "runtime" : "model", true);
-    }); return; }
-    if (e.target.closest("#set-judge-remove")) {
-      invoke("remove_inference_model", {}).then(loadInference).catch(function () {});
-      return;
-    }
   });
   EL("set-autostart-in").addEventListener("change", function () {
     invoke("set_settings", { patch: { autostart: EL("set-autostart-in").checked } })
