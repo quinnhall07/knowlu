@@ -331,13 +331,18 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // and the re-issued `enforce_budget`, writing; each revoked from `public, anon, authenticated`),
   // plus the T1.3 review's `refund_allowance` (writing, revoked the same way), plus T2g.1's two
   // (`mail_hand_off` and `count_mail_arrival`, writing, each revoked from `public, anon,
-  // authenticated`), plus T3e's `expire_mail_work` (writing, revoked the same way), plus L8 S2c1's
-  // three in <stamp>_testers.sql (`admin.comp_grant`, `admin.comp_extend`, `admin.comp_end`;
-  // writing, each revoked from `public, anon, authenticated, service_role`), plus L8 S2c2's
-  // `admin.comp_sweep` in the same file (writing, revoked the same way), plus L8 S2d's
+  // authenticated`), plus T3e's `expire_mail_work` (writing, revoked the same way), plus L3 T1's
+  // two in `<stamp>_event_allowance.sql` (`charge_judge_allowance` and `refund_judge_allowance`,
+  // writing, non-definer, each revoked from `public, anon, authenticated`), plus the email cloud
+  // follow-ups' two in <stamp>_mail_follow_ups.sql (`count_batch_receipt` and
+  // `mail_mark_lapsed_from`, writing, invoker, each revoked from `public, anon, authenticated`),
+  // plus L8 S2c1's three in <stamp>_testers.sql (`admin.comp_grant`, `admin.comp_extend`,
+  // `admin.comp_end`; writing, each revoked from `public, anon, authenticated, service_role`), plus
+  // L8 S2c2's `admin.comp_sweep` in the same file (writing, revoked the same way), plus L8 S2d's
   // `public.count_route` in the same file (writing, revoked from `public, anon, authenticated`,
-  // granted to `service_role`).
-  assertEquals(parsed, 45, "today's corpus should parse exactly 45 function creations");
+  // granted to `service_role`). Recount at the L8 merge of main (2026-10-20): 40 before the three
+  // lanes, + L3's 2 + the follow-ups' 2 + L8's 5 = 49.
+  assertEquals(parsed, 49, "today's corpus should parse exactly 49 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -490,7 +495,7 @@ Deno.test("the three cap-store functions are revoked, not marked — R-C2-E48 fi
   // them for real instead. This asserts the marker is gone and the guard found a real revoke for
   // all three — not that they are silently exempt either way.
   const { exemptedByMarker } = assertExecuteRevoked(await everyMigrationFile());
-  for (const fn of ["charge_call", "record_tokens", "enforce_budget", "refund_call"]) {
+  for (const fn of ["charge_call", "record_tokens", "enforce_budget", "refund_call", "charge_judge_allowance", "refund_judge_allowance"]) {
     assert(!exemptedByMarker.includes(fn), `${fn} must be revoked, not marker-exempt: ${exemptedByMarker}`);
   }
   // No genuine C0/C1 app-called function ever carried this marker (confirmed by hand against
@@ -1036,6 +1041,26 @@ Deno.test("the mail_claim max_tokens migration is unchanged", async () => {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   const hex = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
   assertEquals(hex, "1faed37a5c900325b2e1106249177a80aae63e6891c0bc326e709098a915fb18");
+});
+
+Deno.test("the mail last_lapsed_at migration is unchanged", async () => {
+  // SHA-256 of 20261019000100_mail_last_lapsed_at.sql as committed at fc3fc42
+  // (`git show fc3fc42:<path>`), its only commit. Applied on staging; never edited; a change is a
+  // new file.
+  const bytes = await Deno.readFile(new URL("20261019000100_mail_last_lapsed_at.sql", HERE));
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  const hex = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+  assertEquals(hex, "62336f3ac1b8fe41fb4852e128ad3a340b4547d599671b6423462437770f129f");
+});
+
+Deno.test("the mail max_tokens re-pin migration is unchanged", async () => {
+  // SHA-256 of 20261020000100_mail_max_tokens_repin.sql as committed at 42d4d12
+  // (`git show 42d4d12:<path>`), its only commit. Applied on staging; never edited; a change is a
+  // new file.
+  const bytes = await Deno.readFile(new URL("20261020000100_mail_max_tokens_repin.sql", HERE));
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  const hex = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+  assertEquals(hex, "a1eb2848387b307a2443674faebcf894bbfa18074b2c497dec4ae3046206de8d");
 });
 
 // Email forwarding T1.1 (spec §5.1; test 14's RLS half). The seven mail tables hold a student's mail
@@ -1873,12 +1898,15 @@ Deno.test("mail_addresses_gains_last_lapsed_at_backfilled_from_lapsed_since_and_
   const raw = files.find(([n]) => n === MAIL_LAST_LAPSED_AT)?.[1];
   assert(raw !== undefined, `expected ${MAIL_LAST_LAPSED_AT}`);
   // Forward-only: a new file after every applied one; the mail migration is never edited.
-  // Stamped after every file before it; a later migration is named here when it lands. A lane's
-  // migration is named by its suffix, never its stamp (friends-testers §8.4, M4): L8's testers.
+  // Stamped after every file before it; a later migration is named here when it lands.
+  // A later lane's file is named by its suffix, never its stamp (stamp rule M4); L8's testers file
+  // is left out by its suffix (friends-testers §8.4, M4), so its restamp moves no line here.
   const LATER_LANES = /^\d{14}_testers\.sql$/;
   assertEquals(
-    files.map(([n]) => n).filter((n) => n > MAIL_LAST_LAPSED_AT && !LATER_LANES.test(n)),
-    [MAIL_MAX_TOKENS_REPIN],
+    files.map(([n]) => n).filter((n) => n > MAIL_LAST_LAPSED_AT && !LATER_LANES.test(n))
+      .map((n) => EVENT_ALLOWANCE.test(n) ? "<stamp>_event_allowance.sql" : n),
+    // Both later files by their suffix, never their stamp (M4).
+    [MAIL_MAX_TOKENS_REPIN, "<stamp>_event_allowance.sql", (await followUpsMigration()).name],
     "stamped after every other file but the named later ones",
   );
   const { name: mail, sql: mailSql } = await mailMigration();
@@ -3023,4 +3051,309 @@ Deno.test("S2f-b: the proof pins refuse a drifted A, R or V row, a wrong runner,
     const problems = proofTableProblems(bad, tables);
     assert(problems.length === 1 && problems[0].includes(want), `${want}: ${problems.join(" | ")}`);
   }
+});
+
+// L3 T1, the first-day event allowance (spec 2026-10-06 §2, §3 step 3, §5; §9 tests 1-7). Textual,
+// as the mail allowance's pins are: nothing here applies SQL (plan Q-C), so these pins are the only
+// proof of the 14-day expiry, the no-reopening rule, the refund bounds and the concurrency shape. The
+// file is found by its suffix, never its stamp (stamp rule M4), so a rename moves no line here.
+const EVENT_ALLOWANCE = /^\d{14}_event_allowance\.sql$/;
+
+/** The one `<stamp>_event_allowance.sql`: its raw text, and comment-stripped, whitespace-normalised,
+ *  lower-cased. */
+async function eventAllowanceMigration(): Promise<{ name: string; raw: string; sql: string }> {
+  const files = (await everyMigrationFile()).filter(([n]) => EVENT_ALLOWANCE.test(n));
+  assertEquals(files.length, 1, "exactly one <stamp>_event_allowance.sql (plan T1)");
+  const [name, raw] = files[0];
+  return { name, raw, sql: stripLineComments(raw).replace(/\s+/g, " ").trim().toLowerCase() };
+}
+
+/** `fn`'s header (through `as $tag$`) and body (inside the tags), normalised as above, from its LAST
+ *  definition in the corpus, which must be the event-allowance migration's. */
+async function allowanceFunction(fn: string): Promise<{ name: string; sql: string; header: string; body: string }> {
+  const { name, sql } = await eventAllowanceMigration();
+  const last = await lastFunction(fn);
+  assertEquals(last.name, name, `${fn}: the event-allowance migration's definition governs`);
+  const m = new RegExp(FUNCTION_DEFINITION.source, "i").exec(last.text)!;
+  const rest = m[0].slice(m[1].length);
+  const flat = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  return { name, sql, header: flat(m[1]), body: flat(rest.slice(0, rest.indexOf(m[3]))) };
+}
+
+/** The text strictly between `from` and the first `to` after it. */
+function between(text: string, from: string, to: string): string {
+  const a = text.indexOf(from);
+  assert(a !== -1, `'${from}' not found`);
+  const b = text.indexOf(to, a + from.length);
+  assert(b !== -1, `'${to}' not found after '${from}'`);
+  return text.slice(a + from.length, b).trim();
+}
+
+Deno.test("event_allowance_opens_on_the_first_overflow_with_2000_minus_one_and_14_days", async () => {
+  const f = await allowanceFunction("charge_judge_allowance");
+  assert(/charge_judge_allowance\s*\(\s*p_account uuid, p_kind text\s*\)/.test(f.header), `${f.name}: (p_account uuid, p_kind text)`);
+  assert(f.header.includes("returns boolean"), `${f.name}: answers charged or not, as charge_call`);
+  assert(f.header.includes("language plpgsql"), `${f.name}: plpgsql`);
+  // The opening row: now, 14 days, the size written as `2000 - 1` (T2a's size mirror reads that form).
+  assert(
+    f.body.includes(
+      "insert into public.judge_allowances (account_id, kind, opened_at, until, calls_left, refunds) " +
+        "values (p_account, p_kind, now(), now() + interval '14 days', 2000 - 1, 0) " +
+        "on conflict (account_id, kind) do update",
+    ),
+    `${f.name}: the one insert opens the row with now(), 14 days, 2000 - 1 and no refunds`,
+  );
+  assert(f.body.includes("returning true into charged;"), `${f.name}: charged only when the row was written`);
+  assert(f.body.includes("return coalesce(charged, false);"), `${f.name}: no row written answers false`);
+});
+
+Deno.test("event_allowance_is_one_time_and_never_reopens", async () => {
+  const f = await allowanceFunction("charge_judge_allowance");
+  // The conflict arm sets only `calls_left`, and only while the row is open and not spent. Everything
+  // between `do update` and `returning` is compared whole, so an extra `or`, a reordered precedence or
+  // a second `set` target fails here. The row's own columns stay qualified: `excluded` is in scope too.
+  assertEquals(
+    between(f.body, "do update", "returning"),
+    "set calls_left = judge_allowances.calls_left - 1 " +
+      "where judge_allowances.until > now() and judge_allowances.calls_left > 0",
+    `${f.name}: the conflict arm decrements only, and only while open`,
+  );
+  // No renewal: mail's `charge_allowance` reopens after 120 days; this one never does.
+  const { name, raw } = await eventAllowanceMigration();
+  assert(!/interval\s+'120 days'/i.test(raw), `${name}: no 120-day renewal`);
+  // One-time means "no row", never "row expired": nothing but the account cascade ever deletes it.
+  for (const [file, text] of await everyMigrationFile()) {
+    const code = stripLineComments(text);
+    assert(
+      !/\b(?:delete\s+from|truncate(?:\s+table)?)\s+(?:only\s+)?(?:"?public"?\s*\.\s*)?"?judge_allowances"?/i.test(code),
+      `${file}: no migration deletes from judge_allowances`,
+    );
+  }
+});
+
+Deno.test("charge_judge_allowance_is_one_statement_on_a_unique_key", async () => {
+  // Why one statement is the concurrency proof (spec test 3): two first charges race to insert the
+  // same `(account_id, kind)`. The second waits on the primary key, then takes the `do update` arm,
+  // and Postgres re-checks its `where` on the locked row; two charges against `calls_left = 1`
+  // serialise the same way. An `update`, then an `insert` when not found, would race instead: the
+  // loser hits the key, throws, and `chargeAllowance` answers false while the allowance had room.
+  // The house count of `\b(insert|update|delete)\b` is 2 for an upsert, so the shape is pinned instead.
+  const f = await allowanceFunction("charge_judge_allowance");
+  assert(f.header.includes("security invoker"), `${f.name}: security invoker, as charge_call`);
+  assert(!f.header.includes("security definer"), `${f.name}: never security definer`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertEquals((f.body.match(/\binsert\b/g) ?? []).length, 1, `${f.name}: one insert`);
+  assert(f.body.includes("insert into public.judge_allowances"), `${f.name}: the insert is the allowance row's`);
+  assertEquals((f.body.match(/\bupdate\b/g) ?? []).length, 1, `${f.name}: one update`);
+  assert(f.body.includes("on conflict (account_id, kind) do update"), `${f.name}: the update is the conflict arm`);
+  assert(!/\bupdate\s+(?:public\.)?judge_allowances\b/.test(f.body), `${f.name}: no standalone update`);
+  for (const word of ["delete", "select", "if", "found"]) {
+    assert(!new RegExp(`\\b${word}\\b`).test(f.body), `${f.name}: no '${word}' (no read, no branch on a prior result)`);
+  }
+  const statements = between(f.body, " begin ", " end;").split(";").map((s) => s.trim()).filter((s) => s !== "");
+  assertEquals(statements.length, 2, `${f.name}: the insert and the return, nothing else`);
+  assert(statements[0].startsWith("insert into public.judge_allowances"), `${f.name}: the insert first`);
+  assertEquals(statements[1], "return coalesce(charged, false)", `${f.name}: then the return`);
+  // The conflict target is the table's primary key, so the conflict arm is a row lock.
+  const { name, raw } = await eventAllowanceMigration();
+  assert(tableItems(stripLineComments(raw), "judge_allowances").includes("primary key (account_id, kind)"), `${name}: the key`);
+});
+
+Deno.test("judge_allowances_kind_is_checked_to_event", async () => {
+  const { name, raw } = await eventAllowanceMigration();
+  const kind = tableColumns(stripLineComments(raw), "judge_allowances").get("kind");
+  assertEquals(kind, "kind text not null check (kind in ('event'))", `${name}: events only (spec Q4)`);
+  // And the corpus's live check is still this one: no later lane widens it (plan Q-F, L5's Q41).
+  const last = await lastCheckWords("judge_allowances", "kind");
+  assertEquals(last.words, ["event"], `${last.name}: judge_allowances.kind admits 'event' alone`);
+});
+
+Deno.test("refund_judge_allowance_gives_back_only_while_open_and_within_both_bounds", async () => {
+  // Spec §5: a `model failed` call the allowance charged is given back, but only while the allowance
+  // is open, never past its size, and never more than its size over its life. The lifetime `refunds`
+  // bound is what stops a device on a dead provider charging, failing and refunding forever: each
+  // `/judge-event` request is its own invocation, so F1's breaker never trips across a run.
+  const f = await allowanceFunction("refund_judge_allowance");
+  assert(/refund_judge_allowance\s*\(\s*p_account uuid, p_kind text\s*\)/.test(f.header), `${f.name}: (p_account uuid, p_kind text)`);
+  assert(f.header.includes("returns boolean"), `${f.name}: answers refunded or not, as refund_call`);
+  assert(f.header.includes("language plpgsql"), `${f.name}: plpgsql`);
+  assert(f.header.includes("security invoker") && !f.header.includes("security definer"), `${f.name}: security invoker`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 1, `${f.name}: one write`);
+  assert(!/\binsert\b/.test(f.body), `${f.name}: never opens a missing row`);
+  assert(!/\bselect\b/.test(f.body), `${f.name}: no read before the write`);
+  assertEquals(
+    between(f.body, "update public.judge_allowances", "returning"),
+    "set calls_left = calls_left + 1, refunds = refunds + 1 " +
+      "where account_id = p_account and kind = p_kind and until > now() and calls_left < 2000 and refunds < 2000",
+    `${f.name}: one back and one counted, only while open and inside both bounds`,
+  );
+  assert(!/opened_at|until =/.test(f.body), `${f.name}: never sets opened_at or until`);
+  assert(f.body.includes("returning true into done;"), `${f.name}: refunded only when the row was written`);
+  assert(f.body.includes("return coalesce(done, false);"), `${f.name}: no row written answers false`);
+});
+
+Deno.test("judge_allowances_is_service_role_only_and_purged_with_the_account", async () => {
+  const { name, raw, sql } = await eventAllowanceMigration();
+  assert(sql.includes("alter table public.judge_allowances enable row level security;"), `${name}: RLS on`);
+  assert(sql.includes("revoke all on public.judge_allowances from anon, authenticated;"), `${name}: no client grant`);
+  for (const [file, text] of await everyMigrationFile()) {
+    const code = stripLineComments(text).replace(/\s+/g, " ").toLowerCase();
+    for (const g of code.matchAll(/grant [^;]* on (?:table )?(?:public\.)?judge_allowances to ([^;]+);/g)) {
+      assert(!/\b(anon|authenticated|public)\b/.test(g[1]), `${file}: judge_allowances is granted to ${g[1]}`);
+    }
+    assert(!/create policy [^;]* on (?:public\.)?judge_allowances\b/.test(code), `${file}: no policy on judge_allowances`);
+  }
+  // The account purge removes it: the row lives exactly as long as the account.
+  const account = tableColumns(stripLineComments(raw), "judge_allowances").get("account_id");
+  assertEquals(account, "account_id uuid not null references public.accounts (id) on delete cascade", `${name}: purged with the account`);
+  assertServiceRoleOnly({ name, sql }, "charge_judge_allowance", "uuid, text");
+  assertServiceRoleOnly({ name, sql }, "refund_judge_allowance", "uuid, text");
+});
+
+Deno.test("the_event_allowance_migration_reissues_no_cap_function", async () => {
+  // Spec Q5, Q6: `charge_call`, `refund_call` and `enforce_budget` keep their SQL, so their own pins
+  // (the first-two-days test and F1's) still pass with no edit. The file defines its two functions only.
+  const { name, raw } = await eventAllowanceMigration();
+  const defined = [...stripLineComments(raw).matchAll(FUNCTION_DEFINITION)].map((m) => m[2].toLowerCase());
+  assertEquals(defined, ["charge_judge_allowance", "refund_judge_allowance"], `${name}: its two functions and no other`);
+  // `ci.yml`'s eval gate runs (and spends) for any migration naming the `models` table; this one
+  // changes no pin, so its text, comments included, never uses that word on its own.
+  assert(!/\bmodels\b/i.test(raw), `${name}: never names the models table`);
+});
+
+// Email cloud follow-ups, T2 (docs/plans/2026-10-20-email-cloud-follow-ups-plan.md §2 and T2; Quinn's Q3 and
+// Q4, 2026-10-20). One forward-only file, found by its suffix and never by its stamp (M4): Rotate's prior
+// status (`rotated_from`, D22's widened reading), one count per SES receipt (`count_batch_receipt`), and a
+// held item's mailbox marked lapsed from its arrival (`mail_mark_lapsed_from`). Textual, like the suite.
+const FOLLOW_UPS = /^\d{14}_mail_follow_ups\.sql$/;
+
+/** The one `<stamp>_mail_follow_ups.sql`: its name, its raw text and its comment-stripped code. */
+async function followUpsMigration(): Promise<{ name: string; raw: string; code: string }> {
+  const files = (await everyMigrationFile()).filter(([n]) => FOLLOW_UPS.test(n));
+  assertEquals(files.length, 1, "exactly one <stamp>_mail_follow_ups.sql (M4: found by suffix)");
+  return { name: files[0][0], raw: files[0][1], code: stripLineComments(files[0][1]) };
+}
+
+/** As `mailFunction`, for a function whose LAST definition is the follow-ups file's. */
+async function followUpsFunction(fn: string): Promise<{ name: string; sql: string; header: string; body: string }> {
+  const { name, code } = await followUpsMigration();
+  const last = await lastFunction(fn);
+  assertEquals(last.name, name, `${fn}: the follow-ups migration's definition governs`);
+  const m = new RegExp(FUNCTION_DEFINITION.source, "i").exec(last.text)!;
+  const rest = m[0].slice(m[1].length);
+  const flat = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  return { name, sql: flat(code), header: flat(m[1]), body: flat(rest.slice(0, rest.indexOf(m[3]))) };
+}
+
+Deno.test("the_follow_ups_migration_is_found_by_suffix_and_stamped_after_every_other_file", async () => {
+  const names = (await everyMigrationFile()).map(([n]) => n);
+  const { name } = await followUpsMigration();
+  // Forward-only (M2, M6): a new file after every applied one. A later migration is named here when it lands.
+  assertEquals(names.filter((n) => n > name), [], `${name}: stamped after every other file`);
+  for (const applied of [MAIL_LAST_LAPSED_AT, MAIL_MAX_TOKENS_REPIN]) {
+    assert(name > applied, `${name}: stamped after ${applied}, which stays as applied`);
+  }
+});
+
+Deno.test("it_adds_rotated_from_with_its_status_check_and_counted_receipts_defaulting_empty", async () => {
+  const { name, code } = await followUpsMigration();
+  const flat = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  // Every statement outside the two function definitions, exactly, in order.
+  const statements = code.replace(FUNCTION_DEFINITION, "").split(";").map(flat).filter((s) => s !== "");
+  // `rotated_from` admits exactly the statuses `mail_addresses.status` does (the mail migration's nine).
+  const status = await lastCheckWords("mail_addresses", "status");
+  assertEquals(status.words.length, 9, `${status.name}: the nine statuses`);
+  const nine = status.words.map((w) => `'${w}'`).join(", ");
+  assertEquals(statements, [
+    // Nullable: a mailbox never rotated, or whose grace ended by canary, has none.
+    "alter table public.mail_addresses add column if not exists rotated_from text",
+    // One named check, and nothing ties it to the grace (review r1, M7): D22 reads it only while
+    // `retired_until` is in the future, so a stale value is harmless.
+    "alter table public.mail_addresses add constraint mail_addresses_rotated_from_status " +
+    `check (rotated_from is null or rotated_from in (${nine}))`,
+    // The SES receipts already counted toward `received`; empty for every existing batch.
+    "alter table public.mail_batches add column if not exists counted_receipts text[] not null default '{}'",
+    "revoke execute on function public.count_batch_receipt(uuid, uuid, text, integer) from public, anon, authenticated",
+    "grant execute on function public.count_batch_receipt(uuid, uuid, text, integer) to service_role",
+    "revoke execute on function public.mail_mark_lapsed_from(uuid, timestamptz) from public, anon, authenticated",
+    "grant execute on function public.mail_mark_lapsed_from(uuid, timestamptz) to service_role",
+  ], `${name}: the columns, the check and the grants, and nothing else`);
+  // No new table, so no new row-level security; nothing dropped, truncated or re-created.
+  assert(!/create\s+table|\bdrop\b|\btruncate\b/i.test(code), `${name}: creates, drops and truncates no table`);
+});
+
+Deno.test("count_batch_receipt_is_one_guarded_update_with_no_read_before_it", async () => {
+  // Plan §1.3: an SNS redelivery (a failure after the count, or two deliveries at once) read `received`
+  // and wrote `received + n` again, closing the batch early. One guarded update counts a receipt once:
+  // a concurrent second delivery waits on the row lock, re-checks the `where` and finds the id there.
+  const f = await followUpsFunction("count_batch_receipt");
+  assert(
+    /count_batch_receipt\s*\(\s*p_batch uuid, p_address uuid, p_receipt text, p_n integer\s*\)/.test(f.header),
+    `${f.name}: count_batch_receipt(p_batch uuid, p_address uuid, p_receipt text, p_n integer)`,
+  );
+  assert(f.header.includes("returns boolean"), `${f.name}: answers counted or not`);
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 1, `${f.name}: one write`);
+  assertEquals((f.body.match(/\bselect\b/g) ?? []).length, 0, `${f.name}: no read before the write`);
+  assert(
+    f.body.includes(
+      "update public.mail_batches set received = received + p_n, counted_receipts = counted_receipts || p_receipt " +
+        "where id = p_batch and address_id = p_address and p_n >= 0 and p_receipt ~ '^[0-9a-f]{64}$' " +
+        "and not (p_receipt = any (counted_receipts)) returning true into counted;",
+    ),
+    `${f.name}: one batch of one mailbox, a SHA-256 hex id, and never a receipt already counted`,
+  );
+  assert(f.body.includes("return coalesce(counted, false);"), `${f.name}: no row written answers false`);
+  assert(!/mail_addresses|mail_work|mail_seen|closed_at/.test(f.body), `${f.name}: writes the one batch row only`);
+});
+
+Deno.test("mail_mark_lapsed_from_never_touches_off_or_revoked_and_only_moves_the_stamp_earlier", async () => {
+  // Quinn's Q3 (2026-10-20): a held item marks its mailbox lapsed from the item's arrival, so the device's
+  // reconcile reaches back over it. `least` skips a null, so an unstamped row takes `p_since` and an
+  // earlier stamp is kept; a row already `lapsed` is rewritten only when the stamp moves earlier, and then
+  // `last_lapsed_at` moves too (voiding a `covered` in flight, spec §4.11 step 3). `off` and `revoked` are
+  // left as intake's own mark leaves them. Every write sets `last_lapsed_at`, so
+  // `mail_addresses_last_lapse_stamped` holds.
+  const f = await followUpsFunction("mail_mark_lapsed_from");
+  assert(
+    /mail_mark_lapsed_from\s*\(\s*p_address uuid, p_since timestamptz\s*\)/.test(f.header),
+    `${f.name}: mail_mark_lapsed_from(p_address uuid, p_since timestamptz)`,
+  );
+  assert(f.header.includes("returns boolean"), `${f.name}: answers written or not`);
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 1, `${f.name}: one write`);
+  assertEquals((f.body.match(/\bselect\b/g) ?? []).length, 0, `${f.name}: no read before the write`);
+  assert(
+    f.body.includes(
+      "update public.mail_addresses " +
+        "set status = 'lapsed', lapsed_since = least(lapsed_since, p_since), last_lapsed_at = now() " +
+        "where id = p_address and status not in ('revoked', 'off') and p_since <= now() " +
+        "and (status <> 'lapsed' or lapsed_since is null or lapsed_since > p_since) returning true into marked;",
+    ),
+    `${f.name}: one mailbox, never off or revoked, never a future stamp, and only ever earlier`,
+  );
+  assert(f.body.includes("return coalesce(marked, false);"), `${f.name}: no row written answers false`);
+  assert(!/greatest|account_id|mail_work|mail_seen/.test(f.body), `${f.name}: one mailbox's stamp, never later`);
+});
+
+Deno.test("both_functions_are_invoker_with_public_extensions_revoked_from_clients_and_granted_to_service_role", async () => {
+  // Review r1, I1: the pattern every function in the mail migration uses (`charge_allowance`,
+  // `count_mail_arrival`). The only caller is service_role, so a definer function would bypass RLS for
+  // no gain.
+  const { name, code } = await followUpsMigration();
+  assert(!/security\s+definer/i.test(code), `${name}: no function here is security definer`);
+  for (const [fn, args] of [["count_batch_receipt", "uuid, uuid, text, integer"], ["mail_mark_lapsed_from", "uuid, timestamptz"]]) {
+    const f = await followUpsFunction(fn);
+    assert(f.header.includes("language plpgsql"), `${f.name}: ${fn} is plpgsql`);
+    assert(f.header.includes("security invoker"), `${f.name}: ${fn} is security invoker`);
+    assert(!f.header.includes("security definer") && !f.body.includes("security definer"), `${f.name}: ${fn}`);
+    assert(f.header.includes("set search_path = public, extensions"), `${f.name}: ${fn} pins its search_path`);
+    assertServiceRoleOnly(f, fn, args);
+  }
+});
+
+Deno.test("the_follow_ups_migration_never_names_the_table_the_eval_gate_watches", async () => {
+  // ci.yml runs the paid eval gate for any changed migration that `grep -qiE`s the pin table's name, so
+  // the raw text, comments included, never carries it in any case (plan §3).
+  const { name, raw } = await followUpsMigration();
+  assert(!/\bmodels\b/i.test(raw), `${name}: names the pin table, which would run the paid eval gate`);
 });

@@ -46,3 +46,45 @@ Deno.test("covered_patches_only_the_stamp_given_on_a_mailbox_no_longer_lapsed", 
   // No row changed: false.
   assertEquals(await recording(0).store.clearLapsed(ACCT, ADDR, stamp, last), false);
 });
+
+Deno.test("rotate_writes_rotated_from_in_the_same_guarded_patch", async () => {
+  // Email follow-ups T4 (Q4, 2026-10-20): the status before the Rotate goes in the one PATCH that retires
+  // the old token, still filtered on the account, the id and the token Rotate read (a concurrent Rotate
+  // matches nothing). Every value here is invented.
+  const until = "2026-10-27T12:00:00.000Z";
+  const { seen, store } = recording(1);
+  const next = {
+    tokenHmac: "new-hmac",
+    tokenCiphertext: "new-ciphertext",
+    tokenIv: "new-iv",
+    retiredUntil: until,
+    status: "pending",
+    rotatedFrom: "active",
+    unboundOwnSinceLive: 0 as const,
+    unboundForeignSinceLive: 0 as const,
+  };
+  assertEquals(await store.rotate(ACCT, ADDR, "old-hmac", next), true);
+  assertEquals(seen, [{
+    method: "PATCH",
+    path: `mail_addresses?id=eq.${ADDR}&account_id=eq.${ACCT}&token_hmac=eq.old-hmac&select=id`,
+    body: {
+      token_hmac: "new-hmac",
+      token_ciphertext: "new-ciphertext",
+      token_iv: "new-iv",
+      retired_token_hmac: "old-hmac",
+      retired_until: until,
+      rotated_from: "active",
+      unbound_own_since_live: 0,
+      unbound_foreign_since_live: 0,
+      status: "pending",
+    },
+    prefer: "return=representation",
+  }]);
+  // A provider whose status Rotate leaves alone records its prior status too, and writes no status.
+  const other = recording(1);
+  await other.store.rotate(ACCT, ADDR, "old-hmac", { ...next, status: null, rotatedFrom: "quiet" });
+  const body = other.seen[0].body as Record<string, unknown>;
+  assertEquals([body.rotated_from, Object.hasOwn(body, "status")], ["quiet", false]);
+  // The token moved meanwhile: nothing changed, false.
+  assertEquals(await recording(0).store.rotate(ACCT, ADDR, "old-hmac", next), false);
+});

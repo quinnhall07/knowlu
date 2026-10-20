@@ -13,6 +13,7 @@
  * cancelled unread, and the handler logs only that a store call failed.
  */
 import { type Rest, restFromEnv } from "../_shared/db.ts";
+import { isActive, lookupFrom } from "../_shared/entitlement.ts";
 import { asResponse, fail } from "../_shared/http.ts";
 import { sharedDb } from "../_shared/judge_deps.ts";
 import { judgmentSink } from "../_shared/judge_log.ts";
@@ -95,6 +96,8 @@ function wire(): { cfg: ProcessConfig; deps: ProcessDeps } {
     secretAccessKey: env("AWS_SECRET_ACCESS_KEY"),
   }, { fetch: globalThis.fetch });
   const db = sharedDb();
+  // The entitlement gate's read (follow-ups plan T3), intake's own: `isActive` over the account's row.
+  const lookup = lookupFrom(rest);
   let pinned: ReturnType<ModelPathDeps["pin"]> | null = null;
   const pin = () => {
     pinned ??= modelRow(db, "mail_claim").then((row) => ({
@@ -219,6 +222,12 @@ function wire(): { cfg: ProcessConfig; deps: ProcessDeps } {
       async expire(id) {
         const init = { method: "POST", body: JSON.stringify({ p_work: Number(id) }) };
         return await (await call(rest, "expire", "rpc/expire_mail_work", init)).json() === true;
+      },
+      entitled: async (account) => isActive(await lookup(account)),
+      async markLapsed(address, since) {
+        // `mail_mark_lapsed_from` (the follow-ups migration): never `off` or `revoked`, never a later stamp.
+        const init = { method: "POST", body: JSON.stringify({ p_address: address, p_since: since }) };
+        return await (await call(rest, "mark lapsed", "rpc/mail_mark_lapsed_from", init)).json() === true;
       },
       async expirable(arrivedBy, limit) {
         const path = `mail_work?arrived_at=lte.${

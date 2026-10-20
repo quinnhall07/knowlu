@@ -376,7 +376,102 @@ fn a_capped_event_reply_still_stops_the_batch_rather_than_becoming_unsure() {
         .judge_event(&event_item("engage:1"))
         .expect_err("a spent cap must stay an error, never a recorded unsure");
     assert!(matches!(err, judge::ModelError::Capped), "{err:?}");
+    // L3 Q-A (2026-10-20): an event cap is the event pass's own business. `events::judge_roster`
+    // ends the pass and names the cap once, so `fatal()` -- which `enrich` turns into "the rest of
+    // the batch was not sent" -- stays `None`; only a capped enrichment-batch path sets it.
+    assert_eq!(model.fatal(), None);
+    let _ = server.requests();
+}
+
+/// The request line of a recorded request, e.g. `POST /functions/v1/judge-task HTTP/1.1`.
+fn request_line(request: &str) -> &str {
+    request.lines().next().unwrap_or_default()
+}
+
+/// L3 Q-A: a spent cap on one judge path is remembered for that path only. The task cap and the
+/// event cap are separate on the server, so a capped task must leave the event pass free to ask.
+#[test]
+fn a_capped_task_reply_does_not_stop_event_requests() {
+    let capped = r#"{"verdict":null,"outcome":"capped"}"#;
+    let event = r#"{"verdict":{"verdict":"drop","why":"not for you","confidence":0.9},"tier":3,"outcome":"answered"}"#;
+    let mut server = loopback(vec![(200, capped.to_string()), (200, event.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let seed = judge::tier1(&item(), &heuristics());
+    let err = model.judge(&item(), &heuristics(), &seed).expect_err("the task cap is spent");
+    assert!(matches!(err, judge::ModelError::Capped), "{err:?}");
+    let got = model.judge_event(&event_item("engage:1")).expect("the event path is not capped");
+    assert_eq!(got.verdict, "drop");
+    let seen = server.requests();
+    assert_eq!(seen.len(), 2, "both requests reached the server");
+    assert!(request_line(&seen[0]).contains("/judge-task"), "{}", request_line(&seen[0]));
+    assert!(request_line(&seen[1]).contains("/judge-event"), "{}", request_line(&seen[1]));
+}
+
+/// The other direction: a capped event stops later event requests (no second request), and a
+/// following task call still reaches the server.
+#[test]
+fn a_capped_event_reply_stops_later_event_requests_only() {
+    let capped = r#"{"verdict":null,"outcome":"capped"}"#;
+    let mut server = loopback(vec![(200, capped.to_string()), (200, ANSWERED.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let first = model.judge_event(&event_item("engage:1")).expect_err("the event cap is spent");
+    assert!(matches!(first, judge::ModelError::Capped), "{first:?}");
+    let second = model.judge_event(&event_item("engage:2")).expect_err("still spent, and not sent");
+    assert!(matches!(second, judge::ModelError::Capped), "{second:?}");
+    let seed = judge::tier1(&item(), &heuristics());
+    model.judge(&item(), &heuristics(), &seed).expect("the task path is not capped");
+    let seen = server.requests();
+    assert_eq!(seen.len(), 2, "the second event call must not have been sent");
+    assert!(request_line(&seen[0]).contains("/judge-event"), "{}", request_line(&seen[0]));
+    assert!(request_line(&seen[1]).contains("/judge-task"), "{}", request_line(&seen[1]));
+}
+
+/// Regression: 401, 402 and 403 answer every path the same way, so one of them on any path stops
+/// every later call with no request. Q-A narrows only the cap, never these.
+#[test]
+fn a_402_still_stops_every_path() {
+    let none = r#"{"error":"no active subscription"}"#;
+    // 402 on the task path, then an event call.
+    let mut server = loopback(vec![(402, none.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let seed = judge::tier1(&item(), &heuristics());
+    let _ = model.judge(&item(), &heuristics(), &seed).expect_err("a 402 is an error");
+    let later = model.judge_event(&event_item("engage:1")).expect_err("every path is stopped");
+    assert!(later.to_string().contains("no entitlement"), "{later}");
+    assert_eq!(model.fatal(), Some("no entitlement"));
+    assert_eq!(server.requests().len(), 1, "the event call must not have been sent");
+    // 402 on the event path, then a task call.
+    let mut server = loopback(vec![(402, none.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let _ = model.judge_event(&event_item("engage:1")).expect_err("a 402 is an error");
+    let later = model.judge(&item(), &heuristics(), &seed).expect_err("every path is stopped");
+    assert!(later.to_string().contains("no entitlement"), "{later}");
+    assert_eq!(server.requests().len(), 1, "the task call must not have been sent");
+}
+
+/// `fatal()` names the cap only for the enrichment batch's path (`/judge-task`), because
+/// `enrich` prints "the rest of the batch was not sent" from it. A capped event alone is named
+/// once, by `events::judge_roster`'s summary.
+#[test]
+fn only_a_capped_batch_path_makes_fatal_name_the_cap() {
+    let capped = r#"{"verdict":null,"outcome":"capped"}"#;
+    let mut server = loopback(vec![(200, capped.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let seed = judge::tier1(&item(), &heuristics());
+    let _ = model.judge(&item(), &heuristics(), &seed).expect_err("the task cap is spent");
     assert_eq!(model.fatal(), Some(judge::CAPPED_LABEL));
+    let _ = server.requests();
+
+    let mut server = loopback(vec![(200, capped.to_string())]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let model = CloudModel::new(&client);
+    let _ = model.judge_event(&event_item("engage:1")).expect_err("the event cap is spent");
+    assert_eq!(model.fatal(), None, "an event cap alone does not say the batch was cut");
     let _ = server.requests();
 }
 

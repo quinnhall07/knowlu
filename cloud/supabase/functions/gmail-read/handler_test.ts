@@ -91,6 +91,9 @@ function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"], me
         rules: { lookup: () => Promise.resolve(null) },
         caps: {
           charge: () => Promise.resolve(true),
+          chargeOutcome: () => Promise.resolve("charged"),
+          chargeAllowance: () => Promise.resolve(false),
+          refundAllowance: () => Promise.resolve(),
           refund: () => Promise.resolve(),
           tripped: () => false,
           withinBudget: () => Promise.resolve(true),
@@ -900,4 +903,109 @@ Deno.test("P22: the address is matched whole and case-folded, never as a substri
   assertEquals(forwardingCounts(GMAIL_ADDRESS, [{ hint: null, status: "active" }]), false, "a hint not yet set");
   assertEquals(forwardingCounts(null, [{ hint: GMAIL_ADDRESS, status: "active" }]), false, "no OAuth address");
   assertEquals(forwardingCounts("", [{ hint: "", status: "active" }]), false, "two empty strings are not one address");
+});
+
+// Email follow-ups T4 (Q4, Quinn 2026-10-20; D22 as amended): Rotate sends a Gmail mailbox back to
+// `pending` for the device's confirm wait, while the old forward still delivers through the retired
+// token for up to seven days. Inside that grace the row counts as forwarding when the status it was
+// rotated from (`rotated_from`) counted; once the grace has run out it counts by its status alone.
+const ROTATE_NOW = Date.UTC(2026, 9, 20, 12, 0, 0);
+const GRACE_LEFT = new Date(ROTATE_NOW + 3 * 86_400_000).toISOString();
+const GRACE_GONE = new Date(ROTATE_NOW - 1).toISOString();
+
+/** One round of the handler over a single rotated Gmail mailbox, counting what reached Gmail. */
+async function rotatedRound(box: { status: string; retiredUntil: string | null; rotatedFrom: string | null }) {
+  const { deps, queued, asked, rows } = fakes([TASK_ANSWER]);
+  queued.push({ uid: "gmail:old1", tier: "task", payload: { title: "queued before the rotate" }, judgment_id: null });
+  let tokens = 0;
+  let fetched = 0;
+  const body = await (await readHandler(OK, {
+    ...deps,
+    clock: () => ROTATE_NOW,
+    forwarding: () => Promise.resolve({ gmail: GMAIL_ADDRESS, mailboxes: [{ hint: GMAIL_ADDRESS, ...box }] }),
+    accessTokenFor: (a) => {
+      tokens += 1;
+      return deps.accessTokenFor(a);
+    },
+    api: {
+      list: (t, q, u) => deps.api.list(t, q, u),
+      message: (t, id) => {
+        fetched += 1;
+        return deps.api.message(t, id);
+      },
+    },
+  })(post())).json();
+  return { body, tokens, listed: asked.length, fetched, judged: rows.length };
+}
+
+Deno.test("a_rotated_active_gmail_mailbox_keeps_the_oauth_read_off_inside_its_grace", async () => {
+  for (const rotatedFrom of ["confirmed", "active", "quiet"]) {
+    const r = await rotatedRound({ status: "pending", retiredUntil: GRACE_LEFT, rotatedFrom });
+    // Exactly D22's answer, as the forwarding test above asserts it.
+    assertEquals(r.body, {
+      items: [{ uid: "gmail:old1", tier: "task", payload: { title: "queued before the rotate" }, judgment_id: null }],
+      read: 0,
+      quiet: false,
+      more: false,
+      via_forward: true,
+    }, rotatedFrom);
+    assertEquals([r.tokens, r.listed, r.fetched, r.judged], [0, 0, 0, 0], `no token exchange, no Gmail call (${rotatedFrom})`);
+  }
+});
+
+Deno.test("a_rotated_gmail_mailbox_whose_grace_ran_out_unconfirmed_is_read_by_oauth", async () => {
+  // The old forward has stopped delivering, and the new address was never confirmed: the read comes back.
+  for (const retiredUntil of [GRACE_GONE, new Date(ROTATE_NOW).toISOString(), null]) {
+    const r = await rotatedRound({ status: "pending", retiredUntil, rotatedFrom: "active" });
+    assertEquals("via_forward" in r.body, false, String(retiredUntil));
+    assertEquals([r.body.read, r.tokens, r.listed, r.fetched], [1, 1, 1, 1], String(retiredUntil));
+  }
+});
+
+Deno.test("a_gmail_mailbox_rotated_from_pending_blocked_off_or_lapsed_is_read_by_oauth", async () => {
+  // It did not count before the Rotate, so it does not count inside the grace either.
+  for (const rotatedFrom of ["pending", "blocked", "off", "lapsed", "paused_send", "revoked", "", "Active", null]) {
+    const r = await rotatedRound({ status: "pending", retiredUntil: GRACE_LEFT, rotatedFrom });
+    assertEquals("via_forward" in r.body, false, String(rotatedFrom));
+    assertEquals([r.body.read, r.tokens, r.listed, r.fetched], [1, 1, 1, 1], String(rotatedFrom));
+  }
+});
+
+Deno.test("forwardingCounts_counts_a_pending_row_only_inside_a_rotate_grace_from_a_counting_status", () => {
+  const at = (status: string, retiredUntil: string | null = null, rotatedFrom: string | null = null) => [
+    { hint: GMAIL_ADDRESS, status, retiredUntil, rotatedFrom },
+  ];
+  // The allow-list as before, with or without a grace on the row.
+  for (const status of ["confirmed", "active", "quiet"]) {
+    assertEquals(forwardingCounts(GMAIL_ADDRESS, at(status), () => ROTATE_NOW), true, status);
+    assertEquals(forwardingCounts(GMAIL_ADDRESS, at(status, GRACE_GONE, "pending"), () => ROTATE_NOW), true, status);
+  }
+  // `pending` without a grace, or with one that has run out, does not count.
+  assertEquals(forwardingCounts(GMAIL_ADDRESS, at("pending"), () => ROTATE_NOW), false, "no grace");
+  assertEquals(forwardingCounts(GMAIL_ADDRESS, at("pending", null, "active"), () => ROTATE_NOW), false, "a stale rotated_from");
+  assertEquals(forwardingCounts(GMAIL_ADDRESS, at("pending", GRACE_GONE, "active"), () => ROTATE_NOW), false, "grace gone");
+  assertEquals(forwardingCounts(GMAIL_ADDRESS, at("pending", "not a time", "active"), () => ROTATE_NOW), false, "unparseable");
+  // Inside the grace, from a counting status: counts.
+  assertEquals(forwardingCounts(GMAIL_ADDRESS, at("pending", GRACE_LEFT, "active"), () => ROTATE_NOW), true, "in grace");
+  // The grace widens `pending` only: any other status reads by the allow-list alone.
+  for (const status of ["blocked", "off", "lapsed", "revoked", "paused_send"]) {
+    assertEquals(forwardingCounts(GMAIL_ADDRESS, at(status, GRACE_LEFT, "active"), () => ROTATE_NOW), false, status);
+  }
+  // The address is still matched whole: `notjane@` is not `jane@`, grace or not.
+  const jane = "jane@gmail.example.invalid";
+  const rotated = { status: "pending", retiredUntil: GRACE_LEFT, rotatedFrom: "active" };
+  assertEquals(forwardingCounts(jane, [{ hint: `not${jane}`, ...rotated }], () => ROTATE_NOW), false);
+  assertEquals(forwardingCounts(`not${jane}`, [{ hint: jane, ...rotated }], () => ROTATE_NOW), false);
+  assertEquals(forwardingCounts(` Jane@GMAIL.example.invalid `, [{ hint: jane, ...rotated }], () => ROTATE_NOW), true);
+});
+
+Deno.test("index_reads_the_rotate_grace_fields_for_d22", async () => {
+  // A source pin, as L7's index tests pin `gmail-read/index.ts`: without these two columns the grace
+  // branch above never sees a row, and a rotated Gmail is read twice.
+  const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assert(src.includes("select=mailbox_hint,status,retired_until,rotated_from&limit=20"), "the select list");
+  assert(src.includes("retiredUntil: m.retired_until"), "retired_until is handed on");
+  assert(src.includes("rotatedFrom: m.rotated_from"), "rotated_from is handed on");
+  const handler = await Deno.readTextFile(new URL("./handler.ts", import.meta.url));
+  assert(handler.includes("forwardingCounts(forwarding.gmail, forwarding.mailboxes, deps.clock)"), "the handler's own clock");
 });

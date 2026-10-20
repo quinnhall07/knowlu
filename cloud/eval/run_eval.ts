@@ -92,6 +92,9 @@ const EVAL_ACCOUNT = "00000000-0000-0000-0000-000000000000";
  */
 const EVAL_CAPS: CapStore = {
   charge: () => Promise.resolve(true),
+  chargeOutcome: () => Promise.resolve("charged"),
+  chargeAllowance: () => Promise.resolve(false),
+  refundAllowance: () => Promise.resolve(),
   refund: () => Promise.resolve(),
   tripped: () => false,
   withinBudget: () => Promise.resolve(true),

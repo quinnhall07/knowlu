@@ -26,6 +26,9 @@ const ROW: ModelRow = {
 const NO_RULES: RuleTable = { lookup: () => Promise.resolve(null) };
 const ALWAYS: CapStore = {
   charge: () => Promise.resolve(true),
+  chargeOutcome: () => Promise.resolve("charged"),
+  chargeAllowance: () => Promise.resolve(false),
+  refundAllowance: () => Promise.resolve(),
   refund: () => Promise.resolve(),
   tripped: () => false,
   withinBudget: () => Promise.resolve(true),

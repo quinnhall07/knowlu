@@ -1,8 +1,9 @@
 // The pipeline of cloud design §5.2, and the only place the order of those steps is written down:
 //
-//   rules (tier 2, free) -> breaker -> monthly budget -> daily cap -> constrained call (tier 3)
-//                        -> refund if the model never answered | validate -> record tokens
-//                        -> log -> reply
+//   rules (tier 2, free) -> breaker -> monthly budget -> daily cap
+//                        -> (event only, on overflow) first-day allowance -> constrained call (tier 3)
+//                        -> refund to whichever charged if the model never answered
+//                        | validate -> record tokens -> log -> reply
 //
 // **Rules come before the cap on purpose.** "Rules retire model calls" (§5.4 measure 1) and "a
 // rule still spends the account's model allowance" cannot both be true; the first one is the
@@ -194,7 +195,16 @@ async function judgeUngated(
     });
     return { verdict: null, tier: 0, outcome: "capped" };
   }
-  if (!await deps.caps.charge(accountId, req.kind)) {
+  // L3 (spec 2026-10-06 §3, §5): the daily cap first, then, for an `event` the cap REALLY refused,
+  // the one-time first-day allowance. `"error"` never reaches the allowance: a cap store that could
+  // not answer has not refused, so it neither opens nor spends it, and answers `capped` as before.
+  // `chargedTo` remembers which store this call counted against, so a failed call goes back there.
+  const outcome = await deps.caps.chargeOutcome(accountId, req.kind);
+  let chargedTo: "cap" | "allowance" | null = outcome === "charged" ? "cap" : null;
+  if (outcome === "refused" && req.kind === "event" && await deps.caps.chargeAllowance(accountId, req.kind)) {
+    chargedTo = "allowance";
+  }
+  if (chargedTo === null) {
     await deps.log.write({
       ...base,
       tier: 0,
@@ -240,7 +250,11 @@ async function judgeUngated(
     // error envelope, an unparseable reply), so the call `charge` counted is given back — an outage
     // must not spend the student's day. A refusal or a truncation is the model answering; it stays
     // charged. The charge before the call is untouched: it is what bounds a hot loop in flight.
-    if (cause === "model failed") await deps.caps.refund(accountId, req.kind);
+    // The refund goes to whichever store charged (L3), never both.
+    if (cause === "model failed") {
+      if (chargedTo === "allowance") await deps.caps.refundAllowance(accountId, req.kind);
+      else await deps.caps.refund(accountId, req.kind);
+    }
     const id = await deps.log.write({
       ...base,
       ...pinned,
