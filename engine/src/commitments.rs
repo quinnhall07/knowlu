@@ -1426,6 +1426,41 @@ pub struct SeriesFile {
     /// Sorted by `(source_uid, calendar)`; one key may be held under two calendars (I2), so a
     /// reader takes [`SeriesFile::by_key`], never this list.
     pub series: Vec<Series>,
+    /// Phase-3 spec A2 item 13: the registrar block, per term calendar key. Absent from the file
+    /// (and empty here) until a registrar fetch writes one.
+    pub registrar: BTreeMap<String, RegistrarTerm>,
+}
+
+/// One term's registrar block (phase-3 spec A2 item 13). `applied` and `ended` accumulate over the
+/// term; `kept` is 12's standing state; `status` and `unread` are the latest successful fetch's.
+/// Entries are JSON objects in the shapes close-out B2 pins (`registrar/apply_support.rs`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegistrarTerm {
+    pub first_fetch: Date,
+    pub last_fetch: Date,
+    pub applied: Vec<serde_json::Value>,
+    pub ended: Vec<serde_json::Value>,
+    pub kept: Vec<serde_json::Value>,
+    pub status: Vec<serde_json::Value>,
+    pub unread: Vec<serde_json::Value>,
+}
+
+/// What one registrar fetch adds to its term's block (A2 item 13, "How it changes").
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RegistrarFetch {
+    pub calendar: String,
+    pub applied: Vec<serde_json::Value>,
+    pub ended: Vec<serde_json::Value>,
+    pub status: Vec<serde_json::Value>,
+    pub unread: Vec<serde_json::Value>,
+}
+
+/// A2 item 13's list order: `applied` and `ended` by (fetch day, note path, field); `kept`, `status`
+/// and `unread` (which carry no `day`) by (note path, field). An absent or `null` part sorts first;
+/// the key breaks a tie between two entries no note holds.
+pub fn sort_registrar_entries(entries: &mut [serde_json::Value]) {
+    let part = |e: &serde_json::Value, k: &str| e.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    entries.sort_by_key(|e| (part(e, "day"), part(e, "note"), part(e, "field"), part(e, "key")));
 }
 
 /// The one precedence between two records of one key or one signature (I2, phase-3 D7): a
@@ -1902,10 +1937,33 @@ pub(crate) fn file_bytes(file: &SeriesFile) -> String {
             (k.clone(), entry)
         })
         .collect();
-    let value = serde_json::json!({
+    let mut value = serde_json::json!({
         "calendars": calendars, "ended": ended,
         "series": series.into_iter().map(series_json).collect::<Vec<_>>(),
     });
+    // A2 item 13, "Its bytes": the block is part of this one value, so `dumps_value` sorts its keys;
+    // list entries are sorted here. Omitted when no term has a block (a never-fetched vault's bytes).
+    if !file.registrar.is_empty() {
+        let terms: serde_json::Map<String, serde_json::Value> = file
+            .registrar
+            .iter()
+            .map(|(key, t)| {
+                let sorted = |list: &[serde_json::Value]| {
+                    let mut list = list.to_vec();
+                    sort_registrar_entries(&mut list);
+                    list
+                };
+                let entry = serde_json::json!({
+                    "applied": sorted(&t.applied), "ended": sorted(&t.ended),
+                    "first_fetch": t.first_fetch.to_string(), "kept": sorted(&t.kept),
+                    "last_fetch": t.last_fetch.to_string(), "status": sorted(&t.status),
+                    "unread": sorted(&t.unread),
+                });
+                (key.clone(), entry)
+            })
+            .collect();
+        value["registrar"] = serde_json::Value::Object(terms);
+    }
     format!("{}\n", crate::ledger::dumps_value(&value))
 }
 
@@ -2018,6 +2076,24 @@ fn parse_file(text: &str) -> Parsed<SeriesFile> {
     for series in object.get("series").and_then(|v| v.as_array()).ok_or("no series")? {
         file.series.push(parse_series(series)?);
     }
+    // A2 item 13: a file without the block reads as an empty one; a block in the wrong shape is a
+    // malformed file, like any other part.
+    if let Some(block) = object.get("registrar") {
+        for (key, term) in block.as_object().ok_or("bad registrar")? {
+            let list = |k: &str| term.get(k).and_then(|v| v.as_array()).cloned().ok_or_else(|| "bad registrar".to_string());
+            let day = |k: &str| json_date(term.get(k), "registrar")?.ok_or_else(|| "bad registrar".to_string());
+            let entry = RegistrarTerm {
+                first_fetch: day("first_fetch")?,
+                last_fetch: day("last_fetch")?,
+                applied: list("applied")?,
+                ended: list("ended")?,
+                kept: list("kept")?,
+                status: list("status")?,
+                unread: list("unread")?,
+            };
+            file.registrar.insert(key.clone(), entry);
+        }
+    }
     file.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
     Ok(file)
 }
@@ -2122,10 +2198,36 @@ fn write_state_file(vault: &Path, name: &str, bytes: &str) -> std::io::Result<()
 /// a lock that cannot be taken is one warning and the run goes on unguarded. A file that could not be *read* (an I/O error, not a parse failure) is left
 /// alone and not rewritten this run, with one warning; the returned data then holds only this
 /// run's fresh calendars. Warnings: the old file's, and a failed write's.
+///
+/// The registrar block (phase-3 spec A2 item 13, "Every writer keeps it") is carried unchanged;
+/// a term's entry goes when its calendar leaves `calendars`.
 pub fn refresh_series(
     vault: &Path,
     fresh: &[(String, Vec<Series>)],
     today: Date,
+) -> (SeriesFile, Vec<String>) {
+    refresh_series_with(vault, fresh, today, None)
+}
+
+/// The registrar calendars in play on `today` (phase 3, Plan rulings R2-a, R2-b): each holding a
+/// series whose `until` is open or less than 28 days past.
+pub fn registrar_in_play(file: &SeriesFile, today: Date) -> BTreeSet<String> {
+    file.series
+        .iter()
+        .filter(|s| s.calendar.starts_with(crate::registrar::CALENDAR_PREFIX))
+        .filter(|s| s.until.is_none_or(|u| days_since(u, today) < ENDED_DAYS))
+        .map(|s| s.calendar.clone())
+        .collect()
+}
+
+/// [`refresh_series`], plus a registrar fetch's lists (A2 item 13, "When it is written"): they go
+/// into the term's block in this same write, under the same lock. `applied` and `ended` are
+/// appended, `status` and `unread` replaced, `last_fetch` set (and `first_fetch` on a new block).
+pub fn refresh_series_with(
+    vault: &Path,
+    fresh: &[(String, Vec<Series>)],
+    today: Date,
+    news: Option<&RegistrarFetch>,
 ) -> (SeriesFile, Vec<String>) {
     // Phase 3 final review I2: a run that may write holds the series lock from the read to the
     // rename, so a slot's `rank`, `commitments` and a registrar run never lose each other's merge.
@@ -2157,12 +2259,7 @@ pub fn refresh_series(
     // student fetches it. It counts as configured while it holds a series whose `until` is open or
     // less than 28 days past; then it ages like a removed feed.
     let registrar = |calendar: &str| calendar.starts_with(crate::registrar::CALENDAR_PREFIX);
-    let in_play: BTreeSet<String> = old
-        .series
-        .iter()
-        .filter(|s| registrar(&s.calendar) && s.until.is_none_or(|u| days_since(u, today) < ENDED_DAYS))
-        .map(|s| s.calendar.clone())
-        .collect();
+    let in_play = registrar_in_play(&old, today);
     let configured = |calendar: &str| {
         if registrar(calendar) {
             in_play.contains(calendar)
@@ -2210,6 +2307,24 @@ pub fn refresh_series(
     calendars.retain(|calendar, read| {
         returned.contains_key(calendar.as_str()) || configured(calendar) || recent(Some(*read))
     });
+    let mut block = old.registrar;
+    block.retain(|calendar, _| calendars.contains_key(calendar));
+    if let Some(news) = news {
+        let term = block.entry(news.calendar.clone()).or_insert_with(|| RegistrarTerm {
+            first_fetch: today,
+            last_fetch: today,
+            applied: Vec::new(),
+            ended: Vec::new(),
+            kept: Vec::new(),
+            status: Vec::new(),
+            unread: Vec::new(),
+        });
+        term.last_fetch = today;
+        term.applied.extend(news.applied.iter().cloned());
+        term.ended.extend(news.ended.iter().cloned());
+        term.status = news.status.clone();
+        term.unread = news.unread.clone();
+    }
     series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
 
     let held: BTreeSet<&str> = series.iter().map(|s| s.source_uid.as_str()).collect();
@@ -2234,7 +2349,7 @@ pub fn refresh_series(
         ended.insert(gone.source_uid, entry);
     }
 
-    let file = SeriesFile { calendars, ended, series };
+    let file = SeriesFile { calendars, ended, series, registrar: block };
     if !fresh.is_empty() && writable {
         let bytes = file_bytes(&file);
         if std::fs::read(series_path(vault)).ok().as_deref() != Some(bytes.as_bytes()) {
@@ -4812,9 +4927,35 @@ pub struct Overview {
     pub registrar: serde_json::Value,
     /// The current registrar proposals (key `registrar:`), as [`proposal_value`].
     pub registrar_proposals: Vec<serde_json::Value>,
+    /// Phase-3 spec A2 item 13, "After a restart": [`registrar_changes_json`].
+    pub registrar_changes: serde_json::Value,
     /// D3: the vault is on its first day and has no planning-day note.
     pub setup: bool,
     pub warnings: Vec<String>,
+}
+
+/// The page's "From myBama" lists after a restart (phase-3 spec A2 item 13): `applied`, `ended`,
+/// `kept`, `status` and `unread`, read from the registrar block of every term in play
+/// ([`registrar_in_play`]), terms in key order, each list in the block's order. No term, empty lists.
+pub fn registrar_changes_json(file: &SeriesFile, today: Date) -> serde_json::Value {
+    let in_play = registrar_in_play(file, today);
+    let mut out = serde_json::Map::new();
+    for key in ["applied", "ended", "kept", "status", "unread"] {
+        let mut list = Vec::new();
+        for term in file.registrar.iter().filter(|(c, _)| in_play.contains(*c)).map(|(_, t)| t) {
+            let mut part = match key {
+                "applied" => term.applied.clone(),
+                "ended" => term.ended.clone(),
+                "kept" => term.kept.clone(),
+                "status" => term.status.clone(),
+                _ => term.unread.clone(),
+            };
+            sort_registrar_entries(&mut part);
+            list.extend(part);
+        }
+        out.insert(key.to_string(), serde_json::Value::Array(list));
+    }
+    serde_json::Value::Object(out)
 }
 
 impl Overview {
@@ -4826,6 +4967,7 @@ impl Overview {
             "uncovered_courses": self.uncovered_courses,
             "registrar": self.registrar,
             "registrar_proposals": self.registrar_proposals,
+            "registrar_changes": self.registrar_changes,
             "setup": self.setup,
             "warnings": self.warnings,
         })
@@ -4876,6 +5018,7 @@ pub fn overview(vault: &Path, today: Date) -> Overview {
         .filter(|p| p.source_uid.starts_with(crate::registrar::CALENDAR_PREFIX))
         .map(proposal_value)
         .collect();
+    let registrar_changes = registrar_changes_json(&stored.file, today);
     Overview {
         commitments,
         office_hours,
@@ -4883,6 +5026,7 @@ pub fn overview(vault: &Path, today: Date) -> Overview {
         uncovered_courses,
         registrar,
         registrar_proposals,
+        registrar_changes,
         setup,
         warnings: stored.warnings,
     }
@@ -7361,7 +7505,7 @@ mod series_tests {
         g.last_seen = Some(d0);
         p.last_seen = Some(plus(d0, 3));
         day.last_seen = Some(plus(d0, 3));
-        let file = SeriesFile { calendars, ended: BTreeMap::new(), series: vec![g, p, day] };
+        let file = SeriesFile { calendars, ended: BTreeMap::new(), series: vec![g, p, day], registrar: BTreeMap::new() };
         let map = file.instances_map();
         assert_eq!(
             map["gcal-series:k"],
@@ -7853,6 +7997,7 @@ mod proposal_tests {
             .collect(),
             ended: BTreeMap::new(),
             series,
+            registrar: BTreeMap::new(),
         };
         let first = run(&file, &Commitments::default());
         assert_eq!(

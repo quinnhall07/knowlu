@@ -910,6 +910,9 @@ pub struct CommitmentsReport {
     pub proposals: Vec<crate::commitments::Proposal>,
     /// Phase-2 spec §2: the courses with neither a class proposal nor a confirmed class note.
     pub uncovered: Vec<crate::commitments::UncoveredCourse>,
+    /// Phase-3 spec A2 item 13, "After a restart": the registrar block's lists
+    /// ([`crate::commitments::registrar_changes_json`]).
+    pub registrar_changes: serde_json::Value,
     pub warnings: Vec<String>,
 }
 
@@ -1048,7 +1051,8 @@ pub fn commitments_report_with(
     let proposals = cm::proposals(&file, &set, &codes, &names, &template, &held, today, false);
 
     let uncovered = cm::uncovered_courses(vault, &set, &proposals, &codes);
-    CommitmentsReport { proposals, uncovered, warnings }
+    let registrar_changes = cm::registrar_changes_json(&file, today);
+    CommitmentsReport { proposals, uncovered, registrar_changes, warnings }
 }
 
 /// Phase-2 spec §3: `commitments --confirm`. Parses the input, pins `today` (the vault's zone

@@ -560,6 +560,7 @@ fn main() -> ExitCode {
                 let value = serde_json::json!({
                     "proposals": ordered.into_iter().map(cli::proposal_json).collect::<Vec<_>>(),
                     "uncovered_courses": report.uncovered,
+                    "registrar_changes": report.registrar_changes,
                     "warnings": report.warnings,
                 });
                 println!("{}", knowlu_engine::ledger::dumps_value(&value));

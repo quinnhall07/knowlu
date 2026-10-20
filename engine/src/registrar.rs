@@ -21,10 +21,12 @@ pub struct School {
     /// The `statusIndicator` codes that mean "registered" (spec D3 amendment, P6). Empty means every
     /// row counts, the only behaviour before B9a records UA's real codes.
     pub registered: &'static [&'static str],
+    /// What the school calls its registrar, in the report's `unread` reasons (A2 item 11).
+    pub label: &'static str,
 }
 
 /// UA only before the pilot (Quinn, 2026-09-23).
-pub const SCHOOLS: [School; 1] = [School { key: "ua", terms: &[(1, "10"), (6, "40")], registered: &[] }];
+pub const SCHOOLS: [School; 1] = [School { key: "ua", terms: &[(1, "10"), (6, "40")], registered: &[], label: "myBama" }];
 
 /// Every registrar calendar key, and every registrar `source_uid`, starts with this.
 pub const CALENDAR_PREFIX: &str = "registrar:";
@@ -79,6 +81,12 @@ pub struct Parsed {
     pub status: usize,
     /// P9: every `courseReferenceNumber` of the answer, once, with how its row was read.
     pub seen: std::collections::BTreeMap<String, Reading>,
+    /// P6: each `status` CRN's `statusDescription` (or "an unrecorded status"), for A2 item 13.
+    pub statuses: BTreeMap<String, String>,
+    /// P3/P4: the `unread` CRNs whose row had no `CLAS` meeting with a day and times and no meeting
+    /// of an unknown type ("no class time"); every other unread or partial row is one Knowlu
+    /// "cannot read" (A2 item 11).
+    pub no_class_time: BTreeSet<String>,
 }
 
 /// P9: how [`parse_banner`] read one row.
@@ -139,6 +147,8 @@ struct RowMeetings {
     lab_meeting: bool,
     /// P9: a `CLAS` meeting (P4) or an unknown-type meeting (P3) was skipped.
     partial: bool,
+    /// P3: a meeting of a missing or unknown type was skipped.
+    unknown: bool,
 }
 
 /// P3: only `CLAS` meetings are read; `EXAM` is counted (`out.exam`) and any other or missing
@@ -157,6 +167,7 @@ fn read_meetings(row: &Value, name: &str, out: &mut Parsed) -> RowMeetings {
                 out.meeting_type += 1;
                 out.warnings.push(format!("registrar: {name} has a meeting of an unknown type; skipped"));
                 r.partial = true;
+                r.unknown = true;
                 continue;
             }
         }
@@ -226,6 +237,7 @@ pub fn parse_banner_with(json: &Value, school: &str, registered: &[&str]) -> Res
             out.seen.insert(crn.to_string(), Reading::Status);
             let what = text(row, "statusDescription").unwrap_or("an unrecorded status");
             out.warnings.push(format!("registrar: {name} is listed as {what}; skipped"));
+            out.statuses.insert(crn.to_string(), what.to_string());
             continue;
         }
         let m = read_meetings(row, &name, &mut out);
@@ -235,6 +247,9 @@ pub fn parse_banner_with(json: &Value, school: &str, registered: &[&str]) -> Res
             continue;
         }
         if m.meets.is_empty() {
+            if !m.unknown {
+                out.no_class_time.insert(crn.to_string());
+            }
             out.no_time += 1;
             out.warnings.push(format!("registrar: {name} lists no class meeting with a day and times; not guessed"));
             continue;
@@ -298,16 +313,27 @@ pub struct Report {
     /// A2 items 8, 9 and 13 (close-out B3b): each field this fetch wrote, as `{day, field, from,
     /// note, to}`, in (note path, field) order. Only writes that succeeded.
     pub applied: Vec<Value>,
+    /// A2 item 13 (close-out B3c): `dropped`'s P3 and P6 counts beside `no_time` and `midnight`.
+    pub exam: usize,
+    pub meeting_type: usize,
+    pub not_registered: usize,
+    /// A2 item 13: this fetch's `status` (`{key, note, status}`) and `unread` (`{key, note,
+    /// reason}`) entries, in the block's order; the block holds the same values.
+    pub status: Vec<Value>,
+    pub unread_entries: Vec<Value>,
 }
 
 impl Report {
-    /// `ended` is `[]` until close-out B3d ends a missing note.
+    /// `ended` and `kept` are `[]` until close-out B3d and B3e record them.
     pub fn to_json(&self) -> Value {
         json!({
             "term": self.term, "rows": self.rows, "confirmed": self.confirmed, "proposed": self.proposed,
-            "dropped": { "no_time": self.no_time, "midnight": self.midnight },
+            "dropped": {
+                "exam": self.exam, "meeting_type": self.meeting_type, "midnight": self.midnight,
+                "no_time": self.no_time, "status": self.not_registered,
+            },
             "warnings": self.warnings,
-            "applied": self.applied, "ended": [],
+            "applied": self.applied, "ended": [], "kept": [], "status": self.status, "unread": self.unread_entries,
         })
     }
 }
@@ -366,8 +392,7 @@ pub fn run_parsed(
         s.calendar == calendar && notes.contains_key(&s.source_uid) && read.get(&s.source_uid).is_some_and(|how| *how != Reading::Whole)
     });
     let input: Vec<Series> = whole.iter().cloned().chain(carried).collect();
-    let (_, mut warnings) = cm::refresh_series(vault, &[(calendar, input)], today);
-    warnings.extend(parsed.warnings.iter().cloned());
+    let mut failed = Vec::new();
     // A2 items 8 and 9 (close-out B3b): a note whose row was read `whole` gets each changed `meets`,
     // `until` or `where` written, one field per `write`, journal first, as the registrar. A missing
     // note is item 11's (B3d) and a part-read one gets nothing. Notes in path order.
@@ -382,17 +407,52 @@ pub fn run_parsed(
             let literal = [(change.field.to_string(), change.literal)];
             match crate::write::write_literals(vault, path, &literal, &agent, journal, &crate::write::WriteOpts::default()) {
                 Ok(_) => applied.push(json!({ "day": today.to_string(), "field": change.field, "from": change.from, "note": path, "to": change.to })),
-                Err(_) => warnings.push(format!("registrar: {path}: {} not applied (the write failed)", change.field)),
+                Err(_) => failed.push(format!("registrar: {path}: {} not applied (the write failed)", change.field)),
             }
         }
     }
     // A2 item 11: missing only when `seen` holds no row with the note's CRN at all.
     let missing = notes.iter().filter(|(key, _)| !read.contains_key(*key)).map(|(_, note)| note.clone()).collect();
-    let unread = read
+    let unread: Vec<(String, Option<String>, Reading)> = read
         .iter()
         .filter(|(key, how)| matches!(how, Reading::Partial) || (matches!(how, Reading::Unread) && notes.contains_key(*key)))
         .map(|(key, how)| (key.clone(), notes.get(key).cloned(), *how))
         .collect();
+    // A2 item 13 (close-out B3c): the `status` and `unread` lists, and the block written in the
+    // merge's own series-file write, under its lock, after the note writes (only those that held).
+    let crn_of = |key: &str| key.strip_prefix(calendar.as_str()).and_then(|r| r.strip_prefix('-')).unwrap_or_default().to_string();
+    let label = school(school_key).map_or("The registrar", |s| s.label);
+    let mut unread_entries: Vec<Value> = unread
+        .iter()
+        .map(|(key, note, how)| {
+            let what = match *how == Reading::Unread && parsed.no_class_time.contains(&crn_of(key)) {
+                true => "no class time",
+                false => "a meeting Knowlu cannot read",
+            };
+            json!({ "key": key, "note": note, "reason": format!("{label} lists this course with {what}; nothing changed") })
+        })
+        .collect();
+    let mut status: Vec<Value> = read
+        .iter()
+        .filter(|(key, how)| **how == Reading::Status && notes.contains_key(*key))
+        .map(|(key, _)| {
+            let what = parsed.statuses.get(&crn_of(key)).cloned().unwrap_or_else(|| "an unrecorded status".into());
+            json!({ "key": key, "note": notes.get(key), "status": what })
+        })
+        .collect();
+    cm::sort_registrar_entries(&mut unread_entries);
+    cm::sort_registrar_entries(&mut status);
+    cm::sort_registrar_entries(&mut applied);
+    let news = cm::RegistrarFetch {
+        calendar: calendar.clone(),
+        applied: applied.clone(),
+        ended: Vec::new(),
+        status: status.clone(),
+        unread: unread_entries.clone(),
+    };
+    let (_, mut warnings) = cm::refresh_series_with(vault, &[(calendar, input)], today, Some(&news));
+    warnings.extend(parsed.warnings.iter().cloned());
+    warnings.extend(failed);
     let stored = cm::stored_proposals(vault, today);
     let current: BTreeSet<&str> = stored.proposals.iter().map(|p| p.source_uid.as_str()).collect();
     let (mut mine, mut proposed) = (Vec::new(), 0);
@@ -420,6 +480,11 @@ pub fn run_parsed(
         missing,
         unread,
         applied,
+        exam: parsed.exam,
+        meeting_type: parsed.meeting_type,
+        not_registered: parsed.status,
+        status,
+        unread_entries,
     })
 }
 
