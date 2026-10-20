@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
-import { checkoutForm, handle } from "./handler.ts";
+import { checkoutForm, type Deps, handle } from "./handler.ts";
+import { CASES } from "../../migrations/testers_cases.ts";
 
 Deno.test("the Checkout form carries the trial, the card, the tax and the terms checkbox", () => {
   const form = checkoutForm({
@@ -53,6 +54,7 @@ Deno.test("an account with no Stripe customer gets one, once, and it is saved", 
           stripe_customer_id: null,
           age_attested_at: "2026-09-17T12:00:00Z",
         }),
+      isTester: () => Promise.resolve(false),
       saveCustomerId: (a, c) => {
         saved = [a, c];
         return Promise.resolve();
@@ -94,6 +96,7 @@ Deno.test("the auto-renew consent is logged with its version and the price, befo
           stripe_customer_id: "cus_1",
           age_attested_at: "2026-09-17T12:00:00Z",
         }),
+      isTester: () => Promise.resolve(false),
       saveCustomerId: () => Promise.resolve(),
       recordConsent: (c) => {
         consents.push(c);
@@ -134,6 +137,7 @@ Deno.test("R-C1-59 (M4): a malformed x-forwarded-for never 502s a checkout — t
           stripe_customer_id: "cus_1",
           age_attested_at: "2026-09-17T12:00:00Z",
         }),
+      isTester: () => Promise.resolve(false),
       saveCustomerId: () => Promise.resolve(),
       recordConsent: (c) => {
         consents.push(c);
@@ -167,6 +171,7 @@ Deno.test("an unknown plan is 400 and never reaches Stripe", async () => {
           stripe_customer_id: "cus_1",
           age_attested_at: "2026-09-17T12:00:00Z",
         }),
+      isTester: () => Promise.resolve(false),
       saveCustomerId: () => Promise.resolve(),
       recordConsent: () => Promise.resolve(),
       stripe: () => {
@@ -197,6 +202,7 @@ Deno.test("an account that never attested to being 18 cannot reach Stripe", asyn
       // the server-side tooth that replaced the trigger's `raise`.
       getAccount: () =>
         Promise.resolve({ email: "a@example.invalid", stripe_customer_id: null, age_attested_at: null }),
+      isTester: () => Promise.resolve(false),
       saveCustomerId: () => Promise.resolve(),
       recordConsent: () => {
         touched = true;
@@ -231,6 +237,7 @@ Deno.test("an account that did attest goes through exactly as before", async () 
           stripe_customer_id: "cus_1",
           age_attested_at: "2026-09-17T12:00:00Z",
         }),
+      isTester: () => Promise.resolve(false),
       saveCustomerId: () => Promise.resolve(),
       recordConsent: () => Promise.resolve(),
       stripe: () => Promise.resolve({ id: "cs_4", url: "https://checkout.stripe.com/c/cs_4" }),
@@ -241,4 +248,96 @@ Deno.test("an account that did attest goes through exactly as before", async () 
     },
   );
   assertEquals(res.status, 200);
+});
+
+// Friends testers (docs/specs/2026-10-18-friends-testers-design.md §3.4, Q3, §9 "Functions"; L8 S4):
+// while `effective_entitlements` answers `plan = 'tester'` for the caller, checkout is refused with a
+// 409, so no path, old build or stale page can start a charge. The fake lookup answers from the case
+// table's own expectation for the view, so an expired (P8) or ended (P9) grant is decided where the
+// view decides it, and those callers reach Checkout exactly as today.
+const viewSaysTester = (id: string): boolean => {
+  const c = CASES.find((x) => x.id === id);
+  if (!c) throw new Error(`no case ${id} in testers_cases.ts`);
+  return c.expect[0]?.plan === "tester";
+};
+
+function testerDeps(caseId: string, seen: string[]): Deps {
+  return {
+    verify: () => Promise.resolve({ id: "acc-1", email: "a@example.invalid" }),
+    getAccount: () =>
+      Promise.resolve({
+        email: "a@example.invalid",
+        stripe_customer_id: null,
+        age_attested_at: "2026-09-17T12:00:00Z",
+      }),
+    isTester: (id) => {
+      seen.push(`isTester:${id}`);
+      return Promise.resolve(viewSaysTester(caseId));
+    },
+    saveCustomerId: () => (seen.push("saveCustomerId"), Promise.resolve()),
+    recordConsent: () => (seen.push("recordConsent"), Promise.resolve()),
+    stripe: (path) => {
+      seen.push(path);
+      return Promise.resolve(
+        path === "/v1/customers"
+          ? { id: "cus_new" }
+          : { id: "cs_t", url: "https://checkout.stripe.com/c/cs_t" },
+      );
+    },
+    priceFor: () => "price_monthly",
+    priceCentsFor: () => 999,
+    successUrl: "https://knowlu.com/subscribed.html",
+    cancelUrl: "https://knowlu.com/index.html",
+  };
+}
+
+const checkoutReq = () =>
+  new Request("http://127.0.0.1:1/", {
+    method: "POST",
+    headers: { authorization: "Bearer good" },
+    body: JSON.stringify({ plan: "monthly", terms_version: "2026-09-10" }),
+  });
+
+Deno.test("a caller the view shows as tester is 409, and no customer, consent row or session is made", async () => {
+  for (const id of ["P3", "P3x", "P5", "P6"]) {
+    assert(viewSaysTester(id), `${id} must be a tester row in the case table`);
+    const seen: string[] = [];
+    const res = await handle(checkoutReq(), testerDeps(id, seen)).catch((e) => e as Response);
+    assertEquals(res.status, 409, id);
+    assertEquals(await res.json(), { error: "this account has free tester access" }, id);
+    assertEquals(
+      seen,
+      ["isTester:acc-1"],
+      `${id}: the lookup is scoped to the caller and nothing follows it`,
+    );
+  }
+});
+
+Deno.test("an expired (P8) or ended (P9) grant, and an unpaid or paid account, reach Checkout as today", async () => {
+  for (const id of ["P8", "P9", "P0", "P1"]) {
+    assert(!viewSaysTester(id), `${id} must not be a tester row in the case table`);
+    const seen: string[] = [];
+    const res = await handle(checkoutReq(), testerDeps(id, seen));
+    assertEquals(res.status, 200, id);
+    assertEquals(await res.json(), { url: "https://checkout.stripe.com/c/cs_t" }, id);
+    assertEquals(
+      seen,
+      ["isTester:acc-1", "/v1/customers", "saveCustomerId", "recordConsent", "/v1/checkout/sessions"],
+      `${id}: the lookup comes first, then today's path unchanged`,
+    );
+  }
+});
+
+// `index.ts` is never loaded by `deno test` (it reads `Deno.env` and calls `Deno.serve`), so a fake in
+// this file alone would leave production never reading the view (§3.4). The precedent is
+// `account/handler_test.ts`'s `sources` guard, which reads its `index.ts` as text.
+Deno.test("index.ts wires isTester to effective_entitlements, by the caller's account id, selecting plan", async () => {
+  const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const m = text.match(/isTester: async \(id\) => \{[\s\S]*?\n {6}\},/);
+  assert(m, "could not find isTester's body in index.ts");
+  const body = m[0];
+  assert(/restSelect<[^>]*>\(\s*rest,\s*"effective_entitlements",/.test(body), "isTester must read the view");
+  assert(body.includes("`account_id=eq.${encodeURIComponent(id)}&select=plan&limit=1`"), body);
+  assert(body.includes('=== "tester"'), "isTester must answer true only for plan tester");
+  assert(!/"entitlements"|comp_grants/.test(body), "isTester reads the view, never the table or the grants");
 });

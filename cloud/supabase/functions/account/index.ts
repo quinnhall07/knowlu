@@ -129,6 +129,11 @@ Deno.serve(async (req) => {
             "sync_records",
             "sync_notes",
             "sync_usage",
+            // Friends testers (spec §3.3, §4): the account's per-route call counts. `comp_grants` and
+            // `comp_audit` are NOT named here: the service role holds no delete right on either
+            // (§3.5), so a restDelete would fail the whole purge. The cascade from `accounts`, run
+            // as the tables' owner, deletes both with the `accounts` row below.
+            "route_daily",
             "entitlements",
           ]
         ) {
@@ -162,6 +167,16 @@ Deno.serve(async (req) => {
           telemetry_events: await all("telemetry_events", `${eq(id)}&select=*&order=id`),
           corrections: await all("corrections", `${eq(id)}&select=*&order=id`),
           issues: await all("issues", `${eq(id)}&select=*&order=id`),
+          // Friends testers (spec §3.5, Q7, Q12): the caller's grants (dates, cohort, note, reason)
+          // and audit rows, the audit's four columns exactly (`db_role` and `grant_id` are internal),
+          // the per-route counts and the per-kind usage, each by account id and paged.
+          comp_grants: await all(
+            "comp_grants",
+            `${eq(id)}&select=granted_at,ends_at,ended_at,ended_reason,cohort,note&order=id`,
+          ),
+          comp_audit: await all("comp_audit", `${eq(id)}&select=action,ends_at,cohort,at&order=id`),
+          route_daily: await all("route_daily", `${eq(id)}&select=*&order=day,route`),
+          usage_daily: await all("usage_daily", `${eq(id)}&select=*&order=day,kind`),
           // D17: the mailboxes and the claims held for them, never a token, key or hash.
           ...(await exportMail(mailExportStore(rest), id)),
         };

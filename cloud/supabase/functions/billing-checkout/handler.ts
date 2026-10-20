@@ -29,6 +29,9 @@ export interface Deps {
   getAccount: (
     accountId: string,
   ) => Promise<{ email: string; stripe_customer_id: string | null; age_attested_at: string | null } | null>;
+  /** Friends-testers spec §3.4, Q3: whether `effective_entitlements` shows `plan = 'tester'` for this
+   * account. The view alone decides expiry and ending, so an expired or ended grant answers false. */
+  isTester: (accountId: string) => Promise<boolean>;
   saveCustomerId: (accountId: string, customerId: string) => Promise<void>;
   recordConsent: (c: ConsentRecord) => Promise<void>;
   stripe: StripePost;
@@ -98,6 +101,10 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
   // the 18+ gate lives here now — before the Stripe customer, before the consent row, before the
   // session. `POST /account/consent` is what fills it, and the app calls that on every sign-in.
   if (!account.age_attested_at) throw fail(403, "the 18+ attestation is missing — sign in again");
+  // Friends-testers spec §3.4, Q3: while the view answers `plan = 'tester'` for this account, no path,
+  // old build or stale page can start a charge. Asked before the Stripe customer, the consent row and
+  // the session; an expired or ended grant is the view's to decide, and proceeds as today.
+  if (await deps.isTester(user.id)) throw fail(409, "this account has free tester access");
 
   let customer = account.stripe_customer_id;
   if (!customer) {
