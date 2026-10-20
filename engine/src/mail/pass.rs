@@ -268,7 +268,7 @@ impl Run<'_> {
         let to_settle: Vec<ClaimRef> = asked.iter().filter(|at| !self.slots.given_up(&at.uid())).cloned().collect();
         if !to_settle.is_empty() && self.asking_failed.is_none() {
             let (started, budget) = (self.started, self.budget);
-            let unsettled = asks::settle(self.client, &view, &mut fresh, &to_settle, || started.elapsed() + CALL_TIMEOUT <= budget);
+            let unsettled = asks::settle(self.client, &view, &mut fresh, &to_settle, self.today, || started.elapsed() + CALL_TIMEOUT <= budget);
             self.asking_failed = unsettled.ended;
             self.asking_refused = self.asking_refused.or(unsettled.refused);
             tried = unsettled.tried;

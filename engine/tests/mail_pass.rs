@@ -978,6 +978,120 @@ fn a_refused_course_is_skipped_and_the_next_is_asked() {
     let _ = std::fs::remove_dir_all(&vault);
 }
 
+/// The server refuses more than 15 claims a call (`MAX_CLAIMS`), so a course with more is asked in
+/// consecutive groups. Sixteen claims about `Lab`, each a different due, in one message.
+fn sixteen_lab_claims(today: Date) -> Value {
+    row("mail:aa11", T1, "backfill", (0..16).map(|i| change("Lab", "CS 101", &ahead(today, 3 + i))).collect())
+}
+
+/// Answer every claim of the request with `Lab 6`.
+fn all_lab_6(body: &Value) -> Value {
+    let pick = body["candidates"].as_array().into_iter().flatten().find(|c| c["title"] == "Lab 6").map_or(Value::Null, |c| c["id"].clone());
+    let answers: Vec<Value> =
+        body["claims"].as_array().into_iter().flatten().map(|c| json!({ "uid": c["uid"], "index": c["index"], "target_id": pick })).collect();
+    json!({ "answers": answers })
+}
+
+fn claim_indexes(call: &str) -> Vec<u64> {
+    let body: Value = serde_json::from_str(body_of(call)).unwrap();
+    body["claims"].as_array().unwrap().iter().map(|c| c["index"].as_u64().unwrap()).collect()
+}
+
+/// Sixteen claims in one course are two calls, 15 then 1, in claim order, with the same candidates; both
+/// are answered and applied, so the message is recorded and acknowledged.
+#[test]
+fn sixteen_claims_are_two_calls_of_fifteen_and_one() {
+    let vault = scratch("resolve-sixteen");
+    labs_and_quizzes(&vault);
+    let today = vault_today(&vault);
+    let mut server = resolving(vec![pull(vec![sixteen_lab_claims(today)], json!([]), false)], all_lab_6);
+    let lines = run(&vault, &server, today);
+    let calls = server.calls("mail-resolve");
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(claim_indexes(&calls[0]), (0..15).collect::<Vec<u64>>());
+    assert_eq!(claim_indexes(&calls[1]), [15]);
+    let candidates = |call: &str| serde_json::from_str::<Value>(body_of(call)).unwrap()["candidates"].clone();
+    assert_eq!(candidates(&calls[0]), candidates(&calls[1]), "every group is offered the same items");
+    assert!(knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"), "both groups answered, so the message is recorded: {lines:?}");
+    assert_eq!(lines[0], "mail: 0 new, 0 changed, 1 proposed, 0 notices, 0 past, 15 superseded, 0 unmatched", "all sixteen claims were applied: {lines:?}");
+    assert_eq!(files(&vault, "approvals").len(), 1, "the last claim's change is the one card");
+    assert_eq!(field(&vault, "tasks/lab-5.md", "due").unwrap(), "2030-01-01");
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// A group the service refuses affects only its own claims: the first group's answers are applied, the
+/// message is held for the sixteenth, and the refusal is named.
+#[test]
+fn a_refused_second_group_leaves_the_first_applied() {
+    let vault = scratch("resolve-group-refused");
+    labs_and_quizzes(&vault);
+    let today = vault_today(&vault);
+    let pulled = knowlu_engine::ledger::dumps_value(&pull(vec![sixteen_lab_claims(today)], json!([]), false));
+    let mut server = serve(move |request, _| {
+        if request.starts_with("POST /functions/v1/mail-resolve ") {
+            let body: Value = serde_json::from_str(body_of(request)).unwrap_or(Value::Null);
+            if body["claims"].as_array().is_some_and(|c| c.len() == 1) {
+                return (400, r#"{"error":"refused"}"#.to_string());
+            }
+            return (200, knowlu_engine::ledger::dumps_value(&all_lab_6(&body)));
+        }
+        (200, pulled.clone())
+    });
+    let lines = run(&vault, &server, today);
+    assert_eq!(server.calls("mail-resolve").len(), 2);
+    assert_eq!(lines[0], "mail: 0 new, 0 changed, 1 proposed, 0 notices, 0 past, 14 superseded, 0 unmatched", "the first group's answers are applied: {lines:?}");
+    assert_eq!(files(&vault, "approvals").len(), 1);
+    assert!(lines.iter().any(|l| l == "mail: could not ask which item (the service refused); left for the next slot"), "{lines:?}");
+    assert!(!knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"), "the sixteenth is unanswered, so the message is held");
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// The server refuses more than 200 candidates (`MAX_CANDIDATES`): a course with 250 items offers 200, the
+/// active notes before the archive, the nearest due to today first (undated last), ties by id.
+#[test]
+fn two_hundred_and_fifty_candidates_are_bounded_to_two_hundred() {
+    let vault = scratch("resolve-candidates");
+    labs_and_quizzes(&vault);
+    let today = vault_today(&vault);
+    let note = |folder: &str, title: &str, due: Option<String>| {
+        let due = due.map(|d| format!("due: {d}\n")).unwrap_or_default();
+        let text = format!("---\ntitle: {title}\ncourse: CS 101\n{due}status: active\ncreated_by: mail\n---\n\nx\n");
+        file(&vault, &format!("{folder}/{}.md", title.to_lowercase().replace(' ', "-")), &text, "agent:knowlu.test");
+    };
+    for day in 1..=100 {
+        note("tasks", &format!("A {day}"), Some(ahead(today, day)));
+    }
+    note("tasks", "P past", Some(ahead(today, -200)));
+    for n in 1..=10 {
+        note("tasks", &format!("U {n}"), None);
+    }
+    for day in 1..=137 {
+        note("archive", &format!("R {day}"), Some(ahead(today, day)));
+    }
+    let one = row("mail:aa11", T1, "backfill", vec![change("Lab", "CS 101", &ahead(today, 9))]);
+    let mut server = resolving(vec![pull(vec![one], json!([]), false)], |_| json!({ "answers": [] }));
+    run(&vault, &server, today);
+    let calls = server.calls("mail-resolve");
+    assert_eq!(calls.len(), 1);
+    let body: Value = serde_json::from_str(body_of(&calls[0])).unwrap();
+    let titles: Vec<String> = body["candidates"].as_array().unwrap().iter().map(|c| c["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(titles.len(), 200, "{titles:?}");
+    let a: Vec<String> = (1..=100).map(|d| format!("A {d}")).collect();
+    assert_eq!(titles[..100], a[..], "active notes by nearest due");
+    assert_eq!(titles[100], "P past", "a past due counts by its distance from today");
+    let mut labs = titles[101..103].to_vec();
+    labs.sort();
+    assert_eq!(labs, ["Lab 5", "Lab 6"], "far dues next");
+    let mut undated = titles[103..113].to_vec();
+    undated.sort();
+    let mut expect: Vec<String> = (1..=10).map(|n| format!("U {n}")).collect();
+    expect.sort();
+    assert_eq!(undated, expect, "undated active notes last among the active");
+    let r: Vec<String> = (1..=87).map(|d| format!("R {d}")).collect();
+    assert_eq!(titles[113..], r[..], "then the archive, nearest due first, the rest dropped");
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
 /// Spec test 28b: the device never reports a label on a mail card. A rejected `mail_claim` card is no row
 /// (`labels_to_report` is unchanged), while a rejected `task` card beside it still is, so the test is not
 /// vacuous.
