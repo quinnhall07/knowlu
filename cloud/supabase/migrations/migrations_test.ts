@@ -986,6 +986,25 @@ Deno.test("the original google migration is unchanged", async () => {
   assertEquals(hex, "c86e118dc0bed63875b4785870ccc1bfed15e5299599bd48ce4c2b7d18feeda0");
 });
 
+Deno.test("the mail migration is unchanged", async () => {
+  // SHA-256 of 20261002000200_mail.sql as committed at 87bf8a6 (`git show 87bf8a6:<path>`), its
+  // last change. Applied on staging; never edited; a change is a new file.
+  const bytes = await Deno.readFile(new URL("20261002000200_mail.sql", HERE));
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  const hex = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+  assertEquals(hex, "d62c59cb0352f6e6eb0851388017ccaa0e89ab54f8fc73e81713c4be3c258895");
+});
+
+Deno.test("the mail_claim max_tokens migration is unchanged", async () => {
+  // SHA-256 of 20261005000100_mail_claim_max_tokens.sql as committed at 2966037
+  // (`git show 2966037:<path>`), its only commit. Applied on staging; never edited; a change is a
+  // new file.
+  const bytes = await Deno.readFile(new URL("20261005000100_mail_claim_max_tokens.sql", HERE));
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  const hex = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+  assertEquals(hex, "1faed37a5c900325b2e1106249177a80aae63e6891c0bc326e709098a915fb18");
+});
+
 // Email forwarding T1.1 (spec §5.1; test 14's RLS half). The seven mail tables hold a student's mail
 // metadata, the address tokens and the claims, so only the service role reaches them, and every row
 // goes when its account goes. Textual, like the pins above: nothing here applies SQL (plan P7).
