@@ -746,3 +746,14 @@ Authority: `docs/specs/2026-09-30-email-forwarding-design.md` §10 (items A1–A
 > release carries it before privacy bump #1.
 
 **Ruling 12 of Amendment 2026-09-29 is suspended until 20 paying users (A13).** Quinn (2026-09-30): "change both to allow. We'll keep the school sign-in and mail sign-in for now. Once we have 20 paying users, we'll come back to this." The five passages of ruling 12 and the passages of ruling 10 and §11a's grades row that depend on it carry the marker; the text above shows the replacements in place. The grades spec's §4 and proof lines and VISION's pilot paragraph carry the same ruling.
+
+## Amendment 2026-10-19 — privacy bump #1 is L4's interim bump (Quinn's ruling of 2026-10-19) — **SIGNED by Quinn, 2026-10-19**
+
+> **L4's interim privacy bump is "privacy bump #1"** (Quinn, 2026-10-19; the session-5 ledger,
+> `.superpowers/sdd/2026-10-18-session-5/progress.md`). It carries the sentences the signed Gmail
+> connect (§6, Q8), email forwarding (§7, D18), M2 editing (§5) and grades (§11) specs assign to bump
+> #1, without a lawyer read. The lawyer read stays a before-Pilot item.
+
+This records one part of the 2026-10-18 rulings (`HANDOFF.md` §4, "Sign Amendment 2026-10-18");
+the rest of that amendment (ruling 10's Gate rewording and the lanes moved into the MVP) is not
+written or signed here. The body above and the four specs are not rewritten.
