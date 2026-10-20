@@ -28,7 +28,7 @@
 //! **Nothing here is reached by `rank`** (decision 11). `rank` may reach [`fetch_event_source`]
 //! and [`fetch_ics`], which are transport and carry no judgment.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -65,9 +65,8 @@ pub fn is_judgment_id(s: &str) -> bool {
     JUDGMENT_ID.is_match(s)
 }
 
-/// One call's wall-clock bound — the same 120 seconds `runtime::CALL_TIMEOUT` gave one local
-/// completion. Spelled again here rather than borrowed, because C4 removes `runtime.rs` and this
-/// bound outlives it: a judge step runs inside a slot whose own child cap is twenty minutes.
+/// One call's wall-clock bound: 120 seconds for one completion. A judge step runs inside a slot
+/// whose own child cap is twenty minutes, so a hung call must end well inside it.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `config/cloud.yaml`, written by the wizard at onboarding (C1). Absent on a vault that has
@@ -376,16 +375,31 @@ pub fn task_request(item: &judge::Item, h: &judge::Heuristics, seed: &judge::Ver
     })
 }
 
+/// The judge paths. Each is a separate server-side cap (L3 Q-A), so a `capped` reply is
+/// remembered per path, never for the whole model.
+const TASK_PATH: &str = "/judge-task";
+const EVENT_PATH: &str = "/judge-event";
+const EMAIL_PATH: &str = "/judge-email";
+
+/// The paths `enrich_with`'s batch calls through the model: `judge::Model::judge`, so
+/// `/judge-task` and nothing else (`judge_roster` takes `EventModel`; `EmailModel` has no caller
+/// in the batch). [`CloudModel::fatal`] names the cap only when one of these was capped, because
+/// `enrich` prints "the rest of the batch was not sent" from it. An allowlist on purpose: a path a
+/// later lane adds (L5's `/judge-syllabus`) never makes `fatal()` name the cap until it is listed.
+const BATCH_PATHS: [&str; 1] = [TASK_PATH];
+
 /// Tier 3, over HTTPS. One call per item, and a refusal that answers every item stops the rest.
 pub struct CloudModel<'a> {
     client: &'a CloudClient,
     fatal: Cell<Option<&'static str>>,
+    /// Paths whose reply said `capped`. Only a call to the same path short-circuits on one.
+    capped: RefCell<Vec<&'static str>>,
     timezone: Option<String>,
 }
 
 impl<'a> CloudModel<'a> {
     pub fn new(client: &'a CloudClient) -> CloudModel<'a> {
-        CloudModel { client, fatal: Cell::new(None), timezone: None }
+        CloudModel { client, fatal: Cell::new(None), capped: RefCell::new(Vec::new()), timezone: None }
     }
 
     /// Carry the vault's own timezone name onto `/judge-email` (`cli::vault_timezone_name`), the
@@ -398,10 +412,15 @@ impl<'a> CloudModel<'a> {
         self
     }
 
-    /// Set once a call comes back 401, 402 or 403. `enrich` prints it as one summary line instead
-    /// of fifty identical per-item lines.
+    /// Set once a call comes back 401, 402 or 403 (global: those answer every path alike), or once
+    /// a path on [`BATCH_PATHS`] answers `capped`. `enrich` prints it as one summary line instead
+    /// of fifty identical per-item lines. A capped `/judge-event` alone leaves it `None`: the event
+    /// pass ends and names that cap itself (`events::judge_roster`).
     pub fn fatal(&self) -> Option<&'static str> {
-        self.fatal.get()
+        self.fatal.get().or_else(|| {
+            let capped = self.capped.borrow();
+            BATCH_PATHS.iter().any(|p| capped.contains(p)).then_some(judge::CAPPED_LABEL)
+        })
     }
 
     /// The reply's `verdict`, or the error a null one means.
@@ -410,20 +429,26 @@ impl<'a> CloudModel<'a> {
     /// verdict for three different situations and the three read nothing alike:
     ///   * `outcome: "capped"` — the account's daily judgment cap or its monthly ceiling. Nothing
     ///     failed; the answer was simply not bought, and every remaining item in this batch would
-    ///     answer identically. So it sets `fatal` exactly as a 402 does: the rest of the batch
-    ///     makes no request at all, and `enrich` prints ONE summary line naming the cap instead of
+    ///     answer identically. So the path is remembered as capped: the rest of that path's calls
+    ///     make no request at all, and `enrich` prints ONE summary line naming the cap instead of
     ///     fifty `model failed` lines. `judge` still exits 0 — a spent cap is a normal outcome.
+    ///     **Per path** (L3 Q-A): the task, event and email caps are separate on the server, so a
+    ///     capped `/judge-task` leaves `/judge-event` free to ask. Only a 401, 402 or 403 stops
+    ///     every path.
     ///   * `outcome: "low confidence"` with a `cause` — `below floor`, `incomplete`, `refused`,
     ///     `truncated`, `model failed`. The cause is the word, as before.
     ///   * anything else — `outcome` itself is the fallback, because a reply that names an outcome
     ///     this build has never heard of still says more than the old literal `no verdict` did.
-    fn verdict_of<'r>(&self, reply: &'r Value) -> Result<&'r Value, ModelError> {
+    fn verdict_of<'r>(&self, path: &'static str, reply: &'r Value) -> Result<&'r Value, ModelError> {
         if let Some(verdict) = reply.get("verdict").filter(|v| !v.is_null()) {
             return Ok(verdict);
         }
         let outcome = reply.get("outcome").and_then(Value::as_str).unwrap_or_default();
         if outcome == "capped" {
-            self.fatal.set(Some(judge::CAPPED_LABEL));
+            let mut capped = self.capped.borrow_mut();
+            if !capped.contains(&path) {
+                capped.push(path);
+            }
             return Err(ModelError::Capped);
         }
         let cause = reply
@@ -436,13 +461,13 @@ impl<'a> CloudModel<'a> {
 
     pub(crate) fn call(&self, path: &str, body: &Value) -> Result<Value, ModelError> {
         if let Some(reason) = self.fatal.get() {
-            // C2 final review E-2: the short-circuit must carry the SAME kind of error the first
-            // reply produced, or the second item onward would log `model failed` for a cap the
-            // first item correctly logged as `capped`.
-            if reason == judge::CAPPED_LABEL {
-                return Err(ModelError::Capped);
-            }
             return Err(ModelError::Failed(format!("the judgment service: {reason}")));
+        }
+        // C2 final review E-2: the short-circuit must carry the SAME kind of error the first
+        // reply produced, or the second item onward would log `model failed` for a cap the
+        // first item correctly logged as `capped`. L3 Q-A: only for the path that was capped.
+        if self.capped.borrow().iter().any(|p| *p == path) {
+            return Err(ModelError::Capped);
         }
         self.client.post(path, body).map_err(|e| {
             if e.fatal() {
@@ -460,8 +485,8 @@ impl judge::Model for CloudModel<'_> {
         h: &judge::Heuristics,
         seed: &judge::Verdict,
     ) -> Result<judge::Verdict, ModelError> {
-        let reply = self.call("/judge-task", &task_request(item, h, seed))?;
-        let verdict = self.verdict_of(&reply)?;
+        let reply = self.call(TASK_PATH, &task_request(item, h, seed))?;
+        let verdict = self.verdict_of(TASK_PATH, &reply)?;
         // Through `judge::parse_reply`, deliberately. The clamps, the one-lined reason and the
         // blank-is-None rules are the engine's, and a reply from the service goes through exactly
         // the door a reply from a local process went through — so the service can never widen a
@@ -521,14 +546,14 @@ impl judge::EventModel for CloudModel<'_> {
     /// judgment) and a verdict-less reply with no recognised cause are NOT rescued: they stay
     /// `Err` so the uid is asked again next slot (final review item 1, `REPEATABLE_CAUSES`).
     fn judge_event(&self, item: &judge::EventItem) -> Result<judge::EventVerdict, ModelError> {
-        let reply = self.call("/judge-event", &event_request(item))?;
+        let reply = self.call(EVENT_PATH, &event_request(item))?;
         let tier = reply.get("tier").and_then(Value::as_u64).unwrap_or(3).min(3) as u8;
         // Read once and carried into every `Ok` arm below: `judge_pipeline.ts` writes a
         // `judgments` row — and so a `judgment_id` — for the rescued-`unsure` replies exactly as
         // it does for an honest verdict (lines 233 and 271), so the id is not conditional on
         // which arm below is taken.
         let judgment_id = judgment_id_of(&reply);
-        match self.verdict_of(&reply) {
+        match self.verdict_of(EVENT_PATH, &reply) {
             Ok(verdict) => Ok(judge::EventVerdict {
                 verdict: verdict.get("verdict").and_then(Value::as_str).unwrap_or_default().to_string(),
                 why: judge::one_line(verdict.get("why").and_then(Value::as_str).unwrap_or(""), 140),
@@ -609,8 +634,8 @@ pub fn email_request(item: &judge::EmailItem, timezone: Option<&str>) -> Value {
 
 impl judge::EmailModel for CloudModel<'_> {
     fn judge_email(&self, item: &judge::EmailItem) -> Result<judge::EmailVerdict, ModelError> {
-        let reply = self.call("/judge-email", &email_request(item, self.timezone.as_deref()))?;
-        let verdict = self.verdict_of(&reply)?;
+        let reply = self.call(EMAIL_PATH, &email_request(item, self.timezone.as_deref()))?;
+        let verdict = self.verdict_of(EMAIL_PATH, &reply)?;
         let text = |key: &str| verdict.get(key).and_then(Value::as_str).map(str::to_string);
         Ok(judge::EmailVerdict {
             tier: text("tier").unwrap_or_else(|| "information".to_string()),

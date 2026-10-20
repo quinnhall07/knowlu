@@ -59,19 +59,15 @@ tauri-plugin-updater = "2"
 # the feature for message dialogs, which Knowlu does not use — and imports nothing from comctl32.
 # Nothing else in the graph enables the feature, so cargo's unification cannot turn it back on.
 rfd = { version = "0.16", default-features = false }
-# Knowlu plan 3a Task 8. All three are ALREADY in Cargo.lock through the graph — `sha2` and
-# `zip` transitively, `ureq` through `knowlu-engine` — so naming them here adds no compilation and no
-# new version to audit; cargo unifies them onto the versions already resolved.
+# `sha2` and `ureq` are both already in Cargo.lock through the graph (`ureq` through
+# `knowlu-engine`), so naming them here adds no compilation and no new version to audit; cargo
+# unifies them onto the versions already resolved.
 #
-# `sha2`: a downloaded executable is verified against a pinned digest before it is ever run. The
-# updater's minisign discipline does not apply — upstream's llama.cpp build is not signed by us —
-# so a hash pinned in a manifest we serve is what stands in for it.
+# `sha2`: the SHA-256 of the sign-in PKCE challenge (`account.rs`) and the HMAC in
+# `mail/recover.rs`.
 sha2 = "0.10"
-# `zip`: upstream ships the Windows runtime as a zip. Deflate only, no encryption — the same
-# feature set the engine crate takes for backup snapshots.
-zip = { version = "2", default-features = false, features = ["deflate"] }
-# `ureq`: the manifest fetch and the asset download. Default features, matching the engine's line
-# minus `cookies`; nothing here needs a jar.
+# `ureq`: the account, grades, LMS-link, report and telemetry calls. Default features, matching
+# the engine's line minus `cookies`; nothing here needs a jar.
 ureq = "3.4.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

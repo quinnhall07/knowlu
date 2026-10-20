@@ -104,10 +104,6 @@ pub mod uievents;
 // rule table behind a trait. `rank` never reaches it; `enrich` is its only production caller.
 pub mod judge;
 
-// Knowlu plan 3a — the judge's process half: llama.cpp one process per call, killed if it hangs.
-// Consumed as a release artefact, never linked (spec §5.3 as amended 2026-09-07).
-pub mod runtime;
-
 // Knowlu plan 3a — what was judged, by id and by field value, into the profile's app data and never
 // into the vault (spec §5.4, §5.6). 3b's rule promotion reads it.
 pub mod judgelog;
@@ -149,7 +145,7 @@ pub mod entitle;
 // only caller; never read by the engine.
 pub mod backup;
 
-// `childproc` outlives `history`: `runs::git_sha` and `runtime.rs` both spawn children, and a GUI
+// `childproc` outlives `history`: `runs::git_sha` spawns a child, and a GUI
 // application's child process must never flash a console window.
 pub mod childproc;
 

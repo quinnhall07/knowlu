@@ -95,6 +95,16 @@ class FakeStore implements ProcessStore, SweepStore {
     this.calls.push("expire");
     return Promise.resolve(false);
   }
+  /** The accounts `active` or `trialing` (follow-ups plan T3). */
+  entitledAccounts = new Set(["acct-1"]);
+  entitled(accountId: string) {
+    this.calls.push("entitled");
+    return Promise.resolve(this.entitledAccounts.has(accountId));
+  }
+  markLapsed() {
+    this.calls.push("markLapsed");
+    return Promise.resolve(true);
+  }
   expirable() {
     return Promise.resolve([]);
   }
@@ -454,6 +464,44 @@ Deno.test("a_second_queue_of_one_message_is_a_no_op_on_mail_claims_unique_key", 
     queue.includes('"resolution=ignore-duplicates,return=minimal"'),
     "a duplicate is ignored, not a 409",
   );
+});
+
+// ---------------------------------------------------------------- (b): the entitlement gate (follow-ups T3)
+
+Deno.test("an_unentitled_live_unaligned_item_is_held_not_counted", async () => {
+  // The gate comes before everything after the lease, the `unauthenticated` short-circuit included: an
+  // unpaid account's item is held, never counted, deleted or read.
+  await withWorld(async (w) => {
+    w.store.entitledAccounts.clear();
+    w.put(mail({ from: PROF }), { authenticity: "unaligned" });
+    const res = await w.run();
+    assertEquals(res.status, 200);
+    const counts = await res.json();
+    assertEquals([counts.lapsed, counts.unauthenticated], [1, 0]);
+    assertEquals([w.store.counters, w.store.done, keysUnder(w, "work/")], [{}, [], ["work/item-1"]]);
+    assertEquals(w.store.calls, ["due", "lease", "entitled", "wait", "due", "markLapsed"]);
+    assertEquals([w.modelled, w.rules.asked], [[], []]);
+  });
+});
+
+Deno.test("index_wires_entitled_through_the_shared_isActive", async () => {
+  // `index.ts` is never loaded by `deno test`: its wiring is pinned by its text. The gate is intake's own
+  // (`mail-inbound/store.ts`), `isActive` over `lookupFrom`, so a comp grant (L8) reaches it unchanged.
+  const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assert(
+    /import \{ isActive, lookupFrom \} from "\.\.\/_shared\/entitlement\.ts";/.test(text),
+    "the shared entitlement module",
+  );
+  assert(/const lookup = lookupFrom\(rest\);/.test(text), "the production lookup over the service role");
+  assert(
+    /entitled: async \(account\) => isActive\(await lookup\(account\)\),/.test(text),
+    "entitled is isActive over the lookup",
+  );
+  const mark = text.slice(text.indexOf("async markLapsed("));
+  const body = mark.slice(0, mark.indexOf("},") + 2);
+  assert(body.includes('"rpc/mail_mark_lapsed_from"'), "the mark is T2's RPC");
+  assert(/p_address: address, p_since: since/.test(body), "the RPC's two arguments");
+  assert(/\.json\(\) === true/.test(body), "true only when the RPC answers true");
 });
 
 // ---------------------------------------------------------------- the vendor's no-item notifications

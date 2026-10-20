@@ -5,8 +5,8 @@
 //! **every 60 seconds** — so one missing call there was a terminal blinking at the user once a
 //! minute for the whole session. That is exactly what happened, and it went unnoticed until
 //! 2026-09-09 because no test can see a window and the app had never been run for long enough.
-//! `history.rs` is gone (git leaves the product, C3' Task 10); the two spawns this crate still
-//! makes, `runs::git_sha` and `runtime.rs`, are what this guard checks now.
+//! `history.rs` is gone (git leaves the product, C3' Task 10); the one spawn this crate still
+//! makes outside test code, `runs::git_sha`, is what this guard checks now.
 //!
 //! The scan stops at the file's own `#[cfg(test)] mod …` boundary (fix round 1, review I2 — never
 //! at an earlier bare mention of the words `#[cfg(test)]`, which a doc comment can carry in prose
@@ -77,7 +77,7 @@ fn every_non_test_spawn_suppresses_its_console_window() {
     assert!(scanned >= 10, "the scan found suspiciously few source files: {scanned}");
     // A guard that cannot fail is worse than no guard: if the spawn sites ever vanish entirely,
     // this test would pass vacuously and nobody would notice it had stopped meaning anything.
-    // `history.rs` was one of the three engine files that spawned a child process (git leaves the
-    // product, C3' Task 10) and it is gone; `runs::git_sha` and `runtime.rs` are the two that remain.
-    assert!(with_spawns >= 2, "expected at least two files to spawn children, found {with_spawns}");
+    // `history.rs` was one of the engine files that spawned a child process (git leaves the
+    // product, C3' Task 10) and it is gone; `runs::git_sha` is the one non-test spawn that remains.
+    assert!(with_spawns >= 1, "expected at least one file to spawn children, found {with_spawns}");
 }

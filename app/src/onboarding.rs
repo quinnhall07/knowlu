@@ -276,40 +276,23 @@ pub fn pick_file(app: tauri::AppHandle, title: String, extension: String) -> Val
     json!({ "ok": true, "error": Value::Null, "path": path.map(|p| p.to_string_lossy().to_string()) })
 }
 
-/// The wizard's *show me how after setup* marker.
+/// The wizard's *forward my school mail after setup* marker, set from `offer_mail`.
 ///
 /// A **file in the profile folder, not a `Settings` field**, and deliberately: `state::Settings`
 /// derives `Deserialize` with no `#[serde(default)]` on any field, so adding one would make every
 /// existing `settings.json` fail to parse — and `Settings::load` falls back to defaults on a parse
 /// failure, which would silently reset a friend's backup folder and autostart choice on the first
 /// launch after an update. A zero-byte marker costs nothing and breaks nothing.
-pub fn offer_marker(profile_dir: &Path) -> PathBuf {
-    profile_dir.join("offer-inference")
-}
-
-/// The wizard's *forward my school mail after setup* marker: a file beside [`offer_marker`], for the
-/// same reason (never a `Settings` field), set from `offer_mail` on the same three finishing paths.
 pub fn mail_offer_marker(profile_dir: &Path) -> PathBuf {
     profile_dir.join("offer-mail")
 }
 
-/// Drop or clear the marker for one profile folder, from whichever of the three finishing paths
-/// got here — CREATE and RESTORE go through [`finish_profile_in`], ADOPT through
-/// [`apply_profile_settings`], and the finish panel's checkbox is the same element on all three
-/// (Knowlu plan 3a Task 10 fix: the brief's own code wired this into `apply_profile_settings`
-/// only, which would have silently dropped the offer for the two more common paths — creating or
-/// restoring a vault — while looking correct for the one path someone happened to test by hand).
+/// Drop or clear the mail offer's marker for one profile folder, from whichever of the three
+/// finishing paths got here — CREATE and RESTORE go through [`finish_profile_in`], ADOPT through
+/// [`apply_profile_settings`], and the finish panel's checkbox is the same element on all three (a
+/// marker wired into only one of them would silently drop the offer on the other two).
 ///
 /// Best effort: an unwritable marker costs the reader one prompt, not their setup.
-fn set_offer_marker(dir: &Path, offer: bool) {
-    if offer {
-        let _ = std::fs::write(offer_marker(dir), b"");
-    } else {
-        let _ = std::fs::remove_file(offer_marker(dir));
-    }
-}
-
-/// [`set_offer_marker`] for the mail offer.
 fn set_mail_offer_marker(dir: &Path, offer: bool) {
     if offer {
         let _ = std::fs::write(mail_offer_marker(dir), b"");
@@ -446,8 +429,8 @@ pub fn refresh(app: &tauri::AppHandle, root: &Path) {
 ///
 /// **C1: there is no `backup_dir` and no parent.** Spec §4.1 — the app creates
 /// `%USERPROFILE%\Knowlu\<name>` and `%USERPROFILE%\Knowlu\Backups`, and the wizard has no folder
-/// panel to carry an answer from. `offer_inference` stays with a `serde(default)` so an older page
-/// that still sends it is not a refusal; the C1 wizard never sets it (the local runtime leaves in C4).
+/// panel to carry an answer from. There is no `deny_unknown_fields`, so a page cached from an older
+/// build that still sends a key this struct no longer has is not a refusal (a test pins it).
 #[derive(Debug, serde::Deserialize)]
 pub struct WizardPlan {
     pub ics_url: Option<String>,
@@ -483,12 +466,8 @@ pub struct WizardPlan {
     pub zybooks: bool,
     pub vhl: bool,
     pub autostart: bool,
-    /// The finish panel's *Set up local judgment after setup* checkbox. The wizard NEVER installs
-    /// anything (spec §5.3, "never automatic", and the wizard's own "Nothing is fetched now"); this
-    /// only drops a marker the console reads once on its first launch.
-    #[serde(default)]
-    pub offer_inference: bool,
-    /// The finish panel's *Forward my school mail* offer; like `offer_inference`, a marker only.
+    /// The finish panel's *Forward my school mail* offer: a marker only (`mail_offer_marker`); the
+    /// wizard sets nothing up itself.
     #[serde(default)]
     pub offer_mail: bool,
     #[serde(default)]
@@ -895,7 +874,7 @@ pub fn restore_vault(app: tauri::AppHandle, backup: String, name: String, plan: 
 /// they survive the relaunch exactly as a created vault's do.
 ///
 /// Split into a handle-free core (Task 10 review, M1) so `app/tests/onboarding.rs` can drive the
-/// adopt path's `offer_inference` marker directly, the same way `create_vault_in` and
+/// adopt path's mail-offer marker directly, the same way `create_vault_in` and
 /// `restore_vault_in` already let it drive theirs.
 pub fn apply_profile_settings_in(root: &Path, id: &str, plan: &WizardPlan, backup_dir: Option<PathBuf>) -> Value {
     // The adopted vault's own path, so the backup folder is checked against it here too and not
@@ -913,7 +892,6 @@ pub fn apply_profile_settings_in(root: &Path, id: &str, plan: &WizardPlan, backu
     let dir = profiles::profile_dir(root, id);
     match settings.save(&dir.join("settings.json")) {
         Ok(()) => {
-            set_offer_marker(&dir, plan.offer_inference);
             set_mail_offer_marker(&dir, plan.offer_mail);
             json!({ "ok": true, "error": Value::Null })
         }
@@ -987,7 +965,6 @@ fn finish_profile_in(root: &Path, vault: &Path, name: Option<String>, plan: &Wiz
     if let Err(e) = settings.save(&path) {
         return json!({ "ok": false, "error": format!("{}: {e}", path.display()), "profile": Value::Null });
     }
-    set_offer_marker(&dir, plan.offer_inference);
     set_mail_offer_marker(&dir, plan.offer_mail);
     let label = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| profiles::default_name(vault));
     match profiles::register(root, &label, vault) {
@@ -1001,7 +978,7 @@ fn finish_profile_in(root: &Path, vault: &Path, name: Option<String>, plan: &Wiz
 /// round — and the user is told which it was. `restore_vault_in`'s staging rollback is the same
 /// pattern.
 ///
-/// **`pub` because `app/tests/onboarding.rs` drives the restore path's `offer_inference` marker
+/// **`pub` because `app/tests/onboarding.rs` drives the restore path's mail-offer marker
 /// directly** (Task 10 review, M1): `restore_vault_in` alone only copies the mirror out and never
 /// sees a `WizardPlan` — this is the other half, exactly as the live `restore_vault` command
 /// calls it.

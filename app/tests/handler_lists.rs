@@ -95,6 +95,22 @@ fn the_ten_mail_commands_are_in_the_console_list_and_none_in_the_wizards() {
     assert_eq!(named, MAIL.len(), "the console list names exactly the ten mail commands, no more");
 }
 
+/// Ruling 10 (L6): no command in either list reaches a local model, and `onboarding::pick_file`
+/// stays in both lists (L5's syllabus Offer B uses it).
+#[test]
+fn the_console_list_names_no_inference_command_and_both_lists_keep_pick_file() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let lists = handler_lists(&src);
+    let console = list_with(&lists, "commands::state");
+    let wizard = list_with(&lists, "onboarding::finish_onboarding");
+    for (which, list) in [("console", console), ("wizard", wizard)] {
+        let bad: Vec<&String> = list.iter().filter(|n| n.contains("inference")).collect();
+        assert!(bad.is_empty(), "the {which} list still names local-model commands: {bad:?}");
+        assert!(list.iter().any(|n| n == "onboarding::pick_file"), "the {which} list must keep onboarding::pick_file");
+    }
+}
+
 #[test]
 fn the_parser_reads_a_list_by_its_names() {
     let text = "x.invoke_handler(tauri::generate_handler![a::one, b::two,\n c::three])\n\

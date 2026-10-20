@@ -5,9 +5,8 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 
 - `cargo build --workspace` and `cargo test --workspace` from the root. **0 warnings is part of
   green.** The one accepted line is the app's pre-existing `.rsrc merge failure: multiple non-default
-  manifests` linker message. Four tests are `#[ignore]` by design, each with its reason in the
-  attribute (traps 4 and 5 in `engine/src/events.rs`; `runtime.rs`'s real-runtime smoke test, run by
-  hand with `KNOWLU_RUNTIME` and `KNOWLU_MODEL` set; `app/tests/scheduler.rs::run_slot_end_to_end`).
+  manifests` linker message. Three tests are `#[ignore]` by design, each with its reason in the
+  attribute (traps 4 and 5 in `engine/src/events.rs`; `app/tests/scheduler.rs::run_slot_end_to_end`).
   None may be un-ignored by changing the assertion. TDD: the test first, then the code.
 - Toolchain `stable-x86_64-pc-windows-gnu` (1.98); TLS via `rustls`/`ring`, **never OpenSSL**
   (`engine/tests/dependency_boundary.rs` pins it, and that `tauri` never enters the engine). **The

@@ -114,7 +114,7 @@ jobs:
       # 21 of the first release run's 40 minutes (run 35179886527, 2026-09-17), and it is a tool,
       # not the product - it does not decide what is built for what target. So the archive is
       # Tauri's own Windows build and it is verified against the SHA-256 below, the same contract
-      # app\src\inference.rs holds for llama.cpp runtimes: a bump is the VERSION AND THE HASH
+      # every downloaded tool follows: a bump is the VERSION AND THE HASH
       # together, and a wrong archive stops the run before anything is built.
       - name: tauri-cli
         shell: pwsh

@@ -156,13 +156,13 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
     delete is retried at launch and named in Settings). Sign-out and `delete_local_data` close the
     window and call `forget_all`, which deletes only those two folder shapes.
 - **App data is `%LOCALAPPDATA%\knowlu\`**: `profiles.json`, `profiles\<profile_id>\{settings.json,
-  seen.txt, logs\}`, shared `updates\`, `runtime\`, `models\`. `state::app_data_root()` is the one
+  seen.txt, logs\}`, shared `updates\`. `state::app_data_root()` is the one
   place the path is decided. `profiles::migrate_flat_layout` still folds an old flat
   `%LOCALAPPDATA%\quinn-ops\` root in, file by file — that literal is the only `quinn-ops` left in
   `app/src`, and it stays.
 - A slot is `sync → coursework → ingest → grades → judge → rank` (`scheduler::slot_argv`), each the sibling
   `knowlu-engine.exe` as a child process (`KNOWLU_ENGINE_EXE` overrides). Steps are left out and
-  named — `ingest (skipped: no ics_url)`, `judge (skipped: no runtime)` / `(skipped: no model)`,
+  named — `ingest (skipped: no ics_url)`, `judge (skipped: no account)` / `(skipped: no entitlement)`,
   `sync (skipped: no account)` / `(skipped: no entitlement)` / `(skipped: another sync is running)`,
   `grades (skipped: <why>)` (the Grades bullet below), `mail (skipped: <why>)` (the Email bullet) —
   never run-and-failed: a non-zero step means retry backoff and an amber tray. The scheduler is inert
@@ -185,9 +185,6 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   regenerates it; the laptop's old Credential Manager copy is retired); `release.ps1` takes it from
   the environment and nowhere else. If it is ever lost, regenerate: one `pubkey` line and a release,
   and installed apps need one manual reinstall.
-- `app/src/inference.rs`: `SUPPORTED_RUNTIMES` is a compiled-in table of release tag, asset name and
-  SHA-256; both install paths verify against it, so there is no unverified path to executing a
-  runtime. Adding a release is a code change. Model files are data, not pinned. Not bundled.
 - Plain `cargo build` / `cargo test` work on a fresh checkout because `app/build.rs` drops a
   zero-byte placeholder sidecar at `app/binaries/knowlu-engine-<triple>.exe`. **Releases are CI-only**
   (`.github/workflows/release.yml`, on a `v*` tag): `scripts\release.ps1` is what CI runs; a human runs
@@ -219,8 +216,9 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   cloud.**
 - The work is streams with disjoint files (`HANDOFF.md` §2): C0 CI release → C1 accounts, wizard,
   telemetry → C2 the judgment service → C3 sync (git leaves the product) → C4 removal of the local
-  llama.cpp runtime (`app/src/inference.rs`, `engine/src/runtime.rs`). C4 is no longer a phase:
-  that runtime code stays until the Pilot's runtime-removal lane (Amendment 2026-09-29, ruling 10)
-  removes it, and is not extended.
+  llama.cpp runtime. C4 is no longer a phase: the Pilot's runtime-removal lane (L6; Amendment
+  2026-09-29, ruling 10) removed `app/src/inference.rs` and `engine/src/runtime.rs` (lane PR number
+  and merge sha: `HANDOFF.md` §3). Older installs may still hold `runtime\` and `models\` folders
+  under app data; nothing reads or removes them.
 - Cut day (spec §7.2) is a procedure with Quinn at the machine: the old `quinn-ops` vault is archived,
   not migrated; Quinn re-onboards into `%USERPROFILE%\Knowlu\`.

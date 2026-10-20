@@ -297,10 +297,19 @@ class FakeStore implements InboundStore {
     a.confirmUntil = null;
     return Promise.resolve();
   }
-  batchReceived(batchId: string, _addressId: string, n: number) {
+  /** `mail_batches.counted_receipts`, by batch id: the receipt ids `count_batch_receipt` has counted. */
+  countedReceipts: Record<string, string[]> = {};
+  /** Mailboxes whose next `bindRows` throws, once each (a store failure after an earlier count). */
+  failBindRows = new Set<string>();
+  batchReceived(batchId: string, _addressId: string, n: number, receipt: string) {
     this.calls.push("batchReceived");
+    // As `count_batch_receipt`: one guarded update that adds `n` and records the receipt only while it is
+    // absent, answering whether it counted.
+    const counted = this.countedReceipts[batchId] ??= [];
+    if (counted.includes(receipt)) return Promise.resolve(false);
+    counted.push(receipt);
     this.batchReceivedCounts[batchId] = (this.batchReceivedCounts[batchId] ?? 0) + n;
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
   async addressByTokenHmac(hmac: string) {
     this.calls.push("addressByTokenHmac");
@@ -322,6 +331,7 @@ class FakeStore implements InboundStore {
   }
   bindRows(addressId: string) {
     this.calls.push("bindRows");
+    if (this.failBindRows.delete(addressId)) return Promise.reject(new Error("store"));
     return Promise.resolve({
       batches: (this.batches[addressId] ?? []).map((b) => ({ ...b })),
       canaries: (this.canaries[addressId] ?? []).map((c) => ({ ...c })),
@@ -461,6 +471,10 @@ interface World {
   bucket: Map<string, Uint8Array>;
   gets: number;
   failPut: boolean;
+  /** Keys whose next DELETE answers 503, once each, leaving the object where it is. */
+  failDelete: Set<string>;
+  /** Each `inbound/` DELETE waits until the bucket has answered this many GETs (two deliveries at once). */
+  deletesAwaitGets: number;
   logs: string[];
   /** Google's confirmation page, faked on the same listener: how it answers, and what reached it. */
   confirm: { mode: "ok" | "redirect" | "signin" | "post_redirect" | "offlist"; requests: ConfirmRequest[] };
@@ -491,7 +505,18 @@ async function withWorld(fn: (w: World) => Promise<void>): Promise<void> {
   const bucket = new Map<string, Uint8Array>();
   const confirm = { mode: "ok" as World["confirm"]["mode"], requests: [] as ConfirmRequest[] };
   const kick = { mode: "ok" as World["kick"]["mode"], sent: [] as KickRequest[] };
-  const w = { store, bucket, gets: 0, failPut: false, logs: [] as string[], confirm, kick } as World;
+  const w = {
+    store,
+    bucket,
+    gets: 0,
+    failPut: false,
+    failDelete: new Set<string>(),
+    deletesAwaitGets: 0,
+    logs: [] as string[],
+    confirm,
+    kick,
+  } as World;
+  const gotten: Array<() => void> = [];
   const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen: () => {} }, async (req) => {
     const path = new URL(req.url).pathname;
     if (path.endsWith(".pem")) return new Response(PEM);
@@ -500,6 +525,7 @@ async function withWorld(fn: (w: World) => Promise<void>): Promise<void> {
     if (path.startsWith("/mail/vf-")) return confirmPage(w, req, path, new TextDecoder().decode(body));
     if (req.method === "GET") {
       w.gets++;
+      for (const wake of gotten.splice(0)) wake();
       const got = bucket.get(key);
       return got ? new Response(new Uint8Array(got)) : new Response("<Error/>", { status: 404 });
     }
@@ -509,6 +535,10 @@ async function withWorld(fn: (w: World) => Promise<void>): Promise<void> {
       return new Response(null, { status: 200 });
     }
     if (req.method === "DELETE") {
+      if (key.startsWith("inbound/")) {
+        while (w.gets < w.deletesAwaitGets) await new Promise<void>((wake) => gotten.push(wake));
+      }
+      if (w.failDelete.delete(key)) return new Response("<Error/>", { status: 503 });
       bucket.delete(key);
       return new Response(null, { status: 204 });
     }
@@ -1016,6 +1046,85 @@ Deno.test("an_unaligned_backfilled_original_is_kept_unaligned", async () => {
     assertEquals(w.store.counters, {});
     assertEquals(w.store.batchReceivedCounts, { "b-2": 1 });
     assertEquals(w.store.receivedAt, {});
+  });
+});
+
+// ---------------------------------------------------------------- email follow-ups T5: one count per receipt
+
+/** The receipt id intake counts a batch send under: the lower-case hex SHA-256 of the object key, exactly. */
+const receiptHash = async (key: string) =>
+  Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(key))))
+    .map((b) => b.toString(16).padStart(2, "0")).join("");
+/** SNS's redelivery of `d`: the same object key, nothing put again (the object is whatever is left). */
+const redeliver = async (w: World, d: Delivery) => await handle(await delivery(d), CFG, w.deps);
+
+Deno.test("an_sns_redelivery_with_the_object_still_present_counts_received_once", async () => {
+  await withWorld(async (w) => {
+    await openBatches(w);
+    const send = await batchSend(NONCE, [{ eml: ORIGINAL_A }, { eml: ORIGINAL_B }]);
+    // The first delivery's final delete of the inbound object fails: it answers 500 after the count, and
+    // the object is still there, which is why the redelivery reads it again.
+    w.failDelete.add("inbound/r1");
+    assertEquals((await w.arrive(send, SEND("inbound/r1"))).status, 500);
+    assertEquals(keysUnder(w, "inbound/"), ["inbound/r1"]);
+    assertEquals((await redeliver(w, SEND("inbound/r1"))).status, 200);
+    // The originals count once, and each is queued once.
+    assertEquals(w.store.batchReceivedCounts, { "b-1": 2 });
+    assertEquals(w.store.workRows.map((x) => x.batchId), ["b-1", "b-1"]);
+    assertEquals(keysUnder(w, "inbound/"), []);
+    // Counted under the key's hash, never the key; no log line carries either.
+    const receipt = await receiptHash("inbound/r1");
+    assertEquals(w.store.countedReceipts, { "b-1": [receipt] });
+    for (const line of w.logs) assert(!line.includes(receipt) && !line.includes("inbound/"), line);
+  });
+});
+
+Deno.test("two_concurrent_deliveries_of_one_send_count_once", async () => {
+  await withWorld(async (w) => {
+    await openBatches(w);
+    const send = await batchSend(NONCE, [{ eml: ORIGINAL_A }, { eml: ORIGINAL_B }]);
+    w.bucket.set("inbound/c1", bin(send));
+    // SNS redelivers while the first run is still working: neither deletes the inbound object until both
+    // have read it, which is why the second finds it still there.
+    w.deletesAwaitGets = 2;
+    const [a, b] = await Promise.all([redeliver(w, SEND("inbound/c1")), redeliver(w, SEND("inbound/c1"))]);
+    assertEquals([a.status, b.status], [200, 200]);
+    assertEquals(w.gets, 2);
+    assertEquals(w.store.batchReceivedCounts, { "b-1": 2 });
+    assertEquals(w.store.workRows.length, 2);
+    assertEquals(w.store.countedReceipts, { "b-1": [await receiptHash("inbound/c1")] });
+  });
+});
+
+Deno.test("a_later_recipients_failure_after_the_count_then_the_retry_counts_once", async () => {
+  await withWorld(async (w) => {
+    await openBatches(w);
+    const send = await batchSend(NONCE, [{ eml: ORIGINAL_A }, { eml: ORIGINAL_B }]);
+    // One notification for two of account 1's mailboxes: Jane's batch is counted, then the second
+    // mailbox's store read fails, so the run answers 500 before its final delete, which is why the retry
+    // reads the object again.
+    const d: Delivery = { key: "inbound/t1", recipients: [at(TOK1), at(TOK_M365)], source: "jane@gmail.com" };
+    w.store.failBindRows.add("addr-4");
+    assertEquals((await w.arrive(send, d)).status, 500);
+    assertEquals(w.store.batchReceivedCounts, { "b-1": 2 });
+    assertEquals(keysUnder(w, "inbound/"), ["inbound/t1"]);
+    assertEquals((await redeliver(w, d)).status, 200);
+    assertEquals(w.store.batchReceivedCounts, { "b-1": 2 });
+    assertEquals(w.store.countedReceipts, { "b-1": [await receiptHash("inbound/t1")] });
+    assertEquals(keysUnder(w, "inbound/"), []);
+  });
+});
+
+Deno.test("two_sends_of_one_batch_each_count", async () => {
+  await withWorld(async (w) => {
+    await openBatches(w);
+    // Two sends of one batch are two SES receipts under two object keys: each counts, under its own id.
+    assertEquals((await w.arrive(await batchSend(NONCE, [{ eml: ORIGINAL_A }]), SEND("inbound/k1"))).status, 200);
+    assertEquals((await w.arrive(await batchSend(NONCE, [{ eml: ORIGINAL_B }]), SEND("inbound/k2"))).status, 200);
+    assertEquals(w.store.batchReceivedCounts, { "b-1": 2 });
+    assertEquals(w.store.countedReceipts, {
+      "b-1": [await receiptHash("inbound/k1"), await receiptHash("inbound/k2")],
+    });
   });
 });
 

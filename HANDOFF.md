@@ -137,11 +137,12 @@ untracked in the `email-forwarding` worktree. **The controller commits all of th
 | L6 Runtime removal | ruling 10; owns `app/src/main.rs` and `commands.rs` (other lanes hand it their Tauri-command registration lines). Deleting `engine/src/runtime.rs` deletes one of CLAUDE.md's four `#[ignore]`d tests (the real-runtime smoke test), by deletion with the module and never by un-ignoring, so the "four tests" line in CLAUDE.md becomes three; **that CLAUDE.md edit is a rule change and goes to Quinn, not into the lane PR** | MVP | planner (small plan), implementer, reviewer |
 | L7 Named issues | OpenRouter 402, Gmail "source went quiet"; `surface.rs` before L5 | MVP | implementer, console-ui |
 | L8 Testers | comp entitlement for a named list, per-tester usage and cost view on prod (`docs/specs/2026-10-18-friends-testers-design.md`) | MVP | planner (short spec, Quinn signs), cloud-engineer |
-| L9 Prod parity | §4's checklist, with email's migrations and functions, after the key roll (§4); steps (1)-(2) are re-run after each later lane that adds a migration or function change merges, in merge-stamp order (L3, L8, L5, L1: L3's migration and judge-function redeploys, L8's `<stamp>_testers.sql` and the billing-checkout and entitlement redeploys, before any comp account exists on prod); steps (1)-(2) first, then L10's first tag publishes the privacy page (step (3)), then step (4)'s secrets; Quinn's go per prod deploy | MVP | cloud-engineer; the controller runs every prod push |
+| L9 Prod parity | §4's checklist, with email's migrations and functions, after the key roll (§4); steps (1)-(2) are re-run after each later lane that adds a migration or function change merges, in merge-stamp order (L3, L8, L5, L1: L3's migration and judge-function redeploys, L8's `<stamp>_testers.sql` and the billing-checkout and entitlement redeploys, before any comp account exists on prod; L11's `20261020000400_mail_follow_ups.sql` and the redeploys of `mail-inbound`, `gmail-read`, `mail-process` and `mail`, its stamp recounted at its T9 under M5); steps (1)-(2) first, then L10's first tag publishes the privacy page (step (3)), then step (4)'s secrets; Quinn's go per prod deploy | MVP | cloud-engineer; the controller runs every prod push |
 | L10 Release for friends | unsigned CI release v0.1.x (the first tag also publishes `site/`, so it sits between L9's steps (2) and (4)), install and updater proof, a one-page install note; Quinn's go per tag | MVP | integrator, docs-keeper |
+| L11 Email cloud follow-ups | plan `docs/plans/2026-10-20-email-cloud-follow-ups-plan.md` (FINAL, Quinn's rulings Q1-Q5 of 2026-10-20), branch `email-cloud-follow-ups`: `mail-process` entitlement gate and the lapsed hold (T3), Rotate's `rotated_from` and D22 (T4), one count per SES receipt (T5), migration `20261020000400_mail_follow_ups.sql` (T2), spec markers (T7). **Owed: T6** (an out-of-credit answer spends no attempt, one-hour hold, instance pause), held until L7's cloud half is on `main` (C3), then its own small PR on `email-cloud-follow-ups-credit` from `main`; its spec marker (§4.7 step 5) goes with it. **Owed:** unlapse writes `pending` inside an open Rotate grace (plan §9). L9 redeploys `mail-inbound`, `gmail-read`, `mail-process`, `mail` | MVP | cloud-engineer, docs-keeper, reviewer |
 
 Serialisation: `console.js` is one queue (L4, L7, L1 R11, L5a's B5, L5); migrations stamp in merge order (email, L3, L8,
-L5, L1; L5a adds none); L5a (#19) merges after the email merge and before L5, and before L6 makes its `main.rs` commit (if L6 is ready first, L6 merges first and L5a's B1 re-applies #19's `main.rs` part, recounting by script); `main.rs` and `commands.rs` are L6's; `account.rs` is L4's and `approvals.rs` is L5's (both on
+L5, L1; L5a adds none; L11's stamp is `20261020000400`, rechecked at its T9); L5a (#19) merges after the email merge and before L5, and before L6 makes its `main.rs` commit (if L6 is ready first, L6 merges first and L5a's B1 re-applies #19's `main.rs` part, recounting by script); `main.rs` and `commands.rs` are L6's; `account.rs` is L4's and `approvals.rs` is L5's (both on
 CLAUDE.md's contract list: contract-engineer edits, contract-reviewer reviews, never `implementer`); `surface.rs`
 goes L7 then L5; `app/tests/grades.rs` is L2's first (the `displayGrade.score` test), then L4's
 (`PRIVACY_BUMP_1`), though both are wave 1. Session-5 block item 5 covers only the syllabus spec and the allowance header; the M365 redesign (header DRAFT v2) and the friends-testers spec (DRAFT) are in no block item, so signing them is an open question for Quinn (§4, the row "Sign the C3 and L8 specs"): L1 and L8 write no code against a DRAFT spec before it.
@@ -184,7 +185,7 @@ controller at merge. Merge order was **C0 → C1 → C2**.
 **Shared files with a single owner:** root `Cargo.toml`/`Cargo.lock`, `app/src/main.rs` (the two
 `generate_handler!` lists), `app/src/lib.rs`, `app/src/commands.rs`, `app/src/tray.rs`,
 `app/src/updates.rs`, `app/src/state.rs`, `app/tauri.conf.json` outside C0's three keys,
-`engine/src/lib.rs`, `engine/src/{main,cli,ingest,runtime,inference}.rs`, `scripts/*.py`. Every plan
+`engine/src/lib.rs`, `engine/src/{main,cli,ingest}.rs`, `scripts/*.py`. Every plan
 lists what it needs there under **"Controller hand-offs"** with exact code; the controller applies
 them at merge. **H9 of C2** (the wizard's Google button, five C1 files) lands as one controller
 commit between C1's and C2's merges, or is deferred whole to C4 (R-X-17).
@@ -438,9 +439,11 @@ built there, not here; they stay listed as ruling 10's original list):
   (ruling 3's consequence, tested by `journal::human_edited`). Done 2026-10-18: the R0 spike, the R24 and G2-G5 rulings. Left: the A1 findings and the
   rest of tasks B1-B9 (L5a's row, §2), with B9's live proof at the machine. The registrar never shares the kept
   Blackboard profile.
-- **The local model runtime removed** (MVP since 2026-10-18, L6): `engine/src/runtime.rs`, `app/src/inference.rs`,
-  `SUPPORTED_RUNTIMES` and the wizard's offer. Until L6 merges they stay and are not extended
-  (CLAUDE.md's "stay until the Pilot's runtime-removal lane" wording is stale on the stage, a rule edit that goes to Quinn with the four-tests line).
+- ~~**The local model runtime removed**~~ (MVP since 2026-10-18, L6): **done in lane L6** (branch `l6-runtime-removal`; PR number,
+  merge sha and date are written here by the controller at the merge, T8). `engine/src/runtime.rs`, `app/src/inference.rs`,
+  `SUPPORTED_RUNTIMES`, the settings row and the wizard's offer are gone; `judge` has one model, `CloudModel`, and no account
+  is `judge (skipped: no account)`. `engine/tests/no_local_runtime.rs` fails if any of it returns. The ignored-test count is
+  three. CLAUDE.md's four sentences stay for Quinn's edit at the merge checkpoint (the lane plan's §10).
 - **Two issues shown in the app** (MVP since 2026-10-18, L7): OpenRouter's 402 (payment required) as a named issue instead of
   quiet model failures, and "source went quiet" (`google_accounts.status = 'quiet'` after 14 days,
   modelled server-side, nothing shows it yet; the Issues panel is its home).
