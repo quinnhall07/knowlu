@@ -2960,3 +2960,65 @@ fn the_privacy_skips_reach_the_runner_log_except_mails() {
     assert!(!log.contains("mail"), "a mail step never reaches the runner log:\n{log}");
     assert_eq!(r.listener.hits(), 0);
 }
+
+// ---- L4 T8-R3rust: the two sync paths outside the slot honour the same gate --------------------------------------
+//
+// *Sync now* (`state::run_sync`, through `commands::sync_inner`) and the quit push (`state::quit_flush`) do not run
+// the slot, so T6's gate did not reach them. The rig is the one above: a never-written session target, so a sync
+// that does run answers its own `no session` skip and writes the engine's status file; one that is held does
+// neither. The panel says an unaccepted update "does not sync, import or read anything new", so both are held.
+
+const HELD_SYNC: &str = "sync (skipped: privacy update not accepted)";
+
+#[test]
+fn sync_now_while_the_privacy_update_is_owed_is_a_named_skip_never_an_error() {
+    let r = privacy_rig("syncnow-older", "active", false);
+    r.set_privacy(Some("2026-01-01"));
+    let before = knowlu_engine::sync::load_status(&r.v);
+    let status = knowlu::state::run_sync(&r.cs);
+    assert_eq!(status.skipped.as_deref(), Some("privacy update not accepted"), "{status:?}");
+    assert_eq!(status.lines, vec![HELD_SYNC.to_string()], "{status:?}");
+    assert!(status.ok && status.last_error.is_none(), "a hold is not an error: {status:?}");
+    assert_eq!(*r.cs.sync.lock().unwrap(), status, "the page reads the same status");
+    assert_eq!(knowlu_engine::sync::load_status(&r.v), before, "the engine's sync never ran, so its status file is as it was");
+    // The command's envelope: ok, no error, and the page's topline carries the skip.
+    let env = knowlu::commands::sync_inner(&r.cs, "today").unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    assert!(env["error"].is_null(), "{env}");
+    assert_eq!(env["state"]["topline"]["sync"]["skipped"], "privacy update not accepted", "{env}");
+    assert_eq!(r.listener.hits(), 0);
+}
+
+#[test]
+fn sync_now_runs_as_it_did_when_the_privacy_version_is_accepted_or_unknown() {
+    for (tag, recorded) in [("syncnow-accepted", Some(PRIVACY_VERSION)), ("syncnow-unknown", None)] {
+        let r = privacy_rig(tag, "active", false);
+        if tag.ends_with("accepted") { r.set_privacy(recorded); }
+        let status = knowlu::state::run_sync(&r.cs);
+        assert_eq!(status.skipped.as_deref(), Some("no session"), "the engine's own answer, {tag}: {status:?}");
+        assert!(!status.lines.iter().any(|l| l == HELD_SYNC), "{tag}: {status:?}");
+        assert!(knowlu_engine::sync::load_status(&r.v).at.is_some(), "{tag}: the engine's sync ran and saved its status");
+    }
+}
+
+#[test]
+fn the_quit_push_is_held_while_the_privacy_update_is_owed() {
+    let r = privacy_rig("quit-older", "active", false);
+    r.set_privacy(Some("2026-01-01"));
+    let before = knowlu_engine::sync::load_status(&r.v);
+    let q = quit_flush(&r.cs, Duration::from_secs(10), |_| {});
+    assert!(!q.synced && !q.timed_out, "{q:?}");
+    assert_eq!(knowlu_engine::sync::load_status(&r.v), before, "no push was attempted, so the engine's status file is as it was");
+    assert_eq!(r.listener.hits(), 0);
+}
+
+#[test]
+fn the_quit_push_runs_as_it_did_when_the_privacy_version_is_accepted_or_unknown() {
+    for (tag, accepted) in [("quit-accepted", true), ("quit-unknown", false)] {
+        let r = privacy_rig(tag, "active", false);
+        if accepted { r.set_privacy(Some(PRIVACY_VERSION)); }
+        let q = quit_flush(&r.cs, Duration::from_secs(10), |_| {});
+        assert!(!q.synced && !q.timed_out, "{tag}: signed out, so nothing pushed: {q:?}");
+        assert!(knowlu_engine::sync::load_status(&r.v).at.is_some(), "{tag}: the engine's push ran and saved its status");
+    }
+}
