@@ -2810,3 +2810,75 @@ Deno.test("S2e2: the case table's V1 and V2 rows: est_usd the hand-computed sum,
   assert(priced.size >= 2, "V1 spans two prices, so monthly_spend gives two rows and the view must sum them");
   assertEquals([SPEND_CASES[1].accounts.length, SPEND_CASES[1].alerts?.length], [2, 1], "V2: two testers, one alert");
 });
+
+// L8 S2f-a (friends-testers §9 layer iii, Amendment 2026-10-20): the staging proof, the prod gate. Not
+// a migration (proofs/, never deployed): one transaction that only rolls back, its first statement the
+// trigger precheck, every account made by a real sign-up's triggers from S1's recorded auth.users
+// columns with no password, only @example.invalid addresses and no account id, and its P cases the
+// case table's own rows, verbatim, so the cases are written once and run twice.
+const PROOF = new URL("../proofs/testers_staging.sql", HERE);
+/** S1's ledger row: the auth.users columns GoTrue fills on insert on staging. */
+const S1_COLUMNS = new Set(("aud confirmation_token confirmed_at created_at email email_change email_change_confirm_status " +
+  "email_change_token_current email_change_token_new email_confirmed_at id instance_id is_anonymous is_sso_user " +
+  "last_sign_in_at phone_change phone_change_token raw_app_meta_data raw_user_meta_data reauthentication_token " +
+  "recovery_token role updated_at recovery_sent_at").split(" "));
+
+/** Top-level statements, flattened: line comments dropped, dollar-quoted bodies blanked to `$$`. */
+const topLevel = (raw: string) =>
+  stripLineComments(raw).replace(/(\$[A-Za-z_]*\$)[\s\S]*?\1/g, () => "$$").split(";")
+    .map((s) => s.replace(/\s+/g, " ").trim().toLowerCase()).filter((s) => s !== "");
+
+export function proofProblems(raw: string, cases: unknown): string[] {
+  const out: string[] = [];
+  const code = stripLineComments(raw);
+  const stmts = topLevel(raw);
+  if (stmts[0] !== "begin") out.push("does not open with begin;");
+  if (stmts.at(-1) !== "rollback") out.push("does not close with rollback;");
+  for (const s of stmts.slice(1, -1)) {
+    if (/^(?:begin|start|end|commit|abort|prepare|rollback(?! to\b))\b/.test(s)) out.push(`ends the transaction early: ${s}`);
+  }
+  if (/\bcommit\b/i.test(raw)) out.push("names commit");
+  for (const m of raw.matchAll(ADDRESS_TOKEN)) if (m[0].split("@")[1] !== "example.invalid") out.push(`address ${m[0]}`);
+  if (uuidTokens([["proof", raw]]).length > 0) out.push("an id other than the nil uuid");
+  const pre = /^\s*begin;\s*do\s+\$\$([\s\S]*?)\$\$\s*;/.exec(code)?.[1] ?? "";
+  if (!["handle_new_user", "prosrc", "'raise'", "raise exception"].every((w) => pre.includes(w))) out.push("no trigger precheck first");
+  const users = [...code.matchAll(/insert\s+into\s+auth\.users\s*\(([^)]*)\)/gi)];
+  if (users.length !== 1) out.push(`${users.length} auth.users inserts, want one`);
+  for (const col of users[0]?.[1].split(",").map((c) => c.trim()) ?? []) if (!S1_COLUMNS.has(col)) out.push(`column ${col} is not S1's`);
+  if (/encrypted_password/i.test(code)) out.push("sets a password");
+  if (/insert\s+into\s+(?:public\.)?(?:accounts|entitlements)\b/i.test(code)) out.push("inserts what the sign-up trigger writes");
+  const blob = /\$cases\$([\s\S]*?)\$cases\$/.exec(code)?.[1];
+  try {
+    assertEquals(JSON.parse(blob ?? "null"), cases);
+  } catch {
+    out.push("the P cases are not testers_cases.ts's CASES");
+  }
+  return out;
+}
+
+Deno.test("S2f-a: the staging proof rolls back, prechecks the trigger, signs up with no password, runs CASES verbatim", async () => {
+  const { CASES } = await import("./testers_cases.ts");
+  assertEquals(proofProblems(await Deno.readTextFile(PROOF), CASES), []);
+});
+
+Deno.test("S2f-a: the proof pins refuse a commit, an early end, an address, an id, a password, a direct insert, a drift", async () => {
+  const { CASES } = await import("./testers_cases.ts");
+  const raw = await Deno.readTextFile(PROOF);
+  for (
+    const [bad, want] of [
+      [raw.replace(/rollback;\s*$/, "commit;\n"), "close with rollback"],
+      [raw.replace("begin;\n", "begin;\nend;\nbegin;\n"), "ends the transaction early"],
+      [raw.replace(/rollback;\s*$/, "rollback to savepoint x;\nrollback;\nselect 1;\n"), "close with rollback"],
+      [`${raw}-- friend@example.com\n`, "address"],
+      [`${raw}-- ${ID}\n`, "nil uuid"],
+      [raw.replace("is_sso_user)", "is_sso_user, encrypted_password)"), "password"],
+      [raw.replace(/rollback;\s*$/, "insert into public.entitlements (account_id, status) select id, 'none' from public.accounts;\nrollback;\n"), "sign-up trigger"],
+      [raw.replace('"endsIn":30', '"endsIn":31'), "CASES"],
+      [raw.replace("prosrc", "proname"), "precheck"],
+    ]
+  ) {
+    assertNotEquals(bad, raw, `the mutation for ${want} must apply to the real proof`);
+    const problems = proofProblems(bad, CASES);
+    assert(problems.some((p) => p.includes(want)), `${want}: ${problems.join(" | ")}`);
+  }
+});
