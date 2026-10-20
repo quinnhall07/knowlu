@@ -18,7 +18,7 @@
 //! recover follow either way, reaching back to when forwarding was last known on after it was found off.
 //!
 //! **Privacy.** A line holds fixed words and counts. No address, subject, sender, URL or page text enters one.
-use super::backfill::{keep_messages, keep_pace, left_for, note_stall, save_look, seed_routine, stuck_for};
+use super::backfill::{keep_messages, keep_pace, leftovers_for, left_for, note_batch, note_stall, save_look, seed_routine, stuck_for};
 use super::commands::{run_script, wait_signed_in, GONE_WAIT, SILENT_WAIT};
 use super::host::Host;
 use super::recover::{run_pass, window, Clock, Job, Outcome, Place, Stop, Window, LAPSE_DAYS, SLOT_CAP};
@@ -187,6 +187,7 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
     }
     let last_known_on = state.last_reconcile.get(id).and_then(|t| instant(t)).filter(|_| fwd.was_not_on());
     let look = |at: i64| save_look(env.data_dir, id, at);
+    let batch = |nonce: &str, open: bool| note_batch(env.data_dir, id, nonce, open, env.clock.now());
     let backfilling = state.open_backfills.iter().any(|i| i == id);
     // The page loads go only into a pace this day already keeps (a backfill's, or a slot's that sent), so a mailbox
     // that only recovers adds nothing to `mail.json` for them. A message sent starts one, and its instant is kept at
@@ -217,6 +218,8 @@ fn pass(env: &SlotEnv, id: &str, provider: Provider, knowlu: &str, row: &Value, 
         // slot's own record: a backfill's never replaces it (review of 5f71623..6a8e738, #2).
         stuck: stuck_for(state, id, now.div_euclid(86_400), Phase::Recover),
         left: left_for(state, id),
+        leftovers: leftovers_for(state, id, now),
+        on_batch: Some(&batch),
     };
     let mut routine = seed_routine(env.data_dir, provider, id, now);
     let out = run_pass(env.host, env.client, env.clock, &mut routine, &job);

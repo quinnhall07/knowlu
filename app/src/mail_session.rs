@@ -17,6 +17,11 @@
 //! back on a mailbox the student turned off, and reading it as "nothing pending" would leave a
 //! signed-in profile unnamed. Every write refuses rather than overwrite it, and the one write path
 //! is [`MailState::update`], which reloads under the lock.
+//!
+//! **Sent-cleanup keys.** `sent_nonces` keeps, per mailbox, the nonce of each batch a pass opened until its Sent
+//! copies are cleaned (pre-PR review, 2026-10-20, sent-nonce): a pass killed before its end leaves copies only that
+//! nonce can find, and the mailbox's next pass sweeps them first. Nonces and instants only; they are never logged or
+//! synced, are dropped by a disconnect and kept by a sign-out (the copies are still in the mailbox).
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -149,6 +154,29 @@ pub struct MailState {
     /// written at all when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pending_setups: Vec<PendingSetup>,
+    /// Each mailbox's open Sent-cleanup keys, by address id (pre-PR review, 2026-10-20, sent-nonce): the nonce of
+    /// every batch a pass opened and has not yet cleaned the Sent copies of, with the instant it opened. A pass
+    /// killed before its end (a quit, an update, a sign-out) leaves its copies in Sent under a nonce that exists
+    /// nowhere else; the next pass for the mailbox sweeps each kept nonce before it opens a batch, and an entry
+    /// goes once its copies are gone or after `mail::backfill::SENT_NONCE_DAYS`. Ids and instants only: never
+    /// logged, never synced and never in a `Stop`, and no Knowlu address is kept beside it. Dropped on
+    /// disconnect. A file written before it existed lacks it and reads as none. Not written when empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub sent_nonces: BTreeMap<String, Vec<SentNonce>>,
+}
+
+/// One batch's Sent-cleanup key and when it opened (unix seconds). The nonce is the subject of the copies the
+/// batch left in Sent, so `Debug` never shows it.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SentNonce {
+    pub nonce: String,
+    pub opened: i64,
+}
+
+impl std::fmt::Debug for SentNonce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SentNonce").field("nonce", &"<redacted>").field("opened", &self.opened).finish()
+    }
 }
 
 /// One in-flight setup's address and `withdraw`'s facts (`runner.rs`): ids and flags only.
@@ -216,6 +244,7 @@ impl Default for MailState {
             lone_left: BTreeMap::new(),
             gmail_messages: BTreeMap::new(),
             pending_setups: Vec::new(),
+            sent_nonces: BTreeMap::new(),
         }
     }
 }

@@ -21,7 +21,7 @@
 use super::recover::{backfill_window, pages_spent, run_pass, Clock, Job, Mailbox, Outcome, Stop, Stuck};
 use super::setup::{Backfill, Env, Row, Shared};
 use crate::mail_client::{MailClient, Phase};
-use crate::mail_session::{session_dir, BackfillPace, LoneStall, MailState};
+use crate::mail_session::{session_dir, BackfillPace, LoneStall, MailState, SentNonce};
 use crate::mail_steps::{backfill_held_for_c3, Provider, Routine, Send};
 use jiff::civil::Date;
 use std::path::Path;
@@ -167,6 +167,47 @@ pub(super) fn keep_messages(data_dir: &Path, id: &str, times: &[i64], now: i64) 
 /// effort, like [`keep_pace`].
 pub(super) fn save_look(data_dir: &Path, id: &str, at: i64) {
     let _ = MailState::update(data_dir, |s| s.last_look.insert(id.to_string(), at) != Some(at));
+}
+
+/// Batch nonces older than this many days are dropped, kept or not.
+pub const SENT_NONCE_DAYS: i64 = 7;
+/// At most this many nonces are kept for one mailbox; the oldest go first.
+pub const MAX_SENT_NONCES: usize = 8;
+
+/// Keeps or drops one batch's Sent-cleanup nonce in `mail.json` (pre-PR review, 2026-10-20, sent-nonce): `open` keeps
+/// it with the instant, at most [`MAX_SENT_NONCES`] for the mailbox, the oldest dropped; closing removes it, and the
+/// mailbox's key with the last. Every write drops the entries of every mailbox older than [`SENT_NONCE_DAYS`]. Ids and
+/// instants only, never logged. Best effort: a note that could not be written costs a killed pass's copies staying in
+/// Sent, never the pass.
+pub fn note_batch(data_dir: &Path, id: &str, nonce: &str, open: bool, now: i64) {
+    let _ = MailState::update(data_dir, |s| {
+        let before = s.sent_nonces.clone();
+        let cutoff = now - SENT_NONCE_DAYS * DAY;
+        for list in s.sent_nonces.values_mut() {
+            list.retain(|e| e.opened >= cutoff);
+        }
+        if open {
+            let list = s.sent_nonces.entry(id.to_string()).or_default();
+            list.retain(|e| e.nonce != nonce);
+            list.push(SentNonce { nonce: nonce.to_string(), opened: now });
+            let extra = list.len().saturating_sub(MAX_SENT_NONCES);
+            list.drain(..extra);
+        } else if let Some(list) = s.sent_nonces.get_mut(id) {
+            list.retain(|e| e.nonce != nonce);
+        }
+        s.sent_nonces.retain(|_, list| !list.is_empty());
+        s.sent_nonces != before
+    });
+}
+
+/// The nonces `mail.json` still keeps for mailbox `id` that a pass may sweep: younger than [`SENT_NONCE_DAYS`] and 1 to
+/// 64 ASCII letters or digits (the test nonce is not 32 hex), oldest first. Anything else is never handed to a script.
+pub fn leftovers_for(state: &MailState, id: &str, now: i64) -> Vec<String> {
+    let cutoff = now - SENT_NONCE_DAYS * DAY;
+    let shaped = |n: &str| (1..=64).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_alphanumeric());
+    state.sent_nonces.get(id).map_or_else(Vec::new, |list| {
+        list.iter().filter(|e| e.opened >= cutoff && shaped(&e.nonce)).map(|e| e.nonce.clone()).collect()
+    })
 }
 
 /// Keeps a mailbox's day count, page loads, Gmail messages and pause in `mail.json`, and drops every pace whose day is past.
@@ -418,6 +459,7 @@ fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i
     };
     let look = |at: i64| save_look(d.data_dir, d.address_id, at);
     let state = MailState::load(d.data_dir).ok();
+    let batch = |nonce: &str, open: bool| note_batch(d.data_dir, d.address_id, nonce, open, d.clock.now());
     let load = |day: i64, loads: u32, messages: u32, times: &[i64]| {
         let pace = BackfillPace { day, sent_today: 0, paused_until: None, loads_today: loads, messages_today: messages };
         keep_pace(d.data_dir, d.address_id, pace, true);
@@ -436,6 +478,8 @@ fn run_one(d: &Drive, routine: &mut Routine, since: &str, since_idx: i64, now: i
         frontier: frontier(d.data_dir, d.address_id),
         stuck: state.as_ref().and_then(|s| stuck_for(s, d.address_id, today, Phase::Backfill)),
         left: state.as_ref().map(|s| left_for(s, d.address_id)).unwrap_or_default(),
+        leftovers: state.as_ref().map(|s| leftovers_for(s, d.address_id, now)).unwrap_or_default(),
+        on_batch: Some(&batch),
     };
     let out = run_pass(d.mb, d.client, d.clock, routine, &job);
     d.shared.update(|p| {

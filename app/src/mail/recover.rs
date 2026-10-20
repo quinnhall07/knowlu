@@ -67,8 +67,14 @@
 //! backfill closes or stops, or the mailbox is revoked, so the
 //! record counts the next stuck row (review round 2 of e7ae803).
 //!
-//! **Privacy.** No sender, subject, address, nonce or page text is kept past the pass, logged or put in a
-//! [`Stop`]; every stop is a fixed word or a service error's name.
+//! **A batch's Sent copies** are found only by its nonce (`sent_cleanup.js`), so the nonce outlives a pass that is
+//! killed before its end (pre-PR review, 2026-10-20, sent-nonce): [`Job::on_batch`] tells the caller when a batch
+//! opens, before its first send, and again once its copies are cleaned, and a later pass for the mailbox is handed the
+//! nonces still kept ([`Job::leftovers`]) and sweeps each from Sent before it opens a batch of its own.
+//!
+//! **Privacy.** No sender, subject, address or page text is kept past the pass, logged or put in a [`Stop`]. A
+//! batch's nonce is kept on device in `mail.json` (`sent_nonces`) only until its Sent copies are cleaned, and is
+//! never logged, synced or put in a [`Stop`]; every stop is a fixed word or a service error's name.
 use super::{run_in_window, Refusal, WINDOW};
 use crate::mail_client::{MailClient, MailError, Phase};
 use crate::mail_steps::{Paused, Provider, Routine, Send, BACKFILL_DAYS};
@@ -96,6 +102,9 @@ const STEP: Duration = Duration::from_secs(90);
 /// (Checkpoint C).
 const CLEANUP_WAIT_MS: u64 = 5_000;
 const CLEANUP_ROWS: u32 = 2;
+/// The most deletions one pass's sweep of kept nonces makes in all (the leftovers share it), so a mailbox with a
+/// long Sent backlog is cleared over several passes and a pass is not held for it.
+pub const SWEEP_ROWS: u32 = 60;
 const _: () = assert!(CLEANUP_WAIT_MS * (3 * CLEANUP_ROWS as u64 + 11) < STEP.as_millis() as u64);
 const DAY: i64 = 86_400;
 
@@ -396,6 +405,14 @@ pub struct Job<'a> {
     /// Gmail: the received minutes of lone rows `mail.json` keeps as left (`lone_left`, review round 2 of e7ae803):
     /// each reached its third stalled day, and is left at once when it will not attach, as a leaving `stuck` is.
     pub left: Vec<i64>,
+    /// This mailbox's kept batch nonces (`mail.json`'s `sent_nonces`, pre-PR review 2026-10-20, sent-nonce): batches an
+    /// earlier pass opened and did not finish cleaning Sent of. The pass sweeps each with `sent_cleanup.js` before it
+    /// opens its own batch, in order, within [`SWEEP_ROWS`] deletions, and on Gmail only with page room for it.
+    pub leftovers: Vec<String>,
+    /// Told `(nonce, open)` when this pass opens a batch (before its first send) and again, `false`, once that
+    /// batch's Sent copies are cleaned or there were none, and for each leftover the sweep finished. The caller keeps
+    /// it where a killed pass leaves it for the next one (`mail.json`). Best effort, like `on_look`.
+    pub on_batch: Option<&'a dyn Fn(&str, bool)>,
 }
 
 /// A lone Gmail row that stalled passes: its received minute (unix seconds), and whether to leave it.
@@ -691,6 +708,7 @@ impl Pass<'_> {
         if j.provider == Provider::Guided {
             return Err(Stop::Guided);
         }
+        self.sweep();
         // Gmail searches in a freshly loaded document: a window kept across passes (a backfill's) still holds the
         // last pass's cached search view, which a search with the same words would be answered from.
         if j.provider == Provider::Gmail {
@@ -786,6 +804,10 @@ impl Pass<'_> {
         let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         let (Some(id), Some(nonce)) = (text("batch_id"), text("nonce")) else { return Err(Stop::Service("bad-reply")) };
         self.batch = Some(Batch { id, nonce, opened });
+        // Kept before the first send, whatever kills the pass after it.
+        if let (Some(note), Some(b)) = (j.on_batch, &self.batch) {
+            note(&b.nonce, true);
+        }
         Ok(())
     }
 
@@ -1540,26 +1562,65 @@ impl Pass<'_> {
         }
         let Some(batch) = self.batch.take() else { return };
         self.out.closed = self.client.batch_sent(&batch.id, self.out.sent).is_ok();
-        if self.attempts == 0 || self.open(Place::Sent).is_err() {
-            return;
+        // A batch that tried nothing left no copies. Otherwise its nonce is dropped only when its copies are gone: a
+        // Sent that will not open, or a call that was not whole, keeps it for the next pass's sweep.
+        let done = self.attempts == 0 || (self.open(Place::Sent).is_ok() && self.clean_nonce(&batch.nonce, self.attempts + 5));
+        if let (true, Some(note)) = (done, self.job.on_batch) {
+            note(&batch.nonce, false);
         }
+    }
+
+    /// Deletes the Sent copies of the batch `nonce` (Sent is open), at most `cap` of them. `true` when every call was
+    /// whole and the last deleted fewer than it was asked for (nothing of ours is left), or when `cap` ran out.
+    fn clean_nonce(&mut self, nonce: &str, cap: u32) -> bool {
         // Each call is asked for no more than it can finish inside one STEP, so none is still running in
         // the page after the runner gives up (Gmail's places share one document); then it is called again
-        // while a call deleted all it was asked for, up to the attempts and five.
-        let mut left = self.attempts + 5;
+        // while a call deleted all it was asked for, up to `cap` (a batch's attempts and five).
+        let mut left = cap;
         while left > 0 {
             let max = left.min(CLEANUP_ROWS);
             let args = json!({
-                "address": self.job.knowlu_address, "nonce": batch.nonce, "max": max, "wait_ms": CLEANUP_WAIT_MS,
+                "address": self.job.knowlu_address, "nonce": nonce, "max": max, "wait_ms": CLEANUP_WAIT_MS,
             });
             let cleaned = self.mb.script(&self.path("sent_cleanup.js"), &args).ok();
             let deleted = cleaned.as_ref().and_then(|v| count(v, "deleted")).unwrap_or(0);
             self.out.cleaned += deleted;
             let whole = cleaned.as_ref().and_then(|v| v.get("result")).and_then(Value::as_str) == Some("ok");
             if !whole || deleted < max {
-                return;
+                return whole;
             }
             left -= max;
+        }
+        true
+    }
+
+    /// Cleans Sent of the batches an earlier pass left (`Job::leftovers`) before this pass opens its own, so the
+    /// copies of a pass that was killed before its end do not stay for good. Best effort, and it never stops the pass
+    /// or touches the current batch: on Gmail it runs only with room for it and the pass's own opens
+    /// ([`FRESH_LOADS`] and the search), a Sent that will not open or a call that was not whole keeps the entry, and
+    /// the leftovers share [`SWEEP_ROWS`] deletions. Only `sent_cleanup.js` deletes, and only rows whose subject is
+    /// exactly `Knowlu <nonce>` and whose one recipient is this mailbox's Knowlu address.
+    fn sweep(&mut self) {
+        let j = self.job;
+        if j.leftovers.is_empty() || (j.provider == Provider::Gmail && self.page_room() < FRESH_LOADS + 2) {
+            return;
+        }
+        if self.open(Place::Sent).is_err() {
+            return;
+        }
+        let mut budget = SWEEP_ROWS;
+        for nonce in &j.leftovers {
+            if budget == 0 {
+                break;
+            }
+            let (cap, before) = (budget, self.out.cleaned);
+            let whole = self.clean_nonce(nonce, cap);
+            let used = self.out.cleaned - before;
+            budget = budget.saturating_sub(used);
+            // A budget that ran out may have left copies: the entry stays for the next pass.
+            if let (true, Some(note)) = (whole && used < cap, j.on_batch) {
+                note(nonce, false);
+            }
         }
     }
 }

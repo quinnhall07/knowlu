@@ -788,6 +788,11 @@ struct Fake {
     paces: RefCell<Vec<u32>>,
     /// Gmail: each original a send that went carries is added here as a held entry (`learning`'s service holds them).
     learn: Option<Arc<Mutex<Vec<Value>>>>,
+    /// Sent copies an earlier pass left, as (nonce, the one recipient): `sent_cleanup.js` for any other nonce deletes
+    /// the ones matching its nonce and address, up to its `max`.
+    old_copies: RefCell<Vec<(String, String)>>,
+    /// The next this many opens of Sent are refused.
+    sent_opens_fail: Cell<u32>,
 }
 
 fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
@@ -834,6 +839,8 @@ fn fake(provider: Provider, msgs: Vec<Mail>) -> Fake {
         pace_dir: None,
         paces: Default::default(),
         learn: None,
+        old_copies: Default::default(),
+        sent_opens_fail: Cell::new(0),
     }
 }
 
@@ -884,6 +891,10 @@ impl Mailbox for Fake {
         self.log.borrow_mut().push((format!("open {place:?}"), Value::Null));
         if place == Place::FreshInbox {
             self.fresh_at.borrow_mut().push(self.clk.now());
+        }
+        if place == Place::Sent && self.sent_opens_fail.get() > 0 {
+            self.sent_opens_fail.set(self.sent_opens_fail.get() - 1);
+            return Err(Refusal::TimedOut);
         }
         match place {
             Place::FreshInbox if self.fresh_refuses_after.is_some_and(|n| self.fresh_at.borrow().len() > n) => {
@@ -1154,6 +1165,17 @@ impl Fake {
             }
             "sent_cleanup.js" => {
                 assert_eq!(self.places.borrow().last(), Some(&Place::Sent), "Sent is open for the cleanup");
+                if args["nonce"] != NONCE {
+                    let (nonce, to) = (args["nonce"].as_str().unwrap(), args["address"].as_str().unwrap());
+                    let max = args["max"].as_u64().expect("the cleanup names its most") as usize;
+                    let mut deleted = 0;
+                    self.old_copies.borrow_mut().retain(|(n, t)| {
+                        let go = deleted < max && n == nonce && t == to;
+                        deleted += usize::from(go);
+                        !go
+                    });
+                    return Ok(json!({ "result": "ok", "deleted": deleted }));
+                }
                 if self.cleanup_fails {
                     return Err(Refusal::TimedOut);
                 }
@@ -1208,7 +1230,7 @@ fn routine(provider: Provider) -> Routine {
 }
 
 fn job(provider: Provider, phase: Phase, window: Window, cap: Option<u32>) -> Job<'static> {
-    Job { provider, address_id: A, knowlu_address: KNOWLU, phase, window, cap, watch: None, on_look: None, on_load: None, frontier: None, stuck: None, left: Vec::new() }
+    Job { provider, address_id: A, knowlu_address: KNOWLU, phase, window, cap, watch: None, on_look: None, on_load: None, frontier: None, stuck: None, left: Vec::new(), leftovers: Vec::new(), on_batch: None }
 }
 
 fn pass(fake: &Fake, svc: &Service, routine: &mut Routine, job: &Job) -> knowlu::mail::recover::Outcome {
@@ -1428,6 +1450,203 @@ fn each_sent_cleanup_call_fits_inside_one_step() {
     }
     let asked: u64 = calls.iter().map(|c| c["max"].as_u64().unwrap()).sum();
     assert!(asked <= 10 + 5, "never more than the attempts and five: {asked}");
+}
+
+// ---- the batch nonce is kept until its Sent copies are gone (pre-PR review, 2026-10-20, sent-nonce) -----------
+
+use knowlu::mail::backfill::{leftovers_for, note_batch, MAX_SENT_NONCES, SENT_NONCE_DAYS};
+use knowlu::mail::recover::SWEEP_ROWS;
+use knowlu::mail_session::SentNonce;
+
+/// An earlier pass's batch nonce, and another batch's.
+const OLD: &str = "old0batch001";
+const OTHER: &str = "other0batch2";
+const NOT_MINE: &str = "someone.else@in.example.invalid";
+
+/// A callback that writes each batch note into the fake's own log, so its place among the scripts is seen.
+fn note_into(mb: &Fake) -> impl Fn(&str, bool) + '_ {
+    move |nonce, open| {
+        let n = mb.forwards.borrow().len();
+        mb.log.borrow_mut().push((format!("batch {} {nonce}", if open { "open" } else { "close" }), json!({ "forwards": n })));
+    }
+}
+
+fn batch_notes(mb: &Fake) -> Vec<(String, usize)> {
+    mb.log
+        .borrow()
+        .iter()
+        .filter(|(n, _)| n.starts_with("batch "))
+        .map(|(n, a)| (n.clone(), a["forwards"].as_u64().unwrap() as usize))
+        .collect()
+}
+
+fn recover_job(provider: Provider) -> Job<'static> {
+    job(provider, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP))
+}
+
+#[test]
+fn a_pass_records_its_batch_nonce_before_its_first_forward_and_drops_it_once_sent_is_clean() {
+    let svc = holding(&[]);
+    let mb = fake(Provider::M365, unheld(3));
+    let cb = note_into(&mb);
+    let out = pass(&mb, &svc, &mut routine(Provider::M365), &Job { on_batch: Some(&cb), ..recover_job(Provider::M365) });
+    assert_eq!((out.stop.clone(), out.sent, out.cleaned), (Stop::Done, 3, 3));
+    let notes = batch_notes(&mb);
+    assert_eq!(notes[0], (format!("batch open {NONCE}"), 0), "kept before the first forward: {notes:?}");
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    let names = steps(&mb);
+    let at = |what: &str| names.iter().position(|n| n == what).unwrap_or_else(|| panic!("no {what} in {names:?}"));
+    assert!(at(&format!("batch open {NONCE}")) < at("m365/forward.js"));
+    assert!(names.iter().rposition(|n| n == "m365/sent_cleanup.js").unwrap() < at(&format!("batch close {NONCE}")), "{names:?}");
+
+    // A cleanup that did not complete keeps the nonce: the next pass sweeps it.
+    let mut broken = fake(Provider::M365, unheld(3));
+    broken.cleanup_fails = true;
+    let cb = note_into(&broken);
+    let out = pass(&broken, &holding(&[]), &mut routine(Provider::M365), &Job { on_batch: Some(&cb), ..recover_job(Provider::M365) });
+    assert_eq!(out.sent, 3);
+    assert_eq!(batch_notes(&broken), [(format!("batch open {NONCE}"), 0)], "no close after a cleanup that failed");
+
+    // A batch that sent nothing has no copies: it is dropped at once.
+    let msgs = unheld(2);
+    let held: Vec<(String, String, i64)> = msgs.iter().map(|m| (m.sender.clone(), m.subject.clone(), m.at)).collect();
+    let held: Vec<(&str, &str, i64)> = held.iter().map(|(a, b, c)| (a.as_str(), b.as_str(), *c)).collect();
+    let quiet = fake(Provider::M365, msgs);
+    let cb = note_into(&quiet);
+    let j = job(Provider::M365, Phase::Backfill, backfill_window(NOW.div_euclid(DAY) - 5, NOW), None);
+    pass(&quiet, &holding(&held), &mut routine(Provider::M365), &Job { on_batch: Some(&cb), ..j });
+    assert_eq!(batch_notes(&quiet), [(format!("batch open {NONCE}"), 0), (format!("batch close {NONCE}"), 0)]);
+}
+
+#[test]
+fn a_leftover_nonce_is_swept_from_sent_before_the_next_batch_opens_and_nothing_else_is_deleted() {
+    let mb = fake(Provider::M365, unheld(3));
+    *mb.old_copies.borrow_mut() = vec![
+        (OLD.into(), KNOWLU.into()),
+        (OLD.into(), KNOWLU.into()),
+        (OLD.into(), KNOWLU.into()),
+        (OLD.into(), NOT_MINE.into()),
+        (OTHER.into(), KNOWLU.into()),
+    ];
+    let cb = note_into(&mb);
+    let j = Job { leftovers: vec![OLD.to_string()], on_batch: Some(&cb), ..recover_job(Provider::M365) };
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::M365), &j);
+    assert_eq!((out.stop.clone(), out.sent, out.cleaned), (Stop::Done, 3, 6), "the sweep's three and the pass's own three");
+    let first = &mb.calls("sent_cleanup.js")[0];
+    assert_eq!((first["nonce"].as_str(), first["address"].as_str()), (Some(OLD), Some(KNOWLU)));
+    let names = steps(&mb);
+    let at = |what: &str| names.iter().position(|n| n == what).unwrap_or_else(|| panic!("no {what} in {names:?}"));
+    assert!(at("open Sent") < at("m365/sent_cleanup.js") && at("m365/sent_cleanup.js") < at("m365/forward.js"), "{names:?}");
+    assert!(at("open Sent") < at("open Inbox"), "swept before the pass looks at the Inbox: {names:?}");
+    assert!(at(&format!("batch close {OLD}")) < at(&format!("batch open {NONCE}")), "{names:?}");
+    let left = mb.old_copies.borrow().clone();
+    assert_eq!(left, [(OLD.to_string(), NOT_MINE.to_string()), (OTHER.to_string(), KNOWLU.to_string())], "only our nonce to our address went");
+    // The sweep names no other nonce: every call before the pass's own is for OLD.
+    let before: Vec<_> = mb.calls("sent_cleanup.js").into_iter().take_while(|c| c["nonce"] != NONCE).collect();
+    assert!(!before.is_empty() && before.iter().all(|c| c["nonce"] == OLD));
+}
+
+#[test]
+fn the_sweep_is_bounded_and_a_sweep_that_cannot_run_keeps_its_nonce() {
+    // 200 copies: no more than SWEEP_ROWS go in one pass, and the nonce is kept for the next.
+    let mb = fake(Provider::M365, unheld(3));
+    *mb.old_copies.borrow_mut() = (0..200).map(|_| (OLD.to_string(), KNOWLU.to_string())).collect();
+    let cb = note_into(&mb);
+    let j = Job { leftovers: vec![OLD.to_string()], on_batch: Some(&cb), ..recover_job(Provider::M365) };
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::M365), &j);
+    assert_eq!((out.stop.clone(), out.sent), (Stop::Done, 3), "the pass goes on");
+    assert_eq!(200 - mb.old_copies.borrow().len(), SWEEP_ROWS as usize);
+    let notes = batch_notes(&mb);
+    assert!(!notes.iter().any(|(n, _)| n == &format!("batch close {OLD}")), "{notes:?}");
+    assert!(notes.iter().any(|(n, _)| n == &format!("batch close {NONCE}")), "{notes:?}");
+
+    // A Sent that will not open keeps the entry, and the pass still reaches Done.
+    let mb = fake(Provider::M365, unheld(3));
+    mb.sent_opens_fail.set(1);
+    *mb.old_copies.borrow_mut() = (0..3).map(|_| (OLD.to_string(), KNOWLU.to_string())).collect();
+    let cb = note_into(&mb);
+    let j = Job { leftovers: vec![OLD.to_string()], on_batch: Some(&cb), ..recover_job(Provider::M365) };
+    let out = pass(&mb, &holding(&[]), &mut routine(Provider::M365), &j);
+    assert_eq!((out.stop.clone(), out.sent, out.cleaned), (Stop::Done, 3, 3));
+    assert_eq!(mb.old_copies.borrow().len(), 3);
+    assert!(!batch_notes(&mb).iter().any(|(n, _)| n == &format!("batch close {OLD}")));
+
+    // Gmail with too little page room (the sweep's open and the pass's three): no sweep, the entry kept. With room it goes.
+    let gmail = |loads: u32| {
+        let mb = fake(Provider::Gmail, unheld(3));
+        *mb.old_copies.borrow_mut() = (0..3).map(|_| (OLD.to_string(), KNOWLU.to_string())).collect();
+        let cb = note_into(&mb);
+        let mut r = routine(Provider::Gmail).with_loads(loads);
+        let j = Job { leftovers: vec![OLD.to_string()], on_batch: Some(&cb), ..gmail_backfill() };
+        pass(&mb, &holding(&[]), &mut r, &j);
+        let closed = batch_notes(&mb).iter().any(|(n, _)| n == &format!("batch close {OLD}"));
+        let swept = mb.calls("sent_cleanup.js").iter().any(|c| c["nonce"] == OLD);
+        let left = mb.old_copies.borrow().len();
+        (closed, swept, left)
+    };
+    let tight = knowlu::mail_steps::MAX_PAGE_LOADS_PER_DAY - 7;
+    assert_eq!(gmail(tight), (false, false, 3), "three loads of room is the pass's own and no more");
+    assert_eq!(gmail(tight - 1), (true, true, 0), "one more load of room and the sweep runs");
+}
+
+#[test]
+fn a_mail_json_from_before_sent_nonces_loads_with_none_and_writes_none_until_one_opens() {
+    let dir = temp("sent-nonces-old-file");
+    let old = r#"{"keep_session":true,"last_reconcile":{"0b0e5b2c-1111-4aaa-8bbb-000000000001":"2026-10-02T10:00:40Z"},"pending_deletes":[],"turned_off":[]}"#;
+    std::fs::write(dir.join("mail.json"), old).unwrap();
+    let s = MailState::load(&dir).expect("an older file loads");
+    assert!(s.sent_nonces.is_empty() && leftovers_for(&s, A, NOW).is_empty());
+    MailState::update(&dir, |s| {
+        s.keep_session = false;
+        true
+    })
+    .unwrap();
+    assert!(!std::fs::read_to_string(dir.join("mail.json")).unwrap().contains("sent_nonces"));
+
+    // Opening a batch writes the nonce and its instant, in `dumps_value`'s bytes, and nothing that names the address.
+    note_batch(&dir, A, "n1", true, NOW);
+    let text = std::fs::read_to_string(dir.join("mail.json")).unwrap();
+    let want = knowlu_engine::ledger::dumps_value(&json!({ "sent_nonces": { A: [{ "nonce": "n1", "opened": NOW }] } }));
+    assert!(text.contains(&want[1..want.len() - 1]), "{text}");
+    assert!(!text.contains(KNOWLU));
+    assert_eq!(leftovers_for(&MailState::load(&dir).unwrap(), A, NOW + 60), ["n1"]);
+    assert!(!format!("{:?}", MailState::load(&dir).unwrap()).contains("n1"), "Debug never shows a nonce");
+
+    // Closing removes it, and the key with it.
+    note_batch(&dir, A, "n1", false, NOW + 5);
+    assert!(!std::fs::read_to_string(dir.join("mail.json")).unwrap().contains("sent_nonces"));
+
+    // At most MAX_SENT_NONCES a mailbox, the oldest dropped; another mailbox is not counted.
+    let n = MAX_SENT_NONCES + 2;
+    for i in 0..n {
+        note_batch(&dir, A, &format!("a{i}"), true, NOW + i as i64);
+    }
+    note_batch(&dir, B, "b0", true, NOW);
+    let st = MailState::load(&dir).unwrap();
+    let kept: Vec<_> = st.sent_nonces[A].iter().map(|e| e.nonce.clone()).collect();
+    assert_eq!(kept, (2..n).map(|i| format!("a{i}")).collect::<Vec<_>>());
+    assert_eq!(st.sent_nonces[B].len(), 1);
+
+    // Every write prunes the entries older than SENT_NONCE_DAYS, in every mailbox; a close of a nonce not kept writes nothing.
+    let later = NOW + SENT_NONCE_DAYS * DAY + 100;
+    note_batch(&dir, B, "b1", true, later);
+    let st = MailState::load(&dir).unwrap();
+    assert!(!st.sent_nonces.contains_key(A), "A's are past the age: {:?}", st.sent_nonces);
+    assert_eq!(st.sent_nonces[B], [SentNonce { nonce: "b1".into(), opened: later }]);
+    let before = std::fs::read_to_string(dir.join("mail.json")).unwrap();
+    note_batch(&dir, B, "never-kept", false, later);
+    assert_eq!(std::fs::read_to_string(dir.join("mail.json")).unwrap(), before);
+
+    // What a pass is handed: young entries whose nonce is 1 to 64 letters or digits.
+    let mut s = MailState::default();
+    let entry = |nonce: &str, opened: i64| SentNonce { nonce: nonce.into(), opened };
+    s.sent_nonces.insert(
+        A.to_string(),
+        vec![entry("good1", NOW), entry("", NOW), entry("has space", NOW), entry(&"x".repeat(65), NOW), entry("old", NOW - SENT_NONCE_DAYS * DAY - 1), entry(&"y".repeat(64), NOW)],
+    );
+    assert_eq!(leftovers_for(&s, A, NOW), ["good1".to_string(), "y".repeat(64)]);
+    assert!(leftovers_for(&s, B, NOW).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -3492,6 +3711,34 @@ fn an_open_backfill_resumes_at_launch() {
 }
 
 #[test]
+fn a_quit_mid_backfill_leaves_its_nonce_in_mail_json_and_the_resume_sweeps_it_first() {
+    let r = open_backfill_rig("sent-nonce-resume", 2);
+    MailState::update(&r.dir, |s| {
+        s.sent_nonces.insert(A.to_string(), vec![SentNonce { nonce: OLD.into(), opened: NOW - 100 }]);
+        true
+    })
+    .unwrap();
+    // What mail.json holds when the first forward runs: the old nonce is already swept and this pass's is kept.
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let (h, dir) = (held.clone(), r.dir.clone());
+    r.host.lock().unwrap().on_script = Some(Arc::new(move |name| {
+        if name == "gmail/forward.js" {
+            let st = MailState::load(&dir).unwrap();
+            h.lock().unwrap().push(st.sent_nonces.get(A).map(|v| v.iter().map(|e| e.nonce.clone()).collect::<Vec<_>>()));
+        }
+    }));
+    let shared = r.setups.start_resume(r.dir.clone(), vec![A.to_string()], r.env()).expect("a resume started");
+    assert_eq!(wait(&shared).ended, Some("finished"));
+    let first = r.calls("gmail/sent_cleanup.js").into_iter().next().expect("Sent was cleaned");
+    assert_eq!((first["nonce"].as_str(), first["address"].as_str()), (Some(OLD), Some(KNOWLU)));
+    let scripts = r.scripts();
+    let at = |what: &str| scripts.iter().position(|n| n == what).unwrap_or_else(|| panic!("no {what} in {scripts:?}"));
+    assert!(at("gmail/sent_cleanup.js") < at("gmail/forward.js"), "{scripts:?}");
+    assert_eq!(*held.lock().unwrap().first().expect("a forward ran"), Some(vec![NONCE.to_string()]));
+    assert!(MailState::load(&r.dir).unwrap().sent_nonces.is_empty(), "every nonce was cleaned and dropped");
+}
+
+#[test]
 fn an_open_backfill_resumes_again_as_its_pace_allows() {
     let r = open_backfill_rig("t113-pace", 3);
     let env = r.env();
@@ -5122,6 +5369,24 @@ fn mail_disconnect_removes_every_per_mailbox_entry_for_that_mailbox_and_no_other
     ] {
         assert_eq!(keys, [B], "{name}");
     }
+}
+
+#[test]
+fn mail_disconnect_drops_that_mailboxs_sent_nonces_and_no_other() {
+    let r = rig("disconnect-sent-nonces");
+    profile(&r.dir, &format!("mail-session-{A}"));
+    MailState::update(&r.dir, |s| {
+        for id in [A, B] {
+            s.sent_nonces.insert(id.to_string(), vec![SentNonce { nonce: OLD.into(), opened: NOW - 60 }]);
+        }
+        true
+    })
+    .unwrap();
+    let svc = disc_service(&r, "m365", 200);
+    assert_eq!(disconnect(&r, &svc)["ok"], json!(true));
+    let st = MailState::load(&r.dir).unwrap();
+    assert_eq!(st.sent_nonces.keys().cloned().collect::<Vec<_>>(), [B]);
+    assert_eq!(st.sent_nonces[B].len(), 1);
 }
 
 #[test]
