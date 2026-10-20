@@ -1349,6 +1349,48 @@ fn both_sign_in_paths_record_the_consent() {
     }
 }
 
+/// Every top-level `fn` in `src` with the code under it, comment lines dropped so a name in prose is
+/// never a call: the reading `no_test_in_this_file_can_reach_the_compiled_in_project` uses.
+fn top_level_fns(src: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in src.lines() {
+        let name = ["pub fn ", "fn "]
+            .iter()
+            .find_map(|p| line.strip_prefix(p))
+            .map(|r| r.split(['(', '<']).next().unwrap_or("").trim().to_string())
+            .filter(|n| !n.is_empty());
+        if let Some(n) = name {
+            out.push((n, String::new()));
+        }
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        if let Some(last) = out.last_mut() {
+            last.1.push_str(line);
+            last.1.push('\n');
+        }
+    }
+    out
+}
+
+/// L4 (plan §4.4, Q-ACCEPT): Accept re-sends the sign-in's consent through `record_consent_at`, the
+/// one writer of a `consents` row, and no function writes one any other way: the consent route is
+/// named only by that writer and by the read, `consent_status_at`, which only ever GETs.
+#[test]
+fn accepting_the_privacy_update_writes_consent_only_through_record_consent_at() {
+    let src = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let fns = top_level_fns(&src);
+    let body = |name: &str| {
+        fns.iter().find(|(n, _)| n == name).map(|(_, b)| b.clone()).unwrap_or_else(|| panic!("account.rs has no fn {name}"))
+    };
+    assert!(body("accept_privacy_at").contains("record_consent_at("), "accept_privacy_at must record through record_consent_at");
+    let mut naming: Vec<&str> = fns.iter().filter(|(_, b)| b.contains("/account/consent")).map(|(n, _)| n.as_str()).collect();
+    naming.sort();
+    assert_eq!(naming, ["consent_status_at", "record_consent_at"], "only the writer and the read name the consent route");
+    let read = body("consent_status_at");
+    assert!(read.contains(".get(") && !read.contains("post"), "the read only GETs: {read}");
+}
+
 /// **F2.** `google_sign_in` now takes the attestation the page's checkbox stands for, and refuses on
 /// it the same way `send_magic_link` does — the belt the C1 static test used to describe is back.
 /// The order is the point: the check must be the first thing the function does, before `api_base()`,
@@ -1397,6 +1439,436 @@ fn the_checkout_retries_the_consent_first_and_a_failed_retry_still_reaches_strip
     assert_eq!(out.expect("a checkout link"), "https://checkout.example.invalid/c/cs_1");
     assert!(seen[0].starts_with("POST /functions/v1/account/consent "), "the retry comes first: {}", seen[0]);
     assert!(seen[1].starts_with("POST /functions/v1/billing-checkout "), "{}", seen[1]);
+}
+
+// ---- L4: the recorded privacy version, its cache, the gate and Accept (plan §4.4) ----
+//
+// The read and Accept's core take `(api_base, token)` and read nothing process-global, so their tests
+// need neither `CREDMAN_LOCK` nor the `ApiBase` seam. The tests over a vault read Credential Manager
+// at a generated target and reach `cloud_config`, which reads `api_base()`, so they hold both.
+use knowlu::account::{
+    accept_privacy_at, consent_status_at, load_privacy_cache, privacy_cache_path, privacy_gate, save_privacy_cache,
+    PrivacyCache, PrivacyGate, PRIVACY_VERSION, TOS_VERSION,
+};
+
+/// A fresh scratch folder standing in for a profile's app-data folder.
+fn privacy_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("knowlu-privacy-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn privacy_cache(account_id: &str, recorded: Option<&str>) -> PrivacyCache {
+    PrivacyCache { account_id: account_id.into(), recorded: recorded.map(str::to_string), checked_at: "2026-10-20T12:00:00Z".into() }
+}
+
+/// What the route answers: the recorded pair.
+fn consent_reply(privacy: &str) -> String {
+    format!(r#"{{"tos_version":"{TOS_VERSION}","privacy_version":"{privacy}"}}"#)
+}
+
+/// A loopback listener that answers nothing and counts every connection made to it, whatever its
+/// method or path, for a test whose claim is that nothing was sent. It drains its backlog before it
+/// stops, so a connection the call under test made is counted even if it was never served.
+struct Counting {
+    port: u16,
+    hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Counting {
+    fn start() -> Self {
+        use std::sync::atomic::Ordering::SeqCst;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        listener.set_nonblocking(true).expect("nonblocking listener");
+        let port = listener.local_addr().expect("addr").port();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (h, s) = (hits.clone(), stop.clone());
+        let handle = std::thread::spawn(move || loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    h.fetch_add(1, SeqCst);
+                    drop(stream);
+                }
+                Err(_) if s.load(SeqCst) => break,
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        });
+        Counting { port, hits, stop, handle: Some(handle) }
+    }
+
+    fn base(&self) -> String {
+        format!("http://127.0.0.1:{}/functions/v1", self.port)
+    }
+
+    fn finish(mut self) -> usize {
+        self.halt();
+        self.hits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn halt(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for Counting {
+    fn drop(&mut self) {
+        self.halt();
+    }
+}
+
+/// `GET /account/consent` with the session's bearer: the recorded version, and the route's `null` as
+/// `None`.
+#[test]
+fn consent_status_at_reads_the_recorded_privacy_version_and_a_null() {
+    let (base, handle) = loopback(vec![
+        (200, consent_reply("2026-09-24")),
+        (200, r#"{"tos_version":null,"privacy_version":null}"#.to_string()),
+    ]);
+    let api = format!("{base}/functions/v1");
+    let got = [consent_status_at(&api, "the-access-token"), consent_status_at(&api, "the-access-token")];
+    assert_eq!(got, [Ok(Some("2026-09-24".to_string())), Ok(None)]);
+    for seen in &handle.join().expect("server thread") {
+        assert!(seen.starts_with("GET /functions/v1/account/consent HTTP/1.1\r\n"), "{seen}");
+        assert!(seen.to_ascii_lowercase().contains("\r\nauthorization: bearer the-access-token\r\n"), "{seen}");
+    }
+}
+
+/// A refusal is the service's own sentence (the functions' one error shape), never a bare status; a
+/// function deployed before L4's route answers 405, which is a refusal too. A 2xx that does not carry
+/// the version as a string or a null is an error, never `None`: `None` reads as "older", and a reply
+/// that said nothing must not raise the panel.
+#[test]
+fn consent_status_at_names_a_refusal_and_never_reads_a_reply_without_the_version_as_null() {
+    let (base, handle) = loopback(vec![
+        (404, r#"{"error":"no such account"}"#.to_string()),
+        (405, r#"{"error":"method not allowed; use POST"}"#.to_string()),
+        (200, r#"{"tos_version":"2026-09-10"}"#.to_string()),
+        (200, r#"{"tos_version":"2026-09-10","privacy_version":20260924}"#.to_string()),
+        (200, "not json".to_string()),
+    ]);
+    let api = format!("{base}/functions/v1");
+    let got: Vec<_> = (0..5).map(|_| consent_status_at(&api, "the-access-token")).collect();
+    let unreadable = Err("the consent reply could not be read".to_string());
+    assert_eq!(
+        got,
+        [
+            Err("no such account".to_string()),
+            Err("method not allowed; use POST".to_string()),
+            unreadable.clone(),
+            unreadable.clone(),
+            unreadable,
+        ]
+    );
+    handle.join().expect("server thread");
+}
+
+/// `check_api_base` comes first: a plain-`http` base that is not the `127.0.0.1` test seam is refused
+/// with its sentence, and the listener behind it is never reached.
+#[test]
+fn consent_status_at_refuses_a_plain_http_base_before_any_request() {
+    let svc = Counting::start();
+    let base = format!("http://localhost:{}/functions/v1", svc.port);
+    assert_eq!(consent_status_at(&base, "the-access-token"), Err(format!("{base}: an api_base must be https://")));
+    assert_eq!(svc.finish(), 0, "nothing was sent");
+}
+
+/// Only a definite "older" holds anything back (§5 Q-GATE). Equal to or later than this build's
+/// version is `Accepted`; earlier, null, and a value that is not a real `YYYY-MM-DD` day are `Older`;
+/// no file, a file that does not read, and another account's file are `Unknown`.
+#[test]
+fn the_privacy_gate_holds_back_only_on_a_definite_older_answer() {
+    let dir = privacy_dir("gate");
+    let gate_for = |recorded: Option<&str>| {
+        save_privacy_cache(&dir, &privacy_cache("acc-1", recorded)).expect("save");
+        privacy_gate(load_privacy_cache(&dir).as_ref(), "acc-1")
+    };
+    assert_eq!(gate_for(Some(PRIVACY_VERSION)), PrivacyGate::Accepted, "equal");
+    assert_eq!(gate_for(Some("9999-12-31")), PrivacyGate::Accepted, "later");
+    assert_eq!(gate_for(Some("2000-01-01")), PrivacyGate::Older, "earlier");
+    assert_eq!(gate_for(None), PrivacyGate::Older, "null");
+    for bad in ["not a date", "9999-99-99", "9999-02-30", "99999-01-01", "2099-1-01", "2099-01-01T00:00:00Z", ""] {
+        assert_eq!(gate_for(Some(bad)), PrivacyGate::Older, "{bad:?} is not a YYYY-MM-DD day");
+    }
+    let path = privacy_cache_path(&dir);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(privacy_gate(load_privacy_cache(&dir).as_ref(), "acc-1"), PrivacyGate::Unknown, "no file");
+    let checked = r#""checked_at":"2026-10-20T12:00:00Z""#;
+    for unreadable in [
+        "{".to_string(),
+        format!(r#"{{"account_id":"acc-1",{checked}}}"#),
+        format!(r#"{{"account_id":"acc-1","recorded":20991231,{checked}}}"#),
+        format!(r#"{{"recorded":"2099-01-01",{checked}}}"#),
+    ] {
+        std::fs::write(&path, &unreadable).unwrap();
+        assert_eq!(privacy_gate(load_privacy_cache(&dir).as_ref(), "acc-1"), PrivacyGate::Unknown, "{unreadable}");
+    }
+    save_privacy_cache(&dir, &privacy_cache("acc-2", Some(PRIVACY_VERSION))).unwrap();
+    assert_eq!(privacy_gate(load_privacy_cache(&dir).as_ref(), "acc-1"), PrivacyGate::Unknown, "another account's");
+    assert_eq!(privacy_gate(load_privacy_cache(&dir).as_ref(), "acc-2"), PrivacyGate::Accepted);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `privacy.json` in the profile's folder, beside `entitlement.json`: the three keys and nothing
+/// else, through `ledger::dumps_value` like every JSON this app writes, renamed into place so no
+/// `.tmp` is left behind.
+#[test]
+fn the_privacy_cache_round_trips_with_its_three_keys_and_leaves_no_tmp() {
+    let dir = privacy_dir("cache");
+    assert_eq!(privacy_cache_path(&dir), dir.join("privacy.json"));
+    assert!(load_privacy_cache(&dir).is_none(), "a fresh profile has no privacy cache");
+    for recorded in [Some(PRIVACY_VERSION), None] {
+        let c = privacy_cache("acc-1", recorded);
+        save_privacy_cache(&dir, &c).expect("save");
+        assert_eq!(load_privacy_cache(&dir).as_ref(), Some(&c));
+        let text = std::fs::read_to_string(privacy_cache_path(&dir)).unwrap();
+        let want = serde_json::json!({ "account_id": "acc-1", "recorded": recorded, "checked_at": "2026-10-20T12:00:00Z" });
+        assert_eq!(text, knowlu_engine::ledger::dumps_value(&want), "the three keys, and nothing else");
+        let names: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        assert_eq!(names, ["privacy.json"], "no .tmp left behind");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// R-C1c-final-5's argument for `entitlement.json` holds here: the launch's read and a slot's check
+/// can overlap, so each save's `.tmp` name is its own and neither writer can consume the other's.
+#[test]
+fn overlapping_privacy_cache_saves_never_leave_no_cache_at_all() {
+    let dir = privacy_dir("race");
+    for round in 0..100u32 {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2u32)
+            .map(|i| {
+                let (dir, barrier) = (dir.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let c = PrivacyCache {
+                        account_id: format!("acc-{i}"),
+                        recorded: Some(PRIVACY_VERSION.to_string()),
+                        checked_at: format!("2026-10-20T12:{:02}:00Z", round % 60),
+                    };
+                    barrier.wait();
+                    save_privacy_cache(&dir, &c)
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().expect("an overlapping save must still succeed");
+        }
+        assert!(load_privacy_cache(&dir).is_some(), "round {round}: the cache must end up present and readable");
+    }
+    let names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+    assert_eq!(names, ["privacy.json"], "no .tmp left behind");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Accept (§5 Q-ACCEPT) posts the body every sign-in and the Checkout retry already send, then reads
+/// back, and caches what the service read back.
+#[test]
+fn accept_posts_the_sign_in_consent_then_caches_the_version_the_service_reads_back() {
+    let dir = privacy_dir("accept-ok");
+    let (base, handle) = loopback(vec![(200, r#"{"ok":true}"#.to_string()), (200, consent_reply(PRIVACY_VERSION))]);
+    let out = accept_privacy_at(&format!("{base}/functions/v1"), "the-access-token", "acc-1", &dir);
+    let seen = handle.join().expect("server thread");
+    assert_eq!(out, serde_json::json!({ "ok": true, "error": null, "recorded": PRIVACY_VERSION }));
+    assert!(seen[0].starts_with("POST /functions/v1/account/consent HTTP/1.1\r\n"), "{}", seen[0]);
+    let body = seen[0].split("\r\n\r\n").nth(1).expect("a body");
+    let sent: serde_json::Value = serde_json::from_str(body).expect("a JSON body");
+    assert_eq!(sent, serde_json::json!({ "tos_version": TOS_VERSION, "privacy_version": PRIVACY_VERSION, "age_attested": true }));
+    assert!(seen[1].starts_with("GET /functions/v1/account/consent HTTP/1.1\r\n"), "the read-back is second: {}", seen[1]);
+    for s in &seen {
+        assert!(s.to_ascii_lowercase().contains("\r\nauthorization: bearer the-access-token\r\n"), "{s}");
+    }
+    let c = load_privacy_cache(&dir).expect("the cache was written");
+    assert_eq!((c.account_id.as_str(), c.recorded.as_deref()), ("acc-1", Some(PRIVACY_VERSION)));
+    assert!(c.checked_at.parse::<jiff::Timestamp>().is_ok(), "checked_at is a time: {}", c.checked_at);
+    assert_eq!(privacy_gate(Some(&c), "acc-1"), PrivacyGate::Accepted);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The cache is written from the read-back, never from the request: a service that answers the POST
+/// 200 and still holds the old version (a function deployed before L4, whose second call is the
+/// silent 200) has not recorded an accept, and the cache says `Older`.
+#[test]
+fn an_accept_the_service_did_not_record_is_not_ok_and_the_cache_says_older() {
+    let dir = privacy_dir("accept-older");
+    let (base, handle) = loopback(vec![(200, r#"{"ok":true}"#.to_string()), (200, consent_reply("2000-01-01"))]);
+    let out = accept_privacy_at(&format!("{base}/functions/v1"), "the-access-token", "acc-1", &dir);
+    handle.join().expect("server thread");
+    assert_eq!(out["ok"], false, "{out}");
+    assert_eq!(out["recorded"], "2000-01-01", "{out}");
+    assert!(out["error"].as_str().is_some_and(|e| !e.is_empty()), "{out}");
+    let c = load_privacy_cache(&dir).expect("written from the read-back");
+    assert_eq!(c.recorded.as_deref(), Some("2000-01-01"));
+    assert_eq!(privacy_gate(Some(&c), "acc-1"), PrivacyGate::Older);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A refused POST makes no read and leaves the cache byte for byte; its error is the service's.
+#[test]
+fn a_refused_accept_reads_nothing_back_and_leaves_the_cache_as_it_was() {
+    let dir = privacy_dir("accept-refused");
+    save_privacy_cache(&dir, &privacy_cache("acc-1", Some("2000-01-01"))).unwrap();
+    let before = std::fs::read(privacy_cache_path(&dir)).unwrap();
+    let (base, handle) = loopback(vec![(500, r#"{"error":"the consent route is down"}"#.to_string())]);
+    let out = accept_privacy_at(&format!("{base}/functions/v1"), "the-access-token", "acc-1", &dir);
+    assert_eq!(handle.join().expect("server thread").len(), 1);
+    assert_eq!(out, serde_json::json!({ "ok": false, "error": "the consent route is down", "recorded": null }));
+    assert_eq!(std::fs::read(privacy_cache_path(&dir)).unwrap(), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A scratch vault whose `config/cloud.yaml` names `api_base` and the session `target`, and its
+/// profile's app-data folder (not created: the cache write creates it).
+#[cfg(windows)]
+fn privacy_vault(tag: &str, api_base: &str, target: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let vault = std::env::temp_dir().join(format!("knowlu-privacy-vault-{tag}-{}", std::process::id()));
+    let data = std::env::temp_dir().join(format!("knowlu-privacy-vault-{tag}-data-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(vault.join("config")).unwrap();
+    std::fs::write(
+        vault.join("config").join("cloud.yaml"),
+        format!("api_base: '{api_base}'\nanon_key: 'the-vaults-anon-key'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n"),
+    )
+    .unwrap();
+    (vault, data)
+}
+
+/// A live session (an hour left, so nothing is refreshed) under `target`, the profile's bearer.
+#[cfg(windows)]
+fn save_a_live_session(target: &str) {
+    use knowlu::account::{save_session, Session};
+    let live = jiff::Timestamp::now().as_second() + 3600;
+    let s = Session { access_token: "the-profiles-token".into(), refresh_token: "rt".into(), expires_at: live, email: "a@example.invalid".into() };
+    save_session(target, "acc-1", &s).expect("write the profile's session");
+}
+
+/// The scheduler's call (plan §4.4, review r1 I1): the session is looked for at the target the vault's
+/// `cloud.yaml` names before any request, and with nothing there the answer is the fixed `no session`,
+/// nothing is sent, and the cache stays byte for byte (or absent, if there was none).
+#[cfg(windows)]
+#[test]
+fn refresh_privacy_with_no_session_sends_nothing_and_leaves_the_cache() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::refresh_privacy;
+    let target = format!("knowlu/test-privacy-nosession-{}-{}/session", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    assert!(!knowlu::credentials::exists(&target), "nothing must be there to begin with");
+    let svc = Counting::start();
+    let base = svc.base();
+    let _api = ApiBase::set(&base);
+    let (vault, data) = privacy_vault("nosession", &base, &target);
+    save_privacy_cache(&data, &privacy_cache("acc-1", Some("2000-01-01"))).unwrap();
+    let before = std::fs::read(privacy_cache_path(&data)).unwrap();
+
+    assert_eq!(refresh_privacy(&vault, &data), Err("no session".to_string()));
+    assert_eq!(std::fs::read(privacy_cache_path(&data)).unwrap(), before, "the cache is as it was");
+    std::fs::remove_file(privacy_cache_path(&data)).unwrap();
+    assert_eq!(refresh_privacy(&vault, &data), Err("no session".to_string()));
+    assert!(!privacy_cache_path(&data).exists(), "no cache is created");
+    assert_eq!(svc.finish(), 0, "nothing was sent");
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// With a session, the refresh reads the route with the profile's bearer and writes the cache from
+/// the reply, over a cache another account left (which the gate read as `Unknown`).
+#[cfg(windows)]
+#[test]
+fn refresh_privacy_writes_the_cache_from_the_reply_over_another_accounts() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::refresh_privacy;
+    let target = format!("knowlu/test-privacy-refresh-{}-{}/session", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    save_a_live_session(&target);
+    let (base, handle) = loopback(vec![(200, consent_reply("2000-01-01"))]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    let (vault, data) = privacy_vault("refresh", &api_base, &target);
+    save_privacy_cache(&data, &privacy_cache("acc-2", Some(PRIVACY_VERSION))).unwrap();
+    assert_eq!(privacy_gate(load_privacy_cache(&data).as_ref(), "acc-1"), PrivacyGate::Unknown);
+
+    let got = refresh_privacy(&vault, &data);
+    let seen = handle.join().expect("server thread");
+    assert_eq!(got, Ok(PrivacyGate::Older));
+    assert!(seen[0].starts_with("GET /functions/v1/account/consent HTTP/1.1\r\n"), "{}", seen[0]);
+    assert!(seen[0].to_ascii_lowercase().contains("\r\nauthorization: bearer the-profiles-token\r\n"), "{}", seen[0]);
+    let c = load_privacy_cache(&data).expect("the cache was written");
+    assert_eq!((c.account_id.as_str(), c.recorded.as_deref()), ("acc-1", Some("2000-01-01")));
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// The panel's one call per launch (plan §4.4, §4.6): `needs_accept` is `true` only when the service
+/// answered older; a refusal is `ok: false` with `needs_accept: null` and leaves the cache; and a
+/// vault with no account is the upgrade overlay's case, `needs_accept: false`, with nothing sent.
+#[cfg(windows)]
+#[test]
+fn privacy_status_needs_accept_only_when_the_service_answers_older() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::privacy_status_in;
+    let target = format!("knowlu/test-privacy-status-{}-{}/session", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    save_a_live_session(&target);
+    let (base, handle) = loopback(vec![
+        (200, consent_reply("2000-01-01")),
+        (200, consent_reply(PRIVACY_VERSION)),
+        (404, r#"{"error":"no such account"}"#.to_string()),
+    ]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    let (vault, data) = privacy_vault("status", &api_base, &target);
+    let answer = |ok: bool, error: Option<&str>, recorded: Option<&str>, needs: Option<bool>| {
+        serde_json::json!({ "ok": ok, "error": error, "current": PRIVACY_VERSION, "recorded": recorded, "needs_accept": needs })
+    };
+
+    assert_eq!(privacy_status_in(&vault, &data), answer(true, None, Some("2000-01-01"), Some(true)));
+    assert_eq!(privacy_status_in(&vault, &data), answer(true, None, Some(PRIVACY_VERSION), Some(false)));
+    let before = std::fs::read(privacy_cache_path(&data)).unwrap();
+    assert_eq!(privacy_status_in(&vault, &data), answer(false, Some("no such account"), None, None));
+    assert_eq!(std::fs::read(privacy_cache_path(&data)).unwrap(), before, "a refusal leaves the cache");
+    for s in &handle.join().expect("server thread") {
+        assert!(s.starts_with("GET /functions/v1/account/consent HTTP/1.1\r\n"), "{s}");
+        assert!(s.to_ascii_lowercase().contains("\r\nauthorization: bearer the-profiles-token\r\n"), "{s}");
+    }
+    std::fs::remove_file(vault.join("config").join("cloud.yaml")).unwrap();
+    assert_eq!(privacy_status_in(&vault, &data), answer(true, None, None, Some(false)), "no account: the overlay's case");
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// The command's half of Accept: the vault's own session and account id, never the pending ones.
+#[cfg(windows)]
+#[test]
+fn accept_privacy_uses_the_vaults_session_and_account() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::accept_privacy_in;
+    let target = format!("knowlu/test-privacy-accept-{}-{}/session", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    save_a_live_session(&target);
+    let (base, handle) = loopback(vec![(200, r#"{"ok":true}"#.to_string()), (200, consent_reply(PRIVACY_VERSION))]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    let (vault, data) = privacy_vault("accept", &api_base, &target);
+
+    let out = accept_privacy_in(&vault, &data);
+    let seen = handle.join().expect("server thread");
+    assert_eq!(out, serde_json::json!({ "ok": true, "error": null, "recorded": PRIVACY_VERSION }));
+    assert!(seen[0].starts_with("POST /functions/v1/account/consent HTTP/1.1\r\n"), "{}", seen[0]);
+    for s in &seen {
+        assert!(s.to_ascii_lowercase().contains("\r\nauthorization: bearer the-profiles-token\r\n"), "{s}");
+    }
+    let c = load_privacy_cache(&data).expect("the cache was written");
+    assert_eq!((c.account_id.as_str(), c.recorded.as_deref()), ("acc-1", Some(PRIVACY_VERSION)));
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data);
 }
 
 /// **Review finding 1.** The deadline used to be tested only inside the `WouldBlock` arm, so a peer

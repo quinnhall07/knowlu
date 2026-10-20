@@ -1171,6 +1171,227 @@ pub fn checkout_url_at(api_base: &str, token: &str, plan: &str) -> Result<String
     post_for_url(api_base, "/billing-checkout", token, &json!({ "plan": plan, "terms_version": TOS_VERSION }))
 }
 
+// ---- L4: the recorded privacy version, its cache, the gate and Accept (plan §4.4) ----
+//
+// An account that accepted an older `PRIVACY_VERSION` is asked once per launch, by the console's
+// panel, to accept this build's; until it does, the scheduler names the slot's cloud steps as skips.
+// This section is the read (`GET /account/consent`), the per-profile cache of its answer, the pure
+// gate over that cache, and Accept, which re-sends the sign-in's consent and caches what the service
+// reads back. `PRIVACY_VERSION` itself moves only in the bump commit, with the page.
+
+/// The answer when a 2xx from the consent route does not say which privacy version is recorded.
+const CONSENT_REPLY_UNREADABLE: &str = "the consent reply could not be read";
+
+/// The answer when the consent route's read-back still shows an older version after Accept's POST.
+const PRIVACY_NOT_RECORDED: &str = "the account service did not record the privacy update";
+
+/// The answer when the vault's session target holds nothing. Fixed, because the scheduler names it
+/// as the reason its privacy check failed.
+const NO_SESSION: &str = "no session";
+
+/// `GET /account/consent`: the privacy version the account has recorded, or `None` when the route
+/// answers `null`. Only the bearer is sent, and the reply is bounded, as [`post_authed`] does both.
+/// A refusal is the service's own sentence ([`provider_error`]) and a transport failure starts with
+/// [`UNREACHABLE`]. A 2xx that does not carry `privacy_version` as a string or a null is an error,
+/// never `None`: `None` reads as "older", and a reply that said nothing must not raise the panel.
+/// No token and no reply body reaches an error.
+pub fn consent_status_at(api_base: &str, token: &str) -> Result<Option<String>, String> {
+    check_api_base(api_base)?;
+    let mut res = agent()
+        .get(&format!("{}/account/consent", api_base.trim_end_matches('/')))
+        .header("authorization", &format!("Bearer {token}"))
+        .call()
+        .map_err(|e| format!("{UNREACHABLE} ({e})"))?;
+    let status = res.status().as_u16();
+    let text = res.body_mut().with_config().limit(1 << 16).read_to_string().map_err(|e| e.to_string())?;
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    if !(200..300).contains(&status) {
+        return Err(provider_error(status, &v));
+    }
+    match v.get("privacy_version") {
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(Value::Null) => Ok(None),
+        _ => Err(CONSENT_REPLY_UNREADABLE.to_string()),
+    }
+}
+
+/// What `privacy.json` holds: whose answer it is, the version the service said the account has
+/// recorded (`None` for its `null`), and when this machine read it (RFC 3339, UTC, to the second).
+/// Written only from a reply the service gave, never from a request. It lives in the profile's
+/// app-data folder: never synced, never in the vault, never in telemetry. None of the three keys is a
+/// new data class: the account id is already in `config/cloud.yaml` and `entitlement.json`, the
+/// version is a date the page publishes, and `checked_at` is the time of the read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivacyCache {
+    pub account_id: String,
+    pub recorded: Option<String>,
+    pub checked_at: String,
+}
+
+/// Beside `entitlement.json`, a file of its own for [`cache_path`]'s reason.
+pub fn privacy_cache_path(data_dir: &std::path::Path) -> std::path::PathBuf { data_dir.join("privacy.json") }
+
+/// Read key by key, so a file missing a key, or carrying one of the wrong type, does not read at all
+/// (`None`, which the gate reads as `Unknown`). A derived reader would take a missing `recorded` as
+/// `None`, and that is "older" from a file the service never answered.
+pub fn load_privacy_cache(data_dir: &std::path::Path) -> Option<PrivacyCache> {
+    let text = std::fs::read_to_string(privacy_cache_path(data_dir)).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let recorded = match v.get("recorded")? {
+        Value::Null => None,
+        Value::String(s) => Some(s.clone()),
+        _ => return None,
+    };
+    Some(PrivacyCache {
+        account_id: v.get("account_id")?.as_str()?.to_string(),
+        recorded,
+        checked_at: v.get("checked_at")?.as_str()?.to_string(),
+    })
+}
+
+/// Written as [`save_cache`] writes `entitlement.json`, for the same reasons: the three keys through
+/// `ledger::dumps_value`, into a `.tmp` name unique to this call (the pid and [`CACHE_TMP_COUNTER`]),
+/// then renamed into place. A reader never sees half a file, and the launch's read and a slot's check
+/// can overlap without either consuming the other's source (R-C1c-final-5). A `.tmp` whose rename
+/// failed twice is removed, not left behind.
+pub fn save_privacy_cache(data_dir: &std::path::Path, c: &PrivacyCache) -> Result<(), String> {
+    std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
+    let v = json!({ "account_id": c.account_id, "recorded": c.recorded, "checked_at": c.checked_at });
+    let bytes = knowlu_engine::ledger::dumps_value(&v);
+    let path = privacy_cache_path(data_dir);
+    let n = CACHE_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = data_dir.join(format!("privacy.json.{}-{n}.tmp", std::process::id()));
+    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&path);
+        if let Err(e2) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("privacy cache rename failed ({e}); fallback also failed: {e2}"));
+        }
+    }
+    Ok(())
+}
+
+/// What the cache says about this build's [`PRIVACY_VERSION`] for the vault's account. Only `Older`
+/// holds anything back (§5 Q-GATE, Quinn's ruling): every account records the build's version at
+/// sign-up, so for a real account "unknown" nearly always means "accepted, not yet read".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivacyGate {
+    /// The service said the account has recorded this version or a later one.
+    Accepted,
+    /// The service said the account has recorded an earlier version, none, or a value that is not a
+    /// `YYYY-MM-DD` day. The route stores only what it accepted, so the last is a service bug, and
+    /// the student must still be able to answer it.
+    Older,
+    /// Nothing this account's answer says: no cache, a cache that does not read, or another account's.
+    Unknown,
+}
+
+/// Pure: the cache, the vault's `account_id` and the compiled-in [`PRIVACY_VERSION`]. Two real
+/// `YYYY-MM-DD` days compare as strings exactly as they compare as dates.
+pub fn privacy_gate(cache: Option<&PrivacyCache>, account_id: &str) -> PrivacyGate {
+    let Some(c) = cache.filter(|c| c.account_id == account_id) else { return PrivacyGate::Unknown };
+    match c.recorded.as_deref() {
+        Some(r) if is_policy_date(r) && r >= PRIVACY_VERSION => PrivacyGate::Accepted,
+        _ => PrivacyGate::Older,
+    }
+}
+
+/// `YYYY-MM-DD` in ASCII digits, and a day the calendar has.
+fn is_policy_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b.iter().enumerate().all(|(i, c)| if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() })
+        && s.parse::<jiff::civil::Date>().is_ok()
+}
+
+/// The vault's own session token, as [`console_session`] reads it (refreshed under
+/// `SESSION_REFRESH_LOCK` by `valid_access_token_at`), with one difference the scheduler relies on:
+/// the session is looked for before anything is sent, and a target holding nothing is [`NO_SESSION`],
+/// with no request made.
+fn privacy_token(cfg: &CloudConfig) -> Result<String, String> {
+    if !crate::credentials::exists(&cfg.session_credential_target) {
+        return Err(NO_SESSION.to_string());
+    }
+    let auth = auth_base(&cfg.api_base)?;
+    valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now_unix())
+}
+
+/// One read, cached for `account_id`. A read that fails writes nothing, so the previous cache stays
+/// exactly where it was.
+fn read_privacy(api_base: &str, token: &str, account_id: &str, data_dir: &std::path::Path) -> Result<PrivacyCache, String> {
+    let recorded = consent_status_at(api_base, token)?;
+    let checked_at = jiff::Timestamp::from_second(now_unix()).map_err(|e| e.to_string())?.to_string();
+    let c = PrivacyCache { account_id: account_id.to_string(), recorded, checked_at };
+    save_privacy_cache(data_dir, &c)?;
+    Ok(c)
+}
+
+/// The scheduler's one call: [`privacy_status_in`]'s read and cache write, answered as the gate. With
+/// no session at the target the vault's `config/cloud.yaml` names, it is `Err("no session")` and
+/// nothing is sent; a read that fails leaves the cache as it was.
+pub fn refresh_privacy(vault: &std::path::Path, data_dir: &std::path::Path) -> Result<PrivacyGate, String> {
+    let cfg = cloud_config(vault)?;
+    let token = privacy_token(&cfg)?;
+    let c = read_privacy(&cfg.api_base, &token, &cfg.account_id, data_dir)?;
+    Ok(privacy_gate(Some(&c), &cfg.account_id))
+}
+
+/// `{ok, error, current, recorded, needs_accept}`. `needs_accept` is `true` only when the service
+/// answered older. A refusal or no network is `ok: false` with `recorded` and `needs_accept` null,
+/// never a guess, and the cache is left as it was. A vault with no account (no readable
+/// `config/cloud.yaml`, [`needs_account`]'s test) is the upgrade overlay's case, `needs_accept:
+/// false`, with nothing sent.
+pub fn privacy_status_in(vault: &std::path::Path, data_dir: &std::path::Path) -> Value {
+    let Ok(cfg) = cloud_config(vault) else {
+        return json!({ "ok": true, "error": Value::Null, "current": PRIVACY_VERSION, "recorded": Value::Null, "needs_accept": false });
+    };
+    match privacy_token(&cfg).and_then(|token| read_privacy(&cfg.api_base, &token, &cfg.account_id, data_dir)) {
+        Ok(c) => {
+            let needs_accept = privacy_gate(Some(&c), &cfg.account_id) == PrivacyGate::Older;
+            json!({ "ok": true, "error": Value::Null, "current": PRIVACY_VERSION, "recorded": c.recorded, "needs_accept": needs_accept })
+        }
+        Err(e) => json!({ "ok": false, "error": e, "current": PRIVACY_VERSION, "recorded": Value::Null, "needs_accept": Value::Null }),
+    }
+}
+
+/// Accept's core, split from the command as `checkout_url_at` is (§5 Q-ACCEPT): the body every sign-in
+/// and the Checkout retry already send, through [`record_consent_at`], then a read-back, and the cache
+/// written from **that** reply, never from the request. `{ok, error, recorded}`; `ok` is `true` only
+/// when the read-back is this version or later. A refused POST reads nothing back and leaves the cache.
+pub fn accept_privacy_at(api_base: &str, token: &str, account_id: &str, data_dir: &std::path::Path) -> Value {
+    let read = record_consent_at(api_base, token, TOS_VERSION, PRIVACY_VERSION)
+        .and_then(|()| read_privacy(api_base, token, account_id, data_dir));
+    match read {
+        Ok(c) if privacy_gate(Some(&c), account_id) == PrivacyGate::Accepted => {
+            json!({ "ok": true, "error": Value::Null, "recorded": c.recorded })
+        }
+        Ok(c) => json!({ "ok": false, "error": PRIVACY_NOT_RECORDED, "recorded": c.recorded }),
+        Err(e) => json!({ "ok": false, "error": e, "recorded": Value::Null }),
+    }
+}
+
+/// [`accept_privacy_at`] with the vault's own session and account id, never the pending ones.
+pub fn accept_privacy_in(vault: &std::path::Path, data_dir: &std::path::Path) -> Value {
+    match cloud_config(vault).and_then(|cfg| privacy_token(&cfg).map(|token| (cfg, token))) {
+        Ok((cfg, token)) => accept_privacy_at(&cfg.api_base, &token, &cfg.account_id, data_dir),
+        Err(e) => json!({ "ok": false, "error": e, "recorded": Value::Null }),
+    }
+}
+
+/// The console's one read per launch, for a signed-in vault: [`privacy_status_in`]. `(async)`, as
+/// every credential-touching command in this file is.
+#[tauri::command(async)]
+pub fn privacy_status(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    privacy_status_in(&cs.vault, &cs.data_dir)
+}
+
+/// The panel's Accept: [`accept_privacy_in`].
+#[tauri::command(async)]
+pub fn accept_privacy(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    accept_privacy_in(&cs.vault, &cs.data_dir)
+}
+
 /// **Continue with Google** (spec D1, D2). One loopback listener, one browser window, one exchange.
 ///
 /// Vault-less, like `google_connect_url` beside it: the session goes to [`PENDING_TARGET`], which is
