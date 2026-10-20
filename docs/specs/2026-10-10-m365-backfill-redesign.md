@@ -1,6 +1,6 @@
 # Microsoft 365 backfill, redesigned: read in the page, upload from the device
 
-**Date:** 2026-10-10, **revised 2026-10-13** for Quinn's ruling of that day. **Status: DRAFT v2 for Quinn.**
+**Date:** 2026-10-10, **revised 2026-10-13** for Quinn's ruling of that day. **Status: decisions ruled 2026-10-11/13/18; live gate closed 2026-10-18** (the header Quinn ruled in C3 Q6, session-5 ledger, 2026-10-19). **Signed by Quinn's delegated go, 2026-10-20 (session-5 ledger).**
 Nothing here is built. This note amends the signed email forwarding spec
 (`docs/specs/2026-09-30-email-forwarding-design.md`, "the spec") for one routine: "Bring in recent mail" on
 school Microsoft 365 (§4.2 step 5). The saved session's recover on Microsoft 365 (§4.11 steps 3 and 4) runs
