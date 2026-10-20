@@ -394,12 +394,20 @@ pub struct CloudModel<'a> {
     fatal: Cell<Option<&'static str>>,
     /// Paths whose reply said `capped`. Only a call to the same path short-circuits on one.
     capped: RefCell<Vec<&'static str>>,
+    /// L7: set once any tier-3 reply showed the model answering (see [`CloudModel::heard_model`]).
+    heard: Cell<bool>,
     timezone: Option<String>,
 }
 
 impl<'a> CloudModel<'a> {
     pub fn new(client: &'a CloudClient) -> CloudModel<'a> {
-        CloudModel { client, fatal: Cell::new(None), capped: RefCell::new(Vec::new()), timezone: None }
+        CloudModel {
+            client,
+            fatal: Cell::new(None),
+            capped: RefCell::new(Vec::new()),
+            heard: Cell::new(false),
+            timezone: None,
+        }
     }
 
     /// Carry the vault's own timezone name onto `/judge-email` (`cli::vault_timezone_name`), the
@@ -412,7 +420,8 @@ impl<'a> CloudModel<'a> {
         self
     }
 
-    /// Set once a call comes back 401, 402 or 403 (global: those answer every path alike), or once
+    /// Set once a call comes back 401, 402 or 403 (global: those answer every path alike), once any
+    /// reply says `unavailable: "out of credit"` (L7, also global), or once
     /// a path on [`BATCH_PATHS`] answers `capped`. `enrich` prints it as one summary line instead
     /// of fifty identical per-item lines. A capped `/judge-event` alone leaves it `None`: the event
     /// pass ends and names that cap itself (`events::judge_roster`).
@@ -423,9 +432,22 @@ impl<'a> CloudModel<'a> {
         })
     }
 
+    /// L7: whether any tier-3 reply in this run showed the model answering: a verdict, or a cause in
+    /// [`REPEATABLE_CAUSES`] (the model ran and produced no usable verdict). Only then is Knowlu's
+    /// provider known to have credit. A tier 2 or tier 0 reply, a cap, a failure and a run that made
+    /// no call all leave it `false`, because none of them says anything about the balance.
+    pub fn heard_model(&self) -> bool {
+        self.heard.get()
+    }
+
     /// The reply's `verdict`, or the error a null one means.
     ///
-    /// **`outcome` first, `cause` second** (C2 final review E-2). The service answers a null
+    /// **`unavailable` first** (L7): `unavailable: "out of credit"` is Knowlu's own provider account
+    /// and is checked before `outcome` and `cause`, so a reply carrying both it and `capped` is out
+    /// of credit. It sets `fatal`, which stops every later `/judge-*` call: unlike the cap it is
+    /// global, whatever scopes the cap to a path.
+    ///
+    /// **`outcome` next, `cause` second** (C2 final review E-2). The service answers a null
     /// verdict for three different situations and the three read nothing alike:
     ///   * `outcome: "capped"` — the account's daily judgment cap or its monthly ceiling. Nothing
     ///     failed; the answer was simply not bought, and every remaining item in this batch would
@@ -440,8 +462,16 @@ impl<'a> CloudModel<'a> {
     ///   * anything else — `outcome` itself is the fallback, because a reply that names an outcome
     ///     this build has never heard of still says more than the old literal `no verdict` did.
     fn verdict_of<'r>(&self, path: &'static str, reply: &'r Value) -> Result<&'r Value, ModelError> {
+        let tier_three = reply.get("tier").and_then(Value::as_u64).unwrap_or(3) == 3;
         if let Some(verdict) = reply.get("verdict").filter(|v| !v.is_null()) {
+            if tier_three {
+                self.heard.set(true);
+            }
             return Ok(verdict);
+        }
+        if reply.get("unavailable").and_then(Value::as_str) == Some("out of credit") {
+            self.fatal.set(Some(judge::OUT_OF_CREDIT_LABEL));
+            return Err(ModelError::OutOfCredit);
         }
         let outcome = reply.get("outcome").and_then(Value::as_str).unwrap_or_default();
         if outcome == "capped" {
@@ -450,6 +480,11 @@ impl<'a> CloudModel<'a> {
                 capped.push(path);
             }
             return Err(ModelError::Capped);
+        }
+        if tier_three
+            && reply.get("cause").and_then(Value::as_str).is_some_and(|c| REPEATABLE_CAUSES.contains(&c))
+        {
+            self.heard.set(true);
         }
         let cause = reply
             .get("cause")
@@ -461,6 +496,11 @@ impl<'a> CloudModel<'a> {
 
     pub(crate) fn call(&self, path: &str, body: &Value) -> Result<Value, ModelError> {
         if let Some(reason) = self.fatal.get() {
+            // L7: out of credit keeps its own kind of error, so the second item onward is not
+            // logged as a plain failure for something the first item named.
+            if reason == judge::OUT_OF_CREDIT_LABEL {
+                return Err(ModelError::OutOfCredit);
+            }
             return Err(ModelError::Failed(format!("the judgment service: {reason}")));
         }
         // C2 final review E-2: the short-circuit must carry the SAME kind of error the first
@@ -564,6 +604,9 @@ impl judge::EventModel for CloudModel<'_> {
             // A spent cap answers every remaining item identically and must stay retryable
             // tomorrow — never recorded as if the event itself had been considered.
             Err(ModelError::Capped) => Err(ModelError::Capped),
+            // L7: out of credit is global and not a judgment of the event: never rescued as
+            // `unsure`, so the uid is asked again once the provider is back.
+            Err(ModelError::OutOfCredit) => Err(ModelError::OutOfCredit),
             // Final review item 1: `judge_pipeline.ts` answers a provider outage as HTTP 200 with
             // `cause: "model failed"`. Recording that as `unsure` would bury every event judged
             // during the outage for good, so only a repeatable cause is rescued.
@@ -672,6 +715,9 @@ pub struct GmailPull {
     pub items: Vec<GmailItem>,
     pub more: bool,
     pub deferred: u64,
+    /// L7: the service's `went_quiet` flag — a connected Gmail in which it has found no mail for a
+    /// week. `None` when the reply carries no such key or a non-boolean one (an older server).
+    pub went_quiet: Option<bool>,
 }
 
 pub fn pull_gmail_queue(
@@ -730,7 +776,8 @@ pub fn pull_gmail_queue(
             judgment_id: judgment_id_of(row),
         });
     }
-    Ok(GmailPull { items: out, more, deferred })
+    let went_quiet = reply.get("went_quiet").and_then(Value::as_bool);
+    Ok(GmailPull { items: out, more, deferred, went_quiet })
 }
 
 // ---------------------------------------------------------------------------
@@ -1313,5 +1360,99 @@ mod tests {
         assert_eq!(requests.len(), 1, "only the task's request left the device: {requests:?}");
         assert!(requests[0].contains("/judge-task"), "{requests:?}");
         assert!(answer.is_err(), "an Err, never an unsure verdict, so the uid stays pending: {answer:?}");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // L7 (named issues): out of credit is a global stop, and the heard flag.
+    // -----------------------------------------------------------------------------------------
+
+    fn dead_client() -> CloudClient {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        client_at(format!("http://127.0.0.1:{port}/functions/v1"))
+    }
+
+    /// `unavailable` is read before `outcome` and `cause`: a reply carrying both it and `capped` is
+    /// out of credit, it sets `fatal` to the label, and no path is remembered as capped.
+    #[test]
+    fn unavailable_is_read_before_the_cap_and_sets_fatal() {
+        let client = dead_client();
+        for reply in [
+            json!({ "verdict": null, "outcome": "low confidence", "cause": "model failed", "unavailable": "out of credit" }),
+            json!({ "verdict": null, "outcome": "capped", "unavailable": "out of credit" }),
+        ] {
+            let model = CloudModel::new(&client);
+            assert_eq!(model.verdict_of(TASK_PATH, &reply), Err(ModelError::OutOfCredit), "{reply}");
+            assert_eq!(model.fatal(), Some(judge::OUT_OF_CREDIT_LABEL));
+            assert!(model.capped.borrow().is_empty(), "it is not a cap");
+            assert!(!model.heard_model());
+        }
+        // An older server's reply, and a word this build does not know, read as before.
+        let model = CloudModel::new(&client);
+        let plain = json!({ "verdict": null, "outcome": "low confidence", "cause": "model failed" });
+        assert!(matches!(model.verdict_of(TASK_PATH, &plain), Err(ModelError::Failed(_))));
+        let other = json!({ "verdict": null, "outcome": "capped", "unavailable": "something else" });
+        assert_eq!(model.verdict_of(TASK_PATH, &other), Err(ModelError::Capped));
+        assert_eq!(model.fatal(), Some(judge::CAPPED_LABEL));
+    }
+
+    /// After out of credit, every call on every path returns `OutOfCredit` and makes no request (the
+    /// client points at a closed port: a request would surface as a `Failed` transport error).
+    #[test]
+    fn the_short_circuit_returns_out_of_credit_without_a_request() {
+        let client = dead_client();
+        let model = CloudModel::new(&client);
+        let reply = json!({ "verdict": null, "unavailable": "out of credit" });
+        assert_eq!(model.verdict_of(EMAIL_PATH, &reply), Err(ModelError::OutOfCredit));
+        for path in [TASK_PATH, EVENT_PATH, EMAIL_PATH] {
+            assert_eq!(model.call(path, &json!({})), Err(ModelError::OutOfCredit), "{path}");
+        }
+    }
+
+    /// The heard flag: a tier-3 verdict, or a tier-3 cause that is a judgment, sets it. A tier 2
+    /// reply, a failure, a cap and out of credit do not.
+    #[test]
+    fn only_a_tier_three_answer_counts_as_hearing_the_model() {
+        let client = dead_client();
+        let verdict = json!({ "course": "cs-100" });
+        let cases = [
+            (json!({ "verdict": verdict, "tier": 3 }), true),
+            (json!({ "verdict": verdict, "tier": 2 }), false),
+            (json!({ "verdict": null, "tier": 3, "outcome": "low confidence", "cause": "below floor" }), true),
+            (json!({ "verdict": null, "tier": 3, "outcome": "low confidence", "cause": "truncated" }), true),
+            (json!({ "verdict": null, "tier": 2, "outcome": "low confidence", "cause": "below floor" }), false),
+            (json!({ "verdict": null, "tier": 3, "outcome": "low confidence", "cause": "model failed" }), false),
+            (json!({ "verdict": null, "tier": 3, "outcome": "capped" }), false),
+            (json!({ "verdict": null, "tier": 3, "unavailable": "out of credit" }), false),
+        ];
+        for (reply, heard) in cases {
+            let model = CloudModel::new(&client);
+            let _ = model.verdict_of(TASK_PATH, &reply);
+            assert_eq!(model.heard_model(), heard, "{reply}");
+        }
+        assert!(!CloudModel::new(&client).heard_model(), "a run that made no call heard nothing");
+    }
+
+    /// `went_quiet` is read as a boolean; absent and non-boolean values are `None`.
+    #[test]
+    fn went_quiet_is_a_boolean_or_none() {
+        for (value, want) in [
+            (Some(json!(true)), Some(true)),
+            (Some(json!(false)), Some(false)),
+            (None, None),
+            (Some(json!("yes")), None),
+            (Some(json!(1)), None),
+            (Some(Value::Null), None),
+        ] {
+            let mut body = json!({ "items": [], "read": 0, "quiet": false, "more": false });
+            if let Some(v) = &value {
+                body["went_quiet"] = v.clone();
+            }
+            let (base, handle) = counting_loopback(vec![crate::ledger::dumps_value(&body)]);
+            let pull = pull_gmail_queue(&client_at(base), &[], None).expect("a pull");
+            assert_eq!(pull.went_quiet, want, "{value:?}");
+            handle.join().expect("the listener thread did not panic");
+        }
     }
 }

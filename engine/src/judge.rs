@@ -175,17 +175,26 @@ pub enum ModelError {
     /// judgment cap or its monthly budget ceiling. Its own variant, not a `Failed` carrying those
     /// words, because it is the one model error that is not a fault and must not be logged as one.
     Capped,
+    /// L7: the service answered `unavailable: "out of credit"` — Knowlu's own provider account, not
+    /// the student's. Global (every judge path stops, unlike the per-path cap) and not a fault of
+    /// the item: `judge_task` treats it as the service being unavailable.
+    OutOfCredit,
 }
 
 /// The one sentence this crate uses for a spent cap, in both the per-item error and the batch's
 /// summary line. A closed-set literal: nothing here came from a server body.
 pub const CAPPED_LABEL: &str = "the daily judgment cap";
 
+/// The same for Knowlu's provider account being out of credit (L7). Read inside the summary line
+/// `judge: the service answered {label}, so the rest of the batch was not sent`.
+pub const OUT_OF_CREDIT_LABEL: &str = "out of credit on Knowlu's side";
+
 impl std::fmt::Display for ModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ModelError::Failed(m) => write!(f, "{m}"),
             ModelError::Capped => write!(f, "the judgment service: {CAPPED_LABEL}"),
+            ModelError::OutOfCredit => write!(f, "the judgment service: {OUT_OF_CREDIT_LABEL}"),
         }
     }
 }
@@ -504,6 +513,9 @@ pub fn judge_task(
                 cause: LowCause::Capped,
             }
         }
+        // L7: Knowlu's provider is out of credit. Tier 1's work is still written, the flag stays set,
+        // and the log says `service unavailable`; the next slot asks again.
+        Err(ModelError::OutOfCredit) => return Outcome::ServiceUnavailable(seed),
         Err(e) => {
             return Outcome::LowConfidence { seed, why: e.to_string(), cause: LowCause::ModelFailed }
         }
@@ -794,6 +806,17 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// L7: out of credit is the service being unavailable, so tier 1's work is kept, the log says
+    /// `service unavailable`, and the item is asked again next slot.
+    #[test]
+    fn out_of_credit_is_a_service_unavailable_outcome() {
+        let m = Scripted { reply: std::sync::Mutex::new(Err(ModelError::OutOfCredit)), calls: std::sync::Mutex::new(0) };
+        let out = judge_task(&item("Homework 3"), &heur(), &NoRules, Ok(&m));
+        assert!(matches!(out, Outcome::ServiceUnavailable(_)), "{out:?}");
+        assert_eq!(m.calls(), 1);
+        assert_eq!(ModelError::OutOfCredit.to_string(), "the judgment service: out of credit on Knowlu's side");
     }
 
     /// A course the model invented is dropped. A slug that is not in the vault's own course map
