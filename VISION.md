@@ -2,8 +2,8 @@
 
 What Knowlu is and must stay, so near-term decisions don't foreclose it. **Check every design against
 this file.** It states what holds now; how each point was decided lives in
-`docs/specs/2026-09-09-knowlu-cloud-design.md` (signed, with its amendments; the latest, of
-2026-09-29, signed 2026-09-29), the product and business plan
+`docs/specs/2026-09-09-knowlu-cloud-design.md` (signed, with its amendments; the latest signed,
+Amendment 2026-10-18, signed 2026-10-20 by Quinn's delegated go), the product and business plan
 (`docs/notes/2026-09-01-product-and-business-plan.md`, "the plan"), and git history.
 
 ## The promise
@@ -85,9 +85,12 @@ is wrong.
 - **Grades from the LMS grade page and from homework platforms** (zyBooks, VHL, Pearson, McGraw-Hill
   Connect and the like), fetched on the device with the student's own sign-in; manual entry fills any
   gap.
-- **Syllabi, uploaded by the student** at onboarding and whenever a term starts: class meetings, exam
-  dates, grade weights and the grading scale. Uploading a file is not typing; everything Knowlu reads
-  from one is shown for the student to confirm.
+- **Syllabi**, found in the LMS or the school's syllabus system, or added by the student, at
+  onboarding and whenever a term starts: class meetings, exam and quiz dates, assignment due dates,
+  grade weights and the grading scale, office hours, and the late-work, makeup and attendance
+  policies (shown, and the late-work rule proposed as a change to the course note). Uploading a file
+  is not typing; everything Knowlu reads from one is shown for the student to confirm, and office
+  hours are shown, not proposed.
 - **Calendars**: Google Calendar and Outlook / Microsoft 365, read-only. **Email**: any mailbox that can forward, through the student's own private Knowlu address (school Microsoft 365 and personal Gmail set up automatically, others with guided steps), and Gmail directly by Google's permission. *(amended 2026-09-30, email spec A7, signed by Quinn)*
 - **Campus event feeds**, judged against the student's level, role and interests.
 - **The registrar**, where a school offers it, through the school's own sign-in window.
@@ -147,11 +150,13 @@ other calendars or anyone else's events; changing those stays a proposal.
 - **A Windows desktop app**, Rust + Tauri, OS-native webview. No web app and no mobile app, and
   nothing builds toward either. A phone may follow once the desktop product is proven; that takes a new signed amendment. The account carries a student between desktops. Base app under 50 MB,
   ideally under 20.
-- **One edition: $9.99 a month, an account required**, no free tier, a 7-day trial. An academic-year
-  price is kept as an option; billing pauses June to August.
-- **Onboarding creates the vault** under `%USERPROFILE%\Knowlu\` and asks for sign-ins, nothing
-  else; syllabus upload joins it with the syllabus and GPA phase (Build order). It is judged by one
-  thing: a new student reaches "it already knows what's next" in their first session.
+- **One edition: $9.99 a month, an account required**, no free tier, a 7-day trial. A 6-month term
+  at $39.99 is the other option; Pell Grant recipients pay 75% less ($2.49 a month or $9.99 a term).
+  Monthly billing pauses June to August. *(amended 2026-10-16, the cloud design's Amendment
+  2026-10-16, signed by Quinn)*
+- **Onboarding creates the vault** under `%USERPROFILE%\Knowlu\` and asks for sign-ins; it then
+  looks for each course's syllabus in the LMS and, where it finds none, offers the school's syllabus
+  system or the student's own file. It is judged by one thing: a new student reaches "it already knows what's next" in their first session.
 - **Minimize the AI surface.** Most capabilities need no model. Classification over generation,
   schema-constrained output on every call, and a rule-promotion loop that retires model calls into
   rules as patterns repeat. The model's job keeps shrinking to the residue rules cannot decide.
@@ -200,7 +205,9 @@ Work moves in four stages, each named for what the student gets (the cloud desig
 2026-09-29, ruling 10): **MVP → Pilot → Launch → Beyond**.
 
 **The MVP is everything the founder's own system (quinn-ops) did, plus grades from Blackboard,**
-proven on the founder's own scratch profile before anyone else uses it:
+proven first on the founder's own scratch profile, then given to friends, who test it free on a
+comp grant the founder pays for *(amended 2026-10-20, the cloud design's Amendment 2026-10-18,
+signed by Quinn's delegated go)*:
 
 - today's page: the ordered list with start-by dates and slack, must-do work against the day's
   capacity, recommended work in the day's gaps, the schedule, coming-up events, and the
@@ -213,18 +220,24 @@ proven on the founder's own scratch profile before anyone else uses it:
 - runs and failures visible in the app;
 - **grades per course from Blackboard**, as the rings and their breakdowns.
 
-**The pilot** is a few undergraduates other than the founder, on the released app, one computer
-each, needing nothing from anyone. It adds the registrar where the school offers it (the
-commitment model's phase 3). No one else signs up before the privacy page names the kept
-Blackboard sign-in, the saved mail sign-in and the grades the account holds, a lawyer has read it, the re-consent a second
+**The pilot** is about 30 undergraduates other than the founder, on the released app, one computer
+each, needing nothing from anyone. The registrar is built in the MVP for the first school Knowlu
+supports; the pilot adds it at other schools that offer it (the commitment model's phase 3).
+*(amended 2026-10-20: the size is the cloud design's Amendment 2026-10-16b, signed by Quinn; the
+registrar is its Amendment 2026-10-18; worded under Quinn's delegated go)* No one else signs up, friends included, before the privacy page names the kept
+Blackboard sign-in, the saved mail sign-in and the grades the account holds, the re-consent a second
 account needs is in the app, and a new vault records its student with the neutral token `student`
-rather than the founder's name (the full gate: the cloud design's ruling 10). Until Knowlu has 20 paying users, the kept Blackboard sign-in and the saved mail sign-in are offered at every school without waiting for that school's policy to be read; at the 20th paying user the founder rules on the reads again (the cloud design's Amendment 2026-09-30, A13). *(amended 2026-09-30, email spec A13, signed by Quinn)*
+rather than the founder's name (the full gate: the cloud design's ruling 10, as its Amendment 2026-10-18
+rewords it). For friends that page is an interim one that no lawyer has read (privacy bump #1, the
+cloud design's Amendment 2026-10-19); a lawyer reads it before the first pilot student, and the
+version the lawyer read asks every tester to accept it again. *(amended 2026-10-20, the cloud
+design's Amendment 2026-10-18, signed by Quinn's delegated go)* Until Knowlu has 20 paying users, the kept Blackboard sign-in and the saved mail sign-in are offered at every school without waiting for that school's policy to be read; at the 20th paying user the founder rules on the reads again (the cloud design's Amendment 2026-09-30, A13). *(amended 2026-09-30, email spec A13, signed by Quinn)* The pilot's students do not pay; from its start, students outside it may buy Knowlu at a discounted price without an announcement, ahead of the official launch in fall 2027. *(amended 2026-10-16, the cloud design's Amendment 2026-10-16b, signed by Quinn)*
 
 **Launch** is any US undergraduate paying $9.99, on every desktop they use: the relay fetch and
 two-desktop sync ship before it.
 
 **Beyond, in phases**, each through spec, plan and review: the main page (domain strip, free time,
-all clear, today's schedule); syllabus upload with grade weights, GPA and exam prep; quick
+all clear, today's schedule); GPA and exam prep; quick
 capture; nudges and lock-in; the assistant; the Outlook calendar and more homework platforms; the dedicated
 calendar in Google and Outlook.
 
@@ -233,10 +246,10 @@ calendar in Google and Outlook.
 | Decision | Status |
 |---|---|
 | How grades are read from each LMS and platform, and the legal and terms-of-service read on it | Open; Blackboard first |
-| How a syllabus is read (a model extracting to a confirmed schema is the likely shape) | Open |
+| How a syllabus is read | Decided (syllabus spec, 2026-10-19): fetched on the device, screened by rule, extracted by one pinned model to a strict schema, every result confirmed by the student |
 | The assistant's flows, and whether light study tips pass the "never does the work" line in practice | Open; spec before code |
 | Lock-in mode and the exact nudge rules | Open |
 | Writing the dedicated calendar (`calendar.events` on Google, the Outlook equivalent) | Later; needs a new consent and a privacy-page update |
 | Co-founder | Unowned, and the only open decision with no next action |
-| Legal read on scraping and minors | Landscape written (`docs/notes/2026-09-09-knowlu-cloud-legal-landscape.md`); a lawyer before the first non-founder paid sign-up |
+| Legal read on scraping and minors | Landscape written (`docs/notes/2026-09-09-knowlu-cloud-legal-landscape.md`); a lawyer before the first non-founder paid sign-up, which is now the quiet release's first outside sign-up (the cloud design's Amendment 2026-10-16b) |
 | The repository's visibility | Public since 2026-09-29 (Quinn: develop in the open now, go private later; no scrub for now; the cloud design's Amendment 2026-09-29, ruling 13). The fixtures and history carry real coursework titles and a few personal paths. Returning it to private is a Launch decision |

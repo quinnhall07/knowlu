@@ -11,7 +11,7 @@
 | # | Decision | Consequence |
 |---|---|---|
 | D1 | **Build on the cloud, both meanings, CI first.** Releases are built and signed by CI; the backend is hosted. | Plan C0 (CI) is the first plan. The laptop leaves the release path; the updater keypair is regenerated and exists only in CI secrets. |
-| D2 | **No free tier. One edition. $9.99/month. An account is required.** | The entitlement seam becomes "subscription active", checked at launch and cached; the "free tier runs with zero cloud calls" line in VISION is struck. |
+| D2 | **No free tier. One edition. $9.99/month. An account is required.** *(amended 2026-10-16: a $39.99 6-month term replaces the academic-year price, and Pell Grant recipients pay 75% less; see the amendment at the end)* | The entitlement seam becomes "subscription active", checked at launch and cached; the "free tier runs with zero cloud calls" line in VISION is struck. |
 | D3 | **All three judgments — enrichment, event verdicts, email triage — run in the cloud. No local runs.** Cheapest models that do the job. | Plan 3a's llama.cpp runtime, install UI and digest table are removed (C4). The judge *seam* stays; its tier 3 becomes an HTTP call to our service. |
 | D4 | **The deterministic, offline-capable core stays in the app; everything that depends on the internet moves to the cloud — as much as possible.** *(amended 2026-09-17 — see the amendment at the end)* | The app keeps: vault, ranking, capacity, rendering, journal, scheduler, the deterministic parsers' *input fetch* for credentialed portals (§4.3). The cloud gets: accounts, entitlement, judgment, email ingestion, event feeds, sync, analytics, updates. |
 | D5 | **Analytics:** (a) interaction events and (b) corrections to AI judgments, collected automatically under the ToS; (c) raw content only behind a separate opt-in; issue reports carry diagnostic context. | §6. Gmail-derived content is excluded from (c) by Google policy regardless of opt-in (§9). |
@@ -339,7 +339,7 @@ Quinn's word, 2026-09-09: **R3 — keep both** the academic-year price and the J
 |---|---|---|
 | R1 | Start the Google verification track in C1 week 1 — domain, privacy policy, consent screen, demo video — so it is not on C2's critical path | yes (default) |
 | R2 | A 7-day free trial on the $9.99 plan (card up front, cancel any time) — the first-session moment is the retention lever and a wall before it costs more than a week of inference | yes (default) |
-| R3 | Keep the $69.99/academic-year price and the June–August pause as Stripe options | **both kept — Quinn, 2026-09-09.** The pause is the one thing nobody else does; it halves summer revenue and that cost is accepted. Implemented as a Stripe `pause_collection` schedule (C1) |
+| R3 | Keep the $69.99/academic-year price and the June–August pause as Stripe options | **both kept — Quinn, 2026-09-09.** *(amended 2026-10-16: the academic-year price is replaced by a $39.99 6-month term; the pause stands; see the amendment at the end)* The pause is the one thing nobody else does; it halves summer revenue and that cost is accepted. Implemented as a Stripe `pause_collection` schedule (C1) |
 | R4 | Client-side encryption of note bodies in sync (account-derived key) | yes (default); it forecloses server-side search we do not need *(amended 2026-09-17 — see the amendment at the end)* — **reversed** |
 | R5 | Global rules (cross-account promotion on shared campus sources) reviewed by hand before activation | yes (default) |
 | R6 | Staging Supabase project + test Stripe from day one | yes (default) |
@@ -574,10 +574,17 @@ signed.
    dedicated "Knowlu" calendar inside the student's Google or Outlook account and never edits their
    other calendars. Until that piece is specced, the commitment model's Q3 (Google Calendar stays
    `calendar.readonly`) and C9 (no write-back) stand.
-5. **Syllabi are uploaded by the student**, at onboarding and each term: class meetings, exam dates,
-   grade weights and scale, everything confirmed by the student. This amends the commitment model's
-   Q2 ("login-only… typing is a last resort") to "sign-ins and syllabi"; typing stays the last resort.
-   (This holds from the syllabus phase, in Beyond; until then onboarding asks for sign-ins only.)
+5. **Syllabi are read for the student**, at onboarding and each term: class meetings, exam and quiz
+   dates, assignment due dates, grade weights and scale, office hours, and the late-work, makeup and
+   attendance policies (shown, and the late-work rule proposed as a change to the course note).
+   Knowlu looks for each course's syllabus in the LMS first; where it finds none, it offers the
+   school's syllabus system, where one is curated, or the student's own file or pasted text. Meetings
+   are proposed as commitments, dates as tasks and exams, weights and scale as a change to the course
+   note; office hours are shown, not proposed; the student confirms everything else. This amends the
+   commitment model's Q2 ('login-only… typing is a last resort') to 'sign-ins and syllabi'; typing
+   class times stays the last resort. *(amended 2026-10-19, syllabus spec rulings 1 and 2, the spec
+   signed by Quinn 2026-10-19; applied by Quinn's delegated go, 2026-10-20 (session-5 ledger); the
+   policies by the spec's Q34 and Q35, ruled by Quinn 2026-10-19)*
 6. **Audience:** undergraduates first; graduate students are served by the same product.
 7. **Grades and GPA** join the product: per-course rings, a term GPA with an uncertainty band, a
    projected cumulative GPA on request; read from the LMS grade page and homework platforms on the
@@ -594,19 +601,24 @@ signed.
     next begins; Beyond has no stage-wide gate. The C-series closes at C3′ and stays as history: no
     C-number is issued again and none is renumbered.
     - **MVP:** quinn-ops parity plus grades from Blackboard (item 9), proven on a founder-owned
-      scratch profile and test account on staging, with no second person. It holds commitment-model
+      scratch profile and test account on staging, with no second person *(amended 2026-10-18: then
+      given to friends to test free, and it gains five of the Pilot's items; see the amendment at the
+      end)*. It holds commitment-model
       phases 1–2, M1 grades, Gmail connect in the app, email by the forwarding (the receiver, automatic setup for school Microsoft 365 and personal Gmail, backfill to the term's start, the canary and "source went quiet" for forwarded mailboxes, and the saved sign-in's reconcile and recover) *(amended 2026-09-30, email forwarding to Knowlu)*, events (required events enter the plan as a one-off commitment; accept and decline) *(amended 2026-09-29, events spec Q1: enter the plan as
       a one-off commitment, signed by Quinn)*, body and profile editing, each small parity item done or cut, and UA's university-policy read (ruling 12) *(suspended until 20 paying users: Amendment 2026-09-30, A13)*. *Exit:* the parity audit re-run shows no open row; ~~Quinn has recorded UA's read;~~ the founder's grades proof has passed through the app's real gate on a dev build ~~from the proof branch that carries UA's date~~ (Quinn is a UA student and the MVP's only user; ruling 12's date-and-bump rule); the founder's forwarding proof (the email spec's §12.6) has passed on a dev build against staging *(amended 2026-09-30, email forwarding to Knowlu)*; and Quinn says "MVP reached". Exit does not need UA's date on main. ~~The MVP's grades proof therefore waits on Quinn recording UA's read.~~ *(suspended until 20 paying users: Amendment 2026-09-30, A13)*
     - **Pilot:** a few undergraduates other than the founder, on the released app, one computer
-      each, needing nothing from anyone. It holds production parity (HANDOFF §4 less the two-desktop
+      each, needing nothing from anyone. *(amended 2026-10-18: production parity, the interim privacy
+      bump #1 with the re-consent screen, the UA registrar, runtime removal and the 402 and "source
+      went quiet" issues are built in the MVP; the lawyer read stays here; see the amendment at the
+      end)* It holds production parity (HANDOFF §4 less the two-desktop
       proof); v0.1.1 built by CI; privacy bump #1 with one lawyer read and the re-consent screen
       (R-PS-4); the UA registrar (commitment phase 3, item 3's consequence); removal of the local
       model runtime (`runtime.rs`, `inference.rs`, `SUPPORTED_RUNTIMES`, the wizard offer); the OpenRouter 402 and Gmail's "source went quiet" shown as issues (email forwarding's is the MVP's) *(amended 2026-09-30, email forwarding to Knowlu)*; `calendar.readonly` verification
       submitted; the university-policy read for each pilot student's university other than UA, whose read is done at MVP exit (ruling 12) *(suspended until 20 paying users: Amendment 2026-09-30, A13)*. *Entry:* Quinn sets the number of students and
       their universities, the length, a measure drawn from VISION's successes 1, 2, 5 and 6, and
-      whether pilot students pay; if they do,
+      whether pilot students pay *(amended 2026-10-16b: the 30 pilot students do not pay; students outside the pilot may buy Knowlu from its start; see the amendment at the end)*; if they do,
       VISION's gate "a lawyer before the first non-founder paid sign-up" moves from Launch to Pilot
-      entry. *Gate:* no non-founder account exists before these ship: the re-consent screen (R-PS-4);
+      entry. *Gate (reworded 2026-10-18; the text in force is the amendment at the end):* no non-founder account exists before these ship: the re-consent screen (R-PS-4);
       privacy bump #1 (`PRIVACY_VERSION` moved, with the page naming ruling 12's session and the
       grades the account holds, after its lawyer read); and item 11. And no pilot student uses ruling 12's kept Blackboard session before the policy read for that student's own university is done; a student whose university's read is not done joins without grades from Blackboard. The app enforces this half (ruling 12): Connect is offered, and a capture runs, only where the curated campus row records the read. *(suspended until 20 paying users: Amendment 2026-09-30, A13)*
     - **Launch:** any US undergraduate can pay $9.99 and use more than one desktop. It holds C5, the
@@ -620,7 +632,8 @@ signed.
     This amends ruling 5 of 2026-09-17 ("all of it ships before the pilot … C3′ → C5 → C4 → the
     pilot"): C5 and the two-desktop stream, with its proof, move from before the pilot to before
     Launch. C4 is not a phase any more; its rows are spread across the stages above (Gmail connect
-    to the MVP; runtime removal, re-consent, 402 and "source went quiet" to the Pilot; the
+    to the MVP; runtime removal, re-consent, 402 and "source went quiet" to the Pilot *(amended
+    2026-10-18: on to the MVP)*; the
     telemetry (c) toggle, the widening checklist (less the policy reads done in the MVP and the
     Pilot, ruling 12) and the functions domain to Launch; the Calendar-API origin split to
     Beyond). HANDOFF §4's step (5) two-desktop proof moves to Launch. The instruction
@@ -747,6 +760,81 @@ Authority: `docs/specs/2026-09-30-email-forwarding-design.md` §10 (items A1–A
 
 **Ruling 12 of Amendment 2026-09-29 is suspended until 20 paying users (A13).** Quinn (2026-09-30): "change both to allow. We'll keep the school sign-in and mail sign-in for now. Once we have 20 paying users, we'll come back to this." The five passages of ruling 12 and the passages of ruling 10 and §11a's grades row that depend on it carry the marker; the text above shows the replacements in place. The grades spec's §4 and proof lines and VISION's pilot paragraph carry the same ruling.
 
+## Amendment 2026-10-16 — the price: a 6-month term and a Pell price (Quinn's rulings of 2026-10-16) — **SIGNED by Quinn, 2026-10-16**
+
+Authority: Quinn's rulings in the Levitetz seed grant session of 2026-10-16, recorded in §3b of the
+funding note (`2026-09-29-funding-and-seed-grant.md`; the margin check is there). That note is a private
+note, kept off the repository because it holds personal details. The signature's record in the
+repository is `HANDOFF.md` §2's paragraph "The two signed edits of 2026-10-16", which names this
+amendment. As with the earlier amendments, the body of this spec is not rewritten; the markers on D2
+and R3 point here.
+
+> **The price (Quinn's rulings of 2026-10-16).** (1) **$9.99 a month stays.** (2) **The academic-year
+> price ($69.99) is replaced by a 6-month term at $39.99**, renewing every 6 months until cancelled;
+> kept at 6 months rather than a semester for simplicity. (3) **Pell Grant recipients pay 75% less:
+> $2.49 a month or $9.99 a term** ("Pell students pay for a whole term what everyone else pays for a
+> month"). It is a price, not a free tier: D2's "no free tier" and "one edition" stand. (4) **Eligibility
+> is proved by uploading the Pell award letter**, checked once a year. (5) **Prices stay out of grant
+> applications**; the Levitetz Q20 carries the Pell sentence without numbers. The 7-day trial (R2)
+> and the June–August pause stand; the pause stays monthly-only, as R3's billing job already rules
+> for the academic-year plan, because a term already prices its months in.
+
+**The margin check behind (3).** At a conservative $0.60 per student per month to serve plus Stripe's
+2.9% + $0.30, the Pell monthly price keeps about 61% and the Pell term about 58% (the 50% line is
+about $1.91 and $8.28). If the real cost doubles, the Pell term falls to about 14%; the pilot measures
+the real cost, and the Pell term price is revisited if it runs above about $0.80.
+
+**Open, decided before the Pell price ships:** what Knowlu keeps from the award letter. The
+recommendation is to keep only "verified through" and the award year, deleting the letter once it is
+checked; whatever is kept is named on the privacy page first.
+
+**Consequences (not done by this amendment).** Every surface that names $69.99 or an academic-year
+plan changes to the term before the next release: `site/index.html`, `site/terms.html` (a terms
+change), the app's subscribe step (`app/static/index.html`, `console.js`), `billing-checkout`'s
+`academic_year` plan and Stripe price, `billing-jobs`' `priceOf` and its yearly reminder, and their
+tests. The Pell price is new work: a spec for the upload, the check, the Stripe prices and the
+annual re-check.
+
+## Amendment 2026-10-16b — the quiet release during the pilot (Quinn's rulings of 2026-10-16) — **SIGNED by Quinn, 2026-10-16**
+
+Authority: Quinn's rulings in the Levitetz seed grant session of 2026-10-16, recorded in §3b of the
+funding note (`2026-09-29-funding-and-seed-grant.md`), a private note kept off the repository because it
+holds personal details. The signature's record in the repository is `HANDOFF.md` §2's paragraph "The
+two signed edits of 2026-10-16", which names this amendment. It amends ruling 10's stage order
+(Amendment 2026-09-29) without rewriting it; the marker on the Pilot's entry points here.
+
+> **Paying students before Launch (Quinn's rulings of 2026-10-16).** (1) **The pilot is about 30
+> students, and they do not pay.** This answers the Pilot entry's "whether pilot students pay". (2)
+> **From the pilot's start (spring 2027), students outside the pilot may buy Knowlu at a discounted
+> price**, without an announcement: a quiet release to build funds and early users. (3) **The official
+> launch is fall 2027.** Launch's "for the student" line ("any US undergraduate can pay $9.99 and use
+> Knowlu on more than one desktop") and its holdings are otherwise unchanged; until Launch, a paying
+> student outside the pilot gets what a pilot student gets: the released app, one computer.
+> Quinn (2026-10-16): "if we have a working product, why not silently release it and build some
+> funds and fans so we can do a big official launch for the Fall?"
+
+**Gate: no one outside the pilot is charged before these are done.** This is the Launch work that
+paying strangers make due early; the rest of Launch stays where it is.
+- Everything the Pilot's own gate requires (the re-consent screen, privacy bump #1 after its lawyer
+  read, item 11).
+- **VISION's "a lawyer before the first non-founder paid sign-up" moves here**, to the first outside
+  sign-up: the lawyer reads the terms as well as the privacy page.
+- Kentucky sales-tax registration; Stripe in live mode; the installer signed (Azure, §4); the
+  terms (`site/terms.html`) carrying the Amendment 2026-10-16 prices.
+- The 100-user cap on `gmail.readonly` before verification is accepted for the quiet release;
+  students past it use email forwarding.
+- A13's trigger is unchanged and may now arrive during the pilot: at the 20th paying user, the
+  founder rules on the university-policy reads again.
+
+**Open, decided before the first outside sign-up (Quinn's call):**
+- **The discounted price** (the amount, and whether it ends at the official launch). The Pell
+  price of Amendment 2026-10-16 applies on top or instead, to be stated.
+- **An LLC.** The 2026-09-29 ruling was to hold off until something requires one; charging
+  strangers is that point (personal liability, and the terms need a named seller). Recommended:
+  form it before the first outside charge.
+- **A cap on outside sign-ups during the pilot.** Recommended: about 50, so support for strangers
+  does not crowd out the pilot.
+
 ## Amendment 2026-10-19 — privacy bump #1 is L4's interim bump (Quinn's ruling of 2026-10-19) — **SIGNED by Quinn, 2026-10-19**
 
 > **L4's interim privacy bump is "privacy bump #1"** (Quinn, 2026-10-19; the session-5 ledger,
@@ -754,6 +842,150 @@ Authority: `docs/specs/2026-09-30-email-forwarding-design.md` §10 (items A1–A
 > connect (§6, Q8), email forwarding (§7, D18), M2 editing (§5) and grades (§11) specs assign to bump
 > #1, without a lawyer read. The lawyer read stays a before-Pilot item.
 
-This records one part of the 2026-10-18 rulings (`HANDOFF.md` §4, "Sign Amendment 2026-10-18");
-the rest of that amendment (ruling 10's Gate rewording and the lanes moved into the MVP) is not
-written or signed here. The body above and the four specs are not rewritten.
+This records one part of the 2026-10-18 rulings (`HANDOFF.md` §4, "Sign Amendment 2026-10-18").
+The rest of them (ruling 10's Gate reworded, and the items moved into the MVP) is Amendment
+2026-10-18, below. The body above and the four specs are not rewritten.
+
+## Amendment 2026-10-18 — the friends' MVP: ruling 10's Gate reworded, five Pilot items built in the MVP (Quinn's rulings of 2026-10-18) — **SIGNED by Quinn's delegated go, 2026-10-20 (session-5 ledger)**
+
+**Authority.** Quinn's rulings of 2026-10-18, made in the MVP planning sitting. Each is a dated
+"QUINN RULING (MVP planning)" row of 2026-10-18 in `.superpowers/sdd/2026-09-30-email-forwarding/progress.md`.
+They are gathered in §1 of the session-5 start-here file
+(`.superpowers/handoffs/2026-10-18-START-HERE-session-5-mvp.md`), and `HANDOFF.md` §2–§3 applied them
+the same day. **The signature** is Quinn's standing go of 2026-10-20, 19:35Z, quoted in full: "whatever
+you need my permission for, go for it". It is the RULING row of 2026-10-20 in
+`.superpowers/sdd/2026-10-18-session-5/progress.md`, and it covers every item held for Quinn's word in
+session 5. This amendment was one of those items (`HANDOFF.md` §4, "Sign Amendment 2026-10-18"). So
+the signature is the controller's, under that go; it is not Quinn's own words. Every ruling below is
+Quinn's, quoted from its row, and the amendment adds none, except one: the `VISION.md` wording under
+"Ruled under the delegated go", below, which is the recommended option taken under the same go and is
+marked as such. As with the earlier amendments, the body
+of this spec is not rewritten. The markers on ruling 10's MVP and Pilot entries, its *Gate* and its
+C4 paragraph point here.
+
+> **The friends' MVP (Quinn's rulings of 2026-10-18).**
+> (1) **The finish line.** Quinn: "I just need an MVP that I can give to friends for testing. The time
+> between MVP and pilot will be spent getting it to v1." The row: "an MVP Quinn can give to friends
+> for testing: wave-1 features merged, production parity, a CI-built release installed and updating".
+> (2) **Friends get the app free:** "no purchase; Quinn pays their usage (comp entitlement)".
+> (3) **The lawyer read is "a before-Pilot concern, not a now concern"**: "First, let's just get this
+> working and up."
+> (4) **An honest privacy page now:** `site/privacy.html` says what the app does today,
+> `PRIVACY_VERSION` moves so testers accept it, and the re-consent screen is built now, so that the
+> lawyer-read version re-prompts everyone before the Pilot.
+> (5) **The MVP scope extras:** "runtime removal (ruling 10), named issues for OpenRouter 402 / Gmail
+> source-went-quiet, and a tester list + usage view (comp a named friend, see per-tester usage/cost on
+> prod)".
+> (6) **Friends get an unsigned CI release** (a SmartScreen click-through). Azure Trusted Signing
+> waits for the paid release.
+
+**What changes in ruling 10.**
+
+*The MVP.* It is still proven first on a founder-owned scratch profile and test account on staging.
+It is then given to friends: non-founder accounts that test it free, under a comp entitlement Quinn
+pays for (rulings (1) and (2)). From the Pilot's list it gains five items:
+- **production parity** (`HANDOFF.md` §4's checklist, less the two-desktop proof; lane L9), from
+  ruling (1);
+- **privacy bump #1 as L4's interim bump**, with no lawyer read (Amendment 2026-10-19), **and the
+  re-consent screen** (R-PS-4; lane L4), from rulings (3) and (4);
+- **removal of the local model runtime** (lane L6), from ruling (5);
+- **the OpenRouter 402 and Gmail's "source went quiet" shown as issues** (lane L7), from ruling (5);
+- **the UA registrar** (commitment phase 3; lane L5a). This one follows from a separate ruling of the
+  same day: PR #19 "MERGE BEFORE L5" (the RULING row of 2026-10-18 in the session-5 ledger), and L5,
+  the syllabus lane, is a wave-1 lane. `HANDOFF.md` §2's L5a row records that the friends' release
+  carries the registrar button only if B9's live proof passes before L10's tag and L4's page carries
+  the registrar sentence.
+
+It also gains two items that no stage held before: the testers' comp entitlement with a per-tester
+usage and cost view (lane L8, `docs/specs/2026-10-18-friends-testers-design.md`), from ruling (5);
+and an unsigned CI release for friends that installs and updates (lane L10), from rulings (1) and
+(6). These rulings do not reword the MVP's *Exit*; that is an open question, below.
+
+*The Pilot.* The rest of its list stands as written, and **the lawyer read of bump #1 stays in it**:
+the lawyer-read version re-prompts every tester before the first Pilot student (rulings (3) and (4)).
+
+*The Gate*, in force from 2026-10-18 in place of ruling 10's:
+
+> No non-founder account exists before these have shipped: the re-consent screen (R-PS-4); privacy
+> bump #1 as L4's interim bump, which moves `PRIVACY_VERSION` and whose page says what the app does
+> today, including ruling 12's kept session and the grades the account holds, with no lawyer read
+> (Amendment 2026-10-19); and item 11 (done in Integrate). Friends are non-founder accounts, so the
+> Gate holds for them. The **lawyer-read version** of bump #1 gates the *Pilot*, not the friends'
+> release: it re-prompts every tester before the first Pilot student. And no pilot student uses
+> ruling 12's kept Blackboard session before the policy read for that student's own university is
+> done *(suspended until 20 paying users: Amendment 2026-09-30, A13)*.
+
+Recorded with the Gate, as an operating condition that `HANDOFF.md` already holds rather than as a new
+ruling: the secrets exposed in chat (the prod database password, the live Resend key and the
+OpenRouter key) are rolled before the first friend's account. This is `HANDOFF.md` §4's key-roll row,
+from the start-here file's §2 ("roll it before friends"). It is consistent with Quinn's ruling of
+2026-10-18 that prod access runs at L9 "as one ordered checklist (aws login, key rolls in dashboards,
+secrets pasted straight into Supabase/GitHub pages, never chat ...)" (the session-5 ledger), and L9
+runs before any friend's grant. Friends do not pay, so VISION's "a lawyer before the first non-founder
+paid sign-up" is untouched. Amendment 2026-10-16b made that line the quiet release's first outside
+sign-up.
+
+*The C4 paragraph.* Runtime removal, re-consent, the 402 and "source went quiet" move on from the
+Pilot to the MVP.
+
+**Consequences (not done by this amendment, except the `VISION.md` wording, applied with it).**
+- **`VISION.md` disagreed with this amendment in three places.** Its Build order said the MVP is
+  "proven on the founder's own scratch profile before anyone else uses it". Its pilot paragraph said
+  "It adds the registrar where the school offers it", though the UA registrar (L5a) is now built in
+  the MVP, and "No one else signs up before the privacy page names … a lawyer has read it". The same
+  paragraph's "a few undergraduates" also disagreed with Amendment 2026-10-16b's "about 30 students"
+  and is brought into line in the same edit. Changing VISION needs
+  quoted replacement text. That text is under "Ruled under the delegated go", below, and is applied to
+  `VISION.md` word for word with the marker it names. **This rule is not retroactive.** VISION's two
+  markers of 2026-10-16 (the price line, Amendment 2026-10-16; the pilot paragraph's quiet-release
+  sentence, Amendment 2026-10-16b) predate it, and neither amendment quotes VISION text. Each is carried
+  by its own signed edit, recorded in `HANDOFF.md` §2's paragraph "The two signed edits of 2026-10-16".
+- **`CLAUDE.md`:** L6's merge changed its runtime lines (PR #50, Quinn-delegated, 2026-10-20).
+  `CLAUDE.md` carries no Gate text, so no other line of it follows from this amendment.
+- **`HANDOFF.md`:** §3's *Gate* and MVP paragraphs have carried these rulings since 2026-10-18. Its §4
+  row "Sign Amendment 2026-10-18" is closed with a pointer here.
+
+**Ruled under the delegated go: the `VISION.md` wording** (the recommended option, taken under Quinn's
+delegated go, 2026-10-20 (session-5 ledger); it was this amendment's third open item). The
+replacements say what rulings (1) to (4), the UA registrar's move into the MVP above, Amendment
+2026-10-19, Amendment 2026-10-16b's pilot size and the *Gate* above already hold, and nothing more.
+The neutral `student` token sentence stays as it was. VISION names no school, so the registrar
+sentence says "the first school Knowlu supports" rather than UA. Only these sentences change:
+
+1. VISION's pointer to this spec (its opening paragraph). It was "the latest, of 2026-09-29, signed
+   2026-09-29" and becomes the following, with no marker, since it is the pointer itself:
+   > the latest signed, Amendment 2026-10-18, signed 2026-10-20 by Quinn's delegated go
+2. The Build order's MVP sentence. Its ending was "proven on the founder's own scratch profile before
+   anyone else uses it:" and the sentence becomes:
+   > **The MVP is everything the founder's own system (quinn-ops) did, plus grades from Blackboard,**
+   > proven first on the founder's own scratch profile, then given to friends, who test it free on a
+   > comp grant the founder pays for *(amended 2026-10-20, the cloud design's Amendment 2026-10-18,
+   > signed by Quinn's delegated go)*:
+3. The pilot paragraph's first two sentences. They were "**The pilot** is a few undergraduates other
+   than the founder, on the released app, one computer each, needing nothing from anyone. It adds the
+   registrar where the school offers it (the commitment model's phase 3)." They become:
+   > **The pilot** is about 30 undergraduates other than the founder, on the released app, one computer
+   > each, needing nothing from anyone. The registrar is built in the MVP for the first school Knowlu
+   > supports; the pilot adds it at other schools that offer it (the commitment model's phase 3).
+   > *(amended 2026-10-20: the size is the cloud design's Amendment 2026-10-16b, signed by Quinn; the
+   > registrar is its Amendment 2026-10-18; worded under Quinn's delegated go)*
+4. The pilot paragraph's gate sentence, from "No one else signs up" to "(the full gate: the cloud
+   design's ruling 10)." It becomes:
+   > No one else signs up, friends included, before the privacy page names the kept Blackboard
+   > sign-in, the saved mail sign-in and the grades the account holds, the re-consent a second account
+   > needs is in the app, and a new vault records its student with the neutral token `student` rather
+   > than the founder's name (the full gate: the cloud design's ruling 10, as its Amendment 2026-10-18
+   > rewords it). For friends that page is an interim one that no lawyer has read (privacy bump #1, the
+   > cloud design's Amendment 2026-10-19); a lawyer reads it before the first pilot student, and the
+   > version the lawyer read asks every tester to accept it again. *(amended 2026-10-20, the cloud
+   > design's Amendment 2026-10-18, signed by Quinn's delegated go)*
+
+The rest of the pilot paragraph (the A13 sentence and the quiet-release sentence of Amendment
+2026-10-16b) is unchanged.
+
+**Open, Quinn's call (none of these is ruled anywhere on record):**
+- Whether the MVP's *Exit* gains ruling (1)'s finish line, or stays as ruling 10 wrote it (the parity
+  audit, the founder's grades and forwarding proofs, and "MVP reached").
+- Whether L10's friends' releases satisfy the Pilot's "v0.1.1 built by CI" item.
+- The VISION wording that places the syllabus read (L5) in a stage: VISION's Build order names it in none; left for a later amendment.
+- The registrar at schools other than the first: VISION's pilot paragraph says the pilot adds it, but ruling 10's Pilot list has no registrar item once the UA registrar moved to the MVP; a later amendment adds the line before Pilot planning.
