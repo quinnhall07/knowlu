@@ -1,5 +1,5 @@
 use knowlu::commands::attach_scheduler;
-use knowlu::scheduler::{device_ok, engine_exe, entitlement_state, has_ics_url, ics_state, ingest_included, judge_plan, judge_state_in, lock, mode, prune_logs, run_child, run_slot_inner, should_retry, slot_argv, IcsState, JudgeArgs, JudgePlan, JudgeState, LiveSlot, Scheduler};
+use knowlu::scheduler::{device_ok, engine_exe, entitlement_state, has_ics_url, ics_state, ingest_included, judge_plan, lock, mode, prune_logs, run_child, run_slot_inner, should_retry, slot_argv, IcsState, JudgePlan, LiveSlot, Scheduler};
 use knowlu::state::{quit_flush, ConsoleState};
 use knowlu_engine::schedule::SchedulerMode;
 use serde_json::{json, Value};
@@ -100,10 +100,10 @@ fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configu
     let exe = Path::new(r"C:\bin\knowlu-engine.exe");
     let names = |a: &Vec<(PathBuf, Vec<String>)>| a.iter().map(|(_, x)| x[0].clone()).collect::<Vec<_>>();
     assert!(!has_ics_url(&v));
-    // No judge args: the step is left out entirely, exactly as `ingest` is on a vault with no feed.
+    // A skip plan: the step is left out entirely, exactly as `ingest` is on a vault with no feed.
     // `sync` is always first (C3′, cloud design §5.5 as amended): the pull half has to land before
     // `rank` orders the day, and the push half carries everything written since the last sync.
-    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"), None);
+    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no account)"), None);
     assert_eq!(names(&argv), vec!["sync", "coursework", "rank"]);
     assert_eq!(argv[0].1, vec!["sync", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
     assert_eq!(argv[1].1, vec!["coursework", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
@@ -113,26 +113,20 @@ fn the_slot_runs_coursework_ingest_judge_rank_and_leaves_out_what_is_not_configu
     let old = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(&cfg, format!("ics_url: \"https://lms.example.invalid/learn.ics\"\n{old}")).unwrap();
     assert!(has_ics_url(&v));
-    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"), None);
+    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no account)"), None);
     assert_eq!(names(&argv), vec!["sync", "coursework", "ingest", "rank"]);
     assert_eq!(argv[2].1, vec!["ingest", "--vault", v.to_string_lossy().as_ref(), "--via", "local-runner"]);
     assert!(argv.iter().all(|(e, _)| e == exe));
 
-    // With judge args: FIVE steps, and judge sits BEFORE rank so the day's ranking sees what it
+    // A cloud plan: FIVE steps, and judge sits BEFORE rank so the day's ranking sees what it
     // just wrote. `--via local-runner`, the same value coursework and ingest pass — journal::VIAS
     // does not grow for this.
-    let ja = JudgeArgs {
-        runtime: PathBuf::from(r"C:\rt\llama-cli.exe"),
-        model: PathBuf::from(r"C:\rt\model.gguf"),
-        log_dir: PathBuf::from(r"C:\data\judgments"),
-    };
-    let argv = slot_argv(&v, exe, &JudgePlan::Local(ja), None);
+    let plan = JudgePlan::Cloud { log_dir: PathBuf::from(r"C:\data\judgments") };
+    let argv = slot_argv(&v, exe, &plan, None);
     assert_eq!(names(&argv), vec!["sync", "coursework", "ingest", "judge", "rank"]);
     assert_eq!(argv[3].1, vec![
         "judge".to_string(), "--vault".to_string(), v.to_string_lossy().to_string(),
         "--via".to_string(), "local-runner".to_string(),
-        "--runtime".to_string(), r"C:\rt\llama-cli.exe".to_string(),
-        "--model".to_string(), r"C:\rt\model.gguf".to_string(),
         "--log-dir".to_string(), r"C:\data\judgments".to_string(),
     ]);
     assert!(knowlu_engine::journal::VIAS.contains(&"local-runner"));
@@ -168,7 +162,7 @@ fn a_cloud_vault_runs_ingest_with_no_ics_url() {
     )
     .unwrap();
 
-    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no runtime)"), None);
+    let argv = slot_argv(&v, exe, &JudgePlan::Skip("judge (skipped: no account)"), None);
     assert_eq!(names(&argv), vec!["sync", "coursework", "ingest", "rank"]);
 }
 
@@ -210,28 +204,20 @@ fn sync_is_the_slots_first_step() {
     let _ = std::fs::remove_dir_all(&v);
 }
 
-/// D7: no runtime and no model are NORMAL. The step is recorded with code 0 and a name that says
-/// which half is missing — the shape `ingest (skipped: no ics_url)` already uses — so a friend with
-/// no model sees an explanation on the Runs view rather than a slot that quietly does less.
+/// D7: a vault with no account is NORMAL. The step is recorded with code 0 and a name that says
+/// why — the shape `ingest (skipped: no ics_url)` already uses — so a friend with no account sees an
+/// explanation on the Runs view rather than a slot that quietly does less.
 ///
-/// **Against a temp `LOCALAPPDATA`, never the real one** (M2, final fix wave): `run_slot_inner`
-/// resolves the judge step through `judge_state(cs)` -> `commands::inference_root()` ->
-/// `state::app_data_root()`, which reads the process's real `LOCALAPPDATA` when the variable is
-/// left alone — unlike `judge_state_names_the_missing_half_runtime_first` below, this test had no
-/// seam for it. The first time Quinn uses the settings row this branch shipped to install a
-/// runtime and a model, `judge_state` would return `Ready`, no skip step would be pushed, and
-/// `.expect("a judge step, named")` would panic — exactly the failure mode
-/// `judge_state_in`'s own doc names ("a test that breaks when the feature starts working is worse
-/// than no test"). Seaming it also removes a side effect this test had before the fix: with the
-/// real root in play, `app_data_root()`'s call to `profiles::migrate_flat_layout` ran a migration
-/// attempt against the user's live app data on every `cargo test`.
+/// What it pins: no account is a named skip, `judge (skipped: no account)`, at code 0, **and
+/// `engine_ok`** (the property that matters: the skip must never paint the tray amber).
 ///
-/// Residual 2 (final fix wave re-review): the seam is now an `EnvSeam` held for the whole
-/// function, so a panicking assertion below still restores both env vars via `Drop` — the
-/// straight-line restore this replaced would have left `LOCALAPPDATA` pointed at a (by-then
-/// deleted) temp directory for every later test in this binary.
+/// **Against a temp `LOCALAPPDATA`, never the real one.** After the local judge plan's removal nothing
+/// on `run_slot_inner`'s path reaches `state::app_data_root()`, so the seam below is a guard that keeps
+/// any future call off the developer's real app data (and its `profiles::migrate_flat_layout`), not a
+/// shield for a current one. The seam is an `EnvSeam` held for the whole function, so a panicking
+/// assertion below still restores both env vars via `Drop`.
 #[test]
-fn a_machine_with_no_model_records_the_judge_skip_and_stays_green() {
+fn a_vault_with_no_account_records_the_judge_skip_and_stays_green() {
     let v = scratch("judgeskip");
     std::fs::write(
         v.join("config").join("runners.yaml"),
@@ -258,51 +244,13 @@ fn a_machine_with_no_model_records_the_judge_skip_and_stays_green() {
     let summary = run_slot_inner(&cs, &sch, None, false);
     let names: Vec<String> = summary.steps.iter().map(|(n, _)| n.clone()).collect();
     let judge = names.iter().find(|n| n.starts_with("judge")).expect("a judge step, named");
-    assert!(judge.contains("skipped: no runtime") || judge.contains("skipped: no model"), "{judge}");
+    assert_eq!(judge, "judge (skipped: no account)");
     let code = summary.steps.iter().find(|(n, _)| n.starts_with("judge")).unwrap().1;
     assert_eq!(code, 0, "a skip is not a failure — it must never paint the tray amber");
     // Task 10 review: the step's own exit code being 0 is not the same claim as the slot staying
     // green — `engine_ok` is what `attach_scheduler` feeds the tray, so THIS is what must be true.
     assert!(summary.engine_ok, "a skipped judge step must not paint the tray amber: {:?}", summary.steps);
     let _ = std::fs::remove_dir_all(&fake_local_appdata);
-    let _ = std::fs::remove_dir_all(&v);
-}
-
-/// `judge_state_in` names which half is missing — the runtime first, because it is the prerequisite
-/// for the other.
-///
-/// **Against a temp root, never the real one** (review S3): `judge_state` reads
-/// `%LOCALAPPDATA%\knowlu`, so a test written against it would pass today and start failing the
-/// first time the settings row actually installed something on this machine.
-#[test]
-fn judge_state_names_the_missing_half_runtime_first() {
-    let v = scratch("judgestate");
-    let cs = open(&v, "judgestate");
-    let root = std::env::temp_dir().join(format!("knowlu-judgestate-root-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-
-    assert_eq!(judge_state_in(&root, &cs), JudgeState::NoRuntime, "neither half installed");
-
-    let rt = knowlu::inference::runtime_dir(&root);
-    std::fs::create_dir_all(&rt).unwrap();
-    std::fs::write(rt.join(knowlu_engine::runtime::RUNTIME_EXE), b"MZ").unwrap();
-    assert_eq!(judge_state_in(&root, &cs), JudgeState::NoModel, "runtime but no model");
-
-    let models = knowlu::inference::models_dir(&root);
-    std::fs::create_dir_all(&models).unwrap();
-    std::fs::write(models.join("m.gguf"), b"gg").unwrap();
-    match judge_state_in(&root, &cs) {
-        JudgeState::Ready(a) => {
-            assert!(a.runtime.ends_with(knowlu_engine::runtime::RUNTIME_EXE));
-            assert!(a.model.ends_with("m.gguf"));
-            // The log is the PROFILE's, never the install-wide root's (spec §5.4).
-            assert_eq!(a.log_dir, cs.data_dir.join("judgments"));
-            assert!(!a.log_dir.starts_with(&root), "the log must not live beside the model");
-        }
-        other => panic!("expected Ready, got {other:?}"),
-    }
-    let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&v);
 }
 
@@ -316,12 +264,10 @@ fn judge_state_names_the_missing_half_runtime_first() {
 /// resolved via PATH like the child-process tests above, ignores unknown positional args and
 /// exits 0 on non-interactive stdio — a stand-in "always succeeds" engine.
 ///
-/// **Against a temp `LOCALAPPDATA`, never the real one** (residual 1, final fix wave re-review):
-/// `run_slot_inner` calls `judge_state(cs)` unconditionally — this test never asserts on the
-/// judge step, but the call still resolves `state::app_data_root()` against whatever
-/// `LOCALAPPDATA` is set to, running `profiles::migrate_flat_layout` against it. M2 seamed
-/// `a_machine_with_no_model_records_the_judge_skip_and_stays_green` but left this sibling, its
-/// exact twin in every way that matters, still reaching the real root on every `cargo test` run.
+/// **Against a temp `LOCALAPPDATA`, never the real one**: after the local judge plan's removal no call
+/// on `run_slot_inner`'s path reaches `state::app_data_root()`, so the seam is a guard that keeps any
+/// future call off the developer's real app data, exactly as in its sibling
+/// `a_vault_with_no_account_records_the_judge_skip_and_stays_green`.
 #[test]
 fn a_vault_without_a_feed_records_the_ingest_skip_in_the_step_list() {
     let v = scratch("skipstep");
@@ -765,8 +711,8 @@ fn a_vault_with_an_account_and_no_entitlement_records_the_judge_skip_and_stays_g
     let _ = std::fs::remove_dir_all(&v);
 }
 
-/// …and a vault with no cloud config at all is `NoAccount`, which is what sends it down the local
-/// runtime path rather than to the cloud — case (b), and the reason the two pre-C1 tests still pass.
+/// …and a vault with no cloud config at all is `NoAccount`, which is what makes `judge` the named
+/// skip `judge (skipped: no account)` rather than a cloud call — case (b).
 #[test]
 fn a_vault_with_no_cloud_config_says_no_account_rather_than_no_entitlement() {
     use knowlu::account::EntitlementState;
@@ -777,8 +723,8 @@ fn a_vault_with_no_cloud_config_says_no_account_rather_than_no_entitlement() {
 }
 
 /// Case (a), and the one C2 depends on: **an entitled vault runs `judge`, with nothing but the vault
-/// on the command line.** A runtime-based skip here would leave the whole judgment service inert on
-/// every machine that never installed llama.cpp — which, after C4, is every machine.
+/// on the command line.** A skip keyed on anything installed on the machine would leave the whole
+/// judgment service inert on every machine that has no local install, which is every machine.
 #[test]
 fn an_entitled_vault_runs_judge_with_no_runtime_and_no_account_on_the_command_line() {
     use knowlu::account::{save_cache, EntitlementCache};
@@ -1208,11 +1154,11 @@ fn a_fresh_active_entitlement_is_never_refreshed_inside_the_slot() {
 }
 
 /// Fix round 1, item 2: `config/cloud.yaml` exists but does not parse — a corrupted file, or one
-/// edited by hand and left broken. This must NOT collapse into `NoAccount` (which would fall through
-/// to the local runtime/model gate and run `judge` with no account at all): it is named as its own
-/// skip, distinct from "no entitlement" and from "no runtime"/"no model".
+/// edited by hand and left broken. This must NOT collapse into `NoAccount`, whose
+/// `judge (skipped: no account)` would hide a broken file: it is its own skip, distinct from
+/// "no entitlement" and "no account".
 #[test]
-fn an_unreadable_cloud_yaml_is_named_and_never_falls_into_the_local_arm() {
+fn an_unreadable_cloud_yaml_is_named_and_never_reads_as_no_account() {
     use knowlu::account::EntitlementState;
     let v = scratch("unreadablecloud");
     std::fs::write(
@@ -1546,9 +1492,8 @@ fn slot_argv_places_grades_after_ingest_and_before_judge_only_with_a_bundle() {
     let v = scratch("grades-argv");
     let exe = Path::new(r"C:\bin\knowlu-engine.exe");
     let names = |a: &Vec<(PathBuf, Vec<String>)>| a.iter().map(|(_, x)| x[0].clone()).collect::<Vec<_>>();
-    let ja = JudgeArgs { runtime: PathBuf::from("rt.exe"), model: PathBuf::from("m.gguf"), log_dir: PathBuf::from("logs") };
     let bundle = PathBuf::from(r"C:\data\grades-capture.json");
-    let judge = JudgePlan::Local(ja);
+    let judge = JudgePlan::Cloud { log_dir: PathBuf::from("logs") };
     let with = slot_argv(&v, exe, &judge, Some(&bundle));
     let at = names(&with).iter().position(|n| n == "grades").expect("a grades step");
     assert_eq!(names(&with)[at - 1], "coursework", "no feed on this vault, so ingest is out: {:?}", names(&with));
@@ -1960,9 +1905,8 @@ fn slot_argv_is_unchanged() {
     let exe = Path::new(r"C:\bin\knowlu-engine.exe");
     let vault = v.to_string_lossy().to_string();
     let bundle = PathBuf::from(r"C:\data\grades-capture.json");
-    let ja = JudgeArgs { runtime: PathBuf::from("rt.exe"), model: PathBuf::from("m.gguf"), log_dir: PathBuf::from("logs") };
     // The six steps, in the order and with the arguments they had before the mail step existed.
-    let argv = slot_argv(&v, exe, &JudgePlan::Local(ja), Some(&bundle));
+    let argv = slot_argv(&v, exe, &JudgePlan::Cloud { log_dir: PathBuf::from("logs") }, Some(&bundle));
     let first: Vec<&str> = argv.iter().map(|(_, a)| a[0].as_str()).collect();
     assert_eq!(first, ["sync", "coursework", "grades", "judge", "rank"], "no feed on this vault, so no ingest");
     assert_eq!(argv[0].1, ["sync", "--vault", vault.as_str(), "--via", "local-runner"]);
