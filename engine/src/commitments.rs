@@ -2325,6 +2325,64 @@ fn course_key(course: &str, codes: &Codes) -> String {
     }
 }
 
+/// The registrar hold (phase 3 final review I1, option a, per kind), computed in this one place
+/// for [`proposals`], [`withdrawal_reason`] and [`settle_approved`] so the three cannot drift
+/// (close-out A1-F1). The `(kind, course key)` pairs the registrar holds: a confirmed `registrar:`
+/// `class` or `lab` note in play (no `until`, or one not before `today`), or a `registrar:` `class`
+/// or `lab` series in the series file not past its `until`.
+#[derive(Debug, Default)]
+struct RegistrarHold(BTreeSet<(String, String)>);
+
+impl RegistrarHold {
+    fn of(file: &SeriesFile, set: &Commitments, codes: &Codes, today: Date) -> Self {
+        let registrar = |uid: &str| uid.starts_with(crate::registrar::CALENDAR_PREFIX);
+        let mut held: BTreeSet<(String, String)> = set
+            .confirmed
+            .iter()
+            // Re-review m8: only a note in play (no `until`, or not before today) holds its course.
+            .filter(|n| class_like(&n.kind) && n.source_uid.as_deref().is_some_and(registrar))
+            .filter(|n| n.until.is_none_or(|until| until >= today))
+            .filter_map(|n| n.course.as_deref().map(|c| (n.kind.clone(), course_key(c, codes))))
+            .collect();
+        for (_, series) in file.by_key() {
+            if !registrar(&series.calendar) || series.until.is_some_and(|until| until < today) {
+                continue;
+            }
+            // A registrar row classifies without the planning names (`classify`'s first branch).
+            if let Some(Class::Kind { kind, course: Some(course) }) = classify(series, codes, &[]) {
+                if class_like(&kind) {
+                    held.insert((kind, course_key(&course, codes)));
+                }
+            }
+        }
+        RegistrarHold(held)
+    }
+
+    /// Whether the hold covers a `kind` question about `course` from `source` (a calendar or a
+    /// key). The registrar's own rows are never held, and a hold is per kind: a registrar lecture
+    /// leaves a lab of the same course alone.
+    fn holds(&self, source: &str, kind: &str, course: Option<&str>, codes: &Codes) -> bool {
+        !source.starts_with(crate::registrar::CALENDAR_PREFIX)
+            && class_like(kind)
+            && course.is_some_and(|c| self.0.contains(&(kind.to_string(), course_key(c, codes))))
+    }
+
+    /// Why a proposal card keyed `key` is held, or `None`: "`<course>`'s `<kind>` is held by the
+    /// registrar", from the card's `commitment:`.
+    fn card_reason(&self, key: &str, meta: &Mapping, codes: &Codes) -> Option<String> {
+        let Some(Value::Mapping(map)) = get(meta, "commitment") else { return None };
+        let p = proposed(map).ok()?;
+        let course = p.course.as_deref()?;
+        self.holds(key, &p.kind, Some(course), codes)
+            .then(|| format!("{course}'s {} is held by the registrar", p.kind))
+    }
+}
+
+/// The kinds the registrar hold covers.
+fn class_like(kind: &str) -> bool {
+    kind == "class" || kind == "lab"
+}
+
 impl Commitment {
     pub fn signature(&self, codes: &Codes) -> Signature {
         signature(&self.kind, self.course.as_deref(), &self.title, &self.meets, codes)
@@ -2405,20 +2463,11 @@ pub fn proposals(
         .chain(set.declined.iter().map(String::as_str))
         .collect();
     let mut closed: BTreeSet<Signature> = set.confirmed.iter().map(|n| n.signature(codes)).collect();
-    // Final review I1 (a), per kind: a `(kind, course)` the registrar holds — a confirmed
-    // `registrar:` class or lab note, or a `registrar:` class or lab series not yet past its
-    // `until` — gets no proposal of that kind for that course from any other calendar, whatever
-    // its times (D7). A registrar lecture leaves a Google lab of the same course proposed.
-    let registrar = |uid: &str| uid.starts_with(crate::registrar::CALENDAR_PREFIX);
-    let class_like = |kind: &str| kind == "class" || kind == "lab";
-    let mut registrar_held: BTreeSet<(String, String)> = set
-        .confirmed
-        .iter()
-        // Re-review m8: only a note in play (no `until`, or not before today) holds its course.
-        .filter(|n| class_like(&n.kind) && n.source_uid.as_deref().is_some_and(registrar))
-        .filter(|n| n.until.is_none_or(|until| until >= today))
-        .filter_map(|n| n.course.as_deref().map(|c| (n.kind.clone(), course_key(c, codes))))
-        .collect();
+    // Final review I1 (a), per kind: a `(kind, course)` the registrar holds gets no proposal of
+    // that kind for that course from any other calendar, whatever its times (D7). A registrar
+    // lecture leaves a Google lab of the same course proposed. One predicate ([`RegistrarHold`])
+    // with `withdrawal_reason` and `settle_approved` (close-out A1-F1).
+    let registrar_held = RegistrarHold::of(file, set, codes, today);
 
     // Each candidate carries its signature and its title-only signature: a confirmed note with no
     // `course` (a hand-written class note, say) matches on the title instead (fix round 1, M4).
@@ -2432,9 +2481,6 @@ pub fn proposals(
             None => {}
             Some(Class::Routine { wake, bed }) => routines.push((key, series, wake, bed)),
             Some(Class::Kind { kind, course }) => {
-                if registrar(&series.calendar) && class_like(&kind) {
-                    registrar_held.extend(course.as_deref().map(|c| (kind.clone(), course_key(c, codes))));
-                }
                 let sig = signature(&kind, course.as_deref(), &series.title, &series.meets, codes);
                 let by_title = signature(&kind, None, &series.title, &series.meets, codes);
                 if answered.contains(key) || held.contains(key) {
@@ -2455,10 +2501,7 @@ pub fn proposals(
         if closed.contains(&sig) || closed.contains(&by_title) {
             continue;
         }
-        let held_by_registrar = !registrar(&series.calendar)
-            && class_like(&kind)
-            && course.as_deref().is_some_and(|c| registrar_held.contains(&(kind.clone(), course_key(c, codes))));
-        if held_by_registrar {
+        if registrar_held.holds(&series.calendar, &kind, course.as_deref(), codes) {
             continue;
         }
         match chosen.get(&sig) {
@@ -4291,7 +4334,9 @@ fn created_by_this_card(
 ///   `agent:commitments`.
 /// - **window** → refused when a `planning-day` note exists; else the planning day.
 /// - **proposal** → refused when a confirmed note has the card's key or signature (§2.5: a
-///   second desktop's answer is a no-op), or the `commitment:` cannot be a note; else the note.
+///   second desktop's answer is a no-op), or the `commitment:` cannot be a note;
+///   [`Settled::Superseded`] when the registrar holds the card's `(kind, course)`
+///   ([`RegistrarHold`], close-out A1-F1, §8 Q12); else the note.
 pub fn settle_approved(
     vault: &Path,
     meta: &Mapping,
@@ -4371,6 +4416,13 @@ pub fn settle_approved(
                     note.path.display().to_string().replace('\\', "/")
                 )));
             }
+            // Close-out A1-F1, §8 Q12 (ruled `superseded`): the registrar came to hold this
+            // course's kind after the card was filed. Nothing is written but the card's stamp, so
+            // the question can be asked again if the registrar's note later ends.
+            let (file, _) = read_series_file(vault);
+            if let Some(why) = RegistrarHold::of(&file, &set, &codes, today).card_reason(&key, meta, &codes) {
+                return Ok(Settled::Superseded(format!("{why}; nothing written")));
+            }
             create_confirmed(vault, map, &key, today, ctx, journal)?;
             Ok(Settled::Executed)
         }
@@ -4425,7 +4477,8 @@ pub fn settle_rejected(
 /// - **window**: a `planning-day` note or the `window` marker exists;
 /// - **proposal**: its key is under no calendar of the series file, its series is in the file's
 ///   `ended` map or ends before `today` (fix round 1, m3), a note (confirmed, a marker,
-///   the planning day) has its key, or a confirmed note has its signature. "Under no calendar"
+///   the planning day) has its key, a confirmed note has its signature, or the registrar holds
+///   its `(kind, course)` ([`RegistrarHold`], as [`proposals`] does; close-out A1-F1). "Under no calendar"
 ///   is read only from a file that knows at least one calendar: an empty file (never written,
 ///   or unreadable this run) says nothing about what left it.
 pub fn withdrawal_reason(
@@ -4476,7 +4529,8 @@ pub fn withdrawal_reason(
             if set.confirmed.iter().any(|n| sigs.contains(&n.signature(codes))) {
                 return Some(format!("{key} is already confirmed"));
             }
-            None
+            // Close-out A1-F1: the registrar hold `proposals()` applies, withdrawn here too.
+            RegistrarHold::of(file, set, codes, today).card_reason(&key, meta, codes)
         }
     }
 }
