@@ -51,15 +51,18 @@ comment on table public.comp_audit is
   'Append-only record of comp grants, extensions and ends (friends-testers spec 3.5). No free text.';
 
 -- No client reads or writes either table (RLS on, no policy). The service role, which every edge
--- function holds, keeps select for the caller's export and loses every write, so a mis-scoped write
--- in any function is refused by the database (A7). The owner, and the cascade from accounts that runs
--- as the owner, keep every right.
+-- function holds, keeps select for the caller's export and nothing else, so a mis-scoped write in
+-- any function is refused by the database (A7). The default privileges give it every table right
+-- (references and trigger too, and maintain on Postgres 17), so it loses all of them and gets select
+-- back. The owner, and the cascade from accounts that runs as the owner, keep every right.
 alter table public.comp_grants enable row level security;
 alter table public.comp_audit enable row level security;
 revoke all on public.comp_grants from public, anon, authenticated;
 revoke all on public.comp_audit from public, anon, authenticated;
-revoke insert, update, delete, truncate on public.comp_grants from service_role;
-revoke insert, update, delete, truncate on public.comp_audit from service_role;
+revoke all on public.comp_grants from service_role;
+revoke all on public.comp_audit from service_role;
+grant select on public.comp_grants to service_role;
+grant select on public.comp_audit to service_role;
 
 -- S2b (spec §3.1, §3.2): what the gate and GET /entitlement see, one row per account. It gates every
 -- paying student, so it fails safe: the join starts at accounts and is left all the way, and a row

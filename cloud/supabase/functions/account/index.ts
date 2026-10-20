@@ -132,7 +132,9 @@ Deno.serve(async (req) => {
             // Friends testers (spec §3.3, §4): the account's per-route call counts. `comp_grants` and
             // `comp_audit` are NOT named here: the service role holds no delete right on either
             // (§3.5), so a restDelete would fail the whole purge. The cascade from `accounts`, run
-            // as the tables' owner, deletes both with the `accounts` row below.
+            // as the tables' owner, deletes both with the `accounts` row below. Nor are
+            // `usage_daily` (the per-kind call and token counts) and `judgments` (each judgment's item
+            // id, tier and fields): neither is in this list, and both are deleted by that same cascade.
             "route_daily",
             "entitlements",
           ]
@@ -150,7 +152,7 @@ Deno.serve(async (req) => {
       exportAll: async (id) => {
         // Single-row reads stay `restSelect`: there is at most one `accounts`/`entitlements` row per
         // account. Everything else can run past PostgREST's own `max_rows` (1000), and an access
-        // right that silently truncates at row 1000 is a bug, not a smaller export — so those five
+        // right that silently truncates at row 1000 is a bug, not a smaller export — so those nine
         // page with `restSelectAll`, each ordered by its own primary key so paging is stable.
         const one = async <T>(table: string, q: string) => await restSelect<T>(rest, table, q);
         const all = async <T>(table: string, q: string) => await restSelectAll<T>(rest, table, q);

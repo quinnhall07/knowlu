@@ -69,6 +69,22 @@ Deno.test("S2m: §5's order and §3.2's edges: ended before expired, ends_at now
   assertEquals(viewRow(null, []), NONE, "no row, no grant: the coalesce answers none");
 });
 
+Deno.test("S2m: comp_extend refuses as the SQL does, the date before the open grant", () => {
+  const extend = (grants: Grant[], endsIn: number) =>
+    run({
+      id: "X",
+      given: "model only",
+      accounts: [{ email: "x-0@example.invalid", row: { ...NONE } }],
+      grants,
+      calls: [{ fn: "comp_extend", account: 0, endsIn }],
+      expect: [NONE],
+    }).refusals[0];
+  assertEquals(extend([], -1), "the new ends_at is not in the future", "no open grant and a past date: the date");
+  assertEquals(extend([{ account: 0, endsIn: 30, endedAgo: 1 }], 0), "the new ends_at is not in the future");
+  assertEquals(extend([], 30), "no open grant for this account", "no open grant, a future date");
+  assertEquals(extend([{ account: 0, endsIn: 30 }], 45), null);
+});
+
 Deno.test("S2m: the model holds no Deno.test, so S3's fake lookup can import it without a suite", async () => {
   const text = await Deno.readTextFile(new URL("testers_model.ts", import.meta.url));
   assert(!/Deno\s*\.\s*test\b/.test(text), "testers_model.ts registers no test");

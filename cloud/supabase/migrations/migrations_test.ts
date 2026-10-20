@@ -2018,9 +2018,14 @@ language plpgsql security definer as $$ declare g uuid; begin
   insert into public.comp_grants (account_id, ends_at) values (p_account, p_ends) returning id into g;
   return g; end $$;
 `;
-// §9's must-pass shapes: S2a's own SQL carries them, and none is a write.
+// §9's must-pass shapes, and the select-only revoke and grant that S2a's SQL now carries in their
+// place (the S2-S4R fixups); none is a write.
 const MUST_PASS = `revoke insert, update, delete, truncate on public.comp_grants from service_role;
 revoke insert, update, delete, truncate on public.comp_audit from service_role;
+revoke all on public.comp_grants from service_role;
+grant select on public.comp_grants to service_role;
+revoke all on public.comp_audit from service_role;
+grant select on public.comp_audit to service_role;
 create table public.comp_audit (id uuid primary key, grant_id uuid references public.comp_grants on delete set null,
   account_id uuid not null references public.accounts(id) on delete cascade, at timestamptz);
 create unique index comp_grants_one_open on public.comp_grants (account_id) where ended_at is null;
@@ -2165,29 +2170,61 @@ async function testersMigration(): Promise<{ name: string; sql: string }> {
 const COMP_TABLES = ["comp_grants", "comp_audit"];
 const flatten = (sql: string) => stripLineComments(sql).replace(/\s+/g, " ").toLowerCase();
 
-Deno.test("S2a: comp_grants and comp_audit have RLS on, no client grant or policy, and the service role only reads", async () => {
-  const { name, sql } = await testersMigration();
-  const flat = flatten(sql);
-  for (const t of COMP_TABLES) {
-    assert(flat.includes(`alter table public.${t} enable row level security;`), `${name}: ${t} needs RLS on`);
-    assert(flat.includes(`revoke all on public.${t} from public, anon, authenticated;`), `${name}: ${t} client revoke`);
-    assert(
-      flat.includes(`revoke insert, update, delete, truncate on public.${t} from service_role;`),
-      `${name}: the service role must not write ${t} (§3.5, A7)`,
-    );
-  }
-  for (const [file, raw] of await everyMigrationFile()) {
+/** §3.5, made literal by the S2-S4R fixups: the service role holds select on comp_grants and
+ * comp_audit and nothing else. Supabase's default privileges hand it every table right (references,
+ * trigger and, on PG17, maintain among them), so the testers migration revokes all from it and grants
+ * select back, in that order; no migration grants anything else on either table, revokes that select
+ * from it elsewhere, or grants it every table in public at or after the testers migration. */
+export function compRightsProblems(files: Array<[string, string]>, testers: string): string[] {
+  const out: string[] = [];
+  for (const [file, raw] of files) {
     const text = flatten(raw);
+    if (file >= testers && /\bgrant [^;]* on all tables in schema public [^;]*\bservice_role\b/.test(text)) {
+      out.push(`${file}: a schema-wide grant to the service role reaches the comp tables`);
+    }
     for (const t of COMP_TABLES) {
       const on = `on (?:table )?(?:public\\.)?${t}\\b`;
-      for (const r of text.matchAll(new RegExp(`revoke ([^;]*?) ${on}[^;]* from ([^;]+);`, "g"))) {
-        if (/\bservice_role\b/.test(r[2])) {
-          assert(!/\b(select|all)\b/.test(r[1]), `${file}: the export needs the service role's select on ${t}`);
-        }
+      const rights = [...text.matchAll(new RegExp(`\\b(?:grant|revoke) [^;]*?${on}[^;]*;`, "g"))].map((m) => m[0]);
+      for (const s of rights) if (s.startsWith("grant ") && s !== `grant select on public.${t} to service_role;`) out.push(`${file}: ${s}`);
+      const svc = rights.filter((s) => /\bservice_role\b/.test(s));
+      if (file === testers) {
+        const want = `revoke all on public.${t} from service_role; grant select on public.${t} to service_role;`;
+        if (svc.join(" ") !== want) out.push(`${file}: ${t} is not select-only for the service role: ${svc.join(" ")}`);
+        if (!text.includes(`alter table public.${t} enable row level security;`)) out.push(`${file}: ${t} needs RLS on`);
+        if (!text.includes(`revoke all on public.${t} from public, anon, authenticated;`)) out.push(`${file}: ${t} client revoke`);
+      } else if (svc.some((s) => s.startsWith("revoke ") && /\b(?:select|all)\b/.test(s))) {
+        out.push(`${file}: the export needs the service role's select on ${t}`);
       }
-      assert(!new RegExp(`\\bgrant [^;]*${on}`).test(text), `${file}: grants a right on ${t}`);
-      assert(!new RegExp(`create policy [^;]*${on}`).test(text), `${file}: a policy on ${t}`);
+      if (new RegExp(`create policy [^;]*${on}`).test(text)) out.push(`${file}: a policy on ${t}`);
     }
+  }
+  return out;
+}
+
+Deno.test("S2a: comp_grants and comp_audit have RLS on, no client grant or policy, and the service role only reads", async () => {
+  const { name } = await testersMigration();
+  assertEquals(compRightsProblems(await everyMigrationFile(), name), []);
+});
+
+Deno.test("S2-S4R fixups: the select-only pin refuses a leftover right, a wider grant, the wrong order, a later revoke", async () => {
+  const files = await everyMigrationFile();
+  const { name } = await testersMigration();
+  const edit = (f: (t: string) => string) => files.map(([n, t]): [string, string] => [n, n === name ? f(t) : t]);
+  const revoke = "revoke all on public.comp_grants from service_role;";
+  const grant = "grant select on public.comp_grants to service_role;";
+  for (
+    const [label, bad] of [
+      ["the old four-right revoke", edit((t) => t.replace(revoke, "revoke insert, update, delete, truncate on public.comp_grants from service_role;"))],
+      ["no select back", edit((t) => t.replace(grant, ""))],
+      ["select and references", edit((t) => t.replace(grant, "grant select, references on public.comp_grants to service_role;"))],
+      ["select to a client", edit((t) => `${t}\ngrant select on public.comp_audit to authenticated;\n`)],
+      ["grant before revoke", edit((t) => t.replace(revoke, "@@").replace(grant, revoke).replace("@@", grant))],
+      ["a later select revoke", [...files, ["29991231000000_later.sql", "revoke select on public.comp_audit from service_role;"]]],
+      ["a later schema-wide grant", [...files, ["29991231000000_later.sql", "grant all on all tables in schema public to service_role;"]]],
+    ] as Array<[string, Array<[string, string]>]>
+  ) {
+    assertNotEquals(bad, files, `${label}: the mutation must apply`);
+    assert(compRightsProblems(bad, name).length > 0, `${label} must be refused`);
   }
 });
 
@@ -2556,16 +2593,44 @@ export function routeDailyProblems(sql: string): string[] {
   return out;
 }
 
+/** Across the corpus: no client grant or policy on route_daily, no revoke of the service role's
+ * rights on it (the purge deletes from it), and no client execute on count_route. */
+export function routeDailyCorpusProblems(files: Array<[string, string]>): string[] {
+  const out: string[] = [];
+  for (const [file, raw] of files) {
+    const text = flatten(raw);
+    // Doubled backslashes: in an ordinary string `\b` is a backspace, and these never matched (S2-S4R).
+    const on = "on (?:table )?(?:public\\.)?route_daily\\b";
+    if (new RegExp(`\\bgrant [^;]*${on}[^;]* to [^;]*\\b(anon|authenticated|public)\\b`).test(text)) out.push(`${file}: route_daily granted`);
+    if (new RegExp(`create policy [^;]*${on}`).test(text)) out.push(`${file}: a policy on route_daily`);
+    if (new RegExp(`\\brevoke [^;]*${on}[^;]* from [^;]*\\bservice_role\\b`).test(text)) out.push(`${file}: the purge deletes it`);
+    if (/\bgrant execute on function [^;]*count_route\b[^;]* to [^;]*\b(anon|authenticated|public)\b/.test(text)) {
+      out.push(`${file}: count_route granted`);
+    }
+  }
+  return out;
+}
+
 Deno.test("S2d: route_daily is usage_daily's shape and cascades; count_route is one upsert, the service role's alone", async () => {
   const { name, sql } = await testersMigration();
   assertEquals(routeDailyProblems(sql), [], name);
-  for (const [file, raw] of await everyMigrationFile()) {
-    const text = flatten(raw);
-    const on = "on (?:table )?(?:public\.)?route_daily\b";
-    assert(!new RegExp(`\bgrant [^;]*${on}[^;]* to [^;]*\b(anon|authenticated|public)\b`).test(text), `${file}: route_daily granted`);
-    assert(!new RegExp(`create policy [^;]*${on}`).test(text), `${file}: a policy on route_daily`);
-    assert(!new RegExp(`\brevoke [^;]*${on}[^;]* from [^;]*\bservice_role\b`).test(text), `${file}: the purge deletes it`);
-    assert(!/\bgrant execute on function [^;]*count_route\b[^;]* to [^;]*\b(anon|authenticated|public)\b/.test(text), file);
+  assertEquals(routeDailyCorpusProblems(await everyMigrationFile()), []);
+});
+
+Deno.test("S2-S4R fixups: each route_daily corpus pin fires on its own appended statement", async () => {
+  const files = await everyMigrationFile();
+  const { name } = await testersMigration();
+  for (
+    const [extra, want] of [
+      ["grant select on public.route_daily to authenticated;", "route_daily granted"],
+      ["grant all on table route_daily to anon, public;", "route_daily granted"],
+      ["create policy p on public.route_daily for select using (true);", "a policy on route_daily"],
+      ["revoke delete on public.route_daily from service_role;", "the purge deletes it"],
+      ["grant execute on function public.count_route(uuid, text) to anon;", "count_route granted"],
+    ]
+  ) {
+    const bad = files.map(([n, t]): [string, string] => [n, n === name ? `${t}\n${extra}\n` : t]);
+    assertEquals(routeDailyCorpusProblems(bad), [`${name}: ${want}`], extra);
   }
 });
 
@@ -2730,9 +2795,9 @@ export function costViewsProblems(sql: string): string[] {
   const out: string[] = [];
   const stmts: Record<string, string> = {};
   for (const [name, want] of [["tester_usage_daily", USAGE_VIEW], ["tester_spend_monthly", SPEND_VIEW]]) {
-    const stmt = stmts[name] = new RegExp(`create (?:or replace )?view admin\.${name} as [^;]*;`).exec(flat)?.[0] ?? "";
+    const stmt = stmts[name] = new RegExp(`create (?:or replace )?view admin\\.${name} as [^;]*;`).exec(flat)?.[0] ?? "";
     if (stmt !== want) out.push(`admin.${name} is not the pinned view: ${stmt || "absent"}`);
-    for (const w of LEAKS) if (new RegExp(`\b${w}\b`).test(stmt)) out.push(`admin.${name} names ${w}`);
+    for (const w of LEAKS) if (new RegExp(`\\b${w}\\b`).test(stmt)) out.push(`admin.${name} names ${w}`);
     if (!flat.includes(`revoke all on admin.${name} from public, anon, authenticated, service_role;`)) out.push(`${name}'s revoke`);
   }
   if (/usd/.test(stmts.tester_usage_daily)) out.push("tester_usage_daily carries dollars (ruled out, option (b))");
@@ -2769,6 +2834,23 @@ Deno.test("S2e2: the cost pins refuse a message key, dollars per day, a local da
     const bad = flat.replace(from, to);
     assertNotEquals(bad, flat, `the mutation ${from} must apply to the real views`);
     assert(costViewsProblems(bad).length > 0, `${from} -> ${to} must be refused`);
+  }
+});
+
+Deno.test("S2-S4R fixups: the LEAKS pin names each leaked column, in either view, by itself", async () => {
+  const flat = flatten((await testersMigration()).sql);
+  for (const w of LEAKS) {
+    for (
+      const [view, from, to] of [
+        ["tester_usage_daily", "(select count(*) from public.gmail_seen s", `(select count(s.${w}) from public.gmail_seen s`],
+        ["tester_spend_monthly", "b.usd as alert_usd,", `b.usd as alert_usd, b.${w},`],
+      ]
+    ) {
+      const bad = flat.replace(from, to);
+      assertNotEquals(bad, flat, `the mutation ${from} must apply`);
+      const problems = costViewsProblems(bad);
+      assert(problems.includes(`admin.${view} names ${w}`), `${view} + ${w}: ${problems.join(" | ")}`);
+    }
   }
 });
 

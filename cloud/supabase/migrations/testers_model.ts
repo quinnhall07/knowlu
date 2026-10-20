@@ -71,9 +71,9 @@ function apply(call: Call, alive: boolean[], grants: Grant[]): { refused: string
     if (open) return { refused: OPEN_GRANT_REFUSAL };
     return { refused: null, grants: [...grants, { account, endsIn: call.endsIn }] };
   }
-  // comp_extend (§3.3): accepts an open grant whether or not its ends_at has passed; refuses an ended
-  // grant or none, and a new ends_at not in the future.
-  if (!open) return { refused: "no open grant for this account" };
+  // comp_extend (§3.3): accepts an open grant whether or not its ends_at has passed; refuses a new
+  // ends_at not in the future, then an ended grant or none, in the SQL's order (the date first).
   if (call.endsIn <= 0) return { refused: "the new ends_at is not in the future" };
+  if (!open) return { refused: "no open grant for this account" };
   return { refused: null, grants: grants.map((g) => g === open ? { ...g, endsIn: call.endsIn } : g) };
 }
