@@ -32,6 +32,10 @@ pub const CALENDAR_PREFIX: &str = "registrar:";
 /// A registrar series' `event_type` (spec §3's table).
 pub const EVENT_TYPE: &str = "registrar";
 
+/// Who an applied field is written as (spec A2 item 9): an agent, so `journal::human_edited` never
+/// reads the registrar's change as the student's and a later registrar change still applies.
+pub const ACTOR: &str = "agent:knowlu.registrar";
+
 /// §2.2's bound on `where`.
 const WHERE_MAX: usize = 80;
 
@@ -291,14 +295,19 @@ pub struct Report {
     /// and every `partial` row no note holds, as `(key, note, reading)`. The note is unchanged;
     /// close-out B3c lists them.
     pub unread: Vec<(String, Option<String>, Reading)>,
+    /// A2 items 8, 9 and 13 (close-out B3b): each field this fetch wrote, as `{day, field, from,
+    /// note, to}`, in (note path, field) order. Only writes that succeeded.
+    pub applied: Vec<Value>,
 }
 
 impl Report {
+    /// `ended` is `[]` until close-out B3d ends a missing note.
     pub fn to_json(&self) -> Value {
         json!({
             "term": self.term, "rows": self.rows, "confirmed": self.confirmed, "proposed": self.proposed,
             "dropped": { "no_time": self.no_time, "midnight": self.midnight },
             "warnings": self.warnings,
+            "applied": self.applied, "ended": [],
         })
     }
 }
@@ -340,12 +349,14 @@ pub fn run_parsed(
     let calendar = calendar_key(school_key, &parsed.term);
     // P9: how each CRN of the answer was read, by its key; the confirmed notes of this term, by key.
     let read: BTreeMap<String, Reading> = parsed.seen.iter().map(|(crn, how)| (format!("{calendar}-{crn}"), *how)).collect();
-    let notes: BTreeMap<String, String> = cm::load(vault)
+    let confirmed: BTreeMap<String, cm::Commitment> = cm::load(vault)
         .confirmed
         .into_iter()
-        .filter_map(|n| Some((n.source_uid?, n.path.to_string_lossy().replace('\\', "/"))))
+        .filter_map(|n| Some((n.source_uid.clone()?, n)))
         .filter(|(key, _)| key.strip_prefix(calendar.as_str()).is_some_and(|crn| crn.starts_with('-')))
         .collect();
+    let notes: BTreeMap<String, String> =
+        confirmed.iter().map(|(key, n)| (key.clone(), n.path.to_string_lossy().replace('\\', "/"))).collect();
     // P9's merge carry: the `whole` rows, plus the previous row, unchanged, of each CRN read
     // `partial`, `unread` or `status` whose key a confirmed note holds. A CRN no note holds is not
     // carried, so `refresh_series` moves it to `ended`; with no previous row nothing is stored.
@@ -357,6 +368,24 @@ pub fn run_parsed(
     let input: Vec<Series> = whole.iter().cloned().chain(carried).collect();
     let (_, mut warnings) = cm::refresh_series(vault, &[(calendar, input)], today);
     warnings.extend(parsed.warnings.iter().cloned());
+    // A2 items 8 and 9 (close-out B3b): a note whose row was read `whole` gets each changed `meets`,
+    // `until` or `where` written, one field per `write`, journal first, as the registrar. A missing
+    // note is item 11's (B3d) and a part-read one gets nothing. Notes in path order.
+    let rows: BTreeMap<&str, &Series> = whole.iter().map(|s| (s.source_uid.as_str(), s)).collect();
+    let mut order: Vec<(&String, &String)> = notes.iter().map(|(key, path)| (path, key)).collect();
+    order.sort();
+    let agent = ctx.with_actor(ACTOR);
+    let mut applied = Vec::new();
+    for (path, key) in order {
+        let (Some(note), Some(row)) = (confirmed.get(key), rows.get(key.as_str())) else { continue };
+        for change in cm::registrar_changes(note, row, journal) {
+            let literal = [(change.field.to_string(), change.literal)];
+            match crate::write::write_literals(vault, path, &literal, &agent, journal, &crate::write::WriteOpts::default()) {
+                Ok(_) => applied.push(json!({ "day": today.to_string(), "field": change.field, "from": change.from, "note": path, "to": change.to })),
+                Err(_) => warnings.push(format!("registrar: {path}: {} not applied (the write failed)", change.field)),
+            }
+        }
+    }
     // A2 item 11: missing only when `seen` holds no row with the note's CRN at all.
     let missing = notes.iter().filter(|(key, _)| !read.contains_key(*key)).map(|(_, note)| note.clone()).collect();
     let unread = read
@@ -390,6 +419,7 @@ pub fn run_parsed(
         warnings,
         missing,
         unread,
+        applied,
     })
 }
 
@@ -757,10 +787,12 @@ mod d5_d7_tests {
         assert_eq!(proposed(&file, &Commitments::default(), today), ["gcal-series:invented40002", "registrar:ua:202640-40001"]);
     }
 
-    /// D5 + §5.4: a confirmed registrar note whose row left the term files an end card at the day
-    /// before the fetch (R2-c's `last_instance`), and `registrar:` keys are watched (R2-g).
+    /// D5 + §5.4, as amended (spec A2 item 8; close-out B3b, Plan ruling R2-g went): a confirmed
+    /// registrar note whose row left the term gets no end card from `detect_changes`, even with its
+    /// calendar fresh; the fetch ends it (A2 item 11, close-out B3d). Was
+    /// `a_dropped_registrar_course_ends_its_confirmed_note`, which pinned the end card.
     #[test]
-    fn a_dropped_registrar_course_ends_its_confirmed_note() {
+    fn a_dropped_registrar_course_gets_no_end_card_from_detect_changes() {
         let v = vault("endcard");
         cm::refresh_series(&v, &[(CAL.to_string(), fall())], date(2026, 8, 20));
         let (file, _) = cm::refresh_series(&v, &[(CAL.to_string(), without("40002"))], date(2026, 9, 10));
@@ -775,8 +807,8 @@ mod d5_d7_tests {
         let fresh: BTreeSet<String> = [CAL.to_string()].into_iter().collect();
         let (changes, warnings) = cm::detect_changes(&file, &set, &codes(), &[], &fresh, date(2026, 9, 10), &mut journal);
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(changes.len(), 1, "{changes:?}");
-        assert_eq!(changes[0].change.get("until").and_then(|u| u.as_str()), Some("2026-09-09"));
+        assert!(changes.is_empty(), "a registrar key was carded: {changes:?}");
+        assert!(file.ended.contains_key(&lab.source_uid), "the row did leave the term");
         let _ = std::fs::remove_dir_all(&v);
     }
 

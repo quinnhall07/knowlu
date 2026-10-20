@@ -3521,9 +3521,10 @@ pub fn check_answerable(vault: &Path, target: &str, today: Date) -> Result<(), S
 // P12 — change detection: changed, ended, succeeded (§5.4, R22).
 // ---------------------------------------------------------------------------------------------
 
-/// The key prefixes a calendar or registrar series carries (R6, phase-3 R2-g); only notes keyed so
-/// are watched for changes.
-const SERIES_KEY_PREFIXES: [&str; 3] = ["gcal-series:", "ics-series:", "registrar:"];
+/// The key prefixes a calendar series carries (R6); only notes keyed so are watched for changes.
+/// A `registrar:` note is not: its fetch applies and lists (phase-3 spec A2 item 8, close-out B3b;
+/// Plan ruling R2-g went), so `rank` files no change, end or swap card for one.
+const SERIES_KEY_PREFIXES: [&str; 2] = ["gcal-series:", "ics-series:"];
 
 /// A `meets` list as the set of `(DAY_KEYS index, start, end)` triples — the comparison §3.5's
 /// signature makes, so neither entry order nor day order is a change.
@@ -3579,8 +3580,47 @@ fn text_value(text: Option<&str>) -> Value {
     text.map_or(Value::Null, |t| Value::String(t.to_string()))
 }
 
+/// One field a registrar fetch applies to a confirmed note (phase-3 spec A2 items 8 and 9): the
+/// note's value and the row's, as the command lists them (a `meets` as the note's own list, an
+/// `until` as `YYYY-MM-DD`), and the single-line literal `write` takes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Applied {
+    pub field: &'static str,
+    pub from: serde_json::Value,
+    pub to: serde_json::Value,
+    pub literal: String,
+}
+
+/// Close-out B3b (spec A2 items 8 and 9): the fields a registrar fetch applies to `note` from its
+/// `whole` row `series`, in field order (`meets`, `until`, `where`). Only those three, never
+/// `level`, `kind`, `course` or the title. `meets` compares as phase 2 compares (the set of day,
+/// start and end triples, over the row's `CLAS` meetings); `where` only when the row names one;
+/// `until` only when the row has one (none is never applied). A field `journal::human_edited` shows
+/// the student set by hand is left out: it is not written (B3e records it).
+pub fn registrar_changes(note: &Commitment, series: &Series, journal: &mut crate::journal::Journal) -> Vec<Applied> {
+    let mut out = Vec::new();
+    if !series.meets.is_empty() && meet_set(&series.meets) != meet_set(&note.meets) && !is_human_set(journal, &note.id, "meets") {
+        let to = meets_json(&series.meets);
+        let literal = crate::write::to_literal(&to_value(to.clone()));
+        out.push(Applied { field: "meets", from: meets_json(&note.meets), to, literal });
+    }
+    if let Some(until) = series.until.filter(|u| note.until != Some(*u)) {
+        if !is_human_set(journal, &note.id, "until") {
+            out.push(Applied { field: "until", from: date_json(note.until), to: date_json(Some(until)), literal: until.to_string() });
+        }
+    }
+    if let Some(place) = series.where_.as_deref().map(|w| single_line(w).trim().to_string()).filter(|w| !w.is_empty()) {
+        if note.where_.as_deref().map(str::trim) != Some(place.as_str()) && !is_human_set(journal, &note.id, "where") {
+            let literal = crate::write::to_literal(&Value::String(place.clone()));
+            out.push(Applied { field: "where", from: opt_json(note.where_.as_deref()), to: serde_json::Value::String(place), literal });
+        }
+    }
+    out
+}
+
 /// §5.4's detection, pure (no clock, no I/O, no model): the changes to confirmed notes keyed
-/// `gcal-series:`, `ics-series:` or `registrar:`, over [`SeriesFile::by_key`] and `file.ended`.
+/// `gcal-series:` or `ics-series:` (never `registrar:`, [`SERIES_KEY_PREFIXES`]), over
+/// [`SeriesFile::by_key`] and `file.ended`.
 /// `fresh` is the set of calendar keys read fresh and complete this run. Returns
 /// `(changes, warnings)`, in note order.
 ///

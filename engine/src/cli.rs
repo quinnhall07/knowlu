@@ -851,10 +851,9 @@ fn commitment_passes(
     let (codes, code_warnings) = cm::Codes::load(vault);
     warnings.extend(cm::code_warnings_hit(code_warnings, &file));
     let names: Vec<String> = planning.recurring.iter().map(|r| r.name.clone()).collect();
-    let mut fresh_keys: std::collections::BTreeSet<String> = fresh.iter().map(|(c, _)| c.clone()).collect();
-    // Phase 3 (Plan ruling R2-g): a registrar term is read only on a button press, and the file
-    // always holds that read, so its notes are watched on every run.
-    fresh_keys.extend(file.calendars.keys().filter(|c| c.starts_with(crate::registrar::CALENDAR_PREFIX)).cloned());
+    // Plan ruling R2-g went (phase-3 spec A2 item 8, close-out B3b): a registrar note is applied
+    // and listed at its fetch, so `detect_changes` watches no `registrar:` key.
+    let fresh_keys: std::collections::BTreeSet<String> = fresh.iter().map(|(c, _)| c.clone()).collect();
     let watched = match read_failed {
         true => cm::SeriesFile { ended: BTreeMap::new(), ..file.clone() },
         false => file.clone(),
