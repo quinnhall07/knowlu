@@ -74,10 +74,9 @@ pub struct Curated {
     pub registrar: Option<Registrar>,
 }
 
-/// R0's rows call for UA (spec D3 amendment), under the prefix.
-///
-/// PROVISIONAL until the R0 spike (spec D3): Banner 9's publicly documented registration-events call. R0 replaces this line — and, if the shape differs, `registrar::parse_banner` and its fixture — with what UA's signed-in session actually answers.
-const UA_ROWS_PATH: &str = "classRegistration/getRegistrationEvents?termFilter=";
+/// R0's rows call for UA (spec D3 amendment), under the prefix: the signed-in student's own
+/// registration history for the term. One `GET`; no term-selection `POST` comes before it.
+const UA_ROWS_PATH: &str = "registrationHistory/reset?term={term}";
 
 pub const CAMPUSES: [Curated; 2] = [
     Curated {
@@ -96,7 +95,6 @@ pub const CAMPUSES: [Curated; 2] = [
             prefix: "/StudentRegistrationSsb/ssb/",
             start: "registration",
             calls: &[
-                Call { method: "POST", path: "term/search?mode=registration", form: Some("term={term}") },
                 Call { method: "GET", path: UA_ROWS_PATH, form: None },
             ],
         }),

@@ -18,10 +18,13 @@ pub struct School {
     pub key: &'static str,
     /// `(first month, term-code suffix)`, in month order (Plan ruling R1-f).
     pub terms: &'static [(i8, &'static str)],
+    /// The `statusIndicator` codes that mean "registered" (spec D3 amendment, P6). Empty means every
+    /// row counts, the only behaviour before B9a records UA's real codes.
+    pub registered: &'static [&'static str],
 }
 
 /// UA only before the pilot (Quinn, 2026-09-23).
-pub const SCHOOLS: [School; 1] = [School { key: "ua", terms: &[(1, "10"), (6, "40")] }];
+pub const SCHOOLS: [School; 1] = [School { key: "ua", terms: &[(1, "10"), (6, "40")], registered: &[] }];
 
 /// Every registrar calendar key, and every registrar `source_uid`, starts with this.
 pub const CALENDAR_PREFIX: &str = "registrar:";
@@ -87,13 +90,6 @@ pub enum Reading {
     Status,
 }
 
-/// [`parse_banner`] with the school's registered `statusIndicator` set given (P6). An empty set
-/// means every row counts. TEST SKELETON (B4 step 2): the implementer replaces this body and has
-/// `parse_banner` call it with `SCHOOLS`' set.
-pub fn parse_banner_with(json: &Value, school: &str, _registered: &[&str]) -> Result<Parsed, String> {
-    parse_banner(json, school)
-}
-
 const DAY_FIELDS: [(&str, DayKey); 7] = [
     ("monday", "mon"), ("tuesday", "tue"), ("wednesday", "wed"), ("thursday", "thu"),
     ("friday", "fri"), ("saturday", "sat"), ("sunday", "sun"),
@@ -126,57 +122,117 @@ fn place(mt: &Value) -> Option<String> {
     (!cut.is_empty()).then_some(cut)
 }
 
-/// Banner 9's registration rows → [`Series`] (spec §3; shape (b) as R0 recorded it). A row is kept
-/// when it has a term, a CRN, a subject, a course number and at least one pattern with days and
-/// both times (R1-d). `Err` when no row is kept: an empty parse is a failure, never an empty
-/// semester. `school` goes into the key only.
-pub fn parse_banner(json: &Value, school: &str) -> Result<Parsed, String> {
-    let rows = match json {
-        Value::Array(rows) => rows,
-        _ => json.get("data").and_then(Value::as_array).ok_or("not a list of registration rows")?,
-    };
+/// What one row's `meetingTimes[]` gave (P2-P5, P9).
+#[derive(Default)]
+struct RowMeetings {
+    meets: Vec<Meet>,
+    first: Option<Date>,
+    until: Option<Date>,
+    place: Option<String>,
+    /// A usable `CLAS` meeting across midnight (§3: the whole row is dropped).
+    crosses: bool,
+    /// P5: a `CLAS` meeting whose `meetingScheduleType` is `LAB`.
+    lab_meeting: bool,
+    /// P9: a `CLAS` meeting (P4) or an unknown-type meeting (P3) was skipped.
+    partial: bool,
+}
+
+/// P3: only `CLAS` meetings are read; `EXAM` is counted (`out.exam`) and any other or missing
+/// `meetingType` is counted (`out.meeting_type`) and warned, never read as `CLAS`. P4: a `CLAS`
+/// meeting with no time or no day is skipped, never filled in from another.
+fn read_meetings(row: &Value, name: &str, out: &mut Parsed) -> RowMeetings {
+    let mut r = RowMeetings::default();
+    for mt in row.get("meetingTimes").and_then(Value::as_array).into_iter().flatten() {
+        match text(mt, "meetingType") {
+            Some("CLAS") => {}
+            Some("EXAM") => {
+                out.exam += 1;
+                continue;
+            }
+            _ => {
+                out.meeting_type += 1;
+                out.warnings.push(format!("registrar: {name} has a meeting of an unknown type; skipped"));
+                r.partial = true;
+                continue;
+            }
+        }
+        let days: Vec<DayKey> = DAY_FIELDS.iter().filter(|(f, _)| mt.get(*f).and_then(Value::as_bool) == Some(true)).map(|(_, d)| *d).collect();
+        let (Some(start), Some(end)) = (hhmm(mt, "beginTime"), hhmm(mt, "endTime")) else {
+            r.partial = true;
+            continue;
+        };
+        if days.is_empty() {
+            r.partial = true;
+            continue;
+        }
+        if end <= start {
+            r.crosses = true;
+            continue;
+        }
+        let meet = Meet { days, start, end };
+        if !r.meets.contains(&meet) {
+            r.meets.push(meet);
+        }
+        r.lab_meeting |= text(mt, "meetingScheduleType").is_some_and(|t| t.eq_ignore_ascii_case("LAB"));
+        r.first = [r.first, mdy(mt, "startDate")].into_iter().flatten().min();
+        r.until = [r.until, mdy(mt, "endDate")].into_iter().flatten().max();
+        r.place = r.place.take().or_else(|| place(mt));
+    }
+    r
+}
+
+/// Banner's registration rows (`registrationHistory/reset`, as R0 recorded it; spec D3 amendment,
+/// P1-P9) → [`Series`]. Rows are `data.registrations`; a row's meetings are its flat
+/// `meetingTimes[]`, and only `CLAS` meetings become a series (a final never does). A row is kept
+/// when it has a term, a CRN, a subject, a course number, a registered status (P6) and at least one
+/// `CLAS` meeting with days and both times. `Err` when no row is kept: an empty parse is a failure,
+/// never an empty semester. `school` goes into the key and picks the registered set.
+pub fn parse_banner(json: &Value, school_key: &str) -> Result<Parsed, String> {
+    let registered = school(school_key).map_or(&[][..], |s| s.registered);
+    parse_banner_with(json, school_key, registered)
+}
+
+/// [`parse_banner`] with the school's registered `statusIndicator` set given (P6). An empty set
+/// means every row counts.
+pub fn parse_banner_with(json: &Value, school: &str, registered: &[&str]) -> Result<Parsed, String> {
+    let rows = json
+        .get("data")
+        .and_then(|d| d.get("registrations"))
+        .and_then(Value::as_array)
+        .ok_or("not a list of registration rows")?;
     let mut out = Parsed::default();
-    let mut kept: BTreeSet<String> = BTreeSet::new();
     for row in rows {
+        let crn = text(row, "courseReferenceNumber");
+        if let Some(crn) = crn {
+            if out.seen.contains_key(crn) {
+                out.warnings.push(format!("registrar: CRN {crn} listed twice; the first kept"));
+                continue;
+            }
+            out.seen.insert(crn.to_string(), Reading::Unread);
+        }
         let (Some(term), Some(crn), Some(subject), Some(number)) =
-            (text(row, "term"), text(row, "courseReferenceNumber"), text(row, "subject"), text(row, "courseNumber"))
+            (text(row, "term"), crn, text(row, "subject"), text(row, "courseNumber"))
         else {
             out.warnings.push("registrar: a row without a term, CRN, subject or course number; skipped".into());
             continue;
         };
         let name = format!("{subject} {number}");
-        // A whole word, so "Collaborative Seminar" is not a lab (plan review M2).
-        let lab = text(row, "scheduleTypeDescription").is_some_and(|t| {
-            t.split(|c: char| !c.is_ascii_alphabetic()).any(|w| w.eq_ignore_ascii_case("lab") || w.eq_ignore_ascii_case("laboratory"))
-        }) || text(row, "scheduleType").is_some_and(|t| t.eq_ignore_ascii_case("LAB"));
-        let mut meets: Vec<Meet> = Vec::new();
-        let (mut first, mut until, mut place_of, mut crosses) = (None::<Date>, None::<Date>, None, false);
-        for mf in row.get("meetingsFaculty").and_then(Value::as_array).into_iter().flatten() {
-            let Some(mt) = mf.get("meetingTime") else { continue };
-            let days: Vec<DayKey> = DAY_FIELDS.iter().filter(|(f, _)| mt.get(*f).and_then(Value::as_bool) == Some(true)).map(|(_, d)| *d).collect();
-            let (Some(start), Some(end)) = (hhmm(mt, "beginTime"), hhmm(mt, "endTime")) else { continue };
-            if days.is_empty() {
-                continue;
-            }
-            if end <= start {
-                crosses = true;
-                continue;
-            }
-            let meet = Meet { days, start, end };
-            if !meets.contains(&meet) {
-                meets.push(meet);
-            }
-            first = [first, mdy(mt, "startDate")].into_iter().flatten().min();
-            until = [until, mdy(mt, "endDate")].into_iter().flatten().max();
-            place_of = place_of.or_else(|| place(mt));
+        if !registered.is_empty() && !text(row, "statusIndicator").is_some_and(|s| registered.contains(&s)) {
+            out.status += 1;
+            out.seen.insert(crn.to_string(), Reading::Status);
+            let what = text(row, "statusDescription").unwrap_or("an unrecorded status");
+            out.warnings.push(format!("registrar: {name} is listed as {what}; skipped"));
+            continue;
         }
-        if crosses {
+        let m = read_meetings(row, &name, &mut out);
+        if m.crosses {
             out.midnight += 1;
             out.warnings.push(format!("registrar: {name} meets across midnight; dropped"));
             continue;
         }
-        if meets.is_empty() {
+        if m.meets.is_empty() {
             out.no_time += 1;
+            out.warnings.push(format!("registrar: {name} lists no class meeting with a day and times; not guessed"));
             continue;
         }
         if out.term.is_empty() {
@@ -185,32 +241,33 @@ pub fn parse_banner(json: &Value, school: &str) -> Result<Parsed, String> {
             out.warnings.push(format!("registrar: {name} is in term {term}, not {}; skipped", out.term));
             continue;
         }
-        let key = format!("{CALENDAR_PREFIX}{school}:{term}-{crn}");
-        if !kept.insert(key.clone()) {
-            out.warnings.push(format!("registrar: CRN {crn} listed twice; the first kept"));
-            continue;
-        }
+        out.seen.insert(crn.to_string(), if m.partial { Reading::Partial } else { Reading::Whole });
+        // A whole word, so "Collaborative Seminar" is not a lab (plan review M2).
+        let lab = m.lab_meeting
+            || text(row, "scheduleDescription").is_some_and(|t| {
+                t.split(|c: char| !c.is_ascii_alphabetic()).any(|w| w.eq_ignore_ascii_case("lab") || w.eq_ignore_ascii_case("laboratory"))
+            });
         out.series.push(Series {
-            source_uid: key,
+            source_uid: format!("{CALENDAR_PREFIX}{school}:{term}-{crn}"),
             calendar: calendar_key(school, term),
             title: if lab { format!("{name} Lab") } else { name },
-            where_: place_of,
+            where_: m.place,
             event_type: Some(EVENT_TYPE.to_string()),
-            rule: Rule { freq: "WEEKLY".into(), interval: 1, until, count: None },
+            rule: Rule { freq: "WEEKLY".into(), interval: 1, until: m.until, count: None },
             has_master: true,
             rdate: false,
             unsupported: false,
             instances: Vec::new(),
-            meets,
-            first,
-            until,
+            meets: m.meets,
+            first: m.first,
+            until: m.until,
             last_seen: None,
         });
     }
     if out.series.is_empty() {
         return Err(format!(
-            "no class with meeting times in the registrar's answer ({} without times, {} across midnight)",
-            out.no_time, out.midnight
+            "no class with meeting times in the registrar's answer ({} without times, {} across midnight, {} not registered)",
+            out.no_time, out.midnight, out.status
         ));
     }
     out.series.sort_by(|a, b| a.source_uid.cmp(&b.source_uid));
@@ -931,7 +988,7 @@ mod parse_rule_tests {
             assert!(series(&p, "60005").is_none(), "{name}");
             assert_eq!(p.no_time, 2, "{name}: the fixture's online row and this one");
             assert!(p.warnings.iter().any(|w| w.contains("ZZT 205")), "{name}: {:?}", p.warnings);
-            assert!(!p.warnings.iter().any(|w| w.contains("across midnight")), "{name}");
+            assert!(!p.warnings.iter().any(|w| w.contains("ZZT 205") && w.contains("across midnight")), "{name}: the fixture's own midnight row (MUS 250) is warned, this one is not");
         }
     }
 

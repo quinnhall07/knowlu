@@ -125,7 +125,7 @@ fn a_parse_failure_is_named_writes_nothing_and_the_temp_file_is_gone_too() {
     let v = scratch("fail");
     let cs = open(&v, "fail");
     let _gone = Gone(vec![v.clone(), cs.data_dir.clone()]);
-    let env = run_file(&cs, "today", "ua", b"{\"data\": []}", "2026-09-01".parse().unwrap());
+    let env = run_file(&cs, "today", "ua", b"{\"data\": {\"registrations\": []}}", "2026-09-01".parse().unwrap());
     assert_eq!(env["ok"], false, "{env}");
     assert!(env["error"].as_str().unwrap().contains("no class with meeting times"), "{env}");
     assert!(!v.join("commitments").exists() && !v.join("state/calendar-series.json").exists());
@@ -219,4 +219,34 @@ fn the_registrar_window_never_shares_the_grades_or_mail_session() {
     assert!(wipe.contains("w.label() == lms_link::WINDOW"), "the wipe is keyed on the registrar's label: {wipe}");
     assert_eq!(wipe.matches("wipe_session(").count(), 1, "one wipe, on one label: {wipe}");
     assert!(!wipe.contains("grades::") && !wipe.contains("mail::"), "never the grades or mail window: {wipe}");
+}
+
+/// Spec D3 amendment (R0): UA's rows call is one `GET` of `registrationHistory/reset?term=<term>`;
+/// there is no term-selection `POST` before it. This pins UA's real registrar entry, with
+/// `ua_has_a_registrar_and_every_call_is_on_its_own_registrar_host` above (B4, spec A2 item 18).
+#[test]
+fn uas_only_call_is_one_get_of_the_registration_history_for_the_chosen_term() {
+    let v = scratch("calls");
+    let reg = school_of(&v).expect("UA's row has a registrar entry");
+    let calls = call_urls(reg, "202640");
+    assert_eq!(
+        calls,
+        [("GET".to_string(), "https://bannerssb.ua.edu/StudentRegistrationSsb/ssb/registrationHistory/reset?term=202640".to_string(), None)]
+    );
+    assert!(calls.iter().all(|(method, _, form)| method != "POST" && form.is_none()), "no POST is sent: {calls:?}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// The key-set test: a curated school's `registrar.school` is a school the engine reads, so a
+/// curated row can never name a key `commitments --school` refuses (no UA literal).
+#[test]
+fn every_curated_registrar_school_is_a_key_of_the_engines_schools() {
+    let mut seen = 0;
+    for c in knowlu::scaffold::CAMPUSES {
+        if let Some(r) = c.registrar.as_ref() {
+            seen += 1;
+            assert!(knowlu_engine::registrar::school(r.school).is_some(), "{}: {:?} is not a key of registrar::SCHOOLS", c.label, r.school);
+        }
+    }
+    assert!(seen >= 1, "at least one curated school carries a registrar");
 }
