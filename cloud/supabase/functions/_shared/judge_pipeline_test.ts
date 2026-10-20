@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
-import { ModelRefused, ScriptedModel } from "./judge_anthropic.ts";
+import { ModelRefused, ProviderOutOfCredit, ScriptedModel } from "./judge_anthropic.ts";
+import { promptHash } from "./judge_prompts.ts";
 import {
   type CapStore,
   DAILY_CAP,
@@ -531,4 +532,48 @@ Deno.test("the request's timezone reaches the due resolver, so 'tomorrow' is the
     row,
   });
   assertEquals(bare.verdict?.due, "2026-09-19");
+});
+
+// L7 (plan §3.2, T2a test 2): a provider out of credit is still `model failed` in the row (true:
+// the model never answered, and `judgments.cause`'s check constraint stays as it is) and is still
+// refunded, but the reply names it with one more key, `unavailable: "out of credit"`, which a new
+// engine reads as a global stop and an older engine ignores.
+Deno.test("a provider out of credit is model failed, refunded, and named unavailable: out of credit", async () => {
+  const log = new Sink();
+  const caps = new Caps();
+  const reply = await judge(
+    "acct-1",
+    { kind: "task", item: ITEM, heuristics_seed: SEED },
+    deps(new ScriptedModel([new ProviderOutOfCredit()]), log, caps),
+  );
+  assertEquals(reply.verdict, null);
+  assertEquals(reply.tier, 3);
+  assertEquals(reply.outcome, "low confidence");
+  assertEquals(reply.cause, "model failed");
+  assertEquals(reply.unavailable, "out of credit");
+  assertEquals(log.rows.length, 1);
+  assertEquals(log.rows[0].cause, "model failed");
+  assertEquals(caps.charged, [["acct-1", "task"]]);
+  assertEquals(caps.refunded, [["acct-1", "task"]], "the model never answered, so the call is given back");
+  assertEquals(caps.tokens, []);
+});
+
+Deno.test("a plain model failure carries no unavailable key: byte for byte today's reply", async () => {
+  const reply = await judge(
+    "acct-1",
+    { kind: "task", item: ITEM, heuristics_seed: SEED },
+    deps(new ScriptedModel([new Error("the model service answered HTTP 500")]), new Sink(), new Caps()),
+  );
+  const today = {
+    verdict: null,
+    tier: 3,
+    outcome: "low confidence",
+    cause: "model failed",
+    model: "claude-haiku-4-5",
+    prompt_version: "task-1",
+    grammar_version: "task-1",
+    prompt_hash: await promptHash("task"),
+    judgment_id: "judgment-1",
+  };
+  assertEquals(JSON.stringify(reply), JSON.stringify(today));
 });

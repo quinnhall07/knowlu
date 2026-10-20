@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
-import { ScriptedModel } from "../_shared/judge_anthropic.ts";
+import { ProviderOutOfCredit, ScriptedModel } from "../_shared/judge_anthropic.ts";
 import type { JudgmentRow } from "../_shared/judge_pipeline.ts";
 import { CALENDAR_SCOPE, GMAIL_SCOPE } from "../_shared/google_scopes.ts";
 import { fail } from "../_shared/http.ts";
@@ -476,6 +476,22 @@ Deno.test("a model failure defers that one uid and continues to the next", async
   assertEquals(reply.deferred, 1);
   assert(!seen.has("gmail:m1"), "a failed item must not be marked seen, so it is asked about again");
   assert(seen.has("gmail:m2"));
+});
+
+// L7 (plan §3.2, Q6; T2a test 4): an out-of-credit reply stops the round as `capped` does. Every
+// later item would meet the same spent balance, so none is judged; the item is deferred, neither
+// queued nor marked seen, and nothing new reaches the device on this path.
+Deno.test("an out-of-credit reply stops the round on the spot, defers, and answers more:false", async () => {
+  const ids = ["m1", "m2"];
+  const { deps, rows, queued, seen } = fakes([new ProviderOutOfCredit(), TASK_ANSWER], ids);
+  const reply = await (await readHandler(OK, deps)(post())).json();
+  assertEquals(rows.length, 1, "m2 must never reach the pipeline once the service is out of credit");
+  assertEquals(queued.length, 0, "an out-of-credit item is never enqueued");
+  assert(!seen.has("gmail:m1"), "an out-of-credit item must not be marked seen, so it is asked about again");
+  assert(!seen.has("gmail:m2"), "a later item must not be marked seen either");
+  assertEquals(reply.deferred, 1);
+  assertEquals(reply.more, false, "retrying the rest of THIS round would not help while out of credit");
+  assertEquals("unavailable" in reply, false, "nothing new reaches the device on this path");
 });
 
 // ---------------------------------------------------------------------------------------------

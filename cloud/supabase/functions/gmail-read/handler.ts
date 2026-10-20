@@ -404,9 +404,10 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
           // R-C2-E42: a verdict the pipeline could not reach is neither enqueued nor marked seen
           // — `WINDOW` bounds how long it can keep coming back, so this is a deferral, not a leak.
           deferred += 1;
-          if (reply.outcome === "capped") {
+          if (reply.outcome === "capped" || reply.unavailable !== undefined) {
             // Every later item in this same round would answer the same way; stop rather than
-            // spend the rest of the list finding that out one call at a time.
+            // spend the rest of the list finding that out one call at a time. L7 (Q6): so does a
+            // service out of credit. The key stays here: nothing new reaches the device.
             more = false;
             break;
           }
