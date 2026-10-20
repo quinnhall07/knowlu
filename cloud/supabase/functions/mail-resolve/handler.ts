@@ -42,7 +42,7 @@ import { asResponse, fail, json, methodNotAllowed } from "../_shared/http.ts";
 
 /** D20's claim key: a message uid and the claim's index, below D9's five. */
 export const CLAIM_KEY = new RegExp(`^(mail:[0-9a-f]{32}):([0-${MAX_MAIL_CLAIMS - 1}])$`);
-/** The most claims one call asks: each answer is about 30 tokens and the pin allows 640. */
+/** The most claims one call asks: T18b's 15-claim batch outran 640 output tokens, and the pin allows 1280. */
 export const MAX_CLAIMS = 15;
 /** The most candidates one call carries: a course's active items. */
 export const MAX_CANDIDATES = 200;

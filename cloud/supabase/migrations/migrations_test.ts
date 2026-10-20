@@ -1415,6 +1415,16 @@ function currentMaxTokens(files: Array<[string, string]>): Partial<Record<PinKin
       const set = /\bmax_tokens\s*=\s*(\d+)/i.exec(m[1]);
       if (set) out[m[2] as PinKind] = Number(set[1]);
     }
+    // One statement for several kinds: `set max_tokens = case kind when '<kind>' then N … end, …
+    // where kind in ('<kind>', …);` — a kind moves only if both its `when` arm and the `in` list name it.
+    const multi =
+      /update\s+(?:public\.)?models\s+set\s+max_tokens\s*=\s*case\s+kind\s+((?:when\s+'\w+'\s+then\s+\d+\s+)+)end\b[^;]*?where\s+kind\s+in\s*\(([^)]*)\)\s*;/gi;
+    for (const m of sql.matchAll(multi)) {
+      const listed = new Set([...m[2].matchAll(/'(\w+)'/g)].map((k) => k[1]));
+      for (const arm of m[1].matchAll(/when\s+'(\w+)'\s+then\s+(\d+)/gi)) {
+        if (listed.has(arm[1])) out[arm[1] as PinKind] = Number(arm[2]);
+      }
+    }
   }
   return out;
 }
@@ -1436,9 +1446,38 @@ Deno.test("mail_claim_alone_is_re_pinned_to_1024_max_tokens_by_one_statement", a
     statements[0].replace(/\s+/g, " ").trim(),
     "update public.models set max_tokens = 1024, since = current_date where kind = 'mail_claim'",
   );
-  assertEquals(currentMaxTokens(files), { task: 256, event: 256, email: 640, mail_claim: 1024, mail_resolve: 640 });
+  // As this migration left the rows; the T18b re-pin below moves both mail kinds later.
+  const through = files.filter(([n]) => n <= MAIL_CLAIM_MAX_TOKENS);
+  assertEquals(currentMaxTokens(through), { task: 256, event: 256, email: 640, mail_claim: 1024, mail_resolve: 640 });
   const before = files.filter(([n]) => n < MAIL_CLAIM_MAX_TOKENS);
   assertEquals(currentMaxTokens(before).mail_claim, 640, "the applied mail migration's seed is unchanged");
+});
+
+const MAIL_MAX_TOKENS_REPIN = "20261020000100_mail_max_tokens_repin.sql";
+
+Deno.test("mail_resolve_and_mail_claim_are_re_pinned_to_1280_and_1536_max_tokens_by_one_statement", async () => {
+  // Quinn, 2026-10-20, T18b's pin check (P8's re-pin path): a 15-claim mail_resolve batch stopped at
+  // 640/640 with 0/15 answered, and a five-obligation mail_claim used 1008 of 1024. One statement
+  // moves both rows; 20261002000200_mail.sql and 20261005000100 are applied and stay.
+  const files = await everyMigrationFile();
+  const raw = files.find(([n]) => n === MAIL_MAX_TOKENS_REPIN)?.[1];
+  assert(raw !== undefined, `expected ${MAIL_MAX_TOKENS_REPIN}`);
+  assert(MAIL_MAX_TOKENS_REPIN > MAIL_CLAIM_MAX_TOKENS, `stamped after ${MAIL_CLAIM_MAX_TOKENS}`);
+  assert(MAIL_MAX_TOKENS_REPIN > MAIL_LAST_LAPSED_AT, `stamped after ${MAIL_LAST_LAPSED_AT}, the branch's newest`);
+  const statements = stripLineComments(raw!).split(";").filter((s) => s.trim() !== "");
+  assertEquals(statements.length, 1, `${MAIL_MAX_TOKENS_REPIN}: one statement`);
+  assertEquals(
+    statements[0].replace(/\s+/g, " ").trim(),
+    "update public.models set max_tokens = case kind when 'mail_resolve' then 1280 when 'mail_claim' then 1536 end, " +
+      "since = current_date where kind in ('mail_resolve', 'mail_claim')",
+  );
+  assertEquals(currentMaxTokens(files), { task: 256, event: 256, email: 640, mail_claim: 1536, mail_resolve: 1280 });
+  const before = files.filter(([n]) => n < MAIL_MAX_TOKENS_REPIN);
+  assertEquals(currentMaxTokens(before), { task: 256, event: 256, email: 640, mail_claim: 1024, mail_resolve: 640 });
+  // The pin stays email's model, route and price: only max_tokens and since move.
+  for (const kind of ["mail_claim", "mail_resolve"] as const) {
+    assertEquals(currentPin(files, kind), currentPin(before, kind), `${kind}: only max_tokens moves`);
+  }
 });
 
 // Email forwarding T1.3 (spec §5.1's RPCs and cron, test 14's RPC half and 11's database half; D17,
@@ -1775,7 +1814,12 @@ Deno.test("mail_addresses_gains_last_lapsed_at_backfilled_from_lapsed_since_and_
   const raw = files.find(([n]) => n === MAIL_LAST_LAPSED_AT)?.[1];
   assert(raw !== undefined, `expected ${MAIL_LAST_LAPSED_AT}`);
   // Forward-only: a new file after every applied one; the mail migration is never edited.
-  assertEquals(files.map(([n]) => n).filter((n) => n > MAIL_LAST_LAPSED_AT), [], "stamped after every other file");
+  // Stamped after every file before it; a later migration is named here when it lands.
+  assertEquals(
+    files.map(([n]) => n).filter((n) => n > MAIL_LAST_LAPSED_AT),
+    [MAIL_MAX_TOKENS_REPIN],
+    "stamped after every other file but the named later ones",
+  );
   const { name: mail, sql: mailSql } = await mailMigration();
   assert(!tableColumns(mailSql, "mail_addresses").has("last_lapsed_at"), `${mail} stays as applied`);
   const statements = stripLineComments(raw!).split(";").map((s) => s.replace(/\s+/g, " ").trim().toLowerCase())

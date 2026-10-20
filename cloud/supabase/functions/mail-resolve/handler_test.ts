@@ -500,7 +500,7 @@ Deno.test("the_resolve_needs_a_session_an_entitlement_post_and_a_bounded_batch",
   const get = await w.post(undefined, "session", "GET");
   assertEquals(get.status, 405);
   await get.body?.cancel();
-  // The bounds: 15 answers of about 30 tokens fit the pin's 640; a course's active items fit 200.
+  // The bounds: 15 answers fit the pin's 1280 (T18b outran 640); a course's active items fit 200.
   assertEquals([MAX_CLAIMS, MAX_CANDIDATES], [15, 200]);
   const many = (n: number, f: (i: number) => unknown) => Array.from({ length: n }, (_, i) => f(i));
   const one = [ref(1, 0)];
