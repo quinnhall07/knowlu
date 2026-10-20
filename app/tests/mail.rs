@@ -5674,3 +5674,200 @@ fn a_refused_hint_never_deletes_an_address_settings_handed_out() {
     assert!(p.kept);
     assert!(pendings(&r.dir).is_empty(), "the run handled its address: kept");
 }
+
+// ---- the saved-sign-in switch against a running slot (pre-PR review, 2026-10-20, signin-off; spec §4.13) ----
+//
+// Turning the saved sign-in off closes the mail window and deletes every kept profile. A slot mail step that is
+// already running must stop opening them, the switch holds the one mail window until the last profile is gone,
+// and a step that starts (or is about to open a window) after the switch was recorded opens none at all.
+
+#[path = "support/slot_rig.rs"]
+mod slot_rig;
+
+/// `mail::stop_runs` and the mail window's hold are process-wide: the tests below that run the slot take this lock.
+static SLOT_RUN_LOCK: Mutex<()> = Mutex::new(());
+
+fn slot_rows(ids: &[&str]) -> Vec<Value> {
+    ids.iter()
+        .map(|m| json!({ "address_id": m, "provider": "m365", "address": slot_rig::KNOWLU, "status": "active", "lapsed_since": null }))
+        .collect()
+}
+
+#[test]
+fn slot_opens_no_profile_once_saved_sign_in_is_off() {
+    let _runs = SLOT_RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let d = temp("signin-off-slot");
+    profile(&d, "mail-session-mbx-a");
+    MailState::update(&d, |s| {
+        s.keep_session = false;
+        true
+    })
+    .unwrap();
+    let rows = slot_rows(&["mbx-a"]);
+    let svc = slot_rig::Svc::start(rows.clone());
+    let (client, clock, host) = (svc.client(), slot_rig::Clk::at(slot_rig::NOW), slot_rig::FakeHost::new(slot_rig::fwd("on", "ours")));
+    let out = knowlu::mail::slot::run_step(&knowlu::mail::slot::SlotEnv { host: &host, client: &client, clock: &clock, data_dir: &d }, &rows);
+    assert_eq!(host.opens(), Vec::<(PathBuf, bool)>::new(), "a kept profile was opened with the saved sign-in off");
+    assert_eq!(out, None, "nothing ran, so the step has no line");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The live half, which needs the app's handle, so no test drives it: the toggle's close stops the runs and then
+/// closes the mail window (`stop_and_close`), and the command takes the mail window within the sign-out's bound,
+/// with the same close as the stop it calls on every miss; its hold is what `keep_session_with` keeps.
+#[test]
+fn the_toggles_live_close_stops_runs_first_and_takes_the_mail_window_within_the_bound() {
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("mail.rs")).unwrap();
+    let body = |head: &str| {
+        let at = src.find(head).unwrap_or_else(|| panic!("{head}"));
+        &src[at..at + src[at..].find("\n}\n").expect("the end of its body")]
+    };
+    let close = body("pub fn stop_and_close(app: &tauri::AppHandle) {");
+    let (stop, shut) = (close.find("stop_runs();"), close.find("close(app);"));
+    assert!(stop.is_some() && stop < shut, "stop_and_close sets the stop before it closes the window: {close}");
+    let toggle = body("pub fn mail_keep_session(");
+    let (closes, takes) = (toggle.find("stop_and_close(&app);"), toggle.find("MailWindow::take_by("));
+    assert!(closes.is_some() && closes < takes, "the toggle closes, then takes the mail window: {toggle}");
+    let take = &toggle[takes.unwrap()..];
+    assert!(take.contains("crate::account::MAIL_STOP_BOUND") && take.contains("|| stop_and_close(&app)"), "within the bound, stopping the holder on a miss: {take}");
+}
+
+/// A slot-shaped mail window: each profile it opens is held, a file open with no sharing as WebView2 holds its
+/// profile, until the window closes. A script waits while the window is open and then answers as a vanished
+/// window does, so a pass ends only once its window is closed under it.
+#[cfg(windows)]
+struct HeldWindow {
+    st: Arc<Mutex<HeldState>>,
+    opened: std::sync::mpsc::Sender<String>,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct HeldState {
+    open: Option<std::fs::File>,
+    /// Every profile opened, by folder name.
+    opens: Vec<String>,
+}
+
+#[cfg(windows)]
+impl HeldWindow {
+    fn is_open(&self) -> bool {
+        self.st.lock().unwrap().open.is_some()
+    }
+}
+
+#[cfg(windows)]
+impl knowlu::mail::recover::Mailbox for HeldWindow {
+    fn script(&self, _: &str, _: &Value) -> Result<Value, knowlu::mail::Refusal> {
+        let began = std::time::Instant::now();
+        while self.is_open() && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err(knowlu::mail::Refusal::NoPage)
+    }
+    fn open(&self, _: knowlu::mail::recover::Place) -> Result<(), knowlu::mail::Refusal> {
+        if self.is_open() { Ok(()) } else { Err(knowlu::mail::Refusal::NoPage) }
+    }
+}
+
+#[cfg(windows)]
+impl Host for HeldWindow {
+    fn use_provider(&self, _: Provider) {}
+    fn open_window(&self, profile: &Path, _visible: bool) -> Result<(), String> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = std::fs::OpenOptions::new().write(true).create(true).truncate(true).share_mode(0).open(profile.join("held"));
+        let name = profile.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let mut s = self.st.lock().unwrap();
+        s.open = Some(held.map_err(|e| e.to_string())?);
+        s.opens.push(name.clone());
+        drop(s);
+        let _ = self.opened.send(name);
+        Ok(())
+    }
+    fn window_open(&self) -> bool {
+        self.is_open()
+    }
+    fn signed_in(&self) -> bool {
+        self.is_open()
+    }
+    fn title_address(&self) -> Option<String> {
+        None
+    }
+    fn popup_open(&self) -> bool {
+        false
+    }
+    fn step_aside(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn come_back(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn close_window(&self) {
+        self.st.lock().unwrap().open = None;
+    }
+}
+
+/// What the toggle's close hands `keep_session_with`: the mail window's hold and, when it is let go, whether
+/// any `mail-session-*` profile was still on disk.
+#[cfg(windows)]
+struct Kept<'a> {
+    _hold: Option<knowlu::mail::MailWindow>,
+    dir: PathBuf,
+    left_at_release: &'a Cell<Option<bool>>,
+}
+
+#[cfg(windows)]
+impl Drop for Kept<'_> {
+    fn drop(&mut self) {
+        let left = std::fs::read_dir(&self.dir).map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with("mail-session-")));
+        self.left_at_release.set(Some(left.unwrap_or(true)));
+    }
+}
+
+/// A slot's mail step holds the mail window on the first of three mailboxes when the student turns the saved
+/// sign-in off. The toggle's close (as `mail::stop_and_close` does it: the stop, then the window) ends that
+/// mailbox's pass; the step then opens no second profile. The toggle takes the hold within its time limit,
+/// keeps it until every `mail-session-<id>` is deleted, and lets it go only then.
+#[cfg(windows)]
+#[test]
+fn mail_keep_session_off_stops_the_slot_and_holds_the_window_until_every_profile_is_gone() {
+    let _runs = SLOT_RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let d = temp("signin-off-hold");
+    let ids = ["mbx-a", "mbx-b", "mbx-c"];
+    for m in ids {
+        std::fs::create_dir_all(d.join(format!("mail-session-{m}"))).unwrap();
+    }
+    let rows = slot_rows(&ids);
+    let st = Arc::new(Mutex::new(HeldState::default()));
+    let (opened, first) = std::sync::mpsc::channel();
+    let window = HeldWindow { st: st.clone(), opened };
+    let (svc, slot_dir, due) = (slot_rig::Svc::start(rows.clone()), d.clone(), rows.clone());
+    let slot = std::thread::spawn(move || {
+        let _hold = knowlu::mail::MailWindow::try_take().expect("the slot's mail step holds the mail window");
+        let (client, clock) = (svc.client(), slot_rig::Clk::at(slot_rig::NOW));
+        knowlu::mail::slot::run_step(&knowlu::mail::slot::SlotEnv { host: &window, client: &client, clock: &clock, data_dir: &slot_dir }, &due)
+    });
+    assert_eq!(first.recv_timeout(Duration::from_secs(60)).expect("the slot opened its first mailbox"), "mail-session-mbx-a");
+
+    let left_at_release = Cell::new(None);
+    let out = keep_session_with(&d, false, || {
+        let close = || {
+            knowlu::mail::stop_runs();
+            st.lock().unwrap().open = None;
+        };
+        close();
+        let hold = knowlu::mail::MailWindow::take_by(std::time::Instant::now() + Duration::from_secs(30), close);
+        assert!(hold.is_some(), "the toggle took the mail window within its time limit");
+        Kept { _hold: hold, dir: d.clone(), left_at_release: &left_at_release }
+    });
+    slot.join().expect("the slot's thread");
+
+    assert_eq!(st.lock().unwrap().opens, ["mail-session-mbx-a"], "a mail profile was opened after the toggle's close");
+    assert_eq!((out["ok"].clone(), out["profiles_left"].clone()), (json!(true), json!(false)), "{out}");
+    for m in ids {
+        assert!(!d.join(format!("mail-session-{m}")).exists(), "mail-session-{m} survived the switch");
+    }
+    assert_eq!(left_at_release.get(), Some(false), "the mail window was let go before every mail profile was gone");
+    assert!(knowlu::mail::MailWindow::try_take().is_some(), "the toggle let the mail window go when it was done");
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -644,6 +644,17 @@ pub fn close(app: &tauri::AppHandle) {
     PAGE_TITLE.clear();
 }
 
+/// What a sign-out's close does (`account::close_mail_windows`), for the saved sign-in switch (spec §4.13):
+/// the runs stop first, so a run that began earlier opens no further profile; a setup's own stop is set; then
+/// the windows close. Called again on every miss while the switch waits for the mail window.
+pub fn stop_and_close(app: &tauri::AppHandle) {
+    stop_runs();
+    if let Some(run) = setup::SETUPS.current() {
+        run.stop();
+    }
+    close(app);
+}
+
 /// S3: a page's launch of an external scheme (`mailto:`, an app's own) is cancelled, so no
 /// "open this link" prompt and no other app ever opens from a mail window.
 #[cfg(windows)]
@@ -796,11 +807,11 @@ pub fn mail_rotate(app: tauri::AppHandle, cs: State<'_, ConsoleState>, address_i
 
 #[tauri::command(async)]
 pub fn mail_keep_session(app: tauri::AppHandle, cs: State<'_, ConsoleState>, on: bool) -> Value {
+    // The hold is what `keep_session_with` keeps until the profiles are gone; a deadline miss (`None`) still
+    // deletes and reports `profiles_left`, as a sign-out does.
     commands::keep_session_with(&cs.data_dir, on, || {
-        if let Some(run) = setup::SETUPS.current() {
-            run.stop();
-        }
-        close(&app);
+        stop_and_close(&app);
+        MailWindow::take_by(Instant::now() + crate::account::MAIL_STOP_BOUND, || stop_and_close(&app))
     })
 }
 

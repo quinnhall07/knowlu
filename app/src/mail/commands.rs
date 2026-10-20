@@ -169,9 +169,11 @@ pub fn rotate_with(data_dir: &Path, address_id: &str, row: Option<&Value>, start
 
 /// `mail_keep_session(on)` (D15): the switch is recorded first, so a delete that fails below still leaves it
 /// off. Off closes the mail window (`close`) and deletes every `mail-session-*` profile and `mail-setup`,
-/// through `mail_session`'s guard, and nothing else. A `mail.json` that cannot be read or written changes
-/// nothing, because the switch could not be kept.
-pub fn keep_session_with(data_dir: &Path, on: bool, close: impl FnOnce()) -> Value {
+/// through `mail_session`'s guard, and nothing else. What `close` hands back is the hold on the mail window
+/// (`Held`): it is kept until the deletion ends and dropped only then (spec §4.13), so no run can open a
+/// profile that is being deleted. A `mail.json` that cannot be read or written changes nothing, because the
+/// switch could not be kept.
+pub fn keep_session_with<Held>(data_dir: &Path, on: bool, close: impl FnOnce() -> Held) -> Value {
     let saved = MailState::update(data_dir, |s| {
         let changed = s.keep_session != on;
         s.keep_session = on;
@@ -183,8 +185,10 @@ pub fn keep_session_with(data_dir: &Path, on: bool, close: impl FnOnce()) -> Val
     let left = if on {
         false
     } else {
-        close();
-        forget_all(data_dir) != Ok(true)
+        let held = close();
+        let left = forget_all(data_dir) != Ok(true);
+        drop(held);
+        left
     };
     json!({ "ok": true, "error": Value::Null, "keep_session": on, "profiles_left": left })
 }

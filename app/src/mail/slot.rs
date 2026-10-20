@@ -150,7 +150,9 @@ fn mailbox(env: &SlotEnv, row: &Value, run: crate::mail::Run) -> Option<(Provide
     let id = row["address_id"].as_str().filter(|i| valid_address_id(i))?;
     let provider = Provider::from_service(row["provider"].as_str().unwrap_or(""));
     let state = MailState::load(env.data_dir).ok()?;
-    if provider == Provider::Guided || state.is_turned_off(id) {
+    // The saved sign-in is off (`mail_keep_session`): its profiles are being deleted, so none opens. The switch is
+    // recorded before its close runs, so a run whose `Run` began after the close's stop still reads it here.
+    if provider == Provider::Guided || state.is_turned_off(id) || !state.keep_session {
         return None;
     }
     let knowlu = row["address"].as_str().filter(|a| !a.is_empty())?;
