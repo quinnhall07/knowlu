@@ -1865,9 +1865,11 @@ Deno.test("mail_addresses_gains_last_lapsed_at_backfilled_from_lapsed_since_and_
   const raw = files.find(([n]) => n === MAIL_LAST_LAPSED_AT)?.[1];
   assert(raw !== undefined, `expected ${MAIL_LAST_LAPSED_AT}`);
   // Forward-only: a new file after every applied one; the mail migration is never edited.
-  // Stamped after every file before it; a later migration is named here when it lands.
+  // Stamped after every file before it; a later migration is named here when it lands. A lane's
+  // migration is named by its suffix, never its stamp (friends-testers §8.4, M4): L8's testers.
+  const LATER_LANES = /^\d{14}_testers\.sql$/;
   assertEquals(
-    files.map(([n]) => n).filter((n) => n > MAIL_LAST_LAPSED_AT),
+    files.map(([n]) => n).filter((n) => n > MAIL_LAST_LAPSED_AT && !LATER_LANES.test(n)),
     [MAIL_MAX_TOKENS_REPIN],
     "stamped after every other file but the named later ones",
   );
@@ -1952,4 +1954,172 @@ revoke execute on function other.x() from public, anon, authenticated;
   // schema, and no revoke can name that, so it is reported.
   const viewSql = "create view other.v as select 1;\nrevoke all on other.v from anon, authenticated;\n";
   thrownMessage(() => assertViewsGuarded([["synthetic-other-view.sql", viewSql]]));
+});
+
+// L8 S2a (friends-testers spec §3.1, §3.5, §6, §9 layer i). The rule-1 tripwire: (a) no
+// address-shaped token in any migration's raw text, comments and `$$` bodies included; (b) every
+// write to `comp_grants` or `comp_audit` (exactly the three DML shapes of §6) lies inside an
+// `admin.comp_*` function body, and an insert into `comp_grants` carries no quoted literal.
+const ADDRESS_TOKEN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+export function addressTokens(files: Array<[string, string]>): string[] {
+  return files.flatMap(([name, raw]) => [...raw.matchAll(ADDRESS_TOKEN)].map((m) => `${name}: ${m[0]}`));
+}
+
+/** `comp_grants` or `comp_audit`, bare, `public.`-qualified or quoted, and never a longer name. */
+const GRANT_TABLE = `(?:"?public"?\\s*\\.\\s*)?"?(?:comp_grants|comp_audit)"?(?![\\w"])`;
+/** §6's three write shapes and nothing else: `insert into <t>`, `update [only] <t> [alias] set`,
+ * `delete from [only] <t>`. A DML word elsewhere (a revoke, `on delete set null`) is not a write. */
+const GRANT_WRITE = new RegExp(
+  `\\b(?:insert\\s+into\\s+${GRANT_TABLE}|update\\s+(?:only\\s+)?${GRANT_TABLE}(?:\\s+(?:as\\s+)?\\w+)?\\s+set\\b|` +
+    `delete\\s+from\\s+(?:only\\s+)?${GRANT_TABLE})`,
+  "gi",
+);
+/** A named `admin.comp_*` function; group 1 is its dollar tag, group 2 its body. */
+const ADMIN_COMP_FUNCTION =
+  /create\s+(?:or\s+replace\s+)?function\s+"?admin"?\s*\.\s*"?comp_\w+"?\s*\([^)]*\)[\s\S]*?\bas\s+(\$[A-Za-z_]*\$)([\s\S]*?)\1/gi;
+
+export function grantWriteProblems(files: Array<[string, string]>): string[] {
+  const out: string[] = [];
+  for (const [name, raw] of files) {
+    const sql = stripLineComments(raw);
+    const bodies = [...sql.matchAll(ADMIN_COMP_FUNCTION)].map((m) => {
+      const end = (m.index ?? 0) + m[0].length - m[1].length;
+      return [end - m[2].length, end];
+    });
+    for (const w of sql.matchAll(GRANT_WRITE)) {
+      const at = w.index ?? 0;
+      if (!bodies.some(([s, e]) => at >= s && at < e)) out.push(`${name}: '${w[0]}' outside an admin.comp_* function`);
+      const stop = sql.indexOf(";", at);
+      const statement = sql.slice(at, stop === -1 ? undefined : stop);
+      if (/^insert/i.test(w[0]) && /comp_grants/i.test(w[0]) && statement.includes("'")) {
+        out.push(`${name}: an insert into comp_grants carries a quoted literal`);
+      }
+    }
+  }
+  return out;
+}
+
+const LEAK = "do $$ begin insert into public.comp_grants values ('friend@example.invalid'); end $$;\n";
+const ADMIN_GRANT_FN = `create function admin.comp_grant(p_account uuid, p_ends timestamptz) returns uuid
+language plpgsql security definer as $$ declare g uuid; begin
+  insert into public.comp_grants (account_id, ends_at) values (p_account, p_ends) returning id into g;
+  return g; end $$;
+`;
+// §9's must-pass shapes: S2a's own SQL carries them, and none is a write.
+const MUST_PASS = `revoke insert, update, delete, truncate on public.comp_grants from service_role;
+revoke insert, update, delete, truncate on public.comp_audit from service_role;
+create table public.comp_audit (id uuid primary key, grant_id uuid references public.comp_grants on delete set null,
+  account_id uuid not null references public.accounts(id) on delete cascade, at timestamptz);
+create unique index comp_grants_one_open on public.comp_grants (account_id) where ended_at is null;
+comment on table public.comp_grants is 'rows insert only through admin functions; delete by the sweep';
+`;
+
+Deno.test("S2a tripwire: a do-block insert carrying an address is reported by both parts", () => {
+  assertEquals(addressTokens([["leak.sql", LEAK]]), ["leak.sql: friend@example.invalid"]);
+  const problems = grantWriteProblems([["leak.sql", LEAK]]);
+  assert(problems.some((p) => p.includes("outside an admin.comp_* function")), problems.join("\n"));
+  assert(problems.some((p) => p.includes("quoted literal")), problems.join("\n"));
+});
+
+Deno.test("S2a tripwire: an address in a -- comment is reported by (a)", () => {
+  assertEquals(addressTokens([["c.sql", "-- reach k7@in.example.invalid\nselect 1;\n"]]).length, 1);
+});
+
+Deno.test("S2a tripwire: top-level writes in each DML shape are reported by (b), literal or not", () => {
+  for (
+    const sql of [
+      "insert into comp_grants select * from x;",
+      "update only public.comp_audit set at = now();",
+      'delete from "comp_grants";',
+      "update public.comp_grants g set ends_at = now();",
+    ]
+  ) {
+    assertEquals(grantWriteProblems([["w.sql", sql]]).length, 1, sql);
+  }
+});
+
+Deno.test("S2a tripwire: a parameterised insert inside admin.comp_grant passes; a literal there does not", () => {
+  assertEquals(grantWriteProblems([["fn.sql", ADMIN_GRANT_FN]]), []);
+  const literal = ADMIN_GRANT_FN.replace("(p_account, p_ends)", "('00000000-0000-0000-0000-000000000000', p_ends)");
+  assertEquals(grantWriteProblems([["fn.sql", literal]]).length, 1);
+});
+
+Deno.test("S2a tripwire: S2a's revokes, foreign key, index and comment are not writes", () => {
+  assertEquals(grantWriteProblems([["s2a.sql", MUST_PASS]]), []);
+  assertEquals(addressTokens([["s2a.sql", MUST_PASS]]), []);
+});
+
+Deno.test("S2a tripwire: the whole corpus carries no address-shaped token and no stray grant write", async () => {
+  const files = await everyMigrationFile();
+  assertEquals(addressTokens(files), []);
+  assertEquals(grantWriteProblems(files), []);
+});
+
+/** The one `<stamp>_testers.sql`, comment-stripped; found by suffix, never by stamp (M4). */
+async function testersMigration(): Promise<{ name: string; sql: string }> {
+  const files = (await everyMigrationFile()).filter(([n]) => /^\d{14}_testers\.sql$/.test(n));
+  assertEquals(files.length, 1, "exactly one <stamp>_testers.sql (friends-testers §8.4, M4)");
+  return { name: files[0][0], sql: stripLineComments(files[0][1]) };
+}
+const COMP_TABLES = ["comp_grants", "comp_audit"];
+const flatten = (sql: string) => stripLineComments(sql).replace(/\s+/g, " ").toLowerCase();
+
+Deno.test("S2a: comp_grants and comp_audit have RLS on, no client grant or policy, and the service role only reads", async () => {
+  const { name, sql } = await testersMigration();
+  const flat = flatten(sql);
+  for (const t of COMP_TABLES) {
+    assert(flat.includes(`alter table public.${t} enable row level security;`), `${name}: ${t} needs RLS on`);
+    assert(flat.includes(`revoke all on public.${t} from public, anon, authenticated;`), `${name}: ${t} client revoke`);
+    assert(
+      flat.includes(`revoke insert, update, delete, truncate on public.${t} from service_role;`),
+      `${name}: the service role must not write ${t} (§3.5, A7)`,
+    );
+  }
+  for (const [file, raw] of await everyMigrationFile()) {
+    const text = flatten(raw);
+    for (const t of COMP_TABLES) {
+      const on = `on (?:table )?(?:public\\.)?${t}\\b`;
+      for (const r of text.matchAll(new RegExp(`revoke ([^;]*?) ${on}[^;]* from ([^;]+);`, "g"))) {
+        if (/\bservice_role\b/.test(r[2])) {
+          assert(!/\b(select|all)\b/.test(r[1]), `${file}: the export needs the service role's select on ${t}`);
+        }
+      }
+      assert(!new RegExp(`\\bgrant [^;]*${on}`).test(text), `${file}: grants a right on ${t}`);
+      assert(!new RegExp(`create policy [^;]*${on}`).test(text), `${file}: a policy on ${t}`);
+    }
+  }
+});
+
+Deno.test("S2a: the admin schema's rights are revoked from every API role, and PostgREST does not expose it", async () => {
+  const { name, sql } = await testersMigration();
+  const flat = flatten(sql);
+  assert(/\bcreate schema (?:if not exists )?admin;/.test(flat), `${name}: creates the admin schema`);
+  const revokes = [...flat.matchAll(/revoke (?:all|usage) on schema admin from ([^;]+);/g)].map((m) => m[1]);
+  const roles = ["public", "anon", "authenticated", "service_role"];
+  assert(revokes.some((f) => roles.every((r) => new RegExp(`\\b${r}\\b`).test(f))), `${name}: admin usage revoke`);
+  for (const [file, raw] of await everyMigrationFile()) {
+    assert(!/\bgrant [^;]* on schema admin\b/.test(flatten(raw)), `${file}: grants on the admin schema`);
+  }
+  const toml = await Deno.readTextFile(new URL("../config.toml", HERE));
+  const schemas = /^\[api\][^[]*?^schemas\s*=\s*\[([^\]]*)\]/m.exec(toml);
+  assert(schemas !== null && !/admin/.test(schemas[1]), "config.toml's [api] schemas must not expose admin");
+});
+
+Deno.test("S2a: the grant and audit columns are §3.1's and §3.5's; no address, hash, actor or free text in the audit", async () => {
+  const { name, sql } = await testersMigration();
+  const grants = tableColumns(sql, "comp_grants");
+  const audit = tableColumns(sql, "comp_audit");
+  assertEquals([...grants.keys()], ["id", "account_id", "cohort", "granted_at", "ends_at", "ended_at", "ended_reason", "note"]);
+  assertEquals([...audit.keys()], ["id", "grant_id", "account_id", "action", "ends_at", "cohort", "db_role", "at"]);
+  for (const col of [...grants.keys(), ...audit.keys()]) {
+    assert(!/email|title|body|sender|subject|item_id/.test(col), `${name}: column ${col} could hold an address or content`);
+  }
+  for (const c of ["note", "reason", "actor", "email", "email_hash"]) assert(!audit.has(c), `${name}: comp_audit.${c}`);
+  assert(grants.get("note")!.includes("check (char_length(note) <= 200)"), `${name}: the note's length bound`);
+  assert(grants.get("ended_reason")!.includes("check (ended_reason in ('done', 'asked', 'misuse', 'other'))"));
+  assert(audit.get("action")!.includes("check (action in ('grant', 'extend', 'end'))"), `${name}: the audit's actions`);
+  assert(
+    /create unique index \w+ on public\.comp_grants \(account_id\) where ended_at is null;/.test(flatten(sql)),
+    `${name}: one open grant per account (§3.1)`,
+  );
 });
