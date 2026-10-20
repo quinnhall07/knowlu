@@ -248,7 +248,7 @@ mod tests {
     }
 
     /// Every outcome is logged, not only the ones that wrote something: a week of "service
-    /// unavailable" is exactly what tells Quinn why nothing is being enriched.
+    /// unavailable" is exactly what tells the student why nothing is being enriched.
     #[test]
     fn every_outcome_is_recorded_with_the_tier_that_reached_it() {
         let empty: Vec<(String, String)> = Vec::new();
