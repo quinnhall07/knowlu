@@ -4,19 +4,19 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 `CLAUDE.md` keeps the rules; this file keeps the reference. Recount before quoting a number.
 
 - `app/src/commands.rs` computes nothing itself; every vault write goes through the engine's `write`
-  with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-10-01 (events: `remove_lane_date`; the 2026-09-30 recount, M2 editing after Gmail connect and M1 grades merged in, gave 59 / 29 / 78; the
+  with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-10-03 (email forwarding: ten `mail::` commands; the 2026-10-01 recount gave 60 / 29 / 79; the 2026-09-30 recount, M2 editing after Gmail connect and M1 grades merged in, gave 59 / 29 / 78; the
   merge-time recount gave 54 / 29 / 73, the 2026-09-29 one 47 / 29 / 66)** (by script,
   over the two `generate_handler!` lists in `app/src/main.rs`; C3′ added none):
-  the console window registers **60** (phase 2 added `answer_card`, `commitment_proposals`,
+  the console window registers **70** (email forwarding added the ten `mail::` commands; phase 2 added `answer_card`, `commitment_proposals`,
   `commitments_confirm`, `your_week`, `preview_window`; M1 added `grades::grades_status`,
   `grades_connect`, `grades_refresh`, `grades_forget`; Gmail connect added `account::google_status`,
   `account::google_connect` and `account::google_disconnect`; M2 added `set_body`, `profile`, `set_preferences`, `set_interests` and
   `dropped_events`; events added `remove_lane_date`), the vault-less picker/wizard window **29**
   (C2's hand-off H9 phase (a) added `account::google_connect_url`, `account::google_connected`,
   `account::open_external`; C1b's H1 removed `account::sign_up` and `account::sign_in` with the
-  password and added `account::google_sign_in` to both lists) — **79** distinct. Commands live
+  password and added `account::google_sign_in` to both lists) — **89** distinct. Commands live
   beside the module they serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`,
-  `report.rs`, `lms_link.rs`), never all in one file. **Thirteen** mutate notes (`set_fields`, `set_body`, `set_preferences`, `set_interests`,
+  `report.rs`, `lms_link.rs`, `mail.rs`), never all in one file. **Thirteen** mutate notes (`set_fields`, `set_body`, `set_preferences`, `set_interests`,
   `create_task`, `delete_note`, `decide`, `answer_card`, `commitments_confirm`, `close_info`,
   `open_issue`, `resolve_issue`, `sync` — the last applies another desktop's writes through `write`
   and can file a `kind: amend` card); `set_fields` edits a commitment's `kind`/`level` only as
@@ -102,6 +102,59 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   logged. No curated row carries a `policy_read` date on this branch; the date-and-bump test in
   `app/tests/grades.rs` keeps it so until privacy bump #1. Before any release that writes `grades/`,
   migration `20260929000100` must be applied to the server.
+- **Email forwarding (the mail window)** (spec `docs/specs/2026-09-30-email-forwarding-design.md`;
+  plan `docs/plans/2026-09-30-email-forwarding-plan.md`). Built on branch `email-forwarding`, not
+  merged; no release is cut from a `main` carrying it before privacy bump #1 (D18), and `release.yml`'s
+  first build step, `scripts/ci/privacy-guard.ps1`, fails one that tries. The app sets up
+  forwarding from the student's school mailbox to a secret address the service mints, drives the
+  mailbox's web page for it, and never reads a message. Recounted 2026-10-03 from the code.
+  - **The ten commands** (`app/src/mail.rs`, thin wrappers over seams in `app/src/mail/commands.rs`;
+    named in the console's `generate_handler!` list and not the wizard's): `mail_status`,
+    `mail_setup_start(provider)`, `mail_setup_progress`, `mail_setup_answer(choice)`,
+    `mail_setup_stop`, `mail_sign_in(address_id)`, `mail_disconnect(address_id)`,
+    `mail_rotate(address_id)`, `mail_keep_session(on)` and `mail_applied(since)`. `mail_status`
+    joins the service's mailbox rows to what this device keeps (`turned_off`, `open_backfill`,
+    `saved_sign_in`) and adds `keep_session`, `offer_pending`, `setup_running` and
+    `profile_delete_pending`; it still answers the device's own facts when the service cannot be
+    read. `mail_applied` runs `knowlu-engine mail-applied` and hands its JSON through; a report that
+    is not one JSON object is `{ok: false, error}`. None writes the vault: it changes only through the
+    engine's `judge` (the mail pass).
+  - **The `mail` window.** One label, `mail` (`mail::WINDOW`), and Google's "verify it's you" popup
+    `mail-popup`, in the same profile. It has no Tauri capability grant, so every invoke from it is
+    denied. It is visible only to sign in (`open_visible`), and every run on a saved sign-in uses
+    `open_hidden` (out of the taskbar). `MailWindow::try_take` allows one holder at a time: setup, a
+    repair sign-in, a Disconnect, the slot's mail step and the launch resume. A script runs only by
+    name from `app/assets/mail/` (compiled in), only while the top-level page is on the provider's
+    mail hosts (`mail::mail_hosts`), and its result returns through WebView2's completion value,
+    never IPC. External-scheme launches are cancelled (`refuse_external_schemes`). Nothing
+    simulates a keyboard or mouse.
+  - **Kept profiles and `mail.json`** (`app/src/mail_session.rs`). One WebView2 profile per mailbox,
+    `<profile data dir>\mail-session-<address_id>`, and with the saved sign-in off one throwaway
+    `mail-setup`. `address_id` is the service's opaque id, never the address. `is_session_dir` is the
+    one guard every delete passes: the exact child of an absolute data dir, named `mail-setup` or
+    `mail-session-<id>`. `mail.json` sits beside `settings.json` (never a field in it) and holds
+    `keep_session` (on by default), `last_reconcile`, `pending_deletes`, `turned_off` (only grows),
+    and, only while any exists, `open_backfills` and `backfill_pace`. An unreadable file is an error,
+    never the default: the slot's mail step then runs nothing, and every write refuses.
+  - **The slot's `mail` step** runs after the grades capture and before the child-process chain
+    (`scheduler::run_slot_with`, `mail::slot::run_step`). A mailbox is left out when it is turned off,
+    guided, `revoked`, or not due (`RECONCILE_CADENCE` is `Daily`: due once a day when `active`, at
+    once when it needs repair). The named skips: `mail (skipped: could not read your mailboxes)` (the
+    service's list failed: no proof there is no mailbox), `(no entitlement)`, `(saved sign-in off)`,
+    `(mail.json unreadable)`, `(not due)`, `(mail window open)`, `(no session)` (the pass could not
+    have the account's client); no mailbox connected adds no row, and neither does a vault with no
+    account. A kept profile that does not read as signed in is `needs sign-in`, never shown. The row is
+    fixed words and counts, never an address, subject or sender, and stays out of
+    `state/runner-log.md`. Pace constants `MAX_PER_MINUTE` (10) and `MAX_PER_DAY` (600) in
+    `app/src/mail_steps.rs` are **provisional, pending S6**; the backfill window is `BACKFILL_DAYS`
+    (120) before the setup day.
+  - **Launch and deletion.** `mail::live::on_start` (called from `setup`) takes the mail window,
+    sweeps a leftover `mail-setup`, retries `pending_deletes`, and resumes every open backfill whose
+    profile is kept. `mail_keep_session(false)` records the switch first, closes the window and
+    deletes every kept profile. `mail_disconnect` records the mailbox in `turned_off` before anything
+    else, turns forwarding off, calls `DELETE /mail/addresses/<id>`, then deletes the profile (a failed
+    delete is retried at launch and named in Settings). Sign-out and `delete_local_data` close the
+    window and call `forget_all`, which deletes only those two folder shapes.
 - **App data is `%LOCALAPPDATA%\knowlu\`**: `profiles.json`, `profiles\<profile_id>\{settings.json,
   seen.txt, logs\}`, shared `updates\`, `runtime\`, `models\`. `state::app_data_root()` is the one
   place the path is decided. `profiles::migrate_flat_layout` still folds an old flat
@@ -111,7 +164,7 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   `knowlu-engine.exe` as a child process (`KNOWLU_ENGINE_EXE` overrides). Steps are left out and
   named — `ingest (skipped: no ics_url)`, `judge (skipped: no runtime)` / `(skipped: no model)`,
   `sync (skipped: no account)` / `(skipped: no entitlement)` / `(skipped: another sync is running)`,
-  `grades (skipped: <why>)` (the Grades bullet below) —
+  `grades (skipped: <why>)` (the Grades bullet below), `mail (skipped: <why>)` (the Email bullet) —
   never run-and-failed: a non-zero step means retry backoff and an amber tray. The scheduler is inert
   unless the vault's `config/runners.yaml` `local` entry says `scheduler: app` for this `device:`; a
   wizard-created vault carries both from birth.

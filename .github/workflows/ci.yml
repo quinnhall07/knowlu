@@ -165,6 +165,12 @@ jobs:
       - name: deno test
         if: needs.changes.outputs.code != 'false'
         run: deno test --allow-read --allow-write=cloud/eval --allow-net=127.0.0.1 --allow-env=ANTHROPIC_WEBHOOK_SIGNING_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_LOG,ANTHROPIC_CUSTOM_HEADERS --config cloud/supabase/deno.json cloud/supabase/ cloud/eval/
+      # The mail window's step scripts and their DOM tests (email plan T17 step 5): their own
+      # config and lock (linkedom), outside cloud/supabase/. One step; `&&` so a failed check or
+      # lint fails it on pwsh (self-hosted Windows) as on bash, since pwsh reads only the last exit.
+      - name: deno check, lint and test (app/assets/mail)
+        if: needs.changes.outputs.code != 'false'
+        run: deno check --config app/assets/mail/deno.json app/assets/mail/ && deno lint --config app/assets/mail/deno.json app/assets/mail/ && deno test --allow-read --config app/assets/mail/deno.json app/assets/mail/
 
   # §5.4 measure 2's deploy blocker (hand-off H8, part 2; C2 Task 14): the eval suite replays
   # `cloud/eval/`'s seed against the pinned model whenever a PR touches what a judgment is asked

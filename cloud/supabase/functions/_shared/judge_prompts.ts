@@ -9,7 +9,7 @@
 // appended beyond the bound, not carved out of it, so a fully clipped 1200-character body prompt
 // emits 1213 characters, the marker being the frame telling the model it cut something, not part
 // of what it cut. `judge_prompts_test.ts` pins the exact count.
-import { oneLine } from "./judge_validate.ts";
+import { ABSOLUTE_DUE_RE, type MailKind, oneLine } from "./judge_validate.ts";
 import { scrubForPrompt } from "./scrub.ts";
 
 export const MAX_BODY_CHARS = 1200;
@@ -225,6 +225,198 @@ export function buildPrompt(
  */
 export async function promptHash(kind: "task" | "event" | "email"): Promise<string> {
   const bytes = new TextEncoder().encode(systemTemplate(kind) + "\u0000" + JSON.stringify(schemaFor(kind)));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// ---- Email (plan T3c): the `mail-1` prompt and grammar (spec §4.7 step 4, §5.1 as amended 2026-10-02)
+// and the `mail_resolve` prompt (D12). Their own functions, so the three kinds above keep their bytes and
+// their pinned hashes. `mail_digest` (plan T16, optional) has no prompt until it is built.
+
+/** §4.7 step 1: the text a `mail_claim` call may carry, in characters. */
+export const MAIL_TEXT_CHARS = 2000;
+export type MailPromptKind = Exclude<MailKind, "mail_digest">;
+
+const MAIL_ITEM_SCHEMA = {
+  type: "object",
+  properties: {
+    title: { type: "string" },
+    due: { type: ["string", "null"] },
+    item_kind: { type: "string", enum: ["task", "exam", "event"] },
+    effort_hours: { type: "number" },
+    importance: { type: "integer" },
+  },
+  required: ["title", "due", "item_kind", "effort_hours", "importance"],
+  additionalProperties: false,
+};
+
+// PQ4: `receipt` is a claim kind only a template emits, so the grammar never offers it, and
+// `validateMailClaims` refuses one whose source is the model. The sets the prose names (field, topic)
+// are re-checked there; a value off its set is a refused claim, never a clamped one.
+const MAIL_CLAIM_SCHEMA = {
+  type: "object",
+  properties: {
+    claims: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["new_item", "change", "course_info", "noise"] },
+          course: { type: ["string", "null"] },
+          target: { type: ["string", "null"] },
+          field: { type: ["string", "null"] },
+          value: { type: ["string", "null"] },
+          item: { anyOf: [MAIL_ITEM_SCHEMA, { type: "null" }] },
+          topic: { type: ["string", "null"] },
+          evidence: { type: "string" },
+          why: { type: "string" },
+          confidence: { type: "number" },
+        },
+        required: [
+          "kind",
+          "course",
+          "target",
+          "field",
+          "value",
+          "item",
+          "topic",
+          "evidence",
+          "why",
+          "confidence",
+        ],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["claims"],
+  additionalProperties: false,
+};
+
+/** `validateMailResolve`'s reply shape: one answer per claim key, a candidate's id or null. */
+const MAIL_RESOLVE_SCHEMA = {
+  type: "object",
+  properties: {
+    answers: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { claim: { type: "string" }, target_id: { type: ["string", "null"] } },
+        required: ["claim", "target_id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["answers"],
+  additionalProperties: false,
+};
+
+export function mailSchemaFor(kind: MailPromptKind): Record<string, unknown> {
+  return kind === "mail_claim" ? MAIL_CLAIM_SCHEMA : MAIL_RESOLVE_SCHEMA;
+}
+
+export function mailSystemTemplate(kind: MailPromptKind): string {
+  if (kind === "mail_resolve") {
+    return [
+      "You match claims from a university student's email to the items they already have in one course.",
+      "Rules:",
+      "- Each claim names an item the way the email did; each candidate is an item the student already has.",
+      "- For each claim, answer the id of the one candidate it means, or null when none fits or more than one could.",
+      "- Answer every claim once, by its claim key, and only with ids from the candidates given.",
+    ].join("\n");
+  }
+  return [
+    "You read one email for a university student and list what it says about their coursework, as claims.",
+    "Kinds:",
+    "- new_item: the email sets new work, an exam, or an event the student is expected at.",
+    "- change: the email moves the deadline of an item it names, or cancels that item.",
+    "- course_info: the email gives a course's schedule, room, instructor, office hours, policy or other standing information.",
+    "- noise: everything else, including newsletters, marketing, payments, a confirmation that the student submitted work, and a grade being posted.",
+    "Rules:",
+    "- One claim per fact, at most five. An email that says nothing about the student's coursework is one noise claim.",
+    "- course: one of the known course codes given below, or null.",
+    "- target: for change only, the item exactly as the email names it; else null.",
+    "- field: for change only, due when the deadline moved or cancelled when the item is cancelled; else null.",
+    "- value: for a due change, the new deadline; for cancelled, the string true; else null.",
+    "- item: for new_item only, else null. title: one line, under 200 characters. due: the deadline, or null. item_kind: task, exam or event. effort_hours: the realistic hours to finish it, 0.25 to 40. importance: a whole number 1 to 5.",
+    '- Every deadline exactly as the email states it. Give the phrase as written ("Friday", "next week", "tomorrow at 5pm") -- do NOT compute or resolve it yourself, that happens after you answer. Only when the email itself gives an explicit calendar date (for example "October 3" or "10/3") may you answer that date, as YYYY-MM-DD or YYYY-MM-DDTHH:MM.',
+    "- topic: for course_info only, one of schedule, room, instructor, office_hours, policy or other; else null.",
+    "- evidence: the words in the subject or message that show the claim, copied exactly, one line, at most 140 characters.",
+    "- with no message body, judge from the subject and sender alone and answer a confidence at or below 0.5.",
+    "- why: one line, under 140 characters, no line breaks, no double quotes.",
+    "- confidence: 0 to 1.",
+  ].join("\n");
+}
+
+/**
+ * The text a `mail_claim` call carries and its claims' evidence is checked against (§4.7 step 1):
+ * scrubbed, then cut to `MAIL_TEXT_CHARS`. Scrub before the cut, as the email prompt does, so a token is
+ * never cut in half and left partly on the wire. The caller passes this same string to
+ * `validateMailClaims` as the text the model saw.
+ */
+export function mailPromptText(text: string): string {
+  return [...scrubForPrompt(text.trim())].slice(0, MAIL_TEXT_CHARS).join("");
+}
+
+/**
+ * `mail_claim`'s prompt: the subject (scrubbed), the sender, the Date header, the account's known course
+ * codes, the time zone and `mailPromptText` of the text, and nothing else the caller's item holds. From is
+ * not scrubbed, as on the email path: the sender is what a vendor's mail is judged by, and §7 names it.
+ */
+export function buildMailClaimPrompt(item: Record<string, unknown>, seed: Record<string, unknown>): Prompt {
+  const parts = [
+    `Subject: ${oneLine(scrubForPrompt(str(item.subject)), 200)}`,
+    `From: ${oneLine(str(item.from), 200)}`,
+    `Date: ${oneLine(str(item.date), 80)}`,
+  ];
+  const known = list(seed.known_courses).map((c) => oneLine(c, 40)).filter((c) => c !== "");
+  if (known.length > 0) parts.push(`Known course codes: ${known.join(", ")}`);
+  const zone = oneLine(str(seed.time_zone), 64);
+  if (zone !== "") parts.push(`Time zone: ${zone}`);
+  const raw = scrubForPrompt(str(item.text).trim());
+  const text = mailPromptText(str(item.text));
+  if (text === "") parts.push("Message: (no plain-text body)");
+  else parts.push(`Message:\n${text}${[...raw].length > MAIL_TEXT_CHARS ? " …[truncated]" : ""}`);
+  return { system: mailSystemTemplate("mail_claim"), user: parts.join("\n"), schema: MAIL_CLAIM_SCHEMA };
+}
+
+function records(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((v): v is Record<string, unknown> =>
+      v !== null && typeof v === "object" && !Array.isArray(v)
+    )
+    : [];
+}
+
+/** A due in the wire shape, else `none`: the resolve prompt carries dates, never a phrase from a note. */
+function wireDue(value: unknown): string {
+  return typeof value === "string" && ABSOLUTE_DUE_RE.test(value) ? value : "none";
+}
+
+/**
+ * `mail_resolve`'s prompt for one course batch (D12): each claim's key, the item as the mail named it and
+ * its due, and each candidate's note id, title and due. Nothing else: no evidence, sender, body or course.
+ */
+export function buildMailResolvePrompt(batch: Record<string, unknown>): Prompt {
+  const lines = ["Claims:"];
+  for (const c of records(batch.claims)) {
+    const key = oneLine(str(c.key), 80);
+    if (key !== "") {
+      lines.push(`- claim ${key} | names: ${oneLine(str(c.target), 200)} | due: ${wireDue(c.due)}`);
+    }
+  }
+  lines.push("Candidates:");
+  for (const c of records(batch.candidates)) {
+    const id = oneLine(str(c.id), 80);
+    if (id !== "") lines.push(`- id ${id} | title: ${oneLine(str(c.title), 200)} | due: ${wireDue(c.due)}`);
+  }
+  return { system: mailSystemTemplate("mail_resolve"), user: lines.join("\n"), schema: MAIL_RESOLVE_SCHEMA };
+}
+
+/** `promptHash` for a mail kind: the template and the schema, never a message or a per-account value. */
+export async function mailPromptHash(kind: MailPromptKind): Promise<string> {
+  const bytes = new TextEncoder().encode(
+    mailSystemTemplate(kind) + "\u0000" + JSON.stringify(mailSchemaFor(kind)),
+  );
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }

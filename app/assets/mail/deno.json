@@ -1,0 +1,15 @@
+{
+  "lock": true,
+  "imports": {
+    "linkedom": "npm:linkedom@0.18.12",
+    "@std/assert": "jsr:@std/assert@1.0.19"
+  },
+  "lint": {
+    "rules": { "tags": ["recommended"] }
+  },
+  "fmt": {
+    "lineWidth": 110,
+    "semiColons": true,
+    "singleQuote": false
+  }
+}

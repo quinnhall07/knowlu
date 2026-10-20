@@ -40,6 +40,11 @@ pub struct Curated {
     /// ruling 12), and `grades::availability` is the one place that decides it. A date reaches `main`
     /// only with or after privacy bump #1 (`app/tests/grades.rs`, the date-and-bump test).
     pub policy_read: Option<&'static str>,
+    /// Who hosts this school's student mailbox: `m365`, `google` or `other` (email spec §4.1, D7).
+    /// Data, never code: an uncurated school's provider comes from an MX lookup instead.
+    pub mail_provider: &'static str,
+    /// The student mail domain (`crimson.ua.edu`), set only for `m365` or `google`.
+    pub mail_domain: Option<&'static str>,
 }
 
 pub const CAMPUSES: [Curated; 2] = [
@@ -50,6 +55,8 @@ pub const CAMPUSES: [Curated; 2] = [
         lms_host: "ualearn.blackboard.com",
         lms_kind: "blackboard",
         policy_read: None,
+        mail_provider: "m365",
+        mail_domain: Some("crimson.ua.edu"),
     },
     Curated {
         unitid: "157085",
@@ -58,6 +65,11 @@ pub const CAMPUSES: [Curated; 2] = [
         lms_host: "uk.instructure.com",
         lms_kind: "canvas",
         policy_read: None,
+        // `other` with no domain, per the plan's T14: an MX record shows who hosts the mail, not that
+        // the school allows outside forwarding. Kentucky's student takes the MX-lookup path until Quinn
+        // confirms a row (one edit here).
+        mail_provider: "other",
+        mail_domain: None,
     },
 ];
 

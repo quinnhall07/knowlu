@@ -447,6 +447,12 @@ pub fn run_lines_with(
             let gmail_budget = opts.budget.saturating_sub(arm_started.elapsed());
             lines.extend(pull_gmail(vault, client, opts, gmail_budget));
 
+            // Forwarded mail (email spec §4.8; plan T6.4): the one call, after the Gmail pull and inside
+            // the same cloud arm, so the same entitlement gate. It prints nothing for an account with no
+            // mailbox and names every failure; nothing it meets changes the exit code.
+            let mail_budget = opts.budget.saturating_sub(arm_started.elapsed());
+            lines.extend(crate::mail::pull_mail(vault, client, opts, mail_budget));
+
             // C2 Task 12 — rule promotion. Runs whenever the cloud arm got past the probe,
             // whatever the three passes above found: it sends any decision the student already
             // made and files whatever the service is offering, and both directions are cheap
@@ -1931,8 +1937,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&v);
     }
 
+    /// `mail-pull`'s answer for an account with no mailbox (T6.4: the arm now makes that request between
+    /// the Gmail pull and the rule pull, and replies are scripted by arrival).
+    const EMPTY_MAIL_PULL: &str = r#"{"messages":[],"mailboxes":[],"more":false}"#;
+
     /// Q1 (a′) guard: a 503 on the probe is not transport, so the arm runs as it does today — the
-    /// probe, the Gmail pull and the rule pull are all made.
+    /// probe, the Gmail pull, the mail pull and the rule pull are all made.
     #[test]
     fn a_probe_answered_503_still_runs_the_arm() {
         let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
@@ -1947,15 +1957,17 @@ mod tests {
         let (client, mut server) = loopback_client(vec![
             (503, "{}".to_string()),
             (200, no_scope),
+            (200, EMPTY_MAIL_PULL.to_string()),
             (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
         ]);
         let (code, lines) = run_lines_with(&v, &opts(&v.join("_log")), Some(&client));
         assert_eq!(code, 0, "{lines:?}");
         let requests = server.requests();
-        assert_eq!(requests.len(), 3, "the probe, the pull, the rule pull: {requests:?}");
+        assert_eq!(requests.len(), 4, "the probe, the Gmail pull, the mail pull, the rule pull: {requests:?}");
         assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
         assert!(requests[1].starts_with("POST /functions/v1/gmail-read"), "{}", requests[1]);
-        assert!(requests[2].starts_with("GET /functions/v1/judge-rules"), "{}", requests[2]);
+        assert!(requests[2].starts_with("POST /functions/v1/mail-pull"), "{}", requests[2]);
+        assert!(requests[3].starts_with("GET /functions/v1/judge-rules"), "{}", requests[3]);
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -2096,6 +2108,7 @@ mod tests {
             (200, events_reply),
             (200, judge_reply),
             (200, no_scope),
+            (200, EMPTY_MAIL_PULL.to_string()),
             (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
         ]);
         let cfg = crate::cloudmodel::CloudConfig {
@@ -2115,12 +2128,13 @@ mod tests {
         assert_eq!(ledger["ics:engage:1"].verdict.as_deref(), Some("opportunity"), "{ledger:?}");
 
         let requests = handle.join().expect("the listener thread did not panic");
-        assert_eq!(requests.len(), 5, "{requests:?}");
+        assert_eq!(requests.len(), 6, "{requests:?}");
         assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
         assert!(requests[1].starts_with("POST /functions/v1/events"), "{}", requests[1]);
         assert!(requests[2].starts_with("POST /functions/v1/judge-event"), "{}", requests[2]);
         assert!(requests[3].starts_with("POST /functions/v1/gmail-read"), "{}", requests[3]);
-        assert!(requests[4].starts_with("GET /functions/v1/judge-rules"), "{}", requests[4]);
+        assert!(requests[4].starts_with("POST /functions/v1/mail-pull"), "{}", requests[4]);
+        assert!(requests[5].starts_with("GET /functions/v1/judge-rules"), "{}", requests[5]);
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -2819,6 +2833,7 @@ mod tests {
         let (base, handle) = gmail_loopback(vec![
             (200, "{}".to_string()),
             gmail_reply("[]", false),
+            (200, EMPTY_MAIL_PULL.to_string()),
             (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
         ]);
         let client = client_for(base);
@@ -2835,7 +2850,8 @@ mod tests {
 
     /// D4 (spec §4.3, §8.2 item 2): the cloud arm has no early return. A bare vault — nothing
     /// pending, no event feed, no rule decision, no label — probes, pulls mail (answered
-    /// `no_gmail_scope`, which adds no line) and pulls rules, in that order.
+    /// `no_gmail_scope`, which adds no line), pulls forwarded mail (an empty pull, which adds no line:
+    /// T6.4) and pulls rules, in that order.
     #[test]
     fn a_bare_vault_probes_pulls_mail_and_pulls_rules_in_that_order() {
         let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
@@ -2850,18 +2866,20 @@ mod tests {
         let (base, handle) = gmail_loopback(vec![
             (200, "{}".to_string()),
             (200, no_scope),
+            (200, EMPTY_MAIL_PULL.to_string()),
             (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
         ]);
         let client = client_for(base);
         let log = v.join("_log");
         let (code, lines) = run_lines_with(&v, &opts(&log), Some(&client));
         assert_eq!(code, 0);
-        assert!(!lines.iter().any(|l| l.starts_with("gmail")), "no_gmail_scope adds no line: {lines:?}");
+        assert!(!lines.iter().any(|l| l.starts_with("gmail") || l.starts_with("mail")), "no_gmail_scope and no mailbox add no line: {lines:?}");
         let requests = handle.join().expect("the listener thread did not panic");
-        assert_eq!(requests.len(), 3, "the probe, the pull, the rule pull: {requests:?}");
+        assert_eq!(requests.len(), 4, "the probe, the Gmail pull, the mail pull, the rule pull: {requests:?}");
         assert!(requests[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests[0]);
         assert!(requests[1].starts_with("POST /functions/v1/gmail-read"), "{}", requests[1]);
-        assert!(requests[2].starts_with("GET /functions/v1/judge-rules"), "{}", requests[2]);
+        assert!(requests[2].starts_with("POST /functions/v1/mail-pull"), "{}", requests[2]);
+        assert!(requests[3].starts_with("GET /functions/v1/judge-rules"), "{}", requests[3]);
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -2881,6 +2899,7 @@ mod tests {
         let (base, handle) = gmail_loopback(vec![
             (200, "{}".to_string()),
             (200, revoked),
+            (200, EMPTY_MAIL_PULL.to_string()),
             (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
         ]);
         let client = client_for(base);
@@ -2922,6 +2941,7 @@ mod tests {
             (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))), // the probe
             (200, capped),                                                              // /judge-task
             (200, no_scope),                                                            // /gmail-read (D4)
+            (200, EMPTY_MAIL_PULL.to_string()),                                         // /mail-pull (T6.4)
             (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))), // pull_rules
         ]);
         let log = v.join("_log");
@@ -3261,6 +3281,7 @@ mod tests {
         let (client, mut server) = loopback_client(vec![
             (200, "{}".to_string()),
             (200, no_scope.clone()), // /gmail-read (D4)
+            (200, EMPTY_MAIL_PULL.to_string()), // /mail-pull (T6.4)
             (200, crate::ledger::dumps_value(&serde_json::json!({ "decided": "approved" }))),
             (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
         ]);
@@ -3282,6 +3303,7 @@ mod tests {
         let (client2, mut server2) = loopback_client(vec![
             (200, "{}".to_string()),
             (200, no_scope),
+            (200, EMPTY_MAIL_PULL.to_string()),
             (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
         ]);
         let log2 = bare.join("_log");
@@ -3289,10 +3311,11 @@ mod tests {
         assert_eq!(code2, 0);
         assert_eq!(lines2, vec!["judge: nothing to enrich".to_string()], "{lines2:?}");
         let requests2 = server2.requests();
-        assert_eq!(requests2.len(), 3, "the probe, the pull, the rule pull: {requests2:?}");
+        assert_eq!(requests2.len(), 4, "the probe, the Gmail pull, the mail pull, the rule pull: {requests2:?}");
         assert!(requests2[0].starts_with("GET /functions/v1/judge-rules"), "{}", requests2[0]);
         assert!(requests2[1].starts_with("POST /functions/v1/gmail-read"), "{}", requests2[1]);
-        assert!(requests2[2].starts_with("GET /functions/v1/judge-rules"), "{}", requests2[2]);
+        assert!(requests2[2].starts_with("POST /functions/v1/mail-pull"), "{}", requests2[2]);
+        assert!(requests2[3].starts_with("GET /functions/v1/judge-rules"), "{}", requests2[3]);
         let _ = std::fs::remove_dir_all(&bare);
     }
 

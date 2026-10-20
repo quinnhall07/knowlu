@@ -1,8 +1,11 @@
+import { restFromEnv } from "../_shared/db.ts";
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
+import { unlapseAccount } from "../_shared/mail_unlapse.ts";
 import { liveDeps, sharedDb } from "../_shared/judge_deps.ts";
 import { accessTokenFromRefresh } from "../_shared/google_token.ts";
 import { GMAIL_SCOPE } from "../_shared/google_scopes.ts";
 import {
+  type Forwarding,
   GmailApiError,
   type GmailApi,
   type GrantRow,
@@ -176,6 +179,23 @@ Deno.serve(readHandler(requireActiveEntitlement, {
       if (typeof course === "string" && course !== "" && course !== "null") out.add(course);
     }
     return [...out];
+  },
+  // Past the entitlement gate: the same compare-and-sets `mail-pull` makes, whichever reader comes first.
+  unlapse: (accountId) => unlapseAccount(restFromEnv(), accountId),
+  async forwarding(accountId): Promise<Forwarding> {
+    // Email forwarding D22: the OAuth grant's address and the account's forwarding mailboxes, both
+    // scoped by the caller's account. The handler's `forwardingCounts` decides (P22); this reads.
+    // Twenty rows bounds the read like `mail-process`'s own mailbox list.
+    const grants = await sharedDb().select(
+      `google_accounts?account_id=eq.${accountId}&select=email_hint`,
+    ) as Array<{ email_hint: string | null }>;
+    const mailboxes = await sharedDb().select(
+      `mail_addresses?account_id=eq.${accountId}&select=mailbox_hint,status&limit=20`,
+    ) as Array<{ mailbox_hint: string | null; status: string }>;
+    return {
+      gmail: grants[0]?.email_hint ?? null,
+      mailboxes: mailboxes.map((m) => ({ hint: m.mailbox_hint, status: m.status })),
+    };
   },
   // F-4: a shorter model timeout than the default 120 s, so a call that starts right at the
   // budget's edge cannot run long enough to threaten the edge function's own wall clock.

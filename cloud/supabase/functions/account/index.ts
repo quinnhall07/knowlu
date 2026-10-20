@@ -15,8 +15,61 @@ import { stripePostFrom } from "../_shared/stripe.ts";
 import { serviceDb } from "../_shared/judge_db.ts";
 import { handle } from "./handler.ts";
 import { liveGoogleDeleteDeps, revokeGoogleGrantOnDelete } from "./google_delete.ts";
+import {
+  exportMail,
+  type MailExportStore,
+  type MailPurgeDeps,
+  purgeMailboxes,
+  purgeMailTables,
+} from "./mail.ts";
+import { type S3Client, s3Client } from "../_shared/s3.ts";
+import type { Rest } from "../_shared/db.ts";
 
 const eq = (id: string) => `account_id=eq.${encodeURIComponent(id)}`;
+const one = (account: string, box: string) => `${eq(account)}&id=eq.${encodeURIComponent(box)}`;
+
+/** The mail bucket, built at the first object delete and never at boot: an account with no stored mail
+ * deletes without it, and a missing secret is one failed delete `purgeMailboxes` logs by class. */
+function lazyBucket(): (key: string) => Promise<void> {
+  let s3: S3Client | null = null;
+  return async (key) => {
+    s3 ??= s3Client({
+      bucket: Deno.env.get("MAIL_BUCKET") ?? "",
+      region: Deno.env.get("AWS_REGION") ?? "",
+      accessKeyId: Deno.env.get("AWS_ACCESS_KEY_ID") ?? "",
+      secretAccessKey: Deno.env.get("AWS_SECRET_ACCESS_KEY") ?? "",
+    }, { fetch: globalThis.fetch });
+    await s3.delete(key);
+  };
+}
+
+function mailPurgeDeps(rest: Rest): MailPurgeDeps {
+  return {
+    addressIds: async (account) =>
+      (await restSelectAll<{ id: string }>(rest, "mail_addresses", `${eq(account)}&select=id&order=id`))
+        .map((r) => r.id),
+    revoke: (account, box) => restPatch(rest, "mail_addresses", one(account, box), { status: "revoked" }),
+    workKeys: async (account, box) =>
+      (await restSelectAll<{ s3_key: string }>(
+        rest,
+        "mail_work",
+        `${eq(account)}&address_id=eq.${encodeURIComponent(box)}&select=s3_key&order=id`,
+      )).map((r) => r.s3_key),
+    deleteObject: lazyBucket(),
+    deleteMailAddress: async (box) => {
+      await serviceDb().rpc("delete_mail_address", { p_address: box });
+    },
+  };
+}
+
+function mailExportStore(rest: Rest): MailExportStore {
+  return {
+    mailboxes: (account, columns) =>
+      restSelectAll(rest, "mail_addresses", `${eq(account)}&select=${columns.join(",")}&order=id`),
+    claims: (account, columns) =>
+      restSelectAll(rest, "mail_claims", `${eq(account)}&select=${columns.join(",")}&order=id`),
+  };
+}
 
 Deno.serve(async (req) => {
   try {
@@ -49,6 +102,9 @@ Deno.serve(async (req) => {
         // holding stays valid there forever unless it is revoked here; `revokeGoogleGrantOnDelete`
         // never blocks the deletion below on a failed revoke (the account's right to delete wins).
         await revokeGoogleGrantOnDelete(id, liveGoogleDeleteDeps(serviceDb()));
+        // Email forwarding (§4.13, D17): each mailbox purged as Disconnect purges it, its `work/`
+        // objects deleted by the keys `mail_work` holds before `delete_mail_address` removes the rows.
+        const mailboxes = await purgeMailboxes(mailPurgeDeps(rest), id);
         // The consent log survives, with its account_id and its ip nulled: California's ARL wants
         // the record for at least three years, and `subject_hash` is what keeps it meaningful
         // without identifying. **`ip` goes with the account id** (R-C1-56, C2): an IP address is
@@ -78,6 +134,9 @@ Deno.serve(async (req) => {
         ) {
           await restDelete(rest, table, eq(id));
         }
+        // Email forwarding's seven tables (§4.13), from `mail.ts`'s list: `delete_mail_address` has
+        // already emptied six of them per mailbox, and the list names all seven regardless.
+        await purgeMailTables((table, query) => restDelete(rest, table, query), id, mailboxes);
         await restDelete(rest, "accounts", `id=eq.${encodeURIComponent(id)}`);
       },
       deleteAuthUser: (id) => authDeleteUser(rest, id),
@@ -103,6 +162,8 @@ Deno.serve(async (req) => {
           telemetry_events: await all("telemetry_events", `${eq(id)}&select=*&order=id`),
           corrections: await all("corrections", `${eq(id)}&select=*&order=id`),
           issues: await all("issues", `${eq(id)}&select=*&order=id`),
+          // D17: the mailboxes and the claims held for them, never a token, key or hash.
+          ...(await exportMail(mailExportStore(rest), id)),
         };
       },
       hashEmail: sha256Hex,

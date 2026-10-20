@@ -4,7 +4,7 @@
 //! promise on both is the same — it is read, never written.
 use knowlu::onboarding::{
     adopt_vault_in, apply_profile_settings_in, create_vault_in, dest_for, finish_or_roll_back,
-    default_folders_in, offer_marker, restore_vault_in, WizardPlan,
+    default_folders_in, mail_offer_marker, offer_marker, restore_vault_in, WizardPlan,
 };
 use std::path::{Path, PathBuf};
 
@@ -160,6 +160,7 @@ fn a_vault_that_cannot_be_finished_is_removed_and_nothing_is_registered() {
         vhl: false,
         autostart: true,
         offer_inference: false,
+        offer_mail: false,
         zybooks_courses: Vec::new(),
         vhl_sections: Vec::new(),
         course_map: Vec::new(),
@@ -467,6 +468,7 @@ fn base_plan(offer_inference: bool) -> WizardPlan {
         zybooks_ignore: Vec::new(),
         autostart: true,
         offer_inference,
+        offer_mail: false,
     }
 }
 
@@ -1683,4 +1685,55 @@ fn adopting_a_backup_mirror_is_refused_and_registers_nothing() {
     let out = adopt_vault_in(&app_data, live.to_str().unwrap(), None);
     assert_eq!(out["ok"], true, "an ordinary vault must still be adoptable: {out}");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// T14 (email spec §4.1, D6): the mail offer is its own marker file, set and cleared by the same
+/// three finishing paths, from `offer_mail` alone and independent of `offer_inference`.
+#[test]
+fn the_mail_offer_marker_is_set_and_cleared_on_create_restore_and_adopt() {
+    let mail_marker = |app_data: &Path, id: &str| mail_offer_marker(&knowlu::profiles::profile_dir(app_data, id));
+    let plan = |mail: bool| WizardPlan { offer_mail: mail, ..base_plan(false) };
+    // ADOPT: set, then cleared by a second finish with the box unchecked.
+    let root = tmp("mail-offer-adopt");
+    let vault = root.join("vault");
+    copy(Path::new("../engine/tests/fixtures/vault-s1"), &vault);
+    let app_data = root.join("appdata");
+    let out = adopt_vault_in(&app_data, vault.to_str().unwrap(), None);
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    assert_eq!(apply_profile_settings_in(&app_data, &id, &plan(true), None)["ok"], true);
+    assert!(mail_marker(&app_data, &id).is_file(), "adopt, offered");
+    assert!(!marker_for(&app_data, &id).exists(), "the two markers are independent");
+    assert_eq!(apply_profile_settings_in(&app_data, &id, &plan(false), None)["ok"], true);
+    assert!(!mail_marker(&app_data, &id).exists(), "adopt, not offered");
+    let _ = std::fs::remove_dir_all(&root);
+    // RESTORE.
+    for (tag, on) in [("mail-offer-restore-on", true), ("mail-offer-restore-off", false)] {
+        let root = tmp(tag);
+        let backup = root.join("backup").join("profile_4444444444").join("vault");
+        copy(Path::new("../engine/tests/fixtures/vault-s1"), &backup);
+        let app_data = root.join("appdata");
+        let dest = restore_vault_in(root.join("backup").to_str().unwrap(), &root.join("home"), "Fall 2026").expect("restore");
+        let out = finish_or_roll_back(&app_data, &dest, Some("Fall 2026".to_string()), &plan(on), None);
+        assert_eq!(out["ok"], true, "{out}");
+        let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+        assert_eq!(mail_marker(&app_data, &id).is_file(), on, "restore, offer_mail={on}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn create_vault_sets_the_mail_offer_marker_only_when_offered() {
+    for (tag, on) in [("mail-offer-create-on", true), ("mail-offer-create-off", false)] {
+        let root = tmp(tag);
+        let app_data = root.join("appdata");
+        let mut session = PendingSession::new(&format!("acc-marker-mail-{on}"));
+        let out = create_vault_in(&app_data, &root.join("home"), "Fall 2026", &WizardPlan { offer_mail: on, ..base_plan(false) });
+        assert_eq!(out["ok"], true, "{out}");
+        let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+        session.expect_move_to(&id);
+        let m = mail_offer_marker(&knowlu::profiles::profile_dir(&app_data, &id));
+        assert_eq!(m.is_file(), on, "create, offer_mail={on}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

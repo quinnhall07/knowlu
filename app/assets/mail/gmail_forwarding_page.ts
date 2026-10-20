@@ -1,0 +1,419 @@
+// A synthetic Gmail Settings > Forwarding and POP/IMAP page for the Gmail forwarding scripts (plan T10.3a,
+// spec test 35). Modelled on the spikes' selectors (research note 6): Gmail's buttons are
+// `<input type=button value=...>`, and the section sometimes does not draw until a hash round trip. The page
+// is a small model: what a control shows is drawn from `model`, a click edits the controls, and Save commits
+// them, so a hash round trip re-draws what was saved and drops what was not. No address here is real.
+import { disable, El, load, Page } from "./test_dom.ts";
+
+export const SECTION = "#settings/fwdandpop";
+
+export interface Model {
+  /** The confirmed forwarding addresses, in the list's order. */
+  addresses: string[];
+  on: boolean;
+  /** The address forwarding goes to while `on`. */
+  to: string;
+  disp: "keep" | "read" | "archive" | "trash";
+}
+
+export interface Opts extends Partial<Model> {
+  /** Where the page is when the script starts; the section's own hash when absent. */
+  at?: string;
+  /** The section does not draw at first: until a hash round trip, until a reload, or never. */
+  lateDraw?: "hash" | "reload" | "never";
+  /** A control the page lacks. */
+  without?: "add" | "radios" | "to" | "disp" | "save" | "remove" | "next" | "ok" | "email";
+  /** After Next, the dialog asks "Proceed" before the popup opens. */
+  proceed?: boolean;
+  /** Save never settles: the button stays enabled. */
+  sticky?: boolean;
+  /** The add dialog's address box has no type attribute (T18c's audit: a type-less input reads as text). */
+  untypedEmail?: boolean;
+  /**
+   * Live 2026-10-18: the buttons inside the dialogs (add, the confirmation, remove's confirm) are `<button>`
+   * elements named by their text, not `<input type=button value=...>`. The section's own controls stay inputs.
+   */
+  buttonDialogs?: boolean;
+  /**
+   * Live 2026-10-18: a Gmail with no forwarding address yet draws only the Add button, no forwarding radios
+   * and no Remove button (the POP section is still there).
+   */
+  fresh?: boolean;
+  /**
+   * A forwarding radio this script does not know (no Remove control, so it would read as fresh without the
+   * radio): the section is not fresh, and Add is not pressed.
+   */
+  strangeRadios?: boolean;
+  /** An address added but not yet verified: it is not an option of the list; the page shows a verify text. */
+  unverified?: string;
+  /**
+   * Live 2026-10-18: Gmail's Forwarding section shows a "Verify <address>, Re-send email, Remove address" row
+   * for an address that was added and not yet confirmed. This one is there from the start.
+   */
+  verifyRow?: string;
+  /**
+   * Live 2026-10-18: Google's verify popup did the whole confirmation itself. After Next (and Proceed) the dialog
+   * closes and the opener draws no "confirmation link sent" dialog, only a Verify row for the typed address.
+   */
+  silentPopup?: boolean;
+  /**
+   * The older markup, where each radio sits inside a wrapping <label> in one block. The live page is the
+   * default: a table row per radio, the "Forward a copy" radio with no label of its own. It also draws the
+   * older forward-to list: each option's value is the address, with no separator and no Remove options.
+   */
+  labelled?: boolean;
+  /**
+   * Live 2026-10-18: an address the server confirmed after the page drew its forward-to list. It is in `addresses`
+   * (the saved model) but not among the list's options until the page reloads; a hash round trip does not redraw it.
+   * Keep it last in `addresses`, so the visible options keep their indexes.
+   */
+  staleList?: string;
+  /**
+   * Live 2026-10-18: right after a reload the section draws before Gmail fills the forward-to list, so the select is
+   * there with no options. With this many ms it fills in place after each draw of the section; a negative number
+   * never fills it. `lateListSkipFirst` leaves the page's first draw alone (only a reload or a hash round trip is late).
+   */
+  lateList?: number;
+  lateListSkipFirst?: boolean;
+}
+
+export interface Gmail {
+  page: Page;
+  model: Model;
+  saves: number;
+  /** Addresses typed into the add dialog and sent with Next, in order. */
+  typed: string[];
+  popups: number;
+  oks: number;
+  reloads: number;
+  hashes: string[];
+  /** Addresses the page's Remove button was confirmed on, in order. */
+  removed: string[];
+  /** Clicks on look-alike controls that are not input buttons. */
+  decoy: number;
+  /** Clicks on any control the page draws, enabled or not: a script that must click nothing leaves it 0. */
+  clicks: number;
+  /** Clicks on the Verify row's Re-send email and Remove address controls: a read-back leaves both 0. */
+  verifyClicks: number;
+  /** Google's verify popup closes and the opener shows its "confirmation link sent" dialog. */
+  verified(): void;
+  el(id: string): El;
+  /** Cancels the fill timers of `lateList` (a test that ends before they fire). */
+  stop(): void;
+  snap(): { on: boolean; to: string; disp: string; addresses: string[] };
+}
+
+const DISP: Record<string, string> = {
+  keep: "keep Gmail's copy in the Inbox",
+  read: "mark Gmail's copy as read",
+  archive: "archive Gmail's copy",
+  trash: "delete Gmail's copy",
+};
+
+export function gmail(o: Opts = {}): Gmail {
+  const model: Model = {
+    addresses: [...(o.addresses ?? [])],
+    on: o.on ?? false,
+    to: o.to ?? "",
+    disp: o.disp ?? "keep",
+  };
+  const page = load(`<div id="root"></div>`);
+  const d = page.document;
+  const g: Gmail = {
+    page,
+    model,
+    saves: 0,
+    typed: [],
+    popups: 0,
+    oks: 0,
+    reloads: 0,
+    hashes: [],
+    removed: [],
+    decoy: 0,
+    clicks: 0,
+    verifyClicks: 0,
+    verified: () =>
+      dialog(
+        `<p>Confirmation link sent</p><p>A confirmation link was sent to the address.</p>${
+          dlgButton("OK", "ok")
+        }`,
+      ),
+    el: (id) => d.getElementById(id),
+    stop: () => {
+      for (const t of timers) clearTimeout(t);
+      timers.clear();
+    },
+    snap: () => ({ on: model.on, to: model.to, disp: model.disp, addresses: [...model.addresses] }),
+  };
+  const w = o.without;
+  const input = (
+    value: string,
+    id: string,
+  ) => (w && id === w ? "" : `<input type="button" value="${value}" id="${id}">`);
+  const dlgButton = (value: string, id: string) =>
+    o.buttonDialogs && !(w && id === w)
+      ? `<button type="button" id="${id}">${value}</button>`
+      : input(value, id);
+  let hash = o.at ?? SECTION;
+  let drawn = !o.lateDraw;
+  let dirty = false;
+  let pendingRemove = "";
+  let verifying = o.verifyRow ?? "";
+  let stale = o.staleList ?? "";
+  const wired = new WeakSet();
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  let draws = 0;
+
+  // Live Gmail (2026-10-18): the forward-to list's option values are indexes, never the address. The text is the
+  // bare address, then a "--" separator, then one "Remove <address>" option per address. Once forwarding is on to
+  // an address Gmail appends " (in use)" to its option and to its Remove option. `labelled` draws the older list.
+  const options = () => {
+    const shownAddresses = model.addresses.filter((a) => !stale || a !== stale);
+    const n = shownAddresses.length;
+    if (o.labelled || n === 0) {
+      return shownAddresses.map((a) =>
+        `<option value="${a}"${a === model.to ? " selected" : ""}>${a}</option>`
+      )
+        .join("");
+    }
+    const use = (a: string) => model.on && a === model.to ? " (in use)" : "";
+    const named = shownAddresses.map((a, i) => ({ a, i }));
+    return [
+      ...named.map(({ a, i }) =>
+        `<option value="${i}"${a === model.to ? " selected" : ""}>${a}${use(a)}</option>`
+      ),
+      `<option value="${n}">--</option>`,
+      ...named.filter(({ a }) => a !== "").map(({ a, i }) =>
+        `<option value="${n + 1 + i}">Remove ${a}${use(a)}</option>`
+      ),
+    ].join("");
+  };
+  // The address the forward-to select shows: an index on the live shape, the address on the older one.
+  const chosen = () => {
+    const v: string = g.el("to")?.value ?? "";
+    return o.labelled ? v : model.addresses[Number(v)] ?? "";
+  };
+  const dispOptions = () =>
+    Object.entries(DISP).map(([k, t]) =>
+      `<option value="${k}"${k === model.disp ? " selected" : ""}>${t}</option>`
+    ).join("");
+  const verifyHtml = () =>
+    `<tr><td>Verify ${verifying} <input type="button" value="Re-send email" id="resend"> <input type="button" value="Remove address" id="remove-pending"></td></tr>`;
+  const section = () => {
+    const late = o.lateList !== undefined && !(o.lateListSkipFirst && draws === 0);
+    const toOptions = () => late ? "" : options();
+    draws++;
+    const none = model.addresses.length === 0 ? " disabled" : "";
+    const live = !o.labelled;
+    const rows = w === "radios" || o.fresh ? "" : live
+      // The live shape: each radio in its own first TD. "Disable forwarding" has a label[for]; the "Forward a
+      // copy" radio has none, its text sits in the next TD of the row, which also holds both selects.
+      ? `<tr><td><input type="radio" name="sx_em" id="r-off"${
+        model.on ? "" : " checked"
+      }></td><td><label for="r-off">Disable forwarding</label></td></tr>
+        <tr><td><input type="radio" name="sx_em" id="r-on"${model.on ? " checked" : ""}${none}></td><td>
+          Forward a copy of incoming mail to
+          ${w === "to" ? "" : `<select id="to"${none}>${toOptions()}</select>`}
+          and ${w === "disp" ? "" : `<select id="disp"${none}>${dispOptions()}</select>`}</td></tr>`
+      : `<tr><td>&nbsp;</td><td><div><label><input type="radio" name="fwd" id="r-off"${
+        model.on ? "" : " checked"
+      }> Disable forwarding</label></div>
+        <div><label><input type="radio" name="fwd" id="r-on"${
+        model.on ? " checked" : ""
+      }${none}> Forward a copy of incoming mail to</label>
+          ${w === "to" ? "" : `<select id="to"${none}>${toOptions()}</select>`}
+          and ${w === "disp" ? "" : `<select id="disp"${none}>${dispOptions()}</select>`}</div></td></tr>`;
+    const odd = o.strangeRadios
+      ? `<tr><td><input type="radio" name="sx_em" id="r-odd"></td><td>Send mail to the archive</td></tr>`
+      : "";
+    const verify = o.unverified
+      ? `<div>A verification email was sent to ${o.unverified}. It is not yet verified.</div>`
+      : "";
+    // A [role=dialog] that was on the page before Add is pressed, ahead of the add dialog in DOM order (Gmail keeps
+    // hidden dialogs of its own around): its Next, Cancel and Proceed are never the script's to press.
+    const hidden = `<div role="dialog" id="decoy-dlg"><p>Forwarding settings changed. Confirm?</p>
+      <button type="button" id="decoy-dlg-next">Next</button><input type="button" value="Cancel" id="decoy-dlg-cancel">
+      <button type="button" id="decoy-dlg-proceed">Proceed</button></div>`;
+    const verifyRow = verifying ? verifyHtml() : "";
+    return `${hidden}<div id="fwdandpop"><table>
+      <tr><td>Forwarding:</td><td>
+        ${input("Add a forwarding address", "add")}${
+      o.fresh ? "" : input("Remove forwarding address", "remove")
+    }
+        ${verify}
+      </td></tr>
+      ${verifyRow}${rows}${odd}
+      <tr><td>POP download:</td><td><label><input type="radio" name="pop" id="p-off" checked> Disable POP</label>
+        <label><input type="radio" name="pop" id="p-on"> Enable POP for all mail</label></td></tr>
+      <tr><td></td><td>When messages are accessed with POP
+        <select id="pop-disp">${dispOptions()}</select></td></tr></table>
+      ${w === "save" ? "" : `<button id="save" type="button" disabled>Save Changes</button>`}
+      <button id="cancel" type="button">Cancel</button></div>
+      <button id="decoy-next" type="button">Next</button>
+      <div role="button" id="decoy-add">Add a forwarding address</div>`;
+  };
+  const dialog = (html: string) => {
+    g.el("dlg")?.remove();
+    d.getElementById("root").insertAdjacentHTML("beforeend", `<div role="dialog" id="dlg">${html}</div>`);
+    wire();
+  };
+  const closeDialog = () => g.el("dlg")?.remove();
+
+  const wire = () => {
+    // Each element is wired once: a re-wire after a dialog opens must not stack a second handler.
+    const fresh = (el: El) => {
+      if (!el || wired.has(el)) return null;
+      wired.add(el);
+      return el;
+    };
+    const on = (id: string, fn: () => void) =>
+      fresh(g.el(id))?.addEventListener("click", () => {
+        g.clicks++;
+        if (g.el(id).hasAttribute("disabled")) return;
+        fn();
+      });
+    const edit = () => {
+      dirty = true;
+      sync();
+    };
+    for (const id of ["r-off", "r-on"]) {
+      on(id, () => {
+        g.el("r-off").checked = id === "r-off";
+        g.el("r-on").checked = id === "r-on";
+        edit();
+      });
+    }
+    for (const id of ["to", "disp"]) fresh(g.el(id))?.addEventListener("change", edit);
+    on("decoy-next", () => g.decoy++);
+    on("decoy-add", () => g.decoy++);
+    for (const id of ["decoy-dlg-next", "decoy-dlg-cancel", "decoy-dlg-proceed"]) on(id, () => g.decoy++);
+    on(
+      "add",
+      () =>
+        dialog(
+          `<p>Add a forwarding address</p>${
+            w === "email" ? "" : o.untypedEmail ? `<input id="email">` : `<input type="email" id="email">`
+          }
+      ${dlgButton("Next", "next")}${dlgButton("Cancel", "cancel-dlg")}`,
+        ),
+    );
+    for (const id of ["resend", "remove-pending"]) on(id, () => g.verifyClicks++);
+    const silent = () => {
+      g.popups++;
+      verifying = g.typed.at(-1) ?? "";
+      closeDialog();
+      // Inserted, not re-rendered: the page keeps the elements it already had (the hidden dialog among them).
+      d.querySelector("#fwdandpop tr").insertAdjacentHTML("afterend", verifyHtml());
+      wire();
+    };
+    on("next", () => {
+      g.typed.push(g.el("email")?.value ?? "");
+      if (o.proceed) {
+        dialog(
+          `<p>A confirmation will be sent to the address. Proceed?</p>${dlgButton("Proceed", "proceed")}${
+            dlgButton("Cancel", "cancel-dlg")
+          }`,
+        );
+      } else if (o.silentPopup) {
+        silent();
+      } else {
+        g.popups++;
+      }
+    });
+    on("proceed", () => o.silentPopup ? silent() : g.popups++);
+    on("cancel-dlg", closeDialog);
+    on("ok", () => {
+      g.oks++;
+      closeDialog();
+    });
+    on("save", () => {
+      g.saves++;
+      model.on = !!g.el("r-on").checked;
+      if (model.on && g.el("to")) model.to = chosen();
+      if (g.el("disp")) model.disp = g.el("disp").value;
+      dirty = o.sticky ? dirty : false;
+      sync();
+    });
+    on("remove", () => {
+      pendingRemove = chosen();
+      dialog(
+        `<p>Are you sure you want to remove this forwarding address?</p>${dlgButton("OK", "confirm-remove")}${
+          dlgButton("Cancel", "cancel-dlg")
+        }`,
+      );
+    });
+    on("confirm-remove", () => {
+      g.removed.push(pendingRemove);
+      model.addresses = model.addresses.filter((a) => a !== pendingRemove);
+      if (model.to === pendingRemove) Object.assign(model, { on: false, to: model.addresses[0] ?? "" });
+      render();
+    });
+    sync();
+  };
+  const sync = () => {
+    if (g.el("save")) disable(g.el("save"), !dirty);
+  };
+  // linkedom's <option>.selected and <select>.value are not a browser's: give the page's own.
+  const browserSelects = () => {
+    for (const r of d.querySelectorAll('input[type="radio"]')) r.checked = r.hasAttribute("checked");
+    for (const sel of d.querySelectorAll("select")) {
+      for (const opt of sel.options) {
+        Object.defineProperty(opt, "selected", {
+          configurable: true,
+          get: () => opt.hasAttribute("selected"),
+          set: (on: boolean) => on ? opt.setAttribute("selected", "") : opt.removeAttribute("selected"),
+        });
+      }
+      Object.defineProperty(sel, "value", {
+        configurable: true,
+        get: () => ([...sel.options].find((o: El) => o.selected) ?? sel.options[0])?.value ?? "",
+        set: (v: string) => {
+          for (const o of sel.options) o.selected = o.value === v;
+        },
+      });
+    }
+  };
+  const render = () => {
+    dirty = false;
+    d.getElementById("root").innerHTML = hash !== SECTION
+      ? `<div>Inbox</div>`
+      : drawn
+      ? section()
+      : `<h2>Settings</h2><div>Loading...</div>`;
+    browserSelects();
+    wire();
+    const sel = g.el("to");
+    if (hash === SECTION && drawn && sel && o.lateList !== undefined && o.lateList >= 0 && !sel.options.length) {
+      const t = setTimeout(() => {
+        timers.delete(t);
+        if (g.el("to") !== sel) return;
+        sel.innerHTML = options();
+        browserSelects();
+      }, o.lateList);
+      timers.add(t);
+    }
+  };
+
+  const loc = {
+    host: "mail.google.com",
+    get hash() {
+      return hash;
+    },
+    set hash(v: string) {
+      const was = hash;
+      hash = v;
+      g.hashes.push(v);
+      if (v === SECTION && was !== SECTION && o.lateDraw === "hash") drawn = true;
+      render();
+    },
+    reload() {
+      g.reloads++;
+      stale = "";
+      if (o.lateDraw === "reload") drawn = true;
+      render();
+    },
+  };
+  page.location = loc;
+  render();
+  return g;
+}

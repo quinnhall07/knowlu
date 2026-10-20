@@ -1,0 +1,22 @@
+{
+  "about": "POST /mail-resolve's wire (email plan T4.5), shared by engine/tests/cloud_contract.rs and handler_test.ts. request is exactly what the engine's resolve_mail sends; reply is what the server answers it with. Every uid, title and id is invented.",
+  "request": {
+    "course": "CS 101",
+    "claims": [
+      { "uid": "mail:0a1b2c3d4e5f60718293a4b5c6d7e8f9", "index": 0 },
+      { "uid": "mail:0a1b2c3d4e5f60718293a4b5c6d7e8f9", "index": 1 },
+      { "uid": "mail:f9e8d7c6b5a4938271605f4e3d2c1b0a", "index": 0 }
+    ],
+    "candidates": [
+      { "id": "id-lab-4", "title": "Lab 4", "due": "2026-10-07T23:59" },
+      { "id": "id-essay", "title": "Essay", "due": null }
+    ]
+  },
+  "reply": {
+    "answers": [
+      { "uid": "mail:0a1b2c3d4e5f60718293a4b5c6d7e8f9", "index": 0, "target_id": "id-lab-4" },
+      { "uid": "mail:0a1b2c3d4e5f60718293a4b5c6d7e8f9", "index": 1, "target_id": null },
+      { "uid": "mail:f9e8d7c6b5a4938271605f4e3d2c1b0a", "index": 0, "target_id": "id-essay" }
+    ]
+  }
+}

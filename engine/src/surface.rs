@@ -625,6 +625,10 @@ pub fn is_judged(meta: &Mapping, records: &[crate::ledger::Record]) -> bool {
     records.iter().any(|r| r.get("actor").and_then(|v| v.as_str()).is_some_and(|a| a.starts_with("agent:")))
 }
 
+/// The `created_by` of a card the mail pass wrote (`mail/text.rs`'s writers; `approvals.rs` keys
+/// its mail rules on the same word).
+const MAIL_CARD_CREATOR: &str = "mail";
+
 fn meta_text(m: Option<&Mapping>, key: &str) -> Option<String> {
     m.and_then(|m| crate::yaml::get(m, key)).and_then(crate::yaml::text)
 }
@@ -1334,6 +1338,19 @@ pub struct Card {
     pub snooze_until: Option<String>,
     pub target: Option<String>,
     pub changes: serde_json::Value,
+    /// A mail card's sender as its card writer wrote it, `Name <address>` or the address alone
+    /// (email spec D21, §5.2). These three keys are read as literals, untrusted text the page renders
+    /// only through `h()`, and only on a card whose `created_by` is `mail` (Gmail D15: any other
+    /// card never names a sender). On a card without one, the key is left out, never `null`, so such
+    /// a card serializes as it did before (T15.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The mail's day, `YYYY-MM-DD` (D21).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail_date: Option<String>,
+    /// The verbatim quote the claim rests on (D9, §5.2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1489,6 +1506,10 @@ pub fn read_approvals(vault: &Path, today: Date) -> ApprovalsRead {
         }
 
         if kind != "events-digest" {
+            // Gmail D15, email D21: only a card the mail pass wrote names a sender, a day and a quote;
+            // any other card's top-level keys of those names are never read (spec 6.1's Q2 marker).
+            let by_mail = meta_text(Some(&meta), "created_by").as_deref() == Some(MAIL_CARD_CREATOR);
+            let mail_text = |key: &str| by_mail.then(|| meta_text(Some(&meta), key)).flatten();
             // R18: the digest is a header count, never a row — one batch UI must never smuggle a
             // second card past the "one proposal, one decision" budget rule it already owns.
             out.cards.push(Card {
@@ -1507,6 +1528,9 @@ pub fn read_approvals(vault: &Path, today: Date) -> ApprovalsRead {
                 changes: crate::yaml::get(&meta, "changes")
                     .map(crate::yaml::to_json)
                     .unwrap_or(serde_json::Value::Null),
+                from: mail_text("from"),
+                mail_date: mail_text("mail_date"),
+                evidence: mail_text("evidence"),
             });
         }
     }
@@ -2977,6 +3001,87 @@ mod tests {
         let d_clear = decisions(&clear, TODAY, &ar_clear, &l.planning);
         assert!(d_clear.empty_text.is_some());
         let _ = std::fs::remove_dir_all(&clear);
+    }
+
+    /// T15.0 (email spec D21, §5.2, §6.2): a mail card's `from`, `mail_date` and `evidence` reach
+    /// the deck as the literals the card writer wrote (`mail/text.rs`'s `source_lines`, through
+    /// `write::to_literal`): a colon, a quote and markup stay text, and the change's own nested
+    /// `from` is not the sender.
+    #[test]
+    fn a_mail_card_carries_its_from_mail_date_and_evidence_as_literals() {
+        let dir = std::env::temp_dir().join(format!("qo-approvals-mail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("approvals")).unwrap();
+        let lit = |s: &str| crate::write::to_literal(&serde_yaml_ng::Value::String(s.to_string()));
+        let (from, day) = ("Dr. Ada Byron <ada@uni.example>", "2026-08-27");
+        let quote = "Essay 2: now due \"Monday\" <img src=x onerror=alert(1)>";
+        let card = format!(
+            "---\ntype: approval\nkind: amend\ntitle: {}\nstatus: pending\ntarget: tasks/essay-2.md\n\
+             proposed_at: 2026-08-27\nfirst_proposed_at: 2026-08-27\nexpires: null\nsnooze_until: null\n\
+             created_by: mail\nsource_uid: {}\nfrom: {}\nmail_date: {}\nevidence: {}\nchanges:\n  due:\n    \
+             from: 2026-09-01\n    to: 2026-09-07\n---\n\n**Why proposed:** The instructor moved it\n",
+            lit("Email changed due for Essay 2"),
+            lit("mail:abc:0"),
+            lit(from),
+            lit(day),
+            lit(quote),
+        );
+        crate::pystr::write_text(&dir.join("approvals").join("amend-essay-2-due.md"), &card).unwrap();
+        let ar = read_approvals(&dir, TODAY);
+        assert_eq!(ar.cards.len(), 1);
+        let v = serde_json::to_value(&ar.cards[0]).unwrap();
+        assert_eq!(
+            (v["from"].as_str(), v["mail_date"].as_str(), v["evidence"].as_str()),
+            (Some(from), Some(day), Some(quote))
+        );
+        assert_eq!(v["changes"]["due"]["from"], "2026-09-01", "the change's own `from` is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T15.0: a card without the mail fields serializes byte for byte as it did before them: the
+    /// three keys are omitted, never `null`, so `surface_oracle.rs`'s references stay frozen.
+    #[test]
+    fn a_card_without_mail_fields_serializes_exactly_as_before() {
+        let dir = std::env::temp_dir().join(format!("qo-approvals-nomail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("approvals")).unwrap();
+        let note = "---\ntype: approval\nkind: task\ntitle: \"Something\"\nstatus: pending\nsource_uid: \"gmail:xyz\"\nproposed_at: 2026-08-27\nfirst_proposed_at: 2026-08-27\nexpires: 2026-09-30\nsnooze_until: null\ncreated_by: gmail\n---\n\nBody text.\n";
+        crate::pystr::write_text(&dir.join("approvals").join("task-something.md"), note).unwrap();
+        let ar = read_approvals(&dir, TODAY);
+        let got = crate::ledger::dumps_value(&serde_json::to_value(&ar.cards[0]).unwrap());
+        assert_eq!(
+            got,
+            r#"{"age_days": 1, "changes": null, "expires": "2026-09-30", "first_proposed_at": "2026-08-27", "id": "task-something", "kind": "task", "slug": "task-something", "snooze_until": null, "source_uid": "gmail:xyz", "target": null, "title": "Something", "urgency": null, "why": "Body text."}"#
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Gmail spec D15, email Checkpoint D (minor 4): a card names a sender only when the mail pass
+    /// wrote it (`created_by: mail`). A Gmail card, or a hand-made one, that carries a top-level
+    /// `from`, `mail_date` or `evidence` (a hand edit, a future writer) shows none of the three: it
+    /// serializes exactly as a card without them does.
+    #[test]
+    fn a_card_not_written_by_the_mail_pass_never_carries_a_sender() {
+        let dir = std::env::temp_dir().join(format!("qo-approvals-notmail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("approvals")).unwrap();
+        let fields = "from: \"Prof X <x@uni.edu>\"\nmail_date: 2026-08-27\nevidence: \"Lab 5 moved\"\n";
+        let gmail = format!("---\ntype: approval\nkind: task\ntitle: \"Something\"\nstatus: pending\nsource_uid: \"gmail:xyz\"\nproposed_at: 2026-08-27\nfirst_proposed_at: 2026-08-27\nexpires: 2026-09-30\nsnooze_until: null\ncreated_by: gmail\n{fields}---\n\nBody text.\n");
+        crate::pystr::write_text(&dir.join("approvals").join("task-something.md"), &gmail).unwrap();
+        let ar = read_approvals(&dir, TODAY);
+        let got = crate::ledger::dumps_value(&serde_json::to_value(&ar.cards[0]).unwrap());
+        assert_eq!(
+            got,
+            r#"{"age_days": 1, "changes": null, "expires": "2026-09-30", "first_proposed_at": "2026-08-27", "id": "task-something", "kind": "task", "slug": "task-something", "snooze_until": null, "source_uid": "gmail:xyz", "target": null, "title": "Something", "urgency": null, "why": "Body text."}"#,
+            "a created_by: gmail card shows no sender"
+        );
+        let hand = gmail.replace("created_by: gmail\n", "");
+        crate::pystr::write_text(&dir.join("approvals").join("task-something.md"), &hand).unwrap();
+        let v = serde_json::to_value(&read_approvals(&dir, TODAY).cards[0]).unwrap();
+        for key in ["from", "mail_date", "evidence"] {
+            assert!(v.get(key).is_none(), "a card with no created_by carries no {key}: {v}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------------------------

@@ -3,6 +3,12 @@
 // one — and the confidence floor is the single gate. This is the server-side twin of
 // `judge::parse_reply` and `judge::judge_task`'s known-course rule, and it must not drift from
 // them: the device applies the same clamps to whatever comes back.
+//
+// `judge_due.ts` imports `ABSOLUTE_DUE_RE` from here and the mail region calls its `resolveDue`: a cycle
+// that is safe because neither module touches the other's exports while it loads, only inside functions.
+import { resolveDue } from "./judge_due.ts";
+import type { MailClaim, Topic } from "./mail_templates.ts";
+
 export const CONFIDENCE_FLOOR = 0.6;
 export const MAX_REASON_CHARS = 140;
 
@@ -176,4 +182,231 @@ export function validate(
       confidence: clamp(confidence, 0, 1),
     },
   };
+}
+
+// ---- Email (plan T3b): mail claims and resolve answers (spec §4.7 step 4, §5.1 as amended 2026-10-02,
+// D9, D12; §10 R11). Unlike `validate()`, nothing here is clamped into range but the confidence: a claim
+// is data the device acts on without re-judging it, so a value off its set is a refused claim.
+
+/** The judgment kinds email adds (plan P6). Their own type, so no `Record<Kind, …>` changes. A `receipt`
+ * is a claim kind, never a judgment kind, so it is not here. */
+export const MAIL_KINDS = ["mail_claim", "mail_resolve", "mail_digest"] as const;
+export type MailKind = (typeof MAIL_KINDS)[number];
+
+/** D9: up to five claims a message; a sixth and later are dropped unread. */
+export const MAX_MAIL_CLAIMS = 5;
+export const MAIL_EVIDENCE_CHARS = 140;
+const MAIL_TITLE_CHARS = 200;
+/** §5.1's fixed `course_info` topics. */
+export const MAIL_TOPICS = [
+  "schedule",
+  "room",
+  "instructor",
+  "office_hours",
+  "policy",
+  "other",
+] as const satisfies readonly Topic[];
+const ITEM_KINDS = ["task", "exam", "event"] as const;
+
+/** What a claim is checked against: the message as the model (or a template) read it. */
+export interface MailValidateContext {
+  /** The From header as parsed, display name and address. A line break in it refuses the whole reply. */
+  from: string;
+  /** The subject and the text the claim is checked against: cut and scrubbed for the model (§4.7 step 1),
+   * scrubbed only for a template (§4.7 step 3), so the evidence is checked against what was read.
+   * Evidence must lie inside one of the two, never across them. */
+  subject: string;
+  text: string;
+  /** The Date header: `judge_due.ts`'s reference. */
+  date: string;
+  knownCourses: readonly string[];
+  timeZone?: string | null;
+}
+
+export interface MailValidated {
+  /** True when at least one claim was kept. */
+  ok: boolean;
+  claims: MailClaim[];
+  /** Each refused claim's cause, in reply order. */
+  refused: Cause[];
+  /** When nothing was kept: the first refusal's cause, else `incomplete`. */
+  cause?: Cause;
+}
+
+/** §10 R11: a C0 control other than tab, DEL, U+0085, U+2028 or U+2029. Each is a line boundary for the
+ * device's `pystr::splitlines`, or a control no claim needs; a value carrying one is refused, never cleaned. */
+function breaksLine(text: string): boolean {
+  for (const ch of text) {
+    const c = ch.codePointAt(0) ?? 0;
+    if ((c < 0x20 && c !== 0x09) || c === 0x7f || c === 0x85 || c === 0x2028 || c === 0x2029) return true;
+  }
+  return false;
+}
+
+function fold(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/** `due` when it is in the wire shape AND names a real day and time, else null. `resolveDue` passes a
+ * shaped due through verbatim, so `2026-09-31` or `T24:00` stops here, as the device's `due_date` reads it
+ * (the engine lane's T5.3 finding): the server and the device agree on which dues exist. */
+function realDue(due: string | null): string | null {
+  if (due === null || !ABSOLUTE_DUE_RE.test(due)) return null;
+  const [year, month, day] = [due.slice(0, 4), due.slice(5, 7), due.slice(8, 10)].map(Number);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  if (days === undefined || day < 1 || day > days) return null;
+  if (due.length > 10 && (Number(due.slice(11, 13)) > 23 || Number(due.slice(14, 16)) > 59)) return null;
+  return due;
+}
+
+/** A claim's due: through the resolver against the Date header, then held to a real calendar day. */
+function mailDue(raw: unknown, ctx: MailValidateContext): string | null {
+  return typeof raw === "string" ? realDue(resolveDue(raw, ctx.date, ctx.timeZone)) : null;
+}
+
+function present(value: unknown): boolean {
+  return value !== null && value !== undefined;
+}
+
+type Checked = { claim: MailClaim } | { cause: Cause };
+const INCOMPLETE: Checked = { cause: "incomplete" };
+
+/** One claim against §5.1: its shape first (`incomplete`), the 0.6 floor last, as `validate()` orders them. */
+function mailClaim(
+  raw: unknown,
+  ctx: MailValidateContext,
+  source: "model" | "template",
+  folded: { subject: string; text: string },
+): Checked {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return INCOMPLETE;
+  const a = raw as Record<string, unknown>;
+  const kind = a.kind;
+  if (
+    kind !== "new_item" && kind !== "change" && kind !== "course_info" && kind !== "noise" &&
+    kind !== "receipt"
+  ) {
+    return INCOMPLETE;
+  }
+  // PQ4: a receipt comes only from a template. The source is the caller's word, never the answer's.
+  if (kind === "receipt" && source !== "template") return INCOMPLETE;
+  const confidence = num(a.confidence);
+  if (confidence === null || typeof a.why !== "string" || typeof a.evidence !== "string") return INCOMPLETE;
+  const target = typeof a.target === "string" ? a.target : "";
+  if ([a.why, target].some(breaksLine)) return INCOMPLETE;
+  // D9: the evidence occurs verbatim in the message after whitespace folding, or the claim is refused.
+  // It is folded before R11's check, so a quote of hard-wrapped mail holds; a break folding keeps
+  // (U+0085, a C0 control that is not whitespace, DEL) is still refused, and none reaches the device.
+  const evidence = fold(a.evidence);
+  if (evidence === "" || breaksLine(evidence)) return INCOMPLETE;
+  if (!(folded.text.includes(evidence) || folded.subject.includes(evidence))) {
+    return INCOMPLETE;
+  }
+  const why = oneLine(a.why, MAX_REASON_CHARS);
+  if (why === "") return INCOMPLETE;
+  const course = typeof a.course === "string" && ctx.knownCourses.includes(a.course.trim())
+    ? a.course.trim()
+    : null;
+  const base: MailClaim = {
+    kind,
+    course,
+    target: null,
+    field: null,
+    value: null,
+    item: null,
+    topic: null,
+    evidence: [...evidence].slice(0, MAIL_EVIDENCE_CHARS).join("").trim(),
+    why,
+    confidence: clamp(confidence, 0, 1),
+    source,
+    resolution: null,
+  };
+  const named = oneLine(target, MAIL_TITLE_CHARS);
+  let claim: MailClaim;
+  if (kind === "change") {
+    if (named === "") return INCOMPLETE;
+    if (a.field === "due") claim = { ...base, target: named, field: "due", value: mailDue(a.value, ctx) };
+    else if (a.field === "cancelled" && a.value === "true") {
+      claim = { ...base, target: named, field: "cancelled", value: "true" };
+    } else return INCOMPLETE;
+  } else if (kind === "receipt") {
+    if (named === "" || [a.field, a.value, a.item, a.topic].some(present)) return INCOMPLETE;
+    claim = { ...base, target: named };
+  } else if (kind === "course_info") {
+    const topic = MAIL_TOPICS.find((t) => t === a.topic);
+    if (topic === undefined) return INCOMPLETE;
+    claim = { ...base, topic };
+  } else if (kind === "new_item") {
+    const it = a.item;
+    if (it === null || typeof it !== "object" || Array.isArray(it)) return INCOMPLETE;
+    const i = it as Record<string, unknown>;
+    if (typeof i.title !== "string" || breaksLine(i.title)) return INCOMPLETE;
+    const title = oneLine(i.title, MAIL_TITLE_CHARS);
+    const itemKind = ITEM_KINDS.find((k) => k === i.item_kind);
+    const effort = num(i.effort_hours);
+    const importance = num(i.importance);
+    if (title === "" || itemKind === undefined || effort === null || effort < 0.25 || effort > 40) {
+      return INCOMPLETE;
+    }
+    if (importance === null || !Number.isInteger(importance) || importance < 1 || importance > 5) {
+      return INCOMPLETE;
+    }
+    const due = mailDue(i.due, ctx);
+    claim = { ...base, item: { title, due, item_kind: itemKind, effort_hours: effort, importance } };
+  } else claim = base;
+  if (confidence < CONFIDENCE_FLOOR) return { cause: "below floor" };
+  return { claim };
+}
+
+/**
+ * A `mail_claim` reply (or a template's claims, `source: "template"`) to §5.1's claims. A refused claim is
+ * no claim and the rest stand; a From that breaks a line refuses the whole reply. An unknown course and an
+ * unresolvable due read null; a sixth claim is dropped.
+ */
+export function validateMailClaims(
+  answer: Record<string, unknown>,
+  ctx: MailValidateContext,
+  source: "model" | "template",
+): MailValidated {
+  if (breaksLine(ctx.from)) return { ok: false, claims: [], refused: [], cause: "incomplete" };
+  const raw = Array.isArray(answer.claims) ? answer.claims.slice(0, MAX_MAIL_CLAIMS) : [];
+  const folded = { subject: fold(ctx.subject), text: fold(ctx.text) };
+  const claims: MailClaim[] = [];
+  const refused: Cause[] = [];
+  for (const one of raw) {
+    const checked = mailClaim(one, ctx, source, folded);
+    if ("claim" in checked) claims.push(checked.claim);
+    else refused.push(checked.cause);
+  }
+  if (claims.length > 0) return { ok: true, claims, refused };
+  return { ok: false, claims, refused, cause: refused[0] ?? "incomplete" };
+}
+
+/** One `mail-resolve` batch (D12): its claims' keys and its candidates' note ids, as sent. */
+export interface ResolveBatch {
+  claims: readonly string[];
+  candidates: readonly string[];
+}
+
+/**
+ * A `mail_resolve` reply, `{answers: [{claim, target_id}]}`, to one resolution per batch claim, in batch
+ * order. An id outside the batch's candidates, an unanswered claim, or a claim answered two different ways
+ * reads none (`target_id: null`), never a guess; an answer for a claim outside the batch is ignored.
+ */
+export function validateMailResolve(
+  answer: Record<string, unknown>,
+  batch: ResolveBatch,
+): Array<{ target_id: string | null }> {
+  const said = new Map<string, Set<string | null>>();
+  for (const one of Array.isArray(answer.answers) ? answer.answers : []) {
+    if (one === null || typeof one !== "object") continue;
+    const { claim, target_id } = one as Record<string, unknown>;
+    if (typeof claim !== "string" || !batch.claims.includes(claim)) continue;
+    const id = typeof target_id === "string" && batch.candidates.includes(target_id) ? target_id : null;
+    said.set(claim, (said.get(claim) ?? new Set<string | null>()).add(id));
+  }
+  return batch.claims.map((claim) => {
+    const ids = [...(said.get(claim) ?? [])];
+    return { target_id: ids.length === 1 ? ids[0] : null };
+  });
 }
