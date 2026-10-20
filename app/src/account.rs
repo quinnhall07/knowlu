@@ -157,8 +157,14 @@ pub fn move_session(from: &str, to: &str) -> Result<(), String> {
 }
 
 fn agent() -> ureq::Agent {
+    agent_within(TIMEOUT)
+}
+
+/// [`agent`] with its whole-request bound as a parameter: `TIMEOUT` for every caller but
+/// [`valid_access_token_within`]'s refresh, which gets what is left of its own bound.
+fn agent_within(timeout: std::time::Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
+        .timeout_global(Some(timeout))
         // FALSE deliberately: GoTrue says why it refused in the body of a 400, and turning that into
         // an `Err(status)` would replace "Invalid login credentials" with "400" on the panel.
         .http_status_as_error(false)
@@ -182,8 +188,13 @@ pub const UNREACHABLE: &str = "the account service could not be reached";
 /// body would break. Serializing with `serde_json::to_string` — already a dependency — and sending
 /// the compact result as a plain string is **required**, not merely equivalent.
 fn post_json(url: &str, anon: &str, body: &Value) -> Result<(u16, Value), String> {
+    post_json_within(url, anon, body, TIMEOUT)
+}
+
+/// [`post_json`] over [`agent_within`]: the same request bytes, with the bound as a parameter.
+fn post_json_within(url: &str, anon: &str, body: &Value, timeout: std::time::Duration) -> Result<(u16, Value), String> {
     let text = serde_json::to_string(body).map_err(|e| e.to_string())?;
-    let mut res = agent()
+    let mut res = agent_within(timeout)
         .post(url)
         .header("apikey", anon)
         .header("content-type", "application/json")
@@ -464,7 +475,13 @@ pub fn verify_email_code_at(auth_base: &str, anon: &str, email: &str, code: &str
 }
 
 pub fn refresh_at(auth_base: &str, anon: &str, refresh_token: &str, now_unix: i64) -> Result<(String, Session), String> {
-    let (status, v) = post_json(&format!("{auth_base}/token?grant_type=refresh_token"), anon, &json!({ "refresh_token": refresh_token }))?;
+    refresh_within(auth_base, anon, refresh_token, now_unix, TIMEOUT)
+}
+
+/// [`refresh_at`]'s one request, bounded by `timeout`.
+fn refresh_within(auth_base: &str, anon: &str, refresh_token: &str, now_unix: i64, timeout: std::time::Duration) -> Result<(String, Session), String> {
+    let url = format!("{auth_base}/token?grant_type=refresh_token");
+    let (status, v) = post_json_within(&url, anon, &json!({ "refresh_token": refresh_token }), timeout)?;
     if !(200..300).contains(&status) { return Err(provider_error(status, &v)); }
     session_from(&v, now_unix)
 }
@@ -488,6 +505,9 @@ pub fn refresh_at(auth_base: &str, anon: &str, refresh_token: &str, now_unix: i6
 /// Held across the WHOLE load → (maybe) refresh → save sequence, taken *before* `load_session`: a
 /// caller that blocks here re-reads the entry the winner just saved once it gets the lock, rather than
 /// refreshing the stale token it would otherwise have read before waiting.
+///
+/// Sign-out's clean takes it the same way but never blocks on it: [`valid_access_token_within`] uses
+/// `try_lock` within its bound (L4 plan §4.7), at most once per sign-out.
 static SESSION_REFRESH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// **Refresh is C1's job** (the C2 contract, point 2). A token with under two minutes left is
@@ -498,6 +518,43 @@ pub fn valid_access_token_at(auth_base: &str, anon: &str, target: &str, now_unix
     let (account_id, s) = load_session(target)?;
     if s.expires_at - now_unix > 120 { return Ok(s.access_token); }
     let (id, fresh) = refresh_at(auth_base, anon, &s.refresh_token, now_unix)?;
+    let id = if id.is_empty() { account_id } else { id };
+    save_session(target, &id, &fresh)?;
+    Ok(fresh.access_token)
+}
+
+/// How often [`valid_access_token_within`] tries [`SESSION_REFRESH_LOCK`] again while it is held.
+const LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// [`valid_access_token_within`]'s answer when its bound passed before the lock was free or before a
+/// refresh could be sent. Fixed: no token and no reply reaches it.
+const SESSION_NOT_IN_TIME: &str = "the session could not be read in time";
+
+/// [`valid_access_token_at`]'s rule within a bound, for sign-out's clean ([`sign_out_mail_client`] is its
+/// one caller, L4 plan §4.7). The same lock, the same 120-second floor, the same request and the same
+/// save; what differs is the waiting. The lock is taken by `try_lock`, tried again every [`LOCK_RETRY`]
+/// until `within` has passed since the call began, and not taken in time is [`SESSION_NOT_IN_TIME`] with
+/// no request made; a refresh is sent over what is left of `within`, and with nothing left it is not
+/// sent at all. So one call takes at most `within`, plus local Credential Manager reads and one write.
+/// Every other caller keeps `valid_access_token_at`'s blocking `lock()` and its 30 s refresh.
+pub fn valid_access_token_within(auth_base: &str, anon: &str, target: &str, now_unix: i64, within: std::time::Duration) -> Result<String, String> {
+    let began = std::time::Instant::now();
+    let left = || within.saturating_sub(began.elapsed());
+    let _guard = loop {
+        match SESSION_REFRESH_LOCK.try_lock() {
+            Ok(guard) => break guard,
+            // Poisoned is acquired: a panic under the lock left it, and this caller now holds it, as the
+            // two blocking takers read it. Only `WouldBlock` means another caller holds it.
+            Err(std::sync::TryLockError::Poisoned(p)) => break p.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) if left().is_zero() => return Err(SESSION_NOT_IN_TIME.to_string()),
+            Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(left().min(LOCK_RETRY)),
+        }
+    };
+    let (account_id, s) = load_session(target)?;
+    if s.expires_at - now_unix > 120 { return Ok(s.access_token); }
+    let rest = left();
+    if rest.is_zero() { return Err(SESSION_NOT_IN_TIME.to_string()); }
+    let (id, fresh) = refresh_within(auth_base, anon, &s.refresh_token, now_unix, rest)?;
     let id = if id.is_empty() { account_id } else { id };
     save_session(target, &id, &fresh)?;
     Ok(fresh.access_token)
@@ -641,6 +698,14 @@ pub fn open_policy(which: String) -> Value {
 /// **A signed-out Knowlu keeps no signed-in mailbox** (email-forwarding spec §4.13, T12): signing a
 /// profile out also closes the mail window and deletes every `mail-session-*` profile and the
 /// `mail-setup` profile of that Knowlu profile ([`sign_out_with`]). Forwarding is untouched.
+///
+/// **…and no unfinished mail setup** (L4 plan §4.7, the email lane's hand-back). Before the session is
+/// forgotten, the start-up clean (`mail::setup::clean_unfinished`) runs once with it, so a setup's
+/// address that was never placed is deleted on the service while this account can still ask; then every
+/// `pending_setups` record goes, because another account may sign in on this profile next and must not
+/// inherit them. The clean's client is [`sign_out_mail_client`]: every request capped at
+/// [`SIGN_OUT_MAIL_CALL`], the session read once. A client that cannot be built skips the clean, never
+/// the sign-out.
 #[tauri::command(async)]
 pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Value, String> {
     // The one mail window is this console's profile's: it closes only when that profile signs out, and
@@ -653,7 +718,14 @@ pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Val
         close_mail_windows(&app);
         take_mail_window(&app, std::time::Instant::now() + MAIL_STOP_BOUND)
     };
-    sign_out_with(profile_id, crate::state::app_data_root().as_deref(), close)
+    // Called only for a profile id with a folder, under the hold and before the credential is deleted.
+    let id = profile_id.clone().unwrap_or_default();
+    let clean = |dir: &std::path::Path| {
+        if let Ok(client) = sign_out_mail_client(&api_base(), &anon_key(), &session_target(&id), SIGN_OUT_MAIL_CALL) {
+            crate::mail::setup::clean_unfinished(dir, &client);
+        }
+    };
+    sign_out_with(profile_id, crate::state::app_data_root().as_deref(), close, clean)
 }
 
 /// [`sign_out`] without the app's handle. `close_mail_window` is called with the profile's folder
@@ -665,25 +737,41 @@ pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Val
 /// [`is_profile_id`]-shaped and an unknown `app_root` name no folder, so nothing is deleted.
 /// `mail_profiles_left` is `true` when a mail profile is still on disk: recorded for the start-up
 /// retry, or, when `mail.json` could not record it, not.
+///
+/// **The order** (L4 plan §4.7), for a profile with a folder: (1) the hold, first and once; (2) the
+/// clean, `clean_unfinished(dir)`; (3) every `pending_setups` record cleared through
+/// `MailState::update`, whatever the clean did; (4) `forget_all`; (5) the hold dropped; (6) the token
+/// read and the credential deleted; (7) the revoke. Why: the clean deletes mail profiles (`forget`), so
+/// it runs under the hold; its client reads the session from Credential Manager, so it runs before the
+/// delete, and the token revoked is the one a refresh in the clean saved; and the records are forgotten
+/// because another account may sign in on this profile next, and its start-up clean would not find
+/// these ids among its own addresses. A hold that is not given (another profile's console, or the bound
+/// passed) still runs (2) to (5), as `forget_all` always has. A clean that fails, or a `mail.json` that
+/// cannot be read, never stops the sign-out. `setups_cleared` is `true` when `mail.json` holds no record
+/// afterwards; with no profile folder (the cases above that delete nothing) nothing is read or written,
+/// neither seam is called, and it is `true`.
 pub fn sign_out_with<Held>(
     profile_id: Option<String>,
     app_root: Option<&std::path::Path>,
     close_mail_window: impl FnOnce(&std::path::Path) -> Held,
+    clean_unfinished: impl FnOnce(&std::path::Path),
 ) -> Result<Value, String> {
     let target = match &profile_id {
         Some(id) => session_target(id),
         None => PENDING_TARGET.to_string(),
     };
-    let token = load_session(&target).ok().map(|(_, s)| s.access_token);
-    let had_session = crate::credentials::exists(&target);
-    let forgotten = if had_session { crate::credentials::delete(&target) } else { Ok(()) };
-    let mut mail_profiles_left = false;
+    let (mut mail_profiles_left, mut setups_cleared) = (false, true);
     if let (Some(id), Some(root)) = (profile_id.as_deref().filter(|id| is_profile_id(id)), app_root) {
         let dir = crate::profiles::profile_dir(root, id);
         let held = close_mail_window(&dir);
+        clean_unfinished(&dir);
+        setups_cleared = forget_pending_setups(&dir);
         mail_profiles_left = crate::mail_session::forget_all(&dir) != Ok(true);
         drop(held);
     }
+    let token = load_session(&target).ok().map(|(_, s)| s.access_token);
+    let had_session = crate::credentials::exists(&target);
+    let forgotten = if had_session { crate::credentials::delete(&target) } else { Ok(()) };
     forgotten?;
     if let (Some(t), Ok(auth)) = (token, auth_base(&api_base())) {
         let _ = agent()
@@ -692,7 +780,48 @@ pub fn sign_out_with<Held>(
             .header("authorization", &format!("Bearer {t}"))
             .send_empty();
     }
-    Ok(json!({ "ok": true, "had_session": had_session, "mail_profiles_left": mail_profiles_left }))
+    Ok(json!({ "ok": true, "had_session": had_session, "mail_profiles_left": mail_profiles_left, "setups_cleared": setups_cleared }))
+}
+
+/// Step (3) of [`sign_out_with`]: every in-flight setup record goes, placed, shown and failed-delete ones
+/// included (they name addresses of the account signing out), through `mail.json`'s one write path, so
+/// no other field moves. `true` when the file holds none afterwards; an unreadable file is left as it is.
+fn forget_pending_setups(dir: &std::path::Path) -> bool {
+    crate::mail_session::MailState::update(dir, |s| !std::mem::take(&mut s.pending_setups).is_empty())
+        .is_ok_and(|s| s.pending_setups.is_empty())
+}
+
+/// Sign-out's cap on each network wait of its clean: the one session read (lock wait and refresh
+/// together) and each mail request (the list, and a delete per never-placed `pending` row: at most three,
+/// D3's live addresses). Sign-out's worst case, term by term: `MAIL_STOP_BOUND` (60 s, the hold) +
+/// `SIGN_OUT_MAIL_CALL` × (2 + deletes) + the revoke's 30 s (`TIMEOUT`), so at most 115 s of network
+/// waits; plus the local `wipe` term, about 2.75 s per mail profile WebView2 still holds (in the clean's
+/// `forget` and again in `forget_all`). Every other part is local file and Credential Manager work.
+pub const SIGN_OUT_MAIL_CALL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The client sign-out's clean uses ([`sign_out`], step 2): `api_base`'s mail routes, each request capped
+/// at `per_call`, with a bearer read through [`valid_access_token_within`]`(…, per_call)` **once per
+/// clean**, lazily at the first request, and that answer (an `Err` included) given to every later request.
+///
+/// **Why it keeps a token**, against `mail_client.rs`'s rule ("read on every call … never kept"): this
+/// client lives for one clean, a few seconds at sign-out, and is dropped with it, so the token is kept for
+/// that clean only; reading once is what lets the bound count one session read instead of one per request
+/// (each an uncapped lock wait and refresh under `MailClient::for_session`). The session it reads still
+/// exists, because the clean runs before the credential is deleted. The memo is a `OnceLock`: a token
+/// function must be `Send + Sync`. `api_base` is a parameter, so a test can point the clean at its own
+/// listener; `sign_out` passes `api_base()`, the host the revoke already uses.
+pub fn sign_out_mail_client(
+    api_base: &str,
+    anon: &str,
+    target: &str,
+    per_call: std::time::Duration,
+) -> Result<crate::mail_client::MailClient, crate::mail_client::MailError> {
+    use crate::mail_client::{MailClient, MailError};
+    let auth = auth_base(api_base).map_err(|_| MailError::NoSession)?;
+    let (anon, target) = (anon.to_string(), target.to_string());
+    let read: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    let token = move || read.get_or_init(|| valid_access_token_within(&auth, &anon, &target, now_unix(), per_call)).clone();
+    Ok(MailClient::with_token_fn(api_base, Box::new(token))?.with_timeout(per_call))
 }
 
 /// The four keys `config/cloud.yaml` carries — the contract with C2, in this order.
@@ -764,7 +893,7 @@ pub const GRACE: std::time::Duration = std::time::Duration::from_secs(72 * 60 * 
 /// **A file beside `settings.json`, not a field in it.** `state::Settings` has no `#[serde(default)]`
 /// on any field and `Settings::load` falls back to defaults on a parse failure, so adding a field
 /// would silently reset a user's backup folder and autostart choice on their first launch after an
-/// update. `onboarding::offer_marker` already makes this argument, and this follows its precedent.
+/// update. `onboarding::mail_offer_marker` already makes this argument, and this follows its precedent.
 pub fn cache_path(data_dir: &std::path::Path) -> std::path::PathBuf { data_dir.join("entitlement.json") }
 
 pub fn load_cache(data_dir: &std::path::Path) -> Option<EntitlementCache> {

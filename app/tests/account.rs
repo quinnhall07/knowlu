@@ -298,13 +298,13 @@ fn signing_out_a_profile_reports_whether_it_had_a_session_and_removes_it() {
     let target = session_target(&id);
     let _cleanup = Cleanup(vec![target.clone()]);
 
-    let out = sign_out_with(Some(id.clone()), None, |_: &std::path::Path| {}).expect("sign out with nothing to sign out of");
+    let out = sign_out_with(Some(id.clone()), None, |_: &std::path::Path| {}, |_: &std::path::Path| {}).expect("sign out with nothing to sign out of");
     assert_eq!(out["ok"], true);
     assert_eq!(out["had_session"], false);
 
     let s = Session { access_token: "at".into(), refresh_token: "rt".into(), expires_at: 99, email: "a@example.invalid".into() };
     save_session(&target, "acc-1", &s).expect("write a session to sign out of");
-    let out = sign_out_with(Some(id), None, |_: &std::path::Path| {}).expect("sign out with a real session");
+    let out = sign_out_with(Some(id), None, |_: &std::path::Path| {}, |_: &std::path::Path| {}).expect("sign out with a real session");
     assert_eq!(out["ok"], true);
     assert_eq!(out["had_session"], true);
     assert!(!knowlu::credentials::exists(&target), "the credential must be gone after sign-out");
@@ -2557,9 +2557,14 @@ fn sign_out_deletes_this_profiles_mail_session_and_mail_setup_profiles_and_no_ot
     }
 
     let closed = std::cell::RefCell::new(Vec::new());
-    let out = knowlu::account::sign_out_with(Some(my_id.clone()), Some(&app_root), |dir: &std::path::Path| {
-        closed.borrow_mut().push((dir.to_path_buf(), mail.iter().all(|n| dir.join(n).is_dir())));
-    })
+    let out = knowlu::account::sign_out_with(
+        Some(my_id.clone()),
+        Some(&app_root),
+        |dir: &std::path::Path| {
+            closed.borrow_mut().push((dir.to_path_buf(), mail.iter().all(|n| dir.join(n).is_dir())));
+        },
+        |_: &std::path::Path| {},
+    )
     .expect("sign out");
 
     assert_eq!(out["ok"], true);
@@ -2642,6 +2647,11 @@ fn the_live_close_stops_runs_first_and_sign_out_and_the_wipe_wait_for_the_window
     assert!(closes.is_some() && closes < takes, "sign-out closes, then takes the mail window within its bound: {sign_out}");
     assert!(body("impl DeleteSteps for LiveDelete").contains("take_mail_window(self.app, std::time::Instant::now() + MAIL_STOP_BOUND)"));
     assert!(body("fn take_mail_window(").contains("MailWindow::take_by(deadline, || close_mail_windows(app))"));
+    // L4 (plan §4.7): sign-out's clean is the start-up clean, and it runs before the credential is deleted.
+    assert!(sign_out.contains("crate::mail::setup::clean_unfinished(dir, &client)"), "sign-out runs the unfinished-setup clean: {sign_out}");
+    let with = body(concat!("pub fn sign_out_with", "<Held>("));
+    let (clean, delete) = (with.find("clean_unfinished(&dir)"), with.find("crate::credentials::delete(&target)"));
+    assert!(clean.is_some() && clean < delete, "the clean runs before the session's credential is deleted: {with}");
 }
 
 // ---- the slot's mail step against a sign-out's close (Checkpoint D, finding 1; spec §4.13) ----
@@ -2783,15 +2793,20 @@ fn a_slot_holding_the_mail_window_opens_no_profile_after_the_sign_out_closes_it(
     assert_eq!(first.recv_timeout(Duration::from_secs(60)).expect("the slot opened its first mailbox"), "mail-session-mbx-a");
 
     let left_at_release = std::cell::Cell::new(None);
-    let out = knowlu::account::sign_out_with(Some(id.clone()), Some(&app_root), |d: &std::path::Path| {
-        let close = || {
-            knowlu::mail::stop_runs();
-            st.lock().unwrap().open = None;
-        };
-        let hold = knowlu::mail::MailWindow::take_by(Instant::now() + Duration::from_secs(30), close);
-        assert!(hold.is_some(), "the sign-out took the mail window within its time limit");
-        Kept { _hold: hold, dir: d.to_path_buf(), left_at_release: &left_at_release }
-    })
+    let out = knowlu::account::sign_out_with(
+        Some(id.clone()),
+        Some(&app_root),
+        |d: &std::path::Path| {
+            let close = || {
+                knowlu::mail::stop_runs();
+                st.lock().unwrap().open = None;
+            };
+            let hold = knowlu::mail::MailWindow::take_by(Instant::now() + Duration::from_secs(30), close);
+            assert!(hold.is_some(), "the sign-out took the mail window within its time limit");
+            Kept { _hold: hold, dir: d.to_path_buf(), left_at_release: &left_at_release }
+        },
+        |_: &std::path::Path| {},
+    )
     .expect("sign out");
     slot.join().expect("the slot's thread");
 
@@ -2946,4 +2961,515 @@ fn a_stop_while_a_window_opens_closes_it_and_waits_until_it_is_gone_before_the_h
     }
     assert!(svc.calls().is_empty(), "a stopped run asks nothing of the service: {:?}", svc.calls());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---- L4: sign-out tries the unfinished mail setups, then forgets them (plan §4.7) ----
+//
+// Sign-out holds the mail window, runs the start-up clean with the session it is about to forget, clears
+// every `pending_setups` record, deletes the mail profiles, lets the window go, and only then reads the
+// token and deletes the credential. Every test that calls `sign_out_with` points `KNOWLU_API_BASE` at a
+// closed loopback port, so the revoke is refused at once; a test that needs a listener hands its base to
+// `sign_out_mail_client` directly. Every profile id, target and mailbox here is generated or synthetic.
+
+/// A scratch app-data root, a profile id derived from a path under it, and that profile's folder.
+#[cfg(windows)]
+fn signout_profile(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, String, std::path::PathBuf) {
+    let root = std::env::temp_dir().join(format!("knowlu-l4-signout-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let app_root = root.join("appdata");
+    let id = knowlu::profiles::id_for(&root.join("Mine"));
+    let dir = knowlu::profiles::profile_dir(&app_root, &id);
+    std::fs::create_dir_all(&dir).unwrap();
+    (root, app_root, id, dir)
+}
+
+#[cfg(windows)]
+fn setup_record(address_id: &str, placed: bool, shown: bool) -> knowlu::mail_session::PendingSetup {
+    knowlu::mail_session::PendingSetup { address_id: address_id.into(), placed, backfilled: false, shown }
+}
+
+/// `records` and `turned_off` into the profile's `mail.json`, through its one write path.
+#[cfg(windows)]
+fn record_setups(dir: &std::path::Path, records: Vec<knowlu::mail_session::PendingSetup>, turned_off: &[&str]) {
+    knowlu::mail_session::MailState::update(dir, |s| {
+        s.pending_setups = records;
+        s.turned_off = turned_off.iter().map(|t| t.to_string()).collect();
+        true
+    })
+    .unwrap();
+}
+
+#[cfg(windows)]
+fn pending_setups(dir: &std::path::Path) -> Vec<knowlu::mail_session::PendingSetup> {
+    knowlu::mail_session::MailState::load(dir).expect("a readable mail.json").pending_setups
+}
+
+/// A session with `left` seconds before it expires, at a target the caller generated and cleans up.
+#[cfg(windows)]
+fn save_session_left(target: &str, left: i64) {
+    let s = Session {
+        access_token: "live-at".into(),
+        refresh_token: "rt-1".into(),
+        expires_at: jiff::Timestamp::now().as_second() + left,
+        email: "a@example.invalid".into(),
+    };
+    knowlu::account::save_session(target, "acc-1", &s).expect("write a test session");
+}
+
+/// What Credential Manager holds at `target`, raw, so "unchanged" means byte for byte.
+#[cfg(windows)]
+fn stored(target: &str) -> (String, String) {
+    let c = knowlu_engine::wincred::read_credential(target).expect("a stored session");
+    (c.username, c.password.expose().to_string())
+}
+
+/// A loopback listener that accepts every connection and never answers: each stream is held open until
+/// the listener stops, as a hung service holds a request. It counts what it accepted, and drains its
+/// backlog before it stops, so a connection made just before is still counted.
+#[cfg(windows)]
+struct Silent {
+    port: u16,
+    hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(windows)]
+impl Silent {
+    fn start() -> Self {
+        use std::sync::atomic::Ordering::SeqCst;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        listener.set_nonblocking(true).expect("nonblocking listener");
+        let port = listener.local_addr().expect("addr").port();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (h, s) = (hits.clone(), stop.clone());
+        let handle = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        h.fetch_add(1, SeqCst);
+                        held.push(stream);
+                    }
+                    Err(_) if s.load(SeqCst) => break,
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        Silent { port, hits, stop, handle: Some(handle) }
+    }
+
+    fn functions(&self) -> String {
+        format!("http://127.0.0.1:{}/functions/v1", self.port)
+    }
+
+    fn auth(&self) -> String {
+        format!("http://127.0.0.1:{}/auth/v1", self.port)
+    }
+
+    fn finish(mut self) -> usize {
+        self.halt();
+        self.hits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn halt(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Silent {
+    fn drop(&mut self) {
+        self.halt();
+    }
+}
+
+/// Whatever `PENDING_TARGET` held before a test that signs the pending session out, put back byte for
+/// byte when the test ends: it is one fixed name a developer's own wizard may be holding, as
+/// `tests/onboarding.rs`'s `PendingSession` says. Taken under `CREDMAN_LOCK`, which every test process
+/// waits on. Nothing there before means nothing is written back: sign-out never writes the target.
+#[cfg(windows)]
+struct PendingKept(Option<(String, String)>);
+
+#[cfg(windows)]
+impl PendingKept {
+    fn read() -> Self {
+        let c = knowlu_engine::wincred::read_credential(knowlu::account::PENDING_TARGET).ok();
+        PendingKept(c.map(|c| (c.username, c.password.expose().to_string())))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PendingKept {
+    fn drop(&mut self) {
+        if let Some((user, secret)) = self.0.take() {
+            let _ = knowlu::credentials::write(knowlu::account::PENDING_TARGET, &user, &secret);
+        }
+    }
+}
+
+/// What the order test's close hands back to `sign_out_with`: dropping it is the hold's release, and it
+/// records what was true then (records cleared, the mail profile gone, the credential still there).
+#[cfg(windows)]
+struct Release<'a> {
+    log: &'a std::cell::RefCell<Vec<&'static str>>,
+    dir: std::path::PathBuf,
+    target: String,
+    seen: &'a std::cell::Cell<Option<(bool, bool, bool)>>,
+}
+
+#[cfg(windows)]
+impl Drop for Release<'_> {
+    fn drop(&mut self) {
+        self.log.borrow_mut().push("release");
+        let cleared = knowlu::mail_session::MailState::load(&self.dir).is_ok_and(|s| s.pending_setups.is_empty());
+        let gone = !self.dir.join("mail-session-mbx-new").exists();
+        self.seen.set(Some((cleared, gone, knowlu::credentials::exists(&self.target))));
+    }
+}
+
+/// Plan §4.7's seven steps for a profile: the hold first, then the clean (with the credential still there
+/// and the hold still held), the records cleared and the mail profiles deleted under the hold, and the
+/// credential deleted only after the hold is let go. Every record goes (never placed, placed and shown:
+/// all name addresses of the account being signed out); `turned_off` stays as it was.
+#[cfg(windows)]
+#[test]
+fn sign_out_runs_hold_clean_clear_forget_then_deletes_the_credential() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let (root, app_root, id, dir) = signout_profile("order");
+    let target = knowlu::account::session_target(&id);
+    let _cleanup = Cleanup(vec![target.clone()]);
+    save_session_left(&target, 3600);
+    let records = vec![setup_record("mbx-new", false, false), setup_record("mbx-placed", true, false), setup_record("mbx-shown", false, true)];
+    record_setups(&dir, records, &["mbx-off"]);
+    std::fs::create_dir_all(dir.join("mail-session-mbx-new")).unwrap();
+
+    let log = std::cell::RefCell::new(Vec::new());
+    let seen = std::cell::Cell::new(None);
+    let out = knowlu::account::sign_out_with(
+        Some(id.clone()),
+        Some(&app_root),
+        |d: &std::path::Path| {
+            log.borrow_mut().push("hold");
+            Release { log: &log, dir: d.to_path_buf(), target: target.clone(), seen: &seen }
+        },
+        |d: &std::path::Path| {
+            assert_eq!(d, dir, "the clean is given this profile's folder");
+            assert_eq!(log.borrow().as_slice(), ["hold"], "the clean runs under the hold");
+            assert!(knowlu::credentials::exists(&target), "the clean runs before the credential is deleted");
+            assert_eq!(pending_setups(d).len(), 3, "the clean sees every record");
+            log.borrow_mut().push("clean");
+        },
+    )
+    .expect("sign out");
+
+    assert_eq!(log.into_inner(), ["hold", "clean", "release"], "the window is closed once, first");
+    assert_eq!(seen.get(), Some((true, true, true)), "at the release: records cleared, mail profile gone, credential still there");
+    assert!(pending_setups(&dir).is_empty(), "every record is forgotten");
+    let state = knowlu::mail_session::MailState::load(&dir).unwrap();
+    assert_eq!(state.turned_off, ["mbx-off"], "turned_off is untouched");
+    assert!(!dir.join("mail-session-mbx-new").exists());
+    assert!(!knowlu::credentials::exists(&target), "the credential is gone");
+    assert_eq!((out["ok"].clone(), out["had_session"].clone()), (serde_json::json!(true), serde_json::json!(true)), "{out}");
+    assert_eq!((out["mail_profiles_left"].clone(), out["setups_cleared"].clone()), (serde_json::json!(false), serde_json::json!(true)), "{out}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A clean that fails (here the real one, whose list meets a closed port) never stops the sign-out and
+/// never keeps a record: the records go whatever it answered, and the credential goes after them.
+#[cfg(windows)]
+#[test]
+fn a_failed_clean_still_clears_the_records_and_signs_out() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let (root, app_root, id, dir) = signout_profile("failed-clean");
+    let target = knowlu::account::session_target(&id);
+    let _cleanup = Cleanup(vec![target.clone()]);
+    save_session_left(&target, 3600);
+    record_setups(&dir, vec![setup_record("mbx-new", false, false)], &[]);
+    let closed = closed_loopback_base();
+    let left = std::cell::RefCell::new(None);
+
+    let out = knowlu::account::sign_out_with(Some(id), Some(&app_root), |_: &std::path::Path| {}, |d: &std::path::Path| {
+        let client = knowlu::account::sign_out_mail_client(&closed, "anon", &target, Duration::from_millis(200)).expect("a client");
+        *left.borrow_mut() = Some(knowlu::mail::setup::clean_unfinished(d, &client));
+    })
+    .expect("sign out");
+
+    assert_eq!(left.into_inner(), Some(vec!["mbx-new".to_string()]), "the clean failed and kept its record");
+    assert!(pending_setups(&dir).is_empty(), "the sign-out forgot the record anyway");
+    assert!(!knowlu::credentials::exists(&target), "the credential is gone");
+    assert_eq!((out["ok"].clone(), out["setups_cleared"].clone()), (serde_json::json!(true), serde_json::json!(true)), "{out}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `None` (the wizard's pending session) and an id that is not a profile id name no profile folder:
+/// neither seam is called and no `mail.json` or mail profile anywhere under the app root is touched,
+/// even one sitting where a careless join of the bad id would land. The pending target's contents are
+/// put back afterwards ([`PendingKept`]).
+#[cfg(windows)]
+#[test]
+fn the_pending_session_sign_out_touches_no_mail_json() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let _pending = PendingKept::read();
+    let (root, app_root, _, _) = signout_profile("pending");
+    let pid = std::process::id();
+    let bad = [format!("not-a-profile-{pid}"), format!("profile_{pid:09x}")];
+    let _cleanup = Cleanup(bad.iter().map(|b| knowlu::account::session_target(b)).collect());
+    for b in &bad {
+        let dir = knowlu::profiles::profile_dir(&app_root, b);
+        record_setups(&dir, vec![setup_record("mbx-new", false, false)], &[]);
+        std::fs::create_dir_all(dir.join("mail-session-mbx-new")).unwrap();
+        // A file, so the fingerprint (files only) sees the profile folder go if it ever did.
+        std::fs::write(dir.join("mail-session-mbx-new").join("Local State"), b"{}").unwrap();
+    }
+    let before = fingerprint(&app_root);
+    let calls = std::cell::Cell::new(0);
+
+    for id in std::iter::once(None).chain(bad.iter().cloned().map(Some)) {
+        let out = knowlu::account::sign_out_with(
+            id.clone(),
+            Some(&app_root),
+            |_: &std::path::Path| calls.set(calls.get() + 1),
+            |_: &std::path::Path| calls.set(calls.get() + 1),
+        )
+        .expect("sign out");
+        assert_eq!((out["ok"].clone(), out["setups_cleared"].clone()), (serde_json::json!(true), serde_json::json!(true)), "{id:?}: {out}");
+    }
+
+    assert_eq!(calls.get(), 0, "neither seam is called without a profile folder");
+    assert_eq!(fingerprint(&app_root), before, "no mail.json and no mail profile was touched");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Review r2, I-1: the clean's every request is capped. Against a service that accepts and never
+/// answers (the same listener stands for `/auth/v1`), a session with an hour left needs no refresh, the
+/// list gives up at 200 ms, and the whole sign-out returns in well under the 30 s an uncapped client waits.
+#[cfg(windows)]
+#[test]
+fn the_sign_out_clean_is_bounded_against_a_silent_service() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let (root, app_root, id, dir) = signout_profile("silent");
+    let target = knowlu::account::session_target(&id);
+    let _cleanup = Cleanup(vec![target.clone()]);
+    save_session_left(&target, 3600);
+    record_setups(&dir, vec![setup_record("mbx-new", false, false)], &[]);
+    let silent = Silent::start();
+    let base = silent.functions();
+
+    let began = Instant::now();
+    let out = knowlu::account::sign_out_with(Some(id), Some(&app_root), |_: &std::path::Path| {}, |d: &std::path::Path| {
+        let client = knowlu::account::sign_out_mail_client(&base, "anon", &target, Duration::from_millis(200)).expect("a client");
+        knowlu::mail::setup::clean_unfinished(d, &client);
+    })
+    .expect("sign out");
+    let took = began.elapsed();
+
+    assert!(took < Duration::from_secs(3), "the sign-out waited {took:?} on a silent service");
+    assert_eq!(silent.finish(), 1, "the clean asked the service once (the list), with no refresh");
+    assert!(pending_setups(&dir).is_empty(), "the records are cleared");
+    assert!(!knowlu::credentials::exists(&target), "the credential is gone");
+    assert_eq!(out["ok"], true, "{out}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Review r2, I-1: the clean's one session read is capped too. A session under two minutes from expiry
+/// is refreshed against the silent `/auth/v1`; that refresh gives up at 200 ms, the list fails as
+/// `no-session` with nothing sent, and a second read in the same clean is the first one's answer.
+#[cfg(windows)]
+#[test]
+fn a_sign_out_clean_whose_refresh_hangs_is_bounded_too() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let (root, app_root, id, dir) = signout_profile("refresh-hangs");
+    let target = knowlu::account::session_target(&id);
+    let _cleanup = Cleanup(vec![target.clone()]);
+    save_session_left(&target, 60);
+    record_setups(&dir, vec![setup_record("mbx-new", false, false)], &[]);
+    let silent = Silent::start();
+    let base = silent.functions();
+    let listed = std::cell::RefCell::new(None);
+
+    let began = Instant::now();
+    let out = knowlu::account::sign_out_with(Some(id), Some(&app_root), |_: &std::path::Path| {}, |d: &std::path::Path| {
+        let client = knowlu::account::sign_out_mail_client(&base, "anon", &target, Duration::from_millis(200)).expect("a client");
+        *listed.borrow_mut() = Some(client.list_addresses().map_err(|e| e.name()));
+        knowlu::mail::setup::clean_unfinished(d, &client);
+    })
+    .expect("sign out");
+    let took = began.elapsed();
+
+    assert!(took < Duration::from_secs(3), "the sign-out waited {took:?} on a hung refresh");
+    assert_eq!(listed.into_inner(), Some(Err("no-session")), "the list fails as no-session");
+    assert_eq!(silent.finish(), 1, "one refresh was sent, for both reads, and no list");
+    assert!(pending_setups(&dir).is_empty(), "the records are cleared");
+    assert!(!knowlu::credentials::exists(&target), "the credential is gone");
+    assert_eq!(out["ok"], true, "{out}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `valid_access_token_within` applies `valid_access_token_at`'s rule: a token with more than 120 s left
+/// is answered as it is, with no request.
+#[cfg(windows)]
+#[test]
+fn valid_access_token_within_answers_a_live_token_with_no_request() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let target = format!("knowlu/test-within-live-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    save_session_left(&target, 3600);
+    let counting = Counting::start();
+    let auth = format!("http://127.0.0.1:{}/auth/v1", counting.port);
+    let now = jiff::Timestamp::now().as_second();
+    let got = knowlu::account::valid_access_token_within(&auth, "anon", &target, now, Duration::from_millis(200));
+    assert_eq!(got.as_deref(), Ok("live-at"));
+    assert_eq!(counting.finish(), 0, "a live token needs no request");
+}
+
+/// Against a refresh endpoint that never answers, an expiring session is an `Err` within `within` (plus a
+/// second's slack), and the stored session is left byte for byte as it was.
+#[cfg(windows)]
+#[test]
+fn valid_access_token_within_gives_up_on_a_silent_refresh_and_keeps_the_session() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let target = format!("knowlu/test-within-silent-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    save_session_left(&target, 60);
+    let before = stored(&target);
+    let silent = Silent::start();
+    let now = jiff::Timestamp::now().as_second();
+
+    let began = Instant::now();
+    let got = knowlu::account::valid_access_token_within(&silent.auth(), "anon", &target, now, Duration::from_millis(200));
+    let took = began.elapsed();
+
+    let err = got.expect_err("a refresh that never answers is an error");
+    assert!(took < Duration::from_millis(1200), "the refresh waited {took:?}");
+    assert!(!err.contains("rt-1") && !err.contains("live-at"), "no token reaches the error: {err}");
+    assert_eq!(stored(&target), before, "the stored session is unchanged");
+    assert_eq!(silent.finish(), 1, "one refresh was sent");
+}
+
+/// Against a refresh endpoint that answers, the fresh session is saved and its token answered, with the
+/// same request `valid_access_token_at` sends.
+#[cfg(windows)]
+#[test]
+fn valid_access_token_within_saves_and_answers_a_fresh_session() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::load_session;
+    let target = format!("knowlu/test-within-fresh-{}-{}", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    save_session_left(&target, 60);
+    let now = jiff::Timestamp::now().as_second();
+    let (base, handle) = loopback(vec![(200, FRESH_SESSION.to_string())]);
+
+    let got = knowlu::account::valid_access_token_within(&format!("{base}/auth/v1"), "anon-key", &target, now, Duration::from_secs(5));
+    let seen = handle.join().expect("server thread");
+
+    assert_eq!(got.as_deref(), Ok("fresh-at"));
+    assert!(seen[0].starts_with("POST /auth/v1/token?grant_type=refresh_token "), "{}", seen[0]);
+    assert!(seen[0].contains("\"refresh_token\":\"rt-1\""), "{}", seen[0]);
+    let (id, back) = load_session(&target).expect("the rewritten entry");
+    assert_eq!((id.as_str(), back.access_token.as_str(), back.refresh_token.as_str()), ("acc-1", "fresh-at", "fresh-rt"));
+}
+
+/// Review r3, I-1: the helper's lock wait is capped. Thread A refreshes through `valid_access_token_at`
+/// against a listener that never answers; the listener's first connection shows A holds the refresh
+/// lock. The helper, asked for another target with a 200 ms bound, must give up with no request and that
+/// target's session untouched, no sooner than 200 ms (it kept trying) and well before A's 30 s.
+#[cfg(windows)]
+#[test]
+fn valid_access_token_within_gives_up_on_a_held_lock() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tag = format!("knowlu/test-held-lock-{}-{}", std::process::id(), line!());
+    let (target_a, target_b) = (format!("{tag}/a"), format!("{tag}/b"));
+    let _cleanup = Cleanup(vec![target_a.clone(), target_b.clone()]);
+    save_session_left(&target_a, 60);
+    save_session_left(&target_b, 3600);
+    let before_b = stored(&target_b);
+    let held = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    held.set_nonblocking(true).expect("nonblocking listener");
+    let auth_a = format!("http://127.0.0.1:{}/auth/v1", held.local_addr().expect("addr").port());
+    let counting = Counting::start();
+    let auth_b = format!("http://127.0.0.1:{}/auth/v1", counting.port);
+    let now = jiff::Timestamp::now().as_second();
+
+    std::thread::scope(|scope| {
+        let a = scope.spawn(|| knowlu::account::valid_access_token_at(&auth_a, "anon", &target_a, now));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // Kept here until the helper has answered: a failed assert drops it while unwinding, so A never
+        // hangs the run.
+        let stream = loop {
+            match held.accept() {
+                Ok((s, _)) => break s,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "thread A never reached the refresh endpoint within 10s");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("accept failed: {e}"),
+            }
+        };
+        let began = Instant::now();
+        let got = knowlu::account::valid_access_token_within(&auth_b, "anon", &target_b, now, Duration::from_millis(200));
+        let took = began.elapsed();
+        assert!(got.is_err(), "a held lock is an error past the bound, not a wait: {got:?}");
+        assert!(took >= Duration::from_millis(200), "the helper gave up before its bound: {took:?}");
+        assert!(took < Duration::from_millis(1200), "the helper waited {took:?} on a held lock");
+        drop(stream);
+        assert!(a.join().expect("thread A").is_err(), "A's refresh failed once its connection closed");
+    });
+
+    assert_eq!(counting.finish(), 0, "the helper sent nothing");
+    assert_eq!(stored(&target_b), before_b, "the other target's session is unchanged");
+}
+
+/// Plan §4.7 and T4's pins: the cap, its doc line's worst case, the lock taken by `try_lock` only, the one
+/// session read per clean, the helper's one caller, and sign-out's clean built with the cap.
+#[test]
+fn the_sign_out_clean_is_capped_read_once_and_wired_into_sign_out() {
+    assert!(knowlu::account::SIGN_OUT_MAIL_CALL <= Duration::from_secs(5), "SIGN_OUT_MAIL_CALL is 5 seconds or less");
+    let src = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let at = src.find("pub const SIGN_OUT_MAIL_CALL").expect("SIGN_OUT_MAIL_CALL");
+    let doc: Vec<&str> = src[..at].lines().rev().take_while(|l| l.starts_with("///")).collect();
+    for name in ["MAIL_STOP_BOUND", "revoke", "wipe"] {
+        assert!(doc.iter().any(|l| l.contains(name)), "SIGN_OUT_MAIL_CALL's doc names {name}: {doc:?}");
+    }
+    let fns = top_level_fns(&src);
+    let body = |name: &str| {
+        fns.iter().find(|(n, _)| n == name).map(|(_, b)| b.clone()).unwrap_or_else(|| panic!("account.rs has no fn {name}"))
+    };
+    let within = body("valid_access_token_within");
+    assert!(within.contains(".try_lock()") && !within.contains(".lock("), "the helper only ever try_locks: {within}");
+    let client = body("sign_out_mail_client");
+    assert!(client.contains("OnceLock"), "the clean's token is memoised: {client}");
+    assert_eq!(client.matches("valid_access_token_within(").count(), 1, "{client}");
+    assert!(client.contains("get_or_init(|| valid_access_token_within("), "read only inside get_or_init: {client}");
+    let sign_out = body("sign_out");
+    let call = sign_out.lines().find(|l| l.contains("sign_out_mail_client(")).expect("sign-out builds the clean's client");
+    assert!(call.contains("SIGN_OUT_MAIL_CALL"), "with the cap: {call}");
+
+    // The helper's only caller in `src/` is `sign_out_mail_client`: two code mentions, the definition and that call.
+    let mut mentions = Vec::new();
+    let mut dirs = vec![std::path::PathBuf::from("src")];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).expect("a readable src folder").flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let text = std::fs::read_to_string(&p).expect("a readable source file");
+                let code = text.lines().filter(|l| !l.trim_start().starts_with("//"));
+                mentions.extend(code.filter(|l| l.contains("valid_access_token_within(")).map(|l| format!("{}: {}", p.display(), l.trim())));
+            }
+        }
+    }
+    assert_eq!(mentions.len(), 2, "{mentions:#?}");
+    assert!(mentions.iter().any(|m| m.contains("pub fn valid_access_token_within(")), "{mentions:#?}");
+    assert!(mentions.iter().all(|m| m.starts_with(&format!("{}: ", std::path::Path::new("src").join("account.rs").display()))), "{mentions:#?}");
 }
