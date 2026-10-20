@@ -462,8 +462,48 @@ pub fn run_lines_with(
                     "judge: the service answered {reason}, so the rest of the batch was not sent"
                 ));
             }
+            keep_out_of_credit_heads_up(vault, opts, &model, &mut lines);
             (code, lines)
         }
+    }
+}
+
+/// L7 (plan 3.4): the run's one heads-up for the judgment service being out of credit. Raised when
+/// the run ended on that label; cleared when a tier-3 reply showed the model answering (a run that
+/// made no tier-3 call leaves it alone). A write that fails adds one line and never stops the pass.
+fn keep_out_of_credit_heads_up(
+    vault: &Path,
+    opts: &Options<'_>,
+    model: &crate::cloudmodel::CloudModel<'_>,
+    lines: &mut Vec<String>,
+) {
+    let out_of_credit = model.fatal() == Some(judge::OUT_OF_CREDIT_LABEL);
+    if !out_of_credit && !model.heard_model() {
+        return;
+    }
+    let ctx = WriteContext {
+        actor: ACTOR.to_string(),
+        via: opts.via.to_string(),
+        run_id: opts.run_id.map(str::to_string),
+    };
+    let mut journal = Journal::new(vault);
+    let key = crate::source_issues::OUT_OF_CREDIT_KEY;
+    let done = if out_of_credit {
+        crate::source_issues::raise(
+            vault,
+            key,
+            "Knowlu's AI checks are paused",
+            "This is on Knowlu's side, not your account. Your list still updates; new items get \
+             their estimates once it is back.",
+            &ctx,
+            &mut journal,
+        )
+        .map(|_| ())
+    } else {
+        crate::source_issues::clear(vault, key, &ctx, &mut journal).map(|_| ())
+    };
+    if done.is_err() {
+        lines.push("judge: a heads-up could not be written".to_string());
     }
 }
 
@@ -516,6 +556,13 @@ const GMAIL_NOTE: &str = "---\ntitle: {title}\ncourse: {course}\ndomain: school\
 effort_hours: {effort_hours}\neffort_confidence: low\neffort_source: inferred\n\
 importance: {importance}\nimportance_reason: {why}\nstatus: active\nprogress: 0\n\
 created_by: gmail\nsource_uid: {uid}\n{judgment_lines}needs_enrichment: false\n---\n\n{body}\n";
+
+/// Close the "Gmail has gone quiet" heads-up, if one is open. A failure adds one line, nothing more.
+fn clear_quiet_heads_up(vault: &Path, ctx: &WriteContext, journal: &mut Journal, lines: &mut Vec<String>) {
+    if crate::source_issues::clear(vault, crate::source_issues::GMAIL_QUIET_KEY, ctx, journal).is_err() {
+        lines.push("gmail: a heads-up could not be written".to_string());
+    }
+}
 
 /// Pull the service's queued Gmail judgments and write them, then acknowledge them.
 ///
@@ -572,13 +619,42 @@ pub fn pull_gmail(
             // like `judge (skipped: no account)` — so it prints nothing rather than a line that
             // would read as trouble on an account that has none.
             Err(crate::cloudmodel::CloudError::Quiet(crate::cloudmodel::QuietReason::NoGmailScope)) => {
+                clear_quiet_heads_up(vault, &ctx, &mut journal, &mut lines);
                 return lines;
             }
             Err(e) => {
+                // L7: a Quiet reason means Knowlu cannot read that Gmail at all, and that has its
+                // own words, so "gone quiet" must not stand beside them. Transport, status and
+                // body errors say nothing about the mailbox and leave the heads-up alone.
+                if matches!(e, crate::cloudmodel::CloudError::Quiet(_)) {
+                    clear_quiet_heads_up(vault, &ctx, &mut journal, &mut lines);
+                }
                 lines.push(format!("gmail: skipped ({e})"));
                 return lines;
             }
         };
+        // L7: before the round-0 empty return, because a quiet mailbox is exactly the empty pull.
+        if round == 0 {
+            match pulled.went_quiet {
+                Some(true) => {
+                    lines.push("gmail: no mail found in the connected Gmail for 7 days".to_string());
+                    let raised = crate::source_issues::raise(
+                        vault,
+                        crate::source_issues::GMAIL_QUIET_KEY,
+                        "Gmail has gone quiet",
+                        "Knowlu has found no mail in your connected Gmail for a week. Open Settings \
+                         to check which Google account is connected.",
+                        &ctx,
+                        &mut journal,
+                    );
+                    if raised.is_err() {
+                        lines.push("gmail: a heads-up could not be written".to_string());
+                    }
+                }
+                Some(false) => clear_quiet_heads_up(vault, &ctx, &mut journal, &mut lines),
+                None => {}
+            }
+        }
         let (items, more) = (pulled.items, pulled.more);
         deferred += pulled.deferred;
         ack.clear();
