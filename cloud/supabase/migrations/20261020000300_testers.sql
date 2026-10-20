@@ -60,3 +60,29 @@ revoke all on public.comp_grants from public, anon, authenticated;
 revoke all on public.comp_audit from public, anon, authenticated;
 revoke insert, update, delete, truncate on public.comp_grants from service_role;
 revoke insert, update, delete, truncate on public.comp_audit from service_role;
+
+-- S2b (spec §3.1, §3.2): what the gate and GET /entitlement see, one row per account. It gates every
+-- paying student, so it fails safe: the join starts at accounts and is left all the way, and a row
+-- with no open grant is the entitlements row passed through column for column (a hand-deleted row
+-- reads none / null / null, as GET /entitlement already answers for it). The grant branch is the
+-- complement of the paid statuses, never a list of unpaid ones: the row every tester carries is the
+-- sign-up 'none' row (handle_new_user), and a paid row always wins. A grant is matched by account id
+-- alone; the view reads no auth table and no address. The partial unique index above (one open grant
+-- per account) keeps it at one row per account. Exactly four columns: the names lookupFrom filters
+-- and selects, and billing-checkout's plan lookup reads.
+create view public.effective_entitlements as
+select a.id as account_id,
+       case when g.id is null then e.plan else 'tester' end as plan,
+       case when g.id is null then coalesce(e.status, 'none') else 'active' end as status,
+       case when g.id is null then e.current_period_end else g.ends_at end as current_period_end
+  from public.accounts a
+  left join public.entitlements e on e.account_id = a.id
+  left join public.comp_grants g
+    on g.account_id = a.id
+   and g.ended_at is null
+   and now() < g.ends_at
+   and coalesce(e.status, 'none') not in ('active', 'trialing');
+
+-- Owner rights, so no client may read it; the service role, which every gated function's lookup
+-- uses, keeps its select (A7).
+revoke all on public.effective_entitlements from public, anon, authenticated;

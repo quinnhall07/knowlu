@@ -347,12 +347,13 @@ Deno.test("every view in every migration is either security_invoker or revoked f
   // 20260911000900) — counted by hand against today's corpus. R2-5 widened `VIEW_DEFINITION` and
   // `RAW_VIEW_KEYWORD` to see `create materialized view` too; none of the five is a materialized
   // view — today's corpus creates none, not because the scan cannot see one: the synthetic case
-  // below proves it can. C3's `sync_limits` (revoked, 20260912000100) is the fifth.
-  assertEquals(parsed, 5, "today's corpus should parse exactly 5 view creations");
+  // below proves it can. C3's `sync_limits` (revoked, 20260912000100) is the fifth. L8's
+  // `effective_entitlements` (revoked, <stamp>_testers.sql, friends-testers S2b) is the sixth.
+  assertEquals(parsed, 6, "today's corpus should parse exactly 6 view creations");
   // Asserted by name, not merely counted: the exemption must be seen to fire on a real view rather
   // than papering over a scan that never reached one.
   assertEquals(invoker, ["billing_subscribers"]);
-  assertEquals(revoked, ["telemetry_daily", "correction_rates", "monthly_spend", "sync_limits"]);
+  assertEquals(revoked, ["telemetry_daily", "correction_rates", "monthly_spend", "sync_limits", "effective_entitlements"]);
 });
 
 Deno.test("a view with neither security_invoker nor a revoke is caught by the view guard", () => {
@@ -2122,4 +2123,108 @@ Deno.test("S2a: the grant and audit columns are §3.1's and §3.5's; no address,
     /create unique index \w+ on public\.comp_grants \(account_id\) where ended_at is null;/.test(flatten(sql)),
     `${name}: one open grant per account (§3.1)`,
   );
+});
+
+// L8 S2b (friends-testers §3.1, §3.2, §9 layer i, Amendment 2026-10-20): the view every gated call
+// will read. A row with no open grant is the `entitlements` row passed through; the grant branch is
+// the complement of the paid statuses; the grant is matched by account id alone, never an address.
+const EE_ITEMS = [
+  "a.id as account_id",
+  "case when g.id is null then e.plan else 'tester' end as plan",
+  "case when g.id is null then coalesce(e.status, 'none') else 'active' end as status",
+  "case when g.id is null then e.current_period_end else g.ends_at end as current_period_end",
+];
+const EE_FROM = "from public.accounts a left join public.entitlements e on e.account_id = a.id " +
+  "left join public.comp_grants g on g.account_id = a.id and g.ended_at is null and now() < g.ends_at " +
+  "and coalesce(e.status, 'none') not in ('active', 'trialing');";
+
+/** The flattened `create view public.effective_entitlements … ;`, or "" when there is none. */
+const eeStatement = (sql: string) =>
+  /create (?:or replace )?view public\.effective_entitlements as [^;]*;/.exec(flatten(sql))?.[0] ?? "";
+
+/** The select list split at top-level commas (a comma inside parentheses separates nothing). */
+function selectItems(stmt: string): string[] {
+  const body = stmt.slice(stmt.indexOf(" as select ") + " as select ".length);
+  const items: string[] = [];
+  let depth = 0, cur = "";
+  for (let i = 0; i < body.length && !(depth === 0 && body.startsWith(" from ", i)); i++) {
+    if (body[i] === "(") depth++;
+    if (body[i] === ")") depth--;
+    if (body[i] === "," && depth === 0) {
+      items.push(cur.trim());
+      cur = "";
+    } else cur += body[i];
+  }
+  return [...items, cur.trim()];
+}
+
+export function effectiveEntitlementsProblems(stmt: string): string[] {
+  if (stmt === "") return ["no create view public.effective_entitlements"];
+  const out: string[] = [];
+  const items = selectItems(stmt);
+  const names = items.map((i) => i.split(" as ").at(-1));
+  if (names.join() !== "account_id,plan,status,current_period_end") out.push(`output names ${names}`);
+  if (items.join() !== EE_ITEMS.join()) out.push(`select list ${items.join(" | ")}`);
+  if (!stmt.endsWith(EE_FROM)) out.push("not the accounts left join entitlements, left join open grant (P0, P1, P3)");
+  if ((stmt.match(/\bjoin\b/g) ?? []).length !== (stmt.match(/\bleft join\b/g) ?? []).length) out.push("an inner join");
+  if (/\bwhere\b/.test(stmt)) out.push("a where clause drops an account's row (P0)");
+  for (const bad of ["in ('canceled'", "in ('past_due'", "e.account_id is null", "auth.users", "encrypted_password", "email"]) {
+    if (stmt.includes(bad)) out.push(`names ${bad}`);
+  }
+  return out;
+}
+
+Deno.test("S2b: effective_entitlements passes the Stripe row through, grants by account id on the complement of paid, four columns", async () => {
+  const { name, sql } = await testersMigration();
+  const stmt = eeStatement(sql);
+  assertEquals(effectiveEntitlementsProblems(stmt), [], name);
+  for (const pin of ["coalesce(e.status, 'none') not in ('active', 'trialing')", "g.account_id = a.id", "g.ended_at is null", "now() < g.ends_at"]) {
+    assert(stmt.includes(pin), `${name}: ${pin}`);
+  }
+  const flat = flatten(sql);
+  assert(flat.includes("revoke all on public.effective_entitlements from public, anon, authenticated;"), `${name}: revoke`);
+  for (const [file, raw] of await everyMigrationFile()) {
+    const text = flatten(raw);
+    assert(!/\bgrant [^;]* on (?:table )?public\.effective_entitlements\b/.test(text), `${file}: a grant on the view`);
+    assert(
+      !/\brevoke [^;]* on (?:table )?public\.effective_entitlements [^;]*\bservice_role\b/.test(text),
+      `${file}: the gate's lookup needs the service role's select on the view (A7)`,
+    );
+  }
+});
+
+Deno.test("S2b: the view pins refuse a list branch, an inner join, an auth.users read, a where and a missing column", async () => {
+  const stmt = eeStatement((await testersMigration()).sql);
+  const complement = "coalesce(e.status, 'none') not in ('active', 'trialing')";
+  for (
+    const [from, to] of [
+      [complement, "(e.account_id is null or e.status in ('canceled', 'past_due'))"],
+      ["left join public.entitlements", "join public.entitlements"],
+      [" left join public.comp_grants", " join auth.users u on u.id = a.id left join public.comp_grants"],
+      [" and now() < g.ends_at", " where now() < g.ends_at"],
+      [", case when g.id is null then e.current_period_end else g.ends_at end as current_period_end", ""],
+    ]
+  ) {
+    const bad = stmt.replace(from, to);
+    assertNotEquals(bad, stmt, `the mutation ${from} must apply to the real view`);
+    assert(effectiveEntitlementsProblems(bad).length > 0, `${from} -> ${to} must be refused`);
+  }
+});
+
+Deno.test("S2b: the case table holds §9's live P rows, the none-row cases first; P4, P7, P10, P11 only reserved", async () => {
+  const { CASES } = await import("./testers_cases.ts");
+  const ids = CASES.map((c) => c.id);
+  const live = ["P0", "P0x", "P1", "P2", "P3", "P3x", "P5", "P6", "P8", "P9", "P12", "P13", "P14", "P15", "P16"];
+  assertEquals([...ids].sort(), [...live].sort());
+  assertEquals(ids.slice(0, 2), ["P0", "P3"]);
+  const noneRow = (c: (typeof CASES)[number]) =>
+    c.accounts.length > 0 && c.accounts.every((a) => a.row?.status === "none" && !a.row.plan && a.row.periodEnd === null);
+  const firstOther = CASES.findIndex((c) => !noneRow(c));
+  assert(firstOther > 0 && CASES.slice(firstOther).every((c) => !noneRow(c)), `none-row cases first: ${ids}`);
+  for (const c of CASES) {
+    assertEquals(c.expect.length, c.accounts.length, `${c.id}: one answer per account`);
+    for (const a of c.accounts) assert([a.email, a.authEmail ?? a.email].every((e) => e.endsWith("@example.invalid")), c.id);
+  }
+  const text = await Deno.readTextFile(new URL("testers_cases.ts", HERE));
+  assert(/\/\/[^\n]*P4, P7, P10 and P11/.test(text), "the retired ids are reserved in a comment");
 });
