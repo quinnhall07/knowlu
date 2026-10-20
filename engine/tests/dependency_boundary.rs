@@ -64,7 +64,7 @@ fn tls_is_rustls_never_openssl() {
 /// `ring::digest::SHA256` costs **nothing**: `ring` is already compiled into this binary through
 /// `ureq` to `rustls`, so keeping the direct edge adds no crate, no version and nothing to audit.
 /// `sha2` would: `knowlu-engine`'s own dependency graph has none (the workspace's `sha2 0.10.9` is
-/// the APP's own direct edge, `app/Cargo.toml:69`, for `inference.rs`'s runtime digest check — and
+/// the APP's own direct edge, in `app/Cargo.toml`, for `account.rs`'s PKCE challenge and `mail/recover.rs` — and
 /// this scan reads only `engine/Cargo.toml` and the workspace root), so adding it pulls `digest 0.10`,
 /// `cpufeatures 0.2`, `block-buffer`, `crypto-common`, `generic-array` and `typenum` in beside the
 /// engine's existing `sha1 0.11`, which resolves `digest 0.11` and `cpufeatures 0.3` — two majors of

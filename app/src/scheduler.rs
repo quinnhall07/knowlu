@@ -28,7 +28,7 @@ use crate::tray::{self, TrayState};
 const CHILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
 /// Slot log FILES kept in `log_dir()` — files, not runs. A slot writes one per step, and since
-/// Knowlu plan 3a a vault with an LMS feed and a model installed has four steps (coursework,
+/// a vault with an LMS feed and an account has four steps (coursework,
 /// ingest, judge, rank), so two slots a day is eight files a day: eighty is about twenty runs, or
 /// ten days. Long enough that a bug report can quote the run that went wrong, short enough that the
 /// directory stays bounded. `quit-*` records are neither counted nor pruned (see `prune_logs`).
@@ -270,49 +270,12 @@ pub fn ingest_included(vault: &Path) -> bool {
 /// slot at every launch; the C2 plan review caught it (R-C2-10).
 pub fn needs_first_run(vault: &Path) -> bool { !vault.join("state").join("today.md").exists() }
 
-/// Everything `knowlu-engine judge` needs that only the app knows: where the runtime was installed,
-/// which model file was chosen, and this profile's own judgments directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JudgeArgs {
-    pub runtime: PathBuf,
-    pub model: PathBuf,
-    pub log_dir: PathBuf,
-}
-
-/// Why a slot will or will not run `judge` — the same three-state shape `IcsState` uses, and for
-/// the same reason: the two "no" cases are different problems and get different words on the Runs
-/// view. A friend who has installed neither is told about the runtime, because it is the
-/// prerequisite; one who has the runtime and no model is told about the model.
-///
-/// **Neither is a fault.** Spec §5.3: "the app runs with no model present." The step is recorded
-/// with exit code 0 and an explanatory name, exactly as `ingest (skipped: no ics_url)` is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum JudgeState {
-    Ready(JudgeArgs),
-    NoRuntime,
-    NoModel,
-}
-
-/// Resolve the judge step under an explicit app-data root — the seam the tests use, mirroring
-/// `state::app_data_root_in`.
-///
-/// **Not optional** (review S3): without it the test below reaches the developer's *real*
-/// `%LOCALAPPDATA%\knowlu`, so it would pass today and start failing the first time Task 10's
-/// settings row installed a runtime on this machine — a test that breaks when the feature starts
-/// working is worse than no test.
-pub fn judge_state_in(root: &Path, cs: &ConsoleState) -> JudgeState {
-    let Some(runtime) = crate::inference::runtime_exe(root) else { return JudgeState::NoRuntime };
-    let Some(model) = crate::inference::model_file(root) else { return JudgeState::NoModel };
-    JudgeState::Ready(JudgeArgs { runtime, model, log_dir: crate::inference::judgments_dir(&cs.data_dir) })
-}
-
-/// Resolve the judge step for this profile. Reads the install-wide root for the runtime and the
-/// model and the profile's own `data_dir` for the log directory (spec §5.4/§5.6: the log is per
-/// profile and never in the vault). A root that cannot be resolved at all is `NoRuntime`: there is
-/// nowhere for one to be.
-pub fn judge_state(cs: &ConsoleState) -> JudgeState {
-    let Ok(root) = crate::commands::inference_root() else { return JudgeState::NoRuntime };
-    judge_state_in(&root, cs)
+/// Where this profile's judgment logs go: **per profile**, not per install (spec §5.4/§5.6):
+/// `profiles\<id>\judgments\`, because two vaults are two different sets of judgments, and **judgment
+/// logs never enter the vault** (`CLAUDE.md`). Takes the profile's own `data_dir`, which
+/// `ConsoleState` already carries, so nothing here has to re-derive an id.
+pub fn judgments_dir(profile_data_dir: &Path) -> PathBuf {
+    profile_data_dir.join("judgments")
 }
 
 /// Is this install allowed to run a cloud step? Reads the vault's own `config/cloud.yaml` and the
@@ -322,8 +285,8 @@ pub fn judge_state(cs: &ConsoleState) -> JudgeState {
 ///
 /// **A missing file and an unreadable one are different states** (fix round 1, item 2): `decide`'s
 /// own `cloud_configured` flag cannot tell them apart, so the file's existence is checked here,
-/// first — a vault with no `config/cloud.yaml` at all is `NoAccount` (falls through to the local
-/// runtime/model gate, unchanged); a file that IS there but does not parse, or is missing a required
+/// first — a vault with no `config/cloud.yaml` at all is `NoAccount` (the named `no account` skip);
+/// a file that IS there but does not parse, or is missing a required
 /// key, is `Unreadable` and never reaches `decide` at all.
 pub fn entitlement_state(cs: &ConsoleState) -> crate::account::EntitlementState {
     if !cs.vault.join("config").join("cloud.yaml").exists() {
@@ -338,24 +301,19 @@ pub fn entitlement_state(cs: &ConsoleState) -> crate::account::EntitlementState 
 /// How this slot runs `judge` — or does not. **Three states, and the order between them matters**
 /// (agreed with C2, 2026-09-09):
 ///
-/// 1. **Entitlement outranks everything.** Past the 72-hour grace the step is a named skip, whatever
-///    is installed locally, because from C2 on `judge` *is* a cloud call.
-/// 2. **A vault with `config/cloud.yaml` runs `judge`, full stop.** No `--runtime`, no `--model`, and
-///    nothing about the account on the command line: the engine reads `config/cloud.yaml` itself and
-///    decides everything else, and it still always exits 0. A runtime-based skip here would leave
-///    C2's whole judgment service inert on every machine that never installed llama.cpp.
-/// 3. **Only a vault with no `config/cloud.yaml`** — a pre-C1 install, until Task 18's overlay adopts
-///    it — falls through to the local runtime and model, which is exactly plan 3a's behaviour and
-///    leaves in C4.
+/// 1. **Entitlement outranks everything.** Past the 72-hour grace the step is a named skip, because
+///    `judge` *is* a cloud call.
+/// 2. **A vault with `config/cloud.yaml` runs `judge`, full stop.** Nothing about the account is on
+///    the command line: the engine reads `config/cloud.yaml` itself and decides everything else, and
+///    it still always exits 0.
+/// 3. **A vault with no `config/cloud.yaml`** has no account to judge with, so the step is the named
+///    skip `judge (skipped: no account)`, at exit code 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JudgePlan {
     /// `judge --vault <v> --via local-runner --log-dir <d>`. The engine reads the account out of the
     /// vault; the only thing it cannot know is where this profile's judgment logs go, and **judgment
-    /// logs never enter the vault** (`CLAUDE.md`), so `--log-dir` is in this arm as well as the local
-    /// one (R-X-4).
+    /// logs never enter the vault** (`CLAUDE.md`), so `--log-dir` is in this arm (R-X-4).
     Cloud { log_dir: PathBuf },
-    /// The local runtime and model this profile installed (plan 3a; removed in C4).
-    Local(JudgeArgs),
     /// Not this slot, and why. A named step with exit code **0** — never a failure.
     Skip(&'static str),
 }
@@ -372,17 +330,12 @@ pub fn judge_plan(cs: &ConsoleState) -> JudgePlan {
 fn judge_plan_for(state: crate::account::EntitlementState, cs: &ConsoleState) -> JudgePlan {
     match state {
         crate::account::EntitlementState::NotEntitled => JudgePlan::Skip("judge (skipped: no entitlement)"),
-        // The same directory the local arm uses — `inference::judgments_dir(&cs.data_dir)`, which is
-        // `%LOCALAPPDATA%\knowlu\profiles\<id>\judgments`. C4 removes the runtime, not this folder.
-        crate::account::EntitlementState::Entitled => JudgePlan::Cloud { log_dir: crate::inference::judgments_dir(&cs.data_dir) },
+        // `%LOCALAPPDATA%\knowlu\profiles\<id>\judgments`, see [`judgments_dir`].
+        crate::account::EntitlementState::Entitled => JudgePlan::Cloud { log_dir: judgments_dir(&cs.data_dir) },
         // Fix round 1, item 2: named distinctly from "no entitlement" — a broken config file is a
-        // different problem from a lapsed subscription, and must never fall through to the local arm.
+        // different problem from a lapsed subscription, and must never read as "no account".
         crate::account::EntitlementState::Unreadable => JudgePlan::Skip("judge (skipped: cloud.yaml unreadable)"),
-        crate::account::EntitlementState::NoAccount => match judge_state(cs) {
-            JudgeState::Ready(a) => JudgePlan::Local(a),
-            JudgeState::NoRuntime => JudgePlan::Skip("judge (skipped: no runtime)"),
-            JudgeState::NoModel => JudgePlan::Skip("judge (skipped: no model)"),
-        },
+        crate::account::EntitlementState::NoAccount => JudgePlan::Skip("judge (skipped: no account)"),
     }
 }
 
@@ -551,8 +504,8 @@ pub fn mail_step(est: crate::account::EntitlementState, data_dir: &Path, now: i6
 
 /// sync → coursework → **ingest** → **grades** → **judge** → rank, as child processes of the sibling
 /// engine exe. `ingest` is included only when the vault has a feed; `grades` only when the slot's
-/// capture wrote a bundle (`grades_bundle`, see [`grades_step`]); `judge` only when a runtime and a
-/// model are both installed, which is what `judge_state` decides.
+/// capture wrote a bundle (`grades_bundle`, see [`grades_step`]); `judge` only when `judge_plan`
+/// returns `Cloud`.
 ///
 /// **`judge` sits before `rank`**: it writes `effort_hours`, `importance` and `course`, and a rank
 /// that ran first would order the day from the values the judge was about to replace — every
@@ -587,14 +540,6 @@ pub fn slot_argv(vault: &Path, exe: &Path, judge: &JudgePlan, grades_bundle: Opt
             steps.push((exe.to_path_buf(), vec![
                 "judge".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into(),
                 "--log-dir".into(), log_dir.to_string_lossy().into_owned(),
-            ]));
-        }
-        JudgePlan::Local(j) => {
-            steps.push((exe.to_path_buf(), vec![
-                "judge".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into(),
-                "--runtime".into(), j.runtime.to_string_lossy().into_owned(),
-                "--model".into(), j.model.to_string_lossy().into_owned(),
-                "--log-dir".into(), j.log_dir.to_string_lossy().into_owned(),
             ]));
         }
         JudgePlan::Skip(_) => {}

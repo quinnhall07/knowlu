@@ -65,9 +65,8 @@ pub fn is_judgment_id(s: &str) -> bool {
     JUDGMENT_ID.is_match(s)
 }
 
-/// One call's wall-clock bound — the same 120 seconds `runtime::CALL_TIMEOUT` gave one local
-/// completion. Spelled again here rather than borrowed, because C4 removes `runtime.rs` and this
-/// bound outlives it: a judge step runs inside a slot whose own child cap is twenty minutes.
+/// One call's wall-clock bound: 120 seconds for one completion. A judge step runs inside a slot
+/// whose own child cap is twenty minutes, so a hung call must end well inside it.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `config/cloud.yaml`, written by the wizard at onboarding (C1). Absent on a vault that has

@@ -16,19 +16,19 @@ after a friend has installed orphans all three. It changed from `app.knowlu.desk
 9, before the first installer existed; the one visible cost was that the next launch re-registered
 autostart and reset the window position once. `tauri.conf.json` has no comment syntax, hence this note.
 
-The engine is linked as a path dependency (`knowlu-engine = { path = "../engine" }`). **Sixty-six**
-(recounted 2026-09-24, commitment model phase 2, by script)
-`#[tauri::command]`s exist — **twenty-seven in `src/commands.rs`, four in `src/week.rs`, fourteen in
-`src/onboarding.rs`, fourteen in `src/account.rs`, five in `src/lms_link.rs` and two in
-`src/report.rs`**. Commands live beside the module they serve, never all in one file. Count them in
-`src/main.rs`'s two `generate_handler!` lists if this drifts, and note that the two lists are
-different windows, not one:
+The engine is linked as a path dependency (`knowlu-engine = { path = "../engine" }`). **Eighty-five**
+(recounted 2026-10-20, lane L6, by script)
+`#[tauri::command]`s exist — **twenty-nine in `src/commands.rs`, four in `src/week.rs`, fourteen in
+`src/onboarding.rs`, seventeen in `src/account.rs`, five in `src/lms_link.rs`, two in
+`src/report.rs`, four in `src/grades.rs` and ten in `src/mail.rs`**. Commands live beside the module
+they serve, never all in one file. Count them in `src/main.rs`'s two `generate_handler!` lists if
+this drifts, and note that the two lists are different windows, not one:
 
-- **The console window** registers 47 — all 27 of `commands.rs`; all four of `week.rs`;
-  `launch_state`, `pick_folder` and `pick_file` from `onboarding.rs`; eleven of `account.rs`'s
-  fourteen (the seven sign-in commands included, because an install that predates the account is
-  upgraded in place, inside this window, over its own vault; the three it lacks are the picker-only
-  Google ones below); and both of `report.rs`.
+- **The console window** registers 66 — all 29 of `commands.rs`; all four of `week.rs`, `grades.rs`;
+  all ten of `mail.rs`; `launch_state`, `pick_folder` and `pick_file` from `onboarding.rs`; fourteen
+  of `account.rs`'s seventeen (the seven sign-in commands included, because an install that predates
+  the account is upgraded in place, inside this window, over its own vault; the three it lacks are
+  the picker-only Google ones below); and both of `report.rs`.
 - **The vault-less shell** (picker or wizard) registers 29 — the 14 of `onboarding.rs`, ten of
   `account.rs` (`google_sign_in`, `send_magic_link`, `verify_email_code`, `sign_out`,
   `entitlement_now`, `open_checkout`, `open_policy`, plus `google_connect_url`, `google_connected`
@@ -88,7 +88,7 @@ connected a feed and `ingest (skipped: config unreadable)` for a `config/ingest.
 parse. The app decides this, not the engine: `knowlu-engine ingest` exits 1 on an empty `ics_url`
 (Python does, and the port keeps it), and a step exiting non-zero would put every friend without a
 feed into permanent retry backoff and an amber tray, twice a day, forever. `judge` is plan 3a's,
-skipped the same way for the same reason — see **Local judgment** below.
+skipped the same way for the same reason — see **Judgment** below.
 
 It stays **inert — never ticks, never runs a slot** — unless `config/runners.yaml`'s
 `local` entry says `scheduler: app` **and** this device is the one named there (or none is named);
@@ -102,41 +102,29 @@ The child engine exe is resolved as **`KNOWLU_ENGINE_EXE`** if set and non-empty
 `knowlu-engine.exe` sitting beside the running `knowlu.exe`, else an error naming both places so a
 friend's bug report says exactly what to check.
 
-## Local judgment
+## Judgment
 
-The slot runs `knowlu-engine judge` between `ingest` and `rank`. It reads every task note flagged
+The slot runs `knowlu-engine judge` between `grades` and `rank`. It reads every task note flagged
 `needs_enrichment: true` and answers effort, importance and course in three tiers:
 
 1. **Heuristics** — the course map's uid pins and course codes (the same rule `ingest` applies), and
-   a vendor's own effort estimate. Deterministic.
-2. **Promoted rules** — the seam plan 3b fills. Empty today.
-3. **The model** — **one `llama-cli.exe` process per judgment**, no port, no health check, no
-   process kept alive between calls, answering a five-field JSON object under a GBNF grammar. A
-   spike measured a loopback server 2.15× faster than one process per call — faster on every
-   measure — but short of the plan's pre-committed 3× bar for the added lifecycle, so the simpler
-   shape shipped: `docs/superpowers/reports/2026-09-07-sidecar-protocol-spike.md`.
+   a vendor's own effort estimate. Deterministic, on the device.
+2. **Promoted rules** — rules a student's own decisions have earned. On the device.
+3. **The judgment service** — `POST /judge-task` (and `-event`, `-email`) on our cloud, through
+   `CloudModel`. The prompt, schema and pinned model live server-side; nothing model-shaped runs on
+   the machine.
 
-**It runs with nothing installed.** "runtime not installed" and "model not installed" are normal
-outcomes: the step is recorded at exit code 0 with a name that says which half is missing, whatever
-tier 1 answered is still written, and the flag stays set so the work is still owed. Nothing is ever
-downloaded automatically — Settings → *Local judgment* has a *Download* button and an *Install from
-a file…* button, and the wizard offers a reminder and nothing more.
-
-**Knowlu only runs llama.cpp builds it knows.** `inference::SUPPORTED_RUNTIMES` is a table of
-upstream release tags, asset names and SHA-256s compiled into the app, and **both** install buttons
-check the file against it before anything is written — so the path that works before the download
-site exists is as verified as the one that comes later. An unrecognised digest is refused and the
-message prints it, which is what to send us if you have a build we should add. Model files are not
-pinned: a `.gguf` is data parsed by a runtime that table already vouched for, and any 1–4 B Q4 model
-is meant to work.
+**It runs with no account.** With no account, session or entitlement the step is left out and named
+(`judge (skipped: no account)`, `(skipped: no entitlement)`), at exit code 0, and the
+flag stays set so the work is still owed. Run by hand with no account, `knowlu-engine judge` still
+writes whatever tiers 1 and 2 answer and names tier 3 as unavailable.
 
 Every write is `agent:knowlu.enrich` through `knowlu_engine::write` with `judged: true` and
 `propose: true`, so a field you set in the console is never overwritten: the app's later opinion
 arrives as a `kind: amend` card in the deck.
 
-Where things live: `%LOCALAPPDATA%\knowlu\runtime\` and `…\models\` (install-wide — one download
-serves every profile), `…\profiles\<id>\judgments\YYYY-MM-DD.jsonl` (per profile, ids and field
-values only, never in the vault and never in the backup).
+Judgments are logged per profile at `%LOCALAPPDATA%\knowlu\profiles\<id>\judgments\YYYY-MM-DD.jsonl`
+(ids and field values only, never in the vault and never in the backup).
 
 ## Build and run
 

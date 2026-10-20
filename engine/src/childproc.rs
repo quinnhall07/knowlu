@@ -1,7 +1,7 @@
 //! One place where a child process is told not to open a console window.
 //!
 //! Knowlu is a GUI application. Every console-subsystem child it spawns — `git`, `taskkill`, the
-//! engine exe, a model runtime — gets its own console window unless `CREATE_NO_WINDOW` is set, and
+//! engine exe — gets its own console window unless `CREATE_NO_WINDOW` is set, and
 //! that window flashes open and shut as the child runs. The housekeeping thread syncs **every 60
 //! seconds** (`app/src/main.rs`), and each sync shells out to `git`, so before this module existed
 //! the app blinked a terminal at the user once a minute for the whole session.

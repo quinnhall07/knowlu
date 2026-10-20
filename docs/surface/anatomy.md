@@ -67,7 +67,7 @@ by one function.
 |---|---|---|
 | **Picker** | one row per registered profile — name over vault path, with *Open* — and two buttons, *Use an existing vault…* (adopts a folder) and *Create a new vault…* (the wizard) | a launch with no `--vault` and more than one profile registered; or `--pick`, which is the settings overlay's *Switch profile…* |
 | **Wizard** | seven panels in order — Welcome, Your vault, Backup folder, Your LMS calendar, Coursework logins, Slots and campus, Finish. Back is always allowed and **nothing is written until *Finish*** except the Credential Manager entries, which are written when the credentials panel is left | a launch with no `--vault` and no profile registered; or the picker's *Create a new vault…* |
-| **Settings** | seven rows over the live page — profile name, vault path, backup folder, start with Windows, updates, local judgment, diagnostics | the topline gear, or *Settings* in the tray (which `eval`s `window.KNOWLU_OPEN_SETTINGS`) |
+| **Settings** | rows over the live page — profile name, vault path, backup folder, start with Windows, updates, account, Google, email, grades, preferences, campus events, problem report, delete my data, diagnostics (the `set-row` elements of `app/static/index.html` are the list) | the topline gear, or *Settings* in the tray (which `eval`s `window.KNOWLU_OPEN_SETTINGS`) |
 | **Confirm screen** (`#week-setup`) | "When do your classes meet?" — four groups: *Your classes* (with the courses that have no class row), *Your week*, *Office hours* and *Your day* (the window editor). Each row has Mine / Not mine / unanswered, and a level control on Mine. *Finish* writes through `commitments_confirm`; *Not now* writes nothing and hides it for the session | `your_week` says `setup` (the vault's first day, no planning-day note), over the first-run view |
 
 The picker and the wizard replace the whole document and run in a **vault-less window** — no
@@ -75,19 +75,6 @@ The picker and the wizard replace the whole document and run in a **vault-less w
 to point at yet; they end by *relaunching* into the console, never by acquiring a state after the
 fact. The settings panel is an **overlay** over a running console, and nothing inside it carries a
 `data-id`.
-
-**Local judgment** is the seventh settings row (plan 3a). It has a state for every outcome —
-`runtime not installed`, `model not installed`, `ready — 2.1 GB model` — and "not installed" is
-rendered as an ordinary state, never as an error, because running with no model is the free tier's
-zero-cloud default and not a fault. Its two install buttons are two doors to one rule: **a runtime
-is executed only if its SHA-256 is in `inference::SUPPORTED_RUNTIMES`**, a table compiled into the
-app, whichever door it came through (ruling R-P3a-2). A refusal names the digest, so the answer to
-"why won't it take my file" is a string the reader can send us. *Left out:* a progress bar. A
-two-gigabyte download would want one, and the row deliberately says `installing…` instead: the
-command is `(async)`, the page has no channel to stream progress over, and inventing one for a
-button pressed once per install is cost without a reader. *Also left out:* pinning model digests —
-a `.gguf` is data parsed by a runtime the table already vouched for, and the spec allows any 1–4 B
-Q4 model, so a pinned list would make the row useless to anyone who wants a different one.
 
 ---
 

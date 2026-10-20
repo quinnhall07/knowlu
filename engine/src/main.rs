@@ -156,11 +156,11 @@ enum Command {
         #[arg(long = "run-id")]
         run_id: Option<String>,
     },
-    /// Enrich tasks flagged `needs_enrichment: true` using the local model, if one is installed.
+    /// Enrich tasks flagged `needs_enrichment: true` through the judgment service.
     ///
-    /// Always exits 0: no runtime and no model are normal outcomes (Knowlu spec §5.3), and a
-    /// non-zero exit here would put the app's scheduler into retry backoff and paint the tray
-    /// amber for a machine that has simply not downloaded a model.
+    /// Always exits 0: no account, session, entitlement or network are normal outcomes (named on
+    /// stdout), and a non-zero exit here would put the app's scheduler into retry backoff and paint
+    /// the tray amber for a student who has simply not signed in.
     Judge {
         #[arg(long, default_value = ".")]
         vault: PathBuf,
@@ -170,12 +170,6 @@ enum Command {
         via: String,
         #[arg(long = "run-id")]
         run_id: Option<String>,
-        /// The llama.cpp runtime binary. Without it: KNOWLU_RUNTIME, else a sibling of this exe.
-        #[arg(long)]
-        runtime: Option<PathBuf>,
-        /// The .gguf model file. Without it: KNOWLU_MODEL, else "model not installed".
-        #[arg(long)]
-        model: Option<PathBuf>,
         /// Where judgments are logged. **Never inside the vault** (spec §5.6) -- the app passes its
         /// profile's app-data folder; a hand-typed run without it logs nothing.
         #[arg(long = "log-dir")]
@@ -432,7 +426,7 @@ fn main() -> ExitCode {
     // one `let` rather than one `format!` echoed in a second place). `entitle::gate` answers the
     // reason; the command's own word is this file's to supply, because this file is the only place
     // that knows which subcommand was typed. The result reads exactly like the two skips the app
-    // already prints — `judge (skipped: no runtime)`, `ingest (skipped: no ics_url)` — so a student
+    // already prints — `judge (skipped: no entitlement)`, `ingest (skipped: no ics_url)` — so a student
     // meets one sentence shape whichever step stopped.
     if let Some(vault) = gated_vault(&cli.command) {
         if let Some(reason) = entitle::gate(vault) {
@@ -568,12 +562,10 @@ fn main() -> ExitCode {
             0 => ExitCode::SUCCESS,
             _ => ExitCode::FAILURE,
         },
-        Command::Judge { vault, via, run_id, runtime, model, log_dir, limit } => {
+        Command::Judge { vault, via, run_id, log_dir, limit } => {
             // Always SUCCESS: `enrich::run` only ever returns 0, and this arm says so out loud
             // rather than mapping a code that cannot occur.
-            let _ = enrich::run(
-                &vault, &via, run_id.as_deref(), runtime.as_ref(), model.as_ref(), log_dir.as_ref(), limit,
-            );
+            let _ = enrich::run(&vault, &via, run_id.as_deref(), log_dir.as_ref(), limit);
             ExitCode::SUCCESS
         }
         Command::Sync { vault, direction, via, run_id } => {
@@ -736,7 +728,7 @@ mod tests {
         assert!(Cli::try_parse_from(["knowlu-engine", "judge", "--vault", ".", "--via", "local-runner"]).is_ok());
         let err = Cli::try_parse_from(["knowlu-engine", "judge", "--via", "knowlu"]).err().expect("clap must refuse");
         assert_eq!(err.exit_code(), 2);
-        assert!(Cli::try_parse_from(["knowlu-engine", "judge", "--runtime", "a.exe", "--model", "b.gguf", "--log-dir", "c", "--limit", "10"]).is_ok());
+        assert!(Cli::try_parse_from(["knowlu-engine", "judge", "--log-dir", "c", "--limit", "10"]).is_ok());
     }
 
     /// m3 (Task 7 fix round 1): `--limit 0` can never make progress (`0 item(s) ... 1 left for

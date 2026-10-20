@@ -1043,8 +1043,6 @@ fn label_opts() -> knowlu_engine::enrich::Options<'static> {
     knowlu_engine::enrich::Options {
         via: "local-runner",
         run_id: None,
-        runtime: None,
-        model: None,
         log_dir: None,
         limit: 10,
         budget: knowlu_engine::enrich::BATCH_BUDGET,
