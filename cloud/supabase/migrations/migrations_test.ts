@@ -1,7 +1,7 @@
 // Static pins on the migrations. There is no Docker in this plan, so nothing here applies SQL:
 // these are the invariants that would otherwise only be discovered on a project that already has
 // rows in it, which is the wrong time to discover them.
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
 
 const HERE = new URL(".", import.meta.url);
 
@@ -720,13 +720,36 @@ async function providerSwapFiles(dir: URL = HERE): Promise<Array<[string, string
  *  (spec §5.1, plan P8), the mail kinds. */
 type PinKind = "task" | "event" | "email" | "mail_claim" | "mail_resolve" | "mail_digest";
 
+const PIN_KINDS: readonly PinKind[] = ["task", "event", "email", "mail_claim", "mail_resolve", "mail_digest"];
+
+/** A `set` list as one kind sees it: each `<key> = case kind when '<k>' then <v> … [else <v>] end`
+ *  becomes `<key> = <v>` for that kind (`null` when no arm names it and there is no `else`). */
+function resolveCaseKind(set: string, kind: PinKind): string {
+  const value = String.raw`'(?:[^']|'')*'(?:::\w+)?|[\w.]+`;
+  const arm = new RegExp(String.raw`when\s+'(\w+)'\s+then\s+(${value})\s*`, "gi");
+  const kase = new RegExp(String.raw`\bcase\s+kind\s+((?:when\s+'\w+'\s+then\s+(?:${value})\s*)+)(?:else\s+(${value})\s*)?end\b`, "gi");
+  return set.replace(kase, (_, arms: string, otherwise?: string) => {
+    for (const a of arms.matchAll(arm)) if (a[1] === kind) return a[2];
+    return otherwise ?? "null";
+  });
+}
+
+/** Also reads the several-kinds form, `update models set … where kind in ('<kind>', …);`: the
+ *  statement applies to every listed kind, with any `case kind when …` value resolved per kind. */
 function lastModelPinBlocks(files: Array<[string, string]>): Partial<Record<PinKind, string>> {
   const blocks: Partial<Record<PinKind, string>> = {};
   const re =
-    /update\s+(?:public\.)?models\s+set([\s\S]*?)where\s+kind\s*=\s*'(task|event|email|mail_claim|mail_resolve|mail_digest)'\s*;/gi;
+    /update\s+(?:public\.)?models\s+set([\s\S]*?)where\s+kind\s*(?:=\s*'(task|event|email|mail_claim|mail_resolve|mail_digest)'|in\s*\(([^)]*)\))\s*;/gi;
   for (const [, sql] of files) {
     for (const m of stripLineComments(sql).matchAll(re)) {
-      blocks[m[2] as PinKind] = m[1];
+      if (m[2] !== undefined) {
+        blocks[m[2] as PinKind] = m[1];
+        continue;
+      }
+      for (const k of m[3].matchAll(/'(\w+)'/g)) {
+        const kind = k[1] as PinKind;
+        if (PIN_KINDS.includes(kind)) blocks[kind] = resolveCaseKind(m[1], kind);
+      }
     }
   }
   return blocks;
@@ -1478,6 +1501,32 @@ Deno.test("mail_resolve_and_mail_claim_are_re_pinned_to_1280_and_1536_max_tokens
   for (const kind of ["mail_claim", "mail_resolve"] as const) {
     assertEquals(currentPin(files, kind), currentPin(before, kind), `${kind}: only max_tokens moves`);
   }
+});
+
+Deno.test("the pin parser reads a where-kind-in re-pin per kind, so a scratch re-pin that also moves model_id is caught", async () => {
+  // Review of 42d4d12 (minor 1): `lastModelPinBlocks` once matched only `where kind = '<kind>';`, so
+  // the "only max_tokens moves" check above compared identical pins. An in-test corpus, no file edit.
+  const files = await everyMigrationFile();
+  const raw = files.find(([n]) => n === MAIL_MAX_TOKENS_REPIN)![1];
+  const blocks = lastModelPinBlocks([[MAIL_MAX_TOKENS_REPIN, raw]]);
+  assertEquals(blocks.mail_resolve?.replace(/\s+/g, " ").trim(), "max_tokens = 1280, since = current_date");
+  assertEquals(blocks.mail_claim?.replace(/\s+/g, " ").trim(), "max_tokens = 1536, since = current_date");
+  assertEquals(Object.keys(blocks).sort(), ["mail_claim", "mail_resolve"], "only the listed kinds");
+  const before = files.filter(([n]) => n < MAIL_MAX_TOKENS_REPIN);
+  const tampered = raw.replace(/since = current_date/, "since = current_date, model_id = 'x'");
+  assert(tampered !== raw, "the scratch re-pin differs from the file");
+  const scratch: Array<[string, string]> = [...before, [MAIL_MAX_TOKENS_REPIN, tampered]];
+  for (const kind of ["mail_claim", "mail_resolve"] as const) {
+    assertEquals(currentPin(scratch, kind).model_id, "'x'", `${kind}: the scratch re-pin's model_id is read`);
+    assertNotEquals(currentPin(scratch, kind), currentPin(before, kind), `${kind}: "only max_tokens moves" would fail`);
+  }
+  // A kind the `case` names but the `in` list does not is untouched; a listed kind with no arm is null.
+  const odd = "update public.models set max_tokens = case kind when 'task' then 9 when 'event' then 7 end " +
+    "where kind in ('event', 'email');";
+  const oddBlocks = lastModelPinBlocks([["scratch.sql", odd]]);
+  assertEquals(Object.keys(oddBlocks).sort(), ["email", "event"]);
+  assertEquals(oddBlocks.event?.trim(), "max_tokens = 7");
+  assertEquals(oddBlocks.email?.trim(), "max_tokens = null");
 });
 
 // Email forwarding T1.3 (spec §5.1's RPCs and cron, test 14's RPC half and 11's database half; D17,
