@@ -872,8 +872,11 @@ fn commitment_passes(
     // Phase-2 spec D2 (Plan ruling Q1-b): on the vault's first day the confirm screen asks, so no
     // proposal or window card is filed. Change cards cannot exist yet, and pass through unchanged.
     let asked: &[cm::Proposal] = if cm::vault_day(vault, today) == 1 { &[] } else { &proposals };
-    let budget = std::cmp::max(0, planning.daily_approval_budget - count_proposals_created(vault, today));
-    let (_, filed, card_warnings) = cm::emit_checks(vault, asked, &changes, today, budget, ctx, journal);
+    // Phase-3 spec A2 item 12, "One filer" (close-out B3e): `emit_checks` runs holding the series
+    // lock, taken here after `refresh_series` released it, over a re-read that adds the registrar
+    // block's kept-field changes (none after a bad series read); the budget is counted under it.
+    let (filed, card_warnings) =
+        cm::emit_checks_locked(vault, asked, &changes, today, planning.daily_approval_budget, !read_failed, ctx, journal);
     warnings.extend(card_warnings);
     // Phase-2 spec §5: the per-course fallback cards, with what the check cards left of the
     // budget. Skipped on a bad series read (Plan ruling Q6-b): an unread calendar would make
@@ -1051,7 +1054,7 @@ pub fn commitments_report_with(
     let proposals = cm::proposals(&file, &set, &codes, &names, &template, &held, today, false);
 
     let uncovered = cm::uncovered_courses(vault, &set, &proposals, &codes);
-    let registrar_changes = cm::registrar_changes_json(&file, today);
+    let registrar_changes = cm::registrar_changes_json(vault, &file, &set, today);
     CommitmentsReport { proposals, uncovered, registrar_changes, warnings }
 }
 

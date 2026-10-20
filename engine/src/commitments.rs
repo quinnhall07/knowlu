@@ -1456,6 +1456,9 @@ pub struct RegistrarFetch {
     /// A2 item 11, "When the CRN comes back" (close-out B3d): the note paths whose open `ended`
     /// entry this fetch closes (it gains `returned`, the fetch day).
     pub returned: Vec<String>,
+    /// A2 item 12 (close-out B3e): the term's standing kept entries after this fetch; they replace
+    /// the block's `kept`.
+    pub kept: Vec<serde_json::Value>,
 }
 
 /// A2 item 13's list order: `applied` and `ended` by (fetch day, note path, field); `kept`, `status`
@@ -2332,6 +2335,7 @@ pub fn refresh_series_with(
             }
         }
         term.ended.extend(news.ended.iter().cloned());
+        term.kept = news.kept.clone();
         term.status = news.status.clone();
         term.unread = news.unread.clone();
     }
@@ -3743,6 +3747,106 @@ pub fn registrar_changes(note: &Commitment, series: &Series, journal: &mut crate
     out
 }
 
+/// Phase-3 spec A2 item 12 (close-out B3e): a field's value as a note holds it and the registrar
+/// block lists it (`meets` as the note's list, `until` as a date, `where` on one line), `null` when
+/// unset.
+pub fn field_json(field: &str, meets: &[Meet], until: Option<Date>, where_: Option<&str>) -> serde_json::Value {
+    match field {
+        "meets" if !meets.is_empty() => meets_json(meets),
+        "until" => date_json(until),
+        "where" => opt_json(where_.map(str::trim)),
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// Two values of `field` are one value as a note reads them ([`as_read`]: `meets` as a set).
+pub fn same_value(field: &str, a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    as_read(field, Some(&to_value(a.clone()))) == as_read(field, Some(&to_value(b.clone())))
+}
+
+/// A2 item 12's offer for one kept entry: `None` when it is neither listed nor offered (its note
+/// is gone, or now holds the registrar's value); `Some(None)` when it is listed only (no prior
+/// row); else the `commitment-check` change, with `was` read from the note now.
+fn kept_offer(entry: &serde_json::Value, set: &Commitments) -> Option<Option<Change>> {
+    let (path, field) = (entry["note"].as_str()?, entry["field"].as_str()?);
+    let note = set.confirmed.iter().find(|n| n.path.to_string_lossy().replace('\\', "/") == path)?;
+    let now = field_json(field, &note.meets, note.until, note.where_.as_deref());
+    if same_value(field, &now, &entry["registrar"]) {
+        return None;
+    }
+    if entry.get("listed").is_some() {
+        return Some(None);
+    }
+    let one = |v: &serde_json::Value| Mapping::from_iter([(Value::String(field.to_string()), to_value(v.clone()))]);
+    Some(Some(make_change(note, note.source_uid.as_deref()?, one(&entry["registrar"]), one(&now))))
+}
+
+/// A2 item 12, "Never silent" and item 13: the kept entries as the page lists them, each with
+/// `card`: `listed` (no prior row), `filed` (a card [`emit_checks`]' asked-once test counts) or
+/// `waiting`. An entry whose note now holds the registrar's value is left out.
+pub fn kept_listed(vault: &Path, entries: &[serde_json::Value], set: &Commitments, today: Date) -> Vec<serde_json::Value> {
+    let seen = asked(vault, today);
+    let mut out = Vec::new();
+    for entry in entries {
+        let Some(offer) = kept_offer(entry, set) else { continue };
+        let card = match offer {
+            None => "listed",
+            Some(c) if seen.changes.contains(&(c.target.clone(), canonical(&Value::Mapping(c.change.clone())))) => "filed",
+            Some(_) => "waiting",
+        };
+        let mut shown = entry.clone();
+        if let Some(map) = shown.as_object_mut() {
+            map.remove("listed");
+            map.insert("card".to_string(), serde_json::Value::String(card.to_string()));
+        }
+        out.push(shown);
+    }
+    sort_registrar_entries(&mut out);
+    out
+}
+
+/// A2 item 12, "One filer" (close-out B3e): [`emit_checks`] once, holding [`SERIES_LOCK_FILE`]
+/// from the series file's re-read to the last card write, so a fetch and a `rank` never file the
+/// same `(note, field, value)` twice. Under the lock it re-reads the file and the notes, counts the
+/// budget (`daily_budget` less today's proposals) and joins every kept entry's change to `changes`.
+/// No kept entry is offered when `offer_kept` is false (a bad series read), the lock cannot be
+/// taken, or the re-read is malformed or unreadable. A file that holds no registrar calendar and
+/// no block has nothing to guard: no lock is taken, so a vault that never fetched writes no lock
+/// file it did not write before. Returns `(filed, warnings)`.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_checks_locked(
+    vault: &Path,
+    proposals: &[Proposal],
+    changes: &[Change],
+    today: Date,
+    daily_budget: i64,
+    offer_kept: bool,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> (usize, Vec<String>) {
+    let mut warnings = Vec::new();
+    let registrar = |f: &SeriesFile| {
+        !f.registrar.is_empty() || f.calendars.keys().any(|c| c.starts_with(crate::registrar::CALENDAR_PREFIX))
+    };
+    let lock = match offer_kept && registrar(&read_series_file(vault).0) {
+        true => lock_series_file(vault)
+            .inspect_err(|err| warnings.push(format!("series file: could not lock {SERIES_LOCK_FILE} ({}); no kept-field card this run", err.kind())))
+            .ok(),
+        false => None,
+    };
+    let mut all = changes.to_vec();
+    let (file, read_warnings) = read_series_file(vault);
+    if lock.is_some() && !series_read_failed(&read_warnings) {
+        let set = load(vault);
+        let kept = file.registrar.values().flat_map(|t| t.kept.iter());
+        all.extend(kept.filter_map(|e| kept_offer(e, &set)).flatten());
+    }
+    let budget = std::cmp::max(0, daily_budget - crate::approvals::count_proposals_created(vault, today));
+    let (_, filed, card_warnings) = emit_checks(vault, proposals, &all, today, budget, ctx, journal);
+    warnings.extend(card_warnings);
+    (filed, warnings)
+}
+
 /// §5.4's detection, pure (no clock, no I/O, no model): the changes to confirmed notes keyed
 /// `gcal-series:` or `ics-series:` (never `registrar:`, [`SERIES_KEY_PREFIXES`]), over
 /// [`SeriesFile::by_key`] and `file.ended`.
@@ -4947,7 +5051,8 @@ pub struct Overview {
 /// The page's "From myBama" lists after a restart (phase-3 spec A2 item 13): `applied`, `ended`,
 /// `kept`, `status` and `unread`, read from the registrar block of every term in play
 /// ([`registrar_in_play`]), terms in key order, each list in the block's order. No term, empty lists.
-pub fn registrar_changes_json(file: &SeriesFile, today: Date) -> serde_json::Value {
+/// `kept` is [`kept_listed`] (close-out B3e), so its `card` is read from `approvals/` and `archive/`.
+pub fn registrar_changes_json(vault: &Path, file: &SeriesFile, set: &Commitments, today: Date) -> serde_json::Value {
     let in_play = registrar_in_play(file, today);
     let mut out = serde_json::Map::new();
     for key in ["applied", "ended", "kept", "status", "unread"] {
@@ -4956,7 +5061,7 @@ pub fn registrar_changes_json(file: &SeriesFile, today: Date) -> serde_json::Val
             let mut part = match key {
                 "applied" => term.applied.clone(),
                 "ended" => term.ended.clone(),
-                "kept" => term.kept.clone(),
+                "kept" => kept_listed(vault, &term.kept, set, today),
                 "status" => term.status.clone(),
                 _ => term.unread.clone(),
             };
@@ -5028,7 +5133,7 @@ pub fn overview(vault: &Path, today: Date) -> Overview {
         .filter(|p| p.source_uid.starts_with(crate::registrar::CALENDAR_PREFIX))
         .map(proposal_value)
         .collect();
-    let registrar_changes = registrar_changes_json(&stored.file, today);
+    let registrar_changes = registrar_changes_json(vault, &stored.file, &stored.set, today);
     Overview {
         commitments,
         office_hours,

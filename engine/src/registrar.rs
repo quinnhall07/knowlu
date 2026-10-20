@@ -316,6 +316,9 @@ pub struct Report {
     /// A2 items 11 and 13 (close-out B3d): each note this fetch ended, as `{day, kept_yours, note,
     /// until}` (`until` the pinned end, written or kept yours), in the block's order.
     pub ended: Vec<Value>,
+    /// A2 items 12 and 13 (close-out B3e): the term's standing kept entries, `{card, field, note,
+    /// registrar, student}`, `card` read after this fetch's filing ([`crate::commitments::kept_listed`]).
+    pub kept: Vec<Value>,
     /// A2 item 13 (close-out B3c): `dropped`'s P3 and P6 counts beside `no_time` and `midnight`.
     pub exam: usize,
     pub meeting_type: usize,
@@ -327,7 +330,6 @@ pub struct Report {
 }
 
 impl Report {
-    /// `kept` is `[]` until close-out B3e records it.
     pub fn to_json(&self) -> Value {
         json!({
             "term": self.term, "rows": self.rows, "confirmed": self.confirmed, "proposed": self.proposed,
@@ -336,7 +338,7 @@ impl Report {
                 "no_time": self.no_time, "status": self.not_registered,
             },
             "warnings": self.warnings,
-            "applied": self.applied, "ended": self.ended, "kept": [], "status": self.status, "unread": self.unread_entries,
+            "applied": self.applied, "ended": self.ended, "kept": self.kept, "status": self.status, "unread": self.unread_entries,
         })
     }
 }
@@ -454,6 +456,50 @@ pub fn run_parsed(
     // "When the CRN comes back": a `whole` row closes the note's open entry, written or not.
     let returned: Vec<String> =
         notes.iter().filter(|(key, path)| read.get(*key) == Some(&Reading::Whole) && open(path)).map(|(_, path)| path.clone()).collect();
+    // A2 item 12 (close-out B3e): a hand-set field is never written. `old` is the last whole reading
+    // (P9's carry) or, for `until`, the pinned end of the note's open `ended` entry; a missing note's
+    // new `until` is the pinned end. A value that moved from `old` and differs from the note's is
+    // kept (listed only with no prior row); agreement removes the entry; a part-read CRN is skipped.
+    let mut kept: Vec<Value> = block.map(|t| t.kept.clone()).unwrap_or_default();
+    for (key, path) in &notes {
+        let Some(note) = confirmed.get(key).filter(|_| read.get(key).is_none_or(|how| *how == Reading::Whole)) else { continue };
+        let before = prior.series.iter().find(|s| s.calendar == calendar && s.source_uid == *key);
+        let open_end = block
+            .and_then(|t| t.ended.iter().find(|e| e["note"] == path.as_str() && e.get("returned").is_none()))
+            .map(|e| e["until"].clone());
+        let (gone, newly_ended) = (!read.contains_key(key), ended.iter().any(|e| e["note"] == path.as_str()));
+        let value = |field: &str, s: &Series| cm::field_json(field, &s.meets, s.until, s.where_.as_deref());
+        for field in ["meets", "until", "where"] {
+            if journal.human_edited(&note.id, field).is_none() {
+                continue;
+            }
+            let (old, new) = match (rows.get(key.as_str()), field) {
+                (Some(row), "until") => (open_end.clone().or_else(|| before.map(|s| value(field, s))), value(field, row)),
+                (Some(row), _) => (before.map(|s| value(field, s)), value(field, row)),
+                (None, "until") if gone && open_end.is_some() => (open_end.clone(), open_end.clone().unwrap_or_default()),
+                (None, "until") if newly_ended => (before.map(|s| value(field, s)), json!(pinned.to_string())),
+                _ => continue,
+            };
+            let mine = cm::field_json(field, &note.meets, note.until, note.where_.as_deref());
+            let same = |a: &Value, b: &Value| cm::same_value(field, a, b);
+            let at = kept.iter().position(|e| e["note"] == path.as_str() && e["field"] == field);
+            if new.is_null() {
+                continue;
+            } else if same(&new, &mine) {
+                kept.retain(|e| !(e["note"] == path.as_str() && e["field"] == field));
+            } else if old.as_ref().is_none_or(|o| !same(o, &new)) {
+                let mut entry = json!({ "field": field, "note": path, "registrar": new, "student": mine });
+                if old.is_none() {
+                    entry["listed"] = json!(true);
+                }
+                kept.retain(|e| !(e["note"] == path.as_str() && e["field"] == field));
+                kept.push(entry);
+            } else if let Some(i) = at {
+                kept[i]["student"] = mine;
+            }
+        }
+    }
+    cm::sort_registrar_entries(&mut kept);
     let unread: Vec<(String, Option<String>, Reading)> = read
         .iter()
         .filter(|(key, how)| matches!(how, Reading::Partial) || (matches!(how, Reading::Unread) && notes.contains_key(*key)))
@@ -492,8 +538,11 @@ pub fn run_parsed(
         status: status.clone(),
         unread: unread_entries.clone(),
         returned,
+        kept: kept.clone(),
     };
     let (_, mut warnings) = cm::refresh_series_with(vault, &[(calendar, input)], today, Some(&news));
+    // A2 item 12, "One filer": only after the series-file write held does the fetch offer kept cards.
+    let wrote = !warnings.iter().any(|w| w.contains("could not write") || w.contains("not written this run"));
     warnings.extend(parsed.warnings.iter().cloned());
     warnings.extend(failed);
     let stored = cm::stored_proposals(vault, today);
@@ -512,6 +561,11 @@ pub fn run_parsed(
     let input = cm::ConfirmInput { mine, not_mine: Vec::new(), window: None };
     let done = cm::confirm(vault, &input, today, ctx, journal)?;
     warnings.extend(done.warnings);
+    // A2 item 12, "Filing": each kept entry's card, under the series lock, with `rank`'s budget.
+    let planning = crate::planning::load_planning(&vault.join("config").join("planning.yaml"));
+    let (_, card_warnings) = cm::emit_checks_locked(vault, &[], &[], today, planning.daily_approval_budget, wrote, ctx, journal);
+    warnings.extend(card_warnings);
+    let kept = cm::kept_listed(vault, &kept, &cm::load(vault), today);
     Ok(Report {
         term: parsed.term,
         rows: parsed.series.len(),
@@ -524,6 +578,7 @@ pub fn run_parsed(
         unread,
         applied,
         ended,
+        kept,
         exam: parsed.exam,
         meeting_type: parsed.meeting_type,
         not_registered: parsed.status,
