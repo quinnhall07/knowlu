@@ -22,6 +22,9 @@ export interface Account {
   authEmail?: string;
   /** The `entitlements` row; `null` when it was deleted by hand (P0x, P3x). */
   row: Row | null;
+  /** The S6 follow-up's G rows: the row carries a `stripe_subscription_id` (`has_subscription`).
+   * Meaningless without a row; absent, it carries none, as the sign-up row does. */
+  subscription?: true;
 }
 /** A grant on `accounts[account]`, open unless `endedAgo` says it was ended early that many days ago. */
 export interface Grant {
@@ -341,5 +344,99 @@ export const SPEND_CASES: SpendCase[] = [
       { account: 1, month: "2025-02-01", estUsd: 2, alertUsd: 2 },
       { account: "total", month: "2025-02-01", estUsd: 3, alertUsd: null },
     ],
+  },
+];
+
+// The S6 follow-up (2026-10-20, minors 2 and 3; <stamp>_comp_guards.sql): comp_grant refuses an end
+// date not after now() or more than a year out, comp_extend gains the same ceiling, and admin.testers
+// gains the account's entitlement status and whether it has a Stripe subscription, at its end. Layer
+// ii (testers_model_test.ts) and layer iii (proofs/comp_guards_staging.sql) run these rows. No call
+// here is 366 days out: whether that is past a year depends on the calendar, so 365 is inside and 367
+// outside on every date.
+/** admin.testers' row with the two follow-up columns: `entitlement_status` and `has_subscription`. */
+export interface GuardTestersRow extends TestersRow {
+  entitlementStatus: Status;
+  hasSubscription: boolean;
+}
+export interface GuardCase extends TesterCase {
+  testers?: GuardTestersRow[];
+}
+/** The follow-up's refusals, each in comp_extend's style. */
+export const GRANT_NOT_FUTURE = "the ends_at is not in the future";
+export const GRANT_TOO_FAR = "the ends_at is more than a year away";
+export const EXTEND_NOT_FUTURE = "the new ends_at is not in the future";
+export const EXTEND_TOO_FAR = "the new ends_at is more than a year away";
+
+const live = (paid: boolean, entitlementStatus: Status, hasSubscription: boolean): GuardTestersRow => ({
+  state: "live", paid, entitlementStatus, hasSubscription,
+});
+const subscribed = (id: string, row: Row): Account[] => [{ email: `${id}-0@example.invalid`, row, subscription: true }];
+
+export const GUARD_CASES: GuardCase[] = [
+  {
+    id: "G1", given: "comp_grant at a past date and at now() refused, so no expired grant holds the one open slot; then a grant",
+    accounts: signedUp("g1"), grants: [],
+    calls: [
+      { fn: "comp_grant", account: 0, endsIn: -1, refused: GRANT_NOT_FUTURE },
+      { fn: "comp_grant", account: 0, endsIn: 0, refused: GRANT_NOT_FUTURE },
+      { fn: "comp_grant", account: 0, endsIn: 30 },
+    ],
+    expectBefore: [NONE], expect: [tester(30)],
+  },
+  {
+    id: "G2", given: "comp_grant more than a year out refused; 365 days granted",
+    accounts: signedUp("g2"), grants: [],
+    calls: [
+      { fn: "comp_grant", account: 0, endsIn: 367, refused: GRANT_TOO_FAR },
+      { fn: "comp_grant", account: 0, endsIn: 365 },
+    ],
+    expectBefore: [NONE], expect: [tester(365)],
+  },
+  {
+    id: "G3", given: "comp_grant at a past date on an id with no accounts row: the date is refused first",
+    accounts: [], grants: [],
+    calls: [{ fn: "comp_grant", account: "unknown", endsIn: -1, refused: GRANT_NOT_FUTURE }],
+    expect: [],
+  },
+  {
+    id: "G4", given: "comp_extend more than a year out refused and the grant keeps its end; 365 days extended",
+    accounts: signedUp("g4"), grants: [{ account: 0, endsIn: 30 }],
+    calls: [
+      { fn: "comp_extend", account: 0, endsIn: 367, refused: EXTEND_TOO_FAR },
+      { fn: "comp_extend", account: 0, endsIn: 365 },
+    ],
+    expectBefore: [tester(30)], expect: [tester(365)],
+  },
+  {
+    id: "G5", given: "comp_extend more than a year out with no open grant: the date is refused first",
+    accounts: signedUp("g5"), grants: [],
+    calls: [{ fn: "comp_extend", account: 0, endsIn: 367, refused: EXTEND_TOO_FAR }],
+    expect: [NONE],
+  },
+  // The two columns: a friend Stripe is dunning reads paid unset, and the status and subscription say so.
+  {
+    id: "G6", given: "Stripe past_due with a subscription, open grant: paid unset, past_due and a subscription",
+    accounts: subscribed("g6", { status: "past_due", plan: "monthly", periodEnd: 2 }), grants: [{ account: 0, endsIn: 30 }],
+    expect: [tester(30)], testers: [live(false, "past_due", true)],
+  },
+  {
+    id: "G7", given: "Stripe canceled with a subscription, open grant: paid unset, canceled and a subscription",
+    accounts: subscribed("g7", { status: "canceled", plan: "monthly", periodEnd: -3 }), grants: [{ account: 0, endsIn: 30 }],
+    expect: [tester(30)], testers: [live(false, "canceled", true)],
+  },
+  {
+    id: "G8", given: "Stripe active with a subscription, open grant: paid wins, active and a subscription",
+    accounts: subscribed("g8", { status: "active", plan: "monthly", periodEnd: 20 }), grants: [{ account: 0, endsIn: 30 }],
+    expect: [{ status: "active", plan: "monthly", periodEnd: 20 }], testers: [live(true, "active", true)],
+  },
+  {
+    id: "G9", given: "sign-up none row, open grant: none and no subscription",
+    accounts: signedUp("g9"), grants: [{ account: 0, endsIn: 30 }],
+    expect: [tester(30)], testers: [live(false, "none", false)],
+  },
+  {
+    id: "G10", given: "no entitlements row, open grant: the coalesce answers none, and no subscription",
+    accounts: [{ email: "g10-0@example.invalid", row: null }], grants: [{ account: 0, endsIn: 30 }],
+    expect: [tester(30)], testers: [live(false, "none", false)],
   },
 ];

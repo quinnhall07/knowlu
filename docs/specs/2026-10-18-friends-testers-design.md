@@ -447,7 +447,9 @@ Needs one `console-ui` change (S5; `app/static/console.js` and its markup, Quinn
   `admin.comp_grant(account_id, ends_at, cohort, note)`, `admin.comp_extend(account_id, ends_at)`,
   `admin.comp_end(account_id, reason)`; `admin.comp_sweep()` (§3.1) only deletes. *(Amendment
   2026-10-20: each takes the account id, never an address.)* `comp_grant` refuses an id with no
-  `accounts` row (the foreign key, P16) and writes no audit row then (A2). The owner finds the id by
+  `accounts` row (the foreign key, P16) and writes no audit row then (A2). *(follow-up 2026-10-20, `20261020000600_comp_guards.sql`: `comp_grant` refuses an
+  `ends_at` not after `now()` or more than a year out, and `comp_extend` gains the same ceiling; §9's
+  G1-G10.)* The owner finds the id by
   the address the tester gives, in the SQL editor, with the checks of §8.3, before calling it. There is no `actor`
   argument: the only writer is the project owner, and a free-text actor would invite a person's name
   (rule 1). `reason` is one of `done`, `asked`,
@@ -562,7 +564,8 @@ own billing pages).
 
 - `admin.testers`: one row per grant — account id, the account's current address (read from
   `accounts` when the view is read, never stored on the grant), cohort, state (`live` / `ended` /
-  `expired`), granted, ends, last active day. *(Amendment 2026-10-20: every grant names an account,
+  `expired`), granted, ends, last active day. *(follow-up 2026-10-20: then `entitlement_status` and
+  `has_subscription`, for §8.3's step 3.)* *(Amendment 2026-10-20: every grant names an account,
   so the signed `waiting for sign-up` state is gone.)*
 - `admin.tester_usage_daily`: per tester per UTC day — calls, refunds, in and out tokens and
   `est_usd` per kind; judgments by tier (model vs rule vs deterministic); mail arrivals by phase;
@@ -834,6 +837,12 @@ own billing pages).
         that row would win over the grant (Q3); `canceled` or `past_due` means a payment history the
         friend has not mentioned. Stop and tell Quinn, who cancels in Stripe first, lets the payment
         stand, or says to go on.
+        *(follow-up 2026-10-20, S6 minors 2-3)* The owner refuses the grant while the account has a
+        Stripe subscription (`entitlements.stripe_subscription_id` set; `admin.testers.has_subscription`
+        for an account that held a grant, beside its new `entitlement_status`) and its status is not
+        `canceled`, since Stripe is still billing or dunning it, until it is canceled in Stripe; `paid`
+        alone misses `past_due`, which covers Stripe's `unpaid` and `incomplete`, and
+        `admin.comp_grant` now refuses an `ends_at` not after `now()` or more than a year out.
      4. **Grant.** `admin.comp_grant` with that id. `admin.testers` then shows the grant `live`,
         `paid` unset, and the friend's address. **Right after this step** the controller deletes the
         editor tab that held the lookup.
@@ -1208,6 +1217,7 @@ expectation, and no new case reuses them.)*
 | R1 | `count_route` twice, then a bad route, then as `authenticated` | `calls = 2`; refused; permission denied |
 | V1 | seeded `usage_daily` rows at known token counts | `admin.tester_usage_daily.est_usd` equals the hand-computed sum |
 | V2 | two testers, one with a `budget_alerts` row | `admin.tester_spend_monthly`'s total row is the sum of the two; the alert shows on its month |
+| G1-G10 | `20261020000600_comp_guards.sql` (follow-up 2026-10-20) | the date guards of `comp_grant` and `comp_extend` and the two new `admin.testers` columns; the cases live in `testers_cases.ts` and `proofs/comp_guards_staging.sql` |
 
 **Layer i, first: the guards must see `admin` (S2a0, a non-append edit in its own commit, §8.7).** Today
 `identPattern` (`migrations_test.ts`, top of file) allows only a bare name or `public.<name>`, so
