@@ -30,6 +30,16 @@ Deno.serve(async (req) => {
         );
         return rows[0] ?? null;
       },
+      // Friends-testers spec §3.4: the view, not the grant table, so expiry and ending are decided in
+      // one place. Pinned by `handler_test.ts`, which reads this file as text.
+      isTester: async (id) => {
+        const rows = await restSelect<{ plan: string | null }>(
+          rest,
+          "effective_entitlements",
+          `account_id=eq.${encodeURIComponent(id)}&select=plan&limit=1`,
+        );
+        return rows[0]?.plan === "tester";
+      },
       saveCustomerId: (id, cid) =>
         restPatch(rest, "accounts", `id=eq.${encodeURIComponent(id)}`, { stripe_customer_id: cid }),
       recordConsent: async (c) => {

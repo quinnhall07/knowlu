@@ -667,3 +667,54 @@ Deno.test("the purge list names usage_daily and judgments", async () => {
     assert(match[1].includes(`"${table}",`), `the purge list must name ${table}`);
   }
 });
+
+// Friends testers (docs/specs/2026-10-18-friends-testers-design.md §3.3, §3.5, Q7, Q12, §9; L8 S4).
+// `exportAll` and `purge` live in `index.ts`, which `deno test` never loads, so these pins read it as
+// text, as the `sources` guard above does.
+Deno.test("the export reads comp_grants, comp_audit, route_daily and usage_daily by account id, paged and ordered", async () => {
+  const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  for (const table of ["comp_grants", "comp_audit", "route_daily", "usage_daily"]) {
+    // `all(` or `one(`, the table, then its query template literal, on one line or several.
+    const reads = [...text.matchAll(new RegExp(String.raw`(\w+)\(\s*"${table}",\s*` + "`([^`]*)`", "g"))];
+    assertEquals(reads.length, 1, `exactly one read of ${table} in index.ts`);
+    const [, via, query] = reads[0];
+    assertEquals(via, "all", `${table} is read through the paging all(…), never one(…)`);
+    assert(query.startsWith("${eq(id)}&select="), `${table} is read by the caller's account_id: ${query}`);
+    assert(/&order=[a-z_,]+$/.test(query), `${table}'s read carries an order, so paging is stable: ${query}`);
+  }
+  // Q7: the audit's export columns exactly; `db_role` and `grant_id` are internal (§3.5).
+  const audit = text.match(/all\(\s*"comp_audit",\s*`([^`]*)`/)![1];
+  assert(
+    audit.includes("&select=action,ends_at,cohort,at&"),
+    `comp_audit must select exactly the four: ${audit}`,
+  );
+  assert(!/select=\*|db_role|grant_id/.test(audit), `comp_audit's read leaks an internal column: ${audit}`);
+});
+
+Deno.test("the purge names route_daily, and leaves comp_grants and comp_audit to the cascade, saying so", async () => {
+  const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const m = text.match(
+    /for \(\s*const table of \[([\s\S]*?)\]\s*\)\s*\{\s*await restDelete\(rest, table, eq\(id\)\);/,
+  );
+  assert(m, "could not find purge's table list");
+  const list = m[1];
+  const names = [...list.matchAll(/^\s*"([a-z_]+)",/gm)].map((x) => x[1]);
+  assert(names.includes("route_daily"), `the purge list must name route_daily: ${names}`);
+  // The service role holds no delete right on the grant tables (§3.5); a restDelete there would fail
+  // the whole purge, so the list must never name them, and nothing in the file may delete from them.
+  for (const t of ["comp_grants", "comp_audit"]) {
+    assert(!names.includes(t), `the purge list must not name ${t}`);
+    assert(!new RegExp(String.raw`restDelete\(\s*rest,\s*"${t}"`).test(text), `nothing may restDelete ${t}`);
+  }
+  // §3.3: the comment beside the list names both as taken by the cascade from accounts.
+  // One comment block (consecutive `//` lines) carries all three, so an older comment's "cascades"
+  // elsewhere in the list cannot satisfy it.
+  const blocks = [...list.matchAll(/(?:^\s*\/\/.*\n)+/gm)].map((x) => x[0].replace(/^\s*\/\/ ?/gm, ""));
+  const block = blocks.find((b) => b.includes("comp_grants"));
+  assert(block, "a comment in the purge list names comp_grants");
+  assert(block.includes("comp_audit"), "the same comment names comp_audit");
+  assert(
+    /cascade from\s+`accounts`/.test(block),
+    "the same comment says the cascade from accounts deletes them",
+  );
+});

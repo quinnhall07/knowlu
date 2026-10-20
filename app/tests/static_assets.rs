@@ -1528,7 +1528,7 @@ fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
         go.contains("WIZ.step === 2 && !WIZ.entitled"),
         "wizGo's own pre-ask is gated on the same panel and the same field wizValid is"
     );
-    assert!(go.contains("checkEntitled("), "wizGo re-asks the service before it refuses");
+    assert!(go.contains("checkEntitlement("), "wizGo re-asks the service before it refuses");
     // The subscribe presses ask first too — never a second Checkout page for an account the service
     // already calls entitled.
     let wiz_sub = js
@@ -1542,7 +1542,7 @@ fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
         .and_then(|s| s.split("function finishUpgrade(").next())
         .expect("the up-subscribe handler");
     for (name, handler) in [("#wiz-sub-month", wiz_sub), ("#up-subscribe", up_sub)] {
-        let ask = handler.find("checkEntitled(").expect("checkEntitled appears in the subscribe handler");
+        let ask = handler.find("checkEntitled(").or_else(|| handler.find("checkEntitlement(")).expect("an entitlement ask appears in the subscribe handler");
         let open = handler.find("open_checkout").expect("open_checkout is still reachable on a no");
         assert!(ask < open, "{name} asks the service before it ever opens a second Checkout page");
     }
@@ -1572,7 +1572,7 @@ fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
     // Round-4 re-review, BLOCKING: both stand-down checks must run again AFTER checkEntitled()
     // resolves, not only before it starts — a reply that lands after the student moved on must not
     // act on a panel nobody is looking at.
-    let ce_in_poll = poll.find("checkEntitled(").expect("pollEntitlement calls checkEntitled");
+    let ce_in_poll = poll.find("checkEntitlement(").expect("pollEntitlement calls the status-and-plan helper");
     let guards: Vec<_> = poll.match_indices("WIZ.step !== 2").map(|(i, _)| i).collect();
     assert_eq!(guards.len(), 2, "pollEntitlement's stand-down is checked before AND after checkEntitled()");
     assert!(guards[1] > ce_in_poll, "the second WIZ.step !== 2 check runs after checkEntitled() resolves");
@@ -2972,4 +2972,78 @@ fn no_ui_event_carries_mail_text() {
     }
     // Rendering a card sends nothing: the deck and Decisions renderers hold no event call.
     assert!(!fn_body(&js, "function mailCardLine(").contains("ev("), "the card line is markup only");
+}
+
+// L8 S5t (spec 3.4, section 9 "App"): a comped account never sees a price or a payment prompt. The
+// copy below is the spec's suggested wording; Quinn may reword it, and then this pin moves with it.
+const TESTER_NOTE: &str = "Your account is already set up. Nothing to pay.";
+const TESTER_HEADING: &str = "You're all set";
+
+fn dq(s: &str) -> String { s.replace('\'', "\"") }
+
+#[test]
+fn the_subscribe_step_asks_status_and_plan_and_a_tester_sees_no_price() {
+    let js = dq(&read("console.js"));
+    let html = read("index.html");
+    // The one status-and-plan helper: same entitlement_now answer, plan beside the status, answering
+    // not entitled on any failure. checkEntitled keeps its true-or-false contract.
+    let helper = fn_body(&js, "function checkEntitlement(");
+    assert!(helper.contains("entitlement_now") || helper.contains("checkEntitled("), "the helper reads the same entitlement answer");
+    assert!(helper.contains("plan"), "the helper returns the plan beside the status");
+    assert!(helper.contains(".catch("), "the helper answers not entitled on any failure");
+    assert!(js.contains("function checkEntitled("), "checkEntitled keeps its true-or-false contract for its other callers");
+    // The two sentences, each in one place: the nothing-to-pay line in the script only, and the paid
+    // account keeps today's note.
+    assert_eq!(js.matches(TESTER_NOTE).count(), 1, "the nothing-to-pay line is written once");
+    assert!(!html.contains(TESTER_NOTE), "the markup does not carry the nothing-to-pay line");
+    assert!(js.contains("Your subscription is active."), "a paid account keeps its note");
+    assert!(html.contains("<h2>Subscribe</h2>"), "the default heading is unchanged");
+    assert_eq!(js.matches(dq(TESTER_HEADING).as_str()).count(), 1, "the tester heading is written once");
+    // Rendering, for the plan tester: note, hidden lede, retitled heading; prices hidden for any
+    // entitled account.
+    let render = fn_body(&js, "function renderWizard(");
+    assert!(render.contains("WIZ.plan === \"tester\""), "renderWizard branches on the recorded plan");
+    let note_at = render.find("EL(\"wiz-sub-note\")").expect("the note is set in renderWizard");
+    let note_stmt = &render[note_at..render[note_at..].find(";\n").map(|i| note_at + i).unwrap()];
+    assert!(note_stmt.contains(TESTER_NOTE) && note_stmt.contains("tester"), "#wiz-sub-note carries the nothing-to-pay line for a tester");
+    assert!(note_stmt.contains("Your subscription is active."), "and still the paid note for a paid account");
+    assert_eq!(render.matches(TESTER_NOTE).count(), 1, "no other element carries it");
+    assert!(render.contains("wiz-subscribe") && render.contains(".lede") && render.contains(".hidden"), "the panel's lede is hidden for a tester");
+    assert!(render.contains("wiz-subscribe") && render.contains("h2") && render.contains(dq(TESTER_HEADING).as_str()), "the panel's heading is retitled for a tester");
+    for id in ["wiz-sub-month", "wiz-sub-year"] {
+        let line = render.lines().find(|l| l.contains(&format!("EL(\"{id}\").hidden"))).unwrap_or_else(|| panic!("{id} is hidden in renderWizard"));
+        assert!(line.contains("WIZ.entitled"), "{id} is hidden for any entitled account: {}", line.trim());
+    }
+    // The tester form is drawn only once the plan is known: the plan starts unknown on WIZ.
+    let wiz_decl = &js[js.find("var WIZ = {").expect("WIZ")..];
+    let wiz_decl = &wiz_decl[..wiz_decl.find("};").unwrap()];
+    assert!(wiz_decl.contains("plan: null"), "WIZ.plan starts unknown, so nothing is drawn before the answer");
+    // Every place WIZ.entitled is set records the plan from the helper: wizGo's re-ask, the price
+    // click, pollEntitlement, and the on-entry check.
+    let sets: Vec<usize> = js.match_indices("WIZ.entitled = ").map(|(i, _)| i).collect();
+    assert!(sets.len() >= 4, "four places set WIZ.entitled, the on-entry check included: {}", sets.len());
+    for at in sets {
+        let before = &js[at.saturating_sub(900)..at];
+        let after = &js[at..(at + 400).min(js.len())];
+        assert!(before.contains("checkEntitlement("), "WIZ.entitled set without the helper: {}", &js[at..at + 40]);
+        assert!(before.contains("WIZ.plan = ") || after.contains("WIZ.plan = "), "WIZ.entitled set without recording the plan: {}", &js[at..at + 40]);
+    }
+    // The subscribe step asks the helper on entry, never the plain checkEntitled().
+    let step = fn_body(&js, "function wizStep(");
+    assert!(step.contains("checkEntitlement("), "wizStep asks the status-and-plan helper on entering the subscribe step");
+    assert!(!step.contains("checkEntitled("), "and not the plain boolean");
+    for head in ["function wizGo(", "function pollEntitlement("] {
+        assert!(!fn_body(&js, head).contains("checkEntitled("), "{head} uses the helper, not the plain boolean");
+    }
+}
+
+#[test]
+fn the_upgrade_overlay_shows_subscribe_only_for_a_not_entitled_answer() {
+    let js = dq(&read("console.js"));
+    let body = fn_body(&js, "function afterUpgradeSignIn(");
+    let ask = body.find("checkEntitled(").expect("afterUpgradeSignIn asks checkEntitled()");
+    let unhide = body.find("EL(\"up-subscribe\").hidden = false").expect("it still un-hides #up-subscribe on a no");
+    assert!(unhide > ask, "no up-subscribe un-hide before the entitlement answer");
+    assert!(body[ask..unhide].contains("!yes"), "the un-hide sits inside the not-entitled branch");
+    assert!(body.contains("finishUpgrade()"), "an entitled answer goes straight to finishUpgrade()");
 }
