@@ -1218,4 +1218,100 @@ mod tests {
         }
         assert_eq!(model.fatal(), None, "reporting transport sets nothing on fatal()");
     }
+
+    /// A loopback listener that answers `replies` in arrival order (200 each) and then stops
+    /// listening. Joining it returns the request lines it saw, so a test can count the calls that
+    /// actually left the device. Non-blocking and polled against a deadline, so a regression that
+    /// sends fewer requests fails the test and never hangs it.
+    fn counting_loopback(replies: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let port = listener.local_addr().expect("addr").port();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Read, Write};
+            let mut seen = Vec::new();
+            for body in replies {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+                let mut accepted = None;
+                while std::time::Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok(pair) => {
+                            accepted = Some(pair);
+                            break;
+                        }
+                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                    }
+                }
+                let Some((mut stream, _)) = accepted else { break };
+                stream.set_nonblocking(false).expect("blocking exchange");
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let (mut first, mut length) = (String::new(), 0usize);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if first.is_empty() {
+                        first = line.trim_end().to_string();
+                    }
+                    if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = rest.trim().parse().unwrap_or(0);
+                    }
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                }
+                let mut buf = vec![0u8; length];
+                let _ = reader.read_exact(&mut buf);
+                seen.push(first);
+                let reply = format!(
+                    "HTTP/1.1 200 X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
+            }
+            seen
+        });
+        (format!("http://127.0.0.1:{port}/functions/v1"), handle)
+    }
+
+    /// L7 plan 3.4, T1 test 6: out of credit is GLOBAL, whatever scopes the daily cap to a path. After
+    /// a task call whose reply says `unavailable: "out of credit"`, a `judge_event` call makes no
+    /// request, and it returns an `Err` (never an `unsure` verdict), so the uid is asked again next
+    /// slot. The loopback holds a second reply (an event verdict) so a regression is answered, not
+    /// refused. Red today: two requests reach the loopback, because only a 401, 402 or 403 status stops
+    /// every path.
+    #[test]
+    fn out_of_credit_stops_the_event_pass_and_keeps_the_uid_retryable() {
+        use judge::{EventModel, Model};
+        let out_of_credit = crate::ledger::dumps_value(&json!({
+            "verdict": null, "tier": 3, "outcome": "low confidence",
+            "cause": "model failed", "unavailable": "out of credit",
+        }));
+        let event_verdict = crate::ledger::dumps_value(&json!({
+            "verdict": { "verdict": "opportunity", "why": "matches interests", "confidence": 0.9 },
+            "tier": 3,
+        }));
+        let (base, handle) = counting_loopback(vec![out_of_credit, event_verdict]);
+        let client = client_at(base);
+        let model = CloudModel::new(&client);
+        let item = judge::Item {
+            id: "task_1111111111".into(), rel_path: "tasks/hw.md".into(), title: "Homework 3".into(),
+            body: "Chapters 4 and 5.".into(), source_uid: "blackboard:_1_1".into(),
+            created_by: "blackboard".into(), course: None, due: None, effort_hours: 1.0,
+            effort_source: "inferred".into(),
+        };
+        let heuristics = judge::Heuristics {
+            course_map: Vec::new(), slice_hours: 1.0, weights: Default::default(), preferences: String::new(),
+        };
+        assert!(model.judge(&item, &heuristics, &judge::Verdict::default()).is_err(), "the task call fails");
+        let event = judge::EventItem { uid: "ics:club:1".into(), title: "Club night".into(), ..Default::default() };
+        let answer = model.judge_event(&event);
+
+        let requests = handle.join().expect("the listener thread did not panic");
+        assert_eq!(requests.len(), 1, "only the task's request left the device: {requests:?}");
+        assert!(requests[0].contains("/judge-task"), "{requests:?}");
+        assert!(answer.is_err(), "an Err, never an unsure verdict, so the uid stays pending: {answer:?}");
+    }
 }

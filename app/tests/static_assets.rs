@@ -3047,3 +3047,30 @@ fn the_upgrade_overlay_shows_subscribe_only_for_a_not_entitled_answer() {
     assert!(body[ask..unhide].contains("!yes"), "the un-hide sits inside the not-entitled branch");
     assert!(body.contains("finishUpgrade()"), "an entitled answer goes straight to finishUpgrade()");
 }
+
+/// L7 plan section 3.6, T1 test 12: the Issues view renders the source heads-ups the read model now
+/// carries in `issues_panel.sources`, before the flagged rows. Each row stamps `data-kind="info"` so
+/// the dwell observer's kind rule holds, and none carries a Resolve box (a source issue clears itself).
+#[test]
+fn the_issues_view_renders_source_issues_from_the_payload() {
+    let js = read("console.js");
+    let view = fn_body(&js, "function renderIssuesView(");
+    assert!(view.contains("issues_panel.sources") || view.contains("p.sources"), "the Issues view must read issues_panel.sources: {view}");
+    assert!(view.contains("data-kind=\"info\""), "a source row names its kind as info: {view}");
+    let sources_at = view.find("sources").expect("sources");
+    let rows_at = view.find("p.rows.map").expect("the flagged rows");
+    assert!(sources_at < rows_at, "source issues render before the flagged rows");
+}
+
+/// L7 plan section 3.6 and 3.7, T1 test 13: a connected Gmail the service says went quiet reads in
+/// Settings as the quiet sentence (Quinn's ruling of 2026-10-19, Q2 and Q3), not as the connected one.
+#[test]
+fn the_settings_google_row_names_a_quiet_gmail() {
+    let js = read("console.js");
+    let body = fn_body(&js, "function googleSentence(");
+    assert!(body.contains("g.state === \"quiet\""), "googleSentence needs a branch on the quiet state: {body}");
+    assert!(
+        body.contains(", but Knowlu has found no mail in it for a week. If this is the wrong account, disconnect it and connect the right one."),
+        "the quiet sentence is the spec's words: {body}"
+    );
+}
