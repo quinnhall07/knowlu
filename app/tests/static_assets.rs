@@ -3145,6 +3145,21 @@ fn settings_starts_nothing_new_while_the_update_is_owed() {
 }
 
 #[test]
+fn no_email_setup_starts_while_the_update_is_owed() {
+    let js = read("console.js");
+    // The first-open setup waits for the privacy answer and stands down when the update is owed.
+    let boot = js_fn(&js, "function bootConsole(");
+    let at = boot.find("mailFirstOpen()").expect("bootConsole starts the first-open setup");
+    let before = &boot[..at];
+    assert!(before.contains("checkAccount()") && before.contains(".then("), "mailFirstOpen runs only after the account/privacy check settles");
+    assert!(js_fn(&js, "function mailFirstOpen(").contains("RECONSENT_OWED"), "mailFirstOpen reads the owed flag");
+    assert!(js_fn(&js, "function askPrivacy(").contains("return invoke(\"privacy_status\""), "askPrivacy returns its promise");
+    // The progress view's Gmail switch is a setup start too.
+    let line = js.lines().find(|l| l.contains("id=\"mp-gmail\"")).expect("mp-gmail is built in console.js");
+    assert!(line.contains("owedAttrs()"), "#mp-gmail is disabled while the update is owed");
+}
+
+#[test]
 fn an_unreachable_privacy_check_never_raises_the_panel() {
     let js = read("console.js");
     let asker = js.split("\n  function ").find(|f| f.contains("invoke(\"privacy_status\"")).expect("the function that asks privacy_status");

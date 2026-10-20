@@ -1985,7 +1985,7 @@
       renderAccountRow(s);
       gateGoogleRow(s);
       maybeUpgrade(s);
-      askPrivacy(s);
+      return askPrivacy(s);
     }).catch(function () { renderAccountRow(null); gateGoogleRow(null); EL("upgrade").hidden = true; });
   }
   // M2 T5b.1: Settings, "How you like to work". PREFS.loaded is the text `profile` last returned,
@@ -2236,7 +2236,7 @@
     } else if (p.status !== "ended" && p.rows.some(function (x) { return x.state === "needs_you" || x.state === "failed"; })) {
       ask += '<div class="set-row">' + mpBtn("I’ve done this", "done", " pri y") + (p.blocked ? mpBtn("Try again", "retry") : "") + "</div>";
     }
-    if (p.blocked && (p.offers || []).indexOf("personal_gmail") >= 0) { ask += '<div class="set-row"><button class="b" id="mp-gmail">Connect personal Gmail instead</button></div>'; }
+    if (p.blocked && (p.offers || []).indexOf("personal_gmail") >= 0) { ask += '<div class="set-row"><button class="b" id="mp-gmail"' + owedAttrs() + '>Connect personal Gmail instead</button></div>'; }
     EL("mp-ask").innerHTML = ask;
     var end = "";
     if (p.status === "ended") {
@@ -2268,6 +2268,7 @@
     clearInterval(MP.timer); MP.timer = null;
   }
   function mailFirstOpen() {
+    if (RECONSENT_OWED) { return Promise.resolve(); }
     return invoke("mail_status", {}).then(function (s) {
       if (s && s.offer_pending && !s.setup_running) {
         return invoke("mail_setup_start", { provider: "school" }).then(function (r) { if (r && r.ok) { return openMailProgress(); } });
@@ -2775,7 +2776,7 @@
   function askPrivacy(s) {
     if (PRIVACY_ASKED || !s || s.needs_account) { return; }
     PRIVACY_ASKED = true;
-    invoke("privacy_status", {}).then(function (p) {
+    return invoke("privacy_status", {}).then(function (p) {
       if (p && p.needs_accept === true) { RECONSENT_OWED = true; fillReconsent(p); owedSettings(); maybeReconsent(); }
     }).catch(function () { EL("reconsent").hidden = true; });
   }
@@ -2827,9 +2828,9 @@
     // Spec §11a: and one look at the account, which is what raises the upgrade overlay on the first
     // launch after C1 for an install that already existed. Once per launch, never on a timer — an
     // install that has an account never sees it, and one that dismissed it is asked again tomorrow.
-    checkAccount();
-    // D6: the wizard's announcement was taken and setup has not begun: it begins now, in this window.
-    mailFirstOpen();
+    // D6: the wizard's announcement was taken and setup has not begun: it begins now, in this window,
+    // but only once the privacy answer is in; while an update is owed it waits (the offer marker stays).
+    checkAccount().then(function () { return mailFirstOpen(); });
   }
 
   function renderPicker(l) {
