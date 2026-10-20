@@ -310,12 +310,26 @@ pub fn run(
     ctx: &crate::write::WriteContext,
     journal: &mut crate::journal::Journal,
 ) -> Result<Report, String> {
-    use crate::commitments as cm;
     if school(school_key).is_none() {
         return Err(format!("--school {school_key:?} is not a school Knowlu reads"));
     }
     let json: Value = serde_json::from_str(text).map_err(|e| format!("--registrar is not JSON ({e})"))?;
     let parsed = parse_banner(&json, school_key)?;
+    run_parsed(vault, parsed, school_key, today, ctx, journal)
+}
+
+/// [`run`] after the parse: the seam that lets a test hand it a parse made with an invented
+/// registered set ([`parse_banner_with`]), since a real school's set is data in [`SCHOOLS`]. Moved
+/// verbatim out of `run` by close-out task B2; nothing else changed.
+pub fn run_parsed(
+    vault: &Path,
+    parsed: Parsed,
+    school_key: &str,
+    today: Date,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Result<Report, String> {
+    use crate::commitments as cm;
     let calendar = calendar_key(school_key, &parsed.term);
     let (_, mut warnings) = cm::refresh_series(vault, &[(calendar, parsed.series.clone())], today);
     warnings.extend(parsed.warnings.iter().cloned());
@@ -1167,3 +1181,17 @@ mod parse_rule_tests {
         assert!(series(&p, "60011").is_none());
     }
 }
+
+// Close-out task B2: the apply-and-list tests, one module per concern (see `apply_support`).
+#[cfg(test)]
+mod apply_support;
+#[cfg(test)]
+mod seen_tests;
+#[cfg(test)]
+mod apply_tests;
+#[cfg(test)]
+mod end_tests;
+#[cfg(test)]
+mod kept_tests;
+#[cfg(test)]
+mod block_tests;

@@ -3379,31 +3379,6 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         let _ = std::fs::remove_dir_all(&vault);
     }
 
-    /// Phase-3 D5 end to end: a fetch confirms CS 100 and its lab (R24); the next fetch drops the
-    /// lab and moves the lecture's room; the next `rank` files an end card for the lab (the day
-    /// before the fetch, R2-c) and a change card for the room (R2-g). The notes were created by
-    /// `quinn` (R3-c); the cards come because the p2 judge-once fix counts only a later `set`.
-    #[test]
-    fn a_registrar_refetch_files_an_end_card_and_a_change_card_at_the_next_rank() {
-        let vault = p16_vault("p3refetch");
-        let ctx = WriteContext::new("quinn", "dashboard");
-        let text = include_str!("../tests/fixtures/registrar/banner-ua-registration.json");
-        let first = crate::registrar::run(&vault, text, "ua", Date::constant(2026, 9, 1), &ctx, &mut Journal::new(&vault)).unwrap();
-        assert_eq!((first.confirmed, first.proposed), (2, 2), "CS 100 and its lab; ENGL 101 and ART 110 have no course here");
-        let mut later: serde_json::Value = serde_json::from_str(text).unwrap();
-        later["data"]["registrations"].as_array_mut().unwrap().retain(|r| r["courseReferenceNumber"] != "40002");
-        later["data"]["registrations"][0]["meetingTimes"][0]["room"] = serde_json::json!("102");
-        crate::registrar::run(&vault, &later.to_string(), "ua", P16_MONDAY, &ctx, &mut Journal::new(&vault)).unwrap();
-        rank_p16(&vault, P16_MONDAY, Vec::new());
-        let cards: Vec<String> = checks(&vault, "approvals")
-            .iter()
-            .map(|n| std::fs::read_to_string(vault.join("approvals").join(n)).unwrap())
-            .collect();
-        assert!(cards.iter().any(|t| t.contains("commitments/cs-100-lab.md") && t.contains("2026-09-06")), "{cards:#?}");
-        assert!(cards.iter().any(|t| t.contains("commitments/cs-100.md") && t.contains("Invented Hall 102")), "{cards:#?}");
-        let _ = std::fs::remove_dir_all(&vault);
-    }
-
     #[test]
     fn commitment_checks_take_only_what_the_events_pass_left() {
         let vault = p16_vault("p16budget");
