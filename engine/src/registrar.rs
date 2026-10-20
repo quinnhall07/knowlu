@@ -653,13 +653,26 @@ mod run_tests {
         dir
     }
 
+    /// The vault's human token, as the engine binary resolves it (ruling 11); never a literal.
+    fn ctx(v: &Path) -> WriteContext {
+        WriteContext::new(crate::journal::read_human_actor(v).unwrap(), "dashboard")
+    }
+
+    /// A new vault: `config/actor.yaml` says `student`.
+    fn student_vault(name: &str) -> PathBuf {
+        let dir = vault(name);
+        std::fs::write(dir.join("config").join("actor.yaml"), "human_actor: student
+").unwrap();
+        dir
+    }
+
     fn fetch(v: &Path, text: &str, day: Date) -> Result<Report, String> {
-        run(v, text, "ua", day, &WriteContext::new("quinn", "dashboard"), &mut Journal::new(v))
+        run(v, text, "ua", day, &ctx(v), &mut Journal::new(v))
     }
 
     #[test]
     fn matched_rows_are_confirmed_by_the_student_and_the_rest_proposed() {
-        let v = vault("r24");
+        let v = student_vault("r24");
         let r = fetch(&v, super::tests::FIXTURE, date(2026, 9, 1)).unwrap();
         assert_eq!((r.term.as_str(), r.rows, r.confirmed, r.proposed, r.no_time, r.midnight), ("202640", 4, 2, 2, 1, 1));
         let lab = std::fs::read_to_string(v.join("commitments").join("cs-100-lab.md")).unwrap();
@@ -669,7 +682,7 @@ mod run_tests {
         assert!(lab.contains("Found in your school's class schedule."), "{lab}");
         let journal: String = std::fs::read_dir(v.join("state").join("journal")).unwrap().flatten()
             .map(|e| std::fs::read_to_string(e.path()).unwrap()).collect();
-        assert!(journal.contains("\"actor\": \"quinn\"") && journal.contains("\"via\": \"dashboard\""), "{journal}");
+        assert!(journal.contains("\"actor\": \"student\"") && !journal.contains("quinn") && journal.contains("\"via\": \"dashboard\""), "{journal}");
         assert!(!journal.contains("\"actor\": \"agent:commitments\""), "R3-c: the R24 writes are the student's (spec §3)");
         let again = fetch(&v, super::tests::FIXTURE, date(2026, 9, 2)).unwrap();
         assert_eq!((again.confirmed, again.warnings.iter().filter(|w| w.contains("not a current proposal")).count()), (0, 0));
@@ -679,7 +692,7 @@ mod run_tests {
     #[test]
     fn a_bad_school_or_file_writes_nothing() {
         let v = vault("bad");
-        assert!(run(&v, super::tests::FIXTURE, "zz", date(2026, 9, 1), &WriteContext::new("quinn", "dashboard"), &mut Journal::new(&v)).is_err());
+        assert!(run(&v, super::tests::FIXTURE, "zz", date(2026, 9, 1), &ctx(&v), &mut Journal::new(&v)).is_err());
         assert!(fetch(&v, "<html>sign in</html>", date(2026, 9, 1)).is_err());
         assert!(fetch(&v, "[]", date(2026, 9, 1)).is_err());
         assert!(!v.join("state").exists() && !v.join("commitments").exists());
@@ -713,7 +726,7 @@ mod run_tests {
         let input = crate::commitments::ConfirmInput {
             mine: Vec::new(), not_mine: vec!["registrar:ua:202640-40006".into()], window: None,
         };
-        crate::commitments::confirm(&v, &input, date(2026, 9, 1), &WriteContext::new("quinn", "dashboard"), &mut Journal::new(&v)).unwrap();
+        crate::commitments::confirm(&v, &input, date(2026, 9, 1), &ctx(&v), &mut Journal::new(&v)).unwrap();
         let again = fetch(&v, super::tests::FIXTURE, date(2026, 9, 2)).unwrap();
         assert_eq!((again.confirmed, again.proposed), (0, 1));
         let _ = std::fs::remove_dir_all(&v);
