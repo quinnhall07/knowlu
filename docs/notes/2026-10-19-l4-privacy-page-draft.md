@@ -592,29 +592,52 @@ change.
 
 - **Amazon's one-day expiry** is an S3 lifecycle rule set in the AWS console, not in the repo;
   `sweep.ts:5-9` relies on it. The "about two days" sentence (c29) has no code line. *Owner:* the
-  controller reads the rule (counts and names only) at L9, before the page ships.
-- **A lapsed mailbox may never read `active` again** (EF, read 2026-10-19). Intake marks a mailbox
-  `lapsed` and stamps `lapsed_since` once (`mail-inbound/index.ts:160-161`); the only move to
-  `active` excludes `lapsed` (`:231`), and no route, migration or job clears `lapsed_since`. If so,
-  after one lapse and a renewal the Gmail pass is due at every slot (`mail/slot.rs:51-53, 61-62`),
-  its window looks 30 days back on every run (`mail/recover.rs:111-112`), and the hourly delivery
-  check never goes to that mailbox again (`mail-canary/handler.ts:50`, `SENDABLE` is `active,
-  quiet`). The §3.8 sentence is worded so it stays true either way. *Owner:* the email lane's
-  controller, as a code question for that branch (this note does not touch it); if the code changes
-  to clear the lapse on renewal, the page sentence still holds.
+  controller reads the rule (counts and names only) at L9, before the page ships. *Status
+  2026-10-20: still open.*
+- **A lapsed mailbox may never read `active` again: RESOLVED on the merged tree** (L4 T1, 2026-10-20).
+  The lapsed-mailbox fix (migration `20261019000100_mail_last_lapsed_at`, ledger rows 133, 135, 143)
+  makes the old reading untrue. What the code says now: intake moves a mailbox into `lapsed` and keeps
+  an earlier `lapsed_since` (`mail-inbound/store.ts:97-113`); the next entitled `mail-pull` or
+  `gmail-read` moves `lapsed` to `quiet` (a canary ever arrived) or `pending`
+  (`_shared/mail_unlapse.ts:7-9`: "never `active`, since nothing proves the forward survived the
+  lapse"), and a canary through the current token lifts it to `active` (`mail-inbound/store.ts:183-192`);
+  `lapsed_since` "stays until the device reports the gap covered" (`mail-pull/handler.ts:32-33`), and
+  only that report clears it (`mail/store.ts:323-328`), which the app sends after a whole pass
+  (`mail/slot.rs:71-80, 253-260`). So the Gmail pass is due at every slot only until it covers the gap,
+  the hourly delivery check reaches the mailbox again once it reads `quiet` (`mail-canary/handler.ts:50`,
+  `SENDABLE` is `active, quiet`), and a lapse still reaches back at most 30 days
+  (`mail/recover.rs:91, 126`). The §3.8 sentence ("or up to 30 days back after a lapse") is true
+  either way and needs no change. `last_lapsed_at` is a timestamp on the mailbox row, which "the facts
+  that show forwarding works" covers (ruled: no new data class). *Owner:* none; closed.
 - **Windows encrypting the kept sign-ins' cookies** (c4, c9) is WebView2's behaviour, not a Knowlu
   line; the grades and email specs assert it. No test proves it. *Owner:* L4.9's reviewer decides
-  whether the sentence needs a source note.
+  whether the sentence needs a source note. *Status 2026-10-20: still open.*
 - **`EF` line numbers** were read from the email-forwarding worktree at commit `5f71623`
-  (`5f716238753d1a9ddb02a692e40a3b538d649b35`), with uncommitted changes then in `app/src/mail.rs`,
-  `app/src/mail/{backfill,live,runner}.rs`, `app/src/debug_port.rs` and `app/src/main.rs`; of
-  those, only `mail/backfill.rs` is cited (c6, c33, c42). They will move; L4.0 re-reads them on
-  `main` and diffs from `5f71623`.
+  (`5f716238753d1a9ddb02a692e40a3b538d649b35`) with uncommitted changes then in `mail/backfill.rs` among
+  the cited files. **Re-read on the merged tree 2026-10-20 (L4 T1; lane branch cut from `ba7eb0b`):**
+  every cited line was mapped through `git diff -U0 5f71623 HEAD` and read at its new number; moved
+  ones are updated in Appendix A. Still open: nothing for the code. The email spec's §7 citations had
+  to be re-found by content (§7 is `:967-1012`).
 - **The registrar code** (#19) is unmerged; c18's "at schools Knowlu supports" holds with zero
-  supported schools until it merges, and was not checked against #19's branch.
+  supported schools until it merges, and was not checked against #19's branch. *Status 2026-10-20:
+  still unmerged (`app/src` has no registrar module).*
 - **The re-consent route's shape** (L4.4) is a design choice for the L4 plan; nothing on `main`
-  returns a recorded version today.
+  returns a recorded version today. *Status 2026-10-20: still open; T2 settles it.*
 - **Unchanged sentences** (`⟨=⟩`) were true on 2026-09-24 and were not re-read line by line here.
+  *Status 2026-10-20: still so.*
+- **Facts T1 settled for later tasks (2026-10-20).** (a) *Scheduled jobs that read an account's mail*
+  (the Q4 (b) tripwire's list), all in `20261002000200_mail.sql`: `knowlu-mail-process` (`:605`, every
+  minute, the `mail-process` function), `knowlu-mail-canary` (`:631`, hourly at :11, `mail-canary`, which
+  reads `mail_addresses` to send the delivery check) and `knowlu-mail-sweep` (`:657`, daily 07:47, the
+  `mail-process` function in `sweep` mode). `mail-inbound` and `mail-pull` run on a delivery and a
+  device call, not on a schedule. No other cron reads mail text: `knowlu-promote-rules`
+  (`20260911000500_rule_promotion_fix.sql:251`) reads decision records, which keep a sender (c40), and
+  the rest (billing, tombstone, issue, Google-state, Gmail-queue and `gmail_seen` sweeps, `sync_prune`)
+  read none. (b) *Cascades:* `judgments.account_id` and `usage_daily.account_id` each `references
+  public.accounts(id) on delete cascade` (`20260911000100_judgment_service.sql:69` and `:153`).
+  (c) *Models:* `20261020000100_mail_max_tokens_repin.sql` moves only the two mail rows' `max_tokens`
+  (1280, 1536); the model, host, route and price are as `mail.sql:343-360` pinned them, so c23, c27 and
+  c28 stand.
 
 ## 7. Fidelity ledger
 
@@ -645,9 +668,16 @@ change.
 
 `main` = the main checkout at `C:\Users\danie\GitHub\knowlu`, read 2026-10-19. `EF` = the
 email-forwarding branch, read (never written) in its worktree on 2026-10-19 at `5f71623` plus
-the uncommitted changes §6 lists (only `mail/backfill.rs` among the cited files); L4.0 re-reads
-every `EF` line on `main` after the merge and diffs from `5f71623`. "No code line" means
-the claim rests on a spec or on platform behaviour, said so in §6.
+the uncommitted changes §6 lists (only `mail/backfill.rs` among the cited files). **Re-read
+2026-10-20 (L4 T1) on the lane branch, cut from `ba7eb0b` (after the email merge `6fd44ec`):**
+every `EF` line below now names a line of that tree, found by mapping each old number through
+`git diff -U0 5f71623 HEAD` and reading the code at the new number; a `main` row was re-read
+where the merge touched its file (`index.html`, `gmail-read/handler.ts`, `judge_prompts.ts`,
+`account.rs`) and left alone where the file is the same on both sides. The email spec's §7
+citations were re-found by content (the old numbers no longer land in §7, which is `:967-1012`). A claim
+that moved has its new numbers in place; the one claim the merged code no longer makes is in
+§6 (the lapsed mailbox). "No code line" means the claim rests on a spec or on platform
+behaviour, said so in §6.
 
 | Tag | Claim | Evidence |
 |---|---|---|
@@ -655,19 +685,19 @@ the claim rests on a spec or on platform behaviour, said so in §6.
 | c2 | only the vault is copied; the rest stays | main `app/src/grades.rs:271-272` (kept session never synced); EF `app/src/mail_session.rs:1-12` (profiles under the data folder) |
 | c3 | commitment questions and the series list stay local | main `engine/src/commitments.rs:27` (`LOCAL_CARD_KINDS`); the tripwires CLAUDE.md names (`sync_keeps_every_local_card_kind_local`) |
 | c4 | Blackboard session kept in a browser profile | main `app/src/grades.rs:263-275, 584`; encryption: no code line (§6) |
-| c5 | Forget Blackboard sign-in deletes it | main `app/static/index.html:203`; `app/src/grades.rs:285-294` |
-| c6 | a saved sign-in per mailbox, its uses; missed mail for Gmail only | EF `app/src/mail_session.rs:4-5`; `app/src/mail/slot.rs:1-18`; `app/src/mail/backfill.rs:9-14`; Gmail only: `mail/slot.rs:171-176` (returns before reconcile and recover when `backfill_held_for_c3`), `mail/backfill.rs:16-18` |
-| c7 | on by default; deleted on off, disconnect, sign-out, deletion | EF `mail_session.rs:83`; `mail/commands.rs:174-187` (off), `:333` (disconnect); `account.rs:668-684` (sign-out), `:1274-1283` (deletion) |
+| c5 | Forget Blackboard sign-in deletes it | main `app/static/index.html:212` (the "Forget Blackboard sign-in" button; was `:203` before the email merge); `app/src/grades.rs:285-294` |
+| c6 | a saved sign-in per mailbox, its uses; missed mail for Gmail only | EF `app/src/mail_session.rs:4-5`; `app/src/mail/slot.rs:1-18`; `app/src/mail/backfill.rs:9-14`; Gmail only: `mail/slot.rs:184-189` (returns before reconcile and recover when `backfill_held_for_c3`), `mail/backfill.rs:16-18` |
+| c7 | on by default; deleted on off, disconnect, sign-out, deletion | EF `mail_session.rs:88-89` (the `keep_session` field), `:234` (`keep_session: true`); `mail/commands.rs:176-192` (off: `forget_all`, `:189`), `:346-350` (disconnect: `forget`); `account.rs:668-684` (sign-out), `:1274-1283` (deletion) |
 | c8 | no password kept; never leaves | main `grades.rs:271-272`; EF `mail_session.rs:4-9`; no upload path names either folder |
-| c9 | cookies encrypted, cache not | email spec §7 (`2026-09-30-email-forwarding-design.md:897-899`); no code line (§6) |
+| c9 | cookies encrypted, cache not | email spec §7 (`2026-09-30-email-forwarding-design.md:1001-1003`; was cited `:897-899`); no code line (§6) |
 | c10 | [L5] syllabus files stay local | L5 spec §6.1 item 2; no code yet (Q2) |
-| c11 | both sign-ins on everywhere, for now | main `app/src/grades.rs:51` (`Suspended`); cloud design `:683`, `:740-741`; EF `mail_session.rs:83` (no school check) |
+| c11 | both sign-ins on everywhere, for now | main `app/src/grades.rs:51` (`Suspended`); cloud design `:683`, `:740-741`; EF `mail_session.rs:88-89, 234` (no school check) |
 | c12 | decided again at 20 paying users | cloud design `:683` (review trigger); policy, no code line |
 | c13 | commitments and grades sync | main `engine/src/ids.rs:24` (`NOTE_FOLDERS` ends `commitments`, `grades`); `engine/src/sync.rs:268` |
 | c14 | the Google connection's fields | main `cloud/supabase/migrations/20260911000200_google.sql:7-25` (`google_sub`, `secret_id` into Vault, `email_hint`, `scopes`, `connected_at`, `last_read_at`, `status`) |
-| c15 | forwarding sends everything, whole | EF `mail.sql:41-57` (one row per mailbox, provider); email spec §7 `:865-866` |
-| c16 | forwarding address encrypted; mailbox address and forwarding facts kept; all go on Disconnect | EF `mail.sql:46-54`, `:55-56` (`forward_hint`, e.g. the M365 tenant id), the row's delivery and arrival timestamps and counters (L4.0 lists the columns), `:371-384`; `cloud/supabase/functions/mail-canary/query.ts:21` (checks go to the mailbox address) |
-| c17 | the record keeps who it was from | main `cloud/supabase/functions/_shared/judge_pipeline.ts:81-92`; `_shared/judge_rules.ts:35-37, 65-79`; `gmail-read/handler.ts:329, 347` |
+| c15 | forwarding sends everything, whole | EF `mail.sql:41-57` (one row per mailbox, provider); email spec §7 `:969-970` (was cited `:865-866`) |
+| c16 | forwarding address encrypted; mailbox address and forwarding facts kept; all go on Disconnect | EF `mail.sql:46-54`, `:55-56` (`forward_hint`, e.g. the M365 tenant id), the row's other columns, all in `mail.sql:42-78` and kept until Disconnect: `status`, `lapsed_since`, `reenabled_at`, `confirm_until`, `backfill_since`, the timestamps `last_received_at`, `last_canary_sent_at`, `last_canary_ok_at`, the counters `canaries_today`, `unbound`, `unauthenticated`, `expired`, `unbound_own_since_live`, `unbound_foreign_since_live`, and `last_lapsed_at` (added by `20261019000100_mail_last_lapsed_at.sql:13`, a timestamp the export lists, `account/mail.ts:111`); `:371-384`; `cloud/supabase/functions/mail-canary/query.ts:21` (checks go to the mailbox address) |
+| c17 | the record keeps who it was from | main `cloud/supabase/functions/_shared/judge_pipeline.ts:81-92`; `_shared/judge_rules.ts:35-37, 65-79`; `gmail-read/handler.ts:380, 398` |
 | c18 | discard-everything window; [#19] class schedule | main `app/src/lms_link.rs:17-44, 177-180`; `docs/plans/2026-10-18-p3-registrar-close-out-plan.md:92, 855` |
 | c19 | the one exception | main `app/src/grades.rs:263-275` |
 | c20 | task prompt bounds | main `_shared/judge_prompts.ts:15-17, 163-173` |
@@ -683,28 +713,28 @@ the claim rests on a spec or on platform behaviour, said so in §6.
 | c30 | the delivery provider sends the checks | EF `mail-canary/index.ts:2-6` (Resend, `billing-jobs`' key) |
 | c31 | Sent copies to Trash | EF `app/assets/mail/gmail/sent_cleanup.js:1-17` |
 | c31a | Gmail disconnect deletes; record stays; one grant | main `migrations/20260929000200_gmail_disconnect_purge.sql:12-18, 33-38`; `google-connect/disconnect.ts:4-7`; `google-connect/handler.ts:95-129` |
-| c32a | a forwarded Gmail address is read by forwarding only | EF `gmail-read/handler.ts:7-8, 195-199, 295-301` |
-| c33 | Microsoft 365 backfill and recover held; mail during a forwarding gap not brought in | EF `app/src/mail_steps.rs:80-89`; `mail/backfill.rs:16-18, 70-82`; `mail/slot.rs:171-176` (returns before reconcile and recover) |
+| c32a | a forwarded Gmail address is read by forwarding only | EF `gmail-read/handler.ts:7-9, 196-200, 299-309` |
+| c33 | Microsoft 365 backfill and recover held; mail during a forwarding gap not brought in | EF `app/src/mail_steps.rs:86-95`; `mail/backfill.rs:16-18, 70-82`; `mail/slot.rs:184-189` (returns before reconcile and recover) |
 | c34 | read in memory, text never written | EF `mail-process/handler.ts:32-34` |
-| c34a | lapsed: deleted unread | EF `mail-inbound/handler.ts:12-14, 110, 466-471` (no entitled mailbox left: deleted unread, no `mail_seen` row); entitled means `active` or `trialing` (`_shared/entitlement.ts:19-22`; `past_due`, `canceled` and `none` are not) |
+| c34a | lapsed: deleted unread | EF `mail-inbound/handler.ts:12-15, 111-114, 470-475` (no entitled mailbox left: deleted unread, no `mail_seen` row); entitled means `active` or `trialing` (`_shared/entitlement.ts:19-22`; `past_due`, `canceled` and `none` are not) |
 | c35 | the screen before any model ("such as": not the full list) | EF `mail-process/handler.ts:10-16` (also screens Microsoft bulk score >= 7, the student's own mail outside a batch, and unaligned live mail, which intake deletes) |
 | c35a | mail recognised by shape read by rules, no model | EF `mail-process/handler.ts:17-20` (template-only claims) |
 | c36 | what is kept, and for how long | EF `mail.sql:159-175`; `sweep.ts:12-13, 80`; `_shared/judge_validate.ts:197-199` (140-character quote) |
-| c37 | attachments never opened, backfill and recover exception | EF `mail-process/handler.ts:8-9`; the exception: `mail-inbound/handler.ts:23-25, 429-455` (a batch send's `message/rfc822` attachments each become one work item of the batch's phase, backfill or recover; the outer text and every other attachment dropped unparsed) and `_shared/mail_bind.ts:476` (a backfilled or recovered original); email spec §7 `:880` |
-| c38 | headers in Amazon's notice, never logged | email spec §7 `:879`; `mail-inbound` not read here (L4.0) |
+| c37 | attachments never opened, backfill and recover exception | EF `mail-process/handler.ts:8-9`; the exception: `mail-inbound/handler.ts:24-26, 433-459` (a batch send's `message/rfc822` attachments each become one work item of the batch's phase, backfill or recover; the outer text and every other attachment dropped unparsed) and `_shared/mail_bind.ts:476` (a backfilled or recovered original); email spec §7 `:984` (was cited `:880`) |
+| c38 | headers in Amazon's notice, never logged | email spec §7 `:971, 983` (was cited `:879`); `mail-inbound/handler.ts:208` (the one `log`, `console.log` of a fixed phrase; every call at `:195-196, 280-510` is a fixed phrase or a count, none takes a header; `confirm.ts:197-209` logs a URL's shape, `hopShape`) |
 | c39 | keyed fingerprints, 180 days | EF `mail.sql:114-128`; `sweep.ts:79` |
 | c40 | decision records kept until account deletion; sender in Gmail's | main `judge_rules.ts:35-37, 75-76`; `gmail_disconnect_purge.sql:12-14`; EF `mail.sql:211-213` |
-| c41 | forwarding on at setup, off at Disconnect | EF `app/assets/mail/gmail/forwarding_set.js`; `mail/commands.rs:290-313, 341-392` |
+| c41 | forwarding on at setup, off at Disconnect | EF `app/assets/mail/gmail/forwarding_set.js`; `mail/commands.rs:294-317, 350-401` (the off half) |
 | c42 | older Gmail mail, 120 days, as attachments | EF `mail/backfill.rs:1-5`; `gmail/forward.js:1-3` |
-| c42a | Gmail recover: about daily, the last three days; further back after forwarding was off (to last known on, at most 120 days) or a lapse (at most 30 days); lapsed mail deleted unread; forwarded and Sent copies trashed the same way | EF cadence: `mail/slot.rs:43-53, 60-68` (`Daily`, a 20-hour gap, every `active` mailbox; `quiet`, `off`, `lapsed` due at once); `mail/slot.rs:177, 186-191` (phase `Recover`, `lapsed_since`, last known on); window: `mail/recover.rs:76-80, 106-118`, `app/src/mail_steps.rs:35` (`BACKFILL_DAYS` 120); lapsed mail: `mail-inbound/handler.ts:12-14, 110, 466-471`; the pass waits for entitlement: `app/src/scheduler.rs:530-532`; "the same way": `mail/recover.rs:1-5, 14-18` (one routine for backfill and recover, forwards as attachments, Sent copies removed), `:1121-1132, 1404, 1484` (the Inbox look), `:1502` (`sent_cleanup.js`); `mail.sql:83-88` (`mail_batches` phase `recover`). The wording is an upper bound on purpose: nothing on EF moves a mailbox out of `lapsed` or clears `lapsed_since` (`mail-inbound/index.ts:160-161` set them; `:231` reads `active` only from `pending, confirmed, quiet, blocked, off`; no migration or route clears either), so after a lapse every run is due and looks 30 days back (§6) |
-| c43 | the Inbox look, stop on a report | EF `gmail/bounce.js:1-19`; `gmail/forward.js:14-15` |
-| c44 | turned back on and announced; never if turned off; never "elsewhere" | EF `mail/slot.rs:11-17, 307-320`; `app/src/mail.rs:769-782` |
-| c45 | nothing else changed or sent; no one else (the list above it includes recover, c42a) | email spec §7 `:893-895`; EF `gmail/sent_cleanup.js:10-12`, `gmail/forward.js:21-29` (one recipient, Knowlu's) |
+| c42a | Gmail recover: about daily, the last three days; further back after forwarding was off (to last known on, at most 120 days) or a lapse (at most 30 days); lapsed mail deleted unread; forwarded and Sent copies trashed the same way | EF cadence: `mail/slot.rs:43-53, 60-68` (`Daily`, a 20-hour gap, every `active` mailbox; `quiet`, `off`, `lapsed` due at once); `mail/slot.rs:190` (last known on), `:202-212` (`lapsed_since`, the window, phase `Recover` at `:211`); window: `mail/recover.rs:87-91` (`WINDOW_DAYS` 3, `LAPSE_DAYS` 30), `:120-132` (`window`: `since.min(l.max(now - LAPSE_DAYS * DAY))`, so a lapse reaches back at most 30 days, and `k.max(now - BACKFILL_DAYS * DAY)`), `app/src/mail_steps.rs:35` (`BACKFILL_DAYS` 120); lapsed mail: `mail-inbound/handler.ts:12-15, 111-114, 470-475` (deleted unread); the pass waits for entitlement: `app/src/scheduler.rs:530-532`; "the same way": `mail/recover.rs:1-5, 14-18` (one routine for backfill and recover, forwards as attachments, Sent copies removed), `:1170-1181, 1484, 1580` (the Inbox look), `:1606` (`sent_cleanup.js`); `mail.sql:83-88` (`mail_batches` phase `recover`). **The lapse fix (read 2026-10-20, ledger rows 133, 135, 143):** a lapsed mailbox now leaves `lapsed` on the next entitled `mail-pull` or `gmail-read` (`_shared/mail_unlapse.ts:17-33`: `quiet` if a canary ever arrived, else `pending`; `mail-pull/handler.ts:29-33, 260-262`; `gmail-read/handler.ts:299-307`), or on a canary through the current token (`mail-inbound/store.ts:183-192` sets `active`, `lapsed` included), and `lapsed_since` is cleared only by the device's `covered` report (`mail/routes.ts:28-31`; `mail/store.ts:323-328`: `lapsed_since` and `last_lapsed_at` must both still match and the status be neither `lapsed` nor `revoked`). The device sends `covered` after a whole pass over a mailbox that is not `lapsed` whose window began at or before the later of `lapsed_since` and 30 days back (`mail/slot.rs:71-80`, `:253-260`). The wording stays an upper bound on purpose and is true either way: a lapse still reaches back at most 30 days (`recover.rs:126`), and after `covered` the window is the usual three days again. `last_lapsed_at` is one more timestamp on the mailbox row (`20261019000100_mail_last_lapsed_at.sql:13`): it falls under "the facts that show forwarding works" (c16), no new data class |
+| c43 | the Inbox look, stop on a report | EF `gmail/bounce.js:1-19`; `gmail/forward.js:15-16` |
+| c44 | turned back on and announced; never if turned off; never "elsewhere" | EF `mail/slot.rs:11-17, 341-354`; `app/src/mail.rs:780-793` |
+| c45 | nothing else changed or sent; no one else (the list above it includes recover, c42a) | email spec §7 `:994-999` (was cited `:893-895`); EF `gmail/sent_cleanup.js:10-12`, `gmail/forward.js:23-30, 339-342` (one recipient, Knowlu's) |
 | c46 | the delivery check | EF `mail.sql:631-655` (hourly job); `mail-canary/index.ts:2-6` |
 | c47 | no forwarded mail in telemetry | EF `mail.sql:211-213` (telemetry's kinds not widened) |
 | c48 | not trained on, not pooled | EF `mail.sql:205-224, 249, 281, 299` |
 | c49 | Gmail retention | main `migrations/20260911000900_final_review_fixes.sql:48, 72`; `gmail_disconnect_purge.sql:12-14, 33-34` |
 | c50 | Disconnect deletes all but the decisions | EF `mail.sql:371-384` |
-| c51 | export includes mailboxes and undelivered findings | EF `cloud/supabase/functions/account/index.ts:68-70` |
+| c51 | export includes mailboxes and undelivered findings | EF `cloud/supabase/functions/account/index.ts:68-70`; the mailbox columns the export lists: `account/mail.ts` (`last_lapsed_at` at `:111`) |
 | c52 | Delete turns forwarding off first, never blocks | EF `app/src/account.rs:1378-1416`; email spec §4.13 |
 | c53 | Delete removes both kept sign-ins | EF `account.rs:1274-1284` (the data folder holds `lms-session`: main `grades.rs:271-273`) |
