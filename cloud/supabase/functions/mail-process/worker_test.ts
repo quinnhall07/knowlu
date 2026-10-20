@@ -14,6 +14,8 @@ import { s3Client } from "../_shared/s3.ts";
 import {
   type ClaimsRow,
   handle,
+  LAPSED_HOLD_MS,
+  LEASE_MS,
   type Mailbox,
   type ProcessConfig,
   type ProcessDeps,
@@ -226,7 +228,28 @@ class FakeStore implements ProcessStore, SweepStore {
     this.counters[`${addressId}:${counter}`] = (this.counters[`${addressId}:${counter}`] ?? 0) + 1;
     return Promise.resolve();
   }
+  /** The accounts `active` or `trialing`; every other account reads as lapsed. */
+  entitledAccounts = new Set(["acct-1"]);
+  /** Each `entitled` read, by account, in order; a set error makes every read throw. */
+  entitlementReads: string[] = [];
+  entitlementError: Error | null = null;
+  /** Each `markLapsed` call, `[address, since]`, in order; a set error makes every call throw. */
+  marks: Array<[string, string]> = [];
+  markError: Error | null = null;
+  /** Each `wait`, `[id, until, attempts]`, in order. */
+  waits: Array<[string, string, number]> = [];
+  entitled(accountId: string) {
+    this.entitlementReads.push(accountId);
+    if (this.entitlementError !== null) return Promise.reject(this.entitlementError);
+    return Promise.resolve(this.entitledAccounts.has(accountId));
+  }
+  markLapsed(addressId: string, sinceIso: string) {
+    this.marks.push([addressId, sinceIso]);
+    if (this.markError !== null) return Promise.reject(this.markError);
+    return Promise.resolve(true);
+  }
   wait(workId: string, untilIso: string, attempts: number) {
+    this.waits.push([workId, untilIso, attempts]);
     const row = this.work.find((w) => w.id === workId);
     if (row !== undefined) Object.assign(row, { nextAttemptAt: untilIso, attempts });
     return Promise.resolve();
@@ -347,6 +370,8 @@ interface World {
   store: FakeStore;
   model: SpyModel;
   bucket: Map<string, Uint8Array>;
+  /** The S3 GETs the fake bucket served. */
+  gets: number;
   logs: string[];
   deps: ProcessDeps;
   /** Put `raw` under `work/` as intake would: the object, its `mail_work` row and its `mail_seen` row. */
@@ -362,10 +387,12 @@ async function withWorld(fn: (w: World) => Promise<void>): Promise<void> {
   const store = new FakeStore(clock);
   const model = new SpyModel(events);
   const bucket = new Map<string, Uint8Array>();
+  const w = { clock, events, db, store, model, bucket, gets: 0, logs: [] as string[] } as World;
   const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen: () => {} }, async (req) => {
     const key = decodeURIComponent(new URL(req.url).pathname.slice(1));
     const body = new Uint8Array(await req.arrayBuffer());
     if (req.method === "GET") {
+      w.gets++;
       const got = bucket.get(key);
       return got ? new Response(new Uint8Array(got)) : new Response("<Error/>", { status: 404 });
     }
@@ -388,7 +415,6 @@ async function withWorld(fn: (w: World) => Promise<void>): Promise<void> {
     { fetch: local, now: () => new Date(clock.now) },
   );
   const now = () => clock.now;
-  const w = { clock, events, db, store, model, bucket, logs: [] as string[] } as World;
   w.deps = {
     store,
     s3,
@@ -964,4 +990,185 @@ Deno.test("allowance_usd_is_the_dollars_charge_allowance_opens_with", async () =
   const opened = /allowance_usd = case when .*? then ([\d.]+) else allowance_usd end/.exec(sql);
   assert(opened !== null, "charge_allowance sets allowance_usd when it opens one");
   assertEquals(Number(opened[1]), ALLOWANCE_USD);
+});
+
+// ---------------------------------------------------------------- (b): the entitlement gate and the hold
+// (follow-ups plan T3; Quinn's Q1, Q2 (a) and Q3, 2026-10-20)
+
+const HOUR = 3_600_000;
+/** The account is neither `active` nor `trialing`. */
+const lapse = (w: World) => w.store.entitledAccounts.delete("acct-1");
+const rows = (w: World) => w.store.work.map((r) => [r.id, r.attempts, r.nextAttemptAt]);
+
+Deno.test("an_unentitled_accounts_item_makes_no_model_call_and_no_charge", async () => {
+  await withWorld(async (w) => {
+    lapse(w);
+    w.deps.rules = { lookup: () => (w.events.push("rules"), Promise.resolve(null)) };
+    w.put(mail(), BACKFILL);
+    w.put(mail());
+    w.put(mail(), { phase: "recover", batchId: "b-2" });
+    const res = await w.run();
+    assertEquals(res.status, 200);
+    // No charge_allowance, charge_call, enforce_budget or record_tokens, no rules read and no model call.
+    assertEquals(w.events, []);
+    assertEquals([w.model.asked.length, w.db.judgments.length, w.store.claims.length], [0, 0, 0]);
+    assertEquals((await res.json()).lapsed, 3);
+  });
+});
+
+Deno.test("an_unentitled_accounts_item_is_held_an_hour_unread_with_its_attempts_unchanged", async () => {
+  await withWorld(async (w) => {
+    lapse(w);
+    const item = w.put(mail(), { attempts: 1 });
+    const res = await w.run();
+    assertEquals((await res.json()).lapsed, 1);
+    assertEquals(LAPSED_HOLD_MS, HOUR);
+    assertEquals(w.gets, 0, "the object is never read");
+    assertEquals(w.store.waits, [[item.id, iso(T0 + HOUR), 1]]);
+    // The row, its object and its seen row all stay: nothing is queued, finished, counted or expired.
+    assertEquals(rows(w), [[item.id, 1, iso(T0 + HOUR)]]);
+    assertEquals([objects(w), w.store.claims, w.store.counters], [[item.s3Key], [], {}]);
+    assert(w.store.seen.has(`acct-1|h-${item.id}`));
+    assert(w.logs.some((l) => l.endsWith("mail-process: account not entitled, held")), w.logs.join("\n"));
+    // Inside the hour a run takes nothing.
+    w.store.waits.length = 0;
+    w.clock.now = T0 + 30 * 60_000;
+    await w.run();
+    assertEquals([w.store.waits, w.gets, w.events], [[], 0, []]);
+  });
+});
+
+Deno.test("a_run_marks_each_held_mailbox_once_from_its_oldest_held_arrival", async () => {
+  await withWorld(async (w) => {
+    lapse(w);
+    const a1 = w.put(mail(), { arrivedAt: iso(T0 - 5 * HOUR) });
+    w.put(mail(), { arrivedAt: iso(T0 - 2 * HOUR) });
+    const b1 = w.put(mail(), { addressId: "addr-2", arrivedAt: iso(T0 - 3 * HOUR) });
+    // Whatever order the read answers in, the mark is from the smallest arrival, never the first seen.
+    const due = w.store.due.bind(w.store);
+    w.store.due = async (now: string, limit: number) => (await due(now, limit)).reverse();
+    const res = await w.run();
+    assertEquals((await res.json()).lapsed, 3);
+    assertEquals([...w.store.marks].sort(), [["addr-1", a1.arrivedAt], ["addr-2", b1.arrivedAt]]);
+  });
+});
+
+Deno.test("a_failed_mark_leaves_the_holds_and_counts_failed", async () => {
+  await withWorld(async (w) => {
+    lapse(w);
+    w.store.markError = new Error("store mark lapsed 503");
+    const item = w.put(mail());
+    const res = await w.run();
+    assertEquals(res.status, 200);
+    const counts = await res.json();
+    assertEquals([counts.lapsed, counts.failed], [1, 1]);
+    assertEquals(rows(w), [[item.id, 0, iso(T0 + HOUR)]]);
+    assert(w.logs.some((l) => l.endsWith("mail-process: lapsed mark failed, holds kept")), w.logs.join("\n"));
+    // The next run that holds it marks again.
+    w.store.markError = null;
+    w.store.marks.length = 0;
+    w.clock.now = T0 + HOUR;
+    await w.run();
+    assertEquals(w.store.marks, [["addr-1", item.arrivedAt]]);
+  });
+});
+
+Deno.test("a_run_that_fails_after_a_hold_still_marks", async () => {
+  await withWorld(async (w) => {
+    lapse(w);
+    const item = w.put(mail());
+    // Round 1 holds the item; round 2's read fails, so the run answers 500.
+    const due = w.store.due.bind(w.store);
+    let rounds = 0;
+    w.store.due = (now: string, limit: number) =>
+      ++rounds === 1 ? due(now, limit) : Promise.reject(new Error("store due 503"));
+    assertEquals((await w.run()).status, 500);
+    assertEquals(rounds, 2);
+    assertEquals(w.store.marks, [["addr-1", item.arrivedAt]]);
+  });
+});
+
+Deno.test("a_renewed_account_is_processed_at_the_next_run_after_the_hold", async () => {
+  await withWorld(async (w) => {
+    lapse(w);
+    w.model.script = () => new Error("upstream 503");
+    const item = w.put(mail());
+    await w.run();
+    assertEquals([modelCalls(w), w.events, rows(w)], [0, [], [[item.id, 0, iso(T0 + HOUR)]]]);
+    // Renewed inside the hour: when the hold ends the item runs the model path once, charged as today.
+    w.store.entitledAccounts.add("acct-1");
+    w.clock.now = T0 + LAPSED_HOLD_MS;
+    const res = await w.run();
+    assertEquals((await res.json()).model, 1);
+    assertEquals(w.events, ["charge_call", "enforce_budget", "model", "refund_call"]);
+    // Its attempts move as today: the hold spent none, this failed attempt spends one.
+    assertEquals(rows(w), [[item.id, 1, midnight(w.clock.now)]]);
+    // The next UTC day it is answered, queued and deleted.
+    w.model.script = () => ({ claims: [changeClaim()] });
+    w.clock.now = Date.parse(midnight(w.clock.now)) + 60_000;
+    await w.run();
+    assertEquals([work(w), objects(w), w.store.claims.length], [[], [], 1]);
+  });
+});
+
+Deno.test("a_held_item_is_expired_by_the_sweep_and_loses_its_seen_row", async () => {
+  await withWorld(async (w) => {
+    lapse(w);
+    const item = w.put(mail());
+    // Held hour by hour through the next UTC day: never read, charged or attempted.
+    const dayTwo = Date.parse(midnight(T0)) + DAY;
+    for (let t = T0; t < dayTwo; t += LAPSED_HOLD_MS) {
+      w.clock.now = t;
+      await w.run();
+    }
+    assertEquals([w.gets, w.events, rows(w).map((r) => r[1])], [0, [], [0]]);
+    assert(w.store.seen.has(`acct-1|h-${item.id}`));
+    // Its object's lifecycle has run by the start of day two: the sweep expires it as D8 does.
+    w.clock.now = dayTwo;
+    const res = await w.run(true);
+    assertEquals((await res.json()).expired, 1);
+    assertEquals([work(w), objects(w), w.store.counters], [[], [], { "addr-1:expired": 1 }]);
+    assertEquals(w.store.seen.has(`acct-1|h-${item.id}`), false, "a later recover is accepted");
+  });
+});
+
+Deno.test("entitlement_is_read_once_per_account_per_run", async () => {
+  await withWorld(async (w) => {
+    w.put(mail());
+    w.put(mail(), { phase: "recover", batchId: "b-2" });
+    w.put(mail(), { accountId: "acct-2", addressId: "addr-2" });
+    w.put(mail(), { accountId: "acct-2", addressId: "addr-2" });
+    const counts = await (await w.run()).json();
+    assertEquals(w.store.entitlementReads, ["acct-1", "acct-2"]);
+    assertEquals([counts.model, counts.lapsed], [2, 2]);
+    // An answer is never carried past its run: the held account is read again at the next.
+    w.store.entitlementReads.length = 0;
+    w.clock.now = T0 + LAPSED_HOLD_MS;
+    await w.run();
+    assertEquals(w.store.entitlementReads, ["acct-2"]);
+  });
+});
+
+Deno.test("an_entitlement_read_failure_charges_nothing_spends_no_attempt_and_leaves_the_item", async () => {
+  await withWorld(async (w) => {
+    w.store.entitlementError = new Error("store select entitlements 503");
+    const a = w.put(mail());
+    const b = w.put(mail());
+    const res = await w.run();
+    assertEquals(res.status, 200);
+    const counts = await res.json();
+    assertEquals([counts.failed, counts.lapsed, counts.model], [2, 0, 0]);
+    // A failed read is not kept: the second item reads again.
+    assertEquals(w.store.entitlementReads, ["acct-1", "acct-1"]);
+    assertEquals([w.events, w.gets, w.store.waits, w.store.marks], [[], 0, [], []]);
+    // Each item keeps its attempts and waits out its lease, its object kept.
+    const leased = iso(T0 + LEASE_MS);
+    assertEquals(rows(w), [[a.id, 0, leased], [b.id, 0, leased]]);
+    assertEquals(objects(w), [a.s3Key, b.s3Key]);
+    // Once the read answers and the lease has run, both are processed as usual.
+    w.store.entitlementError = null;
+    w.clock.now = T0 + LEASE_MS;
+    await w.run();
+    assertEquals(modelCalls(w), 2);
+  });
 });
