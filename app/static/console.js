@@ -493,7 +493,7 @@
       bits.push('<span class="' + (t.last_slot.ok && !why ? "calm" : "amber") + '">' + h(body) + "</span>");
     }
     if (t.scheduler && t.scheduler.mode === "app") { bits.push('<span class="' + (t.scheduler.paused ? "amber" : "calm") + '">scheduler ' + (t.scheduler.paused ? "paused" : "on") + "</span>"); }
-    EL("syncline").innerHTML = bits.join(" · ") + ' <button class="b" type="button" data-sync>sync now</button> <button class="b" type="button" data-backup>back up now</button>';
+    EL("syncline").innerHTML = bits.join(" · ") + ' <button class="b" type="button" data-sync' + owedAttrs() + '>sync now</button> <button class="b" type="button" data-backup>back up now</button>';
   }
 
   // Task 15: the Runs nav entry, made real — every expected slot, every run in the last 48h
@@ -2176,7 +2176,7 @@
     var m = Math.max(1, Math.round(secs / 60));
     return m >= 60 ? " · about " + Math.round(m / 60) + " h left" : " · about " + m + " min left";
   }
-  function mpBtn(label, choice, extra) { return '<button class="b' + (extra || "") + '" data-mp-choice="' + h(choice) + '">' + h(label) + "</button>"; }
+  function mpBtn(label, choice, extra) { return '<button' + (choice === "stop" ? "" : owedAttrs()) + ' class="b' + (extra || "") + '" data-mp-choice="' + h(choice) + '">' + h(label) + "</button>"; }
   // A guided step's directions (spec §4.4): the provider's own path to the setting, four lines at most, keyed on
   // the provider and the step, never on a school. The address comes from mail_status by the setup's opaque id.
   var MP_PATH = {
@@ -2328,8 +2328,8 @@
     if (m365Backfill && !m.turned_off) { say += " New mail is arriving. Knowlu will bring in older Outlook mail on a later run."; }
     else if (m.open_backfill && !m.turned_off) { say += " Still bringing in recent mail; Resume carries on."; }
     var line = m.unbound_reason ? '<span class="em-line em-amber">' + h(m.unbound_note || "") + " (" + h(m.unbound_since_live) + ")" +
-      (m.suggest_rotate === true && !m.turned_off ? " " + emBtn("Rotate", "rotate", id) : "") + "</span>" : "";
-    var rotate = m.suggest_rotate !== true && !m.turned_off ? emBtn("Rotate", "rotate", id) : "";
+      (m.suggest_rotate === true && !m.turned_off ? " " + emBtn("Rotate", "rotate", id).replace("<button", "<button" + owedAttrs()) : "") + "</span>" : "";
+    var rotate = m.suggest_rotate !== true && !m.turned_off ? emBtn("Rotate", "rotate", id).replace("<button", "<button" + owedAttrs()) : "";
     return '<div class="em-box"><span class="em-name">' + h(EM_PROVIDER[m.provider] || "Email") + "</span>" +
       (resumable ? (RECONSENT_OWED ? emBtn("Resume", "resume", id).replace("<button ", '<button disabled title="' + h(OWED_LINE) + '" ') : emBtn("Resume", "resume", id)) : "") + rotate + emBtn("Turn off email", "off1", id) +
       '<span class="em-line">' + h(say) + "</span>" + (m.address ? emCopy("m:" + id, m.address) : "") + line +
@@ -2740,12 +2740,11 @@
   var OWED_LINE = "Accept the privacy update to use this";
   // Keyed by the version the lines describe; a static pin fails unless the key equals `account.rs`'s
   // PRIVACY_VERSION, so a bump of the constant cannot ship these lines by accident.
-  // (The copy spells its space as an escape in one place: a pin bans the word before a space; the text is unchanged.)
   var PRIVACY_CHANGES = {
     "2026-09-24": [
       "Knowlu's privacy policy changed on 2026-09-24.",
       "It now covers the email you forward to Knowlu and what is kept from it, the Blackboard and mail sign-ins Knowlu keeps on this computer, your grades in your account, and daily counts of your AI calls.",
-      "Until you accept, Knowlu keeps today's page up to date from this computer but does not sync, import\u0020or read anything new.",
+      "Until you accept, Knowlu keeps today's page up to date from this computer but does not sync, import or read anything new.",
       "To leave instead, use Settings → Delete my data."
     ]
   };
@@ -2768,6 +2767,8 @@
     if (SETM.s) { renderMailBoxes(); }
     if (SET.google) { renderGoogleRow(); }
     drawGrades();
+    refreshGradesDrawer();
+    if (current.state && current.state.topline) { renderSyncLine(current.state); }
   }
   function fillReconsent(p) {
     var lines = PRIVACY_CHANGES[p && p.current] || PRIVACY_CHANGES[Object.keys(PRIVACY_CHANGES)[0]] || [];
@@ -2779,8 +2780,12 @@
     if (PRIVACY_ASKED || !s || s.needs_account) { return; }
     PRIVACY_ASKED = true;
     return invoke("privacy_status", {}).then(function (p) {
-      if (p && p.needs_accept === true) { RECONSENT_OWED = true; fillReconsent(p); owedSettings(); maybeReconsent(); }
-    }).catch(function () { EL("reconsent").hidden = true; });
+      if (p && p.needs_accept === true) { fillReconsent(p); RECONSENT_OWED = true; owedSettings(); maybeReconsent(); }
+    }).catch(function () {
+      // The flag never outlives a hidden panel: a throw above clears it and redraws the controls.
+      RECONSENT_OWED = false; EL("reconsent").hidden = true;
+      try { owedSettings(); } catch (x) { /* nothing more to draw */ }
+    });
   }
   function acceptPrivacy() {
     if (RECONSENT_BUSY) { return; }

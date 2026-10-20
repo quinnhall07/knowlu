@@ -56,7 +56,8 @@ fn console_js_is_one_render_function_per_region_and_uses_invoke() {
         assert!(js.contains(&format!("function {f}(")), "missing function {f}");
     }
     assert!(js.contains("__TAURI__.core.invoke"));
-    assert!(!js.contains("import ") && !js.contains("require("), "no modules, no bundler");
+    // Module syntax only: an `import` statement at a line start, or a dynamic `import(`. The word in prose is fine.
+    assert!(!js.lines().any(|l| l.trim_start().starts_with("import ")) && !js.contains("import(") && !js.contains("require("), "no modules, no bundler");
     // R28: route() must clear current.state too, or a view change's first paint can be
     // mistaken for a reorder (orderOf(stale today state) vs orderOf(new list state) always
     // differ) and the hold path leaves the new view's main column blank.
@@ -3197,4 +3198,23 @@ fn the_panels_changes_describe_this_privacy_version() {
     let table = js.split("var PRIVACY_CHANGES = {").nth(1).and_then(|s| s.split("};").next())
         .expect("console.js needs `var PRIVACY_CHANGES = { … };` keyed by the version it describes");
     assert!(table.contains(&format!("\"{version}\"")), "PRIVACY_CHANGES must carry a key for {version}, the build's PRIVACY_VERSION");
+}
+
+#[test]
+fn every_start_control_reads_the_owed_flag_and_a_throw_never_strands_it() {
+    let js = read("console.js");
+    // The Today sync line's button, and a repaint of it when the flag changes.
+    assert!(js.contains("data-sync' + owedAttrs()"), "sync now carries owedAttrs()");
+    let owed = js_fn(&js, "function owedSettings(");
+    assert!(owed.contains("renderSyncLine("), "the sync line repaints when the owed flag changes");
+    assert!(owed.contains("drawGrades()") && owed.contains("refreshGradesDrawer()"), "the open grades drawer repaints too");
+    // Mail-progress answers (all but stop) and Rotate.
+    let mp = js_fn(&js, "function mpBtn(");
+    assert!(mp.contains("owedAttrs()") && mp.contains("\"stop\""), "mpBtn disables every answer but stop while owed");
+    assert_eq!(js.matches("emBtn(\"Rotate\", \"rotate\", id).replace(\"<button\", \"<button\" + owedAttrs())").count(), 2, "both Rotate buttons carry owedAttrs()");
+    // The flag is set only after the panel is filled; a throw clears it.
+    let asker = js.split("
+  function ").find(|f| f.contains("invoke(\"privacy_status\"")).unwrap();
+    assert!(asker.find("fillReconsent(p)").unwrap() < asker.find("RECONSENT_OWED = true").unwrap(), "fill the panel before raising the flag");
+    assert!(asker.split(".catch(").nth(1).unwrap().contains("RECONSENT_OWED = false"), "a throw clears the owed flag");
 }
