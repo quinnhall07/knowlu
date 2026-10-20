@@ -333,8 +333,9 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // (`mail_hand_off` and `count_mail_arrival`, writing, each revoked from `public, anon,
   // authenticated`), plus T3e's `expire_mail_work` (writing, revoked the same way), plus L8 S2c1's
   // three in <stamp>_testers.sql (`admin.comp_grant`, `admin.comp_extend`, `admin.comp_end`;
-  // writing, each revoked from `public, anon, authenticated, service_role`).
-  assertEquals(parsed, 43, "today's corpus should parse exactly 43 function creations");
+  // writing, each revoked from `public, anon, authenticated, service_role`), plus L8 S2c2's
+  // `admin.comp_sweep` in the same file (writing, revoked the same way).
+  assertEquals(parsed, 44, "today's corpus should parse exactly 44 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -2418,4 +2419,105 @@ Deno.test("S2c1: the case table's A1, A2, A5 and A7 rows: one audit row per succ
   assertEquals(byId.get("A2")!.calls.map((c) => c.refused), [undefined, "admin.comp_extend", "foreign key"]);
   assertEquals(byId.get("A5")!.billingSubscribers, [false]);
   assertEquals(byId.get("A7")!.asServiceRole?.length, 10, "six writes, the call, three selects");
+});
+
+// L8 S2c2 (friends-testers §3.1, §3.3, §9 layer i, Amendment 2026-10-20): deletion and retention,
+// with no trigger: both grant tables cascade from accounts. admin.comp_sweep only deletes, a grant
+// 30 days after it closed (ended_at or ends_at, whichever is first: least() skips a null ended_at)
+// and an audit row at three years; its daily job's minute field is a number no fixed-minute job uses.
+const SWEEP_GRANTS = "delete from public.comp_grants where least(ended_at, ends_at) < now() - interval '30 days';";
+const SWEEP_AUDIT = "delete from public.comp_audit where at < now() - interval '3 years';";
+const CASCADE = "account_id uuid not null references public.accounts(id) on delete cascade";
+
+export function sweepProblems(sql: string): string[] {
+  const flat = flatten(sql);
+  const { header, body } = adminFunction(flat, "comp_sweep");
+  const out = body === "" ? ["no admin.comp_sweep"] : [];
+  if (!body.includes(SWEEP_GRANTS)) out.push("grants 30 days after closing (A4)");
+  if (!body.includes(SWEEP_AUDIT)) out.push("audit rows at three years (A6)");
+  if ((body.match(/\bdelete from\b/g) ?? []).length !== 2 || /\b(insert|update)\b/.test(body)) out.push("more than two deletes");
+  if (/security definer/.test(header) || !header.includes("set search_path = ''")) out.push(`comp_sweep: ${header}`);
+  const revoke = "revoke execute on function admin.comp_sweep() from public, anon, authenticated, service_role;";
+  if (!flat.includes(revoke)) out.push("comp_sweep: its revoke");
+  if (/\bcreate (?:or replace )?(?:constraint )?trigger\b|\breturns trigger\b/.test(flat)) out.push("a trigger");
+  for (const t of COMP_TABLES) {
+    if (tableColumns(flat, t).get("account_id") !== CASCADE) out.push(`${t}.account_id must cascade (A3, A3s)`);
+  }
+  const jobs = cronJobs(flat).filter((j) => j.job === "knowlu-sweep-comp");
+  if (jobs.length !== 1 || jobs[0].command !== "select admin.comp_sweep();") out.push("one knowlu-sweep-comp job");
+  return out;
+}
+
+/** The jobs in `others` whose minute field is a plain number equal to `when`'s, which must itself
+ * be a fixed minute and hour once a day (§3.1). Every-minute and step jobs are skipped. */
+export function minuteClashes(when: string, others: string[]): string[] {
+  if (!/^\d{1,2} \d{1,2} \* \* \*$/.test(when)) return [`'${when}' is not a fixed minute and hour`];
+  const minute = (w: string) => w.trim().split(/\s+/)[0];
+  return others.filter((o) => /^\d{1,2}$/.test(minute(o)) && Number(minute(o)) === Number(minute(when)));
+}
+
+Deno.test("S2c2: comp_sweep deletes at 30 days and three years, daily; both tables cascade; no trigger", async () => {
+  const { name, sql } = await testersMigration();
+  assertEquals(sweepProblems(sql), [], name);
+});
+
+Deno.test("S2c2: the sweep pins refuse coalesce, a moved interval, a narrower revoke, no cascade, no job, a trigger", async () => {
+  const flat = flatten((await testersMigration()).sql);
+  for (
+    const [from, to] of [
+      ["least(ended_at, ends_at)", "coalesce(ended_at, ends_at)"],
+      ["interval '30 days'", "interval '29 days'"],
+      ["interval '3 years'", "interval '3 years 1 day'"],
+      ["comp_sweep() from public, anon, authenticated, service_role;", "comp_sweep() from public, anon, authenticated;"],
+      ["references public.accounts(id) on delete cascade, action", "references public.accounts(id), action"],
+      ["$c$select admin.comp_sweep();$c$", "$c$select 1;$c$"],
+      [" revoke execute on function admin.comp_sweep()", " create trigger t after delete on public.accounts for each row execute function admin.comp_sweep(); revoke execute on function admin.comp_sweep()"],
+    ]
+  ) {
+    const bad = flat.replace(from, to);
+    assertNotEquals(bad, flat, `the mutation ${from} must apply to the real SQL`);
+    assert(sweepProblems(bad).length > 0, `${from} -> ${to} must be refused`);
+  }
+});
+
+Deno.test("S2c2: the minute-field pin refuses a shared minute at another hour and skips every-minute and step jobs", () => {
+  assertEquals(minuteClashes("23 8 * * *", ["23 7 * * *"]), ["23 7 * * *"]);
+  assertEquals(minuteClashes("29 3 * * *", ["* * * * *", "11 * * * *", "*/29 * * * *"]), []);
+  assertEquals(minuteClashes("29 * * * *", []).length, 1, "not once a day");
+});
+
+Deno.test("S2c2: knowlu-sweep-comp's minute field is used by no other fixed-minute job in the corpus", async () => {
+  const texts = (await everyMigrationFile()).map(([, raw]) => stripLineComments(raw));
+  const jobs = texts.flatMap(cronJobs);
+  assertEquals(jobs.length, texts.join("\n").match(/cron\.schedule\(/g)?.length, "every job is read");
+  const mine = jobs.filter((j) => j.job === "knowlu-sweep-comp");
+  assertEquals(mine.length, 1);
+  assertEquals(minuteClashes(mine[0].when, jobs.filter((j) => j !== mine[0]).map((j) => j.when)), []);
+});
+
+Deno.test("S2c2: the case table's A3, A3s, A4 and A6 rows agree with the cascades and the sweep's intervals", async () => {
+  const { ADMIN_CASES } = await import("./testers_cases.ts");
+  const byId = new Map(ADMIN_CASES.map((c) => [c.id, c]));
+  assertEquals(["A3", "A3s"].map((id) => byId.get(id)?.deleteAccount?.as), ["owner", "service_role"]);
+  for (const id of ["A3", "A3s", "A4", "A6"]) {
+    const c = byId.get(id)!;
+    assertEquals([c.rows?.length, c.expect.length], [c.accounts.length, c.accounts.length], id);
+    c.rows!.forEach((r, i) => {
+      const calls = c.calls.filter((k) => k.account === i);
+      const granted = calls.filter((k) => k.fn === "comp_grant" && k.refused === undefined).length;
+      const audit = calls.at(-1)?.audit.length ?? 0;
+      const s = c.sweep?.find((x) => x.account === i);
+      const swept = s && Math.max(s.endedAgo ?? -Infinity, -(s.endsIn ?? Infinity)) > 30 ? granted : 0;
+      const years = /^3 years (-?\d+) days?$/.exec(s?.auditAgo ?? "");
+      const aged = years !== null && Number(years[1]) > 0 ? audit : 0;
+      const gone = c.deleteAccount?.account === i;
+      const want = gone ? { grants: 0, audit: 0, unlinked: 0, routeDaily: 0 } : {
+        grants: granted - swept, audit: audit - aged, unlinked: swept ? audit - aged : 0, routeDaily: c.routeDaily?.[i] ? 1 : 0,
+      };
+      assertEquals(r, want, `${id} account ${i}`);
+      if (gone) assert(granted > 0 && c.routeDaily?.[i] && c.expect[i] === null, `${id}: both referential paths fire`);
+    });
+  }
+  const a4 = byId.get("A4")!.sweep!;
+  assert(a4.some((s) => s.endedAgo !== undefined && -(s.endsIn ?? 30) > s.endedAgo), "A4: least, not coalesce");
 });

@@ -109,7 +109,7 @@ export const CASES: TesterCase[] = [
 
 // S2c1's A rows (§3.5, §9): the audit row each grant function writes, the refusals that write none,
 // the billing job that never lists a comp, and the service role's rights. Every grant here is made
-// by an owner call, never set up by hand. S2c2 appends A3, A3s, A4 and A6.
+// by an owner call, never set up by hand. S2c2's A3, A3s, A4 and A6 follow A7.
 /** An owner call. `audit` is this account's `comp_audit` actions after it, compared as a multiset
  * (one transaction, one `now()`); every row carries the account's id and, but for a refusal, its
  * grant's id. `refused` is a substring the refusal must carry; absent, the call succeeds. */
@@ -138,6 +138,19 @@ export interface AdminCase {
   asServiceRole?: RoleStep[];
   /** A5: per account, whether `billing_subscribers` lists it at the end. */
   billingSubscribers?: boolean[];
+  /** A3, A3s: per account, whether a `route_daily` row is seeded after the calls. */
+  routeDaily?: boolean[];
+  /** A3, A3s: deleted after the calls. `owner` deletes its `auth.users` row (the cascade runs from
+   * there); `service_role` deletes its `accounts` row in a savepoint under `set local role
+   * service_role`, as the purge's `restDelete` does. Its answer in `expect` is then `null`. */
+  deleteAccount?: { account: number; as: "owner" | "service_role" };
+  /** A4, A6: moved into the past as the owner after the calls, then `admin.comp_sweep()` is run.
+   * `endedAgo` and `endsIn` (days) set the account's grant; `auditAgo` (a Postgres interval) sets
+   * its audit rows' `at`. */
+  sweep?: Array<{ account: number; endedAgo?: number; endsIn?: number; auditAgo?: string }>;
+  /** Per account at the end: its `comp_grants`, `comp_audit` (`unlinked`: of them, `grant_id` null)
+   * and `route_daily` rows. */
+  rows?: Array<{ grants: number; audit: number; unlinked: number; routeDaily: number }>;
   /** The view's answer per account at the end. */
   expect: Array<Row | null>;
 }
@@ -177,4 +190,42 @@ export const ADMIN_CASES: AdminCase[] = [
     ],
     expect: [tester(30)],
   },
+  // S2c2 (§3.1, §3.3, Amendment 2026-10-20): deletion by the cascade from accounts, and the sweep.
+  deletion("A3", "owner"),
+  deletion("A3s", "service_role"),
+  {
+    id: "A4", given: "the sweep: grants closed 31 days ago (ended, expired, expired then ended) deleted, 29 kept; audit stays",
+    accounts: signedUp("a4", 5), calls: [0, 1, 2, 3, 4].map(grantOn).concat([0, 1, 4].map(endOn)),
+    sweep: [
+      { account: 0, endedAgo: 31 }, { account: 1, endedAgo: 29 }, { account: 2, endsIn: -31 }, { account: 3, endsIn: -29 },
+      { account: 4, endsIn: -31, endedAgo: 10 },
+    ],
+    rows: [kept(0, 2, 2), kept(1, 2), kept(0, 1, 1), kept(1, 1), kept(0, 2, 2)], expect: [NONE, NONE, NONE, NONE, NONE],
+  },
+  {
+    id: "A6", given: "the sweep: an audit row three years and a day old deleted, three years less a day kept; the grants stay",
+    accounts: signedUp("a6", 2), calls: [grantOn(0), grantOn(1)],
+    sweep: [{ account: 0, auditAgo: "3 years 1 day" }, { account: 1, auditAgo: "3 years -1 day" }],
+    rows: [kept(1, 0), kept(1, 1)], expect: [tester(30), tester(30)],
+  },
 ];
+
+function kept(grants: number, audit: number, unlinked = 0, routeDaily = 0) {
+  return { grants, audit, unlinked, routeDaily };
+}
+function grantOn(account: number): AuditCall {
+  return { fn: "comp_grant", account, endsIn: 30, audit: ["grant"] };
+}
+function endOn(account: number): AuditCall {
+  return { fn: "comp_end", account, reason: "done", audit: ["grant", "end"] };
+}
+/** A3 and A3s: the first account, holding a grant (its audit row's `grant_id` set) and a `route_daily`
+ * row, is deleted, so one delete fires the cascade from `accounts` and the set-null from
+ * `comp_grants`; the second account's grant, audit and `route_daily` rows are untouched. */
+function deletion(id: "A3" | "A3s", as: "owner" | "service_role"): AdminCase {
+  return {
+    id, given: `an account with a grant and a route_daily row deleted as ${as === "owner" ? "the owner" : "production does"}`,
+    accounts: signedUp(id.toLowerCase(), 2), calls: [grantOn(0), grantOn(1)], routeDaily: [true, true],
+    deleteAccount: { account: 0, as }, rows: [kept(0, 0), kept(1, 1, 0, 1)], expect: [null, tester(30)],
+  };
+}

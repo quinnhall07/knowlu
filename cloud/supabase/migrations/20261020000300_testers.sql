@@ -174,3 +174,25 @@ $$;
 revoke execute on function admin.comp_grant(uuid, timestamptz, text, text) from public, anon, authenticated, service_role;
 revoke execute on function admin.comp_extend(uuid, timestamptz) from public, anon, authenticated, service_role;
 revoke execute on function admin.comp_end(uuid, text) from public, anon, authenticated, service_role;
+
+-- S2c2 (spec §3.1, §3.3, §3.5, Amendment 2026-10-20): deletion and retention. No trigger: both
+-- comp_grants.account_id and comp_audit.account_id reference accounts on delete cascade (above), and
+-- the database runs that cascade as the tables' owner, so a deletion by the service role (the
+-- account function's purge), which holds no write right here, still takes them (A3, A3s).
+-- The sweep only deletes. A grant goes 30 days after it closed: ended_at or ends_at, whichever is
+-- first (least() skips a null ended_at), so a closed grant's note and reason are not held past its
+-- life plus 30 days; its audit rows stay, their grant_id set null (A4). An audit row goes at three
+-- years, a maximum (A6). Security invoker, run by pg_cron as the owner that scheduled it.
+create function admin.comp_sweep()
+returns void
+language sql
+set search_path = ''
+as $$
+  delete from public.comp_grants where least(ended_at, ends_at) < now() - interval '30 days';
+  delete from public.comp_audit where at < now() - interval '3 years';
+$$;
+
+revoke execute on function admin.comp_sweep() from public, anon, authenticated, service_role;
+
+-- Daily, at a minute field no other fixed-minute job in the corpus uses (§3.1).
+select cron.schedule('knowlu-sweep-comp', '29 3 * * *', $c$select admin.comp_sweep();$c$);
