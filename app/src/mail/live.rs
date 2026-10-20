@@ -158,6 +158,11 @@ pub fn on_start(app: &AppHandle) {
         if !MailState::load(&data_dir).is_ok_and(|s| s.keep_session) {
             return;
         }
+        // L4: while the privacy update is owed nothing new is read (the panel's own words). The markers stay
+        // in `mail.json`, so the first launch after Accept resumes them.
+        if resume_held_for_privacy(&vault, &data_dir) {
+            return;
+        }
         let ids = super::backfill::open_backfills(&data_dir);
         if ids.is_empty() {
             return;
@@ -171,6 +176,15 @@ pub fn on_start(app: &AppHandle) {
         let env = real_env(&app, &data_dir, client, guard);
         let _ = SETUPS.start_resume(data_dir, ids, env);
     });
+}
+
+/// True only while the account's privacy cache says it has recorded an earlier version
+/// (`PrivacyGate::Older`, the same test as `state::sync_held_for_privacy`). No cache, another account's
+/// cache and a vault with no readable account are `Unknown` and hold nothing. A disk read only.
+pub fn resume_held_for_privacy(vault: &Path, data_dir: &Path) -> bool {
+    let Ok(cfg) = crate::account::cloud_config(vault) else { return false };
+    crate::account::privacy_gate(crate::account::load_privacy_cache(data_dir).as_ref(), &cfg.account_id)
+        == crate::account::PrivacyGate::Older
 }
 
 /// The start-up sweep (`mail_session::start_up_sweep`), run only while `window` holds the mail window:
