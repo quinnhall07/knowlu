@@ -2259,12 +2259,12 @@
     }).catch(function () {});
   }
   function openMailProgress() {
-    EL("mail-progress").hidden = false;
+    EL("mail-progress").hidden = false; maybeReconsent();
     if (!MP.timer) { MP.timer = setInterval(pollMailProgress, 1500); }
     return pollMailProgress();
   }
   function mailLeave() {
-    EL("mail-progress").hidden = true;
+    EL("mail-progress").hidden = true; maybeReconsent();
     clearInterval(MP.timer); MP.timer = null;
   }
   function mailFirstOpen() {
@@ -2439,10 +2439,10 @@
     return invoke("mail_applied", {}).then(renderMailApplied).catch(function () { renderMailApplied(null); });
   }
   function openMailApplied() {
-    MA.note = ""; EL("mail-applied").hidden = false;
+    MA.note = ""; EL("mail-applied").hidden = false; maybeReconsent();
     return loadMailApplied();
   }
-  EL("ma-close").addEventListener("click", function () { EL("mail-applied").hidden = true; });
+  EL("ma-close").addEventListener("click", function () { EL("mail-applied").hidden = true; maybeReconsent(); });
   EL("ma-body").addEventListener("click", function (e) {
     var b = e.target.closest("[data-ma-undo]"); if (!b) { return; }
     var at = MA.rows[Number(b.getAttribute("data-ma-undo"))]; if (!at) { return; }
@@ -2522,14 +2522,14 @@
     if (e.key === "Escape" && !EL("upgrade").hidden) { UPGRADE_DISMISSED = true; EL("upgrade").hidden = true; return; }
     // The report overlay is the same `.setpanel` shape over the same page, so it gets the page's own
     // way out (R-C1-55, M3). Tested before the settings panel because it opens on top of it.
-    if (e.key === "Escape" && !EL("report").hidden) { EL("report").hidden = true; return; }
+    if (e.key === "Escape" && !EL("report").hidden) { EL("report").hidden = true; maybeReconsent(); return; }
     if (e.key === "Escape" && !EL("settings").hidden) { closeSettings(); }
   });
   // ---- C1 Task 17: the issue report (legal note §9). **The text the user reads is the payload** —
   // `report.rs` builds and scrubs it, the textarea shows it, and the send posts exactly what is on
   // screen. Nothing is rebuilt after the user has looked away.
   function openReport() {
-    EL("report").hidden = false;
+    EL("report").hidden = false; maybeReconsent();
     EL("report-note").textContent = "";
     EL("report-text").value = "Loading…";
     invoke("report_preview", { view: stateView() }).then(function (r) {
@@ -2537,7 +2537,7 @@
     }).catch(function () { EL("report-text").value = "could not build the report"; });
   }
   window.KNOWLU_OPEN_REPORT = openReport;
-  EL("report-cancel").addEventListener("click", function () { EL("report").hidden = true; });
+  EL("report-cancel").addEventListener("click", function () { EL("report").hidden = true; maybeReconsent(); });
   EL("set-report-go").addEventListener("click", openReport);
   EL("report-send").addEventListener("click", function () {
     EL("report-send").disabled = true;
@@ -2545,7 +2545,7 @@
     invoke("report_send", { text: EL("report-text").value }).then(function (r) {
       EL("report-note").textContent = r.ok ? "Sent. Thank you." : r.error;
       EL("report-send").disabled = false;
-      if (r.ok) { setTimeout(function () { EL("report").hidden = true; }, 1500); }
+      if (r.ok) { setTimeout(function () { EL("report").hidden = true; maybeReconsent(); }, 1500); }
     }).catch(function () { EL("report-note").textContent = "could not send"; EL("report-send").disabled = false; });
   });
   // R-C1-57 (I2): *Manage subscription* says why nothing opened. `open_portal` refuses with a
@@ -2752,8 +2752,10 @@
   /** The attributes of a start control while the update is owed; empty otherwise. */
   function owedAttrs() { return RECONSENT_OWED ? ' disabled title="' + h(OWED_LINE) + '"' : ""; }
   function maybeReconsent() {
-    // Two `.setpanel`s never stack: the panel stands down while Settings is open and returns on close.
-    if (!EL("settings").hidden || !RECONSENT_OWED) { EL("reconsent").hidden = true; return; }
+    // Two `.setpanel`s never stack: the panel stands down while any other is open and returns on close.
+    var other = !EL("settings").hidden || !EL("report").hidden || !EL("mail-progress").hidden ||
+      !EL("mail-applied").hidden || !EL("upgrade").hidden;
+    if (other || !RECONSENT_OWED) { EL("reconsent").hidden = true; return; }
     EL("reconsent").hidden = false;
   }
   /** Settings while the update is owed: the one line, and the email set-up button locked. The Google

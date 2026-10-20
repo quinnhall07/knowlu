@@ -3142,6 +3142,19 @@ fn settings_starts_nothing_new_while_the_update_is_owed() {
     let close = js.split("function closeSettings()").nth(1).expect("closeSettings");
     assert!(close[..close.len().min(600)].contains("maybeReconsent("), "closing Settings raises the panel again");
     assert!(js_fn(&js, "function openSettings(").contains("maybeReconsent("), "opening Settings stands the panel down");
+    // It stands down over every other .setpanel, and each one's open and close paths call it.
+    for id in ["settings", "report", "mail-progress", "mail-applied", "upgrade"] {
+        assert!(m.contains(&format!("EL(\"{id}\").hidden")), "maybeReconsent must read #{id}");
+    }
+    for f in ["function openReport(", "function openMailProgress(", "function mailLeave(", "function openMailApplied("] {
+        assert!(js_fn(&js, f).contains("maybeReconsent("), "{f} must re-run maybeReconsent");
+    }
+    for h in ["EL(\"report-cancel\").addEventListener", "EL(\"ma-close\").addEventListener"] {
+        let at = js.find(h).expect(h);
+        assert!(js[at..at + 200].contains("maybeReconsent("), "{h} must re-run maybeReconsent");
+    }
+    assert!(js.contains("EL(\"report\").hidden = true; maybeReconsent(); return;"), "Escape on #report re-runs maybeReconsent");
+    assert!(js.contains("setTimeout(function () { EL(\"report\").hidden = true; maybeReconsent(); }, 1500)"), "a sent report re-runs maybeReconsent");
 }
 
 #[test]
