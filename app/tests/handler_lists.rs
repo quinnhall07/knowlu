@@ -111,6 +111,21 @@ fn the_console_list_names_no_inference_command_and_both_lists_keep_pick_file() {
     }
 }
 
+/// L4 (T5): the two privacy commands are in the console's list only. The wizard has no vault and
+/// never asks whether a privacy update is owed.
+#[test]
+fn the_console_list_names_the_two_privacy_commands_and_the_wizard_list_neither() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let lists = handler_lists(&src);
+    let console = list_with(&lists, "commands::state");
+    let wizard = list_with(&lists, "onboarding::finish_onboarding");
+    for name in ["account::privacy_status", "account::accept_privacy"] {
+        assert!(console.iter().any(|n| n == name), "the console list must name {name}");
+        assert!(!wizard.iter().any(|n| n == name), "the wizard list must not name {name}");
+    }
+}
+
 #[test]
 fn the_parser_reads_a_list_by_its_names() {
     let text = "x.invoke_handler(tauri::generate_handler![a::one, b::two,\n c::three])\n\
