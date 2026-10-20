@@ -974,38 +974,18 @@ fn the_unreachable_clause_is_one_string_on_both_sides() {
     );
 }
 
-/// The local runtime leaves in C4; the wizard stops offering it now, because §4.2's step list has no
-/// such step and a wizard that offers a 2 GB download for a feature that is moving to the cloud is
-/// lying to a new user.
-#[test]
-fn the_wizard_never_offers_a_local_model() {
-    let html = read("index.html");
-    assert!(!html.contains("id=\"wiz-judge\""), "the finish panel's local-judgment offer is gone");
-    assert!(!html.contains("2 GB"), "…and so is its download size");
-    let js = read("console.js");
-    // **Asserted by position, not by slice.** Whether `openSettings` — which legitimately calls these
-    // until C4 — happens to fall inside a text slice is a fact about line ordering, not about the
-    // wizard. Each command appears exactly once, and after `renderInference`, which is the settings
-    // row's own function; anything the wizard called would appear earlier and twice.
-    // The flag the deleted `the_wizard_offers_local_judgment_without_doing_anything` pinned, inverted:
-    // the checkbox is gone from the markup, so the plan field it filled must be gone from the page.
-    assert!(!js.contains("offer_inference"), "the wizard's local-judgment flag is gone with its checkbox");
-    let at = |needle: &str| js.find(needle).unwrap_or_else(|| panic!("{needle} is not in console.js"));
-    let inference = at("function renderInference(");
-    for cmd in ["\"install_inference_download\"", "\"install_inference_file\"", "\"inference_status\""] {
-        assert_eq!(js.matches(cmd).count(), 1, "{cmd} is invoked from more than one place");
-        assert!(at(cmd) > inference, "the wizard has nothing to do with the local runtime: {cmd}");
-    }
-}
-
 /// Ruling 10 (L6): nothing on the page reaches a local model. The settings row `#set-judge`, its
 /// functions and its four commands are gone, and so is the wizard's flag. `manifest.json` (the model
 /// manifest's URL, which lived in Rust and never on the page) stays absent: that check is carried over
-/// from `the_local_judgment_row_has_a_state_for_every_outcome`, which T4 deletes.
+/// from the deleted settings-row test. The wizard's offer is pinned absent too (no `#wiz-judge`, no
+/// `2 GB`), as `the_wizard_never_offers_a_local_model` did; its by-position check on the three
+/// commands is subsumed by their absence from the whole file.
 #[test]
 fn nothing_on_the_page_reaches_a_local_model() {
     let html = read("index.html");
     assert!(!html.contains("id=\"set-judge"), "the Local judgment row is gone from the markup");
+    assert!(!html.contains("id=\"wiz-judge\""), "the finish panel's local-judgment offer is gone");
+    assert!(!html.contains("2 GB"), "…and so is its download size");
     let js = read("console.js");
     for gone in ["inference_status", "install_inference", "remove_inference_model", "renderInference", "loadInference", "offer_inference", "manifest.json"] {
         assert!(!js.contains(gone), "console.js still names {gone}");
@@ -1236,36 +1216,6 @@ fn build_rs_still_stages_the_zero_byte_sidecar_placeholder() {
         build_rs.contains(&format!("binaries/{stem}-")),
         "build.rs must name {stem}, the stem bundle.externalBin declares"
     );
-}
-
-/// Knowlu plan 3a Task 10: the seventh settings row. Every state the reader can be in has words
-/// (R7), the two install doors are both there, and nothing on this page reaches the network — the
-/// manifest URL lives in `app/src/inference.rs`, never in the page.
-#[test]
-fn the_local_judgment_row_has_a_state_for_every_outcome() {
-    let html = read("index.html");
-    assert!(html.contains("id=\"set-judge\""), "the row");
-    for id in ["set-judge-state", "set-judge-file", "set-judge-download", "set-judge-remove"] {
-        assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
-    }
-    let js = read("console.js");
-    assert!(js.contains("function renderInference("), "renderInference");
-    for cmd in ["\"inference_status\"", "\"install_inference_file\"", "\"install_inference_download\"", "\"remove_inference_model\""] {
-        assert!(js.contains(cmd), "{cmd}");
-    }
-    // The four states the row can be in, in the page's own words. **`"ready"` alone would be a dead
-    // assertion** — `already` contains it, and this file is full of `already` (M3) — so the
-    // rendered string is asserted with its separator.
-    for words in ["runtime not installed", "model not installed", "\"ready — \"", "installing "] {
-        assert!(js.contains(words), "the row must have words for: {words}");
-    }
-    // Global constraint: no http:// or https:// under app/static/ — the endpoint is Rust's.
-    assert!(!js.contains("manifest.json"), "the manifest URL is inference.rs's, never the page's");
-    assert_eq!(js.matches(" data-id=\"").count(), js.matches(" data-kind=\"").count(), "data-id without data-kind somewhere");
-    // R-C1-59 (M6): an entitled cloud vault never runs the local runtime (`scheduler::judge_plan`
-    // never passes `--runtime`/`--model` once `config/cloud.yaml` exists), so `renderAccountRow`
-    // hides the row rather than offering a multi-gigabyte download that cannot affect anything.
-    assert!(js.contains("EL(\"set-judge\").hidden"), "the row must be gated on the account status");
 }
 
 /// The wizard's default folders come from `launch_state` — the page never builds a path, and the
