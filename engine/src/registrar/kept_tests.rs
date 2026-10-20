@@ -192,6 +192,43 @@ fn a_dropped_course_with_a_hand_set_until_is_kept_yours_with_one_card() {
     assert_eq!((cards.len(), cards[0].meta["change"]["until"].as_str()), (1, Some("2026-09-09")), "{:?}", lab.change_cards());
 }
 
+/// B3eR fix 1 (A2 item 12, "A held card is not lost", across 11's come-back). A hand-set `meets`
+/// the registrar moved has its kept entry and one card; the course is missing, then whole again
+/// with the same moved value. The come-back has no prior row (the drop moved it to `ended`), which
+/// detects nothing: the entry stands, is not turned into a listed-only one, and keeps its one card.
+#[test]
+fn a_kept_entry_and_its_card_survive_a_drop_and_a_whole_come_back() {
+    let lab = edited("kept-comeback");
+    lab.fetch(D10, &at_13());
+    the_card(&lab, LECTURE, "meets");
+    let mut gone = at_13();
+    drop_crn(&mut gone, "40001");
+    lab.fetch(D20, &gone);
+    let back = lab.fetch(D30, &at_13());
+    let kept = kept_of(&back, LECTURE, "meets");
+    assert_eq!((kept.len(), kept[0]["card"].as_str()), (1, Some("filed")), "{back}");
+    assert!(lab.kept_entries().iter().all(|e| e.get("listed").is_none()), "{:?}", lab.kept_entries());
+    the_card(&lab, LECTURE, "meets");
+    lab.rank(D30);
+    assert_eq!(cards_of(&lab, LECTURE, "meets").len(), 1, "{:?}", lab.change_cards());
+}
+
+/// B3eR fix 1, the second scenario. A hand-set `where` the registrar never changed is not listed
+/// "myBama changed it, kept yours" after the course is missing and whole again.
+#[test]
+fn a_hand_set_field_the_registrar_never_changed_is_not_listed_after_a_come_back() {
+    let lab = Lab::new("kept-comeback-where", "2026-08-31");
+    lab.fetch(D1, &fx());
+    lab.hand_set(LECTURE, "where", "\"Invented Hall 9\"");
+    let mut gone = fx();
+    drop_crn(&mut gone, "40001");
+    lab.fetch(D10, &gone);
+    let back = lab.fetch(D20, &fx());
+    assert!(list(&back, "kept").is_empty() && lab.kept_entries().is_empty(), "{back}");
+    lab.rank(D20);
+    assert!(lab.change_cards().is_empty(), "{:?}", lab.change_cards());
+}
+
 /// B3e (round 2, "`was` is read at filing"). A kept entry recorded with the student's value; the
 /// student edits the field to a third value; the next `rank` files the card with `was` that third
 /// value, and it is not superseded at that `rank`.
@@ -226,21 +263,16 @@ fn an_expired_kept_card_is_filed_again_and_a_rejected_one_is_not() {
 
 /// B3e (round 2, "One filer"). With `SERIES_LOCK_FILE` held by the test, a `rank` that has a kept
 /// entry to file does not write a card until the lock is released; a fetch and a `rank` on the
-/// same day file one card between them.
+/// same day file one card between them. B3eR fix 1: the "held" check runs once the rank has
+/// signalled from the filer's lock step (`rank_interleaved`), never while it is still in
+/// `refresh_series`, so a filer that takes no lock turns this test red.
 #[test]
 fn one_filer_holds_the_series_lock_and_a_fetch_and_a_rank_file_one_card() {
     let lab = edited("kept-lock");
     lab.spend_the_cap(D10);
     lab.fetch(D10, &at_13());
     assert!(lab.change_cards().is_empty());
-    let lock = hold_lock(&lab);
-    std::thread::scope(|scope| {
-        let rank = scope.spawn(|| lab.rank(D11));
-        let_it_block();
-        assert!(lab.change_cards().is_empty(), "a card was written while the lock was held");
-        drop(lock);
-        rank.join().unwrap();
-    });
+    rank_interleaved(&lab, D11, || assert!(lab.change_cards().is_empty(), "a card was written while the lock was held"));
     assert_eq!(lab.open_cards(LECTURE, "meets").len(), 1);
     let other = edited("kept-sameday");
     other.fetch(D10, &at_13());

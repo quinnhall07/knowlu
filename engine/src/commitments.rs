@@ -3805,6 +3805,14 @@ pub fn kept_listed(vault: &Path, entries: &[serde_json::Value], set: &Commitment
     out
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Close-out B3eR fix 1, tests only: called on this thread just before [`emit_checks_locked`]
+    /// takes [`SERIES_LOCK_FILE`], so a race test knows its `rank` reached the filer's lock (past
+    /// `refresh_series`) by a signal, not by a clock.
+    pub(crate) static AT_FILER_LOCK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// A2 item 12, "One filer" (close-out B3e): [`emit_checks`] once, holding [`SERIES_LOCK_FILE`]
 /// from the series file's re-read to the last card write, so a fetch and a `rank` never file the
 /// same `(note, field, value)` twice. Under the lock it re-reads the file and the notes, counts the
@@ -3829,9 +3837,17 @@ pub fn emit_checks_locked(
         !f.registrar.is_empty() || f.calendars.keys().any(|c| c.starts_with(crate::registrar::CALENDAR_PREFIX))
     };
     let lock = match offer_kept && registrar(&read_series_file(vault).0) {
-        true => lock_series_file(vault)
-            .inspect_err(|err| warnings.push(format!("series file: could not lock {SERIES_LOCK_FILE} ({}); no kept-field card this run", err.kind())))
-            .ok(),
+        true => {
+            #[cfg(test)]
+            AT_FILER_LOCK.with(|hook| {
+                if let Some(signal) = hook.borrow().as_ref() {
+                    signal();
+                }
+            });
+            lock_series_file(vault)
+                .inspect_err(|err| warnings.push(format!("series file: could not lock {SERIES_LOCK_FILE} ({}); no kept-field card this run", err.kind())))
+                .ok()
+        }
         false => None,
     };
     let mut all = changes.to_vec();

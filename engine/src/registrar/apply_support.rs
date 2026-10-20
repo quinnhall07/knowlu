@@ -526,25 +526,28 @@ pub(super) fn let_it_block() {
     std::thread::sleep(std::time::Duration::from_millis(500));
 }
 
-/// `rank` on `day`, with the series-file lock held by the test. The rank is known to have reached
-/// its calendar read (a channel, not a clock) before `between` runs; after `let_it_block` it has
-/// read the series file and waits for the lock at the filing step. `between` then changes the
-/// vault the way a fetch alongside the rank would, and the lock is released. A rank that never
-/// waits has already finished by then, which the callers' assertions see.
+/// `rank` on `day`, with the series-file lock held by the test. The rank's stash is empty, so its
+/// `refresh_series` has no fresh calendar and takes no lock: it reads the series file before
+/// `between` runs. The rank signals from inside `emit_checks_locked`, just before the filer takes
+/// the lock (`commitments::AT_FILER_LOCK`, a channel, not a clock); `let_it_block` then lets it
+/// enter the wait. `between` changes the vault the way a fetch alongside the rank would, and the
+/// lock is released. A rank that never reaches the filer's lock fails here by name (B3eR fix 1).
 pub(super) fn rank_interleaved(lab: &Lab, day: Date, between: impl FnOnce()) {
     let lock = hold_lock(lab);
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     std::thread::scope(|scope| {
         let rank = scope.spawn(move || {
-            let stash: SeriesStash = RefCell::new(std::collections::BTreeMap::new());
-            let reached = move |_: &str| {
+            let signal = move || {
                 let _ = tx.send(());
-                Ok("BEGIN:VCALENDAR\nEND:VCALENDAR\n".to_string())
             };
-            let fetchers = Fetchers { calendar: Some(&reached), events: None, series: Some(&stash) };
-            run_with(&lab.v, Some(&day.to_string()), "manual", None, fetchers).unwrap();
+            crate::commitments::AT_FILER_LOCK.with(|hook| *hook.borrow_mut() = Some(Box::new(signal)));
+            lab.rank(day);
         });
-        rx.recv().unwrap();
+        if rx.recv_timeout(std::time::Duration::from_secs(300)).is_err() {
+            drop(lock);
+            let _ = rank.join();
+            panic!("the rank never reached the filer's lock");
+        }
         let_it_block();
         between();
         drop(lock);

@@ -459,7 +459,8 @@ pub fn run_parsed(
     // A2 item 12 (close-out B3e): a hand-set field is never written. `old` is the last whole reading
     // (P9's carry) or, for `until`, the pinned end of the note's open `ended` entry; a missing note's
     // new `until` is the pinned end. A value that moved from `old` and differs from the note's is
-    // kept (listed only with no prior row); agreement removes the entry; a part-read CRN is skipped.
+    // kept (listed only with no prior row and no standing entry; a come-back with neither detects
+    // nothing); agreement removes the entry; a part-read CRN is skipped.
     let mut kept: Vec<Value> = block.map(|t| t.kept.clone()).unwrap_or_default();
     for (key, path) in &notes {
         let Some(note) = confirmed.get(key).filter(|_| read.get(key).is_none_or(|how| *how == Reading::Whole)) else { continue };
@@ -468,6 +469,8 @@ pub fn run_parsed(
             .and_then(|t| t.ended.iter().find(|e| e["note"] == path.as_str() && e.get("returned").is_none()))
             .map(|e| e["until"].clone());
         let (gone, newly_ended) = (!read.contains_key(key), ended.iter().any(|e| e["note"] == path.as_str()));
+        // B3eR fix 1: a come-back's row went to the file's `ended` at the drop, so it has no prior row.
+        let come_back = before.is_none() && (open_end.is_some() || prior.ended.contains_key(key.as_str()));
         let value = |field: &str, s: &Series| cm::field_json(field, &s.meets, s.until, s.where_.as_deref());
         for field in ["meets", "until", "where"] {
             if journal.human_edited(&note.id, field).is_none() {
@@ -483,6 +486,14 @@ pub fn run_parsed(
             let mine = cm::field_json(field, &note.meets, note.until, note.where_.as_deref());
             let same = |a: &Value, b: &Value| cm::same_value(field, a, b);
             let at = kept.iter().position(|e| e["note"] == path.as_str() && e["field"] == field);
+            // B3eR fix 1: with no prior row, a standing entry's `registrar` is the last whole reading
+            // (so it is never turned listed-only), and a come-back with no entry detects nothing.
+            let old = match (old, at) {
+                (Some(old), _) => Some(old),
+                (None, Some(i)) => Some(kept[i]["registrar"].clone()),
+                (None, None) if come_back => continue,
+                (None, None) => None,
+            };
             if new.is_null() {
                 continue;
             } else if same(&new, &mine) {
