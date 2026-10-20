@@ -356,7 +356,7 @@ the recipients from it, and logs nothing from it.
    `last_lapsed_at` set; `off` and `revoked` are untouched. The residuals: a held backfill or recover
    item is marked from its batch send's arrival, not the original's date; a renewal in the middle of a
    run can be marked lapsed from the run's stale answer; an item the sweep expires before any run has
-   held it is never marked; and §9's rotated-Gmail one.)*
+   held it is never marked; and the email cloud follow-ups plan's §9 one: a rotated Gmail can keep its OAuth read off past the grace.)*
 4. **Fetch** the object from S3 with a key scoped to the bucket (get, put, delete; nothing else).
 5. **Classify the arrival:**
    - **Canary:** from Knowlu's canary sender, DKIM passing for Knowlu's domain, carrying the nonce of an
