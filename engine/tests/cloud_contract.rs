@@ -1456,3 +1456,49 @@ fn resolve_mail_over_loopback_returns_one_answer_per_claim() {
         "the claims travel as references: the service holds their text"
     );
 }
+
+/// The wire both sides read (plan T4.5): `cloud/supabase/functions/mail-resolve/wire_fixture.json`. Its
+/// `request` is what this engine sends, and `handler_test.ts` posts the same bytes to the real handler and
+/// expects its `reply`, so a drift on either side fails a test (pre-PR review, 2026-10-20, resolve-shape).
+#[test]
+fn resolve_mail_matches_the_servers_wire_fixture() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../cloud/supabase/functions/mail-resolve/wire_fixture.json");
+    let fixture: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("the shared wire fixture")).unwrap();
+    let request = &fixture["request"];
+    let text = |v: &serde_json::Value| v.as_str().expect("a string").to_string();
+    let batch = ResolveBatch {
+        course: text(&request["course"]),
+        claims: request["claims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| claim_ref(c["uid"].as_str().unwrap(), c["index"].as_u64().unwrap() as usize))
+            .collect(),
+        candidates: request["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| Candidate { id: text(&c["id"]), title: text(&c["title"]), due: c["due"].as_str().map(str::to_string) })
+            .collect(),
+    };
+    assert!(batch.candidates.iter().any(|c| c.due.is_none()), "the fixture carries a candidate with no due");
+    let mut server = loopback(vec![(200, knowlu_engine::ledger::dumps_value(&fixture["reply"]))]);
+    let client = CloudClient::new(&config(&server.base), "jwt-not-a-secret");
+    let answers = resolve_mail(&client, &batch).expect("the service answered");
+
+    let sent = server.requests().remove(0);
+    assert!(sent.starts_with("POST /functions/v1/mail-resolve HTTP/1.1"), "{sent}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(body_of(&sent)).unwrap(), *request, "the engine sends the fixture's request");
+    let expected: Vec<ResolveAnswer> = fixture["reply"]["answers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| ResolveAnswer {
+            claim: claim_ref(a["uid"].as_str().unwrap(), a["index"].as_u64().unwrap() as usize),
+            target_id: a["target_id"].as_str().map(str::to_string),
+        })
+        .collect();
+    assert_eq!(answers.len(), batch.claims.len(), "every claim in the server's reply is answered");
+    assert!(expected.iter().any(|a| a.target_id.is_none()), "the fixture's reply carries a none");
+    assert_eq!(answers, expected, "the server's reply reads as one answer per claim, its null as None");
+}

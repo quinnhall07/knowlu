@@ -15,6 +15,7 @@ import {
   resolveHandler,
   type ResolveStore,
 } from "./handler.ts";
+import fixture from "./wire_fixture.json" with { type: "json" };
 
 const ACCT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -23,6 +24,15 @@ const NOW = Date.UTC(2026, 9, 2, 12, 0, 0);
 /** D20's message uid from a small number, and its n-th claim's key. */
 const uid = (n: number) => `mail:${n.toString(16).padStart(32, "0")}`;
 const key = (n: number, i: number) => `${uid(n)}:${i}`;
+/** A claim as the wire names it (plan T4.5), and its answer in the reply. */
+const ref = (n: number, i: number) => ({ uid: uid(n), index: i });
+const ans = (n: number, i: number, target_id: string | null) => ({ uid: uid(n), index: i, target_id });
+/** The posted body: the course, its claims by reference, its candidates. */
+const req = (claims: unknown[], candidates: unknown[] = CANDIDATES) => ({
+  course: "CHEM-105",
+  claims,
+  candidates,
+});
 
 const ROW: ModelRow = {
   kind: "mail_resolve",
@@ -175,7 +185,9 @@ const CANDIDATES = [
   { id: "n-103", title: "Problem set 4", due: "2026-10-12" },
 ];
 
-async function answers(res: Response): Promise<Array<{ claim: string; target_id: string | null }>> {
+async function answers(
+  res: Response,
+): Promise<Array<{ uid: string; index: number; target_id: string | null }>> {
   assertEquals(res.status, 200);
   return (await res.json()).answers;
 }
@@ -195,14 +207,14 @@ Deno.test("one_call_per_course_batch_stores_each_answer_on_its_claim", async () 
     change("the essay", { kind: "receipt", field: null, value: null, source: "template" }),
   ]);
   const got = await answers(
-    await w.post({ claims: [key(1, 1), key(2, 0), key(1, 2)], candidates: CANDIDATES }),
+    await w.post(req([ref(1, 1), ref(2, 0), ref(1, 2)])),
   );
   // One model call for the whole batch, and the answers in the batch's order.
   assertEquals(w.model.seen.length, 1);
   assertEquals(got, [
-    { claim: key(1, 1), target_id: "n-101" },
-    { claim: key(2, 0), target_id: null },
-    { claim: key(1, 2), target_id: "n-103" },
+    ans(1, 1, "n-101"),
+    ans(2, 0, null),
+    ans(1, 2, "n-103"),
   ]);
   // The prompt names each claim as the stored claim names it (a change's or receipt's target, a new
   // item's title), and every candidate; nothing else of the claim (no evidence, sender or why).
@@ -280,8 +292,8 @@ function pullOver(store: FakeStore): PullStore {
 Deno.test("a_stored_answer_is_replayed_on_a_re_pull_with_no_model_call", async () => {
   const w = world([{ answers: [{ claim: key(1, 0), target_id: "n-102" }] }]);
   w.store.add(ACCT, 1, [change("prelab")]);
-  const batch = { claims: [key(1, 0)], candidates: CANDIDATES };
-  assertEquals(await answers(await w.post(batch)), [{ claim: key(1, 0), target_id: "n-102" }]);
+  const batch = req([ref(1, 0)]);
+  assertEquals(await answers(await w.post(batch)), [ans(1, 0, "n-102")]);
   assertEquals(w.model.seen.length, 1);
   // The re-pull: the claim comes back to the device carrying its stored answer.
   const pull = pullHandler({ entitle: gate("active"), store: pullOver(w.store), now: () => NOW });
@@ -296,7 +308,7 @@ Deno.test("a_stored_answer_is_replayed_on_a_re_pull_with_no_model_call", async (
   assertEquals((await pulled.json()).messages[0].claims[0].resolution, { target_id: "n-102" });
   // Asked again (the device lost the answer before it acked): the same answer, no call, no charge.
   w.events.length = 0;
-  assertEquals(await answers(await w.post(batch)), [{ claim: key(1, 0), target_id: "n-102" }]);
+  assertEquals(await answers(await w.post(batch)), [ans(1, 0, "n-102")]);
   assertEquals(w.model.seen.length, 1);
   assertEquals(w.events, []);
   assertEquals(w.judgments.length, 1);
@@ -304,9 +316,9 @@ Deno.test("a_stored_answer_is_replayed_on_a_re_pull_with_no_model_call", async (
   const v = world([{ answers: [{ claim: key(4, 0), target_id: "n-103" }] }]);
   v.store.add(ACCT, 3, [change("essay", { resolution: { target_id: null } })]);
   v.store.add(ACCT, 4, [change("set four")]);
-  assertEquals(await answers(await v.post({ claims: [key(3, 0), key(4, 0)], candidates: CANDIDATES })), [
-    { claim: key(3, 0), target_id: null },
-    { claim: key(4, 0), target_id: "n-103" },
+  assertEquals(await answers(await v.post(req([ref(3, 0), ref(4, 0)]))), [
+    ans(3, 0, null),
+    ans(4, 0, "n-103"),
   ]);
   assert(!v.model.seen[0].user.includes(key(3, 0)));
   assert(v.model.seen[0].user.includes(key(4, 0)));
@@ -326,14 +338,14 @@ Deno.test("an_id_outside_the_batch_reads_none", async () => {
   const theirs = w.store.add(OTHER, 7, [change("Lab 3")]);
   w.store.add(ACCT, 8, [info()]);
   const got = await answers(
-    await w.post({ claims: [key(1, 0), key(1, 1), key(7, 0), key(8, 0), key(9, 0)], candidates: CANDIDATES }),
+    await w.post(req([ref(1, 0), ref(1, 1), ref(7, 0), ref(8, 0), ref(9, 0)])),
   );
   assertEquals(got, [
-    { claim: key(1, 0), target_id: null }, // an id the batch never offered
-    { claim: key(1, 1), target_id: null }, // answered two ways
-    { claim: key(7, 0), target_id: null }, // not this account's
-    { claim: key(8, 0), target_id: null }, // nothing to resolve
-    { claim: key(9, 0), target_id: null }, // no such claim
+    ans(1, 0, null), // an id the batch never offered
+    ans(1, 1, null), // answered two ways
+    ans(7, 0, null), // not this account's
+    ans(8, 0, null), // nothing to resolve
+    ans(9, 0, null), // no such claim
   ]);
   const user = w.model.seen[0].user;
   assert(user.includes(key(1, 0)) && user.includes(key(1, 1)));
@@ -348,7 +360,7 @@ Deno.test("an_id_outside_the_batch_reads_none", async () => {
 
 Deno.test("a_resolve_call_is_charged_before_the_model", async () => {
   const reply = { answers: [{ claim: key(1, 0), target_id: "n-101" }] };
-  const batch = { claims: [key(1, 0)], candidates: CANDIDATES };
+  const batch = req([ref(1, 0)]);
   const w = world([reply]);
   w.store.add(ACCT, 1, [change("Lab 3")]);
   await answers(await w.post(batch));
@@ -388,7 +400,7 @@ Deno.test("a_failed_model_call_stores_nothing_and_answers_its_cause_by_name", as
   for (const [error, cause] of cases) {
     const w = world([error]);
     w.store.add(ACCT, 1, [change("Lab 3")]);
-    const res = await w.post({ claims: [key(1, 0)], candidates: CANDIDATES });
+    const res = await w.post(req([ref(1, 0)]));
     assertEquals(res.status, 502, cause);
     assertEquals((await res.json()).error, cause);
     // Never a stored none: only an answer the model gave is data.
@@ -410,7 +422,7 @@ Deno.test("a_model_failure_gives_its_daily_cap_charge_back_and_a_refusal_or_trun
   for (const [error, cause, events] of cases) {
     const w = world([error]);
     w.store.add(ACCT, 1, [change("Lab 3")]);
-    const res = await w.post({ claims: [key(1, 0)], candidates: CANDIDATES });
+    const res = await w.post(req([ref(1, 0)]));
     assertEquals(res.status, 502, cause);
     await res.body?.cancel();
     assertEquals(w.events, events, cause);
@@ -418,7 +430,7 @@ Deno.test("a_model_failure_gives_its_daily_cap_charge_back_and_a_refusal_or_trun
   // An answered call keeps its charge.
   const ok = world([{ answers: [{ claim: key(1, 0), target_id: "n-101" }] }]);
   ok.store.add(ACCT, 1, [change("Lab 3")]);
-  await answers(await ok.post({ claims: [key(1, 0)], candidates: CANDIDATES }));
+  await answers(await ok.post(req([ref(1, 0)])));
   assert(!ok.events.includes("refund"));
 });
 
@@ -426,12 +438,12 @@ Deno.test("a_batch_with_nothing_to_ask_makes_no_call_and_no_charge", async () =>
   const w = world([]);
   w.store.add(ACCT, 1, [change("Lab 3"), info()]);
   // No candidate: every claim reads none, unstored, uncharged.
-  assertEquals(await answers(await w.post({ claims: [key(1, 0)], candidates: [] })), [
-    { claim: key(1, 0), target_id: null },
+  assertEquals(await answers(await w.post(req([ref(1, 0)], []))), [
+    ans(1, 0, null),
   ]);
   // Only claims with nothing to resolve: the same.
-  assertEquals(await answers(await w.post({ claims: [key(1, 1)], candidates: CANDIDATES })), [
-    { claim: key(1, 1), target_id: null },
+  assertEquals(await answers(await w.post(req([ref(1, 1)]))), [
+    ans(1, 1, null),
   ]);
   assertEquals(w.events, []);
   assertEquals(w.judgments, []);
@@ -450,8 +462,8 @@ Deno.test("an_answer_stored_by_another_call_first_wins", async () => {
     once = false;
     (row.claims[0] as Record<string, unknown>).resolution = { target_id: "n-102" };
   };
-  const got = await answers(await w.post({ claims: [key(1, 0), key(1, 1)], candidates: CANDIDATES }));
-  assertEquals(got, [{ claim: key(1, 0), target_id: "n-102" }, { claim: key(1, 1), target_id: "n-103" }]);
+  const got = await answers(await w.post(req([ref(1, 0), ref(1, 1)])));
+  assertEquals(got, [ans(1, 0, "n-102"), ans(1, 1, "n-103")]);
   assertEquals(w.store.resolution(1, 0), { target_id: "n-102" });
   assertEquals(w.store.resolution(1, 1), { target_id: "n-103" });
 });
@@ -467,8 +479,8 @@ Deno.test("an_answer_another_call_stored_on_a_claim_this_call_does_not_fill_surv
     once = false;
     (row.claims[1] as Record<string, unknown>).resolution = { target_id: "n-7" };
   };
-  assertEquals(await answers(await w.post({ claims: [key(1, 0)], candidates: CANDIDATES })), [
-    { claim: key(1, 0), target_id: "n-101" },
+  assertEquals(await answers(await w.post(req([ref(1, 0)]))), [
+    ans(1, 0, "n-101"),
   ]);
   // Both answers are held: the other call's is never erased by this call's older copy of the row.
   assertEquals(w.store.resolution(1, 0), { target_id: "n-101" });
@@ -479,7 +491,7 @@ Deno.test("an_answer_another_call_stored_on_a_claim_this_call_does_not_fill_surv
 Deno.test("the_resolve_needs_a_session_an_entitlement_post_and_a_bounded_batch", async () => {
   const lapsed = world([], "canceled");
   lapsed.store.add(ACCT, 1, [change("Lab 3")]);
-  const batch = { claims: [key(1, 0)], candidates: CANDIDATES };
+  const batch = req([ref(1, 0)]);
   assertEquals((await lapsed.post(batch)).status, 402);
   assertEquals((await lapsed.post(batch, "nobody")).status, 401);
   assertEquals(lapsed.store.calls, []);
@@ -491,41 +503,91 @@ Deno.test("the_resolve_needs_a_session_an_entitlement_post_and_a_bounded_batch",
   // The bounds: 15 answers of about 30 tokens fit the pin's 640; a course's active items fit 200.
   assertEquals([MAX_CLAIMS, MAX_CANDIDATES], [15, 200]);
   const many = (n: number, f: (i: number) => unknown) => Array.from({ length: n }, (_, i) => f(i));
+  const one = [ref(1, 0)];
   const refused: unknown[] = [
     "{not json",
     [],
     {},
-    { claims: [], candidates: CANDIDATES },
-    { claims: [key(1, 0)] },
-    { claims: [key(1, 0)], candidates: CANDIDATES, course: "CHEM-105" },
-    { claims: ["mail:abc:0"], candidates: CANDIDATES },
-    { claims: [`${uid(1)}:5`], candidates: CANDIDATES },
-    { claims: [key(1, 0), key(1, 0)], candidates: CANDIDATES },
-    { claims: many(MAX_CLAIMS + 1, (i) => key(i + 1, 0)), candidates: CANDIDATES },
-    {
-      claims: [key(1, 0)],
-      candidates: many(MAX_CANDIDATES + 1, (i) => ({ id: `n-${i}`, title: "t", due: null })),
-    },
-    { claims: [key(1, 0)], candidates: [{ id: "", title: "t", due: null }] },
-    {
-      claims: [key(1, 0)],
-      candidates: [{ id: "n-1", title: "t", due: null }, { id: "n-1", title: "u", due: null }],
-    },
-    { claims: [key(1, 0)], candidates: [{ id: "n-1\nn-2", title: "t", due: null }] },
-    { claims: [key(1, 0)], candidates: [{ id: "n-1", title: 7, due: null }] },
-    { claims: [key(1, 0)], candidates: [{ id: "n-1", title: "t", due: 20261009 }] },
-    { claims: [key(1, 0)], candidates: [{ id: "n-1", title: "t", due: null, body: "x" }] },
-    { claims: [key(1, 0)], candidates: [{ id: "n-1", title: "t".repeat(501), due: null }] },
+    req([]),
+    { course: "CHEM-105", claims: one },
+    { ...req(one), pad: "x" },
+    // The course: required, one line of 1 to 80 characters.
+    { claims: one, candidates: CANDIDATES },
+    { ...req(one), course: 105 },
+    { ...req(one), course: "" },
+    { ...req(one), course: "CHEM\n105" },
+    { ...req(one), course: "C".repeat(81) },
+    // A claim is {uid, index}: never D20's key string, never another key, a 32-hex uid, an index 0 to 4.
+    req([key(1, 0)]),
+    req(["mail:abc:0"]),
+    req([{ ...ref(1, 0), course: "CHEM-105" }]),
+    req([{ uid: uid(1) }]),
+    req([ref(1, 5)]),
+    req([ref(1, -1)]),
+    req([{ uid: uid(1), index: 0.5 }]),
+    req([{ uid: uid(1), index: "0" }]),
+    req([{ uid: "mail:abc", index: 0 }]),
+    req([{ uid: `${uid(1)}0`, index: 0 }]),
+    req([{ uid: `mail:${"A".repeat(32)}`, index: 0 }]),
+    req([ref(1, 0), ref(1, 0)]),
+    req(many(MAX_CLAIMS + 1, (i) => ref(i + 1, 0))),
+    req(one, many(MAX_CANDIDATES + 1, (i) => ({ id: `n-${i}`, title: "t", due: null }))),
+    req(one, [{ id: "", title: "t", due: null }]),
+    req(one, [{ id: "n-1", title: "t", due: null }, { id: "n-1", title: "u", due: null }]),
+    req(one, [{ id: "n-1\nn-2", title: "t", due: null }]),
+    req(one, [{ id: "n-1", title: 7, due: null }]),
+    req(one, [{ id: "n-1", title: "t", due: 20261009 }]),
+    req(one, [{ id: "n-1", title: "t", due: null, body: "x" }]),
+    req(one, [{ id: "n-1", title: "t".repeat(501), due: null }]),
   ];
   for (const body of refused) {
     const res = await w.post(body);
     assertEquals(res.status, 400, JSON.stringify(body).slice(0, 120));
     await res.body?.cancel();
   }
-  const huge = await w.post({ claims: [key(1, 0)], candidates: CANDIDATES, pad: "x".repeat(300_000) });
+  const huge = await w.post({ ...req([ref(1, 0)]), pad: "x".repeat(300_000) });
   assertEquals(huge.status, 413);
   await huge.body?.cancel();
   // Nothing was read, charged or asked for any of them.
   assertEquals(w.store.calls, []);
   assertEquals(w.events, []);
+  // The course is read and bounded, and a body carrying it is the one accepted.
+  const ok = world([]);
+  ok.store.add(ACCT, 1, [change("Lab 3")]);
+  assertEquals(await answers(await ok.post(req([ref(1, 0)], []))), [ans(1, 0, null)]);
+});
+
+// ---------------------------------------------------------------- the wire, against the engine's bytes
+
+Deno.test("the_engines_request_fixture_is_accepted_and_answered_in_the_wire_shape", async () => {
+  // wire_fixture.json's request is what engine/tests/cloud_contract.rs proves resolve_mail sends.
+  const { request, reply } = fixture;
+  const keyOf = (c: { uid: string; index: number }) => `${c.uid}:${c.index}`;
+  const w = world([{
+    answers: reply.answers.map((a) => ({ claim: keyOf(a), target_id: a.target_id })),
+  }]);
+  // The fixture's uids, each claim askable at its index (the course_info beside them is never asked).
+  for (const id of new Set(request.claims.map((c) => c.uid))) {
+    const at = request.claims.filter((c) => c.uid === id).map((c) => c.index);
+    const claims = Array.from(
+      { length: Math.max(...at) + 1 },
+      (_, i) => at.includes(i) ? change(`t${i}`) : info(),
+    );
+    w.store.rowsHeld.push({ id: w.store.rowsHeld.length + 1, accountId: ACCT, uid: id, claims });
+  }
+  const res = await w.post(request);
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), reply);
+  assertEquals(w.model.seen.length, 1);
+});
+
+Deno.test("the_resolve_reply_is_answers_with_uid_index_and_target_id", async () => {
+  const w = world([{ answers: [{ claim: key(1, 0), target_id: "n-101" }] }]);
+  w.store.add(ACCT, 1, [change("Lab 3"), info()]);
+  const res = await w.post(req([ref(1, 0), ref(1, 1)]));
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(Object.keys(body), ["answers"]);
+  for (const a of body.answers) assertEquals(Object.keys(a).sort(), ["index", "target_id", "uid"]);
+  assertEquals(body.answers, [ans(1, 0, "n-101"), ans(1, 1, null)]);
 });

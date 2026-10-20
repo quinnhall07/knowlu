@@ -3,11 +3,13 @@
  * course's candidate items, and the reasoning model's answer to which candidate each claim means, or none.
  * Session plus entitlement, like `mail-pull`.
  *
- * **The wire.** `{claims: ["mail:<h>:<n>", ...], candidates: [{id, title, due}, ...]}`: each claim by its
- * D20 key (the message's uid and the claim's 0-based index), at most `MAX_CLAIMS`, once each; each candidate
- * a note's opaque id (one line, at most 80 characters, once each), its title (at most 500) and its due (a
- * string or null), at most `MAX_CANDIDATES`. Nothing else is accepted. The answer is
- * `{answers: [{claim, target_id}]}`, one per claim, in the request's order.
+ * **The wire** (plan T4.5). `{course, claims: [{uid, index}, ...], candidates: [{id, title, due}, ...]}`:
+ * the course (one line, 1 to 80 characters), read and bounded only, since each stored claim holds its own;
+ * each claim by its message's uid (`mail:` and 32 hex) and its 0-based index below D9's five, at most
+ * `MAX_CLAIMS`, once each; each candidate a note's opaque id (one line, at most 80 characters, once each), its
+ * title (at most 500) and its due (a string or null), at most `MAX_CANDIDATES`. Nothing else is accepted.
+ * The answer is `{answers: [{uid, index, target_id}]}`, one per claim, in the request's order, `target_id`
+ * null for none. Inside, a claim is D20's key `mail:<h>:<n>`, the form the prompt and the model answer in.
  *
  * **What is asked.** The server reads each claim from the account's own `mail_claims` row, never from the
  * request: what it names (a change's or a receipt's `target`, a new item's title) and, for a new item, its
@@ -45,6 +47,9 @@ export const MAX_CLAIMS = 15;
 /** The most candidates one call carries: a course's active items. */
 export const MAX_CANDIDATES = 200;
 const ID_CHARS = 80;
+const COURSE_CHARS = 80;
+/** A message uid on the wire, as `mail-pull` acks it. */
+const UID_SHAPE = /^mail:[0-9a-f]{32}$/;
 const TITLE_CHARS = 500;
 const BODY_LIMIT = 256 * 1024;
 
@@ -122,7 +127,8 @@ function readCandidate(v: unknown): Candidate {
   return { id, title, due: due ?? null };
 }
 
-/** The body: exactly `claims` and `candidates`, each bounded and without repeats. Throws a 400 or a 413. */
+/** The body: exactly `course`, `claims` and `candidates`, each bounded and without repeats; the claims as D20
+ * keys. Throws a 400 or a 413. */
 async function readBatch(req: Request): Promise<Batch> {
   const text = await req.text();
   if (text.length > BODY_LIMIT) throw fail(413, `body over ${BODY_LIMIT} characters`);
@@ -132,23 +138,36 @@ async function readBatch(req: Request): Promise<Batch> {
   } catch {
     throw bad("body is not JSON");
   }
-  if (!isRecord(body) || Object.keys(body).some((k) => k !== "claims" && k !== "candidates")) {
-    throw bad("the body is {claims, candidates}");
+  if (!isRecord(body) || Object.keys(body).some((k) => !["course", "claims", "candidates"].includes(k))) {
+    throw bad("the body is {course, claims, candidates}");
   }
-  const { claims, candidates } = body;
-  if (!Array.isArray(claims) || claims.length === 0 || claims.length > MAX_CLAIMS) {
-    throw bad(`claims lists 1 to ${MAX_CLAIMS} claim keys`);
+  const { course, claims: refs, candidates } = body;
+  if (typeof course !== "string" || course === "" || course.length > COURSE_CHARS || !oneLine(course)) {
+    throw bad(`course is one line of 1 to ${COURSE_CHARS} characters`);
   }
-  if (!claims.every((k) => typeof k === "string" && CLAIM_KEY.test(k))) {
-    throw bad("a claim key is mail:<h>:<n>");
+  if (!Array.isArray(refs) || refs.length === 0 || refs.length > MAX_CLAIMS) {
+    throw bad(`claims lists 1 to ${MAX_CLAIMS} claims`);
   }
-  if (new Set(claims).size !== claims.length) throw bad("a claim key is listed once");
+  const claims = refs.map((r) => {
+    if (
+      !isRecord(r) || Object.keys(r).length !== 2 || Object.keys(r).some((k) => k !== "uid" && k !== "index")
+    ) {
+      throw bad("a claim is {uid, index}");
+    }
+    const { uid, index } = r;
+    if (typeof uid !== "string" || !UID_SHAPE.test(uid)) throw bad("a claim is {uid, index}");
+    if (!Number.isInteger(index) || (index as number) < 0 || (index as number) > MAX_MAIL_CLAIMS - 1) {
+      throw bad("a claim is {uid, index}");
+    }
+    return `${uid}:${index}`;
+  });
+  if (new Set(claims).size !== claims.length) throw bad("a claim is listed once");
   if (!Array.isArray(candidates) || candidates.length > MAX_CANDIDATES) {
     throw bad(`candidates lists at most ${MAX_CANDIDATES} items`);
   }
   const read = candidates.map(readCandidate);
   if (new Set(read.map((c) => c.id)).size !== read.length) throw bad("a candidate id is listed once");
-  return { claims: claims as string[], candidates: read };
+  return { claims, candidates: read };
 }
 
 /** What a stored claim names and its due, when it is a claim a resolve can answer; else null. */
@@ -343,7 +362,11 @@ export function resolveHandler(deps: ResolveDeps): (req: Request) => Promise<Res
         }
       }
       return json(200, {
-        answers: batch.claims.map((claim) => ({ claim, target_id: answers.get(claim)?.target_id ?? null })),
+        answers: keys.map(({ key, uid, index }) => ({
+          uid,
+          index,
+          target_id: answers.get(key)?.target_id ?? null,
+        })),
       });
     } catch (e) {
       return asResponse(e);
