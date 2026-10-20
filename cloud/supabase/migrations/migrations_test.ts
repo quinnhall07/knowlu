@@ -2882,3 +2882,63 @@ Deno.test("S2f-a: the proof pins refuse a commit, an early end, an address, an i
     assert(problems.some((p) => p.includes(want)), `${want}: ${problems.join(" | ")}`);
   }
 });
+
+// L8 S2f-b (friends-testers §9 layer iii; V1 restated by the controller's ruling of 2026-10-20 on
+// est_usd): the proof's A, R and V cases are the case table's own ADMIN_CASES, ROUTE_CASES and
+// SPEND_CASES, verbatim, each run by its own runner. A7's statements and A3s's deletion run as the
+// service role in a savepoint that sets the role local and puts the caller's role back, and the
+// price pin the V cases set is only ever updated (the whole proof rolls back).
+const PROOF_TABLES = [["admin", "a_case", "ADMIN_CASES"], ["route", "r_case", "ROUTE_CASES"], ["spend", "v_case", "SPEND_CASES"]] as const;
+const ROLE_SWITCHES = ["set local role %I', p_role)", "set local role %I', v_prev)"];
+
+export function proofTableProblems(raw: string, tables: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const code = stripLineComments(raw);
+  for (const [tag, runner, name] of PROOF_TABLES) {
+    const m = new RegExp(String.raw`select pg_temp\.run\('${runner}', \$${tag}\$([\s\S]*?)\$${tag}\$::jsonb\);`).exec(code);
+    if (!m) {
+      out.push(`${name} is not run by pg_temp.${runner}`);
+      continue;
+    }
+    try {
+      assertEquals(JSON.parse(m[1]), tables[name]);
+    } catch {
+      out.push(`the rows are not testers_cases.ts's ${name}`);
+    }
+  }
+  if (!code.includes("as_role('service_role', 'delete from public.accounts where id = $1'")) out.push("A3s does not delete as service_role");
+  if (!code.includes("as_role('service_role', pg_temp.a7_sql(")) out.push("A7 does not run as service_role");
+  const roles = [...code.matchAll(/\b(?:re)?set\s+(?:local\s+)?role\b[^;]*/gi)].map((m) => m[0].replace(/\s+/g, " "));
+  if (JSON.stringify(roles) !== JSON.stringify(ROLE_SWITCHES) || !code.includes("v_prev text := current_user")) {
+    out.push(`role switches ${roles.join(" | ")}: want one set local role and one restore of the caller's role`);
+  }
+  if (/\b(?:insert\s+into|delete\s+from|truncate(?:\s+table)?)\s+(?:public\.)?models\b/i.test(code)) out.push("writes the price pin other than by update");
+  return out;
+}
+
+Deno.test("S2f-b: the staging proof runs ADMIN_CASES, ROUTE_CASES and SPEND_CASES verbatim, the service role's steps in a savepoint", async () => {
+  const tables = await import("./testers_cases.ts");
+  assertEquals(proofTableProblems(await Deno.readTextFile(PROOF), tables), []);
+});
+
+Deno.test("S2f-b: the proof pins refuse a drifted A, R or V row, a wrong runner, A3s as the owner, an unrestored role, a price write", async () => {
+  const tables = await import("./testers_cases.ts");
+  const raw = await Deno.readTextFile(PROOF);
+  assertEquals(proofTableProblems(raw, tables), [], "each mutation below is the only problem");
+  for (
+    const [from, to, want] of [
+      ['"auditAgo":"3 years 1 day"', '"auditAgo":"3 years"', "not testers_cases.ts's ADMIN_CASES"],
+      ['"calls":{"judge-task":2}', '"calls":{"judge-task":3}', "not testers_cases.ts's ROUTE_CASES"],
+      ['"estUsd":3,', '"estUsd":4,', "not testers_cases.ts's SPEND_CASES"],
+      ["select pg_temp.run('v_case', $spend$", "select pg_temp.run('a_case', $spend$", "SPEND_CASES is not run by pg_temp.v_case"],
+      ["'delete from public.accounts where id = $1'", "'delete from auth.users where id = $1'", "A3s does not delete as service_role"],
+      ["execute format('set local role %I', v_prev);", "reset role;", "role switches"],
+      ["update public.models set", "delete from public.models where false; update public.models set", "price pin"],
+    ]
+  ) {
+    const bad = raw.replace(from, () => to);
+    assertNotEquals(bad, raw, `the mutation for ${want} must apply to the real proof`);
+    const problems = proofTableProblems(bad, tables);
+    assert(problems.length === 1 && problems[0].includes(want), `${want}: ${problems.join(" | ")}`);
+  }
+});
