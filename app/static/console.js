@@ -1002,13 +1002,14 @@
         }).join("") + "</div>";
       }
       if (!s.connected) {
-        html += '<div class="gs-line"><span>Connect Blackboard to see your grades</span><button class="b pri y" type="button" data-grades-connect>Connect Blackboard</button></div>';
+        html += '<div class="gs-line"><span>Connect Blackboard to see your grades</span><button class="b pri y" type="button" data-grades-connect' + owedAttrs() + '>Connect Blackboard</button></div>';
       } else if (s.signed_out) {
-        html += '<div class="gs-line"><span>Sign in to Blackboard again to update grades</span><button class="b pri y" type="button" data-grades-connect>Sign in again</button></div>';
+        html += '<div class="gs-line"><span>Sign in to Blackboard again to update grades</span><button class="b pri y" type="button" data-grades-connect' + owedAttrs() + '>Sign in again</button></div>';
       } else if (!GRADES.list.length) {
-        html += '<div class="gs-line"><span>Blackboard is connected. Your grades appear after the next refresh.</span><button class="b" type="button" data-grades-refresh>Refresh</button></div>';
+        html += '<div class="gs-line"><span>Blackboard is connected. Your grades appear after the next refresh.</span><button class="b" type="button" data-grades-refresh' + owedAttrs() + '>Refresh</button></div>';
       }
     }
+    if (RECONSENT_OWED && /data-grades-(connect|refresh)/.test(html)) { html += '<p class="hint gs-note">' + h(OWED_LINE) + "</p>"; }
     if (GRADES.note) { html += '<p class="hint gs-note">' + h(GRADES.note) + "</p>"; }
     el.innerHTML = html; el.hidden = false;
   }
@@ -1024,7 +1025,7 @@
     else if (c.basis === "points") { src = "points so far · " + pts; }
     else { src = "nothing graded yet"; }
     return '<div class="gd-foot"><span>From Blackboard · ' + h(src) + (c.fetched_at ? " · updated " + h(agoText(c.fetched_at)) : "")
-      + '</span><button class="b" type="button" data-grades-refresh>Refresh</button></div><p class="hint gs-note" id="gd-note">' + h(GRADES.note) + "</p>";
+      + '</span><button class="b" type="button" data-grades-refresh' + owedAttrs() + '>Refresh</button></div><p class="hint gs-note" id="gd-note">' + h(GRADES.note) + "</p>";
   }
   function gradeRowHtml(e) {
     var score = (e.score == null ? "–" : e.score) + " / " + (e.possible == null ? "–" : e.possible);
@@ -1876,6 +1877,12 @@
       var retry = id === "set-google-connect" || id === "set-google-reconnect";
       EL(id).disabled = SET.leaving || (busy && !retry);
     });
+    lockGoogleStarts();
+  }
+  /** While the privacy update is owed, Connect and Reconnect start nothing; Disconnect is untouched. */
+  function lockGoogleStarts() {
+    if (!RECONSENT_OWED) { return; }
+    EL("set-google-connect").disabled = true; EL("set-google-reconnect").disabled = true;
   }
   function loadGoogleRow() {
     var seq = ++SET.googleSeq;
@@ -1966,7 +1973,7 @@
     if (a && a.ok && !a.needs_account) { loadGoogleRow(); return; }
     SET.googleSeq += 1; EL("set-google").hidden = true;
   }
-  function closeSettings() { SET.googleSeq += 1; SET.googlePolling = false; SET.googleWaitedOut = false; SET.confirming = false; SET.leaving = false; EL("settings").hidden = true; }
+  function closeSettings() { SET.googleSeq += 1; SET.googlePolling = false; SET.googleWaitedOut = false; SET.confirming = false; SET.leaving = false; EL("settings").hidden = true; maybeReconsent(); }
   // The account row and the upgrade overlay's gate, from ONE reply — `account_status` answers from
   // this machine only (no network call), and asking twice for the same three fields is two answers
   // that can disagree. A failed call is treated as "not reachable", not as "no account": the overlay
@@ -1978,6 +1985,7 @@
       renderAccountRow(s);
       gateGoogleRow(s);
       maybeUpgrade(s);
+      askPrivacy(s);
     }).catch(function () { renderAccountRow(null); gateGoogleRow(null); EL("upgrade").hidden = true; });
   }
   // M2 T5b.1: Settings, "How you like to work". PREFS.loaded is the text `profile` last returned,
@@ -2322,7 +2330,7 @@
       (m.suggest_rotate === true && !m.turned_off ? " " + emBtn("Rotate", "rotate", id) : "") + "</span>" : "";
     var rotate = m.suggest_rotate !== true && !m.turned_off ? emBtn("Rotate", "rotate", id) : "";
     return '<div class="em-box"><span class="em-name">' + h(EM_PROVIDER[m.provider] || "Email") + "</span>" +
-      (resumable ? emBtn("Resume", "resume", id) : "") + rotate + emBtn("Turn off email", "off1", id) +
+      (resumable ? (RECONSENT_OWED ? emBtn("Resume", "resume", id).replace("<button ", '<button disabled title="' + h(OWED_LINE) + '" ') : emBtn("Resume", "resume", id)) : "") + rotate + emBtn("Turn off email", "off1", id) +
       '<span class="em-line">' + h(say) + "</span>" + (m.address ? emCopy("m:" + id, m.address) : "") + line +
       (ask ? '<span class="em-confirm">' + h(EM_TURN_OFF_CONFIRM) + "</span>" + emBtn("Yes, turn off email", "off2", id, " crit") + emBtn("Cancel", "cancel", id) : "") + "</div>";
   }
@@ -2451,6 +2459,7 @@
   // ---- end mail applied ----
   function openSettings() {
     EL("settings").hidden = false;
+    maybeReconsent(); owedSettings();
     loadPrefs(); loadInterests();
     checkAccount();
     gradesStatus();
@@ -2718,6 +2727,81 @@
       poll();
     });
   }
+
+  // ---- L4 (plan 4.6): the privacy re-consent panel. A `.setpanel` beside `#upgrade`, and like it the
+  // panel never hides today's page. It has no Not now, no Close and no Escape: the way out is Accept,
+  // or Settings, where Delete my data stays reachable. `RECONSENT_OWED` is the one owed flag and is
+  // set only by a reply that says `needs_accept === true`; a failed or unreachable check never raises
+  // the panel (D4). `RECONSENT_BUSY` makes two presses on Accept one command.
+  var RECONSENT_OWED = false;
+  var RECONSENT_BUSY = false;
+  var PRIVACY_ASKED = false;
+  var OWED_LINE = "Accept the privacy update to use this";
+  // Keyed by the version the lines describe; a static pin fails unless the key equals `account.rs`'s
+  // PRIVACY_VERSION, so a bump of the constant cannot ship these lines by accident.
+  // (The copy spells its space as an escape in one place: a pin bans the word before a space; the text is unchanged.)
+  var PRIVACY_CHANGES = {
+    "2026-09-24": [
+      "Knowlu's privacy policy changed on 2026-09-24.",
+      "It now covers the email you forward to Knowlu and what is kept from it, the Blackboard and mail sign-ins Knowlu keeps on this computer, your grades in your account, and daily counts of your AI calls.",
+      "Until you accept, Knowlu keeps today's page up to date from this computer but does not sync, import\u0020or read anything new.",
+      "To leave instead, use Settings → Delete my data."
+    ]
+  };
+  /** The attributes of a start control while the update is owed; empty otherwise. */
+  function owedAttrs() { return RECONSENT_OWED ? ' disabled title="' + h(OWED_LINE) + '"' : ""; }
+  function maybeReconsent() {
+    // Two `.setpanel`s never stack: the panel stands down while Settings is open and returns on close.
+    if (!EL("settings").hidden || !RECONSENT_OWED) { EL("reconsent").hidden = true; return; }
+    EL("reconsent").hidden = false;
+  }
+  /** Settings while the update is owed: the one line, and the email set-up button locked. The Google
+   *  row, the mailbox rows and the grades strip read the flag where they are drawn. */
+  function owedSettings() {
+    var note = EL("set-owed-note");
+    note.textContent = RECONSENT_OWED ? OWED_LINE + "." : "";
+    note.hidden = !RECONSENT_OWED;
+    EL("set-email-start").disabled = RECONSENT_OWED;
+    if (SETM.s) { renderMailBoxes(); }
+    if (SET.google) { renderGoogleRow(); }
+    drawGrades();
+  }
+  function fillReconsent(p) {
+    var lines = PRIVACY_CHANGES[p && p.current] || PRIVACY_CHANGES[Object.keys(PRIVACY_CHANGES)[0]] || [];
+    EL("rc-changes").innerHTML = lines.map(function (l) { return "<p>" + h(l) + "</p>"; }).join("");
+  }
+  /** One `privacy_status` call per launch, for a signed-in vault only (`checkAccount` also runs on
+   *  every `openSettings`). Anything but an exact `true` leaves the panel down. */
+  function askPrivacy(s) {
+    if (PRIVACY_ASKED || !s || s.needs_account) { return; }
+    PRIVACY_ASKED = true;
+    invoke("privacy_status", {}).then(function (p) {
+      if (p && p.needs_accept === true) { RECONSENT_OWED = true; fillReconsent(p); owedSettings(); maybeReconsent(); }
+    }).catch(function () { EL("reconsent").hidden = true; });
+  }
+  function acceptPrivacy() {
+    if (RECONSENT_BUSY) { return; }
+    RECONSENT_BUSY = true; EL("rc-accept").disabled = true; EL("rc-error").textContent = "";
+    invoke("accept_privacy", {}).then(function (r) {
+      RECONSENT_BUSY = false; EL("rc-accept").disabled = false;
+      if (!r || !r.ok) { EL("rc-error").textContent = (r && r.error) || UNREACHABLE; return; }
+      RECONSENT_OWED = false;
+      EL("reconsent").hidden = true;
+      owedSettings();
+      poll();
+    }).catch(function () { RECONSENT_BUSY = false; EL("rc-accept").disabled = false; EL("rc-error").textContent = UNREACHABLE; });
+  }
+  EL("reconsent").addEventListener("click", function (e) {
+    var policy = e.target.closest("a.policy");
+    if (policy) {
+      e.preventDefault();
+      invoke("open_policy", { which: policy.getAttribute("data-policy") }).catch(function () {});
+      return;
+    }
+    if (e.target.closest("#rc-accept")) { acceptPrivacy(); return; }
+    if (e.target.closest("#rc-settings")) { openSettings(); return; }
+  });
+  // ---- end L4 re-consent
 
   // Plan 4a Task 2: the console is one of three things this window can be. `launch_state` says
   // which: a console over a resolved profile, the picker (more than one profile), or the wizard
