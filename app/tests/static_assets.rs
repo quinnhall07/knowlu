@@ -1528,7 +1528,7 @@ fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
         go.contains("WIZ.step === 2 && !WIZ.entitled"),
         "wizGo's own pre-ask is gated on the same panel and the same field wizValid is"
     );
-    assert!(go.contains("checkEntitled("), "wizGo re-asks the service before it refuses");
+    assert!(go.contains("checkEntitlement("), "wizGo re-asks the service before it refuses");
     // The subscribe presses ask first too — never a second Checkout page for an account the service
     // already calls entitled.
     let wiz_sub = js
@@ -1542,7 +1542,7 @@ fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
         .and_then(|s| s.split("function finishUpgrade(").next())
         .expect("the up-subscribe handler");
     for (name, handler) in [("#wiz-sub-month", wiz_sub), ("#up-subscribe", up_sub)] {
-        let ask = handler.find("checkEntitled(").expect("checkEntitled appears in the subscribe handler");
+        let ask = handler.find("checkEntitled(").or_else(|| handler.find("checkEntitlement(")).expect("an entitlement ask appears in the subscribe handler");
         let open = handler.find("open_checkout").expect("open_checkout is still reachable on a no");
         assert!(ask < open, "{name} asks the service before it ever opens a second Checkout page");
     }
@@ -1572,7 +1572,7 @@ fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
     // Round-4 re-review, BLOCKING: both stand-down checks must run again AFTER checkEntitled()
     // resolves, not only before it starts — a reply that lands after the student moved on must not
     // act on a panel nobody is looking at.
-    let ce_in_poll = poll.find("checkEntitled(").expect("pollEntitlement calls checkEntitled");
+    let ce_in_poll = poll.find("checkEntitlement(").expect("pollEntitlement calls the status-and-plan helper");
     let guards: Vec<_> = poll.match_indices("WIZ.step !== 2").map(|(i, _)| i).collect();
     assert_eq!(guards.len(), 2, "pollEntitlement's stand-down is checked before AND after checkEntitled()");
     assert!(guards[1] > ce_in_poll, "the second WIZ.step !== 2 check runs after checkEntitled() resolves");
@@ -2998,7 +2998,7 @@ fn the_subscribe_step_asks_status_and_plan_and_a_tester_sees_no_price() {
     assert!(!html.contains(TESTER_NOTE), "the markup does not carry the nothing-to-pay line");
     assert!(js.contains("Your subscription is active."), "a paid account keeps its note");
     assert!(html.contains("<h2>Subscribe</h2>"), "the default heading is unchanged");
-    assert_eq!(js.matches(TESTER_HEADING).count(), 1, "the tester heading is written once");
+    assert_eq!(js.matches(dq(TESTER_HEADING).as_str()).count(), 1, "the tester heading is written once");
     // Rendering, for the plan tester: note, hidden lede, retitled heading; prices hidden for any
     // entitled account.
     let render = fn_body(&js, "function renderWizard(");
@@ -3009,7 +3009,7 @@ fn the_subscribe_step_asks_status_and_plan_and_a_tester_sees_no_price() {
     assert!(note_stmt.contains("Your subscription is active."), "and still the paid note for a paid account");
     assert_eq!(render.matches(TESTER_NOTE).count(), 1, "no other element carries it");
     assert!(render.contains("wiz-subscribe") && render.contains(".lede") && render.contains(".hidden"), "the panel's lede is hidden for a tester");
-    assert!(render.contains("wiz-subscribe") && render.contains("h2") && render.contains(TESTER_HEADING), "the panel's heading is retitled for a tester");
+    assert!(render.contains("wiz-subscribe") && render.contains("h2") && render.contains(dq(TESTER_HEADING).as_str()), "the panel's heading is retitled for a tester");
     for id in ["wiz-sub-month", "wiz-sub-year"] {
         let line = render.lines().find(|l| l.contains(&format!("EL(\"{id}\").hidden"))).unwrap_or_else(|| panic!("{id} is hidden in renderWizard"));
         assert!(line.contains("WIZ.entitled"), "{id} is hidden for any entitled account: {}", line.trim());
