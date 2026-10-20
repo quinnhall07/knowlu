@@ -329,8 +329,10 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // and the re-issued `enforce_budget`, writing; each revoked from `public, anon, authenticated`),
   // plus the T1.3 review's `refund_allowance` (writing, revoked the same way), plus T2g.1's two
   // (`mail_hand_off` and `count_mail_arrival`, writing, each revoked from `public, anon,
-  // authenticated`), plus T3e's `expire_mail_work` (writing, revoked the same way).
-  assertEquals(parsed, 40, "today's corpus should parse exactly 40 function creations");
+  // authenticated`), plus T3e's `expire_mail_work` (writing, revoked the same way), plus L3 T1's
+  // two in `<stamp>_event_allowance.sql` (`charge_judge_allowance` and `refund_judge_allowance`,
+  // writing, non-definer, each revoked from `public, anon, authenticated`).
+  assertEquals(parsed, 42, "today's corpus should parse exactly 42 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -480,7 +482,7 @@ Deno.test("the three cap-store functions are revoked, not marked — R-C2-E48 fi
   // them for real instead. This asserts the marker is gone and the guard found a real revoke for
   // all three — not that they are silently exempt either way.
   const { exemptedByMarker } = assertExecuteRevoked(await everyMigrationFile());
-  for (const fn of ["charge_call", "record_tokens", "enforce_budget", "refund_call"]) {
+  for (const fn of ["charge_call", "record_tokens", "enforce_budget", "refund_call", "charge_judge_allowance", "refund_judge_allowance"]) {
     assert(!exemptedByMarker.includes(fn), `${fn} must be revoked, not marker-exempt: ${exemptedByMarker}`);
   }
   // No genuine C0/C1 app-called function ever carried this marker (confirmed by hand against
@@ -1864,9 +1866,11 @@ Deno.test("mail_addresses_gains_last_lapsed_at_backfilled_from_lapsed_since_and_
   assert(raw !== undefined, `expected ${MAIL_LAST_LAPSED_AT}`);
   // Forward-only: a new file after every applied one; the mail migration is never edited.
   // Stamped after every file before it; a later migration is named here when it lands.
+  // A later lane's file is named by its suffix, never its stamp (stamp rule M4).
   assertEquals(
-    files.map(([n]) => n).filter((n) => n > MAIL_LAST_LAPSED_AT),
-    [MAIL_MAX_TOKENS_REPIN],
+    files.map(([n]) => n).filter((n) => n > MAIL_LAST_LAPSED_AT)
+      .map((n) => EVENT_ALLOWANCE.test(n) ? "<stamp>_event_allowance.sql" : n),
+    [MAIL_MAX_TOKENS_REPIN, "<stamp>_event_allowance.sql"],
     "stamped after every other file but the named later ones",
   );
   const { name: mail, sql: mailSql } = await mailMigration();
@@ -1882,4 +1886,173 @@ Deno.test("mail_addresses_gains_last_lapsed_at_backfilled_from_lapsed_since_and_
     "alter table public.mail_addresses add constraint mail_addresses_last_lapse_stamped " +
     "check (lapsed_since is null or last_lapsed_at is not null)",
   ]);
+});
+
+// L3 T1, the first-day event allowance (spec 2026-10-06 §2, §3 step 3, §5; §9 tests 1-7). Textual,
+// as the mail allowance's pins are: nothing here applies SQL (plan Q-C), so these pins are the only
+// proof of the 14-day expiry, the no-reopening rule, the refund bounds and the concurrency shape. The
+// file is found by its suffix, never its stamp (stamp rule M4), so a rename moves no line here.
+const EVENT_ALLOWANCE = /^\d{14}_event_allowance\.sql$/;
+
+/** The one `<stamp>_event_allowance.sql`: its raw text, and comment-stripped, whitespace-normalised,
+ *  lower-cased. */
+async function eventAllowanceMigration(): Promise<{ name: string; raw: string; sql: string }> {
+  const files = (await everyMigrationFile()).filter(([n]) => EVENT_ALLOWANCE.test(n));
+  assertEquals(files.length, 1, "exactly one <stamp>_event_allowance.sql (plan T1)");
+  const [name, raw] = files[0];
+  return { name, raw, sql: stripLineComments(raw).replace(/\s+/g, " ").trim().toLowerCase() };
+}
+
+/** `fn`'s header (through `as $tag$`) and body (inside the tags), normalised as above, from its LAST
+ *  definition in the corpus, which must be the event-allowance migration's. */
+async function allowanceFunction(fn: string): Promise<{ name: string; sql: string; header: string; body: string }> {
+  const { name, sql } = await eventAllowanceMigration();
+  const last = await lastFunction(fn);
+  assertEquals(last.name, name, `${fn}: the event-allowance migration's definition governs`);
+  const m = new RegExp(FUNCTION_DEFINITION.source, "i").exec(last.text)!;
+  const rest = m[0].slice(m[1].length);
+  const flat = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  return { name, sql, header: flat(m[1]), body: flat(rest.slice(0, rest.indexOf(m[3]))) };
+}
+
+/** The text strictly between `from` and the first `to` after it. */
+function between(text: string, from: string, to: string): string {
+  const a = text.indexOf(from);
+  assert(a !== -1, `'${from}' not found`);
+  const b = text.indexOf(to, a + from.length);
+  assert(b !== -1, `'${to}' not found after '${from}'`);
+  return text.slice(a + from.length, b).trim();
+}
+
+Deno.test("event_allowance_opens_on_the_first_overflow_with_2000_minus_one_and_14_days", async () => {
+  const f = await allowanceFunction("charge_judge_allowance");
+  assert(/charge_judge_allowance\s*\(\s*p_account uuid, p_kind text\s*\)/.test(f.header), `${f.name}: (p_account uuid, p_kind text)`);
+  assert(f.header.includes("returns boolean"), `${f.name}: answers charged or not, as charge_call`);
+  assert(f.header.includes("language plpgsql"), `${f.name}: plpgsql`);
+  // The opening row: now, 14 days, the size written as `2000 - 1` (T2a's size mirror reads that form).
+  assert(
+    f.body.includes(
+      "insert into public.judge_allowances (account_id, kind, opened_at, until, calls_left, refunds) " +
+        "values (p_account, p_kind, now(), now() + interval '14 days', 2000 - 1, 0) " +
+        "on conflict (account_id, kind) do update",
+    ),
+    `${f.name}: the one insert opens the row with now(), 14 days, 2000 - 1 and no refunds`,
+  );
+  assert(f.body.includes("returning true into charged;"), `${f.name}: charged only when the row was written`);
+  assert(f.body.includes("return coalesce(charged, false);"), `${f.name}: no row written answers false`);
+});
+
+Deno.test("event_allowance_is_one_time_and_never_reopens", async () => {
+  const f = await allowanceFunction("charge_judge_allowance");
+  // The conflict arm sets only `calls_left`, and only while the row is open and not spent. Everything
+  // between `do update` and `returning` is compared whole, so an extra `or`, a reordered precedence or
+  // a second `set` target fails here. The row's own columns stay qualified: `excluded` is in scope too.
+  assertEquals(
+    between(f.body, "do update", "returning"),
+    "set calls_left = judge_allowances.calls_left - 1 " +
+      "where judge_allowances.until > now() and judge_allowances.calls_left > 0",
+    `${f.name}: the conflict arm decrements only, and only while open`,
+  );
+  // No renewal: mail's `charge_allowance` reopens after 120 days; this one never does.
+  const { name, raw } = await eventAllowanceMigration();
+  assert(!/interval\s+'120 days'/i.test(raw), `${name}: no 120-day renewal`);
+  // One-time means "no row", never "row expired": nothing but the account cascade ever deletes it.
+  for (const [file, text] of await everyMigrationFile()) {
+    const code = stripLineComments(text);
+    assert(
+      !/\b(?:delete\s+from|truncate(?:\s+table)?)\s+(?:only\s+)?(?:"?public"?\s*\.\s*)?"?judge_allowances"?/i.test(code),
+      `${file}: no migration deletes from judge_allowances`,
+    );
+  }
+});
+
+Deno.test("charge_judge_allowance_is_one_statement_on_a_unique_key", async () => {
+  // Why one statement is the concurrency proof (spec test 3): two first charges race to insert the
+  // same `(account_id, kind)`. The second waits on the primary key, then takes the `do update` arm,
+  // and Postgres re-checks its `where` on the locked row; two charges against `calls_left = 1`
+  // serialise the same way. An `update`, then an `insert` when not found, would race instead: the
+  // loser hits the key, throws, and `chargeAllowance` answers false while the allowance had room.
+  // The house count of `\b(insert|update|delete)\b` is 2 for an upsert, so the shape is pinned instead.
+  const f = await allowanceFunction("charge_judge_allowance");
+  assert(f.header.includes("security invoker"), `${f.name}: security invoker, as charge_call`);
+  assert(!f.header.includes("security definer"), `${f.name}: never security definer`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertEquals((f.body.match(/\binsert\b/g) ?? []).length, 1, `${f.name}: one insert`);
+  assert(f.body.includes("insert into public.judge_allowances"), `${f.name}: the insert is the allowance row's`);
+  assertEquals((f.body.match(/\bupdate\b/g) ?? []).length, 1, `${f.name}: one update`);
+  assert(f.body.includes("on conflict (account_id, kind) do update"), `${f.name}: the update is the conflict arm`);
+  assert(!/\bupdate\s+(?:public\.)?judge_allowances\b/.test(f.body), `${f.name}: no standalone update`);
+  for (const word of ["delete", "select", "if", "found"]) {
+    assert(!new RegExp(`\\b${word}\\b`).test(f.body), `${f.name}: no '${word}' (no read, no branch on a prior result)`);
+  }
+  const statements = between(f.body, " begin ", " end;").split(";").map((s) => s.trim()).filter((s) => s !== "");
+  assertEquals(statements.length, 2, `${f.name}: the insert and the return, nothing else`);
+  assert(statements[0].startsWith("insert into public.judge_allowances"), `${f.name}: the insert first`);
+  assertEquals(statements[1], "return coalesce(charged, false)", `${f.name}: then the return`);
+  // The conflict target is the table's primary key, so the conflict arm is a row lock.
+  const { name, raw } = await eventAllowanceMigration();
+  assert(tableItems(stripLineComments(raw), "judge_allowances").includes("primary key (account_id, kind)"), `${name}: the key`);
+});
+
+Deno.test("judge_allowances_kind_is_checked_to_event", async () => {
+  const { name, raw } = await eventAllowanceMigration();
+  const kind = tableColumns(stripLineComments(raw), "judge_allowances").get("kind");
+  assertEquals(kind, "kind text not null check (kind in ('event'))", `${name}: events only (spec Q4)`);
+  // And the corpus's live check is still this one: no later lane widens it (plan Q-F, L5's Q41).
+  const last = await lastCheckWords("judge_allowances", "kind");
+  assertEquals(last.words, ["event"], `${last.name}: judge_allowances.kind admits 'event' alone`);
+});
+
+Deno.test("refund_judge_allowance_gives_back_only_while_open_and_within_both_bounds", async () => {
+  // Spec §5: a `model failed` call the allowance charged is given back, but only while the allowance
+  // is open, never past its size, and never more than its size over its life. The lifetime `refunds`
+  // bound is what stops a device on a dead provider charging, failing and refunding forever: each
+  // `/judge-event` request is its own invocation, so F1's breaker never trips across a run.
+  const f = await allowanceFunction("refund_judge_allowance");
+  assert(/refund_judge_allowance\s*\(\s*p_account uuid, p_kind text\s*\)/.test(f.header), `${f.name}: (p_account uuid, p_kind text)`);
+  assert(f.header.includes("returns boolean"), `${f.name}: answers refunded or not, as refund_call`);
+  assert(f.header.includes("language plpgsql"), `${f.name}: plpgsql`);
+  assert(f.header.includes("security invoker") && !f.header.includes("security definer"), `${f.name}: security invoker`);
+  assert(f.header.includes("set search_path = public, extensions"), `${f.name}: a pinned search_path`);
+  assertEquals((f.body.match(/\b(insert|update|delete)\b/g) ?? []).length, 1, `${f.name}: one write`);
+  assert(!/\binsert\b/.test(f.body), `${f.name}: never opens a missing row`);
+  assert(!/\bselect\b/.test(f.body), `${f.name}: no read before the write`);
+  assertEquals(
+    between(f.body, "update public.judge_allowances", "returning"),
+    "set calls_left = calls_left + 1, refunds = refunds + 1 " +
+      "where account_id = p_account and kind = p_kind and until > now() and calls_left < 2000 and refunds < 2000",
+    `${f.name}: one back and one counted, only while open and inside both bounds`,
+  );
+  assert(!/opened_at|until =/.test(f.body), `${f.name}: never sets opened_at or until`);
+  assert(f.body.includes("returning true into done;"), `${f.name}: refunded only when the row was written`);
+  assert(f.body.includes("return coalesce(done, false);"), `${f.name}: no row written answers false`);
+});
+
+Deno.test("judge_allowances_is_service_role_only_and_purged_with_the_account", async () => {
+  const { name, raw, sql } = await eventAllowanceMigration();
+  assert(sql.includes("alter table public.judge_allowances enable row level security;"), `${name}: RLS on`);
+  assert(sql.includes("revoke all on public.judge_allowances from anon, authenticated;"), `${name}: no client grant`);
+  for (const [file, text] of await everyMigrationFile()) {
+    const code = stripLineComments(text).replace(/\s+/g, " ").toLowerCase();
+    for (const g of code.matchAll(/grant [^;]* on (?:table )?(?:public\.)?judge_allowances to ([^;]+);/g)) {
+      assert(!/\b(anon|authenticated|public)\b/.test(g[1]), `${file}: judge_allowances is granted to ${g[1]}`);
+    }
+    assert(!/create policy [^;]* on (?:public\.)?judge_allowances\b/.test(code), `${file}: no policy on judge_allowances`);
+  }
+  // The account purge removes it: the row lives exactly as long as the account.
+  const account = tableColumns(stripLineComments(raw), "judge_allowances").get("account_id");
+  assertEquals(account, "account_id uuid not null references public.accounts (id) on delete cascade", `${name}: purged with the account`);
+  assertServiceRoleOnly({ name, sql }, "charge_judge_allowance", "uuid, text");
+  assertServiceRoleOnly({ name, sql }, "refund_judge_allowance", "uuid, text");
+});
+
+Deno.test("the_event_allowance_migration_reissues_no_cap_function", async () => {
+  // Spec Q5, Q6: `charge_call`, `refund_call` and `enforce_budget` keep their SQL, so their own pins
+  // (the first-two-days test and F1's) still pass with no edit. The file defines its two functions only.
+  const { name, raw } = await eventAllowanceMigration();
+  const defined = [...stripLineComments(raw).matchAll(FUNCTION_DEFINITION)].map((m) => m[2].toLowerCase());
+  assertEquals(defined, ["charge_judge_allowance", "refund_judge_allowance"], `${name}: its two functions and no other`);
+  // `ci.yml`'s eval gate runs (and spends) for any migration naming the `models` table; this one
+  // changes no pin, so its text, comments included, never uses that word on its own.
+  assert(!/\bmodels\b/i.test(raw), `${name}: never names the models table`);
 });
