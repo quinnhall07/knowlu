@@ -58,7 +58,7 @@ fn judge_on_a_vault_with_no_account_names_the_reason_and_exits_zero() {
     );
     assert!(!all.contains("runtime not installed"), "the local runtime no longer exists:\n{all}");
     let note = std::fs::read_to_string(v.join("tasks").join("hw3.md")).unwrap();
-    assert!(note.contains("course: cs-100"), "tier 1 still attributes the course:\n{note}");
+    assert!(note.contains("course: \"cs-100\""), "tier 1 still attributes the course:\n{note}");
     let _ = std::fs::remove_dir_all(&v);
 }
 
