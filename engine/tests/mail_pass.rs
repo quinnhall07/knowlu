@@ -979,9 +979,18 @@ fn a_refused_course_is_skipped_and_the_next_is_asked() {
 }
 
 /// The server refuses more than 15 claims a call (`MAX_CLAIMS`), so a course with more is asked in
-/// consecutive groups. Sixteen claims about `Lab`, each a different due, in one message.
-fn sixteen_lab_claims(today: Date) -> Value {
-    row("mail:aa11", T1, "backfill", (0..16).map(|i| change("Lab", "CS 101", &ahead(today, 3 + i))).collect())
+/// consecutive groups. Sixteen claims about `Lab`, each a different due, in four messages of 5, 5, 5 and 1:
+/// the server also refuses any claim index above 4 (`MAX_MAIL_CLAIMS` = 5 a message).
+fn sixteen_lab_claims(today: Date) -> Vec<Value> {
+    let mut n = 0;
+    [5, 5, 5, 1]
+        .iter()
+        .enumerate()
+        .map(|(m, size)| {
+            let claims = (0..*size).map(|_| { n += 1; change("Lab", "CS 101", &ahead(today, 2 + n)) }).collect();
+            row(&format!("mail:aa1{}", m + 1), T1, "backfill", claims)
+        })
+        .collect()
 }
 
 /// Answer every claim of the request with `Lab 6`.
@@ -992,9 +1001,18 @@ fn all_lab_6(body: &Value) -> Value {
     json!({ "answers": answers })
 }
 
-fn claim_indexes(call: &str) -> Vec<u64> {
+/// The (message uid, claim index) pairs a call carries, in order. No index is above 4, as the real server
+/// refuses it, so a fixture that packs more than five claims into a message fails here.
+fn claim_refs(call: &str) -> Vec<(String, u64)> {
     let body: Value = serde_json::from_str(body_of(call)).unwrap();
-    body["claims"].as_array().unwrap().iter().map(|c| c["index"].as_u64().unwrap()).collect()
+    let refs: Vec<(String, u64)> =
+        body["claims"].as_array().unwrap().iter().map(|c| (c["uid"].as_str().unwrap().to_string(), c["index"].as_u64().unwrap())).collect();
+    assert!(refs.iter().all(|(_, i)| *i <= 4), "the server refuses a claim index above 4: {refs:?}");
+    refs
+}
+
+fn lab_ref(message: u8, index: u64) -> (String, u64) {
+    (format!("mail:aa1{message}"), index)
 }
 
 /// Sixteen claims in one course are two calls, 15 then 1, in claim order, with the same candidates; both
@@ -1004,12 +1022,13 @@ fn sixteen_claims_are_two_calls_of_fifteen_and_one() {
     let vault = scratch("resolve-sixteen");
     labs_and_quizzes(&vault);
     let today = vault_today(&vault);
-    let mut server = resolving(vec![pull(vec![sixteen_lab_claims(today)], json!([]), false)], all_lab_6);
+    let mut server = resolving(vec![pull(sixteen_lab_claims(today), json!([]), false)], all_lab_6);
     let lines = run(&vault, &server, today);
     let calls = server.calls("mail-resolve");
     assert_eq!(calls.len(), 2, "{calls:?}");
-    assert_eq!(claim_indexes(&calls[0]), (0..15).collect::<Vec<u64>>());
-    assert_eq!(claim_indexes(&calls[1]), [15]);
+    let plan_order: Vec<(String, u64)> = (1..=3).flat_map(|m| (0..5).map(move |i| lab_ref(m, i))).collect();
+    assert_eq!(claim_refs(&calls[0]), plan_order, "the first call is the first three messages' claims, in plan order");
+    assert_eq!(claim_refs(&calls[1]), [lab_ref(4, 0)]);
     let candidates = |call: &str| serde_json::from_str::<Value>(body_of(call)).unwrap()["candidates"].clone();
     assert_eq!(candidates(&calls[0]), candidates(&calls[1]), "every group is offered the same items");
     assert!(knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"), "both groups answered, so the message is recorded: {lines:?}");
@@ -1026,7 +1045,7 @@ fn a_refused_second_group_leaves_the_first_applied() {
     let vault = scratch("resolve-group-refused");
     labs_and_quizzes(&vault);
     let today = vault_today(&vault);
-    let pulled = knowlu_engine::ledger::dumps_value(&pull(vec![sixteen_lab_claims(today)], json!([]), false));
+    let pulled = knowlu_engine::ledger::dumps_value(&pull(sixteen_lab_claims(today), json!([]), false));
     let mut server = serve(move |request, _| {
         if request.starts_with("POST /functions/v1/mail-resolve ") {
             let body: Value = serde_json::from_str(body_of(request)).unwrap_or(Value::Null);
@@ -1038,11 +1057,18 @@ fn a_refused_second_group_leaves_the_first_applied() {
         (200, pulled.clone())
     });
     let lines = run(&vault, &server, today);
-    assert_eq!(server.calls("mail-resolve").len(), 2);
+    let calls = server.calls("mail-resolve");
+    assert_eq!(calls.len(), 2);
+    calls.iter().for_each(|c| {
+        claim_refs(c);
+    });
     assert_eq!(lines[0], "mail: 0 new, 0 changed, 1 proposed, 0 notices, 0 past, 14 superseded, 0 unmatched", "the first group's answers are applied: {lines:?}");
     assert_eq!(files(&vault, "approvals").len(), 1);
     assert!(lines.iter().any(|l| l == "mail: could not ask which item (the service refused); left for the next slot"), "{lines:?}");
-    assert!(!knowlu_engine::ingest::load_seen(&vault).contains("mail:aa11"), "the sixteenth is unanswered, so the message is held");
+    let seen = knowlu_engine::ingest::load_seen(&vault);
+    for uid in ["mail:aa11", "mail:aa12", "mail:aa13", "mail:aa14"] {
+        assert!(!seen.contains(uid), "{uid}: the sixteenth is unanswered, so the pull is held");
+    }
     let _ = std::fs::remove_dir_all(&vault);
 }
 
