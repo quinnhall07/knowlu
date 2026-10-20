@@ -3,7 +3,7 @@
 //! [`parse_banner`]** (Plan ruling R1-a); its fixture is
 //! `engine/tests/fixtures/registrar/banner-ua-registration.json`. Nothing here fetches: the app
 //! carries the bytes (spec D4).
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use jiff::civil::{Date, Time};
@@ -284,6 +284,13 @@ pub struct Report {
     pub no_time: usize,
     pub midnight: usize,
     pub warnings: Vec<String>,
+    /// A2 item 11: the confirmed notes of the fetched term whose CRN the answer did not list at all
+    /// (absent from P9's `seen`), by vault-relative path. Named here; close-out B3d ends them.
+    pub missing: Vec<String>,
+    /// A2 items 10, 11 and 13: every row read `unread` or `partial` that a confirmed note holds,
+    /// and every `partial` row no note holds, as `(key, note, reading)`. The note is unchanged;
+    /// close-out B3c lists them.
+    pub unread: Vec<(String, Option<String>, Reading)>,
 }
 
 impl Report {
@@ -298,10 +305,10 @@ impl Report {
 
 /// `commitments --registrar <file> --school <key>` (spec §3). Parses first: an unknown school, a
 /// file that is not JSON and a parse with no usable row are `Err` (exit 2) before anything is
-/// written. Then the term's calendar is merged under D5 ([`crate::commitments::refresh_series`]),
-/// and every kept row that names a vault course and is a current proposal is confirmed at `hard`
-/// through phase 2's `confirm`, under `ctx` (the student: the vault's human token via
-/// `dashboard`; Plan rulings R3-b, R3-c). No network.
+/// written. Then the term's calendar is merged under D5 ([`crate::commitments::refresh_series`])
+/// with P9's carry ([`run_parsed`]), and every row read `whole` that names a vault course and is a
+/// current proposal is confirmed at `hard` through phase 2's `confirm`, under `ctx` (the student:
+/// the vault's human token via `dashboard`; Plan rulings R3-b, R3-c). No network.
 pub fn run(
     vault: &Path,
     text: &str,
@@ -320,7 +327,7 @@ pub fn run(
 
 /// [`run`] after the parse: the seam that lets a test hand it a parse made with an invented
 /// registered set ([`parse_banner_with`]), since a real school's set is data in [`SCHOOLS`]. Moved
-/// verbatim out of `run` by close-out task B2; nothing else changed.
+/// out of `run` by close-out task B2; B3a added P9's carry, `missing` and `unread`.
 pub fn run_parsed(
     vault: &Path,
     parsed: Parsed,
@@ -331,12 +338,37 @@ pub fn run_parsed(
 ) -> Result<Report, String> {
     use crate::commitments as cm;
     let calendar = calendar_key(school_key, &parsed.term);
-    let (_, mut warnings) = cm::refresh_series(vault, &[(calendar, parsed.series.clone())], today);
+    // P9: how each CRN of the answer was read, by its key; the confirmed notes of this term, by key.
+    let read: BTreeMap<String, Reading> = parsed.seen.iter().map(|(crn, how)| (format!("{calendar}-{crn}"), *how)).collect();
+    let notes: BTreeMap<String, String> = cm::load(vault)
+        .confirmed
+        .into_iter()
+        .filter_map(|n| Some((n.source_uid?, n.path.to_string_lossy().replace('\\', "/"))))
+        .filter(|(key, _)| key.strip_prefix(calendar.as_str()).is_some_and(|crn| crn.starts_with('-')))
+        .collect();
+    // P9's merge carry: the `whole` rows, plus the previous row, unchanged, of each CRN read
+    // `partial`, `unread` or `status` whose key a confirmed note holds. A CRN no note holds is not
+    // carried, so `refresh_series` moves it to `ended`; with no previous row nothing is stored.
+    let whole: Vec<Series> = parsed.series.iter().filter(|s| read.get(&s.source_uid) == Some(&Reading::Whole)).cloned().collect();
+    let (prior, _) = cm::read_series_file(vault);
+    let carried = prior.series.into_iter().filter(|s| {
+        s.calendar == calendar && notes.contains_key(&s.source_uid) && read.get(&s.source_uid).is_some_and(|how| *how != Reading::Whole)
+    });
+    let input: Vec<Series> = whole.iter().cloned().chain(carried).collect();
+    let (_, mut warnings) = cm::refresh_series(vault, &[(calendar, input)], today);
     warnings.extend(parsed.warnings.iter().cloned());
+    // A2 item 11: missing only when `seen` holds no row with the note's CRN at all.
+    let missing = notes.iter().filter(|(key, _)| !read.contains_key(*key)).map(|(_, note)| note.clone()).collect();
+    let unread = read
+        .iter()
+        .filter(|(key, how)| matches!(how, Reading::Partial) || (matches!(how, Reading::Unread) && notes.contains_key(*key)))
+        .map(|(key, how)| (key.clone(), notes.get(key).cloned(), *how))
+        .collect();
     let stored = cm::stored_proposals(vault, today);
     let current: BTreeSet<&str> = stored.proposals.iter().map(|p| p.source_uid.as_str()).collect();
     let (mut mine, mut proposed) = (Vec::new(), 0);
-    for s in &parsed.series {
+    // A2 item 10: R24 creates only from a row the fetch read `whole`.
+    for s in &whole {
         match cm::registrar_course(s, &stored.codes) {
             Some(_) if current.contains(s.source_uid.as_str()) => mine.push((s.source_uid.clone(), "hard".to_string())),
             Some(_) => {}
@@ -356,12 +388,37 @@ pub fn run_parsed(
         no_time: parsed.no_time,
         midnight: parsed.midnight,
         warnings,
+        missing,
+        unread,
     })
 }
 
-/// The *Schedule* view's registrar line (Plan ruling R3-d): the school and the terms the series
-/// file holds, the term [`term_for`] names today, and whether that one is missing. `null` when the
-/// file holds no registrar calendar.
+/// G3 (spec A2 item 15, "When the button flips"): a held term is **over** once the latest `until`
+/// (its rows' last `CLAS` `endDate`) of every series under its calendar is before `today`. A row
+/// with an open `until` keeps it in session; a term with no series left meets on no day. This is
+/// not Amendment 1's in-play rule (28 days past), which keeps the term's series alive.
+pub fn term_over(file: &SeriesFile, calendar: &str, today: Date) -> bool {
+    file.series.iter().filter(|s| s.calendar == calendar).all(|s| s.until.is_some_and(|u| u < today))
+}
+
+/// G3 (spec A2 item 15, "Which term it fetches then"): the term after `term` in the school's
+/// [`School::terms`] order; the last suffix is followed by the first of the next year (UA: fall
+/// `<year>40`, then spring `<year+1>10`; spring `<year>10`, then fall `<year>40`).
+pub fn next_term(school_key: &str, term: &str) -> Option<String> {
+    let terms = school(school_key)?.terms;
+    let year: i32 = term.get(..4)?.parse().ok()?;
+    let at = terms.iter().position(|(_, suffix)| Some(*suffix) == term.get(4..))?;
+    Some(match terms.get(at + 1) {
+        Some((_, next)) => format!("{year}{next}"),
+        None => format!("{}{}", year + 1, terms.first()?.1),
+    })
+}
+
+/// The *Schedule* view's registrar line (Plan ruling R3-d; G3, spec A2 item 15): the school and
+/// the terms the series file holds, the term to fetch and whether *Refresh from myBama* is on. It
+/// is on when every held term is [`term_over`]; the term is then [`next_term`] after the latest
+/// held one, and before that the latest held one. `null` when the file holds no registrar
+/// calendar (the app's capture then takes [`term_for`]'s month table).
 pub fn status(file: &SeriesFile, today: Date) -> Value {
     let mut school_key: Option<String> = None;
     let mut held: BTreeSet<String> = BTreeSet::new();
@@ -371,8 +428,9 @@ pub fn status(file: &SeriesFile, today: Date) -> Value {
         held.insert(term.to_string());
     }
     let Some(school_key) = school_key else { return Value::Null };
-    let current = term_for(&school_key, today);
-    let refresh = current.as_ref().is_some_and(|t| !held.contains(t));
+    let refresh = held.iter().all(|t| term_over(file, &calendar_key(&school_key, t), today));
+    let latest = held.iter().next_back();
+    let current = if refresh { latest.and_then(|t| next_term(&school_key, t)) } else { latest.cloned() };
     json!({ "school": school_key, "held": held, "current": current, "refresh": refresh })
 }
 

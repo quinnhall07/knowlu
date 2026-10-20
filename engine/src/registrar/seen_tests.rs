@@ -204,3 +204,27 @@ fn a_dropped_electives_row_is_not_carried_and_comes_back_when_read_whole() {
         assert!(!lab.ended_keys().contains(&KEY_ENGL.to_string()), "{how}: its ended entry stayed");
     }
 }
+
+/// B3a (its own test; A2 items 10 and 11, P9). `run` names a confirmed note missing only when its
+/// CRN is absent from `seen` (B3d ends it), and names for `unread` (B3c lists them) every row read
+/// `unread` or `partial` that a note holds, and a `partial` row no note holds, by its key.
+#[test]
+fn run_names_a_note_missing_only_from_seen_and_names_the_rows_read_in_part() {
+    let lab = four_notes("seen-names");
+    let mut later = fx();
+    drop_crn(&mut later, "40006");
+    blank_times(&mut later, "40001");
+    add_timeless_meeting(&mut later, "40003");
+    add_timeless_meeting(&mut later, "40004");
+    retime(&mut later, "40004", "0900", "0950");
+    set_days(&mut later, "40004", &["monday"]);
+    let journal = &mut crate::journal::Journal::new(&lab.v);
+    let r = super::run(&lab.v, &later.to_string(), "ua", D10, &lab.ctx(), journal).unwrap();
+    assert_eq!(r.missing, ["commitments/art-110.md"]);
+    let unread: Vec<(&str, Option<&str>, super::Reading)> = r.unread.iter().map(|(k, n, how)| (k.as_str(), n.as_deref(), *how)).collect();
+    assert_eq!(unread, [
+        (KEY_LECTURE, Some(LECTURE), super::Reading::Unread),
+        (KEY_ENGL, Some("commitments/engl-101.md"), super::Reading::Partial),
+        ("registrar:ua:202640-40004", None, super::Reading::Partial),
+    ]);
+}
