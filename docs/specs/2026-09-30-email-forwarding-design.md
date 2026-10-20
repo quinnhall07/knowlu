@@ -287,7 +287,9 @@ steps below as they run.
    complete original with its own DKIM and Gmail's own `Authentication-Results` and ARC set from
    delivery), in sends under Gmail's 25 MB per message (about 100 messages), each with the nonce, and
    close the batch with the count sent. Gmail's sending limits are far above this volume; the routine
-   still stops at the first send failure with a named outcome. The script deletes the Sent copies it
+   still stops at the first send failure with a named outcome. *(amended 2026-10-19, Quinn: the day's
+   caps in §4.2 step 5's amendment apply here, at most 1,500 originals in 300 messages and 600 page loads;
+   a backfill held by the 300 messages waits until 30 have freed, then goes on.)* The script deletes the Sent copies it
    created, as on M365.
 8. **Finish**, as §4.2 step 6.
 
@@ -655,8 +657,8 @@ Per mailbox, with the mailbox's own kept profile:
    device read the stamps (even one already unlapsed by a later pull) leaves `cleared: false` and the
    stamp for the next pass. A still-lapsed mailbox keeps its stamp, and a retry is a harmless `cleared:
    false`. Corrected 2026-10-19 after review: the first version matched `lapsed_since` alone, and a
-   lapse during a pass that spanned slots was wiped. The cloud half is built; the app's half, sending
-   `covered` with both stamps, is not yet. Accepted for the MVP (Quinn, 2026-10-19): a mailbox that lapses while `confirmed` or `blocked` (forward on, no canary yet) comes back `pending`, so gmail-read reads its gap by OAuth; if recover later reaches back over the same gap, a message can be filed twice, once as `gmail:<id>` and once as `mail:<hash>`, since the two paths share no key and only an equal normalised title in the same course folds the second. Testers are comped and do not lapse, so the window is left open. The follow-up after the MVP is one shared key: gmail-read derives the forward path's Message-ID hash, which ends every cross-path duplicate, this one included.)*
+   lapse during a pass that spanned slots was wiped. The cloud half is built, and the app's half, sending
+   `covered` with both stamps, is built too (`7c917b3`, merged at `1c15e8d`). Accepted for the MVP (Quinn, 2026-10-19): a mailbox that lapses while `confirmed` or `blocked` (forward on, no canary yet) comes back `pending`, so gmail-read reads its gap by OAuth; if recover later reaches back over the same gap, a message can be filed twice, once as `gmail:<id>` and once as `mail:<hash>`, since the two paths share no key and only an equal normalised title in the same course folds the second. Testers are comped and do not lapse, so the window is left open. The follow-up after the MVP is one shared key: gmail-read derives the forward path's Message-ID hash, which ends every cross-path duplicate, this one included.)*
 4. **Recover.** Open a `recover` batch and forward the missing messages as attachments, **oldest first**,
    at most 30 a slot when no backfill is open, at Microsoft's pace, deleting the Sent copies it created;
    close the batch with the count sent (§4.8 holds it until it is whole).
@@ -882,11 +884,12 @@ approved **task** card, and the card's own status bookkeeping, are executed as t
   `write::find_pending_amendment` finds one; none for a value the student already rejected on a card for
   that note and field (until the feed's value changes); a field no human edited is written exactly as
   today. The card goes through `write::create` in the shape `approvals::validate_amendment` accepts, as
-  the ingest actor, with its own "Why proposed" line ("Blackboard now says <to>; you set <from> by hand,
-  so this is a proposal"), **never through `write::propose_amendment`**, whose "re-judged … (judge-once
-  rule)" line would be false for a feed change (R20's reason, applied here). The run line says
-  `proposed <stem>: due`. Approving it writes as today's executor; the field stays human-edited in the
-  journal, so a later feed move is a card again.
+  the ingest actor, with its own "Why proposed" line ("Your course feed now says <to>; you set <from> by
+  hand, so this is a proposal"; the card names no LMS, since Canvas feeds reach it too, amended
+  2026-10-20), **never through `write::propose_amendment`**, whose "re-judged … (judge-once rule)" line
+  would be false for a feed change (R20's reason, applied here). The run line says `proposed <stem>: due`.
+  Approving it writes as today's executor; the field stays human-edited in the journal, so a later feed
+  move is a card again.
 - **Unchanged:** `rank` (it never calls a model and never sees a claim), `surface`, `write`, the `gmail`
   pass, every frozen reference. `judge` still exits 0 on every failure shape.
   *(Signed: Quinn, 2026-10-04 (G2/Q2): surface carries a mail card's from, mail_date and evidence, on
