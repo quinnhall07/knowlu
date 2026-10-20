@@ -998,6 +998,20 @@ fn the_wizard_never_offers_a_local_model() {
     }
 }
 
+/// Ruling 10 (L6): nothing on the page reaches a local model. The settings row `#set-judge`, its
+/// functions and its four commands are gone, and so is the wizard's flag. `manifest.json` (the model
+/// manifest's URL, which lived in Rust and never on the page) stays absent: that check is carried over
+/// from `the_local_judgment_row_has_a_state_for_every_outcome`, which T4 deletes.
+#[test]
+fn nothing_on_the_page_reaches_a_local_model() {
+    let html = read("index.html");
+    assert!(!html.contains("id=\"set-judge"), "the Local judgment row is gone from the markup");
+    let js = read("console.js");
+    for gone in ["inference_status", "install_inference", "remove_inference_model", "renderInference", "loadInference", "offer_inference", "manifest.json"] {
+        assert!(!js.contains(gone), "console.js still names {gone}");
+    }
+}
+
 /// R-P4a-21: the wizard's privacy paragraph and the site's are ONE sentence, checked against each
 /// other rather than against two copies of a literal. The site page is the published promise; the
 /// wizard is the same promise made to someone who has not visited it. A word edited on either side

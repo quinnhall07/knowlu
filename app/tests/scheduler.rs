@@ -801,7 +801,8 @@ fn an_entitled_vault_runs_judge_with_no_runtime_and_no_account_on_the_command_li
     let plan = judge_plan(&cs);
     let JudgePlan::Cloud { log_dir } = plan.clone() else { panic!("not the cloud plan: {plan:?}") };
     // The profile's own judgments folder, never the vault: judgment logs never enter a vault.
-    assert!(log_dir.starts_with(&cs.data_dir), "{log_dir:?} is not under {:?}", cs.data_dir);
+    // Pinned to equality (L6 T1): the folder must stay byte for byte `<profile data>\judgments`.
+    assert_eq!(log_dir, cs.data_dir.join("judgments"));
     let argv = slot_argv(&v, Path::new(r"C:\bin\knowlu-engine.exe"), &plan, None);
     let judge = argv.iter().find(|(_, a)| a[0] == "judge").expect("the judge step is in the argv");
     assert_eq!(
@@ -812,6 +813,24 @@ fn an_entitled_vault_runs_judge_with_no_runtime_and_no_account_on_the_command_li
     for (_, args) in &argv {
         assert!(!args.iter().any(|a| a.contains("acc-1") || a == "--runtime" || a == "--model"), "{args:?}");
     }
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+/// Ruling 10 (L6): a vault with no `config/cloud.yaml` gets a named judge skip, the same words `sync`
+/// uses, never a silent omission. It runs against a fresh temp `LOCALAPPDATA` so the check can never
+/// read the developer's real app data.
+#[test]
+fn a_vault_with_no_account_skips_judge_by_name() {
+    let v = scratch("noaccountjudge");
+    assert!(!v.join("config").join("cloud.yaml").exists(), "the fixture has no account");
+    let fake_local_appdata = std::env::temp_dir().join(format!("qo-console-sched-noacct-localappdata-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake_local_appdata);
+    std::fs::create_dir_all(&fake_local_appdata).unwrap();
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("LOCALAPPDATA", fake_local_appdata.as_os_str())]);
+    let cs = open(&v, "noaccountjudge");
+    assert_eq!(judge_plan(&cs), JudgePlan::Skip("judge (skipped: no account)"));
+    let _ = std::fs::remove_dir_all(&fake_local_appdata);
     let _ = std::fs::remove_dir_all(&v);
 }
 
