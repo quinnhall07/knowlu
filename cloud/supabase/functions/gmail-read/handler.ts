@@ -62,6 +62,20 @@ export const PER_CALL_MS = 60_000;
  */
 export const READ_BUDGET_MS = 40_000 + PER_CALL_MS;
 
+/** L7 (plan §3.3; Quinn's Q3 ruling, 2026-10-19, amending cloud design §5.3): a week, in
+ * milliseconds. A grant at least this old whose `WINDOW` list holds no message has gone quiet. */
+export const QUIET_AFTER_MS = 7 * 86_400_000;
+
+/**
+ * L7: has a connected Gmail gone quiet? Only when the RAW 7-day list (before dedup and the cap: an
+ * already-seen message is still mail) is empty and the grant is at least `QUIET_AFTER_MS` old.
+ * Milliseconds, never rounded to days, so exactly 7 × 24 hours counts and 1 ms less does not. No
+ * `connected_at` to read claims nothing. The answer is this rule, never a status write's effect.
+ */
+export function wentQuiet(listed: number, connectedAt: number | null, now: number): boolean {
+  return listed === 0 && connectedAt !== null && now - connectedAt >= QUIET_AFTER_MS;
+}
+
 /** A Gmail API call that failed. The status is kept because it reaches a log line; the response
  * body is not, because a Gmail error body is not ours to log (§5.6's rule, applied here too). */
 export class GmailApiError extends Error {
@@ -200,6 +214,9 @@ export function forwardingCounts(gmail: string | null, mailboxes: Forwarding["ma
   return mailboxes.some((m) => fold(m.hint) === address && FORWARDING_COUNTS.includes(m.status));
 }
 
+/** The two `google_accounts.status` values this function moves between; never `revoked`. */
+export type MovableStatus = "active" | "quiet";
+
 export interface ReadDeps {
   api: GmailApi;
   /** A fresh access token, or which of the three reasons there is none. */
@@ -225,6 +242,12 @@ export interface ReadDeps {
   unlapse(accountId: string): Promise<void>;
   /** Email forwarding D22: the account's OAuth Gmail address and its forwarding mailboxes. */
   forwarding(accountId: string): Promise<Forwarding>;
+  /** L7 (plan §3.3): the grant row's `connected_at` in epoch milliseconds, or null when there is
+   * none to read. `store_google_grant` resets it on every connect and reconnect. */
+  connectedAt(accountId: string): Promise<number | null>;
+  /** L7 (plan §3.3): one conditional status move, `from` → `to`, written only while the row still
+   * reads `from` (`status=eq.<from>`), so a `revoked` row is never touched. */
+  moveStatus(accountId: string, from: MovableStatus, to: MovableStatus): Promise<void>;
   pipeline(): Promise<PipelineDeps>;
   budgetMs: number;
   clock: () => number;
@@ -307,7 +330,12 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
       await deps.unlapse(account_id);
       const forwarding = await deps.forwarding(account_id);
       if (forwardingCounts(forwarding.gmail, forwarding.mailboxes)) {
-        return Response.json({ items: await undelivered(), read: 0, quiet: false, more: false, via_forward: true });
+        // L7 (plan §3.3): forwarding owns this mailbox's silence (its canary, D14), so the Gmail
+        // grant is never left reading `quiet` here, and the answer is never "gone quiet".
+        await deps.moveStatus(account_id, "quiet", "active");
+        return Response.json({
+          items: await undelivered(), read: 0, quiet: false, more: false, via_forward: true, went_quiet: false,
+        });
       }
 
       const lookup = await deps.accessTokenFor(account_id);
@@ -348,9 +376,14 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
       // to know when it has gathered enough NEW mail to stop, but this filter-then-slice is the
       // real cap and runs regardless of what the API already did.
       const unseen = (id: string) => !already.has(`gmail:${id}`);
-      const ids = (await deps.api.list(token, query(await deps.excludedLabels(account_id)), unseen))
-        .filter(unseen)
-        .slice(0, READ_CAP);
+      const listed = await deps.api.list(token, query(await deps.excludedLabels(account_id)), unseen);
+      // L7 (plan §3.3): the quiet rule reads this one list, raw, and makes no second Gmail call. The
+      // status move runs here, before the loop, so a throw later in the round cannot leave a row
+      // whose list held mail reading `quiet`; a failed move is the outer catch's 500, like `markSeen`.
+      const goneQuiet = wentQuiet(listed.length, listed.length === 0 ? await deps.connectedAt(account_id) : null, started);
+      if (listed.length > 0) await deps.moveStatus(account_id, "quiet", "active");
+      else if (goneQuiet) await deps.moveStatus(account_id, "active", "quiet");
+      const ids = listed.filter(unseen).slice(0, READ_CAP);
       for (const id of ids) {
         const uid = `gmail:${id}`;
         // F-4: bounds when the call about to start would FINISH, not when it starts. The old check
@@ -420,7 +453,7 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
         await deps.markSeen(account_id, uid);
         read += 1;
       }
-      return Response.json({ items: await undelivered(), read, quiet: false, more, deferred });
+      return Response.json({ items: await undelivered(), read, quiet: false, more, deferred, went_quiet: goneQuiet });
     } catch (e) {
       if (e instanceof Response) return e;
       // The class and, for a Gmail API failure, its status — never the message, which for a

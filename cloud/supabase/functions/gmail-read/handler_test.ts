@@ -7,6 +7,7 @@ import {
   forDevice,
   forwardingCounts,
   type GmailApi,
+  GmailApiError,
   type GrantRow,
   type ListPage,
   lookupFromRow,
@@ -15,10 +16,12 @@ import {
   MAX_LIST_PAGES,
   pagedList,
   PER_CALL_MS,
+  query,
   READ_BUDGET_MS,
   READ_CAP,
   readHandler,
   type ReadDeps,
+  WINDOW,
 } from "./handler.ts";
 
 const OK = () => Promise.resolve({ account_id: "acct-1" });
@@ -79,6 +82,10 @@ function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"], me
     // D22: by default the account forwards nothing, so every older test reads as it always did.
     unlapse: () => Promise.resolve(),
     forwarding: () => Promise.resolve({ gmail: null, mailboxes: [] }),
+    // L7: by default the grant was made at the fake clock's own instant (age 0), so no older test
+    // can read as gone quiet, and a status move is a no-op.
+    connectedAt: () => Promise.resolve(0),
+    moveStatus: () => Promise.resolve(),
     pipeline: () =>
       Promise.resolve({
         row: {
@@ -804,6 +811,9 @@ Deno.test("a_gmail_address_with_a_forwarding_gets_a_non_quiet_answer_with_its_un
     quiet: false,
     more: false,
     via_forward: true,
+    // L7 (plan §3.3, T2b test 7): forwarding owns this mailbox's silence, so the answer is never
+    // "gone quiet". The one key added to this exact-body pin; every other key is as it was.
+    went_quiet: false,
   });
   assertEquals(delivered, ["gmail:old2"], "an ack is still applied on the forwarded path");
   assertEquals([tokens, listed, fetched, revoked], [0, 0, 0, 0], "no token exchange, no Gmail call, no revoke");
@@ -916,4 +926,223 @@ Deno.test("P22: the address is matched whole and case-folded, never as a substri
   assertEquals(forwardingCounts(GMAIL_ADDRESS, [{ hint: null, status: "active" }]), false, "a hint not yet set");
   assertEquals(forwardingCounts(null, [{ hint: GMAIL_ADDRESS, status: "active" }]), false, "no OAuth address");
   assertEquals(forwardingCounts("", [{ hint: "", status: "active" }]), false, "two empty strings are not one address");
+});
+
+// ---------------------------------------------------------------------------------------------
+// L7 T2b (plan §3.3; Quinn's Q3 ruling, 2026-10-19): a connected Gmail has GONE QUIET when the one
+// 7-day list the read already makes holds no message at all, seen or not, and the grant is at least
+// 7 × 24 hours old, compared in milliseconds. The answer is the rule, never the write's effect.
+// "N days old" describes a fixture only: `connected_at` is N × 24 hours before the fake clock.
+// ---------------------------------------------------------------------------------------------
+
+const DAY_MS = 86_400_000;
+const SEVEN_DAYS_MS = 7 * DAY_MS;
+const NOW = Date.UTC(2026, 9, 20, 12, 0, 0);
+const EXCLUDED = ["Promotions"];
+
+/** `fakes()` over a grant row with a status and an age against a fixed clock. Every status write is
+ * recorded with its condition, and changes the row only while the row reads `from`, as the real
+ * `status=eq.<from>` filter does. */
+function grant(opts: { status: string; ageMs: number; ids: string[]; failMove?: boolean }) {
+  const f = fakes([TASK_ANSWER], opts.ids);
+  const row = { status: opts.status };
+  const moves: Array<{ from: string; to: string }> = [];
+  let messages = 0;
+  const base = f.deps.api;
+  const deps: ReadDeps = {
+    ...f.deps,
+    api: {
+      list: base.list,
+      message: (t, id) => {
+        messages += 1;
+        return base.message(t, id);
+      },
+    },
+    excludedLabels: () => Promise.resolve(EXCLUDED),
+    connectedAt: () => Promise.resolve(NOW - opts.ageMs),
+    moveStatus: (_a, from, to) => {
+      moves.push({ from, to });
+      if (opts.failMove) return Promise.reject(new Error("status write failed"));
+      if (row.status === from) row.status = to;
+      return Promise.resolve();
+    },
+    clock: () => NOW,
+  };
+  return { ...f, deps, row, moves, messages: () => messages };
+}
+
+/** Exactly one list call, and its query is today's `query()` output with `WINDOW` first. */
+function assertOneListCall(asked: string[]) {
+  assertEquals(asked, [query(EXCLUDED)], "exactly one list call, with today's query");
+  assert(asked[0].startsWith(`${WINDOW} `), "WINDOW leads the query");
+}
+
+Deno.test("a_message_five_days_old_is_mail", async () => {
+  // The fake list holds the one id a 5-day-old message would put on the 7-day list.
+  const g = grant({ status: "quiet", ageMs: 30 * DAY_MS, ids: ["m1"] });
+  const body = await (await readHandler(OK, g.deps)(post())).json();
+  assertOneListCall(g.asked);
+  assertEquals(body.went_quiet, false);
+  assertEquals(g.moves, [{ from: "quiet", to: "active" }]);
+  assertEquals(g.row.status, "active");
+  assertEquals([body.read, g.queued.length, g.queued[0].uid], [1, 1, "gmail:m1"], "the id is judged as today");
+});
+
+Deno.test("a_seven_day_list_of_seen_ids_is_not_quiet", async () => {
+  const g = grant({ status: "quiet", ageMs: 30 * DAY_MS, ids: ["m1", "m2"] });
+  g.seen.add("gmail:m1");
+  g.seen.add("gmail:m2");
+  const body = await (await readHandler(OK, g.deps)(post())).json();
+  assertOneListCall(g.asked);
+  assertEquals([body.went_quiet, body.read], [false, 0], "an already-seen message is still mail");
+  assertEquals(g.moves, [{ from: "quiet", to: "active" }]);
+  assertEquals(g.row.status, "active");
+  assertEquals(g.rows.length, 0, "nothing is judged twice");
+});
+
+Deno.test("a_grant_six_days_old_is_not_quiet", async () => {
+  const g = grant({ status: "active", ageMs: 6 * DAY_MS, ids: [] });
+  const body = await (await readHandler(OK, g.deps)(post())).json();
+  assertOneListCall(g.asked);
+  assertEquals(body.went_quiet, false);
+  assertEquals(g.moves, [], "no status is written");
+});
+
+Deno.test("a_grant_one_millisecond_short_of_seven_days_is_not_quiet", async () => {
+  // Red under `Math.round` or `Math.ceil` on days: 7 × 24 hours − 1 ms is not a week.
+  const g = grant({ status: "active", ageMs: SEVEN_DAYS_MS - 1, ids: [] });
+  const body = await (await readHandler(OK, g.deps)(post())).json();
+  assertOneListCall(g.asked);
+  assertEquals(body.went_quiet, false);
+  assertEquals(g.moves, [], "no status is written");
+  assertEquals(g.row.status, "active");
+});
+
+Deno.test("a_grant_exactly_seven_days_old_goes_quiet", async () => {
+  for (const ageMs of [SEVEN_DAYS_MS, 30 * DAY_MS]) {
+    const g = grant({ status: "active", ageMs, ids: [] });
+    const response = await readHandler(OK, g.deps)(post());
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertOneListCall(g.asked);
+    assertEquals(body.went_quiet, true, `age ${ageMs} ms`);
+    assertEquals(body.quiet, false, "`quiet: true` keeps its one meaning, not connected");
+    assertEquals("reason" in body, false);
+    assertEquals(g.moves, [{ from: "active", to: "quiet" }]);
+    assertEquals(g.row.status, "quiet");
+  }
+});
+
+Deno.test("a_row_already_quiet_still_answers_went_quiet_true", async () => {
+  // Red if the answer is taken from the write's effect: the heads-up would close and reopen on
+  // alternate slots.
+  const g = grant({ status: "quiet", ageMs: 30 * DAY_MS, ids: [] });
+  const body = await (await readHandler(OK, g.deps)(post())).json();
+  assertOneListCall(g.asked);
+  assertEquals(body.went_quiet, true);
+  assert(g.moves.every((m) => m.from === "active" && m.to === "quiet"), JSON.stringify(g.moves));
+  assertEquals(g.row.status, "quiet", "the conditional write matched nothing");
+});
+
+/** Runs `fn` with `console.error` captured, so a test can count the outer catch's one line. */
+async function capturingErrors<T>(fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
+  const lines: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+  try {
+    return { value: await fn(), lines };
+  } finally {
+    console.error = original;
+  }
+}
+
+Deno.test("a_failed_list_claims_nothing", async () => {
+  // A pin on today's behaviour: the outer catch, its one class-and-status line, nothing new.
+  const g = grant({ status: "quiet", ageMs: 30 * DAY_MS, ids: [] });
+  g.deps.api.list = (_t, q) => {
+    g.asked.push(q);
+    return Promise.reject(new GmailApiError(503, "gmail list 503"));
+  };
+  const { value: response, lines } = await capturingErrors(() => readHandler(OK, g.deps)(post()));
+  assertOneListCall(g.asked);
+  assertEquals(response.status, 500);
+  const body = await response.json();
+  assertEquals(body, { error: "read failed" });
+  assertEquals("went_quiet" in body, false);
+  assertEquals(g.moves, [], "a failed list writes no status");
+  assertEquals(lines, ["gmail-read: GmailApiError 503"], "no new log line");
+});
+
+Deno.test("a_failed_status_write_is_a_500_before_any_item_is_judged", async () => {
+  const g = grant({ status: "quiet", ageMs: 30 * DAY_MS, ids: ["m1"], failMove: true });
+  const { value: response, lines } = await capturingErrors(() => readHandler(OK, g.deps)(post()));
+  assertOneListCall(g.asked);
+  assertEquals(response.status, 500);
+  assertEquals(await response.json(), { error: "read failed" });
+  assertEquals(g.moves, [{ from: "quiet", to: "active" }]);
+  assertEquals(g.messages(), 0, "the write runs before the loop's first message fetch");
+  assertEquals([g.queued.length, g.seen.size], [0, 0], "no enqueue and no markSeen");
+  assertEquals(lines, ["gmail-read: Error"], "the outer catch's own line, not a catch of its own");
+});
+
+Deno.test("every_status_write_carries_its_condition_so_a_revoked_row_is_never_written", async () => {
+  const cases = [
+    { ids: ["m1"], ageMs: 30 * DAY_MS },
+    { ids: [], ageMs: 30 * DAY_MS },
+    { ids: [], ageMs: SEVEN_DAYS_MS },
+    { ids: [], ageMs: 6 * DAY_MS },
+  ];
+  for (const status of ["active", "quiet", "revoked"]) {
+    for (const c of cases) {
+      const g = grant({ status, ...c });
+      await readHandler(OK, g.deps)(post());
+      assertOneListCall(g.asked);
+      for (const m of g.moves) {
+        assert(["active", "quiet"].includes(m.from) && ["active", "quiet"].includes(m.to), JSON.stringify(m));
+        assert(m.from !== m.to, JSON.stringify(m));
+      }
+      if (status === "revoked") assertEquals(g.row.status, "revoked", JSON.stringify(c));
+    }
+  }
+  // And the real write: the condition is in the account-scoped PostgREST filter itself, a literal
+  // path `judge_db_test.ts`'s account-scoping scan reads.
+  const index = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assert(
+    index.includes("`google_accounts?account_id=eq.${accountId}&status=eq.${from}`"),
+    "moveStatus must write only where status=eq.<from>",
+  );
+});
+
+Deno.test("the_forwarding_path_moves_quiet_to_active_and_never_lists", async () => {
+  const g = grant({ status: "quiet", ageMs: 30 * DAY_MS, ids: ["m1"] });
+  const body = await (await readHandler(OK, {
+    ...g.deps,
+    forwarding: () => Promise.resolve({ gmail: GMAIL_ADDRESS, mailboxes: [{ hint: GMAIL_ADDRESS, status: "active" }] }),
+  })(post())).json();
+  assertEquals(body.via_forward, true);
+  assertEquals(body.went_quiet, false, "forwarding owns that mailbox's silence");
+  assertEquals(g.moves, [{ from: "quiet", to: "active" }]);
+  assertEquals(g.row.status, "active");
+  assertEquals(g.asked.length, 0, "no list call at all");
+});
+
+Deno.test("the_not_connected_replies_carry_no_went_quiet_and_write_no_status", async () => {
+  for (const missing of ["scope", "grant"] as const) {
+    const g = grant({ status: "quiet", ageMs: 30 * DAY_MS, ids: [] });
+    let revoked = 0;
+    const body = await (await readHandler(OK, {
+      ...g.deps,
+      accessTokenFor: () => Promise.resolve({ missing }),
+      markRevoked: () => {
+        revoked += 1;
+        return Promise.resolve();
+      },
+    })(post())).json();
+    assertEquals(body.quiet, true, missing);
+    assertEquals(body.reason, missing === "scope" ? "no_gmail_scope" : "revoked");
+    assertEquals("went_quiet" in body, false, missing);
+    assertEquals(g.moves, [], "no status write beyond today's markRevoked");
+    assertEquals(revoked, missing === "grant" ? 1 : 0);
+    assertEquals(g.asked.length, 0);
+  }
 });
