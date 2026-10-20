@@ -110,10 +110,13 @@ export interface MailRow {
 }
 /** What Rotate writes in one update. Both since-live counts go back to 0 with the old token (§9.5's Rotate
  * row, open for Quinn): they described the old address, and leaving them would keep "Rotate gives it a new
- * one" on the row after the student has rotated. The cumulative `unbound` stays. */
+ * one" on the row after the student has rotated. The cumulative `unbound` stays. `rotatedFrom` is the
+ * status the row had before (Q4, Quinn 2026-10-20): Gmail's goes back to `pending` for the device's
+ * confirm wait, and D22 (`gmail-read`) reads this to keep the OAuth read off inside the grace. */
 export type RotateNext = NewToken & {
   retiredUntil: string;
   status: string | null;
+  rotatedFrom: string;
   unboundOwnSinceLive: 0;
   unboundForeignSinceLive: 0;
 };
@@ -370,6 +373,7 @@ async function rotate(accountId: string, id: string, deps: MailDeps): Promise<Re
     ...await keep(token, deps),
     retiredUntil: until,
     status: row.provider === "google" ? "pending" : null,
+    rotatedFrom: row.status,
     unboundOwnSinceLive: 0 as const,
     unboundForeignSinceLive: 0 as const,
   };

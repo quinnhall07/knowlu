@@ -192,7 +192,7 @@ export async function lookupToken(accountId: string, sources: LookupSources): Pr
  */
 export interface Forwarding {
   gmail: string | null;
-  mailboxes: Array<{ hint: string | null; status: string }>;
+  mailboxes: Array<{ hint: string | null; status: string; retiredUntil?: string | null; rotatedFrom?: string | null }>;
 }
 
 /** P22 as amended by PQ11 (Quinn, 2026-10-02): an allow-list of the statuses under which mail
@@ -206,12 +206,26 @@ const FORWARDING_COUNTS: readonly string[] = ["confirmed", "active", "quiet"];
  * Email forwarding D22 under P22: does the OAuth Gmail address have an active forwarding to
  * Knowlu? The two addresses are compared whole, trimmed and case-folded (never as a substring:
  * `notjane@` is not `jane@`); an absent or empty address on either side never matches.
+ *
+ * Q4 (Quinn, 2026-10-20): Rotate sends a Gmail mailbox back to `pending` (the device's confirm wait
+ * needs it), but the old forward still delivers through the retired token until `retired_until`. So
+ * a `pending` row inside an unexpired grace counts when the status it was rotated from counted. A
+ * stale `rotated_from` is ignored: the grace must be after `clock()`, and an unreadable time never is.
+ * The clock is read only for such a row, so a round with no Rotate in flight reads it no more often
+ * than before (the budget's own reads are counted by the F-4 tests).
  */
-export function forwardingCounts(gmail: string | null, mailboxes: Forwarding["mailboxes"]): boolean {
+export function forwardingCounts(
+  gmail: string | null,
+  mailboxes: Forwarding["mailboxes"],
+  clock: () => number = Date.now,
+): boolean {
   const fold = (a: string | null) => a?.trim().toLowerCase() || null;
   const address = fold(gmail);
   if (address === null) return false;
-  return mailboxes.some((m) => fold(m.hint) === address && FORWARDING_COUNTS.includes(m.status));
+  const inGrace = (m: Forwarding["mailboxes"][number]) =>
+    m.status === "pending" && typeof m.rotatedFrom === "string" && FORWARDING_COUNTS.includes(m.rotatedFrom) &&
+    typeof m.retiredUntil === "string" && Date.parse(m.retiredUntil) > clock();
+  return mailboxes.some((m) => fold(m.hint) === address && (FORWARDING_COUNTS.includes(m.status) || inGrace(m)));
 }
 
 /** The two `google_accounts.status` values this function moves between; never `revoked`. */
@@ -329,7 +343,7 @@ export function readHandler(entitle: Entitle, deps: ReadDeps): (req: Request) =>
       // and then recovered by forwarding, filed twice (review of the lapsed fix, #2).
       await deps.unlapse(account_id);
       const forwarding = await deps.forwarding(account_id);
-      if (forwardingCounts(forwarding.gmail, forwarding.mailboxes)) {
+      if (forwardingCounts(forwarding.gmail, forwarding.mailboxes, deps.clock)) {
         // L7 (plan §3.3): forwarding owns this mailbox's silence (its canary, D14), so the Gmail
         // grant is never left reading `quiet` here, and the answer is never "gone quiet".
         await deps.moveStatus(account_id, "quiet", "active");

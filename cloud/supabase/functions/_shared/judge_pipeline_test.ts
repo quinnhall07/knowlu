@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import { ModelRefused, ProviderOutOfCredit, ScriptedModel } from "./judge_anthropic.ts";
+import type { ChargeOutcome } from "./judge_caps.ts";
 import { promptHash } from "./judge_prompts.ts";
 import {
   type CapStore,
@@ -38,14 +39,33 @@ class Caps implements CapStore {
   charged: Array<[string, string]> = [];
   refunded: Array<[string, string]> = [];
   tokens: Array<[string, string, number, number]> = [];
+  allowanceCharged: Array<[string, string]> = [];
+  allowanceRefunded: Array<[string, string]> = [];
+  /** `capError`: a refused daily charge reads as `"error"`, not `"refused"` (L3). `allowanceAllow`:
+   *  what the first-day event allowance answers. Both default off, so every older test keeps its
+   *  meaning whether the pipeline calls `charge` or `chargeOutcome`. */
   constructor(
     private readonly allow = true,
     private readonly budget = true,
     private readonly open = false,
+    private readonly capError = false,
+    private readonly allowanceAllow = false,
   ) {}
   charge(account: string, kind: "task" | "event" | "email"): Promise<boolean> {
     this.charged.push([account, kind]);
     return Promise.resolve(this.allow);
+  }
+  chargeOutcome(account: string, kind: "task" | "event" | "email"): Promise<ChargeOutcome> {
+    this.charged.push([account, kind]);
+    return Promise.resolve(this.allow ? "charged" : this.capError ? "error" : "refused");
+  }
+  chargeAllowance(account: string, kind: "task" | "event" | "email"): Promise<boolean> {
+    this.allowanceCharged.push([account, kind]);
+    return Promise.resolve(this.allowanceAllow);
+  }
+  refundAllowance(account: string, kind: "task" | "event" | "email"): Promise<void> {
+    this.allowanceRefunded.push([account, kind]);
+    return Promise.resolve();
   }
   refund(account: string, kind: "task" | "event" | "email"): Promise<void> {
     this.refunded.push([account, kind]);
@@ -576,4 +596,198 @@ Deno.test("a plain model failure carries no unavailable key: byte for byte today
     judgment_id: "judgment-1",
   };
   assertEquals(JSON.stringify(reply), JSON.stringify(today));
+});
+
+// L3 (spec 2026-10-06 §3, §5; plan T2b): the first-day event allowance. The daily cap is charged
+// first; only a real refusal of an `event` call asks the allowance, and a failed call is refunded to
+// whichever store charged it. `Caps(allow, budget, open, capError, allowanceAllow)`.
+const DROP = { verdict: "drop", why: "a club social", confidence: 0.9 };
+const EMAIL_ITEM = {
+  message_id: "gmail:4c11d",
+  from: "registrar@example.edu",
+  subject: "Reminder",
+  date: "Mon, 14 Sep 2026 09:00:00 -0500",
+  text: "Please respond.",
+};
+
+Deno.test("an_event_the_cap_refuses_is_charged_to_the_allowance_and_judged", async () => {
+  const caps = new Caps(false, true, false, false, true);
+  const model = new ScriptedModel([DROP]);
+  const reply = await judge("acct-1", { kind: "event", item: EVENT_ITEM, heuristics_seed: {} }, deps(model, new Sink(), caps));
+  assertEquals(reply.outcome, "answered");
+  assertEquals(reply.tier, 3);
+  assertEquals(model.seen.length, 1);
+  assertEquals(caps.charged, [["acct-1", "event"]]);
+  assertEquals(caps.allowanceCharged, [["acct-1", "event"]]);
+});
+
+Deno.test("a_task_or_email_the_cap_refuses_is_capped_and_never_asks_the_allowance", async () => {
+  for (const req of [
+    { kind: "task" as const, item: ITEM, heuristics_seed: SEED },
+    { kind: "email" as const, item: EMAIL_ITEM, heuristics_seed: {} },
+  ]) {
+    const caps = new Caps(false, true, false, false, true);
+    const model = new ScriptedModel([ANSWER]);
+    const reply = await judge("acct-1", req, deps(model, new Sink(), caps));
+    assertEquals(reply.outcome, "capped", req.kind);
+    assertEquals(reply.tier, 0);
+    assertEquals(caps.allowanceCharged, [], `${req.kind} never reaches the allowance`);
+    assertEquals(model.seen.length, 0);
+  }
+});
+
+Deno.test("an_event_both_refuse_is_capped_as_today", async () => {
+  const caps = new Caps(false, true, false, false, false);
+  const log = new Sink();
+  const model = new ScriptedModel([DROP]);
+  const reply = await judge("acct-1", { kind: "event", item: EVENT_ITEM, heuristics_seed: {} }, deps(model, log, caps));
+  assertEquals(reply, { verdict: null, tier: 0, outcome: "capped" });
+  assertEquals(caps.allowanceCharged, [["acct-1", "event"]], "the refused event asked the allowance");
+  assertEquals(model.seen.length, 0);
+  assertEquals(log.rows.length, 1);
+  assertEquals(log.rows[0].outcome, "capped");
+  assertEquals(log.rows[0].tier, 0);
+});
+
+Deno.test("an_event_whose_cap_charge_errors_is_capped_and_never_asks_the_allowance", async () => {
+  // Green before the pipeline knew the allowance, and must stay green after: a cap store that could
+  // not answer has not refused, so it neither opens nor spends the one-time allowance (Q2).
+  const caps = new Caps(false, true, false, true, true);
+  const log = new Sink();
+  const model = new ScriptedModel([DROP]);
+  const reply = await judge("acct-1", { kind: "event", item: EVENT_ITEM, heuristics_seed: {} }, deps(model, log, caps));
+  assertEquals(reply, { verdict: null, tier: 0, outcome: "capped" });
+  assertEquals(model.seen.length, 0);
+  assertEquals(caps.allowanceCharged, []);
+  // Logged exactly as a refused charge logs (the both-refuse case's row).
+  const refusedLog = new Sink();
+  await judge(
+    "acct-1",
+    { kind: "event", item: EVENT_ITEM, heuristics_seed: {} },
+    deps(new ScriptedModel([]), refusedLog, new Caps(false, true, false, false, false)),
+  );
+  assertEquals(log.rows, refusedLog.rows);
+});
+
+import { capStore } from "./judge_caps.ts";
+import type { Db } from "./judge_db.ts";
+
+/** The live `capStore`'s database, scripted per rpc name: a value to resolve, or a rejection. */
+class RpcDb implements Db {
+  calls: string[] = [];
+  constructor(private readonly script: Record<string, { value: unknown } | { reject: string }>) {}
+  select(): Promise<unknown[]> {
+    return Promise.resolve([]);
+  }
+  insert(): Promise<Record<string, unknown> | null> {
+    return Promise.resolve(null);
+  }
+  update(): Promise<void> {
+    return Promise.resolve();
+  }
+  rpc(fn: string): Promise<unknown> {
+    this.calls.push(fn);
+    const answer = this.script[fn];
+    if (answer === undefined) return Promise.reject(new Error(`unscripted rpc ${fn}`));
+    return "reject" in answer ? Promise.reject(new Error(answer.reject)) : Promise.resolve(answer.value);
+  }
+}
+
+Deno.test("a_charge_call_error_on_the_live_store_never_opens_the_allowance", async () => {
+  const live = (chargeCall: { value: unknown } | { reject: string }) =>
+    new RpcDb({
+      enforce_budget: { value: true },
+      charge_call: chargeCall,
+      charge_judge_allowance: { value: true },
+      record_tokens: { value: null },
+      refund_call: { value: null },
+    });
+  const req = { kind: "event" as const, item: EVENT_ITEM, heuristics_seed: {} };
+
+  // An error from `charge_call` is not a refusal: capped, and the allowance is never asked.
+  const erroring = live({ reject: "PostgREST 503" });
+  const model = new ScriptedModel([DROP]);
+  const capped = await judge("acct-1", req, { ...deps(model, new Sink(), new Caps()), caps: capStore(erroring) });
+  assertEquals(capped.outcome, "capped");
+  assertEquals(model.seen.length, 0);
+  assert(erroring.calls.includes("charge_call"));
+  assertEquals(erroring.calls.includes("charge_judge_allowance"), false, erroring.calls.join(","));
+
+  // A real `false` is a refusal: the allowance is asked, and the event is judged.
+  const refusing = live({ value: false });
+  const judged = await judge("acct-1", req, {
+    ...deps(new ScriptedModel([DROP]), new Sink(), new Caps()),
+    caps: capStore(refusing),
+  });
+  assertEquals(judged.outcome, "answered");
+  assertEquals(refusing.calls, ["enforce_budget", "charge_call", "charge_judge_allowance", "record_tokens"]);
+});
+
+Deno.test("over_the_monthly_ceiling_neither_charge_is_asked", async () => {
+  const caps = new Caps(false, false, false, false, true);
+  const reply = await judge(
+    "acct-1",
+    { kind: "event", item: EVENT_ITEM, heuristics_seed: {} },
+    deps(new ScriptedModel([DROP]), new Sink(), caps),
+  );
+  assertEquals(reply.outcome, "capped");
+  assertEquals(caps.charged, []);
+  assertEquals(caps.allowanceCharged, []);
+});
+
+Deno.test("a_failed_call_on_the_allowance_is_refunded_to_the_allowance", async () => {
+  const caps = new Caps(false, true, false, false, true);
+  const reply = await judge(
+    "acct-1",
+    { kind: "event", item: EVENT_ITEM, heuristics_seed: {} },
+    deps(new ScriptedModel([new TypeError("error sending request: connection refused")]), new Sink(), caps),
+  );
+  assertEquals(reply.cause, "model failed");
+  assertEquals(caps.allowanceRefunded, [["acct-1", "event"]]);
+  assertEquals(caps.refunded, [], "the cap never charged this call, so it is never refunded");
+});
+
+Deno.test("a_failed_call_on_the_cap_is_refunded_to_the_cap", async () => {
+  const caps = new Caps();
+  const reply = await judge(
+    "acct-1",
+    { kind: "event", item: EVENT_ITEM, heuristics_seed: {} },
+    deps(new ScriptedModel([new TypeError("error sending request: connection refused")]), new Sink(), caps),
+  );
+  assertEquals(reply.cause, "model failed");
+  assertEquals(caps.refunded, [["acct-1", "event"]]);
+  assertEquals(caps.allowanceRefunded, []);
+});
+
+Deno.test("a_refusal_truncation_or_invalid_answer_on_the_allowance_refunds_nothing", async () => {
+  for (
+    const [want, reply] of [
+      ["refused", new ModelRefused("the model declined")],
+      ["truncated", new Error("the reply hit max_tokens (256)")],
+      ["incomplete", { verdict: "maybe", why: "not a verdict word", confidence: 0.9 }],
+    ] as const
+  ) {
+    const caps = new Caps(false, true, false, false, true);
+    const got = await judge(
+      "acct-1",
+      { kind: "event", item: EVENT_ITEM, heuristics_seed: {} },
+      deps(new ScriptedModel([reply]), new Sink(), caps),
+    );
+    assertEquals(got.tier, 3, `${want}: the allowance charged, so the model was reached`);
+    assertEquals(got.cause, want);
+    assertEquals(caps.allowanceCharged, [["acct-1", "event"]]);
+    assertEquals(caps.allowanceRefunded, [], want);
+    assertEquals(caps.refunded, [], want);
+  }
+});
+
+Deno.test("the_breaker_skips_both_charges", async () => {
+  const caps = new Caps(false, true, true, false, true);
+  const model = new ScriptedModel([DROP]);
+  const reply = await judge("acct-1", { kind: "event", item: EVENT_ITEM, heuristics_seed: {} }, deps(model, new Sink(), caps));
+  assertEquals(reply.cause, "model failed");
+  assertEquals(reply.tier, 0);
+  assertEquals(model.seen.length, 0);
+  assertEquals(caps.charged, []);
+  assertEquals(caps.allowanceCharged, []);
 });

@@ -1,6 +1,102 @@
 # Friends testers: a comp entitlement and a per-tester cost view — design
 
-**Status: Signed by Quinn, 2026-10-19** (tester names still to come). Lane L8 of the friends-MVP push
+**Amendment 2026-10-20, S1 result; signed by Quinn's re-read of Q1, Q7 and §8.3, 2026-10-20 (recommended options; lane ledger rows).** §8.9 has
+triggered. *(Revised the same day after the spec-mode review, `docs/reports/2026-10-20-l8-spec-amendment-review.md`,
+FAIL 0C/3I/7M; all ten findings are closed in place, and S1b below is the staging read the review's
+I-2 asked for. Revised again after review r2, `docs/reports/2026-10-20-l8-spec-amendment-review-r2.md`,
+FAIL 0C/3I/6M, with the controller's rulings; all nine are closed in place. Revised a third time
+after review r3, `docs/reports/2026-10-20-l8-spec-amendment-review-r3.md`, FAIL 0C/2I/4M; all six
+are closed in place.)*
+S1's staging spike of 2026-10-20 (this lane's ledger, `.superpowers/sdd/2026-10-18-l8/progress.md`,
+last row; structure only, no value printed) found three things:
+- **Every `auth.users` row carries a password hash.** `encrypted_password` holds a 60-character bcrypt
+  hash (`$2a$`) for a fresh OTP user that never typed its code, for a fresh password `/signup` user,
+  and for both users that already existed. GoTrue fills it for everyone, so no column of `auth.users`
+  tells a user who chose a password from one who did not. The signed predicate
+  `coalesce(u.encrypted_password, '') = ''` would answer `none` to every tester, and email binding has
+  no safe check left. (No Google user was made: the OTP result had already failed the rule.)
+- **Staging confirms every sign-up at once** (`email_confirmed_at` and `last_sign_in_at` set on
+  insert), as `enable_confirmations = false` says (§2).
+- **Every user has one `accounts` row and an `entitlements` row at `none`**, as revision 4 assumed
+  (§2, P0, P3).
+
+**S1b, 2026-10-20 (the controller, staging, structure only), on S1's two scratch users** before
+their deletion, for the review's I-2:
+- both carry `encrypted_password`; `auth.identities` holds one identity each, provider `email` only;
+  each has one live session;
+- `auth.mfa_amr_claims.authentication_method` is `password` for **both** sessions, the OTP-created
+  user's included, although S1 records that user as never verified by code. A likely cause,
+  **untested**: for an unknown address, GoTrue's `/otp` creates the user through its sign-up path
+  with a generated password, and with automatic confirmation that sign-up opens a session that `/otp`
+  never returns. That would also explain the hash and the `last_sign_in_at` on insert;
+- `auth.audit_log_entries` holds no row for either user on staging.
+
+So **for email-code and password sign-ups**, no column of `auth.users`, nor `auth.identities`, nor
+the audit log on staging separates a password sign-up from any other. A live session's amr names
+only that session's method (sign-out and expiry delete sessions), and here it did not separate them
+either: at most a best-effort red flag, which §8.3 weighs and leaves out. S1 also saw
+`last_sign_in_at` set on insert for the OTP user that never typed its code, so `last_sign_in_at`
+does not prove that a sign-in finished (§8.3). **No Google user was read.** The expectation for one
+is **unverified on staging** and has two halves: (a) a fresh Google sign-in shows `google` alone;
+(b) under GoTrue's automatic linking, a Google sign-in on an address that already has a user adds a
+`google` identity beside its `email` one. §8.3's check 1b uses (b) as a conditional red flag. The
+first Google tester's read (structure only) confirms only (a); (b), the half that would catch a
+pre-registration, stays unverified, and no guard in this spec counts on it. An `email` identity
+beside `google` on any read, the first included, is the check's own stop: it goes to Quinn, and is
+never a reason to drop the check.
+
+**What changes: grants are keyed by `account_id` and written after sign-up.** This is §3.1's former
+last alternative, which §8.9 named as the fallback. The body below is edited in place. Every passage
+that S1 does not touch stands as signed.
+- **Binding and flow (§3.1, §3.5, Q1).** `comp_grants.account_id` references `public.accounts(id) on
+  delete cascade`, one open grant per account. A tester installs, signs in by any door, stops at the
+  subscribe step without paying, and tells Quinn the address they signed in with. On Quinn's go, the
+  owner finds the one account carrying that address, checks it (§8.3) and grants by its id. The
+  tester then presses Next, which today's wizard already answers by asking `checkEntitled()` once more
+  (`wizGo`). So a tester meets the subscribe step once, before the grant, and §3.4's on-entry check
+  covers every later visit, only after the grant.
+- **The view (§3.2, §9).** `effective_entitlements` no longer reads `auth.users`; the grant joins on
+  `g.account_id = a.id`. The password predicate and its cases P4, P7, P10 and P11 are retired. P14 (a
+  grant on another account), P15 (two accounts carrying one address) and P16 (a grant naming no
+  account) are new. `admin.testers` loses the `waiting for sign-up` state (§5).
+- **Deletion (§3.3).** Both grant tables cascade from `accounts`. No trigger on `public.accounts` is
+  written, so the `security definer` trigger function, its hash expression and its tripwire exemption
+  are gone. A3s now proves that the cascade runs under the service role's reduced rights.
+- **The audit (§3.5, Q8).** `comp_audit` keys on `account_id` (cascade) instead of `email_hash`, and
+  still holds no free text. The service role gains `select` on it so the export can carry it (Q7);
+  every write stays revoked.
+- **Export and purge (§3.3, §3.5, §9, S4).** The export reads `comp_grants` and `comp_audit` by
+  `account_id`. The purge list does not name them, because the service role cannot delete them; its
+  comment says the cascade from `accounts` takes them.
+- **Tasks (§10).** S1 is done. S2c2 loses the trigger: the function pin moves by one there and by five
+  for the lane (§8.7). S2a, S2b, S2c1, S2e1, S2f, S4, S7 and S8 follow the new binding. **S2a starts
+  only once Quinn has signed this amendment.**
+- **The stamp (§8.4).** L3's T0 recorded `20261020000200` (L3's lane ledger, 2026-10-20). S2a takes the
+  next free stamp after it (M2, M3). That is `20261020000300` if S2a fixes it on 2026-10-20 and no
+  other lane records first; if S2a fixes it on a later day, M2 gives that day's `000100`. M1-M8 are
+  unchanged.
+- **S2a0 stands.** Commit `29dcdc2` on `l8/testers` widens `identPattern` to `public|admin` and
+  touches no table, no binding and no pin. The `admin` functions and views need it under either
+  binding. It rebases onto `origin/main` (which carries the email merge; the main checkout's local
+  `main` is stale) before S2a, and §8.7's hand-off to L5 and L1 still points at it.
+- **S1's scratch users.** S2f's script makes its own `@example.invalid` users inside a rolled-back
+  transaction, from the column list S1 recorded, so it needs neither of S1's two scratch users. The
+  controller deletes them from staging, now that S1b has read them, and records that in the lane
+  ledger.
+- **For Quinn besides Q1 and Q7:** §8.3, which now asks whether the first prod grant waits for L9's
+  C1b to close password sign-up, and whether a best-effort amr check (2b) is wanted (recommended:
+  no).
+
+**2026-10-20, S2-S4R fixups (`b4fdb9f`):** `comp_grants` and `comp_audit` are `revoke all` then
+`grant select` to `service_role`, literally select-only (REFERENCES, TRIGGER and MAINTAIN dropped).
+§3.5, §6 and §9 quote S2a's SQL as `revoke insert, update, delete, truncate … from service_role`; that
+signed text stands, and this line records what the migration does.
+**2026-10-20, restamp (C1):** the email cloud follow-ups landed `20261020000400` first, so L8's
+migration, applied nowhere, is renamed `20261020000300_testers.sql` → `20261020000500_testers.sql`
+(M2, M4: tests find it by suffix; the stamp line under the amendment above stands as signed).
+
+**Status: Signed by Quinn, 2026-10-19** (tester names still to come). **The Amendment 2026-10-20
+above is signed by Quinn's re-read of Q1, Q7 and §8.3, 2026-10-20.** S2a and later tasks may be dispatched. Lane L8 of the friends-MVP push
 (`.superpowers/handoffs/2026-10-18-START-HERE-session-5-mvp.md` §5). Authority: Quinn's rulings of
 2026-10-18 in `.superpowers/sdd/2026-09-30-email-forwarding/progress.md` (friends get the app free,
 Quinn pays their usage; "a tester list + usage view"), read under the cloud design
@@ -121,7 +217,9 @@ line above is Quinn's.
 ## 1. What this is, and what it is not
 
 - **A comp:** a named tester's account is entitled with no purchase, no Stripe customer, no Stripe
-  charge, and the app never shows a price or a payment step while the comp is live.
+  charge, and the app never shows a price or a payment step while the comp is live. *(Amendment
+  2026-10-20: the grant is written after sign-up, so a tester meets the subscribe step once, before
+  it; §3.1.)*
 - **A cost view:** Quinn (whoever holds the prod Supabase dashboard) sees, per tester per day, judge
   calls, tokens, an estimated model cost, mail arrivals and gated-route volume, and a monthly total.
 - **Not:** a free tier, a coupon, a trial, a self-serve sign-up, or a change to the engine. No tester's
@@ -147,6 +245,7 @@ line above is Quinn's.
 | Telemetry views refuse any slice under 10 accounts | `20260910000400_telemetry.sql` |
 | `[api] schemas = ["public"]`: PostgREST exposes nothing else | `cloud/supabase/config.toml` |
 | `[auth.email] enable_confirmations = false`; "GoTrue creates the `auth.users` row before the code is ever typed" | `cloud/supabase/config.toml` |
+| **S1, 2026-10-20 (staging):** every `auth.users` row, a fresh never-verified OTP user and a fresh password `/signup` user included, carries a 60-character bcrypt hash in `encrypted_password`; every sign-up is confirmed on insert; every user has one `accounts` row and an `entitlements` row at `none`. No column of `auth.users` tells a password user from any other | this lane's ledger, S1 row |
 
 Missing for the cost view: the model that served each call (history is re-priced on a pin change),
 the provider's own billed cost, any per-account count of ingest, events or sync calls, and any
@@ -161,17 +260,17 @@ per-account share of infrastructure (S3, SES, egress, invocations).
 | Column | Meaning |
 |---|---|
 | `id uuid` | the grant |
-| `email_lower text not null` | the address the tester signs in with, lower-cased; a grant can exist **before** the tester signs up, so the subscribe step never shows them a price |
+| `account_id uuid not null references public.accounts(id) on delete cascade` | the tester's account (Amendment 2026-10-20). A grant exists only **after** the tester has signed up, so the tester meets the subscribe step once, before it. The table holds no address: the owner finds the account by the address the tester gives and grants by its id (§3.5, §8.3) |
 | `cohort text not null` | `friends` now; see Q6 for `pilot` |
 | `granted_at`, `ends_at timestamptz not null` | every grant has an end (§3.3) |
 | `ended_at`, `ended_reason` | set when a grant is ended early; never deleted to end it |
 | `note text` | why, in the admin's words, at most 200 characters. It lives only on this row: it is shown to the tester in their export, deleted with the row and **never copied into `comp_audit`** (§3.5). Guidance in the function comment: no name or relationship ("friends cohort, round 1", not who the person is) |
 
-A partial unique index allows one open grant (`ended_at is null`) per `email_lower`. A grant row is
+A partial unique index allows one open grant (`ended_at is null`) per `account_id`. A grant row is
 not kept forever (Q11): `admin.comp_sweep()`, scheduled daily by `pg_cron` as `knowlu-sweep-comp`
 (the pattern of `knowlu-sweep-google-state`), deletes a grant 30 days after it closes (`ended_at` or `ends_at`, whichever
-is first), claimed or not, so an address that never signed up is not held past its grant's life plus
-30 days. The audit row, which carries only a hash, survives the grant's sweep; the same sweep deletes
+is first), so a closed grant's note and reason are not held past its life plus 30 days (and the
+cascade takes it sooner if the account is deleted). The audit row, which carries no note, survives the grant's sweep; the same sweep deletes
 audit rows three years after they were written, a maximum (Q8). Its schedule is a fixed minute and
 hour, once a day. **Its minute field (the first of the five cron fields) is a number that no other
 fixed-minute job in the corpus uses, whatever that job's hour.** So `'23 8 * * *'` beside
@@ -207,18 +306,22 @@ redeploy; the view and tables can stay.
 **Alternatives, briefly:**
 - *A `source = 'comp'` row in `entitlements`* (the column exists). Smallest diff, but it breaks the
   load-bearing "only the Stripe webhook writes `entitlements`", needs a cron to flip status at the end,
-  can only exist after sign-up (so the tester meets the price step first), and a later Stripe event's
-  stale guard compares against a hand-written `updated_at`. Rejected.
+  and a later Stripe event's stale guard compares against a hand-written `updated_at`. Rejected. (Its
+  other cost, that it exists only after sign-up, is now shared by the chosen design.)
 - *A 100%-off Stripe coupon or free price.* Creates Stripe customers and subscriptions for friends,
   sends them billing emails and the yearly ARL reminder, enters `billing_subscribers`, and still walks
   them through Checkout. Contradicts "no purchase, no Stripe charge". Rejected.
 - *A long Stripe trial.* Asks for a card, ends in a charge. Rejected.
-- *Grants keyed by account id.* Safest binding, but only after sign-up; kept as the fallback if §3.5's
-  sign-up check fails on staging.
+- *Grants keyed by the lower-cased address, written before sign-up* (the design signed on
+  2026-10-19). The tester would never see a price, but the view could then match a grant only to an
+  account whose address was proved, and §3.5's "no password" test was the proof. S1 found that test
+  unusable (§2): every `auth.users` row carries a hash. Rejected by the Amendment 2026-10-20. It could
+  return once L9's C1b closes password sign-up, because every address is then proved before a session
+  exists; Q1 names that as the alternative.
 
 ### 3.2 Precedence (what the view answers)
 
-| Stripe row | Open, unexpired grant matching `lower(accounts.email)` | `status` / `plan` / `current_period_end` |
+| Stripe row | Open, unexpired grant on this `account_id` (Amendment 2026-10-20; the account's address plays no part) | `status` / `plan` / `current_period_end` |
 |---|---|---|
 | `active` or `trialing` | any | the Stripe row, unchanged (paid wins; see Q3) |
 | anything else: `none` (the sign-up row, the usual case), `canceled`, `past_due`, or no row | yes | `active` / `tester` / the grant's `ends_at` (P3, P3x, P5, P6) |
@@ -238,41 +341,71 @@ throws, a 500 on every gated call, so the names are pinned on both sides (§9 la
 - **By date:** `ends_at` is required at grant time and checked at read time (`now() < ends_at`), so no
   cron is needed and an expired grant can never linger as `active`. Extending writes a new `ends_at`.
 - **Re-granting after expiry:** an expired grant that was never ended still has `ended_at is null`, so
-  it holds the partial unique index and `comp_grant` for that address is refused (P12) until the sweep
+  it holds the partial unique index and `comp_grant` for that account is refused (P12) until the sweep
   deletes it 30 days after `ends_at`. `admin.comp_extend` therefore **accepts an open grant whether or
   not its `ends_at` has passed** (it refuses only an ended grant, no grant, or a new `ends_at` not in
-  the future), and P12's refusal message names it: "an open grant exists for this address; use
+  the future), and P12's refusal message names it: "an open grant exists for this account; use
   admin.comp_extend". Extending an expired grant makes it `live` again at once (P13). After the sweep
-  has deleted it, `comp_grant` works as for a new address.
+  has deleted it, `comp_grant` works as for an account never granted.
 - **Early:** the admin ends it (`ended_at`, `ended_reason`); the row stays for the record.
 - **Effect:** the server gate refuses at once (402 on the next gated call). The app learns at its next
   `/entitlement` check (launch or 6-hourly) that the status is `none` and takes the normal
   not-entitled path: banner, cloud steps skipped as named steps, the upgrade overlay. The 72-hour grace
   covers an unreachable server only, never a fresh `none`, so it does not stretch a comp.
-- **Account deletion:** an `after delete on public.accounts` trigger deletes that address's grants
-  (note and reason go with them) **and its `comp_audit` rows by hash**
-  (`email_hash = encode(sha256(convert_to(lower(old.email), 'UTF8')), 'hex')`, the audit's own
-  expression), so the consent record stays the one record a deletion leaves behind, as the privacy
-  page already says (Q8). The trigger function is `security definer` with a fixed `search_path`,
-  because §3.5 takes every write right on both tables away from the service role that an account
-  deletion runs as; a trigger function cannot be called over PostgREST, so the guard exempts it by kind
-  as it does `handle_new_user`. `route_daily` rows go by `on delete cascade` (§4). A tester who deletes
-  and re-joins needs a new grant.
+- **Account deletion (Amendment 2026-10-20):** `comp_grants.account_id` and `comp_audit.account_id`
+  both reference `public.accounts(id) on delete cascade`, as `route_daily` does (§4). Deleting the
+  account takes its grants (note and reason with them) and its audit rows, so the consent record stays
+  the one record a deletion leaves behind, as the privacy page already says (Q8). **No trigger is
+  written on `public.accounts`.** The signed draft needed a `security definer` trigger because grants
+  were keyed on the address. A foreign key's cascade is run by the database as the referencing table's
+  owner, not as the role that deleted the account, so §3.5's revokes on the service role do not block
+  it. That is how PostgreSQL runs referential actions, but this spec does not take it on trust: A3s
+  proves it on staging, under `set local role service_role`, before the merge (§9). A tester who deletes and re-joins gets a new account id and
+  needs a new grant.
 - **The purge list.** `functions/account/index.ts`'s `purge` names every table holding the student's
   data "whether or not the cascade would also reach it", because the privacy page's deletion paragraph
-  is written from it. S4 adds `route_daily` (by `account_id`) to that list, and a comment beside it
-  naming `comp_grants` and `comp_audit` as deleted by the trigger, keyed on the address rather than the
-  account id, so L4 writes the paragraph from a complete list. (`usage_daily` and `judgments` are not
-  in today's list either; §8.6 hands that to L4 rather than widening this lane.)
+  is written from it. S4 adds `route_daily` (by `account_id`) to that list. It adds a comment beside it
+  naming `comp_grants` and `comp_audit` as deleted by the cascade from `accounts`, and not by the
+  purge, because the service role holds no delete right on them (§3.5) and a `restDelete` there would
+  fail the whole purge. L4 then writes the paragraph from a complete list. (`usage_daily` and
+  `judgments` are not in today's list either; §8.6 hands that to L4 rather than widening this lane.)
 
 ### 3.4 How it shows in the app (it must not look like a paid plan or ask for payment)
 
 Needs one `console-ui` change (S5; `app/static/console.js` and its markup, Quinn words the copy):
-- **Wizard subscribe step:** on entering it, ask `checkEntitled()` first; an entitled account sees one
-  line in place of the price buttons (suggested: "Your account is already set up. Nothing to pay.")
-  and Next. A tester never sees a price, a plan choice or Checkout.
-- **Settings account row:** for `plan === 'tester'`, "Free tester access through {date}. Nothing to
-  pay." in place of `active · tester`, and *Manage subscription* hidden (today it would answer
+- **Wizard subscribe step:** on entering it, ask the status-and-plan helper (below) first, never the
+  plain `checkEntitled()` (review r4, I-1); an entitled account sees
+  the price buttons (`#wiz-sub-month`, `#wiz-sub-year`) hidden and Next. Today nothing hides them:
+  the only entitlement test is inside their click handler, and their `div.wiz-row` has no id, so S5
+  hides the buttons themselves or gives the row an id (review r3, M1). *(Amendment 2026-10-20, after review r2's I-3.)* For the plan
+  `tester` the panel shows no price anywhere: S5 also hides the lede (`app/static/index.html`, the
+  `#wiz-subscribe` panel's `p.lede`, which names both prices and says "your card is taken now") and
+  retitles its "Subscribe" heading (suggested: "You're all set"; Quinn words it). The nothing-to-pay
+  line (suggested: "Your account is already set up. Nothing to pay.") appears **in one place
+  only**, `#wiz-sub-note`, and no other element of the panel carries it. A paid entitled account
+  keeps today's lede, heading and note ("Your subscription is active."). The grant is written after sign-up, so a tester meets this step
+  once, with the price buttons, before the grant exists. They do not press a price. They wait, tell
+  Quinn they have signed in, and press Next once Quinn says the access is on; today's `wizGo` already
+  asks `checkEntitled()` once more on that Next and moves on (Q1). A Next pressed **before** the
+  grant is refused with today's line "Finish the payment page in your browser, then come back."
+  (`wizValid`). The step keeps it, since every unpaid student sees it (D2), and the install note and
+  Q1 tell a friend that this line means "wait for Quinn" (review r3, M3). This on-entry check covers a tester
+  only after the grant: on any later visit to the step (a relaunch, or a step back) they see the
+  one line and never a price, a plan choice or Checkout. The step gains no tester-only line before
+  the grant, because every unpaid student would see it (§6, D2; Q1). Today `renderWizard` sets
+  `#wiz-sub-note` to "Your subscription is active." for any entitled account, so a tester stepping
+  back would read "subscription"; S5 sets the nothing-to-pay line there instead when the plan is
+  `tester`. **The plan is recorded wherever `WIZ.entitled` is set** (review r3, M2; review r4, I-1):
+  today that is `wizGo`'s re-ask, the price click and `pollEntitlement`, each from the plain
+  boolean, and S5 adds a fourth, the on-entry check above. S5 adds one helper that returns status
+  and plan from the same `entitlement_now` answer (which already carries `plan`), uses it at all
+  four, and renders the tester form only once the plan is known, so neither a relaunch onto the
+  step nor a step back flashes a price. Like `checkEntitled()`, the helper answers not entitled on
+  any failure, so an unpaid student, or one whose check failed, still sees the prices. `checkEntitled()` keeps its true-or-false contract for its other
+  callers.
+- **Settings account row:** for `plan === 'tester'`, the **Settings tester line** (suggested: "Free
+  tester access through {date}. Nothing to pay."; Quinn words it, and §8.3, Q1, §9 and S7 refer to
+  it by this name rather than quoting it) in place of `active · tester`, and *Manage subscription* hidden (today it would answer
   "this account has never subscribed").
 - **The upgrade overlay, one fix.** It opens only when not entitled, but a friend can meet it before
   the grant is written (for example while prod grants wait on §8.5) and sign in again once it is.
@@ -285,11 +418,12 @@ Needs one `console-ui` change (S5; `app/static/console.js` and its markup, Quinn
   access" **while the account is comped, that is, while `effective_entitlements` answers
   `plan = 'tester'` for it**, so no path, old build or stale page can start a charge (Q3). That is not
   the same as "while a grant is open" (revision 5). An open grant the view does not honour leaves
-  checkout open, as for any unentitled account: one past its `ends_at` that was never ended (P8), or
-  one matched to an account with a password (P7). The
+  checkout open, as for any unentitled account: one past its `ends_at` that was never ended (P8).
+  *(The signed text also named a grant matched to an account with a password, P7, retired by the
+  Amendment 2026-10-20.)* Before the grant is written, a tester's account is an unentitled one, so
+  checkout is open to it too (Q1 names that risk). The
   handler gains one injected dependency, a caller lookup that answers whether `effective_entitlements`
-  shows `plan = 'tester'` for the caller (so the password rule and expiry are decided in one place,
-  the view). **Production wires it in `functions/billing-checkout/index.ts`**, where the handler's
+  shows `plan = 'tester'` for the caller (so expiry and ending are decided in one place, the view). **Production wires it in `functions/billing-checkout/index.ts`**, where the handler's
   other deps are built (its `getAccount` read of `accounts`); a fake in `handler_test.ts` alone would
   leave production never reading the view, so S4 also pins the wiring statically (§9).
 
@@ -299,17 +433,22 @@ Needs one `console-ui` change (S5; `app/static/console.js` and its markup, Quinn
   authenticated` — the pattern of `mail_*` and `judgments`. No client reads or writes them.
 - **The service role cannot write the grant tables.** RLS does not bind `service_role`, and every edge
   function holds that key, so on top of the client revokes: `revoke insert, update, delete, truncate on
-  public.comp_grants from service_role` (it keeps `select`, which the export needs, §3.5 below) and
-  `revoke all on public.comp_audit from service_role`. A mis-scoped `restUpsert` in any function is then
-  refused by the database, not by convention (case A7). The table owner, which the migrations, the SQL
-  editor, `pg_cron` and the `security definer` trigger run as, keeps every right. `route_daily` keeps
+  public.comp_grants from service_role` and the same on `public.comp_audit`. The service role keeps
+  `select` on both, which the export needs (§3.5 below). *(Amendment 2026-10-20: the signed text
+  revoked all on `comp_audit`, because the audit held an address hash the export did not carry; it now
+  holds the account id and is the caller's data, Q7.)* A mis-scoped `restUpsert` in any function is
+  then refused by the database, not by convention (case A7). The table owner, which the migrations, the
+  SQL editor, `pg_cron` and the cascade from `accounts` run as, keeps every right. `route_daily` keeps
   the posture of `usage_daily` (the service role writes it, through `count_route`): it holds counts,
   and a stray write there misstates a cost, never grants access.
 - **Writes only through three admin functions** in a schema `admin` that PostgREST does not expose
   (`[api] schemas` is `public` only) and whose usage is revoked from `public, anon, authenticated,
   service_role`, so no role but the owner can reach them:
-  `admin.comp_grant(email, ends_at, cohort, note)`, `admin.comp_extend(email, ends_at)`,
-  `admin.comp_end(email, reason)`; `admin.comp_sweep()` (§3.1) only deletes. There is no `actor`
+  `admin.comp_grant(account_id, ends_at, cohort, note)`, `admin.comp_extend(account_id, ends_at)`,
+  `admin.comp_end(account_id, reason)`; `admin.comp_sweep()` (§3.1) only deletes. *(Amendment
+  2026-10-20: each takes the account id, never an address.)* `comp_grant` refuses an id with no
+  `accounts` row (the foreign key, P16) and writes no audit row then (A2). The owner finds the id by
+  the address the tester gives, in the SQL editor, with the checks of §8.3, before calling it. There is no `actor`
   argument: the only writer is the project owner, and a free-text actor would invite a person's name
   (rule 1). `reason` is one of `done`, `asked`,
   `misuse`, `other` (a check constraint, no free text). They run from the dashboard's SQL editor as the
@@ -317,29 +456,41 @@ Needs one `console-ui` change (S5; `app/static/console.js` and its markup, Quinn
 - **Prod grants are prod writes:** the controller runs one only on Quinn's go (§1.7 of the handoff);
   the prod Supabase MCP is read-only and stays so.
 - **`public.comp_audit`**, append-only, written by the three functions in the same transaction:
-  `(id, grant_id → comp_grants on delete set null, email_hash, action in ('grant','extend','end'),
-  ends_at, cohort, db_role, at)`. `db_role` is `session_user` (a database role such as `postgres`,
-  never a person). **No free-text column**: no note, no reason text, no actor, no address. `email_hash`
-  is sha256 of the lower-cased address, as `consents.subject_hash`. It is the record of what Quinn chose
-  to pay for, and exactly two things delete an audit row: the account-deletion trigger, by hash (§3.3),
-  and `admin.comp_sweep()`, once the row is three years old (`at < now() - interval '3 years'`, a
-  maximum; Q8). No function updates one.
-- **The sign-up check.** With confirmations off, anyone holding the public anon key can create an
-  `auth.users` row for any address. OTP and Google sign-ins still prove the address before a session
-  exists, but GoTrue's password `/signup` may hand back a session with no proof. So the view matches a
-  grant only to an account whose `auth.users` row carries **no password**, and "no password" is one
-  predicate, used verbatim in the view and pinned statically:
-  `coalesce(u.encrypted_password, '') = ''`. GoTrue may store `''` rather than `NULL` for OTP and
-  OAuth users, and both must read as "no password"; a test of `is null` alone would answer `none` to
-  every OTP tester and show them the price step. The product never sets a password. S1 records, on
-  staging, the literal value an OTP user, a Google user and a password sign-up carry; if the first two
-  are not both `NULL` or `''`, or the third is, grants bind by account id instead (§3.1, last
-  alternative); that is a spec revision before S2a, not tasks in this one (§8.9).
+  `(id, grant_id → comp_grants on delete set null, account_id → accounts on delete cascade, action in
+  ('grant','extend','end'), ends_at, cohort, db_role, at)`. `db_role` is `session_user` (a database
+  role such as `postgres`, never a person). **No free-text column**: no note, no reason text, no actor,
+  no address, no address hash. *(Amendment 2026-10-20: `account_id` replaces the signed
+  `email_hash`.)* It is the record of what Quinn chose to pay for, and exactly two things delete an
+  audit row: the cascade when the account is deleted (§3.3), and `admin.comp_sweep()`, once the row is
+  three years old (`at < now() - interval '3 years'`, a maximum; Q8). No function updates one.
+- **The sign-up check, replaced by a check at grant time (Amendment 2026-10-20).** With confirmations
+  off, anyone holding the public anon key can create an `auth.users` row for any address, and GoTrue's
+  password `/signup` hands back a session with no proof of the address. The signed draft matched a
+  grant only to an account with no password, tested by `coalesce(u.encrypted_password, '') = ''`. S1
+  found a bcrypt hash on every user (§2), so that test refuses everyone. S1b then read the rest
+  (amendment block): for email-code and password sign-ups, no column of `auth.users`, nor
+  `auth.identities`, nor the audit log on staging separates a password sign-up, and a live session's
+  amr is at most a best-effort red flag. No Google user was read. The view therefore reads nothing
+  from `auth.users` and matches no address.
+  The binding is made by a person, once: the tester says which address they signed in with, how, and
+  roughly when; the owner finds the account and runs §8.3's checks (one account whose auth address
+  and stored address both match; for a Google sign-in, a `google` identity, with an `email` identity
+  beside it a stop for Quinn; created and last signed in inside the window the tester names; still
+  at `none`), grants by its id, has the tester confirm that their own Settings shows §3.4's Settings
+  tester line, and re-reads `paid` a day later. That closes the case the
+  predicate was for, a grant waiting for an address that a stranger then claims with a password,
+  because no grant waits for an address any more. The case it leaves open is a stranger who
+  pre-registered the address **before** the tester signed in, so that both share one `auth.users`
+  row. That is not this lane's to close (§8.3). For an email-code sign-in, none of the tables S1 and
+  S1b read can see it; for a Google sign-in, check 1b may, but that half of it is unverified and
+  stays so after the first Google tester (§8.3).
 - **Export and deletion rights:** `GET /account/export` gains `comp_grants` (the caller's grants by
-  `email_lower = lower(accounts.email)`: dates, cohort, note, `ended_reason`) and `route_daily` (the
-  caller's rows, §4). Today's export also omits `usage_daily`, which the cost view reads; S4 adds it
-  (Q12). Deletion is §3.3's trigger, `on delete cascade` and the purge list; retention is the sweep
-  (§3.1), Q8 and Q11.
+  `account_id`: dates, cohort, note, `ended_reason`), `comp_audit` (the caller's rows by `account_id`,
+  selecting exactly `action, ends_at, cohort, at`, never `*`: `db_role` and `grant_id` are internal
+  and are not exported; Amendment 2026-10-20, Q7) and `route_daily` (the caller's rows,
+  §4). Today's export also omits `usage_daily`, which the cost view reads; S4 adds it (Q12). Deletion
+  is `on delete cascade` from `accounts` (§3.3) and the purge list; retention is the sweep (§3.1), Q8
+  and Q11.
 
 ## 4. Usage and the cost estimate
 
@@ -409,15 +560,16 @@ own billing pages).
 
 ## 5. The admin view — recommended form: SQL views in `admin`, read in the SQL editor
 
-- `admin.testers`: one row per grant — email, cohort, state (`waiting for sign-up` / `live` /
-  `ended` / `expired`), account id once one matches, granted, ends, last active day.
+- `admin.testers`: one row per grant — account id, the account's current address (read from
+  `accounts` when the view is read, never stored on the grant), cohort, state (`live` / `ended` /
+  `expired`), granted, ends, last active day. *(Amendment 2026-10-20: every grant names an account,
+  so the signed `waiting for sign-up` state is gone.)*
 - `admin.tester_usage_daily`: per tester per UTC day — calls, refunds, in and out tokens and
   `est_usd` per kind; judgments by tier (model vs rule vs deterministic); mail arrivals by phase;
   Gmail messages; `route_daily` calls per route (inbound mail volume is the `mail_seen` columns, §4).
 - `admin.tester_spend_monthly`: per tester per month `est_usd`, a total row, and any `budget_alerts`.
 - `admin.testers`' state is derived at read time, in this order: `ended` (`ended_at` set), `expired`
-  (`now() >= ends_at`), `waiting for sign-up` (no account whose address matches **and** that passes
-  the password rule), otherwise `live`. The predicates are the view's own (§3.2), so a grant is `live`
+  (`now() >= ends_at`), otherwise `live`. The predicates are the view's own (§3.2), so a grant is `live`
   exactly when it entitles its account (the view answers `tester`, unless an active Stripe row wins,
   which `admin.testers` shows as a separate `paid` flag).
 - Counts and dollars only: no item id, title, field value, sender or message key appears in any of them.
@@ -442,12 +594,16 @@ own billing pages).
   (a) **no address-shaped token** (`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`) appears anywhere in
   the raw text of any `.sql` migration, comments and `$$` bodies included (today's corpus has none, so
   the guard is green on arrival); and (b) every `insert`, `update` or `delete` naming `comp_grants` or
-  `comp_audit` lies inside the body of a named `admin.comp_*` function or the deletion trigger,
-  never at top level or in a `do` block, and an insert into `comp_grants` carries **no quoted literal**
-  in its values (only parameters and expressions). "A write" means exactly the three DML shapes
+  `comp_audit` lies inside the body of a named `admin.comp_*` function, never at top level or in a
+  `do` block, and an insert into `comp_grants` carries **no quoted literal** in its values (only
+  parameters and expressions). *(Amendment 2026-10-20: the signed exemption for the deletion trigger
+  is gone with the trigger. Under account-id binding, a literal there would be a tester's account
+  id, which rule 1 forbids as it forbids an address, so (b)'s literal ban keeps its point, and (a)
+  stays because an address in a migration is still a rule-1 breach.)* "A write" means exactly the three DML shapes
   `insert into <t>`, `update [only] <t> … set` and `delete from [only] <t>`, with `<t>` bare,
   `public.`-qualified or quoted; a word such as `insert` or `delete` elsewhere in a statement is not a
-  write. So S2a's own `revoke insert, update, delete, truncate on public.comp_grants from service_role`,
+  write. So S2a's own `revoke insert, update, delete, truncate on public.comp_grants from service_role`
+  (and the same on `public.comp_audit`),
   comp_audit's `grant_id … references public.comp_grants on delete set null`, the partial unique index
   and a `comment on table public.comp_grants` are not writes and must pass (§9's must-pass cases).
   Both parts scan `migrations/*.sql` only; the staging proof under `proofs/` (§9 layer iii), which
@@ -466,9 +622,43 @@ own billing pages).
 
 ## 7. Decisions for Quinn (money and privacy; recommendation first)
 
-- **Q1. When a friends grant ends.** *Recommend:* every grant carries its own `ends_at`; the default
-  for `friends` is **2027-01-31** (the pilot starts in spring 2027), extended by `admin.comp_extend`.
-  Alternatives: 90 days per grant; open-ended (not offered: every grant must end).
+- **Q1. When a friends grant starts and ends** (re-read under the Amendment 2026-10-20; the signed Q1
+  covered only the end, because a grant used to exist before sign-up). *Recommend:*
+  - **Start: after sign-up, by account id, on the tester's word.** The friend installs, signs in with
+    Google or an emailed code, and stops at the subscribe step without pressing a price. They tell
+    Quinn, outside the app, the address they signed in with, whether by Google or by a code, and
+    roughly when. On Quinn's go, the owner runs §8.3's checks and
+    `admin.comp_grant(<account id>, '2027-01-31', 'friends', <note>)`. The friend presses Next, and
+    today's wizard asks the server once more and moves on. A Next pressed before the grant shows
+    today's "Finish the payment page in your browser, then come back."; for a friend that line means
+    "wait for Quinn". Once in, the friend tells Quinn that Settings shows §3.4's Settings tester line,
+    which is §8.3's step 5; a day later the owner checks once more that no payment came through
+    (step 5b). The friends' install note (S8, L10) says all of this, "do not press a price" and the
+    meaning of the payment-page line included.
+  - **End: unchanged.** Every grant carries its own `ends_at`. The default for `friends` is
+    **2027-01-31** (the pilot starts in spring 2027), extended by `admin.comp_extend`.
+
+  *Trade-off.* The friend meets the price step once and waits on it until the grant is written:
+  minutes if Quinn is at hand, longer if not. The app shows no "waiting for tester access" line,
+  because every unpaid student would see it (D2). If the friend presses a price anyway, Checkout runs
+  as it does for anyone, since Q3's 409 holds only after the grant. A trial or charge that follows wins
+  over the comp (Q3) until Quinn cancels it in Stripe and refunds by hand. The install note is the only
+  guard against pressing a price. §8.3's checks do not stop a charge; they only make a trial visible.
+  Step 3 finds one that already exists. Steps 5 and 5b find one from a Checkout the friend opened
+  before the grant and finished after it: `admin.testers` then shows `paid` set. A Checkout page
+  stays usable for up to 24 hours (Stripe's default, since `billing-checkout` sets no expiry), so
+  the same-day step 5 can pass before it is finished; step 5b's re-read, within 24 to 72 hours of
+  the grant, is the one that sees it, and the grant's ledger row stays open until then. Such a
+  trial began no later than 24 hours after the grant, so at 5b it is at most three days into its
+  seven, and Quinn cancels it by hand before its first charge. In return, the binding rests on no check that S1 and S1b showed the database cannot
+  make, and no grant ever waits for an address that a stranger could claim first.
+  *Alternatives.* (a) Keep the signed email binding (a grant before sign-up, no price step), but only
+  once L9's C1b has turned password sign-up off on prod. Every session's address is then proved by a
+  code or by Google, so no password test is needed. The friends then wait for C1b, and this lane needs
+  a further amendment with its email-binding tasks back. (b) A tester-only door on the subscribe
+  step. It removes the wait with prices on screen, but it is a visible free path for every student,
+  against D2. Not recommended. For the end date: 90 days per grant; open-ended (not offered: every
+  grant must end).
 - **Q2. Testers' monthly ceiling.** *Recommend:* the same $2.00 runaway guard as everyone, plus the
   $1.00 backfill allowance, so a tester is bounded like a paying student (≈$3 worst case a month; ten
   testers ≈$30). Alternative: a raised ceiling for `cohort = friends` (a per-cohort ceiling in
@@ -478,10 +668,12 @@ own billing pages).
 - **Q3. Paid vs comp.** *Recommend:* while the account is comped (the view answers `tester` for it),
   `billing-checkout` refuses, so a friend can never be charged by accident. If a Stripe row is active
   anyway, it wins. A grant that no longer entitles does not refuse checkout: one past its `ends_at`
-  (P8), or one matched to an account with a password (P7). That friend sees the price step, as any
-  unentitled account does. *(Revision 5 aligned these words with the mechanism. The earlier "while a
-  grant is open" would also have refused checkout for P7 and P8.)* Alternative: allow a friend to
-  subscribe while comped (no refusal).
+  (P8), or one ended early (P9). That friend sees the price step, as any unentitled account does.
+  Nor does a grant not yet written: a friend on the subscribe step before the grant can reach
+  Checkout (Q1). *(Revision 5 aligned these words with the mechanism. The earlier "while a grant is
+  open" would also have refused checkout for P8. The Amendment 2026-10-20 retired P7, a grant on an
+  account with a password, and put P9 in its place here.)* Alternative: allow a friend to subscribe
+  while comped (no refusal).
 - **Q4. The cost basis.** *Recommend:* tokens × today's pin for the MVP, reconciled monthly by hand
   against the OpenRouter dashboard. Alternative (v1): record model and dollars per call in
   `usage_daily` at `record_tokens` time (touches `judge_caps.ts`, L3's file).
@@ -494,28 +686,52 @@ own billing pages).
 - **Q6. Pilot reuse.** *Recommend:* the `cohort` check allows `friends` and `pilot`, so the pilot's
   ~30 non-paying students need no new mechanism. Alternative: `friends` only, widened when the pilot
   is planned.
-- **Q7. What the privacy page says.** *Recommend:* two sentences on the page L4 is rewriting, both in
-  L4's PR **before** its `PRIVACY_VERSION` bump (§8.5):
+- **Q7. What the privacy page says** (re-read under the Amendment 2026-10-20). *Recommend:* two
+  sentences on the page L4 is rewriting, both in L4's PR **before** its `PRIVACY_VERSION` bump (§8.5).
+  Sentence 1 is unchanged. Sentence 2 changes, because a grant no longer holds an address or a hash
+  of one:
   1. For everyone (follows from Q5): "We keep daily counts of your AI calls and cloud requests, never
      what they were about, to keep the service's cost in bounds. They are in your export and are
      deleted with your account."
-  2. For testers: "If Knowlu gives you free tester access, we keep the address you gave us until 30
-     days after that access ends, and a one-way hash of it with the dates of that access for at most
-     three years, or until you delete your account; we look at your daily counts and their cost to pay
-     for them."
-  With Q8's recommendation, the page's existing line that the consent record is "the one record a
-  deletion does not take with it" stays true and needs no change. Alternative: tell friends personally
-  only. That covers sentence 2 only; sentence 1 is still owed if Q5 stands.
+  2. For testers: "If Knowlu gives you free tester access, we record it on your account: the dates of
+     that access, a short note on why and, if it ended early, a one-word reason, kept until 30 days
+     after it ends; and a log of when it was given, extended and ended, kept for at most three years.
+     Both are in your export and are deleted with your account. We look at your daily counts and
+     their cost to pay for them."
+
+  *(Review I-3: the grant row also holds `ended_reason`, one of `done`, `asked`, `misuse` or `other`,
+  exported and kept until the sweep; `misuse` is a judgment about the person, so the page names the
+  field. Quinn may prefer to name the four words on the page; that is one clause more.)*
+  *(Review r2, M6: the grant and the log also hold `cohort` (`friends` or `pilot`), stored and
+  exported. Quinn may add "the kind of access" to the sentence's list; it is harmless left out.)*
+
+  The signed sentence 2 ("we keep the address you gave us … and a one-way hash of it") would now be
+  untrue in its first half: no grant holds an address. Its second half would say less than the truth:
+  the log is the account's own and is in its export. With Q8's recommendation, the page's existing
+  line that the consent record is "the one record a deletion does not take with it" stays true and
+  needs no change. The address a friend sends Quinn lives in Quinn's own messages, not in Knowlu's
+  database, so the sentence does not mention it; §8.3 has the owner delete the lookup from the SQL
+  editor's snippets and check the snippet list afterwards.
+  *Trade-off.* Putting the log in the export gives the service role `select` on `comp_audit` (its
+  writes stay revoked, A7), so one more table is readable with every edge function's key. The log
+  holds no free text: an action, dates, a cohort and a database role, and the export carries the
+  first three only (§3.5). *Alternatives.* (a) Keep `comp_audit` out of the export, with the service
+  role locked out of it entirely (the signed posture). Sentence 2 then reads "The dates of that
+  access, a short note on why and, if it ended early, a one-word reason are in your export. A log of
+  when it was given, extended and ended is kept for at most three years and is deleted with your
+  account." (b) Tell friends personally only. That covers sentence 2 only, and sentence 1 is still
+  owed if Q5 stands.
 - **Q8. Audit retention.** *Recommend (changed in revision 2):* three years is a **maximum**, held by
-  `admin.comp_sweep()` (A6), and the account-deletion trigger deletes the account's audit rows by hash
-  (A3), so no audit row outlives the account it describes. The row holds only the address's hash, the
-  action, the dates, the cohort and the database role (§3.5). After a deletion nothing per person
+  `admin.comp_sweep()` (A6), and the account's audit rows go with the account by `on delete cascade`
+  (A3, A3s; Amendment 2026-10-20, in place of the signed trigger's delete by hash), so no audit row
+  outlives the account it describes. The row holds only the account id, the action, the dates, the
+  cohort and the database role (§3.5). After a deletion nothing per person
   remains; the cost record that survives is the provider's and Supabase's billing totals, which name no
-  one. Alternative: keep the audit through a deletion, three years as a
-  minimum (the earlier draft). That needs a **third privacy sentence** ("If you had free tester access
-  and delete your account, we keep a one-way hash of your address and the dates of that access for
-  three years") and a change to the page's "the one record a deletion does not take with it" line,
-  both in L4's page before its bump.
+  one. Alternative: keep the audit through a deletion, three years as a minimum (the earlier draft;
+  under the amendment, `account_id` would be set null instead of cascaded). That needs a **third
+  privacy sentence** ("If you had free tester access and delete your account, we keep the dates of
+  that access for three years") and a change to the page's "the one record a deletion does not take
+  with it" line, both in L4's page before its bump.
 - **Q9. A spending stop across all testers.** *Recommend:* none for the MVP; the per-account ceiling
   bounds the total at about $3 × testers, and `admin.tester_spend_monthly` shows it. Alternative: a
   global comp budget that ends every friends grant's model calls past a dollar figure.
@@ -526,9 +742,10 @@ own billing pages).
   (iii) the same case table run as real SQL on staging, in a `begin … rollback` script, before any
   function reads the view and before L9 takes the migration to prod. Alternative: a local Postgres
   harness (a new task, and RAM the session does not have, handoff §3).
-- **Q11. Retention.** *Recommend:* grants (address, note, reason) are deleted 30 days after they close,
-  claimed or not, by a daily sweep (§3.1); an open, never-claimed grant holds its address until
-  `ends_at` (with Q1's default, at most until 2027-01-31). `route_daily` is kept while the account
+- **Q11. Retention.** *Recommend:* grants (dates, note, reason) are deleted 30 days after they close,
+  by a daily sweep (§3.1), or sooner with the account by the cascade. *(Amendment 2026-10-20: no grant
+  holds an address or waits unclaimed for one any more, so the signed "an open, never-claimed grant
+  holds its address until `ends_at`" no longer applies.)* `route_daily` is kept while the account
   lives, like `usage_daily`. Alternatives: delete a grant the day it closes (the record is then the
   audit alone); a fixed 400-day window on `route_daily` (needs a second sweep).
 - **Q12. `usage_daily` in the export.** Today's `GET /account/export` omits `usage_daily`, though it is
@@ -566,30 +783,110 @@ own billing pages).
      metering read by the project owner, not telemetry. VISION's sentence then keeps its force for the
      pilot and for paying strangers.
    - Also confirm §6's reading of D2. (Rule and VISION changes are Quinn's.)
-3. **The password sign-up path** (§3.5) is wider than this lane: a session for an unproved address.
-   Hand it to L9's C1b settings check, **with one consequence named for this lane (revision 5)**.
-   Grants bind to `accounts.email`, which is not unique, and nothing updates it when
-   `auth.users.email` changes: no migration has an `after update` trigger for it. With
-   `enable_confirmations = false`, GoTrue confirms a `PUT /user` email change by itself. So two
-   `accounts` rows can carry one address. The scenario:
-   - someone password-signs-up with a friend's address (P7: the view refuses them);
-   - they change their auth email, which frees the address in GoTrue but not in `accounts`;
-   - the friend signs up by OTP, and their grant goes live;
-   - the first person then deletes their account.
+3. **The password sign-up path, and the checks around each grant** (rewritten by the Amendment
+   2026-10-20, and again after its reviews r1 and r2). GoTrue's password `/signup` hands a session to an address
+   nobody proved (§3.5). That is wider than this lane, and closing it stays with L9's C1b settings
+   check (password sign-up off, or confirmations on). Under account-id binding, this is what it means
+   for this lane:
+   - **The signed denial-of-service scenario is gone.** It came from grants keyed on `accounts.email`,
+     which is not unique, and a deletion trigger keyed on `old.email`. A grant now goes only with its
+     own account id, so another account's deletion never ends a friend's grant, even when two
+     accounts carry one address (P15).
+   - **What remains is a pre-registered address.** Suppose a stranger password-signs-up with a
+     friend's address before the friend first signs in. GoTrue then holds one `auth.users` row for
+     that address, and the friend's emailed code (or a Google sign-in on that address) lands in that
+     row. Both people can then sign in to one account. A grant would comp an account the stranger can
+     also use, which costs at most the per-account ceiling (Q2), and the stranger can read whatever
+     the friend syncs. The second exposure is every student's until C1b, comp or no comp; the comp
+     adds only the first. For email-code and password sign-ups, none of the tables S1 and S1b read
+     separates this case: no column of `auth.users`, nor `auth.identities`, nor the audit log on
+     staging, and a live session's amr is at most a best-effort red flag (amendment block). For a
+     Google sign-in, check 1b below may separate it; that is unverified on staging.
+   - **The checks around each grant.** The controller runs them as the project owner in the SQL
+     editor, reading only until step 4. The lane ledger records each outcome, never the address or
+     the id. The friend gives three things: the address they signed in with, whether by Google or by
+     a code, and roughly when.
+     1. **One account, on both addresses.** Join `public.accounts a` to `auth.users u on u.id = a.id`
+        and list every account where `lower(u.email) = lower(<address>)` **or** `lower(a.email) =
+        lower(<address>)`. Go on only if there is exactly one, and it matches on both. None: the
+        friend has not signed in yet, or used another address, so ask the friend. Two or more, or one
+        that matches on only one side: stop and ask Quinn. (`accounts.email` is copied once at
+        sign-up and never follows an auth email change, P15, so a match on `accounts.email` alone
+        can be a stranger's account whose auth address has moved away.)
+        **1b. A Google sign-in shows `google`** (a conditional red flag, unverified on staging). If
+        the friend says they signed in with Google, the account's `auth.identities` should include a
+        `google` identity. No `google` identity at all: ask the friend how they signed in. A
+        `google` identity with an `email` identity beside it means the address
+        may have had a user before the Google sign-in: stop and ask Quinn. This is not a refusal,
+        since a friend may have used a code earlier themselves. The expectation rests on GoTrue's
+        automatic linking and has not been read on staging (no Google scratch user was made, S1b).
+        The first Google tester's read, structure only and with a ledger row, confirms only that a
+        fresh Google sign-in shows `google` alone; the half that would catch a pre-registration
+        (`google` beside `email`) stays unverified. An `email` beside `google` on any read, the
+        first included, goes to Quinn as a stop, never as a reason to drop the check.
+     2. **Inside the friend's window.** `a.created_at` and `u.last_sign_in_at` both fall inside the
+        window the friend named. Outside it: stop and ask Quinn; an older account may be a
+        pre-registration. This bounds staleness only. S1 saw `last_sign_in_at` set at creation even
+        for an OTP user that never typed its code, so it does not prove that the friend finished
+        signing in; step 5 does.
+     3. **Still unpaid.** The account's `entitlements.status` is `none` (or the row is missing). Any
+        other status stops the grant: `trialing` or `active` means the friend pressed a price, and
+        that row would win over the grant (Q3); `canceled` or `past_due` means a payment history the
+        friend has not mentioned. Stop and tell Quinn, who cancels in Stripe first, lets the payment
+        stand, or says to go on.
+     4. **Grant.** `admin.comp_grant` with that id. `admin.testers` then shows the grant `live`,
+        `paid` unset, and the friend's address. **Right after this step** the controller deletes the
+        editor tab that held the lookup.
+     5. **The friend's own Settings shows it, the same day.** The friend reports that the Settings
+        account row shows §3.4's Settings tester line; Next moving on is not enough, because a trial
+        does that too. The controller then re-reads `admin.testers` and finds `paid` still unset.
+        This proves the comp landed on the account the friend actually uses. It cannot yet prove
+        that no trial is coming: a Checkout page the friend opened before the grant stays usable
+        for up to 24 hours (Stripe's default lifetime; `billing-checkout` sets no `expires_at`), and
+        Q3's 409 refuses only new sessions.
+        **5b. A day later, `paid` once more.** Within 24 to 72 hours of the grant (no sooner, so
+        any Checkout opened before the grant has expired; no later, so a trial it started is still
+        days from its first charge), the controller re-reads `admin.testers` and finds `paid` still
+        unset. The grant's ledger row closes only after this read.
 
-   §3.3's deletion trigger deletes every grant and audit row for `old.email`, so the friend's live
-   grant ends silently. In the same state, `admin.testers` shows two account ids for one grant. This is
-   denial of service only, and only inside the password path. It grants no one access, and P7 already
-   refuses the impostor. Closing that path (C1b: password sign-up off, or confirmations on) closes this
-   too. Until L9 does, the controller checks `admin.testers` for a grant with two account ids before
-   each new grant and after any reported loss of access. This lane adds no trigger on `auth.users`.
+        If the line does not show within a day, or `paid` is set at step 5 or 5b, the controller
+        asks Quinn, who ends the grant (`admin.comp_end(<id>, 'other')`) or cancels the trial, since
+        prod writes stay on Quinn's go.
+     6. **No address left in the editor.** The SQL editor may keep an editor tab as a private
+        snippet. After step 5 the controller checks again that the snippet list holds no lookup,
+        and records "snippets checked" in the ledger.
+   - **Check 2b, considered and left out.** A best-effort read, "the account has no live session
+     whose amr is `password`", was weighed after S1b. *Recommend: leave it out.* An amr names only
+     a live session's method, so sign-out and expiry erase it. On staging the OTP-created user's
+     session read `password` too, but that user never typed a code, and the likely cause (the
+     amendment block's untested `/otp` sign-up-path hypothesis) would leave a genuine code-only
+     friend with a `password` session of its own beside the one their code opened. So 2b might stop a genuine friend, and it would miss any stranger who has
+     signed out. A check that may be wrong both ways gets overridden by habit. *Trade-off:* taking
+     it costs one read per grant, as a red flag sent to Quinn rather than a refusal, and might catch
+     a stranger who is still signed in. Revisit if a read on a known code-only sign-in ever shows a
+     method other than `password`.
+   - **For Quinn: does the first prod grant wait for C1b?** *Recommend: no.* The comp's own added
+     exposure is bounded money (about $3 a month per tester, Q2), steps 1 and 2 catch a plain
+     pre-registration and a moved auth address, step 5 catches a comp on the wrong account, step 5b
+     catches a trial behind it before its first charge, and the data exposure is not the comp's:
+     it waits for C1b either way. Check 1b is not counted here: its pre-registration half is
+     unverified, so this recommendation stands without it.
+     *Alternative:* the first prod grant waits until C1b's setting is verified on prod. No
+     pre-registration can then be made, and the friends wait for L9.
+
+   This lane adds no trigger on `auth.users` or on `public.accounts`.
 4. **Migration stamp: the shared rule (revision 5, 2026-10-19).** The email, L3, L8, L5 and L1
    migrations follow one rule, M1-M8, stated in full after this list ("The migration-stamp rule"). The
    same text stands in L3's plan (`2026-10-18-first-day-allowance-plan.md` §2.1). For this lane:
    - **S2a fixes the stamp (M3).** The controller passes S2a the stamp L3's T0 recorded in L3's lane
      ledger. S2a takes the next free stamp after that, after every file on `main` and after every
      version staging holds, and never one that L5's or L1's ledger already records. If L3 has not run
-     T0 when S2a is dispatched, S2a waits for it rather than guessing.
+     T0 when S2a is dispatched, S2a waits for it rather than guessing. *(Amendment 2026-10-20: L3's T0
+     has run. It recorded `20261020000200`, with `main` and staging both at `20261020000100` and no
+     lane ahead holding a stamp. By M2, L8's stamp is `20261020000300` if S2a fixes it on 2026-10-20
+     and no other lane records a later one first; fixed on a later day, it is that day's `000100`
+     (for example `20261021000100`). S2a re-reads all three of M3's sets when it runs, and the
+     ledger row, not this note, is the record.)*
    - S2a writes the stamp to this lane's ledger before it creates `<stamp>_testers.sql`. The tests find
      the file by `^\d{14}_testers\.sql$` (M4).
    - **S7a is this lane's first staging push**, so M5's re-check runs immediately before it, after the
@@ -630,9 +927,9 @@ own billing pages).
      so a function in a third schema still fails the parse-count check loud.
    - **The function parse-count pin** (`assertEquals(parsed, 40, …)` and its hand-count comment, in
      the execute-revoke test, `:333` on the email branch). L3 moves it too (its plan, T1: 40 → 42).
-     On this design the lane adds six function definitions (`admin.comp_grant`, `comp_extend`,
-     `comp_end`, `comp_sweep`, `count_route`, the deletion trigger function); each task moves the pin
-     by its own and adds its line to the comment.
+     On this design the lane adds five function definitions (`admin.comp_grant`, `comp_extend`,
+     `comp_end`, `comp_sweep`, `count_route`; the Amendment 2026-10-20 dropped the signed sixth, the
+     deletion trigger function); each task moves the pin by its own and adds its line to the comment.
    - **The view parse-count pin and the `revoked` name list** (`assertEquals(parsed, 5, …)` and
      `assertEquals(revoked, […])`, `:349` and `:353`, and their comment). The lane adds four views
      (`effective_entitlements`, `testers`, `tester_usage_daily`, `tester_spend_monthly`), each
@@ -652,7 +949,10 @@ own billing pages).
    sign-up does not), email binding is wrong and this spec has no tasks for the account-id fallback.
    Then S2a does not start: the spec returns for a revision (grants keyed by `account_id`, granted
    after sign-up, so a tester meets the subscribe step once and the wizard change of §3.4 covers it
-   only after the grant), and Q1 and Q7 go back to Quinn to re-read under it.
+   only after the grant), and Q1 and Q7 go back to Quinn to re-read under it. **Triggered
+   2026-10-20:** S1 found a hash on an OTP user and on a password user alike (§2). The Amendment
+   2026-10-20 at the top is that revision; Q1 and Q7 are rewritten for Quinn's re-read, §8.3 joins them, and S2a waits
+   for Quinn's signature on it.
 10. **The staging proof runs before the merge (S7a), so the migration reaches staging from the lane
     branch.** That way `main` never carries `lookupFrom` on an unproved view, and a P1 failure stops
     the lane with nothing on `main` to revert. S7a runs after the lane's last rebase onto `main`, so
@@ -670,8 +970,8 @@ own billing pages).
     word; any other stop goes to Quinn first. S7a deploys no function, so nothing is redeployed and
     the withdrawal opens no window. In one `begin … commit`, it drops on staging every object
     `<stamp>_testers.sql` creates, as the file names them (the grant, audit and `route_daily` tables,
-    the four views, the `admin` functions and schema, `count_route`, the deletion trigger on
-    `public.accounts` and its function, and the `knowlu-sweep-comp` job). It then checks the
+    the four views, the `admin` functions and schema, `count_route`, and the `knowlu-sweep-comp` job;
+    since the Amendment 2026-10-20 there is no trigger on `public.accounts` to drop). It then checks the
     catalogue for each of them, `cron.job` included, and records that none is left (anything left
     stops it, the version row in place). Then it removes the version row with
     `supabase migration repair --status reverted <stamp>` and confirms that a dry run on `main` no
@@ -872,7 +1172,10 @@ layers, as L3's plan does (`2026-10-18-first-day-allowance-plan.md`, Q-C), and *
 drives layers ii and iii so the cases are written once and run twice.
 
 **The case table** (`migrations/testers_cases.ts`, data only; every address is
-`…@example.invalid`, never a person):
+`…@example.invalid`, never a person). *(Amendment 2026-10-20, review minor 6: the retired ids P4,
+P7, P10 and P11 are listed in the table below for the record only. In `testers_cases.ts` they are
+reserved in a comment, never data rows, so the loops of layers ii and iii never meet a row with no
+expectation, and no new case reuses them.)*
 
 | Id | Given | The view answers / the state |
 |---|---|---|
@@ -880,25 +1183,28 @@ drives layers ii and iii so the cases are written once and run twice.
 | P0x | an account whose `entitlements` row was deleted by hand, no grant | one view row: `none` / null / null (the coalesce) |
 | P1 | Stripe `active`, no grant | the `entitlements` row, column for column (**the paying-student guard**) |
 | P2 | Stripe `active`, open grant | the Stripe row (paid wins); `admin.testers` `live`, `paid` set |
-| P3 | the sign-up `none` row, open grant, `encrypted_password = ''`: **every real tester** | `active` / `tester` / the grant's `ends_at`; `live` |
+| P3 | the sign-up `none` row, open grant on this account: **every real tester** | `active` / `tester` / the grant's `ends_at`; `live` |
 | P3x | as P3 with the `entitlements` row deleted by hand | as P3 |
-| P4 | as P3 (the `none` row) with `encrypted_password` `NULL` | as P3 |
+| P4 | *retired by the Amendment 2026-10-20 (it tested a `NULL` password; the view reads no password)* | none |
 | P5, P6 | Stripe `canceled`, then `past_due`, open grant | as P3 |
-| P7 | the `none` row, open grant, account carries a password | `none` / null / null; `waiting for sign-up` |
+| P7 | *retired by the Amendment 2026-10-20 (it tested a grant refused for an account with a password)* | none |
 | P8 | the `none` row, grant past `ends_at` | `none` / null / null; `expired` |
 | P9 | the `none` row, grant ended early | `none` / null / null; `ended` |
-| P10 | the `none` row, grant `Friend@Example.invalid`, account `friend@example.invalid` | matches, as P3 |
-| P11 | grant, no account | no view row; `waiting for sign-up` |
-| P12 | a second open grant for one address (including one whose `ends_at` has passed but was never ended) | `comp_grant` refused by the unique index, with the message naming `admin.comp_extend` |
+| P10 | *retired by the Amendment 2026-10-20 (it tested a case-insensitive address match; the view matches no address)* | none |
+| P11 | *retired by the Amendment 2026-10-20 (a grant with no account cannot exist; P16 tests the refusal)* | none |
+| P12 | a second open grant for one account (including one whose `ends_at` has passed but was never ended) | `comp_grant` refused by the unique index, with the message naming `admin.comp_extend` |
 | P13 | an open grant past `ends_at`, then `comp_extend` to a future date | `expired`, then `live` and `active` / `tester` / the new `ends_at`; `comp_extend` to a past date, or on an ended grant, is refused |
-| A1 | `comp_grant`, `comp_extend`, `comp_end` | each writes exactly one `comp_audit` row; `email_hash` is `sha256Hex` of the lower-cased address |
-| A2 | a refused `comp_grant` (P12) | no audit row |
-| A3 | the account is deleted | its grants, its `route_daily` rows and its `comp_audit` rows (by hash) are gone; another address's audit rows are untouched |
-| A3s | a second account, set up as A3's, is deleted **the way production does it**: inside its own savepoint, `set local role service_role`, then `delete from public.accounts` for that account (the purge's `restDelete(rest, "accounts", …)` in `functions/account/index.ts`) | as A3, with no permission error. This is the only case that runs the deletion trigger under §3.5's reduced service-role rights, so a trigger that is not really `security definer` fails here and not on a student's `DELETE /account` on prod |
+| P14 | two accounts with the sign-up `none` row, an open grant on the first only | the first `active` / `tester`; the second `none` / null / null (a grant never reaches another account) |
+| P15 | two accounts carrying one address (§8.3: `accounts.email` is not unique), an open grant on the first; then the second account is deleted | the first `tester` before and after; the second `none`; the grant and its audit rows survive the second account's deletion |
+| P16 | `comp_grant` naming an account id with no `accounts` row | refused by the foreign key; no grant row |
+| A1 | `comp_grant`, `comp_extend`, `comp_end` | each writes exactly one `comp_audit` row, carrying the grant's `account_id` |
+| A2 | a refused `comp_grant` (P12, P16) | no audit row |
+| A3 | an account holding a grant made through `admin.comp_grant` (so its audit row's `grant_id` is set) and a `route_daily` row is deleted; one delete fires both referential paths at once, the cascade from `accounts` and the set-null from `comp_grants` | its grants, its `route_daily` rows and its `comp_audit` rows are gone, with no error from the two paths meeting; another account's grants and audit rows are untouched |
+| A3s | a second account, set up as A3's (a grant through `admin.comp_grant`, its audit row's `grant_id` set, a `route_daily` row), is deleted **the way production does it**: inside its own savepoint, `set local role service_role`, then `delete from public.accounts` for that account (the purge's `restDelete(rest, "accounts", …)` in `functions/account/index.ts`) | as A3, with no permission error. This is the only case that runs the deletion under §3.5's reduced service-role rights, so it proves on staging that the cascade into `comp_grants` and `comp_audit` runs as the tables' owner, before any student's `DELETE /account` on prod relies on it (Amendment 2026-10-20) |
 | A4 | the sweep, grants closed 31 and 29 days ago | the first deleted, the second kept; their audit rows stay, the first's `grant_id` now null |
 | A6 | the sweep, audit rows written three years and a day ago and three years less a day ago | the first deleted, the second kept |
 | A5 | a comped account | absent from `billing_subscribers` |
-| A7 | as `service_role`: insert, update and delete on `comp_grants`, any statement on `comp_audit`, a call to `admin.comp_grant`; then a select on `comp_grants` and `select account_id, plan, status, current_period_end from public.effective_entitlements` | each write and the call refused (permission denied); both selects succeed |
+| A7 | as `service_role`: insert, update and delete on `comp_grants` and on `comp_audit`, a call to `admin.comp_grant`; then a select on `comp_grants`, a select on `comp_audit` and `select account_id, plan, status, current_period_end from public.effective_entitlements` | each write and the call refused (permission denied); the three selects succeed (the `comp_audit` select since the Amendment 2026-10-20, for the export, Q7) |
 | R1 | `count_route` twice, then a bad route, then as `authenticated` | `calls = 2`; refused; permission denied |
 | V1 | seeded `usage_daily` rows at known token counts | `admin.tester_usage_daily.est_usd` equals the hand-computed sum |
 | V2 | two testers, one with a `budget_alerts` row | `admin.tester_spend_monthly`'s total row is the sum of the two; the alert shows on its month |
@@ -923,26 +1229,28 @@ in-place pin moves listed in §8.7 and nothing else):** RLS on
 `comp_grants`, `comp_audit`, `route_daily`; every new writing function revoked from `anon` and
 `authenticated`; every new view revoked; the function and view parse-count pins and the view `revoked`
 list move by exactly the new definitions (§8.7); `admin` schema usage revoked from `public, anon,
-authenticated, service_role`; the service role's write revokes on `comp_grants` and its `revoke all` on
-`comp_audit` (§3.5, A7); `config.toml`'s `[api] schemas` still excludes `admin`; no column on any new
-table can hold a title, body, sender or item id.
+authenticated, service_role`; the service role's write revokes on `comp_grants` and on `comp_audit`,
+and no `revoke` of its `select` on either (§3.5, A7; Amendment 2026-10-20); `config.toml`'s `[api]
+schemas` still excludes `admin`; no column on any new table can hold a title, body, sender or item id,
+and no column of `comp_grants` or `comp_audit` has a name containing `email` (Amendment 2026-10-20).
 **The rule-1 tripwire (§6), with its own synthetic cases first** (S2a, before any admin function
 exists): (a) the address-shaped-token scan over every `.sql` file's raw text; (b) the placement scan:
 every `insert`/`update`/`delete` naming `comp_grants` or `comp_audit` (bare, `public.` or quoted) is
-inside an `admin.comp_*` function body or the deletion trigger's, and an insert into `comp_grants` has
-no quoted literal in its values. Synthetic strings it must get right: a `do $$ … insert into
+inside an `admin.comp_*` function body (no trigger exemption since the Amendment 2026-10-20), and an
+insert into `comp_grants` has no quoted literal in its values. Synthetic strings it must get right: a `do $$ … insert into
 public.comp_grants values ('friend@…') … $$` block is reported by both parts; a top-level
 `insert into comp_grants select …` with no literal is reported by (b); a parameterised insert inside
 `create function admin.comp_grant(…)` passes; an address in a `--` comment is reported by (a);
 `update only public.comp_audit set at = now()` and `delete from "comp_grants"` at top level are
 reported by (b). **Must pass**, because S2a's own SQL carries them: `revoke insert, update, delete,
-truncate on public.comp_grants from service_role`; `revoke all on public.comp_audit from service_role`;
+truncate on public.comp_grants from service_role` and the same on `public.comp_audit`;
 a `create table public.comp_audit (…, grant_id uuid references public.comp_grants on delete set null,
-…)`; `create unique index … on public.comp_grants (email_lower) where ended_at is null`; and
+account_id uuid not null references public.accounts(id) on delete cascade, …)`; `create unique index
+… on public.comp_grants (account_id) where ended_at is null`; and
 `comment on table public.comp_grants is '… insert … delete …'`. (b) matches only the three DML shapes
 of §6, never a DML word alone. On the corpus it is green at S2a (S2a's statements are the must-pass
 shapes, and no write to either table exists yet) and stays green, unedited, when S2c1 and S2c2 add
-the functions and the trigger.
+the functions.
 Plus the exact shape of every predicate the cases depend on:
 `effective_entitlements` reads `accounts` `left join entitlements` (P1) and yields
 `coalesce(e.status, 'none')` for `status` (P0, P0x); its grant branch is gated on
@@ -950,11 +1258,14 @@ Plus the exact shape of every predicate the cases depend on:
 `in ('canceled'`, `in ('past_due'` or `e.account_id is null` test (P3, P3x, P5, P6); its select list,
 split at top-level commas, is exactly four items whose output names are, in order, `account_id`,
 `plan`, `status`, `current_period_end` (§3.2; the lookup's side of this contract is S3's pin); its grant match carries
-`g.ended_at is null`, `now() < g.ends_at`, `g.email_lower = lower(a.email)` and
-`coalesce(u.encrypted_password, '') = ''` verbatim (P3-P10); `admin.testers` uses the same predicates
-(P7-P11); `count_route` is one `insert … on conflict (account_id, day, route) do update` with the route
-pattern; `route_daily`'s foreign key is `on delete cascade`; `comp_audit` has no column named `note`,
-`reason`, `actor` or `email`; each admin function's body contains its own audit insert; no function
+`g.account_id = a.id`, `g.ended_at is null` and `now() < g.ends_at` verbatim (P3, P8, P9, P14,
+P15), and the view's text names no `auth.users`, no `encrypted_password` and no `email` (Amendment
+2026-10-20: the signed `g.email_lower = lower(a.email)` and `coalesce(u.encrypted_password, '') = ''`
+pins are retired, and this absence pin stops either coming back unreviewed); `admin.testers` uses the
+same predicates (P2, P8, P9, P13); `count_route` is one `insert … on conflict (account_id, day, route) do update` with the route
+pattern; `route_daily`'s, `comp_grants`' and `comp_audit`'s `account_id` foreign keys are each `on
+delete cascade` (A3, A3s); `comp_audit` has no column named `note`, `reason`, `actor`, `email` or
+`email_hash`; each admin function's body contains its own audit insert; no function
 body contains `update public.comp_audit` (or the unqualified form); `comp_extend`'s body refuses an
 ended grant and a past `ends_at` but carries no `now() < ends_at` test on the grant it extends (P13);
 the sweep's `cron.schedule('knowlu-sweep-comp'`, its 30-day grant interval and its
@@ -963,9 +1274,10 @@ no other job's minute field where that field is a plain number, compared by a pi
 over the existing `cron.schedule` reader in `migrations_test.ts` (not by that file's whole-string
 `j.when !== sweep` compare in `the_mail_cron_jobs_use_the_vault_token`). The pin has synthetic cases
 first: `'23 8 * * *'` against `'23 7 * * *'` is refused, `'29 3 * * *'` against `'* * * * *'` and
-`'11 * * * *'` passes. Then the delete trigger, `security definer` with a fixed `search_path`, and in it both
-the grant delete and the audit delete by the hash expression of §3.3 (A3); `est_usd`'s expression is `monthly_spend`'s; `billing_subscribers` is
-unchanged.
+`'11 * * * *'` passes. The testers migration creates no trigger at all (Amendment 2026-10-20: the
+signed `security definer` deletion trigger and its hash-expression pin are retired; the cascades
+above replace them, and A3s proves them under the service role); `est_usd`'s expression is
+`monthly_spend`'s; `billing_subscribers` is unchanged.
 
 **Layer ii, the TS model:** a small pure model of §3.2's precedence and `admin.testers`' state order in
 `migrations/testers_model.ts` (no `Deno.test` in it), and its tests in
@@ -977,24 +1289,29 @@ re-register the model's suite under the functions tree.
 **Layer iii, real SQL on staging (`cloud/supabase/proofs/testers_staging.sql`):** every case of the
 table as one `begin; … rollback;` script that raises on the first mismatch, so nothing it writes
 survives. **It builds each account the way a real sign-up does.** It inserts only the `auth.users` row
-(an `@example.invalid` address, `encrypted_password` set per case, and the columns GoTrue's own
-inserts fill on staging, which S1 records), and lets the sign-up triggers run: `on_auth_user_metadata`
+(an `@example.invalid` address and the columns GoTrue's own inserts fill on staging, which S1
+recorded in the lane ledger, with placeholder values; the view reads none of them, so no case sets a
+password any more; Amendment 2026-10-20), and lets the sign-up triggers run: `on_auth_user_metadata`
 (before insert) and `handle_new_user` (after insert), which creates the `accounts` row and the
 `entitlements` row at `status = 'none'`. The script never inserts `accounts` or `entitlements` itself
 (both would hit their primary key). The Stripe cases then `update public.entitlements set status = …,
 plan = …, current_period_end = …` for that account; P0x and P3x `delete from public.entitlements` for
-it; P0, P3, P4 and P7-P10 leave the sign-up row as it is. The script's first statement checks the live
+it; P0, P3, P8, P9 and P12-P15 leave the sign-up row as it is. P15's second account carries the
+first's address in `accounts.email` only (its `auth.users` row has another `@example.invalid`
+address, as an auth email change would leave it, §8.3), set by an owner `update` after the trigger.
+P16 passes a fresh random id to `comp_grant`. The script's first statement checks the live
 trigger is the C1b body (`pg_proc.prosrc` for `handle_new_user` contains no `raise`), and raises a
 named error if not: the C1 body raised without `age_attested`, `tos_version` and `privacy_version` in
 the metadata, and would make every case fail for a reason that is not the view. It then inserts its
 own `usage_daily` and `budget_alerts` rows, calls the admin functions, and backdates `comp_grants` and
 `comp_audit` rows as the owner where A4 and A6 need it. A3 deletes the `auth.users` row, which
-cascades to `accounts` and fires the deletion trigger. A3 runs as the owner, who can do anything, so
-it cannot catch a privilege mistake. **A3s repeats the deletion as production runs it** (revision 5):
-in its own savepoint, under `set local role service_role`, `delete from public.accounts` for a second
-account, as the account function's purge does. The trigger then runs with the service role's reduced
-rights on `comp_grants` and `comp_audit` (§3.5). A function variant that the static `security definer`
-pin accepts but that does not carry the owner's rights fails here, on staging, before the merge. A static test pins that the file opens with `begin;`, closes with
+cascades to `accounts` and on to `comp_grants`, `comp_audit` and `route_daily`. A3 runs as the owner,
+who can do anything, so it cannot catch a privilege mistake. **A3s repeats the deletion as production
+runs it** (revision 5): in its own savepoint, under `set local role service_role`, `delete from
+public.accounts` for a second account, as the account function's purge does. The cascade then
+starts from a role holding no delete right on `comp_grants` or `comp_audit` (§3.5). If the cascade
+needed the deleting role's own rights, A3s fails here, on staging, before the merge, and the lane
+stops (Amendment 2026-10-20: this replaces the signed trigger's `security definer` check). A static test pins that the file opens with `begin;`, closes with
 `rollback;`, contains no `commit`, and names only `@example.invalid` addresses. The folder is not under
 `migrations/` and is never deployed. A7 runs its statements under `set local role service_role`, each
 in its own savepoint so the expected refusal does not end the script. **This is the gate:** the
@@ -1029,28 +1346,44 @@ S3. A failure at P0, P1 or P3 stops the lane before anything reaches `main`.
   makes no `count_route` request (a fake `rest` that records calls sees none).
 - `billing-checkout` answers 409 for a caller the lookup shows as `tester` and is unchanged otherwise
   (Q3). Two named cases cover that "otherwise": a caller with an open grant past `ends_at` (P8's shape)
-  and a caller with an open grant whose account carries a password (P7's shape). Both proceed to
-  Checkout as today. A static pin in `billing-checkout/handler_test.ts` that `index.ts` wires that lookup to
+  and a caller whose grant was ended early (P9's shape; the Amendment 2026-10-20 retired the signed
+  P7 case here). Both proceed to Checkout as today. A static pin in `billing-checkout/handler_test.ts` that `index.ts` wires that lookup to
   `effective_entitlements` selecting `plan`, the precedent of `account/handler_test.ts`'s `sources`
   guard, which reads `index.ts` as text.
 - The export: `account/handler.ts` receives `exportAll` injected, so `handler_test.ts` cannot reach
-  `index.ts`'s assembly. A static pin there, in the same pattern, that `exportAll` reads `comp_grants`
-  by `email_lower`, and `route_daily` and `usage_daily` (Q12) by `account_id` through the paging
-  `all(…)` with an order; and that `purge`'s table list names `route_daily` and its comment names
-  `comp_grants` and `comp_audit` (§3.3). `billing-portal` is unchanged (409, never a Stripe call).
+  `index.ts`'s assembly. A static pin there, in the same pattern, that `exportAll` reads `comp_grants`,
+  `comp_audit` (Q7), `route_daily` and `usage_daily` (Q12), each by `account_id` through the paging
+  `all(…)` with an order (Amendment 2026-10-20: the signed `comp_grants` read by `email_lower` is
+  gone); that the `comp_audit` read's `select=` is exactly `action,ends_at,cohort,at`, never `*` and
+  never `db_role` or `grant_id` (§3.5; review minor 2); that `purge`'s table list names `route_daily` and names neither `comp_grants` nor
+  `comp_audit`; and that its comment names those two as deleted by the cascade (§3.3). `billing-portal` is unchanged (409, never a Stripe call).
 
 **App (S5t, then S5):** a static pin in `app/tests/static_assets.rs`, written first and seen red, for
-the two sentences, that the subscribe step asks `checkEntitled()` on entry, and that
+the two sentences, that the subscribe step asks the status-and-plan helper on entry (not the plain
+`checkEntitled()`; review r4, I-1), and that
 `afterUpgradeSignIn`'s body un-hides `up-subscribe` only inside the not-entitled branch of its
-`checkEntitled()` answer (no `EL("up-subscribe").hidden = false` before that call); a fixture
-screenshot of Settings with `plan: tester`.
+`checkEntitled()` answer (no `EL("up-subscribe").hidden = false` before that call), and that
+`#wiz-sub-note` carries the nothing-to-pay line, not "Your subscription is active.", when the plan
+is `tester` (§3.4; Amendment 2026-10-20, review minor 5); and that for the plan `tester` the
+`#wiz-subscribe` panel's lede is hidden, its "Subscribe" heading is retitled, and the nothing-to-pay
+line is set in `#wiz-sub-note` alone (review r2, I-3); that the price buttons `#wiz-sub-month` and
+`#wiz-sub-year` are hidden for any entitled account (review r3, M1); and that every place
+`WIZ.entitled` is set also records the plan from the one status-and-plan helper, with the tester
+form rendered only once the plan is known (review r3, M2); a fixture screenshot of Settings with
+`plan: tester`, and one of the subscribe step with `plan: tester` showing no price.
 
 **Live, staging (the controller), after the merge, with `ROUTE_COUNTS=on` set on staging and the gated functions deployed after it (§4):** an existing Stripe-test-mode subscriber
 still answers `active` from `GET /entitlement` and runs a judge call (P1 end to end); an existing
-unpaid staging account still answers `none` (P0 end to end); grant a scratch account before sign-up;
-onboard it (so it carries the sign-up `none` row, P3 end to end) and see no price; judge and ingest run; the views show its day and
-a `route_daily` row per route it called; end the grant and see a 402 at once and the app's
-not-entitled path at its next check. Prod grants, and `ROUTE_COUNTS=on` on prod, follow only on
+unpaid staging account still answers `none` (P0 end to end). Then the tester's path as Q1 describes
+it (Amendment 2026-10-20): onboard a scratch account (so it carries the sign-up `none` row) and stop
+at the subscribe step with its prices; run §8.3's checks and grant it by account id; press Next and
+see the wizard move on with no Checkout (P3 end to end); see Settings show §3.4's Settings tester
+line and `admin.testers` show `paid` unset (§8.3 step 5; staging needs no 24-hour step 5b, because
+the proof opens no Checkout); step back to the subscribe step
+and see the retitled heading, no lede, no price buttons and the nothing-to-pay line once, in its
+note, never a price or "subscription"; judge and ingest run; the views show its day and a `route_daily`
+row per route it called; end the grant and see a 402 at once and the app's not-entitled path at its
+next check. Prod grants, and `ROUTE_COUNTS=on` on prod, follow only on
 Quinn's go and after §8.5.
 
 ## 10. Tasks
@@ -1062,7 +1395,8 @@ each task's SQL stays under about 80 lines and its tests (pins plus case rows) u
 task that would cross either line is split before dispatch, never during it: a long append across two
 shared files is the documented stall pattern, and one large commit hides a wrong predicate among
 routine pins. That is why S2c and S2e are each two tasks. The case table grows with the tasks: S2b
-writes the P rows, S2c1 and S2c2 the A rows, S2d R1, S2e1 the state column of P7-P13, S2e2 the V rows.
+writes the P rows, S2c1 and S2c2 the A rows, S2d R1, S2e1 the state column of P2, P8, P9 and P13
+(Amendment 2026-10-20; the signed P7-P13 included retired rows), S2e2 the V rows.
 The edits that are not appends are exactly those of §8.7: S2a0's `identPattern` widening (alone, so it
 is one small commit L5 and L1 can be pointed at), and the in-place moves of the function and view
 parse-count pins and the view `revoked` list by the task that adds each definition (S2b, S2c1, S2c2,
@@ -1070,30 +1404,32 @@ S2d, S2e1, S2e2).
 
 | Task | What | Files | Agent | Why this agent |
 |---|---|---|---|---|
-| S1 | Staging spike: an OTP user, a Google user and a password `/signup` user. Record the literal `encrypted_password` each carries (`NULL`, `''` or a hash); it picks email vs account-id binding. Also record that each has an `entitlements` row at `none` (§2), and which `auth.users` columns GoTrue fills on insert, for S2f's script | none (ledger row) | main session | live staging reads are the controller's |
+| S1 | Staging spike: an OTP user, a Google user and a password `/signup` user. Record the literal `encrypted_password` each carries (`NULL`, `''` or a hash); it picks email vs account-id binding. Also record that each has an `entitlements` row at `none` (§2), and which `auth.users` columns GoTrue fills on insert, for S2f's script. **Done 2026-10-20, with no Google user** (the OTP result had already failed the rule, so the Google user named above was never made; the first Google tester's read stands in for its half, §8.3 check 1b): a hash on the OTP and the password user alike, so account-id binding (the Amendment 2026-10-20); the column list is in the ledger row. **S1b, 2026-10-20:** the review's I-2 read of `auth.identities`, the sessions' amr and the audit log for both scratch users, structure only (amendment block); none separates a password sign-up. Left over: delete S1's two scratch users from staging, which S2f does not need (the amendment), with a ledger row | none (ledger row) | main session | live staging reads and writes are the controller's |
 | S2a0 | The guard widening alone, test first: the five synthetic `admin.x` function and view cases of §9 layer i seen red, then `identPattern`'s optional prefix widened to `public` or `admin` and nothing wider (§8.7), the whole corpus suite still green. No SQL file; one commit | `migrations/migrations_test.ts` | cloud-engineer | a shared guard every migration lane relies on; a loose widening hides a hole in every later migration |
-| S2a | First, the stamp: take L3's recorded stamp from the controller and fix this lane's by the shared rule's M3 (the next free stamp after it, after `main` and after staging), recorded in the ledger (§8.4). Tables, RLS and guards: `comp_grants` (with the partial unique index and the note length check), `comp_audit` (no free-text column), the `admin` schema, the client and service-role revokes (§3.5); the rule-1 tripwire with its synthetic cases, the must-pass ones included (§6, §9 layer i); the other static guards that need no function yet (RLS, revokes, schemas, column names) | `migrations/<stamp>_testers.sql`, `migrations/migrations_test.ts` | cloud-engineer | grants and their audit are money; `cloud/` is its lane |
-| S2b | `effective_entitlements`: the pass-through `left join`, the `coalesce` to `none`, §3.2's precedence with the grant branch as the complement of `active`/`trialing`, the password predicate, the four output columns, and its revoke; the view pins moved (§8.7); the case table's P rows (P0, P0x, P1-P3, P3x, P4-P13, the `none`-row cases first) | the same, `migrations/testers_cases.ts` | cloud-engineer | this view gates every paying student |
+| S2a | First, the stamp: take L3's recorded stamp from the controller and fix this lane's by the shared rule's M3 (the next free stamp after it, after `main` and after staging), recorded in the ledger (§8.4; L3 recorded `20261020000200`). Tables, RLS and guards: `comp_grants` (`account_id` referencing `accounts` `on delete cascade`, the partial unique index on `account_id`, and the note length check), `comp_audit` (`account_id` cascading the same way, no free-text column, no address or hash), the `admin` schema, the client and service-role revokes, the service role keeping `select` on both (§3.5); the no-`email`-column pin; the rule-1 tripwire with its synthetic cases, the must-pass ones included (§6, §9 layer i); the other static guards that need no function yet (RLS, revokes, schemas, column names) | `migrations/<stamp>_testers.sql`, `migrations/migrations_test.ts` | cloud-engineer | grants and their audit are money; `cloud/` is its lane |
+| S2b | `effective_entitlements`: the pass-through `left join`, the `coalesce` to `none`, §3.2's precedence with the grant branch as the complement of `active`/`trialing`, the grant joined on `g.account_id = a.id` with no read of `auth.users` (the absence pin of §9), the four output columns, and its revoke; the view pins moved (§8.7); the case table's P rows (P0, P0x, P1-P3, P3x, P5, P6, P8, P9, P12-P16, the `none`-row cases first; P4, P7, P10 and P11 reserved in a comment in `testers_cases.ts`, never data rows) | the same, `migrations/testers_cases.ts` | cloud-engineer | this view gates every paying student |
 | S2m | The TS model of §3.2 and `admin.testers`' state order, and its tests over every P row (layer ii); split from S2b by the size bound, and a file of its own | `migrations/testers_model.ts`, `migrations/testers_model_test.ts` | cloud-engineer | the fake lookup S3's gate tests stand on |
 | **S2R** | **Checkpoint:** review S2a0-S2m (the widening, the tripwire, the view, its pins, the case table, the model) before anything reads it | `docs/reports/` | reviewer | a wrong join or a wrong grant branch here 402s every student or every tester; caught before S2c1-S4 build on it |
-| S2c1 | The grant functions: `admin.comp_grant`, `admin.comp_extend` (accepting an expired open grant, refusing an ended one or a past `ends_at`), `admin.comp_end`, each with its refusals and its one audit insert; their revokes; pins (each body's audit insert, no `update` of `comp_audit`, P12's message, P13's refusals and no `now() < ends_at` in `comp_extend`), the function pin moved by three (§8.7); the A1, A2, A5 and A7 rows | the same | cloud-engineer | grant writes are money |
-| S2c2 | Deletion and retention: the `after delete on public.accounts` trigger function (`security definer`, fixed `search_path`; grants and audit by the §3.3 hash) and its `create trigger`; `admin.comp_sweep()` (grants 30 days after closing, audit at three years) and its `cron.schedule('knowlu-sweep-comp', …)` on an unused minute field (§3.1); pins (the trigger's two deletes and hash expression, the two intervals, the minute-field pin with its synthetic cases), the function pin moved by two; the A3, A3s, A4 and A6 rows | the same | cloud-engineer | deletion rights; a wrong audit-delete predicate is reviewed on its own, not among the grant pins |
+| S2c1 | The grant functions, each taking an account id (§3.5): `admin.comp_grant`, `admin.comp_extend` (accepting an expired open grant, refusing an ended one or a past `ends_at`), `admin.comp_end`, each with its refusals and its one audit insert carrying the grant's `account_id`; their revokes; pins (each body's audit insert, no `update` of `comp_audit`, P12's message naming the account, P13's refusals and no `now() < ends_at` in `comp_extend`), the function pin moved by three (§8.7); the A1, A2 (P12 and P16), A5 and A7 rows | the same | cloud-engineer | grant writes are money |
+| S2c2 | Deletion and retention (Amendment 2026-10-20: no trigger): `admin.comp_sweep()` (grants 30 days after closing, audit at three years) and its `cron.schedule('knowlu-sweep-comp', …)` on an unused minute field (§3.1); pins (the `account_id` cascades of `comp_grants` and `comp_audit`, the no-trigger pin, the two intervals, the minute-field pin with its synthetic cases), the function pin moved by one; the A3, A3s, A4 and A6 rows | the same | cloud-engineer | deletion rights; a wrong cascade or retention predicate is reviewed on its own, not among the grant pins |
 | S2d | `route_daily` (cascade) and `count_route`; their pins, the function pin moved; R1 | the same | cloud-engineer | a new per-account record |
-| S2e1 | `admin.testers` (the four states in §5's order, `paid`, account id, last active day) and its revoke; pins (the same predicates as the view), the view pins moved by one; the state column of P2 and P7-P13 | the same | cloud-engineer | the list Quinn grants and ends from |
+| S2e1 | `admin.testers` (the three states in §5's order, `paid`, account id, the account's current address read at view time, last active day) and its revoke; pins (the same predicates as the view), the view pins moved by one; the state column of P2, P8, P9 and P13 | the same | cloud-engineer | the list Quinn grants and ends from |
 | S2e2 | `admin.tester_usage_daily` (per kind, tier, phase and route) and `admin.tester_spend_monthly` (total row, `budget_alerts`), their revokes; pins (`est_usd` is `monthly_spend`'s expression; counts and dollars only), the view pins moved by two; the V1 and V2 rows | the same | cloud-engineer | dollars Quinn reads |
-| S2f | The staging proof script (layer iii) from the case table, built through the sign-up trigger (§9), and its static pin. By the size bound, two dispatches appending to the one script: the trigger precheck and the P cases first, then the A, R and V cases | `cloud/supabase/proofs/testers_staging.sql`, `migrations/migrations_test.ts` | cloud-engineer | it is the prod gate |
+| S2f | The staging proof script (layer iii) from the case table, built through the sign-up trigger from S1's recorded column list with placeholder values and no password per case (§9), and its static pin. By the size bound, two dispatches appending to the one script: the trigger precheck and the P cases first, then the A, R and V cases | `cloud/supabase/proofs/testers_staging.sql`, `migrations/migrations_test.ts` | cloud-engineer | it is the prod gate |
 | S3 | The gate and the entitlement read: `lookupFrom` on the view; the route-name parse (§4) and its path table; optional `count` and `defer` deps, `depsFrom` wiring `EdgeRuntime.waitUntil` and supplying `count` only under `ROUTE_COUNTS=on` (§4); their unit tests, the fake lookup built from `testers_model.ts`; the column-contract pin against the view (§9) | `functions/_shared/entitlement.ts`, `_shared/entitlement_test.ts`, `entitlement/handler_test.ts` | cloud-engineer | every gated function goes through this file |
-| S4 | `billing-checkout` refusal for a `tester` caller (Q3), wired in its `index.ts`; the export gains `comp_grants`, `route_daily`, `usage_daily`; the purge list gains `route_daily` and a comment naming `comp_grants` and `comp_audit` (§3.3); the handler tests and the two static pins of §9 | `functions/billing-checkout/handler.ts`, `billing-checkout/index.ts`, `billing-checkout/handler_test.ts`, `functions/account/index.ts`, `account/handler_test.ts` | cloud-engineer | billing path and an access right |
-| S5t | The failing static pin of §9 "App" (the two sentences, the subscribe step's `checkEntitled()` on entry, `afterUpgradeSignIn`'s order), seen red; it runs in S5's queue slot, just before S5, so it rebases onto the same `console.js` | `app/tests/static_assets.rs` | test-writer | `app/tests` is outside console-ui's described lane (`app/static`, `site/`, `scripts/`); test-writer writes the failing app test first |
-| S5 | The wizard step, the Settings row and the `afterUpgradeSignIn` fix (§3.4), Quinn's copy, until S5t's pin is green; fixture screenshot | `app/static/console.js`, `app/static/index.html` | console-ui | `app/static` is its lane; queued per §8.1: after L6's merge, ahead of L4's T8 (Quinn's ruling of 2026-10-19) |
+| S4 | `billing-checkout` refusal for a `tester` caller (Q3), wired in its `index.ts`; the export gains `comp_grants`, `comp_audit` (Q7; exactly `action, ends_at, cohort, at`, pinned), `route_daily`, `usage_daily`, each by `account_id`; the purge list gains `route_daily` and a comment naming `comp_grants` and `comp_audit` as taken by the cascade, not the purge (§3.3); the handler tests and the two static pins of §9 | `functions/billing-checkout/handler.ts`, `billing-checkout/index.ts`, `billing-checkout/handler_test.ts`, `functions/account/index.ts`, `account/handler_test.ts` | cloud-engineer | billing path and an access right |
+| S5t | The failing static pin of §9 "App" (the two sentences, the subscribe step's status-and-plan helper on entry, `afterUpgradeSignIn`'s order, the `#wiz-sub-note` line for a `tester` plan, the hidden lede and retitled heading for a `tester` plan, the price buttons hidden for any entitled account, and the one helper recording the plan wherever `WIZ.entitled` is set), seen red; it runs in S5's queue slot, just before S5, so it rebases onto the same `console.js` | `app/tests/static_assets.rs` | test-writer | `app/tests` is outside console-ui's described lane (`app/static`, `site/`, `scripts/`); test-writer writes the failing app test first |
+| S5 | The wizard step: the price buttons hidden for any entitled account; for a `tester` plan the lede hidden, the heading retitled and the nothing-to-pay line in `#wiz-sub-note` only; the one status-and-plan helper used at all four places `WIZ.entitled` is set, the on-entry check included, with the tester form drawn only once the plan is known (§3.4); the Settings row and the `afterUpgradeSignIn` fix (§3.4), Quinn's copy, until S5t's pin is green; fixture screenshot | `app/static/console.js`, `app/static/index.html` | console-ui | `app/static` is its lane; queued per §8.1: after L6's merge, ahead of L4's T8 (Quinn's ruling of 2026-10-19) |
 | S7a | Staging, **before the merge** (§8.10), after the lane's last rebase and M5's stamp re-check: push the lane's migration to staging from the lane branch (only once M7 clears L3: L3's migration on staging and on `main`, or L3, having neither merged nor pushed, recorded as slipped, never L3's merge alone or its pre-merge push alone; and only after `supabase db push --dry-run` lists this lane's version alone, else stop, and a refusal naming a remote version with no local file waits for that lane's merge or withdrawal, never `migration repair` to get past it; the push is recorded in the session ledger; the name is frozen from here, M6, and until S6's merge or this lane's withdrawal it holds L5's push and L1's C1, M7), run the layer-iii script, and hand the result to S6. A P0, P1 or P3 failure stops the lane here, with nothing on `main`, and the controller withdraws it by M7 on its own (the script tests the SQL alone, so a failure is a defect in the SQL), recording it in the session ledger and telling Quinn; Quinn declining the merge at S6 is Quinn's word for the same withdrawal; any other stop goes to Quinn first (§8.10, Quinn's ruling of 2026-10-19) | none (ledger row, the script's output) | main session | staging pushes and live reads are the controller's |
 | S6 | Review: the whole diff (S2a0-S5) and S7a's result before the PR. **The PR merge then waits for Quinn's go**, not CI green plus a reviewer PASS alone: the lane changes the gate every paying student passes and adds the `billing-checkout` refusal, which is "anything touching money" (handoff §1, ruling 7) | `docs/reports/` | reviewer | money and entitlement; S5 came from a cheaper agent |
-| S7 | After the merge. Staging: set `ROUTE_COUNTS=on`, then deploy the functions (a warm isolate keeps the old value, §4), run §9's live proof. Prod, with L9 and on Quinn's go for prod pushes: the prod migration and the layer-iii script **before** any prod function deploy from a `main` that carries S3 (L9's parity pass included); the migration and functions need no wait on Q7, because the secret is off. Then, on Quinn's go and only once §8.5's sentences are on the live page: `ROUTE_COUNTS=on` on prod and a redeploy of the gated functions (sentence 1) and the first grants from Quinn's block item 7 (sentence 2) | none | main session | staging and prod pushes, secrets, tokens and prod writes are the controller's |
-| S8 | Q7's two sentences to L4 **before** L4's `PRIVACY_VERSION` bump (§8.5); the friends' install note says "sign in with the address you gave Quinn" (L10) | none here | docs-keeper via L4/L10 | those files are other lanes' |
+| S7 | After the merge. Staging: set `ROUTE_COUNTS=on`, then deploy the functions (a warm isolate keeps the old value, §4), run §9's live proof. Prod, with L9 and on Quinn's go for prod pushes: the prod migration and the layer-iii script **before** any prod function deploy from a `main` that carries S3 (L9's parity pass included); the migration and functions need no wait on Q7, because the secret is off. Then, on Quinn's go and only once §8.5's sentences are on the live page: `ROUTE_COUNTS=on` on prod and a redeploy of the gated functions (sentence 1) and the first grants from Quinn's block item 7 (sentence 2). Each grant follows Q1's path: the friend has signed in and waits on the subscribe step; the controller runs §8.3's steps (one account matching on both addresses; for a Google friend, the 1b identity flag, recording the first Google read, which confirms only that a fresh Google sign-in shows `google` alone, and sending any `email` beside `google` to Quinn as a stop; inside the friend's window; still at `none`; the grant, then the editor tab deleted; §3.4's Settings tester line and `paid` still unset the same day; `paid` still unset again within 24 to 72 hours of the grant (5b), the grant's ledger row closing only then; no snippet left), records each outcome (never the address or id) and grants by account id; if Quinn rules that grants wait for C1b (§8.3), they wait | none | main session | staging and prod pushes, secrets, tokens and prod writes are the controller's |
+| S8 | Q7's two sentences to L4 **before** L4's `PRIVACY_VERSION` bump (§8.5); the friends' install note (L10) says, in Quinn's words: sign in with Google or an emailed code; at the payment step press no price, and if Next answers "Finish the payment page in your browser, then come back.", that means wait for Quinn; tell Quinn which address you signed in with, whether by Google or by a code, and roughly when; press Next once Quinn says your access is on, then tell Quinn what the Settings account row says (Q1, §8.3; Amendment 2026-10-20, in place of the signed "sign in with the address you gave Quinn") | none here | docs-keeper via L4/L10 | those files are other lanes' |
 
-Order: **S1 before S2a** (S2a's table already commits to email binding; if S1 fails, §8.9 applies and
-S2a does not start; S2a0 touches no table and may run before S1 returns); **S2a after L3's T0** has
-recorded its stamp (§8.4); S2a0 → S2a → S2b → S2m → S2R → S2c1 → S2c2 → S2d → S2e1 → S2e2 → S2f; S3
+Order: **S1 before S2a.** S1 ran on 2026-10-20 and §8.9 applied, so (Amendment 2026-10-20) **S2a
+waits for this amendment's review and Quinn's signature**: a `reviewer` pass over the amendment, its
+report in `docs/reports/`, then Quinn's re-read of Q1, Q7 and §8.3. S2a0 (done,
+`29dcdc2`) stands and is rebased onto `origin/main` (the local `main` is stale) before S2a. **S2a after L3's T0** has recorded its stamp
+(§8.4; recorded, `20261020000200`); S2a0 → S2a → S2b → S2m → S2R → S2c1 → S2c2 → S2d → S2e1 → S2e2 → S2f; S3
 after S2R and S2d (it reads the view and the RPC); **S4 after S2R** (its checkout lookup reads the
 view's columns, which S2R may reshape); S5t then S5, independent of S2-S4, in S5's queue slot; **S7a
 after S2f, and only once L3 is cleared: its migration on staging and on `main`, or L3, having neither
@@ -1106,17 +1442,17 @@ as Quinn rules Q5, Q7 and Q8, and in any case before L4's bump.
 
 | Asked for (2026-10-18 brief) | Where | Task | Test (§9) |
 |---|---|---|---|
-| Comp for a named list, free, no purchase, no Stripe charge | §1, §3.1, §3.4, Q3 | S2b, S4, S5t, S5 | P3, P3x, P4-P6, A5 (P3, the sign-up `none` row, is the tester's real row); the grant-branch complement pin; the `billing-checkout` 409 and its wiring pin; S5t's static pin, `afterUpgradeSignIn`'s order included |
+| Comp for a named list, free, no purchase, no Stripe charge | §1, §3.1, §3.4, Q3 | S2b, S4, S5t, S5 | P3, P3x, P5, P6, A5 (P3, the sign-up `none` row, is the tester's real row); the grant-branch complement pin; the `billing-checkout` 409 and its wiring pin; S5t's static pin, `afterUpgradeSignIn`'s order included |
 | Paying students unaffected by the new lookup | §3.1 (fail safe), §3.2 | S2b, S2R, S3, S7a, S7 | P0, P0x, P1, P2 (all three layers, layer iii before the merge, built through the sign-up trigger); the `coalesce` pin; the four-column pin on both sides (S2b, S3); the live P0 and P1 checks; the prod migration before any prod function deploy |
 | How a comp row is represented, with alternatives | §3.1 | S2a, S2b | layer-i shape pins; P12 |
 | How it expires or ends | §3.3, Q1 | S2b, S2c1, S3 | P8, P9, P12, P13; the gate's 402 for an ended grant; live end-of-grant check |
-| Only a proved address is matched | §3.5 (sign-up check) | S1, S2b | P3, P4, P7; the `coalesce` pin |
+| Only the account Quinn chose is comped (signed as "only a proved address is matched"; Amendment 2026-10-20) | §3.5 (the check at grant time), §8.3 | S1, S2b, S2c1, S7 | P3, P14, P15, P16; the `g.account_id = a.id` pin and the no-`auth.users`/no-`email` absence pin; §8.3's checks before each grant, recorded by outcome |
 | How it shows; no paid look, no payment prompt | §3.4 | S5t, S5 | S5t's static pin; the Settings fixture screenshot |
 | Who writes it; RLS; audit trail | §3.5, Q8 | S2a, S2c1 | layer-i RLS and revoke pins, the service-role revokes included; A1, A2, A7; the `comp_audit` column pin |
 | No tester's address in the repo (rule 1) | §6, §8.7 | S2a | the address-token and placement scans, their synthetic cases and the must-pass ones (S2a's revoke, the FK, the index, the comment); the proof script's `@example.invalid` pin; the ban named in the L5 and L1 hand-off |
-| Export, deletion, retention | §3.3, §3.5, §4, Q8, Q11, Q12 | S2c2, S2d, S4 | A3, A3s (the deletion as the service role runs it), A4, A6; the trigger's audit-delete pin; the sweep's three-year and unused-minute pins; the export and purge-list static pins |
+| Export, deletion, retention | §3.3, §3.5, §4, Q8, Q11, Q12 | S2a, S2c2, S2d, S4 | A3, A3s (the deletion as the service role runs it, proving the cascade), A4, A6; the three `account_id` cascade pins and the no-trigger pin (Amendment 2026-10-20, in place of the trigger's audit-delete pin); the sweep's three-year and unused-minute pins; the export (`comp_audit` included) and purge-list static pins |
 | Cost estimate: what is recorded, what is missing | §2, §4, Q4, Q5 | S2d, S2e2, S3 | R1, V1; the route-parse path table; the count tests (never awaited, never refusing) |
-| Admin view's form | §5 | S2e1, S2e2 | P7-P11 and P13 states, V1, V2 |
+| Admin view's form | §5 | S2e1, S2e2 | P2, P8, P9 and P13 states, V1, V2 |
 | Test plan (deno, migration) | §9, Q10 | S2a0-S2f, S3, S4 | the three layers; the synthetic `admin.x` guard cases before the widening (S2a0); each task within the §10 size bound |
 | Money changes merge only on Quinn's go | §10 S6, handoff §1 ruling 7 | S6 | none (a gate, not a test) |
 | `entitle.rs` contract unchanged | §1, §3.2 | none (no engine edit) | P3's output uses today's `status` vocabulary |
@@ -1137,3 +1473,9 @@ in-place moves of the function and view parse-count pins and the view `revoked` 
 **Revision 4:** no deviation from the brief. The `entitlements` writer list in §1 and §2 is corrected
 (it was wrong, not narrowed). S2b's model half becomes S2m, and S2f is written in two dispatches,
 both by the same size bound that splits S2c and S2e.
+**Amendment 2026-10-20 (signed 2026-10-20):** one deviation from the brief. "Friends get the app free"
+now carries one sight of the price step before the grant (Q1), because S1 showed that no grant can
+safely exist before sign-up while password sign-up stays open. The comp row is keyed by account id
+(§3.1), the "only a proved address" row becomes "only the account Quinn chose", resting on §8.3's
+checks rather than a database predicate, and the deletion trigger is replaced by cascades. Nothing
+else narrows.

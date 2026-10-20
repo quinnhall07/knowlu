@@ -204,11 +204,17 @@ Deno.serve(readHandler(requireActiveEntitlement, {
       `google_accounts?account_id=eq.${accountId}&select=email_hint`,
     ) as Array<{ email_hint: string | null }>;
     const mailboxes = await sharedDb().select(
-      `mail_addresses?account_id=eq.${accountId}&select=mailbox_hint,status&limit=20`,
-    ) as Array<{ mailbox_hint: string | null; status: string }>;
+      `mail_addresses?account_id=eq.${accountId}&select=mailbox_hint,status,retired_until,rotated_from&limit=20`,
+    ) as Array<{ mailbox_hint: string | null; status: string; retired_until: string | null; rotated_from: string | null }>;
     return {
       gmail: grants[0]?.email_hint ?? null,
-      mailboxes: mailboxes.map((m) => ({ hint: m.mailbox_hint, status: m.status })),
+      // Q4 (2026-10-20): the Rotate grace and the status before it, for D22's `pending` reading.
+      mailboxes: mailboxes.map((m) => ({
+        hint: m.mailbox_hint,
+        status: m.status,
+        retiredUntil: m.retired_until,
+        rotatedFrom: m.rotated_from,
+      })),
     };
   },
   // F-4: a shorter model timeout than the default 120 s, so a call that starts right at the

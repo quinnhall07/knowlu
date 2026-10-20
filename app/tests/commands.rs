@@ -873,33 +873,6 @@ fn a_relaunch_carries_its_own_arguments_and_always_the_after_pid_handshake() {
     assert_eq!(switch, vec![OsString::from("--pick"), OsString::from("--after-pid"), OsString::from("4321")]);
 }
 
-/// The settings row's four commands compute nothing (R9): `inference_status` marshals
-/// `inference::status`, and the two installers refuse a bad path with the module's own words.
-#[test]
-fn the_inference_commands_marshal_and_refuse() {
-    let root = std::env::temp_dir().join(format!("knowlu-cmd-inference-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-
-    let s = knowlu::inference::status(&root);
-    let v = serde_json::to_value(&s).unwrap();
-    assert!(v["runtime"].is_null() && v["model"].is_null() && v["model_bytes"] == 0);
-
-    let notes = root.join("notes.txt");
-    std::fs::write(&notes, b"x").unwrap();
-    let err = knowlu::inference::install_model_from_file(&root, &notes, None).unwrap_err();
-    assert!(err.contains(".gguf"), "{err}");
-
-    // A model that installs, then is removed: the two ends of the row's lifecycle.
-    let gguf = root.join("m.gguf");
-    std::fs::write(&gguf, b"abc").unwrap();
-    knowlu::inference::install_model_from_file(&root, &gguf, None).unwrap();
-    assert!(knowlu::inference::status(&root).model.is_some());
-    knowlu::inference::remove_model(&root).unwrap();
-    assert!(knowlu::inference::status(&root).model.is_none());
-    let _ = std::fs::remove_dir_all(&root);
-}
-
 /// A vault-full copy holding `courses/bui-100.md` and a pending `commitment-ask` card for it
 /// (invented), with "today" pinned to the fixture's own reference date.
 fn ask_vault(name: &str) -> (PathBuf, ConsoleState) {

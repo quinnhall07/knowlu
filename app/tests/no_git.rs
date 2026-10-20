@@ -81,7 +81,7 @@ fn the_history_module_is_gone_and_nothing_declares_it() {
     assert!(!engine.join("src").join("history.rs").exists(), "engine/src/history.rs is still here");
     let lib = std::fs::read_to_string(engine.join("src").join("lib.rs")).expect("lib.rs");
     assert!(!lib.contains("pub mod history"), "lib.rs still declares it");
-    // `childproc` outlives it: `runs::git_sha` and `runtime.rs` both spawn children, and a GUI
+    // `childproc` outlives it: `runs::git_sha` spawns a child, and a GUI
     // application's child must never flash a console window.
     assert!(lib.contains("pub mod childproc"), "childproc must stay");
 }

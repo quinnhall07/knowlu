@@ -1,6 +1,6 @@
 //! The judgment seam (Knowlu spec §5.2, decision 11): one module answers every judgment the same
 //! way, in three tiers — deterministic heuristics in the engine's own terms, then a promoted rule
-//! table, then a local model, and only when the tiers above it left a gap.
+//! table, then the judgment service, and only when the tiers above it left a gap.
 //!
 //! **Pure.** Nothing here starts a process, opens a socket, reads the clock or writes a file. The
 //! model is a trait (`Model`), the rule table is a trait (`Rules`), and what the vault knows is a
@@ -91,7 +91,7 @@ impl Verdict {
 
 /// Why an answer did not become a verdict. Three causes, one variant — but the cause is
 /// **structural**, not parsed back out of `why`, because the log records the cause and must never
-/// record `why` (which carries the runtime's stderr on the `ModelFailed` branch).
+/// record `why` (which carries the model call's error text on the `ModelFailed` branch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LowCause {
     /// The model answered, and the answer was under `CONFIDENCE_FLOOR`.
@@ -120,22 +120,20 @@ impl LowCause {
     }
 }
 
-/// The four ways a judgment ends. Three of them are normal (spec §5.3: "the app runs with no model
-/// present"), and none of them is a failed slot.
+/// The three ways a judgment ends: answered, low confidence, or service unavailable. None of them
+/// is a failed slot.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     Answered(Verdict),
     /// The model was reached and its answer was not used: under the floor, incomplete, or the call
     /// itself failed. `seed` is what the tiers ABOVE the model had — the refused answer is never
     /// merged in. `cause` is which of the three it was, structurally; `why` says the same thing in
-    /// words, verbatim — including the runtime's stderr on the `ModelFailed` branch, which is
-    /// exactly why `cause`, not `why`, is what a log may ever record.
+    /// words, verbatim — including the model call's error text on the `ModelFailed` branch, which
+    /// is exactly why `cause`, not `why`, is what a log may ever record.
     LowConfidence { seed: Verdict, why: String, cause: LowCause },
-    ModelNotInstalled(Verdict),
-    RuntimeNotInstalled(Verdict),
-    /// C2: this vault has an account and the service did not answer. `v` is what the device's own
-    /// tiers had, and it is still written — a slot with no signal must not lose tier 1's work.
-    /// Normal, like the two above it, and still exit 0.
+    /// This vault has no account, or has one and the service did not answer. `v` is what the
+    /// device's own tiers had, and it is still written — a slot with no signal must not lose
+    /// tier 1's work. Normal, and still exit 0.
     ServiceUnavailable(Verdict),
 }
 
@@ -146,8 +144,6 @@ impl Outcome {
         match self {
             Outcome::Answered(v) => v,
             Outcome::LowConfidence { seed, .. } => seed,
-            Outcome::ModelNotInstalled(v) => v,
-            Outcome::RuntimeNotInstalled(v) => v,
             Outcome::ServiceUnavailable(v) => v,
         }
     }
@@ -157,20 +153,16 @@ impl Outcome {
         match self {
             Outcome::Answered(_) => "answered",
             Outcome::LowConfidence { .. } => "low confidence",
-            Outcome::ModelNotInstalled(_) => "model not installed",
-            Outcome::RuntimeNotInstalled(_) => "runtime not installed",
             Outcome::ServiceUnavailable(_) => "service unavailable",
         }
     }
 }
 
-/// Why there is no model to call. Resolved once per run, before any item is judged.
+/// Why there is no judgment to ask for. Resolved once per run, before any item is judged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Missing {
-    Runtime,
-    Model,
-    /// C2: this vault has an account, and the judgment service could not be reached or refused —
-    /// no session, no entitlement, no network. The reason is a `&'static str` from a closed set
+    /// The judgment service could not be reached or refused, or the vault has no account — no
+    /// session, no entitlement, no network. The reason is a `&'static str` from a closed set
     /// (`cloudmodel::CloudError::label`), so it can be printed and logged: it can never carry a
     /// server's body, a prompt or a token.
     Service(&'static str),
@@ -198,8 +190,8 @@ impl std::fmt::Display for ModelError {
     }
 }
 
-/// Tier 3. The implementation owns the transport, the grammar and the reply format; this module
-/// owns only the tiers — which is what makes `runtime::PerCall` and a scripted fake substitutable.
+/// Tier 3. The implementation owns the transport and the reply format; this module owns only the
+/// tiers — which is what makes `cloudmodel::CloudModel` and a scripted fake substitutable.
 pub trait Model {
     fn judge(&self, item: &Item, h: &Heuristics, seed: &Verdict) -> Result<Verdict, ModelError>;
 }
@@ -479,7 +471,7 @@ pub fn merge(lower: Verdict, upper: Verdict) -> Verdict {
 /// tier 3.
 ///
 /// `model` is `Ok(m)` or the reason there is none, resolved once per run rather than per item: a
-/// hundred items must not each re-stat the disk for a model file that is not there.
+/// hundred items must not each re-read the account's files for a service that is not there.
 pub fn judge_task(
     item: &Item,
     h: &Heuristics,
@@ -497,8 +489,6 @@ pub fn judge_task(
         }
     }
     let model = match model {
-        Err(Missing::Runtime) => return Outcome::RuntimeNotInstalled(seed),
-        Err(Missing::Model) => return Outcome::ModelNotInstalled(seed),
         Err(Missing::Service(_)) => return Outcome::ServiceUnavailable(seed),
         Ok(m) => m,
     };
@@ -541,96 +531,17 @@ pub fn judge_task(
     }
 }
 
-/// The GBNF grammar every model call is constrained by (D6, product plan §2.3: grammar-constrained
-/// decoding on every call without exception).
+/// Find the answer inside the model's reply, and read it back into a `Verdict`.
 ///
-/// **Five fields, and the grammar is what enforces four of the five rules.** `importance` is an
-/// alternation of the five literals rather than a number the prompt asks to be in range, so a 7 is
-/// not merely unlikely but unrepresentable. `course` is a string or the literal `null`, so "I could
-/// not tell" has a spelling. `confidence` is the field the tiers key on and is generated last, after
-/// the answer it is about.
-///
-/// Written as a raw string with real newlines: llama.cpp's parser wants one rule per line, and a
-/// grammar that fails to parse fails every judgment identically and silently.
-///
-/// **Not in here:** `effort_source` (the engine sets it), `effort_confidence` (always `low`, as the
-/// routine writes it) and `needs_enrichment` (the pass's decision about its own completeness, never
-/// the model's opinion of it).
-pub const GRAMMAR: &str = r#"root ::= "{" ws "\"course\":" ws course "," ws "\"effort_hours\":" ws number "," ws "\"importance\":" ws importance "," ws "\"importance_reason\":" ws string "," ws "\"confidence\":" ws number ws "}"
-course ::= "null" | string
-importance ::= "1" | "2" | "3" | "4" | "5"
-string ::= "\"" ([^"\\] | "\\" ["\\/bfnrt])* "\""
-number ::= [0-9]+ ("." [0-9]+)?
-ws ::= " "?
-"#;
-
-/// What tier 3 is asked. Built from the note, the course's grade weights and
-/// `profile/preferences.md`, and from nothing else (R6).
-///
-/// It is the cloud routine's step 3, written down: attribute the course if you can, estimate a
-/// realistic effort, ground importance in the grade weights, default to 3 and say so when there are
-/// none, and write one line of reason. The differences from the routine are that the rules are
-/// stated to a 1–4 B model rather than to Claude, and that the output shape is a grammar rather
-/// than a command line.
-///
-/// **Every free-text input is clipped HERE, at the point of use** — `MAX_BODY_CHARS`,
-/// `MAX_WEIGHTS_CHARS`, `MAX_PREFS_CHARS` — and not only inside `Heuristics::load`. Clipping in
-/// `load` alone would make this function's bound a property of one caller rather than of the
-/// function: a test, or any future caller that builds a `Heuristics` by hand, would get a prompt of
-/// whatever size the vault happened to hold. Clipped here, a note carrying a whole syllabus can
-/// never push the question out of a 4096-token context, whoever assembled the inputs.
-pub fn prompt_for(item: &Item, h: &Heuristics, seed: &Verdict) -> String {
-    let slug = seed.course.as_deref().unwrap_or("null");
-    let weights = seed.course.as_deref().and_then(|c| h.weights.get(c)).map(String::as_str).unwrap_or("");
-    let mut p = String::new();
-    p.push_str("You estimate effort and importance for one university assignment.\n");
-    p.push_str("Answer with the JSON object and nothing else.\n\n");
-    p.push_str("Rules:\n");
-    p.push_str("- effort_hours: the realistic time in hours to finish this one assignment, 0.25 to 40.\n");
-    p.push_str(&format!("- a typical work session in this student's plan is {} hours.\n", h.slice_hours));
-    p.push_str("- importance: 1 to 5, grounded in the grade weights below. With no weights given, answer 3 and say so in importance_reason.\n");
-    p.push_str("- importance_reason: one line, under 140 characters, no line breaks.\n");
-    p.push_str("- course: the slug given below, or null when the slug given is null.\n");
-    p.push_str("- confidence: 0 to 1, how sure you are of effort_hours and importance.\n\n");
-    if !h.preferences.is_empty() {
-        p.push_str("The student's stated preferences:\n");
-        p.push_str(&clip(&h.preferences, MAX_PREFS_CHARS));
-        p.push_str("\n\n");
-    }
-    p.push_str(&format!("Course slug: {slug}\n"));
-    if !weights.is_empty() {
-        p.push_str("Grade weights:\n");
-        p.push_str(&clip(weights, MAX_WEIGHTS_CHARS));
-        p.push('\n');
-    }
-    p.push_str(&format!("Title: {}\n", one_line(&item.title, 200)));
-    // An absent due date is absent, never the word `None`: a model shown "Due: None" reliably
-    // treats it as a date it failed to read rather than as an assignment without one.
-    if let Some(due) = item.due.as_deref().filter(|d| !d.is_empty()) {
-        p.push_str(&format!("Due: {due}\n"));
-    }
-    let body = clip(item.body.trim(), MAX_BODY_CHARS);
-    if !body.is_empty() {
-        p.push_str("Body:\n");
-        p.push_str(&body);
-        p.push('\n');
-    }
-    p.push_str("\nJSON:");
-    p
-}
-
-/// Find the answer inside whatever the runtime wrote, and read it back into a `Verdict`.
-///
-/// **Under outcome B this is not a clean response body.** `llama-cli` echoes the prompt — which
-/// carries the note's own title and body, arbitrary text — to stdout ahead of the completion, and
-/// may print more after it. So neither the first `{` nor the last is a reliable anchor: the first
-/// can be a brace sitting in the note's own text, and the last can be a brace **inside a string
-/// value**, which `GRAMMAR`'s `string` rule explicitly permits (a model answering
+/// **The reply is not assumed to be a clean response body.** It may carry text around the JSON
+/// object, and arbitrary text from the note can sit ahead of it. So neither the first `{` nor the
+/// last is a reliable anchor: the first can be a brace sitting in the note's own text, and the
+/// last can be a brace **inside a string value** (a model answering
 /// `"importance_reason": "worth {5} points"` defeats a `rfind('{')`).
 ///
 /// So this does not anchor on a brace at all. It tries every `{` in the text, left to right; at
 /// each one it parses the first complete JSON value that starts there (trailing text — the rest of
-/// the echo, or anything the runtime prints afterwards — is simply not consumed and so never
+/// the reply, or anything printed after it — is simply not consumed and so never
 /// matters) and accepts the first one that is an object carrying both `effort_hours` and
 /// `importance`. A `{"a": 1}` sitting in the echoed prompt is syntactically a JSON object but is
 /// missing those fields, so it is skipped rather than mistaken for the answer; a JSON-shaped but
@@ -658,7 +569,7 @@ pub fn parse_reply(text: &str) -> Result<Verdict, ModelError> {
     //
     // The scan is quadratic in principle (`O(n)` candidate braces, each re-parsed from scratch), but
     // bounded in practice by the prompt clipping (`MAX_BODY_CHARS` and friends) on one end and the
-    // runtime's 1 MiB stdout cap on the other, and left deliberately unbounded rather than capped at
+    // the reply size cap on the other, and left deliberately unbounded rather than capped at
     // some small candidate count: a candidate cap would be a false-negative risk on exactly this
     // product's own users — a CS assignment body that pastes code with sixty-odd braces in it
     // before the real answer ever appears.
@@ -835,22 +746,6 @@ mod tests {
         assert_eq!(out.verdict().effort_hours, Some(2.5));
     }
 
-    /// D7: not installed is a normal outcome, and it still carries whatever tier 1 managed — a
-    /// course attributed from the map is worth writing even with no model on the machine.
-    #[test]
-    fn a_missing_runtime_or_model_is_an_outcome_that_still_carries_tier_one() {
-        let mut i = item("CS-100 Homework 3");
-        i.source_uid = "blackboard:nothing".to_string();
-        let r = judge_task(&i, &heur(), &NoRules, Err(Missing::Runtime));
-        assert!(matches!(r, Outcome::RuntimeNotInstalled(_)), "{r:?}");
-        assert_eq!(r.verdict().course.as_deref(), Some("cs-100"));
-        assert_eq!(r.label(), "runtime not installed");
-        let m = judge_task(&i, &heur(), &NoRules, Err(Missing::Model));
-        assert!(matches!(m, Outcome::ModelNotInstalled(_)), "{m:?}");
-        assert_eq!(m.verdict().course.as_deref(), Some("cs-100"));
-        assert_eq!(m.label(), "model not installed");
-    }
-
     /// The floor is the whole point of tier 3 being conditional: an unsure answer is not written,
     /// and the reason says which number failed.
     #[test]
@@ -890,7 +785,7 @@ mod tests {
     /// same variant, different `why`, so "failures visible, silence never ambiguous" holds.
     #[test]
     fn a_model_error_is_reported_as_itself() {
-        let m = Scripted::err("llama-cli: connection refused");
+        let m = Scripted::err("model: connection refused");
         let out = judge_task(&item("Homework 3"), &heur(), &NoRules, Ok(&m));
         match out {
             Outcome::LowConfidence { why, cause, .. } => {
@@ -1055,77 +950,6 @@ mod tests {
         assert!(crate::write::single_line_problem(&one_line("a\u{1c}b", 100)).is_none());
     }
 
-    /// D6: grammar-constrained decoding on every call without exception. The grammar has to name
-    /// all five fields, in the order the emitter will produce them, and it must be plain GBNF —
-    /// llama-cli rejects a malformed rule set and every judgment then fails identically.
-    #[test]
-    fn the_grammar_names_the_five_fields_and_only_those() {
-        for f in ["course", "effort_hours", "importance", "importance_reason", "confidence"] {
-            assert!(GRAMMAR.contains(&format!("\\\"{f}\\\"")), "grammar must pin {f}: {GRAMMAR}");
-        }
-        assert!(GRAMMAR.starts_with("root ::= "), "GBNF starts at root");
-        assert!(GRAMMAR.contains("importance ::= \"1\" | \"2\" | \"3\" | \"4\" | \"5\""), "1-5, in the grammar, not in a prompt");
-        assert!(!GRAMMAR.contains("effort_source"), "effort_source is the engine's, never the model's");
-        assert!(!GRAMMAR.contains("needs_enrichment"), "the flag is the pass's decision, not the model's");
-    }
-
-    /// R6: nothing but the note, the course's weights and the preferences reaches the model. In
-    /// particular no config file, no path, no credential target.
-    #[test]
-    fn the_prompt_carries_the_note_and_its_grounding_and_nothing_else() {
-        let mut h = heur();
-        h.weights.insert("cs-100".to_string(), "- Homework: 20% of the grade.".to_string());
-        h.preferences = "- German is near-daily small work.".to_string();
-        let mut i = item("CS-100 Homework 3");
-        i.body = "Chapters 4 and 5. Submit on the course page.".to_string();
-        i.source_uid = "blackboard:nothing".to_string();
-        let seed = tier1(&i, &h);
-        let p = prompt_for(&i, &h, &seed);
-
-        assert!(p.contains("CS-100 Homework 3"), "the title");
-        assert!(p.contains("Chapters 4 and 5"), "the body");
-        assert!(p.contains("2026-10-01T23:59"), "the due date");
-        assert!(p.contains("cs-100"), "the resolved slug");
-        assert!(p.contains("Homework: 20% of the grade."), "the grade weights ground importance");
-        assert!(p.contains("German is near-daily"), "preferences are honoured, as the routine honours them");
-        assert!(p.contains("2 hours"), "the vault's own session length anchors the estimate");
-        assert!(!p.contains("ingest.yaml") && !p.contains("credential"), "R6");
-        assert!(p.ends_with("JSON:"), "the model is asked for the object and nothing else");
-    }
-
-    /// A note whose body is a whole syllabus must not push the question out of the context window.
-    #[test]
-    fn the_prompt_is_bounded_however_long_the_note_is() {
-        let mut i = item("Long one");
-        i.body = "x".repeat(50_000);
-        let mut h = heur();
-        h.preferences = "p".repeat(50_000);
-        h.weights.insert("cs-100".to_string(), "w".repeat(50_000));
-        i.course = Some("cs-100".to_string());
-        let p = prompt_for(&i, &h, &tier1(&i, &h));
-        assert!(p.len() < 6_000, "prompt was {} chars", p.len());
-        assert!(p.contains("Long one"), "the title survives the clipping");
-    }
-
-    /// A course with no note, and a note with no due date and no body: the prompt still stands up.
-    #[test]
-    fn the_prompt_survives_a_note_with_nothing_in_it() {
-        let mut i = item("Untitled");
-        i.due = None;
-        i.body = String::new();
-        i.source_uid = "blackboard:nothing".to_string();
-        let h = Heuristics {
-            course_map: Vec::new(),
-            slice_hours: 2.0,
-            weights: std::collections::BTreeMap::new(),
-            preferences: String::new(),
-        };
-        let p = prompt_for(&i, &h, &tier1(&i, &h));
-        assert!(p.contains("Course slug: null"));
-        assert!(!p.contains("Due:"), "an absent due date is absent, never the word None");
-        assert!(p.ends_with("JSON:"));
-    }
-
     #[test]
     fn parse_reply_reads_the_object_clamps_it_and_makes_the_reason_one_line() {
         let v = parse_reply(
@@ -1139,7 +963,7 @@ mod tests {
         assert_eq!(v.confidence, 0.82);
         assert_eq!(v.tier, 3);
 
-        // Clamped, never refused: the grammar bounds importance, and effort and confidence are
+        // Clamped, never refused: importance, effort and confidence are all
         // bounded here so a runaway number cannot reach a note or a ranking.
         let v = parse_reply(r#"{"course": null, "effort_hours": 900, "importance": 9, "importance_reason": "x", "confidence": 5}"#).unwrap();
         assert_eq!(v.effort_hours, Some(40.0));
@@ -1176,7 +1000,7 @@ mod tests {
         assert!(crate::write::single_line_problem(&reason).is_none(), "{reason}");
     }
 
-    /// R-3a-7: `llama-cli` echoes the prompt before the completion, and a note's own text can
+    /// R-3a-7: a reply can echo the prompt before the completion, and a note's own text can
     /// contain a brace that means nothing. A `{TBD}` sitting in the echoed body must not be
     /// mistaken for the start of the answer.
     #[test]
@@ -1205,8 +1029,8 @@ JSON:{"course": "cs-100", "effort_hours": 1.5, "importance": 3, "importance_reas
         assert_eq!(v.effort_hours, Some(1.5));
     }
 
-    /// The case that would have broken an anchor on the LAST `{`: `GRAMMAR`'s `string` rule
-    /// permits a brace inside a string value, so `importance_reason` can legally contain one.
+    /// The case that would have broken an anchor on the LAST `{`: a JSON string value may contain
+    /// a brace, so `importance_reason` can legally contain one.
     #[test]
     fn parse_reply_reads_an_answer_whose_own_reason_contains_braces() {
         let v = parse_reply(
@@ -1216,7 +1040,7 @@ JSON:{"course": "cs-100", "effort_hours": 1.5, "importance": 3, "importance_reas
         assert_eq!(v.importance_reason.as_deref(), Some("worth {5} points"));
     }
 
-    /// Whatever the runtime prints after the completion — end-of-text markers, timing lines — is
+    /// Whatever the model prints after the completion — end-of-text markers, timing lines — is
     /// simply never consumed once the object itself parses.
     #[test]
     fn parse_reply_ignores_trailing_text_after_the_object() {

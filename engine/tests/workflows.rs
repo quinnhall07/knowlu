@@ -82,7 +82,7 @@ fn release_ships_unsigned_only_on_the_explicit_variable() {
 /// C0 (2026-09-17): the first release run spent 21 of its 40 minutes compiling tauri-cli from
 /// source (run 35179886527). The CLI is a tool, not the product: it is downloaded prebuilt for the
 /// exact pinned version and checked against a SHA-256 spelled in the workflow - the contract
-/// `app/src/inference.rs` holds for runtimes - so a bump is the version AND the hash, and a wrong
+/// every downloaded tool follows - so a bump is the version AND the hash, and a wrong
 /// archive stops the run before anything is built.
 #[test]
 fn release_downloads_tauri_cli_prebuilt_and_pinned_by_sha256_never_compiles_it() {

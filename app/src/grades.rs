@@ -84,7 +84,7 @@ pub const WINDOW: &str = "lms-grades";
 /// **Grades preferences: `hidden` only** (spec §3), in `<profile app data>\grades.json`, a file beside
 /// `settings.json` and never a field in it — `state::Settings` falls back to defaults on a parse
 /// failure, so a new field there would reset a student's backup folder and autostart (the precedent
-/// of `account::cache_path` and `onboarding::offer_marker`). No LMS host lives here: the host comes
+/// of `account::cache_path` and `onboarding::mail_offer_marker`). No LMS host lives here: the host comes
 /// only from the curated campus row.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GradesPrefs {

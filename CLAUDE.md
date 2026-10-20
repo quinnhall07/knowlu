@@ -41,8 +41,9 @@ Where the work stands: `HANDOFF.md`. Where the code came from: `PROVENANCE.md`.
   markers and the one `planning-day` note (the day's wake-to-bed window) — a student's `propose`d
   and undecided candidates never live here, only what they confirmed or declined.
 - **`rank` never calls a model** (Knowlu spec decision 11). Judgment is the separate `judge`
-  command, which writes fields into notes before `rank` reads them; `src/judge.rs` is pure and the
-  model process lives behind a trait in `src/runtime.rs`, so nothing under `cli.rs` can reach one.
+  command, which writes fields into notes before `rank` reads them; `src/judge.rs` is pure, and
+  tier 3 is reached only through the `judge::Model` trait, whose one implementation is `CloudModel`
+  (`src/cloudmodel.rs`), so nothing under `cli.rs` can reach one.
 - Never rewrite a vault file wholesale. Every note write goes through `write`: journal record first
   (`state/journal/YYYY-MM-DD.jsonl`, UTC days), single-line frontmatter surgery second. **No note is
   ever parsed and re-dumped**; `src/yamlemit.rs` is the one YAML emitter and deliberately has no
@@ -74,8 +75,8 @@ Where the work stands: `HANDOFF.md`. Where the code came from: `PROVENANCE.md`.
 
 Full detail in `docs/reference/`; these are the parts a change must not break.
 
-- `coursework`, `coursework-discover`, `judge` and `sync` **always exit 0**: no runtime, model,
-  account, session, entitlement or network is a named outcome, never a failure. An empty coursework
+- `coursework`, `coursework-discover`, `judge` and `sync` **always exit 0**: no account,
+  session, entitlement or network is a named outcome, never a failure. An empty coursework
   parse is a failure, never an empty semester. `surface` (`--window` included) and
   `coursework-discover` never write. `commitments` without `--confirm` always exits 0 and writes only
   the generated `state/calendar-series.json`; with `--confirm` it writes as the student through
@@ -106,8 +107,8 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
   else, and `release.yml` never runs self-hosted.
 - **Releases are CI-only** (`release.yml` on a `v*` tag). A human runs `scripts\release.ps1` only with
   `-DryRun`; a hand-run `cargo tauri build` is unsupported and can ship a zero-byte engine.
-- `app/src/inference.rs` and `engine/src/runtime.rs` (the local llama.cpp runtime) stay until the
-  Pilot's runtime-removal lane (Amendment 2026-09-29, ruling 10) removes them and are not extended.
+- The local model runtime is gone (lane L6, ruling 10); nothing model-shaped returns to the app or
+  the engine, and `engine/tests/no_local_runtime.rs` fails if it does.
 - Desktop safety: a live shared desktop — never synthetic keyboard or mouse input; screenshots by
   window handle (`PrintWindow`) only. Develop and demo against scratch vaults
   (`scripts\scratch-vault.ps1 -Source <vault>`), never a live one.
@@ -147,9 +148,8 @@ attempts means one level up, never straight to `max`; Fable and `max` are Quinn'
   the app's `.rsrc merge failure: multiple non-default manifests`. `ci.yml` gates every push and PR:
   the workspace tests (its line reads `warnings: N accepted (.rsrc), N tallies, N other`), the eol
   contract (`scripts/ci/eol-check.ps1`) and SHA-pinned actions (`engine/tests/workflows.rs`).
-- Four tests are `#[ignore]` by design, each with its reason in the attribute: traps 4 and 5 in
-  `engine/src/events.rs`, `runtime.rs`'s real-runtime smoke test, and
-  `app/tests/scheduler.rs::run_slot_end_to_end`. None may be un-ignored by changing the assertion. TDD: the test first, then the code.
+- Three tests are `#[ignore]` by design, each with its reason in the attribute: traps 4 and 5 in
+  `engine/src/events.rs`, and `app/tests/scheduler.rs::run_slot_end_to_end`. None may be un-ignored by changing the assertion. TDD: the test first, then the code.
 - TLS via `rustls`/`ring`, **never OpenSSL**; `tauri` never enters the engine
   (`engine/tests/dependency_boundary.rs`). Build trouble: `docs/reference/toolchain.md`.
 - **Tests never leave the machine**: a test that needs a server binds a listener to `127.0.0.1:0` and
