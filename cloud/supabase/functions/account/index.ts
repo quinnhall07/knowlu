@@ -129,6 +129,13 @@ Deno.serve(async (req) => {
             "sync_records",
             "sync_notes",
             "sync_usage",
+            // The judgment service's per-account rows (L8 §8.6): `judgments` is one row per
+            // judgment of the student's items (the fields written, the tier, the outcome; never a
+            // title, prompt or reply), and `usage_daily` the account's daily call and token counts.
+            // Both already cascade from `accounts`
+            // (`20260911000100_judgment_service.sql`), and are named for the same reason as above.
+            "usage_daily",
+            "judgments",
             "entitlements",
           ]
         ) {
@@ -208,6 +215,31 @@ Deno.serve(async (req) => {
           // document and no date to version, and the log has to read the same on both sides of this
           // migration (review M6).
           { account_id: c.account_id, subject_hash: hash, kind: "age_18", version: "1" },
+        ]);
+      },
+      getConsentVersions: async (id) => {
+        const rows = await restSelect<{ tos_version: string | null; privacy_version: string | null }>(
+          rest,
+          "accounts",
+          `id=eq.${encodeURIComponent(id)}&select=tos_version,privacy_version&limit=1`,
+        );
+        return rows[0] ?? null;
+      },
+      recordLaterPrivacy: async (c) => {
+        // Forward only, in the filter and not just in the handler's comparison: two racing Accepts
+        // (or an old build's retry landing after a new one's) must never move the column backwards.
+        // The handler has already refused anything but a `YYYY-MM-DD` date, so the string order the
+        // filter compares in is the date order.
+        const v = encodeURIComponent(c.privacy_version);
+        const forward = `or=(privacy_version.is.null,privacy_version.lt.${v})`;
+        await restPatch(rest, "accounts", `id=eq.${encodeURIComponent(c.account_id)}&${forward}`, {
+          privacy_version: c.privacy_version,
+        });
+        // One row, the version the student accepted, hashed as the first consent hashes its address.
+        // Two racing Accepts can write two identical rows: harmless, as `recordAccountConsent` says.
+        const hash = await sha256Hex(c.email);
+        await restUpsert(rest, "consents", [
+          { account_id: c.account_id, subject_hash: hash, kind: "privacy", version: c.privacy_version },
         ]);
       },
       putSource: async (id, kind, url) => {

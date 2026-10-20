@@ -31,6 +31,11 @@ function deps(over: Partial<Deps> = {}): Deps {
     // no-op", so every DELETE/export/sources test in this file is untouched by the new route.
     hasConsent: () => Promise.resolve(false),
     recordAccountConsent: () => Promise.resolve(),
+    // L4 T2: the recorded pair defaults to the very versions the consent tests below send, so a
+    // second call with them is the silent 200 it always was; and the later-version write refuses
+    // to run unless a test asks for it, so no existing test can reach it unnoticed.
+    getConsentVersions: () => Promise.resolve({ tos_version: "2026-09-10", privacy_version: "2026-09-17" }),
+    recordLaterPrivacy: () => Promise.reject(new Error("recordLaterPrivacy must not be called here")),
     ...over,
   };
 }
@@ -468,13 +473,197 @@ Deno.test("POST /account/consent — a null JSON body is 400, not 500", async ()
   assertEquals(recorded.length, 0);
 });
 
-Deno.test("GET /account/consent is 405, not 404 — the route exists", async () => {
+Deno.test("PUT /account/consent is 405, not 404 — the route exists", async () => {
   const res = await handle(
     new Request("http://127.0.0.1:1/account/consent", {
-      method: "GET",
+      method: "PUT",
       headers: { authorization: "Bearer good" },
     }),
     consentDeps([], false),
   );
   assertEquals(res.status, 405);
+  assertEquals(res.headers.get("allow"), "GET, POST");
+});
+
+// L4 T2 (plan §4.3): GET /account/consent reads the caller's recorded pair, and nothing else.
+const consentGet = (auth = "Bearer good") => req("GET", "/consent", undefined, auth);
+
+Deno.test("GET /account/consent answers the recorded terms and privacy versions, and nothing else", async () => {
+  const asked: string[] = [];
+  const res = await handle(
+    consentGet(),
+    deps({
+      getConsentVersions: (id) => {
+        asked.push(id);
+        // A dep that over-reads must not leak: the reply is built field by field, never passed on.
+        return Promise.resolve(
+          {
+            tos_version: "2026-09-10",
+            privacy_version: "2026-09-24",
+            email: "a@example.invalid",
+          } as unknown as {
+            tos_version: string | null;
+            privacy_version: string | null;
+          },
+        );
+      },
+    }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { tos_version: "2026-09-10", privacy_version: "2026-09-24" });
+  assertEquals(asked, ["acc-1"], "the read is scoped to the verified caller");
+});
+
+Deno.test("GET /account/consent answers a never-recorded pair as nulls", async () => {
+  const res = await handle(
+    consentGet(),
+    deps({ getConsentVersions: () => Promise.resolve({ tos_version: null, privacy_version: null }) }),
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { tos_version: null, privacy_version: null });
+});
+
+Deno.test("GET /account/consent needs a bearer, and an account with no row is 404", async () => {
+  const noBearer = await handle(consentGet("Basic nope"), deps()).catch((e) => e as Response);
+  assertEquals(noBearer.status, 401);
+  const noRow = await handle(consentGet(), deps({ getConsentVersions: () => Promise.resolve(null) }))
+    .catch((e) => e as Response);
+  assertEquals(noRow.status, 404);
+  assertEquals(await noRow.json(), { error: "no such account" });
+});
+
+Deno.test("/account/consent takes GET and POST only, and its 405 names both", async () => {
+  for (const m of ["PUT", "DELETE", "PATCH"]) {
+    const res = await handle(req(m, "/consent"), deps());
+    assertEquals(res.status, 405, m);
+    assertEquals(res.headers.get("allow"), "GET, POST", m);
+  }
+});
+
+// L4 T2 (plan §4.3): an account that already consented can record a LATER privacy version, and only
+// that: one `privacy` row and the column moved forward, never a `tos` or `age_18` row or a restamp.
+type Writes = { first: unknown[]; later: unknown[] };
+
+function laterDeps(w: Writes, recorded: string | null, already = true): Deps {
+  return deps({
+    hasConsent: () => Promise.resolve(already),
+    getConsentVersions: () => Promise.resolve({ tos_version: "2026-09-10", privacy_version: recorded }),
+    recordAccountConsent: (c) => {
+      w.first.push(c);
+      return Promise.resolve();
+    },
+    recordLaterPrivacy: (c) => {
+      w.later.push(c);
+      return Promise.resolve();
+    },
+    now: () => new Date("2026-10-20T12:00:00Z"),
+  });
+}
+
+const consentPost = (privacy: string) =>
+  req("POST", "/consent", { tos_version: "2026-09-10", privacy_version: privacy, age_attested: true });
+
+Deno.test("POST /account/consent records a later privacy version once, and nothing of the first consent", async () => {
+  const w: Writes = { first: [], later: [] };
+  const res = await handle(consentPost("2026-10-20"), laterDeps(w, "2026-09-24"));
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: true });
+  assertEquals(w.later, [{
+    account_id: "acc-1",
+    email: "a@example.invalid",
+    privacy_version: "2026-10-20",
+    at: "2026-10-20T12:00:00.000Z",
+  }]);
+  assertEquals(w.first.length, 0, "a later version never re-runs the first consent's writes");
+});
+
+Deno.test("a recorded privacy version of null counts as older", async () => {
+  const w: Writes = { first: [], later: [] };
+  const res = await handle(consentPost("2026-09-24"), laterDeps(w, null));
+  assertEquals(res.status, 200);
+  assertEquals(w.later.length, 1);
+  assertEquals(w.first.length, 0);
+});
+
+Deno.test("an equal or an older privacy version is the silent 200 and writes nothing", async () => {
+  for (const sent of ["2026-09-24", "2026-09-17"]) {
+    const w: Writes = { first: [], later: [] };
+    const res = await handle(consentPost(sent), laterDeps(w, "2026-09-24"));
+    assertEquals(res.status, 200, sent);
+    assertEquals(await res.json(), { ok: true });
+    assertEquals(w.later.length + w.first.length, 0, sent);
+  }
+});
+
+Deno.test("a later privacy version that is not a YYYY-MM-DD date is 400 and writes nothing", async () => {
+  // Each of these sorts after the recorded date as a string, so a forward-only filter alone would
+  // let it through and then pin the column past every real version.
+  for (const sent of ["2026-10-20x", "zzzz", "2026-10-2", "2026-13-45", "2026-11-31", "２０２６-10-20"]) {
+    const w: Writes = { first: [], later: [] };
+    const res = await handle(consentPost(sent), laterDeps(w, "2026-09-24")).catch((e) => e as Response);
+    assertEquals(res.status, 400, sent);
+    assertEquals(w.later.length + w.first.length, 0, sent);
+  }
+});
+
+Deno.test("a fresh account still takes the first-consent path, not the later one", async () => {
+  const w: Writes = { first: [], later: [] };
+  const res = await handle(consentPost("2026-10-20"), laterDeps(w, null, false));
+  assertEquals(res.status, 200);
+  assertEquals(w.later.length, 0);
+  assertEquals(w.first.length, 1);
+});
+
+// `index.ts` is never loaded by `deno test`, so its two consent deps are pinned by their text. The
+// forward-only filter lives in the PATCH's query string, not only in the handler: two racing Accepts
+// must not be able to move `accounts.privacy_version` backwards.
+Deno.test("the later-version write moves the column forward only and inserts one privacy row", async () => {
+  const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const start = text.indexOf("recordLaterPrivacy:");
+  assert(start >= 0, "index.ts must define recordLaterPrivacy");
+  const end = text.indexOf("\n      },\n", start);
+  assert(end > start, "could not find the end of recordLaterPrivacy");
+  const block = text.slice(start, end);
+  assert(
+    block.includes("const v = encodeURIComponent(c.privacy_version);") &&
+      block.includes("`or=(privacy_version.is.null,privacy_version.lt.${v})`") &&
+      block.includes("`id=eq.${encodeURIComponent(c.account_id)}&${forward}`"),
+    "the PATCH's query must only ever move privacy_version forward",
+  );
+  assertEquals([...block.matchAll(/restPatch\(/g)].length, 1, "one PATCH, on accounts");
+  assert(/restPatch\(\s*rest,\s*"accounts",/.test(block), "the PATCH is on accounts");
+  const patchBody = block.match(/restPatch\(rest, "accounts", `[^`]*`, \{([^}]*)\}\);/);
+  assert(patchBody, "could not find the PATCH's body");
+  assertEquals(
+    patchBody[1].trim(),
+    "privacy_version: c.privacy_version,",
+    "the PATCH sets privacy_version alone",
+  );
+  assertEquals([...block.matchAll(/kind: "/g)].length, 1, "exactly one consents row");
+  assert(
+    /restUpsert\(rest, "consents", \[\s*\{[^\]]*kind: "privacy"[^\]]*\}\s*,?\s*\]\)/.test(block),
+    "of kind privacy",
+  );
+  for (const name of ["tos_version", "tos_accepted_at", "age_attested_at", '"tos"', '"age_18"']) {
+    assert(!block.includes(name), `the later-version write must not name ${name}`);
+  }
+});
+
+Deno.test("the consent read selects the two version columns of the caller's row alone", async () => {
+  const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  assert(
+    text.includes("`id=eq.${encodeURIComponent(id)}&select=tos_version,privacy_version&limit=1`"),
+    "getConsentVersions must read tos_version and privacy_version, scoped by id",
+  );
+});
+
+// The purge list is what the privacy policy's deletion paragraph is written from (L8 §8.6, Q-PURGE):
+// both tables cascade from `accounts`, and are named here regardless.
+Deno.test("the purge list names usage_daily and judgments", async () => {
+  const text = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+  const match = text.match(/for \(\s*const table of \[([\s\S]*?)\]\s*\)/);
+  assert(match, "could not find the purge list");
+  for (const table of ["usage_daily", "judgments"]) {
+    assert(match[1].includes(`"${table}",`), `the purge list must name ${table}`);
+  }
 });
