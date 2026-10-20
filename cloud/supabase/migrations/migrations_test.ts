@@ -3249,8 +3249,13 @@ async function followUpsFunction(fn: string): Promise<{ name: string; sql: strin
 Deno.test("the_follow_ups_migration_is_found_by_suffix_and_stamped_after_every_other_file", async () => {
   const names = (await everyMigrationFile()).map(([n]) => n);
   const { name } = await followUpsMigration();
-  // Forward-only (M2, M6): a new file after every applied one. A later migration is named here when it lands.
-  assertEquals(names.filter((n) => n > name), [], `${name}: stamped after every other file`);
+  // Forward-only (M2, M6): a new file after every applied one. A later migration is named here when it lands,
+  // by its suffix, never its stamp (M4): L8's testers file, restamped after this one (C1, 2026-10-20).
+  assertEquals(
+    names.filter((n) => n > name).map((n) => /^\d{14}_testers\.sql$/.test(n) ? "<stamp>_testers.sql" : n),
+    ["<stamp>_testers.sql"],
+    `${name}: stamped after every other file but the named later ones`,
+  );
   for (const applied of [MAIL_LAST_LAPSED_AT, MAIL_MAX_TOKENS_REPIN]) {
     assert(name > applied, `${name}: stamped after ${applied}, which stays as applied`);
   }
