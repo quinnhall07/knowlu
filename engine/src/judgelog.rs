@@ -9,7 +9,7 @@
 //! install.
 //!
 //! **What it is for.** Two things. Today it is the only place that answers "why is nothing being
-//! enriched?" — a week of `model not installed` lines is the answer. Tomorrow it is 3b's seed
+//! enriched?" — a week of `service unavailable` lines is the answer. Tomorrow it is 3b's seed
 //! corpus: a rule that reproduces the model's output across repeated cases is what gets proposed for
 //! promotion into tier 2, and this file is the evidence for that.
 //!
@@ -19,10 +19,10 @@
 //!
 //! **The split, for `Outcome::LowConfidence`.** `judge::LowCause` says *why* structurally —
 //! `"below floor"`, `"incomplete"`, `"model failed"` — and that closed vocabulary is what this log
-//! records. The full text (`why`), which on the `ModelFailed` branch carries the runtime's own
-//! stderr, goes to stdout instead — Task 7 prints it, Task 9 captures it into the slot log — and
+//! records. The full text (`why`), which on the `ModelFailed` branch carries the model call's own
+//! error text, goes to stdout instead — Task 7 prints it, Task 9 captures it into the slot log — and
 //! never into this file. Without the split, all three collapse to the one label `"low confidence"`
-//! and a runtime that installs but does not run reads identically, forever, to an answer that was
+//! and a service that answers but fails reads identically, forever, to an answer that was
 //! merely unsure.
 
 use std::path::Path;
@@ -227,11 +227,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
 
         // The `cause` vocabulary: a `ModelFailed` outcome carries `why` text that looks exactly
-        // like the thing this test exists to keep out — the runtime's own stderr. `cause` must
+        // like the thing this test exists to keep out — the model call's own error text. `cause` must
         // reach the line; `why` must not, under any key.
         let d = dir("private-cause");
         let v = crate::judge::Verdict::default();
-        let stderr_secret = "llama-cli: panicked at prompt.cpp:88: token buffer overrun";
+        let stderr_secret = "model: panicked at prompt.cpp:88: token buffer overrun";
         let low = crate::judge::Outcome::LowConfidence {
             seed: v,
             why: stderr_secret.to_string(),
@@ -247,14 +247,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Every outcome is logged, not only the ones that wrote something: a week of "model not
-    /// installed" is exactly what tells Quinn why nothing is being enriched.
+    /// Every outcome is logged, not only the ones that wrote something: a week of "service
+    /// unavailable" is exactly what tells Quinn why nothing is being enriched.
     #[test]
     fn every_outcome_is_recorded_with_the_tier_that_reached_it() {
         let empty: Vec<(String, String)> = Vec::new();
         let v = crate::judge::Verdict { confidence: 1.0, tier: 1, ..Default::default() };
-        let e = entry_for("task_0123456789", &crate::judge::Outcome::RuntimeNotInstalled(v.clone()), &empty, None, 3);
-        assert_eq!(e.outcome, "runtime not installed");
+        let e = entry_for("task_0123456789", &crate::judge::Outcome::ServiceUnavailable(v.clone()), &empty, None, 3);
+        assert_eq!(e.outcome, "service unavailable");
         assert_eq!(e.tier, 1);
         assert_eq!(e.confidence, 1.0);
         assert_eq!(e.cause, None, "cause is only structural on LowConfidence");
