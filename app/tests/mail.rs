@@ -1953,9 +1953,12 @@ fn a_gmail_attachment_that_does_not_upload_stops_the_pass_with_a_fixed_word() {
     let svc = holding(&[]);
     let mut mb = fake(Provider::Gmail, vec![mail(ANA, "Quiz 3 moved", since + 3_600), mail(BO, "Lab report due", since + 7_200)]);
     mb.attach_fails = Some("attachment failed");
-    let out = pass(&mb, &svc, &mut routine(Provider::Gmail), &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&mb, &svc, &mut r, &job(Provider::Gmail, Phase::Recover, window(NOW, None, None), Some(SLOT_CAP)));
     assert_eq!(out.stop, Stop::Script("an attachment did not upload"));
     assert_eq!((out.sent, out.left), (0, 0));
+    // Pre-PR review 2026-10-20: the draft was discarded before Send, so the originals taken for it go back to the day.
+    assert_eq!((r.sent_today(), r.messages_today()), (0, 0));
     assert_eq!(mb.forwards.borrow().len(), 1, "one forward was tried, and none after it");
 }
 
@@ -2077,8 +2080,11 @@ fn no_attachment_on_a_group_or_a_conversation_and_a_compose_left_open_still_stop
     // A compose still open from an earlier try is the page's state: the pass stops naming it.
     let mut open = fake(Provider::Gmail, two());
     open.attach_fails = Some("compose still open");
-    let out = pass(&open, &holding(&[]), &mut routine(Provider::Gmail), &recover());
+    let mut r = routine(Provider::Gmail);
+    let out = pass(&open, &holding(&[]), &mut r, &recover());
     assert_eq!((out.stop, out.left), (Stop::Script("a draft was still open"), 0));
+    // Pre-PR review 2026-10-20: nothing went, so the day is charged nothing.
+    assert_eq!((r.sent_today(), r.messages_today()), (0, 0));
     assert_eq!(open.forwards.borrow().len(), 1, "no second try over it");
 }
 
@@ -4282,6 +4288,29 @@ fn a_gmail_send_that_did_not_settle_keeps_its_message_counted() {
     let mut r = routine(Provider::Gmail);
     let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
     assert_eq!((out.stop, out.sent, r.messages_today()), (Stop::Script("a forward did not finish"), 0, 1));
+    // Pre-PR review 2026-10-20: the originals of a send that may have gone stay charged too.
+    assert_eq!(r.sent_today(), 1);
+}
+
+#[test]
+fn a_gmail_message_cap_stop_gives_back_the_originals_no_send_went_for() {
+    // Pre-PR review 2026-10-20: the stop comes before any Send, so the originals taken for the group are given back.
+    let since = window(NOW, None, None).since;
+    let recent: Vec<i64> = (0..300).map(|i| NOW - 3_600 + i).collect();
+    // Every message spent: the first reservation fails, and nothing is charged.
+    let mb = fake(Provider::Gmail, vec![mail(ANA, "Quiz 3 moved", since + 600)]);
+    let mut r = routine(Provider::Gmail).with_message_times(&recent);
+    let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop, out.sent, r.sent_today()), (Stop::DayLimit { next_day_at: recent[0] + DAY }, 0, 0));
+    assert_eq!(mb.forwards.borrow().len(), 0);
+    // One message left: a pair is refused as too big, the first half takes it, and the second half finds the cap
+    // spent. The two originals taken were one sent and one not: only the sent one stays charged.
+    let mut mb = fake(Provider::Gmail, vec![mail(ANA, "Quiz 3 moved", since + 600), mail(BO, "Lab report due", since + 1_200)]);
+    mb.over_rows = Some(1);
+    let mut r = routine(Provider::Gmail).with_message_times(&recent[1..]);
+    let out = pass(&mb, &holding(&[]), &mut r, &gmail_backfill());
+    assert_eq!((out.stop.clone(), out.sent), (Stop::DayLimit { next_day_at: recent[1] + DAY }, 1));
+    assert_eq!(r.sent_today(), 1);
 }
 
 #[test]

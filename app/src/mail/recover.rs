@@ -497,7 +497,7 @@ pub fn pages_spent(routine: &mut Routine, now: i64) -> bool {
 /// One pass: lists, diffs, forwards, closes. A pass never writes the vault and never fails as a whole:
 /// it ends as a [`Stop`] with the counts so far.
 pub fn run_pass(mb: &dyn Mailbox, client: &MailClient, clock: &dyn Clock, routine: &mut Routine, job: &Job) -> Outcome {
-    let mut pass = Pass { mb, client, clock, routine, job, out: Outcome::new(), batch: None, attempts: 0, judged: HashSet::new(), decided: HashMap::new(), walk: HashMap::new(), since_look: 0, restart: false, sent_since_lone: false, lone_seen: false, waiting: 0, since_day: 0, bound: i64::MIN, base_span: MIN_SPAN_DAYS, span: MIN_SPAN_DAYS, aim_at: 0, at_of: HashMap::new(), first_kept: None, waiting_at: None };
+    let mut pass = Pass { mb, client, clock, routine, job, out: Outcome::new(), batch: None, attempts: 0, judged: HashSet::new(), decided: HashMap::new(), walk: HashMap::new(), since_look: 0, restart: false, sent_since_lone: false, lone_seen: false, waiting: 0, since_day: 0, bound: i64::MIN, base_span: MIN_SPAN_DAYS, span: MIN_SPAN_DAYS, aim_at: 0, at_of: HashMap::new(), first_kept: None, waiting_at: None, may_have_sent: false };
     pass.out.stop = pass.go().err().unwrap_or(Stop::Done);
     pass.out.frontier = pass.frontier();
     pass.finish();
@@ -546,6 +546,10 @@ struct Pass<'a> {
     restart: bool,
     /// Gmail: a send went since the last lone row that would not attach (or since the pass began).
     sent_since_lone: bool,
+    /// Gmail: a forward since [`Pass::forward_taken`] cleared this may have gone: its script call gave no answer,
+    /// or the page answered "refused", "send did not settle" or a reply the pass does not know, all after Send
+    /// could have been pressed. It stays set through a halved group's whole recursion.
+    may_have_sent: bool,
     /// Gmail: a lone row has failed to attach in this pass.
     lone_seen: bool,
     /// Gmail: the pass's first lone failure, when nothing had been sent before it: decided (not tried again this
@@ -1351,13 +1355,19 @@ impl Pass<'_> {
 
     /// Forwards `rows` for which `taken` of the day's originals were reserved, and gives back to the day those
     /// that did not go: a row left with nothing sent (a conversation one short under G1, too big alone, gone, or a
-    /// lone row that will not attach) used none (review round 2 of e7ae803). A send that stops the pass keeps them:
-    /// it may have gone ("send did not settle").
+    /// lone row that will not attach) used none (review round 2 of e7ae803). A stop gives them back too when no
+    /// send in the group may have gone (the message cap, a draft discarded before Send: pre-PR review 2026-10-20).
+    /// It keeps them when one may have: a call with no answer, "refused", or "send did not settle" and any reply the
+    /// pass does not know, all after Send could have been pressed. `may_have_sent` is set anywhere inside a halved
+    /// group's recursion, so a group in which any send was uncertain keeps its whole charge.
     fn forward_taken(&mut self, rows: Vec<Row>, messages: Option<u32>, taken: u32) -> Step<()> {
         let (before, day) = (self.out.sent, self.routine.day());
-        self.forward_gmail(rows, messages)?;
-        self.routine.unsent(taken.saturating_sub(self.out.sent - before), day);
-        Ok(())
+        self.may_have_sent = false;
+        let r = self.forward_gmail(rows, messages);
+        if r.is_ok() || !self.may_have_sent {
+            self.routine.unsent(taken.saturating_sub(self.out.sent - before), day);
+        }
+        r
     }
 
     /// One Send of `rows` (a conversation row carries its message count). An `over 25 MB` send is halved,
@@ -1436,7 +1446,11 @@ impl Pass<'_> {
             return Err(Stop::DayLimit { next_day_at });
         }
         self.attempts += 1;
-        let v = self.mb.script(&self.path("forward.js"), &args).map_err(refused)?;
+        // A call with no answer may have pressed Send.
+        let v = self.mb.script(&self.path("forward.js"), &args).map_err(|r| {
+            self.may_have_sent = true;
+            refused(r)
+        })?;
         let reason = v.get("reason").and_then(Value::as_str);
         if v.get("result").and_then(Value::as_str) == Some("ok") || reason == Some("send did not settle") {
             self.note_loads();
@@ -1471,7 +1485,10 @@ impl Pass<'_> {
                     self.restart = true;
                 }
             }
-            (Some("refused"), _, _) => return Err(self.refusal()),
+            (Some("refused"), _, _) => {
+                self.may_have_sent = true;
+                return Err(self.refusal());
+            }
             // Gmail could not upload the attachments (live 2026-10-19): nothing was sent and the draft is
             // discarded. It is the page's, not these rows', so the pass stops and says so.
             (Some("failed"), Some("attachment failed"), _) => return Err(Stop::Script("an attachment did not upload")),
@@ -1534,7 +1551,11 @@ impl Pass<'_> {
             {
                 self.lone_failed(&rows)?;
             }
-            _ => return Err(Stop::Script("a forward did not finish")),
+            // "send did not settle" and any reply not known above come after Send may have been pressed.
+            _ => {
+                self.may_have_sent = true;
+                return Err(Stop::Script("a forward did not finish"));
+            }
         }
         Ok(())
     }
