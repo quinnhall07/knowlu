@@ -1066,9 +1066,10 @@ fn a_refused_second_group_leaves_the_first_applied() {
     assert_eq!(files(&vault, "approvals").len(), 1);
     assert!(lines.iter().any(|l| l == "mail: could not ask which item (the service refused); left for the next slot"), "{lines:?}");
     let seen = knowlu_engine::ingest::load_seen(&vault);
-    for uid in ["mail:aa11", "mail:aa12", "mail:aa13", "mail:aa14"] {
-        assert!(!seen.contains(uid), "{uid}: the sixteenth is unanswered, so the pull is held");
+    for uid in ["mail:aa11", "mail:aa12", "mail:aa13"] {
+        assert!(seen.contains(uid), "{uid}: every claim in it was answered and applied");
     }
+    assert!(!seen.contains("mail:aa14"), "the sixteenth is unanswered, so its message is held");
     let _ = std::fs::remove_dir_all(&vault);
 }
 
