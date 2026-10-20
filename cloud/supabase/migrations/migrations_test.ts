@@ -353,13 +353,14 @@ Deno.test("every view in every migration is either security_invoker or revoked f
   // `RAW_VIEW_KEYWORD` to see `create materialized view` too; none of the five is a materialized
   // view — today's corpus creates none, not because the scan cannot see one: the synthetic case
   // below proves it can. C3's `sync_limits` (revoked, 20260912000100) is the fifth. L8's
-  // `effective_entitlements` (revoked, <stamp>_testers.sql, friends-testers S2b) is the sixth, and
-  // `admin.testers` (revoked, the same file, S2e1) the seventh.
-  assertEquals(parsed, 7, "today's corpus should parse exactly 7 view creations");
+  // `effective_entitlements` (revoked, <stamp>_testers.sql, friends-testers S2b) is the sixth,
+  // `admin.testers` (revoked, the same file, S2e1) the seventh, and `admin.tester_usage_daily` and
+  // `admin.tester_spend_monthly` (revoked, the same file, S2e2) the eighth and ninth.
+  assertEquals(parsed, 9, "today's corpus should parse exactly 9 view creations");
   // Asserted by name, not merely counted: the exemption must be seen to fire on a real view rather
   // than papering over a scan that never reached one.
   assertEquals(invoker, ["billing_subscribers"]);
-  assertEquals(revoked, ["telemetry_daily", "correction_rates", "monthly_spend", "sync_limits", "effective_entitlements", "testers"]);
+  assertEquals(revoked, ["telemetry_daily", "correction_rates", "monthly_spend", "sync_limits", "effective_entitlements", "testers", "tester_usage_daily", "tester_spend_monthly"]);
 });
 
 Deno.test("a view with neither security_invoker nor a revoke is caught by the view guard", () => {
@@ -2694,4 +2695,118 @@ Deno.test("S2e1: the case table's state column: P2 live and paid, P8 expired, P9
     assertEquals(rows(out.grantsBefore), c.testersBefore ?? c.testers, `${c.id} before its calls`);
     assertEquals(rows(out.grants), c.testers, `${c.id} at the end`);
   }
+});
+
+// L8 S2e2 (friends-testers §5, §9 layer i; the controller's ruling of 2026-10-20 on est_usd, option
+// (b)): the two cost views Quinn reads. tester_spend_monthly sums monthly_spend's own usd per tester
+// and month, so est_usd is monthly_spend's value and is never re-priced in this file (which must not
+// name the pricing table: CI's eval gate greps migrations for it). tester_usage_daily holds counts and
+// no dollars. Both cover only accounts that hold or held a grant, and name no item, field or message.
+const dayOf = (t: string, col: string) => `(${t}.${col} at time zone 'utc')::date`;
+const onDay = (t: string, day: string) => `where ${t}.account_id = d.account_id and ${day} = d.day`;
+const COUNTED = (t: string, table: string, key: string, col: string) =>
+  `(select jsonb_object_agg(${t}.${key}, ${t}.n) from (select ${col}.${key}, count(*) as n from public.${table} ${col} ` +
+  `${onDay(col, dayOf(col, table === "judgments" ? "judged_at" : "seen_at"))} group by ${col}.${key}) ${t})`;
+const USAGE_VIEW = "create view admin.tester_usage_daily as select d.account_id, d.day, " +
+  "(select jsonb_object_agg(u.kind, jsonb_build_object('calls', u.calls, 'refunds', u.refunds, 'in_tokens', u.in_tokens, " +
+  `'out_tokens', u.out_tokens)) from public.usage_daily u ${onDay("u", "u.day")}) as usage_by_kind, ` +
+  `${COUNTED("t", "judgments", "tier", "j")} as judgments_by_tier, ${COUNTED("p", "mail_seen", "phase", "m")} as mail_by_phase, ` +
+  `(select count(*) from public.gmail_seen s ${onDay("s", dayOf("s", "seen_at"))}) as gmail_messages, ` +
+  `(select jsonb_object_agg(r.route, r.calls) from public.route_daily r ${onDay("r", "r.day")}) as calls_by_route ` +
+  `from (select u.account_id, u.day from public.usage_daily u union select j.account_id, ${dayOf("j", "judged_at")} ` +
+  `from public.judgments j union select m.account_id, ${dayOf("m", "seen_at")} from public.mail_seen m ` +
+  `union select s.account_id, ${dayOf("s", "seen_at")} from public.gmail_seen s union select r.account_id, r.day ` +
+  "from public.route_daily r) d where d.account_id in (select g.account_id from public.comp_grants g);";
+const SPEND_VIEW = "create view admin.tester_spend_monthly as select x.account_id, x.month, x.is_total, x.est_usd, " +
+  "b.usd as alert_usd, b.raised_at as alert_raised_at from (select ms.account_id, ms.month::date as month, " +
+  "grouping(ms.account_id) = 1 as is_total, sum(ms.usd) as est_usd from public.monthly_spend ms " +
+  "where ms.account_id in (select g.account_id from public.comp_grants g) " +
+  "group by grouping sets ((ms.month::date, ms.account_id), (ms.month::date))) x " +
+  "left join public.budget_alerts b on b.account_id = x.account_id and b.month = x.month;";
+const LEAKS = ["item_id", "fields", "title", "sender", "subject", "body", "payload", "uid", "msg_hash", "fp_hash", "address_id", "received_minute", "email", "note"];
+
+export function costViewsProblems(sql: string): string[] {
+  const flat = flatten(sql);
+  const out: string[] = [];
+  const stmts: Record<string, string> = {};
+  for (const [name, want] of [["tester_usage_daily", USAGE_VIEW], ["tester_spend_monthly", SPEND_VIEW]]) {
+    const stmt = stmts[name] = new RegExp(`create (?:or replace )?view admin\.${name} as [^;]*;`).exec(flat)?.[0] ?? "";
+    if (stmt !== want) out.push(`admin.${name} is not the pinned view: ${stmt || "absent"}`);
+    for (const w of LEAKS) if (new RegExp(`\b${w}\b`).test(stmt)) out.push(`admin.${name} names ${w}`);
+    if (!flat.includes(`revoke all on admin.${name} from public, anon, authenticated, service_role;`)) out.push(`${name}'s revoke`);
+  }
+  if (/usd/.test(stmts.tester_usage_daily)) out.push("tester_usage_daily carries dollars (ruled out, option (b))");
+  const spend = stmts.tester_spend_monthly;
+  if (!spend.includes("sum(ms.usd) as est_usd from public.monthly_spend ms ")) out.push("est_usd is not monthly_spend's own usd");
+  if (/usd_per_m|_tokens/.test(spend)) out.push("est_usd re-priced here, not monthly_spend's value");
+  return out;
+}
+
+Deno.test("S2e2: the cost views are §5's as ruled: counts per day, monthly_spend's dollars per month, revoked", async () => {
+  const { name, sql } = await testersMigration();
+  assertEquals(costViewsProblems(sql), [], name);
+  const raw = (await everyMigrationFile()).find(([n]) => n === name)![1];
+  assert(!/\bmodels\b/i.test(raw), `${name}: names the pricing table, which starts the paid eval (ci.yml)`);
+  for (const [file, text] of await everyMigrationFile()) {
+    assert(!/\bgrant [^;]* on (?:table )?admin\.tester_(?:usage_daily|spend_monthly)\b/.test(flatten(text)), `${file}: a grant`);
+  }
+});
+
+Deno.test("S2e2: the cost pins refuse a message key, dollars per day, a local day, every account, a share, no total, no alert", async () => {
+  const flat = flatten((await testersMigration()).sql);
+  for (
+    const [from, to] of [
+      ["(select count(*) from public.gmail_seen s", "(select jsonb_agg(s.uid) from public.gmail_seen s"],
+      ["as calls_by_route from", "as calls_by_route, 0.0 as est_usd from"],
+      ["(j.judged_at at time zone 'utc')::date = d.day", "j.judged_at::date = d.day"],
+      [" from public.route_daily r) d where d.account_id in (select g.account_id from public.comp_grants g);", " from public.route_daily r) d;"],
+      ["sum(ms.usd) as est_usd", "sum(ms.usd) / 30 as est_usd"],
+      ["group by grouping sets ((ms.month::date, ms.account_id), (ms.month::date))", "group by ms.month::date, ms.account_id"],
+      ["left join public.budget_alerts b", "join public.budget_alerts b"],
+      ["admin.tester_spend_monthly from public, anon, authenticated, service_role;", "admin.tester_spend_monthly from public;"],
+    ]
+  ) {
+    const bad = flat.replace(from, to);
+    assertNotEquals(bad, flat, `the mutation ${from} must apply to the real views`);
+    assert(costViewsProblems(bad).length > 0, `${from} -> ${to} must be refused`);
+  }
+});
+
+Deno.test("S2e2: the case table's V1 and V2 rows: est_usd the hand-computed sum, the total row the testers', the alert on its month", async () => {
+  const { SPEND_CASES } = await import("./testers_cases.ts");
+  assertEquals(SPEND_CASES.map((c) => c.id), ["V1", "V2"]);
+  const kinds = ["task", "event", "email", "mail_claim", "mail_resolve", "mail_digest"]; // usage_daily_kind_check
+  const nano = (x: number) => Math.round(x * 1e9) / 1e9;
+  const seen = new Set<string>();
+  for (const c of SPEND_CASES) {
+    for (const a of c.accounts) assert(a.email.endsWith("@example.invalid"), c.id);
+    c.accounts.forEach((_, i) => assert(c.grants.some((g) => g.account === i), `${c.id}: account ${i} is a tester`));
+    const months = [...new Set(c.usage.map((u) => `${u.day.slice(0, 8)}01`))];
+    for (const m of months) {
+      assert(!seen.has(m) && m < "2026-01-01", `${c.id}: ${m} is its own month, before any real usage`);
+      seen.add(m);
+    }
+    for (const x of c.alerts ?? []) assert(months.includes(x.month), `${c.id}: an alert shows on a month with spend`);
+    const want: typeof c.spend = [];
+    for (const m of months) {
+      let total = 0;
+      c.accounts.forEach((_, i) => {
+        const rows = c.usage.filter((u) => u.account === i && `${u.day.slice(0, 8)}01` === m);
+        if (rows.length === 0) return;
+        for (const u of rows) assert(kinds.includes(u.kind) && c.prices[u.kind] !== undefined, `${c.id}: ${u.kind}`);
+        const usd = rows.reduce((s, u) => s + (u.inTokens * c.prices[u.kind].in + u.outTokens * c.prices[u.kind].out) / 1e6, 0);
+        total += usd;
+        const alert = c.alerts?.find((x) => x.account === i && x.month === m)?.usd ?? null;
+        want.push({ account: i, month: m, estUsd: nano(usd), alertUsd: alert });
+      });
+      want.push({ account: "total", month: m, estUsd: nano(total), alertUsd: null });
+    }
+    assertEquals(c.spend.map((r) => ({ ...r, estUsd: nano(r.estUsd) })), want, c.id);
+    const days = c.accounts.map((_, i) => new Set(c.usage.filter((u) => u.account === i).map((u) => u.day)).size);
+    assertEquals(c.usageDays, days, `${c.id}: one tester_usage_daily row per day with usage`);
+  }
+  const v1 = SPEND_CASES[0];
+  const priced = new Set(v1.usage.map((u) => `${v1.prices[u.kind].in}/${v1.prices[u.kind].out}`));
+  assert(priced.size >= 2, "V1 spans two prices, so monthly_spend gives two rows and the view must sum them");
+  assertEquals([SPEND_CASES[1].accounts.length, SPEND_CASES[1].alerts?.length], [2, 1], "V2: two testers, one alert");
 });

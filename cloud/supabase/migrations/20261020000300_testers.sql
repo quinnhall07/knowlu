@@ -260,3 +260,59 @@ select g.account_id,
 
 -- Owner rights; the admin schema is already closed to every API role, and so is this view.
 revoke all on admin.testers from public, anon, authenticated, service_role;
+
+-- S2e2 (spec §4, §5; the controller's ruling of 2026-10-20 on est_usd, option (b)): what each tester
+-- costs, read in the SQL editor as the owner. Both views cover only accounts that hold or held a
+-- grant, and carry counts and dollars only: no item id, title, field value, sender or message key.
+-- Still missing, by design (§4): the model per call (a pin change re-prices history), the provider's
+-- billed cost (reconcile the month against the provider's dashboard by hand) and infrastructure per
+-- account. Not counted in route_daily: mail-inbound and mail-canary, whose volume per account is
+-- mail_by_phase here. route_daily counts the gated routes (judge-*, ingest-*, events, sync-*,
+-- gmail-read, mail, mail-pull, mail-resolve, and account and google-connect where they take the gate)
+-- only while the ROUTE_COUNTS secret reads on.
+
+-- Per tester per UTC day: calls, refunds and tokens per kind; judgments per tier (3 is the model,
+-- 2 a rule, lower tiers never reach one); mail arrivals per phase; Gmail messages judged; gated
+-- calls per route. No dollars here (the ruling): the month's dollars are tester_spend_monthly's.
+create view admin.tester_usage_daily as
+select d.account_id,
+       d.day,
+       (select jsonb_object_agg(u.kind, jsonb_build_object('calls', u.calls, 'refunds', u.refunds,
+                 'in_tokens', u.in_tokens, 'out_tokens', u.out_tokens))
+          from public.usage_daily u where u.account_id = d.account_id and u.day = d.day) as usage_by_kind,
+       (select jsonb_object_agg(t.tier, t.n)
+          from (select j.tier, count(*) as n from public.judgments j
+                 where j.account_id = d.account_id and (j.judged_at at time zone 'utc')::date = d.day
+                 group by j.tier) t) as judgments_by_tier,
+       (select jsonb_object_agg(p.phase, p.n)
+          from (select m.phase, count(*) as n from public.mail_seen m
+                 where m.account_id = d.account_id and (m.seen_at at time zone 'utc')::date = d.day
+                 group by m.phase) p) as mail_by_phase,
+       (select count(*) from public.gmail_seen s
+         where s.account_id = d.account_id and (s.seen_at at time zone 'utc')::date = d.day) as gmail_messages,
+       (select jsonb_object_agg(r.route, r.calls)
+          from public.route_daily r where r.account_id = d.account_id and r.day = d.day) as calls_by_route
+  from (select u.account_id, u.day from public.usage_daily u
+        union select j.account_id, (j.judged_at at time zone 'utc')::date from public.judgments j
+        union select m.account_id, (m.seen_at at time zone 'utc')::date from public.mail_seen m
+        union select s.account_id, (s.seen_at at time zone 'utc')::date from public.gmail_seen s
+        union select r.account_id, r.day from public.route_daily r) d
+ where d.account_id in (select g.account_id from public.comp_grants g);
+
+-- Per tester per month: est_usd is monthly_spend's own usd, summed over its rows for the account and
+-- month (it gives one row per price pair), so the dollars are the budget guard's, at today's pin and
+-- labelled an estimate. One total row per month (is_total, account_id null) sums the testers. A
+-- budget_alerts row shows on its tester's month; enforce_budget raises one only once that month has
+-- spend, so the left join from the spend rows misses none it writes.
+create view admin.tester_spend_monthly as
+select x.account_id, x.month, x.is_total, x.est_usd, b.usd as alert_usd, b.raised_at as alert_raised_at
+  from (select ms.account_id, ms.month::date as month, grouping(ms.account_id) = 1 as is_total,
+               sum(ms.usd) as est_usd
+          from public.monthly_spend ms
+         where ms.account_id in (select g.account_id from public.comp_grants g)
+         group by grouping sets ((ms.month::date, ms.account_id), (ms.month::date))) x
+  left join public.budget_alerts b on b.account_id = x.account_id and b.month = x.month;
+
+-- Owner rights; the admin schema is already closed to every API role, and so are these views.
+revoke all on admin.tester_usage_daily from public, anon, authenticated, service_role;
+revoke all on admin.tester_spend_monthly from public, anon, authenticated, service_role;

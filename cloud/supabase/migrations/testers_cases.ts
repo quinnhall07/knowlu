@@ -273,3 +273,73 @@ export const ROUTE_CASES: RouteCase[] = [
     calls: { "judge-task": 2 },
   },
 ];
+
+// S2e2's V rows (§5, §9; the controller's ruling of 2026-10-20 on est_usd, option (b)): the two cost
+// views. Each case seeds `usage_daily` rows in a month of its own in 2025, before any real usage, so
+// no case and no real tester reaches another's totals. `prices` is the per-kind pin (dollars per
+// million tokens) the staging script sets inside its rolled-back transaction, so each expected dollar
+// figure is a hand-computed sum, never read back from the pin it tests. Months are first days (UTC).
+export interface UsageSeed {
+  account: number;
+  day: string;
+  kind: string;
+  calls: number;
+  refunds: number;
+  inTokens: number;
+  outTokens: number;
+}
+/** One `admin.tester_spend_monthly` row: a tester's month, or (`"total"`) the month's total row. */
+export interface SpendRow {
+  account: number | "total";
+  month: string;
+  estUsd: number;
+  alertUsd: number | null;
+}
+export interface SpendCase {
+  id: string;
+  given: string;
+  accounts: Account[];
+  grants: Grant[];
+  prices: Record<string, { in: number; out: number }>;
+  usage: UsageSeed[];
+  /** `budget_alerts` rows seeded beside the usage. */
+  alerts?: Array<{ account: number; month: string; usd: number }>;
+  /** `admin.tester_usage_daily`: per account, its row count (one per day it has any); each row's
+   * `usage_by_kind` holds that day's seeded calls, refunds and token counts exactly. */
+  usageDays: number[];
+  /** `admin.tester_spend_monthly` at the end, the testers' rows then each month's total row. */
+  spend: SpendRow[];
+}
+
+const seed = (account: number, day: string, kind: string, calls: number, refunds: number, inTokens: number, outTokens: number): UsageSeed => ({
+  account, day, kind, calls, refunds, inTokens, outTokens,
+});
+
+export const SPEND_CASES: SpendCase[] = [
+  {
+    // Two kinds at two prices, so monthly_spend gives two rows for the month and the view sums them.
+    id: "V1", given: "seeded usage_daily rows at known token counts: est_usd is the hand-computed sum; the daily view shows the counts",
+    accounts: signedUp("v1"), grants: [{ account: 0, endsIn: 30 }],
+    prices: { task: { in: 1, out: 5 }, mail_claim: { in: 0.5, out: 2 } },
+    usage: [
+      seed(0, "2025-01-06", "task", 4, 1, 1_000_000, 200_000),
+      seed(0, "2025-01-06", "mail_claim", 2, 0, 400_000, 100_000),
+      seed(0, "2025-01-20", "task", 1, 0, 300_000, 60_000),
+    ],
+    usageDays: [2],
+    spend: [{ account: 0, month: "2025-01-01", estUsd: 3, alertUsd: null }, { account: "total", month: "2025-01-01", estUsd: 3, alertUsd: null }],
+  },
+  {
+    id: "V2", given: "two testers, one with a budget_alerts row: the total row is the sum of the two; the alert shows on its month",
+    accounts: signedUp("v2", 2), grants: [{ account: 0, endsIn: 30 }, { account: 1, endsIn: 30 }],
+    prices: { task: { in: 1, out: 5 } },
+    usage: [seed(0, "2025-02-03", "task", 1, 0, 1_000_000, 0), seed(1, "2025-02-04", "task", 3, 0, 0, 400_000)],
+    alerts: [{ account: 1, month: "2025-02-01", usd: 2 }],
+    usageDays: [1, 1],
+    spend: [
+      { account: 0, month: "2025-02-01", estUsd: 1, alertUsd: null },
+      { account: 1, month: "2025-02-01", estUsd: 2, alertUsd: 2 },
+      { account: "total", month: "2025-02-01", estUsd: 3, alertUsd: null },
+    ],
+  },
+];
