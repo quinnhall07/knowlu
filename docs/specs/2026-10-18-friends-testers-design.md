@@ -87,6 +87,14 @@ that S1 does not touch stands as signed.
   C1b to close password sign-up, and whether a best-effort amr check (2b) is wanted (recommended:
   no).
 
+**2026-10-20, S2-S4R fixups (`b4fdb9f`):** `comp_grants` and `comp_audit` are `revoke all` then
+`grant select` to `service_role`, literally select-only (REFERENCES, TRIGGER and MAINTAIN dropped).
+§3.5, §6 and §9 quote S2a's SQL as `revoke insert, update, delete, truncate … from service_role`; that
+signed text stands, and this line records what the migration does.
+**2026-10-20, restamp (C1):** the email cloud follow-ups landed `20261020000400` first, so L8's
+migration, applied nowhere, is renamed `20261020000300_testers.sql` → `20261020000500_testers.sql`
+(M2, M4: tests find it by suffix; the stamp line under the amendment above stands as signed).
+
 **Status: Signed by Quinn, 2026-10-19** (tester names still to come). **The Amendment 2026-10-20
 above is signed by Quinn's re-read of Q1, Q7 and §8.3, 2026-10-20.** S2a and later tasks may be dispatched. Lane L8 of the friends-MVP push
 (`.superpowers/handoffs/2026-10-18-START-HERE-session-5-mvp.md` §5). Authority: Quinn's rulings of
