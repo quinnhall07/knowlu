@@ -854,7 +854,7 @@ fn propose_feed_value(
     let front = Node::map(vec![
         ("type", Node::text("approval")),
         ("kind", Node::text("amend")),
-        ("title", Node::text(&format!("Blackboard changed {field} for {title}"))),
+        ("title", Node::text(&format!("Your course feed changed {field} for {title}"))),
         ("status", Node::text("pending")),
         ("target", Node::text(target_rel)),
         ("proposed_at", Node::Date(today)),
@@ -864,7 +864,7 @@ fn propose_feed_value(
         ("created_by", Node::text(crate::approvals::TITLE_CARD_CREATOR)),
         ("changes", Node::Map(vec![(Node::text(field), change)])),
     ]);
-    let why = format!("Blackboard now says {to}; you set {from_text} by hand, so this is a proposal");
+    let why = format!("Your course feed now says {to}; you set {from_text} by hand, so this is a proposal");
     let text = format!(
         "---\n{}---\n\n**Why proposed:** {why}\n{}",
         crate::yamlemit::safe_dump_block(&front),
@@ -1936,6 +1936,23 @@ mod tests {
             assert_eq!(files(&v, "approvals"), ["amend-task-hw-01-title.md"]);
         }
 
+        /// Pre-PR review finding feed-source (2026-10-20): every ICS feed reaches the card writer,
+        /// Canvas feeds included, and the engine does not know which LMS a feed comes from. The
+        /// card's text must name no LMS; `created_by` stays the shipped `blackboard` token that
+        /// `approvals.rs` accepts a title amendment on.
+        #[test]
+        fn a_feed_card_names_no_lms_and_keeps_its_creator() {
+            let v = made();
+            by_hand(&v, NOTE, "due", "2026-09-18T23:59");
+            by_hand(&v, NOTE, "title", "\"HW 01 (mine)\"");
+            run(&v, &[ev("bb:1", "HW 01 revised", dt(2026, 9, 16))], &[]);
+            for card in [CARD, "approvals/amend-task-hw-01-title.md"] {
+                let text = pystr::read_text(&v.join(card)).unwrap();
+                assert!(!text.replace("created_by: blackboard", "").to_lowercase().contains("blackboard"), "{card}: {text}");
+                assert_eq!(get(&v, card, "created_by").as_deref(), Some(crate::approvals::TITLE_CARD_CREATOR));
+            }
+        }
+
         /// Spec test 31b and plan P12: the card is in the shape `approvals::validate_amendment`
         /// accepts, `created_by: blackboard` with no `source_uid` and no judgment fields, pending
         /// from the run's day, with its own "Why proposed" line, never the text "re-judged".
@@ -1950,10 +1967,10 @@ mod tests {
             let id = get(&v, CARD, "id").unwrap();
             assert!(crate::ids::is_id(&id) && id.starts_with("appr_"), "{id}");
             let want = format!(
-                "---\ntype: approval\nkind: amend\ntitle: Blackboard changed due for HW 01\nstatus: pending\n\
+                "---\ntype: approval\nkind: amend\ntitle: Your course feed changed due for HW 01\nstatus: pending\n\
                  target: tasks/task-hw-01.md\nproposed_at: 2026-08-28\nfirst_proposed_at: 2026-08-28\nexpires: null\n\
                  snooze_until: null\ncreated_by: blackboard\nchanges:\n  due:\n    from: 2026-09-18T23:59\n    to: 2026-09-16T23:59\n\
-                 id: {id}\n---\n\n**Why proposed:** Blackboard now says 2026-09-16T23:59; you set 2026-09-18T23:59 by hand, \
+                 id: {id}\n---\n\n**Why proposed:** Your course feed now says 2026-09-16T23:59; you set 2026-09-18T23:59 by hand, \
                  so this is a proposal\n{}",
                 crate::write::AMEND_BUTTONS
             );
