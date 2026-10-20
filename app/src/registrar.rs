@@ -45,8 +45,9 @@ pub fn call_urls(reg: &Registrar, term: &str) -> Vec<(String, String, Option<Str
         .collect()
 }
 
-/// `--via dashboard`, and `--actor` keeps the engine's default, `quinn`: the R24 notes are the
-/// student's (spec §3, Plan ruling R3-c), as `week::confirm_argv`'s are.
+/// `--via dashboard`, and no `--actor`: the engine writes R24's notes as the vault's human token
+/// (`config/actor.yaml`, ruling 11). They are the student's (spec §3, Plan ruling R3-c), as
+/// `week::confirm_argv`'s are.
 pub fn registrar_argv(vault: &Path, file: &Path, school: &str, today: Date) -> Vec<String> {
     vec![
         "commitments".into(), "--vault".into(), vault.to_string_lossy().into_owned(),

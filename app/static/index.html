@@ -53,6 +53,7 @@
         <div class="meter-key" id="meterkey"></div>
         <p class="overflow" id="overflow"></p>
       </div>
+      <div class="sec grades" id="grades" hidden></div>
       <div class="sec"><div class="sec-hd"><h2>Must do</h2><span class="n" id="mustdo-n"></span><button class="b" id="newtask">+ task</button></div><div id="mustdo"></div></div>
       <div class="sec"><div class="sec-hd"><h2>Recommended</h2><span class="n" id="recommended-n"></span></div><div id="recommended"></div></div>
     </div>
@@ -85,7 +86,7 @@
   <aside>
     <section class="rblock"><div class="rail-hd"><h2>Decisions</h2><span class="n" id="dcount"></span></div><div class="deck" id="deck"></div><div class="deck-foot"><span id="deckrest"></span><span class="adv" id="deckhint"></span></div></section>
     <section class="rblock"><div class="rail-hd"><h2>Ahead</h2><span class="n">hours due per day</span></div><div class="ribbon" id="ribbon"></div><div class="ribbon-ax" id="ribbonax"></div><div class="ahead-note" id="aheadnote"></div></section>
-    <section class="rblock" id="coming-up"><div class="rail-hd"><h2>Coming up</h2><span class="n" id="cu-n"></span></div><div id="cu"></div></section>
+    <section class="rblock" id="coming-up"><div class="rail-hd"><h2>Coming up</h2><span class="n" id="cu-n"></span></div><div id="cu"></div><div id="cu-ns"></div></section>
     <section class="rblock"><div class="rail-hd"><h2>Good to know</h2><span class="n" id="gtk-n"></span></div><div id="gtk"></div></section>
     <section class="rblock"><div class="rail-hd"><h2>Closed this week</h2><span class="n" id="closed-n"></span></div><div id="closed"></div></section>
     <section class="rblock"><div class="rail-hd"><h2>Runs</h2><span class="n" id="runs-n"></span></div><div id="runs"></div></section>
@@ -133,6 +134,11 @@
     <div class="wiz-row"><button class="b pri y" id="wiz-sub-month">Start the trial &mdash; $9.99/month</button><button class="b" id="wiz-sub-year">$69.99 / academic year</button></div>
     <p class="meta" id="wiz-sub-note"></p>
   </div>
+  <div class="wiz-panel" id="wiz-mail" hidden><h2>Next: connect your school email</h2>
+    <p class="lede">Knowlu sets up forwarding from your school mailbox, reads what arrives for things you have to do, and proposes each one for you to approve. It starts when Knowlu first opens.</p>
+    <div class="wiz-row"><button class="b" id="wiz-mail-notnow">Not now</button><span class="meta" id="wiz-mail-note"></span></div>
+    <p class="meta">If your school's rules don't allow forwarding your school email, skip this.</p>
+  </div>
   <div class="wiz-panel" id="wiz-vault" hidden><h2>Name this setup</h2>
     <p class="lede">Knowlu keeps your work as plain files you can open, copy and take with you.</p>
     <div class="wiz-row"><input type="text" id="wiz-name" placeholder="Name"></div>
@@ -177,8 +183,10 @@
     </div>
   </div>
   <div class="wiz-panel" id="wiz-gmail" hidden><h2>Gmail</h2>
-    <p class="lede">Knowlu can read your inbox for things you have to do, and propose them.</p>
-    <p class="meta">Not yet: Google is still reviewing our request for this, so today it works for a handful of named test users only, and those users have to re-connect every week. When the review is done this step will connect in one click. Skip it for now.</p>
+    <p class="lede">Knowlu can read your Gmail for things you have to do and propose each one for you to approve. You can skip this and connect later in Settings.</p>
+    <p class="meta">While Google reviews Knowlu, this works only for invited testers, and the connection needs renewing about once a week.</p>
+    <div class="wiz-row"><button class="b" id="wiz-gmail-connect">Connect Gmail directly (Google testers only)</button></div>
+    <p class="meta" id="wiz-gmail-note"></p>
   </div>
   <div class="wiz-panel" id="wiz-slots" hidden><h2>When should Knowlu look?</h2>
     <div class="wiz-row"><input type="text" id="wiz-tz" placeholder="Timezone"><input type="text" id="wiz-slot1" placeholder="12:00"><input type="text" id="wiz-slot2" placeholder="18:00"></div>
@@ -199,10 +207,47 @@
   <div class="set-row" id="set-autostart"><span class="k">Start with Windows</span><input type="checkbox" id="set-autostart-in"></div>
   <div class="set-row" id="set-updates"><span class="k">Updates</span><span class="meta" id="set-update-state"></span><button class="b" id="set-update-check">Check now</button></div>
   <div class="set-row" id="set-account"><span class="k">Account</span><span class="meta" id="set-account-state"></span><button class="b" id="set-portal">Manage subscription</button></div>
+  <div class="set-row" id="set-google" hidden><span class="k">Google</span><span class="meta" id="set-google-state"></span><button class="b" id="set-google-retry" hidden>Try again</button> <button class="b" id="set-google-check" hidden>Check again</button><button class="b" id="set-google-connect" hidden>Connect Gmail</button><button class="b" id="set-google-reconnect" hidden>Reconnect</button><button class="b" id="set-google-disconnect-1" hidden>Disconnect Google</button><button class="b crit" id="set-google-disconnect-2" hidden>Yes, disconnect</button><span class="meta" id="set-google-note"></span></div>
+  <div class="set-row" id="set-email"><span class="k">Email</span><span class="meta" id="set-email-state"></span><button class="b" id="set-email-open" hidden>Show progress</button><button class="b" id="set-email-start" hidden>Connect school email</button><button class="b" id="set-email-applied">From your email</button></div>
+  <div class="set-sec" id="set-email-boxes"></div>
+  <div class="set-row" id="set-email-keeprow"><span class="k">Email sign-in</span><label class="meta"><input type="checkbox" id="set-email-keep"> Keep my email sign-in saved on this computer so Knowlu can check forwarding</label><span class="meta" id="set-email-keep-note"></span></div>
+  <div class="set-row" id="set-email-profile" hidden><span class="k"></span><span class="meta em-amber" id="set-email-profile-note"></span></div>
+  <div class="set-row" id="set-grades"><span class="k">Blackboard sign-in</span><span class="meta" id="set-grades-note"></span><button class="b" id="set-grades-forget">Forget Blackboard sign-in</button></div>
+  <div class="set-row" id="set-grades-hide"><span class="k">Hide grades</span><input type="checkbox" id="set-grades-hide-in"></div>
+  <div class="set-sec" id="set-prefs-sec"><h3>Your preferences</h3>
+    <div class="set-row" id="set-prefs"><span class="k">How you like to work</span>
+      <textarea id="set-prefs-ta" rows="5"></textarea>
+      <span class="meta" id="set-prefs-count"></span>
+      <button class="b" id="set-prefs-save">Save</button><button class="b" id="set-prefs-cancel">Cancel</button>
+      <p class="meta set-prefs-copy">Knowlu&rsquo;s judge reads the first 600 characters of this when it sizes up a task. They are sent for that one call, and neither we nor the model&rsquo;s host keep them. Otherwise this stays on this computer.</p>
+    </div>
+    <div class="set-row" id="set-ints"><span class="k">Campus events</span>
+      <label class="set-int">Always show me<textarea id="set-int-strong" rows="3"></textarea></label>
+      <label class="set-int">Maybe<textarea id="set-int-mild" rows="3"></textarea></label>
+      <label class="set-int">Never show me<textarea id="set-int-never" rows="3"></textarea></label>
+      <label class="set-int">Clubs I&rsquo;m in<textarea id="set-int-clubs" rows="3"></textarea></label>
+      <button class="b" id="set-int-save">Save</button><button class="b" id="set-int-cancel">Cancel</button>
+      <p class="meta set-prefs-copy" id="set-int-note">One item per line. Knowlu uses these to choose which campus events to show you. The first 600 characters also go to its judge with each event it judges, for that one call, and neither we nor the model&rsquo;s host keep them. Otherwise these lists stay on this computer.</p>
+    </div>
+  </div>
   <div class="set-row" id="set-report"><span class="k">Problems</span><button class="b" id="set-report-go">Report an issue</button></div>
   <div class="set-row" id="set-delete"><span class="k">Delete my data</span><span class="meta" id="set-delete-note"></span><button class="b" id="set-delete-1">Delete everything</button><button class="b crit" id="set-delete-2" hidden>Yes, delete it all</button></div>
   <div class="set-row" id="set-judge"><span class="k">Local judgment</span><span class="meta" id="set-judge-state"></span><button class="b" id="set-judge-download">Download</button><button class="b" id="set-judge-file">Install from a file&hellip;</button><button class="b" id="set-judge-remove" hidden>Remove model</button></div>
   <div class="set-row" id="set-diag"><span class="k">Diagnostics</span><button class="b" id="set-diag-copy">Copy diagnostics</button><span class="meta" id="set-diag-note"></span></div>
+</aside>
+<aside class="setpanel" id="mail-applied" hidden>
+  <div class="set-hd"><h2>From your email</h2><button class="b" id="ma-close">Close</button></div>
+  <div id="ma-body"></div>
+</aside>
+<aside class="setpanel" id="mail-progress" hidden>
+  <div class="set-hd"><h2>Connecting your email</h2><button class="b" id="mp-leave">Leave</button></div>
+  <p class="meta" id="mp-sentence"></p>
+  <div id="mp-rows"></div>
+  <p class="meta" id="mp-backfill"></p>
+  <div class="set-row"><button class="b" id="mp-applied">See what came from your email</button></div>
+  <div id="mp-ask"></div>
+  <p class="meta" id="mp-end"></p>
+  <div class="set-row"><button class="b" id="mp-stop">Stop</button></div>
 </aside>
 <aside class="setpanel" id="report" hidden>
   <div class="set-hd"><h2>Report an issue</h2><button class="b" id="report-cancel">Close</button></div>

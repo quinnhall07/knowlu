@@ -24,9 +24,9 @@ export const MAX_PUSH_BYTES = 4194304;
 const DEVICE_RE = /^[0-9a-f]{16}$/;
 const HASH_RE = /^[0-9a-f]{64}$/;
 /** The same rule `engine/src/sync.rs::is_note_path` enforces and the same one the column checks:
- * one of `ids::NOTE_FOLDERS` (in its order; `commitments` since the commitment model's phase 1s),
- * markdown, no `..` segment and no empty segment. */
-export const NOTE_PATH_RE = /^(tasks|approvals|archive|courses|issues|info|commitments)\/[A-Za-z0-9._ /-]{1,300}\.md$/;
+ * one of `ids::NOTE_FOLDERS` (in its order; `commitments` since the commitment model's phase 1s,
+ * `grades` since grades spec §7), markdown, no `..` segment and no empty segment. */
+export const NOTE_PATH_RE = /^(tasks|approvals|archive|courses|issues|info|commitments|grades)\/[A-Za-z0-9._ /-]{1,300}\.md$/;
 
 export function isDeviceToken(x: unknown): boolean {
   return typeof x === "string" && DEVICE_RE.test(x);

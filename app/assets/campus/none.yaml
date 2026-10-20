@@ -1,2 +1,4 @@
 # No campus preset. Event discovery is off; add sources here to turn it on.
+# Switches on the event cards (accept/decline proposals for campus events).
+event_cards: true
 sources: []

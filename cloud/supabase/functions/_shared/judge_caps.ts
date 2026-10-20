@@ -1,8 +1,14 @@
 import type { Db } from "./judge_db.ts";
-import type { Kind } from "./judge_validate.ts";
+import type { Kind, MailKind } from "./judge_validate.ts";
 
 export interface CapStore {
   charge(account: string, kind: Kind): Promise<boolean>;
+  /** Gives back the call `charge` counted, after a call the model never answered (F1, live proof
+   *  2026-10-02). Never throws. Also counts one more consecutive failure toward `tripped`. */
+  refund(account: string, kind: Kind): Promise<void>;
+  /** True once `BREAKER_FAILURES` calls in a row failed in this store's life (one invocation) with
+   *  no reply between: the pipeline then stops sending and answers `model failed` uncharged. */
+  tripped(): boolean;
   withinBudget(account: string): Promise<boolean>;
   recordTokens(account: string, kind: Kind, inTokens: number, outTokens: number): Promise<void>;
 }
@@ -39,6 +45,16 @@ export interface CapStore {
 export const DAILY_CAP: Record<Kind, number> = { task: 60, event: 80, email: 120 };
 
 /**
+ * The mail kinds' daily caps (email spec §5.1, plan P6): their own record, keyed by `MailKind`, so
+ * `DAILY_CAP` and every `Record<Kind, …>` stay as they were. `mail_claim` starts at email's 120 and
+ * charges only `live` and `recover` items; a `backfill` item charges the account's allowance instead
+ * (D23), never this cap. `mail_resolve` is one call per course batch of ambiguous claims (D12), so 20
+ * a day is many backfills' worth. `mail_digest` is 0 until the optional digest (plan T16) is built and
+ * sets its own number: a cap of 0 refuses every call, so an unbuilt kind can never spend.
+ */
+export const MAIL_DAILY_CAP: Record<MailKind, number> = { mail_claim: 120, mail_resolve: 20, mail_digest: 0 };
+
+/**
  * The enforced monthly ceiling per account, in dollars. The provider swap (Quinn's ruling of
  * 2026-09-16 on R8, option 1) re-pinned all three kinds off Haiku 4.5 ($1.00/$5.00 per MTok) onto
  * OpenRouter: Granite 4.2 8B for task/event at $0.10/$0.15, Qwen3.5-35B-A3B for email at
@@ -59,10 +75,20 @@ export const DAILY_CAP: Record<Kind, number> = { task: 60, event: 80, email: 120
  */
 export const MONTHLY_CEILING_USD = 2.0;
 
+/**
+ * F1 (live proof 2026-10-02): how many model calls in a row may fail inside one invocation before
+ * the rest of it stops sending. Only `gmail-read` judges many items in one invocation; for it, a
+ * dead key or an upstream outage ends the round's model calls after three, not after every email
+ * on the list. Each `judge-*` request is its own invocation and its own store, so across requests
+ * the bound on a failing loop is `refund_call`'s daily refund allowance instead.
+ */
+export const BREAKER_FAILURES = 3;
+
 export function capStore(db: Db): CapStore {
   // One budget check per account per invocation is enough: an edge function handles one request,
   // and `gmail-read` (Task 11) is the only caller that judges many items in one — it memoises.
   const budget = new Map<string, boolean>();
+  let failures = 0;
   return {
     async charge(account, kind) {
       // One statement (`charge_call`), so two concurrent calls cannot both read `calls` below the
@@ -74,6 +100,20 @@ export function capStore(db: Db): CapStore {
       } catch {
         return false;
       }
+    },
+    async refund(account, kind) {
+      failures += 1;
+      // Never throws: a refund that cannot land leaves the call charged, which is exactly the
+      // pre-F1 behaviour — recoverable, and never an uncapped loop. `refund_call` bounds itself
+      // (migration `20261002000100`), so this needs no bound of its own.
+      try {
+        await db.rpc("refund_call", { p_account: account, p_kind: kind, p_cap: DAILY_CAP[kind] });
+      } catch {
+        // Counted nowhere on purpose, as `recordTokens` below.
+      }
+    },
+    tripped() {
+      return failures >= BREAKER_FAILURES;
     },
     async withinBudget(account) {
       const cached = budget.get(account);
@@ -88,6 +128,8 @@ export function capStore(db: Db): CapStore {
       return ok;
     },
     async recordTokens(account, kind, inTokens, outTokens) {
+      // A reply arrived, so the provider is answering: the breaker's streak starts again.
+      failures = 0;
       // Never throws: the tokens are the bill's record, and a failure to write them must not lose
       // a judgment that already happened.
       try {

@@ -196,8 +196,8 @@ fn campus_list() -> &'static [(u64, String, String, String)] {
 /// name (it is *The* University of Alabama) still gets there. Under two characters is no answer at
 /// all: one letter matches a thousand schools and none of them usefully.
 ///
-/// Returns `[unitid, name, city, state]` per hit — the host is in the asset and is not shown, so it
-/// does not cross the IPC either.
+/// Returns `[unitid, name, city, state, lms]` per hit — `lms` is the curated kind or `""`; the host
+/// is in the asset and is not shown, so it does not cross the IPC either.
 #[tauri::command]
 pub fn campus_search(query: String) -> Value {
     let needle = query.trim().to_lowercase();
@@ -210,7 +210,13 @@ pub fn campus_search(query: String) -> Value {
             format!("{name} {city} {state}").to_lowercase().contains(&needle)
         })
         .take(10)
-        .map(|(id, name, city, state)| json!([id, name, city, state]))
+        .map(|(id, name, city, state)| {
+            // The curated LMS kind, "" for a school nobody has curated: the wizard pre-answers its
+            // "which LMS?" question from this and asks only when it is empty. Read from the curated
+            // table, never named here.
+            let lms = crate::scaffold::curated(&id.to_string()).map(|c| c.lms_kind).unwrap_or("");
+            json!([id, name, city, state, lms])
+        })
         .collect();
     json!({ "ok": true, "error": Value::Null, "hits": hits })
 }
@@ -281,6 +287,12 @@ pub fn offer_marker(profile_dir: &Path) -> PathBuf {
     profile_dir.join("offer-inference")
 }
 
+/// The wizard's *forward my school mail after setup* marker: a file beside [`offer_marker`], for the
+/// same reason (never a `Settings` field), set from `offer_mail` on the same three finishing paths.
+pub fn mail_offer_marker(profile_dir: &Path) -> PathBuf {
+    profile_dir.join("offer-mail")
+}
+
 /// Drop or clear the marker for one profile folder, from whichever of the three finishing paths
 /// got here — CREATE and RESTORE go through [`finish_profile_in`], ADOPT through
 /// [`apply_profile_settings`], and the finish panel's checkbox is the same element on all three
@@ -294,6 +306,15 @@ fn set_offer_marker(dir: &Path, offer: bool) {
         let _ = std::fs::write(offer_marker(dir), b"");
     } else {
         let _ = std::fs::remove_file(offer_marker(dir));
+    }
+}
+
+/// [`set_offer_marker`] for the mail offer.
+fn set_mail_offer_marker(dir: &Path, offer: bool) {
+    if offer {
+        let _ = std::fs::write(mail_offer_marker(dir), b"");
+    } else {
+        let _ = std::fs::remove_file(mail_offer_marker(dir));
     }
 }
 
@@ -467,6 +488,9 @@ pub struct WizardPlan {
     /// only drops a marker the console reads once on its first launch.
     #[serde(default)]
     pub offer_inference: bool,
+    /// The finish panel's *Forward my school mail* offer; like `offer_inference`, a marker only.
+    #[serde(default)]
+    pub offer_mail: bool,
     #[serde(default)]
     pub zybooks_courses: Vec<crate::scaffold::BookMapping>,
     #[serde(default)]
@@ -566,6 +590,47 @@ fn normalize_personal_calendar(raw: &str) -> Result<Option<String>, String> {
     Ok(Some(rewritten))
 }
 
+/// Ruling 11 (plan D6): **the token this account already carries**, read from its journal before the
+/// wizard writes `config/actor.yaml` or any human record — [`journal::LEGACY_HUMAN_ACTOR`] if any
+/// record there is by it, otherwise [`journal::HUMAN_ACTOR`] (including an account with no human
+/// record, or no record at all). Never a new one, so one account writes one token.
+///
+/// Pages `sync::pull` under the pending session (the wizard signed in under
+/// `account::PENDING_TARGET`, and there is no vault yet to hold a `cloud.yaml`), with the same stall
+/// guard as `sync::restore_all`, and stops at the first legacy record. Nothing it reads is written
+/// anywhere — `restore_into` does the real pull. `Err` is a closed-set word naming why the account
+/// could not be read; the bearer is never in it (`CloudClient` scrubs its own errors).
+///
+/// [`journal::LEGACY_HUMAN_ACTOR`]: knowlu_engine::journal::LEGACY_HUMAN_ACTOR
+/// [`journal::HUMAN_ACTOR`]: knowlu_engine::journal::HUMAN_ACTOR
+fn account_human_actor(account_id: &str) -> Result<&'static str, String> {
+    use knowlu_engine::journal::{pick_human_actor, HUMAN_ACTOR, LEGACY_HUMAN_ACTOR};
+    let api = crate::account::api_base();
+    let auth = crate::account::auth_base(&api)?;
+    let target = crate::account::PENDING_TARGET;
+    let token = crate::account::valid_access_token_at(&auth, &crate::account::anon_key(), target, jiff::Timestamp::now().as_second())?;
+    let cfg = knowlu_engine::cloudmodel::CloudConfig {
+        api_base: api.trim_end_matches('/').to_string(),
+        anon_key: crate::account::anon_key(),
+        session_credential_target: target.to_string(),
+        account_id: account_id.to_string(),
+    };
+    let client = knowlu_engine::cloudmodel::CloudClient::new(&cfg, &token);
+    let (mut records_after, mut notes_after) = (0i64, 0i64);
+    loop {
+        let page = knowlu_engine::sync::pull(&client, records_after, notes_after).map_err(|e| e.label())?;
+        if pick_human_actor(page.records.iter().map(|(_, r)| r)) == LEGACY_HUMAN_ACTOR {
+            return Ok(LEGACY_HUMAN_ACTOR);
+        }
+        // `restore_all`'s own guard: a page that moved neither cursor would loop for ever.
+        let stalled = page.record_cursor == records_after && page.note_cursor == notes_after;
+        (records_after, notes_after) = (page.record_cursor, page.note_cursor);
+        if !page.more || stalled {
+            return Ok(HUMAN_ACTOR);
+        }
+    }
+}
+
 /// *Finish* for a new vault. Scaffold+seed (one atomic `create_vault`) → the session moves onto this
 /// profile → settings → register.
 ///
@@ -590,6 +655,19 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
     let account_id = match crate::account::load_session(crate::account::PENDING_TARGET) {
         Ok((id, _)) => id,
         Err(_) => return json!({ "ok": false, "error": "sign in again — the account this wizard signed in with is no longer on this machine", "profile": Value::Null }),
+    };
+    // Ruling 11 (plan D6): the vault's human token is decided HERE — before `scaffold::create_vault`
+    // writes `config/actor.yaml` and the seeds as it, and before anything is on disk. An account the
+    // wizard cannot read refuses Finish (plan Q1): a guessed `student` on an account whose journal
+    // already says `quinn` would give one account two tokens. Nothing is made and the pending
+    // session stays where it is, so pressing Finish again is the whole retry.
+    let human_actor = match account_human_actor(&account_id) {
+        Ok(token) => token,
+        Err(why) => return json!({
+            "ok": false,
+            "error": format!("Knowlu could not reach your account to check for an existing vault ({why}); check the connection and press Finish again"),
+            "profile": Value::Null,
+        }),
     };
     // **The page sends a course CODE and a label; the slug is made here, from the code — never the
     // label** (review round 1, I3). `CS 100` is what `suggest_course` proposed and the student
@@ -675,6 +753,7 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
         api_base: crate::account::api_base(),
         anon_key: crate::account::anon_key(),
         account_id,
+        human_actor,
     };
     if let Err(e) = crate::scaffold::create_vault(&dest, &vp) {
         return json!({ "ok": false, "error": e, "profile": Value::Null });
@@ -835,6 +914,7 @@ pub fn apply_profile_settings_in(root: &Path, id: &str, plan: &WizardPlan, backu
     match settings.save(&dir.join("settings.json")) {
         Ok(()) => {
             set_offer_marker(&dir, plan.offer_inference);
+            set_mail_offer_marker(&dir, plan.offer_mail);
             json!({ "ok": true, "error": Value::Null })
         }
         Err(e) => json!({ "ok": false, "error": e }),
@@ -908,6 +988,7 @@ fn finish_profile_in(root: &Path, vault: &Path, name: Option<String>, plan: &Wiz
         return json!({ "ok": false, "error": format!("{}: {e}", path.display()), "profile": Value::Null });
     }
     set_offer_marker(&dir, plan.offer_inference);
+    set_mail_offer_marker(&dir, plan.offer_mail);
     let label = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| profiles::default_name(vault));
     match profiles::register(root, &label, vault) {
         Ok(p) => json!({ "ok": true, "error": Value::Null, "profile": serde_json::to_value(p).unwrap_or(Value::Null) }),

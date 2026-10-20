@@ -175,6 +175,9 @@ aside { border-left: 1px solid var(--hair); padding: var(--s5) var(--s5) var(--s
 .deck-foot .adv { margin-left: auto; }
 .card .t { font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; margin-bottom: var(--s1); }
 .card .w { color: var(--t3); font-size: 12.5px; margin-bottom: var(--s3); }
+.card .mail-from, .row.dec .mail-from { color: var(--t3); font-size: 12px; margin-top: var(--s2); overflow-wrap: anywhere; }
+.card .mail-quote, .row.dec .mail-quote { color: var(--t3); font-size: 12px; font-style: italic; margin-top: var(--s2); overflow-wrap: anywhere; }
+.card .w .src, .row.dec .why .src { color: var(--t4); margin-left: var(--s2); }
 .card .cf { display: flex; gap: var(--s2); align-items: flex-start; font-family: var(--mono); font-size: 10.5px; line-height: 1.55; color: var(--warn); background: var(--warn-dim); border-radius: var(--r1); padding: var(--s2); margin-bottom: var(--s3); }
 .acts { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
 button.b { font-family: var(--sans); font-size: 12.5px; font-weight: 500; border-radius: var(--r2); padding: 4px 10px; cursor: pointer; border: 1px solid var(--hair-2); background: var(--s2c); color: var(--t2); }
@@ -465,7 +468,7 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
    any author `display`) — so `[hidden]` alone would never hide it below 1180px, and `block` alone
    would let the breakpoint grid its rows apart when it is open. `.drawer` carries only the
    `[hidden]` half; it is not this rule's business to change that. */
-.setpanel { position: fixed; right: var(--s4); top: var(--s4); width: 420px; max-width: calc(100vw - 32px); background: var(--s2c); border: 1px solid var(--hair-2); border-radius: var(--r3); padding: var(--s4); z-index: 20; display: block; }
+.setpanel { position: fixed; right: var(--s4); top: var(--s4); width: 420px; max-width: calc(100vw - 32px); background: var(--s2c); border: 1px solid var(--hair-2); border-radius: var(--r3); padding: var(--s4); z-index: 20; display: block; max-height: calc(100vh - 2 * var(--s4)); overflow-y: auto; }
 .setpanel[hidden] { display: none; }
 .set-hd { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: var(--s3); }
 .set-hd h2 { margin: 0; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--t3); font-weight: 600; }
@@ -596,3 +599,81 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .ask-time input[type=time] { background: var(--s2c); color: var(--t1); border: 1px solid var(--hair-2); border-radius: var(--r1); padding: 2px var(--s2); font-family: var(--mono); margin-left: var(--s2); }
 .ask-err { color: var(--crit); font-size: 12px; margin-top: var(--s2); }
 .ask-err[hidden] { display: none; }
+
+/* ---- M1 grades (grades spec §2 and §9): the strip on Today, its rings and the read-only breakdown.
+   Five letter-family tokens, A to F. The console is a dark page, so `:root` carries the dark set; the
+   light set waits under a named theme for the day a light console exists (it is never applied by the
+   OS setting, which would paint light colours on a dark ground). ---- */
+:root {
+  --grade-a: #3FB68B;
+  --grade-b: #5AA9E0;
+  --grade-c: #D9A441;
+  --grade-d: #E08A4A;
+  --grade-f: #E0605A;
+}
+:root[data-theme="light"] {
+  --grade-a: #1F8F68;
+  --grade-b: #2678B5;
+  --grade-c: #A87A18;
+  --grade-d: #B85E1C;
+  --grade-f: #C0392F;
+}
+.grades .gs-rings { display: flex; flex-wrap: wrap; gap: var(--s3) var(--s5); padding: var(--s3) 0; }
+.gring { display: flex; align-items: center; gap: var(--s3); background: none; border: 0; padding: 0; color: inherit; font: inherit; cursor: pointer; text-align: left; }
+.gring:hover .gt b { color: var(--t1); }
+.ring { width: 44px; height: 44px; flex: none; }
+.ring circle { stroke-width: 3.6; }
+.ring .rt { stroke: var(--s3c); }
+.ring .rf { stroke: var(--t3); stroke-linecap: round; }
+.ring .rf.grade-a { stroke: var(--grade-a); } .ring .rf.grade-b { stroke: var(--grade-b); } .ring .rf.grade-c { stroke: var(--grade-c); }
+.ring .rf.grade-d { stroke: var(--grade-d); } .ring .rf.grade-f { stroke: var(--grade-f); }
+.gring .gt { display: flex; flex-direction: column; min-width: 0; }
+.gring .gt b { color: var(--t2); font-weight: 600; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gring .gt span { color: var(--t3); font: 500 11.5px/1.4 var(--mono); }
+.grades .gs-line { display: flex; gap: var(--s3); align-items: center; padding: var(--s2) 0; color: var(--t3); font-size: 12.5px; }
+.grades .gs-note, .drawer .gs-note { color: var(--t4); }
+.drawer .gcat { margin: var(--s4) 0 var(--s1); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--t3); font-weight: 600; }
+.drawer .grw { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 2px var(--s3); padding: var(--s1) 0; border-top: 1px solid var(--hair); font-size: 12.5px; color: var(--t2); }
+.drawer .grw .gn small { color: var(--t4); font-family: var(--mono); font-size: 10.5px; }
+.drawer .grw .gsc { font-family: var(--mono); color: var(--t1); text-align: right; }
+.drawer .grw .gst { font-family: var(--mono); font-size: 11px; color: var(--t3); min-width: 11ch; text-align: right; }
+.drawer .grw .gst.st-graded { color: var(--acc); }
+.drawer .grw .gdue { grid-column: 1 / -1; font-family: var(--mono); font-size: 10.5px; color: var(--t4); }
+.drawer .gd-foot { display: flex; gap: var(--s3); align-items: center; justify-content: space-between; margin-top: var(--s4); padding-top: var(--s3); border-top: 1px solid var(--hair); font-family: var(--mono); font-size: 11px; color: var(--t3); }
+.drawer .bodyed { margin-top: var(--s3); } .drawer .bodyta { width: 100%; box-sizing: border-box; min-height: 180px; background: var(--s2c); color: var(--t1); border: 1px solid var(--hair-2); border-radius: var(--r2); padding: var(--s2); font: inherit; font-size: 12.5px; resize: vertical; }
+.drawer .bodybtns { display: flex; gap: var(--s2); margin-top: var(--s2); }
+.savedtoast, .settoast, .lanetoast { position: fixed; bottom: var(--s4); right: var(--s4); z-index: 50; background: var(--s2c); color: var(--t1); border: 1px solid var(--hair-2); border-radius: var(--r2); padding: var(--s2) var(--s3); font-family: var(--mono); font-size: 11.5px; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+.drawer .bodyconf { margin-top: var(--s2); color: var(--crit); font-size: 11.5px; }
+#set-prefs-ta { flex: 1 1 100%; background: var(--s3c); border: 1px solid var(--hair-2); border-radius: var(--r1); color: var(--t1); padding: 4px 6px; font: inherit; }
+#set-prefs-count.over { color: var(--crit); }
+.set-prefs-copy { flex: 1 1 100%; }
+.prefsconf { flex: 1 1 100%; color: var(--crit); font-size: 11.5px; }
+.set-int { display: flex; flex-direction: column; gap: 2px; flex: 1 1 100%; color: var(--t3); font-size: 11.5px; }
+.set-int textarea { background: var(--s3c); border: 1px solid var(--hair-2); border-radius: var(--r1); color: var(--t1); padding: 4px 6px; font: inherit; }
+.intsconf { flex: 1 1 100%; color: var(--crit); font-size: 11.5px; }
+.set-sec h3 { margin: var(--s3) 0 0; color: var(--t2); font-size: 12px; }
+.notshown { margin-top: var(--s3); }
+.notshown summary { font-size: 12.5px; color: var(--t3); cursor: pointer; }
+/* T15.1 (email spec §4.5): the mail progress view. A `.setpanel`, so `[hidden]` is already handled. */
+.mp-row { display: flex; gap: var(--s2); align-items: baseline; padding: var(--s1) 0; border-top: 1px solid var(--hair); }
+.mp-row .mp-step { flex: 1 1 auto; color: var(--t2); }
+.mp-row .mp-state { color: var(--t4); font: 500 11px/1.4 var(--mono); }
+.mp-row.mp-working .mp-state { color: var(--acc); }
+.mp-row.mp-needs_you .mp-state, .mp-row.mp-failed .mp-state { color: var(--warn); }
+.mp-row .mp-why { flex-basis: 100%; color: var(--t3); font-size: 12px; }
+#mp-ask .set-row input[type="text"] { flex: 1 1 18ch; }
+/* T15.2 (email spec §4.12): Settings -> Email, one row per mailbox. */
+.em-box { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: baseline; padding: var(--s2) 0; border-top: 1px solid var(--hair); }
+.em-box .em-name { flex: 1 1 auto; color: var(--t2); }
+.em-box .em-line { flex-basis: 100%; color: var(--t3); font-size: 12px; }
+.em-box code { font: 500 11.5px/1.4 var(--mono); color: var(--t2); }
+.em-amber { color: var(--warn); }
+.em-box .em-confirm { flex-basis: 100%; color: var(--t2); font-size: 12px; }
+/* T15.4 (email spec §4.14): "From your email". A `.setpanel`. */
+.ma-course h3 { margin: var(--s3) 0 0; color: var(--t2); font-size: 12px; }
+.ma-course h4 { margin: var(--s2) 0 0; color: var(--t3); font-size: 11.5px; font-weight: 500; }
+.ma-row { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: baseline; padding: var(--s1) 0; border-top: 1px solid var(--hair); }
+.ma-row .ma-main { flex: 1 1 auto; color: var(--t2); }
+.ma-row .ma-from { flex-basis: 100%; color: var(--t3); font-size: 12px; }
+.ma-row .ma-since { color: var(--t4); font: 500 11px/1.4 var(--mono); }
+.ma-course summary { font-size: 12.5px; color: var(--t3); cursor: pointer; }

@@ -168,7 +168,10 @@ fn ci_jobs_run_self_hosted_only_behind_the_switch_and_release_never_does() {
 fn the_eval_gate_job_exists_is_pull_request_only_and_names_both_its_secrets() {
     let c = workflow("ci.yml");
     let job = job_block(&c, "eval-gate");
-    assert!(job.contains("if: github.event_name == 'pull_request'"), "eval-gate must run only on pull_request: {job}");
+    assert!(
+        job.contains("if: ${{ !cancelled() && github.event_name == 'pull_request' }}"),
+        "eval-gate must run only on pull_request: {job}"
+    );
     assert!(job.contains("secrets.OPENROUTER_API_KEY"), "eval-gate must reference secrets.OPENROUTER_API_KEY");
     assert!(
         job.contains("secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY"),
@@ -214,4 +217,170 @@ jobs:
 ";
     let job = job_block(last, "eval-gate");
     assert!(job.contains("if: github.event_name == 'pull_request'"), "eval-gate as the last job must still be read to EOF: {job:?}");
+}
+
+/// The docs-only deadlock: `paths-ignore` on the triggers meant a document-only PR never reported the
+/// three REQUIRED checks (branch protection names `test`, `cloud`, `eval-gate`), so it could never
+/// merge. The triggers now carry no path filter; a first `changes` job decides, with plain git, whether
+/// anything outside the document paths changed, and the heavy steps of the three required jobs skip
+/// on `needs.changes.outputs.code` while the jobs themselves always run and succeed. A job-level `if`
+/// that names `changes` (or any `if` on `test`/`cloud`) would skip the check again and reopen the
+/// deadlock; `eval-gate`'s one job-level `if` is its pull-request-only trigger and nothing else.
+///
+/// The gate must also never fail open (a skipped job reads as a pass to a required check). Two holes
+/// are closed here: `git diff --name-only` pairs a rename into one destination path, so a source file
+/// moved into `docs/` would read as a document-only change (`--no-renames` lists the deleted source
+/// too); and a failed `changes` job would skip every job that `needs` it. So each of the three jobs
+/// carries exactly one job-level `if`, `!cancelled()` (plus `eval-gate`'s pull-request trigger), which
+/// runs it even when `changes` failed, and every step condition reads `code != 'false'` or
+/// `code == 'false'`, never `== 'true'`, so a missing output runs everything.
+#[test]
+fn docs_only_changes_still_report_the_three_required_checks() {
+    let c = workflow("ci.yml");
+    assert!(!c.contains("paths-ignore"), "ci.yml must not use paths-ignore: a docs-only PR would never report the required checks");
+    let changes = job_block(&c, "changes");
+    assert!(changes.contains("git diff --no-renames --name-only"), "`changes` must decide with plain git and without rename detection: {changes}");
+    assert!(changes.contains("outputs:") && changes.contains("code:"), "`changes` must publish a `code` output: {changes}");
+    assert!(changes.contains("0000000000000000000000000000000000000000"), "`changes` must treat the zero before-sha as code changed");
+    for job in ["test", "cloud", "eval-gate"] {
+        let block = job_block(&c, job);
+        assert!(block.contains("changes"), "{job}: must depend on the `changes` job");
+        let job_ifs: Vec<&str> = block.lines().filter(|l| l.starts_with("    if:")).collect();
+        match job {
+            "eval-gate" => assert_eq!(
+                job_ifs,
+                ["    if: ${{ !cancelled() && github.event_name == 'pull_request' }}"],
+                "eval-gate's only job-level if is its trigger, behind !cancelled()"
+            ),
+            _ => assert_eq!(job_ifs, ["    if: ${{ !cancelled() }}"], "{job}: the only job-level if is !cancelled(), so a failed `changes` cannot skip it"),
+        }
+        assert!(!block.contains("outputs.code == 'true'"), "{job}: a step keyed on `== 'true'` fails open when `changes` fails: {block}");
+        assert!(!block.contains("code != 'true'"), "{job}: `!= 'true'` runs the no-op when the output is missing: {block}");
+        assert!(block.contains("needs.changes.outputs.code"), "{job}: heavy steps must key on needs.changes.outputs.code");
+    }
+}
+
+/// D18, as Quinn ruled it on 2026-10-04 (session 4): email forwarding may merge to `main` before
+/// privacy bump #1, but no release may ship it until the page discloses it. The guard is
+/// mechanical: `scripts/ci/privacy-guard.ps1` is the build job's first step after checkout, runs
+/// unconditionally, and fails the release while any mail marker is in the tree and
+/// `account::PRIVACY_VERSION` is on or before `2026-09-24`, the version the lane was signed against.
+#[test]
+fn release_refuses_mail_code_until_privacy_bump_1() {
+    let r = workflow("release.yml");
+    let build = job_block(&r, "build");
+    let call = r".\scripts\ci\privacy-guard.ps1";
+    assert_eq!(r.matches(call).count(), 1, "release.yml must run {call} exactly once");
+    let at = build.find(call).expect("the guard must run in the build job, before anything is built");
+    for later in [r".\scripts\ci\toolchain.ps1", "name: tauri-cli", r".\scripts\release.ps1", "actions/upload-artifact@"] {
+        let l = build.find(later).unwrap_or_else(|| panic!("build job lost {later}"));
+        assert!(at < l, "the guard must run before {later}");
+    }
+    // The step itself: from its `- name:` to the next step. No `if:` may skip it.
+    let start = build[..at].rfind("      - ").expect("the guard is a step");
+    let end = build[at..].find("\n      - ").map_or(build.len(), |e| at + e);
+    let step = &build[start..end];
+    assert!(step.contains("name: privacy guard (D18)"), "the step is named for D18: {step}");
+    assert!(!step.contains("if:") && !step.contains("continue-on-error"), "the guard is never skipped or softened: {step}");
+}
+
+fn root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+/// Runs the guard against `tree`; `(passed, output)`.
+fn privacy_guard(tree: &Path) -> (bool, String) {
+    let script = root().join("scripts").join("ci").join("privacy-guard.ps1");
+    assert!(script.is_file(), "{} is missing", script.display());
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&script)
+        .arg("-Root")
+        .arg(tree)
+        .output()
+        .expect("powershell");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
+}
+
+/// A synthetic tree under the system temp directory: `account.rs` (when `version` is `Some`) and
+/// the named marker paths. Removed on drop.
+struct Tree(std::path::PathBuf);
+impl Drop for Tree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+fn tree(tag: &str, version: Option<&str>, markers: &[&str]) -> Tree {
+    let dir = std::env::temp_dir().join(format!("knowlu-privacy-guard-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("app").join("src")).unwrap();
+    if let Some(v) = version {
+        let account = format!("pub const TOS_VERSION: &str = \"2026-09-16\";\npub const PRIVACY_VERSION: &str = \"{v}\";\n");
+        std::fs::write(dir.join("app").join("src").join("account.rs"), account).unwrap();
+    }
+    for m in markers {
+        let p = dir.join(m);
+        if m.ends_with(".rs") {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "// marker\n").unwrap();
+        } else {
+            std::fs::create_dir_all(&p).unwrap();
+        }
+    }
+    Tree(dir)
+}
+
+const MAIL_MARKERS: [&str; 3] = ["cloud/supabase/functions/mail-inbound", "app/src/mail_steps.rs", "engine/src/mailreconcile"];
+
+/// The guard's condition, run for real against synthetic trees: each mail marker alone blocks a
+/// release at or before `2026-09-24`; a later version or a tree without mail code passes; an
+/// unreadable version blocks (fail closed); and on this very tree the verdict is the one the rule
+/// gives, so a moved marker or `account.rs` cannot quietly turn the guard into a pass.
+#[test]
+fn the_privacy_guard_blocks_mail_code_at_or_before_the_pre_bump_version() {
+    for (i, m) in MAIL_MARKERS.iter().enumerate() {
+        for v in ["2026-09-24", "2026-09-16"] {
+            let t = tree(&format!("m{i}-{v}"), Some(v), &[m]);
+            let (ok, out) = privacy_guard(&t.0);
+            assert!(!ok, "{m} with PRIVACY_VERSION {v} must block the release:\n{out}");
+            assert!(out.contains("D18") && out.contains(v), "the refusal names D18 and the version:\n{out}");
+        }
+    }
+    let t = tree("bumped", Some("2026-10-15"), &MAIL_MARKERS);
+    let (ok, out) = privacy_guard(&t.0);
+    assert!(ok, "a version past 2026-09-24 lets mail code ship:\n{out}");
+    let t = tree("no-mail", Some("2026-09-24"), &[]);
+    let (ok, out) = privacy_guard(&t.0);
+    assert!(ok, "a tree without mail code is not D18's business:\n{out}");
+    let t = tree("no-account", None, &[MAIL_MARKERS[0]]);
+    let (ok, out) = privacy_guard(&t.0);
+    assert!(!ok, "no readable PRIVACY_VERSION must block, never pass:\n{out}");
+    let t = tree("bad-version", Some("soon"), &[MAIL_MARKERS[0]]);
+    let (ok, out) = privacy_guard(&t.0);
+    assert!(!ok, "a PRIVACY_VERSION that is not YYYY-MM-DD must block:\n{out}");
+
+    // This tree.
+    let account = std::fs::read_to_string(root().join("app").join("src").join("account.rs")).unwrap();
+    let version = account.split("pub const PRIVACY_VERSION: &str = \"").nth(1).and_then(|s| s.split('"').next()).unwrap();
+    let mail = MAIL_MARKERS.iter().any(|m| root().join(m).exists());
+    let (ok, out) = privacy_guard(&root());
+    assert_eq!(ok, !(mail && version <= "2026-09-24"), "this tree (mail {mail}, PRIVACY_VERSION {version}):\n{out}");
+}
+
+/// The default `-Root "."` is PowerShell's location, not the process's working directory: run by
+/// hand after `Set-Location` into the repo from a session started elsewhere, the guard still reads
+/// `account.rs` (the .NET file API resolves a relative path against the process directory).
+#[test]
+fn the_privacy_guard_reads_a_relative_root_from_the_powershell_location() {
+    let t = tree("relative", Some("2026-10-15"), &MAIL_MARKERS);
+    let script = root().join("scripts").join("ci").join("privacy-guard.ps1");
+    let command = format!("Set-Location -LiteralPath '{}'; & '{}'; exit $LASTEXITCODE", t.0.display(), script.display());
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &command])
+        .current_dir(std::env::temp_dir())
+        .output()
+        .expect("powershell");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success() && text.contains("is past 2026-09-24"), "a relative root after Set-Location must read the tree's account.rs:\n{text}");
 }

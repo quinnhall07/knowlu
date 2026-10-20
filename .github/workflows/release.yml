@@ -48,6 +48,12 @@ jobs:
       # would make `git describe --tags HEAD^` find nothing on every release.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with: { fetch-depth: 0 }
+      # D18 (Quinn, 2026-10-04): no release ships email forwarding before privacy bump #1. The guard
+      # runs first and unconditionally, so a too-early tag fails in seconds, not after the build.
+      # The rule and its markers are in the script; engine/tests/workflows.rs runs it.
+      - name: privacy guard (D18)
+        shell: pwsh
+        run: .\scripts\ci\privacy-guard.ps1
       # The toolchain steps are ci.yml's, line for line: same pinned action, same host triple, same
       # WinLibs archive. A release built on a different compiler than the one CI tested is not the
       # thing CI tested.

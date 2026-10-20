@@ -3,7 +3,7 @@
 # It downloads the same WinLibs POSIX MSVCRT release the dev machine runs (winget
 # BrechtSanders.WinLibs.POSIX.MSVCRT) and refuses to extract it unless the bytes match the pinned
 # SHA-256. Nothing is installed outside $env:RUNNER_TEMP. Exit 1 on any failure - a silently missing
-# `as` reads as `dlltool ... CreateProcess` failures deep inside a windows-* crate build (CLAUDE.md).
+# `as` reads as `dlltool ... CreateProcess` failures deep inside a windows-* crate build (docs/reference/toolchain.md).
 #
 # The runner image does carry a mingw-w64 of its own, and C0 Task 1 proved the workspace green on it
 # (run 34341678223). We do not use it: it is a UCRT build we do not target, the image readme does not

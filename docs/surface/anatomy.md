@@ -38,7 +38,7 @@ record something that was already tried and rejected.
 
 ## 2. The page set
 
-Nine pages, one window (§12.5 #1, §12.6.4). The rails persist; the main column swaps.
+Eight pages, one window (§12.5 #1, §12.6.4). The rails persist; the main column swaps.
 
 | Page | The question it answers |
 |---|---|
@@ -47,7 +47,6 @@ Nine pages, one window (§12.5 #1, §12.6.4). The rails persist; the main column
 | **Week** | Seven days: capacity, hours due, commitments — and where **pull-ahead** lives |
 | **Decisions** | The full approval queue, every kind and urgency |
 | **Info** | Things to know, open/close — including grade postings and late/missing flags |
-| **Grades** | Projected term GPA vs 3.75, per-course standing, needed-on-remainder |
 | **Issues** | Flagged judgments, cleared in one sitting |
 | **Health** | Runs, sync, ingest and source status |
 | **Schedule** | What is my week made of, and which hours do I plan in? (§3.15) |
@@ -135,6 +134,12 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
 - **Two record types earn special rendering:** a `supersede` reads *"laptop's 60% won over the
   agent's 100%"* (S1 §4.2's sync resolution, otherwise invisible); a `via: external` reads as an
   Obsidian edit (`detect_external` journals these and nothing has ever shown them).
+- **A carried event note is listed like any other `create`** (events spec §4.5). The series carry
+  (`eventcarry::run`) books each later date of an accepted series as a journal `create` in the
+  carrying run, so the delta lists it when the page last looked (`seen_at`) before that run started.
+  Two limits, named and not fixed: with no `seen_at` stamp (the window never lost focus between the
+  Accept and the carrying run, or the stamp file is gone) the carry is written but not listed; and
+  the delta expands at most 200 records and counts the rest. `surface::delta` is unchanged.
 - **Left out:** a one-line *reason* per change. The design doc asked for it (`:216`); what exists is
   provenance. See §7 — it is now being built, sourced from `importance_reason` and the derivation
   inputs, not invented.
@@ -237,6 +242,40 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
   from the JSON entirely (no key, not `null`) when nothing changed, when there is no confirmed
   planning-day note, or on any view but today. The today view prints `moved.text` under the
   headline (`#moved`, spec D7).
+- **Accepted all-day, multi-day and zero-length events (events spec §4.2, PQ2).** These have no
+  commitment; they are drawn in the all-day lane on each day they cover, after the calendar's own
+  entries, and never touch capacity (`surface::the_day` over `surface::accepted_events`). Two
+  sources:
+  - executed cards' `instances:` (`event-accept` and `event-check` cards);
+  - carried dates of either series kind, read from the span on the carry's ledger line (P15),
+    drawn whatever the roster holds, through a run where every feed fails.
+
+  A lane-shaped instance that had already started when its series was first carried is not drawn.
+  An accepted lane date from either source stays drawn on its day or days after a later fetch drops
+  it (cancelled, or gone from the feed), while Coming up no longer lists it.
+- **Removing an accepted lane date (P17, accepted by Quinn at Checkpoint B, 2026-10-01).**
+  - `the_day.all_day_uids` is a parallel array: one entry per lane line, `null` for a calendar
+    entry, the event's uid for an accepted lane date. It is absent when no such date covers the
+    day. The console offers **Remove from my day** on a line that has a uid.
+  - The button hides the date at once behind a 10-second "Removed · Undo" toast (PQ6 (b), like
+    `offerBodyUndo`). When the toast closes without Undo, the console calls `remove_lane_date`, which
+    calls `eventcarry::remove_lane_date`: one `declined` line in the existing shape
+    (`eventledger::record_declined`), and only as the vault's own human token (an `agent:` actor,
+    another human token or an invalid `config/actor.yaml` is refused by name). Undo sends nothing,
+    and a window closed inside the 10 seconds sends nothing; the date shows again.
+  - The date then leaves the lane and Coming up for good, from either source. `rank` never brings it
+    back: the carry, never-ask-twice and `relevant_events` all read `declined`.
+  - Two trade-offs remain. The line is device-local and carries no `by`, so a restored vault draws a
+    card-listed or still-fetched date again. The console draws today's lane only, so a date is
+    removable on the day or days it shows.
+- **A moved lane date fixes itself (PQ5 (b2), PQ7 (c)).** When a successful fetch gives an accepted
+  lane date a new lane-shaped span, `eventcarry::follow_moves` appends one more carry line from the
+  same card (no write when the span is unchanged), and the lane reads the last carry line's span,
+  preferring it to the card's. A card-listed date gets its first carry line this way. A carried
+  lane date moved to clock hours is booked at its new hours (`eventcarry::book`), gets a timed
+  carry line and leaves the lane. Two cases stay drawn on the old day, and are never booked, until
+  the student removes them: a card-listed lane date moved to clock hours (the carry never books a
+  card-listed date), and an `event-check` card's own uid, which holds the student's own answer line.
 
 ### 3.8 Left-rail nav
 
@@ -280,6 +319,20 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
   gives each unanswered instance the same answer, and the series is never asked about again. A card
   that expires or is deleted unanswered is not an answer: it writes nothing, its own instances are
   never asked again, and the series' next instance may be.
+  - **The carry writes one answer line per carried date**, by `agent:knowlu.carry`, with `from:`
+    (the answering card's id), `start:` and `end:` (the date's own span). A later human answer
+    replaces it; it never replaces a human one (P15). A moved date gets one more such line (PQ5).
+- **`kind: event-accept` — "Required" or "Worth a look".** With `config/events.yaml`'s
+  `event_cards: true` (both campus presets scaffold it), `rank` files one card per event or series
+  that the judgment calls `obligation` (always) or `opportunity`, from `eventemit::emit_event_accepts`,
+  inside the 15 a day and never twice for a uid or a settled series. **Accept** (shown on both
+  event kinds, with **Decline**) books the card's `instances:` through `approvals::settle_event_accept`:
+  a one-off commitment (hard for an obligation, soft for an opportunity), and a Register task when
+  the feed says so; an all-day, multi-day or zero-length instance books nothing and is drawn in the
+  day's all-day lane (§3.7). **Decline** writes one `declined` ledger line per listed uid, and later
+  instances of the series are declined too. An obligation card expires at its primary's start; an
+  opportunity card at the earlier of that and 14 days after `first_proposed_at`. Expiry archives the
+  card as `expired` and writes no line and no note, so the event stays in Coming up.
 - **`kind: commitment-check` — "Is this part of your week? Knowlu found it repeating on your
   calendar."** `rank` classifies repeating calendar events (`commitments.rs`) into proposals — a
   class, a lab, work, a club, a meeting, or the day's wake-to-bed window — and files up to 5 a day
@@ -299,6 +352,15 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
   Decisions view; there the card is a form — day toggles, start/end time pickers, *add another
   time*, **Save times** (→ `answer_card`, which writes `answer_meets` and approves the card in one
   call) and **No set times** (→ reject).
+- **A mail card names its sender, its date and its quote** (email spec D21, §5.2, §6.2). A card the
+  mail pass files (`created_by: mail`, `kind: amend` or `task`) carries three frontmatter keys:
+  `from` (`Name <address>`, or the address alone), `mail_date` (`YYYY-MM-DD`) and `evidence` (the
+  verbatim quote). `surface::read_approvals` copies each one onto the card's JSON under the same
+  name, as the literal the card writer wrote. A key the note lacks is left out, never `null`, so
+  every other card's JSON is unchanged, and so are the three `surface-today-*.json` references.
+  All three are untrusted text, and the page renders them only through `h()` (email plan T15.5). An
+  amend card's own `changes.<field>.from` is the old value, not the sender. *(Added 2026-10-03,
+  email plan T15.0.)*
 
 ### 3.10 AHEAD
 
@@ -325,6 +387,22 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
 - Next five events, from the roster.
 - **Distinct from the deck**, which holds *undecided* proposals. Accepted events and pending
   decisions are different information and must not share a region.
+- **"Accepted" (P8) and its provenance label (PQ3).** A row the student accepted carries an
+  "Accepted" mark (`ComingUp.accepted`). One accepted through its series gets the label `Accepted ·
+  from your answer to the series on <Ddd> <M/D>` (`ComingUp.provenance`, `surface::provenance`), the
+  date being the answering card's `executed_at`; a date its own card lists has no label.
+  - A carried date of either series kind is listed through its carry line, like any judged event.
+  - An instance a model judged confidently keeps its verdict and gains the label, so a confident
+    `drop` stays unlisted.
+  - `today.md` lists carried dates without the label.
+  - A date the student removed (P17) is not listed. M2's *Not shown* lists it as "you declined it"
+    while the roster still holds it.
+- **Not shown (N)** (M2): a closed `<details class="notshown">` under the list, filled by the
+  `dropped_events` command (`eventroster::read_dropped`) when *Coming up* renders, never on a poll.
+  Each line is the event's date, its title and the reason (`filtered by your interests`, `you
+  declined it`, or `judged not relevant`, with the judge's why when it has one), as escaped text with no
+  action. An event nobody has judged yet never appears here. An empty list renders nothing and a
+  refusal is one quiet line (`renderNotShown` in `app/static/console.js`).
 
 ### 3.12 GOOD TO KNOW
 
@@ -387,6 +465,31 @@ Q4 model, so a pinned list would make the row useless to anyone who wants a diff
   *from myBama*, each with **Add** (a one-row `commitments_confirm`, level hard).
 - **Left out:** a remove control (spec D8).
 
+### 3.16 GRADES (the strip and its drawer)
+
+- **Answers:** how am I doing in each course, and what is still to be graded? It is a strip on
+  Today, **not a page**: the earlier "Grades" page (projected term GPA, needed-on-remainder) is gone,
+  and term and cumulative GPA are a later phase (grades spec §12).
+- **Computed by:** `grades::course_grades → state.grades`, from the `grades/` notes and
+  `state/grades.json`; pure, and it writes nothing. A grade never enters `rank`.
+- **Absent, not empty:** `grades` is omitted from the payload when no course has grade notes
+  (`skip_serializing_if`), so a vault that never connected serialises exactly as before and the
+  three `surface-today-*.json` references are byte-identical.
+- **Per course** (`CourseGrade`), in the order of the course notes' titles: `course` (slug), `title`,
+  `pct`, `basis`, `letter`, `family`, `earned`, `possible`, `graded`, `items`, `pending`,
+  `fetched_at`, `entries`. **`basis: overall`** when the course's `kind: overall` note is graded with
+  `possible > 0` (the ring shows Blackboard's own number); **`points`** otherwise (Σ score ÷ Σ
+  possible over graded, counted items); **`none`** with `pct`, `letter` and `family` null when nothing
+  is graded. `earned` and `possible` are the points-so-far sums whatever the basis, so an `overall`
+  course still shows its points so far in the footer. `letter` is G3's default scale; `family` is its
+  first letter and picks the ring's colour token.
+- **Drawer entries** (`GradeEntry`): `title`, `category`, `score`, `possible`, `pct`, `status`,
+  `due`, `counts` — graded items first, then the rest, each by due (undated last). Removed columns
+  and the overall column are not entries.
+- **`fetched_at`** is the strip's "updated 2 h ago", read from `state/grades.json`; a missing or
+  unreadable file leaves it null and nothing else changes.
+- **Left out:** any ranking weight, GPA and a per-course scale until a syllabus supplies one.
+
 ---
 
 ## 4. Cross-cutting behaviours
@@ -429,6 +532,21 @@ editable** (`EDITABLE` in `app/static/console.js`, Knowlu plan 1, Task 13): `tit
 `<dl>` markup — that attribute, not a hard-coded list at the click site, is what the handler reads
 to know which field it is committing; a field the drawer renders without `data-field` (everything
 outside `EDITABLE`) is inert to a click.
+
+**The body editor (M2).** In the drawer of a note in `tasks/` or `courses/` (`BODY_EDITABLE_FOLDERS`;
+any other folder is refused by `set_body_inner`), the body is a plain `<pre>` with an *Edit* button
+(*Add notes* when empty). *Edit* swaps in a textarea holding the loaded body, kept as `expected`;
+*Save* (or Ctrl+Enter) calls `set_body`, *Cancel* (or Esc) discards. Controls stay disabled until the
+envelope returns, and a poll or repaint never closes or refills an open editor. After a save the
+drawer re-reads the note and a toast says *Saved · Undo* for 10 seconds; Undo is a second `set_body`
+whose `expected` is the re-read body and whose body is the text loaded before the edit, and the
+toast goes with its drawer. A **conflict** (`conflict: true` in the envelope: the body changed after
+the drawer opened it) keeps the textarea and the student's text, with a line saying so and a *Copy*
+button (`copy_text`); *Reload* asks first if the draft would be lost. Telemetry is `edit_started`,
+`edit_committed` and `edit_cancelled` with `object_kind: body` and the id, never the text. The
+history line for a save reads `<path>: body edited (<who>)` (`surface::describe`); the journal record
+holds two SHA-256 digests and byte counts and no text. Settings has the same pattern for
+`profile/preferences.md` and the four one-line interest lists (see `docs/reference/app.md`).
 
 **Never editable:** `id`, `source_uid`, `also_uids`, `judgment`. Keys and provenance; an edited key
 is a corrupted index.

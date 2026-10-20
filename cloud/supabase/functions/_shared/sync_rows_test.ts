@@ -46,7 +46,7 @@ Deno.test("a record body carrying a null byte is a named 400, not a 502 from the
   assertEquals(e.status, 400);
 });
 
-Deno.test("a note path is one of the seven folders, markdown, and cannot climb out", () => {
+Deno.test("a note path is one of the note folders, markdown, and cannot climb out", () => {
   for (const ok of ["tasks/x.md", "courses/cs-100.md", "archive/a-b.md", "info/x.md", "issues/i.md", "approvals/amend-1.md"]) {
     assert(isNotePath(ok), ok);
   }
@@ -65,6 +65,17 @@ Deno.test("a confirmed commitment or a decline marker is a note path; state/ sti
     assert(isNotePath(ok), ok);
   }
   for (const bad of ["state/calendar-series.json", "state/plan.json", "state/x.md", "commitments/x.json", "commitments/"]) {
+    assert(!isNotePath(bad), `${bad} was accepted`);
+  }
+});
+
+Deno.test("a grade note is a note path; state/grades.json is not (grades spec §7)", () => {
+  // `grades/` is the engine's eighth note folder, after `commitments/` (`ids::NOTE_FOLDERS`); a path
+  // the server refuses wedges every push (the batch is all-or-nothing).
+  for (const ok of ["grades/x.md", "grades/cs-100-hw-01.md", "commitments/x.md"]) {
+    assert(isNotePath(ok), ok);
+  }
+  for (const bad of ["state/grades.json", "grades/x.json", "grades/", "grade/x.md", "grades/../tasks/a.md", "GRADES/x.md"]) {
     assert(!isNotePath(bad), `${bad} was accepted`);
   }
 });
@@ -105,6 +116,84 @@ Deno.test("an unknown field beside the body is a 400 that names it", () => {
   assertEquals(e.status, 400);
 });
 
+const MIGRATIONS = new URL("../../migrations/", import.meta.url);
+
+/** `sql` with every `--` comment removed, so a header that quotes an older check is never read as code. */
+function sqlCode(sql: string): string {
+  return sql.split("\n").map((line) => (line.includes("--") ? line.slice(0, line.indexOf("--")) : line)).join("\n");
+}
+
+/** Every `*.sql` migration, whatever its day or name. */
+async function allMigrations(): Promise<{ name: string; sql: string }[]> {
+  const out: { name: string; sql: string }[] = [];
+  for await (const e of Deno.readDir(MIGRATIONS)) {
+    if (e.isFile && e.name.endsWith(".sql")) out.push({ name: e.name, sql: await Deno.readTextFile(new URL(e.name, MIGRATIONS)) });
+  }
+  return out;
+}
+
+/** The LIVE note-path check: of `files`, the latest in name order whose code (comments stripped)
+ * re-adds `sync_notes_path_check`. Migrations apply in name order, so the last one to re-add the
+ * constraint is the one Postgres enforces, whatever the file is called (W1 M1T1-important). */
+function livePathCheck(files: { name: string; sql: string }[]): { name: string; sql: string } {
+  // `\b` keeps the climb-out siblings (`sync_notes_path_check1`, `…2`) out.
+  const adds = /\badd\s+constraint\s+sync_notes_path_check\b/i;
+  let live: { name: string; sql: string } | undefined;
+  for (const m of files) {
+    if (adds.test(sqlCode(m.sql)) && (live === undefined || m.name > live.name)) live = m;
+  }
+  assert(live, "expected at least one migration that adds sync_notes_path_check");
+  return live!;
+}
+
+/** The `|`-separated folder group of the one `path ~ '^(…)` in `sql`'s code. */
+function folderGroup(name: string, sql: string): string {
+  const groups = [...sqlCode(sql).matchAll(/path\s+~\s+'\^\(([^)]*)\)/g)];
+  assertEquals(groups.length, 1, `exactly one folder group in ${name}`);
+  return groups[0][1];
+}
+
+/** NOTE_PATH_RE's own folder group. */
+const NOTE_GROUP = NOTE_PATH_RE.source.slice(2, NOTE_PATH_RE.source.indexOf(")"));
+
+Deno.test("the live path check is chosen by what a migration declares, not by its file name", async () => {
+  // W1 M1T1-important: a later migration that redefines `sync_notes_path_check` under another name
+  // (two-desktop's planned `…_shared_settings.sql`) must be the one read, and its narrower group must
+  // fail the group check below. The later migrations are in-memory strings; no file is written.
+  const settings = {
+    name: "20991231000100_shared_settings.sql",
+    sql: String.raw`alter table public.sync_notes
+  drop constraint sync_notes_path_check,
+  add constraint sync_notes_path_check check (
+    (
+      path ~ '^(tasks|approvals|archive|courses|issues|info|commitments)/[A-Za-z0-9._ /-]+\.md$'
+      and char_length(regexp_replace(path, '^[a-z]+/', '')) between 4 and 303
+    )
+    or path in ('config/campus.yaml', 'config/events.yaml')
+  );
+`,
+  };
+  const sibling = {
+    name: "20991231000200_sync_notes_climb_out.sql",
+    sql: String.raw`alter table public.sync_notes
+  drop constraint sync_notes_path_check1,
+  add constraint sync_notes_path_check1 check (path !~ '(^|/)\.\.(/|$)');
+`,
+  };
+  const commentOnly = {
+    name: "20991231000300_sync_note_path_check_note.sql",
+    sql: String.raw`-- an example only:
+-- alter table public.sync_notes add constraint sync_notes_path_check check (path ~ '^(tasks)/x\.md$');
+select 1;
+`,
+  };
+  const live = livePathCheck([...(await allMigrations()), settings, sibling, commentOnly]);
+  assertEquals(live.name, settings.name, "the last migration that adds sync_notes_path_check is the live one");
+  const group = folderGroup(live.name, live.sql);
+  assert(group !== NOTE_GROUP, "and the group check refuses it: its group is not NOTE_PATH_RE's");
+  assert(!group.split("|").includes("grades"), `the narrowed group lacks grades: ${group}`);
+});
+
 Deno.test("the byte bounds and the note path's character class match the migrations' own checks", async () => {
   // R-C3′-exec-9 m3, amended by R-C3′-exec-10: nothing else ties `MAX_RECORD_BYTES`,
   // `MAX_NOTE_BYTES` or `NOTE_PATH_RE`'s character class to the column checks a drift here would
@@ -121,9 +210,11 @@ Deno.test("the byte bounds and the note path's character class match the migrati
   assert(plaintextSql.includes(`between 2 and ${MAX_RECORD_BYTES})`), "sync_records.body's octet_length bound");
   assert(plaintextSql.includes(`between 1 and ${MAX_NOTE_BYTES})`), "sync_notes.body's octet_length bound");
 
-  const pathCheckSql = await Deno.readTextFile(
-    new URL("../../migrations/20260912000400_sync_note_path_check.sql", import.meta.url),
-  );
+  // The LIVE path check, not 000400 by name (grades spec §7): each migration that widens the folder
+  // group drops and re-adds `sync_notes_path_check`, and migrations apply in name order, so the
+  // latest migration whose code re-adds it is the one Postgres enforces, whatever it is called.
+  const { name: pathCheckName, sql: pathCheckSql } = livePathCheck(await allMigrations());
+  assertEquals(folderGroup(pathCheckName, pathCheckSql), NOTE_GROUP, `${pathCheckName}'s folder group is NOTE_PATH_RE's`);
   // The character class alone — the SQL's version is unbounded (`+`), since Postgres cannot express
   // a bound over 255, where the device's regex still bounds it ({1,300}); only the class itself is
   // shared text between the two, so it is derived from the constant rather than retyped.

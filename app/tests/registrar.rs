@@ -198,3 +198,25 @@ fn the_console_builder_wipes_the_sign_in_session_and_hides_only_main() {
     let shell = src.split("fn run_shell").nth(1).and_then(|s| s.split("fn run_console").next()).expect("run_shell");
     assert!(!shell.contains("registrar::"), "the wizard has no registrar command (spec D6)");
 }
+
+/// #19 close-out §5.2 rule 5 (the merge of `main`): the registrar's window is `lms_link::WINDOW`
+/// on a fresh throwaway directory, never grades' kept `session_dir` or a mail profile
+/// (`HANDOFF.md` §3 Pilot: the registrar never shares the kept Blackboard profile), and the
+/// console's `Destroyed` wipe matches the registrar's window label only.
+#[test]
+fn the_registrar_window_never_shares_the_grades_or_mail_session() {
+    let src = std::fs::read_to_string("src/registrar.rs").expect("src/registrar.rs");
+    let open = src.split("pub fn open_registrar_window").nth(1).unwrap().split("\n}\n").next().unwrap();
+    assert!(open.contains("lms_link::open_window_at(") && open.contains("&lms_link::session_dir()"), "a fresh throwaway directory: {open}");
+    for banned in ["grades::", "mail::", "session_dir(&", "data_dir.join(\"lms"] {
+        assert!(!src.contains(banned), "registrar.rs must not reach {banned}");
+    }
+    assert_ne!(knowlu::lms_link::WINDOW, knowlu::grades::WINDOW);
+    assert_ne!(knowlu::lms_link::WINDOW, knowlu::mail::WINDOW);
+    let main = std::fs::read_to_string("src/main.rs").expect("src/main.rs");
+    let console = main.split("fn run_console").nth(1).expect("run_console");
+    let wipe = console.split(".on_window_event(").nth(1).unwrap().split(".invoke_handler(").next().unwrap();
+    assert!(wipe.contains("w.label() == lms_link::WINDOW"), "the wipe is keyed on the registrar's label: {wipe}");
+    assert_eq!(wipe.matches("wipe_session(").count(), 1, "one wipe, on one label: {wipe}");
+    assert!(!wipe.contains("grades::") && !wipe.contains("mail::"), "never the grades or mail window: {wipe}");
+}

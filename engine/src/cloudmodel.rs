@@ -249,6 +249,17 @@ impl std::fmt::Display for CloudError {
     }
 }
 
+fn agent_with(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        // A non-2xx must arrive as a status AND a body, not as an opaque transport error:
+        // `ureq`'s default turns both into `Error::StatusCode` with the body gone, and 401
+        // and 402 are precisely the two answers the user needs named.
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
 /// One agent, one bearer, one account. Built once per run.
 pub struct CloudClient {
     base: String,
@@ -259,20 +270,19 @@ pub struct CloudClient {
 
 impl CloudClient {
     pub fn new(cfg: &CloudConfig, token: &str) -> CloudClient {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(CALL_TIMEOUT))
-            // A non-2xx must arrive as a status AND a body, not as an opaque transport error:
-            // `ureq`'s default turns both into `Error::StatusCode` with the body gone, and 401
-            // and 402 are precisely the two answers the user needs named.
-            .http_status_as_error(false)
-            .build()
-            .into();
         CloudClient {
             base: cfg.api_base.trim_end_matches('/').to_string(),
             anon_key: cfg.anon_key.clone(),
             token: token.to_string(),
-            agent,
+            agent: agent_with(CALL_TIMEOUT),
         }
+    }
+
+    /// The same client with its own wall-clock bound per call instead of [`CALL_TIMEOUT`], so a test
+    /// can see a timeout in milliseconds, not minutes.
+    pub fn with_timeout(mut self, timeout: Duration) -> CloudClient {
+        self.agent = agent_with(timeout);
+        self
     }
 
     /// Every error string this produces is scrubbed of the bearer first: `state/runner-log.md` is
@@ -698,25 +708,285 @@ pub fn pull_gmail_queue(
     Ok(GmailPull { items: out, more, deferred })
 }
 
+// ---------------------------------------------------------------------------
+// Email forwarding's two service calls (spec §6.1)
+// ---------------------------------------------------------------------------
+
+/// A mailbox's state as `mail-pull` reports it (`mail_addresses.status`, spec §5.1). It is data: a
+/// non-active mailbox is a heads-up and a named line, never an error, which is why a mail pull has no
+/// `Quiet` arm. A word this engine does not know reads [`Unknown`](MailboxState::Unknown), never
+/// active, and carries no text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailboxState {
+    Pending,
+    Confirmed,
+    Active,
+    Quiet,
+    Blocked,
+    Off,
+    PausedSend,
+    Lapsed,
+    Revoked,
+    Unknown,
+}
+
+impl MailboxState {
+    fn from_word(word: &str) -> MailboxState {
+        match word {
+            "pending" => MailboxState::Pending,
+            "confirmed" => MailboxState::Confirmed,
+            "active" => MailboxState::Active,
+            "quiet" => MailboxState::Quiet,
+            "blocked" => MailboxState::Blocked,
+            "off" => MailboxState::Off,
+            "paused_send" => MailboxState::PausedSend,
+            "lapsed" => MailboxState::Lapsed,
+            "revoked" => MailboxState::Revoked,
+            _ => MailboxState::Unknown,
+        }
+    }
+}
+
+/// One forwarded mailbox as the pull's answer shows it (§4.10's *Shown*): its state, when Knowlu last
+/// turned its forwarding back on, and the service's counters. No address and no token: the pull
+/// names a mailbox by `address_id` only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailboxReport {
+    pub address_id: String,
+    pub state: MailboxState,
+    /// `reenabled_at` (§4.11 step 2): set when the saved session turned forwarding back on.
+    pub reenabled_at: Option<jiff::Timestamp>,
+    pub unbound: u64,
+    pub unauthenticated: u64,
+    pub expired: u64,
+}
+
+/// What `POST /mail-pull` answered. The wire shapes are written in the plan's T4.4 and T4.5 (the
+/// authority the cloud lane builds to); the shape, by the `mail_claims` columns of spec §5.1:
+/// `{messages: [{uid, message_date, ordering_date, sender_name, sender_addr, phase, authenticity,
+/// claims, judgment_id}], mailboxes: [{address_id, status, reenabled_at, unbound, unauthenticated,
+/// expired}], more}`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MailPull {
+    /// In the order the service delivered them, which is (ordering date, uid) with a closed batch
+    /// whole and live mail queued during it after it (§4.8 step 1). Never re-sorted here.
+    pub messages: Vec<crate::mailreconcile::Message>,
+    pub mailboxes: Vec<MailboxReport>,
+    /// Message uid to the `judgments` row the service wrote for it (F4's shape check, as for a Gmail
+    /// item), for the cards and notes T6.2 writes. [`Message`](crate::mailreconcile::Message) has no
+    /// such field, and a message with no valid id has no entry. Under the Limited Use ruling the id
+    /// stays in the vault and is never reported.
+    pub judgment_ids: std::collections::BTreeMap<String, String>,
+    /// The service stopped at its wall-clock budget; ask again in this slot (as `GmailPull::more`).
+    pub more: bool,
+    /// Rows that were not a message (no mail uid, no readable ordering date, sender or phase). They
+    /// are not acked, so they come back; the count lets a slot say the service had more than it wrote.
+    pub unreadable: u64,
+}
+
+fn mail_uid_shaped(uid: &str) -> bool {
+    uid.strip_prefix("mail:").is_some_and(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+}
+
+/// §5.1's claim, re-checked for shape on the device. One that fails the check keeps its place as a
+/// noise claim, so `mail:<h>:<n>` (the claim's index) never shifts for the others.
+fn claim_of(value: &Value) -> crate::mailreconcile::Claim {
+    use crate::mailreconcile::{Claim, ClaimKind, ClaimSource};
+    serde_json::from_value::<Claim>(value.clone()).unwrap_or(Claim {
+        kind: ClaimKind::Noise,
+        course: None,
+        target: None,
+        field: None,
+        value: None,
+        item: None,
+        topic: None,
+        evidence: String::new(),
+        why: String::new(),
+        confidence: 0.0,
+        source: ClaimSource::Model,
+        resolution: None,
+    })
+}
+
+fn timestamp_of(row: &Value, key: &str) -> Option<jiff::Timestamp> {
+    row.get(key).and_then(Value::as_str).and_then(|text| text.parse().ok())
+}
+
+fn message_of(row: &Value) -> Option<crate::mailreconcile::Message> {
+    use crate::mailreconcile::{Authenticity, Message, Phase, Sender};
+    let text = |key: &str| row.get(key).and_then(Value::as_str).filter(|t| !t.is_empty()).map(str::to_string);
+    let uid = text("uid").filter(|uid| mail_uid_shaped(uid))?;
+    // Only an `aligned` backfill original may write directly (§4.9), so anything else reads unaligned.
+    let authenticity = match row.get("authenticity").and_then(Value::as_str) {
+        Some("aligned") => Authenticity::Aligned,
+        _ => Authenticity::Unaligned,
+    };
+    let phase = match row.get("phase").and_then(Value::as_str)? {
+        "backfill" => Phase::Backfill,
+        "live" | "recover" => Phase::Live,
+        _ => return None,
+    };
+    Some(Message {
+        uid,
+        ordering_date: timestamp_of(row, "ordering_date")?,
+        message_date: timestamp_of(row, "message_date"),
+        phase,
+        authenticity,
+        sender: Sender { name: text("sender_name"), address: text("sender_addr")? },
+        claims: row.get("claims").and_then(Value::as_array).map(|claims| claims.iter().map(claim_of).collect()).unwrap_or_default(),
+    })
+}
+
+fn mailbox_of(row: &Value) -> Option<MailboxReport> {
+    let count = |key: &str| row.get(key).and_then(Value::as_u64).unwrap_or(0);
+    Some(MailboxReport {
+        address_id: row.get("address_id").and_then(Value::as_str).filter(|id| !id.is_empty())?.to_string(),
+        state: MailboxState::from_word(row.get("status").and_then(Value::as_str).unwrap_or("")),
+        reenabled_at: timestamp_of(row, "reenabled_at"),
+        unbound: count("unbound"),
+        unauthenticated: count("unauthenticated"),
+        expired: count("expired"),
+    })
+}
+
+/// `POST /mail-pull {ack}`: what the service has queued from forwarded mail, acknowledging the uids the
+/// last pull wrote (spec §4.8 step 1, §6.1). Like `pull_gmail_queue` it is a pull the device asks for
+/// inside its own slot, and an ack is only the uids already written, so a crash costs a repeat.
+///
+/// **No `Quiet` arm.** A mailbox's state arrives as data in [`MailPull::mailboxes`]; a reply carrying
+/// Gmail's `quiet` keys is still a mail pull, and `/gmail-read`'s not-configured 503 stays a
+/// `Status`. Every failure is a [`CloudError`] whose `label()` is a closed word, with no mail text,
+/// address or session in it.
+pub fn pull_mail_claims(client: &CloudClient, ack: &[String]) -> Result<MailPull, CloudError> {
+    let reply = client.post("/mail-pull", &json!({ "ack": ack }))?;
+    // Unlike `pull_gmail_queue`, a reply with no `messages` array is not an empty pull: the keys are a
+    // contract with `functions/mail-pull` (plan T4.4), and drift there must be loud, not mail that
+    // silently never lands.
+    let rows = reply
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| CloudError::Body("the reply has no `messages` array".to_string()))?;
+    let messages: Vec<_> = rows.iter().filter_map(message_of).collect();
+    let judgment_ids = messages
+        .iter()
+        .zip(rows.iter().filter(|row| message_of(row).is_some()))
+        .filter_map(|(message, row)| Some((message.uid.clone(), judgment_id_of(row)?)))
+        .collect();
+    Ok(MailPull {
+        unreadable: (rows.len() - messages.len()) as u64,
+        messages,
+        judgment_ids,
+        mailboxes: reply.get("mailboxes").and_then(Value::as_array).into_iter().flatten().filter_map(mailbox_of).collect(),
+        more: reply.get("more").and_then(Value::as_bool).unwrap_or(false),
+    })
+}
+
+/// One of a course's items offered to `mail-resolve` (D12): the only vault text the call sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub id: String,
+    pub title: String,
+    pub due: Option<String>,
+}
+
+/// One course's ambiguous claims and the course's candidate items (D12, §4.8 step 3). The claims go as
+/// references, `(message uid, index)`: the service holds their text, so none travels back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveBatch {
+    pub course: String,
+    pub claims: Vec<crate::mailreconcile::ClaimRef>,
+    pub candidates: Vec<Candidate>,
+}
+
+/// The service's answer for one claim, which it also stores on the claim row so a re-pull replays it
+/// (D12). `target_id: None` is the answer "none": the claim becomes a notice, never a guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveAnswer {
+    pub claim: crate::mailreconcile::ClaimRef,
+    pub target_id: Option<String>,
+}
+
+/// `POST /mail-resolve`: one call per course batch. Wire shape: request `{course, claims: [{uid,
+/// index}], candidates: [{id, title, due}]}`, reply `{answers: [{uid, index, target_id}]}`.
+///
+/// The device re-checks the reply. An id that is not one of the batch's candidates reads `None` (the
+/// service's own rule, held here too); an answer for a claim the batch never held is dropped; a claim
+/// the reply left out has **no entry**, never a `None`, so it is asked again at the next slot instead
+/// of being taken as "no match". The answers come back in the order of the batch's claims.
+pub fn resolve_mail(client: &CloudClient, batch: &ResolveBatch) -> Result<Vec<ResolveAnswer>, CloudError> {
+    let body = json!({
+        "course": batch.course,
+        "claims": batch.claims.iter().map(|c| json!({ "uid": c.message, "index": c.index })).collect::<Vec<_>>(),
+        "candidates": batch.candidates.iter().map(|c| json!({ "id": c.id, "title": c.title, "due": c.due })).collect::<Vec<_>>(),
+    });
+    let reply = client.post("/mail-resolve", &body)?;
+    let answered = |claim: &crate::mailreconcile::ClaimRef| {
+        reply.get("answers").and_then(Value::as_array).into_iter().flatten().find(|a| {
+            a.get("uid").and_then(Value::as_str) == Some(claim.message.as_str())
+                && a.get("index").and_then(Value::as_u64) == Some(claim.index as u64)
+        })
+    };
+    Ok(batch
+        .claims
+        .iter()
+        .filter_map(|claim| {
+            let answer = answered(claim)?;
+            let target_id = answer
+                .get("target_id")
+                .and_then(Value::as_str)
+                .filter(|id| batch.candidates.iter().any(|c| c.id == *id))
+                .map(str::to_string);
+            Some(ResolveAnswer { claim: claim.clone(), target_id })
+        })
+        .collect())
+}
+
+/// What one probe found, with the transport case told apart (Gmail connect spec §4.3, Q1 (a′)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeOutcome {
+    /// The arm may run: a 2xx, and every answer that is neither fatal nor transport — a 404 from a
+    /// deployment without `judge-rules`, a 429, a 5xx, an unreadable body.
+    Clear,
+    /// 401, 402 or 403, which answer every item the same way. `model.fatal()` is set to this label.
+    Fatal(&'static str),
+    /// No HTTP answer at all (`CloudError::Transport`, already scrubbed of the bearer). Sets
+    /// nothing on `model.fatal()`.
+    Transport(CloudError),
+}
+
 impl CloudModel<'_> {
     /// Ask once, before the batch, whether this account can be judged at all.
     ///
     /// `Some(reason)` for the three answers that will not change item by item — no session, no
-    /// entitlement, not allowed — and `None` for everything else, including "no network", because
-    /// a flaky connection is per-item and the batch should try. The probe is `GET /judge-rules`,
-    /// which every account may call, costs no model tokens and charges no cap.
+    /// entitlement, not allowed — and `None` for everything else, including "no network". The
+    /// probe is `GET /judge-rules`, which every account may call, costs no model tokens and
+    /// charges no cap. This answer, and its effect on `fatal()`, are unchanged by Q1 (a′):
+    /// [`CloudModel::probe_outcome`] is the same call with the transport case reported on its own,
+    /// and it is what the cloud arm in `enrich::run_lines_with` asks.
     ///
     /// **Before Task 12 deploys `judge-rules`, this is a 404** — which is not `fatal()`, so it
     /// answers `None` and the batch proceeds exactly as it would have. That is deliberate: the
     /// probe is an optimisation for the two answers that repeat, never a gate.
     pub fn probe(&self) -> Option<&'static str> {
+        match self.probe_outcome() {
+            ProbeOutcome::Fatal(reason) => Some(reason),
+            ProbeOutcome::Clear | ProbeOutcome::Transport(_) => None,
+        }
+    }
+
+    /// [`CloudModel::probe`], with a transport failure reported as [`ProbeOutcome::Transport`]
+    /// rather than folded into "carry on" (Q1 (a′)). A fatal status sets `fatal()` exactly as
+    /// `probe()` always has; a transport failure, a 429 or a 5xx sets nothing.
+    pub fn probe_outcome(&self) -> ProbeOutcome {
         match self.client.get("/judge-rules") {
-            Ok(_) => None,
+            Ok(_) => ProbeOutcome::Clear,
             Err(e) if e.fatal() => {
                 self.fatal.set(Some(e.label()));
-                Some(e.label())
+                ProbeOutcome::Fatal(e.label())
             }
-            Err(_) => None,
+            Err(e @ CloudError::Transport(_)) => ProbeOutcome::Transport(e),
+            Err(_) => ProbeOutcome::Clear,
         }
     }
 }
@@ -854,4 +1124,73 @@ fn urlencode_component(value: &str) -> String {
             other => other.encode_utf8(&mut [0u8; 4]).bytes().map(|b| format!("%{b:02X}")).collect(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client_at(base: String) -> CloudClient {
+        let cfg = CloudConfig {
+            api_base: base,
+            anon_key: "anon".into(),
+            session_credential_target: "knowlu/test/session".into(),
+            account_id: "acct-1".into(),
+        };
+        CloudClient::new(&cfg, "jwt-not-a-secret")
+    }
+
+    /// One `127.0.0.1:0` listener that answers a single request with `code` and an empty JSON
+    /// body, then closes. No egress, no name resolution.
+    fn one_reply(code: u16) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            let Ok((mut stream, _)) = listener.accept() else { return };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" || line == "\n" {
+                    break;
+                }
+            }
+            let reply = format!(
+                "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}"
+            );
+            let _ = stream.write_all(reply.as_bytes());
+            let _ = stream.flush();
+        });
+        (format!("http://127.0.0.1:{port}/functions/v1"), handle)
+    }
+
+    /// Q1 (a′) guard: 401, 402 and 403 on the probe still set `model.fatal()` to their label and
+    /// answer it from `probe()`; a transport failure does not, and is reported on its own.
+    #[test]
+    fn a_fatal_probe_still_sets_model_fatal() {
+        for (code, label) in [(401, "no session"), (402, "no entitlement"), (403, "not allowed")] {
+            let (base, handle) = one_reply(code);
+            let client = client_at(base);
+            let model = CloudModel::new(&client);
+            assert_eq!(model.probe(), Some(label), "HTTP {code}");
+            assert_eq!(model.fatal(), Some(label), "HTTP {code}");
+            handle.join().expect("the listener thread did not panic");
+        }
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        let client = client_at(format!("http://127.0.0.1:{port}/functions/v1"));
+        let model = CloudModel::new(&client);
+        assert_eq!(model.probe(), None, "a transport failure is not fatal");
+        assert_eq!(model.fatal(), None);
+        match model.probe_outcome() {
+            ProbeOutcome::Transport(e) => {
+                assert_eq!(e.label(), "no network");
+                assert!(!e.to_string().contains("jwt-not-a-secret"), "{e}");
+            }
+            other => panic!("expected a transport outcome, got {other:?}"),
+        }
+        assert_eq!(model.fatal(), None, "reporting transport sets nothing on fatal()");
+    }
 }

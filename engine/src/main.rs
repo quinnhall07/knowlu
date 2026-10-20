@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use knowlu_engine::info::{self, InfoCommand};
 use knowlu_engine::issues::{self, IssueCommand};
 use knowlu_engine::write::{self, WriteCommand};
-use knowlu_engine::{cli, coursework, enrich, entitle, ingest, journal, runs, sync};
+use knowlu_engine::{cli, coursework, enrich, entitle, grades, ingest, journal, runs, sync};
 
 #[derive(Parser)]
 #[command(name = "knowlu-engine", version, about = "Deterministic personal operations engine")]
@@ -35,6 +35,15 @@ enum Command {
         /// Reuse a run id the caller already started.
         #[arg(long = "run-id")]
         run_id: Option<String>,
+    },
+    /// Print what forwarded mail wrote (`agent:knowlu.mail`), joined to each note's current value,
+    /// as JSON. Never writes and is never entitlement-gated, like `surface` (email spec §4.14).
+    MailApplied {
+        #[arg(long, default_value = ".")]
+        vault: PathBuf,
+        /// Only records at or after this timestamp. Without it, from the first mail record.
+        #[arg(long)]
+        since: Option<String>,
     },
     /// Print the console's read model as JSON. Never writes. Ports nothing — S2's read model was
     /// designed in Python and built here first (console spec §4.6).
@@ -88,8 +97,10 @@ enum Command {
         /// The registrar's school key (`registrar::SCHOOLS`), with `--registrar`.
         #[arg(long)]
         school: Option<String>,
-        #[arg(long, default_value = "quinn")]
-        actor: String,
+        /// Who `--confirm` and `--registrar` write as. Default: the vault's human token
+        /// (config/actor.yaml).
+        #[arg(long)]
+        actor: Option<String>,
         #[arg(long, default_value = "dashboard", value_parser = journal::VIAS)]
         via: String,
     },
@@ -128,6 +139,22 @@ enum Command {
         /// `coursework.vhl.credential_target`.
         #[arg(long = "vhl-target")]
         vhl_target: Option<String>,
+    },
+    /// Apply a Blackboard grades capture bundle to grades/ (M1 spec §6): one note per gradebook
+    /// column, written as `agent:knowlu.grades` with only the fields that changed.
+    ///
+    /// Exits 0 for every per-course outcome; 1 only for a missing or unparseable bundle, which is
+    /// a bug in the capture, not a school being slow.
+    Grades {
+        #[arg(long, default_value = ".")]
+        vault: PathBuf,
+        /// The capture bundle the app wrote into its own data, never the vault.
+        #[arg(long, required = true)]
+        input: PathBuf,
+        #[arg(long, default_value = "cli", value_parser = journal::VIAS)]
+        via: String,
+        #[arg(long = "run-id")]
+        run_id: Option<String>,
     },
     /// Sync the LMS .ics feed into tasks/. Ports `python -m engine.ingest`.
     Ingest {
@@ -204,8 +231,9 @@ enum Command {
     Info {
         #[arg(long, default_value = ".")]
         vault: PathBuf,
-        #[arg(long, default_value = "quinn")]
-        actor: String,
+        /// Who `open`/`close` write as. Default: the vault's human token (config/actor.yaml).
+        #[arg(long)]
+        actor: Option<String>,
         #[arg(long, default_value = "cli")]
         via: String,
         #[command(subcommand)]
@@ -215,8 +243,9 @@ enum Command {
     Issues {
         #[arg(long, default_value = ".")]
         vault: PathBuf,
-        #[arg(long, default_value = "quinn")]
-        actor: String,
+        /// Who `open`/`address` write as. Default: the vault's human token (config/actor.yaml).
+        #[arg(long)]
+        actor: Option<String>,
         #[arg(long, default_value = "cli")]
         via: String,
         #[command(subcommand)]
@@ -226,8 +255,9 @@ enum Command {
     Write {
         #[arg(long, default_value = ".")]
         vault: PathBuf,
-        #[arg(long, default_value = "quinn")]
-        actor: String,
+        /// Who the change is journalled as. Default: the vault's human token (config/actor.yaml).
+        #[arg(long)]
+        actor: Option<String>,
         #[arg(long, default_value = "cli", value_parser = journal::VIAS)]
         via: String,
         #[arg(long = "run-id")]
@@ -248,7 +278,7 @@ enum WriteArgs {
         /// Apply the judge-once rule and write a provenance block.
         #[arg(long)]
         judged: bool,
-        /// File a `kind: amend` proposal instead of skipping a field Quinn set.
+        /// File a `kind: amend` proposal instead of skipping a field the student set.
         #[arg(long)]
         propose: bool,
         /// JSON mapping recorded in the judgment block.
@@ -291,8 +321,9 @@ enum InfoArgs {
         kind: String,
         #[arg(long, default_value = "")]
         body: String,
-        #[arg(long = "opened-by", default_value = "quinn")]
-        opened_by: String,
+        /// Default: the vault's human token (config/actor.yaml).
+        #[arg(long = "opened-by")]
+        opened_by: Option<String>,
         /// The exact key a later close signal will carry.
         #[arg(long = "close-key")]
         close_key: Option<String>,
@@ -306,8 +337,9 @@ enum InfoArgs {
         key: Option<String>,
         #[arg(long)]
         id: Option<String>,
-        #[arg(long = "closed-by", default_value = "quinn")]
-        closed_by: String,
+        /// Default: the vault's human token (config/actor.yaml).
+        #[arg(long = "closed-by")]
+        closed_by: Option<String>,
     },
     /// Every open item.
     List,
@@ -365,19 +397,21 @@ enum RunsCommand {
 /// amendment of 2026-09-17: *"The engine refuses to run a slot without a valid entitlement past the
 /// 72-hour grace the app already caches."*
 ///
-/// **The four cloud steps, and deliberately not the others.** `surface` is what the console reads
+/// **The four cloud steps and `grades`, and deliberately not the others.** `grades` (M1 spec §6)
+/// fills the folder like `coursework` does, so it stops with them. `surface` is what the console reads
 /// on every poll and `write` is what the console's own edits go through: gating either would freeze
 /// the window rather than the subscription, which is not what ruling 3 is for. `runs`, `info`,
 /// `issues` and `coursework-discover` are the same argument.
 ///
 /// **`rank` is not here, and that is precondition P5.** Ruling 3's own reason — *"an orphaned binary
-/// ranks a hand-made folder and nothing else"* — is satisfied by gating the four steps that fill the
+/// ranks a hand-made folder and nothing else"* — is satisfied by gating the five steps that fill the
 /// folder; §5.1, which the amendment does not mark, promises that past the grace "the slots keep
 /// ranking" and the page never blanks. If Quinn rules the other way, `Command::Rank { vault, .. }`
 /// joins the pattern below and §5.1 is amended in the same commit. That is the whole of answer (b).
 fn gated_vault(command: &Command) -> Option<&PathBuf> {
     match command {
         Command::Coursework { vault, .. }
+        | Command::Grades { vault, .. }
         | Command::Ingest { vault, .. }
         | Command::Judge { vault, .. }
         | Command::Sync { vault, .. } => Some(vault),
@@ -385,12 +419,13 @@ fn gated_vault(command: &Command) -> Option<&PathBuf> {
     }
 }
 
-/// The subcommand's own word, as the student sees it on the Runs view. Only the gated four need one,
+/// The subcommand's own word, as the student sees it on the Runs view. Only the gated five need one,
 /// and the catch-all is unreachable from the call site above — it exists so this function stays total
 /// rather than panicking on a command the gate will never be asked about.
 fn name_of(command: &Command) -> &'static str {
     match command {
         Command::Coursework { .. } => "coursework",
+        Command::Grades { .. } => "grades",
         Command::Ingest { .. } => "ingest",
         Command::Judge { .. } => "judge",
         Command::Sync { .. } => "sync",
@@ -453,6 +488,10 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::MailApplied { vault, since } => {
+            println!("{}", knowlu_engine::mailapplied::run(&vault, since.as_deref()));
+            ExitCode::SUCCESS
+        }
         Command::Surface { vault, view, today, now, seen_at, build_sha, window } => {
             let Some(view) = knowlu_engine::surface::View::parse(&view) else { eprintln!("knowlu-engine: unknown view {view:?}"); return ExitCode::from(2); };
             let tz = knowlu_engine::cli::vault_zone(&vault);
@@ -476,6 +515,9 @@ fn main() -> ExitCode {
                         return ExitCode::from(2);
                     }
                 };
+                // Ruling 11 (A1-F2): R24's notes carry the vault's human token, resolved after the
+                // file is read and before any write; a bad config/actor.yaml stops here.
+                let actor = match human_or_vaults(&vault, actor) { Ok(a) => a, Err(code) => return code };
                 let ctx = write::WriteContext::new(&actor, &via);
                 let school = school.as_deref().unwrap_or_default();
                 return match cli::commitments_registrar(&vault, today.as_deref(), &text, school, &ctx) {
@@ -497,6 +539,7 @@ fn main() -> ExitCode {
                         return ExitCode::from(2);
                     }
                 };
+                let actor = match human_or_vaults(&vault, actor) { Ok(a) => a, Err(code) => return code };
                 let ctx = write::WriteContext::new(&actor, &via);
                 return match cli::commitments_confirm(&vault, today.as_deref(), &text, &ctx) {
                     Ok(report) => {
@@ -544,6 +587,18 @@ fn main() -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        Command::Grades { vault, input, via, run_id } => match grades::run(&vault, &input, &via, run_id.as_deref()) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(line) => {
+                eprintln!("{line}");
+                ExitCode::FAILURE
+            }
+        },
         Command::Ingest { vault, via, run_id } => match ingest::run(&vault, &via, run_id.as_deref()) {
             0 => ExitCode::SUCCESS,
             _ => ExitCode::FAILURE,
@@ -599,16 +654,30 @@ fn main() -> ExitCode {
             },
         },
         Command::Info { vault, actor, via, command } => {
+            // `list` only reads, so it never looks at `config/actor.yaml`.
+            let actor = match command {
+                InfoArgs::List => actor.unwrap_or_default(),
+                _ => match human_or_vaults(&vault, actor) { Ok(a) => a, Err(code) => return code },
+            };
             let command = match command {
                 InfoArgs::Open { title, kind, body, opened_by, close_key, expires } => {
+                    let opened_by = match human_or_vaults(&vault, opened_by) { Ok(a) => a, Err(code) => return code };
                     InfoCommand::Open { title, kind, body, opened_by, close_key, expires }
                 }
-                InfoArgs::Close { key, id, closed_by } => InfoCommand::Close { key, id, closed_by },
+                InfoArgs::Close { key, id, closed_by } => {
+                    let closed_by = match human_or_vaults(&vault, closed_by) { Ok(a) => a, Err(code) => return code };
+                    InfoCommand::Close { key, id, closed_by }
+                }
                 InfoArgs::List => InfoCommand::List,
             };
             print_lines(info::cli(&vault, &actor, &via, &command))
         }
         Command::Issues { vault, actor, via, command } => {
+            // `list` only reads, so it never looks at `config/actor.yaml`.
+            let actor = match command {
+                IssueArgs::List { .. } => actor.unwrap_or_default(),
+                _ => match human_or_vaults(&vault, actor) { Ok(a) => a, Err(code) => return code },
+            };
             let command = match command {
                 IssueArgs::Open { target, category, text } => {
                     IssueCommand::Open { target, categories: category, text }
@@ -621,6 +690,7 @@ fn main() -> ExitCode {
             print_lines(issues::cli(&vault, &actor, &via, &command))
         }
         Command::Write { vault, actor, via, run_id, command } => {
+            let actor = match human_or_vaults(&vault, actor) { Ok(a) => a, Err(code) => return code };
             let command = match command {
                 WriteArgs::Set { target, pairs, judged, propose, inputs, evidence } => {
                     WriteCommand::Set { target, pairs, judged, propose, inputs, evidence }
@@ -632,6 +702,21 @@ fn main() -> ExitCode {
             };
             print_lines(write::cli(&vault, &actor, &via, run_id.as_deref(), &command))
         }
+    }
+}
+
+/// Ruling 11 (plan D2): a human flag the caller left out is **the vault's own token**, read from
+/// `config/actor.yaml` (absent: the legacy token) — never a fixed name, which would either put a
+/// second token into an existing vault or a person's name into a new one. An explicit value passes
+/// through unchanged, and `write`'s gate still judges it. A bad file is the reader's named line on
+/// stderr and exit 2, before anything is written. Only a command that writes calls this.
+fn human_or_vaults(vault: &std::path::Path, flag: Option<String>) -> Result<String, ExitCode> {
+    match flag {
+        Some(value) => Ok(value),
+        None => journal::read_human_actor(vault).map(str::to_string).map_err(|e| {
+            eprintln!("knowlu-engine: {e}");
+            ExitCode::from(2)
+        }),
     }
 }
 

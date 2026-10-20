@@ -114,7 +114,12 @@ pub fn pending_digest_uids(vault: &Path) -> BTreeSet<String> {
     uids
 }
 
-/// Judged-relevant, unproposed, undeclined, and inside the horizon.
+/// Judged-relevant, unproposed, undeclined, uncarried, and inside the horizon.
+///
+/// A carried date (a `carry` on its entry, PQ3, P15) is an instance of a series the student
+/// accepted: it is booked and its answer is the series', so the digest never asks about it again
+/// (never ask twice, spec §11.1 item 5), whether the carry set its `opportunity` or a machine
+/// judged it so before the answer (review of T2b.5). No line written before PQ3 has a carry.
 pub fn eligible_events(
     events: &[DiscoveredEvent],
     ledger: &BTreeMap<String, LedgerEntry>,
@@ -129,7 +134,7 @@ pub fn eligible_events(
         if entry.verdict.as_deref() != Some("opportunity") {
             continue;
         }
-        if entry.proposed || entry.declined {
+        if entry.proposed || entry.declined || entry.carry.is_some() {
             continue;
         }
         if pending_uids.contains(&event.uid) {
@@ -363,8 +368,128 @@ const EVENT_CHECK: &str = "event-check";
 const WHY_PARAGRAPH: &str = "**Does this apply to you?** Knowlu could not tell from the event's \
 own listing whether it is meant for you.";
 
-const CLOSING: &str = "Approve if it applies to you: it joins Coming up as something you're \
-expected at. Reject and it's dropped. Either way you won't be asked again.";
+const CLOSING: &str = "Approve if it applies to you: it goes on your schedule for that day. \
+Reject and it's dropped. Either way you won't be asked again.";
+
+/// The closing of a card with no `instances:` (a roster read-back, §2): its Approve only records
+/// the answer and books nothing (D11), so it promises no schedule entry.
+const ANSWER_ONLY_CLOSING: &str = "Approve if it applies to you: it joins Coming up as something you're expected at. Reject and it's dropped. Either way you won't be asked again.";
+
+const EVENT_ACCEPT: &str = "event-accept";
+
+/// The `source` `eventroster::read_roster` gives every event it reads back (a literal there).
+const ROSTER_SOURCE: &str = "roster";
+
+/// The most obligation cards first proposed on any one day (D7), beside `event-check`'s own.
+pub const OBLIGATION_CARDS_PER_DAY: i64 = 3;
+
+const OBLIGATION_LEAD: &str = "**Knowlu thinks this is required of you.**";
+
+/// The most opportunity cards first proposed on any one day (D7), beside the other two kinds'.
+pub const OPPORTUNITY_CARDS_PER_DAY: i64 = 3;
+
+const OPPORTUNITY_LEAD: &str = "**This may interest you.**";
+
+/// An unanswered opportunity card expires this many days after `first_proposed_at`, or at the
+/// event, whichever is first (D3, §4.4).
+const OPPORTUNITY_EXPIRY_DAYS: i64 = 14;
+
+/// What each answer does on an `event-accept` card, obligation or opportunity alike.
+const ACCEPT_CLOSING: &str = "Approve to put it on your schedule for that day. Reject and \
+it's dropped. Either way you won't be asked again.";
+
+/// One row of the verdict-to-card table (P10): the ledger verdict that earns a question, the card
+/// kind it files, the start window the event must sit in, how the card reads and the cap on
+/// cards first proposed in a day. [`select_cards`] reads every row the same way.
+struct CardRow {
+    verdict: &'static str,
+    kind: &'static str,
+    /// `(event, config, today, last day)`: is the event inside this kind's window?
+    window: fn(&DiscoveredEvent, &EventsConfig, Date, Date) -> bool,
+    closing: &'static str,
+    cap: i64,
+    /// The file name's first words: `event-check` or `event`.
+    file_prefix: &'static str,
+    /// The title's prefix (`Required · `), or empty.
+    title_prefix: &'static str,
+    /// The card's first paragraph. A kind that quotes the ledger's why follows it with that why.
+    lead: &'static str,
+    quotes_why: bool,
+    /// Does the body carry the Obsidian Approve and Reject buttons? Only the older card does.
+    buttons: bool,
+    /// May a card be built from `read_roster`'s read-back (`source: "roster"`)? Such an event is
+    /// lossy (§2), so it never earns a card that books its time.
+    roster_ok: bool,
+    /// An unanswered card expires this many days after it is first proposed if that is before the
+    /// event: the opportunity's rule (§4.4). `None`: it expires on its primary's date.
+    expiry_days: Option<i64>,
+    /// Are the cards ordered by the digest's `sort_key` (D7) rather than by (start, uid)?
+    by_strength: bool,
+}
+
+/// `unsure` keeps `emit_event_checks`' window: a start in `[today, today + propose_horizon_days]`.
+fn start_window(event: &DiscoveredEvent, _: &EventsConfig, today: Date, last_day: Date) -> bool {
+    let day = event.start().date();
+    day >= today && day <= last_day
+}
+
+/// `obligation` uses the digest's rule (P10): a start not before today, and today at or past
+/// [`horizon_start`] (the registration deadline can open it earlier).
+fn horizon_window(event: &DiscoveredEvent, config: &EventsConfig, today: Date, _: Date) -> bool {
+    event.start().date() >= today && horizon_start(event, config) <= today
+}
+
+/// `unsure` → `event-check`.
+const EVENT_CHECK_ROW: CardRow = CardRow {
+    verdict: "unsure",
+    kind: EVENT_CHECK,
+    window: start_window,
+    closing: CLOSING,
+    cap: EVENT_CHECKS_PER_DAY,
+    file_prefix: "event-check",
+    title_prefix: "",
+    lead: WHY_PARAGRAPH,
+    quotes_why: false,
+    buttons: true,
+    roster_ok: true,
+    expiry_days: None,
+    by_strength: false,
+};
+
+/// `obligation` → `event-accept`.
+const OBLIGATION_ROW: CardRow = CardRow {
+    verdict: "obligation",
+    kind: EVENT_ACCEPT,
+    window: horizon_window,
+    closing: ACCEPT_CLOSING,
+    cap: OBLIGATION_CARDS_PER_DAY,
+    file_prefix: "event",
+    title_prefix: "Required · ",
+    lead: OBLIGATION_LEAD,
+    quotes_why: true,
+    buttons: false,
+    roster_ok: false,
+    expiry_days: None,
+    by_strength: false,
+};
+
+/// `opportunity` → `event-accept`, live only under `config.event_cards` (D6). The digest's window
+/// (P10), its own cap of 3 and the digest's order.
+const OPPORTUNITY_ROW: CardRow = CardRow {
+    verdict: "opportunity",
+    kind: EVENT_ACCEPT,
+    window: horizon_window,
+    closing: ACCEPT_CLOSING,
+    cap: OPPORTUNITY_CARDS_PER_DAY,
+    file_prefix: "event",
+    title_prefix: "Worth a look · ",
+    lead: OPPORTUNITY_LEAD,
+    quotes_why: true,
+    buttons: false,
+    roster_ok: false,
+    expiry_days: Some(OPPORTUNITY_EXPIRY_DAYS),
+    by_strength: true,
+};
 
 /// A settled series card's answer: `verdict` is `obligation` (the card was executed) or `drop`
 /// (rejected); `by` is who answered it, read from the ledger's answer line for `source_uid`.
@@ -442,6 +567,11 @@ pub fn what_and_when(event: &DiscoveredEvent) -> String {
 
 /// `(meta, file name)` of every `kind: event-check` approval in `folder`, in file-name order.
 fn event_check_cards(vault: &Path, folder: &str) -> Vec<(serde_yaml_ng::Mapping, String)> {
+    cards_of_kind(vault, folder, EVENT_CHECK)
+}
+
+/// `(meta, file name)` of every `kind: <kind>` approval in `folder`, in file-name order.
+fn cards_of_kind(vault: &Path, folder: &str, kind: &str) -> Vec<(serde_yaml_ng::Mapping, String)> {
     let mut out = Vec::new();
     let dir = vault.join(folder);
     if !dir.is_dir() {
@@ -450,7 +580,7 @@ fn event_check_cards(vault: &Path, folder: &str) -> Vec<(serde_yaml_ng::Mapping,
     for path in crate::approvals::sorted_md(&dir) {
         let Ok(text) = pystr::read_text(&path) else { continue };
         let Ok((meta, _)) = split_frontmatter(&text) else { continue };
-        if card_text(&meta, "type") != "approval" || card_text(&meta, "kind") != EVENT_CHECK {
+        if card_text(&meta, "type") != "approval" || card_text(&meta, "kind") != kind {
             continue;
         }
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -562,25 +692,30 @@ pub fn inherit_series_answers(
     (written, warnings)
 }
 
-/// Does this event qualify for an `event-check` question today? See [`emit_event_checks`].
+/// Does this event qualify for a question of `row`'s kind today? See [`emit_event_checks`].
+#[allow(clippy::too_many_arguments)]
 fn needs_check(
+    row: &CardRow,
     event: &DiscoveredEvent,
+    config: &EventsConfig,
     ledger: &BTreeMap<String, LedgerEntry>,
     first_day: Date,
     last_day: Date,
     asked_uids: &BTreeSet<String>,
     asked_series: &BTreeSet<String>,
 ) -> bool {
+    if event.source == ROSTER_SOURCE && !row.roster_ok {
+        return false;
+    }
     let Some(entry) = ledger.get(&event.uid) else { return false };
-    if entry.verdict.as_deref() != Some("unsure")
+    if entry.verdict.as_deref() != Some(row.verdict)
         || !entry.answered_by.is_empty()
         || entry.declined
         || entry.proposed
     {
         return false;
     }
-    let day = event.start().date();
-    if day < first_day || day > last_day {
+    if !(row.window)(event, config, first_day, last_day) {
         return false;
     }
     !asked_uids.contains(&event.uid) && !asked_series.contains(&event.series_uid)
@@ -594,7 +729,12 @@ fn card_slug(title: &str) -> String {
 
 /// The card's body: the question (the paragraph the console shows as the card's `why`), the
 /// facts, the other instances of a series, what each answer does, and the buttons.
-fn check_body(primary: &DiscoveredEvent, others: &[&DiscoveredEvent]) -> String {
+fn check_body(
+    row: &CardRow,
+    primary: &DiscoveredEvent,
+    others: &[&DiscoveredEvent],
+    ledger: &BTreeMap<String, LedgerEntry>,
+) -> String {
     let mut facts = vec![when_label(primary)];
     for extra in [&primary.location, &primary.organizer] {
         let extra = crate::judge::one_line(extra, 120);
@@ -602,7 +742,15 @@ fn check_body(primary: &DiscoveredEvent, others: &[&DiscoveredEvent]) -> String 
             facts.push(extra);
         }
     }
-    let mut lines = vec![WHY_PARAGRAPH.to_string(), String::new(), facts.join(" · ")];
+    let mut lead = row.lead.to_string();
+    if row.quotes_why {
+        let why = ledger.get(&primary.uid).map(|e| crate::judge::one_line(&e.why, 400)).unwrap_or_default();
+        if !why.is_empty() {
+            lead.push(' ');
+            lead.push_str(&why);
+        }
+    }
+    let mut lines = vec![lead, String::new(), facts.join(" · ")];
     let url = crate::judge::one_line(&primary.url, 500);
     if !url.is_empty() {
         lines.push(url);
@@ -611,14 +759,44 @@ fn check_body(primary: &DiscoveredEvent, others: &[&DiscoveredEvent]) -> String 
         let days: Vec<String> = others.iter().map(|e| when_label(e)).collect();
         lines.push(format!("Also on: {}", days.join(", ")));
     }
-    lines.extend([String::new(), CLOSING.to_string(), String::new(), BUTTONS.to_string(), String::new()]);
+    // The new closing promises a booking, so only a card that carries `instances:` (D10) says it.
+    let closing = if row.kind == EVENT_CHECK && !writes_instances(primary) {
+        ANSWER_ONLY_CLOSING
+    } else {
+        row.closing
+    };
+    lines.extend([String::new(), closing.to_string(), String::new()]);
+    if row.buttons {
+        lines.extend([BUTTONS.to_string(), String::new()]);
+    }
     lines.join("\n")
+}
+
+/// Does the card for `primary` carry `instances:`? Never when it is read back from the roster.
+fn writes_instances(primary: &DiscoveredEvent) -> bool {
+    primary.source != ROSTER_SOURCE
+}
+
+/// The card's `expires`: the primary's date, or for an opportunity the earlier of that and
+/// `first_proposed_at` (today) plus [`CardRow::expiry_days`].
+fn expires(row: &CardRow, primary: &DiscoveredEvent, today: Date) -> Date {
+    let event_day = primary.start().date();
+    match row.expiry_days {
+        Some(days) => {
+            let cutoff = today
+                .checked_add(Span::new().try_days(days).unwrap_or_default())
+                .unwrap_or(today);
+            event_day.min(cutoff)
+        }
+        None => event_day,
+    }
 }
 
 /// Write one card for `primary` and the rest of its series, `others`. `Err` is a create that
 /// failed.
 fn write_check(
     vault: &Path,
+    row: &CardRow,
     primary: &DiscoveredEvent,
     others: &[&DiscoveredEvent],
     ledger: &BTreeMap<String, LedgerEntry>,
@@ -627,16 +805,21 @@ fn write_check(
     journal: &mut Journal,
 ) -> Result<PathBuf, crate::write::WriteError> {
     use crate::yamlemit::Node;
-    let mut title = what_and_when(primary);
+    let mut title = format!("{}{}", row.title_prefix, what_and_when(primary));
     if !others.is_empty() {
         title.push_str(&format!(" · +{} more", others.len()));
     }
     let jid = ledger.get(&primary.uid).map(|e| e.judgment_id.clone()).unwrap_or_default();
     let mut pairs = vec![
         ("type", Node::text("approval")),
-        ("kind", Node::text(EVENT_CHECK)),
+        ("kind", Node::text(row.kind)),
         ("title", Node::text(&title)),
         ("status", Node::text("pending")),
+    ];
+    if row.kind == EVENT_ACCEPT {
+        pairs.push(("verdict", Node::text(row.verdict)));
+    }
+    pairs.extend([
         ("source_uid", Node::text(&primary.uid)),
         ("series_uid", Node::text(&primary.series_uid)),
         (
@@ -648,7 +831,17 @@ fn write_check(
                     .collect(),
             ),
         ),
-    ];
+    ]);
+    // The settlement's whole input (D10). Never from `read_roster`'s lossy read-back (§2): such
+    // a card answers only, and books nothing.
+    if writes_instances(primary) {
+        let listed = std::iter::once(primary).chain(others.iter().copied());
+        let instances = listed
+            .filter(|e| e.source != ROSTER_SOURCE)
+            .map(|e| crate::eventaccept::Instance::from_event(e).to_node())
+            .collect();
+        pairs.push(("instances", Node::Seq(instances)));
+    }
     if !jid.is_empty() {
         pairs.push(("judgment_id", Node::text(&jid)));
         pairs.push(("judgment_kind", Node::text("event")));
@@ -657,7 +850,7 @@ fn write_check(
         // Two distinct dates, never an anchor — see the ruling in `src/yamlemit.rs`.
         ("proposed_at", Node::Date(today)),
         ("first_proposed_at", Node::Date(today)),
-        ("expires", Node::Date(primary.start().date())),
+        ("expires", Node::Date(expires(row, primary, today))),
         ("snooze_until", Node::Null),
         // The literal the digest and `calendar_note` write; the journal's actor is the ctx's.
         ("created_by", Node::text("events")),
@@ -666,13 +859,14 @@ fn write_check(
     let text = format!(
         "---\n{}---\n\n{}",
         crate::yamlemit::safe_dump_block(&front),
-        check_body(primary, others)
+        check_body(row, primary, others, ledger)
     );
 
     let folder = vault.join("approvals");
     std::fs::create_dir_all(&folder).map_err(|e| crate::write::WriteError::Io(e.to_string()))?;
     let stem = format!(
-        "event-check-{}-{}",
+        "{}-{}-{}",
+        row.file_prefix,
         card_slug(&primary.title),
         primary.start().date().strftime("%Y-%m-%d")
     );
@@ -689,9 +883,10 @@ fn write_check(
 ///
 /// An event qualifies when its ledger verdict is `unsure`, nobody answered it, it is neither
 /// declined nor proposed, it starts within `[today, today + propose_horizon_days]`, its uid is no
-/// approval's `source_uid` and on no `event-check` card's `events:`, and its series has neither a
-/// live `event-check` card in `approvals/` nor an answered (`executed`/`rejected`) one in
-/// `archive/`. An expired or deleted card does not close its series (ruling G1). Qualifying instances of one series share one card: the soonest is its primary, and the
+/// approval's `source_uid` and on no event card's `events:` (either kind), and its series has no
+/// live event card of either kind in `approvals/` and no answered one (`settled_series` and
+/// `eventcarry::answered_series`). An expired or deleted card does not close its series (ruling
+/// G1). Qualifying instances of one series share one card: the soonest is its primary, and the
 /// card lists up to 20 of them. Cards are filed in `(primary start, primary uid)` order, at most
 /// `min(budget, 3 − event-check cards first proposed today)` of them, so there is never overflow
 /// for `defer_over_budget` to snooze. After each card, every instance it lists gets a `proposed`
@@ -707,57 +902,58 @@ pub fn emit_event_checks(
     ctx: &WriteContext,
     journal: &mut Journal,
 ) -> (Vec<PathBuf>, usize) {
+    let row = &EVENT_CHECK_ROW;
+    let groups = select_cards(vault, row, events, ledger, config, today, budget);
+    file_cards(vault, row, &groups, ledger, today, ctx, journal)
+}
+
+/// File the `event-accept` cards of one `verdict` for today. Returns `(paths, count)`.
+///
+/// `obligation` and `opportunity` are the verdicts filed (D2: both are asked, never created);
+/// `opportunity` only when `config.event_cards` is on (D6), and any other verdict files nothing.
+/// An event qualifies as [`emit_event_checks`]' do, widened to both card
+/// kinds: its uid is no approval's `source_uid` and on no event card's `events:` (either kind), and
+/// its series has no live event card and no answered one (`settled_series` and
+/// `eventcarry::answered_series`, the one definition). Its window is the digest's (P10). An event
+/// read back from the roster (`source: "roster"`) never earns a card (§2). At most
+/// `min(budget, 3 − cards of this verdict first proposed today)` cards are filed, the soonest
+/// first (opportunities in the digest's `sort_key` order, D7), each followed by a `proposed` line
+/// for every instance it lists.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_event_accepts(
+    vault: &Path,
+    events: &[DiscoveredEvent],
+    ledger: &BTreeMap<String, LedgerEntry>,
+    config: &EventsConfig,
+    today: Date,
+    budget: i64,
+    verdict: &str,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> (Vec<PathBuf>, usize) {
+    let row = match verdict {
+        "obligation" => &OBLIGATION_ROW,
+        "opportunity" if config.event_cards => &OPPORTUNITY_ROW,
+        _ => return (Vec::new(), 0),
+    };
+    let groups = select_cards(vault, row, events, ledger, config, today, budget);
+    file_cards(vault, row, &groups, ledger, today, ctx, journal)
+}
+
+/// Write each group's card, and after it a `proposed` line for every instance it lists. A failed
+/// create stops the run of cards.
+fn file_cards(
+    vault: &Path,
+    row: &CardRow,
+    groups: &[Group<'_>],
+    ledger: &BTreeMap<String, LedgerEntry>,
+    today: Date,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> (Vec<PathBuf>, usize) {
     let mut filed: Vec<PathBuf> = Vec::new();
-    let mut asked_series: BTreeSet<String> = BTreeSet::new();
-    let mut listed_uids: BTreeSet<String> = BTreeSet::new();
-    let mut first_proposed_today: i64 = 0;
-    for folder in ["approvals", "archive"] {
-        for (meta, _) in event_check_cards(vault, folder) {
-            // A live card, or one the student answered, closes its series. One closed without an
-            // answer (expired, or deleted from the app) closes only the instances it listed.
-            let answered = matches!(card_text(&meta, "status").as_str(), "executed" | "rejected");
-            let series = card_text(&meta, "series_uid");
-            if !series.is_empty() && (folder == "approvals" || answered) {
-                asked_series.insert(series);
-            }
-            listed_uids.extend(card_event_uids(&meta));
-            if crate::approvals::as_date(crate::yaml::get(&meta, "first_proposed_at")) == Some(today) {
-                first_proposed_today += 1;
-            }
-        }
-    }
-    let allowance = budget.min(EVENT_CHECKS_PER_DAY - first_proposed_today).max(0) as usize;
-    if allowance == 0 {
-        return (filed, 0);
-    }
-    let mut asked_uids = crate::approvals::existing_source_uids(vault);
-    asked_uids.extend(listed_uids);
-    let last_day = today
-        .checked_add(Span::new().try_days(config.propose_horizon_days).unwrap_or_default())
-        .unwrap_or(today);
-
-    let mut qualifying: Vec<&DiscoveredEvent> = events
-        .iter()
-        .filter(|e| needs_check(e, ledger, today, last_day, &asked_uids, &asked_series))
-        .collect();
-    qualifying.sort_by(|a, b| (a.start(), &a.uid).cmp(&(b.start(), &b.uid)));
-    qualifying.dedup_by(|a, b| a.uid == b.uid);
-    // Grouped in (start, uid) order, so each group's first member is its primary and the groups
-    // themselves come out in (primary start, primary uid) order.
-    let mut groups: Vec<(&DiscoveredEvent, Vec<&DiscoveredEvent>)> = Vec::new();
-    for event in qualifying {
-        match groups.iter_mut().find(|(primary, _)| primary.series_uid == event.series_uid) {
-            Some((_, others)) => {
-                if others.len() + 1 < SERIES_LIST_CAP {
-                    others.push(event);
-                }
-            }
-            None => groups.push((event, Vec::new())),
-        }
-    }
-
-    for (primary, others) in groups.iter().take(allowance) {
-        let Ok(path) = write_check(vault, primary, others, ledger, today, ctx, journal) else {
+    for (primary, others) in groups {
+        let Ok(path) = write_check(vault, row, primary, others, ledger, today, ctx, journal) else {
             break;
         };
         // Card first, ledger second, as the digest does.
@@ -768,6 +964,89 @@ pub fn emit_event_checks(
     }
     let count = filed.len();
     (filed, count)
+}
+
+/// One card's worth of events: the primary (the soonest) and the rest of its series.
+type Group<'a> = (&'a DiscoveredEvent, Vec<&'a DiscoveredEvent>);
+
+/// The selection behind every event card: which groups of `events` get a `row.kind` card today.
+///
+/// Eligibility (`row.verdict`, nobody answered, neither declined nor proposed), `row.window`,
+/// never-ask-twice, the day's cap (`min(budget, row.cap − cards of this kind first proposed
+/// today)`), the order (primary start, primary uid) and the series grouping (up to
+/// [`SERIES_LIST_CAP`] instances a card). The returned groups are already cut to the allowance.
+fn select_cards<'a>(
+    vault: &Path,
+    row: &CardRow,
+    events: &'a [DiscoveredEvent],
+    ledger: &BTreeMap<String, LedgerEntry>,
+    config: &EventsConfig,
+    today: Date,
+    budget: i64,
+) -> Vec<Group<'a>> {
+    let mut asked_series: BTreeSet<String> = BTreeSet::new();
+    let mut listed_uids: BTreeSet<String> = BTreeSet::new();
+    let mut first_proposed_today: i64 = 0;
+    // Never ask twice reads both kinds; each kind counts only its own cards against its cap.
+    for kind in [EVENT_CHECK, EVENT_ACCEPT] {
+        for folder in ["approvals", "archive"] {
+            for (meta, _) in cards_of_kind(vault, folder, kind) {
+                // A live card closes its series. One closed without an answer (expired, or
+                // deleted from the app) closes only the instances it listed; an answered one
+                // closes its series through the union below.
+                let series = card_text(&meta, "series_uid");
+                if !series.is_empty() && folder == "approvals" {
+                    asked_series.insert(series);
+                }
+                listed_uids.extend(card_event_uids(&meta));
+                let own = kind == row.kind
+                    && (kind != EVENT_ACCEPT || card_text(&meta, "verdict") == row.verdict);
+                let proposed = crate::approvals::as_date(crate::yaml::get(&meta, "first_proposed_at"));
+                if own && proposed == Some(today) {
+                    first_proposed_today += 1;
+                }
+            }
+        }
+    }
+    let allowance = budget.min(row.cap - first_proposed_today).max(0) as usize;
+    if allowance == 0 {
+        return Vec::new();
+    }
+    // An answered series, of either kind: the one union `judge_roster` skips too.
+    asked_series.extend(settled_series(vault).into_keys());
+    asked_series.extend(crate::eventcarry::answered_series(vault).into_keys());
+    let mut asked_uids = crate::approvals::existing_source_uids(vault);
+    asked_uids.extend(listed_uids);
+    let last_day = today
+        .checked_add(Span::new().try_days(config.propose_horizon_days).unwrap_or_default())
+        .unwrap_or(today);
+
+    let mut qualifying: Vec<&DiscoveredEvent> = events
+        .iter()
+        .filter(|e| needs_check(row, e, config, ledger, today, last_day, &asked_uids, &asked_series))
+        .collect();
+    qualifying.sort_by(|a, b| (a.start(), &a.uid).cmp(&(b.start(), &b.uid)));
+    qualifying.dedup_by(|a, b| a.uid == b.uid);
+    // Grouped in (start, uid) order, so each group's first member is its primary and the groups
+    // themselves come out in (primary start, primary uid) order.
+    let mut groups: Vec<Group<'a>> = Vec::new();
+    for event in qualifying {
+        match groups.iter_mut().find(|(primary, _)| primary.series_uid == event.series_uid) {
+            Some((_, others)) => {
+                if others.len() + 1 < SERIES_LIST_CAP {
+                    others.push(event);
+                }
+            }
+            None => groups.push((event, Vec::new())),
+        }
+    }
+    if row.by_strength {
+        // The soonest instance is still each series' primary; the cards come out in the digest's
+        // order of their primaries (strength, registration deadline, start, uid). Stable.
+        groups.sort_by_key(|(primary, _)| sort_key(primary, ledger));
+    }
+    groups.truncate(allowance);
+    groups
 }
 
 #[cfg(test)]
@@ -1513,6 +1792,89 @@ mod tests {
             }
         }
 
+        /// T2a.1a's pin: what `emit_event_checks` selects, written green on the code before the
+        /// selection moved into the shared function. It pins the selection, not the card bytes, so
+        /// it stays true when T2a.1b adds `instances:` and the new closing.
+        #[test]
+        fn the_selection_refactor_keeps_what_event_checks_select() {
+            let vault = vault("pin");
+            let events = [
+                // Fed out of order: the cards come out in (primary start, primary uid) order.
+                on("ics:d", "Dance night", 10, 4, 20, 0, 22, 0), // a fourth group: past the cap of 3
+                in_series(on("lx:5:2", "Weekly circle", 10, 9, 19, 0, 21, 0), "lx:5"),
+                on("ics:c", "Charity run", 10, 3, 8, 0, 9, 0),
+                in_series(on("lx:5:1", "Weekly circle", 10, 2, 19, 0, 21, 0), "lx:5"),
+                on("ics:a", "Alpha mixer", 10, 1, 10, 0, 11, 0),
+            ];
+            for e in &events {
+                let jid = (e.uid == "ics:a").then_some(JID_A);
+                unsure(&vault, &e.uid, &e.title, jid);
+            }
+            let (paths, count) = check(&vault, &events, 15);
+            assert_eq!(count, 3);
+            let names: Vec<String> = paths
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "event-check-alpha-mixer-2026-10-01.md",
+                    "event-check-weekly-circle-2026-10-02.md",
+                    "event-check-charity-run-2026-10-03.md",
+                ]
+            );
+            // The same cards are what the folder holds, and nothing else.
+            let mut by_name = paths.clone();
+            by_name.sort();
+            assert_eq!(cards(&vault, "approvals"), by_name);
+
+            let expect: [(&str, &str, &str, &[&str], &str); 3] = [
+                ("Alpha mixer · Thu 1 Oct 10–11am", "ics:a", "ics:a", &["ics:a"], "2026-10-01"),
+                (
+                    "Weekly circle · Fri 2 Oct 7–9pm · +1 more",
+                    "lx:5:1",
+                    "lx:5",
+                    &["lx:5:1", "lx:5:2"],
+                    "2026-10-02",
+                ),
+                ("Charity run · Sat 3 Oct 8–9am", "ics:c", "ics:c", &["ics:c"], "2026-10-03"),
+            ];
+            for (path, (title, source, series, listed, expires)) in paths.iter().zip(expect) {
+                let (meta, _) = note(path);
+                assert_eq!(field(&meta, "title").as_deref(), Some(title));
+                assert_eq!(field(&meta, "source_uid").as_deref(), Some(source));
+                assert_eq!(field(&meta, "series_uid").as_deref(), Some(series));
+                assert_eq!(event_uids(&meta), listed);
+                assert_eq!(field(&meta, "expires").as_deref(), Some(expires));
+                assert_eq!(date_field(&meta, "first_proposed_at"), Some(DAY));
+                assert_eq!(date_field(&meta, "proposed_at"), Some(DAY));
+                assert_eq!(field(&meta, "status").as_deref(), Some("pending"));
+            }
+            assert_eq!(
+                field(&note(&paths[0]).0, "judgment_id").as_deref(),
+                Some(JID_A),
+                "a card carries its primary's judgment id"
+            );
+            assert_eq!(field(&note(&paths[1]).0, "judgment_id"), None);
+
+            // The `proposed` lines, in the order the cards were filed; the fourth group has none.
+            let proposed: Vec<String> = seen(&vault)
+                .lines()
+                .filter(|l| l.contains(" · proposed "))
+                .map(str::to_string)
+                .collect();
+            assert_eq!(
+                proposed,
+                [
+                    "- ics:a · proposed 2026-09-28",
+                    "- lx:5:1 · proposed 2026-09-28",
+                    "- lx:5:2 · proposed 2026-09-28",
+                    "- ics:c · proposed 2026-09-28",
+                ]
+            );
+        }
+
         fn five(vault: &Path, first_day: i8) -> Vec<DiscoveredEvent> {
             let events: Vec<DiscoveredEvent> = (0..5)
                 .map(|i| {
@@ -1813,6 +2175,662 @@ mod tests {
             assert_eq!(ledger["lx:8:2"].answered_by, "quinn");
             assert_eq!(check_on(&vault, &events, &ledger, today, 15).1, 0);
             assert_eq!(cards(&vault, "approvals").len(), 0);
+        }
+
+        // --- obligation cards (T2a.1b) ------------------------------------------------------
+
+        const WHY_OBL: &str = "the club's charter lists this meeting as mandatory";
+
+        fn obligation(vault: &Path, uid: &str, title: &str, jid: Option<&str>) {
+            record_judged_verdict(vault, uid, title, DAY, "obligation", WHY_OBL, jid).unwrap();
+        }
+
+        fn accept_on(
+            vault: &Path,
+            events: &[DiscoveredEvent],
+            ledger: &BTreeMap<String, LedgerEntry>,
+            today: Date,
+            budget: i64,
+        ) -> (Vec<PathBuf>, usize) {
+            let mut journal = Journal::new(vault);
+            let ctx = WriteContext::new("agent:events", "cli");
+            emit_event_accepts(vault, events, ledger, &config(), today, budget, "obligation", &ctx, &mut journal)
+        }
+
+        fn accept(vault: &Path, events: &[DiscoveredEvent], budget: i64) -> (Vec<PathBuf>, usize) {
+            let ledger = load_ledger(vault, None);
+            accept_on(vault, events, &ledger, DAY, budget)
+        }
+
+        /// The `event-accept` cards in `folder`: `event-<slug>-<date>.md`, never `event-check-…`.
+        fn accept_files(vault: &Path, folder: &str) -> Vec<PathBuf> {
+            crate::approvals::sorted_md(&vault.join(folder))
+                .into_iter()
+                .filter(|p| {
+                    p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                        n.starts_with("event-") && !n.starts_with("event-check-")
+                    })
+                })
+                .collect()
+        }
+
+        fn instances(meta: &Mapping) -> Vec<Mapping> {
+            match crate::yaml::get(meta, "instances") {
+                Some(Value::Sequence(items)) => {
+                    items.iter().filter_map(|v| v.as_mapping().cloned()).collect()
+                }
+                _ => Vec::new(),
+            }
+        }
+
+        /// A card written by hand: `extra` is whole frontmatter lines, each ending `\n`.
+        fn hand(vault: &Path, folder: &str, name: &str, kind: &str, status: &str, extra: &str) {
+            fs::create_dir_all(vault.join(folder)).unwrap();
+            let text = format!(
+                "---\ntype: approval\nkind: {kind}\ntitle: \"Earlier card\"\nstatus: {status}\n{extra}\
+                 proposed_at: 2026-09-20\nfirst_proposed_at: 2026-09-20\nexpires: 2026-09-24\n\
+                 snooze_until: null\ncreated_by: events\n---\n\nbody\n"
+            );
+            pystr::write_text(&vault.join(folder).join(name), &text).unwrap();
+        }
+
+        /// A card first proposed on `DAY`, so it counts toward that day's cap.
+        fn hand_today(vault: &Path, name: &str, kind: &str, verdict: &str, uid: &str) {
+            fs::create_dir_all(vault.join("approvals")).unwrap();
+            let text = format!(
+                "---\ntype: approval\nkind: {kind}\ntitle: \"Today's card\"\nstatus: pending\n\
+                 verdict: {verdict}\nsource_uid: \"{uid}\"\nseries_uid: \"{uid}\"\nevents:\n- \"{uid}\"\n\
+                 proposed_at: 2026-09-28\nfirst_proposed_at: 2026-09-28\nexpires: 2026-10-30\n\
+                 snooze_until: null\ncreated_by: events\n---\n\nbody\n"
+            );
+            pystr::write_text(&vault.join("approvals").join(name), &text).unwrap();
+        }
+
+        #[test]
+        fn an_obligation_files_one_event_accept_card() {
+            let vault = vault("oblig");
+            let mut first = on("lx:77:1", "Career fair", 10, 1, 10, 0, 15, 0);
+            first.location = "Ferguson Center".into();
+            first.organizer = "Career Center".into();
+            first.url = "https://example.edu/fair".into();
+            first.registration = true;
+            first.registration_deadline = Some(date(2026, 9, 30));
+            let second = on("lx:77:2", "Career fair", 10, 8, 10, 0, 15, 0);
+            let events = [in_series(second, "lx:77"), in_series(first, "lx:77")];
+            obligation(&vault, "lx:77:1", "Career fair", Some(JID_A));
+            obligation(&vault, "lx:77:2", "Career fair", Some(JID_B));
+
+            let (paths, count) = accept(&vault, &events, 15);
+            assert_eq!(count, 1);
+            assert_eq!(paths, vec![vault.join("approvals").join("event-career-fair-2026-10-01.md")]);
+            let (meta, body) = note(&paths[0]);
+            assert_eq!(field(&meta, "type").as_deref(), Some("approval"));
+            assert_eq!(field(&meta, "kind").as_deref(), Some("event-accept"));
+            assert_eq!(field(&meta, "verdict").as_deref(), Some("obligation"));
+            assert_eq!(
+                field(&meta, "title").as_deref(),
+                Some("Required · Career fair · Thu 1 Oct 10am–3pm · +1 more")
+            );
+            assert_eq!(field(&meta, "status").as_deref(), Some("pending"));
+            assert_eq!(field(&meta, "source_uid").as_deref(), Some("lx:77:1"));
+            assert_eq!(field(&meta, "series_uid").as_deref(), Some("lx:77"));
+            assert_eq!(event_uids(&meta), vec!["lx:77:1", "lx:77:2"]);
+            assert_eq!(field(&meta, "judgment_id").as_deref(), Some(JID_A));
+            assert_eq!(field(&meta, "judgment_kind").as_deref(), Some("event"));
+            assert_eq!(date_field(&meta, "first_proposed_at"), Some(DAY));
+            assert_eq!(date_field(&meta, "expires"), Some(date(2026, 10, 1)), "the primary's date");
+            assert!(matches!(crate::yaml::get(&meta, "snooze_until"), Some(Value::Null)));
+            assert_eq!(field(&meta, "created_by").as_deref(), Some("events"));
+            let id = field(&meta, "id").unwrap_or_default();
+            assert!(crate::ids::ID_RE.is_match(&id), "id was {id:?}");
+
+            // `instances:` (P5): one mapping per listed uid, the primary first, with the url.
+            let listed = instances(&meta);
+            let uids: Vec<_> = listed.iter().filter_map(|m| field(m, "uid")).collect();
+            assert_eq!(uids, vec!["lx:77:1", "lx:77:2"]);
+            assert_eq!(field(&listed[0], "url").as_deref(), Some("https://example.edu/fair"));
+            assert_eq!(field(&listed[0], "location").as_deref(), Some("Ferguson Center"));
+            // To the second, as the carry line holds a span (R1 minor 2).
+            assert_eq!(field(&listed[0], "start").as_deref(), Some("2026-10-01T10:00:00"));
+            assert_eq!(field(&listed[0], "end").as_deref(), Some("2026-10-01T15:00:00"));
+            assert_eq!(field(&listed[0], "registration_deadline").as_deref(), Some("2026-09-30"));
+
+            let paragraphs: Vec<&str> = body.split("\n\n").map(str::trim).filter(|p| !p.is_empty()).collect();
+            assert_eq!(paragraphs[0], format!("**Knowlu thinks this is required of you.** {WHY_OBL}"));
+            assert_eq!(
+                paragraphs[1],
+                "Thu 1 Oct 10am–3pm · Ferguson Center · Career Center\n\
+                 https://example.edu/fair\nAlso on: Thu 8 Oct 10am–3pm"
+            );
+            assert!(
+                body.contains("Reject and it's dropped. Either way you won't be asked again."),
+                "{body}"
+            );
+            assert!(!body.contains("meta-bind-button") && !body.contains(BUTTONS), "{body}");
+
+            // The card is a journaled create by the agent, and the `proposed` lines follow it.
+            assert_eq!(
+                journal_creates(&vault),
+                vec![(
+                    "approvals/event-career-fair-2026-10-01.md".to_string(),
+                    "agent:events".to_string()
+                )]
+            );
+            let ledger = load_ledger(&vault, None);
+            assert!(ledger["lx:77:1"].proposed && ledger["lx:77:2"].proposed);
+
+            // A create that fails leaves no line: `approvals` is a file here.
+            let blocked = self::vault("oblig-blocked");
+            fs::write(blocked.join("approvals"), "not a folder").unwrap();
+            obligation(&blocked, "lx:77:1", "Career fair", None);
+            assert_eq!(accept(&blocked, &events, 15).1, 0);
+            assert!(!load_ledger(&blocked, None)["lx:77:1"].proposed);
+        }
+
+        #[test]
+        fn obligation_cards_are_capped_at_three_a_day_beside_the_checks() {
+            let vault = vault("oblig-cap");
+            let events: Vec<DiscoveredEvent> = (0..4)
+                .map(|i| on(&format!("ics:o{i}"), &format!("Meeting {i}"), 10, 1 + i as i8, 18, 0, 19, 0))
+                .collect();
+            for e in &events {
+                obligation(&vault, &e.uid, &e.title, None);
+            }
+            // Three `event-check` cards first proposed today do not reduce the allowance.
+            for i in 0..3 {
+                hand_today(&vault, &format!("event-check-x{i}.md"), "event-check", "unsure", &format!("ics:c{i}"));
+            }
+            let (paths, count) = accept(&vault, &events, 15);
+            assert_eq!(count, 3);
+            let asked: Vec<String> = paths.iter().filter_map(|p| field(&note(p).0, "source_uid")).collect();
+            assert_eq!(asked, vec!["ics:o0", "ics:o1", "ics:o2"], "soonest first");
+            assert_eq!(accept(&vault, &events, 15).1, 0, "the same day's second call");
+
+            // The budget bounds it, and a card of today's does not leak into the other kind.
+            let small = self::vault("oblig-cap-budget");
+            for e in &events {
+                obligation(&small, &e.uid, &e.title, None);
+            }
+            assert_eq!(accept(&small, &events, 2).1, 2);
+            assert_eq!(accept(&small, &events, 0).1, 0);
+            assert_eq!(accept(&small, &events, -1).1, 0);
+
+            // Three obligation cards today leave `event-check` its own three.
+            let other = self::vault("oblig-cap-checks");
+            for i in 0..3 {
+                hand_today(&other, &format!("event-o{i}.md"), "event-accept", "obligation", &format!("ics:p{i}"));
+            }
+            let fair = on("ics:fair", "Career fair", 10, 1, 10, 0, 15, 0);
+            unsure(&other, "ics:fair", "Career fair", None);
+            assert_eq!(check(&other, std::slice::from_ref(&fair), 15).1, 1);
+        }
+
+        #[test]
+        fn never_ask_twice_across_both_kinds() {
+            let vault = vault("never-twice");
+            // Each skipped event stands in its own series, so only the named rule can close it.
+            let skipped = [
+                "ics:src",    // source_uid of an event-accept card in approvals/
+                "ics:listed", // in `events:` of an event-check card in archive/
+                "ics:prop",   // a `proposed` line
+                "ics:decl",   // a `declined` line
+                "s1:2",       // a live event-check card for its series
+                "s2:2",       // an executed event-accept card for its series
+                "s3:2",       // a rejected event-accept card for its series
+                "s4:2",       // an executed event-check card for its series
+                "s6:2",       // a live event-accept card for its series
+            ];
+            let mut events: Vec<DiscoveredEvent> = skipped
+                .iter()
+                .enumerate()
+                .map(|(i, uid)| {
+                    let event = on(uid, "Meeting", 10, 1 + (i % 10) as i8, 18, 0, 19, 0);
+                    match uid.split_once(':') {
+                        Some((s, _)) if s.starts_with('s') => in_series(event, s),
+                        _ => event,
+                    }
+                })
+                .collect();
+            // The expired card closes only the instance it listed.
+            events.push(in_series(on("s5:1", "Meeting", 10, 3, 18, 0, 19, 0), "s5"));
+            events.push(in_series(on("s5:2", "Meeting", 10, 4, 18, 0, 19, 0), "s5"));
+            events.push(on("ics:free", "Meeting", 10, 5, 18, 0, 19, 0));
+            for e in &events {
+                obligation(&vault, &e.uid, &e.title, None);
+            }
+            record_proposed(&vault, "ics:prop", DAY).unwrap();
+            crate::eventledger::record_declined(&vault, "ics:decl", DAY).unwrap();
+            let series = |s: &str| format!("series_uid: \"{s}\"\n");
+            hand(&vault, "approvals", "event-a.md", "event-accept", "pending", "source_uid: \"ics:src\"\n");
+            hand(&vault, "archive", "event-check-b.md", "event-check", "expired",
+                 "source_uid: \"ics:other\"\nevents:\n- \"ics:other\"\n- \"ics:listed\"\n");
+            hand(&vault, "approvals", "event-check-c.md", "event-check", "pending", &series("s1"));
+            hand(&vault, "archive", "event-d.md", "event-accept", "executed", &series("s2"));
+            hand(&vault, "archive", "event-e.md", "event-accept", "rejected", &series("s3"));
+            hand(&vault, "archive", "event-check-f.md", "event-check", "executed", &series("s4"));
+            hand(&vault, "approvals", "event-g.md", "event-accept", "pending", &series("s6"));
+            hand(&vault, "archive", "event-h.md", "event-accept", "expired",
+                 &format!("source_uid: \"s5:1\"\nevents:\n- \"s5:1\"\n{}", series("s5")));
+            // The answered `event-accept` series are the helper's, not this module's.
+            let answered = crate::eventcarry::answered_series(&vault);
+            assert_eq!(answered.keys().map(String::as_str).collect::<Vec<_>>(), ["s2", "s3"]);
+
+            let (paths, count) = accept(&vault, &events, 15);
+            let asked: Vec<String> = paths.iter().filter_map(|p| field(&note(p).0, "source_uid")).collect();
+            assert_eq!(asked, vec!["s5:2", "ics:free"], "{count}");
+
+            // The same rules close an `event-check` question: an answered event-accept series
+            // is never asked about by an `unsure` instance of it.
+            let unsure_events = [in_series(on("s2:9", "Meeting", 10, 6, 18, 0, 19, 0), "s2")];
+            unsure(&vault, "s2:9", "Meeting", None);
+            assert_eq!(check(&vault, &unsure_events, 15).1, 0);
+        }
+
+        #[test]
+        fn a_series_files_one_card_of_at_most_twenty() {
+            let vault = vault("twenty");
+            let events: Vec<DiscoveredEvent> = (0..25)
+                .map(|i| {
+                    let (day, hour) = (1 + (i / 10) as i8, 8 + (i % 10) as i8);
+                    in_series(on(&format!("lx:5:{i:02}"), "Study hall", 10, day, hour, 0, hour + 1, 0), "lx:5")
+                })
+                .collect();
+            for e in &events {
+                obligation(&vault, &e.uid, &e.title, None);
+            }
+            let (paths, count) = accept(&vault, &events, 15);
+            assert_eq!(count, 1);
+            let (meta, _) = note(&paths[0]);
+            assert_eq!(field(&meta, "title").as_deref(), Some("Required · Study hall · Thu 1 Oct 8–9am · +19 more"));
+            assert_eq!(event_uids(&meta).len(), 20);
+            assert_eq!(instances(&meta).len(), 20);
+            assert_eq!(field(&meta, "source_uid").as_deref(), Some("lx:5:00"));
+            let ledger = load_ledger(&vault, None);
+            assert_eq!(ledger.values().filter(|e| e.proposed).count(), 20);
+            assert!(!ledger["lx:5:24"].proposed, "the 21st instance is not on the card");
+        }
+
+        #[test]
+        fn new_event_check_cards_carry_instances_and_the_new_closing() {
+            let vault = vault("check-instances");
+            let fair = on("ics:fair-1", "Career fair", 10, 1, 10, 0, 15, 0);
+            let talk = in_series(on("lx:9:2", "Weekly lab", 10, 6, 19, 0, 21, 0), "lx:9");
+            let lab = in_series(on("lx:9:1", "Weekly lab", 10, 2, 19, 0, 21, 0), "lx:9");
+            for e in [&fair, &talk, &lab] {
+                unsure(&vault, &e.uid, &e.title, None);
+            }
+            let (paths, count) = check(&vault, &[fair, talk, lab], 15);
+            assert_eq!(count, 2);
+            let (meta, body) = note(&paths[0]);
+            let uids: Vec<_> = instances(&meta).iter().filter_map(|m| field(m, "uid")).collect();
+            assert_eq!(uids, vec!["ics:fair-1"]);
+            let (meta, body2) = note(&paths[1]);
+            let uids: Vec<_> = instances(&meta).iter().filter_map(|m| field(m, "uid")).collect();
+            assert_eq!(uids, vec!["lx:9:1", "lx:9:2"]);
+            for text in [body, body2] {
+                assert!(
+                    text.contains(
+                        "Approve if it applies to you: it goes on your schedule for that day. \
+                         Reject and it's dropped. Either way you won't be asked again."
+                    ),
+                    "{text}"
+                );
+                assert!(!text.contains("joins Coming up"), "{text}");
+            }
+        }
+
+        #[test]
+        fn event_accept_is_not_a_local_card_kind_and_its_notes_sync() {
+            assert!(!crate::commitments::LOCAL_CARD_KINDS.contains(&"event-accept"));
+            assert!(!crate::commitments::LOCAL_CARD_KINDS.contains(&"event-check"));
+            assert!(crate::ids::NOTE_FOLDERS.contains(&"commitments"));
+            assert!(crate::ids::NOTE_FOLDERS.contains(&"tasks"));
+        }
+
+        #[test]
+        fn a_roster_read_event_files_no_event_accept_card_and_no_instances() {
+            let vault = vault("roster");
+            // As `read_roster` builds them: `source: "roster"`, a zero-length event read back as
+            // 15:00-16:00.
+            let roster = |uid: &str, title: &str, day: i8, h: i8, eh: i8| {
+                let mut e = on(uid, title, 10, day, h, 0, eh, 0);
+                e.source = "roster".into();
+                e
+            };
+            let events = [
+                roster("ics:zero", "Info table", 1, 15, 16),
+                roster("ics:late", "Chapter meeting", 2, 18, 19),
+                roster("ics:ask", "Open lab", 3, 10, 11),
+            ];
+            obligation(&vault, "ics:zero", "Info table", None);
+            obligation(&vault, "ics:late", "Chapter meeting", None);
+            unsure(&vault, "ics:ask", "Open lab", None);
+            let (paths, count) = accept(&vault, &events, 15);
+            assert!(paths.is_empty() && count == 0, "{paths:?}");
+            assert!(accept_files(&vault, "approvals").is_empty());
+            let ledger = load_ledger(&vault, None);
+            assert!(!ledger["ics:zero"].proposed && !ledger["ics:late"].proposed);
+
+            // The unsure roster event still gets its question, with no `instances:` key.
+            let (checks, count) = check(&vault, &events, 15);
+            assert_eq!(count, 1);
+            assert_eq!(field(&note(&checks[0]).0, "source_uid").as_deref(), Some("ics:ask"));
+            assert!(crate::yaml::get(&note(&checks[0]).0, "instances").is_none());
+            assert!(!pystr::read_text(&checks[0]).unwrap().contains("instances"));
+            // Approving it books nothing (D11), so it never promises a schedule entry.
+            let body = note(&checks[0]).1;
+            assert!(!body.contains("goes on your schedule"), "{body}");
+            assert!(
+                body.contains(
+                    "Approve if it applies to you: it joins Coming up as something you're \
+                     expected at. Reject and it's dropped. Either way you won't be asked again."
+                ),
+                "{body}"
+            );
+
+            // The same events from a feed file their cards.
+            let fed: Vec<DiscoveredEvent> = events
+                .iter()
+                .cloned()
+                .map(|mut e| {
+                    e.source = "campus".into();
+                    e
+                })
+                .collect();
+            let other = self::vault("roster-fed");
+            obligation(&other, "ics:zero", "Info table", None);
+            obligation(&other, "ics:late", "Chapter meeting", None);
+            let (paths, count) = accept(&other, &fed, 15);
+            assert_eq!(count, 2);
+            assert!(paths.iter().all(|p| !instances(&note(p).0).is_empty()));
+        }
+
+        // --- opportunity cards (T2a.2) ------------------------------------------------------
+
+        const WHY_OPP: &str = "a talk in your major";
+
+        fn cards_on() -> EventsConfig {
+            EventsConfig { event_cards: true, ..EventsConfig::default() }
+        }
+
+        /// `emit_event_accepts` for `verdict` under `config`, over `ledger`, today being `DAY`.
+        fn accept_for(
+            vault: &Path,
+            events: &[DiscoveredEvent],
+            ledger: &BTreeMap<String, LedgerEntry>,
+            config: &EventsConfig,
+            budget: i64,
+            verdict: &str,
+        ) -> (Vec<PathBuf>, usize) {
+            let mut journal = Journal::new(vault);
+            let ctx = WriteContext::new("agent:events", "cli");
+            emit_event_accepts(vault, events, ledger, config, DAY, budget, verdict, &ctx, &mut journal)
+        }
+
+        fn opportunity(vault: &Path, uid: &str, title: &str, jid: Option<&str>) {
+            record_judged_verdict(vault, uid, title, DAY, "opportunity", WHY_OPP, jid).unwrap();
+        }
+
+        fn source_uids(paths: &[PathBuf]) -> Vec<String> {
+            paths.iter().filter_map(|p| field(&note(p).0, "source_uid")).collect()
+        }
+
+        #[test]
+        fn an_opportunity_files_a_card_only_when_event_cards_is_on() {
+            let vault = vault("opp-switch");
+            let mut talk = on("ics:talk", "Engineering talk", 10, 6, 17, 0, 18, 0);
+            talk.location = "Hardaway Hall".into();
+            talk.url = "https://example.edu/talk".into();
+            let events = [talk];
+            opportunity(&vault, "ics:talk", "Engineering talk", Some(JID_A));
+            let ledger = load_ledger(&vault, None);
+
+            // Off: nothing is filed and no `proposed` line is written, so the digest still owns it.
+            let (paths, count) = accept_for(&vault, &events, &ledger, &config(), 15, "opportunity");
+            assert!(paths.is_empty() && count == 0, "{paths:?}");
+            assert!(accept_files(&vault, "approvals").is_empty());
+            assert!(!load_ledger(&vault, None)["ics:talk"].proposed);
+
+            // On, but asked for obligations: an opportunity is not one.
+            assert_eq!(accept_for(&vault, &events, &ledger, &cards_on(), 15, "obligation").1, 0);
+
+            // On: one card.
+            let (paths, count) = accept_for(&vault, &events, &ledger, &cards_on(), 15, "opportunity");
+            assert_eq!(count, 1);
+            assert_eq!(paths, vec![vault.join("approvals").join("event-engineering-talk-2026-10-06.md")]);
+            let (meta, body) = note(&paths[0]);
+            assert_eq!(field(&meta, "kind").as_deref(), Some("event-accept"));
+            assert_eq!(field(&meta, "verdict").as_deref(), Some("opportunity"));
+            assert_eq!(
+                field(&meta, "title").as_deref(),
+                Some("Worth a look · Engineering talk · Tue 6 Oct 5–6pm")
+            );
+            assert_eq!(field(&meta, "judgment_id").as_deref(), Some(JID_A));
+            assert_eq!(field(&meta, "judgment_kind").as_deref(), Some("event"));
+            assert_eq!(instances(&meta).len(), 1);
+            let paragraphs: Vec<&str> = body.split("\n\n").map(str::trim).filter(|p| !p.is_empty()).collect();
+            assert_eq!(paragraphs[0], format!("**This may interest you.** {WHY_OPP}"));
+            assert_eq!(paragraphs[1], "Tue 6 Oct 5–6pm · Hardaway Hall\nhttps://example.edu/talk");
+            assert!(body.contains("Reject and it's dropped. Either way you won't be asked again."), "{body}");
+            assert!(!body.contains("meta-bind-button") && !body.contains(BUTTONS), "{body}");
+            let after = load_ledger(&vault, None);
+            assert!(after["ics:talk"].proposed, "the `proposed` line follows the card");
+            assert_eq!(accept_for(&vault, &events, &after, &cards_on(), 15, "opportunity").1, 0);
+        }
+
+        #[test]
+        fn opportunity_cards_are_capped_at_three_a_day() {
+            let events: Vec<DiscoveredEvent> = (0..5)
+                .map(|i| on(&format!("ics:p{i}"), &format!("Talk {i}"), 10, 1 + i as i8, 17, 0, 18, 0))
+                .collect();
+            let seeded = |name: &str| {
+                let vault = vault(name);
+                for e in &events {
+                    opportunity(&vault, &e.uid, &e.title, None);
+                }
+                vault
+            };
+
+            // Three already first proposed today: none.
+            let full = seeded("opp-cap-full");
+            for i in 0..3 {
+                hand_today(&full, &format!("event-x{i}.md"), "event-accept", "opportunity", &format!("ics:q{i}"));
+            }
+            let ledger = load_ledger(&full, None);
+            assert_eq!(accept_for(&full, &events, &ledger, &cards_on(), 15, "opportunity").1, 0);
+
+            // Two: one more. An obligation card and a check of today leave the allowance alone.
+            let two = seeded("opp-cap-two");
+            for i in 0..2 {
+                hand_today(&two, &format!("event-x{i}.md"), "event-accept", "opportunity", &format!("ics:q{i}"));
+            }
+            hand_today(&two, "event-o0.md", "event-accept", "obligation", "ics:o0");
+            hand_today(&two, "event-check-c0.md", "event-check", "unsure", "ics:c0");
+            let ledger = load_ledger(&two, None);
+            assert_eq!(accept_for(&two, &events, &ledger, &cards_on(), 15, "opportunity").1, 1);
+
+            // None today: three, and the budget bounds it.
+            let none = seeded("opp-cap-none");
+            let ledger = load_ledger(&none, None);
+            assert_eq!(accept_for(&none, &events, &ledger, &cards_on(), 15, "opportunity").1, 3);
+            let small = seeded("opp-cap-budget");
+            let ledger = load_ledger(&small, None);
+            assert_eq!(accept_for(&small, &events, &ledger, &cards_on(), 2, "opportunity").1, 2);
+            assert_eq!(accept_for(&small, &events, &ledger, &cards_on(), 0, "opportunity").1, 0);
+
+            // Three opportunity cards today leave the obligations their own three.
+            let other = vault("opp-cap-oblig");
+            for i in 0..3 {
+                hand_today(&other, &format!("event-x{i}.md"), "event-accept", "opportunity", &format!("ics:q{i}"));
+            }
+            let fair = on("ics:fair", "Career fair", 10, 1, 10, 0, 15, 0);
+            obligation(&other, "ics:fair", "Career fair", None);
+            let ledger = load_ledger(&other, None);
+            assert_eq!(accept_for(&other, std::slice::from_ref(&fair), &ledger, &cards_on(), 15, "obligation").1, 1);
+        }
+
+        /// Every card under `dir`, with its text, in path order, `id:` lines removed.
+        fn tree_without_ids(dir: &Path) -> Vec<(String, String)> {
+            crate::approvals::sorted_md(dir)
+                .into_iter()
+                .map(|path| {
+                    let text = pystr::read_text(&path).unwrap();
+                    let kept: Vec<&str> = text.split('\n').filter(|l| !l.starts_with("id:")).collect();
+                    (path.file_name().unwrap().to_string_lossy().into_owned(), kept.join("\n"))
+                })
+                .collect()
+        }
+
+        fn copy_tree(from: &Path, to: &Path) {
+            fs::create_dir_all(to).unwrap();
+            for entry in fs::read_dir(from).unwrap().filter_map(|e| e.ok()) {
+                let target = to.join(entry.file_name());
+                if entry.path().is_dir() {
+                    copy_tree(&entry.path(), &target);
+                } else {
+                    fs::copy(entry.path(), target).unwrap();
+                }
+            }
+        }
+
+        #[test]
+        fn cards_come_out_in_their_order_and_the_same_input_writes_the_same_bytes() {
+            // Obligations and checks come out in (start, uid): two of each share a start, so the
+            // uid decides.
+            let obligations = [
+                on("ics:ob-b", "Meeting B", 10, 2, 18, 0, 19, 0),
+                on("ics:ob-c", "Meeting C", 10, 1, 18, 0, 19, 0),
+                on("ics:ob-a", "Meeting A", 10, 2, 18, 0, 19, 0),
+            ];
+            let checks = [
+                on("ics:ck-2", "Mixer", 10, 4, 12, 0, 13, 0),
+                on("ics:ck-1", "Social", 10, 4, 12, 0, 13, 0),
+                on("ics:ck-0", "Fair", 10, 5, 9, 0, 10, 0),
+            ];
+            // Opportunities by (strength, registration deadline, start, uid): the digest's
+            // `sort_key`. Two strong ones carry deadlines; the rest have none.
+            let mut d1 = on("ics:op-d1", "Panel D1", 10, 3, 17, 0, 18, 0);
+            d1.registration = true;
+            d1.registration_deadline = Some(date(2026, 10, 2));
+            let mut d2 = on("ics:op-d2", "Panel D2", 10, 2, 17, 0, 18, 0);
+            d2.registration = true;
+            d2.registration_deadline = Some(date(2026, 10, 3));
+            let opps = [
+                on("ics:op-m", "Mild early", 10, 1, 17, 0, 18, 0),
+                on("ics:op-s2", "Strong late", 10, 9, 17, 0, 18, 0),
+                d2,
+                on("ics:op-s1", "Strong tie", 10, 9, 17, 0, 18, 0),
+                d1,
+            ];
+            let strengths = [
+                ("ics:op-m", "mild"),
+                ("ics:op-s2", "strong"),
+                ("ics:op-d1", "strong"),
+                ("ics:op-d2", "strong"),
+                ("ics:op-s1", "strong"),
+            ];
+            let mut events: Vec<DiscoveredEvent> = Vec::new();
+            events.extend(obligations.iter().cloned());
+            events.extend(checks.iter().cloned());
+            events.extend(opps.iter().cloned());
+
+            let vault_a = vault("order-a");
+            for e in &obligations {
+                obligation(&vault_a, &e.uid, &e.title, None);
+            }
+            for e in &checks {
+                unsure(&vault_a, &e.uid, &e.title, None);
+            }
+            for e in &opps {
+                opportunity(&vault_a, &e.uid, &e.title, None);
+            }
+            let vault_b = vault("order-b");
+            copy_tree(&vault_a, &vault_b);
+
+            // `rank`'s order: obligations, then checks, then opportunities.
+            let run = |vault: &Path| {
+                let mut ledger = load_ledger(vault, None);
+                for (uid, strength) in strengths {
+                    ledger.get_mut(uid).unwrap().strength = strength.to_string();
+                }
+                vec![
+                    source_uids(&accept_for(vault, &events, &ledger, &cards_on(), 15, "obligation").0),
+                    source_uids(&check_on(vault, &events, &ledger, DAY, 15).0),
+                    source_uids(&accept_for(vault, &events, &ledger, &cards_on(), 15, "opportunity").0),
+                ]
+            };
+            let asked = run(&vault_a);
+            assert_eq!(asked[0], vec!["ics:ob-c", "ics:ob-a", "ics:ob-b"], "(start, uid)");
+            assert_eq!(asked[1], vec!["ics:ck-1", "ics:ck-2", "ics:ck-0"], "(start, uid)");
+            assert_eq!(
+                asked[2],
+                vec!["ics:op-d1", "ics:op-d2", "ics:op-s1"],
+                "strength, registration deadline, start, uid; the cap of three cuts the rest"
+            );
+
+            // Two runs over copies of one vault write the same output, as P14 reads it: the same
+            // file names in the same order, each card's bytes equal once its `id:` line is
+            // removed, and the same `proposed` ledger lines. Journal timestamps and `id:` values
+            // are left out on purpose: ids are random and journal times are the wall clock, both
+            // contracts. No deterministic id is introduced to make this pass.
+            assert_eq!(run(&vault_b), asked);
+            let cards_a = tree_without_ids(&vault_a.join("approvals"));
+            assert_eq!(cards_a.len(), 9);
+            assert_eq!(cards_a, tree_without_ids(&vault_b.join("approvals")));
+            assert_eq!(seen(&vault_a), seen(&vault_b));
+            assert!(seen(&vault_a).contains("proposed"), "{}", seen(&vault_a));
+        }
+
+        #[test]
+        fn expiry_is_the_event_date_or_fourteen_days_for_an_opportunity() {
+            let vault = vault("opp-expiry");
+            // DAY is 28 Sep. A registration deadline opens an event early (`horizon_start`).
+            let far = |uid: &str, title: &str| {
+                let mut e = on(uid, title, 10, 20, 17, 0, 18, 0);
+                e.registration = true;
+                e.registration_deadline = Some(date(2026, 10, 1));
+                e
+            };
+            let soon = on("ics:soon", "Soon talk", 10, 5, 17, 0, 18, 0);
+            let events = [far("ics:far-opp", "Far talk"), soon.clone(), far("ics:far-obl", "Far meeting")];
+            opportunity(&vault, "ics:far-opp", "Far talk", None);
+            opportunity(&vault, "ics:soon", "Soon talk", None);
+            obligation(&vault, "ics:far-obl", "Far meeting", None);
+            let ledger = load_ledger(&vault, None);
+
+            let (far_opp, _) = accept_for(&vault, &events, &ledger, &cards_on(), 15, "opportunity");
+            // The deadline sorts the far one first, as the digest's `sort_key` would.
+            assert_eq!(source_uids(&far_opp), vec!["ics:far-opp".to_string(), "ics:soon".to_string()]);
+            let expires = |p: &PathBuf| date_field(&note(p).0, "expires").unwrap();
+            assert_eq!(expires(&far_opp[0]), date(2026, 10, 12), "first_proposed_at + 14 comes first");
+            assert_eq!(expires(&far_opp[1]), date(2026, 10, 5), "the event comes first");
+
+            let (obl, _) = accept_for(&vault, &events, &ledger, &cards_on(), 15, "obligation");
+            assert_eq!(source_uids(&obl), vec!["ics:far-obl".to_string()]);
+            assert_eq!(expires(&obl[0]), date(2026, 10, 20), "an obligation expires on its primary's date");
+        }
+
+        #[test]
+        fn a_roster_read_opportunity_files_no_card() {
+            let vault = vault("opp-roster");
+            // As `read_roster` builds it: `source: "roster"`, a past-midnight event read back as
+            // 22:00-23:00.
+            let mut late = on("ics:late", "Late show", 10, 2, 22, 0, 23, 0);
+            late.source = "roster".into();
+            opportunity(&vault, "ics:late", "Late show", None);
+            let ledger = load_ledger(&vault, None);
+
+            let (paths, count) = accept_for(&vault, std::slice::from_ref(&late), &ledger, &cards_on(), 15, "opportunity");
+            assert!(paths.is_empty() && count == 0, "{paths:?}");
+            assert!(accept_files(&vault, "approvals").is_empty());
+            assert!(!load_ledger(&vault, None)["ics:late"].proposed, "so the next fetched run can still ask");
+
+            // The same event from a feed files one.
+            let mut fed = late.clone();
+            fed.source = "campus".into();
+            let (paths, count) = accept_for(&vault, &[fed], &ledger, &cards_on(), 15, "opportunity");
+            assert_eq!(count, 1);
+            assert!(!instances(&note(&paths[0]).0).is_empty());
         }
     }
 }

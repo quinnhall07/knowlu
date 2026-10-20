@@ -130,7 +130,10 @@ pub fn resolve(
                 synthetic.insert("ts".into(), Value::String(upstream_mtime_ts.to_string()));
                 synthetic.insert("device".into(), Value::String("upstream".into()));
                 synthetic.insert("seq".into(), Value::Number(0.into()));
-                synthetic.insert("actor".into(), Value::String("quinn".into()));
+                // Ruling 11 (D4): the human, under the new token. Never written (the supersede
+                // keeps only `record_key`'s four fields); its actor only feeds `actor_rank`, where
+                // both tokens rank 0 — so the outcome and every byte are unchanged.
+                synthetic.insert("actor".into(), Value::String(crate::journal::HUMAN_ACTOR.into()));
                 synthetic.insert("via".into(), Value::String("external".into()));
                 synthetic.insert("field".into(), Value::String(field.clone()));
                 synthetic.insert("old".into(), value_of(&first, "old"));
@@ -286,6 +289,21 @@ mod tests {
         assert_eq!(res.supersede[0].get("old").unwrap().get("device"), Some(&json!("laptop")));
         assert!(res.notes.iter().any(|n| n.contains("external")), "{:?}", res.notes);
         assert_eq!(res.notes[0], "progress: upstream value 55 was an external write");
+    }
+
+    /// Ruling 11 (D4): the synthetic contender is the human, under the new token, and still wins a
+    /// same-instant tie against an agent exactly as before. It is never written — the supersede
+    /// record keeps only `record_key`'s four fields — so no byte carries its actor.
+    #[test]
+    fn an_external_write_still_wins_a_tie_as_the_human() {
+        let local = rec("2026-08-29T10:00:00.000Z", "laptop", "progress", json!(0), json!(40), "agent:coursework.vhl", 1);
+        let res = go(&up("progress: 55\n"), &[], &[local], "2026-08-29T10:00:00.000Z");
+        assert!(res.apply.is_empty(), "the hand edit outranks the agent at the same instant");
+        let sup = &res.supersede[0];
+        assert_eq!(sup.get("new"), Some(&json!({"ts": "2026-08-29T10:00:00.000Z", "device": "upstream", "seq": 0, "field": "progress"})));
+        assert_eq!(sup.get("old").unwrap().get("device"), Some(&json!("laptop")));
+        assert!(!crate::ledger::dumps_value(&Value::Object(sup.clone())).contains("student"), "the contender's actor is never written");
+        assert_eq!(res.notes, vec!["progress: upstream value 55 was an external write".to_string()]);
     }
 
     #[test]

@@ -60,6 +60,16 @@ pub struct Curated {
     pub lms_host: &'static str,
     /// `blackboard` or `canvas`. With `lms_host`, it is enough to build every endpoint either LMS has.
     pub lms_kind: &'static str,
+    /// **The date (`YYYY-MM-DD`) this school's university-policy read was done**, `None` until it is.
+    /// Grades are offered only on a `blackboard` row that carries one (grades spec §4; cloud design
+    /// ruling 12), and `grades::availability` is the one place that decides it. A date reaches `main`
+    /// only with or after privacy bump #1 (`app/tests/grades.rs`, the date-and-bump test).
+    pub policy_read: Option<&'static str>,
+    /// Who hosts this school's student mailbox: `m365`, `google` or `other` (email spec §4.1, D7).
+    /// Data, never code: an uncurated school's provider comes from an MX lookup instead.
+    pub mail_provider: &'static str,
+    /// The student mail domain (`crimson.ua.edu`), set only for `m365` or `google`.
+    pub mail_domain: Option<&'static str>,
     /// Phase 3: the registrar Knowlu can read, or `None` (every school but UA before the pilot).
     pub registrar: Option<Registrar>,
 }
@@ -76,6 +86,9 @@ pub const CAMPUSES: [Curated; 2] = [
         label: "The University of Alabama",
         lms_host: "ualearn.blackboard.com",
         lms_kind: "blackboard",
+        policy_read: None,
+        mail_provider: "m365",
+        mail_domain: Some("crimson.ua.edu"),
         registrar: Some(Registrar {
             school: "ua",
             label: "myBama",
@@ -94,6 +107,12 @@ pub const CAMPUSES: [Curated; 2] = [
         label: "University of Kentucky",
         lms_host: "uk.instructure.com",
         lms_kind: "canvas",
+        policy_read: None,
+        // `other` with no domain, per the plan's T14: an MX record shows who hosts the mail, not that
+        // the school allows outside forwarding. Kentucky's student takes the MX-lookup path until Quinn
+        // confirms a row (one edit here).
+        mail_provider: "other",
+        mail_domain: None,
         registrar: None,
     },
 ];
@@ -229,6 +248,11 @@ pub struct VaultPlan {
     pub api_base: String,
     pub anon_key: String,
     pub account_id: String,
+    /// Ruling 11: the vault's human token, `journal::HUMAN_ACTOR` or `journal::LEGACY_HUMAN_ACTOR`,
+    /// decided before the vault is made (a restore takes the one the account already carries,
+    /// `onboarding::create_vault_in`). `build_into` writes it into `config/actor.yaml` once, before
+    /// any seed, so every human record the wizard makes carries it.
+    pub human_actor: &'static str,
 }
 
 /// One discovered zyBook, as the student confirmed it. `code` is the vendor's own
@@ -709,7 +733,7 @@ fn write_file(root: &Path, rel: &str, text: &str) -> Result<(), String> {
 }
 
 fn build_into(root: &Path, plan: &VaultPlan) -> Result<(), String> {
-    for folder in ["tasks", "approvals", "archive", "courses", "issues", "info", "state", "state/journal", "config"] {
+    for folder in ["tasks", "approvals", "archive", "courses", "issues", "info", "grades", "state", "state/journal", "config"] {
         let path = root.join(folder);
         std::fs::create_dir_all(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     }
@@ -720,6 +744,10 @@ fn build_into(root: &Path, plan: &VaultPlan) -> Result<(), String> {
     write_file(root, "config/planning.yaml", PLANNING)?;
     write_file(root, "config/week_template.yaml", WEEK_TEMPLATE)?;
     write_file(root, ".gitignore", GITIGNORE)?;
+    // Ruling 11 (plan D7): the vault states its human token once, before `seed_writes`, so the
+    // first task and every course note are written as it. Create-new: never rewritten. The adopt
+    // path and the backup-folder restore copy or keep a vault and never reach this.
+    knowlu_engine::journal::create_actor_file(root, plan.human_actor).map_err(|e| e.to_string())?;
     let campus = campus_yaml(&plan.campus).ok_or_else(|| format!("unknown campus preset {:?}", plan.campus))?;
     write_file(root, "config/events.yaml", campus)?;
     write_file(root, "config/campus.yaml", &campus_config_yaml(&plan.campus_choice)?)?;
@@ -750,7 +778,7 @@ const FIRST_TASK_BODY: &str = "Open the drawer on this row to see every field Kn
 it off when you have had a look — Today will fill up as your courses do.";
 
 /// The two engine calls, in this order (spec §3.1). Both go through `knowlu_engine::write`, and only
-/// the first uses a non-`console_ctx()` context — **the one exception in the whole app** (R2).
+/// the first uses a non-`console_ctx(vault)` context — **the one exception in the whole app** (R2).
 ///
 /// **Private, and it stays private** (review round 1, Important 2): `create_vault` runs it against
 /// the staging folder before the rename, so a second call — against a vault that already holds
@@ -770,21 +798,24 @@ fn seed_writes(vault: &Path, plan: &VaultPlan) -> Result<(), String> {
     write::create(vault, "archive/_migrated.md", &seed, &WriteContext::new("system:migration", "cli"), &mut journal, None)
         .map_err(|e| e.to_string())?;
 
-    // …and one real task, so Today is not empty and the first `rank` has something to order.
+    // …and one real task, so Today is not empty and the first `rank` has something to order. Its
+    // `effort_source` and `created_by` are the vault's own token (ruling 11), from the same context
+    // that journals it — `config/actor.yaml`, which `build_into` has just written.
+    let ctx = crate::commands::console_ctx(vault)?;
     let front = Node::map(vec![
         ("title", Node::text("Get to know Knowlu")),
         ("course", Node::Null),
         ("domain", Node::text("school")),
         ("due", Node::Null),
         ("effort_hours", Node::Float(0.5)),
-        ("effort_source", Node::text("quinn")),
+        ("effort_source", Node::text(&ctx.actor)),
         ("importance", Node::Int(2)),
         ("status", Node::text("active")),
         ("progress", Node::Int(0)),
-        ("created_by", Node::text("quinn")),
+        ("created_by", Node::text(&ctx.actor)),
     ]);
     let text = format!("---\n{}---\n\n{FIRST_TASK_BODY}\n", safe_dump_block(&front));
-    write::create(vault, "tasks/get-to-know-knowlu.md", &text, &crate::commands::console_ctx(), &mut journal, None)
+    write::create(vault, "tasks/get-to-know-knowlu.md", &text, &ctx, &mut journal, None)
         .map_err(|e| e.to_string())?;
 
     // R-OB-2: one note per enrolled course, so tier-1 judgment can place a task and the model has a
@@ -810,7 +841,7 @@ fn seed_writes(vault: &Path, plan: &VaultPlan) -> Result<(), String> {
             "---\n{}---\n\n## Grade weights\n\nFill this in from your syllabus — Knowlu uses it to decide what matters.\n",
             safe_dump_block(&front)
         );
-        write::create(vault, &format!("courses/{}.md", c.slug), &body, &crate::commands::console_ctx(), &mut journal, None)
+        write::create(vault, &format!("courses/{}.md", c.slug), &body, &ctx, &mut journal, None)
             .map_err(|e| e.to_string())?;
     }
     Ok(())

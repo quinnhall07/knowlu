@@ -36,6 +36,7 @@ fn plan_for(dest: &Path) -> VaultPlan {
         api_base: knowlu::account::api_base(),
         anon_key: "anon".into(),
         account_id: "acc-1".into(),
+        human_actor: knowlu_engine::journal::HUMAN_ACTOR,
     }
 }
 
@@ -244,6 +245,7 @@ fn a_value_full_of_yaml_metacharacters_is_data_and_never_structure() {
         // about YAML quoting fidelity, not about the account-vs-no-account routing
         // `a_vault_with_an_account_carries_no_capability_url` covers.
         account_id: String::new(),
+        human_actor: knowlu_engine::journal::HUMAN_ACTOR,
     };
     create_vault(&v, &p).unwrap();
     let cfg = v.join("config").join("runners.yaml");
@@ -345,6 +347,20 @@ fn the_campus_preset_is_the_shape_the_engine_already_reads() {
     assert!(warnings.is_empty() && cfg.sources.is_empty());
 }
 
+/// Spec section 5.5, D6, Q5 (c): both presets switch event cards on, and the engine never writes `events.yaml`.
+#[test]
+fn either_preset_scaffolds_event_cards_on() {
+    for campus in ["none", "university-of-alabama"] {
+        let v = temp(&format!("cards-{campus}")).join("Vault");
+        let mut p = plan_for(&v);
+        p.campus = campus.into();
+        create_vault(&v, &p).unwrap();
+        let (cfg, warnings) = knowlu_engine::events::load_events_config(&v.join("config").join("events.yaml"));
+        assert!(warnings.is_empty(), "{campus}: {warnings:?}");
+        assert!(cfg.event_cards, "{campus} scaffolds event_cards on");
+    }
+}
+
 /// I2 (final review): **the read model over a vault the wizard has just made.** The console's first
 /// poll happens seconds after *Finish*, on a vault where nothing has ever run: no `state/today.md`,
 /// no `state/runs/`, no `state/runner-log.md`, not even a git repository. Every view the console
@@ -373,8 +389,45 @@ fn every_view_answers_over_a_vault_the_wizard_has_just_made() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Ruling 11: a vault the wizard makes states its token once, `config/actor.yaml`, before any seed —
+/// so the first task and every human record carry `student`, and the founder's name appears
+/// nowhere in it.
+#[test]
+fn a_new_vault_has_actor_yaml_and_seeds_as_student() {
+    let v = temp("actor-student").join("Vault");
+    let mut p = plan_for(&v);
+    p.courses = vec![knowlu::scaffold::CourseSeed { code: "CS 100".into(), name: "Invented Course".into(), slug: "cs-100".into(), label: "CS 100".into() }];
+    create_vault(&v, &p).unwrap();
+    let file = v.join("config").join("actor.yaml");
+    assert_eq!(knowlu_engine::pystr::read_text(&file).unwrap(), "human_actor: student\n");
+    assert_eq!(std::fs::read(&file).unwrap(), format!("human_actor: student{}", knowlu_engine::pystr::NEWLINE).into_bytes());
+    let task = std::fs::read_to_string(v.join("tasks").join("get-to-know-knowlu.md")).unwrap();
+    assert!(task.contains("created_by: student") && task.contains("effort_source: student"), "{task}");
+    let humans: Vec<_> = journal_records(&v).into_iter().filter(|r| r["actor"] != "system:migration").collect();
+    assert_eq!(humans.len(), 2, "the first task and the course note: {humans:?}");
+    assert!(humans.iter().all(|r| r["actor"] == "student"), "{humans:?}");
+    assert!(!journal_text(&v).contains("quinn"), "no legacy token anywhere in a new vault's journal");
+    assert_eq!(knowlu_engine::journal::read_human_actor(&v), Ok("student"));
+}
+
+/// The restore case (plan D6/D7): the account already carries the legacy token, so the plan says
+/// so, the file says so, and every seed carries it — one account, one token.
+#[test]
+fn a_vault_planned_as_quinn_writes_quinn_throughout() {
+    let v = temp("actor-legacy").join("Vault");
+    let mut p = plan_for(&v);
+    p.human_actor = knowlu_engine::journal::LEGACY_HUMAN_ACTOR;
+    create_vault(&v, &p).unwrap();
+    assert_eq!(knowlu_engine::pystr::read_text(&v.join("config").join("actor.yaml")).unwrap(), "human_actor: quinn\n");
+    let task = std::fs::read_to_string(v.join("tasks").join("get-to-know-knowlu.md")).unwrap();
+    assert!(task.contains("created_by: quinn") && task.contains("effort_source: quinn"), "{task}");
+    let humans: Vec<_> = journal_records(&v).into_iter().filter(|r| r["actor"] != "system:migration").collect();
+    assert!(!humans.is_empty() && humans.iter().all(|r| r["actor"] == "quinn"), "{humans:?}");
+    assert!(!journal_text(&v).contains("student"), "{}", journal_text(&v));
+}
+
 /// R2 + decision 5: exactly ONE `system:migration` record, and every other write the wizard makes
-/// is an ordinary `quinn`/`dashboard` one. An adopted vault gets neither.
+/// is an ordinary `student`/`dashboard` one (ruling 11). An adopted vault gets neither.
 #[test]
 fn one_migration_record_and_the_rest_are_dashboard_writes() {
     let v = temp("journal").join("Vault");
@@ -389,7 +442,7 @@ fn one_migration_record_and_the_rest_are_dashboard_writes() {
     assert!(migration[0]["path"].as_str().unwrap().contains("archive/_migrated.md"));
     let others: Vec<_> = records.iter().filter(|r| r["actor"] != "system:migration").collect();
     assert_eq!(others.len(), 1, "the first task, and nothing else");
-    assert_eq!(others[0]["actor"], "quinn");
+    assert_eq!(others[0]["actor"], "student", "ruling 11: a new vault's human is `student`");
     assert_eq!(others[0]["via"], "dashboard");
     // The credential target the engine will read is named, and holds no secret.
     let ingest = std::fs::read_to_string(v.join("config").join("ingest.yaml")).unwrap();
@@ -472,6 +525,7 @@ fn a_new_vault_carries_the_four_cloud_keys_and_no_secret() {
         api_base: "https://example.supabase.co/functions/v1".into(),
         anon_key: "a-public-anon-key".into(),
         account_id: "11111111-2222-3333-4444-555555555555".into(),
+        human_actor: knowlu_engine::journal::HUMAN_ACTOR,
     };
     let text = cloud_yaml(&p).expect("cloud.yaml");
     // The C2 contract, in its order, single-line single-quoted scalars.
@@ -720,6 +774,7 @@ fn a_confirmed_mapping_becomes_the_config_the_engine_reads() {
         api_base: "https://example.supabase.co/functions/v1".into(),
         anon_key: "anon".into(),
         account_id: "acc-1".into(),
+        human_actor: knowlu_engine::journal::HUMAN_ACTOR,
     };
     let text = ingest_yaml(&p).expect("ingest.yaml");
 
@@ -933,4 +988,35 @@ fn a_chosen_school_becomes_campus_yaml_and_a_timezone_suggestion() {
     for (st, tz) in knowlu::scaffold::STATE_TZ {
         assert!(jiff::tz::TimeZone::get(tz).is_ok(), "{st} maps to {tz}, which the tz database does not have");
     }
+}
+
+// ---- T14: the mail columns of `Curated` (email spec §4.1, D7) -------------------------------------
+
+#[test]
+fn every_curated_row_names_a_known_mail_provider() {
+    for row in CAMPUSES.iter() {
+        assert!(["m365", "google", "other"].contains(&row.mail_provider), "{}: {}", row.label, row.mail_provider);
+    }
+}
+
+#[test]
+fn a_mail_domain_is_set_only_for_m365_or_google() {
+    for row in CAMPUSES.iter() {
+        match (row.mail_provider, row.mail_domain) {
+            ("other", d) => assert!(d.is_none(), "{}: an `other` row names no domain", row.label),
+            (_, Some(d)) => assert!(d.contains('.') && !d.contains('@') && d == d.to_lowercase(), "{}: {d}", row.label),
+            (p, None) => panic!("{}: a {p} row needs a mail domain", row.label),
+        }
+    }
+}
+
+/// The plan's T14 text: UA is the one proof school (m365, `crimson.ua.edu`), and Kentucky's row is
+/// `other` with no domain until Quinn confirms otherwise, so its student takes the MX-lookup path.
+#[test]
+fn the_curated_mail_rows_are_the_plans_ua_proof_school_and_an_other_kentucky() {
+    use knowlu::scaffold::curated;
+    let ua = curated("100751").expect("UA");
+    assert_eq!((ua.mail_provider, ua.mail_domain), ("m365", Some("crimson.ua.edu")));
+    let uk = curated("157085").expect("Kentucky");
+    assert_eq!((uk.mail_provider, uk.mail_domain), ("other", None));
 }

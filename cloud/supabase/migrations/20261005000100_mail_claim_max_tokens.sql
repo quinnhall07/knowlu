@@ -1,0 +1,14 @@
+-- Knowlu — email forwarding: `mail_claim`'s `max_tokens` re-pinned from 640 to 1024 (Quinn's ruling of
+-- 2026-10-05, before T18b's pin check; plan P8's re-pin path, one statement).
+--
+-- 20261002000200_mail.sql seeded `mail_claim` with email's 640. The `mail_claim` prompt
+-- (`judge_prompts.ts`) allows up to five claims with a title under 200 characters, evidence at most 140
+-- and a why under 140, so a reply at its limits needs about 690 output tokens or more; a `max_tokens`
+-- stop records the item `truncated` and drops every claim (`mail-process/model.ts`). 1024 gives that
+-- reply room, and the cap is not what is billed: a call pays for the tokens it used.
+--
+-- `models` is one row per kind (primary key `kind`), so only `mail_claim`'s row moves. `mail_resolve`
+-- keeps 640, and task, event and email are untouched. The model, provider, route, precision, price,
+-- sampling and prompt and grammar versions stay as 20261002000200_mail.sql pinned them; `since` is
+-- re-stamped, as on every re-pin. Forward-only: the mail migration is applied on staging and never edited.
+update public.models set max_tokens = 1024, since = current_date where kind = 'mail_claim';

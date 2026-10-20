@@ -195,9 +195,13 @@ impl Drop for Cleanup {
 /// it over — a read for one target has been observed to spuriously report `ERROR_NOT_FOUND` for a
 /// target no other thread ever touched, surfacing minutes later as an unrelated 10-second loopback
 /// timeout. This serializes every test that reads, writes or deletes a real credential, the same way
-/// `ENGINE_ENV_LOCK` in `tests/scheduler.rs` serializes process-global env var access.
+/// `ENGINE_ENV_LOCK` in `tests/scheduler.rs` serializes process-global env var access. The store is
+/// shared by every process as well, so this is the cross-process lock in `support/credman_lock.rs`.
 #[cfg(windows)]
-static CREDMAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[path = "support/credman_lock.rs"]
+mod credman_lock;
+#[cfg(windows)]
+static CREDMAN_LOCK: credman_lock::CredmanLock = credman_lock::CredmanLock::new();
 
 /// Credential Manager is real on this machine, so this test uses two targets of its own naming and
 /// removes them itself. No secret is asserted on: only the account id and the fact of the move.
@@ -287,18 +291,20 @@ fn moving_a_session_that_does_not_exist_to_a_destination_that_also_does_not_name
 fn signing_out_a_profile_reports_whether_it_had_a_session_and_removes_it() {
     let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _api = ApiBase::set(&closed_loopback_base());
-    use knowlu::account::{save_session, session_target, sign_out, Session};
+    // `sign_out` is the Tauri command (it takes the app's handle to close the mail window, T12);
+    // `sign_out_with` is everything it does, with the mail window's close as a closure.
+    use knowlu::account::{save_session, session_target, sign_out_with, Session};
     let id = format!("test-signout-{}-{}", std::process::id(), line!());
     let target = session_target(&id);
     let _cleanup = Cleanup(vec![target.clone()]);
 
-    let out = sign_out(Some(id.clone())).expect("sign out with nothing to sign out of");
+    let out = sign_out_with(Some(id.clone()), None, |_: &std::path::Path| {}).expect("sign out with nothing to sign out of");
     assert_eq!(out["ok"], true);
     assert_eq!(out["had_session"], false);
 
     let s = Session { access_token: "at".into(), refresh_token: "rt".into(), expires_at: 99, email: "a@example.invalid".into() };
     save_session(&target, "acc-1", &s).expect("write a session to sign out of");
-    let out = sign_out(Some(id)).expect("sign out with a real session");
+    let out = sign_out_with(Some(id), None, |_: &std::path::Path| {}).expect("sign out with a real session");
     assert_eq!(out["ok"], true);
     assert_eq!(out["had_session"], true);
     assert!(!knowlu::credentials::exists(&target), "the credential must be gone after sign-out");
@@ -1591,4 +1597,881 @@ fn a_session_refresh_that_fails_is_named_in_the_sync_status() {
     drop(cs);
     let _ = std::fs::remove_dir_all(&vault);
     let _ = std::fs::remove_dir_all(&data);
+}
+
+// ---- Gmail connect T4b: the three pure cores (spec §4.2, D3; §8.1 items 1–3) ----
+//
+// Each core takes `(api_base, anon, token)` and reads nothing process-global, so these need neither
+// `CREDMAN_LOCK` nor the `ApiBase` seam: the base is the test's own loopback, and
+// `no_test_in_this_file_can_reach_the_compiled_in_project` scans these tests like every other.
+use knowlu::account::{google_connect_url_at, google_disconnect_at, google_status_at};
+
+const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
+const GMAIL_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
+
+/// What every core sends: the named method and path, the session's bearer, and the anon key the
+/// caller passed in (not one read from the environment).
+fn assert_bearer_request(seen: &str, request_line: &str) {
+    assert!(seen.starts_with(&format!("{request_line} HTTP/1.1\r\n")), "{seen}");
+    let lower = seen.to_ascii_lowercase();
+    assert!(lower.contains("\r\nauthorization: bearer the-access-token\r\n"), "{seen}");
+    assert!(lower.contains("\r\napikey: the-anon-key\r\n"), "{seen}");
+}
+
+#[test]
+fn google_status_at_reads_each_state_and_both_scopes() {
+    let (base, handle) = loopback(vec![
+        (200, r#"{"connected":false,"scopes":[],"status":"none","email":null}"#.to_string()),
+        (200, format!(r#"{{"connected":true,"scopes":["openid","email","{CALENDAR_SCOPE}","{GMAIL_SCOPE}"],"status":"active","email":"student@example.invalid"}}"#)),
+        // A bare scope name is not the scope: only the full URL counts, as the wizard's check did.
+        (200, format!(r#"{{"connected":true,"scopes":["{CALENDAR_SCOPE}","gmail.readonly"],"status":"quiet","email":"student@example.invalid"}}"#)),
+        (200, r#"{"connected":false,"scopes":[],"status":"revoked","email":"student@example.invalid"}"#.to_string()),
+    ]);
+    let api = format!("{base}/functions/v1");
+    let got: Vec<_> = (0..4).map(|_| google_status_at(&api, "the-anon-key", "the-access-token")).collect();
+    let got: Vec<_> = got.into_iter().map(|r| r.expect("a status")).collect();
+    assert_eq!(got.iter().map(|s| s.state).collect::<Vec<_>>(), ["none", "active", "quiet", "revoked"]);
+    assert_eq!(got.iter().map(|s| s.connected).collect::<Vec<_>>(), [false, true, true, false]);
+    assert_eq!(got.iter().map(|s| (s.calendar, s.gmail)).collect::<Vec<_>>(), [(false, false), (true, true), (true, false), (false, false)]);
+    let who = Some("student@example.invalid");
+    assert_eq!(got.iter().map(|s| s.email.as_deref()).collect::<Vec<_>>(), [None, who, who, who]);
+    for s in &handle.join().expect("server thread") {
+        assert_bearer_request(s, "GET /functions/v1/google-connect?status=1");
+    }
+}
+
+#[test]
+fn google_status_at_reads_an_older_servers_reply() {
+    let (base, handle) = loopback(vec![
+        (200, format!(r#"{{"connected":true,"scopes":["{CALENDAR_SCOPE}"]}}"#)),
+        (200, r#"{"connected":false,"scopes":[]}"#.to_string()),
+    ]);
+    let api = format!("{base}/functions/v1");
+    let on = google_status_at(&api, "the-anon-key", "the-access-token").expect("a status");
+    let off = google_status_at(&api, "the-anon-key", "the-access-token").expect("a status");
+    assert_eq!((on.state, on.connected, on.calendar, on.gmail, on.email), ("active", true, true, false, None));
+    assert_eq!((off.state, off.connected, off.calendar, off.gmail, off.email), ("none", false, false, false, None));
+    handle.join().expect("server thread");
+}
+
+/// `gmail`, `reconnect` and `calendar` pass through; anything else — a typo, another scope, or an
+/// attempt to smuggle a second `scope=` into the query — asks for `calendar`.
+#[test]
+fn google_connect_url_at_asks_for_the_named_scope_with_the_bearer() {
+    let consent = "https://accounts.google.com/o/oauth2/v2/auth?state=s";
+    let asks = ["gmail", "reconnect", "calendar", "drive", "gmail&scope=reconnect"];
+    let (base, handle) = loopback(asks.iter().map(|_| (200, format!(r#"{{"url":"{consent}"}}"#))).collect());
+    let api = format!("{base}/functions/v1");
+    let got: Vec<_> = asks.iter().map(|ask| google_connect_url_at(&api, "the-anon-key", "the-access-token", ask)).collect();
+    assert!(got.iter().all(|u| u.as_deref() == Ok(consent)), "{got:?}");
+    let seen = handle.join().expect("server thread");
+    for (s, scope) in seen.iter().zip(["gmail", "reconnect", "calendar", "calendar", "calendar"]) {
+        assert_bearer_request(s, &format!("GET /functions/v1/google-connect?scope={scope}"));
+    }
+}
+
+/// The URL is checked in Rust before any caller can open it, and the refusal never repeats it.
+#[test]
+fn google_connect_url_at_refuses_a_url_knowlu_will_not_open() {
+    let (base, handle) = loopback(vec![(200, r#"{"url":"https://evil.example/o/oauth2/v2/auth?state=s"}"#.to_string())]);
+    let got = google_connect_url_at(&format!("{base}/functions/v1"), "the-anon-key", "the-access-token", "gmail");
+    assert_eq!(got, Err("the service returned a url Knowlu will not open".to_string()));
+    handle.join().expect("server thread");
+}
+
+/// Each refusal maps by its status, never by its body (T4a's sentences, spec §4.2).
+#[test]
+fn google_disconnect_at_sends_delete_and_maps_each_status() {
+    let (base, handle) = loopback(vec![
+        (200, r#"{"disconnected":true}"#.to_string()),
+        (502, r#"{"error":"a body the student never sees"}"#.to_string()),
+        (401, r#"{"error":"jwt expired"}"#.to_string()),
+        (402, r#"{"error":"subscription required"}"#.to_string()),
+        (503, r#"{"error":"not configured"}"#.to_string()),
+    ]);
+    let api = format!("{base}/functions/v1");
+    let got: Vec<_> = (0..5).map(|_| google_disconnect_at(&api, "the-anon-key", "the-access-token")).collect();
+    assert_eq!(
+        got,
+        [
+            Ok(()),
+            Err("Google could not be reached to disconnect; try again".to_string()),
+            Err("sign in again".to_string()),
+            Err("your subscription is not active, so Google cannot be connected".to_string()),
+            Err("Google sign-in is not available right now — use the secret address below".to_string()),
+        ]
+    );
+    for s in &handle.join().expect("server thread") {
+        assert_bearer_request(s, "DELETE /functions/v1/google-connect");
+    }
+}
+
+// ---- Gmail connect T5: the three console commands (spec §4.2, D2; §8.1 item 5) ----
+//
+// The console reads the vault's `config/cloud.yaml` and the session target it names, never
+// `PENDING_TARGET`, which is a fixed, real target a developer's own wizard may be holding, so nothing
+// here writes it. The loopback starts last (its `accept` deadline must not outlast the Credential
+// Manager setup; see `refresh_entitlement_saves_the_cache_from_a_live_reply`), and `KNOWLU_API_BASE`
+// names the same loopback, because `cloud_config` refuses a vault `api_base` naming another host.
+
+/// A scratch vault, its generated profile's session target, and a live session (an hour left, so
+/// nothing is refreshed) stored under that target and nowhere else. The `Cleanup` guard exists before
+/// the credential does. `cloud.yaml` is written by [`point_console_vault_at`] once the port is known.
+#[cfg(windows)]
+fn console_vault(tag: &str) -> (std::path::PathBuf, String, Cleanup) {
+    use knowlu::account::{save_session, session_target, Session};
+    let vault = std::env::temp_dir().join(format!("knowlu-google-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&vault);
+    std::fs::create_dir_all(vault.join("config")).unwrap();
+    std::fs::create_dir_all(vault.join("tasks")).unwrap();
+    std::fs::write(vault.join("tasks").join("t.md"), "---\nid: task_0000000001\n---\n\nA task.\n").unwrap();
+    let target = session_target(&knowlu::profiles::id_for(&vault));
+    let cleanup = Cleanup(vec![target.clone()]);
+    let live = jiff::Timestamp::now().as_second() + 3600;
+    let s = Session { access_token: "the-profiles-token".into(), refresh_token: "rt".into(), expires_at: live, email: "a@example.invalid".into() };
+    save_session(&target, "acc-1", &s).expect("write the profile's session");
+    (vault, target, cleanup)
+}
+
+#[cfg(windows)]
+fn point_console_vault_at(vault: &std::path::Path, api_base: &str, target: &str) {
+    std::fs::write(
+        vault.join("config").join("cloud.yaml"),
+        format!("api_base: '{api_base}'\nanon_key: 'the-vaults-anon-key'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n"),
+    )
+    .unwrap();
+}
+
+/// The bearer is the profile's session and the anon key is the vault's, never the compiled-in one.
+#[cfg(windows)]
+fn assert_the_profiles_request(seen: &str, request_line: &str) {
+    assert!(seen.starts_with(&format!("{request_line} HTTP/1.1\r\n")), "{seen}");
+    let lower = seen.to_ascii_lowercase();
+    assert!(lower.contains("\r\nauthorization: bearer the-profiles-token\r\n"), "{seen}");
+    assert!(lower.contains("\r\napikey: the-vaults-anon-key\r\n"), "{seen}");
+}
+
+/// D2: after onboarding the pending target is empty (or, on a shared machine, another student's), so
+/// a console command that read it would answer "sign in again" or speak as someone else. The reply's
+/// error envelope is pinned too: the page shows `error` verbatim and knows nothing it did not hear.
+#[cfg(windows)]
+#[test]
+fn the_console_google_commands_use_the_vaults_session_not_the_pending_one() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::{google_status_in, PENDING_TARGET};
+    let (vault, target, _cleanup) = console_vault("status");
+    assert_ne!(target, PENDING_TARGET);
+    let (base, handle) = loopback(vec![
+        (200, format!(r#"{{"connected":true,"scopes":["openid","email","{CALENDAR_SCOPE}","{GMAIL_SCOPE}"],"status":"active","email":"student@example.invalid"}}"#)),
+        (401, r#"{"error":"jwt expired"}"#.to_string()),
+    ]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    point_console_vault_at(&vault, &api_base, &target);
+
+    let live = google_status_in(&vault);
+    let refused = google_status_in(&vault);
+    let seen = handle.join().expect("server thread");
+    let who = "student@example.invalid";
+    let ok = serde_json::json!({ "ok": true, "state": "active", "calendar": true, "gmail": true, "email": who, "error": null });
+    assert_eq!(live, ok);
+    let err = serde_json::json!({ "ok": false, "state": null, "calendar": null, "gmail": null, "email": null, "error": "sign in again" });
+    assert_eq!(refused, err);
+    assert_eq!(seen.len(), 2);
+    for s in &seen {
+        assert_the_profiles_request(s, "GET /functions/v1/google-connect?status=1");
+    }
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// D2: the inner function answers the URL `external_url_allowed` passed, and only the Tauri wrapper
+/// opens it from Rust. A refused URL comes back as T4b's sentence and no URL, so there is nothing to
+/// open. `reconnect` reaches the service as itself (D8), unlike the wizard's command.
+#[cfg(windows)]
+#[test]
+fn google_connect_in_returns_nothing_to_open_when_the_url_is_refused() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::google_connect_in;
+    let (vault, target, _cleanup) = console_vault("connect");
+    let consent = "https://accounts.google.com/o/oauth2/v2/auth?state=s";
+    let (base, handle) = loopback(vec![
+        (200, format!(r#"{{"url":"{consent}"}}"#)),
+        (200, r#"{"url":"https://evil.example/o/oauth2/v2/auth?state=s"}"#.to_string()),
+    ]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    point_console_vault_at(&vault, &api_base, &target);
+
+    let allowed = google_connect_in(&vault, "reconnect");
+    let refused = google_connect_in(&vault, "gmail");
+    let seen = handle.join().expect("server thread");
+    assert_eq!(allowed.as_deref(), Ok(consent));
+    assert_eq!(refused, Err("the service returned a url Knowlu will not open".to_string()));
+    assert_eq!(seen.len(), 2);
+    assert_the_profiles_request(&seen[0], "GET /functions/v1/google-connect?scope=reconnect");
+    assert_the_profiles_request(&seen[1], "GET /functions/v1/google-connect?scope=gmail");
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// D6: a refused revoke (502) leaves the grant where it was, and Disconnect never touches this
+/// machine either way: the vault keeps what Knowlu wrote, and the session is the student's Knowlu
+/// sign-in, not Google's. The 200 half shows the envelope a landed disconnect answers.
+#[cfg(windows)]
+#[test]
+fn google_disconnect_in_reports_a_502_and_changes_nothing_locally() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::{google_disconnect_in, load_session};
+    let (vault, target, _cleanup) = console_vault("disconnect");
+    let (base, handle) = loopback(vec![
+        (502, r#"{"error":"a body the student never sees"}"#.to_string()),
+        (200, r#"{"disconnected":true}"#.to_string()),
+    ]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    point_console_vault_at(&vault, &api_base, &target);
+    let (tree, held) = (fingerprint(&vault), load_session(&target).ok());
+    assert!(held.is_some(), "the profile's session is there to begin with");
+
+    let failed = google_disconnect_in(&vault);
+    let after_failed = (fingerprint(&vault), load_session(&target).ok());
+    let landed = google_disconnect_in(&vault);
+    let after_landed = (fingerprint(&vault), load_session(&target).ok());
+    let seen = handle.join().expect("server thread");
+    let try_again = "Google could not be reached to disconnect; try again";
+    assert_eq!(failed, serde_json::json!({ "ok": false, "error": try_again }));
+    assert!(after_failed == (tree.clone(), held.clone()), "a refused disconnect changed a vault file or the session");
+    assert_eq!(landed, serde_json::json!({ "ok": true, "error": null }));
+    assert!(after_landed == (tree, held), "a disconnect changed a vault file or the session");
+    assert_eq!(seen.len(), 2);
+    for s in &seen {
+        assert_the_profiles_request(s, "DELETE /functions/v1/google-connect");
+    }
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+// ---- Delete my data and sign-out: the mail steps (email-forwarding T12, spec §4.13, test 38) ----
+//
+// `delete_my_data` is a Tauri command, so its order is driven through `delete_my_data_with` and a
+// recording `DeleteSteps`; the live steps are the command's own. No window opens here, nothing leaves
+// the machine (the wire test's server is this file's loopback), and every mailbox is synthetic.
+
+use knowlu::account::{delete_my_data_with, DeleteSteps, SavedMailbox, FORWARDING_OFF_BOUND};
+use std::time::{Duration, Instant};
+
+/// A scratch profile folder (absolute, under the temp dir) with a kept sign-in for each id in `kept`.
+fn mail_data_dir(tag: &str, kept: &[&str]) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("knowlu-t12-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for id in kept {
+        std::fs::create_dir_all(dir.join(format!("mail-session-{id}"))).unwrap();
+    }
+    dir
+}
+
+/// `GET /mail/addresses`'s reply: two mailboxes with a kept sign-in (Microsoft 365, then Gmail), a
+/// guided one, and a Microsoft 365 one whose sign-in this machine does not keep.
+fn four_mailboxes() -> serde_json::Value {
+    serde_json::json!({ "addresses": [
+        { "address_id": "mbx-school", "provider": "m365", "address": "k1@in.example.invalid", "status": "active" },
+        { "address_id": "mbx-gmail", "provider": "google", "address": "k2@in.example.invalid", "status": "active" },
+        { "address_id": "mbx-other", "provider": "other", "address": "k3@in.example.invalid", "status": "active" },
+        { "address_id": "mbx-unkept", "provider": "m365", "address": "k4@in.example.invalid", "status": "active" },
+    ]})
+}
+
+fn rows_of(v: &serde_json::Value) -> Vec<serde_json::Value> {
+    v["addresses"].as_array().expect("an addresses array").clone()
+}
+
+/// A `DeleteSteps` that records each call in order; each step's behaviour is a closure, all succeeding
+/// by default (an empty mailbox list, a forwarding turned off, a deleted account).
+struct Steps<'a> {
+    log: Vec<String>,
+    /// Per mailbox tried: (id, provider, the Knowlu address handed to the script, the profile folder).
+    tried: Vec<(String, knowlu::mail_steps::Provider, String, std::path::PathBuf)>,
+    /// Per mailbox tried: (when the call began, the deadline it was given).
+    bounds: Vec<(Instant, Instant)>,
+    list: Box<dyn FnMut() -> Result<Vec<serde_json::Value>, String> + 'a>,
+    off: Box<dyn FnMut(&SavedMailbox) -> Result<bool, &'static str> + 'a>,
+    delete: Box<dyn FnMut() -> Result<(), String> + 'a>,
+    close: Box<dyn FnMut() + 'a>,
+    local: Box<dyn FnMut() + 'a>,
+}
+
+impl<'a> Steps<'a> {
+    fn new() -> Steps<'a> {
+        Steps {
+            log: Vec::new(),
+            tried: Vec::new(),
+            bounds: Vec::new(),
+            list: Box::new(|| Ok(Vec::new())),
+            off: Box::new(|_| Ok(true)),
+            delete: Box::new(|| Ok(())),
+            close: Box::new(|| {}),
+            local: Box::new(|| {}),
+        }
+    }
+}
+
+impl DeleteSteps for Steps<'_> {
+    fn mailboxes(&mut self) -> Result<Vec<serde_json::Value>, String> {
+        self.log.push("list".into());
+        (self.list)()
+    }
+    fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: Instant) -> Result<bool, &'static str> {
+        let began = Instant::now();
+        self.log.push(format!("off {}", mailbox.address_id));
+        self.tried.push((mailbox.address_id.clone(), mailbox.provider, mailbox.address().to_string(), mailbox.profile.clone()));
+        let r = (self.off)(mailbox);
+        self.bounds.push((began, deadline));
+        r
+    }
+    fn delete_account(&mut self) -> Result<(), String> {
+        self.log.push("delete".into());
+        (self.delete)()
+    }
+    fn close_mail_windows(&mut self) {
+        self.log.push("close".into());
+        (self.close)()
+    }
+    fn delete_local_data(&mut self) {
+        self.log.push("local".into());
+        (self.local)()
+    }
+}
+
+/// Spec §4.13: before its server call, *Delete my data* tries to turn forwarding off in each mailbox
+/// with a saved sign-in, a minute each. Driven on the wire: the mailbox list (`GET /mail/addresses`)
+/// and `DELETE /account` are the real calls against this file's loopback, so the order is the order
+/// the service sees. Only the two mailboxes with a kept profile are tried, in the service's order and
+/// each with its own Knowlu address; a guided mailbox and one with no kept sign-in are not.
+#[test]
+fn delete_my_data_runs_the_forwarding_off_pre_step_before_the_server_call() {
+    let data_dir = mail_data_dir("order", &["mbx-school", "mbx-gmail"]);
+    let (base, handle) = loopback(vec![(200, four_mailboxes().to_string()), (200, r#"{"deleted":true}"#.to_string())]);
+    let api_base = format!("{base}/functions/v1");
+    let client = knowlu::mail_client::MailClient::with_token_fn(&api_base, Box::new(|| Ok("tok".to_string()))).expect("a loopback client");
+    let mut steps = Steps::new();
+    steps.list = Box::new(|| client.list_addresses().map_err(|e| e.name().to_string()));
+    steps.delete = Box::new(|| knowlu::account::delete_account_at(&api_base, "tok"));
+
+    let out = delete_my_data_with(&mut steps, &data_dir, FORWARDING_OFF_BOUND);
+    let seen = handle.join().expect("server thread");
+
+    assert_eq!(out, serde_json::json!({ "ok": true, "error": null }));
+    assert_eq!(steps.log, ["list", "off mbx-school", "off mbx-gmail", "delete", "close", "local"]);
+    assert_eq!(seen.len(), 2, "one list, one delete, nothing else");
+    assert!(seen[0].starts_with("GET /functions/v1/mail/addresses "), "{}", seen[0]);
+    assert!(seen[1].starts_with("DELETE /functions/v1/account "), "{}", seen[1]);
+    use knowlu::mail_steps::Provider;
+    let tried: Vec<_> = steps.tried.iter().map(|(id, p, a, dir)| (id.as_str(), *p, a.as_str(), dir.clone())).collect();
+    assert_eq!(
+        tried,
+        [
+            ("mbx-school", Provider::M365, "k1@in.example.invalid", data_dir.join("mail-session-mbx-school")),
+            ("mbx-gmail", Provider::Gmail, "k2@in.example.invalid", data_dir.join("mail-session-mbx-gmail")),
+        ]
+    );
+    assert_eq!(FORWARDING_OFF_BOUND, Duration::from_secs(60), "a minute per mailbox");
+    for (began, deadline) in &steps.bounds {
+        assert!(*deadline > *began && *deadline <= *began + FORWARDING_OFF_BOUND, "each mailbox is bounded to its minute");
+    }
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// Spec §4.13: the pre-step is best effort. A mailbox list that cannot be read skips it; a mailbox whose
+/// forwarding could not be turned off (signed out, a page that changed, its minute spent) is passed
+/// over and the next one is still tried; and the deletion goes ahead in every case. A slow mailbox
+/// never takes the next one's minute: each deadline is set when its own mailbox starts.
+#[test]
+fn a_failing_pre_step_never_blocks_the_deletion() {
+    let data_dir = mail_data_dir("failing", &["mbx-school", "mbx-gmail"]);
+    let rows = rows_of(&four_mailboxes());
+    let deleted = serde_json::json!({ "ok": true, "error": null });
+
+    let mut s = Steps::new();
+    s.list = Box::new(|| Err("unreachable".to_string()));
+    assert_eq!(delete_my_data_with(&mut s, &data_dir, FORWARDING_OFF_BOUND), deleted);
+    assert_eq!(s.log, ["list", "delete", "close", "local"], "an unreadable list skips the pre-step, nothing more");
+
+    let mut s = Steps::new();
+    let listed = rows.clone();
+    s.list = Box::new(move || Ok(listed.clone()));
+    s.off = Box::new(|_| Err("needs sign-in"));
+    assert_eq!(delete_my_data_with(&mut s, &data_dir, FORWARDING_OFF_BOUND), deleted);
+    assert_eq!(s.log, ["list", "off mbx-school", "off mbx-gmail", "delete", "close", "local"]);
+
+    let bound = Duration::from_millis(200);
+    let mut s = Steps::new();
+    s.list = Box::new(move || Ok(rows.clone()));
+    s.off = Box::new(move |_| {
+        std::thread::sleep(bound);
+        Err("out of time")
+    });
+    assert_eq!(delete_my_data_with(&mut s, &data_dir, bound), deleted);
+    assert_eq!(s.log, ["list", "off mbx-school", "off mbx-gmail", "delete", "close", "local"]);
+    for (began, deadline) in &s.bounds {
+        assert!(*deadline > *began && *deadline <= *began + bound, "each mailbox has its own bound");
+    }
+    assert!(s.bounds[1].1 >= s.bounds[0].1 + bound, "the second mailbox's minute starts when it does");
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// Spec §4.13: the mail windows close before `delete_local_data` removes the profile folder and every
+/// kept mail profile with it. A refused server call stops before either (nothing on this machine is
+/// touched, the windows included); a deleted account closes them while every kept profile is still
+/// there, and then the real local wipe takes the profiles with the folder.
+#[test]
+fn the_mail_windows_close_before_delete_local_data() {
+    let root = std::env::temp_dir().join(format!("knowlu-t12-close-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let vault = root.join("vault");
+    std::fs::create_dir_all(vault.join("tasks")).unwrap();
+    std::fs::write(vault.join("tasks").join("a.md"), "mine").unwrap();
+    let data_dir = root.join("data");
+    for kept in ["mail-session-mbx-school", "mail-session-mbx-gmail", "mail-setup"] {
+        std::fs::create_dir_all(data_dir.join(kept)).unwrap();
+    }
+    std::fs::write(data_dir.join("settings.json"), "{}").unwrap();
+    let profiles_there = || ["mail-session-mbx-school", "mail-session-mbx-gmail", "mail-setup"].iter().all(|n| data_dir.join(n).is_dir());
+    // No profile id and no session target: this wipe never reaches Credential Manager, so no lock.
+    let wipe = || knowlu::account::delete_local_data(&vault, &data_dir, None, "", None, "");
+
+    let refused = "your account could not be deleted (no) — nothing on this machine was touched";
+    let mut s = Steps::new();
+    s.delete = Box::new(|| Err(refused.to_string()));
+    s.local = Box::new(wipe);
+    assert_eq!(delete_my_data_with(&mut s, &data_dir, FORWARDING_OFF_BOUND), serde_json::json!({ "ok": false, "error": refused }));
+    assert_eq!(s.log, ["list", "delete"], "a refused deletion closes nothing and wipes nothing");
+    assert!(profiles_there() && vault.join("tasks").join("a.md").is_file());
+
+    let at_close = std::cell::Cell::new(None);
+    let mut s = Steps::new();
+    s.close = Box::new(|| at_close.set(Some(profiles_there())));
+    s.local = Box::new(wipe);
+    assert_eq!(delete_my_data_with(&mut s, &data_dir, FORWARDING_OFF_BOUND), serde_json::json!({ "ok": true, "error": null }));
+    assert_eq!(s.log, ["list", "delete", "close", "local"]);
+    assert_eq!(at_close.get(), Some(true), "the windows closed while the kept profiles were still there");
+    assert!(!data_dir.exists(), "the local wipe took the profile folder and every kept mail profile in it");
+    assert!(!vault.exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Spec §4.13: Knowlu sign-out closes the mail window and deletes every `mail-session-*` profile and the
+/// `mail-setup` profile of THAT Knowlu profile: a signed-out Knowlu keeps no signed-in mailbox. Nothing
+/// else in its folder goes (its settings, the grades kept session, a folder that only looks like a mail
+/// profile), and a second profile on the machine keeps its own. The window closes first, while the
+/// profiles are still there.
+#[cfg(windows)]
+#[test]
+fn sign_out_deletes_this_profiles_mail_session_and_mail_setup_profiles_and_no_others() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let root = std::env::temp_dir().join(format!("knowlu-t12-signout-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&root);
+    let app_root = root.join("appdata");
+    let (my_id, their_id) = (knowlu::profiles::id_for(&root.join("Mine")), knowlu::profiles::id_for(&root.join("Theirs")));
+    let _cleanup = Cleanup(vec![knowlu::account::session_target(&my_id)]);
+    let (mine, theirs) = (knowlu::profiles::profile_dir(&app_root, &my_id), knowlu::profiles::profile_dir(&app_root, &their_id));
+    let mail = ["mail-session-mbx-school", "mail-session-mbx-gmail", "mail-setup"];
+    let kept = ["lms-session", "mail-session-NOT-AN-ID", "mail-sessions"];
+    for n in mail.iter().chain(kept.iter()) {
+        std::fs::create_dir_all(mine.join(n)).unwrap();
+    }
+    std::fs::write(mine.join("settings.json"), "{}").unwrap();
+    for n in ["mail-session-mbx-theirs", "mail-setup"] {
+        std::fs::create_dir_all(theirs.join(n)).unwrap();
+    }
+
+    let closed = std::cell::RefCell::new(Vec::new());
+    let out = knowlu::account::sign_out_with(Some(my_id.clone()), Some(&app_root), |dir: &std::path::Path| {
+        closed.borrow_mut().push((dir.to_path_buf(), mail.iter().all(|n| dir.join(n).is_dir())));
+    })
+    .expect("sign out");
+
+    assert_eq!(out["ok"], true);
+    assert_eq!(out["mail_profiles_left"], false);
+    assert_eq!(closed.into_inner(), [(mine.clone(), true)], "the window closed once, for this profile, before any delete");
+    for n in mail {
+        assert!(!mine.join(n).exists(), "{n} survived sign-out");
+    }
+    for n in kept {
+        assert!(mine.join(n).is_dir(), "{n} is not a mail profile and must survive");
+    }
+    assert!(mine.join("settings.json").is_file());
+    assert!(theirs.join("mail-session-mbx-theirs").is_dir() && theirs.join("mail-setup").is_dir(), "another profile's mail profiles were deleted");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The pre-step opens Microsoft 365's Forwarding page itself, under its own deadline, so it keeps its
+/// own copy of the URL the setup runner's `WindowMailbox` opens for `Place::Forwarding`. Both must
+/// name the same page.
+#[test]
+fn the_pre_steps_forwarding_page_is_the_setup_runners() {
+    let page = "\"https://outlook.office.com/mail/options/mail/forwarding\"";
+    let account = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let recover = std::fs::read_to_string("src/mail/recover.rs").expect("src/mail/recover.rs");
+    assert!(account.contains(page), "account.rs's pre-step does not open Microsoft 365's Forwarding page");
+    assert!(recover.contains(page), "the setup runner's Forwarding page moved; move the pre-step's with it");
+}
+
+/// Checkpoint D (minor 3): the pre-step runs before `DELETE /account`, so a refused deletion can follow a
+/// forwarding it already turned off. The page's sentence then says so, with the count and the way back,
+/// singular or plural; with nothing turned off it says nothing more. A mailbox whose forwarding was already
+/// off (the script's `changed: false`) was not turned off by the pre-step and is not counted (Checkpoint D
+/// re-check). Nothing local is touched either way.
+#[test]
+fn a_refused_deletion_says_where_forwarding_was_already_turned_off() {
+    let data_dir = mail_data_dir("refused-off", &["mbx-school", "mbx-gmail"]);
+    let rows = rows_of(&four_mailboxes());
+    let refused = "your account could not be deleted (server error) — nothing on this machine was touched";
+    let after = |n: &str| {
+        format!("{refused}. Forwarding to Knowlu was turned off in {n} before this failed; you can turn it back on in Settings → Email.")
+    };
+    let cases: [(fn(&SavedMailbox) -> Result<bool, &'static str>, Option<String>); 5] = [
+        (|_| Ok(true), Some(after("2 mailboxes"))),
+        (|m| if m.address_id == "mbx-school" { Ok(true) } else { Err("needs sign-in") }, Some(after("1 mailbox"))),
+        (|_| Err("needs sign-in"), None),
+        // Gmail's forwarding was already off: only the school mailbox's was turned off.
+        (|m| Ok(m.address_id == "mbx-school"), Some(after("1 mailbox"))),
+        // Both already off: nothing was turned off, so the sentence adds nothing.
+        (|_| Ok(false), None),
+    ];
+    for (off, sentence) in cases {
+        let mut s = Steps::new();
+        let listed = rows.clone();
+        s.list = Box::new(move || Ok(listed.clone()));
+        s.off = Box::new(off);
+        s.delete = Box::new(|| Err(refused.to_string()));
+        let out = delete_my_data_with(&mut s, &data_dir, FORWARDING_OFF_BOUND);
+        assert_eq!(out, serde_json::json!({ "ok": false, "error": sentence.unwrap_or_else(|| refused.to_string()) }));
+        assert_eq!(s.log, ["list", "off mbx-school", "off mbx-gmail", "delete"], "a refused deletion closes nothing and wipes nothing");
+    }
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// The live half of the stop, which needs the app's handle, so no test drives it: `close_mail_windows`
+/// calls `mail::stop_runs` before it closes the window; sign-out closes and then takes the mail window,
+/// within its bound, as what its close hands `sign_out_with`; the wipe waits for the window the same way.
+#[test]
+fn the_live_close_stops_runs_first_and_sign_out_and_the_wipe_wait_for_the_window() {
+    let src = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let body = |head: &str| {
+        let at = src.find(head).unwrap_or_else(|| panic!("{head}"));
+        &src[at..at + src[at..].find("\n}\n").expect("the end of its body")]
+    };
+    let close = body("fn close_mail_windows(app: &tauri::AppHandle) {");
+    let (stop, shut) = (close.find("crate::mail::stop_runs();"), close.find("crate::mail::close(app);"));
+    assert!(stop.is_some() && stop < shut, "close_mail_windows sets the stop before it closes the window: {close}");
+    // Split so this file's compiled-in-project guard does not read a search string as a call to sign_out.
+    let sign_out = body(concat!("pub fn sign_out", "(app: tauri::AppHandle"));
+    let (closes, takes) = (sign_out.find("close_mail_windows(&app);"), sign_out.find("take_mail_window(&app, std::time::Instant::now() + MAIL_STOP_BOUND)"));
+    assert!(closes.is_some() && closes < takes, "sign-out closes, then takes the mail window within its bound: {sign_out}");
+    assert!(body("impl DeleteSteps for LiveDelete").contains("take_mail_window(self.app, std::time::Instant::now() + MAIL_STOP_BOUND)"));
+    assert!(body("fn take_mail_window(").contains("MailWindow::take_by(deadline, || close_mail_windows(app))"));
+}
+
+// ---- the slot's mail step against a sign-out's close (Checkpoint D, finding 1; spec §4.13) ----
+//
+// The slot's mail step holds the one mail window across every due mailbox, opening each one's kept profile in
+// turn. A sign-out or a deletion closes the mail window and then deletes every kept profile, so once the close
+// has run the step must open no further profile, and the closer must hold the window until the profiles are gone.
+
+#[cfg(windows)]
+#[path = "support/slot_rig.rs"]
+mod slot_rig;
+
+/// A slot-shaped mail window. Each profile it opens is held, a file open with no sharing as WebView2 holds its
+/// profile, until the window closes. A script waits while the window is open (a long reconcile) and then answers
+/// as a vanished window does, so a pass ends only once its window is closed under it.
+#[cfg(windows)]
+struct HeldWindow {
+    st: std::sync::Arc<std::sync::Mutex<Held>>,
+    opened: std::sync::mpsc::Sender<String>,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct Held {
+    open: Option<std::fs::File>,
+    /// Every profile opened, by folder name.
+    opens: Vec<String>,
+}
+
+#[cfg(windows)]
+impl HeldWindow {
+    fn is_open(&self) -> bool {
+        self.st.lock().unwrap().open.is_some()
+    }
+}
+
+#[cfg(windows)]
+impl knowlu::mail::recover::Mailbox for HeldWindow {
+    fn script(&self, _: &str, _: &serde_json::Value) -> Result<serde_json::Value, knowlu::mail::Refusal> {
+        let began = Instant::now();
+        while self.is_open() && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err(knowlu::mail::Refusal::NoPage)
+    }
+    fn open(&self, _: knowlu::mail::recover::Place) -> Result<(), knowlu::mail::Refusal> {
+        if self.is_open() { Ok(()) } else { Err(knowlu::mail::Refusal::NoPage) }
+    }
+}
+
+#[cfg(windows)]
+impl knowlu::mail::host::Host for HeldWindow {
+    fn use_provider(&self, _: knowlu::mail_steps::Provider) {}
+    fn open_window(&self, profile: &std::path::Path, _visible: bool) -> Result<(), String> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = std::fs::OpenOptions::new().write(true).create(true).truncate(true).share_mode(0).open(profile.join("held"));
+        let name = profile.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let mut s = self.st.lock().unwrap();
+        s.open = Some(held.map_err(|e| e.to_string())?);
+        s.opens.push(name.clone());
+        drop(s);
+        let _ = self.opened.send(name);
+        Ok(())
+    }
+    fn window_open(&self) -> bool {
+        self.is_open()
+    }
+    fn signed_in(&self) -> bool {
+        self.is_open()
+    }
+    fn title_address(&self) -> Option<String> {
+        None
+    }
+    fn popup_open(&self) -> bool {
+        false
+    }
+    fn step_aside(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn come_back(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn close_window(&self) {
+        self.st.lock().unwrap().open = None;
+    }
+}
+
+/// What the test's sign-out close hands back to `sign_out_with`: the mail window's hold and, when it is let
+/// go, whether any `mail-session-*` profile was still on disk.
+#[cfg(windows)]
+struct Kept<'a> {
+    _hold: Option<knowlu::mail::MailWindow>,
+    dir: std::path::PathBuf,
+    left_at_release: &'a std::cell::Cell<Option<bool>>,
+}
+
+#[cfg(windows)]
+impl Drop for Kept<'_> {
+    fn drop(&mut self) {
+        let left = std::fs::read_dir(&self.dir).map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with("mail-session-")));
+        self.left_at_release.set(Some(left.unwrap_or(false)));
+    }
+}
+
+/// Spec §4.13, Checkpoint D finding 1: a slot's mail step holds the mail window on the first of three
+/// mailboxes when the student signs out. The sign-out's close (as `account::close_mail_windows` does it: the
+/// stop, then the window) ends that mailbox's pass; the step then tries the next mailbox and is refused, so no
+/// second profile opens. The sign-out takes the hold within its time limit, keeps it until every
+/// `mail-session-<id>` is deleted, and lets it go only then.
+#[cfg(windows)]
+#[test]
+fn a_slot_holding_the_mail_window_opens_no_profile_after_the_sign_out_closes_it() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _runs = MAIL_RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let root = std::env::temp_dir().join(format!("knowlu-t12-slot-stop-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&root);
+    let app_root = root.join("appdata");
+    let id = knowlu::profiles::id_for(&root.join("Mine"));
+    let _cleanup = Cleanup(vec![knowlu::account::session_target(&id)]);
+    let dir = knowlu::profiles::profile_dir(&app_root, &id);
+    let ids = ["mbx-a", "mbx-b", "mbx-c"];
+    for m in ids {
+        std::fs::create_dir_all(dir.join(format!("mail-session-{m}"))).unwrap();
+    }
+    let rows: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|m| serde_json::json!({ "address_id": m, "provider": "m365", "address": slot_rig::KNOWLU, "status": "active", "lapsed_since": null }))
+        .collect();
+    let st = std::sync::Arc::new(std::sync::Mutex::new(Held::default()));
+    let (opened, first) = std::sync::mpsc::channel();
+    let window = HeldWindow { st: st.clone(), opened };
+    let (svc, slot_dir, due) = (slot_rig::Svc::start(rows.clone()), dir.clone(), rows.clone());
+    let slot = std::thread::spawn(move || {
+        let _hold = knowlu::mail::MailWindow::try_take().expect("the slot's mail step holds the mail window");
+        let (client, clock) = (svc.client(), slot_rig::Clk::at(slot_rig::NOW));
+        knowlu::mail::slot::run_step(&knowlu::mail::slot::SlotEnv { host: &window, client: &client, clock: &clock, data_dir: &slot_dir }, &due)
+    });
+    assert_eq!(first.recv_timeout(Duration::from_secs(60)).expect("the slot opened its first mailbox"), "mail-session-mbx-a");
+
+    let left_at_release = std::cell::Cell::new(None);
+    let out = knowlu::account::sign_out_with(Some(id.clone()), Some(&app_root), |d: &std::path::Path| {
+        let close = || {
+            knowlu::mail::stop_runs();
+            st.lock().unwrap().open = None;
+        };
+        let hold = knowlu::mail::MailWindow::take_by(Instant::now() + Duration::from_secs(30), close);
+        assert!(hold.is_some(), "the sign-out took the mail window within its time limit");
+        Kept { _hold: hold, dir: d.to_path_buf(), left_at_release: &left_at_release }
+    })
+    .expect("sign out");
+    slot.join().expect("the slot's thread");
+
+    assert_eq!(st.lock().unwrap().opens, ["mail-session-mbx-a"], "a mail profile was opened after the sign-out's close");
+    assert_eq!((out["ok"].clone(), out["mail_profiles_left"].clone()), (serde_json::json!(true), serde_json::json!(false)), "{out}");
+    for m in ids {
+        assert!(!dir.join(format!("mail-session-{m}")).exists(), "mail-session-{m} survived sign-out");
+    }
+    assert_eq!(left_at_release.get(), Some(false), "the mail window was let go before every mail profile was gone");
+    assert!(knowlu::mail::MailWindow::try_take().is_some(), "the sign-out let the mail window go when it was done");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---- a stop that lands while the slot opens a mailbox's window (Checkpoint D re-check; spec §4.13) ----
+
+/// `mail::stop_runs` and the mail window's hold are process-wide: the slot runs in this file take this lock,
+/// so one test's stop never lands in another's run.
+#[cfg(windows)]
+static MAIL_RUN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Where a sign-out's close (`mail::stop_runs`) lands in the slot's mailbox: while the provider is chosen,
+/// just before the window opens, or while the window opens.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum StopIn {
+    UseProvider,
+    OpenWindow,
+}
+
+/// How many more looks a closed window still answers as open: WebView2 destroys a window asynchronously.
+#[cfg(windows)]
+const GOING_LOOKS: u32 = 3;
+
+/// A mail window whose destroy lags, as WebView2's does, and on which a sign-out's close lands at `stop_in`.
+/// It records every profile opened and everything run in it.
+#[cfg(windows)]
+struct LaggingWindow {
+    stop_in: StopIn,
+    st: std::sync::Mutex<Lagging>,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct Lagging {
+    open: bool,
+    /// Looks at `window_open` the closed window still answers `true` to.
+    going: u32,
+    closed: u32,
+    /// Every profile opened, by folder name.
+    opens: Vec<String>,
+    /// Every script run and every place opened in the window.
+    ran: Vec<String>,
+}
+
+#[cfg(windows)]
+impl knowlu::mail::recover::Mailbox for LaggingWindow {
+    fn script(&self, path: &str, _: &serde_json::Value) -> Result<serde_json::Value, knowlu::mail::Refusal> {
+        self.st.lock().unwrap().ran.push(path.to_string());
+        Err(knowlu::mail::Refusal::NoPage)
+    }
+    fn open(&self, place: knowlu::mail::recover::Place) -> Result<(), knowlu::mail::Refusal> {
+        self.st.lock().unwrap().ran.push(format!("open {place:?}"));
+        Err(knowlu::mail::Refusal::NoPage)
+    }
+}
+
+#[cfg(windows)]
+impl knowlu::mail::host::Host for LaggingWindow {
+    fn use_provider(&self, _: knowlu::mail_steps::Provider) {
+        if self.stop_in == StopIn::UseProvider {
+            knowlu::mail::stop_runs();
+        }
+    }
+    fn open_window(&self, profile: &std::path::Path, _visible: bool) -> Result<(), String> {
+        let mut s = self.st.lock().unwrap();
+        s.open = true;
+        s.opens.push(profile.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+        drop(s);
+        if self.stop_in == StopIn::OpenWindow {
+            knowlu::mail::stop_runs();
+        }
+        Ok(())
+    }
+    fn window_open(&self) -> bool {
+        let mut s = self.st.lock().unwrap();
+        if s.going > 0 {
+            s.going -= 1;
+            return true;
+        }
+        s.open
+    }
+    fn signed_in(&self) -> bool {
+        self.st.lock().unwrap().open
+    }
+    fn title_address(&self) -> Option<String> {
+        None
+    }
+    fn popup_open(&self) -> bool {
+        false
+    }
+    fn step_aside(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn come_back(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn close_window(&self) {
+        let mut s = self.st.lock().unwrap();
+        if s.open {
+            s.open = false;
+            s.closed += 1;
+            s.going = GOING_LOOKS;
+        }
+    }
+}
+
+/// Spec §4.13, Checkpoint D re-check: a sign-out's close can land while the slot's mail step opens a
+/// mailbox's window. The step closes that window before anything runs in it and then waits until the window is
+/// gone before it ends, which is when the scheduler's pass lets go of the mail window: otherwise the sign-out's
+/// `forget_all` can find the profile still held and leave a signed-in profile on disk. A close that lands just
+/// before the open opens nothing. Either way no further mailbox opens and the run reports nothing.
+#[cfg(windows)]
+#[test]
+fn a_stop_while_a_window_opens_closes_it_and_waits_until_it_is_gone_before_the_hold_goes() {
+    let _runs = MAIL_RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = std::env::temp_dir().join(format!("knowlu-t12-stop-opening-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&root);
+    let ids = ["mbx-a", "mbx-b"];
+    for m in ids {
+        std::fs::create_dir_all(root.join(format!("mail-session-{m}"))).unwrap();
+    }
+    let rows: Vec<serde_json::Value> = ids
+        .iter()
+        .map(|m| serde_json::json!({ "address_id": m, "provider": "m365", "address": slot_rig::KNOWLU, "status": "active", "lapsed_since": null }))
+        .collect();
+    let svc = slot_rig::Svc::start(rows.clone());
+    for (stop_in, opened) in [(StopIn::OpenWindow, vec!["mail-session-mbx-a"]), (StopIn::UseProvider, vec![])] {
+        let window = LaggingWindow { stop_in, st: Default::default() };
+        let (client, clock) = (svc.client(), slot_rig::Clk::at(slot_rig::NOW));
+        let hold = knowlu::mail::MailWindow::try_take().expect("the slot's mail step holds the mail window");
+        let env = knowlu::mail::slot::SlotEnv { host: &window, client: &client, clock: &clock, data_dir: &root };
+        let out = knowlu::mail::slot::run_step(&env, &rows);
+        // `run_step` has returned: this is where the scheduler's pass lets go of the hold.
+        let s = window.st.lock().unwrap();
+        assert_eq!(s.opens, opened, "{stop_in:?}: only the window the stop caught opening, and no further mailbox");
+        assert!(s.ran.is_empty(), "{stop_in:?}: something ran in a window a stop had closed: {:?}", s.ran);
+        assert_eq!(s.closed as usize, opened.len(), "{stop_in:?}: the window the stop caught opening was closed");
+        assert!(!s.open && s.going == 0, "{stop_in:?}: the step let go of the mail window while its window was still going");
+        drop(s);
+        drop(hold);
+        assert_eq!(out, None, "{stop_in:?}: a stopped run reports nothing");
+    }
+    assert!(svc.calls().is_empty(), "a stopped run asks nothing of the service: {:?}", svc.calls());
+    let _ = std::fs::remove_dir_all(&root);
 }

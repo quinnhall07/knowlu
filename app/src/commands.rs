@@ -151,20 +151,26 @@ pub const EDITABLE: [&str; 14] = ["title", "course", "due", "effort_hours", "imp
 /// survives as YAML; every other editable field is passed through as the literal the page sent.
 pub const QUOTED: [&str; 5] = ["title", "course", "importance_reason", "domain", "effort_confidence"];
 
-/// The one `WriteContext` constructor in `app/` — every console-originated write is `quinn` via
+/// The one `WriteContext` constructor in `app/` — every console-originated write is the student via
 /// `dashboard` (`journal::VIAS` carries it since Task 7).
-pub fn console_ctx() -> WriteContext {
+///
+/// **The student is this vault's own token** (ruling 11, plan D8): `config/actor.yaml`, read on
+/// every write so a hand fix takes effect without a restart — `student` in a vault the wizard made,
+/// the legacy token in one made before (no file). A bad file is the reader's named line, which
+/// `mutate` returns as the command's `error` with the current state; nothing is written.
+pub fn console_ctx(vault: &std::path::Path) -> Result<WriteContext, String> {
     debug_assert!(knowlu_engine::journal::VIAS.contains(&"dashboard"));
-    WriteContext::new("quinn", "dashboard")
+    let token = knowlu_engine::journal::read_human_actor(vault).map_err(|e| e.to_string())?;
+    Ok(WriteContext::new(token, "dashboard"))
 }
 
 /// The context for a `decide`d proposal's in-process execution (R-T9, Task 9 review). The
-/// DECISION (writing `status`/`decision_note`/`snooze_until`) is Quinn's and keeps
-/// `console_ctx()`; EXECUTING that decision — `process_approvals` materializing a task, applying
-/// an amendment, expanding a digest — is the system acting on Quinn's already-made decision,
-/// exactly as `cli::run`'s scheduled pass does it (actor `agent:approvals`), so it must not be
-/// journaled as a fresh human judgement: `write::write_literals`'s judge-once freeze
-/// (`journal::human_set`) reads a `create`/`set` record's `actor` field, and an `actor: quinn`
+/// DECISION (writing `status`/`decision_note`/`snooze_until`) is the student's and keeps
+/// `console_ctx(vault)`; EXECUTING that decision — `process_approvals` materializing a task,
+/// applying an amendment, expanding a digest — is the system acting on the student's already-made
+/// decision, exactly as `cli::run`'s scheduled pass does it (actor `agent:approvals`), so it must not
+/// be journaled as a fresh human judgement: `write::write_literals`'s judge-once freeze
+/// (`journal::human_set`) reads a `create`/`set` record's `actor` field, and a human-actor
 /// materialize record would wrongly freeze every field of the new task (effort_hours, importance,
 /// course, due, …) against future agent re-judgement. `via` stays `dashboard` so provenance still
 /// shows the write happened from the console, not the scheduled runner.
@@ -220,9 +226,70 @@ pub fn set_fields_inner(cs: &ConsoleState, view: &str, id: &str, fields: serde_j
             }
             literals.push((k.clone(), literal_for(k, v)?));
         }
-        let res = write::write_literals(&cs.vault, id, &literals, &console_ctx(), journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
+        let res = write::write_literals(&cs.vault, id, &literals, &console_ctx(&cs.vault)?, journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
         if let Some((name, why)) = res.skipped.iter().next() { return Err(format!("{name}: {why}")); }
         Ok(())
+    })
+}
+
+/// Folders whose notes the drawer may give a new body (M2 D7): the student's working notes and the
+/// course notes. Anything else is refused by name; a list, like `EDITABLE`, not a decision.
+pub const BODY_EDITABLE_FOLDERS: [&str; 2] = ["tasks", "courses"];
+
+/// `mutate`'s envelope, plus `conflict: true` when the refusal was the engine's `Conflict` variant
+/// (never read from the error's text), so the page can keep the draft.
+fn with_conflict(mut env: Value, conflict: bool) -> Value {
+    if conflict { env["conflict"] = json!(true); }
+    env
+}
+
+/// A body edit (M2 spec §8): `id` must be a note id the engine's index resolves to a note in
+/// `BODY_EDITABLE_FOLDERS`; a path-shaped id is refused by name before the engine is asked, so a
+/// path cannot reach `config/` or climb out of a folder. `expected` is the body the drawer last read.
+pub fn set_body_inner(cs: &ConsoleState, view: &str, id: &str, expected: &str, body: &str) -> Result<Value, String> {
+    let mut conflict = false;
+    let env = mutate(cs, view, |journal| {
+        if !knowlu_engine::ids::is_id(id) { return Err(format!("{id} is not a note id; only a note in tasks/ or courses/ can be edited here")); }
+        let path = knowlu_engine::ids::resolve_target(&cs.vault, id).map_err(|e| e.to_string())?;
+        let rel = path.strip_prefix(&cs.vault).map_err(|_| format!("{id} is outside the vault"))?;
+        let folder = rel.components().next().map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
+        if !BODY_EDITABLE_FOLDERS.contains(&folder.as_str()) { return Err(format!("a note in {folder}/ cannot be edited here; only tasks/ and courses/ can")); }
+        match write::set_body(&cs.vault, id, expected, body, &console_ctx(&cs.vault)?, journal) {
+            Ok(_) => Ok(()),
+            Err(e) => { conflict = matches!(e, write::WriteError::Conflict(_)); Err(e.to_string()) }
+        }
+    })?;
+    Ok(with_conflict(env, conflict))
+}
+
+/// `profile::read` under `cs.lock`, as `note_inner` does; it writes nothing.
+pub fn profile_inner(cs: &ConsoleState) -> Result<Value, String> {
+    let _g = cs.lock.lock().map_err(|_| "console lock poisoned".to_string())?;
+    Ok(envelope(serde_json::to_value(knowlu_engine::profile::read(&cs.vault)).map_err(|e| e.to_string()), "profile"))
+}
+
+pub fn set_preferences_inner(cs: &ConsoleState, view: &str, expected: &str, text: &str) -> Result<Value, String> {
+    let mut conflict = false;
+    let env = mutate(cs, view, |journal| {
+        match knowlu_engine::profile::set_preferences(&cs.vault, expected, text, &console_ctx(&cs.vault)?, journal) {
+            Ok(_) => Ok(()),
+            Err(e) => { conflict = matches!(e, write::WriteError::Conflict(_)); Err(e.to_string()) }
+        }
+    })?;
+    Ok(with_conflict(env, conflict))
+}
+
+/// `eventroster::read_dropped` under `cs.lock`, as `note_inner` does; it writes nothing. The page lists
+/// these under *Not shown* (M2 spec P6(d), PQ2 = no: an unjudged event is never among them).
+pub fn dropped_events_inner(cs: &ConsoleState) -> Result<Value, String> {
+    let _g = cs.lock.lock().map_err(|_| "console lock poisoned".to_string())?;
+    Ok(envelope(serde_json::to_value(knowlu_engine::eventroster::read_dropped(&cs.vault)).map_err(|e| e.to_string()), "dropped"))
+}
+
+pub fn set_interests_inner(cs: &ConsoleState, view: &str, strong: Vec<String>, mild: Vec<String>, never: Vec<String>, clubs: Vec<String>) -> Result<Value, String> {
+    mutate(cs, view, |journal| {
+        let lists = knowlu_engine::events::Interests { strong, mild, never, clubs };
+        knowlu_engine::profile::set_interests(&cs.vault, &lists, &console_ctx(&cs.vault)?, journal).map_err(|e| e.to_string())
     })
 }
 
@@ -240,28 +307,41 @@ pub fn create_task_inner(cs: &ConsoleState, view: &str, fields: serde_json::Map<
         let course = fields.get("course").and_then(|v| v.as_str()).map(str::trim).filter(|c| !c.is_empty());
         let due = fields.get("due").and_then(|v| v.as_str()).map(|d| if d.len() == 10 { format!("{d}T23:59") } else { d.to_string() });
         let effort = fields.get("effort_hours").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        // Ruling 11: `created_by` and `effort_source` are the student who made it — the context's
+        // own actor, never a name.
+        let ctx = console_ctx(&cs.vault)?;
         let front = Node::map(vec![
             ("title", Node::text(title)),
             ("course", Node::opt_text(course)),
             ("domain", Node::text("school")),
             ("due", due.as_deref().map(Node::text).unwrap_or(Node::Null)),
             ("effort_hours", Node::Float(effort)),
-            ("effort_source", Node::text("quinn")),
+            ("effort_source", Node::text(&ctx.actor)),
             ("importance", Node::Int(3)),
             ("status", Node::text("active")),
             ("progress", Node::Int(0)),
-            ("created_by", Node::text("quinn")),
+            ("created_by", Node::text(&ctx.actor)),
         ]);
         let text = format!("---\n{}---\n\n", safe_dump_block(&front));
         let mut slug = slugify(title); if slug.is_empty() { slug = "task".into(); }
         let mut rel = format!("tasks/{slug}.md"); let mut n = 2;
         while cs.vault.join(&rel).exists() { rel = format!("tasks/{slug}-{n}.md"); n += 1; }
-        write::create(&cs.vault, &rel, &text, &console_ctx(), journal, None).map(|_| ()).map_err(|e| e.to_string())
+        write::create(&cs.vault, &rel, &text, &ctx, journal, None).map(|_| ()).map_err(|e| e.to_string())
     })
 }
 
 pub fn delete_note_inner(cs: &ConsoleState, view: &str, id: &str) -> Result<Value, String> {
-    mutate(cs, view, |journal| write::delete(&cs.vault, id, &console_ctx(), journal).map(|_| ()).map_err(|e| e.to_string()))
+    mutate(cs, view, |journal| write::delete(&cs.vault, id, &console_ctx(&cs.vault)?, journal).map(|_| ()).map_err(|e| e.to_string()))
+}
+
+/// P17 (Quinn, Checkpoint B, 2026-10-01): "Remove from my day" on an accepted all-day date.
+/// The engine gates (only this vault's own human token), checks (a date the lane draws) and
+/// writes (one `declined` line); this computes nothing. A refusal is the engine's line.
+pub fn remove_lane_date_inner(cs: &ConsoleState, view: &str, uid: &str) -> Result<Value, String> {
+    mutate(cs, view, |_journal| {
+        knowlu_engine::eventcarry::remove_lane_date(&cs.vault, uid, now_in(cs).date(), &console_ctx(&cs.vault)?)
+            .map(|_| ())
+    })
 }
 
 /// Approve/reject/snooze one approval, then run `process_approvals` in the same call so an
@@ -276,7 +356,7 @@ pub fn decide_inner(cs: &ConsoleState, view: &str, id: &str, verdict: &str, note
     let mut env = env; env["decision"] = decision; Ok(env)
 }
 
-/// The verdict as Quinn's write, then `process_approvals` in-process as `executor_ctx()` —
+/// The verdict as the student's write, then `process_approvals` in-process as `executor_ctx()` —
 /// `decide_inner`'s body, shared with `answer_card_inner`. Returns the `decision` summary.
 fn decide_in(cs: &ConsoleState, journal: &mut Journal, id: &str, verdict: &str, note: &str, snooze_until: Option<&str>) -> Result<Value, String> {
     if !["approved", "rejected", "snoozed"].contains(&verdict) { return Err(format!("verdict must be approved, rejected or snoozed, not {verdict:?}")); }
@@ -286,7 +366,7 @@ fn decide_in(cs: &ConsoleState, journal: &mut Journal, id: &str, verdict: &str, 
         ("decision_note".to_string(), write::to_literal(&serde_yaml_ng::Value::String(note.to_string()))),
         ("snooze_until".to_string(), snooze),
     ];
-    write::write_literals(&cs.vault, id, &literals, &console_ctx(), journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
+    write::write_literals(&cs.vault, id, &literals, &console_ctx(&cs.vault)?, journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
     let now = now_in(cs);
     let r = knowlu_engine::approvals::process_approvals(&cs.vault, now.date(), now.datetime(), &executor_ctx(), journal);
     Ok(json!({ "executed": r.executed, "expired": r.expired, "woken": r.woken, "rejected": r.rejected, "warnings": r.warnings }))
@@ -305,7 +385,7 @@ pub fn answer_card_inner(cs: &ConsoleState, view: &str, id: &str, meets: &Value)
         knowlu_engine::commitments::check_answerable(&cs.vault, id, now_in(cs).date())?;
         // Review I1: the engine validates the answer and hands back the one-line literal to write.
         let literal = knowlu_engine::commitments::answer_literal(meets)?;
-        write::write_literals(&cs.vault, id, &[("answer_meets".to_string(), literal)], &console_ctx(), journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
+        write::write_literals(&cs.vault, id, &[("answer_meets".to_string(), literal)], &console_ctx(&cs.vault)?, journal, &WriteOpts::default()).map_err(|e| e.to_string())?;
         decision = decide_in(cs, journal, id, "approved", "", None)?;
         Ok(())
     })?;
@@ -326,19 +406,23 @@ pub fn answer_card_inner(cs: &ConsoleState, view: &str, id: &str, meets: &Value)
 }
 
 pub fn close_info_inner(cs: &ConsoleState, view: &str, id: &str) -> Result<Value, String> {
-    mutate(cs, view, |journal| knowlu_engine::info::close_info(&cs.vault, None, Some(id), "quinn", &console_ctx(), Some(journal), None).map(|_| ()).map_err(|e| e.to_string()))
+    // Ruling 11: `closed_by` is the student who closed it — the context's own actor.
+    mutate(cs, view, |journal| {
+        let ctx = console_ctx(&cs.vault)?;
+        knowlu_engine::info::close_info(&cs.vault, None, Some(id), &ctx.actor, &ctx, Some(journal), None).map(|_| ()).map_err(|e| e.to_string())
+    })
 }
 
 pub fn open_issue_inner(cs: &ConsoleState, view: &str, target: &str, categories: Vec<String>, text: &str) -> Result<Value, String> {
     mutate(cs, view, |journal| {
         if categories.is_empty() { return Err("pick at least one category".into()); }
         let text = text.trim();
-        knowlu_engine::issues::open_issue(&cs.vault, target, &categories, (!text.is_empty()).then_some(text), &console_ctx(), Some(journal), None, None).map(|_| ()).map_err(|e| e.to_string())
+        knowlu_engine::issues::open_issue(&cs.vault, target, &categories, (!text.is_empty()).then_some(text), &console_ctx(&cs.vault)?, Some(journal), None, None).map(|_| ()).map_err(|e| e.to_string())
     })
 }
 
 pub fn resolve_issue_inner(cs: &ConsoleState, view: &str, id: &str, resolution: &str) -> Result<Value, String> {
-    mutate(cs, view, |journal| knowlu_engine::issues::address_issue(&cs.vault, id, resolution, None, &console_ctx(), Some(journal), None).map(|_| ()).map_err(|e| e.to_string()))
+    mutate(cs, view, |journal| knowlu_engine::issues::address_issue(&cs.vault, id, resolution, None, &console_ctx(&cs.vault)?, Some(journal), None).map(|_| ()).map_err(|e| e.to_string()))
 }
 
 /// Runs the engine's sync OUTSIDE `cs.lock` — a pull can take seconds and must not block a
@@ -379,10 +463,15 @@ pub fn get_settings_inner(cs: &ConsoleState) -> Result<Value, String> {
     Ok(json!({ "ok": true, "error": Value::Null, "settings": serde_json::to_value(&*cs.settings.lock().map_err(|_| "lock")?).map_err(|e| e.to_string())? }))
 }
 
-/// Only `backup_dir` (string path; `null`/empty string clears it) and `autostart` (bool) may be
-/// set here — anything else is refused by name, never silently ignored. Toggling the OS
-/// autostart entry needs the `AppHandle`, which only the `#[tauri::command]` twin has, so it
-/// happens there, not here.
+/// Only `backup_dir` (string path; `null`/empty string clears it), `autostart` (bool) and
+/// `grades_hidden` (bool) may be set here — anything else is refused by name, never silently
+/// ignored. Toggling the OS autostart entry needs the `AppHandle`, which only the
+/// `#[tauri::command]` twin has, so it happens there, not here.
+///
+/// **`grades_hidden` is *Hide grades*** (M1 grades spec §2, §9; T9 finding 3): a row in this panel
+/// like the others, so the console's grades commands stay four. Its flag lives in
+/// `grades::GradesPrefs` (`grades.json`, spec §3), never in `settings.json`, and a patch that
+/// carries only it leaves `settings.json` untouched.
 ///
 /// R-T10: `serde_json::Map` iterates keys alphabetically, so a patch like `{"autostart": true,
 /// "unknown": 1}` would hit `autostart` before the refusal on `unknown` — mutating the live
@@ -392,8 +481,13 @@ pub fn get_settings_inner(cs: &ConsoleState) -> Result<Value, String> {
 pub fn set_settings_inner(cs: &ConsoleState, patch: serde_json::Map<String, Value>) -> Result<Value, String> {
     let mut s = cs.settings.lock().map_err(|_| "lock")?;
     let mut next = s.clone();
+    let mut grades_hidden = None;
     for (k, v) in &patch {
         match k.as_str() {
+            "grades_hidden" => match v.as_bool() {
+                Some(b) => grades_hidden = Some(b),
+                None => return Ok(json!({ "ok": false, "error": "grades_hidden must be true or false", "settings": Value::Null })),
+            },
             "backup_dir" => match v {
                 Value::Null => next.backup_dir = None,
                 Value::String(p) => next.backup_dir = (!p.is_empty()).then(|| std::path::PathBuf::from(p)),
@@ -404,6 +498,12 @@ pub fn set_settings_inner(cs: &ConsoleState, patch: serde_json::Map<String, Valu
                 None => return Ok(json!({ "ok": false, "error": "autostart must be true or false", "settings": Value::Null })),
             },
             other => return Ok(json!({ "ok": false, "error": format!("{other} is not a setting you can change here"), "settings": Value::Null })),
+        }
+    }
+    if let Some(hidden) = grades_hidden {
+        crate::grades::GradesPrefs { hidden }.save(&cs.data_dir)?;
+        if patch.len() == 1 {
+            return Ok(json!({ "ok": true, "error": Value::Null, "settings": serde_json::to_value(&*s).map_err(|e| e.to_string())? }));
         }
     }
     next.save(&cs.settings_path)?;
@@ -440,11 +540,17 @@ pub fn state_envelope(cs: &ConsoleState, sch: &Scheduler, view: &str) -> Value {
 #[tauri::command(async)] pub fn set_fields(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String, fields: serde_json::Map<String, Value>) -> Value { let mut env = set_fields_inner(&cs, &view, &id, fields).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn create_task(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, fields: serde_json::Map<String, Value>) -> Value { let mut env = create_task_inner(&cs, &view, fields).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn delete_note(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String) -> Value { let mut env = delete_note_inner(&cs, &view, &id).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
+#[tauri::command(async)] pub fn remove_lane_date(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, uid: String) -> Value { let mut env = remove_lane_date_inner(&cs, &view, &uid).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn decide(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String, verdict: String, note: String, snooze_until: Option<String>) -> Value { let mut env = decide_inner(&cs, &view, &id, &verdict, &note, snooze_until).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn answer_card(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String, meets: Value) -> Value { let mut env = answer_card_inner(&cs, &view, &id, &meets).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn close_info(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String) -> Value { let mut env = close_info_inner(&cs, &view, &id).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn open_issue(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, target: String, categories: Vec<String>, text: String) -> Value { let mut env = open_issue_inner(&cs, &view, &target, categories, &text).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn resolve_issue(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String, resolution: String) -> Value { let mut env = resolve_issue_inner(&cs, &view, &id, &resolution).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
+#[tauri::command(async)] pub fn set_body(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, id: String, expected: String, body: String) -> Value { let mut env = set_body_inner(&cs, &view, &id, &expected, &body).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
+#[tauri::command] pub fn profile(cs: State<'_, ConsoleState>) -> Value { profile_inner(&cs).unwrap_or_else(|e| json!({ "ok": false, "error": e, "profile": Value::Null })) }
+#[tauri::command] pub fn dropped_events(cs: State<'_, ConsoleState>) -> Value { dropped_events_inner(&cs).unwrap_or_else(|e| json!({ "ok": false, "error": e, "dropped": Value::Null })) }
+#[tauri::command(async)] pub fn set_preferences(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, expected: String, text: String) -> Value { let mut env = set_preferences_inner(&cs, &view, &expected, &text).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
+#[tauri::command(async)] pub fn set_interests(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String, strong: Vec<String>, mild: Vec<String>, never: Vec<String>, clubs: Vec<String>) -> Value { let mut env = set_interests_inner(&cs, &view, strong, mild, never, clubs).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn sync(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String) -> Value { let mut env = sync_inner(&cs, &view).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command(async)] pub fn backup_now(cs: State<'_, ConsoleState>, sch: State<'_, Scheduler>, view: String) -> Value { let mut env = backup_now_inner(&cs, &view).unwrap_or_else(|e| json!({ "ok": false, "error": e, "state": Value::Null })); let _ = attach_scheduler(&mut env, &sch); env }
 #[tauri::command] pub fn get_settings(cs: State<'_, ConsoleState>) -> Value { get_settings_inner(&cs).unwrap_or_else(|e| json!({ "ok": false, "error": e, "settings": Value::Null })) }

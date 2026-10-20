@@ -33,11 +33,26 @@ use crate::pystr;
 pub enum WriteError {
     NoFrontmatter(String),
     AppendLine(&'static str),
+    /// A frontmatter literal carrying a line break, named by its field. Refused before anything is
+    /// journalled or written: surgery replaces one line, so a second line would be orphaned.
+    LineBreak(String),
     Exists(String),
     Id(IdError),
     Ingest(IngestError),
     Provenance(ProvenanceError),
     Io(String),
+    /// Ruling 11: a human write refused because `config/actor.yaml` is not valid, named by the
+    /// reader's own line. Refused before anything is journalled or written.
+    Actor(String),
+    /// M2 D5: a body edit refused because the note's body is not the one the caller last read,
+    /// named by the note's path. Nothing is journalled or written.
+    Conflict(String),
+    /// M2 D4: a body edit refused for a named reason (an unclosed fence, a NUL, a note over the
+    /// sync limit, a `---` first line on a note without frontmatter), before any record.
+    Body(&'static str),
+    /// M2 D10: a list the one-line surgery cannot replace because its value spans lines, named by
+    /// its key, before any record.
+    MultiLine(String),
 }
 
 impl std::fmt::Display for WriteError {
@@ -45,13 +60,57 @@ impl std::fmt::Display for WriteError {
         match self {
             WriteError::NoFrontmatter(p) => write!(f, "{p} has no readable frontmatter"),
             WriteError::AppendLine(why) => write!(f, "append line {why}"),
+            WriteError::LineBreak(field) => {
+                write!(f, "{field}: a frontmatter value must not contain a line break")
+            }
             WriteError::Exists(p) => write!(f, "{p} exists"),
             WriteError::Id(e) => write!(f, "{e}"),
             WriteError::Ingest(e) => write!(f, "{e}"),
             WriteError::Provenance(e) => write!(f, "{e}"),
             WriteError::Io(m) => write!(f, "{m}"),
+            WriteError::Actor(m) => write!(f, "{m}"),
+            WriteError::Conflict(p) => {
+                write!(f, "{p} changed since it was read; nothing was written")
+            }
+            WriteError::Body(why) => write!(f, "the body was not written: {why}"),
+            WriteError::MultiLine(key) => {
+                write!(f, "{key}: Knowlu can only edit a list written on one line")
+            }
         }
     }
+}
+
+/// M2 §7.2: **the one hash** of a note body, SHA-256 of its UTF-8 bytes in lowercase hex. A
+/// `set_body` record's `old` and `new` carry it, so the app and the tests call this and never hash
+/// on their own.
+pub fn body_sha256(body: &str) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, body.as_bytes());
+    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Ruling 11 (plan D3): **the one gate** every public entry point below takes before the journal is
+/// touched, so no caller — the CLI, the console, the scaffold, a pass — can write as the student
+/// while the vault's `config/actor.yaml` is invalid. An `agent:` or `system:` actor is never gated:
+/// `judge`, `sync`, `coursework` and the rank's own passes keep their exit-0 contracts whatever the
+/// file says. The file is read on every human write, never cached, so a hand fix takes effect at
+/// once.
+///
+/// Plan Q2: a human actor that is not the vault's own token — `quinn` on a `student` vault,
+/// `student` on a legacy one, any name — is refused too, so one stray CLI call can never put a
+/// second token into an account (which would flip every later restore's choice).
+fn human_gate(vault: &Path, ctx: &WriteContext) -> Result<(), WriteError> {
+    if is_agent(&ctx.actor) || ctx.actor.starts_with("system:") {
+        return Ok(());
+    }
+    let token = crate::journal::read_human_actor(vault).map_err(|e| WriteError::Actor(e.to_string()))?;
+    if ctx.actor != token {
+        return Err(WriteError::Actor(format!(
+            "{}: this vault's human is {token}, so a write as {:?} is refused (one account writes one token)",
+            crate::journal::ACTOR_FILE,
+            ctx.actor
+        )));
+    }
+    Ok(())
 }
 
 impl From<IdError> for WriteError {
@@ -230,6 +289,15 @@ pub fn write_literals(
     journal: &mut Journal,
     opts: &WriteOpts<'_>,
 ) -> Result<WriteResult, WriteError> {
+    human_gate(vault, ctx)?;
+    // Every literal is one line, or nothing is written: surgery replaces exactly one line, so a
+    // literal carrying a break would orphan its tail (and a tail of `---` would close the block).
+    // Only `\n` and `\r` count: surgery splits on `\n` and `read_text` maps `\r` to `\n`. U+2028,
+    // U+2029 and U+0085 are not breaks to anything that re-reads a note, so they are written
+    // (refusing them would fail a whole coursework or enrich batch on an upstream title).
+    if let Some((name, _)) = literals.iter().find(|(_, l)| l.contains(['\n', '\r'])) {
+        return Err(WriteError::LineBreak(name.clone()));
+    }
     let path = resolve_target(vault, target)?;
     let rel_path = rel(vault, &path);
     let (_, meta) = load(&path, true)?;
@@ -239,6 +307,8 @@ pub fn write_literals(
     // `(name, old, new)` — `propose_amendment` writes both sides into the card's `changes` block,
     // and `approvals::apply_amendment` compares `from` against the note before it applies.
     let mut proposed: Vec<(String, Value, Value)> = Vec::new();
+    // Ruling 11: the human records behind `proposed`, so the card names their token, not a person.
+    let mut proposed_over: Vec<Record> = Vec::new();
 
     for (name, literal) in literals {
         let new = parse_literal(literal);
@@ -254,6 +324,7 @@ pub fn write_literals(
             if let Some(human) = human {
                 if opts.propose && old != Value::Null {
                     proposed.push((name.clone(), old.clone(), new.clone()));
+                    proposed_over.push(human);
                 } else if opts.propose {
                     // validate_amendment refuses a null `from` (the 08-21 hardening rule); a
                     // proposal it can never apply is worse than no proposal at all.
@@ -266,9 +337,12 @@ pub fn write_literals(
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
+                    // D5: the actor the record names, never a person's — on a legacy vault that is
+                    // still the legacy token, so the reason's bytes are unchanged.
+                    let who = human.get("actor").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     result.skipped.insert(
                         name.clone(),
-                        format!("judge-once: {name} set by quinn at {ts}"),
+                        format!("judge-once: {name} set by {who} at {ts}"),
                     );
                 }
                 continue;
@@ -358,8 +432,11 @@ pub fn write_literals(
                     Some((get_str(m, "judgment_id")?, get_str(m, "judgment_kind")?))
                 });
                 let judgment = judgment_ids.as_ref().map(|(id, kind)| (id.as_str(), kind.as_str()));
+                // The legacy token if any field's hand-set carries it, as the restore rule reads an
+                // account; otherwise the student's.
+                let human = crate::journal::pick_human_actor(proposed_over.iter());
                 result.proposal = Some(propose_amendment(
-                    vault, &path, &meta, &proposed, ctx, journal, opts.evidence, today, judgment,
+                    vault, &path, &meta, &proposed, ctx, journal, opts.evidence, today, judgment, human,
                 )?);
             }
         }
@@ -391,6 +468,7 @@ pub fn create(
     journal: &mut Journal,
     evidence: Option<&serde_json::Value>,
 ) -> Result<PathBuf, WriteError> {
+    human_gate(vault, ctx)?;
     let path = crate::ids::inside_vault(vault, &vault.join(rel_path))?;
     if path.exists() {
         return Err(WriteError::Exists(rel_path.to_string()));
@@ -475,6 +553,7 @@ pub fn reassert(
     ctx: &WriteContext,
     journal: &mut Journal,
 ) -> Result<bool, WriteError> {
+    human_gate(vault, ctx)?;
     let path = resolve_target(vault, target)?;
     let (_, meta) = load(&path, false)?;
     let current = yaml_to_json(&crate::yaml::get(&meta, field).cloned().unwrap_or(Value::Null));
@@ -501,6 +580,7 @@ pub fn delete(
     ctx: &WriteContext,
     journal: &mut Journal,
 ) -> Result<PathBuf, WriteError> {
+    human_gate(vault, ctx)?;
     let path = resolve_target(vault, target)?;
     let (_, meta) = load(&path, false)?;
     let archive = vault.join("archive");
@@ -530,6 +610,7 @@ pub fn move_note(
     ctx: &WriteContext,
     journal: &mut Journal,
 ) -> Result<PathBuf, WriteError> {
+    human_gate(vault, ctx)?;
     let path = resolve_target(vault, target)?;
     let (_, meta) = load(&path, false)?;
     let dest = crate::ids::inside_vault(vault, &vault.join(new_rel))?;
@@ -560,6 +641,7 @@ pub fn append_body(
     ctx: &WriteContext,
     journal: &mut Journal,
 ) -> Result<bool, WriteError> {
+    human_gate(vault, ctx)?;
     let path = resolve_target(vault, target)?;
     let (_, meta) = load(&path, false)?;
     if let Some(problem) = single_line_problem(line) {
@@ -589,6 +671,255 @@ pub fn append_body(
     journal.append(&mut record).map_err(|e| WriteError::Io(e.to_string()))?;
 
     append_body_line(&path, line)
+}
+
+// ---------------------------------------------------------------------------
+// Body replace (M2 §6.1, §7.1)
+// ---------------------------------------------------------------------------
+
+const UNCLOSED: &str = "the frontmatter has no closing line";
+const SPACED: &str = "the frontmatter's closing line is not exactly ---";
+
+/// M2 D6, **the one normaliser**: `read_text`'s line endings (`\r\n` and a lone `\r` become `\n`),
+/// leading and trailing newlines trimmed, one final `\n` when anything is left. The compare-and-swap
+/// and the write both use it, so the drawer, the hash and the file agree on one string.
+fn normalise_body(raw: &str) -> String {
+    let text = pystr::universal_newlines(raw);
+    let trimmed = text.trim_matches('\n');
+    if trimmed.is_empty() { String::new() } else { format!("{trimmed}\n") }
+}
+
+/// M2 §6.1: `(head, run, body)` of a note's text as `read_text` gives it. `head` runs through the
+/// closing fence's three dashes, `run` is the newlines after them (the fence's own line ending
+/// included) and `body` is exactly what `split_frontmatter` returns, i.e. what `note_detail` shows. A
+/// text not starting `---` is all body. The closing line is the **reader's** (the first that is
+/// `---` once trailing whitespace is stripped), and it must also be the **writer's** (exactly `---`,
+/// `apply_frontmatter_fields_to_text`): where the two differ the body the drawer shows is not the
+/// text after the fence the surgery finds, so the note is refused, never guessed at.
+fn split_body(text: &str) -> Result<(&str, &str, &str), WriteError> {
+    if !text.starts_with("---") {
+        return Ok(("", "", text));
+    }
+    let mut start = text.find('\n').map(|i| i + 1).ok_or(WriteError::Body(UNCLOSED))?;
+    let close = loop {
+        if start >= text.len() {
+            return Err(WriteError::Body(UNCLOSED));
+        }
+        let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+        let line = &text[start..end];
+        if line.trim_end() == "---" {
+            if line != "---" {
+                return Err(WriteError::Body(SPACED));
+            }
+            break start + 3;
+        }
+        start = end + 1;
+    };
+    let rest = &text[close..];
+    let body = rest.trim_start_matches('\n');
+    Ok((&text[..close], &rest[..rest.len() - body.len()], body))
+}
+
+/// A body as a `set_body` record carries it (§6.2, D3): its digest and byte count, never its text.
+fn body_digest(body: &str) -> serde_json::Value {
+    serde_json::json!({"sha256": body_sha256(body), "bytes": body.len()})
+}
+
+/// M2 §7.1: replace a note's body, everything after its closing fence, and nothing before it. The
+/// head is carried over as text, never parsed and re-dumped. `expected` is the body the caller last
+/// read; `Ok(true)` when it wrote, `Ok(false)` when the new body equals the current one under D6.
+/// Each refusal comes before the record, so it leaves the journal and the note untouched. **Journal
+/// first, file second**, like every write here.
+pub fn set_body(
+    vault: &Path,
+    target: &str,
+    expected: &str,
+    new_body: &str,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<bool, WriteError> {
+    human_gate(vault, ctx)?;
+    let path = resolve_target(vault, target)?;
+    let rel_path = rel(vault, &path);
+    let (text, meta) = load(&path, false)?;
+    let (head, run, current) = split_body(&text)?;
+    // D5, compare-and-swap on normalised bodies (equal strings, equal `body_sha256` digests), so a
+    // copy that differs from the file only by CRLF or a trailing newline is not a conflict.
+    let shown = normalise_body(current);
+    if shown != normalise_body(expected) {
+        return Err(WriteError::Conflict(rel_path));
+    }
+    let new = normalise_body(new_body);
+    // D6, §7.1 step 4: a save equal to the current body under D6's rule writes nothing, no record
+    // and no file (the F4 rule of `write_literals`), and leaves a file not in D6's form as it is.
+    if new == shown {
+        return Ok(false);
+    }
+    // D4's refusals, each by name.
+    if new.contains('\u{0}') {
+        return Err(WriteError::Body("the body contains a NUL character"));
+    }
+    if head.is_empty() && new.starts_with("---") {
+        return Err(WriteError::Body("a note without frontmatter cannot start with ---"));
+    }
+    // D6: the file's own run of newlines after the fence, or one blank line (the `create_task`
+    // shape) when the body was empty and there was none, so the fence always ends its line.
+    let run = if !head.is_empty() && current.is_empty() && run.len() < 2 { "\n\n" } else { run };
+    let out = format!("{head}{run}{new}");
+    // `sync` measures a note after `read_text`, which is `out` exactly: it holds no `\r`.
+    if out.len() > crate::sync::MAX_NOTE_BYTES {
+        return Err(WriteError::Body("the note would be too large to sync"));
+    }
+
+    let note_id = get_str(&meta, "id").filter(|s| is_id(s));
+    let mut spec = NewRecord::new("set_body", &rel_path, &ctx.actor, &ctx.via);
+    spec.id = note_id.as_deref();
+    spec.old = body_digest(current);
+    spec.new = body_digest(&new);
+    spec.run_id = ctx.run_id.as_deref();
+    let mut record = make_record(spec).map_err(|e| WriteError::Io(e.to_string()))?;
+    // ---- journal first ----
+    journal.append(&mut record).map_err(|e| WriteError::Io(e.to_string()))?;
+    // ---- note second ----
+    pystr::write_text(&path, &out).map_err(|e| WriteError::Io(e.to_string()))?;
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// The profile files (M2 §6.3, §7.2, D10, D11)
+// ---------------------------------------------------------------------------
+
+/// The names [`create_profile_file`] takes, each the file `profile/<name>.md` (D11).
+const PROFILE_FILES: [&str; 2] = ["preferences", "interests"];
+
+/// M2 D11, §7.2: create `profile/<name>.md`, for `name` `preferences` or `interests` only and only
+/// when it is absent, holding `text` exactly as given. **Journal first**: one `create` record with
+/// a null `id` and `new` the frontmatter mapping `text` holds (`{}` when it has none). File second.
+/// It never stamps an id: [`create`] would mint `task_…` (`ids::kind_for`'s default) and refuses a
+/// text with no frontmatter. The caller holds the canonical texts (`profile.rs`).
+pub fn create_profile_file(
+    vault: &Path,
+    name: &str,
+    text: &str,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<PathBuf, WriteError> {
+    human_gate(vault, ctx)?;
+    if !PROFILE_FILES.contains(&name) {
+        return Err(WriteError::Body("only profile/preferences.md and profile/interests.md can be created"));
+    }
+    let path = crate::ids::inside_vault(vault, &vault.join("profile").join(format!("{name}.md")))?;
+    let rel_path = rel(vault, &path);
+    // `symlink_metadata`, not `exists`: a dangling link is present, and writing through it is not
+    // creating the file.
+    if path.symlink_metadata().is_ok() {
+        return Err(WriteError::Exists(rel_path));
+    }
+    let (meta, _) = split_frontmatter(&pystr::universal_newlines(text))
+        .map_err(|_| WriteError::NoFrontmatter(rel_path.clone()))?;
+    let mut spec = NewRecord::new("create", &rel_path, &ctx.actor, &ctx.via);
+    spec.new = yaml_to_json(&Value::Mapping(meta));
+    spec.run_id = ctx.run_id.as_deref();
+    let mut record = make_record(spec).map_err(|e| WriteError::Io(e.to_string()))?;
+    // ---- journal first ----
+    journal.append(&mut record).map_err(|e| WriteError::Io(e.to_string()))?;
+    // ---- file second ----
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| WriteError::Io(e.to_string()))?;
+    }
+    pystr::write_text(&path, text).map_err(|e| WriteError::Io(e.to_string()))?;
+    Ok(path)
+}
+
+/// M2 D10, §7.2: does `key`'s value in the frontmatter of `text` (a note's text; `\r\n` reads as
+/// `\n`) continue past its own line, so that the one-line surgery (`apply_frontmatter_fields_to_text`)
+/// would replace its first line and orphan the rest? The frontmatter is found by the writer's fence
+/// rule: it opens with `---` and closes on the first later line exactly `---`. A text with none has
+/// no value to continue, and [`write_one_line_literals`] refuses it by name before any record.
+///
+/// True when the key's line (the first starting `key:`, as the surgery finds it) is followed by a
+/// non-blank line before the next line that starts at column 0 with a character other than `-`, `#`
+/// or whitespace, or before the closing fence; and when the key starts two lines. **It errs toward
+/// true**: a false true refuses an edit by name, a false false corrupts the file. So it is also true
+/// wherever the reader (`split_frontmatter`, which `events::load_interests` uses) and the surgery
+/// would disagree about the key: the reader closes on another line or cannot parse the frontmatter,
+/// or the key's line read alone does not hold the value the reader reads (a flow list continued at
+/// column 0, a key the surgery cannot find, such as a quoted one or one on the opening line).
+pub fn value_spans_lines(text: &str, key: &str) -> bool {
+    let text = pystr::universal_newlines(text);
+    if !text.starts_with("---") {
+        return false;
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let close = |rule: fn(&str) -> bool| lines.iter().skip(1).position(|&l| rule(l)).map(|i| i + 1);
+    // The writer's closing line and the reader's (`split_frontmatter` strips trailing whitespace).
+    let end = match (close(|l| l == "---"), close(|l| l.trim_end() == "---")) {
+        (None, None) => return false,
+        (Some(writer), Some(reader)) if writer == reader => writer,
+        _ => return true,
+    };
+    let prefix = format!("{key}:");
+    let mut found = (1..end).filter(|&i| lines[i].starts_with(&prefix));
+    let at = found.next();
+    if found.next().is_some() {
+        return true;
+    }
+    if let Some(at) = at {
+        for line in &lines[at + 1..end] {
+            match line.chars().next() {
+                Some(c) if c != '-' && c != '#' && !c.is_whitespace() => break,
+                // Blank is YAML's blank: spaces and tabs only, so anything else counts as text.
+                _ if line.trim_matches([' ', '\t']).is_empty() => {}
+                _ => return true,
+            }
+        }
+    }
+    // Read-only parses, never re-dumped: the reader's value for the key against its line alone.
+    let Ok((meta, _)) = split_frontmatter(&text) else { return true };
+    let alone = match at {
+        None => None,
+        Some(at) => match serde_yaml_ng::from_str::<Value>(lines[at]) {
+            Ok(Value::Mapping(line)) => crate::yaml::get(&line, key).cloned(),
+            _ => return true,
+        },
+    };
+    alone.as_ref() != crate::yaml::get(&meta, key)
+}
+
+/// The writer's fence rule (`ingest::apply_frontmatter_fields_to_text`): `text`, its newlines
+/// already universal, opens with `---` and has a later line exactly `---`.
+fn has_writer_frontmatter(text: &str) -> bool {
+    text.starts_with("---") && text.split('\n').skip(1).any(|line| line == "---")
+}
+
+/// M2 D10, §7.2: [`write_literals`] for lists written on one line. It reads the note once and
+/// refuses before any record: with `NoFrontmatter(path)` when the file has no frontmatter by the
+/// writer's fence rule, and with `MultiLine(key)` when [`value_spans_lines`] is true for any key in
+/// `literals` (one that would not change included), since the surgery replaces one line and would
+/// orphan the rest. Otherwise it is exactly `write_literals`, which does not change.
+///
+/// The first refusal is its own because `write_literals` reads a file with no frontmatter (prose,
+/// an unclosed fence, a BOM before the fence) as an empty mapping, as the reader does, journals a
+/// record per key, and only then does the surgery refuse: records that name no id, so `verify_tail`
+/// cannot heal them, and every retry would add more.
+pub fn write_one_line_literals(
+    vault: &Path,
+    target: &str,
+    literals: &[(String, String)],
+    ctx: &WriteContext,
+    journal: &mut Journal,
+    opts: &WriteOpts<'_>,
+) -> Result<WriteResult, WriteError> {
+    human_gate(vault, ctx)?;
+    let path = resolve_target(vault, target)?;
+    let text = pystr::read_text(&path).map_err(|e| WriteError::Io(e.to_string()))?;
+    if !has_writer_frontmatter(&text) {
+        return Err(WriteError::NoFrontmatter(rel(vault, &path)));
+    }
+    if let Some((key, _)) = literals.iter().find(|(key, _)| value_spans_lines(&text, key)) {
+        return Err(WriteError::MultiLine(key.clone()));
+    }
+    write_literals(vault, target, literals, ctx, journal, opts)
 }
 
 /// An already-pending `kind: amend` proposal for the same target and the same **set of fields**.
@@ -643,9 +974,10 @@ pub const AMEND_BUTTONS: &str = "\n```meta-bind-button\nlabel: Approve\nstyle: p
 /// Judge-once's other half: the agent may **re-propose, never silently overwrite** (Quinn,
 /// 2026-08-29). Port of `engine/write.py:propose_amendment` (lines 333–353).
 ///
-/// Called only from [`write_literals`], and only when the journal shows Quinn set the field himself
-/// and `propose` is on. It mints one `kind: amend` approval naming every re-judged field, through
-/// [`create`] — so the proposal is journalled like any other note and gets its own `id`.
+/// Called from [`write_literals`] when the journal shows the student set the field and `propose` is
+/// on, and from `sync` for a field both desktops moved. It mints one `kind: amend` approval naming
+/// every re-judged field, through [`create`] — so the proposal is journalled like any other note
+/// and gets its own `id`.
 ///
 /// Four details that are load-bearing:
 ///
@@ -688,6 +1020,10 @@ pub fn propose_amendment(
     // a local run, or an older server), which renders the card exactly as before this parameter
     // existed.
     judgment: Option<(&str, &str)>,
+    // Ruling 11 (CLAUDE.md rule 1): the human token whose hand-set this card re-proposes over.
+    // `journal::LEGACY_HUMAN_ACTOR` keeps the sentence Python wrote, byte for byte (legacy vaults,
+    // `scripts/diff-engines-notes.ps1`); any other value reads "the student", never a person.
+    human: &str,
 ) -> Result<PathBuf, WriteError> {
     let target_rel = rel(vault, target_path);
     let stem_of_target = target_path
@@ -751,10 +1087,12 @@ pub fn propose_amendment(
     }
     front_pairs.push(("changes", crate::yamlemit::Node::Map(change_block)));
     let front = crate::yamlemit::Node::map(front_pairs);
-    let mut why = format!(
-        "{} re-judged {fields}; Quinn had set them by hand, so this is a proposal (judge-once rule).",
-        ctx.actor
-    );
+    let hand = if human == crate::journal::LEGACY_HUMAN_ACTOR {
+        "Quinn had set them by hand"
+    } else {
+        "the student had set them by hand"
+    };
+    let mut why = format!("{} re-judged {fields}; {hand}, so this is a proposal (judge-once rule).", ctx.actor);
     // Python's `if evidence:` is TRUTHINESS, so an empty mapping appends nothing — not just `None`.
     // A `!e.is_null()` test alone would write a bare `Evidence: {}` the other engine never writes.
     let truthy = |e: &&serde_json::Value| match e {
@@ -992,6 +1330,83 @@ mod tests {
         assert_eq!(single_line_problem("  --- x"), Some("must not start a frontmatter block"));
     }
 
+    // -- dashes and line breaks in a literal --------------------------------
+
+    #[test]
+    fn a_title_carrying_dashes_is_quoted_and_the_note_survives_a_second_edit() {
+        // `a---b` and `--- x` are legitimate titles. Quoted, each is one line that is not a
+        // delimiter line, so the note must still read in full and take a later edit.
+        for title in ["a---b", "--- x", "x ---", "---"] {
+            let v = vault();
+            let path = seed(&v);
+            let mut j = Journal::new(&v);
+            let ctx = WriteContext::new("quinn", "cli");
+            let literal = to_literal(&Value::String(title.to_string()));
+            assert_eq!(literal.lines().count(), 1, "{title:?}");
+            write_literals(&v, "tasks/a.md", &lit(&[("title", &literal)]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("{title:?}: {e}"));
+
+            let (meta, body) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+            assert_eq!(get_str(&meta, "title").as_deref(), Some(title));
+            assert_eq!(get_str(&meta, "status").as_deref(), Some("active"), "{title:?}");
+            assert_eq!(get_str(&meta, "id").as_deref(), Some("task_0123456789"), "{title:?}");
+            assert_eq!(body, "Body text.\n", "{title:?}");
+
+            // The second edit is what the reviewer's probe broke.
+            write_literals(&v, "tasks/a.md", &lit(&[("status", "done")]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("second edit after {title:?}: {e}"));
+            let (meta, _) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+            assert_eq!(get_str(&meta, "status").as_deref(), Some("done"), "{title:?}");
+            assert_eq!(get_str(&meta, "title").as_deref(), Some(title));
+        }
+    }
+
+    #[test]
+    fn a_literal_carrying_a_line_break_is_refused_and_nothing_is_written() {
+        for raw in ["a\nb", "a\rb", "a\r\nb", "\"a\n---\nb\"", "\"a\rb\""] {
+            let v = vault();
+            let path = seed(&v);
+            let before = std::fs::read(&path).unwrap();
+            let mut j = Journal::new(&v);
+            let ctx = WriteContext::new("quinn", "cli");
+            let err = write_literals(&v, "tasks/a.md", &lit(&[("status", "done"), ("title", raw)]), &ctx, &mut j, &WriteOpts::default())
+                .expect_err(&format!("{raw:?} must be refused"));
+            assert!(err.to_string().contains("title"), "{raw:?}: {err}");
+            assert!(err.to_string().contains("line break"), "{raw:?}: {err}");
+            assert_eq!(std::fs::read(&path).unwrap(), before, "{raw:?}: the note must be untouched");
+            assert!(j.read(None, None).is_empty(), "{raw:?}: no journal record for a refused write");
+        }
+    }
+
+    #[test]
+    fn an_invisible_separator_is_not_a_line_break_to_the_note_and_is_written() {
+        // Surgery splits on `\n` and `read_text` maps `\r` to `\n`; nothing that re-reads a note
+        // breaks on U+2028/U+2029/U+0085. Refusing them would fail a whole coursework or enrich
+        // batch on every run for as long as an upstream title (pasted from a PDF) carries one.
+        for (title, reads_back) in [
+            ("a\u{2028}b", "a\u{2028}b"),
+            ("a\u{2029}b", "a\u{2029}b"),
+            // NEL is folded to a space by the YAML reader — lossy, pre-existing, not a break.
+            ("a\u{85}b", "a b"),
+        ] {
+            let v = vault();
+            let path = seed(&v);
+            let mut j = Journal::new(&v);
+            let ctx = WriteContext::new("quinn", "cli");
+            let literal = to_literal(&Value::String(title.to_string()));
+            write_literals(&v, "tasks/a.md", &lit(&[("title", &literal), ("status", "done")]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("{title:?}: {e}"));
+            let (meta, body) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+            assert_eq!(get_str(&meta, "title").as_deref(), Some(reads_back), "{title:?}");
+            assert_eq!(get_str(&meta, "status").as_deref(), Some("done"), "{title:?}");
+            assert_eq!(body, "Body text.\n", "{title:?}");
+            assert_eq!(j.read(None, None).len(), 2, "{title:?}");
+            // ...and the note still takes a second edit.
+            write_literals(&v, "tasks/a.md", &lit(&[("status", "active")]), &ctx, &mut j, &WriteOpts::default())
+                .unwrap_or_else(|e| panic!("second edit after {title:?}: {e}"));
+        }
+    }
+
     // -- the ordering invariant --------------------------------------------
 
     #[test]
@@ -1074,6 +1489,140 @@ mod tests {
 
         assert!(res.written.is_empty(), "the agent must not write over a human decision");
         assert!(res.skipped.get("importance").unwrap().starts_with("judge-once: importance set by quinn at"));
+    }
+
+    // -- ruling 11: the human token and the gate (D3, D5) -------------------
+
+    fn actor_file(v: &Path, text: &str) {
+        std::fs::create_dir_all(v.join("config")).unwrap();
+        std::fs::write(v.join("config").join("actor.yaml"), text).unwrap();
+    }
+
+    /// Every file under the vault, with its bytes, in path order — the "nothing moved" oracle.
+    fn fingerprint(v: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() { walk(&path, out) } else { out.push((path.clone(), std::fs::read(&path).unwrap())) }
+            }
+        }
+        let mut out = Vec::new();
+        walk(v, &mut out);
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_human_write_on_a_vault_with_a_bad_actor_file_writes_nothing() {
+        for human in ["quinn", "student"] {
+            let v = vault();
+            seed(&v);
+            actor_file(&v, "human_actor: alice\n");
+            let before = fingerprint(&v);
+            let ctx = WriteContext::new(human, "dashboard");
+            let mut j = Journal::new(&v);
+            let named = |r: Result<(), WriteError>, what: &str| {
+                let err = r.expect_err(&format!("{human}: {what} must be refused")).to_string();
+                assert!(err.starts_with("config/actor.yaml: ") && err.contains("\"alice\""), "{human}: {what}: {err}");
+            };
+            named(write_literals(&v, "tasks/a.md", &lit(&[("status", "done")]), &ctx, &mut j, &WriteOpts::default()).map(|_| ()), "set");
+            named(create(&v, "tasks/new.md", "---\ntitle: New\n---\n\nb\n", &ctx, &mut j, None).map(|_| ()), "create");
+            named(delete(&v, "tasks/a.md", &ctx, &mut j).map(|_| ()), "delete");
+            named(move_note(&v, "tasks/a.md", "tasks/b.md", &ctx, &mut j).map(|_| ()), "move");
+            named(append_body(&v, "tasks/a.md", "a line", &ctx, &mut j).map(|_| ()), "append_body");
+            named(reassert(&v, "tasks/a.md", "status", &serde_json::json!("done"), &ctx, &mut j).map(|_| ()), "reassert");
+            assert_eq!(fingerprint(&v), before, "{human}: the journal and every note are byte-identical");
+        }
+    }
+
+    #[test]
+    fn an_agent_or_system_write_ignores_the_actor_file() {
+        let v = vault();
+        seed(&v);
+        actor_file(&v, "human_actor: alice\n");
+        let mut j = Journal::new(&v);
+        let agent = WriteContext::new("agent:knowlu.enrich", "local-runner");
+        let res = write_literals(&v, "tasks/a.md", &lit(&[("importance", "5")]), &agent, &mut j, &WriteOpts::default()).unwrap();
+        assert_eq!(res.records.len(), 1);
+        create(&v, "tasks/agent.md", "---\ntitle: Agent\n---\n\nb\n", &agent, &mut j, None).unwrap();
+        let system = WriteContext::new("system:idfix", "cli");
+        write_literals(&v, "tasks/a.md", &lit(&[("progress", "10")]), &system, &mut j, &WriteOpts::default()).unwrap();
+        let actors: Vec<String> = j.read(None, None).iter().map(|r| r["actor"].as_str().unwrap().to_string()).collect();
+        assert_eq!(actors, ["agent:knowlu.enrich", "agent:knowlu.enrich", "system:idfix"]);
+    }
+
+    #[test]
+    fn a_student_vault_takes_student_writes() {
+        let v = vault();
+        seed(&v);
+        actor_file(&v, "human_actor: student\n");
+        let mut j = Journal::new(&v);
+        let ctx = WriteContext::new("student", "dashboard");
+        let res = write_literals(&v, "tasks/a.md", &lit(&[("status", "done")]), &ctx, &mut j, &WriteOpts::default()).unwrap();
+        assert_eq!(res.records[0]["actor"], serde_json::json!("student"));
+        assert_eq!(j.read(None, None)[0]["actor"], serde_json::json!("student"));
+        assert!(pystr::read_text(&v.join("tasks").join("a.md")).unwrap().contains("status: done"));
+    }
+
+    /// Plan Q2 (recommended yes): one account writes one token, mechanically. A human actor that is
+    /// not the vault's own token is refused by name, before anything is journalled or written.
+    #[test]
+    fn a_human_actor_other_than_the_vaults_is_refused() {
+        for (file, actor, token) in [
+            (Some("human_actor: student\n"), "quinn", "student"),
+            (None, "student", "quinn"),
+            (None, "alice", "quinn"),
+            (Some("human_actor: student\n"), "alice", "student"),
+            (None, "Quinn", "quinn"),
+        ] {
+            let v = vault();
+            seed(&v);
+            if let Some(text) = file { actor_file(&v, text) }
+            let before = fingerprint(&v);
+            let ctx = WriteContext::new(actor, "cli");
+            let mut j = Journal::new(&v);
+            let err = write_literals(&v, "tasks/a.md", &lit(&[("status", "done")]), &ctx, &mut j, &WriteOpts::default())
+                .expect_err(&format!("{actor} on a {token} vault must be refused"))
+                .to_string();
+            assert!(err.starts_with("config/actor.yaml: ") && err.contains(token) && err.contains(&format!("{actor:?}")), "{err}");
+            assert!(create(&v, "tasks/new.md", "---\ntitle: New\n---\n\nb\n", &ctx, &mut j, None).is_err(), "{actor}: create");
+            assert_eq!(fingerprint(&v), before, "{actor} on a {token} vault: nothing written");
+        }
+    }
+
+    #[test]
+    fn judge_once_skip_names_the_recorded_human() {
+        for (human, file) in [("quinn", None), ("student", Some("human_actor: student\n"))] {
+            let v = vault();
+            seed(&v);
+            if let Some(text) = file { actor_file(&v, text) }
+            let mut j = Journal::new(&v);
+            let res = write_literals(&v, "tasks/a.md", &lit(&[("importance", "1")]), &WriteContext::new(human, "dashboard"), &mut j, &WriteOpts::default()).unwrap();
+            let ts = res.records[0]["ts"].as_str().unwrap().to_string();
+            let agent = WriteContext::new("agent:knowlu.enrich", "local-runner");
+            let opts = WriteOpts { judged: true, ..Default::default() };
+            let res = write_literals(&v, "tasks/a.md", &lit(&[("importance", "5")]), &agent, &mut j, &opts).unwrap();
+            // On a legacy vault these are the exact bytes the reason has always had.
+            assert_eq!(res.skipped["importance"], format!("judge-once: importance set by {human} at {ts}"));
+        }
+    }
+
+    #[test]
+    fn an_agent_cannot_overwrite_a_field_student_set() {
+        let v = vault();
+        seed(&v);
+        actor_file(&v, "human_actor: student\n");
+        let mut j = Journal::new(&v);
+        let student = WriteContext::new("student", "dashboard");
+        write_literals(&v, "tasks/a.md", &lit(&[("importance", "1")]), &student, &mut j, &WriteOpts::default()).unwrap();
+
+        let agent = WriteContext::new("agent:routine.enrich", "cloud-routine");
+        let opts = WriteOpts { judged: true, ..Default::default() };
+        let res = write_literals(&v, "tasks/a.md", &lit(&[("importance", "5")]), &agent, &mut j, &opts).unwrap();
+
+        assert!(res.written.is_empty(), "the agent must not write over the student's decision");
+        assert!(res.skipped.get("importance").unwrap().starts_with("judge-once: importance set by student at"));
     }
 
     #[test]
@@ -1485,6 +2034,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&v);
     }
 
+    /// Ruling 11 and CLAUDE.md rule 1: the card's `**Why proposed:**` line follows the recorded
+    /// human's token and never names a person on a vault the app makes. A legacy vault (no
+    /// `config/actor.yaml`, `quinn` in its journal) keeps the sentence Python wrote, byte for byte;
+    /// the whole legacy card is pinned by `an_amend_card_without_one_is_byte_identical` above.
+    #[test]
+    fn an_amend_cards_why_line_names_no_person_on_a_student_vault() {
+        for (file, human, hand) in [
+            (None, "quinn", "Quinn had set them by hand"),
+            (Some("human_actor: student\n"), "student", "the student had set them by hand"),
+        ] {
+            let v = propose_vault(&format!("why-{human}"));
+            if let Some(text) = file { actor_file(&v, text) }
+            let mut journal = Journal::new(&v);
+            write_literals(&v, "tasks/t.md", &[("effort_hours".to_string(), "4.0".to_string())],
+                &WriteContext::new(human, "dashboard"), &mut journal, &WriteOpts::default()).unwrap();
+            let res = write_literals(
+                &v, "tasks/t.md",
+                &[("effort_hours".to_string(), "2.0".to_string())],
+                &WriteContext::new("agent:knowlu.enrich", "local-runner"),
+                &mut journal,
+                &WriteOpts { judged: true, propose: true, ..Default::default() },
+            ).unwrap();
+            let text = pystr::read_text(&res.proposal.expect("an amendment was filed")).unwrap();
+            let why = format!(
+                "\n**Why proposed:** agent:knowlu.enrich re-judged effort_hours; {hand}, so this is a \
+                 proposal (judge-once rule).\n"
+            );
+            assert!(text.contains(&why), "{human}: {text}");
+            if human == "student" {
+                assert!(!text.to_lowercase().contains("quinn"), "no person's name on a student's card: {text}");
+            }
+            let _ = std::fs::remove_dir_all(&v);
+        }
+    }
+
     /// An amend card must survive the single-line surgery `defer_over_budget` performs on it.
     ///
     /// `proposed_at` and `first_proposed_at` were the SAME `date` object until 2026-09-07, and
@@ -1657,5 +2241,666 @@ mod tests {
         let body = pystr::read_text(&res.proposal.unwrap()).unwrap();
         assert!(body.contains("Evidence: {\"why\": \"syllabus\"}"), "{body}");
         let _ = std::fs::remove_dir_all(&v);
+    }
+
+    // -- M2: the body hash and the new refusals -----------------------------
+
+    #[test]
+    fn body_sha256_is_lowercase_hex_of_the_utf8_bytes() {
+        // The empty body: §6.2's example `old`, and every SHA-256 implementation's first vector.
+        assert_eq!(body_sha256(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        // Non-ASCII: the digest covers the UTF-8 bytes (63 61 66 c3 a9 20 e2 80 94 20 e6 97 a5
+        // e6 9c ac 0a), checked against `sha256sum` and Python's `hashlib` over those bytes.
+        let body = "caf\u{e9} \u{2014} \u{65e5}\u{672c}\n";
+        assert_eq!(body_sha256(body), "954d89d459ee5f2d1a8902b9d7bfe745cb84445dfc5228c168ced2bb35cab546");
+        for digest in [body_sha256(""), body_sha256(body)] {
+            assert_eq!(digest.len(), 64, "{digest}");
+            assert!(digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{digest}");
+        }
+    }
+
+    #[test]
+    fn the_new_write_errors_name_the_file_or_the_reason() {
+        let conflict = WriteError::Conflict("tasks/stats-hw-4.md".into()).to_string();
+        assert!(conflict.contains("tasks/stats-hw-4.md"), "{conflict}");
+        let body = WriteError::Body("the frontmatter has no closing line").to_string();
+        assert!(body.contains("the frontmatter has no closing line"), "{body}");
+        let multi = WriteError::MultiLine("strong".into()).to_string();
+        assert!(multi.contains("Knowlu can only edit a list written on one line"), "{multi}");
+        assert!(multi.contains("strong"), "{multi}");
+    }
+
+    // -- M2: set_body (T1a.2) ------------------------------------------------
+
+    /// A vault made after ruling 11 and its human's context. The token comes from the constant,
+    /// never a literal (plan §5), so these tests hold on both sides of the token.
+    fn human_ctx(v: &Path) -> WriteContext {
+        crate::journal::create_actor_file(v, crate::journal::HUMAN_ACTOR).unwrap();
+        WriteContext::new(crate::journal::HUMAN_ACTOR, "dashboard")
+    }
+
+    /// The body as the drawer shows it: `surface::note_detail`'s, which is the reader's split.
+    fn shown_body(path: &Path) -> String {
+        split_frontmatter(&pystr::read_text(path).unwrap()).unwrap().1
+    }
+
+    fn body_records(j: &mut Journal) -> Vec<Record> {
+        j.read(None, None).into_iter().filter(|r| r["op"] == "set_body").collect()
+    }
+
+    #[test]
+    fn set_body_replaces_only_the_body_and_keeps_the_head_bytes() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let head = "---\ntitle: \"Stats HW 4\"\nstatus: active\njudgment: {by: \"agent:knowlu.enrich\", at: \"2026-09-29T10:00:00Z\", fields: [effort_hours]}\nid: task_0123456789\n---\n";
+        let path = v.join("tasks").join("a.md");
+        // `write_text` writes the platform newline, so on Windows this is a CRLF note, as vaults are.
+        pystr::write_text(&path, &format!("{head}\nOld notes.\n")).unwrap();
+        let head_bytes = head.replace('\n', pystr::NEWLINE).into_bytes();
+        assert!(std::fs::read(&path).unwrap().starts_with(&head_bytes));
+        let (meta, _) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+        let mut j = Journal::new(&v);
+
+        let wrote = set_body(&v, "task_0123456789", "Old notes.\n", "Read ch. 4\r\nthen pp. 12-14", &ctx, &mut j).unwrap();
+        assert!(wrote);
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(&after[..head_bytes.len()], &head_bytes[..], "the head, through the fence's line ending, is byte-identical");
+        let (meta_after, body) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+        assert_eq!(meta_after, meta);
+        assert_eq!(body, "Read ch. 4\nthen pp. 12-14\n", "the body reads back as the normalised new body");
+        assert_eq!(pystr::read_text(&path).unwrap(), format!("{head}\nRead ch. 4\nthen pp. 12-14\n"), "the blank line after the fence is kept");
+        assert_eq!(body_records(&mut j).len(), 1);
+    }
+
+    #[test]
+    fn set_body_journals_before_it_writes() {
+        // Mirrors `the_journal_record_is_written_before_the_note`: the file write fails (the note is
+        // read-only, which every earlier step tolerates), and the record is already in the journal.
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let before = std::fs::read(&path).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms.clone()).unwrap();
+        let mut j = Journal::new(&v);
+        let res = set_body(&v, "tasks/a.md", "Body text.\n", "New text.\n", &ctx, &mut j);
+        perms.set_readonly(false);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        assert!(matches!(res, Err(WriteError::Io(_))), "the file write must fail for this test to mean anything: {res:?}");
+        assert_eq!(body_records(&mut j).len(), 1, "journal-first was violated");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "the note is unchanged");
+    }
+
+    #[test]
+    fn set_body_refuses_a_stale_expected_body() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let read = shown_body(&path);
+        // An agent appends a line after the drawer read the body, so the drawer's copy is stale.
+        let mut j = Journal::new(&v);
+        append_body(&v, "tasks/a.md", "an agent's line", &WriteContext::new("agent:knowlu.enrich", "local-runner"), &mut j).unwrap();
+        let before = fingerprint(&v);
+
+        let err = set_body(&v, "tasks/a.md", &read, "Mine.\n", &ctx, &mut j).unwrap_err();
+        assert_eq!(err, WriteError::Conflict("tasks/a.md".into()));
+        assert!(body_records(&mut j).is_empty(), "no record");
+        assert_eq!(fingerprint(&v), before, "the journal and the note are byte-identical");
+    }
+
+    #[test]
+    fn a_body_holding_a_dash_rule_keeps_the_frontmatter() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let (meta, _) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+        let mut j = Journal::new(&v);
+        let new = "---\nPart one\n---\n--- \ntitle: not a field\n---\n";
+
+        assert!(set_body(&v, "tasks/a.md", "Body text.\n", new, &ctx, &mut j).unwrap());
+        let (meta_after, body) = split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap();
+        assert_eq!(meta_after, meta, "the frontmatter mapping is unchanged");
+        assert_eq!(body, new, "the body reads back whole");
+        // ...and the note still takes a second body edit and a field edit.
+        assert!(set_body(&v, "tasks/a.md", new, "After.\n", &ctx, &mut j).unwrap());
+        write_literals(&v, "tasks/a.md", &lit(&[("status", "\"done\"")]), &ctx, &mut j, &WriteOpts::default()).unwrap();
+        assert_eq!(shown_body(&path), "After.\n");
+        assert_eq!(get_str(&split_frontmatter(&pystr::read_text(&path).unwrap()).unwrap().0, "status").as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn set_body_on_a_file_without_frontmatter_replaces_the_whole_text() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        std::fs::create_dir_all(v.join("profile")).unwrap();
+        let path = v.join("profile").join("preferences.md");
+        pystr::write_text(&path, "\nMornings are best.\n\nNo work after 9pm.\n").unwrap();
+        let mut j = Journal::new(&v);
+
+        assert!(set_body(&v, "profile/preferences.md", &shown_body(&path), "Evenings now.\r\n\r\n", &ctx, &mut j).unwrap());
+        assert_eq!(pystr::read_text(&path).unwrap(), "Evenings now.\n", "the whole text is the body");
+        let records = body_records(&mut j);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["id"], serde_json::Value::Null, "a file with no id records a null id");
+
+        // A first line starting `---` would turn the body into frontmatter on the next read.
+        let before = fingerprint(&v);
+        for new in ["---\nstrong: [x]\n---\n", "\n\n---", "--- not a rule"] {
+            let err = set_body(&v, "profile/preferences.md", "Evenings now.\n", new, &ctx, &mut j).unwrap_err();
+            assert!(matches!(err, WriteError::Body(_)), "{new:?}: {err}");
+        }
+        assert_eq!(fingerprint(&v), before, "refused before any record");
+    }
+
+    #[test]
+    fn set_body_refuses_an_unclosed_fence_and_a_space_trailed_one() {
+        let unclosed = "the frontmatter has no closing line";
+        let spaced = "the frontmatter's closing line is not exactly ---";
+        for (text, why) in [
+            ("---\nid: task_0123456789\n\nno closing line\n", unclosed),
+            ("---", unclosed),
+            ("---\nid: task_0123456789\n--- \n\nBody\n", spaced),
+            // The reader closes on `---\t`; the writer would close on the body's rule below it.
+            ("---\nid: task_0123456789\n---\t\nBody\n---\nMore\n", spaced),
+        ] {
+            let v = vault();
+            let ctx = human_ctx(&v);
+            let path = v.join("tasks").join("a.md");
+            pystr::write_text(&path, text).unwrap();
+            let before = fingerprint(&v);
+            let mut j = Journal::new(&v);
+            let err = set_body(&v, "tasks/a.md", &shown_body(&path), "New.\n", &ctx, &mut j).unwrap_err();
+            assert_eq!(err, WriteError::Body(why), "{text:?}");
+            assert_eq!(fingerprint(&v), before, "{text:?}: nothing journalled or written");
+        }
+    }
+
+    #[test]
+    fn set_body_refuses_nul_and_a_note_over_the_sync_limit() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let before = fingerprint(&v);
+        let mut j = Journal::new(&v);
+        let limit = crate::sync::MAX_NOTE_BYTES;
+        // Everything but the body, as `sync` measures a note (after `read_text`).
+        let head = NOTE.len() - "Body text.\n".len();
+        let over = format!("{}\n", "x".repeat(limit - head));
+        for (new, why) in [
+            ("a\u{0}b", "the body contains a NUL character"),
+            (over.as_str(), "the note would be too large to sync"),
+        ] {
+            let err = set_body(&v, "tasks/a.md", "Body text.\n", new, &ctx, &mut j).unwrap_err();
+            assert_eq!(err, WriteError::Body(why));
+        }
+        assert_eq!(fingerprint(&v), before, "nothing journalled or written");
+        // Exactly the limit is sendable, so it is written.
+        let at = format!("{}\n", "x".repeat(limit - head - 1));
+        assert!(set_body(&v, "tasks/a.md", "Body text.\n", &at, &ctx, &mut j).unwrap());
+        assert_eq!(pystr::read_text(&path).unwrap().len(), limit);
+    }
+
+    #[test]
+    fn set_body_normalises_by_d6() {
+        for (raw, want) in [
+            ("", ""),
+            ("\n\r\n\r", ""),
+            ("a", "a\n"),
+            ("a\r\nb\rc\n\n\n", "a\nb\nc\n"),
+            ("\n\n  indented\n", "  indented\n"),
+            ("x\n  \n", "x\n  \n"),
+            // Not a newline to `read_text`, so not one here: the drawer and the hash must agree.
+            ("one\u{2028}line", "one\u{2028}line\n"),
+        ] {
+            assert_eq!(normalise_body(raw), want, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn set_body_takes_the_human_gate() {
+        use crate::journal::{HUMAN_ACTOR, LEGACY_HUMAN_ACTOR};
+        for (file, actor) in [
+            (Some("human_actor: alice\n".to_string()), HUMAN_ACTOR),
+            (Some(format!("human_actor: {HUMAN_ACTOR}\n")), LEGACY_HUMAN_ACTOR),
+            (None, HUMAN_ACTOR),
+        ] {
+            let v = vault();
+            seed(&v);
+            if let Some(text) = &file { actor_file(&v, text) }
+            let before = fingerprint(&v);
+            let mut j = Journal::new(&v);
+            let err = set_body(&v, "tasks/a.md", "Body text.\n", "New.\n", &WriteContext::new(actor, "dashboard"), &mut j).unwrap_err();
+            assert!(matches!(err, WriteError::Actor(_)), "{actor} with {file:?}: {err}");
+            assert_eq!(fingerprint(&v), before, "{actor} with {file:?}: nothing journalled or written");
+        }
+        // An agent is never gated, whatever the file says.
+        let v = vault();
+        let path = seed(&v);
+        actor_file(&v, "human_actor: alice\n");
+        let mut j = Journal::new(&v);
+        let agent = WriteContext::new("agent:knowlu.enrich", "local-runner");
+        assert!(set_body(&v, "tasks/a.md", "Body text.\n", "Agent notes.\n", &agent, &mut j).unwrap());
+        assert_eq!(body_records(&mut j)[0]["actor"], "agent:knowlu.enrich");
+        assert_eq!(shown_body(&path), "Agent notes.\n");
+    }
+
+    /// D6's parenthesis: an empty body with no blank line after the fence (or no line ending at all)
+    /// gets the `create_task` shape, so the fence still ends its line; a note with a body keeps its
+    /// own run of newlines.
+    #[test]
+    fn set_body_keeps_the_fence_a_whole_line_and_the_notes_own_separator() {
+        let fm = "---\nid: task_0123456789\n---";
+        for (text, want) in [
+            (fm.to_string(), format!("{fm}\n\nNew\n")),
+            (format!("{fm}\n"), format!("{fm}\n\nNew\n")),
+            (format!("{fm}\n\n\n"), format!("{fm}\n\n\nNew\n")),
+            (format!("{fm}\nOld\n"), format!("{fm}\nNew\n")),
+            (format!("{fm}\n\n\nOld\n"), format!("{fm}\n\n\nNew\n")),
+        ] {
+            let v = vault();
+            let ctx = human_ctx(&v);
+            let path = v.join("tasks").join("a.md");
+            pystr::write_text(&path, &text).unwrap();
+            let mut j = Journal::new(&v);
+            assert!(set_body(&v, "tasks/a.md", &shown_body(&path), "New", &ctx, &mut j).unwrap(), "{text:?}");
+            assert_eq!(pystr::read_text(&path).unwrap(), want, "{text:?}");
+            assert_eq!(shown_body(&path), "New\n", "{text:?}");
+        }
+    }
+
+    // -- M2: set_body's no-op, and the pins (T1a.3) --------------------------
+
+    /// The seeded task's body as `surface::note_detail` gives it to the drawer (D6's one string).
+    fn detail_body(v: &Path, j: &mut Journal) -> String {
+        let day = jiff::civil::Date::constant(2026, 9, 30);
+        crate::surface::note_detail(v, "task_0123456789", day, j).expect("the seeded task").body
+    }
+
+    #[test]
+    fn set_body_is_a_no_op_when_the_body_is_unchanged() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let mut j = Journal::new(&v);
+        let before = fingerprint(&v);
+        for same in ["Body text.\r\n", "Body text.", "Body text.\n\n\n", "\n\nBody text.\n", "\r\n\r\nBody text.\r\n\r\n", "\rBody text.\r"] {
+            assert_eq!(set_body(&v, "tasks/a.md", "Body text.\n", same, &ctx, &mut j), Ok(false), "{same:?}");
+            // The caller's copy may differ from the file the same ways (§7.1 step 3).
+            assert_eq!(set_body(&v, "tasks/a.md", same, "Body text.\n", &ctx, &mut j), Ok(false), "{same:?}");
+        }
+        // The no-op comes after the compare-and-swap: a stale copy is still a conflict.
+        assert_eq!(set_body(&v, "tasks/a.md", "Stale.\n", "Body text.\n", &ctx, &mut j), Err(WriteError::Conflict("tasks/a.md".into())));
+        assert!(body_records(&mut j).is_empty(), "nothing is journalled");
+        assert_eq!(fingerprint(&v), before, "the journal and the note are byte-identical");
+
+        // A file whose own text is not in D6's form is left in it, never rewritten into it.
+        for text in [
+            NOTE.replace("---\n\nBody text.\n", "---\n\n\n\nBody text.\n\n\n"),
+            "---\nid: task_0123456789\n---".to_string(),
+        ] {
+            pystr::write_text(&path, &text).unwrap();
+            let before = fingerprint(&v);
+            let shown = shown_body(&path);
+            assert_eq!(set_body(&v, "tasks/a.md", shown.trim_end(), &format!("\r\n{shown}\n\n"), &ctx, &mut j), Ok(false), "{text:?}");
+            assert_eq!(fingerprint(&v), before, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn set_body_record_holds_hashes_and_never_text() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = v.join("tasks").join("a.md");
+        let old = "Old notes: marker-OLD-4e1c, caf\u{e9} \u{2014} \u{65e5}\u{672c}.\n";
+        pystr::write_text(&path, &NOTE.replace("Body text.\n", old)).unwrap();
+        let new = "New notes: marker-NEW-9b7d\r\nsecond line";
+        let mut j = Journal::new(&v);
+        assert!(set_body(&v, "tasks/a.md", old, new, &ctx, &mut j).unwrap());
+
+        let records = body_records(&mut j);
+        assert_eq!(records.len(), 1);
+        let rec = &records[0];
+        // §6.2: `make_record`'s twelve keys plus `seq`, stamped by `Journal::append`.
+        let mut keys: Vec<&str> = rec.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["actor", "device", "evidence", "field", "id", "new", "old", "op", "path", "run_id", "seq", "ts", "via"]);
+        assert_eq!(rec["actor"], ctx.actor.as_str(), "the test's own context, never §6.2's example");
+        assert_eq!(rec["via"], ctx.via.as_str());
+        assert_eq!(rec["op"], "set_body");
+        assert_eq!(rec["id"], "task_0123456789");
+        assert_eq!(rec["path"], "tasks/a.md");
+        for key in ["run_id", "field", "evidence"] {
+            assert_eq!(rec[key], serde_json::Value::Null, "{key}");
+        }
+        assert!(rec["ts"].as_str().is_some_and(|ts| ts.ends_with('Z')) && rec["device"].is_string() && rec["seq"].is_u64(), "{rec:?}");
+        let norm = "New notes: marker-NEW-9b7d\nsecond line\n";
+        assert_eq!(rec["old"], serde_json::json!({"sha256": body_sha256(old), "bytes": old.len()}), "UTF-8 bytes, not chars");
+        assert_eq!(rec["new"], serde_json::json!({"sha256": body_sha256(norm), "bytes": norm.len()}));
+
+        // On disk: one line, `dumps_value`'s bytes, and no text of either body in any form.
+        let files: Vec<PathBuf> = std::fs::read_dir(v.join("state").join("journal")).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(files.len(), 1);
+        let raw = std::fs::read_to_string(&files[0]).unwrap();
+        assert_eq!(raw, format!("{}{}", crate::ledger::dumps_value(&serde_json::Value::Object(rec.clone())), pystr::NEWLINE));
+        for marker in ["marker-OLD-4e1c", "marker-NEW-9b7d", "Old notes", "New notes", "second line", "caf\u{e9}", "\u{65e5}\u{672c}"] {
+            assert!(!raw.contains(marker), "{marker:?} reached the journal: {raw}");
+        }
+    }
+
+    #[test]
+    fn set_body_hashes_chain() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        seed(&v);
+        let mut j = Journal::new(&v);
+        let digest = |body: &str| serde_json::json!({"sha256": body_sha256(body), "bytes": body.len()});
+        let b0 = detail_body(&v, &mut j);
+        assert!(set_body(&v, "task_0123456789", &b0, "\r\n\r\nFirst edit\r\nline two", &ctx, &mut j).unwrap());
+        let b1 = detail_body(&v, &mut j);
+        assert!(set_body(&v, "task_0123456789", &b1, "Second edit.\n\n\n", &ctx, &mut j).unwrap());
+        let b2 = detail_body(&v, &mut j);
+        assert_eq!((b1.as_str(), b2.as_str()), ("First edit\nline two\n", "Second edit.\n"));
+
+        let records = body_records(&mut j);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["old"], digest(&b0), "the first `old` is the body the drawer showed");
+        assert_eq!(records[0]["new"], digest(&b1), "`new` is the body `note_detail` then shows");
+        assert_eq!(records[1]["old"], records[0]["new"], "a second edit's `old` is the first's `new`");
+        assert_eq!(records[1]["new"], digest(&b2));
+    }
+
+    #[test]
+    fn an_emptied_body_keeps_the_blank_line_after_the_fence() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let mut j = Journal::new(&v);
+        // `create_task_inner`'s shape: the frontmatter, its fence, one blank line and no body.
+        let path = create(&v, "tasks/new.md", "---\ntitle: New task\nstatus: active\n---\n\n", &ctx, &mut j, None).unwrap();
+        let minted = std::fs::read(&path).unwrap();
+        let minted_text = pystr::read_text(&path).unwrap();
+        assert!(minted_text.ends_with("\n---\n\n"), "{minted_text:?}");
+        for empty in ["", "\n", "\r\n\r\n"] {
+            assert!(set_body(&v, "tasks/new.md", &shown_body(&path), "Notes.", &ctx, &mut j).unwrap());
+            assert_eq!(pystr::read_text(&path).unwrap(), format!("{minted_text}Notes.\n"));
+            assert!(set_body(&v, "tasks/new.md", "Notes.\n", empty, &ctx, &mut j).unwrap(), "{empty:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), minted, "{empty:?}: the create_task shape, byte for byte");
+            assert_eq!(shown_body(&path), "", "{empty:?}");
+        }
+        // A note that had a body from the start keeps its blank line too.
+        let seeded = seed(&v);
+        assert!(set_body(&v, "tasks/a.md", "Body text.\n", "", &ctx, &mut j).unwrap());
+        assert_eq!(pystr::read_text(&seeded).unwrap(), NOTE.replace("Body text.\n", ""));
+    }
+
+    #[test]
+    fn set_body_records_are_invisible_to_judge_once_and_verify_tail() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let mut j = Journal::new(&v);
+        assert!(set_body(&v, "tasks/a.md", "Body text.\n", "My own notes.\n", &ctx, &mut j).unwrap());
+        assert_eq!(body_records(&mut j)[0]["actor"], ctx.actor.as_str(), "a human record, so a reader that took it would freeze a field");
+        // `sha256` and `bytes` are the keys of the record's `new`: a reader treating it as a `create`
+        // would find them.
+        for field in ["body", "sha256", "bytes", "status", "effort_hours"] {
+            assert!(j.human_set("task_0123456789", field).is_none(), "human_set {field}");
+            assert!(j.human_edited("task_0123456789", field).is_none(), "human_edited {field}");
+        }
+        assert!(crate::journal::latest_by_field(&j.read(None, None)).is_empty());
+        // The file back at the old body, as a crash between record and file would leave it (§7.5):
+        // `verify_tail` re-applies nothing and writes nothing.
+        pystr::write_text(&path, NOTE).unwrap();
+        let before = fingerprint(&v);
+        assert_eq!(crate::passes::verify_tail(&v, &mut j, &ctx, 1000), Vec::<String>::new());
+        assert_eq!(fingerprint(&v), before);
+    }
+
+    #[test]
+    fn set_body_undo_succeeds_after_a_save_without_a_trailing_newline() {
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let path = seed(&v);
+        let seeded = std::fs::read(&path).unwrap();
+        let mut j = Journal::new(&v);
+        let original = detail_body(&v, &mut j);
+        let typed = "Edited, with no final newline";
+        // D8: save, then undo with the body the page re-read as `expected` and the old text as new.
+        assert!(set_body(&v, "task_0123456789", &original, typed, &ctx, &mut j).unwrap());
+        let reread = detail_body(&v, &mut j);
+        assert_eq!(reread, format!("{typed}\n"));
+        assert_eq!(set_body(&v, "task_0123456789", &reread, &original, &ctx, &mut j), Ok(true));
+        assert_eq!(detail_body(&v, &mut j), original, "the original body is back");
+        assert_eq!(std::fs::read(&path).unwrap(), seeded, "byte for byte");
+        let r = body_records(&mut j);
+        assert_eq!((&r[1]["old"], &r[1]["new"]), (&r[0]["new"], &r[0]["old"]), "the undo's record chains back");
+        // §7.1 step 3: the textarea's own text, with no final newline or with CRLF, is no conflict.
+        for expected in [typed.to_string(), format!("{typed}\r\n")] {
+            assert!(set_body(&v, "task_0123456789", &original, typed, &ctx, &mut j).unwrap());
+            assert_eq!(set_body(&v, "task_0123456789", &expected, &original, &ctx, &mut j), Ok(true), "{expected:?}");
+            assert_eq!(detail_body(&v, &mut j), original, "{expected:?}");
+        }
+        assert_eq!(body_records(&mut j).len(), 6);
+    }
+
+    // -- M2: the profile-file primitives (T1b) -------------------------------
+
+    /// `profile/interests.md` as Knowlu creates it (§6.3); T3's `profile.rs` holds the canonical text.
+    const INTERESTS: &str = "---\nstrong: []\nmild: []\nnever: []\nclubs: []\n---\n";
+
+    #[test]
+    fn create_profile_file_makes_only_the_two_files_once_and_stamps_no_id() {
+        // The `create` record comes first: with a file where the `profile/` folder goes, the write
+        // fails after the record is in the journal.
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let mut j = Journal::new(&v);
+        std::fs::write(v.join("profile"), "").unwrap();
+        let res = create_profile_file(&v, "interests", INTERESTS, &ctx, &mut j);
+        assert!(matches!(res, Err(WriteError::Io(_))), "the file write must fail for this test to mean anything: {res:?}");
+        assert_eq!(j.read(None, None).len(), 1, "journal-first was violated");
+
+        let v = vault();
+        let ctx = human_ctx(&v);
+        let mut j = Journal::new(&v);
+        let before = fingerprint(&v);
+        for name in ["tasks", "task", "preferences.md", "Interests", "../interests", "profile/interests", ""] {
+            let err = create_profile_file(&v, name, INTERESTS, &ctx, &mut j).unwrap_err();
+            assert!(matches!(err, WriteError::Body(_)), "{name:?}: {err}");
+        }
+        assert_eq!(fingerprint(&v), before, "another name: nothing journalled or written");
+
+        let prefs = "Mornings are best.\nNo work after 9pm.\n";
+        let interests = create_profile_file(&v, "interests", INTERESTS, &ctx, &mut j).unwrap();
+        let preferences = create_profile_file(&v, "preferences", prefs, &ctx, &mut j).unwrap();
+        assert_eq!(interests, v.join("profile").join("interests.md"));
+        assert_eq!(preferences, v.join("profile").join("preferences.md"));
+        assert_eq!(pystr::read_text(&interests).unwrap(), INTERESTS, "written as given: no id stamped");
+        assert_eq!(pystr::read_text(&preferences).unwrap(), prefs, "written as given: no frontmatter added");
+        let records = j.read(None, None);
+        assert_eq!(records.len(), 2);
+        for (rec, (path, new)) in records.iter().zip([
+            ("profile/interests.md", serde_json::json!({"strong": [], "mild": [], "never": [], "clubs": []})),
+            ("profile/preferences.md", serde_json::json!({})),
+        ]) {
+            assert_eq!(rec["op"], "create", "{rec:?}");
+            assert_eq!(rec["id"], serde_json::Value::Null, "{rec:?}");
+            assert_eq!(rec["path"], path, "{rec:?}");
+            assert_eq!(rec["new"], new, "the frontmatter mapping, or {{}} when there is none");
+            assert_eq!(rec["actor"], ctx.actor.as_str(), "{rec:?}");
+        }
+        // The event filter's own reader reads the new file as four empty lists.
+        assert_eq!(crate::events::load_interests(&interests), (crate::events::Interests::default(), Vec::new()));
+
+        // Once: an existing file is refused by name, and nothing more is journalled or written.
+        let before = fingerprint(&v);
+        for (name, text) in [("interests", "---\nstrong: [research]\n---\n"), ("preferences", "Evenings.\n")] {
+            assert_eq!(create_profile_file(&v, name, text, &ctx, &mut j), Err(WriteError::Exists(format!("profile/{name}.md"))));
+        }
+        assert_eq!(fingerprint(&v), before);
+    }
+
+    /// The four keys in the order `profile::set_interests` sends them (§7.6).
+    fn four(values: [&str; 4]) -> Vec<(String, String)> {
+        lit(&[("strong", values[0]), ("mild", values[1]), ("never", values[2]), ("clubs", values[3])])
+    }
+
+    /// `profile/interests.md` holding `text` in the vault at `v`, and the vault's human context.
+    fn interests_vault(v: &Path, text: &str) -> (PathBuf, WriteContext) {
+        let ctx = human_ctx(v);
+        std::fs::create_dir_all(v.join("profile")).unwrap();
+        let path = v.join("profile").join("interests.md");
+        pystr::write_text(&path, text).unwrap();
+        (path, ctx)
+    }
+
+    #[test]
+    fn write_one_line_literals_refuses_a_value_that_spans_lines() {
+        for (why, text, key) in [
+            ("a block list, as the fixture writes it", "---\nstrong:\n  - research\n  - AI talks\nmild: []\nnever: []\nclubs: []\n---\n", "strong"),
+            ("a list at column 0", "---\nstrong: []\nmild:\n- free food\nnever: []\nclubs: []\n---\n", "mild"),
+            ("a comment line after the key", "---\nstrong: []\nmild: []\nnever:\n# none of these\n  - recruitment\nclubs: []\n---\n", "never"),
+            ("trailing spaces after the key, then items", "---\nstrong:   \n  - research\nmild: []\nnever: []\nclubs: []\n---\n", "strong"),
+            ("a blank line inside the block", "---\nstrong: []\nmild: []\nnever: []\nclubs:\n\n  - AI Club\n\n  - Chess Club\n---\n", "clubs"),
+            ("a duplicated key", "---\nstrong: [research]\nmild: []\nnever: []\nstrong: [talks]\nclubs: []\n---\n", "strong"),
+        ] {
+            let v = vault();
+            let (_, ctx) = interests_vault(&v, text);
+            let before = fingerprint(&v);
+            let mut j = Journal::new(&v);
+            let err = write_one_line_literals(&v, "profile/interests.md", &four(["[x]", "[y]", "[z]", "[w]"]), &ctx, &mut j, &WriteOpts::default()).unwrap_err();
+            assert_eq!(err, WriteError::MultiLine(key.to_string()), "{why}");
+            assert!(err.to_string().contains("Knowlu can only edit a list written on one line"), "{why}: {err}");
+            assert_eq!(fingerprint(&v), before, "{why}: no record, and the bytes are left alone");
+        }
+
+        // No frontmatter by the writer's fence rule: the reader reads four empty lists, so no key
+        // spans lines, yet `write_literals` would journal a record per key before the surgery refused
+        // (records with no id, which `verify_tail` cannot heal). Refused by name before any record.
+        for (why, text) in [
+            ("prose, which the event filter reads", "I like AI talks.\n"),
+            ("an unclosed fence", "---\nstrong: [a]\n"),
+            ("a BOM before the fence", "\u{feff}---\nstrong: [a]\nmild: []\nnever: []\nclubs: []\n---\n"),
+            ("only a spaced closing line", "---\nstrong: [a]\nmild: []\n--- \n"),
+        ] {
+            let v = vault();
+            let (_, ctx) = interests_vault(&v, text);
+            let before = fingerprint(&v);
+            let mut j = Journal::new(&v);
+            for _ in 0..2 {
+                let err = write_one_line_literals(&v, "profile/interests.md", &four(["[x]", "[y]", "[z]", "[w]"]), &ctx, &mut j, &WriteOpts::default()).unwrap_err();
+                assert_eq!(err, WriteError::NoFrontmatter("profile/interests.md".to_string()), "{why}");
+            }
+            assert_eq!(fingerprint(&v), before, "{why}: no record on any retry, and the bytes are left alone");
+        }
+
+        // A one-line or absent key is exactly `write_literals`: the same bytes and the same records
+        // on a copy of the same file. `clubs` is absent, `mild` does not change, the body is kept.
+        let text = "---\nstrong: [research]\nmild: []\n\nnever: []  # none yet\n---\n\nMy own notes.\n";
+        let literals = four(["[research, AI talks]", "[]", "[recruitment]", "[AI Club]"]);
+        let copy = std::env::temp_dir().join(format!("qo-write-copy-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&copy);
+        std::fs::create_dir_all(copy.join("state").join("journal")).unwrap();
+        let mut out = Vec::new();
+        for (v, one_line) in [(vault(), true), (copy.clone(), false)] {
+            let (path, ctx) = interests_vault(&v, text);
+            let mut j = Journal::new(&v);
+            let opts = WriteOpts::default();
+            let res = if one_line {
+                write_one_line_literals(&v, "profile/interests.md", &literals, &ctx, &mut j, &opts)
+            } else {
+                write_literals(&v, "profile/interests.md", &literals, &ctx, &mut j, &opts)
+            }
+            .unwrap();
+            let records: Vec<Record> = j.read(None, None).into_iter().map(|mut r| { r.remove("ts"); r.remove("seq"); r }).collect();
+            out.push((std::fs::read(&path).unwrap(), res.written, records, path));
+        }
+        let (one_line, plain) = (&out[0], &out[1]);
+        assert_eq!((&one_line.0, &one_line.1, &one_line.2), (&plain.0, &plain.1, &plain.2), "the bytes, the literals written and the records");
+        assert_eq!(one_line.2.len(), 3, "a record each for strong, never and clubs; none for mild");
+        let (read, warnings) = crate::events::load_interests(&one_line.3);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!((read.strong, read.mild, read.never, read.clubs), (vec!["research".to_string(), "AI talks".into()], vec![], vec!["recruitment".into()], vec!["AI Club".into()]));
+        assert!(pystr::read_text(&one_line.3).unwrap().ends_with("---\n\nMy own notes.\n"), "the body is kept");
+        let _ = std::fs::remove_dir_all(&copy);
+    }
+
+    #[test]
+    fn profile_primitives_take_the_human_gate() {
+        use crate::journal::{HUMAN_ACTOR, LEGACY_HUMAN_ACTOR};
+        for (file, actor) in [
+            (Some("human_actor: alice\n".to_string()), HUMAN_ACTOR),
+            (Some(format!("human_actor: {HUMAN_ACTOR}\n")), LEGACY_HUMAN_ACTOR),
+            (None, HUMAN_ACTOR),
+        ] {
+            let v = vault();
+            std::fs::create_dir_all(v.join("profile")).unwrap();
+            pystr::write_text(&v.join("profile").join("interests.md"), INTERESTS).unwrap();
+            if let Some(text) = &file { actor_file(&v, text) }
+            let before = fingerprint(&v);
+            let mut j = Journal::new(&v);
+            let ctx = WriteContext::new(actor, "dashboard");
+            let created = create_profile_file(&v, "preferences", "Mornings.\n", &ctx, &mut j).unwrap_err();
+            let written = write_one_line_literals(&v, "profile/interests.md", &lit(&[("strong", "[x]")]), &ctx, &mut j, &WriteOpts::default()).unwrap_err();
+            for err in [created, written] {
+                assert!(matches!(err, WriteError::Actor(_)), "{actor} with {file:?}: {err}");
+            }
+            assert_eq!(fingerprint(&v), before, "{actor} with {file:?}: nothing journalled or written");
+        }
+        // An agent is never gated, whatever the file says.
+        let v = vault();
+        actor_file(&v, "human_actor: alice\n");
+        let mut j = Journal::new(&v);
+        let agent = WriteContext::new("agent:knowlu.enrich", "local-runner");
+        let path = create_profile_file(&v, "interests", INTERESTS, &agent, &mut j).unwrap();
+        write_one_line_literals(&v, "profile/interests.md", &lit(&[("strong", "[research]")]), &agent, &mut j, &WriteOpts::default()).unwrap();
+        assert_eq!(crate::events::load_interests(&path).0.strong, ["research"]);
+        let records = j.read(None, None);
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|r| r["actor"] == "agent:knowlu.enrich"), "{records:?}");
+    }
+
+    /// T1b ruling: past §7.2's column rule, `value_spans_lines` is also true wherever the reader
+    /// (`split_frontmatter`, so `load_interests`) and the one-line surgery would disagree about the
+    /// key; and it stays false on every file Knowlu writes, so Knowlu's own lists stay editable.
+    #[test]
+    fn value_spans_lines_errs_toward_true_where_the_reader_and_the_surgery_disagree() {
+        let flow = "---\nstrong: [research,\nAI talks]\nmild: []\n---\n";
+        let read = split_frontmatter(flow).expect("the reader takes a flow list continued at column 0").0;
+        assert_eq!(crate::yaml::get(&read, "strong"), Some(&parse_literal("[research, AI talks]")), "so the surgery would orphan `AI talks]`");
+        let wrong: Vec<&str> = [
+            ("a flow list continued at column 0", flow),
+            ("a quoted key the surgery cannot find", "---\n\"strong\": [research]\n---\n"),
+            ("the key on the opening line", "---strong: [research]\nmild: []\n---\n"),
+            ("the reader closes on a spaced line before the writer's", "---\nmild: []\n--- \nBody\n---\n"),
+            ("only a spaced closing line", "---\nstrong: []\n--- \nBody\n"),
+            ("a frontmatter the reader cannot parse", "---\nstrong: [research\n---\n"),
+            ("section 7.2's own rule: a comment after a one-line value", "---\nstrong: []\n# later\nmild: []\n---\n"),
+        ]
+        .into_iter()
+        .filter(|(_, text)| !value_spans_lines(text, "strong"))
+        .map(|(why, _)| why)
+        .collect();
+        assert!(wrong.is_empty(), "false where it must be true: {wrong:?}");
+
+        let crlf = INTERESTS.replace('\n', "\r\n");
+        let mut editable: Vec<(String, &str, &str)> = [
+            ("one line, with a comment", "---\nstrong: [research]  # mine\nmild: []\n---\n"),
+            ("blank lines between the keys", "---\nstrong: [research, AI talks]\n\n\nmild: []\n\n---\n"),
+            ("an absent key", "---\nmild: []\n---\n"),
+            ("a longer key sharing the prefix", "---\nstrongest:\n  - x\nstrong: [a]\n---\n"),
+            ("list lines in the body", "---\nmild: []\n---\nstrong:\n  - x\n"),
+            ("no frontmatter: write_one_line_literals refuses the file by name", "Mornings.\nstrong:\n  - x\n"),
+        ]
+        .map(|(why, text)| (why.to_string(), text, "strong"))
+        .into();
+        for key in ["strong", "mild", "never", "clubs"] {
+            editable.push((format!("Knowlu's own file ({key})"), INTERESTS, key));
+            editable.push((format!("Knowlu's own file, CRLF ({key})"), crlf.as_str(), key));
+        }
+        let wrong: Vec<String> =
+            editable.into_iter().filter(|(_, text, key)| value_spans_lines(text, key)).map(|(why, ..)| why).collect();
+        assert!(wrong.is_empty(), "true where it must be false: {wrong:?}");
     }
 }

@@ -52,6 +52,8 @@ pub mod eventfilter;
 pub mod eventfeed;
 pub mod eventroster;
 pub mod eventemit;
+pub mod eventaccept;
+pub mod eventcarry;
 
 // Wave 6 - coursework: zyBooks and VHL.
 pub mod coursework;
@@ -82,10 +84,18 @@ pub mod cli;
 // `cli` already knows how to load, never written to it.
 pub mod surface;
 
+// The student's profile (M2 spec §7.6, hand-off H1): `profile/preferences.md` and
+// `profile/interests.md` read into plain data and written through `write`, never parsed and re-dumped.
+pub mod profile;
+
 // The commitment model (spec 2026-09-23): the notes in `commitments/`, read into plain data for
 // `weekcal` and the piece-2 overlap API. Pure but for `load`'s reads; never a model or the network.
 pub mod commitments;
 pub mod registrar;
+
+// Grades from Blackboard (M1 spec 2026-09-29): the pure half — the capture bundle, course matching,
+// one column into the fields of a `grades/` note, and a course's standing. No I/O here.
+pub mod grades;
 
 // The console's write path (Knowlu plan 1): interaction events only, through the same
 // `JsonlLedger` seam as the journal. Never read by the engine.
@@ -111,6 +121,18 @@ pub mod cloudmodel;
 // Knowlu plan 3a — the enrichment pass (spec §5.5 step 1): select, judge, write as
 // `agent:knowlu.enrich`, log. The cloud routine's step 3, run locally, so that step starves.
 pub mod enrich;
+
+// Email forwarding to Knowlu (email spec 2026-09-30, §6.1): the pure reconciler. Notes and claims
+// in, an ordered list of actions out; the one place card or direct write is decided (D11).
+pub mod mailreconcile;
+
+// Email forwarding to Knowlu (email spec 2026-09-30, §6.1): the mail pass's device half — pull, plan,
+// write as `agent:knowlu.mail`. Doc-only until T6.2 (plan H1b).
+pub mod mail;
+
+// Email forwarding to Knowlu (email spec 2026-09-30, §6.1): `mail-applied`, the read-only list of
+// what the mail pass wrote. Doc-only until T7 (plan H1c).
+pub mod mailapplied;
 
 // Knowlu C3′ — journal sync (cloud design §5.5, as amended 2026-09-17). Every record this device
 // writes, and the text of every note that changed, goes up to the account's own copy as it is —

@@ -28,7 +28,7 @@ use jiff::civil::{Date, DateTime, Time};
 use jiff::Span;
 use regex::Regex;
 
-use crate::eventledger::LedgerEntry;
+use crate::eventledger::{self, LedgerEntry};
 use crate::events::{DiscoveredEvent, EventsConfig};
 use crate::pystr;
 
@@ -306,6 +306,83 @@ pub fn read_roster(path: &Path) -> Vec<DiscoveredEvent> {
         );
     }
     events
+}
+
+/// One event the page lists under *Not shown*: dropped, with the one reason it was.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DroppedEvent {
+    pub uid: String,
+    pub title: String,
+    /// `YYYY-MM-DD`, as the audit line carries it.
+    pub date: String,
+    /// `HH:MM`, as the audit line carries it.
+    pub time: String,
+    pub reason: String,
+}
+
+// The audit line shape `audit_lines` writes: `- Thu 2026-09-03 18:00 · Title · detail`uid``, then
+// ` · url` when unjudged and ` · filtered` when the pre-filter dropped it. The title is matched
+// lazily, so a title that itself holds ` · ` is cut at its first one; the uid keys the event.
+static AUDIT_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^- \w{3} (?P<date>\d{4}-\d{2}-\d{2}) (?P<time>\d{2}:\d{2}) · (?P<title>.+?) · [^`]*`(?P<uid>[^`]+)`(?P<tail>.*)$",
+    )
+    .unwrap()
+});
+
+/// The events the roster's audit section records as dropped, each with the one reason.
+///
+/// Read-only: `state/events.md` and the event ledger are read, nothing is written. The reason is
+/// "filtered by your interests" for a `· filtered` line, else "you declined it" when the ledger
+/// marks the uid declined, else "judged not relevant" (with the ledger's `why`, when it has one)
+/// for a `drop` verdict only (ruled 2026-09-30, Quinn: an `unsure` verdict is not listed, it may
+/// still have an open card asking the student). An unjudged line, an unsure or relevant verdict, a
+/// continuation line and everything under *Coming up* are not drops and are left out (PQ2 = no).
+/// Date and time stay the text the line carries. An absent or unreadable roster is empty.
+pub fn read_dropped(vault: &Path) -> Vec<DroppedEvent> {
+    let path = vault.join("state").join("events.md");
+    let Ok(text) = pystr::read_text(&path) else {
+        return Vec::new();
+    };
+    let ledger = eventledger::load_ledger(vault, None);
+    let mut in_audit = false;
+    let mut out = Vec::new();
+    for line in pystr::splitlines(&text) {
+        if line.starts_with("## ") {
+            in_audit = line.starts_with("## Everything else");
+            continue;
+        }
+        if !in_audit {
+            continue;
+        }
+        let Some(m) = AUDIT_LINE.captures(line) else { continue };
+        let uid = &m["uid"];
+        let entry = ledger.get(uid);
+        let reason = if m["tail"].ends_with(" · filtered") {
+            "filtered by your interests".to_string()
+        } else if entry.is_some_and(|e| e.declined) {
+            "you declined it".to_string()
+        } else {
+            match entry.and_then(|e| e.verdict.as_deref().map(|v| (v, &e.why))) {
+                Some(("drop", why)) => {
+                    if why.is_empty() {
+                        "judged not relevant".to_string()
+                    } else {
+                        format!("judged not relevant: {why}")
+                    }
+                }
+                _ => continue,
+            }
+        };
+        out.push(DroppedEvent {
+            uid: uid.to_string(),
+            title: m["title"].to_string(),
+            date: m["date"].to_string(),
+            time: m["time"].to_string(),
+            reason,
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -651,6 +728,140 @@ mod tests {
             assert_eq!(recovered[0].start(), original.start());
             assert_eq!(recovered[0].end(), original.end());
         }
+    }
+
+    // ---- read_dropped (M2 T6) ----
+
+    /// Close enough to the September events that they fall inside the 14-day audit window.
+    const SEPT_1: Date = Date::constant(2026, 9, 1);
+
+    fn scratch_vault(name: &str) -> PathBuf {
+        let vault = tmp(name).parent().unwrap().to_path_buf();
+        fs::create_dir_all(vault.join("state")).unwrap();
+        vault
+    }
+
+    fn roster_path(vault: &Path) -> PathBuf {
+        vault.join("state").join("events.md")
+    }
+
+    #[test]
+    fn read_dropped_reads_the_fixtures_audit_section() {
+        let fixture = Path::new("tests/fixtures/vault-full/state/events.md");
+        let before = fs::read(fixture).unwrap();
+        let vault = scratch_vault("dropped-fixture");
+        // The frozen roster has an empty audit section; read it through a copy.
+        let copy = pystr::read_text(fixture).unwrap();
+        assert!(copy.contains("- Nothing else in the window."));
+        pystr::write_text(&roster_path(&vault), &copy).unwrap();
+        assert!(read_dropped(&vault).is_empty(), "Coming up is never returned");
+
+        // Two filtered lines go into the copy's audit section; Coming up keeps its three.
+        let with_drops = copy.replace(
+            "- Nothing else in the window.",
+            "- Fri 2026-09-04 18:30 · Pep Rally · Spirit Club · @ Gym `localist:pep` · filtered\n\
+             - Sat 2026-09-05 09:00 · Yard Sale · `ics:yard` · filtered",
+        );
+        pystr::write_text(&roster_path(&vault), &with_drops).unwrap();
+        let dropped = read_dropped(&vault);
+        let got: Vec<(&str, &str, &str, &str)> = dropped
+            .iter()
+            .map(|d| (d.title.as_str(), d.date.as_str(), d.time.as_str(), d.reason.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Pep Rally", "2026-09-04", "18:30", "filtered by your interests"),
+                ("Yard Sale", "2026-09-05", "09:00", "filtered by your interests"),
+            ]
+        );
+        assert_eq!(dropped[0].uid, "localist:pep");
+        assert_eq!(fs::read(fixture).unwrap(), before, "the frozen reference is untouched");
+    }
+
+    #[test]
+    fn read_dropped_names_why() {
+        let vault = scratch_vault("dropped-why");
+        let mut declined = ev("dec", "Declined Thing", 2);
+        declined.organizer = "Chess Club".into();
+        let events = [declined, ev("irr", "Irrelevant Thing", 3), ev("rel", "Kept Thing", 4)];
+        let filtered = [ev("flt", "Filtered Thing", 5)];
+        let when = SEPT_1;
+        eventledger::record_verdict(&vault, "dec", "Declined Thing", when, "opportunity", "", "", "")
+            .unwrap();
+        eventledger::record_proposed(&vault, "dec", when).unwrap();
+        eventledger::record_declined(&vault, "dec", when).unwrap();
+        eventledger::record_verdict(
+            &vault, "irr", "Irrelevant Thing", when, "drop", "", "a sports night", "",
+        )
+        .unwrap();
+        eventledger::record_verdict(&vault, "rel", "Kept Thing", when, "obligation", "", "", "")
+            .unwrap();
+        let ledger = eventledger::load_ledger(&vault, None);
+        write_roster(&roster_path(&vault), &events, &ledger, &config(), SEPT_1, &filtered).unwrap();
+        let before = fs::read(roster_path(&vault)).unwrap();
+        let ledger_before = fs::read(vault.join("state").join("events-seen.md")).unwrap();
+
+        let dropped = read_dropped(&vault);
+        let got: Vec<(&str, &str)> = dropped
+            .iter()
+            .map(|d| (d.title.as_str(), d.reason.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Declined Thing", "you declined it"),
+                ("Irrelevant Thing", "judged not relevant: a sports night"),
+                ("Filtered Thing", "filtered by your interests"),
+            ]
+        );
+        assert_eq!(dropped[0].date, "2026-09-02");
+        assert_eq!(dropped[0].time, "18:00");
+        assert_eq!(fs::read(roster_path(&vault)).unwrap(), before, "the read writes nothing");
+        assert_eq!(fs::read(vault.join("state").join("events-seen.md")).unwrap(), ledger_before);
+    }
+
+    #[test]
+    fn read_dropped_skips_unjudged_and_continuation_lines() {
+        // PQ2 = no (Quinn, 2026-09-30): an unjudged event is not a drop, so it never appears.
+        let vault = scratch_vault("dropped-unjudged");
+        let mut unjudged = ev("un", "Unjudged Thing", 2);
+        unjudged.description = "A long description that lands on a continuation line".into();
+        unjudged.categories = vec!["Social".into()];
+        unjudged.url = "https://example.test/un".into();
+        let filtered = [ev("flt", "Filtered Thing", 3)];
+        write_roster(&roster_path(&vault), &[unjudged], &BTreeMap::new(), &config(), SEPT_1, &filtered)
+            .unwrap();
+        let text = read(&roster_path(&vault));
+        assert!(text.contains("Unjudged Thing") && text.contains("      A long description"));
+        let titles: Vec<String> = read_dropped(&vault).into_iter().map(|d| d.title).collect();
+        assert_eq!(titles, vec!["Filtered Thing"]);
+    }
+
+    #[test]
+    fn read_dropped_skips_unsure() {
+        // Ruled 2026-09-30 (Quinn): only a "drop" verdict is "judged not relevant"; an "unsure"
+        // event may still have an open card asking the student, so it is not listed.
+        let vault = scratch_vault("dropped-unsure");
+        let events = [ev("uns", "Unsure Thing", 2), ev("irr", "Irrelevant Thing", 3)];
+        let when = SEPT_1;
+        eventledger::record_verdict(&vault, "uns", "Unsure Thing", when, "unsure", "", "maybe", "")
+            .unwrap();
+        eventledger::record_verdict(&vault, "irr", "Irrelevant Thing", when, "drop", "", "", "")
+            .unwrap();
+        let ledger = eventledger::load_ledger(&vault, None);
+        write_roster(&roster_path(&vault), &events, &ledger, &config(), SEPT_1, &[]).unwrap();
+        assert!(read(&roster_path(&vault)).contains("Unsure Thing"), "the roster still lists it");
+        let got: Vec<(String, String)> =
+            read_dropped(&vault).into_iter().map(|d| (d.title, d.reason)).collect();
+        assert_eq!(got, vec![("Irrelevant Thing".to_string(), "judged not relevant".to_string())]);
+    }
+
+    #[test]
+    fn read_dropped_of_an_absent_roster_is_empty() {
+        let vault = scratch_vault("dropped-absent");
+        assert!(!roster_path(&vault).exists());
+        assert!(read_dropped(&vault).is_empty());
     }
 }
 

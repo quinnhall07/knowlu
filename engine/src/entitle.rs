@@ -16,6 +16,10 @@
 //! machine with a problem, and retrying fixes nothing; `main.rs` prints the line and returns
 //! SUCCESS, so the tray stays calm and the Runs view says what happened.
 //!
+//! **What is gated: five commands,** `coursework`, `grades`, `ingest`, `judge` and `sync`, the steps
+//! that fill the folder (`main.rs::gated_vault`; `grades`, M1 spec §6, stops with `coursework`).
+//! `engine/tests/entitlement_gate.rs` spawns the built binary once for each of the five.
+//!
 //! **What is not gated:** `surface` and `write` (the console reads and edits through them — gating
 //! either freezes the window rather than the subscription), `runs`, `info`, `issues`,
 //! `coursework-discover`, and — pending precondition P5 — `rank`.

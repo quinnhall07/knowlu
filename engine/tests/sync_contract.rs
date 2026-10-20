@@ -385,29 +385,147 @@ fn a_push_over_the_byte_budget_is_split_across_two_build_push_calls_and_nothing_
 // R-C3′-exec-8/11: the device applies the server's exact path rule.
 // ---------------------------------------------------------------------------
 
+/// `sql` with every `--` comment removed, so a migration header that quotes an older folder group
+/// is never read as the live one.
+fn sql_code(sql: &str) -> String {
+    sql.lines().map(|line| line.split("--").next().unwrap_or_default()).collect::<Vec<_>>().join("\n")
+}
+
+/// The `|`-separated names inside the parenthesised group that opens right after `anchor`, which
+/// must occur exactly once in `code`.
+fn group_after(code: &str, anchor: &str, what: &str) -> Vec<String> {
+    assert_eq!(code.matches(anchor).count(), 1, "{what}: expected exactly one `{anchor}`");
+    let start = code.find(anchor).expect("counted above") + anchor.len();
+    let len = code[start..].find(')').unwrap_or_else(|| panic!("{what}: the folder group never closes"));
+    code[start..start + len].split('|').map(str::to_string).collect()
+}
+
+/// Every `*.sql` in `migrations` as `(file name, text)`, in name order: the order Postgres applies
+/// them in.
+fn migration_files(migrations: &Path) -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = std::fs::read_dir(migrations)
+        .expect("cloud/supabase/migrations")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".sql"))
+        .map(|n| {
+            let sql = std::fs::read_to_string(migrations.join(&n)).unwrap_or_else(|e| panic!("{n}: {e}"));
+            (n, sql)
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// The live column check: of `files`, the one latest in name order whose code (comments stripped)
+/// adds `sync_notes_path_check`. Migrations are forward-only and applied in name order, so the last
+/// one to re-add the constraint is the one Postgres enforces, **whatever the file is called** (W1
+/// M1T1-important). A later redefinition under another name, like two-desktop's settings migration,
+/// is read like any other. `\b` keeps the climb-out siblings (`sync_notes_path_check1`, `…2`) out.
+fn live_path_check(files: &[(String, String)]) -> (String, String) {
+    let adds = regex::Regex::new(r"(?i)\badd\s+constraint\s+sync_notes_path_check\b").expect("a valid pattern");
+    files.iter()
+        .filter(|(_, sql)| adds.is_match(&sql_code(sql)))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .cloned()
+        .expect("at least one migration adds sync_notes_path_check")
+}
+
+fn latest_path_check(migrations: &Path) -> (String, String) {
+    live_path_check(&migration_files(migrations))
+}
+
+/// The `ids::NOTE_FOLDERS` entries the path check in `check_sql` does not accept. Empty is the
+/// union rule: the live check holds every note folder.
+fn folders_missing(check_name: &str, check_sql: &str) -> Vec<&'static str> {
+    let group = group_after(&sql_code(check_sql), "path ~ '^(", check_name);
+    knowlu_engine::ids::NOTE_FOLDERS.into_iter().filter(|f| !group.iter().any(|g| g == f)).collect()
+}
+
+/// Two-desktop's planned settings migration, re-stamped after M1's as D10 says, still carrying its
+/// planned group: it redefines `sync_notes_path_check` under a name that says nothing about paths,
+/// and its group lacks `grades`.
+const LATER_SETTINGS: (&str, &str) = ("20991231000100_shared_settings.sql", r"alter table public.sync_notes
+  drop constraint sync_notes_path_check,
+  add constraint sync_notes_path_check check (
+    (
+      path ~ '^(tasks|approvals|archive|courses|issues|info|commitments)/[A-Za-z0-9._ /-]+\.md$'
+      and char_length(regexp_replace(path, '^[a-z]+/', '')) between 4 and 303
+    )
+    or path in ('config/campus.yaml', 'config/events.yaml')
+  );
+");
+
+/// A later migration that re-adds a climb-out sibling (`sync_notes_path_check1`), not the folder check.
+const LATER_SIBLING: (&str, &str) = ("20991231000200_sync_notes_climb_out.sql", r"alter table public.sync_notes
+  drop constraint sync_notes_path_check1,
+  add constraint sync_notes_path_check1 check (path !~ '(^|/)\.\.(/|$)');
+");
+
+/// A later migration whose NAME matches the old filter but which only mentions the constraint in a
+/// comment.
+const LATER_COMMENT_ONLY: (&str, &str) = ("20991231000300_sync_note_path_check_note.sql", r"-- Nothing here touches the folder check; an example only:
+-- alter table public.sync_notes add constraint sync_notes_path_check check (path ~ '^(tasks)/x\.md$');
+select 1;
+");
+
+#[test]
+fn the_live_path_check_is_chosen_by_what_a_migration_declares_not_by_its_file_name() {
+    // W1 M1T1-important: the union rule (D10) is guarded only by
+    // `is_note_path_and_the_servers_regex_agree` below, and it guards nothing if it reads the wrong
+    // migration. Picking by file name lets a later migration that redefines `sync_notes_path_check`
+    // under another name (two-desktop's `…_shared_settings.sql`) go unread while it narrows the live
+    // check. The later migrations are in-memory strings; no migration file is written.
+    let supabase = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("cloud").join("supabase");
+    let mut files = migration_files(&supabase.join("migrations"));
+    for (name, sql) in [LATER_SETTINGS, LATER_SIBLING, LATER_COMMENT_ONLY] {
+        files.push((name.to_string(), sql.to_string()));
+    }
+    let (name, sql) = live_path_check(&files);
+    assert_eq!(name, LATER_SETTINGS.0, "the last migration that adds sync_notes_path_check is the live one");
+    let missing = folders_missing(&name, &sql);
+    assert!(missing.contains(&"grades"), "and the union rule refuses it: {missing:?}");
+}
+
 #[test]
 fn is_note_path_and_the_servers_regex_agree() {
     // The rule lives in three places by necessity — Rust, TypeScript and a column check — so it is
-    // pinned from one side rather than trusted three times. The TS source is read, not imported.
-    let ts = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("cloud").join("supabase")
-            .join("functions").join("_shared").join("sync_rows.ts"),
-    ).expect("sync_rows.ts");
-    // Commitment-model spec §10 gate 1 (plan review C2): derived from `NOTE_FOLDERS`, never a
-    // literal, so a folder the engine gains and the server lacks fails here. `NOTE_PATH_RE` is a JS
-    // regex literal, which escapes its slash: the group reads `(…)\/` in the source.
+    // pinned from one side rather than trusted three times. The TS source and the SQL are read, not
+    // imported or applied.
+    //
+    // Commitment-model spec §10 gate 1 (plan review C2) and grades spec §7: the folder list is
+    // derived from `NOTE_FOLDERS`, never a literal, so a folder the engine gains and the server lacks
+    // fails here — against `NOTE_PATH_RE` AND against the live column check (the latest migration
+    // that re-declares it, chosen by content). Per folder first, for a precise message; then gate 1's
+    // whole group, in `NOTE_FOLDERS` order, in `NOTE_PATH_RE`. The column check is held to the union
+    // rule (D10: a subset of its group), and that the server's two sides carry the same group is
+    // `migrations_sync_test.ts`'s to pin.
+    let supabase = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("cloud").join("supabase");
+    let ts = std::fs::read_to_string(supabase.join("functions").join("_shared").join("sync_rows.ts"))
+        .expect("sync_rows.ts");
+    let ts_group = group_after(&ts, "export const NOTE_PATH_RE = /^(", "sync_rows.ts");
+    let (check_name, check_sql) = latest_path_check(&supabase.join("migrations"));
     let folders = knowlu_engine::ids::NOTE_FOLDERS;
+    for folder in folders {
+        assert!(ts_group.iter().any(|f| f == folder), "sync_rows.ts's NOTE_PATH_RE lacks {folder}: {ts_group:?}");
+    }
+    // `NOTE_PATH_RE` is a JS regex literal, which escapes its slash: the group reads `(…)\/` in the source.
     let group = format!("({})\\/", folders.join("|"));
     assert!(ts.contains(&group), "the server's folder list is the engine's: {group}");
+    let missing = folders_missing(&check_name, &check_sql);
+    assert!(missing.is_empty(), "{check_name}'s path check (the live one) lacks {missing:?}");
     assert!(ts.contains("[A-Za-z0-9._ /-]{1,300}"), "the server's character class and length are the engine's");
     let vault = std::env::temp_dir();
     for folder in folders {
         let ok = format!("{folder}/x.md");
         assert!(sync::is_note_path(&vault, &ok), "{ok}");
     }
-    for ok in ["tasks/x.md", "courses/cs-100.md", "info/a.md", "commitments/cs-100.md"] { assert!(sync::is_note_path(&vault, ok), "{ok}"); }
+    for ok in ["tasks/x.md", "courses/cs-100.md", "info/a.md", "commitments/cs-100.md", "grades/a.md"] {
+        assert!(sync::is_note_path(&vault, ok), "{ok}");
+    }
     for bad in ["state/journal/2026-09-17.jsonl", "config/ingest.yaml", "tasks/../../x.md", "tasks//x.md",
-                "tasks/x.txt", "tasks\\x.md", "/tasks/x.md", "tasks", ""] {
+                "tasks/x.txt", "tasks\\x.md", "/tasks/x.md", "tasks", "", "grades/../tasks/a.md", "grade/a.md",
+                "state/grades.json"] {
         assert!(!sync::is_note_path(&vault, bad), "{bad}");
     }
     // The middle's own length bound: 300 characters accepted, 301 refused.
@@ -580,6 +698,169 @@ fn an_unreadable_folder_suppresses_tombstones_for_that_folder_only() {
 }
 
 // ---------------------------------------------------------------------------
+// M2 editing (spec 2026-09-29, §6.2, §7.3, D13): a body edit's record, and the profile's.
+// ---------------------------------------------------------------------------
+
+/// The app's `console_ctx(vault)`: the vault's own human token, via `dashboard`. Read from the vault,
+/// never spelt here (rule 1).
+fn vault_ctx(vault: &Path) -> knowlu_engine::write::WriteContext {
+    let token = knowlu_engine::journal::read_human_actor(vault).expect("the vault's human token");
+    knowlu_engine::write::WriteContext::new(token, "dashboard")
+}
+
+/// A batch's records, parsed back out of the canonical bodies they travel as.
+fn sent_records(batch: &sync::PushBatch) -> Vec<serde_json::Value> {
+    batch.records.iter()
+        .map(|r| serde_json::from_str(r["body"].as_str().expect("a body")).expect("a record"))
+        .collect()
+}
+
+fn is_profile_path(record: &serde_json::Value) -> bool {
+    record["path"].as_str().is_some_and(|p| p.starts_with("profile/"))
+}
+
+/// Spec test 15 (§6.2, D3): a `set_body` record holds two digests and two byte counts, never the
+/// body, so it stays small whatever the note holds. `record_is_well_formed` (which reads
+/// `journal::OPS`) takes it, and `build_push` sends it like any other record about a note.
+#[test]
+fn a_set_body_record_is_well_formed_and_small_whatever_the_body() {
+    let dir = fixture("set-body-small");
+    let ctx = vault_ctx(&dir);
+    let mut journal = Journal::new(&dir);
+    let note = "---\nid: task_00000000aa\ntitle: Long notes\n---\n\nshort\n";
+    knowlu_engine::pystr::write_text(&dir.join("tasks").join("long-notes.md"), note).expect("a note");
+    let body = "x".repeat(100 * 1024);
+    let wrote = knowlu_engine::write::set_body(&dir, "tasks/long-notes.md", "short\n", &body, &ctx, &mut journal);
+    assert_eq!(wrote, Ok(true));
+
+    journal.invalidate();
+    let records = journal.read(None, None);
+    let record = records.iter()
+        .find(|r| r.get("op").and_then(serde_json::Value::as_str) == Some("set_body"))
+        .expect("the set_body record");
+    assert_eq!(sync::record_is_well_formed(record), Ok(()));
+    let bytes = knowlu_engine::ledger::dumps_value(&serde_json::Value::Object(record.clone()));
+    assert!(bytes.len() < 1024, "{} bytes: {bytes}", bytes.len());
+    assert!(!bytes.contains("xxxx"), "no body text in the record: {bytes}");
+    // The body D6 writes (one final newline added), measured and hashed, not the file.
+    let written = format!("{body}\n");
+    assert_eq!(record["new"]["bytes"], serde_json::json!(written.len()));
+    assert_eq!(record["new"]["sha256"], serde_json::json!(knowlu_engine::write::body_sha256(&written)));
+
+    let (batch, _) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
+    assert!(batch.warnings.is_empty(), "{:?}", batch.warnings);
+    let sent = sent_records(&batch);
+    assert!(
+        sent.iter().any(|r| r["op"] == "set_body" && r["path"] == "tasks/long-notes.md" && r["id"] == "task_00000000aa"),
+        "{sent:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Spec test 16 (§7.3, D13, Q6 (A)): a record whose path is outside the note folders (here the
+/// profile's `create`, `set_body` and `set`) stays on this computer, since `apply` and `restore`
+/// both refuse one. The filter is a `continue`: a `tasks/` record in the same journal still goes, and
+/// later pushes neither re-send the withheld records nor stall on them.
+#[test]
+fn build_push_sends_no_record_about_a_path_outside_the_note_folders() {
+    use knowlu_engine::write;
+    let dir = fixture("profile-stays-local");
+    let ctx = vault_ctx(&dir);
+    let mut journal = Journal::new(&dir);
+    let importance = |n: &str| [("importance".to_string(), n.to_string())];
+    // What T3's editors write: each file's `create`, a preferences `set_body`, an interests `set`...
+    write::create_profile_file(&dir, "preferences", "Mornings.\n", &ctx, &mut journal).expect("preferences");
+    let edited = write::set_body(&dir, "profile/preferences.md", "Mornings.\n", "Evenings.\n", &ctx, &mut journal);
+    assert_eq!(edited, Ok(true));
+    let interests = "---\nstrong: []\nmild: []\nnever: []\nclubs: []\n---\n";
+    write::create_profile_file(&dir, "interests", interests, &ctx, &mut journal).expect("interests");
+    let lists = [("strong".to_string(), "[AI talks]".to_string())];
+    write::write_one_line_literals(&dir, "profile/interests.md", &lists, &ctx, &mut journal, &Default::default())
+        .expect("a list");
+    // ...and, after them, a record about a note.
+    write::write_literals(&dir, "tasks/cs-100-hw-01.md", &importance("5"), &ctx, &mut journal, &Default::default())
+        .expect("a task edit");
+    journal.invalidate();
+    let journalled = journal.read(None, None);
+    let profile = journalled.iter()
+        .filter(|r| r.get("path").and_then(serde_json::Value::as_str).is_some_and(|p| p.starts_with("profile/")))
+        .count();
+    assert_eq!(profile, 4, "the setup journals four profile records: {journalled:?}");
+
+    let (first, cursor) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
+    assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    let sent = sent_records(&first);
+    assert!(!sent.iter().any(is_profile_path), "a profile record went up: {sent:?}");
+    assert!(!first.notes.iter().any(is_profile_path), "{:?}", first.notes);
+    let task_edit = |r: &serde_json::Value| {
+        r["op"] == "set" && r["path"] == "tasks/cs-100-hw-01.md" && r["field"] == "importance" && r["actor"] == ctx.actor.as_str()
+    };
+    assert!(sent.iter().any(|r| task_edit(r) && r["new"] == 5), "the note's record still goes: {sent:?}");
+    assert_eq!(sent.len(), 2, "the fixture's seed record and this edit, and nothing else: {sent:?}");
+
+    // A second push re-sends nothing: a withheld record is never retried.
+    let (second, cursor) = sync::build_push(&dir, &cursor, "acct-1", &mut journal);
+    assert_eq!(second.records.len(), 0, "{:?}", second.records);
+
+    // Nor does it stall: a later profile edit stays, a later note edit goes, and then nothing is left.
+    let edited = write::set_body(&dir, "profile/preferences.md", "Evenings.\n", "Weekends.\n", &ctx, &mut journal);
+    assert_eq!(edited, Ok(true));
+    write::write_literals(&dir, "tasks/cs-100-hw-01.md", &importance("2"), &ctx, &mut journal, &Default::default())
+        .expect("a second task edit");
+    journal.invalidate();
+    let (third, cursor) = sync::build_push(&dir, &cursor, "acct-1", &mut journal);
+    let sent = sent_records(&third);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(task_edit(&sent[0]) && sent[0]["new"] == 2, "{sent:?}");
+    let (fourth, _) = sync::build_push(&dir, &cursor, "acct-1", &mut journal);
+    assert_eq!(fourth.records.len(), 0, "{:?}", fourth.records);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The merge of main (M1 grades #25, Gmail connect #26) into M2: main made `grades` the eighth
+/// `ids::NOTE_FOLDERS` folder while M2's D13 `continue` began holding back every record whose path
+/// fails `is_note_path`. On main a record went up whatever its path; now it goes up only if its
+/// folder is on that list. So a `create` in EVERY note folder (derived from the list, never spelt,
+/// so a folder the engine gains is covered the day it lands) and a grade note made the way
+/// `grades::create_note` makes one (`agent:knowlu.grades`, `type: grade`, at `grades::note_path`)
+/// still go up, record and note both, beside the profile's `create`, which stays.
+#[test]
+fn a_record_about_a_note_in_every_note_folder_still_goes_up_beside_the_withheld_profile() {
+    use knowlu_engine::write;
+    let dir = fixture("every-note-folder-goes-up");
+    let ctx = vault_ctx(&dir);
+    let mut journal = Journal::new(&dir);
+    write::create_profile_file(&dir, "preferences", "Mornings.\n", &ctx, &mut journal).expect("preferences");
+    let mut made = Vec::new();
+    for folder in knowlu_engine::ids::NOTE_FOLDERS {
+        let rel = format!("{folder}/merge-pin.md");
+        write::create(&dir, &rel, "---\ntitle: Merge pin\n---\n", &ctx, &mut journal, None).expect(&rel);
+        made.push(rel);
+    }
+    let grades = write::WriteContext::new("agent:knowlu.grades", "local-runner");
+    let grade = knowlu_engine::grades::note_path("cs-100", "_4686399_1");
+    let text = "---\ntype: grade\ntitle: HW 1\ncourse: cs-100\n---\n";
+    write::create(&dir, &grade, text, &grades, &mut journal, None).expect("a grade note");
+    made.push(grade);
+    journal.invalidate();
+
+    let (batch, _) = sync::build_push(&dir, &Cursor::default(), "acct-1", &mut journal);
+    assert!(batch.warnings.is_empty(), "{:?}", batch.warnings);
+    let sent = sent_records(&batch);
+    for rel in &made {
+        let went = sent.iter().any(|r| r["op"] == "create" && r["path"] == rel.as_str());
+        assert!(went, "{rel}'s record stayed on this computer: {sent:?}");
+        assert!(batch.notes.iter().any(|n| n["path"] == rel.as_str()), "{rel} stayed: {:?}", batch.notes);
+    }
+    assert!(sent.iter().any(|r| r["actor"] == "agent:knowlu.grades"), "{sent:?}");
+    assert!(!sent.iter().any(is_profile_path), "a profile record went up: {sent:?}");
+    assert!(!batch.notes.iter().any(is_profile_path), "{:?}", batch.notes);
+    // The fixture's seed record, one `create` per note folder and the grade note's; nothing else.
+    assert_eq!(sent.len(), 1 + knowlu_engine::ids::NOTE_FOLDERS.len() + 1, "{sent:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
 // Task 6: the pull, `reconcile` with the roles reversed, and the amend card.
 // ---------------------------------------------------------------------------
 
@@ -727,6 +1008,39 @@ fn a_field_both_desktops_moved_becomes_one_amend_card_and_not_a_silent_merge() {
 }
 
 #[test]
+fn a_sync_card_names_the_vaults_human_and_never_a_person() {
+    // Ruling 11 and CLAUDE.md rule 1: a conflict card's `**Why proposed:**` line follows the vault's
+    // own token. A vault with no `config/actor.yaml` is legacy and keeps the sentence it has always
+    // carried; a `student` vault (every vault the app now makes) names no person.
+    for (file, human, hand) in [
+        (None, "quinn", "Quinn had set them by hand"),
+        (Some("human_actor: student\n"), "student", "the student had set them by hand"),
+    ] {
+        let dir = fixture_with_id(&format!("why-{human}"));
+        if let Some(text) = file {
+            std::fs::create_dir_all(dir.join("config")).expect("config/");
+            std::fs::write(dir.join("config").join("actor.yaml"), text).expect("actor.yaml");
+        }
+        let mut journal = Journal::new(&dir);
+        let mine = knowlu_engine::write::WriteContext::new(human, "dashboard");
+        knowlu_engine::write::write_literals(&dir, "tasks/cs-100-hw-01.md", &[("importance".to_string(), "4".to_string())], &mine, &mut journal, &Default::default()).expect("my edit");
+        let ctx = knowlu_engine::write::WriteContext::new(sync::ACTOR, "local-runner");
+        let mut rec = foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(3), serde_json::json!(5), "2036-09-17T10:00:00.000Z");
+        rec.insert("actor".to_string(), serde_json::json!(human));
+        let report = sync::apply(&dir, &pulled(vec![rec], vec![]), &ctx, &mut journal, "2026-09-17".parse().unwrap());
+        assert_eq!(report.cards, 1, "{human}: {report:?}");
+        let card = std::fs::read_dir(dir.join("approvals")).expect("approvals").flatten().map(|e| e.path())
+            .find(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("amend-cs-100-hw-01-")).unwrap_or(false)).expect("one amend card");
+        let text = knowlu_engine::pystr::read_text(&card).expect("the card");
+        assert!(text.contains(&format!("; {hand}, so this is a proposal")), "{human}: {text}");
+        if human == "student" {
+            assert!(!text.to_lowercase().contains("quinn"), "no person's name on a student's card: {text}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
 fn a_pulled_record_that_is_not_a_record_never_reaches_the_ledger() {
     // Review I7, inherited. The rows are plaintext now, which makes this MORE important rather than
     // less: a malformed record used to fail to decrypt, and now it arrives looking like data.
@@ -758,7 +1072,7 @@ fn a_pulled_record_that_is_not_a_record_never_reaches_the_ledger() {
 #[test]
 fn a_pulled_note_for_a_path_this_device_has_never_seen_arrives_whole() {
     // The second-desktop case: a note created on the other machine has no local file to reconcile
-    // against, so its text is written as it stands — and a path outside the six folders is refused
+    // against, so its text is written as it stands — and a path outside the note folders is refused
     // before anything is written.
     let dir = fixture("newnote");
     let mut journal = Journal::new(&dir);
@@ -1456,7 +1770,7 @@ fn sync_never_settles_or_archives_a_proposal_it_did_not_file() {
         knowlu_engine::write::propose_amendment(
             &dir, &file, &meta,
             &[("importance".to_string(), knowlu_engine::yaml::from_json(&serde_json::json!(4)), knowlu_engine::yaml::from_json(&serde_json::json!(3)))],
-            &judge, &mut journal, None, today, None,
+            &judge, &mut journal, None, today, None, knowlu_engine::journal::LEGACY_HUMAN_ACTOR,
         ).expect("a judge-once proposal");
         let rec = if converge {
             foreign_set("task_0000000001", "tasks/cs-100-hw-01.md", "importance", serde_json::json!(5), serde_json::json!(4), "2036-09-17T11:00:00.000Z")
@@ -2336,7 +2650,7 @@ fn rejecting_a_judge_once_card_writes_no_re_assert_record() {
     let card = knowlu_engine::write::propose_amendment(
         &dir, &file, &meta,
         &[("importance".to_string(), knowlu_engine::yaml::from_json(&serde_json::json!(4)), knowlu_engine::yaml::from_json(&serde_json::json!(3)))],
-        &judge, &mut journal, None, today, None,
+        &judge, &mut journal, None, today, None, knowlu_engine::journal::LEGACY_HUMAN_ACTOR,
     ).expect("a judge-once proposal");
     let card_rel = knowlu_engine::ids::rel(&dir, &card);
     let count = |journal: &mut Journal| journal.read(None, None).iter()

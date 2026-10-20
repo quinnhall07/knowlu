@@ -215,8 +215,8 @@ impl Report {
 /// file that is not JSON and a parse with no usable row are `Err` (exit 2) before anything is
 /// written. Then the term's calendar is merged under D5 ([`crate::commitments::refresh_series`]),
 /// and every kept row that names a vault course and is a current proposal is confirmed at `hard`
-/// through phase 2's `confirm`, under `ctx` (the student: `quinn` via `dashboard`; Plan rulings
-/// R3-b, R3-c). No network.
+/// through phase 2's `confirm`, under `ctx` (the student: the vault's human token via
+/// `dashboard`; Plan rulings R3-b, R3-c). No network.
 pub fn run(
     vault: &Path,
     text: &str,

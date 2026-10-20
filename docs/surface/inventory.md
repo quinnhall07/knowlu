@@ -74,7 +74,7 @@ archives them.
 | 25 | **Snooze 2 days** — **half-broken.** `enableJs: false` in Meta Bind's config, so it writes `status: snoozed` but `snooze_until` silently fails, producing the `snoozed without snooze_until` WARN. Also absent from digest notes | card overflow action, **fixed** — the date is computed server-side, no JS setting involved |
 | 26 | **Events-digest checkboxes** — tick events, then Approve; unticked are declined. Two-step, real semantics | S3 retires digests; each event becomes its own card |
 | 27 | **Frontmatter / Bases cell editing** — how `progress` actually gets recorded today | click-to-edit on every field |
-| 28 | **Note body editing** — tasks, courses, profile | body editing in the detail drawer |
+| 28 | **Note body editing** — tasks, courses, profile | **done (M2):** body editing in the detail drawer for tasks and courses (`set_body`, a hash-only journal record, conflict keeps the draft, *Saved · Undo* for 10 seconds); the profile in Settings (*Your preferences*, *Campus events*) |
 | 29 | **Ticking `- [ ]` in `today.md`** — **inert.** Nothing reads today.md back; the file is rewritten every run and the tick is discarded | **replaced** by a progress control that writes for real (below) |
 | 30 | Obsidian **Git status bar / branch indicator** — the ambient sync signal | topline synced stamp + pending-push count |
 

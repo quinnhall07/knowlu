@@ -1,0 +1,404 @@
+{
+  "schema": 1,
+  "lms": "blackboard",
+  "host": "lms.example.test",
+  "fetched_at": "2026-09-29T14:02:11Z",
+  "user_id": "_900001_1",
+  "courses": [
+    {
+      "membership": {
+        "userId": "_900001_1",
+        "courseId": "_900110_1",
+        "course": {
+          "id": "_900110_1",
+          "courseId": "SYN-110-001-FA2026",
+          "name": "SYN 110-001: Synthetic Studies I",
+          "organization": false,
+          "ultraStatus": "Ultra",
+          "availability": {
+            "available": "Yes",
+            "duration": {
+              "type": "Term"
+            }
+          }
+        },
+        "created": "2026-08-10T15:00:00.000Z",
+        "availability": {
+          "available": "Yes"
+        },
+        "courseRoleId": "Student"
+      },
+      "columns": [
+        {
+          "id": "_8110001_1",
+          "name": "Homework 1",
+          "displayName": "Homework 1",
+          "externalGrade": false,
+          "created": "2026-08-10T15:00:00.000Z",
+          "score": {
+            "possible": 20.0
+          },
+          "availability": {
+            "available": "Yes"
+          },
+          "grading": {
+            "type": "Attempts",
+            "due": "2026-09-05T04:59:00.000Z"
+          },
+          "gradebookCategoryId": "_8119001_1",
+          "includeInCalculations": true
+        },
+        {
+          "id": "_8110002_1",
+          "name": "Homework 2",
+          "displayName": "Homework 2",
+          "externalGrade": false,
+          "created": "2026-08-10T15:00:00.000Z",
+          "score": {
+            "possible": 20.0
+          },
+          "availability": {
+            "available": "Yes"
+          },
+          "grading": {
+            "type": "Attempts",
+            "due": "2026-09-12T04:59:00.000Z"
+          },
+          "gradebookCategoryId": "_8119001_1",
+          "includeInCalculations": true
+        },
+        {
+          "id": "_8110003_1",
+          "name": "Exam 1",
+          "displayName": "Midterm Exam",
+          "externalGrade": false,
+          "created": "2026-08-10T15:00:00.000Z",
+          "score": {
+            "possible": 100.0
+          },
+          "availability": {
+            "available": "Yes"
+          },
+          "grading": {
+            "type": "Attempts",
+            "due": "2026-09-30T20:00:00.000Z"
+          },
+          "gradebookCategoryId": "_8119002_1",
+          "includeInCalculations": true
+        },
+        {
+          "id": "_8110004_1",
+          "name": "Homework 3",
+          "displayName": "Homework 3",
+          "externalGrade": false,
+          "created": "2026-08-10T15:00:00.000Z",
+          "score": {
+            "possible": 20.0
+          },
+          "availability": {
+            "available": "Yes"
+          },
+          "grading": {
+            "type": "Attempts",
+            "due": "2026-10-03T04:59:00.000Z"
+          },
+          "gradebookCategoryId": "_8119001_1",
+          "includeInCalculations": true
+        },
+        {
+          "id": "_8110005_1",
+          "name": "Quiz 1",
+          "displayName": "Quiz 1",
+          "externalGrade": false,
+          "created": "2026-08-10T15:00:00.000Z",
+          "score": {
+            "possible": 10.0
+          },
+          "availability": {
+            "available": "Yes"
+          },
+          "grading": {
+            "type": "Attempts",
+            "due": "2026-09-08T14:00:00.000Z"
+          },
+          "gradebookCategoryId": "_8119003_1",
+          "includeInCalculations": true
+        },
+        {
+          "id": "_8110006_1",
+          "name": "Practice Quiz",
+          "displayName": "Practice Quiz",
+          "externalGrade": false,
+          "created": "2026-08-10T15:00:00.000Z",
+          "score": {
+            "possible": 10.0
+          },
+          "availability": {
+            "available": "Yes"
+          },
+          "grading": {
+            "type": "Attempts"
+          },
+          "gradebookCategoryId": "_8119003_1",
+          "includeInCalculations": false
+        },
+        {
+          "id": "_8110007_1",
+          "name": "Overall Grade",
+          "displayName": "Overall Grade",
+          "externalGrade": true,
+          "created": "2026-08-10T15:00:00.000Z",
+          "score": {
+            "possible": 100.0
+          },
+          "availability": {
+            "available": "Yes"
+          },
+          "grading": {
+            "type": "Calculated"
+          },
+          "includeInCalculations": true
+        }
+      ],
+      "grades": [
+        {
+          "userId": "_900001_1",
+          "columnId": "_8110001_1",
+          "status": "Graded",
+          "displayGrade": {
+            "scaleType": "Score",
+            "score": 18.0,
+            "text": "18.00"
+          },
+          "text": "18.00",
+          "score": 18.0,
+          "exempt": false,
+          "corrupt": false
+        },
+        {
+          "userId": "_900001_1",
+          "columnId": "_8110002_1",
+          "status": "NeedsGrading",
+          "exempt": false,
+          "corrupt": false
+        },
+        {
+          "userId": "_900001_1",
+          "columnId": "_8110003_1",
+          "status": "InProgress",
+          "exempt": false,
+          "corrupt": false
+        },
+        {
+          "userId": "_900001_1",
+          "columnId": "_8110004_1",
+          "status": "Graded",
+          "displayGrade": {
+            "scaleType": "Score",
+            "score": 17.0,
+            "text": "17.00"
+          },
+          "text": "17.00",
+          "score": 17.0,
+          "exempt": false,
+          "corrupt": false
+        },
+        {
+          "userId": "_900001_1",
+          "columnId": "_8110005_1",
+          "status": "Graded",
+          "exempt": true,
+          "corrupt": false
+        },
+        {
+          "userId": "_900001_1",
+          "columnId": "_8110006_1",
+          "status": "Graded",
+          "displayGrade": {
+            "scaleType": "Score",
+            "score": 7.0,
+            "text": "7.00"
+          },
+          "text": "7.00",
+          "score": 7.0,
+          "exempt": false,
+          "corrupt": false
+        },
+        {
+          "userId": "_900001_1",
+          "columnId": "_8110007_1",
+          "status": "Graded",
+          "displayGrade": {
+            "scaleType": "Percent",
+            "score": 88.25,
+            "text": "88.25%"
+          },
+          "text": "88.25",
+          "score": 88.25,
+          "exempt": false,
+          "corrupt": false
+        }
+      ],
+      "categories": [
+        {
+          "id": "_8119001_1",
+          "title": "Homework",
+          "description": "",
+          "userDefined": true
+        },
+        {
+          "id": "_8119002_1",
+          "title": "Exams",
+          "description": "",
+          "userDefined": true
+        },
+        {
+          "id": "_8119003_1",
+          "title": "Quizzes",
+          "description": "",
+          "userDefined": true
+        }
+      ],
+      "error": null
+    },
+    {
+      "membership": {
+        "userId": "_900001_1",
+        "courseId": "_900220_1",
+        "course": {
+          "id": "_900220_1",
+          "courseId": "SYN-220-001-FA2026",
+          "name": "SYN 220-001: Synthetic Studies II",
+          "organization": false,
+          "ultraStatus": "Ultra",
+          "availability": {
+            "available": "Yes",
+            "duration": {
+              "type": "Term"
+            }
+          }
+        },
+        "created": "2026-08-10T15:00:00.000Z",
+        "availability": {
+          "available": "Yes"
+        },
+        "courseRoleId": "Student"
+      },
+      "columns": [],
+      "grades": [],
+      "categories": [],
+      "error": "403"
+    },
+    {
+      "membership": {
+        "userId": "_900001_1",
+        "courseId": "_900330_1",
+        "course": {
+          "id": "_900330_1",
+          "courseId": "SYN-330-002-FA2026",
+          "name": "SYN 330-002: Synthetic Studies III",
+          "organization": false,
+          "ultraStatus": "Ultra",
+          "availability": {
+            "available": "Yes",
+            "duration": {
+              "type": "Term"
+            }
+          }
+        },
+        "created": "2026-08-10T15:00:00.000Z",
+        "availability": {
+          "available": "Yes"
+        },
+        "courseRoleId": "Student"
+      },
+      "columns": [
+        {
+          "id": "_8330001_1",
+          "name": "Lab 1",
+          "displayName": "Lab 1",
+          "externalGrade": false,
+          "created": "2026-08-10T15:00:00.000Z",
+          "score": {
+            "possible": 50.0
+          },
+          "availability": {
+            "available": "Yes"
+          },
+          "grading": {
+            "type": "Attempts",
+            "due": "2026-09-10T22:00:00.000Z"
+          },
+          "gradebookCategoryId": "_8339001_1",
+          "includeInCalculations": true
+        },
+        {
+          "id": "_8330003_1",
+          "name": "Participation",
+          "displayName": "Participation",
+          "externalGrade": false,
+          "created": "2026-08-10T15:00:00.000Z",
+          "availability": {
+            "available": "Yes"
+          },
+          "grading": {
+            "type": "Manual"
+          },
+          "gradebookCategoryId": "_8339002_1",
+          "includeInCalculations": true
+        },
+        {
+          "id": "_8330004_1",
+          "name": "Lab 3",
+          "displayName": "Lab 3",
+          "externalGrade": false,
+          "created": "2026-08-10T15:00:00.000Z",
+          "score": {
+            "possible": 50.0
+          },
+          "availability": {
+            "available": "Yes"
+          },
+          "grading": {
+            "type": "Attempts",
+            "due": "2026-10-01T22:00:00.000Z"
+          },
+          "gradebookCategoryId": "_8339001_1",
+          "includeInCalculations": true
+        }
+      ],
+      "grades": [
+        {
+          "userId": "_900001_1",
+          "columnId": "_8330001_1",
+          "status": "Graded",
+          "displayGrade": {
+            "scaleType": "Score",
+            "score": 45.5,
+            "text": "45.50"
+          },
+          "text": "45.50",
+          "score": 45.5,
+          "exempt": false,
+          "corrupt": false
+        },
+        {
+          "userId": "_900001_1",
+          "columnId": "_8330003_1",
+          "status": "Graded",
+          "displayGrade": {
+            "scaleType": "Score",
+            "score": 5.0,
+            "text": "5.00"
+          },
+          "text": "5.00",
+          "score": 5.0,
+          "exempt": false,
+          "corrupt": false
+        }
+      ],
+      "categories": null,
+      "error": null
+    }
+  ]
+}

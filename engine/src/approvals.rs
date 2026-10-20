@@ -18,13 +18,13 @@ use serde_yaml_ng::{Mapping, Value};
 use crate::commitments::{AskSettled, Codes, Commitments, Proposal, SeriesFile, Settled, COMMITMENT_ASK, COMMITMENT_CHECK};
 use crate::eventledger::{record_answer, record_declined, VerdictError};
 use crate::ids::resolve_lenient;
-use crate::ingest::{apply_frontmatter_fields_to_text, slugify};
+use crate::ingest::{apply_frontmatter_fields_to_text, slugify, IMPORTED_PAST};
 use crate::journal::Journal;
 use crate::models::{coerce_datetime, split_frontmatter};
 use crate::pystr;
 use crate::write::{
-    append_body, create, delete, single_line_problem, write_literals, WriteContext, WriteError,
-    WriteOpts,
+    append_body, create, delete, move_note, single_line_problem, write_literals, WriteContext,
+    WriteError, WriteOpts,
 };
 
 /// `WriteContext(actor="agent:approvals", via="cli")`.
@@ -53,6 +53,22 @@ pub const AMENDABLE_FIELDS: [&str; 9] = [
 ];
 
 pub const AMENDABLE_FOLDERS: [&str; 2] = ["tasks", "courses"];
+
+/// The `created_by` of a card the mail pass files (email spec D11 (3), D20). Approving one of its
+/// `kind: amend` cards writes the changed fields as the vault's human (D11 (4)). Under F3 (b) (plan
+/// T8c) such a card may also fill an empty `due`, or bring an `imported-past` note out of `archive/`.
+const MAIL_CARD_CREATOR: &str = "mail";
+
+/// PQ5 (c), Quinn's answer: the one creator whose `kind: amend` card may change `title`, beside
+/// [`AMENDABLE_FIELDS`]. Only `ingest` files such a card, for a title the student set by hand that
+/// the feed contradicts (email spec D11 (5), plan P12); every other card naming `title` is refused
+/// exactly as before.
+pub const TITLE_CARD_CREATOR: &str = "blackboard";
+
+/// Why an approved mail card carrying `append` is refused (plan §10 R15): its lines would be
+/// journalled as the student. Recoverable, so the card goes back to pending, where it can be
+/// rejected.
+pub const MAIL_APPEND_REFUSAL: &str = "a mail card carries append lines, which are never written as the student";
 
 /// PyYAML's YAML 1.1 timestamp resolver, transcribed from `yaml/resolver.py`.
 ///
@@ -176,6 +192,55 @@ pub fn resolve_amend_target(vault: &Path, raw_target: Option<&Value>) -> Option<
         }
     }
     None
+}
+
+/// F3 (b) arm (2), Quinn 2026-10-02 (plan T8c): the one `archive/` note an amend card may name.
+///
+/// A [`MAIL_CARD_CREATOR`] card whose only change is `due` (no `append`) may target a note in
+/// `archive/` that is `status: archived` with `archived_reason: imported-past`: an item archived on
+/// import because its due had passed, which a later date may bring back. A note the student
+/// archived, finished or deleted by hand carries neither line and stays out of reach, refused as
+/// before. [`resolve_amend_target`] and [`AMENDABLE_FOLDERS`] are unchanged; this sits beside them,
+/// as [`TITLE_CARD_CREATOR`]'s arm sits beside [`AMENDABLE_FIELDS`]. The renderer still reads only
+/// the amendable folders, so such a card shows its own title.
+fn imported_past_target(vault: &Path, meta: &Mapping) -> Option<PathBuf> {
+    if !due_only_mail_card(meta) {
+        return None;
+    }
+    let target = in_archive(vault, crate::yaml::get(meta, "target")?)?;
+    let (note, _) = read_note(&target)?;
+    let imported = str_field(&note, "status") == "archived" && str_field(&note, "archived_reason") == IMPORTED_PAST;
+    imported.then_some(target)
+}
+
+/// A mail card whose `changes` hold `due` and nothing else, and which carries no `append`.
+fn due_only_mail_card(meta: &Mapping) -> bool {
+    if str_field(meta, "created_by") != MAIL_CARD_CREATOR {
+        return false;
+    }
+    match changes_and_appends(meta) {
+        Ok((changes, appends)) => {
+            appends.is_empty() && changes.len() == 1 && crate::yaml::get(changes, "due").is_some()
+        }
+        Err(_) => false,
+    }
+}
+
+/// A card's `target` resolved strictly inside `archive/`, with [`resolve_amend_target`]'s
+/// containment, or `None`.
+fn in_archive(vault: &Path, raw_target: &Value) -> Option<PathBuf> {
+    let Value::String(raw) = raw_target else { return None };
+    if raw.is_empty() {
+        return None;
+    }
+    let target = resolve_lenient(&resolve_lenient(vault).join(raw));
+    archive_contains(vault, &target).then_some(target)
+}
+
+/// Whether a resolved `path` sits strictly inside the vault's `archive/`.
+fn archive_contains(vault: &Path, path: &Path) -> bool {
+    let archive = resolve_lenient(&resolve_lenient(vault).join("archive"));
+    path.ancestors().skip(1).any(|p| p == archive)
 }
 
 /// What `process_approvals` learned about one pending `amend` proposal.
@@ -343,7 +408,8 @@ pub fn validate_amendment(vault: &Path, meta: &Mapping) -> Result<PathBuf, Strin
         Some(Value::String(s)) if !s.is_empty() => s.clone(),
         _ => return Err("missing target".to_string()),
     };
-    let target = match resolve_amend_target(vault, raw_target) {
+    // F3 (b) arm (2): beside the amendable folders, the one `archive/` note a mail card may name.
+    let target = match resolve_amend_target(vault, raw_target).or_else(|| imported_past_target(vault, meta)) {
         Some(target) => target,
         None => {
             return Err(format!("target outside {}: {}", AMENDABLE_FOLDERS.join("/"), raw));
@@ -358,9 +424,12 @@ pub fn validate_amendment(vault: &Path, meta: &Mapping) -> Result<PathBuf, Strin
         return Err("nothing to apply".to_string());
     }
 
+    // PQ5 (c): `title` too, on a card the feed filed, and on no other.
+    let title_card = str_field(meta, "created_by") == TITLE_CARD_CREATOR;
+    let mail_card = str_field(meta, "created_by") == MAIL_CARD_CREATOR;
     for (key, spec) in changes {
         let name = key_text(key);
-        if !AMENDABLE_FIELDS.contains(&name.as_str()) {
+        if !AMENDABLE_FIELDS.contains(&name.as_str()) && !(title_card && name == "title") {
             return Err(format!("field not amendable: {name}"));
         }
         if !matches!(spec, Value::Mapping(_)) {
@@ -368,10 +437,17 @@ pub fn validate_amendment(vault: &Path, meta: &Mapping) -> Result<PathBuf, Strin
         }
         let from = spec_get(spec, "from").filter(|v| !matches!(v, Value::Null));
         let to = spec_get(spec, "to").filter(|v| !matches!(v, Value::Null));
-        let (Some(from), Some(to)) = (from, to) else {
-            return Err(format!("{name}: from/to must both be present and non-null"));
+        // F3 (b) arm (1): a mail card may fill an empty `due`, saying so with an explicit
+        // `from: null`. That the note's due is empty is checked where every `from` is, by
+        // `apply_amendment`'s stale check, so a note that gained a date since is never overwritten
+        // and a retry after a failed stamp still executes.
+        let fills_due = mail_card && name == "due" && matches!(spec_get(spec, "from"), Some(Value::Null));
+        let sides = match (from, to) {
+            (Some(from), Some(to)) => vec![("from", from), ("to", to)],
+            (None, Some(to)) if fills_due => vec![("to", to)],
+            _ => return Err(format!("{name}: from/to must both be present and non-null")),
         };
-        for (side, value) in [("from", from), ("to", to)] {
+        for (side, value) in sides {
             if matches!(value, Value::Sequence(_) | Value::Mapping(_)) {
                 // `str()` of a collection is a single line and legal YAML, so it slips past the
                 // newline check and lands as `due: ['a', 'b']` — a note that no longer coerces,
@@ -470,7 +546,9 @@ fn comparable(field: &str, value: Option<&Value>) -> Comparable {
     }
 }
 
-const QUOTED_FIELDS: [&str; 2] = ["status", "importance_reason"];
+/// `title` is reached only through a feed card (PQ5 (c), [`TITLE_CARD_CREATOR`]); a title is free
+/// text, so it is quoted like the other two.
+const QUOTED_FIELDS: [&str; 3] = ["status", "importance_reason", "title"];
 
 /// `models.load_tasks` keeps only `status == "active"`; the design doc lists these three.
 /// Anything else is not a status, it is a disappearance.
@@ -571,9 +649,9 @@ fn reread_problem(text: &str, name: &str, value: &Value) -> Option<String> {
 ///
 /// This replaces a simulation that parsed a synthetic two-key document. The simulation was wrong in
 /// the way simulations always are: it modelled neither the real writer (line surgery that replaces
-/// the FIRST matching `key:` line) nor the real reader (`split_frontmatter`'s un-anchored
-/// `text.split("---", 2)`). An inline `---` truncates the block and silently discards every later
-/// key; a duplicated key means YAML reads the last while the writer rewrites the first.
+/// the FIRST matching `key:` line) nor the real reader (`split_frontmatter`, which once split on an
+/// un-anchored `---` and truncated the block at an inline marker; it now closes only on a whole
+/// `---` line). A duplicated key means YAML reads the last while the writer rewrites the first.
 ///
 /// So: apply the actual changes to the actual text, re-read with the actual parser, and require
 /// three things — every changed field reads back as intended, every untouched field is untouched,
@@ -792,6 +870,189 @@ pub fn apply_amendment(
         write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())?;
     }
     Ok(None)
+}
+
+/// Apply an approved mail `kind: amend` card (email spec D11 (4), test 31; plan P11, §10 R15).
+///
+/// The student approved it, so its changed fields are written **as the vault's human**
+/// (`journal::read_human_actor`) with the executor's `via` and run id: `Journal::human_set` then
+/// finds the student's value, and later mail about the field is a card (judge once). Only the actor
+/// changes; [`apply_amendment`] is called unchanged, and the card's own bookkeeping stays the
+/// executor's. Two refusals come first, both recoverable, so the card goes back to pending where the
+/// student can reject it, and neither writes anything:
+/// - a bad `config/actor.yaml` (ruling 11) refuses with the file's named error, and no other actor
+///   is tried;
+/// - an `append` would journal its lines as the student; the mail pass writes none, so a card
+///   carrying one is refused ([`MAIL_APPEND_REFUSAL`]) before `apply_amendment` runs.
+///
+/// F3 (b) arm (2) (plan T8c): a card naming an `imported-past` note ([`imported_past_target`])
+/// whose new due is on or after `today`, the approval day, takes the note out of `archive/`
+/// ([`unarchive`]); an earlier due is set in place by `apply_amendment`, and the note stays
+/// archived. A card whose `archive/` note an interrupted un-archive already moved is finished at the
+/// note's new path ([`unarchived_note`]). The un-archive's `due` is the student's, but its `status`
+/// and `archived_reason` are the executor's own (`ctx`, Quinn 2026-10-02), so completion detection
+/// may still propose the task done.
+fn apply_mail_amendment(
+    vault: &Path,
+    meta: &Mapping,
+    today: Date,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<Option<String>, WriteError> {
+    if crate::yaml::get(meta, "append").is_some_and(is_truthy) {
+        return Ok(Some(MAIL_APPEND_REFUSAL.to_string()));
+    }
+    let human = match crate::journal::read_human_actor(vault) {
+        Ok(human) => ctx.with_actor(human),
+        Err(refusal) => return Ok(Some(refusal.to_string())),
+    };
+    if imported_past_target(vault, meta).is_some() {
+        if card_due(meta).is_some_and(|due| due >= today) {
+            return unarchive(vault, meta, &human, ctx, journal);
+        }
+    } else if let Some(moved) = unarchived_note(vault, meta, journal) {
+        let mut retargeted = meta.clone();
+        retargeted.insert(Value::String("target".to_string()), Value::String(rel_path(vault, &moved)));
+        return unarchive(vault, &retargeted, &human, ctx, journal);
+    }
+    apply_amendment(vault, meta, &human, journal)
+}
+
+/// The day of the card's new `due`, or `None` when it has none the engine can read.
+fn card_due(meta: &Mapping) -> Option<Date> {
+    let (changes, _) = changes_and_appends(meta).ok()?;
+    as_date(spec_get(crate::yaml::get(changes, "due")?, "to"))
+}
+
+/// F3 (b) arm (2), executed: take the `imported-past` note `meta` names out of `archive/`, or finish
+/// the note an interrupted run already moved (`meta` then names its path in `tasks/`).
+///
+/// The card must pass [`validate_amendment`], and the note must hold the card's `from` or already its
+/// `to`, read as [`apply_amendment`]'s stale check reads them. The move and the `due` are the
+/// student's (`human`, T8's actor). `status: active` and `archived_reason: null` are the executor's
+/// (`executor`, Quinn 2026-10-02): taking a note out of `archive/` is the un-archive's bookkeeping,
+/// not the student's position on `status`, so `Journal::human_set` finds none and
+/// `completion::propose_done` may still propose the task done. The card's own stamp is the
+/// caller's, after this returns `Ok(None)`.
+///
+/// **The order of writes.** Whatever could refuse the writes after the move is checked before it
+/// ([`unarchive_problem`]); a refusal there writes nothing, and the card goes back to pending. Then
+/// `write::move_note` takes the note to the first free `tasks/<stem>[-N].md` ([`free_task_path`]),
+/// and two frontmatter writes there set the new `due`, then `status: active` and
+/// `archived_reason: null`, each journal first. A failure before the move leaves the note as it
+/// was. A failure after it and before the status write leaves the note in `tasks/` still `archived`
+/// and `imported-past`, so it never ranks half done, with the card unsettled; the next run finds it
+/// through the move record ([`unarchived_note`]) and makes the writes, a `due` already set being
+/// no write. There, `status` and `archived_reason` are written only while the note is still
+/// `archived` `imported-past`, so a note finished since is never set active again.
+fn unarchive(
+    vault: &Path,
+    meta: &Mapping,
+    human: &WriteContext,
+    executor: &WriteContext,
+    journal: &mut Journal,
+) -> Result<Option<String>, WriteError> {
+    let target = match validate_amendment(vault, meta) {
+        Ok(target) => target,
+        Err(reason) => return Ok(Some(reason)),
+    };
+    let (changes, _) = match changes_and_appends(meta) {
+        Ok(pair) => pair,
+        Err(reason) => return Ok(Some(reason)),
+    };
+    let spec = crate::yaml::get(changes, "due").unwrap_or(&Value::Null);
+    let (from, to) = (spec_get(spec, "from"), spec_get(spec, "to").unwrap_or(&Value::Null));
+    let text = pystr::read_text(&target).map_err(|e| WriteError::Io(e.to_string()))?;
+    let Ok((current, _)) = split_frontmatter(&text) else {
+        return Ok(Some("target note has malformed YAML frontmatter".to_string()));
+    };
+    let held = crate::yaml::get(&current, "due");
+    if comparable("due", held) != comparable("due", Some(to)) && comparable("due", held) != comparable("due", from) {
+        return Ok(Some(format!("stale amendment: due is {}, expected {}", inline_opt(held), inline_opt(from))));
+    }
+    let due = [("due".to_string(), frontmatter_literal("due", to))];
+    let mut bookkeeping = Vec::new();
+    if str_field(&current, "status") == "archived" && str_field(&current, "archived_reason") == IMPORTED_PAST {
+        let active = frontmatter_literal("status", &Value::String("active".to_string()));
+        bookkeeping.push(("status".to_string(), active));
+        bookkeeping.push(("archived_reason".to_string(), "null".to_string()));
+    }
+    let mut rel = rel_path(vault, &target);
+    if archive_contains(vault, &target) {
+        if let Some(problem) = unarchive_problem(&target, &text, to) {
+            return Ok(Some(problem));
+        }
+        let dest = free_task_path(vault, &stem_of(&target));
+        move_note(vault, &rel, &dest, human, journal)?;
+        rel = dest;
+    }
+    write_literals(vault, &rel, &due, human, journal, &WriteOpts::default())?;
+    if !bookkeeping.is_empty() {
+        write_literals(vault, &rel, &bookkeeping, executor, journal, &WriteOpts::default())?;
+    }
+    Ok(None)
+}
+
+/// The first free `tasks/<stem>.md`, then `tasks/<stem>-2.md`, `-3` and on: the suffix loop
+/// `ingest::sync_tasks` names a new note with. Ingest names `archive/` and `tasks/` apart, so one
+/// title can sit in both, and an un-archive never waits on a path the student cannot free.
+fn free_task_path(vault: &Path, stem: &str) -> String {
+    let mut dest = format!("tasks/{stem}.md");
+    let mut suffix = 2;
+    while vault.join(&dest).exists() {
+        dest = format!("tasks/{stem}-{suffix}.md");
+        suffix += 1;
+    }
+    dest
+}
+
+/// What would refuse the un-archive's writes once the note had moved, checked before the move: a
+/// `judgment:` block the writer will not edit around, or a write of the three fields that would not
+/// read back ([`write_problem`]). `None` when the move may go ahead.
+fn unarchive_problem(target: &Path, text: &str, to: &Value) -> Option<String> {
+    if let Err(problem) = crate::provenance::guard_block_style(text) {
+        return Some(problem.to_string());
+    }
+    // The dry run spells the null `Null` (`plain`'s fallback) where the write spells it `null`: the
+    // same single YAML token, so the lines it checks are the lines written.
+    let mut changes = Mapping::new();
+    let active = Value::String("active".to_string());
+    for (name, value) in [("due", to.clone()), ("status", active), ("archived_reason", Value::Null)] {
+        let mut spec = Mapping::new();
+        spec.insert(Value::String("to".to_string()), value);
+        changes.insert(Value::String(name.to_string()), Value::Mapping(spec));
+    }
+    write_problem(target, &changes)
+}
+
+/// The note an interrupted un-archive already moved, or `None`.
+///
+/// The card still names `archive/<name>`, which is gone. The journal's last `move` out of that path
+/// made as the human (the un-archive's own record) names where the note went, and the note there must
+/// carry the record's id. Only a mail card changing `due` alone is followed, as only such a card
+/// reaches [`imported_past_target`].
+fn unarchived_note(vault: &Path, meta: &Mapping, journal: &mut Journal) -> Option<PathBuf> {
+    if !due_only_mail_card(meta) {
+        return None;
+    }
+    let gone = in_archive(vault, crate::yaml::get(meta, "target")?).filter(|path| !path.exists())?;
+    let from = rel_path(vault, &gone);
+    let text = |record: &crate::ledger::Record, key: &str| {
+        record.get(key).and_then(|v| v.as_str()).map(str::to_string)
+    };
+    let human = |record: &crate::ledger::Record| {
+        text(record, "actor").is_some_and(|actor| crate::journal::is_human(&actor))
+    };
+    let moved = journal.read(None, None).into_iter().filter(|record| {
+        text(record, "op").as_deref() == Some("move")
+            && text(record, "path").as_deref() == Some(from.as_str())
+            && human(record)
+    });
+    let record = moved.last()?;
+    let (new, id) = (text(&record, "new")?, text(&record, "id").filter(|id| !id.is_empty())?);
+    let note = resolve_amend_target(vault, Some(&Value::String(new)))?;
+    let (front, _) = read_note(&note)?;
+    (str_field(&front, "id") == id).then_some(note)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1279,6 +1540,13 @@ fn transition_note(
             result.warnings.extend(warnings);
         } else if kind == "event-check" {
             settle_event_check(vault, meta, "drop", today, journal)?;
+        } else if kind == "event-accept" {
+            // Events spec §4.3: one `declined` line per uid the card's `events:` lists, before the
+            // move, so a failed ledger write leaves the card `rejected` for the next run. These are
+            // the uids the carry's D9 rebuild reads from the archived card. No note, no new word.
+            for uid in crate::eventemit::card_event_uids(meta) {
+                record_declined(vault, &uid, today).map_err(|e| WriteError::Io(e.to_string()))?;
+            }
         } else if kind == COMMITMENT_CHECK {
             // P13 (§5.2, §5.4): the decline marker(s) first, so a failed write leaves the card
             // `rejected` for the next run rather than archived with the question left open.
@@ -1419,7 +1687,12 @@ fn transition_note(
             delete(vault, &rel, ctx, journal)?;
             result.executed.push(slug);
         } else if kind == "amend" {
-            if let Some(reason) = apply_amendment(vault, meta, ctx, journal)? {
+            let refusal = if str_field(meta, "created_by") == MAIL_CARD_CREATOR {
+                apply_mail_amendment(vault, meta, today, ctx, journal)?
+            } else {
+                apply_amendment(vault, meta, ctx, journal)?
+            };
+            if let Some(reason) = refusal {
                 result.warnings.push(format!("{name}: {reason}"));
                 // Recoverable by hand (stale value, bad field, bad line) → write the status back to
                 // pending, so the proposal is counted, escalated into Must do, and eventually
@@ -1461,6 +1734,39 @@ fn transition_note(
             // F3: the student's "yes, this applies to me". Ledger first, so a failed answer leaves
             // the card `approved` for the next run rather than archived with nothing written.
             settle_event_check(vault, meta, "obligation", today, journal)?;
+            // Events D11 (§5.2), P7: on a card that carries `instances:`, that answer is an Accept,
+            // so its dates are booked as `event-accept`'s are, at `level: hard` (the answer word is
+            // `obligation`), before the stamp. A failed write leaves the card `approved`; the retry
+            // answers again (harmless, as today) and books nothing twice (the ever-written set). A
+            // card with no `instances:` (filed before D11, or from the roster) writes nothing more.
+            let booked = settle_event_accept(vault, meta, crate::commitments::Level::Hard, today, ctx, journal)?;
+            result.warnings.extend(booked.unwrap_or_default().into_iter().map(|w| format!("{name}: {w}")));
+            let literals = vec![
+                ("status".to_string(), "executed".to_string()),
+                ("executed_at".to_string(), stamped),
+            ];
+            write_literals(vault, &rel, &literals, ctx, journal, &WriteOpts::default())?;
+            delete(vault, &rel, ctx, journal)?;
+            result.executed.push(stem);
+        } else if kind == "event-accept" {
+            // Events spec §4.2 (D1, D10): the commitments and the register task first, the stamp
+            // second, as `event-check` does. A failed write leaves the card `approved` for the next
+            // run, and the ever-written set makes that retry write nothing twice. A card with no
+            // level or no payload (only a hand edit makes one) writes nothing and waits, as an
+            // approved `task` card with no payload does.
+            let level = match str_field(meta, "verdict").as_str() {
+                "obligation" => crate::commitments::Level::Hard,
+                "opportunity" => crate::commitments::Level::Soft,
+                _ => {
+                    result.warnings.push(format!("{name}: no verdict the settlement reads"));
+                    return Ok(());
+                }
+            };
+            let Some(warnings) = settle_event_accept(vault, meta, level, today, ctx, journal)? else {
+                result.warnings.push(format!("missing event payload: {name}"));
+                return Ok(());
+            };
+            result.warnings.extend(warnings.into_iter().map(|w| format!("{name}: {w}")));
             let literals = vec![
                 ("status".to_string(), "executed".to_string()),
                 ("executed_at".to_string(), stamped),
@@ -1722,6 +2028,66 @@ fn settle_event_check(
         recorded.map_err(|e| WriteError::Io(e.to_string()))?;
     }
     Ok(())
+}
+
+/// Write the notes an accepted event card books (events spec §4.2, D1, D10), from the card's own
+/// `instances:`. `process_approvals` runs with no feed at hand, so the payload is the only input.
+/// Two arms call it: an approved `event-accept` card at its verdict's level, and an approved
+/// `event-check` card at `Hard`, after the student's answer is recorded (D11, P7).
+///
+/// For each entry (`eventaccept::Instance::from_yaml`) whose uid is not in
+/// `eventcarry::ever_written`, the commitment `eventaccept::commitment_for` gives at `level`
+/// through `commitments::create_confirmed` (actor `agent:commitments`, journal first). A lane shape
+/// (all-day, multi-day, zero-length) has none: the answer stands, and nothing warns. Then, for the
+/// primary (`source_uid`) alone, the "Register" task `eventaccept::register_task` gives, through
+/// `write::create` under `ctx`, unless `register:<uid>` is in the set; `-2`, `-3` on a name
+/// collision. The set reads `commitments/`, `tasks/` and `archive/`, approval cards left out, so a
+/// retry after a failed stamp writes nothing twice and a note the student deleted never returns.
+///
+/// `Ok(None)`: the card carries no `instances:` payload, and nothing was written. Otherwise the
+/// warnings, one per malformed entry, which is skipped. `Err` is a failed write: the caller leaves
+/// the card `approved`, and the next pass retries.
+fn settle_event_accept(
+    vault: &Path,
+    meta: &Mapping,
+    level: crate::commitments::Level,
+    today: Date,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+) -> Result<Option<Vec<String>>, WriteError> {
+    let entries = match crate::yaml::get(meta, "instances") {
+        Some(Value::Sequence(entries)) if !entries.is_empty() => entries,
+        _ => return Ok(None),
+    };
+    let primary = truthy_str(meta, "source_uid");
+    let mut written = crate::eventcarry::ever_written(vault);
+    let mut warnings = Vec::new();
+    let mut register = None;
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(instance) = entry.as_mapping().and_then(crate::eventaccept::Instance::from_yaml) else {
+            warnings.push(format!("bad instance entry {}", index + 1));
+            continue;
+        };
+        if instance.uid == primary && register.is_none() {
+            register = crate::eventaccept::register_task(&instance);
+        }
+        if written.contains(&instance.uid) {
+            continue;
+        }
+        let Some(commitment) = crate::eventaccept::commitment_for(&instance, level) else { continue };
+        crate::commitments::create_confirmed(vault, &commitment, &instance.uid, today, ctx, journal)?;
+        written.insert(instance.uid);
+    }
+    if let Some((stem, text)) = register.filter(|_| !written.contains(&format!("register:{primary}"))) {
+        let mut rel = format!("tasks/{stem}.md");
+        let mut suffix = 2;
+        while vault.join(&rel).exists() {
+            rel = format!("tasks/{stem}-{suffix}.md");
+            suffix += 1;
+        }
+        create(vault, &rel, &text, ctx, journal, None)?;
+    }
+    Ok(Some(warnings))
 }
 
 static PAYLOAD_FENCE: LazyLock<Regex> =
@@ -2119,9 +2485,10 @@ mod tests {
 
     #[test]
     fn a_note_the_writer_cannot_edit_warns_instead_of_killing_the_pass() {
-        // Closing delimiter `---x`: `split_frontmatter`'s un-anchored split still parses it, but
-        // the writer's `lines.index("---", 1)` cannot find a closing marker. The pass must warn and
-        // carry on — the neighbouring proposal is still counted.
+        // Closing delimiter `--- ` (trailing space): `split_frontmatter` tolerates it, but the
+        // writer's `lines.index("---", 1)` cannot find a closing marker. The pass must warn and
+        // carry on — the neighbouring proposal is still counted. (This test once used `---x`,
+        // which only the old un-anchored split read; a `---x` line closes nothing now.)
         let v = vault();
         let front_text = PENDING
             .replace("status: pending", "status: snoozed")
@@ -2129,7 +2496,7 @@ mod tests {
         let folder = v.join("approvals");
         std::fs::create_dir_all(&folder).unwrap();
         let bad = folder.join("task-bad-delim.md");
-        pystr::write_text(&bad, &format!("---\n{front_text}\n---x\n\nbody")).unwrap();
+        pystr::write_text(&bad, &format!("---\n{front_text}\n--- \n\nbody")).unwrap();
         proposal(&v, "task-b.md", PENDING, "");
 
         let result = run(&v);
@@ -2586,42 +2953,29 @@ mod tests {
     }
 
     #[test]
-    fn an_inline_frontmatter_marker_is_refused_and_never_drops_a_neighbouring_key() {
+    fn an_inline_frontmatter_marker_is_written_whole_and_never_drops_a_neighbouring_key() {
         // `---` mid-value is not a leading `---`, so the single-line check passes and the value is
-        // a legal plain scalar. But production reads with `text.split("---", 2)`, which truncates
-        // the block at the inline marker and silently discards every later key.
-        for (note, changes) in [
-            (
-                "title: T\ndue: 2026-10-09T13:00\neffort_hours: 6.0\nimportance: 5\nprogress: 90",
-                "changes:\n  due:\n    from: \"2026-10-09T13:00\"\n    to: \"2026-10-05 --- tentative\"\n",
-            ),
-            (
-                "title: T\ndue: 2026-10-09T13:00\nimportance_reason: initial",
-                "changes:\n  importance_reason:\n    from: initial\n    to: \"prof moved it --- see announcement\"\n",
-            ),
-        ] {
-            let v = vault();
-            let path = with_task(&v, "t.md", note);
-            let before = std::fs::read(&path).unwrap();
-            let meta = yaml(&format!("target: tasks/t.md\n{changes}"));
-            assert!(apply(&v, &meta).is_some());
-            assert_eq!(std::fs::read(&path).unwrap(), before);
-        }
-
-        // The sharpest form: the note would still parse, so nothing warns, but effort, importance
-        // and progress would be gone and the task would keep ranking with default values.
+        // a legal plain scalar. The reader once split on an un-anchored `---`, truncating the block
+        // at the inline marker and discarding every later key, so this was refused. The reader now
+        // closes the block only on a whole `---` line: the text is legitimate and lands intact.
         let v = vault();
-        let path = with_task(
-            &v,
-            "t.md",
-            "title: T\ndue: 2026-10-09T13:00\neffort_hours: 6.0\nimportance: 5\nprogress: 90",
-        );
-        let meta = yaml("target: tasks/t.md\nchanges:\n  due:\n    from: \"2026-10-09T13:00\"\n    to: \"2026-10-05 --- tentative\"\n");
-        apply(&v, &meta);
+        let path = with_task(&v, "t.md", "title: T\ndue: 2026-10-09T13:00\nimportance_reason: initial\nimportance: 5");
+        let meta = yaml("target: tasks/t.md\nchanges:\n  importance_reason:\n    from: initial\n    to: \"prof moved it --- see announcement\"\n");
+        assert_eq!(apply(&v, &meta), None);
         let parsed = split_frontmatter(&read(&path)).unwrap().0;
-        assert_eq!(crate::yaml::opt_f64(crate::yaml::get(&parsed, "effort_hours"), -1.0), 6.0);
+        assert_eq!(
+            crate::yaml::get(&parsed, "importance_reason").and_then(crate::yaml::text).as_deref(),
+            Some("prof moved it --- see announcement")
+        );
         assert_eq!(crate::yaml::opt_i64(crate::yaml::get(&parsed, "importance"), -1), 5);
-        assert_eq!(crate::yaml::opt_i64(crate::yaml::get(&parsed, "progress"), -1), 90);
+
+        // A `due` with an inline marker is still refused — because it is not a date, nothing else.
+        let v = vault();
+        let path = with_task(&v, "t.md", "title: T\ndue: 2026-10-09T13:00\neffort_hours: 6.0\nimportance: 5\nprogress: 90");
+        let before = std::fs::read(&path).unwrap();
+        let meta = yaml("target: tasks/t.md\nchanges:\n  due:\n    from: \"2026-10-09T13:00\"\n    to: \"2026-10-05 --- tentative\"\n");
+        assert_eq!(apply(&v, &meta), Some("due: to is not a date the engine can read".to_string()));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
@@ -3969,6 +4323,786 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------------------------
+    // The event-accept card (events spec §4.2, D1, D10; spec tests 9–12): Accept writes the
+    // commitment and the register task from the card's own `instances:`, then the stamp. Every
+    // title, place and uid is invented.
+    // -----------------------------------------------------------------------------------------
+
+    mod event_accept {
+        use super::*;
+        use crate::commitments::{Level, Meet, CARD_ACTOR};
+        use crate::eventledger::{load_ledger, record_judged_verdict};
+        use crate::events::{DiscoveredEvent, EventsConfig};
+        use jiff::civil::Time;
+
+        const J: &str = "0f0e0d0c-0b0a-4908-8706-050403020100";
+        const WHY: &str = "the listing says every first-year attends";
+        const URL: &str = "https://events.example.edu/e/1";
+
+        /// A 7–9pm campus event on 2026-08-`day`, in `series` (its own uid when empty).
+        fn event(uid: &str, series: &str, title: &str, day: i8) -> DiscoveredEvent {
+            DiscoveredEvent {
+                uid: uid.to_string(),
+                title: title.to_string(),
+                start: Some(Date::constant(2026, 8, day).at(19, 0, 0, 0)),
+                end: Some(Date::constant(2026, 8, day).at(21, 0, 0, 0)),
+                source: "campus".into(),
+                location: "Ferguson Center".into(),
+                url: URL.into(),
+                series_uid: series.to_string(),
+                ..Default::default()
+            }
+            .normalized()
+        }
+
+        /// `e`, with the feed saying registration is required, by `deadline` when it gives one.
+        fn registered(mut e: DiscoveredEvent, deadline: Option<Date>) -> DiscoveredEvent {
+            e.registration = true;
+            e.registration_deadline = deadline;
+            e
+        }
+
+        /// The one `event-accept` card the emitter files for `events`, each judged `verdict` first.
+        fn file_card(vault: &Path, events: &[DiscoveredEvent], verdict: &str) -> PathBuf {
+            for e in events {
+                record_judged_verdict(vault, &e.uid, &e.title, TODAY, verdict, WHY, Some(J)).unwrap();
+            }
+            let ledger = load_ledger(vault, None);
+            let config = EventsConfig { event_cards: true, ..EventsConfig::default() };
+            let ctx = WriteContext::new("agent:events", "cli");
+            let mut journal = Journal::new(vault);
+            let (paths, count) = crate::eventemit::emit_event_accepts(
+                vault, events, &ledger, &config, TODAY, 15, verdict, &ctx, &mut journal,
+            );
+            assert_eq!(count, 1, "{paths:?}");
+            paths[0].clone()
+        }
+
+        /// The console's half of `decide_inner` (`app/src/commands.rs`): the status, set by the
+        /// vault's own human actor.
+        fn mark(vault: &Path, card: &Path, status: &str) {
+            let human = crate::journal::read_human_actor(vault).unwrap();
+            let console = WriteContext::new(human, "dashboard");
+            let mut journal = Journal::new(vault);
+            let literals = vec![("status".to_string(), status.to_string())];
+            let rel = rel_path(vault, card);
+            write_literals(vault, &rel, &literals, &console, &mut journal, &WriteOpts::default()).unwrap();
+        }
+
+        /// All of `decide_inner`: the status, then `process_approvals` under the default context.
+        fn decide(vault: &Path, card: &Path, status: &str) -> ApprovalsResult {
+            mark(vault, card, status);
+            run(vault)
+        }
+
+        fn archived(vault: &Path, card: &Path) -> PathBuf {
+            vault.join("archive").join(card.file_name().unwrap())
+        }
+
+        fn files(vault: &Path, folder: &str) -> Vec<String> {
+            let mut out: Vec<String> = std::fs::read_dir(vault.join(folder))
+                .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect())
+                .unwrap_or_default();
+            out.sort();
+            out
+        }
+
+        fn text(record: &crate::ledger::Record, key: &str) -> String {
+            record.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+        }
+
+        /// The journal's `create` records under `folder/`, in order.
+        fn creates(vault: &Path, folder: &str) -> Vec<crate::ledger::Record> {
+            let prefix = format!("{folder}/");
+            journal_records(vault)
+                .into_iter()
+                .filter(|r| text(r, "op") == "create" && text(r, "path").starts_with(&prefix))
+                .collect()
+        }
+
+        /// A hand-written note at `rel`, written outside the engine (no journal record).
+        fn seed(vault: &Path, rel: &str, front: &str) {
+            let path = vault.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            pystr::write_text(&path, &format!("---\n{front}\n---\n\nMine.\n")).unwrap();
+        }
+
+        fn at(h: i8, m: i8) -> Time {
+            Time::new(h, m, 0, 0).unwrap()
+        }
+
+        #[test]
+        fn approving_an_obligation_card_writes_a_hard_commitment() {
+            let v = vault();
+            let card = file_card(&v, &[event("ics:fair-1", "", "Career fair", 25)], "obligation");
+            assert_eq!(proposal_weight(&front(&card)), 1);
+            let card_rel = rel_path(&v, &card);
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+            assert_eq!(files(&v, "commitments"), vec!["career-fair.md"]);
+            let note = v.join("commitments").join("career-fair.md");
+            for (key, want) in [
+                ("type", "commitment"),
+                ("kind", "event"),
+                ("level", "hard"),
+                ("title", "Career fair"),
+                ("where", "Ferguson Center"),
+                ("from", "2026-08-25"),
+                ("until", "2026-08-25"),
+                ("source_uid", "ics:fair-1"),
+                ("status", "confirmed"),
+            ] {
+                assert_eq!(field(&note, key), want, "{key}");
+            }
+            assert!(read(&note).ends_with("\n\nYou accepted this from your campus events.\n"), "{}", read(&note));
+            // The one-day `meets` (Tuesday 25 Aug, 7–9pm), as `commitments::load` reads it back.
+            let set = crate::commitments::load(&v);
+            assert!(set.warnings.is_empty(), "{:?}", set.warnings);
+            assert_eq!(set.confirmed.len(), 1);
+            assert_eq!(set.confirmed[0].level, Level::Hard);
+            assert_eq!(set.confirmed[0].meets, vec![Meet { days: vec!["tue"], start: at(19, 0), end: at(21, 0) }]);
+            assert!(files(&v, "tasks").is_empty(), "no registration, no task");
+
+            // The journal: the note's `create` (as `agent:commitments`, carrying its id), then the
+            // card's stamp, then its move to `archive/`.
+            let records = journal_records(&v);
+            let index = |wanted: &dyn Fn(&crate::ledger::Record) -> bool| {
+                records.iter().position(wanted).expect("the record is journaled")
+            };
+            let created = index(&|r| text(r, "op") == "create" && text(r, "path") == "commitments/career-fair.md");
+            let stamped = index(&|r| text(r, "op") == "set" && text(r, "path") == card_rel && text(r, "new") == "executed");
+            let moved = index(&|r| text(r, "op") == "delete" && text(r, "path") == card_rel);
+            assert!(created < stamped && stamped < moved, "{created} {stamped} {moved}");
+            assert_eq!(text(&records[created], "actor"), CARD_ACTOR);
+            assert_eq!(text(&records[created], "id"), field(&note, "id"));
+
+            assert!(!card.exists());
+            let archived = archived(&v, &card);
+            assert_eq!(field(&archived, "status"), "executed");
+            assert!(!field(&archived, "executed_at").is_empty());
+            assert_eq!(result.executed, vec![stem_of(&card)]);
+        }
+
+        #[test]
+        fn approving_an_opportunity_card_writes_a_soft_commitment() {
+            let v = vault();
+            let card = file_card(&v, &[event("ics:talk-1", "", "Engineering talk", 26)], "opportunity");
+            assert_eq!(field(&card, "verdict"), "opportunity");
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+            assert_eq!(files(&v, "commitments"), vec!["engineering-talk.md"]);
+            let note = v.join("commitments").join("engineering-talk.md");
+            for (key, want) in [
+                ("kind", "event"),
+                ("level", "soft"),
+                ("from", "2026-08-26"),
+                ("until", "2026-08-26"),
+                ("source_uid", "ics:talk-1"),
+                ("status", "confirmed"),
+            ] {
+                assert_eq!(field(&note, key), want, "{key}");
+            }
+            let set = crate::commitments::load(&v);
+            assert_eq!(set.confirmed.len(), 1);
+            assert_eq!(set.confirmed[0].level, Level::Soft);
+            assert_eq!(set.confirmed[0].meets, vec![Meet { days: vec!["wed"], start: at(19, 0), end: at(21, 0) }]);
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+            assert_eq!(result.executed, vec![stem_of(&card)]);
+        }
+
+        #[test]
+        fn registration_writes_the_register_task() {
+            // With a deadline: a two-date series books both dates and writes one task, the
+            // primary's, due at the deadline at 23:59, under the pass's own context.
+            let v = vault();
+            let deadline = Some(Date::constant(2026, 8, 23));
+            let series = [
+                registered(event("lx:7:1", "lx:7", "Resume clinic", 25), deadline),
+                registered(event("lx:7:2", "lx:7", "Resume clinic", 27), deadline),
+            ];
+            let card = file_card(&v, &series, "obligation");
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(files(&v, "commitments").len(), 2);
+            assert_eq!(files(&v, "tasks"), vec!["register-resume-clinic-2026-08-25.md"]);
+            let task = v.join("tasks").join("register-resume-clinic-2026-08-25.md");
+            for (key, want) in [
+                ("title", "Register: Resume clinic"),
+                ("due", "2026-08-23T23:59"),
+                ("effort_hours", "0.25"),
+                ("importance", "3"),
+                ("domain", "school"),
+                ("status", "active"),
+                ("created_by", "events"),
+                ("source_uid", "register:lx:7:1"),
+            ] {
+                assert_eq!(field(&task, key), want, "{key}");
+            }
+            let made = creates(&v, "tasks");
+            assert_eq!(made.len(), 1);
+            assert_eq!(text(&made[0], "actor"), "agent:approvals");
+            assert_eq!(text(&made[0], "id"), field(&task, "id"));
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+
+            // With `registration_deadline: null`: `due` is null, the task is in the read model's
+            // undated list, and no field holds the event's start. The body names the start as an
+            // upper bound, with the URL.
+            let v = vault();
+            let expo = registered(event("ics:expo-1", "", "Startup expo", 26), None);
+            let card = file_card(&v, std::slice::from_ref(&expo), "obligation");
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(files(&v, "tasks"), vec!["register-startup-expo-2026-08-26.md"]);
+            let task = v.join("tasks").join("register-startup-expo-2026-08-26.md");
+            let meta = front(&task);
+            assert_eq!(crate::yaml::get(&meta, "due"), Some(&Value::Null));
+            for (key, value) in &meta {
+                let shown = python_str(value);
+                assert!(!shown.contains("2026-08-26") && !shown.contains("19:00"), "{}: {shown}", key_text(key));
+            }
+            let body = read(&task);
+            assert!(
+                body.contains(
+                    "Registration closes by Wed 26 Aug 7pm at the latest; check the event page for the real deadline."
+                ),
+                "{body}"
+            );
+            assert!(body.contains(URL), "{body}");
+            let loaded = crate::surface::load(&v, TODAY);
+            let undated = crate::surface::ranked_list(&loaded, TODAY, "undated", &[]);
+            let slugs: Vec<&str> = undated.rows.iter().map(|r| r.slug.as_str()).collect();
+            assert_eq!(slugs, vec!["register-startup-expo-2026-08-26"]);
+        }
+
+        #[test]
+        fn a_retried_settlement_writes_no_second_note() {
+            // A card left `approved` with its notes written (the stamp failed), settled again:
+            // nothing new is written, and the card is stamped and archived.
+            let v = vault();
+            let fair = registered(event("ics:fair-1", "", "Career fair", 25), Some(Date::constant(2026, 8, 23)));
+            let card = file_card(&v, std::slice::from_ref(&fair), "obligation");
+            mark(&v, &card, "approved");
+            let mut journal = Journal::new(&v);
+            let settled = settle_event_accept(&v, &front(&card), Level::Hard, TODAY, &default_ctx(), &mut journal);
+            assert_eq!(settled.unwrap(), Some(Vec::new()));
+            assert_eq!(field(&card, "status"), "approved");
+            let (notes, tasks) = (files(&v, "commitments"), files(&v, "tasks"));
+            assert_eq!((notes.len(), tasks.len()), (1, 1));
+            let journaled = journal_records(&v).len();
+
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!((files(&v, "commitments"), files(&v, "tasks")), (notes, tasks));
+            let since: Vec<String> = journal_records(&v)[journaled..].iter().map(|r| text(r, "op")).collect();
+            assert!(!since.is_empty() && since.iter().all(|op| op != "create"), "{since:?}");
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+            assert_eq!(result.executed, vec![stem_of(&card)]);
+
+            // The ever-written set: a uid on a live commitment, a live task or an archived (deleted)
+            // commitment is skipped, and so is the primary's register task deleted to `archive/`.
+            // An archived approval card carrying the primary as its `source_uid` does not count, so
+            // the primary is still written.
+            let v = vault();
+            let series = [
+                registered(event("lx:9:1", "lx:9", "Writing lab", 24), None),
+                event("lx:9:2", "lx:9", "Writing lab", 25),
+                event("lx:9:3", "lx:9", "Writing lab", 26),
+                event("lx:9:4", "lx:9", "Writing lab", 27),
+            ];
+            let card = file_card(&v, &series, "obligation");
+            seed(&v, "commitments/writing-lab-two.md", "type: commitment\nkind: event\nsource_uid: \"lx:9:2\"");
+            seed(&v, "archive/writing-lab-three.md", "type: commitment\nkind: event\nsource_uid: \"lx:9:3\"");
+            seed(&v, "tasks/writing-lab-four.md", "title: Writing lab four\nsource_uid: \"lx:9:4\"");
+            seed(&v, "archive/register-writing-lab.md", "title: \"Register: Writing lab\"\nsource_uid: \"register:lx:9:1\"");
+            seed(
+                &v,
+                "archive/event-check-writing-lab.md",
+                "type: approval\nkind: event-check\nstatus: expired\nsource_uid: \"lx:9:1\"\nseries_uid: \"lx:9\"",
+            );
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            let made = creates(&v, "commitments");
+            assert_eq!(made.len(), 1, "{made:?}");
+            let source = made[0].get("new").and_then(|n| n.get("source_uid")).and_then(|s| s.as_str());
+            assert_eq!(source, Some("lx:9:1"));
+            assert!(creates(&v, "tasks").is_empty());
+            assert_eq!(files(&v, "commitments"), vec!["writing-lab-two.md", "writing-lab.md"]);
+            assert_eq!(files(&v, "tasks"), vec!["writing-lab-four.md"]);
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+        }
+
+        #[test]
+        fn a_failed_write_leaves_the_card_approved_for_the_next_pass() {
+            let v = vault();
+            let card = file_card(&v, &[event("ics:fair-1", "", "Career fair", 25)], "obligation");
+            mark(&v, &card, "approved");
+            // The journal cannot be appended to, so the commitment's `create` fails before its file.
+            let journal_dir = v.join("state").join("journal");
+            let aside = v.join("state").join("journal-aside");
+            std::fs::rename(&journal_dir, &aside).unwrap();
+            pystr::write_text(&journal_dir, "not a folder\n").unwrap();
+            let result = run(&v);
+            assert_eq!(result.warnings, vec![format!("transition failed: {}", name_of(&card))]);
+            assert!(result.executed.is_empty());
+            assert_eq!(field(&card, "status"), "approved");
+            assert!(files(&v, "commitments").is_empty());
+
+            // The next pass, with the journal back, settles it, once.
+            std::fs::remove_file(&journal_dir).unwrap();
+            std::fs::rename(&aside, &journal_dir).unwrap();
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(files(&v, "commitments"), vec!["career-fair.md"]);
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+        }
+
+        #[test]
+        fn a_card_with_no_payload_or_no_verdict_it_reads_stays_approved_and_warns() {
+            // Only a hand edit makes either. Nothing is written, and the card waits, as an approved
+            // `task` card with no payload does.
+            for (from, to, warning) in [
+                ("\ninstances:", "\nlisted:", "missing event payload: {name}"),
+                ("verdict: obligation", "verdict: required", "{name}: no verdict the settlement reads"),
+            ] {
+                let v = vault();
+                let card = file_card(&v, &[event("ics:fair-1", "", "Career fair", 25)], "obligation");
+                let edited = read(&card).replacen(from, to, 1);
+                assert_ne!(edited, read(&card));
+                pystr::write_text(&card, &edited).unwrap();
+                let result = decide(&v, &card, "approved");
+                let name = name_of(&card);
+                assert_eq!(result.warnings, vec![warning.replace("{name}", &name)]);
+                assert!(result.executed.is_empty());
+                assert_eq!(field(&card, "status"), "approved");
+                assert!(files(&v, "commitments").is_empty() && files(&v, "tasks").is_empty());
+            }
+        }
+
+        #[test]
+        fn a_malformed_instance_entry_is_skipped_with_a_warning_and_the_rest_settles() {
+            let v = vault();
+            let series = [event("lx:3:1", "lx:3", "Study hall", 25), event("lx:3:2", "lx:3", "Study hall", 27)];
+            let card = file_card(&v, &series, "obligation");
+            let edited = read(&card).replacen("2026-08-27T19:00", "soon", 1);
+            assert_ne!(edited, read(&card));
+            pystr::write_text(&card, &edited).unwrap();
+            let result = decide(&v, &card, "approved");
+            assert_eq!(result.warnings, vec![format!("{}: bad instance entry 2", name_of(&card))]);
+            let made = creates(&v, "commitments");
+            assert_eq!(made.len(), 1, "{made:?}");
+            let source = made[0].get("new").and_then(|n| n.get("source_uid")).and_then(|s| s.as_str());
+            assert_eq!(source, Some("lx:3:1"));
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+        }
+
+        // --- T3.1b: the rejected arm and expiry (spec tests 13–14; §4.3, §4.4, D8) ------------
+
+        fn ledger_text(vault: &Path) -> String {
+            pystr::read_text(&vault.join("state").join("events-seen.md")).unwrap_or_default()
+        }
+
+        /// The ledger's `declined` lines, in file order.
+        fn declined_lines(vault: &Path) -> Vec<String> {
+            let text = ledger_text(vault);
+            pystr::splitlines(&text).into_iter().filter(|l| l.contains(" · declined ")).map(str::to_string).collect()
+        }
+
+        #[test]
+        fn rejecting_writes_one_declined_line_per_listed_uid() {
+            // One `declined` line per uid the card's `events:` lists, in its order, then the card
+            // archived `rejected`. Nothing else: no note, no task, no `create` record.
+            let v = vault();
+            let deadline = Some(Date::constant(2026, 8, 23));
+            let series = [
+                registered(event("lx:7:1", "lx:7", "Resume clinic", 25), deadline),
+                registered(event("lx:7:2", "lx:7", "Resume clinic", 27), deadline),
+            ];
+            let card = file_card(&v, &series, "obligation");
+            assert_eq!(crate::eventemit::card_event_uids(&front(&card)), vec!["lx:7:1", "lx:7:2"]);
+            assert_eq!(crate::eventroster::relevant_events(&series, &load_ledger(&v, None)).len(), 2);
+            let journaled = journal_records(&v).len();
+
+            let result = decide(&v, &card, "rejected");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(declined_lines(&v), vec!["- lx:7:1 · declined 2026-08-20", "- lx:7:2 · declined 2026-08-20"]);
+            let after = load_ledger(&v, None);
+            assert!(crate::eventroster::relevant_events(&series, &after).is_empty(), "both leave Coming up");
+            assert!(!card.exists());
+            assert_eq!(field(&archived(&v, &card), "status"), "rejected");
+            assert_eq!(result.rejected, vec![stem_of(&card)]);
+            assert!(result.executed.is_empty());
+            assert!(files(&v, "commitments").is_empty() && files(&v, "tasks").is_empty());
+            let since: Vec<String> = journal_records(&v)[journaled..].iter().map(|r| text(r, "op")).collect();
+            assert_eq!(since, vec!["set", "delete"], "the console's status, then the move");
+
+            // D9's rebuild reads the same archived card and finds every line written.
+            let before = ledger_text(&v);
+            let (mut ledger, mut journal) = (after, Journal::new(&v));
+            let carried = crate::eventcarry::run(&v, &series, &mut ledger, TODAY, &default_ctx(), &mut journal);
+            assert_eq!(carried, (0, Vec::new()));
+            assert_eq!(ledger_text(&v), before);
+        }
+
+        #[test]
+        fn a_failed_decline_leaves_the_card_rejected_for_the_next_pass() {
+            // The ledger first, the move second: a ledger that cannot be appended to leaves the
+            // card `rejected` in `approvals/`, and the next pass settles it.
+            let v = vault();
+            let card = file_card(&v, &[event("ics:fair-1", "", "Career fair", 25)], "obligation");
+            let seen = v.join("state").join("events-seen.md");
+            let aside = v.join("state").join("events-seen-aside.md");
+            std::fs::rename(&seen, &aside).unwrap();
+            std::fs::create_dir_all(&seen).unwrap();
+            let result = decide(&v, &card, "rejected");
+            assert_eq!(result.warnings, vec![format!("transition failed: {}", name_of(&card))]);
+            assert!(result.rejected.is_empty());
+            assert_eq!(field(&card, "status"), "rejected");
+
+            std::fs::remove_dir(&seen).unwrap();
+            std::fs::rename(&aside, &seen).unwrap();
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(declined_lines(&v), vec!["- ics:fair-1 · declined 2026-08-20"]);
+            assert_eq!(field(&archived(&v, &card), "status"), "rejected");
+            assert_eq!(result.rejected, vec![stem_of(&card)]);
+        }
+
+        #[test]
+        fn an_expired_event_accept_card_writes_nothing() {
+            // D8: expiry is not an answer. Each card is stamped `expired` and archived, and nothing
+            // else is written: no ledger line, no note, no task. The events stay in Coming up, and
+            // the carry sees no answered series. The digest's expiry still declines, by contrast
+            // (`a_rejected_or_expired_digest_declines_every_event`, unchanged).
+            let v = vault();
+            let fair = registered(event("ics:fair-1", "", "Career fair", 25), Some(Date::constant(2026, 8, 23)));
+            let talk = event("ics:talk-1", "", "Engineering talk", 26);
+            let fair_card = file_card(&v, std::slice::from_ref(&fair), "obligation");
+            let talk_card = file_card(&v, std::slice::from_ref(&talk), "opportunity");
+            assert_eq!(field(&fair_card, "expires"), "2026-08-25");
+            assert_eq!(field(&talk_card, "expires"), "2026-08-26");
+            let before = ledger_text(&v);
+            let journaled = journal_records(&v).len();
+
+            let day = Date::constant(2026, 8, 27);
+            let result = run_at(&v, day, day.at(9, 0, 0, 0));
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(result.expired, vec![stem_of(&fair_card), stem_of(&talk_card)]);
+            assert!(result.rejected.is_empty() && result.executed.is_empty());
+            for card in [&fair_card, &talk_card] {
+                assert!(!card.exists());
+                assert_eq!(field(&archived(&v, card), "status"), "expired");
+            }
+            assert_eq!(ledger_text(&v), before, "no ledger line");
+            assert!(declined_lines(&v).is_empty());
+            assert!(files(&v, "commitments").is_empty() && files(&v, "tasks").is_empty());
+            let since: Vec<String> = journal_records(&v)[journaled..].iter().map(|r| text(r, "op")).collect();
+            assert_eq!(since, vec!["set", "delete", "set", "delete"], "each card's stamp, then its move");
+            let events = [fair, talk];
+            let relevant = crate::eventroster::relevant_events(&events, &load_ledger(&v, None));
+            assert_eq!(relevant.len(), 2, "both stay in Coming up");
+            assert!(crate::eventcarry::answered_series(&v).is_empty(), "an expired card answers nothing");
+        }
+
+        // --- T3.2: the extended event-check arm (spec tests 15–17; §5.2, D11, Q1b, P7, PQ2) ----
+
+        /// The one `event-check` card the emitter files for `events`, each judged `unsure` first. It
+        /// carries `instances:` (T2a.1b) unless its events are read back from the roster (§2).
+        fn file_check(vault: &Path, events: &[DiscoveredEvent]) -> PathBuf {
+            for e in events {
+                record_judged_verdict(vault, &e.uid, &e.title, TODAY, "unsure", WHY, Some(J)).unwrap();
+            }
+            let ledger = load_ledger(vault, None);
+            let ctx = WriteContext::new("agent:events", "cli");
+            let mut journal = Journal::new(vault);
+            let (paths, count) = crate::eventemit::emit_event_checks(
+                vault, events, &ledger, &EventsConfig::default(), TODAY, 15, &ctx, &mut journal,
+            );
+            assert_eq!(count, 1, "{paths:?}");
+            paths[0].clone()
+        }
+
+        /// [`event`]'s campus event, from `start` to `end`.
+        fn spanning(uid: &str, series: &str, title: &str, start: DateTime, end: DateTime) -> DiscoveredEvent {
+            DiscoveredEvent { start: Some(start), end: Some(end), ..event(uid, series, title, start.date().day()) }
+        }
+
+        fn on(day: i8, hour: i8, minute: i8) -> DateTime {
+            Date::constant(2026, 8, day).at(hour, minute, 0, 0)
+        }
+
+        /// The ledger's answer lines, in file order.
+        fn answer_lines(vault: &Path) -> Vec<String> {
+            let text = ledger_text(vault);
+            pystr::splitlines(&text).into_iter().filter(|l| l.contains(" · by:")).map(str::to_string).collect()
+        }
+
+        fn copy_tree(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap().map(Result::unwrap) {
+                let target = to.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    copy_tree(&entry.path(), &target);
+                } else {
+                    std::fs::copy(entry.path(), &target).unwrap();
+                }
+            }
+        }
+
+        /// Every journal record, in order, without its wall-clock `ts` and its per-process `seq`
+        /// (P14): the stamps an append adds, not the data a settlement writes.
+        fn untimed(vault: &Path) -> Vec<crate::ledger::Record> {
+            let unstamped = |mut r: crate::ledger::Record| {
+                r.remove("ts");
+                r.remove("seq");
+                r
+            };
+            journal_records(vault).into_iter().map(unstamped).collect()
+        }
+
+        /// A note's text without its opaque `id:` line (P14).
+        fn without_id(path: &Path) -> String {
+            pystr::splitlines(&read(path)).into_iter().filter(|l| !l.starts_with("id: ")).collect::<Vec<_>>().join("\n")
+        }
+
+        #[test]
+        fn an_event_check_with_instances_records_the_answer_then_books_it() {
+            // D11, P7: "this applies to me" on a card that carries `instances:` is an Accept. The
+            // student's `record_answer` line first, as today, then the date booked at `level: hard`
+            // (the answer word is `obligation`), then the stamp and the move.
+            let v = vault();
+            let card = file_check(&v, &[event("ics:fair-1", "", "Career fair", 25)]);
+            assert!(crate::yaml::get(&front(&card), "instances").is_some());
+            let card_rel = rel_path(&v, &card);
+
+            // The answer goes first: with the ledger unwritable, nothing is booked and the card waits.
+            let seen = v.join("state").join("events-seen.md");
+            let aside = v.join("state").join("events-seen-aside.md");
+            std::fs::rename(&seen, &aside).unwrap();
+            std::fs::create_dir_all(&seen).unwrap();
+            let result = decide(&v, &card, "approved");
+            assert_eq!(result.warnings, vec![format!("transition failed: {}", name_of(&card))]);
+            assert_eq!(field(&card, "status"), "approved");
+            assert!(files(&v, "commitments").is_empty() && creates(&v, "commitments").is_empty());
+            std::fs::remove_dir(&seen).unwrap();
+            std::fs::rename(&aside, &seen).unwrap();
+
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            let human = crate::journal::read_human_actor(&v).unwrap();
+            assert_eq!(
+                answer_lines(&v),
+                vec![format!("- ics:fair-1 · Career fair · verdict:obligation · by:{human} · jid:{J} · answered 2026-08-20")]
+            );
+            assert_eq!(files(&v, "commitments"), vec!["career-fair.md"]);
+            let note = v.join("commitments").join("career-fair.md");
+            for (key, want) in [
+                ("kind", "event"),
+                ("level", "hard"),
+                ("from", "2026-08-25"),
+                ("until", "2026-08-25"),
+                ("source_uid", "ics:fair-1"),
+                ("status", "confirmed"),
+            ] {
+                assert_eq!(field(&note, key), want, "{key}");
+            }
+            let set = crate::commitments::load(&v);
+            assert!(set.warnings.is_empty(), "{:?}", set.warnings);
+            assert_eq!(set.confirmed.len(), 1);
+            assert_eq!(set.confirmed[0].level, Level::Hard);
+            assert_eq!(set.confirmed[0].meets, vec![Meet { days: vec!["tue"], start: at(19, 0), end: at(21, 0) }]);
+            assert!(files(&v, "tasks").is_empty(), "no registration, no task");
+            let records = journal_records(&v);
+            let index = |wanted: &dyn Fn(&crate::ledger::Record) -> bool| {
+                records.iter().position(wanted).expect("the record is journaled")
+            };
+            let created = index(&|r| text(r, "op") == "create" && text(r, "path") == "commitments/career-fair.md");
+            let stamped = index(&|r| text(r, "op") == "set" && text(r, "path") == card_rel && text(r, "new") == "executed");
+            let moved = index(&|r| text(r, "op") == "delete" && text(r, "path") == card_rel);
+            assert!(created < stamped && stamped < moved, "{created} {stamped} {moved}");
+            assert_eq!(text(&records[created], "actor"), CARD_ACTOR);
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+            assert_eq!(result.executed, vec![stem_of(&card)]);
+
+            // Without `instances:` (a card read back from the roster, or filed before D11), the
+            // settlement's journal and ledger bytes equal today's. Today's arm (the answer, the
+            // stamp, the move) is replayed by hand on a copy of the same vault.
+            let v = vault();
+            let fair = DiscoveredEvent { source: "roster".into(), ..event("ics:fair-1", "", "Career fair", 25) };
+            let card = file_check(&v, std::slice::from_ref(&fair));
+            assert!(crate::yaml::get(&front(&card), "instances").is_none());
+            mark(&v, &card, "approved");
+            let twin = vault();
+            copy_tree(&v, &twin);
+
+            let result = run(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(result.executed, vec![stem_of(&card)]);
+
+            let rel = rel_path(&v, &card);
+            let (ctx, mut journal) = (default_ctx(), Journal::new(&twin));
+            settle_event_check(&twin, &front(&twin.join(&rel)), "obligation", TODAY, &mut journal).unwrap();
+            let literals = vec![
+                ("status".to_string(), "executed".to_string()),
+                ("executed_at".to_string(), format!("\"{}\"", now().strftime("%Y-%m-%d %H:%M"))),
+            ];
+            write_literals(&twin, &rel, &literals, &ctx, &mut journal, &WriteOpts::default()).unwrap();
+            delete(&twin, &rel, &ctx, &mut journal).unwrap();
+
+            assert_eq!(answer_lines(&v).len(), 1);
+            assert_eq!(ledger_text(&v), ledger_text(&twin));
+            assert_eq!(untimed(&v), untimed(&twin));
+            assert_eq!(read(&archived(&v, &card)), read(&archived(&twin, &card)));
+            assert!(!v.join("commitments").exists() && !v.join("tasks").exists());
+        }
+
+        #[test]
+        fn an_all_day_instance_stands_with_no_commitment_and_no_warning() {
+            // Q1b, PQ2: the answer stands for every listed date, and a lane shape books nothing. An
+            // all-day or multi-day date has no hours to take, and Knowlu invents none for a
+            // zero-length one. The timed date beside them is booked, so the settlement ran and
+            // skipped only the lane shapes. The archived card keeps `instances:`, which the
+            // all-day lane reads.
+            let v = vault();
+            let series = [
+                spanning("lx:4:1", "lx:4", "Club fair", on(24, 0, 0), on(25, 0, 0)),
+                spanning("lx:4:2", "lx:4", "Club fair", on(26, 15, 0), on(26, 15, 0)),
+                spanning("lx:4:3", "lx:4", "Club fair", on(27, 19, 0), on(27, 21, 0)),
+                spanning("lx:4:4", "lx:4", "Club fair", on(28, 17, 0), on(30, 14, 0)),
+            ];
+            let uids = ["lx:4:1", "lx:4:2", "lx:4:3", "lx:4:4"];
+            let card = file_check(&v, &series);
+            assert_eq!(crate::eventemit::card_event_uids(&front(&card)), uids);
+            let journaled = journal_records(&v).len();
+
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "nothing warns: {:?}", result.warnings);
+            assert_eq!(result.executed, vec![stem_of(&card)]);
+            let ledger = load_ledger(&v, None);
+            let human = crate::journal::read_human_actor(&v).unwrap();
+            for uid in uids {
+                assert_eq!(ledger[uid].verdict.as_deref(), Some("obligation"), "{uid}");
+                assert_eq!(ledger[uid].answered_by, human, "{uid}");
+            }
+            let made = creates(&v, "commitments");
+            assert_eq!(made.len(), 1, "{made:?}");
+            let source = made[0].get("new").and_then(|n| n.get("source_uid")).and_then(|s| s.as_str());
+            assert_eq!(source, Some("lx:4:3"), "only the timed date is booked");
+            assert!(files(&v, "tasks").is_empty());
+            let since: Vec<String> = journal_records(&v)[journaled..].iter().map(|r| text(r, "op")).collect();
+            assert_eq!(
+                since,
+                vec!["set", "create", "set", "set", "delete"],
+                "the console's status, the one booking, the stamp's two fields, the move"
+            );
+            let archived = archived(&v, &card);
+            assert_eq!(field(&archived, "status"), "executed");
+            match crate::yaml::get(&front(&archived), "instances") {
+                Some(Value::Sequence(entries)) => assert_eq!(entries.len(), 4),
+                other => panic!("the archived card keeps its instances: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_past_midnight_instance_books_to_2359_with_its_true_end_in_the_body() {
+            // Q1b, P6: a 10pm–1am date books its start day to 23:59 at `level: hard`, and the note's
+            // body gives the true end. The `ends` label never reaches the frontmatter.
+            let v = vault();
+            let late = spanning("ics:late-1", "", "Night market", on(25, 22, 0), on(26, 1, 0));
+            let card = file_check(&v, std::slice::from_ref(&late));
+            let result = decide(&v, &card, "approved");
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(load_ledger(&v, None)["ics:late-1"].verdict.as_deref(), Some("obligation"));
+            assert_eq!(files(&v, "commitments"), vec!["night-market.md"]);
+            let note = v.join("commitments").join("night-market.md");
+            for (key, want) in [
+                ("kind", "event"),
+                ("level", "hard"),
+                ("from", "2026-08-25"),
+                ("until", "2026-08-25"),
+                ("source_uid", "ics:late-1"),
+            ] {
+                assert_eq!(field(&note, key), want, "{key}");
+            }
+            assert!(crate::yaml::get(&front(&note), "ends").is_none());
+            let body = read(&note);
+            assert!(
+                body.ends_with("\n\nYou accepted this from your campus events. Ends at 1am the next day.\n"),
+                "{body}"
+            );
+            let set = crate::commitments::load(&v);
+            assert!(set.warnings.is_empty(), "{:?}", set.warnings);
+            assert_eq!(set.confirmed[0].meets, vec![Meet { days: vec!["tue"], start: at(22, 0), end: at(23, 59) }]);
+            assert_eq!(field(&archived(&v, &card), "status"), "executed");
+        }
+
+        /// A rejected digest beside `digest`'s approved one: its own name and uids.
+        const REJECTED_DIGEST: &str = "type: approval\nkind: events-digest\ntitle: \"Events — 2026-08-20\"\n\
+             status: rejected\nproposed_at: 2026-08-20\nexpires: 2026-09-03\n\
+             snooze_until: null\ncreated_by: events\nevents:\n\
+             \x20 - uid: \"engage:3\"\n    summary: \"Robotics Demo\"\n\
+             \x20   start: 2026-09-05T18:00\n    end: 2026-09-05T19:00\n    location: \"Lloyd 40\"\n\
+             \x20 - uid: \"localist:4\"\n    summary: \"Study Abroad Fair\"\n\
+             \x20   start: 2026-09-06T12:00\n    end: 2026-09-06T14:00\n    location: \"Ferguson Center\"";
+
+        #[test]
+        fn the_calendar_event_and_digest_arms_are_unchanged() {
+            // One approved digest, one rejected digest and an approved `calendar-event` card, settled
+            // in one pass beside an approved `event-accept` card and an approved `event-check` card
+            // with `instances:`, give what they give alone. Two vaults built the same way, the event
+            // cards only in the first; every note compared without its `id:` line (P14).
+            let build = |with_event_cards: bool| -> PathBuf {
+                let v = vault();
+                if with_event_cards {
+                    let accept = file_card(&v, &[event("ics:fair-1", "", "Career fair", 25)], "obligation");
+                    let check = file_check(&v, &[event("ics:club-1", "", "Club night", 26)]);
+                    mark(&v, &accept, "approved");
+                    mark(&v, &check, "approved");
+                }
+                digest(&v, "approved", &["engage:1"]);
+                let lines = "- [ ] Sat 9/5 18:00 · Robotics Demo · `engage:3`\n\
+                             - [ ] Sun 9/6 12:00 · Study Abroad Fair · `localist:4`\n";
+                proposal(&v, "events-digest-2026-08-20.md", REJECTED_DIGEST, lines);
+                let calendar = PENDING.replace("kind: task", "kind: calendar-event").replace("status: pending", "status: approved");
+                proposal(&v, "calendar-event-a.md", &calendar, "");
+                v
+            };
+            let (beside, alone) = (build(true), build(false));
+            let a = run_at(&beside, DIGEST_TODAY, digest_now());
+            let b = run_at(&alone, DIGEST_TODAY, digest_now());
+
+            assert!(a.warnings.is_empty() && b.warnings.is_empty(), "{:?} {:?}", a.warnings, b.warnings);
+            assert_eq!(files(&beside, "commitments"), vec!["career-fair.md", "club-night.md"], "the event cards settled too");
+            let digests = |r: &ApprovalsResult| -> Vec<String> {
+                r.executed.iter().filter(|s| s.starts_with("events-digest")).cloned().collect()
+            };
+            assert_eq!(digests(&a), vec!["events-digest-2026-08-21 (1 events)"]);
+            assert_eq!(digests(&a), digests(&b));
+            assert_eq!(a.rejected, vec!["events-digest-2026-08-20"]);
+            assert_eq!(a.rejected, b.rejected);
+            assert_eq!((a.awaiting_calendar, b.awaiting_calendar), (1, 1));
+            assert_eq!(calendar_notes(&beside), vec!["calendar-event-a.md", "calendar-event-ai-club-kickoff.md"]);
+            assert_eq!(calendar_notes(&beside), calendar_notes(&alone));
+            for name in calendar_notes(&beside) {
+                let rel = format!("approvals/{name}");
+                assert_eq!(without_id(&beside.join(&rel)), without_id(&alone.join(&rel)), "{name}");
+            }
+            for name in ["events-digest-2026-08-20.md", "events-digest-2026-08-21.md"] {
+                let rel = format!("archive/{name}");
+                assert_eq!(without_id(&beside.join(&rel)), without_id(&alone.join(&rel)), "{name}");
+            }
+            let digest_lines = |vault: &Path| -> Vec<String> {
+                let text = ledger_text(vault);
+                let uids = ["- engage:1 ", "- localist:2 ", "- engage:3 ", "- localist:4 "];
+                pystr::splitlines(&text).into_iter().filter(|l| uids.iter().any(|u| l.contains(u))).map(str::to_string).collect()
+            };
+            assert_eq!(digest_lines(&beside).len(), 3, "{:?}", digest_lines(&beside));
+            assert_eq!(digest_lines(&beside), digest_lines(&alone));
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
     // The commitment-check card (P13, spec §5.2, §5.4, §5.5): approve → the confirmed note or the
     // change, reject → the decline marker, withdrawal by card shape. Every title, room, key and
     // calendar is invented.
@@ -5103,6 +6237,668 @@ mod tests {
             let done = withdraw_asks(&v, &[], &set, &default_ctx(), &mut Journal::new(&v));
             assert_eq!(done.withdrawn, ["commitment-ask-when-does-bui-100-meet"]);
             assert!(!card.exists());
+        }
+    }
+
+    // T8 (email spec D11 (4), §5.3, test 31; plan P11, §10 R15): approving a mail amend card writes
+    // its fields as the vault's human; and PQ5 (c), a feed card may amend `title`. Every course,
+    // title and date is invented.
+    mod mail_amend {
+        use super::*;
+
+        const TASK_ID: &str = "task_00000000e1";
+        const NOTE: &str = "tasks/lab-5.md";
+        const CARD: &str = "approvals/amend-lab-5.md";
+
+        /// "Lab 5", a mail note with an id, so `Journal::human_set` can find what an approval writes.
+        fn lab(vault: &Path, due: &str) -> PathBuf {
+            let front = format!("id: {TASK_ID}\ntitle: Lab 5\ncourse: cs-101\ndue: {due}\nstatus: active\ncreated_by: mail");
+            with_task(vault, "lab-5.md", &front)
+        }
+
+        /// An approved `kind: amend` card filed by `created_by`, moving Lab 5's due from 10-12 to
+        /// 10-14, with `extra` frontmatter lines after `changes`.
+        fn card(vault: &Path, created_by: &str, extra: &str) -> PathBuf {
+            let front = format!(
+                "id: appr_00000000e2\ntype: approval\nkind: amend\ntarget: {NOTE}\ntitle: Lab 5 moved\nstatus: approved\n\
+                 source_uid: \"mail:5a5a:1\"\nproposed_at: 2026-08-18\nfirst_proposed_at: 2026-08-18\nexpires: null\n\
+                 snooze_until: null\ncreated_by: {created_by}\nchanges:\n  due:\n    from: 2026-10-12\n    to: 2026-10-14{extra}"
+            );
+            proposal(vault, "amend-lab-5.md", &front, "**Why proposed:** the lab moved.\n")
+        }
+
+        /// The executor as a slot runs it (P11): `agent:approvals`, with the slot's `via` and run id.
+        fn executor() -> WriteContext {
+            WriteContext { run_id: Some("run-t8".to_string()), ..WriteContext::new("agent:approvals", "local-runner") }
+        }
+
+        fn execute(vault: &Path) -> ApprovalsResult {
+            process_approvals(vault, TODAY, now(), &executor(), &mut Journal::new(vault))
+        }
+
+        fn text(record: &crate::ledger::Record, key: &str) -> String {
+            record.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+        }
+
+        /// `[op, field, actor, via, run_id]` of every journal record on `path`, in order.
+        fn trail(vault: &Path, path: &str) -> Vec<[String; 5]> {
+            let records = journal_records(vault).into_iter().filter(|r| text(r, "path") == path);
+            records.map(|r| ["op", "field", "actor", "via", "run_id"].map(|key| text(&r, key))).collect()
+        }
+
+        fn by(op: &str, field: &str, actor: &str) -> [String; 5] {
+            [op, field, actor, "local-runner", "run-t8"].map(str::to_string)
+        }
+
+        fn bad_actor_file(vault: &Path, text: &str) {
+            std::fs::create_dir_all(vault.join("config")).unwrap();
+            pystr::write_text(&vault.join(crate::journal::ACTOR_FILE), text).unwrap();
+        }
+
+        /// Spec test 31 and D11 (4): an approved mail amend writes its field as the vault's human
+        /// (`journal::read_human_actor`: the legacy token with no `config/actor.yaml`, else the
+        /// file's), with the executor's `via` and run id (P11). `Journal::human_set` then finds the
+        /// student's value, so later mail about the field is a card (judge once).
+        #[test]
+        fn an_approved_mail_amend_writes_its_fields_as_the_human_actor() {
+            for token in [None, Some("student"), Some("quinn")] {
+                let v = vault();
+                if let Some(token) = token {
+                    crate::journal::create_actor_file(&v, token).unwrap();
+                }
+                let target = lab(&v, "2026-10-12");
+                card(&v, "mail", "");
+                let result = execute(&v);
+                assert!(result.warnings.is_empty(), "{token:?}: {:?}", result.warnings);
+                assert_eq!(result.executed, ["amend-lab-5"], "{token:?}");
+                assert_eq!(field(&target, "due"), "2026-10-14", "{token:?}");
+                let human = crate::journal::read_human_actor(&v).unwrap();
+                assert_eq!(trail(&v, NOTE), vec![by("set", "due", human)], "{token:?}");
+                let set = Journal::new(&v).human_set(TASK_ID, "due").map(|r| text(&r, "new"));
+                assert_eq!(set.as_deref(), Some("2026-10-14"), "{token:?}");
+            }
+        }
+
+        /// D11 (4) and ruling 11: with a bad `config/actor.yaml` the approval stops with the file's
+        /// named error, the card goes back to pending (a recoverable refusal) and nothing is written
+        /// to the note: no other actor is tried.
+        #[test]
+        fn a_bad_actor_file_leaves_the_mail_card_pending_with_ruling_11s_error() {
+            for bad in ["human_actor: alice\n", "human_actor: agent:approvals\n", "human_actor:\n", "- student\n"] {
+                let v = vault();
+                bad_actor_file(&v, bad);
+                let target = lab(&v, "2026-10-12");
+                let before = read(&target);
+                let path = card(&v, "mail", "");
+                let error = crate::journal::read_human_actor(&v).unwrap_err().to_string();
+                let result = execute(&v);
+                assert_eq!(result.warnings, vec![format!("amend-lab-5.md: {error}")], "{bad:?}");
+                assert_eq!(field(&path, "status"), "pending", "{bad:?}");
+                assert_eq!(read(&target), before, "{bad:?}");
+                assert_eq!(trail(&v, NOTE), Vec::<[String; 5]>::new(), "{bad:?}");
+                assert_eq!(trail(&v, CARD), vec![by("set", "status", "agent:approvals")], "{bad:?}");
+                // Pending again, it is counted and shown like any card the student can reject.
+                assert_eq!(execute(&v).pending, 1, "{bad:?}");
+            }
+        }
+
+        /// Spec test 31's last clause: every other amend executes exactly as today, as
+        /// `agent:approvals`, whatever `config/actor.yaml` says. Only `created_by: mail`, exactly,
+        /// is a mail card.
+        #[test]
+        fn a_non_mail_amend_executes_exactly_as_today() {
+            for created_by in ["gmail", "events", "blackboard", "agent:knowlu.enrich", "agent:knowlu.sync", "Mail", "null"] {
+                for bad in [false, true] {
+                    let v = vault();
+                    if bad {
+                        bad_actor_file(&v, "human_actor: alice\n");
+                    }
+                    let target = lab(&v, "2026-10-12");
+                    card(&v, created_by, "");
+                    let result = execute(&v);
+                    assert!(result.warnings.is_empty(), "{created_by} {bad}: {:?}", result.warnings);
+                    assert_eq!(result.executed, ["amend-lab-5"], "{created_by} {bad}");
+                    assert_eq!(field(&target, "due"), "2026-10-14", "{created_by} {bad}");
+                    assert_eq!(trail(&v, NOTE), vec![by("set", "due", "agent:approvals")], "{created_by} {bad}");
+                }
+            }
+        }
+
+        /// §4.9's last line: approving a mail **task** card materialises the task as today, as
+        /// `agent:approvals`, never as the student.
+        #[test]
+        fn an_approved_mail_task_card_materialises_as_agent_approvals() {
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            let front = PENDING.replace("status: pending", "status: approved").replace("created_by: gmail", "created_by: mail");
+            proposal(&v, "task-study-group.md", &front, &approved_task_body());
+            let result = execute(&v);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            assert_eq!(result.executed, ["study-group"]);
+            let records = journal_records(&v);
+            let creates: Vec<_> = records.iter().filter(|r| text(r, "op") == "create").collect();
+            assert_eq!(creates.len(), 1);
+            assert_eq!(text(creates[0], "path"), "tasks/study-group.md");
+            assert!(records.iter().all(|r| text(r, "actor") == "agent:approvals"), "{records:?}");
+        }
+
+        /// P11: only the amended fields are the student's. The card's own bookkeeping (the executed
+        /// stamp and the move to `archive/`, or the status written back to pending on a refusal)
+        /// stays `agent:approvals`.
+        #[test]
+        fn the_mail_cards_own_status_bookkeeping_stays_agent_approvals() {
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            lab(&v, "2026-10-12");
+            card(&v, "mail", "");
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            let agent = "agent:approvals";
+            assert_eq!(trail(&v, CARD), vec![by("set", "status", agent), by("set", "executed_at", agent), by("delete", "", agent)]);
+            assert_eq!(trail(&v, NOTE), vec![by("set", "due", "student")]);
+            // A recoverable refusal (the note moved since the card was filed): back to pending, as
+            // `agent:approvals`, and nothing written to the note.
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            lab(&v, "2026-10-13");
+            let path = card(&v, "mail", "");
+            let result = execute(&v);
+            assert_eq!(result.warnings, ["amend-lab-5.md: stale amendment: due is 2026-10-13, expected 2026-10-12"]);
+            assert_eq!(field(&path, "status"), "pending");
+            assert_eq!(trail(&v, CARD), vec![by("set", "status", agent)]);
+            assert_eq!(trail(&v, NOTE), Vec::<[String; 5]>::new());
+        }
+
+        /// Plan §10 R15: a mail card never carries `append` (T6.2 writes none). One that does is
+        /// refused before anything is written, so no line is ever journalled as the student; the
+        /// refusal is recoverable, so the card goes back to pending, where the student can reject
+        /// it. An empty `append` carries no line, and the card executes as the student.
+        #[test]
+        fn a_mail_card_carrying_append_is_refused_and_writes_nothing() {
+            for append in ["\nappend:\n  - moved by the course staff", "\nappend:\n  - one\n  - two", "\nappend: a line"] {
+                let v = vault();
+                crate::journal::create_actor_file(&v, "student").unwrap();
+                let target = lab(&v, "2026-10-12");
+                let before = read(&target);
+                let path = card(&v, "mail", append);
+                let result = execute(&v);
+                assert_eq!(result.warnings, vec![format!("amend-lab-5.md: {MAIL_APPEND_REFUSAL}")], "{append:?}");
+                assert!(is_recoverable_refusal(MAIL_APPEND_REFUSAL));
+                assert_eq!(field(&path, "status"), "pending", "{append:?}");
+                assert_eq!(read(&target), before, "{append:?}");
+                assert!(journal_records(&v).iter().all(|r| text(r, "op") != "append_body"), "{append:?}");
+                assert_eq!(trail(&v, NOTE), Vec::<[String; 5]>::new(), "{append:?}");
+            }
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            lab(&v, "2026-10-12");
+            card(&v, "mail", "\nappend: []");
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            assert_eq!(trail(&v, NOTE), vec![by("set", "due", "student")]);
+        }
+
+        /// "HW 01", a Blackboard note whose title the student set by hand.
+        fn homework(vault: &Path) -> PathBuf {
+            let front = "id: task_00000000e3\ntitle: \"HW 01\"\ncourse: cs-101\ndue: 2026-10-12\nstatus: active\n\
+                         created_by: blackboard\nsource_uid: \"_901_1\"";
+            with_task(vault, "hw-1.md", front)
+        }
+
+        /// An amend card by `created_by` (`None`: no `created_by:` line) renaming HW 01 to `to`, a
+        /// YAML scalar as written.
+        fn rename(created_by: Option<&str>, to: &str) -> String {
+            let by = created_by.map(|c| format!("created_by: {c}\n")).unwrap_or_default();
+            format!(
+                "type: approval\nkind: amend\ntarget: tasks/hw-1.md\ntitle: HW 01 renamed\nstatus: approved\n\
+                 proposed_at: 2026-08-18\nfirst_proposed_at: 2026-08-18\nexpires: null\nsnooze_until: null\n\
+                 {by}changes:\n  title:\n    from: HW 01\n    to: {to}"
+            )
+        }
+
+        /// PQ5 (c): `title` is amendable on a card `created_by: blackboard`, the one feed that files
+        /// such a card (T8b, P12). It is written quoted, so a colon, a quote or a backslash in it
+        /// cannot corrupt the block, and the card executes as every non-mail amend does.
+        #[test]
+        fn title_is_amendable_only_on_a_blackboard_card() {
+            for (to, want) in [
+                ("HW 02", "HW 02"),
+                (r#""HW 01: Linked \"Lists\" \\ part 2""#, r#"HW 01: Linked "Lists" \ part 2"#),
+                ("'Lab #3 — recursion'", "Lab #3 — recursion"),
+            ] {
+                let v = vault();
+                let target = homework(&v);
+                let meta = yaml(&rename(Some(TITLE_CARD_CREATOR), to));
+                assert_eq!(validate_amendment(&v, &meta), Ok(resolve_lenient(&target)), "{to}");
+                proposal(&v, "amend-hw-1.md", &rename(Some(TITLE_CARD_CREATOR), to), "");
+                let result = execute(&v);
+                assert!(result.warnings.is_empty(), "{to}: {:?}", result.warnings);
+                assert_eq!(result.executed, ["amend-hw-1"], "{to}");
+                assert_eq!(field(&target, "title"), want, "{to}");
+                assert_eq!(field(&target, "due"), "2026-10-12", "{to}: every other line untouched");
+                assert_eq!(trail(&v, "tasks/hw-1.md"), vec![by("set", "title", "agent:approvals")], "{to}");
+            }
+            assert_eq!(TITLE_CARD_CREATOR, "blackboard");
+        }
+
+        /// PQ5 (c): every other card that names `title` is refused exactly as today, the mail pass's
+        /// own cards included, and a blackboard card gains no other field.
+        #[test]
+        fn a_title_amend_on_any_other_card_is_refused_exactly_as_today() {
+            let v = vault();
+            homework(&v);
+            let others = ["mail", "gmail", "events", "zybooks", "agent:knowlu.enrich", "agent:knowlu.sync", "Blackboard", "null"];
+            for created_by in others.map(Some).into_iter().chain([None]) {
+                let meta = yaml(&rename(created_by, "HW 02"));
+                assert_eq!(validate_amendment(&v, &meta), Err("field not amendable: title".to_string()), "{created_by:?}");
+            }
+            let progress = rename(Some(TITLE_CARD_CREATOR), "HW 02").replace("title:\n    from: HW 01\n    to: HW 02", "progress:\n    from: 0\n    to: 1");
+            assert_eq!(validate_amendment(&v, &yaml(&progress)), Err("field not amendable: progress".to_string()));
+            assert!(!AMENDABLE_FIELDS.contains(&"title"), "the nine stay nine");
+        }
+
+        // T8c, F3 (b) (Quinn 2026-10-02): a mail amend card may fill an empty `due`, and one giving an
+        // `imported-past` note a due on or after the approval day takes it out of `archive/`. Both arms
+        // are keyed on the card's `created_by: mail`; every other amend is refused or executed exactly
+        // as before. Every course and date is invented.
+
+        const ARCHIVED: &str = "archive/lab-5.md";
+        /// The two lines a past item is archived with (`ingest::IMPORTED_PAST`, email spec §4.9, D24).
+        const IMPORTED: &str = "status: archived\narchived_reason: imported-past";
+
+        /// An approved amend card by `created_by` on `target`, `changes` the lines under `changes:`.
+        fn amend_front(created_by: &str, target: &str, changes: &str) -> String {
+            format!(
+                "id: appr_00000000e4\ntype: approval\nkind: amend\ntarget: {target}\ntitle: Lab 5 dated\nstatus: approved\n\
+                 source_uid: \"mail:5a5a:2\"\nproposed_at: 2026-08-18\nfirst_proposed_at: 2026-08-18\nexpires: null\n\
+                 snooze_until: null\ncreated_by: {created_by}\nchanges:\n{changes}"
+            )
+        }
+
+        fn amend(vault: &Path, created_by: &str, target: &str, changes: &str) -> PathBuf {
+            let front = amend_front(created_by, target, changes);
+            proposal(vault, "amend-lab-5.md", &front, "**Why proposed:** the course mail dated it.\n")
+        }
+
+        /// The `changes:` lines moving `due` from `from` to `to`, each a YAML scalar as written.
+        fn due_change(from: &str, to: &str) -> String {
+            format!("  due:\n    from: {from}\n    to: {to}")
+        }
+
+        /// Lab 5 as a mail-created "needs a date" note: `due_line` is a `due:` line, or empty for none.
+        fn undated(vault: &Path, due_line: &str) -> PathBuf {
+            let front = format!("id: {TASK_ID}\ntitle: Lab 5\ncourse: cs-101\n{due_line}status: active\ncreated_by: mail");
+            with_task(vault, "lab-5.md", &front)
+        }
+
+        /// Lab 5 in `archive/` with a past due, `tail` its status lines ([`IMPORTED`], or another archive's).
+        fn archived_lab(vault: &Path, tail: &str) -> PathBuf {
+            let folder = vault.join("archive");
+            std::fs::create_dir_all(&folder).unwrap();
+            let path = folder.join("lab-5.md");
+            let front = format!("id: {TASK_ID}\ntitle: Lab 5\ncourse: cs-101\ndue: 2026-08-01\n{tail}\ncreated_by: mail");
+            pystr::write_text(&path, &format!("---\n{front}\n---\n\nFrom the course mail.\n")).unwrap();
+            path
+        }
+
+        /// F3 (b) arm (1): a mail card whose `from` is null fills a note with `due: null`, `due: ~` or
+        /// no `due:` line, written as the student, as T8 writes. The relaxation is exactly that: a null
+        /// `to`, or a card with no `from` line, is still refused with today's string.
+        #[test]
+        fn a_mail_card_fills_an_empty_due_as_the_human_actor() {
+            for due_line in ["due: null\n", "due: ~\n", ""] {
+                let v = vault();
+                crate::journal::create_actor_file(&v, "student").unwrap();
+                let target = undated(&v, due_line);
+                let card = amend(&v, "mail", NOTE, &due_change("null", "2026-10-14"));
+                assert_eq!(validate_amendment(&v, &front(&card)), Ok(resolve_lenient(&target)), "{due_line:?}");
+                let result = execute(&v);
+                assert!(result.warnings.is_empty(), "{due_line:?}: {:?}", result.warnings);
+                assert_eq!(result.executed, ["amend-lab-5"], "{due_line:?}");
+                assert_eq!(field(&target, "due"), "2026-10-14", "{due_line:?}");
+                assert_eq!(read(&target).matches("\ndue:").count(), 1, "{due_line:?}");
+                assert_eq!(trail(&v, NOTE), vec![by("set", "due", "student")], "{due_line:?}");
+                let set = Journal::new(&v).human_set(TASK_ID, "due").map(|r| text(&r, "new"));
+                assert_eq!(set.as_deref(), Some("2026-10-14"), "{due_line:?}: judge once sees the student's date");
+            }
+            let v = vault();
+            undated(&v, "due: null\n");
+            for changes in [due_change("null", "null"), due_change("2026-10-12", "null"), "  due:\n    to: 2026-10-14".to_string()] {
+                let meta = yaml(&amend_front("mail", NOTE, &changes));
+                let refused = Err("due: from/to must both be present and non-null".to_string());
+                assert_eq!(validate_amendment(&v, &meta), refused, "{changes}");
+            }
+        }
+
+        /// F3 (b) arm (1) is the mail card's, for `due` only: a null `from` on any other card, or on a
+        /// mail card for another field, is refused with today's string, recoverably, and the card goes
+        /// back to pending with nothing written.
+        #[test]
+        fn a_null_from_on_any_other_card_or_field_is_refused_exactly_as_today() {
+            let refused = |name: &str| format!("{name}: from/to must both be present and non-null");
+            let fill = due_change("null", "2026-10-14");
+            let status = "  status:\n    from: null\n    to: archived".to_string();
+            let v = vault();
+            undated(&v, "due: null\n");
+            for created_by in ["blackboard", "agent:knowlu.enrich", "gmail", "events", "agent:knowlu.sync", "Mail", "null"] {
+                let meta = yaml(&amend_front(created_by, NOTE, &fill));
+                assert_eq!(validate_amendment(&v, &meta), Err(refused("due")), "{created_by}");
+            }
+            assert_eq!(validate_amendment(&v, &yaml(&amend_front("mail", NOTE, &status))), Err(refused("status")));
+            assert!(is_recoverable_refusal(&refused("due")) && is_recoverable_refusal(&refused("status")));
+            for (created_by, changes, name) in [("blackboard", &fill, "due"), ("agent:knowlu.enrich", &fill, "due"), ("mail", &status, "status")] {
+                let v = vault();
+                crate::journal::create_actor_file(&v, "student").unwrap();
+                let target = undated(&v, "due: null\n");
+                let before = read(&target);
+                let card = amend(&v, created_by, NOTE, changes);
+                let result = execute(&v);
+                assert_eq!(result.warnings, vec![format!("amend-lab-5.md: {}", refused(name))], "{created_by}");
+                assert_eq!(field(&card, "status"), "pending", "{created_by}");
+                assert_eq!(read(&target), before, "{created_by}");
+                assert_eq!(trail(&v, NOTE), Vec::<[String; 5]>::new(), "{created_by}");
+            }
+        }
+
+        /// A fill card filed while the note had no date, approved after it gained one: refused as any
+        /// card whose `from` the note no longer holds is today (`stale amendment`, recoverable), and
+        /// that due is never overwritten. A note already holding the card's date (a retry after the
+        /// stamp failed) executes, writing nothing, as today.
+        #[test]
+        fn a_mail_card_with_a_null_from_against_a_note_that_now_has_a_due_is_refused() {
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            let target = lab(&v, "2026-10-13");
+            let before = read(&target);
+            let card = amend(&v, "mail", NOTE, &due_change("null", "2026-10-14"));
+            let result = execute(&v);
+            assert_eq!(result.warnings, ["amend-lab-5.md: stale amendment: due is 2026-10-13, expected None"]);
+            assert_eq!(field(&card, "status"), "pending");
+            assert_eq!(read(&target), before);
+            assert_eq!(trail(&v, NOTE), Vec::<[String; 5]>::new());
+
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            let target = lab(&v, "2026-10-14");
+            let before = read(&target);
+            amend(&v, "mail", NOTE, &due_change("null", "2026-10-14"));
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            assert_eq!(read(&target), before);
+            assert_eq!(trail(&v, NOTE), Vec::<[String; 5]>::new());
+        }
+
+        /// Lab 5 un-archived to [`NOTE`]: see [`unarchived_at`].
+        fn unarchived(vault: &Path, due: &str) {
+            unarchived_at(vault, NOTE, due);
+        }
+
+        /// Lab 5 un-archived to `rel`: in `tasks/`, `status: active`, the card's `due`,
+        /// `archived_reason: null`, its body kept, and the card executed and settled.
+        fn unarchived_at(vault: &Path, rel: &str, due: &str) {
+            let note = vault.join(rel);
+            assert!(!vault.join(ARCHIVED).exists(), "the note has left archive/");
+            let fields = ["status", "due", "archived_reason"].map(|key| field(&note, key));
+            assert_eq!(fields, ["active", due, "None"]);
+            let text = read(&note);
+            assert!(text.contains("\narchived_reason: null\n") && text.ends_with("\n---\n\nFrom the course mail.\n"), "{text}");
+            assert!(!vault.join(CARD).exists(), "the card is settled");
+            assert_eq!(field(&vault.join("archive/amend-lab-5.md"), "status"), "executed");
+        }
+
+        /// F3 (b) arm (2): a mail card giving an `imported-past` note a due on or after the approval day
+        /// (TODAY, 2026-08-20, at any hour, as T5.3 reads past) moves it to `tasks/` through
+        /// `write::move_note`, then writes the due there as the student, and `status: active` and
+        /// `archived_reason: null` as the executor (Quinn 2026-10-02: the un-archive's bookkeeping is
+        /// never the student's position on `status`). The card's own bookkeeping stays
+        /// `agent:approvals`.
+        #[test]
+        fn approving_a_future_due_for_an_imported_past_mail_note_unarchives_it() {
+            for to in ["2026-09-01", "2026-08-20", "2026-08-20T09:00"] {
+                let v = vault();
+                crate::journal::create_actor_file(&v, "student").unwrap();
+                let archived = archived_lab(&v, IMPORTED);
+                let changes = due_change("2026-08-01", to);
+                let meta = yaml(&amend_front("mail", ARCHIVED, &changes));
+                assert_eq!(validate_amendment(&v, &meta), Ok(resolve_lenient(&archived)), "{to}");
+                amend(&v, "mail", ARCHIVED, &changes);
+                let result = execute(&v);
+                assert!(result.warnings.is_empty(), "{to}: {:?}", result.warnings);
+                assert_eq!(result.executed, ["amend-lab-5"], "{to}");
+                unarchived(&v, to);
+                assert_eq!(trail(&v, ARCHIVED), vec![by("move", "", "student")], "{to}");
+                let agent = "agent:approvals";
+                let set = |field| by("set", field, agent);
+                assert_eq!(trail(&v, NOTE), vec![by("set", "due", "student"), set("status"), set("archived_reason")], "{to}");
+                let bookkeeping = vec![set("status"), set("executed_at"), by("delete", "", agent)];
+                assert_eq!(trail(&v, CARD), bookkeeping, "{to}");
+                let set = Journal::new(&v).human_set(TASK_ID, "due").map(|r| text(&r, "new"));
+                assert_eq!(set.as_deref(), Some(to), "{to}: judge once sees the student's date");
+            }
+        }
+
+        /// Quinn 2026-10-02 (Checkpoint A): only the un-archive's due is the student's, so
+        /// `Journal::human_set` finds no student `status` on the moved task, and completion detection
+        /// may still propose it done. Written as the student, it was skipped `status set by hand`.
+        #[test]
+        fn an_unarchived_task_can_still_be_proposed_done() {
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            archived_lab(&v, IMPORTED);
+            amend(&v, "mail", ARCHIVED, &due_change("2026-08-01", "2026-09-01"));
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            unarchived(&v, "2026-09-01");
+            let mut journal = Journal::new(&v);
+            assert!(journal.human_set(TASK_ID, "status").is_none(), "the student never set status");
+            assert!(journal.human_set(TASK_ID, "due").is_some(), "the due stays the student's");
+            let evidence = crate::completion::Evidence {
+                source: "zybooks".to_string(),
+                summary: "zyBooks reports 10 of 10 points earned (100%)".to_string(),
+                detail: serde_json::Map::new(),
+            };
+            let ctx = executor().with_actor(crate::completion::ACTOR);
+            let task = Path::new(NOTE);
+            let outcome = crate::completion::propose_done(&v, task, &evidence, TODAY, &ctx, &mut journal, false, None);
+            assert!(matches!(outcome, Ok(crate::completion::Outcome::Proposed(_))), "{outcome:?}");
+        }
+
+        /// Checkpoint A: ingest names `archive/` and `tasks/` apart, so one title can sit in both
+        /// (`archive/lab-5.md` beside `tasks/lab-5.md`). The un-archive takes the first free
+        /// `tasks/<stem>[-N].md`, ingest's own suffix loop, rather than leave the card pending for
+        /// good; the notes already there are untouched, and the move record names the new path.
+        #[test]
+        fn a_repeated_title_unarchives_to_the_first_free_suffixed_path() {
+            for (taken, free) in [(&["lab-5.md"][..], "tasks/lab-5-2.md"), (&["lab-5.md", "lab-5-2.md"][..], "tasks/lab-5-3.md")] {
+                let v = vault();
+                crate::journal::create_actor_file(&v, "student").unwrap();
+                archived_lab(&v, IMPORTED);
+                let others: Vec<(PathBuf, String)> = taken
+                    .iter()
+                    .map(|name| with_task(&v, name, "title: Another Lab 5"))
+                    .map(|path| (path.clone(), read(&path)))
+                    .collect();
+                amend(&v, "mail", ARCHIVED, &due_change("2026-08-01", "2026-09-01"));
+                let result = execute(&v);
+                assert!(result.warnings.is_empty(), "{free}: {:?}", result.warnings);
+                assert_eq!(result.executed, ["amend-lab-5"], "{free}");
+                unarchived_at(&v, free, "2026-09-01");
+                for (path, before) in others {
+                    assert_eq!(read(&path), before, "{free}: {}", path.display());
+                }
+                let moves: Vec<String> = journal_records(&v).iter().filter(|r| text(r, "op") == "move").map(|r| text(r, "new")).collect();
+                assert_eq!(moves, [free], "{free}");
+            }
+        }
+
+        /// T5.4's "a due still past is set directly", at approval: a card whose date is before the
+        /// approval day (filed ahead, approved late) sets it in place, and the note stays archived. No
+        /// refusal, so the card never sits pending for good.
+        #[test]
+        fn a_due_that_is_past_by_approval_day_is_set_in_place_and_the_note_stays_archived() {
+            for to in ["2026-08-19", "2026-08-10T23:59"] {
+                let v = vault();
+                crate::journal::create_actor_file(&v, "student").unwrap();
+                let archived = archived_lab(&v, IMPORTED);
+                amend(&v, "mail", ARCHIVED, &due_change("2026-08-01", to));
+                let result = execute(&v);
+                assert!(result.warnings.is_empty(), "{to}: {:?}", result.warnings);
+                assert_eq!(result.executed, ["amend-lab-5"], "{to}");
+                assert!(!v.join(NOTE).exists(), "{to}");
+                let fields = ["due", "status", "archived_reason"].map(|key| field(&archived, key));
+                assert_eq!(fields, [to, "archived", "imported-past"], "{to}");
+                assert_eq!(trail(&v, ARCHIVED), vec![by("set", "due", "student")], "{to}");
+            }
+        }
+
+        /// Arm (2) is the mail card's, for `due` alone, on an `imported-past` note alone. Any other card
+        /// on that note, a mail card changing more, or a mail card on a note the student archived
+        /// (`done`, deleted by hand, another reason) is refused as today, unrecoverably.
+        #[test]
+        fn an_archive_target_on_any_other_card_or_note_is_refused_exactly_as_today() {
+            let outside = format!("target outside tasks/courses: {ARCHIVED}");
+            let check = |v: &Path, created_by: &str, changes: &str| validate_amendment(v, &yaml(&amend_front(created_by, ARCHIVED, changes)));
+            let future = due_change("2026-08-01", "2026-09-01");
+            let v = vault();
+            archived_lab(&v, IMPORTED);
+            for created_by in ["blackboard", "agent:knowlu.enrich", "gmail", "events", "agent:knowlu.sync", "Mail", "null"] {
+                assert_eq!(check(&v, created_by, &future), Err(outside.clone()), "{created_by}");
+            }
+            let status = "  status:\n    from: archived\n    to: active";
+            for changes in [format!("{future}\n{status}"), status.to_string(), format!("{future}\nappend:\n  - a line")] {
+                assert_eq!(check(&v, "mail", &changes), Err(outside.clone()), "{changes}");
+            }
+            let others = ["status: done", "status: active", "status: archived", "status: archived\narchived_reason: done"];
+            for tail in others.into_iter().chain(["status: active\narchived_reason: imported-past"]) {
+                let v = vault();
+                archived_lab(&v, tail);
+                assert_eq!(check(&v, "mail", &future), Err(outside.clone()), "{tail}");
+            }
+            assert!(!is_recoverable_refusal(&outside));
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            let archived = archived_lab(&v, "status: done");
+            let before = read(&archived);
+            amend(&v, "mail", ARCHIVED, &future);
+            assert_eq!(execute(&v).warnings, vec![format!("amend-lab-5.md: {outside}")]);
+            assert_eq!(field(&v.join("archive/amend-lab-5.md"), "status"), "refused");
+            assert_eq!(read(&archived), before);
+            assert!(!v.join(NOTE).exists());
+            assert_eq!(trail(&v, ARCHIVED), Vec::<[String; 5]>::new());
+        }
+
+        fn set_readonly(path: &Path, readonly: bool) {
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_readonly(readonly);
+            std::fs::set_permissions(path, perms).unwrap();
+        }
+
+        /// Plan T8c: a failure between the un-archive's steps never settles the card while its note is
+        /// half moved. A failed move leaves the note as it was. A failed write after the move leaves the
+        /// note in `tasks/` still `archived` (it never ranks half done), and the next run finds it
+        /// through the journal's move record and finishes, at a suffixed path too when the plain one
+        /// was taken (Checkpoint A). A failed stamp after both leaves the card approved, and the next
+        /// run stamps it, writing nothing more to the note. Checkpoint A's two minor findings: a note
+        /// the writes after the move would refuse (a block-style `judgment:`) is refused before the
+        /// move, so it never sits half moved; and the split write's middle (the student's move and
+        /// due made, the executor's `status` not), staged by hand, is finished by the next run with
+        /// exactly the executor's two writes.
+        #[test]
+        fn an_unarchive_interrupted_between_its_writes_completes_or_stays_pending() {
+            let failed = vec!["transition failed: amend-lab-5.md".to_string()];
+            let setup = || {
+                let v = vault();
+                crate::journal::create_actor_file(&v, "student").unwrap();
+                let archived = archived_lab(&v, IMPORTED);
+                let card = amend(&v, "mail", ARCHIVED, &due_change("2026-08-01", "2026-09-01"));
+                (v, archived, card)
+            };
+
+            let (v, archived, card) = setup();
+            let other = with_task(&v, "lab-5.md", "title: Another Lab 5");
+            let before = read(&other);
+            let suffixed = "tasks/lab-5-2.md";
+            set_readonly(&archived, true);
+            assert_eq!(execute(&v).warnings, failed, "the write after the move to {suffixed} fails");
+            assert_eq!(field(&v.join(suffixed), "status"), "archived", "half moved, it never ranks");
+            assert_eq!(field(&card, "status"), "approved", "never settled while half moved");
+            set_readonly(&v.join(suffixed), false);
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            unarchived_at(&v, suffixed, "2026-09-01");
+            assert_eq!(read(&other), before, "the note already at tasks/lab-5.md is untouched");
+
+            let (v, archived, card) = setup();
+            let before = read(&archived);
+            pystr::write_text(&v.join("tasks"), "not a folder\n").unwrap();
+            assert_eq!(execute(&v).warnings, failed, "the move fails");
+            assert_eq!(read(&archived), before);
+            assert_eq!(field(&card, "status"), "approved");
+            std::fs::remove_file(v.join("tasks")).unwrap();
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            unarchived(&v, "2026-09-01");
+
+            let (v, archived, card) = setup();
+            set_readonly(&archived, true);
+            for run in 0..2 {
+                assert_eq!(execute(&v).warnings, failed, "run {run}: the write after the move fails");
+                assert!(!archived.exists(), "run {run}");
+                assert_eq!(field(&v.join(NOTE), "status"), "archived", "run {run}: half moved, it never ranks");
+                assert_eq!(field(&card, "status"), "approved", "run {run}: never settled while half moved");
+            }
+            set_readonly(&v.join(NOTE), false);
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            unarchived(&v, "2026-09-01");
+
+            let (v, _, card) = setup();
+            set_readonly(&card, true);
+            assert_eq!(execute(&v).warnings, failed, "the card's stamp fails");
+            assert_eq!(field(&v.join(NOTE), "status"), "active");
+            assert_eq!(field(&card, "status"), "approved");
+            let note = trail(&v, NOTE);
+            set_readonly(&card, false);
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            assert_eq!(trail(&v, NOTE), note, "the re-run writes nothing more to the note");
+            unarchived(&v, "2026-09-01");
+
+            // A block-style `judgment:` the writes after the move would refuse: `unarchive_problem`
+            // refuses before the move, recoverably, and nothing is written or moved.
+            let v = vault();
+            crate::journal::create_actor_file(&v, "student").unwrap();
+            let archived = archived_lab(&v, &format!("{IMPORTED}\njudgment:\n  migrated: true"));
+            let before = read(&archived);
+            let card = amend(&v, "mail", ARCHIVED, &due_change("2026-08-01", "2026-09-01"));
+            let block = crate::provenance::ProvenanceError::BlockStyle.to_string();
+            assert_eq!(execute(&v).warnings, [format!("amend-lab-5.md: {block}")], "refused before the move");
+            assert!(is_recoverable_refusal(&block));
+            assert_eq!(field(&card, "status"), "pending");
+            assert_eq!(read(&archived), before, "archive/lab-5.md unchanged byte for byte");
+            assert!(journal_records(&v).iter().all(|r| text(r, "path") == CARD), "no record on the note");
+            let listed = std::fs::read_dir(v.join("tasks")).map(|dir| dir.count()).unwrap_or(0);
+            assert_eq!(listed, 0, "nothing in tasks/");
+
+            // The split write's middle, staged by hand through the writer: the student's move to the
+            // suffixed path and the student's due are made, the executor's `status` is not. The next
+            // run writes exactly `status` and `archived_reason` as the executor, then settles the card.
+            let (v, _, card) = setup();
+            let suffixed = "tasks/lab-5-2.md";
+            let (student, mut journal) = (executor().with_actor("student"), Journal::new(&v));
+            move_note(&v, ARCHIVED, suffixed, &student, &mut journal).unwrap();
+            let due = [("due".to_string(), "2026-09-01".to_string())];
+            write_literals(&v, suffixed, &due, &student, &mut journal, &WriteOpts::default()).unwrap();
+            let fields = ["due", "status", "archived_reason"].map(|key| field(&v.join(suffixed), key));
+            assert_eq!(fields, ["2026-09-01", "archived", "imported-past"], "staged half done");
+            assert_eq!(trail(&v, ARCHIVED), [by("move", "", "student")]);
+            assert_eq!(trail(&v, suffixed), [by("set", "due", "student")]);
+            assert_eq!(field(&card, "status"), "approved", "staged unsettled");
+            let staged = journal_records(&v).len();
+            assert_eq!(execute(&v).executed, ["amend-lab-5"]);
+            let agent = "agent:approvals";
+            let written: Vec<[String; 4]> = journal_records(&v)[staged..]
+                .iter()
+                .map(|r| ["path", "op", "field", "actor"].map(|key| text(r, key)))
+                .collect();
+            let by_agent = |path: &str, op: &str, field: &str| [path, op, field, agent].map(str::to_string);
+            let settled = [by_agent(CARD, "set", "status"), by_agent(CARD, "set", "executed_at"), by_agent(CARD, "delete", "")];
+            let finished = [by_agent(suffixed, "set", "status"), by_agent(suffixed, "set", "archived_reason")];
+            assert_eq!(written, [&finished[..], &settled[..]].concat(), "exactly the executor's two writes, then the card");
+            unarchived_at(&v, suffixed, "2026-09-01");
+            assert!(Journal::new(&v).human_set(TASK_ID, "status").is_none(), "the student never set status");
         }
     }
 }

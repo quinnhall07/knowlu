@@ -265,6 +265,11 @@ pub const RUN_LOCK_FILE: &str = "state/sync.lock";
 /// talks to the account, so the slot's own `sync` child, the console's *Sync now* and the quit
 /// push can never run at once and file the same conflict twice (review I1).
 ///
+/// **`grades::run` takes it too** (M1 T9), for its whole apply: `grades/` is a synced folder, so a
+/// pull must never write a grade note between that run's read of it and its surgery, and two
+/// `grades` runs (the slot's and the console's Refresh) must never both create one note. Public for
+/// that one caller; the hold itself is unchanged.
+///
 /// **Deliberately not given `history.rs`'s own lock type's name** (fix round 1; fix round 2,
 /// review N1 — spelling that name here at all, even in a comment, fails Task 10's own gate the
 /// moment `history.rs` is deleted, since the gate scans this file's text for it): `history.rs`
@@ -276,7 +281,7 @@ pub const RUN_LOCK_FILE: &str = "state/sync.lock";
 /// Released by `Drop`ping the held `File`, which closes its handle and so releases the OS-level
 /// lock `try_lock` took — on every return path out of `run_lines_with`, panic or not, because the
 /// OS itself reclaims a lock its holder's process no longer has open.
-struct RunLock {
+pub struct RunLock {
     #[allow(dead_code)]
     file: std::fs::File,
 }
@@ -286,7 +291,7 @@ impl RunLock {
     /// `File::try_lock` is std's own non-blocking exclusive OS lock (stable since Rust 1.89; this
     /// toolchain is 1.98), so no new crate is needed for what `history.rs`'s own git-shaped lock
     /// type used to reach for a whole file-existence-and-pid dance to approximate.
-    fn try_acquire(vault: &Path) -> std::io::Result<Option<RunLock>> {
+    pub fn try_acquire(vault: &Path) -> std::io::Result<Option<RunLock>> {
         let path = vault.join(RUN_LOCK_FILE);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -351,7 +356,8 @@ pub fn load_status(vault: &Path) -> SyncStatus {
 /// other two sides of the wire, and `is_note_path_and_the_servers_regex_agree` pins them together.
 ///
 /// **The name itself is bounded too** (R-C3′-exec-8/11): the server's regex is
-/// `^(tasks|approvals|archive|courses|issues|info)\/[A-Za-z0-9._ /-]{1,300}\.md$`, so the part after
+/// `^(tasks|approvals|archive|courses|issues|info|commitments|grades)\/[A-Za-z0-9._ /-]{1,300}\.md$`
+/// (its group is `NOTE_FOLDERS`, in that order), so the part after
 /// `<folder>/` and before the final `.md` must be 1–300 characters, each one of
 /// `A-Z a-z 0-9 . _ space / -`. Checked with plain character comparisons rather than a new `regex`
 /// call — the crate already depends on `regex` for `ids.rs`, but this rule is small enough that a
@@ -381,7 +387,7 @@ pub fn is_note_path(vault: &Path, rel: &str) -> bool {
 /// Every note in the vault, vault-relative and POSIX-separated, sorted.
 ///
 /// **Flat, like every other pass in this engine.** `ids::scan_notes` and `backup::BACKUP_FOLDERS`
-/// treat the six folders as flat and nothing in this product has ever produced a nested note;
+/// treat the note folders as flat and nothing in this product has ever produced a nested note;
 /// `is_note_path` accepts any depth because a *pulled* path must be checked whatever it is, but
 /// making this side recursive alone would push a file nothing else in the engine can see. Deferred,
 /// and recorded in *Deferred minors*.
@@ -650,6 +656,13 @@ pub fn build_push(vault: &Path, cursor: &Cursor, account_id: &str, journal: &mut
         // the deck — stays here like the card itself. A `continue`, like the two filters above, so
         // it never advances `next` and can never wedge a page.
         if sync_cards.covers(&record) { continue; }
+        // M2 D13 (Q6 (A)): a record about a path outside the note folders — the profile's
+        // `profile/preferences.md` and `profile/interests.md` above all — stays on this computer.
+        // Every other desktop (`apply`) and every restore refuses such a record by the same
+        // `is_note_path`, so the account would keep data no computer can use. A `continue`, like the
+        // filters above, so it never advances `next` and can never wedge a page.
+        let path = record.get("path").and_then(Value::as_str).unwrap_or_default();
+        if !is_note_path(vault, path) { continue; }
         // R-C3′-exec-12 (the wedge principle): predict every refusal `sync_rows.ts::checkRecord`
         // makes and never send the row that would trigger it. `sync_rows.ts:89-93` refuses a record
         // whose body has no non-empty string `op` or `actor` — `ledger::read` itself validates only
@@ -2170,7 +2183,10 @@ pub fn apply(
                 }
             }
             if !changes.is_empty() && keep.is_none() {
-                match crate::write::propose_amendment(vault, &file, &now_meta, &changes, ctx, journal, None, today, None) {
+                // Ruling 11: the card names the vault's own token, never a person. A bad
+                // `config/actor.yaml` reads as the student here: sync never fails on it (exit 0).
+                let human = crate::journal::read_human_actor(vault).unwrap_or(crate::journal::HUMAN_ACTOR);
+                match crate::write::propose_amendment(vault, &file, &now_meta, &changes, ctx, journal, None, today, None, human) {
                     // One card, however many fields it carries — the fifteen-a-day cap the deck
                     // already applies counts cards, and so does this.
                     Ok(_) => report.cards += 1,
@@ -2764,6 +2780,8 @@ mod tests {
         let today = jiff::civil::Date::constant(2026, 8, 20);
         let now = jiff::civil::DateTime::constant(2026, 8, 20, 12, 0, 0, 0);
         let v = scratch("local-cards");
+        // Ruling 11: the console below writes as the student, which only a `student` vault takes.
+        crate::journal::create_actor_file(&v, crate::journal::HUMAN_ACTOR).unwrap();
         let runner = WriteContext::new("agent:rank", "cli");
         let console = WriteContext::new("student", "dashboard");
         let mut journal = Journal::new(&v);

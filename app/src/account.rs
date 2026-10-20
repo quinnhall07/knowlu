@@ -637,17 +637,54 @@ pub fn open_policy(which: String) -> Value {
 /// the user believes they signed out of. `had_session` is the local delete's own answer — `false`
 /// for a target that never held one — so a repeated sign-out reports honestly as a no-op instead of
 /// a silent "ok".
+///
+/// **A signed-out Knowlu keeps no signed-in mailbox** (email-forwarding spec §4.13, T12): signing a
+/// profile out also closes the mail window and deletes every `mail-session-*` profile and the
+/// `mail-setup` profile of that Knowlu profile ([`sign_out_with`]). Forwarding is untouched.
 #[tauri::command(async)]
-pub fn sign_out(profile_id: Option<String>) -> Result<Value, String> {
+pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Value, String> {
+    // The one mail window is this console's profile's: it closes only when that profile signs out, and
+    // its hold is taken, within the bound, and kept until every mail profile is deleted, as the wipe does.
+    let close = |dir: &std::path::Path| {
+        use tauri::Manager;
+        if !app.try_state::<crate::state::ConsoleState>().is_some_and(|cs| cs.data_dir == dir) {
+            return None;
+        }
+        close_mail_windows(&app);
+        take_mail_window(&app, std::time::Instant::now() + MAIL_STOP_BOUND)
+    };
+    sign_out_with(profile_id, crate::state::app_data_root().as_deref(), close)
+}
+
+/// [`sign_out`] without the app's handle. `close_mail_window` is called with the profile's folder
+/// before any mail profile in it is deleted (WebView2 holds a profile while its window is open), and
+/// what it hands back (the console's: the mail window's hold) is kept until the deletion is done, so
+/// nothing opens a mail profile in between (spec §4.13). The deletion itself is
+/// `mail_session::forget_all`'s, through its guard, so nothing but `mail-setup` and
+/// `mail-session-<address_id>` goes. `None` (the pending session), an id that is not
+/// [`is_profile_id`]-shaped and an unknown `app_root` name no folder, so nothing is deleted.
+/// `mail_profiles_left` is `true` when a mail profile is still on disk: recorded for the start-up
+/// retry, or, when `mail.json` could not record it, not.
+pub fn sign_out_with<Held>(
+    profile_id: Option<String>,
+    app_root: Option<&std::path::Path>,
+    close_mail_window: impl FnOnce(&std::path::Path) -> Held,
+) -> Result<Value, String> {
     let target = match &profile_id {
         Some(id) => session_target(id),
         None => PENDING_TARGET.to_string(),
     };
     let token = load_session(&target).ok().map(|(_, s)| s.access_token);
     let had_session = crate::credentials::exists(&target);
-    if had_session {
-        crate::credentials::delete(&target)?;
+    let forgotten = if had_session { crate::credentials::delete(&target) } else { Ok(()) };
+    let mut mail_profiles_left = false;
+    if let (Some(id), Some(root)) = (profile_id.as_deref().filter(|id| is_profile_id(id)), app_root) {
+        let dir = crate::profiles::profile_dir(root, id);
+        let held = close_mail_window(&dir);
+        mail_profiles_left = crate::mail_session::forget_all(&dir) != Ok(true);
+        drop(held);
     }
+    forgotten?;
     if let (Some(t), Ok(auth)) = (token, auth_base(&api_base())) {
         let _ = agent()
             .post(&format!("{auth}/logout"))
@@ -655,7 +692,7 @@ pub fn sign_out(profile_id: Option<String>) -> Result<Value, String> {
             .header("authorization", &format!("Bearer {t}"))
             .send_empty();
     }
-    Ok(json!({ "ok": true, "had_session": had_session }))
+    Ok(json!({ "ok": true, "had_session": had_session, "mail_profiles_left": mail_profiles_left }))
 }
 
 /// The four keys `config/cloud.yaml` carries — the contract with C2, in this order.
@@ -914,6 +951,9 @@ pub fn attach_config_and_session(
         api_base: api_base(),
         anon_key: anon_key(),
         account_id: account_id.to_string(),
+        // Ruling 11: never read here — `write_cloud_yaml_if_absent` writes `cloud.yaml` only, and an
+        // adopted vault keeps whatever `config/actor.yaml` it has (or none: the legacy token).
+        human_actor: knowlu_engine::journal::LEGACY_HUMAN_ACTOR,
     };
     // Only `config/cloud.yaml` is written. Nothing else in this vault is read, rewritten or moved.
     crate::scaffold::write_cloud_yaml_if_absent(vault, &plan)?;
@@ -1226,6 +1266,11 @@ pub fn open_portal(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
 /// Best effort throughout: a file held open by another process must not stop the rest of the wipe,
 /// and there is nothing a user could do with the error anyway — the account is already deleted by
 /// the time this runs.
+///
+/// **The kept mail profiles go first, patiently** (email-forwarding spec §4.13): the mail windows
+/// were closed a moment ago, and WebView2 lets go of a profile folder a second or so after its window
+/// is gone, so a single `remove_dir_all` could leave a signed-in mailbox behind. They are inside
+/// `data_dir`, so this names nothing new.
 pub fn delete_local_data(
     vault: &std::path::Path,
     data_dir: &std::path::Path,
@@ -1235,6 +1280,7 @@ pub fn delete_local_data(
     session_credential_target: &str,
 ) {
     let _ = std::fs::remove_dir_all(vault);
+    let _ = crate::mail_session::forget_all(data_dir);
     let _ = std::fs::remove_dir_all(data_dir);
     if !session_credential_target.is_empty() {
         let _ = crate::credentials::delete(session_credential_target);
@@ -1263,55 +1309,400 @@ pub fn delete_local_data(
     }
 }
 
-/// Spec §4.1: *Delete my data* removes the vault, the snapshots, the app data **and** calls
-/// `DELETE /account`. The server call goes FIRST: a local wipe that ran before it would leave an
-/// account nobody can reach to delete, and the deletion right is the one that matters here.
-///
-/// **A refusal is also a stop**, not only a transport failure: the agent is built with
-/// `http_status_as_error(false)`, so a 401 or a 500 arrives as `Ok`, and wiping the machine on one
-/// would destroy the vault while the account it was supposed to delete is still there. Nothing local
-/// is touched unless the server answered 2xx — `cloud/…/account/handler.ts` answers
-/// `200 {deleted:true}` — **or 404** (R-C1-57, M1): an account that is already gone is the one
-/// refusal that must not lock a user out of deleting their own machine's copy, which is otherwise
-/// exactly what a half-finished first attempt would do.
-#[tauri::command(async)]
-pub fn delete_my_data(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
-    let cfg = match cloud_config(&cs.vault) { Ok(c) => c, Err(e) => return json!({ "ok": false, "error": e }) };
-    let auth = match auth_base(&cfg.api_base) { Ok(a) => a, Err(e) => return json!({ "ok": false, "error": e }) };
-    let token = match valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now_unix()) { Ok(t) => t, Err(e) => return json!({ "ok": false, "error": e }) };
+/// `DELETE /account` with `token` (spec §4.1). **A refusal is also a stop**, not only a transport
+/// failure: the agent is built with `http_status_as_error(false)`, so a 401 or a 500 arrives as `Ok`,
+/// and wiping the machine on one would destroy the vault while the account it was supposed to delete
+/// is still there. `Ok` only on 2xx — `cloud/…/account/handler.ts` answers `200 {deleted:true}` —
+/// **or 404** (R-C1-57, M1): an account that is already gone is the one refusal that must not lock a
+/// user out of deleting their own machine's copy, which is otherwise exactly what a half-finished
+/// first attempt would do. `Err` is the sentence the page shows, and it says nothing local was touched.
+pub fn delete_account_at(api_base: &str, token: &str) -> Result<(), String> {
     let untouched = "nothing on this machine was touched";
     let res = agent()
-        .delete(&format!("{}/account", cfg.api_base.trim_end_matches('/')))
+        .delete(&format!("{}/account", api_base.trim_end_matches('/')))
         .header("authorization", &format!("Bearer {token}"))
         .call();
-    let mut res = match res {
-        Ok(r) => r,
-        Err(e) => return json!({ "ok": false, "error": format!("your account could not be deleted ({e}) — {untouched}") }),
-    };
+    let mut res = res.map_err(|e| format!("your account could not be deleted ({e}) — {untouched}"))?;
     let status = res.status().as_u16();
     if !(200..300).contains(&status) && status != 404 {
         let text = res.body_mut().with_config().limit(1 << 16).read_to_string().unwrap_or_default();
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-        return json!({ "ok": false, "error": format!("your account could not be deleted ({}) — {untouched}", provider_error(status, &v)) });
+        return Err(format!("your account could not be deleted ({}) — {untouched}", provider_error(status, &v)));
     }
-    let backup = cs.settings.lock().map(|s| s.backup_dir.clone()).unwrap_or_default();
-    let profile_id = profile_id_of(&cs);
-    delete_local_data(
-        &cs.vault,
-        &cs.data_dir,
-        backup.as_deref(),
-        &profile_id,
-        crate::state::app_data_root().as_deref(),
-        &cfg.session_credential_target,
-    );
-    // The envelope goes back first and the process ends a moment later, on another thread: a page
-    // whose `.then` never runs cannot say "Deleted", and the settings row's own copy promises it will.
-    let h = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        h.exit(0);
-    });
+    Ok(())
+}
+
+/// Spec §4.1: *Delete my data* removes the vault, the snapshots, the app data **and** calls
+/// `DELETE /account`. The server call goes FIRST: a local wipe that ran before it would leave an
+/// account nobody can reach to delete, and the deletion right is the one that matters here. Nothing
+/// local is touched unless [`delete_account_at`] says the account is gone.
+///
+/// **The mail steps** (email-forwarding spec §4.13, T12) are [`delete_my_data_with`]'s order: the
+/// forwarding-off pre-step before the server call, the mail windows closed after it, then the local
+/// wipe. A console with no usable session stops here before any of it, so forwarding is never turned
+/// off for a deletion that could not even be asked for.
+#[tauri::command(async)]
+pub fn delete_my_data(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    let cfg = match cloud_config(&cs.vault) { Ok(c) => c, Err(e) => return json!({ "ok": false, "error": e }) };
+    let auth = match auth_base(&cfg.api_base) { Ok(a) => a, Err(e) => return json!({ "ok": false, "error": e }) };
+    if let Err(e) = valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now_unix()) {
+        return json!({ "ok": false, "error": e });
+    }
+    let mut steps = LiveDelete { app: &app, cs: &cs, cfg, auth, window: None, window_busy: false };
+    let out = delete_my_data_with(&mut steps, &cs.data_dir, FORWARDING_OFF_BOUND);
+    drop(steps);
+    if out["ok"] == true {
+        // The envelope goes back first and the process ends a moment later, on another thread: a page
+        // whose `.then` never runs cannot say "Deleted", and the settings row's own copy promises it will.
+        let h = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            h.exit(0);
+        });
+    }
+    out
+}
+
+// ---- Delete my data and sign-out: the mail steps (email-forwarding spec §4.13, T12) ----
+//
+// *Delete my data* tries, before its server call, to turn forwarding off in each mailbox with a saved
+// sign-in on this machine: hidden, a minute each, and never in a way that can stop the deletion. After
+// the server call the mail windows close, and only then does `delete_local_data` remove the profile
+// folder and every kept mail profile in it. The order is `delete_my_data_with`'s, behind `DeleteSteps`,
+// so a test drives it without a window; `LiveDelete` is the console's. Nothing here logs, keeps or
+// returns a mailbox address: the Knowlu address goes into the step script's arguments and nowhere else.
+
+/// How long the pre-step may spend on one mailbox (spec §4.13: "bounded to a minute each").
+pub const FORWARDING_OFF_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One mailbox the pre-step can turn forwarding off in: a saved sign-in kept on this machine, and a
+/// provider Knowlu has a script for. Not `Debug`: it holds the mailbox's Knowlu address.
+pub struct SavedMailbox {
+    pub address_id: String,
+    pub provider: crate::mail_steps::Provider,
+    /// `<data_dir>\mail-session-<address_id>`, which exists.
+    pub profile: std::path::PathBuf,
+    address: String,
+}
+
+impl SavedMailbox {
+    /// The mailbox's Knowlu forwarding address: the step script's argument, and nothing else's.
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+}
+
+/// The mailboxes of `rows` (`GET /mail/addresses`, in the service's order) the pre-step can reach: a
+/// valid address id, Microsoft 365 or Gmail, an address, and a kept profile. A guided mailbox has no
+/// script and one with no kept profile has no saved sign-in; the confirm's sentence covers both.
+fn saved_mailboxes(data_dir: &std::path::Path, rows: &[Value]) -> Vec<SavedMailbox> {
+    use crate::mail_steps::Provider;
+    rows.iter()
+        .filter_map(|r| {
+            let id = r["address_id"].as_str()?;
+            let provider = Provider::from_service(r["provider"].as_str().unwrap_or(""));
+            let address = r["address"].as_str().filter(|a| !a.is_empty())?;
+            let profile = crate::mail_session::session_dir(data_dir, id).filter(|p| p.is_dir())?;
+            let saved = SavedMailbox { address_id: id.to_string(), provider, profile, address: address.to_string() };
+            (provider != Provider::Guided).then_some(saved)
+        })
+        .collect()
+}
+
+/// What *Delete my data* asks of the world, one call per step (spec test 38).
+pub trait DeleteSteps {
+    /// `GET /mail/addresses`: the mailboxes, read while the account still has them.
+    fn mailboxes(&mut self) -> Result<Vec<Value>, String>;
+    /// Turn forwarding off in `mailbox` with its saved sign-in, hidden, giving up at `deadline`. `Ok(true)`
+    /// when this call turned it off, `Ok(false)` when it was already off (the script's `changed: false`).
+    fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: std::time::Instant) -> Result<bool, &'static str>;
+    /// [`delete_account_at`]; `Err` is the page's sentence.
+    fn delete_account(&mut self) -> Result<(), String>;
+    /// Close the mail window and its popup, and stop whatever drives them.
+    fn close_mail_windows(&mut self);
+    /// [`delete_local_data`].
+    fn delete_local_data(&mut self);
+}
+
+/// *Delete my data* in spec §4.13's order: the forwarding-off pre-step, the server call, the mail
+/// windows, the local wipe. The pre-step is best effort, and nothing it does or fails to do changes
+/// what follows: a list that cannot be read skips it, a mailbox that fails is passed over, and each
+/// mailbox's `bound` starts when that mailbox does. A refused server call stops before anything
+/// local, the windows included, and its sentence says in how many mailboxes the pre-step turned
+/// forwarding off (one that was already off is not counted), and how to turn it back on
+/// (`turned_off_sentence`).
+pub fn delete_my_data_with(steps: &mut dyn DeleteSteps, data_dir: &std::path::Path, bound: std::time::Duration) -> Value {
+    let mut turned_off = 0usize;
+    if let Ok(rows) = steps.mailboxes() {
+        for mailbox in saved_mailboxes(data_dir, &rows) {
+            turned_off += usize::from(steps.forwarding_off(&mailbox, std::time::Instant::now() + bound) == Ok(true));
+        }
+    }
+    if let Err(e) = steps.delete_account() {
+        let error = match turned_off {
+            0 => e,
+            n => format!("{}. {}", e.trim_end_matches('.'), turned_off_sentence(n)),
+        };
+        return json!({ "ok": false, "error": error });
+    }
+    steps.close_mail_windows();
+    steps.delete_local_data();
     json!({ "ok": true, "error": Value::Null })
+}
+
+/// A refused deletion's second sentence when the pre-step had already turned forwarding off in `n`
+/// mailboxes (Checkpoint D; the controller's copy, 2026-10-03, while Quinn is away).
+fn turned_off_sentence(n: usize) -> String {
+    let mailboxes = if n == 1 { "1 mailbox".to_string() } else { format!("{n} mailboxes") };
+    format!("Forwarding to Knowlu was turned off in {mailboxes} before this failed; you can turn it back on in Settings → Email.")
+}
+
+/// The console's [`DeleteSteps`]: its vault and profile folder, the account's session, the windows.
+struct LiveDelete<'a> {
+    app: &'a tauri::AppHandle,
+    cs: &'a crate::state::ConsoleState,
+    cfg: CloudConfig,
+    auth: String,
+    /// The one mail window (spec §5.4), held from the pre-step's first mailbox to the end of the wipe.
+    window: Option<crate::mail::MailWindow>,
+    /// The window could not be had once; the next mailbox does not wait for it again.
+    window_busy: bool,
+}
+
+impl DeleteSteps for LiveDelete<'_> {
+    fn mailboxes(&mut self) -> Result<Vec<Value>, String> {
+        let c = &self.cfg;
+        let client = crate::mail_client::MailClient::for_session(&c.api_base, &c.anon_key, &c.session_credential_target);
+        client.and_then(|m| m.list_addresses()).map_err(|e| e.name().to_string())
+    }
+
+    fn forwarding_off(&mut self, mailbox: &SavedMailbox, deadline: std::time::Instant) -> Result<bool, &'static str> {
+        if self.window.is_none() && !self.window_busy {
+            self.window = take_mail_window(self.app, deadline);
+            self.window_busy = self.window.is_none();
+        }
+        if self.window.is_none() {
+            return Err("the mail window is busy");
+        }
+        let r = forwarding_off_in_window(self.app, &self.cs.data_dir, mailbox, deadline);
+        crate::mail::close(self.app);
+        r
+    }
+
+    fn delete_account(&mut self) -> Result<(), String> {
+        // Read again: the pre-step can outlast the two minutes `valid_access_token_at` refreshes within.
+        let token = valid_access_token_at(&self.auth, &self.cfg.anon_key, &self.cfg.session_credential_target, now_unix())?;
+        delete_account_at(&self.cfg.api_base, &token)
+    }
+
+    fn close_mail_windows(&mut self) {
+        close_mail_windows(self.app);
+        // Held to the end of the wipe, so nothing opens a mail window on a profile being deleted; a
+        // holder still finishing its mailbox (a slot's mail step) is waited for, within the bound.
+        if self.window.is_none() {
+            self.window = take_mail_window(self.app, std::time::Instant::now() + MAIL_STOP_BOUND);
+        }
+    }
+
+    fn delete_local_data(&mut self) {
+        let backup = self.cs.settings.lock().map(|s| s.backup_dir.clone()).unwrap_or_default();
+        let profile_id = profile_id_of(self.cs);
+        let root = crate::state::app_data_root();
+        delete_local_data(&self.cs.vault, &self.cs.data_dir, backup.as_deref(), &profile_id, root.as_deref(), &self.cfg.session_credential_target);
+    }
+}
+
+/// The one mail window for the pre-step, the wipe and sign-out. A setup, a resume or a slot's mail
+/// step that holds it is stopped and its window closed (the student has confirmed the deletion or the
+/// sign-out), again at every miss, and the hold is waited for until `deadline`.
+fn take_mail_window(app: &tauri::AppHandle, deadline: std::time::Instant) -> Option<crate::mail::MailWindow> {
+    crate::mail::MailWindow::take_by(deadline, || close_mail_windows(app))
+}
+
+/// How long sign-out and the wipe wait for whatever drives the mail window (a slot's mail step that
+/// is finishing its mailbox, a setup) to stop and let go of it: the pre-step's minute.
+pub const MAIL_STOP_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Stops every run that drives the mail window and closes the window and its popup (spec §4.13):
+/// nothing may go on driving a profile that is about to be deleted, or open another. The slot's mail
+/// step opens no further profile once `stop_runs` is called; a setup or resume stops after its step.
+fn close_mail_windows(app: &tauri::AppHandle) {
+    crate::mail::stop_runs();
+    if let Some(run) = crate::mail::setup::SETUPS.current() {
+        run.stop();
+    }
+    crate::mail::close(app);
+}
+
+/// Microsoft 365's Forwarding page, where its `forwarding_off.js` expects to be: the page the setup
+/// runner's `WindowMailbox` opens for `Place::Forwarding` (a test pins the two together). Gmail's
+/// script goes to its section by hash from the inbox the window opens at.
+const M365_FORWARDING: &str = "https://outlook.office.com/mail/options/mail/forwarding";
+
+/// One mailbox's forwarding, off, in the hidden mail window on its kept profile, before `deadline`:
+/// open it, wait for the saved sign-in, go to the Forwarding page (Microsoft 365), and run the
+/// provider's `forwarding_off.js` with the Knowlu address; a Gmail page that reloads is run once more,
+/// as the setup runner does. The script leaves forwarding to any other address alone. The caller
+/// closes the window, whatever happened. `Ok(false)` only for the script's explicit `changed: false`
+/// (it was already off); an `ok` without that word counts as turned off, since a refused deletion's
+/// sentence must not hide a forwarding this step stopped. Every `Err` is a fixed word.
+fn forwarding_off_in_window(app: &tauri::AppHandle, data_dir: &std::path::Path, mb: &SavedMailbox, deadline: std::time::Instant) -> Result<bool, &'static str> {
+    use crate::mail::{open_hidden, run_in_window, window_signed_in, Refusal, WINDOW};
+    use crate::mail_steps::Provider;
+    use tauri::Manager;
+    let left = || deadline.saturating_duration_since(std::time::Instant::now());
+    let nap = |most: u64| std::thread::sleep(left().min(std::time::Duration::from_millis(most)));
+    // The last mailbox's window goes a moment after it is closed.
+    while app.get_webview_window(WINDOW).is_some() {
+        if left().is_zero() {
+            return Err("the mail window is busy");
+        }
+        nap(100);
+    }
+    open_hidden(app, data_dir, &mb.profile, mb.provider).map_err(|_| "the mail window would not open")?;
+    while !window_signed_in(app, mb.provider) {
+        if left().is_zero() {
+            return Err("needs sign-in");
+        }
+        nap(500);
+    }
+    let script = match mb.provider {
+        Provider::M365 => "m365/forwarding_off.js",
+        Provider::Gmail => "gmail/forwarding_off.js",
+        Provider::Guided => return Err("this mailbox is set up by hand"),
+    };
+    if mb.provider == Provider::M365 {
+        let w = app.get_webview_window(WINDOW).ok_or(Refusal::NoPage.as_str())?;
+        w.navigate(M365_FORWARDING.parse().map_err(|_| Refusal::Unreadable.as_str())?).map_err(|_| Refusal::Lost.as_str())?;
+        page_ready(app, mb.provider, deadline)?;
+    }
+    let mut args = json!({ "address": mb.address() });
+    let mut reloaded = false;
+    loop {
+        if left().is_zero() {
+            return Err(Refusal::TimedOut.as_str());
+        }
+        let r = run_in_window(app, mb.provider, script, &args, left());
+        let reloading = match &r {
+            Ok(v) => v["result"].as_str() == Some("reloading"),
+            Err(Refusal::Lost) => mb.provider == Provider::Gmail,
+            Err(_) => false,
+        };
+        if reloading && !reloaded {
+            reloaded = true;
+            args["reloaded"] = json!(true);
+            page_ready(app, mb.provider, deadline)?;
+            continue;
+        }
+        return match r {
+            Ok(v) if v["result"].as_str() == Some("ok") => Ok(v["changed"].as_bool() != Some(false)),
+            Ok(_) => Err("forwarding was not turned off"),
+            Err(refusal) => Err(refusal.as_str()),
+        };
+    }
+}
+
+/// Waits, until `deadline`, for the mail window's document (`ready.js`), then a beat for the page to
+/// draw: `WindowMailbox::open`'s wait, under the pre-step's deadline.
+fn page_ready(app: &tauri::AppHandle, provider: crate::mail_steps::Provider, deadline: std::time::Instant) -> Result<(), &'static str> {
+    use std::time::{Duration, Instant};
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(crate::mail::Refusal::TimedOut.as_str());
+        }
+        std::thread::sleep(left.min(Duration::from_millis(250)));
+        let wait = deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(5));
+        let state = crate::mail::run_in_window(app, provider, "ready.js", &json!({}), wait);
+        if state.ok().as_ref().and_then(Value::as_str) == Some("complete") {
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(2)));
+            return Ok(());
+        }
+    }
+}
+
+// ---- Gmail connect (spec §4.2, D3): the three pure cores ----
+//
+// Each takes `(api_base, anon, token)` and reads no credential and no environment variable, so the
+// wizard's commands (the pending session, the compiled-in base) and the console's (the vault's) call
+// the same HTTP path, and a test drives it on a `127.0.0.1:0` loopback.
+
+/// The full scope URLs `google-connect` records; a bare name like `gmail.readonly` is not one.
+const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
+const GMAIL_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
+
+/// `GET /google-connect?status=1`, read (D5). `state` is `none`, `active`, `quiet` or `revoked`.
+/// `connected` is the service's own flag, carried so the wizard's `google_connected` answers exactly
+/// what it did before the refactor (D3).
+#[derive(Clone, PartialEq, Eq)]
+pub struct GoogleStatus {
+    pub state: &'static str,
+    pub connected: bool,
+    pub calendar: bool,
+    pub gmail: bool,
+    pub email: Option<String>,
+}
+
+/// Hand-written, as `Session`'s is: the address is shown back to its owner on the Settings row and
+/// goes nowhere else, so a `{:?}` in a log line or a panic never prints it.
+impl std::fmt::Debug for GoogleStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GoogleStatus")
+            .field("state", &self.state)
+            .field("connected", &self.connected)
+            .field("calendar", &self.calendar)
+            .field("gmail", &self.gmail)
+            .field("email", &self.email.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+pub fn google_status_at(api_base: &str, anon: &str, token: &str) -> Result<GoogleStatus, String> {
+    let v = get_json(&format!("{}/google-connect?status=1", api_base.trim_end_matches('/')), anon, token)?;
+    let scopes: Vec<&str> =
+        v.get("scopes").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let connected = v.get("connected").and_then(Value::as_bool).unwrap_or(false);
+    // An older server sends no `status`, and `connected` is then the whole story. A value this build
+    // does not know reads the same way, never as a state the page has no copy for.
+    let state = match v.get("status").and_then(Value::as_str) {
+        Some("none") => "none",
+        Some("active") => "active",
+        Some("quiet") => "quiet",
+        Some("revoked") => "revoked",
+        _ if connected => "active",
+        _ => "none",
+    };
+    Ok(GoogleStatus {
+        state,
+        connected,
+        calendar: scopes.contains(&CALENDAR_SCOPE),
+        gmail: scopes.contains(&GMAIL_SCOPE),
+        email: v.get("email").and_then(Value::as_str).map(str::to_string),
+    })
+}
+
+/// `scope` is normalised here, so nothing a caller passes reaches the query but `calendar`, `gmail`
+/// or `reconnect` (D8). The URL is checked against [`external_url_allowed`] before any caller can
+/// open it, and the refusal never repeats the URL.
+pub fn google_connect_url_at(api_base: &str, anon: &str, token: &str, scope: &str) -> Result<String, String> {
+    let scope = match scope {
+        "gmail" => "gmail",
+        "reconnect" => "reconnect",
+        _ => "calendar",
+    };
+    let v = get_json(&format!("{}/google-connect?scope={scope}", api_base.trim_end_matches('/')), anon, token)?;
+    let url = v.get("url").and_then(Value::as_str).ok_or_else(|| "the service returned no url".to_string())?;
+    if !external_url_allowed(url) {
+        return Err("the service returned a url Knowlu will not open".to_string());
+    }
+    Ok(url.to_string())
+}
+
+/// A bearer `DELETE` (D6). The service revokes at Google first and forgets the grant second, so every
+/// refusal leaves the grant where it was, and [`google_error_for_status`] names each one.
+pub fn google_disconnect_at(api_base: &str, anon: &str, token: &str) -> Result<(), String> {
+    let url = format!("{}/google-connect", api_base.trim_end_matches('/'));
+    send_json(ureq::http::Method::DELETE, &url, anon, token).map(|_| ())
 }
 
 /// The Google consent URL for the account this wizard signed in as (§11a).
@@ -1328,6 +1719,8 @@ pub fn delete_my_data(app: tauri::AppHandle, cs: tauri::State<'_, crate::state::
 /// Google token** — the exchange happens server-side in `google-callback` (D12).
 #[tauri::command(async)]
 pub fn google_connect_url(scope: String) -> Value {
+    // The wizard asks for `calendar` or `gmail` and nothing else, as it always has; `reconnect` is
+    // the Settings row's, so it is folded to `calendar` here before the core sees it.
     let scope = if scope == "gmail" { "gmail" } else { "calendar" };
     let api = api_base();
     let auth = match auth_base(&api) {
@@ -1338,11 +1731,8 @@ pub fn google_connect_url(scope: String) -> Value {
         Ok(token) => token,
         Err(e) => return json!({ "ok": false, "error": e }),
     };
-    match get_json(&format!("{api}/google-connect?scope={scope}"), &token) {
-        Ok(v) => match v.get("url").and_then(Value::as_str) {
-            Some(url) => json!({ "ok": true, "url": url }),
-            None => json!({ "ok": false, "error": "the service returned no url" }),
-        },
+    match google_connect_url_at(&api, &anon_key(), &token, scope) {
+        Ok(url) => json!({ "ok": true, "url": url }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
@@ -1364,56 +1754,128 @@ pub fn google_connected() -> Value {
         Ok(token) => token,
         Err(e) => return json!({ "ok": false, "error": e }),
     };
-    match get_json(&format!("{api}/google-connect?status=1"), &token) {
-        Ok(v) => {
-            let scopes: Vec<String> = v
-                .get("scopes")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
-                .unwrap_or_default();
-            json!({
-                "ok": true,
-                "connected": v.get("connected").and_then(Value::as_bool).unwrap_or(false),
-                "calendar": scopes.iter().any(|s| s == "https://www.googleapis.com/auth/calendar.readonly"),
-                "gmail": scopes.iter().any(|s| s == "https://www.googleapis.com/auth/gmail.readonly"),
-            })
-        }
+    match google_status_at(&api, &anon_key(), &token) {
+        Ok(s) => json!({ "ok": true, "connected": s.connected, "calendar": s.calendar, "gmail": s.gmail }),
         Err(e) => json!({ "ok": false, "error": e }),
     }
 }
 
+// ---- Gmail connect (spec §4.2, D2): the three console commands ----
+//
+// The Settings row's commands, on the **console** window's list. Each is a Tauri wrapper over an
+// inner function taking the vault path, so `app/tests/account.rs` drives the inner one with no
+// `ConsoleState`, the shape `delete_local_data` and `attach_in` already have.
+
+/// The vault's own session, never `PENDING_TARGET` (D2). After onboarding the pending target is empty,
+/// and on a machine where a second student is mid-onboarding it holds *their* session; so the base,
+/// the anon key and the credential target all come from this vault's `config/cloud.yaml`, whose
+/// `api_base` `cloud_config` has already held to the host this build talks to (R-C1-59 I1).
+fn console_session(vault: &std::path::Path) -> Result<(CloudConfig, String), String> {
+    let cfg = cloud_config(vault)?;
+    let auth = auth_base(&cfg.api_base)?;
+    let token = valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now_unix())?;
+    Ok((cfg, token))
+}
+
+/// `{ok, state, calendar, gmail, email, error}`. On a failure the four facts are `null`, never a
+/// guess, and `error` is the sentence the row shows verbatim. The email is the student's own Google
+/// address, shown back to them on the row; it reaches no log line.
+pub fn google_status_in(vault: &std::path::Path) -> Value {
+    match console_session(vault).and_then(|(cfg, token)| google_status_at(&cfg.api_base, &cfg.anon_key, &token)) {
+        Ok(s) => json!({ "ok": true, "state": s.state, "calendar": s.calendar, "gmail": s.gmail, "email": s.email, "error": Value::Null }),
+        Err(e) => json!({ "ok": false, "state": Value::Null, "calendar": Value::Null, "gmail": Value::Null, "email": Value::Null, "error": e }),
+    }
+}
+
+/// The consent URL, already through [`external_url_allowed`] (in [`google_connect_url_at`]); a
+/// refused one is an error carrying no URL, so the wrapper has nothing to open. `scope` is
+/// `calendar`, `gmail` or `reconnect` (D8), normalised by the core.
+pub fn google_connect_in(vault: &std::path::Path, scope: &str) -> Result<String, String> {
+    let (cfg, token) = console_session(vault)?;
+    google_connect_url_at(&cfg.api_base, &cfg.anon_key, &token, scope)
+}
+
+/// `{ok, error}`. Nothing on this machine changes either way (D6): what Knowlu wrote stays in the
+/// vault, the `cloud:google` marker included, and the session is the Knowlu sign-in, not Google's.
+pub fn google_disconnect_in(vault: &std::path::Path) -> Value {
+    match console_session(vault).and_then(|(cfg, token)| google_disconnect_at(&cfg.api_base, &cfg.anon_key, &token)) {
+        Ok(()) => json!({ "ok": true, "error": Value::Null }),
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+#[tauri::command(async)]
+pub fn google_status(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    google_status_in(&cs.vault)
+}
+
+/// Opens the consent page from Rust, as `open_portal` does (D2): the URL never passes through the
+/// console's webview, which is why `open_external` stays off the console's list. `{ok, error}`.
+#[tauri::command(async)]
+pub fn google_connect(cs: tauri::State<'_, crate::state::ConsoleState>, scope: String) -> Value {
+    match google_connect_in(&cs.vault, &scope).and_then(|url| open_in_browser(&url)) {
+        Ok(()) => json!({ "ok": true, "error": Value::Null }),
+        Err(e) => json!({ "ok": false, "error": e }),
+    }
+}
+
+#[tauri::command(async)]
+pub fn google_disconnect(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
+    google_disconnect_in(&cs.vault)
+}
+
 /// A-6: what the wizard's Google error line says for a failed status — pulled out as a pure
 /// function (no network, no agent) so the mapping is tested directly rather than only through a
-/// live `get_json` call. `get_json` below is reached by exactly two commands (`google_connect_url`,
-/// `google_connected`), so this is specific to the Google flow on purpose: 401 means the wizard's
-/// own pending session has gone stale (the fix is a sign-in, not a retry of THIS request), and 503
+/// live `get_json` call. `send_json` below is reached only by the three Google cores
+/// (`google_status_at`, `google_connect_url_at`, `google_disconnect_at`) and the commands built on
+/// them, so this is specific to the Google flow on purpose: 401 means the caller's own session
+/// (the wizard's pending one, or later the vault's) has gone stale (the fix is a sign-in, not a
+/// retry of THIS request), and 503
 /// means the deployment has no Google client configured at all (`GOOGLE_NOT_CONFIGURED` on the
 /// service side) — the fix is the `calendar_ics` fallback the panel already shows, not "try again".
-/// Every other status keeps the generic form, which names the code but nothing more specific.
+/// Gmail connect (spec §4.2) adds two: 402 is `requireActiveEntitlement` refusing the consent URL
+/// (Connect, Reconnect) for a lapsed subscription, so the fix is the subscription, not Google —
+/// `?status=1` and `DELETE` need only a session, so a lapsed student can still disconnect; 502
+/// is `DELETE` failing to revoke at Google, which leaves the grant and the row in place, so a retry
+/// is the right ask. Every other status keeps the generic form, which names the code but nothing
+/// more specific.
 fn google_error_for_status(code: u16) -> String {
     match code {
         401 => "sign in again".to_string(),
+        402 => "your subscription is not active, so Google cannot be connected".to_string(),
+        502 => "Google could not be reached to disconnect; try again".to_string(),
         503 => "Google sign-in is not available right now — use the secret address below".to_string(),
         _ => format!("the service refused (HTTP {code})"),
     }
 }
 
-/// One bearer GET against the functions base. `check_api_base` is applied first, so an
-/// `KNOWLU_API_BASE` pointing anywhere but https (or loopback, for the tests) is refused here
-/// rather than turned into a request to a host nobody chose.
-fn get_json(url: &str, token: &str) -> Result<Value, String> {
+/// One bearer GET against the functions base: [`send_json`] with `GET`, for the two GET cores.
+fn get_json(url: &str, anon: &str, token: &str) -> Result<Value, String> {
+    send_json(ureq::http::Method::GET, url, anon, token)
+}
+
+/// One bearer request with no body against the functions base, answering the reply's JSON.
+/// `check_api_base` is applied first, so an `KNOWLU_API_BASE` pointing anywhere but https (or
+/// loopback, for the tests) is refused here rather than turned into a request to a host nobody
+/// chose. `Agent::run` on a bodiless `http::Request` is the path `RequestBuilder::call` takes, and a
+/// request that will not build fails as `call` would have (`ureq::Error::Http`), so `get_json`'s
+/// errors are unchanged. No error carries the token or the reply's body. `anon` is the caller's
+/// (D3: the cores take it), so the key sent is the one the caller's base belongs to.
+fn send_json(method: ureq::http::Method, url: &str, anon: &str, token: &str) -> Result<Value, String> {
     check_api_base(url)?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
         .http_status_as_error(false)
         .build()
         .into();
-    let mut response = agent
-        .get(url)
+    let request = ureq::http::Request::builder()
+        .method(method)
+        .uri(url)
         .header("Authorization", format!("Bearer {token}"))
-        .header("apikey", anon_key())
-        .call()
-        .map_err(|e| format!("no network ({e})"))?;
+        .header("apikey", anon)
+        .body(())
+        .map_err(|e| format!("no network ({})", ureq::Error::from(e)))?;
+    let mut response = agent.run(request).map_err(|e| format!("no network ({e})"))?;
     let code = response.status().as_u16();
     let body = response.body_mut().read_to_string().unwrap_or_default();
     if !(200..300).contains(&code) {
@@ -1470,10 +1932,85 @@ mod google_error_for_status_tests {
     }
 
     #[test]
+    fn a_402_names_the_subscription_rather_than_google() {
+        assert_eq!(
+            google_error_for_status(402),
+            "your subscription is not active, so Google cannot be connected"
+        );
+    }
+
+    #[test]
+    fn a_502_says_google_could_not_be_reached_and_asks_for_a_retry() {
+        assert_eq!(google_error_for_status(502), "Google could not be reached to disconnect; try again");
+    }
+
+    #[test]
     fn every_other_status_keeps_the_generic_form() {
         assert_eq!(google_error_for_status(500), "the service refused (HTTP 500)");
         assert_eq!(google_error_for_status(429), "the service refused (HTTP 429)");
         assert_eq!(google_error_for_status(404), "the service refused (HTTP 404)");
+    }
+}
+
+/// `send_json` on a real `127.0.0.1:0` socket, beneath the cores: T4a's refactor guard, kept now that
+/// `app/tests/account.rs` also reaches it through the three Google cores (T4b).
+#[cfg(test)]
+mod send_json_tests {
+    use super::{get_json, send_json};
+    use std::io::{Read, Write};
+
+    /// Answers one request with `status` and `body`; `join()` yields the request head. The accept
+    /// polls against a 10-second deadline, so a request that never comes fails instead of hanging.
+    fn serve_one(status: u16, body: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().expect("addr").port());
+        let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((s, _)) => break s,
+                    Err(_) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    Err(e) => panic!("loopback: no request within 10s ({e})"),
+                }
+            };
+            stream.set_nonblocking(false).expect("blocking");
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).expect("read timeout");
+            let (mut head, mut chunk) = (Vec::new(), [0u8; 1024]);
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut chunk) { Ok(n) if n > 0 => head.extend_from_slice(&chunk[..n]), _ => break }
+            }
+            let reply = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            stream.write_all(reply.as_bytes()).expect("reply");
+            String::from_utf8_lossy(&head).to_ascii_lowercase()
+        });
+        (base, handle)
+    }
+
+    #[test]
+    fn get_json_still_sends_a_get_with_the_bearer_and_the_apikey() {
+        let (base, server) = serve_one(200, r#"{"connected":false}"#);
+        let reply = get_json(&format!("{base}/google-connect?status=1"), "an0n", "t0k");
+        let head = server.join().expect("server");
+        assert_eq!(reply, Ok(serde_json::json!({ "connected": false })));
+        assert!(head.starts_with("get /google-connect?status=1 http/1.1\r\n"), "{head}");
+        assert!(head.contains("\r\nauthorization: bearer t0k\r\n") && head.contains("\r\napikey: "), "{head}");
+    }
+
+    #[test]
+    fn a_delete_goes_out_as_a_delete_and_a_refusal_maps_by_status_not_body() {
+        let (base, server) = serve_one(502, r#"{"error":"a body the page never sees"}"#);
+        let reply = send_json(ureq::http::Method::DELETE, &format!("{base}/google-connect"), "an0n", "t0k");
+        let head = server.join().expect("server");
+        assert_eq!(reply, Err("Google could not be reached to disconnect; try again".to_string()));
+        assert!(head.starts_with("delete /google-connect http/1.1\r\n"), "{head}");
+        assert!(head.contains("\r\nauthorization: bearer t0k\r\n"), "{head}");
+    }
+
+    #[test]
+    fn check_api_base_applies_before_any_request() {
+        let refused = send_json(ureq::http::Method::DELETE, "ftp://127.0.0.1:9/google-connect", "an0n", "t0k");
+        assert!(refused.is_err_and(|e| e.ends_with("an api_base must be https://")));
     }
 }
 

@@ -428,12 +428,12 @@ fn the_picker_is_in_the_page_and_carries_no_data_id() {
 }
 
 #[test]
-fn the_wizard_has_nine_panels_and_the_privacy_words_and_no_live_fetch() {
+fn the_wizard_has_ten_panels_and_the_privacy_words_and_no_live_fetch() {
     let html = read("index.html");
     assert!(html.contains("id=\"wizard\""));
     // Spec §4.2, in order. **No `wiz-backup`, and no folder anywhere**: the app creates
     // `%USERPROFILE%\Knowlu\<name>` and `Backups` beside it (§4.1, §11a).
-    for p in ["wiz-welcome", "wiz-account", "wiz-subscribe", "wiz-vault", "wiz-calendars", "wiz-logins", "wiz-gmail", "wiz-slots", "wiz-finish"] {
+    for p in ["wiz-welcome", "wiz-account", "wiz-subscribe", "wiz-mail", "wiz-vault", "wiz-calendars", "wiz-logins", "wiz-gmail", "wiz-slots", "wiz-finish"] {
         assert!(html.contains(&format!("id=\"{p}\"")), "panel {p}");
     }
     assert!(!html.contains("id=\"wiz-backup\""), "the backup-folder panel is gone");
@@ -442,7 +442,7 @@ fn the_wizard_has_nine_panels_and_the_privacy_words_and_no_live_fetch() {
     for f in ["startWizard", "renderWizard", "wizGo", "wizFinish"] {
         assert!(js.contains(&format!("function {f}(")), "missing {f}");
     }
-    assert!(js.contains("var PANELS = [\"welcome\", \"account\", \"subscribe\", \"vault\", \"calendars\", \"logins\", \"gmail\", \"slots\", \"finish\"];"));
+    assert!(js.contains("var PANELS = [\"welcome\", \"account\", \"subscribe\", \"mail\", \"vault\", \"calendars\", \"logins\", \"gmail\", \"slots\", \"finish\"];"));
     // No live fetch in onboarding: the ICS shape is matched, never requested, by the PAGE. The
     // escape keeps the network-reference rule true.
     assert!(js.contains("/^https:\\/\\/"), "the ICS check is an escaped regex");
@@ -504,6 +504,17 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     assert!(panel.contains("id=\"wiz-school\"") && panel.contains("id=\"wiz-school-hits\""), "the school typeahead");
     assert!(panel.contains("id=\"wiz-school-none\"") && panel.contains("id=\"wiz-school-free\""), "…and the free-text fallback");
     assert!(panel.contains("id=\"wiz-lms-kind\""), "…and the two-button LMS question for an uncurated school");
+    // F4: "Sign in to my school" waits for a picked school; pressing it with no unitid used to fail
+    // and unhide the LMS chooser. Disabled in renderWizard, early return in the handler, chooser
+    // hidden when free entry starts.
+    assert!(js.contains("EL(\"wiz-lms-open\").disabled = !WIZ.campus.unitid;"), "the sign-in button waits for a school");
+    assert!(js.contains("if (!WIZ.campus.unitid) { return; }"), "the handler returns early with no school");
+    let free = js.split("EL(\"wiz-school-free\").addEventListener(\"input\"").nth(1).and_then(|s| s.split("});").next()).expect("the free-entry handler");
+    assert!(free.contains("EL(\"wiz-lms-kind\").hidden = !(typed && !WIZ.campus.lms);"), "free entry asks the LMS once name and state are filled");
+    assert!(free.contains("var typed = !!(WIZ.campus.name && WIZ.campus.state);"), "…keyed on both fields");
+    assert!(free.contains("WIZ.icsNote = typed ?") && free.contains("paste your calendar link below"), "…with the paste-link note, cleared otherwise");
+    assert!(free.contains("unitid: \"\""), "free entry keeps the unitid empty, so sign-in stays disabled");
+    assert!(free.contains("lms: WIZ.campus.unitid ? \"\" : (WIZ.campus.lms || \"\")"), "a curated school's lms is never carried into a free entry");
     assert!(!html.contains("name=\"campus\""), "no campus radios anywhere on the page");
     assert!(!js.contains("input[name=\\\"campus\\\"]"), "…and nothing reads one");
     assert!(js.contains("function schoolHits(") && js.contains("\"campus_search\""), "the typeahead asks Rust");
@@ -511,6 +522,9 @@ fn the_page_has_no_lms_credential_field_anywhere() {
     // a `fetch` of a bundled asset is refused — and that file is the controller's. The search is a
     // command; the page holds ten rows.
     assert!(!js.contains("campuses.json"), "the page never names the asset; `campus_search` reads it");
+    // A curated school's LMS kind comes in the hit (`r[4]`) and is the pick's answer, so the chooser is
+    // for an uncurated school only (live proof 2026-10-02). The page names no school.
+    assert!(js.contains("lms: r[4] || \"\""), "pickSchool takes the curated LMS kind from the hit");
     // Spec §11a: **both** calendars, on this one panel, before coursework logins and Gmail — the
     // personal one is what makes today's page know the day is already half full.
     assert!(panel.contains("id=\"wiz-cal-ics\"") && panel.contains("id=\"wiz-cal-note\""), "the personal calendar's field");
@@ -593,6 +607,53 @@ fn the_wizard_google_flow_keeps_its_state_on_wiz_and_renders_it() {
         busy_write < google_connected_call.unwrap(),
         "wiz-next is disabled before the google_connected await, not after it"
     );
+}
+
+/// Gmail connect D11: the wizard's Gmail panel has a Connect Gmail button whose state follows the
+/// same A-5 rule as the calendar button's (`WIZ`, `renderWizard()`, a token `wizGo` bumps).
+#[test]
+fn the_wizard_gmail_flow_keeps_its_state_on_wiz_and_renders_it() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let panel = html.split("id=\"wiz-gmail\"").nth(1).and_then(|s| s.split("id=\"wiz-slots\"").next()).expect("the Gmail panel");
+    assert!(panel.contains("id=\"wiz-gmail-connect\""), "the panel has the button");
+    assert!(panel.contains("id=\"wiz-gmail-note\""), "the status line has its own element");
+    assert!(!panel.contains("Skip it for now"), "the old copy-only text is gone");
+    assert!(panel.contains("While Google reviews Knowlu, this works only for invited testers"), "the Testing sentence");
+    assert!(panel.contains("Knowlu can read your Gmail for things you have to do and propose each one for you to approve. You can skip this and connect later in Settings."), "the plan's what-it-does sentence");
+    assert_eq!(panel.matches("read your").count(), 1, "one what-it-does sentence");
+    assert!(js.contains("WIZ.gmailNote = \"Gmail is connected.\";"), "the plan's success note");
+    assert!(js.contains("WIZ.gmailNote = GOOGLE_TIMEOUT;"), "the Settings timeout sentence, unchanged");
+    assert!(js.contains("gmail: false") && js.contains("gmailNote:") && js.contains("gmailPolling: false") && js.contains("gmailSeq: 0"), "WIZ carries the flow's state");
+    assert!(js.contains("EL(\"wiz-gmail-note\").textContent = WIZ.gmailNote"), "renderWizard paints the note");
+    assert!(js.contains("EL(\"wiz-gmail-connect\").disabled = WIZ.gmail || WIZ.gmailPolling"), "disabled is derived from WIZ");
+    let go = js.find("function wizGo(").map(|i| &js[i..]).expect("wizGo");
+    assert!(
+        go.find("WIZ.gmailSeq").map(|i| i < go.find("function wizFinish(").unwrap_or(usize::MAX)).unwrap_or(false),
+        "wizGo bumps the token on leaving the panel"
+    );
+}
+
+#[test]
+fn the_wizard_gmail_button_uses_the_wizard_commands() {
+    let js = read("console.js");
+    let h = js.split("getElementById(\"wiz-gmail-connect\")").nth(1).and_then(|s| s.split("// ---- R-OB-4").next()).expect("the Gmail handler");
+    assert!(h.contains("invoke(\"google_connect_url\", { scope: \"gmail\" })"), "the wizard command, scope gmail");
+    assert!(h.contains("invoke(\"open_external\""), "the wizard's opener");
+    assert!(h.contains("invoke(\"google_connected\")"), "polls the wizard's status command");
+    for console_only in ["google_status", "google_connect\"", "google_disconnect"] {
+        assert!(!h.contains(console_only), "no console-only command: {console_only}");
+    }
+}
+
+#[test]
+fn next_never_waits_on_gmail() {
+    let js = read("console.js");
+    let render = js.split("function renderWizard(").nth(1).and_then(|s| s.split("function clearCredentialFields").next()).expect("renderWizard");
+    assert!(render.contains("EL(\"wiz-next\").disabled = WIZ.busy;"), "Next depends on busy alone");
+    assert!(!render.contains("wiz-next\").disabled = WIZ.busy ||") && !render.contains("gmailPolling ||  WIZ.busy"), "not on polling");
+    let finish = js.split("function wizFinish(").nth(1).and_then(|s| s.split("\n  // The Checkout page").next()).expect("wizFinish");
+    assert!(!finish.contains("gmail"), "nothing about Gmail reaches the plan");
 }
 
 /// R-OB-1: the wizard that takes a coursework password must also say what the work is for. Quinn's
@@ -1804,6 +1865,1149 @@ fn the_picker_offers_a_local_backup_restore_link_and_says_it_is_not_the_account(
     let after_open_profile = &go_handler[open_profile_call..];
     assert!(after_open_profile.contains("o.ok === false"), "open_profile's own refusal is checked: {after_open_profile}");
     assert!(after_open_profile.contains("EL(\"pick-lede\").textContent = o.error"), "…and its message is shown: {after_open_profile}");
+}
+
+/// Gmail connect T9a (spec §8.4 item 1): the Google row sits after Account, inside Settings, with
+/// every id T9b and T9c bind to.
+#[test]
+fn the_google_row_sits_after_account_with_its_ids() {
+    let html = read("index.html");
+    let js = read("console.js");
+    let open = html.find("id=\"settings\"").expect("#settings");
+    let close = open + html[open..].find("</aside>").expect("end of #settings");
+    let acct = html.find("id=\"set-account\"").expect("#set-account");
+    let google = html.find("id=\"set-google\"").expect("#set-google");
+    assert!(open < acct && acct < google && google < close, "#set-google is inside #settings, after #set-account");
+    for id in [
+        "set-google-state", "set-google-connect", "set-google-reconnect",
+        "set-google-disconnect-1", "set-google-disconnect-2", "set-google-note",
+    ] {
+        let at = html.find(&format!("id=\"{id}\"")).unwrap_or_else(|| panic!("index.html has no #{id}"));
+        assert!(google < at && at < close, "#{id} is inside the Google row");
+        assert!(js.contains(&format!("\"{id}\"")), "console.js never names #{id}");
+    }
+    assert!(js.contains("\"google_status\""), "the row asks google_status");
+}
+
+/// The launch-time `checkAccount` (upgrade overlay) must not reach `google_status`: the row loads
+/// only while Settings is open (spec section 4.4).
+#[test]
+fn the_launch_account_check_does_not_reach_google_status() {
+    let js = read("console.js");
+    let start = js.find("function gateGoogleRow").expect("gateGoogleRow");
+    let end = start + js[start..].find("function closeSettings").expect("closeSettings");
+    let gate = &js[start..end];
+    let guard = gate.find("EL(\"settings\").hidden").expect("gateGoogleRow checks that Settings is open");
+    let load = gate.find("loadGoogleRow()").expect("gateGoogleRow loads the row");
+    assert!(guard < load, "the Settings-open guard comes before loadGoogleRow");
+}
+
+/// Gmail connect T9b (spec section 8.4 item 2): the console invokes the three Google commands, and
+/// `open_external` is invoked only inside the wizard's Google handler. Its `google_disconnect` half
+/// is red until T9c wires the two-step Disconnect.
+#[test]
+fn the_console_invokes_the_three_google_commands_and_never_open_external_outside_the_wizard() {
+    let js = read("console.js");
+    for cmd in ["google_status", "google_connect", "google_disconnect"] {
+        assert!(js.contains(&format!("invoke(\"{cmd}\"")), "console.js never invokes {cmd}");
+    }
+    // The wizard's two handlers (calendar, and Gmail per D11) are the only places it may be invoked.
+    let spans: Vec<(usize, usize)> = ["wiz-google", "wiz-gmail-connect"].iter().map(|id| {
+        let start = js.find(&format!("getElementById(\"{id}\").addEventListener")).unwrap_or_else(|| panic!("the wizard's {id} handler"));
+        (start, start + js[start..].find("
+  });").expect("end of the handler"))
+    }).collect();
+    for (at, _) in js.match_indices("invoke(\"open_external\"") {
+        assert!(spans.iter().any(|&(a, b)| a < at && at < b), "open_external is invoked outside the wizard's handlers");
+    }
+}
+
+/// Gmail connect plan section 4: while polling, the state line (not the note) reads the plan's
+/// exact sentence.
+#[test]
+fn the_google_row_shows_the_plan_polling_sentence_in_the_state_line() {
+    let js = read("console.js");
+    assert!(js.contains("var GOOGLE_POLLING = \"Waiting for Google\u{2026} finish in your browser.\";"));
+    let start = js.find("function renderGoogleRow(").expect("renderGoogleRow");
+    let end = start + js[start..].find("\n  }\n").expect("end of renderGoogleRow");
+    let f = &js[start..end];
+    assert!(f.contains("EL(\"set-google-state\").textContent = busy ? GOOGLE_POLLING : (SET.googleWaitedOut"), "{f}");
+    let c = js.find("function connectGoogle(").expect("connectGoogle");
+    let c_end = c + js[c..].find("\n  }\n").expect("end of connectGoogle");
+    assert!(!js[c..c_end].contains("SET.googleNote = GOOGLE_POLLING"), "the note stays empty while polling");
+}
+
+/// Gmail connect T9b (spec section 8.4 item 3): the row's poll carries `SET.googleSeq`, bumped on
+/// Settings close and on every new click.
+#[test]
+fn the_google_row_poll_is_cancelled_when_settings_closes() {
+    let js = read("console.js");
+    let start = js.find("function connectGoogle(").expect("connectGoogle");
+    let end = start + js[start..].find("\n  }\n").expect("end of connectGoogle");
+    let f = &js[start..end];
+    assert!(f.contains("var mySeq = ++SET.googleSeq"), "every click takes a new token: {f}");
+    assert!(f.matches("SET.googleSeq !== mySeq").count() >= 2, "the loop checks the token after each await: {f}");
+    assert!(f.contains("SET.googlePolling = true") && f.contains("SET.googlePolling = false"), "{f}");
+    let close = js.find("function closeSettings(").map(|i| &js[i..i + 160]).expect("closeSettings");
+    assert!(close.contains("SET.googleSeq += 1"), "closing Settings bumps the token: {close}");
+    assert!(js.contains("\"google_connect\", { scope:"), "the row starts the flow with google_connect");
+    assert!(!js.contains("gmail.readonly"), "no scope string on the page");
+}
+
+/// The poll runs ten minutes; a student who cancelled on Google's page must be able to mint a new
+/// link, so Connect and Reconnect stay enabled while polling (only a disconnect in flight locks them).
+#[test]
+fn the_google_row_connect_buttons_stay_enabled_while_polling() {
+    let js = read("console.js");
+    let start = js.find("function renderGoogleRow(").expect("renderGoogleRow");
+    let end = start + js[start..].find("\n  }\n").expect("end of renderGoogleRow");
+    let f = &js[start..end];
+    assert!(f.contains("var retry = id === \"set-google-connect\" || id === \"set-google-reconnect\""), "{f}");
+    assert!(f.contains("EL(id).disabled = SET.leaving || (busy && !retry)"), "{f}");
+}
+
+/// Gmail connect T9c (spec section 8.4 item 4, D6): step 1 names Calendar, step 2 is the only call
+/// to `google_disconnect`, and closing Settings puts the confirm away.
+#[test]
+fn the_disconnect_confirm_names_calendar() {
+    let js = read("console.js");
+    assert!(js.contains("Google Calendar too"), "the step-1 text names Calendar");
+    let text = js.find("var GOOGLE_DISCONNECT_CONFIRM").expect("the confirm text is one constant");
+    assert!(js[text..text + 400].contains("This disconnects Google Calendar too"), "step 1 opens with the spec's sentence");
+    assert!(js.contains("\"#set-google-disconnect-1\"") && js.contains("\"#set-google-disconnect-2\""), "both steps are wired");
+    let step2 = js.find("closest(\"#set-google-disconnect-2\")").expect("step 2 handler");
+    assert!(js[step2..step2 + 120].contains("disconnectGoogle()"), "step 2 runs disconnectGoogle");
+    let f = js.find("function disconnectGoogle(").expect("disconnectGoogle");
+    let call = js.find("invoke(\"google_disconnect\"").expect("google_disconnect is invoked");
+    assert!(f < call && call < f + 400, "google_disconnect is called from disconnectGoogle only");
+    assert_eq!(js.matches("invoke(\"google_disconnect\"").count(), 1);
+    let close = js.find("function closeSettings(").map(|i| js[i..].lines().next().unwrap()).expect("closeSettings");
+    assert!(close.contains("SET.confirming = false"), "closing Settings hides step 2: {close}");
+}
+
+// ---- M1 grades (spec 2026-09-29-grades-design §2 and §9; plan Task 7) ------------------------------
+
+/// The console's grades code: everything between the two markers in `console.js`.
+fn grades_js() -> String {
+    let js = read("console.js");
+    let from = js.find("// ---- M1 grades").expect("console.js carries the grades region");
+    let to = js.find("// ---- end M1 grades").expect("console.js closes the grades region");
+    js[from..to].to_string()
+}
+
+/// One function's body out of the grades region, up to the next top-level `function`.
+fn grades_fn(name: &str) -> String {
+    let js = grades_js();
+    let at = js.find(&format!("function {name}(")).unwrap_or_else(|| panic!("no function {name} in the grades region"));
+    let rest = &js[at + 1..];
+    js[at..at + 1 + rest.find("\n  function ").unwrap_or(rest.len())].to_string()
+}
+
+#[test]
+fn the_grades_strip_renders_from_state_grades_and_has_its_four_states() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"grades\""), "Today carries the strip's container");
+    let draw = grades_fn("drawGrades");
+    assert!(grades_fn("renderGrades").contains("state.grades"), "the strip renders from state.grades");
+    assert!(draw.contains("GRADES.list"), "…and draws it");
+    // The four states: not available, not connected, signed out, hidden.
+    assert!(draw.contains("s.hidden"), "the hidden state: {draw}");
+    assert!(draw.contains("s.available === false") && draw.contains("gradesUnavailableHtml("), "the not-available state");
+    assert!(draw.contains("!s.connected") && grades_js().contains("Connect Blackboard to see your grades"), "the not-connected state");
+    assert!(draw.contains("s.signed_out") && grades_js().contains("Sign in to Blackboard again to update grades"), "the signed-out state");
+    // A signed-out session is a named state, never an error and never amber.
+    assert!(!draw.contains("crit") && !draw.contains("warn"), "signed out is never amber or red: {draw}");
+    assert!(grades_js().contains("no grades yet"), "a course with nothing graded reads \"no grades yet\"");
+}
+
+#[test]
+fn the_not_available_state_is_one_line_and_no_button() {
+    let line = grades_fn("gradesUnavailableHtml");
+    assert!(line.contains("Grades from Blackboard are not available at your school yet"), "{line}");
+    assert!(!line.contains("<button") && !line.contains("<input") && !line.contains("<a "), "no control on the not-available line: {line}");
+    // The console decides the state only from `grades_status`: no campus file, no campus list, no host.
+    let js = grades_js();
+    assert!(js.contains("invoke(\"grades_status\""), "the console asks grades_status");
+    for word in ["campus", "unitid", "lms_host", "policy_read", "lms_kind"] {
+        assert!(!js.contains(word), "the grades region names {word}: the console never decides availability itself");
+    }
+}
+
+#[test]
+fn the_console_has_no_address_entry_and_never_names_grades_set_host() {
+    for f in ["console.js", "index.html", "console.css"] {
+        assert!(!read(f).contains("grades_set_host"), "{f} names grades_set_host");
+    }
+    let js = grades_js();
+    assert!(!js.contains("<input") && !js.contains("prompt("), "no address input in the grades region");
+    let html = read("index.html");
+    for id in ["grades-host", "grades-address", "grades-url"] {
+        assert!(!html.contains(id), "index.html carries {id}");
+    }
+    // The four commands, and only those, are called from here.
+    for call in ["invoke(\"grades_status\"", "gradesAct(\"grades_connect\"", "gradesAct(\"grades_refresh\"", "invoke(\"grades_forget\""] {
+        assert!(js.contains(call), "{call} is called");
+    }
+    assert!(grades_fn("gradesAct").contains("invoke(cmd"), "gradesAct forwards to the named command");
+}
+
+#[test]
+fn the_rings_are_svg_coloured_by_five_grade_tokens_in_both_themes() {
+    let ring = grades_fn("ringSvg");
+    assert!(ring.contains("<svg") && ring.contains("<circle") && ring.contains("stroke-dasharray"), "the ring is inline SVG: {ring}");
+    let css = read("console.css");
+    for t in ["--grade-a", "--grade-b", "--grade-c", "--grade-d", "--grade-f"] {
+        assert_eq!(css.matches(&format!("{t}:")).count(), 2, "{t} is defined once per theme");
+        assert!(grades_js().contains(&t[2..]) || grades_js().contains("grade-\" +"), "the page picks {t}");
+    }
+    assert!(css.contains(":root[data-theme=\"light\"]"), "the light set is a named theme, not a media query over the dark console");
+    assert!(css.contains("color-scheme: dark"), "the console stays dark by default");
+}
+
+#[test]
+fn the_breakdown_drawer_is_read_only_and_the_footer_says_where_the_number_came_from() {
+    let drawer = grades_fn("openGradesDrawer");
+    for banned in ["set_fields", "data-field", "contenteditable", "<input", "<textarea", "create_task", "delete_note"] {
+        assert!(!drawer.contains(banned), "the grades drawer contains {banned}: it is read-only");
+    }
+    let all = grades_js();
+    assert!(!all.contains("set_fields"), "nothing in the grades region writes a note");
+    let footer = grades_fn("gradesFooterHtml");
+    assert!(footer.contains("From Blackboard") && footer.contains("Overall Grade") && footer.contains("points so far"), "{footer}");
+    assert!(footer.contains("c.basis === \"overall\"") && footer.contains("c.earned") && footer.contains("c.possible"),
+        "points so far sits beside the Overall Grade when the course carries both: {footer}");
+    assert!(footer.contains("data-grades-refresh") && footer.contains("updated "), "Refresh and the age: {footer}");
+    // The four statuses the engine sends, each with words.
+    for s in ["graded", "needs-grading", "not-submitted", "exempt"] {
+        assert!(all.contains(&format!("\"{s}\"")), "status {s} has a label");
+    }
+}
+
+#[test]
+fn every_number_on_the_strip_is_the_engines() {
+    let js = grades_js();
+    for banned in ["reduce(", "Math.round(", "/ c.possible", "* 100", "/ 100", "parseFloat("] {
+        assert!(!js.contains(banned), "the grades region computes ({banned}): every number comes from state.grades");
+    }
+}
+
+#[test]
+fn the_grades_buttons_and_the_settings_row_are_in_the_page() {
+    let js = grades_js();
+    for hook in ["data-grades-connect", "data-grades-refresh", "data-grades-course"] {
+        assert!(js.contains(hook), "{hook}");
+    }
+    assert!(js.contains("invoke(\"grades_forget\""), "Forget calls grades_forget");
+    let html = read("index.html");
+    assert!(html.contains("id=\"set-grades\"") && html.contains("id=\"set-grades-forget\"") && html.contains("Forget Blackboard sign-in"), "settings carry Forget Blackboard sign-in");
+    let css = read("console.css");
+    assert!(css.contains(".grades") && css.contains(".ring"), "the strip is styled");
+}
+
+/// Spec §2 and §9 (T9 finding 3): *Hide grades* is a settings row like *Start with Windows*, a box
+/// whose change goes through `set_settings` (the grades commands stay four). The box shows
+/// `grades_status`'s `hidden`, which opening the panel re-reads; `drawGrades` already hides the strip
+/// on it.
+#[test]
+fn the_settings_panel_hides_grades_through_set_settings() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"set-grades-hide\"") && html.contains("Hide grades") && html.contains("<input type=\"checkbox\" id=\"set-grades-hide-in\">"), "the settings row");
+    let js = grades_js();
+    assert!(js.contains("EL(\"set-grades-hide-in\").addEventListener(\"change\""), "the box is wired");
+    assert!(js.contains("invoke(\"set_settings\", { patch: { grades_hidden: EL(\"set-grades-hide-in\").checked } })"), "through set_settings, like the other rows");
+    let draw = grades_fn("drawGrades");
+    assert!(draw.contains("EL(\"set-grades-hide-in\").checked = !!s.hidden"), "the box shows grades_status's hidden: {draw}");
+    let all = read("console.js");
+    let at = all.find("function openSettings(").expect("openSettings");
+    let rest = &all[at + 1..];
+    let open = &all[at..at + 1 + rest.find("\n  function ").unwrap_or(rest.len())];
+    assert!(open.contains("gradesStatus()"), "opening the panel re-reads grades_status: {open}");
+}
+
+#[test]
+fn a_note_drawer_is_never_hijacked_by_a_grades_repaint() {
+    // The one #drawer is shared: the breakdown's open marker must not outlive the breakdown.
+    let refresh = grades_fn("refreshGradesDrawer");
+    assert!(refresh.contains("getAttribute(\"data-kind\") === \"grades\""), "a repaint only rebuilds a drawer that is the breakdown: {refresh}");
+    let js = read("console.js");
+    let at = js.find("function openDrawer(").expect("openDrawer");
+    let rest = &js[at + 1..];
+    let body = &js[at..at + 1 + rest.find("\n  function ").unwrap_or(rest.len())];
+    assert!(body.matches("removeAttribute(\"data-grades-open\")").count() >= 2, "openDrawer clears the marker on both its found and not-found paths: {body}");
+}
+
+// M2 T5a.1 (spec tests 27 and 28, the drawer halves).
+#[test]
+fn the_drawer_saves_a_body_with_expected() {
+    let js = read("console.js");
+    let at = js.find("function openBodyEditor(").expect("the drawer's body editor");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    let ed = &js[at..end];
+    assert!(ed.contains("invoke(\"set_body\"") && ed.contains("id: id") && ed.contains("expected: expected") && ed.contains("body: ta.value"), "set_body carries id, expected and body");
+    assert!(js.contains("Add notes") && js.contains("data-body-edit"), "an empty body offers Add notes");
+    assert!(ed.contains("ctrlKey") && ed.contains("Escape"), "Ctrl+Enter saves, Esc cancels");
+    assert!(ed.contains("lock(true)") && ed.contains("lock(false)"), "controls stay disabled until the envelope returns");
+    assert!(js.contains("tasks") && js.contains("BODY_FOLDERS"), "only tasks and courses are editable");
+}
+
+#[test]
+fn no_ui_event_carries_body_text() {
+    let js = read("console.js");
+    assert!(js.contains("\"edit_started\", id, \"body\"") && js.contains("\"edit_committed\", id, \"body\"") && js.contains("\"edit_cancelled\", id, \"body\""), "body events use object_kind body");
+    let at = js.find("function openBodyEditor(").expect("the drawer's body editor");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    for line in js[at..end].lines().filter(|l| l.contains("ui_event") || l.contains("ev(")) {
+        assert!(!line.contains("ta.value") && !line.contains("expected") && !line.contains("body:"), "a ui event carries body text: {line}");
+    }
+}
+
+// M2 T5a.2 (spec tests 29 and 32, the drawer halves, and the plan's conflict test).
+#[test]
+fn a_poll_leaves_an_open_editor_alone() {
+    let js = read("console.js");
+    assert!(js.contains("data-open-editor"), "an open editor is marked");
+    let at = js.find("function refreshGradesDrawer(").expect("the one background drawer rewrite");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    assert!(js[at..end].contains("editorOpen()"), "a background repaint of the drawer skips an open editor");
+    let p = js.find("function paint(").unwrap();
+    let pe = js[p..].find("\n  }\n").map(|i| p + i).unwrap();
+    assert!(!js[p..pe].contains("openDrawer(") && !js[p..pe].contains("EL(\"drawer\").innerHTML"), "paint never rebuilds the drawer");
+    let q = js.find("function poll(").unwrap();
+    let qe = js[q..].find("\n  }\n").map(|i| q + i).unwrap();
+    assert!(!js[q..qe].contains("openDrawer("), "poll never reopens the drawer");
+}
+
+#[test]
+fn body_undo_sends_the_reread_body_as_expected() {
+    let js = read("console.js");
+    let at = js.find("function offerBodyUndo(").expect("the Saved - Undo toast");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    let u = &js[at..end];
+    assert!(u.contains("Saved") && u.contains("Undo") && u.contains("10000"), "a 10-second Saved - Undo toast");
+    assert!(u.contains("invoke(\"note\"") && u.contains("expected: env.note.body") && u.contains("body: before"), "undo's expected is the re-read body, its body the pre-edit text");
+    assert!(!u.contains("ta.value"), "never the textarea's value");
+    assert!(js.contains("edit_cancelled") && !u.contains("ev(\"edit_undone"), "no new telemetry action");
+}
+
+#[test]
+fn the_saved_toast_dies_with_its_drawer() {
+    let js = read("console.js");
+    assert!(js.contains("function dropSavedToast(") && js.contains(".savedtoast"), "one helper removes the toast");
+    for f in ["function openDrawer(", "function openGradesDrawer("] {
+        let at = js.find(f).unwrap();
+        let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap();
+        assert!(js[at..end].contains("dropSavedToast()"), "{f} drops the toast of the previous note");
+    }
+    let at = js.find("function openDrawer(").unwrap();
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap();
+    assert!(js[at..end].contains("click\", function () { dropSavedToast(); d.hidden = true;"), "closing the drawer drops the toast");
+    let u = js.find("function offerBodyUndo(").unwrap();
+    assert!(js[u..u + 600].contains("data-id") && js[u..u + 600].contains("!== id"), "a toast is only raised for the open drawer");
+}
+
+#[test]
+fn a_body_conflict_keeps_the_draft() {
+    let js = read("console.js");
+    let at = js.find("function openBodyEditor(").expect("the drawer's body editor");
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    let ed = &js[at..end];
+    assert!(ed.contains("env.conflict"), "a conflict envelope has its own state");
+    assert!(ed.contains("This note changed since you opened it. Your text is still here. Copy it, then reload to see the new version."), "the spec's line");
+    assert!(ed.contains("copy_text") && ed.contains("data-body-copy") && ed.contains("data-body-reload"), "Copy and Reload");
+    assert!(ed.contains("confirm("), "Reload asks before it discards the draft");
+    let c = ed.find("env.conflict").unwrap();
+    assert!(!ed[c..c + 600].contains("ta.value = "), "the draft is never refilled");
+}
+
+// M2 T5b.1 (spec tests 27, 28 and 32, the preferences halves).
+fn prefs_js() -> String {
+    let js = read("console.js");
+    let at = js.find("// M2 T5b.1").expect("the preferences section");
+    let end = js[at..].find("// M2 T5b.1 end").map(|i| at + i).expect("its end marker");
+    js[at..end].to_string()
+}
+
+#[test]
+fn settings_reads_and_saves_preferences() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"set-prefs-ta\"") && html.contains("id=\"set-prefs-save\"") && html.contains("id=\"set-prefs-count\""), "a textarea, a counter and its own Save");
+    assert!(html.contains("Your preferences") && html.contains("How you like to work"), "the section and its part");
+    for fact in ["600 characters", "one call", "keep them", "stays on this computer"] {
+        assert!(html.contains(fact), "the copy keeps its fact: {fact}");
+    }
+    let p = prefs_js();
+    assert!(p.contains("invoke(\"profile\""), "the panel reads profile");
+    assert!(p.contains("invoke(\"set_preferences\"") && p.contains("expected: PREFS.loaded"), "Save sends expected");
+    assert!(p.contains("env.conflict") && p.contains("data-prefs-conflict") && p.contains("Your text is still here"), "a conflict keeps the draft");
+    assert!(p.contains("showRefusal("), "other refusals use showRefusal");
+    let js = read("console.js");
+    let o = js.find("function openSettings(").unwrap();
+    let oe = js[o..].find("\n  }\n").map(|i| o + i).unwrap();
+    assert!(js[o..oe].contains("loadPrefs("), "opening Settings loads the preferences");
+}
+
+#[test]
+fn no_settings_ui_event_carries_preferences_text() {
+    let p = prefs_js();
+    assert!(p.contains("\"edit_started\", null, \"preferences\"") && p.contains("\"edit_committed\", null, \"preferences\"") && p.contains("\"edit_cancelled\", null, \"preferences\""), "preferences events use object_kind preferences");
+    for line in p.lines().filter(|l| l.contains("ui_event") || l.contains("ev(")) {
+        for bad in ["ta.value", "PREFS", "before", "after", "text", "expected", "draft"] {
+            assert!(!line.contains(bad), "a ui event carries preferences text ({bad}): {line}");
+        }
+    }
+}
+
+#[test]
+fn settings_offers_undo_for_preferences() {
+    let p = prefs_js();
+    let at = p.find("function offerPrefsUndo(").expect("the Saved - Undo toast");
+    let end = p[at..].find("\n  }\n").map(|i| at + i).unwrap_or(p.len());
+    let u = &p[at..end];
+    assert!(u.contains("Saved") && u.contains("Undo") && u.contains("10000"), "a 10-second Saved - Undo toast");
+    assert!(u.contains("invoke(\"set_preferences\"") && u.contains("expected: after") && u.contains("text: before"), "undo's expected is the text profile returned after the save");
+    assert!(p.contains("invoke(\"profile\"") && p.contains("offerPrefsUndo(before, PREFS.loaded)"), "after is the re-read text");
+    assert!(!u.contains("ta.value"), "never the textarea's value");
+}
+
+// M2 T5b.2 (spec tests 27, 28 and 32, the interests halves; plan addition for D10).
+fn ints_js() -> String {
+    let js = read("console.js");
+    let at = js.find("// M2 T5b.2").expect("the interests section");
+    let end = js[at..].find("// M2 T5b.2 end").map(|i| at + i).expect("its end marker");
+    js[at..end].to_string()
+}
+
+#[test]
+fn settings_reads_and_saves_interests() {
+    let html = read("index.html");
+    for id in ["set-int-strong", "set-int-mild", "set-int-never", "set-int-clubs", "set-int-save"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
+    }
+    for label in ["Campus events", "Always show me", "Maybe", "Never show me", "Clubs I&rsquo;m in"] {
+        assert!(html.contains(label), "the section keeps: {label}");
+    }
+    let n = html.find("id=\"set-int-note\"").expect("the interests note");
+    let note = &html[n..n + html[n..].find("</p>").expect("note end")];
+    // Spec 9.2 / plan T5b: every fixed fact, on this line, not only on the preferences line.
+    for fact in ["600", "one call", "each event it judges", "neither we nor the model&rsquo;s host keep", "stay on this computer"] {
+        assert!(note.contains(fact), "the interests note keeps the disclosure: {fact}");
+    }
+    let p = ints_js();
+    assert!(p.contains("invoke(\"set_interests\"") && p.contains("strong:") && p.contains("mild:") && p.contains("never:") && p.contains("clubs:"), "Save sends the four lists");
+    assert!(p.contains("showRefusal("), "a refusal is shown, the draft kept");
+    let js = read("console.js");
+    let o = js.find("function openSettings(").unwrap();
+    let oe = js[o..].find("\n  }\n").map(|i| o + i).unwrap();
+    assert!(js[o..oe].contains("loadInterests("), "opening Settings loads the lists");
+}
+
+#[test]
+fn no_settings_ui_event_carries_interests_text() {
+    let p = ints_js();
+    assert!(p.contains("\"edit_started\", null, \"interests\"") && p.contains("\"edit_committed\", null, \"interests\"") && p.contains("\"edit_cancelled\", null, \"interests\""), "interests events use object_kind interests");
+    for line in p.lines().filter(|l| l.contains("ui_event") || l.contains("ev(")) {
+        for bad in ["value", "INT", "before", "after", "lists", "draft", "strong", "clubs"] {
+            assert!(!line.contains(bad), "a ui event carries interests text ({bad}): {line}");
+        }
+    }
+}
+
+#[test]
+fn settings_offers_undo_for_interests() {
+    let p = ints_js();
+    let at = p.find("function offerIntUndo(").expect("the Saved - Undo toast");
+    let end = p[at..].find("\n  }\n").map(|i| at + i).unwrap_or(p.len());
+    let u = &p[at..end];
+    assert!(u.contains("Saved") && u.contains("Undo") && u.contains("10000"), "a 10-second Saved - Undo toast");
+    assert!(u.contains("invoke(\"set_interests\"") && u.contains("before.strong") && u.contains("before.clubs"), "undo sends the four lists held before the save");
+}
+
+#[test]
+fn interests_are_read_only_when_not_editable() {
+    let p = ints_js();
+    assert!(p.contains("interests_editable"), "the page reads the flag");
+    assert!(p.contains("readOnly") && p.contains("set-int-save"), "the lists lock and Save is disabled");
+    assert!(p.contains("Knowlu can only edit a list written on one line"), "D10's reason is shown");
+}
+
+fn notshown_js() -> String {
+    let js = read("console.js");
+    let at = js.find("// M2 T7").expect("the Not shown section");
+    let end = js[at..].find("// M2 T7 end").map(|i| at + i).expect("its end marker");
+    js[at..end].to_string()
+}
+
+#[test]
+fn coming_up_offers_a_not_shown_list_from_dropped_events() {
+    let n = notshown_js();
+    assert!(read("index.html").contains("id=\"cu-ns\""), "the container sits under Coming up");
+    assert!(n.contains("invoke(\"dropped_events\""), "the page reads dropped_events");
+    assert!(n.contains("Not shown (") && n.contains("<details"), "a collapsed list titled Not shown (N)");
+    for f in ["d.title", "d.date", "d.reason"] {
+        assert!(n.contains(&format!("h({f}")), "{f} is escaped text");
+    }
+    assert!(n.contains("!list.length") || n.contains("list.length === 0"), "an empty list renders nothing");
+    assert!(n.contains(".catch(") && n.contains("Not shown is unavailable"), "a refusal is one quiet line");
+    assert!(!n.contains("data-") && !n.contains("<button") && !n.contains("invoke(\"ui_event\""), "read-only: no write action: {n}");
+    // Fetched when Coming up renders, not on every poll.
+    let render = read("console.js");
+    let at = render.find("function renderComingUp(").unwrap();
+    let body = &render[at..at + render[at..].find("\n  }\n").unwrap()];
+    assert!(body.contains("renderNotShown("), "renderComingUp triggers it");
+    assert!(!render[render.find("function poll(").unwrap()..].split("// Task 13").next().unwrap().contains("dropped_events"), "poll does not fetch it");
+}
+
+// events T5 (spec test 26, P8, PQ3, P17, PQ6 (b)).
+fn fn_body<'a>(js: &'a str, head: &str) -> &'a str {
+    let at = js.find(head).unwrap_or_else(|| panic!("{head}"));
+    let end = js[at..].find("\n  }\n").map(|i| at + i).unwrap_or(js.len());
+    &js[at..end]
+}
+
+#[test]
+fn event_cards_read_accept_and_decline_and_send_the_same_verdicts() {
+    let js = read("console.js");
+    let l = fn_body(&js, "function verdictLabels(");
+    assert!(l.contains("event-accept") && l.contains("event-check") && l.contains("Accept") && l.contains("Decline"), "one switch names both kinds");
+    assert!(l.contains("Approve") && l.contains("Reject"), "other kinds keep Approve and Reject");
+    for f in ["function renderDeck(", "function renderDecisionsView("] {
+        let b = js.split(f).nth(1).unwrap().split("\n  function ").next().unwrap();
+        assert!(b.contains("verdictLabels(c.kind)"), "{f} reads the switch");
+        assert!(b.contains("data-verdict=\"approved\"") && b.contains("data-verdict=\"rejected\""), "{f} still sends approved and rejected");
+        assert!(!b.contains(">Approve<") && !b.contains(">Reject<"), "{f} has no fixed label");
+    }
+    assert!(js.contains("data-answer-in>Answer&hellip;"), "commitment-ask keeps Answer");
+}
+
+#[test]
+fn coming_up_shows_accepted_events() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function renderComingUp(");
+    assert!(b.contains("e.accepted") && b.contains("Accepted"), "the tag");
+    assert!(b.contains("h(e.provenance)"), "the carry's provenance, escaped, as the engine gives it");
+    assert!(b.contains("e.provenance ?") || b.contains("e.provenance)"), "provenance replaces the plain tag");
+}
+
+#[test]
+fn coming_up_shows_the_carrys_provenance() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function renderComingUp(");
+    let p = b.find("e.provenance").unwrap();
+    let a = b.find("\"Accepted\"").unwrap();
+    assert!(p < a, "provenance is tried first; plain Accepted is the fallback");
+}
+
+#[test]
+fn the_lane_offers_remove_on_accepted_dates_only() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function renderTheDay(");
+    assert!(b.contains("all_day_uids"), "reads the uids");
+    assert!(b.contains("Remove from my day") && b.contains("data-lane-remove=\"") && b.contains("data-title=\""), "the button carries uid and title");
+    assert!(b.contains("(all day) "), "an entry without a uid renders as today");
+    assert!(b.contains("h(uid)") && b.contains("h(t)"), "escaped");
+    assert!(b.contains("pendingLaneRemovals"), "a pending uid is skipped");
+}
+
+#[test]
+fn remove_from_my_day_hides_at_once_and_calls_when_the_undo_toast_closes() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function removeFromMyDay(");
+    assert!(b.contains("pendingLaneRemovals[") && b.contains("renderTheDay("), "hidden at once");
+    assert!(b.contains("Removed") && b.contains("Undo") && b.contains("10000"), "Removed - Undo for 10 seconds");
+    assert!(b.contains("className = \"lanetoast\"") && !b.contains("savedtoast"), "its own class, which dropSavedToast leaves alone");
+    assert!(read("console.css").contains(".savedtoast, .settoast, .lanetoast"), "styled by the existing rule");
+    assert!(b.contains("invoke(\"remove_lane_date\", { view: stateView(), uid: uid })"), "the one invoke, with the view and uid");
+    assert!(b.contains("applyEnvelope("), "the envelope goes to applyEnvelope");
+    assert!(!js.contains("confirm(\"Remove"), "no window.confirm");
+    let call = b.find("invoke(\"remove_lane_date\"").unwrap();
+    let to = b.find("setTimeout(").unwrap();
+    assert!(to < call, "the call sits behind the timer");
+    assert!(js.contains("[data-lane-remove]") && js.contains("removeFromMyDay("), "the delegated handler");
+    assert!(!b.contains("ev("), "no telemetry row of its own (D12)");
+}
+
+#[test]
+fn a_refused_removal_repaints_the_lane() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function removeFromMyDay(");
+    let d = b.find("delete pendingLaneRemovals[uid];").unwrap();
+    let r = b[d..].find("renderTheDay(").expect("the .then branch re-renders");
+    let a = b[d..].find("applyEnvelope(").unwrap();
+    assert!(r < a, "the lane is repainted before the envelope is applied, state or not");
+    assert!(b.contains("querySelectorAll(\".lanetoast\")"), "a second pending toast is offset, not stacked on the first");
+}
+
+#[test]
+fn undo_within_the_toast_never_calls_remove_lane_date() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function removeFromMyDay(");
+    let u = b.find("data-lane-undo").expect("an Undo button");
+    assert!(b.contains("clearTimeout("), "undo cancels the timer");
+    assert!(b[u..].contains("delete pendingLaneRemovals["), "undo clears the pending uid");
+    assert_eq!(js.matches("invoke(\"remove_lane_date\"").count(), 1, "one call site, behind the timer");
+}
+
+/// Live proof 2026-10-02 (F2): the row keeps polling until the consent link's own lifetime (the
+/// server's nonce dies ten minutes after minting), backing off gently, then offers "Check again",
+/// which re-reads the status and never mints a new link. Reconnect shares the same code.
+#[test]
+fn the_google_row_waits_out_the_link_lifetime_then_offers_check_again() {
+    let js = read("console.js");
+    let html = read("index.html");
+    assert!(js.contains("var GOOGLE_LINK_LIFETIME_MS = 600000;"), "ten minutes, the nonce's lifetime");
+    assert!(js.contains("var GOOGLE_NO_ANSWER = \"Didn\u{2019}t hear back from Google.\";"));
+    let start = js.find("async function connectGoogle(").expect("connectGoogle");
+    let end = start + js[start..].find("\n  }\n").expect("end of connectGoogle");
+    let f = &js[start..end];
+    assert!(!f.contains("i < 20"), "no fixed count of polls: {f}");
+    assert!(f.contains("GOOGLE_LINK_LIFETIME_MS") && f.contains("Date.now()"), "{f}");
+    assert!(f.contains("delay = Math.min("), "the wait grows between polls: {f}");
+    assert!(f.contains("SET.googleWaitedOut = !googleDone("), "{f}");
+    assert!(html.contains("id=\"set-google-check\"") && html.contains(">Check again</button>"));
+    let r = js.find("function renderGoogleRow(").expect("renderGoogleRow");
+    let r_end = r + js[r..].find("\n  }\n").expect("end");
+    assert!(js[r..r_end].contains("EL(\"set-google-check\").hidden = !SET.googleWaitedOut"), "shown only after the wait ran out");
+    assert!(js[r..r_end].contains("GOOGLE_NO_ANSWER"));
+    let c = js.find("function checkGoogleAgain(").expect("checkGoogleAgain");
+    let c_end = c + js[c..].find("\n  }\n").expect("end");
+    assert!(js[c..c_end].contains("invoke(\"google_status\"") && !js[c..c_end].contains("google_connect"), "re-polls status, never re-mints");
+    assert!(js.contains("closest(\"#set-google-check\")) { checkGoogleAgain(); return; }"));
+    assert_eq!(js.matches("invoke(\"google_connect\", { scope: scope })").count(), 1, "only connectGoogle mints a link");
+}
+
+#[test]
+fn a_gmail_card_shows_its_gmail_attribution_and_never_a_sender() {
+    let js = read("console.js");
+    assert!(js.contains("function sourceLabel(c)"), "one helper names a card's source");
+    assert!(js.contains("from Gmail"), "the label words");
+    let deck = js.split("function renderDeck(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(deck.contains("sourceLabel(c)"), "the deck card carries the label");
+    let view = js.split("function renderDecisionsView(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(view.contains("sourceLabel(c)"), "so does the decisions row");
+    // D21 (T15.5) and Checkpoint D (minor 4): only a mail card names a sender. `surface` sends `from`,
+    // `mail_date` and `evidence` only on a `created_by: mail` card (the engine's
+    // a_card_not_written_by_the_mail_pass_never_carries_a_sender), and the page reads the three in
+    // `mailCardLine` and nowhere else, which draws nothing when none is there. So a Gmail card never
+    // shows a sender.
+    assert!(!js.contains("c.sender"), "never the sender");
+    // The Gmail label itself names no sender in any spelling (`c["evidence"]` included), beside the count below.
+    let label = fn_body(&js, "function sourceLabel(c)");
+    assert!(!label.contains("c.from") && !label.contains("mail_date") && !label.contains("evidence"), "the Gmail label never names a sender");
+    let line = fn_body(&js, "function mailCardLine(c)");
+    assert!(line.contains("if (!c.from && !c.mail_date && !c.evidence) { return \"\"; }"), "no keys, no line: {line}");
+    for key in ["c.from", "c.mail_date", "c.evidence"] {
+        assert!(line.contains(key), "mailCardLine reads {key}");
+        assert_eq!(js.matches(key).count(), line.matches(key).count(), "{key} is read outside mailCardLine");
+    }
+}
+
+// ---- T15.1: the mail progress view (email spec §4.5, D6, BW) ----------------------------------------
+
+fn mail_progress_fn(js: &str) -> &str {
+    let at = js.find("// ---- mail progress view").expect("the progress view's section");
+    let end = js[at..].find("// ---- end mail progress view").expect("its end marker");
+    &js[at..at + end]
+}
+
+#[test]
+fn the_progress_view_shows_one_row_per_step_with_its_state() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let v = mail_progress_fn(&js);
+    for id in ["mail-progress", "mp-sentence", "mp-rows", "mp-backfill", "mp-ask", "mp-end", "mp-leave", "mp-stop"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
+    }
+    for step in ["sign_in", "step_aside", "forwarding", "add_address", "confirm_address", "turn_on", "canary", "backfill", "finish"] {
+        assert!(v.contains(&format!("{step}:")), "label for {step}");
+    }
+    for st in ["waiting", "working", "done", "needs_you", "done_by_hand", "skipped", "failed"] {
+        assert!(v.contains(&format!("{st}:")), "label for state {st}");
+    }
+    assert!(v.contains("p.rows.forEach") && v.contains("class=\"mp-row mp-"), "one row per step, the state as a class");
+    assert!(v.contains("invoke(\"mail_setup_progress\""), "polled");
+}
+
+#[test]
+fn needs_you_names_its_reason_and_offers_its_answers() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    for r in ["guided", "forwarding_elsewhere", "not_found", "script_failed", "blocked"] {
+        assert!(v.contains(&format!("{r}:")), "reason {r}");
+    }
+    assert!(v.contains("row.reason") && v.contains("MP_REASON["));
+    assert!(v.contains("invoke(\"mail_setup_answer\", { choice: \"done\" })"), "I've done this");
+    assert!(v.contains("{ choice: \"retry\" }") && v.contains("{ choice: \"replace\" }") && v.contains("{ choice: \"stop\" }"));
+    assert!(v.contains("{ choice: { school_address:"), "the one question of an uncurated school");
+    assert!(v.contains("personal_gmail") && v.contains("invoke(\"mail_setup_start\", { provider: \"gmail\" })"));
+}
+
+#[test]
+fn a_failed_sign_in_row_says_why_in_its_own_words() {
+    // T18c (2026-10-05): a sign-in that fails is a failed row with a reason; "could not find the setting"
+    // is the forwarding steps' sentence and misleads on a sign-in, so sign-in has its own.
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    let words = v.split("var MP_STEP_REASON = { sign_in: {").nth(1).expect("sign-in's own reasons").split("} };").next().unwrap();
+    for r in ["not_found:", "script_failed:"] {
+        assert!(words.contains(r), "sign-in reason {r}");
+    }
+    assert!(words.contains("address"), "not_found on sign-in names the mailbox address it could not read");
+    assert!(v.contains("(MP_STEP_REASON[row.step] || {})[row.reason] || MP_REASON[row.reason]"), "a row reads its step's own reasons first");
+}
+
+#[test]
+fn a_sign_in_the_service_refuses_says_so_and_points_at_settings() {
+    // T18c (2026-10-05): a mailbox another of the account's setups already holds read "Signing in did not
+    // finish". It has its own words, naming Settings → Email, and any other refusal its own.
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    let words = v.split("var MP_STEP_REASON = { sign_in: {").nth(1).expect("sign-in's own reasons").split("} };").next().unwrap();
+    let already = words.split("already_connected:").nth(1).expect("already_connected has words").split("\",").next().unwrap();
+    assert!(already.contains("already set up in Knowlu"), "{already}");
+    assert!(already.contains("Settings") && already.contains("Email"), "it points at Settings → Email: {already}");
+    assert!(already.contains("resume") && already.contains("turn it off"), "{already}");
+    assert!(words.contains("refused:"), "a refusal of another kind has words too");
+}
+
+#[test]
+fn a_refused_sign_in_never_promises_that_starting_again_fixes_it() {
+    // T18c review: a 422 (the address does not fit the provider) or a 409 refuses every retry the same way,
+    // so the row names the service's reason (the ended line, shown below the rows) and promises nothing.
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    let words = v.split("var MP_STEP_REASON = { sign_in: {").nth(1).expect("sign-in's own reasons").split("} };").next().unwrap();
+    let refused = words.split("refused:").nth(1).expect("refused has words").split("\"").nth(1).unwrap();
+    assert!(!refused.contains("again"), "{refused}");
+    assert!(refused.contains("below"), "it points at the service's reason: {refused}");
+    // already_connected's row says what its ended line says: the line is not shown a second time.
+    // ... unless the setup kept its address: that line is said only there.
+    assert!(v.contains("if (!kept && p.rows.some(function (x) { return x.reason === \"already_connected\"; })) { end = \"\"; }"), "the already_connected line is dropped");
+    // Kept is the progress's own flag (runner.rs sets it on a kept end), never a match on the line's words.
+    assert!(v.contains("var kept = p.kept === true;"), "kept reads the flag");
+    assert!(!v.contains("was kept because Settings showed it"), "no text match on the kept line");
+}
+
+#[test]
+fn an_ended_setup_never_shows_the_same_sentence_twice() {
+    // T18c (2026-10-05): a refused mint ends with the service's sentence as both the view's sentence and
+    // the ended line (Settings reads the line); the view shows it once.
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("end = p.line && p.line !== p.sentence ? p.line : \"\";"), "the line is shown only when it adds something");
+}
+
+#[test]
+fn a_guided_step_shows_the_address_with_copy_and_its_path() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("data-mp-copy") && v.contains("navigator.clipboard.writeText"), "the address with a Copy button");
+    assert!(v.contains("invoke(\"mail_status\"") && v.contains("p.address_id"), "the address is read from the service by id");
+    assert!(v.contains("MP_PATH[p.provider]") && v.contains("row.step"), "the path is keyed on provider and step");
+    for prov in ["m365:", "google:", "other:"] {
+        assert!(v.contains(prov), "a path for {prov}");
+    }
+    let paths = &v[v.find("var MP_PATH = {").unwrap()..v.find("var MP_PATH_CONFIRM").unwrap()];
+    for line in paths.lines().filter(|l| l.contains('[')) {
+        assert!(line.matches("\", \"").count() + 1 <= 4, "four lines or fewer: {line}");
+    }
+}
+
+#[test]
+fn the_backfill_row_names_its_start_date_and_asks_nothing() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("mail from the last 120 days, since "), "the plan's copy");
+    assert!(v.contains("b.since"));
+    assert!(!v.contains("type=\"date\"") && !v.contains("term start") && !v.contains("confirm the date"), "no date is asked");
+}
+
+#[test]
+fn leave_closes_the_panel_and_settings_carries_the_progress() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("function mailLeave(") && fn_body(&js, "function mailLeave(").contains("EL(\"mail-progress\").hidden = true"));
+    assert!(!fn_body(&js, "function mailLeave(").contains("mail_setup_stop"), "leaving never stops the setup");
+    assert!(html.contains("id=\"set-email\"") && html.contains("id=\"set-email-state\"") && html.contains("id=\"set-email-open\""));
+    assert!(fn_body(&js, "function openSettings(").contains("mailSettingsRow("));
+    assert!(fn_body(&js, "function mailSettingsRow(").contains("mail_setup_progress"));
+}
+
+#[test]
+fn stop_invokes_mail_setup_stop_and_shows_what_was_done() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert_eq!(v.matches("invoke(\"mail_setup_stop\"").count(), 1);
+    assert!(v.contains("p.done") && v.contains("p.left") && v.contains("not_brought_in_before"));
+    assert!(v.contains(" was not brought in"));
+    assert!(v.contains("closest(\"#mp-stop\")"));
+}
+
+#[test]
+fn backfill_shows_n_of_m_and_a_time_left() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(v.contains("b.handled") && v.contains("b.expected") && v.contains(" of "));
+    assert!(v.contains("b.eta_secs") && v.contains(" left"));
+    assert!(v.contains("b.paused"));
+}
+
+#[test]
+fn the_consoles_first_open_starts_school_mail_setup_when_offer_pending() {
+    let js = read("console.js");
+    let b = fn_body(&js, "function bootConsole(");
+    assert!(b.contains("mailFirstOpen()"));
+    let f = fn_body(&js, "function mailFirstOpen(");
+    assert!(f.contains("invoke(\"mail_status\"") && f.contains("offer_pending") && f.contains("setup_running"));
+    assert!(f.contains("invoke(\"mail_setup_start\", { provider: \"school\" })"));
+    assert_eq!(js.matches("invoke(\"mail_setup_start\", { provider: \"school\" })").count(), 2, "first open and the Settings offer");
+}
+
+#[test]
+fn the_progress_view_never_reaches_ui_event_and_every_string_goes_through_h() {
+    let js = read("console.js");
+    let v = mail_progress_fn(&js);
+    assert!(!v.contains("ui_event") && !v.contains("ev("), "no usage events from the mail view");
+    assert!(!v.contains("innerHTML = p.") && !v.contains("+ p.sentence"), "the engine's sentence is set as text");
+}
+
+// ---- T15.2: Settings -> Email (email spec §4.12, §4.13, D15) ----------------------------------------
+
+fn mail_settings(js: &str) -> &str {
+    let at = js.find("// ---- mail settings").expect("the Settings -> Email section");
+    let end = js[at..].find("// ---- end mail settings").expect("its end marker");
+    &js[at..at + end]
+}
+
+#[test]
+fn settings_email_lists_each_mailbox_with_its_state_and_its_address_with_copy() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let v = mail_settings(&js);
+    assert!(html.contains("id=\"set-email-boxes\"") && html.contains("id=\"set-email-keep\""));
+    assert!(v.contains("invoke(\"mail_status\"") && v.contains("s.mailboxes.forEach"), "one row per mailbox");
+    for st in ["pending", "confirmed", "active", "quiet", "blocked", "off", "paused_send", "lapsed", "revoked"] {
+        assert!(v.contains(&format!("{st}:")), "a sentence for state {st}");
+    }
+    assert!(v.contains("m.address") && v.contains("data-em-copy") && v.contains("navigator.clipboard.writeText"), "the address with Copy");
+    assert!(v.contains("m.turned_off") && v.contains("m.open_backfill"));
+    assert!(v.contains("Mail from the last 120 days") || v.contains("recent mail"), "an open backfill is said");
+    assert!(v.contains("m.provider === \"m365\"") && v.contains("New mail is arriving. Knowlu will bring in older Outlook mail on a later run."), "a Microsoft 365 backfill says so and offers no Resume");
+}
+
+#[test]
+fn resume_rotate_and_the_saved_sign_in_switch_invoke_their_commands() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("invoke(\"mail_sign_in\", { addressId: id })"), "Resume");
+    assert!(v.contains("invoke(\"mail_rotate\", { addressId: id })"), "Rotate");
+    assert!(v.contains("invoke(\"mail_keep_session\", { on: "), "the switch");
+    assert!(v.contains("profiles_left"), "a profile the switch could not delete is named");
+    let rows = v.find("function mailBoxRow(").map(|i| &v[i..]).expect("the row builder");
+    assert!(rows.contains("emBtn(\"Resume\", \"resume\"") && rows.contains("emBtn(\"Rotate\", \"rotate\"")); 
+}
+
+#[test]
+fn turn_off_email_is_two_steps_with_the_confirm_text() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("Knowlu turns off forwarding in this mailbox, stops reading it and deletes what it holds to serve it. What it already added stays in your plan."));
+    assert!(v.contains("emBtn(\"Turn off email\", \"off1\"") && v.contains("emBtn(\"Yes, turn off email\", \"off2\""));
+    assert_eq!(v.matches("invoke(\"mail_disconnect\", { addressId: id })").count(), 1, "only the second press invokes it");
+    let first = v.split("act === \"off1\"").nth(1).unwrap().split("act ===").next().unwrap();
+    assert!(!first.contains("mail_disconnect"), "the first press only reveals the second");
+}
+
+#[test]
+fn turn_off_email_names_a_forwarding_address_it_left_for_the_student() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("remove_address") && v.contains("needs_you"));
+    assert!(v.contains("Knowlu’s forwarding address is still in your Gmail forwarding list"), "says it is still there");
+    assert!(v.contains("Settings, then See all settings, then Forwarding and POP/IMAP"), "names where to remove it");
+    assert!(v.contains("r.address") && v.contains("data-em-copy"), "the address is shown to find it");
+}
+
+#[test]
+fn delete_my_data_confirm_adds_the_forwarding_sentence() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("If Knowlu cannot turn forwarding off, your mail keeps going to Knowlu's address and is deleted unread; you can turn it off in your mail settings."));
+    let d = js.split("EL(\"set-delete-1\").addEventListener").nth(1).unwrap().split("EL(\"set-delete-2\").addEventListener").next().unwrap();
+    assert!(d.contains("This deletes your vault, your backups, your account and everything we hold. It cannot be undone."));
+    assert!(d.contains("mailDeleteSentence("), "the sentence is added to the first press's confirm");
+}
+
+#[test]
+fn a_failed_profile_delete_is_named_until_it_succeeds() {
+    let js = read("console.js");
+    let v = mail_settings(&js);
+    assert!(v.contains("s.profile_delete_pending"), "read from mail_status every time Settings opens");
+    assert!(v.contains("could not be deleted from this computer yet"));
+    assert!(fn_body(&js, "function openSettings(").contains("mailSettingsRow("));
+}
+
+#[test]
+fn the_google_row_and_the_email_row_sit_side_by_side() {
+    let html = read("index.html");
+    let g = html.find("id=\"set-google\"").unwrap();
+    let e = html.find("id=\"set-email\"").unwrap();
+    let between = &html[g..e];
+    assert!(e > g && between.matches("class=\"set-row\"").count() == 1, "the email row follows the Google row directly");
+    assert!(html.find("id=\"set-email-boxes\"").unwrap() > e && html.find("id=\"set-email-boxes\"").unwrap() < html.find("id=\"set-grades\"").unwrap());
+}
+
+#[test]
+fn an_unbound_reason_shows_amber_with_its_count_and_rotate_only_when_suggested() {
+    let js = read("console.js");
+    let css = read("console.css");
+    let v = mail_settings(&js);
+    assert!(v.contains("m.unbound_reason") && v.contains("m.unbound_note") && v.contains("m.unbound_since_live"));
+    assert!(v.contains("em-amber") && css.contains(".em-amber"));
+    assert!(v.contains("m.suggest_rotate === true") && v.contains("m.suggest_rotate !== true"), "Rotate sits in the amber line only when suggested");
+    assert!(!v.contains("ui_event") && !v.contains("ev("), "nothing mail-derived reaches usage events");
+    assert!(!v.contains("innerHTML = m.") && !v.contains("innerHTML += m."), "every mail string goes through h()");
+}
+
+/// T15.3 (email spec D6, risk 12, section 9): the panel right after sign-in and subscription
+/// announces school mail setup; nothing is set up in the wizard.
+fn mail_panel(html: &str) -> &str {
+    html.split("id=\"wiz-mail\"").nth(1).and_then(|s| s.split("id=\"wiz-vault\"").next()).expect("the mail panel")
+}
+
+#[test]
+fn the_panel_after_sign_in_reads_next_connect_your_school_email() {
+    let html = read("index.html");
+    assert!(html.find("id=\"wiz-mail\"").unwrap() > html.find("id=\"wiz-subscribe\"").unwrap());
+    assert!(html.find("id=\"wiz-mail\"").unwrap() < html.find("id=\"wiz-vault\"").unwrap());
+    assert!(mail_panel(&html).contains("Next: connect your school email"));
+    let js = read("console.js");
+    assert!(js.contains("var PANELS = [\"welcome\", \"account\", \"subscribe\", \"mail\", \"vault\", \"calendars\", \"logins\", \"gmail\", \"slots\", \"finish\"];"));
+}
+
+#[test]
+fn not_now_carries_the_school_rules_sentence() {
+    let html = read("index.html");
+    let p = mail_panel(&html);
+    assert!(p.contains("id=\"wiz-mail-notnow\""), "a one-click Not now");
+    let at = p.find("id=\"wiz-mail-notnow\"").unwrap();
+    let rule = p.find("If your school's rules don't allow forwarding your school email, skip this.")
+        .or_else(|| p.find("If your school&rsquo;s rules don&rsquo;t allow forwarding your school email, skip this."))
+        .expect("risk 12's sentence");
+    assert!(rule > at, "the sentence sits under Not now");
+    let js = read("console.js");
+    assert!(fn_body(&js, "function wizNotNow(").contains("WIZ.mailOffer = false"));
+}
+
+#[test]
+fn finish_sends_offer_mail() {
+    let js = read("console.js");
+    assert!(js.contains("offer_mail: WIZ.mailOffer"), "the plan carries the choice");
+    assert!(js.contains("mailOffer: true"), "the announcement defaults to on");
+    assert!(!fn_body(&js, "function wizFinish(").contains("ui_event"));
+}
+
+#[test]
+fn the_gmail_panel_button_reads_connect_gmail_directly_google_testers_only() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"wiz-gmail-connect\">Connect Gmail directly (Google testers only)</button>"));
+}
+
+// ---- T15.4: "From your email" (email spec §4.14, D10) ------------------------------------------------
+
+fn mail_applied_fn(js: &str) -> &str {
+    let at = js.find("// ---- mail applied").expect("the From your email section");
+    let end = js[at..].find("// ---- end mail applied").expect("its end marker");
+    &js[at..at + end]
+}
+
+#[test]
+fn from_your_email_lists_by_course_items_created_fields_changed_past_archived_and_notices() {
+    let js = read("console.js");
+    let html = read("index.html");
+    let v = mail_applied_fn(&js);
+    for id in ["mail-applied", "ma-body", "ma-close"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
+    }
+    assert!(v.contains("invoke(\"mail_applied\""), "the engine's read-only list");
+    assert!(v.contains("r.courses.forEach") && v.contains("g.course"), "by course");
+    assert!(v.contains("g.created") && v.contains("g.changed") && v.contains("g.archived.count") && v.contains("g.archived.items") && v.contains("g.notices"));
+    assert!(v.contains("<details") && v.contains("<summary"), "the archived count expands");
+    for part in ["Items created", "Fields changed", "Past items archived", "Notices opened"] {
+        assert!(v.contains(part), "heading {part}");
+    }
+    assert!(v.contains("x.sender") && v.contains("x.date") && v.contains("x.old") && v.contains("x.new") && v.contains("x.due"));
+    assert!(!v.contains("innerHTML = x.") && !v.contains("innerHTML += x."), "every mail string goes through h()");
+}
+
+#[test]
+fn undo_invokes_delete_note_set_fields_with_the_old_value_or_close_info() {
+    let js = read("console.js");
+    let v = mail_applied_fn(&js);
+    assert!(v.contains("invoke(\"delete_note\", { view: stateView(), id: row.id })"), "a created item");
+    assert!(v.contains("invoke(\"set_fields\"") && v.contains("fields[row.field] = row.old"), "a changed field, the journal's old value");
+    assert!(v.contains("invoke(\"close_info\", { view: stateView(), id: row.id })"), "a notice");
+    assert!(v.contains("applyEnvelope("), "the console repaints from the envelope");
+    assert!(!v.contains("ui_event") && !v.contains("ev("), "no usage event carries mail text");
+}
+
+#[test]
+fn a_changed_since_row_shows_no_undo() {
+    let js = read("console.js");
+    let v = mail_applied_fn(&js);
+    assert!(v.contains("x.changed_since ?") && v.contains("changed since"), "the fixed words");
+    assert!(v.contains("data-ma-undo"), "the Undo button");
+    let row = fn_body(v, "function maRow(");
+    assert!(row.contains("changed_since") && row.find("changed since").unwrap() < row.find("data-ma-undo").unwrap(), "the branch picks one or the other");
+}
+
+#[test]
+fn from_your_email_opens_from_the_last_progress_row_and_from_settings() {
+    let js = read("console.js");
+    let html = read("index.html");
+    assert!(html.contains("id=\"mp-applied\"") && html.contains("id=\"set-email-applied\""));
+    assert!(js.contains("EL(\"mp-applied\").addEventListener(\"click\", openMailApplied)"));
+    assert!(js.contains("EL(\"set-email-applied\").addEventListener(\"click\", openMailApplied)"));
+    assert!(read("console.css").contains(".ma-row"));
+}
+
+// ---- T15.5: the deck, untrusted text and telemetry (email spec D21, §5.2, §12.4) -----------------------
+
+/// Every occurrence of `.field` (a property read, not `Array.from`) in `js`, with its line.
+fn field_reads<'a>(js: &'a str, fields: &[&str]) -> Vec<(usize, &'a str, String)> {
+    let mut out = Vec::new();
+    for (n, line) in js.lines().enumerate() {
+        let b = line.as_bytes();
+        for f in fields {
+            let pat = format!(".{f}");
+            let mut from = 0;
+            while let Some(i) = line[from..].find(&pat) {
+                let at = from + i;
+                let after = b.get(at + pat.len()).copied().unwrap_or(b' ');
+                let ident_after = after.is_ascii_alphanumeric() || after == b'_';
+                let on_ident = at > 0 && (b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'_');
+                if !ident_after && on_ident && !line[..at].ends_with("Array") {
+                    out.push((n + 1, line, line[..at + pat.len()].to_string()));
+                }
+                from = at + pat.len();
+            }
+        }
+    }
+    out
+}
+
+const MAIL_FIELDS: [&str; 4] = ["from", "mail_date", "evidence", "sender"];
+
+#[test]
+fn a_mail_card_shows_its_sender_date_and_quote() {
+    let js = read("console.js");
+    let css = read("console.css");
+    let f = fn_body(&js, "function mailCardLine(");
+    assert!(f.contains("c.from") && f.contains("c.mail_date") && f.contains("c.evidence"), "the three read-model fields");
+    assert!(f.contains("class=\"mail-from\"") && f.contains("class=\"mail-quote\""), "its two lines");
+    assert!(f.contains("<q>") || f.contains("<blockquote"), "the quote reads as a quote");
+    assert!(f.contains("if (!c.from && !c.mail_date && !c.evidence) { return \"\"; }"), "a card without them is as before");
+    assert!(css.contains(".mail-from") && css.contains(".mail-quote"), "styled");
+    let deck = fn_body(&js, "function renderDeck(");
+    assert!(deck.contains("mailCardLine(c)"), "the deck card");
+    assert!(js.matches("mailCardLine(c)").count() >= 2, "the Decisions view's row too");
+}
+
+#[test]
+fn mail_derived_text_renders_inert() {
+    let js = read("console.js");
+    let f = fn_body(&js, "function mailCardLine(");
+    for part in ["h(c.from)", "h(c.mail_date)", "h(c.evidence)"] {
+        assert!(f.contains(part), "{part}");
+    }
+    assert!(!f.contains("innerHTML") && !f.contains("insertAdjacentHTML"), "the helper builds a string, never writes the DOM");
+    let deck = fn_body(&js, "function renderDeck(");
+    assert!(deck.contains("h(c.title)") && deck.contains("h(c.why || c.kind)"), "title and why through h()");
+    let v = mail_applied_fn(&js);
+    assert!(v.contains("h(x.title)") && v.contains("h(x.sender)") && v.contains("h(x.date)"), "a From your email row, its notices too");
+    // h() itself escapes the five characters that open a tag or an attribute.
+    let hdef = js.lines().find(|l| l.starts_with("  var h = function")).expect("h");
+    for ch in ["&amp;", "&lt;", "&gt;", "&quot;", "&#39;"] {
+        assert!(hdef.contains(ch), "h escapes {ch}");
+    }
+}
+
+/// One read of an untrusted field is safe when it sits directly inside `h(`, is the
+/// fallback `h(c.why || ...)`, or is only a test (`!c.x`, or `c.x ? ...`). `upto` is the line up
+/// to the end of the read; `line` is the whole line.
+fn read_is_safe(line: &str, upto: &str) -> bool {
+    let var_len = upto.len() - upto.rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.')).map_or(0, |i| i + 1);
+    let pre = &upto[..upto.len() - var_len];
+    let post = &line[upto.len()..];
+    let in_h = |p: &str| p.strip_suffix("h(").is_some_and(|b| !b.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.'));
+    in_h(pre) || pre.strip_suffix("c.why || ").is_some_and(in_h) || pre.ends_with('!') || post.starts_with(" ? ")
+}
+
+#[test]
+fn no_mail_field_reaches_the_dom_without_h() {
+    let js = read("console.js");
+    let mut checked = 0;
+    for (n, line, upto) in field_reads(&js, &MAIL_FIELDS) {
+        checked += 1;
+        assert!(read_is_safe(line, &upto), "line {n}: a mail field outside h(): {}", line.trim());
+    }
+    assert!(checked >= 4, "the scan found the card line and the applied rows ({checked})");
+    // Title and why of a card or a row are mail-derived too: every read of one sits inside h(...) or is a test.
+    for (n, line, upto) in field_reads(&js, &["title", "why"]) {
+        let var = upto.rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.')).next().unwrap_or("");
+        if !(var.starts_with("c.") || var.starts_with("x.")) { continue; }
+        // noteTitleFor() keeps a title in a local, `found`, for a toast's textContent, never markup.
+        let kept = upto[..upto.len() - var.len()].ends_with("found = ") && !line.contains("innerHTML");
+        assert!(kept || read_is_safe(line, &upto), "line {n}: {var} not inside h(): {}", line.trim());
+    }
+}
+
+#[test]
+fn the_untrusted_text_scan_rejects_a_bad_line() {
+    for bad in [
+        "r = '<div>' + h(c.from) + ' · ' + c.evidence + '</div>';",
+        "r = h(c.from) + x.sender;",
+        "list.push(c.title);",
+        "t = \"\" || c.title;",
+        "el.innerHTML = c.title;",
+        "r = h(m.x) + c.evidence;",
+    ] {
+        let reads = field_reads(bad, &["from", "evidence", "sender", "title"]);
+        assert!(reads.iter().any(|(_, l, u)| !read_is_safe(l, u)), "should be rejected: {bad}");
+    }
+    for good in ["r = h(c.from) + h(c.evidence);", "r = c.from ? h(c.from) : \"\";", "if (!c.from && !c.evidence) { return; }", "h(c.why || c.kind)"] {
+        let reads = field_reads(good, &["from", "evidence", "why"]);
+        assert!(reads.iter().all(|(_, l, u)| read_is_safe(l, u)), "should pass: {good}");
+    }
+}
+
+fn is_ev_call(line: &str) -> bool {
+    let mut from = 0;
+    while let Some(i) = line[from..].find("ev(") {
+        let at = from + i;
+        if at == 0 || !(line.as_bytes()[at - 1].is_ascii_alphanumeric() || line.as_bytes()[at - 1] == b'_') { return true; }
+        from = at + 3;
+    }
+    false
+}
+
+#[test]
+fn no_ui_event_carries_mail_text() {
+    let js = read("console.js");
+    // Every mail section, the progress view to "From your email", sends no usage event at all.
+    let at = js.find("// ---- mail progress view").expect("the mail sections");
+    let end = js.find("// ---- end mail applied").expect("their end");
+    for (n, line) in js[at..end].lines().enumerate() {
+        assert!(!line.contains("ui_event") && !is_ev_call(line), "mail section line {n}: a usage event: {}", line.trim());
+    }
+    // And no usage event anywhere names a mail field, a card's words or a mailbox address.
+    for (n, line) in js.lines().enumerate().filter(|(_, l)| l.contains("ui_event") || is_ev_call(l)) {
+        for bad in [".from", ".mail_date", ".evidence", ".sender", ".why", ".title", ".address", "mpAddr", "mp-addr"] {
+            assert!(!line.contains(bad) || line.contains("Array.from"), "line {n}: a usage event carries {bad}: {}", line.trim());
+        }
+    }
+    // Rendering a card sends nothing: the deck and Decisions renderers hold no event call.
+    assert!(!fn_body(&js, "function mailCardLine(").contains("ev("), "the card line is markup only");
 }
 
 /// Phase 3 of the commitment model (spec D6, D8, §2): the registrar button on the confirm screen and

@@ -118,7 +118,7 @@ not "maintaining" the institution's record. The exposure that *does* exist is un
 Use rules (§5) and general privacy law (§7): another person's data will pass through Knowlu's
 classifier, so Knowlu should (i) never surface, store or train on content about third parties beyond
 what the triage feature needs, and (ii) drop message bodies after classification. Note also that
-UA's Crimson mail is Google Workspace for Education; a Workspace administrator can block third-party
+UA's Crimson mail is Google Workspace for Education; *[Corrected 2026-10-03: Crimson mail moved to Microsoft 365 in 2021 (email forwarding spec §10), so this sentence is stale for UA; the mechanism holds for any Google Workspace tenant.]* a Workspace administrator can block third-party
 OAuth apps for the domain (see §10), which is the realistic way a university would stop Gmail ingest
 — not FERPA.
 
@@ -745,7 +745,7 @@ The existing rule that judgment logs "hold ids and field values only, and never 
   is a Blackboard-native feature Anthology documents for students.
 - *Registrar FERPA page:* institution-facing; describes directory information and the myBama
   proxy/FERPA-release mechanism; silent on third-party apps.
-- *Crimson mail is Google Workspace for Education.* A Workspace administrator can set third-party
+- *Crimson mail is Google Workspace for Education.* *[Corrected 2026-10-03: Crimson mail moved to Microsoft 365 in 2021 (email forwarding spec §10), so this sentence is stale for UA; the mechanism holds for any Google Workspace tenant.]* A Workspace administrator can set third-party
   OAuth apps to "Trusted," "Limited," "Specific Google data," or "Blocked," and Education tenants can
   "choose different settings for users who are over and under 18 years old." The default is
   permissive ("Allow users to access any third-party apps"), and UA's current setting could not be

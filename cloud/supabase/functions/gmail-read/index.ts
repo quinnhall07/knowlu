@@ -1,11 +1,16 @@
+import { restFromEnv } from "../_shared/db.ts";
 import { requireActiveEntitlement } from "../_shared/entitlement.ts";
+import { unlapseAccount } from "../_shared/mail_unlapse.ts";
 import { liveDeps, sharedDb } from "../_shared/judge_deps.ts";
 import { accessTokenFromRefresh } from "../_shared/google_token.ts";
 import { GMAIL_SCOPE } from "../_shared/google_scopes.ts";
 import {
+  type Forwarding,
   GmailApiError,
   type GmailApi,
+  type GrantRow,
   type ListPage,
+  lookupToken,
   pagedList,
   PER_CALL_MS,
   READ_BUDGET_MS,
@@ -69,36 +74,42 @@ const api: GmailApi = {
 Deno.serve(readHandler(requireActiveEntitlement, {
   api,
   async accessTokenFor(accountId): Promise<TokenLookup> {
-    // R-C2-E41: a missing P2 (no Google client configured on this deployment at all) is checked
-    // first and answers `missing: "config"` — never per-account, and never worth a DB round trip.
+    // R-C2-E41: a missing P2 (no Google client configured on this deployment at all) is decided
+    // first by `lookupToken` and answers `missing: "config"`, never worth a DB round trip.
     const clientId = Deno.env.get("GOOGLE_CLIENT_ID") ?? "";
-    if (clientId === "") return { missing: "config" };
-    // The Gmail scope specifically: a grant that carries only `calendar.readonly` must read no
-    // mail, and `read_google_grant` refuses rather than this function remembering to check.
-    // R-C2-E39: reuse Task 10's shared token exchange — `invalid_grant` (a revoked grant, or the
-    // 7-day testing-mode expiry) comes back as null and folds into `missing: "grant"`; any other
-    // failure throws and surfaces as the handler's generic 500.
-    const refresh = await sharedDb().rpc("read_google_grant", {
-      p_account: accountId,
-      p_scope: GMAIL_SCOPE,
+    return await lookupToken(accountId, {
+      clientConfigured: clientId !== "",
+      // Gmail connect §4.1: no status filter. `lookupFromRow` tells a revoked row (a dead grant)
+      // from no row at all (never connected, or removed by Disconnect), which reads as silent.
+      async row(id) {
+        const rows = await sharedDb().select(
+          `google_accounts?account_id=eq.${id}&select=status,scopes`,
+        ) as GrantRow[];
+        return rows[0] ?? null;
+      },
+      // The token path, unchanged. The Gmail scope specifically: `read_google_grant` refuses a
+      // calendar-only grant rather than this function remembering to check. R-C2-E39: Task 10's
+      // shared token exchange — `invalid_grant` (a revoked grant, or the 7-day testing-mode expiry)
+      // comes back as null and folds into `missing: "grant"`; any other failure throws and
+      // surfaces as the handler's generic 500.
+      async token(id) {
+        const refresh = await sharedDb().rpc("read_google_grant", {
+          p_account: id,
+          p_scope: GMAIL_SCOPE,
+        });
+        if (typeof refresh === "string" && refresh !== "") {
+          const token = await accessTokenFromRefresh(refresh, {
+            clientId,
+            clientSecret: Deno.env.get("GOOGLE_CLIENT_SECRET") ?? "",
+            fetch,
+          });
+          return token === null ? { missing: "grant" } : { token };
+        }
+        // The row read live and Gmail-scoped a moment ago but the RPC found nothing (a concurrent
+        // Disconnect, say). As before this change, a live row the RPC will not serve is silent.
+        return { missing: "scope" };
+      },
     });
-    if (typeof refresh === "string" && refresh !== "") {
-      const token = await accessTokenFromRefresh(refresh, {
-        clientId,
-        clientSecret: Deno.env.get("GOOGLE_CLIENT_SECRET") ?? "",
-        fetch,
-      });
-      return token === null ? { missing: "grant" } : { token };
-    }
-    // The RPC answered nothing: either this account never connected Google at all, or it did and
-    // the grant simply does not carry the Gmail scope (`p_scope` is checked inside the RPC —
-    // Task 10 step 7). The two read as different things to the device (R-C2-E41): a calendar-only
-    // grant must never be marked revoked over a Gmail step the student never took, so this
-    // distinguishes them by whether a live `google_accounts` row exists at all.
-    const rows = await sharedDb().select(
-      `google_accounts?account_id=eq.${accountId}&status=neq.revoked&select=scopes`,
-    ) as Array<{ scopes: string[] }>;
-    return rows.length > 0 ? { missing: "scope" } : { missing: "grant" };
   },
   async excludedLabels(accountId) {
     const rows = await sharedDb().select(
@@ -168,6 +179,23 @@ Deno.serve(readHandler(requireActiveEntitlement, {
       if (typeof course === "string" && course !== "" && course !== "null") out.add(course);
     }
     return [...out];
+  },
+  // Past the entitlement gate: the same compare-and-sets `mail-pull` makes, whichever reader comes first.
+  unlapse: (accountId) => unlapseAccount(restFromEnv(), accountId),
+  async forwarding(accountId): Promise<Forwarding> {
+    // Email forwarding D22: the OAuth grant's address and the account's forwarding mailboxes, both
+    // scoped by the caller's account. The handler's `forwardingCounts` decides (P22); this reads.
+    // Twenty rows bounds the read like `mail-process`'s own mailbox list.
+    const grants = await sharedDb().select(
+      `google_accounts?account_id=eq.${accountId}&select=email_hint`,
+    ) as Array<{ email_hint: string | null }>;
+    const mailboxes = await sharedDb().select(
+      `mail_addresses?account_id=eq.${accountId}&select=mailbox_hint,status&limit=20`,
+    ) as Array<{ mailbox_hint: string | null; status: string }>;
+    return {
+      gmail: grants[0]?.email_hint ?? null,
+      mailboxes: mailboxes.map((m) => ({ hint: m.mailbox_hint, status: m.status })),
+    };
   },
   // F-4: a shorter model timeout than the default 120 s, so a call that starts right at the
   // budget's edge cannot run long enough to threaten the edge function's own wall clock.

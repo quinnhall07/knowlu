@@ -1,11 +1,12 @@
 import type { Sampling } from "./judge_anthropic.ts";
 import type { Db } from "./judge_db.ts";
-import type { Kind } from "./judge_validate.ts";
+import type { Kind, MailKind } from "./judge_validate.ts";
 
 /// The pin. Changing one is a migration row with a date, so every historical judgment names the
 /// model that made it — and carries that model's own sampling rules and price (§5.2, §5.4 m4).
+/// A mail kind's pin is read the same way (email plan T3e, P6: widened to `Kind | MailKind` here).
 export interface ModelRow {
-  kind: Kind;
+  kind: Kind | MailKind;
   provider: string;
   model_id: string;
   prompt_version: string;
@@ -24,7 +25,7 @@ export interface ModelRow {
 
 /// There is no default and no fallback: a missing row is a deployment error, and answering with an
 /// unpinned model would put a judgment in the log that names a model nobody chose.
-export async function modelRow(db: Db, kind: Kind): Promise<ModelRow> {
+export async function modelRow(db: Db, kind: Kind | MailKind): Promise<ModelRow> {
   const rows = await db.select(
     `models?kind=eq.${kind}&select=kind,provider,model_id,prompt_version,grammar_version,max_tokens,sampling,route,precision,usd_per_m_in,usd_per_m_out`,
   );

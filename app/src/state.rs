@@ -82,6 +82,11 @@ pub struct ConsoleState {
     /// whole `commitments --confirm` child, and `capture_registrar` (`registrar::run_file`, phase
     /// 3) for the whole `commitments --registrar` child. Both children write notes, a sync must
     /// not rewrite the tree under them, and neither fetches anything, so each hold is short.
+    /// **`vault_io` alone does not keep the slot's `sync` child out** (W1 P1P2-important), so
+    /// `run_confirm` also holds the engine's `state/sync.lock` (`sync::RUN_LOCK_FILE`) for the
+    /// child's run. It takes that lock after `vault_io`, as *Sync now* does, and refuses by name,
+    /// without waiting, when a sync already holds it. `registrar::run_file` does not take it yet
+    /// (a #19 close-out finding at the merge of `main`).
     /// Neither lock covers `state/calendar-series.json` against a slot's `rank` child or
     /// `commitment_proposals`: that read-modify-write is the engine's own, under its exclusive
     /// `state/calendar-series.lock` (`commitments::refresh_series`, phase 3 final review I2).

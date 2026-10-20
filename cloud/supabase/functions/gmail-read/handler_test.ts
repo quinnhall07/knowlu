@@ -1,10 +1,17 @@
 import { assert, assertEquals } from "@std/assert";
 import { ScriptedModel } from "../_shared/judge_anthropic.ts";
 import type { JudgmentRow } from "../_shared/judge_pipeline.ts";
+import { CALENDAR_SCOPE, GMAIL_SCOPE } from "../_shared/google_scopes.ts";
+import { fail } from "../_shared/http.ts";
 import {
   forDevice,
+  forwardingCounts,
   type GmailApi,
+  type GrantRow,
   type ListPage,
+  lookupFromRow,
+  type LookupSources,
+  lookupToken,
   MAX_LIST_PAGES,
   pagedList,
   PER_CALL_MS,
@@ -69,6 +76,9 @@ function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"], me
       return Promise.resolve();
     },
     knownCourses: () => Promise.resolve(["ph-106"]),
+    // D22: by default the account forwards nothing, so every older test reads as it always did.
+    unlapse: () => Promise.resolve(),
+    forwarding: () => Promise.resolve({ gmail: null, mailboxes: [] }),
     pipeline: () =>
       Promise.resolve({
         row: {
@@ -81,6 +91,8 @@ function fakes(replies: Array<Record<string, unknown> | Error>, ids = ["m1"], me
         rules: { lookup: () => Promise.resolve(null) },
         caps: {
           charge: () => Promise.resolve(true),
+          refund: () => Promise.resolve(),
+          tripped: () => false,
           withinBudget: () => Promise.resolve(true),
           recordTokens: () => Promise.resolve(),
         },
@@ -334,6 +346,90 @@ Deno.test("no Google client configured on this deployment is a 503, never quiet 
   })(post());
   assertEquals(response.status, 503);
   assertEquals(revoked, false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Gmail connect T1 (spec §4.1, §8.3 items 1–2) — the row lookup is `lookupFromRow`, read without a
+// status filter, so an account that never connected Google answers the silent `no_gmail_scope`
+// rather than `revoked`, and only a row that says `revoked` reads as a dead grant.
+// ---------------------------------------------------------------------------------------------
+
+function sources(row: GrantRow | null, clientConfigured = true) {
+  const calls = { row: 0, token: 0 };
+  const src: LookupSources = {
+    clientConfigured,
+    row: () => {
+      calls.row += 1;
+      return Promise.resolve(row);
+    },
+    token: () => {
+      calls.token += 1;
+      return Promise.resolve({ token: "access-token-not-a-secret" });
+    },
+  };
+  return { src, calls };
+}
+
+/** `readHandler` over `lookupToken`, with a spy on `markRevoked`. */
+async function readThrough(src: LookupSources) {
+  const { deps } = fakes([]);
+  let marks = 0;
+  const response = await readHandler(OK, {
+    ...deps,
+    accessTokenFor: (accountId) => lookupToken(accountId, src),
+    markRevoked: () => {
+      marks += 1;
+      return Promise.resolve();
+    },
+  })(post());
+  return { response, marks: () => marks };
+}
+
+Deno.test("lookupFromRow: no row reads as a missing scope and marks nothing", async () => {
+  assertEquals(lookupFromRow(null), { missing: "scope" });
+  const { src, calls } = sources(null);
+  const { response, marks } = await readThrough(src);
+  assertEquals((await response.json()).reason, "no_gmail_scope");
+  assertEquals(marks(), 0, "an account that never connected Google is not a revoked grant");
+  assertEquals(calls.token, 0, "no row means no token path");
+});
+
+Deno.test("lookupFromRow: a revoked row reads as a missing grant", () => {
+  assertEquals(lookupFromRow({ status: "revoked", scopes: [GMAIL_SCOPE] }), { missing: "grant" });
+  assertEquals(lookupFromRow({ status: "revoked", scopes: [] }), { missing: "grant" });
+});
+
+Deno.test("lookupFromRow: an active row without the Gmail scope reads as a missing scope", () => {
+  assertEquals(lookupFromRow({ status: "active", scopes: [CALENDAR_SCOPE] }), { missing: "scope" });
+  assertEquals(lookupFromRow({ status: "active", scopes: [] }), { missing: "scope" });
+  // "Any other row": a `quiet` calendar-only grant is still not a dead one.
+  assertEquals(lookupFromRow({ status: "quiet", scopes: [CALENDAR_SCOPE] }), { missing: "scope" });
+});
+
+Deno.test("lookupFromRow: an active row with the Gmail scope takes the token path", async () => {
+  assertEquals(lookupFromRow({ status: "active", scopes: [CALENDAR_SCOPE, GMAIL_SCOPE] }), { tokenPath: true });
+  const { src, calls } = sources({ status: "active", scopes: [GMAIL_SCOPE] });
+  assertEquals(await lookupToken("acct-1", src), { token: "access-token-not-a-secret" });
+  assertEquals(calls.token, 1);
+});
+
+Deno.test("readHandler: no client configured still answers 503", async () => {
+  const { src, calls } = sources(null, false);
+  const { response, marks } = await readThrough(src);
+  assertEquals(response.status, 503);
+  assertEquals(marks(), 0);
+  assertEquals(calls.row, 0, "an unconfigured deployment is decided before any row read");
+  assertEquals(calls.token, 0);
+});
+
+Deno.test("readHandler: an account with no google_accounts row answers quiet no_gmail_scope", async () => {
+  const { src } = sources(null);
+  const { response, marks } = await readThrough(src);
+  assertEquals(response.status, 200);
+  assertEquals(await response.json(), {
+    items: [], read: 0, quiet: true, reason: "no_gmail_scope", more: false,
+  });
+  assertEquals(marks(), 0, "no mark is made for an account with no row");
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -634,4 +730,174 @@ Deno.test("the request's timezone reaches the due resolver for every message the
   await readHandler(OK, deps)(post({ accepts: ["completion"], timezone: "America/Chicago" }));
   assertEquals(queued.length, 1);
   assertEquals(queued[0].payload.due, "2026-09-18");
+});
+
+// ---------------------------------------------------------------------------------------------
+// Email forwarding D22 (spec test 16c, plan P22): one mailbox, one path. A Gmail address with an
+// active forwarding to Knowlu is read by email forwarding alone; `gmail-read` reads nothing new and
+// answers an ordinary, NON-quiet pull, because the merged device reads every unknown quiet reason
+// as "re-connect from settings" and stops before reading items (`cloudmodel.rs:667-675`).
+// ---------------------------------------------------------------------------------------------
+
+const GMAIL_ADDRESS = "student@gmail.example.invalid";
+
+Deno.test("a_gmail_address_with_a_forwarding_gets_a_non_quiet_answer_with_its_undelivered_items_and_no_gmail_call", async () => {
+  const { deps, queued, rows } = fakes([TASK_ANSWER], ["m1", "m2"]);
+  queued.push(
+    { uid: "gmail:old1", tier: "task", payload: { title: "queued before the forwarding" }, judgment_id: "judgment-0" },
+    { uid: "gmail:old2", tier: "event", payload: { title: "acked this round" }, judgment_id: null },
+  );
+  let tokens = 0;
+  let listed = 0;
+  let fetched = 0;
+  let revoked = 0;
+  let delivered: string[] = [];
+  const response = await readHandler(OK, {
+    ...deps,
+    // The OAuth hint and the forwarding's hint differ only in case: P22 compares them case-folded.
+    forwarding: () =>
+      Promise.resolve({ gmail: "Student@Gmail.Example.Invalid", mailboxes: [{ hint: GMAIL_ADDRESS, status: "quiet" }] }),
+    accessTokenFor: () => {
+      tokens += 1;
+      return Promise.resolve({ token: "access-token-not-a-secret" });
+    },
+    api: {
+      list: () => {
+        listed += 1;
+        return Promise.resolve(["m1", "m2"]);
+      },
+      message: () => {
+        fetched += 1;
+        return Promise.reject(new Error("no message is fetched on the forwarded path"));
+      },
+    },
+    markRevoked: () => {
+      revoked += 1;
+      return Promise.resolve();
+    },
+    deliver: (account, uids) => {
+      delivered = uids;
+      return deps.deliver(account, uids);
+    },
+  })(post({ ack: ["gmail:old2"] }));
+  assertEquals(response.status, 200);
+  const body = await response.json();
+  assertEquals(body, {
+    items: [{ uid: "gmail:old1", tier: "task", payload: { title: "queued before the forwarding" }, judgment_id: "judgment-0" }],
+    read: 0,
+    quiet: false,
+    more: false,
+    via_forward: true,
+  });
+  assertEquals(delivered, ["gmail:old2"], "an ack is still applied on the forwarded path");
+  assertEquals([tokens, listed, fetched, revoked], [0, 0, 0, 0], "no token exchange, no Gmail call, no revoke");
+  assertEquals(rows.length, 0, "nothing is judged on the forwarded path");
+});
+
+Deno.test("a_gmail_address_without_a_forwarding_reads_exactly_as_today", async () => {
+  // Shapes of "no active forwarding": none at all, one that is off or revoked, a setup still pending or
+  // blocked (PQ11), and one for a different address on the same account. Each reads, judges and
+  // answers as before, with no `via_forward` field at all.
+  const cases: Array<{ gmail: string | null; mailboxes: Array<{ hint: string | null; status: string }> }> = [
+    { gmail: GMAIL_ADDRESS, mailboxes: [] },
+    { gmail: GMAIL_ADDRESS, mailboxes: [{ hint: GMAIL_ADDRESS, status: "off" }, { hint: GMAIL_ADDRESS, status: "revoked" }] },
+    // PQ11: a setup that never finished (`pending`) or whose canary never came (`blocked`) keeps reading.
+    { gmail: GMAIL_ADDRESS, mailboxes: [{ hint: GMAIL_ADDRESS, status: "pending" }] },
+    { gmail: GMAIL_ADDRESS, mailboxes: [{ hint: GMAIL_ADDRESS, status: "blocked" }] },
+    { gmail: GMAIL_ADDRESS, mailboxes: [{ hint: "student@school.example.invalid", status: "active" }] },
+  ];
+  for (const forwarding of cases) {
+    const { deps, queued, asked } = fakes([TASK_ANSWER]);
+    const body = await (await readHandler(OK, { ...deps, forwarding: () => Promise.resolve(forwarding) })(post())).json();
+    assertEquals(asked.length, 1, "Gmail is listed");
+    assertEquals(queued.length, 1);
+    assertEquals(body.read, 1);
+    assertEquals(body.quiet, false);
+    assertEquals(body.more, false);
+    assertEquals(body.items.length, 1);
+    assertEquals("via_forward" in body, false);
+  }
+});
+
+// P22 as amended by PQ11 (Quinn, 2026-10-02): an allow-list. A forwarding counts only while mail arrives
+// by it; a stalled (`blocked`) or abandoned (`pending`) setup keeps the Gmail OAuth read.
+Deno.test("P22: a forwarding counts only while confirmed, active or quiet", () => {
+  for (const status of ["confirmed", "active", "quiet"]) {
+    assertEquals(forwardingCounts(GMAIL_ADDRESS, [{ hint: GMAIL_ADDRESS, status }]), true, status);
+  }
+  for (const status of ["pending", "blocked", "paused_send", "lapsed", "revoked", "off", "", "Active"]) {
+    assertEquals(forwardingCounts(GMAIL_ADDRESS, [{ hint: GMAIL_ADDRESS, status }]), false, status);
+  }
+});
+
+// The lapsed-mailbox fix (2026-10-19): a lapsed mailbox leaves `lapsed` on its account's first entitled
+// pull, as `quiet` when a canary ever reached it. Forwarding still delivers then, so the OAuth read must
+// stop again or every message is filed twice; one never reached reads `pending` and the read goes on.
+Deno.test("a_mailbox_unlapsed_to_quiet_counts_as_forwarding", () => {
+  const box = (status: string) => [{ hint: GMAIL_ADDRESS, status }];
+  assertEquals(forwardingCounts(GMAIL_ADDRESS, box("lapsed")), false, "while lapsed");
+  assertEquals(forwardingCounts(GMAIL_ADDRESS, box("quiet")), true, "unlapsed, a canary once reached it");
+  assertEquals(forwardingCounts(GMAIL_ADDRESS, box("pending")), false, "unlapsed, no canary ever reached it");
+});
+
+// Review of the lapsed fix, #2: the judge step calls `gmail-read` before `mail-pull`, so in the first
+// entitled slot after a renewal `gmail-read` met a mailbox still `lapsed`, read the gap by OAuth, and the
+// device's recover then forwarded the same messages. It is past the entitlement gate too, so it moves the
+// account's lapsed mailboxes on itself, before it reads the forwarding (the same compare-and-sets).
+Deno.test("a_lapsed_forwarding_is_unlapsed_before_the_forwarding_read_so_the_gap_is_never_read_twice", async () => {
+  for (const [canary, forwarded] of [[true, true], [false, false]] as const) {
+    const { deps, asked } = fakes([TASK_ANSWER]);
+    const box = { hint: GMAIL_ADDRESS, status: "lapsed", canaryOk: canary };
+    const order: string[] = [];
+    let tokens = 0;
+    const body = await (await readHandler(OK, {
+      ...deps,
+      unlapse: (account) => {
+        assertEquals(account, "acct-1");
+        order.push("unlapse");
+        if (box.status === "lapsed") box.status = box.canaryOk ? "quiet" : "pending";
+        return Promise.resolve();
+      },
+      forwarding: () => {
+        order.push("forwarding");
+        return Promise.resolve({ gmail: GMAIL_ADDRESS, mailboxes: [{ hint: box.hint, status: box.status }] });
+      },
+      accessTokenFor: (a) => {
+        tokens += 1;
+        return deps.accessTokenFor(a);
+      },
+    })(post())).json();
+    assertEquals(order, ["unlapse", "forwarding"], `canary ${canary}`);
+    if (forwarded) {
+      // A canary once reached it: `quiet`, so forwarding alone reads it and recover brings the gap in.
+      assertEquals([body.via_forward, body.read, tokens, asked.length], [true, 0, 0, 0]);
+    } else {
+      // No canary ever did: `pending`, setup never finished, and the OAuth read goes on.
+      assertEquals([("via_forward" in body), body.read, tokens, asked.length], [false, 1, 1, 1]);
+    }
+  }
+});
+
+Deno.test("an_unentitled_read_unlapses_nothing", async () => {
+  const { deps } = fakes([]);
+  let unlapsed = 0;
+  const refuse = () => Promise.reject(fail(402, "no entitlement"));
+  const res = await readHandler(refuse, {
+    ...deps,
+    unlapse: () => {
+      unlapsed += 1;
+      return Promise.resolve();
+    },
+  })(post());
+  assertEquals([res.status, unlapsed], [402, 0]);
+  await res.body?.cancel();
+});
+
+Deno.test("P22: the address is matched whole and case-folded, never as a substring", () => {
+  assertEquals(forwardingCounts(" Student@GMAIL.example.invalid ", [{ hint: GMAIL_ADDRESS, status: "active" }]), true);
+  assertEquals(forwardingCounts(GMAIL_ADDRESS, [{ hint: `not${GMAIL_ADDRESS}`, status: "active" }]), false);
+  assertEquals(forwardingCounts(`not${GMAIL_ADDRESS}`, [{ hint: GMAIL_ADDRESS, status: "active" }]), false);
+  assertEquals(forwardingCounts(GMAIL_ADDRESS, [{ hint: null, status: "active" }]), false, "a hint not yet set");
+  assertEquals(forwardingCounts(null, [{ hint: GMAIL_ADDRESS, status: "active" }]), false, "no OAuth address");
+  assertEquals(forwardingCounts("", [{ hint: "", status: "active" }]), false, "two empty strings are not one address");
 });
