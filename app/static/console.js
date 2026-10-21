@@ -2743,7 +2743,7 @@
   var PRIVACY_CHANGES = {
     "2026-10-20": [
       "It now covers connecting Google Calendar and Gmail, the email you forward to Knowlu (received by Amazon Web Services) and what is kept from it, the Blackboard and mail sign-ins Knowlu keeps on this computer, your grades in your account, daily counts of your AI calls, any free tester access, and the interests you give for campus events.",
-      "Until you accept, Knowlu keeps today's page up to date from this computer but does not sync, import or read anything new.",
+      "Until you accept, Knowlu keeps today's page and your calendar up to date, but does not sync, import or read anything else new.",
       "To leave instead, use Settings → Delete my data."
     ]
   };

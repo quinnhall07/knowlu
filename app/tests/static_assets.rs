@@ -49,6 +49,53 @@ fn the_page_has_every_region_and_none_of_the_mock() {
     for href in ["#today", "#overdue", "#week", "#later", "#all", "#decisions", "#good-to-know", "#issues", "#runs"] { assert!(html.contains(&format!("href=\"{href}\"")), "nav {href}"); }
 }
 
+/// Blank out JS string literals (single, double, template; with escapes) and comments.
+fn strip_strings_and_comments(src: &str) -> String {
+    let c: Vec<char> = src.chars().collect();
+    let (mut out, mut i) = (String::new(), 0);
+    while i < c.len() {
+        let ch = c[i];
+        if ch == '/' && c.get(i + 1) == Some(&'/') {
+            while i < c.len() && c[i] != '\n' { i += 1; }
+        } else if ch == '/' && c.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i < c.len() && !(c[i] == '*' && c.get(i + 1) == Some(&'/')) { i += 1; }
+            i += 2;
+        } else if ch == '"' || ch == '\'' || ch == '`' {
+            i += 1;
+            while i < c.len() && c[i] != ch {
+                if c[i] == '\\' { i += 1; }
+                if c.get(i) == Some(&'\n') && ch != '`' { break; }
+                i += 1;
+            }
+            i += 1;
+            out.push(' ');
+        } else {
+            out.push(ch);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// True when, outside strings and comments, the word `import` is followed by whitespace or `(`.
+fn has_import_syntax(src: &str) -> bool {
+    let code = strip_strings_and_comments(src);
+    let b = code.as_bytes();
+    code.match_indices("import").any(|(i, _)| {
+        let before_ok = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'$' || b[i - 1] == b'.');
+        matches!(b.get(i + 6).copied(), Some(b' ' | b'\t' | b'\n' | b'\r' | b'(')) && before_ok
+    })
+}
+
+#[test]
+fn the_import_check_rejects_statements_and_accepts_prose() {
+    assert!(has_import_syntax("var a = 1; import b from \"c\";"));
+    assert!(has_import_syntax("const m = import(\"x\");"));
+    let prose = "const t = \"does not sync, import or read\"; // import x\n/* import y */ `a \\` import z`";
+    assert!(!has_import_syntax(prose));
+}
+
 #[test]
 fn console_js_is_one_render_function_per_region_and_uses_invoke() {
     let js = read("console.js");
@@ -56,8 +103,8 @@ fn console_js_is_one_render_function_per_region_and_uses_invoke() {
         assert!(js.contains(&format!("function {f}(")), "missing function {f}");
     }
     assert!(js.contains("__TAURI__.core.invoke"));
-    // Module syntax only: an `import` statement at a line start, or a dynamic `import(`. The word in prose is fine.
-    assert!(!js.lines().any(|l| l.trim_start().starts_with("import ")) && !js.contains("import(") && !js.contains("require("), "no modules, no bundler");
+    // Module syntax only: strings and comments are stripped first, so the word in prose is fine.
+    assert!(!has_import_syntax(&js) && !js.contains("require("), "no modules, no bundler");
     // R28: route() must clear current.state too, or a view change's first paint can be
     // mistaken for a reorder (orderOf(stale today state) vs orderOf(new list state) always
     // differ) and the hold path leaves the new view's main column blank.

@@ -2966,7 +2966,7 @@ fn the_privacy_skips_reach_the_runner_log_except_mails() {
 // *Sync now* (`state::run_sync`, through `commands::sync_inner`) and the quit push (`state::quit_flush`) do not run
 // the slot, so T6's gate did not reach them. The rig is the one above: a never-written session target, so a sync
 // that does run answers its own `no session` skip and writes the engine's status file; one that is held does
-// neither. The panel says an unaccepted update "does not sync, import or read anything new", so both are held.
+// neither. The panel says an unaccepted update "does not sync, import or read anything else new", so both are held.
 
 const HELD_SYNC: &str = "sync (skipped: privacy update not accepted)";
 

@@ -220,7 +220,7 @@ pub const SYNC_HELD_FOR_PRIVACY: &str = "privacy update not accepted";
 /// another account's cache and a vault with no readable account are `Unknown` and hold nothing. A
 /// disk read only; no network, and `account::privacy_gate` owns every rule about versions. Both syncs
 /// outside the slot, *Sync now* and the quit push, ask it, so the panel's "does not sync, import or
-/// read anything new" is true of them as well. Unlike the slot it does not wait for an `Entitled`
+/// read anything else new" is true of them as well. Unlike the slot it does not wait for an `Entitled`
 /// answer: holding a sync that the entitlement would also have stopped sends nothing either way.
 fn sync_held_for_privacy(cs: &ConsoleState) -> bool {
     let Ok(cfg) = crate::account::cloud_config(&cs.vault) else { return false };
