@@ -243,3 +243,14 @@ fn the_page_does_not_overclaim_what_stays_local_or_which_sign_ins_are_kept() {
     assert!(!text.contains("The one exception is the Blackboard sign-in"));
     assert!(text.contains("if you forward a school mailbox, its saved mail sign-in"));
 }
+
+/// The export bullet must say what the export file leaves out (judgments, the Google connection's
+/// details, undelivered Gmail proposals), not claim "everything".
+#[test]
+fn the_export_bullet_names_what_the_file_does_not_yet_hold() {
+    let text = page_text();
+    assert!(!text.contains("everything our servers hold that is meaningful to you"));
+    assert!(text.contains(
+        "The record of each decision Knowlu made, your Google connection's details (never the permission itself) and Gmail proposals not yet on your computer are not in this file yet; ask and we will send them with it."
+    ));
+}

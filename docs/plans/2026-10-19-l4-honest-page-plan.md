@@ -1226,6 +1226,11 @@ counts and outcomes recorded, never an address or token.
       signed-out account (§4.7's accepted cost), the ledger records which, and clean-up below deletes
       it. One mint at most; the staging mint cap (session ledger row 48) is the controller's to watch.
       Otherwise the check is recorded as not run, and T4's tests stand for it.
+- [ ] Policy-change notice (the page's "we will email the address on your account" is a published
+      commitment; T12-fix2): before the release that deploys V, the controller sends one notice to every
+      account whose latest consent `privacy_version` is below V, through the account-mail provider, and
+      records the count in the ledger. Nothing in `cloud/supabase/functions` sends it; do not soften the
+      page's sentence.
 - [ ] Clean-up per memory "live-proof profile cleanup": the scratch profiles, vaults, credentials and
       autostart entries; any staging address left by the check deleted.
 
@@ -1245,6 +1250,9 @@ Checks beyond the usual:
 6. `PRIVACY_VERSION` moved in a lane PR by Amendment 2026-10-19, committed on `main` at the sha T0
    recorded, and by Quinn's Q-AGENT answer, cited by its ledger row (the Amendment itself names no lane
    PR; review r1, M1); and the privacy guard now passes on this tree.
+8. The ledger holds the T15 policy-change notice row (count sent) before T17 merges; the page's Export
+   bullet names what `exportAll` leaves out (decisions, Google connection, Gmail proposals) until a
+   cloud-engineer task adds those tables, without token columns, to `exportAll` with a handler test.
 7. The warning tally is 0 other; the ignored count is the baseline's.
 A PASS lets T17 go ahead; findings are answered in §11 and re-reviewed.
 
