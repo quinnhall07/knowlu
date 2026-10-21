@@ -104,6 +104,38 @@ fn release_downloads_tauri_cli_prebuilt_and_pinned_by_sha256_never_compiles_it()
     assert!(release_ps1.contains(&format!("tauri-cli {version}")), "scripts/release.ps1 must name tauri-cli {version}, the version release.yml pins");
 }
 
+/// L10 (release run 39643305066, 2026-10-21): without `--target`, tauri-cli names the externalBin it
+/// looks for by the triple the CLI ITSELF was compiled for (tauri-cli 2.11.4, get_bundler_settings ->
+/// tauri_utils::platform::target_triple()), and the prebuilt CLI is MSVC while release.ps1 stages the
+/// sidecar under rustc's gnu host triple - so the bundle failed on a missing
+/// `knowlu-engine-x86_64-pc-windows-msvc.exe`. `tauri build` therefore gets `--target $triple`, the
+/// SAME variable that names the staged sidecar, and every lookup of the bundle or the built
+/// knowlu.exe follows cargo's per-target output dir, `target\<triple>\release`.
+#[test]
+fn release_builds_for_the_staged_sidecars_triple_and_reads_its_output_under_it() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let ps1 = std::fs::read_to_string(root.join("scripts").join("release.ps1")).expect("scripts/release.ps1");
+    let yml = workflow("release.yml");
+    assert!(
+        ps1.contains(r#"$staged = Join-Path $bin ($sidecar + "-" + $triple + ".exe")"#),
+        "release.ps1 must stage the sidecar under $triple"
+    );
+    let args = regex::Regex::new(r"\$buildArgs\s*=\s*@\(([^)]*)\)").unwrap()
+        .captures(&ps1).map(|c| c[1].to_string()).expect("release.ps1 must build `$buildArgs = @(...)`");
+    let args: Vec<&str> = args.split(',').map(str::trim).collect();
+    assert_eq!(args, [r#""tauri""#, r#""build""#, r#""--target""#, "$triple"], "tauri build must be told --target $triple");
+    assert!(
+        ps1.contains(r#"Join-Path $repo ("target\" + $triple + "\release\bundle\nsis")"#),
+        "release.ps1 must read the installer from target\\<triple>\\release\\bundle\\nsis"
+    );
+    assert!(yml.contains(r#""target\$triple\release\knowlu.exe""#), "release.yml must verify target\\<triple>\\release\\knowlu.exe");
+    for (name, text) in [("release.ps1", &ps1), ("release.yml", &yml)] {
+        for bare in [r"target\release\bundle", r"target\release\knowlu.exe", "target/release/bundle", "target/release/knowlu.exe"] {
+            assert!(!text.contains(bare), "{name} still names {bare}: with --target the bundle and knowlu.exe live under target\\<triple>\\release");
+        }
+    }
+}
+
 /// C0 (2026-09-17): build and publish are two jobs joined by an artifact, so a publish-only failure
 /// - the first release run's, a wrong Cloudflare token after a 40-minute build - reruns in minutes
 /// with `gh run rerun --failed`; the build's cache is saved even when the build fails; and each job
