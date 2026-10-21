@@ -78,10 +78,13 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
 - `coursework`, `coursework-discover`, `judge` and `sync` **always exit 0**: no account,
   session, entitlement or network is a named outcome, never a failure. An empty coursework
   parse is a failure, never an empty semester. `surface` (`--window` included) and
-  `coursework-discover` never write. `commitments` without `--confirm` always exits 0 and writes only
-  the generated `state/calendar-series.json`; with `--confirm` it writes as the student through
-  `write`, journal first, and exits 2 having written nothing on bad input. Judgment logs never enter
-  the vault.
+  `coursework-discover` never write. `commitments` without `--confirm` or `--registrar` always exits 0 and
+  writes only the generated `state/calendar-series.json`; with `--confirm` it writes as the student
+  through `write`, journal first, and exits 2 having written nothing on bad input.
+  `commitments --registrar` makes no network call and exits 0 or 2; on 2 it writes nothing; it confirms
+  matched rows as the student and applies later changes and ends dropped courses as
+  `agent:knowlu.registrar`, journal first, and files a `commitment-check` card, under the day's cap,
+  for a field the student set by hand. Judgment logs never enter the vault.
 - **The engine gates itself:** `coursework`, `ingest`, `grades`, `judge` and `sync` do not run past the
   72-hour entitlement grace (`engine/src/entitle.rs`); the refusal is a named line at exit 0. `rank`,
   `surface` and `write` are never gated.

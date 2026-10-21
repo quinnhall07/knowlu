@@ -99,6 +99,27 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   screen's answers from a JSON file (`mine`, `not_mine`, `window`) as the student (default
   `--actor` the vault's token, `--via dashboard`), journal first. It prints `{created, declined, warnings, window}`
   and exits 2 on unreadable input or an invalid window, having written nothing.
+  `--json` carries a top-level `registrar_changes` key beside `proposals`, `uncovered_courses` and
+  `warnings` (the same object the overview returns): `{applied, ended, kept, status, unread}`, the
+  lists of every registrar term in play (terms in key order, each list in the block's order), read
+  from `state/calendar-series.json`'s registrar block; `kept` entries carry their `card`, read from
+  `approvals/` and `archive/`. With no registrar term every list is empty.
+- `commitments --vault <v> --registrar <file> --school <key> [--today YYYY-MM-DD] [--actor …] [--via dashboard]`
+  — the UA registrar (phase 3). Conflicts with `--confirm`; `--school` is required (a key in
+  `registrar::SCHOOLS`, today `ua`). **No network:** the app fetches Banner through the student's
+  sign-in window and hands the answer over in a temp file. It parses first, merges the term's
+  calendar into the series file (`refresh_series`), and for every row read whole that names a vault
+  course confirms a hard, weekly commitment note **as the student** (the vault's human token, or
+  `--actor`; `--via dashboard`), journal first. Later fetches apply a changed time, room or place
+  and end a dropped course **as `agent:knowlu.registrar`**, journal first (the note gets an `until`,
+  never a delete); a field the student set by hand is kept, and the engine files a `commitment-check`
+  card (`agent:commitments`, local by kind, under the day's cap) instead. Rows with no meeting times,
+  across midnight, `EXAM` meetings (skipped and counted until a later lane decides), other meeting
+  types and not-registered statuses are dropped and counted. It holds the sync run lock for its
+  writes. Prints `{term, rows, confirmed, proposed, dropped: {exam, meeting_type, midnight, no_time,
+  status}, warnings, applied, ended, kept, status, unread}` and **exits 0, or 2 on an unknown school,
+  a file that is unreadable or not JSON, a bad `config/actor.yaml`, or an answer with no usable row,
+  having written nothing**. It is never gated and calls no model.
 - **The judgment service (C2).** When `config/cloud.yaml` exists (written by the wizard at
   onboarding; absent is a named skip, never an error), `judge`'s tier 3 is `POST /judge-task` /
   `-event` / `-email` on our Supabase project — the prompt, schema and pinned model id live

@@ -450,6 +450,10 @@ fact. The settings panel is an **overlay** over a running console, and nothing i
   myBama*, or *Refresh from myBama* once `overview.registrar` holds a term, in the primary style
   only when `registrar.refresh`; the registrar's proposals (`overview.registrar_proposals`), marked
   *from myBama*, each with **Add** (a one-row `commitments_confirm`, level hard).
+- **After a registrar fetch** `overview.registrar_changes` (also `commitments --json`'s top-level
+  key) holds `{applied, ended, kept, status, unread}`, the lists of every term in play, so the
+  "From myBama" list can show changed, ended, kept ("kept yours", with its card) and status rows
+  after a restart. The engine supplies the lists; the page's rendering is close-out task B5's.
 - **Left out:** a remove control (spec D8).
 
 ### 3.16 GRADES (the strip and its drawer)
