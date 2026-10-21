@@ -220,6 +220,40 @@ fn an_unanswered_google_class_card_is_archived_by_the_next_rank_once_the_registr
     assert_eq!(class_notes(&lab), 1);
 }
 
+/// A pending Google class card for CS 100 and the fetch that creates the registrar's class: the
+/// card's archive records after the fetch.
+fn fetch_over_a_pending_google_card(name: &str) -> (Lab, Vec<Value>) {
+    let lab = Lab::new(name, "2026-08-31");
+    lab.rank_with(D7, vec![("cloud:google", google_entry(vec![cs100_one_minute_off()]))]);
+    let card = lab.proposal_cards("gcal-series:cs100aa").remove(0);
+    let before = lab.journal().len();
+    lab.fetch(D7, &fx());
+    let records = lab.journal().split_off(before).into_iter()
+        .filter(|r| r["path"].as_str().is_some_and(|p| p.ends_with(&format!("/{}", card.name))))
+        .collect();
+    (lab, records)
+}
+
+/// B3 minors (close-out B3e', the 2f785ae reorder). With the registrar holding the course, the
+/// fetch's own withdrawal pass archives a still-pending `gcal-series:` class card, no `rank` needed.
+#[test]
+fn the_fetch_archives_a_pending_google_class_card_once_the_registrar_holds_the_course() {
+    let (lab, records) = fetch_over_a_pending_google_card("f1-fetch-archives");
+    let after = lab.proposal_cards("gcal-series:cs100aa");
+    assert_eq!((after.len(), after[0].folder, after[0].status()), (1, "archive", "superseded"), "{after:?}");
+    assert!(records.iter().any(|r| r["op"] == "delete"), "{records:?}");
+    assert_eq!(class_notes(&lab), 1);
+}
+
+/// B3 minors (review B3ePR, 9f53ad5). That withdrawal journals as `rank`'s approvals actor,
+/// `agent:approvals`, never as the student whose context the fetch runs under.
+#[test]
+fn the_fetchs_withdrawal_journals_as_agent_approvals() {
+    let (_lab, records) = fetch_over_a_pending_google_card("f1-fetch-actor");
+    assert!(!records.is_empty(), "the fetch withdrew nothing");
+    assert!(records.iter().all(|r| r["actor"] == "agent:approvals"), "{records:?}");
+}
+
 /// B3f (A2 item 16, "not watched stays unwatched"; a guard that should already be green). A
 /// confirmed note whose `source_uid` is outside `registrar:`, `gcal-series:` and `ics-series:`,
 /// with a series under that key whose times moved, gets no `commitment-check` card.

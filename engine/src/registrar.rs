@@ -378,6 +378,9 @@ pub fn run_parsed(
 ) -> Result<Report, String> {
     use crate::commitments as cm;
     let calendar = calendar_key(school_key, &parsed.term);
+    // B3 minors (A2 item 11): the series lock is held from before the first read to the merge's
+    // write, so two fetches at once never both read one prior and end a note twice.
+    let held = cm::hold_series_lock(vault);
     // P9: how each CRN of the answer was read, by its key; the confirmed notes of this term, by key.
     let read: BTreeMap<String, Reading> = parsed.seen.iter().map(|(crn, how)| (format!("{calendar}-{crn}"), *how)).collect();
     let confirmed: BTreeMap<String, cm::Commitment> = cm::load(vault)
@@ -553,7 +556,7 @@ pub fn run_parsed(
     };
     // A2 item 12, "One filer": only after the series-file write held does the fetch withdraw and
     // offer kept cards (close-out B3e': the typed result, not the warning text).
-    let (_, mut warnings, wrote) = cm::refresh_series_with(vault, &[(calendar, input)], today, Some(&news));
+    let (_, mut warnings, wrote) = cm::refresh_series_held(vault, held, &[(calendar, input)], today, Some(&news));
     warnings.extend(parsed.warnings.iter().cloned());
     warnings.extend(failed);
     let stored = cm::stored_proposals(vault, today);

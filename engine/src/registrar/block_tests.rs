@@ -67,14 +67,15 @@ fn entries_are_in_the_fixed_order() {
     lab.fetch_registered(D20, &twentieth, &REGISTERED);
     let notes: Vec<Value> = lab.ended_entries().iter().map(|e| e["note"].clone()).collect();
     assert_eq!(notes, [json!(LAB), json!("commitments/art-110.md")], "day first, then path");
-    // The answer needs one whole row (spec section 3), so the lab is listed again, whole, beside the two withdrawn.
+    // The answer needs one whole row (spec section 3), so the lecture and the lab are whole beside
+    // the two withdrawn (B3 minors): ENGL 101 (CRN 40003) and ART 110 (CRN 40006), whose CRN order
+    // is the reverse of their path order, so a CRN sort fails here.
     let mut both = trimmed();
-    drop_crn(&mut both, "40006");
     set_status(&mut both, "40003", "WD", "Invented Withdrawn");
-    set_status(&mut both, "40001", "WD", "Invented Withdrawn");
+    set_status(&mut both, "40006", "WD", "Invented Withdrawn");
     lab.fetch_registered(D30, &both, &REGISTERED);
     let status: Vec<Value> = lab.term()["status"].as_array().unwrap().iter().map(|e| e["note"].clone()).collect();
-    assert_eq!(status, [json!(LECTURE), json!("commitments/engl-101.md")], "path order");
+    assert_eq!(status, [json!("commitments/art-110.md"), json!("commitments/engl-101.md")], "path order, not CRN order");
 }
 
 /// B3c (A2 item 13, "Every writer keeps it"). A `rank` that rewrites the file leaves the block

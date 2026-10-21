@@ -2296,13 +2296,37 @@ pub fn refresh_series_with(
 ) -> (SeriesFile, Vec<String>, bool) {
     // Phase 3 final review I2: a run that may write holds the series lock from the read to the
     // rename, so a slot's `rank`, `commitments` and a registrar run never lose each other's merge.
-    let (_lock, lock_warning) = match fresh.is_empty() {
-        true => (None, None),
-        false => match lock_series_file(vault) {
-            Ok(file) => (Some(file), None),
-            Err(err) => (None, Some(format!("series file: could not lock {SERIES_LOCK_FILE} ({})", err.kind()))),
-        },
+    let held = match fresh.is_empty() {
+        true => SeriesLock(None, None),
+        false => hold_series_lock(vault),
     };
+    refresh_series_held(vault, held, fresh, today, news)
+}
+
+/// A hold on [`SERIES_LOCK_FILE`] ([`hold_series_lock`]), or the warning that it could not be
+/// taken; released when dropped or handed to [`refresh_series_held`].
+pub struct SeriesLock(Option<std::fs::File>, Option<String>);
+
+/// Takes [`SERIES_LOCK_FILE`] (blocking until it is free). A registrar fetch takes it before its
+/// first read and hands it to [`refresh_series_held`], so its carry, its already-ended test and its
+/// kept detection read the file the merge writes over (A2 item 11; B3 minors, 2026-10-21).
+pub fn hold_series_lock(vault: &Path) -> SeriesLock {
+    match lock_series_file(vault) {
+        Ok(file) => SeriesLock(Some(file), None),
+        Err(err) => SeriesLock(None, Some(format!("series file: could not lock {SERIES_LOCK_FILE} ({})", err.kind()))),
+    }
+}
+
+/// [`refresh_series_with`] under a lock the caller already holds (the lock is not re-entrant);
+/// it is released when this returns.
+pub fn refresh_series_held(
+    vault: &Path,
+    held: SeriesLock,
+    fresh: &[(String, Vec<Series>)],
+    today: Date,
+    news: Option<&RegistrarFetch>,
+) -> (SeriesFile, Vec<String>, bool) {
+    let SeriesLock(_lock, lock_warning) = held;
     let (old, mut warnings, writable) = match load_series_file(vault) {
         Loaded::Read(file) => (file, Vec::new(), true),
         Loaded::Malformed(why) => (

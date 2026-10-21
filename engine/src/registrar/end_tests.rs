@@ -151,3 +151,25 @@ fn the_list_survives_a_restart_its_ended_part() {
     let record = lab.sets(LAB, "until");
     assert_eq!((record.len(), record[0].2.as_str()), (1, listed[0]["until"].as_str()), "an ended entry without its record");
 }
+
+/// B3 minors (A2 item 11, "Ended once", two runs over one prior). A fetch waiting on the series
+/// lock while another run over the same prior ends the lab reads, once it holds the lock, the
+/// vault that run left: one open `ended` entry and one end record, never two.
+#[test]
+fn two_fetches_over_one_prior_end_the_note_once() {
+    let lab = Lab::new("end-race", "2026-08-31");
+    lab.fetch(D1, &fx());
+    let other = lab.clone_as("end-race-other", "2026-08-31");
+    other.fetch(D10, &without_lab());
+    let lock = hold_lock(&lab);
+    std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| lab.fetch(D10, &without_lab()));
+        let_it_block();
+        lab.adopt(&other);
+        drop(lock);
+        waiting.join().unwrap();
+    });
+    let entries = lab.ended_entries();
+    assert_eq!(entries.len(), 1, "a second open entry for one note: {entries:?}");
+    one_end_record(&lab, "2026-09-09");
+}

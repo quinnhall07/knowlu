@@ -615,6 +615,9 @@ bullet, D5's end card, Amendment 2's end card, Amendment 4's actor and Plan ruli
       one `ended` entry per note is open at a time. A missing note is **already ended** when its
       term's registrar block holds an **open** `ended` entry for it. A closed entry never counts:
       the test reads the note's open entry, never "any `ended` entry".
+      (B3 minors, 2026-10-21) The fetch takes the series-file lock before its first read and holds
+      it to the merge's write, so P9's carry, this test and 12's kept detection read the file as it
+      stands under that lock. Two fetches at once end a note once.
       - **Block absent** (13's accepted residual): the note is already ended when the journal's last
         `until` record for it is by `agent:knowlu.registrar` and holds a date before the fetch.
       - **What already ended means.** An already-ended note that is still missing gets no write, no
@@ -850,6 +853,14 @@ bullet, D5's end card, Amendment 2's end card, Amendment 4's actor and Plan ruli
       `returned`, that fetch's day (11). An
       `ended` entry without `returned` is **open**, and the note's open entry is the record 11's
       "already ended" test reads.
+      - (B3 minors, 2026-10-21) A `kept` entry with no prior value to compare (12's "no prior
+        row") also holds `listed: true`: it is listed only, and no card is filed for it.
+      - (B3 minors, 2026-10-21) An `ended` entry also holds `day`, the fetch day that ended the
+        note, and `kept_yours`: `true` when the student had set `until` by hand and nothing was
+        written, `false` when the fetch wrote the pinned end.
+      - (B3 minors, 2026-10-21) B3d's ruling: a missing note whose `until` is already on or before
+        the pinned end is skipped. Nothing is written, no `ended` entry is opened and nothing is
+        listed, so `until` never moves later.
     - **How it changes.** `applied` and `ended` accumulate over the term: a fetch adds only its new
       entries, and an already-ended note adds none (11). The one change to an existing entry is a
       come-back: it sets `returned` on the note's open `ended` entry, once. `kept` is current state, changed only by

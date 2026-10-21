@@ -9,7 +9,12 @@
 //!   kept_yours, meets?, note, returned?, until, where?} (`meets` and `where`: the dropped row's
 //!   last whole values, present when the file held its row; B3eR fix 2); `kept` {field, note,
 //!   registrar, student} (the report's copy adds `card`: "filed", "waiting" or "listed");
-//!   `status` {key, note, status}; `unread` {key, note, reason}. `note` is the vault-relative
+//!   `status` {key, note, status}; `unread` {key, note, reason}. (B3 minors, 2026-10-21) A kept
+//!   entry with no prior value to compare also holds `listed: true` (listed only, no card).
+//!   (B3 minors, 2026-10-21) An `ended` entry's `day` is the fetch day that ended the note, and
+//!   `kept_yours` is true when the student had set `until` by hand, so nothing was written.
+//!   (B3 minors, 2026-10-21) B3d's ruling: a missing note whose `until` is already on or before
+//!   the pinned end is skipped: no write, no `ended` entry, no listing. `note` is the vault-relative
 //!   path (`null` when no note holds the key); dates are `YYYY-MM-DD`; a `meets` value is the note's own list (`[{days, start, end}]`).
 //! - `commitments --json`'s overview carries the same five lists, read from the block, under the
 //!   new key `registrar_changes` (its existing `registrar` object is untouched).
