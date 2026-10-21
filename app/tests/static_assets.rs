@@ -3216,6 +3216,16 @@ fn the_panels_first_line_names_the_version_from_the_key_never_a_literal_date() {
 }
 
 #[test]
+fn the_panels_changes_name_gmail_and_amazon() {
+    let js = read("console.js");
+    let table = js.split("var PRIVACY_CHANGES = {").nth(1).and_then(|s| s.split("};").next())
+        .expect("console.js needs `var PRIVACY_CHANGES = { ... };`");
+    for w in ["Gmail", "Amazon"] {
+        assert!(table.contains(w), "the panel's changes must name {w}: the page now covers it");
+    }
+}
+
+#[test]
 fn every_start_control_reads_the_owed_flag_and_a_throw_never_strands_it() {
     let js = read("console.js");
     // The Today sync line's button, and a repaint of it when the flag changes.

@@ -2742,7 +2742,7 @@
   // PRIVACY_VERSION, so a bump of the constant cannot ship these lines by accident.
   var PRIVACY_CHANGES = {
     "2026-09-24": [
-      "It now covers the email you forward to Knowlu and what is kept from it, the Blackboard and mail sign-ins Knowlu keeps on this computer, your grades in your account, and daily counts of your AI calls.",
+      "It now covers connecting Google Calendar and Gmail, the email you forward to Knowlu (received by Amazon Web Services) and what is kept from it, the Blackboard and mail sign-ins Knowlu keeps on this computer, your grades in your account, and daily counts of your AI calls.",
       "Until you accept, Knowlu keeps today's page up to date from this computer but does not sync, import or read anything new.",
       "To leave instead, use Settings → Delete my data."
     ]

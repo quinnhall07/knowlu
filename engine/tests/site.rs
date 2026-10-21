@@ -251,6 +251,8 @@ fn the_export_bullet_names_what_the_file_does_not_yet_hold() {
     let text = page_text();
     assert!(!text.contains("everything our servers hold that is meaningful to you"));
     assert!(text.contains(
-        "The record of each decision Knowlu made, your Google connection's details (never the permission itself) and Gmail proposals not yet on your computer are not in this file yet; ask and we will send them with it."
+        "The record of each decision Knowlu made, your Google connection's details (never the permission itself) and Gmail proposals not yet on your computer are not in this file yet. Ask at support@knowlu.com and we will send the file, and those three with it if you want them."
     ));
+    assert!(text.contains("your daily counts and any free tester access"));
+    assert!(!text.contains("we will send them with it. Ask at"));
 }
