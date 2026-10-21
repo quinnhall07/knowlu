@@ -256,3 +256,43 @@ fn the_export_bullet_names_what_the_file_does_not_yet_hold() {
     assert!(text.contains("your daily counts and any free tester access"));
     assert!(!text.contains("we will send them with it. Ask at"));
 }
+
+/// Grades spec §11: the two sentences the spec hands to privacy bump #1 (the kept Blackboard
+/// sign-in on this computer, and your grades in the account), plus the retention line.
+#[test]
+fn the_page_carries_the_grades_sentences() {
+    let text = page_text();
+    let gone = missing(&text, &[
+        "If you connect Blackboard for grades, Knowlu keeps your Blackboard sign-in on this computer, in a browser profile Windows encrypts for your Windows account, so it can read your grades without asking you to sign in every time. Forget Blackboard sign-in in Settings deletes it.",
+        "if you connect Blackboard, your grades, kept with your tasks so that every computer you sign in on shows the same ones",
+        "the current text of each and your grades, for as long as the account exists",
+    ]);
+    assert!(gone.is_empty(), "the page lacks: {gone:?}");
+}
+
+/// Gmail spec §8.5 test 3: "What we collect" has the Google-connection entry and "How long we keep
+/// it" has the Gmail bullet. Each is pinned inside its own section, not just somewhere on the page.
+#[test]
+fn the_google_connection_entry_and_the_gmail_retention_bullet_sit_in_their_sections() {
+    let text = page_text();
+    let collect = text.find("What we collect").expect("the heading");
+    let not_collect = text.find("What we do not collect").expect("the next heading");
+    let entry = text.find("Your Google connection, if you make one").expect("the Google-connection entry");
+    assert!(collect < entry && entry < not_collect, "the entry is outside What we collect");
+    assert!(text.contains("The permission Google gave us, stored encrypted and never sent to your computer"));
+    let keep = text.find("How long we keep it").expect("the heading");
+    let bullet = text.find("Gmail — our list of the emails we have read, for 30 days").expect("the Gmail bullet");
+    assert!(keep < bullet, "the Gmail bullet is outside How long we keep it");
+}
+
+/// Gmail spec §8.5 test 2: the disconnect sentence names what it deletes, and the record of each
+/// decision, message id included, stays until the account is deleted (in both places it is said).
+#[test]
+fn the_decision_record_stays_until_the_account_is_deleted() {
+    let text = page_text();
+    let gone = missing(&text, &[
+        "Disconnecting revokes our access at Google and deletes the stored connection, our list of which emails we have already read, and any proposals from your mail that had not reached your computer yet. The record of what Knowlu decided about each email, including its message id and who it was from, stays until you delete your account.",
+        "The record of what we decided about each email, including its message id and who it was from, is kept until you delete your account.",
+    ]);
+    assert!(gone.is_empty(), "the page lacks: {gone:?}");
+}
