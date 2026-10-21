@@ -3,7 +3,8 @@
 // Amendment 2026-10-20 (grants keyed by account, no address read). It registers no test: S3's fake lookup
 // imports this file and testers_cases.ts, never a _test.ts file. Days are relative to the model's
 // fixed now, day 0, as in the case table. It proves the table self-consistent, not the SQL.
-import type { Call, Grant, Row, TesterCase } from "./testers_cases.ts";
+import type { Account, Call, Grant, GuardTestersRow, Row, TesterCase } from "./testers_cases.ts";
+import { EXTEND_NOT_FUTURE, EXTEND_TOO_FAR, GRANT_NOT_FUTURE, GRANT_TOO_FAR } from "./testers_cases.ts";
 
 export type State = "ended" | "expired" | "live";
 /** The statuses a grant never overrides: `not in ('active', 'trialing')` is the grant branch (§3.2). */
@@ -29,6 +30,21 @@ export function viewRow(row: Row | null, grants: Grant[]): Row {
   const g = isPaid(row) ? undefined : grants.find(entitles);
   if (g) return { status: "active", plan: "tester", periodEnd: g.endsIn };
   return { status: row?.status ?? "none", plan: row?.plan ?? null, periodEnd: row?.periodEnd ?? null };
+}
+
+/** The S6 follow-up's ceiling, `now() + interval '1 year'`, in whole days: 365 is inside on every
+ * date and 367 outside; 366 depends on the calendar, and no case uses it. */
+export const YEAR_DAYS = 365;
+
+/** admin.testers' row for a grant, with the follow-up's two columns: `coalesce(e.status, 'none')` and
+ * `e.stripe_subscription_id is not null` (false with no row). */
+export function testersRow(a: Account, g: Grant): GuardTestersRow {
+  return {
+    state: grantState(g),
+    paid: isPaid(a.row),
+    entitlementStatus: a.row?.status ?? "none",
+    hasSubscription: a.row !== null && a.subscription === true,
+  };
 }
 
 export interface Outcome {
@@ -65,6 +81,9 @@ function apply(call: Call, alive: boolean[], grants: Grant[]): { refused: string
   const account = call.account;
   const open = account === "unknown" ? undefined : grants.find((g) => g.account === account && g.endedAgo === undefined);
   if (call.fn === "comp_grant") {
+    // The S6 follow-up: the date first, as the SQL checks it before the insert.
+    if (call.endsIn <= 0) return { refused: GRANT_NOT_FUTURE };
+    if (call.endsIn > YEAR_DAYS) return { refused: GRANT_TOO_FAR };
     if (account === "unknown" || !alive[account]) {
       return { refused: 'insert on table "comp_grants" violates foreign key constraint' };
     }
@@ -72,8 +91,10 @@ function apply(call: Call, alive: boolean[], grants: Grant[]): { refused: string
     return { refused: null, grants: [...grants, { account, endsIn: call.endsIn }] };
   }
   // comp_extend (§3.3): accepts an open grant whether or not its ends_at has passed; refuses a new
-  // ends_at not in the future, then an ended grant or none, in the SQL's order (the date first).
-  if (call.endsIn <= 0) return { refused: "the new ends_at is not in the future" };
+  // ends_at not in the future, then (the S6 follow-up) one past a year, then an ended grant or none,
+  // in the SQL's order (the date first).
+  if (call.endsIn <= 0) return { refused: EXTEND_NOT_FUTURE };
+  if (call.endsIn > YEAR_DAYS) return { refused: EXTEND_TOO_FAR };
   if (!open) return { refused: "no open grant for this account" };
   return { refused: null, grants: grants.map((g) => g === open ? { ...g, endsIn: call.endsIn } : g) };
 }
