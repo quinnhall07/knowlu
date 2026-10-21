@@ -160,7 +160,7 @@ pub fn on_start(app: &AppHandle) {
         }
         // L4: while the privacy update is owed nothing new is read (the panel's own words). The markers stay
         // in `mail.json`, so the first launch after Accept resumes them.
-        if resume_held_for_privacy(&vault, &data_dir) {
+        if resume_held_after_privacy_check(&vault, &data_dir) {
             return;
         }
         let ids = super::backfill::open_backfills(&data_dir);
@@ -185,6 +185,24 @@ pub fn resume_held_for_privacy(vault: &Path, data_dir: &Path) -> bool {
     let Ok(cfg) = crate::account::cloud_config(vault) else { return false };
     crate::account::privacy_gate(crate::account::load_privacy_cache(data_dir).as_ref(), &cfg.account_id)
         == crate::account::PrivacyGate::Older
+}
+
+/// The launch resume's test: `resume_held_for_privacy`, after one `account::refresh_privacy` when the
+/// cached gate is not `Accepted` (the first launch after an upgrade has no cache). Call it off the UI
+/// thread: the refresh is a network call. A definite `Older` holds, `Accepted` resumes, and an
+/// `Unknown` or failed check keeps the cached rule (only a cached `Older` holds).
+pub fn resume_held_after_privacy_check(vault: &Path, data_dir: &Path) -> bool {
+    use crate::account::PrivacyGate;
+    let Ok(cfg) = crate::account::cloud_config(vault) else { return false };
+    let cached = crate::account::privacy_gate(crate::account::load_privacy_cache(data_dir).as_ref(), &cfg.account_id);
+    if cached == PrivacyGate::Accepted {
+        return false;
+    }
+    match crate::account::refresh_privacy(vault, data_dir) {
+        Ok(PrivacyGate::Older) => true,
+        Ok(PrivacyGate::Accepted) => false,
+        Ok(PrivacyGate::Unknown) | Err(_) => cached == PrivacyGate::Older,
+    }
 }
 
 /// The start-up sweep (`mail_session::start_up_sweep`), run only while `window` holds the mail window:

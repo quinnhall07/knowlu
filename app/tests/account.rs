@@ -1806,6 +1806,41 @@ fn refresh_privacy_writes_the_cache_from_the_reply_over_another_accounts() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// The mail launch resume (L4, review minor 5): on the first launch after an upgrade there is no cache
+/// yet, so the resume asks the service before it decides. A definite older answer holds it, an accepted
+/// one resumes, and an unanswered check keeps the cached rule (only a cached `Older` holds). An
+/// `Accepted` cache sends nothing.
+#[cfg(windows)]
+#[test]
+fn the_mail_launch_resume_asks_the_service_when_the_cache_is_not_accepted() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::mail::live::resume_held_after_privacy_check as held;
+    let target = format!("knowlu/test-privacy-mail-resume-{}-{}/session", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    save_a_live_session(&target);
+    let (base, handle) = loopback(vec![(200, consent_reply("2000-01-01")), (200, consent_reply(PRIVACY_VERSION))]);
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    let (vault, data) = privacy_vault("mail-resume", &api_base, &target);
+
+    assert!(!privacy_cache_path(&data).exists(), "an upgrade: no cache yet");
+    assert!(held(&vault, &data), "no cache and an older answer: held");
+    assert_eq!(load_privacy_cache(&data).and_then(|c| c.recorded).as_deref(), Some("2000-01-01"), "the answer is cached");
+    assert!(!held(&vault, &data), "an older cache and an accepted answer: resumes");
+    assert_eq!(load_privacy_cache(&data).and_then(|c| c.recorded).as_deref(), Some(PRIVACY_VERSION));
+    assert!(!held(&vault, &data), "an accepted cache: resumes, and asks nothing");
+    assert_eq!(handle.join().expect("server thread").len(), 2, "two asks, none for the accepted cache");
+
+    // The service cannot be reached (nothing listens now): Unknown keeps today's rule.
+    let (vault2, data2) = privacy_vault("mail-resume-down", &api_base, &target);
+    assert!(!held(&vault2, &data2), "no cache and no answer: resumes");
+    save_privacy_cache(&data2, &privacy_cache("acc-1", Some("2000-01-01"))).unwrap();
+    assert!(held(&vault2, &data2), "an older cache and no answer: still held");
+    for d in [&vault, &data, &vault2, &data2] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
 /// The panel's one call per launch (plan §4.4, §4.6): `needs_accept` is `true` only when the service
 /// answered older; a refusal is `ok: false` with `needs_accept: null` and leaves the cache; and a
 /// vault with no account is the upgrade overlay's case, `needs_accept: false`, with nothing sent.
