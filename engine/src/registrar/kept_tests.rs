@@ -362,9 +362,16 @@ fn a_replaced_value_withdraws_its_card() {
     let lab = edited("kept-replaced");
     lab.fetch(D10, &at_13());
     let b = the_card(&lab, LECTURE, "meets");
+    let before = lab.journal().len();
     lab.fetch(D20, &lecture_at("1400", "1450"));
     let (b_now, c) = (named(&lab, &b), the_card(&lab, LECTURE, "meets"));
     assert_eq!((b_now.folder, b_now.status()), ("archive", "superseded"));
+    // Review B3ePR: the fetch's withdrawal is an engine act, journaled as an agent, never the student.
+    let withdrawal: Vec<Value> = lab.journal().split_off(before).into_iter()
+        .filter(|r| r["path"].as_str().is_some_and(|p| p.ends_with(&format!("/{}", b.name))))
+        .collect();
+    assert!(withdrawal.iter().any(|r| r["op"] == "delete"), "{withdrawal:?}");
+    assert!(withdrawal.iter().all(|r| r["actor"].as_str().is_some_and(|a| a.starts_with("agent:"))), "{withdrawal:?}");
     assert_eq!(c.meta["change"]["meets"], meets(&["mon", "wed", "fri"], "14:00", "14:50"));
     assert!(matches!(lab.settle(&b_now, D20), Settled::Superseded(_)));
     assert_eq!(lab.loaded(LECTURE).meets[0].days, vec!["tue"], "approving the withdrawn card wrote");

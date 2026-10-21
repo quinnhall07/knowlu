@@ -3869,6 +3869,11 @@ thread_local! {
     pub(crate) static AT_FILER_LOCK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
+/// The actor [`emit_checks_locked`]'s withdrawal pass writes as: `rank`'s own approvals actor
+/// (`cli.rs`), so a fetch's withdrawal and a `rank`'s carry the same actor and neither reads as
+/// the student's answer (`provenance::is_agent`).
+const WITHDRAW_ACTOR: &str = "agent:approvals";
+
 /// A2 item 12, "One filer" (close-out B3e): [`emit_checks`] once, holding [`SERIES_LOCK_FILE`]
 /// from the series file's re-read to the last card write, so a fetch and a `rank` never file the
 /// same `(note, field, value)` twice. Under the lock it re-reads the file and the notes, counts the
@@ -3883,7 +3888,7 @@ thread_local! {
 /// `refresh_series` returned) with the re-read's block for each term calendar `base` holds, or with
 /// no `base` (the fetch) over the re-read itself. Every `registrar:` proposal whose key the re-read
 /// does not hold under `series` is dropped (all of them on a bad re-read). Returns `(filed,
-/// withdrawn pending, warnings)`.
+/// withdrawn pending, warnings)`. The withdrawal writes as [`WITHDRAW_ACTOR`], whatever `ctx` is.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_checks_locked(
     vault: &Path,
@@ -3926,7 +3931,10 @@ pub fn emit_checks_locked(
             }
             None => file.clone(),
         };
-        let out = crate::approvals::withdraw_stale(vault, &over, &load(vault), today, ctx, journal);
+        // Review B3ePR: a withdrawal is the engine's act, journaled as `rank`'s own pass journals
+        // it (`agent:approvals`) whichever path runs it — never as the fetch's human ctx.
+        let agent = ctx.with_actor(WITHDRAW_ACTOR);
+        let out = crate::approvals::withdraw_stale(vault, &over, &load(vault), today, &agent, journal);
         withdrawn = out.pending;
         warnings.extend(out.warnings);
         let set = load(vault);
