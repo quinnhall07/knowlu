@@ -58,10 +58,10 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   in the account, not the vault (C2 final review A-1/A-2): `/ingest-ics` answering 404 (no
   `lms_ics` source configured) is a named skip at exit 0, never a failure, and any other service
   failure with no local `ics_url` names the real cause honestly and keeps exit 1.
-- `judge --vault <v> [--via <via>] [--run-id <id>] [--runtime <llama-cli.exe>] [--model <.gguf>]
+- `judge --vault <v> [--via <via>] [--run-id <id>]
   [--log-dir <dir>] [--limit N]` — enriches tasks flagged `needs_enrichment: true` in three tiers
-  (heuristics, promoted rules, the model — one process per judgment). **Always exits 0**: no runtime
-  and no model are normal outcomes. Writes as `agent:knowlu.enrich` (`provenance::is_agent` is a
+  (heuristics, promoted rules, the judgment service). **Always exits 0**: no account, session,
+  entitlement or network are normal outcomes. Writes as `agent:knowlu.enrich` (`provenance::is_agent` is a
   `starts_with` test) with `judged: true`, `propose: true`. Judgment logs never enter the vault.
 - `sync --vault <v> [--direction pull|push|both] [--via <via>] [--run-id <id>]` — the account's copy
   of the vault: new journal records and changed note text up, another desktop's writes down and
@@ -102,8 +102,8 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 - **The judgment service (C2).** When `config/cloud.yaml` exists (written by the wizard at
   onboarding; absent is a named skip, never an error), `judge`'s tier 3 is `POST /judge-task` /
   `-event` / `-email` on our Supabase project — the prompt, schema and pinned model id live
-  server-side, so `CloudModel` (`engine/src/cloudmodel.rs`) implements the same `judge::Model` the
-  local runtime implemented. `ingest`, `coursework` and `rank` reach the same service too, but only
+  server-side, so `CloudModel` (`engine/src/cloudmodel.rs`) is the one implementation of
+  `judge::Model`. `ingest`, `coursework` and `rank` reach the same service too, but only
   for **transport** (the LMS feed, the zyBooks/VHL fetch, event feeds and `cloud:`-named calendars
   move server-side) — never for judgment, so `rank` never calls a model still holds.
   `engine/src/enrich.rs`'s `run_lines_with` hosts the five cloud passes a judge step runs in one slot:

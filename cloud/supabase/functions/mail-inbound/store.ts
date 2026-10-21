@@ -202,30 +202,27 @@ export function storeOver(rest: Rest, encKey: CryptoKey, now: () => number = Dat
       return true;
     },
     async endRotateGrace(address) {
+      // The status before the Rotate goes with the grace (Q4, 2026-10-20): tidiness only, since D22
+      // ignores `rotated_from` once `retired_until` is gone.
       await patch("rotate grace", `id=eq.${id(address)}&retired_token_hmac=not.is.null`, {
         retired_token_hmac: null,
         retired_until: null,
+        rotated_from: null,
       });
     },
     async confirmed(address) {
       await patch("confirmed", `id=eq.${id(address)}&status=eq.pending`, { status: "confirmed" });
       await patch("confirm window", `id=eq.${id(address)}`, { confirm_until: null });
     },
-    async batchReceived(batch, address, n) {
-      // PostgREST has no increment: read, then write only if nobody else wrote between (a concurrent
-      // send of the same batch), a few times over.
-      const mine = `id=eq.${id(batch)}&address_id=eq.${id(address)}`;
-      for (let tries = 0; tries < 8; tries++) {
-        const [b] = await rows<{ received: number }>(
-          await call(rest, "batch", `mail_batches?${mine}&select=received&limit=1`),
-        );
-        if (b === undefined) return; // pruned or disconnected: nothing left to count toward
-        const unchanged = `${mine}&received=eq.${b.received}`;
-        if (await patched("batch received", "mail_batches", unchanged, { received: b.received + n }) > 0) {
-          return;
-        }
-      }
-      throw new Error("store batch received contended");
-    },
+    // One guarded update (`count_batch_receipt`, email follow-ups T5): `n` is added and the receipt recorded
+    // only while the batch has not counted it, so an SNS redelivery, even one running beside the first,
+    // counts nothing again. False when it was counted already, or the batch is pruned or disconnected.
+    batchReceived: async (batch, address, n, receipt) =>
+      await (await rpc("count_batch_receipt", {
+        p_batch: batch,
+        p_address: address,
+        p_receipt: receipt,
+        p_n: n,
+      })).json() === true,
   };
 }

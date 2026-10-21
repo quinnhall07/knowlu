@@ -14,7 +14,7 @@
 # whatever the cache restored, so the verified binary is the one `cargo tauri build` runs.
 #
 # A bump is the version AND the hash, and a wrong archive throws before anything is built - the same
-# contract app\src\inference.rs holds for llama.cpp runtimes. This script runs unchanged on Windows
+# contract every downloaded tool follows. This script runs unchanged on Windows
 # PowerShell 5.1 and on pwsh 7: no &&, no ternary, no ??.
 param(
   [Parameter(Mandatory = $true)][string]$Version,

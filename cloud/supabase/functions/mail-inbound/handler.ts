@@ -23,7 +23,8 @@
  *      closed; a refusal, the classifier's or the page's, is counted `unbound`;
  *    - a **batch send**'s `message/rfc822` attachments each go through steps 7 and 8 as the batch's phase,
  *      with step 6's word from the original alone (`unaligned` is kept), and all of them count toward the
- *      batch's `received`; nothing else in the send is parsed;
+ *      batch's `received`, once per SES receipt (an SNS redelivery counts nothing again; email follow-ups
+ *      T5); nothing else in the send is parsed;
  *    - a live `aligned` forward is handed off; a live `unaligned` one is deleted and counted
  *      `unauthenticated`; `unbound` is deleted and counted on the address, as `own` or `foreign`
  *      (`unboundOrigin`), and a bound live forward zeroes those runs (Quinn's unbound-display ruling,
@@ -144,8 +145,10 @@ export interface InboundStore {
   endRotateGrace(addressId: string): Promise<void>;
   /** Gmail's confirmation completed: a `pending` mailbox reads `confirmed`, and its confirm window closes. */
   confirmed(addressId: string): Promise<void>;
-  /** Adds `n` to the batch's `received`. */
-  batchReceived(batchId: string, addressId: string, n: number): Promise<void>;
+  /** `count_batch_receipt`: adds `n` to the batch's `received` and records `receipt` (the SHA-256 hex of
+   * the notification's object key) in one guarded write, only while the batch has not counted it. False,
+   * with nothing written, when the receipt was already counted (an SNS redelivery) or the batch is gone. */
+  batchReceived(batchId: string, addressId: string, n: number, receipt: string): Promise<boolean>;
 }
 export interface InboundDeps {
   /** The certificate fetch; the replay bound reads `now` below, one clock for the whole delivery. */
@@ -218,6 +221,14 @@ interface Receipt {
   spfPass: boolean;
   /** SES's receipt time (epoch ms), never later than now. */
   arrivedAt: number;
+}
+/** A receipt as intake acts on it: `countId` is the lower-case hex SHA-256 of `key`, computed once per
+ * delivery. An SNS redelivery carries the same key, and another send another one, so a batch counts each
+ * SES receipt once (email follow-ups T5). The hash is never logged or answered. */
+type Delivered = Receipt & { countId: string };
+async function countIdOf(key: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 const rec = (x: unknown): Record<string, unknown> | null =>
   typeof x === "object" && x !== null && !Array.isArray(x) ? x as Record<string, unknown> : null;
@@ -341,7 +352,7 @@ async function handOff(
 async function arrive(
   raw: Uint8Array,
   f: Found,
-  n: Receipt,
+  n: Delivered,
   cfg: InboundConfig,
   deps: InboundDeps,
 ): Promise<number> {
@@ -438,7 +449,7 @@ async function batchSend(
   raw: Uint8Array,
   row: AddressRow,
   batch: Extract<Arrival, { kind: "batch" }>,
-  n: Receipt,
+  n: Delivered,
   deps: InboundDeps,
 ): Promise<number> {
   const originals = attachedMessages(raw);
@@ -453,14 +464,21 @@ async function batchSend(
     };
     if (await handOff(original, row, item, deps)) queued++;
   }
-  if (originals.length > 0) await deps.store.batchReceived(batch.batchId, row.id, originals.length);
+  // One count per SES receipt (email follow-ups T5): a redelivery of this send, after a later failure or
+  // while this run still works, is refused by the store's one guarded write. Not an error either way.
+  if (
+    originals.length > 0 &&
+    !await deps.store.batchReceived(batch.batchId, row.id, originals.length, n.countId)
+  ) {
+    log("batch send already counted, or its batch is gone");
+  }
   log(`batch send: ${queued} of ${originals.length} queued (${batch.phase})`);
   return queued;
 }
 
 /** Steps 2–4 and the final delete: find, entitle, fetch once, then each bound mailbox in turn; how many
  * new work items the delivery queued. */
-async function intake(n: Receipt, cfg: InboundConfig, deps: InboundDeps): Promise<number> {
+async function intake(n: Delivered, cfg: InboundConfig, deps: InboundDeps): Promise<number> {
   const found = await find(n, cfg, deps);
   const entitled: Found[] = [];
   const answers = new Map<string, boolean>();
@@ -505,7 +523,7 @@ export async function handle(req: Request, cfg: InboundConfig, deps: InboundDeps
   }
   let queued: number;
   try {
-    queued = await intake(n, cfg, deps);
+    queued = await intake({ ...n, countId: await countIdOf(n.key) }, cfg, deps);
   } catch (e) {
     log(`failed (${e instanceof S3Error ? `s3 ${e.op} ${e.status}` : "store"})`);
     return fail(500, "intake failed");

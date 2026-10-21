@@ -4,7 +4,10 @@
  * `x-knowlu-job-token`. Per item, oldest arrival first, inside the run's wall-clock budget:
  *
  * 0. **Lease** the item (`next_attempt_at` moved past this run, guarded on its old value), so a kick and
- *    the cron never work one item twice.
+ *    the cron never work one item twice. Then the **entitlement gate** (follow-ups plan T3; Quinn's Q1-Q3,
+ *    2026-10-20): an item of an account neither `active` nor `trialing` is held `LAPSED_HOLD_MS`, unread,
+ *    uncharged and with its attempts unchanged, until the account renews or the sweep expires it (D8). Each
+ *    run marks every held mailbox `lapsed` once, from its oldest held arrival (`mail_mark_lapsed_from`).
  * 1. **Parse** (`mime.ts`): the headers, and the first `text/plain` part, else the HTML part as text. No
  *    attachment is opened.
  * 2. **Screen, no model** (`screen.ts`), in order, the first that fires deciding: bulk or list mail from a
@@ -110,6 +113,12 @@ export interface ProcessStore {
   /** `expire_mail_work`: the work row, its `mail_seen` row and one `expired` on its mailbox, in one
    * transaction; false, counting nothing, when the row is already gone. */
   expire(workId: string): Promise<boolean>;
+  /** Whether the account is `active` or `trialing` (`isActive` over its `entitlements` row, as intake's
+   * gate reads it). A failed read throws. */
+  entitled(accountId: string): Promise<boolean>;
+  /** `mail_mark_lapsed_from`: the mailbox `lapsed` from `sinceIso` or earlier; never an `off` or `revoked`
+   * one, and never a later stamp. True when it wrote. */
+  markLapsed(addressId: string, sinceIso: string): Promise<boolean>;
 }
 /** The nightly sweep's reads and deletes (plan P7). Every bound is an ISO time, at or before which a row
  * qualifies; each answers how many rows it touched. */
@@ -167,6 +176,10 @@ export interface ItemDeps {
 export const LEASE_MS = 5 * 60_000;
 /** The run's own wall-clock budget, inside the platform's limit, and the work read per round. */
 export const RUN_BUDGET_MS = 50_000;
+/** How long an item of an account neither `active` nor `trialing` is held before it is looked at again
+ * (Quinn's Q2 (a), 2026-10-20): unread, uncharged, its attempts unchanged, until the account renews or the
+ * sweep expires it with its object (D8). */
+export const LAPSED_HOLD_MS = 60 * 60_000;
 const ROUND = 25;
 /** At most this many items a run, whatever the budget. */
 const MAX_ITEMS = 500;
@@ -244,7 +257,25 @@ export async function expireItem(item: { id: string; s3Key: string }, deps: Item
   return expired;
 }
 
-type Outcome = "noise" | "template" | "refused" | "unauthenticated" | "model" | "expired" | "taken" | "left";
+type Outcome =
+  | "noise"
+  | "template"
+  | "refused"
+  | "unauthenticated"
+  | "model"
+  | "expired"
+  | "taken"
+  | "left"
+  | "lapsed";
+
+/** What one run reads once per account, and what its holds leave for the run's marks. */
+interface RunState {
+  account(id: string): Promise<Account>;
+  /** `store.entitled`, once per account per run; a failed read is not kept. */
+  entitled(id: string): Promise<boolean>;
+  /** A hold written: the mailbox's oldest held arrival this run is what its mark starts from (Q3). */
+  held(item: WorkItem): void;
+}
 
 /** The account's mailboxes, allow-list and known courses, read once a run. */
 interface Account {
@@ -254,12 +285,19 @@ interface Account {
 }
 
 /** Steps 0–3 for one item, then the model path for what is left. */
-async function processItem(
-  item: WorkItem,
-  deps: ProcessDeps,
-  account: (id: string) => Promise<Account>,
-): Promise<Outcome> {
+async function processItem(item: WorkItem, deps: ProcessDeps, state: RunState): Promise<Outcome> {
   if (!(await deps.store.lease(item, iso(deps.now() + LEASE_MS)))) return "taken";
+  // The entitlement gate (Quinn's Q1, 2026-10-20), before anything else: an account neither `active` nor
+  // `trialing` has its item held, unread and uncharged, its attempts unchanged, until it renews or the
+  // sweep expires it with its object (Q2 (a)). A failed read throws: the item waits out its lease, and no
+  // metered call is made on an answer we could not read.
+  if (!(await state.entitled(item.accountId))) {
+    await deps.store.wait(item.id, iso(deps.now() + LAPSED_HOLD_MS), item.attempts);
+    state.held(item);
+    log("account not entitled, held");
+    return "lapsed";
+  }
+  const account = state.account;
   if (item.phase === "live" && item.authenticity !== "aligned") {
     await deps.store.count(item.addressId, "unauthenticated");
     await finishItem(item, deps);
@@ -335,25 +373,69 @@ async function run(deps: ProcessDeps): Promise<Record<Outcome | "failed", number
     expired: 0,
     taken: 0,
     left: 0,
+    lapsed: 0,
     failed: 0,
   };
   const started = deps.now();
-  const accounts = new Map<string, Promise<Account>>();
-  const account = (id: string) => {
-    let got = accounts.get(id);
-    if (got === undefined) {
-      got = Promise.all([deps.store.mailboxes(id), deps.store.knownCourses(id)]).then((
-        [mailboxes, known],
-      ) => ({
-        mailboxes,
-        allow: allowDomains(mailboxes, deps.vendorDomains ?? VENDOR_DOMAINS, deps.templates ?? TEMPLATES),
-        knownCourses: known,
-      }));
-      got.catch(() => accounts.delete(id));
-      accounts.set(id, got);
-    }
-    return got;
+  // Once per account per run; a failed read evicts its entry, so the next item reads again. The
+  // entitlement is its own entry: an unpaid account's mailboxes and courses are never read.
+  const perRun = <T>(read: (id: string) => Promise<T>) => {
+    const cache = new Map<string, Promise<T>>();
+    return (id: string) => {
+      let got = cache.get(id);
+      if (got === undefined) {
+        got = read(id);
+        got.catch(() => cache.delete(id));
+        cache.set(id, got);
+      }
+      return got;
+    };
   };
+  const account = perRun((id) =>
+    Promise.all([deps.store.mailboxes(id), deps.store.knownCourses(id)]).then(([mailboxes, known]) => ({
+      mailboxes,
+      allow: allowDomains(mailboxes, deps.vendorDomains ?? VENDOR_DOMAINS, deps.templates ?? TEMPLATES),
+      knownCourses: known,
+    }))
+  );
+  /** Each held mailbox's oldest held arrival this run (Q3). */
+  const holds = new Map<string, string>();
+  const state: RunState = {
+    account,
+    entitled: perRun((id) => deps.store.entitled(id)),
+    held(item) {
+      const prior = holds.get(item.addressId);
+      if (prior === undefined || Date.parse(item.arrivedAt) < Date.parse(prior)) {
+        holds.set(item.addressId, item.arrivedAt);
+      }
+    },
+  };
+  try {
+    await loop(deps, state, counts, started);
+  } finally {
+    // One mark per held mailbox per run, from its oldest held arrival, so the device's reconcile reaches
+    // back over the held mail (Q3). In a `finally` (review r2, minor 1): a run that fails after a hold still
+    // marks. A failed mark is caught, so it never hides the run's own error; the holds stand, and the next
+    // run that holds the mailbox marks it again.
+    for (const [address, since] of holds) {
+      try {
+        await deps.store.markLapsed(address, since);
+      } catch {
+        counts.failed++;
+        log("lapsed mark failed, holds kept");
+      }
+    }
+  }
+  return counts;
+}
+
+/** The rounds: due work, oldest arrival first, inside the budget. */
+async function loop(
+  deps: ProcessDeps,
+  state: RunState,
+  counts: Record<Outcome | "failed", number>,
+  started: number,
+): Promise<void> {
   let seen = 0;
   while (seen < MAX_ITEMS && deps.now() - started < RUN_BUDGET_MS) {
     const due = await deps.store.due(iso(deps.now()), ROUND);
@@ -363,7 +445,7 @@ async function run(deps: ProcessDeps): Promise<Record<Outcome | "failed", number
       if (seen >= MAX_ITEMS || deps.now() - started >= RUN_BUDGET_MS) break;
       seen++;
       try {
-        const outcome = await processItem(item, deps, account);
+        const outcome = await processItem(item, deps, state);
         counts[outcome]++;
         if (outcome !== "taken") took++;
       } catch (e) {
@@ -375,7 +457,6 @@ async function run(deps: ProcessDeps): Promise<Record<Outcome | "failed", number
     // A round that took nothing (every item leased by another run) ends the run rather than spin.
     if (took === 0) break;
   }
-  return counts;
 }
 
 /** One cron call or kick. 401 without the job token; `{mode: "sweep"}` runs the nightly sweep (P7). */

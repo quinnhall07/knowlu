@@ -5,12 +5,12 @@
 //! at once is the expected state for weeks: whichever runs second finds `needs_enrichment: false`
 //! and writes nothing, because `write`'s F4 rule makes an identical value a no-op with no record.
 //!
-//! **This command always exits 0.** A missing runtime, a missing model, a runtime that will not
-//! start and a model that answers nonsense are all normal outcomes reported on stdout. A non-zero
-//! exit would set `RunSummary.engine_ok = false` in the app's scheduler, which paints the tray amber
-//! and puts the slot into retry backoff twice a day forever — for a machine that has simply not
-//! downloaded a 2 GB file. `coursework` exits 0 for the same reason; `ingest` does not, and that
-//! difference is deliberate on both sides.
+//! **This command always exits 0.** A vault with no account, a missing or expired session, a lapsed
+//! entitlement, a judgment service that cannot be reached and a model that answers nonsense are all
+//! normal outcomes reported on stdout. A non-zero exit would set `RunSummary.engine_ok = false` in
+//! the app's scheduler, which paints the tray amber and puts the slot into retry backoff twice a day
+//! forever — for a student who has simply not signed in yet. `coursework` exits 0 for the same
+//! reason; `ingest` does not, and that difference is deliberate on both sides.
 //!
 //! **What it writes, and as whom.** Exactly the fields the routine's step 3 writes — `course`,
 //! `effort_hours`, `effort_confidence: low`, `importance`, `importance_reason`, and
@@ -33,12 +33,10 @@
 //! one that loop then had to argue with. Nothing is lost meanwhile — the routine keeps writing pins
 //! until it is turned off, and an unpinned item is simply re-attributed each time.
 //!
-//! **No server, no load phase (spec §5.3 as amended 2026-09-07).** Task 1's spike measured a
-//! `Server` (start once, call many times) against one `llama-cli` process per judgment and found the
-//! server win shrink, not grow, as the batch got bigger — 2.15x at thirty items, converging to
-//! 2.21x, against a pre-committed 3x bar. So there is no server here: `run_lines` resolves the
-//! runtime and the model once per run and hands `judge_task` a fresh `runtime::PerCall` for every
-//! item, which is what actually spawns and kills a process.
+//! **Tier 3 is the judgment service.** `run_lines` builds one `CloudModel` per run and hands
+//! `judge_task` that model for every item; the prompt, the schema and the pinned model live
+//! server-side. A vault with no account (no `config/cloud.yaml`) is a named skip, not a failure:
+//! tier 1 is still written, one lead line says why, and the run exits 0.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -60,7 +58,7 @@ pub const ACTOR: &str = "agent:knowlu.enrich";
 pub const DEFAULT_LIMIT: usize = 50;
 
 /// M1 (final fix wave): a wall-clock budget for one run's items, checked **before starting each
-/// item** — not a per-call bound, which `runtime::CALL_TIMEOUT` already is. `DEFAULT_LIMIT *
+/// item** — not a per-call bound, which `cloudmodel::CALL_TIMEOUT` already is. `DEFAULT_LIMIT *
 /// CALL_TIMEOUT` is 100 minutes against `scheduler::CHILD_TIMEOUT`'s 20-minute slot budget:
 /// eleven consecutive timed-out calls are enough for `run_child` to return `-2`, which sets
 /// `engine_ok = false` and paints the tray amber with retry backoff twice a day forever — exactly
@@ -77,10 +75,6 @@ pub const BATCH_BUDGET: Duration = Duration::from_secs(15 * 60);
 pub struct Options<'a> {
     pub via: &'a str,
     pub run_id: Option<&'a str>,
-    /// Where the app installed the runtime. `None` falls back to `KNOWLU_RUNTIME` and then to a
-    /// sibling of the exe (`runtime::resolve`).
-    pub runtime: Option<&'a Path>,
-    pub model: Option<&'a Path>,
     /// The profile's `judgments\` directory. `None` writes no log — which is what a hand-typed
     /// `knowlu-engine judge` does, since only the app knows where a profile's app data is (§5.4).
     pub log_dir: Option<&'a Path>,
@@ -186,8 +180,7 @@ pub fn literals_for(v: &judge::Verdict, complete: bool) -> Vec<(String, String)>
 }
 
 /// The testable core: the model — or the reason there is none — is handed in, and **no process is
-/// started here**. `run_lines` is this with `runtime::resolve` (and a fresh `runtime::PerCall`) in
-/// front.
+/// started here**. `run_lines` is this with `cloudmodel::resolve` (and a `CloudModel`) in front.
 pub fn enrich_with(
     vault: &Path,
     opts: &Options<'_>,
@@ -228,7 +221,7 @@ pub fn enrich_with(
         let ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
 
         // Ids and field values only (§5.6) — and logged for EVERY outcome, because a week of
-        // "model not installed" is exactly what answers "why is nothing being enriched?".
+        // "service unavailable" is exactly what answers "why is nothing being enriched?".
         if let Some(dir) = opts.log_dir {
             let entry = crate::judgelog::entry_for(&item.id, &outcome, &literals, opts.run_id, ms);
             if let Err(e) = crate::judgelog::record(dir, &entry, None) {
@@ -240,10 +233,10 @@ pub fn enrich_with(
         // in all three places below. `tier1` seeds nothing at all unless a note already names a
         // course or the uid is pinned — a wizard-created friend's vault has an empty `course_map`
         // and `effort_source: inferred`, so EVERY item seeds empty. On the machine where the
-        // runtime is broken, every item then takes the early exit, and if `why` were appended only
-        // in the `Ok(res)` arm below, the diagnostic that exists FOR that machine would never
-        // appear on it: the line would read `nothing to write (low confidence)` with the runtime's
-        // stderr tail nowhere. This is the third time this exact diagnostic has been dropped at a
+        // model call keeps failing, every item then takes the early exit, and if `why` were
+        // appended only in the `Ok(res)` arm below, the diagnostic that exists FOR that machine
+        // would never appear on it: the line would read `nothing to write (low confidence)` with
+        // the model call's failure text nowhere. This is the third time this exact diagnostic has been dropped at a
         // boundary (Task 3's process boundary, Task 5's log boundary, now stdout) — the standing
         // question is "does the failure text survive this boundary?", not "does this case compile".
         let why_suffix = match &outcome {
@@ -311,25 +304,28 @@ pub fn enrich_with(
     (0, lines)
 }
 
-/// Resolve the service — or, on a vault with no account, plan 3a's local runtime — and enrich.
+/// Resolve the judgment service and enrich.
 ///
-/// **The cloud comes first from C2 on** (cloud design D3, §3.2). The local branch below is plan
-/// 3a's and is removed by C4; until then a vault with no `config/cloud.yaml` behaves exactly as it
-/// did. Every arm exits 0: no account, no session, no network and no entitlement are all normal
-/// outcomes reported on stdout.
+/// Tier 3 is the service (cloud design D3, §3.2). Every arm exits 0: no account, no session, no
+/// network and no entitlement are all normal outcomes reported on stdout. Anything that stops the
+/// service resolving (a vault with no `config/cloud.yaml`, or an account whose session is missing
+/// or unreadable) takes one arm: tier 1 is still written, and `judge: skipped (<why>)` leads.
 pub fn run_lines(vault: &Path, opts: &Options<'_>) -> (i32, Vec<String>) {
     match crate::cloudmodel::resolve(vault) {
         Ok(client) => run_lines_with(vault, opts, Some(&client)),
-        Err(crate::cloudmodel::Unavailable::NoConfig) => run_lines_with(vault, opts, None),
-        Err(why) => {
-            // A vault WITH an account whose session is missing or unreadable. Not a fallback to
-            // the local runtime: this is a cloud machine and the answer is "sign in again".
-            let (code, mut lines) =
-                enrich_with(vault, opts, Err(judge::Missing::Service(why.label())));
-            lines.insert(0, format!("judge: skipped ({why})"));
-            (code, lines)
-        }
+        Err(why) => skipped_lines(vault, opts, &why),
     }
+}
+
+/// The named skip: tier 1 is written with the service marked missing, and one lead line says why.
+fn skipped_lines(
+    vault: &Path,
+    opts: &Options<'_>,
+    why: &crate::cloudmodel::Unavailable,
+) -> (i32, Vec<String>) {
+    let (code, mut lines) = enrich_with(vault, opts, Err(judge::Missing::Service(why.label())));
+    lines.insert(0, format!("judge: skipped ({why})"));
+    (code, lines)
 }
 
 /// [`run_lines`] with the service seam exposed, exactly as `ingest::run_with` exposes its fetch and
@@ -337,25 +333,16 @@ pub fn run_lines(vault: &Path, opts: &Options<'_>) -> (i32, Vec<String>) {
 /// aimed at a listener bound to `127.0.0.1:0`, so no test needs a credential or an environment
 /// variable and there is no process-global state to race.
 ///
-/// **No server, no load phase (spec §5.3 as amended 2026-09-07).** The spike found the server's
-/// advantage shrinking as the batch grows, not growing — 2.15x at thirty items, converging to
-/// 2.21x, against a pre-committed 3x bar — so there is no long-lived process here: `judge_task`
-/// spawns one `llama-cli` process per judgment, through `PerCall`, and it is gone before the next
-/// item starts. A missing runtime or model is one line and exit 0 — never a failed slot.
+/// `None` is a vault with no account: the same named skip `run_lines` gives it (the lead line and
+/// `Missing::Service("no account")`), so a caller passing `None` gets the identical answer. A
+/// missing service is one line and exit 0 — never a failed slot.
 pub fn run_lines_with(
     vault: &Path,
     opts: &Options<'_>,
     cloud: Option<&crate::cloudmodel::CloudClient>,
 ) -> (i32, Vec<String>) {
     let Some(client) = cloud else {
-        return match crate::runtime::resolve(opts.runtime, opts.model) {
-            Err(missing) => enrich_with(vault, opts, Err(missing)),
-            Ok((rt, gguf)) => enrich_with(
-                vault,
-                opts,
-                Ok(&crate::runtime::PerCall::new(&rt, &gguf, crate::runtime::CALL_TIMEOUT)),
-            ),
-        };
+        return skipped_lines(vault, opts, &crate::cloudmodel::Unavailable::NoConfig);
     };
     let model = crate::cloudmodel::CloudModel::new(client).with_timezone(crate::cli::vault_timezone_name(vault));
     // C2 Task 9 fix 1 (R-C2-E22 #2): the cloud arm's wall clock starts here, before the probe —
@@ -494,8 +481,6 @@ pub fn run(
     vault: &Path,
     via: &str,
     run_id: Option<&str>,
-    runtime: Option<&PathBuf>,
-    model: Option<&PathBuf>,
     log_dir: Option<&PathBuf>,
     limit: usize,
 ) -> i32 {
@@ -504,8 +489,6 @@ pub fn run(
         &Options {
             via,
             run_id,
-            runtime: runtime.map(PathBuf::as_path),
-            model: model.map(PathBuf::as_path),
             log_dir: log_dir.map(PathBuf::as_path),
             limit,
             budget: BATCH_BUDGET,
@@ -586,7 +569,7 @@ pub fn pull_gmail(
         let pulled = match crate::cloudmodel::pull_gmail_queue(client, &ack, timezone.as_deref()) {
             Ok(got) => got,
             // R-C2-E41: a calendar-only grant is not a failure at all — a step left out, exactly
-            // like `judge (skipped: no model)` — so it prints nothing rather than a line that
+            // like `judge (skipped: no account)` — so it prints nothing rather than a line that
             // would read as trouble on an account that has none.
             Err(crate::cloudmodel::CloudError::Quiet(crate::cloudmodel::QuietReason::NoGmailScope)) => {
                 return lines;
@@ -1368,7 +1351,7 @@ mod tests {
         })
     }
     fn opts<'a>(log: &'a Path) -> Options<'a> {
-        Options { via: "local-runner", run_id: Some("local-2026-09-07T18:00:00Z"), runtime: None, model: None, log_dir: Some(log), limit: 50, budget: BATCH_BUDGET }
+        Options { via: "local-runner", run_id: Some("local-2026-09-07T18:00:00Z"), log_dir: Some(log), limit: 50, budget: BATCH_BUDGET }
     }
     fn meta_of(v: &Path, name: &str) -> serde_yaml_ng::Mapping {
         crate::ids::read_meta(&v.join("tasks").join(name)).unwrap()
@@ -1574,22 +1557,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&v);
     }
 
-    /// D7: no runtime and no model are normal. Whatever tier 1 answered is still written — a course
+    /// D7: no service is normal. Whatever tier 1 answered is still written — a course
     /// attributed from the uid pin is worth having — and the flag STAYS SET so the routine, or a
-    /// later run with a model, finishes the job.
+    /// later run with the service, finishes the job.
     #[test]
-    fn with_no_model_tier_one_still_writes_and_the_flag_stays_set() {
+    fn with_no_service_tier_one_still_writes_and_the_flag_stays_set() {
         let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let v = vault("nomodel");
         let log = v.join("_log");
-        let (code, lines) = enrich_with(&v, &opts(&log), Err(crate::judge::Missing::Model));
-        assert_eq!(code, 0, "a missing model is never a failed slot");
-        assert!(lines.iter().any(|l| l.contains("model not installed")), "{lines:?}");
+        let (code, lines) = enrich_with(&v, &opts(&log), Err(crate::judge::Missing::Service("no account")));
+        assert_eq!(code, 0, "a missing service is never a failed slot");
+        assert!(lines.iter().any(|l| l.contains("service unavailable")), "{lines:?}");
         let meta = meta_of(&v, "hw3.md");
         assert_eq!(crate::yaml::opt_text(crate::yaml::get(&meta, "course")).as_deref(), Some("cs-100"), "the uid pin answered");
         assert_eq!(crate::yaml::get(&meta, "needs_enrichment"), Some(&serde_yaml_ng::Value::Bool(true)), "still owed");
         assert_eq!(crate::yaml::opt_f64(crate::yaml::get(&meta, "effort_hours"), 0.0), 1.0, "the template's value is untouched");
-        assert_eq!(crate::judgelog::read_day(&log, &crate::journal::now_ts(None)[..10])[0]["outcome"], "model not installed");
+        assert_eq!(crate::judgelog::read_day(&log, &crate::journal::now_ts(None)[..10])[0]["outcome"], "service unavailable");
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -1601,10 +1584,10 @@ mod tests {
         let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let v = vault("idem");
         let log = v.join("_log");
-        enrich_with(&v, &opts(&log), Err(crate::judge::Missing::Model));
+        enrich_with(&v, &opts(&log), Err(crate::judge::Missing::Service("no account")));
         let before = records(&v).len();
         let before_bytes = std::fs::read(v.join("tasks").join("hw3.md")).unwrap();
-        let (code, _) = enrich_with(&v, &opts(&log), Err(crate::judge::Missing::Model));
+        let (code, _) = enrich_with(&v, &opts(&log), Err(crate::judge::Missing::Service("no account")));
         assert_eq!(code, 0);
         assert_eq!(records(&v).len(), before, "a re-run journalled something");
         assert_eq!(std::fs::read(v.join("tasks").join("hw3.md")).unwrap(), before_bytes, "the note changed on a re-run");
@@ -1654,7 +1637,7 @@ mod tests {
                 -> Result<crate::judge::Verdict, crate::judge::ModelError> {
                 let mut n = self.0.lock().unwrap();
                 *n += 1;
-                if *n == 1 { return Err(crate::judge::ModelError::Failed("llama-cli: broken pipe".into())); }
+                if *n == 1 { return Err(crate::judge::ModelError::Failed("model: broken pipe".into())); }
                 Ok(crate::judge::Verdict { course: None, effort_hours: Some(1.5), importance: Some(3),
                     importance_reason: Some("No weights given, so 3.".into()), confidence: 0.8, tier: 3,
                     ..Default::default() })
@@ -1668,15 +1651,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&v);
     }
 
-    /// C1 (Task 7 fix round 1): the runtime's failure text must survive to stdout even when the
+    /// C1 (Task 7 fix round 1): the model call's failure text must survive to stdout even when the
     /// seed tier1 hands the model is completely empty — an empty `course_map` plus
     /// `effort_source: inferred`, exactly the shape of a wizard-created friend's vault. Before the
     /// fix, `why` was appended only inside the write's `Ok` arm, which sits AFTER the
     /// `literals.is_empty()` early exit; on this fixture the seed answers nothing at all, so
     /// `literals` is empty and the line read `nothing to write (low confidence)` with the
-    /// runtime's stderr tail gone — on exactly the machine the diagnostic exists for.
+    /// failure text gone — on exactly the machine the diagnostic exists for.
     #[test]
-    fn a_broken_runtimes_stderr_survives_even_when_the_seed_answers_nothing() {
+    fn a_failed_models_detail_survives_even_when_the_seed_answers_nothing() {
         let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
         let v = vault("nocourse");
         // No course_map entry matches this note's source_uid or title, so tier1's course is also
@@ -1689,15 +1672,15 @@ mod tests {
             fn judge(&self, _i: &crate::judge::Item, _h: &crate::judge::Heuristics, _s: &crate::judge::Verdict)
                 -> Result<crate::judge::Verdict, crate::judge::ModelError> {
                 Err(crate::judge::ModelError::Failed(
-                    "llama-cli: exited with exit code: 2 — stderr: ERROR: model load failed".into(),
+                    "judgment service: 502 — ERROR: model load failed".into(),
                 ))
             }
         }
         let (code, lines) = enrich_with(&v, &opts(&log), Ok(&Broken));
-        assert_eq!(code, 0, "a broken runtime is never a failed slot");
+        assert_eq!(code, 0, "a failed model call is never a failed slot");
         assert!(
             lines.iter().any(|l| l.contains("ERROR: model load failed")),
-            "the runtime's stderr must reach stdout even on the empty-seed path: {lines:?}"
+            "the model call's failure text must reach stdout even on the empty-seed path: {lines:?}"
         );
         let _ = std::fs::remove_dir_all(&v);
     }
@@ -1715,7 +1698,7 @@ mod tests {
         }
         let mut o = opts(&log);
         o.limit = 2;
-        let (code, lines) = enrich_with(&v, &o, Err(crate::judge::Missing::Runtime));
+        let (code, lines) = enrich_with(&v, &o, Err(crate::judge::Missing::Service("no account")));
         assert_eq!(code, 0);
         let summary = lines.last().unwrap();
         assert!(summary.contains("2 item"), "{summary}");
@@ -1724,7 +1707,7 @@ mod tests {
     }
 
     /// M1 (final fix wave): the batch has a wall-clock budget, checked BEFORE each item starts —
-    /// distinct from `runtime::CALL_TIMEOUT`, which bounds one call. A model that sleeps past the
+    /// distinct from `cloudmodel::CALL_TIMEOUT`, which bounds one call. A model that sleeps past the
     /// budget on its first call must never be handed a second item: the run stops there, folds
     /// what it did not reach into the existing "left for the next slot" line, and still exits 0 —
     /// this is what stands between `DEFAULT_LIMIT * CALL_TIMEOUT` (100 minutes) and
@@ -1823,28 +1806,36 @@ mod tests {
     fn an_empty_queue_is_one_line() {
         let v = vault("empty");
         crate::pystr::write_text(&v.join("tasks").join("hw3.md"), &NOTE.replace("needs_enrichment: true", "needs_enrichment: false")).unwrap();
-        let (code, lines) = enrich_with(&v, &opts(&v.join("_log")), Err(crate::judge::Missing::Runtime));
+        let (code, lines) = enrich_with(&v, &opts(&v.join("_log")), Err(crate::judge::Missing::Service("no account")));
         assert_eq!(code, 0);
         assert_eq!(lines, vec!["judge: nothing to enrich".to_string()]);
         assert!(!v.join("state").join("journal").exists(), "nothing was journalled");
         let _ = std::fs::remove_dir_all(&v);
     }
 
-    /// The CLI wrapper resolves nothing and starts nothing when neither path is given and no env
-    /// var is set: it reports and exits 0.
+    /// A vault with no `config/cloud.yaml` is a named skip, not a failure: the first line says why
+    /// (`Unavailable::NoConfig`'s own text), tier 1 is still written, the flag stays set, the logged
+    /// outcome reads `service unavailable`, and the exit is 0. `run_lines_with(None)` answers the
+    /// same.
     #[test]
-    fn run_lines_with_no_runtime_anywhere_reports_and_exits_zero() {
+    fn run_lines_on_a_vault_with_no_account_names_it_first_and_exits_zero() {
         let _guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap();
-        let v = vault("cli");
-        // Explicit paths that cannot exist, rather than clearing the environment: `remove_var`
-        // mutates process-global state every other test in this binary shares, and they run in
-        // parallel. `resolve` prefers the ARGUMENT, so this takes the same branch on a machine that
-        // does have KNOWLU_RUNTIME set — which is the machine the smoke test runs on.
-        let gone = v.join("does-not-exist");
-        let o = Options { via: "cli", run_id: None, runtime: Some(&gone), model: Some(&gone), log_dir: None, limit: 50, budget: BATCH_BUDGET };
-        let (code, lines) = run_lines(&v, &o);
+        let v = vault("noaccount");
+        let log = v.join("_log");
+        let (code, lines) = run_lines(&v, &opts(&log));
+        assert_eq!(code, 0, "no account is never a failed slot");
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("judge: skipped (no account on this vault (no config/cloud.yaml))"),
+            "{lines:?}"
+        );
+        let meta = meta_of(&v, "hw3.md");
+        assert_eq!(crate::yaml::opt_text(crate::yaml::get(&meta, "course")).as_deref(), Some("cs-100"), "the uid pin answered");
+        assert_eq!(crate::yaml::get(&meta, "needs_enrichment"), Some(&serde_yaml_ng::Value::Bool(true)), "still owed");
+        assert_eq!(crate::judgelog::read_day(&log, &crate::journal::now_ts(None)[..10])[0]["outcome"], "service unavailable");
+        let (code, with_none) = run_lines_with(&v, &opts(&log), None);
         assert_eq!(code, 0);
-        assert!(lines.iter().any(|l| l.contains("runtime not installed")), "{lines:?}");
+        assert_eq!(with_none.first(), lines.first(), "a None client answers like a vault with no account");
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -1895,7 +1886,7 @@ mod tests {
         };
         let client = crate::cloudmodel::CloudClient::new(&cfg, "jwt-not-a-secret");
         let opts = Options {
-            via: "local-runner", run_id: None, runtime: None, model: None,
+            via: "local-runner", run_id: None,
             log_dir: None, limit: 10, budget: BATCH_BUDGET,
         };
         let (code, lines) = run_lines_with(&v, &opts, Some(&client));

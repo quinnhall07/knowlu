@@ -36,10 +36,17 @@
   // status test. One copy, resolved `true` only on `ok` plus an active or trialing status, `false`
   // on anything else, a refusal or a dropped invoke included: nobody downstream of this has to
   // remember to `.catch`.
-  function checkEntitled() {
+  // L8 S5 (spec 3.4): the same answer with the plan beside the status, `{ entitled, plan }`, and the
+  // same fall-back — not entitled, no plan — on any failure. Every place the wizard records
+  // `WIZ.entitled` asks this one, so the plan is known wherever the status is.
+  function checkEntitlement() {
     return invoke("entitlement_now", {}).then(function (r) {
-      return !!(r && r.ok && (r.status === "active" || r.status === "trialing"));
-    }).catch(function () { return false; });
+      var yes = !!(r && r.ok && (r.status === "active" || r.status === "trialing"));
+      return { entitled: yes, plan: yes && r.plan ? String(r.plan) : "" };
+    }).catch(function () { return { entitled: false, plan: "" }; });
+  }
+  function checkEntitled() {
+    return checkEntitlement().then(function (r) { return r.entitled; });
   }
 
   function renderNav(state) {
@@ -1970,53 +1977,16 @@
     // the real thing. The panel's one message line carries it until the next action overwrites it.
     EL("set-diag-note").textContent = current.registryError || "";
   }
-  // Knowlu plan 3a Task 10: the Local judgment row. Four states and every one of them has words —
-  // "not installed" is a normal state (spec §5.3), not an error, so it is never rendered red.
-  //
-  // **Task 10 review, m2**: the Download button's own label changes once both halves are present
-  // — "Replace model…", never "Download" — so replacing an installed model (a legitimate thing to
-  // want) does not look identical to a first-time install with the same wording and no warning
-  // that it re-fetches gigabytes. Reset to "Download" on every other branch so it never gets stuck
-  // on the wrong word if the model is later removed.
-  function renderInference(s) {
-    var el = EL("set-judge-state");
-    // The Remove button is set on EVERY branch, including this one: leaving it in whatever
-    // visibility the last successful render gave it would offer "Remove model" over a status the
-    // page could not read.
-    if (!s || !s.ok) { el.textContent = (s && s.error) || "unavailable"; EL("set-judge-remove").hidden = true; EL("set-judge-download").textContent = "Download"; return; }
-    if (!s.runtime) { el.textContent = "runtime not installed — assignments arrive unestimated"; }
-    else if (!s.model) { el.textContent = "model not installed — assignments arrive unestimated"; }
-    else { el.textContent = "ready — " + (Math.round((s.model_bytes / 1073741824) * 10) / 10) + " GB model"; }
-    EL("set-judge-remove").hidden = !s.model;
-    EL("set-judge-download").textContent = (s.runtime && s.model) ? "Replace model…" : "Download";
-  }
-  function loadInference() {
-    // The status object is handed back to the caller, not just rendered from — **Task 10 review,
-    // m2**: reading which half is missing back out of the row's own rendered text was the actual
-    // defect (a UI string is not state), and it broke the moment the text became "ready — X GB".
-    return invoke("inference_status", {}).then(function (s) { renderInference(s); return s; }).catch(function () { return null; });
-  }
-  function installInference(kind, viaFile) {
-    EL("set-judge-state").textContent = "installing " + kind + "… this can take a while";
-    var step = viaFile
-      ? invoke("pick_file", { title: kind === "model" ? "Choose the model file" : "Choose the runtime archive", extension: kind === "model" ? "gguf" : "zip" })
-          .then(function (p) { if (!p || !p.path) { return null; } return invoke("install_inference_file", { kind: kind, path: p.path }); })
-      : invoke("install_inference_download", { kind: kind });
-    return step.then(function (r) {
-      if (r && !r.ok) { EL("set-judge-state").textContent = r.error; return; }
-      return loadInference();
-    }).catch(function () { EL("set-judge-state").textContent = "that did not finish"; });
-  }
   function renderAccountRow(a) {
+    // L8 S5 (spec 3.4): a comped account reads the Settings tester line, never a status or a plan, and
+    // has no subscription to manage.
+    var tester = !!(a && a.ok && !a.needs_account && a.plan === "tester");
+    var until = tester && a.current_period_end ? String(a.current_period_end).slice(0, 10) : "";
+    EL("set-portal").hidden = tester;
     EL("set-account-state").textContent = (!a || !a.ok) ? "" : (a.needs_account
       ? "not attached to an account yet"
+      : tester ? (a.email ? a.email + " · " : "") + "Free tester access" + (until ? " through " + until : "") + ". Nothing to pay."
       : [a.email || "", a.status || "", a.plan || ""].filter(function (x) { return x; }).join(" · "));
-    // R-C1-59 (M6): an entitled cloud vault never runs the local runtime — `judge_plan` (scheduler.rs)
-    // never passes `--runtime`/`--model` once `config/cloud.yaml` exists — so offering to download a
-    // multi-gigabyte model there is dead weight the student would act on for nothing. Hidden only
-    // once the account status is KNOWN to have an account: a missing or failed reply (the vault-less
-    // shell, or a build from before Task 18) leaves the row exactly as visible as it always was.
-    EL("set-judge").hidden = !!(a && a.ok && !a.needs_account);
   }
   // Gmail connect T9a (spec §4.4, D1, D10, D12): the Google row. `SET` is the settings panel's own
   // state; the row keeps no cache, it asks `google_status` every time Settings opens. `googleSeq` is
@@ -2636,7 +2606,7 @@
       current.vaultPath = c.vault; current.version = c.version; current.profileName = c.profile_name;
       current.registryError = c.registry_error || "";
       return invoke("get_settings", {});
-    }).then(function (r) { if (r.ok) { renderSettings(r.settings); } }).then(loadInference).catch(function () {});
+    }).then(function (r) { if (r.ok) { renderSettings(r.settings); } }).catch(function () {});
   }
   window.KNOWLU_OPEN_SETTINGS = openSettings;
 
@@ -2673,22 +2643,6 @@
     // Plan 4a Task 8: the Updates row's button. `checkForUpdates` repaints this row itself while
     // the panel is open, so there is one place that formats the update line and not two.
     if (e.target.closest("#set-update-check")) { checkForUpdates(); return; }
-    // The runtime first, then the model: the runtime is the prerequisite, and one button does the
-    // next thing rather than two doing halves. **Task 10 review, m2**: which half is missing comes
-    // from the status object `loadInference` hands back, never from re-reading the row's own
-    // rendered text — a UI string ("ready — X GB model") is not state, and once ready it no longer
-    // contains "runtime" at all, so parsing it would silently target "model" forever, including a
-    // stray re-fetch of gigabytes once both halves were already installed.
-    if (e.target.closest("#set-judge-download")) { loadInference().then(function (s) {
-      installInference((s && s.ok && !s.runtime) ? "runtime" : "model", false);
-    }); return; }
-    if (e.target.closest("#set-judge-file")) { loadInference().then(function (s) {
-      installInference((s && s.ok && !s.runtime) ? "runtime" : "model", true);
-    }); return; }
-    if (e.target.closest("#set-judge-remove")) {
-      invoke("remove_inference_model", {}).then(loadInference).catch(function () {});
-      return;
-    }
   });
   EL("set-autostart-in").addEventListener("change", function () {
     invoke("set_settings", { patch: { autostart: EL("set-autostart-in").checked } })
@@ -2806,9 +2760,12 @@
   function afterUpgradeSignIn() {
     EL("up-error").textContent = "";
     EL("up-code-row").hidden = true;
-    EL("up-subscribe").hidden = false;
+    // L8 S5 (spec 3.4): ask first. The prices appear only on a not-entitled answer (a failed check
+    // answers not entitled too, so nobody is left without a way forward); an entitled answer goes
+    // straight to finishUpgrade() and never flashes them.
     return checkEntitled().then(function (yes) {
-      if (yes) { return finishUpgrade(); }
+      if (!yes) { EL("up-subscribe").hidden = false; return; }
+      return finishUpgrade();
     });
   }
   EL("upgrade").addEventListener("click", function (e) {
@@ -3039,6 +2996,9 @@
   // `dest()` is what the credential target is derived from, and a rename on the vault panel has to
   // move the coursework logins with it (R-P4a-23).
   var WIZ = { mailOffer: true, step: 0, parent: "", name: "Knowlu", email: "", accountId: "", entitled: false,
+              // L8 S5: the plan the entitlement answer carried, `null` until it has answered, so the
+              // tester form is never drawn on a guess; `entryCheck` is true while the on-entry ask is out.
+              plan: null, entryCheck: false,
               // The Google round trip runs in the system browser and can take a minute; `busy` is
               // what disables #wiz-google-signin meanwhile and `accountNote` is the status line —
               // both painted by `renderWizard`, the file's own A-5 rule (state lives on WIZ, never
@@ -3156,8 +3116,16 @@
     EL("wiz-code-go").disabled = WIZ.busy;
     // Silent until the checkout page has actually been opened: on a panel nobody has pressed yet,
     // "waiting for your browser" reads as *a page failed to open* (R-C1-55, M1).
-    EL("wiz-sub-note").textContent = WIZ.entitled ? "Your subscription is active."
+    EL("wiz-sub-note").textContent = WIZ.entitled ? (WIZ.plan === "tester" ? "Your account is already set up. Nothing to pay." : "Your subscription is active.")
       : (WIZ.checkoutOpened ? "Waiting for the payment page in your browser…" : "");
+    // L8 S5 (spec 3.4): no price on a panel an entitled account is looking at, and none while the
+    // on-entry ask is out. For the plan tester the lede goes and the heading is retitled; the note
+    // above is the one place the nothing-to-pay line is written.
+    var tester = WIZ.entitled && WIZ.plan === "tester";
+    EL("wiz-sub-month").hidden = WIZ.entitled || WIZ.entryCheck;
+    EL("wiz-sub-year").hidden = WIZ.entitled || WIZ.entryCheck;
+    document.querySelector("#wiz-subscribe .lede").hidden = tester || WIZ.entryCheck;
+    document.querySelector("#wiz-subscribe h2").textContent = tester ? "You're all set" : "Subscribe";
     EL("wiz-vault-path").textContent = dest() ? "Your files will be at " + dest() : "";
     EL("wiz-lms-state").textContent = WIZ.icsNote;
     // R-C1-42: the capture is a SECOND press, and it only exists once a window is open. Firing it as
@@ -3275,9 +3243,9 @@
     // forever.
     if (n > WIZ.step && WIZ.step === 2 && !WIZ.entitled) {
       WIZ.busy = true; renderWizard();
-      return checkEntitled().then(function (yes) {
+      return checkEntitlement().then(function (r) {
         WIZ.busy = false;
-        if (yes) { WIZ.entitled = true; }
+        if (r.entitled) { WIZ.plan = r.plan; WIZ.entitled = true; }
         return wizStep(n);
       });
     }
@@ -3365,6 +3333,18 @@
           WIZ.busy = false;
           renderWizard();
         });
+      });
+    }
+    // L8 S5 (spec 3.4): on entering the subscribe step, ask status and plan first, so a granted
+    // account sees the nothing-to-pay form at once (relaunch or step back) and never a price. An
+    // answer of no changes nothing here: the prices come back and the step behaves as today.
+    if (WIZ.step === 2 && leaving !== 2 && !WIZ.entitled) {
+      WIZ.entryCheck = true;
+      renderWizard();
+      return checkEntitlement().then(function (r) {
+        WIZ.entryCheck = false;
+        if (r.entitled) { WIZ.plan = r.plan; WIZ.entitled = true; WIZ.error = ""; }
+        renderWizard();
       });
     }
     renderWizard();
@@ -3516,13 +3496,13 @@
       // poll that outlives the question it was asked.
       if (WIZ.entitled || WIZ.step !== 2) { return; }
       tries += 1;
-      checkEntitled().then(function (yes) {
+      checkEntitlement().then(function (r) {
         // The re-review's blocking finding: the student can leave panel 2 while this reply is still
         // in flight, and a yes that lands after they moved on must not act on a panel nobody is
         // looking at either — the same stand-down, checked again now that the wait is over.
         if (WIZ.entitled || WIZ.step !== 2) { return; }
-        if (yes) {
-          WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return;
+        if (r.entitled) {
+          WIZ.plan = r.plan; WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return;
         }
         if (tries < 40) { setTimeout(tick, 3000); }
         else { WIZ.error = "Still not subscribed. When the payment page is done, press Next."; renderWizard(); }
@@ -3598,8 +3578,8 @@
       var which = e.target.closest("#wiz-sub-year") ? "academic_year" : "monthly";
       // R-C1b-exec-9: ask before opening a second Checkout page — an account the service already
       // calls entitled goes straight to the vault panel, never back through Stripe.
-      checkEntitled().then(function (yes) {
-        if (yes) { WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return; }
+      checkEntitlement().then(function (r) {
+        if (r.entitled) { WIZ.plan = r.plan; WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return; }
         return invoke("open_checkout", { plan: which }).then(function (r) {
           if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
           WIZ.checkoutOpened = true;

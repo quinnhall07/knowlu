@@ -176,6 +176,8 @@ const SECRET_COLUMNS = [
   "fp_hash",
   "nonce_hmac",
   "s3_key",
+  // Hashes of SES object keys, one per counted batch send (email follow-ups T5).
+  "counted_receipts",
 ];
 
 Deno.test("the_export_carries_mailboxes_and_queued_claims_and_never_a_token_key_or_hash", async () => {
@@ -277,4 +279,20 @@ Deno.test("the_export_carries_mailboxes_and_queued_claims_and_never_a_token_key_
   assert(!text.includes("SECRET"), "the export carries a secret value");
   // The address itself is the token: no column that could rebuild it leaves.
   assert(!text.includes("retired_until"));
+});
+
+Deno.test("the_secret_column_list_names_the_counted_receipts_the_follow_ups_migration_adds", async () => {
+  // Email follow-ups T5: `mail_batches.counted_receipts` holds hashes of SES object keys, so it is a secret
+  // column and no export list may carry it. The name is the migration's own, found by the file's suffix.
+  const dir = new URL("../../migrations/", import.meta.url);
+  const files = [...Deno.readDirSync(dir)].map((e) => e.name).filter((n) =>
+    /^\d{14}_mail_follow_ups\.sql$/.test(n)
+  );
+  assertEquals(files.length, 1);
+  const sql = await Deno.readTextFile(new URL(files[0], dir));
+  assert(/alter table public\.mail_batches add column if not exists counted_receipts\b/.test(sql));
+  assert(SECRET_COLUMNS.includes("counted_receipts"), "the secret-column list lacks counted_receipts");
+  for (const cols of [MAILBOX_EXPORT_COLUMNS, CLAIM_EXPORT_COLUMNS]) {
+    assert(!(cols as readonly string[]).includes("counted_receipts"));
+  }
 });

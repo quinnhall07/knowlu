@@ -1,8 +1,26 @@
 import type { Db } from "./judge_db.ts";
 import type { Kind, MailKind } from "./judge_validate.ts";
 
+/** What one `charge_call` answered (L3, spec 2026-10-06 §3 step 3). Only a real `false` is a
+ *  refusal; a thrown or rejected rpc, or any answer that is not a boolean, is an `error`. */
+export type ChargeOutcome = "charged" | "refused" | "error";
+
 export interface CapStore {
+  /** The daily cap's one charge, failing closed: it folds `"refused"` and `"error"` into `false`.
+   *  The pipeline calls `chargeOutcome`, which must tell the two apart. */
   charge(account: string, kind: Kind): Promise<boolean>;
+  /** The same one `charge_call` as `charge`, with the same args, answering which of the three it
+   *  was. The first-day event allowance opens only on a `"refused"`, so a transient error or a broken
+   *  signature can never open or spend it while the cap had room. Never counts toward `tripped`. */
+  chargeOutcome(account: string, kind: Kind): Promise<ChargeOutcome>;
+  /** One judgment charged to the account's one-time allowance (`charge_judge_allowance`), after
+   *  `chargeOutcome` answered `"refused"`. A database it cannot reach REFUSES (`false`): here a
+   *  refusal and an error both mean `capped`. */
+  chargeAllowance(account: string, kind: Kind): Promise<boolean>;
+  /** Gives back the judgment `chargeAllowance` counted, after a call the model never answered
+   *  (`refund_judge_allowance`). Never throws, and counts one failure toward `tripped` as `refund`
+   *  does: the breaker counts every `model failed`, whichever store charged it. */
+  refundAllowance(account: string, kind: Kind): Promise<void>;
   /** Gives back the call `charge` counted, after a call the model never answered (F1, live proof
    *  2026-10-02). Never throws. Also counts one more consecutive failure toward `tripped`. */
   refund(account: string, kind: Kind): Promise<void>;
@@ -84,21 +102,67 @@ export const MONTHLY_CEILING_USD = 2.0;
  */
 export const BREAKER_FAILURES = 3;
 
+/**
+ * The first-day event allowance (L3, spec 2026-10-06 §2, ruled 2026-10-06): once per account, this
+ * many event judgments, spent only on the event calls `charge_call` refuses, for this many days from
+ * the first such refusal, never renewed. **Mirrors of the migration (the one `*_event_allowance.sql`),
+ * never sent to it:** `charge_judge_allowance` and `refund_judge_allowance` take only the account and
+ * the kind, and the SQL alone decides the size and the window. A test pins these to its text.
+ *
+ * What it costs (spec §6), worked out here as the CORRECTION paragraph above works its numbers:
+ * event judgments are pinned to Granite 4.2 8B at $0.10 in / $0.15 out per MTok, so at ~980 tokens in
+ * and ~80 out one call is (980 / 1e6 * $0.10) + (80 / 1e6 * $0.15) = $0.000098 + $0.000012 =
+ * **~$0.00011**, and the whole allowance is 2,000 * $0.00011 = **~$0.22, once per account**. Its
+ * refund bound lets at most twice its size reach the model, but a refunded call is one the model never
+ * answered and records no tokens, so the bill stays ~$0.22. A fully capped account (~$1.3 a month,
+ * above) plus the whole allowance is ~$1.52, under `MONTHLY_CEILING_USD`, which is **not raised** while
+ * the allowance is open and is checked before either charge.
+ */
+export const EVENT_ALLOWANCE_CALLS = 2000;
+export const EVENT_ALLOWANCE_DAYS = 14;
+
 export function capStore(db: Db): CapStore {
   // One budget check per account per invocation is enough: an edge function handles one request,
   // and `gmail-read` (Task 11) is the only caller that judges many items in one — it memoises.
   const budget = new Map<string, boolean>();
   let failures = 0;
+  // One statement (`charge_call`), so two concurrent calls cannot both read `calls` below the cap
+  // and both write. Only a real `false` is a refusal; anything else that is not `true` is an error.
+  const chargeOutcome = async (account: string, kind: Kind): Promise<ChargeOutcome> => {
+    let answer: unknown;
+    try {
+      answer = await db.rpc("charge_call", { p_account: account, p_kind: kind, p_cap: DAILY_CAP[kind] });
+    } catch {
+      return "error";
+    }
+    if (answer === true) return "charged";
+    if (answer === false) return "refused";
+    return "error";
+  };
   return {
     async charge(account, kind) {
-      // One statement (`charge_call`), so two concurrent calls cannot both read `calls` below the
-      // cap and both write. A cap store that cannot be reached REFUSES: over-charging a student's
-      // account is recoverable, an uncapped loop against a metered API is not.
+      // A cap store that cannot be reached REFUSES: over-charging a student's account is
+      // recoverable, an uncapped loop against a metered API is not.
+      return (await chargeOutcome(account, kind)) === "charged";
+    },
+    chargeOutcome,
+    async chargeAllowance(account, kind) {
+      // One statement on the allowance's key (`charge_judge_allowance`). Unreachable means refused.
       try {
-        return await db.rpc("charge_call", { p_account: account, p_kind: kind, p_cap: DAILY_CAP[kind] }) ===
-          true;
+        return await db.rpc("charge_judge_allowance", { p_account: account, p_kind: kind }) === true;
       } catch {
         return false;
+      }
+    },
+    async refundAllowance(account, kind) {
+      failures += 1;
+      // Never throws, as `refund`: a refund that cannot land leaves the judgment charged to the
+      // allowance. `refund_judge_allowance` bounds itself (open, within its size, and within its
+      // size in lifetime refunds), so this needs no bound of its own.
+      try {
+        await db.rpc("refund_judge_allowance", { p_account: account, p_kind: kind });
+      } catch {
+        // Counted nowhere on purpose, as `refund` above.
       }
     },
     async refund(account, kind) {

@@ -6,7 +6,6 @@ pub mod commands;
 #[cfg(windows)] pub mod credentials;
 #[cfg(debug_assertions)] pub mod debug_port;
 pub mod grades;
-pub mod inference;
 pub mod lms_link;
 pub mod mail;
 pub mod mail_client;

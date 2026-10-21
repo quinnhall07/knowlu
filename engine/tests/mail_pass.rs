@@ -155,7 +155,7 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 fn opts() -> Options<'static> {
-    Options { via: "local-runner", run_id: None, runtime: None, model: None, log_dir: None, limit: 10, budget: BATCH_BUDGET }
+    Options { via: "local-runner", run_id: None, log_dir: None, limit: 10, budget: BATCH_BUDGET }
 }
 
 fn vault_today(vault: &Path) -> Date {

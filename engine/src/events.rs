@@ -403,6 +403,12 @@ pub const ACTOR: &str = "agent:knowlu.events";
 /// time `load_discovered_events_at` spends paging Localist/Engage counts against this same budget
 /// instead of extending it; the feed's own `per_run` limit is `min(180s, budget)`, so the two
 /// budgets are never more than a heartbeat apart.
+///
+/// **A capped reply ends the pass** (L3, spec 2026-10-06 Q9): the first `ModelError::Capped` stops
+/// the loop, and the capped item plus every item after it fold into the same "left for the next
+/// slot" line, which then ends with the cap's name. The service has already answered the daily
+/// judgment cap, so the rest of the batch would only be refused one by one; an item that was
+/// reached and failed in any other way keeps its own `not judged` line and the pass goes on.
 pub fn judge_roster(
     vault: &Path,
     model: &dyn crate::judge::EventModel,
@@ -471,6 +477,7 @@ pub fn judge_roster(
     let batch: Vec<&DiscoveredEvent> = pending.into_iter().take(cap).collect();
     let mut judged = 0usize;
     let mut processed = 0usize;
+    let mut capped = false;
 
     for event in &batch {
         // Checked BEFORE starting each item, not after — the worst case this bounds is the budget
@@ -478,7 +485,6 @@ pub fn judge_roster(
         if started.elapsed() >= budget {
             break;
         }
-        processed += 1;
         let event = *event;
         let item = crate::judge::EventItem {
             uid: event.uid.clone(),
@@ -497,11 +503,20 @@ pub fn judge_roster(
         };
         let verdict = match model.judge_event(&item) {
             Ok(v) => v,
+            // The service's daily cap ends the pass. The capped item was not judged and is not
+            // counted as processed, so it falls into `left` with every item after it; the summary
+            // names the cap once, instead of one `not judged` line per remaining event.
+            Err(crate::judge::ModelError::Capped) => {
+                capped = true;
+                break;
+            }
             Err(e) => {
+                processed += 1;
                 lines.push(format!("events {}: not judged ({e})", event.uid));
                 continue;
             }
         };
+        processed += 1;
         // Checked again here, not only on the server: `record_judged_verdict` refuses an unknown
         // word and a `why` carrying a quote, a newline or the field separator, and a refusal at
         // that depth would lose the verdict with no line to explain it.
@@ -529,6 +544,9 @@ pub fn judge_roster(
     let mut summary = format!("events: {judged} judged");
     if left > 0 {
         summary.push_str(&format!(", {left} left for the next slot"));
+    }
+    if capped {
+        summary.push_str(&format!(" ({})", crate::judge::CAPPED_LABEL));
     }
     lines.push(summary);
     lines
@@ -880,6 +898,61 @@ mod tests {
         (dir, feed)
     }
 
+    /// A vault with `n` pending events (`engage:1` .. `engage:n`, no verdict seeded) on one enabled
+    /// ICS source. The feed lists them out of chronological order, so a test can tell the order the
+    /// feed gave from the order `judge_roster` judges in: the start hours cycle through
+    /// `[14, 11, 15, 12, 13]`, so for `n = 5` the soonest first are `engage:2` then `engage:4`.
+    /// Dates copy `scratch_vault_with_feed` (`today = 2026-08-28`, events on 2026-08-29), which is
+    /// green today; nothing here reads the wall clock.
+    fn scratch_vault_with_n_events(name: &str, n: usize) -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("knowlu-l3-events-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).expect("scratch vault");
+        std::fs::create_dir_all(dir.join("state")).expect("scratch vault");
+        std::fs::create_dir_all(dir.join("profile")).expect("scratch vault");
+        std::fs::write(
+            dir.join("config").join("events.yaml"),
+            "sources:\n  - name: engage\n    type: ics\n    url: https://example.invalid/e.ics\n    enabled: true\n",
+        )
+        .expect("write events.yaml");
+        std::fs::write(dir.join("profile").join("interests.md"), "Machine learning, German.\n")
+            .expect("write interests.md");
+        const HOURS: [usize; 5] = [14, 11, 15, 12, 13];
+        let mut feed = String::from("BEGIN:VCALENDAR\r\n");
+        for i in 1..=n {
+            let hour = HOURS[(i - 1) % HOURS.len()];
+            feed.push_str(&format!(
+                "BEGIN:VEVENT\r\nUID:engage:{i}\r\nSUMMARY:Career Fair {i}\r\n\
+                 DTSTART:20260829T{hour:02}0000Z\r\nDTEND:20260829T{end:02}0000Z\r\n\
+                 DESCRIPTION:Employers across engineering and computing.\r\nEND:VEVENT\r\n",
+                end = hour + 1
+            ));
+        }
+        feed.push_str("END:VCALENDAR\r\n");
+        (dir, feed)
+    }
+
+    /// A model that judges its first `k` calls (`drop`) and answers `Capped` from call `k + 1` on,
+    /// counting every call it is handed.
+    struct CapsAfter<'a> {
+        k: usize,
+        calls: &'a std::cell::RefCell<usize>,
+    }
+
+    impl crate::judge::EventModel for CapsAfter<'_> {
+        fn judge_event(
+            &self,
+            _item: &crate::judge::EventItem,
+        ) -> Result<crate::judge::EventVerdict, crate::judge::ModelError> {
+            *self.calls.borrow_mut() += 1;
+            if *self.calls.borrow() <= self.k {
+                Ok(verdict("drop", "scripted"))
+            } else {
+                Err(crate::judge::ModelError::Capped)
+            }
+        }
+    }
+
     /// F4 decision 4: `judge_roster` writes through `record_judged_verdict`, so a `judgment_id`
     /// the model scripted onto its `EventVerdict` lands on the ledger line as `jid:<uuid>` — both
     /// in the parsed `LedgerEntry` and in the file's own bytes.
@@ -1046,6 +1119,98 @@ mod tests {
         let model = Scripted(std::cell::RefCell::new(vec![]));
         let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 0, std::time::Duration::from_secs(60));
         assert!(lines.iter().any(|l| l.contains("1 left for the next slot")), "{lines:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// L3 T3, spec 2026-10-06 test 12 and Q9. The first `Capped` reply ends the pass: the capped
+    /// item and everything after it are "left", and the log is one summary line naming the cap, not
+    /// a `not judged` line per remaining event. **Red before T3**: the model was called 5 times
+    /// (items 3, 4 and 5 each got `Capped` and `continue`d), three `not judged` lines were pushed,
+    /// and `left` read 0, so the summary was `events: 2 judged`.
+    #[test]
+    fn a_capped_reply_ends_the_pass_with_one_line_and_an_exact_left() {
+        let (vault, feed) = scratch_vault_with_n_events("capped-mid", 5);
+        let fetch = |_: &str| Ok(feed.clone());
+        let calls = std::cell::RefCell::new(0usize);
+        let model = CapsAfter { k: 2, calls: &calls };
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
+        assert_eq!(*calls.borrow(), 3, "the pass must stop at the first capped reply: {lines:?}");
+        let ledger = crate::eventledger::load_ledger(&vault, None);
+        assert_eq!(ledger.values().filter(|e| e.verdict.is_some()).count(), 2, "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("not judged")), "{lines:?}");
+        let summaries: Vec<&String> = lines.iter().filter(|l| l.starts_with("events: ")).collect();
+        assert_eq!(summaries.len(), 1, "{lines:?}");
+        assert_eq!(
+            summaries[0].as_str(),
+            "events: 2 judged, 3 left for the next slot (the daily judgment cap)"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// L3 T3, test 12: a cap on the very first item judges nothing and leaves everything.
+    #[test]
+    fn a_capped_reply_on_the_first_item_judges_nothing_and_leaves_everything() {
+        let (vault, feed) = scratch_vault_with_n_events("capped-first", 5);
+        let fetch = |_: &str| Ok(feed.clone());
+        let calls = std::cell::RefCell::new(0usize);
+        let model = CapsAfter { k: 0, calls: &calls };
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
+        assert_eq!(*calls.borrow(), 1, "{lines:?}");
+        let ledger = crate::eventledger::load_ledger(&vault, None);
+        assert_eq!(ledger.values().filter(|e| e.verdict.is_some()).count(), 0, "{lines:?}");
+        assert!(lines.iter().any(|l| l == "events: 0 judged, 5 left for the next slot (the daily judgment cap)"), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("not judged")), "{lines:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// L3 T3, test 13: under a cap, what got judged is the soonest. The feed lists `engage:1`
+    /// first but it starts at 14:00; the two earliest starts are `engage:2` (11:00) and `engage:4`
+    /// (12:00). `eventfeed.rs`'s `sort_events` tests pin the order of the merged list itself
+    /// (`eventfeed.rs:133-134`, `:1305`); this one pins that `judge_roster` spends a cap on that
+    /// order. Green today by construction: it guards the order under T3's new early exit.
+    #[test]
+    fn the_events_judged_before_a_cap_are_the_soonest_pending() {
+        let (vault, feed) = scratch_vault_with_n_events("capped-order", 5);
+        let fetch = |_: &str| Ok(feed.clone());
+        let calls = std::cell::RefCell::new(0usize);
+        let model = CapsAfter { k: 2, calls: &calls };
+        let _ = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
+        let ledger = crate::eventledger::load_ledger(&vault, None);
+        let mut judged: Vec<&str> = ledger
+            .iter()
+            .filter(|(_, e)| e.verdict.is_some())
+            .map(|(uid, _)| uid.as_str())
+            .collect();
+        judged.sort();
+        assert_eq!(judged, vec!["ics:engage:2", "ics:engage:4"]);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// L3 T3 regression: a `Failed` call still names its item and does not end the pass; the
+    /// summary carries no cap suffix and `left` stays 0 (a reached item is processed, not left).
+    #[test]
+    fn a_failed_call_still_names_its_item_and_does_not_end_the_pass() {
+        let (vault, feed) = scratch_vault_with_n_events("failed-first", 5);
+        let fetch = |_: &str| Ok(feed.clone());
+        struct FailsFirst<'a>(&'a std::cell::RefCell<usize>);
+        impl crate::judge::EventModel for FailsFirst<'_> {
+            fn judge_event(
+                &self,
+                _item: &crate::judge::EventItem,
+            ) -> Result<crate::judge::EventVerdict, crate::judge::ModelError> {
+                *self.0.borrow_mut() += 1;
+                if *self.0.borrow() == 1 {
+                    Err(crate::judge::ModelError::Failed("transient".into()))
+                } else {
+                    Ok(verdict("drop", "scripted"))
+                }
+            }
+        }
+        let calls = std::cell::RefCell::new(0usize);
+        let lines = judge_roster(&vault, &FailsFirst(&calls), Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
+        assert_eq!(*calls.borrow(), 5, "{lines:?}");
+        assert_eq!(lines.iter().filter(|l| l.contains("not judged")).count(), 1, "{lines:?}");
+        assert_eq!(lines.last().map(String::as_str), Some("events: 4 judged"), "{lines:?}");
         let _ = std::fs::remove_dir_all(&vault);
     }
 

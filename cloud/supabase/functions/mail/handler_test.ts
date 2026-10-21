@@ -59,6 +59,8 @@ class FakeStore implements MailStore {
   calls: string[] = [];
   /** A concurrent mint landing between this one's insert and its recount. */
   raceInsert: (() => void) | null = null;
+  /** Every Rotate's write as the handler handed it (email follow-ups T4: `rotatedFrom`). */
+  rotations: RotateNext[] = [];
   private n = 0;
   addresses(accountId: string) {
     this.calls.push("addresses");
@@ -101,6 +103,7 @@ class FakeStore implements MailStore {
     next: RotateNext,
   ) {
     this.calls.push("rotate");
+    this.rotations.push({ ...next });
     const r = this.rows.find((x) => x.id === id && x.accountId === accountId && x.tokenHmac === fromHmac);
     if (r === undefined) return Promise.resolve(false);
     Object.assign(r, {
@@ -557,6 +560,28 @@ Deno.test("rotate_keeps_the_old_token_until_the_new_canary_or_seven_days", async
   // Another account's mailbox, or none, reads as not found.
   assertEquals((await g.call("POST", `/addresses/${B1}/rotate`)).status, 404);
   assertEquals((await g.call("POST", `/addresses/not-an-id/rotate`)).status, 404);
+});
+
+Deno.test("rotating_a_gmail_mailbox_still_reads_pending_for_the_devices_confirm_wait", async () => {
+  // Email follow-ups T4 (Q4, Quinn 2026-10-20): the device's Gmail confirm step polls until the row reads
+  // `confirmed` or `active`, so Rotate still writes `pending`; the status before it goes in the same write
+  // as `rotatedFrom`, for D22's reading during the grace. The answer is unchanged.
+  for (const prior of ["active", "confirmed", "quiet", "pending", "blocked", "off", "lapsed"]) {
+    const g = await world();
+    g.store.rows.push(
+      await stored(A2, ACCT, TOK2, { provider: "google", mailboxHint: "jane@gmail.example.invalid", status: prior }),
+    );
+    const res = await g.call("POST", `/addresses/${A2}/rotate`);
+    assertEquals(res.status, 200, prior);
+    assertEquals(Object.keys(await res.json()).sort(), ["address", "address_id", "grace_until"], prior);
+    assertEquals(g.store.rows.find((r) => r.id === A2)!.status, "pending", prior);
+    assertEquals(g.store.rotations.map((n) => [n.status, n.rotatedFrom]), [["pending", prior]], prior);
+  }
+  // Another provider's status is left alone, and its prior status is recorded all the same.
+  const m = await world();
+  assertEquals((await m.call("POST", `/addresses/${A1}/rotate`)).status, 200);
+  assertEquals(m.store.rows.find((r) => r.id === A1)!.status, "active");
+  assertEquals(m.store.rotations.map((n) => [n.status, n.rotatedFrom]), [[null, "active"]]);
 });
 
 Deno.test("a_rotate_clears_the_leaked_reason", async () => {
