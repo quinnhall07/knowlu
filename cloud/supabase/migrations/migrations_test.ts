@@ -341,8 +341,10 @@ Deno.test("every SECURITY DEFINER or writing function in every migration has exe
   // L8 S2c2's `admin.comp_sweep` in the same file (writing, revoked the same way), plus L8 S2d's
   // `public.count_route` in the same file (writing, revoked from `public, anon, authenticated`,
   // granted to `service_role`). Recount at the L8 merge of main (2026-10-20): 40 before the three
-  // lanes, + L3's 2 + the follow-ups' 2 + L8's 5 = 49.
-  assertEquals(parsed, 49, "today's corpus should parse exactly 49 function creations");
+  // lanes, + L3's 2 + the follow-ups' 2 + L8's 5 = 49. Plus the S6 follow-up's `create or replace` of
+  // `admin.comp_grant` and `admin.comp_extend` in <stamp>_comp_guards.sql (writing, each revoked again
+  // from `public, anon, authenticated, service_role` in that file): 51.
+  assertEquals(parsed, 51, "today's corpus should parse exactly 51 function creations");
 });
 
 Deno.test("every view in every migration is either security_invoker or revoked from anon and authenticated", async () => {
@@ -360,12 +362,14 @@ Deno.test("every view in every migration is either security_invoker or revoked f
   // below proves it can. C3's `sync_limits` (revoked, 20260912000100) is the fifth. L8's
   // `effective_entitlements` (revoked, <stamp>_testers.sql, friends-testers S2b) is the sixth,
   // `admin.testers` (revoked, the same file, S2e1) the seventh, and `admin.tester_usage_daily` and
-  // `admin.tester_spend_monthly` (revoked, the same file, S2e2) the eighth and ninth.
-  assertEquals(parsed, 9, "today's corpus should parse exactly 9 view creations");
+  // `admin.tester_spend_monthly` (revoked, the same file, S2e2) the eighth and ninth. The S6
+  // follow-up's `create or replace view admin.testers` (<stamp>_comp_guards.sql, revoked again in that
+  // file) is the tenth, so `testers` is listed twice.
+  assertEquals(parsed, 10, "today's corpus should parse exactly 10 view creations");
   // Asserted by name, not merely counted: the exemption must be seen to fire on a real view rather
   // than papering over a scan that never reached one.
   assertEquals(invoker, ["billing_subscribers"]);
-  assertEquals(revoked, ["telemetry_daily", "correction_rates", "monthly_spend", "sync_limits", "effective_entitlements", "testers", "tester_usage_daily", "tester_spend_monthly"]);
+  assertEquals(revoked, ["telemetry_daily", "correction_rates", "monthly_spend", "sync_limits", "effective_entitlements", "testers", "tester_usage_daily", "tester_spend_monthly", "testers"]);
 });
 
 Deno.test("a view with neither security_invoker nor a revoke is caught by the view guard", () => {
@@ -1900,8 +1904,9 @@ Deno.test("mail_addresses_gains_last_lapsed_at_backfilled_from_lapsed_since_and_
   // Forward-only: a new file after every applied one; the mail migration is never edited.
   // Stamped after every file before it; a later migration is named here when it lands.
   // A later lane's file is named by its suffix, never its stamp (stamp rule M4); L8's testers file
-  // is left out by its suffix (friends-testers §8.4, M4), so its restamp moves no line here.
-  const LATER_LANES = /^\d{14}_testers\.sql$/;
+  // is left out by its suffix (friends-testers §8.4, M4), so its restamp moves no line here; so is
+  // its S6 follow-up, <stamp>_comp_guards.sql.
+  const LATER_LANES = /^\d{14}_(?:testers|comp_guards)\.sql$/;
   assertEquals(
     files.map(([n]) => n).filter((n) => n > MAIL_LAST_LAPSED_AT && !LATER_LANES.test(n))
       .map((n) => EVENT_ALLOWANCE.test(n) ? "<stamp>_event_allowance.sql" : n),
@@ -3250,10 +3255,11 @@ Deno.test("the_follow_ups_migration_is_found_by_suffix_and_stamped_after_every_o
   const names = (await everyMigrationFile()).map(([n]) => n);
   const { name } = await followUpsMigration();
   // Forward-only (M2, M6): a new file after every applied one. A later migration is named here when it lands,
-  // by its suffix, never its stamp (M4): L8's testers file, restamped after this one (C1, 2026-10-20).
+  // by its suffix, never its stamp (M4): L8's testers file, restamped after this one (C1, 2026-10-20),
+  // and its S6 follow-up after that.
   assertEquals(
-    names.filter((n) => n > name).map((n) => /^\d{14}_testers\.sql$/.test(n) ? "<stamp>_testers.sql" : n),
-    ["<stamp>_testers.sql"],
+    names.filter((n) => n > name).map((n) => n.replace(/^\d{14}_(testers|comp_guards)\.sql$/, "<stamp>_$1.sql")),
+    ["<stamp>_testers.sql", "<stamp>_comp_guards.sql"],
     `${name}: stamped after every other file but the named later ones`,
   );
   for (const applied of [MAIL_LAST_LAPSED_AT, MAIL_MAX_TOKENS_REPIN]) {
@@ -3361,4 +3367,166 @@ Deno.test("the_follow_ups_migration_never_names_the_table_the_eval_gate_watches"
   // the raw text, comments included, never carries it in any case (plan §3).
   const { name, raw } = await followUpsMigration();
   assert(!/\bmodels\b/i.test(raw), `${name}: names the pin table, which would run the paid eval gate`);
+});
+
+// L8's S6 follow-up (2026-10-20, minors 2 and 3; friends-testers §3.3, §5, §8.3). One forward-only file,
+// found by its suffix (M4): comp_grant refuses an ends_at not after now() or past now() + 1 year,
+// comp_extend gains the same ceiling, and admin.testers gains entitlement_status and has_subscription
+// at its end. Every other byte of the two functions and the view is the testers file's, so the pin
+// rebuilds each statement from the testers file and compares the whole.
+const COMP_GUARDS = /^\d{14}_comp_guards\.sql$/;
+
+/** The one `<stamp>_comp_guards.sql`: its name and raw text. */
+async function compGuardsMigration(): Promise<{ name: string; raw: string }> {
+  const files = (await everyMigrationFile()).filter(([n]) => COMP_GUARDS.test(n));
+  assertEquals(files.length, 1, "exactly one <stamp>_comp_guards.sql (M4: found by suffix)");
+  return { name: files[0][0], raw: files[0][1] };
+}
+
+const GUARD_GRANT_SQL = "if p_ends_at is null or p_ends_at <= now() then raise exception 'the ends_at is not in the future'; " +
+  "end if; if p_ends_at > now() + interval '1 year' then raise exception 'the ends_at is more than a year away'; end if;";
+const GUARD_EXTEND_PAST = "if p_ends_at is null or p_ends_at <= now() then raise exception 'the new ends_at is not in the future'; end if;";
+const GUARD_EXTEND_SQL = "if p_ends_at > now() + interval '1 year' then raise exception 'the new ends_at is more than a year away'; end if;";
+const GUARD_COLUMNS = "coalesce(e.status, 'none') as entitlement_status, e.stripe_subscription_id is not null as has_subscription";
+
+/** The flattened `create [or replace] function admin.<fn>(…) … ;` statement, or "". */
+const adminFunctionStatement = (flat: string, fn: string) =>
+  new RegExp(`create (?:or replace )?function admin\\.${fn}\\([^)]*\\) .*? as \\$\\$.*?\\$\\$[^;]*;`).exec(flat)?.[0] ?? "";
+const testersViewStatement = (flat: string) => /create (?:or replace )?view admin\.testers as [^;]*;/.exec(flat)?.[0] ?? "";
+
+/** What the guards file must be, rebuilt from the testers file: each statement, then the whole list. */
+export function compGuardsProblems(testersSql: string, guardsRaw: string): string[] {
+  const was = flatten(testersSql);
+  const now = flatten(guardsRaw);
+  const out: string[] = [];
+  const replaced = (s: string) => s.replace(/^create (function|view) /, "create or replace $1 ");
+  const want: Record<string, string> = {
+    comp_grant: replaced(adminFunctionStatement(was, "comp_grant")).replace(" begin begin ", ` begin ${GUARD_GRANT_SQL} begin `),
+    comp_extend: replaced(adminFunctionStatement(was, "comp_extend")).replace(GUARD_EXTEND_PAST, `${GUARD_EXTEND_PAST} ${GUARD_EXTEND_SQL}`),
+    testers: replaced(testersViewStatement(was)).replace(" as last_active_day from ", ` as last_active_day, ${GUARD_COLUMNS} from `),
+  };
+  for (const [what, stmt] of Object.entries(want)) {
+    if (!stmt.includes("or replace") || !/now\(\) \+ interval '1 year'|has_subscription/.test(stmt)) out.push(`${what}: not rebuilt`);
+  }
+  if (adminFunctionStatement(now, "comp_grant") !== want.comp_grant) out.push("comp_grant is not the testers file's plus the date guards");
+  if (adminFunctionStatement(now, "comp_extend") !== want.comp_extend) out.push("comp_extend is not the testers file's plus the ceiling");
+  if (testersViewStatement(now) !== want.testers) out.push("admin.testers is not the testers file's plus two columns at its end");
+  const revokes = [
+    "revoke execute on function admin.comp_grant(uuid, timestamptz, text, text) from public, anon, authenticated, service_role",
+    "revoke execute on function admin.comp_extend(uuid, timestamptz) from public, anon, authenticated, service_role",
+    "revoke all on admin.testers from public, anon, authenticated, service_role",
+  ];
+  for (const r of revokes) if (!was.includes(`${r};`)) out.push(`the testers file lacks ${r}`);
+  const blank = (s: string) => s.replace(/\$\$.*?\$\$/g, "$$$$").replace(/;$/, "");
+  const statements = topLevel(guardsRaw);
+  const wantStatements = [blank(want.comp_grant), blank(want.comp_extend), revokes[0], revokes[1], blank(want.testers), revokes[2]];
+  if (JSON.stringify(statements) !== JSON.stringify(wantStatements)) out.push(`statements: ${statements.join(" | ")}`);
+  return out;
+}
+
+Deno.test("S6 follow-up: the guards file is found by suffix and stamped after every other file", async () => {
+  const { name } = await compGuardsMigration();
+  const { name: testers } = await testersMigration();
+  const names = (await everyMigrationFile()).map(([n]) => n);
+  assertEquals(names.at(-1), name, `${name}: stamped after every other file; a later migration is named here when it lands`);
+  assert(name > testers, `${name}: after ${testers}, which stays as applied`);
+});
+
+Deno.test("S6 follow-up: comp_grant and comp_extend gain the date guards, admin.testers two end columns, and nothing else moves", async () => {
+  const { name, raw } = await compGuardsMigration();
+  assertEquals(compGuardsProblems((await testersMigration()).sql, raw), [], name);
+  for (const fn of ["comp_grant", "comp_extend"]) assertEquals((await lastFunction(fn)).name, name, `${fn}: the guards file governs`);
+  for (const fn of ["comp_end", "comp_sweep"]) assertEquals((await lastFunction(fn)).name, (await testersMigration()).name, fn);
+  assert(!/\bmodels\b/i.test(raw), `${name}: names the pin table, which would run the paid eval gate`);
+  assert(!/security\s+definer/i.test(stripLineComments(raw)), `${name}: no definer`);
+});
+
+Deno.test("S6 follow-up: the guard pins refuse a moved ceiling, a lost null check, a late guard, a middle column, a lost revoke", async () => {
+  const { raw } = await compGuardsMigration();
+  const testers = (await testersMigration()).sql;
+  assertEquals(compGuardsProblems(testers, raw), [], "each mutation below is the only change");
+  for (
+    const [from, to] of [
+      ["interval '1 year' then\n    raise exception 'the ends_at", "interval '2 years' then\n    raise exception 'the ends_at"],
+      ["interval '1 year' then\n    raise exception 'the new", "interval '1 year 1 day' then\n    raise exception 'the new"],
+      ["p_ends_at > now() + interval '1 year' then\n    raise exception 'the new", "p_ends_at >= now() + interval '1 year' then\n    raise exception 'the new"],
+      ["if p_ends_at is null or p_ends_at <= now() then\n    raise exception 'the ends_at", "if p_ends_at <= now() then\n    raise exception 'the ends_at"],
+      ["'the ends_at is more than a year away'", "'too far'"],
+      ["       g.granted_at,", "       e.stripe_subscription_id is not null as has_subscription,\n       g.granted_at,"],
+      ["is not null as has_subscription", "is not null as subscribed"],
+      ["revoke all on admin.testers from public, anon, authenticated, service_role;", "revoke all on admin.testers from public, anon, authenticated;"],
+      ["language plpgsql\nset search_path = ''", "language plpgsql\nsecurity definer\nset search_path = ''"],
+    ]
+  ) {
+    const bad = raw.replace(from, to);
+    assertNotEquals(bad, raw, `the mutation ${from} must apply to the real file`);
+    assert(compGuardsProblems(testers, bad).length > 0, `${from} -> ${to} must be refused`);
+  }
+});
+
+Deno.test("S6 follow-up: the G rows' refusals are the SQL's own words, and their columns the view's", async () => {
+  const { GUARD_CASES, GRANT_NOT_FUTURE, GRANT_TOO_FAR, EXTEND_NOT_FUTURE, EXTEND_TOO_FAR } = await import("./testers_cases.ts");
+  const flat = flatten((await compGuardsMigration()).raw);
+  for (const m of [GRANT_NOT_FUTURE, GRANT_TOO_FAR, EXTEND_NOT_FUTURE, EXTEND_TOO_FAR]) {
+    assert(flat.includes(`raise exception '${m}';`), `the migration raises '${m}'`);
+  }
+  const refusals = new Set(GUARD_CASES.flatMap((c) => (c.calls ?? []).map((k) => k.refused).filter((r) => r !== undefined)));
+  assertEquals([...refusals].sort(), [GRANT_NOT_FUTURE, GRANT_TOO_FAR, EXTEND_TOO_FAR].sort(), "each new refusal is a G row's");
+  for (const c of GUARD_CASES) {
+    for (const a of c.accounts) assert(a.email.endsWith("@example.invalid"), c.id);
+    assertEquals(c.expect.length, c.accounts.length, `${c.id}: one answer per account`);
+  }
+  assert(flat.includes(GUARD_COLUMNS), "entitlement_status and has_subscription, the names the G rows' runner reads");
+});
+
+// The S6 follow-up's layer iii: proofs/comp_guards_staging.sql, in the testers proof's form (one
+// transaction that only rolls back, the trigger precheck first, sign-ups by S1's columns with no
+// password, GUARD_CASES verbatim), plus the year's exact edge, which whole days cannot state.
+const GUARD_PROOF = new URL("../proofs/comp_guards_staging.sql", HERE);
+
+export function guardProofProblems(raw: string): string[] {
+  const code = flatten(raw);
+  const out: string[] = [];
+  for (
+    const pin of [
+      "admin.comp_grant(v_id, now() + interval '1 year', 'friends', null)",
+      "admin.comp_grant(v_id, now() + interval '1 year 1 second', 'friends', null)",
+      "admin.comp_extend(v_id, now() + interval '1 year 1 second')",
+      "admin.comp_grant(v_id, null, 'friends', null)",
+      "information_schema.columns",
+      "has_function_privilege",
+      "has_table_privilege",
+    ]
+  ) if (!code.includes(pin)) out.push(`no ${pin}`);
+  if (/\bmodels\b/i.test(raw)) out.push("names the pin table");
+  if (/\b(?:insert\s+into|update|delete\s+from)\s+(?:public\.)?comp_(?:grants|audit)\b/.test(code)) out.push("writes a grant table directly");
+  return out;
+}
+
+Deno.test("S6 follow-up: the guards proof rolls back, prechecks, signs up with no password and runs GUARD_CASES verbatim", async () => {
+  const { GUARD_CASES } = await import("./testers_cases.ts");
+  const raw = await Deno.readTextFile(GUARD_PROOF);
+  assertEquals(proofProblems(raw, GUARD_CASES), []);
+  assertEquals(guardProofProblems(raw), []);
+  for (
+    const [bad, want] of [
+      [raw.replace(/rollback;\s*$/, "commit;\n"), "close with rollback"],
+      [raw.replace('"endsIn":367', '"endsIn":366'), "CASES"],
+      [raw.replace("interval '1 year 1 second', 'friends'", "interval '2 years', 'friends'"), "1 year 1 second"],
+    ]
+  ) {
+    assertNotEquals(bad, raw, `the mutation for ${want} must apply to the real proof`);
+    const problems = [...proofProblems(bad, GUARD_CASES), ...guardProofProblems(bad)];
+    assert(problems.some((p) => p.includes(want)), `${want}: ${problems.join(" | ")}`);
+  }
+});
+
+Deno.test("S6 follow-up: the testers proof makes a past-dated grant at a future date and backdates it, as the guards require", async () => {
+  const code = flatten(await Deno.readTextFile(PROOF));
+  // flatten lower-cases, so the case table's endsIn key reads endsin here.
+  assert(
+    code.includes("perform admin.comp_grant(v_id, greatest(pg_temp.days(x -> 'endsin'), now() + interval '1 day'), 'friends', null);"),
+    "the grant at a future date",
+  );
+  assert(code.includes("update public.comp_grants set ends_at = pg_temp.days(x -> 'endsin') where account_id = v_id and ended_at is null;"), "then backdated");
 });

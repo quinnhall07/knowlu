@@ -137,9 +137,14 @@ begin
        where account_id = v_id;
     end if;
   end loop;
+  -- Since 20261020000600_comp_guards.sql, comp_grant refuses a date not after now(), so a grant the case
+  -- puts in the past (P8, P12, P13) is made a day out and then backdated by the owner, as A4 does.
   for x in select value from jsonb_array_elements(c -> 'grants') loop
     v_id := ids[(x ->> 'account')::int + 1];
-    perform admin.comp_grant(v_id, pg_temp.days(x -> 'endsIn'), 'friends', null);
+    perform admin.comp_grant(v_id, greatest(pg_temp.days(x -> 'endsIn'), now() + interval '1 day'), 'friends', null);
+    if (x ->> 'endsIn')::int <= 0 then
+      update public.comp_grants set ends_at = pg_temp.days(x -> 'endsIn') where account_id = v_id and ended_at is null;
+    end if;
     if x -> 'endedAgo' is not null then
       perform admin.comp_end(v_id, 'done');
       update public.comp_grants set ended_at = now() - make_interval(days => (x ->> 'endedAgo')::int)

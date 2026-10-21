@@ -1093,7 +1093,7 @@ fn the_bundle_config_is_the_one_the_installer_and_the_updater_need() {
     // camelCase - so `"currentUser"`, and `deny_unknown_fields` would reject any other spelling.)
     assert_eq!(conf["bundle"]["windows"]["nsis"]["installMode"], "currentUser",
                "R9's disk-hop reasoning depends on this - see updates::install_staged");
-    assert_eq!(conf["version"], "0.1.0", "one version, in one place (Knowlu spec 6)");
+    assert_eq!(conf["version"], env!("CARGO_PKG_VERSION"), "one version, in one place (Knowlu spec 6): tauri.conf.json matches the workspace");
     // R-P4a-16: the bundler signs each binary BEFORE it packs, through one wrapper script.
     // tauri-bundler 2.9.4 calls try_sign() on the main binary, on every externalBin, on the
     // resources and on the installer, so all three of the things inside the NSIS package are
