@@ -178,3 +178,36 @@ fn a_refetch_applies_as_the_registrar_and_a_new_process_lists_it() {
     assert_eq!(fingerprint(&v), before, "an exit 2 wrote something");
     let _ = std::fs::remove_dir_all(&v);
 }
+
+/// P7 (fixture review M1): instructor names, emails and ids are never read, logged or put in a
+/// warning or error. The fixture carries invented ones on every row; none may surface in what
+/// `parse_banner` returns (series, warnings, counts) or in what the command prints or writes.
+#[test]
+fn instructor_data_never_surfaces() {
+    const SECRETS: [&str; 3] = ["Invented Instructor", "example.invalid", "INV00000"];
+    fn check(what: &str, text: &str) {
+        for s in SECRETS {
+            assert!(!text.contains(s), "{what} carries {s:?}: {text}");
+        }
+    }
+    let json: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    assert!(FIXTURE.contains("Invented Instructor One"), "the fixture no longer carries instructor data");
+    let parsed = knowlu_engine::registrar::parse_banner(&json, "ua").unwrap();
+    assert!(!parsed.series.is_empty());
+    check("parse_banner", &format!("{parsed:?}"));
+    // A parse error names no row data either.
+    let mut bad = json.clone();
+    for r in bad["data"]["registrations"].as_array_mut().unwrap() {
+        r["statusIndicator"] = "XX".into();
+    }
+    check("parse_banner on dropped rows", &format!("{:?}", knowlu_engine::registrar::parse_banner(&bad, "ua")));
+    let v = scratch("instructors");
+    let out = run(&v, FIXTURE, &["--school", "ua"]);
+    assert!(out.status.success(), "{out:?}");
+    check("stdout", &String::from_utf8_lossy(&out.stdout));
+    check("stderr", &String::from_utf8_lossy(&out.stderr));
+    for (path, bytes) in fingerprint(&v) {
+        check(&path.to_string_lossy(), &String::from_utf8_lossy(&bytes));
+    }
+    let _ = std::fs::remove_dir_all(&v);
+}
