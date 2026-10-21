@@ -134,6 +134,14 @@ fn release_builds_for_the_staged_sidecars_triple_and_reads_its_output_under_it()
             assert!(!text.contains(bare), "{name} still names {bare}: with --target the bundle and knowlu.exe live under target\\<triple>\\release");
         }
     }
+    // Run 39651026811: `rustc -vV | ... | Select-Object -First 1` stops the pipeline before pwsh
+    // records rustc's exit, so a fresh step's $LASTEXITCODE stays $null beside a good triple and
+    // `$null -ne 0` throws. Capture, then filter.
+    for (name, text) in [("release.ps1", &ps1), ("release.yml", &yml)] {
+        for line in text.lines().filter(|l| l.contains("rustc -vV |")) {
+            assert!(!line.contains("Select-Object -First"), "{name} cuts rustc's own pipeline short: {}", line.trim());
+        }
+    }
 }
 
 /// C0 (2026-09-17): build and publish are two jobs joined by an artifact, so a publish-only failure
