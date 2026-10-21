@@ -657,6 +657,12 @@ bullet, D5's end card, Amendment 2's end card, Amendment 4's actor and Plan ruli
       - **A note that comes back:** `prior` is the pinned end of the open `ended` entry this fetch
         closes (11).
 
+      A come-back's row has no prior row in the series file (the drop moved it to the file's
+      `ended`), so for `meets` and `where` `prior` is the value that same open `ended` entry kept
+      from the dropped row (13; B3eR fix 2, for review). Without it, a hand-set field the registrar
+      moved while the course was gone would never be shown. An entry that kept no value (the file
+      held no row at the drop, or the block was lost) is "no prior row": listed only, never silent.
+
       A note whose CRN `seen` marks `unread`, `partial` or `status` gets no detection at all (11,
       P6). When `new` differs from both `prior` and the note's
       value, the fetch records a **kept entry** in the registrar block (item 13): the note, the
@@ -839,7 +845,9 @@ bullet, D5's end card, Amendment 2's end card, Amendment 4's actor and Plan ruli
       `last_fetch` (dates), `applied` and `ended` (each entry dated by its fetch day), `kept` (the
       standing entries of 12), `status` and `unread` (the latest successful fetch's). Each `ended`
       entry holds the pinned end of 11 (the `until` written, or the registrar's value when it was
-      "kept yours"). Once the note comes back, it also holds `returned`, that fetch's day (11). An
+      "kept yours"), and `meets` and `where`, the dropped row's last whole values, when the series file
+      held its row at the drop (12's come-back; B3eR fix 2). Once the note comes back, it also holds
+      `returned`, that fetch's day (11). An
       `ended` entry without `returned` is **open**, and the note's open entry is the record 11's
       "already ended" test reads.
     - **How it changes.** `applied` and `ended` accumulate over the term: a fetch adds only its new
@@ -1084,6 +1092,10 @@ bullet, D5's end card, Amendment 2's end card, Amendment 4's actor and Plan ruli
     - **The CRN comes back.** After the day-1 end, a day-20 fetch that returns the CRN as a whole
       row moves `until` to the row's value, lists it under `applied`, and keeps the day-1 `ended`
       entry, now closed with `returned` day 20 (convergence round 1).
+    - **A move across the drop (12; B3eR fix 2).** Day 1: the student sets `where` by hand to a value
+      other than the registrar's, so no kept entry. Day 10: no row, so the note is ended. Day 20: the
+      CRN comes back whole in another room. A kept entry for the new room, with its one card, never
+      listed only. With the room unchanged on day 20, nothing is kept, listed or carded.
     - **Seen is not missing (P9).** A confirmed note whose row comes back with null `beginTime` and
       `endTime` (`unread`), one whose row has only an unknown `meetingType` (`unread`), and one whose
       row lost one of two `CLAS` meetings to P4 (`partial`): none is written, none is ended, each is

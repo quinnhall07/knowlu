@@ -6,10 +6,11 @@
 //! ledger and the test changes with the controller's say):
 //! - the command's JSON lists (`applied`, `ended`, `kept`, `status`, `unread`) and the registrar
 //!   block hold entries with these keys: `applied` {day, field, from, note, to}; `ended` {day,
-//!   kept_yours, note, returned?, until}; `kept` {field, note, registrar, student} (the report's
-//!   copy adds `card`: "filed", "waiting" or "listed"); `status` {key, note, status}; `unread`
-//!   {key, note, reason}. `note` is the vault-relative path (`null` when no note holds the key);
-//!   dates are `YYYY-MM-DD`; a `meets` value is the note's own list (`[{days, start, end}]`).
+//!   kept_yours, meets?, note, returned?, until, where?} (`meets` and `where`: the dropped row's
+//!   last whole values, present when the file held its row; B3eR fix 2); `kept` {field, note,
+//!   registrar, student} (the report's copy adds `card`: "filed", "waiting" or "listed");
+//!   `status` {key, note, status}; `unread` {key, note, reason}. `note` is the vault-relative
+//!   path (`null` when no note holds the key); dates are `YYYY-MM-DD`; a `meets` value is the note's own list (`[{days, start, end}]`).
 //! - `commitments --json`'s overview carries the same five lists, read from the block, under the
 //!   new key `registrar_changes` (its existing `registrar` object is untouched).
 #![allow(dead_code)]

@@ -451,26 +451,31 @@ pub fn run_parsed(
                 continue;
             }
         }
-        ended.push(json!({ "day": today.to_string(), "kept_yours": kept_yours, "note": path, "until": pinned.to_string() }));
+        let mut entry = json!({ "day": today.to_string(), "kept_yours": kept_yours, "note": path, "until": pinned.to_string() });
+        // B3eR fix 2 (A2 item 13): the entry also keeps the dropped row's last whole `meets` and
+        // `where`, as `until` keeps its pinned end, so a come-back has a prior value to compare.
+        if let Some(row) = prior.series.iter().find(|s| s.calendar == calendar && s.source_uid == *key) {
+            entry["meets"] = cm::field_json("meets", &row.meets, row.until, row.where_.as_deref());
+            entry["where"] = cm::field_json("where", &row.meets, row.until, row.where_.as_deref());
+        }
+        ended.push(entry);
     }
     // "When the CRN comes back": a `whole` row closes the note's open entry, written or not.
     let returned: Vec<String> =
         notes.iter().filter(|(key, path)| read.get(*key) == Some(&Reading::Whole) && open(path)).map(|(_, path)| path.clone()).collect();
     // A2 item 12 (close-out B3e): a hand-set field is never written. `old` is the last whole reading
-    // (P9's carry) or, for `until`, the pinned end of the note's open `ended` entry; a missing note's
-    // new `until` is the pinned end. A value that moved from `old` and differs from the note's is
-    // kept (listed only with no prior row and no standing entry; a come-back with neither detects
-    // nothing); agreement removes the entry; a part-read CRN is skipped.
+    // (P9's carry) or, at a come-back, what the note's open `ended` entry kept at the drop (`until`'s
+    // pinned end, the dropped row's `meets` and `where`: B3eR fix 2); a missing note's new `until`
+    // is the pinned end. A value that moved from `old` and differs from the note's is kept (listed
+    // only with no prior value and no standing entry); agreement removes the entry; a part-read CRN
+    // is skipped.
     let mut kept: Vec<Value> = block.map(|t| t.kept.clone()).unwrap_or_default();
     for (key, path) in &notes {
         let Some(note) = confirmed.get(key).filter(|_| read.get(key).is_none_or(|how| *how == Reading::Whole)) else { continue };
         let before = prior.series.iter().find(|s| s.calendar == calendar && s.source_uid == *key);
-        let open_end = block
-            .and_then(|t| t.ended.iter().find(|e| e["note"] == path.as_str() && e.get("returned").is_none()))
-            .map(|e| e["until"].clone());
+        let open_entry = block.and_then(|t| t.ended.iter().find(|e| e["note"] == path.as_str() && e.get("returned").is_none()));
+        let open_end = open_entry.map(|e| e["until"].clone());
         let (gone, newly_ended) = (!read.contains_key(key), ended.iter().any(|e| e["note"] == path.as_str()));
-        // B3eR fix 1: a come-back's row went to the file's `ended` at the drop, so it has no prior row.
-        let come_back = before.is_none() && (open_end.is_some() || prior.ended.contains_key(key.as_str()));
         let value = |field: &str, s: &Series| cm::field_json(field, &s.meets, s.until, s.where_.as_deref());
         for field in ["meets", "until", "where"] {
             if journal.human_edited(&note.id, field).is_none() {
@@ -478,7 +483,7 @@ pub fn run_parsed(
             }
             let (old, new) = match (rows.get(key.as_str()), field) {
                 (Some(row), "until") => (open_end.clone().or_else(|| before.map(|s| value(field, s))), value(field, row)),
-                (Some(row), _) => (before.map(|s| value(field, s)), value(field, row)),
+                (Some(row), _) => (before.map(|s| value(field, s)).or_else(|| open_entry.and_then(|e| e.get(field).cloned())), value(field, row)),
                 (None, "until") if gone && open_end.is_some() => (open_end.clone(), open_end.clone().unwrap_or_default()),
                 (None, "until") if newly_ended => (before.map(|s| value(field, s)), json!(pinned.to_string())),
                 _ => continue,
@@ -486,14 +491,9 @@ pub fn run_parsed(
             let mine = cm::field_json(field, &note.meets, note.until, note.where_.as_deref());
             let same = |a: &Value, b: &Value| cm::same_value(field, a, b);
             let at = kept.iter().position(|e| e["note"] == path.as_str() && e["field"] == field);
-            // B3eR fix 1: with no prior row, a standing entry's `registrar` is the last whole reading
-            // (so it is never turned listed-only), and a come-back with no entry detects nothing.
-            let old = match (old, at) {
-                (Some(old), _) => Some(old),
-                (None, Some(i)) => Some(kept[i]["registrar"].clone()),
-                (None, None) if come_back => continue,
-                (None, None) => None,
-            };
+            // B3eR fix 1: with no prior value, a standing entry's `registrar` is the last whole
+            // reading, so it is never turned listed-only.
+            let old = old.or_else(|| at.map(|i| kept[i]["registrar"].clone()));
             if new.is_null() {
                 continue;
             } else if same(&new, &mine) {

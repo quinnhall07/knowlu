@@ -194,8 +194,9 @@ fn a_dropped_course_with_a_hand_set_until_is_kept_yours_with_one_card() {
 
 /// B3eR fix 1 (A2 item 12, "A held card is not lost", across 11's come-back). A hand-set `meets`
 /// the registrar moved has its kept entry and one card; the course is missing, then whole again
-/// with the same moved value. The come-back has no prior row (the drop moved it to `ended`), which
-/// detects nothing: the entry stands, is not turned into a listed-only one, and keeps its one card.
+/// with the same moved value. The come-back has no prior row (the drop moved it to `ended`); its
+/// `old` is the value the open `ended` entry kept (B3eR fix 2), equal to the new one, so the entry
+/// stands, is not turned into a listed-only one, and keeps its one card.
 #[test]
 fn a_kept_entry_and_its_card_survive_a_drop_and_a_whole_come_back() {
     let lab = edited("kept-comeback");
@@ -227,6 +228,34 @@ fn a_hand_set_field_the_registrar_never_changed_is_not_listed_after_a_come_back(
     assert!(list(&back, "kept").is_empty() && lab.kept_entries().is_empty(), "{back}");
     lab.rank(D20);
     assert!(lab.change_cards().is_empty(), "{:?}", lab.change_cards());
+}
+
+/// B3eR fix 2 (A2 items 11, 12 and 13, "Never silent"). A hand-set `where` that differed from the
+/// registrar's on day 1 has no kept entry. The course is missing on day 10, and on day 20 it is whole
+/// again in another room. The drop's open `ended` entry kept the dropped row's `where`, so the
+/// come-back compares against it: a kept entry with its one card, never silence and never listed-only.
+#[test]
+fn a_registrar_move_across_a_drop_and_a_come_back_is_kept_with_a_card() {
+    let lab = Lab::new("kept-comeback-moved", "2026-08-31");
+    lab.fetch(D1, &fx());
+    lab.hand_set(LECTURE, "where", "\"Invented Hall 9\"");
+    let mut gone = fx();
+    drop_crn(&mut gone, "40001");
+    lab.fetch(D10, &gone);
+    let mut moved = fx();
+    meeting(&mut moved, "40001")["room"] = json!("300");
+    let back = lab.fetch(D20, &moved);
+    assert_eq!(lab.loaded(LECTURE).where_.as_deref(), Some("Invented Hall 9"), "the registrar overwrote the student");
+    let kept = kept_of(&back, LECTURE, "where");
+    assert_eq!(
+        (kept.len(), kept[0]["registrar"].as_str(), kept[0]["student"].as_str(), kept[0]["card"].as_str()),
+        (1, Some("Invented Hall 300"), Some("Invented Hall 9"), Some("filed")),
+        "{back}"
+    );
+    assert!(lab.kept_entries().iter().all(|e| e.get("listed").is_none()), "{:?}", lab.kept_entries());
+    assert_eq!(the_card(&lab, LECTURE, "where").meta["change"]["where"].as_str(), Some("Invented Hall 300"));
+    lab.rank(D20);
+    assert_eq!(cards_of(&lab, LECTURE, "where").len(), 1, "{:?}", lab.change_cards());
 }
 
 /// B3e (round 2, "`was` is read at filing"). A kept entry recorded with the student's value; the
