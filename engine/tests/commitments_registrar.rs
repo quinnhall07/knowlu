@@ -195,7 +195,9 @@ fn instructor_data_never_surfaces() {
     let parsed = knowlu_engine::registrar::parse_banner(&json, "ua").unwrap();
     assert!(!parsed.series.is_empty());
     check("parse_banner", &format!("{parsed:?}"));
-    // A parse error names no row data either.
+    // A parse error names no row data either. Until B9a records UA's registered status codes,
+    // `SCHOOLS`' UA entry has `registered: &[]` (every row counts), so this leg parses cleanly and
+    // only checks the Ok value; it exercises the error path once B9a fills the set.
     let mut bad = json.clone();
     for r in bad["data"]["registrations"].as_array_mut().unwrap() {
         r["statusIndicator"] = "XX".into();

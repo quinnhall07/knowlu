@@ -101,7 +101,7 @@ fn the_argv_carries_the_vault_the_file_the_school_today_and_the_consoles_via() {
 }
 
 /// D4 + R4-e: the bytes go to a temp file under the profile's `tmp\`, the engine writes the
-/// notes as `quinn` via `dashboard`, and the file is gone afterwards.
+/// notes as the vault's human token (config/actor.yaml) via `dashboard`, and the file is gone afterwards.
 #[test]
 fn a_fetched_schedule_runs_through_the_engine_and_the_temp_file_is_gone() {
     let _engine = real_engine();
