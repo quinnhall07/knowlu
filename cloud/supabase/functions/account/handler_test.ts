@@ -606,6 +606,42 @@ Deno.test("a later privacy version that is not a YYYY-MM-DD date is 400 and writ
   }
 });
 
+// T16 review minor 7: a dev build with a far-future version pointed at this server must not record
+// it, or that account reads Accepted for every later bump. `laterDeps` is pinned at 2026-10-20 (UTC).
+Deno.test("a version later than tomorrow (UTC) is 400 and writes nothing, on either consent path", async () => {
+  const bodies = [
+    { tos_version: "2026-09-10", privacy_version: "2026-10-22", age_attested: true },
+    { tos_version: "2026-10-22", privacy_version: "2026-10-20", age_attested: true },
+    { tos_version: "2026-09-10", privacy_version: "9999-12-31", age_attested: true },
+  ];
+  for (const body of bodies) {
+    for (const already of [true, false]) {
+      const w: Writes = { first: [], later: [] };
+      const res = await handle(req("POST", "/consent", body), laterDeps(w, "2026-09-24", already))
+        .catch((e) => e as Response);
+      const label = `${JSON.stringify(body)} already=${already}`;
+      assertEquals(res.status, 400, label);
+      const answer = await res.json();
+      assertEquals(Object.keys(answer), ["error"], label);
+      assertEquals(typeof answer.error, "string", label);
+      assertEquals(w.later.length + w.first.length, 0, label);
+    }
+  }
+});
+
+Deno.test("today's and tomorrow's versions (UTC) are still recorded, on either consent path", async () => {
+  for (const sent of ["2026-10-20", "2026-10-21"]) {
+    const later: Writes = { first: [], later: [] };
+    const res = await handle(consentPost(sent), laterDeps(later, "2026-09-24"));
+    assertEquals(res.status, 200, sent);
+    assertEquals(later.later.length, 1, sent);
+    const first: Writes = { first: [], later: [] };
+    const tos = req("POST", "/consent", { tos_version: sent, privacy_version: sent, age_attested: true });
+    assertEquals((await handle(tos, laterDeps(first, null, false))).status, 200, sent);
+    assertEquals(first.first.length, 1, sent);
+  }
+});
+
 Deno.test("a fresh account still takes the first-consent path, not the later one", async () => {
   const w: Writes = { first: [], later: [] };
   const res = await handle(consentPost("2026-10-20"), laterDeps(w, null, false));

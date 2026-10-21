@@ -190,6 +190,16 @@ async function recordConsent(req: Request, deps: Deps): Promise<Response> {
   if (tos.length > MAX_VERSION || priv.length > MAX_VERSION) {
     throw fail(400, `a version string is longer than ${MAX_VERSION} characters`);
   }
+  // No version is ever dated after tomorrow (UTC; a day of slack for a client whose clock or zone
+  // runs ahead). Without this, a dev build with a far-future version pointed here records it once,
+  // and every later bump sorts at or before it: that account reads Accepted for good (T16 review
+  // minor 7). Versions compare as strings, the same order `recordLaterPrivacy` and the PATCH's
+  // forward-only filter use, so anything that sorts past tomorrow is refused, on both paths, before
+  // any read or write.
+  const tomorrow = new Date(deps.now().getTime() + 86_400_000).toISOString().slice(0, 10);
+  if (tos > tomorrow || priv > tomorrow) {
+    throw fail(400, "a version must be a YYYY-MM-DD date no later than tomorrow");
+  }
   if (await deps.hasConsent(user.id)) return await recordLaterPrivacy(user.id, priv, deps);
   const account = await deps.getAccount(user.id);
   if (!account) throw fail(404, "no such account");
