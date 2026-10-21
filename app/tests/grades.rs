@@ -180,7 +180,7 @@ fn the_gate_is_one_constant_suspended_in_every_build() {
 /// the grades the account holds (spec §11). `None` until bump #1's PR sets it, in the commit that puts
 /// spec §11's sentences on the page. Keyed on that version and never on "any version after
 /// `2026-09-24`", so a version moved for another page edit never lets a `policy_read` date through.
-const PRIVACY_BUMP_1: Option<&str> = None;
+const PRIVACY_BUMP_1: Option<&str> = Some("2026-10-20");
 
 /// The version in force when the grades spec was signed; its page does not disclose the kept session,
 /// so bump #1 is later than it.

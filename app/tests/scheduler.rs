@@ -2675,3 +2675,350 @@ fn no_file_or_log_of_knowlus_own_holds_the_address_or_token() {
     let _ = std::fs::remove_dir_all(&cs.data_dir);
     let _ = std::fs::remove_dir_all(&v);
 }
+
+// ---- L4 T6: until the privacy update is accepted, the slot's cloud steps are named skips ---------------------
+//
+// The gate is driven by writing `privacy.json`. Each rig vault names a loopback `api_base` that a test-owned
+// listener serves and counts (every request, whatever its method or path), and a generated
+// `session_credential_target` that nothing ever writes. So the slot only READS Credential Manager at that target
+// (the session step, `refresh_privacy`, `refresh_entitlement`, telemetry), which is the never-written-target
+// exemption `m4_quit_flush_reports_a_skip_as_a_skip_never_synced` records: no `CREDMAN_LOCK`, no write, no delete.
+// Each of those reads fails before a request, so the listener must count none.
+
+use knowlu::account::{privacy_cache_path, save_cache, save_privacy_cache, EntitlementCache, PrivacyCache, PRIVACY_VERSION};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+
+const HELD: &str = "(skipped: privacy update not accepted)";
+
+struct CountingListener {
+    port: u16,
+    hits: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CountingListener {
+    fn start() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (hits, stop) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
+        let (h, s) = (hits.clone(), stop.clone());
+        let join = std::thread::spawn(move || {
+            while !s.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok(_) => {
+                        h.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        CountingListener { port, hits, stop, join: Some(join) }
+    }
+    fn hits(&self) -> usize { self.hits.load(Ordering::SeqCst) }
+}
+
+impl Drop for CountingListener {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+    }
+}
+
+/// One scratch app-scheduled vault with an account, a never-written session target, an entitlement cache of
+/// `status` and the env seam (`KNOWLU_ENGINE_EXE=cmd`, a fresh `LOCALAPPDATA`, `KNOWLU_API_BASE` = the listener).
+struct PrivacyRig {
+    v: PathBuf,
+    cs: ConsoleState,
+    fake: PathBuf,
+    listener: CountingListener,
+    _env: EnvSeam,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+fn privacy_rig(tag: &str, status: &str, grades_connected: bool) -> PrivacyRig {
+    let guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let listener = CountingListener::start();
+    let (v, cs) = app_slot_vault(&format!("privacy-{tag}"));
+    let base = format!("http://127.0.0.1:{}/functions/v1", listener.port);
+    let target = format!("knowlu/test-l4-gate-{}-{tag}/session", std::process::id());
+    std::fs::write(
+        v.join("config").join("cloud.yaml"),
+        format!("api_base: '{base}'\nanon_key: 'anon'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n"),
+    )
+    .unwrap();
+    std::fs::write(v.join("config").join("campus.yaml"), "unitid: '999999'\r\nlms: 'blackboard'\r\n").unwrap();
+    if grades_connected {
+        std::fs::create_dir_all(grades_app::session_dir(&cs.data_dir)).unwrap();
+    }
+    save_cache(&cs.data_dir, &EntitlementCache {
+        status: status.into(),
+        current_period_end: None,
+        plan: Some("monthly".into()),
+        checked_at: knowlu_engine::journal::now_ts(None),
+    })
+    .unwrap();
+    let fake = std::env::temp_dir().join(format!("qo-sched-privacy-localappdata-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fake);
+    std::fs::create_dir_all(&fake).unwrap();
+    let env = EnvSeam::set(&[
+        ("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd")),
+        ("LOCALAPPDATA", fake.as_os_str()),
+        ("KNOWLU_API_BASE", std::ffi::OsStr::new(&base)),
+    ]);
+    PrivacyRig { v, cs, fake, listener, _env: env, _guard: guard }
+}
+
+impl PrivacyRig {
+    fn set_privacy(&self, recorded: Option<&str>) {
+        save_privacy_cache(&self.cs.data_dir, &PrivacyCache {
+            account_id: "acc-1".into(),
+            recorded: recorded.map(String::from),
+            checked_at: "2026-10-20T00:00:00Z".into(),
+        })
+        .unwrap();
+    }
+    fn cache_bytes(&self) -> Option<Vec<u8>> { std::fs::read(privacy_cache_path(&self.cs.data_dir)).ok() }
+    fn slot(&self, grades: &GradesSeam, mail: &MailSeam) -> knowlu::scheduler::RunSummary {
+        run_slot_with(&self.cs, &Scheduler::default(), None, false, grades, mail)
+    }
+    fn runner_log(&self) -> String { knowlu_engine::pystr::read_text(&self.v.join("state").join("runner-log.md")).unwrap_or_default() }
+    /// Slot logs the child loop wrote: `slot-<started>-<i>-<step>.txt`, one per child it started.
+    fn children_started(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(self.cs.data_dir.join("logs"))
+            .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
+            .unwrap_or_default();
+        names.sort();
+        names.iter().map(|n| n.trim_end_matches(".txt").rsplit('-').next().unwrap_or("").to_string()).collect()
+    }
+}
+
+impl Drop for PrivacyRig {
+    fn drop(&mut self) {
+        let _ = &self.listener;
+        let _ = std::fs::remove_dir_all(&self.fake);
+        let _ = std::fs::remove_dir_all(&self.cs.data_dir);
+        let _ = std::fs::remove_dir_all(&self.v);
+    }
+}
+
+fn names_of(s: &knowlu::scheduler::RunSummary) -> Vec<String> { s.steps.iter().map(|(n, _)| n.clone()).collect() }
+
+fn panic_capture(_h: &'static str) -> Result<Value, CaptureError> { panic!("the grades capture seam was called") }
+fn panic_pass(_due: &[Value]) -> Result<String, &'static str> { panic!("the mail pass seam was called") }
+fn one_due_mailbox() -> Result<Vec<Value>, &'static str> { Ok(vec![rig::row("active", "m365")]) }
+fn no_mailbox() -> Result<Vec<Value>, &'static str> { Ok(Vec::new()) }
+
+#[test]
+fn an_older_privacy_version_skips_every_cloud_step_by_name_and_still_ranks() {
+    let r = privacy_rig("older", "active", true);
+    r.set_privacy(Some("2026-01-01"));
+    let before = r.cache_bytes();
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&panic_capture), window_open: false };
+    let mail = MailSeam { mailboxes: &one_due_mailbox, pass: Some(&panic_pass), window_open: false };
+    let s = r.slot(&grades, &mail);
+    let named = names_of(&s);
+    // The session step's row comes first (its reason is the Credential Manager read's), then exactly one
+    // privacy row, then the skips in the slot's order.
+    assert!(named[0].starts_with("session (refresh failed: "), "{named:?}");
+    assert_eq!(named[1], "privacy (check failed: no session)", "{named:?}");
+    let held: Vec<String> = ["grades", "mail", "judge", "sync", "coursework", "ingest"].iter().map(|n| format!("{n} {HELD}")).collect();
+    assert_eq!(named[2..8], held[..], "{named:?}");
+    assert_eq!(named.iter().filter(|n| n.starts_with("privacy")).count(), 1, "exactly one privacy row: {named:?}");
+    assert!(named.iter().any(|n| n == "rank"), "rank still runs: {named:?}");
+    assert!(s.steps.iter().all(|(_, c)| *c == 0) && s.engine_ok && s.ok, "every code is 0: {:?}", s.steps);
+    // None of the held steps ran: no bare row, and the child loop started nothing but `rank`.
+    for step in ["sync", "coursework", "ingest", "grades", "judge"] {
+        assert!(!named.iter().any(|n| n == step), "{step} ran: {named:?}");
+    }
+    assert_eq!(r.children_started(), ["rank"]);
+    // The stand-in capture marks nothing: not a "capture running" row, and no signed-out mark.
+    assert!(!named.iter().any(|n| n.contains("another grades capture is running")), "{named:?}");
+    assert!(!r.cs.data_dir.join("grades-signed-out").exists(), "no signed-out mark");
+    assert!(no_bundles_left(&r.cs.data_dir));
+    assert_eq!(r.cache_bytes(), before, "a failed check leaves the cache as it was");
+    assert_eq!(r.listener.hits(), 0, "no request of any kind");
+}
+
+#[test]
+fn an_older_version_names_only_steps_that_would_have_run() {
+    let r = privacy_rig("older-quiet", "active", false);
+    r.set_privacy(None);
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&panic_capture), window_open: false };
+    let mail = MailSeam { mailboxes: &no_mailbox, pass: Some(&panic_pass), window_open: false };
+    let s = r.slot(&grades, &mail);
+    let named = names_of(&s);
+    assert!(named.iter().any(|n| n == "grades (skipped: not connected)"), "today's name, not privacy's: {named:?}");
+    assert!(!named.iter().any(|n| n.starts_with("mail")), "no mailbox, no mail row: {named:?}");
+    assert!(named.iter().any(|n| n == &format!("judge {HELD}")), "{named:?}");
+    assert!(!named.iter().any(|n| n == &format!("grades {HELD}")), "{named:?}");
+    assert_eq!(r.listener.hits(), 0);
+}
+
+#[test]
+fn an_accepted_privacy_version_leaves_the_slot_as_it_was() {
+    let r = privacy_rig("accepted", "active", true);
+    r.set_privacy(Some(PRIVACY_VERSION));
+    let before = r.cache_bytes();
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let (captures, passes) = (Cell::new(0), Cell::new(0));
+    let capture = |_h: &'static str| { captures.set(captures.get() + 1); Ok(bundle()) };
+    let pass = |_: &[Value]| { passes.set(passes.get() + 1); Ok("mail: forwarding on, 0 recovered".to_string()) };
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false };
+    let mail = MailSeam { mailboxes: &one_due_mailbox, pass: Some(&pass), window_open: false };
+    let s = r.slot(&grades, &mail);
+    let named = names_of(&s);
+    assert!(named[0].starts_with("session (refresh failed: "), "{named:?}");
+    assert!(!named.iter().any(|n| n.contains("privacy")), "no privacy row of any kind: {named:?}");
+    assert_eq!((captures.get(), passes.get()), (1, 1), "both real seams ran");
+    // The child loop's argv is slot_argv's unfiltered output.
+    let bundle_path = PathBuf::from("bundle.json");
+    let plan = JudgePlan::Cloud { log_dir: PathBuf::from("logs") };
+    let want: Vec<String> = slot_argv(&r.v, Path::new("cmd"), &plan, Some(&bundle_path)).into_iter().map(|(_, a)| a[0].clone()).collect();
+    assert_eq!(want, ["sync", "coursework", "ingest", "grades", "judge", "rank"]);
+    assert_eq!(r.children_started(), want);
+    assert_eq!(r.cache_bytes(), before, "an accepted cache makes no call");
+    assert_eq!(r.listener.hits(), 0);
+}
+
+#[test]
+fn an_unknown_privacy_version_names_only_the_failed_check() {
+    let r = privacy_rig("unknown", "active", true);
+    assert!(r.cache_bytes().is_none(), "no cache to begin with");
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let (captures, passes) = (Cell::new(0), Cell::new(0));
+    let capture = |_h: &'static str| { captures.set(captures.get() + 1); Ok(bundle()) };
+    let pass = |_: &[Value]| { passes.set(passes.get() + 1); Ok("mail: forwarding on, 0 recovered".to_string()) };
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false };
+    let mail = MailSeam { mailboxes: &one_due_mailbox, pass: Some(&pass), window_open: false };
+    let s = r.slot(&grades, &mail);
+    let named = names_of(&s);
+    assert!(named[0].starts_with("session (refresh failed: "), "{named:?}");
+    assert_eq!(named[1], "privacy (check failed: no session)", "{named:?}");
+    assert_eq!(named.iter().filter(|n| n.starts_with("privacy")).count(), 1, "exactly one privacy row: {named:?}");
+    assert!(!named.iter().any(|n| n.contains("(skipped: privacy")), "{named:?}");
+    assert_eq!((captures.get(), passes.get()), (1, 1), "an unknown gate holds nothing back");
+    assert_eq!(r.children_started(), ["sync", "coursework", "ingest", "grades", "judge", "rank"]);
+    assert!(r.cache_bytes().is_none(), "a failed check creates no cache file");
+    assert!(s.engine_ok && s.ok, "{:?}", s.steps);
+    assert_eq!(r.listener.hits(), 0);
+}
+
+/// M3: a step the entitlement stops keeps the entitlement's name, whatever the privacy cache says.
+#[test]
+fn an_unentitled_account_keeps_the_entitlements_names() {
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let seams = || (GradesSeam { row: Some(&dated), capture: Some(&panic_capture), window_open: false }, MailSeam { mailboxes: &one_due_mailbox, pass: Some(&panic_pass), window_open: false });
+    // Today's rows: the same vault and slot with an accepted privacy cache (which adds nothing).
+    let accepted = {
+        let r = privacy_rig("unentitled", "canceled", true);
+        r.set_privacy(Some(PRIVACY_VERSION));
+        let (g, m) = seams();
+        let s = r.slot(&g, &m);
+        assert_eq!(r.listener.hits(), 0);
+        names_of(&s)
+    };
+    let r = privacy_rig("unentitled", "canceled", true);
+    r.set_privacy(Some("2026-01-01"));
+    let before = r.cache_bytes();
+    let (g, m) = seams();
+    let s = r.slot(&g, &m);
+    let named = names_of(&s);
+    assert_eq!(named, accepted, "an Older cache changes nothing for an unentitled account");
+    for want in ["grades (skipped: no entitlement)", "mail (skipped: no entitlement)", "judge (skipped: no entitlement)", "sync", "coursework", "ingest", "rank"] {
+        assert!(named.iter().any(|n| n == want), "{want} in {named:?}");
+    }
+    assert!(!named.iter().any(|n| n.contains("privacy")), "{named:?}");
+    assert_eq!(r.children_started(), ["sync", "coursework", "ingest", "rank"], "the argv is unfiltered");
+    assert_eq!(r.cache_bytes(), before);
+    assert_eq!(r.listener.hits(), 0);
+}
+
+#[test]
+fn the_privacy_skips_reach_the_runner_log_except_mails() {
+    let r = privacy_rig("log", "active", true);
+    r.set_privacy(Some("2026-01-01"));
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&panic_capture), window_open: false };
+    let mail = MailSeam { mailboxes: &one_due_mailbox, pass: Some(&panic_pass), window_open: false };
+    let s = r.slot(&grades, &mail);
+    assert!(names_of(&s).iter().any(|n| n == &format!("mail {HELD}")), "mail is in the summary: {:?}", s.steps);
+    let log = r.runner_log();
+    for line in ["sync", "coursework", "ingest", "grades", "judge"] {
+        assert!(log.contains(&format!("local ok {line} {HELD}")), "{line} in the runner log:\n{log}");
+    }
+    // Beside today's bare session line, the bare privacy line; no reason text from either.
+    assert!(log.contains("local ok session (refresh failed)"), "{log}");
+    assert!(log.contains("local ok privacy (check failed)"), "{log}");
+    assert!(!log.contains("check failed:") && !log.contains("refresh failed:") && !log.contains("no session"), "no reason text:\n{log}");
+    assert!(!log.contains("mail"), "a mail step never reaches the runner log:\n{log}");
+    assert_eq!(r.listener.hits(), 0);
+}
+
+// ---- L4 T8-R3rust: the two sync paths outside the slot honour the same gate --------------------------------------
+//
+// *Sync now* (`state::run_sync`, through `commands::sync_inner`) and the quit push (`state::quit_flush`) do not run
+// the slot, so T6's gate did not reach them. The rig is the one above: a never-written session target, so a sync
+// that does run answers its own `no session` skip and writes the engine's status file; one that is held does
+// neither. The panel says an unaccepted update "does not sync, import or read anything else new", so both are held.
+
+const HELD_SYNC: &str = "sync (skipped: privacy update not accepted)";
+
+#[test]
+fn sync_now_while_the_privacy_update_is_owed_is_a_named_skip_never_an_error() {
+    let r = privacy_rig("syncnow-older", "active", false);
+    r.set_privacy(Some("2026-01-01"));
+    let before = knowlu_engine::sync::load_status(&r.v);
+    let status = knowlu::state::run_sync(&r.cs);
+    assert_eq!(status.skipped.as_deref(), Some("privacy update not accepted"), "{status:?}");
+    assert_eq!(status.lines, vec![HELD_SYNC.to_string()], "{status:?}");
+    assert!(status.ok && status.last_error.is_none(), "a hold is not an error: {status:?}");
+    assert_eq!(*r.cs.sync.lock().unwrap(), status, "the page reads the same status");
+    assert_eq!(knowlu_engine::sync::load_status(&r.v), before, "the engine's sync never ran, so its status file is as it was");
+    // The command's envelope: ok, no error, and the page's topline carries the skip.
+    let env = knowlu::commands::sync_inner(&r.cs, "today").unwrap();
+    assert_eq!(env["ok"], true, "{env}");
+    assert!(env["error"].is_null(), "{env}");
+    assert_eq!(env["state"]["topline"]["sync"]["skipped"], "privacy update not accepted", "{env}");
+    assert_eq!(r.listener.hits(), 0);
+}
+
+#[test]
+fn sync_now_runs_as_it_did_when_the_privacy_version_is_accepted_or_unknown() {
+    for (tag, recorded) in [("syncnow-accepted", Some(PRIVACY_VERSION)), ("syncnow-unknown", None)] {
+        let r = privacy_rig(tag, "active", false);
+        if tag.ends_with("accepted") { r.set_privacy(recorded); }
+        let status = knowlu::state::run_sync(&r.cs);
+        assert_eq!(status.skipped.as_deref(), Some("no session"), "the engine's own answer, {tag}: {status:?}");
+        assert!(!status.lines.iter().any(|l| l == HELD_SYNC), "{tag}: {status:?}");
+        assert!(knowlu_engine::sync::load_status(&r.v).at.is_some(), "{tag}: the engine's sync ran and saved its status");
+    }
+}
+
+#[test]
+fn the_quit_push_is_held_while_the_privacy_update_is_owed() {
+    let r = privacy_rig("quit-older", "active", false);
+    r.set_privacy(Some("2026-01-01"));
+    let before = knowlu_engine::sync::load_status(&r.v);
+    let q = quit_flush(&r.cs, Duration::from_secs(10), |_| {});
+    assert!(!q.synced && !q.timed_out, "{q:?}");
+    assert_eq!(knowlu_engine::sync::load_status(&r.v), before, "no push was attempted, so the engine's status file is as it was");
+    assert_eq!(r.listener.hits(), 0);
+}
+
+#[test]
+fn the_quit_push_runs_as_it_did_when_the_privacy_version_is_accepted_or_unknown() {
+    for (tag, accepted) in [("quit-accepted", true), ("quit-unknown", false)] {
+        let r = privacy_rig(tag, "active", false);
+        if accepted { r.set_privacy(Some(PRIVACY_VERSION)); }
+        let q = quit_flush(&r.cs, Duration::from_secs(10), |_| {});
+        assert!(!q.synced && !q.timed_out, "{tag}: signed out, so nothing pushed: {q:?}");
+        assert!(knowlu_engine::sync::load_status(&r.v).at.is_some(), "{tag}: the engine's push ran and saved its status");
+    }
+}

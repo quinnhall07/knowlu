@@ -141,6 +141,33 @@ fn the_launch_sweep_runs_only_while_it_holds_the_mail_window() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// L4: while the privacy update is owed, the launch resume reads nothing (the panel's own words); an
+/// accepted, unknown or other account's answer resumes as before.
+#[test]
+fn the_launch_resume_is_held_only_while_the_privacy_update_is_owed() {
+    use knowlu::account::{save_privacy_cache, PrivacyCache, PRIVACY_VERSION};
+    use knowlu::mail::live::resume_held_for_privacy;
+    let d = std::env::temp_dir().join(format!("knowlu-mail-resume-privacy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let (vault, data) = (d.join("vault"), d.join("data"));
+    std::fs::create_dir_all(vault.join("config")).unwrap();
+    std::fs::write(vault.join("config").join("cloud.yaml"), format!("api_base: '{}'\naccount_id: acc-1\n", knowlu::account::api_base())).unwrap();
+    let cache = |account: &str, recorded: Option<&str>| {
+        save_privacy_cache(&data, &PrivacyCache { account_id: account.into(), recorded: recorded.map(str::to_string), checked_at: "2026-10-20T12:00:00Z".into() }).unwrap()
+    };
+    assert!(!resume_held_for_privacy(&vault, &data), "no cache: unknown, resumes");
+    cache("acc-1", Some("2020-01-01"));
+    assert!(resume_held_for_privacy(&vault, &data), "an older version is held");
+    cache("acc-1", None);
+    assert!(resume_held_for_privacy(&vault, &data), "none recorded is held");
+    cache("acc-1", Some(PRIVACY_VERSION));
+    assert!(!resume_held_for_privacy(&vault, &data), "accepted resumes");
+    cache("acc-2", Some("2020-01-01"));
+    assert!(!resume_held_for_privacy(&vault, &data), "another account's cache holds nothing");
+    assert!(!resume_held_for_privacy(&d.join("no-vault"), &data), "no readable account holds nothing");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// S1b: the popup's first request is `about:blank`; then only the provider's own hosts.
 #[test]
 fn the_popup_opens_only_for_about_blank_and_the_providers_own_hosts() {
