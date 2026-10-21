@@ -843,7 +843,10 @@ fn commitment_passes(
 
     let mut withdrawn_pending = 0;
     if !read_failed {
-        let withdrawal = crate::approvals::withdraw_stale(vault, &file, &set, today, ctx, journal);
+        // The I5 call, with the registrar block emptied (phase-3 spec A2 item 12, "Where it runs";
+        // close-out B3e'): the kept-entry test reads a block only under the lock, below.
+        let unblocked = cm::SeriesFile { registrar: BTreeMap::new(), ..file.clone() };
+        let withdrawal = crate::approvals::withdraw_stale(vault, &unblocked, &set, today, ctx, journal);
         withdrawn_pending = withdrawal.pending;
         warnings.extend(withdrawal.warnings);
     }
@@ -875,8 +878,11 @@ fn commitment_passes(
     // Phase-3 spec A2 item 12, "One filer" (close-out B3e): `emit_checks` runs holding the series
     // lock, taken here after `refresh_series` released it, over a re-read that adds the registrar
     // block's kept-field changes (none after a bad series read); the budget is counted under it.
-    let (filed, card_warnings) =
-        cm::emit_checks_locked(vault, asked, &changes, today, planning.daily_approval_budget, !read_failed, ctx, journal);
+    // B3e': the second withdrawal call runs there too, and a `registrar:` proposal the re-read no
+    // longer holds under `series` is not filed.
+    let (filed, withdrawn, card_warnings) =
+        cm::emit_checks_locked(vault, asked, &changes, Some(&file), today, planning.daily_approval_budget, !read_failed, ctx, journal);
+    withdrawn_pending += withdrawn;
     warnings.extend(card_warnings);
     // Phase-2 spec §5: the per-course fallback cards, with what the check cards left of the
     // budget. Skipped on a bad series read (Plan ruling Q6-b): an unread calendar would make

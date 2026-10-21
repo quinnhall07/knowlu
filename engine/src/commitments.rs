@@ -2268,7 +2268,8 @@ pub fn refresh_series(
     fresh: &[(String, Vec<Series>)],
     today: Date,
 ) -> (SeriesFile, Vec<String>) {
-    refresh_series_with(vault, fresh, today, None)
+    let (file, warnings, _) = refresh_series_with(vault, fresh, today, None);
+    (file, warnings)
 }
 
 /// The registrar calendars in play on `today` (phase 3, Plan rulings R2-a, R2-b): each holding a
@@ -2285,12 +2286,14 @@ pub fn registrar_in_play(file: &SeriesFile, today: Date) -> BTreeSet<String> {
 /// [`refresh_series`], plus a registrar fetch's lists (A2 item 13, "When it is written"): they go
 /// into the term's block in this same write, under the same lock. `applied` and `ended` are
 /// appended, `status` and `unread` replaced, `last_fetch` set (and `first_fetch` on a new block).
+/// The third value says whether the file on disk now holds the returned bytes (written, or
+/// already identical): false with `fresh` empty, an unreadable file or a failed write.
 pub fn refresh_series_with(
     vault: &Path,
     fresh: &[(String, Vec<Series>)],
     today: Date,
     news: Option<&RegistrarFetch>,
-) -> (SeriesFile, Vec<String>) {
+) -> (SeriesFile, Vec<String>, bool) {
     // Phase 3 final review I2: a run that may write holds the series lock from the read to the
     // rename, so a slot's `rank`, `commitments` and a registrar run never lose each other's merge.
     let (_lock, lock_warning) = match fresh.is_empty() {
@@ -2417,15 +2420,17 @@ pub fn refresh_series_with(
     }
 
     let file = SeriesFile { calendars, ended, series, registrar: block };
-    if !fresh.is_empty() && writable {
+    let mut stored = !fresh.is_empty() && writable;
+    if stored {
         let bytes = file_bytes(&file);
         if std::fs::read(series_path(vault)).ok().as_deref() != Some(bytes.as_bytes()) {
             if let Err(err) = write_series_file(vault, &bytes) {
                 warnings.push(format!("series file: could not write {SERIES_FILE} ({})", err.kind()));
+                stored = false;
             }
         }
     }
-    (file, warnings)
+    (file, warnings, stored)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3871,18 +3876,26 @@ thread_local! {
 /// No kept entry is offered when `offer_kept` is false (a bad series read), the lock cannot be
 /// taken, or the re-read is malformed or unreadable. A file that holds no registrar calendar and
 /// no block has nothing to guard: no lock is taken, so a vault that never fetched writes no lock
-/// file it did not write before. Returns `(filed, warnings)`.
+/// file it did not write before.
+///
+/// Close-out B3e' ("Withdrawn with its entry", "A second call, under the lock"): holding the lock
+/// over a good re-read, it first runs `approvals::withdraw_stale` — over `base` (the file `rank`'s
+/// `refresh_series` returned) with the re-read's block for each term calendar `base` holds, or with
+/// no `base` (the fetch) over the re-read itself. Every `registrar:` proposal whose key the re-read
+/// does not hold under `series` is dropped (all of them on a bad re-read). Returns `(filed,
+/// withdrawn pending, warnings)`.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_checks_locked(
     vault: &Path,
     proposals: &[Proposal],
     changes: &[Change],
+    base: Option<&SeriesFile>,
     today: Date,
     daily_budget: i64,
     offer_kept: bool,
     ctx: &crate::write::WriteContext,
     journal: &mut crate::journal::Journal,
-) -> (usize, Vec<String>) {
+) -> (usize, i64, Vec<String>) {
     let mut warnings = Vec::new();
     let registrar = |f: &SeriesFile| {
         !f.registrar.is_empty() || f.calendars.keys().any(|c| c.starts_with(crate::registrar::CALENDAR_PREFIX))
@@ -3903,15 +3916,35 @@ pub fn emit_checks_locked(
     };
     let mut all = changes.to_vec();
     let (file, read_warnings) = read_series_file(vault);
-    if lock.is_some() && !series_read_failed(&read_warnings) {
+    let good = !series_read_failed(&read_warnings);
+    let mut withdrawn = 0;
+    if lock.is_some() && good {
+        let over = match base {
+            Some(b) => {
+                let blocks = file.registrar.iter().filter(|(c, _)| b.calendars.contains_key(*c));
+                SeriesFile { registrar: blocks.map(|(c, t)| (c.clone(), t.clone())).collect(), ..b.clone() }
+            }
+            None => file.clone(),
+        };
+        let out = crate::approvals::withdraw_stale(vault, &over, &load(vault), today, ctx, journal);
+        withdrawn = out.pending;
+        warnings.extend(out.warnings);
         let set = load(vault);
         let kept = file.registrar.values().flat_map(|t| t.kept.iter());
         all.extend(kept.filter_map(|e| kept_offer(e, &set)).flatten());
     }
+    // Convergence round 5: a fetch since `refresh_series` may have moved a `registrar:` key to
+    // `ended`, and its withdrawn card no longer closes the question, so only a held key is filed.
+    let held: BTreeSet<&str> = file.series.iter().filter(|_| good).map(|s| s.source_uid.as_str()).collect();
+    let asked: Vec<Proposal> = proposals
+        .iter()
+        .filter(|p| Source::by_uid(&p.source_uid).lands != Lands::AppliedAndListed || held.contains(p.source_uid.as_str()))
+        .cloned()
+        .collect();
     let budget = std::cmp::max(0, daily_budget - crate::approvals::count_proposals_created(vault, today));
-    let (_, filed, card_warnings) = emit_checks(vault, proposals, &all, today, budget, ctx, journal);
+    let (_, filed, card_warnings) = emit_checks(vault, &asked, &all, today, budget, ctx, journal);
     warnings.extend(card_warnings);
-    (filed, warnings)
+    (filed, withdrawn, warnings)
 }
 
 /// §5.4's detection, pure (no clock, no I/O, no model): the changes to confirmed notes keyed
@@ -4513,6 +4546,24 @@ fn stale_change(vault: &Path, target: &str, meta: &Mapping) -> Option<String> {
     None
 }
 
+/// Phase-3 spec A2 item 12, "Withdrawn with its entry" (close-out B3e'): a change card on a note
+/// keyed `registrar:` asks about one standing kept entry. `Some` when that note's term has a block
+/// in `file` holding no kept entry with the card's target and canonical change; `None` for a note
+/// keyed otherwise and for a term with no block ("Only from a block that exists").
+fn kept_entry_gone(target: &str, meta: &Mapping, file: &SeriesFile, set: &Commitments) -> Option<String> {
+    let rel = target_rel(target)?;
+    let note = set.confirmed.iter().find(|n| n.path.to_string_lossy().replace('\\', "/") == rel)?;
+    let key = note.source_uid.as_deref().filter(|k| Source::by_uid(k).lands == Lands::AppliedAndListed)?;
+    let (_, term) = file.registrar.iter().find(|(c, _)| key.strip_prefix(c.as_str()).is_some_and(|r| r.starts_with('-')))?;
+    let change = canonical(get(meta, "change").unwrap_or(&Value::Null));
+    let of_entry = |e: &serde_json::Value| {
+        let field = Value::String(e["field"].as_str().unwrap_or_default().to_string());
+        canonical(&Value::Mapping(Mapping::from_iter([(field, to_value(e["registrar"].clone()))])))
+    };
+    let standing = term.kept.iter().any(|e| e["note"] == rel && of_entry(e) == change);
+    (!standing).then(|| format!("{rel}: the registrar no longer lists this change"))
+}
+
 /// The literals an approved change writes, or why it cannot be written: a target that is not a
 /// note in `commitments/`, an empty `change`, a field outside [`CHANGE_FIELDS`], a `null` value,
 /// or a `meets` with an invalid entry.
@@ -4696,7 +4747,9 @@ pub fn settle_approved(
             if change_applied(vault, &target, meta) {
                 return Ok(Settled::Executed);
             }
-            if let Some(why) = stale_change(vault, &target, meta) {
+            // Close-out B3e': the same entry test as the withdrawal, on the series file on disk.
+            let gone = || kept_entry_gone(&target, meta, &read_series_file(vault).0, &set);
+            if let Some(why) = stale_change(vault, &target, meta).or_else(gone) {
                 return Ok(Settled::Superseded(format!("{why}; not applied")));
             }
             crate::write::write_literals(
@@ -4758,6 +4811,18 @@ pub fn settle_approved(
             // course's kind after the card was filed. Nothing is written but the card's stamp, so
             // the question can be asked again if the registrar's note later ends.
             let (file, _) = read_series_file(vault);
+            // A2 item 12, "And a `registrar:` proposal card" (close-out B3e'): the file on disk
+            // ended the key, or knows a calendar and holds the key under none. An empty file says
+            // nothing; a key outside `registrar:` is not tested.
+            if Source::by_uid(&key).lands == Lands::AppliedAndListed {
+                let gone = match file.ended.contains_key(&key) {
+                    true => Some(format!("{key} ended")),
+                    false => (!file.calendars.is_empty() && !file.by_key().contains_key(key.as_str())).then(|| format!("{key} left the calendar")),
+                };
+                if let Some(why) = gone {
+                    return Ok(Settled::Superseded(format!("{why}; nothing written")));
+                }
+            }
             if let Some(why) = RegistrarHold::of(&file, &set, &codes, today).card_reason(&key, meta, &codes) {
                 return Ok(Settled::Superseded(format!("{why}; nothing written")));
             }
@@ -4828,7 +4893,8 @@ pub fn withdrawal_reason(
     today: Date,
 ) -> Option<String> {
     match shape(meta) {
-        Shape::Change(target) => stale_change(vault, &target, meta),
+        // Close-out B3e': after `stale_change`, a kept-field card goes with its entry.
+        Shape::Change(target) => stale_change(vault, &target, meta).or_else(|| kept_entry_gone(&target, meta, file, set)),
         Shape::Window => {
             if set.planning_day.is_some() {
                 Some("a planning day exists".to_string())

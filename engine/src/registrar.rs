@@ -551,9 +551,9 @@ pub fn run_parsed(
         returned,
         kept: kept.clone(),
     };
-    let (_, mut warnings) = cm::refresh_series_with(vault, &[(calendar, input)], today, Some(&news));
-    // A2 item 12, "One filer": only after the series-file write held does the fetch offer kept cards.
-    let wrote = !warnings.iter().any(|w| w.contains("could not write") || w.contains("not written this run"));
+    // A2 item 12, "One filer": only after the series-file write held does the fetch withdraw and
+    // offer kept cards (close-out B3e': the typed result, not the warning text).
+    let (_, mut warnings, wrote) = cm::refresh_series_with(vault, &[(calendar, input)], today, Some(&news));
     warnings.extend(parsed.warnings.iter().cloned());
     warnings.extend(failed);
     let stored = cm::stored_proposals(vault, today);
@@ -572,9 +572,10 @@ pub fn run_parsed(
     let input = cm::ConfirmInput { mine, not_mine: Vec::new(), window: None };
     let done = cm::confirm(vault, &input, today, ctx, journal)?;
     warnings.extend(done.warnings);
-    // A2 item 12, "Filing": each kept entry's card, under the series lock, with `rank`'s budget.
+    // A2 item 12, "Filing": each kept entry's card, under the series lock, with `rank`'s budget,
+    // after the fetch's withdrawal pass over the re-read (close-out B3e', "Withdrawn with its entry").
     let planning = crate::planning::load_planning(&vault.join("config").join("planning.yaml"));
-    let (_, card_warnings) = cm::emit_checks_locked(vault, &[], &[], today, planning.daily_approval_budget, wrote, ctx, journal);
+    let (_, _, card_warnings) = cm::emit_checks_locked(vault, &[], &[], None, today, planning.daily_approval_budget, wrote, ctx, journal);
     warnings.extend(card_warnings);
     let kept = cm::kept_listed(vault, &kept, &cm::load(vault), today);
     Ok(Report {

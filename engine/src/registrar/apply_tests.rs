@@ -195,9 +195,11 @@ fn an_approved_google_class_card_is_superseded_once_the_registrar_holds_the_cour
     lab.rank_with(D7, google());
     let cards = lab.proposal_cards("gcal-series:cs100aa");
     assert_eq!((cards.len(), cards[0].status()), (1, "pending"), "{cards:?}");
+    // Approved before the fetch (close-out B3e'): the fetch's withdrawal pass archives a card
+    // still pending, as `rank` would, so only an approved card reaches the next `rank`'s settlement.
+    lab.set_status_of("approvals", &cards[0].name, "approved");
     lab.fetch(D7, &fx());
     assert_eq!(class_notes(&lab), 1, "the registrar's class");
-    lab.set_status_of("approvals", &cards[0].name, "approved");
     lab.rank_with(D8, google());
     let after = lab.proposal_cards("gcal-series:cs100aa");
     assert_eq!((after.len(), after[0].folder, after[0].status()), (1, "archive", "superseded"), "{after:?}");
