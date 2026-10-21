@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "knowlu"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "jiff",
  "knowlu-engine",
@@ -2357,7 +2357,7 @@ dependencies = [
 
 [[package]]
 name = "knowlu-engine"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "clap",
  "getrandom 0.2.17",

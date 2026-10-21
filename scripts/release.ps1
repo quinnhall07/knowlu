@@ -239,7 +239,12 @@ try {
   # sign.ps1 is launched by the bundler, not by this script, so the only channel to it is the
   # environment its child process inherits.
   if ($SigningProfile -ne "") { $env:KNOWLU_SIGNING_PROFILE = $SigningProfile }
-  $buildArgs = @("tauri", "build")
+  # --target $triple, ALWAYS (L10, release run 39643305066). Without it tauri-cli looks for the
+  # externalBin under the triple the CLI itself was compiled for, not the one cargo builds: CI's
+  # prebuilt tauri-cli 2.11.4 is MSVC, the sidecar above is staged under rustc's gnu host triple,
+  # and the bundle died on a missing knowlu-engine-x86_64-pc-windows-msvc.exe. The price is cargo's
+  # per-target output dir: the app and the bundle land under target\<triple>\release, below.
+  $buildArgs = @("tauri", "build", "--target", $triple)
   if ($DryRun) { $buildArgs += @("--config", $dryRunConfig) }
   Push-Location (Join-Path $repo "app")
   Invoke-Native cargo $buildArgs
@@ -257,7 +262,9 @@ try {
   if ($dryRunConfig -ne "") { Remove-Item $dryRunConfig -Force -ErrorAction SilentlyContinue }
 }
 
-$bundle = Join-Path $repo "target\release\bundle\nsis"
+# Under the triple, because `tauri build` was given --target above. The engine is NOT: it is built by
+# a plain `cargo build --release -p knowlu-engine` and read from target\release, where that puts it.
+$bundle = Join-Path $repo ("target\" + $triple + "\release\bundle\nsis")
 # -like, not -Filter: the FileSystem provider's -Filter uses Win32 wildcards, where a 3-letter
 # extension can also match a longer one through 8.3 aliasing (the classic *.htm matching .html).
 # Here that would let "*.nsis.zip" pick up a .nsis.zip.sig. -like is plain PowerShell globbing.

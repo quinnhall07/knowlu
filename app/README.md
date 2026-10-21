@@ -172,8 +172,9 @@ engine beside a plain `cargo build`.
 
 `scripts\release.ps1` (repo root) is the **one** release command. **A hand-run `cargo tauri build` is not a supported release path** — it skips the clean-tree gate, the sidecar staging and the placeholder check, so it can bundle a stale or zero-byte engine. Releases go through `release.ps1` only. It refuses a working tree with
 uncommitted changes so the installer always matches a commit, builds the engine at the root
-(`cargo build --release -p knowlu-engine`), stages it as the sidecar, and runs `cargo tauri build`
-from `app/`. The output is `target/release/bundle/nsis/Knowlu_<version>_x64-setup.exe` (one
+(`cargo build --release -p knowlu-engine`), stages it as the sidecar, and runs `cargo tauri build
+--target <triple>` from `app/`. The output is
+`target/<triple>/release/bundle/nsis/Knowlu_<version>_x64-setup.exe` (one
 `target/` for the workspace), copied into
 `site/releases/` both under its versioned name and as the stable `Knowlu-setup.exe` the download
 page links.

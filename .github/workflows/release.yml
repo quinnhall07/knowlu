@@ -112,10 +112,11 @@ jobs:
       #
       # Downloaded prebuilt, never compiled: building the CLI from source with `cargo install` cost
       # 21 of the first release run's 40 minutes (run 35179886527, 2026-09-17), and it is a tool,
-      # not the product - it does not decide what is built for what target. So the archive is
-      # Tauri's own Windows build and it is verified against the SHA-256 below, the same contract
-      # every downloaded tool follows: a bump is the VERSION AND THE HASH
-      # together, and a wrong archive stops the run before anything is built.
+      # not the product. It is MSVC-built, and without --target it names the sidecar it bundles by
+      # its OWN triple, so release.ps1 always passes `--target <triple>` (L10, run 39643305066).
+      # The archive is Tauri's own Windows build and it is verified against the SHA-256 below, the
+      # same contract every downloaded tool follows: a bump is the VERSION AND THE HASH together,
+      # and a wrong archive stops the run before anything is built.
       - name: tauri-cli
         shell: pwsh
         env:
@@ -228,7 +229,17 @@ jobs:
           }
           $sidecar = Get-ChildItem "app\binaries" -File | Where-Object { $_.Name -like "knowlu-engine-*.exe" } | Sort-Object LastWriteTime | Select-Object -Last 1
           if (-not $sidecar) { throw "no staged sidecar under app\binaries" }
-          foreach ($f in @($env:REL_INSTALLER, "target\release\knowlu.exe", $sidecar.FullName)) {
+          # release.ps1 runs `tauri build --target <triple>` (L10), so cargo puts knowlu.exe under
+          # target\<triple>\release. The triple is derived exactly as release.ps1 derives it: rustc's
+          # own host: line, which `assert gnu host toolchain` above has already pinned. Captured
+          # before filtering: Select-Object -First on rustc's own pipeline stops it before pwsh
+          # records rustc's exit, so in a fresh step $LASTEXITCODE stays $null beside a good
+          # triple and `$null -ne 0` threw (run 39651026811).
+          $rustcVv = rustc -vV
+          if ($LASTEXITCODE -ne 0) { throw "rustc -vV failed" }
+          $triple = (($rustcVv | Where-Object { $_ -like "host:*" } | Select-Object -First 1) -replace "^host:", "").Trim()
+          if (-not $triple) { throw "rustc -vV printed no host: triple" }
+          foreach ($f in @($env:REL_INSTALLER, "target\$triple\release\knowlu.exe", $sidecar.FullName)) {
             $s = Get-AuthenticodeSignature $f
             Write-Output ("{0}: {1} {2}" -f $f, $s.Status, $s.SignerCertificate.Subject)
             if ($s.Status -ne $want) { throw "expected $want, got $($s.Status): $f" }
