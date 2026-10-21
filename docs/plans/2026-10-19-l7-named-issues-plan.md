@@ -1427,3 +1427,15 @@ controller's rulings on important 2 and minors 5-7. A delta check of the lines b
 migration exclusion and C1's README note, and tests 2, 4 and 5 each go red against the plausible
 wrong implementation. Round 3 item 5's "No other text in the spec is changed" still holds after M7:
 the only spec edit is the marker itself, and it now carries the plan path.
+
+### Whole-branch review T7 (2026-10-21): PASS (0 critical or important, minors below)
+
+T5 and T7 ran on top of `l4/honest-page` (PR #55) by a controller ruling of 2026-10-21 (Quinn-delegated): L4's console was final, so L7 took its queue slot early.
+
+| # | Sev. | Finding | Answer |
+|---|---|---|---|
+| 1 | minor | HANDOFF said T5 was still queued. | Updated at T8: the page is built. |
+| 2 | minor | `mail::heads::close_unreported` (92216cf) is outside §3.4. | Controller ruling (a), 2026-10-20, in the lane ledger: a mailbox the service no longer reports closes its `mail-source:` heads-up; an offline, failed or malformed answer closes nothing, pinned by three `mail_pass` tests. Follow-up handed on: `cloudmodel::mailbox_of` drops an entry with an empty `address_id`, which would close that mailbox's heads-up in the same pass; the pass should skip when any reported entry fails to parse. |
+| 3 | minor | Q2's rule keeps "Knowlu's AI checks are paused" up until a run makes a tier-3 call, so a student with nothing to judge sees it after the service is back. | Accepted as Q2 rules it. Follow-up handed on: clear the heads-up on a healthy probe answer, or have the server report that it is reachable without a model call. |
+| 4 | minor | The order test matched the first mention of "sources", a comment. | It now asserts `innerHTML = srcs + p.rows.map` and `(p.sources || []).map`. |
+| 5 | minor | Shipped and test files cite rulings by a person's name. | The shipped `console.js` comment now cites the plan's Q2 and Q3; test and function comments follow the repo's existing practice. |

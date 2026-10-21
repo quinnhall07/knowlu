@@ -622,14 +622,22 @@
     var p = state.issues_panel, host = EL("iss-list");
     EL("issv-n").textContent = p.open_count ? p.open_count + " open" : "";
     preserveAcross(host, ".flagpop", function () {
-      host.innerHTML = p.rows.map(function (r) {
+      // L7 (spec 3.6): sources in trouble come first. The engine's words, shown as given; the row has no
+      // Resolve, flag or Close, because the heads-up clears itself when the source is well again.
+      var srcs = (p.sources || []).map(function (s) {
+        return '<div class="row iss src" data-id="' + h(s.id) + '" data-kind="info">' +
+          '<div class="ttl"><span class="a">' + h(s.title) + '</span>' +
+          '<span class="meta">' + h(s.since ? "since " + s.since.slice(0, 10) : "") + '</span>' +
+          '<div class="why">' + h(s.text) + "</div></div></div>";
+      }).join("");
+      host.innerHTML = srcs + p.rows.map(function (r) {
         var chips = (r.categories || []).map(function (c) { return '<span class="chip on">' + h(c) + "</span>"; }).join("");
         var when = r.opened_at ? "raised " + r.opened_at.slice(0, 10) : "";
         return '<div class="row iss" data-id="' + h(r.id) + '" data-kind="issue">' +
           '<div class="ttl"><span class="a">' + h(r.title) + '</span><span class="meta">' + h(when) + "</span><div class=\"chips\">" + chips + "</div>" +
           (r.target ? '<button class="lnk" data-open-target="' + h(r.target) + '">open the object</button>' : "") + "</div>" +
           '<div class="acts"><input type="text" class="dnote" placeholder="Resolution"><button class="b" data-resolve="' + h(r.id) + '">Resolve</button></div></div>';
-      }).join("") + (p.rows.length ? "" : '<div class="empty">' + h(p.empty_text) + "</div>");
+      }).join("") + (p.rows.length || srcs ? "" : '<div class="empty">' + h(p.empty_text) + "</div>");
     });
   }
   function resolveIssue(id, text, btn) {
@@ -1857,6 +1865,8 @@
     var who = g.email ? " (as " + g.email + ")" : "";
     if (g.state === "revoked") { return "Google stopped answering for Knowlu. While Google reviews Knowlu, connections expire after seven days."; }
     if (g.state === "none") { return "Gmail is not connected. Knowlu can read your inbox for things you have to do and propose each one for you to approve."; }
+    // L7 (spec 3.7; plan Q2 and Q3, 2026-10-19): the service found no mail for a week.
+    if (g.state === "quiet" && g.gmail) { return "Gmail is connected" + who + ", but Knowlu has found no mail in it for a week. If this is the wrong account, disconnect it and connect the right one."; }
     if (g.gmail) { return "Gmail is connected" + who + ", read-only. Knowlu proposes what it finds; nothing is added without you."; }
     return "Google Calendar is connected" + who + ". Gmail is not.";
   }

@@ -13,7 +13,7 @@
 // `deno test` with a scripted model, an in-memory sink and no database at all. The handlers on top
 // of it are thin by design: a handler that computed anything would be a second place to fix a bug.
 import type { JudgeModel } from "./judge_anthropic.ts";
-import { ModelRefused } from "./judge_anthropic.ts";
+import { ModelRefused, ProviderOutOfCredit } from "./judge_anthropic.ts";
 import { type CapStore, DAILY_CAP, MONTHLY_CEILING_USD } from "./judge_caps.ts";
 import { resolveDue } from "./judge_due.ts";
 import type { JudgmentRow, JudgmentSink } from "./judge_log.ts";
@@ -52,6 +52,10 @@ export interface JudgeReply {
   grammar_version?: string;
   /** The `judgments` row this reply came from, so a later correction can name it. */
   judgment_id?: string;
+  /** L7 (plan §3.2): the judgment service itself cannot answer anyone, beside `cause: "model failed"`.
+   * A closed set of one word for now: the provider answered HTTP 402 (`ProviderOutOfCredit`). A new
+   * engine reads it as a global stop; an older engine ignores the key and sees today's reply. */
+  unavailable?: "out of credit";
 }
 
 export interface PipelineDeps {
@@ -272,6 +276,11 @@ async function judgeUngated(
       cause,
       ...pinned,
       ...(id === null ? {} : { judgment_id: id }),
+      // L7 (plan §3.2): the provider's own balance is spent. The row above says `model failed`,
+      // which is true, and the reply adds this one key so a new engine can stop and name it. Told
+      // apart by class, never by message. It is still HTTP 200: a 402 to the device means "no
+      // entitlement", and this is never the student's subscription.
+      ...(e instanceof ProviderOutOfCredit ? { unavailable: "out of credit" as const } : {}),
     };
   }
 

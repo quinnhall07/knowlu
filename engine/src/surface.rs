@@ -1595,9 +1595,18 @@ pub struct InfoItem {
     pub path: String,
 }
 
+/// Whether an open `info/` item is a source issue (plan 3.5): it lives in the Issues panel, not here.
+fn is_source_item(m: &Mapping) -> bool {
+    crate::source_issues::is_source_issue(
+        &meta_text(Some(m), "kind").unwrap_or_default(),
+        &meta_text(Some(m), "close_key").unwrap_or_default(),
+    )
+}
+
 pub fn good_to_know(vault: &Path) -> Vec<InfoItem> {
     crate::info::list_info(vault)
         .iter()
+        .filter(|m| !is_source_item(m))
         .map(|m| InfoItem {
             id: meta_text(Some(m), "id").unwrap_or_default(),
             title: meta_text(Some(m), "title").unwrap_or_default(),
@@ -1619,14 +1628,49 @@ pub struct IssueRow {
     pub opened_at: Option<String>,
     pub path: String,
 }
+/// One source in trouble (L7, plan 3.5): an open `heads-up` for which `source_issues::is_source_issue`
+/// holds. `text` is the note body's first non-blank line, read from the note, never computed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SourceIssueRow {
+    pub id: String,
+    pub title: String,
+    pub text: String,
+    pub since: Option<String>,
+    pub close_key: Option<String>,
+    pub path: String,
+}
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IssuesPanel {
     pub open_count: i64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<SourceIssueRow>,
     pub rows: Vec<IssueRow>,
     pub empty_text: Option<String>,
 }
 
+/// The first non-blank line of a note's body, or `""` when it has none or cannot be read.
+fn first_body_line(vault: &Path, rel_path: &str) -> String {
+    let Ok(text) = crate::pystr::read_text(&vault.join(rel_path)) else { return String::new() };
+    let Ok((_, body)) = crate::models::split_frontmatter(&text) else { return String::new() };
+    body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_string()
+}
+
 pub fn issues_panel(vault: &Path) -> IssuesPanel {
+    let sources: Vec<SourceIssueRow> = crate::info::list_info(vault)
+        .iter()
+        .filter(|m| is_source_item(m))
+        .map(|m| {
+            let path = meta_text(Some(m), "path").unwrap_or_default();
+            SourceIssueRow {
+                id: meta_text(Some(m), "id").unwrap_or_default(),
+                title: meta_text(Some(m), "title").unwrap_or_default(),
+                text: first_body_line(vault, &path),
+                since: meta_text(Some(m), "opened_at"),
+                close_key: meta_text(Some(m), "close_key"),
+                path,
+            }
+        })
+        .collect();
     let rows: Vec<IssueRow> = crate::issues::list_issues(vault, true)
         .iter()
         .map(|m| IssueRow {
@@ -1641,7 +1685,9 @@ pub fn issues_panel(vault: &Path) -> IssuesPanel {
             path: meta_text(Some(m), "path").unwrap_or_default(),
         })
         .collect();
-    IssuesPanel { open_count: rows.len() as i64, empty_text: rows.is_empty().then(|| EMPTY_TEXT.issues.to_string()), rows }
+    let open_count = (sources.len() + rows.len()) as i64;
+    let empty_text = (sources.is_empty() && rows.is_empty()).then(|| EMPTY_TEXT.issues.to_string());
+    IssuesPanel { open_count, sources, empty_text, rows }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2747,6 +2793,43 @@ mod tests {
         assert!(good_to_know(vault).is_empty());
         let ip = issues_panel(vault);
         assert_eq!((ip.open_count, ip.empty_text.as_deref()), (0, Some(EMPTY_TEXT.issues)));
+    }
+
+    fn plant_heads_up(vault: &Path, key: Option<&str>, body: &str) {
+        let ctx = crate::write::WriteContext::new("agent:knowlu.test", "local-runner");
+        let item = crate::info::NewInfo {
+            title: "A heads-up", kind: "heads-up", body, opened_by: "agent:knowlu.test", close_key: key, expires: None,
+        };
+        crate::info::open_info(vault, &item, &ctx, None, None).unwrap();
+    }
+
+    fn scratch_vault(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("qo-surface-l7-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_source_heads_up_with_an_empty_body_gives_empty_text_not_a_panic() {
+        let vault = scratch_vault("empty-body");
+        plant_heads_up(&vault, Some("gmail-source:quiet"), "");
+        let ip = issues_panel(&vault);
+        assert_eq!(ip.sources.len(), 1);
+        assert_eq!(ip.sources[0].text, "");
+        assert_eq!((ip.open_count, ip.empty_text), (1, None));
+        assert!(good_to_know(&vault).is_empty());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_heads_up_whose_key_has_no_listed_prefix_stays_in_good_to_know() {
+        let vault = scratch_vault("unlisted");
+        plant_heads_up(&vault, Some("something-else:x"), "Not a source.");
+        plant_heads_up(&vault, None, "No key at all.");
+        assert!(issues_panel(&vault).sources.is_empty());
+        assert_eq!(good_to_know(&vault).len(), 2);
+        let _ = std::fs::remove_dir_all(&vault);
     }
 
     // The brief's sketch of this test built the day file by hand (`format!("{day}.jsonl")`), which

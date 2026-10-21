@@ -462,8 +462,48 @@ pub fn run_lines_with(
                     "judge: the service answered {reason}, so the rest of the batch was not sent"
                 ));
             }
+            keep_out_of_credit_heads_up(vault, opts, &model, &mut lines);
             (code, lines)
         }
+    }
+}
+
+/// L7 (plan 3.4): the run's one heads-up for the judgment service being out of credit. Raised when
+/// the run ended on that label; cleared when a tier-3 reply showed the model answering (a run that
+/// made no tier-3 call leaves it alone). A write that fails adds one line and never stops the pass.
+fn keep_out_of_credit_heads_up(
+    vault: &Path,
+    opts: &Options<'_>,
+    model: &crate::cloudmodel::CloudModel<'_>,
+    lines: &mut Vec<String>,
+) {
+    let out_of_credit = model.fatal() == Some(judge::OUT_OF_CREDIT_LABEL);
+    if !out_of_credit && !model.heard_model() {
+        return;
+    }
+    let ctx = WriteContext {
+        actor: ACTOR.to_string(),
+        via: opts.via.to_string(),
+        run_id: opts.run_id.map(str::to_string),
+    };
+    let mut journal = Journal::new(vault);
+    let key = crate::source_issues::OUT_OF_CREDIT_KEY;
+    let done = if out_of_credit {
+        crate::source_issues::raise(
+            vault,
+            key,
+            "Knowlu's AI checks are paused",
+            "This is on Knowlu's side, not your account. Your list still updates; new items get \
+             their estimates once it is back.",
+            &ctx,
+            &mut journal,
+        )
+        .map(|_| ())
+    } else {
+        crate::source_issues::clear(vault, key, &ctx, &mut journal).map(|_| ())
+    };
+    if done.is_err() {
+        lines.push("judge: a heads-up could not be written".to_string());
     }
 }
 
@@ -516,6 +556,13 @@ const GMAIL_NOTE: &str = "---\ntitle: {title}\ncourse: {course}\ndomain: school\
 effort_hours: {effort_hours}\neffort_confidence: low\neffort_source: inferred\n\
 importance: {importance}\nimportance_reason: {why}\nstatus: active\nprogress: 0\n\
 created_by: gmail\nsource_uid: {uid}\n{judgment_lines}needs_enrichment: false\n---\n\n{body}\n";
+
+/// Close the "Gmail has gone quiet" heads-up, if one is open. A failure adds one line, nothing more.
+fn clear_quiet_heads_up(vault: &Path, ctx: &WriteContext, journal: &mut Journal, lines: &mut Vec<String>) {
+    if crate::source_issues::clear(vault, crate::source_issues::GMAIL_QUIET_KEY, ctx, journal).is_err() {
+        lines.push("gmail: a heads-up could not be written".to_string());
+    }
+}
 
 /// Pull the service's queued Gmail judgments and write them, then acknowledge them.
 ///
@@ -572,13 +619,42 @@ pub fn pull_gmail(
             // like `judge (skipped: no account)` — so it prints nothing rather than a line that
             // would read as trouble on an account that has none.
             Err(crate::cloudmodel::CloudError::Quiet(crate::cloudmodel::QuietReason::NoGmailScope)) => {
+                clear_quiet_heads_up(vault, &ctx, &mut journal, &mut lines);
                 return lines;
             }
             Err(e) => {
+                // L7: a Quiet reason means Knowlu cannot read that Gmail at all, and that has its
+                // own words, so "gone quiet" must not stand beside them. Transport, status and
+                // body errors say nothing about the mailbox and leave the heads-up alone.
+                if matches!(e, crate::cloudmodel::CloudError::Quiet(_)) {
+                    clear_quiet_heads_up(vault, &ctx, &mut journal, &mut lines);
+                }
                 lines.push(format!("gmail: skipped ({e})"));
                 return lines;
             }
         };
+        // L7: before the round-0 empty return, because a quiet mailbox is exactly the empty pull.
+        if round == 0 {
+            match pulled.went_quiet {
+                Some(true) => {
+                    lines.push("gmail: no mail found in the connected Gmail for 7 days".to_string());
+                    let raised = crate::source_issues::raise(
+                        vault,
+                        crate::source_issues::GMAIL_QUIET_KEY,
+                        "Gmail has gone quiet",
+                        "Knowlu has found no mail in your connected Gmail for a week. Open Settings \
+                         to check which Google account is connected.",
+                        &ctx,
+                        &mut journal,
+                    );
+                    if raised.is_err() {
+                        lines.push("gmail: a heads-up could not be written".to_string());
+                    }
+                }
+                Some(false) => clear_quiet_heads_up(vault, &ctx, &mut journal, &mut lines),
+                None => {}
+            }
+        }
         let (items, more) = (pulled.items, pulled.more);
         deferred += pulled.deferred;
         ack.clear();
@@ -3640,5 +3716,331 @@ mod tests {
         got.sort();
         assert_eq!(got, expected, "one decision row for the rejected card, none for the executed one");
         let _ = std::fs::remove_dir_all(&v);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // L7 (named issues), T1: out of credit and a quiet Gmail as named issues. Plan
+    // `docs/plans/2026-10-19-l7-named-issues-plan.md` section 3.4 and 3.7. The keys and the run
+    // lines are literals, so these compile before any L7 code exists.
+    // -----------------------------------------------------------------------------------------
+
+    /// Run `body` under the device-env lock without ever poisoning it. A red test panics, and a panic
+    /// while the guard is held poisons the mutex for every later test in the binary (they `unwrap` it),
+    /// so the body runs under `catch_unwind`, the guard is released, and the panic is then resumed.
+    fn serialised<F: FnOnce()>(body: F) {
+        let guard = crate::journal::DEVICE_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+        drop(guard);
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    const OOC_KEY: &str = "judge-service:out-of-credit";
+    const QUIET_KEY: &str = "gmail-source:quiet";
+    const OOC_LINE: &str =
+        "judge: the service answered out of credit on Knowlu's side, so the rest of the batch was not sent";
+    const QUIET_LINE: &str = "gmail: no mail found in the connected Gmail for 7 days";
+
+    /// `vault(tag)` plus two more flagged tasks, so a batch has three items to stop in the middle of.
+    fn three_flagged(tag: &str) -> PathBuf {
+        let v = vault(tag);
+        for (name, n) in [("hw4.md", 2), ("hw5.md", 3)] {
+            let note = NOTE
+                .replace("task_1111111111", &format!("task_{n}{n}{n}{n}{n}{n}{n}{n}{n}{n}"))
+                .replace("CS-100 Homework 3", &format!("CS-100 Homework {}", n + 2))
+                .replace("blackboard:_884411_1", &format!("blackboard:_884411_{n}"));
+            crate::pystr::write_text(&v.join("tasks").join(name), &note).unwrap();
+        }
+        v
+    }
+
+    fn ooc_task_reply() -> (u16, String) {
+        (200, crate::ledger::dumps_value(&serde_json::json!({
+            "verdict": null, "tier": 3, "outcome": "low confidence",
+            "cause": "model failed", "unavailable": "out of credit",
+        })))
+    }
+
+    fn model_failed_reply() -> (u16, String) {
+        (200, crate::ledger::dumps_value(&serde_json::json!({
+            "verdict": null, "tier": 3, "outcome": "low confidence", "cause": "model failed",
+        })))
+    }
+
+    fn verdict_reply(tier: u8) -> (u16, String) {
+        (200, crate::ledger::dumps_value(&serde_json::json!({
+            "verdict": {
+                "course": "cs-100", "effort_hours": 2.5, "importance": 4,
+                "importance_reason": "Homework is 20% of CS 100.", "confidence": 0.9,
+            },
+            "tier": tier,
+        })))
+    }
+
+    fn quiet_reply(went_quiet: Option<bool>) -> (u16, String) {
+        let mut body = serde_json::json!({ "items": [], "read": 0, "quiet": false, "more": false });
+        if let Some(flag) = went_quiet {
+            body["went_quiet"] = serde_json::json!(flag);
+        }
+        (200, crate::ledger::dumps_value(&body))
+    }
+
+    /// The replies the cloud arm's later passes ask for an account with no Gmail, no mailbox and no
+    /// rules, in arrival order: the Gmail pull, the mail pull, the rule pull.
+    fn later_passes() -> Vec<(u16, String)> {
+        let no_scope = crate::ledger::dumps_value(&serde_json::json!({
+            "items": [], "read": 0, "quiet": true, "reason": "no_gmail_scope", "more": false,
+        }));
+        vec![
+            (200, no_scope),
+            (200, EMPTY_MAIL_PULL.to_string()),
+            (200, crate::ledger::dumps_value(&serde_json::json!({ "proposals": [] }))),
+        ]
+    }
+
+    fn paths_of(requests: &[String]) -> Vec<String> {
+        requests
+            .iter()
+            .map(|r| r.lines().next().unwrap_or("").trim_end_matches(" HTTP/1.1").to_string())
+            .collect()
+    }
+
+    fn items_keyed(v: &Path, key: &str) -> Vec<serde_yaml_ng::Mapping> {
+        crate::info::list_info(v)
+            .into_iter()
+            .filter(|m| crate::yaml::opt_text(crate::yaml::get(m, "close_key")).as_deref() == Some(key))
+            .collect()
+    }
+
+    fn closed_keyed(v: &Path, key: &str) -> usize {
+        crate::approvals::sorted_md(&v.join("archive"))
+            .iter()
+            .filter_map(|p| crate::ids::read_meta(p))
+            .filter(|m| {
+                crate::yaml::opt_text(crate::yaml::get(m, "close_key")).as_deref() == Some(key)
+                    && crate::yaml::opt_text(crate::yaml::get(m, "status")).as_deref() == Some("closed")
+            })
+            .count()
+    }
+
+    fn plant_heads_up(v: &Path, key: &str, title: &str, actor: &str) {
+        let ctx = WriteContext { actor: actor.into(), via: "local-runner".into(), run_id: None };
+        let item = crate::info::NewInfo {
+            title, kind: "heads-up", body: "Planted by a test.", opened_by: actor,
+            close_key: Some(key), expires: None,
+        };
+        crate::info::open_info(v, &item, &ctx, None, None).expect("the heads-up files");
+    }
+
+    /// Run the cloud arm once against `replies` (the probe's first) and return the lines and the paths.
+    fn run_arm(v: &Path, replies: Vec<(u16, String)>) -> (i32, Vec<String>, Vec<String>) {
+        let (client, mut server) = loopback_client(replies);
+        let (code, lines) = run_lines_with(v, &opts(&v.join("_log")), Some(&client));
+        (code, lines, paths_of(&server.requests()))
+    }
+
+    fn ooc_replies() -> Vec<(u16, String)> {
+        let mut replies = vec![(200, "{}".to_string()), ooc_task_reply()];
+        replies.extend(later_passes());
+        replies
+    }
+
+    /// Run `pull_gmail` once against one scripted reply.
+    fn pull_once(v: &Path, reply: (u16, String)) -> Vec<String> {
+        let (base, handle) = gmail_loopback(vec![reply]);
+        let client = client_for(base);
+        let lines = pull_gmail(v, &client, &opts(&v.join("_log")), BATCH_BUDGET);
+        handle.join().expect("the listener thread did not panic");
+        lines
+    }
+
+    fn quiet_vault(tag: &str) -> PathBuf {
+        let v = vault(tag);
+        plant_heads_up(&v, QUIET_KEY, "Gmail has gone quiet", GMAIL_ACTOR);
+        assert_eq!(items_keyed(&v, QUIET_KEY).len(), 1, "set-up: the item is open");
+        v
+    }
+
+    /// Test 1 (plan 3.4, 3.7): an answer of `unavailable: "out of credit"` ends the batch, names it
+    /// once, writes tier 1, keeps every task owed, and opens ONE heads-up. Red today: three
+    /// `/judge-task` requests go out, so the path list is wrong first.
+    #[test]
+    fn an_out_of_credit_reply_stops_the_batch_and_names_it_once() {
+        serialised(|| {
+            let v = three_flagged("ooc-batch");
+            let (code, lines, paths) = run_arm(&v, ooc_replies());
+            let want = [
+                "GET /functions/v1/judge-rules", "POST /functions/v1/judge-task",
+                "POST /functions/v1/gmail-read", "POST /functions/v1/mail-pull", "GET /functions/v1/judge-rules",
+            ];
+            assert_eq!(paths, want, "one /judge-task, then the later passes: {paths:?}");
+            assert_eq!(lines.iter().filter(|l| l.as_str() == OOC_LINE).count(), 1, "{lines:?}");
+            assert_eq!(code, 0, "{lines:?}");
+            for name in ["hw3.md", "hw4.md", "hw5.md"] {
+                assert_eq!(
+                    crate::yaml::get(&meta_of(&v, name), "needs_enrichment"),
+                    Some(&serde_yaml_ng::Value::Bool(true)), "{name} stays owed"
+                );
+            }
+            assert_eq!(crate::yaml::opt_text(crate::yaml::get(&meta_of(&v, "hw3.md"), "course")).as_deref(), Some("cs-100"), "tier 1 is written");
+            let open = items_keyed(&v, OOC_KEY);
+            assert_eq!(open.len(), 1, "exactly one open heads-up: {open:?}");
+            assert_eq!(crate::yaml::opt_text(crate::yaml::get(&open[0], "kind")).as_deref(), Some("heads-up"));
+            let by = crate::yaml::opt_text(crate::yaml::get(&open[0], "opened_by")).unwrap_or_default();
+            assert!(by.starts_with("agent:"), "opened_by {by}");
+            let _ = std::fs::remove_dir_all(&v);
+        });
+    }
+
+    /// Test 2: the same outage on two slots is still one open heads-up, never two. Red today: no
+    /// heads-up is ever opened.
+    #[test]
+    fn a_second_out_of_credit_run_does_not_duplicate_the_heads_up() {
+        serialised(|| {
+            let v = three_flagged("ooc-twice");
+            run_arm(&v, ooc_replies());
+            run_arm(&v, ooc_replies());
+            assert_eq!(items_keyed(&v, OOC_KEY).len(), 1, "{:?}", items_keyed(&v, OOC_KEY));
+            let _ = std::fs::remove_dir_all(&v);
+        });
+    }
+
+    /// Test 3: the first later tier-3 answer closes it (to `archive/`, `status: closed`), and no
+    /// out-of-credit line prints. Red today: nothing closes a heads-up.
+    #[test]
+    fn a_tier_three_answer_clears_the_out_of_credit_heads_up() {
+        serialised(|| {
+            let v = vault("ooc-clear");
+            plant_heads_up(&v, OOC_KEY, "Knowlu's AI checks are paused", "agent:knowlu.enrich");
+            assert_eq!(items_keyed(&v, OOC_KEY).len(), 1, "set-up: the item is open");
+            let mut replies = vec![(200, "{}".to_string()), verdict_reply(3)];
+            replies.extend(later_passes());
+            let (code, lines, _) = run_arm(&v, replies);
+            assert_eq!(code, 0, "{lines:?}");
+            assert!(!lines.iter().any(|l| l.contains("out of credit")), "{lines:?}");
+            assert!(items_keyed(&v, OOC_KEY).is_empty(), "no longer open");
+            assert_eq!(closed_keyed(&v, OOC_KEY), 1, "it moved to archive/ with status closed");
+            let _ = std::fs::remove_dir_all(&v);
+        });
+    }
+
+    /// Test 4: a tier-2 answer says nothing about the provider's balance, so it does not clear.
+    /// Green at T1: nothing clears a heads-up today. It pins that T3b clears on tier 3 only.
+    #[test]
+    fn a_tier_two_answer_does_not_clear_it() {
+        serialised(|| {
+            let v = vault("ooc-tier2");
+            plant_heads_up(&v, OOC_KEY, "Knowlu's AI checks are paused", "agent:knowlu.enrich");
+            let mut replies = vec![(200, "{}".to_string()), verdict_reply(2)];
+            replies.extend(later_passes());
+            let (code, lines, _) = run_arm(&v, replies);
+            assert_eq!(code, 0, "{lines:?}");
+            assert_eq!(items_keyed(&v, OOC_KEY).len(), 1, "still open");
+            let _ = std::fs::remove_dir_all(&v);
+        });
+    }
+
+    /// Test 5: an old server's `model failed` reply (no `unavailable` key) behaves as it does today:
+    /// per-item failure, no heads-up, no out-of-credit line. Green at T1: the compatibility pin.
+    #[test]
+    fn an_old_servers_model_failed_reply_is_unchanged() {
+        serialised(|| {
+            let v = vault("ooc-old-server");
+            let mut replies = vec![(200, "{}".to_string()), model_failed_reply()];
+            replies.extend(later_passes());
+            let (code, lines, _) = run_arm(&v, replies);
+            assert_eq!(code, 0, "{lines:?}");
+            assert!(items_keyed(&v, OOC_KEY).is_empty(), "no heads-up");
+            assert!(!lines.iter().any(|l| l.contains("out of credit")), "{lines:?}");
+            let _ = std::fs::remove_dir_all(&v);
+        });
+    }
+
+    /// Test 7 (plan 3.4, 3.7): `went_quiet: true` prints the Gmail line and keeps one heads-up, opened
+    /// by the Gmail actor; a second pull adds none. Red today: no line and no item (the empty pull
+    /// returns at round 0).
+    #[test]
+    fn a_quiet_gmail_is_named_and_kept_as_one_heads_up() {
+        serialised(|| {
+            let v = vault("gmail-went-quiet");
+            let lines = pull_once(&v, quiet_reply(Some(true)));
+            assert_eq!(lines.iter().filter(|l| l.as_str() == QUIET_LINE).count(), 1, "{lines:?}");
+            let open = items_keyed(&v, QUIET_KEY);
+            assert_eq!(open.len(), 1, "{open:?}");
+            assert_eq!(crate::yaml::opt_text(crate::yaml::get(&open[0], "opened_by")).as_deref(), Some("agent:knowlu.gmail"));
+            pull_once(&v, quiet_reply(Some(true)));
+            assert_eq!(items_keyed(&v, QUIET_KEY).len(), 1, "a second pull adds none");
+            let _ = std::fs::remove_dir_all(&v);
+        });
+    }
+
+    /// Test 8a: `went_quiet: false` closes the heads-up. Red today: it stays open.
+    #[test]
+    fn went_quiet_false_clears_it() {
+        serialised(|| {
+            let v = quiet_vault("gmail-clear-false");
+            pull_once(&v, quiet_reply(Some(false)));
+            assert!(items_keyed(&v, QUIET_KEY).is_empty());
+            assert_eq!(closed_keyed(&v, QUIET_KEY), 1);
+            let _ = std::fs::remove_dir_all(&v);
+        });
+    }
+
+    /// Test 8b: not connected for want of the Gmail scope clears it too and prints nothing. Red today:
+    /// the item stays open.
+    #[test]
+    fn no_gmail_scope_clears_it_and_prints_nothing() {
+        serialised(|| {
+            let v = quiet_vault("gmail-clear-noscope");
+            let body = crate::ledger::dumps_value(&serde_json::json!({
+                "items": [], "read": 0, "quiet": true, "reason": "no_gmail_scope", "more": false,
+            }));
+            let lines = pull_once(&v, (200, body));
+            assert!(lines.is_empty(), "{lines:?}");
+            assert!(items_keyed(&v, QUIET_KEY).is_empty());
+            let _ = std::fs::remove_dir_all(&v);
+        });
+    }
+
+    /// Test 8c: a revoked grant clears it and keeps today's re-connect line, unchanged. Red today:
+    /// the item stays open.
+    #[test]
+    fn a_revoked_reply_clears_it_and_keeps_todays_line() {
+        serialised(|| {
+            let v = quiet_vault("gmail-clear-revoked");
+            let body = crate::ledger::dumps_value(&serde_json::json!({
+                "items": [], "read": 0, "quiet": true, "reason": "revoked", "more": false,
+            }));
+            let lines = pull_once(&v, (200, body));
+            assert_eq!(lines, vec!["gmail: skipped (gmail is not connected; re-connect from settings)".to_string()]);
+            assert!(items_keyed(&v, QUIET_KEY).is_empty());
+            let _ = std::fs::remove_dir_all(&v);
+        });
+    }
+
+    /// Test 8d: a transport or server error says nothing about the mailbox, so it leaves the
+    /// heads-up open. Green at T1: the pin that only a `Quiet` reason or `went_quiet: false` clears.
+    #[test]
+    fn a_transport_error_leaves_it_open() {
+        serialised(|| {
+            let v = quiet_vault("gmail-keep-500");
+            pull_once(&v, (500, "{}".to_string()));
+            assert_eq!(items_keyed(&v, QUIET_KEY).len(), 1);
+            let _ = std::fs::remove_dir_all(&v);
+        });
+    }
+
+    /// Test 9: a reply without `went_quiet` (an old server) changes nothing: the open item stays and
+    /// the lines are today's (none, for an empty pull). Green at T1.
+    #[test]
+    fn a_reply_without_went_quiet_changes_nothing() {
+        serialised(|| {
+            let v = quiet_vault("gmail-old-server");
+            let lines = pull_once(&v, quiet_reply(None));
+            assert!(lines.is_empty(), "{lines:?}");
+            assert_eq!(items_keyed(&v, QUIET_KEY).len(), 1);
+            let _ = std::fs::remove_dir_all(&v);
+        });
     }
 }

@@ -120,6 +120,20 @@ Deno.serve(readHandler(requireActiveEntitlement, {
   async markRevoked(accountId) {
     await sharedDb().update(`google_accounts?account_id=eq.${accountId}`, { status: "revoked" });
   },
+  // L7 (plan §3.3): the grant's age, for the quiet rule. `connected_at` is `not null default now()`
+  // and `store_google_grant` resets it on every connect and reconnect; no row, or a value that does
+  // not parse, is null, which claims nothing.
+  async connectedAt(accountId) {
+    const rows = await sharedDb().select(
+      `google_accounts?account_id=eq.${accountId}&select=connected_at`,
+    ) as Array<{ connected_at: string | null }>;
+    const at = Date.parse(rows[0]?.connected_at ?? "");
+    return Number.isNaN(at) ? null : at;
+  },
+  // L7: conditional on the row still reading `from`, so a `revoked` row (or no row) is never written.
+  async moveStatus(accountId, from, to) {
+    await sharedDb().update(`google_accounts?account_id=eq.${accountId}&status=eq.${from}`, { status: to });
+  },
   async seen(accountId) {
     // F-2: windowed and bounded. `WINDOW` (the query this function sends Gmail) only ever asks for
     // the last 7 days, so a row past 14 can never affect a dedup decision here again — but an

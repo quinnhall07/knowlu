@@ -2,7 +2,7 @@
 // no network permission needed for this file (CLAUDE.md, plan 3a's loopback rule covers the
 // Anthropic adapter's real-listener tests; this one needs none of that).
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
-import { ModelRefused } from "./judge_anthropic.ts";
+import { ModelRefused, ProviderOutOfCredit } from "./judge_anthropic.ts";
 import { assertPinnedRoute, OPENROUTER_URL, openRouterBody, OpenRouterModel } from "./judge_openrouter.ts";
 
 const SCHEMA = { type: "object" } as const;
@@ -240,4 +240,27 @@ Deno.test("a 2xx error envelope with no choices is named without quoting the err
   }
   assertEquals(message, "the model service answered a 2xx with an error envelope");
   assertEquals(message.includes("SECRET-LOOKING"), false, message);
+});
+
+// L7 (plan §3.2, T2a test 1): OpenRouter answers HTTP 402 when Knowlu's own balance is spent. That
+// is its own class, so the pipeline can name it `out of credit` by `instanceof`, and its message
+// names the status only: the provider's body is never read into it.
+Deno.test("a provider 402 throws ProviderOutOfCredit, naming 402 and never the body", async () => {
+  const fake: typeof fetch = () =>
+    Promise.resolve(jsonResponse({ error: { message: "SECRET-LOOKING-TEXT", code: 402 } }, 402));
+  const model = new OpenRouterModel({ apiKey: "test-key-not-a-secret", fetchImpl: fake });
+  const error = await assertRejects(() => model.complete(request()), ProviderOutOfCredit);
+  assertEquals(error.message, "the model service answered HTTP 402");
+  assertEquals(error.message.includes("SECRET-LOOKING-TEXT"), false, error.message);
+});
+
+Deno.test("every other non-2xx still throws a plain Error, unchanged", async () => {
+  for (const status of [400, 401, 403, 404, 408, 429, 500, 502, 503]) {
+    const fake: typeof fetch = () => Promise.resolve(jsonResponse({ error: { message: "SECRET-LOOKING-TEXT" } }, status));
+    const model = new OpenRouterModel({ apiKey: "test-key-not-a-secret", fetchImpl: fake });
+    const error = await assertRejects(() => model.complete(request()), Error);
+    assertEquals(error.constructor, Error, `HTTP ${status} must stay a plain Error`);
+    assertEquals(error instanceof ProviderOutOfCredit, false, `HTTP ${status}`);
+    assertEquals(error.message, `the model service answered HTTP ${status}`);
+  }
 });
