@@ -67,7 +67,10 @@ fn entries_are_in_the_fixed_order() {
     lab.fetch_registered(D20, &twentieth, &REGISTERED);
     let notes: Vec<Value> = lab.ended_entries().iter().map(|e| e["note"].clone()).collect();
     assert_eq!(notes, [json!(LAB), json!("commitments/art-110.md")], "day first, then path");
-    let mut both = twentieth.clone();
+    // The answer needs one whole row (spec section 3), so the lab is listed again, whole, beside the two withdrawn.
+    let mut both = trimmed();
+    drop_crn(&mut both, "40006");
+    set_status(&mut both, "40003", "WD", "Invented Withdrawn");
     set_status(&mut both, "40001", "WD", "Invented Withdrawn");
     lab.fetch_registered(D30, &both, &REGISTERED);
     let status: Vec<Value> = lab.term()["status"].as_array().unwrap().iter().map(|e| e["note"].clone()).collect();
