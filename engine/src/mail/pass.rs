@@ -59,6 +59,7 @@ pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budg
         tally: Tally::default(),
         boxes: BTreeMap::new(),
         connected: false,
+        reported: false,
         held: BTreeSet::new(),
         asking_failed: None,
         asking_refused: None,
@@ -85,6 +86,7 @@ pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budg
                 break;
             }
         };
+        run.reported = true;
         run.acked(&ack);
         ack.clear();
         round += 1;
@@ -112,6 +114,11 @@ pub fn pull_mail_on(vault: &Path, client: &CloudClient, opts: &Options<'_>, budg
     let held = mailreconcile::proposal(today, crate::commitments::vault_day(vault, today));
     let mut writer = Writer::new(vault, opts.via, opts.run_id, &mut journal, today, held);
     lines.extend(heads::keep(&mut writer, vault, &boxes, &today.to_string()));
+    // A mailbox the service no longer reports (revoked, disconnected) closes its heads-up, but only once an
+    // answer was actually received: an offline or failed slot says nothing about any mailbox.
+    if run.reported {
+        lines.extend(heads::close_unreported(&mut writer, vault, &boxes));
+    }
     // Only when a claim still waits: one given up on is a notice, not "left for the next slot".
     if let Some(why) = run.asking_failed.or(run.asking_refused).filter(|_| run.waiting) {
         lines.push(format!("mail: could not ask which item ({why}); left for the next slot"));
@@ -140,6 +147,8 @@ struct Run<'a> {
     boxes: BTreeMap<String, MailboxReport>,
     /// A mailbox was reported or a message arrived: the line prints.
     connected: bool,
+    /// An answer from the service was received this pass (even one naming no mailbox).
+    reported: bool,
     /// The uids held unacked this pass. The server returns an undelivered claim on every later pull, so a
     /// held message that comes back is neither planned, written nor counted again (a notice written for
     /// it would otherwise be closed and reopened, and counted in `J` each round).

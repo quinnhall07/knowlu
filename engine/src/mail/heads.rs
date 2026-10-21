@@ -74,6 +74,27 @@ pub(super) fn keep(writer: &mut Writer<'_>, vault: &Path, boxes: &[&MailboxRepor
     lines
 }
 
+/// The service leaves a revoked or disconnected mailbox out of every later report, so `keep` never sees it
+/// again. After a pass that **received** a report, close each open `mail-source:<id>` heads-up whose id is
+/// not in `boxes`, as `keep` closes one: the mail actor, journal first. Called only for a received report,
+/// so an offline, failed or skipped slot closes nothing. In key order, one line if a close fails.
+pub(super) fn close_unreported(writer: &mut Writer<'_>, vault: &Path, boxes: &[&MailboxReport]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut keys: Vec<String> = info::list_info(vault)
+        .iter()
+        .filter_map(|item| yaml::opt_text(yaml::get(item, "close_key")))
+        .filter(|key| key.starts_with("mail-source:") && !boxes.iter().any(|b| key.as_str() == format!("mail-source:{}", b.address_id)))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    for key in keys {
+        if writer.close_notices(&key).is_err() {
+            lines.push("mail: a heads-up could not be closed".to_string());
+        }
+    }
+    lines
+}
+
 /// Write one heads-up; `false` (and one line) when the write failed.
 fn note(writer: &mut Writer<'_>, lines: &mut Vec<String>, key: &str, title: &str, body: &str) -> bool {
     let written = writer.notice("heads-up", Some(key), title, body).is_ok();

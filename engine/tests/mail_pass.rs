@@ -600,6 +600,63 @@ fn a_non_active_mailbox_keeps_one_heads_up_and_names_its_line() {
     let _ = std::fs::remove_dir_all(&vault);
 }
 
+/// L7's ruling (a): the service leaves a revoked or disconnected mailbox out of every later report, so a
+/// heads-up whose mailbox is no longer reported is closed, but only when a report was actually received.
+#[test]
+fn a_heads_up_closes_when_a_received_report_omits_its_mailbox() {
+    let vault = scratch("heads-omitted");
+    let today = vault_today(&vault);
+    only_boxes(&vault, today, json!([mailbox("a1", "quiet", None), mailbox("a2", "off", None)]));
+    assert_eq!(open_items(&vault, "mail-source:a1").len(), 1);
+    assert_eq!(open_items(&vault, "mail-source:a2").len(), 1);
+
+    // The next answer reports a2 only: a1 is gone from the account's list.
+    only_boxes(&vault, today, json!([mailbox("a2", "off", None)]));
+    assert!(open_items(&vault, "mail-source:a1").is_empty(), "a1 is not reported any more, so its heads-up closes");
+    assert_eq!(open_items(&vault, "mail-source:a2").len(), 1, "a2 is still reported and in trouble");
+    let journal = journal_bytes(&vault);
+    let closes = |name: &str| journal.iter().any(|(_, bytes)| String::from_utf8_lossy(bytes).lines().any(|l| l.contains(name) && l.contains("close")));
+    assert!(closes(MAIL_ACTOR), "the close is journalled as the mail agent");
+
+    // An answer with no mailboxes at all is still a received report: a2 is gone too.
+    only_boxes(&vault, today, json!([]));
+    assert!(open_items(&vault, "mail-source:a2").is_empty());
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn a_heads_up_stays_open_when_no_report_was_received() {
+    let vault = scratch("heads-offline");
+    let today = vault_today(&vault);
+    only_boxes(&vault, today, json!([mailbox("a1", "quiet", None)]));
+    let (info, journal) = (files(&vault, "info"), journal_bytes(&vault));
+
+    let mut failing = serve(|_, _| (500, "{}".to_string()));
+    let lines = run(&vault, &failing, today);
+    assert!(lines.iter().any(|l| l.starts_with("mail: skipped")), "{lines:?}");
+    failing.requests();
+    // A reply that is not a pull answer (no `messages` array) is no report either.
+    let mut odd = serve(|_, _| (200, "{\"mailboxes\":[]}".to_string()));
+    run(&vault, &odd, today);
+    odd.requests();
+    assert_eq!(open_items(&vault, "mail-source:a1").len(), 1, "no report received, so nothing closes");
+    assert_eq!((files(&vault, "info"), journal_bytes(&vault)), (info, journal), "and nothing is written");
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn a_reported_mailbox_that_is_not_active_keeps_its_heads_up() {
+    let vault = scratch("heads-kept");
+    let today = vault_today(&vault);
+    only_boxes(&vault, today, json!([mailbox("a1", "quiet", None)]));
+    // Still reported, in other states a setup passes through or trouble: the item stays.
+    for status in ["pending", "confirmed", "blocked"] {
+        only_boxes(&vault, today, json!([mailbox("a1", status, None)]));
+        assert_eq!(open_items(&vault, "mail-source:a1").len(), 1, "{status}: still reported, so the heads-up stays");
+    }
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
 #[test]
 fn a_reenabled_mailbox_opens_one_heads_up_with_the_exact_text() {
     let vault = scratch("reenabled");
