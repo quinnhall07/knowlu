@@ -231,9 +231,14 @@ jobs:
           if (-not $sidecar) { throw "no staged sidecar under app\binaries" }
           # release.ps1 runs `tauri build --target <triple>` (L10), so cargo puts knowlu.exe under
           # target\<triple>\release. The triple is derived exactly as release.ps1 derives it: rustc's
-          # own host: line, which `assert gnu host toolchain` above has already pinned.
-          $triple = ((rustc -vV | Where-Object { $_ -like "host:*" } | Select-Object -First 1) -replace "^host:", "").Trim()
-          if ($LASTEXITCODE -ne 0 -or -not $triple) { throw "rustc -vV printed no host: triple" }
+          # own host: line, which `assert gnu host toolchain` above has already pinned. Captured
+          # before filtering: Select-Object -First on rustc's own pipeline stops it before pwsh
+          # records rustc's exit, so in a fresh step $LASTEXITCODE stays $null beside a good
+          # triple and `$null -ne 0` threw (run 39651026811).
+          $rustcVv = rustc -vV
+          if ($LASTEXITCODE -ne 0) { throw "rustc -vV failed" }
+          $triple = (($rustcVv | Where-Object { $_ -like "host:*" } | Select-Object -First 1) -replace "^host:", "").Trim()
+          if (-not $triple) { throw "rustc -vV printed no host: triple" }
           foreach ($f in @($env:REL_INSTALLER, "target\$triple\release\knowlu.exe", $sidecar.FullName)) {
             $s = Get-AuthenticodeSignature $f
             Write-Output ("{0}: {1} {2}" -f $f, $s.Status, $s.SignerCertificate.Subject)
