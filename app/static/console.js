@@ -840,6 +840,9 @@
   // sign-in window and, once the student says they are signed in, asks the app to read the
   // schedule. The page never sees a cookie or the fetched bytes: `capture_registrar` keeps both.
   var registrarLabel = null;   // your_week's registrar_label; null where the school has none
+  // B5, m3 and m4: a fetch that reached the engine and failed shows this sentence and nothing the
+  // engine said. The school window is gone by then (R4-d), so a retry starts from a fresh sign-in.
+  var REG_FAILED = "Knowlu couldn't use what the school sent, so nothing was changed. The sign-in window is closed; to try again, press the button and sign in again.";
 
   // R5-a: a row the registrar proposed.
   function fromRegistrar(p) { return p.source_uid.indexOf("registrar:") === 0; }
@@ -877,7 +880,7 @@
           c.done.disabled = false;
           if (!env.ok) {
             setBusy(false);
-            if (env.closed) { registrarIdle(host, env.error); } else { c.cancel.hidden = false; c.say.textContent = env.error; }
+            if (env.closed) { registrarIdle(host, REG_FAILED); } else { c.cancel.hidden = false; c.say.textContent = env.error; }
             return;
           }
           if (env.state) { current.pendingOrder = null; paint(env.state, true); }
@@ -907,6 +910,56 @@
         ' <span class="src">from ' + h(registrarLabel) + '</span></span></div><div class="acts"><button class="b" type="button" data-reg-add="' +
         h(p.source_uid) + '">Add</button></div></div>';
     }).join("");
+    var list = registrarChangesHtml(w.registrar_changes, w.commitments), box = EL("sched-reg-changes");
+    box.hidden = !list; box.innerHTML = list;
+  }
+
+  // B5 (spec A2 item 13): the "From myBama" lists that follow a fetch and a restart, read from the
+  // overview's `registrar_changes`. The page names a note by its title (the block holds its path),
+  // words an unread row itself, and shows each value escaped; it works out nothing.
+  var REG_FIELDS = { meets: "meeting times", where: "room", until: "last day", from: "first day" };
+
+  function regMeets(list) {
+    return list.map(function (m) {
+      return m.days.map(function (d) { return d.charAt(0).toUpperCase() + d.slice(1, 3); }).join("/") + " " + m.start + "–" + m.end;
+    }).join(", ");
+  }
+
+  function regValue(v) { return v == null || v === "" ? "nothing" : Array.isArray(v) ? regMeets(v) : v; }
+
+  // Returns markup: the title is escaped here, once.
+  function regTitle(note, key, commitments) {
+    var c = (commitments || []).filter(function (x) { return x.path === note; })[0];
+    return c ? h(c.title) : (key ? "Class " + h(String(key).split("-").pop()) : "A class");
+  }
+
+  function registrarChangesHtml(ch, commitments) {
+    if (!ch || !registrarLabel) { return ""; }
+    var field = function (f) { return REG_FIELDS[f] || f; };
+    var CARDS = { filed: "Knowlu has asked you in Decisions which to keep.", waiting: "Knowlu will ask you in Decisions which to keep.", listed: "Listed here only." };
+    var parts = [
+      // `e["from"]`: the entry's old value, not the mail sender the deck scan looks for.
+      [" — changed", ch.applied, function (e) {
+        return regTitle(e.note, null, commitments) + ": " + h(field(e.field)) + " " + h(regValue(e["from"])) + " → " + h(regValue(e.to));
+      }],
+      [" — ended", ch.ended, function (e) {
+        return regTitle(e.note, null, commitments) + " ended on " + h(e.until) + (e.kept_yours
+          ? ' <span class="reg-card">You had set a different last day, so Knowlu kept yours.</span>' : "");
+      }],
+      [" — kept yours", ch.kept, function (e) {
+        return regTitle(e.note, null, commitments) + ": your " + h(field(e.field)) + " is " + h(regValue(e.student)) + "; " + h(registrarLabel) +
+          " has " + h(regValue(e.registrar)) + '. <span class="reg-card">' + h(CARDS[e.card] || CARDS.listed) + "</span>";
+      }],
+      [" — status", ch.status, function (e) {
+        return regTitle(e.note, e.key, commitments) + ": " + h(registrarLabel) + " lists it as " + h(e.status) + "; nothing changed.";
+      }],
+      [" — not read", ch.unread, function (e) {
+        var what = String(e.reason || "").indexOf("no class time") >= 0 ? "no class time" : "a meeting Knowlu can't read";
+        return regTitle(e.note, e.key, commitments) + ": " + h(registrarLabel) + " lists it with " + h(what) + "; nothing changed.";
+      }]];
+    return parts.filter(function (p) { return (p[1] || []).length; }).map(function (p) {
+      return '<p class="hint">From ' + h(registrarLabel) + p[0] + "</p><ul>" + p[1].map(function (e) { return "<li>" + p[2](e) + "</li>"; }).join("") + "</ul>";
+    }).join("");
   }
 
   // R5-b: after a fetch the confirm screen reads its rows again, and the answers and levels already
@@ -924,19 +977,21 @@
         row.querySelectorAll("[data-answer-set]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.getAttribute("data-answer-set") === k.answer)); });
         row.querySelectorAll("[data-level-set]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.getAttribute("data-level-set") === k.level)); });
       });
-      return invoke("your_week", {}).then(function (w) { paintRegistrarAdded(w && w.ok && w.week ? w.week.commitments : []); });
+      return invoke("your_week", {}).then(function (w) {
+        paintRegistrarAdded(w && w.ok && w.week ? w.week.commitments : [], w && w.ok && w.week ? w.week.registrar_changes : null);
+      });
     }).catch(function () {});
   }
 
   // Final review I3: the confirm screen lists what myBama confirmed (spec §2 step 4) — your_week's
   // confirmed rows keyed `registrar:`, as the engine built them: title, then days and times.
-  function paintRegistrarAdded(commitments) {
+  function paintRegistrarAdded(commitments, changes) {
     var added = (commitments || []).filter(function (c) { return c.source_uid && c.source_uid.indexOf("registrar:") === 0; });
-    var host = EL("ws-reg-added");
-    host.hidden = !added.length || !registrarLabel;
-    host.innerHTML = host.hidden ? "" : '<p class="hint">From ' + h(registrarLabel) + " — added</p><ul>" + added.map(function (c) {
+    var host = EL("ws-reg-added"), list = registrarChangesHtml(changes, commitments);
+    host.hidden = (!added.length && !list) || !registrarLabel;
+    host.innerHTML = host.hidden ? "" : (added.length ? '<p class="hint">From ' + h(registrarLabel) + " — added</p><ul>" + added.map(function (c) {
       return '<li><span class="a">' + h(c.title) + '</span> <span class="meta">' + h(c.when || "") + "</span></li>";
-    }).join("") + "</ul>";
+    }).join("") + "</ul>" : "") + list;
   }
 
   // ---- Phase 2 (spec §2, D1, D3): the confirm screen, over the first-run view. `your_week` says

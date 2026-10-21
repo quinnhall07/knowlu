@@ -175,14 +175,32 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
   if (cmd === 'launch_state') { return Promise.resolve({ ok: true, mode: 'console', profiles: [] }); }
   if (cmd === 'state') { return Promise.resolve({ ok: true, error: null, state: JSON.parse(JSON.stringify(window.__STATE)),
       first_run: window.__SCHED_REG ? null : { running: true, current: 'coursework', steps: [] } }); }
+  // B5 (spec A2 item 13): the overview's registrar_changes, invented. A title with markup and a
+  // value with markup prove escaping; the unread reason is the engine's sentence, which the page
+  // must word itself.
+  var CHANGES = { applied: [{ day: '2026-09-10', field: 'where', from: 'Make-Believe Hall 101', note: 'commitments/cs-100.md', to: '<b>Make-Believe Hall 102</b>' },
+        { day: '2026-09-10', field: 'meets', from: [{ days: ['mon', 'wed'], start: '12:00', end: '12:50' }], note: 'commitments/cs-100.md',
+          to: [{ days: ['mon', 'wed'], start: '13:00', end: '13:50' }] }],
+      ended: [{ day: '2026-09-12', kept_yours: false, note: 'commitments/art-110.md', until: '2026-09-11' },
+        { day: '2026-09-12', kept_yours: true, note: 'commitments/cs-100.md', until: '2026-09-11' }],
+      kept: [{ card: 'filed', field: 'until', note: 'commitments/cs-100.md', registrar: '2026-12-11', student: '2026-11-20' },
+        { card: 'waiting', field: 'where', note: 'commitments/art-110.md', registrar: 'Make-Believe Studio 5', student: 'Make-Believe Studio 4' }],
+      status: [{ key: 'registrar:ua:202640-40006', note: 'commitments/art-110.md', status: 'Invented Withdrawn' }],
+      unread: [{ key: 'registrar:ua:202640-40009', note: null, reason: 'ENGINE-SENTENCE lists this course with no class time; nothing changed' }] };
   // Final review I3: once a fetch has run, your_week holds the registrar's confirmed CS 100 (an
   // invented title with markup, to prove it is escaped) beside a Google-keyed note it must not list.
   var CONFIRMED = window.__REGISTRAR_DONE && !window.__SCHED_REG ? [
     { id: 'cmt_a', kind: 'class', level: 'hard', title: 'CS 100 <i>Lecture</i>', course: 'cs-100', when: 'Mon/Wed/Fri 12–12:50pm',
-      where: 'Room 101', source_uid: 'registrar:ua:202640-40001', meets: [] },
+      where: 'Room 101', source_uid: 'registrar:ua:202640-40001', path: 'commitments/cs-100.md', meets: [] },
     { id: 'cmt_b', kind: 'club', level: 'soft', title: 'Chess Club', course: null, when: 'Wed 6–7pm',
       where: null, source_uid: 'gcal-series:chess-old', meets: [] }] : [];
-  if (cmd === 'your_week') { return Promise.resolve({ ok: true, error: null, week: { setup: !window.__SCHED_REG, commitments: CONFIRMED, office_hours: [],
+  var ART_NOTE = { id: 'cmt_c', kind: 'class', level: 'hard', title: 'ART 110', course: 'art-110', when: 'Mon 6–8:50pm',
+      where: 'Make-Believe Studio 4', source_uid: 'registrar:ua:202640-40006', path: 'commitments/art-110.md', meets: [] };
+  var CS_NOTE = { id: 'cmt_a', kind: 'class', level: 'hard', title: 'CS 100 <i>Lecture</i>', course: 'cs-100', when: 'Mon/Wed/Fri 12–12:50pm',
+      where: 'Room 101', source_uid: 'registrar:ua:202640-40001', path: 'commitments/cs-100.md', meets: [] };
+  var SHOWN = window.__SCHED_REG ? [CS_NOTE, ART_NOTE] : window.__REGISTRAR_DONE ? CONFIRMED.concat([ART_NOTE]) : CONFIRMED;
+  if (cmd === 'your_week') { return Promise.resolve({ ok: true, error: null, week: { setup: !window.__SCHED_REG, commitments: SHOWN, office_hours: [],
+      registrar_changes: window.__REGISTRAR_DONE || window.__SCHED_REG ? CHANGES : { applied: [], ended: [], kept: [], status: [], unread: [] },
       uncovered_courses: [{ slug: 'bui-100', title: 'BUI 100' }], window: [], warnings: [],
       registrar: window.__SCHED_REG ? { school: 'ua', held: ['202640'], current: '202710', refresh: true } : null,
       registrar_proposals: window.__SCHED_REG ? [ART] : [] }, registrar_label: window.__NO_REG ? null : 'myBama' }); }
@@ -209,6 +227,7 @@ window.__TAURI__ = { core: { invoke: function (cmd, args) {
   if (cmd === 'open_registrar_window') { return Promise.resolve({ ok: true, error: null, opened: true }); }
   if (cmd === 'capture_registrar' && window.__HOLD_REG) { return new Promise(function (res) {
       window.__RELEASE_REG = function () { window.__HOLD_REG = false; res(window.__TAURI__.core.invoke('capture_registrar', { view: 'today' })); }; }); }
+  if (cmd === 'capture_registrar' && window.__FAIL_REG) { return Promise.resolve({ ok: false, error: 'ENGINE-TEXT: no usable row', closed: true, state: null, result: null }); }
   if (cmd === 'capture_registrar') { window.__REGISTRAR_DONE = true; return Promise.resolve({ ok: true, error: null, closed: true, state: null,
       result: { term: '202640', rows: 2, confirmed: 1, proposed: 1, dropped: { no_time: 0, midnight: 0 }, warnings: [] } }); }
   if (cmd === 'close_registrar_window') { return Promise.resolve({ ok: true, error: null }); }
@@ -756,9 +775,43 @@ def check_registrar(page, errors) -> list:
             if want not in got: bad.append(f"the confirmed list lacks {want!r}: {got!r}")
         if "Chess Club" in got: bad.append("the confirmed list names a note the registrar did not confirm")
         if page.query_selector("#ws-reg-added i"): bad.append("a confirmed title's markup was not escaped")
+        bad += check_changes_list("#ws-reg-added", "the confirm screen", page)
     if page.evaluate("document.querySelectorAll('#week-setup input[type=text], #week-setup input[type=password]').length"):
         bad.append("the confirm screen accepts typed text")
     for e in errors: bad.append(f"registrar page error: {e}")
+    return bad
+
+
+def check_changes_list(host, where, page) -> list:
+    """B5: the 'From myBama' list holds changed, ended, kept yours, status and not-read rows, a
+    note named by its title, values escaped, the unread row in the page's own words, and the kept
+    rows saying whether the question is filed or waiting."""
+    bad = []
+    got = page.inner_text(host)
+    for want in ("From myBama — changed", "CS 100 <i>Lecture</i>: room Make-Believe Hall 101 → <b>Make-Believe Hall 102</b>",
+                 "meeting times Mon/Wed 12:00–12:50 → Mon/Wed 13:00–13:50",
+                 "From myBama — ended", "ART 110 ended on 2026-09-11", "Knowlu kept yours",
+                 "From myBama — kept yours", "your last day is 2026-11-20; myBama has 2026-12-11",
+                 "Knowlu has asked you in Decisions which to keep", "Knowlu will ask you in Decisions which to keep",
+                 "From myBama — status", "myBama lists it as Invented Withdrawn; nothing changed",
+                 "From myBama — not read", "Class 40009: myBama lists it with no class time; nothing changed"):
+        if want not in got: bad.append(f"{where}: the list lacks {want!r}")
+    if "ENGINE-SENTENCE" in got: bad.append(f"{where}: the engine's sentence reached the page")
+    if page.query_selector(host + " b") or page.query_selector(host + " i"): bad.append(f"{where}: a value's markup was not escaped")
+    return bad
+
+
+def check_registrar_failed(page, errors) -> list:
+    """B5, m3 and m4: a fetch that reached the engine and failed says one fixed sentence, never the
+    engine's text, and that a retry needs a fresh sign-in; the button comes back."""
+    bad = []
+    page.click("#ws-reg [data-reg-open]"); page.wait_for_timeout(200)
+    page.click("#ws-reg [data-reg-done]"); page.wait_for_timeout(400)
+    got = page.inner_text("#ws-reg")
+    if "ENGINE-TEXT" in got: bad.append("failed fetch: the engine's text reached the page")
+    if "nothing was changed" not in got or "sign in again" not in got: bad.append(f"failed fetch: the fixed sentence is missing: {got!r}")
+    if not page.is_visible("#ws-reg [data-reg-open]"): bad.append("failed fetch: the button did not come back")
+    for e in errors: bad.append(f"failed fetch page error: {e}")
     return bad
 
 
@@ -801,6 +854,8 @@ def check_registrar_schedule(page, errors, label) -> list:
         return ["Schedule: the registrar button is not shown"] + [f"page error: {e}" for e in errors]
     if page.inner_text(opener).strip() != "Refresh from myBama": bad.append(f"Schedule: the button reads {page.inner_text(opener)!r}")
     if "pri" not in (page.get_attribute(opener, "class") or ""): bad.append("Schedule: refresh is set but the button is not primary")
+    if not page.is_visible("#sched-reg-changes"): bad.append("Schedule: the From myBama list is not shown")
+    else: bad += check_changes_list("#sched-reg-changes", "Schedule", page)
     row = "#sched-reg-rows .row"
     if not page.query_selector(row) or "from myBama" not in page.inner_text(row): bad.append("Schedule: the registrar row is not marked")
     else:
@@ -883,6 +938,7 @@ def main() -> int:
                 reg.goto(url); reg.wait_for_timeout(600)
                 bad += check_registrar(reg, rerrors)
                 for flag, run in (("window.__HOLD_REG = true;", lambda p, e: check_registrar_hold(p, e)),
+                                  ("window.__FAIL_REG = true;", lambda p, e: check_registrar_failed(p, e)),
                                   ("window.__HOLD_CONFIRM = true;", lambda p, e: check_finish_pending(p, e)),
                                   ("window.__SCHED_REG = true;", lambda p, e: check_registrar_schedule(p, e, True)),
                                   ("window.__NO_REG = true;", lambda p, e: check_registrar_schedule(p, e, False))):

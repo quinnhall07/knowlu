@@ -3108,6 +3108,57 @@ fn the_confirm_screen_lists_what_mybama_confirmed() {
     assert!(reload.contains("invoke(\"your_week\", {})") && reload.contains("paintRegistrarAdded("), "read after the fetch");
 }
 
+/// Close-out B5 (spec A2 item 13): the "From myBama" list shows changed, ended, kept, status and
+/// unread rows from the overview's `registrar_changes`, on the confirm screen and on Schedule. The
+/// page reads the block; it computes no change, and every engine string is escaped.
+#[test]
+fn the_mybama_list_shows_changed_ended_kept_status_and_unread_rows() {
+    let html = read("index.html");
+    let sched = html.split("<section id=\"main-schedule\" hidden>").nth(1).unwrap().split("</section>").next().unwrap();
+    assert!(sched.contains("id=\"sched-reg-changes\" hidden"), "Schedule has a hidden list for the block");
+    assert!(sched.find("id=\"sched-reg-changes\"").unwrap() < sched.find("id=\"sched-list\"").unwrap(), "at the top, with the button");
+    let js = read("console.js");
+    let list = js.split("function registrarChangesHtml(").nth(1).expect("registrarChangesHtml").split("\n  function ").next().unwrap();
+    for key in ["ch.applied", "ch.ended", "ch.kept", "ch.status", "ch.unread"] {
+        assert!(list.contains(key), "the list reads {key}");
+    }
+    for heading in ["\" — changed\"", "\" — ended\"", "\" — kept yours\"", "\" — status\"", "\" — not read\""] {
+        assert!(list.contains(heading), "heading {heading}");
+    }
+    assert!(list.contains("e.kept_yours") && list.contains("e.card"), "ended says kept yours; kept says filed, waiting or listed");
+    assert!(list.contains("e.registrar") && list.contains("e.student"), "kept shows both values");
+    for part in ["h(regValue(", "h(e.status)", "h(e.until)"] {
+        assert!(list.contains(part), "escaped: {part}");
+    }
+    assert!(!list.contains("h(e.reason"), "the page words an unread row itself and never shows the engine's sentence");
+    let title = js.split("function regTitle(").nth(1).unwrap().split("
+  }").next().unwrap();
+    assert!(title.contains("h(c.title)") && title.contains("h(String(key)"), "a title is escaped where it is named");
+    for f in ["regTitle", "regValue", "regMeets"] {
+        assert!(js.contains(&format!("function {f}(")), "missing {f}");
+    }
+    let sched_js = js.split("function renderRegistrar(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(sched_js.contains("registrarChangesHtml(w.registrar_changes, w.commitments)"), "Schedule paints the block");
+    let added = js.split("function paintRegistrarAdded(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(added.contains("registrarChangesHtml(") && added.contains("changes"), "the confirm screen lists the block too");
+    let reload = js.split("function reloadSetupRows(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(reload.contains("w.week.registrar_changes"), "read after the fetch, from the overview");
+    assert!(read("console.css").contains(".reg-changes"), "the list has its own style");
+}
+
+/// Close-out B5, m3 and m4: a fetch that reached the engine and failed shows one fixed sentence,
+/// never the engine's text, and says a retry needs a fresh sign-in (the window is thrown away).
+#[test]
+fn a_failed_fetch_says_a_fixed_sentence_and_a_fresh_sign_in() {
+    let js = read("console.js");
+    assert!(js.contains("var REG_FAILED = "), "the fixed sentence is one constant");
+    let line = js.split("var REG_FAILED = ").nth(1).unwrap().split(";\n").next().unwrap();
+    assert!(line.contains("nothing was changed") && line.contains("sign in"), "m3 and m4: nothing changed; sign in again");
+    let bind = js.split("function bindRegistrar(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(bind.contains("if (env.closed) { registrarIdle(host, REG_FAILED); }"), "a closed failure never shows env.error");
+    assert!(!bind.contains("registrarIdle(host, env.error)"), "m3: the engine's text never reaches the page");
+}
+
 /// Phase 3 final review m1, m2: Not now is gated as Finish is (the first calendar read, a myBama
 /// fetch, a Finish), and closing the confirm screen closes the school's window.
 #[test]
