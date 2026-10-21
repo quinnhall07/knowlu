@@ -1469,18 +1469,74 @@ pub fn sort_registrar_entries(entries: &mut [serde_json::Value]) {
     entries.sort_by_key(|e| (part(e, "day"), part(e, "note"), part(e, "field"), part(e, "key")));
 }
 
+/// How a calendar no fresh read returned this run stays in the series file (the table's
+/// keep-alive column; `refresh_series`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeepAlive {
+    /// A registrar term (Plan rulings R2-a to R2-c, Amendment 1): a fetch is the whole term, so a
+    /// row it omits ends at once; unfetched, it counts as configured while [`registrar_in_play`]
+    /// (by `until`), then ages like a removed feed (read in 14 days).
+    InPlay,
+    /// Configured while the vault names a `cloud:google` feed, or read in 14 days.
+    GoogleFeed,
+    /// Configured while the vault names the calendar as a feed, or read in 14 days.
+    NamedFeed,
+}
+
+/// How a change to a confirmed note lands (the table's last column).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lands {
+    /// The fetch applies and lists it (phase-3 spec A2 item 8): `rank` files no card.
+    AppliedAndListed,
+    /// `detect_changes` offers it and `emit_checks` files a `commitment-check` card (§5.4).
+    Carded,
+    /// No card, ever: a `source_uid` outside the three prefixes (a `card:` note, an events
+    /// one-off, a hand-made note), as the old `SERIES_KEY_PREFIXES` allow-list left it.
+    NotWatched,
+}
+
+/// One row of the per-source table (phase-3 spec A2 item 16, close-out B3f, §8 Q4). Two key
+/// columns, because two strings select a source: a series' calendar key selects the tier,
+/// keep-alive, instances and the per-kind hold; a note's `source_uid` selects how a change lands.
+/// A lookup names its column ([`Source::by_calendar`], [`Source::by_uid`]); `None` is "any other".
+struct Source {
+    calendar: Option<&'static str>,
+    uid: Option<&'static str>,
+    tier: u8,
+    keep_alive: KeepAlive,
+    instances: bool,
+    holds_per_kind: bool,
+    lands: Lands,
+}
+
+/// The rows, as the spec's table. The fourth row's tier, keep-alive and instances are "as its
+/// calendar": a `by_calendar` lookup never reaches it (the third row matches any other calendar
+/// first), so only its `lands` and `holds_per_kind` are read. L5 adds one `syllabus:` row and its
+/// two keep-alive arms.
+const SOURCES: [Source; 4] = [
+    Source { calendar: Some(crate::registrar::CALENDAR_PREFIX), uid: Some(crate::registrar::CALENDAR_PREFIX), tier: 0, keep_alive: KeepAlive::InPlay, instances: false, holds_per_kind: true, lands: Lands::AppliedAndListed },
+    Source { calendar: Some("google:"), uid: Some("gcal-series:"), tier: 1, keep_alive: KeepAlive::GoogleFeed, instances: true, holds_per_kind: false, lands: Lands::Carded },
+    Source { calendar: None, uid: Some("ics-series:"), tier: 2, keep_alive: KeepAlive::NamedFeed, instances: true, holds_per_kind: false, lands: Lands::Carded },
+    Source { calendar: None, uid: None, tier: 2, keep_alive: KeepAlive::NamedFeed, instances: true, holds_per_kind: false, lands: Lands::NotWatched },
+];
+
+impl Source {
+    /// The row a series' calendar key selects (`Series.calendar`).
+    fn by_calendar(calendar: &str) -> &'static Source {
+        SOURCES.iter().find(|s| s.calendar.is_none_or(|p| calendar.starts_with(p))).expect("a catch-all row")
+    }
+
+    /// The row a note's or card's `source_uid` selects.
+    fn by_uid(uid: &str) -> &'static Source {
+        SOURCES.iter().find(|s| s.uid.is_none_or(|p| uid.starts_with(p))).expect("a catch-all row")
+    }
+}
+
 /// The one precedence between two records of one key or one signature (I2, phase-3 D7): a
 /// `registrar:` calendar first, then a `google:` one, then any other; then the lower calendar key.
-/// Smaller wins (Plan ruling R2-f).
+/// Smaller wins (Plan ruling R2-f). The tier is the table's ([`Source::by_calendar`]).
 fn precedence(series: &Series) -> (u8, &str) {
-    let tier = if series.calendar.starts_with(crate::registrar::CALENDAR_PREFIX) {
-        0
-    } else if series.calendar.starts_with("google:") {
-        1
-    } else {
-        2
-    };
-    (tier, series.calendar.as_str())
+    (Source::by_calendar(&series.calendar).tier, series.calendar.as_str())
 }
 
 impl SeriesFile {
@@ -1509,11 +1565,11 @@ impl SeriesFile {
     /// time at once; the record itself, with its old instances, stays in the file until it ages
     /// into `ended` (§3.3), so P12 can still name its last instance. A registrar series carries
     /// no instances and is left out, so its notes are busy by their weekly `meets` (phase 3,
-    /// Plan ruling R2-d).
+    /// Plan ruling R2-d; the table's instances column, [`Source::by_calendar`]).
     pub fn instances_map(&self) -> BTreeMap<String, (Date, Date, Vec<(Date, Time, Time)>)> {
         self.by_key()
             .into_iter()
-            .filter(|(_, series)| !series.calendar.starts_with(crate::registrar::CALENDAR_PREFIX))
+            .filter(|(_, series)| Source::by_calendar(&series.calendar).instances)
             .filter_map(|(key, series)| {
                 let read = self.calendars.get(&series.calendar).copied().or(series.last_seen)?;
                 let stale = series.last_seen.is_none_or(|seen| seen < read);
@@ -2264,16 +2320,13 @@ pub fn refresh_series_with(
     // Phase 3 (Plan rulings R2-a, R2-b): a registrar calendar is one term, read only when the
     // student fetches it. It counts as configured while it holds a series whose `until` is open or
     // less than 28 days past; then it ages like a removed feed.
-    let registrar = |calendar: &str| calendar.starts_with(crate::registrar::CALENDAR_PREFIX);
+    // Each arm is the table's keep-alive column ([`Source::by_calendar`], [`KeepAlive`]).
+    let whole_term = |calendar: &str| Source::by_calendar(calendar).keep_alive == KeepAlive::InPlay;
     let in_play = registrar_in_play(&old, today);
-    let configured = |calendar: &str| {
-        if registrar(calendar) {
-            in_play.contains(calendar)
-        } else if calendar.starts_with("google:") {
-            google
-        } else {
-            names.contains(calendar)
-        }
+    let configured = |calendar: &str| match Source::by_calendar(calendar).keep_alive {
+        KeepAlive::InPlay => in_play.contains(calendar),
+        KeepAlive::GoogleFeed => google,
+        KeepAlive::NamedFeed => names.contains(calendar),
     };
     let recent = |read: Option<Date>| read.is_some_and(|d| days_since(d, today) < UNSEEN_DAYS);
 
@@ -2298,7 +2351,7 @@ pub fn refresh_series_with(
             Some(keys) if keys.contains(held.source_uid.as_str()) => {}
             // D5 (Plan ruling R2-c): a registrar fetch is the whole term's truth; a row it no
             // longer returns is a dropped course, at once.
-            Some(_) if registrar(&held.calendar) => aged_out.push(held),
+            Some(_) if whole_term(&held.calendar) => aged_out.push(held),
             Some(_) if recent(held.last_seen) => series.push(held),
             Some(_) => aged_out.push(held),
             None if configured(&held.calendar) => series.push(held),
@@ -2353,10 +2406,10 @@ pub fn refresh_series_with(
             calendar: gone.calendar.clone(),
             dropped: today,
             // A registrar series has no instances: the day before the fetch that dropped it is the
-            // last day the registrar named it (Plan ruling R2-c).
-            last_instance: match registrar(&gone.calendar) {
-                true => Some(add_days(today, -1)),
-                false => gone.instances.iter().map(|i| i.date).max(),
+            // last day the registrar named it (Plan ruling R2-c; the table's instances column).
+            last_instance: match Source::by_calendar(&gone.calendar).instances {
+                false => Some(add_days(today, -1)),
+                true => gone.instances.iter().map(|i| i.date).max(),
             },
             until: gone.until,
         };
@@ -2464,17 +2517,19 @@ struct RegistrarHold(BTreeSet<(String, String)>);
 
 impl RegistrarHold {
     fn of(file: &SeriesFile, set: &Commitments, codes: &Codes, today: Date) -> Self {
-        let registrar = |uid: &str| uid.starts_with(crate::registrar::CALENDAR_PREFIX);
+        // The table's holds-per-kind column, by each record's own key: a note's `source_uid`, a
+        // series' calendar.
+        let holds_uid = |uid: &str| Source::by_uid(uid).holds_per_kind;
         let mut held: BTreeSet<(String, String)> = set
             .confirmed
             .iter()
             // Re-review m8: only a note in play (no `until`, or not before today) holds its course.
-            .filter(|n| class_like(&n.kind) && n.source_uid.as_deref().is_some_and(registrar))
+            .filter(|n| class_like(&n.kind) && n.source_uid.as_deref().is_some_and(holds_uid))
             .filter(|n| n.until.is_none_or(|until| until >= today))
             .filter_map(|n| n.course.as_deref().map(|c| (n.kind.clone(), course_key(c, codes))))
             .collect();
         for (_, series) in file.by_key() {
-            if !registrar(&series.calendar) || series.until.is_some_and(|until| until < today) {
+            if !Source::by_calendar(&series.calendar).holds_per_kind || series.until.is_some_and(|until| until < today) {
                 continue;
             }
             // A registrar row classifies without the planning names (`classify`'s first branch).
@@ -2487,11 +2542,12 @@ impl RegistrarHold {
         RegistrarHold(held)
     }
 
-    /// Whether the hold covers a `kind` question about `course` from `source` (a calendar or a
-    /// key). The registrar's own rows are never held, and a hold is per kind: a registrar lecture
-    /// leaves a lab of the same course alone.
-    fn holds(&self, source: &str, kind: &str, course: Option<&str>, codes: &Codes) -> bool {
-        !source.starts_with(crate::registrar::CALENDAR_PREFIX)
+    /// Whether the hold covers a `kind` question about `course` from `source`, the table row the
+    /// caller looked up by its own key (a series' calendar, a card's `source_uid`). A source that
+    /// holds is never held itself, and a hold is per kind: a registrar lecture leaves a lab of the
+    /// same course alone.
+    fn holds(&self, source: &Source, kind: &str, course: Option<&str>, codes: &Codes) -> bool {
+        !source.holds_per_kind
             && class_like(kind)
             && course.is_some_and(|c| self.0.contains(&(kind.to_string(), course_key(c, codes))))
     }
@@ -2502,7 +2558,7 @@ impl RegistrarHold {
         let Some(Value::Mapping(map)) = get(meta, "commitment") else { return None };
         let p = proposed(map).ok()?;
         let course = p.course.as_deref()?;
-        self.holds(key, &p.kind, Some(course), codes)
+        self.holds(Source::by_uid(key), &p.kind, Some(course), codes)
             .then(|| format!("{course}'s {} is held by the registrar", p.kind))
     }
 }
@@ -2630,7 +2686,7 @@ pub fn proposals(
         if closed.contains(&sig) || closed.contains(&by_title) {
             continue;
         }
-        if registrar_held.holds(&series.calendar, &kind, course.as_deref(), codes) {
+        if registrar_held.holds(Source::by_calendar(&series.calendar), &kind, course.as_deref(), codes) {
             continue;
         }
         match chosen.get(&sig) {
@@ -3650,11 +3706,6 @@ pub fn check_answerable(vault: &Path, target: &str, today: Date) -> Result<(), S
 // P12 — change detection: changed, ended, succeeded (§5.4, R22).
 // ---------------------------------------------------------------------------------------------
 
-/// The key prefixes a calendar series carries (R6); only notes keyed so are watched for changes.
-/// A `registrar:` note is not: its fetch applies and lists (phase-3 spec A2 item 8, close-out B3b;
-/// Plan ruling R2-g went), so `rank` files no change, end or swap card for one.
-const SERIES_KEY_PREFIXES: [&str; 2] = ["gcal-series:", "ics-series:"];
-
 /// A `meets` list as the set of `(DAY_KEYS index, start, end)` triples — the comparison §3.5's
 /// signature makes, so neither entry order nor day order is a change.
 fn meet_set(meets: &[Meet]) -> BTreeSet<(usize, Time, Time)> {
@@ -3864,7 +3915,9 @@ pub fn emit_checks_locked(
 }
 
 /// §5.4's detection, pure (no clock, no I/O, no model): the changes to confirmed notes keyed
-/// `gcal-series:` or `ics-series:` (never `registrar:`, [`SERIES_KEY_PREFIXES`]), over
+/// `gcal-series:` or `ics-series:`, the table rows whose change is [`Lands::Carded`] (R6; never
+/// `registrar:`, whose fetch applies and lists: phase-3 spec A2 item 8, close-out B3b, Plan ruling
+/// R2-g went; never a key outside the three, [`Lands::NotWatched`]), over
 /// [`SeriesFile::by_key`] and `file.ended`.
 /// `fresh` is the set of calendar keys read fresh and complete this run. Returns
 /// `(changes, warnings)`, in note order.
@@ -3938,7 +3991,7 @@ pub fn detect_changes(
     let mut warnings = Vec::new();
     for note in &set.confirmed {
         let Some(key) = note.source_uid.as_deref() else { continue };
-        if !SERIES_KEY_PREFIXES.iter().any(|p| key.starts_with(p)) || note.until.is_some_and(|u| u < today) {
+        if Source::by_uid(key).lands != Lands::Carded || note.until.is_some_and(|u| u < today) {
             continue;
         }
         let sig = note.signature(codes);
@@ -9841,6 +9894,28 @@ mod change_tests {
         assert!(detect(&file, &set, &[]).0.is_empty());
         assert!(detect(&file, &set, &["personal"]).0.is_empty());
         assert_eq!(detect(&file, &set, &[GOOGLE]).0.len(), 1);
+    }
+
+    #[test]
+    fn a_note_keyed_outside_the_watched_prefixes_stays_unwatched() {
+        // B3f (phase-3 spec A2 item 16, the table's "not watched" row): a confirmed note whose
+        // `source_uid` is not `gcal-series:`, `ics-series:` or `registrar:` (a card note, an events
+        // one-off, a hand-made key) files no change card, even when a fresh series under that same
+        // key moved its times.
+        for key in ["card:cs-100", "events:cs-100-talk", "hand-made-cs-100"] {
+            let mut moved = cs100(key, GOOGLE);
+            moved.meets = vec![meet(&["tue", "thu"], t(9, 30), t(10, 45))];
+            let file = file_of(vec![moved]);
+            let set = set_of(vec![note(key)]);
+            let (changes, warnings) = detect(&file, &set, &[GOOGLE]);
+            assert!(changes.is_empty(), "{key}: {changes:?}");
+            assert!(warnings.is_empty(), "{key}: {warnings:?}");
+            assert!(emit(&vault("unwatched"), &changes, &[]).is_empty(), "{key}");
+        }
+        // The control: the same move under a watched key is one card.
+        let mut moved = cs100(OLD, GOOGLE);
+        moved.meets = vec![meet(&["tue", "thu"], t(9, 30), t(10, 45))];
+        assert_eq!(detect(&file_of(vec![moved]), &set_of(vec![note(OLD)]), &[GOOGLE]).0.len(), 1);
     }
 
     #[test]

@@ -945,7 +945,9 @@ bullet, D5's end card, Amendment 2's end card, Amendment 4's actor and Plan ruli
     precedence, keep-alive, instances and the per-kind hold; a note's **`source_uid`** prefix
     (`registrar:`, `gcal-series:`, `ics-series:`) selects whether a change is watched and how it
     lands. A lookup names which key it uses; nothing matches a `source_uid` against a calendar
-    prefix or the reverse.
+    prefix or the reverse. (Corrected at B3f against the code: the per-kind hold reads both keys,
+    a series by its calendar and a confirmed note or a proposal card by its `source_uid`, each in
+    its own column of the same row.)
     - **Columns:** calendar prefix; `source_uid` prefix; precedence tier; keep-alive rule; whether
       its series carry instances; whether it holds other sources' proposals per kind; how a change
       to a confirmed note lands (applied and listed, a `commitment-check` card, or not watched).
@@ -953,7 +955,7 @@ bullet, D5's end card, Amendment 2's end card, Amendment 4's actor and Plan ruli
 
       | Calendar prefix | `source_uid` prefix | Tier | Keep-alive | Instances | Holds per kind | A change |
       |---|---|---|---|---|---|---|
-      | `registrar:` | `registrar:` | 0 | in play by `until` (Amendment 1) | no | yes | applied and listed (8) |
+      | `registrar:` | `registrar:` | 0 | in play by `until` (Amendment 1); a fetch that omits a row ends it at once (D5); out of play, read in 14 days | no | yes | applied and listed (8) |
       | `google:` | `gcal-series:` | 1 | configured, or read in 14 days | yes | no | carded |
       | any other | `ics-series:` | 2 | configured, or read in 14 days | yes | no | carded |
       | any other | any other `source_uid` | 2 | as its calendar | as its calendar | no | **not watched**: no card |
@@ -963,7 +965,9 @@ bullet, D5's end card, Amendment 2's end card, Amendment 4's actor and Plan ruli
       and the table must not start filing one. A test pins it: a confirmed note keyed outside the
       three prefixes, with a series whose times moved, gets no `commitment-check` card. B3 checks the
       keep-alive and instances cells against the code it refactors and corrects this table in its
-      commit if a cell differs; the table may not change behaviour to match this text.
+      commit if a cell differs; the table may not change behaviour to match this text. (B3f: the
+      registrar's keep-alive cell gained the at-once end and the 14-day fallback the code has; the
+      instances cells matched.)
     - **What L5 adds:** one `syllabus:` row (tier 1, `google:` moving to 2 and the rest to 3) and its
       two keep-alive arms.
     - **No output change:** the table changes no output on its own. The eight frozen references,
