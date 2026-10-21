@@ -3201,6 +3201,21 @@ fn the_panels_changes_describe_this_privacy_version() {
 }
 
 #[test]
+fn the_panels_first_line_names_the_version_from_the_key_never_a_literal_date() {
+    let js = read("console.js");
+    let table = js.split("var PRIVACY_CHANGES = {").nth(1).and_then(|s| s.split("};").next())
+        .expect("console.js needs `var PRIVACY_CHANGES = { … };`");
+    // A date typed into a line would go stale at the next bump while every other gate stayed green.
+    for l in table.lines().filter(|l| !l.contains("\": [")) {
+        assert!(!l.chars().collect::<Vec<_>>().windows(4).any(|w| w.iter().all(|c| c.is_ascii_digit())),
+            "a changes line must not carry a typed year: {l}");
+    }
+    let fill = js_fn(&js, "function fillReconsent(");
+    assert!(fill.contains("changed on \" + ") && fill.contains("key"),
+        "fillReconsent builds line 1 (\"Knowlu's privacy policy changed on …\") from the table key it shows");
+}
+
+#[test]
 fn every_start_control_reads_the_owed_flag_and_a_throw_never_strands_it() {
     let js = read("console.js");
     // The Today sync line's button, and a repaint of it when the flag changes.

@@ -92,3 +92,154 @@ fn the_review_amendments_i2_i3_and_i4_are_on_the_page() {
     );
     assert!(!privacy.contains("other than by Knowlu's automatic judgments"), "the judgments-only clause is still published");
 }
+
+// ---- L4 T9: the honest page's pins (draft §4.3 "L4.1"; red until T10's page lands) ----------------
+
+/// The page as a reader sees it: tags dropped, the few entities it uses decoded, curly apostrophes
+/// straightened and every run of whitespace one space, so a pin names a sentence, not its markup.
+fn page_text() -> String {
+    let html = fs::read_to_string(site("privacy.html")).expect("site/privacy.html");
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if in_tag => {}
+            '\u{2019}' => out.push('\''),
+            c => out.push(c),
+        }
+    }
+    let out = out.replace("&amp;", "&").replace("&nbsp;", " ").replace("&middot;", "\u{b7}");
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Every sentence in `wanted` that the page lacks, so one failure names all of them.
+fn missing<'a>(text: &str, wanted: &[&'a str]) -> Vec<&'a str> {
+    wanted.iter().copied().filter(|w| !text.contains(w)).collect()
+}
+
+#[test]
+fn the_page_drops_the_sentences_that_stopped_being_true() {
+    let text = page_text();
+    let still: Vec<&str> = ["Gmail is not connected in this version", "to fetch two things", "Six companies", "These four things"]
+        .into_iter().filter(|b| text.contains(b)).collect();
+    assert!(still.is_empty(), "the page still publishes: {still:?}");
+}
+
+#[test]
+fn the_page_names_the_kept_sign_ins_and_how_to_end_them() {
+    let gone = missing(&page_text(), &[
+        "Kept sign-ins at every school, for now",
+        "Forget Blackboard sign-in",
+        "Settings → Email",
+        "the pages and mail the site keeps in its own cache sit in the same folder without that encryption",
+    ]);
+    assert!(gone.is_empty(), "the page lacks: {gone:?}");
+}
+
+#[test]
+fn the_page_describes_forwarded_mail_as_it_is_read_and_kept() {
+    let gone = missing(&page_text(), &[
+        "Amazon Web Services",
+        "mail that arrives is deleted unread",
+        "2,000 characters",
+        "the codes of your courses",
+        "your school's tenant id",
+        "180 days",
+        "any mail from the last three days that did not reach Knowlu",
+        "up to 30 days back after a lapse",
+        "Knowlu does not yet bring in older mail, or mail that arrived while forwarding was off; only mail forwarded after setup reaches Knowlu",
+    ]);
+    assert!(gone.is_empty(), "the page lacks: {gone:?}");
+}
+
+#[test]
+fn the_page_describes_what_is_sent_to_a_model_and_what_survives_gmail() {
+    let gone = missing(&page_text(), &[
+        "up to the first 600 characters of the interests",
+        "Google holds Calendar and Gmail as one permission",
+        "who it was from",
+    ]);
+    assert!(gone.is_empty(), "the page lacks: {gone:?}");
+}
+
+#[test]
+fn the_page_carries_the_registrars_sentence_and_the_syllabus_parenthesis() {
+    let gone = missing(&page_text(), &[
+        "at schools Knowlu supports, your class schedule",
+        "Knowlu does not read syllabi in this version; the app will say when it does",
+    ]);
+    assert!(gone.is_empty(), "the page lacks: {gone:?}");
+}
+
+/// Draft Q3 (ii), the narrow form: reading a kind of material the page says Knowlu does not read is
+/// never a "smaller change" that gets only a new date.
+#[test]
+fn the_change_rule_says_a_newly_read_kind_of_material_is_never_a_smaller_change() {
+    let gone = missing(&page_text(), &["Reading a kind of material this page says Knowlu does not read, such as syllabi, is never a smaller change"]);
+    assert!(gone.is_empty(), "the page lacks: {gone:?}");
+}
+
+/// Draft Q3 (ii): a "Last changed" line apart from the version, a real date no earlier than the
+/// version line's. T13 moves both together; until then both read the old date, which this allows.
+#[test]
+fn the_last_changed_line_is_a_real_date_no_earlier_than_the_version() {
+    fn date_after(text: &str, marker: &str) -> Option<String> {
+        let d: String = text.split(marker).nth(1)?.chars().take(10).collect();
+        let b = d.as_bytes();
+        let shaped = b.len() == 10 && b.iter().enumerate().all(|(i, c)| if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() });
+        let (m, day) = (d.get(5..7)?.parse::<u32>().ok()?, d.get(8..10)?.parse::<u32>().ok()?);
+        (shaped && (1..=12).contains(&m) && (1..=31).contains(&day)).then_some(d)
+    }
+    let text = page_text();
+    let changed = date_after(&text, "Last changed ").expect("the page carries a `Last changed YYYY-MM-DD` line");
+    let version = date_after(&text, "This page is version ").expect("the page carries its version line");
+    assert!(changed >= version, "last changed {changed} is earlier than the version {version}");
+}
+
+/// Friends-testers spec Q7, as Quinn ruled it at Q-L8: both sentences, in the spec's words.
+#[test]
+fn the_page_carries_the_two_tester_and_counter_sentences() {
+    let gone = missing(&page_text(), &[
+        "We keep daily counts of your AI calls and cloud requests",
+        "If Knowlu gives you free tester access",
+    ]);
+    assert!(gone.is_empty(), "the page lacks: {gone:?}");
+}
+
+/// "What we collect" promises a closed list, so the tester-access record is a category inside it.
+#[test]
+fn the_tester_access_record_is_listed_under_what_we_collect() {
+    let text = page_text();
+    let at = text.find("If Knowlu gives you free tester access").expect("the tester sentence");
+    let start = text.find("What we collect").expect("the heading");
+    let end = text.find("What we do not collect").expect("the next heading");
+    assert!(start < at && at < end, "the tester-access sentence is outside What we collect");
+}
+
+/// Security must not say sessions are never in a file: the kept sign-ins are browser profiles on disk.
+#[test]
+fn security_does_not_claim_every_session_is_outside_a_file() {
+    let text = page_text();
+    assert!(!text.contains("Sessions live in Windows Credential Manager, not in a file"));
+    assert!(text.contains(
+        "Your Knowlu sign-in lives in Windows Credential Manager, not in a file; the two kept sign-ins described above are the exception, kept in a browser profile on this computer."
+    ));
+}
+
+/// Preserve: the way out stays named in the page's own words (passes today and must keep passing).
+#[test]
+fn the_page_still_names_settings_delete_my_data() {
+    assert!(page_text().contains("Settings → Delete my data"));
+}
+
+/// The page must not say more stays on the machine, or fewer sign-ins are kept, than the app does.
+#[test]
+fn the_page_does_not_overclaim_what_stays_local_or_which_sign_ins_are_kept() {
+    let text = page_text();
+    assert!(!text.contains("everything else in this list never leaves this machine"));
+    assert!(text.contains("app data leaves only in an issue report you choose to send"));
+    assert!(!text.contains("The one exception is the Blackboard sign-in"));
+    assert!(text.contains("if you forward a school mailbox, its saved mail sign-in"));
+}

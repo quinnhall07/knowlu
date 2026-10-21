@@ -2742,7 +2742,6 @@
   // PRIVACY_VERSION, so a bump of the constant cannot ship these lines by accident.
   var PRIVACY_CHANGES = {
     "2026-09-24": [
-      "Knowlu's privacy policy changed on 2026-09-24.",
       "It now covers the email you forward to Knowlu and what is kept from it, the Blackboard and mail sign-ins Knowlu keeps on this computer, your grades in your account, and daily counts of your AI calls.",
       "Until you accept, Knowlu keeps today's page up to date from this computer but does not sync, import or read anything new.",
       "To leave instead, use Settings → Delete my data."
@@ -2771,7 +2770,8 @@
     if (current.state && current.state.topline) { renderSyncLine(current.state); }
   }
   function fillReconsent(p) {
-    var lines = PRIVACY_CHANGES[p && p.current] || PRIVACY_CHANGES[Object.keys(PRIVACY_CHANGES)[0]] || [];
+    var key = PRIVACY_CHANGES[p && p.current] ? p.current : Object.keys(PRIVACY_CHANGES)[0];
+    var lines = ["Knowlu's privacy policy changed on " + key + "."].concat(PRIVACY_CHANGES[key] || []);
     EL("rc-changes").innerHTML = lines.map(function (l) { return "<p>" + h(l) + "</p>"; }).join("");
   }
   /** One `privacy_status` call per launch, for a signed-in vault only (`checkAccount` also runs on
