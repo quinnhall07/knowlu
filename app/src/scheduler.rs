@@ -760,6 +760,12 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
 /// `run_slot_inner`'s body, with the grades step's inputs (the curated row, the capture, the window
 /// question) and the mail step's (the mailboxes, the pass, the window question) handed in so a test can drive a
 /// dated row without editing `scaffold::CAMPUSES` and a mailbox without a window.
+///
+/// **Until the account accepts this build's privacy version** (L4, plan §4.5): for an `Entitled` vault whose
+/// privacy gate is not `Accepted`, the slot asks `account::refresh_privacy` once, and a failed check is the
+/// row `privacy (check failed: <reason>)` at exit 0. Only a definite `Older` answer turns the `sync`,
+/// `coursework`, `ingest`, `grades`, `judge` and `mail` steps that would have run into
+/// `<step> (skipped: privacy update not accepted)`; `rank`, the backup and telemetry run as always.
 pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHandle>, late: bool, grades: &GradesSeam, mail: &MailSeam) -> RunSummary {
     if mode(&cs.vault) != SchedulerMode::App {
         return refuse(sch, late, "scheduler is script on this vault");
@@ -898,29 +904,90 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
     // decide the slot's own judge and telemetry steps. The two reads answer different questions at
     // different points and must not be collapsed into one.
     let est = entitlement_state(cs);
+    // L4 (cloud design Amendment 2026-10-19, plan §4.5): until the account has accepted this build's
+    // privacy version, the cloud steps are named skips. Only an `Entitled` vault gets here: a step the
+    // entitlement already stops keeps the entitlement's name (a step it stops would not run whatever
+    // the student accepts). Only a definite `Older` answer holds anything back (Q-GATE): `Unknown`
+    // adds the failed check's row at most, and an `Accepted` cache makes no call and adds no row.
+    // `refresh_privacy` and `privacy_gate` own every rule about versions; nothing here compares one.
+    let mut privacy_held = false;
+    if est == crate::account::EntitlementState::Entitled {
+        if let Ok(cfg) = crate::account::cloud_config(&cs.vault) {
+            let mut gate = crate::account::privacy_gate(crate::account::load_privacy_cache(&cs.data_dir).as_ref(), &cfg.account_id);
+            if gate != crate::account::PrivacyGate::Accepted {
+                steps.start("privacy");
+                match crate::account::refresh_privacy(&cs.vault, &cs.data_dir) {
+                    Ok(found) => {
+                        gate = found;
+                        steps.idle();
+                    }
+                    // Exit code 0, and the cache (so the gate) is as it was; the runner log gets the bare line.
+                    Err(e) => steps.push((format!("privacy (check failed: {e})"), 0)),
+                }
+            }
+            privacy_held = gate == crate::account::PrivacyGate::Older;
+        }
+    }
+    const HELD: &str = "privacy update not accepted";
     // The grades step, after the entitlement step and before `judge`: the gate's fourth caller. A
     // capture writes a bundle for the engine's `grades` step (deleted after the loop below whatever
     // its exit code); anything else is one named skip at exit 0.
+    //
+    // Held: `grades_step` gets a stand-in capture that only records that it would have run and answers
+    // `Busy` (never `SignedOut`, which would write a mark), so its own earlier skips keep their names and
+    // only a capture that would have run becomes the privacy skip. The real capture is never called.
     steps.start("grades");
     let lms = crate::grades::campus_of(&cs.vault).lms;
-    let grades_bundle = match grades_step(grades.row, &lms, est, &cs.data_dir, grades.window_open, grades.capture) {
+    let would_capture = std::cell::Cell::new(false);
+    let stand_in = |_host: &'static str| {
+        would_capture.set(true);
+        Err(crate::grades::CaptureError::Busy)
+    };
+    let capture: Option<&dyn Fn(&'static str) -> Result<serde_json::Value, crate::grades::CaptureError>> =
+        if privacy_held && grades.capture.is_some() { Some(&stand_in) } else { grades.capture };
+    let grades_bundle = match grades_step(grades.row, &lms, est, &cs.data_dir, grades.window_open, capture) {
         GradesStep::Captured(path) => Some(path),
         GradesStep::Skip(name) => {
-            steps.push((name, 0));
+            steps.push((if would_capture.get() { format!("grades (skipped: {HELD})") } else { name }, 0));
             None
         }
     };
     // The mail step, after the grades capture and before the child-process loop starts with `sync` (spec §4.11, F6):
     // one hidden window at a time, so the two never run at once. No mailbox connected adds no row. Its rows are
     // the Settings page's and stay out of the runner-log filter below: the step writes nothing in the vault.
+    //
+    // Held: the same seam with a pass that answers `Err(HELD)`, so `mail_step`'s own skips and its "no
+    // mailbox, no row" keep their names and only a pass that would have run is the privacy skip.
     steps.start("mail");
-    match mail_step(est, &cs.data_dir, jiff::Timestamp::now().as_second(), mail) {
+    let held_pass = |_due: &[serde_json::Value]| -> Result<String, &'static str> { Err(HELD) };
+    let held_mail = MailSeam {
+        mailboxes: mail.mailboxes,
+        pass: mail.pass.map(|_| &held_pass as &dyn Fn(&[serde_json::Value]) -> Result<String, &'static str>),
+        window_open: mail.window_open,
+    };
+    match mail_step(est, &cs.data_dir, jiff::Timestamp::now().as_second(), if privacy_held { &held_mail } else { mail }) {
         Some(row) => steps.push((row, 0)),
         None => steps.idle(),
     }
-    let judge = judge_plan_for(est, cs);
+    let mut judge = judge_plan_for(est, cs);
+    if privacy_held && matches!(judge, JudgePlan::Cloud { .. }) {
+        judge = JudgePlan::Skip("judge (skipped: privacy update not accepted)");
+    }
     if let JudgePlan::Skip(note) = &judge {
         steps.push(((*note).to_string(), 0));
+    }
+    // The engine steps: `slot_argv` is not edited. Held, its `sync`, `coursework` and `ingest` entries are
+    // dropped by `args[0]` and each becomes a named skip after judge's row, in `slot_argv`'s order; an
+    // entry it did not emit (`ingest` without a feed) gets no row. The exe is only the entries' program, so a
+    // missing engine still reads as `engine: ...` below.
+    let exe = engine_exe();
+    let mut argv = slot_argv(&cs.vault, exe.as_deref().unwrap_or(Path::new("")), &judge, grades_bundle.as_deref());
+    if privacy_held {
+        let (held, kept): (Vec<_>, Vec<_>) = argv.into_iter().partition(|(_, a)| matches!(a[0].as_str(), "sync" | "coursework" | "ingest"));
+        for (_, a) in &held {
+            steps.push((format!("{} (skipped: {HELD})", a[0]), 0));
+        }
+        argv = kept;
     }
     // D8: a skipped step reaches the vault too. `RunSummary` lives in this process and the Runs
     // view reads the run record the ENGINE writes — a step this app left out appears in neither, so
@@ -962,8 +1029,10 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
         .steps
         .iter()
         .filter_map(|(n, _)| {
-            if n.starts_with("ingest (skipped:") || n.starts_with("judge (skipped:") || n.starts_with("grades (skipped:") {
+            if n.starts_with("ingest (skipped:") || n.starts_with("judge (skipped:") || n.starts_with("grades (skipped:") || n.starts_with("sync (skipped:") || n.starts_with("coursework (skipped:") {
                 Some(n.clone())
+            } else if n.starts_with("privacy (check failed") {
+                Some("privacy (check failed)".to_string())
             } else if n == "entitlement (refreshed)" {
                 Some(n.clone())
             } else if n.starts_with("entitlement (refresh failed") {
@@ -981,9 +1050,9 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
             let _ = knowlu_engine::cli::append_run_log(&cs.vault, "local", "ok", note, None);
         }
     }
-    match engine_exe() {
-        Ok(exe) => {
-            for (i, (e, args)) in slot_argv(&cs.vault, &exe, &judge, grades_bundle.as_deref()).into_iter().enumerate() {
+    match exe {
+        Ok(_) => {
+            for (i, (e, args)) in argv.into_iter().enumerate() {
                 let log = log_dir(cs).join(format!("slot-{}-{}-{}.txt", started.replace(':', ""), i, args[0]));
                 steps.start(&args[0]);
                 let code = run_child(&e, &args, &log, CHILD_TIMEOUT);

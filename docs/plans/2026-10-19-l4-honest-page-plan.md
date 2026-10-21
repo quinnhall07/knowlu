@@ -1226,6 +1226,11 @@ counts and outcomes recorded, never an address or token.
       signed-out account (§4.7's accepted cost), the ledger records which, and clean-up below deletes
       it. One mint at most; the staging mint cap (session ledger row 48) is the controller's to watch.
       Otherwise the check is recorded as not run, and T4's tests stand for it.
+- [ ] Policy-change notice (the page's "we will email the address on your account" is a published
+      commitment; T12-fix2): before the release that deploys V, the controller sends one notice to every
+      account whose latest consent `privacy_version` is below V, through the account-mail provider, and
+      records the count in the ledger. Nothing in `cloud/supabase/functions` sends it; do not soften the
+      page's sentence.
 - [ ] Clean-up per memory "live-proof profile cleanup": the scratch profiles, vaults, credentials and
       autostart entries; any staging address left by the check deleted.
 
@@ -1245,6 +1250,9 @@ Checks beyond the usual:
 6. `PRIVACY_VERSION` moved in a lane PR by Amendment 2026-10-19, committed on `main` at the sha T0
    recorded, and by Quinn's Q-AGENT answer, cited by its ledger row (the Amendment itself names no lane
    PR; review r1, M1); and the privacy guard now passes on this tree.
+8. The ledger holds the T15 policy-change notice row (count sent) before T17 merges; the page's Export
+   bullet names what `exportAll` leaves out (decisions, Google connection, Gmail proposals) until a
+   cloud-engineer task adds those tables, without token columns, to `exportAll` with a handler test.
 7. The warning tally is 0 other; the ignored count is the baseline's.
 A PASS lets T17 go ahead; findings are answered in §11 and re-reviewed.
 
@@ -1435,3 +1443,20 @@ All four applied in place; no further round follows.
 | nit | nit | The 401 case is unreachable for a simpler reason: deletes go only to rows the service lists as `pending` (EF `mail/setup.rs:415`), which are live addresses, at most three. | §4.7 says so: at most 1 + 3 requests whatever the record count, a network worst case of at most 115 s, and no delete can meet an expired token. `n` is now the number of deletes, in §4.7 and `SIGN_OUT_MAIL_CALL`'s doc line in T4. |
 
 **Also changed.** The status line reads "final (r4 review PASS, minors applied)", and checkpoint 1 records the pass.
+
+### Whole-lane review T16 (2026-10-21): round 1 FAIL (3 important, 4 minor), contract PASS (4 minor); round 2 PASS, contract PASS
+
+Rulings are the controller's under Quinn's standing go of 2026-10-20 (Quinn-delegated); the lane ledger holds the rows.
+
+| # | Sev. | Finding | Answer |
+|---|---|---|---|
+| I1 | important | The panel said Knowlu "does not sync, import or read anything new", but `rank` (never gated) still refreshes the student's Google Calendar through the cloud. | The copy now reads "Until you accept, Knowlu keeps today's page and your calendar up to date, but does not sync, import or read anything else new." (cf892e7). T8R's "code true to the copy" stands for every path that can be gated. §4's quotation above keeps the round-4 wording as history. |
+| I2 | important | `app/src/mail/live.rs`, `app/src/state.rs`, `app/tests/mail.rs` and `app/tests/mail_window.rs` changed outside §6's list; `on_start`'s resume is L1's territory. | Accepted. The session ledger tells L1 that the launch resume now checks (and, after 5b63855, refreshes) the gate before `open_backfills`, with the order pin in `app/tests/mail.rs`, and that the C3 plan's R9d no longer finds nothing to rebase over. |
+| I3 | important | `app/tests/static_assets.rs`'s import check was narrowed in 0cd05bf with no task naming it. | Ruled in, then restored to full strength: strings and comments are stripped, and `import` is refused anywhere (cf892e7). |
+| m4 | minor | The page text was committed before its version (be92709, c51c381, 62310ff) and changed after the bump (114e38c). | Recorded. Nothing was released and the date did not move; the release deploys `site/` from `main` at the merge, never from an earlier commit. |
+| m5 | minor | The first launch after an upgrade has no `privacy.json`, so the mail resume read `Unknown` and resumed. | The resume asks the service when the cache is not `Accepted` (5b63855). |
+| m6 | minor | Grades, Google-connection and Gmail §8.5 sentences had no pin. | Pinned in `engine/tests/site.rs` (14528d1). |
+| m7 | minor | The account route took any future date as a version. | Refused after tomorrow (UTC) (7ce8a5d). A version is therefore the day its page is published, never a later effective date. |
+| C-M1 | minor | A failed `privacy.json` write discarded the service's answer; the save fallback deleted the old file first. | The gate comes from the reply and the save error is named separately; the save never deletes (9cebf5b). |
+| C-M2, C-M3 | minor | Sign-out's credential delete waits behind the mail hold and clean; `setups_cleared` can be true before a late `note_pending`. | Accepted costs, as §4.7 already accepts. |
+| r2 minors | minor | Round 2: a failed save is visible only in a debug log and `cache_error`, which the console does not read; the regex-quote case in the import check's stripper; one test cannot see a third request; this plan still quotes the old panel line. | Recorded. A named scheduler row for a failed save is a follow-up, not this lane's. |

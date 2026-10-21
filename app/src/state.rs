@@ -212,11 +212,36 @@ fn sync_with_a_fresh_session(vault: &Path, direction: knowlu_engine::sync::Direc
     (lines, totals)
 }
 
+/// The named outcome of a sync the privacy gate holds, worded as the slot's skip is.
+pub const SYNC_HELD_FOR_PRIVACY: &str = "privacy update not accepted";
+
+/// L4 (cloud design Amendment 2026-10-19): true only while the account's cache says it has recorded an
+/// earlier privacy version (`PrivacyGate::Older`, the slot's own test in `scheduler.rs`). No cache yet,
+/// another account's cache and a vault with no readable account are `Unknown` and hold nothing. A
+/// disk read only; no network, and `account::privacy_gate` owns every rule about versions. Both syncs
+/// outside the slot, *Sync now* and the quit push, ask it, so the panel's "does not sync, import or
+/// read anything else new" is true of them as well. Unlike the slot it does not wait for an `Entitled`
+/// answer: holding a sync that the entitlement would also have stopped sends nothing either way.
+fn sync_held_for_privacy(cs: &ConsoleState) -> bool {
+    let Ok(cfg) = crate::account::cloud_config(&cs.vault) else { return false };
+    crate::account::privacy_gate(crate::account::load_privacy_cache(&cs.data_dir).as_ref(), &cfg.account_id)
+        == crate::account::PrivacyGate::Older
+}
+
 /// Runs the engine's sync in-process and records what it did. **Takes `vault_io`, never `lock`**:
 /// a pull writes notes and can file a card, so it must not run under the console's read lock, and
 /// `commands::sync_inner` takes `lock` only afterwards to rebuild `state`. The session is refreshed
 /// first ([`refresh_session`]).
 pub fn run_sync(cs: &ConsoleState) -> knowlu_engine::sync::SyncStatus {
+    // A named skip at `ok: true` (`SyncStatus::of` reads a skip as no error), so the tray stays calm and
+    // the engine is not reached: nothing is refreshed, pulled or pushed. It lives in `cs.sync` only; the
+    // engine's own status file is the engine's to write, and still says what the last real sync did.
+    if sync_held_for_privacy(cs) {
+        let totals = knowlu_engine::sync::Totals { skipped: Some(SYNC_HELD_FOR_PRIVACY.to_string()), ..Default::default() };
+        let status = knowlu_engine::sync::SyncStatus::of(&totals, vec![format!("sync (skipped: {SYNC_HELD_FOR_PRIVACY})")]);
+        *cs.sync.lock().unwrap_or_else(|e| e.into_inner()) = status.clone();
+        return status;
+    }
     let (lines, totals) = {
         let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
         sync_with_a_fresh_session(&cs.vault, knowlu_engine::sync::Direction::Both)
@@ -307,7 +332,9 @@ pub fn quit_flush(cs: &ConsoleState, cap: std::time::Duration, then: impl FnOnce
             // A quit flush pushes what is already on disk; it never pulls. A pull applies writes and
             // can file cards, and doing that while the window is closing would show the student a
             // deck they never saw change.
-            if knowlu_engine::sync::is_configured(&cs.vault) {
+            // Held while the privacy update is owed (`sync_held_for_privacy`): nothing is refreshed or
+            // pushed, so `synced` stays false, which is what it already says of a push that did not complete.
+            if knowlu_engine::sync::is_configured(&cs.vault) && !sync_held_for_privacy(cs) {
                 let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
                 // C1 (final review): refreshed first, like *Sync now* — see `refresh_session`.
                 let (_, totals) = sync_with_a_fresh_session(&cs.vault, knowlu_engine::sync::Direction::Push);

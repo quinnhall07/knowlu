@@ -5042,6 +5042,8 @@ fn the_launch_hook_cleans_unfinished_setups_under_the_mail_window_before_any_res
     let resume = body.find("start_resume(").unwrap();
     assert!(sweep < clean && clean < resume, "{body}");
     assert!(clean < body.find("keep_session").unwrap(), "cleaned whatever the saved sign-in switch says");
+    let gate = body.find("resume_held_after_privacy_check(").expect("on_start asks the privacy gate");
+    assert!(clean < gate && gate < body.find("open_backfills(").unwrap() && gate < resume, "held before any resume: {body}");
 }
 
 #[test]

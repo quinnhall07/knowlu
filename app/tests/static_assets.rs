@@ -49,6 +49,53 @@ fn the_page_has_every_region_and_none_of_the_mock() {
     for href in ["#today", "#overdue", "#week", "#later", "#all", "#decisions", "#good-to-know", "#issues", "#runs"] { assert!(html.contains(&format!("href=\"{href}\"")), "nav {href}"); }
 }
 
+/// Blank out JS string literals (single, double, template; with escapes) and comments.
+fn strip_strings_and_comments(src: &str) -> String {
+    let c: Vec<char> = src.chars().collect();
+    let (mut out, mut i) = (String::new(), 0);
+    while i < c.len() {
+        let ch = c[i];
+        if ch == '/' && c.get(i + 1) == Some(&'/') {
+            while i < c.len() && c[i] != '\n' { i += 1; }
+        } else if ch == '/' && c.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i < c.len() && !(c[i] == '*' && c.get(i + 1) == Some(&'/')) { i += 1; }
+            i += 2;
+        } else if ch == '"' || ch == '\'' || ch == '`' {
+            i += 1;
+            while i < c.len() && c[i] != ch {
+                if c[i] == '\\' { i += 1; }
+                if c.get(i) == Some(&'\n') && ch != '`' { break; }
+                i += 1;
+            }
+            i += 1;
+            out.push(' ');
+        } else {
+            out.push(ch);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// True when, outside strings and comments, the word `import` is followed by whitespace or `(`.
+fn has_import_syntax(src: &str) -> bool {
+    let code = strip_strings_and_comments(src);
+    let b = code.as_bytes();
+    code.match_indices("import").any(|(i, _)| {
+        let before_ok = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'$' || b[i - 1] == b'.');
+        matches!(b.get(i + 6).copied(), Some(b' ' | b'\t' | b'\n' | b'\r' | b'(')) && before_ok
+    })
+}
+
+#[test]
+fn the_import_check_rejects_statements_and_accepts_prose() {
+    assert!(has_import_syntax("var a = 1; import b from \"c\";"));
+    assert!(has_import_syntax("const m = import(\"x\");"));
+    let prose = "const t = \"does not sync, import or read\"; // import x\n/* import y */ `a \\` import z`";
+    assert!(!has_import_syntax(prose));
+}
+
 #[test]
 fn console_js_is_one_render_function_per_region_and_uses_invoke() {
     let js = read("console.js");
@@ -56,7 +103,8 @@ fn console_js_is_one_render_function_per_region_and_uses_invoke() {
         assert!(js.contains(&format!("function {f}(")), "missing function {f}");
     }
     assert!(js.contains("__TAURI__.core.invoke"));
-    assert!(!js.contains("import ") && !js.contains("require("), "no modules, no bundler");
+    // Module syntax only: strings and comments are stripped first, so the word in prose is fine.
+    assert!(!has_import_syntax(&js) && !js.contains("require("), "no modules, no bundler");
     // R28: route() must clear current.state too, or a view change's first paint can be
     // mistaken for a reorder (orderOf(stale today state) vs orderOf(new list state) always
     // differ) and the hold path leaves the new view's main column blank.
@@ -3046,4 +3094,228 @@ fn the_upgrade_overlay_shows_subscribe_only_for_a_not_entitled_answer() {
     assert!(unhide > ask, "no up-subscribe un-hide before the entitlement answer");
     assert!(body[ask..unhide].contains("!yes"), "the un-hide sits inside the not-entitled branch");
     assert!(body.contains("finishUpgrade()"), "an entitled answer goes straight to finishUpgrade()");
+}
+
+// L4 T7 (plan §4.6): the privacy re-consent panel. These are static pins on the page and its script;
+// they are red until T8 builds `#reconsent` and are committed with it (plan §2, "Held diffs").
+
+/// The panel's markup, from `id="reconsent"` to the end of its `</aside>`.
+fn reconsent_panel(html: &str) -> &str {
+    html.split("id=\"reconsent\"").nth(1).and_then(|s| s.split("</aside>").next()).expect("index.html needs the #reconsent panel")
+}
+
+/// The function whose head is `head`, to the next top-level function (a `fn_body` that also covers one-liners).
+fn js_fn<'a>(js: &'a str, head: &str) -> &'a str {
+    let at = js.find(head).unwrap_or_else(|| panic!("console.js needs {head}"));
+    let end = js[at + head.len()..].find("\n  function ").map(|i| at + head.len() + i).unwrap_or(js.len());
+    &js[at..end]
+}
+
+#[test]
+fn the_reconsent_panel_has_accept_settings_a_policy_link_and_no_way_to_dismiss_it() {
+    let html = read("index.html");
+    assert!(html.contains("<aside class=\"setpanel\" id=\"reconsent\""), "the panel is a setpanel, like #upgrade and #settings");
+    let panel = reconsent_panel(&html);
+    assert!(panel.contains("<button") && panel.contains("id=\"rc-accept\""), "an Accept button, #rc-accept");
+    assert!(panel.contains("id=\"rc-settings\""), "a Settings button, #rc-settings (the way to Delete my data)");
+    let link = panel.split("<a ").skip(1).map(|a| a.split('>').next().unwrap_or("")).find(|a| a.contains("data-policy=\"privacy\""))
+        .expect("the panel links the privacy policy with data-policy=\"privacy\"");
+    assert!(link.contains("class=\"policy\""), "the link is an a.policy: {link}");
+    // No way out but Accept and Settings: not a control, not an id, not a word.
+    let low = panel.to_lowercase();
+    for banned in ["not now", "close", "later", "dismiss", "skip"] {
+        assert!(!low.contains(banned), "the panel must not offer `{banned}`: there is no dismissing a re-consent");
+    }
+    assert!(!panel.contains("id=\"rc-later\"") && !panel.contains("id=\"rc-close\""), "no dismiss id");
+    let js = read("console.js");
+    assert!(js.contains("EL(\"rc-settings\")") || js.contains("#rc-settings"), "console.js must bind #rc-settings");
+    let reconsent_listener = js.split("EL(\"reconsent\").addEventListener(\"click\"").nth(1)
+        .expect("a click listener on #reconsent");
+    let listener = reconsent_listener.split("\n  });").next().unwrap_or(reconsent_listener);
+    let at = listener.find("#rc-settings").expect("the listener handles #rc-settings");
+    assert!(listener[at..].split("\n    if (").next().unwrap().contains("openSettings()"), "#rc-settings calls openSettings()");
+    // Escape never reaches the panel (§4.6: no Escape).
+    let keys = js.split("document.addEventListener(\"keydown\"").nth(1).and_then(|s| s.split("function openReport(").next())
+        .expect("the page's keydown handler");
+    assert!(!keys.contains("reconsent"), "Escape must not close the re-consent panel");
+}
+
+#[test]
+fn the_console_asks_privacy_status_once_at_launch_and_accept_privacy_on_accept() {
+    let js = read("console.js");
+    assert_eq!(js.matches("invoke(\"privacy_status\"").count(), 1, "one place asks privacy_status");
+    let asker = js.split("\n  function ").find(|f| f.contains("invoke(\"privacy_status\"")).expect("the function that asks");
+    assert!(asker.contains("PRIVACY_ASKED"), "it asks once per launch, behind a PRIVACY_ASKED flag, because openSettings re-runs checkAccount");
+    let check = js_fn(&js, "function checkAccount(");
+    let name = asker.split('(').next().unwrap().trim();
+    assert!(check.contains(&format!("{name}(")), "checkAccount reaches it ({name}), for a signed-in vault only");
+    assert!(asker.contains("needs_account"), "only a signed-in vault is asked");
+    assert_eq!(js.matches("invoke(\"accept_privacy\"").count(), 1, "one place accepts");
+    let listener = js.split("EL(\"reconsent\").addEventListener(\"click\"").nth(1).expect("a click listener on #reconsent");
+    let listener = listener.split("\n  });").next().unwrap_or(listener);
+    let rc = listener.find("#rc-accept").expect("the listener handles #rc-accept");
+    assert!(listener[rc..].contains("accept_privacy") || js.contains("function acceptPrivacy("), "Accept calls accept_privacy");
+    assert!(js.contains("RECONSENT_BUSY"), "two presses on Accept are one command (a busy flag)");
+    let after = js.split("invoke(\"accept_privacy\"").nth(1).unwrap();
+    let after = &after[..after.len().min(700)];
+    assert!(after.contains("poll()") && after.contains("EL(\"reconsent\").hidden = true"), "on ok, Accept hides the panel and calls poll()");
+    assert!(listener.contains("a.policy") && listener.contains("invoke(\"open_policy\""), "the panel's policy link goes through open_policy");
+}
+
+#[test]
+fn settings_starts_nothing_new_while_the_update_is_owed() {
+    let js = read("console.js");
+    let html = read("index.html");
+    assert!(js.contains("var RECONSENT_OWED"), "one owed flag, as #upgrade has UPGRADE_DISMISSED");
+    // The start controls that exist by id today; T8 may add ids, never drop one.
+    for id in ["set-google-connect", "set-google-reconnect", "set-email-start"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "{id} is in index.html today");
+        let locked = js.split("\n  function ").any(|f| f.contains(&format!("\"{id}\"")) && f.contains(".disabled") && f.contains("RECONSENT_OWED"));
+        assert!(locked, "a settings render must disable #{id} from RECONSENT_OWED");
+    }
+    // The controls that are built in script: Resume (mail row), Grades' Connect and Refresh.
+    for head in ["function mailBoxRow(", "function drawGrades("] {
+        assert!(js_fn(&js, head).contains("RECONSENT_OWED"), "{head} must read the owed flag");
+    }
+    assert!(js.contains("Accept the privacy update to use this"), "the one line that says why");
+    // Stopping a use never waits for consent: the stop controls are not read against the flag.
+    for id in ["set-google-disconnect-1", "set-google-disconnect-2", "set-grades-forget", "set-delete-1", "set-delete-2"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "{id} exists");
+        let gated = js.split("\n  function ").any(|f| f.contains("RECONSENT_OWED") && (f.contains(&format!("EL(\"{id}\").disabled")) || f.contains(&format!("EL(\"{id}\").hidden"))));
+        assert!(!gated, "#{id} must stay live while the update is owed");
+    }
+    // The panel stands down while #settings is open, and returns when it closes (as maybeUpgrade does).
+    let m = js_fn(&js, "function maybeReconsent(");
+    assert!(m.contains("EL(\"settings\").hidden") && m.contains("RECONSENT_OWED"), "maybeReconsent reads the owed flag and stands down over Settings");
+    let close = js.split("function closeSettings()").nth(1).expect("closeSettings");
+    assert!(close[..close.len().min(600)].contains("maybeReconsent("), "closing Settings raises the panel again");
+    assert!(js_fn(&js, "function openSettings(").contains("maybeReconsent("), "opening Settings stands the panel down");
+    // It stands down over every other .setpanel, and each one's open and close paths call it.
+    for id in ["settings", "report", "mail-progress", "mail-applied", "upgrade"] {
+        assert!(m.contains(&format!("EL(\"{id}\").hidden")), "maybeReconsent must read #{id}");
+    }
+    for f in ["function openReport(", "function openMailProgress(", "function mailLeave(", "function openMailApplied("] {
+        assert!(js_fn(&js, f).contains("maybeReconsent("), "{f} must re-run maybeReconsent");
+    }
+    for h in ["EL(\"report-cancel\").addEventListener", "EL(\"ma-close\").addEventListener"] {
+        let at = js.find(h).expect(h);
+        assert!(js[at..at + 200].contains("maybeReconsent("), "{h} must re-run maybeReconsent");
+    }
+    assert!(js.contains("EL(\"report\").hidden = true; maybeReconsent(); return;"), "Escape on #report re-runs maybeReconsent");
+    assert!(js.contains("setTimeout(function () { EL(\"report\").hidden = true; maybeReconsent(); }, 1500)"), "a sent report re-runs maybeReconsent");
+}
+
+#[test]
+fn no_email_setup_starts_while_the_update_is_owed() {
+    let js = read("console.js");
+    // The first-open setup waits for the privacy answer and stands down when the update is owed.
+    let boot = js_fn(&js, "function bootConsole(");
+    let at = boot.find("mailFirstOpen()").expect("bootConsole starts the first-open setup");
+    let before = &boot[..at];
+    assert!(before.contains("checkAccount()") && before.contains(".then("), "mailFirstOpen runs only after the account/privacy check settles");
+    assert!(js_fn(&js, "function mailFirstOpen(").contains("RECONSENT_OWED"), "mailFirstOpen reads the owed flag");
+    assert!(js_fn(&js, "function askPrivacy(").contains("return invoke(\"privacy_status\""), "askPrivacy returns its promise");
+    // The progress view's Gmail switch is a setup start too.
+    let line = js.lines().find(|l| l.contains("id=\"mp-gmail\"")).expect("mp-gmail is built in console.js");
+    assert!(line.contains("owedAttrs()"), "#mp-gmail is disabled while the update is owed");
+}
+
+#[test]
+fn an_unreachable_privacy_check_never_raises_the_panel() {
+    let js = read("console.js");
+    let asker = js.split("\n  function ").find(|f| f.contains("invoke(\"privacy_status\"")).expect("the function that asks privacy_status");
+    let catch = asker.split(".catch(").nth(1).expect("the call has a failed-call branch");
+    assert!(catch.contains("EL(\"reconsent\").hidden = true"), "a failed call hides the panel");
+    assert!(!catch.contains("RECONSENT_OWED = true"), "a failed call sets no owed flag");
+    // Only an exact `true` owes the update: false, null and an unreachable reply leave it down.
+    assert!(asker.contains("needs_accept === true"), "only needs_accept === true raises the panel");
+    assert_eq!(asker.matches("RECONSENT_OWED = true").count(), 1, "the flag is set in exactly one place");
+    let set_at = asker.find("RECONSENT_OWED = true").unwrap();
+    assert!(asker[..set_at].contains("needs_accept === true"), "…and only after that test");
+}
+
+#[test]
+fn the_panels_changes_describe_this_privacy_version() {
+    let rust = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let version = rust
+        .split("pub const PRIVACY_VERSION: &str = \"").nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("account.rs must declare `pub const PRIVACY_VERSION: &str = \"…\";`");
+    let js = read("console.js");
+    let table = js.split("var PRIVACY_CHANGES = {").nth(1).and_then(|s| s.split("};").next())
+        .expect("console.js needs `var PRIVACY_CHANGES = { … };` keyed by the version it describes");
+    assert!(table.contains(&format!("\"{version}\"")), "PRIVACY_CHANGES must carry a key for {version}, the build's PRIVACY_VERSION");
+}
+
+#[test]
+fn the_panels_first_line_names_the_version_from_the_key_never_a_literal_date() {
+    let js = read("console.js");
+    let table = js.split("var PRIVACY_CHANGES = {").nth(1).and_then(|s| s.split("};").next())
+        .expect("console.js needs `var PRIVACY_CHANGES = { … };`");
+    // A date typed into a line would go stale at the next bump while every other gate stayed green.
+    for l in table.lines().filter(|l| !l.contains("\": [")) {
+        assert!(!l.chars().collect::<Vec<_>>().windows(4).any(|w| w.iter().all(|c| c.is_ascii_digit())),
+            "a changes line must not carry a typed year: {l}");
+    }
+    let fill = js_fn(&js, "function fillReconsent(");
+    assert!(fill.contains("changed on \" + ") && fill.contains("key"),
+        "fillReconsent builds line 1 (\"Knowlu's privacy policy changed on …\") from the table key it shows");
+}
+
+/// One key per bump, and no way round it: the table holds only the build's version, and line 1 is
+/// built from the reply's `current`, which every `privacy_status` reply sets to PRIVACY_VERSION. A
+/// fallback to another key would show that key's date and lines for a version they do not describe.
+#[test]
+fn the_panels_line_one_names_privacy_version_and_the_table_has_one_key() {
+    let rust = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let version = rust
+        .split("pub const PRIVACY_VERSION: &str = \"").nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("account.rs must declare `pub const PRIVACY_VERSION: &str = \"…\";`");
+    let status = rust.split("pub fn privacy_status_in(").nth(1).and_then(|s| s.split("\n}\n").next())
+        .expect("account.rs has privacy_status_in");
+    assert!(status.matches("json!(").count() > 0, "privacy_status_in answers with json!");
+    assert_eq!(status.matches("json!(").count(), status.matches("\"current\": PRIVACY_VERSION").count(),
+        "every privacy_status reply carries current: PRIVACY_VERSION");
+    let js = read("console.js");
+    let table = js.split("var PRIVACY_CHANGES = {").nth(1).and_then(|s| s.split("};").next())
+        .expect("console.js needs `var PRIVACY_CHANGES = { … };`");
+    let keys: Vec<&str> = table.lines().map(str::trim).filter(|l| l.ends_with("\": ["))
+        .map(|l| l.trim_end_matches(": [").trim_matches('"')).collect();
+    assert_eq!(keys, [version], "PRIVACY_CHANGES has exactly one key, the build's PRIVACY_VERSION");
+    let fill = js_fn(&js, "function fillReconsent(");
+    assert!(!fill.contains("Object.keys"), "no fallback to another key's date or lines");
+    assert!(fill.contains("var key = p.current;"), "the key is the reply's current, PRIVACY_VERSION");
+    assert!(fill.contains("[\"Knowlu's privacy policy changed on \" + key + \".\"]"), "line 1 is built from the key");
+    let line1 = format!("Knowlu's privacy policy changed on {}.", keys[0]);
+    assert!(line1.contains(version), "line 1 reads {line1:?} and must name {version}");
+}
+
+#[test]
+fn the_panels_changes_name_gmail_and_amazon() {
+    let js = read("console.js");
+    let table = js.split("var PRIVACY_CHANGES = {").nth(1).and_then(|s| s.split("};").next())
+        .expect("console.js needs `var PRIVACY_CHANGES = { ... };`");
+    for w in ["Gmail", "Amazon"] {
+        assert!(table.contains(w), "the panel's changes must name {w}: the page now covers it");
+    }
+}
+
+#[test]
+fn every_start_control_reads_the_owed_flag_and_a_throw_never_strands_it() {
+    let js = read("console.js");
+    // The Today sync line's button, and a repaint of it when the flag changes.
+    assert!(js.contains("data-sync' + owedAttrs()"), "sync now carries owedAttrs()");
+    let owed = js_fn(&js, "function owedSettings(");
+    assert!(owed.contains("renderSyncLine("), "the sync line repaints when the owed flag changes");
+    assert!(owed.contains("drawGrades()") && owed.contains("refreshGradesDrawer()"), "the open grades drawer repaints too");
+    // Mail-progress answers (all but stop) and Rotate.
+    let mp = js_fn(&js, "function mpBtn(");
+    assert!(mp.contains("owedAttrs()") && mp.contains("\"stop\""), "mpBtn disables every answer but stop while owed");
+    assert_eq!(js.matches("emBtn(\"Rotate\", \"rotate\", id).replace(\"<button\", \"<button\" + owedAttrs())").count(), 2, "both Rotate buttons carry owedAttrs()");
+    // The flag is set only after the panel is filled; a throw clears it.
+    let asker = js.split("
+  function ").find(|f| f.contains("invoke(\"privacy_status\"")).unwrap();
+    assert!(asker.find("fillReconsent(p)").unwrap() < asker.find("RECONSENT_OWED = true").unwrap(), "fill the panel before raising the flag");
+    assert!(asker.split(".catch(").nth(1).unwrap().contains("RECONSENT_OWED = false"), "a throw clears the owed flag");
 }
