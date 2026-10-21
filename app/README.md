@@ -16,24 +16,30 @@ after a friend has installed orphans all three. It changed from `app.knowlu.desk
 9, before the first installer existed; the one visible cost was that the next launch re-registered
 autostart and reset the window position once. `tauri.conf.json` has no comment syntax, hence this note.
 
-The engine is linked as a path dependency (`knowlu-engine = { path = "../engine" }`). **Sixty-nine**
-(recounted 2026-09-26, commitment model phase 3, by script)
-`#[tauri::command]`s exist — **twenty-seven in `src/commands.rs`, four in `src/week.rs`, three in
-`src/registrar.rs`, fourteen in `src/onboarding.rs`, fourteen in `src/account.rs`, five in
-`src/lms_link.rs` and two in `src/report.rs`**. Commands live beside the module they serve, never
-all in one file. Count them in `src/main.rs`'s two `generate_handler!` lists if this drifts, and note that the two lists are
-different windows, not one:
+The engine is linked as a path dependency (`knowlu-engine = { path = "../engine" }`). **Ninety-two**
+distinct `#[tauri::command]`s are registered (recounted 2026-10-20, close-out P3-lock, by script:
+every name in the two `generate_handler!` lists of `src/main.rs`, split on the commas, counted
+per list and as a union) — **thirty-three from `src/commands.rs`, seventeen from `src/account.rs`,
+fourteen from `src/onboarding.rs`, ten from `src/mail.rs`, five from `src/lms_link.rs`, four each
+from `src/week.rs` and `src/grades.rs`, three from `src/registrar.rs` and two from `src/report.rs`**.
+Commands live beside the module they serve, never all in one file. Count them in `src/main.rs`'s
+two `generate_handler!` lists if this drifts, and note that the two lists are different windows,
+not one:
 
-- **The console window** registers 50 — all 27 of `commands.rs`; all four of `week.rs`; all three of
-  `registrar.rs`; `launch_state`, `pick_folder` and `pick_file` from `onboarding.rs`; eleven of
-  `account.rs`'s fourteen (the seven sign-in commands included, because an install that predates the account is
-  upgraded in place, inside this window, over its own vault; the three it lacks are the picker-only
-  Google ones below); and both of `report.rs`.
+- **The console window** registers 73 — 33 of `commands.rs`; all four of `week.rs` and of
+  `grades.rs`; all three of `registrar.rs`; all ten of `mail.rs`; `launch_state`, `pick_folder` and
+  `pick_file` from `onboarding.rs`; fourteen of `account.rs`'s seventeen (the seven sign-in
+  commands included, because an install that predates the account is upgraded in place, inside
+  this window, over its own vault; the three it lacks are the picker-only Google ones below); and
+  both of `report.rs`.
 - **The vault-less shell** (picker or wizard) registers 29 — the 14 of `onboarding.rs`, ten of
   `account.rs` (`google_sign_in`, `send_magic_link`, `verify_email_code`, `sign_out`,
   `entitlement_now`, `open_checkout`, `open_policy`, plus `google_connect_url`, `google_connected`
   and `open_external` — C2's hand-off H9 phase (a), the wizard's Google button) and all five of
   `lms_link.rs`: there is no `ConsoleState` yet, so no command that needs one can be called.
+
+73 + 29 is 102; the ten names both lists register (`launch_state`, `pick_folder`, `pick_file` and
+the seven sign-in commands) are counted once in the 92.
 
 In `commands.rs`: `state`, `note`, `mark_seen`, `ui_event` (read-only with respect to the vault's
 notes); `set_fields`, `create_task`, `delete_note`, `decide`, `answer_card`, `close_info`, `open_issue`,

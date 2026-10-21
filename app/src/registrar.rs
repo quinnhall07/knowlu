@@ -65,9 +65,10 @@ pub fn registrar_argv(vault: &Path, file: &Path, school: &str, today: Date) -> V
     ]
 }
 
-/// Writes the fetched bytes to `<profile>\tmp\`, runs `commitments --registrar` under `vault_io`,
-/// deletes the file whatever happened, and rebuilds the state for `view`. `closed` is always true
-/// here: the capture closes the window after this returns (Plan ruling R4-d).
+/// Writes the fetched bytes to `<profile>\tmp\`, runs `commitments --registrar` under `vault_io`
+/// and the sync run lock (refusing by name when a sync holds it), deletes the file whatever
+/// happened, and rebuilds the state for `view`. `closed` is always true here: the capture closes
+/// the window after this returns (Plan ruling R4-d).
 pub fn run_file(cs: &ConsoleState, view: &str, school: &str, bytes: &[u8], today: Date) -> Value {
     let dir = cs.data_dir.join("tmp");
     let stamp = knowlu_engine::journal::now_ts(None).replace([':', '.', '-'], "");
@@ -97,6 +98,10 @@ fn spawn(cs: &ConsoleState, dir: &Path, file: &Path, school: &str, bytes: &[u8],
     std::fs::write(file, bytes).map_err(|e| e.to_string())?;
     let exe = crate::scheduler::engine_exe()?;
     let _io = cs.vault_io.lock().unwrap_or_else(|e| e.into_inner());
+    // `commitments/` is a synced folder and the slot's `sync` child takes no `vault_io`: hold the
+    // engine's `state/sync.lock` for the child's run, after `vault_io` as `week::run_confirm` does,
+    // and refuse by name, without waiting, when a sync already holds it.
+    let _sync = crate::week::hold_sync_lock(&cs.vault)?;
     std::process::Command::new(exe).no_console().args(registrar_argv(&cs.vault, file, school, today)).output().map_err(|e| e.to_string())
 }
 

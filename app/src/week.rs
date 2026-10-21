@@ -118,8 +118,8 @@ fn run_confirm(cs: &ConsoleState, dir: &Path, file: &Path, confirm: &Value, toda
 }
 
 /// The exclusive OS lock `sync::RunLock::try_acquire` takes, on the same file, without waiting.
-/// It is released when the returned `File` is dropped.
-fn hold_sync_lock(vault: &Path) -> Result<std::fs::File, String> {
+/// It is released when the returned `File` is dropped. `registrar::spawn` takes it the same way.
+pub(crate) fn hold_sync_lock(vault: &Path) -> Result<std::fs::File, String> {
     let path = vault.join(knowlu_engine::sync::RUN_LOCK_FILE);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;

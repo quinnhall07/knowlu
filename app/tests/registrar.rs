@@ -119,6 +119,34 @@ fn a_fetched_schedule_runs_through_the_engine_and_the_temp_file_is_gone() {
     assert_eq!(std::fs::read_dir(&tmp).map(|d| d.count()).unwrap_or(0), 0, "the temp file is deleted");
 }
 
+/// A #19 close-out finding: `commitments/` is a synced folder, and the slot's `sync` step is a child
+/// process that takes no `vault_io`, so only `state/sync.lock` keeps a pull apart from the
+/// registrar's note writes. Like `week.rs`'s confirm, `run_file` refuses by name, without waiting,
+/// when a sync holds that lock, writes nothing and still deletes its temp file; it runs once the
+/// lock is free. The test holds the same exclusive OS lock `sync::RunLock` takes.
+#[test]
+fn a_registrar_run_refuses_while_a_sync_holds_the_run_lock() {
+    let _engine = real_engine();
+    let v = scratch("busy");
+    let cs = open(&v, "busy");
+    let _gone = Gone(vec![v.clone(), cs.data_dir.clone()]);
+    let lock_path = v.join(knowlu_engine::sync::RUN_LOCK_FILE);
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let held = std::fs::OpenOptions::new().create(true).write(true).open(&lock_path).unwrap();
+    held.try_lock().unwrap();
+    let today = "2026-09-01".parse().unwrap();
+    let env = run_file(&cs, "today", "ua", FIXTURE.as_bytes(), today);
+    assert_eq!(env["ok"], false, "the run went ahead under a sync's lock: {env}");
+    assert_eq!(env["error"], "a sync is running; try again in a moment");
+    assert_eq!(env["closed"], true);
+    assert!(!v.join("commitments").exists() && !v.join("state/calendar-series.json").exists(), "nothing written while a sync holds the lock");
+    assert_eq!(std::fs::read_dir(cs.data_dir.join("tmp")).map(|d| d.count()).unwrap_or(0), 0, "the temp file is deleted on a refusal too");
+    drop(held);
+    let env = run_file(&cs, "today", "ua", FIXTURE.as_bytes(), today);
+    assert_eq!(env["ok"], true, "the lock was the only reason: {}", env["error"]);
+    assert!(v.join("commitments/cs-100-lab.md").is_file());
+}
+
 #[test]
 fn a_parse_failure_is_named_writes_nothing_and_the_temp_file_is_gone_too() {
     let _engine = real_engine();
