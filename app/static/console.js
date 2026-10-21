@@ -1865,7 +1865,7 @@
     var who = g.email ? " (as " + g.email + ")" : "";
     if (g.state === "revoked") { return "Google stopped answering for Knowlu. While Google reviews Knowlu, connections expire after seven days."; }
     if (g.state === "none") { return "Gmail is not connected. Knowlu can read your inbox for things you have to do and propose each one for you to approve."; }
-    // L7 (spec 3.7): the service found no mail for a week. Quinn-ruled words, 2026-10-19.
+    // L7 (spec 3.7; plan Q2 and Q3, 2026-10-19): the service found no mail for a week.
     if (g.state === "quiet" && g.gmail) { return "Gmail is connected" + who + ", but Knowlu has found no mail in it for a week. If this is the wrong account, disconnect it and connect the right one."; }
     if (g.gmail) { return "Gmail is connected" + who + ", read-only. Knowlu proposes what it finds; nothing is added without you."; }
     return "Google Calendar is connected" + who + ". Gmail is not.";

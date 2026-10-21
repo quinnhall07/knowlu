@@ -3105,9 +3105,10 @@ fn the_issues_view_renders_source_issues_from_the_payload() {
     let view = fn_body(&js, "function renderIssuesView(");
     assert!(view.contains("issues_panel.sources") || view.contains("p.sources"), "the Issues view must read issues_panel.sources: {view}");
     assert!(view.contains("data-kind=\"info\""), "a source row names its kind as info: {view}");
-    let sources_at = view.find("sources").expect("sources");
-    let rows_at = view.find("p.rows.map").expect("the flagged rows");
-    assert!(sources_at < rows_at, "source issues render before the flagged rows");
+    // The rendered order, not the first mention: the assignment itself must put the source rows
+    // ahead of the flagged rows (a comment naming "sources" cannot satisfy this).
+    assert!(view.contains("innerHTML = srcs + p.rows.map"), "source issues render before the flagged rows: {view}");
+    assert!(view.contains("(p.sources || []).map"), "the source rows come from issues_panel.sources: {view}");
 }
 
 /// L7 plan section 3.6 and 3.7, T1 test 13: a connected Gmail the service says went quiet reads in
