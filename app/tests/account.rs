@@ -1871,6 +1871,149 @@ fn accept_privacy_uses_the_vaults_session_and_account() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+// ---- Contract review M1: a cache that cannot be written never discards the service's answer ----
+
+/// The sentence a reply names when `privacy.json` could not be written from it.
+const NOT_SAVED: &str = "the privacy check could not be saved";
+
+/// Marks `path` read-only until dropped, so a scratch folder can still be removed after a panic.
+#[cfg(windows)]
+struct ReadOnly(std::path::PathBuf);
+
+#[cfg(windows)]
+impl ReadOnly {
+    fn set(path: &std::path::Path) -> Self {
+        let mut p = std::fs::metadata(path).unwrap().permissions();
+        p.set_readonly(true);
+        std::fs::set_permissions(path, p).unwrap();
+        ReadOnly(path.to_path_buf())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ReadOnly {
+    #[allow(clippy::permissions_set_readonly_false)] // Windows only: this clears the one attribute.
+    fn drop(&mut self) {
+        if let Ok(m) = std::fs::metadata(&self.0) {
+            let mut p = m.permissions();
+            p.set_readonly(false);
+            let _ = std::fs::set_permissions(&self.0, p);
+        }
+    }
+}
+
+/// The file names in `dir`, so a test can say no `.tmp` was left behind.
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect()
+}
+
+/// A save that cannot replace `privacy.json` leaves it byte for byte. The rename is the one call that
+/// touches the target; a fallback that removed the target first, then failed its second rename, left no
+/// cache at all. A read-only `privacy.json` is a target the rename refuses: the save names its error,
+/// the old bytes stay, and no `.tmp` is left behind.
+#[cfg(windows)]
+#[test]
+fn a_privacy_cache_save_that_cannot_replace_the_file_leaves_the_old_bytes() {
+    let dir = privacy_dir("save-readonly");
+    save_privacy_cache(&dir, &privacy_cache("acc-1", Some("2000-01-01"))).unwrap();
+    let path = privacy_cache_path(&dir);
+    let before = std::fs::read(&path).unwrap();
+    let ro = ReadOnly::set(&path);
+    let got = save_privacy_cache(&dir, &privacy_cache("acc-1", Some(PRIVACY_VERSION)));
+    assert!(got.as_ref().is_err_and(|e| !e.is_empty()), "a refused rename is a named error: {got:?}");
+    assert_eq!(std::fs::read(&path).unwrap(), before, "the old privacy.json is as it was");
+    assert_eq!(names_in(&dir), ["privacy.json"], "no .tmp left behind");
+    drop(ro);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Accept's read-back stands when the cache cannot be written: the service recorded this version, so
+/// the answer is `ok`, and the write's failure is named beside it, never in place of it.
+#[test]
+fn an_accept_the_service_recorded_is_ok_when_the_cache_cannot_be_written() {
+    let dir = privacy_dir("accept-unsaved");
+    std::fs::create_dir_all(privacy_cache_path(&dir)).unwrap();
+    let (base, handle) = loopback(vec![(200, r#"{"ok":true}"#.to_string()), (200, consent_reply(PRIVACY_VERSION))]);
+    let out = accept_privacy_at(&format!("{base}/functions/v1"), "the-access-token", "acc-1", &dir);
+    assert_eq!(handle.join().expect("server thread").len(), 2);
+    assert_eq!((&out["ok"], &out["error"], &out["recorded"]), (&serde_json::json!(true), &serde_json::Value::Null, &serde_json::json!(PRIVACY_VERSION)), "{out}");
+    assert!(out["cache_error"].as_str().is_some_and(|e| e.starts_with(NOT_SAVED)), "{out}");
+    assert!(privacy_cache_path(&dir).is_dir(), "nothing replaced what was there");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The scheduler's gate is the reply's, not the write's. With a directory, then a read-only file, where
+/// `privacy.json` goes, this build's version is still `Accepted` (the slot is not held forever) and an
+/// older one still `Older` (the slot is held, not waved through); what was on disk stays as it was.
+#[cfg(windows)]
+#[test]
+fn refresh_privacy_answers_from_the_reply_when_the_cache_cannot_be_written() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::refresh_privacy;
+    let target = format!("knowlu/test-privacy-unsaved-{}-{}/session", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    save_a_live_session(&target);
+    let replies = [PRIVACY_VERSION, "2000-01-01", PRIVACY_VERSION, "2000-01-01"];
+    let (base, handle) = loopback(replies.iter().map(|v| (200, consent_reply(v))).collect());
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    let (vault, data) = privacy_vault("refresh-unsaved", &api_base, &target);
+    let path = privacy_cache_path(&data);
+
+    std::fs::create_dir_all(&path).unwrap();
+    assert_eq!(refresh_privacy(&vault, &data), Ok(PrivacyGate::Accepted), "a directory: the reply's version");
+    assert_eq!(refresh_privacy(&vault, &data), Ok(PrivacyGate::Older), "a directory: an older reply");
+    assert!(path.is_dir(), "nothing replaced the directory");
+    std::fs::remove_dir(&path).unwrap();
+    save_privacy_cache(&data, &privacy_cache("acc-2", Some(PRIVACY_VERSION))).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let ro = ReadOnly::set(&path);
+    assert_eq!(refresh_privacy(&vault, &data), Ok(PrivacyGate::Accepted), "read-only: the reply's version");
+    assert_eq!(refresh_privacy(&vault, &data), Ok(PrivacyGate::Older), "read-only: an older reply");
+    assert_eq!(std::fs::read(&path).unwrap(), before, "the read-only file is as it was");
+    drop(ro);
+    assert_eq!(handle.join().expect("server thread").len(), 4);
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// The panel's read answers from the reply too, and names the failed write in `cache_error`, a key of
+/// its own: `ok` and `error` describe the service's answer, and `needs_accept` is computed from it.
+#[cfg(windows)]
+#[test]
+fn privacy_status_answers_from_the_reply_and_names_a_cache_it_could_not_write() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use knowlu::account::privacy_status_in;
+    let target = format!("knowlu/test-privacy-status-unsaved-{}-{}/session", std::process::id(), line!());
+    let _cleanup = Cleanup(vec![target.clone()]);
+    save_a_live_session(&target);
+    let replies = [PRIVACY_VERSION, "2000-01-01", PRIVACY_VERSION];
+    let (base, handle) = loopback(replies.iter().map(|v| (200, consent_reply(v))).collect());
+    let api_base = format!("{base}/functions/v1");
+    let _api = ApiBase::set(&api_base);
+    let (vault, data) = privacy_vault("status-unsaved", &api_base, &target);
+    let path = privacy_cache_path(&data);
+    let check = |out: serde_json::Value, recorded: &str, needs: bool, case: &str| {
+        let want = serde_json::json!([true, null, PRIVACY_VERSION, recorded, needs]);
+        assert_eq!(serde_json::json!([out["ok"], out["error"], out["current"], out["recorded"], out["needs_accept"]]), want, "{case}: {out}");
+        assert!(out["cache_error"].as_str().is_some_and(|e| e.starts_with(NOT_SAVED)), "{case}: the write's error is named: {out}");
+    };
+
+    std::fs::create_dir_all(&path).unwrap();
+    check(privacy_status_in(&vault, &data), PRIVACY_VERSION, false, "a directory, this version");
+    check(privacy_status_in(&vault, &data), "2000-01-01", true, "a directory, an older version: the student is asked");
+    std::fs::remove_dir(&path).unwrap();
+    save_privacy_cache(&data, &privacy_cache("acc-1", Some("2000-01-01"))).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let ro = ReadOnly::set(&path);
+    check(privacy_status_in(&vault, &data), PRIVACY_VERSION, false, "read-only, this version");
+    assert_eq!(std::fs::read(&path).unwrap(), before, "the read-only file is as it was");
+    drop(ro);
+    assert_eq!(handle.join().expect("server thread").len(), 3);
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// **Review finding 1.** The deadline used to be tested only inside the `WouldBlock` arm, so a peer
 /// that connects and immediately closes (`n == 0`, no `/callback`, no sleep) took the `Ok` arm every
 /// time and never re-tested it — holding the call, the loopback port and a Tauri async-runtime

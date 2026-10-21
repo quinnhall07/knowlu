@@ -1381,8 +1381,17 @@ pub fn load_privacy_cache(data_dir: &std::path::Path) -> Option<PrivacyCache> {
 /// Written as [`save_cache`] writes `entitlement.json`, for the same reasons: the three keys through
 /// `ledger::dumps_value`, into a `.tmp` name unique to this call (the pid and [`CACHE_TMP_COUNTER`]),
 /// then renamed into place. A reader never sees half a file, and the launch's read and a slot's check
-/// can overlap without either consuming the other's source (R-C1c-final-5). A `.tmp` whose rename
-/// failed twice is removed, not left behind.
+/// can overlap without either consuming the other's source (R-C1c-final-5).
+///
+/// **The rename is the only call that touches `privacy.json`** (contract review M1). On Windows
+/// `fs::rename` replaces an existing target in one step (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`,
+/// and on access denied `FileRenameInfoEx` with replace-if-exists), so each attempt either lands the
+/// new bytes or leaves the old file exactly as it was. There is no remove-then-rename fallback, unlike
+/// [`save_cache`]: a remove that worked before a second rename that failed left no cache at all, and
+/// `remove_file` (a POSIX delete that ignores the read-only attribute) also took a read-only file the
+/// rename had refused. A failed rename is tried again after each of
+/// [`PRIVACY_RENAME_PAUSES`] (an overlapping save, an indexer or a scanner can hold the target for a
+/// moment); if every attempt fails, the `.tmp` is removed and the first error returned.
 pub fn save_privacy_cache(data_dir: &std::path::Path, c: &PrivacyCache) -> Result<(), String> {
     std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
     let v = json!({ "account_id": c.account_id, "recorded": c.recorded, "checked_at": c.checked_at });
@@ -1391,15 +1400,24 @@ pub fn save_privacy_cache(data_dir: &std::path::Path, c: &PrivacyCache) -> Resul
     let n = CACHE_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = data_dir.join(format!("privacy.json.{}-{n}.tmp", std::process::id()));
     std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        let _ = std::fs::remove_file(&path);
-        if let Err(e2) = std::fs::rename(&tmp, &path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!("privacy cache rename failed ({e}); fallback also failed: {e2}"));
+    let first = match std::fs::rename(&tmp, &path) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    for pause in PRIVACY_RENAME_PAUSES {
+        std::thread::sleep(pause);
+        if std::fs::rename(&tmp, &path).is_ok() {
+            return Ok(());
         }
     }
-    Ok(())
+    let _ = std::fs::remove_file(&tmp);
+    Err(format!("privacy cache rename failed ({first}); privacy.json was left as it was"))
 }
+
+/// The waits before each retry of [`save_privacy_cache`]'s rename: about a quarter of a second in all,
+/// paid only when a rename fails.
+const PRIVACY_RENAME_PAUSES: [std::time::Duration; 2] =
+    [std::time::Duration::from_millis(25), std::time::Duration::from_millis(200)];
 
 /// What the cache says about this build's [`PRIVACY_VERSION`] for the vault's account. Only `Older`
 /// holds anything back (§5 Q-GATE, Quinn's ruling): every account records the build's version at
@@ -1446,23 +1464,42 @@ fn privacy_token(cfg: &CloudConfig) -> Result<String, String> {
     valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now_unix())
 }
 
+/// What a reply names, under `cache_error`, when `privacy.json` could not be written from it.
+const PRIVACY_NOT_SAVED: &str = "the privacy check could not be saved";
+
 /// One read, cached for `account_id`. A read that fails writes nothing, so the previous cache stays
-/// exactly where it was.
-fn read_privacy(api_base: &str, token: &str, account_id: &str, data_dir: &std::path::Path) -> Result<PrivacyCache, String> {
+/// exactly where it was. A write that fails does not undo the read (contract review M1): the service's
+/// answer comes back beside the write's error, `PRIVACY_NOT_SAVED (<reason>)`, which is logged here,
+/// so every caller computes its gate from the reply and none can drop the failure silently.
+fn read_privacy(api_base: &str, token: &str, account_id: &str, data_dir: &std::path::Path) -> Result<(PrivacyCache, Option<String>), String> {
     let recorded = consent_status_at(api_base, token)?;
     let checked_at = jiff::Timestamp::from_second(now_unix()).map_err(|e| e.to_string())?.to_string();
     let c = PrivacyCache { account_id: account_id.to_string(), recorded, checked_at };
-    save_privacy_cache(data_dir, &c)?;
-    Ok(c)
+    let not_saved = save_privacy_cache(data_dir, &c).err().map(|e| format!("{PRIVACY_NOT_SAVED} ({e})"));
+    if let Some(e) = &not_saved {
+        eprintln!("Knowlu: {e}; the service's answer still stands");
+    }
+    Ok((c, not_saved))
+}
+
+/// `json` with `cache_error` added when the write failed. The key is absent after a write that
+/// landed, so a reply's shape is unchanged whenever `privacy.json` holds what it says.
+fn with_cache_error(mut json: Value, not_saved: Option<String>) -> Value {
+    if let (Some(e), Some(map)) = (not_saved, json.as_object_mut()) {
+        map.insert("cache_error".to_string(), Value::String(e));
+    }
+    json
 }
 
 /// The scheduler's one call: [`privacy_status_in`]'s read and cache write, answered as the gate. With
 /// no session at the target the vault's `config/cloud.yaml` names, it is `Err("no session")` and
-/// nothing is sent; a read that fails leaves the cache as it was.
+/// nothing is sent; a read that fails leaves the cache as it was. The gate is the reply's: a write
+/// that fails is logged by [`read_privacy`] and changes nothing here, so a definite answer is never
+/// turned into a failed check (the slot asks again while the file on disk is not `Accepted`).
 pub fn refresh_privacy(vault: &std::path::Path, data_dir: &std::path::Path) -> Result<PrivacyGate, String> {
     let cfg = cloud_config(vault)?;
     let token = privacy_token(&cfg)?;
-    let c = read_privacy(&cfg.api_base, &token, &cfg.account_id, data_dir)?;
+    let (c, _logged) = read_privacy(&cfg.api_base, &token, &cfg.account_id, data_dir)?;
     Ok(privacy_gate(Some(&c), &cfg.account_id))
 }
 
@@ -1470,15 +1507,17 @@ pub fn refresh_privacy(vault: &std::path::Path, data_dir: &std::path::Path) -> R
 /// answered older. A refusal or no network is `ok: false` with `recorded` and `needs_accept` null,
 /// never a guess, and the cache is left as it was. A vault with no account (no readable
 /// `config/cloud.yaml`, [`needs_account`]'s test) is the upgrade overlay's case, `needs_accept:
-/// false`, with nothing sent.
+/// false`, with nothing sent. An answer whose cache write failed is still `ok`, computed from the
+/// reply, and adds `cache_error` (contract review M1).
 pub fn privacy_status_in(vault: &std::path::Path, data_dir: &std::path::Path) -> Value {
     let Ok(cfg) = cloud_config(vault) else {
         return json!({ "ok": true, "error": Value::Null, "current": PRIVACY_VERSION, "recorded": Value::Null, "needs_accept": false });
     };
     match privacy_token(&cfg).and_then(|token| read_privacy(&cfg.api_base, &token, &cfg.account_id, data_dir)) {
-        Ok(c) => {
+        Ok((c, not_saved)) => {
             let needs_accept = privacy_gate(Some(&c), &cfg.account_id) == PrivacyGate::Older;
-            json!({ "ok": true, "error": Value::Null, "current": PRIVACY_VERSION, "recorded": c.recorded, "needs_accept": needs_accept })
+            let answer = json!({ "ok": true, "error": Value::Null, "current": PRIVACY_VERSION, "recorded": c.recorded, "needs_accept": needs_accept });
+            with_cache_error(answer, not_saved)
         }
         Err(e) => json!({ "ok": false, "error": e, "current": PRIVACY_VERSION, "recorded": Value::Null, "needs_accept": Value::Null }),
     }
@@ -1488,14 +1527,15 @@ pub fn privacy_status_in(vault: &std::path::Path, data_dir: &std::path::Path) ->
 /// and the Checkout retry already send, through [`record_consent_at`], then a read-back, and the cache
 /// written from **that** reply, never from the request. `{ok, error, recorded}`; `ok` is `true` only
 /// when the read-back is this version or later. A refused POST reads nothing back and leaves the cache.
+/// A read-back whose cache write failed is answered from the read-back and adds `cache_error`.
 pub fn accept_privacy_at(api_base: &str, token: &str, account_id: &str, data_dir: &std::path::Path) -> Value {
     let read = record_consent_at(api_base, token, TOS_VERSION, PRIVACY_VERSION)
         .and_then(|()| read_privacy(api_base, token, account_id, data_dir));
     match read {
-        Ok(c) if privacy_gate(Some(&c), account_id) == PrivacyGate::Accepted => {
-            json!({ "ok": true, "error": Value::Null, "recorded": c.recorded })
+        Ok((c, not_saved)) if privacy_gate(Some(&c), account_id) == PrivacyGate::Accepted => {
+            with_cache_error(json!({ "ok": true, "error": Value::Null, "recorded": c.recorded }), not_saved)
         }
-        Ok(c) => json!({ "ok": false, "error": PRIVACY_NOT_RECORDED, "recorded": c.recorded }),
+        Ok((c, not_saved)) => with_cache_error(json!({ "ok": false, "error": PRIVACY_NOT_RECORDED, "recorded": c.recorded }), not_saved),
         Err(e) => json!({ "ok": false, "error": e, "recorded": Value::Null }),
     }
 }
