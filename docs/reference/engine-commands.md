@@ -122,6 +122,31 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   `email-forwarding`): a probe that failed in transport ends the cloud arm's network passes
   (events, Gmail, mail, rules, labels) with one leading `judge: skipped (no network (…))` line at
   exit 0; tier 1's answers are still written first (`enrich_with` with the service marked missing).
+  **Out of credit (L7).** A judge reply carrying `unavailable: "out of credit"` is Knowlu's own
+  provider account, never the student's subscription. `CloudModel::verdict_of` reads it before
+  `outcome` and `cause` and sets `fatal()` to `judge::OUT_OF_CREDIT_LABEL`; unlike the daily cap it is
+  global, so `CloudModel::call` makes no further `/judge-*` request in the run (task, event or email).
+  `judge_task` maps it to `Outcome::ServiceUnavailable` (tier 1 is still written, the flag stays set),
+  and `judge_event` passes it through as an error, never `unsure`, so the uid is asked again next slot.
+  `run_lines_with` prints one line, `judge: the service answered out of credit on Knowlu's side, so the
+  rest of the batch was not sent`, and `judge_roster` ends the events pass with one summary line ending
+  `(out of credit on Knowlu's side)`. `keep_out_of_credit_heads_up` then opens one `heads-up` keyed
+  `judge-service:out-of-credit`, "Knowlu's AI checks are paused", as `agent:knowlu.enrich`; a second
+  run opens no twin (`source_issues::raise`). It closes the item (`source_issues::clear`) only when a
+  tier-3 reply in the run showed the model answering (`CloudModel::heard_model`: a verdict, or a
+  cause in `REPEATABLE_CAUSES`); a run that made no tier-3 call, or only tier 0 and 2 replies, leaves
+  it alone. A failed write adds `judge: a heads-up could not be written` and changes neither the
+  exit code (0) nor the pass.
+  **A quiet Gmail (L7).** `/gmail-read` answers `went_quiet` (true when the connected Gmail's own
+  7-day list held no message and the grant is at least 7 days old; see `cloud/supabase/README.md`);
+  `GmailPull.went_quiet` is `None` for an absent or non-boolean key (an older server). `pull_gmail`
+  reads it on round 0, before the empty-pull early return: `Some(true)` prints `gmail: no mail found
+  in the connected Gmail for 7 days` and opens one `heads-up` keyed `gmail-source:quiet`, "Gmail has
+  gone quiet", as `agent:knowlu.gmail`; `Some(false)` closes it; `None` does nothing. Every
+  `CloudError::Quiet(_)` (not connected, revoked, not configured) closes it too, keeping its own
+  words (`NoGmailScope` still prints nothing); transport, status and body errors leave it alone. A
+  failed write adds `gmail: a heads-up could not be written`. Both keys are source issues
+  (`source_issues::is_source_issue`): see `docs/surface/anatomy.md` §4.1.
 - **Forwarded mail (email spec 2026-09-30; `engine/src/mail/`).** `judge`'s cloud arm runs the mail
   pass (`mail::pull_mail`) after the Gmail pull and before the rules pass, inside the same entitlement
   gate, so a lapsed account pulls nothing; it is not a new command and `rank` never reaches it. Per

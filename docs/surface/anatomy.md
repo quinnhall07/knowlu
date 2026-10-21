@@ -47,7 +47,7 @@ Eight pages, one window (§12.5 #1, §12.6.4). The rails persist; the main colum
 | **Week** | Seven days: capacity, hours due, commitments — and where **pull-ahead** lives |
 | **Decisions** | The full approval queue, every kind and urgency |
 | **Info** | Things to know, open/close — including grade postings and late/missing flags |
-| **Issues** | Flagged judgments, cleared in one sitting |
+| **Issues** | Flagged judgments, cleared in one sitting; and the sources in trouble (`issues_panel.sources`) |
 | **Health** | Runs, sync, ingest and source status |
 | **Schedule** | What is my week made of, and which hours do I plan in? (§3.15) |
 
@@ -399,6 +399,8 @@ fact. The settings panel is an **overlay** over a running console, and nothing i
 - **Now also carries heads-up items** (§12.5 G2): grade postings, late/missing flags. Quinn's split:
   *who is owed an email* is a recurring task, *registration windows* are tasks, and only *grade
   changes* and *late/missing* are info.
+- **Source issues are not here** (L7): a heads-up that names a source in trouble
+  (`source_issues::is_source_issue`) is listed in `issues_panel.sources` instead (§4.1).
 - **Left out:** a separate heads-up region. Merged here rather than given its own strip.
 
 ### 3.13 CLOSED THIS WEEK
@@ -497,6 +499,19 @@ refusal the popover stays open and shows the refusal text instead.
 **Nothing acts on it.** No autonomous follow-up, ever. The list is cleared by a later Claude session
 in one sitting — that is the entire point of the mechanism (§3 #9).
 
+**Sources in trouble (L7).** `issues_panel` (`src/surface.rs`) also carries `sources`, one
+`SourceIssueRow` (`id`, `title`, `text`, `since`, `close_key`, `path`) for each open `info/` item
+that `source_issues::is_source_issue` accepts: kind `heads-up` and a `close_key` starting
+`mail-source:`, `judge-service:` or `gmail-source:` (`mail-reenabled:` is an announcement and is not
+one). `text` is the first non-blank line of the note's body, read from the note, and `since` is its
+`opened_at`; rows come in `list_info`'s path order. `open_count` counts these and the flagged `rows`
+together. The `sources` key is left out of the payload when the list is empty, so a vault with no
+source heads-up serialises as it did before. These are not issues a student flagged, and the payload
+offers no way to close one: the engine closes each when its cause is gone
+(`enrich::keep_out_of_credit_heads_up`, `enrich::clear_quiet_heads_up`, and the mail pass's
+`heads::keep` and `heads::close_unreported`). `good_to_know` leaves them out, and its count follows;
+every other heads-up stays there.
+
 ### 4.2 The "why" disclosure
 
 Every computed value can explain itself from inputs the engine already has and currently discards:
@@ -553,7 +568,7 @@ will not parse · offline.
 `verdict.headline == "Nothing active."`, `must_do.empty_text == "Nothing is at risk today."`,
 `recommended.empty_text == "No spare capacity today."`,
 `decisions.empty_text == "Queue clear — nothing waiting on you."`,
-`issues_panel.empty_text == "No open issues."`,
+`issues_panel.empty_text == "No open issues."` (set only when both `sources` and `rows` are empty),
 `runs_panel.empty_text == "No run recorded in the last 24 hours."`,
 `ahead.takeaway == "Nothing due in the next fortnight."` (no `empty_text` field of its own — the
 takeaway sentence carries it), `the_day.empty_text == "No free block today."`, and the four bare-`Vec`
