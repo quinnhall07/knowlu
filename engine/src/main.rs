@@ -75,7 +75,10 @@ enum Command {
     /// journal record; `state/calendar.md` is untouched. Always exits 0. With `--confirm`
     /// (phase-2 spec §3) it fetches nothing: it writes the screen's answers from a JSON file,
     /// prints `{created, declined, warnings, window}`, and exits 2 on unreadable input or an
-    /// invalid window, having written nothing.
+    /// invalid window, having written nothing. With `--registrar <file> --school <key>` (phase 3)
+    /// it fetches nothing either: it merges the registrar's rows and confirms the ones that match
+    /// a course, prints `{confirmed, dropped, proposed, rows, term, warnings}`, and exits 2 on an
+    /// unknown school or no usable row, having written nothing.
     Commitments {
         #[arg(long, default_value = ".")]
         vault: PathBuf,
@@ -87,7 +90,15 @@ enum Command {
         /// `{"mine": [{"source_uid", "level"}], "not_mine": [...], "window": "<flow sequence>"}`.
         #[arg(long)]
         confirm: Option<PathBuf>,
-        /// Who `--confirm` writes as. Default: the vault's human token (config/actor.yaml).
+        /// Phase 3: the registrar's fetched JSON (the app's temp file). Fetches nothing; writes
+        /// the series and the matched rows' notes; exit 2 on an unknown school or no usable row.
+        #[arg(long, conflicts_with = "confirm", requires = "school")]
+        registrar: Option<PathBuf>,
+        /// The registrar's school key (`registrar::SCHOOLS`), with `--registrar`.
+        #[arg(long)]
+        school: Option<String>,
+        /// Who `--confirm` and `--registrar` write as. Default: the vault's human token
+        /// (config/actor.yaml).
         #[arg(long)]
         actor: Option<String>,
         #[arg(long, default_value = "dashboard", value_parser = journal::VIAS)]
@@ -489,7 +500,31 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         // commitments command: begin
-        Command::Commitments { vault, today, json, confirm, actor, via } => {
+        Command::Commitments { vault, today, json, confirm, registrar, school, actor, via } => {
+            if let Some(path) = registrar {
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(err) => {
+                        eprintln!("knowlu-engine: --registrar {}: {err}", path.display());
+                        return ExitCode::from(2);
+                    }
+                };
+                // Ruling 11 (A1-F2): R24's notes carry the vault's human token, resolved after the
+                // file is read and before any write; a bad config/actor.yaml stops here.
+                let actor = match human_or_vaults(&vault, actor) { Ok(a) => a, Err(code) => return code };
+                let ctx = write::WriteContext::new(&actor, &via);
+                let school = school.as_deref().unwrap_or_default();
+                return match cli::commitments_registrar(&vault, today.as_deref(), &text, school, &ctx) {
+                    Ok(report) => {
+                        println!("{}", knowlu_engine::ledger::dumps_value(&report.to_json()));
+                        ExitCode::SUCCESS
+                    }
+                    Err(err) => {
+                        eprintln!("knowlu-engine: {err}");
+                        ExitCode::from(2)
+                    }
+                };
+            }
             if let Some(path) = confirm {
                 let text = match std::fs::read_to_string(&path) {
                     Ok(text) => text,
@@ -519,6 +554,7 @@ fn main() -> ExitCode {
                 let value = serde_json::json!({
                     "proposals": ordered.into_iter().map(cli::proposal_json).collect::<Vec<_>>(),
                     "uncovered_courses": report.uncovered,
+                    "registrar_changes": report.registrar_changes,
                     "warnings": report.warnings,
                 });
                 println!("{}", knowlu_engine::ledger::dumps_value(&value));

@@ -754,6 +754,7 @@
     return invoke("your_week", {}).then(function (r) {
       if (!r || !r.ok || !r.week) { EL("sched-n").textContent = (r && r.error) || ""; return; }
       var w = r.week;
+      registrarLabel = r.registrar_label || null; renderRegistrar(w);
       EL("sched-n").textContent = w.commitments.length + (w.commitments.length === 1 ? " commitment" : " commitments");
       EL("sched-list").innerHTML = w.commitments.map(function (c) {
         var known = KIND_NAMES.some(function (k) { return k[0] === c.kind; });
@@ -835,14 +836,195 @@
     });
   }
 
+  // ---- Phase 3 (spec D1, D6, §2): Get my class times from myBama. The page opens the school's
+  // sign-in window and, once the student says they are signed in, asks the app to read the
+  // schedule. The page never sees a cookie or the fetched bytes: `capture_registrar` keeps both.
+  var registrarLabel = null;   // your_week's registrar_label; null where the school has none
+  // B5, m3 and m4: a fetch that reached the engine and failed shows this sentence and nothing the
+  // engine said. The school window is gone by then (R4-d), so a retry starts from a fresh sign-in.
+  var REG_FAILED = "Knowlu couldn't use what the school sent, so nothing was changed. The sign-in window is closed; to try again, press the button and sign in again.";
+
+  // R5-a: a row the registrar proposed.
+  function fromRegistrar(p) { return p.source_uid.indexOf("registrar:") === 0; }
+
+  function registrarControls(host) {
+    return { open: host.querySelector("[data-reg-open]"), done: host.querySelector("[data-reg-done]"),
+      cancel: host.querySelector("[data-reg-cancel]"), say: host.querySelector("[data-reg-say]") };
+  }
+
+  function registrarIdle(host, message) {
+    var c = registrarControls(host);
+    c.open.hidden = false; c.done.hidden = true; c.cancel.hidden = true; c.done.disabled = false;
+    c.say.textContent = message || "";
+  }
+
+  // `after(env)` runs once a fetch has reached the engine: the confirm screen re-reads its rows;
+  // Schedule repaints (paint already ran its renderer when a state came back). `busy(on)`, if
+  // given, holds the host's screen from I'm signed in until the fetch and `after` settle, on every
+  // path (R5 review I1: a Finish mid-fetch wrote the rows from before the reload).
+  function bindRegistrar(host, after, busy) {
+    var setBusy = busy || function () {};
+    host.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var c = registrarControls(host);
+      if (e.target.closest("[data-reg-open]")) {
+        invoke("open_registrar_window", {}).then(function (r) {
+          if (!r || !r.ok) { registrarIdle(host, r && r.error); return; }
+          c.open.hidden = true; c.done.hidden = false; c.cancel.hidden = false;
+          c.say.textContent = "Sign in to " + registrarLabel + " in the window Knowlu opened, then press I'm signed in.";
+        }).catch(function () { registrarIdle(host, "Knowlu couldn't open " + registrarLabel + "; try again."); });
+      } else if (e.target.closest("[data-reg-done]")) {
+        c.done.disabled = true; c.cancel.hidden = true; setBusy(true);
+        c.say.textContent = "Reading your class schedule…";
+        invoke("capture_registrar", { view: stateView() }).then(function (env) {
+          c.done.disabled = false;
+          if (!env.ok) {
+            setBusy(false);
+            if (env.closed) { registrarIdle(host, REG_FAILED); } else { c.cancel.hidden = false; c.say.textContent = env.error; }
+            return;
+          }
+          if (env.state) { current.pendingOrder = null; paint(env.state, true); }
+          var r = env.result || {};
+          registrarIdle(host, "Found " + r.rows + (r.rows === 1 ? " class" : " classes") + " in " + registrarLabel + ": " + r.confirmed + " confirmed, " + r.proposed + " to check.");
+          return Promise.resolve(after(env)).then(function () { setBusy(false); }, function () { setBusy(false); });
+        }).catch(function () { setBusy(false); registrarIdle(host, "Knowlu couldn't read " + registrarLabel + "; try again."); });
+      } else if (e.target.closest("[data-reg-cancel]")) {
+        invoke("close_registrar_window", {}).catch(function () {});
+        registrarIdle(host, "");
+      }
+    });
+  }
+
+  // R5-c: Schedule's registrar section — the label by term, the primary style only when a term the
+  // file does not hold has begun, and the registrar's proposals with Add.
+  function renderRegistrar(w) {
+    var sec = EL("sched-reg-sec");
+    sec.hidden = !registrarLabel;
+    if (!registrarLabel) { return; }
+    var reg = w.registrar, open = EL("sched-reg").querySelector("[data-reg-open]");
+    open.textContent = (reg && reg.held && reg.held.length ? "Refresh from " : "Get my class times from ") + registrarLabel;
+    open.classList.toggle("pri", !!(reg && reg.refresh));
+    open.classList.toggle("y", !!(reg && reg.refresh));
+    EL("sched-reg-rows").innerHTML = (w.registrar_proposals || []).map(function (p) {
+      return '<div class="row sched reg-row"><div class="ttl"><span class="a">' + h(p.title) + '</span><span class="meta">' + h(p.when || "") +
+        ' <span class="src">from ' + h(registrarLabel) + '</span></span></div><div class="acts"><button class="b" type="button" data-reg-add="' +
+        h(p.source_uid) + '">Add</button></div></div>';
+    }).join("");
+    var list = registrarChangesHtml(w.registrar_changes, w.commitments), box = EL("sched-reg-changes");
+    box.hidden = !list; box.innerHTML = list;
+  }
+
+  // B5 (spec A2 item 13): the "From myBama" lists that follow a fetch and a restart, read from the
+  // overview's `registrar_changes`. The page names a note by its title (the block holds its path),
+  // words an unread row itself, and shows each value escaped; it works out nothing.
+  var REG_FIELDS = { meets: "meeting times", where: "room", until: "last day", from: "first day" };
+
+  function regMeets(list) {
+    return list.map(function (m) {
+      return m.days.map(function (d) { return d.charAt(0).toUpperCase() + d.slice(1, 3); }).join("/") + " " + m.start + "–" + m.end;
+    }).join(", ");
+  }
+
+  function regValue(v) { return v == null || v === "" ? "nothing" : Array.isArray(v) ? regMeets(v) : v; }
+
+  // Returns markup: the title is escaped here, once.
+  function regTitle(note, key, commitments) {
+    var c = (commitments || []).filter(function (x) { return x.path === note; })[0];
+    return c ? h(c.title) : (key ? "Class " + h(String(key).split("-").pop()) : "A class");
+  }
+
+  function registrarChangesHtml(ch, commitments) {
+    if (!ch || !registrarLabel) { return ""; }
+    var field = function (f) { return REG_FIELDS[f] || f; };
+    var CARDS = { filed: "Knowlu has asked you in Decisions which to keep.", waiting: "Knowlu will ask you in Decisions which to keep.", listed: "Listed here only." };
+    var parts = [
+      // `e["from"]`: the entry's old value, not the mail sender the deck scan looks for.
+      [" — changed", ch.applied, function (e) {
+        return regTitle(e.note, null, commitments) + ": " + h(field(e.field)) + " " + h(regValue(e["from"])) + " → " + h(regValue(e.to));
+      }],
+      [" — ended", ch.ended, function (e) {
+        return regTitle(e.note, null, commitments) + " ended on " + h(e.until) + (e.kept_yours
+          ? ' <span class="reg-card">You had set a different last day, so Knowlu kept yours.</span>' : "");
+      }],
+      [" — kept yours", ch.kept, function (e) {
+        return regTitle(e.note, null, commitments) + ": your " + h(field(e.field)) + " is " + h(regValue(e.student)) + "; " + h(registrarLabel) +
+          " has " + h(regValue(e.registrar)) + '. <span class="reg-card">' + h(CARDS[e.card] || CARDS.listed) + "</span>";
+      }],
+      [" — status", ch.status, function (e) {
+        return regTitle(e.note, e.key, commitments) + ": " + h(registrarLabel) + " lists it as " + h(e.status) + "; nothing changed.";
+      }],
+      [" — not read", ch.unread, function (e) {
+        var what = String(e.reason || "").indexOf("no class time") >= 0 ? "no class time" : "a meeting Knowlu can't read";
+        return regTitle(e.note, e.key, commitments) + ": " + h(registrarLabel) + " lists it with " + h(what) + "; nothing changed.";
+      }]];
+    return parts.filter(function (p) { return (p[1] || []).length; }).map(function (p) {
+      return '<p class="hint">From ' + h(registrarLabel) + p[0] + "</p><ul>" + p[1].map(function (e) { return "<li>" + p[2](e) + "</li>"; }).join("") + "</ul>";
+    }).join("");
+  }
+
+  // R5-b: after a fetch the confirm screen reads its rows again, and the answers and levels already
+  // given are put back by key.
+  function reloadSetupRows() {
+    var kept = {};
+    document.querySelectorAll("#week-setup .wsrow[data-key]").forEach(function (r) {
+      kept[r.getAttribute("data-key")] = { answer: r.getAttribute("data-answer"), level: r.getAttribute("data-level") };
+    });
+    return invoke("commitment_proposals", {}).then(function (r) {
+      paintSetupRows((r && r.proposals) || [], (r && r.uncovered_courses) || []);
+      document.querySelectorAll("#week-setup .wsrow[data-key]").forEach(function (row) {
+        var k = kept[row.getAttribute("data-key")]; if (!k) { return; }
+        row.setAttribute("data-answer", k.answer); row.setAttribute("data-level", k.level);
+        row.querySelectorAll("[data-answer-set]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.getAttribute("data-answer-set") === k.answer)); });
+        row.querySelectorAll("[data-level-set]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.getAttribute("data-level-set") === k.level)); });
+      });
+      return invoke("your_week", {}).then(function (w) {
+        paintRegistrarAdded(w && w.ok && w.week ? w.week.commitments : [], w && w.ok && w.week ? w.week.registrar_changes : null);
+      });
+    }).catch(function () {});
+  }
+
+  // Final review I3: the confirm screen lists what myBama confirmed (spec §2 step 4) — your_week's
+  // confirmed rows keyed `registrar:`, as the engine built them: title, then days and times.
+  function paintRegistrarAdded(commitments, changes) {
+    var added = (commitments || []).filter(function (c) { return c.source_uid && c.source_uid.indexOf("registrar:") === 0; });
+    var host = EL("ws-reg-added"), list = registrarChangesHtml(changes, commitments);
+    host.hidden = (!added.length && !list) || !registrarLabel;
+    host.innerHTML = host.hidden ? "" : (added.length ? '<p class="hint">From ' + h(registrarLabel) + " — added</p><ul>" + added.map(function (c) {
+      return '<li><span class="a">' + h(c.title) + '</span> <span class="meta">' + h(c.when || "") + "</span></li>";
+    }).join("") + "</ul>" : "") + list;
+  }
+
   // ---- Phase 2 (spec §2, D1, D3): the confirm screen, over the first-run view. `your_week` says
   // `setup` while the vault is on its first day and has no planning-day note. Not now hides the
   // screen for this console session; Finish writes the planning-day note, so it never returns.
-  var weekSetup = { dismissed: false, open: false, dirty: false };
+  var weekSetup = { dismissed: false, open: false, dirty: false, reading: false, fetching: false, finishing: false };
+
+  // R5 re-review: the one answer to "may Finish be pressed?" — nothing else is in flight: not the
+  // first calendar read, not a myBama fetch, not a Finish. Every path that re-enables Finish asks.
+  function finishMayRun() {
+    return !weekSetup.reading && !weekSetup.fetching && !weekSetup.finishing;
+  }
+
+  // A Finish in flight holds the myBama controls too, so no capture starts under it.
+  function setupFinishing(on) {
+    weekSetup.finishing = on;
+    EL("ws-reg").querySelectorAll("[data-reg-open], [data-reg-done]").forEach(function (b) { b.disabled = on; });
+    EL("ws-finish").disabled = !finishMayRun();
+    EL("ws-later").disabled = !finishMayRun();   // final review m1: Not now waits as Finish does
+  }
+
+  // R5 review I1: a myBama fetch holds Finish and Not now until it and the reload settle. Finish
+  // stays held past it while the first calendar read is still out (phase 2's final review I1).
+  function setupBusy(on) {
+    weekSetup.fetching = on;
+    EL("ws-finish").disabled = !finishMayRun();
+    EL("ws-later").disabled = !finishMayRun();
+  }
 
   function checkWeekSetup() {
     if (weekSetup.dismissed || weekSetup.open) { return; }
     invoke("your_week", {}).then(function (r) {
+      if (r) { registrarLabel = r.registrar_label || null; }
       if (r && r.ok && r.week && r.week.setup && !weekSetup.dismissed) { openWeekSetup(r.week); }
     }).catch(function () {});
   }
@@ -853,6 +1035,7 @@
     var preset = { class: 1, lab: 1, work: 1 }[p.kind] ? "mine" : "";
     return '<div class="wsrow" data-key="' + h(p.source_uid) + '" data-answer="' + preset + '" data-level="' + h(p.level) + '">' +
       '<div class="ttl"><span class="a">' + h(p.title) + '</span><span class="meta">' + h(p.when || "") + "</span>" +
+      (fromRegistrar(p) && registrarLabel ? ' <span class="src">from ' + h(registrarLabel) + "</span>" : "") +
       (p.where ? "<small>" + h(p.where) + "</small>" : "") + "</div>" +
       '<div class="acts"><button class="b" type="button" data-answer-set="mine" aria-pressed="' + (preset === "mine") + '">Mine</button>' +
       '<button class="b" type="button" data-answer-set="not" aria-pressed="false">Not mine</button>' + levelButtons(p.level) + "</div></div>";
@@ -867,7 +1050,9 @@
     }).join("");
     EL("ws-week-rows").innerHTML = rest.map(setupRow).join("");
     EL("ws-oh-rows").innerHTML = office.map(setupRow).join("");
-    EL("ws-classes").hidden = !classes.length && !uncovered.length;
+    EL("ws-classes").hidden = !classes.length && !uncovered.length && !registrarLabel;
+    EL("ws-reg").hidden = !registrarLabel;
+    if (registrarLabel) { EL("ws-reg").querySelector("[data-reg-open]").textContent = "Get my class times from " + registrarLabel; }
     EL("ws-week").hidden = !rest.length;
     EL("ws-oh").hidden = !office.length;
   }
@@ -884,8 +1069,9 @@
     // before it would write the planning-day note from the placeholder hours, and the routine's
     // window proposal would never be offered again.
     weekSetup.dirty = false;
-    EL("ws-finish").disabled = true;
-    var ready = function () { EL("ws-finish").disabled = false; };
+    EL("ws-finish").disabled = true; weekSetup.reading = true;
+    EL("ws-later").disabled = true;   // final review m1
+    var ready = function () { weekSetup.reading = false; EL("ws-later").disabled = !finishMayRun(); if (finishMayRun()) { EL("ws-finish").disabled = false; } };
     invoke("commitment_proposals", {}).then(function (r) {
       var ps = (r && r.proposals) || [];
       var win = ps.filter(function (p) { return p.window; })[0];
@@ -900,9 +1086,13 @@
     }).catch(function () { EL("ws-status").textContent = "Knowlu found nothing repeating on your calendar. Set your day below."; }).then(ready);
   }
 
-  function closeWeekSetup() { weekSetup.open = false; EL("week-setup").hidden = true; }
+  // Final review m2: the school's window goes with the screen (its controls do), wiped as on Cancel.
+  function closeWeekSetup() {
+    weekSetup.open = false; EL("week-setup").hidden = true;
+    invoke("close_registrar_window", {}).catch(function () {});
+  }
 
-  function finishWeekSetup(btn) {
+  function finishWeekSetup() {
     var mine = [], notMine = [];
     document.querySelectorAll("#week-setup .wsrow[data-key]").forEach(function (r) {
       var key = r.getAttribute("data-key"), a = r.getAttribute("data-answer");
@@ -914,9 +1104,9 @@
     var seq = windowSequence(EL("ws-window"));
     if (!seq) { showWindowError(EL("ws-window"), "Set the hours for at least one day"); return; }
     var payload = { mine: mine, not_mine: notMine, window: seq };
-    btn.disabled = true;
+    setupFinishing(true);
     confirmWeek(payload).then(function (env) {
-      btn.disabled = false;
+      setupFinishing(false);
       if (!env.ok) { showWindowError(EL("ws-window"), env.error); EL("ws-status").textContent = env.error; return; }
       closeWeekSetup();
       // Final review M4: a row --confirm skipped (no longer a current proposal) comes back as a
@@ -925,7 +1115,7 @@
       if (skipped.length) {
         EL("delta").textContent = skipped.length + (skipped.length === 1 ? " row" : " rows") + " will come back as questions: " + skipped.join("; ");
       }
-    }).catch(function () { btn.disabled = false; });
+    }).catch(function () { setupFinishing(false); });
   }
 
   EL("week-setup").addEventListener("click", function (e) {
@@ -947,9 +1137,9 @@
       row.querySelectorAll("[data-level-set]").forEach(function (b) { b.setAttribute("aria-pressed", String(b === l)); });
       return;
     }
-    if (e.target.closest("#ws-later")) { weekSetup.dismissed = true; closeWeekSetup(); return; }
+    if (e.target.closest("#ws-later")) { if (finishMayRun()) { weekSetup.dismissed = true; closeWeekSetup(); } return; }
     var fin = e.target.closest("#ws-finish");
-    if (fin) { finishWeekSetup(fin); }
+    if (fin) { finishWeekSetup(); }
   });
   bindWindowEditor(EL("ws-window"), function () { weekSetup.dirty = true; showWindowError(EL("ws-window"), null); });
 
@@ -1819,6 +2009,18 @@
   bindDeck();   // #deck's node persists across renderDeck's innerHTML rewrites — bound once
   bindDecisionsView();
   bindScheduleView();
+  bindRegistrar(EL("ws-reg"), reloadSetupRows, setupBusy);
+  bindRegistrar(EL("sched-reg"), function (env) { if (!env.state) { renderScheduleView(); } });
+  // R5-c: Add confirms a registrar row at hard, as the office-hours Add confirms at optional.
+  EL("sched-reg-rows").addEventListener("click", function (e) {
+    e.stopPropagation();
+    var b = e.target.closest("[data-reg-add]"); if (!b) { return; }
+    b.disabled = true;
+    confirmWeek({ mine: [{ source_uid: b.getAttribute("data-reg-add"), level: "hard" }] }).then(function (env) {
+      if (!env.ok) { b.disabled = false; showRefusal(null, "refused: " + env.error); }
+      if (!env.state) { return renderScheduleView(); }
+    }).catch(function () { b.disabled = false; });
+  });
   bindGoodToKnowView();
   bindIssuesView();
 

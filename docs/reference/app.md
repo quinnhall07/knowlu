@@ -7,17 +7,16 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-10-03 (email forwarding: ten `mail::` commands; the 2026-10-01 recount gave 60 / 29 / 79; the 2026-09-30 recount, M2 editing after Gmail connect and M1 grades merged in, gave 59 / 29 / 78; the
   merge-time recount gave 54 / 29 / 73, the 2026-09-29 one 47 / 29 / 66)** (by script,
   over the two `generate_handler!` lists in `app/src/main.rs`; C3′ added none):
-  **recounted 2026-10-20 on the L4 branch: console 68, picker/wizard 29, 87 distinct (L4 added `account::privacy_status` and `account::accept_privacy` to the console list; `cc8b162` counted 66 / 29 / 85, so the figures after this note, 70 / 29 / 89, are stale)**:
-  the console window registered **70** (email forwarding added the ten `mail::` commands; phase 2 added `answer_card`, `commitment_proposals`,
+  the console window registers **71** (recounted 2026-10-21 by the same script when L7, carrying L4, merged into p3-registrar: L4 added `account::privacy_status` and `account::accept_privacy` to the console list, where the L4 branch alone counted 68 / 29 / 87; on 2026-10-20 main's runtime removal took out the four `inference` commands and the UA registrar added three `registrar::` ones, `open_registrar_window`, `capture_registrar` and `close_registrar_window`; the earlier build-up: email forwarding added the ten `mail::` commands; phase 2 added `answer_card`, `commitment_proposals`,
   `commitments_confirm`, `your_week`, `preview_window`; M1 added `grades::grades_status`,
   `grades_connect`, `grades_refresh`, `grades_forget`; Gmail connect added `account::google_status`,
   `account::google_connect` and `account::google_disconnect`; M2 added `set_body`, `profile`, `set_preferences`, `set_interests` and
   `dropped_events`; events added `remove_lane_date`), the vault-less picker/wizard window **29**
   (C2's hand-off H9 phase (a) added `account::google_connect_url`, `account::google_connected`,
   `account::open_external`; C1b's H1 removed `account::sign_up` and `account::sign_in` with the
-  password and added `account::google_sign_in` to both lists) — **89** distinct. Commands live
+  password and added `account::google_sign_in` to both lists) — **90** distinct (2026-10-21). Commands live
   beside the module they serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`,
-  `report.rs`, `lms_link.rs`, `mail.rs`), never all in one file. **Thirteen** mutate notes (`set_fields`, `set_body`, `set_preferences`, `set_interests`,
+  `report.rs`, `lms_link.rs`, `mail.rs`, `registrar.rs`), never all in one file. **Thirteen** mutate notes (`set_fields`, `set_body`, `set_preferences`, `set_interests`,
   `create_task`, `delete_note`, `decide`, `answer_card`, `commitments_confirm`, `close_info`,
   `open_issue`, `resolve_issue`, `sync` — the last applies another desktop's writes through `write`
   and can file a `kind: amend` card); `set_fields` edits a commitment's `kind`/`level` only as
@@ -25,6 +24,25 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   without writing a note; `ui_event` writes the `state/events-ui/` ledger; everything else touches
   app data, `profiles.json`, the clipboard, the process or the updater — never a note. Recount
   before quoting a number.
+- **The UA registrar (commitment model phase 3; spec `docs/specs/2026-09-26-commitment-model-phase3-design.md`).**
+  Three console commands in `app/src/registrar.rs`, none in the wizard's list. `open_registrar_window`
+  opens `lms_link`'s incognito, capability-less sign-in window on the school's registrar
+  (`scaffold::Registrar`, chosen by `school_of` from `config/campus.yaml`'s `unitid`; UA only, any
+  other school gets the fixed line "Knowlu can't read your school's class schedule yet").
+  `capture_registrar(view)` reads that window's cookies for the registrar host only
+  (`lms_link::cookie_url`; they stay on the call's stack and never reach a file, a log or an error),
+  fetches the term the engine names (`fetch_term`; the app never computes a term), writes the bodies to
+  one temp file under the profile's `tmp\`, runs `commitments --registrar <file> --school <key>`
+  (`registrar_argv`: `--via dashboard`, no `--actor`, so the engine writes as the vault's human token)
+  under `vault_io` and the sync run lock (it refuses by name while a sync holds it), deletes the file
+  whatever happened, closes and wipes the window (once bytes reach the engine the session is thrown
+  away, whatever the engine says, so a retry needs a fresh sign-in) and returns the rebuilt state; it
+  keeps the window open only when Banner answers with its sign-in page. `close_registrar_window` closes
+  and wipes. `sweep_stale_files_in` removes `registrar-*.json` a crash left behind. A failed request
+  is reported in fixed words (`fetch_error`), never ureq's text, which can carry the URL. The engine's
+  exit 2 becomes a fixed sentence on the page; the page never shows engine text verbatim. The console
+  builder manages `LmsSession`, wipes on the `lms-signin` window's `Destroyed` and at exit, and never
+  touches `grades::WINDOW` or a mail window. Contract: `docs/reference/engine-commands.md`.
 - **M2 editing: bodies and the profile** (spec `docs/specs/2026-09-29-m2-editing-design.md`). Five
   console commands in `app/src/commands.rs`, each an `_inner` function plus a thin wrapper, none in the
   wizard's list. `set_body_inner(view, id, expected, body)` refuses a non-id before the engine is

@@ -94,6 +94,7 @@ pub mod profile;
 // The commitment model (spec 2026-09-23): the notes in `commitments/`, read into plain data for
 // `weekcal` and the piece-2 overlap API. Pure but for `load`'s reads; never a model or the network.
 pub mod commitments;
+pub mod registrar;
 
 // Grades from Blackboard (M1 spec 2026-09-29): the pure half — the capture bundle, course matching,
 // one column into the fields of a `grades/` note, and a course's standing. No I/O here.

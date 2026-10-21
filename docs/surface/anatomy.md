@@ -68,7 +68,7 @@ by one function.
 | **Picker** | one row per registered profile — name over vault path, with *Open* — and two buttons, *Use an existing vault…* (adopts a folder) and *Create a new vault…* (the wizard) | a launch with no `--vault` and more than one profile registered; or `--pick`, which is the settings overlay's *Switch profile…* |
 | **Wizard** | seven panels in order — Welcome, Your vault, Backup folder, Your LMS calendar, Coursework logins, Slots and campus, Finish. Back is always allowed and **nothing is written until *Finish*** except the Credential Manager entries, which are written when the credentials panel is left | a launch with no `--vault` and no profile registered; or the picker's *Create a new vault…* |
 | **Settings** | rows over the live page — profile name, vault path, backup folder, start with Windows, updates, account, Google, email, grades, preferences, campus events, problem report, delete my data, diagnostics (the `set-row` elements of `app/static/index.html` are the list) | the topline gear, or *Settings* in the tray (which `eval`s `window.KNOWLU_OPEN_SETTINGS`) |
-| **Confirm screen** (`#week-setup`) | "When do your classes meet?" — four groups: *Your classes* (with the courses that have no class row), *Your week*, *Office hours* and *Your day* (the window editor). Each row has Mine / Not mine / unanswered, and a level control on Mine. *Finish* writes through `commitments_confirm`; *Not now* writes nothing and hides it for the session | `your_week` says `setup` (the vault's first day, no planning-day note), over the first-run view |
+| **Confirm screen** (`#week-setup`) | "When do your classes meet?" — four groups: *Your classes* (with the courses that have no class row; at a school with a registrar it holds **Get my class times from myBama** — `open_registrar_window`, then *I'm signed in* → `capture_registrar` — and registrar rows are marked *from myBama*), *Your week*, *Office hours* and *Your day* (the window editor). Each row has Mine / Not mine / unanswered, and a level control on Mine. *Finish* writes through `commitments_confirm`; *Not now* writes nothing and hides it for the session | `your_week` says `setup` (the vault's first day, no planning-day note), over the first-run view |
 
 The picker and the wizard replace the whole document and run in a **vault-less window** — no
 `ConsoleState`, no tray, no scheduler, no autostart registration, because none of those has a vault
@@ -448,6 +448,14 @@ fact. The settings panel is an **overlay** over a running console, and nothing i
 - **The window editor** (*Your day*) previews an edit through `preview_window` after 400 ms: the
   preview's `moved.text`, or "No change to today's plan", and the first five items of the
   previewed day.
+- **Your classes** (only where `your_week`'s `registrar_label` is set): *Get my class times from
+  myBama*, or *Refresh from myBama* once `overview.registrar` holds a term, in the primary style
+  only when `registrar.refresh`; the registrar's proposals (`overview.registrar_proposals`), marked
+  *from myBama*, each with **Add** (a one-row `commitments_confirm`, level hard).
+- **After a registrar fetch** `overview.registrar_changes` (also `commitments --json`'s top-level
+  key) holds `{applied, ended, kept, status, unread}`, the lists of every term in play, so the
+  "From myBama" list can show changed, ended, kept ("kept yours", with its card) and status rows
+  after a restart. The engine supplies the lists; the page's rendering is close-out task B5's.
 - **Left out:** a remove control (spec D8).
 
 ### 3.16 GRADES (the strip and its drawer)

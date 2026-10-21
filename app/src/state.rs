@@ -77,14 +77,18 @@ pub struct ConsoleState {
     ///
     /// **Ordering, and it is one-way:** `vault_io` is taken BEFORE `lock`, never while `lock` is
     /// held. `lock` alone still guards the read polls, so a `state` poll never waits on a sync's
-    /// own network call. Nothing holds `vault_io` across a child-process wait, with one exception:
-    /// `commitments_confirm` (`week::run_confirm`, Plan ruling Q9-a) holds it for the whole
-    /// `commitments --confirm` child: that child writes notes, a sync must not rewrite the tree
-    /// under it, and it fetches nothing, so the hold is short. **`vault_io` alone does not keep the
-    /// slot's `sync` child out** (W1 P1P2-important), so `run_confirm` also holds the engine's
-    /// `state/sync.lock` (`sync::RUN_LOCK_FILE`) for the child's run. It takes that lock after
-    /// `vault_io`, as *Sync now* does, and refuses by name, without waiting, when a sync already
-    /// holds it.
+    /// own network call. Nothing holds `vault_io` across a child-process wait, with two
+    /// exceptions: `commitments_confirm` (`week::run_confirm`, Plan ruling Q9-a) holds it for the
+    /// whole `commitments --confirm` child, and `capture_registrar` (`registrar::run_file`, phase
+    /// 3) for the whole `commitments --registrar` child. Both children write notes, a sync must
+    /// not rewrite the tree under them, and neither fetches anything, so each hold is short.
+    /// **`vault_io` alone does not keep the slot's `sync` child out** (W1 P1P2-important), so
+    /// `run_confirm` also holds the engine's `state/sync.lock` (`sync::RUN_LOCK_FILE`) for the
+    /// child's run. It takes that lock after `vault_io`, as *Sync now* does, and refuses by name,
+    /// without waiting, when a sync already holds it; `registrar::run_file` does the same.
+    /// Neither lock covers `state/calendar-series.json` against a slot's `rank` child or
+    /// `commitment_proposals`: that read-modify-write is the engine's own, under its exclusive
+    /// `state/calendar-series.lock` (`commitments::refresh_series`, phase 3 final review I2).
     pub vault_io: Mutex<()>,
     pub settings: Mutex<Settings>,
     /// `Some` when `settings.json` existed but did not parse at open — names the path and the

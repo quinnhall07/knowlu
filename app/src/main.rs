@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use tauri::Manager;
-use knowlu::{account, commands, grades, lms_link, mail, onboarding, profiles, report, scheduler, state::{app_data_root, resolve_vault, ConsoleState}, tray, week};
+use knowlu::{account, commands, grades, lms_link, mail, onboarding, profiles, registrar, report, scheduler, state::{app_data_root, resolve_vault, ConsoleState}, tray, week};
 
 /// A missing/bad vault is fatal before any window exists, so it has to reach the user some way
 /// other than a console that may not be attached (the exe carries `windows_subsystem = "windows"`
@@ -162,6 +162,9 @@ fn run_console(p: profiles::Profile, root: std::path::PathBuf) -> ! {
             // Plan 4a Task 8, and BEFORE `tray::build`: the tray stashes its *Restart to update*
             // item in here, and `try_state` would find nothing if this came after.
             app.manage(knowlu::updates::Updates::default());
+            // Phase 3: the registrar's sign-in window is `lms_link`'s, so the console holds its
+            // session directory as the wizard does.
+            app.manage(lms_link::LmsSession::default());
             tray::build(app.handle())?;
             use tauri_plugin_autostart::ManagerExt;
             let al = app.autolaunch();
@@ -178,10 +181,20 @@ fn run_console(p: profiles::Profile, root: std::path::PathBuf) -> ! {
         // Closing the console window hides it to the tray instead of ending the process — Knowlu
         // keeps running so the scheduler (Task 12) can still fire. Quit is the tray's job. Only
         // `main` hides: the grades sign-in window (`lms-grades`) closes for real when the student
-        // closes it early (grades spec §4), and its kept session is never wiped here.
-        .on_window_event(|w, e| { if let tauri::WindowEvent::CloseRequested { api, .. } = e { if w.label() == "main" { api.prevent_close(); let _ = w.hide(); } } })
-        .invoke_handler(tauri::generate_handler![commands::state, commands::note, commands::mark_seen, commands::ui_event, commands::set_fields, commands::create_task, commands::delete_note, commands::remove_lane_date, commands::decide, commands::answer_card, week::commitment_proposals, week::commitments_confirm, week::your_week, week::preview_window, commands::close_info, commands::open_issue, commands::resolve_issue, commands::set_body, commands::profile, commands::set_preferences, commands::set_interests, commands::dropped_events, commands::sync, commands::backup_now, commands::get_settings, commands::set_settings, commands::set_profile_name, commands::copy_diagnostics, commands::copy_text, commands::settings_context, commands::switch_profile, commands::check_for_updates, commands::install_update, onboarding::launch_state, onboarding::pick_folder, onboarding::pick_file, account::google_sign_in, account::send_magic_link, account::verify_email_code, account::sign_out, account::open_policy, account::entitlement_now, account::open_checkout, account::account_status, account::open_portal, account::attach_account, account::delete_my_data, account::google_status, account::google_connect, account::google_disconnect, account::privacy_status, account::accept_privacy, report::report_preview, report::report_send, grades::grades_status, grades::grades_connect, grades::grades_refresh, grades::grades_forget, mail::mail_status, mail::mail_setup_start, mail::mail_setup_progress, mail::mail_setup_answer, mail::mail_setup_stop, mail::mail_sign_in, mail::mail_disconnect, mail::mail_rotate, mail::mail_keep_session, mail::mail_applied])
-        .run(tauri::generate_context!())
-        .expect("Knowlu: failed to start the Tauri runtime");
+        // closes it early (grades spec §4), and its kept session is never wiped here. The
+        // registrar's sign-in window (`lms_link::WINDOW`, `lms-signin`) is a campus session: it
+        // closes for real, and its throwaway directory is wiped on `Destroyed` (phase 3, R4-f).
+        .on_window_event(|w, e| {
+            if w.label() == lms_link::WINDOW {
+                if matches!(e, tauri::WindowEvent::Destroyed) { lms_link::wipe_session(w.app_handle()); }
+            } else if w.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = e { api.prevent_close(); let _ = w.hide(); }
+            }
+        })
+        .invoke_handler(tauri::generate_handler![commands::state, commands::note, commands::mark_seen, commands::ui_event, commands::set_fields, commands::create_task, commands::delete_note, commands::remove_lane_date, commands::decide, commands::answer_card, week::commitment_proposals, week::commitments_confirm, week::your_week, week::preview_window, registrar::open_registrar_window, registrar::capture_registrar, registrar::close_registrar_window, commands::close_info, commands::open_issue, commands::resolve_issue, commands::set_body, commands::profile, commands::set_preferences, commands::set_interests, commands::dropped_events, commands::sync, commands::backup_now, commands::get_settings, commands::set_settings, commands::set_profile_name, commands::copy_diagnostics, commands::copy_text, commands::settings_context, commands::switch_profile, commands::check_for_updates, commands::install_update, onboarding::launch_state, onboarding::pick_folder, onboarding::pick_file, account::google_sign_in, account::send_magic_link, account::verify_email_code, account::sign_out, account::open_policy, account::entitlement_now, account::open_checkout, account::account_status, account::open_portal, account::attach_account, account::delete_my_data, account::google_status, account::google_connect, account::google_disconnect, account::privacy_status, account::accept_privacy, report::report_preview, report::report_send, grades::grades_status, grades::grades_connect, grades::grades_refresh, grades::grades_forget, mail::mail_status, mail::mail_setup_start, mail::mail_setup_progress, mail::mail_setup_answer, mail::mail_setup_stop, mail::mail_sign_in, mail::mail_disconnect, mail::mail_rotate, mail::mail_keep_session, mail::mail_applied])
+        .build(tauri::generate_context!())
+        .expect("Knowlu: failed to start the Tauri runtime")
+        // A sign-in session still open when the console exits goes with it (phase 3, R4-f).
+        .run(|app, event| { if matches!(event, tauri::RunEvent::Exit) { lms_link::wipe_session_on_exit(app); } });
     std::process::exit(0)
 }

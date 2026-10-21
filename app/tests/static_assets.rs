@@ -3022,6 +3022,158 @@ fn no_ui_event_carries_mail_text() {
     assert!(!fn_body(&js, "function mailCardLine(").contains("ev("), "the card line is markup only");
 }
 
+/// Phase 3 of the commitment model (spec D6, D8, §2): the registrar button on the confirm screen and
+/// at the top of Schedule, the sign-in steps, the marker, and nothing typed.
+#[test]
+fn the_registrar_button_is_on_the_confirm_screen_and_the_schedule_view() {
+    let html = read("index.html");
+    let classes = html.split("id=\"ws-classes\"").nth(1).unwrap().split("</div></div>").next().unwrap();
+    assert!(classes.contains("id=\"ws-reg\""), "D6: under Your classes");
+    let sched = html.split("<section id=\"main-schedule\" hidden>").nth(1).unwrap().split("</section>").next().unwrap();
+    assert!(sched.find("id=\"sched-reg\"").unwrap() < sched.find("id=\"sched-list\"").unwrap(), "D6: at the top of Schedule");
+    for host in ["ws-reg", "sched-reg"] {
+        let block = html.split(&format!("id=\"{host}\"")).nth(1).unwrap().split("</div>").next().unwrap();
+        for part in ["data-reg-open", "data-reg-done", "data-reg-cancel", "data-reg-say", "I'm signed in"] {
+            assert!(block.contains(part), "#{host} lacks {part}");
+        }
+        assert!(!block.contains("type=\"text\"") && !block.contains("type=\"password\""), "#{host}: nothing is typed in Knowlu");
+    }
+    let js = read("console.js");
+    for f in ["fromRegistrar", "registrarControls", "registrarIdle", "bindRegistrar", "renderRegistrar", "reloadSetupRows"] {
+        assert!(js.contains(&format!("function {f}(")), "missing function {f}");
+    }
+    assert!(js.contains("invoke(\"open_registrar_window\", {})"));
+    assert!(js.contains("invoke(\"capture_registrar\", { view: stateView() })"), "one-word argument, the read model's view");
+    assert!(js.contains("invoke(\"close_registrar_window\", {})"));
+    assert!(js.contains("p.source_uid.indexOf(\"registrar:\") === 0"), "R5-a: the marker by key prefix");
+    assert!(js.contains("\"Refresh from \"") && js.contains("\"Get my class times from \""), "R5-c");
+    assert!(js.contains("r.registrar_label"), "R4-g: the button only where the school has a registrar");
+    assert!(js.contains("bindRegistrar(EL(\"ws-reg\"), reloadSetupRows, setupBusy)") && js.contains("bindRegistrar(EL(\"sched-reg\"),"));
+    let bind = js.split("function bindRegistrar(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(bind.contains("e.stopPropagation();"), "no click reaches the drawer or the deck underneath");
+    assert!(!js.contains("capture_registrar\", { view: current.view"), "Q10-a: never the page's own view");
+}
+
+/// R5 review I1, M3, M4: while a myBama fetch and the reload after it run, the confirm screen's
+/// Finish and Not now are disabled; a school without a registrar shows no button; the Schedule
+/// rows keep the row grid.
+#[test]
+fn a_registrar_fetch_holds_the_confirm_screen_and_no_registrar_hides_the_button() {
+    let js = read("console.js");
+    assert!(js.contains("bindRegistrar(EL(\"ws-reg\"), reloadSetupRows, setupBusy)"), "I1: the confirm screen's fetch is busy");
+    let busy = js.split("function setupBusy(").nth(1).unwrap().split("\n  }").next().unwrap();
+    assert!(busy.contains("EL(\"ws-finish\").disabled") && busy.contains("EL(\"ws-later\").disabled"), "I1: Finish and Not now wait");
+    let bind = js.split("function bindRegistrar(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(bind.matches("setBusy(false)").count() >= 3, "I1: every settle path clears the busy state");
+    assert!(bind.contains("c.cancel.hidden = true; setBusy(true);"), "M5: no Cancel mid-capture");
+    assert!(!bind.contains("registrarIdle(host, \"\"); });"), "M6: a rejected invoke says so");
+    let css = read("console.css");
+    assert!(css.contains(".reg[hidden] { display: none; }"), "M3: a flex class beats the UA's [hidden]");
+    assert!(js.contains("class=\"row sched reg-row\"") && !js.contains("class=\"row sched reg\""), "M4: rows keep the row grid");
+}
+
+/// R5 re-review (fix round 1): one helper answers "may Finish be pressed?", every path that
+/// re-enables Finish asks it, and a Finish in flight holds the myBama controls.
+#[test]
+fn finish_is_re_enabled_only_through_one_helper() {
+    let js = read("console.js");
+    let may = js.split("function finishMayRun(").nth(1).unwrap().split("\n  }").next().unwrap();
+    for flag in ["weekSetup.reading", "weekSetup.fetching", "weekSetup.finishing"] {
+        assert!(may.contains(flag), "finishMayRun ignores {flag}");
+    }
+    let fin = js.split("function finishWeekSetup(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(!fin.contains("btn.disabled = false"), "Finish's settle never re-enables it unconditionally");
+    assert!(fin.matches("setupFinishing(false)").count() == 2 && fin.contains("setupFinishing(true)"), "both settle paths");
+    let held = js.split("function setupFinishing(").nth(1).unwrap().split("\n  }").next().unwrap();
+    assert!(held.contains("[data-reg-open], [data-reg-done]") && held.contains("!finishMayRun()"), "a Finish holds the myBama controls");
+    let busy = js.split("function setupBusy(").nth(1).unwrap().split("\n  }").next().unwrap();
+    assert!(busy.contains("!finishMayRun()"), "setupBusy asks the helper");
+    let open = js.split("function openWeekSetup(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(open.contains("if (finishMayRun()) { EL(\"ws-finish\").disabled = false; }"), "the read's settle asks the helper");
+}
+
+/// Phase 3 final review I3: after a fetch the confirm screen lists what myBama confirmed, from
+/// `your_week`'s rows keyed `registrar:` (the engine built them), each string escaped.
+#[test]
+fn the_confirm_screen_lists_what_mybama_confirmed() {
+    let html = read("index.html");
+    let classes = html.split("id=\"ws-classes\"").nth(1).unwrap().split("id=\"ws-class-rows\"").next().unwrap();
+    assert!(classes.contains("id=\"ws-reg-added\" hidden"), "under Your classes, hidden until a fetch");
+    let js = read("console.js");
+    let added = js.split("function paintRegistrarAdded(").nth(1).expect("paintRegistrarAdded").split("\n  function ").next().unwrap();
+    assert!(added.contains("c.source_uid.indexOf(\"registrar:\") === 0"), "only the registrar's confirmed rows");
+    assert!(added.contains("h(c.title)") && added.contains("h(c.when || \"\")") && added.contains("h(registrarLabel)"), "escaped");
+    assert!(added.contains("\" — added</p>"), "the heading: From myBama — added");
+    let reload = js.split("function reloadSetupRows(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(reload.contains("invoke(\"your_week\", {})") && reload.contains("paintRegistrarAdded("), "read after the fetch");
+}
+
+/// Close-out B5 (spec A2 item 13): the "From myBama" list shows changed, ended, kept, status and
+/// unread rows from the overview's `registrar_changes`, on the confirm screen and on Schedule. The
+/// page reads the block; it computes no change, and every engine string is escaped.
+#[test]
+fn the_mybama_list_shows_changed_ended_kept_status_and_unread_rows() {
+    let html = read("index.html");
+    let sched = html.split("<section id=\"main-schedule\" hidden>").nth(1).unwrap().split("</section>").next().unwrap();
+    assert!(sched.contains("id=\"sched-reg-changes\" hidden"), "Schedule has a hidden list for the block");
+    assert!(sched.find("id=\"sched-reg-changes\"").unwrap() < sched.find("id=\"sched-list\"").unwrap(), "at the top, with the button");
+    let js = read("console.js");
+    let list = js.split("function registrarChangesHtml(").nth(1).expect("registrarChangesHtml").split("\n  function ").next().unwrap();
+    for key in ["ch.applied", "ch.ended", "ch.kept", "ch.status", "ch.unread"] {
+        assert!(list.contains(key), "the list reads {key}");
+    }
+    for heading in ["\" — changed\"", "\" — ended\"", "\" — kept yours\"", "\" — status\"", "\" — not read\""] {
+        assert!(list.contains(heading), "heading {heading}");
+    }
+    assert!(list.contains("e.kept_yours") && list.contains("e.card"), "ended says kept yours; kept says filed, waiting or listed");
+    assert!(list.contains("e.registrar") && list.contains("e.student"), "kept shows both values");
+    for part in ["h(regValue(", "h(e.status)", "h(e.until)"] {
+        assert!(list.contains(part), "escaped: {part}");
+    }
+    assert!(!list.contains("h(e.reason"), "the page words an unread row itself and never shows the engine's sentence");
+    let title = js.split("function regTitle(").nth(1).unwrap().split("
+  }").next().unwrap();
+    assert!(title.contains("h(c.title)") && title.contains("h(String(key)"), "a title is escaped where it is named");
+    for f in ["regTitle", "regValue", "regMeets"] {
+        assert!(js.contains(&format!("function {f}(")), "missing {f}");
+    }
+    let sched_js = js.split("function renderRegistrar(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(sched_js.contains("registrarChangesHtml(w.registrar_changes, w.commitments)"), "Schedule paints the block");
+    let added = js.split("function paintRegistrarAdded(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(added.contains("registrarChangesHtml(") && added.contains("changes"), "the confirm screen lists the block too");
+    let reload = js.split("function reloadSetupRows(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(reload.contains("w.week.registrar_changes"), "read after the fetch, from the overview");
+    assert!(read("console.css").contains(".reg-changes"), "the list has its own style");
+}
+
+/// Close-out B5, m3 and m4: a fetch that reached the engine and failed shows one fixed sentence,
+/// never the engine's text, and says a retry needs a fresh sign-in (the window is thrown away).
+#[test]
+fn a_failed_fetch_says_a_fixed_sentence_and_a_fresh_sign_in() {
+    let js = read("console.js");
+    assert!(js.contains("var REG_FAILED = "), "the fixed sentence is one constant");
+    let line = js.split("var REG_FAILED = ").nth(1).unwrap().split(";\n").next().unwrap();
+    assert!(line.contains("nothing was changed") && line.contains("sign in"), "m3 and m4: nothing changed; sign in again");
+    let bind = js.split("function bindRegistrar(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(bind.contains("if (env.closed) { registrarIdle(host, REG_FAILED); }"), "a closed failure never shows env.error");
+    assert!(!bind.contains("registrarIdle(host, env.error)"), "m3: the engine's text never reaches the page");
+}
+
+/// Phase 3 final review m1, m2: Not now is gated as Finish is (the first calendar read, a myBama
+/// fetch, a Finish), and closing the confirm screen closes the school's window.
+#[test]
+fn not_now_waits_as_finish_does_and_closing_the_screen_closes_the_school_window() {
+    let js = read("console.js");
+    for f in ["setupFinishing", "setupBusy"] {
+        let body = js.split(&format!("function {f}(")).nth(1).unwrap().split("\n  }").next().unwrap();
+        assert!(body.contains("EL(\"ws-later\").disabled = !finishMayRun();"), "m1: {f} gates Not now by the helper");
+    }
+    let open = js.split("function openWeekSetup(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(open.contains("EL(\"ws-later\").disabled = true;"), "m1: Not now waits for the first read");
+    let close = js.split("function closeWeekSetup(").nth(1).unwrap().split("\n  function ").next().unwrap();
+    assert!(close.contains("invoke(\"close_registrar_window\", {})"), "m2: the school window goes with the screen");
+}
+
 // L8 S5t (spec 3.4, section 9 "App"): a comped account never sees a price or a payment prompt. The
 // copy below is the spec's suggested wording; Quinn may reword it, and then this pin moves with it.
 const TESTER_NOTE: &str = "Your account is already set up. Nothing to pay.";

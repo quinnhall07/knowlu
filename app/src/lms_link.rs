@@ -19,7 +19,7 @@ const SESSION_PREFIX: &str = "knowlu-lms-session-";
 /// How long a leftover session directory has to have been sitting in the temp folder before the
 /// sweep takes it. An hour, because a second Knowlu part-way through its own capture is not ours to
 /// delete and a student can spend a long time on a campus SSO page.
-const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
+pub const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// WebView2's browser process exits asynchronously and keeps the profile open for a moment after the
 /// window is gone, so the first `remove_dir_all` usually loses. Twelve tries at 250 ms is three
@@ -147,7 +147,8 @@ pub fn sweep_stale_sessions_in(temp: &Path, take: &str, skip: Option<&str>, now:
 /// Session directories a crash left behind — the only thing that ever cleans up after a process that
 /// died with a sign-in window open (R-C1-40, I1c). Not this process's own, and only ones that have
 /// been sitting there for [`STALE_AFTER`]: another Knowlu, mid-capture, is not ours to delete.
-fn sweep_stale_sessions() {
+/// Also called by `registrar::open_registrar_window`.
+pub fn sweep_stale_sessions() {
     let mine = mine_prefix();
     sweep_stale_sessions_in(&std::env::temp_dir(), SESSION_PREFIX, Some(&mine), SystemTime::now(), STALE_AFTER);
 }
@@ -376,12 +377,13 @@ fn capture_failed(error: impl std::fmt::Display) -> Value {
     json!({ "ok": false, "error": error.to_string(), "kind": "lms_ics", "link": Value::Null, "note": Value::Null, "stored": false })
 }
 
-/// **One agent, one shape, for both captures** (the calendar link, and Task 14b's course list).
+/// **One agent, one shape, for every capture** (the calendar link, the course list, and phase 3's
+/// registrar).
 /// Thirty seconds global, because a campus behind SSO is slow and a student is watching; no jar of
 /// its own, because the only cookies either capture sends are the ones the window hands it for that
 /// one call. `put_source_at` builds its own on purpose — it talks to our API, not to a campus, and
 /// it reads a status code rather than treating one as an error.
-fn session_agent() -> ureq::Agent {
+pub fn session_agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(30)))
         .build()

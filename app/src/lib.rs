@@ -13,6 +13,7 @@ pub mod mail_session;
 pub mod mail_steps;
 pub mod onboarding;
 pub mod profiles;
+pub mod registrar;
 pub mod report;
 pub mod scaffold;
 pub mod scheduler;

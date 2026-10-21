@@ -843,7 +843,10 @@ fn commitment_passes(
 
     let mut withdrawn_pending = 0;
     if !read_failed {
-        let withdrawal = crate::approvals::withdraw_stale(vault, &file, &set, today, ctx, journal);
+        // The I5 call, with the registrar block emptied (phase-3 spec A2 item 12, "Where it runs";
+        // close-out B3e'): the kept-entry test reads a block only under the lock, below.
+        let unblocked = cm::SeriesFile { registrar: BTreeMap::new(), ..file.clone() };
+        let withdrawal = crate::approvals::withdraw_stale(vault, &unblocked, &set, today, ctx, journal);
         withdrawn_pending = withdrawal.pending;
         warnings.extend(withdrawal.warnings);
     }
@@ -851,6 +854,8 @@ fn commitment_passes(
     let (codes, code_warnings) = cm::Codes::load(vault);
     warnings.extend(cm::code_warnings_hit(code_warnings, &file));
     let names: Vec<String> = planning.recurring.iter().map(|r| r.name.clone()).collect();
+    // Plan ruling R2-g went (phase-3 spec A2 item 8, close-out B3b): a registrar note is applied
+    // and listed at its fetch, so `detect_changes` watches no `registrar:` key.
     let fresh_keys: std::collections::BTreeSet<String> = fresh.iter().map(|(c, _)| c.clone()).collect();
     let watched = match read_failed {
         true => cm::SeriesFile { ended: BTreeMap::new(), ..file.clone() },
@@ -870,14 +875,21 @@ fn commitment_passes(
     // Phase-2 spec D2 (Plan ruling Q1-b): on the vault's first day the confirm screen asks, so no
     // proposal or window card is filed. Change cards cannot exist yet, and pass through unchanged.
     let asked: &[cm::Proposal] = if cm::vault_day(vault, today) == 1 { &[] } else { &proposals };
-    let budget = std::cmp::max(0, planning.daily_approval_budget - count_proposals_created(vault, today));
-    let (_, filed, card_warnings) = cm::emit_checks(vault, asked, &changes, today, budget, ctx, journal);
+    // Phase-3 spec A2 item 12, "One filer" (close-out B3e): `emit_checks` runs holding the series
+    // lock, taken here after `refresh_series` released it, over a re-read that adds the registrar
+    // block's kept-field changes (none after a bad series read); the budget is counted under it.
+    // B3e': the second withdrawal call runs there too, and a `registrar:` proposal the re-read no
+    // longer holds under `series` is not filed.
+    let (filed, withdrawn, card_warnings) =
+        cm::emit_checks_locked(vault, asked, &changes, Some(&file), today, planning.daily_approval_budget, !read_failed, ctx, journal);
+    withdrawn_pending += withdrawn;
     warnings.extend(card_warnings);
     // Phase-2 spec §5: the per-course fallback cards, with what the check cards left of the
     // budget. Skipped on a bad series read (Plan ruling Q6-b): an unread calendar would make
-    // every course look uncovered.
+    // every course look uncovered, and while a registrar term has not begun (phase-3 D7, Plan
+    // ruling R2-h).
     let mut asks = 0;
-    if !read_failed {
+    if !read_failed && !cm::asks_wait_for_registrar(&file, today) {
         let ask_budget = std::cmp::max(0, planning.daily_approval_budget - count_proposals_created(vault, today));
         let (_, n, ask_warnings) = cm::emit_asks(vault, &proposals, today, ask_budget, ctx, journal);
         asks = n;
@@ -907,6 +919,9 @@ pub struct CommitmentsReport {
     pub proposals: Vec<crate::commitments::Proposal>,
     /// Phase-2 spec §2: the courses with neither a class proposal nor a confirmed class note.
     pub uncovered: Vec<crate::commitments::UncoveredCourse>,
+    /// Phase-3 spec A2 item 13, "After a restart": the registrar block's lists
+    /// ([`crate::commitments::registrar_changes_json`]).
+    pub registrar_changes: serde_json::Value,
     pub warnings: Vec<String>,
 }
 
@@ -1045,7 +1060,8 @@ pub fn commitments_report_with(
     let proposals = cm::proposals(&file, &set, &codes, &names, &template, &held, today, false);
 
     let uncovered = cm::uncovered_courses(vault, &set, &proposals, &codes);
-    CommitmentsReport { proposals, uncovered, warnings }
+    let registrar_changes = cm::registrar_changes_json(vault, &file, &set, today);
+    CommitmentsReport { proposals, uncovered, registrar_changes, warnings }
 }
 
 /// Phase-2 spec §3: `commitments --confirm`. Parses the input, pins `today` (the vault's zone
@@ -1064,6 +1080,23 @@ pub fn commitments_confirm(
     };
     let mut journal = Journal::new(vault);
     crate::commitments::confirm(vault, &input, today, ctx, &mut journal)
+}
+
+/// Phase-3 spec §3: `commitments --registrar`. Pins `today` (the vault's zone when none is given)
+/// and runs `registrar::run`. It fetches nothing. `Err` is the exit-2 message.
+pub fn commitments_registrar(
+    vault: &Path,
+    today_iso: Option<&str>,
+    text: &str,
+    school: &str,
+    ctx: &WriteContext,
+) -> Result<crate::registrar::Report, String> {
+    let today = match today_iso {
+        Some(iso) => Date::strptime("%Y-%m-%d", iso).map_err(|_| format!("bad --today {iso:?}"))?,
+        None => Timestamp::now().to_zoned(vault_zone(vault)).date(),
+    };
+    let mut journal = Journal::new(vault);
+    crate::registrar::run(vault, text, school, today, ctx, &mut journal)
 }
 
 /// Python: `f"{label}: {warnings[0]}" + (" (+N more)" if len > 1 else "")`.
@@ -3340,6 +3373,24 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         let _ = std::fs::remove_dir_all(&vault);
     }
 
+    /// Phase-3 D7 (Plan ruling R2-h): a vault holding a registrar term that has not started yet
+    /// files no ask card; the day after the term starts, the ask comes as before. ART 110 is a
+    /// registrar row with no vault course, so CS 100 stays uncovered and only the gate holds it.
+    #[test]
+    fn asks_wait_for_the_registrars_term_to_start() {
+        let vault = p16_vault("p3gate");
+        let text = include_str!("../tests/fixtures/registrar/banner-ua-registration.json");
+        let parsed = crate::registrar::parse_banner(&serde_json::from_str(text).unwrap(), "ua").unwrap();
+        let mut art = parsed.series.into_iter().find(|s| s.source_uid.ends_with("40006")).unwrap();
+        art.first = Some(Date::constant(2026, 9, 14));
+        crate::commitments::refresh_series(&vault, &[(art.calendar.clone(), vec![art])], P16_MONDAY);
+        rank_p16(&vault, p16_day(1), Vec::new());
+        assert!(md_names(&vault.join("approvals"), "commitment-ask-").is_empty(), "the term starts on 09-14");
+        rank_p16(&vault, Date::constant(2026, 9, 15), Vec::new());
+        assert_eq!(md_names(&vault.join("approvals"), "commitment-ask-"), ["commitment-ask-when-does-cs-100-intro-to-computing-meet.md"]);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
     #[test]
     fn commitment_checks_take_only_what_the_events_pass_left() {
         let vault = p16_vault("p16budget");
@@ -3823,8 +3874,8 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         let after = snapshot(&vault);
         assert_eq!(
             changed_paths(&before, &after),
-            vec!["state/calendar-series.json".to_string()],
-            "the commitments command must write nothing else under the vault"
+            vec!["state/calendar-series.json".to_string(), "state/calendar-series.lock".to_string()],
+            "the commitments command must write nothing else under the vault (the lock: final review I2)"
         );
         assert!(!vault.join("commitments").exists(), "R18: a proposal is never a note");
         assert!(md_names(&vault.join("approvals"), "commitment-check-").is_empty(), "no card either");

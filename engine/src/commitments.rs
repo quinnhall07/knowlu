@@ -1268,10 +1268,27 @@ fn section_kind(
     None
 }
 
+/// The course a registrar series names (Plan ruling R2-e): the code table's slug for its title's
+/// leading code, or `None` when the vault has no such course.
+pub fn registrar_course(series: &Series, codes: &Codes) -> Option<String> {
+    class_course(&series.title, &codes.table).map(|(slug, _)| slug)
+}
+
+/// A registrar series' class, without the classifier (spec §3: the registrar is the authority):
+/// `lab` when R1 titled it `"… Lab"`, else `class`.
+pub fn registrar_class(series: &Series, codes: &Codes) -> Class {
+    let kind = if series.title.ends_with(" Lab") { "lab" } else { "class" };
+    Class::Kind { kind: kind.to_string(), course: registrar_course(series, codes) }
+}
+
 /// Pure: no clock, no network, no model (`rank` never calls a model — Knowlu spec decision 11;
 /// this is the same discipline one layer up). Eligibility first (§3.4's bullets), then rules 0–6
 /// in order, first match wins, on the title trimmed of surrounding punctuation (C5).
 pub fn classify(series: &Series, codes: &Codes, planning: &[String]) -> Option<Class> {
+    // Phase 3 (Plan ruling R2-e): a registrar row carries no instances and needs no eligibility.
+    if series.calendar.starts_with(crate::registrar::CALENDAR_PREFIX) {
+        return Some(registrar_class(series, codes));
+    }
     if !eligible(series) {
         return None;
     }
@@ -1409,12 +1426,117 @@ pub struct SeriesFile {
     /// Sorted by `(source_uid, calendar)`; one key may be held under two calendars (I2), so a
     /// reader takes [`SeriesFile::by_key`], never this list.
     pub series: Vec<Series>,
+    /// Phase-3 spec A2 item 13: the registrar block, per term calendar key. Absent from the file
+    /// (and empty here) until a registrar fetch writes one.
+    pub registrar: BTreeMap<String, RegistrarTerm>,
 }
 
-/// The one precedence between two records of one key (I2): a `google:` calendar first, then the
-/// lower calendar key. Smaller wins.
-fn precedence(series: &Series) -> (bool, &str) {
-    (!series.calendar.starts_with("google:"), series.calendar.as_str())
+/// One term's registrar block (phase-3 spec A2 item 13). `applied` and `ended` accumulate over the
+/// term; `kept` is 12's standing state; `status` and `unread` are the latest successful fetch's.
+/// Entries are JSON objects in the shapes close-out B2 pins (`registrar/apply_support.rs`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegistrarTerm {
+    pub first_fetch: Date,
+    pub last_fetch: Date,
+    pub applied: Vec<serde_json::Value>,
+    pub ended: Vec<serde_json::Value>,
+    pub kept: Vec<serde_json::Value>,
+    pub status: Vec<serde_json::Value>,
+    pub unread: Vec<serde_json::Value>,
+}
+
+/// What one registrar fetch adds to its term's block (A2 item 13, "How it changes").
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RegistrarFetch {
+    pub calendar: String,
+    pub applied: Vec<serde_json::Value>,
+    pub ended: Vec<serde_json::Value>,
+    pub status: Vec<serde_json::Value>,
+    pub unread: Vec<serde_json::Value>,
+    /// A2 item 11, "When the CRN comes back" (close-out B3d): the note paths whose open `ended`
+    /// entry this fetch closes (it gains `returned`, the fetch day).
+    pub returned: Vec<String>,
+    /// A2 item 12 (close-out B3e): the term's standing kept entries after this fetch; they replace
+    /// the block's `kept`.
+    pub kept: Vec<serde_json::Value>,
+}
+
+/// A2 item 13's list order: `applied` and `ended` by (fetch day, note path, field); `kept`, `status`
+/// and `unread` (which carry no `day`) by (note path, field). An absent or `null` part sorts first;
+/// the key breaks a tie between two entries no note holds.
+pub fn sort_registrar_entries(entries: &mut [serde_json::Value]) {
+    let part = |e: &serde_json::Value, k: &str| e.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    entries.sort_by_key(|e| (part(e, "day"), part(e, "note"), part(e, "field"), part(e, "key")));
+}
+
+/// How a calendar no fresh read returned this run stays in the series file (the table's
+/// keep-alive column; `refresh_series`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeepAlive {
+    /// A registrar term (Plan rulings R2-a to R2-c, Amendment 1): a fetch is the whole term, so a
+    /// row it omits ends at once; unfetched, it counts as configured while [`registrar_in_play`]
+    /// (by `until`), then ages like a removed feed (read in 14 days).
+    InPlay,
+    /// Configured while the vault names a `cloud:google` feed, or read in 14 days.
+    GoogleFeed,
+    /// Configured while the vault names the calendar as a feed, or read in 14 days.
+    NamedFeed,
+}
+
+/// How a change to a confirmed note lands (the table's last column).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lands {
+    /// The fetch applies and lists it (phase-3 spec A2 item 8): `rank` files no card.
+    AppliedAndListed,
+    /// `detect_changes` offers it and `emit_checks` files a `commitment-check` card (§5.4).
+    Carded,
+    /// No card, ever: a `source_uid` outside the three prefixes (a `card:` note, an events
+    /// one-off, a hand-made note), as the old `SERIES_KEY_PREFIXES` allow-list left it.
+    NotWatched,
+}
+
+/// One row of the per-source table (phase-3 spec A2 item 16, close-out B3f, §8 Q4). Two key
+/// columns, because two strings select a source: a series' calendar key selects the tier,
+/// keep-alive, instances and the per-kind hold; a note's `source_uid` selects how a change lands.
+/// A lookup names its column ([`Source::by_calendar`], [`Source::by_uid`]); `None` is "any other".
+struct Source {
+    calendar: Option<&'static str>,
+    uid: Option<&'static str>,
+    tier: u8,
+    keep_alive: KeepAlive,
+    instances: bool,
+    holds_per_kind: bool,
+    lands: Lands,
+}
+
+/// The rows, as the spec's table. The fourth row's tier, keep-alive and instances are "as its
+/// calendar": a `by_calendar` lookup never reaches it (the third row matches any other calendar
+/// first), so only its `lands` and `holds_per_kind` are read. L5 adds one `syllabus:` row and its
+/// two keep-alive arms.
+const SOURCES: [Source; 4] = [
+    Source { calendar: Some(crate::registrar::CALENDAR_PREFIX), uid: Some(crate::registrar::CALENDAR_PREFIX), tier: 0, keep_alive: KeepAlive::InPlay, instances: false, holds_per_kind: true, lands: Lands::AppliedAndListed },
+    Source { calendar: Some("google:"), uid: Some("gcal-series:"), tier: 1, keep_alive: KeepAlive::GoogleFeed, instances: true, holds_per_kind: false, lands: Lands::Carded },
+    Source { calendar: None, uid: Some("ics-series:"), tier: 2, keep_alive: KeepAlive::NamedFeed, instances: true, holds_per_kind: false, lands: Lands::Carded },
+    Source { calendar: None, uid: None, tier: 2, keep_alive: KeepAlive::NamedFeed, instances: true, holds_per_kind: false, lands: Lands::NotWatched },
+];
+
+impl Source {
+    /// The row a series' calendar key selects (`Series.calendar`).
+    fn by_calendar(calendar: &str) -> &'static Source {
+        SOURCES.iter().find(|s| s.calendar.is_none_or(|p| calendar.starts_with(p))).expect("a catch-all row")
+    }
+
+    /// The row a note's or card's `source_uid` selects.
+    fn by_uid(uid: &str) -> &'static Source {
+        SOURCES.iter().find(|s| s.uid.is_none_or(|p| uid.starts_with(p))).expect("a catch-all row")
+    }
+}
+
+/// The one precedence between two records of one key or one signature (I2, phase-3 D7): a
+/// `registrar:` calendar first, then a `google:` one, then any other; then the lower calendar key.
+/// Smaller wins (Plan ruling R2-f). The tier is the table's ([`Source::by_calendar`]).
+fn precedence(series: &Series) -> (u8, &str) {
+    (Source::by_calendar(&series.calendar).tier, series.calendar.as_str())
 }
 
 impl SeriesFile {
@@ -1441,10 +1563,13 @@ impl SeriesFile {
     /// date) gets the horizon with **no** instances (fix round 1, M1; R21: inside the fresh
     /// horizon only the actual instances subtract, and that read found none). It stops blocking
     /// time at once; the record itself, with its old instances, stays in the file until it ages
-    /// into `ended` (§3.3), so P12 can still name its last instance.
+    /// into `ended` (§3.3), so P12 can still name its last instance. A registrar series carries
+    /// no instances and is left out, so its notes are busy by their weekly `meets` (phase 3,
+    /// Plan ruling R2-d; the table's instances column, [`Source::by_calendar`]).
     pub fn instances_map(&self) -> BTreeMap<String, (Date, Date, Vec<(Date, Time, Time)>)> {
         self.by_key()
             .into_iter()
+            .filter(|(_, series)| Source::by_calendar(&series.calendar).instances)
             .filter_map(|(key, series)| {
                 let read = self.calendars.get(&series.calendar).copied().or(series.last_seen)?;
                 let stale = series.last_seen.is_none_or(|seen| seen < read);
@@ -1874,10 +1999,33 @@ pub(crate) fn file_bytes(file: &SeriesFile) -> String {
             (k.clone(), entry)
         })
         .collect();
-    let value = serde_json::json!({
+    let mut value = serde_json::json!({
         "calendars": calendars, "ended": ended,
         "series": series.into_iter().map(series_json).collect::<Vec<_>>(),
     });
+    // A2 item 13, "Its bytes": the block is part of this one value, so `dumps_value` sorts its keys;
+    // list entries are sorted here. Omitted when no term has a block (a never-fetched vault's bytes).
+    if !file.registrar.is_empty() {
+        let terms: serde_json::Map<String, serde_json::Value> = file
+            .registrar
+            .iter()
+            .map(|(key, t)| {
+                let sorted = |list: &[serde_json::Value]| {
+                    let mut list = list.to_vec();
+                    sort_registrar_entries(&mut list);
+                    list
+                };
+                let entry = serde_json::json!({
+                    "applied": sorted(&t.applied), "ended": sorted(&t.ended),
+                    "first_fetch": t.first_fetch.to_string(), "kept": sorted(&t.kept),
+                    "last_fetch": t.last_fetch.to_string(), "status": sorted(&t.status),
+                    "unread": sorted(&t.unread),
+                });
+                (key.clone(), entry)
+            })
+            .collect();
+        value["registrar"] = serde_json::Value::Object(terms);
+    }
     format!("{}\n", crate::ledger::dumps_value(&value))
 }
 
@@ -1990,6 +2138,24 @@ fn parse_file(text: &str) -> Parsed<SeriesFile> {
     for series in object.get("series").and_then(|v| v.as_array()).ok_or("no series")? {
         file.series.push(parse_series(series)?);
     }
+    // A2 item 13: a file without the block reads as an empty one; a block in the wrong shape is a
+    // malformed file, like any other part.
+    if let Some(block) = object.get("registrar") {
+        for (key, term) in block.as_object().ok_or("bad registrar")? {
+            let list = |k: &str| term.get(k).and_then(|v| v.as_array()).cloned().ok_or_else(|| "bad registrar".to_string());
+            let day = |k: &str| json_date(term.get(k), "registrar")?.ok_or_else(|| "bad registrar".to_string());
+            let entry = RegistrarTerm {
+                first_fetch: day("first_fetch")?,
+                last_fetch: day("last_fetch")?,
+                applied: list("applied")?,
+                ended: list("ended")?,
+                kept: list("kept")?,
+                status: list("status")?,
+                unread: list("unread")?,
+            };
+            file.registrar.insert(key.clone(), entry);
+        }
+    }
     file.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
     Ok(file)
 }
@@ -2038,6 +2204,19 @@ pub fn read_series_file(vault: &Path) -> (SeriesFile, Vec<String>) {
     }
 }
 
+/// Device-local and never synced (the push never looks under `state/`); it holds no bytes and
+/// exists only to be locked around [`refresh_series`]'s read-modify-write (final review I2).
+pub const SERIES_LOCK_FILE: &str = "state/calendar-series.lock";
+
+/// An exclusive hold on [`SERIES_LOCK_FILE`], blocking until it is free (std's `File::lock`,
+/// stable since 1.89). Released when the returned handle drops, or by the OS if the process dies.
+fn lock_series_file(vault: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(vault.join("state"))?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(vault.join(SERIES_LOCK_FILE))?;
+    file.lock()?;
+    Ok(file)
+}
+
 /// Writes `bytes` beside the file, then renames it over (fix round 1, M5): a crash mid-write
 /// leaves the old file whole, never a truncated one. The crate's other temp-then-rename writer
 /// (`backup::place`) copies a file rather than writing bytes, so it is not reused.
@@ -2071,16 +2250,83 @@ fn write_state_file(vault: &Path, name: &str, bytes: &str) -> std::io::Result<()
 /// - An `ended` entry goes 28 days after `dropped`, or at once when its key is held again.
 /// - A record with no `last_seen` (the engine never writes one; only a hand-edited file) counts
 ///   as unseen for 14 days already, so a fresh read that does not return it ages it out at once.
+/// - A `registrar:` calendar (phase 3, D5) is configured while its term is in play (a series with
+///   an open `until` or one under 28 days past); a row its own fresh fetch no longer returns moves
+///   to `ended` that day, with the day before as its last instance.
 ///
 /// The file is written only when `fresh` is non-empty and the bytes differ, whole (temp file,
-/// then rename). A file that could not be *read* (an I/O error, not a parse failure) is left
+/// then rename). With `fresh` non-empty, the whole read-to-rename holds [`SERIES_LOCK_FILE`]
+/// exclusively, so two processes refreshing at once each keep their calendars (final review I2);
+/// a lock that cannot be taken is one warning and the run goes on unguarded. A file that could not be *read* (an I/O error, not a parse failure) is left
 /// alone and not rewritten this run, with one warning; the returned data then holds only this
 /// run's fresh calendars. Warnings: the old file's, and a failed write's.
+///
+/// The registrar block (phase-3 spec A2 item 13, "Every writer keeps it") is carried unchanged;
+/// a term's entry goes when its calendar leaves `calendars`.
 pub fn refresh_series(
     vault: &Path,
     fresh: &[(String, Vec<Series>)],
     today: Date,
 ) -> (SeriesFile, Vec<String>) {
+    let (file, warnings, _) = refresh_series_with(vault, fresh, today, None);
+    (file, warnings)
+}
+
+/// The registrar calendars in play on `today` (phase 3, Plan rulings R2-a, R2-b): each holding a
+/// series whose `until` is open or less than 28 days past.
+pub fn registrar_in_play(file: &SeriesFile, today: Date) -> BTreeSet<String> {
+    file.series
+        .iter()
+        .filter(|s| s.calendar.starts_with(crate::registrar::CALENDAR_PREFIX))
+        .filter(|s| s.until.is_none_or(|u| days_since(u, today) < ENDED_DAYS))
+        .map(|s| s.calendar.clone())
+        .collect()
+}
+
+/// [`refresh_series`], plus a registrar fetch's lists (A2 item 13, "When it is written"): they go
+/// into the term's block in this same write, under the same lock. `applied` and `ended` are
+/// appended, `status` and `unread` replaced, `last_fetch` set (and `first_fetch` on a new block).
+/// The third value says whether the file on disk now holds the returned bytes (written, or
+/// already identical): false with `fresh` empty, an unreadable file or a failed write.
+pub fn refresh_series_with(
+    vault: &Path,
+    fresh: &[(String, Vec<Series>)],
+    today: Date,
+    news: Option<&RegistrarFetch>,
+) -> (SeriesFile, Vec<String>, bool) {
+    // Phase 3 final review I2: a run that may write holds the series lock from the read to the
+    // rename, so a slot's `rank`, `commitments` and a registrar run never lose each other's merge.
+    let held = match fresh.is_empty() {
+        true => SeriesLock(None, None),
+        false => hold_series_lock(vault),
+    };
+    refresh_series_held(vault, held, fresh, today, news)
+}
+
+/// A hold on [`SERIES_LOCK_FILE`] ([`hold_series_lock`]), or the warning that it could not be
+/// taken; released when dropped or handed to [`refresh_series_held`].
+pub struct SeriesLock(Option<std::fs::File>, Option<String>);
+
+/// Takes [`SERIES_LOCK_FILE`] (blocking until it is free). A registrar fetch takes it before its
+/// first read and hands it to [`refresh_series_held`], so its carry, its already-ended test and its
+/// kept detection read the file the merge writes over (A2 item 11; B3 minors, 2026-10-21).
+pub fn hold_series_lock(vault: &Path) -> SeriesLock {
+    match lock_series_file(vault) {
+        Ok(file) => SeriesLock(Some(file), None),
+        Err(err) => SeriesLock(None, Some(format!("series file: could not lock {SERIES_LOCK_FILE} ({})", err.kind()))),
+    }
+}
+
+/// [`refresh_series_with`] under a lock the caller already holds (the lock is not re-entrant);
+/// it is released when this returns.
+pub fn refresh_series_held(
+    vault: &Path,
+    held: SeriesLock,
+    fresh: &[(String, Vec<Series>)],
+    today: Date,
+    news: Option<&RegistrarFetch>,
+) -> (SeriesFile, Vec<String>, bool) {
+    let SeriesLock(_lock, lock_warning) = held;
     let (old, mut warnings, writable) = match load_series_file(vault) {
         Loaded::Read(file) => (file, Vec::new(), true),
         Loaded::Malformed(why) => (
@@ -2094,12 +2340,20 @@ pub fn refresh_series(
             false,
         ),
     };
+    warnings.extend(lock_warning);
     let feeds = crate::calfeed::calendar_entries(vault);
     let names: BTreeSet<&str> = feeds.iter().map(|(name, _)| name.as_str()).collect();
     let google = feeds.iter().any(|(_, url)| url == "cloud:google");
-    let configured = |calendar: &str| match calendar.starts_with("google:") {
-        true => google,
-        false => names.contains(calendar),
+    // Phase 3 (Plan rulings R2-a, R2-b): a registrar calendar is one term, read only when the
+    // student fetches it. It counts as configured while it holds a series whose `until` is open or
+    // less than 28 days past; then it ages like a removed feed.
+    // Each arm is the table's keep-alive column ([`Source::by_calendar`], [`KeepAlive`]).
+    let whole_term = |calendar: &str| Source::by_calendar(calendar).keep_alive == KeepAlive::InPlay;
+    let in_play = registrar_in_play(&old, today);
+    let configured = |calendar: &str| match Source::by_calendar(calendar).keep_alive {
+        KeepAlive::InPlay => in_play.contains(calendar),
+        KeepAlive::GoogleFeed => google,
+        KeepAlive::NamedFeed => names.contains(calendar),
     };
     let recent = |read: Option<Date>| read.is_some_and(|d| days_since(d, today) < UNSEEN_DAYS);
 
@@ -2122,6 +2376,9 @@ pub fn refresh_series(
     for held in old.series {
         match returned.get(held.calendar.as_str()) {
             Some(keys) if keys.contains(held.source_uid.as_str()) => {}
+            // D5 (Plan ruling R2-c): a registrar fetch is the whole term's truth; a row it no
+            // longer returns is a dropped course, at once.
+            Some(_) if whole_term(&held.calendar) => aged_out.push(held),
             Some(_) if recent(held.last_seen) => series.push(held),
             Some(_) => aged_out.push(held),
             None if configured(&held.calendar) => series.push(held),
@@ -2136,6 +2393,32 @@ pub fn refresh_series(
     calendars.retain(|calendar, read| {
         returned.contains_key(calendar.as_str()) || configured(calendar) || recent(Some(*read))
     });
+    let mut block = old.registrar;
+    block.retain(|calendar, _| calendars.contains_key(calendar));
+    if let Some(news) = news {
+        let term = block.entry(news.calendar.clone()).or_insert_with(|| RegistrarTerm {
+            first_fetch: today,
+            last_fetch: today,
+            applied: Vec::new(),
+            ended: Vec::new(),
+            kept: Vec::new(),
+            status: Vec::new(),
+            unread: Vec::new(),
+        });
+        term.last_fetch = today;
+        term.applied.extend(news.applied.iter().cloned());
+        // A come-back sets `returned` on the note's open entry, once; no other entry changes.
+        for note in &news.returned {
+            let open = term.ended.iter_mut().find(|e| e["note"] == note.as_str() && e.get("returned").is_none());
+            if let Some(serde_json::Value::Object(entry)) = open {
+                entry.insert("returned".to_string(), serde_json::Value::String(today.to_string()));
+            }
+        }
+        term.ended.extend(news.ended.iter().cloned());
+        term.kept = news.kept.clone();
+        term.status = news.status.clone();
+        term.unread = news.unread.clone();
+    }
     series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
 
     let held: BTreeSet<&str> = series.iter().map(|s| s.source_uid.as_str()).collect();
@@ -2149,22 +2432,29 @@ pub fn refresh_series(
         let entry = Ended {
             calendar: gone.calendar.clone(),
             dropped: today,
-            last_instance: gone.instances.iter().map(|i| i.date).max(),
+            // A registrar series has no instances: the day before the fetch that dropped it is the
+            // last day the registrar named it (Plan ruling R2-c; the table's instances column).
+            last_instance: match Source::by_calendar(&gone.calendar).instances {
+                false => Some(add_days(today, -1)),
+                true => gone.instances.iter().map(|i| i.date).max(),
+            },
             until: gone.until,
         };
         ended.insert(gone.source_uid, entry);
     }
 
-    let file = SeriesFile { calendars, ended, series };
-    if !fresh.is_empty() && writable {
+    let file = SeriesFile { calendars, ended, series, registrar: block };
+    let mut stored = !fresh.is_empty() && writable;
+    if stored {
         let bytes = file_bytes(&file);
         if std::fs::read(series_path(vault)).ok().as_deref() != Some(bytes.as_bytes()) {
             if let Err(err) = write_series_file(vault, &bytes) {
                 warnings.push(format!("series file: could not write {SERIES_FILE} ({})", err.kind()));
+                stored = false;
             }
         }
     }
-    (file, warnings)
+    (file, warnings, stored)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2246,6 +2536,67 @@ fn course_key(course: &str, codes: &Codes) -> String {
     }
 }
 
+/// The registrar hold (phase 3 final review I1, option a, per kind), computed in this one place
+/// for [`proposals`], [`withdrawal_reason`] and [`settle_approved`] so the three cannot drift
+/// (close-out A1-F1). The `(kind, course key)` pairs the registrar holds: a confirmed `registrar:`
+/// `class` or `lab` note in play (no `until`, or one not before `today`), or a `registrar:` `class`
+/// or `lab` series in the series file not past its `until`.
+#[derive(Debug, Default)]
+struct RegistrarHold(BTreeSet<(String, String)>);
+
+impl RegistrarHold {
+    fn of(file: &SeriesFile, set: &Commitments, codes: &Codes, today: Date) -> Self {
+        // The table's holds-per-kind column, by each record's own key: a note's `source_uid`, a
+        // series' calendar.
+        let holds_uid = |uid: &str| Source::by_uid(uid).holds_per_kind;
+        let mut held: BTreeSet<(String, String)> = set
+            .confirmed
+            .iter()
+            // Re-review m8: only a note in play (no `until`, or not before today) holds its course.
+            .filter(|n| class_like(&n.kind) && n.source_uid.as_deref().is_some_and(holds_uid))
+            .filter(|n| n.until.is_none_or(|until| until >= today))
+            .filter_map(|n| n.course.as_deref().map(|c| (n.kind.clone(), course_key(c, codes))))
+            .collect();
+        for (_, series) in file.by_key() {
+            if !Source::by_calendar(&series.calendar).holds_per_kind || series.until.is_some_and(|until| until < today) {
+                continue;
+            }
+            // A registrar row classifies without the planning names (`classify`'s first branch).
+            if let Some(Class::Kind { kind, course: Some(course) }) = classify(series, codes, &[]) {
+                if class_like(&kind) {
+                    held.insert((kind, course_key(&course, codes)));
+                }
+            }
+        }
+        RegistrarHold(held)
+    }
+
+    /// Whether the hold covers a `kind` question about `course` from `source`, the table row the
+    /// caller looked up by its own key (a series' calendar, a card's `source_uid`). A source that
+    /// holds is never held itself, and a hold is per kind: a registrar lecture leaves a lab of the
+    /// same course alone.
+    fn holds(&self, source: &Source, kind: &str, course: Option<&str>, codes: &Codes) -> bool {
+        !source.holds_per_kind
+            && class_like(kind)
+            && course.is_some_and(|c| self.0.contains(&(kind.to_string(), course_key(c, codes))))
+    }
+
+    /// Why a proposal card keyed `key` is held, or `None`: "`<course>`'s `<kind>` is held by the
+    /// registrar", from the card's `commitment:`.
+    fn card_reason(&self, key: &str, meta: &Mapping, codes: &Codes) -> Option<String> {
+        let Some(Value::Mapping(map)) = get(meta, "commitment") else { return None };
+        let p = proposed(map).ok()?;
+        let course = p.course.as_deref()?;
+        self.holds(Source::by_uid(key), &p.kind, Some(course), codes)
+            .then(|| format!("{course}'s {} is held by the registrar", p.kind))
+    }
+}
+
+/// The kinds the registrar hold covers.
+fn class_like(kind: &str) -> bool {
+    kind == "class" || kind == "lab"
+}
+
 impl Commitment {
     pub fn signature(&self, codes: &Codes) -> Signature {
         signature(&self.kind, self.course.as_deref(), &self.title, &self.meets, codes)
@@ -2294,13 +2645,16 @@ fn minutes(time: Time) -> i64 {
 /// not in `held` (keys a change card's `change.source_uid` carries, P12's `successor_keys`), no
 /// note has its key (a confirmed note, a decline marker, the planning day), no confirmed note has
 /// its [`Signature`], and — when `for_cards` — it is not `office-hours` (R8; the screen lists
-/// them).
+/// them). A `class` or `lab` series from any calendar but the registrar is not proposed when the
+/// registrar holds that kind for that course (a confirmed `registrar:` note or a `registrar:`
+/// series of the same kind and course, either with no `until` or one not before `today`), whatever its times (phase 3 final review I1,
+/// option a, per kind).
 ///
 /// **Twins** (P8 review): one real series can reach the file under two keys — an Outlook/Exchange
 /// invite keeps its own UID, so a `gcal-series:` key and an `ics-series:` key carry the same
 /// signature. Candidates are grouped by signature and one proposal is made per group, from the
-/// record [`SeriesFile::by_key`]'s precedence prefers (a `google:` calendar, then the lower
-/// calendar key; then the lower key). A key answered or held closes its signature, so a declined,
+/// record [`SeriesFile::by_key`]'s precedence prefers (a `registrar:` calendar, then a `google:`
+/// calendar, then the lower calendar key; then the lower key). A key answered or held closes its signature, so a declined,
 /// confirmed or held twin suppresses the other.
 ///
 /// Routines feed the one window proposal (decision 3, [`window_proposal`]), never a commitment.
@@ -2323,6 +2677,11 @@ pub fn proposals(
         .chain(set.declined.iter().map(String::as_str))
         .collect();
     let mut closed: BTreeSet<Signature> = set.confirmed.iter().map(|n| n.signature(codes)).collect();
+    // Final review I1 (a), per kind: a `(kind, course)` the registrar holds gets no proposal of
+    // that kind for that course from any other calendar, whatever its times (D7). A registrar
+    // lecture leaves a Google lab of the same course proposed. One predicate ([`RegistrarHold`])
+    // with `withdrawal_reason` and `settle_approved` (close-out A1-F1).
+    let registrar_held = RegistrarHold::of(file, set, codes, today);
 
     // Each candidate carries its signature and its title-only signature: a confirmed note with no
     // `course` (a hand-written class note, say) matches on the title instead (fix round 1, M4).
@@ -2348,12 +2707,15 @@ pub fn proposals(
         }
     }
 
-    fn rank(s: &Series) -> ((bool, &str), &str) {
+    fn rank(s: &Series) -> ((u8, &str), &str) {
         (precedence(s), s.source_uid.as_str())
     }
     let mut chosen: BTreeMap<Signature, (&Series, String, Option<String>)> = BTreeMap::new();
     for (sig, by_title, series, kind, course) in candidates {
         if closed.contains(&sig) || closed.contains(&by_title) {
+            continue;
+        }
+        if registrar_held.holds(Source::by_calendar(&series.calendar), &kind, course.as_deref(), codes) {
             continue;
         }
         match chosen.get(&sig) {
@@ -3166,6 +3528,19 @@ pub fn emit_asks(
     (filed, count, warnings)
 }
 
+/// Phase-3 D7 (Plan ruling R2-h): while the vault holds a registrar term that has not begun, the
+/// per-course asks wait for it. True while the earliest `first` among registrar series whose
+/// `until` is open or not yet past is `today` or later: asks resume the day after the term starts.
+pub fn asks_wait_for_registrar(file: &SeriesFile, today: Date) -> bool {
+    file.series
+        .iter()
+        .filter(|s| s.calendar.starts_with(crate::registrar::CALENDAR_PREFIX))
+        .filter(|s| s.until.is_none_or(|u| u >= today))
+        .filter_map(|s| s.first)
+        .min()
+        .is_some_and(|start| today <= start)
+}
+
 /// What settling an approved `commitment-ask` card decided (phase-2 spec §5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AskSettled {
@@ -3360,9 +3735,6 @@ pub fn check_answerable(vault: &Path, target: &str, today: Date) -> Result<(), S
 // P12 — change detection: changed, ended, succeeded (§5.4, R22).
 // ---------------------------------------------------------------------------------------------
 
-/// The key prefixes a calendar series carries (R6); only notes keyed so are watched for changes.
-const SERIES_KEY_PREFIXES: [&str; 2] = ["gcal-series:", "ics-series:"];
-
 /// A `meets` list as the set of `(DAY_KEYS index, start, end)` triples — the comparison §3.5's
 /// signature makes, so neither entry order nor day order is a change.
 fn meet_set(meets: &[Meet]) -> BTreeSet<(usize, Time, Time)> {
@@ -3417,9 +3789,203 @@ fn text_value(text: Option<&str>) -> Value {
     text.map_or(Value::Null, |t| Value::String(t.to_string()))
 }
 
+/// One field a registrar fetch applies to a confirmed note (phase-3 spec A2 items 8 and 9): the
+/// note's value and the row's, as the command lists them (a `meets` as the note's own list, an
+/// `until` as `YYYY-MM-DD`), and the single-line literal `write` takes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Applied {
+    pub field: &'static str,
+    pub from: serde_json::Value,
+    pub to: serde_json::Value,
+    pub literal: String,
+}
+
+/// Close-out B3b (spec A2 items 8 and 9): the fields a registrar fetch applies to `note` from its
+/// `whole` row `series`, in field order (`meets`, `until`, `where`). Only those three, never
+/// `level`, `kind`, `course` or the title. `meets` compares as phase 2 compares (the set of day,
+/// start and end triples, over the row's `CLAS` meetings); `where` only when the row names one;
+/// `until` only when the row has one (none is never applied). A field `journal::human_edited` shows
+/// the student set by hand is left out: it is not written (B3e records it).
+pub fn registrar_changes(note: &Commitment, series: &Series, journal: &mut crate::journal::Journal) -> Vec<Applied> {
+    let mut out = Vec::new();
+    if !series.meets.is_empty() && meet_set(&series.meets) != meet_set(&note.meets) && !is_human_set(journal, &note.id, "meets") {
+        let to = meets_json(&series.meets);
+        let literal = crate::write::to_literal(&to_value(to.clone()));
+        out.push(Applied { field: "meets", from: meets_json(&note.meets), to, literal });
+    }
+    if let Some(until) = series.until.filter(|u| note.until != Some(*u)) {
+        if !is_human_set(journal, &note.id, "until") {
+            out.push(Applied { field: "until", from: date_json(note.until), to: date_json(Some(until)), literal: until.to_string() });
+        }
+    }
+    if let Some(place) = series.where_.as_deref().map(|w| single_line(w).trim().to_string()).filter(|w| !w.is_empty()) {
+        if note.where_.as_deref().map(str::trim) != Some(place.as_str()) && !is_human_set(journal, &note.id, "where") {
+            let literal = crate::write::to_literal(&Value::String(place.clone()));
+            out.push(Applied { field: "where", from: opt_json(note.where_.as_deref()), to: serde_json::Value::String(place), literal });
+        }
+    }
+    out
+}
+
+/// Phase-3 spec A2 item 12 (close-out B3e): a field's value as a note holds it and the registrar
+/// block lists it (`meets` as the note's list, `until` as a date, `where` on one line), `null` when
+/// unset.
+pub fn field_json(field: &str, meets: &[Meet], until: Option<Date>, where_: Option<&str>) -> serde_json::Value {
+    match field {
+        "meets" if !meets.is_empty() => meets_json(meets),
+        "until" => date_json(until),
+        "where" => opt_json(where_.map(str::trim)),
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// Two values of `field` are one value as a note reads them ([`as_read`]: `meets` as a set).
+pub fn same_value(field: &str, a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    as_read(field, Some(&to_value(a.clone()))) == as_read(field, Some(&to_value(b.clone())))
+}
+
+/// A2 item 12's offer for one kept entry: `None` when it is neither listed nor offered (its note
+/// is gone, or now holds the registrar's value); `Some(None)` when it is listed only (no prior
+/// row); else the `commitment-check` change, with `was` read from the note now.
+fn kept_offer(entry: &serde_json::Value, set: &Commitments) -> Option<Option<Change>> {
+    let (path, field) = (entry["note"].as_str()?, entry["field"].as_str()?);
+    let note = set.confirmed.iter().find(|n| n.path.to_string_lossy().replace('\\', "/") == path)?;
+    let now = field_json(field, &note.meets, note.until, note.where_.as_deref());
+    if same_value(field, &now, &entry["registrar"]) {
+        return None;
+    }
+    if entry.get("listed").is_some() {
+        return Some(None);
+    }
+    let one = |v: &serde_json::Value| Mapping::from_iter([(Value::String(field.to_string()), to_value(v.clone()))]);
+    Some(Some(make_change(note, note.source_uid.as_deref()?, one(&entry["registrar"]), one(&now))))
+}
+
+/// A2 item 12, "Never silent" and item 13: the kept entries as the page lists them, each with
+/// `card`: `listed` (no prior row), `filed` (a card [`emit_checks`]' asked-once test counts) or
+/// `waiting`. An entry whose note now holds the registrar's value is left out.
+pub fn kept_listed(vault: &Path, entries: &[serde_json::Value], set: &Commitments, today: Date) -> Vec<serde_json::Value> {
+    let seen = asked(vault, today);
+    let mut out = Vec::new();
+    for entry in entries {
+        let Some(offer) = kept_offer(entry, set) else { continue };
+        let card = match offer {
+            None => "listed",
+            Some(c) if seen.changes.contains(&(c.target.clone(), canonical(&Value::Mapping(c.change.clone())))) => "filed",
+            Some(_) => "waiting",
+        };
+        let mut shown = entry.clone();
+        if let Some(map) = shown.as_object_mut() {
+            map.remove("listed");
+            map.insert("card".to_string(), serde_json::Value::String(card.to_string()));
+        }
+        out.push(shown);
+    }
+    sort_registrar_entries(&mut out);
+    out
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Close-out B3eR fix 1, tests only: called on this thread just before [`emit_checks_locked`]
+    /// takes [`SERIES_LOCK_FILE`], so a race test knows its `rank` reached the filer's lock (past
+    /// `refresh_series`) by a signal, not by a clock.
+    pub(crate) static AT_FILER_LOCK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The actor [`emit_checks_locked`]'s withdrawal pass writes as: `rank`'s own approvals actor
+/// (`cli.rs`), so a fetch's withdrawal and a `rank`'s carry the same actor and neither reads as
+/// the student's answer (`provenance::is_agent`).
+const WITHDRAW_ACTOR: &str = "agent:approvals";
+
+/// A2 item 12, "One filer" (close-out B3e): [`emit_checks`] once, holding [`SERIES_LOCK_FILE`]
+/// from the series file's re-read to the last card write, so a fetch and a `rank` never file the
+/// same `(note, field, value)` twice. Under the lock it re-reads the file and the notes, counts the
+/// budget (`daily_budget` less today's proposals) and joins every kept entry's change to `changes`.
+/// No kept entry is offered when `offer_kept` is false (a bad series read), the lock cannot be
+/// taken, or the re-read is malformed or unreadable. A file that holds no registrar calendar and
+/// no block has nothing to guard: no lock is taken, so a vault that never fetched writes no lock
+/// file it did not write before.
+///
+/// Close-out B3e' ("Withdrawn with its entry", "A second call, under the lock"): holding the lock
+/// over a good re-read, it first runs `approvals::withdraw_stale` — over `base` (the file `rank`'s
+/// `refresh_series` returned) with the re-read's block for each term calendar `base` holds, or with
+/// no `base` (the fetch) over the re-read itself. Every `registrar:` proposal whose key the re-read
+/// does not hold under `series` is dropped (all of them on a bad re-read). Returns `(filed,
+/// withdrawn pending, warnings)`. The withdrawal writes as [`WITHDRAW_ACTOR`], whatever `ctx` is.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_checks_locked(
+    vault: &Path,
+    proposals: &[Proposal],
+    changes: &[Change],
+    base: Option<&SeriesFile>,
+    today: Date,
+    daily_budget: i64,
+    offer_kept: bool,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> (usize, i64, Vec<String>) {
+    let mut warnings = Vec::new();
+    let registrar = |f: &SeriesFile| {
+        !f.registrar.is_empty() || f.calendars.keys().any(|c| c.starts_with(crate::registrar::CALENDAR_PREFIX))
+    };
+    let lock = match offer_kept && registrar(&read_series_file(vault).0) {
+        true => {
+            #[cfg(test)]
+            AT_FILER_LOCK.with(|hook| {
+                if let Some(signal) = hook.borrow().as_ref() {
+                    signal();
+                }
+            });
+            lock_series_file(vault)
+                .inspect_err(|err| warnings.push(format!("series file: could not lock {SERIES_LOCK_FILE} ({}); no kept-field card this run", err.kind())))
+                .ok()
+        }
+        false => None,
+    };
+    let mut all = changes.to_vec();
+    let (file, read_warnings) = read_series_file(vault);
+    let good = !series_read_failed(&read_warnings);
+    let mut withdrawn = 0;
+    if lock.is_some() && good {
+        let over = match base {
+            Some(b) => {
+                let blocks = file.registrar.iter().filter(|(c, _)| b.calendars.contains_key(*c));
+                SeriesFile { registrar: blocks.map(|(c, t)| (c.clone(), t.clone())).collect(), ..b.clone() }
+            }
+            None => file.clone(),
+        };
+        // Review B3ePR: a withdrawal is the engine's act, journaled as `rank`'s own pass journals
+        // it (`agent:approvals`) whichever path runs it — never as the fetch's human ctx.
+        let agent = ctx.with_actor(WITHDRAW_ACTOR);
+        let out = crate::approvals::withdraw_stale(vault, &over, &load(vault), today, &agent, journal);
+        withdrawn = out.pending;
+        warnings.extend(out.warnings);
+        let set = load(vault);
+        let kept = file.registrar.values().flat_map(|t| t.kept.iter());
+        all.extend(kept.filter_map(|e| kept_offer(e, &set)).flatten());
+    }
+    // Convergence round 5: a fetch since `refresh_series` may have moved a `registrar:` key to
+    // `ended`, and its withdrawn card no longer closes the question, so only a held key is filed.
+    let held: BTreeSet<&str> = file.series.iter().filter(|_| good).map(|s| s.source_uid.as_str()).collect();
+    let asked: Vec<Proposal> = proposals
+        .iter()
+        .filter(|p| Source::by_uid(&p.source_uid).lands != Lands::AppliedAndListed || held.contains(p.source_uid.as_str()))
+        .cloned()
+        .collect();
+    let budget = std::cmp::max(0, daily_budget - crate::approvals::count_proposals_created(vault, today));
+    let (_, filed, card_warnings) = emit_checks(vault, &asked, &all, today, budget, ctx, journal);
+    warnings.extend(card_warnings);
+    (filed, withdrawn, warnings)
+}
+
 /// §5.4's detection, pure (no clock, no I/O, no model): the changes to confirmed notes keyed
-/// `gcal-series:`/`ics-series:`, over [`SeriesFile::by_key`] and `file.ended`. `fresh` is the set
-/// of calendar keys read fresh and complete this run. Returns `(changes, warnings)`, in note order.
+/// `gcal-series:` or `ics-series:`, the table rows whose change is [`Lands::Carded`] (R6; never
+/// `registrar:`, whose fetch applies and lists: phase-3 spec A2 item 8, close-out B3b, Plan ruling
+/// R2-g went; never a key outside the three, [`Lands::NotWatched`]), over
+/// [`SeriesFile::by_key`] and `file.ended`.
+/// `fresh` is the set of calendar keys read fresh and complete this run. Returns
+/// `(changes, warnings)`, in note order.
 ///
 /// - **changed** — the note's record is live on a calendar in `fresh` and differs in `meets`, in
 ///   a non-empty `where`, or in `until` (a `None` `until` is never proposed). An `until` that ends
@@ -3490,7 +4056,7 @@ pub fn detect_changes(
     let mut warnings = Vec::new();
     for note in &set.confirmed {
         let Some(key) = note.source_uid.as_deref() else { continue };
-        if !SERIES_KEY_PREFIXES.iter().any(|p| key.starts_with(p)) || note.until.is_some_and(|u| u < today) {
+        if Source::by_uid(key).lands != Lands::Carded || note.until.is_some_and(|u| u < today) {
             continue;
         }
         let sig = note.signature(codes);
@@ -3930,6 +4496,8 @@ fn create_confirmed_as(
             "Found as a weekly series on your Google Calendar.\n".to_string()
         } else if key.starts_with("card:") {
             "You told Knowlu when this class meets.\n".to_string()
+        } else if key.starts_with(crate::registrar::CALENDAR_PREFIX) {
+            "Found in your school's class schedule.\n".to_string()
         } else {
             "Found as a weekly series on your calendar.\n".to_string()
         };
@@ -4008,6 +4576,24 @@ fn stale_change(vault: &Path, target: &str, meta: &Mapping) -> Option<String> {
         }
     }
     None
+}
+
+/// Phase-3 spec A2 item 12, "Withdrawn with its entry" (close-out B3e'): a change card on a note
+/// keyed `registrar:` asks about one standing kept entry. `Some` when that note's term has a block
+/// in `file` holding no kept entry with the card's target and canonical change; `None` for a note
+/// keyed otherwise and for a term with no block ("Only from a block that exists").
+fn kept_entry_gone(target: &str, meta: &Mapping, file: &SeriesFile, set: &Commitments) -> Option<String> {
+    let rel = target_rel(target)?;
+    let note = set.confirmed.iter().find(|n| n.path.to_string_lossy().replace('\\', "/") == rel)?;
+    let key = note.source_uid.as_deref().filter(|k| Source::by_uid(k).lands == Lands::AppliedAndListed)?;
+    let (_, term) = file.registrar.iter().find(|(c, _)| key.strip_prefix(c.as_str()).is_some_and(|r| r.starts_with('-')))?;
+    let change = canonical(get(meta, "change").unwrap_or(&Value::Null));
+    let of_entry = |e: &serde_json::Value| {
+        let field = Value::String(e["field"].as_str().unwrap_or_default().to_string());
+        canonical(&Value::Mapping(Mapping::from_iter([(field, to_value(e["registrar"].clone()))])))
+    };
+    let standing = term.kept.iter().any(|e| e["note"] == rel && of_entry(e) == change);
+    (!standing).then(|| format!("{rel}: the registrar no longer lists this change"))
 }
 
 /// The literals an approved change writes, or why it cannot be written: a target that is not a
@@ -4169,7 +4755,9 @@ fn created_by_this_card(
 ///   `agent:commitments`.
 /// - **window** → refused when a `planning-day` note exists; else the planning day.
 /// - **proposal** → refused when a confirmed note has the card's key or signature (§2.5: a
-///   second desktop's answer is a no-op), or the `commitment:` cannot be a note; else the note.
+///   second desktop's answer is a no-op), or the `commitment:` cannot be a note;
+///   [`Settled::Superseded`] when the registrar holds the card's `(kind, course)`
+///   ([`RegistrarHold`], close-out A1-F1, §8 Q12); else the note.
 pub fn settle_approved(
     vault: &Path,
     meta: &Mapping,
@@ -4191,7 +4779,9 @@ pub fn settle_approved(
             if change_applied(vault, &target, meta) {
                 return Ok(Settled::Executed);
             }
-            if let Some(why) = stale_change(vault, &target, meta) {
+            // Close-out B3e': the same entry test as the withdrawal, on the series file on disk.
+            let gone = || kept_entry_gone(&target, meta, &read_series_file(vault).0, &set);
+            if let Some(why) = stale_change(vault, &target, meta).or_else(gone) {
                 return Ok(Settled::Superseded(format!("{why}; not applied")));
             }
             crate::write::write_literals(
@@ -4249,6 +4839,25 @@ pub fn settle_approved(
                     note.path.display().to_string().replace('\\', "/")
                 )));
             }
+            // Close-out A1-F1, §8 Q12 (ruled `superseded`): the registrar came to hold this
+            // course's kind after the card was filed. Nothing is written but the card's stamp, so
+            // the question can be asked again if the registrar's note later ends.
+            let (file, _) = read_series_file(vault);
+            // A2 item 12, "And a `registrar:` proposal card" (close-out B3e'): the file on disk
+            // ended the key, or knows a calendar and holds the key under none. An empty file says
+            // nothing; a key outside `registrar:` is not tested.
+            if Source::by_uid(&key).lands == Lands::AppliedAndListed {
+                let gone = match file.ended.contains_key(&key) {
+                    true => Some(format!("{key} ended")),
+                    false => (!file.calendars.is_empty() && !file.by_key().contains_key(key.as_str())).then(|| format!("{key} left the calendar")),
+                };
+                if let Some(why) = gone {
+                    return Ok(Settled::Superseded(format!("{why}; nothing written")));
+                }
+            }
+            if let Some(why) = RegistrarHold::of(&file, &set, &codes, today).card_reason(&key, meta, &codes) {
+                return Ok(Settled::Superseded(format!("{why}; nothing written")));
+            }
             create_confirmed(vault, map, &key, today, ctx, journal)?;
             Ok(Settled::Executed)
         }
@@ -4303,7 +4912,8 @@ pub fn settle_rejected(
 /// - **window**: a `planning-day` note or the `window` marker exists;
 /// - **proposal**: its key is under no calendar of the series file, its series is in the file's
 ///   `ended` map or ends before `today` (fix round 1, m3), a note (confirmed, a marker,
-///   the planning day) has its key, or a confirmed note has its signature. "Under no calendar"
+///   the planning day) has its key, a confirmed note has its signature, or the registrar holds
+///   its `(kind, course)` ([`RegistrarHold`], as [`proposals`] does; close-out A1-F1). "Under no calendar"
 ///   is read only from a file that knows at least one calendar: an empty file (never written,
 ///   or unreadable this run) says nothing about what left it.
 pub fn withdrawal_reason(
@@ -4315,7 +4925,8 @@ pub fn withdrawal_reason(
     today: Date,
 ) -> Option<String> {
     match shape(meta) {
-        Shape::Change(target) => stale_change(vault, &target, meta),
+        // Close-out B3e': after `stale_change`, a kept-field card goes with its entry.
+        Shape::Change(target) => stale_change(vault, &target, meta).or_else(|| kept_entry_gone(&target, meta, file, set)),
         Shape::Window => {
             if set.planning_day.is_some() {
                 Some("a planning day exists".to_string())
@@ -4354,7 +4965,8 @@ pub fn withdrawal_reason(
             if set.confirmed.iter().any(|n| sigs.contains(&n.signature(codes))) {
                 return Some(format!("{key} is already confirmed"));
             }
-            None
+            // Close-out A1-F1: the registrar hold `proposals()` applies, withdrawn here too.
+            RegistrarHold::of(file, set, codes, today).card_reason(&key, meta, codes)
         }
     }
 }
@@ -4592,9 +5204,40 @@ pub struct Overview {
     /// `source` is `note` (the planning day) or `template` (`week_template.yaml`).
     pub window: Vec<serde_json::Value>,
     pub uncovered_courses: Vec<UncoveredCourse>,
+    /// Phase 3 (Plan ruling R3-d): [`crate::registrar::status`], or `null`.
+    pub registrar: serde_json::Value,
+    /// The current registrar proposals (key `registrar:`), as [`proposal_value`].
+    pub registrar_proposals: Vec<serde_json::Value>,
+    /// Phase-3 spec A2 item 13, "After a restart": [`registrar_changes_json`].
+    pub registrar_changes: serde_json::Value,
     /// D3: the vault is on its first day and has no planning-day note.
     pub setup: bool,
     pub warnings: Vec<String>,
+}
+
+/// The page's "From myBama" lists after a restart (phase-3 spec A2 item 13): `applied`, `ended`,
+/// `kept`, `status` and `unread`, read from the registrar block of every term in play
+/// ([`registrar_in_play`]), terms in key order, each list in the block's order. No term, empty lists.
+/// `kept` is [`kept_listed`] (close-out B3e), so its `card` is read from `approvals/` and `archive/`.
+pub fn registrar_changes_json(vault: &Path, file: &SeriesFile, set: &Commitments, today: Date) -> serde_json::Value {
+    let in_play = registrar_in_play(file, today);
+    let mut out = serde_json::Map::new();
+    for key in ["applied", "ended", "kept", "status", "unread"] {
+        let mut list = Vec::new();
+        for term in file.registrar.iter().filter(|(c, _)| in_play.contains(*c)).map(|(_, t)| t) {
+            let mut part = match key {
+                "applied" => term.applied.clone(),
+                "ended" => term.ended.clone(),
+                "kept" => kept_listed(vault, &term.kept, set, today),
+                "status" => term.status.clone(),
+                _ => term.unread.clone(),
+            };
+            sort_registrar_entries(&mut part);
+            list.extend(part);
+        }
+        out.insert(key.to_string(), serde_json::Value::Array(list));
+    }
+    serde_json::Value::Object(out)
 }
 
 impl Overview {
@@ -4604,6 +5247,9 @@ impl Overview {
             "office_hours": self.office_hours,
             "window": self.window,
             "uncovered_courses": self.uncovered_courses,
+            "registrar": self.registrar,
+            "registrar_proposals": self.registrar_proposals,
+            "registrar_changes": self.registrar_changes,
             "setup": self.setup,
             "warnings": self.warnings,
         })
@@ -4629,6 +5275,7 @@ pub fn overview(vault: &Path, today: Date) -> Overview {
                 "where": n.where_,
                 "from": date_json(n.from),
                 "until": date_json(n.until),
+                "source_uid": n.source_uid,
             })
         })
         .collect();
@@ -4646,7 +5293,25 @@ pub fn overview(vault: &Path, today: Date) -> Overview {
         .collect();
     let uncovered_courses = uncovered_courses(vault, &stored.set, &stored.proposals, &stored.codes);
     let setup = vault_day(vault, today) == 1 && stored.set.planning_day.is_none();
-    Overview { commitments, office_hours, window, uncovered_courses, setup, warnings: stored.warnings }
+    let registrar = crate::registrar::status(&stored.file, today);
+    let registrar_proposals = stored
+        .proposals
+        .iter()
+        .filter(|p| p.source_uid.starts_with(crate::registrar::CALENDAR_PREFIX))
+        .map(proposal_value)
+        .collect();
+    let registrar_changes = registrar_changes_json(vault, &stored.file, &stored.set, today);
+    Overview {
+        commitments,
+        office_hours,
+        window,
+        uncovered_courses,
+        registrar,
+        registrar_proposals,
+        registrar_changes,
+        setup,
+        warnings: stored.warnings,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -6853,6 +7518,33 @@ mod series_tests {
         assert_eq!(g.last_seen, Some(d0));
     }
 
+    /// Phase 3 final review I2: two refreshes at once (a slot's `rank` and a registrar run, say)
+    /// each keep their own calendar; the read-to-rename is under `state/calendar-series.lock`.
+    #[test]
+    fn two_concurrent_refreshes_both_keep_their_calendars() {
+        let d0 = date(2026, 9, 21);
+        let v = vault("concurrent", &["clients"]);
+        for round in 0..40 {
+            let day = plus(d0, round);
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|s| {
+                for cal in ["personal", "clients"] {
+                    let (v, barrier) = (&v, &barrier);
+                    s.spawn(move || {
+                        let one = ser(&format!("ics-series:{cal}"), cal, &[day]);
+                        barrier.wait();
+                        refresh_series(v, &[(cal.to_string(), vec![one])], day)
+                    });
+                }
+            });
+            let (file, warnings) = read_series_file(&v);
+            assert!(warnings.is_empty(), "round {round}: {warnings:?}");
+            assert_eq!(file.calendars.get("personal"), Some(&day), "round {round}");
+            assert_eq!(file.calendars.get("clients"), Some(&day), "round {round}");
+        }
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
     #[test]
     fn an_ics_fetched_with_zero_series_is_fresh_and_ages_its_old_series() {
         let d0 = date(2026, 9, 21);
@@ -7095,7 +7787,7 @@ mod series_tests {
         g.last_seen = Some(d0);
         p.last_seen = Some(plus(d0, 3));
         day.last_seen = Some(plus(d0, 3));
-        let file = SeriesFile { calendars, ended: BTreeMap::new(), series: vec![g, p, day] };
+        let file = SeriesFile { calendars, ended: BTreeMap::new(), series: vec![g, p, day], registrar: BTreeMap::new() };
         let map = file.instances_map();
         assert_eq!(
             map["gcal-series:k"],
@@ -7146,11 +7838,13 @@ mod series_tests {
         let v = vault("atomic", &[]);
         refresh_series(&v, &[("personal".into(), vec![ser("ics-series:a", "personal", &[d0])])], d0);
         let (file, _) = refresh_series(&v, &[("personal".into(), vec![ser("ics-series:b", "personal", &[d0])])], plus(d0, 1));
-        let names: Vec<String> = std::fs::read_dir(v.join("state"))
+        let mut names: Vec<String> = std::fs::read_dir(v.join("state"))
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["calendar-series.json".to_string()]);
+        names.sort();
+        // The empty lock file stays (final review I2); no temporary file does.
+        assert_eq!(names, vec!["calendar-series.json".to_string(), "calendar-series.lock".to_string()]);
         assert_eq!(read_series_file(&v), (file, Vec::new()));
     }
 }
@@ -7585,6 +8279,7 @@ mod proposal_tests {
             .collect(),
             ended: BTreeMap::new(),
             series,
+            registrar: BTreeMap::new(),
         };
         let first = run(&file, &Commitments::default());
         assert_eq!(
@@ -9300,6 +9995,28 @@ mod change_tests {
     }
 
     #[test]
+    fn a_note_keyed_outside_the_watched_prefixes_stays_unwatched() {
+        // B3f (phase-3 spec A2 item 16, the table's "not watched" row): a confirmed note whose
+        // `source_uid` is not `gcal-series:`, `ics-series:` or `registrar:` (a card note, an events
+        // one-off, a hand-made key) files no change card, even when a fresh series under that same
+        // key moved its times.
+        for key in ["card:cs-100", "events:cs-100-talk", "hand-made-cs-100"] {
+            let mut moved = cs100(key, GOOGLE);
+            moved.meets = vec![meet(&["tue", "thu"], t(9, 30), t(10, 45))];
+            let file = file_of(vec![moved]);
+            let set = set_of(vec![note(key)]);
+            let (changes, warnings) = detect(&file, &set, &[GOOGLE]);
+            assert!(changes.is_empty(), "{key}: {changes:?}");
+            assert!(warnings.is_empty(), "{key}: {warnings:?}");
+            assert!(emit(&vault("unwatched"), &changes, &[]).is_empty(), "{key}");
+        }
+        // The control: the same move under a watched key is one card.
+        let mut moved = cs100(OLD, GOOGLE);
+        moved.meets = vec![meet(&["tue", "thu"], t(9, 30), t(10, 45))];
+        assert_eq!(detect(&file_of(vec![moved]), &set_of(vec![note(OLD)]), &[GOOGLE]).0.len(), 1);
+    }
+
+    #[test]
     fn a_non_empty_where_change_is_a_change_and_an_empty_one_is_not() {
         let set = set_of(vec![note(OLD)]);
         let mut moved = cs100(OLD, GOOGLE);
@@ -10611,5 +11328,311 @@ status: active
             .unwrap();
         s.meets = vec![Meet { days: vec!["tue".into(), "thu".into()], start: t(9, 30), end: t(10, 45) }];
         assert!(detect_in(&v, &file_with(vec![s])).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod registrar_hold_tests {
+    //! A1-F1 (close-out plan B4a): the registrar hold of `proposals()` also withdraws a filed
+    //! `commitment-check` card (`withdrawal_reason`, through `approvals::withdraw_stale`) and refuses
+    //! its approval (`settle_approved`). Every title, key, room and time is invented.
+
+    use super::*;
+    use crate::journal::Journal;
+    use crate::write::WriteContext;
+    use jiff::civil::date;
+
+    const TODAY: Date = Date::constant(2026, 9, 10);
+    const REG_CAL: &str = "registrar:ua:202640";
+    const REG_KEY: &str = "registrar:ua:202640-40001";
+    const GOOGLE_CAL: &str = "google:invented";
+
+    /// A scratch vault removed when the test ends, pass or fail.
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A vault whose one course is `cs-100` ("CS 100").
+    fn vault(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("knowlu-hold-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("courses")).unwrap();
+        std::fs::write(dir.join("courses").join("cs-100.md"), "---\ntitle: \"CS 100\"\nslug: cs-100\n---\n\nInvented.\n")
+            .unwrap();
+        Scratch(dir)
+    }
+
+    fn t(h: i8, m: i8) -> Time {
+        Time::new(h, m, 0, 0).unwrap()
+    }
+
+    fn series(uid: &str, cal: &str, title: &str, end_minute: i8, until: Option<Date>) -> Series {
+        let instances = [date(2026, 9, 7), date(2026, 9, 9), date(2026, 9, 11), date(2026, 9, 14)]
+            .into_iter()
+            .map(|d| Instance { date: d, start: Some(t(12, 0)), end: Some(t(12, end_minute)) })
+            .collect();
+        Series {
+            source_uid: uid.to_string(),
+            calendar: cal.to_string(),
+            title: title.to_string(),
+            where_: None,
+            event_type: None,
+            rule: Rule { freq: "WEEKLY".into(), interval: 1, until, count: None },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            instances,
+            meets: vec![Meet { days: vec!["mon", "wed", "fri"], start: t(12, 0), end: t(12, end_minute) }],
+            first: Some(date(2026, 8, 24)),
+            until,
+            last_seen: Some(TODAY),
+        }
+    }
+
+    /// Banner's CS 100 class: 12:00-12:50. Google's copy ends one minute later, so the two have
+    /// different signatures and only the hold can tell them apart.
+    fn registrar_series(title: &str, until: Option<Date>) -> Series {
+        series(REG_KEY, REG_CAL, title, 50, until)
+    }
+
+    fn google_series(uid: &str, title: &str) -> Series {
+        series(uid, GOOGLE_CAL, title, 51, None)
+    }
+
+    fn file_of(series: Vec<Series>) -> SeriesFile {
+        let mut file = SeriesFile::default();
+        for s in &series {
+            file.calendars.insert(s.calendar.clone(), TODAY);
+        }
+        file.series = series;
+        file.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+        file
+    }
+
+    fn write_series_file(v: &Path, file: &SeriesFile) {
+        std::fs::create_dir_all(v.join("state")).unwrap();
+        std::fs::write(v.join(SERIES_FILE), file_bytes(file)).unwrap();
+    }
+
+    /// The card an earlier run filed for Google's series `uid`, `kind` `title`, pending.
+    fn google_card(v: &Path, uid: &str, kind: &str, title: &str) -> PathBuf {
+        let dir = v.join("approvals");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("commitment-check-{uid}.md").replace(':', "-"));
+        let front = format!(
+            "type: approval\nkind: commitment-check\ntitle: {title} · Mon/Wed/Fri 12–12:51pm · a {kind}?\n\
+             status: pending\nsource_uid: {uid}\n\
+             commitment: {{course: cs-100, from: '2026-08-24', kind: {kind}, level: hard, \
+             meets: [{{days: [mon, wed, fri], end: '12:51', start: '12:00'}}], title: {title}, \
+             until: '2026-12-11'}}\n\
+             proposed_at: 2026-09-10\nfirst_proposed_at: 2026-09-10\nexpires: null\nsnooze_until: null\n\
+             created_by: agent:commitments\n"
+        );
+        std::fs::write(&path, format!("---\n{front}---\n\nInvented.\n")).unwrap();
+        path
+    }
+
+    /// A confirmed `registrar:` note for CS 100, `kind`, with an optional `until`.
+    fn registrar_note(v: &Path, kind: &str, until: Option<&str>) {
+        let dir = v.join("commitments");
+        std::fs::create_dir_all(&dir).unwrap();
+        let until = until.map(|u| format!("until: \"{u}\"\n")).unwrap_or_default();
+        let text = format!(
+            "---\nid: cmt_invented01\ntype: commitment\nkind: {kind}\nlevel: hard\ntitle: \"CS 100\"\n\
+             course: cs-100\nmeets: [{{days: [mon, wed, fri], start: \"12:00\", end: \"12:50\"}}]\n\
+             {until}source_uid: \"{REG_KEY}\"\nstatus: confirmed\n---\n\nInvented.\n"
+        );
+        std::fs::write(dir.join(format!("cs-100-{kind}.md")), text).unwrap();
+    }
+
+    fn meta_of(path: &Path) -> Mapping {
+        let raw = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+        split_frontmatter(&raw).unwrap().0
+    }
+
+    fn reason(v: &Path, card: &Path, file: &SeriesFile) -> Option<String> {
+        let set = load(v);
+        let (codes, _) = Codes::load(v);
+        withdrawal_reason(v, &meta_of(card), file, &set, &codes, TODAY)
+    }
+
+    fn ctx() -> WriteContext {
+        WriteContext::new("agent:rank", "cli")
+    }
+
+    fn withdraw(v: &Path, file: &SeriesFile) -> crate::approvals::Withdrawal {
+        let set = load(v);
+        let mut journal = Journal::new(v);
+        crate::approvals::withdraw_stale(v, file, &set, TODAY, &ctx(), &mut journal)
+    }
+
+    fn names(v: &Path, folder: &str) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(v.join(folder)) else { return Vec::new() };
+        let mut out: Vec<String> = entries.map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        out.sort();
+        out
+    }
+
+    /// The `create` records the journal holds for notes under `commitments/`.
+    fn commitment_creates(v: &Path) -> usize {
+        let dir = v.join("state").join("journal");
+        let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
+        entries
+            .flat_map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap().lines().map(str::to_string).collect::<Vec<_>>())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+            .filter(|r| r["op"] == "create" && r["path"].as_str().is_some_and(|p| p.starts_with("commitments/")))
+            .count()
+    }
+
+    fn settle(v: &Path, card: &Path) -> Settled {
+        let mut journal = Journal::new(v);
+        settle_approved(v, &meta_of(card), TODAY, &ctx(), &mut journal).unwrap()
+    }
+
+    // ---- withdrawal ----
+
+    /// Red on the branch: `withdrawal_reason` is `None`, the card stays pending.
+    #[test]
+    fn a_registrar_series_holding_the_course_withdraws_the_google_class_card() {
+        let v = vault("series");
+        let card = google_card(&v, "gcal-series:cs100", "class", "CS 100");
+        let file = file_of(vec![registrar_series("CS 100", None), google_series("gcal-series:cs100", "CS 100")]);
+        let why = reason(&v, &card, &file).expect("the registrar holds CS 100's class");
+        assert!(why.contains("registrar"), "{why}");
+
+        let done = withdraw(&v, &file);
+        assert_eq!(done.withdrawn.len(), 1, "{done:?}");
+        assert_eq!(done.pending, 1, "it was pending on disk");
+        assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+        assert!(names(&v, "approvals").is_empty(), "{:?}", names(&v, "approvals"));
+        let archived = names(&v, "archive");
+        assert_eq!(archived.len(), 1, "{archived:?}");
+        let text = std::fs::read_to_string(v.join("archive").join(&archived[0])).unwrap();
+        assert!(text.contains("status: superseded"), "{text}");
+    }
+
+    /// Red on the branch: the same, with the hold a confirmed in-play `registrar:` note only.
+    #[test]
+    fn a_confirmed_registrar_note_holding_the_course_withdraws_the_google_class_card() {
+        let v = vault("note");
+        registrar_note(&v, "class", None);
+        assert_eq!(load(&v).confirmed.len(), 1, "the note loads");
+        let card = google_card(&v, "gcal-series:cs100", "class", "CS 100");
+        let file = file_of(vec![google_series("gcal-series:cs100", "CS 100")]);
+        assert!(reason(&v, &card, &file).is_some());
+        assert_eq!(withdraw(&v, &file).withdrawn.len(), 1);
+        assert!(names(&v, "approvals").is_empty());
+    }
+
+    #[test]
+    fn a_registrar_class_hold_leaves_a_google_lab_card_pending() {
+        let v = vault("lab");
+        let card = google_card(&v, "gcal-series:cs100lab", "lab", "CS 100 Lab");
+        let file = file_of(vec![registrar_series("CS 100", None), google_series("gcal-series:cs100lab", "CS 100 Lab")]);
+        assert_eq!(reason(&v, &card, &file), None, "a registrar lecture never withdraws a Google lab");
+        assert!(withdraw(&v, &file).withdrawn.is_empty());
+        assert_eq!(names(&v, "approvals").len(), 1);
+    }
+
+    #[test]
+    fn a_registrar_note_or_series_past_its_until_holds_nothing() {
+        let v = vault("past");
+        registrar_note(&v, "class", Some("2026-09-09"));
+        let card = google_card(&v, "gcal-series:cs100", "class", "CS 100");
+        let ended = Some(date(2026, 9, 9));
+        let file = file_of(vec![registrar_series("CS 100", ended), google_series("gcal-series:cs100", "CS 100")]);
+        assert_eq!(reason(&v, &card, &file), None);
+        assert!(withdraw(&v, &file).withdrawn.is_empty());
+        assert_eq!(names(&v, "approvals").len(), 1);
+    }
+
+    /// A guard, green on the branch too: the hold never reaches a card keyed `registrar:`.
+    #[test]
+    fn a_registrar_keyed_card_is_never_withdrawn_by_the_hold() {
+        let v = vault("own");
+        let card = google_card(&v, REG_KEY, "class", "CS 100");
+        let sibling = series("registrar:ua:202640-40009", REG_CAL, "CS 100", 50, None);
+        let file = file_of(vec![registrar_series("CS 100", None), sibling]);
+        assert_eq!(reason(&v, &card, &file), None);
+    }
+
+    // ---- settlement ----
+
+    /// Red on the branch: the approval writes a second hard class note for CS 100.
+    #[test]
+    fn approving_the_google_card_while_the_registrar_holds_the_course_is_superseded() {
+        let v = vault("settle-note");
+        registrar_note(&v, "class", None);
+        let card = google_card(&v, "gcal-series:cs100", "class", "CS 100");
+        write_series_file(&v, &file_of(vec![google_series("gcal-series:cs100", "CS 100")]));
+        let got = settle(&v, &card);
+        let Settled::Superseded(why) = got else { panic!("{got:?}") };
+        assert!(why.contains("registrar") && why.contains("nothing written"), "{why}");
+        assert_eq!(names(&v, "commitments"), ["cs-100-class.md"], "one confirmed class note for CS 100");
+        assert_eq!(commitment_creates(&v), 0, "no create record under commitments/");
+    }
+
+    /// Red on the branch: the hold is a registrar series in the stored file, with no note yet.
+    #[test]
+    fn approving_while_a_registrar_series_holds_the_course_writes_no_note() {
+        let v = vault("settle-series");
+        let card = google_card(&v, "gcal-series:cs100", "class", "CS 100");
+        write_series_file(
+            &v,
+            &file_of(vec![registrar_series("CS 100", None), google_series("gcal-series:cs100", "CS 100")]),
+        );
+        let got = settle(&v, &card);
+        assert!(matches!(got, Settled::Superseded(_)), "{got:?}");
+        assert!(names(&v, "commitments").is_empty(), "{:?}", names(&v, "commitments"));
+        assert_eq!(commitment_creates(&v), 0);
+    }
+
+    /// Guard, green on the branch: a registrar class does not hold a Google lab's approval.
+    #[test]
+    fn approving_a_google_lab_card_while_the_registrar_holds_the_class_still_writes_the_note() {
+        let v = vault("settle-lab");
+        let card = google_card(&v, "gcal-series:cs100lab", "lab", "CS 100 Lab");
+        write_series_file(
+            &v,
+            &file_of(vec![registrar_series("CS 100", None), google_series("gcal-series:cs100lab", "CS 100 Lab")]),
+        );
+        assert_eq!(settle(&v, &card), Settled::Executed);
+        assert_eq!(commitment_creates(&v), 1);
+    }
+
+    // ---- the next rank ----
+
+    /// Red on the branch at the first assertion (the card is never withdrawn). After the
+    /// withdrawal the question is not asked again and nothing is charged against the cap.
+    #[test]
+    fn after_the_withdrawal_the_next_rank_files_no_card_and_charges_nothing() {
+        let v = vault("after");
+        let card = google_card(&v, "gcal-series:cs100", "class", "CS 100");
+        let file = file_of(vec![registrar_series("CS 100", None), google_series("gcal-series:cs100", "CS 100")]);
+        write_series_file(&v, &file);
+        assert_eq!(withdraw(&v, &file).withdrawn.len(), 1, "the card {} is withdrawn", card.display());
+
+        let stored = stored_proposals(&v, TODAY);
+        let keys: Vec<&str> = stored.proposals.iter().map(|p| p.source_uid.as_str()).collect();
+        assert_eq!(keys, [REG_KEY], "the registrar's class is the one question left");
+        let mut journal = Journal::new(&*v);
+        let (paths, filed, warnings) = emit_checks(&v, &stored.proposals, &[], TODAY, 15, &ctx(), &mut journal);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(filed, 1, "only the registrar's own question is charged: {paths:?}");
+        let uids: Vec<String> = paths.iter().map(|p| meta_of(p).get("source_uid").and_then(|v| v.as_str()).unwrap().to_string()).collect();
+        assert_eq!(uids, [REG_KEY]);
+        let again = withdraw(&v, &file);
+        assert!(again.withdrawn.is_empty() && again.pending == 0, "{again:?}");
     }
 }

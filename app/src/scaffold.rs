@@ -15,6 +15,31 @@ use knowlu_engine::journal::Journal;
 use knowlu_engine::write::{self, WriteContext};
 use knowlu_engine::yamlemit::{safe_dump_block, Node};
 
+/// One request the registrar capture makes (phase 3, Plan ruling R4-b): `path` is under the
+/// registrar's `prefix`; `{term}` in `path` or `form` becomes the term code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Call {
+    pub method: &'static str,
+    pub path: &'static str,
+    pub form: Option<&'static str>,
+}
+
+/// A curated school's registrar (phase-3 spec D2). **Data, recorded by the R0 spike** — adding a
+/// school is adding one of these to its row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Registrar {
+    /// The engine's `--school` key (`knowlu_engine::registrar::SCHOOLS`).
+    pub school: &'static str,
+    /// What the student calls it; the button reads "Get my class times from <label>".
+    pub label: &'static str,
+    pub host: &'static str,
+    pub prefix: &'static str,
+    /// Where the sign-in window opens, under `prefix`.
+    pub start: &'static str,
+    /// In order; the last one's body is the schedule.
+    pub calls: &'static [Call],
+}
+
 /// What a **curated** school gets on top of being in the list: event feeds, a known LMS, and a
 /// sign-in URL the window can be pointed at. Keyed by IPEDS `UNITID`, which is the one identifier
 /// that is stable across years and unambiguous across the four "University of ——" in a state.
@@ -45,7 +70,13 @@ pub struct Curated {
     pub mail_provider: &'static str,
     /// The student mail domain (`crimson.ua.edu`), set only for `m365` or `google`.
     pub mail_domain: Option<&'static str>,
+    /// Phase 3: the registrar Knowlu can read, or `None` (every school but UA before the pilot).
+    pub registrar: Option<Registrar>,
 }
+
+/// R0's rows call for UA (spec D3 amendment), under the prefix: the signed-in student's own
+/// registration history for the term. One `GET`; no term-selection `POST` comes before it.
+const UA_ROWS_PATH: &str = "registrationHistory/reset?term={term}";
 
 pub const CAMPUSES: [Curated; 2] = [
     Curated {
@@ -57,6 +88,16 @@ pub const CAMPUSES: [Curated; 2] = [
         policy_read: None,
         mail_provider: "m365",
         mail_domain: Some("crimson.ua.edu"),
+        registrar: Some(Registrar {
+            school: "ua",
+            label: "myBama",
+            host: "bannerssb.ua.edu",
+            prefix: "/StudentRegistrationSsb/ssb/",
+            start: "registration",
+            calls: &[
+                Call { method: "GET", path: UA_ROWS_PATH, form: None },
+            ],
+        }),
     },
     Curated {
         unitid: "157085",
@@ -70,6 +111,7 @@ pub const CAMPUSES: [Curated; 2] = [
         // confirms a row (one edit here).
         mail_provider: "other",
         mail_domain: None,
+        registrar: None,
     },
 ];
 
