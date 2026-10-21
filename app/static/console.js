@@ -2738,10 +2738,10 @@
   var RECONSENT_BUSY = false;
   var PRIVACY_ASKED = false;
   var OWED_LINE = "Accept the privacy update to use this";
-  // Keyed by the version the lines describe; a static pin fails unless the key equals `account.rs`'s
-  // PRIVACY_VERSION, so a bump of the constant cannot ship these lines by accident.
+  // One key, the version the lines describe; a static pin fails unless it is the only key and equals
+  // `account.rs`'s PRIVACY_VERSION, so a bump of the constant cannot ship these lines by accident.
   var PRIVACY_CHANGES = {
-    "2026-09-24": [
+    "2026-10-20": [
       "It now covers connecting Google Calendar and Gmail, the email you forward to Knowlu (received by Amazon Web Services) and what is kept from it, the Blackboard and mail sign-ins Knowlu keeps on this computer, your grades in your account, and daily counts of your AI calls.",
       "Until you accept, Knowlu keeps today's page up to date from this computer but does not sync, import or read anything new.",
       "To leave instead, use Settings → Delete my data."
@@ -2770,7 +2770,8 @@
     if (current.state && current.state.topline) { renderSyncLine(current.state); }
   }
   function fillReconsent(p) {
-    var key = PRIVACY_CHANGES[p && p.current] ? p.current : Object.keys(PRIVACY_CHANGES)[0];
+    // `current` is the build's PRIVACY_VERSION, the table's one key: no fallback to another key.
+    var key = p.current;
     var lines = ["Knowlu's privacy policy changed on " + key + "."].concat(PRIVACY_CHANGES[key] || []);
     EL("rc-changes").innerHTML = lines.map(function (l) { return "<p>" + h(l) + "</p>"; }).join("");
   }

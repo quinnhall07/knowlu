@@ -3215,6 +3215,35 @@ fn the_panels_first_line_names_the_version_from_the_key_never_a_literal_date() {
         "fillReconsent builds line 1 (\"Knowlu's privacy policy changed on …\") from the table key it shows");
 }
 
+/// One key per bump, and no way round it: the table holds only the build's version, and line 1 is
+/// built from the reply's `current`, which every `privacy_status` reply sets to PRIVACY_VERSION. A
+/// fallback to another key would show that key's date and lines for a version they do not describe.
+#[test]
+fn the_panels_line_one_names_privacy_version_and_the_table_has_one_key() {
+    let rust = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let version = rust
+        .split("pub const PRIVACY_VERSION: &str = \"").nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("account.rs must declare `pub const PRIVACY_VERSION: &str = \"…\";`");
+    let status = rust.split("pub fn privacy_status_in(").nth(1).and_then(|s| s.split("\n}\n").next())
+        .expect("account.rs has privacy_status_in");
+    assert!(status.matches("json!(").count() > 0, "privacy_status_in answers with json!");
+    assert_eq!(status.matches("json!(").count(), status.matches("\"current\": PRIVACY_VERSION").count(),
+        "every privacy_status reply carries current: PRIVACY_VERSION");
+    let js = read("console.js");
+    let table = js.split("var PRIVACY_CHANGES = {").nth(1).and_then(|s| s.split("};").next())
+        .expect("console.js needs `var PRIVACY_CHANGES = { … };`");
+    let keys: Vec<&str> = table.lines().map(str::trim).filter(|l| l.ends_with("\": ["))
+        .map(|l| l.trim_end_matches(": [").trim_matches('"')).collect();
+    assert_eq!(keys, [version], "PRIVACY_CHANGES has exactly one key, the build's PRIVACY_VERSION");
+    let fill = js_fn(&js, "function fillReconsent(");
+    assert!(!fill.contains("Object.keys"), "no fallback to another key's date or lines");
+    assert!(fill.contains("var key = p.current;"), "the key is the reply's current, PRIVACY_VERSION");
+    assert!(fill.contains("[\"Knowlu's privacy policy changed on \" + key + \".\"]"), "line 1 is built from the key");
+    let line1 = format!("Knowlu's privacy policy changed on {}.", keys[0]);
+    assert!(line1.contains(version), "line 1 reads {line1:?} and must name {version}");
+}
+
 #[test]
 fn the_panels_changes_name_gmail_and_amazon() {
     let js = read("console.js");
