@@ -228,7 +228,11 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 - Plain `cargo build` / `cargo test` work on a fresh checkout because `app/build.rs` drops a
   zero-byte placeholder sidecar at `app/binaries/knowlu-engine-<triple>.exe`. **Releases are CI-only**
   (`.github/workflows/release.yml`, on a `v*` tag): `scripts\release.ps1` is what CI runs; a human runs
-  it only with `-DryRun`, which bundles unsigned and publishes nothing. A hand-run `cargo tauri build`
+  it only with `-DryRun`, which bundles unsigned and publishes nothing. It runs `cargo tauri build
+  --target <triple>` (rustc's host triple, the one that names the staged sidecar) because CI's
+  prebuilt MSVC tauri-cli would otherwise look for an MSVC-named sidecar, so the installer lands in
+  `target\<triple>\release\bundle\nsis` and the app in `target\<triple>\release\knowlu.exe` (0.1.2,
+  L10). A hand-run `cargo tauri build`
   is unsupported — it skips the clean-tree gate, the sidecar staging and the placeholder check, and
   can ship a zero-byte engine. `ci.yml` is the gate on every push and PR: `cargo test --workspace` at
   0 warnings (the gate prints `warnings: N accepted (.rsrc), N tallies, N other`), the eol contract

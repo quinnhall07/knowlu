@@ -3,9 +3,13 @@
 #
 # It is downloaded, never compiled: `cargo install tauri-cli --locked` spent 21 of the first release
 # run's 40 minutes building the CLI from source (run 35179886527, 2026-09-17). The CLI is a tool that
-# invokes cargo, not the product - it does not decide what the product is built for (the toolchain
-# step does, and `assert gnu host toolchain` proves it), so the MSVC build of the CLI is the right
-# one to take.
+# invokes cargo, not the product: the toolchain step decides what the product is compiled for, and
+# `assert gnu host toolchain` proves it. But the CLI is not neutral. Without --target it names the
+# externalBin it bundles by the triple the CLI ITSELF was compiled for (tauri-cli 2.11.4,
+# get_bundler_settings -> tauri_utils::platform::target_triple()), so this MSVC build looked for
+# knowlu-engine-x86_64-pc-windows-msvc.exe beside a gnu-staged sidecar (L10, release run
+# 39643305066). release.ps1 therefore always passes `--target <triple>`; with that, the MSVC build
+# of the CLI is the right one to take.
 #
 # $Dest defaults to cargo home's bin, and that matters. `cargo tauri` resolves the external
 # subcommand `cargo-tauri.exe` by looking in cargo home's bin FIRST, and Swatinem/rust-cache caches
