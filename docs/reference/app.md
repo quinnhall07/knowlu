@@ -7,14 +7,14 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   with `console_ctx(vault)` (`via: "dashboard"`; the actor is the vault's own token, read from `config/actor.yaml` on every write, and a bad file is the command's named `error` with nothing written). **Tauri commands, recounted 2026-10-03 (email forwarding: ten `mail::` commands; the 2026-10-01 recount gave 60 / 29 / 79; the 2026-09-30 recount, M2 editing after Gmail connect and M1 grades merged in, gave 59 / 29 / 78; the
   merge-time recount gave 54 / 29 / 73, the 2026-09-29 one 47 / 29 / 66)** (by script,
   over the two `generate_handler!` lists in `app/src/main.rs`; C3′ added none):
-  the console window registers **69** (recounted 2026-10-20 by the same script after main's runtime removal took out the four `inference` commands and the UA registrar added three `registrar::` ones, `open_registrar_window`, `capture_registrar` and `close_registrar_window`; the earlier build-up: email forwarding added the ten `mail::` commands; phase 2 added `answer_card`, `commitment_proposals`,
+  the console window registers **71** (recounted 2026-10-21 by the same script when L7, carrying L4, merged into p3-registrar: L4 added `account::privacy_status` and `account::accept_privacy` to the console list, where the L4 branch alone counted 68 / 29 / 87; on 2026-10-20 main's runtime removal took out the four `inference` commands and the UA registrar added three `registrar::` ones, `open_registrar_window`, `capture_registrar` and `close_registrar_window`; the earlier build-up: email forwarding added the ten `mail::` commands; phase 2 added `answer_card`, `commitment_proposals`,
   `commitments_confirm`, `your_week`, `preview_window`; M1 added `grades::grades_status`,
   `grades_connect`, `grades_refresh`, `grades_forget`; Gmail connect added `account::google_status`,
   `account::google_connect` and `account::google_disconnect`; M2 added `set_body`, `profile`, `set_preferences`, `set_interests` and
   `dropped_events`; events added `remove_lane_date`), the vault-less picker/wizard window **29**
   (C2's hand-off H9 phase (a) added `account::google_connect_url`, `account::google_connected`,
   `account::open_external`; C1b's H1 removed `account::sign_up` and `account::sign_in` with the
-  password and added `account::google_sign_in` to both lists) — **88** distinct (2026-10-20). Commands live
+  password and added `account::google_sign_in` to both lists) — **90** distinct (2026-10-21). Commands live
   beside the module they serve (`commands.rs`, `week.rs`, `onboarding.rs`, `account.rs`,
   `report.rs`, `lms_link.rs`, `mail.rs`, `registrar.rs`), never all in one file. **Thirteen** mutate notes (`set_fields`, `set_body`, `set_preferences`, `set_interests`,
   `create_task`, `delete_note`, `decide`, `answer_card`, `commitments_confirm`, `close_info`,
@@ -119,7 +119,7 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   before `sync`) never undoes a Refresh made while it waited. A Refresh whose step skipped answers
   the skip by name (`grades::step_answer`). No grade value is
   logged. No curated row carries a `policy_read` date on this branch; the date-and-bump test in
-  `app/tests/grades.rs` keeps it so until privacy bump #1. Before any release that writes `grades/`,
+  `app/tests/grades.rs` keeps it so until privacy bump #1, which is now set (`PRIVACY_BUMP_1` is `2026-10-20`). Before any release that writes `grades/`,
   migration `20260929000100` must be applied to the server.
 - **Email forwarding (the mail window)** (spec `docs/specs/2026-09-30-email-forwarding-design.md`;
   plan `docs/plans/2026-09-30-email-forwarding-plan.md`). Built on branch `email-forwarding`, not
@@ -173,7 +173,12 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
     deletes every kept profile. `mail_disconnect` records the mailbox in `turned_off` before anything
     else, turns forwarding off, calls `DELETE /mail/addresses/<id>`, then deletes the profile (a failed
     delete is retried at launch and named in Settings). Sign-out and `delete_local_data` close the
-    window and call `forget_all`, which deletes only those two folder shapes.
+    window and call `forget_all`, which deletes only those two folder shapes. **Sign-out's order** (L4 plan
+    §4.7, `account::sign_out_with`): the mail-window hold, the unfinished-setup clean, every
+    `pending_setups` record in `mail.json` cleared whatever the clean did, `forget_all`, the hold dropped,
+    the session credential deleted, then the revoke. The reply carries `setups_cleared` beside `ok`,
+    `had_session` and `mail_profiles_left`: `true` when `mail.json` holds no record afterwards (and when
+    there was no profile folder to read).
 - **App data is `%LOCALAPPDATA%\knowlu\`**: `profiles.json`, `profiles\<profile_id>\{settings.json,
   seen.txt, logs\}`, shared `updates\`. `state::app_data_root()` is the one
   place the path is decided. `profiles::migrate_flat_layout` still folds an old flat
@@ -187,6 +192,40 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   never run-and-failed: a non-zero step means retry backoff and an amber tray. The scheduler is inert
   unless the vault's `config/runners.yaml` `local` entry says `scheduler: app` for this `device:`; a
   wizard-created vault carries both from birth.
+- **The privacy update (L4; plan `docs/plans/2026-10-19-l4-honest-page-plan.md` §4).** `PRIVACY_VERSION`
+  in `app/src/account.rs` is `2026-10-20` (privacy bump #1, commit `d4ee7ab`; it moves only in a commit
+  that moves `site/privacy.html`'s date with it, and `app/tests/grades.rs`'s `PRIVACY_BUMP_1` is set to it).
+  - **Two console commands** (in the console's `generate_handler!` list, not the wizard's):
+    `privacy_status` and `accept_privacy`, thin wrappers over `privacy_status_in` and `accept_privacy_in`.
+    `privacy_status` returns `{ok, error, current, recorded, needs_accept}`; it reads
+    `GET /account/consent` with the vault's own session and caches the answer. A vault with no readable
+    account answers `needs_accept: false`; a failed read answers `ok: false` and `needs_accept: null`
+    (never a raised panel). `accept_privacy` re-sends the sign-in's consent for this build's version
+    (`POST /account/consent`, which on an account that already consented moves `privacy_version` forward
+    only), reads it back, and answers `ok: true` only if the read-back shows this version or a later one.
+    The console calls `privacy_status` once per launch for a signed-in vault and raises the
+    `#reconsent` panel only for `needs_accept: true`; the panel's Settings button opens Settings with the
+    start controls disabled and Delete my data live.
+  - **`privacy.json`** in the profile's app-data folder (beside `entitlement.json`) holds three keys,
+    `account_id` (whose answer it is), `recorded` (the version the service said the account has, or
+    `null`) and `checked_at` (RFC 3339, UTC, to the second). It is written only from a service reply,
+    never from a request; it never syncs and enters neither the vault nor telemetry. None of the three is a
+    new data class: the account id is already in `config/cloud.yaml` and `entitlement.json`, the version is
+    a date the page publishes, and `checked_at` is the time of a read. The gate over it
+    (`account::privacy_gate`) holds back only a definite `Older` (an earlier version, none, or a value that
+    is not a `YYYY-MM-DD` day); no cache, a cache that does not read and another account's cache are
+    `Unknown` and hold nothing.
+  - **The scheduler's new skips.** For an entitled vault whose gate is not `Accepted`, the slot asks
+    `account::refresh_privacy` once. A failed check is the row `privacy (check failed: <reason>)` at exit 0,
+    recorded in the runner log as `privacy (check failed)`, and holds nothing. A definite `Older` turns the
+    `sync`, `coursework`, `ingest`, `grades`, `judge` and `mail` steps into
+    `<step> (skipped: privacy update not accepted)`; `rank`, the backup and telemetry run as always. The
+    two naming rules: only a step that would have run gets the privacy name (`ingest` without a feed, a
+    grades step that was already skipped and a mail pass with no mailbox keep their own names or no row),
+    and the entitlement's names win (an unentitled account gets `(skipped: no entitlement)`, because the
+    step would not have run whatever it accepts). *Sync now*, the quit push and the launch resume of open
+    mail backfills are held the same way while the gate is `Older`; *Sync now* answers
+    `sync (skipped: privacy update not accepted)` and the tray stays calm.
 - Credentials the app writes are `knowlu/<profile_id>/<source>` (`app/src/credentials.rs`); the
   engine's `wincred.rs` reads whatever `credential_target` the vault names.
 - The account's session JWT is Credential Manager's `knowlu/<profile_id>/session`

@@ -6,7 +6,13 @@
 // so a policy change at the upstream fails the request instead of silently routing elsewhere. The
 // upstream is named in the row's `route` and on the privacy page; OpenRouter's own policy is not to
 // retain prompts unless logging is opted into (never on this account).
-import { type JudgeModel, type ModelReply, type ModelRequest, ModelRefused } from "./judge_anthropic.ts";
+import {
+  type JudgeModel,
+  type ModelReply,
+  type ModelRequest,
+  ModelRefused,
+  ProviderOutOfCredit,
+} from "./judge_anthropic.ts";
 
 export const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 export const CALL_TIMEOUT_MS = 120_000;
@@ -85,6 +91,9 @@ export class OpenRouterModel implements JudgeModel {
     }
     if (!response.ok) {
       await response.body?.cancel();
+      // 402 is OpenRouter's "the account's balance is spent" (L7 plan §3.2): a typed error, so the
+      // pipeline names it `out of credit`. Its message is fixed; the body is never read.
+      if (response.status === 402) throw new ProviderOutOfCredit();
       throw new Error(`the model service answered HTTP ${response.status}`);
     }
     const envelopeText = await response.text();

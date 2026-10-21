@@ -1,11 +1,13 @@
 /**
- * One function, five routes (spec §5.1 and §4.1):
+ * One function, six routes (spec §5.1 and §4.1):
  *
  *   DELETE /account         the deletion right, and the app's *Delete my data*
  *   GET    /account/export  the access and portability rights
  *   GET    /account/sources what sources are connected (Task 7) — never their URLs
  *   PUT    /account/sources connect one (Task 7)
- *   POST   /account/consent record the terms/privacy/18+ attestation (Task 1, C1b) — idempotent
+ *   POST   /account/consent record the terms/privacy/18+ attestation (Task 1, C1b) — idempotent;
+ *                           on an account that already consented, a later privacy version (L4)
+ *   GET    /account/consent the recorded terms and privacy versions (L4), and nothing else
  *
  * The order inside `DELETE` is the whole of its correctness: Stripe first (a cancelled card is
  * better than a deleted account still being billed), then the rows, then the tombstone, and the
@@ -29,6 +31,20 @@ export interface ConsentWrite {
   at: string;
 }
 
+/** A later privacy version accepted by an account that already consented (L4, plan §4.3). */
+export interface LaterPrivacyWrite {
+  account_id: string;
+  email: string;
+  privacy_version: string;
+  at: string;
+}
+
+/** The two version columns of an `accounts` row; either is null until it is recorded. */
+export interface ConsentVersions {
+  tos_version: string | null;
+  privacy_version: string | null;
+}
+
 export interface Deps {
   verify: VerifyToken;
   /** The C2 gate, injected so this handler stays testable: `requireActiveEntitlement`. */
@@ -36,7 +52,7 @@ export interface Deps {
   getAccount: (accountId: string) => Promise<{ email: string; stripe_customer_id: string | null } | null>;
   getSubscriptionId: (accountId: string) => Promise<string | null>;
   stripe: StripePost;
-  /** Rows in sources, telemetry_events, corrections, issues, entitlements, accounts; consents nulled. */
+  /** Every table the account's data lives in (the list in `index.ts`), accounts last; consents nulled. */
   purge: (accountId: string) => Promise<void>;
   deleteAuthUser: (accountId: string) => Promise<void>;
   tombstone: (emailHash: string, at: string) => Promise<void>;
@@ -48,6 +64,10 @@ export interface Deps {
   hasConsent: (accountId: string) => Promise<boolean>;
   /** Fills the four null columns on `accounts` and inserts the three `consents` rows. */
   recordAccountConsent: (c: ConsentWrite) => Promise<void>;
+  /** The caller's recorded pair, or null when the account has no `accounts` row. */
+  getConsentVersions: (accountId: string) => Promise<ConsentVersions | null>;
+  /** Moves `accounts.privacy_version` forward only and inserts one `privacy` consents row. */
+  recordLaterPrivacy: (c: LaterPrivacyWrite) => Promise<void>;
   now: () => Date;
 }
 
@@ -170,7 +190,17 @@ async function recordConsent(req: Request, deps: Deps): Promise<Response> {
   if (tos.length > MAX_VERSION || priv.length > MAX_VERSION) {
     throw fail(400, `a version string is longer than ${MAX_VERSION} characters`);
   }
-  if (await deps.hasConsent(user.id)) return json(200, { ok: true });
+  // No version is ever dated after tomorrow (UTC; a day of slack for a client whose clock or zone
+  // runs ahead). Without this, a dev build with a far-future version pointed here records it once,
+  // and every later bump sorts at or before it: that account reads Accepted for good (T16 review
+  // minor 7). Versions compare as strings, the same order `recordLaterPrivacy` and the PATCH's
+  // forward-only filter use, so anything that sorts past tomorrow is refused, on both paths, before
+  // any read or write.
+  const tomorrow = new Date(deps.now().getTime() + 86_400_000).toISOString().slice(0, 10);
+  if (tos > tomorrow || priv > tomorrow) {
+    throw fail(400, "a version must be a YYYY-MM-DD date no later than tomorrow");
+  }
+  if (await deps.hasConsent(user.id)) return await recordLaterPrivacy(user.id, priv, deps);
   const account = await deps.getAccount(user.id);
   if (!account) throw fail(404, "no such account");
   await deps.recordAccountConsent({
@@ -183,6 +213,51 @@ async function recordConsent(req: Request, deps: Deps): Promise<Response> {
   return json(200, { ok: true });
 }
 
+/** `YYYY-MM-DD`, ASCII digits only, and a real calendar day. */
+function isIsoDate(v: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+}
+
+/**
+ * **A later privacy version, on an account that already consented** (L4, plan §4.3). Without this,
+ * an account that accepted version A could never record version B: every later call was the silent
+ * 200. A version that sorts after the recorded one (ISO dates of equal length compare as strings; a
+ * recorded null counts as older) moves `accounts.privacy_version` forward and adds one `privacy`
+ * row, and nothing else: the terms, the 18+ attestation and their dates were the first consent's
+ * and are never restamped. An equal or older version is today's silent 200.
+ *
+ * The date check sits on this path only, after the comparison: a non-date string can sort anywhere,
+ * so letting one through would pin the column past every real version the app will ever send.
+ */
+async function recordLaterPrivacy(accountId: string, priv: string, deps: Deps): Promise<Response> {
+  const recorded = await deps.getConsentVersions(accountId);
+  if (!recorded) throw fail(404, "no such account");
+  if (recorded.privacy_version !== null && priv <= recorded.privacy_version) return json(200, { ok: true });
+  if (!isIsoDate(priv)) throw fail(400, "a later privacy version must be a YYYY-MM-DD date");
+  const account = await deps.getAccount(accountId);
+  if (!account) throw fail(404, "no such account");
+  await deps.recordLaterPrivacy({
+    account_id: accountId,
+    email: account.email,
+    privacy_version: priv,
+    at: deps.now().toISOString(),
+  });
+  return json(200, { ok: true });
+}
+
+/** `GET /account/consent`: the caller's recorded pair, built field by field so nothing else leaks. */
+async function consentStatus(req: Request, deps: Deps): Promise<Response> {
+  const user = await requireUser(req, deps.verify);
+  const recorded = await deps.getConsentVersions(user.id);
+  if (!recorded) throw fail(404, "no such account");
+  return json(200, {
+    tos_version: recorded.tos_version ?? null,
+    privacy_version: recorded.privacy_version ?? null,
+  });
+}
+
 export async function handle(req: Request, deps: Deps): Promise<Response> {
   const path = subPath(req.url, "account");
   switch (path) {
@@ -193,8 +268,9 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
       if (req.method !== "GET") return methodNotAllowed(["GET"]);
       return await exportAccount(req, deps);
     case "/consent":
-      if (req.method !== "POST") return methodNotAllowed(["POST"]);
-      return await recordConsent(req, deps);
+      if (req.method === "POST") return await recordConsent(req, deps);
+      if (req.method === "GET") return await consentStatus(req, deps);
+      return methodNotAllowed(["GET", "POST"]);
     case "/sources":
       if (req.method === "PUT") return await putSource(req, deps);
       if (req.method === "GET") return await getSources(req, deps);

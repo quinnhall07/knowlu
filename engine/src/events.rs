@@ -409,6 +409,7 @@ pub const ACTOR: &str = "agent:knowlu.events";
 /// slot" line, which then ends with the cap's name. The service has already answered the daily
 /// judgment cap, so the rest of the batch would only be refused one by one; an item that was
 /// reached and failed in any other way keeps its own `not judged` line and the pass goes on.
+/// **An out-of-credit reply ends it the same way** (L7), and the summary ends with that name.
 pub fn judge_roster(
     vault: &Path,
     model: &dyn crate::judge::EventModel,
@@ -477,7 +478,8 @@ pub fn judge_roster(
     let batch: Vec<&DiscoveredEvent> = pending.into_iter().take(cap).collect();
     let mut judged = 0usize;
     let mut processed = 0usize;
-    let mut capped = false;
+    // The name of what ended the pass early: the daily cap or an out-of-credit reply.
+    let mut stopped: Option<&str> = None;
 
     for event in &batch {
         // Checked BEFORE starting each item, not after — the worst case this bounds is the budget
@@ -507,7 +509,12 @@ pub fn judge_roster(
             // counted as processed, so it falls into `left` with every item after it; the summary
             // names the cap once, instead of one `not judged` line per remaining event.
             Err(crate::judge::ModelError::Capped) => {
-                capped = true;
+                stopped = Some(crate::judge::CAPPED_LABEL);
+                break;
+            }
+            // L7: out of credit on the service's side ends the pass the same way, with its own name.
+            Err(crate::judge::ModelError::OutOfCredit) => {
+                stopped = Some(crate::judge::OUT_OF_CREDIT_LABEL);
                 break;
             }
             Err(e) => {
@@ -545,8 +552,8 @@ pub fn judge_roster(
     if left > 0 {
         summary.push_str(&format!(", {left} left for the next slot"));
     }
-    if capped {
-        summary.push_str(&format!(" ({})", crate::judge::CAPPED_LABEL));
+    if let Some(label) = stopped {
+        summary.push_str(&format!(" ({label})"));
     }
     lines.push(summary);
     lines
@@ -1143,6 +1150,49 @@ mod tests {
         assert_eq!(
             summaries[0].as_str(),
             "events: 2 judged, 3 left for the next slot (the daily judgment cap)"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// A model that judges its first `k` calls (`drop`) and answers `OutOfCredit` from call `k + 1`
+    /// on, counting every call it is handed.
+    struct OutOfCreditAfter<'a> {
+        k: usize,
+        calls: &'a std::cell::RefCell<usize>,
+    }
+
+    impl crate::judge::EventModel for OutOfCreditAfter<'_> {
+        fn judge_event(
+            &self,
+            _item: &crate::judge::EventItem,
+        ) -> Result<crate::judge::EventVerdict, crate::judge::ModelError> {
+            *self.calls.borrow_mut() += 1;
+            if *self.calls.borrow() <= self.k {
+                Ok(verdict("drop", "scripted"))
+            } else {
+                Err(crate::judge::ModelError::OutOfCredit)
+            }
+        }
+    }
+
+    /// L7 T3c, plan test 6b. The first `OutOfCredit` reply ends the pass exactly as a capped one
+    /// does: the item and everything after it are "left", and the log is one summary line ending in
+    /// `OUT_OF_CREDIT_LABEL`. **Red before the arm**: the model was called 5 times and three
+    /// `not judged` lines were pushed.
+    #[test]
+    fn an_out_of_credit_reply_ends_the_event_pass_with_one_line() {
+        let (vault, feed) = scratch_vault_with_n_events("out-of-credit-mid", 5);
+        let fetch = |_: &str| Ok(feed.clone());
+        let calls = std::cell::RefCell::new(0usize);
+        let model = OutOfCreditAfter { k: 2, calls: &calls };
+        let lines = judge_roster(&vault, &model, Some(&fetch), jiff::civil::date(2026, 8, 28), 150, std::time::Duration::from_secs(60));
+        assert_eq!(*calls.borrow(), 3, "the pass must stop at the first out-of-credit reply: {lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("not judged")), "{lines:?}");
+        let summaries: Vec<&String> = lines.iter().filter(|l| l.starts_with("events: ")).collect();
+        assert_eq!(summaries.len(), 1, "{lines:?}");
+        assert_eq!(
+            summaries[0].as_str(),
+            format!("events: 2 judged, 3 left for the next slot ({})", crate::judge::OUT_OF_CREDIT_LABEL)
         );
         let _ = std::fs::remove_dir_all(&vault);
     }

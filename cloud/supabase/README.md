@@ -44,6 +44,34 @@ time, so `deno test` needs no environment at all.
 - `gmail-read` reads the grant row without a status filter: no row is the silent `no_gmail_scope`, a
   `revoked` row answers `revoked` (and marks it), any other row without the Gmail scope is
   `no_gmail_scope`.
+- **A Gmail that went quiet (L7).** Every `gmail-read` reply on the Gmail path carries `went_quiet`
+  (a boolean). It is true when the 7-day list the handler already makes (`WINDOW`, with Knowlu's
+  excluded labels kept) holds no message at all and the grant is at least 7 days old
+  (`wentQuiet`, `QUIET_AFTER_MS`; milliseconds, so exactly 7 days counts). The rule reads that list
+  raw, before dedup and `READ_CAP`: an already-seen message is still mail. No second Gmail call is
+  made. The age is `google_accounts.connected_at`, which `store_google_grant` resets on every connect
+  and reconnect. Straight after the list returns, and before the judging loop, the handler moves
+  `active` to `quiet` when the rule holds and `quiet` to `active` when the list held mail (each move
+  is conditional on the current status, so a `revoked` row is never touched). The reply is the rule,
+  never the write's effect, so a row already `quiet` still answers true. The forwarding path moves a
+  `quiet` row back to `active` and answers `went_quiet: false`. The not-connected, `revoked` and
+  not-configured replies have no `went_quiet` key. The existing `quiet: true` plus `reason` keeps its
+  one meaning, not connected; a went-quiet reply has `quiet: false` and no `reason`.
+  - `google_accounts.last_read_at` is still never written by anything, and is not the quiet clock;
+    do not read it as one.
+  - The `status` comment in `20260911000200_google.sql` says "14 days". That is superseded by the
+    amended cloud design §5.3 (7 days, Quinn's Q3 of 2026-10-19). The migration is not edited: its
+    hash is pinned.
+  - The `seen` lookback in `gmail-read/index.ts` is a different thing (the dedup window, twice
+    `WINDOW`) and stays as it is.
+  - Until `gmail.readonly` is verified, Google's Testing mode kills a refresh token 7 days after
+    consent, which takes the `revoked` path first, so the rule cannot fire there yet.
+- **Out of credit (L7).** When the model provider answers HTTP 402 (Knowlu's own balance there), the
+  `/judge-*` reply gains `unavailable: "out of credit"` beside `cause: "model failed"`
+  (`ProviderOutOfCredit`, told apart by class in `judge_pipeline.ts`). The reply is still HTTP 200,
+  because a 402 to the device means no entitlement; the charge is refunded and the `judgments` row is
+  logged as `model failed`, so no migration. `gmail-read` stops its round on a reply carrying
+  `unavailable`, as it does for `capped`, and defers the item.
 - The migration and both functions reach staging before a device build with the D4 gate runs a slot
   there (`db push --include-all`).
 

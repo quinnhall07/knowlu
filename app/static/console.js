@@ -493,7 +493,7 @@
       bits.push('<span class="' + (t.last_slot.ok && !why ? "calm" : "amber") + '">' + h(body) + "</span>");
     }
     if (t.scheduler && t.scheduler.mode === "app") { bits.push('<span class="' + (t.scheduler.paused ? "amber" : "calm") + '">scheduler ' + (t.scheduler.paused ? "paused" : "on") + "</span>"); }
-    EL("syncline").innerHTML = bits.join(" · ") + ' <button class="b" type="button" data-sync>sync now</button> <button class="b" type="button" data-backup>back up now</button>';
+    EL("syncline").innerHTML = bits.join(" · ") + ' <button class="b" type="button" data-sync' + owedAttrs() + '>sync now</button> <button class="b" type="button" data-backup>back up now</button>';
   }
 
   // Task 15: the Runs nav entry, made real — every expected slot, every run in the last 48h
@@ -622,14 +622,22 @@
     var p = state.issues_panel, host = EL("iss-list");
     EL("issv-n").textContent = p.open_count ? p.open_count + " open" : "";
     preserveAcross(host, ".flagpop", function () {
-      host.innerHTML = p.rows.map(function (r) {
+      // L7 (spec 3.6): sources in trouble come first. The engine's words, shown as given; the row has no
+      // Resolve, flag or Close, because the heads-up clears itself when the source is well again.
+      var srcs = (p.sources || []).map(function (s) {
+        return '<div class="row iss src" data-id="' + h(s.id) + '" data-kind="info">' +
+          '<div class="ttl"><span class="a">' + h(s.title) + '</span>' +
+          '<span class="meta">' + h(s.since ? "since " + s.since.slice(0, 10) : "") + '</span>' +
+          '<div class="why">' + h(s.text) + "</div></div></div>";
+      }).join("");
+      host.innerHTML = srcs + p.rows.map(function (r) {
         var chips = (r.categories || []).map(function (c) { return '<span class="chip on">' + h(c) + "</span>"; }).join("");
         var when = r.opened_at ? "raised " + r.opened_at.slice(0, 10) : "";
         return '<div class="row iss" data-id="' + h(r.id) + '" data-kind="issue">' +
           '<div class="ttl"><span class="a">' + h(r.title) + '</span><span class="meta">' + h(when) + "</span><div class=\"chips\">" + chips + "</div>" +
           (r.target ? '<button class="lnk" data-open-target="' + h(r.target) + '">open the object</button>' : "") + "</div>" +
           '<div class="acts"><input type="text" class="dnote" placeholder="Resolution"><button class="b" data-resolve="' + h(r.id) + '">Resolve</button></div></div>';
-      }).join("") + (p.rows.length ? "" : '<div class="empty">' + h(p.empty_text) + "</div>");
+      }).join("") + (p.rows.length || srcs ? "" : '<div class="empty">' + h(p.empty_text) + "</div>");
     });
   }
   function resolveIssue(id, text, btn) {
@@ -1137,13 +1145,14 @@
         }).join("") + "</div>";
       }
       if (!s.connected) {
-        html += '<div class="gs-line"><span>Connect Blackboard to see your grades</span><button class="b pri y" type="button" data-grades-connect>Connect Blackboard</button></div>';
+        html += '<div class="gs-line"><span>Connect Blackboard to see your grades</span><button class="b pri y" type="button" data-grades-connect' + owedAttrs() + '>Connect Blackboard</button></div>';
       } else if (s.signed_out) {
-        html += '<div class="gs-line"><span>Sign in to Blackboard again to update grades</span><button class="b pri y" type="button" data-grades-connect>Sign in again</button></div>';
+        html += '<div class="gs-line"><span>Sign in to Blackboard again to update grades</span><button class="b pri y" type="button" data-grades-connect' + owedAttrs() + '>Sign in again</button></div>';
       } else if (!GRADES.list.length) {
-        html += '<div class="gs-line"><span>Blackboard is connected. Your grades appear after the next refresh.</span><button class="b" type="button" data-grades-refresh>Refresh</button></div>';
+        html += '<div class="gs-line"><span>Blackboard is connected. Your grades appear after the next refresh.</span><button class="b" type="button" data-grades-refresh' + owedAttrs() + '>Refresh</button></div>';
       }
     }
+    if (RECONSENT_OWED && /data-grades-(connect|refresh)/.test(html)) { html += '<p class="hint gs-note">' + h(OWED_LINE) + "</p>"; }
     if (GRADES.note) { html += '<p class="hint gs-note">' + h(GRADES.note) + "</p>"; }
     el.innerHTML = html; el.hidden = false;
   }
@@ -1159,7 +1168,7 @@
     else if (c.basis === "points") { src = "points so far · " + pts; }
     else { src = "nothing graded yet"; }
     return '<div class="gd-foot"><span>From Blackboard · ' + h(src) + (c.fetched_at ? " · updated " + h(agoText(c.fetched_at)) : "")
-      + '</span><button class="b" type="button" data-grades-refresh>Refresh</button></div><p class="hint gs-note" id="gd-note">' + h(GRADES.note) + "</p>";
+      + '</span><button class="b" type="button" data-grades-refresh' + owedAttrs() + '>Refresh</button></div><p class="hint gs-note" id="gd-note">' + h(GRADES.note) + "</p>";
   }
   function gradeRowHtml(e) {
     var score = (e.score == null ? "–" : e.score) + " / " + (e.possible == null ? "–" : e.possible);
@@ -2003,6 +2012,8 @@
     var who = g.email ? " (as " + g.email + ")" : "";
     if (g.state === "revoked") { return "Google stopped answering for Knowlu. While Google reviews Knowlu, connections expire after seven days."; }
     if (g.state === "none") { return "Gmail is not connected. Knowlu can read your inbox for things you have to do and propose each one for you to approve."; }
+    // L7 (spec 3.7; plan Q2 and Q3, 2026-10-19): the service found no mail for a week.
+    if (g.state === "quiet" && g.gmail) { return "Gmail is connected" + who + ", but Knowlu has found no mail in it for a week. If this is the wrong account, disconnect it and connect the right one."; }
     if (g.gmail) { return "Gmail is connected" + who + ", read-only. Knowlu proposes what it finds; nothing is added without you."; }
     return "Google Calendar is connected" + who + ". Gmail is not.";
   }
@@ -2023,6 +2034,12 @@
       var retry = id === "set-google-connect" || id === "set-google-reconnect";
       EL(id).disabled = SET.leaving || (busy && !retry);
     });
+    lockGoogleStarts();
+  }
+  /** While the privacy update is owed, Connect and Reconnect start nothing; Disconnect is untouched. */
+  function lockGoogleStarts() {
+    if (!RECONSENT_OWED) { return; }
+    EL("set-google-connect").disabled = true; EL("set-google-reconnect").disabled = true;
   }
   function loadGoogleRow() {
     var seq = ++SET.googleSeq;
@@ -2113,7 +2130,7 @@
     if (a && a.ok && !a.needs_account) { loadGoogleRow(); return; }
     SET.googleSeq += 1; EL("set-google").hidden = true;
   }
-  function closeSettings() { SET.googleSeq += 1; SET.googlePolling = false; SET.googleWaitedOut = false; SET.confirming = false; SET.leaving = false; EL("settings").hidden = true; }
+  function closeSettings() { SET.googleSeq += 1; SET.googlePolling = false; SET.googleWaitedOut = false; SET.confirming = false; SET.leaving = false; EL("settings").hidden = true; maybeReconsent(); }
   // The account row and the upgrade overlay's gate, from ONE reply — `account_status` answers from
   // this machine only (no network call), and asking twice for the same three fields is two answers
   // that can disagree. A failed call is treated as "not reachable", not as "no account": the overlay
@@ -2125,6 +2142,7 @@
       renderAccountRow(s);
       gateGoogleRow(s);
       maybeUpgrade(s);
+      return askPrivacy(s);
     }).catch(function () { renderAccountRow(null); gateGoogleRow(null); EL("upgrade").hidden = true; });
   }
   // M2 T5b.1: Settings, "How you like to work". PREFS.loaded is the text `profile` last returned,
@@ -2315,7 +2333,7 @@
     var m = Math.max(1, Math.round(secs / 60));
     return m >= 60 ? " · about " + Math.round(m / 60) + " h left" : " · about " + m + " min left";
   }
-  function mpBtn(label, choice, extra) { return '<button class="b' + (extra || "") + '" data-mp-choice="' + h(choice) + '">' + h(label) + "</button>"; }
+  function mpBtn(label, choice, extra) { return '<button' + (choice === "stop" ? "" : owedAttrs()) + ' class="b' + (extra || "") + '" data-mp-choice="' + h(choice) + '">' + h(label) + "</button>"; }
   // A guided step's directions (spec §4.4): the provider's own path to the setting, four lines at most, keyed on
   // the provider and the step, never on a school. The address comes from mail_status by the setup's opaque id.
   var MP_PATH = {
@@ -2375,7 +2393,7 @@
     } else if (p.status !== "ended" && p.rows.some(function (x) { return x.state === "needs_you" || x.state === "failed"; })) {
       ask += '<div class="set-row">' + mpBtn("I’ve done this", "done", " pri y") + (p.blocked ? mpBtn("Try again", "retry") : "") + "</div>";
     }
-    if (p.blocked && (p.offers || []).indexOf("personal_gmail") >= 0) { ask += '<div class="set-row"><button class="b" id="mp-gmail">Connect personal Gmail instead</button></div>'; }
+    if (p.blocked && (p.offers || []).indexOf("personal_gmail") >= 0) { ask += '<div class="set-row"><button class="b" id="mp-gmail"' + owedAttrs() + '>Connect personal Gmail instead</button></div>'; }
     EL("mp-ask").innerHTML = ask;
     var end = "";
     if (p.status === "ended") {
@@ -2398,15 +2416,16 @@
     }).catch(function () {});
   }
   function openMailProgress() {
-    EL("mail-progress").hidden = false;
+    EL("mail-progress").hidden = false; maybeReconsent();
     if (!MP.timer) { MP.timer = setInterval(pollMailProgress, 1500); }
     return pollMailProgress();
   }
   function mailLeave() {
-    EL("mail-progress").hidden = true;
+    EL("mail-progress").hidden = true; maybeReconsent();
     clearInterval(MP.timer); MP.timer = null;
   }
   function mailFirstOpen() {
+    if (RECONSENT_OWED) { return Promise.resolve(); }
     return invoke("mail_status", {}).then(function (s) {
       if (s && s.offer_pending && !s.setup_running) {
         return invoke("mail_setup_start", { provider: "school" }).then(function (r) { if (r && r.ok) { return openMailProgress(); } });
@@ -2466,10 +2485,10 @@
     if (m365Backfill && !m.turned_off) { say += " New mail is arriving. Knowlu will bring in older Outlook mail on a later run."; }
     else if (m.open_backfill && !m.turned_off) { say += " Still bringing in recent mail; Resume carries on."; }
     var line = m.unbound_reason ? '<span class="em-line em-amber">' + h(m.unbound_note || "") + " (" + h(m.unbound_since_live) + ")" +
-      (m.suggest_rotate === true && !m.turned_off ? " " + emBtn("Rotate", "rotate", id) : "") + "</span>" : "";
-    var rotate = m.suggest_rotate !== true && !m.turned_off ? emBtn("Rotate", "rotate", id) : "";
+      (m.suggest_rotate === true && !m.turned_off ? " " + emBtn("Rotate", "rotate", id).replace("<button", "<button" + owedAttrs()) : "") + "</span>" : "";
+    var rotate = m.suggest_rotate !== true && !m.turned_off ? emBtn("Rotate", "rotate", id).replace("<button", "<button" + owedAttrs()) : "";
     return '<div class="em-box"><span class="em-name">' + h(EM_PROVIDER[m.provider] || "Email") + "</span>" +
-      (resumable ? emBtn("Resume", "resume", id) : "") + rotate + emBtn("Turn off email", "off1", id) +
+      (resumable ? (RECONSENT_OWED ? emBtn("Resume", "resume", id).replace("<button ", '<button disabled title="' + h(OWED_LINE) + '" ') : emBtn("Resume", "resume", id)) : "") + rotate + emBtn("Turn off email", "off1", id) +
       '<span class="em-line">' + h(say) + "</span>" + (m.address ? emCopy("m:" + id, m.address) : "") + line +
       (ask ? '<span class="em-confirm">' + h(EM_TURN_OFF_CONFIRM) + "</span>" + emBtn("Yes, turn off email", "off2", id, " crit") + emBtn("Cancel", "cancel", id) : "") + "</div>";
   }
@@ -2577,10 +2596,10 @@
     return invoke("mail_applied", {}).then(renderMailApplied).catch(function () { renderMailApplied(null); });
   }
   function openMailApplied() {
-    MA.note = ""; EL("mail-applied").hidden = false;
+    MA.note = ""; EL("mail-applied").hidden = false; maybeReconsent();
     return loadMailApplied();
   }
-  EL("ma-close").addEventListener("click", function () { EL("mail-applied").hidden = true; });
+  EL("ma-close").addEventListener("click", function () { EL("mail-applied").hidden = true; maybeReconsent(); });
   EL("ma-body").addEventListener("click", function (e) {
     var b = e.target.closest("[data-ma-undo]"); if (!b) { return; }
     var at = MA.rows[Number(b.getAttribute("data-ma-undo"))]; if (!at) { return; }
@@ -2598,6 +2617,7 @@
   // ---- end mail applied ----
   function openSettings() {
     EL("settings").hidden = false;
+    maybeReconsent(); owedSettings();
     loadPrefs(); loadInterests();
     checkAccount();
     gradesStatus();
@@ -2659,14 +2679,14 @@
     if (e.key === "Escape" && !EL("upgrade").hidden) { UPGRADE_DISMISSED = true; EL("upgrade").hidden = true; return; }
     // The report overlay is the same `.setpanel` shape over the same page, so it gets the page's own
     // way out (R-C1-55, M3). Tested before the settings panel because it opens on top of it.
-    if (e.key === "Escape" && !EL("report").hidden) { EL("report").hidden = true; return; }
+    if (e.key === "Escape" && !EL("report").hidden) { EL("report").hidden = true; maybeReconsent(); return; }
     if (e.key === "Escape" && !EL("settings").hidden) { closeSettings(); }
   });
   // ---- C1 Task 17: the issue report (legal note §9). **The text the user reads is the payload** —
   // `report.rs` builds and scrubs it, the textarea shows it, and the send posts exactly what is on
   // screen. Nothing is rebuilt after the user has looked away.
   function openReport() {
-    EL("report").hidden = false;
+    EL("report").hidden = false; maybeReconsent();
     EL("report-note").textContent = "";
     EL("report-text").value = "Loading…";
     invoke("report_preview", { view: stateView() }).then(function (r) {
@@ -2674,7 +2694,7 @@
     }).catch(function () { EL("report-text").value = "could not build the report"; });
   }
   window.KNOWLU_OPEN_REPORT = openReport;
-  EL("report-cancel").addEventListener("click", function () { EL("report").hidden = true; });
+  EL("report-cancel").addEventListener("click", function () { EL("report").hidden = true; maybeReconsent(); });
   EL("set-report-go").addEventListener("click", openReport);
   EL("report-send").addEventListener("click", function () {
     EL("report-send").disabled = true;
@@ -2682,7 +2702,7 @@
     invoke("report_send", { text: EL("report-text").value }).then(function (r) {
       EL("report-note").textContent = r.ok ? "Sent. Thank you." : r.error;
       EL("report-send").disabled = false;
-      if (r.ok) { setTimeout(function () { EL("report").hidden = true; }, 1500); }
+      if (r.ok) { setTimeout(function () { EL("report").hidden = true; maybeReconsent(); }, 1500); }
     }).catch(function () { EL("report-note").textContent = "could not send"; EL("report-send").disabled = false; });
   });
   // R-C1-57 (I2): *Manage subscription* says why nothing opened. `open_portal` refuses with a
@@ -2866,6 +2886,89 @@
     });
   }
 
+  // ---- L4 (plan 4.6): the privacy re-consent panel. A `.setpanel` beside `#upgrade`, and like it the
+  // panel never hides today's page. It has no Not now, no Close and no Escape: the way out is Accept,
+  // or Settings, where Delete my data stays reachable. `RECONSENT_OWED` is the one owed flag and is
+  // set only by a reply that says `needs_accept === true`; a failed or unreachable check never raises
+  // the panel (D4). `RECONSENT_BUSY` makes two presses on Accept one command.
+  var RECONSENT_OWED = false;
+  var RECONSENT_BUSY = false;
+  var PRIVACY_ASKED = false;
+  var OWED_LINE = "Accept the privacy update to use this";
+  // One key, the version the lines describe; a static pin fails unless it is the only key and equals
+  // `account.rs`'s PRIVACY_VERSION, so a bump of the constant cannot ship these lines by accident.
+  var PRIVACY_CHANGES = {
+    "2026-10-20": [
+      "It now covers connecting Google Calendar and Gmail, the email you forward to Knowlu (received by Amazon Web Services) and what is kept from it, the Blackboard and mail sign-ins Knowlu keeps on this computer, your grades in your account, daily counts of your AI calls, any free tester access, and the interests you give for campus events.",
+      "Until you accept, Knowlu keeps today's page and your calendar up to date, but does not sync, import or read anything else new.",
+      "To leave instead, use Settings → Delete my data."
+    ]
+  };
+  /** The attributes of a start control while the update is owed; empty otherwise. */
+  function owedAttrs() { return RECONSENT_OWED ? ' disabled title="' + h(OWED_LINE) + '"' : ""; }
+  function maybeReconsent() {
+    // Two `.setpanel`s never stack: the panel stands down while any other is open and returns on close.
+    var other = !EL("settings").hidden || !EL("report").hidden || !EL("mail-progress").hidden ||
+      !EL("mail-applied").hidden || !EL("upgrade").hidden;
+    if (other || !RECONSENT_OWED) { EL("reconsent").hidden = true; return; }
+    EL("reconsent").hidden = false;
+  }
+  /** Settings while the update is owed: the one line, and the email set-up button locked. The Google
+   *  row, the mailbox rows and the grades strip read the flag where they are drawn. */
+  function owedSettings() {
+    var note = EL("set-owed-note");
+    note.textContent = RECONSENT_OWED ? OWED_LINE + "." : "";
+    note.hidden = !RECONSENT_OWED;
+    EL("set-email-start").disabled = RECONSENT_OWED;
+    if (SETM.s) { renderMailBoxes(); }
+    if (SET.google) { renderGoogleRow(); }
+    drawGrades();
+    refreshGradesDrawer();
+    if (current.state && current.state.topline) { renderSyncLine(current.state); }
+  }
+  function fillReconsent(p) {
+    // `current` is the build's PRIVACY_VERSION, the table's one key: no fallback to another key.
+    var key = p.current;
+    var lines = ["Knowlu's privacy policy changed on " + key + "."].concat(PRIVACY_CHANGES[key] || []);
+    EL("rc-changes").innerHTML = lines.map(function (l) { return "<p>" + h(l) + "</p>"; }).join("");
+  }
+  /** One `privacy_status` call per launch, for a signed-in vault only (`checkAccount` also runs on
+   *  every `openSettings`). Anything but an exact `true` leaves the panel down. */
+  function askPrivacy(s) {
+    if (PRIVACY_ASKED || !s || s.needs_account) { return; }
+    PRIVACY_ASKED = true;
+    return invoke("privacy_status", {}).then(function (p) {
+      if (p && p.needs_accept === true) { fillReconsent(p); RECONSENT_OWED = true; owedSettings(); maybeReconsent(); }
+    }).catch(function () {
+      // The flag never outlives a hidden panel: a throw above clears it and redraws the controls.
+      RECONSENT_OWED = false; EL("reconsent").hidden = true;
+      try { owedSettings(); } catch (x) { /* nothing more to draw */ }
+    });
+  }
+  function acceptPrivacy() {
+    if (RECONSENT_BUSY) { return; }
+    RECONSENT_BUSY = true; EL("rc-accept").disabled = true; EL("rc-error").textContent = "";
+    invoke("accept_privacy", {}).then(function (r) {
+      RECONSENT_BUSY = false; EL("rc-accept").disabled = false;
+      if (!r || !r.ok) { EL("rc-error").textContent = (r && r.error) || UNREACHABLE; return; }
+      RECONSENT_OWED = false;
+      EL("reconsent").hidden = true;
+      owedSettings();
+      poll();
+    }).catch(function () { RECONSENT_BUSY = false; EL("rc-accept").disabled = false; EL("rc-error").textContent = UNREACHABLE; });
+  }
+  EL("reconsent").addEventListener("click", function (e) {
+    var policy = e.target.closest("a.policy");
+    if (policy) {
+      e.preventDefault();
+      invoke("open_policy", { which: policy.getAttribute("data-policy") }).catch(function () {});
+      return;
+    }
+    if (e.target.closest("#rc-accept")) { acceptPrivacy(); return; }
+    if (e.target.closest("#rc-settings")) { openSettings(); return; }
+  });
+  // ---- end L4 re-consent
+
   // Plan 4a Task 2: the console is one of three things this window can be. `launch_state` says
   // which: a console over a resolved profile, the picker (more than one profile), or the wizard
   // (none). The console's own listeners are bound only on the console path — a picker window has
@@ -2890,9 +2993,9 @@
     // Spec §11a: and one look at the account, which is what raises the upgrade overlay on the first
     // launch after C1 for an install that already existed. Once per launch, never on a timer — an
     // install that has an account never sees it, and one that dismissed it is asked again tomorrow.
-    checkAccount();
-    // D6: the wizard's announcement was taken and setup has not begun: it begins now, in this window.
-    mailFirstOpen();
+    // D6: the wizard's announcement was taken and setup has not begun: it begins now, in this window,
+    // but only once the privacy answer is in; while an update is owed it waits (the offer marker stays).
+    checkAccount().then(function () { return mailFirstOpen(); });
   }
 
   function renderPicker(l) {

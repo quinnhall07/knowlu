@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { ScriptedModel } from "./judge_anthropic.ts";
+import { ProviderOutOfCredit, ScriptedModel } from "./judge_anthropic.ts";
 import { judgeHandler } from "./judge_handler.ts";
 import type {
   CapStore,
@@ -176,4 +176,19 @@ Deno.test("the email handler carries the request's timezone through to the due r
   );
   assertEquals(response.status, 200);
   assertEquals((await response.json()).verdict.due, "2026-09-18");
+});
+
+// L7 (plan §3.1's trap, T2a test 3): HTTP 402 TO THE DEVICE already means "no entitlement"
+// (`CloudError::label`, the sync line). A provider's 402 is Knowlu's own balance, never the
+// student's subscription, so it must never reach the device as a 402: it is a 200 whose reply
+// names it `unavailable: "out of credit"`.
+Deno.test("a_provider_402_never_reaches_the_device_as_a_402", async () => {
+  const handler = judgeHandler("task", OK, deps(new ScriptedModel([new ProviderOutOfCredit()])));
+  const response = await handler(new Request("http://127.0.0.1/judge-task", { method: "POST", body: BODY }));
+  assertEquals(response.status, 200);
+  const reply = await response.json();
+  assertEquals(reply.verdict, null);
+  assertEquals(reply.outcome, "low confidence");
+  assertEquals(reply.cause, "model failed");
+  assertEquals(reply.unavailable, "out of credit");
 });

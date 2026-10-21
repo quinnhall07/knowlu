@@ -66,6 +66,9 @@ pub mod completion;
 pub mod runs;
 pub mod info;
 pub mod issues;
+// L7 (named issues): one open `heads-up` per source problem (`judge-service:out-of-credit`,
+// `gmail-source:quiet`), raised and cleared through `info`. Read by `surface` in T4.
+pub mod source_issues;
 
 // Knowlu foundation plan, Task 3 — pure slot arithmetic over runs::RunnerConfig and run
 // records for the app's scheduler thread. Never reads the clock, never writes.

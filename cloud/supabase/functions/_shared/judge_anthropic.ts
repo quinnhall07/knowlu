@@ -71,6 +71,17 @@ export interface JudgeModel {
 /// class so the pipeline can one day route it somewhere other than `model failed`.
 export class ModelRefused extends Error {}
 
+/// The provider answered HTTP 402: Knowlu's own balance there is spent (L7 plan §3.2). Its own class
+/// so the pipeline names it `unavailable: "out of credit"` by `instanceof`, never by matching a
+/// message. The message is fixed and names the status only, so no provider body can ride on it.
+/// It is never the student's entitlement: a device-facing 402 means "no subscription"
+/// (`judge_handler.ts`), and this error is answered with HTTP 200.
+export class ProviderOutOfCredit extends Error {
+  constructor() {
+    super("the model service answered HTTP 402");
+  }
+}
+
 export class AnthropicModel implements JudgeModel {
   readonly #client: Anthropic;
 
