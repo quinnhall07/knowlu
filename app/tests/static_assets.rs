@@ -3516,6 +3516,10 @@ fn from_your_email_opens_above_the_progress_panel() {
     for pair in order.windows(2) {
         assert!(at(pair[0]) < at(pair[1]), "#{} comes before #{}", pair[0], pair[1]);
     }
+    // The one panel that page order cannot put above it: the progress panel opened from Settings.
+    let js = read("console.js");
+    let open = js_fn(&js, "function openMailProgress(");
+    assert!(open.contains("EL(\"mail-applied\").hidden = true;"), "opening progress closes From your email");
 }
 
 #[test]

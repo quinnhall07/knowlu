@@ -2475,6 +2475,8 @@
     }).catch(function () {});
   }
   function openMailProgress() {
+    // "From your email" sits above this panel in page order; opened from Settings it could cover it.
+    EL("mail-applied").hidden = true;
     EL("mail-progress").hidden = false; maybeReconsent();
     if (!MP.timer) { MP.timer = setInterval(pollMailProgress, 1500); }
     return pollMailProgress();
