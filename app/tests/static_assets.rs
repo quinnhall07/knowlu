@@ -3499,3 +3499,31 @@ fn every_start_control_reads_the_owed_flag_and_a_throw_never_strands_it() {
     assert!(asker.find("fillReconsent(p)").unwrap() < asker.find("RECONSENT_OWED = true").unwrap(), "fill the panel before raising the flag");
     assert!(asker.split(".catch(").nth(1).unwrap().contains("RECONSENT_OWED = false"), "a throw clears the owed flag");
 }
+
+#[test]
+fn from_your_email_opens_above_the_progress_panel() {
+    // Both are fixed `.setpanel`s at z-index 20 and `#mail-applied` comes first in the DOM, so
+    // "See what came from your email" opened it hidden under `#mail-progress`.
+    let css = read("console.css");
+    let panel = css.lines().find(|l| l.starts_with(".setpanel {")).expect(".setpanel rule");
+    assert!(panel.contains("z-index: 20;"), "the shared panel layer");
+    let rule = css.lines().find(|l| l.starts_with("#mail-applied {")).expect("a #mail-applied rule");
+    assert!(rule.contains("z-index: 21;"), "From your email sits above the progress panel: {rule}");
+    let html = read("index.html");
+    assert!(html.contains("id=\"mail-applied\"") && html.contains("id=\"mail-progress\""), "the two panels");
+}
+
+#[test]
+fn the_held_backfill_step_says_so_and_shows_no_forwarding_guide() {
+    // A Microsoft 365 setup holds "Bring in recent mail"; forwarding is already set and verified.
+    let js = read("console.js");
+    let g = js_fn(&js, "function mpGuide(");
+    let at = g.find("row.step === \"backfill\"").expect("mpGuide has a backfill branch");
+    assert!(g[..at].contains("var row ="), "the branch reads the guided row");
+    assert!(g[at..].starts_with("row.step === \"backfill\" && p.provider === \"m365\""), "only Microsoft 365 holds the backfill");
+    assert!(g.contains("Knowlu can’t bring in Outlook’s older mail yet. New mail is already arriving — press I’ve done this to finish."), "the backfill sentence");
+    let branch = &g[at..g.find("var lines =").expect("the path lines")];
+    assert!(branch.contains("return"), "the backfill step returns its own sentence before any address or path");
+    assert!(branch.find("return").unwrap() < branch.find("mpAddressFor(").unwrap(), "and before the address is even fetched");
+    assert!(!branch.contains("data-mp-copy") && !branch.contains("MP_PATH"), "no address, Copy or forwarding path on the backfill step");
+}
