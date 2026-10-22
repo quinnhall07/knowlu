@@ -3502,15 +3502,20 @@ fn every_start_control_reads_the_owed_flag_and_a_throw_never_strands_it() {
 
 #[test]
 fn from_your_email_opens_above_the_progress_panel() {
-    // Both are fixed `.setpanel`s at z-index 20 and `#mail-applied` comes first in the DOM, so
-    // "See what came from your email" opened it hidden under `#mail-progress`.
+    // Every `.setpanel` shares one fixed spot at z-index 20, so page order is the stacking order.
+    // `#mail-applied` used to come before `#mail-progress`, so "See what came from your email"
+    // opened it hidden under the progress panel. It sits after it now, and before the panels that
+    // must still open over it (a z-index of its own would lift it above those too).
     let css = read("console.css");
     let panel = css.lines().find(|l| l.starts_with(".setpanel {")).expect(".setpanel rule");
     assert!(panel.contains("z-index: 20;"), "the shared panel layer");
-    let rule = css.lines().find(|l| l.starts_with("#mail-applied {")).expect("a #mail-applied rule");
-    assert!(rule.contains("z-index: 21;"), "From your email sits above the progress panel: {rule}");
+    assert!(!css.lines().any(|l| l.starts_with("#mail-applied {")), "no layer of its own");
     let html = read("index.html");
-    assert!(html.contains("id=\"mail-applied\"") && html.contains("id=\"mail-progress\""), "the two panels");
+    let at = |id: &str| html.find(&format!("id=\"{id}\"")).unwrap_or_else(|| panic!("#{id}"));
+    let order = ["settings", "mail-progress", "mail-applied", "report", "upgrade", "reconsent"];
+    for pair in order.windows(2) {
+        assert!(at(pair[0]) < at(pair[1]), "#{} comes before #{}", pair[0], pair[1]);
+    }
 }
 
 #[test]

@@ -470,8 +470,6 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
    `[hidden]` half; it is not this rule's business to change that. */
 .setpanel { position: fixed; right: var(--s4); top: var(--s4); width: 420px; max-width: calc(100vw - 32px); background: var(--s2c); border: 1px solid var(--hair-2); border-radius: var(--r3); padding: var(--s4); z-index: 20; display: block; max-height: calc(100vh - 2 * var(--s4)); overflow-y: auto; }
 .setpanel[hidden] { display: none; }
-/* "From your email" opens from the progress panel too: both are fixed in the same spot and it comes first in the DOM, so it needs the higher layer. */
-#mail-applied { z-index: 21; }
 .set-hd { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: var(--s3); }
 .set-hd h2 { margin: 0; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--t3); font-weight: 600; }
 .set-row { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; padding: var(--s2) 0; border-top: 1px solid var(--hair); }
