@@ -3347,3 +3347,40 @@ fn every_start_control_reads_the_owed_flag_and_a_throw_never_strands_it() {
     assert!(asker.find("fillReconsent(p)").unwrap() < asker.find("RECONSENT_OWED = true").unwrap(), "fill the panel before raising the flag");
     assert!(asker.split(".catch(").nth(1).unwrap().contains("RECONSENT_OWED = false"), "a throw clears the owed flag");
 }
+
+#[test]
+fn from_your_email_opens_above_the_progress_panel() {
+    // Every `.setpanel` shares one fixed spot at z-index 20, so page order is the stacking order.
+    // `#mail-applied` used to come before `#mail-progress`, so "See what came from your email"
+    // opened it hidden under the progress panel. It sits after it now, and before the panels that
+    // must still open over it (a z-index of its own would lift it above those too).
+    let css = read("console.css");
+    let panel = css.lines().find(|l| l.starts_with(".setpanel {")).expect(".setpanel rule");
+    assert!(panel.contains("z-index: 20;"), "the shared panel layer");
+    assert!(!css.lines().any(|l| l.starts_with("#mail-applied {")), "no layer of its own");
+    let html = read("index.html");
+    let at = |id: &str| html.find(&format!("id=\"{id}\"")).unwrap_or_else(|| panic!("#{id}"));
+    let order = ["settings", "mail-progress", "mail-applied", "report", "upgrade", "reconsent"];
+    for pair in order.windows(2) {
+        assert!(at(pair[0]) < at(pair[1]), "#{} comes before #{}", pair[0], pair[1]);
+    }
+    // The one panel that page order cannot put above it: the progress panel opened from Settings.
+    let js = read("console.js");
+    let open = js_fn(&js, "function openMailProgress(");
+    assert!(open.contains("EL(\"mail-applied\").hidden = true;"), "opening progress closes From your email");
+}
+
+#[test]
+fn the_held_backfill_step_says_so_and_shows_no_forwarding_guide() {
+    // A Microsoft 365 setup holds "Bring in recent mail"; forwarding is already set and verified.
+    let js = read("console.js");
+    let g = js_fn(&js, "function mpGuide(");
+    let at = g.find("row.step === \"backfill\"").expect("mpGuide has a backfill branch");
+    assert!(g[..at].contains("var row ="), "the branch reads the guided row");
+    assert!(g[at..].starts_with("row.step === \"backfill\" && p.provider === \"m365\""), "only Microsoft 365 holds the backfill");
+    assert!(g.contains("Knowlu can’t bring in Outlook’s older mail yet. New mail is already arriving — press I’ve done this to finish."), "the backfill sentence");
+    let branch = &g[at..g.find("var lines =").expect("the path lines")];
+    assert!(branch.contains("return"), "the backfill step returns its own sentence before any address or path");
+    assert!(branch.find("return").unwrap() < branch.find("mpAddressFor(").unwrap(), "and before the address is even fetched");
+    assert!(!branch.contains("data-mp-copy") && !branch.contains("MP_PATH"), "no address, Copy or forwarding path on the backfill step");
+}

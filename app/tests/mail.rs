@@ -4442,7 +4442,7 @@ fn a_microsoft_setup_ends_at_a_guided_backfill_and_runs_none_of_the_retired_scri
     assert!(shared.answer(Answer::Done));
     let p = wait(&shared);
     assert_eq!(p.not_brought_in_before, Some(since_day()), "the end names the day before which mail was not brought in");
-    assert!(p.done.contains(&"canary") && !p.done.contains(&"backfill") && p.left.contains(&"backfill"), "{:?} {:?}", p.done, p.left);
+    assert!(p.done.contains(&"canary") && !p.done.contains(&"backfill") && !p.left.contains(&"backfill"), "{:?} {:?}", p.done, p.left);
     assert_ne!(row(&p, "backfill").state, "done_by_hand");
     assert!(ran_retired(&r).is_empty(), "{:?}", r.scripts());
     assert!(!r.events().iter().any(|e| e == "svc batch"), "no backfill batch was opened: {:?}", r.events());
@@ -4503,7 +4503,9 @@ fn a_microsoft_setup_whose_forwarding_worked_ends_as_a_success_not_a_stop() {
     assert!(shared.answer(Answer::Done));
     let p = wait(&shared);
     assert_eq!((p.ended, p.line), (Some("finished"), Some("Forwarding is set. New mail is arriving.")));
-    assert!(p.left.contains(&"backfill") && p.not_brought_in_before.is_some(), "{:?}", p.left);
+    assert!(p.not_brought_in_before.is_some(), "what was not brought in is still named");
+    // The held backfill and the Finish that never ran are not "Not done": the end reads as a success.
+    assert!(p.left.is_empty(), "{:?}", p.left);
     assert!(!r.events().contains(&"svc delete address".to_string()), "the address is kept");
     // The student's own Stop is still a stop.
     let s = rig("m365-forwarding-set-stop");
@@ -4513,6 +4515,7 @@ fn a_microsoft_setup_whose_forwarding_worked_ends_as_a_success_not_a_stop() {
     shared.stop();
     let p = wait(&shared);
     assert_eq!((p.ended, p.line), (Some("stopped"), Some("setup stopped")));
+    assert!(p.left.contains(&"backfill") && p.left.contains(&"finish"), "a stop still lists what was left: {:?}", p.left);
 }
 
 #[test]

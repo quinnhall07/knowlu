@@ -528,10 +528,13 @@ impl<'a> Runner<'a> {
             }
         }
         let summary = self.machine.summary();
+        // Ending at the held backfill is the designed end (see `finished_end`): that step and the Finish that
+        // never ran are not "Not done". `not_brought_in_before` still says what was left out.
+        let held_end = matches!(end, End::ForwardingSet);
         self.publish();
         self.sh.update(|p| {
             p.done = summary.done.iter().map(|s| step_name(*s)).collect();
-            p.left = summary.left.iter().map(|s| step_name(*s)).collect();
+            p.left = summary.left.iter().filter(|s| !(held_end && matches!(s, Step::Backfill | Step::Finish))).map(|s| step_name(*s)).collect();
             p.not_brought_in_before = summary.mail_not_brought_in_before.map(|d| d.to_string());
             p.sentence = "";
         });

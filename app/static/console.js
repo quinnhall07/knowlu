@@ -2211,8 +2211,12 @@
   }
   function mpGuide(p) {
     if (p.status === "ended" || !mpGuided(p)) { return ""; }
-    mpAddressFor(p);
     var row = p.rows.filter(function (x) { return x.state === "needs_you" || x.state === "failed" || x.guided; })[0] || {};
+    // The held Microsoft 365 backfill: forwarding is already set and verified, so no address and no path.
+    if (row.step === "backfill" && p.provider === "m365") {
+      return '<div class="mp-guide"><p>' + h("Knowlu can’t bring in Outlook’s older mail yet. New mail is already arriving — press I’ve done this to finish.") + "</p></div>";
+    }
+    mpAddressFor(p);
     var lines = row.step === "confirm_address" ? MP_PATH_CONFIRM : (MP_PATH[p.provider] || MP_PATH.other);
     var addr = MPA.id === p.address_id && MPA.address ? '<div class="set-row"><code class="mp-addr">' + h(MPA.address) + "</code>" +
       '<button class="b" data-mp-copy>Copy</button></div>' : "";
@@ -2269,6 +2273,8 @@
     }).catch(function () {});
   }
   function openMailProgress() {
+    // "From your email" sits above this panel in page order; opened from Settings it could cover it.
+    EL("mail-applied").hidden = true;
     EL("mail-progress").hidden = false; maybeReconsent();
     if (!MP.timer) { MP.timer = setInterval(pollMailProgress, 1500); }
     return pollMailProgress();
