@@ -508,8 +508,9 @@ pub fn mail_step(est: crate::account::EntitlementState, data_dir: &Path, now: i6
 /// `Cloud`.
 ///
 /// **`grades` sits before `ingest`**: ingest reads the grade notes to keep turned-in work out of
-/// `tasks/` and to mark live tasks done (spec §6.2, Q11). It reads `grades/` without a lock, which is
-/// safe only because these steps run in sequence.
+/// `tasks/` and to mark live tasks done (spec §6.2, Q11). It reads `grades/` without a lock, so a
+/// concurrent grades write (a refresh or Sync now) can make it miss a note; that only means a
+/// turned-in item is created live this slot and marked done (with Undo) on the next.
 ///
 /// **`judge` sits before `rank`**: it writes `effort_hours`, `importance` and `course`, and a rank
 /// that ran first would order the day from the values the judge was about to replace — every

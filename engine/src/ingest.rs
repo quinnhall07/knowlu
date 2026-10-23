@@ -600,10 +600,11 @@ pub type GradeIndex = BTreeMap<String, GradeRow>;
 /// (the first note for a column id wins); a note that does not parse is skipped. No `grades/`
 /// folder is an empty index, which is today's behaviour exactly.
 ///
-/// **This reads `grades/` without a lock, and that is safe only because slot steps run in
-/// sequence**: the slot is `sync → coursework → grades → ingest → judge → rank`, `grades` is the
-/// only writer of `grades/`, and `ingest` takes no `RunLock`. A caller that ran `grades` beside
-/// `ingest` would read a half-applied capture.
+/// **This reads `grades/` without a lock, and a concurrent write can race it.** `ingest` takes no
+/// `RunLock`, while the app's grades refresh, grades connect and Sync now write `grades/` under one,
+/// and `pystr::write_text` truncates then writes. A read that lands in that window can make
+/// `read_meta` miss a note, which only means a turned-in item is created live this run and marked
+/// done (with Undo) on the next. `ingest` never writes `grades/`, so nothing is corrupted.
 pub fn grade_index(vault: &Path) -> GradeIndex {
     let mut index = GradeIndex::new();
     for path in crate::approvals::sorted_md(&vault.join("grades")) {
@@ -661,7 +662,7 @@ fn mark_gradebook_done(
         match crate::completion::apply_done(vault, path, &evidence, ctx, journal, false) {
             Ok(crate::completion::Applied::Marked) => log.push(format!("marked done: {stem} (gradebook)")),
             Ok(_) => {}
-            Err(err) => log.push(format!("skipped (unwritable): {err}")),
+            Err(err) => log.push(format!("gradebook: {stem} not marked done ({err})")),
         }
     }
     log
@@ -1255,8 +1256,8 @@ fn run_lines_on(
         .map(|m| m.iter().filter_map(|(k, v)| Some((k.as_str()?.to_string(), v.as_str()?.to_string()))).collect())
         .unwrap_or_default();
     let mut journal = crate::journal::Journal::new(vault);
-    // O1: the gradebook half. `grades/` is read lockless, which is safe only because slot steps are
-    // sequential (see `grade_index`).
+    // O1: the gradebook half. `grades/` is read lockless: a concurrent grades write can make a note
+    // be missed this run, which only defers the mark to the next run (see `grade_index`).
     let grades = grade_index(vault);
     let mut log =
         sync_tasks_with_grades(&events, vault, &course_map, Some(&ctx), &mut journal, today, first_run, &grades);
