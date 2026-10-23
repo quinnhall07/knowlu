@@ -559,3 +559,241 @@ fn every_curated_endpoint_is_built_from_that_schools_own_host() {
     }
     assert!(lms_home("999999").is_none(), "an uncurated school has no sign-in page we know");
 }
+
+// ---- Only the courses a student is taking now ----------------------------------------------------
+// Every course below is invented. Blackboard's `users/me/courses?expand=course` lists a student's
+// whole history; the wizard must not offer last year's classes. Every availability field is optional
+// on a real tenant, so each rule drops a course only on a field it can read, and keeps the rest.
+
+fn t(s: &str) -> jiff::Timestamp { s.parse().expect("a timestamp") }
+
+fn names(got: &[knowlu::lms_link::Course]) -> Vec<&str> { got.iter().map(|c| c.name.as_str()).collect() }
+
+fn one(course: &str, membership: &str) -> String {
+    format!(r#"{{"results":[{{"courseId":"_1_1"{membership},"course":{{"name":"Test Course"{course}}}}}]}}"#)
+}
+
+#[test]
+fn a_course_the_lms_marks_unavailable_is_not_current() {
+    use knowlu::lms_link::current_courses_from_json;
+    let now = t("2026-10-23T12:00:00Z");
+    let none = std::collections::BTreeMap::new();
+    for a in ["No", "Disabled", "no", "DISABLED"] {
+        let body = one(&format!(r#","availability":{{"available":"{a}"}}"#), "");
+        assert!(current_courses_from_json(&body, now, &none).is_empty(), "course {a}");
+    }
+    let body = one(r#","availability":{"available":"Yes"}"#, "");
+    assert_eq!(current_courses_from_json(&body, now, &none).len(), 1);
+}
+
+#[test]
+fn a_membership_the_lms_marks_unavailable_is_not_current() {
+    use knowlu::lms_link::current_courses_from_json;
+    let now = t("2026-10-23T12:00:00Z");
+    let none = std::collections::BTreeMap::new();
+    for a in ["No", "Disabled"] {
+        let body = one("", &format!(r#","availability":{{"available":"{a}"}}"#));
+        assert!(current_courses_from_json(&body, now, &none).is_empty(), "membership {a}");
+    }
+    let body = one("", r#","availability":{"available":"Yes"}"#);
+    assert_eq!(current_courses_from_json(&body, now, &none).len(), 1);
+}
+
+#[test]
+fn a_date_range_course_that_has_ended_is_not_current_and_one_running_or_ahead_is() {
+    use knowlu::lms_link::current_courses_from_json;
+    let now = t("2026-10-23T12:00:00Z");
+    let none = std::collections::BTreeMap::new();
+    let range = |start: &str, end: &str| {
+        one(&format!(r#","availability":{{"available":"Yes","duration":{{"type":"DateRange","start":"{start}","end":"{end}"}}}}"#), "")
+    };
+    assert!(current_courses_from_json(&range("2026-01-12T05:00:00.000Z", "2026-05-08T04:00:00.000Z"), now, &none).is_empty());
+    assert_eq!(current_courses_from_json(&range("2026-08-24T05:00:00.000Z", "2026-12-18T05:00:00.000Z"), now, &none).len(), 1);
+    assert_eq!(current_courses_from_json(&range("2027-01-12T05:00:00.000Z", "2027-05-08T04:00:00.000Z"), now, &none).len(), 1);
+    // An offset is read as an offset: 23:00-05:00 on the 22nd is 04:00Z on the 23rd, before `now`.
+    assert!(current_courses_from_json(&range("2026-08-24T05:00:00Z", "2026-10-22T23:00:00-05:00"), now, &none).is_empty());
+}
+
+#[test]
+fn a_missing_or_unreadable_field_keeps_the_course() {
+    use knowlu::lms_link::current_courses_from_json;
+    let now = t("2026-10-23T12:00:00Z");
+    let none = std::collections::BTreeMap::new();
+    for body in [
+        r#"{"results":[{"courseId":"_1_1","course":{"name":"Test Course"}}]}"#.to_string(),
+        r#"[{"course_code":"X100","name":"Test Course"}]"#.to_string(),
+        one(r#","availability":{}"#, r#","availability":{}"#),
+        one(r#","availability":{"available":"Yes","duration":{}}"#, ""),
+        one(r#","availability":{"duration":{"type":"DateRange"}}"#, ""),
+        one(r#","availability":{"duration":{"type":"DateRange","end":"soon-ish"}}"#, ""),
+        one(r#","availability":{"duration":{"type":"DateRange","end":"2026-05-08T04:00:00"}}"#, ""),
+        one(r#","availability":{"duration":{"type":"Continuous","end":"2020-01-01T00:00:00Z"}}"#, ""),
+        one(r#","availability":"nope""#, r#","availability":7"#),
+    ] {
+        assert_eq!(current_courses_from_json(&body, now, &none).len(), 1, "{body}");
+    }
+}
+
+#[test]
+fn a_course_in_an_ended_term_is_not_current_but_only_when_it_defers_to_the_term() {
+    use knowlu::lms_link::current_courses_from_json;
+    let now = t("2026-10-23T12:00:00Z");
+    let ended: std::collections::BTreeMap<String, knowlu::lms_link::TermEnd> = [("_77_1".to_string(), knowlu::lms_link::TermEnd::Dates)].into();
+    let by_avail = one(r#","termId":"_77_1","availability":{"available":"Term"}"#, "");
+    let by_dur = one(r#","termId":"_77_1","availability":{"duration":{"type":"Term"}}"#, "");
+    // A course that sets its own dates or is continuous ignores its term, as Blackboard does.
+    let continuous = one(r#","termId":"_77_1","availability":{"available":"Yes","duration":{"type":"Continuous"}}"#, "");
+    let no_term = one(r#","availability":{"available":"Term"}"#, "");
+    assert!(current_courses_from_json(&by_avail, now, &ended).is_empty());
+    assert!(current_courses_from_json(&by_dur, now, &ended).is_empty());
+    assert_eq!(current_courses_from_json(&continuous, now, &ended).len(), 1);
+    assert_eq!(current_courses_from_json(&no_term, now, &ended).len(), 1);
+    // A term nobody fetched, or one that did not end, keeps its courses.
+    assert_eq!(current_courses_from_json(&by_avail, now, &std::collections::BTreeMap::new()).len(), 1);
+}
+
+#[test]
+fn a_term_has_ended_when_its_dates_or_its_availability_say_so() {
+    use knowlu::lms_link::term_ended;
+    let now = t("2026-10-23T12:00:00Z");
+    let dr = |end: &str| format!(r#"{{"id":"_77_1","availability":{{"available":"Yes","duration":{{"type":"DateRange","start":"2026-01-01T00:00:00Z","end":"{end}"}}}}}}"#);
+    assert!(term_ended(&dr("2026-05-08T04:00:00.000Z"), now));
+    assert!(!term_ended(&dr("2026-12-18T05:00:00.000Z"), now));
+    assert!(term_ended(r#"{"availability":{"available":"No"}}"#, now));
+    assert!(term_ended(r#"{"availability":{"available":"Disabled"}}"#, now));
+    for keep in [
+        r#"{"availability":{"available":"Yes"}}"#, r#"{"availability":{"duration":{"type":"Continuous"}}}"#,
+        r#"{"availability":{"duration":{"type":"DateRange"}}}"#, r#"{"availability":{"duration":{"type":"DateRange","end":"later"}}}"#,
+        r#"{"availability":{"duration":{"type":"FixedNumDays","end":"2020-01-01T00:00:00Z"}}}"#,
+        "{}", "", "not json", "null",
+    ] {
+        assert!(!term_ended(keep, now), "{keep}");
+    }
+}
+
+#[test]
+fn the_terms_to_fetch_are_the_distinct_ones_courses_defer_to() {
+    use knowlu::lms_link::deferred_term_ids;
+    let body = r#"{"results":[
+      {"courseId":"_1_1","course":{"name":"A","termId":"_7_1","availability":{"available":"Term"}}},
+      {"courseId":"_2_1","course":{"name":"B","termId":"_7_1","availability":{"duration":{"type":"Term"}}}},
+      {"courseId":"_3_1","course":{"name":"C","termId":"_8_1","availability":{"available":"Term"}}},
+      {"courseId":"_4_1","course":{"name":"D","termId":"_9_1","availability":{"available":"Yes","duration":{"type":"Continuous"}}}},
+      {"courseId":"_5_1","course":{"name":"E","availability":{"available":"Term"}}}
+    ]}"#;
+    let now = t("2026-10-23T12:00:00Z");
+    assert_eq!(deferred_term_ids(body, now), ["_7_1", "_8_1"]);
+    assert!(deferred_term_ids("not json", now).is_empty());
+}
+
+#[test]
+fn a_mixed_list_keeps_exactly_the_current_classes_in_order() {
+    use knowlu::lms_link::current_courses_from_json;
+    let now = t("2026-10-23T12:00:00Z");
+    let ended: std::collections::BTreeMap<String, knowlu::lms_link::TermEnd> = [("_7_1".to_string(), knowlu::lms_link::TermEnd::Dates)].into();
+    let body = r#"{"results":[
+      {"courseId":"_1_1","course":{"name":"Invented Studies 101","termId":"_8_1","availability":{"available":"Term"}}},
+      {"courseId":"_2_1","course":{"name":"Invented Studies 102","termId":"_7_1","availability":{"available":"Term"}}},
+      {"courseId":"_3_1","course":{"name":"Invented Studies 103","availability":{"available":"Yes","duration":{"type":"DateRange","end":"2026-05-01T00:00:00Z"}}}},
+      {"courseId":"_4_1","courseRoleId":"Student","availability":{"available":"Disabled"},"course":{"name":"Invented Studies 104"}},
+      {"courseId":"_5_1","course":{"name":"Invented Studies 105"}},
+      {"courseId":"_6_1","course":{"name":"Invented Studies 106","availability":{"available":"No"}}},
+      {"courseId":"_9_1","course":{"name":"Invented Studies 107","availability":{"available":"Yes","duration":{"type":"Continuous"}}}}
+    ]}"#;
+    let got = current_courses_from_json(body, now, &ended);
+    assert_eq!(names(&got), ["Invented Studies 101", "Invented Studies 105", "Invented Studies 107"]);
+    // Same shape out as before: the filter changes how many, never what a course carries.
+    assert_eq!(got[0].code, "_1_1");
+}
+
+/// The capture reads the filtered list and asks for each deferred term once, by the window's own
+/// session, through the same cookie jar and agent as the course list. A failed term fetch adds
+/// nothing to the ended set, so its courses stay.
+#[test]
+fn the_capture_filters_to_current_courses_and_fetches_each_term_through_the_same_session() {
+    let src = std::fs::read_to_string("src/lms_link.rs").expect("src/lms_link.rs");
+    let at = src.find("pub fn capture_courses").expect("capture_courses");
+    let tail = &src[at..];
+    let body = &tail[..tail.find("\n}\n").map(|e| e + 2).unwrap_or(tail.len())];
+    assert!(body.contains("current_courses_from_json("), "{body}");
+    assert!(body.contains("deferred_term_ids("), "{body}");
+    assert!(body.contains("term_state("), "{body}");
+    assert!(body.contains("term_url("), "{body}");
+    assert!(!body.contains("courses_from_json(&body)"), "the unfiltered reader must not feed the wizard:\n{body}");
+    assert_eq!(body.matches("cookie_url(").count(), 1, "one jar rule, not a second:\n{body}");
+}
+
+#[test]
+fn a_course_already_gone_asks_for_no_term() {
+    use knowlu::lms_link::deferred_term_ids;
+    let now = t("2026-10-23T12:00:00Z");
+    let body = r#"{"results":[
+      {"courseId":"_1_1","course":{"name":"A","termId":"_7_1","availability":{"available":"Term"}},"availability":{"available":"No"}},
+      {"courseId":"_2_1","course":{"name":"B","termId":"_8_1","availability":{"available":"No"}}},
+      {"courseId":"_3_1","course":{"name":"C","termId":"_9_1","availability":{"available":"Term","duration":{"type":"DateRange","end":"2026-01-01T00:00:00Z"}}}},
+      {"courseId":"_4_1","course":{"name":"D","termId":"_6_1","availability":{"available":"Term"}}}
+    ]}"#;
+    assert_eq!(deferred_term_ids(body, now), ["_6_1"]);
+}
+
+/// Blackboard gates only a course whose availability is `Term` by the term's own availability. A
+/// course that is `Yes` with `duration: Term` takes the term's dates and nothing else.
+#[test]
+fn a_term_switched_off_hides_only_a_course_whose_availability_is_term() {
+    use knowlu::lms_link::{current_courses_from_json, term_state, TermEnd};
+    let now = t("2026-10-23T12:00:00Z");
+    assert_eq!(term_state(r#"{"availability":{"available":"No"}}"#, now), Some(TermEnd::Off));
+    assert_eq!(term_state(r#"{"availability":{"available":"Yes","duration":{"type":"DateRange","end":"2026-05-01T00:00:00Z"}}}"#, now), Some(TermEnd::Dates));
+    assert_eq!(term_state(r#"{"availability":{"available":"Yes"}}"#, now), None);
+    let off: std::collections::BTreeMap<String, TermEnd> = [("_7_1".to_string(), TermEnd::Off)].into();
+    let over: std::collections::BTreeMap<String, TermEnd> = [("_7_1".to_string(), TermEnd::Dates)].into();
+    let gated = one(r#","termId":"_7_1","availability":{"available":"Term"}"#, "");
+    let dates_only = one(r#","termId":"_7_1","availability":{"available":"Yes","duration":{"type":"Term"}}"#, "");
+    assert!(current_courses_from_json(&gated, now, &off).is_empty());
+    assert!(current_courses_from_json(&gated, now, &over).is_empty());
+    assert_eq!(current_courses_from_json(&dates_only, now, &off).len(), 1, "a term marked No keeps a Yes course");
+    assert!(current_courses_from_json(&dates_only, now, &over).is_empty(), "an ended term drops it");
+}
+
+#[test]
+fn a_term_url_is_the_same_origin_terms_path_and_nothing_else() {
+    use knowlu::lms_link::term_url;
+    let list = "https://lms.example.test/learn/api/public/v1/users/me/courses?expand=course";
+    assert_eq!(
+        term_url(list, "_77_1").as_deref(),
+        Some("https://lms.example.test/learn/api/public/v1/terms/_77_1")
+    );
+    assert_eq!(term_url(list, "ext-1.a:b").as_deref(), Some("https://lms.example.test/learn/api/public/v1/terms/ext-1.a:b"));
+    for bad in ["../x", "a/b", "a?b", "a#b", "a@b", "%2F", "a%2Fb", "a b", "a\\b", "", ".", ".."] {
+        assert_eq!(term_url(list, bad), None, "termId {bad:?}");
+    }
+    for bad_list in [
+        "http://lms.example.test/learn/api/public/v1/users/me/courses",
+        "https://lms.example.test/api/v1/courses",
+        "https:///learn/api/x",
+        "https://user@evil.test/learn/api/x",
+        "https://lms.example.test/x/learn/api/x",
+        "https://lms.example.test?x=/learn/api/x",
+        "ftp://lms.example.test/learn/api/x",
+        "",
+    ] {
+        assert_eq!(term_url(bad_list, "_77_1"), None, "{bad_list:?}");
+    }
+}
+
+/// The 20 s budget is a ceiling on the whole term phase, not a gate before each request: the last
+/// request is cut to whatever remains, and nothing starts once nothing remains.
+#[test]
+fn a_term_request_never_runs_past_the_budget() {
+    use knowlu::lms_link::term_fetch_limit;
+    use std::time::Duration;
+    let s = Duration::from_secs;
+    assert_eq!(term_fetch_limit(s(0)), Some(s(10)));
+    assert_eq!(term_fetch_limit(s(10)), Some(s(10)));
+    assert_eq!(term_fetch_limit(s(15)), Some(s(5)), "cut to what is left of the budget");
+    assert_eq!(term_fetch_limit(Duration::from_millis(19_999)), Some(Duration::from_millis(1)));
+    assert_eq!(term_fetch_limit(s(20)), None);
+    assert_eq!(term_fetch_limit(s(99)), None);
+    let src = std::fs::read_to_string("src/lms_link.rs").expect("src/lms_link.rs");
+    assert!(src.contains("term_fetch_limit(started.elapsed())"), "the capture asks the clamp before every term");
+}

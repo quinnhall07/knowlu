@@ -481,6 +481,10 @@ pub struct Course {
 /// as its curated row's Canvas path is. **Never panics and never guesses**: a body it does not
 /// recognise is an empty list, and an empty list is what puts the typed-codes fallback on screen.
 pub fn courses_from_json(body: &str) -> Vec<Course> {
+    read_courses(body, |_| true)
+}
+
+fn read_courses(body: &str, keep: impl Fn(&serde_json::Value) -> bool) -> Vec<Course> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return Vec::new() };
     let items: Vec<&serde_json::Value> = match (&v, v.get("results")) {
         (serde_json::Value::Array(a), _) => a.iter().collect(),
@@ -489,6 +493,9 @@ pub fn courses_from_json(body: &str) -> Vec<Course> {
     };
     let mut out = Vec::new();
     for it in items {
+        if !keep(it) {
+            continue;
+        }
         let code = it
             .get("courseId")
             .or_else(|| it.get("course_code"))
@@ -521,6 +528,105 @@ pub fn courses_from_json(body: &str) -> Vec<Course> {
     out
 }
 
+/// `x.availability.<key>` as text, lower-cased; `None` for anything that is not there as a string.
+fn availability_text(x: &serde_json::Value, key: &str) -> Option<String> {
+    x.get("availability")?.get(key)?.as_str().map(str::to_ascii_lowercase)
+}
+
+/// `x.availability.duration.<key>` as text, as written.
+fn duration_text(x: &serde_json::Value, key: &str) -> Option<String> {
+    x.get("availability")?.get("duration")?.get(key)?.as_str().map(str::to_string)
+}
+
+fn is_off(x: &serde_json::Value) -> bool {
+    matches!(availability_text(x, "available").as_deref(), Some("no" | "disabled"))
+}
+
+/// A `DateRange` that has an `end` this reader can parse, and that end is before `now`. Anything else
+/// — no type, no end, a bare local time with no zone — is not an ended range: it keeps the course.
+fn range_ended(x: &serde_json::Value, now: jiff::Timestamp) -> bool {
+    duration_text(x, "type").is_some_and(|t| t.eq_ignore_ascii_case("DateRange"))
+        && duration_text(x, "end").and_then(|e| e.parse::<jiff::Timestamp>().ok()).is_some_and(|e| e < now)
+}
+
+/// The course object of a Blackboard membership, or the item itself in a shape that has none.
+fn course_of(it: &serde_json::Value) -> &serde_json::Value { it.get("course").unwrap_or(it) }
+
+/// Does this course take its dates from its term? (`available: "Term"` or `duration.type: "Term"`.)
+fn defers_to_term(c: &serde_json::Value) -> bool {
+    availability_text(c, "available").as_deref() == Some("term")
+        || duration_text(c, "type").is_some_and(|t| t.eq_ignore_ascii_case("Term"))
+}
+
+/// Why a term no longer holds its courses open. `Dates` is a `DateRange` whose `end` has passed;
+/// `Off` is the term's own availability being `No`/`Disabled`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TermEnd { Dates, Off }
+
+/// What a term's JSON says about its end. `term_json` is Blackboard's
+/// `GET /learn/api/public/v1/terms/{termId}`. Every field is optional on a real tenant, so a body that
+/// does not say so is `None`: a term that has not ended. Dates win when both are true.
+pub fn term_state(term_json: &str, now: jiff::Timestamp) -> Option<TermEnd> {
+    let t = serde_json::from_str::<serde_json::Value>(term_json).ok()?;
+    if range_ended(&t, now) { Some(TermEnd::Dates) } else if is_off(&t) { Some(TermEnd::Off) } else { None }
+}
+
+/// Has this term ended, by dates or by being switched off? (`term_state` says which.)
+pub fn term_ended(term_json: &str, now: jiff::Timestamp) -> bool {
+    term_state(term_json, now).is_some()
+}
+
+/// Whether a course is gone on its own fields, before any term is asked: its own or its membership's
+/// availability is `No`/`Disabled`, or it is a `DateRange` that has ended.
+fn gone_on_its_own(it: &serde_json::Value, now: jiff::Timestamp) -> bool {
+    let c = course_of(it);
+    is_off(c) || is_off(it) || range_ended(c, now)
+}
+
+fn term_id_of(c: &serde_json::Value) -> Option<&str> {
+    c.get("termId").and_then(|t| t.as_str()).filter(|t| !t.is_empty())
+}
+
+/// The distinct `termId`s, in list order, of the courses that take their dates from their term **and
+/// are still standing after every other rule** — the only terms worth a request. A course with its
+/// own dates, one already gone, or one with no `termId`, asks for nothing.
+pub fn deferred_term_ids(body: &str, now: jiff::Timestamp) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return Vec::new() };
+    let Some(items) = v.get("results").and_then(|r| r.as_array()) else { return Vec::new() };
+    let mut out: Vec<String> = Vec::new();
+    for it in items {
+        let c = course_of(it);
+        if !defers_to_term(c) || gone_on_its_own(it, now) { continue; }
+        if let Some(id) = term_id_of(c) {
+            if !out.iter().any(|o| o == id) { out.push(id.to_string()); }
+        }
+    }
+    out
+}
+
+/// [`courses_from_json`] less what a student is no longer taking, **by fields the LMS gave and
+/// nothing else**: the course or the membership is `No`/`Disabled`; the course is a `DateRange` whose
+/// `end` is before `now`; or the course takes its dates from a term in `ended_terms`. Blackboard gates
+/// only a course whose availability is `Term` by the term's own availability, so for that course a
+/// term that is `Off` or past its dates hides it; a course that is merely `duration: Term` takes only
+/// the term's DATES, so only `Dates` hides it. A field that is missing or unreadable keeps the course
+/// — hiding a real class is worse than offering an old one, and the wizard still asks the student to
+/// remove any they are not taking.
+pub fn current_courses_from_json(
+    body: &str,
+    now: jiff::Timestamp,
+    ended_terms: &std::collections::BTreeMap<String, TermEnd>,
+) -> Vec<Course> {
+    read_courses(body, |it| {
+        let c = course_of(it);
+        let term_hides = defers_to_term(c)
+            && term_id_of(c).and_then(|t| ended_terms.get(t)).is_some_and(|end| {
+                *end == TermEnd::Dates || availability_text(c, "available").as_deref() == Some("term")
+            });
+        !(gone_on_its_own(it, now) || term_hides)
+    })
+}
+
 /// Likewise for the enrolled-course endpoint: one path per LMS kind, **this school's own host**. A
 /// constant host per LMS kind would send the third curated Blackboard school's student to the first
 /// one's course list.
@@ -548,6 +654,34 @@ pub fn lms_kind_from_url(url: &str) -> Option<&'static str> {
     if u.contains("blackboard.com") || u.contains("/ultra/") { return Some("blackboard"); }
     if u.contains("instructure.com") || u.contains("/api/v1/courses") { return Some("canvas"); }
     None
+}
+
+/// The term endpoint beside the course list's own (same `https` origin), for a `termId` made only of
+/// the characters a Blackboard key is made of and not a dot-segment. Anything else — a path, a query,
+/// an `@`, an escape, an `http://` list, a list URL with no `/learn/api/` — is not asked for, and its
+/// courses stay.
+pub fn term_url(course_list: &str, term_id: &str) -> Option<String> {
+    let id_ok = !matches!(term_id, "" | "." | "..")
+        && term_id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'));
+    let (origin, _) = course_list.split_once("/learn/api/")?;
+    let host = origin.strip_prefix("https://")?;
+    let host_ok = !host.is_empty() && !host.contains(['/', '?', '#', '@', '\\', '%']);
+    (id_ok && host_ok).then(|| format!("{origin}/learn/api/public/v1/terms/{term_id}"))
+}
+
+/// At most this many distinct terms are asked for, each within [`TERM_TIMEOUT`], and none once
+/// [`TERM_BUDGET`] has gone: past any of them the courses stay, so a slow campus costs a longer list,
+/// never a longer wait.
+const TERM_FETCH_MAX: usize = 6;
+const TERM_TIMEOUT: Duration = Duration::from_secs(10);
+const TERM_BUDGET: Duration = Duration::from_secs(20);
+
+/// How long the next term request may take, `elapsed` into the term phase: [`TERM_TIMEOUT`], cut to
+/// what is left of [`TERM_BUDGET`]; `None` once nothing is left. The whole phase therefore ends within
+/// the budget, however slow each request is.
+pub fn term_fetch_limit(elapsed: Duration) -> Option<Duration> {
+    let left = TERM_BUDGET.saturating_sub(elapsed);
+    (!left.is_zero()).then(|| TERM_TIMEOUT.min(left))
 }
 
 /// The one answer a course capture that could not read a list gives — the **ruled outcome C, for the
@@ -583,14 +717,32 @@ pub fn capture_courses(app: tauri::AppHandle, unitid: String) -> Value {
     let Ok(cookies) = w.cookies_for_url(jar_url) else { return no_courses() };
     let jar: String = cookies.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; ");
     let agent = session_agent();
-    let read = agent
-        .get(&url)
-        .header("cookie", &jar)
-        .header("accept", "application/json")
-        .call()
-        .and_then(|mut r| r.body_mut().with_config().limit(1 << 22).read_to_string());
-    let Ok(body) = read else { return no_courses() };
-    let courses = courses_from_json(&body);
+    // One GET through the window's own cookies, for the course list and for each term below.
+    let get = |u: &str, limit: Duration| -> Option<String> {
+        agent
+            .get(u)
+            .config()
+            .timeout_global(Some(limit))
+            .build()
+            .header("cookie", &jar)
+            .header("accept", "application/json")
+            .call()
+            .and_then(|mut r| r.body_mut().with_config().limit(1 << 22).read_to_string())
+            .ok()
+    };
+    let Some(body) = get(&url, Duration::from_secs(30)) else { return no_courses() };
+    // A course that takes its dates from its term is current only while the term is: each distinct
+    // term of a course still standing is asked for once, within the budget above. A term that cannot
+    // be fetched, read or reached in time is a term that has not ended.
+    let now = jiff::Timestamp::now();
+    let started = std::time::Instant::now();
+    let mut ended = std::collections::BTreeMap::new();
+    for id in deferred_term_ids(&body, now).into_iter().take(TERM_FETCH_MAX) {
+        let Some(limit) = term_fetch_limit(started.elapsed()) else { break };
+        let end = term_url(&url, &id).and_then(|u| get(&u, limit)).and_then(|t| term_state(&t, now));
+        if let Some(end) = end { ended.insert(id, end); }
+    }
+    let courses = current_courses_from_json(&body, now, &ended);
     if courses.is_empty() {
         return no_courses();
     }
