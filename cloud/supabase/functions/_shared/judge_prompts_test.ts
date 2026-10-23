@@ -226,13 +226,104 @@ Deno.test("T9: the email rules define completion, name the work as its title, an
   assert(!rules.includes("including receipts,"), `information still swallows every receipt: ${rules}`);
 });
 
-Deno.test("T9: email-3's hash moved off T4's draft; the task hash did not move", async () => {
+Deno.test("T9: email-3's hash moved off T4's draft", async () => {
   assert((await promptHash("email")) !== T4_EMAIL_DRAFT_HASH, "the email prompt hash did not change");
   // email-3 as shipped (T4 + T9). Any edit to the email template or schema moves this and must
-  // come with a new prompt_version in a migration.
+  // come with a new prompt_version in a migration. The task hash is pinned in the task-3 section
+  // below (effort anchors, 2026-10-23), which moved it.
   assertEquals(await promptHash("email"), "ad890b53c5e984a8bd7ac03eff7170085cbb8df17e316e7d8d48ad6c15fa2405");
-  assertEquals(await promptHash("task"), "ee59545ad9910231b22debe10ce9ed9c34f4d0fe043dc6aeb3fe11a4f9e02ca6");
   // event-3 (stream J T1, the `unsure` verdict), pinned at integration: T9 was written on a branch
   // without T1, where the event prompt was still event-2 (0faedc21...). T9 does not touch it.
   assertEquals(await promptHash("event"), "b6324351b0a70976f818930a3dd2e1e66478c804f4a8ff01d4a9123b674b5e92");
+});
+
+// ---------------------------------------------------------------------------------------------
+// task-3 (effort anchors, 2026-10-23). task-2's one effort line ("the realistic time in hours to
+// finish this one assignment, 0.25 to 40") gave the model no scale: a fresh vault's twenty
+// Blackboard items, judged from a title, a course slug and a due date, came back at a median of
+// 8 hours and a maximum of 24. task-3 adds anchors by type, a ceiling rule for "above 8", a rule
+// for a vague title with nothing else given, and the points/weight rule. The schema, the
+// 0.25-40 clamp and the `{slice_hours}` placeholder do not move.
+// ---------------------------------------------------------------------------------------------
+
+/** task-2's hash (`20260916000100_provider_swap.sql`'s re-pin), pinned so task-3 provably moved it. */
+const TASK_2_HASH = "ee59545ad9910231b22debe10ce9ed9c34f4d0fe043dc6aeb3fe11a4f9e02ca6";
+
+// Revised after PR #61's per-case eval (task-3 draft vs task-2, granite-4.2-8b): given RANGES the
+// model answered at or past the top (homework 1-3 -> 2.5-3.5, milestone 3-8 -> 8, exam 3-6 ->
+// 12 and 24, a 12-page paper at 1-2 per page -> 40), so each type now has one typical value.
+Deno.test("task-3: the effort rule gives one typical value per assignment type", () => {
+  const rules = systemTemplate("task");
+  assert(rules.includes("for a typical undergraduate"), `missing the typical-student frame in: ${rules}`);
+  for (
+    const anchor of [
+      "a reading, discussion post or quiz 0.5",
+      "a homework, problem set, worksheet or lab 2",
+      "a short essay or report 3",
+      "a longer paper 1.5 per page",
+      "a project milestone 5",
+      "an exam, midterm or final exam 4 of study",
+    ]
+  ) {
+    assert(rules.includes(anchor), `missing anchor '${anchor}' in: ${rules}`);
+  }
+});
+
+Deno.test("task-3: above 8 needs a named large project or long paper, an exam never passes 6, a vague title is 2", () => {
+  const rules = systemTemplate("task");
+  assert(rules.includes("answer above 8 only for a large project or a paper of more than 5 pages"), rules);
+  assert(rules.includes("An exam is never above 6."), `missing the exam ceiling in: ${rules}`);
+  assert(rules.includes("a vague title with nothing else given: answer 2, never a large number."), rules);
+  assert(rules.includes("points, when given, scale effort_hours only: a 5-point item is small."), rules);
+});
+
+// The draft's "points or a grade weight ... scale the estimate" line and its size anchors leaked
+// into importance: with no weights given, task-2 answered the rule's 3 on 16 of 19 cases and the
+// draft on 9 of 19 — 2 for every quiz-sized item, 4-5 for exams, papers and projects.
+Deno.test("task-3: importance comes from the grade weights only, never from size or effort", () => {
+  const rules = systemTemplate("task");
+  assert(
+    rules.includes(
+      "- importance: 1 to 5, grounded only in the grade weights given, never in the assignment's size or effort. With no weights given, answer 3 and say so in importance_reason.",
+    ),
+    rules,
+  );
+  assert(!rules.includes("grade weight, when given, scale"), `weights must not scale effort: ${rules}`);
+});
+
+Deno.test("task-3: the vague-title rule never asks for a confidence under the 0.6 floor", () => {
+  // A task answer under CONFIDENCE_FLOOR is `below floor`: no verdict at all, and the note is
+  // re-asked every slot. The device already writes every model estimate as `effort_confidence:
+  // low`, so the prompt must not push an honest middle-of-range answer under the floor.
+  const rules = systemTemplate("task");
+  assert(!/confidence (at or )?below/i.test(rules), `the task rules must not ask for a sub-floor confidence: ${rules}`);
+  assert(rules.includes("- confidence: 0 to 1, how sure you are of effort_hours and importance."), rules);
+});
+
+Deno.test("task-3: the clamp, the slice placeholder and the schema are unchanged", () => {
+  const rules = systemTemplate("task");
+  assert(rules.includes("0.25 to 40."), `the 0.25-40 bound left the effort rule: ${rules}`);
+  assertEquals(rules.split("{slice_hours}").length - 1, 1, "exactly one {slice_hours} placeholder");
+  const rendered = buildPrompt("task", { title: "Homework 4" }, { slice_hours: 2 }).system;
+  assert(rendered.includes("is 2 hours."), `the slice did not render: ${rendered}`);
+  assert(!rendered.includes("{slice_hours}"), "the placeholder survived rendering");
+  assertEquals(schemaFor("task"), {
+    type: "object",
+    properties: {
+      course: { type: ["string", "null"] },
+      effort_hours: { type: "number" },
+      importance: { type: "integer", enum: [1, 2, 3, 4, 5] },
+      importance_reason: { type: "string" },
+      confidence: { type: "number" },
+    },
+    required: ["course", "effort_hours", "importance", "importance_reason", "confidence"],
+    additionalProperties: false,
+  });
+});
+
+Deno.test("task-3: the task hash moved off task-2 and is pinned", async () => {
+  assert((await promptHash("task")) !== TASK_2_HASH, "the task prompt hash did not change");
+  // task-3 as shipped, `<stamp>_task_effort_anchors.sql`. Any edit to the task template or schema
+  // moves this and must come with a new prompt_version in a migration.
+  assertEquals(await promptHash("task"), "03a48a2da8b6d7523eb9176b049bb00977f81fdba3f7e4b538343e8a3faa927f");
 });

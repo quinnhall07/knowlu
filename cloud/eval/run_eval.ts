@@ -8,6 +8,12 @@
 //   --dry-run     score against a `ScriptedModel` seeded from `dryRunAnswer` below (ruling
 //                 R-C2-E10), so the harness itself is tested with NO KEY AND NO SPEND.
 //   --thresholds  the file the gate reads. Required once there is at least one case to score.
+//   --per-case    also print one line per case (`perCaseLine`): numbers, enum words and the outcome,
+//                 never free text. Diagnosis only; it changes no score and no `eval_runs` row.
+//   --kind        score one kind only.
+//   --model, --upstream  (with --kind) a dev-only model study: score a candidate OpenRouter model on
+//                 one named zero-retention upstream instead of the pin, for this run only; its
+//                 `eval_runs` rows record `eval-override:<id>@<upstream>`. Never passed by the CI gate.
 //
 // Every run of this program without --dry-run spends real money (one model call per case, at
 // roughly $0.0002 each as a conservative bound on the pinned OpenRouter models — measured on
@@ -46,8 +52,10 @@ import { serviceDb } from "../supabase/functions/_shared/judge_db.ts";
 import { type JudgeModel, ScriptedModel } from "../supabase/functions/_shared/judge_anthropic.ts";
 import { type ModelRow, modelRow } from "../supabase/functions/_shared/judge_models.ts";
 import { judge, type Kind } from "../supabase/functions/_shared/judge_pipeline.ts";
+import { EMAIL_TIERS, EVENT_VERDICTS } from "../supabase/functions/_shared/judge_validate.ts";
 import { promptHash } from "../supabase/functions/_shared/judge_prompts.ts";
 import { modelFor } from "../supabase/functions/_shared/judge_provider.ts";
+import { scrubForPrompt } from "../supabase/functions/_shared/scrub.ts";
 import { loadSeed } from "./loader.ts";
 import type { SeedRecord } from "./schema.ts";
 import { type Case, failed, providerError, score } from "./score.ts";
@@ -101,8 +109,187 @@ const EVAL_CAPS: CapStore = {
   recordTokens: () => Promise.resolve(),
 };
 
+const num = (v: unknown): string => typeof v === "number" && Number.isFinite(v) ? String(v) : "-";
+const word = (v: unknown, allowed: readonly string[]): string =>
+  typeof v === "string" ? (allowed.includes(v) ? v : "?") : "-";
+
+/**
+ * One `--per-case` line (task-3 diagnosis, PR #61): the model's RAW numbers and enum words (before
+ * `validate` clamps or drops them, so a below-floor answer still shows its confidence), the
+ * label's, and the outcome. Never free text — no title, reason, course string or due — because an
+ * `eval_cases` row may one day be a student's consented correction and the gate's log is public;
+ * a task's course is reported only as whether the scored verdict matched the label. A failed call's
+ * `detail` is the provider's status, error code, upstream name and error message, scrubbed and
+ * clipped to 200 characters; never the upstream's raw echo, which can carry a case's own text.
+ */
+export function perCaseLine(
+  kind: Kind,
+  name: string,
+  outcome: string,
+  raw: Record<string, unknown> | null,
+  verdict: Record<string, unknown> | null,
+  theirs: Record<string, unknown>,
+  detail?: string,
+): string {
+  const line = perCaseBody(kind, name, outcome, raw, verdict, theirs);
+  return detail === undefined ? line : `${line} | error ${clipDetail(detail)}`;
+}
+
+function perCaseBody(
+  kind: Kind,
+  name: string,
+  outcome: string,
+  raw: Record<string, unknown> | null,
+  verdict: Record<string, unknown> | null,
+  theirs: Record<string, unknown>,
+): string {
+  const m = raw ?? {};
+  const head = `per-case ${kind} ${name}: ${outcome}`;
+  if (kind === "task") {
+    const course = !("course" in theirs)
+      ? "unlabelled"
+      : (verdict?.course ?? null) === (theirs.course ?? null)
+      ? "match"
+      : "miss";
+    return `${head} | model effort=${num(m.effort_hours)} importance=${num(m.importance)} confidence=${
+      num(m.confidence)
+    } | label effort=${num(theirs.effort_hours)} importance=${num(theirs.importance)} | course ${course}`;
+  }
+  if (kind === "event") {
+    return `${head} | model verdict=${word(m.verdict, EVENT_VERDICTS)} confidence=${num(m.confidence)} | label verdict=${
+      word(theirs.verdict, EVENT_VERDICTS)
+    }`;
+  }
+  return `${head} | model tier=${word(m.tier, EMAIL_TIERS)} effort=${num(m.effort_hours)} importance=${
+    num(m.importance)
+  } confidence=${num(m.confidence)} | label tier=${word(theirs.tier, EMAIL_TIERS)} effort=${
+    num(theirs.effort_hours)
+  } importance=${num(theirs.importance)}`;
+}
+
+const MODEL_ID_RE = /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:-]*$/i;
+const UPSTREAM_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+
+export interface Study {
+  kind?: Kind;
+  model?: { id: string; upstream: string };
+}
+
+/**
+ * `--kind <kind>`, `--model <openrouter-id>` and `--upstream <provider>` (task-3 model study, PR
+ * #61): a dev-only way to score a candidate model on the same seed before Quinn rules on a pin. An
+ * override needs all three, so it is always one kind on one named upstream; anything malformed is
+ * a message, returned before any connection or spend. The CI gate never passes these
+ * (`run_eval_test.ts` checks ci.yml).
+ */
+export function parseStudyArgs(args: string[]): Study | string {
+  const value = (flag: string): string | undefined | null => {
+    const at = args.indexOf(flag);
+    if (at < 0) return undefined;
+    const v = args[at + 1];
+    return v === undefined || v.startsWith("--") ? null : v;
+  };
+  const kind = value("--kind"), model = value("--model"), upstream = value("--upstream");
+  if (kind === null || (kind !== undefined && !KINDS.includes(kind as Kind))) {
+    return `--kind must be one of ${KINDS.join(", ")}`;
+  }
+  if (model === undefined && upstream === undefined) return { kind: kind as Kind | undefined };
+  if (model === undefined || model === null || !MODEL_ID_RE.test(model)) {
+    return "--model must be an OpenRouter model id (vendor/model)";
+  }
+  if (upstream === undefined || upstream === null || !UPSTREAM_RE.test(upstream)) {
+    return "--model needs --upstream <provider>: the one zero-retention upstream to route to";
+  }
+  if (kind === undefined) return "--model needs --kind <kind>: an override is scored on one kind only";
+  return { kind: kind as Kind, model: { id: model, upstream } };
+}
+
+/**
+ * The pinned row with an override applied: the model id swapped and the route's one `order` entry
+ * set to the named upstream, the zero-retention pin (`allow_fallbacks: false`, `zdr: true`,
+ * `require_parameters: true`) kept as `assertPinnedRoute` demands. Provider, sampling, max_tokens,
+ * prompt and grammar versions stay the row's. Only an `openrouter` row can be overridden.
+ */
+export function overrideRow(row: ModelRow, model: Study["model"]): ModelRow {
+  if (model === undefined) return row;
+  if (row.provider !== "openrouter") throw new Error(`--model overrides an openrouter row only, not '${row.provider}'`);
+  return {
+    ...row,
+    model_id: model.id,
+    precision: "unpinned (eval --model)",
+    route: { order: [model.upstream], allow_fallbacks: false, zdr: true, require_parameters: true },
+  };
+}
+
+/** One upstream's entry in OpenRouter's endpoint list for a model. */
+export interface Endpoint {
+  provider_name: string;
+  supported_parameters?: string[];
+}
+
+/** What the request always sends whatever the row says, and must not adapt away. */
+const REQUIRED_PARAMETERS = ["max_tokens", "structured_outputs"];
+
+/**
+ * An override row fitted to its upstream's own endpoint entry. A sampling key the endpoint does not
+ * list is dropped and named (gemma-3-27b-it at DeepInfra takes no `reasoning`; with
+ * `require_parameters: true` OpenRouter then has no endpoint to route to). The zero-retention route
+ * never adapts, and a route without `max_tokens` or strict JSON-schema output (`structured_outputs`)
+ * is refused: the eval would be scoring a different request. A message when refused.
+ */
+export function adaptToEndpoint(
+  row: ModelRow,
+  upstream: string,
+  endpoints: Endpoint[],
+): { row: ModelRow; notes: string[] } | string {
+  const endpoint = endpoints.find((e) => e.provider_name.toLowerCase() === upstream.toLowerCase());
+  if (endpoint === undefined) {
+    const names = endpoints.map((e) => e.provider_name).join(", ") || "none";
+    return `--upstream ${upstream} does not serve ${row.model_id}; OpenRouter lists: ${names}`;
+  }
+  const supported = endpoint.supported_parameters ?? [];
+  const missing = REQUIRED_PARAMETERS.filter((p) => !supported.includes(p));
+  if (missing.length > 0) {
+    return `${upstream} cannot take this request for ${row.model_id}: it does not list ${missing.join(", ")}`;
+  }
+  const sampling: Record<string, unknown> = {};
+  const notes: string[] = [];
+  for (const [key, value] of Object.entries(row.sampling as Record<string, unknown>)) {
+    if (supported.includes(key)) sampling[key] = value;
+    else notes.push(`dropped sampling.${key} (${upstream} does not list ${key})`);
+  }
+  return notes.length === 0 ? { row, notes } : { row: { ...row, sampling }, notes };
+}
+
+/** One line, scrubbed, at most 200 characters. */
+function clipDetail(text: string): string {
+  return [...scrubForPrompt(text.replace(/\s+/g, " ").trim())].slice(0, 200).join("");
+}
+
+/** A failed call as `HTTP <status> · code=<code> · <upstream> · <message>`. Never `metadata.raw`:
+ *  the upstream's own echo can carry the request's text (an item's title). */
+function failureDetail(status: number, text: string): string {
+  try {
+    const e = (JSON.parse(text) as { error?: Record<string, unknown> }).error ?? {};
+    const meta = (e.metadata ?? {}) as Record<string, unknown>;
+    const parts = [`HTTP ${status}`];
+    if (e.code !== undefined) parts.push(`code=${String(e.code)}`);
+    if (typeof meta.provider_name === "string") parts.push(meta.provider_name);
+    if (typeof e.message === "string") parts.push(e.message);
+    return clipDetail(parts.join(" · "));
+  } catch {
+    return `HTTP ${status} (${text.length} chars, not JSON)`;
+  }
+}
+
+/** A case's name in a `--per-case` line: its synthetic seed id, else its row id. */
+function caseName(r: Row): string {
+  return typeof r.seed_id === "string" && /^seed-[a-z0-9-]+$/.test(r.seed_id) ? r.seed_id : `case ${r.id}`;
+}
+
 interface Row {
   id: number;
+  seed_id?: string | null;
   kind: Kind;
   request: { item: Record<string, unknown>; heuristics_seed: Record<string, unknown> };
   ours: Record<string, unknown> | null;
@@ -121,7 +308,7 @@ async function load(db: Db, kind: Kind): Promise<Row[]> {
   const since = new Date(Date.now() - 90 * 86_400_000).toISOString();
   return await db.select(
     `eval_cases?kind=eq.${kind}&or=(source.eq.seed,added_at.gte.${since})` +
-      `&select=id,kind,request,ours,theirs&order=id&limit=${MAX_CASES}`,
+      `&select=id,kind,seed_id,request,ours,theirs&order=id&limit=${MAX_CASES}`,
   ) as Row[];
 }
 
@@ -186,12 +373,29 @@ export interface Deps {
   db: () => Db;
   loadSeed: () => Promise<SeedRecord[]>;
   /** Builds the live model for a kind's pinned row; a test hands in a `ScriptedModel`. */
-  modelFor: (row: ModelRow, envGet: EnvGet) => JudgeModel;
+  modelFor: (row: ModelRow, envGet: EnvGet, opts?: { fetchImpl?: typeof fetch }) => JudgeModel;
   /** The wait between attempts; a test records it instead of waiting. */
   sleep: (ms: number) => Promise<void>;
+  /** An override's endpoint list (`--model`); a test hands in a fixed list. */
+  endpoints: (modelId: string) => Promise<Endpoint[]>;
 }
 const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-const REAL_DEPS: Deps = { envGet: realEnvGet, db: serviceDb, loadSeed, modelFor, sleep: realSleep };
+
+/** OpenRouter's public endpoint list for one model: which upstreams serve it, and which request
+ *  parameters each takes. No key is sent; the list is public. */
+async function realEndpoints(modelId: string): Promise<Endpoint[]> {
+  const res = await fetch(`https://openrouter.ai/api/v1/models/${modelId}/endpoints`);
+  if (!res.ok) {
+    await res.body?.cancel();
+    throw new Error(`the endpoint list for ${modelId} answered HTTP ${res.status}`);
+  }
+  const data = await res.json() as { data?: { endpoints?: Endpoint[] } };
+  return data.data?.endpoints ?? [];
+}
+
+const REAL_DEPS: Deps = {
+  envGet: realEnvGet, db: serviceDb, loadSeed, modelFor, sleep: realSleep, endpoints: realEndpoints,
+};
 
 /**
  * The entry point, factored so `run_eval_test.ts` can drive it directly (ruling R-C2-E50 (2)):
@@ -199,7 +403,10 @@ const REAL_DEPS: Deps = { envGet: realEnvGet, db: serviceDb, loadSeed, modelFor,
  * it a function that throws and prove the zero-case path never calls it.
  */
 export async function main(args: string[], deps: Partial<Deps> = {}): Promise<number> {
-  const { envGet, db: dbFactory, loadSeed: loadSeedFn, modelFor: buildModel, sleep } = { ...REAL_DEPS, ...deps };
+  const { envGet, db: dbFactory, loadSeed: loadSeedFn, modelFor: buildModel, sleep, endpoints: endpointsFor } = {
+    ...REAL_DEPS,
+    ...deps,
+  };
   const argSet = new Set(args);
 
   if (argSet.has("--load-seed")) {
@@ -254,19 +461,48 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
   const thresholds = JSON.parse(await Deno.readTextFile(args[thresholdIndex + 1])) as
     Record<string, Record<string, number>>;
 
+  // The model study (task-3, PR #61): `--kind` scores one kind; `--model` with `--upstream` swaps that
+  // kind's pinned model for this run only. Refused before any connection or spend when malformed.
+  const study = parseStudyArgs(args);
+  if (typeof study === "string") {
+    console.error(study);
+    return 2;
+  }
+
   const db = dbFactory();
   // Corrections carry no judgment id from the device; fill them before anything reads them.
   await db.rpc("backfill_correction_judgments", {});
 
   const dry = argSet.has("--dry-run");
+  // task-3 diagnosis: one line per case (`perCaseLine`); off unless asked, so the gate's log is unchanged.
+  const perCase = argSet.has("--per-case");
 
   // One id for the whole run (R-C2-E51 fix 1, finding 5): every `eval_runs` row this run writes,
   // across every kind and every metric, carries the same `run_id`, so a later reader can group a
   // run's rows back together without guessing from `ran_at` alone.
   const runId = crypto.randomUUID();
 
+  // Diagnosis only (`--per-case`): the live model's fetch, recording the provider's status and error
+  // for a failed call (a non-2xx, or a 2xx error envelope) before the adapter discards it. Never a
+  // request header; the text is clipped, scrubbed and one line (`failureDetail`).
+  let lastFailure: string | null = null;
+  const recordingFetch: typeof fetch = async (input, init) => {
+    const res = await fetch(input, init);
+    try {
+      const text = await res.clone().text();
+      if (!res.ok) lastFailure = failureDetail(res.status, text);
+      else {
+        const body = JSON.parse(text) as { error?: unknown; choices?: unknown[] };
+        if (body.error !== undefined && !(body.choices?.length)) lastFailure = failureDetail(res.status, text);
+      }
+    } catch {
+      // A body that is not JSON on a 2xx is the adapter's own error to name.
+    }
+    return res;
+  };
+
   let worst = 0;
-  for (const kind of KINDS) {
+  for (const kind of KINDS.filter((k) => study.kind === undefined || k === study.kind)) {
     const rows = await load(db, kind);
     if (rows.length === 0) {
       const seeded = seedRecords.some((r) => r.kind === kind);
@@ -288,14 +524,37 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
       `${kind}: ${rows.length} cases, <= ${rows.length * MAX_ATTEMPTS} model calls ` +
         `(${MAX_ATTEMPTS} attempts per case at most, cap ${MAX_CASES})`,
     );
-    const row = await modelRow(db, kind);
+    let row = overrideRow(await modelRow(db, kind), study.model);
+    // What `eval_runs.model` records: the pinned id, or an override label no pin can ever equal.
+    const recordedModel = study.model === undefined
+      ? row.model_id
+      : `eval-override:${study.model.id}@${study.model.upstream}`;
+    if (study.model !== undefined) console.log(`${kind}: model override ${recordedModel}`);
+    if (study.model !== undefined && !dry) {
+      // The pinned row's settings were chosen for the pinned upstream; the override's upstream may
+      // not take all of them, and `require_parameters` then answers no endpoint at all. Read its
+      // own entry and adapt only what it cannot take — refusing when strict JSON output is missing.
+      let adapted: { row: ModelRow; notes: string[] } | string;
+      try {
+        adapted = adaptToEndpoint(row, study.model.upstream, await endpointsFor(study.model.id));
+      } catch (e) {
+        adapted = e instanceof Error ? e.message : String(e);
+      }
+      if (typeof adapted === "string") {
+        console.error(`${kind}: ${adapted}`);
+        worst = Math.max(worst, 2);
+        continue;
+      }
+      row = adapted.row;
+      console.log(`${kind}: override adapted: ${adapted.notes.length === 0 ? "nothing" : adapted.notes.join("; ")}`);
+    }
     // R-PS-3: the model is built only now — the row is read, and there is at least one
     // non-dry-run case this kind is actually about to spend on. One build per kind (not per
     // case): a missing key fails this kind loud, once, instead of once per case.
     let liveModel: JudgeModel | undefined;
     if (!dry) {
       try {
-        liveModel = buildModel(row, envGet);
+        liveModel = buildModel(row, envGet, { fetchImpl: recordingFetch });
       } catch (e) {
         // `modelFor`'s own message already names the row's provider and its secret (Step 6 of
         // the provider seam); this is that same "no key" fault, at the point a real spend was
@@ -313,6 +572,8 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
     let inputTokens = 0, outputTokens = 0, calls = 0, unscored = 0, stoppedEarly = false;
     for (const [i, r] of rows.entries()) {
       let reply;
+      let lastRaw: Record<string, unknown> | null = null;
+      let lastError: string | undefined;
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         if (attempt > 1) await sleep(RETRY_BACKOFF_MS);
         const raw: JudgeModel = dry ? new ScriptedModel([dryRunAnswer(kind, r.theirs)]) : liveModel!;
@@ -321,7 +582,18 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
         const metered: JudgeModel = {
           async complete(req) {
             calls += 1;
-            const answer = await raw.complete(req);
+            lastFailure = null;
+            let answer;
+            try {
+              answer = await raw.complete(req);
+            } catch (e) {
+              // Diagnosis only (`--per-case`): the provider's own status and error, else the
+              // adapter's message, which never quotes a prompt. `judge()` maps the throw as before.
+              lastError = lastFailure ?? clipDetail(e instanceof Error ? e.message : String(e));
+              throw e;
+            }
+            lastError = undefined;
+            lastRaw = answer.json;
             inputTokens += answer.inputTokens;
             outputTokens += answer.outputTokens;
             return answer;
@@ -345,6 +617,9 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
           now: () => Date.now(),
         });
         if (reply.cause !== "model failed") break;
+      }
+      if (perCase) {
+        console.log(perCaseLine(kind, caseName(r), reply!.cause ?? reply!.outcome, lastRaw, reply!.verdict, r.theirs, lastError));
       }
       if (reply!.cause === "model failed") {
         unscored += 1;
@@ -387,7 +662,7 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
       }
       const bad = failed(scored, threshold);
       await db.insert("eval_runs", {
-        model: row.model_id, prompt_version: row.prompt_version, grammar_version: row.grammar_version,
+        model: recordedModel, prompt_version: row.prompt_version, grammar_version: row.grammar_version,
         prompt_hash: hash, kind, metric: scored.metric, value: scored.value,
         threshold, passed: !bad, cases: scored.n, input_tokens: inputTokens, output_tokens: outputTokens,
         run_id: runId, dry_run: dry,

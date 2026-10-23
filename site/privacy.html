@@ -10,7 +10,7 @@
 <main class="doc">
   <h1>Privacy policy</h1>
   <p class="date">Effective 2026-10-20. This page is version <strong>2026-10-20</strong> — the version Knowlu writes down beside your name on the day you accept it.</p>
-  <p class="date">Last changed 2026-10-20.</p>
+  <p class="date">Last changed 2026-10-23.</p>
   <p>Your tasks and notes live in a plain-text folder on this machine and in your Knowlu account, so every computer you sign in on opens on the same day; our servers keep them encrypted at rest, beside your account, the judgments made for you and what you correct, and none of it is ever sold or shared.</p>
   <p>That is the whole policy in one line. The rest of this page is the same promise said slowly, so you can check it.</p>
 
@@ -78,8 +78,8 @@
     <li><strong>Stripe</strong> — payments and the subscription. Stripe sees your card; we do not.</li>
     <li><strong>Cloudflare</strong> — this website and the downloads.</li>
     <li><strong>OpenRouter</strong> — the router every judgment request goes through on its way to a model. It carries the text but does not itself run a model on it, sends every request under zero data retention — never as a default it could quietly lose — and trains nothing on what passes through. Each request names the one company allowed to answer it and is <strong>refused outright, never sent somewhere else,</strong> if that company cannot meet every requirement we set.</li>
-    <li><strong>CoreWeave</strong> — reads your assignments and the events on your calendar to make those judgments, one item at a time, only while a judgment is being made, on a zero-retention endpoint that trains nothing on what it reads.</li>
-    <li><strong>DeepInfra</strong> — reads your email to make those judgments, one item at a time, only while a judgment is being made, on a zero-retention endpoint that trains nothing on what it reads.</li>
+    <li><strong>CoreWeave</strong> — reads the events on your calendar to make those judgments, one item at a time, only while a judgment is being made, on a zero-retention endpoint that trains nothing on what it reads.</li>
+    <li><strong>DeepInfra</strong> — reads your assignments and your email to make those judgments, one item at a time, only while a judgment is being made, on a zero-retention endpoint that trains nothing on what it reads.</li>
     <li><strong>Amazon Web Services</strong> — receives the email you forward to Knowlu and holds it until Knowlu has read it, at most about two days.</li>
   </ul>
   <p>CoreWeave and DeepInfra are <strong>the only two places your content is ever sent to be read by a model.</strong> What they are sent is held for the length of the call and kept by neither of them; what we write down from a judgment is the answer.</p>
