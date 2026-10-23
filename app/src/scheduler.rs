@@ -502,10 +502,14 @@ pub fn mail_step(est: crate::account::EntitlementState, data_dir: &Path, now: i6
     Some(pass(&due).unwrap_or_else(|why| format!("mail (skipped: {why})")))
 }
 
-/// sync → coursework → **ingest** → **grades** → **judge** → rank, as child processes of the sibling
-/// engine exe. `ingest` is included only when the vault has a feed; `grades` only when the slot's
-/// capture wrote a bundle (`grades_bundle`, see [`grades_step`]); `judge` only when `judge_plan`
-/// returns `Cloud`.
+/// sync → coursework → **grades** → **ingest** → **judge** → rank, as child processes of the sibling
+/// engine exe. `grades` is included only when the slot's capture wrote a bundle (`grades_bundle`, see
+/// [`grades_step`]); `ingest` only when the vault has a feed; `judge` only when `judge_plan` returns
+/// `Cloud`.
+///
+/// **`grades` sits before `ingest`**: ingest reads the grade notes to keep turned-in work out of
+/// `tasks/` and to mark live tasks done (spec §6.2, Q11). It reads `grades/` without a lock, which is
+/// safe only because these steps run in sequence.
 ///
 /// **`judge` sits before `rank`**: it writes `effort_hours`, `importance` and `course`, and a rank
 /// that ran first would order the day from the values the judge was about to replace — every
@@ -522,6 +526,9 @@ pub fn slot_argv(vault: &Path, exe: &Path, judge: &JudgePlan, grades_bundle: Opt
     // rows both reading `sync` would say less than one row does. It always exits 0.
     let mut steps = vec![(exe.to_path_buf(), vec!["sync".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into()])];
     steps.push((exe.to_path_buf(), vec!["coursework".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into()]));
+    if let Some(bundle) = grades_bundle {
+        steps.push((exe.to_path_buf(), crate::grades::grades_argv(vault, bundle, "local-runner")));
+    }
     // C2 Task 8: the LMS capability URL lives in the account from here on, so a cloud vault runs
     // `ingest` whether or not the vault still carries a copy — the feed lives in the account, and
     // the engine names a missing one as a skip (A-1) rather than this app leaving the step out.
@@ -529,9 +536,6 @@ pub fn slot_argv(vault: &Path, exe: &Path, judge: &JudgePlan, grades_bundle: Opt
     // service) exits 1 forever before this app or the student can do anything about it.
     if ingest_included(vault) {
         steps.push((exe.to_path_buf(), vec!["ingest".into(), "--vault".into(), v.clone(), "--via".into(), "local-runner".into()]));
-    }
-    if let Some(bundle) = grades_bundle {
-        steps.push((exe.to_path_buf(), crate::grades::grades_argv(vault, bundle, "local-runner")));
     }
     match judge {
         JudgePlan::Cloud { log_dir } => {
