@@ -52,6 +52,15 @@ exists, is already tested, and already has a surface (`surface --view decisions`
 Nothing about this needs a new field, a new write path, a new note type or a migration on the device
 side. That matters more than it sounds: it means step 1 below is small.
 
+> **Amendment 2026-10-23 (lane O1; Quinn's Q3 ruling, `docs/specs/2026-10-23-onboarding-redesign-draft.md`
+> §6, §10).** Where the source is authoritative on its own items (zyBooks, VHL, the Blackboard
+> gradebook), tier 1 no longer files an approval card. `completion::apply_done` writes `status: done`
+> as `agent:knowlu.completion` through `write` and the surface lists it under "Closed this week" with
+> an Undo (the student's own `set` back to `active`). The card path (`propose_done`, the 15-a-day cap,
+> approve or reject) remains for a source that only suggests: mail's completion evidence. The
+> permission story above is kept by the card rule: a "Mark done" card the student rejected, whatever
+> filed it, blocks any later apply for that task, and a pending one is left in the student's hands.
+
 ## 3. What each source actually gives us
 
 This is the heart of Quinn's question — *based on the different sources we'll receive info from.*
@@ -211,6 +220,13 @@ uses.
 The probe was read-only, printed field names and aggregates, stored nothing and wrote nothing to the
 vault. The credential was read from Windows Credential Manager at runtime and never persisted, per
 the standing rule that no secret enters the repo, a log, a prompt or a test name.
+
+> **Amendment 2026-10-23 (lane O1; Q3).** The 100% rule above is unchanged, but its output changed:
+> a task already in the vault is marked done and listed with Undo (`marked done: <stem> (<source>
+> <n>%)`), not proposed; and an item at 100% in a source seen for the first time is archived at first
+> sight as `imported-done`, never created as a task. `propose_vendor_completions` is replaced by
+> `apply_vendor_completions`. Tier 1's cards did ship (v0.1.3 to v0.1.5), so an installed vault may
+> hold pending or rejected "Mark done" cards; the card rule protects them.
 
 ## 7b. The email answer, measured 2026-09-22, and what was built
 

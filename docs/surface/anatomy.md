@@ -410,6 +410,9 @@ fact. The settings panel is an **overlay** over a running console, and nothing i
   `progress → 100`, `status → done|archived`, or `op: delete`, last 7 days.
 - **Marks:** `me` (actor `quinn`) · `agent` (actor `agent:*`) · `lapsed` (note carries
   `status: lapsed`).
+- **`undo`** (lane O1): true on a row whose latest close is `agent:knowlu.completion`'s `status: done`
+  and whose note still reads `done`. The console shows an Undo button that is the student's own `set`
+  of `status` back to `active`; the next apply then skips the task for good.
 - **Lapsed items appear deliberately.** A relevance filter eating wanted things must be visible.
 - **This is the only completion surface that has ever existed.** Today a done task simply vanishes
   from `load_tasks` and nothing anywhere says what got finished.

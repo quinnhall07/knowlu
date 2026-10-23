@@ -264,6 +264,13 @@ one named step, exit 0, in the same way as the ingest and judge skips (and appen
 
 A capture never paints the tray amber; only the engine step's own exit 1 (a bad bundle) does.
 
+> **Amendment 2026-10-23 (lane O1; Quinn's Q11 and Q3, `docs/specs/2026-10-23-onboarding-redesign-draft.md`
+> §6.2, §10).** The slot line above now reads `sync → coursework → grades → ingest → judge → rank`:
+> `grades` runs before `ingest` so `ingest` can read the gradebook's submitted-work status. `grades`
+> reads only `courses/` and `grades/` and writes `grades/` and `state/grades.json`, nothing `ingest`
+> writes, so the swap changes no result of either step. The capture-before-engine rule and every skip
+> name above are unchanged.
+
 ## 11. Privacy
 
 **M1 drafts the privacy sentences here and does not edit `site/privacy.html`** (edit 3; cloud design
@@ -296,7 +303,11 @@ priority weighting; grade-posted emails as a source; zyBooks/VHL/Pearson scores 
 ICS tasks to courses by gradebook column (C1c's D9 — the bundle makes it cheap, but it changes
 `ingest`, which is not this stream's); **manual grade entry** (VISION's gap-filler, "manual entry
 fills any gap"; its own phase, edit 4 — it adds an editing surface and a new write path, so M1 does
-not build it). Also outside M1, and not promised to a later phase: an address entry for an
+not build it). *(Amendment 2026-10-23, lane O1 (Q3, Q11): "pinning ICS tasks to courses by gradebook
+column" leaves this list for a narrower join. `ingest` joins a feed task to its gradebook item
+exactly, by `GradableItem-<id>`, for **status only**: turned-in work is marked done (or archived at
+first sight as `imported-done`). It never sets `course` or `due` from the gradebook; that pinning
+stays out of scope.)* Also outside M1, and not promised to a later phase: an address entry for an
 uncurated Blackboard school (§4); a school gains grades only through a curated row with a read.
 
 ## 13. Tests and proofs
