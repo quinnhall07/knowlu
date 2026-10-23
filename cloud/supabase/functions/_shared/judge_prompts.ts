@@ -102,10 +102,22 @@ function list(value: unknown): string[] {
  */
 export function systemTemplate(kind: "task" | "event" | "email"): string {
   if (kind === "task") {
+    // task-3 (effort anchors, 2026-10-23; `<stamp>_task_effort_anchors.sql`): task-2's one effort
+    // line gave no scale, and items judged from a title, a slug and a due date came back at a
+    // median of 8 hours. The anchors, the above-8 rule and the vague-title rule fix the scale; the
+    // schema, the 0.25-40 clamp and `{slice_hours}` do not move. The vague-title rule deliberately
+    // asks for no lower confidence: an answer under CONFIDENCE_FLOOR (0.6) is `below floor`, no
+    // verdict at all, and the device already labels every model estimate `effort_confidence: low`.
+    // This now differs from the device's local `judge::prompt_for`, which the runtime-removal lane
+    // deletes and which is not extended.
     return [
       "You estimate effort and importance for one university assignment.",
       "Rules:",
-      "- effort_hours: the realistic time in hours to finish this one assignment, 0.25 to 40.",
+      "- effort_hours: the realistic time in hours for a typical undergraduate to finish this one assignment, 0.25 to 40.",
+      "- effort anchors: a reading, discussion post or quiz 0.25 to 1; a weekly homework, problem set or lab 1 to 3; a short essay or report 2 to 4, a longer one 1 to 2 per page; a project milestone 3 to 8; an exam 3 to 6 of study.",
+      "- answer above 8 only when the title or body clearly says a large project or a long paper.",
+      "- a vague title with nothing else given: answer the middle of its likely type's range, never a large number.",
+      "- points or a grade weight, when given, scale the estimate: a 5-point item is small.",
       "- a typical work session in this student's plan is {slice_hours} hours.",
       "- importance: 1 to 5, grounded in the grade weights given. With no weights given, answer 3 and say so in importance_reason.",
       "- importance_reason: one line, under 140 characters, no line breaks.",

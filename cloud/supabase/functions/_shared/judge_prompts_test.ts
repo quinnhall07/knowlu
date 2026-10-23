@@ -226,13 +226,87 @@ Deno.test("T9: the email rules define completion, name the work as its title, an
   assert(!rules.includes("including receipts,"), `information still swallows every receipt: ${rules}`);
 });
 
-Deno.test("T9: email-3's hash moved off T4's draft; the task hash did not move", async () => {
+Deno.test("T9: email-3's hash moved off T4's draft", async () => {
   assert((await promptHash("email")) !== T4_EMAIL_DRAFT_HASH, "the email prompt hash did not change");
   // email-3 as shipped (T4 + T9). Any edit to the email template or schema moves this and must
-  // come with a new prompt_version in a migration.
+  // come with a new prompt_version in a migration. The task hash is pinned in the task-3 section
+  // below (effort anchors, 2026-10-23), which moved it.
   assertEquals(await promptHash("email"), "ad890b53c5e984a8bd7ac03eff7170085cbb8df17e316e7d8d48ad6c15fa2405");
-  assertEquals(await promptHash("task"), "ee59545ad9910231b22debe10ce9ed9c34f4d0fe043dc6aeb3fe11a4f9e02ca6");
   // event-3 (stream J T1, the `unsure` verdict), pinned at integration: T9 was written on a branch
   // without T1, where the event prompt was still event-2 (0faedc21...). T9 does not touch it.
   assertEquals(await promptHash("event"), "b6324351b0a70976f818930a3dd2e1e66478c804f4a8ff01d4a9123b674b5e92");
+});
+
+// ---------------------------------------------------------------------------------------------
+// task-3 (effort anchors, 2026-10-23). task-2's one effort line ("the realistic time in hours to
+// finish this one assignment, 0.25 to 40") gave the model no scale: a fresh vault's twenty
+// Blackboard items, judged from a title, a course slug and a due date, came back at a median of
+// 8 hours and a maximum of 24. task-3 adds anchors by type, a ceiling rule for "above 8", a rule
+// for a vague title with nothing else given, and the points/weight rule. The schema, the
+// 0.25-40 clamp and the `{slice_hours}` placeholder do not move.
+// ---------------------------------------------------------------------------------------------
+
+/** task-2's hash (`20260916000100_provider_swap.sql`'s re-pin), pinned so task-3 provably moved it. */
+const TASK_2_HASH = "ee59545ad9910231b22debe10ce9ed9c34f4d0fe043dc6aeb3fe11a4f9e02ca6";
+
+Deno.test("task-3: the effort rule anchors each assignment type to a typical undergraduate range", () => {
+  const rules = systemTemplate("task");
+  assert(rules.includes("for a typical undergraduate"), `missing the typical-student frame in: ${rules}`);
+  for (
+    const anchor of [
+      "a reading, discussion post or quiz 0.25 to 1",
+      "a weekly homework, problem set or lab 1 to 3",
+      "a short essay or report 2 to 4",
+      "a longer one 1 to 2 per page",
+      "a project milestone 3 to 8",
+      "an exam 3 to 6 of study",
+    ]
+  ) {
+    assert(rules.includes(anchor), `missing anchor '${anchor}' in: ${rules}`);
+  }
+});
+
+Deno.test("task-3: above 8 hours needs the text to say so, and a vague title answers the middle", () => {
+  const rules = systemTemplate("task");
+  assert(rules.includes("above 8 only when the title or body clearly says"), `missing the ceiling rule in: ${rules}`);
+  assert(rules.includes("answer the middle of its likely type's range"), `missing the vague-title rule in: ${rules}`);
+  assert(rules.includes("never a large number"), `missing the never-large rule in: ${rules}`);
+  assert(rules.includes("a 5-point item is small"), `missing the points rule in: ${rules}`);
+});
+
+Deno.test("task-3: the vague-title rule never asks for a confidence under the 0.6 floor", () => {
+  // A task answer under CONFIDENCE_FLOOR is `below floor`: no verdict at all, and the note is
+  // re-asked every slot. The device already writes every model estimate as `effort_confidence:
+  // low`, so the prompt must not push an honest middle-of-range answer under the floor.
+  const rules = systemTemplate("task");
+  assert(!/confidence (at or )?below/i.test(rules), `the task rules must not ask for a sub-floor confidence: ${rules}`);
+  assert(rules.includes("- confidence: 0 to 1, how sure you are of effort_hours and importance."), rules);
+});
+
+Deno.test("task-3: the clamp, the slice placeholder and the schema are unchanged", () => {
+  const rules = systemTemplate("task");
+  assert(rules.includes("0.25 to 40."), `the 0.25-40 bound left the effort rule: ${rules}`);
+  assertEquals(rules.split("{slice_hours}").length - 1, 1, "exactly one {slice_hours} placeholder");
+  const rendered = buildPrompt("task", { title: "Homework 4" }, { slice_hours: 2 }).system;
+  assert(rendered.includes("is 2 hours."), `the slice did not render: ${rendered}`);
+  assert(!rendered.includes("{slice_hours}"), "the placeholder survived rendering");
+  assertEquals(schemaFor("task"), {
+    type: "object",
+    properties: {
+      course: { type: ["string", "null"] },
+      effort_hours: { type: "number" },
+      importance: { type: "integer", enum: [1, 2, 3, 4, 5] },
+      importance_reason: { type: "string" },
+      confidence: { type: "number" },
+    },
+    required: ["course", "effort_hours", "importance", "importance_reason", "confidence"],
+    additionalProperties: false,
+  });
+});
+
+Deno.test("task-3: the task hash moved off task-2 and is pinned", async () => {
+  assert((await promptHash("task")) !== TASK_2_HASH, "the task prompt hash did not change");
+  // task-3 as shipped, `<stamp>_task_effort_anchors.sql`. Any edit to the task template or schema
+  // moves this and must come with a new prompt_version in a migration.
+  assertEquals(await promptHash("task"), "fee0d9a3cdee3a40fcd39d6b4146af0087ddd6d88c9c0d67bc6edcfa39d949ab");
 });

@@ -5,8 +5,9 @@ the only place enough of them existed was an archived vault — but on 2026-09-1
 declined: nothing is ever read from an archive to seed this suite. So `cloud/eval/` shipped with the
 schema, the scrub rules and the loader that would check every case against them, and no cases at
 all — until T2 (stream J, 2026-09-22), which hand-wrote `events.jsonl` below: the first cases this
-suite has ever scored. `tasks.jsonl` and `email.jsonl` still carry no cases and fill the same way the
-rest of this file describes: one account at a time, and only with that account's consent. A later
+suite has ever scored. `tasks.jsonl` followed with task-3 (effort anchors, 2026-10-23; see below).
+`email.jsonl` still carries no cases, and real cases of every kind fill the way the rest of this file
+describes: one account at a time, and only with that account's consent. A later
 stream adds the opt-in — a student reviewing one of their own corrections and choosing to let it
 become an eval case — and that correction already carries the shape below, because it is the same
 `request` the device sent when it was first judged.
@@ -29,6 +30,18 @@ and score today; `cloud/eval/score.ts`'s `COST` table is this directory's own en
 verdicts, and it prices `unsure` transitions by the same default-1 fallback every unnamed transition
 gets — ratifying named costs for `unsure` (like the rest of the cost-matrix proposal,
 `docs/notes/2026-09-22-cost-matrices.md`) is separate, unruled work this task does not do.
+
+## The task cases (task-3)
+
+`tasks.jsonl` is twenty-two hand-written cases, invented, not sampled: no real student, course, item or
+institution. Each is shaped like the item that showed task-2's defect (a median of 8 hours on ordinary
+coursework): a learning-management feed item with a title, a course slug and a due date and no body,
+since a seed item may never carry one. Each labels `effort_hours` at the middle of the range the task
+template's anchors give its type, `course` as the slug the rules say to echo, and `importance: 3` only
+where no grade weights are given (the rule's own answer). The labels come from the same anchors the
+prompt states, so the cases measure rule-following, not the real distribution of coursework. Like the
+event cases, a score here can rule a prompt or a model out, not in. `seed_tasks_test.ts` checks their
+shape, scrub and coverage.
 
 ## The record shape
 

@@ -1905,8 +1905,8 @@ Deno.test("mail_addresses_gains_last_lapsed_at_backfilled_from_lapsed_since_and_
   // Stamped after every file before it; a later migration is named here when it lands.
   // A later lane's file is named by its suffix, never its stamp (stamp rule M4); L8's testers file
   // is left out by its suffix (friends-testers §8.4, M4), so its restamp moves no line here; so is
-  // its S6 follow-up, <stamp>_comp_guards.sql.
-  const LATER_LANES = /^\d{14}_(?:testers|comp_guards)\.sql$/;
+  // its S6 follow-up, <stamp>_comp_guards.sql, and the task-3 re-pin, <stamp>_task_effort_anchors.sql.
+  const LATER_LANES = /^\d{14}_(?:testers|comp_guards|task_effort_anchors)\.sql$/;
   assertEquals(
     files.map(([n]) => n).filter((n) => n > MAIL_LAST_LAPSED_AT && !LATER_LANES.test(n))
       .map((n) => EVENT_ALLOWANCE.test(n) ? "<stamp>_event_allowance.sql" : n),
@@ -3256,10 +3256,12 @@ Deno.test("the_follow_ups_migration_is_found_by_suffix_and_stamped_after_every_o
   const { name } = await followUpsMigration();
   // Forward-only (M2, M6): a new file after every applied one. A later migration is named here when it lands,
   // by its suffix, never its stamp (M4): L8's testers file, restamped after this one (C1, 2026-10-20),
-  // and its S6 follow-up after that.
+  // its S6 follow-up after that, and the task-3 re-pin (effort anchors, 2026-10-23) after both.
   assertEquals(
-    names.filter((n) => n > name).map((n) => n.replace(/^\d{14}_(testers|comp_guards)\.sql$/, "<stamp>_$1.sql")),
-    ["<stamp>_testers.sql", "<stamp>_comp_guards.sql"],
+    names.filter((n) => n > name).map((n) =>
+      n.replace(/^\d{14}_(testers|comp_guards|task_effort_anchors)\.sql$/, "<stamp>_$1.sql")
+    ),
+    ["<stamp>_testers.sql", "<stamp>_comp_guards.sql", "<stamp>_task_effort_anchors.sql"],
     `${name}: stamped after every other file but the named later ones`,
   );
   for (const applied of [MAIL_LAST_LAPSED_AT, MAIL_MAX_TOKENS_REPIN]) {
@@ -3428,7 +3430,12 @@ Deno.test("S6 follow-up: the guards file is found by suffix and stamped after ev
   const { name } = await compGuardsMigration();
   const { name: testers } = await testersMigration();
   const names = (await everyMigrationFile()).map(([n]) => n);
-  assertEquals(names.at(-1), name, `${name}: stamped after every other file; a later migration is named here when it lands`);
+  // A later migration is named here when it lands, by its suffix: the task-3 re-pin (2026-10-23).
+  assertEquals(
+    names.filter((n) => n > name).map((n) => n.replace(/^\d{14}_(task_effort_anchors)\.sql$/, "<stamp>_$1.sql")),
+    ["<stamp>_task_effort_anchors.sql"],
+    `${name}: stamped after every other file but the named later ones`,
+  );
   assert(name > testers, `${name}: after ${testers}, which stays as applied`);
 });
 
@@ -3529,4 +3536,45 @@ Deno.test("S6 follow-up: the testers proof makes a past-dated grant at a future 
     "the grant at a future date",
   );
   assert(code.includes("update public.comp_grants set ends_at = pg_temp.days(x -> 'endsin') where account_id = v_id and ended_at is null;"), "then backdated");
+});
+
+// ---------------------------------------------------------------------------------------------
+// task-3 (effort anchors, 2026-10-23). The task system prompt gains effort anchors
+// (`judge_prompts.ts`'s `systemTemplate("task")`); its hash moves, so the task row's
+// `prompt_version` moves with it, in one forward-only file found by its suffix (M4). The schema
+// does not change, so `grammar_version` stays; the model, provider, route, price, sampling and
+// max_tokens stay. Event, email and the mail kinds are not touched.
+// ---------------------------------------------------------------------------------------------
+
+const TASK_EFFORT_ANCHORS = /^\d{14}_task_effort_anchors\.sql$/;
+
+async function taskEffortAnchorsMigration(): Promise<{ name: string; raw: string }> {
+  const files = (await everyMigrationFile()).filter(([n]) => TASK_EFFORT_ANCHORS.test(n));
+  assertEquals(files.length, 1, "exactly one <stamp>_task_effort_anchors.sql");
+  return { name: files[0][0], raw: files[0][1] };
+}
+
+Deno.test("task-3: the effort-anchors file is found by suffix and stamped after every other file", async () => {
+  const { name } = await taskEffortAnchorsMigration();
+  const names = (await everyMigrationFile()).map(([n]) => n);
+  assertEquals(names.at(-1), name, `${name}: stamped after every other file; a later migration is named here when it lands`);
+});
+
+Deno.test("task-3: the effort-anchors file re-pins only the task row's prompt_version", async () => {
+  const { name, raw } = await taskEffortAnchorsMigration();
+  const code = stripLineComments(raw);
+  const updates = [...code.matchAll(/update\s+(?:public\.)?models\s+set\s+([^;]*);/gi)].map((m) => m[1]);
+  assertEquals(updates.length, 1, `${name}: exactly one update of models`);
+  const set = updates[0].replace(/\s+/g, " ").trim();
+  assertEquals(set, "prompt_version = 'task-3', since = current_date where kind = 'task'", `${name}: ${set}`);
+  // Nothing else in the file: no other statement, so no other row, table or function moves.
+  const statements = code.split(";").map((s) => s.trim()).filter((s) => s !== "");
+  assertEquals(statements.length, 1, `${name}: one statement only`);
+});
+
+Deno.test("task-3: across every migration, the task row's last prompt_version is task-3 and the others are unmoved", async () => {
+  const blocks = lastModelPinBlocks(await everyMigrationFile());
+  assert(blocks.task?.includes("prompt_version = 'task-3'"), `task: ${blocks.task}`);
+  assert(blocks.event?.includes("prompt_version = 'event-3'"), `event: ${blocks.event}`);
+  assert(blocks.email?.includes("prompt_version = 'email-3'"), `email: ${blocks.email}`);
 });

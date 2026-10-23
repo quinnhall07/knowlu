@@ -1,0 +1,18 @@
+-- Knowlu — task-3: effort anchors for the task judge (2026-10-23).
+--
+-- task-2's task prompt said only "the realistic time in hours to finish this one assignment, 0.25
+-- to 40": no scale. Items judged from a title, a course slug and a due date (a Blackboard feed item
+-- carries little else) came back at a median of 8 hours. `judge_prompts.ts`'s
+-- `systemTemplate("task")` now anchors effort by assignment type for a typical undergraduate,
+-- allows more than 8 hours only when the text says a large project or a long paper, answers the
+-- middle of the likely type's range for a vague title, and scales with points or a grade weight
+-- when given. The prompt hash moves, so the task row's `prompt_version` moves with it, off `task-2`
+-- (`20260916000100_provider_swap.sql`) onto `task-3`.
+--
+-- The JSON schema does not change, so `grammar_version` stays. The model, provider, route, price,
+-- sampling and max_tokens stay: this is a prompt change, not a model change. Event, email and the
+-- mail kinds are not touched.
+--
+-- Forward-only, stamped after every existing file. Not applied by the task that wrote it: the
+-- controller runs `supabase db push` on staging; production is the owner's.
+update models set prompt_version = 'task-3', since = current_date where kind = 'task';
