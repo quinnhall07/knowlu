@@ -398,7 +398,7 @@
 
   // Plan 4a Task 8: the offer. Rendered only when the engine says there is one — the mid-run
   // gate is `updates::update_offer` in Rust, never a check here (R9).
-  function renderUpdateOffer(u) {
+  function renderUpdateOffer(u, quiet) {
     var el = EL("upd");
     current.version = u.version;
     // M8: version, last check, staged-or-not, error — and no release track is named, because
@@ -406,7 +406,7 @@
     // `u.held` is a bundle the RUN is holding back (R-P4a-24): downloaded, verified, and
     // deliberately not offered until the slot ends. Saying "up to date" there would be a lie about
     // a file already sitting on this machine — so it gets its own words, and the offer stays away.
-    var when = u.last_check ? ", checked " + u.last_check.slice(0, 16).replace("T", " ") : "";
+    var when = localHM(u.last_check) ? ", checked " + localHM(u.last_check) : "";
     var what = u.staged ? " — " + u.staged + " ready"
       : u.held ? " — " + u.held + " staged; installs after the run"
       : u.last_error ? " — " + u.last_error.split("\n")[0]
@@ -416,6 +416,12 @@
     // which is a true statement about the CHECK and says nothing about the install that failed.
     var act = u.action_error ? " · last action: " + u.action_error.split("\n")[0] : "";
     current.updateText = "version " + u.version + what + when + act;
+    // Mid-install the banner belongs to `installUpdate` ("installing…" or its failure); a check that
+    // lands now must not put a fresh, pressable button over it.
+    // A quiet (automatic) check also leaves a banner that is showing an install message alone: the
+    // slot-running wait, a failure, "restart Knowlu" — hiding it would lose the offer until a restart.
+    if (UPD.installing || (quiet && UPD.note)) { return; }
+    UPD.note = false;
     if (u.staged) {
       el.innerHTML = '<span class="amber">Knowlu ' + h(u.staged) + ' is ready.</span> <button class="b pri y" type="button" data-install>Restart to update</button>';
       el.hidden = false;
@@ -427,8 +433,93 @@
       el.hidden = true;
     }
   }
-  function checkForUpdates() {
-    return invoke("check_for_updates", {}).then(function (u) { renderUpdateOffer(u); if (!EL("settings").hidden) { EL("set-update-state").textContent = current.updateText; } }).catch(function () {});
+  // The updater's page-side state: an install is in flight (`installing`), was ever pressed
+  // (`attempted`, which ends the automatic retries), the banner shows an install message (`note`),
+  // and how many times a check that lost the single flight has asked again, on one shared `timer`.
+  var UPD = { installing: false, attempted: false, note: false, retries: 0, timer: null };
+  var ALREADY_CHECKING = "a check is already running";
+  /// A local HH:MM from an ISO stamp (the engine and the updater write UTC, `...Z`); "" if unparseable.
+  function localHM(iso) {
+    var d = new Date(iso);
+    if (!iso || isNaN(d.getTime())) { return ""; }
+    return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+  }
+  /// A calm toast: what happened, when nothing went wrong. Errors keep `showRefusal`.
+  function showNote(message) {
+    var n = document.createElement("div"); n.className = "notetoast"; n.textContent = message;
+    document.body.appendChild(n);
+    setTimeout(function () { n.remove(); }, 6000);
+  }
+  function reasonOf(err) { return String((err && err.message) || err || "unknown").split("\n")[0]; }
+  function setUpdateState(text) { var el = EL("set-update-state"); if (el) { el.textContent = text; } }
+  /// The Updates row's line for one finished check — every outcome says something. Never a decision:
+  /// `u` is the command's own answer (`staged` is already gated on a running slot in Rust).
+  function updateOutcome(u, retrying) {
+    if (u.error) { return u.error === ALREADY_CHECKING ? (retrying ? "a check is already running — the result will show here" : "a check is already running — try again shortly") : "could not check — " + String(u.error).split("\n")[0]; }
+    if (u.staged) { return u.staged + " is available"; }
+    if (u.held) { return u.held + " is staged; installs after the run"; }
+    return "up to date (checked " + (localHM(u.last_check) || localHM(new Date().toISOString())) + ")";
+  }
+  /// `manual` is the Updates row's button: it says "checking…" and then the outcome. The quiet form
+  /// (launch, and the retry below) only fills the row if the panel is open. Either way a staged
+  /// update raises the same banner (`renderUpdateOffer`). The startup check and the housekeeping
+  /// thread share one flight, and the loser used to say nothing and never ask again — the banner then
+  /// waited for a restart — so it asks again in 10 s, up to six times, on ONE timer. Every check
+  /// clears the server's action error (`check_for_updates`), which background work must not do to an
+  /// install's outcome: so no retry once an install was pressed or while the banner shows a message.
+  function checkForUpdates(manual) {
+    var btn = EL("set-update-check");
+    clearTimeout(UPD.timer);
+    if (manual === true) { UPD.retries = 0; btn.disabled = true; setUpdateState("checking…"); }
+    return invoke("check_for_updates", {}).then(function (u) {
+      renderUpdateOffer(u, manual !== true);
+      // Whether a retry will follow decides what the row may promise: after an install attempt none does.
+      var retry = u.error === ALREADY_CHECKING && UPD.retries < 6 && !UPD.attempted && !UPD.note;
+      if (manual === true) { setUpdateState(updateOutcome(u, retry)); }
+      else if (!EL("settings").hidden) { setUpdateState(current.updateText); }
+      if (retry) {
+        UPD.retries++;
+        clearTimeout(UPD.timer);
+        UPD.timer = setTimeout(function () { if (!UPD.attempted && !UPD.note && !UPD.installing) { checkForUpdates(); } }, 10000);
+      }
+    }).catch(function (err) {
+      if (manual === true) { setUpdateState("could not check — " + reasonOf(err)); }
+    }).then(function () { if (manual === true) { btn.disabled = false; } });
+  }
+  /// *Restart to update*: disabled and "installing…" on the first press. A slot running (it often is,
+  /// just after launch) is not a failure: the banner says it is waiting for the current sync to finish
+  /// and the install is retried every 5 s for up to 5 minutes. Any other refusal stays ON the banner
+  /// with a way to try again, not only in a six-second toast. On Windows a good install exits the
+  /// process; where it does not, the banner says to restart.
+  function installUpdate(btn) {
+    if (UPD.installing) { return; }
+    var el = EL("upd"), waits = 0;
+    function say(html) { el.innerHTML = html; el.hidden = false; UPD.note = true; }
+    function fail(msg) {
+      UPD.installing = false;
+      say('<span class="amber">update failed — ' + h(msg) + '</span> <button class="b pri y" type="button" data-install>Try again</button>');
+      showRefusal(null, "update failed — " + msg);
+    }
+    function attempt() {
+      invoke("install_update", {}).then(function (r) {
+        if (r.ok) {
+          setTimeout(function () { UPD.installing = false; say('<span class="amber">restart Knowlu to finish the update</span>'); }, 15000);
+          return;
+        }
+        var msg = reasonOf(r.error || "refused");
+        if (msg.indexOf("a slot is running") === 0 && waits < 60) {
+          if (waits === 0) { say('<span class="amber">waiting for the current sync to finish — Knowlu will install the update when it ends</span>'); }
+          waits++;
+          setTimeout(attempt, 5000);
+          return;
+        }
+        fail(msg);
+      }).catch(function (err) { fail(reasonOf(err)); });
+    }
+    UPD.attempted = true; UPD.installing = true; UPD.note = false;
+    clearTimeout(UPD.timer);
+    btn.disabled = true; btn.textContent = "installing…";
+    attempt();
   }
 
   // Task 15: the topline's sync/backup/scheduler line, never computed here. Every source object
@@ -460,6 +551,33 @@
   }
   /// *Sync now*'s refusal says what the sync line says, never the engine's raw word.
   function syncRefusal(err) { showRefusal(null, syncSays(err, "amber")[1]); }
+  // *Sync now* can take ~30 s and a poll repaint rebuilds the button while it runs, so "busy" is a flag
+  // `renderSyncLine` reads as well as a state the button is put into.
+  var syncing = false;
+  function setSyncBusy(on) {
+    syncing = on;
+    Array.prototype.forEach.call(document.querySelectorAll("[data-sync]"), function (b) {
+      b.disabled = on || RECONSENT_OWED; b.textContent = on ? "syncing…" : "sync now";
+    });
+  }
+  /// Every outcome says something: the time on a clean sync, the sync line's own words on a skip, the
+  /// refusal on an error, and a rejected call its reason — never an empty catch.
+  function runSync() {
+    if (syncing) { return; }
+    setSyncBusy(true);
+    return invoke("sync", { view: stateView() }).then(function (env) {
+      setSyncBusy(false);
+      var ok = applyEnvelope(env, syncRefusal);
+      ev("sync_run", null, null, null);
+      if (!ok) { return; }
+      var s = (env.state && env.state.topline && env.state.topline.sync) || {};
+      if (s.skipped) { showNote(syncSays(s.skipped, "calm", "sync skipped — ")[1]); }
+      else { showNote("synced " + (localHM(s.at) || localHM(new Date().toISOString()))); }
+    }).catch(function (err) {
+      setSyncBusy(false);
+      showRefusal(null, "sync could not start — " + reasonOf(err));
+    });
+  }
   // C3', Task 10 (fix round 1, review I1): `t.sync` is the engine's own `SyncStatus` (state.rs
   // fills it from `sync::run_lines_with`), never a git-shaped status any more. `SyncStatus::of`
   // stamps `at` on every run, skipped ones included, so `s.skipped` MUST be read before `s.at` —
@@ -475,6 +593,8 @@
     }
     else if (s.at) { bits.push('<span class="calm">in step with your account</span>'); }
     else { bits.push('<span class="calm">not synced yet</span>'); }
+    // `at` is stamped on every run, so a skip or an error says "tried", never "synced".
+    if (s.at && localHM(s.at)) { bits.push('<span class="calm">' + (s.last_error || s.skipped ? "tried " : "synced ") + localHM(s.at) + "</span>"); }
     if (b.last_error) { bits.push('<span class="amber">backup: ' + h(b.last_error.split("\n")[0]) + "</span>"); }
     else if (b.behind_days != null && b.behind_days >= 1) { bits.push('<span class="amber">backup ' + b.behind_days + " day" + (b.behind_days === 1 ? "" : "s") + " behind</span>"); }
     else if (b.last_ok) { bits.push('<span class="calm">backed up</span>'); }
@@ -493,7 +613,7 @@
       bits.push('<span class="' + (t.last_slot.ok && !why ? "calm" : "amber") + '">' + h(body) + "</span>");
     }
     if (t.scheduler && t.scheduler.mode === "app") { bits.push('<span class="' + (t.scheduler.paused ? "amber" : "calm") + '">scheduler ' + (t.scheduler.paused ? "paused" : "on") + "</span>"); }
-    EL("syncline").innerHTML = bits.join(" · ") + ' <button class="b" type="button" data-sync' + owedAttrs() + '>sync now</button> <button class="b" type="button" data-backup>back up now</button>';
+    EL("syncline").innerHTML = bits.join(" · ") + ' <button class="b" type="button" data-sync' + owedAttrs() + (syncing ? " disabled" : "") + '>' + (syncing ? "syncing…" : "sync now") + '</button> <button class="b" type="button" data-backup>back up now</button>';
   }
 
   // Task 15: the Runs nav entry, made real — every expected slot, every run in the last 48h
@@ -1784,13 +1904,14 @@
     var closeBtn = e.target.closest("[data-close-info]"); if (closeBtn) { closeInfoItem(closeBtn.getAttribute("data-close-info")); return; }
     // Task 15: manual sync/backup from the topline — both return the fresh state like every
     // other mutating command (spec's envelope shape), so applyEnvelope repaints it the same way.
-    var syncBtn = e.target.closest("[data-sync]"); if (syncBtn) { invoke("sync", { view: stateView() }).then(function (env) { applyEnvelope(env, syncRefusal); ev("sync_run", null, null, null); }).catch(function () {}); return; }
+    var syncBtn = e.target.closest("[data-sync]"); if (syncBtn) { runSync(); return; }
     var backupBtn = e.target.closest("[data-backup]"); if (backupBtn) { invoke("backup_now", { view: stateView() }).then(applyEnvelope).catch(function () {}); return; }
     var gear = e.target.closest("[data-settings]"); if (gear) { openSettings(); return; }
-    // Plan 4a Task 8: *Restart to update*. A refusal (a slot started between the offer and the
-    // click, or the install failed) comes back in the envelope and is shown, never retried.
+    // Plan 4a Task 8: *Restart to update*. A slot that started between the offer and the click is
+    // waited out and the install retried; any other refusal comes back in the envelope and is shown
+    // on the banner with Try again (`installUpdate`).
     var ins = e.target.closest("[data-install]");
-    if (ins) { ins.disabled = true; invoke("install_update", {}).then(function (r) { if (!r.ok) { ins.disabled = false; showRefusal(null, r.error); } }).catch(function () { ins.disabled = false; }); return; }
+    if (ins) { installUpdate(ins); return; }
     // A click on [data-field] edits in place and never opens the drawer or toggles "why" — this
     // has to run before the .row/.b handling below, since the editable chips live inside .b.
     var fld = e.target.closest("[data-field]");
@@ -2521,7 +2642,7 @@
     }
     // Plan 4a Task 8: the Updates row's button. `checkForUpdates` repaints this row itself while
     // the panel is open, so there is one place that formats the update line and not two.
-    if (e.target.closest("#set-update-check")) { checkForUpdates(); return; }
+    if (e.target.closest("#set-update-check")) { checkForUpdates(true); return; }
   });
   EL("set-autostart-in").addEventListener("change", function () {
     invoke("set_settings", { patch: { autostart: EL("set-autostart-in").checked } })
