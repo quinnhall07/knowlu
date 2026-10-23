@@ -475,7 +475,7 @@ pub fn record_seen(vault: &Path, uid: &str, title: &str, date_str: &str) -> std:
 /// **The absence of `today.md`, and deliberately not the absence of `state/ingest-seen.md`**
 /// (ruling R-C2-9). That ledger is not `ingest`'s alone: `coursework` imports
 /// `crate::ingest::record_seen` (`coursework.rs:19`) and calls it at `:310` and `:415`, and the
-/// slot order is `coursework → ingest → judge → rank`. So on a genuinely fresh vault the
+/// slot order is `sync → coursework → grades → ingest → judge → rank`. So on a genuinely fresh vault the
 /// seen-ledger already exists by the time `ingest` looks at it, and a flag derived from it is
 /// `false` on exactly the run R-OB-3 was written for. `today.md` is written by `rank`, the LAST
 /// step of the slot, so the first `ingest` always sees it absent and every later one sees it
@@ -539,21 +539,132 @@ pub const IMPORTED_PAST: &str = "imported-past";
 /// Beside [`IMPORTED_PAST`]; precedence: a past item is `imported-past`, never this.
 pub const IMPORTED_DONE: &str = "imported-done";
 
-/// O1 T2b stub (an empty template); T5 replaces it with [`IMPORTED_PAST_TEMPLATE`] carrying
-/// `archived_reason: imported-done` instead.
-pub const IMPORTED_DONE_TEMPLATE: &str = "";
+/// [`IMPORTED_PAST_TEMPLATE`] with `archived_reason: imported-done` ([`IMPORTED_DONE`]) where the
+/// past template says `imported-past`: a second template, for the reason the past one gives.
+pub const IMPORTED_DONE_TEMPLATE: &str = r#"---
+title: {title}
+course: {course}
+domain: school
+due: {due}
+effort_hours: 1.0
+effort_confidence: low
+effort_source: inferred
+importance: 3
+importance_reason: "pending enrichment"
+status: archived
+archived_reason: imported-done
+progress: 0
+created_by: blackboard
+source_uid: {uid}
+needs_enrichment: false
+---
 
-/// O1 T2b stub; T5 replaces the body. The gradebook column id inside a feed task's UID: the suffix
-/// after exactly `_blackboard.platform.gradebook2.GradableItem-`, non-empty, else `None`.
-pub fn gradable_id(_uid: &str) -> Option<&str> {
-    todo!("O1 T5")
+{body}
+"#;
+
+/// The prefix of a Blackboard feed task's UID that names a gradebook column; the rest is the
+/// column id the grade note keeps as `source_uid` (`_4686399_1`).
+const GRADABLE_PREFIX: &str = "_blackboard.platform.gradebook2.GradableItem-";
+
+/// The gradebook column id inside a feed task's UID: the suffix after exactly
+/// `_blackboard.platform.gradebook2.GradableItem-`, non-empty, else `None`. No other UID shape
+/// (a calendar entry, an assignment-style `BB-ASSIGN-...`) ever joins the gradebook.
+pub fn gradable_id(uid: &str) -> Option<&str> {
+    uid.strip_prefix(GRADABLE_PREFIX).filter(|id| !id.is_empty())
 }
 
-/// O1 T2b stub; T5 replaces the body. Whether a grade note's `status` and `score` say the work is
-/// turned in (plan section 3, Q-A): `needs-grading`, `exempt`, and `graded` with a score above 0.
-/// Everything else is live.
-pub fn gradebook_done(_status: &str, _score: Option<f64>) -> bool {
-    todo!("O1 T5")
+/// Whether a grade note's `status` and `score` say the work is turned in (plan §3, Q-A, spec §6.2):
+/// `needs-grading`, `exempt`, and `graded` with a score above 0. Everything else is live -- a graded
+/// zero, and a `graded` row with no score (every column type that yields one can hold a zero or a
+/// fail), included.
+pub fn gradebook_done(status: &str, score: Option<f64>) -> bool {
+    match status {
+        "needs-grading" | "exempt" => true,
+        "graded" => score.is_some_and(|s| s > 0.0),
+        _ => false,
+    }
+}
+
+/// What ingest reads of one Blackboard grade note: its `status` and `score`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradeRow {
+    pub status: String,
+    pub score: Option<f64>,
+}
+
+/// Blackboard grade items by column id (the note's `source_uid`), read from `grades/`.
+pub type GradeIndex = BTreeMap<String, GradeRow>;
+
+/// A read-only index of `grades/`: per `kind: item` note with `source: blackboard`, its column id,
+/// `status` and `score` -- the fields `grades::desired` writes. Built once per run, in path order
+/// (the first note for a column id wins); a note that does not parse is skipped. No `grades/`
+/// folder is an empty index, which is today's behaviour exactly.
+///
+/// **This reads `grades/` without a lock, and that is safe only because slot steps run in
+/// sequence**: the slot is `sync → coursework → grades → ingest → judge → rank`, `grades` is the
+/// only writer of `grades/`, and `ingest` takes no `RunLock`. A caller that ran `grades` beside
+/// `ingest` would read a half-applied capture.
+pub fn grade_index(vault: &Path) -> GradeIndex {
+    let mut index = GradeIndex::new();
+    for path in crate::approvals::sorted_md(&vault.join("grades")) {
+        let Some(meta) = crate::ids::read_meta(&path) else { continue };
+        let text = |key: &str| crate::yaml::get(&meta, key).and_then(crate::yaml::text).filter(|t| !t.is_empty());
+        if text("kind").as_deref().unwrap_or("item") != "item"
+            || text("source").as_deref() != Some(crate::grades::SOURCE)
+        {
+            continue;
+        }
+        let (Some(id), Some(status)) = (text("source_uid"), text("status")) else { continue };
+        let score = crate::yaml::get(&meta, "score").and_then(crate::yaml::f64_of);
+        index.entry(id).or_insert(GradeRow { status, score });
+    }
+    index
+}
+
+/// The grade row for a feed task's UID, with its column id, if it joins the gradebook and the row
+/// says turned in.
+fn done_grade<'a>(grades: &'a GradeIndex, uid: &str) -> Option<(&'a str, &'a GradeRow)> {
+    let id = gradable_id(uid)?;
+    let (column, row) = grades.get_key_value(id)?;
+    gradebook_done(&row.status, row.score).then_some((column.as_str(), row))
+}
+
+/// Every ingest, after the sync: each feed event, **in feed order**, whose note is an active task
+/// joined to a turned-in grade row is marked done by [`crate::completion::apply_done`] (which also
+/// skips a task the student set by hand, or one with a pending or rejected "Mark done" card).
+/// Evidence is `{source: "blackboard-gradebook", status, column}`. One line per task marked:
+/// `marked done: <stem> (gradebook)`. An event that left the feed is not visited.
+fn mark_gradebook_done(
+    events: &[Event],
+    vault: &Path,
+    grades: &GradeIndex,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Vec<String> {
+    let mut log = Vec::new();
+    if grades.is_empty() {
+        return log;
+    }
+    let known = existing_by_uid(vault);
+    for event in events {
+        let Some((column, row)) = done_grade(grades, &event.uid) else { continue };
+        let Some(path) = known.get(&event.uid) else { continue };
+        let mut detail = serde_json::Map::new();
+        detail.insert("status".to_string(), serde_json::Value::String(row.status.clone()));
+        detail.insert("column".to_string(), serde_json::Value::String(column.to_string()));
+        let evidence = crate::completion::Evidence {
+            source: "blackboard-gradebook".to_string(),
+            summary: "Blackboard's gradebook shows this submitted".to_string(),
+            detail,
+        };
+        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        match crate::completion::apply_done(vault, path, &evidence, ctx, journal, false) {
+            Ok(crate::completion::Applied::Marked) => log.push(format!("marked done: {stem} (gradebook)")),
+            Ok(_) => {}
+            Err(err) => log.push(format!("skipped (unwritable): {err}")),
+        }
+    }
+    log
 }
 
 /// The archived twin of `NOTE_TEMPLATE`. Identical but for the two lines that say why it is here —
@@ -643,6 +754,23 @@ pub fn sync_tasks(
     // `run_lines` computes it; every caller in the tests passes `false`, which is the behaviour
     // they were written against.
     first_run: bool,
+) -> Vec<String> {
+    sync_tasks_with_grades(events, vault, course_map, ctx, journal, today, first_run, &GradeIndex::new())
+}
+
+/// [`sync_tasks`] plus the gradebook index (O1, spec §6.2): on a first ingest, an item that is not
+/// past but joins a turned-in grade row ([`done_grade`]) goes straight to `archive/` as
+/// `imported-done`, by the same rule as `imported-past` and below it in precedence.
+#[allow(clippy::too_many_arguments)]
+pub fn sync_tasks_with_grades(
+    events: &[Event],
+    vault: &Path,
+    course_map: &[(String, String)],
+    ctx: Option<&crate::write::WriteContext>,
+    journal: &mut crate::journal::Journal,
+    today: Option<Date>,
+    first_run: bool,
+    grades: &GradeIndex,
 ) -> Vec<String> {
     let default_ctx = crate::write::WriteContext::new("agent:ingest.blackboard", "cli");
     let ctx = ctx.unwrap_or(&default_ctx);
@@ -769,7 +897,15 @@ pub fn sync_tasks(
                 Due::Date(d) => d < stamp_date,
                 Due::DateTime(dt) => dt.date() < stamp_date,
             };
-        if past_due {
+        // O1: turned in, per the gradebook -- on a first ingest only, and only when not already past.
+        let import = if past_due {
+            Some((IMPORTED_PAST_TEMPLATE, IMPORTED_PAST))
+        } else if first_run && done_grade(grades, &event.uid).is_some() {
+            Some((IMPORTED_DONE_TEMPLATE, IMPORTED_DONE))
+        } else {
+            None
+        };
+        if let Some((template, reason)) = import {
             let slug = format!("{}-{}", course.clone().unwrap_or_else(|| "task".into()), slugify(&event.title));
             let archive_dir = vault.join("archive");
             let _ = std::fs::create_dir_all(&archive_dir);
@@ -779,7 +915,7 @@ pub fn sync_tasks(
                 path = archive_dir.join(format!("{slug}-{suffix}.md"));
                 suffix += 1;
             }
-            let body = IMPORTED_PAST_TEMPLATE
+            let body = template
                 .replace("{title}", &json_dumps_unicode(&event.title))
                 .replace(
                     "{course}",
@@ -792,7 +928,7 @@ pub fn sync_tasks(
             match crate::write::create(vault, &rel_path, &body, ctx, journal, None) {
                 Ok(created) => {
                     let stem = created.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                    log.push(format!("archived (imported-past) {stem}"));
+                    log.push(format!("archived ({reason}) {stem}"));
                     known.insert(event.uid.clone(), created);
                     let _ = record_seen(vault, &event.uid, &event.title, &stamp);
                 }
@@ -1119,10 +1255,19 @@ fn run_lines_on(
         .map(|m| m.iter().filter_map(|(k, v)| Some((k.as_str()?.to_string(), v.as_str()?.to_string()))).collect())
         .unwrap_or_default();
     let mut journal = crate::journal::Journal::new(vault);
-    let mut log = sync_tasks(&events, vault, &course_map, Some(&ctx), &mut journal, today, first_run);
+    // O1: the gradebook half. `grades/` is read lockless, which is safe only because slot steps are
+    // sequential (see `grade_index`).
+    let grades = grade_index(vault);
+    let mut log =
+        sync_tasks_with_grades(&events, vault, &course_map, Some(&ctx), &mut journal, today, first_run, &grades);
+    log.extend(mark_gradebook_done(&events, vault, &grades, &ctx, &mut journal));
     if first_run {
         log.push(format!("ingest: first run — {} item(s) already past were archived",
             log.iter().filter(|l| l.starts_with("archived (imported-past)")).count()));
+        let turned_in = log.iter().filter(|l| l.starts_with("archived (imported-done)")).count();
+        if turned_in > 0 {
+            log.push(format!("ingest: first run — {turned_in} item(s) already turned in were archived"));
+        }
     }
     if malformed > 0 { log.push(format!("skipped {malformed} malformed event(s)")); }
     let summary = format!("ingest: {} events, {} action(s)", events.len(), log.len());

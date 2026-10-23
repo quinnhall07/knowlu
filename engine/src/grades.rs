@@ -333,7 +333,7 @@ pub fn course_grade(notes: &[GradeNote]) -> Standing {
 pub const ACTOR: &str = "agent:knowlu.grades";
 /// Generated and device-local, rewritten on every run, never synced (spec §6).
 pub const STATE_FILE: &str = "state/grades.json";
-const SOURCE: &str = "blackboard";
+pub const SOURCE: &str = "blackboard";
 
 /// What one run did, in the only terms it may print: counts, course codes, note paths and error
 /// codes (spec §6, §11).
