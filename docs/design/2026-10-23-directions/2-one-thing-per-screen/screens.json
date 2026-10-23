@@ -1,0 +1,479 @@
+{
+  "direction": "2-one-thing-per-screen",
+  "built": "2026-10-23",
+  "pass": 3,
+  "viewport": "1280x800",
+  "note": "Every screen opens at index.html#<id>. Append ~dark or ~light to force a theme (index.html#T~dark). shots/ were taken in light; shots/dark/ holds the dark set for key screens. Press the backslash key or the Screens button for the state jumper and settings. Ids retired in pass 2 still route: A1-ok to S1, P3 to G1, G3 to H1-zybooks, H1-zybooks-ok to H1-vhl, E1 and E1-reading to S3 (their proof now sits at the top of the next screen).",
+  "count": 66,
+  "screens": [
+    {
+      "id": "W0",
+      "title": "Welcome",
+      "group": "Onboarding",
+      "url": "index.html#W0",
+      "shot": "shots/W0.png",
+      "shot_dark": "shots/dark/W0.png"
+    },
+    {
+      "id": "A1",
+      "title": "Your account",
+      "group": "Onboarding",
+      "url": "index.html#A1",
+      "shot": "shots/A1.png"
+    },
+    {
+      "id": "A1-code",
+      "title": "Your account: code",
+      "group": "Onboarding",
+      "url": "index.html#A1-code",
+      "shot": "shots/A1-code.png"
+    },
+    {
+      "id": "PV",
+      "title": "What your account holds",
+      "group": "Onboarding",
+      "url": "index.html#PV",
+      "shot": "shots/PV.png"
+    },
+    {
+      "id": "S1",
+      "title": "Your school",
+      "group": "School",
+      "url": "index.html#S1",
+      "shot": "shots/S1.png",
+      "shot_dark": "shots/dark/S1.png"
+    },
+    {
+      "id": "S1-separate",
+      "title": "Your school (separate sign-ins)",
+      "group": "School",
+      "url": "index.html#S1-separate",
+      "shot": "shots/S1-separate.png"
+    },
+    {
+      "id": "S2",
+      "title": "Signing in (school window open)",
+      "group": "School",
+      "url": "index.html#S2",
+      "shot": "shots/S2.png"
+    },
+    {
+      "id": "S2-duo",
+      "title": "Waiting for Duo",
+      "group": "School",
+      "url": "index.html#S2-duo",
+      "shot": "shots/S2-duo.png"
+    },
+    {
+      "id": "S2-closed",
+      "title": "Window closed early",
+      "group": "School",
+      "url": "index.html#S2-closed",
+      "shot": "shots/S2-closed.png"
+    },
+    {
+      "id": "S2-help",
+      "title": "Trouble signing in",
+      "group": "School",
+      "url": "index.html#S2-help",
+      "shot": "shots/S2-help.png"
+    },
+    {
+      "id": "S2-feed",
+      "title": "Calendar link fallback",
+      "group": "School",
+      "url": "index.html#S2-feed",
+      "shot": "shots/S2-feed.png"
+    },
+    {
+      "id": "S3",
+      "title": "Your school: proof",
+      "group": "School",
+      "url": "index.html#S3",
+      "shot": "shots/S3.png",
+      "shot_dark": "shots/dark/S3.png"
+    },
+    {
+      "id": "S3-feed",
+      "title": "School proof (link only)",
+      "group": "School",
+      "url": "index.html#S3-feed",
+      "shot": "shots/S3-feed.png"
+    },
+    {
+      "id": "S2-sep",
+      "title": "Separate school: grades sign-in",
+      "group": "School",
+      "url": "index.html#S2-sep",
+      "shot": "shots/S2-sep.png"
+    },
+    {
+      "id": "E1-own",
+      "title": "School email (own sign-in)",
+      "group": "School",
+      "url": "index.html#E1-own",
+      "shot": "shots/E1-own.png"
+    },
+    {
+      "id": "E1-done",
+      "title": "School email (own sign-in): proof",
+      "group": "School",
+      "url": "index.html#E1-done",
+      "shot": "shots/E1-done.png"
+    },
+    {
+      "id": "S2-expired",
+      "title": "Resume: school signed you out",
+      "group": "Resume",
+      "url": "index.html#S2-expired",
+      "shot": "shots/S2-expired.png"
+    },
+    {
+      "id": "P1",
+      "title": "Payment",
+      "group": "Payment",
+      "url": "index.html#P1",
+      "shot": "shots/P1.png",
+      "shot_dark": "shots/dark/P1.png"
+    },
+    {
+      "id": "P1-plans",
+      "title": "Payment: other plans",
+      "group": "Payment",
+      "url": "index.html#P1-plans",
+      "shot": "shots/P1-plans.png"
+    },
+    {
+      "id": "P1-feed",
+      "title": "Payment (link only)",
+      "group": "Payment",
+      "url": "index.html#P1-feed",
+      "shot": "shots/P1-feed.png"
+    },
+    {
+      "id": "P1-tester",
+      "title": "Payment (tester)",
+      "group": "Payment",
+      "url": "index.html#P1-tester",
+      "shot": "shots/P1-tester.png"
+    },
+    {
+      "id": "P2",
+      "title": "Checkout open",
+      "group": "Payment",
+      "url": "index.html#P2",
+      "shot": "shots/P2.png"
+    },
+    {
+      "id": "P2-stale",
+      "title": "Checkout not confirmed",
+      "group": "Payment",
+      "url": "index.html#P2-stale",
+      "shot": "shots/P2-stale.png"
+    },
+    {
+      "id": "G1",
+      "title": "Gmail and Calendar",
+      "group": "Google",
+      "url": "index.html#G1",
+      "shot": "shots/G1.png"
+    },
+    {
+      "id": "G1-fwd",
+      "title": "Gmail and Calendar (forwarding)",
+      "group": "Google",
+      "url": "index.html#G1-fwd",
+      "shot": "shots/G1-fwd.png"
+    },
+    {
+      "id": "G2",
+      "title": "Google window open",
+      "group": "Google",
+      "url": "index.html#G2",
+      "shot": "shots/G2.png"
+    },
+    {
+      "id": "G1-closed",
+      "title": "Google window closed",
+      "group": "Google",
+      "url": "index.html#G1-closed",
+      "shot": "shots/G1-closed.png"
+    },
+    {
+      "id": "G3-partial",
+      "title": "Google: calendar not shared",
+      "group": "Google",
+      "url": "index.html#G3-partial",
+      "shot": "shots/G3-partial.png"
+    },
+    {
+      "id": "G4",
+      "title": "Gmail by forwarding",
+      "group": "Google",
+      "url": "index.html#G4",
+      "shot": "shots/G4.png"
+    },
+    {
+      "id": "G4-done",
+      "title": "Gmail forwarding: proof",
+      "group": "Google",
+      "url": "index.html#G4-done",
+      "shot": "shots/G4-done.png"
+    },
+    {
+      "id": "G5",
+      "title": "Personal email that isn’t Gmail",
+      "group": "Google",
+      "url": "index.html#G5",
+      "shot": "shots/G5.png"
+    },
+    {
+      "id": "C1",
+      "title": "Another calendar",
+      "group": "Google",
+      "url": "index.html#C1",
+      "shot": "shots/C1.png"
+    },
+    {
+      "id": "H1-zybooks",
+      "title": "zyBooks",
+      "group": "Homework",
+      "url": "index.html#H1-zybooks",
+      "shot": "shots/H1-zybooks.png"
+    },
+    {
+      "id": "H1-zybooks-lti",
+      "title": "zyBooks through Blackboard",
+      "group": "Homework",
+      "url": "index.html#H1-zybooks-lti",
+      "shot": "shots/H1-zybooks-lti.png"
+    },
+    {
+      "id": "H1-vhl",
+      "title": "VHL",
+      "group": "Homework",
+      "url": "index.html#H1-vhl",
+      "shot": "shots/H1-vhl.png"
+    },
+    {
+      "id": "H1-vhl-fail",
+      "title": "VHL refused the sign-in",
+      "group": "Homework",
+      "url": "index.html#H1-vhl-fail",
+      "shot": "shots/H1-vhl-fail.png"
+    },
+    {
+      "id": "Y1-cs110",
+      "title": "CS 110’s syllabus",
+      "group": "Syllabi",
+      "url": "index.html#Y1-cs110",
+      "shot": "shots/Y1-cs110.png"
+    },
+    {
+      "id": "Y1-cs110-reading",
+      "title": "CS 110’s syllabus: reading",
+      "group": "Syllabi",
+      "url": "index.html#Y1-cs110-reading",
+      "shot": "shots/Y1-cs110-reading.png"
+    },
+    {
+      "id": "X1",
+      "title": "Finish later",
+      "group": "Leave and resume",
+      "url": "index.html#X1",
+      "shot": "shots/X1.png"
+    },
+    {
+      "id": "Q",
+      "title": "Resume (next launch)",
+      "group": "Leave and resume",
+      "url": "index.html#Q",
+      "shot": "shots/Q.png"
+    },
+    {
+      "id": "Q-restore",
+      "title": "Restore on a second computer",
+      "group": "Leave and resume",
+      "url": "index.html#Q-restore",
+      "shot": "shots/Q-restore.png"
+    },
+    {
+      "id": "Q-restore-ok",
+      "title": "Restore: done",
+      "group": "Leave and resume",
+      "url": "index.html#Q-restore-ok",
+      "shot": "shots/Q-restore-ok.png"
+    },
+    {
+      "id": "K",
+      "title": "Your week",
+      "group": "Your week",
+      "url": "index.html#K",
+      "shot": "shots/K.png"
+    },
+    {
+      "id": "R0",
+      "title": "Building your week",
+      "group": "Reveal",
+      "url": "index.html#R0",
+      "shot": "shots/R0.png"
+    },
+    {
+      "id": "R0-cap",
+      "title": "Building your week: 3-minute cap",
+      "group": "Reveal",
+      "url": "index.html#R0-cap",
+      "shot": "shots/R0-cap.png"
+    },
+    {
+      "id": "R1",
+      "title": "Here’s your week",
+      "group": "Reveal",
+      "url": "index.html#R1",
+      "shot": "shots/R1.png",
+      "shot_dark": "shots/dark/R1.png"
+    },
+    {
+      "id": "R1-late",
+      "title": "Reveal at 11 pm",
+      "group": "Reveal",
+      "url": "index.html#R1-late",
+      "shot": "shots/R1-late.png"
+    },
+    {
+      "id": "R1-cap",
+      "title": "Reveal after the 3-minute cap",
+      "group": "Reveal",
+      "url": "index.html#R1-cap",
+      "shot": "shots/R1-cap.png"
+    },
+    {
+      "id": "R1-skipped",
+      "title": "Reveal with skipped sources",
+      "group": "Reveal",
+      "url": "index.html#R1-skipped",
+      "shot": "shots/R1-skipped.png"
+    },
+    {
+      "id": "R2",
+      "title": "What Knowlu tidied",
+      "group": "Reveal",
+      "url": "index.html#R2",
+      "shot": "shots/R2.png"
+    },
+    {
+      "id": "R2-skipped",
+      "title": "What Knowlu tidied (skipped sources)",
+      "group": "Reveal",
+      "url": "index.html#R2-skipped",
+      "shot": "shots/R2-skipped.png"
+    },
+    {
+      "id": "T-week",
+      "title": "Week view",
+      "group": "Today",
+      "url": "index.html#T-week",
+      "shot": "shots/T-week.png"
+    },
+    {
+      "id": "T",
+      "title": "Today",
+      "group": "Today",
+      "url": "index.html#T",
+      "shot": "shots/T.png",
+      "shot_dark": "shots/dark/T.png"
+    },
+    {
+      "id": "T-task",
+      "title": "Today: a task opened",
+      "group": "Today",
+      "url": "index.html#T-task",
+      "shot": "shots/T-task.png"
+    },
+    {
+      "id": "T-undo",
+      "title": "Today: Undo on a Knowlu close",
+      "group": "Today",
+      "url": "index.html#T-undo",
+      "shot": "shots/T-undo.png"
+    },
+    {
+      "id": "T-grades",
+      "title": "Today: grade breakdown",
+      "group": "Today",
+      "url": "index.html#T-grades",
+      "shot": "shots/T-grades.png"
+    },
+    {
+      "id": "T-avoided",
+      "title": "Today: a task being avoided",
+      "group": "Today",
+      "url": "index.html#T-avoided",
+      "shot": "shots/T-avoided.png"
+    },
+    {
+      "id": "T-offline",
+      "title": "Today: offline",
+      "group": "Today",
+      "url": "index.html#T-offline",
+      "shot": "shots/T-offline.png"
+    },
+    {
+      "id": "T-broken",
+      "title": "Today: a source broken",
+      "group": "Today",
+      "url": "index.html#T-broken",
+      "shot": "shots/T-broken.png"
+    },
+    {
+      "id": "T-allclear",
+      "title": "Today: all clear",
+      "group": "Today",
+      "url": "index.html#T-allclear",
+      "shot": "shots/T-allclear.png"
+    },
+    {
+      "id": "T-empty",
+      "title": "Today: every empty state",
+      "group": "Today",
+      "url": "index.html#T-empty",
+      "shot": "shots/T-empty.png"
+    },
+    {
+      "id": "T-capture",
+      "title": "Today: add or ask",
+      "group": "Today",
+      "url": "index.html#T-capture",
+      "shot": "shots/T-capture.png"
+    },
+    {
+      "id": "T-late",
+      "title": "Late window closed",
+      "group": "Today",
+      "url": "index.html#T-late",
+      "shot": "shots/T-late.png",
+      "shot_dark": "shots/dark/T-late.png"
+    },
+    {
+      "id": "T0",
+      "title": "Today: first open of the morning (What changed unfolded)",
+      "group": "Today",
+      "url": "index.html#T0",
+      "shot": "shots/T0.png"
+    },
+    {
+      "id": "T0-q",
+      "title": "Today: Needs you",
+      "group": "Today",
+      "url": "index.html#T0-q",
+      "shot": "shots/T0-q.png"
+    },
+    {
+      "id": "T-focus",
+      "title": "Focus session",
+      "group": "Today",
+      "url": "index.html#T-focus",
+      "shot": "shots/T-focus.png"
+    }
+  ]
+}

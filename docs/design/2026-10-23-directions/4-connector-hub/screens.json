@@ -1,0 +1,462 @@
+{
+  "direction": "4-connector-hub",
+  "note": "Every screen is addressable as index.html#<id>. Add ?shot=1 to hide the Prototype button, &theme=dark for dark mode. Extra dark shots: shots/dark-M-TODAY.png, shots/dark-P-SCH-NEED.png, shots/dark-R-REV.png.",
+  "count": 65,
+  "screens": [
+    {
+      "id": "W",
+      "title": "Welcome: the board",
+      "group": "onboarding",
+      "url": "index.html#W",
+      "shot": "shots/W.png"
+    },
+    {
+      "id": "H",
+      "title": "The board after payment: the rest in any order",
+      "group": "onboarding",
+      "url": "index.html#H",
+      "shot": "shots/H.png"
+    },
+    {
+      "id": "H-RETURN",
+      "title": "Resume after quitting at payment",
+      "group": "onboarding",
+      "url": "index.html#H-RETURN",
+      "shot": "shots/H-RETURN.png"
+    },
+    {
+      "id": "H-RESTORED",
+      "title": "New computer, existing account",
+      "group": "onboarding",
+      "url": "index.html#H-RESTORED",
+      "shot": "shots/H-RESTORED.png"
+    },
+    {
+      "id": "P-LOCKED",
+      "title": "A tile that opens later (Gmail and Calendar, before payment)",
+      "group": "onboarding",
+      "url": "index.html#P-LOCKED",
+      "shot": "shots/P-LOCKED.png"
+    },
+    {
+      "id": "S-ACC",
+      "title": "Account (18+ and terms)",
+      "group": "onboarding",
+      "url": "index.html#S-ACC",
+      "shot": "shots/S-ACC.png"
+    },
+    {
+      "id": "P-ACC-BROWSER",
+      "title": "Account: finish in the browser",
+      "group": "onboarding",
+      "url": "index.html#P-ACC-BROWSER",
+      "shot": "shots/P-ACC-BROWSER.png"
+    },
+    {
+      "id": "P-ACC-CODE",
+      "title": "Account: emailed code",
+      "group": "onboarding",
+      "url": "index.html#P-ACC-CODE",
+      "shot": "shots/P-ACC-CODE.png"
+    },
+    {
+      "id": "P-ACC-DONE",
+      "title": "Account: done, folder made",
+      "group": "onboarding",
+      "url": "index.html#P-ACC-DONE",
+      "shot": "shots/P-ACC-DONE.png"
+    },
+    {
+      "id": "P-SCH-PICK",
+      "title": "School: pick your school",
+      "group": "onboarding",
+      "url": "index.html#P-SCH-PICK",
+      "shot": "shots/P-SCH-PICK.png"
+    },
+    {
+      "id": "P-SCH-NEED",
+      "title": "School: what you'll need, what Knowlu reads",
+      "group": "onboarding",
+      "url": "index.html#P-SCH-NEED",
+      "shot": "shots/P-SCH-NEED.png"
+    },
+    {
+      "id": "P-SCH-WINDOW",
+      "title": "School: the school's own sign-in window",
+      "group": "onboarding",
+      "url": "index.html#P-SCH-WINDOW",
+      "shot": "shots/P-SCH-WINDOW.png"
+    },
+    {
+      "id": "P-SCH-DUO",
+      "title": "School: the Duo prompt",
+      "group": "onboarding",
+      "url": "index.html#P-SCH-DUO",
+      "shot": "shots/P-SCH-DUO.png"
+    },
+    {
+      "id": "E-SCH-CLOSED",
+      "title": "School error: window closed",
+      "group": "onboarding",
+      "url": "index.html#E-SCH-CLOSED",
+      "shot": "shots/E-SCH-CLOSED.png"
+    },
+    {
+      "id": "E-SCH-DUO",
+      "title": "School error: Duo got no answer",
+      "group": "onboarding",
+      "url": "index.html#E-SCH-DUO",
+      "shot": "shots/E-SCH-DUO.png"
+    },
+    {
+      "id": "E-SCH-LOCKED",
+      "title": "School error: account locked",
+      "group": "onboarding",
+      "url": "index.html#E-SCH-LOCKED",
+      "shot": "shots/E-SCH-LOCKED.png"
+    },
+    {
+      "id": "P-SCH-FEED",
+      "title": "School fallback: calendar link, with guidance",
+      "group": "onboarding",
+      "url": "index.html#P-SCH-FEED",
+      "shot": "shots/P-SCH-FEED.png"
+    },
+    {
+      "id": "P-SCH-READING",
+      "title": "School: signed in, counts filling",
+      "group": "onboarding",
+      "url": "index.html#P-SCH-READING",
+      "shot": "shots/P-SCH-READING.png"
+    },
+    {
+      "id": "P-SCH-PROOF",
+      "title": "School: proof, homework tiles added",
+      "group": "onboarding",
+      "url": "index.html#P-SCH-PROOF",
+      "shot": "shots/P-SCH-PROOF.png"
+    },
+    {
+      "id": "S-PAY",
+      "title": "Payment: the order summary is the school proof",
+      "group": "onboarding",
+      "url": "index.html#S-PAY",
+      "shot": "shots/S-PAY.png"
+    },
+    {
+      "id": "S-PAY-SLOW",
+      "title": "Payment while one school read is slow",
+      "group": "onboarding",
+      "url": "index.html#S-PAY-SLOW",
+      "shot": "shots/S-PAY-SLOW.png"
+    },
+    {
+      "id": "P-PAY-BROWSER",
+      "title": "Payment: Stripe's checkout",
+      "group": "onboarding",
+      "url": "index.html#P-PAY-BROWSER",
+      "shot": "shots/P-PAY-BROWSER.png"
+    },
+    {
+      "id": "P-PAY-TESTER",
+      "title": "Payment: tester, nothing to pay",
+      "group": "onboarding",
+      "url": "index.html#P-PAY-TESTER",
+      "shot": "shots/P-PAY-TESTER.png"
+    },
+    {
+      "id": "P-PAY-DONE",
+      "title": "Payment: trial on, the rest opens",
+      "group": "onboarding",
+      "url": "index.html#P-PAY-DONE",
+      "shot": "shots/P-PAY-DONE.png"
+    },
+    {
+      "id": "S-MAIL",
+      "title": "School email: covered by the school sign-in, mailbox writes named",
+      "group": "onboarding",
+      "url": "index.html#S-MAIL",
+      "shot": "shots/S-MAIL.png"
+    },
+    {
+      "id": "P-MAIL-NEED",
+      "title": "School email: when the school doesn't share one sign-in",
+      "group": "onboarding",
+      "url": "index.html#P-MAIL-NEED",
+      "shot": "shots/P-MAIL-NEED.png"
+    },
+    {
+      "id": "P-MAIL-READING",
+      "title": "School email: forwarding on, test on its way",
+      "group": "onboarding",
+      "url": "index.html#P-MAIL-READING",
+      "shot": "shots/P-MAIL-READING.png"
+    },
+    {
+      "id": "E-MAIL-FORBIDDEN",
+      "title": "School email: school blocks forwarding",
+      "group": "onboarding",
+      "url": "index.html#E-MAIL-FORBIDDEN",
+      "shot": "shots/E-MAIL-FORBIDDEN.png"
+    },
+    {
+      "id": "P-GOO-NEED",
+      "title": "Google: what Google will show, what Knowlu reads",
+      "group": "onboarding",
+      "url": "index.html#P-GOO-NEED",
+      "shot": "shots/P-GOO-NEED.png"
+    },
+    {
+      "id": "P-GOO-NEED-FWD",
+      "title": "Google past the first 100: Calendar by permission, Gmail by forwarding",
+      "group": "onboarding",
+      "url": "index.html#P-GOO-NEED-FWD",
+      "shot": "shots/P-GOO-NEED-FWD.png"
+    },
+    {
+      "id": "P-GOO-BROWSER",
+      "title": "Google: Google's consent window",
+      "group": "onboarding",
+      "url": "index.html#P-GOO-BROWSER",
+      "shot": "shots/P-GOO-BROWSER.png"
+    },
+    {
+      "id": "P-GOO-PARTIAL",
+      "title": "Google: Calendar only, Gmail fallback offered",
+      "group": "onboarding",
+      "url": "index.html#P-GOO-PARTIAL",
+      "shot": "shots/P-GOO-PARTIAL.png"
+    },
+    {
+      "id": "P-GOO-FWD",
+      "title": "Google fallback: Gmail by forwarding",
+      "group": "onboarding",
+      "url": "index.html#P-GOO-FWD",
+      "shot": "shots/P-GOO-FWD.png"
+    },
+    {
+      "id": "P-GOO-READING",
+      "title": "Google: proof, with setup mail applied and Undo",
+      "group": "onboarding",
+      "url": "index.html#P-GOO-READING",
+      "shot": "shots/P-GOO-READING.png"
+    },
+    {
+      "id": "S-CAL",
+      "title": "Another calendar (only when Google shared no calendar)",
+      "group": "onboarding",
+      "url": "index.html#S-CAL",
+      "shot": "shots/S-CAL.png"
+    },
+    {
+      "id": "S-ZY",
+      "title": "zyBooks: credentials in the local panel",
+      "group": "onboarding",
+      "url": "index.html#S-ZY",
+      "shot": "shots/S-ZY.png"
+    },
+    {
+      "id": "P-HW-READING",
+      "title": "zyBooks: proof",
+      "group": "onboarding",
+      "url": "index.html#P-HW-READING",
+      "shot": "shots/P-HW-READING.png"
+    },
+    {
+      "id": "S-VHL",
+      "title": "VHL Central: credentials",
+      "group": "onboarding",
+      "url": "index.html#S-VHL",
+      "shot": "shots/S-VHL.png"
+    },
+    {
+      "id": "E-HW-REJECTED",
+      "title": "VHL error: sign-in rejected",
+      "group": "onboarding",
+      "url": "index.html#E-HW-REJECTED",
+      "shot": "shots/E-HW-REJECTED.png"
+    },
+    {
+      "id": "P-SKIP",
+      "title": "Skip VHL, with its cost named",
+      "group": "onboarding",
+      "url": "index.html#P-SKIP",
+      "shot": "shots/P-SKIP.png"
+    },
+    {
+      "id": "P-SKIP-ZY",
+      "title": "Skip zyBooks, with its cost named",
+      "group": "onboarding",
+      "url": "index.html#P-SKIP-ZY",
+      "shot": "shots/P-SKIP-ZY.png"
+    },
+    {
+      "id": "P-SKIP-MAIL",
+      "title": "Skip school email, with its cost named",
+      "group": "onboarding",
+      "url": "index.html#P-SKIP-MAIL",
+      "shot": "shots/P-SKIP-MAIL.png"
+    },
+    {
+      "id": "P-SKIP-GOO",
+      "title": "Skip Google, with its cost named",
+      "group": "onboarding",
+      "url": "index.html#P-SKIP-GOO",
+      "shot": "shots/P-SKIP-GOO.png"
+    },
+    {
+      "id": "P-SKIP-GMAIL",
+      "title": "Skip Gmail, with its cost named",
+      "group": "onboarding",
+      "url": "index.html#P-SKIP-GMAIL",
+      "shot": "shots/P-SKIP-GMAIL.png"
+    },
+    {
+      "id": "P-SKIP-CAL",
+      "title": "Skip a calendar, with its cost named",
+      "group": "onboarding",
+      "url": "index.html#P-SKIP-CAL",
+      "shot": "shots/P-SKIP-CAL.png"
+    },
+    {
+      "id": "S-SYL",
+      "title": "Syllabi: upload or Simple Syllabus, per course",
+      "group": "onboarding",
+      "url": "index.html#S-SYL",
+      "shot": "shots/S-SYL.png"
+    },
+    {
+      "id": "S-WEEK",
+      "title": "Your week: two questions, then confirm the rest",
+      "group": "onboarding",
+      "url": "index.html#S-WEEK",
+      "shot": "shots/S-WEEK.png"
+    },
+    {
+      "id": "P-EXIT",
+      "title": "Finish later",
+      "group": "onboarding",
+      "url": "index.html#P-EXIT",
+      "shot": "shots/P-EXIT.png"
+    },
+    {
+      "id": "S-RECEIPT",
+      "title": "A done tile's receipt (School)",
+      "group": "onboarding",
+      "url": "index.html#S-RECEIPT",
+      "shot": "shots/S-RECEIPT.png"
+    },
+    {
+      "id": "R-WAIT",
+      "title": "Reveal wait: the board shows the last runs",
+      "group": "reveal",
+      "url": "index.html#R-WAIT",
+      "shot": "shots/R-WAIT.png"
+    },
+    {
+      "id": "R-REV",
+      "title": "Here's your week (everything ran once)",
+      "group": "reveal",
+      "url": "index.html#R-REV",
+      "shot": "shots/R-REV.png"
+    },
+    {
+      "id": "R-REV-STILL",
+      "title": "Here's your week after the 3-minute cap, with VHL skipped",
+      "group": "reveal",
+      "url": "index.html#R-REV-STILL",
+      "shot": "shots/R-REV-STILL.png"
+    },
+    {
+      "id": "M-TODAY",
+      "title": "Main page: what's next",
+      "group": "main page",
+      "url": "index.html#M-TODAY",
+      "shot": "shots/M-TODAY.png"
+    },
+    {
+      "id": "M-INSPECT",
+      "title": "Main page: Lab 6 opened, its receipt",
+      "group": "main page",
+      "url": "index.html#M-INSPECT",
+      "shot": "shots/M-INSPECT.png"
+    },
+    {
+      "id": "M-AUTODONE",
+      "title": "Main page: an item Knowlu marked done, with Undo",
+      "group": "main page",
+      "url": "index.html#M-AUTODONE",
+      "shot": "shots/M-AUTODONE.png"
+    },
+    {
+      "id": "M-UNDONE",
+      "title": "Main page: after Undo, back on the list",
+      "group": "main page",
+      "url": "index.html#M-UNDONE",
+      "shot": "shots/M-UNDONE.png"
+    },
+    {
+      "id": "M-LATE",
+      "title": "Main page: late window closed, Still doing it",
+      "group": "main page",
+      "url": "index.html#M-LATE",
+      "shot": "shots/M-LATE.png"
+    },
+    {
+      "id": "M-DECIDE",
+      "title": "Main page: Needs you, one question at a time",
+      "group": "main page",
+      "url": "index.html#M-DECIDE",
+      "shot": "shots/M-DECIDE.png"
+    },
+    {
+      "id": "M-DOMAIN",
+      "title": "Main page: a course selected (filter + receipt)",
+      "group": "main page",
+      "url": "index.html#M-DOMAIN",
+      "shot": "shots/M-DOMAIN.png"
+    },
+    {
+      "id": "M-CONN",
+      "title": "Main page: Connections, VHL needs you",
+      "group": "main page",
+      "url": "index.html#M-CONN",
+      "shot": "shots/M-CONN.png"
+    },
+    {
+      "id": "S-REPAIR",
+      "title": "Repair: sign in to VHL again",
+      "group": "main page",
+      "url": "index.html#S-REPAIR",
+      "shot": "shots/S-REPAIR.png"
+    },
+    {
+      "id": "M-WEEK",
+      "title": "Week view",
+      "group": "main page",
+      "url": "index.html#M-WEEK",
+      "shot": "shots/M-WEEK.png"
+    },
+    {
+      "id": "M-CLEAR",
+      "title": "All clear: nothing due today (Sunday November 1)",
+      "group": "main page",
+      "url": "index.html#M-CLEAR",
+      "shot": "shots/M-CLEAR.png"
+    },
+    {
+      "id": "M-BROKEN",
+      "title": "Broken: the school signed Maya out (and VHL)",
+      "group": "main page",
+      "url": "index.html#M-BROKEN",
+      "shot": "shots/M-BROKEN.png"
+    },
+    {
+      "id": "M-TASK",
+      "title": "Main page: any other task opened (Problem set 7 by default)",
+      "group": "main page",
+      "url": "index.html#M-TASK",
+      "shot": "shots/M-TASK.png"
+    }
+  ]
+}

@@ -1,0 +1,414 @@
+{
+  "prototype": "index.html",
+  "usage": "Open index.html#<id> (add ?theme=light for the day board, ?shot=1 to hide the prototype panel and scenario links). Screens are listed in journey order. Second pass 2026-10-23: see BRIEF.md R3.",
+  "screens": [
+    {
+      "id": "o0-welcome",
+      "group": "Onboarding",
+      "label": "O0 Welcome",
+      "shot": "shots/o0-welcome.png"
+    },
+    {
+      "id": "o1-account",
+      "group": "Onboarding",
+      "label": "O1 Your account",
+      "shot": "shots/o1-account.png"
+    },
+    {
+      "id": "o1g-google",
+      "group": "Onboarding",
+      "label": "O1g Finish in your browser (Google)",
+      "shot": "shots/o1g-google.png"
+    },
+    {
+      "id": "o1c-code",
+      "group": "Onboarding",
+      "label": "O1c Emailed code",
+      "shot": "shots/o1c-code.png"
+    },
+    {
+      "id": "o1d-signed-in",
+      "group": "Onboarding",
+      "label": "O1d Signed in (proof)",
+      "shot": "shots/o1d-signed-in.png"
+    },
+    {
+      "id": "o2-school",
+      "group": "Onboarding",
+      "label": "O2 Your school: pick",
+      "shot": "shots/o2-school.png"
+    },
+    {
+      "id": "o2n-before",
+      "group": "Onboarding",
+      "label": "O2n Before you sign in",
+      "shot": "shots/o2n-before.png"
+    },
+    {
+      "id": "o2n-uncurated",
+      "group": "Onboarding",
+      "label": "O2n Variant: a school Knowlu has no sign-in for yet",
+      "shot": "shots/o2n-uncurated.png"
+    },
+    {
+      "id": "o2w-window",
+      "group": "Onboarding",
+      "label": "O2w The school's own window",
+      "shot": "shots/o2w-window.png"
+    },
+    {
+      "id": "o2m-duo",
+      "group": "Onboarding",
+      "label": "O2m Duo prompt (in the school window)",
+      "shot": "shots/o2m-duo.png"
+    },
+    {
+      "id": "o2-x-timeout",
+      "group": "Onboarding",
+      "label": "O2 failure: no sign-in came back",
+      "shot": "shots/o2-x-timeout.png"
+    },
+    {
+      "id": "o2-x-closed",
+      "group": "Onboarding",
+      "label": "O2 failure: window closed",
+      "shot": "shots/o2-x-closed.png"
+    },
+    {
+      "id": "o2-x-trouble",
+      "group": "Onboarding",
+      "label": "O2 I can't sign in",
+      "shot": "shots/o2-x-trouble.png"
+    },
+    {
+      "id": "o2f-feed",
+      "group": "Onboarding",
+      "label": "O2f Course feed link (fallback)",
+      "shot": "shots/o2f-feed.png"
+    },
+    {
+      "id": "o2r-reading",
+      "group": "Onboarding",
+      "label": "O2r Reading the school",
+      "shot": "shots/o2r-reading.png"
+    },
+    {
+      "id": "o2r-slow",
+      "group": "Onboarding",
+      "label": "O2r A slow source (grades)",
+      "shot": "shots/o2r-slow.png"
+    },
+    {
+      "id": "o2p-proof",
+      "group": "Onboarding",
+      "label": "O2p School proof",
+      "shot": "shots/o2p-proof.png"
+    },
+    {
+      "id": "o2p-totals",
+      "group": "Onboarding",
+      "label": "O2p Variant: totals only (if spike S-F gives no dates)",
+      "shot": "shots/o2p-totals.png"
+    },
+    {
+      "id": "o2-x-empty",
+      "group": "Onboarding",
+      "label": "O2 failure: no assignments found",
+      "shot": "shots/o2-x-empty.png"
+    },
+    {
+      "id": "o3-payment",
+      "group": "Onboarding",
+      "label": "O3 Payment",
+      "shot": "shots/o3-payment.png"
+    },
+    {
+      "id": "o3b-checkout",
+      "group": "Onboarding",
+      "label": "O3b Checkout in the browser",
+      "shot": "shots/o3b-checkout.png"
+    },
+    {
+      "id": "o3-x-closed",
+      "group": "Onboarding",
+      "label": "O3 failure: checkout closed",
+      "shot": "shots/o3-x-closed.png"
+    },
+    {
+      "id": "o3t-tester",
+      "group": "Onboarding",
+      "label": "O3t Tester: nothing to pay",
+      "shot": "shots/o3t-tester.png"
+    },
+    {
+      "id": "o3d-trial-on",
+      "group": "Onboarding",
+      "label": "O3d Trial on (proof)",
+      "shot": "shots/o3d-trial-on.png"
+    },
+    {
+      "id": "o4-school-email",
+      "group": "Onboarding",
+      "label": "O4 School email",
+      "shot": "shots/o4-school-email.png"
+    },
+    {
+      "id": "o4r-forwarding",
+      "group": "Onboarding",
+      "label": "O4r Forwarding on (proof)",
+      "shot": "shots/o4r-forwarding.png"
+    },
+    {
+      "id": "o4r-late",
+      "group": "Onboarding",
+      "label": "O4r The test message is late",
+      "shot": "shots/o4r-late.png"
+    },
+    {
+      "id": "o5-google",
+      "group": "Onboarding",
+      "label": "O5 Google: Gmail and Calendar",
+      "shot": "shots/o5-google.png"
+    },
+    {
+      "id": "o4s-skipped",
+      "group": "Onboarding",
+      "label": "O4s After skipping school email (cost recorded)",
+      "shot": "shots/o4s-skipped.png"
+    },
+    {
+      "id": "o5b-consent",
+      "group": "Onboarding",
+      "label": "O5b Google's consent in the browser",
+      "shot": "shots/o5b-consent.png"
+    },
+    {
+      "id": "o5p-partial",
+      "group": "Onboarding",
+      "label": "O5p Partial grant",
+      "shot": "shots/o5p-partial.png"
+    },
+    {
+      "id": "o5f-forwarding",
+      "group": "Onboarding",
+      "label": "O5f Gmail by forwarding (fallback)",
+      "shot": "shots/o5f-forwarding.png"
+    },
+    {
+      "id": "o5-cap",
+      "group": "Onboarding",
+      "label": "O5 Variant: past the first 100 Gmail-permission users",
+      "shot": "shots/o5-cap.png"
+    },
+    {
+      "id": "o5r-proof",
+      "group": "Onboarding",
+      "label": "O5r Gmail and Calendar (proof)",
+      "shot": "shots/o5r-proof.png"
+    },
+    {
+      "id": "o6-calendar",
+      "group": "Onboarding",
+      "label": "O6 Another calendar (only without Google Calendar)",
+      "shot": "shots/o6-calendar.png"
+    },
+    {
+      "id": "o7-zybooks",
+      "group": "Onboarding",
+      "label": "O7 Homework sites: zyBooks",
+      "shot": "shots/o7-zybooks.png"
+    },
+    {
+      "id": "o7-vhl",
+      "group": "Onboarding",
+      "label": "O7 Homework sites: VHL",
+      "shot": "shots/o7-vhl.png"
+    },
+    {
+      "id": "o7-x",
+      "group": "Onboarding",
+      "label": "O7 failure: VHL rejected the sign-in",
+      "shot": "shots/o7-x.png"
+    },
+    {
+      "id": "o8-syllabi",
+      "group": "Onboarding",
+      "label": "O8 Syllabi",
+      "shot": "shots/o8-syllabi.png"
+    },
+    {
+      "id": "o7s-skipped",
+      "group": "Onboarding",
+      "label": "O7s After skipping VHL (cost recorded)",
+      "shot": "shots/o7s-skipped.png"
+    },
+    {
+      "id": "o8-x",
+      "group": "Onboarding",
+      "label": "O8 failure: file isn't a syllabus",
+      "shot": "shots/o8-x.png"
+    },
+    {
+      "id": "o9-your-week",
+      "group": "Onboarding",
+      "label": "O9 Your week",
+      "shot": "shots/o9-your-week.png"
+    },
+    {
+      "id": "w1-wait",
+      "group": "Onboarding",
+      "label": "W1 Building your week (the wait)",
+      "shot": "shots/w1-wait.png"
+    },
+    {
+      "id": "w1-cap",
+      "group": "Onboarding",
+      "label": "W1 Variant: the 3-minute cap, VHL skipped",
+      "shot": "shots/w1-cap.png"
+    },
+    {
+      "id": "r1-reveal",
+      "group": "Reveal",
+      "label": "R1 Here's your week",
+      "shot": "shots/r1-reveal.png"
+    },
+    {
+      "id": "r1-variant",
+      "group": "Reveal",
+      "label": "R1 Variant: cap reached, VHL skipped",
+      "shot": "shots/r1-variant.png"
+    },
+    {
+      "id": "x1-finish-later",
+      "group": "Exits and resume",
+      "label": "X1 Finish later",
+      "shot": "shots/x1-finish-later.png"
+    },
+    {
+      "id": "x2-resume",
+      "group": "Exits and resume",
+      "label": "X2 Resume at payment",
+      "shot": "shots/x2-resume.png"
+    },
+    {
+      "id": "x3-expired",
+      "group": "Exits and resume",
+      "label": "X3 Resume: school session expired",
+      "shot": "shots/x3-expired.png"
+    },
+    {
+      "id": "x4-restored",
+      "group": "Exits and resume",
+      "label": "X4 Your account already has a plan (new computer)",
+      "shot": "shots/x4-restored.png"
+    },
+    {
+      "id": "x5-picker",
+      "group": "Exits and resume",
+      "label": "X5 Profile picker (setup not finished)",
+      "shot": "shots/x5-picker.png"
+    },
+    {
+      "id": "m1-today",
+      "group": "Main page",
+      "label": "M1 What's next (Monday 8:15 am)",
+      "shot": "shots/m1-today.png"
+    },
+    {
+      "id": "m2-task",
+      "group": "Main page",
+      "label": "M2 A task opened (detail under the row)",
+      "shot": "shots/m2-task.png"
+    },
+    {
+      "id": "m2-report",
+      "group": "Main page",
+      "label": "M2 Report a problem",
+      "shot": "shots/m2-report.png"
+    },
+    {
+      "id": "m2-delete",
+      "group": "Main page",
+      "label": "M2 Delete asks first",
+      "shot": "shots/m2-delete.png"
+    },
+    {
+      "id": "m3-change",
+      "group": "Main page",
+      "label": "M3 A date change opened (Lab 8)",
+      "shot": "shots/m3-change.png"
+    },
+    {
+      "id": "m4-late-closed",
+      "group": "Main page",
+      "label": "M4 Late window closed, opened",
+      "shot": "shots/m4-late-closed.png"
+    },
+    {
+      "id": "m4-still-doing",
+      "group": "Main page",
+      "label": "M4 Still doing it: when?",
+      "shot": "shots/m4-still-doing.png"
+    },
+    {
+      "id": "m5-needs-you",
+      "group": "Main page",
+      "label": "M5 Needs you: answered, next card",
+      "shot": "shots/m5-needs-you.png"
+    },
+    {
+      "id": "m6-vhl-repair",
+      "group": "Main page",
+      "label": "M6 Source repair: VHL sign-in",
+      "shot": "shots/m6-vhl-repair.png"
+    },
+    {
+      "id": "m1-undo",
+      "group": "Main page",
+      "label": "M1 Undo on an item Knowlu closed",
+      "shot": "shots/m1-undo.png"
+    },
+    {
+      "id": "m7-all-clear",
+      "group": "Main page",
+      "label": "M7 All clear (Sunday, November 1)",
+      "shot": "shots/m7-all-clear.png"
+    },
+    {
+      "id": "m8-offline",
+      "group": "Main page",
+      "label": "M8 Offline",
+      "shot": "shots/m8-offline.png"
+    },
+    {
+      "id": "m9-run-failed",
+      "group": "Main page",
+      "label": "M9 A check didn't finish",
+      "shot": "shots/m9-run-failed.png"
+    },
+    {
+      "id": "m10-settings",
+      "group": "Main page",
+      "label": "M10 Settings: sources",
+      "shot": "shots/m10-settings.png"
+    },
+    {
+      "id": "m11-lock-in",
+      "group": "Main page",
+      "label": "M11 Lock in (focus session)",
+      "shot": "shots/m11-lock-in.png"
+    },
+    {
+      "id": "t1-tray",
+      "group": "Tray",
+      "label": "T1 Tray flyout",
+      "shot": "shots/t1-tray.png"
+    }
+  ],
+  "light_shots": [
+    "shots/m1-today--light.png",
+    "shots/o2p-proof--light.png",
+    "shots/m2-task--light.png",
+    "shots/r1-reveal--light.png"
+  ]
+}

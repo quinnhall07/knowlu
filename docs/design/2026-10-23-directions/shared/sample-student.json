@@ -1,0 +1,4392 @@
+{
+ "_about": {
+  "what": "One invented student for all five Knowlu UI directions (2026-10-23). Every person, school, course, room, email address and grade here is fictional.",
+  "two_moments": {
+   "onboarding_and_reveal": "Sunday October 18, 7:05-7:19 pm (term week 8). The reveal shows the week of Monday October 19 - Sunday October 25.",
+   "daily_main_page": "Monday October 26, 8:15 am (term week 10). 'today' and 'week' are as of then.",
+   "why_two": "A week of use between them is what makes 'Closed this week' with Undo, 'Late window closed' and an in-window late label real (first sight archives anything already past)."
+  },
+  "times": "Local times, America/Chicago, ISO without offset. Durations in hours.",
+  "effort_anchors": {
+   "reading": 0.5,
+   "homework": 2.0,
+   "essay": 3.0,
+   "lab report": 3.0,
+   "exam study": 4.0,
+   "quiz": 0.5,
+   "zyBooks participation": 1.0
+  },
+  "states": [
+   "live",
+   "past due, inside late window",
+   "late window closed",
+   "done: checked off by Maya",
+   "done: marked by Knowlu (turned in)",
+   "archived: imported-done (turned in before setup)",
+   "archived: imported-past"
+  ],
+  "rules_the_data_obeys": [
+   "Past-term classes (BIO 110, MATH 141) have show:false and appear nowhere else.",
+   "Archived items never appear in today.list, today.later or the week's due lists.",
+   "Turned-in work after setup is marked done by Knowlu with Undo and listed in closed_this_week.",
+   "Class times come from the registrar; exams, weights and late rules from syllabi; none were typed.",
+   "Only today/tomorrow is urgent; recommended work fills the day's budget (7h on class days, 6h otherwise), scaled to the open time left when the page is read (6.5h at 8:15 am Monday)."
+  ],
+  "generated_by": "scratch script; derived numbers computed from the raw data"
+ },
+ "counts": {
+  "assignments_listed": 45,
+  "from_sources_due_on_or_after_onboarding": 40,
+  "turned_in_before_setup_archived": 9,
+  "past_items_archived_at_setup": 52,
+  "live_at_onboarding_incl_knowlu_study_tasks": 34,
+  "marked_done_by_knowlu_since_setup": 6,
+  "late_window_closed_now": 2,
+  "inside_late_window_now": 1,
+  "live_now": 26,
+  "emails": 6,
+  "decisions_pending": 4
+ },
+ "student": {
+  "name": "Maya Okafor",
+  "first_name": "Maya",
+  "pronouns": "she/her",
+  "fictional": true,
+  "year": "Sophomore",
+  "major": "Biology",
+  "minor": "Spanish",
+  "knowlu_account": {
+   "sign_in": "Continue with Google",
+   "email": "maya.okafor.demo@gmail.example",
+   "plan": "Monthly, $9.99 after a 7-day trial",
+   "trial_started": "2026-10-18",
+   "trial_ends": "2026-10-25",
+   "billing": "First charge $9.99 on 2026-10-25 (trial ended); renews monthly"
+  },
+  "school_email": "mokafor@students.halverson.example",
+  "personal_email": "maya.okafor.demo@gmail.example",
+  "vault_path": "C:\\Users\\<student>\\Knowlu\\",
+  "prior_credits": null
+ },
+ "school": {
+  "name": "Halverson State University",
+  "short": "Halverson State",
+  "fictional": true,
+  "city": "Larkfield (fictional)",
+  "lms": "Blackboard",
+  "mail": "Microsoft 365 (school Outlook)",
+  "shared_sign_in": true,
+  "shared_sign_in_covers": [
+   "Blackboard (course list, assignments, grades, syllabi)",
+   "registrar (class times)",
+   "school Outlook"
+  ],
+  "timezone": "America/Chicago"
+ },
+ "term": {
+  "name": "Fall 2026",
+  "start": "2026-08-24",
+  "classes_end": "2026-12-11",
+  "finals": {
+   "start": "2026-12-14",
+   "end": "2026-12-18"
+  },
+  "week_at_onboarding": 8,
+  "week_now": 10,
+  "weeks_total": 16
+ },
+ "courses": [
+  {
+   "code": "BIO 201",
+   "slug": "bio-201",
+   "name": "Cell Biology",
+   "domain_name": "Cell Biology",
+   "credits": 4,
+   "instructor": "Dr. Renata Alvarez",
+   "lms": "Blackboard",
+   "homework_site": null,
+   "meetings": [
+    {
+     "kind": "lecture",
+     "days": [
+      "Mon",
+      "Wed",
+      "Fri"
+     ],
+     "start": "09:00",
+     "end": "09:50",
+     "room": "Kessler Hall 104",
+     "source": "registrar"
+    },
+    {
+     "kind": "lab",
+     "days": [
+      "Thu"
+     ],
+     "start": "14:00",
+     "end": "16:50",
+     "room": "Kessler Hall 310",
+     "source": "registrar"
+    }
+   ],
+   "office_hours": {
+    "days": [
+     "Wed"
+    ],
+    "start": "11:00",
+    "end": "12:00",
+    "room": "Kessler Hall 228",
+    "level": "optional",
+    "source": "syllabus"
+   },
+   "syllabus": {
+    "found_in": "Blackboard",
+    "read": true
+   },
+   "exams": [
+    {
+     "title": "Exam 2",
+     "date": "2026-11-06",
+     "start": "09:00",
+     "end": "09:50",
+     "room": "Kessler Hall 104",
+     "source": "syllabus"
+    },
+    {
+     "title": "Final exam",
+     "date": "2026-12-14",
+     "start": "08:00",
+     "end": "10:00",
+     "room": "Kessler Hall 104",
+     "source": "syllabus"
+    }
+   ],
+   "weights": {
+    "Exams": 45,
+    "Lab reports": 25,
+    "Problem sets": 15,
+    "Quizzes": 10,
+    "Participation": 5
+   },
+   "late_policy": {
+    "accepted": true,
+    "penalty_percent": 10,
+    "per": "day",
+    "max_days": 3,
+    "grace_hours": 0,
+    "label": "Late: −10% a day, up to 3 days (your syllabus)"
+   }
+  },
+  {
+   "code": "CHEM 231",
+   "slug": "chem-231",
+   "name": "Organic Chemistry I",
+   "domain_name": "Organic Chemistry",
+   "credits": 4,
+   "instructor": "Dr. Marcus Feld",
+   "lms": "Blackboard",
+   "homework_site": null,
+   "meetings": [
+    {
+     "kind": "lecture",
+     "days": [
+      "Tue",
+      "Thu"
+     ],
+     "start": "09:30",
+     "end": "10:45",
+     "room": "Hallett Hall 220",
+     "source": "registrar"
+    },
+    {
+     "kind": "recitation",
+     "days": [
+      "Wed"
+     ],
+     "start": "15:00",
+     "end": "15:50",
+     "room": "Hallett Hall 015",
+     "source": "registrar"
+    }
+   ],
+   "office_hours": {
+    "days": [
+     "Mon"
+    ],
+    "start": "15:30",
+    "end": "16:30",
+    "room": "Hallett Hall 301",
+    "level": "optional",
+    "source": "syllabus"
+   },
+   "syllabus": {
+    "found_in": "Blackboard",
+    "read": true
+   },
+   "exams": [
+    {
+     "title": "Exam 2",
+     "date": "2026-10-29",
+     "start": "09:30",
+     "end": "10:45",
+     "room": "Hallett Hall 120 (moved from 220, by email)",
+     "source": "syllabus"
+    },
+    {
+     "title": "Exam 3",
+     "date": "2026-11-19",
+     "start": "09:30",
+     "end": "10:45",
+     "room": "Hallett Hall 220",
+     "source": "syllabus"
+    },
+    {
+     "title": "Final exam",
+     "date": "2026-12-16",
+     "start": "13:00",
+     "end": "15:00",
+     "room": "Hallett Hall 120",
+     "source": "syllabus"
+    }
+   ],
+   "weights": {
+    "Exams": 60,
+    "Problem sets": 20,
+    "Online homework": 10,
+    "Recitation": 10
+   },
+   "late_policy": {
+    "accepted": false,
+    "grace_hours": 48,
+    "label": "Late work not accepted after 48 hours (your syllabus)"
+   }
+  },
+  {
+   "code": "CS 110",
+   "slug": "cs-110",
+   "name": "Introduction to Programming (Python)",
+   "domain_name": "Programming",
+   "credits": 3,
+   "instructor": "Prof. Dana Whitlock",
+   "lms": "Blackboard",
+   "homework_site": "zyBooks",
+   "meetings": [
+    {
+     "kind": "lecture",
+     "days": [
+      "Mon",
+      "Wed"
+     ],
+     "start": "13:00",
+     "end": "14:15",
+     "room": "Ostrander Center 140",
+     "source": "registrar"
+    }
+   ],
+   "office_hours": null,
+   "syllabus": {
+    "found_in": null,
+    "read": true,
+    "uploaded_at_step": 9,
+    "file": "CS110_Fall2026_syllabus.pdf"
+   },
+   "exams": [
+    {
+     "title": "Midterm 2",
+     "date": "2026-11-18",
+     "start": "13:00",
+     "end": "14:15",
+     "room": "Ostrander Center 140",
+     "source": "syllabus"
+    },
+    {
+     "title": "Final exam",
+     "date": "2026-12-18",
+     "start": "10:30",
+     "end": "12:30",
+     "room": "Ostrander Center 140",
+     "source": "syllabus"
+    }
+   ],
+   "weights": {
+    "Labs": 30,
+    "Exams": 30,
+    "Projects": 20,
+    "zyBooks participation": 10,
+    "zyBooks challenge": 10
+   },
+   "late_policy": {
+    "accepted": true,
+    "penalty_percent": 10,
+    "per": "day",
+    "max_days": 5,
+    "grace_hours": 0,
+    "label": "Late: −10% a day, up to 5 days (your syllabus)"
+   }
+  },
+  {
+   "code": "SPAN 202",
+   "slug": "span-202",
+   "name": "Intermediate Spanish II",
+   "domain_name": "Spanish",
+   "credits": 3,
+   "instructor": "Prof. Lucía Herrera",
+   "lms": "Blackboard",
+   "homework_site": "VHL",
+   "meetings": [
+    {
+     "kind": "lecture",
+     "days": [
+      "Mon",
+      "Wed",
+      "Fri"
+     ],
+     "start": "10:00",
+     "end": "10:50",
+     "room": "Bellamy Hall 212",
+     "source": "registrar"
+    }
+   ],
+   "office_hours": null,
+   "syllabus": {
+    "found_in": "Blackboard",
+    "read": true
+   },
+   "exams": [
+    {
+     "title": "Oral exam 2",
+     "date": "2026-11-04",
+     "start": "10:00",
+     "end": "10:50",
+     "room": "Bellamy Hall 212",
+     "source": "syllabus"
+    },
+    {
+     "title": "Examen 3",
+     "date": "2026-11-20",
+     "start": "10:00",
+     "end": "10:50",
+     "room": "Bellamy Hall 212",
+     "source": "syllabus"
+    },
+    {
+     "title": "Final exam",
+     "date": "2026-12-15",
+     "start": "10:30",
+     "end": "12:30",
+     "room": "Bellamy Hall 212",
+     "source": "syllabus"
+    }
+   ],
+   "weights": {
+    "Exams": 40,
+    "VHL practice": 20,
+    "Compositions": 20,
+    "Oral exams": 10,
+    "Participation": 10
+   },
+   "late_policy": {
+    "accepted": true,
+    "penalty_percent": 10,
+    "per": "day",
+    "max_days": 3,
+    "grace_hours": 0,
+    "label": "Late: −10% a day, up to 3 days (your syllabus)"
+   }
+  },
+  {
+   "code": "ENG 210",
+   "slug": "eng-210",
+   "name": "Writing in the Sciences",
+   "domain_name": "Science Writing",
+   "credits": 3,
+   "instructor": "Dr. Hannah Brooks",
+   "lms": "Blackboard",
+   "homework_site": null,
+   "meetings": [
+    {
+     "kind": "seminar",
+     "days": [
+      "Tue",
+      "Thu"
+     ],
+     "start": "12:30",
+     "end": "13:45",
+     "room": "Marsh Library, seminar room 3B",
+     "source": "registrar"
+    }
+   ],
+   "office_hours": null,
+   "syllabus": {
+    "found_in": "Blackboard",
+    "read": true
+   },
+   "exams": [],
+   "weights": {
+    "Final paper": 35,
+    "Literature review": 25,
+    "Peer reviews": 15,
+    "Participation": 15,
+    "Annotated bibliography": 10
+   },
+   "late_policy": null,
+   "late_policy_note": "No late rule found in the syllabus. Past-due work stays on the list until you close it."
+  }
+ ],
+ "past_courses": [
+  {
+   "code": "BIO 110",
+   "name": "Introductory Biology",
+   "term": "Spring 2026",
+   "show": false,
+   "why_hidden": "Past term. Returned by Blackboard's course list; must never appear in onboarding or on the page."
+  },
+  {
+   "code": "MATH 141",
+   "name": "Calculus I",
+   "term": "Spring 2026",
+   "show": false,
+   "why_hidden": "Past term. Returned by Blackboard's course list; must never appear in onboarding or on the page."
+  }
+ ],
+ "commitments": [
+  {
+   "id": "cm-job",
+   "title": "Marsh Library circulation desk",
+   "domain": "Library job",
+   "kind": "work",
+   "level": "hard",
+   "recurrence": [
+    {
+     "days": [
+      "Tue"
+     ],
+     "start": "17:00",
+     "end": "21:00"
+    },
+    {
+     "days": [
+      "Sat"
+     ],
+     "start": "10:00",
+     "end": "14:00"
+    }
+   ],
+   "source": "Google Calendar (repeating)",
+   "confirmed_at_step": 10
+  },
+  {
+   "id": "cm-club",
+   "title": "Pre-Health Society meeting",
+   "domain": "Pre-Health Society",
+   "kind": "club",
+   "level": "soft",
+   "recurrence": [
+    {
+     "days": [
+      "Wed"
+     ],
+     "start": "18:30",
+     "end": "19:30"
+    }
+   ],
+   "room": "Bryce Hall 110",
+   "source": "Google Calendar (repeating)",
+   "confirmed_at_step": 10
+  },
+  {
+   "id": "cm-soccer",
+   "title": "Intramural soccer",
+   "domain": "Personal",
+   "kind": "club",
+   "level": "optional",
+   "recurrence": [
+    {
+     "days": [
+      "Sun"
+     ],
+     "start": "16:00",
+     "end": "17:00"
+    }
+   ],
+   "source": "Google Calendar (repeating)",
+   "confirmed_at_step": 10
+  }
+ ],
+ "planning_day": {
+  "wake": "07:30",
+  "bed": "23:30",
+  "source": "default from onboarding, confirmed on Your week",
+  "note": "The day's wake-to-bed window; free time is counted inside it."
+ },
+ "preferences": {
+  "work_budget_hours": {
+   "class_day": 7.0,
+   "no_class_day": 6.0
+  },
+  "note": "How much schoolwork a day Maya wants recommended. Urgent work is shown even past this.",
+  "nudges_per_day": 2,
+  "quiet_hours": "22:30-08:00",
+  "grades_visible": true
+ },
+ "calendar_events": [
+  {
+   "title": "Haircut",
+   "start": "2026-10-22T17:00",
+   "end": "2026-10-22T17:45",
+   "kind": "meeting",
+   "level": "hard",
+   "source": "Google Calendar"
+  },
+  {
+   "title": "Family video call",
+   "start": "2026-10-25T19:00",
+   "end": "2026-10-25T20:00",
+   "kind": "meeting",
+   "level": "soft",
+   "source": "Google Calendar"
+  },
+  {
+   "title": "Dentist",
+   "start": "2026-10-30T15:30",
+   "end": "2026-10-30T16:30",
+   "kind": "meeting",
+   "level": "hard",
+   "source": "Google Calendar"
+  },
+  {
+   "title": "Halloween party at Jordan's",
+   "start": "2026-10-31T20:00",
+   "end": "2026-10-31T23:30",
+   "kind": "meeting",
+   "level": "optional",
+   "source": "Google Calendar"
+  },
+  {
+   "title": "Family video call",
+   "start": "2026-11-01T19:00",
+   "end": "2026-11-01T20:00",
+   "kind": "meeting",
+   "level": "soft",
+   "source": "Google Calendar"
+  }
+ ],
+ "assignments": [
+  {
+   "id": "t-bio-r8",
+   "course": "BIO 201",
+   "domain": "Cell Biology",
+   "title": "Reading: Ch. 8, Metabolism",
+   "kind": "reading",
+   "source": "Blackboard",
+   "due": "2026-10-19T09:00",
+   "effort_hours": 0.5,
+   "category": "Participation",
+   "points": null,
+   "submitted_at": null,
+   "done_by_student_at": "2026-10-19T08:35",
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "done: checked off by Maya",
+   "late_window_closes": "2026-10-22T09:00"
+  },
+  {
+   "id": "t-bio-lab4",
+   "course": "BIO 201",
+   "domain": "Cell Biology",
+   "title": "Lab 4 report: Membrane transport",
+   "kind": "lab report",
+   "source": "Blackboard",
+   "due": "2026-10-22T14:00",
+   "effort_hours": 3.0,
+   "category": "Lab reports",
+   "points": 50,
+   "submitted_at": "2026-10-22T11:40",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "done: marked by Knowlu (turned in)",
+   "late_window_closes": "2026-10-25T14:00"
+  },
+  {
+   "id": "t-bio-ps5",
+   "course": "BIO 201",
+   "domain": "Cell Biology",
+   "title": "Problem set 5",
+   "kind": "homework",
+   "source": "Blackboard",
+   "due": "2026-10-23T23:59",
+   "effort_hours": 2.0,
+   "category": "Problem sets",
+   "points": 20,
+   "submitted_at": "2026-10-23T21:15",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "done: marked by Knowlu (turned in)",
+   "late_window_closes": "2026-10-26T23:59"
+  },
+  {
+   "id": "t-bio-rc9",
+   "course": "BIO 201",
+   "domain": "Cell Biology",
+   "title": "Ch. 9 reading check",
+   "kind": "quiz",
+   "source": "Blackboard",
+   "due": "2026-10-26T09:00",
+   "effort_hours": 0.5,
+   "category": "Quizzes",
+   "points": 10,
+   "submitted_at": "2026-10-15T20:10",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "archived: imported-done (turned in before setup)",
+   "state_now": "archived: imported-done (turned in before setup)",
+   "late_window_closes": "2026-10-29T09:00"
+  },
+  {
+   "id": "t-bio-r9",
+   "course": "BIO 201",
+   "domain": "Cell Biology",
+   "title": "Reading: Ch. 9, Cellular respiration",
+   "kind": "reading",
+   "source": "Blackboard",
+   "due": "2026-10-26T09:00",
+   "effort_hours": 0.5,
+   "category": "Participation",
+   "points": null,
+   "submitted_at": null,
+   "done_by_student_at": "2026-10-26T07:55",
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "done: checked off by Maya",
+   "late_window_closes": "2026-10-29T09:00"
+  },
+  {
+   "id": "t-bio-pre6",
+   "course": "BIO 201",
+   "domain": "Cell Biology",
+   "title": "Pre-lab 6 quiz",
+   "kind": "quiz",
+   "source": "Blackboard",
+   "due": "2026-10-29T14:00",
+   "effort_hours": 0.5,
+   "category": "Quizzes",
+   "points": 10,
+   "submitted_at": "2026-10-17T15:30",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "archived: imported-done (turned in before setup)",
+   "state_now": "archived: imported-done (turned in before setup)",
+   "late_window_closes": "2026-11-01T14:00"
+  },
+  {
+   "id": "t-bio-lab5",
+   "course": "BIO 201",
+   "domain": "Cell Biology",
+   "title": "Lab 5 report: Enzyme kinetics",
+   "kind": "lab report",
+   "source": "Blackboard",
+   "due": "2026-10-29T14:00",
+   "effort_hours": 3.0,
+   "category": "Lab reports",
+   "points": 50,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 20,
+   "platform_progress_now": null,
+   "steps": [
+    {
+     "title": "Results table and graph",
+     "hours": 1.0,
+     "done": true
+    },
+    {
+     "title": "Discussion",
+     "hours": 1.5,
+     "done": false
+    },
+    {
+     "title": "Abstract and references",
+     "hours": 0.5,
+     "done": false
+    }
+   ],
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-01T14:00"
+  },
+  {
+   "id": "t-bio-r10",
+   "course": "BIO 201",
+   "domain": "Cell Biology",
+   "title": "Reading: Ch. 10, Photosynthesis",
+   "kind": "reading",
+   "source": "Blackboard",
+   "due": "2026-10-30T09:00",
+   "effort_hours": 0.5,
+   "category": "Participation",
+   "points": null,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-02T09:00"
+  },
+  {
+   "id": "t-bio-ps6",
+   "course": "BIO 201",
+   "domain": "Cell Biology",
+   "title": "Problem set 6",
+   "kind": "homework",
+   "source": "Blackboard",
+   "due": "2026-10-30T23:59",
+   "effort_hours": 2.0,
+   "category": "Problem sets",
+   "points": 20,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-02T23:59"
+  },
+  {
+   "id": "t-bio-r11",
+   "course": "BIO 201",
+   "domain": "Cell Biology",
+   "title": "Reading: Ch. 11, Cell signaling",
+   "kind": "reading",
+   "source": "Blackboard",
+   "due": "2026-11-02T09:00",
+   "effort_hours": 0.5,
+   "category": "Participation",
+   "points": null,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-05T09:00"
+  },
+  {
+   "id": "t-bio-lab6",
+   "course": "BIO 201",
+   "domain": "Cell Biology",
+   "title": "Lab 6 report: Photosynthetic pigments",
+   "kind": "lab report",
+   "source": "Blackboard",
+   "due": "2026-11-05T14:00",
+   "effort_hours": 3.0,
+   "category": "Lab reports",
+   "points": 50,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-08T14:00"
+  },
+  {
+   "id": "t-bio-ex2",
+   "course": "BIO 201",
+   "domain": "Cell Biology",
+   "title": "Study for Exam 2 (Ch. 8-11)",
+   "kind": "exam study",
+   "source": "Knowlu (from syllabus)",
+   "due": "2026-11-06T09:00",
+   "effort_hours": 4.0,
+   "category": "Exams",
+   "points": null,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": [
+    {
+     "title": "Rewrite Ch. 8-9 notes",
+     "hours": 1.0,
+     "done": false
+    },
+    {
+     "title": "Ch. 10-11 practice questions",
+     "hours": 1.5,
+     "done": false
+    },
+    {
+     "title": "Practice exam",
+     "hours": 1.5,
+     "done": false
+    }
+   ],
+   "notes": null,
+   "created_by": "Knowlu",
+   "origin": "Exam date from the BIO 201 syllabus",
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-09T09:00"
+  },
+  {
+   "id": "t-chem-ps6",
+   "course": "CHEM 231",
+   "domain": "Organic Chemistry",
+   "title": "Problem set 6",
+   "kind": "homework",
+   "source": "Blackboard",
+   "due": "2026-10-20T09:30",
+   "effort_hours": 2.0,
+   "category": "Problem sets",
+   "points": 25,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "late window closed",
+   "late_window_closes": "2026-10-22T09:30"
+  },
+  {
+   "id": "t-chem-hw5",
+   "course": "CHEM 231",
+   "domain": "Organic Chemistry",
+   "title": "Ch. 5 online homework",
+   "kind": "homework",
+   "source": "Blackboard",
+   "due": "2026-10-21T23:59",
+   "effort_hours": 1.0,
+   "category": "Online homework",
+   "points": 20,
+   "submitted_at": "2026-10-21T22:05",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "done: marked by Knowlu (turned in)",
+   "late_window_closes": "2026-10-23T23:59"
+  },
+  {
+   "id": "t-chem-pq7",
+   "course": "CHEM 231",
+   "domain": "Organic Chemistry",
+   "title": "Pre-lecture quiz: Ch. 7",
+   "kind": "quiz",
+   "source": "Blackboard",
+   "due": "2026-10-27T09:30",
+   "effort_hours": 0.5,
+   "category": "Online homework",
+   "points": 5,
+   "submitted_at": "2026-10-25T16:40",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "done: marked by Knowlu (turned in)",
+   "late_window_closes": "2026-10-29T09:30"
+  },
+  {
+   "id": "t-chem-ps7",
+   "course": "CHEM 231",
+   "domain": "Organic Chemistry",
+   "title": "Problem set 7",
+   "kind": "homework",
+   "source": "Blackboard",
+   "due": "2026-10-27T09:30",
+   "effort_hours": 2.0,
+   "category": "Problem sets",
+   "points": 25,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 25,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-10-29T09:30"
+  },
+  {
+   "id": "t-chem-hw6",
+   "course": "CHEM 231",
+   "domain": "Organic Chemistry",
+   "title": "Ch. 6 online homework",
+   "kind": "homework",
+   "source": "Blackboard",
+   "due": "2026-10-28T23:59",
+   "effort_hours": 1.0,
+   "category": "Online homework",
+   "points": 20,
+   "submitted_at": "2026-10-16T21:00",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "archived: imported-done (turned in before setup)",
+   "state_now": "archived: imported-done (turned in before setup)",
+   "late_window_closes": "2026-10-30T23:59"
+  },
+  {
+   "id": "t-chem-rw8",
+   "course": "CHEM 231",
+   "domain": "Organic Chemistry",
+   "title": "Recitation worksheet 8",
+   "kind": "homework",
+   "source": "Blackboard",
+   "due": "2026-10-28T15:00",
+   "effort_hours": 1.0,
+   "category": "Recitation",
+   "points": 10,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-10-30T15:00"
+  },
+  {
+   "id": "t-chem-ex2",
+   "course": "CHEM 231",
+   "domain": "Organic Chemistry",
+   "title": "Study for Exam 2 (Ch. 5-7)",
+   "kind": "exam study",
+   "source": "Knowlu (from syllabus)",
+   "due": "2026-10-29T09:30",
+   "effort_hours": 4.0,
+   "category": "Exams",
+   "points": null,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": [
+    {
+     "title": "Practice exam 1",
+     "hours": 1.5,
+     "done": false
+    },
+    {
+     "title": "Ch. 5-6 problems",
+     "hours": 1.0,
+     "done": false
+    },
+    {
+     "title": "Ch. 7 stereochemistry problems",
+     "hours": 1.0,
+     "done": false
+    },
+    {
+     "title": "Review mechanisms",
+     "hours": 0.5,
+     "done": false
+    }
+   ],
+   "notes": null,
+   "created_by": "Knowlu",
+   "origin": "Exam date from the CHEM 231 syllabus",
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-10-31T09:30"
+  },
+  {
+   "id": "t-chem-ps8",
+   "course": "CHEM 231",
+   "domain": "Organic Chemistry",
+   "title": "Problem set 8",
+   "kind": "homework",
+   "source": "Blackboard",
+   "due": "2026-11-03T09:30",
+   "effort_hours": 2.0,
+   "category": "Problem sets",
+   "points": 25,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-05T09:30"
+  },
+  {
+   "id": "t-cs-zy6",
+   "course": "CS 110",
+   "domain": "Programming",
+   "title": "zyBooks 6.1-6.6 participation",
+   "kind": "homework",
+   "source": "zyBooks",
+   "due": "2026-10-19T23:59",
+   "effort_hours": 1.0,
+   "category": "zyBooks participation",
+   "points": null,
+   "submitted_at": "2026-10-18T16:00",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": 100,
+   "steps": null,
+   "notes": null,
+   "created_by": "zyBooks",
+   "origin": null,
+   "state_at_onboarding": "archived: imported-done (turned in before setup)",
+   "state_now": "archived: imported-done (turned in before setup)",
+   "late_window_closes": "2026-10-24T23:59"
+  },
+  {
+   "id": "t-cs-lab6",
+   "course": "CS 110",
+   "domain": "Programming",
+   "title": "Lab 6: Functions",
+   "kind": "lab",
+   "source": "zyBooks",
+   "due": "2026-10-23T23:59",
+   "effort_hours": 2.0,
+   "category": "Labs",
+   "points": 100,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 40,
+   "platform_progress_now": 40,
+   "steps": null,
+   "notes": null,
+   "created_by": "zyBooks",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "past due, inside late window",
+   "late_label_now": "−30% now; closes Wednesday at 11:59 pm",
+   "late_window_closes": "2026-10-28T23:59"
+  },
+  {
+   "id": "t-cs-zy71",
+   "course": "CS 110",
+   "domain": "Programming",
+   "title": "zyBooks 7.1-7.4 participation",
+   "kind": "homework",
+   "source": "zyBooks",
+   "due": "2026-10-26T23:59",
+   "effort_hours": 1.0,
+   "category": "zyBooks participation",
+   "points": null,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 60,
+   "platform_progress_now": 60,
+   "steps": null,
+   "notes": null,
+   "created_by": "zyBooks",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-10-31T23:59"
+  },
+  {
+   "id": "t-cs-zy75",
+   "course": "CS 110",
+   "domain": "Programming",
+   "title": "zyBooks 7.5-7.7 challenge activities",
+   "kind": "homework",
+   "source": "zyBooks",
+   "due": "2026-10-26T23:59",
+   "effort_hours": 1.0,
+   "category": "zyBooks challenge",
+   "points": null,
+   "submitted_at": "2026-10-17T14:20",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": 100,
+   "steps": null,
+   "notes": null,
+   "created_by": "zyBooks",
+   "origin": null,
+   "state_at_onboarding": "archived: imported-done (turned in before setup)",
+   "state_now": "archived: imported-done (turned in before setup)",
+   "late_window_closes": "2026-10-31T23:59"
+  },
+  {
+   "id": "t-cs-zy78",
+   "course": "CS 110",
+   "domain": "Programming",
+   "title": "zyBooks 7.8 challenge activity",
+   "kind": "homework",
+   "source": "zyBooks",
+   "due": "2026-10-28T23:59",
+   "effort_hours": 0.5,
+   "category": "zyBooks challenge",
+   "points": null,
+   "submitted_at": "2026-10-17T14:50",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": 100,
+   "steps": null,
+   "notes": null,
+   "created_by": "zyBooks",
+   "origin": null,
+   "state_at_onboarding": "archived: imported-done (turned in before setup)",
+   "state_now": "archived: imported-done (turned in before setup)",
+   "late_window_closes": "2026-11-02T23:59"
+  },
+  {
+   "id": "t-cs-lab7",
+   "course": "CS 110",
+   "domain": "Programming",
+   "title": "Lab 7: Lists and loops",
+   "kind": "lab",
+   "source": "zyBooks",
+   "due": "2026-10-28T23:59",
+   "effort_hours": 2.0,
+   "category": "Labs",
+   "points": 100,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 30,
+   "platform_progress_now": 30,
+   "steps": null,
+   "notes": null,
+   "created_by": "zyBooks",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-02T23:59"
+  },
+  {
+   "id": "t-cs-p2",
+   "course": "CS 110",
+   "domain": "Programming",
+   "title": "Project 2 proposal",
+   "kind": "writing",
+   "source": "Blackboard",
+   "due": "2026-10-30T17:00",
+   "effort_hours": 1.5,
+   "category": "Projects",
+   "points": 20,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-04T17:00"
+  },
+  {
+   "id": "t-cs-zy81",
+   "course": "CS 110",
+   "domain": "Programming",
+   "title": "zyBooks 8.1-8.3 participation",
+   "kind": "homework",
+   "source": "zyBooks",
+   "due": "2026-11-02T23:59",
+   "effort_hours": 1.0,
+   "category": "zyBooks participation",
+   "points": null,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "zyBooks",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-07T23:59"
+  },
+  {
+   "id": "t-cs-lab8",
+   "course": "CS 110",
+   "domain": "Programming",
+   "title": "Lab 8: Dictionaries",
+   "kind": "lab",
+   "source": "zyBooks",
+   "due": "2026-11-04T23:59",
+   "effort_hours": 2.0,
+   "category": "Labs",
+   "points": 100,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": "A TA's email says this moves to Friday, November 6 (waiting for Maya's answer).",
+   "created_by": "zyBooks",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-09T23:59"
+  },
+  {
+   "id": "t-span-v5v",
+   "course": "SPAN 202",
+   "domain": "Spanish",
+   "title": "VHL Lección 5: Vocabulario",
+   "kind": "homework",
+   "source": "VHL",
+   "due": "2026-10-19T23:59",
+   "effort_hours": 1.0,
+   "category": "VHL practice",
+   "points": 20,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": 0,
+   "steps": null,
+   "notes": null,
+   "created_by": "VHL",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "late window closed",
+   "late_window_closes": "2026-10-22T23:59"
+  },
+  {
+   "id": "t-span-v52",
+   "course": "SPAN 202",
+   "domain": "Spanish",
+   "title": "VHL Lección 5: Gramática 5.2",
+   "kind": "homework",
+   "source": "VHL",
+   "due": "2026-10-21T23:59",
+   "effort_hours": 1.0,
+   "category": "VHL practice",
+   "points": 20,
+   "submitted_at": "2026-10-21T20:30",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": 100,
+   "steps": null,
+   "notes": null,
+   "created_by": "VHL",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "done: marked by Knowlu (turned in)",
+   "late_window_closes": "2026-10-24T23:59"
+  },
+  {
+   "id": "t-span-v6p",
+   "course": "SPAN 202",
+   "domain": "Spanish",
+   "title": "VHL Lección 6: Práctica de vocabulario",
+   "kind": "homework",
+   "source": "VHL",
+   "due": "2026-10-26T23:59",
+   "effort_hours": 1.0,
+   "category": "VHL practice",
+   "points": 20,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 40,
+   "platform_progress_now": 40,
+   "steps": null,
+   "notes": null,
+   "created_by": "VHL",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-10-29T23:59"
+  },
+  {
+   "id": "t-span-v61",
+   "course": "SPAN 202",
+   "domain": "Spanish",
+   "title": "VHL Lección 6: Gramática 6.1",
+   "kind": "homework",
+   "source": "VHL",
+   "due": "2026-10-28T23:59",
+   "effort_hours": 1.0,
+   "category": "VHL practice",
+   "points": 20,
+   "submitted_at": "2026-10-17T19:10",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": 100,
+   "steps": null,
+   "notes": null,
+   "created_by": "VHL",
+   "origin": null,
+   "state_at_onboarding": "archived: imported-done (turned in before setup)",
+   "state_now": "archived: imported-done (turned in before setup)",
+   "late_window_closes": "2026-10-31T23:59"
+  },
+  {
+   "id": "t-span-v6l",
+   "course": "SPAN 202",
+   "domain": "Spanish",
+   "title": "VHL Lección 6: Lectura",
+   "kind": "reading",
+   "source": "VHL",
+   "due": "2026-10-28T23:59",
+   "effort_hours": 0.5,
+   "category": "VHL practice",
+   "points": 10,
+   "submitted_at": "2026-10-17T19:40",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": 100,
+   "steps": null,
+   "notes": null,
+   "created_by": "VHL",
+   "origin": null,
+   "state_at_onboarding": "archived: imported-done (turned in before setup)",
+   "state_now": "archived: imported-done (turned in before setup)",
+   "late_window_closes": "2026-10-31T23:59"
+  },
+  {
+   "id": "t-span-c3",
+   "course": "SPAN 202",
+   "domain": "Spanish",
+   "title": "Composición 3: Mi comunidad",
+   "kind": "essay",
+   "source": "Blackboard",
+   "due": "2026-10-30T23:59",
+   "effort_hours": 3.0,
+   "category": "Compositions",
+   "points": 50,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-02T23:59"
+  },
+  {
+   "id": "t-span-v62",
+   "course": "SPAN 202",
+   "domain": "Spanish",
+   "title": "VHL Lección 6: Gramática 6.2",
+   "kind": "homework",
+   "source": "VHL",
+   "due": "2026-10-30T23:59",
+   "effort_hours": 1.0,
+   "category": "VHL practice",
+   "points": 20,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "VHL",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-02T23:59"
+  },
+  {
+   "id": "t-span-or2",
+   "course": "SPAN 202",
+   "domain": "Spanish",
+   "title": "Practice for Oral exam 2",
+   "kind": "exam study",
+   "source": "Knowlu (from syllabus)",
+   "due": "2026-11-04T10:00",
+   "effort_hours": 2.0,
+   "category": "Oral exams",
+   "points": null,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Knowlu",
+   "origin": "Exam date from the SPAN 202 syllabus",
+   "state_at_onboarding": "live",
+   "state_now": "live",
+   "late_window_closes": "2026-11-07T10:00"
+  },
+  {
+   "id": "t-eng-ol",
+   "course": "ENG 210",
+   "domain": "Science Writing",
+   "title": "Literature review outline",
+   "kind": "writing",
+   "source": "Blackboard",
+   "due": "2026-10-22T12:30",
+   "effort_hours": 1.0,
+   "category": "Literature review",
+   "points": 10,
+   "submitted_at": "2026-10-22T10:50",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "done: marked by Knowlu (turned in)"
+  },
+  {
+   "id": "t-eng-pr",
+   "course": "ENG 210",
+   "domain": "Science Writing",
+   "title": "Peer review: outline exchange (2 classmates)",
+   "kind": "homework",
+   "source": "Blackboard",
+   "due": "2026-10-27T12:30",
+   "effort_hours": 1.0,
+   "category": "Peer reviews",
+   "points": 15,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live"
+  },
+  {
+   "id": "t-eng-r4",
+   "course": "ENG 210",
+   "domain": "Science Writing",
+   "title": "Reading: Ch. 4, Writing for lay readers",
+   "kind": "reading",
+   "source": "Blackboard",
+   "due": "2026-10-29T12:30",
+   "effort_hours": 0.5,
+   "category": "Participation",
+   "points": null,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live"
+  },
+  {
+   "id": "t-eng-ab",
+   "course": "ENG 210",
+   "domain": "Science Writing",
+   "title": "Annotated bibliography",
+   "kind": "writing",
+   "source": "Blackboard",
+   "due": "2026-10-30T23:59",
+   "effort_hours": 2.0,
+   "category": "Annotated bibliography",
+   "points": 40,
+   "submitted_at": "2026-10-16T22:30",
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "archived: imported-done (turned in before setup)",
+   "state_now": "archived: imported-done (turned in before setup)"
+  },
+  {
+   "id": "t-eng-lr",
+   "course": "ENG 210",
+   "domain": "Science Writing",
+   "title": "Literature review draft",
+   "kind": "essay",
+   "source": "Blackboard",
+   "due": "2026-10-30T23:59",
+   "effort_hours": 3.0,
+   "category": "Literature review",
+   "points": 100,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 35,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": "Dr. Brooks granted an extension to Monday, November 2 at 11:59 pm (waiting for Maya to approve the date change).",
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live"
+  },
+  {
+   "id": "t-eng-fp",
+   "course": "ENG 210",
+   "domain": "Science Writing",
+   "title": "Final paper: research article",
+   "kind": "essay",
+   "source": "Blackboard",
+   "due": "2026-12-04T23:59",
+   "effort_hours": 8.0,
+   "category": "Final paper",
+   "points": 200,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": [
+    {
+     "title": "Pick a study and get approval",
+     "hours": 1.0,
+     "done": false
+    },
+    {
+     "title": "First draft",
+     "hours": 4.0,
+     "done": false
+    },
+    {
+     "title": "Revise after peer review",
+     "hours": 2.0,
+     "done": false
+    },
+    {
+     "title": "Final edit and references",
+     "hours": 1.0,
+     "done": false
+    }
+   ],
+   "notes": null,
+   "created_by": "Blackboard",
+   "origin": null,
+   "state_at_onboarding": "live",
+   "state_now": "live"
+  },
+  {
+   "id": "t-club-dues",
+   "course": null,
+   "domain": "Pre-Health Society",
+   "title": "Pay Pre-Health Society dues ($15)",
+   "kind": "errand",
+   "source": "Gmail",
+   "due": "2026-10-30T17:00",
+   "effort_hours": 0.25,
+   "category": null,
+   "points": null,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Knowlu (from Gmail)",
+   "origin": "Applied from mail read at setup (before Gmail was connected); listed under 'From your email' with Undo",
+   "state_at_onboarding": "live",
+   "state_now": "live"
+  },
+  {
+   "id": "t-pers-bus",
+   "course": null,
+   "domain": "Personal",
+   "title": "Renew bus pass",
+   "kind": "errand",
+   "source": "Maya (quick capture)",
+   "due": "2026-10-31T12:00",
+   "effort_hours": 0.25,
+   "category": null,
+   "points": null,
+   "submitted_at": null,
+   "done_by_student_at": null,
+   "progress_now": 0,
+   "platform_progress_now": null,
+   "steps": null,
+   "notes": null,
+   "created_by": "Maya",
+   "origin": "Typed into quick capture on 2026-10-24",
+   "state_at_onboarding": "not yet created",
+   "state_now": "live"
+  }
+ ],
+ "emails": [
+  {
+   "id": "m1",
+   "mailbox": "Gmail",
+   "via": "Google permission (read-only)",
+   "received": "2026-10-12T09:14",
+   "from": "Pre-Health Society <prehealth.society@clubs.halverson.example>",
+   "subject": "Fall dues reminder",
+   "quote": "Fall dues are $15 and due by Friday, October 30 at 5:00 pm. Pay at the club table or online through the student org portal.",
+   "read_when": "setup (mail from before Gmail was connected, read once)",
+   "outcome": "applied",
+   "result": "Task 'Pay Pre-Health Society dues ($15)', due Friday October 30 at 5:00 pm. Listed under 'From your email' with Undo.",
+   "task": "t-club-dues"
+  },
+  {
+   "id": "m2",
+   "mailbox": "Gmail",
+   "via": "Google permission (read-only)",
+   "received": "2026-10-19T08:00",
+   "from": "Office of Undergraduate Research <research@halverson.example>",
+   "subject": "SURF applications now open",
+   "quote": "Applications for the Summer Undergraduate Research Fellowship are due Friday, November 6 at 5:00 pm. You'll need a one-page statement and a faculty contact.",
+   "read_when": "after setup",
+   "outcome": "proposed",
+   "decision": "d-surf"
+  },
+  {
+   "id": "m3",
+   "mailbox": "Gmail",
+   "via": "Google permission (read-only)",
+   "received": "2026-10-22T18:20",
+   "from": "Pre-Health Society <prehealth.society@clubs.halverson.example>",
+   "subject": "Next Wednesday: med school admissions panel",
+   "quote": "Instead of our usual meeting, join us Wednesday, October 28 at 6:30 pm in Bryce Auditorium for a panel with admissions officers from three medical schools.",
+   "read_when": "after setup",
+   "outcome": "proposed",
+   "decision": "d-panel"
+  },
+  {
+   "id": "m4",
+   "mailbox": "School Outlook",
+   "via": "forwarding to Maya's private Knowlu address",
+   "received": "2026-10-23T16:12",
+   "from": "Dr. Hannah Brooks <hbrooks@halverson.example>",
+   "subject": "Re: Literature review extension",
+   "quote": "Maya, yes, you can submit the literature review draft by Monday, November 2 at 11:59 pm. The outline exchange on Tuesday still stands.",
+   "read_when": "after setup",
+   "outcome": "proposed",
+   "decision": "d-ext"
+  },
+  {
+   "id": "m5",
+   "mailbox": "School Outlook",
+   "via": "forwarding to Maya's private Knowlu address",
+   "received": "2026-10-24T10:03",
+   "from": "CHEM 231 (Blackboard announcement) <do-not-reply@blackboard.halverson.example>",
+   "subject": "Exam 2 location change",
+   "quote": "Exam 2 on Thursday will be held in Hallett Hall 120, not our usual room. Bring a pencil and your student ID.",
+   "read_when": "after setup",
+   "outcome": "shown, not proposed (changes nothing in the plan)",
+   "notice": "n-room"
+  },
+  {
+   "id": "m6",
+   "mailbox": "School Outlook",
+   "via": "forwarding to Maya's private Knowlu address",
+   "received": "2026-10-25T21:41",
+   "from": "Priya Raman, CS 110 TA <praman@halverson.example>",
+   "subject": "Lab 8 deadline moved",
+   "quote": "Heads up: Lab 8 (Dictionaries) is now due Friday, November 6 at 11:59 pm instead of Wednesday.",
+   "read_when": "after setup",
+   "outcome": "proposed",
+   "decision": "d-lab8"
+  }
+ ],
+ "mail_screened": {
+  "gmail_read_at_setup": 40,
+  "gmail_screened_out_at_setup": 39,
+  "outlook_screened_out_since_setup": 57,
+  "note": "Messages that could not affect the plan are discarded before any model reads them; Knowlu keeps what it found, never the message."
+ },
+ "decisions": [
+  {
+   "id": "d-ext",
+   "kind": "amend (date change)",
+   "question": "Move the Literature review draft to Monday, November 2 at 11:59 pm?",
+   "evidence_email": "m4",
+   "target": "t-eng-lr",
+   "change": {
+    "due": [
+     "2026-10-30T23:59",
+     "2026-11-02T23:59"
+    ]
+   },
+   "answers": [
+    "Move it",
+    "Keep Friday"
+   ],
+   "proposed_at": "2026-10-23T16:30",
+   "waiting_days_now": 2
+  },
+  {
+   "id": "d-lab8",
+   "kind": "amend (date change)",
+   "question": "Move Lab 8: Dictionaries to Friday, November 6 at 11:59 pm?",
+   "evidence_email": "m6",
+   "target": "t-cs-lab8",
+   "change": {
+    "due": [
+     "2026-11-04T23:59",
+     "2026-11-06T23:59"
+    ]
+   },
+   "answers": [
+    "Move it",
+    "Keep Wednesday"
+   ],
+   "proposed_at": "2026-10-25T22:00",
+   "waiting_days_now": 0
+  },
+  {
+   "id": "d-panel",
+   "kind": "event-accept (Worth a look)",
+   "question": "Is the med school admissions panel part of your week?",
+   "detail": "Wednesday, October 28, 6:30-8:00 pm, Bryce Auditorium. Replaces that week's Pre-Health Society meeting.",
+   "evidence_email": "m3",
+   "answers": [
+    "Yes, add it",
+    "No"
+   ],
+   "proposed_at": "2026-10-22T18:30",
+   "waiting_days_now": 3
+  },
+  {
+   "id": "d-surf",
+   "kind": "new task from email",
+   "question": "Add 'SURF application' to Personal, due Friday, November 6 at 5:00 pm, about 2h?",
+   "evidence_email": "m2",
+   "answers": [
+    "Add it",
+    "Not for me"
+   ],
+   "proposed_at": "2026-10-19T08:15",
+   "waiting_days_now": 7,
+   "note": "Unanswered for 7 days: eligible for one of the day's nudges (3-day rule)."
+  }
+ ],
+ "notices": [
+  {
+   "id": "n-room",
+   "kind": "room change",
+   "text": "CHEM 231 Exam 2 on Thursday is in Hallett Hall 120, not the usual room.",
+   "source_email": "m5",
+   "at": "2026-10-24T10:05"
+  },
+  {
+   "id": "n-grade-lab4",
+   "kind": "grade posted",
+   "text": "BIO 201 Lab 4 report graded: 44/50.",
+   "source": "Blackboard grades",
+   "at": "2026-10-25T18:00"
+  },
+  {
+   "id": "n-grade-ps6-missing",
+   "kind": "marked missing",
+   "text": "CHEM 231 Problem set 6 is marked missing in Blackboard.",
+   "source": "Blackboard grades",
+   "at": "2026-10-22T18:00"
+  }
+ ],
+ "grades": [
+  {
+   "course": "BIO 201",
+   "slug": "bio-201",
+   "pct": 87.8,
+   "letter": "B+",
+   "basis": "points",
+   "earned": 404,
+   "possible": 460,
+   "graded": 7,
+   "pending": [
+    "Problem set 5"
+   ],
+   "fetched_at": "2026-10-26T06:02",
+   "entries": [
+    {
+     "title": "Exam 1",
+     "category": "Exams",
+     "score": 86,
+     "possible": 100,
+     "pct": 86.0,
+     "status": "graded"
+    },
+    {
+     "title": "Lab 1 report",
+     "category": "Lab reports",
+     "score": 46,
+     "possible": 50,
+     "pct": 92.0,
+     "status": "graded"
+    },
+    {
+     "title": "Lab 2 report",
+     "category": "Lab reports",
+     "score": 45,
+     "possible": 50,
+     "pct": 90.0,
+     "status": "graded"
+    },
+    {
+     "title": "Lab 3 report",
+     "category": "Lab reports",
+     "score": 43,
+     "possible": 50,
+     "pct": 86.0,
+     "status": "graded"
+    },
+    {
+     "title": "Lab 4 report: Membrane transport",
+     "category": "Lab reports",
+     "score": 44,
+     "possible": 50,
+     "pct": 88.0,
+     "status": "graded"
+    },
+    {
+     "title": "Problem set 1-4",
+     "category": "Problem sets",
+     "score": 71,
+     "possible": 80,
+     "pct": 88.8,
+     "status": "graded"
+    },
+    {
+     "title": "Quizzes 1-8",
+     "category": "Quizzes",
+     "score": 69,
+     "possible": 80,
+     "pct": 86.2,
+     "status": "graded"
+    },
+    {
+     "title": "Problem set 5",
+     "status": "needs-grading (submitted)"
+    }
+   ]
+  },
+  {
+   "course": "CHEM 231",
+   "slug": "chem-231",
+   "pct": 81.2,
+   "letter": "B-",
+   "basis": "points",
+   "earned": 341,
+   "possible": 420,
+   "graded": 6,
+   "pending": [],
+   "fetched_at": "2026-10-26T06:02",
+   "entries": [
+    {
+     "title": "Exam 1",
+     "category": "Exams",
+     "score": 74,
+     "possible": 100,
+     "pct": 74.0,
+     "status": "graded"
+    },
+    {
+     "title": "Problem sets 1-5",
+     "category": "Problem sets",
+     "score": 108,
+     "possible": 125,
+     "pct": 86.4,
+     "status": "graded"
+    },
+    {
+     "title": "Problem set 6",
+     "category": "Problem sets",
+     "score": 0,
+     "possible": 25,
+     "pct": 0.0,
+     "status": "graded"
+    },
+    {
+     "title": "Online homework Ch. 1-4",
+     "category": "Online homework",
+     "score": 74,
+     "possible": 80,
+     "pct": 92.5,
+     "status": "graded"
+    },
+    {
+     "title": "Ch. 5 online homework",
+     "category": "Online homework",
+     "score": 19,
+     "possible": 20,
+     "pct": 95.0,
+     "status": "graded"
+    },
+    {
+     "title": "Recitation 1-7",
+     "category": "Recitation",
+     "score": 66,
+     "possible": 70,
+     "pct": 94.3,
+     "status": "graded"
+    }
+   ]
+  },
+  {
+   "course": "CS 110",
+   "slug": "cs-110",
+   "pct": 96.4,
+   "letter": "A",
+   "basis": "points",
+   "earned": 858,
+   "possible": 890,
+   "graded": 4,
+   "pending": [],
+   "fetched_at": "2026-10-26T06:02",
+   "entries": [
+    {
+     "title": "Midterm 1",
+     "category": "Exams",
+     "score": 91,
+     "possible": 100,
+     "pct": 91.0,
+     "status": "graded"
+    },
+    {
+     "title": "Labs 1-5",
+     "category": "Labs",
+     "score": 482,
+     "possible": 500,
+     "pct": 96.4,
+     "status": "graded"
+    },
+    {
+     "title": "Project 1",
+     "category": "Projects",
+     "score": 47,
+     "possible": 50,
+     "pct": 94.0,
+     "status": "graded"
+    },
+    {
+     "title": "zyBooks ch. 1-6",
+     "category": "zyBooks",
+     "score": 238,
+     "possible": 240,
+     "pct": 99.2,
+     "status": "graded"
+    }
+   ]
+  },
+  {
+   "course": "SPAN 202",
+   "slug": "span-202",
+   "pct": 89.3,
+   "letter": "B+",
+   "basis": "points",
+   "earned": 509,
+   "possible": 570,
+   "graded": 7,
+   "pending": [
+    "VHL Lección 5: Gramática 5.2"
+   ],
+   "fetched_at": "2026-10-26T06:02",
+   "entries": [
+    {
+     "title": "Examen 1",
+     "category": "Exams",
+     "score": 88,
+     "possible": 100,
+     "pct": 88.0,
+     "status": "graded"
+    },
+    {
+     "title": "Examen 2",
+     "category": "Exams",
+     "score": 90,
+     "possible": 100,
+     "pct": 90.0,
+     "status": "graded"
+    },
+    {
+     "title": "Oral exam 1",
+     "category": "Oral exams",
+     "score": 46,
+     "possible": 50,
+     "pct": 92.0,
+     "status": "graded"
+    },
+    {
+     "title": "VHL Lecciónes 1-4",
+     "category": "VHL practice",
+     "score": 196,
+     "possible": 200,
+     "pct": 98.0,
+     "status": "graded"
+    },
+    {
+     "title": "VHL Lección 5: Vocabulario",
+     "category": "VHL practice",
+     "score": 0,
+     "possible": 20,
+     "pct": 0.0,
+     "status": "graded"
+    },
+    {
+     "title": "Composición 1",
+     "category": "Compositions",
+     "score": 45,
+     "possible": 50,
+     "pct": 90.0,
+     "status": "graded"
+    },
+    {
+     "title": "Composición 2",
+     "category": "Compositions",
+     "score": 44,
+     "possible": 50,
+     "pct": 88.0,
+     "status": "graded"
+    },
+    {
+     "title": "VHL Lección 5: Gramática 5.2",
+     "status": "needs-grading (submitted)"
+    }
+   ]
+  },
+  {
+   "course": "ENG 210",
+   "slug": "eng-210",
+   "pct": 83.2,
+   "letter": "B",
+   "basis": "points",
+   "earned": 79,
+   "possible": 95,
+   "graded": 4,
+   "pending": [
+    "Annotated bibliography"
+   ],
+   "fetched_at": "2026-10-26T06:02",
+   "entries": [
+    {
+     "title": "Science news summary",
+     "category": "Participation",
+     "score": 17,
+     "possible": 20,
+     "pct": 85.0,
+     "status": "graded"
+    },
+    {
+     "title": "Peer review 1",
+     "category": "Peer reviews",
+     "score": 13,
+     "possible": 15,
+     "pct": 86.7,
+     "status": "graded"
+    },
+    {
+     "title": "Literature review outline",
+     "category": "Literature review",
+     "score": 8,
+     "possible": 10,
+     "pct": 80.0,
+     "status": "graded"
+    },
+    {
+     "title": "Lab report rewrite",
+     "category": "Final paper",
+     "score": 41,
+     "possible": 50,
+     "pct": 82.0,
+     "status": "graded"
+    },
+    {
+     "title": "Annotated bibliography",
+     "status": "needs-grading (submitted)"
+    }
+   ]
+  }
+ ],
+ "onboarding": {
+  "started": "2026-10-18T19:05",
+  "finished": "2026-10-18T19:19",
+  "student_minutes": 8.9,
+  "steps": [
+   {
+    "n": 1,
+    "id": "welcome",
+    "title": "Welcome",
+    "why": "Knowlu answers one question every morning: what's next? Next, you'll connect the places that already know your work, about 10 minutes.",
+    "ask": null,
+    "proof": null,
+    "student_time_s": 25
+   },
+   {
+    "n": 2,
+    "id": "account",
+    "title": "Your account",
+    "why": "Your plan lives in your account, so it's safe if this computer isn't.",
+    "ask": "Continue with Google (name and email only) or email me a code; confirm 18+ and the terms",
+    "choice_made": "Continue with Google",
+    "proof": "Signed in as maya.okafor.demo@gmail.example",
+    "student_time_s": 40,
+    "background": [
+     "Vault folder created on this computer with defaults (name 'Knowlu', Windows' timezone, checks at 12:00 and 6:00)"
+    ]
+   },
+   {
+    "n": 3,
+    "id": "school",
+    "title": "Your school",
+    "why": "One school sign-in lets Knowlu read your classes, class times, assignments, grades and school email. You won't sign in to these again.",
+    "ask": "Pick your school, then sign in once in Halverson State's own window (password and phone approval happen there; Knowlu never sees the password)",
+    "school_picked": "Halverson State University",
+    "mfa_prompts": 1,
+    "student_time_s": 95,
+    "proof": {
+     "classes_this_term": 5,
+     "past_term_classes_hidden": 2,
+     "class_times_found_for": 5,
+     "meetings_found": 7,
+     "assignments": 26,
+     "already_turned_in": 4,
+     "past_items_found": 29,
+     "grades_for_courses": 5,
+     "syllabi_found_for": 4,
+     "text": "5 classes this term; class times for 5; 26 assignments, 4 already turned in; grades for 5 courses; syllabi found for 4"
+    },
+    "background": [
+     "Course list (current term only)",
+     "Blackboard calendar feed link",
+     "Registrar class schedule",
+     "Grades",
+     "Syllabus skim",
+     "School mailbox forwarding steps"
+    ]
+   },
+   {
+    "n": 4,
+    "id": "payment",
+    "title": "Payment",
+    "why": "Everything you just connected keeps running every day for $9.99 a month, after 7 days free.",
+    "ask": "Checkout in your browser (Stripe). Other options: $39.99 for a 6-month term; Pell Grant recipients pay 75% less.",
+    "proof": "Your trial is on. First charge October 25.",
+    "student_time_s": 80,
+    "tester_variant": "Nothing to pay: you're a tester."
+   },
+   {
+    "n": 5,
+    "id": "school-email",
+    "title": "School email",
+    "why": "Professors change dates by email. Knowlu reads what arrives and proposes each change for you to approve.",
+    "ask": "Nothing new: your school sign-in covers it",
+    "student_time_s": 10,
+    "proof": "Forwarding on. Test message arrived in 38 s. New mail is read as it arrives; older school mail is still coming in.",
+    "skip_cost": "Date changes and new work announced by email are missed."
+   },
+   {
+    "n": 6,
+    "id": "google",
+    "title": "Your Google account: Gmail and Calendar",
+    "why": "Clubs, jobs and internships write to your Gmail, and your calendar says when you're already busy. One Google permission covers both, read-only.",
+    "ask": "One Google consent for Gmail and Calendar together (read-only). While Knowlu is unverified, Google shows a warning screen first: choose Advanced, then continue.",
+    "student_time_s": 35,
+    "gmail_history_note": "Gmail by permission brings in the last 7 days of mail.",
+    "proof": "Read 40 recent messages; 1 thing to do (Pre-Health dues, added). 6 events this week, 3 repeating ones to check on Your week.",
+    "fallback": "If you decline or the read fails: set up Gmail forwarding instead (2-4 min).",
+    "skip_cost": "Club, job and internship tasks from Gmail are missed; free time ignores your own events."
+   },
+   {
+    "n": 7,
+    "id": "other-calendar",
+    "title": "Another calendar",
+    "shown": false,
+    "why": "If your calendar isn't Google's, add it so your free time is honest.",
+    "ask": "Paste an iCal link",
+    "proof": null,
+    "note": "Not shown for Maya: step 6 granted Google Calendar."
+   },
+   {
+    "n": 8,
+    "id": "homework-sites",
+    "title": "Homework sites",
+    "why": "Homework sites hold due dates your school's feed doesn't show.",
+    "ask": "Sign in to zyBooks and VHL (both mentioned in your syllabi). The sign-in stays on this computer.",
+    "student_time_s": 70,
+    "proof": {
+     "zyBooks": {
+      "books": 1,
+      "book_title": "Programming in Python 3 (CS 110)",
+      "assignments": 8,
+      "already_done": 3,
+      "past_items": 17,
+      "text": "zyBooks: 1 book, 8 assignments, 3 already done"
+     },
+     "VHL": {
+      "courses": 1,
+      "course_title": "SPAN 202 online practice",
+      "assignments": 6,
+      "already_done": 2,
+      "past_items": 6,
+      "text": "VHL: 1 course, 6 assignments, 2 already done"
+     }
+    },
+    "skip_cost": "That site's due dates are missing unless Blackboard's feed carries them."
+   },
+   {
+    "n": 9,
+    "id": "syllabi",
+    "title": "Syllabi",
+    "why": "Your syllabus has every exam date, how each course is graded, and the late-work rules.",
+    "ask": "CS 110's syllabus wasn't in Blackboard: upload the file (or skip this course)",
+    "uploaded": "CS110_Fall2026_syllabus.pdf",
+    "student_time_s": 40,
+    "proof": "Read 5 of 5: 10 exams, weights for 5, late rules for 4 (ENG 210's syllabus has none)",
+    "skip_cost": "No exam dates beyond the feed, no weights and no late rule for that course."
+   },
+   {
+    "n": 10,
+    "id": "your-week",
+    "title": "Your week",
+    "why": "Check your classes. Everything here can be changed later.",
+    "ask": "Confirm each row; Edit any; typing is the last resort",
+    "student_time_s": 110,
+    "rows": [
+     {
+      "group": "Classes",
+      "text": "BIO 201 lecture: Mon, Wed, Fri 09:00-09:50, Kessler Hall 104",
+      "source": "registrar",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Classes",
+      "text": "BIO 201 lab: Thu 14:00-16:50, Kessler Hall 310",
+      "source": "registrar",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Classes",
+      "text": "CHEM 231 lecture: Tue, Thu 09:30-10:45, Hallett Hall 220",
+      "source": "registrar",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Classes",
+      "text": "CHEM 231 recitation: Wed 15:00-15:50, Hallett Hall 015",
+      "source": "registrar",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Classes",
+      "text": "CS 110 lecture: Mon, Wed 13:00-14:15, Ostrander Center 140",
+      "source": "registrar",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Classes",
+      "text": "SPAN 202 lecture: Mon, Wed, Fri 10:00-10:50, Bellamy Hall 212",
+      "source": "registrar",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Classes",
+      "text": "ENG 210 seminar: Tue, Thu 12:30-13:45, Marsh Library, seminar room 3B",
+      "source": "registrar",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Exams",
+      "text": "BIO 201 Exam 2: 2026-11-06 09:00",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Exams",
+      "text": "BIO 201 Final exam: 2026-12-14 08:00",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Exams",
+      "text": "CHEM 231 Exam 2: 2026-10-29 09:30",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Exams",
+      "text": "CHEM 231 Exam 3: 2026-11-19 09:30",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Exams",
+      "text": "CHEM 231 Final exam: 2026-12-16 13:00",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Exams",
+      "text": "CS 110 Midterm 2: 2026-11-18 13:00",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Exams",
+      "text": "CS 110 Final exam: 2026-12-18 10:30",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Exams",
+      "text": "SPAN 202 Oral exam 2: 2026-11-04 10:00",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Exams",
+      "text": "SPAN 202 Examen 3: 2026-11-20 10:00",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Exams",
+      "text": "SPAN 202 Final exam: 2026-12-15 10:30",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Grading",
+      "text": "BIO 201 weights: Exams 45%, Lab reports 25%, Problem sets 15%, Quizzes 10%, Participation 5%",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Grading",
+      "text": "CHEM 231 weights: Exams 60%, Problem sets 20%, Online homework 10%, Recitation 10%",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Grading",
+      "text": "CS 110 weights: Labs 30%, Exams 30%, Projects 20%, zyBooks participation 10%, zyBooks challenge 10%",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Grading",
+      "text": "SPAN 202 weights: Exams 40%, VHL practice 20%, Compositions 20%, Oral exams 10%, Participation 10%",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Grading",
+      "text": "ENG 210 weights: Final paper 35%, Literature review 25%, Peer reviews 15%, Participation 15%, Annotated bibliography 10%",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Late work",
+      "text": "BIO 201: Late: −10% a day, up to 3 days (your syllabus)",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Late work",
+      "text": "CHEM 231: Late work not accepted after 48 hours (your syllabus)",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Late work",
+      "text": "CS 110: Late: −10% a day, up to 5 days (your syllabus)",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Late work",
+      "text": "SPAN 202: Late: −10% a day, up to 3 days (your syllabus)",
+      "source": "syllabus",
+      "answer": "Confirmed"
+     },
+     {
+      "group": "Late work",
+      "text": "ENG 210: no rule found",
+      "source": "syllabus",
+      "answer": "Left blank"
+     },
+     {
+      "group": "Your week",
+      "text": "Marsh Library circulation desk: Tue 17:00-21:00; Sat 10:00-14:00 (work, hard)",
+      "source": "Google Calendar (repeating)",
+      "answer": "Mine"
+     },
+     {
+      "group": "Your week",
+      "text": "Pre-Health Society meeting: Wed 18:30-19:30 (club, soft)",
+      "source": "Google Calendar (repeating)",
+      "answer": "Mine"
+     },
+     {
+      "group": "Your week",
+      "text": "Intramural soccer: Sun 16:00-17:00 (club, optional)",
+      "source": "Google Calendar (repeating)",
+      "answer": "Mine"
+     },
+     {
+      "group": "Office hours",
+      "text": "BIO 201 office hours: Wed 11:00-12:00 (optional)",
+      "source": "syllabus",
+      "answer": "Mine"
+     },
+     {
+      "group": "Office hours",
+      "text": "CHEM 231 office hours: Mon 15:30-16:30 (optional)",
+      "source": "syllabus",
+      "answer": "Mine"
+     },
+     {
+      "group": "Your day",
+      "text": "Awake 07:30 to 23:30",
+      "source": "default",
+      "answer": "Kept"
+     }
+    ]
+   },
+   {
+    "n": 11,
+    "id": "reveal",
+    "title": "Here's your week",
+    "why": "Here's your week.",
+    "ask": "Open Knowlu",
+    "student_time_s": 30
+   }
+  ],
+  "rail": [
+   {
+    "source": "Account",
+    "state": "done",
+    "proof": "Signed in",
+    "finished_at": "19:06"
+   },
+   {
+    "source": "Course list",
+    "state": "done",
+    "proof": "5 classes this term (2 past-term hidden)",
+    "started_at": "19:07",
+    "finished_at": "19:07"
+   },
+   {
+    "source": "Blackboard assignments",
+    "state": "done",
+    "proof": "26 assignments, 4 already turned in",
+    "started_at": "19:07",
+    "finished_at": "19:08"
+   },
+   {
+    "source": "Class times (registrar)",
+    "state": "done",
+    "proof": "7 meetings for 5 classes",
+    "started_at": "19:07",
+    "finished_at": "19:08"
+   },
+   {
+    "source": "Grades",
+    "state": "done",
+    "proof": "Grades for 5 courses",
+    "started_at": "19:07",
+    "finished_at": "19:09"
+   },
+   {
+    "source": "Syllabi",
+    "state": "done",
+    "proof": "5 of 5 read",
+    "started_at": "19:08",
+    "finished_at": "19:19",
+    "note": "CS 110's uploaded syllabus was the last one read; it finished 40 s into the reveal's wait."
+   },
+   {
+    "source": "School email",
+    "state": "done",
+    "proof": "Forwarding on; test arrived in 38 s",
+    "started_at": "19:10",
+    "finished_at": "19:11",
+    "still_coming": "Older school mail is still coming in (it can take a day)."
+   },
+   {
+    "source": "Gmail",
+    "state": "done",
+    "proof": "40 messages read; 1 thing to do",
+    "started_at": "19:12",
+    "finished_at": "19:13"
+   },
+   {
+    "source": "Google Calendar",
+    "state": "done",
+    "proof": "6 events this week",
+    "started_at": "19:12",
+    "finished_at": "19:12"
+   },
+   {
+    "source": "zyBooks",
+    "state": "done",
+    "proof": "zyBooks: 1 book, 8 assignments, 3 already done",
+    "started_at": "19:14",
+    "finished_at": "19:15"
+   },
+   {
+    "source": "VHL",
+    "state": "done",
+    "proof": "VHL: 1 course, 6 assignments, 2 already done",
+    "started_at": "19:14",
+    "finished_at": "19:15"
+   },
+   {
+    "source": "Effort estimates and order",
+    "state": "done",
+    "proof": "Effort estimated for 34 assignments",
+    "started_at": "19:18",
+    "finished_at": "19:19"
+   }
+  ],
+  "failure_examples": [
+   {
+    "where": "rail, during onboarding (variant)",
+    "text": "VHL didn't accept the sign-in. Try again, or skip VHL for now; its due dates will be missing until it's connected."
+   },
+   {
+    "where": "rail, during onboarding (variant)",
+    "text": "Gmail's read failed. Knowlu can bring Gmail in by forwarding instead, about 3 minutes."
+   },
+   {
+    "where": "reveal, after the 3-minute wait (variant)",
+    "text": "Still reading 1 syllabus; it will appear on your page."
+   }
+  ],
+  "resume_example": "If Maya had quit at payment, the next launch opens at Payment with steps 1-3's proof intact; the school sign-in is not asked again."
+ },
+ "reveal": {
+  "as_of": "2026-10-18T19:19",
+  "title": "Here's your week",
+  "week": [
+   {
+    "date": "2026-10-19",
+    "weekday": "Monday",
+    "blocks": [
+     {
+      "title": "BIO 201 lecture",
+      "start": "09:00",
+      "end": "09:50",
+      "room": "Kessler Hall 104",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Cell Biology"
+     },
+     {
+      "title": "SPAN 202 lecture",
+      "start": "10:00",
+      "end": "10:50",
+      "room": "Bellamy Hall 212",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Spanish"
+     },
+     {
+      "title": "CS 110 lecture",
+      "start": "13:00",
+      "end": "14:15",
+      "room": "Ostrander Center 140",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Programming"
+     },
+     {
+      "title": "CHEM 231 office hours",
+      "start": "15:30",
+      "end": "16:30",
+      "room": "Hallett Hall 301",
+      "kind": "office hours",
+      "level": "optional",
+      "domain": "Organic Chemistry"
+     }
+    ],
+    "due": [
+     {
+      "title": "Reading: Ch. 8, Metabolism",
+      "course": "BIO 201",
+      "due_time": "9:00 am",
+      "estimate_hours": 0.5
+     },
+     {
+      "title": "VHL Lección 5: Vocabulario",
+      "course": "SPAN 202",
+      "due_time": "11:59 pm",
+      "estimate_hours": 1.0
+     }
+    ]
+   },
+   {
+    "date": "2026-10-20",
+    "weekday": "Tuesday",
+    "blocks": [
+     {
+      "title": "CHEM 231 lecture",
+      "start": "09:30",
+      "end": "10:45",
+      "room": "Hallett Hall 220",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Organic Chemistry"
+     },
+     {
+      "title": "ENG 210 seminar",
+      "start": "12:30",
+      "end": "13:45",
+      "room": "Marsh Library, seminar room 3B",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Science Writing"
+     },
+     {
+      "title": "Marsh Library circulation desk",
+      "start": "17:00",
+      "end": "21:00",
+      "kind": "work",
+      "level": "hard",
+      "domain": "Library job"
+     }
+    ],
+    "due": [
+     {
+      "title": "Problem set 6",
+      "course": "CHEM 231",
+      "due_time": "9:30 am",
+      "estimate_hours": 2.0
+     }
+    ]
+   },
+   {
+    "date": "2026-10-21",
+    "weekday": "Wednesday",
+    "blocks": [
+     {
+      "title": "BIO 201 lecture",
+      "start": "09:00",
+      "end": "09:50",
+      "room": "Kessler Hall 104",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Cell Biology"
+     },
+     {
+      "title": "SPAN 202 lecture",
+      "start": "10:00",
+      "end": "10:50",
+      "room": "Bellamy Hall 212",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Spanish"
+     },
+     {
+      "title": "BIO 201 office hours",
+      "start": "11:00",
+      "end": "12:00",
+      "room": "Kessler Hall 228",
+      "kind": "office hours",
+      "level": "optional",
+      "domain": "Cell Biology"
+     },
+     {
+      "title": "CS 110 lecture",
+      "start": "13:00",
+      "end": "14:15",
+      "room": "Ostrander Center 140",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Programming"
+     },
+     {
+      "title": "CHEM 231 recitation",
+      "start": "15:00",
+      "end": "15:50",
+      "room": "Hallett Hall 015",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Organic Chemistry"
+     },
+     {
+      "title": "Pre-Health Society meeting",
+      "start": "18:30",
+      "end": "19:30",
+      "kind": "club",
+      "level": "soft",
+      "domain": "Pre-Health Society"
+     }
+    ],
+    "due": [
+     {
+      "title": "Ch. 5 online homework",
+      "course": "CHEM 231",
+      "due_time": "11:59 pm",
+      "estimate_hours": 1.0
+     },
+     {
+      "title": "VHL Lección 5: Gramática 5.2",
+      "course": "SPAN 202",
+      "due_time": "11:59 pm",
+      "estimate_hours": 1.0
+     }
+    ]
+   },
+   {
+    "date": "2026-10-22",
+    "weekday": "Thursday",
+    "blocks": [
+     {
+      "title": "CHEM 231 lecture",
+      "start": "09:30",
+      "end": "10:45",
+      "room": "Hallett Hall 220",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Organic Chemistry"
+     },
+     {
+      "title": "ENG 210 seminar",
+      "start": "12:30",
+      "end": "13:45",
+      "room": "Marsh Library, seminar room 3B",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Science Writing"
+     },
+     {
+      "title": "BIO 201 lab",
+      "start": "14:00",
+      "end": "16:50",
+      "room": "Kessler Hall 310",
+      "kind": "lab",
+      "level": "hard",
+      "domain": "Cell Biology"
+     },
+     {
+      "title": "Haircut",
+      "start": "17:00",
+      "end": "17:45",
+      "kind": "meeting",
+      "level": "hard",
+      "domain": "Personal"
+     }
+    ],
+    "due": [
+     {
+      "title": "Lab 4 report: Membrane transport",
+      "course": "BIO 201",
+      "due_time": "2:00 pm",
+      "estimate_hours": 3.0
+     },
+     {
+      "title": "Literature review outline",
+      "course": "ENG 210",
+      "due_time": "12:30 pm",
+      "estimate_hours": 1.0
+     }
+    ]
+   },
+   {
+    "date": "2026-10-23",
+    "weekday": "Friday",
+    "blocks": [
+     {
+      "title": "BIO 201 lecture",
+      "start": "09:00",
+      "end": "09:50",
+      "room": "Kessler Hall 104",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Cell Biology"
+     },
+     {
+      "title": "SPAN 202 lecture",
+      "start": "10:00",
+      "end": "10:50",
+      "room": "Bellamy Hall 212",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Spanish"
+     }
+    ],
+    "due": [
+     {
+      "title": "Problem set 5",
+      "course": "BIO 201",
+      "due_time": "11:59 pm",
+      "estimate_hours": 2.0
+     },
+     {
+      "title": "Lab 6: Functions",
+      "course": "CS 110",
+      "due_time": "11:59 pm",
+      "estimate_hours": 2.0
+     }
+    ]
+   },
+   {
+    "date": "2026-10-24",
+    "weekday": "Saturday",
+    "blocks": [
+     {
+      "title": "Marsh Library circulation desk",
+      "start": "10:00",
+      "end": "14:00",
+      "kind": "work",
+      "level": "hard",
+      "domain": "Library job"
+     }
+    ],
+    "due": []
+   },
+   {
+    "date": "2026-10-25",
+    "weekday": "Sunday",
+    "blocks": [
+     {
+      "title": "Intramural soccer",
+      "start": "16:00",
+      "end": "17:00",
+      "kind": "club",
+      "level": "optional",
+      "domain": "Personal"
+     },
+     {
+      "title": "Family video call",
+      "start": "19:00",
+      "end": "20:00",
+      "kind": "meeting",
+      "level": "soft",
+      "domain": "Personal"
+     }
+    ],
+    "due": []
+   }
+  ],
+  "whats_next": {
+   "id": "t-bio-r8",
+   "title": "Reading: Ch. 8, Metabolism",
+   "course": "BIO 201",
+   "due_text": "tomorrow at 9:00 am",
+   "estimate": "30m",
+   "why": "Due tomorrow at 9:00 am, before BIO 201. It's the first thing due this week."
+  },
+  "tonight_and_tomorrow": [
+   {
+    "title": "Reading: Ch. 8, Metabolism",
+    "due_text": "tomorrow at 9:00 am",
+    "estimate": "30m"
+   },
+   {
+    "title": "VHL Lección 5: Vocabulario",
+    "due_text": "tomorrow at 11:59 pm",
+    "estimate": "1h"
+   }
+  ],
+  "free_time_tonight": {
+   "hours": 2.7,
+   "windows": [
+    "after 9:00 pm"
+   ],
+   "text": "About 3h free tonight, after 9:00 pm."
+  },
+  "tidied": [
+   "52 past items and 9 already turned in were archived.",
+   "Effort estimated for 34 assignments.",
+   "2 classes from last term left out."
+  ],
+  "from_your_email": [
+   "Pay Pre-Health Society dues ($15), due Friday, October 30 at 5:00 pm. Undo"
+  ],
+  "still_coming": [
+   "Older school email is still coming in; anything it finds will be proposed."
+  ],
+  "not_connected": [],
+  "wait": {
+   "cap_seconds": 180,
+   "waited_seconds": 40,
+   "note": "Opened after 40 s, when CS 110's syllabus finished. Nothing was still running."
+  },
+  "button": "Open Knowlu"
+ },
+ "today": {
+  "as_of": "2026-10-26T08:15",
+  "weekday": "Monday",
+  "term_week": "Week 10 of 16",
+  "verdict": {
+   "headline": "About 4.7h is due by tomorrow, and today has room for it.",
+   "sub": "Lab 6 is next. After today's work, about 6h is yours, after 6:00 pm.",
+   "must_do_hours": 4.7,
+   "capacity_hours": 6.5,
+   "planned_hours": 6.5,
+   "status_word": "steady"
+  },
+  "list": [
+   {
+    "id": "t-cs-lab6",
+    "title": "Lab 6: Functions",
+    "course": "CS 110",
+    "domain": "Programming",
+    "source": "zyBooks",
+    "due": "2026-10-23T23:59",
+    "due_text": "last Friday at 11:59 pm",
+    "estimate_hours": 2.0,
+    "remaining_hours": 1.2,
+    "estimate_text": "1h 12m",
+    "progress": 40,
+    "platform_progress": 40,
+    "state": "past due, inside late window",
+    "why": "Past due since Friday. Each day late costs 10%; finishing today keeps it at −30%.",
+    "late_label": "−30% now; closes Wednesday at 11:59 pm",
+    "group": "urgent"
+   },
+   {
+    "id": "t-cs-zy71",
+    "title": "zyBooks 7.1-7.4 participation",
+    "course": "CS 110",
+    "domain": "Programming",
+    "source": "zyBooks",
+    "due": "2026-10-26T23:59",
+    "due_text": "today at 11:59 pm",
+    "estimate_hours": 1.0,
+    "remaining_hours": 0.4,
+    "estimate_text": "24m",
+    "progress": 60,
+    "platform_progress": 60,
+    "state": "live",
+    "why": "Due today at 11:59 pm. zyBooks shows 60% done.",
+    "group": "urgent"
+   },
+   {
+    "id": "t-span-v6p",
+    "title": "VHL Lección 6: Práctica de vocabulario",
+    "course": "SPAN 202",
+    "domain": "Spanish",
+    "source": "VHL",
+    "due": "2026-10-26T23:59",
+    "due_text": "today at 11:59 pm",
+    "estimate_hours": 1.0,
+    "remaining_hours": 0.6,
+    "estimate_text": "36m",
+    "progress": 40,
+    "platform_progress": 40,
+    "state": "live",
+    "why": "Due today at 11:59 pm. VHL shows 40% done.",
+    "group": "urgent"
+   },
+   {
+    "id": "t-chem-ps7",
+    "title": "Problem set 7",
+    "course": "CHEM 231",
+    "domain": "Organic Chemistry",
+    "source": "Blackboard",
+    "due": "2026-10-27T09:30",
+    "due_text": "tomorrow at 9:30 am",
+    "estimate_hours": 2.0,
+    "remaining_hours": 1.5,
+    "estimate_text": "1h 30m",
+    "progress": 25,
+    "platform_progress": null,
+    "state": "live",
+    "why": "Due tomorrow at 9:30 am, at the start of CHEM 231. A quarter done.",
+    "group": "urgent"
+   },
+   {
+    "id": "t-eng-pr",
+    "title": "Peer review: outline exchange (2 classmates)",
+    "course": "ENG 210",
+    "domain": "Science Writing",
+    "source": "Blackboard",
+    "due": "2026-10-27T12:30",
+    "due_text": "tomorrow at 12:30 pm",
+    "estimate_hours": 1.0,
+    "remaining_hours": 1.0,
+    "estimate_text": "1h",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "why": "Due tomorrow at 12:30 pm, at the start of ENG 210.",
+    "group": "urgent"
+   },
+   {
+    "id": "t-chem-ex2",
+    "title": "Study for Exam 2 (Ch. 5-7)",
+    "course": "CHEM 231",
+    "domain": "Organic Chemistry",
+    "source": "Knowlu (from syllabus)",
+    "due": "2026-10-29T09:30",
+    "due_text": "Thursday at 9:30 am",
+    "estimate_hours": 4.0,
+    "remaining_hours": 4.0,
+    "estimate_text": "1h 48m today (of 4h left)",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "hours_today": 1.8,
+    "steps": [
+     {
+      "title": "Practice exam 1",
+      "hours": 1.5,
+      "done": false
+     },
+     {
+      "title": "Ch. 5-6 problems",
+      "hours": 1.0,
+      "done": false
+     },
+     {
+      "title": "Ch. 7 stereochemistry problems",
+      "hours": 1.0,
+      "done": false
+     },
+     {
+      "title": "Review mechanisms",
+      "hours": 0.5,
+      "done": false
+     }
+    ],
+    "why": "Exam 2 is Thursday at 9:30 am. Two sessions before then keep it to about 2h a day.",
+    "group": "recommended"
+   }
+  ],
+  "done_today": [
+   {
+    "id": "t-bio-r9",
+    "title": "Reading: Ch. 9, Cellular respiration",
+    "course": "BIO 201",
+    "by": "Maya",
+    "at": "2026-10-26T07:55",
+    "note": "Checked off this morning; stays visible today and can be unchecked."
+   }
+  ],
+  "later": [
+   {
+    "id": "t-chem-ex2",
+    "title": "Study for Exam 2 (Ch. 5-7)",
+    "course": "CHEM 231",
+    "domain": "Organic Chemistry",
+    "source": "Knowlu (from syllabus)",
+    "due": "2026-10-29T09:30",
+    "due_text": "Thursday at 9:30 am",
+    "estimate_hours": 4.0,
+    "remaining_hours": 4.0,
+    "estimate_text": "4h",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "steps": [
+     {
+      "title": "Practice exam 1",
+      "hours": 1.5,
+      "done": false
+     },
+     {
+      "title": "Ch. 5-6 problems",
+      "hours": 1.0,
+      "done": false
+     },
+     {
+      "title": "Ch. 7 stereochemistry problems",
+      "hours": 1.0,
+      "done": false
+     },
+     {
+      "title": "Review mechanisms",
+      "hours": 0.5,
+      "done": false
+     }
+    ],
+    "why": "Exam 2 is Thursday at 9:30 am. Two sessions before then keep it to about 2h a day.",
+    "group": "later (rest of a task started today)",
+    "remaining_after_today": 2.2
+   },
+   {
+    "id": "t-chem-rw8",
+    "title": "Recitation worksheet 8",
+    "course": "CHEM 231",
+    "domain": "Organic Chemistry",
+    "source": "Blackboard",
+    "due": "2026-10-28T15:00",
+    "due_text": "Wednesday at 3:00 pm",
+    "estimate_hours": 1.0,
+    "remaining_hours": 1.0,
+    "estimate_text": "1h",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-cs-lab7",
+    "title": "Lab 7: Lists and loops",
+    "course": "CS 110",
+    "domain": "Programming",
+    "source": "zyBooks",
+    "due": "2026-10-28T23:59",
+    "due_text": "Wednesday at 11:59 pm",
+    "estimate_hours": 2.0,
+    "remaining_hours": 1.4,
+    "estimate_text": "1h 24m",
+    "progress": 30,
+    "platform_progress": 30,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-eng-r4",
+    "title": "Reading: Ch. 4, Writing for lay readers",
+    "course": "ENG 210",
+    "domain": "Science Writing",
+    "source": "Blackboard",
+    "due": "2026-10-29T12:30",
+    "due_text": "Thursday at 12:30 pm",
+    "estimate_hours": 0.5,
+    "remaining_hours": 0.5,
+    "estimate_text": "30m",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-bio-lab5",
+    "title": "Lab 5 report: Enzyme kinetics",
+    "course": "BIO 201",
+    "domain": "Cell Biology",
+    "source": "Blackboard",
+    "due": "2026-10-29T14:00",
+    "due_text": "Thursday at 2:00 pm",
+    "estimate_hours": 3.0,
+    "remaining_hours": 2.4,
+    "estimate_text": "2h 24m",
+    "progress": 20,
+    "platform_progress": null,
+    "state": "live",
+    "steps": [
+     {
+      "title": "Results table and graph",
+      "hours": 1.0,
+      "done": true
+     },
+     {
+      "title": "Discussion",
+      "hours": 1.5,
+      "done": false
+     },
+     {
+      "title": "Abstract and references",
+      "hours": 0.5,
+      "done": false
+     }
+    ],
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-bio-r10",
+    "title": "Reading: Ch. 10, Photosynthesis",
+    "course": "BIO 201",
+    "domain": "Cell Biology",
+    "source": "Blackboard",
+    "due": "2026-10-30T09:00",
+    "due_text": "Friday at 9:00 am",
+    "estimate_hours": 0.5,
+    "remaining_hours": 0.5,
+    "estimate_text": "30m",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-cs-p2",
+    "title": "Project 2 proposal",
+    "course": "CS 110",
+    "domain": "Programming",
+    "source": "Blackboard",
+    "due": "2026-10-30T17:00",
+    "due_text": "Friday at 5:00 pm",
+    "estimate_hours": 1.5,
+    "remaining_hours": 1.5,
+    "estimate_text": "1h 30m",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-club-dues",
+    "title": "Pay Pre-Health Society dues ($15)",
+    "course": null,
+    "domain": "Pre-Health Society",
+    "source": "Gmail",
+    "due": "2026-10-30T17:00",
+    "due_text": "Friday at 5:00 pm",
+    "estimate_hours": 0.25,
+    "remaining_hours": 0.25,
+    "estimate_text": "15m",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-bio-ps6",
+    "title": "Problem set 6",
+    "course": "BIO 201",
+    "domain": "Cell Biology",
+    "source": "Blackboard",
+    "due": "2026-10-30T23:59",
+    "due_text": "Friday at 11:59 pm",
+    "estimate_hours": 2.0,
+    "remaining_hours": 2.0,
+    "estimate_text": "2h",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-span-c3",
+    "title": "Composición 3: Mi comunidad",
+    "course": "SPAN 202",
+    "domain": "Spanish",
+    "source": "Blackboard",
+    "due": "2026-10-30T23:59",
+    "due_text": "Friday at 11:59 pm",
+    "estimate_hours": 3.0,
+    "remaining_hours": 3.0,
+    "estimate_text": "3h",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-span-v62",
+    "title": "VHL Lección 6: Gramática 6.2",
+    "course": "SPAN 202",
+    "domain": "Spanish",
+    "source": "VHL",
+    "due": "2026-10-30T23:59",
+    "due_text": "Friday at 11:59 pm",
+    "estimate_hours": 1.0,
+    "remaining_hours": 1.0,
+    "estimate_text": "1h",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-eng-lr",
+    "title": "Literature review draft",
+    "course": "ENG 210",
+    "domain": "Science Writing",
+    "source": "Blackboard",
+    "due": "2026-10-30T23:59",
+    "due_text": "Friday at 11:59 pm",
+    "estimate_hours": 3.0,
+    "remaining_hours": 1.95,
+    "estimate_text": "1h 57m",
+    "progress": 35,
+    "platform_progress": null,
+    "state": "live",
+    "flag": "Dr. Brooks granted an extension to Monday, November 2 at 11:59 pm (waiting for Maya to approve the date change).",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-pers-bus",
+    "title": "Renew bus pass",
+    "course": null,
+    "domain": "Personal",
+    "source": "Maya (quick capture)",
+    "due": "2026-10-31T12:00",
+    "due_text": "Saturday at 12:00 pm",
+    "estimate_hours": 0.25,
+    "remaining_hours": 0.25,
+    "estimate_text": "15m",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-bio-r11",
+    "title": "Reading: Ch. 11, Cell signaling",
+    "course": "BIO 201",
+    "domain": "Cell Biology",
+    "source": "Blackboard",
+    "due": "2026-11-02T09:00",
+    "due_text": "November 2 at 9:00 am",
+    "estimate_hours": 0.5,
+    "remaining_hours": 0.5,
+    "estimate_text": "30m",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-cs-zy81",
+    "title": "zyBooks 8.1-8.3 participation",
+    "course": "CS 110",
+    "domain": "Programming",
+    "source": "zyBooks",
+    "due": "2026-11-02T23:59",
+    "due_text": "November 2 at 11:59 pm",
+    "estimate_hours": 1.0,
+    "remaining_hours": 1.0,
+    "estimate_text": "1h",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-chem-ps8",
+    "title": "Problem set 8",
+    "course": "CHEM 231",
+    "domain": "Organic Chemistry",
+    "source": "Blackboard",
+    "due": "2026-11-03T09:30",
+    "due_text": "November 3 at 9:30 am",
+    "estimate_hours": 2.0,
+    "remaining_hours": 2.0,
+    "estimate_text": "2h",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-span-or2",
+    "title": "Practice for Oral exam 2",
+    "course": "SPAN 202",
+    "domain": "Spanish",
+    "source": "Knowlu (from syllabus)",
+    "due": "2026-11-04T10:00",
+    "due_text": "November 4 at 10:00 am",
+    "estimate_hours": 2.0,
+    "remaining_hours": 2.0,
+    "estimate_text": "2h",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-cs-lab8",
+    "title": "Lab 8: Dictionaries",
+    "course": "CS 110",
+    "domain": "Programming",
+    "source": "zyBooks",
+    "due": "2026-11-04T23:59",
+    "due_text": "November 4 at 11:59 pm",
+    "estimate_hours": 2.0,
+    "remaining_hours": 2.0,
+    "estimate_text": "2h",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "flag": "A TA's email says this moves to Friday, November 6 (waiting for Maya's answer).",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-bio-lab6",
+    "title": "Lab 6 report: Photosynthetic pigments",
+    "course": "BIO 201",
+    "domain": "Cell Biology",
+    "source": "Blackboard",
+    "due": "2026-11-05T14:00",
+    "due_text": "November 5 at 2:00 pm",
+    "estimate_hours": 3.0,
+    "remaining_hours": 3.0,
+    "estimate_text": "3h",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-bio-ex2",
+    "title": "Study for Exam 2 (Ch. 8-11)",
+    "course": "BIO 201",
+    "domain": "Cell Biology",
+    "source": "Knowlu (from syllabus)",
+    "due": "2026-11-06T09:00",
+    "due_text": "November 6 at 9:00 am",
+    "estimate_hours": 4.0,
+    "remaining_hours": 4.0,
+    "estimate_text": "4h",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "steps": [
+     {
+      "title": "Rewrite Ch. 8-9 notes",
+      "hours": 1.0,
+      "done": false
+     },
+     {
+      "title": "Ch. 10-11 practice questions",
+      "hours": 1.5,
+      "done": false
+     },
+     {
+      "title": "Practice exam",
+      "hours": 1.5,
+      "done": false
+     }
+    ],
+    "group": "later (beyond today's time)"
+   },
+   {
+    "id": "t-eng-fp",
+    "title": "Final paper: research article",
+    "course": "ENG 210",
+    "domain": "Science Writing",
+    "source": "Blackboard",
+    "due": "2026-12-04T23:59",
+    "due_text": "December 4 at 11:59 pm",
+    "estimate_hours": 8.0,
+    "remaining_hours": 8.0,
+    "estimate_text": "8h",
+    "progress": 0,
+    "platform_progress": null,
+    "state": "live",
+    "steps": [
+     {
+      "title": "Pick a study and get approval",
+      "hours": 1.0,
+      "done": false
+     },
+     {
+      "title": "First draft",
+      "hours": 4.0,
+      "done": false
+     },
+     {
+      "title": "Revise after peer review",
+      "hours": 2.0,
+      "done": false
+     },
+     {
+      "title": "Final edit and references",
+      "hours": 1.0,
+      "done": false
+     }
+    ],
+    "group": "later (beyond today's time)"
+   }
+  ],
+  "late_window_closed": [
+   {
+    "id": "t-chem-ps6",
+    "title": "Problem set 6",
+    "course": "CHEM 231",
+    "due": "2026-10-20T09:30",
+    "due_text": "last Tuesday at 9:30 am",
+    "closed_at": "2026-10-22T09:30",
+    "rule": "Late work not accepted after 48 hours (your syllabus)",
+    "actions": [
+     "Archive",
+     "Still doing it"
+    ],
+    "still_doing_it_asks": "When will you turn it in?"
+   },
+   {
+    "id": "t-span-v5v",
+    "title": "VHL Lección 5: Vocabulario",
+    "course": "SPAN 202",
+    "due": "2026-10-19T23:59",
+    "due_text": "October 19 at 11:59 pm",
+    "closed_at": "2026-10-22T23:59",
+    "rule": "Late: −10% a day, up to 3 days (your syllabus)",
+    "actions": [
+     "Archive",
+     "Still doing it"
+    ],
+    "still_doing_it_asks": "When will you turn it in?"
+   }
+  ],
+  "schedule": [
+   {
+    "title": "BIO 201 lecture",
+    "start": "09:00",
+    "end": "09:50",
+    "room": "Kessler Hall 104",
+    "kind": "class",
+    "level": "hard",
+    "domain": "Cell Biology"
+   },
+   {
+    "title": "SPAN 202 lecture",
+    "start": "10:00",
+    "end": "10:50",
+    "room": "Bellamy Hall 212",
+    "kind": "class",
+    "level": "hard",
+    "domain": "Spanish"
+   },
+   {
+    "title": "CS 110 lecture",
+    "start": "13:00",
+    "end": "14:15",
+    "room": "Ostrander Center 140",
+    "kind": "class",
+    "level": "hard",
+    "domain": "Programming"
+   },
+   {
+    "title": "CHEM 231 office hours",
+    "start": "15:30",
+    "end": "16:30",
+    "room": "Hallett Hall 301",
+    "kind": "office hours",
+    "level": "optional",
+    "domain": "Organic Chemistry"
+   }
+  ],
+  "free_time": {
+   "hours": 5.7,
+   "open_hours": 12.17,
+   "planned_work_hours": 6.5,
+   "windows": [
+    "after 6:00 pm"
+   ],
+   "method": "Open time between wake and bed, minus hard and soft commitments (optional ones don't count), minus today's planned work filled into the earliest open time. Knowlu doesn't assign work to those times; it shows where free time falls."
+  },
+  "domains": [
+   {
+    "domain": "Cell Biology",
+    "code": "BIO 201",
+    "status": "on track",
+    "hours": 0,
+    "sentence": "On track. Lab 5 report is the big one this week."
+   },
+   {
+    "domain": "Organic Chemistry",
+    "code": "CHEM 231",
+    "status": "behind",
+    "hours": 2.0,
+    "sentence": "Organic Chemistry is about 2 hours behind. Today's study session and one Wednesday catch it up before Thursday's exam."
+   },
+   {
+    "domain": "Programming",
+    "code": "CS 110",
+    "status": "behind",
+    "hours": 1.2,
+    "sentence": "Programming is about 1 hour behind: Lab 6 is past due. Finishing it today keeps it at −30%."
+   },
+   {
+    "domain": "Spanish",
+    "code": "SPAN 202",
+    "status": "ahead",
+    "hours": 1.5,
+    "sentence": "You're about a day ahead in Spanish: two of this week's VHL sets are already done."
+   },
+   {
+    "domain": "Science Writing",
+    "code": "ENG 210",
+    "status": "on track",
+    "hours": 0,
+    "sentence": "On track. The literature review may move to Monday; there's a question waiting."
+   },
+   {
+    "domain": "Library job",
+    "code": null,
+    "status": "on track",
+    "hours": 0,
+    "sentence": "Shifts Tuesday 5:00-9:00 pm and Saturday 10:00 am-2:00 pm."
+   },
+   {
+    "domain": "Pre-Health Society",
+    "code": null,
+    "status": "on track",
+    "hours": 0,
+    "sentence": "Dues due Friday at 5:00 pm. A panel on Wednesday is waiting for your answer."
+   },
+   {
+    "domain": "Personal",
+    "code": null,
+    "status": "on track",
+    "hours": 0,
+    "sentence": "Bus pass by Saturday at noon."
+   }
+  ],
+  "ahead_14_days": [
+   {
+    "date": "2026-10-26",
+    "weekday": "Mon",
+    "hours_due": 2.2,
+    "tasks": 3,
+    "exams": []
+   },
+   {
+    "date": "2026-10-27",
+    "weekday": "Tue",
+    "hours_due": 2.5,
+    "tasks": 2,
+    "exams": []
+   },
+   {
+    "date": "2026-10-28",
+    "weekday": "Wed",
+    "hours_due": 2.4,
+    "tasks": 2,
+    "exams": []
+   },
+   {
+    "date": "2026-10-29",
+    "weekday": "Thu",
+    "hours_due": 6.9,
+    "tasks": 3,
+    "exams": [
+     "CHEM 231 Exam 2"
+    ]
+   },
+   {
+    "date": "2026-10-30",
+    "weekday": "Fri",
+    "hours_due": 10.2,
+    "tasks": 7,
+    "exams": []
+   },
+   {
+    "date": "2026-10-31",
+    "weekday": "Sat",
+    "hours_due": 0.25,
+    "tasks": 1,
+    "exams": []
+   },
+   {
+    "date": "2026-11-01",
+    "weekday": "Sun",
+    "hours_due": 0,
+    "tasks": 0,
+    "exams": []
+   },
+   {
+    "date": "2026-11-02",
+    "weekday": "Mon",
+    "hours_due": 1.5,
+    "tasks": 2,
+    "exams": []
+   },
+   {
+    "date": "2026-11-03",
+    "weekday": "Tue",
+    "hours_due": 2.0,
+    "tasks": 1,
+    "exams": []
+   },
+   {
+    "date": "2026-11-04",
+    "weekday": "Wed",
+    "hours_due": 4.0,
+    "tasks": 2,
+    "exams": [
+     "SPAN 202 Oral exam 2"
+    ]
+   },
+   {
+    "date": "2026-11-05",
+    "weekday": "Thu",
+    "hours_due": 3.0,
+    "tasks": 1,
+    "exams": []
+   },
+   {
+    "date": "2026-11-06",
+    "weekday": "Fri",
+    "hours_due": 4.0,
+    "tasks": 1,
+    "exams": [
+     "BIO 201 Exam 2"
+    ]
+   },
+   {
+    "date": "2026-11-07",
+    "weekday": "Sat",
+    "hours_due": 0,
+    "tasks": 0,
+    "exams": []
+   },
+   {
+    "date": "2026-11-08",
+    "weekday": "Sun",
+    "hours_due": 0,
+    "tasks": 0,
+    "exams": []
+   }
+  ],
+  "ahead_takeaway": "Friday is the heaviest day in the next two weeks, about 10.2h due.",
+  "upcoming_exams": [
+   {
+    "course": "CHEM 231",
+    "title": "Exam 2",
+    "date": "2026-10-29",
+    "start": "09:30",
+    "room": "Hallett Hall 120 (moved from 220, by email)"
+   },
+   {
+    "course": "SPAN 202",
+    "title": "Oral exam 2",
+    "date": "2026-11-04",
+    "start": "10:00",
+    "room": "Bellamy Hall 212"
+   },
+   {
+    "course": "BIO 201",
+    "title": "Exam 2",
+    "date": "2026-11-06",
+    "start": "09:00",
+    "room": "Kessler Hall 104"
+   }
+  ],
+  "decisions": {
+   "pending": 4,
+   "oldest_days": 7,
+   "cards": [
+    "d-ext",
+    "d-lab8",
+    "d-panel",
+    "d-surf"
+   ]
+  },
+  "good_to_know": [
+   "n-room",
+   "n-grade-lab4",
+   "n-grade-ps6-missing"
+  ],
+  "closed_this_week": [
+   {
+    "id": "t-bio-r9",
+    "title": "Reading: Ch. 9, Cellular respiration",
+    "course": "BIO 201",
+    "closed_at": "2026-10-26T07:55",
+    "by": "Maya",
+    "how": "checked off",
+    "undo": false
+   },
+   {
+    "id": "t-chem-pq7",
+    "title": "Pre-lecture quiz: Ch. 7",
+    "course": "CHEM 231",
+    "closed_at": "2026-10-25T16:40",
+    "by": "Knowlu",
+    "how": "Blackboard shows it turned in",
+    "undo": true
+   },
+   {
+    "id": "t-bio-ps5",
+    "title": "Problem set 5",
+    "course": "BIO 201",
+    "closed_at": "2026-10-23T21:15",
+    "by": "Knowlu",
+    "how": "Blackboard shows it turned in",
+    "undo": true
+   },
+   {
+    "id": "t-bio-lab4",
+    "title": "Lab 4 report: Membrane transport",
+    "course": "BIO 201",
+    "closed_at": "2026-10-22T11:40",
+    "by": "Knowlu",
+    "how": "Blackboard shows it turned in",
+    "undo": true
+   },
+   {
+    "id": "t-eng-ol",
+    "title": "Literature review outline",
+    "course": "ENG 210",
+    "closed_at": "2026-10-22T10:50",
+    "by": "Knowlu",
+    "how": "Blackboard shows it turned in",
+    "undo": true
+   },
+   {
+    "id": "t-chem-hw5",
+    "title": "Ch. 5 online homework",
+    "course": "CHEM 231",
+    "closed_at": "2026-10-21T22:05",
+    "by": "Knowlu",
+    "how": "Blackboard shows it turned in",
+    "undo": true
+   },
+   {
+    "id": "t-span-v52",
+    "title": "VHL Lección 5: Gramática 5.2",
+    "course": "SPAN 202",
+    "closed_at": "2026-10-21T20:30",
+    "by": "Knowlu",
+    "how": "VHL shows it turned in",
+    "undo": true
+   },
+   {
+    "id": "t-bio-r8",
+    "title": "Reading: Ch. 8, Metabolism",
+    "course": "BIO 201",
+    "closed_at": "2026-10-19T08:35",
+    "by": "Maya",
+    "how": "checked off",
+    "undo": false
+   }
+  ],
+  "delta": {
+   "since": "2026-10-25T18:00",
+   "items": [
+    "Pre-lecture quiz: Ch. 7 marked done by Knowlu (Blackboard shows it turned in). Undo",
+    "BIO 201 Lab 4 report graded: 44/50.",
+    "New question: move Lab 8 to Friday, November 6? (from a TA's email)",
+    "VHL needs you to sign in again."
+   ]
+  },
+  "sources": [
+   {
+    "source": "School sign-in (Blackboard, registrar, grades, school email)",
+    "state": "ok",
+    "last": "2026-10-26T06:02",
+    "next": "2026-10-26T12:00",
+    "text": "Kept on this computer. Last check 6:02 am."
+   },
+   {
+    "source": "Gmail (permission)",
+    "state": "ok",
+    "last": "2026-10-26T06:03",
+    "text": "Read-only. Last read 6:03 am."
+   },
+   {
+    "source": "Google Calendar",
+    "state": "ok",
+    "last": "2026-10-26T06:03"
+   },
+   {
+    "source": "zyBooks",
+    "state": "ok",
+    "last": "2026-10-26T06:04"
+   },
+   {
+    "source": "VHL",
+    "state": "needs sign-in",
+    "last_ok": "2026-10-25T18:04",
+    "text": "VHL signed you out. Sign in again to bring in new VHL work; what Knowlu already has is still here.",
+    "action": "Sign in to VHL"
+   },
+   {
+    "source": "Sync",
+    "state": "ok",
+    "text": "In step with your account."
+   },
+   {
+    "source": "Backup",
+    "state": "ok",
+    "text": "Backed up."
+   }
+  ],
+  "nudge_example": {
+   "at": "2026-10-26T16:00",
+   "text": "Still need an answer: add the SURF application, due November 6?",
+   "acting_on_it": "Opens the question; no focus session (it's a decision, not a task)."
+  },
+  "focus_session_example": {
+   "serves": [
+    "t-cs-lab6",
+    "t-cs-zy71",
+    "t-span-v6p",
+    "t-chem-ps7",
+    "t-eng-pr",
+    "t-chem-ex2"
+   ],
+   "pomodoro": {
+    "focus_min": 25,
+    "break_min": 5,
+    "long_break_min": 15,
+    "long_every": 4
+   }
+  }
+ },
+ "week": {
+  "start": "2026-10-26",
+  "days": [
+   {
+    "date": "2026-10-26",
+    "weekday": "Monday",
+    "blocks": [
+     {
+      "title": "BIO 201 lecture",
+      "start": "09:00",
+      "end": "09:50",
+      "room": "Kessler Hall 104",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Cell Biology"
+     },
+     {
+      "title": "SPAN 202 lecture",
+      "start": "10:00",
+      "end": "10:50",
+      "room": "Bellamy Hall 212",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Spanish"
+     },
+     {
+      "title": "CS 110 lecture",
+      "start": "13:00",
+      "end": "14:15",
+      "room": "Ostrander Center 140",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Programming"
+     },
+     {
+      "title": "CHEM 231 office hours",
+      "start": "15:30",
+      "end": "16:30",
+      "room": "Hallett Hall 301",
+      "kind": "office hours",
+      "level": "optional",
+      "domain": "Organic Chemistry"
+     }
+    ],
+    "due": [
+     {
+      "id": "t-bio-r9",
+      "title": "Reading: Ch. 9, Cellular respiration",
+      "course": "BIO 201",
+      "due_time": "9:00 am",
+      "estimate_hours": 0.5,
+      "state_now": "done: checked off by Maya"
+     },
+     {
+      "id": "t-cs-zy71",
+      "title": "zyBooks 7.1-7.4 participation",
+      "course": "CS 110",
+      "due_time": "11:59 pm",
+      "estimate_hours": 1.0,
+      "state_now": "live"
+     },
+     {
+      "id": "t-span-v6p",
+      "title": "VHL Lección 6: Práctica de vocabulario",
+      "course": "SPAN 202",
+      "due_time": "11:59 pm",
+      "estimate_hours": 1.0,
+      "state_now": "live"
+     }
+    ],
+    "hours_due_live": 1.0
+   },
+   {
+    "date": "2026-10-27",
+    "weekday": "Tuesday",
+    "blocks": [
+     {
+      "title": "CHEM 231 lecture",
+      "start": "09:30",
+      "end": "10:45",
+      "room": "Hallett Hall 220",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Organic Chemistry"
+     },
+     {
+      "title": "ENG 210 seminar",
+      "start": "12:30",
+      "end": "13:45",
+      "room": "Marsh Library, seminar room 3B",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Science Writing"
+     },
+     {
+      "title": "Marsh Library circulation desk",
+      "start": "17:00",
+      "end": "21:00",
+      "kind": "work",
+      "level": "hard",
+      "domain": "Library job"
+     }
+    ],
+    "due": [
+     {
+      "id": "t-chem-pq7",
+      "title": "Pre-lecture quiz: Ch. 7",
+      "course": "CHEM 231",
+      "due_time": "9:30 am",
+      "estimate_hours": 0.5,
+      "state_now": "done: marked by Knowlu (turned in)"
+     },
+     {
+      "id": "t-chem-ps7",
+      "title": "Problem set 7",
+      "course": "CHEM 231",
+      "due_time": "9:30 am",
+      "estimate_hours": 2.0,
+      "state_now": "live"
+     },
+     {
+      "id": "t-eng-pr",
+      "title": "Peer review: outline exchange (2 classmates)",
+      "course": "ENG 210",
+      "due_time": "12:30 pm",
+      "estimate_hours": 1.0,
+      "state_now": "live"
+     }
+    ],
+    "hours_due_live": 2.5
+   },
+   {
+    "date": "2026-10-28",
+    "weekday": "Wednesday",
+    "blocks": [
+     {
+      "title": "BIO 201 lecture",
+      "start": "09:00",
+      "end": "09:50",
+      "room": "Kessler Hall 104",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Cell Biology"
+     },
+     {
+      "title": "SPAN 202 lecture",
+      "start": "10:00",
+      "end": "10:50",
+      "room": "Bellamy Hall 212",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Spanish"
+     },
+     {
+      "title": "BIO 201 office hours",
+      "start": "11:00",
+      "end": "12:00",
+      "room": "Kessler Hall 228",
+      "kind": "office hours",
+      "level": "optional",
+      "domain": "Cell Biology"
+     },
+     {
+      "title": "CS 110 lecture",
+      "start": "13:00",
+      "end": "14:15",
+      "room": "Ostrander Center 140",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Programming"
+     },
+     {
+      "title": "CHEM 231 recitation",
+      "start": "15:00",
+      "end": "15:50",
+      "room": "Hallett Hall 015",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Organic Chemistry"
+     },
+     {
+      "title": "Pre-Health Society meeting (replaced by the admissions panel if Maya accepts it)",
+      "start": "18:30",
+      "end": "19:30",
+      "kind": "club",
+      "level": "soft",
+      "domain": "Pre-Health Society"
+     }
+    ],
+    "due": [
+     {
+      "id": "t-chem-rw8",
+      "title": "Recitation worksheet 8",
+      "course": "CHEM 231",
+      "due_time": "3:00 pm",
+      "estimate_hours": 1.0,
+      "state_now": "live"
+     },
+     {
+      "id": "t-cs-lab7",
+      "title": "Lab 7: Lists and loops",
+      "course": "CS 110",
+      "due_time": "11:59 pm",
+      "estimate_hours": 2.0,
+      "state_now": "live"
+     }
+    ],
+    "hours_due_live": 2.4
+   },
+   {
+    "date": "2026-10-29",
+    "weekday": "Thursday",
+    "blocks": [
+     {
+      "title": "CHEM 231 Exam 2",
+      "start": "09:30",
+      "end": "10:45",
+      "room": "Hallett Hall 120 (moved from 220, by email)",
+      "kind": "exam",
+      "level": "hard",
+      "domain": "Organic Chemistry"
+     },
+     {
+      "title": "ENG 210 seminar",
+      "start": "12:30",
+      "end": "13:45",
+      "room": "Marsh Library, seminar room 3B",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Science Writing"
+     },
+     {
+      "title": "BIO 201 lab",
+      "start": "14:00",
+      "end": "16:50",
+      "room": "Kessler Hall 310",
+      "kind": "lab",
+      "level": "hard",
+      "domain": "Cell Biology"
+     }
+    ],
+    "due": [
+     {
+      "id": "t-bio-lab5",
+      "title": "Lab 5 report: Enzyme kinetics",
+      "course": "BIO 201",
+      "due_time": "2:00 pm",
+      "estimate_hours": 3.0,
+      "state_now": "live"
+     },
+     {
+      "id": "t-chem-ex2",
+      "title": "Study for Exam 2 (Ch. 5-7)",
+      "course": "CHEM 231",
+      "due_time": "9:30 am",
+      "estimate_hours": 4.0,
+      "state_now": "live"
+     },
+     {
+      "id": "t-eng-r4",
+      "title": "Reading: Ch. 4, Writing for lay readers",
+      "course": "ENG 210",
+      "due_time": "12:30 pm",
+      "estimate_hours": 0.5,
+      "state_now": "live"
+     }
+    ],
+    "hours_due_live": 6.9
+   },
+   {
+    "date": "2026-10-30",
+    "weekday": "Friday",
+    "blocks": [
+     {
+      "title": "BIO 201 lecture",
+      "start": "09:00",
+      "end": "09:50",
+      "room": "Kessler Hall 104",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Cell Biology"
+     },
+     {
+      "title": "SPAN 202 lecture",
+      "start": "10:00",
+      "end": "10:50",
+      "room": "Bellamy Hall 212",
+      "kind": "class",
+      "level": "hard",
+      "domain": "Spanish"
+     },
+     {
+      "title": "Dentist",
+      "start": "15:30",
+      "end": "16:30",
+      "kind": "meeting",
+      "level": "hard",
+      "domain": "Personal"
+     }
+    ],
+    "due": [
+     {
+      "id": "t-bio-r10",
+      "title": "Reading: Ch. 10, Photosynthesis",
+      "course": "BIO 201",
+      "due_time": "9:00 am",
+      "estimate_hours": 0.5,
+      "state_now": "live"
+     },
+     {
+      "id": "t-bio-ps6",
+      "title": "Problem set 6",
+      "course": "BIO 201",
+      "due_time": "11:59 pm",
+      "estimate_hours": 2.0,
+      "state_now": "live"
+     },
+     {
+      "id": "t-cs-p2",
+      "title": "Project 2 proposal",
+      "course": "CS 110",
+      "due_time": "5:00 pm",
+      "estimate_hours": 1.5,
+      "state_now": "live"
+     },
+     {
+      "id": "t-span-c3",
+      "title": "Composición 3: Mi comunidad",
+      "course": "SPAN 202",
+      "due_time": "11:59 pm",
+      "estimate_hours": 3.0,
+      "state_now": "live"
+     },
+     {
+      "id": "t-span-v62",
+      "title": "VHL Lección 6: Gramática 6.2",
+      "course": "SPAN 202",
+      "due_time": "11:59 pm",
+      "estimate_hours": 1.0,
+      "state_now": "live"
+     },
+     {
+      "id": "t-eng-lr",
+      "title": "Literature review draft",
+      "course": "ENG 210",
+      "due_time": "11:59 pm",
+      "estimate_hours": 3.0,
+      "state_now": "live"
+     },
+     {
+      "id": "t-club-dues",
+      "title": "Pay Pre-Health Society dues ($15)",
+      "course": "Pre-Health Society",
+      "due_time": "5:00 pm",
+      "estimate_hours": 0.25,
+      "state_now": "live"
+     }
+    ],
+    "hours_due_live": 10.2
+   },
+   {
+    "date": "2026-10-31",
+    "weekday": "Saturday",
+    "blocks": [
+     {
+      "title": "Marsh Library circulation desk",
+      "start": "10:00",
+      "end": "14:00",
+      "kind": "work",
+      "level": "hard",
+      "domain": "Library job"
+     },
+     {
+      "title": "Halloween party at Jordan's",
+      "start": "20:00",
+      "end": "23:30",
+      "kind": "meeting",
+      "level": "optional",
+      "domain": "Personal"
+     }
+    ],
+    "due": [
+     {
+      "id": "t-pers-bus",
+      "title": "Renew bus pass",
+      "course": "Personal",
+      "due_time": "12:00 pm",
+      "estimate_hours": 0.25,
+      "state_now": "live"
+     }
+    ],
+    "hours_due_live": 0.25
+   },
+   {
+    "date": "2026-11-01",
+    "weekday": "Sunday",
+    "blocks": [
+     {
+      "title": "Intramural soccer",
+      "start": "16:00",
+      "end": "17:00",
+      "kind": "club",
+      "level": "optional",
+      "domain": "Personal"
+     },
+     {
+      "title": "Family video call",
+      "start": "19:00",
+      "end": "20:00",
+      "kind": "meeting",
+      "level": "soft",
+      "domain": "Personal"
+     }
+    ],
+    "due": [],
+    "hours_due_live": 0
+   }
+  ]
+ },
+ "all_clear_example": {
+  "date": "2026-11-01",
+  "weekday": "Sunday",
+  "note": "Use for the 'all clear' state: in this data nothing is due Sunday November 1, only soccer (optional) and a family call.",
+  "text": "Nothing is due today. The day is yours."
+ }
+}

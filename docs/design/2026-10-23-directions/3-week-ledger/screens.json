@@ -1,0 +1,265 @@
+{
+ "direction": "3-week-ledger",
+ "title": "The week as a balance",
+ "file": "index.html",
+ "url_pattern": "index.html#<id>",
+ "screenshot_pattern": "shots/<id>.png",
+ "note": "Append ?shot to hide the prototype screen index and freeze motion.",
+ "screens": [
+  {
+   "id": "o1-welcome",
+   "group": "Onboarding",
+   "title": "Welcome"
+  },
+  {
+   "id": "o2-account",
+   "group": "Onboarding",
+   "title": "Your account"
+  },
+  {
+   "id": "o2-code",
+   "group": "Onboarding",
+   "title": "Your account: code didn't match"
+  },
+  {
+   "id": "o2-proof",
+   "group": "Onboarding",
+   "title": "Your account: signed in"
+  },
+  {
+   "id": "o3-school",
+   "group": "Onboarding",
+   "title": "Your school"
+  },
+  {
+   "id": "o3a-need",
+   "group": "Onboarding",
+   "title": "Your school: what you'll need"
+  },
+  {
+   "id": "o3b-window",
+   "group": "Onboarding",
+   "title": "School sign-in window"
+  },
+  {
+   "id": "o3b-duo",
+   "group": "Onboarding",
+   "title": "School sign-in: Duo prompt"
+  },
+  {
+   "id": "o3x-didnt-finish",
+   "group": "Onboarding",
+   "title": "School sign-in didn't finish"
+  },
+  {
+   "id": "o3f-feed-link",
+   "group": "Onboarding",
+   "title": "Calendar-link fallback"
+  },
+  {
+   "id": "o3c-reading",
+   "group": "Onboarding",
+   "title": "Signed in: reading"
+  },
+  {
+   "id": "o3c-proof",
+   "group": "Onboarding",
+   "title": "Your school: proof"
+  },
+  {
+   "id": "o4-payment",
+   "group": "Onboarding",
+   "title": "Payment"
+  },
+  {
+   "id": "o4w-browser",
+   "group": "Onboarding",
+   "title": "Payment: checkout in the browser"
+  },
+  {
+   "id": "o4x-cancelled",
+   "group": "Onboarding",
+   "title": "Payment: checkout closed"
+  },
+  {
+   "id": "o4t-tester",
+   "group": "Onboarding",
+   "title": "Payment: tester"
+  },
+  {
+   "id": "o4p-trial-on",
+   "group": "Onboarding",
+   "title": "Payment: trial on"
+  },
+  {
+   "id": "o5-school-email",
+   "group": "Onboarding",
+   "title": "School email"
+  },
+  {
+   "id": "o5p-forwarding",
+   "group": "Onboarding",
+   "title": "School email: proof"
+  },
+  {
+   "id": "o6-google",
+   "group": "Onboarding",
+   "title": "Google: Gmail and Calendar"
+  },
+  {
+   "id": "o6-partial",
+   "group": "Onboarding",
+   "title": "Google: partial grant"
+  },
+  {
+   "id": "o6f-forwarding",
+   "group": "Onboarding",
+   "title": "Gmail by forwarding (past 100 students)"
+  },
+  {
+   "id": "o6f-declined",
+   "group": "Onboarding",
+   "title": "Gmail read failed: forwarding offered"
+  },
+  {
+   "id": "o6p-google",
+   "group": "Onboarding",
+   "title": "Google: proof"
+  },
+  {
+   "id": "o7-other-calendar",
+   "group": "Onboarding",
+   "title": "Another calendar"
+  },
+  {
+   "id": "o8-sites",
+   "group": "Onboarding",
+   "title": "Homework sites"
+  },
+  {
+   "id": "o8x-vhl-failed",
+   "group": "Onboarding",
+   "title": "Homework sites: VHL didn't accept"
+  },
+  {
+   "id": "o8-skipped",
+   "group": "Onboarding",
+   "title": "Homework sites: VHL skipped"
+  },
+  {
+   "id": "o8p-sites",
+   "group": "Onboarding",
+   "title": "Homework sites: proof"
+  },
+  {
+   "id": "o9-syllabi",
+   "group": "Onboarding",
+   "title": "Syllabi"
+  },
+  {
+   "id": "o10-your-week",
+   "group": "Onboarding",
+   "title": "Check it"
+  },
+  {
+   "id": "o11-wait",
+   "group": "Onboarding",
+   "title": "Putting your week together"
+  },
+  {
+   "id": "r1-resume",
+   "group": "Resume",
+   "title": "Resume at payment"
+  },
+  {
+   "id": "r1-school-expired",
+   "group": "Resume",
+   "title": "Resume: school session expired"
+  },
+  {
+   "id": "r2-restored",
+   "group": "Resume",
+   "title": "Resume: restored install"
+  },
+  {
+   "id": "o12-reveal",
+   "group": "Reveal",
+   "title": "Here's your week"
+  },
+  {
+   "id": "o12-still-running",
+   "group": "Reveal",
+   "title": "Here's your week: still running, needs you, skipped"
+  },
+  {
+   "id": "o12-statement",
+   "group": "Reveal",
+   "title": "How every line was read"
+  },
+  {
+   "id": "m1-today",
+   "group": "Main page",
+   "title": "Today"
+  },
+  {
+   "id": "m1-today-dark",
+   "group": "Main page",
+   "title": "Today, dark"
+  },
+  {
+   "id": "m1-task-open",
+   "group": "Main page",
+   "title": "Today: a task opened"
+  },
+  {
+   "id": "m1-closed",
+   "group": "Main page",
+   "title": "Closed this week"
+  },
+  {
+   "id": "m1-undo",
+   "group": "Main page",
+   "title": "Undo on an auto-closed item"
+  },
+  {
+   "id": "m1-late",
+   "group": "Main page",
+   "title": "Late window closed"
+  },
+  {
+   "id": "m1-vhl",
+   "group": "Main page",
+   "title": "VHL needs you"
+  },
+  {
+   "id": "m1-domain",
+   "group": "Main page",
+   "title": "A course opened"
+  },
+  {
+   "id": "m1-all-clear",
+   "group": "States",
+   "title": "All clear"
+  },
+  {
+   "id": "m1-spill",
+   "group": "States",
+   "title": "More must-do than open time"
+  },
+  {
+   "id": "m1-avoided",
+   "group": "States",
+   "title": "A task being put off rises"
+  },
+  {
+   "id": "m1-source-broken",
+   "group": "States",
+   "title": "A source broke"
+  },
+  {
+   "id": "m1-offline",
+   "group": "States",
+   "title": "Offline"
+  }
+ ]
+}

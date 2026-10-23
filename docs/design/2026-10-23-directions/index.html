@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Five Directions Compared</title>
+<meta name="description" content="Knowlu, 2026-10-23: five fleshed-out directions for onboarding, the week reveal and the daily page, compared side by side with a recommendation.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: oklch(0.975 0.006 80);
+  --paper: oklch(0.995 0.003 80);
+  --ink: oklch(0.24 0.02 260);
+  --ink-2: oklch(0.42 0.015 260);
+  --ink-3: oklch(0.56 0.01 260);
+  --rule: oklch(0.88 0.01 80);
+  --rule-strong: oklch(0.30 0.02 260);
+  --brand: #BC4444;
+  --pick: oklch(0.93 0.05 150);
+  --pick-ink: oklch(0.36 0.08 150);
+  --warn: oklch(0.94 0.05 75);
+  --warn-ink: oklch(0.45 0.09 60);
+  --chip: oklch(0.94 0.008 260);
+  --shadow: 0 1px 2px oklch(0.2 0.02 260 / 0.06), 0 4px 14px oklch(0.2 0.02 260 / 0.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: oklch(0.19 0.012 260);
+    --paper: oklch(0.23 0.014 260);
+    --ink: oklch(0.94 0.008 80);
+    --ink-2: oklch(0.80 0.01 80);
+    --ink-3: oklch(0.66 0.01 80);
+    --rule: oklch(0.34 0.012 260);
+    --rule-strong: oklch(0.85 0.01 80);
+    --pick: oklch(0.32 0.05 150);
+    --pick-ink: oklch(0.86 0.08 150);
+    --warn: oklch(0.33 0.05 70);
+    --warn-ink: oklch(0.88 0.09 75);
+    --chip: oklch(0.29 0.012 260);
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: oklch(0.19 0.012 260);
+  --paper: oklch(0.23 0.014 260);
+  --ink: oklch(0.94 0.008 80);
+  --ink-2: oklch(0.80 0.01 80);
+  --ink-3: oklch(0.66 0.01 80);
+  --rule: oklch(0.34 0.012 260);
+  --rule-strong: oklch(0.85 0.01 80);
+  --pick: oklch(0.32 0.05 150);
+  --pick-ink: oklch(0.86 0.08 150);
+  --warn: oklch(0.33 0.05 70);
+  --warn-ink: oklch(0.88 0.09 75);
+  --chip: oklch(0.29 0.012 260);
+  --shadow: none;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 400 16px/1.55 "Public Sans", system-ui, sans-serif;
+}
+a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:hover { color: var(--brand); }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 16px; }
+@media (min-width: 720px) { .wrap { padding: 0 32px; } }
+h1, h2, h3 { font-family: "Source Serif 4", Georgia, serif; font-weight: 600; letter-spacing: -0.01em; line-height: 1.2; }
+h1 { font-size: clamp(30px, 4.4vw, 46px); margin: 0 0 12px; }
+h2 { font-size: clamp(24px, 3vw, 32px); margin: 0; }
+h3 { font-size: 18px; margin: 0 0 8px; }
+p { margin: 0 0 12px; }
+.small { font-size: 14px; }
+.dim { color: var(--ink-2); }
+.faint { color: var(--ink-3); }
+
+header.top { padding: 28px 0 8px; }
+header.top .bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+header.top img { height: 26px; width: auto; display: block; }
+.mark { display: inline-block; padding: 6px 8px; border-radius: 6px; background: oklch(0.985 0.004 80); }
+.toggle { font: inherit; font-size: 13px; background: none; border: 1px solid var(--rule); color: var(--ink-2); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.hero { padding: 36px 0 28px; border-bottom: 2px solid var(--rule-strong); }
+.hero .lede { font-size: 19px; max-width: 46em; color: var(--ink-2); }
+.verdict {
+  margin-top: 24px; background: var(--paper); border-left: 4px solid var(--brand);
+  padding: 18px 20px; box-shadow: var(--shadow); max-width: 62em;
+}
+.verdict strong { color: var(--ink); }
+.verdict p:last-child { margin: 0; }
+
+nav.jump { display: flex; flex-wrap: wrap; gap: 8px; padding: 18px 0; border-bottom: 1px solid var(--rule); }
+nav.jump a { text-decoration: none; font-size: 14px; background: var(--chip); padding: 4px 10px; border-radius: 99px; }
+nav.jump a.rec { background: var(--pick); color: var(--pick-ink); font-weight: 600; }
+
+section.dir { padding: 44px 0 36px; border-bottom: 1px solid var(--rule); }
+.dir-head { display: grid; grid-template-columns: 1fr auto; gap: 12px 24px; align-items: start; }
+.eyebrow { font-size: 13px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 6px; }
+.score { text-align: right; }
+.score b { display: block; font: 600 40px/1 "Source Serif 4", Georgia, serif; font-variant-numeric: tabular-nums; }
+.score span { font-size: 13px; color: var(--ink-3); }
+.tag { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 4px; margin-left: 8px; vertical-align: 4px; font-family: "Public Sans", sans-serif; letter-spacing: 0; }
+.tag.rec { background: var(--pick); color: var(--pick-ink); }
+.tag.alt { background: var(--warn); color: var(--warn-ink); }
+.thesis { font-size: 17px; max-width: 48em; margin-top: 14px; }
+
+.strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 24px 0; }
+@media (min-width: 900px) { .strip { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.strip a { text-decoration: none; display: block; }
+.strip figure { margin: 0; }
+.strip img { width: 100%; height: auto; aspect-ratio: 16 / 10; object-fit: cover; object-position: top left; display: block; border: 1px solid var(--rule); border-radius: 6px; background: var(--paper); box-shadow: var(--shadow); transition: transform .15s ease-out; }
+.strip a:hover img { transform: translateY(-2px); }
+.strip figcaption { font-size: 13px; color: var(--ink-2); margin-top: 6px; line-height: 1.4; }
+.strip figcaption b { color: var(--ink); font-weight: 600; display: block; }
+
+.cols { display: grid; grid-template-columns: 1fr; gap: 24px; }
+@media (min-width: 900px) { .cols { grid-template-columns: 1.1fr 1fr; gap: 40px; } }
+.borrow { margin: 0; padding: 0; list-style: none; }
+.borrow li { padding: 10px 0; border-top: 1px solid var(--rule); font-size: 15px; }
+.borrow li b { display: inline-block; min-width: 6.5em; font-weight: 600; }
+.weak { margin: 0; padding-left: 18px; font-size: 15px; }
+.weak li { margin-bottom: 8px; }
+.weak li::marker { color: var(--brand); }
+.keep { font-size: 15px; background: var(--paper); padding: 12px 14px; border-radius: 6px; border: 1px solid var(--rule); margin-top: 14px; }
+.links { margin-top: 18px; font-size: 14px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+
+section.compare { padding: 48px 0; }
+.tablewrap { overflow-x: auto; margin-top: 18px; border: 1px solid var(--rule); border-radius: 8px; background: var(--paper); }
+table { border-collapse: collapse; width: 100%; min-width: 980px; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 12px 14px; border-bottom: 1px solid var(--rule); }
+thead th { font-size: 13px; font-weight: 600; color: var(--ink); background: var(--chip); position: sticky; top: 0; }
+tbody th { font-weight: 600; width: 150px; color: var(--ink); }
+td.best { background: var(--pick); color: var(--pick-ink); }
+tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
+.note { font-size: 13px; color: var(--ink-3); margin-top: 10px; max-width: 60em; }
+
+section.rec { padding: 40px 0 56px; border-top: 2px solid var(--rule-strong); }
+section.rec ol { padding-left: 20px; max-width: 62em; }
+section.rec li { margin-bottom: 10px; }
+footer { padding: 24px 0 48px; font-size: 13px; color: var(--ink-3); border-top: 1px solid var(--rule); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <div class="bar">
+    <span class="mark"><img src="../assets/Knowlu_Wordmark_Red.png" alt="Knowlu"></span>
+    <button class="toggle" type="button" id="theme">Switch theme</button>
+  </div>
+</header>
+
+<div class="hero">
+  <div class="eyebrow">Design run · 2026-10-23 · for Quinn · after round 2</div>
+  <h1>Five directions for the whole journey</h1>
+  <p class="lede">Each direction redesigns the ruled onboarding (every login inside it, a benefit line before each one, proof after it), the "Here's your week" reveal and the daily "what's next" page. Every one starts from Notion and Stripe and adds one third reference that no other direction uses. All data is invented: Maya Okafor at Halverson State University. Screenshots and scores below are from round 2; round 1's score is shown beside each.</p>
+  <div class="verdict">
+    <p><strong>Recommendation: keep 5b, Departures, as the spine.</strong> Round 2 fixed its daily page: it is now the same week board in its own face, "Lab 6 is next." over one departures board in Knowlu's order. The next work is the reveal, which still drops the board for a calendar grid on the screen meant to pay it off, and then the wait, which is still the round-1 version.</p>
+    <p class="dim small">Fallback if a student test shows the board distracts during setup: 2, One thing per screen. 2, 4 and 5b now tie at 66 and all five sit within 5 points, so the scores don't decide this. 4 moved the most (its board is now ranked, not a padlock grid), but it ends in a generic calendar and a console. The reasoning is in <a href="#recommendation">the recommendation</a> and in README.md.</p>
+  </div>
+</div>
+
+<nav class="jump" aria-label="Directions">
+  <a href="#d1b">1b Concierge</a>
+  <a href="#d2">2 One thing per screen</a>
+  <a href="#d3">3 Week ledger</a>
+  <a href="#d4">4 Connections hub</a>
+  <a class="rec" href="#d5b">5b Departures (recommended)</a>
+  <a href="#compare">Side by side</a>
+  <a href="#recommendation">Recommendation</a>
+</nav>
+
+<!-- 1b -->
+<section class="dir" id="d1b">
+  <div class="dir-head">
+    <div>
+      <div class="eyebrow">Direction 1b · third reference: Superhuman's 1:1 onboarding</div>
+      <h2>A conversation that hands you the list</h2>
+    </div>
+    <div class="score"><b>64</b><span>round 2 · round 1: 58</span></div>
+  </div>
+  <p class="thesis">Superhuman ran onboarding as a live session on the user's own inbox. Knowlu runs the same session with no human in it. Each step is one exchange: one line from Knowlu, then the action, then the proof in numbers. Gestures are taught on real items as they appear (Undo on the dues email found before setup). The reveal is Knowlu's first morning brief, and the daily page puts the list on the left with Knowlu's note in the margin.</p>
+
+  <div class="strip">
+    <a href="1b-concierge/index.html#S-need"><figure><img loading="lazy" src="1b-concierge/shots/S-need.png" alt="1b school sign-in exchange"><figcaption><b>Login step</b>You'll need · You type it on · Knowlu keeps</figcaption></figure></a>
+    <a href="1b-concierge/index.html#S-proof"><figure><img loading="lazy" src="1b-concierge/shots/S-proof.png" alt="1b school proof"><figcaption><b>Proof</b>"Found 5 classes, 26 assignments and 4 already turned in", with what was left out</figcaption></figure></a>
+    <a href="1b-concierge/index.html#R"><figure><img loading="lazy" src="1b-concierge/shots/R.png" alt="1b reveal"><figcaption><b>Reveal</b>Brief, week table, two margin notes</figcaption></figure></a>
+    <a href="1b-concierge/index.html#T"><figure><img loading="lazy" src="1b-concierge/shots/T.png" alt="1b main page"><figcaption><b>Main page</b>List from the top, the why note level with row 1</figcaption></figure></a>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>What it borrows</h3>
+      <ul class="borrow">
+        <li><b>Notion</b>Notion Mail's proof drawn from your own inbox; Ivan Zhao's "make the dumbest path great" (open, read one sentence, press Start); no tours, no fake to-dos.</li>
+        <li><b>Stripe</b>Link's recognise-then-verify (one school sign-in, "you won't sign in to these again"); docs written with the reader's own data; Checkout's order summary built from the school proof.</li>
+        <li><b>Superhuman</b>Onboarding as a session on real data; teach only the gestures that matter, by doing them for real; full-screen setup before the product; turn a stumble into a calm reply.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Honest weaknesses after round 2</h3>
+      <ul class="weak">
+        <li>Onboarding is still mostly empty canvas. On A, S-need and K1 the content ends around y 350-510 of 800, in a column left of centre. It reads as a form floating in a void.</li>
+        <li>Progress is shown three ways at once (the "answered so far" line, an echo of the last answer, the rail). On G the echo reads "Continue ✓". The rail's "6 with you, then up to 3 while I read" is cryptic.</li>
+        <li>The daily margin is link soup: six underlined phrases in five lines, with the four waiting questions (the only ones needing action) at the same weight as "closed 8".</li>
+        <li>Three hour figures on one page: "6h 30m of work", "4h 42m is due by tomorrow" with "5h 40m stays free", and "Today's 6h 30m ends here".</li>
+        <li>The reveal's "61 more were past or already turned in, so I archived them" has no way to look, and the week table wraps to three lines a day.</li>
+      </ul>
+      <p class="keep"><b>Worth keeping:</b> S-proof is now the strongest proof screen in the set: one sentence over ruled rows, each saying what was left out and why, with one "Looks right".</p>
+    </div>
+  </div>
+  <div class="links"><a href="1b-concierge/index.html">Open the prototype</a><a href="1b-concierge/BRIEF.md">BRIEF.md</a><a href="1b-concierge/shots/">All 78 screenshots</a></div>
+</section>
+
+<!-- 2 -->
+<section class="dir" id="d2">
+  <div class="dir-head">
+    <div>
+      <div class="eyebrow">Direction 2 · third reference: Apple Setup Assistant</div>
+      <h2>Setup, one screen at a time <span class="tag alt">fallback</span></h2>
+    </div>
+    <div class="score"><b>66</b><span>round 2 · round 1: 63</span></div>
+  </div>
+  <p class="thesis">The student never sees more than one thing to do. Each full-window sheet gives the why line, one button, then the proof. Progress is counted in the student's own terms on a route bar at the bottom. Optional steps get Setup's "Set up later" with the cost named. The week is kept hidden until the reveal so that it lands as one event, after a transfer-style "Building your week" screen that counts real work and stops at 3 minutes.</p>
+
+  <div class="strip">
+    <a href="2-one-thing-per-screen/index.html#S1"><figure><img loading="lazy" src="2-one-thing-per-screen/shots/S1.png" alt="2 school sheet"><figcaption><b>Login step</b>"Your school": what one sign-in covers, then the button</figcaption></figure></a>
+    <a href="2-one-thing-per-screen/index.html#S3"><figure><img loading="lazy" src="2-one-thing-per-screen/shots/S3.png" alt="2 school proof"><figcaption><b>Proof</b>"Halverson State is connected", course codes named</figcaption></figure></a>
+    <a href="2-one-thing-per-screen/index.html#R1"><figure><img loading="lazy" src="2-one-thing-per-screen/shots/R1.png" alt="2 reveal"><figcaption><b>Reveal</b>Calendar week grid and a "What's next" column</figcaption></figure></a>
+    <a href="2-one-thing-per-screen/index.html#T"><figure><img loading="lazy" src="2-one-thing-per-screen/shots/T.png" alt="2 main page"><figcaption><b>Main page</b>"Lab 6 is next.", the task, the list; status in the side column</figcaption></figure></a>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>What it borrows</h3>
+      <ul class="borrow">
+        <li><b>Notion</b>Home's order (now, then soon, then my work); sections that appear only when they have content; adjacency spacing in place of boxes.</li>
+        <li><b>Stripe</b>"Save for later" and resume that re-checks what is outstanding; pending states with a time expectation; Checkout's order summary; prefill then confirm.</li>
+        <li><b>Apple Setup</b>One decision per screen; a pre-permission screen whose one button names what it opens; "Set Up Later"; the Quick Start transfer screen with honest timing; the week as a single "Hello" moment.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Honest weaknesses after round 2</h3>
+      <ul class="weak">
+        <li>The reveal is slow to settle. At 4 seconds it is still mid-animation: the grid dimmed, cut at 4 pm, the weekend missing. The most important screen shows a half-built week.</li>
+        <li>The VHL warning sits in the side column, away from the "VHL Lección 6, today at 11:59 pm" row it affects, which carries no flag.</li>
+        <li>The headline and the task card repeat each other ("Lab 6 is next." over "Lab 6: Functions"), so the task starts at y 285. The list's columns are ragged ("1h 48m today (of 4h left)").</li>
+        <li>Due items are still bare diamonds on the reveal and the Week page, with 11:59 pm on the midnight line.</li>
+        <li>The zyBooks step shows a password already filled in before the student types, which reads as stored credentials. R0 shows "11 of 12 done" above a rail saying "7 of 7 done".</li>
+      </ul>
+      <p class="keep"><b>Worth keeping:</b> the school sheet and S3 proof are the clearest in the set, and R0's "Building your week" countable list is the model for any wait. Today now reads in about two scrolls with no morning gate.</p>
+    </div>
+  </div>
+  <div class="links"><a href="2-one-thing-per-screen/index.html">Open the prototype</a><a href="2-one-thing-per-screen/BRIEF.md">BRIEF.md</a><a href="2-one-thing-per-screen/shots/">All screenshots</a></div>
+</section>
+
+<!-- 3 -->
+<section class="dir" id="d3">
+  <div class="dir-head">
+    <div>
+      <div class="eyebrow">Direction 3 · third reference: Shovel (semester time arithmetic)</div>
+      <h2>The week as a balance</h2>
+    </div>
+    <div class="score"><b>61</b><span>round 2 · round 1: 60</span></div>
+  </div>
+  <p class="thesis">Under "what's next" sits "do I have enough time?", so the direction answers it from the first proof on. A ledger opens at the school step and fills as each source is read, showing its two inputs (work due, time taken) and weighing them only at the end. The reveal is the week's statement: work due against open time, day by day, read at the tightest day. The daily page is today's budget with its line items.</p>
+
+  <div class="strip">
+    <a href="3-week-ledger/index.html#o3a-need"><figure><img loading="lazy" src="3-week-ledger/shots/o3a-need.png" alt="3 school sign-in"><figcaption><b>Login step</b>What you'll need, beside the ledger to come</figcaption></figure></a>
+    <a href="3-week-ledger/index.html#o3c-proof"><figure><img loading="lazy" src="3-week-ledger/shots/o3c-proof.png" alt="3 school proof"><figcaption><b>Proof</b>The ledger's two inputs, weighed only at the end</figcaption></figure></a>
+    <a href="3-week-ledger/index.html#o12-reveal"><figure><img loading="lazy" src="3-week-ledger/shots/o12-reveal.png" alt="3 reveal"><figcaption><b>Reveal</b>"Tightest day: Thursday · 4h of 10h"</figcaption></figure></a>
+    <a href="3-week-ledger/index.html#m1-today"><figure><img loading="lazy" src="3-week-ledger/shots/m1-today.png" alt="3 main page"><figcaption><b>Main page</b>Next, must do, today's ledger, the week's bars</figcaption></figure></a>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>What it borrows</h3>
+      <ul class="borrow">
+        <li><b>Notion</b>The preview that builds beside the signup form, made real as the ledger pane; one object, many renders; adjacency spacing.</li>
+        <li><b>Stripe</b>Balances shown precisely with available and pending kept apart; at most one comparison per figure; Checkout's order summary.</li>
+        <li><b>Shovel</b>Hours needed against hours available; the cushion taken at its tightest deadline. It stops short of typed estimates, start dates and "delete something" advice.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Honest weaknesses after round 2</h3>
+      <ul class="weak">
+        <li>Every screen's main heading is boxed in red by focus styling ("Your school", "Here's your week.", "Lab 6: Functions"). To a tired student it reads as an error.</li>
+        <li>The daily page breaks the ledger's own promise: the Today rail says Must do −4.5h for Monday while This week says Mon 2h due, 200 px apart, unexplained.</li>
+        <li>The dropped leftover-hours idea survives at day scale ("Open after the work: about 5.5h", "About 2.5h of tonight is free"), and "Classes −16h" still subtracts from nothing.</li>
+        <li>The stepper's "Your week" label overlaps "About 3 min to your week" on <code>o10-your-week</code>, which also has two controls for the same awake window.</li>
+        <li>The daily page has about nine regions competing above or near the fold, and "steady" in the header is cryptic.</li>
+      </ul>
+      <p class="keep"><b>Worth keeping:</b> "Tightest day · 10h of 13.5h" with "Every day has more open time than work due". It answers "am I okay?" honestly, and 5b has already taken it.</p>
+    </div>
+  </div>
+  <div class="links"><a href="3-week-ledger/index.html">Open the prototype</a><a href="3-week-ledger/BRIEF.md">BRIEF.md</a><a href="3-week-ledger/shots/">All screenshots</a></div>
+</section>
+
+<!-- 4 -->
+<section class="dir" id="d4">
+  <div class="dir-head">
+    <div>
+      <div class="eyebrow">Direction 4 · third reference: Plaid Link</div>
+      <h2>Connections hub, one sheet per source</h2>
+    </div>
+    <div class="score"><b>66</b><span>round 2 · round 1: 61</span></div>
+  </div>
+  <p class="thesis">What Knowlu reads becomes the visible structure. A ranked board shows one large "Suggested next" tile, the other open places as rows, then what is connected and what each found. Sources the school sign-in discovered (zyBooks, VHL, the missing syllabus) say "Found at your school" and why. Each opens a Plaid-style sheet: what you'll need, the school's own window, then a success state that writes the proof onto the board. After setup the board becomes Connections, and the daily page is a ranked list.</p>
+
+  <div class="strip">
+    <a href="4-connector-hub/index.html#H"><figure><img loading="lazy" src="4-connector-hub/shots/H.png" alt="4 ranked board"><figcaption><b>Board</b>Suggested next, also open, connected</figcaption></figure></a>
+    <a href="4-connector-hub/index.html#P-SCH-PROOF"><figure><img loading="lazy" src="4-connector-hub/shots/P-SCH-PROOF.png" alt="4 school proof"><figcaption><b>Proof</b>"Syllabi found for 4 of 5", written onto the school row</figcaption></figure></a>
+    <a href="4-connector-hub/index.html#R-REV"><figure><img loading="lazy" src="4-connector-hub/shots/R-REV.png" alt="4 reveal"><figcaption><b>Reveal</b>What's next card beside a calendar week</figcaption></figure></a>
+    <a href="4-connector-hub/index.html#M-TODAY"><figure><img loading="lazy" src="4-connector-hub/shots/M-TODAY.png" alt="4 main page"><figcaption><b>Main page</b>Rail, Next card and list, day column</figcaption></figure></a>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>What it borrows</h3>
+      <ul class="borrow">
+        <li><b>Notion</b>Toggle children for a task's steps; a quiet collapsible rail; tint as course identity; one object, many renders.</li>
+        <li><b>Stripe</b>Connect's requirements model (resume lands on the first gap); the Dashboard inspector; distinct "checking" vs "failed" states; errors as cause plus fix.</li>
+        <li><b>Plaid Link</b>Expectations before the window; data transparency above Continue; the institution's own window; update mode for repair ("sign in again" asks only for what is broken).</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Honest weaknesses after round 2</h3>
+      <ul class="weak">
+        <li>The same proof appears three times on one screen (top bar, Connected row, sheet), and H has two calls to action for the same step (the hero button and the Suggested tile).</li>
+        <li>On S-WEEK the one open item, "Your week", is the last tile in a cramped 320 px column and is cut off at the fold. Proof there breaks over three lines.</li>
+        <li>The reveal truncates every chip ("11:59p VHL Le...", "Marsh Library...") and is a generic week calendar with nothing of the hub in it, not even a mark for which place supplied each item.</li>
+        <li>The daily page's left rail is unlabelled course dots with trend glyphs and an amber "!" on the plug icon. A broken connection is the hub's subject, and here it has no words.</li>
+        <li>"1 of 6 places connected" leaves out Account and Payment, which the board shows as connected.</li>
+      </ul>
+      <p class="keep"><b>Worth keeping:</b> "Found at your school" with its reason on each discovered source, and the three-row pre-sheet (You'll need · What Knowlu reads · Where it goes).</p>
+    </div>
+  </div>
+  <div class="links"><a href="4-connector-hub/index.html">Open the prototype</a><a href="4-connector-hub/BRIEF.md">BRIEF.md</a><a href="4-connector-hub/shots/">All screenshots</a></div>
+</section>
+
+<!-- 5b -->
+<section class="dir" id="d5b">
+  <div class="dir-head">
+    <div>
+      <div class="eyebrow">Direction 5b · third reference: Flighty</div>
+      <h2>Departures <span class="tag rec">recommended</span></h2>
+    </div>
+    <div class="score"><b>66</b><span>round 2 · round 1: 65</span></div>
+  </div>
+  <p class="thesis">What students fear is being surprised more than the list itself, so status and change become the structure. A rail names each step's benefit before the login and its proof after. A board of the week, one row per day, appears at the school proof and grows at every later one, in counts and course codes only until the reveal. The daily page is the same board in its daily form: the next departure enlarged with its why, the rest in Knowlu's order, one status word each. Changes arrive the way Flighty reports gate changes: the new value, the old one, and the reason.</p>
+
+  <div class="strip">
+    <a href="5b-departures-board/index.html#o2n-before"><figure><img loading="lazy" src="5b-departures-board/shots/o2n-before.png" alt="5b school sign-in"><figcaption><b>Login step</b>Where you sign in, your phone, what Knowlu reads</figcaption></figure></a>
+    <a href="5b-departures-board/index.html#o2p-proof"><figure><img loading="lazy" src="5b-departures-board/shots/o2p-proof.png" alt="5b school proof"><figcaption><b>Proof</b>One sentence, and the week board arrives holding the counts</figcaption></figure></a>
+    <a href="5b-departures-board/index.html#r1-reveal"><figure><img loading="lazy" src="5b-departures-board/shots/r1-reveal.png" alt="5b reveal"><figcaption><b>Reveal</b>Live card, tonight, a calendar grid, tidied / email / still coming</figcaption></figure></a>
+    <a href="5b-departures-board/index.html#m1-today"><figure><img loading="lazy" src="5b-departures-board/shots/m1-today.png" alt="5b main page"><figcaption><b>Main page</b>"Lab 6 is next." over one departures board</figcaption></figure></a>
+  </div>
+
+  <div class="cols">
+    <div>
+      <h3>What it borrows</h3>
+      <ul class="borrow">
+        <li><b>Notion</b>The menu-bar "what's next" with no window open (the tray card); Notion Calendar's grid recipe; the preview that builds as you answer, here the board growing one proof at a time.</li>
+        <li><b>Stripe</b>Many system states collapse into a few human words; badges typed by what the reader must do; "reading" never looks like "needs you"; the order summary above one $9.99 button.</li>
+        <li><b>Flighty</b>One line per departure, essential fields only; a change shown as new value, old value and cause; predicted shown beside official, never replacing it. It drops Flighty's countdowns, red/green and delay predictions.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Honest weaknesses after round 2</h3>
+      <ul class="weak">
+        <li>The reveal drops the board. Nine steps build one row-per-day board, the daily page uses it, and the payoff screen switches to a 7-column calendar grid. Its button, "Open Knowlu", is shown inside Knowlu.</li>
+        <li>A late item's Due cell shows a large "11:59 pm" with a small "Was due Fri". At 11 pm that reads as "due in an hour"; the real close is in the Status column.</li>
+        <li>"Left" beside deadline times reads as a countdown ("24m" on an 11:59 pm item), and the page mixes "4.7h" with "1h 12m".</li>
+        <li>"Lock in" is the filled red primary on a late row and is never explained; Done is what a tired student wants. Other rows' actions appear only on hover.</li>
+        <li>The right rail's Needs-you card (three buttons) and a day bar that needs a four-line legend compete with the board. The wait (<code>w1-wait</code>) is still the round-1 version.</li>
+      </ul>
+      <p class="keep"><b>Why it still leads:</b> it is the only direction where one object runs through setup and the daily page: every login visibly changes the same week board, payment waits for that proof, and the daily page is now that board. The round-1 fixes landed ("Free from" computed, Needs-you date-checked, "Your week" questions-first, the board arriving with the first proof, light mode at parity). The reveal is the last place the thesis breaks.</p>
+    </div>
+  </div>
+  <div class="links"><a href="5b-departures-board/index.html">Open the prototype</a><a href="5b-departures-board/BRIEF.md">BRIEF.md</a><a href="5b-departures-board/shots/">All screenshots</a></div>
+</section>
+
+<!-- Compare -->
+<section class="compare" id="compare">
+  <h2>Side by side</h2>
+  <p class="dim" style="margin-top:8px;max-width:52em">All five keep the ruled ask order and the same logins. They differ in what the student sees while they connect, when the week first appears, and what the daily page is built around. Green marks the strongest answer in each row after round 2.</p>
+  <div class="tablewrap">
+  <table>
+    <thead>
+      <tr><th></th><th>1b Concierge</th><th>2 One thing per screen</th><th>3 Week ledger</th><th>4 Connections hub</th><th>5b Departures</th></tr>
+    </thead>
+    <tbody>
+      <tr><th>Organising idea</th>
+        <td>An exchange: one line, the action, the proof</td>
+        <td>One sheet per ask; route bar at the bottom</td>
+        <td>A ledger of hours that fills as sources land</td>
+        <td>A ranked board of places; one sheet per place</td>
+        <td class="best">A step rail plus a week board that grows at every proof and becomes the daily page</td></tr>
+      <tr><th>Flow length</th>
+        <td>About 22 exchanges on the main path; "about 9 minutes"</td>
+        <td>About 20 sheets, 7 stops on the route bar; "about 9 minutes"</td>
+        <td class="best">12 steps (O1-O12); "about 9 min to your week"</td>
+        <td>6 places, 2-4 panes each; "about 8 min"; after payment any order</td>
+        <td>9 rail steps; "about 8 minutes"</td></tr>
+      <tr><th>Logins asked</th>
+        <td colspan="5">The same in all five, as ruled: account (Google or emailed code) → one school sign-in on the school's own page, with Duo (covers Blackboard, registrar, grades, syllabi and school email) → Stripe checkout in the browser → one Google consent for Gmail and Calendar → zyBooks and VHL (only because the syllabi name them) → CS 110's syllabus as a file. That is 6 sign-ins or consents and 1 file. Google and the homework sites can be skipped, with the cost named. Only 4 relaxes the order after payment.</td></tr>
+      <tr><th>First value</th>
+        <td class="best">School proof sentence over ruled rows saying what was left out and why</td>
+        <td>School proof sheet with course codes named, about 2 min in</td>
+        <td>The ledger's two inputs from the school step on</td>
+        <td>Proof on the school row, plus discovered places with their reason</td>
+        <td class="best">School proof plus the week board arriving with 6 items due this week, about 2 min in</td></tr>
+      <tr><th>When the week first shows</th>
+        <td>At the reveal</td>
+        <td>At the reveal (held back on purpose)</td>
+        <td>Inputs from the school proof; weighed only at the reveal</td>
+        <td>At the reveal</td>
+        <td class="best">Counts and course codes from the school proof; titles at the reveal</td></tr>
+      <tr><th>The wait (up to 3 min)</th>
+        <td>Thread follow-ups narrating real work</td>
+        <td class="best">"Building your week": 12 countable lines (its two counts disagree)</td>
+        <td>Mostly empty pane beside the ledger</td>
+        <td>The board plus spinners</td>
+        <td>Round-1 version, not rebuilt: per-source lines plus the board settling</td></tr>
+      <tr><th>The reveal</th>
+        <td>Brief and a dense week table; "61 archived" with no way to look</td>
+        <td>Calendar grid still animating at 4 s; bare due diamonds</td>
+        <td class="best">"Tightest day: Thursday · 4h of 10h"; legend swatch nearly invisible</td>
+        <td>Next card beside a calendar; truncated chips; no source marks</td>
+        <td>Live card, tonight, then a calendar grid that drops the board; tidied, email (with Undo), still coming</td></tr>
+      <tr><th>How "what's next" is answered daily</th>
+        <td>The list owns the column from row 1; margin is link soup with three hour figures</td>
+        <td class="best">"Lab 6 is next.", one sentence of why, the task, the list; VHL warning apart from its row</td>
+        <td>Next item under about nine competing regions; two figures for today's work</td>
+        <td>Next card and ranked list beside an unlabelled rail and a day column</td>
+        <td class="best">"Lab 6 is next." and a checked sentence over one board in Knowlu's order, one status word per row</td></tr>
+      <tr><th>The 11 pm case</th>
+        <td colspan="5">Not shown in any direction. 2, 4 and 5b all rank the late Lab 6 (window open to Wednesday) above two items closing at 11:59 pm tonight, and every daily page's copy is written for the morning.</td></tr>
+      <tr><th>Biggest risk now</th>
+        <td>Onboarding as a short form in an empty page; margin noise</td>
+        <td>A conventional wizard; a reveal that doesn't settle</td>
+        <td>Numbers that don't add up on the page that promises they will</td>
+        <td>A hub that pictures the setup, not the week; generic reveal and console</td>
+        <td>The reveal breaks the thesis; late-item Due cell misleads at night</td></tr>
+      <tr><th>Critique score, round 1 → 2</th>
+        <td>58 → 64</td><td>63 → 66</td><td>60 → 61</td><td>61 → 66</td><td>65 → 66</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">Flow lengths are main-path counts from each BRIEF's flow map, not timed walk-throughs. None of the five has been timed with a person. The critique scores come from two red-team passes, each using one rubric for every direction. After round 2 the spread is 5 points with a three-way tie at the top, which is within critic noise. Round 2's critique was time-boxed: about five screens were inspected per direction, and most error, empty and skip states were not re-checked.</p>
+</section>
+
+<section class="rec" id="recommendation">
+  <h2>Recommendation</h2>
+  <p style="margin-top:12px;max-width:62em"><strong>Keep 5b, Departures,</strong> as the spine. Round 2 took four grafts in (2's headline, 1b's list-first page as the board, 3's tightest-day bar, 4's update-mode repair) and closed round 1's fix list. Next, in order:</p>
+  <ol>
+    <li><strong>Make the reveal the board:</strong> the same rows the student watched gain counts, now with titles and hours. Keep the live card, Tonight and the tidied / email / still coming row. Replace "Open Knowlu" with "Start with Reading: Ch. 8".</li>
+    <li><strong>Rebuild the wait</strong> on 2's R0 model: countable lines, one count, a 3-minute cap.</li>
+    <li><strong>Fix the board's daily reading:</strong> a late item's Due cell shows "Late" and the window's close; "Left" becomes "Work left" in one time format; Done is the lead row's primary; every row shows an action target; the right rail steps back.</li>
+    <li><strong>Graft from 4:</strong> "Found at your school" with its reason on the rail rows for zyBooks, VHL and the syllabus. <strong>From 1b:</strong> S-proof's rows that say what was left out and why.</li>
+    <li><strong>Decide the 11 pm order</strong> and show it: two items closing in an hour against a late lab with two days of window.</li>
+  </ol>
+  <p style="max-width:62em">Test with one real student before building more: see README.md. Use the invented Maya data in the prototype, never the student's own accounts.</p>
+</section>
+
+<footer>
+  Superseded first passes, not compared here: <a href="1-checklist-to-today/index.html">1 Checklist to today</a> (replaced by 1b) and <a href="5-three-lanes/index.html">5 Three lanes</a> (replaced by 5b). Shared research: <a href="research/">research/</a>; concepts: <a href="concepts.md">concepts.md</a>; sample data: <a href="shared/sample-student.json">shared/sample-student.json</a> (invented). Built 2026-10-23; updated after round 2.
+</footer>
+</div>
+<script>
+(function () {
+  var btn = document.getElementById('theme');
+  var root = document.documentElement;
+  try { var saved = localStorage.getItem('kd-theme'); if (saved) root.setAttribute('data-theme', saved); } catch (e) {}
+  var q = /[?&]theme=(light|dark)/.exec(location.search); if (q) root.setAttribute('data-theme', q[1]);
+  btn.addEventListener('click', function () {
+    var cur = root.getAttribute('data-theme');
+    if (!cur) cur = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    var next = cur === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('kd-theme', next); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>
