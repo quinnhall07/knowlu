@@ -1697,7 +1697,7 @@ pub struct Closed {
     pub mark: String,
     pub when: String,
     pub path: String,
-    /// O1 T2a stub, always `false`; T7a: true only for a close written by `agent:knowlu.completion`
+    /// True only for a close written by `agent:knowlu.completion` (`op: set`, `status` to `done`)
     /// whose note still reads `status: done` at `path`, so the console can offer Undo.
     pub undo: bool,
 }
@@ -1717,6 +1717,9 @@ pub fn closed_this_week(vault: &Path, now: DateTime, journal: &mut crate::journa
     // not the map's own key order, so a caller with no duplicates still sees chronological rows.
     let mut order: Vec<String> = Vec::new();
     let mut by_path: BTreeMap<String, Closed> = BTreeMap::new();
+    // Paths whose latest closing record is the completion agent's `status: done`; confirmed against
+    // the note once, after the loop.
+    let mut completion_closes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for r in journal.read(Some(&since), None) {
         let ts = r.get("ts").and_then(|v| v.as_str()).unwrap_or("");
         let ts_bound = ts.get(..19).unwrap_or(ts);
@@ -1738,6 +1741,11 @@ pub fn closed_this_week(vault: &Path, now: DateTime, journal: &mut crate::journa
         if !by_path.contains_key(&path) {
             order.push(path.clone());
         }
+        if op == "set" && field == "status" && new.and_then(|v| v.as_str()) == Some("done") && actor == crate::completion::ACTOR {
+            completion_closes.insert(path.clone());
+        } else {
+            completion_closes.remove(&path);
+        }
         by_path.insert(
             path.clone(),
             Closed {
@@ -1749,6 +1757,17 @@ pub fn closed_this_week(vault: &Path, now: DateTime, journal: &mut crate::journa
                 undo: false,
             },
         );
+    }
+    // Undo is offered only while the note still reads `status: done` where the agent wrote it: a
+    // student who has since set it back (or moved it) has already undone it.
+    for path in &completion_closes {
+        let still_done = crate::ids::read_meta(&vault.join(path))
+            .and_then(|meta| crate::yaml::get(&meta, "status").and_then(crate::yaml::text))
+            .as_deref()
+            == Some("done");
+        if let Some(row) = by_path.get_mut(path) {
+            row.undo = still_done;
+        }
     }
     order.into_iter().filter_map(|p| by_path.remove(&p)).collect()
 }
