@@ -383,7 +383,7 @@ fn sync_line_copy_is_verbatim_and_object_kind_is_never_guessed() {
     assert!(js.contains("[data-sync]"));
     let sync_line_start = js.find("[data-sync]").unwrap();
     let backup_line_start = js.find("[data-backup]").unwrap();
-    assert!(js[sync_line_start..sync_line_start + 220].contains(".catch(function () {})"), "manual sync swallows an IPC rejection");
+    let _ = sync_line_start; // manual sync no longer swallows a rejection: see `sync_now_says_what_happened`
     assert!(js[backup_line_start..backup_line_start + 220].contains(".catch(function () {})"), "manual backup swallows an IPC rejection");
 }
 
@@ -3535,4 +3535,107 @@ fn the_held_backfill_step_says_so_and_shows_no_forwarding_guide() {
     assert!(branch.contains("return"), "the backfill step returns its own sentence before any address or path");
     assert!(branch.find("return").unwrap() < branch.find("mpAddressFor(").unwrap(), "and before the address is even fetched");
     assert!(!branch.contains("data-mp-copy") && !branch.contains("MP_PATH"), "no address, Copy or forwarding path on the backfill step");
+}
+
+/// Founder report (prod 0.1.3/0.1.4): *sync now* synced and showed nothing. The press disables the
+/// button for the length of the call, says what happened in a toast on every outcome, and the sync
+/// line carries the time. A rejected call names itself instead of vanishing into an empty catch.
+#[test]
+fn sync_now_says_what_happened() {
+    let js = read("console.js");
+    let run = js_fn(&js, "function runSync(");
+    assert!(!run.contains(".catch(function () {})"), "no empty catch on manual sync: {run}");
+    assert!(run.contains("setSyncBusy(true)") && run.contains("setSyncBusy(false)"), "busy for the length of the call");
+    assert!(run.contains("\"synced \"") && run.contains("showNote("), "success toasts the time");
+    assert!(run.contains("syncSays(s.skipped"), "a skip toasts the sync line's own words");
+    assert!(run.contains("syncRefusal"), "an error keeps the existing refusal");
+    assert!(run.contains("sync could not start — "), "a rejected call says why");
+    let busy = js_fn(&js, "function setSyncBusy(");
+    assert!(busy.contains("disabled") && busy.contains("syncing…"), "the button is disabled and reads syncing…");
+    let click = js.find("var syncBtn = e.target.closest(\"[data-sync]\")").expect("the sync click branch");
+    assert!(js[click..click + 120].contains("runSync()"), "the click calls runSync");
+}
+
+#[test]
+fn the_sync_line_shows_the_last_sync_time_and_survives_a_repaint_mid_sync() {
+    let js = read("console.js");
+    assert!(js.contains("function localHM("), "one local HH:MM formatter");
+    let line = js_fn(&js, "function renderSyncLine(");
+    assert!(line.contains("localHM(s.at)"), "the status's `at` is shown as a local time");
+    assert!(line.contains("synced ") && line.contains("tried "), "ok says synced, a skip or error says tried");
+    assert!(line.contains("syncing ? \" disabled\"") && line.contains("syncing…"), "a repaint during a sync keeps the busy button");
+    assert!(read("console.css").contains(".notetoast"), "the calm toast is styled");
+}
+
+/// Founder report: *Check now* showed nothing. Every outcome lands in the Updates row.
+#[test]
+fn check_now_renders_every_outcome_in_the_updates_row() {
+    let js = read("console.js");
+    let chk = js_fn(&js, "function checkForUpdates(");
+    assert!(!chk.contains(".catch(function () {})"), "no empty catch on the check: {chk}");
+    assert!(chk.contains("checking…") && chk.contains("disabled"), "busy while it runs");
+    assert!(chk.contains("could not check — "), "a rejected call says why");
+    let out = js_fn(&js, "function updateOutcome(");
+    assert!(out.contains("up to date (checked ") && out.contains(" is available") && out.contains("u.error"), "up to date, available, error");
+    assert!(out.contains("localHM("), "the check time is local HH:MM");
+    assert!(chk.contains("renderUpdateOffer(u, "), "the banner is raised by the same path as at startup");
+    // The housekeeping thread and the startup check share one flight; the loser used to say
+    // nothing and never asked again.
+    assert!(chk.contains("ALREADY_CHECKING") && chk.contains("setTimeout("), "a check that lost the flight asks again");
+    assert!(js.contains("checkForUpdates(true)"), "the button's press is the manual path");
+    // Review: an automatic retry runs `check_for_updates`, which clears the server's action error
+    // (updates.rs: background work never touches it) - so it stops once an install was attempted or
+    // the banner shows a failure, and there is ONE retry timer, never a chain per press.
+    assert!(chk.contains("!UPD.attempted") && chk.contains("!UPD.note"), "no retry after an install attempt or while a note shows");
+    assert!(chk.contains("clearTimeout(UPD.timer)") && chk.contains("UPD.timer = setTimeout("), "one shared retry timer");
+    assert!(chk.contains("renderUpdateOffer(u, manual !== true)"), "a quiet check is told it is quiet");
+    let offer = js_fn(&js, "function renderUpdateOffer(");
+    assert!(offer.contains("quiet && UPD.note"), "a quiet check never repaints a banner that shows an install message");
+    assert!(offer.contains("localHM(u.last_check)"), "the settings line shows the check time as local HH:MM");
+}
+
+/// Founder report: *Restart to update* needed two presses. The first was refused (a slot running
+/// just after launch, or a slow manifest) and the only trace was a six-second toast.
+#[test]
+fn the_update_button_shows_progress_and_keeps_a_failure_on_the_banner() {
+    let js = read("console.js");
+    let ins = js_fn(&js, "function installUpdate(");
+    assert!(!ins.contains(".catch(function () {})") && !ins.contains("{ ins.disabled = false; })"), "no silent catch");
+    assert!(ins.contains("disabled = true") && ins.contains("installing…"), "disabled and says installing…");
+    assert!(ins.contains("update failed") && ins.contains("data-install"), "a failure stays on the banner with a way to retry");
+    assert!(ins.contains("UPD.installing"), "a second press while installing is ignored");
+    assert!(ins.contains("UPD.attempted = true"), "an install attempt ends the automatic retries");
+    // Review: a slot running is not a failure - the page waits and installs when it ends.
+    assert!(ins.contains("waiting for the current sync to finish") && ins.contains("a slot is running"), "a running slot is named as a wait");
+    assert!(ins.contains("setTimeout(attempt"), "and the install is retried on its own");
+    // A good install that does not exit the process says what to do.
+    assert!(ins.contains("restart Knowlu to finish"), "ok without an exit says so");
+    let click = js.find("var ins = e.target.closest(\"[data-install]\")").expect("the install click branch");
+    assert!(js[click..click + 120].contains("installUpdate("), "the click calls installUpdate");
+    let offer = js_fn(&js, "function renderUpdateOffer(");
+    assert!(offer.contains("UPD.installing"), "a later check does not repaint the banner mid-install");
+}
+
+/// Review: the page matches the updater's two refusals by their words (`ALREADY_CHECKING` exactly,
+/// `SLOT_RUNNING` by its start). The words live in `updates.rs`; this is the tripwire if either moves.
+#[test]
+fn the_page_matches_the_updaters_refusal_words() {
+    let rs = fs::read_to_string(Path::new("src").join("updates.rs")).expect("src/updates.rs");
+    let js = read("console.js");
+    assert!(rs.contains("pub const ALREADY_CHECKING: &str = \"a check is already running\";"), "updates.rs ALREADY_CHECKING");
+    assert!(js.contains("var ALREADY_CHECKING = \"a check is already running\";"), "console.js matches it exactly");
+    assert!(rs.contains("pub const SLOT_RUNNING: &str = \"a slot is running"), "updates.rs SLOT_RUNNING");
+    assert!(js.contains("msg.indexOf(\"a slot is running\") === 0"), "console.js matches its start");
+}
+
+/// Review: a manual check that loses the flight after an install attempt gets no automatic retry (a
+/// retry would clear the install's outcome), so its row must not promise a result.
+#[test]
+fn a_manual_check_that_will_not_retry_does_not_promise_a_result() {
+    let js = read("console.js");
+    let out = js_fn(&js, "function updateOutcome(");
+    assert!(out.contains("retrying") && out.contains("try again shortly"), "the outcome knows whether a retry follows");
+    let chk = js_fn(&js, "function checkForUpdates(");
+    assert!(chk.contains("updateOutcome(u, retry)"), "and the check tells it");
+    assert!(!js.contains("comes back in the envelope and is shown, never retried"), "the install-click comment is current: a running slot is retried");
 }
