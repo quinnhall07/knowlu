@@ -228,9 +228,30 @@ source_uid: {uid}\n\
 \n\
 {body}\n";
 
-/// O1 T2a stub (an empty template); T4 replaces it with [`IMPORTED_PAST_TEMPLATE`]'s twin carrying
-/// `archived_reason: imported-done`.
-pub const IMPORTED_DONE_TEMPLATE: &str = "";
+/// [`IMPORTED_PAST_TEMPLATE`]'s twin for work the source says is already turned in (O1, spec §6.2):
+/// the same fields, and `archived_reason: imported-done` (`ingest::IMPORTED_DONE`) where the past
+/// template says `imported-past`. Two templates for the reason the first gives: the two reasons
+/// differ in what they MEAN, and a reader should not have to diff them to see it.
+pub const IMPORTED_DONE_TEMPLATE: &str = "---
+title: {title}
+course: {course}
+domain: school
+due: {due}
+effort_hours: {effort_hours}
+effort_confidence: {effort_confidence}
+effort_source: {effort_source}
+importance: {importance}
+importance_reason: {importance_reason}
+status: archived
+archived_reason: imported-done
+progress: {progress}
+needs_enrichment: false
+created_by: {created_by}
+source_uid: {uid}
+---
+
+{body}
+";
 
 /// Python's `f"{value}"` on a float, which keeps the decimal point on a whole number — `3.0`,
 /// never `3`. The frontmatter value depends on it: `effort_hours: 3` and `effort_hours: 3.0` load
@@ -304,6 +325,23 @@ pub fn sync_coursework(
     dry_run: bool,
     ctx: Option<&WriteContext>,
     journal: Option<&mut Journal>,
+) -> Result<Vec<String>, SourceError> {
+    sync_coursework_with_done(assignments, vault, today, dry_run, ctx, journal, &Default::default())
+}
+
+/// [`sync_coursework`] plus the uids whose vendor figure is complete (100%) -- `finished`. An item in
+/// `finished` that lands in a source group new to the vault (and is not already past) goes straight
+/// to `archive/` as `imported-done`: work the source says is turned in is never a task (O1, spec
+/// §6.2). In a group the vault already holds it is created live, and the run's tier-1 apply marks
+/// it done afterwards. An item already past stays `imported-past`.
+pub fn sync_coursework_with_done(
+    assignments: &[Assignment],
+    vault: &Path,
+    today: Option<Date>,
+    dry_run: bool,
+    ctx: Option<&WriteContext>,
+    journal: Option<&mut Journal>,
+    finished: &std::collections::HashSet<String>,
 ) -> Result<Vec<String>, SourceError> {
     let mut owned_journal;
     let journal: &mut Journal = match journal {
@@ -490,7 +528,16 @@ pub fn sync_coursework(
         // `today_local` is `Some` exactly when at least one group is new (M5); gated again here,
         // per item, by whether THIS item's own group is one of them.
         let cutoff = if new_groups.contains(&group) { today_local } else { None };
-        if cutoff.is_some_and(|c| item.due.date() < c) {
+        // Precedence: past first (`imported-past`), then turned-in (`imported-done`) under the same
+        // new-group cutoff; `cutoff` is `Some` exactly for an item of a new group.
+        let import = if cutoff.is_some_and(|c| item.due.date() < c) {
+            Some((IMPORTED_PAST_TEMPLATE, "imported-past"))
+        } else if cutoff.is_some() && finished.contains(&item.uid) {
+            Some((IMPORTED_DONE_TEMPLATE, "imported-done"))
+        } else {
+            None
+        };
+        if let Some((template, reason)) = import {
             let archive_dir = vault.join("archive");
             let mut path = archive_dir.join(format!("{}.md", item.slug));
             let mut suffix = 2;
@@ -503,13 +550,13 @@ pub fn sync_coursework(
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if dry_run {
-                log.push(format!("would archive (imported-past) {stem} (due {new_due})"));
+                log.push(format!("would archive ({reason}) {stem} (due {new_due})"));
                 continue;
             }
             // M1: below the dry-run guard, never above it — a `--dry-run` that creates a folder in
             // the vault has already broken the promise it exists to make.
             let _ = std::fs::create_dir_all(&archive_dir);
-            let text = IMPORTED_PAST_TEMPLATE
+            let text = template
                 .replace("{title}", &json_quoted(&item.title))
                 .replace(
                     "{course}",
@@ -531,7 +578,7 @@ pub fn sync_coursework(
             let target = crate::ids::rel(vault, &path);
             crate::write::create(vault, &target, &text, &item_ctx, journal, None)
                 .map_err(|err| SourceError::Failed(format!("{err}")))?;
-            log.push(format!("archived (imported-past) {stem}"));
+            log.push(format!("archived ({reason}) {stem}"));
             known.insert(item.uid.clone(), path);
             record_seen(vault, &item.uid, &item.title, &stamp)
                 .map_err(|err| SourceError::Failed(format!("{err}")))?;
@@ -598,23 +645,15 @@ pub fn sync_coursework(
             "coursework: {archived} item(s) already past were archived from a source seen for the first time"
         ));
     }
+    // O1: the turned-in twin of the line above, counted the same way (a dry run reports what a real
+    // run would archive) and silent at zero.
+    let turned_in = log.iter().filter(|l| l.contains("(imported-done)")).count();
+    if turned_in > 0 {
+        log.push(format!(
+            "coursework: {turned_in} item(s) already turned in were archived from a source seen for the first time"
+        ));
+    }
     Ok(log)
-}
-
-/// O1 T2a stub: [`sync_coursework`] plus the uids whose vendor figure is complete (100%). T4 makes
-/// an item in `finished` that lands in a source group new to the vault (and is not already past)
-/// go straight to `archive/` as `imported-done`; until then the set is ignored and the sync is
-/// `sync_coursework` exactly. `sync_coursework` itself stays, and T4 has it call this with an empty set.
-pub fn sync_coursework_with_done(
-    assignments: &[Assignment],
-    vault: &Path,
-    today: Option<Date>,
-    dry_run: bool,
-    ctx: Option<&WriteContext>,
-    journal: Option<&mut Journal>,
-    _finished: &std::collections::HashSet<String>,
-) -> Result<Vec<String>, SourceError> {
-    sync_coursework(assignments, vault, today, dry_run, ctx, journal)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1899,7 +1938,23 @@ fn main_with_sources_on(
         if !assignments.is_empty() {
             // R-C1c-6: `sync_coursework` now judges the archive per source group, computed from
             // `assignments` and the vault's own `known`/`seen` state — no first-run flag to pass.
-            log.extend(sync_coursework(&assignments, vault, sync_today, dry_run, Some(&ctx), None)?);
+            // O1: the uids whose vendor figure says 100% -- a finished item of a group new to the
+            // vault is archived as `imported-done` instead of becoming a task.
+            let finished: std::collections::HashSet<String> = sink
+                .borrow()
+                .iter()
+                .filter(|figure| figure.is_complete())
+                .map(|figure| figure.uid.clone())
+                .collect();
+            log.extend(sync_coursework_with_done(
+                &assignments,
+                vault,
+                sync_today,
+                dry_run,
+                Some(&ctx),
+                None,
+                &finished,
+            )?);
         }
         // Stream J T8, O1 T3: after the sync, so a note created this run can be marked this run.
         // Its log lines (`marked done: …`) start with none of the sync step's counted prefixes.
@@ -1946,8 +2001,13 @@ fn main_with_sources_on(
         let updated = log.iter().filter(|l| l.starts_with("updated")).count() as i64;
         let skipped = log.iter().filter(|l| l.starts_with("skipped")).count() as i64;
         // D3: an archived import is neither a creation nor a skip, and a first day that looks empty
-        // needs a number that says where the work went.
-        let archived = log.iter().filter(|l| l.starts_with("archived (imported-past)")).count() as i64;
+        // needs a number that says where the work went. Both reasons count (`imported-past` and,
+        // from O1, `imported-done`) under the one existing key: run records are a contract with
+        // existing vaults, so no new key. `marked done:` lines count under none of these.
+        let archived = log
+            .iter()
+            .filter(|l| l.starts_with("archived (imported-past)") || l.starts_with("archived (imported-done)"))
+            .count() as i64;
         let counts = vec![("created", created), ("updated", updated), ("skipped", skipped), ("archived", archived)];
         crate::runs::add_step(vault, rid, "sync", "ok", &counts, "", None);
         steps.push(crate::cli::step_record(&crate::cli::Step {
