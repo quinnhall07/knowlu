@@ -986,7 +986,12 @@ mod tests {
         assert_eq!(apply(&vault, "tasks/hw-01.md", false), Applied::Marked);
 
         let after = std::fs::read_to_string(vault.join("tasks/hw-01.md")).unwrap();
-        assert_eq!(after, before.replace("\nstatus: active\n", "\nstatus: done\n"));
+        assert!(before.contains("\r\nstatus: active\r\n"), "precondition: the vault note is CRLF");
+        assert_eq!(
+            after,
+            before.replace("\r\nstatus: active\r\n", "\r\nstatus: done\r\n"),
+            "only the status line changes and CRLF survives"
+        );
         let records = records_for(&vault, "tasks/hw-01.md");
         let last = records.last().expect("a record");
         assert_eq!(last.get("op").and_then(Json::as_str), Some("set"));
@@ -1007,6 +1012,8 @@ mod tests {
     fn apply_done_leaves_a_status_the_student_set_by_hand() {
         let vault = scratch("apply-hand");
         task(&vault, "hw-01", "zybooks:1", "active");
+        // done then active: a no-op set journals nothing, so the student takes a position the way Undo does.
+        set_by(&vault, "tasks/hw-01.md", "quinn", "status", "done");
         set_by(&vault, "tasks/hw-01.md", "quinn", "status", "active");
         let before = snapshot(&vault);
 
@@ -1208,7 +1215,12 @@ mod tests {
         }
         let after = std::fs::read_to_string(vault.join("tasks/hw-01.md")).unwrap();
         assert!(!after.contains("judgment"), "{after}");
-        assert_eq!(after, before.replace("\nstatus: active\n", "\nstatus: done\n"));
+        assert!(before.contains("\r\nstatus: active\r\n"), "precondition: the vault note is CRLF");
+        assert_eq!(
+            after,
+            before.replace("\r\nstatus: active\r\n", "\r\nstatus: done\r\n"),
+            "only the status line changes and CRLF survives"
+        );
         let _ = std::fs::remove_dir_all(&vault);
     }
 }
