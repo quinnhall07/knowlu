@@ -676,6 +676,14 @@ const TERM_FETCH_MAX: usize = 6;
 const TERM_TIMEOUT: Duration = Duration::from_secs(10);
 const TERM_BUDGET: Duration = Duration::from_secs(20);
 
+/// How long the next term request may take, `elapsed` into the term phase: [`TERM_TIMEOUT`], cut to
+/// what is left of [`TERM_BUDGET`]; `None` once nothing is left. The whole phase therefore ends within
+/// the budget, however slow each request is.
+pub fn term_fetch_limit(elapsed: Duration) -> Option<Duration> {
+    let left = TERM_BUDGET.saturating_sub(elapsed);
+    (!left.is_zero()).then(|| TERM_TIMEOUT.min(left))
+}
+
 /// The one answer a course capture that could not read a list gives — the **ruled outcome C, for the
 /// course list only**: an empty list, and the panel showing its typed-codes field. Never an `error`,
 /// because there is nothing here for a student to act on, and never anything to do with the calendar
@@ -730,8 +738,8 @@ pub fn capture_courses(app: tauri::AppHandle, unitid: String) -> Value {
     let started = std::time::Instant::now();
     let mut ended = std::collections::BTreeMap::new();
     for id in deferred_term_ids(&body, now).into_iter().take(TERM_FETCH_MAX) {
-        if started.elapsed() >= TERM_BUDGET { break; }
-        let end = term_url(&url, &id).and_then(|u| get(&u, TERM_TIMEOUT)).and_then(|t| term_state(&t, now));
+        let Some(limit) = term_fetch_limit(started.elapsed()) else { break };
+        let end = term_url(&url, &id).and_then(|u| get(&u, limit)).and_then(|t| term_state(&t, now));
         if let Some(end) = end { ended.insert(id, end); }
     }
     let courses = current_courses_from_json(&body, now, &ended);

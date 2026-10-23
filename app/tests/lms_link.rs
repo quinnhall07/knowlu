@@ -780,3 +780,20 @@ fn a_term_url_is_the_same_origin_terms_path_and_nothing_else() {
         assert_eq!(term_url(bad_list, "_77_1"), None, "{bad_list:?}");
     }
 }
+
+/// The 20 s budget is a ceiling on the whole term phase, not a gate before each request: the last
+/// request is cut to whatever remains, and nothing starts once nothing remains.
+#[test]
+fn a_term_request_never_runs_past_the_budget() {
+    use knowlu::lms_link::term_fetch_limit;
+    use std::time::Duration;
+    let s = Duration::from_secs;
+    assert_eq!(term_fetch_limit(s(0)), Some(s(10)));
+    assert_eq!(term_fetch_limit(s(10)), Some(s(10)));
+    assert_eq!(term_fetch_limit(s(15)), Some(s(5)), "cut to what is left of the budget");
+    assert_eq!(term_fetch_limit(Duration::from_millis(19_999)), Some(Duration::from_millis(1)));
+    assert_eq!(term_fetch_limit(s(20)), None);
+    assert_eq!(term_fetch_limit(s(99)), None);
+    let src = std::fs::read_to_string("src/lms_link.rs").expect("src/lms_link.rs");
+    assert!(src.contains("term_fetch_limit(started.elapsed())"), "the capture asks the clamp before every term");
+}
