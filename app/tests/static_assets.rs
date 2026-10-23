@@ -3578,11 +3578,20 @@ fn check_now_renders_every_outcome_in_the_updates_row() {
     let out = js_fn(&js, "function updateOutcome(");
     assert!(out.contains("up to date (checked ") && out.contains(" is available") && out.contains("u.error"), "up to date, available, error");
     assert!(out.contains("localHM("), "the check time is local HH:MM");
-    assert!(chk.contains("renderUpdateOffer(u)"), "the banner is raised by the same path as at startup");
+    assert!(chk.contains("renderUpdateOffer(u, "), "the banner is raised by the same path as at startup");
     // The housekeeping thread and the startup check share one flight; the loser used to say
     // nothing and never asked again.
     assert!(chk.contains("ALREADY_CHECKING") && chk.contains("setTimeout("), "a check that lost the flight asks again");
     assert!(js.contains("checkForUpdates(true)"), "the button's press is the manual path");
+    // Review: an automatic retry runs `check_for_updates`, which clears the server's action error
+    // (updates.rs: background work never touches it) - so it stops once an install was attempted or
+    // the banner shows a failure, and there is ONE retry timer, never a chain per press.
+    assert!(chk.contains("!UPD.attempted") && chk.contains("!UPD.note"), "no retry after an install attempt or while a note shows");
+    assert!(chk.contains("clearTimeout(UPD.timer)") && chk.contains("UPD.timer = setTimeout("), "one shared retry timer");
+    assert!(chk.contains("renderUpdateOffer(u, manual !== true)"), "a quiet check is told it is quiet");
+    let offer = js_fn(&js, "function renderUpdateOffer(");
+    assert!(offer.contains("quiet && UPD.note"), "a quiet check never repaints a banner that shows an install message");
+    assert!(offer.contains("localHM(u.last_check)"), "the settings line shows the check time as local HH:MM");
 }
 
 /// Founder report: *Restart to update* needed two presses. The first was refused (a slot running
@@ -3595,6 +3604,12 @@ fn the_update_button_shows_progress_and_keeps_a_failure_on_the_banner() {
     assert!(ins.contains("disabled = true") && ins.contains("installing…"), "disabled and says installing…");
     assert!(ins.contains("update failed") && ins.contains("data-install"), "a failure stays on the banner with a way to retry");
     assert!(ins.contains("UPD.installing"), "a second press while installing is ignored");
+    assert!(ins.contains("UPD.attempted = true"), "an install attempt ends the automatic retries");
+    // Review: a slot running is not a failure - the page waits and installs when it ends.
+    assert!(ins.contains("waiting for the current sync to finish") && ins.contains("a slot is running"), "a running slot is named as a wait");
+    assert!(ins.contains("setTimeout(attempt"), "and the install is retried on its own");
+    // A good install that does not exit the process says what to do.
+    assert!(ins.contains("restart Knowlu to finish"), "ok without an exit says so");
     let click = js.find("var ins = e.target.closest(\"[data-install]\")").expect("the install click branch");
     assert!(js[click..click + 120].contains("installUpdate("), "the click calls installUpdate");
     let offer = js_fn(&js, "function renderUpdateOffer(");
