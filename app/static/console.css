@@ -397,6 +397,9 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 /* GOOD TO KNOW's "close" button needs a fourth grid track that the shared .ln rule doesn't have */
 #gtk .ln { grid-template-columns: 48px minmax(0,1fr) minmax(0,80px) auto; }
 #gtk .ln button.b { padding: 2px 8px; font-size: 11px; }
+/* CLOSED THIS WEEK: a row the engine marks undo carries a button in a fourth track */
+#closed .ln.undo { grid-template-columns: 48px minmax(0,1fr) minmax(0,80px) auto; }
+#closed .ln button.b { padding: 2px 8px; font-size: 11px; }
 
 /* ---- Plan 2 Task 1: the Decisions view — every pending approval, acting like the deck ---- */
 /* Final fix wave A1: all three plan-2 row kinds are .row, and .row's four tracks

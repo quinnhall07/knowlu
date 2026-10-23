@@ -393,7 +393,20 @@
   function renderClosed(state) {
     var c = state.closed_this_week;
     EL("closed-n").textContent = c.length;
-    EL("closed").innerHTML = c.length ? c.map(function (x) { var k = x.mark === "me" ? "me" : x.mark === "agent" ? "ag" : "lp"; return '<div class="ln"><span class="k ' + k + '">' + h(x.mark === "me" ? "you" : x.mark) + "</span><span>" + h(x.title) + '</span><span class="rt">' + h(x.when.slice(11)) + "</span></div>"; }).join("") : '<div class="empty">' + h(state.texts.closed) + "</div>";
+    EL("closed").innerHTML = c.length ? c.map(function (x) { var k = x.mark === "me" ? "me" : x.mark === "agent" ? "ag" : "lp"; return '<div class="ln' + (x.undo && x.id ? " undo" : "") + '"><span class="k ' + k + '">' + h(x.mark === "me" ? "you" : x.mark) + "</span><span>" + h(x.title) + '</span><span class="rt">' + h(x.when.slice(11)) + "</span>" + (x.undo && x.id ? '<button class="b" type="button" data-undo-close="' + h(x.id) + '">Undo</button>' : "") + "</div>"; }).join("") : '<div class="empty">' + h(state.texts.closed) + "</div>";
+  }
+
+  /// O1 T7b: Undo on a close the engine marked `undo`. It is the student's own `set` back to active
+  /// (the same `set_fields` the drawer uses); which rows may offer it is the engine's call.
+  function undoClose(id, btn) {
+    if (btn) { btn.disabled = true; }
+    return invoke("set_fields", { view: stateView(), id: id, fields: { status: "active" } }).then(function (env) {
+      var ok = applyEnvelope(env, function (msg) { if (btn) { btn.disabled = false; } showRefusal(null, "could not undo — " + msg, id); });
+      if (ok) { showNote("put back on your list"); }
+    }).catch(function (err) {
+      if (btn) { btn.disabled = false; }
+      showRefusal(null, "could not undo — " + reasonOf(err), id);
+    });
   }
 
   // Plan 4a Task 8: the offer. Rendered only when the engine says there is one — the mid-run
@@ -2091,6 +2104,7 @@
     // [data-flag]/[data-close-info] route before the .row[data-id] drawer branch below — a flag
     // or close click must never also open the drawer underneath it.
     var flagBtn = e.target.closest("[data-flag]"); if (flagBtn) { openFlag(flagBtn, flagBtn.getAttribute("data-flag")); return; }
+    var undoBtn = e.target.closest("[data-undo-close]"); if (undoBtn) { undoClose(undoBtn.getAttribute("data-undo-close"), undoBtn); return; }
     var closeBtn = e.target.closest("[data-close-info]"); if (closeBtn) { closeInfoItem(closeBtn.getAttribute("data-close-info")); return; }
     // Task 15: manual sync/backup from the topline — both return the fresh state like every
     // other mutating command (spec's envelope shape), so applyEnvelope repaints it the same way.

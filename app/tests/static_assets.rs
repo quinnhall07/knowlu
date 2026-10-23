@@ -3639,3 +3639,21 @@ fn a_manual_check_that_will_not_retry_does_not_promise_a_result() {
     assert!(chk.contains("updateOutcome(u, retry)"), "and the check tells it");
     assert!(!js.contains("comes back in the envelope and is shown, never retried"), "the install-click comment is current: a running slot is retried");
 }
+
+/// O1 T7b: a close the engine marks `undo` gets an Undo button; it is the student's `set_fields`
+/// back to active, and the page decides nothing about which rows qualify.
+#[test]
+fn closed_this_week_offers_undo_only_where_the_engine_says_so() {
+    let js = read("console.js");
+    let css = read("console.css");
+    let r = js_fn(&js, "function renderClosed(");
+    assert!(r.contains("x.undo") && r.contains("data-undo-close"), "the button hangs on the engine's flag");
+    assert!(r.contains(">Undo</button>"), "and says Undo");
+    let u = js_fn(&js, "function undoClose(");
+    assert!(u.contains("invoke(\"set_fields\"") && u.contains("stateView()"), "Undo is the existing set_fields, with the page's view");
+    assert!(u.contains("status: \"active\""), "back to active");
+    assert!(u.contains("btn.disabled = true"), "disabled while pending");
+    assert!(u.contains("showNote(") && u.contains("applyEnvelope("), "an outcome is shown and the view repaints");
+    assert!(js.contains("closest(\"[data-undo-close]\")"), "the click is routed");
+    assert!(css.contains("#closed .ln.undo"), "the row has its fourth track");
+}
