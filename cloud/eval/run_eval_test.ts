@@ -966,6 +966,11 @@ Deno.test("--model refuses, before any model call, a route that cannot take the 
   assert(run.error.some((l) => l.includes("structured_outputs")), run.error.join(" | "));
 });
 
+Deno.test("perCaseLine clips a failure's detail to 200 characters", () => {
+  const line = perCaseLine("task", "case 1", "model failed", null, null, { effort_hours: 2 }, "HTTP 500 " + "x".repeat(400));
+  assertEquals([...line.slice(line.indexOf("| error ") + "| error ".length)].length, 200, line);
+});
+
 Deno.test("perCaseLine appends a failure's detail on one line", () => {
   const line = perCaseLine("task", "case 1", "model failed", null, null, { effort_hours: 2 }, "HTTP 404 · code=404 · No endpoints found");
   assert(line.endsWith(" | error HTTP 404 · code=404 · No endpoints found"), line);
@@ -973,7 +978,7 @@ Deno.test("perCaseLine appends a failure's detail on one line", () => {
 
 Deno.test("a model-failed per-case line names the HTTP status and the provider's error, never a header", async () => {
   const body = JSON.stringify({
-    error: { code: 404, message: "No endpoints found that can handle the requested parameters.\nSee docs " + "x".repeat(400), metadata: { provider_name: "DeepInfra" } },
+    error: { code: 404, message: "No endpoints found that can handle the requested parameters.\nSee docs", metadata: { provider_name: "DeepInfra", raw: "upstream echo: Homework 4 for a student" } },
   });
   const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen: () => {} }, () => new Response(body, { status: 404 }));
   const url = `http://127.0.0.1:${(server.addr as Deno.NetAddr).port}`;
@@ -1006,6 +1011,8 @@ Deno.test("a model-failed per-case line names the HTTP status and the provider's
       assert(l.includes("| error HTTP 404 · code=404 · DeepInfra · No endpoints found that can handle the requested parameters. See docs"), l);
       assert(!l.includes("\n"), l);
       assert(!/sk-test-secret|Bearer|Authorization/i.test(l), l);
+      // The upstream's raw echo can carry an item's own text (a title); it is never printed.
+      assert(!l.includes("upstream echo") && !l.includes("Homework 4"), l);
       const detail = l.slice(l.indexOf("| error ") + "| error ".length);
       assert([...detail].length <= 200, `${[...detail].length}: ${detail}`);
     }

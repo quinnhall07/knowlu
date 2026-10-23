@@ -118,7 +118,9 @@ const word = (v: unknown, allowed: readonly string[]): string =>
  * `validate` clamps or drops them, so a below-floor answer still shows its confidence), the
  * label's, and the outcome. Never free text — no title, reason, course string or due — because an
  * `eval_cases` row may one day be a student's consented correction and the gate's log is public;
- * a task's course is reported only as whether the scored verdict matched the label.
+ * a task's course is reported only as whether the scored verdict matched the label. A failed call's
+ * `detail` is the provider's status, error code, upstream name and error message, scrubbed and
+ * clipped to 200 characters; never the upstream's raw echo, which can carry a case's own text.
  */
 export function perCaseLine(
   kind: Kind,
@@ -264,7 +266,8 @@ function clipDetail(text: string): string {
   return [...scrubForPrompt(text.replace(/\s+/g, " ").trim())].slice(0, 200).join("");
 }
 
-/** A failed call as `HTTP <status> · code=<code> · <upstream> · <message> · <upstream's raw>`. */
+/** A failed call as `HTTP <status> · code=<code> · <upstream> · <message>`. Never `metadata.raw`:
+ *  the upstream's own echo can carry the request's text (an item's title). */
 function failureDetail(status: number, text: string): string {
   try {
     const e = (JSON.parse(text) as { error?: Record<string, unknown> }).error ?? {};
@@ -273,7 +276,6 @@ function failureDetail(status: number, text: string): string {
     if (e.code !== undefined) parts.push(`code=${String(e.code)}`);
     if (typeof meta.provider_name === "string") parts.push(meta.provider_name);
     if (typeof e.message === "string") parts.push(e.message);
-    if (typeof meta.raw === "string") parts.push(meta.raw);
     return clipDetail(parts.join(" · "));
   } catch {
     return `HTTP ${status} (${text.length} chars, not JSON)`;

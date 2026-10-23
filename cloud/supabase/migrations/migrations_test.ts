@@ -3541,9 +3541,11 @@ Deno.test("S6 follow-up: the testers proof makes a past-dated grant at a future 
 // ---------------------------------------------------------------------------------------------
 // task-3 (effort anchors, 2026-10-23). The task system prompt gains effort anchors
 // (`judge_prompts.ts`'s `systemTemplate("task")`); its hash moves, so the task row's
-// `prompt_version` moves with it, in one forward-only file found by its suffix (M4). The schema
-// does not change, so `grammar_version` stays; the model, provider, route, price, sampling and
-// max_tokens stay. Event, email and the mail kinds are not touched.
+// `prompt_version` moves with it, in one forward-only file found by its suffix (M4). The same
+// update re-pins the task row to Qwen3.5-35B-A3B at DeepInfra (Quinn's ruling, 2026-10-23),
+// copying the email row's provider, model id, precision, price, sampling and route field for field.
+// The schema does not change, so `grammar_version` stays, and `max_tokens` stays 256. Event, email
+// and the mail kinds are not touched.
 // ---------------------------------------------------------------------------------------------
 
 const TASK_EFFORT_ANCHORS = /^\d{14}_task_effort_anchors\.sql$/;
