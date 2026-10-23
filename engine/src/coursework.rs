@@ -228,6 +228,31 @@ source_uid: {uid}\n\
 \n\
 {body}\n";
 
+/// [`IMPORTED_PAST_TEMPLATE`]'s twin for work the source says is already turned in (O1, spec §6.2):
+/// the same fields, and `archived_reason: imported-done` (`ingest::IMPORTED_DONE`) where the past
+/// template says `imported-past`. Two templates for the reason the first gives: the two reasons
+/// differ in what they MEAN, and a reader should not have to diff them to see it.
+pub const IMPORTED_DONE_TEMPLATE: &str = "---
+title: {title}
+course: {course}
+domain: school
+due: {due}
+effort_hours: {effort_hours}
+effort_confidence: {effort_confidence}
+effort_source: {effort_source}
+importance: {importance}
+importance_reason: {importance_reason}
+status: archived
+archived_reason: imported-done
+progress: {progress}
+needs_enrichment: false
+created_by: {created_by}
+source_uid: {uid}
+---
+
+{body}
+";
+
 /// Python's `f"{value}"` on a float, which keeps the decimal point on a whole number — `3.0`,
 /// never `3`. The frontmatter value depends on it: `effort_hours: 3` and `effort_hours: 3.0` load
 /// as different YAML types.
@@ -300,6 +325,23 @@ pub fn sync_coursework(
     dry_run: bool,
     ctx: Option<&WriteContext>,
     journal: Option<&mut Journal>,
+) -> Result<Vec<String>, SourceError> {
+    sync_coursework_with_done(assignments, vault, today, dry_run, ctx, journal, &Default::default())
+}
+
+/// [`sync_coursework`] plus the uids whose vendor figure is complete (100%) -- `finished`. An item in
+/// `finished` that lands in a source group new to the vault (and is not already past) goes straight
+/// to `archive/` as `imported-done`: work the source says is turned in is never a task (O1, spec
+/// §6.2). In a group the vault already holds it is created live, and the run's tier-1 apply marks
+/// it done afterwards. An item already past stays `imported-past`.
+pub fn sync_coursework_with_done(
+    assignments: &[Assignment],
+    vault: &Path,
+    today: Option<Date>,
+    dry_run: bool,
+    ctx: Option<&WriteContext>,
+    journal: Option<&mut Journal>,
+    finished: &std::collections::HashSet<String>,
 ) -> Result<Vec<String>, SourceError> {
     let mut owned_journal;
     let journal: &mut Journal = match journal {
@@ -486,7 +528,16 @@ pub fn sync_coursework(
         // `today_local` is `Some` exactly when at least one group is new (M5); gated again here,
         // per item, by whether THIS item's own group is one of them.
         let cutoff = if new_groups.contains(&group) { today_local } else { None };
-        if cutoff.is_some_and(|c| item.due.date() < c) {
+        // Precedence: past first (`imported-past`), then turned-in (`imported-done`) under the same
+        // new-group cutoff; `cutoff` is `Some` exactly for an item of a new group.
+        let import = if cutoff.is_some_and(|c| item.due.date() < c) {
+            Some((IMPORTED_PAST_TEMPLATE, "imported-past"))
+        } else if cutoff.is_some() && finished.contains(&item.uid) {
+            Some((IMPORTED_DONE_TEMPLATE, "imported-done"))
+        } else {
+            None
+        };
+        if let Some((template, reason)) = import {
             let archive_dir = vault.join("archive");
             let mut path = archive_dir.join(format!("{}.md", item.slug));
             let mut suffix = 2;
@@ -499,13 +550,13 @@ pub fn sync_coursework(
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if dry_run {
-                log.push(format!("would archive (imported-past) {stem} (due {new_due})"));
+                log.push(format!("would archive ({reason}) {stem} (due {new_due})"));
                 continue;
             }
             // M1: below the dry-run guard, never above it — a `--dry-run` that creates a folder in
             // the vault has already broken the promise it exists to make.
             let _ = std::fs::create_dir_all(&archive_dir);
-            let text = IMPORTED_PAST_TEMPLATE
+            let text = template
                 .replace("{title}", &json_quoted(&item.title))
                 .replace(
                     "{course}",
@@ -527,7 +578,7 @@ pub fn sync_coursework(
             let target = crate::ids::rel(vault, &path);
             crate::write::create(vault, &target, &text, &item_ctx, journal, None)
                 .map_err(|err| SourceError::Failed(format!("{err}")))?;
-            log.push(format!("archived (imported-past) {stem}"));
+            log.push(format!("archived ({reason}) {stem}"));
             known.insert(item.uid.clone(), path);
             record_seen(vault, &item.uid, &item.title, &stamp)
                 .map_err(|err| SourceError::Failed(format!("{err}")))?;
@@ -592,6 +643,14 @@ pub fn sync_coursework(
     if archived > 0 {
         log.push(format!(
             "coursework: {archived} item(s) already past were archived from a source seen for the first time"
+        ));
+    }
+    // O1: the turned-in twin of the line above, counted the same way (a dry run reports what a real
+    // run would archive) and silent at zero.
+    let turned_in = log.iter().filter(|l| l.contains("(imported-done)")).count();
+    if turned_in > 0 {
+        log.push(format!(
+            "coursework: {turned_in} item(s) already turned in were archived from a source seen for the first time"
         ));
     }
     Ok(log)
@@ -1783,7 +1842,7 @@ pub fn main_with_fetchers(
 ///
 /// Every fetcher of a run reports the vendors' completion figures into one [`CompletionSink`];
 /// after the sync, each figure at 100% whose uid names an active task note becomes one
-/// `status: done` amend card ([`crate::completion::propose_vendor_completions`]). `None` means the
+/// `status: done` write ([`crate::completion::apply_vendor_completions`]). `None` means the
 /// run owns its sink — the production path, where the default fetchers and the cloud path both
 /// fill it. A test passes its own so a stand-in fetcher can report a figure the way a real one does.
 pub fn main_with_sources(
@@ -1879,17 +1938,28 @@ fn main_with_sources_on(
         if !assignments.is_empty() {
             // R-C1c-6: `sync_coursework` now judges the archive per source group, computed from
             // `assignments` and the vault's own `known`/`seen` state — no first-run flag to pass.
-            log.extend(sync_coursework(&assignments, vault, sync_today, dry_run, Some(&ctx), None)?);
+            // O1: the uids whose vendor figure says 100% -- a finished item of a group new to the
+            // vault is archived as `imported-done` instead of becoming a task.
+            let finished: std::collections::HashSet<String> = sink
+                .borrow()
+                .iter()
+                .filter(|figure| figure.is_complete())
+                .map(|figure| figure.uid.clone())
+                .collect();
+            log.extend(sync_coursework_with_done(
+                &assignments,
+                vault,
+                sync_today,
+                dry_run,
+                Some(&ctx),
+                None,
+                &finished,
+            )?);
         }
-        // Stream J T8: after the sync, so a note created this run can be proposed this run. Its
-        // log lines (`proposed done: …`) start with none of the sync step's counted prefixes.
-        let (done_log, done_warnings) = crate::completion::propose_vendor_completions(
-            vault,
-            &sink.borrow(),
-            today,
-            &ctx,
-            dry_run,
-        );
+        // Stream J T8, O1 T3: after the sync, so a note created this run can be marked this run.
+        // Its log lines (`marked done: …`) start with none of the sync step's counted prefixes.
+        let (done_log, done_warnings) =
+            crate::completion::apply_vendor_completions(vault, &sink.borrow(), &ctx, dry_run);
         log.extend(done_log);
         warnings.extend(done_warnings);
         Ok(())
@@ -1931,8 +2001,13 @@ fn main_with_sources_on(
         let updated = log.iter().filter(|l| l.starts_with("updated")).count() as i64;
         let skipped = log.iter().filter(|l| l.starts_with("skipped")).count() as i64;
         // D3: an archived import is neither a creation nor a skip, and a first day that looks empty
-        // needs a number that says where the work went.
-        let archived = log.iter().filter(|l| l.starts_with("archived (imported-past)")).count() as i64;
+        // needs a number that says where the work went. Both reasons count (`imported-past` and,
+        // from O1, `imported-done`) under the one existing key: run records are a contract with
+        // existing vaults, so no new key. `marked done:` lines count under none of these.
+        let archived = log
+            .iter()
+            .filter(|l| l.starts_with("archived (imported-past)") || l.starts_with("archived (imported-done)"))
+            .count() as i64;
         let counts = vec![("created", created), ("updated", updated), ("skipped", skipped), ("archived", archived)];
         crate::runs::add_step(vault, rid, "sync", "ok", &counts, "", None);
         steps.push(crate::cli::step_record(&crate::cli::Step {
@@ -4629,18 +4704,35 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_assignment_is_proposed_done_once_across_runs() {
+    fn a_finished_assignment_is_marked_done_once_across_runs() {
+        // O1 T2a (item 13): was `..._is_proposed_done_once_across_runs`. Tier 1 now applies the
+        // done itself, and a 100% item in a source group new to the vault is archived at first
+        // sight instead (T4), so the first run holds the item at 87% to make the group old.
         let vault = runnable_vault(
             "done-once",
             "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n",
         );
-        assert_eq!(run_with_figure(&vault, false, 193.0), 0);
-        assert_eq!(approvals_in(&vault), vec!["amend-cs-100-hw-01-done.md".to_string()]);
-        assert_eq!(run_with_figure(&vault, false, 193.0), 0);
-        assert_eq!(approvals_in(&vault).len(), 1, "a second run filed a second card");
-        // `progress` is still never written after creation; the proposal is the only output.
+        assert_eq!(run_with_figure(&vault, false, 168.0), 0);
         let note = pystr::read_text(&vault.join("tasks").join("cs-100-hw-01.md")).unwrap();
-        assert!(note.contains("\nprogress: 0\n") && note.contains("\nstatus: active\n"), "{note}");
+        assert!(note.contains("\nstatus: active\n"), "87% is not done: {note}");
+        assert_eq!(run_with_figure(&vault, false, 193.0), 0);
+        assert!(approvals_in(&vault).is_empty(), "tier 1 files no card: {:?}", approvals_in(&vault));
+        let marks = |vault: &Path| {
+            journal_records(vault)
+                .iter()
+                .filter(|r| {
+                    r["actor"] == serde_json::json!(crate::completion::ACTOR)
+                        && r["field"] == serde_json::json!("status")
+                        && r["new"] == serde_json::json!("done")
+                })
+                .count()
+        };
+        assert_eq!(marks(&vault), 1);
+        assert_eq!(run_with_figure(&vault, false, 193.0), 0);
+        assert_eq!(marks(&vault), 1, "a second run marked it again");
+        // `progress` is still never written after creation; the status line is the only change.
+        let note = pystr::read_text(&vault.join("tasks").join("cs-100-hw-01.md")).unwrap();
+        assert!(note.contains("\nprogress: 0\n") && note.contains("\nstatus: done\n"), "{note}");
         let _ = std::fs::remove_dir_all(&vault);
     }
 
@@ -4715,5 +4807,221 @@ mod tests {
             complete,
             vec!["zybooks:9100001", "zybooks:9100005", "vhl:2000001:2026-09-21"]
         );
+    }
+
+    // --- O1 T2a: finished items are archived at first sight (`imported-done`) -----------------
+    //
+    // Red state: `sync_coursework_with_done` ignores its set and `IMPORTED_DONE_TEMPLATE` is empty,
+    // so a finished item is still created live. `sync()` pins 2026-08-25 as the vault's day.
+
+    fn finished(uids: &[&str]) -> std::collections::HashSet<String> {
+        uids.iter().map(|u| u.to_string()).collect()
+    }
+
+    fn sync_done(
+        items: &[Assignment],
+        vault: &Path,
+        dry_run: bool,
+        done: &std::collections::HashSet<String>,
+    ) -> Vec<String> {
+        sync_coursework_with_done(items, vault, Some(date(2026, 8, 25)), dry_run, None, None, done)
+            .expect("the sync completed")
+    }
+
+    const DONE_SUMMARY: &str =
+        "coursework: 1 item(s) already turned in were archived from a source seen for the first time";
+
+    #[test]
+    fn a_finished_item_in_a_new_group_is_archived_as_imported_done() {
+        let vault = vault_with("cwdonefirst");
+        let turned_in =
+            make("zybooks:d1", "cs-100-hw-01", "CS 100 HW 01", date(2026, 8, 27).at(23, 59, 0, 0), 0);
+        let live = make("zybooks:l1", "cs-100-hw-02", "CS 100 HW 02", date(2026, 8, 28).at(23, 59, 0, 0), 0);
+        let log = sync_done(&[turned_in.clone(), live.clone()], &vault, false, &finished(&["zybooks:d1"]));
+        assert_eq!(
+            log,
+            vec![
+                "archived (imported-done) cs-100-hw-01".to_string(),
+                "created cs-100-hw-02".to_string(),
+                DONE_SUMMARY.to_string(),
+            ]
+        );
+        assert!(!vault.join("tasks").join("cs-100-hw-01.md").exists());
+        let meta = meta_of(&vault.join("archive").join("cs-100-hw-01.md"));
+        assert_eq!(field(&meta, "status"), "archived");
+        assert_eq!(field(&meta, "archived_reason"), crate::ingest::IMPORTED_DONE);
+        assert_eq!(field(&meta, "needs_enrichment"), "False");
+        assert_eq!(field(&meta, "effort_source"), "inferred");
+        assert_eq!(field(&meta, "progress"), "0");
+        let seen = load_seen(&vault);
+        assert!(seen.contains("zybooks:d1") && seen.contains("zybooks:l1"));
+        let again = sync_done(&[turned_in, live], &vault, false, &finished(&["zybooks:d1"]));
+        assert!(again.is_empty(), "a second run changed something: {again:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_past_and_finished_item_is_imported_past_not_imported_done() {
+        let vault = vault_with("cwdoneprecedence");
+        let past = make("zybooks:p1", "cs-100-hw-01", "CS 100 HW 01", date(2026, 8, 20).at(23, 59, 0, 0), 0);
+        let log = sync_done(&[past], &vault, false, &finished(&["zybooks:p1"]));
+        assert_eq!(
+            log,
+            vec![
+                "archived (imported-past) cs-100-hw-01".to_string(),
+                "coursework: 1 item(s) already past were archived from a source seen for the first time"
+                    .to_string(),
+            ]
+        );
+        let meta = meta_of(&vault.join("archive").join("cs-100-hw-01.md"));
+        assert_eq!(field(&meta, "archived_reason"), crate::ingest::IMPORTED_PAST);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_finished_item_in_a_group_the_vault_holds_is_created_live() {
+        let vault = vault_with("cwdoneoldgroup");
+        sync(&[plain()], &vault, false);
+        let later = make("zybooks:d2", "cs-100-hw-02", "CS 100 HW 02", date(2026, 8, 27).at(23, 59, 0, 0), 0);
+        let log = sync_done(&[plain(), later], &vault, false, &finished(&["zybooks:d2"]));
+        assert_eq!(log, vec!["created cs-100-hw-02".to_string()]);
+        assert_eq!(std::fs::read_dir(vault.join("archive")).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_dry_run_names_the_imported_done_archive_and_creates_no_folder() {
+        let vault = scratch("cwdonedry");
+        for folder in ["tasks", "state"] {
+            std::fs::create_dir_all(vault.join(folder)).unwrap();
+        }
+        let turned_in =
+            make("zybooks:d1", "cs-100-hw-01", "CS 100 HW 01", date(2026, 8, 27).at(23, 59, 0, 0), 0);
+        let before = snapshot(&vault);
+        let log = sync_done(&[turned_in], &vault, true, &finished(&["zybooks:d1"]));
+        assert!(log[0].starts_with("would archive (imported-done) cs-100-hw-01"), "{log:?}");
+        assert_eq!(log[1], DONE_SUMMARY, "a dry run reports what the real run would");
+        assert_eq!(snapshot(&vault), before);
+        assert!(!vault.join("archive").exists(), "a dry run made the archive folder");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn the_imported_done_template_is_the_past_template_with_its_own_reason() {
+        assert_eq!(
+            IMPORTED_DONE_TEMPLATE,
+            IMPORTED_PAST_TEMPLATE.replace("archived_reason: imported-past", "archived_reason: imported-done")
+        );
+        assert!(IMPORTED_DONE_TEMPLATE.contains("archived_reason: imported-done\n"));
+        assert!(IMPORTED_DONE_TEMPLATE.contains("needs_enrichment: false\n"));
+    }
+
+    /// One `main_with_sources_on` run of a stand-in zyBooks fetcher: `items`, and `figures` as
+    /// `(uid, earned out of 100)` reported into the sink the way the real fetcher does. The vault's
+    /// day is pinned to 2026-08-20 so no due date drifts across the cutoff.
+    fn run_items(vault: &Path, dry_run: bool, items: &[Assignment], figures: &[(&str, f64)]) -> i32 {
+        let sink: CompletionSink = std::cell::RefCell::new(Vec::new());
+        let zy = |_: &Mapping, _: &TimeZone, _: &mut Vec<String>| -> Result<Vec<Assignment>, SourceError> {
+            for (uid, earned) in figures {
+                sink.borrow_mut().push(crate::completion::VendorCompletion {
+                    source: "zybooks".to_string(),
+                    uid: uid.to_string(),
+                    earned: *earned,
+                    possible: 100.0,
+                });
+            }
+            Ok(items.to_vec())
+        };
+        let fetchers: [(&str, Fetcher); 1] = [("zybooks", &zy)];
+        main_with_sources_on(
+            vault,
+            dry_run,
+            "local-runner",
+            None,
+            Some(&fetchers),
+            Some(&sink),
+            Some(date(2026, 8, 20)),
+        )
+    }
+
+    fn zy_vault(name: &str) -> PathBuf {
+        runnable_vault(name, "timezone: America/Chicago\ncoursework:\n  zybooks:\n    enabled: true\n")
+    }
+
+    fn sync_step_counts(vault: &Path) -> serde_json::Value {
+        let day = crate::runs::Runs::new(vault).read(None);
+        let step = day
+            .iter()
+            .rev()
+            .find(|r| r.get("name").and_then(|v| v.as_str()) == Some("sync"))
+            .expect("a sync step");
+        step["counts"].clone()
+    }
+
+    #[test]
+    fn a_finished_item_in_a_group_the_vault_holds_is_created_then_marked_done_in_the_same_run() {
+        let vault = zy_vault("cwdonesame");
+        let first = make("zybooks:1", "cs-100-hw-01", "CS 100 HW 01", date(2026, 8, 26).at(23, 59, 0, 0), 0);
+        let second = make("zybooks:2", "cs-100-hw-02", "CS 100 HW 02", date(2026, 8, 27).at(23, 59, 0, 0), 0);
+        assert_eq!(run_items(&vault, false, &[first.clone()], &[("zybooks:1", 87.0)]), 0);
+        assert_eq!(
+            run_items(&vault, false, &[first, second], &[("zybooks:1", 87.0), ("zybooks:2", 100.0)]),
+            0
+        );
+        let note = pystr::read_text(&vault.join("tasks").join("cs-100-hw-02.md")).unwrap();
+        assert!(note.contains("\nstatus: done\n"), "{note}");
+        assert!(approvals_in(&vault).is_empty());
+        let on_note: Vec<_> = journal_records(&vault)
+            .into_iter()
+            .filter(|r| r["path"] == serde_json::json!("tasks/cs-100-hw-02.md"))
+            .collect();
+        assert_eq!(on_note.len(), 2, "create, then set: two records by design: {on_note:?}");
+        assert_eq!(on_note[0]["op"], "create");
+        assert_eq!(on_note[0]["actor"], "agent:coursework.zybooks");
+        assert_eq!(on_note[1]["field"], "status");
+        assert_eq!(on_note[1]["actor"], crate::completion::ACTOR);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_99_percent_item_in_a_new_group_is_created_live() {
+        let vault = zy_vault("cwdone99");
+        let item = make("zybooks:1", "cs-100-hw-01", "CS 100 HW 01", date(2026, 8, 26).at(23, 59, 0, 0), 0);
+        assert_eq!(run_items(&vault, false, &[item], &[("zybooks:1", 99.0)]), 0);
+        let note = pystr::read_text(&vault.join("tasks").join("cs-100-hw-01.md")).unwrap();
+        assert!(note.contains("\nstatus: active\n"), "{note}");
+        assert!(!vault.join("archive").exists() || std::fs::read_dir(vault.join("archive")).unwrap().count() == 0);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn the_run_record_counts_imported_done_under_archived_and_adds_no_key() {
+        let vault = zy_vault("cwdonecounts");
+        let past1 = make("zybooks:p1", "cs-100-hw-01", "CS 100 HW 01", date(2026, 8, 15).at(23, 59, 0, 0), 0);
+        let past2 = make("zybooks:p2", "cs-100-hw-02", "CS 100 HW 02", date(2026, 8, 18).at(23, 59, 0, 0), 0);
+        let done = make("zybooks:d1", "cs-100-hw-03", "CS 100 HW 03", date(2026, 8, 26).at(23, 59, 0, 0), 0);
+        let items = [past1, past2, done];
+        assert_eq!(run_items(&vault, false, &items, &[("zybooks:d1", 100.0)]), 0);
+        let counts = sync_step_counts(&vault);
+        let keys: std::collections::BTreeSet<&str> =
+            counts.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["archived", "created", "skipped", "updated"].into_iter().collect());
+        assert_eq!(counts["archived"], 3, "two imported-past and one imported-done: {counts}");
+        assert_eq!(counts["created"], 0);
+
+        // A later run: the group is held, a new 100% item is created live then marked done. The
+        // `marked done:` line counts under none of created, updated, skipped or archived.
+        let late = make("zybooks:l1", "cs-100-hw-04", "CS 100 HW 04", date(2026, 8, 27).at(23, 59, 0, 0), 0);
+        let items = [items[0].clone(), items[1].clone(), items[2].clone(), late];
+        assert_eq!(run_items(&vault, false, &items, &[("zybooks:l1", 100.0)]), 0);
+        let note = pystr::read_text(&vault.join("tasks").join("cs-100-hw-04.md")).unwrap();
+        assert!(note.contains("\nstatus: done\n"), "{note}");
+        let counts = sync_step_counts(&vault);
+        assert_eq!(
+            (counts["created"].as_i64(), counts["updated"].as_i64(), counts["skipped"].as_i64(), counts["archived"].as_i64()),
+            (Some(1), Some(0), Some(0), Some(0)),
+            "{counts}"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
     }
 }

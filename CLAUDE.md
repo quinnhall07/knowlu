@@ -91,7 +91,8 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
 - Cloud calls from `ingest`, `coursework` and `rank` are **transport only**, never judgment. Judgment
   is `judge`'s tier 3 through `CloudModel` (`engine/src/cloudmodel.rs`); the prompt, schema and pinned
   model live server-side.
-- A slot is `sync → coursework → ingest → grades → judge → rank`. Before the chain, the app runs its own
+- A slot is `sync → coursework → grades → ingest → judge → rank` (grades before ingest, so turned-in work
+  is never created as a task; Quinn, 2026-10-23). Before the chain, the app runs its own
   window steps, the grades capture and then the saved-sign-in `mail` step; neither writes the vault.
   A step that cannot run is left out and named
   (`judge (skipped: no entitlement)`), never run-and-failed; a non-zero step means backoff and an

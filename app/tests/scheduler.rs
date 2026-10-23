@@ -1488,7 +1488,7 @@ fn skip_of(s: GradesStep) -> String {
 }
 
 #[test]
-fn slot_argv_places_grades_after_ingest_and_before_judge_only_with_a_bundle() {
+fn slot_argv_places_grades_after_coursework_and_before_ingest_only_with_a_bundle() {
     let v = scratch("grades-argv");
     let exe = Path::new(r"C:\bin\knowlu-engine.exe");
     let names = |a: &Vec<(PathBuf, Vec<String>)>| a.iter().map(|(_, x)| x[0].clone()).collect::<Vec<_>>();
@@ -1496,16 +1496,17 @@ fn slot_argv_places_grades_after_ingest_and_before_judge_only_with_a_bundle() {
     let judge = JudgePlan::Cloud { log_dir: PathBuf::from("logs") };
     let with = slot_argv(&v, exe, &judge, Some(&bundle));
     let at = names(&with).iter().position(|n| n == "grades").expect("a grades step");
-    assert_eq!(names(&with)[at - 1], "coursework", "no feed on this vault, so ingest is out: {:?}", names(&with));
-    assert_eq!(names(&with)[at + 1], "judge");
+    assert_eq!(names(&with)[at - 1], "coursework", "{:?}", names(&with));
+    assert_eq!(names(&with)[at + 1], "judge", "no feed on this vault, so ingest is out: {:?}", names(&with));
     assert_eq!(with[at].1, vec!["grades", "--vault", v.to_string_lossy().as_ref(), "--input", bundle.to_string_lossy().as_ref(), "--via", "local-runner"]);
-    // With a feed, it sits after ingest.
+    // O1 (Q11): with a feed it is still right after coursework, and ingest follows it, so ingest
+    // reads the grade notes this slot just wrote.
     let cfg = v.join("config").join("ingest.yaml");
     let old = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(&cfg, format!("ics_url: \"https://lms.example.invalid/learn.ics\"\n{old}")).unwrap();
     let with = slot_argv(&v, exe, &judge, Some(&bundle));
     let n = names(&with);
-    assert_eq!(&n[n.iter().position(|x| x == "ingest").unwrap() + 1..][..2], ["grades", "judge"], "{n:?}");
+    assert_eq!(&n[n.iter().position(|x| x == "coursework").unwrap() + 1..][..3], ["grades", "ingest", "judge"], "{n:?}");
     // And without a bundle the step is not there at all.
     assert!(!names(&slot_argv(&v, exe, &judge, None)).contains(&"grades".to_string()));
     let _ = std::fs::remove_dir_all(&v);
@@ -2881,7 +2882,7 @@ fn an_accepted_privacy_version_leaves_the_slot_as_it_was() {
     let bundle_path = PathBuf::from("bundle.json");
     let plan = JudgePlan::Cloud { log_dir: PathBuf::from("logs") };
     let want: Vec<String> = slot_argv(&r.v, Path::new("cmd"), &plan, Some(&bundle_path)).into_iter().map(|(_, a)| a[0].clone()).collect();
-    assert_eq!(want, ["sync", "coursework", "ingest", "grades", "judge", "rank"]);
+    assert_eq!(want, ["sync", "coursework", "grades", "ingest", "judge", "rank"]);
     assert_eq!(r.children_started(), want);
     assert_eq!(r.cache_bytes(), before, "an accepted cache makes no call");
     assert_eq!(r.listener.hits(), 0);
@@ -2904,7 +2905,7 @@ fn an_unknown_privacy_version_names_only_the_failed_check() {
     assert_eq!(named.iter().filter(|n| n.starts_with("privacy")).count(), 1, "exactly one privacy row: {named:?}");
     assert!(!named.iter().any(|n| n.contains("(skipped: privacy")), "{named:?}");
     assert_eq!((captures.get(), passes.get()), (1, 1), "an unknown gate holds nothing back");
-    assert_eq!(r.children_started(), ["sync", "coursework", "ingest", "grades", "judge", "rank"]);
+    assert_eq!(r.children_started(), ["sync", "coursework", "grades", "ingest", "judge", "rank"]);
     assert!(r.cache_bytes().is_none(), "a failed check creates no cache file");
     assert!(s.engine_ok && s.ok, "{:?}", s.steps);
     assert_eq!(r.listener.hits(), 0);

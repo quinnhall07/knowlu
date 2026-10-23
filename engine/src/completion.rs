@@ -1,34 +1,41 @@
-//! Completion detection, tier 1: a vendor's own number says a task is finished, and Knowlu proposes
-//! `status: done` (stream J Task T8; design note `docs/notes/2026-09-22-completion-detection-design.md`
-//! §2, §3, §7a).
+//! Completion detection, tier 1: a vendor's own number says a task is finished, and Knowlu marks it
+//! `status: done` and lists it (stream J Task T8; design note
+//! `docs/notes/2026-09-22-completion-detection-design.md` §2, §3, §7a; O1, spec §6.2-§6.3).
 //!
-//! **Deterministic, no model, no new write path.** The output is an ordinary `kind: amend` approval
-//! moving `status` from `active` to `done` — `status` is one of the nine amendable fields
-//! (`approvals::AMENDABLE_FIELDS`), so the card is applied, capped (15 a day, overflow snoozed by
-//! `approvals::defer_over_budget` on the next `rank`), surfaced and archived by machinery that
-//! already exists. Nothing here ever writes a task note; it only mints approval cards through
-//! [`crate::write::create`], journal first.
+//! **Deterministic, no model.** Two entry points, by who is authoritative:
 //!
-//! The rules [`propose_done`] enforces, in order:
+//! - [`apply_done`] is for a source that is authoritative on its own items (zyBooks, VHL, the
+//!   Blackboard gradebook): the one field `status: done` is written through [`crate::write::write`]
+//!   under [`ACTOR`], journal first, with the evidence on the record, and the surface lists it under
+//!   "Closed this week" with an Undo. `judged` is `false` (`status` is not a judged field), so the
+//!   checks below are the only judge-once fence. **Undo** is the student's own `set` of `status`
+//!   back to `active`: that record is the judge-once mark, so the next apply skips the task for good.
+//! - [`propose_done`] is for a source that only suggests (T9's email receipts): an ordinary
+//!   `kind: amend` approval moving `status` from `active` to `done` — `status` is one of the nine
+//!   amendable fields (`approvals::AMENDABLE_FIELDS`), so the card is applied, capped (15 a day,
+//!   overflow snoozed by `approvals::defer_over_budget` on the next `rank`), surfaced and archived by
+//!   machinery that already exists. It only mints approval cards through [`crate::write::create`].
 //!
-//! 1. only a note under `tasks/` (never `archive/`) is a candidate;
+//! The rules both enforce, in order:
+//!
+//! 1. only a note directly under `tasks/` (never `archive/`) is a candidate;
 //! 2. only a note whose frontmatter says `status: active` — a task already done or archived is left
 //!    alone, and a note with no `status:` line is skipped because an amend `from: active` could
 //!    never validate against it;
 //! 3. a note whose `status` the journal shows the student set by hand (`op: set`) is left alone —
 //!    they have already taken a position on whether it is finished;
-//! 4. **one proposal per task, ever**: any `kind: amend` card for this note that moves `status`
+//! 4. **one question per task, ever**: any `kind: amend` card for this note that moves `status`
 //!    to `done` — pending, snoozed, approved, rejected, executed, in `approvals/` or `archive/` —
 //!    means the question has been asked. A rejection therefore sticks: `process_approvals` moves a
-//!    rejected card to `archive/` keeping its frontmatter, and this scan reads `archive/` too.
-//!    That is the same shape `coursework::asked_map_keys` gives coursework-map cards. The card
-//!    carries the note's opaque `target_id:` alongside its `target:` path, and [`already_proposed`]
-//!    matches by `target_id` whenever both the card and the note have one — a path is not the
-//!    note's identity (F11): a rollover can reuse a path for an unrelated note, and a note can be
-//!    renamed without losing its `id:`.
+//!    rejected card to `archive/` keeping its frontmatter, and this scan reads `archive/` too. A
+//!    pending or snoozed card is left in the student's hands, not withdrawn (an amend card has no
+//!    withdrawal; approving it applies `done`, rejecting it closes the question). The card carries
+//!    the note's opaque `target_id:` alongside its `target:` path, and [`already_proposed`] matches
+//!    by `target_id` whenever both the card and the note have one — a path is not the note's
+//!    identity (F11): a rollover can reuse a path for an unrelated note, and a note can be renamed
+//!    without losing its `id:`.
 //!
-//! [`propose_done`] is the one public entry point a second evidence source (T9's email receipts)
-//! calls; [`propose_vendor_completions`] is the tier-1 caller that maps vendor uids to task notes.
+//! [`apply_vendor_completions`] is the tier-1 caller that maps vendor uids to task notes.
 
 use std::path::{Path, PathBuf};
 
@@ -154,8 +161,7 @@ fn text_of(meta: &Mapping, key: &str) -> Option<String> {
 /// `target_id` is the note's own `id:`, if it has one. A card matches:
 /// - by `target_id`, when both the card and the note have one — that survives a rename and, at a
 ///   reused path, tells last term's archived card apart from this term's new note (F11);
-/// - by path (`target_rel`) otherwise — a legacy card with no `target_id` (none have shipped; T8
-///   is unreleased), or a note with no `id:`.
+/// - by path (`target_rel`) otherwise — a legacy card with no `target_id`, or a note with no `id:`.
 ///
 /// `id:` is the vault's opaque identity (CLAUDE.md); a path is not.
 pub fn already_proposed(vault: &Path, target_rel: &str, target_id: Option<&str>) -> bool {
@@ -305,16 +311,88 @@ pub fn propose_done(
     Ok(Outcome::Proposed(card))
 }
 
-/// Tier 1: every vendor figure at 100% whose uid names a task note gets [`propose_done`].
+/// Mark one task note `status: done` on a source's own authority: the gradebook or the homework
+/// platform is authoritative on its own items, so this applies and the surface lists it (with Undo)
+/// rather than proposing (spec §6.2-§6.3).
 ///
-/// Returns `(log, warnings)`: one log line per card filed (`proposed done: <stem> (…)`) or, in a
-/// dry run, per card that would be (`would propose done: …`); a warning only for a write that
+/// The rules are **all four of [`propose_done`]'s**, in the same order: a note directly under
+/// `tasks/`; `status: active`; no `op: set` of `status` by the student in the journal; and no
+/// `status → done` amend card for this note in `approvals/` or `archive/`, whatever its status
+/// ([`already_proposed`]). A rejected card therefore closes the question for good; a pending or
+/// snoozed card is left in the student's hands (an amend card has no withdrawal, and approving it
+/// applies `done` cleanly). `status` is not a judged field and the apply writes with
+/// `judged: false`, so these checks are the only judge-once fence.
+///
+/// The one field is written through [`crate::write::write`] (single-line surgery, journal first)
+/// under `ctx.with_actor(ACTOR)`, the evidence on the journal record. Undo is the student's own
+/// `set` of `status` back to `active`: that record is the judge-once mark, so a later apply skips.
+/// A dry run checks everything and writes nothing. `Err` only for a write that was attempted and
+/// failed; every "nothing to do" is `Ok(Applied::Skipped(..))`.
+pub fn apply_done(
+    vault: &Path,
+    task: &Path,
+    evidence: &Evidence,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+    dry_run: bool,
+) -> Result<Applied, WriteError> {
+    let path = if task.is_absolute() { task.to_path_buf() } else { vault.join(task) };
+    let target_rel = crate::ids::rel(vault, &path);
+    let in_tasks = target_rel.starts_with("tasks/") && !target_rel[6..].contains('/');
+    if !in_tasks {
+        return Ok(Applied::Skipped(format!("not a task note: {target_rel}")));
+    }
+    let Some(meta) = read_meta(&path) else {
+        return Ok(Applied::Skipped(format!("unreadable: {target_rel}")));
+    };
+    match text_of(&meta, "status").as_deref() {
+        Some("active") => {}
+        Some(other) => return Ok(Applied::Skipped(format!("status is {other}"))),
+        None => return Ok(Applied::Skipped("no status field".to_string())),
+    }
+    let note_id = text_of(&meta, "id");
+    if let Some(id) = &note_id {
+        let by_hand = journal
+            .human_set(id, "status")
+            .filter(|r| r.get("op").and_then(Json::as_str) == Some("set"));
+        if by_hand.is_some() {
+            return Ok(Applied::Skipped("status set by hand".to_string()));
+        }
+    }
+    if already_proposed(vault, &target_rel, note_id.as_deref()) {
+        return Ok(Applied::Skipped("already proposed".to_string()));
+    }
+    if dry_run {
+        return Ok(Applied::WouldMark);
+    }
+    let evidence_json = evidence.to_json();
+    let opts = crate::write::WriteOpts {
+        judged: false,
+        evidence: Some(&evidence_json),
+        ..crate::write::WriteOpts::default()
+    };
+    // A literal, as every other plain-word status write does: `to_literal` would quote the word.
+    crate::write::write_literals(
+        vault,
+        &target_rel,
+        &[("status".to_string(), "done".to_string())],
+        &ctx.with_actor(ACTOR),
+        journal,
+        &opts,
+    )?;
+    Ok(Applied::Marked)
+}
+
+/// Tier 1: every vendor figure at 100% whose uid names a task note gets [`apply_done`].
+///
+/// Returns `(log, warnings)`: one log line per task marked (`marked done: <stem> (<source> <n>%)`)
+/// or, in a dry run, per task that would be (`would mark done: …`); a warning only for a write that
 /// failed. Figures below 100%, uids with no note, and every skip rule are silent. Processed in uid
-/// order so the same input files the same cards in the same order.
-pub fn propose_vendor_completions(
+/// order so the same input marks the same tasks in the same order. Its lines start with none of
+/// `coursework`'s counted prefixes.
+pub fn apply_vendor_completions(
     vault: &Path,
     completions: &[VendorCompletion],
-    today: Date,
     ctx: &WriteContext,
     dry_run: bool,
 ) -> (Vec<String>, Vec<String>) {
@@ -327,27 +405,37 @@ pub fn propose_vendor_completions(
     complete.sort_by(|a, b| a.uid.cmp(&b.uid));
     complete.dedup_by(|a, b| a.uid == b.uid);
     let known = crate::ingest::existing_by_uid(vault);
-    let ctx = ctx.with_actor(ACTOR);
     let mut journal = Journal::new(vault);
     for figure in complete {
         let Some(path) = known.get(&figure.uid) else { continue };
         let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let evidence = figure.evidence();
-        // A vendor figure is not a judgment: tier 1 never carries a `judgment_id`.
-        match propose_done(vault, path, &evidence, today, &ctx, &mut journal, dry_run, None) {
-            Ok(Outcome::Proposed(_)) => {
-                log.push(format!("proposed done: {stem} ({} {}%)", figure.source, figure.percent()))
+        // A vendor figure is not a judgment: nothing here carries a `judgment_id`.
+        match apply_done(vault, path, &evidence, ctx, &mut journal, dry_run) {
+            Ok(Applied::Marked) => {
+                log.push(format!("marked done: {stem} ({} {}%)", figure.source, figure.percent()))
             }
-            Ok(Outcome::WouldPropose) => log.push(format!(
-                "would propose done: {stem} ({} {}%)",
+            Ok(Applied::WouldMark) => log.push(format!(
+                "would mark done: {stem} ({} {}%)",
                 figure.source,
                 figure.percent()
             )),
-            Ok(Outcome::Skipped(_)) => {}
-            Err(err) => warnings.push(format!("completion: proposal not written for {stem} ({err})")),
+            Ok(Applied::Skipped(_)) => {}
+            Err(err) => warnings.push(format!("completion: {stem} not marked done ({err})")),
         }
     }
     (log, warnings)
+}
+
+/// What [`apply_done`] did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Applied {
+    /// `status: done` was written.
+    Marked,
+    /// A dry run: `status: done` would have been written. Nothing was written.
+    WouldMark,
+    /// Nothing to do, and why (`status set by hand`, `already proposed`, ...) -- never an error.
+    Skipped(String),
 }
 
 #[cfg(test)]
@@ -445,72 +533,56 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_figure_files_one_card_and_a_second_run_files_none() {
+    fn a_complete_figure_marks_the_task_done_once_and_a_second_run_marks_nothing() {
+        // O1 T2c: was `..._files_one_card_and_a_second_run_files_none`. Tier 1 applies now.
         let vault = scratch("once");
         task(&vault, "hw-01", "zybooks:1", "active");
         let figures = [figure("zybooks:1", 193.0, 193.0)];
 
-        let (log, warnings) = propose_vendor_completions(&vault, &figures, today(), &ctx(), false);
-        assert_eq!(log, vec!["proposed done: hw-01 (zybooks 100%)".to_string()]);
+        let (log, warnings) = apply_vendor_completions(&vault, &figures, &ctx(), false);
+        assert_eq!(log, vec!["marked done: hw-01 (zybooks 100%)".to_string()]);
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(cards(&vault, "approvals").len(), 1);
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("done"));
+        assert!(cards(&vault, "approvals").is_empty());
 
-        let (log, warnings) = propose_vendor_completions(&vault, &figures, today(), &ctx(), false);
+        let (log, warnings) = apply_vendor_completions(&vault, &figures, &ctx(), false);
         assert!(log.is_empty(), "{log:?}");
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(cards(&vault, "approvals").len(), 1, "a second run filed a second card");
+        let marks = records_for(&vault, "tasks/hw-01.md")
+            .iter()
+            .filter(|r| r.get("actor").and_then(Json::as_str) == Some(ACTOR))
+            .count();
+        assert_eq!(marks, 1, "a second run wrote a second record");
         let _ = std::fs::remove_dir_all(&vault);
     }
 
     #[test]
-    fn the_card_is_a_status_amend_under_the_completion_agent_with_its_evidence() {
+    fn the_mark_is_a_status_set_under_the_completion_agent_with_the_vendors_evidence() {
+        // O1 T2c: was `the_card_is_a_status_amend_under_the_completion_agent_with_its_evidence`. The
+        // card's shape is `propose_done`'s (mail still files it; see the judgment-key tests below);
+        // what tier 1 leaves behind now is one journaled `set`.
         let vault = scratch("card");
         task(&vault, "hw-01", "zybooks:1", "active");
         let id = text_of(&meta(&vault.join("tasks/hw-01.md")), "id").expect("id");
-        propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
-        let card = &cards(&vault, "approvals")[0];
-        assert_eq!(card.file_name().unwrap(), "amend-hw-01-done.md");
-        let m = meta(card);
-        assert_eq!(text_of(&m, "kind").as_deref(), Some("amend"));
-        assert_eq!(text_of(&m, "status").as_deref(), Some("pending"));
-        assert_eq!(text_of(&m, "target").as_deref(), Some("tasks/hw-01.md"));
-        // F11: the card also carries the note's `id:`, so completion matching survives a rename
-        // or a reused path (`already_proposed`), and `validate_amendment` still applies by path.
-        assert_eq!(text_of(&m, "target_id").as_deref(), Some(id.as_str()));
-        assert_eq!(text_of(&m, "created_by").as_deref(), Some(ACTOR));
+        apply_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], &ctx(), false);
+        assert!(cards(&vault, "approvals").is_empty(), "no card is filed");
         assert!(crate::provenance::is_agent(ACTOR));
-        assert_eq!(crate::approvals::as_date(crate::yaml::get(&m, "proposed_at")), Some(today()));
-        assert_eq!(
-            crate::approvals::as_date(crate::yaml::get(&m, "first_proposed_at")),
-            Some(today())
-        );
-        // `validate_amendment` is the check `process_approvals` runs before applying.
-        assert!(crate::approvals::validate_amendment(&vault, &m).is_ok());
-
-        let body = crate::pystr::read_text(card).unwrap();
-        assert!(body.contains("zyBooks reports 193 of 193 points earned (100%)"), "{body}");
-        let mut journal = Journal::new(&vault);
-        let records = journal.read(None, None);
-        let create = records
-            .iter()
-            .find(|r| r.get("path").and_then(Json::as_str) == Some("approvals/amend-hw-01-done.md"))
-            .expect("the card's create is journaled");
-        assert_eq!(create.get("actor").and_then(Json::as_str), Some(ACTOR));
-        assert_eq!(create.get("via").and_then(Json::as_str), Some("local-runner"));
-        let evidence = create.get("evidence").expect("evidence on the record");
+        let records = records_for(&vault, "tasks/hw-01.md");
+        let set = records.last().expect("the set is journaled");
+        assert_eq!(set.get("op").and_then(Json::as_str), Some("set"));
+        assert_eq!(set.get("id").and_then(Json::as_str), Some(id.as_str()));
+        assert_eq!(set.get("actor").and_then(Json::as_str), Some(ACTOR));
+        assert_eq!(set.get("via").and_then(Json::as_str), Some("local-runner"));
+        let evidence = set.get("evidence").expect("evidence on the record");
         assert_eq!(evidence.get("source").and_then(Json::as_str), Some("zybooks"));
         assert_eq!(evidence.get("percent").and_then(Json::as_i64), Some(100));
         assert_eq!(evidence.get("uid").and_then(Json::as_str), Some("zybooks:1"));
-        // The task note itself is untouched: a proposal, never a write.
-        assert_eq!(
-            text_of(&meta(&vault.join("tasks/hw-01.md")), "status").as_deref(),
-            Some("active")
-        );
         let _ = std::fs::remove_dir_all(&vault);
     }
 
     #[test]
-    fn anything_below_one_hundred_percent_files_nothing() {
+    fn anything_below_one_hundred_percent_marks_nothing() {
+        // O1 T2c: was `..._files_nothing`; the rule is the same, the output is a write now.
         let vault = scratch("partial");
         task(&vault, "project-2", "zybooks:2", "active");
         task(&vault, "hw-03", "zybooks:3", "active");
@@ -520,38 +592,42 @@ mod tests {
             figure("zybooks:3", 292.9, 293.0),
             figure("zybooks:4", 0.0, 0.0),
         ];
-        let (log, _) = propose_vendor_completions(&vault, &figures, today(), &ctx(), false);
+        let before = snapshot(&vault);
+        let (log, _) = apply_vendor_completions(&vault, &figures, &ctx(), false);
         assert!(log.is_empty(), "{log:?}");
-        assert!(cards(&vault, "approvals").is_empty());
+        assert_eq!(snapshot(&vault), before, "something was written");
         assert_eq!(figure("x", 292.9, 293.0).percent(), 99, "99.97% must not read as 100");
         let _ = std::fs::remove_dir_all(&vault);
     }
 
     #[test]
-    fn a_rejected_card_is_never_filed_again() {
+    fn a_rejected_mark_done_card_keeps_tier_1_from_marking_the_task() {
+        // O1 T2c: was `a_rejected_card_is_never_filed_again`. The card now comes from mail's path
+        // (`propose_done`); the rejection must still close the question for tier 1 (section 9.1 F1).
         let vault = scratch("reject");
         task(&vault, "hw-01", "zybooks:1", "active");
         let figures = [figure("zybooks:1", 193.0, 193.0)];
-        propose_vendor_completions(&vault, &figures, today(), &ctx(), false);
-        let card = crate::ids::rel(&vault, &cards(&vault, "approvals")[0]);
-        set_by(&vault, &card, "quinn", "status", "rejected");
+        let card = file_card(&vault, "tasks/hw-01.md");
+        set_by(&vault, &crate::ids::rel(&vault, &card), "quinn", "status", "rejected");
         let result = process(&vault);
         assert_eq!(result.rejected.len(), 1, "{:?}", result.warnings);
         assert!(cards(&vault, "approvals").is_empty());
         assert_eq!(cards(&vault, "archive").len(), 1);
+        let before = snapshot(&vault);
 
-        let (log, _) = propose_vendor_completions(&vault, &figures, today(), &ctx(), false);
-        assert!(log.is_empty(), "a rejected proposal was re-filed: {log:?}");
-        assert!(cards(&vault, "approvals").is_empty());
+        let (log, _) = apply_vendor_completions(&vault, &figures, &ctx(), false);
+        assert!(log.is_empty(), "a rejected question was answered anyway: {log:?}");
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("active"));
+        assert_eq!(snapshot(&vault), before);
         let _ = std::fs::remove_dir_all(&vault);
     }
 
     #[test]
     fn an_approved_card_marks_the_task_done() {
+        // O1 T2c: the card is filed through `propose_done` (mail's path), not tier 1.
         let vault = scratch("approve");
         task(&vault, "hw-01", "zybooks:1", "active");
-        propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
-        let card = crate::ids::rel(&vault, &cards(&vault, "approvals")[0]);
+        let card = crate::ids::rel(&vault, &file_card(&vault, "tasks/hw-01.md"));
         set_by(&vault, &card, "quinn", "status", "approved");
         let result = process(&vault);
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
@@ -565,6 +641,7 @@ mod tests {
 
     #[test]
     fn a_task_already_done_archived_or_reopened_by_hand_is_left_alone() {
+        // O1 T2c: asserts through `apply_vendor_completions`; nothing is written, no card either.
         let vault = scratch("alone");
         task(&vault, "done", "zybooks:1", "done");
         task(&vault, "gone", "zybooks:2", "active");
@@ -578,10 +655,13 @@ mod tests {
             figure("zybooks:2", 10.0, 10.0),
             figure("zybooks:3", 10.0, 10.0),
         ];
-        let (log, warnings) = propose_vendor_completions(&vault, &figures, today(), &ctx(), false);
+        let before = snapshot(&vault);
+        let (log, warnings) = apply_vendor_completions(&vault, &figures, &ctx(), false);
         assert!(log.is_empty(), "{log:?}");
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(cards(&vault, "approvals").is_empty());
+        assert_eq!(snapshot(&vault), before, "a left-alone task was written");
+        assert_eq!(status_of(&vault, "tasks/reopened.md").as_deref(), Some("active"));
         let _ = std::fs::remove_dir_all(&vault);
     }
 
@@ -589,7 +669,9 @@ mod tests {
     /// same note — a `due` re-proposal, or a status change to anything but `done` — is not a
     /// "mark done" question and must not close it.
     #[test]
-    fn an_unrelated_amend_card_on_the_same_task_does_not_count_as_already_proposed() {
+    fn an_unrelated_amend_card_on_the_same_task_does_not_block_the_mark() {
+        // O1 T2c: was `..._does_not_count_as_already_proposed`; the filter is the same, and the
+        // tier-1 outcome is a mark rather than a card.
         let vault = scratch("unrelated");
         task(&vault, "hw-01", "zybooks:1", "active");
         let id = text_of(&meta(&vault.join("tasks/hw-01.md")), "id").expect("id");
@@ -605,10 +687,10 @@ mod tests {
         card("amend-hw-01-archive.md", "  status:\n    from: active\n    to: archived\n");
         assert!(!already_proposed(&vault, "tasks/hw-01.md", Some(&id)));
 
-        let (log, warnings) =
-            propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
-        assert_eq!(log, vec!["proposed done: hw-01 (zybooks 100%)".to_string()], "{warnings:?}");
-        assert!(already_proposed(&vault, "tasks/hw-01.md", Some(&id)));
+        let (log, warnings) = apply_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], &ctx(), false);
+        assert_eq!(log, vec!["marked done: hw-01 (zybooks 100%)".to_string()], "{warnings:?}");
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("done"));
+        assert!(!already_proposed(&vault, "tasks/hw-01.md", Some(&id)), "a mark is not a card");
         let _ = std::fs::remove_dir_all(&vault);
     }
 
@@ -616,7 +698,8 @@ mod tests {
     /// `id:`) that once lived at `tasks/hw-01.md`. The new note at that same path must still be
     /// proposed: matching by `target_id` is what keeps a stale path from silencing it.
     #[test]
-    fn a_new_task_at_a_reused_path_is_still_proposed() {
+    fn a_new_task_at_a_reused_path_is_still_marked() {
+        // O1 T2c: was `..._is_still_proposed`.
         let vault = scratch("reused-path");
         let archived = "---\ntype: approval\nkind: amend\ntitle: \"x\"\nstatus: rejected\n\
              target: tasks/hw-01.md\ntarget_id: id-old-a\nproposed_at: 2026-09-01\n\
@@ -625,10 +708,10 @@ mod tests {
         std::fs::write(vault.join("archive").join("amend-hw-01-done.md"), archived).unwrap();
 
         task(&vault, "hw-01", "zybooks:9", "active");
-        let (log, warnings) =
-            propose_vendor_completions(&vault, &[figure("zybooks:9", 10.0, 10.0)], today(), &ctx(), false);
-        assert_eq!(log, vec!["proposed done: hw-01 (zybooks 100%)".to_string()], "{warnings:?}");
-        assert_eq!(cards(&vault, "approvals").len(), 1);
+        let (log, warnings) = apply_vendor_completions(&vault, &[figure("zybooks:9", 10.0, 10.0)], &ctx(), false);
+        assert_eq!(log, vec!["marked done: hw-01 (zybooks 100%)".to_string()], "{warnings:?}");
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("done"));
+        assert!(cards(&vault, "approvals").is_empty());
         let _ = std::fs::remove_dir_all(&vault);
     }
 
@@ -636,10 +719,12 @@ mod tests {
     /// `target_id`, must still close the question for the note at its new path.
     #[test]
     fn a_renamed_task_is_not_proposed_twice() {
+        // O1 T2c: the first card is filed through `propose_done` (mail's path); the rename must
+        // still not fool `propose_done` or `apply_done`.
         let vault = scratch("renamed");
         task(&vault, "hw-01", "zybooks:1", "active");
         let id = text_of(&meta(&vault.join("tasks/hw-01.md")), "id").expect("id");
-        propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
+        file_card(&vault, "tasks/hw-01.md");
         assert_eq!(cards(&vault, "approvals").len(), 1);
         let card_meta = meta(&cards(&vault, "approvals")[0]);
         assert_eq!(text_of(&card_meta, "target_id").as_deref(), Some(id.as_str()));
@@ -658,6 +743,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outcome, Outcome::Skipped("already proposed".to_string()));
+        let applied = apply(&vault, "tasks/hw-01-renamed.md", false);
+        assert!(is_skipped_for(&applied, "already proposed"), "{applied:?}");
+        assert_eq!(status_of(&vault, "tasks/hw-01-renamed.md").as_deref(), Some("active"));
         let _ = std::fs::remove_dir_all(&vault);
     }
 
@@ -673,11 +761,11 @@ mod tests {
              ---\n\nbody\n";
         std::fs::write(vault.join("approvals").join("amend-hw-01-done.md"), text).unwrap();
 
-        let (log, warnings) =
-            propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
+        let (log, warnings) = apply_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], &ctx(), false);
         assert!(log.is_empty(), "{log:?}");
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(cards(&vault, "approvals").len(), 1, "no second card filed");
+        assert_eq!(cards(&vault, "approvals").len(), 1, "the legacy card is left as it was");
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("active"));
         let _ = std::fs::remove_dir_all(&vault);
     }
 
@@ -685,7 +773,8 @@ mod tests {
     /// hand WITH a status has not taken a position on `status` — only a later explicit `set` is
     /// one — so a vendor's 100% still files the card for it.
     #[test]
-    fn a_task_the_student_created_by_hand_with_a_status_is_still_proposed() {
+    fn a_task_the_student_created_by_hand_with_a_status_is_still_marked() {
+        // O1 T2c: was `..._is_still_proposed`; same rule (`op: set` only), a mark rather than a card.
         let vault = scratch("by-hand-create");
         let text = "---\ntitle: \"CS 100 hw-01\"\ncourse: \"cs-100\"\ndomain: school\n\
                     due: 2026-09-30T23:59\nstatus: active\nsource_uid: \"zybooks:1\"\n---\n\nbody\n";
@@ -698,52 +787,32 @@ mod tests {
             "precondition: the hand-made create record names status"
         );
 
-        let (log, warnings) =
-            propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
-        assert_eq!(log, vec!["proposed done: hw-01 (zybooks 100%)".to_string()], "{warnings:?}");
+        let (log, warnings) = apply_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], &ctx(), false);
+        assert_eq!(log, vec!["marked done: hw-01 (zybooks 100%)".to_string()], "{warnings:?}");
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("done"));
         let _ = std::fs::remove_dir_all(&vault);
     }
 
-    #[test]
-    fn a_dry_run_says_what_it_would_file_and_writes_nothing() {
-        let vault = scratch("dry");
-        task(&vault, "hw-01", "zybooks:1", "active");
-        let before = snapshot(&vault);
-        let (log, _) = propose_vendor_completions(
-            &vault,
-            &[figure("zybooks:1", 193.0, 193.0)],
-            today(),
-            &ctx(),
-            true,
-        );
-        assert_eq!(log, vec!["would propose done: hw-01 (zybooks 100%)".to_string()]);
-        assert_eq!(snapshot(&vault), before, "a dry run wrote something");
-        let _ = std::fs::remove_dir_all(&vault);
-    }
+    // O1 T2c, deleted: `a_dry_run_says_what_it_would_file_and_writes_nothing` -- its rule lives on as
+    // `a_dry_run_tier_1_says_would_mark_done_and_writes_nothing` (T2a).
 
     #[test]
-    fn the_existing_daily_cap_snoozes_the_overflow_and_deletes_nothing() {
+    fn tier_1_is_not_under_the_daily_proposal_cap() {
+        // O1 T2c: replaces `the_existing_daily_cap_snoozes_the_overflow_and_deletes_nothing`. The
+        // 15-a-day cap charges cards, and tier 1 files none: eighteen figures mark eighteen tasks,
+        // with nothing to snooze. (Mail's cards stay under the cap; `approvals` pins that.)
         let vault = scratch("cap");
         let mut figures = Vec::new();
         for n in 0..18 {
             task(&vault, &format!("hw-{n:02}"), &format!("zybooks:{n}"), "active");
             figures.push(figure(&format!("zybooks:{n}"), 5.0, 5.0));
         }
-        let (log, _) = propose_vendor_completions(&vault, &figures, today(), &ctx(), false);
+        let (log, _) = apply_vendor_completions(&vault, &figures, &ctx(), false);
         assert_eq!(log.len(), 18);
-        let mut journal = Journal::new(&vault);
-        let deferred = crate::approvals::defer_over_budget(
-            &vault,
-            today(),
-            15,
-            &crate::approvals::default_ctx(),
-            &mut journal,
-        );
-        assert_eq!(deferred.len(), 3, "{deferred:?}");
-        assert_eq!(cards(&vault, "approvals").len(), 18, "overflow is snoozed, never deleted");
-        // A snoozed card still counts as asked.
-        let (log, _) = propose_vendor_completions(&vault, &figures, today(), &ctx(), false);
-        assert!(log.is_empty(), "{log:?}");
+        for n in 0..18 {
+            assert_eq!(status_of(&vault, &format!("tasks/hw-{n:02}.md")).as_deref(), Some("done"), "hw-{n:02}");
+        }
+        assert!(cards(&vault, "approvals").is_empty());
         let _ = std::fs::remove_dir_all(&vault);
     }
 
@@ -773,15 +842,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&vault);
     }
 
-    /// F6b: tier 1 (`propose_vendor_completions`) always passes `None` for `judgment` — a vendor's
+    /// F6b: `propose_done(.., None)` (mail, and the card shape tier 1 used to file) passes no judgment — a vendor's
     /// own figure is not a judgment. The card carries neither `judgment_id` nor `judgment_kind`,
     /// byte-identical to F11's shape (`target_id` included, since the note has an `id:`).
     #[test]
-    fn a_vendor_completion_card_carries_no_judgment_keys() {
+    fn a_card_filed_without_a_judgment_carries_no_judgment_keys() {
+        // O1 T2c: was `a_vendor_completion_card_carries_no_judgment_keys`. Tier 1 files no card now;
+        // the same bytes are what `propose_done(.., None)` writes for mail, so the card is filed
+        // through it directly with the vendor figure's evidence.
         let vault = scratch("no-judgment");
         task(&vault, "hw-01", "zybooks:1", "active");
         let id = text_of(&meta(&vault.join("tasks/hw-01.md")), "id").expect("id");
-        propose_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], today(), &ctx(), false);
+        file_card(&vault, "tasks/hw-01.md");
         let card = &cards(&vault, "approvals")[0];
         let text = crate::pystr::read_text(card).unwrap();
         assert!(!text.contains("judgment_id"), "{text}");
@@ -850,6 +922,305 @@ mod tests {
         assert_eq!(lines[created_by_at + 3], "changes:");
 
         assert!(crate::approvals::validate_amendment(&vault, &m).is_ok());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    // --- O1 T2a: `apply_done`, the one write path for an authoritative "done" -------------------
+    //
+    // Red state: `apply_done` and `apply_vendor_completions` are `todo!("O1 T3")` stubs, so every
+    // test below panics at run time until T3 lands.
+
+    fn evidence() -> Evidence {
+        figure("zybooks:1", 193.0, 193.0).evidence()
+    }
+
+    /// Every journal record about `path`, oldest first.
+    fn records_for(vault: &Path, path: &str) -> Vec<crate::ledger::Record> {
+        Journal::new(vault)
+            .read(None, None)
+            .into_iter()
+            .filter(|r| r.get("path").and_then(Json::as_str) == Some(path))
+            .collect()
+    }
+
+    fn apply(vault: &Path, rel: &str, dry_run: bool) -> Applied {
+        let mut journal = Journal::new(vault);
+        apply_done(vault, Path::new(rel), &evidence(), &ctx(), &mut journal, dry_run).unwrap()
+    }
+
+    /// File a "Mark done" card the way mail does, under the completion agent.
+    fn file_card(vault: &Path, rel: &str) -> PathBuf {
+        let mut journal = Journal::new(vault);
+        match propose_done(
+            vault,
+            Path::new(rel),
+            &evidence(),
+            today(),
+            &ctx().with_actor(ACTOR),
+            &mut journal,
+            false,
+            None,
+        )
+        .unwrap()
+        {
+            Outcome::Proposed(card) => card,
+            other => panic!("the precondition card was not filed: {other:?}"),
+        }
+    }
+
+    fn status_of(vault: &Path, rel: &str) -> Option<String> {
+        text_of(&meta(&vault.join(rel)), "status")
+    }
+
+    fn is_skipped_for(outcome: &Applied, needle: &str) -> bool {
+        matches!(outcome, Applied::Skipped(why) if why.contains(needle))
+    }
+
+    #[test]
+    fn apply_done_sets_only_the_status_line_and_journals_it_under_the_completion_agent() {
+        let vault = scratch("apply-one");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let id = text_of(&meta(&vault.join("tasks/hw-01.md")), "id").expect("id");
+        let before = std::fs::read_to_string(vault.join("tasks/hw-01.md")).unwrap();
+
+        assert_eq!(apply(&vault, "tasks/hw-01.md", false), Applied::Marked);
+
+        let after = std::fs::read_to_string(vault.join("tasks/hw-01.md")).unwrap();
+        assert!(before.contains("\r\nstatus: active\r\n"), "precondition: the vault note is CRLF");
+        assert_eq!(
+            after,
+            before.replace("\r\nstatus: active\r\n", "\r\nstatus: done\r\n"),
+            "only the status line changes and CRLF survives"
+        );
+        let records = records_for(&vault, "tasks/hw-01.md");
+        let last = records.last().expect("a record");
+        assert_eq!(last.get("op").and_then(Json::as_str), Some("set"));
+        assert_eq!(last.get("field").and_then(Json::as_str), Some("status"));
+        assert_eq!(last.get("old").and_then(Json::as_str), Some("active"));
+        assert_eq!(last.get("new").and_then(Json::as_str), Some("done"));
+        assert_eq!(last.get("actor").and_then(Json::as_str), Some(ACTOR));
+        assert_eq!(last.get("id").and_then(Json::as_str), Some(id.as_str()));
+        assert_eq!(
+            last.get("via").and_then(Json::as_str),
+            Some("local-runner"),
+            "the caller's via survives; only the actor is replaced"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn apply_done_leaves_a_status_the_student_set_by_hand() {
+        let vault = scratch("apply-hand");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        // done then active: a no-op set journals nothing, so the student takes a position the way Undo does.
+        set_by(&vault, "tasks/hw-01.md", "quinn", "status", "done");
+        set_by(&vault, "tasks/hw-01.md", "quinn", "status", "active");
+        let before = snapshot(&vault);
+
+        let outcome = apply(&vault, "tasks/hw-01.md", false);
+
+        assert!(is_skipped_for(&outcome, "set by hand"), "{outcome:?}");
+        assert_eq!(snapshot(&vault), before, "bytes changed");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn undo_sticks_the_students_own_set_keeps_the_task_active_forever() {
+        let vault = scratch("apply-undo");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        assert_eq!(apply(&vault, "tasks/hw-01.md", false), Applied::Marked);
+        // Undo is the console's `set_fields` as the student.
+        set_by(&vault, "tasks/hw-01.md", "quinn", "status", "active");
+        let agent_records = |vault: &Path| {
+            records_for(vault, "tasks/hw-01.md")
+                .iter()
+                .filter(|r| r.get("actor").and_then(Json::as_str) == Some(ACTOR))
+                .count()
+        };
+        assert_eq!(agent_records(&vault), 1, "precondition: one agent record so far");
+        let before = snapshot(&vault);
+
+        let outcome = apply(&vault, "tasks/hw-01.md", false);
+
+        assert!(is_skipped_for(&outcome, "set by hand"), "{outcome:?}");
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("active"));
+        assert_eq!(agent_records(&vault), 1, "a new agent record was written after Undo");
+        assert_eq!(snapshot(&vault), before);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn apply_done_skips_a_task_already_done_archived_outside_tasks_or_with_no_status() {
+        let vault = scratch("apply-skips");
+        task(&vault, "is-done", "zybooks:1", "done");
+        task(&vault, "is-archived", "zybooks:2", "archived");
+        task(&vault, "elsewhere", "zybooks:3", "active");
+        std::fs::rename(vault.join("tasks/elsewhere.md"), vault.join("archive/elsewhere.md")).unwrap();
+        let bare = "---\ntitle: \"CS 100 bare\"\ncourse: \"cs-100\"\ndomain: school\n\
+                    due: 2026-09-30T23:59\nsource_uid: \"zybooks:4\"\n---\n\nbody\n";
+        let mut journal = Journal::new(&vault);
+        crate::write::create(&vault, "tasks/bare.md", bare, &ctx(), &mut journal, None).unwrap();
+        let before = snapshot(&vault);
+
+        for rel in ["tasks/is-done.md", "tasks/is-archived.md", "archive/elsewhere.md", "tasks/bare.md"] {
+            let outcome = apply(&vault, rel, false);
+            assert!(matches!(outcome, Applied::Skipped(_)), "{rel}: {outcome:?}");
+        }
+        assert_eq!(snapshot(&vault), before, "a skip wrote something");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_dry_run_apply_reports_would_mark_and_writes_nothing() {
+        let vault = scratch("apply-dry");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let before = snapshot(&vault);
+
+        assert_eq!(apply(&vault, "tasks/hw-01.md", true), Applied::WouldMark);
+
+        assert_eq!(snapshot(&vault), before, "a dry run wrote something");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn tier_1_applies_a_complete_figure_and_files_no_card() {
+        let vault = scratch("vendor-apply");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        task(&vault, "hw-02", "zybooks:2", "active");
+        task(&vault, "hw-03", "zybooks:3", "active");
+        // Out of order, one duplicated, one at 99.6%: processed once each, in uid order.
+        let figures = [
+            figure("zybooks:3", 10.0, 10.0),
+            figure("zybooks:2", 996.0, 1000.0),
+            figure("zybooks:1", 193.0, 193.0),
+            figure("zybooks:3", 10.0, 10.0),
+        ];
+
+        let (log, warnings) = apply_vendor_completions(&vault, &figures, &ctx(), false);
+
+        assert_eq!(
+            log,
+            vec![
+                "marked done: hw-01 (zybooks 100%)".to_string(),
+                "marked done: hw-03 (zybooks 100%)".to_string()
+            ]
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("done"));
+        assert_eq!(status_of(&vault, "tasks/hw-02.md").as_deref(), Some("active"), "99.6% is not 100%");
+        assert_eq!(status_of(&vault, "tasks/hw-03.md").as_deref(), Some("done"));
+        assert!(cards(&vault, "approvals").is_empty(), "tier 1 no longer files cards");
+
+        let (again, _) = apply_vendor_completions(&vault, &figures, &ctx(), false);
+        assert!(again.is_empty(), "a second run marked again: {again:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_dry_run_tier_1_says_would_mark_done_and_writes_nothing() {
+        let vault = scratch("vendor-dry");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let before = snapshot(&vault);
+
+        let (log, _) = apply_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], &ctx(), true);
+
+        assert_eq!(log, vec!["would mark done: hw-01 (zybooks 100%)".to_string()]);
+        assert_eq!(snapshot(&vault), before);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_rejected_mark_done_card_closes_the_question_even_after_a_rename() {
+        for rename in [false, true] {
+            let vault = scratch(&format!("apply-rejected-{rename}"));
+            task(&vault, "hw-01", "zybooks:1", "active");
+            let card = file_card(&vault, "tasks/hw-01.md");
+            set_by(&vault, &crate::ids::rel(&vault, &card), "quinn", "status", "rejected");
+            let result = process(&vault);
+            assert_eq!(result.rejected.len(), 1, "{:?}", result.warnings);
+            assert_eq!(cards(&vault, "archive").len(), 1, "the rejected card sits in archive/");
+            let rel = if rename {
+                std::fs::rename(vault.join("tasks/hw-01.md"), vault.join("tasks/hw-01-renamed.md")).unwrap();
+                "tasks/hw-01-renamed.md"
+            } else {
+                "tasks/hw-01.md"
+            };
+            let before = snapshot(&vault);
+
+            let outcome = apply(&vault, rel, false);
+
+            assert!(is_skipped_for(&outcome, "already proposed"), "rename={rename}: {outcome:?}");
+            assert_eq!(snapshot(&vault), before, "rename={rename}: bytes or journal changed");
+            let _ = std::fs::remove_dir_all(&vault);
+        }
+    }
+
+    #[test]
+    fn a_pending_mark_done_card_is_left_alone_and_the_task_skipped() {
+        let vault = scratch("apply-pending");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let card = file_card(&vault, "tasks/hw-01.md");
+        let card_bytes = std::fs::read(&card).unwrap();
+        let before = snapshot(&vault);
+
+        let outcome = apply(&vault, "tasks/hw-01.md", false);
+
+        assert!(is_skipped_for(&outcome, "already proposed"), "{outcome:?}");
+        assert_eq!(std::fs::read(&card).unwrap(), card_bytes, "the card was touched");
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("active"));
+        assert_eq!(snapshot(&vault), before, "something was written or journaled");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn approving_the_left_card_marks_the_task_done_and_rejecting_it_keeps_it_active() {
+        // Approve.
+        let vault = scratch("apply-pending-approve");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let card = file_card(&vault, "tasks/hw-01.md");
+        assert!(is_skipped_for(&apply(&vault, "tasks/hw-01.md", false), "already proposed"));
+        set_by(&vault, &crate::ids::rel(&vault, &card), "quinn", "status", "approved");
+        let result = process(&vault);
+        assert_eq!(result.executed.len(), 1, "{:?}", result.warnings);
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("done"));
+        let _ = std::fs::remove_dir_all(&vault);
+
+        // Reject.
+        let vault = scratch("apply-pending-reject");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let card = file_card(&vault, "tasks/hw-01.md");
+        assert!(is_skipped_for(&apply(&vault, "tasks/hw-01.md", false), "already proposed"));
+        set_by(&vault, &crate::ids::rel(&vault, &card), "quinn", "status", "rejected");
+        assert_eq!(process(&vault).rejected.len(), 1);
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("active"));
+        assert!(is_skipped_for(&apply(&vault, "tasks/hw-01.md", false), "already proposed"));
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("active"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn apply_done_journals_evidence_and_nothing_judged() {
+        let vault = scratch("apply-opts");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let before = std::fs::read_to_string(vault.join("tasks/hw-01.md")).unwrap();
+
+        assert_eq!(apply(&vault, "tasks/hw-01.md", false), Applied::Marked);
+
+        let records = records_for(&vault, "tasks/hw-01.md");
+        assert_eq!(records.len(), 2, "create + one set; a judged write would add provenance records");
+        let set = &records[1];
+        assert_eq!(set.get("evidence"), Some(&evidence().to_json()));
+        for key in ["judgment", "judgment_id", "judgment_kind", "provenance"] {
+            assert!(set.get(key).is_none(), "`{key}` on a record that is not a judgment");
+        }
+        let after = std::fs::read_to_string(vault.join("tasks/hw-01.md")).unwrap();
+        assert!(!after.contains("judgment"), "{after}");
+        assert!(before.contains("\r\nstatus: active\r\n"), "precondition: the vault note is CRLF");
+        assert_eq!(
+            after,
+            before.replace("\r\nstatus: active\r\n", "\r\nstatus: done\r\n"),
+            "only the status line changes and CRLF survives"
+        );
         let _ = std::fs::remove_dir_all(&vault);
     }
 }

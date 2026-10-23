@@ -1697,6 +1697,9 @@ pub struct Closed {
     pub mark: String,
     pub when: String,
     pub path: String,
+    /// True only for a close written by `agent:knowlu.completion` (`op: set`, `status` to `done`)
+    /// whose note still reads `status: done` at `path`, so the console can offer Undo.
+    pub undo: bool,
 }
 
 /// Last 7 days of the journal: progress → 100, status → done/archived, or a delete (S2 §7.3).
@@ -1714,6 +1717,9 @@ pub fn closed_this_week(vault: &Path, now: DateTime, journal: &mut crate::journa
     // not the map's own key order, so a caller with no duplicates still sees chronological rows.
     let mut order: Vec<String> = Vec::new();
     let mut by_path: BTreeMap<String, Closed> = BTreeMap::new();
+    // Paths whose latest closing record is the completion agent's `status: done`; confirmed against
+    // the note once, after the loop.
+    let mut completion_closes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for r in journal.read(Some(&since), None) {
         let ts = r.get("ts").and_then(|v| v.as_str()).unwrap_or("");
         let ts_bound = ts.get(..19).unwrap_or(ts);
@@ -1735,6 +1741,11 @@ pub fn closed_this_week(vault: &Path, now: DateTime, journal: &mut crate::journa
         if !by_path.contains_key(&path) {
             order.push(path.clone());
         }
+        if op == "set" && field == "status" && new.and_then(|v| v.as_str()) == Some("done") && actor == crate::completion::ACTOR {
+            completion_closes.insert(path.clone());
+        } else {
+            completion_closes.remove(&path);
+        }
         by_path.insert(
             path.clone(),
             Closed {
@@ -1743,8 +1754,20 @@ pub fn closed_this_week(vault: &Path, now: DateTime, journal: &mut crate::journa
                 mark: mark.into(),
                 when: local_stamp(vault, ts),
                 path,
+                undo: false,
             },
         );
+    }
+    // Undo is offered only while the note still reads `status: done` where the agent wrote it: a
+    // student who has since set it back (or moved it) has already undone it.
+    for path in &completion_closes {
+        let still_done = crate::ids::read_meta(&vault.join(path))
+            .and_then(|meta| crate::yaml::get(&meta, "status").and_then(crate::yaml::text))
+            .as_deref()
+            == Some("done");
+        if let Some(row) = by_path.get_mut(path) {
+            row.undo = still_done;
+        }
     }
     order.into_iter().filter_map(|p| by_path.remove(&p)).collect()
 }
@@ -2878,6 +2901,52 @@ mod tests {
         drop(plant);
         let closed = closed_this_week(&dir, TODAY.at(9, 0, 0, 0), &mut journal);
         assert_eq!(closed.iter().map(|c| (c.path.as_str(), c.mark.as_str())).collect::<Vec<_>>(), [("tasks/a.md", "me"), ("tasks/b.md", "agent"), ("approvals/c.md", "system")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// O1 T2a (T7a makes it pass): a row offers Undo only when the completion agent closed the note
+    /// and the note still reads `status: done` at that path. The student's close, another agent's
+    /// close, and a completion close the student has since undone (or archived) do not.
+    #[test]
+    fn closed_this_week_flags_undo_only_for_a_live_completion_close() {
+        let dir = std::env::temp_dir().join(format!("qo-closed-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tasks")).unwrap();
+        let mut journal = crate::journal::Journal::new(&dir);
+        let rows = [
+            ("a", crate::completion::ACTOR, "done"),
+            ("b", "student", "done"),
+            ("c", "agent:knowlu.mail", "done"),
+            ("d", crate::completion::ACTOR, "active"),
+            ("e", crate::completion::ACTOR, "archived"),
+        ];
+        for (n, (stem, actor, now_reads)) in rows.iter().enumerate() {
+            std::fs::write(
+                dir.join("tasks").join(format!("{stem}.md")),
+                format!("---\ntitle: \"Row {stem}\"\nstatus: {now_reads}\n---\n\nbody\n"),
+            )
+            .unwrap();
+            let rel = format!("tasks/{stem}.md");
+            let mut spec = crate::journal::NewRecord::new("set", &rel, actor, "dashboard");
+            spec.id = Some("task_aaaaaaaaaa");
+            spec.field = Some("status");
+            spec.old = serde_json::json!("active");
+            spec.new = serde_json::json!("done");
+            spec.ts = Some(format!("2026-08-27T1{n}:00:00.000Z"));
+            spec.device = Some("d".to_string());
+            journal.append(&mut crate::journal::make_record(spec).unwrap()).unwrap();
+        }
+        let closed = closed_this_week(&dir, TODAY.at(9, 0, 0, 0), &mut journal);
+        assert_eq!(
+            closed.iter().map(|c| (c.path.as_str(), c.undo)).collect::<Vec<_>>(),
+            [
+                ("tasks/a.md", true),
+                ("tasks/b.md", false),
+                ("tasks/c.md", false),
+                ("tasks/d.md", false),
+                ("tasks/e.md", false),
+            ]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

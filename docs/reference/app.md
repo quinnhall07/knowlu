@@ -184,7 +184,7 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   place the path is decided. `profiles::migrate_flat_layout` still folds an old flat
   `%LOCALAPPDATA%\quinn-ops\` root in, file by file — that literal is the only `quinn-ops` left in
   `app/src`, and it stays.
-- A slot is `sync → coursework → ingest → grades → judge → rank` (`scheduler::slot_argv`), each the sibling
+- A slot is `sync → coursework → grades → ingest → judge → rank` (`scheduler::slot_argv`; grades before ingest since lane O1, so ingest can read the gradebook's submitted-work status), each the sibling
   `knowlu-engine.exe` as a child process (`KNOWLU_ENGINE_EXE` overrides). Steps are left out and
   named — `ingest (skipped: no ics_url)`, `judge (skipped: no account)` / `(skipped: no entitlement)`,
   `sync (skipped: no account)` / `(skipped: no entitlement)` / `(skipped: another sync is running)`,
@@ -218,7 +218,7 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   - **The scheduler's new skips.** For an entitled vault whose gate is not `Accepted`, the slot asks
     `account::refresh_privacy` once. A failed check is the row `privacy (check failed: <reason>)` at exit 0,
     recorded in the runner log as `privacy (check failed)`, and holds nothing. A definite `Older` turns the
-    `sync`, `coursework`, `ingest`, `grades`, `judge` and `mail` steps into
+    `sync`, `coursework`, `grades`, `ingest`, `judge` and `mail` steps into
     `<step> (skipped: privacy update not accepted)`; `rank`, the backup and telemetry run as always. The
     two naming rules: only a step that would have run gets the privacy name (`ingest` without a feed, a
     grades step that was already skipped and a mail pass with no mailbox keep their own names or no row),

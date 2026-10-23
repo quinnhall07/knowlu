@@ -333,7 +333,7 @@ pub fn course_grade(notes: &[GradeNote]) -> Standing {
 pub const ACTOR: &str = "agent:knowlu.grades";
 /// Generated and device-local, rewritten on every run, never synced (spec §6).
 pub const STATE_FILE: &str = "state/grades.json";
-const SOURCE: &str = "blackboard";
+pub const SOURCE: &str = "blackboard";
 
 /// What one run did, in the only terms it may print: counts, course codes, note paths and error
 /// codes (spec §6, §11).
@@ -616,7 +616,7 @@ pub const OLDER: &str = "grades (skipped: a newer capture is already applied)";
 
 /// Whether the bundle stamped `bundle_at` is strictly older than the capture `state/grades.json`
 /// records (T9 finding 2). The slot captures before `sync`, `coursework` and `ingest` and applies
-/// after them, so a Refresh in between can apply a newer capture first. Both stamps are compared as
+/// after `sync` and `coursework` and before `ingest`, so a Refresh in between can apply a newer capture first. Both stamps are compared as
 /// instants, never as text (`…:00Z` and `…:00.500Z` both occur). A stamp on either side that does
 /// not parse orders nothing, and neither does a recorded stamp later than now. A clock that once ran
 /// ahead and was put right must not refuse every capture until it catches up.

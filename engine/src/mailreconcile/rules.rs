@@ -1825,6 +1825,20 @@ mod tests {
         }
     }
 
+    /// O1 T2a (a pin; no code changes): a note the source said was turned in (`imported-done`) is no
+    /// `imported-past` note. A `due` move on it is refused however far ahead the new due is, while the
+    /// same move on an `imported-past` note is still allowed (`amendable`'s one archive arm).
+    #[test]
+    fn an_imported_done_note_is_not_amendable_but_an_imported_past_one_still_is() {
+        let past = imported("mail");
+        let done = NoteView { archived_reason: Some(crate::ingest::IMPORTED_DONE.to_string()), ..imported("mail") };
+        for to in ["2026-10-05", "2027-01-01", "2099-12-31"] {
+            let to = json!(to);
+            assert!(!amendable(&done, "due", &done.due, &to, today()), "imported-done must refuse {to}");
+            assert!(amendable(&past, "due", &past.due, &to, today()), "imported-past must still allow {to}");
+        }
+    }
+
     /// A `cancelled` for an active note with no `status:` line would amend from a null `status`,
     /// which T8c's first arm (`due` only) never accepts: still `NotAmendable` in every phase.
     #[test]

@@ -475,7 +475,7 @@ pub fn record_seen(vault: &Path, uid: &str, title: &str, date_str: &str) -> std:
 /// **The absence of `today.md`, and deliberately not the absence of `state/ingest-seen.md`**
 /// (ruling R-C2-9). That ledger is not `ingest`'s alone: `coursework` imports
 /// `crate::ingest::record_seen` (`coursework.rs:19`) and calls it at `:310` and `:415`, and the
-/// slot order is `coursework → ingest → judge → rank`. So on a genuinely fresh vault the
+/// slot order is `sync → coursework → grades → ingest → judge → rank`. So on a genuinely fresh vault the
 /// seen-ledger already exists by the time `ingest` looks at it, and a flag derived from it is
 /// `false` on exactly the run R-OB-3 was written for. `today.md` is written by `rank`, the LAST
 /// step of the slot, so the first `ingest` always sees it absent and every later one sees it
@@ -534,6 +534,139 @@ needs_enrichment: true
 /// than a naming convention, so a human reading the note in six months can see it, and so a future
 /// `surface` view can filter on it without parsing a filename.
 pub const IMPORTED_PAST: &str = "imported-past";
+
+/// O1: why a note went straight to `archive/` because its source already says it is turned in.
+/// Beside [`IMPORTED_PAST`]; precedence: a past item is `imported-past`, never this.
+pub const IMPORTED_DONE: &str = "imported-done";
+
+/// [`IMPORTED_PAST_TEMPLATE`] with `archived_reason: imported-done` ([`IMPORTED_DONE`]) where the
+/// past template says `imported-past`: a second template, for the reason the past one gives.
+pub const IMPORTED_DONE_TEMPLATE: &str = r#"---
+title: {title}
+course: {course}
+domain: school
+due: {due}
+effort_hours: 1.0
+effort_confidence: low
+effort_source: inferred
+importance: 3
+importance_reason: "pending enrichment"
+status: archived
+archived_reason: imported-done
+progress: 0
+created_by: blackboard
+source_uid: {uid}
+needs_enrichment: false
+---
+
+{body}
+"#;
+
+/// The prefix of a Blackboard feed task's UID that names a gradebook column; the rest is the
+/// column id the grade note keeps as `source_uid` (`_4686399_1`).
+const GRADABLE_PREFIX: &str = "_blackboard.platform.gradebook2.GradableItem-";
+
+/// The gradebook column id inside a feed task's UID: the suffix after exactly
+/// `_blackboard.platform.gradebook2.GradableItem-`, non-empty, else `None`. No other UID shape
+/// (a calendar entry, an assignment-style `BB-ASSIGN-...`) ever joins the gradebook.
+pub fn gradable_id(uid: &str) -> Option<&str> {
+    uid.strip_prefix(GRADABLE_PREFIX).filter(|id| !id.is_empty())
+}
+
+/// Whether a grade note's `status` and `score` say the work is turned in (plan §3, Q-A, spec §6.2):
+/// `needs-grading`, `exempt`, and `graded` with a score above 0. Everything else is live -- a graded
+/// zero, and a `graded` row with no score (every column type that yields one can hold a zero or a
+/// fail), included.
+pub fn gradebook_done(status: &str, score: Option<f64>) -> bool {
+    match status {
+        "needs-grading" | "exempt" => true,
+        "graded" => score.is_some_and(|s| s > 0.0),
+        _ => false,
+    }
+}
+
+/// What ingest reads of one Blackboard grade note: its `status` and `score`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GradeRow {
+    pub status: String,
+    pub score: Option<f64>,
+}
+
+/// Blackboard grade items by column id (the note's `source_uid`), read from `grades/`.
+pub type GradeIndex = BTreeMap<String, GradeRow>;
+
+/// A read-only index of `grades/`: per `kind: item` note with `source: blackboard`, its column id,
+/// `status` and `score` -- the fields `grades::desired` writes. Built once per run, in path order
+/// (the first note for a column id wins); a note that does not parse is skipped. No `grades/`
+/// folder is an empty index, which is today's behaviour exactly.
+///
+/// **This reads `grades/` without a lock, and a concurrent write can race it.** `ingest` takes no
+/// `RunLock`, while the app's grades refresh, grades connect and Sync now write `grades/` under one,
+/// and `pystr::write_text` truncates then writes. A read that lands in that window can make
+/// `read_meta` miss a note, which only means a turned-in item is created live this run and marked
+/// done (with Undo) on the next. `ingest` never writes `grades/`, so nothing is corrupted.
+pub fn grade_index(vault: &Path) -> GradeIndex {
+    let mut index = GradeIndex::new();
+    for path in crate::approvals::sorted_md(&vault.join("grades")) {
+        let Some(meta) = crate::ids::read_meta(&path) else { continue };
+        let text = |key: &str| crate::yaml::get(&meta, key).and_then(crate::yaml::text).filter(|t| !t.is_empty());
+        if text("kind").as_deref().unwrap_or("item") != "item"
+            || text("source").as_deref() != Some(crate::grades::SOURCE)
+        {
+            continue;
+        }
+        let (Some(id), Some(status)) = (text("source_uid"), text("status")) else { continue };
+        let score = crate::yaml::get(&meta, "score").and_then(crate::yaml::f64_of);
+        index.entry(id).or_insert(GradeRow { status, score });
+    }
+    index
+}
+
+/// The grade row for a feed task's UID, with its column id, if it joins the gradebook and the row
+/// says turned in.
+fn done_grade<'a>(grades: &'a GradeIndex, uid: &str) -> Option<(&'a str, &'a GradeRow)> {
+    let id = gradable_id(uid)?;
+    let (column, row) = grades.get_key_value(id)?;
+    gradebook_done(&row.status, row.score).then_some((column.as_str(), row))
+}
+
+/// Every ingest, after the sync: each feed event, **in feed order**, whose note is an active task
+/// joined to a turned-in grade row is marked done by [`crate::completion::apply_done`] (which also
+/// skips a task the student set by hand, or one with a pending or rejected "Mark done" card).
+/// Evidence is `{source: "blackboard-gradebook", status, column}`. One line per task marked:
+/// `marked done: <stem> (gradebook)`. An event that left the feed is not visited.
+fn mark_gradebook_done(
+    events: &[Event],
+    vault: &Path,
+    grades: &GradeIndex,
+    ctx: &crate::write::WriteContext,
+    journal: &mut crate::journal::Journal,
+) -> Vec<String> {
+    let mut log = Vec::new();
+    if grades.is_empty() {
+        return log;
+    }
+    let known = existing_by_uid(vault);
+    for event in events {
+        let Some((column, row)) = done_grade(grades, &event.uid) else { continue };
+        let Some(path) = known.get(&event.uid) else { continue };
+        let mut detail = serde_json::Map::new();
+        detail.insert("status".to_string(), serde_json::Value::String(row.status.clone()));
+        detail.insert("column".to_string(), serde_json::Value::String(column.to_string()));
+        let evidence = crate::completion::Evidence {
+            source: "blackboard-gradebook".to_string(),
+            summary: "Blackboard's gradebook shows this submitted".to_string(),
+            detail,
+        };
+        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        match crate::completion::apply_done(vault, path, &evidence, ctx, journal, false) {
+            Ok(crate::completion::Applied::Marked) => log.push(format!("marked done: {stem} (gradebook)")),
+            Ok(_) => {}
+            Err(err) => log.push(format!("gradebook: {stem} not marked done ({err})")),
+        }
+    }
+    log
+}
 
 /// The archived twin of `NOTE_TEMPLATE`. Identical but for the two lines that say why it is here —
 /// deliberately a second template rather than a substitution on the first, because the two differ
@@ -622,6 +755,23 @@ pub fn sync_tasks(
     // `run_lines` computes it; every caller in the tests passes `false`, which is the behaviour
     // they were written against.
     first_run: bool,
+) -> Vec<String> {
+    sync_tasks_with_grades(events, vault, course_map, ctx, journal, today, first_run, &GradeIndex::new())
+}
+
+/// [`sync_tasks`] plus the gradebook index (O1, spec §6.2): on a first ingest, an item that is not
+/// past but joins a turned-in grade row ([`done_grade`]) goes straight to `archive/` as
+/// `imported-done`, by the same rule as `imported-past` and below it in precedence.
+#[allow(clippy::too_many_arguments)]
+pub fn sync_tasks_with_grades(
+    events: &[Event],
+    vault: &Path,
+    course_map: &[(String, String)],
+    ctx: Option<&crate::write::WriteContext>,
+    journal: &mut crate::journal::Journal,
+    today: Option<Date>,
+    first_run: bool,
+    grades: &GradeIndex,
 ) -> Vec<String> {
     let default_ctx = crate::write::WriteContext::new("agent:ingest.blackboard", "cli");
     let ctx = ctx.unwrap_or(&default_ctx);
@@ -748,7 +898,15 @@ pub fn sync_tasks(
                 Due::Date(d) => d < stamp_date,
                 Due::DateTime(dt) => dt.date() < stamp_date,
             };
-        if past_due {
+        // O1: turned in, per the gradebook -- on a first ingest only, and only when not already past.
+        let import = if past_due {
+            Some((IMPORTED_PAST_TEMPLATE, IMPORTED_PAST))
+        } else if first_run && done_grade(grades, &event.uid).is_some() {
+            Some((IMPORTED_DONE_TEMPLATE, IMPORTED_DONE))
+        } else {
+            None
+        };
+        if let Some((template, reason)) = import {
             let slug = format!("{}-{}", course.clone().unwrap_or_else(|| "task".into()), slugify(&event.title));
             let archive_dir = vault.join("archive");
             let _ = std::fs::create_dir_all(&archive_dir);
@@ -758,7 +916,7 @@ pub fn sync_tasks(
                 path = archive_dir.join(format!("{slug}-{suffix}.md"));
                 suffix += 1;
             }
-            let body = IMPORTED_PAST_TEMPLATE
+            let body = template
                 .replace("{title}", &json_dumps_unicode(&event.title))
                 .replace(
                     "{course}",
@@ -771,7 +929,7 @@ pub fn sync_tasks(
             match crate::write::create(vault, &rel_path, &body, ctx, journal, None) {
                 Ok(created) => {
                     let stem = created.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                    log.push(format!("archived (imported-past) {stem}"));
+                    log.push(format!("archived ({reason}) {stem}"));
                     known.insert(event.uid.clone(), created);
                     let _ = record_seen(vault, &event.uid, &event.title, &stamp);
                 }
@@ -1098,10 +1256,19 @@ fn run_lines_on(
         .map(|m| m.iter().filter_map(|(k, v)| Some((k.as_str()?.to_string(), v.as_str()?.to_string()))).collect())
         .unwrap_or_default();
     let mut journal = crate::journal::Journal::new(vault);
-    let mut log = sync_tasks(&events, vault, &course_map, Some(&ctx), &mut journal, today, first_run);
+    // O1: the gradebook half. `grades/` is read lockless: a concurrent grades write can make a note
+    // be missed this run, which only defers the mark to the next run (see `grade_index`).
+    let grades = grade_index(vault);
+    let mut log =
+        sync_tasks_with_grades(&events, vault, &course_map, Some(&ctx), &mut journal, today, first_run, &grades);
+    log.extend(mark_gradebook_done(&events, vault, &grades, &ctx, &mut journal));
     if first_run {
         log.push(format!("ingest: first run — {} item(s) already past were archived",
             log.iter().filter(|l| l.starts_with("archived (imported-past)")).count()));
+        let turned_in = log.iter().filter(|l| l.starts_with("archived (imported-done)")).count();
+        if turned_in > 0 {
+            log.push(format!("ingest: first run — {turned_in} item(s) already turned in were archived"));
+        }
     }
     if malformed > 0 { log.push(format!("skipped {malformed} malformed event(s)")); }
     let summary = format!("ingest: {} events, {} action(s)", events.len(), log.len());
@@ -2124,6 +2291,403 @@ mod tests {
             let log = run(&v, &[ev("bb:1", "HW 01 revised", dt(2026, 9, 16))], &[]);
             assert_eq!(log, ["proposed task-hw-01: title"]);
             assert_eq!(files(&v, "approvals"), ["amend-mail.md", "amend-task-hw-01-title.md"]);
+        }
+    }
+
+    // -- O1 T2b: the gradebook half of "turned-in work is not a task" -------------------------
+    //
+    // Red state: `gradable_id` and `gradebook_done` are `todo!("O1 T5")` stubs and `run_lines_on`
+    // reads no `grades/`, so a turned-in item is still created live. Every grade note below is built
+    // by `grades::apply` on an inline v2-shape bundle (no top-level `score`, the number under
+    // `displayGrade`), the path a real capture takes. Every course, column and name is invented.
+
+    mod gradebook {
+        use super::*;
+        use serde_json::{json, Value as J};
+
+        const DAY: Date = Date::constant(2026, 8, 29);
+        const CONFIG: &str = "ics_url: \"https://example.invalid/learn.ics\"\ntimezone: America/Chicago\ncourse_map:\n  XX-101: xx-101\n";
+        const GB: &str = "_blackboard.platform.gradebook2.GradableItem-";
+
+        #[derive(Clone, Copy)]
+        enum Row {
+            Score(f64),
+            Percent(f64),
+            NeedsGrading,
+            Exempt,
+            InProgress,
+            Absent,
+            Overall(f64),
+        }
+
+        /// The invented gradebook: `(column id, name)`.
+        const ESSAY1: (&str, &str) = ("_11_1", "XX-101 Essay One");
+        const ESSAY2: (&str, &str) = ("_12_1", "XX-101 Essay Two");
+        const QUIZ: (&str, &str) = ("_13_1", "XX-101 Quiz One");
+        const LAB1: (&str, &str) = ("_14_1", "XX-101 Lab One");
+        const LAB2: (&str, &str) = ("_15_1", "XX-101 Lab Two");
+        const LAB3: (&str, &str) = ("_16_1", "XX-101 Lab Three");
+        const LAB4: (&str, &str) = ("_17_1", "XX-101 Lab Four");
+        const TOTAL: (&str, &str) = ("_19_1", "XX-101 Total");
+        const EARLY: (&str, &str) = ("_21_1", "XX-101 Warmup");
+
+        fn vault(tag: &str) -> PathBuf {
+            let d = std::env::temp_dir().join(format!("qo-ingest-gb-{tag}-{}-{:?}", std::process::id(), std::thread::current().id()));
+            let _ = std::fs::remove_dir_all(&d);
+            for folder in ["config", "tasks", "courses"] {
+                std::fs::create_dir_all(d.join(folder)).unwrap();
+            }
+            pystr::write_text(&d.join("config").join("ingest.yaml"), CONFIG).unwrap();
+            pystr::write_text(&d.join("courses").join("xx-101.md"), "---\ntitle: Intro Studies\ncode: _900_1\n---\n").unwrap();
+            d
+        }
+
+        /// A slot that has already been ranked once: ingest is no longer a first run.
+        fn ranked(v: &Path) {
+            std::fs::create_dir_all(v.join("state")).unwrap();
+            pystr::write_text(&v.join("state").join("today.md"), "# Today\n").unwrap();
+        }
+
+        /// `grades::apply` on an inline v2 bundle with one column and one row per item.
+        fn grade(v: &Path, rows: &[((&str, &str), Row)]) {
+            let (mut columns, mut grades) = (Vec::<J>::new(), Vec::<J>::new());
+            for ((id, name), row) in rows {
+                let mut column = json!({"id": id, "name": name, "score": {"possible": 40.0}});
+                let row_json = |status: &str, exempt: bool, display: J| {
+                    json!({"columnId": id, "userId": "_77_1", "status": status, "exempt": exempt, "displayGrade": display})
+                };
+                match *row {
+                    Row::Score(n) => grades.push(row_json("Graded", false, json!({"scaleType": "Score", "score": n, "possible": 40.0}))),
+                    Row::Percent(n) => grades.push(row_json("Graded", false, json!({"scaleType": "Percent", "score": n, "possible": 100.0}))),
+                    Row::NeedsGrading => grades.push(row_json("NeedsGrading", false, J::Null)),
+                    Row::Exempt => grades.push(row_json("Graded", true, J::Null)),
+                    Row::InProgress => grades.push(row_json("InProgress", false, J::Null)),
+                    Row::Absent => {}
+                    Row::Overall(n) => {
+                        column["externalGrade"] = json!(true);
+                        grades.push(row_json("Graded", false, json!({"scaleType": "Score", "score": n, "possible": 100.0})));
+                    }
+                }
+                columns.push(column);
+            }
+            let bundle: crate::grades::Bundle = serde_json::from_value(json!({
+                "schema": 1, "lms": "blackboard", "host": "lms.example.test",
+                "fetched_at": "2026-08-29T12:00:00Z", "user_id": "_77_1",
+                "courses": [{"membership": {"courseId": "_900_1"}, "columns": columns, "grades": grades, "categories": null}],
+            }))
+            .unwrap();
+            let ctx = crate::write::WriteContext::new(crate::grades::ACTOR, "local-runner");
+            let mut journal = crate::journal::Journal::new(v);
+            let report = crate::grades::apply(v, &bundle, &ctx, &mut journal);
+            assert!(report.not_written.is_empty(), "{:?}", report.not_written);
+        }
+
+        /// One VEVENT: `uid`, `title`, local due `YYYYMMDDTHHMMSS`.
+        fn vevent(uid: &str, title: &str, due: &str) -> String {
+            format!("BEGIN:VEVENT\nUID:{uid}\nSUMMARY:{title}\nDESCRIPTION:from the feed\nDTSTART:{due}\nEND:VEVENT\n")
+        }
+
+        fn gb_event(item: (&str, &str), due: &str) -> String {
+            vevent(&format!("{GB}{}", item.0), item.1, due)
+        }
+
+        fn ics(events: &[String]) -> String {
+            format!("BEGIN:VCALENDAR\nVERSION:2.0\n{}END:VCALENDAR\n", events.concat())
+        }
+
+        const LATER: &str = "20260905T235900";
+        const PAST: &str = "20260820T235900";
+
+        fn ingest(v: &Path, feed_text: &str) -> (i32, Vec<String>) {
+            let text = feed_text.to_string();
+            let fetch = move |_: &str| -> Result<String, String> { Ok(text.clone()) };
+            run_lines_on(v, "local-runner", None, Some(&fetch), Some(DAY))
+        }
+
+        fn folder_of(v: &Path, uid: &str) -> String {
+            existing_by_uid(v)
+                .get(uid)
+                .and_then(|p| p.parent()?.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "absent".to_string())
+        }
+
+        fn field_of(v: &Path, uid: &str, key: &str) -> Option<String> {
+            let path = existing_by_uid(v).get(uid)?.clone();
+            let meta = split_frontmatter(&pystr::read_text(&path).ok()?).ok()?.0;
+            crate::yaml::get(&meta, key).and_then(crate::yaml::text)
+        }
+
+        fn uid(item: (&str, &str)) -> String {
+            format!("{GB}{}", item.0)
+        }
+
+        fn stem_of(v: &Path, uid: &str) -> String {
+            existing_by_uid(v).get(uid).unwrap().file_stem().unwrap().to_string_lossy().into_owned()
+        }
+
+        /// Journal records on the note holding `uid`, oldest first.
+        fn trail(v: &Path, uid: &str) -> Vec<J> {
+            let path = existing_by_uid(v).get(uid).unwrap().clone();
+            let rel = crate::ids::rel(v, &path);
+            records_of(v).into_iter().filter(|r| r["path"] == json!(rel)).collect()
+        }
+
+        fn agent_marks(v: &Path, uid: &str) -> usize {
+            trail(v, uid).iter().filter(|r| r["actor"] == json!(crate::completion::ACTOR) && r["new"] == json!("done")).count()
+        }
+
+        fn hand_set(v: &Path, rel: &str, value: &str) {
+            let ctx = crate::write::WriteContext::new(crate::journal::LEGACY_HUMAN_ACTOR, "dashboard");
+            let mut journal = crate::journal::Journal::new(v);
+            crate::write::write_literals(v, rel, &[("status".to_string(), value.to_string())], &ctx, &mut journal, &crate::write::WriteOpts::default()).unwrap();
+        }
+
+        /// The whole invented feed: eight gradable items, a calendar entry and an assignment-style UID
+        /// that happen to carry course titles, none of which may join the gradebook.
+        fn full_feed() -> String {
+            ics(&[
+                gb_event(ESSAY1, LATER),
+                gb_event(ESSAY2, LATER),
+                gb_event(QUIZ, LATER),
+                gb_event(LAB1, LATER),
+                gb_event(LAB2, LATER),
+                gb_event(LAB3, LATER),
+                gb_event(LAB4, LATER),
+                gb_event(TOTAL, LATER),
+                vevent("_blackboard.data.calendar.CalendarEntry-_99_1", "XX-101 Office Hours", LATER),
+                vevent("BB-ASSIGN-5001@lms.example.test", "XX-101 Paper", LATER),
+            ])
+        }
+
+        fn all_rows() -> Vec<((&'static str, &'static str), Row)> {
+            vec![
+                (ESSAY1, Row::Score(31.5)),
+                (ESSAY2, Row::Score(0.0)),
+                (QUIZ, Row::NeedsGrading),
+                (LAB1, Row::Exempt),
+                (LAB2, Row::Percent(85.0)),
+                (LAB3, Row::InProgress),
+                (LAB4, Row::Absent),
+                (TOTAL, Row::Overall(90.0)),
+            ]
+        }
+
+        // 14
+        #[test]
+        fn the_gradable_id_is_the_suffix_after_exactly_the_gradebook_prefix() {
+            assert_eq!(gradable_id("_blackboard.platform.gradebook2.GradableItem-_4686399_1"), Some("_4686399_1"));
+            assert_eq!(gradable_id("_blackboard.data.calendar.CalendarEntry-_4686399_1"), None);
+            assert_eq!(gradable_id("BB-ASSIGN-1111@ua.blackboard.com"), None);
+            assert_eq!(gradable_id("_blackboard.platform.gradebook2.GradableItem-"), None);
+            assert_eq!(gradable_id(""), None);
+        }
+
+        // 15
+        #[test]
+        fn the_done_rule_is_needs_grading_exempt_or_graded_above_zero() {
+            for (status, score, want) in [
+                ("needs-grading", None, true),
+                ("exempt", None, true),
+                ("graded", Some(31.5), true),
+                ("graded", Some(0.5), true),
+                ("graded", Some(0.0), false),
+                ("graded", None, false),
+                ("in-progress", None, false),
+                ("in-progress", Some(12.0), false),
+                ("not-submitted", None, false),
+                ("removed", Some(10.0), false),
+            ] {
+                assert_eq!(gradebook_done(status, score), want, "{status} {score:?}");
+            }
+        }
+
+        // 15, through captured scores: the notes come from `grades::apply`, never a hand-written `score:`.
+        #[test]
+        fn captured_v2_rows_feed_the_done_rule_as_the_notes_hold_them() {
+            let v = vault("captured");
+            grade(&v, &all_rows());
+            let note = |item: (&str, &str)| {
+                let rel = crate::grades::note_path("xx-101", item.0);
+                let meta = split_frontmatter(&pystr::read_text(&v.join(rel)).unwrap()).unwrap().0;
+                let status = crate::yaml::get(&meta, "status").and_then(crate::yaml::text).unwrap();
+                let score = crate::yaml::get(&meta, "score").and_then(crate::yaml::f64_of);
+                (status, score)
+            };
+            let done = |item| { let (s, sc) = note(item); gradebook_done(&s, sc) };
+            assert_eq!(note(ESSAY1), ("graded".to_string(), Some(31.5)));
+            assert!(done(ESSAY1), "a Score row at 31.5 is turned in");
+            assert!(!done(ESSAY2), "the same row at 0 is not");
+            assert!(!done(LAB2), "a Percent row at 85 has no captured score and stays live");
+            assert!(done(QUIZ) && done(LAB1));
+            assert!(!done(LAB3) && !done(LAB4));
+            let _ = std::fs::remove_dir_all(&v);
+        }
+
+        // 15a, 16a
+        #[test]
+        fn a_first_ingest_archives_joined_done_items_as_imported_done_and_creates_the_rest() {
+            let v = vault("first");
+            grade(&v, &all_rows());
+            let (code, lines) = ingest(&v, &full_feed());
+            assert_eq!(code, 0, "{lines:?}");
+            for item in [ESSAY1, QUIZ, LAB1] {
+                assert_eq!(folder_of(&v, &uid(item)), "archive", "{item:?}");
+                assert_eq!(field_of(&v, &uid(item), "archived_reason").as_deref(), Some(IMPORTED_DONE), "{item:?}");
+                assert_eq!(field_of(&v, &uid(item), "status").as_deref(), Some("archived"));
+                assert!(load_seen(&v).contains(&uid(item)), "{item:?} must be in the seen ledger");
+            }
+            for live in [uid(ESSAY2), uid(LAB2), uid(LAB3), uid(LAB4), uid(TOTAL), "_blackboard.data.calendar.CalendarEntry-_99_1".to_string(), "BB-ASSIGN-5001@lms.example.test".to_string()] {
+                assert_eq!(folder_of(&v, &live), "tasks", "{live}");
+                assert_eq!(field_of(&v, &live, "status").as_deref(), Some("active"), "{live}");
+            }
+            assert_eq!(lines.iter().filter(|l| l.starts_with("archived (imported-done)")).count(), 3, "{lines:?}");
+            assert!(lines.contains(&"ingest: first run — 0 item(s) already past were archived".to_string()), "{lines:?}");
+            assert!(lines.contains(&"ingest: first run — 3 item(s) already turned in were archived".to_string()), "{lines:?}");
+            let _ = std::fs::remove_dir_all(&v);
+        }
+
+        // 16
+        #[test]
+        fn past_and_done_on_a_first_ingest_is_imported_past_and_counts_only_as_past() {
+            let v = vault("precedence");
+            grade(&v, &[(EARLY, Row::NeedsGrading), (ESSAY1, Row::Score(31.5))]);
+            let feed_text = ics(&[gb_event(EARLY, PAST), gb_event(ESSAY1, LATER)]);
+            let (_, lines) = ingest(&v, &feed_text);
+            assert_eq!(field_of(&v, &uid(EARLY), "archived_reason").as_deref(), Some(IMPORTED_PAST));
+            assert_eq!(field_of(&v, &uid(ESSAY1), "archived_reason").as_deref(), Some(IMPORTED_DONE));
+            assert!(lines.contains(&"ingest: first run — 1 item(s) already past were archived".to_string()), "{lines:?}");
+            assert!(lines.contains(&"ingest: first run — 1 item(s) already turned in were archived".to_string()), "{lines:?}");
+            let _ = std::fs::remove_dir_all(&v);
+        }
+
+        // 16a: the second line is present only when its count is above 0.
+        #[test]
+        fn the_turned_in_line_is_absent_when_nothing_was_turned_in() {
+            let v = vault("noline");
+            grade(&v, &[(ESSAY2, Row::Score(0.0)), (LAB2, Row::Percent(85.0))]);
+            let (_, lines) = ingest(&v, &ics(&[gb_event(ESSAY2, LATER), gb_event(LAB2, LATER)]));
+            assert!(lines.contains(&"ingest: first run — 0 item(s) already past were archived".to_string()), "{lines:?}");
+            assert!(!lines.iter().any(|l| l.contains("turned in")), "{lines:?}");
+            assert_eq!(folder_of(&v, &uid(ESSAY2)), "tasks");
+            let _ = std::fs::remove_dir_all(&v);
+        }
+
+        // 17
+        #[test]
+        fn a_later_ingest_marks_a_live_task_done_when_the_gradebook_now_says_so_in_feed_order() {
+            let v = vault("later");
+            ranked(&v);
+            grade(&v, &[(QUIZ, Row::InProgress), (LAB1, Row::InProgress)]);
+            let feed_text = ics(&[gb_event(LAB1, LATER), gb_event(QUIZ, LATER)]);
+            let (_, first) = ingest(&v, &feed_text);
+            assert!(!first.iter().any(|l| l.starts_with("marked done")), "{first:?}");
+            assert_eq!(field_of(&v, &uid(QUIZ), "status").as_deref(), Some("active"));
+
+            grade(&v, &[(QUIZ, Row::NeedsGrading), (LAB1, Row::Exempt)]);
+            let (code, lines) = ingest(&v, &feed_text);
+            assert_eq!(code, 0, "{lines:?}");
+            let marked: Vec<&String> = lines.iter().filter(|l| l.starts_with("marked done:")).collect();
+            assert_eq!(
+                marked,
+                [
+                    &format!("marked done: {} (gradebook)", stem_of(&v, &uid(LAB1))),
+                    &format!("marked done: {} (gradebook)", stem_of(&v, &uid(QUIZ))),
+                ],
+                "feed order, the lab first: {lines:?}"
+            );
+            for item in [QUIZ, LAB1] {
+                assert_eq!(field_of(&v, &uid(item), "status").as_deref(), Some("done"), "{item:?}");
+                assert_eq!(folder_of(&v, &uid(item)), "tasks", "marked done, not archived");
+                let last = trail(&v, &uid(item)).pop().unwrap();
+                assert_eq!(last["actor"], json!(crate::completion::ACTOR));
+                assert_eq!((last["field"].as_str(), last["old"].as_str(), last["new"].as_str()), (Some("status"), Some("active"), Some("done")));
+                assert_eq!(last["evidence"]["source"], json!("blackboard-gradebook"));
+            }
+            // Idempotent: a third ingest marks nothing and writes nothing more.
+            let (_, again) = ingest(&v, &feed_text);
+            assert!(!again.iter().any(|l| l.starts_with("marked done")), "{again:?}");
+            assert_eq!(agent_marks(&v, &uid(QUIZ)), 1);
+            let _ = std::fs::remove_dir_all(&v);
+        }
+
+        // 18
+        #[test]
+        fn a_reopened_task_and_a_task_with_a_pending_or_rejected_card_stay_active() {
+            let v = vault("protected");
+            ranked(&v);
+            let items = [ESSAY1, QUIZ, LAB1];
+            let feed_text = ics(&items.map(|i| gb_event(i, LATER)));
+            grade(&v, &[(ESSAY1, Row::InProgress), (QUIZ, Row::InProgress), (LAB1, Row::InProgress)]);
+            ingest(&v, &feed_text);
+
+            // The reopened one: marked once, then the student sets it back to active.
+            grade(&v, &[(ESSAY1, Row::Score(31.5)), (QUIZ, Row::InProgress), (LAB1, Row::InProgress)]);
+            ingest(&v, &feed_text);
+            assert_eq!(field_of(&v, &uid(ESSAY1), "status").as_deref(), Some("done"));
+            let essay_rel = crate::ids::rel(&v, existing_by_uid(&v).get(&uid(ESSAY1)).unwrap());
+            hand_set(&v, &essay_rel, "active");
+
+            // A pending card on the quiz, a rejected one on the lab, both filed as mail files them.
+            let file_card = |item: (&str, &str)| {
+                let rel = crate::ids::rel(&v, existing_by_uid(&v).get(&uid(item)).unwrap());
+                let evidence = crate::completion::Evidence { source: "email".to_string(), summary: "an email says so".to_string(), detail: serde_json::Map::new() };
+                let ctx = crate::write::WriteContext::new(crate::completion::ACTOR, "local-runner");
+                let mut journal = crate::journal::Journal::new(&v);
+                match crate::completion::propose_done(&v, Path::new(&rel), &evidence, DAY, &ctx, &mut journal, false, None).unwrap() {
+                    crate::completion::Outcome::Proposed(card) => card,
+                    other => panic!("card not filed: {other:?}"),
+                }
+            };
+            let pending = file_card(QUIZ);
+            let rejected = file_card(LAB1);
+            hand_set(&v, &crate::ids::rel(&v, &rejected), "rejected");
+            let mut journal = crate::journal::Journal::new(&v);
+            let result = crate::approvals::process_approvals(&v, DAY, DAY.at(12, 0, 0, 0), &crate::approvals::default_ctx(), &mut journal);
+            assert_eq!(result.rejected.len(), 1, "{:?}", result.warnings);
+            let pending_bytes = std::fs::read(&pending).unwrap();
+            let before = [agent_marks(&v, &uid(ESSAY1)), agent_marks(&v, &uid(QUIZ)), agent_marks(&v, &uid(LAB1))];
+
+            grade(&v, &[(ESSAY1, Row::Score(31.5)), (QUIZ, Row::NeedsGrading), (LAB1, Row::Exempt)]);
+            let (code, lines) = ingest(&v, &feed_text);
+            assert_eq!(code, 0, "{lines:?}");
+            assert!(!lines.iter().any(|l| l.starts_with("marked done")), "{lines:?}");
+            for item in items {
+                assert_eq!(field_of(&v, &uid(item), "status").as_deref(), Some("active"), "{item:?}");
+            }
+            assert_eq!([agent_marks(&v, &uid(ESSAY1)), agent_marks(&v, &uid(QUIZ)), agent_marks(&v, &uid(LAB1))], before);
+            assert_eq!(std::fs::read(&pending).unwrap(), pending_bytes, "the pending card was touched");
+            let _ = std::fs::remove_dir_all(&v);
+        }
+
+        // 19
+        #[test]
+        fn no_grades_folder_changes_nothing_and_an_empty_one_is_the_same() {
+            let feed_text = ics(&[gb_event(ESSAY1, LATER), gb_event(QUIZ, PAST), vevent("BB-ASSIGN-5001@lms.example.test", "XX-101 Paper", LATER)]);
+            let run = |tag: &str, empty_grades_dir: bool| {
+                let v = vault(tag);
+                if empty_grades_dir {
+                    std::fs::create_dir_all(v.join("grades")).unwrap();
+                }
+                let (code, lines) = ingest(&v, &feed_text);
+                let mut notes = Vec::new();
+                for folder in ["tasks", "archive"] {
+                    let Ok(entries) = std::fs::read_dir(v.join(folder)) else { continue };
+                    for e in entries.flatten() {
+                        let text = pystr::read_text(&e.path()).unwrap();
+                        let body: Vec<&str> = text.lines().filter(|l| !l.starts_with("id:")).collect();
+                        notes.push((folder, e.file_name().to_string_lossy().into_owned(), body.join("\n")));
+                    }
+                }
+                notes.sort();
+                let _ = std::fs::remove_dir_all(&v);
+                (code, lines, notes)
+            };
+            let without = run("nogrades-a", false);
+            let with_empty = run("nogrades-b", true);
+            assert_eq!(without, with_empty);
+            let (_, lines, notes) = without;
+            assert!(!lines.iter().any(|l| l.contains("turned in") || l.starts_with("marked done")), "{lines:?}");
+            assert_eq!(notes.iter().filter(|n| n.0 == "tasks").count(), 2, "only the future feed items are live: {notes:?}");
         }
     }
 }

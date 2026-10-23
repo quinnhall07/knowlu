@@ -20,9 +20,23 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   and `relevant_events` all respect. `rank` still never calls a model.
 - `coursework --vault <v> [--dry-run] [--via <via>] [--run-id <id>]` — zyBooks + VHL into `tasks/`.
   Always exits 0. An empty parse is a failure, never an empty semester. A vendor figure at 100%
-  (zyBooks points, VHL `percentage_complete`) files a `status: done` amend proposal as
-  `agent:knowlu.completion` (`engine/src/completion.rs`); `progress` is still never written after
-  creation. Passwords come from Windows Credential Manager via the vault's `credential_target`;
+  (zyBooks points, VHL `percentage_complete`) is **applied, not proposed** (lane O1):
+  `completion::apply_vendor_completions` writes `status: done` as `agent:knowlu.completion` through
+  `write` (journal first, `judged: false`, the figure on the record) and logs
+  `marked done: <stem> (<source> <n>%)` (`would mark done: …` under `--dry-run`); the surface lists it
+  under "Closed this week" with an Undo (the student's own `set` back to `active`). **Card rule**
+  (`completion::apply_done`, all four of `propose_done`'s rules): only a task note directly under
+  `tasks/` with `status: active`; never one whose `status` the student set by hand; never one with a
+  `status → done` amend card in `approvals/` or `archive/`. A pending or snoozed "Mark done" card is
+  left and the task skipped; **a card the student rejected, whatever filed it (a mail completion claim
+  included), blocks every later gradebook or vendor answer for that task, by design: the student's
+  answer stands.** An item at 100% in a source group **new to the vault** is never created as a task:
+  it goes straight to `archive/` with `archived_reason: imported-done` (below `imported-past` in
+  precedence: an item already past stays `imported-past`; `needs_enrichment: false`, so it is never
+  judged) and logs `archived (imported-done) <stem>`; the summary line
+  `coursework: N item(s) already turned in were archived from a source seen for the first time` follows
+  when N > 0. The run record counts `imported-done` under the existing `archived` key (no new key).
+  `progress` is still never written after creation. Passwords come from Windows Credential Manager via the vault's `credential_target`;
   zyBooks 403s without a `User-Agent`; VHL is CAS with a one-time `lt` ticket and a dashboard on
   `m3a.vhlcentral.com`.
 - `grades --vault <v> --input <bundle> [--via <via>] [--run-id <id>]` — a Blackboard capture
@@ -58,6 +72,17 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   in the account, not the vault (C2 final review A-1/A-2): `/ingest-ics` answering 404 (no
   `lms_ics` source configured) is a named skip at exit 0, never a failure, and any other service
   failure with no local `ics_url` names the real cause honestly and keeps exit 1.
+  **Turned-in work (lane O1)**: `ingest` joins a feed task to its gradebook item exactly, by the
+  `GradableItem-<id>` in its `source_uid` against a `kind: item` grade note's `source_uid` (an Overall
+  column never joins; only `grades/` is read, which is why `grades` runs first in the slot). **Done rule
+  (Quinn, Q-A, 2026-10-23):** the grade note's status is `needs-grading`, `exempt`, or `graded` with a
+  score above 0. `in-progress`, `not-submitted`, `graded` with a score of 0 and `graded` with no score
+  stay live, and the late-work rule decides. On the **first** ingest such an item (not already past) is
+  archived as `imported-done` (`archived (imported-done) <stem>`; the first-run line is kept and a second
+  one, `ingest: first run — N item(s) already turned in were archived`, follows when N > 0). After
+  first sight an active task so joined is marked done through `completion::apply_done` and logs
+  `marked done: <stem> (gradebook)`, in feed order; the card rule above applies. With no `grades/` notes
+  (grades not connected) nothing joins and nothing changes.
 - `judge --vault <v> [--via <via>] [--run-id <id>]
   [--log-dir <dir>] [--limit N]` — enriches tasks flagged `needs_enrichment: true` in three tiers
   (heuristics, promoted rules, the judgment service). **Always exits 0**: no account, session,
@@ -132,8 +157,8 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   report (F8: card answers and rejections, keyed by `judgment_id`, to `/telemetry`; never an
   `email`-kind decision).
   The Gmail pull declares `accepts: ["completion"]` and the events request `accepts: ["unsure"]`;
-  a `completion` item (an LMS submission receipt) files the same `status: done` proposal through
-  `completion::propose_done`, matched to exactly one active task by title.
+  a `completion` item (an LMS submission receipt) files a `status: done` proposal (a card, not an
+  apply: mail only suggests) through `completion::propose_done`, matched to exactly one active task by title.
   **Gmail connect (D4, D7).** The cloud arm always probes, and the Gmail pull runs on every cloud slot
   past the probe, whether or not the vault carries a calendar marker; the service decides (no grant is
   the silent `no_gmail_scope`, a revoked one prints `gmail: skipped (gmail is not connected;

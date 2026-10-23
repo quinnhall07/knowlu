@@ -94,7 +94,7 @@ previous action's outcome and records its own; the daily housekeeping check neve
 `src/scheduler.rs` is a tick thread that can fire the local runner's slots plus a housekeeping
 thread for debounced sync/backup and the tray's health colour.
 
-**A slot is `coursework` → `ingest` → `judge` → `rank`**, each a child process of the sibling
+**A slot is `sync` → `coursework` → `grades` → `ingest` → `judge` → `rank`** (grades before ingest since lane O1), each a child process of the sibling
 engine exe (`slot_argv`). `ingest` is plan 4a's: a wizard that collects an LMS calendar URL and then
 never fetches it is not a working install. It is **left out when the vault has no `ics_url`**, and
 named as a skipped step in the run summary rather than silently dropped — `ics_state` distinguishes
@@ -119,7 +119,7 @@ friend's bug report says exactly what to check.
 
 ## Judgment
 
-The slot runs `knowlu-engine judge` between `grades` and `rank`. It reads every task note flagged
+The slot runs `knowlu-engine judge` between `ingest` and `rank`. It reads every task note flagged
 `needs_enrichment: true` and answers effort, importance and course in three tiers:
 
 1. **Heuristics** — the course map's uid pins and course codes (the same rule `ingest` applies), and
@@ -285,7 +285,7 @@ shell needs the engine it takes it as a path dependency — `knowlu-engine = { p
 | `assets/` | files compiled into the exe with `include_str!`: `scaffold/{planning.yaml,week_template.yaml,gitignore.txt}` and `campus/{none.yaml,university-of-alabama.yaml}`. Adding a campus is adding a file |
 | `binaries/` | **git-ignored build output**: the staged engine sidecar, `knowlu-engine-<target triple>.exe`. `build.rs` drops a zero-byte placeholder here when it is absent; `scripts\release.ps1` puts the real engine here and refuses to bundle anything under 1 MiB |
 | `src/state.rs` | `ConsoleState` — vault, settings, data dir, session id, and the live `sync`/`backup`/`last_write`/`pending_edits` fields the topline reads — plus `Settings` (profile id, backup dir, autostart, quit timestamp), `quit_flush`, and `app_data_root()`/`app_data_root_in()`: `%LOCALAPPDATA%\knowlu`, with `settings.json`, `seen.txt` and `logs\` under `profiles\<profile_id>\`. There is no `src/sync.rs` in this crate — the sync logic is `engine/src/sync.rs`'s; this file only holds the `Mutex<knowlu_engine::sync::SyncStatus>` the topline reads and the `run_sync` wrapper that calls into it under `vault_io`. |
-| `src/scheduler.rs` | the tick/housekeeping threads, `RunGuard`, `engine_exe()` (`KNOWLU_ENGINE_EXE` resolution), `mode()`/`device_ok()` (`scheduler: app` gating), `ics_state`/`has_ics_url`, `slot_argv` (coursework → ingest → judge → rank), `run_slot`/`run_slot_inner`, and `lock` — every mutex in the crate is taken through it |
+| `src/scheduler.rs` | the tick/housekeeping threads, `RunGuard`, `engine_exe()` (`KNOWLU_ENGINE_EXE` resolution), `mode()`/`device_ok()` (`scheduler: app` gating), `ics_state`/`has_ics_url`, `slot_argv` (sync → coursework → grades → ingest → judge → rank), `run_slot`/`run_slot_inner`, and `lock` — every mutex in the crate is taken through it |
 | `src/week.rs` | the commitment commands: `your_week` (`commitments::overview`) and `preview_window` (`surface::build_state_preview`) in-process; `commitment_proposals` (`commitments --json`) and `commitments_confirm` (`commitments --confirm <file>`, the file under the profile's `tmp\`, run under `vault_io` and `state/sync.lock`) on the sibling engine; `proposals_argv`/`confirm_argv` |
 | `src/registrar.rs` | the registrar capture: `school_of`, `call_urls`, `registrar_argv`, `run_file`, `sweep_stale_files_in` and the three commands |
 | `tauri.conf.json` | one 1280×860 window titled `Knowlu` (`minWidth: 820`), `productName: "Knowlu"`, `identifier: "com.knowlu.desktop"` (permanent, see above), `frontendDist: static`; and the bundle — `targets: ["nsis"]`, `externalBin: ["binaries/knowlu-engine"]`, `webviewInstallMode: embedBootstrapper`, `windows.nsis.installMode: "currentUser"` (**load-bearing**: `updates::install_staged`'s reasoning about the staged bundle depends on the exe living in the user's own profile), `windows.signCommand` → `scripts\sign.ps1`, `createUpdaterArtifacts: true` (one decision with `plugins.updater`, see *Releasing*); and `plugins.updater` — the release endpoint and the minisign **public** key (id `C2EC981122E1D2DF`). The private half is never in this repo: `release.ps1` reads it from Credential Manager for one build |
