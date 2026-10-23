@@ -454,8 +454,8 @@
   function setUpdateState(text) { var el = EL("set-update-state"); if (el) { el.textContent = text; } }
   /// The Updates row's line for one finished check — every outcome says something. Never a decision:
   /// `u` is the command's own answer (`staged` is already gated on a running slot in Rust).
-  function updateOutcome(u) {
-    if (u.error) { return u.error === ALREADY_CHECKING ? "a check is already running — the result will show here" : "could not check — " + String(u.error).split("\n")[0]; }
+  function updateOutcome(u, retrying) {
+    if (u.error) { return u.error === ALREADY_CHECKING ? (retrying ? "a check is already running — the result will show here" : "a check is already running — try again shortly") : "could not check — " + String(u.error).split("\n")[0]; }
     if (u.staged) { return u.staged + " is available"; }
     if (u.held) { return u.held + " is staged; installs after the run"; }
     return "up to date (checked " + (localHM(u.last_check) || localHM(new Date().toISOString())) + ")";
@@ -473,9 +473,11 @@
     if (manual === true) { UPD.retries = 0; btn.disabled = true; setUpdateState("checking…"); }
     return invoke("check_for_updates", {}).then(function (u) {
       renderUpdateOffer(u, manual !== true);
-      if (manual === true) { setUpdateState(updateOutcome(u)); }
+      // Whether a retry will follow decides what the row may promise: after an install attempt none does.
+      var retry = u.error === ALREADY_CHECKING && UPD.retries < 6 && !UPD.attempted && !UPD.note;
+      if (manual === true) { setUpdateState(updateOutcome(u, retry)); }
       else if (!EL("settings").hidden) { setUpdateState(current.updateText); }
-      if (u.error === ALREADY_CHECKING && UPD.retries < 6 && !UPD.attempted && !UPD.note) {
+      if (retry) {
         UPD.retries++;
         clearTimeout(UPD.timer);
         UPD.timer = setTimeout(function () { if (!UPD.attempted && !UPD.note && !UPD.installing) { checkForUpdates(); } }, 10000);
@@ -2095,8 +2097,9 @@
     var syncBtn = e.target.closest("[data-sync]"); if (syncBtn) { runSync(); return; }
     var backupBtn = e.target.closest("[data-backup]"); if (backupBtn) { invoke("backup_now", { view: stateView() }).then(applyEnvelope).catch(function () {}); return; }
     var gear = e.target.closest("[data-settings]"); if (gear) { openSettings(); return; }
-    // Plan 4a Task 8: *Restart to update*. A refusal (a slot started between the offer and the
-    // click, or the install failed) comes back in the envelope and is shown, never retried.
+    // Plan 4a Task 8: *Restart to update*. A slot that started between the offer and the click is
+    // waited out and the install retried; any other refusal comes back in the envelope and is shown
+    // on the banner with Try again (`installUpdate`).
     var ins = e.target.closest("[data-install]");
     if (ins) { installUpdate(ins); return; }
     // A click on [data-field] edits in place and never opens the drawer or toggles "why" — this

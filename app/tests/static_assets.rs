@@ -3615,3 +3615,27 @@ fn the_update_button_shows_progress_and_keeps_a_failure_on_the_banner() {
     let offer = js_fn(&js, "function renderUpdateOffer(");
     assert!(offer.contains("UPD.installing"), "a later check does not repaint the banner mid-install");
 }
+
+/// Review: the page matches the updater's two refusals by their words (`ALREADY_CHECKING` exactly,
+/// `SLOT_RUNNING` by its start). The words live in `updates.rs`; this is the tripwire if either moves.
+#[test]
+fn the_page_matches_the_updaters_refusal_words() {
+    let rs = fs::read_to_string(Path::new("src").join("updates.rs")).expect("src/updates.rs");
+    let js = read("console.js");
+    assert!(rs.contains("pub const ALREADY_CHECKING: &str = \"a check is already running\";"), "updates.rs ALREADY_CHECKING");
+    assert!(js.contains("var ALREADY_CHECKING = \"a check is already running\";"), "console.js matches it exactly");
+    assert!(rs.contains("pub const SLOT_RUNNING: &str = \"a slot is running"), "updates.rs SLOT_RUNNING");
+    assert!(js.contains("msg.indexOf(\"a slot is running\") === 0"), "console.js matches its start");
+}
+
+/// Review: a manual check that loses the flight after an install attempt gets no automatic retry (a
+/// retry would clear the install's outcome), so its row must not promise a result.
+#[test]
+fn a_manual_check_that_will_not_retry_does_not_promise_a_result() {
+    let js = read("console.js");
+    let out = js_fn(&js, "function updateOutcome(");
+    assert!(out.contains("retrying") && out.contains("try again shortly"), "the outcome knows whether a retry follows");
+    let chk = js_fn(&js, "function checkForUpdates(");
+    assert!(chk.contains("updateOutcome(u, retry)"), "and the check tells it");
+    assert!(!js.contains("comes back in the envelope and is shown, never retried"), "the install-click comment is current: a running slot is retried");
+}
