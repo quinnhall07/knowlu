@@ -8,6 +8,8 @@
 //   --dry-run     score against a `ScriptedModel` seeded from `dryRunAnswer` below (ruling
 //                 R-C2-E10), so the harness itself is tested with NO KEY AND NO SPEND.
 //   --thresholds  the file the gate reads. Required once there is at least one case to score.
+//   --per-case    also print one line per case (`perCaseLine`): numbers, enum words and the outcome,
+//                 never free text. Diagnosis only; it changes no score and no `eval_runs` row.
 //
 // Every run of this program without --dry-run spends real money (one model call per case, at
 // roughly $0.0002 each as a conservative bound on the pinned OpenRouter models — measured on
@@ -46,6 +48,7 @@ import { serviceDb } from "../supabase/functions/_shared/judge_db.ts";
 import { type JudgeModel, ScriptedModel } from "../supabase/functions/_shared/judge_anthropic.ts";
 import { type ModelRow, modelRow } from "../supabase/functions/_shared/judge_models.ts";
 import { judge, type Kind } from "../supabase/functions/_shared/judge_pipeline.ts";
+import { EMAIL_TIERS, EVENT_VERDICTS } from "../supabase/functions/_shared/judge_validate.ts";
 import { promptHash } from "../supabase/functions/_shared/judge_prompts.ts";
 import { modelFor } from "../supabase/functions/_shared/judge_provider.ts";
 import { loadSeed } from "./loader.ts";
@@ -101,8 +104,57 @@ const EVAL_CAPS: CapStore = {
   recordTokens: () => Promise.resolve(),
 };
 
+const num = (v: unknown): string => typeof v === "number" && Number.isFinite(v) ? String(v) : "-";
+const word = (v: unknown, allowed: readonly string[]): string =>
+  typeof v === "string" ? (allowed.includes(v) ? v : "?") : "-";
+
+/**
+ * One `--per-case` line (task-3 diagnosis, PR #61): the model's RAW numbers and enum words (before
+ * `validate` clamps or drops them, so a below-floor answer still shows its confidence), the
+ * label's, and the outcome. Never free text — no title, reason, course string or due — because an
+ * `eval_cases` row may one day be a student's consented correction and the gate's log is public;
+ * a task's course is reported only as whether the scored verdict matched the label.
+ */
+export function perCaseLine(
+  kind: Kind,
+  name: string,
+  outcome: string,
+  raw: Record<string, unknown> | null,
+  verdict: Record<string, unknown> | null,
+  theirs: Record<string, unknown>,
+): string {
+  const m = raw ?? {};
+  const head = `per-case ${kind} ${name}: ${outcome}`;
+  if (kind === "task") {
+    const course = !("course" in theirs)
+      ? "unlabelled"
+      : (verdict?.course ?? null) === (theirs.course ?? null)
+      ? "match"
+      : "miss";
+    return `${head} | model effort=${num(m.effort_hours)} importance=${num(m.importance)} confidence=${
+      num(m.confidence)
+    } | label effort=${num(theirs.effort_hours)} importance=${num(theirs.importance)} | course ${course}`;
+  }
+  if (kind === "event") {
+    return `${head} | model verdict=${word(m.verdict, EVENT_VERDICTS)} confidence=${num(m.confidence)} | label verdict=${
+      word(theirs.verdict, EVENT_VERDICTS)
+    }`;
+  }
+  return `${head} | model tier=${word(m.tier, EMAIL_TIERS)} effort=${num(m.effort_hours)} importance=${
+    num(m.importance)
+  } confidence=${num(m.confidence)} | label tier=${word(theirs.tier, EMAIL_TIERS)} effort=${
+    num(theirs.effort_hours)
+  } importance=${num(theirs.importance)}`;
+}
+
+/** A case's name in a `--per-case` line: its synthetic seed id, else its row id. */
+function caseName(r: Row): string {
+  return typeof r.seed_id === "string" && /^seed-[a-z0-9-]+$/.test(r.seed_id) ? r.seed_id : `case ${r.id}`;
+}
+
 interface Row {
   id: number;
+  seed_id?: string | null;
   kind: Kind;
   request: { item: Record<string, unknown>; heuristics_seed: Record<string, unknown> };
   ours: Record<string, unknown> | null;
@@ -121,7 +173,7 @@ async function load(db: Db, kind: Kind): Promise<Row[]> {
   const since = new Date(Date.now() - 90 * 86_400_000).toISOString();
   return await db.select(
     `eval_cases?kind=eq.${kind}&or=(source.eq.seed,added_at.gte.${since})` +
-      `&select=id,kind,request,ours,theirs&order=id&limit=${MAX_CASES}`,
+      `&select=id,kind,seed_id,request,ours,theirs&order=id&limit=${MAX_CASES}`,
   ) as Row[];
 }
 
@@ -259,6 +311,8 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
   await db.rpc("backfill_correction_judgments", {});
 
   const dry = argSet.has("--dry-run");
+  // task-3 diagnosis: one line per case (`perCaseLine`); off unless asked, so the gate's log is unchanged.
+  const perCase = argSet.has("--per-case");
 
   // One id for the whole run (R-C2-E51 fix 1, finding 5): every `eval_runs` row this run writes,
   // across every kind and every metric, carries the same `run_id`, so a later reader can group a
@@ -313,6 +367,7 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
     let inputTokens = 0, outputTokens = 0, calls = 0, unscored = 0, stoppedEarly = false;
     for (const [i, r] of rows.entries()) {
       let reply;
+      let lastRaw: Record<string, unknown> | null = null;
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         if (attempt > 1) await sleep(RETRY_BACKOFF_MS);
         const raw: JudgeModel = dry ? new ScriptedModel([dryRunAnswer(kind, r.theirs)]) : liveModel!;
@@ -322,6 +377,7 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
           async complete(req) {
             calls += 1;
             const answer = await raw.complete(req);
+            lastRaw = answer.json;
             inputTokens += answer.inputTokens;
             outputTokens += answer.outputTokens;
             return answer;
@@ -345,6 +401,9 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
           now: () => Date.now(),
         });
         if (reply.cause !== "model failed") break;
+      }
+      if (perCase) {
+        console.log(perCaseLine(kind, caseName(r), reply!.cause ?? reply!.outcome, lastRaw, reply!.verdict, r.theirs));
       }
       if (reply!.cause === "model failed") {
         unscored += 1;

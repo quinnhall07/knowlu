@@ -2,7 +2,7 @@ import { assert, assertEquals, assertAlmostEquals } from "@std/assert";
 import { ModelRefused, ScriptedModel } from "../supabase/functions/_shared/judge_anthropic.ts";
 import type { Db } from "../supabase/functions/_shared/judge_db.ts";
 import { validate } from "../supabase/functions/_shared/judge_validate.ts";
-import { dryRunAnswer, main, MAX_ATTEMPTS, RETRY_BACKOFF_MS } from "./run_eval.ts";
+import { dryRunAnswer, main, MAX_ATTEMPTS, perCaseLine, RETRY_BACKOFF_MS } from "./run_eval.ts";
 import type { SeedRecord } from "./schema.ts";
 import { type Case, failed, score } from "./score.ts";
 
@@ -698,4 +698,104 @@ Deno.test("a truncation is the model answering: scored as a miss, never retried"
   assertEquals(run.code, 1);
   assertEquals(run.calls, 1);
   assertEquals(run.evalRuns.map((r) => [r.value, r.cases]), [[0, 1]]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// task-3 diagnosis (PR #61's eval-gate, 2026-10-23): the run printed three task aggregates and
+// nothing per case, and `eval_runs` holds only metrics, so which cases missed was unknowable.
+// `--per-case` prints one line per case: the model's raw numbers and enum words, the label's, and
+// the outcome. Never free text — no title, no reason, no course string, no due — because a later
+// `eval_cases` row may be a student's consented correction, and the gate's log is public.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("perCaseLine: a task line carries numbers, the outcome and a course match, never free text", () => {
+  const raw = {
+    effort_hours: 24, importance: 4, confidence: 0.7, course: "hist-150",
+    importance_reason: "A long research paper weighs heavily",
+  };
+  const line = perCaseLine("task", "seed-task-0012", "answered", raw, { course: "hist-150" }, {
+    effort_hours: 15, importance: 3, course: "hist-150",
+  });
+  assertEquals(
+    line,
+    "per-case task seed-task-0012: answered | model effort=24 importance=4 confidence=0.7 | label effort=15 importance=3 | course match",
+  );
+  assert(!line.includes("research"), line);
+});
+
+Deno.test("perCaseLine: a below-floor task shows the raw confidence, and a missing label or value is a dash", () => {
+  const line = perCaseLine("task", "case 7", "below floor", { effort_hours: 2, importance: 3, confidence: 0.4 }, null, {
+    effort_hours: 2,
+  });
+  assertEquals(
+    line,
+    "per-case task case 7: below floor | model effort=2 importance=3 confidence=0.4 | label effort=2 importance=- | course unlabelled",
+  );
+});
+
+Deno.test("perCaseLine: event and email print only words from their closed sets", () => {
+  assertEquals(
+    perCaseLine("event", "seed-event-0001", "answered", { verdict: "obligation", confidence: 0.9, why: "x" }, null, {
+      verdict: "obligation",
+    }),
+    "per-case event seed-event-0001: answered | model verdict=obligation confidence=0.9 | label verdict=obligation",
+  );
+  const email = perCaseLine("email", "case 3", "answered", {
+    tier: "a free-text tier", effort_hours: null, importance: null, confidence: 0.8, title: "Secret title",
+  }, null, { tier: "task", title: "Secret title" });
+  assertEquals(
+    email,
+    "per-case email case 3: answered | model tier=? effort=- importance=- confidence=0.8 | label tier=task effort=- importance=-",
+  );
+  assert(!email.includes("Secret"), email);
+});
+
+/** A live task run of `rows` against `script`, with or without `--per-case`. */
+async function liveTaskRun(perCase: boolean, script: Array<Record<string, unknown> | Error>) {
+  const request = { kind: "task" as const, item: { id: "t1", title: "Homework 4" }, heuristics_seed: { course: "math-221", known_courses: ["math-221"] } };
+  const rows = [
+    { id: 1, kind: "task", seed_id: "seed-task-0003", request, ours: null, theirs: { effort_hours: 2, importance: 3, course: "math-221" } },
+    { id: 2, kind: "task", seed_id: null, request, ours: null, theirs: { effort_hours: 2 } },
+  ];
+  const db: Db = fakeDb({
+    select: (path: string) => {
+      if (path.startsWith("eval_cases?kind=eq.task")) return Promise.resolve(rows);
+      if (path.startsWith("eval_cases?kind=eq.")) return Promise.resolve([]);
+      if (path.startsWith("models?kind=eq.task")) {
+        return Promise.resolve([{
+          kind: "task", provider: "openrouter", model_id: "scripted/model", prompt_version: "task-3",
+          grammar_version: "task-1", max_tokens: 256, sampling: {}, usd_per_m_in: 1, usd_per_m_out: 5,
+        }]);
+      }
+      return Promise.resolve([]);
+    },
+    insert: () => Promise.resolve(null),
+  });
+  const model = new ScriptedModel(script);
+  const records: SeedRecord[] = [{ id: "seed-task-0003", kind: "task", request, theirs: { effort_hours: 2 } }];
+  const captured = captureConsole();
+  try {
+    await main(["--thresholds", "cloud/eval/thresholds.json", ...(perCase ? ["--per-case"] : [])], {
+      db: () => db, loadSeed: () => Promise.resolve(records), envGet: () => undefined,
+      modelFor: () => model, sleep: () => Promise.resolve(),
+    });
+  } finally {
+    captured.restore();
+  }
+  return captured.log.filter((l) => l.startsWith("per-case "));
+}
+
+Deno.test("--per-case prints one line per case, named by seed_id or row id, below-floor answers included", async () => {
+  const answered = { course: "math-221", effort_hours: 6, importance: 4, importance_reason: "r", confidence: 0.8 };
+  const low = { course: "math-221", effort_hours: 2, importance: 3, importance_reason: "r", confidence: 0.4 };
+  const lines = await liveTaskRun(true, [answered, low]);
+  assertEquals(lines, [
+    "per-case task seed-task-0003: answered | model effort=6 importance=4 confidence=0.8 | label effort=2 importance=3 | course match",
+    "per-case task case 2: below floor | model effort=2 importance=3 confidence=0.4 | label effort=2 importance=- | course unlabelled",
+  ]);
+});
+
+Deno.test("without --per-case the gate prints no per-case line", async () => {
+  const answered = { course: "math-221", effort_hours: 2, importance: 3, importance_reason: "r", confidence: 0.8 };
+  assertEquals(await liveTaskRun(false, [answered, answered]), []);
 });
