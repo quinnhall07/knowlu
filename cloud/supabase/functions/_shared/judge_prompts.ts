@@ -106,11 +106,13 @@ export function systemTemplate(kind: "task" | "event" | "email"): string {
     // line gave no scale, and items judged from a title, a slug and a due date came back at a
     // median of 8 hours. The anchors, the above-8 rule and the vague-title rule fix the scale; the
     // schema, the 0.25-40 clamp and `{slice_hours}` do not move. PR #61's per-case eval shaped the
-    // wording: given ranges, the pinned 8B model answered at or past their top (exams 12 and 24, a
-    // 12-page paper 40), so each type has one typical value and exams a ceiling; and a draft line
-    // letting "points or a grade weight" scale the estimate leaked size into importance (3 on 9 of
-    // 19 no-weights cases, against task-2's 16), so points scale effort only and importance says
-    // it never follows size. The vague-title rule deliberately
+    // wording: given ranges, the then-pinned Granite 4.2 8B answered at or past their top (exams 12
+    // and 24, a 12-page paper 40), so each type has one typical value and exams a ceiling; and a
+    // draft line letting "points or a grade weight" scale the estimate leaked size into importance
+    // (3 on 9 of 19 no-weights cases, against task-2's 16), so points scale effort only and
+    // importance says it never follows size. Granite still broke the exam and paper ceilings, so
+    // Quinn re-pinned the task kind to Qwen3.5-35B-A3B at DeepInfra in the same migration
+    // (effort_mae 0.273 on the seed). The vague-title rule deliberately
     // asks for no lower confidence: an answer under CONFIDENCE_FLOOR (0.6) is `below floor`, no
     // verdict at all, and the device already labels every model estimate `effort_confidence: low`.
     // This now differs from the device's local `judge::prompt_for`, which the runtime-removal lane

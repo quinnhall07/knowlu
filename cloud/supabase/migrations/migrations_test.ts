@@ -3560,21 +3560,54 @@ Deno.test("task-3: the effort-anchors file is found by suffix and stamped after 
   assertEquals(names.at(-1), name, `${name}: stamped after every other file; a later migration is named here when it lands`);
 });
 
-Deno.test("task-3: the effort-anchors file re-pins only the task row's prompt_version", async () => {
+/** One `<field> = <value>` assignment out of a `set` list, as written. */
+function assignment(set: string, field: string): string | undefined {
+  const m = new RegExp(String.raw`\b${field}\s*=\s*('(?:[^']|'')*'(?:::\w+)?|[\w.]+)`, "i").exec(set);
+  return m?.[1];
+}
+
+Deno.test("task-3: the effort-anchors file is one update of the task row: task-3, and a re-stamped pin", async () => {
   const { name, raw } = await taskEffortAnchorsMigration();
   const code = stripLineComments(raw);
   const updates = [...code.matchAll(/update\s+(?:public\.)?models\s+set\s+([^;]*);/gi)].map((m) => m[1]);
   assertEquals(updates.length, 1, `${name}: exactly one update of models`);
   const set = updates[0].replace(/\s+/g, " ").trim();
-  assertEquals(set, "prompt_version = 'task-3', since = current_date where kind = 'task'", `${name}: ${set}`);
+  assert(/where kind = 'task'$/.test(set), `${name}: the task row only: ${set}`);
+  assertEquals(assignment(set, "prompt_version"), "'task-3'", set);
+  assertEquals(assignment(set, "since"), "current_date", set);
+  // The schema did not change and the eval ran at the row's 256: neither moves.
+  for (const unmoved of ["grammar_version", "max_tokens"]) assertEquals(assignment(set, unmoved), undefined, `${unmoved}: ${set}`);
   // Nothing else in the file: no other statement, so no other row, table or function moves.
   const statements = code.split(";").map((s) => s.trim()).filter((s) => s !== "");
   assertEquals(statements.length, 1, `${name}: one statement only`);
 });
 
-Deno.test("task-3: across every migration, the task row's last prompt_version is task-3 and the others are unmoved", async () => {
+Deno.test("task-3: the task row copies the email row's Qwen3.5-35B-A3B pin field for field, and invents none", async () => {
+  // Quinn's ruling (2026-10-23): task judging moves to the model and upstream email already uses.
+  const { raw } = await taskEffortAnchorsMigration();
+  const task = lastModelPinBlocks([["task", raw]]).task!;
+  // The email pin as the provider swap set it; the later email files move only its prompt_version.
+  const email = lastModelPinBlocks(await providerSwapFiles()).email!;
+  assert(!/model_id|route|sampling/.test(lastModelPinBlocks(await everyMigrationFile()).email!), "a later file moved email's pin");
+  for (const field of ["provider", "model_id", "precision", "usd_per_m_in", "usd_per_m_out", "sampling", "route"]) {
+    const want = assignment(email, field);
+    assert(want !== undefined, `the email pin carries no ${field}`);
+    assertEquals(assignment(task, field), want, `task.${field} must be email's`);
+  }
+  assertEquals(assignment(task, "model_id"), "'qwen/qwen3.5-35b-a3b'");
+  assertEquals(
+    assignment(task, "route"),
+    `'{"order": ["DeepInfra"], "allow_fallbacks": false, "zdr": true, "require_parameters": true}'::jsonb`,
+  );
+});
+
+Deno.test("task-3: across every migration, task is task-3 on Qwen at DeepInfra; event stays on Granite at CoreWeave", async () => {
   const blocks = lastModelPinBlocks(await everyMigrationFile());
   assert(blocks.task?.includes("prompt_version = 'task-3'"), `task: ${blocks.task}`);
+  assert(blocks.task?.includes("model_id = 'qwen/qwen3.5-35b-a3b'"), `task: ${blocks.task}`);
   assert(blocks.event?.includes("prompt_version = 'event-3'"), `event: ${blocks.event}`);
   assert(blocks.email?.includes("prompt_version = 'email-3'"), `email: ${blocks.email}`);
+  const swap = lastModelPinBlocks(await providerSwapFiles());
+  assert(swap.event?.includes("model_id = 'ibm-granite/granite-4.2-8b'"), "event's pin is the provider swap's");
+  assert(!/model_id|route/.test(blocks.event!), `a later file moved event's pin: ${blocks.event}`);
 });
