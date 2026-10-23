@@ -15,7 +15,8 @@ const API_KEY_ENV: Record<string, string> = {
 export function modelFor(
   row: { provider: string },
   env: (name: string) => string | undefined,
-  opts?: { timeoutMs?: number },
+  // `fetchImpl` is the eval's diagnosis seam (`cloud/eval/run_eval.ts --per-case`); no function passes it.
+  opts?: { timeoutMs?: number; fetchImpl?: typeof fetch },
 ): JudgeModel {
   const envName = API_KEY_ENV[row.provider];
   if (envName === undefined) {
@@ -26,7 +27,7 @@ export function modelFor(
     throw new Error(`no API key for provider '${row.provider}' (set ${envName})`);
   }
   if (row.provider === "openrouter") {
-    return new OpenRouterModel({ apiKey, timeoutMs: opts?.timeoutMs });
+    return new OpenRouterModel({ apiKey, timeoutMs: opts?.timeoutMs, fetchImpl: opts?.fetchImpl });
   }
   // `baseURL` explicit, always: leaving it out makes the Anthropic SDK's own constructor read
   // `ANTHROPIC_BASE_URL` itself (a default-parameter fallback baked into the SDK, not this

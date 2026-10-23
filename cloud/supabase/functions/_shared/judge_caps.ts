@@ -57,6 +57,13 @@ export interface CapStore {
  * it is sized to survive a mispriced or re-pinned row, or the day a heavier model is pinned above
  * these — not to survive a capped account running flat out on these prices.
  *
+ * RE-PIN (comment only, task-3, 2026-10-23): the task kind moved to Qwen3.5-35B-A3B at $0.14/$1.00
+ * (`20261023000100_task_effort_anchors.sql`); event stays on Granite 4.2 8B. At ~980 tokens in and
+ * ~80 out a task call is ~$0.00022 (was ~$0.00011), so a fully-capped account is about **$1.45 a
+ * month** (was ~$1.3), plus the event allowance's ~$0.22 about $1.66, still under the $2
+ * `MONTHLY_CEILING_USD`; the heavy persona below rises from ~$0.87 to ~$0.94, the lighter one from
+ * ~$0.29 to ~$0.32. No cap or ceiling moves.
+ *
  * An account's first two UTC judging days charge against twice this cap; the SQL does it
  * (`charge_call`, migration `20260923000100`, R-C1c-7), and `p_cap` below stays this value.
  */
