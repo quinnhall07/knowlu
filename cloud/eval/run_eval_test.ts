@@ -1,8 +1,10 @@
 import { assert, assertEquals, assertAlmostEquals } from "@std/assert";
 import { ModelRefused, ScriptedModel } from "../supabase/functions/_shared/judge_anthropic.ts";
 import type { Db } from "../supabase/functions/_shared/judge_db.ts";
+import type { ModelRow } from "../supabase/functions/_shared/judge_models.ts";
 import { validate } from "../supabase/functions/_shared/judge_validate.ts";
-import { dryRunAnswer, main, MAX_ATTEMPTS, perCaseLine, RETRY_BACKOFF_MS } from "./run_eval.ts";
+import { OpenRouterModel } from "../supabase/functions/_shared/judge_openrouter.ts";
+import { adaptToEndpoint, type Deps, dryRunAnswer, main, MAX_ATTEMPTS, perCaseLine, RETRY_BACKOFF_MS } from "./run_eval.ts";
 import type { SeedRecord } from "./schema.ts";
 import { type Case, failed, score } from "./score.ts";
 
@@ -808,14 +810,16 @@ Deno.test("without --per-case the gate prints no per-case line", async () => {
 // The CI gate never passes it (checked against ci.yml below).
 // ---------------------------------------------------------------------------------------------
 
-const TASK_ROW = {
+const TASK_ROW: ModelRow = {
   kind: "task", provider: "openrouter", model_id: "ibm-granite/granite-4.2-8b", prompt_version: "task-3",
-  grammar_version: "task-1", max_tokens: 256, sampling: { temperature: 0 }, precision: "bf16 (CoreWeave)",
+  grammar_version: "task-1", max_tokens: 256, sampling: { temperature: 0, reasoning: { enabled: false } }, precision: "bf16 (CoreWeave)",
   route: { order: ["CoreWeave"], allow_fallbacks: false, zdr: true, require_parameters: true },
   usd_per_m_in: 0.1, usd_per_m_out: 0.15,
 };
 
-async function overrideRun(args: string[]) {
+const FULL_SUPPORT = ["max_tokens", "temperature", "reasoning", "include_reasoning", "response_format", "structured_outputs"];
+
+async function overrideRun(args: string[], extra: Partial<Deps> = {}) {
   const request = { kind: "task" as const, item: { id: "t1", title: "Homework 4" }, heuristics_seed: { course: "math-221", known_courses: ["math-221"] } };
   const rows = [{ id: 1, kind: "task", seed_id: "seed-task-0003", request, ours: null, theirs: { effort_hours: 2 } }];
   const selects: string[] = [];
@@ -846,6 +850,8 @@ async function overrideRun(args: string[]) {
         built.push(row as unknown as Record<string, unknown>);
         return new ScriptedModel([answer]);
       },
+      endpoints: () => Promise.resolve([{ provider_name: "DeepInfra", supported_parameters: FULL_SUPPORT }]),
+      ...extra,
     });
   } finally {
     captured.restore();
@@ -898,4 +904,117 @@ Deno.test("the CI eval gate never passes --model, --upstream or --kind", async (
   const lines = ci.split("\n").filter((l) => l.includes("run_eval.ts"));
   assert(lines.length > 0, "ci.yml no longer runs run_eval.ts");
   for (const l of lines) assert(!/--(model|upstream|kind)\b/.test(l), `ci.yml passes an override: ${l}`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The override runs on 8ebbdf0 (qwen3.5-35b-a3b and gemma-3-27b-it at DeepInfra) stopped as provider
+// errors with no detail. Two fixes: an override reads the upstream's own endpoint entry and adapts
+// only what that route cannot take (a sampling key it does not support), refusing outright when the
+// route cannot do strict JSON-schema output; and a `model failed` per-case line names the HTTP
+// status and the provider's error, one line, at most 200 characters, never a request header.
+// ---------------------------------------------------------------------------------------------
+
+const TASK_ROUTE_ROW: ModelRow = { ...TASK_ROW, model_id: "google/gemma-3-27b-it", precision: "x", route: { order: ["DeepInfra"], allow_fallbacks: false, zdr: true, require_parameters: true } };
+
+Deno.test("adaptToEndpoint drops a sampling key the endpoint does not list, and says so", () => {
+  const got = adaptToEndpoint(TASK_ROUTE_ROW, "DeepInfra", [
+    { provider_name: "DeepInfra", supported_parameters: ["max_tokens", "temperature", "response_format", "structured_outputs"] },
+  ]);
+  assert(typeof got !== "string", String(got));
+  if (typeof got === "string") return;
+  assertEquals(got.row.sampling, { temperature: 0 });
+  assertEquals(got.row.route, TASK_ROUTE_ROW.route, "the zero-retention pin never adapts");
+  assertEquals(got.notes, ["dropped sampling.reasoning (DeepInfra does not list reasoning)"]);
+});
+
+Deno.test("adaptToEndpoint changes nothing on a route that takes every setting", () => {
+  const row = { ...TASK_ROUTE_ROW, sampling: { temperature: 0, reasoning: { enabled: false } } };
+  const got = adaptToEndpoint(row, "DeepInfra", [{ provider_name: "DeepInfra", supported_parameters: FULL_SUPPORT }]);
+  assert(typeof got !== "string");
+  if (typeof got === "string") return;
+  assertEquals(got.row, row);
+  assertEquals(got.notes, []);
+});
+
+Deno.test("adaptToEndpoint refuses a route without strict JSON-schema output, or an upstream that does not serve the model", () => {
+  const noSchema = adaptToEndpoint(TASK_ROUTE_ROW, "DeepInfra", [
+    { provider_name: "DeepInfra", supported_parameters: ["max_tokens", "temperature", "response_format"] },
+  ]);
+  assertEquals(typeof noSchema, "string");
+  assert(String(noSchema).includes("structured_outputs"), String(noSchema));
+  const elsewhere = adaptToEndpoint(TASK_ROUTE_ROW, "DeepInfra", [{ provider_name: "Novita", supported_parameters: FULL_SUPPORT }]);
+  assertEquals(typeof elsewhere, "string");
+  assert(String(elsewhere).includes("Novita"), String(elsewhere));
+});
+
+Deno.test("--model adapts the row to the endpoint before building, and prints what it adapted", async () => {
+  const run = await overrideRun(["--model", "google/gemma-3-27b-it", "--upstream", "DeepInfra", "--kind", "task"], {
+    endpoints: () =>
+      Promise.resolve([{ provider_name: "DeepInfra", supported_parameters: ["max_tokens", "temperature", "response_format", "structured_outputs"] }]),
+  });
+  assertEquals(run.code, 0, run.error.join(" | "));
+  assertEquals((run.built[0].sampling as Record<string, unknown>).reasoning, undefined);
+  assert(run.log.some((l) => l.includes("task: override adapted: dropped sampling.reasoning (DeepInfra does not list reasoning)")), run.log.join(" | "));
+});
+
+Deno.test("--model refuses, before any model call, a route that cannot take the request", async () => {
+  const run = await overrideRun(["--model", "google/gemma-3-27b-it", "--upstream", "DeepInfra", "--kind", "task"], {
+    endpoints: () => Promise.resolve([{ provider_name: "DeepInfra", supported_parameters: ["max_tokens"] }]),
+  });
+  assertEquals(run.code, 2);
+  assertEquals(run.built.length, 0);
+  assert(run.error.some((l) => l.includes("structured_outputs")), run.error.join(" | "));
+});
+
+Deno.test("perCaseLine appends a failure's detail on one line", () => {
+  const line = perCaseLine("task", "case 1", "model failed", null, null, { effort_hours: 2 }, "HTTP 404 · code=404 · No endpoints found");
+  assert(line.endsWith(" | error HTTP 404 · code=404 · No endpoints found"), line);
+});
+
+Deno.test("a model-failed per-case line names the HTTP status and the provider's error, never a header", async () => {
+  const body = JSON.stringify({
+    error: { code: 404, message: "No endpoints found that can handle the requested parameters.\nSee docs " + "x".repeat(400), metadata: { provider_name: "DeepInfra" } },
+  });
+  const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen: () => {} }, () => new Response(body, { status: 404 }));
+  const url = `http://127.0.0.1:${(server.addr as Deno.NetAddr).port}`;
+  try {
+    const request = { kind: "task" as const, item: { id: "t1", title: "Homework 4" }, heuristics_seed: {} };
+    const rows = Array.from({ length: 4 }, (_, i) => ({ id: i + 1, kind: "task", seed_id: null, request, ours: null, theirs: { effort_hours: 2 } }));
+    const db: Db = fakeDb({
+      select: (path: string) => {
+        if (path.startsWith("eval_cases?kind=eq.task")) return Promise.resolve(rows);
+        if (path.startsWith("models?kind=eq.task")) return Promise.resolve([TASK_ROW]);
+        return Promise.resolve([]);
+      },
+    });
+    const captured = captureConsole();
+    try {
+      await main(["--thresholds", "cloud/eval/thresholds.json", "--per-case", "--kind", "task"], {
+        db: () => db,
+        loadSeed: () => Promise.resolve([{ id: "seed-task-0003", kind: "task", request, theirs: { effort_hours: 2 } }]),
+        envGet: () => undefined,
+        sleep: () => Promise.resolve(),
+        modelFor: (_row, _env, opts) => new OpenRouterModel({ apiKey: "sk-test-secret", baseURL: url, fetchImpl: opts?.fetchImpl }),
+      });
+    } finally {
+      captured.restore();
+    }
+    const lines = captured.log.filter((l) => l.startsWith("per-case task"));
+    assert(lines.length > 0, captured.log.join(" | "));
+    for (const l of lines) {
+      assert(l.includes(": model failed |"), l);
+      assert(l.includes("| error HTTP 404 · code=404 · DeepInfra · No endpoints found that can handle the requested parameters. See docs"), l);
+      assert(!l.includes("\n"), l);
+      assert(!/sk-test-secret|Bearer|Authorization/i.test(l), l);
+      const detail = l.slice(l.indexOf("| error ") + "| error ".length);
+      assert([...detail].length <= 200, `${[...detail].length}: ${detail}`);
+    }
+  } finally {
+    await server.shutdown();
+  }
+});
+
+Deno.test("the CI eval gate never passes --per-case: provider error text stays out of the public log", async () => {
+  const ci = await Deno.readTextFile(new URL("../../.github/workflows/ci.yml", import.meta.url));
+  for (const l of ci.split("\n").filter((l) => l.includes("run_eval.ts"))) assert(!l.includes("--per-case"), l);
 });
