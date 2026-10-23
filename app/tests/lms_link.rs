@@ -577,7 +577,7 @@ fn one(course: &str, membership: &str) -> String {
 fn a_course_the_lms_marks_unavailable_is_not_current() {
     use knowlu::lms_link::current_courses_from_json;
     let now = t("2026-10-23T12:00:00Z");
-    let none = std::collections::BTreeSet::new();
+    let none = std::collections::BTreeMap::new();
     for a in ["No", "Disabled", "no", "DISABLED"] {
         let body = one(&format!(r#","availability":{{"available":"{a}"}}"#), "");
         assert!(current_courses_from_json(&body, now, &none).is_empty(), "course {a}");
@@ -590,7 +590,7 @@ fn a_course_the_lms_marks_unavailable_is_not_current() {
 fn a_membership_the_lms_marks_unavailable_is_not_current() {
     use knowlu::lms_link::current_courses_from_json;
     let now = t("2026-10-23T12:00:00Z");
-    let none = std::collections::BTreeSet::new();
+    let none = std::collections::BTreeMap::new();
     for a in ["No", "Disabled"] {
         let body = one("", &format!(r#","availability":{{"available":"{a}"}}"#));
         assert!(current_courses_from_json(&body, now, &none).is_empty(), "membership {a}");
@@ -603,7 +603,7 @@ fn a_membership_the_lms_marks_unavailable_is_not_current() {
 fn a_date_range_course_that_has_ended_is_not_current_and_one_running_or_ahead_is() {
     use knowlu::lms_link::current_courses_from_json;
     let now = t("2026-10-23T12:00:00Z");
-    let none = std::collections::BTreeSet::new();
+    let none = std::collections::BTreeMap::new();
     let range = |start: &str, end: &str| {
         one(&format!(r#","availability":{{"available":"Yes","duration":{{"type":"DateRange","start":"{start}","end":"{end}"}}}}"#), "")
     };
@@ -618,7 +618,7 @@ fn a_date_range_course_that_has_ended_is_not_current_and_one_running_or_ahead_is
 fn a_missing_or_unreadable_field_keeps_the_course() {
     use knowlu::lms_link::current_courses_from_json;
     let now = t("2026-10-23T12:00:00Z");
-    let none = std::collections::BTreeSet::new();
+    let none = std::collections::BTreeMap::new();
     for body in [
         r#"{"results":[{"courseId":"_1_1","course":{"name":"Test Course"}}]}"#.to_string(),
         r#"[{"course_code":"X100","name":"Test Course"}]"#.to_string(),
@@ -638,7 +638,7 @@ fn a_missing_or_unreadable_field_keeps_the_course() {
 fn a_course_in_an_ended_term_is_not_current_but_only_when_it_defers_to_the_term() {
     use knowlu::lms_link::current_courses_from_json;
     let now = t("2026-10-23T12:00:00Z");
-    let ended: std::collections::BTreeSet<String> = ["_77_1".to_string()].into();
+    let ended: std::collections::BTreeMap<String, knowlu::lms_link::TermEnd> = [("_77_1".to_string(), knowlu::lms_link::TermEnd::Dates)].into();
     let by_avail = one(r#","termId":"_77_1","availability":{"available":"Term"}"#, "");
     let by_dur = one(r#","termId":"_77_1","availability":{"duration":{"type":"Term"}}"#, "");
     // A course that sets its own dates or is continuous ignores its term, as Blackboard does.
@@ -649,7 +649,7 @@ fn a_course_in_an_ended_term_is_not_current_but_only_when_it_defers_to_the_term(
     assert_eq!(current_courses_from_json(&continuous, now, &ended).len(), 1);
     assert_eq!(current_courses_from_json(&no_term, now, &ended).len(), 1);
     // A term nobody fetched, or one that did not end, keeps its courses.
-    assert_eq!(current_courses_from_json(&by_avail, now, &std::collections::BTreeSet::new()).len(), 1);
+    assert_eq!(current_courses_from_json(&by_avail, now, &std::collections::BTreeMap::new()).len(), 1);
 }
 
 #[test]
@@ -681,15 +681,16 @@ fn the_terms_to_fetch_are_the_distinct_ones_courses_defer_to() {
       {"courseId":"_4_1","course":{"name":"D","termId":"_9_1","availability":{"available":"Yes","duration":{"type":"Continuous"}}}},
       {"courseId":"_5_1","course":{"name":"E","availability":{"available":"Term"}}}
     ]}"#;
-    assert_eq!(deferred_term_ids(body), ["_7_1", "_8_1"]);
-    assert!(deferred_term_ids("not json").is_empty());
+    let now = t("2026-10-23T12:00:00Z");
+    assert_eq!(deferred_term_ids(body, now), ["_7_1", "_8_1"]);
+    assert!(deferred_term_ids("not json", now).is_empty());
 }
 
 #[test]
 fn a_mixed_list_keeps_exactly_the_current_classes_in_order() {
     use knowlu::lms_link::current_courses_from_json;
     let now = t("2026-10-23T12:00:00Z");
-    let ended: std::collections::BTreeSet<String> = ["_7_1".to_string()].into();
+    let ended: std::collections::BTreeMap<String, knowlu::lms_link::TermEnd> = [("_7_1".to_string(), knowlu::lms_link::TermEnd::Dates)].into();
     let body = r#"{"results":[
       {"courseId":"_1_1","course":{"name":"Invented Studies 101","termId":"_8_1","availability":{"available":"Term"}}},
       {"courseId":"_2_1","course":{"name":"Invented Studies 102","termId":"_7_1","availability":{"available":"Term"}}},
@@ -716,7 +717,66 @@ fn the_capture_filters_to_current_courses_and_fetches_each_term_through_the_same
     let body = &tail[..tail.find("\n}\n").map(|e| e + 2).unwrap_or(tail.len())];
     assert!(body.contains("current_courses_from_json("), "{body}");
     assert!(body.contains("deferred_term_ids("), "{body}");
-    assert!(body.contains("term_ended("), "{body}");
+    assert!(body.contains("term_state("), "{body}");
+    assert!(body.contains("term_url("), "{body}");
     assert!(!body.contains("courses_from_json(&body)"), "the unfiltered reader must not feed the wizard:\n{body}");
     assert_eq!(body.matches("cookie_url(").count(), 1, "one jar rule, not a second:\n{body}");
+}
+
+#[test]
+fn a_course_already_gone_asks_for_no_term() {
+    use knowlu::lms_link::deferred_term_ids;
+    let now = t("2026-10-23T12:00:00Z");
+    let body = r#"{"results":[
+      {"courseId":"_1_1","course":{"name":"A","termId":"_7_1","availability":{"available":"Term"}},"availability":{"available":"No"}},
+      {"courseId":"_2_1","course":{"name":"B","termId":"_8_1","availability":{"available":"No"}}},
+      {"courseId":"_3_1","course":{"name":"C","termId":"_9_1","availability":{"available":"Term","duration":{"type":"DateRange","end":"2026-01-01T00:00:00Z"}}}},
+      {"courseId":"_4_1","course":{"name":"D","termId":"_6_1","availability":{"available":"Term"}}}
+    ]}"#;
+    assert_eq!(deferred_term_ids(body, now), ["_6_1"]);
+}
+
+/// Blackboard gates only a course whose availability is `Term` by the term's own availability. A
+/// course that is `Yes` with `duration: Term` takes the term's dates and nothing else.
+#[test]
+fn a_term_switched_off_hides_only_a_course_whose_availability_is_term() {
+    use knowlu::lms_link::{current_courses_from_json, term_state, TermEnd};
+    let now = t("2026-10-23T12:00:00Z");
+    assert_eq!(term_state(r#"{"availability":{"available":"No"}}"#, now), Some(TermEnd::Off));
+    assert_eq!(term_state(r#"{"availability":{"available":"Yes","duration":{"type":"DateRange","end":"2026-05-01T00:00:00Z"}}}"#, now), Some(TermEnd::Dates));
+    assert_eq!(term_state(r#"{"availability":{"available":"Yes"}}"#, now), None);
+    let off: std::collections::BTreeMap<String, TermEnd> = [("_7_1".to_string(), TermEnd::Off)].into();
+    let over: std::collections::BTreeMap<String, TermEnd> = [("_7_1".to_string(), TermEnd::Dates)].into();
+    let gated = one(r#","termId":"_7_1","availability":{"available":"Term"}"#, "");
+    let dates_only = one(r#","termId":"_7_1","availability":{"available":"Yes","duration":{"type":"Term"}}"#, "");
+    assert!(current_courses_from_json(&gated, now, &off).is_empty());
+    assert!(current_courses_from_json(&gated, now, &over).is_empty());
+    assert_eq!(current_courses_from_json(&dates_only, now, &off).len(), 1, "a term marked No keeps a Yes course");
+    assert!(current_courses_from_json(&dates_only, now, &over).is_empty(), "an ended term drops it");
+}
+
+#[test]
+fn a_term_url_is_the_same_origin_terms_path_and_nothing_else() {
+    use knowlu::lms_link::term_url;
+    let list = "https://lms.example.test/learn/api/public/v1/users/me/courses?expand=course";
+    assert_eq!(
+        term_url(list, "_77_1").as_deref(),
+        Some("https://lms.example.test/learn/api/public/v1/terms/_77_1")
+    );
+    assert_eq!(term_url(list, "ext-1.a:b").as_deref(), Some("https://lms.example.test/learn/api/public/v1/terms/ext-1.a:b"));
+    for bad in ["../x", "a/b", "a?b", "a#b", "a@b", "%2F", "a%2Fb", "a b", "a\\b", "", ".", ".."] {
+        assert_eq!(term_url(list, bad), None, "termId {bad:?}");
+    }
+    for bad_list in [
+        "http://lms.example.test/learn/api/public/v1/users/me/courses",
+        "https://lms.example.test/api/v1/courses",
+        "https:///learn/api/x",
+        "https://user@evil.test/learn/api/x",
+        "https://lms.example.test/x/learn/api/x",
+        "https://lms.example.test?x=/learn/api/x",
+        "ftp://lms.example.test/learn/api/x",
+        "",
+    ] {
+        assert_eq!(term_url(bad_list, "_77_1"), None, "{bad_list:?}");
+    }
 }
