@@ -609,6 +609,26 @@ dated, newest first.)*
   `ingest` writes. `ingest` takes no `RunLock`, so T5's read of `grades/` is safe only because slot
   steps run in sequence. L5's PR-1 is not merged; `sync_tasks` is at `ingest.rs:613-620` as the plan
   describes.
+- **2026-10-23, T1 S-C PASSED (controller; live, read-only, counts only, on a real vault).** 62
+  feed gradable items and 112 grade item notes; 58 ids in both. The id after
+  `_blackboard.platform.gradebook2.GradableItem-` equals the grade note's `source_uid` exactly
+  (shape `_N_N`), one-to-one with no duplicates on either side, and the titles are equal for 58 of
+  58. So T2b is dispatched (Q-C does not apply).
+- **2026-10-23, T1b (controller).** Scores are captured live: 69 graded item notes, 66 with a numeric
+  score, 3 without. Statuses seen: graded, not-submitted, in-progress, needs-grading. T2b builds its
+  grade notes from inline v2 bundles through `grades::apply`.
+- **2026-10-23, T0 (controller): tier 1's "Mark done" cards DID ship.** `propose_done` and
+  `propose_vendor_completions` are present in v0.1.3, v0.1.4 and v0.1.5, so installed vaults can hold
+  pending or rejected "Mark done" cards. T3's card rule (section 9.1 F1) is what protects them, and
+  T10 checks one. (The old "T8 is unreleased" doc comment is stale.)
+- **2026-10-23, Q-A recorded (Quinn).** `graded` with a score of 0 is not turned in; `graded` with no
+  score stays live. T2b tests 15 and 18 pin both.
+- **2026-10-23, T2b stubs (test-writer).** `ingest::gradable_id(&str) -> Option<&str>`,
+  `ingest::gradebook_done(status: &str, score: Option<f64>) -> bool` (both `todo!("O1 T5")`) and
+  `ingest::IMPORTED_DONE_TEMPLATE` (empty). The flow tests drive `run_lines_on` with an inline ICS
+  feed, so T5 may name its `sync_tasks` sibling and the grade index as it likes. The tests expect the
+  per-item first-ingest line `archived (imported-done) <stem>` (as coursework's) and the two
+  first-run lines of test 16a.
 - **2026-10-23, T2a stubs (test-writer).** `apply_vendor_completions` is declared
   `(vault, completions, ctx, dry_run)`, without propose's `today` (an apply needs no date, and an
   unused parameter would warn); `coursework::sync_coursework_with_done(.., finished: &HashSet<String>)`
