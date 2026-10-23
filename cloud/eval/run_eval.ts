@@ -10,6 +10,10 @@
 //   --thresholds  the file the gate reads. Required once there is at least one case to score.
 //   --per-case    also print one line per case (`perCaseLine`): numbers, enum words and the outcome,
 //                 never free text. Diagnosis only; it changes no score and no `eval_runs` row.
+//   --kind        score one kind only.
+//   --model, --upstream  (with --kind) a dev-only model study: score a candidate OpenRouter model on
+//                 one named zero-retention upstream instead of the pin, for this run only; its
+//                 `eval_runs` rows record `eval-override:<id>@<upstream>`. Never passed by the CI gate.
 //
 // Every run of this program without --dry-run spends real money (one model call per case, at
 // roughly $0.0002 each as a conservative bound on the pinned OpenRouter models — measured on
@@ -145,6 +149,60 @@ export function perCaseLine(
   } confidence=${num(m.confidence)} | label tier=${word(theirs.tier, EMAIL_TIERS)} effort=${
     num(theirs.effort_hours)
   } importance=${num(theirs.importance)}`;
+}
+
+const MODEL_ID_RE = /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:-]*$/i;
+const UPSTREAM_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+
+export interface Study {
+  kind?: Kind;
+  model?: { id: string; upstream: string };
+}
+
+/**
+ * `--kind <kind>`, `--model <openrouter-id>` and `--upstream <provider>` (task-3 model study, PR
+ * #61): a dev-only way to score a candidate model on the same seed before Quinn rules on a pin. An
+ * override needs all three, so it is always one kind on one named upstream; anything malformed is
+ * a message, returned before any connection or spend. The CI gate never passes these
+ * (`run_eval_test.ts` checks ci.yml).
+ */
+export function parseStudyArgs(args: string[]): Study | string {
+  const value = (flag: string): string | undefined | null => {
+    const at = args.indexOf(flag);
+    if (at < 0) return undefined;
+    const v = args[at + 1];
+    return v === undefined || v.startsWith("--") ? null : v;
+  };
+  const kind = value("--kind"), model = value("--model"), upstream = value("--upstream");
+  if (kind === null || (kind !== undefined && !KINDS.includes(kind as Kind))) {
+    return `--kind must be one of ${KINDS.join(", ")}`;
+  }
+  if (model === undefined && upstream === undefined) return { kind: kind as Kind | undefined };
+  if (model === undefined || model === null || !MODEL_ID_RE.test(model)) {
+    return "--model must be an OpenRouter model id (vendor/model)";
+  }
+  if (upstream === undefined || upstream === null || !UPSTREAM_RE.test(upstream)) {
+    return "--model needs --upstream <provider>: the one zero-retention upstream to route to";
+  }
+  if (kind === undefined) return "--model needs --kind <kind>: an override is scored on one kind only";
+  return { kind: kind as Kind, model: { id: model, upstream } };
+}
+
+/**
+ * The pinned row with an override applied: the model id swapped and the route's one `order` entry
+ * set to the named upstream, the zero-retention pin (`allow_fallbacks: false`, `zdr: true`,
+ * `require_parameters: true`) kept as `assertPinnedRoute` demands. Provider, sampling, max_tokens,
+ * prompt and grammar versions stay the row's. Only an `openrouter` row can be overridden.
+ */
+export function overrideRow(row: ModelRow, model: Study["model"]): ModelRow {
+  if (model === undefined) return row;
+  if (row.provider !== "openrouter") throw new Error(`--model overrides an openrouter row only, not '${row.provider}'`);
+  return {
+    ...row,
+    model_id: model.id,
+    precision: "unpinned (eval --model)",
+    route: { order: [model.upstream], allow_fallbacks: false, zdr: true, require_parameters: true },
+  };
 }
 
 /** A case's name in a `--per-case` line: its synthetic seed id, else its row id. */
@@ -306,6 +364,14 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
   const thresholds = JSON.parse(await Deno.readTextFile(args[thresholdIndex + 1])) as
     Record<string, Record<string, number>>;
 
+  // The model study (task-3, PR #61): `--kind` scores one kind; `--model` with `--upstream` swaps that
+  // kind's pinned model for this run only. Refused before any connection or spend when malformed.
+  const study = parseStudyArgs(args);
+  if (typeof study === "string") {
+    console.error(study);
+    return 2;
+  }
+
   const db = dbFactory();
   // Corrections carry no judgment id from the device; fill them before anything reads them.
   await db.rpc("backfill_correction_judgments", {});
@@ -320,7 +386,7 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
   const runId = crypto.randomUUID();
 
   let worst = 0;
-  for (const kind of KINDS) {
+  for (const kind of KINDS.filter((k) => study.kind === undefined || k === study.kind)) {
     const rows = await load(db, kind);
     if (rows.length === 0) {
       const seeded = seedRecords.some((r) => r.kind === kind);
@@ -342,7 +408,12 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
       `${kind}: ${rows.length} cases, <= ${rows.length * MAX_ATTEMPTS} model calls ` +
         `(${MAX_ATTEMPTS} attempts per case at most, cap ${MAX_CASES})`,
     );
-    const row = await modelRow(db, kind);
+    const row = overrideRow(await modelRow(db, kind), study.model);
+    // What `eval_runs.model` records: the pinned id, or an override label no pin can ever equal.
+    const recordedModel = study.model === undefined
+      ? row.model_id
+      : `eval-override:${study.model.id}@${study.model.upstream}`;
+    if (study.model !== undefined) console.log(`${kind}: model override ${recordedModel}`);
     // R-PS-3: the model is built only now — the row is read, and there is at least one
     // non-dry-run case this kind is actually about to spend on. One build per kind (not per
     // case): a missing key fails this kind loud, once, instead of once per case.
@@ -446,7 +517,7 @@ export async function main(args: string[], deps: Partial<Deps> = {}): Promise<nu
       }
       const bad = failed(scored, threshold);
       await db.insert("eval_runs", {
-        model: row.model_id, prompt_version: row.prompt_version, grammar_version: row.grammar_version,
+        model: recordedModel, prompt_version: row.prompt_version, grammar_version: row.grammar_version,
         prompt_hash: hash, kind, metric: scored.metric, value: scored.value,
         threshold, passed: !bad, cases: scored.n, input_tokens: inputTokens, output_tokens: outputTokens,
         run_id: runId, dry_run: dry,

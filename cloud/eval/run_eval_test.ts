@@ -799,3 +799,103 @@ Deno.test("without --per-case the gate prints no per-case line", async () => {
   const answered = { course: "math-221", effort_hours: 2, importance: 3, importance_reason: "r", confidence: 0.8 };
   assertEquals(await liveTaskRun(false, [answered, answered]), []);
 });
+
+// ---------------------------------------------------------------------------------------------
+// task-3 model study (PR #61): `--model <openrouter-id> --upstream <provider> --kind <kind>` swaps the
+// pinned model for ONE kind and ONE run, so a candidate can be scored on the same seed before Quinn
+// rules on a pin. Its `eval_runs` rows name the override (`eval-override:<id>@<upstream>`), never
+// the pinned id, and the route keeps the zero-retention pin with the named upstream as its one order.
+// The CI gate never passes it (checked against ci.yml below).
+// ---------------------------------------------------------------------------------------------
+
+const TASK_ROW = {
+  kind: "task", provider: "openrouter", model_id: "ibm-granite/granite-4.2-8b", prompt_version: "task-3",
+  grammar_version: "task-1", max_tokens: 256, sampling: { temperature: 0 }, precision: "bf16 (CoreWeave)",
+  route: { order: ["CoreWeave"], allow_fallbacks: false, zdr: true, require_parameters: true },
+  usd_per_m_in: 0.1, usd_per_m_out: 0.15,
+};
+
+async function overrideRun(args: string[]) {
+  const request = { kind: "task" as const, item: { id: "t1", title: "Homework 4" }, heuristics_seed: { course: "math-221", known_courses: ["math-221"] } };
+  const rows = [{ id: 1, kind: "task", seed_id: "seed-task-0003", request, ours: null, theirs: { effort_hours: 2 } }];
+  const selects: string[] = [];
+  const evalRuns: Array<Record<string, unknown>> = [];
+  const built: Array<Record<string, unknown>> = [];
+  const db: Db = fakeDb({
+    select: (path: string) => {
+      selects.push(path);
+      if (path.startsWith("eval_cases?kind=eq.task")) return Promise.resolve(rows);
+      if (path.startsWith("eval_cases?kind=eq.event")) return Promise.resolve(rows.map((r) => ({ ...r, kind: "event" })));
+      if (path.startsWith("eval_cases?kind=eq.")) return Promise.resolve([]);
+      if (path.startsWith("models?kind=eq.task")) return Promise.resolve([TASK_ROW]);
+      return Promise.resolve([]);
+    },
+    insert: (table: string, row: Record<string, unknown>) => {
+      if (table === "eval_runs") evalRuns.push(row);
+      return Promise.resolve(null);
+    },
+  });
+  const answer = { course: "math-221", effort_hours: 2, importance: 3, importance_reason: "r", confidence: 0.9 };
+  const records: SeedRecord[] = [{ id: "seed-task-0003", kind: "task", request, theirs: { effort_hours: 2 } }];
+  const captured = captureConsole();
+  let code: number;
+  try {
+    code = await main(["--thresholds", "cloud/eval/thresholds.json", ...args], {
+      db: () => db, loadSeed: () => Promise.resolve(records), envGet: () => undefined, sleep: () => Promise.resolve(),
+      modelFor: (row) => {
+        built.push(row as unknown as Record<string, unknown>);
+        return new ScriptedModel([answer]);
+      },
+    });
+  } finally {
+    captured.restore();
+  }
+  return { code, evalRuns, built, selects, log: captured.log, error: captured.error };
+}
+
+Deno.test("--model scores one kind on the named model, and its eval_runs rows name the override, never the pin", async () => {
+  const run = await overrideRun(["--model", "qwen/qwen3.5-35b-a3b", "--upstream", "DeepInfra", "--kind", "task"]);
+  assertEquals(run.code, 0, run.error.join(" | "));
+  assertEquals(run.built.length, 1);
+  assertEquals(run.built[0].model_id, "qwen/qwen3.5-35b-a3b");
+  assertEquals(run.built[0].route, { order: ["DeepInfra"], allow_fallbacks: false, zdr: true, require_parameters: true });
+  assert(run.evalRuns.length > 0);
+  for (const r of run.evalRuns) {
+    assertEquals(r.model, "eval-override:qwen/qwen3.5-35b-a3b@DeepInfra");
+    assertEquals(r.kind, "task");
+  }
+  assert(!run.selects.some((p) => p.startsWith("eval_cases?kind=eq.event")), "--kind task must not load event cases");
+  assert(run.log.some((l) => l.includes("task: model override eval-override:qwen/qwen3.5-35b-a3b@DeepInfra")), run.log.join(" | "));
+});
+
+Deno.test("--model without --upstream or --kind, or with a malformed id, is refused before any spend", async () => {
+  for (
+    const args of [
+      ["--model", "qwen/qwen3.5-35b-a3b", "--kind", "task"],
+      ["--model", "qwen/qwen3.5-35b-a3b", "--upstream", "DeepInfra"],
+      ["--model", "not a model", "--upstream", "DeepInfra", "--kind", "task"],
+      ["--model", "qwen/qwen3.5-35b-a3b", "--upstream", "Deep;Infra", "--kind", "task"],
+      ["--kind", "nope"],
+    ]
+  ) {
+    const run = await overrideRun(args);
+    assertEquals(run.code, 2, args.join(" "));
+    assertEquals(run.built.length, 0, args.join(" "));
+    assertEquals(run.evalRuns.length, 0, args.join(" "));
+  }
+});
+
+Deno.test("without --model the pinned row is used and recorded as itself", async () => {
+  const run = await overrideRun(["--kind", "task"]);
+  assertEquals(run.code, 0, run.error.join(" | "));
+  assertEquals(run.built[0].model_id, "ibm-granite/granite-4.2-8b");
+  assertEquals(run.built[0].route, TASK_ROW.route);
+  for (const r of run.evalRuns) assertEquals(r.model, "ibm-granite/granite-4.2-8b");
+});
+
+Deno.test("the CI eval gate never passes --model, --upstream or --kind", async () => {
+  const ci = await Deno.readTextFile(new URL("../../.github/workflows/ci.yml", import.meta.url));
+  const lines = ci.split("\n").filter((l) => l.includes("run_eval.ts"));
+  assert(lines.length > 0, "ci.yml no longer runs run_eval.ts");
+  for (const l of lines) assert(!/--(model|upstream|kind)\b/.test(l), `ci.yml passes an override: ${l}`);
+});
