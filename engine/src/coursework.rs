@@ -1803,7 +1803,7 @@ pub fn main_with_fetchers(
 ///
 /// Every fetcher of a run reports the vendors' completion figures into one [`CompletionSink`];
 /// after the sync, each figure at 100% whose uid names an active task note becomes one
-/// `status: done` amend card ([`crate::completion::propose_vendor_completions`]). `None` means the
+/// `status: done` write ([`crate::completion::apply_vendor_completions`]). `None` means the
 /// run owns its sink — the production path, where the default fetchers and the cloud path both
 /// fill it. A test passes its own so a stand-in fetcher can report a figure the way a real one does.
 pub fn main_with_sources(
@@ -1901,15 +1901,10 @@ fn main_with_sources_on(
             // `assignments` and the vault's own `known`/`seen` state — no first-run flag to pass.
             log.extend(sync_coursework(&assignments, vault, sync_today, dry_run, Some(&ctx), None)?);
         }
-        // Stream J T8: after the sync, so a note created this run can be proposed this run. Its
-        // log lines (`proposed done: …`) start with none of the sync step's counted prefixes.
-        let (done_log, done_warnings) = crate::completion::propose_vendor_completions(
-            vault,
-            &sink.borrow(),
-            today,
-            &ctx,
-            dry_run,
-        );
+        // Stream J T8, O1 T3: after the sync, so a note created this run can be marked this run.
+        // Its log lines (`marked done: …`) start with none of the sync step's counted prefixes.
+        let (done_log, done_warnings) =
+            crate::completion::apply_vendor_completions(vault, &sink.borrow(), &ctx, dry_run);
         log.extend(done_log);
         warnings.extend(done_warnings);
         Ok(())

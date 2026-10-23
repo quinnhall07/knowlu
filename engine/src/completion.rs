@@ -1,34 +1,41 @@
-//! Completion detection, tier 1: a vendor's own number says a task is finished, and Knowlu proposes
-//! `status: done` (stream J Task T8; design note `docs/notes/2026-09-22-completion-detection-design.md`
-//! §2, §3, §7a).
+//! Completion detection, tier 1: a vendor's own number says a task is finished, and Knowlu marks it
+//! `status: done` and lists it (stream J Task T8; design note
+//! `docs/notes/2026-09-22-completion-detection-design.md` §2, §3, §7a; O1, spec §6.2-§6.3).
 //!
-//! **Deterministic, no model, no new write path.** The output is an ordinary `kind: amend` approval
-//! moving `status` from `active` to `done` — `status` is one of the nine amendable fields
-//! (`approvals::AMENDABLE_FIELDS`), so the card is applied, capped (15 a day, overflow snoozed by
-//! `approvals::defer_over_budget` on the next `rank`), surfaced and archived by machinery that
-//! already exists. Nothing here ever writes a task note; it only mints approval cards through
-//! [`crate::write::create`], journal first.
+//! **Deterministic, no model.** Two entry points, by who is authoritative:
 //!
-//! The rules [`propose_done`] enforces, in order:
+//! - [`apply_done`] is for a source that is authoritative on its own items (zyBooks, VHL, the
+//!   Blackboard gradebook): the one field `status: done` is written through [`crate::write::write`]
+//!   under [`ACTOR`], journal first, with the evidence on the record, and the surface lists it under
+//!   "Closed this week" with an Undo. `judged` is `false` (`status` is not a judged field), so the
+//!   checks below are the only judge-once fence. **Undo** is the student's own `set` of `status`
+//!   back to `active`: that record is the judge-once mark, so the next apply skips the task for good.
+//! - [`propose_done`] is for a source that only suggests (T9's email receipts): an ordinary
+//!   `kind: amend` approval moving `status` from `active` to `done` — `status` is one of the nine
+//!   amendable fields (`approvals::AMENDABLE_FIELDS`), so the card is applied, capped (15 a day,
+//!   overflow snoozed by `approvals::defer_over_budget` on the next `rank`), surfaced and archived by
+//!   machinery that already exists. It only mints approval cards through [`crate::write::create`].
 //!
-//! 1. only a note under `tasks/` (never `archive/`) is a candidate;
+//! The rules both enforce, in order:
+//!
+//! 1. only a note directly under `tasks/` (never `archive/`) is a candidate;
 //! 2. only a note whose frontmatter says `status: active` — a task already done or archived is left
 //!    alone, and a note with no `status:` line is skipped because an amend `from: active` could
 //!    never validate against it;
 //! 3. a note whose `status` the journal shows the student set by hand (`op: set`) is left alone —
 //!    they have already taken a position on whether it is finished;
-//! 4. **one proposal per task, ever**: any `kind: amend` card for this note that moves `status`
+//! 4. **one question per task, ever**: any `kind: amend` card for this note that moves `status`
 //!    to `done` — pending, snoozed, approved, rejected, executed, in `approvals/` or `archive/` —
 //!    means the question has been asked. A rejection therefore sticks: `process_approvals` moves a
-//!    rejected card to `archive/` keeping its frontmatter, and this scan reads `archive/` too.
-//!    That is the same shape `coursework::asked_map_keys` gives coursework-map cards. The card
-//!    carries the note's opaque `target_id:` alongside its `target:` path, and [`already_proposed`]
-//!    matches by `target_id` whenever both the card and the note have one — a path is not the
-//!    note's identity (F11): a rollover can reuse a path for an unrelated note, and a note can be
-//!    renamed without losing its `id:`.
+//!    rejected card to `archive/` keeping its frontmatter, and this scan reads `archive/` too. A
+//!    pending or snoozed card is left in the student's hands, not withdrawn (an amend card has no
+//!    withdrawal; approving it applies `done`, rejecting it closes the question). The card carries
+//!    the note's opaque `target_id:` alongside its `target:` path, and [`already_proposed`] matches
+//!    by `target_id` whenever both the card and the note have one — a path is not the note's
+//!    identity (F11): a rollover can reuse a path for an unrelated note, and a note can be renamed
+//!    without losing its `id:`.
 //!
-//! [`propose_done`] is the one public entry point a second evidence source (T9's email receipts)
-//! calls; [`propose_vendor_completions`] is the tier-1 caller that maps vendor uids to task notes.
+//! [`apply_vendor_completions`] is the tier-1 caller that maps vendor uids to task notes.
 
 use std::path::{Path, PathBuf};
 
@@ -154,8 +161,7 @@ fn text_of(meta: &Mapping, key: &str) -> Option<String> {
 /// `target_id` is the note's own `id:`, if it has one. A card matches:
 /// - by `target_id`, when both the card and the note have one — that survives a rename and, at a
 ///   reused path, tells last term's archived card apart from this term's new note (F11);
-/// - by path (`target_rel`) otherwise — a legacy card with no `target_id` (none have shipped; T8
-///   is unreleased), or a note with no `id:`.
+/// - by path (`target_rel`) otherwise — a legacy card with no `target_id`, or a note with no `id:`.
 ///
 /// `id:` is the vault's opaque identity (CLAUDE.md); a path is not.
 pub fn already_proposed(vault: &Path, target_rel: &str, target_id: Option<&str>) -> bool {
@@ -305,16 +311,88 @@ pub fn propose_done(
     Ok(Outcome::Proposed(card))
 }
 
-/// Tier 1: every vendor figure at 100% whose uid names a task note gets [`propose_done`].
+/// Mark one task note `status: done` on a source's own authority: the gradebook or the homework
+/// platform is authoritative on its own items, so this applies and the surface lists it (with Undo)
+/// rather than proposing (spec §6.2-§6.3).
 ///
-/// Returns `(log, warnings)`: one log line per card filed (`proposed done: <stem> (…)`) or, in a
-/// dry run, per card that would be (`would propose done: …`); a warning only for a write that
+/// The rules are **all four of [`propose_done`]'s**, in the same order: a note directly under
+/// `tasks/`; `status: active`; no `op: set` of `status` by the student in the journal; and no
+/// `status → done` amend card for this note in `approvals/` or `archive/`, whatever its status
+/// ([`already_proposed`]). A rejected card therefore closes the question for good; a pending or
+/// snoozed card is left in the student's hands (an amend card has no withdrawal, and approving it
+/// applies `done` cleanly). `status` is not a judged field and the apply writes with
+/// `judged: false`, so these checks are the only judge-once fence.
+///
+/// The one field is written through [`crate::write::write`] (single-line surgery, journal first)
+/// under `ctx.with_actor(ACTOR)`, the evidence on the journal record. Undo is the student's own
+/// `set` of `status` back to `active`: that record is the judge-once mark, so a later apply skips.
+/// A dry run checks everything and writes nothing. `Err` only for a write that was attempted and
+/// failed; every "nothing to do" is `Ok(Applied::Skipped(..))`.
+pub fn apply_done(
+    vault: &Path,
+    task: &Path,
+    evidence: &Evidence,
+    ctx: &WriteContext,
+    journal: &mut Journal,
+    dry_run: bool,
+) -> Result<Applied, WriteError> {
+    let path = if task.is_absolute() { task.to_path_buf() } else { vault.join(task) };
+    let target_rel = crate::ids::rel(vault, &path);
+    let in_tasks = target_rel.starts_with("tasks/") && !target_rel[6..].contains('/');
+    if !in_tasks {
+        return Ok(Applied::Skipped(format!("not a task note: {target_rel}")));
+    }
+    let Some(meta) = read_meta(&path) else {
+        return Ok(Applied::Skipped(format!("unreadable: {target_rel}")));
+    };
+    match text_of(&meta, "status").as_deref() {
+        Some("active") => {}
+        Some(other) => return Ok(Applied::Skipped(format!("status is {other}"))),
+        None => return Ok(Applied::Skipped("no status field".to_string())),
+    }
+    let note_id = text_of(&meta, "id");
+    if let Some(id) = &note_id {
+        let by_hand = journal
+            .human_set(id, "status")
+            .filter(|r| r.get("op").and_then(Json::as_str) == Some("set"));
+        if by_hand.is_some() {
+            return Ok(Applied::Skipped("status set by hand".to_string()));
+        }
+    }
+    if already_proposed(vault, &target_rel, note_id.as_deref()) {
+        return Ok(Applied::Skipped("already proposed".to_string()));
+    }
+    if dry_run {
+        return Ok(Applied::WouldMark);
+    }
+    let evidence_json = evidence.to_json();
+    let opts = crate::write::WriteOpts {
+        judged: false,
+        evidence: Some(&evidence_json),
+        ..crate::write::WriteOpts::default()
+    };
+    // A literal, as every other plain-word status write does: `to_literal` would quote the word.
+    crate::write::write_literals(
+        vault,
+        &target_rel,
+        &[("status".to_string(), "done".to_string())],
+        &ctx.with_actor(ACTOR),
+        journal,
+        &opts,
+    )?;
+    Ok(Applied::Marked)
+}
+
+/// Tier 1: every vendor figure at 100% whose uid names a task note gets [`apply_done`].
+///
+/// Returns `(log, warnings)`: one log line per task marked (`marked done: <stem> (<source> <n>%)`)
+/// or, in a dry run, per task that would be (`would mark done: …`); a warning only for a write that
 /// failed. Figures below 100%, uids with no note, and every skip rule are silent. Processed in uid
-/// order so the same input files the same cards in the same order.
-pub fn propose_vendor_completions(
+/// order so the same input marks the same tasks in the same order. Its lines start with none of
+/// `coursework`'s counted prefixes.
+pub fn apply_vendor_completions(
     vault: &Path,
     completions: &[VendorCompletion],
-    today: Date,
     ctx: &WriteContext,
     dry_run: bool,
 ) -> (Vec<String>, Vec<String>) {
@@ -327,30 +405,29 @@ pub fn propose_vendor_completions(
     complete.sort_by(|a, b| a.uid.cmp(&b.uid));
     complete.dedup_by(|a, b| a.uid == b.uid);
     let known = crate::ingest::existing_by_uid(vault);
-    let ctx = ctx.with_actor(ACTOR);
     let mut journal = Journal::new(vault);
     for figure in complete {
         let Some(path) = known.get(&figure.uid) else { continue };
         let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let evidence = figure.evidence();
-        // A vendor figure is not a judgment: tier 1 never carries a `judgment_id`.
-        match propose_done(vault, path, &evidence, today, &ctx, &mut journal, dry_run, None) {
-            Ok(Outcome::Proposed(_)) => {
-                log.push(format!("proposed done: {stem} ({} {}%)", figure.source, figure.percent()))
+        // A vendor figure is not a judgment: nothing here carries a `judgment_id`.
+        match apply_done(vault, path, &evidence, ctx, &mut journal, dry_run) {
+            Ok(Applied::Marked) => {
+                log.push(format!("marked done: {stem} ({} {}%)", figure.source, figure.percent()))
             }
-            Ok(Outcome::WouldPropose) => log.push(format!(
-                "would propose done: {stem} ({} {}%)",
+            Ok(Applied::WouldMark) => log.push(format!(
+                "would mark done: {stem} ({} {}%)",
                 figure.source,
                 figure.percent()
             )),
-            Ok(Outcome::Skipped(_)) => {}
-            Err(err) => warnings.push(format!("completion: proposal not written for {stem} ({err})")),
+            Ok(Applied::Skipped(_)) => {}
+            Err(err) => warnings.push(format!("completion: {stem} not marked done ({err})")),
         }
     }
     (log, warnings)
 }
 
-/// What [`apply_done`] did. O1 T2a stub: T3 owns the real behaviour.
+/// What [`apply_done`] did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Applied {
     /// `status: done` was written.
@@ -359,31 +436,6 @@ pub enum Applied {
     WouldMark,
     /// Nothing to do, and why (`status set by hand`, `already proposed`, ...) -- never an error.
     Skipped(String),
-}
-
-/// O1 T2a stub; T3 replaces the body. Writes `status: active -> done` for one task note on a
-/// source's own authority, under [`ACTOR`], through `write`.
-pub fn apply_done(
-    _vault: &Path,
-    _task: &Path,
-    _evidence: &Evidence,
-    _ctx: &WriteContext,
-    _journal: &mut Journal,
-    _dry_run: bool,
-) -> Result<Applied, WriteError> {
-    todo!("O1 T3")
-}
-
-/// O1 T2a stub; T3 replaces the body. Tier 1 applies: every figure at 100% whose uid names a task
-/// note gets [`apply_done`]. Returns `(log, warnings)`; lines `marked done: <stem> (<source> <n>%)`
-/// or `would mark done: ...`.
-pub fn apply_vendor_completions(
-    _vault: &Path,
-    _completions: &[VendorCompletion],
-    _ctx: &WriteContext,
-    _dry_run: bool,
-) -> (Vec<String>, Vec<String>) {
-    todo!("O1 T3")
 }
 
 #[cfg(test)]
