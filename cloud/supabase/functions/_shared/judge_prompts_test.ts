@@ -249,29 +249,46 @@ Deno.test("T9: email-3's hash moved off T4's draft", async () => {
 /** task-2's hash (`20260916000100_provider_swap.sql`'s re-pin), pinned so task-3 provably moved it. */
 const TASK_2_HASH = "ee59545ad9910231b22debe10ce9ed9c34f4d0fe043dc6aeb3fe11a4f9e02ca6";
 
-Deno.test("task-3: the effort rule anchors each assignment type to a typical undergraduate range", () => {
+// Revised after PR #61's per-case eval (task-3 draft vs task-2, granite-4.2-8b): given RANGES the
+// model answered at or past the top (homework 1-3 -> 2.5-3.5, milestone 3-8 -> 8, exam 3-6 ->
+// 12 and 24, a 12-page paper at 1-2 per page -> 40), so each type now has one typical value.
+Deno.test("task-3: the effort rule gives one typical value per assignment type", () => {
   const rules = systemTemplate("task");
   assert(rules.includes("for a typical undergraduate"), `missing the typical-student frame in: ${rules}`);
   for (
     const anchor of [
-      "a reading, discussion post or quiz 0.25 to 1",
-      "a weekly homework, problem set or lab 1 to 3",
-      "a short essay or report 2 to 4",
-      "a longer one 1 to 2 per page",
-      "a project milestone 3 to 8",
-      "an exam 3 to 6 of study",
+      "a reading, discussion post or quiz 0.5",
+      "a homework, problem set, worksheet or lab 2",
+      "a short essay or report 3",
+      "a longer paper 1.5 per page",
+      "a project milestone 5",
+      "an exam, midterm or final exam 4 of study",
     ]
   ) {
     assert(rules.includes(anchor), `missing anchor '${anchor}' in: ${rules}`);
   }
 });
 
-Deno.test("task-3: above 8 hours needs the text to say so, and a vague title answers the middle", () => {
+Deno.test("task-3: above 8 needs a named large project or long paper, an exam never passes 6, a vague title is 2", () => {
   const rules = systemTemplate("task");
-  assert(rules.includes("above 8 only when the title or body clearly says"), `missing the ceiling rule in: ${rules}`);
-  assert(rules.includes("answer the middle of its likely type's range"), `missing the vague-title rule in: ${rules}`);
-  assert(rules.includes("never a large number"), `missing the never-large rule in: ${rules}`);
-  assert(rules.includes("a 5-point item is small"), `missing the points rule in: ${rules}`);
+  assert(rules.includes("answer above 8 only for a large project or a paper of more than 5 pages"), rules);
+  assert(rules.includes("An exam is never above 6."), `missing the exam ceiling in: ${rules}`);
+  assert(rules.includes("a vague title with nothing else given: answer 2, never a large number."), rules);
+  assert(rules.includes("points, when given, scale effort_hours only: a 5-point item is small."), rules);
+});
+
+// The draft's "points or a grade weight ... scale the estimate" line and its size anchors leaked
+// into importance: with no weights given, task-2 answered the rule's 3 on 16 of 19 cases and the
+// draft on 9 of 19 — 2 for every quiz-sized item, 4-5 for exams, papers and projects.
+Deno.test("task-3: importance comes from the grade weights only, never from size or effort", () => {
+  const rules = systemTemplate("task");
+  assert(
+    rules.includes(
+      "- importance: 1 to 5, grounded only in the grade weights given, never in the assignment's size or effort. With no weights given, answer 3 and say so in importance_reason.",
+    ),
+    rules,
+  );
+  assert(!rules.includes("grade weight, when given, scale"), `weights must not scale effort: ${rules}`);
 });
 
 Deno.test("task-3: the vague-title rule never asks for a confidence under the 0.6 floor", () => {
@@ -308,5 +325,5 @@ Deno.test("task-3: the task hash moved off task-2 and is pinned", async () => {
   assert((await promptHash("task")) !== TASK_2_HASH, "the task prompt hash did not change");
   // task-3 as shipped, `<stamp>_task_effort_anchors.sql`. Any edit to the task template or schema
   // moves this and must come with a new prompt_version in a migration.
-  assertEquals(await promptHash("task"), "fee0d9a3cdee3a40fcd39d6b4146af0087ddd6d88c9c0d67bc6edcfa39d949ab");
+  assertEquals(await promptHash("task"), "03a48a2da8b6d7523eb9176b049bb00977f81fdba3f7e4b538343e8a3faa927f");
 });

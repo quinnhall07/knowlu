@@ -3,7 +3,7 @@
 // institution — and is shaped like the low-information item that showed the defect: a learning-
 // management feed item judged from a title, a course slug and a due date, with no body (a seed item
 // may never carry one: `scrubViolations` bans the key). Each case labels `effort_hours` at the
-// middle of the range `systemTemplate("task")`'s anchors give its type, `course` as the slug the
+// middle of its type's anchor range in the task-3 brief (the template now states one typical value), `course` as the slug the
 // rules say to echo, and `importance: 3` only where no grade weights are given (the rule's own
 // answer); a case with weights leaves importance unlabelled, because that is a judgment, not a rule.
 //

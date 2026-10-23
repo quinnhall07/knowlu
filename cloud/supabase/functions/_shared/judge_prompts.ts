@@ -105,7 +105,12 @@ export function systemTemplate(kind: "task" | "event" | "email"): string {
     // task-3 (effort anchors, 2026-10-23; `<stamp>_task_effort_anchors.sql`): task-2's one effort
     // line gave no scale, and items judged from a title, a slug and a due date came back at a
     // median of 8 hours. The anchors, the above-8 rule and the vague-title rule fix the scale; the
-    // schema, the 0.25-40 clamp and `{slice_hours}` do not move. The vague-title rule deliberately
+    // schema, the 0.25-40 clamp and `{slice_hours}` do not move. PR #61's per-case eval shaped the
+    // wording: given ranges, the pinned 8B model answered at or past their top (exams 12 and 24, a
+    // 12-page paper 40), so each type has one typical value and exams a ceiling; and a draft line
+    // letting "points or a grade weight" scale the estimate leaked size into importance (3 on 9 of
+    // 19 no-weights cases, against task-2's 16), so points scale effort only and importance says
+    // it never follows size. The vague-title rule deliberately
     // asks for no lower confidence: an answer under CONFIDENCE_FLOOR (0.6) is `below floor`, no
     // verdict at all, and the device already labels every model estimate `effort_confidence: low`.
     // This now differs from the device's local `judge::prompt_for`, which the runtime-removal lane
@@ -114,12 +119,12 @@ export function systemTemplate(kind: "task" | "event" | "email"): string {
       "You estimate effort and importance for one university assignment.",
       "Rules:",
       "- effort_hours: the realistic time in hours for a typical undergraduate to finish this one assignment, 0.25 to 40.",
-      "- effort anchors: a reading, discussion post or quiz 0.25 to 1; a weekly homework, problem set or lab 1 to 3; a short essay or report 2 to 4, a longer one 1 to 2 per page; a project milestone 3 to 8; an exam 3 to 6 of study.",
-      "- answer above 8 only when the title or body clearly says a large project or a long paper.",
-      "- a vague title with nothing else given: answer the middle of its likely type's range, never a large number.",
-      "- points or a grade weight, when given, scale the estimate: a 5-point item is small.",
+      "- typical effort: a reading, discussion post or quiz 0.5; a homework, problem set, worksheet or lab 2; a short essay or report 3; a longer paper 1.5 per page; a project milestone 5; an exam, midterm or final exam 4 of study.",
+      "- answer above 8 only for a large project or a paper of more than 5 pages that the title or body names. An exam is never above 6.",
+      "- a vague title with nothing else given: answer 2, never a large number.",
+      "- points, when given, scale effort_hours only: a 5-point item is small.",
       "- a typical work session in this student's plan is {slice_hours} hours.",
-      "- importance: 1 to 5, grounded in the grade weights given. With no weights given, answer 3 and say so in importance_reason.",
+      "- importance: 1 to 5, grounded only in the grade weights given, never in the assignment's size or effort. With no weights given, answer 3 and say so in importance_reason.",
       "- importance_reason: one line, under 140 characters, no line breaks.",
       "- course: the slug given below, or null when the slug given is null.",
       "- confidence: 0 to 1, how sure you are of effort_hours and importance.",

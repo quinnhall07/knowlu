@@ -3,10 +3,10 @@
 -- task-2's task prompt said only "the realistic time in hours to finish this one assignment, 0.25
 -- to 40": no scale. Items judged from a title, a course slug and a due date (a Blackboard feed item
 -- carries little else) came back at a median of 8 hours. `judge_prompts.ts`'s
--- `systemTemplate("task")` now anchors effort by assignment type for a typical undergraduate,
--- allows more than 8 hours only when the text says a large project or a long paper, answers the
--- middle of the likely type's range for a vague title, and scales with points or a grade weight
--- when given. The prompt hash moves, so the task row's `prompt_version` moves with it, off `task-2`
+-- `systemTemplate("task")` now gives one typical effort per assignment type for a typical
+-- undergraduate, allows more than 8 hours only for a named large project or a paper of more than 5
+-- pages, never more than 6 for an exam, answers 2 for a vague title, lets points scale effort only,
+-- and says importance never follows size. The prompt hash moves, so the task row's `prompt_version` moves with it, off `task-2`
 -- (`20260916000100_provider_swap.sql`) onto `task-3`.
 --
 -- The JSON schema does not change, so `grammar_version` stays. The model, provider, route, price,

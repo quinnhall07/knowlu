@@ -36,8 +36,8 @@ gets — ratifying named costs for `unsure` (like the rest of the cost-matrix pr
 `tasks.jsonl` is twenty-two hand-written cases, invented, not sampled: no real student, course, item or
 institution. Each is shaped like the item that showed task-2's defect (a median of 8 hours on ordinary
 coursework): a learning-management feed item with a title, a course slug and a due date and no body,
-since a seed item may never carry one. Each labels `effort_hours` at the middle of the range the task
-template's anchors give its type, `course` as the slug the rules say to echo, and `importance: 3` only
+since a seed item may never carry one. Each labels `effort_hours` at the middle of its type's anchor
+range in the task-3 brief (the template now states one typical value per type), `course` as the slug the rules say to echo, and `importance: 3` only
 where no grade weights are given (the rule's own answer). The labels come from the same anchors the
 prompt states, so the cases measure rule-following, not the real distribution of coursework. Like the
 event cases, a score here can rule a prompt or a model out, not in. `seed_tasks_test.ts` checks their
