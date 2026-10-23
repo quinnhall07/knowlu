@@ -535,6 +535,10 @@ needs_enrichment: true
 /// `surface` view can filter on it without parsing a filename.
 pub const IMPORTED_PAST: &str = "imported-past";
 
+/// O1: why a note went straight to `archive/` because its source already says it is turned in.
+/// Beside [`IMPORTED_PAST`]; precedence: a past item is `imported-past`, never this.
+pub const IMPORTED_DONE: &str = "imported-done";
+
 /// The archived twin of `NOTE_TEMPLATE`. Identical but for the two lines that say why it is here —
 /// deliberately a second template rather than a substitution on the first, because the two differ
 /// in what they MEAN and a reader should not have to diff them to see it.

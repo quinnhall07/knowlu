@@ -350,6 +350,42 @@ pub fn propose_vendor_completions(
     (log, warnings)
 }
 
+/// What [`apply_done`] did. O1 T2a stub: T3 owns the real behaviour.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Applied {
+    /// `status: done` was written.
+    Marked,
+    /// A dry run: `status: done` would have been written. Nothing was written.
+    WouldMark,
+    /// Nothing to do, and why (`status set by hand`, `already proposed`, ...) -- never an error.
+    Skipped(String),
+}
+
+/// O1 T2a stub; T3 replaces the body. Writes `status: active -> done` for one task note on a
+/// source's own authority, under [`ACTOR`], through `write`.
+pub fn apply_done(
+    _vault: &Path,
+    _task: &Path,
+    _evidence: &Evidence,
+    _ctx: &WriteContext,
+    _journal: &mut Journal,
+    _dry_run: bool,
+) -> Result<Applied, WriteError> {
+    todo!("O1 T3")
+}
+
+/// O1 T2a stub; T3 replaces the body. Tier 1 applies: every figure at 100% whose uid names a task
+/// note gets [`apply_done`]. Returns `(log, warnings)`; lines `marked done: <stem> (<source> <n>%)`
+/// or `would mark done: ...`.
+pub fn apply_vendor_completions(
+    _vault: &Path,
+    _completions: &[VendorCompletion],
+    _ctx: &WriteContext,
+    _dry_run: bool,
+) -> (Vec<String>, Vec<String>) {
+    todo!("O1 T3")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,6 +886,293 @@ mod tests {
         assert_eq!(lines[created_by_at + 3], "changes:");
 
         assert!(crate::approvals::validate_amendment(&vault, &m).is_ok());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    // --- O1 T2a: `apply_done`, the one write path for an authoritative "done" -------------------
+    //
+    // Red state: `apply_done` and `apply_vendor_completions` are `todo!("O1 T3")` stubs, so every
+    // test below panics at run time until T3 lands.
+
+    fn evidence() -> Evidence {
+        figure("zybooks:1", 193.0, 193.0).evidence()
+    }
+
+    /// Every journal record about `path`, oldest first.
+    fn records_for(vault: &Path, path: &str) -> Vec<crate::ledger::Record> {
+        Journal::new(vault)
+            .read(None, None)
+            .into_iter()
+            .filter(|r| r.get("path").and_then(Json::as_str) == Some(path))
+            .collect()
+    }
+
+    fn apply(vault: &Path, rel: &str, dry_run: bool) -> Applied {
+        let mut journal = Journal::new(vault);
+        apply_done(vault, Path::new(rel), &evidence(), &ctx(), &mut journal, dry_run).unwrap()
+    }
+
+    /// File a "Mark done" card the way mail does, under the completion agent.
+    fn file_card(vault: &Path, rel: &str) -> PathBuf {
+        let mut journal = Journal::new(vault);
+        match propose_done(
+            vault,
+            Path::new(rel),
+            &evidence(),
+            today(),
+            &ctx().with_actor(ACTOR),
+            &mut journal,
+            false,
+            None,
+        )
+        .unwrap()
+        {
+            Outcome::Proposed(card) => card,
+            other => panic!("the precondition card was not filed: {other:?}"),
+        }
+    }
+
+    fn status_of(vault: &Path, rel: &str) -> Option<String> {
+        text_of(&meta(&vault.join(rel)), "status")
+    }
+
+    fn is_skipped_for(outcome: &Applied, needle: &str) -> bool {
+        matches!(outcome, Applied::Skipped(why) if why.contains(needle))
+    }
+
+    #[test]
+    fn apply_done_sets_only_the_status_line_and_journals_it_under_the_completion_agent() {
+        let vault = scratch("apply-one");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let id = text_of(&meta(&vault.join("tasks/hw-01.md")), "id").expect("id");
+        let before = std::fs::read_to_string(vault.join("tasks/hw-01.md")).unwrap();
+
+        assert_eq!(apply(&vault, "tasks/hw-01.md", false), Applied::Marked);
+
+        let after = std::fs::read_to_string(vault.join("tasks/hw-01.md")).unwrap();
+        assert_eq!(after, before.replace("\nstatus: active\n", "\nstatus: done\n"));
+        let records = records_for(&vault, "tasks/hw-01.md");
+        let last = records.last().expect("a record");
+        assert_eq!(last.get("op").and_then(Json::as_str), Some("set"));
+        assert_eq!(last.get("field").and_then(Json::as_str), Some("status"));
+        assert_eq!(last.get("old").and_then(Json::as_str), Some("active"));
+        assert_eq!(last.get("new").and_then(Json::as_str), Some("done"));
+        assert_eq!(last.get("actor").and_then(Json::as_str), Some(ACTOR));
+        assert_eq!(last.get("id").and_then(Json::as_str), Some(id.as_str()));
+        assert_eq!(
+            last.get("via").and_then(Json::as_str),
+            Some("local-runner"),
+            "the caller's via survives; only the actor is replaced"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn apply_done_leaves_a_status_the_student_set_by_hand() {
+        let vault = scratch("apply-hand");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        set_by(&vault, "tasks/hw-01.md", "quinn", "status", "active");
+        let before = snapshot(&vault);
+
+        let outcome = apply(&vault, "tasks/hw-01.md", false);
+
+        assert!(is_skipped_for(&outcome, "set by hand"), "{outcome:?}");
+        assert_eq!(snapshot(&vault), before, "bytes changed");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn undo_sticks_the_students_own_set_keeps_the_task_active_forever() {
+        let vault = scratch("apply-undo");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        assert_eq!(apply(&vault, "tasks/hw-01.md", false), Applied::Marked);
+        // Undo is the console's `set_fields` as the student.
+        set_by(&vault, "tasks/hw-01.md", "quinn", "status", "active");
+        let agent_records = |vault: &Path| {
+            records_for(vault, "tasks/hw-01.md")
+                .iter()
+                .filter(|r| r.get("actor").and_then(Json::as_str) == Some(ACTOR))
+                .count()
+        };
+        assert_eq!(agent_records(&vault), 1, "precondition: one agent record so far");
+        let before = snapshot(&vault);
+
+        let outcome = apply(&vault, "tasks/hw-01.md", false);
+
+        assert!(is_skipped_for(&outcome, "set by hand"), "{outcome:?}");
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("active"));
+        assert_eq!(agent_records(&vault), 1, "a new agent record was written after Undo");
+        assert_eq!(snapshot(&vault), before);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn apply_done_skips_a_task_already_done_archived_outside_tasks_or_with_no_status() {
+        let vault = scratch("apply-skips");
+        task(&vault, "is-done", "zybooks:1", "done");
+        task(&vault, "is-archived", "zybooks:2", "archived");
+        task(&vault, "elsewhere", "zybooks:3", "active");
+        std::fs::rename(vault.join("tasks/elsewhere.md"), vault.join("archive/elsewhere.md")).unwrap();
+        let bare = "---\ntitle: \"CS 100 bare\"\ncourse: \"cs-100\"\ndomain: school\n\
+                    due: 2026-09-30T23:59\nsource_uid: \"zybooks:4\"\n---\n\nbody\n";
+        let mut journal = Journal::new(&vault);
+        crate::write::create(&vault, "tasks/bare.md", bare, &ctx(), &mut journal, None).unwrap();
+        let before = snapshot(&vault);
+
+        for rel in ["tasks/is-done.md", "tasks/is-archived.md", "archive/elsewhere.md", "tasks/bare.md"] {
+            let outcome = apply(&vault, rel, false);
+            assert!(matches!(outcome, Applied::Skipped(_)), "{rel}: {outcome:?}");
+        }
+        assert_eq!(snapshot(&vault), before, "a skip wrote something");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_dry_run_apply_reports_would_mark_and_writes_nothing() {
+        let vault = scratch("apply-dry");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let before = snapshot(&vault);
+
+        assert_eq!(apply(&vault, "tasks/hw-01.md", true), Applied::WouldMark);
+
+        assert_eq!(snapshot(&vault), before, "a dry run wrote something");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn tier_1_applies_a_complete_figure_and_files_no_card() {
+        let vault = scratch("vendor-apply");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        task(&vault, "hw-02", "zybooks:2", "active");
+        task(&vault, "hw-03", "zybooks:3", "active");
+        // Out of order, one duplicated, one at 99.6%: processed once each, in uid order.
+        let figures = [
+            figure("zybooks:3", 10.0, 10.0),
+            figure("zybooks:2", 996.0, 1000.0),
+            figure("zybooks:1", 193.0, 193.0),
+            figure("zybooks:3", 10.0, 10.0),
+        ];
+
+        let (log, warnings) = apply_vendor_completions(&vault, &figures, &ctx(), false);
+
+        assert_eq!(
+            log,
+            vec![
+                "marked done: hw-01 (zybooks 100%)".to_string(),
+                "marked done: hw-03 (zybooks 100%)".to_string()
+            ]
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("done"));
+        assert_eq!(status_of(&vault, "tasks/hw-02.md").as_deref(), Some("active"), "99.6% is not 100%");
+        assert_eq!(status_of(&vault, "tasks/hw-03.md").as_deref(), Some("done"));
+        assert!(cards(&vault, "approvals").is_empty(), "tier 1 no longer files cards");
+
+        let (again, _) = apply_vendor_completions(&vault, &figures, &ctx(), false);
+        assert!(again.is_empty(), "a second run marked again: {again:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_dry_run_tier_1_says_would_mark_done_and_writes_nothing() {
+        let vault = scratch("vendor-dry");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let before = snapshot(&vault);
+
+        let (log, _) = apply_vendor_completions(&vault, &[figure("zybooks:1", 193.0, 193.0)], &ctx(), true);
+
+        assert_eq!(log, vec!["would mark done: hw-01 (zybooks 100%)".to_string()]);
+        assert_eq!(snapshot(&vault), before);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn a_rejected_mark_done_card_closes_the_question_even_after_a_rename() {
+        for rename in [false, true] {
+            let vault = scratch(&format!("apply-rejected-{rename}"));
+            task(&vault, "hw-01", "zybooks:1", "active");
+            let card = file_card(&vault, "tasks/hw-01.md");
+            set_by(&vault, &crate::ids::rel(&vault, &card), "quinn", "status", "rejected");
+            let result = process(&vault);
+            assert_eq!(result.rejected.len(), 1, "{:?}", result.warnings);
+            assert_eq!(cards(&vault, "archive").len(), 1, "the rejected card sits in archive/");
+            let rel = if rename {
+                std::fs::rename(vault.join("tasks/hw-01.md"), vault.join("tasks/hw-01-renamed.md")).unwrap();
+                "tasks/hw-01-renamed.md"
+            } else {
+                "tasks/hw-01.md"
+            };
+            let before = snapshot(&vault);
+
+            let outcome = apply(&vault, rel, false);
+
+            assert!(is_skipped_for(&outcome, "already proposed"), "rename={rename}: {outcome:?}");
+            assert_eq!(snapshot(&vault), before, "rename={rename}: bytes or journal changed");
+            let _ = std::fs::remove_dir_all(&vault);
+        }
+    }
+
+    #[test]
+    fn a_pending_mark_done_card_is_left_alone_and_the_task_skipped() {
+        let vault = scratch("apply-pending");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let card = file_card(&vault, "tasks/hw-01.md");
+        let card_bytes = std::fs::read(&card).unwrap();
+        let before = snapshot(&vault);
+
+        let outcome = apply(&vault, "tasks/hw-01.md", false);
+
+        assert!(is_skipped_for(&outcome, "already proposed"), "{outcome:?}");
+        assert_eq!(std::fs::read(&card).unwrap(), card_bytes, "the card was touched");
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("active"));
+        assert_eq!(snapshot(&vault), before, "something was written or journaled");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn approving_the_left_card_marks_the_task_done_and_rejecting_it_keeps_it_active() {
+        // Approve.
+        let vault = scratch("apply-pending-approve");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let card = file_card(&vault, "tasks/hw-01.md");
+        assert!(is_skipped_for(&apply(&vault, "tasks/hw-01.md", false), "already proposed"));
+        set_by(&vault, &crate::ids::rel(&vault, &card), "quinn", "status", "approved");
+        let result = process(&vault);
+        assert_eq!(result.executed.len(), 1, "{:?}", result.warnings);
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("done"));
+        let _ = std::fs::remove_dir_all(&vault);
+
+        // Reject.
+        let vault = scratch("apply-pending-reject");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let card = file_card(&vault, "tasks/hw-01.md");
+        assert!(is_skipped_for(&apply(&vault, "tasks/hw-01.md", false), "already proposed"));
+        set_by(&vault, &crate::ids::rel(&vault, &card), "quinn", "status", "rejected");
+        assert_eq!(process(&vault).rejected.len(), 1);
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("active"));
+        assert!(is_skipped_for(&apply(&vault, "tasks/hw-01.md", false), "already proposed"));
+        assert_eq!(status_of(&vault, "tasks/hw-01.md").as_deref(), Some("active"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn apply_done_journals_evidence_and_nothing_judged() {
+        let vault = scratch("apply-opts");
+        task(&vault, "hw-01", "zybooks:1", "active");
+        let before = std::fs::read_to_string(vault.join("tasks/hw-01.md")).unwrap();
+
+        assert_eq!(apply(&vault, "tasks/hw-01.md", false), Applied::Marked);
+
+        let records = records_for(&vault, "tasks/hw-01.md");
+        assert_eq!(records.len(), 2, "create + one set; a judged write would add provenance records");
+        let set = &records[1];
+        assert_eq!(set.get("evidence"), Some(&evidence().to_json()));
+        for key in ["judgment", "judgment_id", "judgment_kind", "provenance"] {
+            assert!(set.get(key).is_none(), "`{key}` on a record that is not a judgment");
+        }
+        let after = std::fs::read_to_string(vault.join("tasks/hw-01.md")).unwrap();
+        assert!(!after.contains("judgment"), "{after}");
+        assert_eq!(after, before.replace("\nstatus: active\n", "\nstatus: done\n"));
         let _ = std::fs::remove_dir_all(&vault);
     }
 }
