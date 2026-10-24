@@ -3,8 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:subagent-driven-development (recommended)
 > or superpowers:executing-plans to run this plan task by task. Steps use checkbox (`- [ ]`) syntax.
 
-**Status: r2, awaiting plan review r2.** Review r1 (2026-10-24): FAIL, 4 important, 6 minor, all
-folded in (§9.1). Q-1 to Q-3 approved by the controller as recommended, with r1 M1's re-point (§2,
+**Status: r3, awaiting plan review r3.** Review r2 (2026-10-24): narrow FAIL, 2 important, 1 minor,
+folded in (§9.2). Review r1: FAIL, 4 important, 6 minor, folded in (§9.1). Q-1 to Q-3 approved by the controller as recommended, with r1 M1's re-point (§2,
 §3). No task starts before the review passes (§7).
 
 **Date:** 2026-10-24. **Lane:** deadline ordering (replaces the 20:00 evening step). **Base:** `main`
@@ -59,8 +59,9 @@ pub struct WontFit {
     pub work_minutes: i64,
     pub available_minutes: i64, // A(d)
     pub prefix: Vec<String>,    // every other item kept at removal, up to and including the overflower
-    pub kept_count: usize,      // kept dated items, in the final plan, due no later than `deadline`
-    pub kept_minutes: i64,      // their work: the time before `deadline` that goes to them
+    pub prefix_minutes: i64,    // the prefix's work at removal
+    pub overflower: String,     // the item whose addition overflowed (may be this one)
+    pub overflow_deadline: DateTime, // its deadline
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeadlinePlan { pub order: Vec<Task>, pub safe: bool, pub wont_fit: Vec<WontFit> }
@@ -121,7 +122,9 @@ before merging. The planner had no shell; T0 re-confirms every symbol and line o
   - **re-pointed** (edited, **the controller's explicit allowance, plan review r1 M1**): the last
     assertion of `cli.rs`'s `now_without_today_ranks_the_day_of_now`, and the 21:00 half of
     `surface.rs`'s `build_state_after_the_hour_leads_must_do_with_due_today`, whose 09:00 half is
-    kept as is. Each is pointed at the formula's result (§T3c). No other existing test is edited.
+    kept as is (the controller confirmed that reading after review r2). Each is pointed at the
+    formula's result (§T3c): C5 at Erste Reflexion first, S2's 21:00 half at `groups[0].label ==
+    "Overdue"` only (DS1 covers the row order). No other existing test is edited.
   `evening_rank.rs` is not edited. `#[ignore]`d tests stay ignored.
 - **Size:** every implementer task is at most about 80 changed lines; every red task about 80 lines
   of tests. A task that would exceed it stops and reports for a split.
@@ -339,15 +342,18 @@ from T3a, so the red tests fail on their assertions, not on a panic. **Red:** DP
 **Guards** (T3a already gives them): DP13, DP20.
 - **DP11** `the_walk_names_the_longest` (example (d)): X 1h, Y 2.5h, Z 1.5h, all due `D 23:59`, in
   that `rank` order; at `D 21:00` the order is X, Z, Y and `wont_fit` is exactly Y with
-  `work_minutes` 150, `available_minutes` 179, `prefix` `[X]`, `kept_count` 2 and `kept_minutes`
-  150.
+  `work_minutes` 150, `available_minutes` 179, `prefix` `[X]`, `prefix_minutes` 60, `overflower` Y
+  (it overflowed itself) and `overflow_deadline` `D 23:59`.
 - **DP12** `a_walk_tie_names_the_later_deadline_then_the_lower_pressure`: equal work, different
   deadlines: the later one is named; equal work and deadline: the one later in `rank`'s order.
 - **DP13** `an_unsafe_order_can_name_nothing` (guard): DP9's pair at 19:30: order task, lab;
   `wont_fit` empty.
 - **DP14** `the_prefix_names_a_later_overflower`: Y 2.5h and X 1h, both due `D 23:59`, at 21:00.
   With Y first under `rank`: Y is named and its `prefix` is `[X]` although X comes after it. With
-  X first: Y is named, `prefix` `[X]`.
+  X first: Y is named, `prefix` `[X]`. And DP21's set without D (plan review r2, I1): B (2h due
+  22:30, 90 minutes) is named with `prefix` `[]`, `overflower` B and `overflow_deadline` 22:30; C
+  (2.5h due 23:30) fits alone (150 of 150 minutes) but is named when K (1h due 23:59) overflows,
+  with `prefix` `[K]`, `prefix_minutes` 60, `overflower` K and `overflow_deadline` `D 23:59`.
 - **DP20** `the_plan_is_deterministic` (guard): two calls equal; reversing an input whose keys all
   differ gives the same plan.
 
@@ -358,9 +364,10 @@ Acceptance: DP11, DP12, DP14 fail at run time; DP13, DP20 green; everything else
 **Brief:** spec §2.6, §2.8, §5; T1c's tests.
 - [ ] The walk over the deadline order in integer minutes; removal by §5's key (most work, later
   deadline, later scored index); no margin.
-- [ ] Each `WontFit` records `prefix` as spec §2.6 defines it (every other item kept at that point,
-  up to and including the overflower), and, once the walk ends, `kept_count` and `kept_minutes`
-  over the final kept dated items due no later than its deadline.
+- [ ] Each `WontFit` records, **at the moment of its removal** (spec §2.6): `prefix` (every other
+  item kept at that point, up to and including the overflower), `prefix_minutes` (their work),
+  `overflower` (the item whose addition overflowed, which may be itself) and `overflow_deadline`.
+  Nothing in the record is computed after the walk ends.
 - [ ] Assembly gains `W` last, by `(deadline, scored index)`. Overdue items still follow the kept
   items in scored order (the merge is T3c's).
 
@@ -384,7 +391,8 @@ rule. **Red:** DP17, DP21, DC1. **Guards** (T3a or T3b already give them): DP15,
   and a 1h task due `D 23:59`, at 21:00: the pinned task first, the other second, nothing named.
 - **DP21** `the_merge_runs_before_wont_fit_items`: at 21:00, K 1h due 23:59, B 2h due 22:30, C 2.5h
   due 23:30 and a 0.5h overdue D: `wont_fit` B then C; the order is D, K, B, C (D fits ahead of K
-  with the margin: 30 + 60 ≤ 179 − 30).
+  with the margin: 30 + 60 ≤ 179 − 30). The walk: B overflows itself (120 > 90); C fits (150 ≤
+  150); K overflows (210 > 179) and C, the longest of C and K, is removed.
 - **DC1** (in `cli.rs`'s tests) `an_unsafe_run_writes_the_new_order_and_no_new_line`: a temp-dir
   copy of `vault-s1` with a 1h probe due `D 23:59` (an `id:`, `due`, `effort_hours`);
   `run_with_at` with `--today 2026-08-28 --now 2026-08-28T21:00`: the first Must do line of
@@ -406,8 +414,8 @@ allowance; Q-1.
 - [ ] `cli.rs`'s run path: `designate_today` (and anything else T0 found reading `ranked` for the
   designation) is given `rank(&tasks, today, &cal)`; `render_today` and the gauge keep `ranked`.
 - [ ] Delete the tests T0 recorded as **retire**. **Re-point** (§2): C5's last assertion now
-  expects Erste Reflexion first at 21:00; S2's 21:00 half now expects `groups[0].label ==
-  "Overdue"` led by Erste Reflexion, and its 09:00 half is untouched. Test code only (Q-1). The
+  expects Erste Reflexion first at 21:00; S2's 21:00 half now asserts only `groups[0].label ==
+  "Overdue"` (DS1 covers the row order), and its 09:00 half is untouched. Test code only (Q-1). The
   commit message names Quinn's Q5 ruling and the controller's re-point allowance.
 
 Acceptance: DP1-DP21 and DC1 green; every test T0 recorded as keep green unedited, the two
@@ -505,10 +513,15 @@ Acceptance: DS1-DS5, DS12, DS13 green; T1o's file, `surface_oracle.rs` and every
   `effort_hours` key counts the same.
 - **DS10** `a_placeholder_wont_fit_item_reads_no_time_estimate_yet`: the named item's own estimate
   is the placeholder: "May not fit before 11:59 pm · no time estimate yet".
-- **DS11** `fit_why_states_the_time_left_after_the_others`: Y's `fit_why` is "2.5h left; your 3.0h
-  before it's due go to 2 others that then finish on time." (179 minutes print as 3.0h, `round1`;
-  `kept_count` 2). With one other: "go to 1 other that then finishes on time." With none (DP21's
-  B): "2.0h left; you have 1.5h before it's due."
+- **DS11** `fit_why_comes_from_the_prefix_at_removal` (plan review r2, I1), on DP21's set at 21:00:
+  - **C**, which fits alone (150 of 150 minutes) but was removed when K overflowed: "2.5h left;
+    doing it would leave 1 other (due 11:59 pm) late." It must **not** read "you have 2.5h before
+    it's due", which would read as fitting;
+  - **B**, which does not fit alone (120 minutes of work, 90 available): "2.0h left; you have 1.5h
+    before it's due.";
+  - example (d)'s **Y**, which overflowed itself: "2.5h left; doing it would leave 1 other (due
+    11:59 pm) late.";
+  - an overflower with a bare-date due prints "(due tonight)" or "(due Sat)", never a clock time.
 - **DS14** `needs_enrichment_alone_is_not_a_placeholder` (guard after T4b): X with a real
   `effort_confidence: medium` and `needs_enrichment: true`: Y reads "Won't fit before 11:59 pm".
 
@@ -519,9 +532,13 @@ Acceptance: DS6-DS11 fail at run time; DS14 green; everything else green. Size: 
 **Brief:** spec §3, §7; Quinn's Q7 and Q10; T1g's tests.
 - [ ] **Bare date** (one helper): the raw `due` value in `metas` has no time part.
 - [ ] `row`: `fit_text` and `fit_why` for `W` rows only, per DS6-DS11, using T4b's placeholder
-  helper and the `WontFit` record (`prefix`, `kept_count`, `kept_minutes`, `available_minutes`).
-  Times print as "11:59 pm", "8:30 am"; another day prefixes its short weekday (`WEEKDAYS`); a bare
-  date today is "tonight".
+  helper and the `WontFit` record. `fit_why`: when `work_minutes > available_minutes`, "<work> left;
+  you have <available> before it's due."; otherwise "<work> left; doing it would leave 1 other
+  (due <overflow_deadline>) late." (Moore–Hodgson removes one item per overflow, so keeping this
+  one makes exactly the overflow miss at that point; the overflower is `overflower`, or this item
+  when it overflowed itself, and the other is then one of `prefix`.) Times print as "11:59 pm",
+  "8:30 am"; another day prefixes its short weekday (`WEEKDAYS`); a bare date (this item's or the
+  overflower's) prints "tonight" or the weekday alone.
 - [ ] No new wording outside these fields; `render.rs` is untouched (Q7: no `today.md` line).
 
 Acceptance: DS1-DS14 green; T1o's file, `surface_oracle.rs` and every existing `surface.rs` test
@@ -608,7 +625,8 @@ Acceptance: `scripts/ci/eol-check.ps1` clean; no source file in the diff. Size: 
 | §4, Q7 | `today.md` in the new order, no new line | T3c | DC1 |
 | §5 | Integer minutes; total tie-breaks; deterministic | T3a-T3c | DP2, DP12, DP20 |
 | §6, Q5 | The 20:00 step deleted; hour tests retired or re-pointed by name; plumbing kept | T0, T3c | T0's record; T7 |
-| §7, Q7 | Row line, bare dates, weekday, the explanation with the time left after the others, meter line, words never used | T4b, T4c, T5 | DS6, DS7, DS8, DS11, DS12; T5 screenshots |
+| §7, Q7 | Row line, bare dates, weekday, meter line, words never used | T4b, T4c, T5 | DS6, DS7, DS8, DS12; T5 screenshots |
+| §7 (edited after the ruling, r2 I1) | The explanation from the prefix at removal: "you have Xh" only when the item does not fit alone, else "would leave 1 other (due …) late" | T3b, T4c | DP11, DP14, DS11 |
 | §8 | Goldens and references byte-identical, never regenerated, at four moments | T1o | DO1, DO2; `oracle.rs`, `surface_oracle.rs` unedited |
 | §8, M8 | The oracle file is contract-list work | T1o, T7 | `contract-engineer` wrote it; `contract-reviewer`'s read |
 | §9 | `rank` model-free; no note field, no journal record | all | T7 |
@@ -645,15 +663,25 @@ here, dated, newest first.)*
 - **2026-10-24, the controller.** Q-1 to Q-3 approved as recommended. The re-point of C5's last
   assertion and of S2's 21:00 half is explicitly allowed (plan review r1 M1); §2 records it.
 
+### 9.2 Plan review r2 (narrow FAIL; answered 2026-10-24)
+
+1. **I1, the explanation's source:** `WontFit` drops `kept_count` and `kept_minutes` and records, at
+   removal, `prefix`, `prefix_minutes`, `overflower` and `overflow_deadline` (header, T3b). "You have
+   Xh before it's due" is printed only when the item does not fit alone; otherwise "doing it would
+   leave 1 other (due …) late" (T4c). DP14 pins DP21's B and C records; DS11 tests C (fits alone,
+   removed when K overflows), B and Y. The spec's §7 and §10 follow, and its status line says the
+   explanation was edited after the ruling.
+2. **I2, the S2 re-point:** its 21:00 half asserts only `groups[0].label == "Overdue"`; DS1 covers
+   the row order (§2, T3c). The controller confirmed the 09:00 reading.
+
 ### 9.1 Plan review r1 (FAIL; answered 2026-10-24)
 
 1. **I1, the retire list:** R4, R7 and R15 join R3, R14, C3 and S1 (T0, §2).
 2. **I2, guards:** DP13, DP15, DP16, DP18, DP19 and DP20 are marked guards; only DP11, DP12, DP14,
    DP17, DP21 and DC1 are red in their tasks (§2 defines a guard). DP21 was redesigned so the merge,
    not only `W`-last, decides it.
-3. **I3, the explanation:** `WontFit` carries `kept_count` and `kept_minutes`; DS11 states the time
-   left after the others ("2.5h left; your 3.0h before it's due go to 2 others that then finish on
-   time"), with the one-other and no-other forms. The spec's §7 example follows.
+3. **I3, the explanation:** answered in r2 with `kept_count` and `kept_minutes`; **superseded by
+   review r2's I1** (§9.2): the explanation now comes from the prefix at removal.
 4. **I4, sizes:** the walk (T1c, T3b) is split from the merge (T1d, T3c); the meter (T1f, T4b) from
    the row line (T1g, T4c).
 5. **M1:** C5's last assertion and S2's 21:00 half are re-pointed, not deleted (§2, T3c).

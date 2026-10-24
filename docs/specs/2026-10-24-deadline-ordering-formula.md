@@ -6,6 +6,12 @@ Review r1 failed (4 important, 9 minor), review r2 failed narrowly (2 important,
 r3 passed (one nit, folded into §10); every finding is mapped in §13. Its plan is
 `docs/plans/2026-10-24-deadline-ordering-plan.md`.
 
+**Edited after the ruling, for Quinn to see** (2026-10-24, from plan reviews r1 I3 and r2 I1): the
+won't-fit row's **explanation** in §7, and the walk's record that feeds it in §10. The explanation is not one of Q7's ruled strings ("Won't fit before 11:59 pm", "Won't fit by
+Wed", the meter line), and none of those changed. The old example could read as if an item fitted
+when it did not; the new wording says either "you have 1.5h before it's due" (it cannot fit alone)
+or "doing it would leave 1 other (due 11:59 pm) late" (it fits alone, but not with the others).
+
 It answers Quinn's question on the evening rule ("Why 8pm? Is there a general formula we can come
 up with to decide what should come first based on how long it will take and when it is due?").
 Quinn chose to ship the 20:00 rule now and to spec the general formula to replace it later. The
@@ -440,10 +446,17 @@ Plain, specific, never an instruction to give up. Knowlu names the item; the stu
   - a placeholder in play (§3): "May not fit before 11:59 pm · no time estimate yet" (its own), or
     "May not fit before 11:59 pm · depends on 2 items with no time estimate yet" (others in its
     prefix at removal, before or after it).
-- **Its explanation** (on demand, beside the start-by `why`, which is unchanged) states the time
-  left after the others (plan review r1, I3): "2.5h left; your 3.0h before it's due go to 2 others
-  that then finish on time." With one other: "go to 1 other that then finishes on time." With none:
-  "2.0h left; you have 1.5h before it's due." Your time counts evenings to midnight (§2.3).
+- **Its explanation** (on demand, beside the start-by `why`, which is unchanged) comes from the
+  walk's record at the item's removal (§2.6; plan reviews r1 I3 and r2 I1; **edited after the
+  ruling**, see the status line):
+  - when the item does not fit alone (its work exceeds the time before its deadline): "2.0h left;
+    you have 1.5h before it's due.";
+  - otherwise, when it fits alone but was removed at an overflow: "2.5h left; doing it would leave
+    1 other (due 11:59 pm) late." The time is the overflowing item's deadline (a bare date prints
+    "tonight" or the weekday alone). Moore–Hodgson removes one item per overflow, so keeping this
+    one makes exactly that overflow miss. It never says "you have 2.5h" of an item that fits alone,
+    which would read as fitting.
+  Your time counts evenings to midnight (§2.3).
 - **On the meter,** when `W` is not empty, a line under the existing sentence: "If something has to
   give: Lab 3 (3.0h). Everything else fits by its deadline." With more than one: "If something has
   to give: Lab 3 and Essay draft (5.5h)." With a pinned Must do item: "Everything else fits by its
@@ -545,9 +558,10 @@ page or run `rank` with dated Must do work at a clock time (app tests resolve a 
 (what `rank_at` returns), whether step 0 found today's order safe, and for each `W` item its slug,
 deadline, work minutes, the minutes `A(d)` gave it, and **the slugs of every other item in its
 prefix at removal**: all items kept at that point, up to and including the one whose addition
-overflowed, whether before or after it in the order (§2.6), plus the count and work of the kept
-dated items due no later than it (for §7's explanation). `rank_at` becomes `plan_at(..).order`. `surface.rs` reads only that, plus the
-frontmatter it already holds; it never recomputes the walk.
+overflowed, whether before or after it in the order (§2.6), plus, from that same moment, the
+prefix's work, the overflowing item and its deadline (for §7's explanation). Nothing in the record
+is computed after the walk ends. `rank_at` becomes `plan_at(..).order`. `surface.rs` reads only
+that, plus the frontmatter it already holds; it never recomputes the walk.
 
 | Task | What | Agent | Why | After |
 |---|---|---|---|---|
