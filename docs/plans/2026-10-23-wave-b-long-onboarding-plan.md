@@ -8,7 +8,7 @@
 A10 assigned before F11 (§14.44); a removed course's feed items left out by ingest, new task F6c
 (§14.45); shared fragments, the pin form and one source of pairs (§14.46); the kept grades count and class
 times on removal (§14.47); F10 review r2's owners and F5b's three retirements (§14.48); an unreadable file never resumes past
-the school (§14.49).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
+the school (§14.49); a failed first grades and a gate that fails closed (§14.50).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
 record is in §13 (dated 2026-10-24) and its amendments in §14.42: seven premises did not hold as
 written, and each is amended where it lands (the lanes not yet merged, `grades` and course notes,
 the entitlement-refused sync, the feed host, the sync hold, `mode_device`, a `campus.yaml` race).
@@ -772,8 +772,24 @@ promised, and its "still coming" line until each handed-over job is done.
     stays `pending` behind the hold. **A sync that met a held `sync.lock` writes no status**
     (`sync.rs:2524-2528`), so only the stale-stamp rule catches it; the item stays `pending` for the
     next slot.
+- **First grades, from the step row** (F9 review r1, §14.50). The gate's "first grades" reads the
+  slot's bare `grades` row (the engine child's step, with its real exit code): exit 0 marks it
+  (F9's `first_grades_marked`), a non-zero exit makes it `failed` (F9's `first_grades_failed`,
+  mapped by F8g), and a `(skipped:` or `(not yet:` row leaves it `pending`. **The same blind spot as
+  `sync`'s, noted, not fixed:** the engine can also skip at exit 0 under the bare name `grades`
+  (for example `grades (skipped: the vault is busy…)` printed by the child itself), which would mark
+  first grades with nothing written. In onboarding this is barely reachable, because the queue is
+  serial and holds the notes gate around every slot, so nothing else holds the vault while its
+  `grades` runs. Unlike `sync`, `grades` has no status record to read instead; if it ever shows up,
+  the fix is a status line from the engine, not a guess from the step name.
 - **Named jobs, each with a state:** `pending`, `running`, `done` (with its proof numbers), `failed`
   (a closed-set reason and its fix), `skipped` (the student's), `held` (waiting for the entitlement).
+  **The closed set's first written entry** (§14.50; owned by F8g, as constants in
+  `onboarding_jobs.rs`, so F9's caller, F11's screens and F1 share one spelling):
+  `grades_read_failed`, with the fix "Knowlu couldn't read your grades this time. It will try again
+  on its next run, or press Try again now. If it keeps failing, reconnect your school in Settings
+  after setup." Every other `failed` reason this plan names (for example "waiting to reach your
+  account", the sync status's `last_error`) joins the same constants as its task builds it.
   States are written to `onboarding.json` as they change, so a quit loses at most the running job.
 - **Device-side before payment, everything else after.** `school.capture` and `school.preview` need
   no entitlement and run at once. Every job that writes the vault, stores on the account or runs a
@@ -1942,6 +1958,15 @@ job runners as a trait so tests pass fakes.
     M3). Also in test 6 (the
     gate): a `grades (not yet: …)` row never marks "first grades", and a `grades (skipped: …)` row
     leaves it pending.
+28. **First grades from the slot's rows (F9 review r1, §14.50; F8g)**, in `app/tests/onboarding_jobs.rs`
+    with fake slot summaries: a bare `grades` row at exit 1 makes `first.grades`
+    `Failed { reason, fix }` equal to the two constants, and F9's output lists it with that fix and
+    does not count it as done; a later fake slot with `grades` at exit 0 makes it `Done`; a
+    `grades (skipped: …)` or `grades (not yet: …)` row leaves the state unchanged; "Try again" on
+    it enqueues exactly one slot. **`onboarding_status` never hands F9 an empty list it did not
+    read** (F9 review r1, the implementer's ruling 4; F2b): with the jobs read failing (an
+    unreadable queue state, through a fake), `onboarding_status` answers `{ok: false, error}` and
+    no gate output at all, never `{ok: true}` with an empty item list, which would open the gate.
 Tests 21, 22 and 26 touch the real Credential Manager, so the test-writer's sign-off rule for such tests
 applies (the controller gives it at dispatch); every other test here uses fakes.
 Acceptance: as S1's. Size: M (test files; the cap is for implementer and console-ui tasks).
@@ -1975,7 +2000,9 @@ Split so that each edits about 80 lines or fewer of one file (review r2 I6, revi
 - **F2b (implementer), the commands.** F1's test 9's finish bullets and tests 12, 17's command half
   and 19; §4.5, §4.10. The `onboarding_status`, `onboarding_answer` (saves each answer to the answers
   file before enqueuing its jobs), `onboarding_skip` and `onboarding_retry` commands (registered in
-  F5), each a thin wrapper; and the three exits of §4.10's table, each an inner function over seams
+  F5), each a thin wrapper. **`onboarding_status` fails closed** (F9 review r1; §14.50; F1 test
+  28's second half): when the jobs cannot be read, it answers `{ok: false, error}` with no gate
+  output, never an empty item list, because F9 opens the gate on an empty list; and the three exits of §4.10's table, each an inner function over seams
   (drain, sign-out, relaunch, exit) so F1 drives them with fakes, and a `#[tauri::command]` wrapper
   passing the real ones:
   - `onboarding_quit`: stop, drain, save, stamp `quit_at`, `state::quit_flush` (10 s) exiting in its
@@ -2472,6 +2499,14 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   (about 70 lines).
 - **F8g, the slot runners.** Both hold the notes gate for their run (§4.3), and after each, F8e reads
   `cs.sync` for "first sync" and `account_settled`.
+  - **First grades** (F9 review r1, §14.50; F1 test 28): after each slot, F8g reads the summary's
+    `(name, exit)` rows with F9's `first_grades_marked` and `first_grades_failed`. Marked makes
+    `first.grades` `Done`; failed (and not marked) makes it `Failed { reason: GRADES_READ_FAILED,
+    fix: GRADES_READ_FAILED_FIX }`, the closed-set constants of §4.3; neither leaves it as it was.
+    A later slot whose `grades` exits 0 turns a `Failed` into `Done`, and "Try again" on the item
+    enqueues the next `NoRank` (or, after step 10, `slot.first_full`) slot. At finish, a failed
+    first grades goes into `handover` like any unfinished item, cleared by the first slot whose
+    `grades` exits 0.
   - Both call `scheduler::run_slot_inner_scoped(&cs, &sch, Some(&app), false, scope)` with the
     queue's own `AppHandle` (review r5, I-3), so the grades capture and the mail pass exist; with no
     tray, `tray::set_state` does nothing (`tray.rs:150-151`).
@@ -2483,7 +2518,7 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
     (`scheduler.rs:966`), so **no second mail step** is added (review r3, M1).
   - A summary with `reason` set (a refusal: script mode, another device) is the job's `failed` with
     that reason, never `done`; F3's test 1 makes it unreachable for a step-2 vault.
-  Size: S (about 40 lines).
+  Size: S (about 55 lines with the first-grades mapping and its constants, §14.50).
 - **F8d, the remaining runners.** `mail.setup`, `mail.canary` and `mail.first_pass` (the mail
   commands' inner functions); `google.gmail_first_read` and `google.calendar_read`;
   `coursework.discover`. Size: S (about 70 lines).
@@ -3866,4 +3901,29 @@ no `school`. A restored, entitled account with a corrupt file would resume past 
 - **Tasks changed:** F2a (the rule in `earliest_unproven`; its brief), F1 test 2 (the ladder and the
   new tail), §4.5's unreadable-file bullet. F2a's I-1 ruling (a session present and a file step of
   2 or below resumes at 3) is recorded in F2a's brief too.
+
+### 14.50 A failed first grades, its reason, and a gate that fails closed (2026-10-24)
+
+From the F9 review r1 (`docs/reports/2026-10-24-wave-b-f9-review-r1.md`, on `feat/o3-f9`), after
+the controller's ruling that F9 keeps `first_grades_marked` (a bare `grades` row at exit 0) and adds
+`first_grades_failed` (a bare `grades` row at a non-zero exit):
+1. **The caller's mapping goes to F8g**, not F2b, because F8g already reads each slot's result into
+   the gate's items (`first sync` and `account_settled` after each slot). After each slot: marked
+   gives `first.grades` `Done`; failed and not marked gives `Failed { reason, fix }`; neither leaves
+   it as it was; a later exit-0 `grades` turns `Failed` into `Done`; "Try again" enqueues the next
+   `NoRank` or `slot.first_full`; at finish a failed first grades goes to `handover` like any
+   unfinished item. **The closed set gains its first written entry** (§4.3), as constants in
+   `onboarding_jobs.rs`: reason `grades_read_failed`, fix "Knowlu couldn't read your grades this
+   time. It will try again on its next run, or press Try again now. If it keeps failing, reconnect
+   your school in Settings after setup." Each part is something the student can do or can count
+   on: an automatic retry, a button, and a Settings action that exists after the reveal (the
+   school row, S6b; Settings is unreachable during onboarding, hence "after setup"). F1 test 28.
+2. **M3, noted beside §4.3's sync note:** the engine can skip at exit 0 under the bare name
+   `grades` (the vault busy), which would mark first grades with nothing written. Barely reachable
+   in onboarding, where the queue is serial and holds the notes gate around every slot; no fix in
+   wave B, and if it appears, the fix is an engine status line, not a guess from the step name.
+3. **`onboarding_status` fails closed (F2b):** a jobs read that fails is `{ok: false, error}` with
+   no gate output, never an empty item list, which F9 would open on. F1 test 28's second half.
+Tasks changed: F8g (the first-grades mapping and the closed-set constants), F2b (`onboarding_status`
+fails closed), F1 (new test 28), §4.3 (the first-grades note and the closed set's first entry).
 
