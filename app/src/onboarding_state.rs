@@ -386,15 +386,22 @@ pub fn load_answers(data_dir: &Path) -> Result<Option<Answers>, String> {
     match std::fs::read_to_string(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: cannot be read ({e})", path.display())),
-        Ok(text) => serde_json::from_str::<Answers>(&text).map(Some).map_err(|e| format!("{}: is not an answers file ({e})", path.display())),
+        Ok(text) => serde_json::from_str::<Answers>(&text).map(Some).map_err(|e| {
+            // Category, line and column only: serde's own text can quote the file's content (a course label).
+            format!("{}: is not an answers file ({:?} at line {}, column {})", path.display(), e.classify(), e.line(), e.column())
+        }),
     }
 }
 /// Temp file and rename in app data (never a vault file), as [`save_state`].
 pub fn save_answers(data_dir: &Path, a: &Answers) -> Result<(), String> {
     write_atomic(&answers_path(data_dir), &serde_json::to_value(a).map_err(|e| e.to_string())?)
 }
+static ANSWERS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Load (or start empty), change, save: how each answer is written the moment it is given.
 pub fn update_answers(data_dir: &Path, change: &dyn Fn(&mut Answers)) -> Result<(), String> {
+    // Held across load, change and save, so a Remove and a `save_preview` never overwrite each other.
+    let _held = ANSWERS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     // An unreadable file is an error here: it is never started over from empty and written back.
     let mut a = load_answers(data_dir)?.unwrap_or_default();
     change(&mut a);
@@ -505,9 +512,10 @@ fn earliest_unproven(c: &dyn ResumeChecks, has_school: bool) -> u8 {
 /// After the student confirms the school at step 3 (the state then holds a confirmed `school`): moves
 /// the state to the earliest step past 3 the checks do not prove and returns the steps it passed
 /// through, each `already-done` with its proof (§4.7). Nothing changes while the school is
-/// unconfirmed, the state is not at step 3, or the restore brought no courses (step 3 still needs its capture).
+/// unconfirmed, the state is not at step 3, the restore brought no courses (step 3 still needs its
+/// capture), or the answers file is absent or unreadable (step 3 is asked again, never skipped).
 pub fn advance_after_school(state: &mut OnboardingState, checks: &dyn ResumeChecks) -> Vec<u8> {
-    if state.step != 3 || !school_apply_may_run(state) { return Vec::new(); }
+    if state.step != 3 || !school_apply_may_run(state) || !checks.answers_ok() { return Vec::new(); }
     let next = earliest_unproven(checks, true);
     if next <= 3 { return Vec::new(); }
     state.step = next;

@@ -1477,3 +1477,59 @@ fn test_12_save_preview_given_null_or_a_non_object_is_an_error_that_changes_no_b
         assert_eq!(std::fs::read(answers_path(&d)).unwrap(), before, "{bad} changed the answers file");
     }
 }
+
+// ---- F2d review r1: the update lock, the re-ask, the error text, the no-session case --------------------------
+
+#[test]
+fn test_01_two_concurrent_update_answers_calls_both_land() {
+    let d = scratch("t01-concurrent");
+    let threads: Vec<_> = (0..16)
+        .map(|i| {
+            let d = d.clone();
+            std::thread::spawn(move || update_answers(&d, &move |a| a.zybooks_ignore.push(format!("KEY-{i}"))).expect("update"))
+        })
+        .collect();
+    for t in threads { t.join().unwrap(); }
+    let mut got = load_answers(&d).unwrap().expect("the file").zybooks_ignore;
+    got.sort();
+    let mut want: Vec<String> = (0..16).map(|i| format!("KEY-{i}")).collect();
+    want.sort();
+    assert_eq!(got, want, "no update was lost to an overlapping load, change and save");
+}
+
+#[test]
+fn test_01_an_unreadable_answers_error_names_category_line_and_column_never_the_files_text() {
+    let d = scratch("t01-errtext");
+    std::fs::write(answers_path(&d), "{\"courses\": \"Quilting Basics, Tuesdays\"}").unwrap();
+    let e = load_answers(&d).unwrap_err();
+    assert!(!e.contains("Quilting") && !e.contains("Tuesdays"), "the error quotes the file: {e}");
+    assert!(e.contains("line 1") && e.contains("column"), "{e}");
+}
+
+#[test]
+fn test_17_a_confirmed_school_does_not_advance_past_step_3_while_the_answers_are_absent_or_unreadable() {
+    let d = scratch("t17-noadvance");
+    save_state(&d, &unfinished(3)).unwrap();
+    let all = Checks { entitled: true, mailbox: true, google: true, login: true, week: true, ..Checks::restored(3) };
+    let mut st = resume(load_state(&d), &all).state.expect("a state");
+    st.school = Some(School { confirmed: false, ..a_school() });
+    confirm_school(&mut st);
+    all.answers.set(false);
+    assert_eq!(advance_after_school(&mut st, &all), Vec::<u8>::new(), "no answers: step 3 is asked again");
+    assert_eq!(st.step, 3);
+    all.answers.set(true);
+    assert_eq!(advance_after_school(&mut st, &all), vec![4, 5, 6, 7, 8]);
+    assert_eq!(st.step, 10);
+}
+
+#[test]
+fn test_17_no_session_and_no_answers_keeps_step_2_now_and_asks_step_3_after_the_sign_in() {
+    let d = scratch("t17-nosession-noanswers");
+    save_state(&d, &unfinished(8)).unwrap();
+    let checks = Checks { session: Cell::new(false), answers: Cell::new(false), ..Checks::restored(3) };
+    let r = resume(load_state(&d), &checks);
+    assert_eq!(r.step, 2, "the sign-in comes first");
+    assert_eq!(r.state.as_ref().unwrap().step, 3, "the step the answers served, for after the sign-in");
+    checks.session.set(true);
+    assert_eq!(resume(load_state(&d), &checks).step, 3);
+}
