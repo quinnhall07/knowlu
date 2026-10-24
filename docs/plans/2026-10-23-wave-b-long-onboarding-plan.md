@@ -7,7 +7,7 @@
 `cb3b661`); S-A phase 1 PASS (§13), so T2 (phase 2, WebView2) is next; F10's review gaps in §9
 A10 assigned before F11 (§14.44); a removed course's feed items left out by ingest, new task F6c
 (§14.45); shared fragments, the pin form and one source of pairs (§14.46); the kept grades count and class
-times on removal (§14.47).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
+times on removal (§14.47); F10 review r2's owners and F5b's three retirements (§14.48).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
 record is in §13 (dated 2026-10-24) and its amendments in §14.42: seven premises did not hold as
 written, and each is amended where it lands (the lanes not yet merged, `grades` and course notes,
 the entitlement-refused sync, the feed host, the sync hold, `mode_device`, a `campus.yaml` race).
@@ -2131,7 +2131,8 @@ mode. Size: XS (about 15 lines).
 ## F5. Command lists (mechanical)
 
 Into the console's `generate_handler!` list: `onboarding::campus_search`,
-`onboarding::timezone_for_state` (kept for Settings), `onboarding::store_credentials`,
+`onboarding::store_credentials` (**not** `timezone_for_state`: no page calls it and Q-B12 retired
+its suggestion; F5b, §14.48),
 `onboarding::discover_coursework`, `lms_link::open_lms_window`, `capture_courses`,
 `close_lms_window`, F8l's `onboarding_capture_link` and `onboarding_paste_link` (**never**
 `lms_link::capture_calendar_link` or `paste_calendar_link`, which store under the pending session;
@@ -2154,6 +2155,22 @@ caller in the shell's page (each named in F10's report); recount and pin. F10 it
   `paste_calendar_link` and `capture_calendar_link`, the shell's pending-target commands, which no
   onboarding screen may call (F11t). Their functions stay unless a later task removes them with
   their tests: `capture_calendar_link_with` keeps today's `finish` arm (F8la).
+- **Retired from the shell's list, never moved** (F10 review r2, Minor 1; §14.48):
+  - `account::open_external` (shell list, `main.rs:107`): its one caller was the old wizard's
+    Google button; every Google consent now opens from Rust (`google_sign_in`, `google_connect`),
+    and the console list must still not name it (`app/tests/handler_lists.rs:50-51`). The function
+    stays in `account.rs` (contract list, not a `mechanical` edit); its removal is a later
+    contract-engineer cleanup, out of wave B.
+  - `onboarding::retarget_credentials` (shell list, `main.rs:107`): it existed because the old
+    wizard stored the coursework logins before the vault's name was final (R-P4a-23). Now the vault
+    and its name exist from step 2 (F3) and step 8 stores the logins against that vault, so no
+    caller remains. Off the list; the function and its test (`app/tests/onboarding.rs:417-441`)
+    stay until F13's follow-up list names their deletion.
+  - `onboarding::timezone_for_state`: no page has ever called it, and Q-B12 retired R-OB-4's
+    timezone suggestion (the zone is Windows'). It joins neither list (F5 no longer adds it) and
+    leaves the shell's; the function and its tests stay on the same follow-up.
+  F5b's pin asserts all three are on neither list, and `static_assets.rs:2994-2995`'s command list
+  is updated to match.
 Size: XS.
 
 ## F6a, F6b, F6c. The answers into the vault, each file once (test-writer, then implementer)
@@ -2554,6 +2571,14 @@ no caller, for F5b. C1's rulings on those panels are carried or retired per §9'
     allow-list of the zyBooks and VHL login fields' ids when F11c adds them, as
     `static_assets.rs:516-535` does today; any other `type="password"` fails. **This test is never
     deleted**, only its allow-list extended;
+  - **credentials leave page memory the moment the write returns** (spec §5, `clearCredentialFields`;
+    F10 review r2, Important 2; §14.48): step 8's handler that calls `store_credentials` clears the
+    zyBooks or VHL username and password fields in **both** arms of the result (ok and refused),
+    before anything else it does with the answer, by calling `clearCredentialFields` (or one
+    onboarding function of that name); no credential value is assigned to anything that outlives
+    the handler (no module-level variable, no saved state, no `onboarding_answer` payload), and the
+    fields are read only inside that handler. The pin reads the handler's text for the call in each
+    arm and scans `onboarding.js` for a password field's value assigned outside it;
   - step 4 on a `comp` entitlement shows "nothing to pay" and no trial terms ("no free plan after
     the trial" is absent from that state's render);
   - step 5's skip shows the risk-12 line ("If your school's rules don't allow forwarding your
@@ -2577,7 +2602,11 @@ count. Each piece edits about 80 lines or fewer of code and adds fixture renders
 `?fixture=` path) for its steps' states. Acceptance for each: its share of F11t's tests passes.
 - **F11a:** the step frame (why, ask, proof, the states of §4.1, Finish later, Sign out, the
   "finishing <job>…" state of §4.10) and the rail; and one line in `console.js`'s `renderFirstRun`
-  (`:1542`) so a `(not yet:` row reads as skipped (review r6, M1). Size: S (about 70 lines of `onboarding.js`, plus
+  (`:1542`) so a `(not yet:` row reads as skipped (review r6, M1). **The shots hook** (F10 review r2,
+  Important 3; §14.48): `scripts/console-shots.py:91` calls `KNOWLU_SHOTS.startWizard`, which F10
+  removed, so the shots run aborts (not a CI gate). F11a adds `KNOWLU_SHOTS.startOnboarding(step)`,
+  which opens the step frame at a given step against the fixture state, with a static pin; F12
+  repoints the script at it (the script is F12's, beside `wizard-check.py`). Size: S (about 70 lines of `onboarding.js`, plus
   CSS).
 - **F11e (two pieces, F11e1 and F11e2; "F11e" elsewhere means both):** steps 3 and 4, including the restored install's school suggestion (§4.7) and the feed
   kept on this device (§4.11), step 4 through `onboarding_checkout` and `onboarding_entitlement`; and
@@ -2605,7 +2634,9 @@ count. Each piece edits about 80 lines or fewer of code and adds fixture renders
   sentence and its Try again, as the console does (§13.1). **Step 8's C1 rules** (F10's review,
   §4.2): Next and the site's Skip disabled while discovery is in flight (R-C1-55); a blank row is
   never sent as ignored, and a row's course is sent as its key, never a slug made on the page
-  (R-OB-1); the zyBooks and VHL password fields added to F11t's allow-list by id. Size: S
+  (R-OB-1); the zyBooks and VHL password fields added to F11t's allow-list by id, and both login
+  fields cleared the moment `store_credentials` returns, ok or refused (spec §5,
+  `clearCredentialFields`; §14.48). Size: S
   (about 80 lines; the same rule, step 10 moving out).
 - **F11d:** the reveal, and the main page's "still coming" line from `handover`, each item dropped at
   its own signal; the `older_mail` line's "after the next scheduled run" case when a batch closed
@@ -2617,14 +2648,23 @@ count. Each piece edits about 80 lines or fewer of code and adds fixture renders
 including a quit and resume at steps 3, 4 and 10, a skip at 5 and 8, the reveal with one item
 still coming, and Open Knowlu handing it over; and (F10's review) one course removed at step 3's
 proof, one walk through "my school isn't listed" to the paste, and a `comp` account's step 4. Run
-in the repository's `.wv/` venv. **Its pass is the O3 merge gate** (§8). Size: M.
+in the repository's `.wv/` venv. **Its pass is the O3 merge gate** (§8). **Also the shots script**
+(F10 review r2, Important 3; §14.48): `scripts/console-shots.py:91`'s `KNOWLU_SHOTS.startWizard`
+call becomes F11a's `KNOWLU_SHOTS.startOnboarding(step)`, one shot per shown step, run once to show
+it no longer aborts. Size: M.
 
 ## F13, F14, F15. Docs, review, live proof
 
 - **F13 (docs-keeper):** `docs/reference/app.md` (onboarding mode, `onboarding.json` and
   `onboarding-answers.json`, the two pending feed credential targets and when each is deleted, the
   queue and its local lane, the scheduler's stop, the commands, the picker flag), `docs/reference/engine-commands.md` (`onboarding`), `app/README.md`,
-  HANDOFF's O3 row; drafts of O3's amendments (§9 rows A7-A13) for Quinn's signature.
+  HANDOFF's O3 row; drafts of O3's amendments (§9 rows A7-A13) for Quinn's signature. **Stale text
+  found by F10's review r2** (§14.48): `app/README.md:293` (`startWizard`, "seven panels") is
+  F13's. The `account.rs:2100` doc comment (`#wiz-google`) is on the contract list, so docs-keeper
+  does not edit it: it goes to the next contract-engineer task that touches `account.rs` (F2c or
+  S5, whichever lands later), named in F13's report. F13's report also lists the follow-up
+  deletions F5b leaves: `open_external`, `retarget_credentials` and `timezone_for_state`, with
+  their tests.
 - **F14 (reviewer):** the lane against this plan and spec §1; report
   `docs/reports/2026-10-2X-o3-long-onboarding-review.md`.
 - **F15 (main session, Quinn's go, after S10):** a dev build with both lanes, against staging, on a
@@ -2692,7 +2732,7 @@ behaviour, before it merges.
 | A7 | Cloud design §4.2 and §11a's "keep nothing" rows | the long onboarding's steps, payment's place, the reveal | Q2, Q7, Q12, Q13 | F13 | O3 |
 | A8 | Email spec D6, §4.2 step 6 | school mail is set up inside onboarding, not at the console's first open | Q13 | F13 | O3 |
 | A9 | Gmail connect spec | step 6's place; one consent for Gmail and Calendar (O2 drafts its half) | Q4, Q8 | F13 | O3 |
-| A10 | C1, C1b, C1c specs; C1's rulings R-C1-40, -41, -42, -47, -48, -51, -55 and R-OB-1, -2, -4 | each carried, with the task that carries it (corrected after F10's review, 2026-10-24, which found the page halves unassigned): **R-C1-40/41** the incognito fallback (S4b) and, the page's half, `close_lms_window` on leaving step 3 (F11e1); **R-C1-42** the second-press capture trigger, never on open or on the identity provider's page (F11e1, F11t); **R-C1-47/48** in F6a, F6b; **R-C1-51** the data half in F6a, F6b and the page's half, the removable course list at step 3's proof (F2d, F8b, F7a's `by_course`, F11e2, F11t); **R-C1-55** the casing pins and "discovery in flight disables Next" (F11c, F11t); **R-OB-1** at step 8, with "a blank row is never ignored" and "no invented slug" (F11c, F11t); **R-OB-2** at step 3; **R-OB-4** the school search and its "isn't listed" free-text fallback (F11e1, F6a). Retired: R-OB-4's timezone suggestion only (Q-B12). Also carried from tests F10 deleted: mail risk 12 at step 5's skip and `GOOGLE_TESTING` at step 6 (F11b), and the password check as an allow-list by id (F11c, F11t; never deleted) | Q2, Q12, Q13 | F13 | O3 |
+| A10 | C1, C1b, C1c specs; C1's rulings R-C1-40, -41, -42, -47, -48, -51, -55 and R-OB-1, -2, -4 | each carried, with the task that carries it (corrected after F10's review, 2026-10-24, which found the page halves unassigned): **R-C1-40/41** the incognito fallback (S4b) and, the page's half, `close_lms_window` on leaving step 3 (F11e1); **R-C1-42** the second-press capture trigger, never on open or on the identity provider's page (F11e1, F11t); **R-C1-47/48** in F6a, F6b; **R-C1-51** the data half in F6a, F6b and the page's half, the removable course list at step 3's proof (F2d, F8b, F7a's `by_course`, F11e2, F11t); **R-C1-55** the casing pins and "discovery in flight disables Next" (F11c, F11t); **R-OB-1** at step 8, with "a blank row is never ignored" and "no invented slug" (F11c, F11t); **R-OB-2** at step 3; **R-OB-4** the school search and its "isn't listed" free-text fallback (F11e1, F6a). Retired: R-OB-4's timezone suggestion only (Q-B12). Also carried from tests F10 deleted: mail risk 12 at step 5's skip and `GOOGLE_TESTING` at step 6 (F11b), and the password check as an allow-list by id (F11c, F11t; never deleted); and, from the C1 spec's §5, **credentials leave page memory the moment the write returns** (`clearCredentialFields`, at step 8's zyBooks and VHL fields: F11c, F11t's pin; F10 review r2, §14.48) | Q2, Q12, Q13 | F13 | O3 |
 | A11 | `CLAUDE.md`, "Command and app contracts" | the `onboarding` command never writes, reaches no network, exits 0 (Q-B3); onboarding mode runs no scheduler until the reveal. **Nothing about config writes:** §4.9 needs no rule change. **Ruled yes (Quinn, 2026-10-23).** The line, drafted here and added to `CLAUDE.md` by F7a in the commit that adds the command: "`onboarding` (`--preview`, `--tidied`) never writes, reaches no network, is never gated and always exits 0; an unreadable input is a named `null`. Onboarding mode runs no scheduler, tray or autostart until the reveal." | Q-B3 | this plan (text); F7a lands it | O3 (ruled) |
 | A17 | `CLAUDE.md`, engine invariants ("never rewrite a vault file wholesale") | **only if** Quinn rules Q-B1's candidate exception: `ingest.yaml` extended in place during onboarding | Q-B1 | F13 | O3 (Quinn's word), conditional |
 | A18 | The onboarding spec, §9's dependency line | O4 merges first, O3 second, no tag between; they still ship together. **Ruled (Quinn, 2026-10-23, Q-B11)** | Q-B11 | F13 | both (ruled) |
@@ -3753,3 +3793,34 @@ source of pairs, passed to `--preview`), F1 test 12 (pairs byte-equal).
 Tasks changed: F7a (`graded` on single-course buckets, every course a bucket, class-time buckets for
 display only, tests), F8b (kept `grades_courses` and `class_times` rules), F6b (a note that removal
 never touches class times; no code), F1 test 12 (grades and class-time expectations).
+
+### 14.48 F10's review, round 2: three owners and a list (2026-10-24)
+
+From `docs/reports/2026-10-24-wave-b-f10-review-r2.md` (on `feat/o3-f10`; F10 passed with the
+controller's fix). Each gap now has a task:
+1. **Credentials leave page memory when the write returns** (Important 2). The C1 spec's §5 rule
+   (`clearCredentialFields`) lost its owner when F10 retired the old login panel. F11c clears the
+   zyBooks and VHL fields in both arms of `store_credentials`' result, and F11t pins it: the clear
+   in each arm, and no password value assigned outside the handler. §9 A10 names it.
+2. **The shots script** (Important 3). `scripts/console-shots.py:91` calls the removed
+   `KNOWLU_SHOTS.startWizard`. Split by domain: **F11a** adds the page hook
+   `KNOWLU_SHOTS.startOnboarding(step)` (with a static pin), and **F12** repoints the script, which
+   sits beside the `wizard-check.py` it already rewrites. Until F12, the shots run aborts; it is not
+   a CI gate.
+3. **F5b's list** (Minor 1), each decided:
+   - `open_external`: **retired** from the shell's list (its only caller was the old wizard's
+     Google button; every consent now opens from Rust). Kept off the console's list, as
+     `handler_lists.rs` already pins.
+   - `retarget_credentials`: **retired** from the shell's list (R-P4a-23's reason, a vault name
+     changed after the logins were stored, is gone: the vault and name exist from step 2).
+   - `timezone_for_state`: **retired** from both lists (never called; Q-B12 retired its
+     suggestion). F5's text no longer adds it to the console's list.
+   None moves; none is kept for a caller. Their functions and tests stay for now (`open_external`
+   is in `account.rs`, on the contract list), and F13's report lists their deletion as a follow-up.
+4. **For F13** (Minor 4): `app/README.md:293` is F13's. The `account.rs:2100` doc comment is on the
+   contract list, so it goes to the next contract-engineer task touching `account.rs` (F2c or S5),
+   not to docs-keeper.
+Tasks changed: F5 (no `timezone_for_state`), F5b (three retirements and their pin), F11a (the shots
+hook), F11c (credential clearing), F11t (its pin), F12 (the shots script), F13 (stale README line;
+the routed `account.rs` comment; the follow-up deletions), §9 A10.
+
