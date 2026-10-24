@@ -208,7 +208,7 @@ impl Core {
         match job {
             "school.apply" => school_apply_may_run(&self.state),
             "school.courses" => self.state.account_settled && answers(),
-            "registrar.confirm" => done("school.courses") && answers(),
+            "registrar.confirm" => done("school.apply") && done("school.courses") && answers(),
             "config.ingest" => done("school.courses") && settled("school.store") && settled("calendar.store") && answers(),
             "calendar.read" | "google.calendar_read" => done("config.ingest"),
             "slot.first_full" => done("config.ingest") && settled("school.apply"),
@@ -661,21 +661,36 @@ pub const RETRY_BUDGET: Duration = Duration::from_secs(30);
 /// [`RETRY_INTERVAL`] up to [`RETRY_BUDGET`]; holds nothing itself. For `registrar.confirm`, whose
 /// call takes `vault_io` and the lock itself.
 pub fn retry_on_sync_running<T>(
-    _sleep: &dyn Fn(Duration),
-    _try_once: &mut dyn FnMut() -> Result<T, String>,
+    sleep: &dyn Fn(Duration),
+    try_once: &mut dyn FnMut() -> Result<T, String>,
 ) -> Result<T, String> {
-    todo!("F8h: retry on a running sync")
+    let mut waited = Duration::ZERO;
+    loop {
+        match try_once() {
+            // Compared on the constant itself, never a copy of its words (T0 review M2).
+            Err(e) if e == crate::week::SYNC_RUNNING && waited < RETRY_BUDGET => {
+                sleep(RETRY_INTERVAL);
+                waited += RETRY_INTERVAL;
+            }
+            other => return other,
+        }
+    }
 }
 
 /// The same retry for a lane job that takes the two holds itself around an engine child: each try
 /// takes `vault_io` then `take_lock`, and on `SYNC_RUNNING` drops both before it sleeps.
 pub fn retry_with_hold<T>(
-    _vault_io: &Mutex<()>,
-    _take_lock: &dyn Fn() -> Result<Box<dyn std::any::Any>, String>,
-    _sleep: &dyn Fn(Duration),
-    _work: &mut dyn FnMut() -> Result<T, String>,
+    vault_io: &Mutex<()>,
+    take_lock: &dyn Fn() -> Result<Box<dyn std::any::Any>, String>,
+    sleep: &dyn Fn(Duration),
+    work: &mut dyn FnMut() -> Result<T, String>,
 ) -> Result<T, String> {
-    todo!("F8h: retry holding neither between tries")
+    retry_on_sync_running(sleep, &mut || {
+        // Both holds live only inside one try, in the gate order (`vault_io`, then the lock).
+        let _io = vault_io.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = take_lock()?;
+        work()
+    })
 }
 
 // ---- the feed store, the courses, the hand-over to `config.ingest` --------------------------------
@@ -1645,6 +1660,7 @@ mod order_tests {
     fn no_config_job_runs_without_a_readable_answers_file_and_both_run_once_it_is_saved() {
         let mut s = state(true);
         s.jobs.insert("school.courses".into(), done_rec()); // registrar.confirm and config.ingest have their input
+        s.jobs.insert("school.apply".into(), done_rec()); // and registrar.confirm waits for this too (F8h)
         let (q, fake, dir) = rig("i5", s, vec![], false);
         for j in ["registrar.confirm", "config.ingest"] { q.enqueue(j); }
         idle(&q);

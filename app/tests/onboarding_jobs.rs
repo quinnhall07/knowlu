@@ -226,6 +226,14 @@ fn state_at(step: u8, settled: bool) -> OnboardingState {
     s
 }
 
+/// `state_at` with `school.apply` already done: `registrar.confirm` waits for it (F8h), because the
+/// school it writes under comes from the `campus.yaml` that job creates.
+fn state_applied(step: u8, settled: bool) -> OnboardingState {
+    let mut s = state_at(step, settled);
+    s.jobs.insert("school.apply".into(), JobRecord { state: JobState::Done, ..Default::default() });
+    s
+}
+
 /// A rig as a real run looks at step 4 or later: the answers file holds the three captured courses
 /// (no feeds) and the school is confirmed. A queue that gates on either would otherwise be held for
 /// good, and one that ignored them would pass every test below unproven.
@@ -1230,7 +1238,7 @@ fn slot_holds_sync_while_notes_are_asked_for(r: &Rig) {
 
 #[test]
 fn test_16_at_payment_with_the_account_settled_the_note_jobs_and_sync_never_overlap_and_none_fails() {
-    let r = rig("t16-settled", state_at(4, true), true);
+    let r = rig("t16-settled", state_applied(4, true), true);
     slot_holds_sync_while_notes_are_asked_for(&r);
     r.log.assert_clean();
     for j in ["school.courses", "registrar.confirm", "slot.partial"] {
@@ -1260,7 +1268,7 @@ fn test_16_a_note_job_mid_write_holds_the_gate_and_a_slot_asked_for_meanwhile_wa
 
 #[test]
 fn test_16_with_the_account_unsettled_sync_runs_first_and_the_note_jobs_after_it() {
-    let r = rig("t16-unsettled", state_at(4, false), true);
+    let r = rig("t16-unsettled", state_applied(4, false), true);
     // Asked for in the other order: the notes first. Sync still runs first, because the account is not reached.
     slow_notes(&r);
     for j in ["school.courses", "registrar.confirm", "slot.partial"] { r.q.enqueue(j); }
@@ -1381,6 +1389,24 @@ fn test_16_t0_a_cursor_that_moves_on_every_run_stops_at_exactly_fifty_and_try_ag
 }
 
 #[test]
+fn test_36_registrar_confirm_waits_for_school_apply_as_well_as_school_courses() {
+    // F8h: `school_of` reads the campus.yaml that school.apply creates, so the confirm is not ready
+    // while that job is pending, and runs once it is done.
+    let mut s = state_at(4, true);
+    s.jobs.insert("school.courses".into(), JobRecord { state: JobState::Done, ..Default::default() });
+    let r = rig("t36-waits-apply", s, true);
+    r.q.enqueue("registrar.confirm");
+    r.idle();
+    assert!(!r.log.ran("registrar.confirm"), "started before school.apply: {:?}", r.log.all());
+    assert_eq!(r.state_of("registrar.confirm"), JobState::Pending);
+    r.q.enqueue("school.apply");
+    r.idle();
+    r.log.assert_clean();
+    assert_eq!(r.state_of("registrar.confirm"), JobState::Done, "{:?}", r.log.all());
+    assert!(r.log.pos("end:school.apply").unwrap() < r.log.pos("start:registrar.confirm").unwrap(), "{:?}", r.log.all());
+}
+
+#[test]
 fn test_16_a_lane_job_retrying_on_a_held_sync_lock_holds_neither_vault_io_nor_the_lock_between_tries() {
     let vault_io = Mutex::new(());
     let lock_held = Arc::new(AtomicBool::new(false));
@@ -1413,7 +1439,7 @@ fn test_16_a_lane_job_retrying_on_a_held_sync_lock_holds_neither_vault_io_nor_th
     // Always refused: gives up after thirty seconds of tries, never having run the work.
     let total = RefCell::new(Duration::ZERO);
     let never = retry_with_hold(&vault_io, &|| Err::<Box<dyn std::any::Any>, _>(knowlu::week::SYNC_RUNNING.to_string()), &|d| *total.borrow_mut() += d, &mut || Ok(1));
-    assert!(never.is_err());
+    assert_eq!(never, Err(knowlu::week::SYNC_RUNNING.to_string()), "past the budget is the busy refusal itself");
     assert_eq!(*total.borrow(), RETRY_BUDGET);
     assert_eq!(RETRY_BUDGET, Duration::from_secs(30));
 }
@@ -1436,6 +1462,11 @@ fn test_16_registrar_confirm_is_entered_with_vault_io_free_and_retries_only_on_t
     let other = retry_on_sync_running::<i32>(&|_| panic!("slept"), &mut || { n.set(n.get() + 1); Err("a sync is running; try again in a moment!".to_string()) });
     assert!(other.is_err());
     assert_eq!(n.get(), 1, "only week::SYNC_RUNNING itself is retried");
+    // Always busy: thirty seconds of sleeps, then the busy refusal itself (review: F8h-runner maps it).
+    let slept = RefCell::new(Duration::ZERO);
+    let busy = retry_on_sync_running::<i32>(&|d| *slept.borrow_mut() += d, &mut || Err(knowlu::week::SYNC_RUNNING.to_string()));
+    assert_eq!(busy, Err(knowlu::week::SYNC_RUNNING.to_string()));
+    assert_eq!(*slept.borrow(), RETRY_BUDGET);
     // The pin: onboarding_jobs.rs compares the constant and never a copy of its words.
     let src = src_of("onboarding_jobs.rs");
     assert!(src.contains("SYNC_RUNNING"), "the retry compares week::SYNC_RUNNING");
@@ -1729,7 +1760,7 @@ fn test_02_school_apply_is_enqueued_but_does_not_start_until_the_school_is_confi
 
 #[test]
 fn test_17_after_a_rewind_with_no_answers_file_the_config_jobs_stay_pending_and_run_once_the_answers_are_saved() {
-    let r = rig_full("t17-noanswers-queue", state_at(8, true), true, vec![ok_reading(true, 10, 10)], false, |_| {});
+    let r = rig_full("t17-noanswers-queue", state_applied(8, true), true, vec![ok_reading(true, 10, 10)], false, |_| {});
     assert!(!answers_path(&r.dir).exists());
     for j in ["school.courses", "config.ingest"] { r.q.enqueue(j); }
     r.idle();
