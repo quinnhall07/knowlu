@@ -1659,6 +1659,42 @@ fn test_12_an_answer_refusal_names_the_answers_file_and_never_the_app_data_path(
     assert!(!out["error"].as_str().unwrap().contains(&d.display().to_string()), "{out}");
 }
 
+/// F2b review r2's residual race: an answer that passed the stop check just before sign-out is refused
+/// by the check inside the answers lock, and sign-out's delete waits for a writer that holds it.
+#[test]
+fn test_12_an_answer_past_the_first_stop_check_cannot_recreate_the_file_after_sign_out() {
+    let d = scratch("t12-late");
+    let capture = serde_json::json!({"capture": {"courses": [row("QLT 101", "Quilting Basics", "_1001_1", false)]}});
+    // The stop is clear at the outer check and set by the time the lock is held.
+    let calls = Cell::new(0);
+    let late = || { calls.set(calls.get() + 1); calls.get() > 1 };
+    let out = answer_unless_exiting_with(&late, &d, 3, &capture, &mut |j| panic!("enqueued {j}"));
+    assert_eq!((out["ok"].clone(), out["exiting"].clone()), (false.into(), true.into()), "{out}");
+    assert!(!answers_path(&d).exists(), "the late answer wrote nothing");
+    // A writer inside the lock: sign-out's delete does not run until the writer is done, so it removes what was written.
+    let (inside_tx, inside_rx) = std::sync::mpsc::channel::<()>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let dir = d.clone();
+    let writer = std::thread::spawn(move || {
+        let go_rx = Mutex::new(go_rx);
+        update_answers(&dir, &|a| { a.google_calendar = Some(true); inside_tx.send(()).unwrap(); go_rx.lock().unwrap().recv().unwrap(); })
+    });
+    inside_rx.recv().unwrap();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (dir, flag) = (d.clone(), done.clone());
+    let signer = std::thread::spawn(move || {
+        let r = on_sign_out_with(&dir, &FakePending::default());
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        r
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!done.load(std::sync::atomic::Ordering::SeqCst), "sign-out's delete waits for the writer holding the answers lock");
+    go_tx.send(()).unwrap();
+    writer.join().unwrap().expect("the writer's save");
+    signer.join().unwrap().expect("the rewind");
+    assert!(!answers_path(&d).exists(), "the answers file is gone after sign-out");
+}
+
 #[test]
 fn test_12_an_answer_or_a_skip_is_refused_outright_while_an_exit_is_under_way() {
     let d = scratch("t12-exiting");

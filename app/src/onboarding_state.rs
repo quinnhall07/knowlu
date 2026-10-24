@@ -398,11 +398,14 @@ pub fn save_pairs(_data_dir: &Path, _pairs: &BTreeMap<String, Vec<String>>) -> R
 /// "I'm signed in" press through F8lb's `onboarding_capture_link`, or S4d's signed-in test), and
 /// step 6's `google.gmail_first_read` by the Gmail grant (the consent poll, `google_status`), or
 /// `mail.canary` by the forwarding setup's end (F8d, F11b). No shape here enqueues any of the three.
-pub fn onboarding_answer_inner(
+/// `stopping` is checked again inside the answers lock, so an answer that passed `exiting_now` just
+/// before sign-out cannot put the file back (F2b review r2).
+pub fn onboarding_answer_checked(
     data_dir: &Path,
     step: u8,
     answer: &Value,
     enqueue: &mut dyn FnMut(&str),
+    stopping: &dyn Fn() -> bool,
 ) -> Value {
     let refuse = |why: &str| serde_json::json!({ "ok": false, "error": why });
     // One key, one shape: anything else (`buckets`, `pairs`, two keys at once) is refused unread.
@@ -426,7 +429,7 @@ pub fn onboarding_answer_inner(
             if c.feeds.values().any(|s| !matches!(s, FeedState::Validated | FeedState::Rejected)) { return refuse("a feed is validated or rejected here"); }
             // A page never supplies pairs: a matching row keeps the ones `save_pairs` wrote.
             let courses: Vec<CourseAnswer> = c.courses.into_iter().map(|mut r| { r.fragments.clear(); r }).collect();
-            let saved = replace_answers(data_dir, &|a| {
+            let saved = replace_answers(data_dir, stopping, &|a| {
                 a.recapture(courses.clone());
                 a.registrar_rows = c.registrar_rows.clone();
                 a.feeds.extend(c.feeds.clone());
@@ -436,20 +439,20 @@ pub fn onboarding_answer_inner(
         (3, "remove") => {
             let Some(key) = text(body) else { return refuse("a removal names a course key") };
             if let Err(e) = require_course(data_dir, &key) { return refuse(&file_only(e, data_dir)); }
-            (update_answers(data_dir, &|a| { for c in a.courses.iter_mut().filter(|c| c.key() == key) { c.removed = true; } }), &[])
+            (update_answers_unless(data_dir, stopping, &|a| { for c in a.courses.iter_mut().filter(|c| c.key() == key) { c.removed = true; } }), &[])
         }
         (3, "label") => {
             let (Some(key), Some(label)) = (text(&body["key"]), text(&body["label"])) else { return refuse("a label edit names a course key and a label") };
             if let Err(e) = require_course(data_dir, &key) { return refuse(&file_only(e, data_dir)); }
-            (update_answers(data_dir, &|a| { for c in a.courses.iter_mut().filter(|c| c.key() == key) { c.label = label.clone(); } }), &[])
+            (update_answers_unless(data_dir, stopping, &|a| { for c in a.courses.iter_mut().filter(|c| c.key() == key) { c.label = label.clone(); } }), &[])
         }
         (6, "google_calendar") => {
             let Some(on) = body.as_bool() else { return refuse("the calendar answer is yes or no") };
-            (update_answers(data_dir, &|a| a.google_calendar = Some(on)), if on { &["google.calendar_read"] } else { &[] })
+            (update_answers_unless(data_dir, stopping, &|a| a.google_calendar = Some(on)), if on { &["google.calendar_read"] } else { &[] })
         }
         (8, "row") => {
             let Ok(row) = serde_json::from_value::<BookRow>(body.clone()) else { return refuse("a homework row names a source, a key and a course") };
-            let saved = update_answers(data_dir, &|a| match a.rows.iter_mut().find(|r| r.source == row.source && r.key == row.key) {
+            let saved = update_answers_unless(data_dir, stopping, &|a| match a.rows.iter_mut().find(|r| r.source == row.source && r.key == row.key) {
                 Some(old) => *old = row.clone(),
                 None => a.rows.push(row.clone()),
             });
@@ -457,12 +460,12 @@ pub fn onboarding_answer_inner(
         }
         (8, "zybooks_ignore") => {
             let Some(key) = text(body) else { return refuse("an ignored section is a key") };
-            let saved = update_answers(data_dir, &|a| { if !a.zybooks_ignore.contains(&key) { a.zybooks_ignore.push(key.clone()); } });
+            let saved = update_answers_unless(data_dir, stopping, &|a| { if !a.zybooks_ignore.contains(&key) { a.zybooks_ignore.push(key.clone()); } });
             (saved, &[])
         }
         _ => return refuse("that answer has no shape Knowlu knows at this step"),
     };
-    if let Err(e) = saved { return refuse(&file_only(e, data_dir)); }
+    if let Err(e) = saved { return if e == SETUP_CLOSING { refused_exiting() } else { refuse(&file_only(e, data_dir)) }; }
     // Saved first: a quit between the save and an enqueue loses nothing, since the answer is on disk.
     for job in jobs { enqueue(job); }
     serde_json::json!({ "ok": true, "error": Value::Null })
@@ -471,8 +474,9 @@ pub fn onboarding_answer_inner(
 /// Step 3's capture: like [`update_answers`], but an unreadable (or absent) file is **replaced** by
 /// what the capture holds, never merged into and never refused (F2d review r1, I-2). The re-capture is
 /// the student's own do-over, so the damaged file is the one thing it is allowed to discard.
-fn replace_answers(data_dir: &Path, change: &dyn Fn(&mut Answers)) -> Result<(), String> {
+fn replace_answers(data_dir: &Path, stopping: &dyn Fn() -> bool, change: &dyn Fn(&mut Answers)) -> Result<(), String> {
     let _held = ANSWERS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if stopping() { return Err(SETUP_CLOSING.into()); }
     let mut a = load_answers(data_dir).ok().flatten().unwrap_or_default();
     change(&mut a);
     save_answers(data_dir, &a)
@@ -493,8 +497,18 @@ fn refused_exiting() -> Value { serde_json::json!({ "ok": false, "exiting": true
 
 /// [`onboarding_answer_inner`], refused outright (nothing written, nothing enqueued) while `stopping`.
 pub fn answer_unless_exiting(stopping: bool, data_dir: &Path, step: u8, answer: &Value, enqueue: &mut dyn FnMut(&str)) -> Value {
-    if stopping { return refused_exiting(); }
-    onboarding_answer_inner(data_dir, step, answer, enqueue)
+    answer_unless_exiting_with(&|| stopping, data_dir, step, answer, enqueue)
+}
+
+/// [`answer_unless_exiting`] with a live stop check: asked first, and again inside the answers lock.
+pub fn answer_unless_exiting_with(stopping: &dyn Fn() -> bool, data_dir: &Path, step: u8, answer: &Value, enqueue: &mut dyn FnMut(&str)) -> Value {
+    if stopping() { return refused_exiting(); }
+    onboarding_answer_checked(data_dir, step, answer, enqueue, stopping)
+}
+
+/// [`onboarding_answer_checked`] with no stop: the tests' and the lane's direct callers.
+pub fn onboarding_answer_inner(data_dir: &Path, step: u8, answer: &Value, enqueue: &mut dyn FnMut(&str)) -> Value {
+    onboarding_answer_checked(data_dir, step, answer, enqueue, &|| false)
 }
 
 /// A skip recorded through `apply`, refused outright while `stopping`.
@@ -534,8 +548,17 @@ static ANSWERS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Load (or start empty), change, save: how each answer is written the moment it is given.
 pub fn update_answers(data_dir: &Path, change: &dyn Fn(&mut Answers)) -> Result<(), String> {
+    update_answers_unless(data_dir, &|| false, change)
+}
+
+/// The error a write answers when the stop was set by the time it held the lock: nothing was written.
+const SETUP_CLOSING: &str = "setup is closing";
+
+/// [`update_answers`], refused inside the lock while `stopping()` (sign-out deletes the file under it).
+pub fn update_answers_unless(data_dir: &Path, stopping: &dyn Fn() -> bool, change: &dyn Fn(&mut Answers)) -> Result<(), String> {
     // Held across load, change and save, so a Remove and a `save_preview` never overwrite each other.
     let _held = ANSWERS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if stopping() { return Err(SETUP_CLOSING.into()); }
     // An unreadable file is an error here: it is never started over from empty and written back.
     let mut a = load_answers(data_dir)?.unwrap_or_default();
     change(&mut a);
@@ -741,11 +764,14 @@ pub fn on_sign_out_with(data_dir: &Path, pending: &dyn PendingStore) -> Result<(
     // Every step runs; the failures are collected, so one stuck file never keeps the rest on the device.
     let mut failed: Vec<String> = Vec::new();
     let answers = answers_path(data_dir);
+    // Under the answers lock, so a writer that is mid-save finishes first and its file is the one deleted.
+    let held = ANSWERS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     match std::fs::remove_file(&answers) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => failed.push(format!("{}: could not be deleted ({e})", answers.display())),
     }
+    drop(held);
     for name in [PENDING_LMS, PENDING_CALENDAR] {
         if let Err(e) = pending.delete(name) { failed.push(format!("pending link {name}: {e}")); }
     }
@@ -1122,7 +1148,7 @@ pub fn onboarding_status(app: tauri::AppHandle) -> Value {
 pub fn onboarding_answer(app: tauri::AppHandle, step: u8, answer: Value) -> Value {
     use tauri::Manager;
     let (Some(queue), Some(cs)) = (app.try_state::<crate::onboarding_jobs::Queue>(), app.try_state::<crate::state::ConsoleState>()) else { return no_setup() };
-    let out = answer_unless_exiting(exiting_now(&queue, &exit_guard()), &cs.data_dir, step, &answer, &mut |job| queue.enqueue(job));
+    let out = answer_unless_exiting_with(&|| exiting_now(&queue, &exit_guard()), &cs.data_dir, step, &answer, &mut |job| queue.enqueue(job));
     // The jobs that wait for the answers file (`school.courses`, `registrar.confirm`, `config.ingest`)
     // are woken by nothing else: a saved answer wakes the queue even when it enqueued no job.
     if out["ok"] == true { queue.wake(); }
