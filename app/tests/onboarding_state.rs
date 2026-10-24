@@ -1721,7 +1721,7 @@ fn test_12_an_answer_past_the_first_stop_check_cannot_recreate_the_file_after_si
     // The stop is clear at the outer check and set by the time the lock is held.
     let calls = Cell::new(0);
     let late = || { calls.set(calls.get() + 1); calls.get() > 1 };
-    let out = answer_unless_exiting_with(&late, &d, 3, &capture, &mut |j| panic!("enqueued {j}"));
+    let out = answer_unless_exiting_with(&late, &d, 3, &capture, &mut |j| panic!("enqueued {j}"), true);
     assert_eq!((out["ok"].clone(), out["exiting"].clone()), (false.into(), true.into()), "{out}");
     assert!(!answers_path(&d).exists(), "the late answer wrote nothing");
     // A writer inside the lock: sign-out's delete does not run until the writer is done, so it removes what was written.
@@ -1761,4 +1761,134 @@ fn test_12_an_answer_or_a_skip_is_refused_outright_while_an_exit_is_under_way() 
     assert_eq!((out["ok"].clone(), out["exiting"].clone(), applied.get()), (false.into(), true.into(), 0), "{out}");
     assert_eq!(skip_unless_exiting(false, &mut || { applied.set(applied.get() + 1); Ok(()) })["ok"], true);
     assert_eq!(applied.get(), 1);
+}
+
+// ---- test 33 (F2b2a): the step-5 answer, the three proceeds and the confirmed-school guard (§14.52.1, .3) ----------------
+
+/// The jobs an answer enqueued, in order, with the confirmed-school fact the wrapper reads from the queue.
+fn asked(d: &Path, step: u8, shape: &serde_json::Value, school_confirmed: bool) -> (serde_json::Value, Vec<String>) {
+    let jobs = std::cell::RefCell::new(Vec::<String>::new());
+    let out = onboarding_answer_checked(d, step, shape, &mut |j| jobs.borrow_mut().push(j.to_string()), &|| false, school_confirmed);
+    (out, jobs.into_inner())
+}
+
+#[test]
+fn test_33_each_proceed_enqueues_exactly_its_jobs_in_order_and_saves_no_answer() {
+    let d = scratch("t33-proceeds");
+    let proceed = serde_json::json!({"proceed": true});
+    for (step, want) in [
+        (3u8, vec!["school.store", "school.apply", "school.courses", "registrar.confirm", "slot.partial"]),
+        (7, vec!["calendar.store"]),
+        (8, vec!["config.ingest", "slot.partial"]),
+    ] {
+        let (out, jobs) = asked(&d, step, &proceed, true);
+        assert_eq!(out["ok"], true, "step {step}: {out}");
+        assert_eq!(jobs, want, "step {step}");
+        let (_, again) = asked(&d, step, &proceed, true);
+        assert_eq!(again, want, "a repeat asks again, and the queue keeps one copy of each (the jobs test)");
+    }
+    assert!(!answers_path(&d).exists(), "a proceed saves no answer, so it can never be refused on the answers file");
+    std::fs::write(answers_path(&d), "{ broken").unwrap();
+    for step in [3u8, 7, 8] {
+        assert_eq!(asked(&d, step, &proceed, true).0["ok"], true, "step {step} proceeds on an unreadable answers file");
+    }
+    assert_eq!(std::fs::read_to_string(answers_path(&d)).unwrap(), "{ broken", "and changes no byte of it");
+}
+
+#[test]
+fn test_33_step_3s_proceed_is_refused_unread_without_a_confirmed_school_and_a_malformed_proceed_is_refused() {
+    let d = scratch("t33-guard");
+    let proceed = serde_json::json!({"proceed": true});
+    let (out, jobs) = asked(&d, 3, &proceed, false);
+    assert_eq!(out["ok"], false, "{out}");
+    assert!(out["error"].as_str().is_some_and(|e| !e.is_empty()), "{out}");
+    assert!(jobs.is_empty(), "nothing is enqueued: {jobs:?}");
+    for bad in [serde_json::json!({"proceed": false}), serde_json::json!({"proceed": "yes"}), serde_json::json!({"proceed": true, "extra": 1})] {
+        let (out, jobs) = asked(&d, 3, &bad, true);
+        assert_eq!((out["ok"].clone(), jobs.len()), (false.into(), 0), "{bad}: {out}");
+    }
+    assert!(!answers_path(&d).exists());
+    // The wrapper's fact: the live state's school is set and confirmed.
+    let mut s = OnboardingState::new("2026-10-24T09:00:00Z", 3);
+    assert!(!school_apply_may_run(&s), "no school");
+    s.school = Some(School { unitid: None, label: "Example Test College".into(), path: SchoolPath::Paste, confirmed: false });
+    assert!(!school_apply_may_run(&s), "an unconfirmed one");
+    s.school.as_mut().unwrap().confirmed = true;
+    assert!(school_apply_may_run(&s), "an unlisted school confirmed counts");
+}
+
+#[test]
+fn test_33_step_5s_mail_answer_saves_the_kind_and_enqueues_setup_canary_first_pass_in_that_order() {
+    let d = scratch("t33-step5");
+    let school = serde_json::json!({"mail": {"provider": "school"}});
+    let (out, jobs) = asked(&d, 5, &school, false);
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(jobs, ["mail.setup", "mail.canary", "mail.first_pass"]);
+    assert_eq!(load_answers(&d).unwrap().unwrap().mail_kind.as_deref(), Some("school"), "saved before it enqueued, so a resumed setup finds the kind");
+    assert_eq!(asked(&d, 5, &school, false).1, ["mail.setup", "mail.canary", "mail.first_pass"], "a repeat asks again; the queue keeps one copy");
+}
+
+#[test]
+fn test_33_step_5s_gmail_and_unknown_shapes_are_refused_unread_and_change_no_byte() {
+    let d = scratch("t33-step5-refused");
+    save_answers(&d, &full_answers()).unwrap();
+    let before = std::fs::read(answers_path(&d)).unwrap();
+    for (step, shape) in [
+        (5u8, serde_json::json!({"mail": {"provider": "gmail"}})),
+        (5, serde_json::json!({"mail": {"provider": "m365"}})),
+        (5, serde_json::json!({"mail": {"provider": "school", "extra": 1}})),
+        (5, serde_json::json!({"mail": {}})),
+        (5, serde_json::json!({"mail": "school"})),
+        (5, serde_json::json!({"mail": {"provider": 7}})),
+        (5, serde_json::json!({"mail": {"provider": "school"}, "google_calendar": true})),
+        (6, serde_json::json!({"mail": {"provider": "school"}})),
+    ] {
+        let (out, jobs) = asked(&d, step, &shape, true);
+        assert_eq!(out["ok"], false, "{shape} at step {step}: {out}");
+        assert!(jobs.is_empty(), "{shape}: enqueued {jobs:?}");
+    }
+    assert_eq!(std::fs::read(answers_path(&d)).unwrap(), before, "a refused answer changes no byte");
+    // A proceed belongs to steps 3, 7 and 8 alone.
+    for step in [4u8, 5, 6, 9, 10] {
+        assert_eq!(asked(&d, step, &serde_json::json!({"proceed": true}), true).0["ok"], false, "step {step}");
+    }
+}
+
+#[test]
+fn test_33_mail_kind_round_trips_and_an_answers_file_without_it_keeps_its_bytes() {
+    let d = scratch("t33-kind");
+    save_answers(&d, &full_answers()).unwrap();
+    let bytes = std::fs::read(answers_path(&d)).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("mail_kind"), "none recorded, no key written");
+    let loaded = load_answers(&d).unwrap().unwrap();
+    assert_eq!(loaded.mail_kind, None);
+    save_answers(&d, &loaded).unwrap();
+    assert_eq!(std::fs::read(answers_path(&d)).unwrap(), bytes, "load and save leave the bytes alone");
+    update_answers(&d, &|a| a.mail_kind = Some("school".into())).unwrap();
+    assert_eq!(load_answers(&d).unwrap().unwrap().mail_kind.as_deref(), Some("school"));
+    assert!(std::fs::read_to_string(answers_path(&d)).unwrap().contains("\"mail_kind\""));
+}
+
+// ---- test 34 (F2b2a): the Skip on step 5 calls skip_mail -------------------------------------------------------------
+
+#[test]
+fn test_34_onboarding_skip_5_mail_records_the_skip_and_calls_skip_mail_once_and_only_then() {
+    let stopped = Cell::new(0);
+    let recorded = Cell::new(0);
+    let skip = |stopping: bool, step: u8, source: &str, fail: bool| {
+        skip_and_stop_mail(stopping, step, source, &mut || { recorded.set(recorded.get() + 1); if fail { Err("frozen".into()) } else { Ok(()) } }, &mut || stopped.set(stopped.get() + 1))
+    };
+    assert_eq!(skip(false, 5, "mail", false)["ok"], true);
+    assert_eq!((recorded.get(), stopped.get()), (1, 1), "recorded, then the mail jobs are skipped");
+    assert_eq!(skip(false, 5, "mail", false)["ok"], true);
+    assert_eq!((recorded.get(), stopped.get()), (2, 2), "a second press is the same, and skip_mail is safe to repeat");
+    for (step, source) in [(6, "google"), (7, "calendar"), (8, "zybooks"), (5, "other")] {
+        skip(false, step, source, false);
+    }
+    assert_eq!(stopped.get(), 2, "no other skip touches the mail jobs");
+    let out = skip(false, 5, "mail", true);
+    assert_eq!(out["ok"], false, "{out}");
+    assert_eq!(stopped.get(), 2, "a skip that did not record stops nothing");
+    let out = skip(true, 5, "mail", false);
+    assert_eq!((out["ok"].clone(), out["exiting"].clone(), stopped.get()), (false.into(), true.into(), 2), "an exit under way refuses it outright: {out}");
 }

@@ -358,6 +358,11 @@ pub struct Answers {
     /// this file. Absent keeps today's bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mail_provider: Option<String>,
+    /// The kind step 5 asked for (`school`), written by [`onboarding_answer_checked`] so a resumed
+    /// `mail.setup` knows it after a relaunch. Not the service's string (that is `mail_provider`).
+    /// Absent keeps today's bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_kind: Option<String>,
 }
 
 impl Answers {
@@ -439,8 +444,15 @@ pub fn save_pairs(_data_dir: &Path, _pairs: &BTreeMap<String, Vec<String>>) -> R
 /// - 3 `{"remove": <CourseAnswer::key>}` and `{"label": {"key": <key>, "label": <text>}}` (display
 ///   only: it changes no pairs and no bucket) enqueue nothing;
 /// - 6 `{"google_calendar": bool}` enqueues `google.calendar_read` for `true`, nothing for `false`;
+/// - 5 `{"mail": {"provider": "school"}}` saves `mail_kind` and enqueues `mail.setup`, `mail.canary`
+///   and `mail.first_pass`, in that order (§14.52.1). `gmail` and every other kind or shape is refused unread;
 /// - 8 `{"row": BookRow}` or `{"zybooks_ignore": <key>}` enqueue nothing (`config.ingest` is asked
-///   for on leaving the step).
+///   for on leaving the step);
+/// - the proceeds, `{"proceed": true}` (§14.52.3), each saves nothing: 3 enqueues `school.store`,
+///   `school.apply`, `school.courses`, `registrar.confirm`, `slot.partial` and is refused unread unless
+///   `school_confirmed` (the wrapper reads it from the queue's live state with [`school_apply_may_run`]);
+///   7 enqueues `calendar.store`; 8 enqueues `config.ingest`, `slot.partial`. A repeat asks again and the
+///   queue keeps one copy of each queued job.
 /// Answers `{ok, error?}`; an unknown shape is `ok: false`, enqueues nothing and changes no byte of
 /// the file. **`{"buckets"}` and `{"pairs"}` are refused** the same way: both come only from F8b,
 /// through [`save_preview`] and [`save_pairs`] (§4.5, §14.46.3). Nothing is held in memory, so a
@@ -458,6 +470,7 @@ pub fn onboarding_answer_checked(
     answer: &Value,
     enqueue: &mut dyn FnMut(&str),
     stopping: &dyn Fn() -> bool,
+    school_confirmed: bool,
 ) -> Value {
     let refuse = |why: &str| serde_json::json!({ "ok": false, "error": why });
     // One key, one shape: anything else (`buckets`, `pairs`, two keys at once) is refused unread.
@@ -515,6 +528,20 @@ pub fn onboarding_answer_checked(
             let saved = update_answers_unless(data_dir, stopping, &|a| { if !a.zybooks_ignore.contains(&key) { a.zybooks_ignore.push(key.clone()); } });
             (saved, &[])
         }
+        (5, "mail") => {
+            // Wave B's step 5 takes the school's own mailbox only; `gmail` and the rest are refused unread.
+            if body.as_object().filter(|o| o.len() == 1).and_then(|o| o.get("provider")).and_then(Value::as_str) != Some("school") {
+                return refuse("step 5 sets up the school's email only");
+            }
+            (update_answers_unless(data_dir, stopping, &|a| a.mail_kind = Some("school".into())), &["mail.setup", "mail.canary", "mail.first_pass"])
+        }
+        // A proceed saves nothing, so an unreadable answers file never refuses it.
+        (3 | 7 | 8, "proceed") if body.as_bool() == Some(true) => match step {
+            3 if !school_confirmed => return refuse("choose and confirm your school first"),
+            3 => (Ok(()), &["school.store", "school.apply", "school.courses", "registrar.confirm", "slot.partial"]),
+            7 => (Ok(()), &["calendar.store"]),
+            _ => (Ok(()), &["config.ingest", "slot.partial"]),
+        },
         _ => return refuse("that answer has no shape Knowlu knows at this step"),
     };
     if let Err(e) = saved { return if e == SETUP_CLOSING { refused_exiting() } else { refuse(&file_only(e, data_dir)) }; }
@@ -548,19 +575,23 @@ pub fn exiting_now(queue: &crate::onboarding_jobs::Queue, g: &ExitGuard) -> bool
 fn refused_exiting() -> Value { serde_json::json!({ "ok": false, "exiting": true, "error": "Knowlu is closing setup. Open it again to carry on." }) }
 
 /// [`onboarding_answer_inner`], refused outright (nothing written, nothing enqueued) while `stopping`.
+/// It knows no school, so step 3's proceed is refused through it (the command goes through
+/// [`answer_unless_exiting_with`]).
 pub fn answer_unless_exiting(stopping: bool, data_dir: &Path, step: u8, answer: &Value, enqueue: &mut dyn FnMut(&str)) -> Value {
-    answer_unless_exiting_with(&|| stopping, data_dir, step, answer, enqueue)
+    answer_unless_exiting_with(&|| stopping, data_dir, step, answer, enqueue, false)
 }
 
 /// [`answer_unless_exiting`] with a live stop check: asked first, and again inside the answers lock.
-pub fn answer_unless_exiting_with(stopping: &dyn Fn() -> bool, data_dir: &Path, step: u8, answer: &Value, enqueue: &mut dyn FnMut(&str)) -> Value {
+/// `school_confirmed` is the live state's fact, read by the command from the queue ([`school_apply_may_run`]).
+pub fn answer_unless_exiting_with(stopping: &dyn Fn() -> bool, data_dir: &Path, step: u8, answer: &Value, enqueue: &mut dyn FnMut(&str), school_confirmed: bool) -> Value {
     if stopping() { return refused_exiting(); }
-    onboarding_answer_checked(data_dir, step, answer, enqueue, stopping)
+    onboarding_answer_checked(data_dir, step, answer, enqueue, stopping, school_confirmed)
 }
 
-/// [`onboarding_answer_checked`] with no stop: the tests' and the lane's direct callers.
+/// [`onboarding_answer_checked`] with no stop and no confirmed school: the tests' and the lane's direct
+/// callers. Step 3's proceed is refused through it.
 pub fn onboarding_answer_inner(data_dir: &Path, step: u8, answer: &Value, enqueue: &mut dyn FnMut(&str)) -> Value {
-    onboarding_answer_checked(data_dir, step, answer, enqueue, &|| false)
+    onboarding_answer_checked(data_dir, step, answer, enqueue, &|| false, false)
 }
 
 /// A skip recorded through `apply`, refused outright while `stopping`.
@@ -570,6 +601,15 @@ pub fn skip_unless_exiting(stopping: bool, apply: &mut dyn FnMut() -> Result<(),
         Ok(()) => serde_json::json!({ "ok": true, "error": Value::Null }),
         Err(e) => serde_json::json!({ "ok": false, "error": e }),
     }
+}
+
+/// [`skip_unless_exiting`], then (step 5's `mail` only, and only once the skip is recorded) `stop_mail`,
+/// which the command points at `Queue::skip_mail`: a pending or held mail job becomes `skipped`, and a
+/// running setup is stopped. Called on a repeat press too; `skip_mail` is safe to repeat.
+pub fn skip_and_stop_mail(stopping: bool, step: u8, source: &str, apply: &mut dyn FnMut() -> Result<(), String>, stop_mail: &mut dyn FnMut()) -> Value {
+    let out = skip_unless_exiting(stopping, apply);
+    if out["ok"] == true && (step, source) == (5, "mail") { stop_mail(); }
+    out
 }
 
 /// A remove or a label edit names a saved course by its key; no such course changes no byte.
@@ -1205,7 +1245,9 @@ pub fn onboarding_status(app: tauri::AppHandle) -> Value {
 pub fn onboarding_answer(app: tauri::AppHandle, step: u8, answer: Value) -> Value {
     use tauri::Manager;
     let (Some(queue), Some(cs)) = (app.try_state::<crate::onboarding_jobs::Queue>(), app.try_state::<crate::state::ConsoleState>()) else { return no_setup() };
-    let out = answer_unless_exiting_with(&|| exiting_now(&queue, &exit_guard()), &cs.data_dir, step, &answer, &mut |job| queue.enqueue(job));
+    // The school fact is read from the queue's live state (its lock is released before the answers lock is taken).
+    let confirmed = school_apply_may_run(&queue.snapshot());
+    let out = answer_unless_exiting_with(&|| exiting_now(&queue, &exit_guard()), &cs.data_dir, step, &answer, &mut |job| queue.enqueue(job), confirmed);
     // The jobs that wait for the answers file (`school.courses`, `registrar.confirm`, `config.ingest`)
     // are woken by nothing else: a saved answer wakes the queue even when it enqueued no job.
     if out["ok"] == true { queue.wake(); }
@@ -1217,7 +1259,7 @@ pub fn onboarding_answer(app: tauri::AppHandle, step: u8, answer: Value) -> Valu
 pub fn onboarding_skip(app: tauri::AppHandle, step: u8, source: String) -> Value {
     use tauri::Manager;
     let Some(queue) = app.try_state::<crate::onboarding_jobs::Queue>() else { return no_setup() };
-    skip_unless_exiting(exiting_now(&queue, &exit_guard()), &mut || queue.update_state(|s| skip_step(s, step, &source)).and_then(|r| r))
+    skip_and_stop_mail(exiting_now(&queue, &exit_guard()), step, &source, &mut || queue.update_state(|s| skip_step(s, step, &source)).and_then(|r| r), &mut || queue.skip_mail())
 }
 
 /// "Try again" on a job the page lists.
