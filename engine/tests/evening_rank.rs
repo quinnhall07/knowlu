@@ -100,3 +100,47 @@ fn rank_refuses_a_bad_now_with_exit_2() {
     assert!(stderr.contains("--now"), "stderr should name --now:\n{stderr}");
     let _ = std::fs::remove_dir_all(&vault);
 }
+
+/// `surface --view today` at an evening moment, read in place: `surface` never writes, so no copy
+/// is needed (`surface_oracle.rs` does the same).
+fn surface_at(fixture: &str, now: &str) -> serde_json::Value {
+    let out = Command::new(binary())
+        .args(["surface", "--vault", &format!("tests/fixtures/{fixture}"), "--view", "today"])
+        .args(["--today", PINNED_DATE, "--now", now, "--build-sha", "pinned"])
+        .output()
+        .expect("run knowlu-engine surface");
+    assert!(out.status.success(), "surface failed: {}", String::from_utf8_lossy(&out.stderr));
+    serde_json::from_slice(&out.stdout).expect("surface prints one JSON document")
+}
+
+/// The ranking-bearing parts of a state. `now`, `revision`, the runs panel, "closed this week" and
+/// `nav_counts.runs_warn` read the clock, so they differ at 21:00 for clock reasons, not ranking ones.
+fn ranked_parts(state: &serde_json::Value) -> serde_json::Value {
+    let mut nav = state["nav_counts"].clone();
+    nav.as_object_mut().expect("nav_counts is an object").remove("runs_warn");
+    serde_json::json!({
+        "must_do": state["must_do"],
+        "recommended": state["recommended"],
+        "meter": state["meter"],
+        "nav_counts": nav,
+    })
+}
+
+/// No fixture task is due on 2026-08-28, so the page at 21:00 ranks as its frozen reference does.
+#[test]
+fn surface_at_an_evening_moment_keeps_the_references_ranked_blocks() {
+    for (fixture, reference) in [
+        ("vault-s1", "surface-today-s1.json"),
+        ("vault-s1-migrated", "surface-today-s1-migrated.json"),
+        ("vault-full", "surface-today-full.json"),
+    ] {
+        let raw = std::fs::read(Path::new("tests/fixtures").join(reference)).expect("reference file");
+        let want: serde_json::Value = serde_json::from_slice(&raw).expect("reference is JSON");
+        let got = surface_at(fixture, "2026-08-28T21:00");
+        assert_eq!(
+            ranked_parts(&got),
+            ranked_parts(&want),
+            "{fixture} at 21:00 disagrees with {reference} on a ranked block. Fix the Rust; do NOT regenerate it."
+        );
+    }
+}
