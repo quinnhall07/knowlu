@@ -25,3 +25,12 @@ Reviewer: `reviewer`. Filed by the controller.
 - onboarding.js is net +59 lines.
 - No single-user data, no storage, and the faces are local.
 - The six shot pairs match the prototype in layout, regions and controls. The only unintended differences are m-1 and m-2.
+
+---
+
+## r2 (8e02bb0): PASS
+
+- I-1 and I-2 are closed. The pin correction (from "comped" to active + tester, plus a "none" case) tightens the pin, as authorized.
+- Step 7 = 60 s is accepted and recorded in plan §14.58.4.
+- m-1, the welcome-dark shot that caught a fallback font, is re-shot after `document.fonts.ready` (ae11d47).
+- m-2, the comment, is wrapped (ae11d47).
