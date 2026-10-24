@@ -589,6 +589,10 @@ pub fn school_apply_may_run(state: &OnboardingState) -> bool { state.school.as_r
 pub fn confirm_school(state: &mut OnboardingState) {
     if let Some(s) = state.school.as_mut() { s.confirmed = true; }
 }
+/// Step 10 asks for proposals only once `config.ingest` has written the file they read (§4.2, §4.3).
+pub fn proposals_ready(state: &OnboardingState) -> bool {
+    state.jobs.get("config.ingest").is_some_and(|j| j.state == JobState::Done)
+}
 
 /// The skip cost keys the rail, the reveal gate (F9) and the page name; a contract, never retyped.
 pub const COST_MAIL: &str = "mail_dates_missed";
@@ -713,7 +717,10 @@ pub fn handover_for(state: &OnboardingState) -> Vec<HandoverItem> {
 /// `onboarding_status`'s body: the file plus the live job states, the gate, and whether step 10's
 /// proposals may be asked (only once `config.ingest` is `done`). Keys: `jobs`, `proposals_ready`,
 /// `gate`.
-pub fn status_inner(_state: &OnboardingState, _now_secs: i64) -> Value { todo!("F2b: onboarding_status") }
+pub fn status_inner(state: &OnboardingState, _now_secs: i64) -> Value {
+    // F8e: `jobs` and `proposals_ready`. F2b adds the fail-closed read and `gate` (F9).
+    serde_json::json!({ "jobs": state.jobs, "proposals_ready": proposals_ready(state) })
+}
 
 // ---- step 2 again, and step 4 (F2g, F2h) ---------------------------------------------------------
 
