@@ -48,3 +48,12 @@ M1 to M6 are closed, and the no-folder sentence no longer gives false advice. Ho
   - Fix: show the row's own kind as the selected option, or send only the fields the student changed. The console's `KIND_NAMES` may share this bug; it is to be checked.
 - **I-6:** `set_fields` was added to the page's allowed list without a plan ruling. It is not an assertion edit. The planner needs to name `set_fields` (kind and level only) for step 10 at plan:703.
 - **Still open from r1:** I-2, I-3 and I-4, all cross-task, with the planner.
+
+## r3 (184783e vs 1cb8eb4): PASS
+
+- I-5 is fixed: a kind with no label stays selected, and Save sends only what changed.
+- The console was checked and does not have the bug (console.js:893-894).
+- N-1 (an empty kind fell back to "Class") was fixed by the controller in 2154c0d.
+- I-6 is ruled in plan §14.57, which names `set_fields` for step 10.
+- I-2 to I-4 are assigned to F2b3, F5c and F8c2.
+- Controller run: onboarding_static 42 pass / 13 fail (all later tasks); static_assets 149/149.
