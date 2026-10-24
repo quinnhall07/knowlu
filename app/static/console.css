@@ -48,6 +48,12 @@
 @font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/jetbrains-mono-400.woff2") format("woff2"); }
 @font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 500; font-display: swap; src: url("fonts/jetbrains-mono-500.woff2") format("woff2"); }
 @font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 600; font-display: swap; src: url("fonts/jetbrains-mono-600.woff2") format("woff2"); }
+/* F11p1: the setup frame and onboarding (`.setup`, `.picker`) set every piece of text in Zilla Slab;
+   only the logo is set in the serif caption face. The console's own faces above are untouched. */
+@font-face { font-family: "Zilla Slab"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/zilla-slab-400.woff2") format("woff2"); }
+@font-face { font-family: "Zilla Slab"; font-style: normal; font-weight: 600; font-display: swap; src: url("fonts/zilla-slab-600.woff2") format("woff2"); }
+@font-face { font-family: "Zilla Slab"; font-style: normal; font-weight: 700; font-display: swap; src: url("fonts/zilla-slab-700.woff2") format("woff2"); }
+@font-face { font-family: "PT Serif Caption"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/pt-serif-caption-400.ttf") format("truetype"); }
 
 * { box-sizing: border-box; }
 body { background: var(--canvas); color: var(--t1); font-family: var(--sans); font-size: 14px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
@@ -444,7 +450,7 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .row.pick { border: 1px solid var(--su-rule-2); border-radius: var(--r2); background: var(--su-board); padding: var(--s3) var(--s4); margin-bottom: var(--s2); display: flex; align-items: center; }
 .row.pick .ttl { flex: 1; min-width: 0; }
 .row.pick .acts { margin-left: auto; }
-.row.pick .meta { color: var(--su-ink-2); font: 500 12.5px/1.4 var(--sans); display: block; }
+.row.pick .meta { color: var(--su-ink-2); font: 500 12.5px/1.4 var(--su-font); display: block; }
 .row.pick .a { font-weight: 600; }
 .row.pick .meta { padding: 0; }
 .pick-nav { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; margin-top: var(--s4); }
@@ -656,11 +662,12 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .ma-course summary { font-size: 12.5px; color: var(--t3); cursor: pointer; }
 
 /* ---- O3 F10: the setup shell, steps 1 and 2, in the ruled direction (5b, Departures) ----
-   Tokens are the direction's own, scoped to `.setup` so the console's palette is untouched. The
-   direction's two display faces are not vendored yet (BRIEF R3.8), so the page keeps the console's
-   Instrument Sans and JetBrains Mono. Every class carries `su-`: `.mark`, `.lede` and `.row` mean
-   something else in this sheet. */
+   Tokens are the direction's own, scoped to `.setup` so the console's palette is untouched. Text is
+   Zilla Slab through the one `--su-font` token (F11p1); the console's `--sans` and `--mono` are not
+   used here. Every class carries `su-`: `.mark`, `.lede` and `.row` mean something else in this sheet. */
 .setup, .picker {
+  --su-font: "Zilla Slab", Georgia, "Times New Roman", serif;
+  font-family: var(--su-font);
   --su-ground: oklch(0.17 0.025 258); --su-board: oklch(0.205 0.028 258); --su-board-2: oklch(0.245 0.03 258);
   --su-rule: oklch(0.95 0.01 258 / 0.10); --su-rule-2: oklch(0.95 0.01 258 / 0.18);
   --su-ink: oklch(0.95 0.012 85); --su-ink-2: oklch(0.79 0.015 85); --su-ink-3: oklch(0.68 0.015 85);
@@ -669,11 +676,25 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 }
 .setup { position: fixed; inset: 0; z-index: 30; display: grid; grid-template-columns: 340px minmax(0, 1fr); }
 .setup[hidden] { display: none; }
-.setup button, .setup input, .picker button, .picker input { font-family: var(--sans); }
+.setup button, .setup input, .picker button, .picker input { font-family: var(--su-font); }
+.setup select, .setup textarea, .picker select { font-family: var(--su-font); }
+/* The light "day board": the same token names, from the prototype's light block. It starts from
+   Windows' setting (onboarding.js sets data-theme); nothing is stored. Labels and figures step up to 700. */
+.setup[data-theme="light"], .picker[data-theme="light"] {
+  color-scheme: light;
+  --su-ground: oklch(0.972 0.006 85); --su-board: oklch(0.993 0.003 85); --su-board-2: oklch(0.955 0.008 85);
+  --su-rule: oklch(0.25 0.02 258 / 0.10); --su-rule-2: oklch(0.25 0.02 258 / 0.20);
+  --su-ink: oklch(0.23 0.025 258); --su-ink-2: oklch(0.45 0.02 258); --su-ink-3: oklch(0.52 0.02 258);
+  --su-amber: oklch(0.52 0.115 65); --su-focus: oklch(0.45 0.13 258);
+}
+.setup[data-theme="light"] .su-row .su-st, .setup[data-theme="light"] .su-field label, .setup[data-theme="light"] .su-cost b { font-weight: 700; }
+/* The logo: the one rule that uses the caption face; the red block sits behind "lu". */
+.su-logo { font-family: "PT Serif Caption", Georgia, serif; font-size: 25px; line-height: 1; letter-spacing: .01em; color: var(--su-ink); white-space: nowrap; }
+.su-logo .su-lu { background: var(--su-brand); color: inherit; padding: 1px 2px 0; margin-left: 1px; }
 .setup :focus-visible, .picker :focus-visible { outline: 2px solid var(--su-focus); outline-offset: 2px; }
 .su-dim { color: var(--su-ink-3); font-size: 12.5px; }
 .su-small { color: var(--su-ink-2); font-size: 13.5px; margin: 14px 0 0; }
-.su-mono, .su-host { font-family: var(--mono); }
+.su-mono, .su-host { font-family: var(--su-font); }
 .su-mark { width: 15px; height: 15px; border-radius: var(--r1); background: var(--su-brand); flex: none; }
 .su-rail { background: var(--su-board); border-right: 1px solid var(--su-rule); display: flex; flex-direction: column; min-height: 0; }
 .su-rail-head { display: flex; align-items: center; gap: var(--s2); padding: 20px 20px 12px; }
@@ -692,7 +713,7 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .su-row.now .su-st { color: var(--su-ink); }
 .su-row.now .su-shape { background: none; border-style: solid; border-color: transparent transparent transparent var(--su-ink); border-width: 6px 0 6px 10px; border-radius: 0; transform: none; }
 .su-row.done .su-shape { background: none; transform: none; border-radius: 0; border: solid var(--su-ink); border-width: 0 2px 2px 0; width: 5px; height: 9px; margin: 2px 0 0 3px; rotate: 45deg; }
-.su-rail-foot { border-top: 1px solid var(--su-rule); padding: 12px 20px 16px; }
+.su-rail-foot { border-top: 1px solid var(--su-rule); padding: 12px 20px 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .su-main { min-width: 0; min-height: 0; overflow: auto; }
 .su-step { padding: 30px 56px 24px; max-width: 760px; }
 .su-step[hidden] { display: none; }

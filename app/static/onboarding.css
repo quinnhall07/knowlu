@@ -30,3 +30,9 @@
 .ob-list { margin: 0; padding-left: 18px; color: var(--su-ink); }
 .ob-prop button[aria-pressed="true"] { border-color: var(--su-ink); background: var(--su-board-2); }
 .ob-course, .ob-level { min-height: 36px; background: var(--su-board); color: var(--su-ink); border: 1px solid var(--su-rule-2); border-radius: 6px; padding: 0 8px; }
+/* F11p1: the rail's foot (minutes left, Finish later) and the top bar that keeps only Sign out. */
+.ob .su-rail-foot .su-link { color: var(--su-ink); font-size: 14.5px; font-weight: 600; }
+.ob .su-rail-foot .su-dim { font-size: 13.5px; }
+.ob .su-rail-head { justify-content: space-between; }
+.ob .su-rail-head .su-dim { margin-left: 0; }
+.ob .su-row .su-pf { font-size: 13.5px; }

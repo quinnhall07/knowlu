@@ -3155,3 +3155,29 @@ fn the_welcome_screen_renders_the_privacy_sentence_from_privacy() {
     let js = read("console.js");
     assert!(js.contains("EL(\"su-privacy\").textContent = PRIVACY;"), "its text is set from PRIVACY");
 }
+
+#[test]
+fn f11p1_setup_and_picker_text_is_zilla_slab_through_one_token_and_only_the_logo_is_pt_serif() {
+    let css = read("console.css");
+    for (f, w) in [("zilla-slab-400", 400), ("zilla-slab-600", 600), ("zilla-slab-700", 700)] {
+        assert!(css.contains(&format!("fonts/{f}.woff2")) && Path::new("static/fonts").join(format!("{f}.woff2")).is_file(), "@font-face for {f}");
+        assert!(css.contains(&format!("font-weight: {w}")));
+    }
+    assert!(css.contains("fonts/pt-serif-caption-400.ttf") && !css.contains("not vendored yet"));
+    assert!(css.contains("--su-font:") && css.contains("--sans: \"Instrument Sans\""), "one scoped token; the console's own --sans stays");
+    assert!(css.contains(".setup button, .setup input, .picker button, .picker input { font-family: var(--su-font)"), "controls follow the token");
+    assert!(!css.contains(".picker button, .picker input { font-family: var(--sans)"));
+    let uses = |src: &str| src.lines().filter(|l| l.contains("PT Serif Caption") && !l.contains("@font-face")).count();
+    assert_eq!(uses(&css), 1, "exactly one rule (the logo) uses PT Serif Caption");
+    assert_eq!(uses(&read("onboarding.css")), 0);
+    assert!(css.contains(".su-logo") && css.contains("#BC4444") && css.contains(".su-logo .su-lu"), "the red block sits behind lu");
+}
+
+#[test]
+fn f11p1_the_light_day_board_uses_the_same_token_names_and_leaves_the_console_palette_alone() {
+    let css = read("console.css");
+    for sel in [".setup[data-theme=\"light\"]", ".picker[data-theme=\"light\"]"] { assert!(css.contains(sel), "{sel}"); }
+    let at = css.find(".setup[data-theme=\"light\"]").unwrap();
+    let block = &css[at..css[at..].find('}').map_or(css.len(), |e| at + e)];
+    assert!(block.contains("--su-ground:") && block.contains("--su-board:") && block.contains("--su-ink:"));
+}
