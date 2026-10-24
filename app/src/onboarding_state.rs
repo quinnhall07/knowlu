@@ -1227,7 +1227,7 @@ pub fn attach_session_with(
     let Ok((pending_id, session)) = crate::account::load_session(pending_target) else { return refuse(false, REFUSED_NO_SIGN_IN) };
     after_load();
     let cfg = match crate::account::cloud_config(vault) {
-        Ok(c) if !c.session_credential_target.is_empty() && c.session_credential_target != pending_target => c,
+        Ok(c) if !c.session_credential_target.is_empty() && !c.session_credential_target.eq_ignore_ascii_case(pending_target) => c,
         _ => return refuse(false, REFUSED_CLOUD_CONFIG),
     };
     if pending_id != expected_account_id || pending_id != cfg.account_id { return refuse(true, REFUSED_OTHER_ACCOUNT); }

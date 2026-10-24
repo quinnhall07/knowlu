@@ -839,9 +839,10 @@ fn fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
 fn test_21_f2gs_code_names_neither_sign_out_with_nor_a_logout_call() {
     let src = src_of("onboarding_state.rs");
     let region = format!(
-        "{}\n{}\n{}",
+        "{}\n{}\n{}\n{}",
         fn_body(&src, "pub fn forget_pending_local"),
         fn_body(&src, "pub fn attach_session_in"),
+        fn_body(&src, "pub fn attach_session_with"),
         fn_body(&src, "pub fn onboarding_attach_session"),
     );
     for banned in ["sign_out_with", "sign_out(", "/logout", "logout"] {
