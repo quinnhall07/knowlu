@@ -226,6 +226,14 @@ fn state_at(step: u8, settled: bool) -> OnboardingState {
     s
 }
 
+/// `state_at` with `school.apply` already done: `registrar.confirm` waits for it (F8h), because the
+/// school it writes under comes from the `campus.yaml` that job creates.
+fn state_applied(step: u8, settled: bool) -> OnboardingState {
+    let mut s = state_at(step, settled);
+    s.jobs.insert("school.apply".into(), JobRecord { state: JobState::Done, ..Default::default() });
+    s
+}
+
 /// A rig as a real run looks at step 4 or later: the answers file holds the three captured courses
 /// (no feeds) and the school is confirmed. A queue that gates on either would otherwise be held for
 /// good, and one that ignored them would pass every test below unproven.
@@ -1230,7 +1238,7 @@ fn slot_holds_sync_while_notes_are_asked_for(r: &Rig) {
 
 #[test]
 fn test_16_at_payment_with_the_account_settled_the_note_jobs_and_sync_never_overlap_and_none_fails() {
-    let r = rig("t16-settled", state_at(4, true), true);
+    let r = rig("t16-settled", state_applied(4, true), true);
     slot_holds_sync_while_notes_are_asked_for(&r);
     r.log.assert_clean();
     for j in ["school.courses", "registrar.confirm", "slot.partial"] {
@@ -1260,7 +1268,7 @@ fn test_16_a_note_job_mid_write_holds_the_gate_and_a_slot_asked_for_meanwhile_wa
 
 #[test]
 fn test_16_with_the_account_unsettled_sync_runs_first_and_the_note_jobs_after_it() {
-    let r = rig("t16-unsettled", state_at(4, false), true);
+    let r = rig("t16-unsettled", state_applied(4, false), true);
     // Asked for in the other order: the notes first. Sync still runs first, because the account is not reached.
     slow_notes(&r);
     for j in ["school.courses", "registrar.confirm", "slot.partial"] { r.q.enqueue(j); }
@@ -1378,6 +1386,24 @@ fn test_16_t0_a_cursor_that_moves_on_every_run_stops_at_exactly_fifty_and_try_ag
     assert_eq!(r.log.scopes("slot.partial")[50], "BeforeConfig");
     assert!(r.q.snapshot().account_settled);
     assert_eq!(r.state_of("school.courses"), JobState::Done);
+}
+
+#[test]
+fn test_36_registrar_confirm_waits_for_school_apply_as_well_as_school_courses() {
+    // F8h: `school_of` reads the campus.yaml that school.apply creates, so the confirm is not ready
+    // while that job is pending, and runs once it is done.
+    let mut s = state_at(4, true);
+    s.jobs.insert("school.courses".into(), JobRecord { state: JobState::Done, ..Default::default() });
+    let r = rig("t36-waits-apply", s, true);
+    r.q.enqueue("registrar.confirm");
+    r.idle();
+    assert!(!r.log.ran("registrar.confirm"), "started before school.apply: {:?}", r.log.all());
+    assert_eq!(r.state_of("registrar.confirm"), JobState::Pending);
+    r.q.enqueue("school.apply");
+    r.idle();
+    r.log.assert_clean();
+    assert_eq!(r.state_of("registrar.confirm"), JobState::Done, "{:?}", r.log.all());
+    assert!(r.log.pos("end:school.apply").unwrap() < r.log.pos("start:registrar.confirm").unwrap(), "{:?}", r.log.all());
 }
 
 #[test]
