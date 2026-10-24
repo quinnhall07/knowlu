@@ -38,7 +38,7 @@ use crate::models::{apply_slice_default, load_tasks};
 use crate::passes::{detect_external, verify_tail, VERIFY_TAIL_LIMIT};
 use crate::planning::load_planning;
 use crate::pystr;
-use crate::ranking::{designate_today, rank};
+use crate::ranking::{designate_today, rank_at};
 use crate::runs::{end_run, git_sha, start_run};
 use crate::render::{render_today, RenderOpts};
 use crate::weekcal::WeekCalendar;
@@ -316,40 +316,39 @@ fn calendar_fetcher<'a>(
     }
 }
 
-/// Resolve the day and the ranking moment for `rank`. STUB (evening T1b): T3 implements it.
+/// Resolve the day and the ranking moment for `rank`.
 ///
 /// `--today` is the day when given, else `--now`'s date, else `system_today`. The moment is
-/// `--now`, else none when `--today` is given, else `wall`.
+/// `--now`, else none when `--today` is given (the run ranks as daytime), else `wall`.
+///
+/// `--now` is strict `%Y-%m-%dT%H:%M`, the parse `models::coerce_datetime` makes: a bare date,
+/// seconds and a space are refused as `BadNow`. Single-digit fields are accepted.
 pub fn rank_clock(
-    _today_iso: Option<&str>,
-    _now_iso: Option<&str>,
-    _system_today: Date,
-    _wall: DateTime,
+    today_iso: Option<&str>,
+    now_iso: Option<&str>,
+    system_today: Date,
+    wall: DateTime,
 ) -> Result<(Date, Option<DateTime>), RunError> {
-    todo!("evening T3")
-}
-
-/// [`run`] with `--now`. STUB (evening T1b): T3 implements it.
-pub fn run_at(
-    _vault: &Path,
-    _today_iso: Option<&str>,
-    _now_iso: Option<&str>,
-    _runner: &str,
-    _run_id: Option<&str>,
-) -> Result<RunOutcome, RunError> {
-    todo!("evening T3")
-}
-
-/// [`run_with`] with `--now`. STUB (evening T1b): T3 implements it.
-pub fn run_with_at(
-    _vault: &Path,
-    _today_iso: Option<&str>,
-    _now_iso: Option<&str>,
-    _runner: &str,
-    _run_id: Option<&str>,
-    _fetchers: Fetchers<'_>,
-) -> Result<RunOutcome, RunError> {
-    todo!("evening T3")
+    let today = match today_iso {
+        Some(iso) => Some(
+            Date::strptime("%Y-%m-%d", iso).map_err(|_| RunError::BadDate(iso.to_string()))?,
+        ),
+        None => None,
+    };
+    let pinned = match now_iso {
+        Some(iso) => Some(
+            DateTime::strptime("%Y-%m-%dT%H:%M", iso)
+                .map_err(|_| RunError::BadNow(iso.to_string()))?,
+        ),
+        None => None,
+    };
+    let day = today.or(pinned.map(|n| n.date())).unwrap_or(system_today);
+    let moment = match (pinned, today) {
+        (Some(n), _) => Some(n),
+        (None, Some(_)) => None,
+        (None, None) => Some(wall),
+    };
+    Ok((day, moment))
 }
 
 /// Rank, run the passes, and write `state/today.md`.
@@ -359,6 +358,18 @@ pub fn run_with_at(
 pub fn run(
     vault: &Path,
     today_iso: Option<&str>,
+    runner: &str,
+    run_id: Option<&str>,
+) -> Result<RunOutcome, RunError> {
+    run_at(vault, today_iso, None, runner, run_id)
+}
+
+/// [`run`] with `--now`, which pins the ranking moment (and, with no `--today`, the day) and
+/// nothing the engine writes. Builds the real fetchers, then [`run_with_at`].
+pub fn run_at(
+    vault: &Path,
+    today_iso: Option<&str>,
+    now_iso: Option<&str>,
     runner: &str,
     run_id: Option<&str>,
 ) -> Result<RunOutcome, RunError> {
@@ -384,9 +395,10 @@ pub fn run(
     // (spec §4.2); P16's `commitments::refresh_series` reads it after `load_calendar_events` runs.
     let stash: SeriesStash = RefCell::new(BTreeMap::new());
     let calendar = calendar_fetcher(&cloud, &stash);
-    run_with(
+    run_with_at(
         vault,
         today_iso,
+        now_iso,
         runner,
         run_id,
         Fetchers { calendar: Some(&calendar), events: Some(&events), series: Some(&stash) },
@@ -403,17 +415,27 @@ pub fn run_with(
     run_id: Option<&str>,
     fetchers: Fetchers<'_>,
 ) -> Result<RunOutcome, RunError> {
+    run_with_at(vault, today_iso, None, runner, run_id, fetchers)
+}
+
+/// [`run_with`] with `--now` (see [`rank_clock`] for how the day and the moment resolve). The
+/// moment feeds `rank_at` only; the footer, the run record and `crash` keep the wall clock.
+pub fn run_with_at(
+    vault: &Path,
+    today_iso: Option<&str>,
+    now_iso: Option<&str>,
+    runner: &str,
+    run_id: Option<&str>,
+    fetchers: Fetchers<'_>,
+) -> Result<RunOutcome, RunError> {
     if let Some(id) = run_id {
         if !run_id_is_well_formed(id) {
             return Err(RunError::BadRunId(id.to_string()));
         }
     }
     let now = local_now(vault);
-    let today = match today_iso {
-        Some(iso) => Date::strptime("%Y-%m-%d", iso)
-            .map_err(|_| RunError::BadDate(iso.to_string()))?,
-        None => Timestamp::now().to_zoned(TimeZone::system()).date(),
-    };
+    let system_today = Timestamp::now().to_zoned(TimeZone::system()).date();
+    let (today, moment) = rank_clock(today_iso, now_iso, system_today, now)?;
     let via = match runner {
         "local" => "local-runner",
         "cloud" => "cloud-routine",
@@ -613,7 +635,7 @@ pub fn run_with(
     let mut skipped: Vec<String> = Vec::new();
     let mut tasks = load_tasks(&vault.join("tasks"), Some(&mut skipped));
     apply_slice_default(&mut tasks, planning.slice_hours);
-    let ranked = rank(&tasks, today, &cal);
+    let ranked = rank_at(&tasks, today, &cal, moment);
     let designated = designate_today(&ranked, today, &cal, Some(&planning));
 
     // Gauge counts (S2 §7.7; plan 2 Task 7, F6). Three integers on the record `rank` already

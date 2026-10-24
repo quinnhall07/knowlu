@@ -467,9 +467,8 @@ fn main() -> ExitCode {
         }
     }
     match cli.command {
-        // `now: _` until evening T3 wires `--now` to `cli::run_at`.
-        Command::Rank { vault, today, now: _, runner, run_id } => {
-            match cli::run(&vault, today.as_deref(), &runner, run_id.as_deref()) {
+        Command::Rank { vault, today, now, runner, run_id } => {
+            match cli::run_at(&vault, today.as_deref(), now.as_deref(), &runner, run_id.as_deref()) {
                 Ok(outcome) => {
                     println!("wrote {}", outcome.output.display());
                     println!("{} {}", outcome.status, outcome.summary);
