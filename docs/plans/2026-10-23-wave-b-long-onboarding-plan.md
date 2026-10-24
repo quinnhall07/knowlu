@@ -1497,12 +1497,12 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F8c | Runners: the local lane (stores, apply, courses, config); `registrar.confirm` moved to F8h-runner (§14.52.4, r4 n-2). Merged | `implementer` | specified | F8e, F6a, F6b |
 | F8g | Runners: the partial (`BeforeConfig`, then `NoRank`) and full slots, each with onboarding's `AppHandle` (held by the runner); a queue stop returns before the slot; a slot the stop cut short is `Stopped` (§14.51 r1); sets the in-memory `judge_seen` and `ingest_seen` facts the Google reads wait for on every queued Google job, pending, held or waiting (no `onboarding.json` change; §14.52 r2 n1); the job-name dispatch is F8w1's (§14.52.4; about 78 lines) | `implementer` | specified | F8e, F8f, F8h (alone, never F8h-runner; r4 n-2), F8s, F8b2 (`job_context`, and the chain F8d2, F8b, F8b2, F8g), F8d2 |
 | F8d | Runners: mail, Google, calendars, coursework; the stop checks in `mail/runner.rs`'s confirm and canary waits; `mail_provider` recorded as the service's string through `update_answers` (§14.51 r2, r3); the canary's 180 s kept. **Merged into O3 at `62f6c73`** (carrying `ad006ca` and `cb2b2bf`); the queue and guard follow-ups are F8d2's (§14.52.1, r2 R2-2; its merged test-34 parts were not written first) | `implementer` | specified | F8a |
-| F8d2 | `mail.rs`: `mail_setup_start` refused in onboarding mode (an inner taking `LaunchMode`, about 6 lines). `onboarding_jobs.rs` (about 30 lines): `Queue::skip_mail` (pending or held mail jobs `skipped`; a running `mail.setup` stopped and landed `skipped`), `MAIL_FIRST_PASS_LOOKS` (1) with `mail_batch_closed` clearing `parked` and notifying, and `retry_at` (30 s, `mail_window_busy` alone) with the idle `wait_timeout` (§14.52.1, r2 R2-2; test 34's F8d2 parts, written first) | `implementer` | specified, off the contract list, tested over the fake queue and a fake clock | **F8d alone**; first in `onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8g (r5 reorder), so it never waits on S4d. Collision note, not a dependency: F8h (in progress) also edits `onboarding_jobs.rs`, in other functions; if F8h lands first, F8d2 rebases on it |
+| F8d2 | `mail.rs`: `mail_setup_start` refused in onboarding mode (an inner taking `LaunchMode`, about 6 lines). `onboarding_jobs.rs` (**about 115 lines**, corrected after F8d2's review; r2's "about 30" left out the seams): `Queue::skip_mail` (pending or held mail jobs `skipped`; a running `mail.setup` stopped and landed `skipped`), `Queue::attach_setup_run(Arc<dyn SetupRun>)` (the run the glue started, so a skip can stop it), `MAIL_FIRST_PASS_LOOKS` (1) with `mail_batch_closed` clearing `parked` and notifying, `retry_at` (30 s, `mail_window_busy` alone) with the idle `wait_timeout`, and the `RetryClock` seam (`Queue::start_with_clock`; `Queue::start` keeps its signature over `WallClock`). Its fix round adds `Queue::mail_skipped(job)` for F8w2's glue (§14.52.1, r2 R2-2; test 34's F8d2 parts, written first) | `implementer` | specified, off the contract list, tested over the fake queue and a fake clock | **F8d alone**; first in `onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8g (r5 reorder), so it never waits on S4d. Collision note, not a dependency: F8h (in progress) also edits `onboarding_jobs.rs`, in other functions; if F8h lands first, F8d2 rebases on it |
 | F8m | `mail/live.rs`: in onboarding mode a closed backfill batch tells the queue, never starts a slot | `implementer` | specified, about ten lines, tested in F1 (review r5, I-4) | F8a |
 | F8la | `lms_link.rs`: `capture_calendar_link_with`, `validate_only` and `capture_link_only`, the validate-only seam | `implementer`, reviewed by `contract-reviewer` | a bearer link stored under the wrong session reaches another account (review r6 I-2, r7 I-1) | F1, S4b merged |
 | F8lb | `onboarding_capture_link` and `onboarding_paste_link` over F8la's seam; the link to its pending credential | `implementer`, reviewed by `contract-reviewer` | as F8la | F8la, F8b, F8c, F8g, F8d (last in `onboarding_jobs.rs`'s chain), F2d |
 | F8w1 | New `onboarding_live.rs`: `LiveRunner` (every `JOB_ORDER` name to its runner; an unknown name is `Failed`; `registrar.confirm` an interim `Waiting("registrar_runner_pending")` until F8h-runner replaces it, r4 n-2), `LiveEntitlement`, `LiveSyncView`: the live `Deps` (§14.52.4; test 37) | `implementer` | specified glue over built runners; its own file, so no chain | F8b's capture half, F8b2, F8c, F8g, F8h (not F8h-runner, so not Q7) |
-| F8w2 | The same file: the mail seams (`start_setup` with the file's unitid and the window wait, the canary's list reading, `batch_closed_noted`), the two Google reads over `--tidied` after their slot facts, and the network-free `LiveChecks` (§14.52.1, .4; tests 34, 37) | `implementer` | as F8w1 | F8w1, F8d, F8d2 (r2 R2-2), F8s2 (`mail_signals`); F7c's `--tidied` is on O3 at `623a5f8`, F7a's merge, which carried F7c r4 |
+| F8w2 | The same file: the mail seams (`start_setup` with the file's unitid and the window wait; `Queue::mail_skipped("mail.setup")` checked on every window poll and once more just before `start_setup`, returning `skipped` without starting; `Queue::attach_setup_run` with the run's `Shared` right after `start_setup` returns; the canary's list reading, `batch_closed_noted`), the two Google reads over `--tidied` after their slot facts, and the network-free `LiveChecks` (§14.52.1, .4; tests 34, 37) | `implementer` | as F8w1 | F8w1, F8d, F8d2 (r2 R2-2), F8s2 (`mail_signals`); F7c's `--tidied` is on O3 at `623a5f8`, F7a's merge, which carried F7c r4 |
 | F9 | The reveal gate, in its own `onboarding_gate.rs` | `implementer` | a pure function, tested in F1; its own file, so no chain (review r8's note) | F1 |
 | F10 | Shell steps 1-2 in the ruled direction (5b); old wizard removed (static files only) | `console-ui` | `app/static`, the `console.js` queue | direction ruled (5b, 2026-10-23) |
 | F11t | Failing static tests for the onboarding screens; §14.52's pins: step 5's answer and its three allowed mail commands (the seven others never called), the proceeds of steps 3, 7 and 8, Open Knowlu on `finish_ready` only, the closing state held while an exit call is outstanding | `test-writer` | test first (review r1 minor) | F2b |
@@ -4641,7 +4641,16 @@ its test first, failing before the code, as for 29-32.
      `mail.setup`, `mail.canary` and `mail.first_pass` `skipped` and drops them from the order. For
      a running `mail.setup` it marks the job and calls the run's `Shared::stop` (after the current
      step, `mail/setup.rs:251-252`). The runner's `Stopped` then lands as `skipped`, not `pending`.
-     Today's withdraw rule (`mail/runner.rs:185-186`) applies to a forward the run had set. A skipped
+     **The controller's call, after F8d2's review:** after a skip, a `Failed` end lands `skipped`
+     too, as `Stopped` and `Waiting` do. The student's skip decides how the job lands (VISION
+     design commitment 5, "who started a change decides how it lands"), so a run that failed while
+     stopping never shows as a failure the student must fix. A `Done` end stays `done`: the setup
+     did finish, and its canary and first pass are then handled as for any finished setup. While a
+     `mail.setup` still has a `retry_at` entry, it is not re-picked before that time, even when
+     another job's end clears `parked`. The 30 s timer is the only thing that wakes a
+     `mail_window_busy` park, and a skip removes the entry with the job (`skip_mail`). Owner: F8d2, in
+     its fix round, with `mail_skipped`; test 34's F8d2 Skip cases gain the `Failed`-after-skip and
+     `Done`-after-skip ends. Today's withdraw rule (`mail/runner.rs:185-186`) applies to a forward the run had set. A skipped
      mail job is never handed over (`handover_for` already leaves `skipped` out). Test 34.
    - **A setup not finished at Open Knowlu is a named not-connected item, never a silent drop** (r1
      I3, the controller's direction). The old rule handed an open `mail.setup` over to "`on_start`
@@ -4704,9 +4713,20 @@ its test first, failing before the code, as for 29-32.
      no `skip_mail`, no `MAIL_FIRST_PASS_LOOKS`, no `retry_at`, no guard on `mail_setup_start`, and
      `mail_batch_closed` only stores a flag, `onboarding_jobs.rs:650`). So they are a new task:
      - **F8d2** (`implementer`): the `mail_setup_start` onboarding-mode guard (`mail.rs`, about 6
-       lines), and in `onboarding_jobs.rs` (about 30 lines) `Queue::skip_mail`,
-       `MAIL_FIRST_PASS_LOOKS` (1) with `mail_batch_closed` clearing `parked` and notifying, and the
-       30 s `retry_at`.
+       lines), and in `onboarding_jobs.rs` (about 115 lines, corrected after F8d2's review)
+       `Queue::skip_mail`, `Queue::attach_setup_run`, `MAIL_FIRST_PASS_LOOKS` (1) with
+       `mail_batch_closed` clearing `parked` and notifying, the 30 s `retry_at` with the idle wait,
+       and the `RetryClock` seam (`Queue::start_with_clock`). Its fix round adds
+       `Queue::mail_skipped(job)`.
+     - **F8w2's glue uses both new calls.** It checks `Queue::mail_skipped("mail.setup")` on every
+       window poll and once more just before `start_setup`, and returns `skipped` without starting
+       if the job was skipped. Right after `start_setup` returns, it calls
+       `Queue::attach_setup_run` with the run's `Shared`, so a later skip stops the run. If the
+       skip came first, `attach_setup_run` stops the run at once (`onboarding_jobs.rs:724-730` on
+       `feat/o3-f8d2`).
+     - **Sizes re-checked.** F8w1 builds the live `Deps` and calls `Queue::start`, which keeps its
+       signature over `WallClock` (`:499`), so F8w1's size holds. F8g (about 78) holds too: it
+       touches none of F8d2's functions. F8w2 grows by about 6 lines for the two calls and stays S.
      - It sits **first** in `onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8g (r5, the
        controller's reorder). It needs nothing from F8b's or F8b2's code, so it depends on **F8d
        alone**. F8b's capture half waits on S4d, and the O4 school sign-in behind S4d waits on the
@@ -5089,6 +5109,11 @@ its test first, failing before the code, as for 29-32.
     names another, and `None` for an unlisted school;
   - (F8w2) with the window busy, it retries and returns `Stopped` on the stop, or `Waiting` after
     the minute (a fake clock);
+  - (F8w2) a skip during the window wait, and a skip landing between the last poll and the
+    start, each make the glue return `skipped` with the start seam never called
+    (`Queue::mail_skipped("mail.setup")` read on every poll and once just before `start_setup`);
+  - (F8w2) the glue calls `Queue::attach_setup_run` with the run's `Shared` right after
+    `start_setup` returns, so a skip after that stops the fake run (a counting fake);
   - (F8d2) a job parked on `mail_window_busy` is picked again after 30 s with nothing else
     changing, and a stop during that wait starts nothing;
   - (F8d2) `mail_setup_start`'s inner refuses in onboarding mode;
