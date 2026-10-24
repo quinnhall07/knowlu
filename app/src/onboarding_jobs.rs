@@ -7,7 +7,7 @@
 //! **While a [`Queue`] is live it is the only writer of `onboarding.json`**: the commands (F2) and the
 //! window's exits (F4) change the file through the queue's methods, never `save_state` directly. The
 //! one exception is the sign-out rewind, which writes after [`Queue::freeze`] (F8f, F2e).
-use crate::onboarding_state::{save_state, Answers, CourseAnswer, HandoverItem, JobRecord, JobState, OnboardingState, PendingStore};
+use crate::onboarding_state::{load_answers, save_state, update_answers, Answers, CourseAnswer, HandoverItem, JobRecord, JobState, OnboardingState, PendingStore};
 use crate::scheduler::SlotScope;
 use serde::Serialize;
 use serde_json::Value;
@@ -433,14 +433,43 @@ pub struct ExistingNote {
 /// **One note per course** (§14.15, I5): the kept rows are walked in captured order, and a kept row
 /// whose trimmed, **non-empty** human `code` equals an earlier kept row's reuses that row's slug and
 /// does no create (two shells of one course). An empty `code` never matches another row, so two
-/// typed rows with no code are two courses, two creates, two slugs.
+/// typed rows with no code are two courses unless they would share a note: **one note per slug**
+/// (today's seed rule, `seeded_courses`), so a later row whose slug equals an earlier row's reuses
+/// that note on the first run, with no create and no error, and both rows record the shared slug.
 /// An absent or unreadable answers file is an error (`Outcome::Failed`), never "no courses".
 pub fn run_school_courses(
-    _data_dir: &Path,
-    _existing: &[ExistingNote],
-    _create: &mut dyn FnMut(&CourseAnswer) -> Result<String, String>,
+    data_dir: &Path,
+    existing: &[ExistingNote],
+    create: &mut dyn FnMut(&CourseAnswer) -> Result<String, String>,
 ) -> Outcome {
-    todo!("F6a, F8c: school.courses")
+    let answers = match load_answers(data_dir) {
+        Ok(Some(a)) => a,
+        Ok(None) => return Outcome::Failed("Knowlu has no saved course list to make notes from. Try again.".into()),
+        Err(e) => return Outcome::Failed(e),
+    };
+    let nonempty = |t: &str| (!t.trim().is_empty()).then(|| t.trim().to_string());
+    let (mut by_code, mut by_slug, mut slugs) = (BTreeMap::<String, String>::new(), BTreeMap::<String, String>::new(), BTreeMap::<String, String>::new());
+    for c in answers.kept_courses() {
+        let code = nonempty(&c.code);
+        let (lms, derived) = (nonempty(&c.lms_key), crate::scaffold::course_note_slug(c));
+        // A restored note matches by `source_uid`, then `code` (the LMS key, or a typed human code), then its path.
+        let restored = lms.as_deref().and_then(|k| existing.iter().find(|n| n.source_uid.trim() == k))
+            .or_else(|| existing.iter().find(|n| lms.as_deref().is_some_and(|k| n.code.trim() == k) || code.as_deref().is_some_and(|k| n.code.trim() == k)))
+            .or_else(|| existing.iter().find(|n| n.slug == derived));
+        let earlier = code.as_ref().and_then(|k| by_code.get(k)).or_else(|| by_slug.get(&derived));
+        let slug = match (earlier, restored) {
+            (Some(earlier), _) => earlier.clone(),
+            (None, Some(note)) => note.slug.clone(),
+            (None, None) => match create(c) { Ok(s) => s, Err(e) => return Outcome::Failed(e) },
+        };
+        by_slug.insert(derived, slug.clone());
+        if let Some(k) = code { by_code.insert(k, slug.clone()); }
+        slugs.insert(c.key(), slug);
+    }
+    match update_answers(data_dir, &|a| a.slugs.extend(slugs.clone())) {
+        Ok(()) => Outcome::Done(BTreeMap::new()),
+        Err(e) => Outcome::Failed(e),
+    }
 }
 
 /// What `config.ingest` hands F6b's builder, from the answers file alone. Serialised, it is the
@@ -508,6 +537,56 @@ pub fn paste_link_inner(
     _fetch: &dyn Fn(&str) -> Result<String, String>,
 ) -> Value {
     todo!("F8lb: onboarding_paste_link")
+}
+
+/// `Done`'s proof key: how many files `school.apply` kept because they held other bytes ("kept your
+/// existing settings"). Absent or `Some(0)` when nothing was kept.
+pub const KEPT_EXISTING_KEY: &str = "kept_existing_settings";
+
+/// `school.apply`: creates `config/campus.yaml` and `config/events.yaml` once (F6a), each through
+/// [`crate::scaffold::put_new_file`]. The events preset is `events_preset_for(choice.unitid)`.
+pub fn run_school_apply(vault: &Path, choice: &crate::scaffold::CampusChoice) -> Outcome {
+    run_school_apply_with(vault, choice, &Default::default())
+}
+
+pub fn run_school_apply_with(vault: &Path, choice: &crate::scaffold::CampusChoice, seams: &crate::scaffold::PutSeams) -> Outcome {
+    use crate::scaffold::{campus_config_yaml, campus_yaml, events_preset_for, put_new_file_with, Put};
+    let preset = events_preset_for(&choice.unitid);
+    let files = [
+        ("config/events.yaml", campus_yaml(preset).map(str::to_string).ok_or_else(|| format!("unknown campus preset {preset:?}"))),
+        ("config/campus.yaml", campus_config_yaml(choice)),
+    ];
+    let volume = match vault.components().next() {
+        Some(std::path::Component::Prefix(p)) => p.as_os_str().to_string_lossy().to_string(),
+        _ => vault.display().to_string(),
+    };
+    let mut kept = 0;
+    for (rel, text) in files {
+        // The bytes `build_into`'s `write_file` writes: the platform's line ending.
+        let text = text.map(|t| knowlu_engine::pystr::universal_newlines(&t).replace('\n', knowlu_engine::pystr::NEWLINE));
+        match text.and_then(|t| put_new_file_with(vault, rel, &t, seams)) {
+            Ok(Put::Existing { same_bytes: false }) => kept += 1,
+            Ok(_) => {}
+            Err(e) => return Outcome::Failed(format!(
+                "Knowlu could not save your school settings on {volume} ({e}). Check that {volume} is a normal drive with free space, then Try again.")),
+        }
+    }
+    Outcome::Done(if kept > 0 { BTreeMap::from([(KEPT_EXISTING_KEY.to_string(), Some(kept))]) } else { BTreeMap::new() })
+}
+
+/// `school.courses` against a real vault: finds the notes already in `<vault>/courses/` (a C3' restore),
+/// then runs [`run_school_courses`] with [`crate::scaffold::create_course_note`] as `create`.
+pub fn run_school_courses_in(data_dir: &Path, vault: &Path) -> Outcome {
+    let mut existing = Vec::new();
+    for e in std::fs::read_dir(vault.join("courses")).into_iter().flatten().flatten() {
+        let path = e.path();
+        let Some(slug) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".md")).map(str::to_string) else { continue };
+        let front = knowlu_engine::pystr::read_text(&path).ok().and_then(|t| knowlu_engine::models::split_frontmatter(&t).ok()).map(|(m, _)| m);
+        let field = |k: &str| front.as_ref().and_then(|m| knowlu_engine::yaml::get(m, k)).and_then(knowlu_engine::yaml::text).unwrap_or_default();
+        existing.push(ExistingNote { slug, source_uid: field("source_uid"), code: field("code") });
+    }
+    existing.sort_by(|a, b| a.slug.cmp(&b.slug));
+    run_school_courses(data_dir, &existing, &mut |c| crate::scaffold::create_course_note(vault, c))
 }
 
 #[cfg(test)]

@@ -830,26 +830,142 @@ fn seed_writes(vault: &Path, plan: &VaultPlan) -> Result<(), String> {
     // `## Grade weights` is present and empty on purpose: the weights are the student's to write and
     // the judgment's to read, and an invented weight would be a number nobody chose.
     for c in seeded_courses(plan) {
-        // D4: the note is TITLED by the human code the capture read (R-C1c-plan-2's `label`), so a
-        // typed `BUI 100` on the coursework panel and this note are the same course. `name:` always
-        // carries the school's own name, so nothing the student recognises is lost; `code:` stays
-        // the LMS's own key, which is the `course_map` fragment `ingest::match_course` matches a
-        // UID against. A course whose id and name both carried no code has an empty label and keeps
-        // today's behaviour — the name. Nothing is recomputed here: one reader, one rule.
-        let title = if c.label.trim().is_empty() { c.name.as_str() } else { c.label.as_str() };
-        let front = Node::map(vec![
-            ("title", Node::text(title)),
-            ("name", Node::text(&c.name)),
-            ("slug", Node::text(&c.slug)),
-            ("code", Node::text(&c.code)),
-            ("status", Node::text("active")),
-        ]);
-        let body = format!(
-            "---\n{}---\n\n## Grade weights\n\nFill this in from your syllabus — Knowlu uses it to decide what matters.\n",
-            safe_dump_block(&front)
-        );
+        let body = course_note_text(c);
         write::create(vault, &format!("courses/{}.md", c.slug), &body, &ctx, &mut journal, None)
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// The text of one course note; `seed_writes` and F6a's `school.courses` both write exactly this.
+fn course_note_text(c: &CourseSeed) -> String {
+    // D4: the note is TITLED by the human code the capture read (R-C1c-plan-2's `label`), so a
+    // typed `BUI 100` on the coursework panel and this note are the same course. `name:` always
+    // carries the school's own name, so nothing the student recognises is lost; `code:` stays
+    // the LMS's own key, which is the `course_map` fragment `ingest::match_course` matches a
+    // UID against. A course whose id and name both carried no code has an empty label and keeps
+    // today's behaviour — the name. Nothing is recomputed here: one reader, one rule.
+    let title = if c.label.trim().is_empty() { c.name.as_str() } else { c.label.as_str() };
+    let front = Node::map(vec![
+        ("title", Node::text(title)),
+        ("name", Node::text(&c.name)),
+        ("slug", Node::text(&c.slug)),
+        ("code", Node::text(&c.code)),
+        ("status", Node::text("active")),
+    ]);
+    format!(
+        "---\n{}---\n\n## Grade weights\n\nFill this in from your syllabus — Knowlu uses it to decide what matters.\n",
+        safe_dump_block(&front)
+    )
+}
+
+// ---- F6a: create-new for the answer-built files (§4.9) ---------------------------------------------
+
+/// A stray temp file in `config/` starts with this; the helper removes any it finds on its next run.
+pub const TEMP_PREFIX: &str = ".knowlu-tmp-";
+
+/// What the create-new helper found: it made the file, or one was already there and was kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Put {
+    Created,
+    /// A file was at the final name (at the existence check, or created before the put-in-place).
+    /// `same_bytes` is true when it already holds exactly the bytes asked for.
+    Existing { same_bytes: bool },
+}
+
+/// The seams the create-new helper's tests drive; `None` is the real thing, and `Default` is all `None`.
+#[derive(Default)]
+pub struct PutSeams<'a> {
+    /// Called with the final path after the temp file is written and before the put-in-place. An `Err`
+    /// aborts the run: the temp file is removed and nothing is left at the final name.
+    pub after_temp: Option<&'a dyn Fn(&Path) -> Result<(), String>>,
+    /// Replaces `std::fs::hard_link(temp, final)`.
+    pub hard_link: Option<&'a dyn Fn(&Path, &Path) -> std::io::Result<()>>,
+    /// Replaces the fallback, `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` (temp, final).
+    pub move_no_replace: Option<&'a dyn Fn(&Path, &Path) -> std::io::Result<()>>,
+}
+
+/// Creates `<root>/<rel>` with `text` only if nothing is there: temp file in `config/`, then a hard link
+/// (never `rename`); on any hard-link error but `AlreadyExists`, the no-replace move. An existing file
+/// is kept, never replaced. The temp file is removed on every path, and strays are removed first.
+pub fn put_new_file(root: &Path, rel: &str, text: &str) -> Result<Put, String> {
+    put_new_file_with(root, rel, text, &PutSeams::default())
+}
+
+pub fn put_new_file_with(root: &Path, rel: &str, text: &str, seams: &PutSeams) -> Result<Put, String> {
+    let target = root.join(rel);
+    let (dir, name) = match (target.parent(), target.file_name()) {
+        (Some(d), Some(n)) => (d, n.to_string_lossy().to_string()),
+        _ => return Err(format!("{}: no folder to put it in", target.display())),
+    };
+    let found = |p: &Path| -> Result<Option<Put>, String> {
+        match std::fs::read(p) {
+            Ok(b) => Ok(Some(Put::Existing { same_bytes: b == text.as_bytes() })),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{}: {e}", p.display())),
+        }
+    };
+    // A crash's leftover temp file (any file's) goes first; the job runs one at a time on the local lane.
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().starts_with(TEMP_PREFIX) { let _ = std::fs::remove_file(e.path()); }
+    }
+    if let Some(put) = found(&target)? { return Ok(put); }
+    let temp = dir.join(format!("{TEMP_PREFIX}{name}-{}", std::process::id()));
+    // Flushed to disk before the link, so a power loss never leaves a zero-length file at the final name.
+    let flushed = std::fs::File::create(&temp).and_then(|mut f| { use std::io::Write; f.write_all(text.as_bytes())?; f.sync_all() });
+    let placed = flushed.map_err(|e| format!("{}: {e}", temp.display())).and_then(|()| {
+        if let Some(hook) = seams.after_temp { hook(&target)?; }
+        let linked = match seams.hard_link { Some(f) => f(&temp, &target), None => std::fs::hard_link(&temp, &target) };
+        match linked {
+            Ok(()) => return Ok(Put::Created),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            // FAT, exFAT and network volumes answer "not supported": the move that also refuses to replace.
+            Err(_) => match match seams.move_no_replace { Some(f) => f(&temp, &target), None => move_no_replace(&temp, &target) } {
+                Ok(()) => return Ok(Put::Created),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return found(&target)?.ok_or_else(|| format!("{}: {e}", target.display())),
+            },
+        }
+        found(&target)?.ok_or_else(|| format!("{}: reported as existing but is not there", target.display()))
+    });
+    let _ = std::fs::remove_file(&temp);
+    placed
+}
+
+/// `MoveFileExW` with flags 0: unlike `rename`, it fails when the target exists.
+#[cfg(windows)]
+fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
+    let wide = |p: &Path| p.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let (a, b) = (wide(from), wide(to));
+    unsafe { MoveFileExW(PCWSTR(a.as_ptr()), PCWSTR(b.as_ptr()), MOVE_FILE_FLAGS(0)) }
+        .map_err(|e| std::io::Error::from_raw_os_error((e.code().0 & 0xFFFF) as i32))
+}
+
+#[cfg(not(windows))]
+fn move_no_replace(_from: &Path, _to: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no no-replace move on this platform"))
+}
+
+/// The slug a new note for this course gets: the row's own, else its human code's, else its name's
+/// (as `lms_link::courses_from_json` derives one), else its key's.
+pub fn course_note_slug(c: &crate::onboarding_state::CourseAnswer) -> String {
+    // Whatever the source, the slug is cleaned: it names a file under `courses/`, never a path (`../tasks/x`).
+    let from = [c.slug.trim(), c.code.trim(), c.name.trim(), c.lms_key.trim()].into_iter().find(|t| !t.is_empty()).unwrap_or_default();
+    knowlu_engine::ingest::slugify(from)
+}
+
+/// One `courses/<slug>.md` note for a kept course, through `write::create` as the vault's human
+/// (`console_ctx`, journal first). Returns the slug it made.
+pub fn create_course_note(vault: &Path, c: &crate::onboarding_state::CourseAnswer) -> Result<String, String> {
+    let ctx = crate::commands::console_ctx(vault)?;
+    let slug = course_note_slug(c);
+    // The seed note's own text: `code:` is the LMS key (the typed row with none keeps its human code).
+    let lms = if c.lms_key.trim().is_empty() { c.code.trim() } else { c.lms_key.trim() };
+    let seed = CourseSeed { code: lms.to_string(), name: c.name.clone(), slug: slug.clone(), label: c.code.trim().to_string() };
+    write::create(vault, &format!("courses/{slug}.md"), &course_note_text(&seed), &ctx, &mut Journal::new(vault), None)
+        .map_err(|e| e.to_string())?;
+    Ok(slug)
 }
