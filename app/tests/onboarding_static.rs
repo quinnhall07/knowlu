@@ -40,49 +40,74 @@ fn code(src: &str) -> String { blank(src, false) }
 fn skeleton(src: &str) -> String { blank(src, true) }
 
 fn blank(src: &str, strings_too: bool) -> String {
+    // Every blanked char becomes `len_utf8()` spaces (a newline stays one), so byte offsets in the
+    // result are byte offsets in `src`, even past a multibyte char such as an ellipsis.
+    fn pad(out: &mut String, ch: char) {
+        if ch == '\n' { out.push('\n'); } else { for _ in 0..ch.len_utf8() { out.push(' '); } }
+    }
+    const AFTER: &str = "(,=:[!&|?{};+-*%<>~^}";
+    const KEYWORDS: [&str; 13] = ["return", "typeof", "case", "in", "of", "delete", "void", "throw", "new", "else", "do", "yield", "await"];
     let c: Vec<char> = src.chars().collect();
     let mut out = String::with_capacity(src.len());
-    let keep = |ch: char| if ch == '\n' { '\n' } else { ' ' };
-    let (mut i, mut prev) = (0, '\0');
+    let (mut i, mut prev, mut word) = (0, '\0', String::new());
     while i < c.len() {
         let ch = c[i];
         if ch == '/' && c.get(i + 1) == Some(&'/') {
-            while i < c.len() && c[i] != '\n' { out.push(' '); i += 1; }
+            while i < c.len() && c[i] != '\n' { pad(&mut out, c[i]); i += 1; }
         } else if ch == '/' && c.get(i + 1) == Some(&'*') {
-            while i < c.len() && !(c[i] == '*' && c.get(i + 1) == Some(&'/')) { out.push(keep(c[i])); i += 1; }
-            for _ in 0..2 { if i < c.len() { out.push(' '); i += 1; } }
-        } else if ch == '/' && (prev == '\0' || "(,=:[!&|?{};+-*%<>~^".contains(prev)) {
+            while i < c.len() && !(c[i] == '*' && c.get(i + 1) == Some(&'/')) { pad(&mut out, c[i]); i += 1; }
+            for _ in 0..2 { if i < c.len() { pad(&mut out, c[i]); i += 1; } }
+        } else if ch == '/' && (prev == '\0' || AFTER.contains(prev) || KEYWORDS.contains(&word.as_str())) {
             // A regex literal: to the next unescaped `/` outside a class.
             out.push('/');
             i += 1;
             let mut class = false;
             while i < c.len() && c[i] != '\n' && (class || c[i] != '/') {
-                if c[i] == '\\' && i + 1 < c.len() { out.push(if strings_too { ' ' } else { c[i] }); i += 1; }
+                if c[i] == '\\' && i + 1 < c.len() { if strings_too { pad(&mut out, c[i]); } else { out.push(c[i]); } i += 1; }
                 if c[i] == '[' { class = true; }
                 if c[i] == ']' { class = false; }
-                out.push(if strings_too { ' ' } else { c[i] });
+                if strings_too { pad(&mut out, c[i]); } else { out.push(c[i]); }
                 i += 1;
             }
             if i < c.len() && c[i] == '/' { out.push('/'); i += 1; }
             prev = ')';
+            word.clear();
         } else if ch == '"' || ch == '\'' || ch == '`' {
             out.push(ch);
             i += 1;
             while i < c.len() && c[i] != ch {
-                if c[i] == '\\' && i + 1 < c.len() { out.push(if strings_too { ' ' } else { c[i] }); i += 1; }
+                if c[i] == '\\' && i + 1 < c.len() { if strings_too { pad(&mut out, c[i]); } else { out.push(c[i]); } i += 1; }
                 if c[i] == '\n' && ch != '`' { break; }
-                out.push(if strings_too { keep(c[i]) } else { c[i] });
+                if strings_too { pad(&mut out, c[i]); } else { out.push(c[i]); }
                 i += 1;
             }
             if i < c.len() && c[i] == ch { out.push(ch); i += 1; }
             prev = ')';
+            word.clear();
         } else {
             out.push(ch);
+            if ch.is_alphanumeric() || ch == '_' || ch == '$' { word.push(ch); } else if !ch.is_whitespace() { word.clear(); }
             if !ch.is_whitespace() { prev = ch; }
             i += 1;
         }
     }
     out
+}
+
+#[test]
+fn the_stripper_keeps_byte_offsets_and_reads_regex_literals() {
+    let src = "var s = \"Finishing\u{2026}\"; // n\u{e9} here\nvar re = /[\"']x/; function f() { return /\"/.test(s) ? 1 : 2; }\nfunction g() { invoke(\"a\"); /* \u{2026} */ }\n";
+    assert_eq!(code(src).len(), src.len(), "code() keeps byte offsets");
+    assert_eq!(skeleton(src).len(), src.len(), "skeleton() keeps byte offsets");
+    assert!(!code(src).contains("n\u{e9} here") && code(src).contains("Finishing\u{2026}"), "comments go, strings stay");
+    assert!(!skeleton(src).contains("Finishing"), "the skeleton blanks strings");
+    // Two functions and a long file: the whole-file refusal does not apply.
+    let at = src.find("return").unwrap();
+    assert_eq!(enclosing_fn(src, at), "function f() { return /\"/.test(s) ? 1 : 2; }");
+    let at = src.find("invoke").unwrap();
+    assert_eq!(enclosing_fn(src, at), "function g() { invoke(\"a\"); /* \u{2026} */ }");
+    assert_eq!(invoked(&code(src)), ["a"]);
+    assert!(invoked("var t = \"call invoke now\"; function h() { invoke(\"b\"); }").contains(&"b".to_string()), "invoke inside a string is not a call");
 }
 
 /// The source of the smallest `function` (or block-bodied arrow) whose body holds byte `at`,
@@ -128,7 +153,7 @@ fn function<'a>(src: &'a str, name: &str) -> &'a str {
 /// use of the word (an alias, a pass-through) panics.
 fn invoked(js: &str) -> Vec<String> {
     let sk = skeleton(js);
-    let wrapper = js.find("function invoke(").map(|at| {
+    let wrapper = sk.find("function invoke(").map(|at| {
         let open = at + sk[at..].find('{').expect("a wrapper body");
         let mut depth = 0i32;
         let mut end = sk.len();
@@ -139,17 +164,16 @@ fn invoked(js: &str) -> Vec<String> {
         (at, end)
     });
     let mut names = Vec::new();
-    for (at, _) in js.match_indices("invoke") {
+    for (at, _) in sk.match_indices("invoke") {
         let edge = |ch: Option<char>| ch.is_none_or(|ch| !(ch.is_alphanumeric() || ch == '_'));
-        if !edge(js[..at].chars().last()) || !edge(js[at + 6..].chars().next()) { continue; }
+        if !edge(sk[..at].chars().last()) || !edge(sk[at + 6..].chars().next()) { continue; }
         if wrapper.is_some_and(|(s, e)| at >= s && at < e) { continue; }
-        let tail = js[at + 6..].trim_start();
-        if !tail.starts_with('(') {
+        if !sk[at + 6..].trim_start().starts_with('(') {
             let line = format!("{}{}", js[..at].rsplit('\n').next().unwrap_or(""), js[at..].split('\n').next().unwrap_or(""));
             assert!(line.contains("__TAURI__.core.invoke") && line.trim_start().starts_with("var invoke"), "invoke is used without a call (an alias?): {line}");
             continue;
         }
-        let arg = tail[1..].trim_start();
+        let arg = js[at + 6..].trim_start()[1..].trim_start();
         let quote = arg.chars().next().unwrap_or(' ');
         assert!(quote == '"' || quote == '\'', "invoke( must take a literal command name, got: {}", &arg[..arg.len().min(40)]);
         names.push(arg[1..].chars().take_while(|&ch| ch != quote).collect());
@@ -175,6 +199,9 @@ const g = {
   requestAnimationFrame: () => 0, cancelAnimationFrame() {},
   setTimeout: () => 0, setInterval: () => 0, clearTimeout() {}, clearInterval() {},
   addEventListener() {}, removeEventListener() {},
+  fetch: () => { throw new Error("tests never leave the machine"); },
+  XMLHttpRequest: function () { throw new Error("tests never leave the machine"); },
+  WebSocket: function () { throw new Error("tests never leave the machine"); },
   KNOWLU_COPY: { GOOGLE_TESTING: "GT" }, KNOWLU_SHOTS: {},
   __TAURI__: { core: { invoke: () => new Promise(() => {}) } },
 };
@@ -199,17 +226,19 @@ const BANNED: &[&str] = &[
     "entitlement_now", "open_checkout", "attach_account", "google_connect_url", "google_connected", "sync", "backup_now",
     "check_for_updates", "install_update", "hold_for_install", "capture_calendar_link", "paste_calendar_link",
     "sign_out", "switch_profile", "delete_my_data", "open_external", "retarget_credentials",
+    // The queue's mail.setup owns the run; a page-started run would not be drained (ruling, review r2).
+    "mail_setup_start",
 ];
 
 /// Only commands the plan names: section 4.5's list, F5's, the step-2 sign-in, step 5's
-/// `mail_setup_start` and its progress (plan line 643), step 10's confirm screen and `launch_state`
-/// (F10/F11 brief, plan line 3053). Step 5 never starts mail work outside the queue's `mail.setup`.
+/// `mail_setup_progress` (read-only; plan line 643), step 10's confirm screen and `launch_state`
+/// (plan line 3053). Step 5 never starts mail work: `mail_setup_start` is banned.
 const ALLOWED: &[&str] = &[
     "onboarding_status", "onboarding_answer", "onboarding_skip", "onboarding_retry", "onboarding_finish", "onboarding_quit",
     "onboarding_sign_out", "onboarding_attach_session", "onboarding_entitlement", "onboarding_checkout",
     "onboarding_capture_link", "onboarding_paste_link", "campus_search", "store_credentials", "discover_coursework",
     "open_lms_window", "capture_courses", "close_lms_window", "google_sign_in", "send_magic_link", "verify_email_code",
-    "google_connect", "google_status", "mail_setup_start", "mail_setup_progress",
+    "google_connect", "google_status", "mail_setup_progress",
     "your_week", "commitment_proposals", "commitments_confirm", "launch_state",
 ];
 
@@ -221,6 +250,8 @@ fn the_onboarding_assets_exist_and_index_html_loads_them() {
     let html = read("index.html");
     assert!(html.contains("onboarding.js") && html.contains("onboarding.css"), "index.html loads both new files");
     assert!(!html.contains("type=\"module\""), "a classic script, like console.js");
+    let (con, onb) = (html.find("console.js").expect("console.js is loaded"), html.find("onboarding.js").unwrap());
+    assert!(con < onb, "onboarding.js loads after console.js, which defines KNOWLU_COPY and KNOWLU_SHOTS");
     for (name, text) in [("onboarding.js", code(&js)), ("onboarding.css", code(&css))] {
         let text = text.replace("http://www.w3.org/2000/svg", "");
         assert!(!text.contains("http://") && !text.contains("https://"), "{name} references the network");
@@ -300,9 +331,11 @@ fn a_restart_answer_shows_one_screen_whose_only_button_quits() {
 
 #[test]
 fn the_shots_hook_opens_the_frame_at_a_step() {
-    let all = format!("{}{}", code(&read("onboarding.js")), code(&read("console.js")));
-    assert!(all.contains("startOnboarding") && all.contains("KNOWLU_SHOTS"), "KNOWLU_SHOTS.startOnboarding(step) exists");
-    assert!(code(&read("onboarding.js")).contains("fixture"), "the screens render from the console's ?fixture= path");
+    let ours = code(&read("onboarding.js"));
+    let flat = ours.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("KNOWLU_SHOTS.startOnboarding =") || flat.contains("Object.assign(window.KNOWLU_SHOTS"), "KNOWLU_SHOTS.startOnboarding(step) exists");
+    assert!(!flat.contains("KNOWLU_SHOTS = {") && !flat.contains("KNOWLU_SHOTS={"), "onboarding.js extends console.js's KNOWLU_SHOTS, never replaces it");
+    assert!(ours.contains("fixture"), "the screens render from the console's ?fixture= path");
 }
 
 #[test]
@@ -402,8 +435,18 @@ fn no_reason_is_written_to_the_page_without_passing_through_the_words_table() {
     for (at, _) in c.match_indices(".reason") {
         let from = c[..at].rfind([';', '{', '}']).map_or(0, |n| n + 1);
         let to = at + c[at..].find(';').unwrap_or(c.len() - at);
-        let stmt = &c[from..to];
-        if !stmt.trim_start().starts_with("if (") && (stmt.contains("textContent") || stmt.contains("innerHTML") || stmt.contains("insertAdjacent") || stmt.contains("+=") || stmt.contains("setAttribute")) {
+        let mut stmt = c[from..to].trim_start();
+        if stmt.starts_with("if (") {
+            // Skip only the condition: `if (j.reason) el.textContent = j.reason;` still writes.
+            let (mut depth, mut cut) = (0i32, stmt.len());
+            for (k, ch) in stmt.char_indices().skip(3) {
+                if ch == '(' { depth += 1; }
+                if ch == ')' { depth -= 1; if depth == 0 { cut = k + 1; break; } }
+            }
+            stmt = &stmt[cut..];
+            if !stmt.contains(".reason") { continue; }
+        }
+        if stmt.contains("textContent") || stmt.contains("innerHTML") || stmt.contains("insertAdjacent") || stmt.contains("+=") || stmt.contains("setAttribute") {
             assert!(stmt.contains("reasonWords("), "a raw reason is written to the page: {stmt}");
         }
     }
@@ -555,8 +598,8 @@ fn step_three_lists_every_course_with_remove_and_takes_counts_from_the_status() 
     assert!(c.contains("ob-remove-course"), "each captured course has a Remove control");
     let rm = function(&c, "removeCourse");
     let flat = rm.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(flat.contains("invoke(\"onboarding_answer\"") && flat.contains("step: 3"), "Remove is an onboarding_answer for step 3");
-    assert!(flat.contains("removed"), "that marks the row removed");
+    assert!(flat.contains("invoke(\"onboarding_answer\"") && (flat.contains("step: 3") || flat.contains("step:3")), "Remove is an onboarding_answer for step 3");
+    assert!(flat.contains("remove:") || flat.contains("\"remove\""), "whose answer is {{remove: <key>}} (onboarding_state.rs:484)");
     for field in ["classes", "class_times", "assignments_upcoming", "turned_in", "grades_courses"] {
         assert!(c.contains(&format!("step3.{field}")), "the proof reads step3.{field}");
     }
@@ -642,7 +685,9 @@ fn no_password_field_on_the_page_but_ours_by_id() {
             // `{type: 'password'}`); an id such as ob-vhl-password is preceded by `-`.
             let before = text[..at].trim_end_matches('\\');
             let after = &text[at + "password".len()..];
-            if !(before.ends_with(['"', '\'']) && after.starts_with(['"', '\'', '\\'])) { continue; }
+            let quoted = before.ends_with(['"', '\'']) && after.starts_with(['"', '\'', '\\']);
+            let bare = ["type=", "type =", "type:", "type :"].iter().any(|t| before.trim_end().ends_with(t));
+            if !(quoted || bare) { continue; }
             let around = &text[at.saturating_sub(200)..(at + 200).min(text.len())];
             assert!(f == "onboarding.js" && PASSWORD_FIELD_IDS.iter().any(|id| around.contains(id)), "{f} has a password field that is not one of ours: {around}");
         }
@@ -691,6 +736,18 @@ fn a_credential_value_is_read_only_inside_the_store_handler_and_goes_nowhere_els
     assert!(lookups >= 4, "the four login fields are looked up by their literal ids ({lookups} found)");
     for (at, _) in c.match_indices("invoke(\"onboarding_answer\"") {
         assert!(!c[at..(at + 240).min(c.len())].to_lowercase().contains("password"), "no credential in an onboarding_answer payload");
+    }
+    // Plan ~3032: no credential value is assigned to anything that outlives the handler. Inside the
+    // handler, a statement that reads `.value` on its right side assigns only to a local it declares.
+    let h = enclosing_fn(&c, c.find("invoke(\"store_credentials\"").unwrap());
+    for stmt in h.split(';') {
+        let Some(eq) = stmt.find('=').filter(|&e| !stmt[e..].starts_with("==") && !stmt[e..].starts_with("=>")) else { continue };
+        if !stmt[eq + 1..].contains(".value") { continue; }
+        let mut lhs = stmt[..eq].rsplit(['{', '}']).next().unwrap_or("").trim();
+        if lhs.starts_with("if (") { lhs = lhs.rsplit(')').next().unwrap_or("").trim(); }
+        let name = lhs.trim_start_matches("var ").trim_start_matches("let ").trim_start_matches("const ").trim();
+        let declared = lhs.len() != name.len() || h.contains(&format!("var {name}")) || h.contains(&format!("let {name}")) || h.contains(&format!("const {name}"));
+        assert!(declared && !name.contains('.') && !name.contains('['), "a login field's value is assigned beyond the handler: {stmt}");
     }
 }
 
