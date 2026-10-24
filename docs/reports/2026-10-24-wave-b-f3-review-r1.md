@@ -27,4 +27,4 @@ The reviewer checked `git diff bd024fd..e5e6568` (tests 5ede3b4, code e5e6568). 
 ## Rulings
 All six are upheld, and ruling 3 (onboarding.json before `register`) is safer than the plan's "last". Ruling 4's cleanup deletes only this call's own vault folder. The exception is Important 1's case.
 
-## Review r2 (b501448): PASS — both Importants and Minors 3-5 closed; picker can't remove a pre-existing profile folder; the seam's only production caller passes the real restore_into. New minor (else-branch onboarding.json removal without ownership) folded in at HASH.
+## Review r2 (b501448): PASS — both Importants and Minors 3-5 closed; picker can't remove a pre-existing profile folder; the seam's only production caller passes the real restore_into. New minor (else-branch onboarding.json removal without ownership) folded in at 0b7b9f9.
