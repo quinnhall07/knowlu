@@ -648,14 +648,54 @@ pub trait SchoolWindows {
 /// the pending credential is deleted. Two failures: `failed` (kept on this computer), which settles
 /// it for `config.ingest`. A `rejected` link is never sent.
 pub fn run_feed_store(
-    _data_dir: &Path,
-    _kind: &str,
-    _pending: &dyn PendingStore,
-    _account: &dyn FeedAccount,
+    data_dir: &Path,
+    kind: &str,
+    pending: &dyn PendingStore,
+    account: &dyn FeedAccount,
     _windows: &dyn SchoolWindows,
 ) -> Outcome {
-    todo!("F8c: the feed store")
+    use crate::onboarding_state::{pending_name, FeedState};
+    let answers = match load_answers(data_dir) {
+        Ok(Some(a)) => a,
+        Ok(None) => return Outcome::Failed("Knowlu has no saved answers to store your calendar link from. Try again.".into()),
+        Err(e) => return Outcome::Failed(e),
+    };
+    let Some(name) = pending_name(kind) else { return Outcome::Failed(format!("{kind} is not a calendar this app stores")) };
+    let set = |state: FeedState| update_answers(data_dir, &|a| { a.feeds.insert(kind.to_string(), state); });
+    match answers.feeds.get(kind) {
+        // Nothing to send: no feed, a rejected link (kept on this computer, never sent) or one already stored.
+        None | Some(FeedState::Rejected) => return Outcome::Done(BTreeMap::new()),
+        Some(FeedState::Stored) => { let _ = pending.delete(name); return Outcome::Done(BTreeMap::new()); }
+        Some(FeedState::Validated | FeedState::Failed) => {}
+    }
+    let kept = |why: &str| -> Outcome {
+        match set(FeedState::Failed) { Ok(()) => Outcome::Failed(why.to_string()), Err(e) => Outcome::Failed(e) }
+    };
+    // The link comes from the pending credential alone, so a quit after payment needs no school window (§4.11).
+    let Some(link) = pending.get(name).filter(|l| !l.trim().is_empty()) else {
+        return kept(if kind == "lms_ics" { REASON_LMS_LINK_MISSING } else { REASON_CALENDAR_LINK_MISSING });
+    };
+    // One retry, as `create_vault_in` does. The service's words are never kept: they can carry the link.
+    if account.put_source(kind, &link).or_else(|_| account.put_source(kind, &link)).is_err() { return kept(REASON_FEED_KEPT_ON_DEVICE); }
+    if let Err(e) = set(FeedState::Stored) { return Outcome::Failed(e); }
+    let _ = pending.delete(name); // a link that stays is deleted again by `settle_pending_after_ingest`
+    Outcome::Done(BTreeMap::new())
 }
+
+/// `school.store` / `calendar.store` over the real account: the vault's own session, as `attach_in`
+/// stores with the profile's target (`account.rs:1031`), never the wizard's pending one (review r8, M1).
+pub struct VaultFeedAccount { pub vault: std::path::PathBuf }
+impl FeedAccount for VaultFeedAccount {
+    fn put_source(&self, kind: &str, link: &str) -> Result<(), String> { store_feed_in_account(&self.vault, kind, link) }
+}
+
+fn store_feed_in_account(vault: &Path, kind: &str, link: &str) -> Result<(), String> {
+    let cfg = crate::account::cloud_config(vault)?;
+    crate::lms_link::store_source(&cfg.api_base, &cfg.session_credential_target, kind, link)
+}
+
+/// A feed the account could not take stays on this computer; the page says so (a closed key).
+pub const REASON_FEED_KEPT_ON_DEVICE: &str = "feed_kept_on_device";
 
 /// A course note that already exists (a C3' restore), matched by path, `source_uid` or code.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -807,17 +847,24 @@ pub fn run_school_preview(_data_dir: &Path, _engine: &mut dyn FnMut(&Value) -> R
 /// What F8c's `registrar.confirm` hands R24's write: **every** saved registrar row, in captured order,
 /// a removed course's included (§14.47, G5: removal never touches class times). From the answers
 /// file alone.
-pub fn registrar_confirm_rows(_answers: &Answers) -> Vec<crate::onboarding_state::RegistrarRow> {
-    todo!("F8c: the registrar rows to confirm")
+pub fn registrar_confirm_rows(answers: &Answers) -> Vec<crate::onboarding_state::RegistrarRow> {
+    answers.registrar_rows.clone()
 }
 
 /// After `config.ingest` has written the file: deletes both pending credentials.
-pub fn settle_pending_after_ingest(_pending: &dyn PendingStore) { todo!("F8c: delete the pending links") }
+pub fn settle_pending_after_ingest(pending: &dyn PendingStore) {
+    for name in [crate::onboarding_state::PENDING_LMS, crate::onboarding_state::PENDING_CALENDAR] { let _ = pending.delete(name); }
+}
 
 /// Back to another school before payment: deletes the pending links, the feed states and the
 /// school-step jobs' results, and clears `school` (§4.11).
-pub fn change_school(_data_dir: &Path, _pending: &dyn PendingStore, _state: &mut OnboardingState) -> Result<(), String> {
-    todo!("F8c: back to another school")
+pub fn change_school(data_dir: &Path, pending: &dyn PendingStore, state: &mut OnboardingState) -> Result<(), String> {
+    for name in [crate::onboarding_state::PENDING_LMS, crate::onboarding_state::PENDING_CALENDAR] { pending.delete(name)?; }
+    // An absent answers file has no feed states to clear, and none is made; an unreadable one is an error.
+    if load_answers(data_dir)?.is_some() { update_answers(data_dir, &|a| a.feeds.clear())?; }
+    for job in ["school.capture", "school.preview", "school.store"] { state.jobs.remove(job); }
+    state.school = None;
+    Ok(())
 }
 
 // ---- the link commands that only validate (F8lb) -----------------------------------------------------
@@ -956,6 +1003,33 @@ pub fn run_config_ingest_with(
         Ok(text) => put_ingest_text(vault, data_dir, &text, seams),
         Err(e) => Outcome::Failed(format!("Knowlu could not build your course settings ({e}). Try again.")),
     }
+}
+
+/// `config.ingest`'s base from the answers file: which homework logins the student stored comes from
+/// step 8's confirmed rows (a row with a vendor key), the profile id and time zone from the vault.
+pub fn ingest_base_for(answers: &Answers, profile_id: &str, timezone: &str) -> IngestBase {
+    let has = |source: &str| answers.rows.iter().any(|r| r.source == source && !r.key.trim().is_empty());
+    IngestBase { profile_id: profile_id.to_string(), timezone: timezone.to_string(), zybooks: has("zybooks"), vhl: has("vhl") }
+}
+
+/// The lane's `config.ingest`: [`run_config_ingest`] over a base built from the answers file, and
+/// then, once the file is written, [`settle_pending_after_ingest`]. A feed still `validated` holds the
+/// job (`Waiting`, nothing touched), and a `*_link_missing` failure settles nothing. A file already
+/// there with other bytes did not take a kept link, so a `failed` or `rejected` feed's link stays.
+pub fn run_config_ingest_in(vault: &Path, data_dir: &Path, profile_id: &str, timezone: &str, pending: &dyn PendingStore) -> Outcome {
+    let answers = match load_answers(data_dir) {
+        Ok(Some(a)) => a,
+        Ok(None) => return Outcome::Failed("Knowlu has no saved answers to build your course settings from. Try again.".into()),
+        Err(e) => return Outcome::Failed(e),
+    };
+    let base = ingest_base_for(&answers, profile_id, timezone);
+    let out = run_config_ingest(vault, data_dir, &base, pending);
+    if let Outcome::Done(proof) = &out {
+        let h = ingest_handoff(&answers, pending);
+        let link_unplaced = proof.contains_key(KEPT_EXISTING_KEY) && (h.feed_kept_on_device || h.calendar_kept_on_device);
+        if !link_unplaced { settle_pending_after_ingest(pending); }
+    }
+    out
 }
 
 /// The reason key of a `config.ingest` that found a kept course with no recorded slug.
