@@ -440,9 +440,10 @@ Plain, specific, never an instruction to give up. Knowlu names the item; the stu
   - a placeholder in play (§3): "May not fit before 11:59 pm · no time estimate yet" (its own), or
     "May not fit before 11:59 pm · depends on 2 items with no time estimate yet" (others in its
     prefix at removal, before or after it).
-- **Its explanation** (on demand, beside the start-by `why`, which is unchanged): "3.0h left and
-  1.5h of your time before it's due, counting evenings to midnight. Doing the others first keeps 2
-  on time."
+- **Its explanation** (on demand, beside the start-by `why`, which is unchanged) states the time
+  left after the others (plan review r1, I3): "2.5h left; your 3.0h before it's due go to 2 others
+  that then finish on time." With one other: "go to 1 other that then finishes on time." With none:
+  "2.0h left; you have 1.5h before it's due." Your time counts evenings to midnight (§2.3).
 - **On the meter,** when `W` is not empty, a line under the existing sentence: "If something has to
   give: Lab 3 (3.0h). Everything else fits by its deadline." With more than one: "If something has
   to give: Lab 3 and Essay draft (5.5h)." With a pinned Must do item: "Everything else fits by its
@@ -544,7 +545,8 @@ page or run `rank` with dated Must do work at a clock time (app tests resolve a 
 (what `rank_at` returns), whether step 0 found today's order safe, and for each `W` item its slug,
 deadline, work minutes, the minutes `A(d)` gave it, and **the slugs of every other item in its
 prefix at removal**: all items kept at that point, up to and including the one whose addition
-overflowed, whether before or after it in the order (§2.6). `rank_at` becomes `plan_at(..).order`. `surface.rs` reads only that, plus the
+overflowed, whether before or after it in the order (§2.6), plus the count and work of the kept
+dated items due no later than it (for §7's explanation). `rank_at` becomes `plan_at(..).order`. `surface.rs` reads only that, plus the
 frontmatter it already holds; it never recomputes the walk.
 
 | Task | What | Agent | Why | After |
