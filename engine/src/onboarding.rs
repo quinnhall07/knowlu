@@ -68,9 +68,11 @@ fn read_courses(text: &str, errors: &mut Vec<String>) -> Option<(usize, BTreeSet
     Some((list.len(), codes))
 }
 
-/// The distinct UIDs of the feed's items due after `now` in the vault's zone. A date-only due on
-/// today's date is today's work (ingest's rule), so it counts. Institutional noise and an event
-/// with no due are not items. `None` when the text is not a calendar.
+/// The distinct UIDs of the feed's items that ingest's first run would keep live: an item is left
+/// out only when its due date is before today in the vault's zone (`ingest.rs`'s `past_due`), so an
+/// item timed earlier today still counts and the proof's number equals what lands in the vault.
+/// Institutional noise and an event with no due are not items. `None` when the text is not a
+/// calendar.
 fn read_feed(text: &str, tz: &TimeZone, now: DateTime, errors: &mut Vec<String>) -> Option<Vec<String>> {
     if !text.contains("BEGIN:VCALENDAR") {
         errors.push("feed: not a calendar".to_string());
@@ -81,7 +83,7 @@ fn read_feed(text: &str, tz: &TimeZone, now: DateTime, errors: &mut Vec<String>)
         .into_iter()
         .filter(|e| !ingest::is_institutional_noise(&e.uid))
         .filter(|e| match e.due {
-            Some(Due::DateTime(dt)) => dt > now,
+            Some(Due::DateTime(dt)) => dt.date() >= now.date(),
             Some(Due::Date(d)) => d >= now.date(),
             None => false,
         })
@@ -91,8 +93,10 @@ fn read_feed(text: &str, tz: &TimeZone, now: DateTime, errors: &mut Vec<String>)
 }
 
 /// From the v2 bundle: the item columns whose row says turned in (O1's rule), and how many courses
-/// have at least one item column. An Overall column is neither; a course whose capture failed has
-/// no columns to count.
+/// have at least one item column with a graded row. "Graded" follows `ingest::gradebook_done`: a
+/// `graded` row with a score above 0, or an `exempt` row; a row still `needs-grading` is turned in
+/// but not graded, and a graded zero is live, so neither makes a grades course. An Overall column is
+/// neither; a course whose capture failed has no columns to count.
 fn read_grades(text: &str, tz: &TimeZone, errors: &mut Vec<String>) -> Option<(BTreeSet<String>, usize)> {
     let Ok(bundle) = serde_json::from_str::<crate::grades::Bundle>(text) else {
         errors.push("grades: not a v2 grades bundle".to_string());
@@ -100,7 +104,7 @@ fn read_grades(text: &str, tz: &TimeZone, errors: &mut Vec<String>) -> Option<(B
     };
     let (mut done, mut courses) = (BTreeSet::new(), 0);
     for course in bundle.courses.iter().filter(|c| c.error.is_none()) {
-        let mut items = 0;
+        let mut graded = false;
         for column in &course.columns {
             let Some(id) = column["id"].as_str().filter(|s| !s.is_empty()) else { continue };
             let row = course.grades.iter().find(|r| r["columnId"].as_str() == Some(id));
@@ -108,18 +112,23 @@ fn read_grades(text: &str, tz: &TimeZone, errors: &mut Vec<String>) -> Option<(B
             if fields.kind != crate::grades::Kind::Item {
                 continue;
             }
-            items += 1;
             if ingest::gradebook_done(fields.status.as_str(), fields.score) {
                 done.insert(id.to_string());
+                graded |= fields.status != crate::grades::Status::NeedsGrading;
             }
         }
-        courses += usize::from(items > 0);
+        courses += usize::from(graded);
     }
     Some((done, courses))
 }
 
-/// The registrar's matched class times: Banner's series whose course code (a lab's " Lab" dropped)
+/// The registrar's matched class times: Banner's series read `Reading::Whole` (a partly read row is
+/// not counted, as the registrar's own confirm skips it) whose course code (a lab's " Lab" dropped)
 /// is a code in the course list. Nothing is written and nothing is fetched.
+///
+/// A student whose classes are all online has no `CLAS` meeting with a day and times, so the parse
+/// fails: `class_times` is `null` plus a named `registrar:` line in `errors`. The reveal treats that
+/// as a named outcome (no class times to show), never as a failure.
 fn read_registrar(text: &str, school: Option<&str>, codes: &BTreeSet<String>, errors: &mut Vec<String>) -> Option<usize> {
     let Some(key) = school else {
         errors.push("registrar: no school given".to_string());
@@ -134,9 +143,14 @@ fn read_registrar(text: &str, school: Option<&str>, codes: &BTreeSet<String>, er
         return None;
     };
     match crate::registrar::parse_banner(&json, key) {
-        Ok(parsed) => Some(
-            parsed.series.iter().filter(|s| codes.contains(&compact(s.title.strip_suffix(" Lab").unwrap_or(&s.title)))).count(),
-        ),
+        Ok(parsed) => {
+            let whole = |uid: &str| {
+                let crn = uid.rsplit_once('-').map_or("", |(_, crn)| crn);
+                parsed.seen.get(crn) == Some(&crate::registrar::Reading::Whole)
+            };
+            let named = |title: &str| codes.contains(&compact(title.strip_suffix(" Lab").unwrap_or(title)));
+            Some(parsed.series.iter().filter(|s| whole(&s.source_uid) && named(&s.title)).count())
+        }
         Err(e) => {
             errors.push(format!("registrar: {e}"));
             None
@@ -296,11 +310,44 @@ mod tests {
 
     #[test]
     fn upcoming_is_judged_in_the_vault_zone_not_utc() {
-        // 2026-09-02 02:00 UTC is 2026-09-01 21:00 in Chicago (CDT): after a 12:00 now, so upcoming.
-        // 2026-09-01 15:00 UTC is 10:00 in Chicago: already past, though 15:00 > 12:00 read as UTC.
+        // 2026-09-02 02:00 UTC is 2026-09-01 21:00 in Chicago (CDT): today, so upcoming.
+        // 2026-09-01 04:00 UTC is 2026-08-31 23:00 in Chicago: before today, though it reads as
+        // today if the Z is ignored.
         let feed = ics(&[
             vevent("BB-ASSIGN-1", "Evening thing", "20260902T020000Z"),
-            vevent("BB-ASSIGN-2", "Morning thing", "20260901T150000Z"),
+            vevent("BB-ASSIGN-2", "Yesterday thing", "20260901T040000Z"),
+        ]);
+        let v = run(&feed, None);
+        assert_eq!(count(&v, "assignments_upcoming"), json!(1), "{v}");
+    }
+
+    #[test]
+    fn an_item_timed_earlier_today_still_counts_as_upcoming() {
+        // Ingest's first-run rule: excluded only when the due date is before today (ingest.rs:899),
+        // so the proof's number equals what lands in the vault. Now is 12:00.
+        let feed = ics(&[
+            vevent("BB-ASSIGN-1", "Morning thing", "20260901T090000"),
+            vevent("BB-ASSIGN-2", "Yesterday thing", "20260831T235900"),
+        ]);
+        let v = run(&feed, None);
+        assert_eq!(count(&v, "assignments_upcoming"), json!(1), "{v}");
+    }
+
+    #[test]
+    fn a_date_only_due_today_counts_and_yesterday_does_not() {
+        let feed = ics(&[
+            "BEGIN:VEVENT
+UID:BB-ASSIGN-1
+SUMMARY:All day
+DTSTART;VALUE=DATE:20260901
+END:VEVENT
+".to_string(),
+            "BEGIN:VEVENT
+UID:BB-ASSIGN-2
+SUMMARY:Gone
+DTSTART;VALUE=DATE:20260831
+END:VEVENT
+".to_string(),
         ]);
         let v = run(&feed, None);
         assert_eq!(count(&v, "assignments_upcoming"), json!(1), "{v}");
@@ -386,6 +433,56 @@ mod tests {
         assert_eq!(count(&v, "errors"), json!([]), "{v}");
     }
 
+    fn banner_rows(rows: Vec<Value>) -> String {
+        json!({"data": {"registrations": rows}}).to_string()
+    }
+
+    fn banner_row(crn: &str, number: &str, schedule: &str, meetings: Value) -> Value {
+        json!({"term": "202640", "courseReferenceNumber": crn, "subject": "SYN", "courseNumber": number,
+               "scheduleDescription": schedule, "statusIndicator": "IR", "meetingTimes": meetings})
+    }
+
+    fn clas(begin: Option<&str>) -> Value {
+        let mut m = json!({"meetingType": "CLAS", "monday": true, "endTime": "0950",
+                           "startDate": "08/20/2026", "endDate": "12/05/2026"});
+        if let Some(b) = begin {
+            m["beginTime"] = json!(b);
+        }
+        m
+    }
+
+    #[test]
+    fn only_whole_series_count_as_class_times() {
+        // SYN 110: one good meeting, whole. SYN 120: a good meeting and one with no begin time,
+        // so the row is read partial and does not count.
+        let b = banner_rows(vec![
+            banner_row("90001", "110", "Lecture", json!([clas(Some("0900"))])),
+            banner_row("90002", "120", "Lecture", json!([clas(Some("0900")), clas(None)])),
+        ]);
+        let v = with_registrar(Some(&b), Some("ua"));
+        assert_eq!(count(&v, "class_times"), json!(1), "{v}");
+    }
+
+    #[test]
+    fn a_lab_row_matches_its_course() {
+        let b = banner_rows(vec![
+            banner_row("90001", "110", "Lecture", json!([clas(Some("0900"))])),
+            banner_row("90002", "110", "Laboratory", json!([clas(Some("0800"))])),
+        ]);
+        let v = with_registrar(Some(&b), Some("ua"));
+        assert_eq!(count(&v, "class_times"), json!(2), "the lab (titled 'SYN 110 Lab') matches SYN 110: {v}");
+    }
+
+    #[test]
+    fn a_course_with_an_empty_label_matches_by_its_slug() {
+        let c = json!([{"code": "_900001_1", "name": "Synthetic Studies I", "slug": "syn-110", "label": ""}]).to_string();
+        let b = banner_rows(vec![banner_row("90001", "110", "Lecture", json!([clas(Some("0900"))]))]);
+        let f = ics(&[]);
+        let inputs = PreviewInputs { feed: Some(&f), courses: Some(&c), registrar: Some(&b), school: Some("ua"), ..Default::default() };
+        let v = preview(&inputs, &chicago(), now());
+        assert_eq!(count(&v, "class_times"), json!(1), "{v}");
+    }
+
     #[test]
     fn no_registrar_is_a_null_class_times_and_no_error() {
         let v = with_registrar(None, None);
@@ -409,6 +506,28 @@ mod tests {
         // Course one has item columns; course two only an Overall; course three failed.
         let v = run(&ics(&[]), Some(&bundle()));
         assert_eq!(count(&v, "grades_courses"), json!(1), "{v}");
+    }
+
+    #[test]
+    fn a_course_with_columns_but_nothing_graded_is_not_a_grades_course() {
+        // Course one: an item column and no row (not submitted). Course two: a graded zero (live by
+        // gradebook_done), an item still needing grading. Course three: one exempt column (turned in).
+        let item = |id: &str| json!({"id": id, "name": id, "externalGrade": false, "score": {"possible": 10.0}});
+        let zero = json!({"columnId": "_2_1", "status": "Graded", "exempt": false,
+                          "displayGrade": {"scaleType": "Score", "score": 0.0, "possible": 10.0}});
+        let needs = json!({"columnId": "_3_1", "status": "NeedsGrading", "exempt": false});
+        let exempt = json!({"columnId": "_4_1", "status": "Graded", "exempt": true});
+        let bundle = json!({
+            "schema": 1, "lms": "blackboard", "host": "lms.example.test", "fetched_at": "2026-08-30T12:00:00Z", "user_id": "_900_1",
+            "courses": [
+                {"membership": {"courseId": "_900001_1"}, "columns": [item("_1_1")], "grades": [], "categories": null},
+                {"membership": {"courseId": "_900002_1"}, "columns": [item("_2_1"), item("_3_1")], "grades": [zero, needs], "categories": null},
+                {"membership": {"courseId": "_900003_1"}, "columns": [item("_4_1")], "grades": [exempt], "categories": null},
+            ],
+        })
+        .to_string();
+        let v = run(&ics(&[]), Some(&bundle));
+        assert_eq!(count(&v, "grades_courses"), json!(1), "only the exempt course has a graded row: {v}");
     }
 
     #[test]
