@@ -217,6 +217,15 @@ pub fn ingest_handoff(_answers: &Answers, _pending: &dyn PendingStore) -> Ingest
     todo!("F6b, F8c: the config.ingest hand-over")
 }
 
+/// `school.preview`'s core (F8b): loads the answers file, builds the `--courses` list with
+/// [`crate::onboarding_state::preview_courses`] and hands it to `engine` (the
+/// `knowlu-engine onboarding --preview` call, the feed, grades and registrar files beside it), then
+/// saves the output's `by_course` through [`crate::onboarding_state::save_preview`]. An absent or
+/// unreadable answers file is `Failed`, never a preview of no courses.
+pub fn run_school_preview(_data_dir: &Path, _engine: &mut dyn FnMut(&Value) -> Result<Value, String>) -> Outcome {
+    todo!("F8b: school.preview")
+}
+
 /// What F8c's `registrar.confirm` hands R24's write: **every** saved registrar row, in captured order,
 /// a removed course's included (§14.47, G5: removal never touches class times). From the answers
 /// file alone.

@@ -956,7 +956,8 @@ fn test_25_quit_and_finish_flush_after_the_drain_and_before_the_exit_with_quit_a
 const LMS_LINK: &str = "https://lms.example.invalid/feed/tok-5c19e0.ics";
 
 fn course(code: &str, name: &str, key: &str) -> CourseAnswer {
-    CourseAnswer { code: code.into(), name: name.into(), label: name.split(' ').next().unwrap().into(), lms_key: key.into(), removed: false, slug: String::new(), fragments: Vec::new() }
+    let label: String = name.split(' ').next().unwrap().into();
+    CourseAnswer { code: code.into(), name: name.into(), captured_label: label.clone(), label, lms_key: key.into(), removed: false, slug: String::new(), fragments: Vec::new() }
 }
 fn three_courses() -> Vec<CourseAnswer> {
     vec![course("QLT 101", "Quilting Basics", "_1001_1"), course("KNT 220", "Knotwork Theory", "_1002_1"), course("WVG 105", "Weaving Lab", "_1003_1")]
@@ -1607,18 +1608,26 @@ fn test_12_a_course_removed_at_step_3_reaches_no_note_and_no_course_map_entry_an
         assert_eq!(out["ok"], true, "{out}");
     };
     give(3, capture_answer());
-    // F8b's two seams (never page answers): each course's pairs by its key (the human code, then a
-    // gradebook column id in the pin form), then the preview's match-set buckets as the engine writes them.
+    // F8b's pairs seam (never a page answer): each course's pairs by its key (the human code, then a
+    // gradebook column id in the pin form).
     save_pairs(&dir, &pairs_of(&[("_1001_1", &["QLT 101", "_71_1"]), ("_1002_1", &["KNT 220", "_72_1"]), ("_1003_1", &["WVG 105", "_73_1"])])).unwrap();
-    save_preview(&dir, &serde_json::json!({
-        "_1001_1": {"codes": ["_1001_1"], "class_times": 3, "assignments_upcoming": 7, "graded": true, "turned_in": 0},
-        "_1002_1": {"codes": ["_1002_1"], "class_times": 2, "assignments_upcoming": 11, "graded": true, "turned_in": 0},
-        "_1003_1": {"codes": ["_1003_1"], "class_times": 1, "assignments_upcoming": 4, "graded": false, "turned_in": 0},
-        "_1001_1,_1002_1": {"codes": ["_1001_1", "_1002_1"], "class_times": 0, "assignments_upcoming": 100, "turned_in": 0},
-        "unmatched": {"codes": [], "class_times": 0, "assignments_upcoming": 1000, "turned_in": 0},
-    })).unwrap();
     // A label edit is display only (§14.46): it changes no pair.
     give(3, serde_json::json!({"label": {"key": "_1002_1", "label": "Knots, edited"}}));
+    // `school.preview` through its core, with a fake engine that records the `--courses` it is handed
+    // and answers the match-set buckets as the engine writes them.
+    let handed = RefCell::new(Vec::<Value>::new());
+    let out = run_school_preview(&dir, &mut |courses| {
+        handed.borrow_mut().push(courses.clone());
+        Ok(serde_json::json!({"by_course": {
+            "_1001_1": {"codes": ["_1001_1"], "class_times": 3, "assignments_upcoming": 7, "graded": true, "turned_in": 0},
+            "_1002_1": {"codes": ["_1002_1"], "class_times": 2, "assignments_upcoming": 11, "graded": true, "turned_in": 0},
+            "_1003_1": {"codes": ["_1003_1"], "class_times": 1, "assignments_upcoming": 4, "graded": false, "turned_in": 0},
+            "_1001_1,_1002_1": {"codes": ["_1001_1", "_1002_1"], "class_times": 0, "assignments_upcoming": 100, "turned_in": 0},
+            "unmatched": {"codes": [], "class_times": 0, "assignments_upcoming": 1000, "turned_in": 0},
+        }, "classes": 3, "errors": []}))
+    });
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    assert_eq!(handed.borrow().len(), 1, "one --preview call");
     give(3, serde_json::json!({"remove": "_1002_1"}));
     // A quit and a reload: nothing here but the folder.
     let reloaded = load_answers(&dir).unwrap().expect("the answers file survived");
@@ -1640,11 +1649,12 @@ fn test_12_a_course_removed_at_step_3_reaches_no_note_and_no_course_map_entry_an
     // Narrowed (§14.45): the removed course's name or slug is in no course_map entry; its fragments are only under course_exclude.
     let map_text = serde_json::to_string(&h.course_map).unwrap();
     assert!(!map_text.contains("knotwork") && !map_text.contains("KNT 220") && !map_text.contains("_72_1"), "course_map: {map_text}");
-    // One source of pairs (§14.46): after the label edit, the pairs in the --courses list the preview
-    // is given are byte-equal to that course's lines in the text (course_map's, or course_exclude).
-    // The entry's `code` is the row's key (the LMS course key), which is also its key in `slugs`.
+    // One source of pairs (§14.46): after the label edit, the pairs in the --courses list the fake
+    // --preview call was handed are byte-equal to that course's lines in the text (course_map's, or
+    // course_exclude less any fragment a kept course shares; none here). The entry's `code` is the
+    // row's key (the LMS course key), which is also its key in `slugs`.
     let now = load_answers(&dir).unwrap().unwrap();
-    let listed = preview_courses(&now);
+    let listed = handed.borrow()[0].clone();
     for c in listed.as_array().expect("one object per course") {
         let key = c["code"].as_str().unwrap();
         let row = now.courses.iter().find(|r| r.lms_key == key).unwrap_or_else(|| panic!("--courses code {key} is no row's LMS key"));
@@ -1789,8 +1799,10 @@ fn test_03_a_runners_null_proof_count_reaches_the_job_record_and_the_saved_file_
 }
 
 #[test]
-fn test_14_two_kept_shells_of_one_human_code_get_two_slugs_each_under_its_own_key() {
-    // "KNT 220" from spring (`_0990_1`) and fall (`_1002_1`), both kept: two rows, two notes, two slugs.
+fn test_14_two_kept_shells_of_one_human_code_share_one_note_and_each_key_maps_to_its_slug() {
+    // "KNT 220" from spring (`_0990_1`) and fall (`_1002_1`), both kept: one course, so one note
+    // (F6a matches by path, `source_uid` or code; the scaffold seeds one note per slug; §14.15 forbids a
+    // duplicate), made for the first kept shell in captured order, and both keys name its slug.
     let dir = scratch("t14-two-shells");
     let capture = serde_json::json!({"capture": {"courses": [
         course("KNT 220", "Knotwork Theory", "_0990_1"), course("KNT 220", "Knotwork Theory", "_1002_1"),
@@ -1799,14 +1811,14 @@ fn test_14_two_kept_shells_of_one_human_code_get_two_slugs_each_under_its_own_ke
     let created = RefCell::new(Vec::<String>::new());
     let out = run_school_courses(&dir, &[], &mut |c| {
         created.borrow_mut().push(c.lms_key.clone());
-        Ok(format!("knotwork-theory{}", if c.lms_key == "_0990_1" { "-spring" } else { "" }))
+        Ok("knotwork-theory".to_string())
     });
     assert!(matches!(out, Outcome::Done(_)), "{out:?}");
-    assert_eq!(*created.borrow(), ["_0990_1", "_1002_1"], "one create per kept shell");
+    assert_eq!(*created.borrow(), ["_0990_1"], "one create, for the first kept shell; no duplicate note");
     let slugs = load_answers(&dir).unwrap().unwrap().slugs;
-    assert_eq!(slugs.get("_0990_1").map(String::as_str), Some("knotwork-theory-spring"), "{slugs:?}");
-    assert_eq!(slugs.get("_1002_1").map(String::as_str), Some("knotwork-theory"), "{slugs:?}");
-    assert!(!slugs.contains_key("KNT 220"), "never keyed by the human code, where one shell would overwrite the other: {slugs:?}");
+    assert_eq!(slugs.get("_0990_1").map(String::as_str), Some("knotwork-theory"), "{slugs:?}");
+    assert_eq!(slugs.get("_0990_1"), slugs.get("_1002_1"), "both shells name the one note: {slugs:?}");
+    assert!(!slugs.contains_key("KNT 220"), "keyed by each row's key, never by the human code: {slugs:?}");
 }
 
 #[test]

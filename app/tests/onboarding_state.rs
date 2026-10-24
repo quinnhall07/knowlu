@@ -69,8 +69,8 @@ fn full_answers() -> Answers {
     let mut a = Answers::default();
     a.courses = vec![
         // Fragments: the human code, then a gradebook column id in the pin form (never a course id).
-        CourseAnswer { code: "QLT 101".into(), name: "Quilting Basics".into(), label: "Quilting".into(), lms_key: "_1001_1".into(), removed: false, slug: "quilting-basics".into(), fragments: vec!["QLT 101".into(), "_71_1".into()] },
-        CourseAnswer { code: "KNT 220".into(), name: "Knotwork Theory".into(), label: "Knots".into(), lms_key: "_1002_1".into(), removed: true, slug: String::new(), fragments: vec!["KNT 220".into()] },
+        CourseAnswer { code: "QLT 101".into(), name: "Quilting Basics".into(), label: "Quilting".into(), captured_label: "Quilting".into(), lms_key: "_1001_1".into(), removed: false, slug: "quilting-basics".into(), fragments: vec!["QLT 101".into(), "_71_1".into()] },
+        CourseAnswer { code: "KNT 220".into(), name: "Knotwork Theory".into(), label: "Knots, edited".into(), captured_label: "Knots".into(), lms_key: "_1002_1".into(), removed: true, slug: String::new(), fragments: vec!["KNT 220".into()] },
     ];
     a.registrar_rows = vec![RegistrarRow { code: "QLT 101".into(), days: "MWF".into(), start: "09:00".into(), end: "09:50".into() }];
     put_bucket(&mut a, &["_1001_1"], &[("class_times", 3)]);
@@ -852,9 +852,12 @@ fn test_22_the_pending_target_is_named_only_inside_f2gs_command_wrapper() {
 
 /// A captured row: `code` is the human code, `key` the LMS course key (the row's identity, F7a). Its
 /// one saved fragment is the human code; a test that needs a gradebook pin adds a column id itself.
+/// `captured_label` is set as a capture sets it (from the label), so a row built here in memory has
+/// the key it would have after a capture.
 fn row(code: &str, name: &str, key: &str, removed: bool) -> CourseAnswer {
+    let label: String = name.split(' ').next().unwrap().into();
     CourseAnswer {
-        code: code.into(), name: name.into(), label: name.split(' ').next().unwrap().into(), lms_key: key.into(), removed,
+        code: code.into(), name: name.into(), captured_label: label.clone(), label, lms_key: key.into(), removed,
         slug: String::new(), fragments: vec![code.to_string()],
     }
 }
@@ -908,14 +911,25 @@ fn test_12_kept_courses_leaves_out_a_removed_row_and_keeps_the_captured_order() 
 }
 
 #[test]
-fn test_12_the_course_key_is_the_lms_key_then_the_slug_then_the_label_like_by_course_and_never_the_human_code() {
+fn test_12_the_course_key_is_the_lms_key_then_the_slug_then_the_captured_label_trimmed_and_never_the_human_code_or_the_edited_label() {
     let mut c = row("QLT 101", "Quilting Basics", "_1001_1", false);
     c.slug = "quilting".into();
     assert_eq!(c.key(), "_1001_1", "the LMS course key, as the engine's by_course keys it");
     c.lms_key = String::new();
     assert_eq!(c.key(), "quilting", "no LMS key: the slug, not the human code");
     c.slug = String::new();
-    assert_eq!(c.key(), "Quilting", "no LMS key and no slug: the label, not the human code");
+    assert_eq!(c.key(), "Quilting", "no LMS key and no slug: the label as captured, not the human code");
+    c.label = "Quilting, Tuesdays".into();
+    assert_eq!(c.key(), "Quilting", "an edited label is display only: the key is unchanged");
+    // Trimmed, as the engine trims each of its fields: a blank field is empty and falls through.
+    c.lms_key = "  _1001_1 ".into();
+    assert_eq!(c.key(), "_1001_1");
+    c.lms_key = "   ".into();
+    c.slug = " quilting ".into();
+    assert_eq!(c.key(), "quilting", "a blank LMS key is no key");
+    c.slug = "\t".into();
+    c.captured_label = " Quilting ".into();
+    assert_eq!(c.key(), "Quilting");
 }
 
 #[test]
@@ -1253,17 +1267,25 @@ fn test_12_every_preview_entry_carries_pairs_and_a_row_with_fragments_never_send
     let mut a = three_with_one_removed();
     a.courses[0].fragments = vec!["QLT 101".into(), "_71_1".into()];
     a.courses[2].fragments = Vec::new(); // none saved yet
+    // A typed row with no human code and nothing saved: `[]` is allowed there, and only there (the
+    // hand-over writes no pair for it either).
+    let mut bare = row("", "Seminar", "", false);
+    bare.fragments = Vec::new();
+    a.courses.push(bare);
     let listed = preview_courses(&a);
     let entries = listed.as_array().expect("one entry per row");
-    assert_eq!(entries.len(), 3, "removed rows included");
+    assert_eq!(entries.len(), 4, "removed rows included");
     for (entry, course) in entries.iter().zip(&a.courses) {
         let pairs = entry.get("pairs").and_then(|p| p.as_array()).unwrap_or_else(|| panic!("no pairs array: {entry}"));
-        assert!(!pairs.is_empty(), "never an empty list for {}: {entry}", course.code);
+        if !course.fragments.is_empty() || !course.code.is_empty() {
+            assert!(!pairs.is_empty(), "never an empty list for a row with fragments or a human code ({}): {entry}", course.key());
+        }
         if !course.fragments.is_empty() {
             assert_eq!(entry["pairs"], serde_json::json!(course.fragments), "exactly the saved fragments");
         }
     }
     assert_eq!(entries[2]["pairs"], serde_json::json!(["WVG 105"]), "none saved: the hand-over's own fallback, the human code");
+    assert_eq!(entries[3]["pairs"], serde_json::json!([]), "no fragments and no human code: present, and empty");
 }
 
 #[test]
@@ -1325,5 +1347,80 @@ fn test_12_grades_courses_counts_kept_graded_courses_and_class_times_never_fall_
     for (i, removed) in [&[][..], &["_1002_1"], &["_1001_1", "_1002_1"], &keys[..]].into_iter().enumerate() {
         let t = totals_after(&format!("t12-ct-{i}"), bundle, removed);
         assert_eq!(total(&t, "class_times"), Some(116), "removing {removed:?} removed a class time: {t:?}");
+    }
+}
+
+// ---- F1 review r4 ------------------------------------------------------------------------------------------
+
+#[test]
+fn test_12_a_label_edit_on_a_row_with_no_lms_key_and_no_slug_changes_no_key_no_total_and_no_remove() {
+    // The paste fallback's typed row: no LMS key, no slug, so its key is the label as captured.
+    let d = scratch("t12-label-key");
+    let mut typed = row("", "Lab", "", false);
+    typed.captured_label = "FORGED".into(); // a page cannot set it: the capture takes it from the label
+    let capture = serde_json::json!({"capture": {"courses": [row("QLT 101", "Quilting Basics", "_1001_1", false), typed]}});
+    assert_eq!(onboarding_answer_inner(&d, 3, &capture, &mut |_| {})["ok"], true);
+    let captured = load_answers(&d).unwrap().unwrap();
+    assert_eq!(captured.courses[1].captured_label, "Lab", "set at capture from the captured label");
+    save_preview(&d, &serde_json::json!({
+        "_1001_1": {"assignments_upcoming": 1, "class_times": 0, "codes": ["_1001_1"], "graded": null, "turned_in": null},
+        "Lab": {"assignments_upcoming": 10, "class_times": 0, "codes": ["Lab"], "graded": null, "turned_in": null},
+        "unmatched": {"assignments_upcoming": 0, "class_times": 0, "codes": [], "turned_in": null},
+    })).unwrap();
+    let before = step3_totals(&load_answers(&d).unwrap().unwrap());
+    assert_eq!(total(&before, "assignments_upcoming"), Some(11), "{before:?}");
+    // The student renames it.
+    assert_eq!(onboarding_answer_inner(&d, 3, &serde_json::json!({"label": {"key": "Lab", "label": "Lab, Tues"}}), &mut |_| {})["ok"], true);
+    let edited = load_answers(&d).unwrap().unwrap();
+    assert_eq!((edited.courses[1].label.as_str(), edited.courses[1].key()), ("Lab, Tues", "Lab".to_string()), "shown renamed, keyed as captured");
+    assert_eq!(step3_totals(&edited), before, "no bucket lost its row: the 10 items stay in the proof");
+    assert_eq!(preview_courses(&edited)[1]["code"], "Lab", "the engine is still given the captured key");
+    // Remove still finds it by the same key, and the totals then drop it.
+    assert_eq!(onboarding_answer_inner(&d, 3, &serde_json::json!({"remove": "Lab"}), &mut |_| {})["ok"], true);
+    let removed = load_answers(&d).unwrap().unwrap();
+    assert!(removed.courses[1].removed, "{:?}", removed.courses);
+    assert_eq!(total(&step3_totals(&removed), "assignments_upcoming"), Some(1));
+}
+
+#[test]
+fn test_12_save_preview_replaces_the_saved_buckets_and_never_merges() {
+    let d = scratch("t12-preview-replace");
+    let courses = vec![row("QLT 101", "Quilting Basics", "_1001_1", false), row("KNT 220", "Knotwork Theory", "_1002_1", false)];
+    assert_eq!(onboarding_answer_inner(&d, 3, &serde_json::json!({"capture": {"courses": courses}}), &mut |_| {})["ok"], true);
+    save_preview(&d, &serde_json::json!({
+        "_1001_1": {"assignments_upcoming": 7, "class_times": 0, "codes": ["_1001_1"], "turned_in": 0},
+        "_1002_1": {"assignments_upcoming": 9, "class_times": 0, "codes": ["_1002_1"], "turned_in": 0},
+        "_1001_1,_1002_1": {"assignments_upcoming": 50, "class_times": 0, "codes": ["_1001_1", "_1002_1"], "turned_in": 0},
+    })).unwrap();
+    let second = serde_json::json!({
+        "_1001_1": {"assignments_upcoming": 2, "class_times": 0, "codes": ["_1001_1"], "turned_in": 0},
+        "unmatched": {"assignments_upcoming": 3, "class_times": 0, "codes": [], "turned_in": 0},
+    });
+    save_preview(&d, &second).unwrap();
+    let saved = load_answers(&d).unwrap().unwrap().buckets;
+    let expected: BTreeMap<String, Bucket> = serde_json::from_value(second).unwrap();
+    assert_eq!(saved, expected, "only the second preview's buckets remain");
+}
+
+#[test]
+fn test_12_with_no_buckets_every_count_total_is_null_never_0() {
+    // No preview yet, or a failed one: nothing is known but the rows.
+    let a = Answers { courses: vec![row("QLT 101", "Quilting Basics", "_1001_1", false)], ..Default::default() };
+    let t = step3_totals(&a);
+    assert_eq!(t.get("classes"), Some(&Some(1)), "{t:?}");
+    for name in ["assignments_upcoming", "turned_in", "class_times", "grades_courses"] {
+        assert_eq!(t.get(name), Some(&None), "{name}: null, never 0 or absent: {t:?}");
+    }
+}
+
+#[test]
+fn test_12_save_preview_given_null_or_a_non_object_is_an_error_that_changes_no_byte() {
+    let d = scratch("t12-preview-bad");
+    assert_eq!(onboarding_answer_inner(&d, 3, &serde_json::json!({"capture": {"courses": [row("QLT 101", "Quilting Basics", "_1001_1", false)]}}), &mut |_| {})["ok"], true);
+    save_preview(&d, &serde_json::json!({"_1001_1": {"assignments_upcoming": 7, "class_times": 0, "codes": ["_1001_1"], "turned_in": 0}})).unwrap();
+    let before = std::fs::read(answers_path(&d)).unwrap();
+    for bad in [serde_json::Value::Null, serde_json::json!([]), serde_json::json!("by_course"), serde_json::json!(4)] {
+        assert!(save_preview(&d, &bad).is_err(), "{bad} must be an error");
+        assert_eq!(std::fs::read(answers_path(&d)).unwrap(), before, "{bad} changed the answers file");
     }
 }

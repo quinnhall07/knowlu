@@ -129,7 +129,14 @@ pub struct CourseAnswer {
     /// share it, so it is never a row's identity: [`CourseAnswer::key`] is.
     pub code: String,
     pub name: String,
+    /// What the proof shows; the student may edit it (`{"label"}`), so it is display only and never
+    /// part of [`CourseAnswer::key`] (§14.46.3).
     pub label: String,
+    /// The label **as captured**, set once by [`Answers::recapture`] from the captured row's `label`
+    /// (whatever a page sends here is overwritten) and never changed by a label edit: the key's last
+    /// fallback, for a row with no LMS key and no slug (the paste fallback's typed list).
+    #[serde(default)]
+    pub captured_label: String,
     /// The LMS's own course key (one per shell, never shared by two terms): the row's identity and
     /// the engine's `code` (F7a).
     pub lms_key: String,
@@ -151,8 +158,10 @@ pub struct CourseAnswer {
 
 impl CourseAnswer {
     /// The key `by_course` uses, and so Remove's, a label edit's, [`save_pairs`]'s and a re-capture's
-    /// identity for a row (F7a, §14.45.2): the **LMS course key** (`lms_key`), then the slug, then the
-    /// label, each only when the one before is empty. Never the human `code`, which two shells share.
+    /// identity for a row (F7a, §14.45.2): the **LMS course key** (`lms_key`), then the slug, then
+    /// **`captured_label`**, each trimmed, the first that is not empty (as the engine reads its own
+    /// `code`, `slug`, `label`). Never the human `code`, which two shells share, and never the
+    /// editable `label`, so a label edit changes no key, no bucket and no Remove.
     pub fn key(&self) -> String { todo!("F2d: the course key") }
 }
 
@@ -228,7 +237,8 @@ impl Answers {
     /// The courses that were not removed, in captured order. `school.courses`, `config.ingest`'s
     /// `course_map` and the step-3 totals read the list only through this.
     pub fn kept_courses(&self) -> Vec<&CourseAnswer> { todo!("F2d: kept_courses") }
-    /// A re-capture: replaces the list with `captured`, every row un-removed. A captured row's own
+    /// A re-capture: replaces the list with `captured`, every row un-removed and its `captured_label`
+    /// set to its captured `label`. A captured row's own
     /// non-empty `fragments` win (a new gradebook pin is never lost); a captured row with none, whose
     /// [`CourseAnswer::key`] matches an old row's, keeps that row's `fragments`.
     pub fn recapture(&mut self, _captured: Vec<CourseAnswer>) { todo!("F2d: recapture") }
@@ -245,11 +255,14 @@ impl Answers {
 /// - `grades_courses`: the number of **kept single-course buckets with `graded: true`**; `null` when
 ///   every single-course bucket's `graded` is `null` (no bundle).
 /// A count name is **`null`** when every bucket carrying it carries `null` (its input was missing), so
-/// the proof shows nothing rather than 0.
+/// the proof shows nothing rather than 0; with **no buckets at all** (no preview yet, or a failed one)
+/// every count name is `null` and only `classes` is a number.
 pub fn step3_totals(_a: &Answers) -> BTreeMap<String, Option<i64>> { todo!("F2d: the step-3 totals") }
 
 /// F8b's seam after `school.preview`: parses the engine's `by_course` object (its nulls included)
-/// into [`Answers::buckets`], replacing the earlier preview's, and saves. Never a page answer.
+/// into [`Answers::buckets`], **replacing** the earlier preview's (never merged with them), and saves.
+/// `null` (the engine had no course list) or anything not an object is an `Err` that changes no byte
+/// of the file. Never a page answer.
 pub fn save_preview(_data_dir: &Path, _by_course: &Value) -> Result<(), String> { todo!("F8b: save the preview's buckets") }
 
 /// F8b's seam at capture (§14.46.3): each course's pairs, by [`CourseAnswer::key`], built once with
@@ -477,6 +490,7 @@ pub fn checkout_url_in(_vault: &Path, _plan: &str) -> Result<String, String> { t
 /// **`pairs` is always present** (engine 4c9ca48: a present array, even an empty one, is the course's
 /// whole fragment list, uid pins and class-time matching included). A row with saved `fragments`
 /// sends exactly those, never `[]`; a row with none yet sends the hand-over's own fallback, its human
-/// `code` alone (as [`crate::onboarding_jobs::IngestHandoff::course_map`] does), so the preview and
+/// `code` alone (and `[]` only for a row with neither fragments nor a human code, for which the
+/// hand-over writes no pair either) (as [`crate::onboarding_jobs::IngestHandoff::course_map`] does), so the preview and
 /// `ingest.yaml` still read one list.
 pub fn preview_courses(_a: &Answers) -> Value { todo!("F8b: the --courses list") }
