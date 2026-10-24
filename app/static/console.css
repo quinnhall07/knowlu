@@ -341,7 +341,7 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 
 /* Plan 4a Task 8's update banner, above the sync line: the same monospace row the lines around it
    are, with the offer's button on the same baseline. `[hidden]` needs its own rule — a class
-   `display` beats the UA stylesheet's, the `.app[hidden]` / `.wiz-row[hidden]` lesson — and it
+   `display` beats the UA stylesheet's, the `.app[hidden]` / `.pick-nav[hidden]` lesson — and it
    matters here more than anywhere: `renderUpdateOffer` hides this element on every poll that has no
    staged version, which is every poll until a release the running build is behind actually exists —
    and, once one does, every poll while a slot is running (the offer is withheld mid-run, R9). */
@@ -435,35 +435,25 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
    console with `.hidden = true` did nothing: the picker rendered BELOW a full-height empty grid
    (review round 1, IMPORTANT 1). `.drawer[hidden]` above has always needed the same line. */
 .app[hidden] { display: none; }
-.picker { max-width: 560px; margin: var(--s8) auto; padding: 0 var(--s5); }
-.picker h1 { font-size: 22px; margin: 0 0 var(--s2); }
-.row.pick { border-bottom: 1px solid var(--hair); padding: var(--s3) 0; display: flex; align-items: center; }
+.picker { position: fixed; inset: 0; overflow: auto; z-index: 30; padding: var(--s8) max(var(--s5), calc(50vw - 260px)); }
+.picker[hidden] { display: none; }
+.picker h1 { font-size: 34px; line-height: 1.05; margin: 0 0 var(--s2); }
+.picker .lede { color: var(--su-ink-2); margin: 0 0 var(--s4); }
+.picker button.b { min-height: 36px; padding: 0 16px; font-size: 14.5px; font-weight: 600; background: transparent; border-color: var(--su-rule-2); color: var(--su-ink); }
+.picker button.b.pri { background: var(--su-brand); border-color: var(--su-brand); color: #fff; }
+.row.pick { border: 1px solid var(--su-rule-2); border-radius: var(--r2); background: var(--su-board); padding: var(--s3) var(--s4); margin-bottom: var(--s2); display: flex; align-items: center; }
 .row.pick .ttl { flex: 1; min-width: 0; }
 .row.pick .acts { margin-left: auto; }
-.row.pick .meta { color: var(--t4); font: 500 11px/1.4 var(--mono); display: block; }
-.wiz-nav { display: flex; gap: var(--s2); justify-content: flex-end; margin-top: var(--s5); }
-
-/* ---- Plan 4a Task 6: the first-run wizard — seven panels in this same document ---- */
-.wiz { max-width: 640px; margin: var(--s7) auto; padding: 0 var(--s5); }
-.wiz-hd { display: flex; align-items: baseline; justify-content: space-between; }
-.wiz-panel h2 { font-size: 17px; margin: var(--s5) 0 var(--s2); }
-.wiz-panel label { display: block; padding: var(--s1) 0; color: var(--t2); }
-.wiz-row { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; margin: var(--s3) 0; }
-.wiz-panel input[type="text"], .wiz-panel input[type="password"] { background: var(--s2c); border: 1px solid var(--hair-2); border-radius: var(--r1); color: var(--t1); padding: 6px 8px; font: inherit; min-width: 22ch; }
-/* The `.app[hidden]` lesson again (Task 2, review round 1): `.wiz-row` is a flex container, and
-   a class rule beats the UA stylesheet's `[hidden]` — without this the adopt and restore rows
-   stayed on screen while CREATING a vault, offering three folder pickers at once. */
-.wiz-row[hidden] { display: none; }
-/* `input[type=text]` is 100% wide page-wide (elsewhere it is an edit-in-place field filling its
-   cell), which inside a row put every field on a line of its own. A field in a row is sized by
-   its content; the one field that IS its own row — the feed link — keeps the full width. */
-.wiz-row input[type="text"], .wiz-row input[type="password"] { width: auto; }
-/* a slot time is five characters, not a folder name — at the shared 22ch the third field wrapped */
-#wiz-slot1, #wiz-slot2 { width: 11ch; min-width: 11ch; }
-.wiz-panel .meta { color: var(--t4); font: 500 11px/1.5 var(--mono); }
-.wiz .crit { color: var(--crit); margin-right: auto; }
-.wiz .crit.flash { animation: wiz-flash 420ms ease-out; }
-@keyframes wiz-flash { 0% { opacity: 0; transform: translateY(-2px); } 100% { opacity: 1; transform: none; } }
+.row.pick .meta { color: var(--su-ink-2); font: 500 12.5px/1.4 var(--sans); display: block; }
+.row.pick .a { font-weight: 600; }
+.row.pick .meta { padding: 0; }
+.pick-nav { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; margin-top: var(--s4); }
+.pick-nav[hidden] { display: none; }
+.pick-nav input[type="text"] { background: var(--s2c); border: 1px solid var(--hair-2); border-radius: var(--r1); color: var(--t1); padding: 6px 8px; font: inherit; min-width: 22ch; }
+.pick-nav label { color: var(--t2); }
+.pick-nav button.b[disabled] { opacity: .5; cursor: not-allowed; }
+.pick-nav button.b[disabled]:hover { border-color: var(--hair-2); color: var(--t2); }
+.pick-sub { color: var(--t3); font-size: 12.5px; margin-top: 2px; }
 
 /* ---- Plan 4a Task 7: the settings overlay — a panel in the page, never a view ---- */
 /* `display` is stated TWICE on purpose. The panel is an <aside>, and the 1180px breakpoint turns
@@ -480,9 +470,9 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .set-row .meta { color: var(--t4); font: 500 11px/1.4 var(--mono); flex: 1 1 12ch; overflow-wrap: anywhere; }
 /* The password field is the upgrade overlay's (C1 Task 18) and gets the text field's look — without
    it a `type="password"` inside a settings row is the browser default, a white box on a dark panel,
-   on the one panel every install that predates C1 sees first. Same pairing `.wiz-panel` already has. */
+   on the one panel every install that predates C1 sees first. */
 .set-row input[type="text"], .set-row input[type="password"] { background: var(--s3c); border: 1px solid var(--hair-2); border-radius: var(--r1); color: var(--t1); padding: 4px 6px; font: inherit; flex: 1 1 14ch; }
-/* …and the two consent checkboxes get a line each, exactly as `.wiz-panel label` does. Inline, they
+/* …and the two consent checkboxes get a line each, one line each. Inline, they
    ran together into one sentence a reader could tick without seeing the second one. */
 .setpanel label { display: block; padding: var(--s1) 0; color: var(--t2); }
 /* A disabled button in a settings row has to LOOK disabled — the only other [disabled] rule in the
@@ -490,30 +480,10 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
    row, and the rule stands for any row control a command turns off.) */
 .set-row button.b[disabled] { opacity: .5; cursor: not-allowed; }
 .set-row button.b[disabled]:hover { border-color: var(--hair-2); color: var(--t2); }
-/* Spec §7 defect 1: the wizard's nav had NO disabled rule, so a disabled Back or Next was full
-   contrast, full colour and silently inert — which is what "why are there even back and next
-   buttons if they don't work" was looking at. */
-.wiz-nav button.b[disabled], .wiz-row button.b[disabled] { opacity: .5; cursor: not-allowed; }
-.wiz-nav button.b[disabled]:hover, .wiz-row button.b[disabled]:hover { border-color: var(--hair-2); color: var(--t2); }
-/* Task 6 hides Back at step 0 instead of disabling it, and `button.b` (line 180) sets no `display` —
-   so the UA stylesheet's `[hidden]` is enough today. This rule is here anyway, because this file has
-   taught the same lesson three times (`.app[hidden]`, `.drawer[hidden]`, `.wiz-row[hidden]`): the
-   day someone gives `.wiz-nav button` a `display`, a hidden Back comes back. (Review M8.) */
-.wiz-nav button.b[hidden] { display: none; }
-/* M3 (fix round 1): the SAME lesson a fourth time — `#pick-restore-options` is a `.wiz-nav` too (it
-   wants the same right-aligned row of controls the picker's own nav uses), and `.wiz-nav`'s
-   `display: flex` beats `[hidden]`'s UA default exactly like `.wiz-row` and `.set-row` did, so the
-   name field and the Restore button stayed on screen before a backup folder was ever chosen. */
-.wiz-nav[hidden] { display: none; }
 /* …and the same lesson, live rather than pre-emptive: `.set-row` IS `display: flex` (line 470) and
    the sheet has no `.set-row[hidden]` rule, so the overlay's new `#up-code-row` would show through
    its own `hidden` attribute without this. */
 .set-row[hidden] { display: none; }
-/* R-OB-4: ten hits, scrollable, keyboard-focusable — the list is every US institution and the panel shows ten. */
-.wiz-hits { max-height: 220px; overflow-y: auto; border: 1px solid var(--hair); }
-.wiz-hits:empty { display: none; }
-.wiz-hits .hit { padding: 6px 8px; cursor: pointer; }
-.wiz-hits .hit:hover, .wiz-hits .hit:focus { background: var(--s2c); outline: none; }
 #report-text { width: 100%; font: 12px/1.5 var(--mono); background: var(--s2c); color: var(--t2); border: 1px solid var(--hair); padding: 8px; resize: vertical; }
 
 /* ---- C1c Task 8 (R-C1c-8): the first-run view replaces the day ---- */
@@ -684,3 +654,85 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .ma-row .ma-from { flex-basis: 100%; color: var(--t3); font-size: 12px; }
 .ma-row .ma-since { color: var(--t4); font: 500 11px/1.4 var(--mono); }
 .ma-course summary { font-size: 12.5px; color: var(--t3); cursor: pointer; }
+
+/* ---- O3 F10: the setup shell, steps 1 and 2, in the ruled direction (5b, Departures) ----
+   Tokens are the direction's own, scoped to `.setup` so the console's palette is untouched. The
+   direction's two display faces are not vendored yet (BRIEF R3.8), so the page keeps the console's
+   Instrument Sans and JetBrains Mono. Every class carries `su-`: `.mark`, `.lede` and `.row` mean
+   something else in this sheet. */
+.setup, .picker {
+  --su-ground: oklch(0.17 0.025 258); --su-board: oklch(0.205 0.028 258); --su-board-2: oklch(0.245 0.03 258);
+  --su-rule: oklch(0.95 0.01 258 / 0.10); --su-rule-2: oklch(0.95 0.01 258 / 0.18);
+  --su-ink: oklch(0.95 0.012 85); --su-ink-2: oklch(0.79 0.015 85); --su-ink-3: oklch(0.68 0.015 85);
+  --su-amber: oklch(0.81 0.13 75); --su-brand: #BC4444; --su-brand-hover: #A93B3B; --su-focus: oklch(0.86 0.12 85);
+  background: var(--su-ground); color: var(--su-ink); font-size: 15px; line-height: 1.45;
+}
+.setup { position: fixed; inset: 0; z-index: 30; display: grid; grid-template-columns: 340px minmax(0, 1fr); }
+.setup[hidden] { display: none; }
+.setup button, .setup input, .picker button, .picker input { font-family: var(--sans); }
+.setup :focus-visible, .picker :focus-visible { outline: 2px solid var(--su-focus); outline-offset: 2px; }
+.su-dim { color: var(--su-ink-3); font-size: 12.5px; }
+.su-small { color: var(--su-ink-2); font-size: 13.5px; margin: 14px 0 0; }
+.su-mono, .su-host { font-family: var(--mono); }
+.su-mark { width: 15px; height: 15px; border-radius: var(--r1); background: var(--su-brand); flex: none; }
+.su-rail { background: var(--su-board); border-right: 1px solid var(--su-rule); display: flex; flex-direction: column; min-height: 0; }
+.su-rail-head { display: flex; align-items: center; gap: var(--s2); padding: 20px 20px 12px; }
+.su-rail-head .su-dim { margin-left: auto; }
+.su-rail-title { display: flex; justify-content: space-between; align-items: baseline; padding: 4px 20px 10px; border-bottom: 1px solid var(--su-rule); }
+.su-rail-title h2 { margin: 0; font-size: 18px; font-weight: 700; }
+.su-rail-list { list-style: none; margin: 0; padding: 6px 0; flex: 1; overflow: auto; }
+.su-row { display: grid; grid-template-columns: 18px 1fr auto; column-gap: 10px; padding: 5px 20px; align-items: start; }
+.su-row .su-nm { font-weight: 500; font-size: 14.5px; color: var(--su-ink-2); }
+.su-row .su-st { font-size: 12.5px; font-weight: 600; color: var(--su-ink-2); padding-top: 1px; }
+.su-row .su-pf { grid-column: 2 / 4; font-size: 13px; color: var(--su-ink-2); line-height: 1.35; overflow-wrap: anywhere; }
+.su-row .su-pf:empty { display: none; }
+.su-row .su-shape { width: 12px; height: 12px; margin-top: 4px; border-radius: 50%; background: var(--su-ink-3); transform: scale(.34); }
+.su-row.now, .su-row.next { background: var(--su-board-2); }
+.su-row.now .su-nm, .su-row.done .su-nm { color: var(--su-ink); font-weight: 600; }
+.su-row.now .su-st { color: var(--su-ink); }
+.su-row.now .su-shape { background: none; border-style: solid; border-color: transparent transparent transparent var(--su-ink); border-width: 6px 0 6px 10px; border-radius: 0; transform: none; }
+.su-row.done .su-shape { background: none; transform: none; border-radius: 0; border: solid var(--su-ink); border-width: 0 2px 2px 0; width: 5px; height: 9px; margin: 2px 0 0 3px; rotate: 45deg; }
+.su-rail-foot { border-top: 1px solid var(--su-rule); padding: 12px 20px 16px; }
+.su-main { min-width: 0; min-height: 0; overflow: auto; }
+.su-step { padding: 30px 56px 24px; max-width: 760px; }
+.su-step[hidden] { display: none; }
+.su-step h1:focus { outline: none; }
+.su-step h1 { margin: 0 0 12px; font-size: 38px; line-height: 1.05; font-weight: 700; letter-spacing: -0.01em; }
+.su-why { font-size: 19px; line-height: 1.35; max-width: 62ch; margin: 0 0 16px; text-wrap: pretty; }
+.su-body { max-width: 64ch; margin: 0 0 12px; }
+.su-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 20px 0 0; }
+.setup button.su-btn { min-height: 36px; padding: 0 16px; font-size: 14.5px; font-weight: 600; border-radius: 6px; border: 1px solid var(--su-rule-2); background: transparent; color: var(--su-ink); }
+.setup button.su-btn:hover { border-color: var(--su-ink-3); color: var(--su-ink); }
+.setup button.su-btn.pri { background: var(--su-brand); border-color: var(--su-brand); color: #fff; }
+.setup button.su-btn.pri:hover { background: var(--su-brand-hover); }
+.setup button.su-btn[disabled] { background: transparent; border-style: dashed; border-color: var(--su-rule-2); color: var(--su-ink-3); cursor: not-allowed; }
+.su-btn[hidden] { display: none; }
+.su-link { background: none; border: 0; padding: 0; color: var(--su-ink); font-size: inherit; font-weight: 500; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; min-height: 32px; }
+.su-link:hover { color: var(--su-ink-2); }
+.su-field { display: flex; flex-direction: column; gap: 6px; max-width: 420px; margin: 16px 0 0; }
+.su-field[hidden] { display: none; }
+.su-field label { font-size: 13.5px; font-weight: 600; }
+.su-inline { display: flex; gap: 8px; align-items: center; }
+.su-field input { flex: 1; min-width: 0; min-height: 36px; padding: 0 10px; background: var(--su-board); color: var(--su-ink); border: 1px solid var(--su-rule-2); border-radius: 6px; font-size: 15px; }
+.su-field input:focus { border-color: var(--su-focus); outline: none; }
+.su-field input.su-mono { font-size: 18px; letter-spacing: .2em; max-width: 200px; }
+.su-opt { display: flex; gap: 10px; align-items: flex-start; margin: 16px 0 0; color: var(--su-ink); font-size: 14.5px; }
+.su-opt input { margin-top: 3px; accent-color: var(--su-brand); }
+.su-opt a { color: var(--su-ink); text-decoration: underline; text-underline-offset: 3px; }
+.su-privacy { color: var(--su-ink-2); font-size: 13.5px; max-width: 64ch; margin: 14px 0 0; }
+.su-privacy:empty { display: none; }
+.su-cost { color: var(--su-ink-2); font-size: 13.5px; max-width: 64ch; margin: 14px 0 0; }
+.su-cost b { color: var(--su-ink); font-weight: 600; }
+.su-err { color: var(--su-amber); font-size: 14px; max-width: 64ch; margin: 14px 0 0; }
+.su-err:empty { display: none; }
+.su-ext { display: grid; gap: 4px; max-width: 520px; padding: 14px 16px; border: 1px solid var(--su-rule-2); border-radius: 6px; margin: 4px 0 0; }
+.su-host { font-size: 13px; color: var(--su-ink-2); }
+.su-proof { display: flex; gap: 14px; align-items: flex-start; font-size: 18px; line-height: 1.4; margin: 4px 0 18px; }
+.su-check { width: 28px; height: 28px; flex: none; }
+.su-check circle { fill: none; stroke: var(--su-ink); stroke-width: 1.5; }
+.su-check path { fill: none; stroke: var(--su-ink); stroke-width: 2.25; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 24; animation: su-draw .24s cubic-bezier(.16, 1, .3, 1) both; }
+@keyframes su-draw { from { stroke-dashoffset: 24; } to { stroke-dashoffset: 0; } }
+@media (prefers-reduced-motion: reduce) { .su-check path { animation: none; } }
+.su-brand { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s5); }
+.su-brand b { font-size: 18px; }
+@media (max-width: 960px) { .setup { grid-template-columns: 260px minmax(0, 1fr); } .su-step { padding: 24px 28px; } }

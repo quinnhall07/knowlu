@@ -328,24 +328,6 @@ fn the_sync_lines_words_are_the_engines_own_mapped_to_what_a_student_reads() {
     assert!(js.contains("showRefusal(null, syncSays(err, \"amber\")[1])"), "Sync now's refusal says the same words as the line");
 }
 
-/// Task 11 re-review N1 (R-C3′-exec-41): what the paste or capture did with each feed reaches the
-/// plan, as the four flags `onboarding::WizardPlan` reads — and only for the value the field holds
-/// at Finish, so a link typed over after its check is never sent to the account as if validated.
-#[test]
-fn the_wizard_carries_each_feeds_validated_and_stored_flags_into_the_plan() {
-    let js = read("console.js");
-    for key in ["ics_validated: icsFlags.validated", "ics_stored: icsFlags.stored",
-                "personal_calendar_validated: calFlags.validated", "personal_calendar_stored: calFlags.stored"] {
-        assert!(js.contains(key), "the plan must carry {key}");
-    }
-    assert!(js.contains("feedFlags(WIZ.icsFeed, WIZ.ics)") && js.contains("feedFlags(WIZ.calFeed, WIZ.cal)"), "the flags are for the field's value at Finish");
-    assert!(js.contains("var same = !!(feed && value && feed.url === value);"), "a changed link is neither validated nor stored");
-    // All three places a feed is checked record the envelope's own `stored`, never `note`'s absence.
-    assert!(js.contains("WIZ.icsFeed = { url: c.link.url, stored: c.stored === true };"), "the capture");
-    assert!(js.contains("WIZ.icsFeed = r.ok ? { url: sent, stored: r.stored === true } : null;"), "the pasted school feed");
-    assert!(js.contains("WIZ.calFeed = r.ok ? { url: sent, stored: r.stored === true } : null;"), "the pasted personal calendar");
-}
-
 #[test]
 fn sync_line_copy_is_verbatim_and_object_kind_is_never_guessed() {
     let js = read("console.js");
@@ -475,338 +457,6 @@ fn the_picker_is_in_the_page_and_carries_no_data_id() {
     assert!(css.contains(".row.pick .acts { margin-left: auto; }"), "Open belongs at the right of the row");
 }
 
-#[test]
-fn the_wizard_has_ten_panels_and_the_privacy_words_and_no_live_fetch() {
-    let html = read("index.html");
-    assert!(html.contains("id=\"wizard\""));
-    // Spec §4.2, in order. **No `wiz-backup`, and no folder anywhere**: the app creates
-    // `%USERPROFILE%\Knowlu\<name>` and `Backups` beside it (§4.1, §11a).
-    for p in ["wiz-welcome", "wiz-account", "wiz-subscribe", "wiz-mail", "wiz-vault", "wiz-calendars", "wiz-logins", "wiz-gmail", "wiz-slots", "wiz-finish"] {
-        assert!(html.contains(&format!("id=\"{p}\"")), "panel {p}");
-    }
-    assert!(!html.contains("id=\"wiz-backup\""), "the backup-folder panel is gone");
-    assert!(!html.contains("id=\"wiz-pick-parent\"") && !html.contains("id=\"wiz-pick-bdir\""), "no folder is picked in the wizard");
-    let js = read("console.js");
-    for f in ["startWizard", "renderWizard", "wizGo", "wizFinish"] {
-        assert!(js.contains(&format!("function {f}(")), "missing {f}");
-    }
-    assert!(js.contains("var PANELS = [\"welcome\", \"account\", \"subscribe\", \"mail\", \"vault\", \"calendars\", \"logins\", \"gmail\", \"slots\", \"finish\"];"));
-    // No live fetch in onboarding: the ICS shape is matched, never requested, by the PAGE. The
-    // escape keeps the network-reference rule true.
-    assert!(js.contains("/^https:\\/\\/"), "the ICS check is an escaped regex");
-    assert!(!js.contains("fetch(\"http"), "the page never fetches");
-    // Credentials leave page memory the moment the write returns (spec §5).
-    assert!(js.contains("clearCredentialFields("), "the fields are cleared by name");
-    assert!(js.contains("window.KNOWLU_SHOTS = { startWizard: startWizard, renderPicker: renderPicker, openSettings: openSettings, openReport: openReport }"), "the shots seam");
-    assert!(js.contains("retarget_credentials"), "Finish moves the credentials when the name changed");
-    // R-C1-55, M5: two pins the brief's replacement body dropped, restored — both still matter.
-    // A class `display` beats the UA stylesheet's `[hidden]`, and this rule is the only thing that
-    // actually hides `#wiz-code-row`, `#wiz-school-free`, `#wiz-lms-kind` and `#wiz-google-row`.
-    assert!(read("console.css").contains(".wiz-row[hidden] { display: none; }"), "a hidden .wiz-row must actually hide");
-    // `documents` is the retired launch_state key that named the OneDrive-redirected folder.
-    assert!(!js.contains("l.documents"), "the retired `documents` key is gone from the page");
-    // D5: class (c) — raw note bodies for model improvement — is not built and has no UI, and the
-    // page is where a toggle for it would appear. The pin predates C1 and is kept for exactly that.
-    assert!(!js.to_lowercase().contains("telemetry"), "no telemetry toggle: (c) is not built (D5)");
-    assert_eq!(js.matches(" data-id=\"").count(), js.matches(" data-kind=\"").count(), "data-id without data-kind somewhere");
-}
-
-/// Spec §11a and VISION's standing rule: **Knowlu never asks for a campus credential.** The student
-/// types into the university's own page, inside a window we opened and then throw away. The page has
-/// exactly three password fields and they are all ours: the account's, and the two coursework logins
-/// the student explicitly chose to store in Credential Manager (D11).
-#[test]
-fn the_page_has_no_lms_credential_field_anywhere() {
-    let html = read("index.html");
-    let js = read("console.js");
-    // Every password field on the page is one of ours, by id: the two coursework logins the
-    // student chose to store (D11). The account panel and the upgrade overlay carry no password
-    // at all any more (spec D4). Counted by allow-list rather than by number, so adding one of
-    // ours is fine and adding anybody else's is not.
-    const OURS: [&str; 2] = ["wiz-zy-pass", "wiz-vhl-pass"];
-    let mut seen = 0usize;
-    for (i, _) in html.match_indices("type=\"password\"") {
-        let around = &html[i.saturating_sub(200)..(i + 200).min(html.len())];
-        assert!(OURS.iter().any(|id| around.contains(&format!("id=\"{id}\""))), "an unknown password field near: {around}");
-        seen += 1;
-    }
-    assert_eq!(seen, 2, "the two coursework logins are the only passwords Knowlu ever asks for");
-    for id in ["wiz-zy-pass", "wiz-vhl-pass"] {
-        assert!(html.contains(&format!("id=\"{id}\"")), "password field {id}");
-    }
-    // The LMS panel holds a button, a status line and a paste field — and nothing to type a school
-    // password into. Checked over the panel's own markup, so a field added there fails here.
-    let panel = html.split("id=\"wiz-calendars\"").nth(1).and_then(|s| s.split("id=\"wiz-logins\"").next()).expect("the calendars panel");
-    assert!(!panel.contains("password"), "the calendars panel must never carry a password field");
-    assert!(!panel.to_lowercase().contains("username"), "…nor a username field");
-    assert!(panel.contains("id=\"wiz-lms-open\"") && panel.contains("id=\"wiz-ics\""), "sign-in button and paste fallback");
-    // R-C1-42: the capture is the student's SECOND press, and it is its own button — chained onto the
-    // open it would read the identity provider's page, where nobody has signed in yet.
-    assert!(panel.contains("id=\"wiz-lms-capture\""), "the capture button");
-    assert!(js.contains("\"capture_calendar_link\"") && js.contains("wiz-lms-capture"),
-        "the capture fires on the press, not on the open");
-    // The campus is asked HERE, on the panel that uses it — not two panels later, where it used to be
-    // and where it made every sign-in answer "no sign-in page is known for that school yet".
-    // R-OB-4: a search over every US institution, not two radios. The radios are gone from the whole
-    // page — a list of two schools was a placeholder that read like a decision.
-    assert!(panel.contains("id=\"wiz-school\"") && panel.contains("id=\"wiz-school-hits\""), "the school typeahead");
-    assert!(panel.contains("id=\"wiz-school-none\"") && panel.contains("id=\"wiz-school-free\""), "…and the free-text fallback");
-    assert!(panel.contains("id=\"wiz-lms-kind\""), "…and the two-button LMS question for an uncurated school");
-    // F4: "Sign in to my school" waits for a picked school; pressing it with no unitid used to fail
-    // and unhide the LMS chooser. Disabled in renderWizard, early return in the handler, chooser
-    // hidden when free entry starts.
-    assert!(js.contains("EL(\"wiz-lms-open\").disabled = !WIZ.campus.unitid;"), "the sign-in button waits for a school");
-    assert!(js.contains("if (!WIZ.campus.unitid) { return; }"), "the handler returns early with no school");
-    let free = js.split("EL(\"wiz-school-free\").addEventListener(\"input\"").nth(1).and_then(|s| s.split("});").next()).expect("the free-entry handler");
-    assert!(free.contains("EL(\"wiz-lms-kind\").hidden = !(typed && !WIZ.campus.lms);"), "free entry asks the LMS once name and state are filled");
-    assert!(free.contains("var typed = !!(WIZ.campus.name && WIZ.campus.state);"), "…keyed on both fields");
-    assert!(free.contains("WIZ.icsNote = typed ?") && free.contains("paste your calendar link below"), "…with the paste-link note, cleared otherwise");
-    assert!(free.contains("unitid: \"\""), "free entry keeps the unitid empty, so sign-in stays disabled");
-    assert!(free.contains("lms: WIZ.campus.unitid ? \"\" : (WIZ.campus.lms || \"\")"), "a curated school's lms is never carried into a free entry");
-    assert!(!html.contains("name=\"campus\""), "no campus radios anywhere on the page");
-    assert!(!js.contains("input[name=\\\"campus\\\"]"), "…and nothing reads one");
-    assert!(js.contains("function schoolHits(") && js.contains("\"campus_search\""), "the typeahead asks Rust");
-    // **The page must not fetch the list.** `app/tauri.conf.json`'s CSP names only the IPC origin, so
-    // a `fetch` of a bundled asset is refused — and that file is the controller's. The search is a
-    // command; the page holds ten rows.
-    assert!(!js.contains("campuses.json"), "the page never names the asset; `campus_search` reads it");
-    // A curated school's LMS kind comes in the hit (`r[4]`) and is the pick's answer, so the chooser is
-    // for an uncurated school only (live proof 2026-10-02). The page names no school.
-    assert!(js.contains("lms: r[4] || \"\""), "pickSchool takes the curated LMS kind from the hit");
-    // Spec §11a: **both** calendars, on this one panel, before coursework logins and Gmail — the
-    // personal one is what makes today's page know the day is already half full.
-    assert!(panel.contains("id=\"wiz-cal-ics\"") && panel.contains("id=\"wiz-cal-note\""), "the personal calendar's field");
-    assert!(panel.contains("Secret address in iCal format"), "the panel says where the address is");
-    assert!(panel.contains("Reset"), "…and advises resetting it first");
-    // C2's Google sign-in is live: the calendar scope only, ordered ahead of Gmail (§11a).
-    assert!(panel.contains("id=\"wiz-google\""), "the Google sign-in is on the calendars panel");
-    assert!(!panel.contains("id=\"wiz-google\" disabled"), "…and is live from C2 on");
-    // R-OB-2: the enrolled classes are confirmed on this panel — captured from the sign-in window if
-    // the campus lets us, typed if it does not. Without them a first ingest is 28 tasks with no
-    // course, which is the run this section of the plan exists because of.
-    assert!(panel.contains("id=\"wiz-courses\"") && panel.contains("id=\"wiz-course-rows\""), "the class list");
-    assert!(panel.contains("id=\"wiz-course-add\""), "…and the typed fallback beside it");
-    assert!(js.contains("\"capture_courses\"") && js.contains("function renderCourses("), "the capture and its rows");
-    // A-6: relabelled to what this actually guards. C2 shipped Google connect (calendar scope
-    // only, via `google_connect_url`) — the stale message called that "no Google connect in C1",
-    // which stopped being true at C2 and would have kept passing for the wrong reason forever.
-    // What is still true, and what this proves: no `gmail.readonly` scope string anywhere on the
-    // wizard page (the incremental Gmail consent is a later, separate step — not this branch), and
-    // no leftover pre-C2 `connect_google` command name.
-    assert!(!js.contains("\"connect_google\"") && !js.contains("gmail.readonly"), "no Gmail scope on the wizard page until C4");
-    let slots = html.split("id=\"wiz-slots\"").nth(1).and_then(|s| s.split("id=\"wiz-finish\"").next()).expect("the slots panel");
-    assert!(!slots.contains("id=\"wiz-school\""), "the school must not also be on the slots panel");
-}
-
-/// C2 final review A-5 (m59+m60): the Google flow's own state lives on `WIZ`, rendered by
-/// `renderWizard()` like every other field — never a bare module-level flag a direct DOM write can
-/// desync from the next repaint, and never a poll that outlives the panel it started on.
-#[test]
-fn the_wizard_google_flow_keeps_its_state_on_wiz_and_renders_it() {
-    let js = read("console.js");
-    let html = read("index.html");
-
-    // The flag and its note are WIZ fields, not a bare module-level variable a direct DOM write
-    // could desync from the next `renderWizard()` call.
-    assert!(js.contains("google: false") && js.contains("googleNote:"), "WIZ carries the Google flow's own state");
-    assert!(!js.contains("var WIZ_GOOGLE"), "the old bare flag must be gone, not merely unused");
-
-    // A dedicated note element — never the personal calendar field's `wiz-cal-note`, which the
-    // original click handler wrote into by mistake.
-    assert!(html.contains("id=\"wiz-google-note\""), "the Google status line has its own element");
-    assert!(js.contains("EL(\"wiz-google-note\").textContent = WIZ.googleNote"), "renderWizard paints it");
-
-    // The button's disabled state is computed from WIZ on every render — connected OR mid-poll —
-    // not set once, directly, and left for a later render to forget.
-    assert!(
-        js.contains("EL(\"wiz-google\").disabled = WIZ.google || WIZ.googlePolling"),
-        "the button's disabled state is derived from WIZ state on every render"
-    );
-
-    // Leaving the calendars panel (step 4) cancels a poll in flight — the same cancellation-token
-    // shape `WIZ.schoolSeq` uses for the typeahead — so a stale timer never writes onto a panel the
-    // student is no longer looking at.
-    assert!(js.contains("googleSeq"), "a cancellation token exists");
-    let go = js.find("function wizGo(").map(|i| &js[i..]).expect("wizGo");
-    assert!(
-        go.find("WIZ.googleSeq").map(|i| i < go.find("function wizFinish(").unwrap_or(usize::MAX)).unwrap_or(false),
-        "wizGo itself bumps the token on leaving the panel"
-    );
-
-    // wizFinish re-reads the truth with one more `google_connected` call, falling back to the
-    // polled flag only if THAT call fails — a consent that finished after the last poll tick must
-    // still birth the vault with the `cloud:google` entry.
-    let finish = js.find("function wizFinish(").map(|i| &js[i..]).expect("wizFinish");
-    let google_connected_call = finish.find("invoke(\"google_connected\"");
-    let plan_build = finish.find("google_calendar:");
-    assert!(google_connected_call.is_some(), "wizFinish re-checks google_connected");
-    assert!(
-        google_connected_call.unwrap() < plan_build.expect("the plan is built somewhere in wizFinish"),
-        "the re-check happens BEFORE the plan is built, not after"
-    );
-    assert!(finish.contains("WIZ.google") , "the polled flag is still read, as the fallback");
-    assert!(!js.contains("google_calendar: WIZ_GOOGLE"), "the plan no longer reads the old bare flag directly");
-
-    // R2-3: the button is disabled as the FIRST statement of wizFinish, before the `google_connected`
-    // await — not after it. Two Finish clicks landing in that window used to start two
-    // `retarget_credentials`/`wizRegister` flows racing each other.
-    let busy_write = finish.find("WIZ.busy = true").expect("wizFinish latches WIZ.busy");
-    assert!(
-        busy_write < google_connected_call.unwrap(),
-        "wiz-next is disabled before the google_connected await, not after it"
-    );
-}
-
-/// Gmail connect D11: the wizard's Gmail panel has a Connect Gmail button whose state follows the
-/// same A-5 rule as the calendar button's (`WIZ`, `renderWizard()`, a token `wizGo` bumps).
-#[test]
-fn the_wizard_gmail_flow_keeps_its_state_on_wiz_and_renders_it() {
-    let js = read("console.js");
-    let html = read("index.html");
-    let panel = html.split("id=\"wiz-gmail\"").nth(1).and_then(|s| s.split("id=\"wiz-slots\"").next()).expect("the Gmail panel");
-    assert!(panel.contains("id=\"wiz-gmail-connect\""), "the panel has the button");
-    assert!(panel.contains("id=\"wiz-gmail-note\""), "the status line has its own element");
-    assert!(!panel.contains("Skip it for now"), "the old copy-only text is gone");
-    assert!(panel.contains("While Google reviews Knowlu, this works only for invited testers"), "the Testing sentence");
-    assert!(panel.contains("Knowlu can read your Gmail for things you have to do and propose each one for you to approve. You can skip this and connect later in Settings."), "the plan's what-it-does sentence");
-    assert_eq!(panel.matches("read your").count(), 1, "one what-it-does sentence");
-    assert!(js.contains("WIZ.gmailNote = \"Gmail is connected.\";"), "the plan's success note");
-    assert!(js.contains("WIZ.gmailNote = GOOGLE_TIMEOUT;"), "the Settings timeout sentence, unchanged");
-    assert!(js.contains("gmail: false") && js.contains("gmailNote:") && js.contains("gmailPolling: false") && js.contains("gmailSeq: 0"), "WIZ carries the flow's state");
-    assert!(js.contains("EL(\"wiz-gmail-note\").textContent = WIZ.gmailNote"), "renderWizard paints the note");
-    assert!(js.contains("EL(\"wiz-gmail-connect\").disabled = WIZ.gmail || WIZ.gmailPolling"), "disabled is derived from WIZ");
-    let go = js.find("function wizGo(").map(|i| &js[i..]).expect("wizGo");
-    assert!(
-        go.find("WIZ.gmailSeq").map(|i| i < go.find("function wizFinish(").unwrap_or(usize::MAX)).unwrap_or(false),
-        "wizGo bumps the token on leaving the panel"
-    );
-}
-
-#[test]
-fn the_wizard_gmail_button_uses_the_wizard_commands() {
-    let js = read("console.js");
-    let h = js.split("getElementById(\"wiz-gmail-connect\")").nth(1).and_then(|s| s.split("// ---- R-OB-4").next()).expect("the Gmail handler");
-    assert!(h.contains("invoke(\"google_connect_url\", { scope: \"gmail\" })"), "the wizard command, scope gmail");
-    assert!(h.contains("invoke(\"open_external\""), "the wizard's opener");
-    assert!(h.contains("invoke(\"google_connected\")"), "polls the wizard's status command");
-    for console_only in ["google_status", "google_connect\"", "google_disconnect"] {
-        assert!(!h.contains(console_only), "no console-only command: {console_only}");
-    }
-}
-
-#[test]
-fn next_never_waits_on_gmail() {
-    let js = read("console.js");
-    let render = js.split("function renderWizard(").nth(1).and_then(|s| s.split("function clearCredentialFields").next()).expect("renderWizard");
-    assert!(render.contains("EL(\"wiz-next\").disabled = WIZ.busy;"), "Next depends on busy alone");
-    assert!(!render.contains("wiz-next\").disabled = WIZ.busy ||") && !render.contains("gmailPolling ||  WIZ.busy"), "not on polling");
-    let finish = js.split("function wizFinish(").nth(1).and_then(|s| s.split("\n  // The Checkout page").next()).expect("wizFinish");
-    assert!(!finish.contains("gmail"), "nothing about Gmail reaches the plan");
-}
-
-/// R-OB-1: the wizard that takes a coursework password must also say what the work is for. Quinn's
-/// first slot had both logins stored and `courses: {}` in the config, so the engine answered
-/// `zybook UACS100Fall2026 not in config; skipped` and then `0 assignments parsed; treating as
-/// failure` — three warnings for one missing sentence.
-#[test]
-fn the_logins_panel_maps_what_it_finds_to_a_course() {
-    let html = read("index.html");
-    let panel = html.split("id=\"wiz-logins\"").nth(1).and_then(|s| s.split("id=\"wiz-gmail\"").next()).expect("the logins panel");
-    assert!(panel.contains("id=\"wiz-map\"") && panel.contains("id=\"wiz-map-rows\""), "the mapping block");
-    let js = read("console.js");
-    assert!(js.contains("\"discover_coursework\""), "discovery runs after the credentials are stored");
-    assert!(js.contains("function renderMapping("), "renderMapping");
-    // The mapping travels in the plan, and the SLUGS are made in Rust from the codes — a page that
-    // invented vault identifiers would be a page deciding what the engine may know.
-    assert!(js.contains("zybooks_courses:") && js.contains("vhl_sections:") && js.contains("course_map:"), "the plan carries the mapping");
-    assert!(!js.contains("slugify"), "slugs are `knowlu_engine::ingest::slugify`'s, never the page's");
-    // R-C1-55, I3: `discover_coursework` spawns the engine and logs into both vendors. A second Next
-    // while the first is in flight starts a SECOND child, and the two `WIZ.map` assignments decide the
-    // panel between them. Asserted inside `wizGo` itself, so `wizFinish`'s own disable cannot stand in.
-    let go = js.split("function wizGo(").nth(1).and_then(|s| s.split("function wizRegister(").next()).expect("wizGo");
-    assert!(go.contains("WIZ.discovering"), "a second Next must not start a second coursework-discover");
-    assert!(go.contains("WIZ.busy = true") && go.contains("WIZ.busy = false"),
-        "Next is disabled while discovery is in flight and re-enabled when it settles");
-}
-
-/// D5 and D6: the mapping row offers the classes the wizard already captured rather than asking
-/// for a code from memory, a row with nothing to offer says what it needs, and leaving one blank is
-/// a choice whose consequence the panel states before Next goes on. The first live onboarding left
-/// the VHL row blank, wrote `sections: {}` and spent the whole next run warning about it.
-#[test]
-fn a_mapping_row_offers_the_captured_classes_and_says_what_a_blank_one_costs() {
-    let html = read("index.html");
-    let panel = html.split("id=\"wiz-logins\"").nth(1).and_then(|s| s.split("id=\"wiz-gmail\"").next()).expect("the logins panel");
-    assert!(panel.contains("<datalist id=\"wiz-course-codes\">"), "the panel keeps one datalist");
-    let js = read("console.js");
-    assert!(js.contains("function renderCourseCodes("), "renderCourseCodes fills it");
-    assert!(js.contains("list=\"wiz-course-codes\""), "every mapping row's field reads it");
-    // The list offers what round-trips to the vault's own name for the course — the human code the
-    // capture read, or the slug — never the LMS's opaque key, which would be slugged into a course
-    // note nobody has (R-C1c-plan-2).
-    assert!(js.contains("c.label || c.slug"), "the datalist offers the human code, and the slug otherwise");
-    assert!(js.contains("type the course this belongs to"), "a row with no suggestion says what it needs");
-    assert!(js.contains(" of these will be asked about in the app"), "…and Next says what blank rows cost");
-    assert!(js.contains("function noteUnmapped("), "noteUnmapped");
-    // R-C1c-plan-3: the sentence is read BEFORE the panel goes — the first Next latches and stays,
-    // the second goes on. Asserted over the `wizGo`/`wizStep` slice (the split runs to
-    // `wizRegister`, so it spans both), because `wizFinish`'s own bookkeeping must not stand in.
-    let go = js.split("function wizGo(").nth(1).and_then(|s| s.split("function wizRegister(").next()).expect("wizGo/wizStep");
-    assert!(go.contains("noteUnmapped()"), "the count is written on the way out of the panel");
-    assert!(go.contains("WIZ.mapWarned"), "…and the panel stays once, so the student reads it");
-    assert!(js.contains("mapWarned: false"), "the latch starts clear on a fresh wizard");
-    assert!(
-        js.contains("WIZ.discovered = false; WIZ.mapWarned = false"),
-        "…and re-typed logins clear it with the discovery they invalidate"
-    );
-    // R-C1b-exec-10 still holds: the sentence is a note, never a refusal — the second Next goes on
-    // whatever the rows say, and nothing writes an error for a blank one.
-    assert!(!go.contains("WIZ.error = \"Map"), "a blank row must never block Next");
-}
-
-/// Final review, I2: `wizFinish` must put only the rows the student explicitly ticked as ignored
-/// into `zybooks_ignore` — never a blank row. A blank zyBooks row left out of both `courses` and
-/// `ignore` is `BookRouting::Unmapped` (`route_zybook`, `engine/src/coursework.rs`) and the cloud
-/// handler's mirror (`routeZybook`, `cloud/supabase/functions/ingest-coursework/parse_zybooks.ts`)
-/// files a coursework-map card for it — the same path a blank VHL row already takes. Putting a
-/// blank row in `zybooks_ignore` instead makes it silently skipped forever and makes
-/// `noteUnmapped`'s "N of these will be asked about in the app" false for zyBooks.
-#[test]
-fn a_blank_zybooks_row_is_never_sent_as_ignored() {
-    let js = read("console.js");
-    let finish = js.find("function wizFinish(")
-        .map(|i| &js[i..])
-        .and_then(|s| s.split("\n  // The Checkout page").next())
-        .expect("wizFinish");
-    assert!(
-        finish.contains("r.source === \"zybooks\" && r.ignore; }"),
-        "zybooks_ignore takes only rows the student ticked as ignored"
-    );
-    assert!(
-        !finish.contains("r.source === \"zybooks\" && (r.ignore || !r.course)"),
-        "a blank, un-ignored zyBooks row must not reach zybooks_ignore"
-    );
-}
-
-/// Final review, I4 (a C1 Task 17 bug predating this branch, undoing part of D4): a captured
-/// course already carries its own slug and is covered by `course_fragments`
-/// (`app/src/scaffold.rs`) — sending its LMS id into `course_map` a second time with an empty
-/// slug lets `create_vault_in` fill it with `slugify(<LMS id>)`, and because `course_map_lines` is
-/// first-wins with the page's entries first, that phantom slug wins over the real one. Only a
-/// TYPED course (`slug: ""`) belongs in this list.
-#[test]
-fn a_captured_courses_lms_id_never_gets_a_phantom_slug() {
-    let js = read("console.js");
-    let finish = js.find("function wizFinish(")
-        .map(|i| &js[i..])
-        .and_then(|s| s.split("\n  // The Checkout page").next())
-        .expect("wizFinish");
-    assert!(
-        finish.contains("if (c.code && !c.slug)"),
-        "only a typed course (no slug of its own) contributes its code to course_map"
-    );
-}
-
 /// D7 / §6, re-ruled by R-C1c-8: the minute between Finish and the first `rank` is a status view of
 /// its own that REPLACES the day. `.app` carries `first-run` while the envelope carries the block,
 /// and the stylesheet hides the nav, the rail and everything in `main` but the view. The sentence is
@@ -895,36 +545,6 @@ fn the_first_run_view_says_what_is_happening_and_polls_until_the_day_arrives() {
     }
 }
 
-/// Spec §4.2 step 1 and §9's minors row: one attestation, one acceptance, both linked to the text.
-#[test]
-fn the_account_panel_leads_with_google_asks_for_no_password_and_still_gates_on_eighteen() {
-    let html = read("index.html");
-    let panel = html.split("id=\"wiz-account\"").nth(1).and_then(|s| s.split("id=\"wiz-subscribe\"").next()).expect("the account panel");
-    // Spec D1: the Google button is the FIRST control on the panel, not an alternative buried
-    // under a form. Proved by position, because "present" is not the claim.
-    let g = panel.find("id=\"wiz-google-signin\"").expect("the Google button");
-    let e = panel.find("id=\"wiz-email\"").expect("the email field");
-    assert!(g < e, "Continue with Google comes before the email field");
-    assert!(panel.contains("Continue with Google"), "…and says so in words");
-    // Spec D4: no password, anywhere on this panel or in the overlay.
-    assert!(!panel.contains("password"), "the account panel must never carry a password field again");
-    assert!(!html.contains("id=\"wiz-pw\"") && !html.contains("id=\"up-pw\""), "both account passwords are gone");
-    // One button for the email path. The create/sign-in split went with the password.
-    assert!(panel.contains("id=\"wiz-magic\"") && panel.contains("Email me a code"), "one button, and it says what it does");
-    assert!(!panel.contains("id=\"wiz-create\"") && !panel.contains("id=\"wiz-signin\""), "no create/sign-in split");
-    assert!(panel.contains("id=\"wiz-code-row\"") && panel.contains("id=\"wiz-code-go\""), "the code row stays");
-    // §9's minors row and the consent log are unchanged: both boxes, both policies, both gates.
-    assert!(panel.contains("id=\"wiz-18\"") && panel.contains("18 or older"));
-    assert!(panel.contains("id=\"wiz-terms\"") && panel.contains("terms.html") && panel.contains("privacy.html"));
-    let js = read("console.js");
-    assert!(js.contains("\"google_sign_in\"") && js.contains("\"send_magic_link\"") && js.contains("\"verify_email_code\""));
-    assert!(!js.contains("\"sign_up\"") && !js.contains("\"sign_in\""), "the password commands are gone from the page too");
-    // Tauri v2 camel-cases argument keys; `age_attested` here is a rejected invoke and a wizard
-    // whose Next never unlocks.
-    assert!(js.contains("ageAttested:"), "send_magic_link carries the attestation as ageAttested");
-    assert!(js.contains("Tick both boxes"), "the page still says why a sign-in was refused");
-}
-
 /// Spec §6, last line: the upgrade overlay gets the same two doors. It is a **second** sign-in
 /// surface, in the console window, over an existing vault — and it is not painted by `renderWizard`,
 /// so the `WIZ.busy` guard that protects `#wiz-google-signin` does not reach it.
@@ -956,32 +576,6 @@ fn the_upgrade_overlay_offers_the_same_two_doors_and_no_password() {
     // `EL("upgrade").addEventListener`, where `UPGRADE_DISMISSED` and `UPGRADE_UNREACHABLE` live.
     let before = js.split("EL(\"upgrade\").addEventListener(\"click\"").next().expect("the file before the listener");
     assert!(before.contains("var UP_BUSY"), "UP_BUSY must be declared at IIFE scope, not inside the click handler");
-}
-
-/// **F10.** The overlay got `UP_BUSY` and the wizard's Google button gets `WIZ.busy`, but the
-/// wizard's two emailed-code doors got neither — two quick presses on `#wiz-magic` spend two of the
-/// twenty emails an hour `config.toml`'s comment calls the whole of the cap. Both doors now get the
-/// same guard: refuse a second press while one is in flight, latch `WIZ.busy` before the `invoke`,
-/// release it on every outcome, and `renderWizard` paints both as disabled while it is set — the
-/// same pattern `#wiz-google-signin` and `#wiz-next` already use.
-#[test]
-fn the_wizards_email_doors_get_the_same_busy_guard_the_google_button_has() {
-    let js = read("console.js");
-    let render = js.split("function renderWizard(").nth(1).and_then(|s| s.split("\n  }").next()).expect("renderWizard");
-    assert!(render.contains("EL(\"wiz-magic\").disabled = WIZ.busy"), "the email door is painted from WIZ.busy");
-    assert!(render.contains("EL(\"wiz-code-go\").disabled = WIZ.busy"), "the code door is painted from WIZ.busy");
-    let listener = js.split("EL(\"wizard\").addEventListener(\"click\"").nth(1)
-        .and_then(|s| s.split("function renderCourses(").next())
-        .expect("the wizard's click listener");
-    for id in ["#wiz-magic", "#wiz-code-go"] {
-        let marker = format!("e.target.closest(\"{id}\")");
-        let handler = listener.split(&marker).nth(1)
-            .and_then(|s| s.split("if (e.target.closest(").next())
-            .unwrap_or_else(|| panic!("the {id} handler"));
-        assert!(handler.contains("if (WIZ.busy) { return; }"), "{id} must refuse a second press while one is in flight");
-        assert!(handler.contains("WIZ.busy = true"), "{id} must latch WIZ.busy before its invoke");
-        assert!(handler.contains("WIZ.busy = false"), "{id} must release WIZ.busy on the outcome");
-    }
 }
 
 /// Legal note §9: the report is shown, editable, before anything is sent — and what is sent is what
@@ -1266,20 +860,6 @@ fn build_rs_still_stages_the_zero_byte_sidecar_placeholder() {
     );
 }
 
-/// The wizard's default folders come from `launch_state` — the page never builds a path, and the
-/// retired `documents` key (which named the OneDrive-redirected folder) is read nowhere. C1: there is
-/// no backups root on the page at all.
-#[test]
-fn the_wizard_takes_its_default_folders_from_the_launch_state() {
-    let js = read("console.js");
-    // The vault's parent still comes from `launch_state` (renamed on main 2026-09-09:
-    // `documents` -> `default_parent`).
-    assert!(js.contains("l.default_parent"), "the parent folder still comes from launch_state");
-    // …but nothing reads a backups root any more. There is no backup panel and no folder picker in
-    // the wizard at all; `create_vault` puts `Backups` beside the vault (Task 12, spec §4.1).
-    assert!(!js.contains("l.default_backup"), "the wizard must not read a backups root it cannot show");
-}
-
 /// **R-C1-55, C1 — Tauri v2 lower-camel-cases every argument key** (tauri-macros' `ArgumentCase::Camel`)
 /// unless the command opts out with `rename_all = "snake_case"`. `send_magic_link` does not opt out, so
 /// a page that sends `age_attested` is rejected *before* the command body runs; the handler's `.catch`
@@ -1377,9 +957,9 @@ fn every_control_this_task_added_is_in_the_markup_and_named_by_the_page() {
         // The three new settings rows' controls. The rows themselves are pinned by
         // `the_settings_panel_has_its_rows_and_one_way_in`, which is where rows belong.
         "set-account-state", "set-report-go", "set-delete-1", "set-delete-2", "set-delete-note", "set-portal",
-        // R-C1-42's second press, and the panels' own new controls.
-        "wiz-lms-capture", "wiz-code-row", "wiz-code", "wiz-school-picked", "wiz-courses-note",
-        "wiz-course-add-go", "wiz-map-note", "wiz-sub-note", "wiz-account-note",
+        // O3 F10: the setup shell's controls. Bound by id at use, so a missing one fails on the press.
+        "su-start", "su-returning", "su-google", "su-use-code", "su-email", "su-magic", "su-18", "su-code-in",
+        "su-code-go", "su-resend", "su-other-email", "su-continue", "su-retry", "su-error", "su-code-error", "su-done-error",
         // Task 18's upgrade overlay. `upgrade` and `up-later` are bound at IIFE top level too, so
         // they carry the same "delete one and every window renders blank" weight the six above do.
         "upgrade", "up-email", "up-google", "up-magic", "up-code-row", "up-code", "up-code-go", "up-18", "up-terms",
@@ -1528,151 +1108,6 @@ fn the_upgrade_overlays_field_and_labels_are_styled_like_the_rest_of_the_panel()
     assert!(css.contains(".setpanel label {"), "a consent checkbox needs a line of its own");
 }
 
-/// Spec §7. Quinn, 2026-09-17: "why are there even back and next buttons if they don't work?"
-/// Three answers, and this pins all three.
-#[test]
-fn the_wizards_nav_is_rendered_state_and_never_a_dead_control() {
-    let js = read("console.js");
-    let render = js.split("function renderWizard(").nth(1).and_then(|s| s.split("\n  }").next()).expect("renderWizard");
-    // (a) Back is never `disabled` — at step 0 it is simply not there, so there is no dead control
-    // to press. `hidden` on a button the UA stylesheet hides is enough; `disabled` was the bug.
-    assert!(render.contains("EL(\"wiz-back\").hidden = WIZ.step === 0"), "Back is hidden at step 0, never disabled");
-    assert!(!render.contains("EL(\"wiz-back\").disabled"), "Back is never disabled anywhere");
-    // (b) Next's disabled state is a WIZ field renderWizard paints, like every other wizard field.
-    // Set only by a direct DOM write, it survived every re-render that did not re-set it — which is
-    // a Finish that resolved without relaunching leaving Next dead forever.
-    assert!(render.contains("EL(\"wiz-next\").disabled = WIZ.busy"), "Next's disabled state is rendered from WIZ.busy");
-    let go = js.split("function wizGo(").nth(1).and_then(|s| s.split("function wizRegister(").next()).expect("wizGo");
-    let fin = js.split("function wizFinish(").nth(1).and_then(|s| s.split("\n  // The Checkout page").next()).expect("wizFinish");
-    for (name, body) in [("wizGo", go), ("wizFinish", fin)] {
-        assert!(!body.contains("EL(\"wiz-next\").disabled"), "{name} sets WIZ.busy, never the DOM property directly");
-        assert!(body.contains("WIZ.busy"), "{name} still latches re-entry, through WIZ.busy");
-    }
-    // …and one count over the WHOLE file, because the two slices above do not cover the file
-    // (review R5). `credentialsStranded` (`console.js:1617-1626`) sits between `wizGo` and
-    // `wizFinish`, so its write at `:1623` is in neither slice — and a missed one is the worst of
-    // the six: `renderWizard()` fires on the very next line and repaints `disabled = WIZ.busy`, so a
-    // stranded-credentials recovery would re-enable Next and then immediately kill it again.
-    assert_eq!(
-        js.matches("EL(\"wiz-next\").disabled").count(),
-        1,
-        "renderWizard is the ONLY writer of Next's disabled state"
-    );
-    // (c) A refused Next says what is missing, in a sentence, and says it again on a second press —
-    // a red line that was already on screen does not read as a new answer.
-    // Review M7: the gates themselves, not merely the name — a `wizValid` that still exists and no
-    // longer refuses an unsigned-in step is exactly the regression this is here to catch.
-    let valid = js.split("function wizValid(").nth(1).and_then(|s| s.split("function wizGo(").next()).expect("wizValid");
-    assert!(valid.contains("WIZ.step === 1 && !WIZ.accountId"), "step 1 is still gated on a session");
-    assert!(valid.contains("WIZ.step === 2 && !WIZ.entitled"), "…and step 2 on an entitlement");
-    assert!(go.contains("!wizValid()"), "wizGo refuses a forward step wizValid refuses");
-    assert!(js.contains("flashError("), "a repeated refusal is re-announced, not silently unchanged");
-    for sentence in ["Sign in first.", "Finish the payment page in your browser, then come back."] {
-        assert!(js.contains(sentence), "the refusal names what is missing: {sentence}");
-    }
-    // R-C1b-exec-9: a Next off the subscribe panel now asks the service once before it refuses,
-    // rather than trusting a WIZ.entitled the two-minute poll below may already have given up on.
-    assert!(
-        go.contains("WIZ.step === 2 && !WIZ.entitled"),
-        "wizGo's own pre-ask is gated on the same panel and the same field wizValid is"
-    );
-    assert!(go.contains("checkEntitlement("), "wizGo re-asks the service before it refuses");
-    // The subscribe presses ask first too — never a second Checkout page for an account the service
-    // already calls entitled.
-    let wiz_sub = js
-        .find("if (e.target.closest(\"#wiz-sub-month\")")
-        .map(|i| &js[i..])
-        .and_then(|s| s.split("if (e.target.closest(\"#wiz-lms-open\")").next())
-        .expect("the wiz-sub-month/year handler");
-    let up_sub = js
-        .find("if (e.target.closest(\"#up-subscribe\")")
-        .map(|i| &js[i..])
-        .and_then(|s| s.split("function finishUpgrade(").next())
-        .expect("the up-subscribe handler");
-    for (name, handler) in [("#wiz-sub-month", wiz_sub), ("#up-subscribe", up_sub)] {
-        let ask = handler.find("checkEntitled(").or_else(|| handler.find("checkEntitlement(")).expect("an entitlement ask appears in the subscribe handler");
-        let open = handler.find("open_checkout").expect("open_checkout is still reachable on a no");
-        assert!(ask < open, "{name} asks the service before it ever opens a second Checkout page");
-    }
-    // Both expiries name the way forward instead of dead-ending on a re-ask nobody can trigger.
-    for sentence in [
-        "Still not subscribed. When the payment page is done, press Next.",
-        "Still not subscribed. When the payment page is done, press Subscribe again.",
-    ] {
-        assert!(js.contains(sentence), "the expiry names the way forward: {sentence}");
-    }
-    // The entitlement status test lives in exactly one place — `checkEntitled` — so a status the
-    // service adds later needs one edit, not three.
-    assert_eq!(
-        js.matches("status === \"trialing\"").count(),
-        1,
-        "checkEntitled is the ONLY copy of the entitlement status test"
-    );
-    let poll = js
-        .split("function pollEntitlement(")
-        .nth(1)
-        .and_then(|s| s.split("EL(\"wizard\").addEventListener(").next())
-        .expect("pollEntitlement");
-    assert!(
-        poll.contains("WIZ.step !== 2"),
-        "pollEntitlement's tick stands down once the student has left panel 2"
-    );
-    // Round-4 re-review, BLOCKING: both stand-down checks must run again AFTER checkEntitled()
-    // resolves, not only before it starts — a reply that lands after the student moved on must not
-    // act on a panel nobody is looking at.
-    let ce_in_poll = poll.find("checkEntitlement(").expect("pollEntitlement calls the status-and-plan helper");
-    let guards: Vec<_> = poll.match_indices("WIZ.step !== 2").map(|(i, _)| i).collect();
-    assert_eq!(guards.len(), 2, "pollEntitlement's stand-down is checked before AND after checkEntitled()");
-    assert!(guards[1] > ce_in_poll, "the second WIZ.step !== 2 check runs after checkEntitled() resolves");
-    let up_sub = js
-        .find("if (e.target.closest(\"#up-subscribe\")")
-        .map(|i| &js[i..])
-        .and_then(|s| s.split("function finishUpgrade(").next())
-        .expect("the up-subscribe handler");
-    let ce_in_up = up_sub.find("checkEntitled(").expect("the up-subscribe handler calls checkEntitled");
-    let hidden_checks: Vec<_> = up_sub.match_indices("EL(\"upgrade\").hidden").map(|(i, _)| i).collect();
-    assert_eq!(hidden_checks.len(), 2, "the overlay's stand-down is checked before AND after checkEntitled()");
-    assert!(hidden_checks[1] > ce_in_up, "the second hidden check runs after checkEntitled() resolves");
-}
-
-/// R-C1b-exec-10: an empty coursework discovery — no rows, for any reason — must not trap the
-/// student on the logins panel, and must say something rather than show an empty div.
-#[test]
-fn an_empty_coursework_discovery_lets_next_proceed_and_says_so() {
-    let js = read("console.js");
-    let step = js
-        .split("function wizStep(")
-        .nth(1)
-        .and_then(|s| s.split("function wizRegister(").next())
-        .expect("wizStep");
-    assert!(
-        step.contains("WIZ.map.length || WIZ.discovered"),
-        "a finished discovery, rows or none, lets Next proceed"
-    );
-    let mapping = js
-        .split("function renderMapping(")
-        .nth(1)
-        .and_then(|s| s.split("\n  }").next())
-        .expect("renderMapping");
-    assert!(mapping.contains("!WIZ.discovered"), "the mapping panel stays up for a finished-but-empty discovery");
-    assert!(
-        js.contains("You can go on — Knowlu will try again on its first run."),
-        "an empty discovery names the way forward rather than dead-ending"
-    );
-    let onboarding_rs = std::fs::read_to_string("src/onboarding.rs").expect("src/onboarding.rs");
-    for stale in ["fill them in below", "fill those in below"] {
-        assert!(!js.contains(stale), "console.js no longer tells the student to fill in a panel with nothing on it: {stale}");
-        assert!(!onboarding_rs.contains(stale), "onboarding.rs no longer tells the student to fill in a panel with nothing on it: {stale}");
-    }
-    let html = read("index.html");
-    let map_div = html
-        .find("id=\"wiz-map\"")
-        .map(|i| &html[i..])
-        .and_then(|s| s.split("</div>").next())
-        .expect("#wiz-map");
-    assert!(map_div.contains("id=\"wiz-map-heading\""), "the mapping heading has an id renderMapping can hide");
-}
-
 /// The version constant and the page's own date are one fact in two files (`account.rs`'s rule).
 #[test]
 fn the_privacy_version_constant_is_the_published_pages_date() {
@@ -1785,46 +1220,6 @@ fn the_confirm_screen_and_the_ask_form_are_there() {
     assert!(fin.contains("env.result.warnings") && fin.contains("EL(\"delta\").textContent"), "Finish shows the skipped rows");
 }
 
-/// C3' Task 9, Step 5: Finish now restores the account's own copy of the vault (H11a) before it ever
-/// reaches this panel's copy, and an account that has nothing to bring back yet is a fact, not a
-/// failure — the finish panel says so in its own sentence rather than leaving the case to read as
-/// something having gone wrong.
-#[test]
-fn the_finish_panel_says_when_the_account_had_nothing_to_restore() {
-    let js = read("console.js");
-    // M1 (fix round 1): the OLD sentence was static, painted on every visit to the finish panel
-    // before Finish had even run — a returning student with a real account copy read a claim that
-    // was simply false. `restoreSentence` reads the actual result instead, and each of the three
-    // outcomes gets its own sentence rather than one fixed line pretending to cover all of them.
-    let sentence_fn = js.split("function restoreSentence(").nth(1).and_then(|s| s.split("\n  }").next()).expect("restoreSentence");
-    for (label, sentence) in [
-        ("restored", "Your account already had a vault here"),
-        // N3/item 2 (fix round 2): "over the next syncs", plural — a large account takes more than
-        // one page, and the round 1 wording ("at the next sync") understated that.
-        ("could not be reached", "could not be reached just now; your vault will fill in over the next syncs"),
-        ("had no vault yet", "Your account had no vault yet"),
-    ] {
-        assert!(sentence_fn.contains(sentence), "{label}: the sentence is not in restoreSentence: {sentence_fn}");
-    }
-    // N3 (fix round 2): keyed on the explicit `ok` field, never on `warnings.length` — a
-    // successful pull can carry warnings too (a refused sync card, an oversize row), and the round 1
-    // version would have misread those as "could not be reached".
-    assert!(sentence_fn.contains("!restored.ok"), "restoreSentence keys on the explicit ok field: {sentence_fn}");
-    assert!(!sentence_fn.contains("warnings"), "restoreSentence no longer reads warnings.length at all: {sentence_fn}");
-    // The static claim is gone: no fixed sentence is painted before Finish has run.
-    assert!(js.contains("restoreNote: \"\""), "WIZ.restoreNote starts blank — nothing is claimed before Finish runs");
-    assert!(js.contains("WIZ.restoreNote = restoreSentence("), "wizFinish reads the real result into it");
-    assert!(js.contains("EL(\"wiz-restore-note\").textContent = WIZ.restoreNote"), "renderWizard paints it, like every other wizard field");
-    // N3: stays visible until the relaunch and does not race entitlement_now — the sentence is set,
-    // and painted, strictly BEFORE entitlement_now/finish_onboarding are ever invoked, and nothing
-    // in between clears or repaints over it.
-    let set_at = js.find("WIZ.restoreNote = restoreSentence(").expect("the assignment");
-    let entitlement_at = js[set_at..].find("invoke(\"entitlement_now\"").map(|i| i + set_at).expect("entitlement_now follows it");
-    assert!(set_at < entitlement_at, "the sentence is set before entitlement_now is ever invoked");
-    let between = &js[set_at..entitlement_at];
-    assert_eq!(between.matches("WIZ.restoreNote").count(), 1, "nothing between the two touches WIZ.restoreNote again: {between}");
-}
-
 /// C3' Task 9, Step 6 (P3: built to yes — Quinn is away; logged for Quinn, not asked). The picker's
 /// third door: a LOCAL `Backups\` folder, never the account — the account's own copy arrives by
 /// signing in, at Finish, with no route and no code to type (H11a). `pick_folder` and `restore_vault`
@@ -1912,26 +1307,6 @@ fn the_launch_account_check_does_not_reach_google_status() {
     let guard = gate.find("EL(\"settings\").hidden").expect("gateGoogleRow checks that Settings is open");
     let load = gate.find("loadGoogleRow()").expect("gateGoogleRow loads the row");
     assert!(guard < load, "the Settings-open guard comes before loadGoogleRow");
-}
-
-/// Gmail connect T9b (spec section 8.4 item 2): the console invokes the three Google commands, and
-/// `open_external` is invoked only inside the wizard's Google handler. Its `google_disconnect` half
-/// is red until T9c wires the two-step Disconnect.
-#[test]
-fn the_console_invokes_the_three_google_commands_and_never_open_external_outside_the_wizard() {
-    let js = read("console.js");
-    for cmd in ["google_status", "google_connect", "google_disconnect"] {
-        assert!(js.contains(&format!("invoke(\"{cmd}\"")), "console.js never invokes {cmd}");
-    }
-    // The wizard's two handlers (calendar, and Gmail per D11) are the only places it may be invoked.
-    let spans: Vec<(usize, usize)> = ["wiz-google", "wiz-gmail-connect"].iter().map(|id| {
-        let start = js.find(&format!("getElementById(\"{id}\").addEventListener")).unwrap_or_else(|| panic!("the wizard's {id} handler"));
-        (start, start + js[start..].find("
-  });").expect("end of the handler"))
-    }).collect();
-    for (at, _) in js.match_indices("invoke(\"open_external\"") {
-        assert!(spans.iter().any(|&(a, b)| a < at && at < b), "open_external is invoked outside the wizard's handlers");
-    }
 }
 
 /// Gmail connect plan section 4: while polling, the state line (not the note) reads the plan's
@@ -2781,50 +2156,6 @@ fn an_unbound_reason_shows_amber_with_its_count_and_rotate_only_when_suggested()
     assert!(!v.contains("innerHTML = m.") && !v.contains("innerHTML += m."), "every mail string goes through h()");
 }
 
-/// T15.3 (email spec D6, risk 12, section 9): the panel right after sign-in and subscription
-/// announces school mail setup; nothing is set up in the wizard.
-fn mail_panel(html: &str) -> &str {
-    html.split("id=\"wiz-mail\"").nth(1).and_then(|s| s.split("id=\"wiz-vault\"").next()).expect("the mail panel")
-}
-
-#[test]
-fn the_panel_after_sign_in_reads_next_connect_your_school_email() {
-    let html = read("index.html");
-    assert!(html.find("id=\"wiz-mail\"").unwrap() > html.find("id=\"wiz-subscribe\"").unwrap());
-    assert!(html.find("id=\"wiz-mail\"").unwrap() < html.find("id=\"wiz-vault\"").unwrap());
-    assert!(mail_panel(&html).contains("Next: connect your school email"));
-    let js = read("console.js");
-    assert!(js.contains("var PANELS = [\"welcome\", \"account\", \"subscribe\", \"mail\", \"vault\", \"calendars\", \"logins\", \"gmail\", \"slots\", \"finish\"];"));
-}
-
-#[test]
-fn not_now_carries_the_school_rules_sentence() {
-    let html = read("index.html");
-    let p = mail_panel(&html);
-    assert!(p.contains("id=\"wiz-mail-notnow\""), "a one-click Not now");
-    let at = p.find("id=\"wiz-mail-notnow\"").unwrap();
-    let rule = p.find("If your school's rules don't allow forwarding your school email, skip this.")
-        .or_else(|| p.find("If your school&rsquo;s rules don&rsquo;t allow forwarding your school email, skip this."))
-        .expect("risk 12's sentence");
-    assert!(rule > at, "the sentence sits under Not now");
-    let js = read("console.js");
-    assert!(fn_body(&js, "function wizNotNow(").contains("WIZ.mailOffer = false"));
-}
-
-#[test]
-fn finish_sends_offer_mail() {
-    let js = read("console.js");
-    assert!(js.contains("offer_mail: WIZ.mailOffer"), "the plan carries the choice");
-    assert!(js.contains("mailOffer: true"), "the announcement defaults to on");
-    assert!(!fn_body(&js, "function wizFinish(").contains("ui_event"));
-}
-
-#[test]
-fn the_gmail_panel_button_reads_connect_gmail_directly_google_testers_only() {
-    let html = read("index.html");
-    assert!(html.contains("id=\"wiz-gmail-connect\">Connect Gmail directly (Google testers only)</button>"));
-}
-
 // ---- T15.4: "From your email" (email spec §4.14, D10) ------------------------------------------------
 
 fn mail_applied_fn(js: &str) -> &str {
@@ -3174,68 +2505,7 @@ fn not_now_waits_as_finish_does_and_closing_the_screen_closes_the_school_window(
     assert!(close.contains("invoke(\"close_registrar_window\", {})"), "m2: the school window goes with the screen");
 }
 
-// L8 S5t (spec 3.4, section 9 "App"): a comped account never sees a price or a payment prompt. The
-// copy below is the spec's suggested wording; Quinn may reword it, and then this pin moves with it.
-const TESTER_NOTE: &str = "Your account is already set up. Nothing to pay.";
-const TESTER_HEADING: &str = "You're all set";
-
 fn dq(s: &str) -> String { s.replace('\'', "\"") }
-
-#[test]
-fn the_subscribe_step_asks_status_and_plan_and_a_tester_sees_no_price() {
-    let js = dq(&read("console.js"));
-    let html = read("index.html");
-    // The one status-and-plan helper: same entitlement_now answer, plan beside the status, answering
-    // not entitled on any failure. checkEntitled keeps its true-or-false contract.
-    let helper = fn_body(&js, "function checkEntitlement(");
-    assert!(helper.contains("entitlement_now") || helper.contains("checkEntitled("), "the helper reads the same entitlement answer");
-    assert!(helper.contains("plan"), "the helper returns the plan beside the status");
-    assert!(helper.contains(".catch("), "the helper answers not entitled on any failure");
-    assert!(js.contains("function checkEntitled("), "checkEntitled keeps its true-or-false contract for its other callers");
-    // The two sentences, each in one place: the nothing-to-pay line in the script only, and the paid
-    // account keeps today's note.
-    assert_eq!(js.matches(TESTER_NOTE).count(), 1, "the nothing-to-pay line is written once");
-    assert!(!html.contains(TESTER_NOTE), "the markup does not carry the nothing-to-pay line");
-    assert!(js.contains("Your subscription is active."), "a paid account keeps its note");
-    assert!(html.contains("<h2>Subscribe</h2>"), "the default heading is unchanged");
-    assert_eq!(js.matches(dq(TESTER_HEADING).as_str()).count(), 1, "the tester heading is written once");
-    // Rendering, for the plan tester: note, hidden lede, retitled heading; prices hidden for any
-    // entitled account.
-    let render = fn_body(&js, "function renderWizard(");
-    assert!(render.contains("WIZ.plan === \"tester\""), "renderWizard branches on the recorded plan");
-    let note_at = render.find("EL(\"wiz-sub-note\")").expect("the note is set in renderWizard");
-    let note_stmt = &render[note_at..render[note_at..].find(";\n").map(|i| note_at + i).unwrap()];
-    assert!(note_stmt.contains(TESTER_NOTE) && note_stmt.contains("tester"), "#wiz-sub-note carries the nothing-to-pay line for a tester");
-    assert!(note_stmt.contains("Your subscription is active."), "and still the paid note for a paid account");
-    assert_eq!(render.matches(TESTER_NOTE).count(), 1, "no other element carries it");
-    assert!(render.contains("wiz-subscribe") && render.contains(".lede") && render.contains(".hidden"), "the panel's lede is hidden for a tester");
-    assert!(render.contains("wiz-subscribe") && render.contains("h2") && render.contains(dq(TESTER_HEADING).as_str()), "the panel's heading is retitled for a tester");
-    for id in ["wiz-sub-month", "wiz-sub-year"] {
-        let line = render.lines().find(|l| l.contains(&format!("EL(\"{id}\").hidden"))).unwrap_or_else(|| panic!("{id} is hidden in renderWizard"));
-        assert!(line.contains("WIZ.entitled"), "{id} is hidden for any entitled account: {}", line.trim());
-    }
-    // The tester form is drawn only once the plan is known: the plan starts unknown on WIZ.
-    let wiz_decl = &js[js.find("var WIZ = {").expect("WIZ")..];
-    let wiz_decl = &wiz_decl[..wiz_decl.find("};").unwrap()];
-    assert!(wiz_decl.contains("plan: null"), "WIZ.plan starts unknown, so nothing is drawn before the answer");
-    // Every place WIZ.entitled is set records the plan from the helper: wizGo's re-ask, the price
-    // click, pollEntitlement, and the on-entry check.
-    let sets: Vec<usize> = js.match_indices("WIZ.entitled = ").map(|(i, _)| i).collect();
-    assert!(sets.len() >= 4, "four places set WIZ.entitled, the on-entry check included: {}", sets.len());
-    for at in sets {
-        let before = &js[at.saturating_sub(900)..at];
-        let after = &js[at..(at + 400).min(js.len())];
-        assert!(before.contains("checkEntitlement("), "WIZ.entitled set without the helper: {}", &js[at..at + 40]);
-        assert!(before.contains("WIZ.plan = ") || after.contains("WIZ.plan = "), "WIZ.entitled set without recording the plan: {}", &js[at..at + 40]);
-    }
-    // The subscribe step asks the helper on entry, never the plain checkEntitled().
-    let step = fn_body(&js, "function wizStep(");
-    assert!(step.contains("checkEntitlement("), "wizStep asks the status-and-plan helper on entering the subscribe step");
-    assert!(!step.contains("checkEntitled("), "and not the plain boolean");
-    for head in ["function wizGo(", "function pollEntitlement("] {
-        assert!(!fn_body(&js, head).contains("checkEntitled("), "{head} uses the helper, not the plain boolean");
-    }
-}
 
 #[test]
 fn the_upgrade_overlay_shows_subscribe_only_for_a_not_entitled_answer() {
@@ -3656,4 +2926,243 @@ fn closed_this_week_offers_undo_only_where_the_engine_says_so() {
     assert!(u.contains("showNote(") && u.contains("applyEnvelope("), "an outcome is shown and the view repaints");
     assert!(js.contains("closest(\"[data-undo-close]\")"), "the click is routed");
     assert!(css.contains("#closed .ln.undo"), "the row has its fourth track");
+}
+
+// ---- O3 F10: the setup shell, steps 1 and 2, in the ruled direction (5b). The ten-panel wizard and
+// every pin that stood on one of its panels are gone; these are the shell's own. -----------------------
+
+/// The five screens the shell has, in the page, and nothing of the retired panels 3 to 10.
+#[test]
+fn the_setup_shell_has_its_screens_a_nine_row_rail_and_no_retired_panel() {
+    let html = read("index.html");
+    assert!(html.contains("id=\"setup\""), "the shell");
+    for id in ["su-welcome", "su-account", "su-browser", "su-code", "su-done"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "screen {id}");
+    }
+    // The rail is the direction's "Your sources": eight rows in wave B (Syllabi is absent until O5,
+    // plan §4.2 step 9: not shown, not counted, not on the rail), the account first, the reveal last.
+    let rail = html.split("id=\"su-rail\"").nth(1).and_then(|s| s.split("</ol>").next()).expect("the rail");
+    assert_eq!(rail.matches("data-rail=\"").count(), 8, "eight rows");
+    assert!(!rail.to_lowercase().contains("syllab") && !rail.contains("late rules"), "no syllabus word on the rail in wave B");
+    assert!(rail.find("data-rail=\"account\"").unwrap() < rail.find("data-rail=\"school\"").unwrap());
+    assert!(rail.find("data-rail=\"week\"").unwrap() < rail.find("data-rail=\"reveal\"").unwrap());
+    // A row ahead says what its step brings, never what it will find (BRIEF R3.1).
+    assert!(rail.contains("Classes, assignments and grades") && rail.contains("$9.99 a month, after 7 days free"));
+    // Retired with the wizard: its section, its ten panels' ids and its nav.
+    assert!(!html.contains("id=\"wizard\"") && !html.contains("wiz-"), "no wizard markup survives");
+    let js = read("console.js");
+    for f in ["startSetup", "renderSetup", "suShow", "suMakeFolder", "suContinue", "suGoogle", "suSendCode", "suVerify"] {
+        assert!(js.contains(&format!("function {f}(")), "missing {f}");
+    }
+    for gone in ["startWizard", "renderWizard", "wizGo", "wizFinish", "PANELS", "WIZ.", "wiz-"] {
+        assert!(!js.contains(gone), "console.js still names {gone}");
+    }
+    // The step counter follows §4.2's numbering (welcome is step 1, the account step 2) over the ten
+    // steps wave B shows (eleven, less the absent step 9).
+    assert!(js.contains("welcome: { no: \"Step 1 of 10\"") && js.contains("account: { no: \"Step 2 of 10\"") && js.contains("done: { no: \"Step 2 of 10\""), "the counter");
+    assert!(!js.contains("of 9\""), "no nine-step counter");
+    // One time estimate, the spec's, until S-E measures real times.
+    assert!(js.contains("left: \"About 10 minutes\"") && !js.contains("minutes left"), "one estimate");
+    assert!(js.contains("window.KNOWLU_SHOTS = { startSetup: startSetup, renderPicker: renderPicker, openSettings: openSettings, openReport: openReport }"), "the shots seam");
+    // The shell hides by attribute, and a class `display` beats the UA's `[hidden]`: each rule is the
+    // only thing that hides its element.
+    let css = read("console.css");
+    for rule in [".setup[hidden] { display: none; }", ".su-step[hidden] { display: none; }", ".pick-nav[hidden] { display: none; }", ".picker[hidden] { display: none; }"] {
+        assert!(css.contains(rule), "{rule}");
+    }
+    assert!(!css.contains(".wiz"), "no wizard rule survives in the sheet");
+    // D5: class (c) is not built and has no UI, and the page is where a toggle for it would appear.
+    assert!(!js.to_lowercase().contains("telemetry"), "no telemetry toggle: (c) is not built (D5)");
+    assert!(!js.contains("fetch(\"http"), "the page never fetches");
+    assert_eq!(js.matches(" data-id=\"").count(), js.matches(" data-kind=\"").count(), "data-id without data-kind somewhere");
+}
+
+/// Spec §11a and VISION's standing rule: **Knowlu never asks for a campus credential**, and the account
+/// has no password. Steps 1 and 2 carry no password field at all, and none of the retired panels'
+/// commands (the school's window, the feed link, the coursework logins, Google's two consents) is
+/// invoked by the shell: each belongs to a later step, in onboarding mode.
+#[test]
+fn the_shell_asks_for_no_password_and_invokes_none_of_the_retired_panels_commands() {
+    let html = read("index.html");
+    assert!(!html.contains("type=\"password\""), "no password field anywhere on the page");
+    let js = read("console.js");
+    for gone in [
+        "open_lms_window", "capture_calendar_link", "capture_courses", "paste_calendar_link", "close_lms_window",
+        "campus_search", "timezone_for_state", "discover_coursework", "store_credentials", "retarget_credentials",
+        "google_connect_url", "google_connected", "open_external",
+    ] {
+        assert!(!js.contains(&format!("invoke(\"{gone}\"")), "the page still invokes {gone}");
+    }
+    assert!(!js.contains("\"connect_google\"") && !js.contains("gmail.readonly"), "no Google scope string on the page");
+    assert!(!js.contains("campuses.json"), "the page never names the school list");
+    // The console keeps its three Google commands (Settings' row) and nothing opens a browser itself.
+    for cmd in ["google_status", "google_connect", "google_disconnect"] {
+        assert!(js.contains(&format!("invoke(\"{cmd}\"")), "console.js never invokes {cmd}");
+    }
+    assert!(!html.to_lowercase().contains("username"), "no username field");
+    assert!(!js.contains("l.documents") && !js.contains("l.default_parent") && !js.contains("l.default_backup"),
+        "the page builds no path: the folder it shows is what create_vault answered");
+}
+
+/// Step 2's ask. Spec §4.2: Google (name and email only) or an emailed code, 18 or older and the
+/// terms; D1: the Google button is the FIRST control, not an alternative buried under a form; D4: no
+/// password, anywhere. One box says both things, linked to both texts.
+#[test]
+fn the_account_step_leads_with_google_asks_for_no_password_and_gates_on_the_box() {
+    let html = read("index.html");
+    let step = html.split("id=\"su-account\"").nth(1).and_then(|s| s.split("id=\"su-browser\"").next()).expect("the account step");
+    let g = step.find("id=\"su-google\"").expect("the Google button");
+    let m = step.find("id=\"su-use-code\"").expect("the emailed-code door");
+    let e = step.find("id=\"su-email\"").expect("the email field");
+    assert!(g < m && m < e, "Continue with Google, then the emailed code, then its field");
+    assert!(step.contains("Continue with Google") && step.contains("Email me a code"), "each says what it does");
+    assert!(!step.to_lowercase().contains("password"), "the account step never carries a password field");
+    assert!(!html.contains("id=\"up-pw\"") && !html.contains("id=\"su-pw\""), "both account passwords are gone");
+    assert!(step.contains("id=\"su-18\"") && step.contains("18 or older") && step.contains("terms"), "the one box says 18 and the terms");
+    assert_eq!(step.matches("type=\"checkbox\"").count(), 1, "one box, not two");
+    assert!(step.contains("href=\"terms.html\"") && step.contains("href=\"privacy.html\"") && step.matches("class=\"policy\"").count() == 2,
+        "both texts, both the browser-opening kind");
+    // The ask carries the copy the direction asks for before the student presses anything.
+    assert!(step.contains("Google shares your name and email with Knowlu, nothing else."), "what Google gives");
+    assert!(step.contains("$9.99 a month after 7 days free") && step.contains("no free plan after the trial"), "the price, said once, here");
+    let js = read("console.js");
+    assert!(js.contains("\"google_sign_in\"") && js.contains("\"send_magic_link\"") && js.contains("\"verify_email_code\""));
+    assert!(!js.contains("\"sign_up\"") && !js.contains("\"sign_in\""), "the password commands are gone from the page too");
+    // Tauri v2 camel-cases argument keys; `age_attested` is a rejected invoke and a shell whose
+    // sign-in never starts, with a sentence that blames the network.
+    assert!(js.contains("ageAttested:"), "the attestation travels camel-cased");
+    assert!(js.contains("Tick the box to continue."), "the page says why a sign-in was refused");
+    // Policy links open in the browser: a plain navigation would lose the only window.
+    let click = js.split("EL(\"setup\").addEventListener(\"click\"").nth(1).and_then(|s| s.split("EL(\"setup\").addEventListener(\"keydown\"").next()).expect("the shell's click listener");
+    assert!(click.contains("a.policy") && click.contains("preventDefault()") && click.contains("\"open_policy\""));
+}
+
+/// **F10 (the busy guard, carried).** The upgrade overlay has `UP_BUSY`; the shell's three doors share
+/// `SU.busy`: a second press while one is in flight is refused, the latch is set before the invoke,
+/// released on every outcome, and `renderSetup` paints every door as disabled while it is set. Two
+/// quick presses on the emailed-code door spend two of the twenty emails an hour the cap allows.
+#[test]
+fn the_shells_three_doors_share_one_busy_latch_painted_from_state() {
+    let js = read("console.js");
+    let render = js.split("function renderSetup(").nth(1).and_then(|s| s.split("\n  }\n").next()).expect("renderSetup");
+    for id in ["su-google", "su-use-code", "su-magic", "su-code-go"] {
+        assert!(render.contains(&format!("EL(\"{id}\").disabled = SU.busy")), "{id} is painted from SU.busy");
+    }
+    // The button's disabled state has exactly one writer per button: the painter.
+    assert_eq!(js.matches("EL(\"su-google\").disabled").count(), 1, "renderSetup is the only writer");
+    for (head, until) in [("function suGoogle(", "function suSendCode("), ("function suSendCode(", "function suVerify("), ("function suVerify(", "EL(\"setup\").addEventListener(\"click\"")] {
+        let body = js.split(head).nth(1).and_then(|s| s.split(until).next()).unwrap_or_else(|| panic!("{head}"));
+        assert!(body.contains("if (SU.busy"), "{head} refuses a second press while one is in flight");
+        assert!(body.contains("SU.busy = true"), "{head} latches before its invoke");
+        assert!(body.matches("SU.busy = false").count() >= 2, "{head} releases the latch on its outcome and on a dropped call");
+        assert!(body.find("SU.busy = true").unwrap() < body.find("invoke(").unwrap(), "{head} latches BEFORE the invoke");
+    }
+}
+
+/// Step 2 on success (spec §4.2): the shell makes the folder with its defaults, which also brings back
+/// the account's copy, says what that found in a sentence keyed on the explicit `ok` (never on
+/// `warnings.length`: a good pull can carry warnings), and waits on Continue before it relaunches.
+/// Nothing is claimed before the answer is in.
+#[test]
+fn the_account_step_makes_the_folder_says_what_it_restored_and_relaunches_on_continue() {
+    let js = read("console.js");
+    let sentence_fn = js.split("function restoreSentence(").nth(1).and_then(|s| s.split("\n  }").next()).expect("restoreSentence");
+    for (label, sentence) in [
+        ("restored", "Your account already had a plan, and it just came back."),
+        ("could not be reached", "could not be reached just now; your plan will fill in over the next syncs"),
+        ("had no plan yet", "Your account had no plan yet, so this is the first one."),
+    ] {
+        assert!(sentence_fn.contains(sentence), "{label}: the sentence is not in restoreSentence: {sentence_fn}");
+    }
+    assert!(sentence_fn.contains("!restored.ok") && !sentence_fn.contains("warnings"), "keyed on ok, never on warnings: {sentence_fn}");
+    // Blank until create_vault has answered; painted from state by the one painter.
+    assert!(js.contains("folder: \"\", profileId: \"\", restore: \"\""), "SU starts with nothing claimed");
+    assert!(js.contains("SU.restore = restoreSentence(r.restored)"), "the sentence reads the real answer");
+    assert!(js.contains("EL(\"su-restore-line\").textContent = SU.restore"), "renderSetup paints it");
+    // The defaults (spec §1.9 A): the system's zone, 12:00 and 18:00, start with Windows; no school,
+    // no feed, no login, no mail offer. The folder shown is what create_vault answered.
+    let plan = js.split("function suPlan(").nth(1).and_then(|s| s.split("\n  }\n").next()).expect("suPlan");
+    for want in ["timezone: SU.l.tz || \"\"", "slots: [\"12:00\", \"18:00\"]", "autostart: true", "ics_url: null", "personal_calendar: null", "offer_mail: false", "zybooks: false", "vhl: false"] {
+        assert!(plan.contains(want), "the defaults lack {want}");
+    }
+    assert!(!plan.contains("campus_choice") && !plan.contains("courses"), "no school and no classes before their steps");
+    assert!(js.contains("SU.folder = r.profile.vault"), "the folder is shown as the command named it");
+    // The name: "Knowlu", then "Knowlu 2", "Knowlu 3": the first no profile on this machine has, and
+    // when `dest_for` answers "already exists" (a folder that outlived a reinstall) the next one, to
+    // 20, then a named error. F3 moves naming into Rust and this loop goes with it.
+    let name = js.split("function suCandidate(").nth(1).and_then(|s| s.split("
+  }
+").next()).expect("suCandidate");
+    assert!(name.contains("\"Knowlu\"") && name.contains("\"Knowlu \" + i"), "{name}");
+    let make = js.split("function suMakeFolder(").nth(1).and_then(|s| s.split("
+  }
+").next()).expect("suMakeFolder");
+    assert!(make.contains("invoke(\"create_vault\", { name: suCandidate(i), plan: suPlan() })"));
+    assert!(make.contains("already exists") && make.contains("suMakeFolder(i + 1)"), "an existing folder tries the next name");
+    assert!(make.contains("i > SU_NAME_CAP") && js.contains("var SU_NAME_CAP = 20;"), "capped at 20");
+    assert!(make.contains("Knowlu 20") || make.contains("SU_NAME_CAP"), "the cap is named in the error");
+    assert!(js.contains("F3 moves naming into Rust"), "the interim says what retires it");
+    assert!(js.contains("invoke(\"create_vault\""));
+    // Continue is the relaunch; it waits for the folder and for itself, and a refusal is shown.
+    let go = js.split("function suContinue(").nth(1).and_then(|s| s.split("\n  }\n").next()).expect("suContinue");
+    assert!(go.contains("if (SU.making || !SU.profileId || SU.busy) { return; }"), "no relaunch before the folder, none twice");
+    assert!(go.contains("invoke(\"finish_onboarding\", { id: SU.profileId })") && go.contains("o.ok === false") && go.contains("SU.doneError = o.error"));
+    let render = js.split("function renderSetup(").nth(1).and_then(|s| s.split("\n  }\n").next()).expect("renderSetup");
+    assert!(render.contains("EL(\"su-continue\").disabled = SU.making || !SU.profileId || SU.busy"), "Continue is painted from state");
+    assert!(render.contains("EL(\"su-retry\").hidden = SU.making || !!SU.profileId"), "a failed folder offers Try again");
+}
+
+/// The picker is the shell's other door: a profile whose setup stopped says so and offers Continue
+/// setup (the same open), Add a profile starts the shell, and the restore-from-backup link and the
+/// adopt path stay (the local mirror, never the account).
+#[test]
+fn the_picker_names_an_unfinished_setup_and_keeps_adopt_restore_and_add() {
+    let html = read("index.html");
+    for id in ["pick-list", "pick-adopt", "pick-restore-backup", "pick-add", "pick-restore-go", "pick-lede"] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "the picker needs #{id}");
+    }
+    assert!(html.contains("Choose a profile") && html.contains("Add a profile"), "the direction's picker words");
+    let js = read("console.js");
+    let render = js.split("function renderPicker(").nth(1).and_then(|s| s.split("\n  }\n").next()).expect("renderPicker");
+    assert!(render.contains("p.setup_unfinished") && render.contains("Setup not finished") && render.contains("Continue setup"));
+    assert!(render.contains("data-open=\""), "Continue setup is the same open as Open");
+    assert!(js.contains("EL(\"pick-add\").addEventListener(\"click\"") && js.contains("startSetup(l || {})"), "Add a profile starts the shell");
+    assert!(js.contains("invoke(\"adopt_vault\"") && js.contains("invoke(\"restore_vault\""), "adopt and restore stay");
+}
+
+/// The status-and-plan helper survives the wizard: the upgrade overlay asks it. Same entitlement_now
+/// answer with the plan beside the status, not entitled on any failure, and the status test in exactly
+/// one place; the overlay asks before it ever opens a second Checkout page, and both its expiries name
+/// the way forward. (The wizard's own subscribe step, its tester form and its poll went with it:
+/// payment is step 4 of onboarding mode.)
+#[test]
+fn the_entitlement_helper_and_the_upgrade_overlays_subscribe_ask_first() {
+    let js = dq(&read("console.js"));
+    let helper = fn_body(&js, "function checkEntitlement(");
+    assert!(helper.contains("entitlement_now") && helper.contains("plan") && helper.contains(".catch("), "{helper}");
+    assert!(js.contains("function checkEntitled("), "checkEntitled keeps its true-or-false contract");
+    assert_eq!(js.matches("status === \"trialing\"").count(), 1, "checkEntitled is the ONLY copy of the entitlement status test");
+    let up_sub = js.find("if (e.target.closest(\"#up-subscribe\")").map(|i| &js[i..]).and_then(|s| s.split("function finishUpgrade(").next()).expect("the up-subscribe handler");
+    let ask = up_sub.find("checkEntitled(").expect("an entitlement ask in the handler");
+    assert!(ask < up_sub.find("open_checkout").expect("open_checkout stays reachable on a no"), "asks before it opens a second Checkout page");
+    assert!(js.contains("Still not subscribed. When the payment page is done, press Subscribe again."), "the expiry names the way forward");
+    let ce = up_sub.find("checkEntitled(").unwrap();
+    let hidden: Vec<_> = up_sub.match_indices("EL(\"upgrade\").hidden").map(|(i, _)| i).collect();
+    assert_eq!(hidden.len(), 2, "the overlay's stand-down is checked before AND after checkEntitled()");
+    assert!(hidden[1] > ce, "the second check runs after the answer");
+    // Nothing in the page tells a student to fill in a panel that has nothing on it.
+    let onboarding_rs = std::fs::read_to_string("src/onboarding.rs").expect("src/onboarding.rs");
+    for stale in ["fill them in below", "fill those in below"] {
+        assert!(!js.contains(stale) && !onboarding_rs.contains(stale), "stale sentence: {stale}");
+    }
+}
+
+/// The welcome screen renders the privacy sentence from the one constant the site's page is pinned to.
+#[test]
+fn the_welcome_screen_renders_the_privacy_sentence_from_privacy() {
+    let html = read("index.html");
+    let welcome = html.split("id=\"su-welcome\"").nth(1).and_then(|s| s.split("id=\"su-account\"").next()).expect("the welcome step");
+    assert!(welcome.contains("id=\"su-privacy\""), "the line has its element in #su-welcome");
+    let js = read("console.js");
+    assert!(js.contains("EL(\"su-privacy\").textContent = PRIVACY;"), "its text is set from PRIVACY");
 }
