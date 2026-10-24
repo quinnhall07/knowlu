@@ -532,8 +532,17 @@ impl Queue {
     /// A `slot.partial` ask that merges into a queued one owes a `NoRank` slot (I1), unless the queued
     /// one is `pending` with `config.ingest` already done, so it is sure to run as `NoRank` itself, or
     /// is already running as `NoRank`.
-    pub fn enqueue(&self, job: &str) {
+    pub fn enqueue(&self, job: &str) { self.enqueue_with(job, false); }
+    /// An answer or a proceed (§14.52.3: a repeat changes nothing): like [`Queue::enqueue`], but a job that
+    /// already has a `done`, `failed` or `skipped` record is left alone, under the same lock. A failed job
+    /// is re-run only by Try again ([`Core::press`]); skipped mail jobs stay skipped. `slot.partial` is
+    /// exempt: a second ask is its own merge rule (I1), and step 8 needs a `NoRank` slot after step 3's.
+    /// Answers `true` when the job was newly queued (it was not queued, and nothing blocked it), so a proceed
+    /// can ask for `slot.partial` only if one of its earlier jobs was.
+    pub fn enqueue_once(&self, job: &str) -> bool { self.enqueue_with(job, true) }
+    fn enqueue_with(&self, job: &str, once: bool) -> bool {
         let mut g = self.inner.lock();
+        if once && job != "slot.partial" && matches!(g.job_state(job), Some(JobState::Done | JobState::Failed | JobState::Skipped)) { return false; }
         if job == "slot.partial" && g.order.iter().any(|j| j == job) {
             let covered = match g.job_state(job) {
                 Some(JobState::Pending) => proposals_ready(&g.state),
@@ -542,10 +551,13 @@ impl Queue {
             };
             if !covered { g.no_rank_owed = true; }
         }
+        let queued = g.order.iter().any(|j| j == job);
         g.push_job(job);
+        let fresh = !queued && g.order.iter().any(|j| j == job);
         g.settle();
         self.inner.persist(&g);
         self.inner.cv.notify_all();
+        fresh
     }
     /// The entitlement changed (F2h's poll): re-test the hold.
     pub fn wake(&self) {
@@ -695,7 +707,7 @@ impl Queue {
     /// F8d2: the student skipped step 5's email. A pending or held `mail.setup`, `mail.canary` and
     /// `mail.first_pass` become `skipped` and leave the order; one that is running is marked, and the
     /// run handed over by [`Queue::attach_setup_run`] is stopped (after its current step), so its
-    /// `Stopped` (or a watch's `Waiting`) lands `skipped`, not `pending`. A job that is not queued is left
+    /// `Stopped` (or a watch's `Waiting`) lands `skipped`, not `pending`. A job with no record gets a `skipped` one (a skip before the answer holds). A job that is done or failed is left
     /// alone, and a skipped mail job is never handed over (`handover_for`).
     pub fn skip_mail(&self) {
         let mut g = self.inner.lock();
@@ -712,6 +724,9 @@ impl Queue {
                     g.skipping.insert(job.to_string());
                     if job == "mail.setup" { run = g.setup_run.clone(); }
                 }
+                // No record yet: the skip is made before the step-5 answer. A `skipped` record keeps
+                // `enqueue_once` from queueing the job later.
+                None => { g.state.jobs.insert(job.to_string(), JobRecord { state: JobState::Skipped, ..Default::default() }); }
                 _ => {}
             }
         }
