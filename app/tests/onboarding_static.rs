@@ -12,7 +12,19 @@
 //!   `clearCredentialFields`, `removeCourse`, `renderRestart`.
 //! - Panels are `id="ob-step-N"` (N = 2..8, 10, 11; there is no step 9 in wave B); skip controls
 //!   are `ob-skip-5`, `ob-skip-6`, `ob-skip-7`, `ob-skip-8-zybooks`, `ob-skip-8-vhl`.
-//! - Every Tauri call is `invoke("<literal name>", ...)`.
+//! - Every Tauri call is `invoke("<literal name>", ...)`. The one exception is a single wrapper,
+//!   either `var invoke = window.__TAURI__.core.invoke;` or one `function invoke(cmd, args) {...}`
+//!   whose body holds the only `__TAURI__.core.invoke`; `invoke` is never aliased or passed on.
+//! - Handlers are named `function`s (the pins find the smallest enclosing function; arrow bodies
+//!   count too). A call placed straight in the file-wide IIFE wrapper fails the pin on purpose.
+//! - Regex literals in `onboarding.js` must not contain quotes, `//` or `/*` (the comment stripper
+//!   reads simple regex literals only).
+//! - Style the pins rely on: markup is built as HTML strings or `createElement("button")`;
+//!   promise chains use `.then(` / `.catch(` / `.finally(`; step 8 declares `var discovering`;
+//!   no `reduce(`; the four login fields are looked up by their literal ids
+//!   (`ob-zybooks-username`, `ob-zybooks-password`, `ob-vhl-username`, `ob-vhl-password`) only
+//!   inside the store handler and `clearCredentialFields`.
+//! - `onboarding_status` carries `finish_ready` (server side); the page never re-derives it.
 
 use std::fs;
 use std::path::Path;
@@ -31,7 +43,7 @@ fn blank(src: &str, strings_too: bool) -> String {
     let c: Vec<char> = src.chars().collect();
     let mut out = String::with_capacity(src.len());
     let keep = |ch: char| if ch == '\n' { '\n' } else { ' ' };
-    let mut i = 0;
+    let (mut i, mut prev) = (0, '\0');
     while i < c.len() {
         let ch = c[i];
         if ch == '/' && c.get(i + 1) == Some(&'/') {
@@ -39,6 +51,20 @@ fn blank(src: &str, strings_too: bool) -> String {
         } else if ch == '/' && c.get(i + 1) == Some(&'*') {
             while i < c.len() && !(c[i] == '*' && c.get(i + 1) == Some(&'/')) { out.push(keep(c[i])); i += 1; }
             for _ in 0..2 { if i < c.len() { out.push(' '); i += 1; } }
+        } else if ch == '/' && (prev == '\0' || "(,=:[!&|?{};+-*%<>~^".contains(prev)) {
+            // A regex literal: to the next unescaped `/` outside a class.
+            out.push('/');
+            i += 1;
+            let mut class = false;
+            while i < c.len() && c[i] != '\n' && (class || c[i] != '/') {
+                if c[i] == '\\' && i + 1 < c.len() { out.push(if strings_too { ' ' } else { c[i] }); i += 1; }
+                if c[i] == '[' { class = true; }
+                if c[i] == ']' { class = false; }
+                out.push(if strings_too { ' ' } else { c[i] });
+                i += 1;
+            }
+            if i < c.len() && c[i] == '/' { out.push('/'); i += 1; }
+            prev = ')';
         } else if ch == '"' || ch == '\'' || ch == '`' {
             out.push(ch);
             i += 1;
@@ -49,17 +75,31 @@ fn blank(src: &str, strings_too: bool) -> String {
                 i += 1;
             }
             if i < c.len() && c[i] == ch { out.push(ch); i += 1; }
-        } else { out.push(ch); i += 1; }
+            prev = ')';
+        } else {
+            out.push(ch);
+            if !ch.is_whitespace() { prev = ch; }
+            i += 1;
+        }
     }
     out
 }
 
-/// The source of the smallest `function` whose body holds byte `at` (anonymous callbacks included).
+/// The source of the smallest `function` (or block-bodied arrow) whose body holds byte `at`,
+/// anonymous callbacks included. Refuses a span that is the whole file (an IIFE wrapper).
 fn enclosing_fn(src: &str, at: usize) -> &str {
     let sk = skeleton(src);
     let mut best: Option<(usize, usize)> = None;
+    let mut starts: Vec<(usize, usize)> = Vec::new(); // (span start, body `{`)
     for (start, _) in sk.match_indices("function") {
-        let Some(open) = sk[start..].find('{').map(|o| start + o) else { continue };
+        if let Some(o) = sk[start..].find('{') { starts.push((start, start + o)); }
+    }
+    for (arrow, _) in sk.match_indices("=>") {
+        let rest = &sk[arrow + 2..];
+        let ws = rest.len() - rest.trim_start().len();
+        if rest.trim_start().starts_with('{') { starts.push((arrow, arrow + 2 + ws)); }
+    }
+    for (start, open) in starts {
         let (mut depth, mut end) = (0i32, None);
         for (k, b) in sk[open..].bytes().enumerate() {
             if b == b'{' { depth += 1; }
@@ -68,6 +108,10 @@ fn enclosing_fn(src: &str, at: usize) -> &str {
         if let Some(end) = end { if start < at && at < end && best.is_none_or(|(s, _)| start > s) { best = Some((start, end)); } }
     }
     let (s, e) = best.unwrap_or_else(|| panic!("no function encloses byte {at}"));
+    assert!(
+        (e - s) * 10 < src.trim().len() * 9,
+        "the only function around byte {at} is the whole file (an IIFE wrapper): put the code in a named handler"
+    );
     &src[s..e]
 }
 
@@ -78,18 +122,37 @@ fn function<'a>(src: &'a str, name: &str) -> &'a str {
     enclosing_fn(src, open + 1)
 }
 
-/// Every command name passed to `invoke(`; panics on a dynamic first argument.
+/// Every command name passed to `invoke(`. A call must name its command by a literal, wherever
+/// `invoke` is written (`.invoke(` included). Exempt: a `function invoke(` definition with its body
+/// (the one wrapper) and the one `var invoke = ...__TAURI__.core.invoke` assignment. Any other
+/// use of the word (an alias, a pass-through) panics.
 fn invoked(js: &str) -> Vec<String> {
+    let sk = skeleton(js);
+    let wrapper = js.find("function invoke(").map(|at| {
+        let open = at + sk[at..].find('{').expect("a wrapper body");
+        let mut depth = 0i32;
+        let mut end = sk.len();
+        for (k, b) in sk[open..].bytes().enumerate() {
+            if b == b'{' { depth += 1; }
+            if b == b'}' { depth -= 1; if depth == 0 { end = open + k + 1; break; } }
+        }
+        (at, end)
+    });
     let mut names = Vec::new();
     for (at, _) in js.match_indices("invoke") {
+        let edge = |ch: Option<char>| ch.is_none_or(|ch| !(ch.is_alphanumeric() || ch == '_'));
+        if !edge(js[..at].chars().last()) || !edge(js[at + 6..].chars().next()) { continue; }
+        if wrapper.is_some_and(|(s, e)| at >= s && at < e) { continue; }
         let tail = js[at + 6..].trim_start();
-        let before_ok = js[..at].chars().last().is_none_or(|ch| !(ch.is_alphanumeric() || ch == '_'));
-        if !before_ok || !tail.starts_with('(') { continue; }
+        if !tail.starts_with('(') {
+            let line = format!("{}{}", js[..at].rsplit('\n').next().unwrap_or(""), js[at..].split('\n').next().unwrap_or(""));
+            assert!(line.contains("__TAURI__.core.invoke") && line.trim_start().starts_with("var invoke"), "invoke is used without a call (an alias?): {line}");
+            continue;
+        }
         let arg = tail[1..].trim_start();
         let quote = arg.chars().next().unwrap_or(' ');
         assert!(quote == '"' || quote == '\'', "invoke( must take a literal command name, got: {}", &arg[..arg.len().min(40)]);
-        let name: String = arg[1..].chars().take_while(|&ch| ch != quote).collect();
-        names.push(name);
+        names.push(arg[1..].chars().take_while(|&ch| ch != quote).collect());
     }
     names
 }
@@ -102,10 +165,23 @@ fn node(expr: &str) -> serde_json::Value {
 const fs = require("fs"), vm = require("vm");
 process.on("unhandledRejection", () => {});
 const stub = () => new Proxy(function () {}, { get: (t, k) => (k === Symbol.toPrimitive ? () => "" : stub()), apply: () => stub(), construct: () => stub(), set: () => true });
-const window = { __TAURI__: { core: { invoke: () => new Promise(() => {}) } }, addEventListener() {}, KNOWLU_COPY: { GOOGLE_TESTING: "GT" } };
-const ctx = vm.createContext({ window, document: stub(), console, setTimeout: () => 0, setInterval: () => 0, clearTimeout() {}, clearInterval() {}, Date, JSON, Math, location: stub() });
+const store = new Map();
+const g = {
+  document: stub(),
+  location: { search: "", hash: "", href: "http://localhost/", pathname: "/", origin: "http://localhost" },
+  URLSearchParams, URL, console, Date, JSON, Math,
+  navigator: { userAgent: "node", language: "en" },
+  localStorage: { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => { store.set(k, String(v)); }, removeItem: (k) => { store.delete(k); }, clear: () => store.clear() },
+  requestAnimationFrame: () => 0, cancelAnimationFrame() {},
+  setTimeout: () => 0, setInterval: () => 0, clearTimeout() {}, clearInterval() {},
+  addEventListener() {}, removeEventListener() {},
+  KNOWLU_COPY: { GOOGLE_TESTING: "GT" }, KNOWLU_SHOTS: {},
+  __TAURI__: { core: { invoke: () => new Promise(() => {}) } },
+};
+g.window = g;
+const ctx = vm.createContext(g);
 vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), ctx);
-const h = window.KNOWLU_ONBOARDING;
+const h = g.KNOWLU_ONBOARDING;
 // `eval` runs only the expression this test file passes in; it is not page or user input.
 if (!h) { console.log(JSON.stringify({ __missing: true })); } else { console.log(JSON.stringify(eval(process.env.OB_EXPR))); }
 "#;
@@ -125,14 +201,16 @@ const BANNED: &[&str] = &[
     "sign_out", "switch_profile", "delete_my_data", "open_external", "retarget_credentials",
 ];
 
-/// §4.5's list, F5's, the step-2 sign-in, step 5's mail window and step 10's confirm screen.
+/// Only commands the plan names: section 4.5's list, F5's, the step-2 sign-in, step 5's
+/// `mail_setup_start` and its progress (plan line 643), step 10's confirm screen and `launch_state`
+/// (F10/F11 brief, plan line 3053). Step 5 never starts mail work outside the queue's `mail.setup`.
 const ALLOWED: &[&str] = &[
     "onboarding_status", "onboarding_answer", "onboarding_skip", "onboarding_retry", "onboarding_finish", "onboarding_quit",
     "onboarding_sign_out", "onboarding_attach_session", "onboarding_entitlement", "onboarding_checkout",
     "onboarding_capture_link", "onboarding_paste_link", "campus_search", "store_credentials", "discover_coursework",
     "open_lms_window", "capture_courses", "close_lms_window", "google_sign_in", "send_magic_link", "verify_email_code",
-    "google_connect", "google_status", "mail_setup_start", "mail_setup_progress", "mail_setup_answer", "mail_setup_stop",
-    "mail_status", "mail_sign_in", "your_week", "commitment_proposals", "commitments_confirm", "launch_state",
+    "google_connect", "google_status", "mail_setup_start", "mail_setup_progress",
+    "your_week", "commitment_proposals", "commitments_confirm", "launch_state",
 ];
 
 #[test]
@@ -143,11 +221,12 @@ fn the_onboarding_assets_exist_and_index_html_loads_them() {
     let html = read("index.html");
     assert!(html.contains("onboarding.js") && html.contains("onboarding.css"), "index.html loads both new files");
     assert!(!html.contains("type=\"module\""), "a classic script, like console.js");
-    for (name, text) in [("onboarding.js", &js), ("onboarding.css", &css)] {
+    for (name, text) in [("onboarding.js", code(&js)), ("onboarding.css", code(&css))] {
+        let text = text.replace("http://www.w3.org/2000/svg", "");
         assert!(!text.contains("http://") && !text.contains("https://"), "{name} references the network");
     }
     let c = code(&js);
-    assert!(c.contains("__TAURI__.core.invoke"), "calls go through the one invoke");
+    assert_eq!(c.matches("__TAURI__.core.invoke").count(), 1, "calls go through the one invoke (var or wrapper)");
     assert!(c.contains("KNOWLU_ONBOARDING"), "the pure helpers are exposed on window.KNOWLU_ONBOARDING");
 }
 
@@ -215,7 +294,7 @@ fn a_restart_answer_shows_one_screen_whose_only_button_quits() {
     assert!(c.contains(".restart"), "a {{restart: true}} answer is recognised");
     let screen = function(&c, "renderRestart");
     assert!(c.contains("ob-restart") && screen.contains("ob-restart"), "the restart screen has its id");
-    assert_eq!(screen.matches("<button").count(), 1, "the restart screen has exactly one button");
+    assert_eq!(screen.matches("<button").count() + screen.matches("createElement(\"button\")").count(), 1, "the restart screen has exactly one button");
     assert!(screen.contains("onboarding_quit") || screen.contains("finishLater"), "its button exits through onboarding_quit");
 }
 
@@ -321,11 +400,11 @@ fn the_crash_guard_and_grades_failures_use_the_plans_exact_fixes() {
 fn no_reason_is_written_to_the_page_without_passing_through_the_words_table() {
     let c = code(&read("onboarding.js"));
     for (at, _) in c.match_indices(".reason") {
-        let line_start = c[..at].rfind('\n').map_or(0, |n| n + 1);
-        let line_end = at + c[at..].find('\n').unwrap_or(c.len() - at);
-        let line = &c[line_start..line_end];
-        if line.contains("textContent") || line.contains("innerHTML") || line.contains("insertAdjacent") {
-            assert!(line.contains("reasonWords("), "a raw reason is written to the page: {line}");
+        let from = c[..at].rfind([';', '{', '}']).map_or(0, |n| n + 1);
+        let to = at + c[at..].find(';').unwrap_or(c.len() - at);
+        let stmt = &c[from..to];
+        if !stmt.trim_start().starts_with("if (") && (stmt.contains("textContent") || stmt.contains("innerHTML") || stmt.contains("insertAdjacent") || stmt.contains("+=") || stmt.contains("setAttribute")) {
+            assert!(stmt.contains("reasonWords("), "a raw reason is written to the page: {stmt}");
         }
     }
 }
@@ -348,35 +427,46 @@ fn every_skip_cost_key_has_words_and_none_shows_the_key() {
 // ---- F11a/F11d: the rail and the reveal -------------------------------------------------------------
 
 #[test]
-fn the_reveals_button_waits_for_the_gate_and_every_local_lane_job() {
-    let lane = ["school.apply", "school.courses", "registrar.confirm", "config.ingest"];
-    let status = |open: bool, odd: Option<(&str, &str)>| {
-        let mut jobs = serde_json::Map::new();
-        for j in lane { jobs.insert(j.into(), serde_json::json!({"state": "done"})); }
-        if let Some((j, s)) = odd { jobs.insert(j.into(), serde_json::json!({"state": s})); }
-        serde_json::json!({"ok": true, "gate": {"open": open, "still_coming": [], "failed": [], "not_connected": []}, "jobs": jobs})
+fn the_reveals_button_follows_the_servers_one_rule_and_re_derives_nothing() {
+    // `finish_ready` is `finish_refusal(state).is_none()`, computed in Rust; the page reads it.
+    let status = |patch: &str| {
+        let mut v = serde_json::json!({"ok": true, "finish_ready": true, "exiting": null,
+            "gate": {"open": true, "still_coming": [], "failed": [], "not_connected": []},
+            "jobs": {"school.apply": {"state": "done"}, "school.courses": {"state": "done"}, "config.ingest": {"state": "done"}}});
+        let patch: serde_json::Value = serde_json::from_str(patch).unwrap();
+        for (k, val) in patch.as_object().unwrap() { v[k] = val.clone(); }
+        v
     };
     let enabled = |s: serde_json::Value| node(&format!("h.openKnowluEnabled({s})")).as_bool().unwrap();
-    assert!(enabled(status(true, None)));
-    assert!(!enabled(status(false, None)), "a closed gate keeps the button disabled");
-    for j in lane {
-        for s in ["pending", "running", "held", "failed"] {
-            assert!(!enabled(status(true, Some((j, s)))), "{j} {s} must disable Open Knowlu");
-        }
-    }
+    assert!(enabled(status("{}")), "ok, finish_ready, gate open, not exiting");
+    assert!(!enabled(status(r#"{"finish_ready": false}"#)), "finish_ready false");
+    assert!(!enabled(status(r#"{"finish_ready": null}"#)), "an absent finish_ready is not ready");
+    assert!(!enabled(status(r#"{"ok": false}"#)), "a failed status is not ready");
+    assert!(!enabled(status(r#"{"gate": {"open": false}}"#)), "a closed gate");
+    assert!(!enabled(status(r#"{"exiting": {"job": "slot.partial", "long": true, "since": "x"}}"#)), "while an exit drains");
+    // The page does not re-derive job states: an absent registrar.confirm and a running
+    // school.store change nothing when the server says ready; all-done jobs change nothing when not.
+    assert!(enabled(status(r#"{"jobs": {"school.apply": {"state": "done"}, "school.store": {"state": "running"}}}"#)));
+    assert!(!enabled(status(r#"{"finish_ready": false, "jobs": {"registrar.confirm": {"state": "done"}, "school.apply": {"state": "done"}, "school.courses": {"state": "done"}, "config.ingest": {"state": "done"}}}"#)));
+    let c = code(&read("onboarding.js"));
+    let f = function(&c, "openKnowluEnabled");
+    assert!(f.contains("finish_ready") && !f.contains("jobs") && !f.contains("registrar.confirm"), "it reads finish_ready only");
 }
 
 #[test]
-fn the_reveal_names_a_failed_item_with_its_fix_and_a_long_chain_as_still_coming() {
+fn the_reveal_names_a_failed_item_in_words_with_a_try_again_and_a_long_chain_as_still_coming() {
     let status = serde_json::json!({"ok": true, "gate": {
         "open": true,
         "still_coming": ["first.grades", "backfill.older_mail"],
-        "failed": [{"key": "first.sync", "reason": "first_sync_failed", "fix": "Knowlu couldn't reach your account. Press Try again."}],
+        "failed": [{"key": "first.sync", "reason": "first_sync_failed", "fix": "Try again"}],
         "not_connected": [{"key": "mail", "cost_key": "mail_dates_missed"}]}});
     let m = node(&format!("h.revealModel({status})"));
     let failed = m["failed"].as_array().expect("failed list");
     assert_eq!(failed.len(), 1, "a failed item is named, never hidden");
-    assert!(failed[0]["fix"].as_str().unwrap().contains("Press Try again"), "with its fix: {failed:?}");
+    let words = node("h.reasonWords(\"first_sync_failed\")");
+    assert_eq!(failed[0]["text"], words, "the shown text is reasonWords(reason), not the server's one-word fix: {failed:?}");
+    assert_ne!(failed[0]["text"], "Try again");
+    assert_eq!(failed[0]["retry"], true, "beside a Try again control");
     let coming = m["stillComing"].as_array().expect("stillComing list");
     assert_eq!(coming.len(), 2, "every unfinished item is listed while the chain runs");
     for c in coming {
@@ -393,7 +483,8 @@ fn a_failed_job_on_the_rail_shows_its_reason_in_words_and_a_try_again() {
     let job = r#"{state: "failed", reason: "job_crashed"}"#;
     let row = node(&format!("h.railRow(\"slot.partial\", {job})"));
     assert_eq!(row["state"], "failed");
-    assert!(row["line"].as_str().unwrap().contains("Press Try again to run it once more."), "{row}");
+    let words = node("h.reasonWords(\"job_crashed\")");
+    assert_eq!(row["line"], words, "the row's line is reasonWords(reason): {row}");
     assert_eq!(row["retry"], true);
     let done = node(r#"h.railRow("mail.setup", {state: "done"})"#);
     assert_eq!(done["retry"], false);
@@ -445,7 +536,7 @@ fn step_three_captures_only_on_the_second_press_and_shows_a_refusal() {
     }
     let cap = enclosing_fn(&c, c.find("invoke(\"capture_courses\"").expect("capture"));
     assert_ne!(open, cap, "the capture is its own handler, the second press");
-    assert!(cap.contains(".error") && cap.contains("ok"), "a refusal on the identity provider's page is shown");
+    assert!(cap.contains(".error") && cap.contains(".ok"), "a refusal on the identity provider's page is shown");
 }
 
 #[test]
@@ -463,7 +554,9 @@ fn step_three_lists_every_course_with_remove_and_takes_counts_from_the_status() 
     let c = code(&read("onboarding.js"));
     assert!(c.contains("ob-remove-course"), "each captured course has a Remove control");
     let rm = function(&c, "removeCourse");
-    assert!(rm.contains("onboarding_answer") && rm.contains('3'), "Remove is an onboarding_answer for step 3");
+    let flat = rm.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("invoke(\"onboarding_answer\"") && flat.contains("step: 3"), "Remove is an onboarding_answer for step 3");
+    assert!(flat.contains("removed"), "that marks the row removed");
     for field in ["classes", "class_times", "assignments_upcoming", "turned_in", "grades_courses"] {
         assert!(c.contains(&format!("step3.{field}")), "the proof reads step3.{field}");
     }
@@ -545,12 +638,11 @@ fn no_password_field_on_the_page_but_ours_by_id() {
     for f in ["index.html", "console.js", "onboarding.js"] {
         let text = if f == "index.html" { read(f) } else { code(&read(f)) };
         for (at, _) in text.match_indices("password") {
-            let before = &text[..at];
-            let quoted = before.ends_with('"') || before.ends_with("\\\"") || before.ends_with('\'');
-            let typed = before.trim_end_matches(['"', '\'', '\\']).trim_end().ends_with("type=")
-                || before.trim_end_matches(['"', '\'', '\\']).trim_end().ends_with("type:")
-                || before.trim_end_matches(['"', '\'', '\\']).trim_end().ends_with("type =");
-            if !(quoted && typed) { continue; }
+            // A quoted `password` is a type (`type="password"`, `setAttribute("type", "password")`,
+            // `{type: 'password'}`); an id such as ob-vhl-password is preceded by `-`.
+            let before = text[..at].trim_end_matches('\\');
+            let after = &text[at + "password".len()..];
+            if !(before.ends_with(['"', '\'']) && after.starts_with(['"', '\'', '\\'])) { continue; }
             let around = &text[at.saturating_sub(200)..(at + 200).min(text.len())];
             assert!(f == "onboarding.js" && PASSWORD_FIELD_IDS.iter().any(|id| around.contains(id)), "{f} has a password field that is not one of ours: {around}");
         }
@@ -582,16 +674,28 @@ fn a_credential_value_is_read_only_inside_the_store_handler_and_goes_nowhere_els
     let span = |s: &str| (s.as_ptr() as usize - base, s.as_ptr() as usize - base + s.len());
     let handler = span(enclosing_fn(&c, c.find("invoke(\"store_credentials\"").unwrap()));
     let clear = span(function(&c, "clearCredentialFields"));
-    for (at, _) in c.match_indices(".value") {
-        let ctx = c[at.saturating_sub(120)..at].to_lowercase();
-        if !(ctx.contains("password") || ctx.contains("username") || ctx.contains("zybooks") || ctx.contains("vhl")) { continue; }
-        let inside = |s: (usize, usize)| at >= s.0 && at < s.1;
-        assert!(inside(handler) || inside(clear), "a credential field's value is touched outside the store handler: {}", &c[at.saturating_sub(120)..at + 20]);
+    let mut lookups = 0;
+    for id in LOGIN_FIELD_IDS {
+        for (at, _) in c.match_indices(id) {
+            // A lookup is the id as a whole literal or `"#id"`, not a quoted `id="..."` in markup.
+            let (b, a) = (c[..at].chars().last().unwrap_or(' '), c[at + id.len()..].chars().next().unwrap_or(' '));
+            let opens = b == '"' || b == '\'' || (b == '#' && matches!(c[..at - 1].chars().last(), Some('"' | '\'')));
+            let quote_at = at - if b == '#' { 2 } else { 1 };
+            let in_markup = c[..quote_at].trim_end_matches('\\').ends_with('=');
+            if !(opens && (a == '"' || a == '\'') && !in_markup) { continue; }
+            lookups += 1;
+            let inside = |s: (usize, usize)| at >= s.0 && at < s.1;
+            assert!(inside(handler) || inside(clear), "login field {id} is looked up outside the store handler and clearCredentialFields: {}", &c[at.saturating_sub(100)..at + 40]);
+        }
     }
+    assert!(lookups >= 4, "the four login fields are looked up by their literal ids ({lookups} found)");
     for (at, _) in c.match_indices("invoke(\"onboarding_answer\"") {
         assert!(!c[at..(at + 240).min(c.len())].to_lowercase().contains("password"), "no credential in an onboarding_answer payload");
     }
 }
+
+/// The four login fields; the first two are also the page's only password inputs.
+const LOGIN_FIELD_IDS: [&str; 4] = ["ob-zybooks-username", "ob-zybooks-password", "ob-vhl-username", "ob-vhl-password"];
 
 #[test]
 fn discovery_in_flight_disables_next_and_the_sites_skip() {
