@@ -931,7 +931,7 @@ END:VEVENT
     fn all_mapped_feed() -> String {
         ics(&[
             // The LMS course key in the UID: ingest's uid pass.
-            vevent_in("UA_900001_1-HW2", "Homework 2", None, "x"),
+            vevent_in("UA-_900001_1-HW2", "Homework 2", None, "x"),
             // The human code in CATEGORIES, and at the head of a SUMMARY.
             vevent_in("BB-ASSIGN-2", "Kapitel 2 Quiz", Some("SYN 120"), "x"),
             vevent_in("BB-ASSIGN-3", "SYN 120: Reading", None, "x"),
@@ -957,7 +957,7 @@ END:VEVENT
     #[test]
     fn an_item_reaching_no_course_is_under_unmatched_and_the_buckets_still_sum_to_the_totals() {
         let feed = ics(&[
-            vevent_in("UA_900001_1-HW", "Homework", None, "x"),
+            vevent_in("UA-_900001_1-HW", "Homework", None, "x"),
             vevent_in("BB-ASSIGN-2", "Orphan [ZZT-999-001-FALL2026]", None, "x"),
             // Ingest's rule: a SUMMARY that names a course code at a boundary is that course, wherever
             // in the sentence. Only DESCRIPTION is never read, and SYN 1100 is not SYN 110.
@@ -1012,8 +1012,8 @@ END:VEVENT
         ])
         .to_string();
         let f = ics(&[
-            vevent_in("UA_100_1-A", "Old only", None, "x"),
-            vevent_in("UA_200_1-B", "Live only", None, "x"),
+            vevent_in("UA-_100_1-A", "Old only", None, "x"),
+            vevent_in("UA-_200_1-B", "Live only", None, "x"),
             vevent_in("BB-ASSIGN-3", "SYN 110: Reading", None, "x"), // both shells claim it
             vevent_in("BB-ASSIGN-4", "Nobody's", None, "x"),
         ]);
@@ -1233,7 +1233,7 @@ END:VEVENT
     #[test]
     fn a_crlf_feed_with_a_folded_summary_buckets_like_an_lf_one() {
         // CRLF line ends, and a SUMMARY folded in the middle of the course code's line.
-        let crlf = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:BB-ASSIGN-1\r\nSUMMARY:Reading for SYN\r\n  110 today\r\nDTSTART:20260905T235900\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:UA_900002_1-X\r\nSUMMARY:Other\r\nDTSTART:20260906T235900\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let crlf = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:BB-ASSIGN-1\r\nSUMMARY:Reading for SYN\r\n  110 today\r\nDTSTART:20260905T235900\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:UA-_900002_1-X\r\nSUMMARY:Other\r\nDTSTART:20260906T235900\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         let v = full_preview(crlf);
         assert_eq!(count(&v, "assignments_upcoming"), json!(2), "{v}");
         assert_eq!(by_course(&v, "_900001_1", "assignments_upcoming"), json!(1), "the folded SUMMARY names SYN 110: {v}");
