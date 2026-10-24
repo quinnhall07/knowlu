@@ -2407,3 +2407,587 @@ fn a_row_slug_with_path_separators_cannot_place_a_note_outside_courses() {
     assert!(vault.join("courses").join(format!("{slug}.md")).exists());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---- O3 F6b: `config.ingest` creates `ingest.yaml` once (plan F6b; §4.9, §4.11, §14.45, §14.46) ------
+// The reference is `build_into`'s own text: a full `create_vault` for the same answers (an account, so
+// a stored feed is blanked), plus `restore_capability_url` for a link the account did not take. The
+// links are fakes (`example.invalid`) and are never printed: feed tests compare with `assert!`.
+use knowlu::onboarding_jobs::{put_ingest_text, run_config_ingest, run_config_ingest_with, IngestBase};
+use knowlu::onboarding_state::{Answers, BookRow, FeedState, PendingStore, PENDING_CALENDAR, PENDING_LMS};
+use knowlu::scaffold::{restore_capability_url, BookMapping, SectionMapping};
+
+const F6B_LMS_LINK: &str = "https://example.invalid/feeds/f6b-lms-token.ics";
+const F6B_CAL_LINK: &str = "https://example.invalid/feeds/f6b-cal-token.ics";
+
+#[derive(Default)]
+struct F6bPending(std::sync::Mutex<std::collections::BTreeMap<String, String>>);
+impl PendingStore for F6bPending {
+    fn put(&self, name: &str, link: &str) -> Result<(), String> { self.0.lock().unwrap().insert(name.into(), link.into()); Ok(()) }
+    fn get(&self, name: &str) -> Option<String> { self.0.lock().unwrap().get(name).cloned() }
+    fn delete(&self, name: &str) -> Result<(), String> { self.0.lock().unwrap().remove(name); Ok(()) }
+}
+
+fn f6b_course(code: &str, name: &str, key: &str, fragments: &[&str]) -> CourseAnswer {
+    let mut c = f6a_course(code, name, key);
+    c.fragments = fragments.iter().map(|f| f.to_string()).collect();
+    c
+}
+
+fn f6b_pairs(v: &[(&str, &str)]) -> Vec<(String, String)> { v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() }
+
+/// One onboarding run's answers, and the reference's inputs that do not come from them.
+struct Scn {
+    courses: Vec<CourseAnswer>,
+    slugs: Vec<(&'static str, &'static str)>,
+    lms: Option<FeedState>,
+    cal: Option<FeedState>,
+    google: Option<bool>,
+    /// Step 8 answered: a zyBooks row, a VHL row and two ignored books, with both logins stored.
+    step8: bool,
+    /// The `course_map` pairs the file must carry, in order.
+    pairs: Vec<(&'static str, &'static str)>,
+    /// The `course_exclude` fragments, in order; empty means the key is absent.
+    exclude: Vec<&'static str>,
+}
+
+impl Scn {
+    fn quilting() -> Scn {
+        Scn {
+            courses: vec![
+                f6b_course("QLT 101", "Quilting Basics", "_1001_1", &["QLT101Fall2026", "QLT 101"]),
+                f6b_course("KNT 220", "Knotwork Theory", "_1002_1", &["KNT220Fall2026", "KNT 220"]),
+            ],
+            slugs: vec![("_1001_1", "quilting-basics"), ("_1002_1", "knotwork-theory")],
+            lms: Some(FeedState::Stored),
+            cal: Some(FeedState::Stored),
+            google: Some(true),
+            step8: true,
+            pairs: vec![("QLT101Fall2026", "quilting-basics"), ("QLT 101", "quilting-basics"), ("KNT220Fall2026", "knotwork-theory"), ("KNT 220", "knotwork-theory")],
+            exclude: Vec::new(),
+        }
+    }
+}
+
+struct F6b { root: PathBuf, vault: PathBuf, data: PathBuf, base: IngestBase, pending: F6bPending }
+
+fn f6b_rig(tag: &str, s: &Scn) -> F6b {
+    let (root, vault, data) = f6a_vault(&format!("f6b-{tag}"));
+    let base = IngestBase { profile_id: "profile-f6b".into(), timezone: "America/Chicago".into(), zybooks: s.step8, vhl: s.step8 };
+    let pending = F6bPending::default();
+    for (kind, state, link) in [(PENDING_LMS, s.lms, F6B_LMS_LINK), (PENDING_CALENDAR, s.cal, F6B_CAL_LINK)] {
+        // A stored feed's pending credential is already deleted; the others still wait.
+        if matches!(state, Some(FeedState::Failed | FeedState::Rejected)) { pending.put(kind, link).unwrap(); }
+    }
+    update_answers(&data, &|a: &mut Answers| {
+        a.courses = s.courses.clone();
+        a.slugs = s.slugs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        a.google_calendar = s.google;
+        if let Some(st) = s.lms { a.feeds.insert("lms_ics".into(), st); }
+        if let Some(st) = s.cal { a.feeds.insert("calendar_ics".into(), st); }
+        if s.step8 {
+            a.rows = vec![
+                BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "quilting-basics".into() },
+                BookRow { source: "vhl".into(), key: "4471".into(), course_slug: "knotwork-theory".into() },
+            ];
+            a.zybooks_ignore = vec!["HowToUseZyBooks2".into(), "ZYB-OLD-9".into()];
+        }
+    }).unwrap();
+    F6b { root, vault, data, base, pending }
+}
+
+fn f6b_exclude_line(items: &[&str]) -> String {
+    let quoted: Vec<String> = items.iter().map(|f| format!("'{}'", f.replace('\'', "''"))).collect();
+    format!("course_exclude: [{}]{}", quoted.join(", "), knowlu_engine::pystr::NEWLINE)
+}
+
+/// What `build_into` (plus `restore_capability_url` for a kept link) writes for the same answers;
+/// `course_exclude` goes right after the `course_map` block, where `calendars:` starts.
+fn f6b_expected(r: &F6b, tag: &str, s: &Scn) -> Vec<u8> {
+    let reference = r.root.join(format!("reference-{tag}"));
+    let mut plan = f6a_plan(&reference, "none", &CampusChoice::default());
+    plan.profile_id = r.base.profile_id.clone();
+    plan.personal_calendar = s.cal.map(|_| F6B_CAL_LINK.to_string());
+    plan.google_calendar = s.google == Some(true);
+    plan.course_map = f6b_pairs(&s.pairs);
+    if s.step8 {
+        plan.zybooks = true;
+        plan.vhl = true;
+        plan.zybooks_courses = vec![BookMapping { code: "ZYB-QLT-101".into(), course: "quilting-basics".into(), label: String::new() }];
+        plan.vhl_sections = vec![SectionMapping { section: "4471".into(), course: "knotwork-theory".into(), label: String::new() }];
+        plan.zybooks_ignore = vec!["HowToUseZyBooks2".into(), "ZYB-OLD-9".into()];
+    }
+    knowlu::scaffold::create_vault(&reference, &plan).unwrap();
+    if matches!(s.lms, Some(FeedState::Failed | FeedState::Rejected)) { restore_capability_url(&reference, "lms_ics", F6B_LMS_LINK).unwrap(); }
+    if matches!(s.cal, Some(FeedState::Failed | FeedState::Rejected)) { restore_capability_url(&reference, "calendar_ics", F6B_CAL_LINK).unwrap(); }
+    let text = String::from_utf8(config_bytes(&reference, "ingest.yaml")).unwrap();
+    if s.exclude.is_empty() { return text.into_bytes(); }
+    let at = text.find("calendars:").expect("calendars: in the reference");
+    format!("{}{}{}", &text[..at], f6b_exclude_line(&s.exclude), &text[at..]).into_bytes()
+}
+
+/// Runs `config.ingest` for `s` and returns (what it wrote, what `build_into` would have).
+fn f6b_run(tag: &str, s: &Scn) -> (F6b, Outcome, Vec<u8>) {
+    let r = f6b_rig(tag, s);
+    let expected = f6b_expected(&r, tag, s);
+    let out = run_config_ingest(&r.vault, &r.data, &r.base, &r.pending);
+    (r, out, expected)
+}
+
+fn f6b_written(r: &F6b) -> Vec<u8> {
+    std::fs::read(r.vault.join("config").join("ingest.yaml")).unwrap_or_else(|e| panic!("config/ingest.yaml was not created: {e}"))
+}
+
+fn f6b_check_root(r: &F6b) -> PathBuf { r.data.join("tmp").join(format!("ingest-check-{}", std::process::id())) }
+
+/// F6b test 1: `ingest.yaml`'s bytes equal `build_into`'s for the same answers; the engine's own loader
+/// reads them with no warning; nothing else in `config/` appears or changes, and the check's scratch
+/// root is gone.
+#[test]
+fn config_ingest_writes_the_bytes_build_into_writes_for_the_same_answers() {
+    let s = Scn::quilting();
+    let r = f6b_rig("bytes", &s);
+    let expected = f6b_expected(&r, "bytes", &s);
+    let before: Vec<String> = std::fs::read_dir(r.vault.join("config")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    let out = run_config_ingest(&r.vault, &r.data, &r.base, &r.pending);
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    assert!(f6b_written(&r) == expected, "config/ingest.yaml differs from build_into's");
+    let (_, warnings) = knowlu_engine::coursework::load_coursework_config(&r.vault).expect("the engine reads it");
+    assert!(warnings.is_empty(), "no warning: {warnings:?}");
+    let mut after: Vec<String> = std::fs::read_dir(r.vault.join("config")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    after.sort();
+    let mut want = before;
+    want.push("ingest.yaml".into());
+    want.sort();
+    assert_eq!(after, want, "only ingest.yaml is added to config/");
+    assert!(!f6b_check_root(&r).exists(), "the scratch root is deleted");
+    let text = String::from_utf8(f6b_written(&r)).unwrap();
+    assert!(text.contains("ics_url: ''") && !text.contains("example.invalid"), "a stored feed leaves no link in the file");
+    assert!(!text.contains("course_exclude"), "nothing was removed, so the key is absent");
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+/// F6b test 2: a skipped step 6, 7 or 8 leaves its section empty, exactly as today's wizard writes it
+/// (the same reference, with that answer absent).
+#[test]
+fn a_skipped_step_leaves_its_section_empty_exactly_as_the_wizard_does() {
+    let cases: [(&str, Box<dyn Fn(&mut Scn)>); 4] = [
+        ("step6", Box::new(|s| s.google = None)),
+        ("step7", Box::new(|s| s.cal = None)),
+        ("step8", Box::new(|s| s.step8 = false)),
+        ("all", Box::new(|s| { s.google = None; s.cal = None; s.step8 = false; })),
+    ];
+    for (tag, skip) in cases {
+        let mut s = Scn::quilting();
+        skip(&mut s);
+        let (r, out, expected) = f6b_run(&format!("skip-{tag}"), &s);
+        assert!(matches!(out, Outcome::Done(_)), "{tag}: {out:?}");
+        assert!(f6b_written(&r) == expected, "{tag}: differs from build_into's");
+        let text = String::from_utf8(f6b_written(&r)).unwrap();
+        match tag {
+            "step6" => assert!(!text.contains("cloud:google") && text.contains("cloud:personal"), "{tag}"),
+            "step7" => assert!(text.contains("cloud:google") && !text.contains("cloud:personal"), "{tag}"),
+            "step8" => assert!(!text.contains("coursework:"), "{tag}: no coursework block"),
+            _ => assert!(text.contains("calendars: []") && !text.contains("coursework:"), "{tag}"),
+        }
+        let _ = std::fs::remove_dir_all(&r.root);
+    }
+    // A Google answer of `false` is the same as no answer.
+    let mut s = Scn::quilting();
+    s.google = Some(false);
+    let (r, out, expected) = f6b_run("google-false", &s);
+    assert!(matches!(out, Outcome::Done(_)) && f6b_written(&r) == expected, "{out:?}");
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+/// F6b test 3 (§4.11, R-C3'-exec-40/41): for each feed, `stored` writes the empty entry and no link;
+/// `failed` and `rejected` write the link itself, and the bytes are `build_into`'s followed by
+/// `restore_capability_url`. The two feeds are independent, so every pairing is checked.
+#[test]
+fn feeds_are_blank_when_stored_and_carry_the_link_when_failed_or_rejected() {
+    let states = [FeedState::Stored, FeedState::Failed, FeedState::Rejected];
+    for lms in states {
+        for cal in states {
+            let mut s = Scn::quilting();
+            s.lms = Some(lms);
+            s.cal = Some(cal);
+            let tag = format!("feeds-{lms:?}-{cal:?}").to_lowercase();
+            let (r, out, expected) = f6b_run(&tag, &s);
+            assert!(matches!(out, Outcome::Done(_)), "{tag}: {out:?}");
+            let got = f6b_written(&r);
+            assert!(got == expected, "{tag}: differs from build_into plus restore_capability_url");
+            let text = String::from_utf8(got).unwrap();
+            assert_eq!(text.contains(F6B_LMS_LINK), lms != FeedState::Stored, "{tag}: the LMS link is in the file only when the account did not take it");
+            assert_eq!(text.contains(F6B_CAL_LINK), cal != FeedState::Stored, "{tag}: likewise the other calendar's link");
+            if lms == FeedState::Stored { assert!(text.contains("ics_url: ''\n") || text.contains("ics_url: ''\r\n"), "{tag}"); }
+            let _ = std::fs::remove_dir_all(&r.root);
+        }
+    }
+}
+
+/// F6b test 3, first half again: a feed link kept for a feed whose state is `failed` is read from the
+/// pending store and nowhere else (not from the answers file, which never holds a link).
+#[test]
+fn the_answers_file_never_holds_a_feed_link() {
+    let mut s = Scn::quilting();
+    s.lms = Some(FeedState::Failed);
+    s.cal = Some(FeedState::Rejected);
+    let (r, out, _) = f6b_run("no-link-in-answers", &s);
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    let answers = std::fs::read_to_string(knowlu::onboarding_state::answers_path(&r.data)).unwrap();
+    assert!(!answers.contains("example.invalid"), "the answers file holds states, never links");
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+/// F6b test 4 (the audit's fix, §13.1): `load_coursework_config` reads `<vault>/config/ingest.yaml` and
+/// answers empty for an absent file, so a check pointed at the wrong path passes silently. The job
+/// writes the text into a scratch root under the profile's app data, checks that root, and deletes it.
+/// A malformed text makes the job `failed` with no file created, which proves the check read the text.
+#[test]
+fn a_text_that_does_not_parse_cleanly_fails_the_job_and_creates_nothing() {
+    let (root, vault, data) = f6a_vault("f6b-malformed");
+    let scratch = data.join("tmp").join(format!("ingest-check-{}", std::process::id()));
+    // A stale, valid file at the scratch path (a crashed run's): the check must overwrite it, not read it.
+    std::fs::create_dir_all(scratch.join("config")).unwrap();
+    std::fs::write(scratch.join("config").join("ingest.yaml"), b"ics_url: ''\ntimezone: 'America/Chicago'\ncourse_map: {}\ncalendars: []\n").unwrap();
+    let reached = std::cell::Cell::new(0);
+    let probe = |_: &Path| -> Result<(), String> { reached.set(reached.get() + 1); Ok(()) };
+    let seams = PutSeams { after_temp: Some(&probe), ..Default::default() };
+    for (what, text) in [
+        ("unclosed flow sequence", "ics_url: ''\ncourse_exclude: ['a', 'b'\ncalendars: []\n"),
+        ("a duplicate key", "ics_url: ''\ncourse_map:\n  'a': 'x'\n  'a': 'y'\ncalendars: []\n"),
+    ] {
+        // The premise: the engine's own loader warns about this text when it can see it.
+        let premise = root.join(format!("premise-{}", what.len()));
+        std::fs::create_dir_all(premise.join("config")).unwrap();
+        std::fs::write(premise.join("config").join("ingest.yaml"), text).unwrap();
+        let (_, warned) = knowlu_engine::coursework::load_coursework_config(&premise).unwrap_or_default();
+        assert!(!warned.is_empty(), "{what}: the loader must warn about this text");
+        let out = put_ingest_text(&vault, &data, text, &seams);
+        assert!(matches!(out, Outcome::Failed(_)), "{what}: {out:?}");
+        assert!(!vault.join("config").join("ingest.yaml").exists(), "{what}: no file is created");
+        assert!(strays_in_config(&vault).is_empty(), "{what}");
+        assert_eq!(reached.get(), 0, "{what}: the check runs before anything is written to config/");
+        assert!(!scratch.exists(), "{what}: the scratch root is deleted on a failed check too");
+    }
+    // The same job with a good text creates the file and still leaves no scratch root.
+    let good = "ics_url: ''\ntimezone: 'America/Chicago'\ncourse_map: {}\ncalendars: []\n";
+    let out = put_ingest_text(&vault, &data, good, &PutSeams::default());
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    assert_eq!(config_bytes(&vault, "ingest.yaml"), good.replace('\n', knowlu_engine::pystr::NEWLINE).as_bytes());
+    assert!(!scratch.exists(), "the scratch root is deleted");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F6b test 5: an existing file is kept, unchanged, and the job reports "kept your existing settings";
+/// the same bytes are a resume and the job is simply `done`.
+#[test]
+fn an_existing_ingest_file_is_kept_and_a_resume_is_simply_done() {
+    let s = Scn::quilting();
+    let r = f6b_rig("keeps", &s);
+    std::fs::write(r.vault.join("config").join("ingest.yaml"), b"timezone: 'my own'\n").unwrap();
+    let proof = proof_of(&run_config_ingest(&r.vault, &r.data, &r.base, &r.pending));
+    assert_eq!(config_bytes(&r.vault, "ingest.yaml"), b"timezone: 'my own'\n", "never replaced");
+    assert_eq!(proof.get(KEPT_EXISTING_KEY).copied().flatten(), Some(1), "{proof:?}");
+    // A resume: the file holds what this run would write.
+    std::fs::remove_file(r.vault.join("config").join("ingest.yaml")).unwrap();
+    assert!(matches!(run_config_ingest(&r.vault, &r.data, &r.base, &r.pending), Outcome::Done(_)));
+    let first = config_bytes(&r.vault, "ingest.yaml");
+    let again = proof_of(&run_config_ingest(&r.vault, &r.data, &r.base, &r.pending));
+    assert_eq!(again.get(KEPT_EXISTING_KEY).copied().flatten().unwrap_or(0), 0, "equal bytes are a resume: {again:?}");
+    assert_eq!(config_bytes(&r.vault, "ingest.yaml"), first);
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+/// F6b test 5, mid-way: a file created after the temp file is written (a seam) is kept, never replaced.
+#[test]
+fn an_ingest_file_created_mid_way_is_kept() {
+    let s = Scn::quilting();
+    let r = f6b_rig("midway", &s);
+    let racer = |p: &Path| -> Result<(), String> { std::fs::write(p, b"timezone: 'raced in'\n").map_err(|e| e.to_string()) };
+    let seams = PutSeams { after_temp: Some(&racer), ..Default::default() };
+    let proof = proof_of(&run_config_ingest_with(&r.vault, &r.data, &r.base, &r.pending, &seams));
+    assert_eq!(config_bytes(&r.vault, "ingest.yaml"), b"timezone: 'raced in'\n", "never replaced");
+    assert_eq!(proof.get(KEPT_EXISTING_KEY).copied().flatten(), Some(1), "{proof:?}");
+    assert!(strays_in_config(&r.vault).is_empty());
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+/// F6b test 6 (F6a's partial-failure test, review r2 M4): a failure part-way leaves no partial file at
+/// the final name, the job is `failed`, and a stray temp file is removed on the next run.
+#[test]
+fn a_failure_part_way_leaves_no_partial_ingest_file_and_the_next_run_sweeps_a_stray() {
+    let s = Scn::quilting();
+    let r = f6b_rig("partial", &s);
+    let boom = |_: &Path| -> Result<(), String> { Err("the disk went away".to_string()) };
+    let seams = PutSeams { after_temp: Some(&boom), ..Default::default() };
+    let out = run_config_ingest_with(&r.vault, &r.data, &r.base, &r.pending, &seams);
+    assert!(matches!(out, Outcome::Failed(_)), "{out:?}");
+    assert!(!r.vault.join("config").join("ingest.yaml").exists(), "no partial file at the final name");
+    assert!(strays_in_config(&r.vault).is_empty(), "the failed run cleans its own temp file");
+    assert!(!f6b_check_root(&r).exists(), "and the scratch root");
+    let stray = r.vault.join("config").join(format!("{TEMP_PREFIX}ingest.yaml-left-by-a-crash"));
+    std::fs::write(&stray, b"timezone: 'half a fi").unwrap();
+    assert!(matches!(run_config_ingest(&r.vault, &r.data, &r.base, &r.pending), Outcome::Done(_)));
+    assert!(!stray.exists(), "the stray temp file is removed on the next run");
+    assert!(f6b_written(&r) == f6b_expected(&r, "partial", &s), "and the file is whole");
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+/// F6b, the run-time fallback through the same helper (ledger row "§1.9, CLAUDE.md"): with the hard link
+/// forced to fail "not supported" the no-replace move puts the same bytes in place; with both forced to
+/// fail the job is `failed` with a fix that names the volume and nothing is at the final name.
+#[test]
+fn the_ingest_file_uses_the_fallback_and_names_the_volume_when_both_steps_fail() {
+    let s = Scn::quilting();
+    let r = f6b_rig("fallback", &s);
+    let expected = f6b_expected(&r, "fallback", &s);
+    let no_link = |_: &Path, _: &Path| -> std::io::Result<()> { Err(not_supported()) };
+    let seams = PutSeams { hard_link: Some(&no_link), ..Default::default() };
+    assert!(matches!(run_config_ingest_with(&r.vault, &r.data, &r.base, &r.pending, &seams), Outcome::Done(_)));
+    assert!(f6b_written(&r) == expected, "same bytes through the fallback");
+    std::fs::remove_file(r.vault.join("config").join("ingest.yaml")).unwrap();
+    let no_move = |_: &Path, _: &Path| -> std::io::Result<()> { Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "the volume refused")) };
+    let seams = PutSeams { hard_link: Some(&no_link), move_no_replace: Some(&no_move), ..Default::default() };
+    let out = run_config_ingest_with(&r.vault, &r.data, &r.base, &r.pending, &seams);
+    let Outcome::Failed(fix) = out else { panic!("both steps failing must fail the job, got {out:?}") };
+    let volume = match r.vault.components().next() { Some(std::path::Component::Prefix(p)) => p.as_os_str().to_string_lossy().to_string(), other => panic!("{other:?}") };
+    assert!(fix.contains(&volume), "the fix names the volume {volume}: {fix}");
+    assert!(!r.vault.join("config").join("ingest.yaml").exists() && strays_in_config(&r.vault).is_empty());
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+/// An absent answers file is `failed`, never an empty config (as `school.courses`).
+#[test]
+fn without_an_answers_file_config_ingest_fails_and_creates_nothing() {
+    let (root, vault, data) = f6a_vault("f6b-no-answers");
+    let base = IngestBase { profile_id: "profile-f6b".into(), timezone: "America/Chicago".into(), zybooks: false, vhl: false };
+    let out = run_config_ingest(&vault, &data, &base, &F6bPending::default());
+    assert!(matches!(out, Outcome::Failed(_)), "{out:?}");
+    assert!(!vault.join("config").join("ingest.yaml").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F6b test 7 (review r2, I5): with two restored course notes (a C3' restore), `school.courses` records
+/// the restored notes' own slugs, and `course_map` names exactly those; no second note is made, and the
+/// derived slugs do not appear.
+#[test]
+fn course_map_names_the_restored_notes_slugs() {
+    let mut s = Scn::quilting();
+    s.slugs = Vec::new();
+    s.step8 = false;
+    s.pairs = vec![
+        ("QLT101Fall2026", "quilting-basics-restored"), ("QLT 101", "quilting-basics-restored"),
+        ("KNT220Fall2026", "knotwork-restored"), ("KNT 220", "knotwork-restored"),
+    ];
+    let r = f6b_rig("restored", &s);
+    let note = |extra: &str| format!("---\ntitle: Restored\n{extra}status: active\n---\n\nmy own notes\n");
+    std::fs::write(r.vault.join("courses").join("quilting-basics-restored.md"), note("source_uid: _1001_1\n")).unwrap();
+    std::fs::write(r.vault.join("courses").join("knotwork-restored.md"), note("code: KNT 220\n")).unwrap();
+    let notes_before = course_files(&r.vault);
+    assert!(matches!(run_school_courses_in(&r.data, &r.vault), Outcome::Done(_)));
+    assert_eq!(course_files(&r.vault), notes_before, "no second note is made for a restored course");
+    let slugs = load_answers(&r.data).unwrap().unwrap().slugs;
+    assert_eq!((slugs["_1001_1"].as_str(), slugs["_1002_1"].as_str()), ("quilting-basics-restored", "knotwork-restored"));
+    let expected = f6b_expected(&r, "restored", &s);
+    assert!(matches!(run_config_ingest(&r.vault, &r.data, &r.base, &r.pending), Outcome::Done(_)));
+    let got = f6b_written(&r);
+    assert!(got == expected, "course_map must carry the restored notes' slugs");
+    let text = String::from_utf8(got).unwrap();
+    assert!(!text.contains("'quilting-basics'") && !text.contains("'knotwork-theory'"), "the derived slugs are not used");
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+fn f6b_removed(mut c: CourseAnswer) -> CourseAnswer { c.removed = true; c }
+
+/// F6b test 8 (§14.45): a course removed at step 3 has its pairs written as one single-line flow
+/// sequence `course_exclude: [...]` through `yaml_scalar` (right after the `course_map` block), in no
+/// `course_map` entry; the bytes are otherwise `build_into`'s.
+#[test]
+fn a_removed_course_goes_in_course_exclude_and_in_no_course_map_entry() {
+    let mut s = Scn::quilting();
+    s.step8 = false;
+    s.courses[1] = f6b_removed(s.courses[1].clone());
+    s.slugs = vec![("_1001_1", "quilting-basics")];
+    s.pairs = vec![("QLT101Fall2026", "quilting-basics"), ("QLT 101", "quilting-basics")];
+    s.exclude = vec!["KNT220Fall2026", "KNT 220"];
+    let (r, out, expected) = f6b_run("exclude", &s);
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    let got = f6b_written(&r);
+    assert!(got == expected, "differs from build_into's text plus the course_exclude line");
+    let text = String::from_utf8(got).unwrap();
+    assert!(text.contains("course_exclude: ['KNT220Fall2026', 'KNT 220']"), "one single-line flow sequence");
+    let map_block = &text[text.find("course_map:").unwrap()..text.find("course_exclude:").unwrap()];
+    assert!(!map_block.contains("KNT"), "a removed course is in no course_map entry: {map_block}");
+    let (_, warnings) = knowlu_engine::coursework::load_coursework_config(&r.vault).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+/// F6b test 8, fallback: a course with no saved pairs contributes its human code alone, kept (to
+/// `course_map`) or removed (to `course_exclude`), as the hand-over's own fallback says.
+#[test]
+fn a_course_with_no_saved_pairs_contributes_its_code() {
+    let mut s = Scn::quilting();
+    s.step8 = false;
+    s.courses = vec![f6b_course("QLT 101", "Quilting Basics", "_1001_1", &[]), f6b_removed(f6b_course("KNT 220", "Knotwork Theory", "_1002_1", &[]))];
+    s.slugs = vec![("_1001_1", "quilting-basics")];
+    s.pairs = vec![("QLT 101", "quilting-basics")];
+    s.exclude = vec!["KNT 220"];
+    let (r, out, expected) = f6b_run("fallback-code", &s);
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    assert!(f6b_written(&r) == expected, "differs from build_into's text plus the course_exclude line");
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+/// F6b test 9 (§14.46, F7c review r2): a lecture and its lab both contribute `CS 100`. With the lab
+/// removed and the lecture kept, the shared fragment stays in `course_map` and is absent from
+/// `course_exclude`; only the lab's own code goes there. When every removed fragment is shared the key
+/// is absent altogether, and the bytes are `build_into`'s.
+#[test]
+fn a_fragment_a_kept_course_also_contributes_is_never_excluded() {
+    let lecture = f6b_course("CS 100", "Intro to Computing", "_2001_1", &["CS100L1", "CS 100"]);
+    let mut s = Scn::quilting();
+    s.step8 = false;
+    s.courses = vec![lecture.clone(), f6b_removed(f6b_course("CS 100", "Intro to Computing Lab", "_2002_1", &["CS100B1", "CS 100"]))];
+    s.slugs = vec![("_2001_1", "cs-100")];
+    s.pairs = vec![("CS100L1", "cs-100"), ("CS 100", "cs-100")];
+    s.exclude = vec!["CS100B1"];
+    let (r, out, expected) = f6b_run("shared", &s);
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    let got = f6b_written(&r);
+    assert!(got == expected, "only the lab's own code is excluded");
+    let text = String::from_utf8(got).unwrap();
+    assert!(text.contains("course_exclude: ['CS100B1']"), "{text}");
+    assert!(text.contains("'CS 100': 'cs-100'"), "the shared fragment stays in course_map");
+    let _ = std::fs::remove_dir_all(&r.root);
+    // Every fragment the lab has is shared: nothing to exclude, so no key.
+    s.courses[1] = f6b_removed(f6b_course("CS 100", "Intro to Computing Lab", "_2002_1", &["CS 100"]));
+    s.exclude = Vec::new();
+    let (r, out, expected) = f6b_run("shared-all", &s);
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    let got = f6b_written(&r);
+    assert!(got == expected && !String::from_utf8(got).unwrap().contains("course_exclude"), "no key when nothing is left to exclude");
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+/// F6b test 10 (§14.46): a course's gradebook pins (`_<digits>_<digits>`) follow its code fragments, in
+/// the answers file's order: `course_map` entries for a kept course, `course_exclude` items for a
+/// removed one. With none removed the bytes are `build_into`'s plus the pin lines.
+#[test]
+fn uid_pins_follow_their_courses_code_fragments_in_course_map_and_course_exclude() {
+    let mut s = Scn::quilting();
+    s.step8 = false;
+    s.courses[0] = f6b_course("QLT 101", "Quilting Basics", "_1001_1", &["QLT101Fall2026", "QLT 101", "_71_1", "_71_2"]);
+    s.courses[1] = f6b_course("KNT 220", "Knotwork Theory", "_1002_1", &["KNT220Fall2026", "KNT 220", "_72_1"]);
+    s.pairs = vec![
+        ("QLT101Fall2026", "quilting-basics"), ("QLT 101", "quilting-basics"), ("_71_1", "quilting-basics"), ("_71_2", "quilting-basics"),
+        ("KNT220Fall2026", "knotwork-theory"), ("KNT 220", "knotwork-theory"), ("_72_1", "knotwork-theory"),
+    ];
+    let (r, out, expected) = f6b_run("pins-kept", &s);
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    let got = f6b_written(&r);
+    assert!(got == expected, "build_into's text plus the pin lines, in the answers file's order");
+    let text = String::from_utf8(got).unwrap();
+    assert!(text.find("'QLT 101'").unwrap() < text.find("'_71_1'").unwrap(), "a pin follows its course's code fragments");
+    let _ = std::fs::remove_dir_all(&r.root);
+    // The second course removed: its pins are excluded, after its code fragments, and are in no map entry.
+    s.courses[1] = f6b_removed(s.courses[1].clone());
+    s.slugs = vec![("_1001_1", "quilting-basics")];
+    s.pairs.truncate(4);
+    s.exclude = vec!["KNT220Fall2026", "KNT 220", "_72_1"];
+    let (r, out, expected) = f6b_run("pins-removed", &s);
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    let got = f6b_written(&r);
+    assert!(got == expected, "a removed course's pins are in course_exclude only");
+    let text = String::from_utf8(got).unwrap();
+    assert!(text.contains("course_exclude: ['KNT220Fall2026', 'KNT 220', '_72_1']"), "{text}");
+    assert!(!text.contains("'_72_1': "), "no map entry for a removed pin");
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+// ---- F6b review r1: the guards on a feed that has not settled, and the redacted Debug --------------------
+
+fn f6b_no_file(r: &F6b) {
+    assert!(!r.vault.join("config").join("ingest.yaml").exists(), "nothing is created");
+    assert!(strays_in_config(&r.vault).is_empty() && !f6b_check_root(r).exists());
+}
+
+/// I-1: a feed that is `failed` or `rejected` whose pending credential is gone (or unreadable) cannot
+/// have its link written: the job fails with that feed's key, creates nothing, and touches no credential.
+#[test]
+fn a_kept_feed_with_no_pending_link_fails_with_its_key_and_creates_nothing() {
+    for (lms, cal, want) in [
+        (FeedState::Failed, FeedState::Stored, "lms_link_missing"),
+        (FeedState::Rejected, FeedState::Stored, "lms_link_missing"),
+        (FeedState::Stored, FeedState::Failed, "calendar_link_missing"),
+        (FeedState::Stored, FeedState::Rejected, "calendar_link_missing"),
+    ] {
+        let mut s = Scn::quilting();
+        s.lms = Some(lms);
+        s.cal = Some(cal);
+        let r = f6b_rig(&format!("nolink-{lms:?}-{cal:?}").to_lowercase(), &s);
+        // The other feed's link stays where it waits; the missing one is gone.
+        let (gone, other) = if want.starts_with("lms") { (PENDING_LMS, PENDING_CALENDAR) } else { (PENDING_CALENDAR, PENDING_LMS) };
+        r.pending.delete(gone).unwrap();
+        r.pending.put(other, "https://example.invalid/feeds/other-token.ics").unwrap();
+        let out = run_config_ingest(&r.vault, &r.data, &r.base, &r.pending);
+        assert!(out == Outcome::Failed(want.into()), "{want}: {out:?}");
+        f6b_no_file(&r);
+        assert!(r.pending.get(gone).is_none() && r.pending.get(other).as_deref() == Some("https://example.invalid/feeds/other-token.ics"), "no credential is touched");
+        let _ = std::fs::remove_dir_all(&r.root);
+    }
+}
+
+/// I-2: a feed still `validated` has not settled, so the job waits (`pending`, with the reason), creates
+/// nothing and leaves the waiting link where it is.
+#[test]
+fn a_validated_feed_makes_config_ingest_wait_and_creates_nothing() {
+    for (lms, cal) in [(FeedState::Validated, FeedState::Stored), (FeedState::Stored, FeedState::Validated), (FeedState::Validated, FeedState::Validated)] {
+        let mut s = Scn::quilting();
+        s.lms = Some(lms);
+        s.cal = Some(cal);
+        let r = f6b_rig(&format!("validated-{lms:?}-{cal:?}").to_lowercase(), &s);
+        r.pending.put(PENDING_LMS, F6B_LMS_LINK).unwrap();
+        r.pending.put(PENDING_CALENDAR, F6B_CAL_LINK).unwrap();
+        let out = run_config_ingest(&r.vault, &r.data, &r.base, &r.pending);
+        assert!(out == Outcome::Waiting("feeds_not_settled".into()), "{out:?}");
+        f6b_no_file(&r);
+        assert!(r.pending.get(PENDING_LMS).as_deref() == Some(F6B_LMS_LINK) && r.pending.get(PENDING_CALENDAR).as_deref() == Some(F6B_CAL_LINK), "the waiting links stay");
+        let _ = std::fs::remove_dir_all(&r.root);
+    }
+}
+
+/// M4: a `stored` feed whose pending credential is still there (F8c deletes it after the job) is written
+/// blank, with no link in the file, and the credential is untouched by this job.
+#[test]
+fn a_stored_feed_with_its_pending_link_still_present_is_written_blank_and_the_link_stays() {
+    let s = Scn::quilting();
+    let r = f6b_rig("stored-pending", &s);
+    r.pending.put(PENDING_LMS, F6B_LMS_LINK).unwrap();
+    r.pending.put(PENDING_CALENDAR, F6B_CAL_LINK).unwrap();
+    let expected = f6b_expected(&r, "stored-pending", &s);
+    let out = run_config_ingest(&r.vault, &r.data, &r.base, &r.pending);
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    let got = f6b_written(&r);
+    assert!(got == expected, "the same bytes as a stored feed with no pending link");
+    let text = String::from_utf8(got).unwrap();
+    assert!(!text.contains("example.invalid"), "a stored feed leaves no link in the file");
+    assert!(r.pending.get(PENDING_LMS).as_deref() == Some(F6B_LMS_LINK) && r.pending.get(PENDING_CALENDAR).as_deref() == Some(F6B_CAL_LINK), "this job deletes nothing");
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+/// M5: `Debug` on the hand-over never prints a link (the field still carries it for the builder).
+#[test]
+fn the_hand_over_never_prints_a_feed_link() {
+    let mut s = Scn::quilting();
+    s.lms = Some(FeedState::Failed);
+    s.cal = Some(FeedState::Rejected);
+    let r = f6b_rig("debug", &s);
+    let answers = load_answers(&r.data).unwrap().unwrap();
+    let h = knowlu::onboarding_jobs::ingest_handoff(&answers, &r.pending);
+    assert!(h.ics_url == F6B_LMS_LINK && h.calendar_url == F6B_CAL_LINK, "the builder still gets the links");
+    let shown = format!("{h:?} {h:#?}");
+    assert!(!shown.contains("example.invalid") && !shown.contains("token"), "Debug redacts the links");
+    assert!(shown.contains("feed_kept_on_device: true"), "and still says a link is kept");
+    let _ = std::fs::remove_dir_all(&r.root);
+}
