@@ -483,17 +483,61 @@ pub struct IngestHandoff {
     pub calendar_kept_on_device: bool,
     /// Fragment to slug, over the **kept** courses only: each kept course's saved `fragments` (its
     /// code when none are saved) paired with its slug (a restored note's where one matched).
+    /// A course with no recorded slug contributes no pair (`config.ingest` refuses before that).
     pub course_map: Vec<(String, String)>,
     /// The removed courses' fragments (§14.45) that **no kept course also contributes** (§14.46.1), in
     /// no `course_map` entry; empty when none was removed (and then F6b writes no `course_exclude` key).
     pub course_exclude: Vec<String>,
     pub google_calendar: bool,
+    /// Step 8's confirmed rows, `(source, key, course slug)` in the order they were saved.
     pub books: Vec<(String, String, String)>,
     pub zybooks_ignore: Vec<String>,
 }
 
-pub fn ingest_handoff(_answers: &Answers, _pending: &dyn PendingStore) -> IngestHandoff {
-    todo!("F6b, F8c: the config.ingest hand-over")
+/// A course's pairs for `course_map` / `course_exclude`: its saved `fragments` (code fragments, then
+/// uid pins), else its human code alone, and nothing for a row with neither (§14.45, §14.46).
+fn course_pairs(c: &CourseAnswer) -> Vec<String> {
+    let saved: Vec<String> = c.fragments.iter().filter(|f| !f.trim().is_empty()).cloned().collect();
+    if !saved.is_empty() { saved } else { Some(c.code.trim().to_string()).filter(|t| !t.is_empty()).into_iter().collect() }
+}
+
+/// The hand-over `config.ingest` builds from: the answers file and the pending links only. A link is
+/// read from `pending` for a feed that is `failed` or `rejected` and for no other state (a `validated`
+/// feed has not settled: F8c holds `config.ingest` until it has), and is never copied anywhere else.
+pub fn ingest_handoff(answers: &Answers, pending: &dyn PendingStore) -> IngestHandoff {
+    use crate::onboarding_state::{FeedState, PENDING_CALENDAR, PENDING_LMS};
+    let kept_link = |feed: &str, name: &str| -> Option<String> {
+        matches!(answers.feeds.get(feed), Some(FeedState::Failed | FeedState::Rejected))
+            .then(|| pending.get(name)).flatten().filter(|l| !l.trim().is_empty())
+    };
+    let (lms, calendar) = (kept_link("lms_ics", PENDING_LMS), kept_link("calendar_ics", PENDING_CALENDAR));
+    let mut course_map = Vec::new();
+    let mut kept_fragments = BTreeSet::new();
+    for c in answers.kept_courses() {
+        let slug = answers.slugs.get(&c.key()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        for f in course_pairs(c) {
+            kept_fragments.insert(f.clone());
+            if let Some(s) = &slug { course_map.push((f, s.clone())); }
+        }
+    }
+    // A fragment a kept course also contributes (a lecture and its lab share `CS 100`) is never excluded.
+    let mut course_exclude: Vec<String> = Vec::new();
+    for c in answers.courses.iter().filter(|c| c.removed) {
+        for f in course_pairs(c) {
+            if !kept_fragments.contains(&f) && !course_exclude.contains(&f) { course_exclude.push(f); }
+        }
+    }
+    IngestHandoff {
+        feed_kept_on_device: lms.is_some(),
+        calendar_kept_on_device: calendar.is_some(),
+        ics_url: lms.unwrap_or_default(),
+        calendar_url: calendar.unwrap_or_default(),
+        course_map,
+        course_exclude,
+        google_calendar: answers.google_calendar == Some(true),
+        books: answers.rows.iter().map(|r| (r.source.clone(), r.key.clone(), r.course_slug.clone())).collect(),
+        zybooks_ignore: answers.zybooks_ignore.clone(),
+    }
 }
 
 /// `school.preview`'s core (F8b): loads the answers file, builds the `--courses` list with
@@ -556,10 +600,7 @@ pub fn run_school_apply_with(vault: &Path, choice: &crate::scaffold::CampusChoic
         ("config/events.yaml", campus_yaml(preset).map(str::to_string).ok_or_else(|| format!("unknown campus preset {preset:?}"))),
         ("config/campus.yaml", campus_config_yaml(choice)),
     ];
-    let volume = match vault.components().next() {
-        Some(std::path::Component::Prefix(p)) => p.as_os_str().to_string_lossy().to_string(),
-        _ => vault.display().to_string(),
-    };
+    let volume = volume_of(vault);
     let mut kept = 0;
     for (rel, text) in files {
         // The bytes `build_into`'s `write_file` writes: the platform's line ending.
@@ -607,13 +648,62 @@ pub fn run_config_ingest(vault: &Path, data_dir: &Path, base: &IngestBase, pendi
 }
 
 pub fn run_config_ingest_with(
-    _vault: &Path,
-    _data_dir: &Path,
-    _base: &IngestBase,
-    _pending: &dyn PendingStore,
-    _seams: &crate::scaffold::PutSeams,
+    vault: &Path,
+    data_dir: &Path,
+    base: &IngestBase,
+    pending: &dyn PendingStore,
+    seams: &crate::scaffold::PutSeams,
 ) -> Outcome {
-    todo!("F6b: config.ingest")
+    use crate::scaffold::{ingest_yaml_for, patch_capability_url, BookMapping, CampusChoice, SectionMapping, VaultPlan};
+    let answers = match load_answers(data_dir) {
+        Ok(Some(a)) => a,
+        Ok(None) => return Outcome::Failed("Knowlu has no saved answers to build your course settings from. Try again.".into()),
+        Err(e) => return Outcome::Failed(e),
+    };
+    // Defensive: the queue runs this after `school.courses` is done, which records every kept slug.
+    if answers.kept_courses().iter().any(|c| answers.slugs.get(&c.key()).is_none_or(|s| s.trim().is_empty())) {
+        return Outcome::Failed(REASON_COURSES_NOT_RECORDED.into());
+    }
+    let h = ingest_handoff(&answers, pending);
+    // One mapping per book or section, first wins (a duplicate key is a file the engine refuses whole).
+    let (mut zybooks_courses, mut vhl_sections) = (Vec::<BookMapping>::new(), Vec::<SectionMapping>::new());
+    for (source, key, slug) in h.books.iter().filter(|(_, k, s)| !k.trim().is_empty() && !s.trim().is_empty()) {
+        match source.as_str() {
+            "zybooks" if !zybooks_courses.iter().any(|b| &b.code == key) => zybooks_courses.push(BookMapping { code: key.clone(), course: slug.clone(), label: String::new() }),
+            "vhl" if !vhl_sections.iter().any(|s| &s.section == key) => vhl_sections.push(SectionMapping { section: key.clone(), course: slug.clone(), label: String::new() }),
+            _ => {}
+        }
+    }
+    // Only the fields `ingest_yaml_for` reads are meaningful; the rest are the vault's other files'.
+    let plan = VaultPlan {
+        profile_id: base.profile_id.clone(), ics_url: None,
+        personal_calendar: answers.feeds.contains_key("calendar_ics").then(String::new),
+        google_calendar: h.google_calendar, timezone: base.timezone.clone(), slots: Vec::new(), device: String::new(),
+        campus: String::new(), campus_choice: CampusChoice::default(), zybooks: base.zybooks, vhl: base.vhl,
+        zybooks_courses, vhl_sections, zybooks_ignore: h.zybooks_ignore.clone(), course_map: h.course_map.clone(), courses: Vec::new(),
+        api_base: String::new(), anon_key: String::new(), account_id: String::new(), human_actor: knowlu_engine::journal::HUMAN_ACTOR,
+    };
+    // The account holds the feeds (`ics_url: ''`); a feed it did not take gets its link patched in, as `restore_capability_url` does.
+    let built = ingest_yaml_for(&plan, true, &h.course_exclude).and_then(|text| {
+        let at = "config/ingest.yaml";
+        let text = if h.feed_kept_on_device { patch_capability_url(&text, "lms_ics", &h.ics_url, at)? } else { text };
+        if h.calendar_kept_on_device { patch_capability_url(&text, "calendar_ics", &h.calendar_url, at) } else { Ok(text) }
+    });
+    match built {
+        Ok(text) => put_ingest_text(vault, data_dir, &text, seams),
+        Err(e) => Outcome::Failed(format!("Knowlu could not build your course settings ({e}). Try again.")),
+    }
+}
+
+/// The reason key of a `config.ingest` that found a kept course with no recorded slug.
+pub const REASON_COURSES_NOT_RECORDED: &str = "courses_not_recorded";
+
+/// The drive a vault is on (`C:`), for the fix a failed save names.
+fn volume_of(vault: &Path) -> String {
+    match vault.components().next() {
+        Some(std::path::Component::Prefix(p)) => p.as_os_str().to_string_lossy().to_string(),
+        _ => vault.display().to_string(),
+    }
 }
 
 /// The parse check, then the create, for `text` as `build_into` builds it (LF line ends; the file
@@ -622,8 +712,32 @@ pub fn run_config_ingest_with(
 /// on that root (any warning or error is `Failed`, and nothing is created), and deletes the root on
 /// every path. Then [`crate::scaffold::put_new_file_with`] for `config/ingest.yaml`, reporting as
 /// [`run_school_apply`] does (`KEPT_EXISTING_KEY`; `Failed` with a fix that names the volume).
-pub fn put_ingest_text(_vault: &Path, _data_dir: &Path, _text: &str, _seams: &crate::scaffold::PutSeams) -> Outcome {
-    todo!("F6b: the parse check, then the create")
+/// A failed check names how many problems it found and never quotes them: the text can hold a feed link.
+pub fn put_ingest_text(vault: &Path, data_dir: &Path, text: &str, seams: &crate::scaffold::PutSeams) -> Outcome {
+    use crate::scaffold::{put_new_file_with, Put};
+    let text = knowlu_engine::pystr::universal_newlines(text).replace('\n', knowlu_engine::pystr::NEWLINE);
+    let scratch = data_dir.join("tmp").join(format!("ingest-check-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let checked = std::fs::create_dir_all(scratch.join("config"))
+        .and_then(|()| std::fs::write(scratch.join("config").join("ingest.yaml"), text.as_bytes()))
+        .map_err(|e| format!("could not write the check file ({e})"))
+        .and_then(|()| match knowlu_engine::coursework::load_coursework_config(&scratch) {
+            Ok((_, w)) if w.is_empty() => Ok(()),
+            Ok((_, w)) => Err(format!("{} problem(s) reading it back", w.len())),
+            Err(_) => Err("it could not be read back".to_string()),
+        });
+    let _ = std::fs::remove_dir_all(&scratch);
+    if let Err(e) = checked {
+        return Outcome::Failed(format!("Knowlu built a course settings file it could not use ({e}), so it saved nothing. Try again."));
+    }
+    match put_new_file_with(vault, "config/ingest.yaml", &text, seams) {
+        Ok(Put::Existing { same_bytes: false }) => Outcome::Done(BTreeMap::from([(KEPT_EXISTING_KEY.to_string(), Some(1))])),
+        Ok(_) => Outcome::Done(BTreeMap::new()),
+        Err(e) => {
+            let volume = volume_of(vault);
+            Outcome::Failed(format!("Knowlu could not save your course settings on {volume} ({e}). Check that {volume} is a normal drive with free space, then Try again."))
+        }
+    }
 }
 
 #[cfg(test)]

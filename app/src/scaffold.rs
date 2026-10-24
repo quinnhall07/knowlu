@@ -494,6 +494,14 @@ fn yaml_scalar(field: &str, value: &str) -> Result<String, String> {
 /// `ics_url` is written verbatim (quoted, never rewritten): the engine fetches exactly the string
 /// the friend pasted, so any mangling here would be a feed that 404s for a reason nothing explains.
 pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
+    ingest_yaml_for(p, !p.account_id.is_empty(), &[])
+}
+
+/// [`ingest_yaml`]'s writer, for a caller that knows what the plan does not (`config.ingest`, F6b):
+/// `blank_feeds` is "the account holds the feeds" (today `!p.account_id.is_empty()`), and
+/// `course_exclude` (§14.45) is written as one single-line flow sequence right after the `course_map`
+/// block, and not at all when empty, so `ingest_yaml`'s bytes are unchanged.
+pub fn ingest_yaml_for(p: &VaultPlan, blank_feeds: bool, course_exclude: &[String]) -> Result<String, String> {
     // m8: a plan carrying confirmed mappings with the source's own flag off would drop them in
     // silence below (they are only emitted inside the `if p.zybooks`/`if p.vhl` arms) — unreachable
     // through today's wizard, since the flag comes off the same login panel that fills the
@@ -512,7 +520,7 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
     // name, and on a vault that has an account the one place it belongs is the account, encrypted,
     // where `PUT /account/sources` already put it. The KEY stays, empty, so `ingest` still parses
     // the file and so a reader can see the feed is elsewhere rather than missing.
-    if !p.account_id.is_empty() {
+    if blank_feeds {
         s.push_str("ics_url: ''\n");
     } else if let Some(u) = &p.ics_url {
         s.push_str(&format!("ics_url: {}\n", yaml_scalar("LMS feed URL", u)?));
@@ -528,6 +536,10 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
             s.push_str(&format!("  {}: {}\n", yaml_scalar("course code", fragment)?, yaml_scalar("course slug", slug)?));
         }
     }
+    if !course_exclude.is_empty() {
+        let items = course_exclude.iter().map(|f| yaml_scalar("course exclude", f)).collect::<Result<Vec<_>, _>>()?;
+        s.push_str(&format!("course_exclude: [{}]\n", items.join(", ")));
+    }
     // The engine reads `calendars:` as a list of `{name, ics_url}` mappings (`calfeed.rs`), and an
     // empty list is why the first page of a fresh install used to show a day with no busy time in
     // it at all. Two possible entries, in a fixed order, through the same `yaml_scalar` every other
@@ -535,7 +547,7 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
     // marker for the account's grant, C2's — §11a).
     let mut entries: Vec<String> = Vec::new();
     if p.personal_calendar.is_some() {
-        if p.account_id.is_empty() {
+        if !blank_feeds {
             let u = p.personal_calendar.as_deref().unwrap_or_default();
             entries.push(format!("  - name: personal\n    ics_url: {}\n", yaml_scalar("personal calendar address", u)?));
         } else {
@@ -629,25 +641,31 @@ pub fn ingest_yaml(p: &VaultPlan) -> Result<String, String> {
 pub fn restore_capability_url(vault: &Path, kind: &str, url: &str) -> Result<(), String> {
     let path = vault.join("config").join("ingest.yaml");
     let text = knowlu_engine::pystr::read_text(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let patched = match kind {
+    let patched = patch_capability_url(&text, kind, url, &path.display().to_string())?;
+    knowlu_engine::pystr::write_text(&path, &patched).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// [`restore_capability_url`]'s text edit, on LF text and with no file (`config.ingest` patches the
+/// text before it is created, F6b); `at` names the file in an error.
+pub fn patch_capability_url(text: &str, kind: &str, url: &str, at: &str) -> Result<String, String> {
+    match kind {
         "lms_ics" => {
             let scalar = yaml_scalar("LMS feed URL", url)?;
             if !text.contains("ics_url: ''\n") {
-                return Err(format!("{}: no blanked LMS feed line to restore", path.display()));
+                return Err(format!("{at}: no blanked LMS feed line to restore"));
             }
-            text.replacen("ics_url: ''\n", &format!("ics_url: {scalar}\n"), 1)
+            Ok(text.replacen("ics_url: ''\n", &format!("ics_url: {scalar}\n"), 1))
         }
         "calendar_ics" => {
             let scalar = yaml_scalar("personal calendar address", url)?;
             let blanked = "- name: personal\n    ics_url: 'cloud:personal'\n";
             if !text.contains(blanked) {
-                return Err(format!("{}: no blanked personal-calendar line to restore", path.display()));
+                return Err(format!("{at}: no blanked personal-calendar line to restore"));
             }
-            text.replacen(blanked, &format!("- name: personal\n    ics_url: {scalar}\n"), 1)
+            Ok(text.replacen(blanked, &format!("- name: personal\n    ics_url: {scalar}\n"), 1))
         }
-        other => return Err(format!("{other}: not a capability url this restores")),
-    };
-    knowlu_engine::pystr::write_text(&path, &patched).map_err(|e| format!("{}: {e}", path.display()))
+        other => Err(format!("{other}: not a capability url this restores")),
+    }
 }
 
 /// Decision 4: `scheduler: app` and `device:` from birth. `grace_minutes: 20` is the local
