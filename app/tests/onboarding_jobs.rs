@@ -696,6 +696,20 @@ impl ResumeChecks for Proven {
     fn answers_ok(&self) -> bool { true }
 }
 
+/// `Proven` after a sign-out: the session credential is gone, every other check unchanged.
+struct SignedOut;
+impl ResumeChecks for SignedOut {
+    fn session_present(&self) -> bool { false }
+    fn restored_course_count(&self) -> usize { Proven.restored_course_count() }
+    fn entitled(&self) -> bool { Proven.entitled() }
+    fn school_mailbox_active(&self) -> bool { Proven.school_mailbox_active() }
+    fn google_granted(&self) -> bool { Proven.google_granted() }
+    fn homework_login_stored(&self) -> bool { Proven.homework_login_stored() }
+    fn class_commitments_cover_courses(&self) -> bool { Proven.class_commitments_cover_courses() }
+    fn account_school(&self) -> Option<School> { None }
+    fn answers_ok(&self) -> bool { Proven.answers_ok() }
+}
+
 /// A canary that never notices the stop (its gate stays closed): the exit must not wait for it. The
 /// canary's own thread is released at the end so no fake waits out its 30 s guard.
 #[test]
@@ -724,7 +738,8 @@ fn test_09_a_canary_that_never_notices_the_stop_is_abandoned_at_once_by_finish_a
             _ => {
                 // The rewind resets every job to pending, so the canary's own state says nothing on this arm:
                 // the closed gate and the time bound above are its test. Only the rewind is checked here.
-                let resumed = resume(load_state(&r.dir), &Proven);
+                // Sign-out deleted the session, so the checks report none (controller ruling, F2a review r1, I-1).
+                let resumed = resume(load_state(&r.dir), &SignedOut);
                 assert_eq!((resumed.mode, resumed.step), (LaunchMode::Onboarding, 2));
             }
         }

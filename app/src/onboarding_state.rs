@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const STATE_FILE: &str = "onboarding.json";
+/// The only `version` this build reads; a file of any other is `Loaded::Unreadable`.
+pub const STATE_VERSION: u32 = 1;
 pub const ANSWERS_FILE: &str = "onboarding-answers.json";
 /// The two pending-credential names under `knowlu/<profile_id>/` (§4.11).
 pub const PENDING_LMS: &str = "pending-lms_ics";
@@ -87,7 +89,7 @@ pub struct OnboardingState {
 impl OnboardingState {
     pub fn new(started_at: &str, step: u8) -> OnboardingState {
         OnboardingState {
-            version: 1,
+            version: STATE_VERSION,
             step,
             finished: false,
             school: None,
@@ -120,18 +122,30 @@ pub enum Loaded {
 /// Through `ledger::dumps_value`, to a sibling temp file and renamed over `path`, so a crash never
 /// leaves half a file (as `grades.json` and `profiles.json` are written). App data, never a vault
 /// file. The temp name carries a process-wide counter, so two threads saving one file never share it.
+/// A failed rename is tried again after each of [`RENAME_PAUSES`] (a scanner or indexer can hold the
+/// target for a moment, as `save_privacy_cache` allows for); the temp file is removed on every failure.
 pub(crate) fn write_atomic(path: &Path, v: &Value) -> Result<(), String> {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = path.parent().ok_or_else(|| format!("{}: has no folder", path.display()))?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp = dir.join(format!("{}.{}.{n}.tmp", path.file_name().and_then(|f| f.to_str()).unwrap_or("onboarding"), std::process::id()));
-    std::fs::write(&tmp, knowlu_engine::ledger::dumps_value(v)).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| {
+    if let Err(e) = std::fs::write(&tmp, knowlu_engine::ledger::dumps_value(v)) {
         let _ = std::fs::remove_file(&tmp);
-        e.to_string()
-    })
+        return Err(e.to_string());
+    }
+    let first = match std::fs::rename(&tmp, path) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    for pause in RENAME_PAUSES {
+        std::thread::sleep(pause);
+        if std::fs::rename(&tmp, path).is_ok() { return Ok(()); }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    Err(format!("{}: could not be written ({first})", path.display()))
 }
+const RENAME_PAUSES: [std::time::Duration; 2] = [std::time::Duration::from_millis(25), std::time::Duration::from_millis(200)];
 
 /// Temp file and rename, in the profile's app data. This save has no freeze: the sign-out rewind
 /// writes through it after the queue's saver is frozen and must land (review r5, M1).
@@ -146,6 +160,7 @@ pub fn load_state(data_dir: &Path) -> Loaded {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Loaded::Absent,
         Err(e) => Loaded::Unreadable(format!("{}: cannot be read ({e})", path.display())),
         Ok(text) => match serde_json::from_str::<OnboardingState>(&text) {
+            Ok(s) if s.version != STATE_VERSION => Loaded::Unreadable(format!("{}: is version {}, which this build does not know", path.display(), s.version)),
             Ok(s) => Loaded::Ok(s),
             Err(e) => Loaded::Unreadable(format!("{}: is not an onboarding file ({e})", path.display())),
         },
@@ -413,16 +428,30 @@ pub fn launch_mode(loaded: &Loaded) -> LaunchMode {
     }
 }
 
-/// The earliest step §4.7's checks do not prove (an unreadable file's resume). Step 7 is asked only
-/// when step 6 granted no calendar and step 9 is absent in wave B, so neither is a rung.
-fn earliest_unproven(c: &dyn ResumeChecks) -> u8 {
+/// The earliest step §4.7's checks do not prove (an unreadable file's resume). **The school is never
+/// a rung** (§14.49): nothing proves it, so with no `school` in the state the ladder stops at 3.
+/// Step 7 is asked only when step 6 granted no calendar and step 9 is absent in wave B, so neither
+/// is a rung.
+fn earliest_unproven(c: &dyn ResumeChecks, has_school: bool) -> u8 {
     if !c.session_present() { 2 }
-    else if c.restored_course_count() == 0 { 3 }
+    else if !has_school || c.restored_course_count() == 0 { 3 }
     else if !c.entitled() { 4 }
     else if !c.school_mailbox_active() { 5 }
     else if !c.google_granted() { 6 }
     else if !c.homework_login_stored() { 8 }
     else { 10 }
+}
+
+/// After the student confirms the school at step 3 (the state then holds a confirmed `school`): moves
+/// the state to the earliest step past 3 the checks do not prove and returns the steps it passed
+/// through, each `already-done` with its proof (§4.7). Nothing changes while the school is
+/// unconfirmed, the state is not at step 3, or the restore brought no courses (step 3 still needs its capture).
+pub fn advance_after_school(state: &mut OnboardingState, checks: &dyn ResumeChecks) -> Vec<u8> {
+    if state.step != 3 || !school_apply_may_run(state) { return Vec::new(); }
+    let next = earliest_unproven(checks, true);
+    if next <= 3 { return Vec::new(); }
+    state.step = next;
+    (4..next).filter(|s| *s != 9).collect()
 }
 
 pub fn resume(loaded: Loaded, checks: &dyn ResumeChecks) -> Resume {
@@ -431,7 +460,7 @@ pub fn resume(loaded: Loaded, checks: &dyn ResumeChecks) -> Resume {
         Loaded::Absent | Loaded::Ok(OnboardingState { finished: true, .. }) => None,
         Loaded::Ok(s) => Some(s),
         // Rewritten from what the account and this device prove, never read as finished.
-        Loaded::Unreadable(_) => Some(OnboardingState::new(&knowlu_engine::journal::now_ts(None), earliest_unproven(checks))),
+        Loaded::Unreadable(_) => Some(OnboardingState::new(&knowlu_engine::journal::now_ts(None), earliest_unproven(checks, false))),
     };
     if let Some(s) = state.as_mut() {
         for j in s.jobs.values_mut().filter(|j| j.state == JobState::Running) { j.state = JobState::Pending; }
@@ -439,6 +468,10 @@ pub fn resume(loaded: Loaded, checks: &dyn ResumeChecks) -> Resume {
         if let Some(sc) = s.school.as_mut() { sc.confirmed = false; }
     }
     // A profile with no session resumes at step 2's sign-in whatever the file's step, which is kept.
+    // With a session, a file at step 2 or below (a rewound file, or a vault just made) lands on step 3.
+    if checks.session_present() {
+        if let Some(s) = state.as_mut().filter(|s| s.step < 3) { s.step = 3; }
+    }
     let step = match &state {
         Some(s) if checks.session_present() => s.step,
         Some(_) => 2,
@@ -462,16 +495,25 @@ pub fn confirm_school(state: &mut OnboardingState) {
     if let Some(s) = state.school.as_mut() { s.confirmed = true; }
 }
 
+/// The skip cost keys the rail, the reveal gate (F9) and the page name; a contract, never retyped.
+pub const COST_MAIL: &str = "mail_dates_missed";
+pub const COST_GOOGLE: &str = "gmail_and_calendar_missed";
+pub const COST_CALENDAR: &str = "calendar_busy_time_missed";
+/// Step 8's key is per site: this prefix and the site (`zybooks`, `vhl`).
+pub const COST_HOMEWORK_PREFIX: &str = "homework_due_dates_missing_";
+
 /// Account, payment, the school step and "Your week" refuse a skip; every other step takes one.
 /// Steps 1 (welcome), 9 (absent in wave B) and 11 (the reveal) ask nothing, so there is nothing to skip.
-/// Recorded once per `(step, source)`, with the cost key the rail and the reveal name.
+/// The source must belong to the step (5 `mail`, 6 `google`, 7 `calendar`, 8 `zybooks` or `vhl`); a
+/// skip is recorded once per `(step, source)`, with its cost key.
 pub fn skip_step(state: &mut OnboardingState, step: u8, source: &str) -> Result<(), String> {
-    let cost_key = match step {
-        5 => "mail_dates_missed".to_string(),
-        6 => "gmail_and_calendar_missed".to_string(),
-        7 => "calendar_busy_time_missed".to_string(),
-        8 => format!("homework_due_dates_missing_{source}"),
-        2 | 3 | 4 | 10 => return Err(format!("step {step} cannot be skipped")),
+    let cost_key = match (step, source) {
+        (5, "mail") => COST_MAIL.to_string(),
+        (6, "google") => COST_GOOGLE.to_string(),
+        (7, "calendar") => COST_CALENDAR.to_string(),
+        (8, "zybooks" | "vhl") => format!("{COST_HOMEWORK_PREFIX}{source}"),
+        (5..=8, _) => return Err(format!("step {step} has no source {source:?} to skip")),
+        (2 | 3 | 4 | 10, _) => return Err(format!("step {step} cannot be skipped")),
         _ => return Err(format!("step {step} has nothing to skip")),
     };
     if !state.skips.iter().any(|k| k.step == step && k.source == source) {

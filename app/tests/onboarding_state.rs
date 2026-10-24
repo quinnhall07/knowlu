@@ -233,24 +233,40 @@ fn test_02_an_unreadable_file_resumes_at_the_earliest_step_the_checks_do_not_pro
     let d = scratch("t02-unreadable");
     std::fs::write(state_path(&d), "{ \"step\": 7, \"finished\": tru").unwrap();
     assert!(matches!(load_state(&d), Loaded::Unreadable(_)));
+    // The school is never proven (plan §14.49): with a session present, whatever else the checks prove,
+    // an unreadable file resumes at 3 and asks for the school; with no session, at 2.
     let ladder: Vec<(Checks, u8)> = vec![
         (Checks { session: Cell::new(false), ..Checks::restored(3) }, 2),
         (Checks::at_least_signed_in(), 3),
-        (Checks::restored(3), 4),
-        (Checks { entitled: true, ..Checks::restored(3) }, 5),
-        (Checks { entitled: true, mailbox: true, ..Checks::restored(3) }, 6),
-        (Checks { entitled: true, mailbox: true, google: true, ..Checks::restored(3) }, 8),
-        (Checks { entitled: true, mailbox: true, google: true, login: true, ..Checks::restored(3) }, 10),
-        // Everything proven: still not "finished" and not past the last asked step.
-        (Checks { entitled: true, mailbox: true, google: true, login: true, week: true, ..Checks::restored(3) }, 10),
+        (Checks::restored(3), 3),
+        (Checks { entitled: true, ..Checks::restored(3) }, 3),
+        (Checks { entitled: true, mailbox: true, ..Checks::restored(3) }, 3),
+        (Checks { entitled: true, mailbox: true, google: true, ..Checks::restored(3) }, 3),
+        (Checks { entitled: true, mailbox: true, google: true, login: true, ..Checks::restored(3) }, 3),
+        // Everything proven: still not "finished" and not past the school.
+        (Checks { entitled: true, mailbox: true, google: true, login: true, week: true, ..Checks::restored(3) }, 3),
     ];
     for (checks, want) in ladder {
         let r = resume(load_state(&d), &checks);
         assert_eq!(r.mode, LaunchMode::Onboarding, "step {want}");
         assert_eq!(r.step, want);
+        if checks.session_present() { assert_eq!(r.school, SchoolOffer::Ask); }
         let st = r.state.expect("rewritten from the derived step");
         assert_eq!((st.step, st.finished), (want, false));
     }
+    // After the school is confirmed, the next step is the earliest one past 3 the checks do not prove,
+    // each proven step passed through as already-done.
+    let advance = |checks: Checks| {
+        let mut st = resume(load_state(&d), &checks).state.expect("a state");
+        assert_eq!(advance_after_school(&mut st, &checks), Vec::<u8>::new(), "an unconfirmed school moves nothing");
+        st.school = Some(School { confirmed: false, ..a_school() });
+        confirm_school(&mut st);
+        let passed = advance_after_school(&mut st, &checks);
+        (st.step, passed)
+    };
+    let all = Checks { entitled: true, mailbox: true, google: true, login: true, week: true, ..Checks::restored(3) };
+    assert_eq!(advance(all), (10, vec![4, 5, 6, 7, 8]));
+    assert_eq!(advance(Checks::restored(3)), (4, vec![]));
 }
 
 #[test]
@@ -359,6 +375,43 @@ fn test_07_each_steps_skip_has_its_own_cost_key_and_step_8_is_per_site() {
     skip_step(&mut s, 8, "zybooks").unwrap();
     skip_step(&mut s, 8, "vhl").unwrap();
     assert_eq!(s.skips.len(), 2, "each site's skip is recorded on its own");
+}
+
+/// F2a review r1, M4: a source belongs to its step; an empty one never records a skip; the cost keys
+/// are the named constants.
+#[test]
+fn test_07_a_skip_names_a_source_that_belongs_to_its_step() {
+    for (step, source) in [(8u8, ""), (8, "mail"), (5, "zybooks"), (6, ""), (7, "google"), (5, "")] {
+        let mut s = unfinished(step);
+        assert!(skip_step(&mut s, step, source).is_err(), "({step}, {source:?}) is refused");
+        assert!(s.skips.is_empty());
+    }
+    let mut s = unfinished(8);
+    skip_step(&mut s, 8, "vhl").unwrap();
+    skip_step(&mut s, 8, "vhl").unwrap();
+    assert_eq!(s.skips.len(), 1, "one record per step and source");
+    assert_eq!(s.skips[0].cost_key, format!("{COST_HOMEWORK_PREFIX}vhl"));
+    for (step, source, key) in [(5u8, "mail", COST_MAIL), (6, "google", COST_GOOGLE), (7, "calendar", COST_CALENDAR)] {
+        let mut s = unfinished(step);
+        skip_step(&mut s, step, source).unwrap();
+        assert_eq!(s.skips[0].cost_key, key);
+    }
+}
+
+/// F2a review r1, M3 and I-1: a file of an unknown version is unreadable; with a session, a file at
+/// step 2 or below resumes at 3.
+#[test]
+fn test_01_an_unknown_version_is_unreadable_and_a_session_lifts_step_2_to_3() {
+    let d = scratch("t01-version");
+    let mut s = unfinished(6);
+    s.version = STATE_VERSION + 1;
+    save_state(&d, &s).unwrap();
+    assert!(matches!(load_state(&d), Loaded::Unreadable(_)));
+    save_state(&d, &unfinished(2)).unwrap();
+    let r = resume(load_state(&d), &Checks::at_least_signed_in());
+    assert_eq!((r.step, r.state.unwrap().step), (3, 3));
+    let none = Checks { session: Cell::new(false), ..Checks::at_least_signed_in() };
+    assert_eq!(resume(load_state(&d), &none).step, 2);
 }
 
 // ---- test 10: LaunchMode, and the no-session rule -------------------------------------------------------------
