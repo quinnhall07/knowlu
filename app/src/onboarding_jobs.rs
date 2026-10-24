@@ -589,6 +589,43 @@ pub fn run_school_courses_in(data_dir: &Path, vault: &Path) -> Outcome {
     run_school_courses(data_dir, &existing, &mut |c| crate::scaffold::create_course_note(vault, c))
 }
 
+/// What `config.ingest` needs besides the answers file and the pending links (F6b): the vault's
+/// profile id (the coursework credential targets), its time zone, and which homework logins the
+/// student stored at step 8 (`zybooks`/`vhl` switch each `coursework:` block on).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestBase {
+    pub profile_id: String,
+    pub timezone: String,
+    pub zybooks: bool,
+    pub vhl: bool,
+}
+
+/// `config.ingest`: builds `ingest.yaml` from the answers file ([`ingest_handoff`]), then
+/// [`put_ingest_text`]. An absent or unreadable answers file is `Failed`, never an empty config.
+pub fn run_config_ingest(vault: &Path, data_dir: &Path, base: &IngestBase, pending: &dyn PendingStore) -> Outcome {
+    run_config_ingest_with(vault, data_dir, base, pending, &Default::default())
+}
+
+pub fn run_config_ingest_with(
+    _vault: &Path,
+    _data_dir: &Path,
+    _base: &IngestBase,
+    _pending: &dyn PendingStore,
+    _seams: &crate::scaffold::PutSeams,
+) -> Outcome {
+    todo!("F6b: config.ingest")
+}
+
+/// The parse check, then the create, for `text` as `build_into` builds it (LF line ends; the file
+/// gets the platform's, as [`run_school_apply`]'s do). The check writes the text to
+/// `<data_dir>/tmp/ingest-check-<pid>/config/ingest.yaml`, runs `coursework::load_coursework_config`
+/// on that root (any warning or error is `Failed`, and nothing is created), and deletes the root on
+/// every path. Then [`crate::scaffold::put_new_file_with`] for `config/ingest.yaml`, reporting as
+/// [`run_school_apply`] does (`KEPT_EXISTING_KEY`; `Failed` with a fix that names the volume).
+pub fn put_ingest_text(_vault: &Path, _data_dir: &Path, _text: &str, _seams: &crate::scaffold::PutSeams) -> Outcome {
+    todo!("F6b: the parse check, then the create")
+}
+
 #[cfg(test)]
 mod stop_tests {
     //! F8f's own tests over the queue alone (F1's test 9 and 17 go through F2b's exits, which are
