@@ -22,3 +22,24 @@
 - **m-3.** F11b's frame fixes are unsized. Split them out as F11b0.
 
 **r1 revision:** I-1 and m-1 to m-3 are folded into the plan. `google_calendar_granted` defaults to `google_granted`, so the existing fakes keep their meaning, and `LiveChecks` answers false.
+
+---
+
+## r2 (639c2da): PASS
+
+**r1 findings: all closed.**
+- **I-1:** the step-7 rung means a Gmail-only grant lands at step 7, and the advance asks for `gmail_first_read` alone.
+- **m-1:** one `ManagedChecks` alias, with test 38's pin.
+- **m-2:** recorded.
+- **m-3:** F11b0 is split out and sized.
+
+**The `google_calendar_granted` default (`self.google_granted()`)** is safe today:
+- Every existing fake keeps its meaning.
+- `LiveChecks` answers false.
+
+**Minor:**
+- **n-1:** the default could quietly bring I-1 back once `LiveChecks::google_granted` gains a local source. Fix: F8w2 gives `LiveChecks` an explicit `google_calendar_granted() -> false`, and the trait's doc says the default is for fakes only.
+- **n-2:** test 38's pin must spare the alias's own line: exactly one occurrence, on the `pub type ManagedChecks` line, and none in `main.rs`.
+- **n-3:** F11b, F11c and F11d can now run in parallel but share `onboarding.js` and `onboarding_static.rs`. Fix: give each its own file, or add a collision note and a merge order.
+
+**§7:** no cycle. **Sizes:** within the cap. **Holding:** no vault writes outside `write`, no lock held across the network, no new command.

@@ -1507,7 +1507,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F8la | `lms_link.rs`: `capture_calendar_link_with`, `validate_only` and `capture_link_only`, the validate-only seam | `implementer`, reviewed by `contract-reviewer` | a bearer link stored under the wrong session reaches another account (review r6 I-2, r7 I-1) | F1, S4b merged |
 | F8lb | `onboarding_capture_link` and `onboarding_paste_link` over F8la's seam; the link to its pending credential | `implementer`, reviewed by `contract-reviewer` | as F8la | F8la, F8b, F8c, F8g, F8d (last in `onboarding_jobs.rs`'s chain), F2d |
 | F8w1 | New `onboarding_live.rs`: `LiveRunner` (every `JOB_ORDER` name to its runner; an unknown name is `Failed`; `registrar.confirm` an interim `Waiting("registrar_runner_pending")` until F8h-runner replaces it, r4 n-2), `LiveEntitlement`, `LiveSyncView`: the live `Deps` (§14.52.4; test 37) | `implementer` | specified glue over built runners; its own file, so no chain | F8b's capture half, F8b2, F8c, F8g, F8h (not F8h-runner, so not Q7) |
-| F8w2 | The same file: the mail seams (`start_setup` with the file's unitid and the window wait; `Queue::mail_skipped("mail.setup")` checked on every window poll and once more just before `start_setup`, returning `skipped` without starting; `Queue::attach_setup_run` with the run's `Shared` right after `start_setup` returns; the canary's list reading, `batch_closed_noted`), the two Google reads over `--tidied` after their slot facts, and the network-free `LiveChecks` (§14.52.1, .4; tests 34, 37) | `implementer` | as F8w1 | F8w1, F8d, F8d2 (r2 R2-2), F8b2-advance (`google_calendar_granted`, which `LiveChecks` answers `false`; §14.55), F8s2 (`mail_signals`); F7c's `--tidied` is on O3 at `623a5f8`, F7a's merge, which carried F7c r4 |
+| F8w2 | The same file: the mail seams (`start_setup` with the file's unitid and the window wait; `Queue::mail_skipped("mail.setup")` checked on every window poll and once more just before `start_setup`, returning `skipped` without starting; `Queue::attach_setup_run` with the run's `Shared` right after `start_setup` returns; the canary's list reading, `batch_closed_noted`), the two Google reads over `--tidied` after their slot facts, and the network-free `LiveChecks` (§14.52.1, .4; tests 34, 37) | `implementer` | as F8w1 | F8w1, F8d, F8d2 (r2 R2-2), F8b2-advance (`google_calendar_granted`, which `LiveChecks` answers `false` in an explicit body; §14.55, r2 n-1), F8s2 (`mail_signals`); F7c's `--tidied` is on O3 at `623a5f8`, F7a's merge, which carried F7c r4 |
 | F9 | The reveal gate, in its own `onboarding_gate.rs` | `implementer` | a pure function, tested in F1; its own file, so no chain (review r8's note) | F1 |
 | F10 | Shell steps 1-2 in the ruled direction (5b); old wizard removed (static files only) | `console-ui` | `app/static`, the `console.js` queue | direction ruled (5b, 2026-10-23) |
 | F11t | Failing static tests for the onboarding screens; §14.52's pins: step 5's answer and its three allowed mail commands (the seven others never called), the proceeds of steps 3, 7 and 8, Open Knowlu on `finish_ready` only, the closing state held while an exit call is outstanding | `test-writer` | test first (review r1 minor) | F2b |
@@ -1515,7 +1515,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F11e1 | Step 3's school choice ("isn't listed" included), sign-in and capture rules (second press, close on leaving, through `registerLeave`); step 2's sign-in again. Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3) | `console-ui` | `app/static` | F11a, F8b, F2g, F8lb (review r7 M1), F8b2 (the school answer), F2b2a (step 3's proceed) |
 | F11e2 | Step 3's proof with the removable course list; step 4, its `comp` state included. Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3) | `console-ui` | `app/static` | F11e1, F8c, F8g, F2d, F2h, F7a (`by_course`) |
 | F11b | Steps 5, 6 and 7; step 6 on today's separate consents (`google_connect` with each scope, `google_status`); step 5 by `onboarding_answer(5, {mail})`, `mail_setup_progress` and `mail_setup_answer`, its Skip through `onboarding_skip`; step 7's proceed (§14.52.1, .3). Through the frame's seam, `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()`. Fixtures for steps 5-7's rows: a past row with no job records, and mixed `done` and `skipped` (m5, over F11b0's rule). The frame fixes are F11b0's | `console-ui` | `app/static` | F11a, F11b0, F8d, F8lb (step 7's paste; review r7 M1), F2b2a. No longer O2 (T0, 2026-10-24: O2 has no branch) |
-| F11b0 | The frame's fixes in `onboarding.js`, split out of F11b (§14.53.2, review m-3): a refused retry's line clears on the student's next action, never a poll (m2); `rowModel`'s `found` read dropped (m3); `rowModel`'s past-row rule (m5); the sentences for `mail_setup_cancelled`, `mail_setup_failed`, `mail_not_yet` and `feed_kept_on_device` (M3); `onboarding.js:4`'s seam comment naming `{render, onStatus}` and `registerLeave`. Per file: `app/static/onboarding.js` about 15 lines (m2 4, m3 2 removed, m5 4, M3 4, the comment 1); `app/tests/onboarding_static.rs` about 45 lines of new cases (m2's two polls and a click, m3's source pin, m5's four row readings over generic fixtures, M3's four keys against the fallback) | `test-writer` (the cases, first), then `console-ui` | `app/static`; the test file only gains cases, and no pin is loosened | F11a |
+| F11b0 | The frame's fixes in `onboarding.js`, split out of F11b (§14.53.2, review m-3): a refused retry's line clears on the student's next action, never a poll (m2); `rowModel`'s `found` read dropped (m3); `rowModel`'s past-row rule (m5); the sentences for `mail_setup_cancelled`, `mail_setup_failed`, `mail_not_yet` and `feed_kept_on_device` (M3); `onboarding.js:4`'s seam comment naming `{render, onStatus}` and `registerLeave`. Per file: `app/static/onboarding.js` about 15 lines (m2 4, m3 2 removed, m5 4, M3 4, the comment 1); `app/tests/onboarding_static.rs` about 45 lines of new cases (m2's two polls and a click, m3's source pin, m5's four row readings over generic fixtures, M3's four keys against the fallback) | `test-writer` (the cases, first), then `console-ui` | `app/static`; the test file only gains cases, and no pin is loosened | F11a. Collision note: the panel tasks share `onboarding.js` and `onboarding_static.rs` and merge serially, F11b0, F11d, F11c, F11b, then F11e1 and F11e2, each rebased on the one before (§14.53.5) |
 | F11f | Step 6's combined Gmail-and-Calendar ask and the forwarding fallback, over O2's cloud half | `console-ui` | `app/static`; O2's contract only | F11b, O2 merged; may follow wave B (§8) |
 | F11c | Steps 8 and 10; step 8's proceed (§14.52.3). Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3). Fixtures for steps 8 and 10's rows: a past row with no job records, and mixed `done` and `skipped` (m5) | `console-ui` | `app/static` | F11a, F8d, F2b2a, F11b0 (m5's `rowModel` rule, which its fixtures read; review m-3) |
 | F11d | The reveal and the main page's "still coming" line; Open Knowlu is `ok && finish_ready && !exiting`, with no `gate.open` read (§14.52.6, §14.53.1); `revealModel` carries and shows `gate.failed[].fix` (M7); `mail.connect` as a not-connected line with its Settings button (§14.52.1). Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` | `test-writer` first (amends the pin at `app/tests/onboarding_static.rs:488` and `:496`, justified in §14.53.1, and adds M7's `fix` assertion), then `console-ui` | `app/static`; the one test edit loosens a page pin that re-derived the rule, never a contract test | F11a, F9, F2b2b, F11b0 (the frame's `onboarding.js` edits first; review m-3) |
@@ -5199,7 +5199,7 @@ its test first, failing before the code, as for 29-32.
   - `LiveSyncView` and `LiveChecks` make no request (a source pin finds no `ureq`, client or
     `refresh_` call in them);
   - the four checks with no local source answer `false` (`google_calendar_granted` added,
-    §14.55);
+    §14.55), each through `LiveChecks`'s own body, never a trait default (r2 n-1);
   - a Google read waits until its slot fact holds, and after a relaunch it waits for one more
     slot; `onboarding.json`'s bytes carry no new key.
 - **38 (F4c; the read's half is F2b2b's while the patient read is, F4c's if it moves, r2 n2):**
@@ -5211,8 +5211,9 @@ its test first, failing before the code, as for 29-32.
   - unparseable bytes are rewritten at the derived step;
   - `install_update`'s inner refuses in onboarding mode;
   - test 27's pins;
-  - (§14.55, review m-1) a source pin: the onboarding arm manages a `ManagedChecks` value, and no
-    other `Arc<dyn ResumeChecks` spelling appears in `main.rs` or `onboarding_state.rs`.
+  - (§14.55, review m-1, r2 n-2) a source pin: the onboarding arm manages a `ManagedChecks` value;
+    `onboarding_state.rs` has exactly one `Arc<dyn ResumeChecks` occurrence, on the
+    `pub type ManagedChecks` line; and `main.rs` has none.
 - **39 (F2b2b):** m-1's restart answer; `exiting_now` is false with only the guard held and true
   once the stop is set; a `failed` `school.courses` gives the "needs Try again" refusal and
   `failed_job`; with a `cloud.yaml` naming another host, neither error text contains the vault's
@@ -5498,6 +5499,16 @@ F11a r2 minors (`docs/reports/2026-10-24-wave-b-f11a-review-r2.md`, m2-m6) their
    - It depends on F11a alone. F11b, F11c and F11d depend on F11b0, not on F11b, so the panels do
      not wait on one another.
 
+5. **Collision note and merge order for the panel tasks** (r2 n-3). F11b0, F11b, F11c, F11d,
+   F11e1 and F11e2 all edit `app/static/onboarding.js` and `app/tests/onboarding_static.rs`.
+   - They may be built at the same time, but they merge into the lane branch one at a time, in
+     this order: **F11b0, F11d, F11c, F11b, then F11e1 and F11e2** (the last two in either order,
+     one after the other).
+   - Each task after the first rebases on the one merged before it and runs the static tests
+     again before it merges.
+   - Neither file is split. These are collisions, not dependencies, so §7's dependency columns are
+     unchanged.
+
 Tasks changed: new F11b0 (m2, m3, m5's frame change, M3, the seam comment; review m-3), F11b
 (m5's fixtures, the seam and m4), F11c (m5's
 fixtures, the seam and m4), F11d (the pin amended by `test-writer` first, `openKnowluEnabled`, M7,
@@ -5569,8 +5580,10 @@ From F2b2a's r4 review (PASS; F2b2a is merged into O3).
     advance (`app/tests/onboarding_state.rs:1592-1593`, `[4, 5, 6, 7, 8]` and step 10) to step
     7. Delegating keeps every existing fake's meaning (a fake granting Google grants both scopes),
     and no test is edited.
-  - An implementor that can tell the scopes apart overrides it. `LiveChecks` inherits the
-    default, which is `false` there (below).
+  - An implementor that can tell the scopes apart overrides it. **The trait's doc comment says
+    the default exists for test fakes only.** A production implementor writes its own body
+    (r2 n-1). `LiveChecks` does: F8w2 gives it an explicit
+    `fn google_calendar_granted(&self) -> bool { false }`.
   - **`earliest_unproven` gains the step-7 rung** (I-1; about 2 lines in `onboarding_state.rs`,
     `:764-772`, with its doc comment corrected). After `!c.google_granted() → 6`, it reads
     `!c.google_calendar_granted() → 7`, then the homework rung. Step 7 is the one asked when step 6
@@ -5583,8 +5596,8 @@ From F2b2a's r4 review (PASS; F2b2a is merged into O3).
     `scopes` list, read as `GoogleStatus.calendar` (`account.rs:2050-2069`, `CALENDAR_SCOPE`).
   - **That source is a network read** (`google_status_at` calls the service), and `LiveChecks`
     must make none (test 37's pin; F4c calls the checks before the window exists). So
-    `LiveChecks` answers `false` for it: it inherits the default over its `google_granted`,
-    which has no local source either and answers `false` (ruling 4, "a check with no local source
+    `LiveChecks` answers `false` for it, in its own explicit body (F8w2; r2 n-1), as it does for
+    `google_granted`, which has no local source either (ruling 4, "a check with no local source
     answers false").
   - **Consequence in production today:** `google_granted` is `false`, so the advance stops at
     step 6 at the latest (in fact at 5, since `school_mailbox_active` is `false` too). Step 6 is
@@ -5606,9 +5619,11 @@ From F2b2a's r4 review (PASS; F2b2a is merged into O3).
     exactly `State<ManagedChecks>`, and F4c manages exactly that type. A different `Arc` type would
     compile, but the lookup would quietly find nothing.
   - **F4c manages `LiveChecks` as `ManagedChecks`** (one line beside `.manage(queue)`; F4c already
-    builds it for `resume`). F4c's test 38 gains a source pin: `main.rs`'s onboarding arm contains
-    `.manage(` with a `ManagedChecks` value, and no other `Arc<dyn ResumeChecks` spelling appears
-    in `main.rs` or `onboarding_state.rs`.
+    builds it for `resume`). F4c's test 38 gains a source pin (r2 n-2):
+    - `main.rs`'s onboarding arm manages a `ManagedChecks` value;
+    - `onboarding_state.rs` has exactly one `Arc<dyn ResumeChecks` occurrence, on the
+      `pub type ManagedChecks` line;
+    - `main.rs` has none.
   - Size: about 38 lines for F8b2-advance (about 10 in `onboarding_jobs.rs`; about 28 in
     `onboarding_state.rs`: the trait method, the alias, the step-7 rung and step 6's reads). F8b2 stays at about 80
     (45 and 35).
