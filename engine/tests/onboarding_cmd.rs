@@ -457,3 +457,47 @@ fn tidied_on_a_vault_that_does_not_exist_is_all_null_a_named_error_and_exit_zero
     assert!(j["errors"].as_array().is_some_and(|e| !e.is_empty()), "{j}");
     assert!(!v.exists(), "the command must not create the vault");
 }
+
+#[test]
+fn tidied_puts_a_live_task_with_no_created_by_in_the_unknown_bucket() {
+    let v = tidy_vault("tidy-unknown");
+    // One note with no created_by at all, one with an empty value: both are "unknown".
+    std::fs::write(v.join("tasks/loose.md"), "---\nid: task_00000000a5\ntitle: Loose\nstatus: active\n---\n\nBody.\n").unwrap();
+    std::fs::write(v.join("tasks/blank.md"), "---\nid: task_00000000a6\ntitle: Blank\nstatus: active\ncreated_by: \"\"\n---\n\nBody.\n").unwrap();
+    let j = json_of(&tidied(&v));
+    assert_eq!(
+        j["live_by_source"],
+        json!({"blackboard": 2, "gmail": 1, "unknown": 2, "zybooks": 1}),
+        "a live task with no created_by is counted, not dropped: {j}"
+    );
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn tidied_counts_a_task_whose_agent_effort_the_student_later_overrode() {
+    let v = tidy_vault("tidy-override");
+    // The student also set quiz-a's effort afterwards; the agent estimate still happened.
+    let extra = journal_line(6, "student", "tasks/quiz-a.md", "effort_hours");
+    let path = v.join("state/journal/2026-08-30.jsonl");
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str(&extra);
+    std::fs::write(&path, text).unwrap();
+    let j = json_of(&tidied(&v));
+    assert_eq!(j["effort_estimated"], json!(2), "{j}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn preview_by_course_buckets_the_inline_captures_by_course() {
+    let v = scratch("bycourse");
+    let c = captures("bycourse");
+    let j = json_of(&preview(&v, &c, true));
+    // The feed carries no course text: _71_1 and _73_1 reach SYN 110 through the grades bundle's
+    // course; BB-ASSIGN-2 reaches no course, so it is in the totals and in no bucket.
+    assert_eq!(j["by_course"]["syn-110"]["assignments_upcoming"], json!(2), "{j}");
+    assert_eq!(j["by_course"]["syn-110"]["turned_in"], json!(1), "{j}");
+    assert_eq!(j["by_course"]["syn-110"]["class_times"], Value::Null, "{j}");
+    assert_eq!(j["by_course"]["syn-120"]["assignments_upcoming"], json!(0), "{j}");
+    assert_eq!(j["assignments_upcoming"], json!(3), "the totals stay as they were: {j}");
+    let _ = std::fs::remove_dir_all(&v);
+}

@@ -73,7 +73,8 @@ enum Command {
     /// Step 3's counts for onboarding, from raw captures, before any note is written (Wave B plan
     /// §4.4). Exactly one mode: `--preview` (`--feed`, `--courses`, optionally `--grades`, and
     /// `--registrar` with `--school`) prints `{assignments_upcoming, class_times, classes, errors,
-    /// grades_courses, turned_in}`; `--tidied` is declared and not built yet. Never writes, opens no
+    /// grades_courses, turned_in, by_course}`; `--tidied` prints `{effort_estimated, errors, imported_done,
+    /// imported_past, live_by_source}` from the vault. Never writes, opens no
     /// socket, is never gated, and always exits 0: an unreadable input is a `null` and a line in `errors`.
     Onboarding {
         #[arg(long, default_value = ".")]
@@ -548,7 +549,7 @@ fn main() -> ExitCode {
                     let files = knowlu_engine::onboarding::PreviewFiles { feed, courses, grades, registrar, school };
                     println!("{}", knowlu_engine::onboarding::run_preview(&files, &tz, now));
                 }
-                (false, true) => println!("onboarding: --tidied is not built yet"),
+                (false, true) => println!("{}", knowlu_engine::onboarding::run_tidied(&vault)),
                 _ => println!("onboarding: exactly one mode (--preview or --tidied)"),
             }
             ExitCode::SUCCESS
