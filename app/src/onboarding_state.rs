@@ -415,8 +415,8 @@ pub fn update_answers(data_dir: &Path, change: &dyn Fn(&mut Answers)) -> Result<
 pub trait PendingStore {
     fn put(&self, name: &str, link: &str) -> Result<(), String>;
     fn get(&self, name: &str) -> Option<String>;
-    /// Deleting what is not there is not an error.
-    fn delete(&self, name: &str);
+    /// Deleting what is not there is not an error; a link that is there and stays is (F2d review M2).
+    fn delete(&self, name: &str) -> Result<(), String>;
 }
 
 pub struct CredPending { pub profile_id: String }
@@ -430,9 +430,9 @@ impl PendingStore for CredPending {
         if !crate::credentials::exists(&target) { return None; }
         knowlu_engine::wincred::read_credential(&target).ok().map(|c| c.password.expose().to_string())
     }
-    fn delete(&self, name: &str) {
+    fn delete(&self, name: &str) -> Result<(), String> {
         let target = crate::credentials::target_for(&self.profile_id, name);
-        if crate::credentials::exists(&target) { let _ = crate::credentials::delete(&target); }
+        if crate::credentials::exists(&target) { crate::credentials::delete(&target) } else { Ok(()) }
     }
 }
 
@@ -596,12 +596,42 @@ pub fn skip_step(state: &mut OnboardingState, step: u8, source: &str) -> Result<
 }
 
 /// F2e: deletes the answers file and both pending credentials, then rewinds an unfinished
-/// `onboarding.json` to step 2 (jobs pending, `account_settled` and `school` cleared, skips kept).
+/// `onboarding.json` to step 2 (jobs pending, `account_settled`, `school`, `step10_confirmed_at` and
+/// `handover` cleared, skips kept).
 /// A finished file is left alone. `account::sign_out_clean` calls the real-store wrapper.
-pub fn on_sign_out_with(_data_dir: &Path, _pending: &dyn PendingStore) -> Result<(), String> {
-    todo!("F2e: the sign-out rewind")
+pub fn on_sign_out_with(data_dir: &Path, pending: &dyn PendingStore) -> Result<(), String> {
+    // Every step runs; the failures are collected, so one stuck file never keeps the rest on the device.
+    let mut failed: Vec<String> = Vec::new();
+    let answers = answers_path(data_dir);
+    match std::fs::remove_file(&answers) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => failed.push(format!("{}: could not be deleted ({e})", answers.display())),
+    }
+    for name in [PENDING_LMS, PENDING_CALENDAR] {
+        if let Err(e) = pending.delete(name) { failed.push(format!("pending link {name}: {e}")); }
+    }
+    match load_state(data_dir) {
+        Loaded::Absent => {}
+        Loaded::Unreadable(e) => failed.push(e),
+        Loaded::Ok(s) if s.finished => {}
+        Loaded::Ok(mut s) => {
+            s.step = 2;
+            s.account_settled = false;
+            s.school = None;
+            // A step-2 file is a fresh install's: no confirmation or hand-over from before the sign-out.
+            s.step10_confirmed_at = None;
+            s.handover.clear();
+            for job in s.jobs.values_mut() { *job = JobRecord::default(); }
+            if let Err(e) = save_state(data_dir, &s) { failed.push(e); }
+        }
+    }
+    if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
 }
-pub fn on_sign_out(_data_dir: &Path, _profile_id: &str) -> Result<(), String> { todo!("F2e: the real-store wrapper") }
+/// [`on_sign_out_with`] over this profile's own Credential Manager entries.
+pub fn on_sign_out(data_dir: &Path, profile_id: &str) -> Result<(), String> {
+    on_sign_out_with(data_dir, &CredPending { profile_id: profile_id.to_string() })
+}
 
 // ---- the three exits (§4.10, F2b) ----------------------------------------------------------------
 

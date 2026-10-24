@@ -33,7 +33,7 @@ impl PendingStore for FakePending {
         Ok(())
     }
     fn get(&self, name: &str) -> Option<String> { self.0.lock().unwrap().get(name).cloned() }
-    fn delete(&self, name: &str) { self.0.lock().unwrap().remove(name); }
+    fn delete(&self, name: &str) -> Result<(), String> { self.0.lock().unwrap().remove(name); Ok(()) }
 }
 
 const LMS_LINK: &str = "https://lms.example.invalid/feed/tok-7f3a9c.ics";
@@ -469,6 +469,21 @@ fn test_17_on_sign_out_deletes_the_answers_and_the_pending_links_and_rewinds_to_
     assert!(!after.account_settled && after.school.is_none());
     assert_eq!(after.skips, before.skips, "the skips are kept");
     assert_eq!(after.started_at, before.started_at);
+}
+
+#[test]
+fn test_17_a_rewound_file_has_no_step_10_stamp_and_no_hand_over_items() {
+    // A step-2 file behaves as a fresh install: a confirmation from before the sign-out must not
+    // reach step 10's gate or `slot.first_full`.
+    let d = scratch("t17-stamp");
+    let before = full_state();
+    assert!(before.step10_confirmed_at.is_some() && !before.handover.is_empty());
+    save_state(&d, &before).unwrap();
+    on_sign_out_with(&d, &FakePending::default()).expect("the rewind");
+    let Loaded::Ok(after) = load_state(&d) else { panic!("rewritten, not removed") };
+    assert_eq!(after.step, 2);
+    assert!(after.step10_confirmed_at.is_none(), "the step-10 stamp is cleared");
+    assert!(after.handover.is_empty(), "the hand-over items are cleared");
 }
 
 #[test]
@@ -1205,10 +1220,10 @@ fn test_26_cred_pending_round_trips_put_get_delete_under_knowlu_profile_pending_
     assert_eq!(store.get(PENDING_CALENDAR), None, "the other name is its own credential");
     store.put(PENDING_LMS, CAL_LINK).expect("a second put replaces");
     assert_eq!(store.get(PENDING_LMS).as_deref(), Some(CAL_LINK));
-    store.delete(PENDING_LMS);
+    store.delete(PENDING_LMS).unwrap();
     assert_eq!(store.get(PENDING_LMS), None);
     assert!(!knowlu::credentials::exists(&format!("knowlu/{id}/{PENDING_LMS}")));
-    store.delete(PENDING_LMS); // not-found is not an error: this must not panic
+    store.delete(PENDING_LMS).unwrap(); // not-found is not an error: this must not panic
     assert_eq!(pending_name("lms_ics"), Some(PENDING_LMS));
     assert_eq!(pending_name("calendar_ics"), Some(PENDING_CALENDAR));
     assert_eq!(pending_name("nonsense"), None);
