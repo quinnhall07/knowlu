@@ -54,3 +54,18 @@ Closed: C1, I1, I2, I5, M1, M2.
 - **m1. Timestamps.** `last_canary_ok_at` and `started_at` must both be parsed as timestamps, not compared as strings. Add a mixed-format case.
 - **m2. Lost updates.** Two writers can save `onboarding.json` at once in the normal console (`live.rs:120-131` and `slot_ended`). Use one process-wide lock around load, modify and save.
 - **m3. Wording.** Capture's line should read "within a minute or two".
+
+## Review r3 (8e3a8cb): FAIL, narrow
+- **I-1.** A Guided provider's first pass never cleared.
+- **m-a.** The lock was held across the network.
+- **m-b.** The `mail_provider` write path was unspecified.
+- **m-c.** An unparseable `sent_at` was not covered.
+
+The planner's addition (the hook reads the canary first) was judged safe.
+
+## Review r4 (32d5d33): PASS
+All r3 findings are closed, and the invariants hold.
+
+Minor notes, which go into the briefs:
+- **n1.** Hand-over items carry no address id. On an account with several mailboxes, one verified row clears the mail items for all of them. This predates §14.51; name it in F8s2.
+- **n2.** F8d's brief should say where the service row's `provider` string is read. The runner holds only the enum, and there is no mapping from it.
