@@ -31,3 +31,11 @@ Reviewer, on `git diff 7191751..0fa8c43` (`app/src/onboarding_state.rs` only, +7
 2. **A failed pending delete is dropped** (`:428`). The `PendingStore::delete` signature is F1/F2a's. This goes to F2e as a follow-up: `on_sign_out` must report it.
 3. **Untested case** (`:533`): no session and `answers_ok = false`. Add one case.
 4. **Counts are null, not 0, when every course is removed and there is no `unmatched` bucket** (`:330`). This is a note only. Today's engine always writes `unmatched`.
+
+## Controller check of the r1 fixes (ff19cd2)
+- **I-1 closed.** `ANSWERS_LOCK` is held across load, change and save. The new 16-thread test fails when the lock is removed.
+- **I-2 closed.** `advance_after_school` returns early while `!answers_ok()`, and a new test covers it.
+- **M1 closed.** The error now gives the category, line and column only, and a test checks it never quotes the file.
+- **M3 closed.** The new case is tested.
+- **M2** goes to F2e.
+- Verified from the diff. **F2d passes.**
