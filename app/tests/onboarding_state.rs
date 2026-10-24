@@ -43,7 +43,7 @@ const CAL_LINK: &str = "webcal://cal.example.invalid/private/tok-2b81d4.ics";
 fn full_state() -> OnboardingState {
     let mut s = OnboardingState::new("2026-10-24T09:00:00Z", 8);
     s.finished = false;
-    s.school = Some(School { unitid: "900001".into(), label: "Example Test College".into(), path: SchoolPath::Separate, confirmed: true });
+    s.school = Some(School { unitid: Some("900001".into()), label: "Example Test College".into(), path: SchoolPath::Separate, confirmed: true });
     s.skips = vec![Skip { step: 5, source: "mail".into(), cost_key: "mail_dates_missed".into() }];
     for (name, state) in [
         ("school.capture", JobState::Done), ("school.preview", JobState::Done), ("school.store", JobState::Running),
@@ -64,8 +64,8 @@ fn full_state() -> OnboardingState {
 fn full_answers() -> Answers {
     let mut a = Answers::default();
     a.courses = vec![
-        CourseAnswer { code: "QLT 101".into(), name: "Quilting Basics".into(), label: "Quilting".into(), lms_key: "_1001_1".into() },
-        CourseAnswer { code: "KNT 220".into(), name: "Knotwork Theory".into(), label: "Knots".into(), lms_key: "_1002_1".into() },
+        CourseAnswer { code: "QLT 101".into(), name: "Quilting Basics".into(), label: "Quilting".into(), lms_key: "_1001_1".into(), removed: false, counts: [("class_times".to_string(), 3), ("assignments_upcoming".to_string(), 7)].into() },
+        CourseAnswer { code: "KNT 220".into(), name: "Knotwork Theory".into(), label: "Knots".into(), lms_key: "_1002_1".into(), removed: true, counts: [("class_times".to_string(), 2)].into() },
     ];
     a.registrar_rows = vec![RegistrarRow { code: "QLT 101".into(), days: "MWF".into(), start: "09:00".into(), end: "09:50".into() }];
     a.slugs.insert("QLT 101".into(), "quilting-basics".into());
@@ -100,10 +100,23 @@ fn test_01_neither_file_holds_a_url_a_cookie_or_a_login_and_the_state_holds_no_c
     let d = scratch("t01-nourl");
     // A captured feed link is present in the run: it waits in the pending store, and its states are
     // recorded. Neither file may carry it, or any URL-shaped text.
-    let pending = FakePending::with(&[(PENDING_LMS, LMS_LINK), (PENDING_CALENDAR, CAL_LINK)]);
-    assert!(pending.get(PENDING_LMS).is_some());
+    // The files are written by the code paths that handle a link, not by a hand-built value: the
+    // paste command's inner validates and keeps the link, and a fake `school.capture` answers
+    // step 3 through the answer-recording inner. Then both files are scanned.
+    let pending = FakePending::default();
+    let good = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:QLT 101 Homework 4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let pasted = knowlu::onboarding_jobs::paste_link_inner(&d, &pending, "lms_ics", LMS_LINK, &|_| Ok(good.to_string()));
+    assert_eq!(pasted["ok"], true, "{pasted}");
+    assert_eq!(pending.get(PENDING_LMS).as_deref(), Some(LMS_LINK));
+    pending.put(PENDING_CALENDAR, CAL_LINK).unwrap();
+    let capture = serde_json::json!({"capture": {
+        "courses": full_answers().courses,
+        "registrar_rows": full_answers().registrar_rows,
+        "feeds": {"lms_ics": "validated"},
+    }});
+    let answered = onboarding_answer_inner(&d, 3, &capture, &mut |_| {});
+    assert_eq!(answered["ok"], true, "{answered}");
     save_state(&d, &full_state()).expect("save state");
-    save_answers(&d, &full_answers()).expect("save answers");
     let state_text = std::fs::read_to_string(state_path(&d)).expect("onboarding.json exists after a save");
     let answers_text = std::fs::read_to_string(answers_path(&d)).expect("the answers file exists after a save");
     for (which, text) in [("onboarding.json", &state_text), ("onboarding-answers.json", &answers_text)] {
@@ -239,7 +252,7 @@ fn test_02_an_absent_file_on_a_registered_profile_is_a_normal_launch() {
 
 // ---- test 2, T0 review M5: the school at step 3 on a restored install -----------------------------------
 
-fn a_school() -> School { School { unitid: "900001".into(), label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: true } }
+fn a_school() -> School { School { unitid: Some("900001".into()), label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: true } }
 
 #[test]
 fn test_02_a_new_profile_on_a_restored_account_asks_for_the_school_and_never_asks_the_account() {
@@ -264,7 +277,7 @@ fn test_02_a_school_left_by_a_quit_after_step_3_is_offered_as_a_confirm_and_assu
     let checks = Checks::restored(3);
     let r = resume(load_state(&d), &checks);
     let SchoolOffer::Confirm(offered) = r.school.clone() else { panic!("a saved school is offered: {:?}", r.school) };
-    assert_eq!((offered.unitid.as_str(), offered.label.as_str()), ("900001", "Example Test College"));
+    assert_eq!((offered.unitid.as_deref().unwrap_or(""), offered.label.as_str()), ("900001", "Example Test College"));
     assert!(!offered.confirmed, "the offer assumes nothing");
     let mut st = r.state.expect("a state");
     assert!(!school_apply_may_run(&st), "school.apply does not run until the school is confirmed");
@@ -311,6 +324,31 @@ fn test_07_every_other_step_takes_a_skip_and_records_it_with_its_cost_key() {
         assert_eq!((s.skips[0].step, s.skips[0].source.as_str()), (step, source));
         assert!(!s.skips[0].cost_key.is_empty(), "step {step}: the skip names its cost");
     }
+}
+
+/// §4.2 gives each skip a cost sentence (step 5 "date changes and new work announced by email are
+/// missed"; step 6 "club, job and internship tasks from Gmail are missed"; step 7 "as step 6's calendar
+/// half"; step 8 "that site's due dates are missing"), so each step's key is its own: no two steps
+/// share one, the same skip gives the same key twice, and step 8 names its site (a per-site skip).
+#[test]
+fn test_07_each_steps_skip_has_its_own_cost_key_and_step_8_is_per_site() {
+    let key = |step: u8, source: &str| {
+        let mut s = unfinished(step);
+        skip_step(&mut s, step, source).unwrap();
+        s.skips[0].cost_key.clone()
+    };
+    let keys = [key(5, "mail"), key(6, "google"), key(7, "calendar"), key(8, "zybooks")];
+    for (i, a) in keys.iter().enumerate() {
+        for b in &keys[i + 1..] {
+            assert_ne!(a, b, "two steps share one cost key: {keys:?}");
+        }
+    }
+    assert_eq!(key(5, "mail"), keys[0], "deterministic");
+    assert_ne!(key(8, "zybooks"), key(8, "vhl"), "step 8's skip is per site, so its cost is");
+    let mut s = unfinished(8);
+    skip_step(&mut s, 8, "zybooks").unwrap();
+    skip_step(&mut s, 8, "vhl").unwrap();
+    assert_eq!(s.skips.len(), 2, "each site's skip is recorded on its own");
 }
 
 // ---- test 10: LaunchMode, and the no-session rule -------------------------------------------------------------
@@ -795,4 +833,159 @@ fn test_22_the_pending_target_is_named_only_inside_f2gs_command_wrapper() {
     let core = fn_body(&src, "pub fn checkout_url_in");
     assert!(core.contains("checkout_url_at"), "the core calls checkout_url_at");
     assert!(!core.contains("open_in_browser"), "the core opens nothing");
+}
+
+// ======================================================================================================
+// F1 review r1: the removed courses (test 12, R-C1-51), the "isn't listed" school (test 1), the real
+// pending store (test 26) and the real-store sign-out wrapper (test 17).
+// ======================================================================================================
+
+fn counted(code: &str, name: &str, key: &str, removed: bool, ct: i64, au: i64, ti: i64) -> CourseAnswer {
+    CourseAnswer {
+        code: code.into(), name: name.into(), label: name.split(' ').next().unwrap().into(), lms_key: key.into(), removed,
+        counts: [("class_times", ct), ("assignments_upcoming", au), ("turned_in", ti)].into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+    }
+}
+
+/// Three captured courses with `school.preview`'s per-course counts; the middle one is removed.
+fn three_with_one_removed() -> Answers {
+    Answers {
+        courses: vec![
+            counted("QLT 101", "Quilting Basics", "_1001_1", false, 3, 7, 2),
+            counted("KNT 220", "Knotwork Theory", "_1002_1", true, 2, 11, 5),
+            counted("WVG 105", "Weaving Lab", "_1003_1", false, 1, 4, 0),
+        ],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_01_a_school_typed_as_isnt_listed_has_no_unitid_and_round_trips() {
+    let d = scratch("t01-nounitid");
+    let mut s = full_state();
+    s.school = Some(School { unitid: None, label: "Example Typed College".into(), path: SchoolPath::Paste, confirmed: true });
+    save_state(&d, &s).unwrap();
+    assert_eq!(load_state(&d), Loaded::Ok(s));
+}
+
+#[test]
+fn test_12_kept_courses_leaves_out_a_removed_row_and_keeps_the_captured_order() {
+    let a = three_with_one_removed();
+    let kept: Vec<&str> = a.kept_courses().iter().map(|c| c.code.as_str()).collect();
+    assert_eq!(kept, ["QLT 101", "WVG 105"]);
+}
+
+#[test]
+fn test_12_step_3s_totals_are_the_sums_of_the_kept_rows_saved_counts_and_the_removed_row_is_in_none() {
+    let t = step3_totals(&three_with_one_removed());
+    assert_eq!(t.get("classes"), Some(&2), "{t:?}");
+    assert_eq!(t.get("class_times"), Some(&4), "3 + 1, not 3 + 2 + 1: {t:?}");
+    assert_eq!(t.get("assignments_upcoming"), Some(&11), "7 + 4: {t:?}");
+    assert_eq!(t.get("turned_in"), Some(&2), "2 + 0: {t:?}");
+    // Removing the other two leaves the one row's own counts.
+    let mut a = three_with_one_removed();
+    a.courses[0].removed = true;
+    let t = step3_totals(&a);
+    assert_eq!((t.get("classes"), t.get("assignments_upcoming")), (Some(&1), Some(&4)), "{t:?}");
+}
+
+#[test]
+fn test_12_a_re_capture_clears_the_removed_mark() {
+    let mut a = three_with_one_removed();
+    a.recapture(vec![
+        counted("QLT 101", "Quilting Basics", "_1001_1", false, 0, 0, 0),
+        counted("KNT 220", "Knotwork Theory", "_1002_1", false, 0, 0, 0),
+    ]);
+    assert!(a.courses.iter().all(|c| !c.removed), "a re-capture is the student asking again: {:?}", a.courses);
+    assert_eq!(a.kept_courses().len(), 2);
+}
+
+#[test]
+fn test_12_a_removal_given_through_the_answer_inner_survives_a_reload_and_a_re_capture_clears_it() {
+    let d = scratch("t12-removed");
+    let capture = serde_json::json!({"capture": {"courses": three_with_one_removed().courses.iter().map(|c| CourseAnswer { removed: false, ..c.clone() }).collect::<Vec<_>>()}});
+    let enqueued = std::cell::RefCell::new(Vec::<String>::new());
+    let out = onboarding_answer_inner(&d, 3, &capture, &mut |j| enqueued.borrow_mut().push(j.to_string()));
+    assert_eq!(out["ok"], true, "{out}");
+    let out = onboarding_answer_inner(&d, 3, &serde_json::json!({"remove": "KNT 220"}), &mut |j| enqueued.borrow_mut().push(j.to_string()));
+    assert_eq!(out["ok"], true, "{out}");
+    // Nothing in memory: a fresh read of the file.
+    let reloaded = load_answers(&d).unwrap().expect("the answers file");
+    let kept: Vec<&str> = reloaded.kept_courses().iter().map(|c| c.code.as_str()).collect();
+    assert_eq!(kept, ["QLT 101", "WVG 105"], "the removal was saved the moment it was given");
+    assert!(reloaded.courses.iter().any(|c| c.code == "KNT 220" && c.removed), "the row stays, marked: {:?}", reloaded.courses);
+    onboarding_answer_inner(&d, 3, &capture, &mut |_| {});
+    assert_eq!(load_answers(&d).unwrap().unwrap().kept_courses().len(), 3, "a re-capture clears the mark");
+}
+
+#[test]
+fn test_12_the_answer_inner_saves_before_it_enqueues_and_enqueues_nothing_for_an_answer_it_refused() {
+    let d = scratch("t12-order");
+    let saw = std::cell::RefCell::new(Vec::<bool>::new());
+    let dir = d.clone();
+    let out = onboarding_answer_inner(&d, 6, &serde_json::json!({"google_calendar": true}), &mut |_| {
+        saw.borrow_mut().push(matches!(load_answers(&dir), Ok(Some(a)) if a.google_calendar == Some(true)));
+    });
+    assert_eq!(out["ok"], true, "{out}");
+    assert!(saw.borrow().iter().all(|s| *s), "the file already held the answer when each job was enqueued: {:?}", saw.borrow());
+    let refused = onboarding_answer_inner(&d, 6, &serde_json::json!({"nonsense": 1}), &mut |j| panic!("enqueued {j} for a refused answer"));
+    assert_eq!(refused["ok"], false, "{refused}");
+}
+
+// ---- the real pending store (plan line 1916) and the real-store sign-out wrapper (test 17) ----------------
+// These two are the only additions here that touch the real Credential Manager beyond tests 21 and 22:
+// both hold `CREDMAN_LOCK`, use a generated profile id, and clean up with a `Drop` guard.
+
+#[cfg(windows)]
+fn pending_targets(profile_id: &str) -> Vec<String> {
+    [PENDING_LMS, PENDING_CALENDAR].iter().map(|n| knowlu::credentials::target_for(profile_id, n)).collect()
+}
+
+#[cfg(windows)]
+#[test]
+fn test_26_cred_pending_round_trips_put_get_delete_under_knowlu_profile_pending_names_and_deleting_nothing_is_fine() {
+    // Declared lock first, cleanup second: dropped in reverse, so the credentials go before the lock is released.
+    let _lock = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let id = format!("test-o3-{}-{}", std::process::id(), line!());
+    let _clean = real::Cleanup(pending_targets(&id));
+    let store = CredPending { profile_id: id.clone() };
+    assert_eq!(store.get(PENDING_LMS), None, "nothing there yet");
+    store.put(PENDING_LMS, LMS_LINK).expect("put");
+    assert_eq!(store.get(PENDING_LMS).as_deref(), Some(LMS_LINK));
+    assert!(knowlu::credentials::exists(&format!("knowlu/{id}/{PENDING_LMS}")), "the credential is at knowlu/<profile_id>/<name>");
+    assert_eq!(store.get(PENDING_CALENDAR), None, "the other name is its own credential");
+    store.put(PENDING_LMS, CAL_LINK).expect("a second put replaces");
+    assert_eq!(store.get(PENDING_LMS).as_deref(), Some(CAL_LINK));
+    store.delete(PENDING_LMS);
+    assert_eq!(store.get(PENDING_LMS), None);
+    assert!(!knowlu::credentials::exists(&format!("knowlu/{id}/{PENDING_LMS}")));
+    store.delete(PENDING_LMS); // not-found is not an error: this must not panic
+    assert_eq!(pending_name("lms_ics"), Some(PENDING_LMS));
+    assert_eq!(pending_name("calendar_ics"), Some(PENDING_CALENDAR));
+    assert_eq!(pending_name("nonsense"), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn test_17_the_real_store_wrapper_deletes_this_profiles_pending_links_rewinds_and_leaves_another_profiles_alone() {
+    let _lock = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (id, other) = (format!("test-o3-{}-{}", std::process::id(), line!()), format!("test-o3-{}-{}-other", std::process::id(), line!()));
+    let mut targets = pending_targets(&id);
+    targets.extend(pending_targets(&other));
+    let _clean = real::Cleanup(targets);
+    let (mine, theirs) = (CredPending { profile_id: id.clone() }, CredPending { profile_id: other });
+    mine.put(PENDING_LMS, LMS_LINK).unwrap();
+    mine.put(PENDING_CALENDAR, CAL_LINK).unwrap();
+    theirs.put(PENDING_LMS, LMS_LINK).unwrap();
+    let d = scratch("t17-wrapper");
+    let before = full_state();
+    save_state(&d, &before).unwrap();
+    save_answers(&d, &full_answers()).unwrap();
+    on_sign_out(&d, &id).expect("the wrapper over the real store");
+    assert!(mine.get(PENDING_LMS).is_none() && mine.get(PENDING_CALENDAR).is_none(), "both of this profile's links are gone");
+    assert_eq!(theirs.get(PENDING_LMS).as_deref(), Some(LMS_LINK), "another profile's link is untouched");
+    assert!(!answers_path(&d).exists());
+    let Loaded::Ok(after) = load_state(&d) else { panic!("rewritten, not removed") };
+    assert_eq!((after.step, after.finished, after.school.is_none()), (2, false, true));
+    on_sign_out(&d, &id).expect("a second sign-out with nothing left to delete is not an error");
 }

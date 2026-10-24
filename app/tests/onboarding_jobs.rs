@@ -743,7 +743,7 @@ fn test_09_a_slot_end_clears_the_slot_items_and_a_mail_item_only_its_own_signal_
 #[test]
 fn test_17_sign_out_stops_abandons_saves_freezes_signs_out_relaunches_with_pick_and_exits_in_that_order() {
     let mut s = state_at(8, true);
-    s.school = Some(School { unitid: "900001".into(), label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: true });
+    s.school = Some(School { unitid: Some("900001".into()), label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: true });
     s.jobs.insert("school.capture".into(), JobRecord { state: JobState::Done, ..Default::default() });
     let r = rig("t17-order", s, true);
     save_answers(&r.dir, &Answers { feeds: BTreeMap::from([("lms_ics".to_string(), FeedState::Validated)]), ..Default::default() }).unwrap();
@@ -897,7 +897,7 @@ fn test_25_quit_and_finish_flush_after_the_drain_and_before_the_exit_with_quit_a
 const LMS_LINK: &str = "https://lms.example.invalid/feed/tok-5c19e0.ics";
 
 fn course(code: &str, name: &str, key: &str) -> CourseAnswer {
-    CourseAnswer { code: code.into(), name: name.into(), label: name.split(' ').next().unwrap().into(), lms_key: key.into() }
+    CourseAnswer { code: code.into(), name: name.into(), label: name.split(' ').next().unwrap().into(), lms_key: key.into(), removed: false, counts: Default::default() }
 }
 fn three_courses() -> Vec<CourseAnswer> {
     vec![course("QLT 101", "Quilting Basics", "_1001_1"), course("KNT 220", "Knotwork Theory", "_1002_1"), course("WVG 105", "Weaving Lab", "_1003_1")]
@@ -1048,7 +1048,7 @@ fn test_13e_back_to_another_school_before_payment_deletes_the_waiting_link() {
     let (dir, pending) = feed_rig("t13e", FeedState::Validated, LMS_LINK);
     pending.put(PENDING_CALENDAR, "https://cal.example.invalid/private/tok-77.ics").unwrap();
     let mut state = state_at(3, false);
-    state.school = Some(School { unitid: "900001".into(), label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: true });
+    state.school = Some(School { unitid: Some("900001".into()), label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: true });
     state.jobs.insert("school.capture".into(), JobRecord { state: JobState::Done, ..Default::default() });
     change_school(&dir, &pending, &mut state).expect("back to the picker");
     assert!(pending.get(PENDING_LMS).is_none() && pending.get(PENDING_CALENDAR).is_none());

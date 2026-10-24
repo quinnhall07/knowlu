@@ -3,7 +3,7 @@
 //!
 //! **F1 stub.** Types and signatures are the contract `app/tests/onboarding_jobs.rs` writes
 //! against; every function panics (`todo!`) until F8 replaces it.
-use crate::onboarding_state::{Answers, CourseAnswer, OnboardingState, PendingStore};
+use crate::onboarding_state::{Answers, CourseAnswer, HandoverItem, OnboardingState, PendingStore};
 use crate::scheduler::SlotScope;
 use serde::Serialize;
 use serde_json::Value;
@@ -109,6 +109,9 @@ impl Queue {
     pub fn save(&self) -> Result<(), String> { todo!("F8f: save") }
     pub fn freeze(&self) { todo!("F8f: freeze") }
     pub fn is_frozen(&self) -> bool { todo!("F8f: is frozen") }
+    /// Finish's write, through the queue's own state: sets `finished` and `handover` on the live
+    /// state and saves it, so no later save can write an older, unfinished copy over it.
+    pub fn finish(&self, _handover: Vec<HandoverItem>) -> Result<(), String> { todo!("F8f: finish") }
     /// F8m: a closed backfill batch tells the queue; nothing is started.
     pub fn mail_batch_closed(&self) { todo!("F8m: mail batch closed") }
     pub fn batch_closed_noted(&self) -> bool { todo!("F8m: batch closed noted") }

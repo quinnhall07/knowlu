@@ -46,7 +46,8 @@ pub enum SchoolPath { Shared, Separate, Paste }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct School {
-    pub unitid: String,
+    /// `None` for a school typed as "isn't listed": a name and no unitid (R-OB-4).
+    pub unitid: Option<String>,
     pub label: String,
     pub path: SchoolPath,
     /// True once the student has confirmed this school in this run. Never trusted across a quit.
@@ -128,6 +129,14 @@ pub struct CourseAnswer {
     pub label: String,
     /// The LMS's own course key.
     pub lms_key: String,
+    /// Step 3's Remove (R-C1-51): set through `onboarding_answer`, cleared by a re-capture. A
+    /// removed row is read by nobody; [`Answers::kept_courses`] is the only way to the list.
+    #[serde(default)]
+    pub removed: bool,
+    /// `school.preview`'s `by_course` counts for this course, by name (`class_times`,
+    /// `assignments_upcoming`, `turned_in`, `grades_courses`). Empty until a preview has run.
+    #[serde(default)]
+    pub counts: BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +171,34 @@ pub struct Answers {
     pub feeds: BTreeMap<String, FeedState>,
     pub rows: Vec<BookRow>,
     pub zybooks_ignore: Vec<String>,
+}
+
+impl Answers {
+    /// The courses that were not removed, in captured order. `school.courses`, `config.ingest`'s
+    /// `course_map` and the step-3 totals read the list only through this.
+    pub fn kept_courses(&self) -> Vec<&CourseAnswer> { todo!("F2d: kept_courses") }
+    /// A re-capture: replaces the list with `captured`, every row un-removed, and keeps the counts
+    /// of a row whose code is unchanged until the next preview.
+    pub fn recapture(&mut self, _captured: Vec<CourseAnswer>) { todo!("F2d: recapture") }
+}
+
+/// Step 3's proof totals, over the kept rows only: `classes` is the number of kept rows and every
+/// other key the sum of the kept rows' saved `by_course` counts (`onboarding_status` returns this).
+pub fn step3_totals(_a: &Answers) -> BTreeMap<String, i64> { todo!("F2d: the step-3 totals") }
+
+/// The answer-recording inner of `onboarding_answer(step, answer)` (F2b): saves the answer to the
+/// answers file **first**, then calls `enqueue` once per job the answer asks for. Shapes by step:
+/// 3 `{"capture": {"courses": [CourseAnswer], "registrar_rows": [..], "feeds": {kind: state}}}`,
+/// `{"remove": <code>}`, `{"counts": {<code>: {name: n}}}`; 6 `{"google_calendar": bool}`; 8
+/// `{"row": BookRow}` or `{"zybooks_ignore": <key>}`. Answers `{ok, error?}`; nothing is held in
+/// memory, so a quit between two calls loses nothing.
+pub fn onboarding_answer_inner(
+    _data_dir: &Path,
+    _step: u8,
+    _answer: &Value,
+    _enqueue: &mut dyn FnMut(&str),
+) -> Value {
+    todo!("F2b: onboarding_answer")
 }
 
 /// `Ok(None)` is an absent file; an unreadable one is `Err`, never "no answers".
