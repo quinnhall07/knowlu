@@ -91,12 +91,12 @@ fn read_courses(text: &str, errors: &mut Vec<String>) -> Option<Vec<Course>> {
         list.iter()
             .map(|c| {
                 let (code, slug, label) = (field(c, "code"), field(c, "slug"), field(c, "label"));
-                let pairs = saved_pairs(c);
+                let key = [&code, &slug, &label].into_iter().find(|t| !t.is_empty()).cloned().unwrap_or_default();
+                let pairs = saved_pairs(c, &key, errors);
                 let codes = match &pairs {
                     Some(fragments) => fragments.iter().map(|f| compact(f)).filter(|t| !t.is_empty()).collect(),
                     None => [&label, &slug].iter().map(|t| compact(t)).filter(|t| !t.is_empty()).collect(),
                 };
-                let key = [&code, &slug, &label].into_iter().find(|t| !t.is_empty()).cloned().unwrap_or_default();
                 Course { key, code, label, codes, pairs }
             })
             .collect(),
@@ -104,16 +104,33 @@ fn read_courses(text: &str, errors: &mut Vec<String>) -> Option<Vec<Course>> {
 }
 
 /// A course entry's saved `pairs`: an array whose elements are a fragment string or a
-/// `[fragment, slug]` pair (`course_map`'s own shape); `None` when the entry has no such array. The
-/// value half of a pair is not read: the bucket key is the course's, whatever slug the pair names.
-fn saved_pairs(course: &Value) -> Option<Vec<String>> {
-    let list = course.get("pairs")?.as_array()?;
-    let fragment = |p: &Value| match p {
+/// `[fragment, slug]` pair (`course_map`'s own shape). `None` only when the entry has no `pairs` key
+/// at all (the engine then derives its own). A `pairs` that is not an array, or an element that is
+/// neither shape, is never silently re-derived: it is a named `courses: <key>: pairs unreadable`
+/// line (once per course), a non-array giving no fragments and an element being left out. The value
+/// half of a pair is not read: the bucket key is the course's, whatever slug the pair names.
+fn saved_pairs(course: &Value, key: &str, errors: &mut Vec<String>) -> Option<Vec<String>> {
+    let raw = course.get("pairs")?;
+    let mut readable = true;
+    let mut fragment = |p: &Value| match p {
         Value::String(f) => Some(f.clone()),
-        Value::Array(a) => a.first().and_then(Value::as_str).map(str::to_string),
-        _ => None,
+        Value::Array(a) if a.first().is_some_and(Value::is_string) => a[0].as_str().map(str::to_string),
+        _ => {
+            readable = false;
+            None
+        }
     };
-    Some(list.iter().filter_map(fragment).map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect())
+    let list = match raw.as_array() {
+        Some(list) => list.iter().filter_map(|p| fragment(p)).map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect(),
+        None => {
+            readable = false;
+            Vec::new()
+        }
+    };
+    if !readable {
+        errors.push(format!("courses: {key}: pairs unreadable"));
+    }
+    Some(list)
 }
 
 /// The keys of every course (not only the first) one of whose codes is `code`: a past-term shell
@@ -1029,6 +1046,31 @@ END:VEVENT
         assert_eq!(by_course(&v, "unmatched", "assignments_upcoming"), json!(1), "{v}");
         // The class time names SYN 110, which the saved pairs carry; the label plays no part.
         assert_eq!(by_course(&v, "_900001_1", "class_times"), json!(1), "{v}");
+    }
+
+    #[test]
+    fn unreadable_pairs_are_a_named_error_and_never_a_silent_re_derivation() {
+        let c = json!([
+            {"code": "_1_1", "slug": "a", "label": "SYN 110", "pairs": "SYN 110"},       // not an array
+            {"code": "_2_1", "slug": "b", "label": "SYN 120", "pairs": ["SYN 120", 5]},  // one element unreadable
+            {"code": "_3_1", "slug": "c", "label": "SYN 130"},                           // no pairs key: derived
+            {"code": "_4_1", "slug": "d", "label": "SYN 140", "pairs": null},            // present, not an array
+        ])
+        .to_string();
+        let f = ics(&[
+            vevent_in("BB-ASSIGN-1", "SYN 110: x", None, "x"),
+            vevent_in("BB-ASSIGN-2", "SYN 120: x", None, "x"),
+            vevent_in("BB-ASSIGN-3", "SYN 130: x", None, "x"),
+            vevent_in("BB-ASSIGN-4", "SYN 140: x", None, "x"),
+        ]);
+        let inputs = PreviewInputs { feed: Some(&f), courses: Some(&c), ..Default::default() };
+        let v = preview(&inputs, &chicago(), now());
+        assert_eq!(v["errors"], json!(["courses: _1_1: pairs unreadable", "courses: _2_1: pairs unreadable", "courses: _4_1: pairs unreadable"]), "{v}");
+        assert_eq!(by_course(&v, "_1_1", "assignments_upcoming"), json!(0), "no fragments, and no label fallback: {v}");
+        assert_eq!(by_course(&v, "_2_1", "assignments_upcoming"), json!(1), "the readable element stands: {v}");
+        assert_eq!(by_course(&v, "_3_1", "assignments_upcoming"), json!(1), "{v}");
+        assert_eq!(by_course(&v, "_4_1", "assignments_upcoming"), json!(0), "{v}");
+        assert_eq!(by_course(&v, "unmatched", "assignments_upcoming"), json!(2), "{v}");
     }
 
     #[test]
