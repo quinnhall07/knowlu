@@ -3023,3 +3023,214 @@ fn the_quit_push_runs_as_it_did_when_the_privacy_version_is_accepted_or_unknown(
         assert!(knowlu_engine::sync::load_status(&r.v).at.is_some(), "{tag}: the engine's push ran and saved its status");
     }
 }
+
+// ======================================================================================================
+// O3 F1 (plan tests 15, 18 and 27): the scheduler's half of onboarding. `run_slot_scoped` takes the same
+// seams `run_slot_with` takes; the rig is the L4 `privacy_rig` above (a cloud vault, a loopback listener
+// nothing is sent to, a never-written session target). Invented data only.
+// ======================================================================================================
+
+use knowlu::scheduler::{prime_mode_device, run_slot_scoped, SlotScope};
+
+fn accepted_rig(tag: &str, grades_connected: bool) -> PrivacyRig {
+    let r = privacy_rig(tag, "active", grades_connected);
+    r.set_privacy(Some(PRIVACY_VERSION));
+    r
+}
+
+fn rows_starting<'a>(names: &'a [String], stage: &str) -> Vec<&'a String> {
+    names.iter().filter(|n| n.as_str() == stage || n.starts_with(&format!("{stage} ("))).collect()
+}
+
+/// Every stage a stopped slot did not start is named, and none ran.
+fn assert_nothing_ran(r: &PrivacyRig, s: &knowlu::scheduler::RunSummary, runner_log_before: &str) {
+    let named = names_of(s);
+    for stage in ["sync", "coursework", "ingest", "judge", "rank"] {
+        let rows = rows_starting(&named, stage);
+        assert!(!rows.is_empty(), "the summary names {stage} as not run: {named:?}");
+        assert!(rows.iter().all(|n| n.contains("not run")), "{stage} did not run: {named:?}");
+    }
+    for stage in ["session", "grades", "mail", "backup", "telemetry"] {
+        assert!(rows_starting(&named, stage).iter().all(|n| n.contains("not run")), "{stage} started: {named:?}");
+    }
+    assert!(s.engine_ok && s.reason.is_none(), "a stop is not a failure: {s:?}");
+    assert!(s.steps.iter().all(|(_, c)| *c == 0), "{:?}", s.steps);
+    assert!(r.children_started().is_empty(), "no engine child started: {:?}", r.children_started());
+    assert_eq!(r.runner_log(), runner_log_before, "no run-log line is added");
+    assert!(no_bundles_left(&r.cs.data_dir));
+    assert_eq!(r.listener.hits(), 0);
+}
+
+// ---- test 15: the scheduler's stop -------------------------------------------------------------------------
+
+#[test]
+fn test_15_a_stop_set_before_the_slot_starts_no_stage_and_survives_the_slot() {
+    let r = accepted_rig("o3-15-before", true);
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&panic_capture), window_open: false };
+    let mail = MailSeam { mailboxes: &one_due_mailbox, pass: Some(&panic_pass), window_open: false };
+    let sch = Scheduler::default();
+    sch.stop.store(true, Ordering::SeqCst);
+    let log_before = r.runner_log();
+    let s = run_slot_scoped(&r.cs, &sch, None, false, &grades, &mail, SlotScope::Full);
+    assert_nothing_ran(&r, &s, &log_before);
+    // Nothing cleared the stop, and a second slot on the same Scheduler also runs no stage.
+    assert!(sch.stop.load(Ordering::SeqCst), "nothing clears the stop");
+    let s2 = run_slot_scoped(&r.cs, &sch, None, false, &grades, &mail, SlotScope::NoRank);
+    assert_nothing_ran(&r, &s2, &log_before);
+    assert!(sch.stop.load(Ordering::SeqCst));
+}
+
+#[test]
+fn test_15_a_stop_set_from_the_grades_capture_lets_it_finish_and_removes_its_bundle() {
+    let r = accepted_rig("o3-15-mid", true);
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let sch = Scheduler::default();
+    let captures = Cell::new(0);
+    let capture = |_h: &'static str| {
+        captures.set(captures.get() + 1);
+        sch.stop.store(true, Ordering::SeqCst);
+        Ok(bundle())
+    };
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false };
+    let mail = MailSeam { mailboxes: &one_due_mailbox, pass: Some(&panic_pass), window_open: false };
+    let s = run_slot_scoped(&r.cs, &sch, None, false, &grades, &mail, SlotScope::Full);
+    assert_eq!(captures.get(), 1, "the capture in flight finishes");
+    assert!(r.children_started().is_empty(), "no engine child starts after the stop: {:?}", r.children_started());
+    let named = names_of(&s);
+    assert!(rows_starting(&named, "mail").iter().all(|n| n.contains("not run")), "the mail pass did not start (panic_pass would have fired): {named:?}");
+    assert!(no_bundles_left(&r.cs.data_dir), "the bundle is gone when the slot returns, a stop included");
+    assert!(s.engine_ok && s.reason.is_none(), "{s:?}");
+    assert!(sch.stop.load(Ordering::SeqCst));
+}
+
+// ---- test 18: slot.partial through run_slot_scoped -------------------------------------------------------------
+
+fn runner_log_of(r: &PrivacyRig) -> String { r.runner_log() }
+
+#[test]
+fn test_18_no_rank_names_the_grades_skip_like_a_full_slot_and_holds_rank_back_without_a_log_line() {
+    let r = accepted_rig("o3-18-norank", true);
+    let _ = std::fs::remove_file(r.v.join("state").join("today.md"));
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let capture = |_h: &'static str| Err(CaptureError::Unreachable);
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false };
+    let s = run_slot_scoped(&r.cs, &Scheduler::default(), None, false, &grades, &MailSeam { mailboxes: &no_mailbox, pass: None, window_open: false }, SlotScope::NoRank);
+    let named = names_of(&s);
+    assert!(named.iter().any(|n| n == "grades (skipped: Blackboard unreachable)"), "{named:?}");
+    assert!(runner_log_of(&r).contains("local ok grades (skipped: Blackboard unreachable)"), "the runner log gains its line as for a full slot");
+    assert_eq!(r.children_started(), ["sync", "coursework", "ingest", "judge"], "rank is not in the argv");
+    assert_eq!(named.iter().filter(|n| n.as_str() == "rank (not yet: the first full slot ranks)").count(), 1, "{named:?}");
+    assert!(!runner_log_of(&r).contains("not yet"), "a scope's rows stay out of the runner log");
+    assert!(!r.v.join("state").join("today.md").exists(), "no state/today.md was written");
+}
+
+#[test]
+fn test_18_before_config_runs_sync_only_never_captures_and_names_every_other_step_once() {
+    let r = accepted_rig("o3-18-before", true);
+    let _ = std::fs::remove_file(r.v.join("config").join("ingest.yaml"));
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&panic_capture), window_open: false };
+    let s = run_slot_scoped(&r.cs, &Scheduler::default(), None, false, &grades, &MailSeam { mailboxes: &no_mailbox, pass: None, window_open: false }, SlotScope::BeforeConfig);
+    let named = names_of(&s);
+    assert_eq!(r.children_started(), ["sync"], "the recorded argv is sync only");
+    assert!(no_bundles_left(&r.cs.data_dir), "the capture seam was never called, so no bundle was written");
+    for step in ["coursework", "grades", "ingest", "judge", "rank"] {
+        let rows = rows_starting(&named, step);
+        assert_eq!(rows.len(), 1, "{step} is one row (grades once: its capture and step together): {named:?}");
+        assert!(rows[0].starts_with(&format!("{step} (not yet:")), "{}", rows[0]);
+    }
+    assert!(!runner_log_of(&r).contains("not yet"), "no runner-log line for a scope's rows");
+}
+
+#[test]
+fn test_18_the_seams_belong_to_the_slot_so_no_rank_runs_them_as_a_full_slot_does() {
+    let r = accepted_rig("o3-18-seams", true);
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let (captures, passes) = (Cell::new(0), Cell::new(0));
+    let capture = |_h: &'static str| { captures.set(captures.get() + 1); Ok(bundle()) };
+    let pass = |_: &[Value]| { passes.set(passes.get() + 1); Ok("mail: forwarding on, 0 recovered".to_string()) };
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&capture), window_open: false };
+    let mail = MailSeam { mailboxes: &one_due_mailbox, pass: Some(&pass), window_open: false };
+    let full = run_slot_scoped(&r.cs, &Scheduler::default(), None, false, &grades, &mail, SlotScope::Full);
+    let full_children = r.children_started();
+    assert_eq!((captures.get(), passes.get()), (1, 1), "{:?}", names_of(&full));
+    let no_rank = run_slot_scoped(&r.cs, &Scheduler::default(), None, false, &grades, &mail, SlotScope::NoRank);
+    assert_eq!((captures.get(), passes.get()), (2, 2), "both seams ran under NoRank too: {:?}", names_of(&no_rank));
+    let all = r.children_started();
+    let second: Vec<String> = all[full_children.len()..].to_vec();
+    let want: Vec<String> = full_children.iter().filter(|c| c.as_str() != "rank").cloned().collect();
+    assert_eq!(second, want, "the same steps as a full slot, without rank");
+}
+
+#[test]
+fn test_18_a_pending_privacy_update_holds_the_same_steps_by_the_same_names_in_every_scope() {
+    let r = accepted_rig("o3-18-privacy", true);
+    r.set_privacy(Some("2026-01-01"));
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&panic_capture), window_open: false };
+    let mail = MailSeam { mailboxes: &one_due_mailbox, pass: Some(&panic_pass), window_open: false };
+    let held = |s: &knowlu::scheduler::RunSummary| -> Vec<String> { names_of(s).into_iter().filter(|n| n.contains(HELD)).collect() };
+    let full = run_slot_scoped(&r.cs, &Scheduler::default(), None, false, &grades, &mail, SlotScope::Full);
+    let no_rank = run_slot_scoped(&r.cs, &Scheduler::default(), None, false, &grades, &mail, SlotScope::NoRank);
+    assert_eq!(held(&full).len(), 6, "grades, mail, judge, sync, coursework, ingest: {:?}", names_of(&full));
+    assert_eq!(held(&no_rank), held(&full), "named exactly as in a full slot");
+    // And the scope still applies on top of the hold: rank is not held by the privacy update, so a
+    // NoRank slot names it as not yet, while a full slot runs it.
+    assert!(names_of(&no_rank).iter().any(|n| n == "rank (not yet: the first full slot ranks)"), "{:?}", names_of(&no_rank));
+    assert!(names_of(&full).iter().any(|n| n == "rank"), "{:?}", names_of(&full));
+    let privacy_rows = |s: &knowlu::scheduler::RunSummary| names_of(s).iter().filter(|n| n.starts_with("privacy")).count();
+    assert_eq!((privacy_rows(&full), privacy_rows(&no_rank)), (1, 1));
+}
+
+// ---- test 27: onboarding mode primes the scheduler's cached mode ---------------------------------------------------
+
+fn topline_scheduler(sch: &Scheduler) -> Value {
+    let mut env = json!({ "state": { "topline": {} } });
+    attach_scheduler(&mut env, sch).unwrap();
+    env["state"]["topline"]["scheduler"].clone()
+}
+
+#[test]
+fn test_27_a_default_scheduler_reports_the_script_placeholder_until_it_is_primed() {
+    let t = topline_scheduler(&Scheduler::default());
+    assert_eq!((t["mode"].as_str(), t["device_ok"].as_bool()), (Some("script"), Some(true)), "today's placeholder, pinned: {t}");
+}
+
+#[test]
+fn test_27_priming_on_a_step_2_vault_reports_app_mode_on_this_device() {
+    let (v, cs) = app_slot_vault("o3-27-prime");
+    let sch = Scheduler::default();
+    prime_mode_device(&cs, &sch);
+    let t = topline_scheduler(&sch);
+    assert_eq!((t["mode"].as_str(), t["device_ok"].as_bool()), (Some("app"), Some(true)), "{t}");
+    let _ = std::fs::remove_dir_all(&cs.data_dir);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+fn src_text(file: &str) -> String {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(file);
+    let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+    text.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n")
+}
+
+#[test]
+fn test_27_main_primes_the_mode_and_checks_for_an_update_once_and_never_installs() {
+    let main = src_text("main.rs");
+    assert!(main.contains("scheduler::prime_mode_device"), "the onboarding arm primes the cached mode before the window is built");
+    assert_eq!(main.matches("scheduler::spawn_update_check").count(), 1, "the onboarding arm calls spawn_update_check exactly once");
+    for banned in ["install_staged", "hold_for_install"] {
+        assert!(!main.contains(banned), "onboarding has no install path: main.rs names {banned}");
+    }
+}
+
+#[test]
+fn test_27_the_housekeeping_tick_calls_spawn_update_check_and_the_check_lives_only_inside_it() {
+    let sched = src_text("scheduler.rs");
+    let at = sched.find("pub fn spawn_update_check").expect("scheduler.rs defines spawn_update_check");
+    let rest = &sched[at..];
+    let body = &rest[..rest.find("\n}").map(|i| i + 2).unwrap_or(rest.len())];
+    assert!(body.contains("check_and_stage_blocking"), "the check moved into spawn_update_check");
+    assert_eq!(sched.matches("check_and_stage_blocking").count(), 1, "and appears nowhere else");
+    assert!(sched.matches("spawn_update_check(").count() >= 2, "the tick calls it as well as defining it");
+}

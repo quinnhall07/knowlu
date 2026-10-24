@@ -1233,3 +1233,21 @@ fn remove_lane_date_takes_the_date_off_the_day_before_returning() {
     assert!(nope["error"].as_str().unwrap().contains("lx:nothing:1") && nope["state"].is_object(), "{nope}");
     assert_eq!(ledger(), before, "a refusal writes nothing");
 }
+
+// ---- O3 F1, plan test 20: no other exit in onboarding mode -------------------------------------------------------
+
+/// `switch_profile`'s inner refuses with its named line when the console is in onboarding mode and
+/// writes nothing: `quit_at` is unchanged and `settings.json` is not written. The normal console's
+/// switch relaunches the app and exits the process, so it has no test here (existing tests unedited).
+#[test]
+fn test_20_switch_profile_refuses_in_onboarding_mode_and_writes_nothing() {
+    let (_v, cs) = open_scratch("o3-20-switch");
+    assert!(!cs.settings_path.exists(), "a fresh profile has no settings file yet");
+    let stamp = "2026-10-20T08:00:00Z".to_string();
+    cs.settings.lock().unwrap().quit_at = Some(stamp.clone());
+    let out = knowlu::commands::switch_profile_inner(&cs, knowlu::onboarding_state::LaunchMode::Onboarding);
+    assert_eq!(out["ok"], false, "{out}");
+    assert!(out["error"].as_str().unwrap_or_default().contains("finish or leave setup first"), "{out}");
+    assert_eq!(cs.settings.lock().unwrap().quit_at.as_deref(), Some(stamp.as_str()), "quit_at is unchanged");
+    assert!(!cs.settings_path.exists(), "nothing was written");
+}
