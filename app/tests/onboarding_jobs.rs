@@ -59,12 +59,14 @@ impl Gate {
     fn wait(&self, stop: &AtomicBool, honor_stop: bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut g = self.open.lock().unwrap();
-        while !*g {
-            assert!(Instant::now() < deadline, "a fake gate was never released");
+        // The stop is looked at before the gate, so a release that lands in the same instant as the
+        // stop still reads as "the job noticed the stop" (the helper is the test's, not an assertion).
+        loop {
             if honor_stop && stop.load(Ordering::SeqCst) { return false; }
+            if *g { return true; }
+            assert!(Instant::now() < deadline, "a fake gate was never released");
             g = self.cv.wait_timeout(g, Duration::from_millis(5)).unwrap().0;
         }
-        true
     }
 }
 
@@ -1994,4 +1996,296 @@ fn test_03_every_job_name_these_tests_use_is_in_the_resume_order() {
     assert!(seen.len() >= 15, "the scan found too few jobs: {seen:?}");
     let missing: Vec<&String> = seen.iter().filter(|j| !JOB_ORDER.contains(&j.as_str())).collect();
     assert!(missing.is_empty(), "not in JOB_ORDER: {missing:?}");
+}
+
+// ======================================================================================================
+// F2b: one call sets both stops (test 29), the never-driven first pass (test 32's F2b half), the status
+// that fails closed (test 28's second half) and the three exits' guards.
+// ======================================================================================================
+
+/// A slot runner that, like the real `run_slot_scoped`, looks only at `sch.stop` between its stages
+/// (never at the queue's own flag), after waiting at a gate that ignores both.
+struct SchStopRunner {
+    sch: Arc<knowlu::scheduler::Scheduler>,
+    gate: Arc<Gate>,
+    log: Log,
+}
+impl Runner for SchStopRunner {
+    fn run(&self, job: &str, _scope: Option<SlotScope>, _queue_stop: &AtomicBool) -> Outcome {
+        self.log.push(format!("start:{job}"));
+        self.gate.wait(&AtomicBool::new(false), false);
+        for step in steps_of(SlotScope::Full) {
+            if self.sch.stop.load(Ordering::SeqCst) {
+                self.log.push(format!("stopped_before:{step}"));
+                return Outcome::Stopped;
+            }
+            self.log.push(format!("step:{step}"));
+        }
+        Outcome::Slot(SlotRun { started: "2026-10-24T12:00:00.000Z".into(), steps: vec![], reason: None })
+    }
+}
+
+#[test]
+fn test_29_stop_both_sets_the_schedulers_stop_and_the_queues_so_a_slot_in_flight_starts_no_stage() {
+    let dir = scratch("t29");
+    save_answers(&dir, &Answers { courses: three_courses(), ..Default::default() }).unwrap();
+    let sch = Arc::new(knowlu::scheduler::Scheduler::default());
+    let (gate, log) = (Gate::new(), Log::default());
+    let deps = Deps {
+        data_dir: dir.clone(),
+        runner: Arc::new(SchStopRunner { sch: sch.clone(), gate: gate.clone(), log: log.clone() }),
+        entitlement: Arc::new(Ent(AtomicBool::new(true), AtomicUsize::new(0))),
+        sync_view: Arc::new(Syncs(Mutex::new(VecDeque::new()))),
+    };
+    let mut state = state_at(11, true);
+    state.school = Some(School { unitid: Some("900001".into()), label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: true });
+    let q = Queue::start(deps, state);
+    q.enqueue("slot.first_full");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while log.pos("start:slot.first_full").is_none() {
+        assert!(Instant::now() < deadline, "the slot never started");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!sch.stop.load(Ordering::SeqCst) && !q.stop_requested());
+    stop_both(&sch, &q);
+    assert!(sch.stop.load(Ordering::SeqCst), "the scheduler's stop is set");
+    assert!(q.stop_requested(), "the queue's stop is set");
+    gate.release();
+    q.drain();
+    assert!(!log.all().iter().any(|e| e.starts_with("step:")), "no stage started after the call: {:?}", log.all());
+    assert!(log.pos("stopped_before:sync").is_some());
+    assert_eq!(q.snapshot().jobs["slot.first_full"].state, JobState::Pending, "stopped, so pending");
+}
+
+/// The text of the `impl ExitSeams for LiveExit` block's `fn request_stop`.
+fn live_request_stop(src: &str) -> String {
+    let at = src.find("impl ExitSeams for LiveExit").expect("the live seams");
+    let from = &src[at..];
+    let s = from.find("fn request_stop").expect("request_stop");
+    let body = &from[s..];
+    body[..body.find("\n    }").unwrap_or(body.len())].to_string()
+}
+
+#[test]
+fn test_29_the_live_request_stop_is_stop_both_and_nothing_else_calls_the_queues_request_stop_there() {
+    let src = src_of("onboarding_state.rs");
+    let live = live_request_stop(&src);
+    assert!(live.contains("stop_both("), "{live}");
+    assert!(!live.contains("request_stop()") && !live.contains(".stop.store"), "the live seam does only that call:\n{live}");
+    let hits: Vec<_> = src.match_indices("queue.request_stop()").collect();
+    assert_eq!(hits.len(), 1, "the queue's request_stop is called once in onboarding_state.rs, inside stop_both");
+    let f = enclosing_fn(&src, hits[0].0);
+    assert!(f.starts_with("pub fn stop_both"), "{f}");
+}
+
+#[test]
+fn test_24_the_three_exit_commands_are_async_wrappers_and_the_one_live_drain_is_inside_the_live_seam() {
+    let src = src_of("onboarding_state.rs");
+    for name in ["onboarding_quit", "onboarding_sign_out", "onboarding_finish"] {
+        let at = src.find(&format!("pub fn {name}(")).unwrap_or_else(|| panic!("no command {name}"));
+        assert!(src[..at].trim_end().ends_with("#[tauri::command(async)]"), "{name} carries `async`");
+    }
+    let drains: Vec<usize> = src.match_indices("queue.drain()").map(|(i, _)| i).collect();
+    assert_eq!(drains.len(), 1, "one live drain call");
+    let live = src.find("impl ExitSeams for LiveExit").expect("the live seams");
+    assert!(live < drains[0] && !src[live..drains[0]].contains("\n}\n"), "the drain call is inside the live seam, which only the exits' inners reach");
+}
+
+/// `Seams`, with the answers file's recorded provider read back as the real seam reads it.
+struct Provided<'a>(Seams<'a>);
+impl ExitSeams for Provided<'_> {
+    fn request_stop(&self) { self.0.request_stop() }
+    fn drain(&self) { self.0.drain() }
+    fn save(&self) -> Result<(), String> { self.0.save() }
+    fn freeze_saves(&self) { self.0.freeze_saves() }
+    fn sign_out(&self) -> Result<(), String> { self.0.sign_out() }
+    fn relaunch(&self, args: &[&str]) -> Result<(), String> { self.0.relaunch(args) }
+    fn relaunch_with(&self) -> Result<(), String> { self.0.relaunch_with() }
+    fn stamp_quit_at(&self) { self.0.stamp_quit_at() }
+    fn flush(&self) { self.0.flush() }
+    fn exit(&self) { self.0.exit() }
+    fn snapshot(&self) -> OnboardingState { self.0.snapshot() }
+    fn write_finish(&self, handover: Vec<HandoverItem>) -> Result<(), String> { self.0.write_finish(handover) }
+    fn mail_provider(&self) -> Option<String> { recorded_mail_provider(&self.0.dir) }
+}
+
+/// A finishable state with the three mail items open.
+fn finishable_with_mail() -> OnboardingState {
+    let mut s = finishable();
+    for j in ["mail.setup", "mail.canary", "mail.first_pass"] { s.jobs.insert(j.into(), JobRecord { state: JobState::Pending, ..Default::default() }); }
+    s
+}
+
+fn handed_over(tag: &str, provider: Option<&str>) -> Vec<String> {
+    // Not entitled, so nothing runs and the three mail items stay open in the snapshot.
+    let r = rig(tag, finishable_with_mail(), false);
+    if let Some(p) = provider { update_answers(&r.dir, &|a| a.mail_provider = Some(p.into())).unwrap(); }
+    let seams = Provided(Seams::new(&r));
+    let out = onboarding_finish_inner(&seams, &ExitGuard::default(), epoch(CONFIRMED) + 180);
+    assert_eq!(out["ok"], true, "{tag}: {out}");
+    let Loaded::Ok(saved) = load_state(&r.dir) else { panic!("saved") };
+    assert!(saved.finished);
+    saved.handover.iter().filter(|h| h.item.starts_with("mail.")).map(|h| h.item.clone()).collect()
+}
+
+#[test]
+fn test_32_finish_leaves_a_never_driven_providers_first_pass_out_of_the_handover() {
+    assert_eq!(handed_over("t32-m365", Some("m365")), ["mail.canary", "mail.setup"], "held until C3: setup and canary kept, first pass dropped");
+    assert_eq!(handed_over("t32-other", Some("other")), ["mail.canary", "mail.setup"], "Guided is never driven either");
+    assert_eq!(handed_over("t32-google", Some("google")), ["mail.canary", "mail.first_pass", "mail.setup"], "Gmail's batch closes, so it is waited for");
+    assert_eq!(handed_over("t32-none", None), ["mail.canary", "mail.first_pass", "mail.setup"], "no provider recorded keeps the item");
+    assert_eq!(handed_over("t32-unknown", Some("something-else")), ["mail.canary", "mail.setup"], "an unknown service string reads as Guided, as from_service does");
+}
+
+#[test]
+fn test_32_backfill_never_driven_is_true_for_exactly_guided_and_m365() {
+    use knowlu::mail_steps::Provider;
+    assert!(backfill_never_driven(Provider::Guided));
+    assert!(backfill_never_driven(Provider::M365));
+    assert!(!backfill_never_driven(Provider::Gmail));
+}
+
+// ---- test 28's second half: the status fails closed ---------------------------------------------------------------
+
+#[test]
+fn test_28_a_status_whose_jobs_cannot_be_read_is_not_ok_and_carries_no_gate_and_no_item_list() {
+    let out = status_for(Err("the onboarding jobs could not be read".into()), None, None, 0);
+    assert_eq!(out["ok"], false, "{out}");
+    assert!(out["error"].as_str().is_some_and(|e| !e.is_empty()), "{out}");
+    for key in ["gate", "jobs", "proposals_ready"] {
+        assert!(out.get(key).is_none(), "a failed read answers no {key}: {out}");
+    }
+}
+
+#[test]
+fn test_28_a_status_that_read_its_jobs_carries_the_gate_the_exiting_progress_and_the_step_3_totals() {
+    let mut s = finishable();
+    s.jobs.insert("slot.first_full".into(), JobRecord { state: JobState::Pending, ..Default::default() });
+    s.jobs.insert("first.grades".into(), JobRecord { state: JobState::Failed, reason: Some("grades_read_failed".into()), ..Default::default() });
+    s.skips.push(Skip { step: 5, source: "mail".into(), cost_key: COST_MAIL.into() });
+    let confirmed = epoch(CONFIRMED);
+    let early = status_for(Ok(s.clone()), None, None, confirmed + 10);
+    assert_eq!(early["ok"], true, "{early}");
+    assert_eq!(early["gate"]["open"], false, "{early}");
+    assert_eq!(early["gate"]["still_coming"], serde_json::json!(["slot.first_full"]));
+    assert_eq!(early["gate"]["failed"][0]["key"], "first.grades");
+    assert_eq!(early["gate"]["failed"][0]["reason"], "grades_read_failed", "a failed item is named, never hidden");
+    assert_eq!(early["gate"]["not_connected"][0]["cost_key"], COST_MAIL);
+    assert_eq!(early["proposals_ready"], true, "config.ingest is done");
+    assert!(early["exiting"].is_null(), "not draining");
+    let exiting = ExitingNow { job: "slot.first_full".into(), long: true, since: "2026-10-24T12:03:00Z".into() };
+    let capped = status_for(Ok(s), None, Some(exiting), confirmed + 180);
+    assert_eq!(capped["gate"]["open"], true, "three minutes after the confirm");
+    assert_eq!(capped["exiting"], serde_json::json!({"job": "slot.first_full", "long": true, "since": "2026-10-24T12:03:00Z"}));
+    let totals = status_for(Ok(finishable()), Some(&Answers { courses: three_courses(), ..Default::default() }), None, 0);
+    assert_eq!(totals["step3"]["classes"], 3);
+}
+
+// ---- F2b review r1: the gate's class times, the lane jobs, the sign-out order, the stop's refusals ------------------
+
+#[test]
+fn test_09_finish_is_refused_before_step_10_is_confirmed_and_the_gate_lists_class_times() {
+    let mut s = finishable();
+    s.step10_confirmed_at = None;
+    let r = rig("t09-unconfirmed", s.clone(), false);
+    let seams = Seams::new(&r);
+    let out = onboarding_finish_inner(&seams, &ExitGuard::default(), epoch(CONFIRMED) + 100_000);
+    assert_eq!(out["ok"], false, "{out}");
+    assert!(r.log.all().is_empty(), "a refusal stops nothing: {:?}", r.log.all());
+    let status = status_for(Ok(s), None, None, epoch(CONFIRMED) + 100_000);
+    assert_eq!(status["gate"]["open"], false, "no confirm, no cap: {status}");
+    assert_eq!(status["gate"]["still_coming"], serde_json::json!(["class_times"]));
+    let confirmed = finishable();
+    assert_eq!(status_for(Ok(confirmed), None, None, epoch(CONFIRMED))["gate"]["open"], true, "confirmed, nothing else coming");
+}
+
+#[test]
+fn test_09_finish_needs_the_four_local_jobs_present_and_done_and_only_the_stores_may_be_absent() {
+    for missing in ["school.apply", "school.courses", "registrar.confirm", "config.ingest"] {
+        let mut s = finishable();
+        s.jobs.remove(missing);
+        let r = rig(&format!("t09-absent-{missing}"), s, false);
+        let seams = Seams::new(&r);
+        let out = onboarding_finish_inner(&seams, &ExitGuard::default(), epoch(CONFIRMED) + 600);
+        assert_eq!(out["ok"], false, "{missing} absent: {out}");
+        assert!(r.log.all().is_empty(), "{missing}: {:?}", r.log.all());
+    }
+    let mut s = finishable();
+    for store in ["school.store", "calendar.store"] { s.jobs.remove(store); }
+    let r = rig("t09-no-stores", s, false);
+    let out = onboarding_finish_inner(&Seams::new(&r), &ExitGuard::default(), epoch(CONFIRMED) + 600);
+    assert_eq!(out["ok"], true, "no store job is fine: {out}");
+}
+
+#[test]
+fn test_09_a_second_finish_after_the_first_landed_writes_nothing() {
+    let r = rig("t09-twice", finishable(), false);
+    let seams = Seams::new(&r);
+    let guard = ExitGuard::default();
+    assert_eq!(onboarding_finish_inner(&seams, &guard, epoch(CONFIRMED) + 180)["ok"], true);
+    // In life the first one ended the process; with fakes the guard is still held, so release it.
+    guard.0.store(false, Ordering::SeqCst);
+    let before = r.log.all();
+    let again = onboarding_finish_inner(&seams, &guard, epoch(CONFIRMED) + 180);
+    assert_eq!((again["ok"].clone(), again["finished"].clone()), (true.into(), true.into()), "{again}");
+    assert_eq!(r.log.all(), before, "no stop, drain, write, relaunch or exit the second time");
+    assert!(!guard.0.load(Ordering::SeqCst), "the guard is released");
+}
+
+#[test]
+fn test_17_sign_out_runs_only_after_the_drain_returns_and_a_writer_that_ignores_the_stop_is_waited_for() {
+    let r = rig("t17-drain-first", state_at(8, true), true);
+    // A writer that ignores the stop for a moment, standing in for school.capture writing the answers file.
+    let capture = r.fake.block("school.capture", false);
+    r.q.enqueue("school.capture");
+    r.wait_started("school.capture");
+    let seams = Seams::new(&r);
+    let out = std::thread::scope(|sc| {
+        let exit = sc.spawn(|| onboarding_sign_out_inner(&seams, &ExitGuard::default()));
+        r.wait_for("the stop", |r| r.q.stop_requested());
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(r.log.pos("drained").is_none() && !r.log.all().iter().any(|e| e.starts_with("sign_out")), "the sign-out waits for the writer: {:?}", r.log.all());
+        capture.release();
+        exit.join().unwrap()
+    });
+    assert_eq!(out["ok"], true, "{out}");
+    let order = ["set_stop", "end:school.capture", "drained", "save", "freeze", "sign_out frozen=true file_step=8", "relaunch:--pick", "exit"];
+    let at: Vec<usize> = order.iter().map(|e| seams.index(e)).collect();
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "stop, the writer's end, drain, save, freeze, sign-out, relaunch, exit: {:?}", r.log.all());
+}
+
+#[test]
+fn test_12_the_stop_and_the_exit_guard_refuse_an_answer_and_a_skip_through_the_live_check() {
+    let r = rig("t12-stop-refuses", state_at(8, true), false);
+    let guard = ExitGuard::default();
+    assert!(!exiting_now(&r.q, &guard));
+    guard.0.store(true, Ordering::SeqCst);
+    assert!(exiting_now(&r.q, &guard), "a held exit guard refuses");
+    guard.0.store(false, Ordering::SeqCst);
+    r.q.request_stop();
+    assert!(exiting_now(&r.q, &guard), "the queue's stop refuses");
+    let late = serde_json::json!({"zybooks_ignore": "ZYB-LATE"});
+    let out = answer_unless_exiting(exiting_now(&r.q, &guard), &r.dir, 8, &late, &mut |_| {});
+    assert_eq!(out["ok"], false, "{out}");
+    let rows = load_answers(&r.dir).unwrap().map(|a| a.zybooks_ignore).unwrap_or_default();
+    assert!(rows.is_empty(), "no late row after the stop: {rows:?}");
+    let src = src_of("onboarding_state.rs");
+    for name in ["pub fn onboarding_answer(", "pub fn onboarding_skip("] {
+        let body = enclosing_fn(&src, src.find(name).unwrap());
+        assert!(body.contains("exiting_now("), "{name} asks the live check:\n{body}");
+    }
+}
+
+#[test]
+fn test_17_update_state_rolls_back_a_change_whose_save_failed() {
+    let r = rig("t17-rollback", state_at(8, true), false);
+    r.q.save().unwrap();
+    let path = state_path(&r.dir);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let before = r.q.snapshot();
+    let out = r.q.update_state(|s| { s.skips.push(Skip { step: 5, source: "mail".into(), cost_key: COST_MAIL.into() }); });
+    assert!(out.is_err(), "the save could not land");
+    assert_eq!(r.q.snapshot().skips, before.skips, "the change is not kept in memory");
+    let _ = std::fs::remove_dir(&path);
 }
