@@ -70,6 +70,41 @@ enum Command {
         #[arg(long)]
         window: Option<String>,
     },
+    /// Step 3's counts for onboarding, from raw captures, before any note is written (Wave B plan
+    /// §4.4). Exactly one mode: `--preview` (`--feed`, `--courses`, optionally `--grades`, and
+    /// `--registrar` with `--school`) prints `{assignments_upcoming, class_times, classes, errors,
+    /// grades_courses, turned_in, by_course}`; `--tidied` prints `{effort_estimated, errors, imported_done,
+    /// imported_past, live_by_source}` from the vault. Never writes, opens no
+    /// socket, is never gated, and always exits 0: an unreadable input is a `null` and a line in `errors`.
+    Onboarding {
+        #[arg(long, default_value = ".")]
+        vault: PathBuf,
+        /// Accepted for symmetry with the other read commands; the output is always JSON.
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        preview: bool,
+        #[arg(long)]
+        tidied: bool,
+        /// Pin the clock (YYYY-MM-DDTHH:MM, vault time zone). Without it, now.
+        #[arg(long)]
+        now: Option<String>,
+        /// The LMS calendar feed (ICS), a temp file the app fetched on the device.
+        #[arg(long)]
+        feed: Option<PathBuf>,
+        /// The captured course list: a JSON array of `{code, name, slug, label}`.
+        #[arg(long)]
+        courses: Option<PathBuf>,
+        /// The v2 grades bundle.
+        #[arg(long)]
+        grades: Option<PathBuf>,
+        /// The registrar's raw answer (Banner JSON). Needs `--school`.
+        #[arg(long)]
+        registrar: Option<PathBuf>,
+        /// The registrar's school key (`registrar::SCHOOLS`), with `--registrar`.
+        #[arg(long)]
+        school: Option<String>,
+    },
     /// Fetch, refresh the series file, and print the current commitment proposals — the
     /// phase-2 confirm screen's data source (spec §5.1, R14). Writes no note, no card and no
     /// journal record; `state/calendar.md` is untouched. Always exits 0. With `--confirm`
@@ -497,6 +532,26 @@ fn main() -> ExitCode {
             };
             if let Some(sha) = build_sha { state.topline.engine_build = Some(sha); state.revision = knowlu_engine::surface::revision_of(&state); }
             println!("{}", knowlu_engine::surface::state_json(&state));
+            ExitCode::SUCCESS
+        }
+        Command::Onboarding { vault, json: _, preview, tidied, now, feed, courses, grades, registrar, school } => {
+            // Read-only and always exit 0: a usage problem is a named line, never a failure.
+            let tz = cli::vault_zone(&vault);
+            let now = match now {
+                None => cli::local_now(&vault),
+                Some(n) => match n.parse::<jiff::civil::DateTime>() {
+                    Ok(dt) => dt,
+                    Err(_) => { println!("onboarding: bad --now {n:?}; expected YYYY-MM-DDTHH:MM"); return ExitCode::SUCCESS; }
+                },
+            };
+            match (preview, tidied) {
+                (true, false) => {
+                    let files = knowlu_engine::onboarding::PreviewFiles { feed, courses, grades, registrar, school };
+                    println!("{}", knowlu_engine::onboarding::run_preview(&files, &tz, now));
+                }
+                (false, true) => println!("{}", knowlu_engine::onboarding::run_tidied(&vault)),
+                _ => println!("onboarding: exactly one mode (--preview or --tidied)"),
+            }
             ExitCode::SUCCESS
         }
         // commitments command: begin

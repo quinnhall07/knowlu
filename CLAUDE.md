@@ -88,6 +88,9 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
 - **The engine gates itself:** `coursework`, `ingest`, `grades`, `judge` and `sync` do not run past the
   72-hour entitlement grace (`engine/src/entitle.rs`); the refusal is a named line at exit 0. `rank`,
   `surface` and `write` are never gated.
+- `onboarding` (`--preview`, `--tidied`) never writes, reaches no network, is never gated and always
+  exits 0; an unreadable input is a named `null`. Onboarding mode runs no scheduler, tray or
+  autostart until the reveal.
 - Cloud calls from `ingest`, `coursework` and `rank` are **transport only**, never judgment. Judgment
   is `judge`'s tier 3 through `CloudModel` (`engine/src/cloudmodel.rs`); the prompt, schema and pinned
   model live server-side.

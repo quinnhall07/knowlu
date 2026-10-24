@@ -167,3 +167,7 @@ pub const PINNED_FIXTURE_DATE: &str = "2026-08-28";
 /// whether they were built from the same commit (spec §15 Q1: the console shows `engine newer than
 /// console` when not).
 pub const BUILD_SHA: Option<&str> = option_env!("KNOWLU_BUILD_SHA");
+
+// Onboarding (Wave B plan §4.4, F7a): `onboarding --preview`, the read-only step-3 counts from raw
+// captures. Never writes, reaches no network, is never gated. The clap entry is in `main.rs`.
+pub mod onboarding;
