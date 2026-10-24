@@ -31,10 +31,15 @@ pub struct PreviewInputs<'a> {
 /// Step 3's counts. Keys: `classes`, `class_times`, `assignments_upcoming`, `turned_in`,
 /// `grades_courses` (each a number or `null`) and `errors` (an array of lines).
 ///
-/// `by_course` is an object keyed by course slug (the label when the slug is empty) whose values
-/// carry `assignments_upcoming`, `turned_in` and `class_times`, each `null` where its input is
-/// missing, so the reveal can re-total after the student removes a course. An item that matches no
-/// course is in the totals and in no bucket; `null` when there is no course list.
+/// `by_course` is an object of buckets whose values carry `assignments_upcoming`, `turned_in` and
+/// `class_times` (each `null` where its input is missing) and `codes`, so the reveal can re-total
+/// after the student removes a course. An item is matched against each course one at a time with
+/// `ingest::match_course` and counted once under the sorted set of course keys that claim it. A
+/// course's key is its LMS course key (`code`; the slug, then the label, when it is empty). The bucket
+/// is named by those keys joined with `,` (its `codes` array is the set): one key in the usual case,
+/// two for an item a past and a current shell both claim, and `unmatched` (empty `codes`) for an item
+/// no course claims. The buckets sum to the totals; the app totals every bucket whose `codes` is empty
+/// or names a kept course, which is what ingest will import. `null` when there is no course list.
 pub fn preview(inputs: &PreviewInputs, tz: &TimeZone, now: DateTime) -> Value {
     preview_inner(inputs, &[], tz, now)
 }
@@ -57,11 +62,15 @@ fn input<'a>(name: &str, text: Option<&'a str>, unread: &[&str], required: bool,
     text
 }
 
-/// One course of the captured list: the `by_course` key (the slug, or the label when the slug is
-/// empty; empty when it has neither), the LMS's course key, and the codes its label and slug compact to.
+/// One course of the captured list. `key` is the `by_course` key: the LMS course key (`code`),
+/// else the slug, else the label; empty when it has none of the three, and then it has no bucket.
+/// Two enrolments of one course in different terms share a slug but never a `code`, so a removed
+/// past-term shell can never take a live course's counts with it. `codes` are what the label and
+/// slug compact to, for the registrar's class times.
 struct Course {
     key: String,
-    lms: String,
+    code: String,
+    label: String,
     codes: Vec<String>,
 }
 
@@ -75,9 +84,10 @@ fn read_courses(text: &str, errors: &mut Vec<String>) -> Option<Vec<Course>> {
     Some(
         list.iter()
             .map(|c| {
-                let (slug, label) = (field(c, "slug"), field(c, "label"));
+                let (code, slug, label) = (field(c, "code"), field(c, "slug"), field(c, "label"));
                 let codes = [&label, &slug].iter().map(|t| compact(t)).filter(|t| !t.is_empty()).collect();
-                Course { key: if slug.is_empty() { label } else { slug }, lms: field(c, "code"), codes }
+                let key = [&code, &slug, &label].into_iter().find(|t| !t.is_empty()).cloned().unwrap_or_default();
+                Course { key, code, label, codes }
             })
             .collect(),
     )
@@ -88,32 +98,17 @@ fn course_with_code(courses: &[Course], code: &str) -> Option<usize> {
     courses.iter().position(|c| c.codes.iter().any(|k| k == code))
 }
 
-/// Does `text` open with a course code? Its alphanumeric runs are joined from the start, one to
-/// three of them, and compared with the course's codes: `SYN-110-003-FALL2026`, `SYN 110: Reading`
-/// and `SYN110.55555` all open with `SYN110`; `SYN-1100-001` does not. Never a mid-sentence mention.
-fn opens_with_code(text: &str, codes: &[String]) -> bool {
-    let runs: Vec<&str> = text.split(|c: char| !c.is_ascii_alphanumeric()).filter(|t| !t.is_empty()).collect();
-    (1..=runs.len().min(3)).any(|k| codes.contains(&compact(&runs[..k].concat())))
-}
-
-/// The ICS has no one reliable course field (the fixture's gradebook items carry none, a homework
-/// item has the section id in a trailing `[...]` of its SUMMARY, another in CATEGORIES). So the
-/// candidates are the SUMMARY's trailing bracket, each CATEGORIES value and the SUMMARY itself
-/// (its prefix); never DESCRIPTION, never a title match.
-fn course_texts(raw: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in raw.split('\n') {
-        let Some((name, _, value)) = ingest::parse_property(line) else { continue };
-        let value = ingest::unescape(&value);
-        match name.as_str() {
-            "SUMMARY" => {
-                if let Some((_, inner)) = value.trim_end().strip_suffix(']').and_then(|r| r.rsplit_once('[')) {
-                    out.push(inner.to_string());
-                }
-                out.push(value);
+/// One course's `(fragment, key)` pairs as `config.ingest` writes them into `course_map` (R-C1-48):
+/// its LMS course key and its human code (the label), both pointing at the course's `by_course` key.
+/// A course is matched on its own pairs (see [`claiming_keys`]), so two shells that share a label
+/// both claim an item that names it; no fragment is dropped for being named first elsewhere.
+fn course_pairs(c: &Course) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    if !c.key.is_empty() {
+        for fragment in [&c.code, &c.label].into_iter().filter(|f| !f.is_empty()) {
+            if !out.iter().any(|(f, _)| f == fragment) {
+                out.push((fragment.clone(), c.key.clone()));
             }
-            "CATEGORIES" => out.extend(value.split(',').map(|s| s.trim().to_string())),
-            _ => {}
         }
     }
     out
@@ -124,13 +119,13 @@ fn course_texts(raw: &str) -> Vec<String> {
 /// item timed earlier today still counts and the proof's number equals what lands in the vault.
 /// Institutional noise and an event with no due are not items. `None` when the text is not a
 /// calendar.
-fn read_feed(text: &str, tz: &TimeZone, now: DateTime, errors: &mut Vec<String>) -> Option<Vec<FeedItem>> {
+fn read_feed(text: &str, tz: &TimeZone, now: DateTime, errors: &mut Vec<String>) -> Option<Vec<ingest::Event>> {
     if !text.contains("BEGIN:VCALENDAR") {
         errors.push("feed: not a calendar".to_string());
         return None;
     }
     let (events, _malformed) = ingest::parse_ics(text, tz);
-    let mut upcoming: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut upcoming: BTreeMap<String, ingest::Event> = BTreeMap::new();
     for e in events {
         let live = match e.due {
             Some(Due::DateTime(dt)) => dt.date() >= now.date(),
@@ -138,16 +133,10 @@ fn read_feed(text: &str, tz: &TimeZone, now: DateTime, errors: &mut Vec<String>)
             None => false,
         };
         if live && !ingest::is_institutional_noise(&e.uid) {
-            upcoming.entry(e.uid).or_insert_with(|| course_texts(&e.raw));
+            upcoming.entry(e.uid.clone()).or_insert(e);
         }
     }
-    Some(upcoming.into_iter().map(|(uid, texts)| FeedItem { uid, texts }).collect())
-}
-
-/// An upcoming feed item: its UID and the texts that may name its course.
-struct FeedItem {
-    uid: String,
-    texts: Vec<String>,
+    Some(upcoming.into_values().collect())
 }
 
 /// From the v2 bundle: the item columns whose row says turned in (O1's rule), and how many courses
@@ -236,34 +225,41 @@ fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: Da
         (Some(text), Some(list)) => read_registrar(text, inputs.school, list, &mut errors),
         _ => None,
     };
-    let is_done = |u: &FeedItem| grades.as_ref().is_some_and(|g| ingest::gradable_id(&u.uid).is_some_and(|id| g.done.contains(id)));
+    let is_done = |e: &ingest::Event| grades.as_ref().is_some_and(|g| ingest::gradable_id(&e.uid).is_some_and(|id| g.done.contains(id)));
     let turned_in = match (&feed, &grades) {
         (Some(items), Some(_)) => Some(items.iter().filter(|i| is_done(i)).count()),
         _ => None,
     };
     let by_course = courses.as_ref().map(|list| {
-        let mut buckets: BTreeMap<String, [Option<usize>; 3]> = BTreeMap::new();
+        let zero = |on: bool| on.then_some(0);
+        let empty = [zero(feed.is_some()), zero(feed.is_some() && grades.is_some()), zero(class_times.is_some())];
+        // Every keyed course has its own bucket from the start; a set of two or more codes (an item
+        // two courses both claim) is added when an item lands there.
+        let mut buckets: BTreeMap<String, ([Option<usize>; 3], Vec<String>)> = BTreeMap::new();
         for c in list.iter().filter(|c| !c.key.is_empty()) {
-            let zero = |on: bool| on.then_some(0);
-            buckets.insert(c.key.clone(), [zero(feed.is_some()), zero(feed.is_some() && grades.is_some()), zero(class_times.is_some())]);
+            buckets.insert(c.key.clone(), (empty, vec![c.key.clone()]));
         }
-        let mut add = |idx: Option<usize>, slot: usize| {
-            let Some(c) = idx.map(|i| &list[i]).filter(|c| !c.key.is_empty()) else { return };
-            if let Some(n) = buckets.get_mut(&c.key).and_then(|b| b[slot].as_mut()) {
+        buckets.insert(UNMATCHED.to_string(), (empty, Vec::new()));
+        let mut add = |codes: &BTreeSet<String>, slot: usize| {
+            let key = if codes.is_empty() { UNMATCHED.to_string() } else { codes.iter().cloned().collect::<Vec<_>>().join(",") };
+            let entry = buckets.entry(key).or_insert_with(|| (empty, codes.iter().cloned().collect()));
+            if let Some(n) = entry.0[slot].as_mut() {
                 *n += 1;
             }
         };
         for item in feed.iter().flatten() {
-            let idx = course_of_item(item, list, grades.as_ref());
-            add(idx, 0);
+            let codes = claiming_keys(item, list, grades.as_ref());
+            add(&codes, 0);
             if is_done(item) {
-                add(idx, 1);
+                add(&codes, 1);
             }
         }
         for idx in class_times.iter().flatten() {
-            add(Some(*idx), 2);
+            add(&BTreeSet::from([list[*idx].key.clone()]).into_iter().filter(|k| !k.is_empty()).collect(), 2);
         }
-        let entry = |b: &[Option<usize>; 3]| json!({"assignments_upcoming": b[0], "turned_in": b[1], "class_times": b[2]});
+        let entry = |(n, codes): &([Option<usize>; 3], Vec<String>)| {
+            json!({"assignments_upcoming": n[0], "class_times": n[2], "codes": codes, "turned_in": n[1]})
+        };
         Value::Object(buckets.iter().map(|(k, b)| (k.clone(), entry(b))).collect())
     });
     json!({
@@ -277,15 +273,29 @@ fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: Da
     })
 }
 
-/// The course a feed item belongs to: the first course in list order whose code the item's own
-/// texts open with; failing that, the course the grades bundle holds the item's column in. Never
-/// the title alone.
-fn course_of_item(item: &FeedItem, courses: &[Course], grades: Option<&Grades>) -> Option<usize> {
-    let by_text = courses.iter().position(|c| item.texts.iter().any(|t| opens_with_code(t, &c.codes)));
-    by_text.or_else(|| {
-        let lms = grades?.owner.get(ingest::gradable_id(&item.uid)?)?;
-        courses.iter().position(|c| !c.lms.is_empty() && &c.lms == lms)
-    })
+/// The `by_course` key of the items (and class times) that no course claims: they count in the
+/// totals, so the buckets sum to the totals, and under this key so the app can leave them out of a
+/// kept-courses total. (An LMS course key never reads like this.)
+const UNMATCHED: &str = "unmatched";
+
+/// The keys of the courses that claim a feed item, by ingest's own rule: each course is matched on
+/// its own pairs with `ingest::match_course` (a uid pin, then the SUMMARY and CATEGORIES against the
+/// `course_map` fragments), so a proof and a vault cannot disagree. Usually one key; two for an item
+/// a past-term and a current shell both claim; none for an item no course claims. A gradebook item
+/// the bundle holds in a course is pinned to it first, the way a `course_map` entry naming the
+/// item's own UID would pin it; that is the only use of the bundle.
+fn claiming_keys(item: &ingest::Event, courses: &[Course], grades: Option<&Grades>) -> BTreeSet<String> {
+    let owner = grades.and_then(|g| g.owner.get(ingest::gradable_id(&item.uid)?));
+    courses
+        .iter()
+        .filter(|c| !c.key.is_empty())
+        .filter(|c| {
+            let pin = owner.filter(|lms| !c.code.is_empty() && &c.code == *lms).map(|_| (item.uid.clone(), c.key.clone()));
+            let map: Vec<(String, String)> = pin.into_iter().chain(course_pairs(c)).collect();
+            ingest::match_course(item, &map).is_some()
+        })
+        .map(|c| c.key.clone())
+        .collect()
 }
 
 /// The files `--preview` reads, by path (the command's arguments).
@@ -353,32 +363,62 @@ fn field_text(meta: &Mapping, key: &str) -> Option<String> {
     crate::yaml::get(meta, key).and_then(crate::yaml::text).map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
 }
 
-/// The notes (by path) and ids an `agent:` actor set `effort_hours` on, from the journal's day files.
-/// `None` and a named line when the folder is missing. Reads through the ledger reader, which writes nothing.
-fn agent_effort_sets(vault: &Path, errors: &mut Vec<String>) -> Option<(BTreeSet<String>, BTreeSet<String>)> {
+/// What the journal says an `agent:` actor did to the effort of a note, keyed by note id and by path.
+#[derive(Default)]
+struct AgentEffort {
+    /// An `op: set` of `effort_hours`.
+    set_ids: BTreeSet<String>,
+    set_paths: BTreeSet<String>,
+    /// An `op: create` (the note was minted with its effort already judged, as Gmail's are).
+    created_ids: BTreeSet<String>,
+    created_paths: BTreeSet<String>,
+}
+
+impl AgentEffort {
+    /// Did an agent estimate this note's effort? A journal `set` of `effort_hours`, or an agent
+    /// `create` of a note whose `effort_source` is `inferred`. The record is matched by the note's
+    /// `id`; by `path` only when the note has no `id`, so a note archived and re-created at the
+    /// same path does not inherit the old one's estimate.
+    fn estimated(&self, path: &str, meta: &Mapping) -> bool {
+        let inferred = field_text(meta, "effort_source").as_deref() == Some("inferred");
+        match field_text(meta, "id") {
+            Some(id) => self.set_ids.contains(&id) || (inferred && self.created_ids.contains(&id)),
+            None => self.set_paths.contains(path) || (inferred && self.created_paths.contains(path)),
+        }
+    }
+}
+
+/// The journal's agent effort records, from its day files. `None` and a named line when the folder
+/// is missing. Reads through the ledger reader, which writes nothing.
+fn agent_effort(vault: &Path, errors: &mut Vec<String>) -> Option<AgentEffort> {
     let mut ledger = crate::ledger::JsonlLedger::new(vault.join("state").join("journal"));
     if !ledger.root.is_dir() {
         errors.push("journal: folder not found".to_string());
         return None;
     }
-    let (mut paths, mut ids) = (BTreeSet::new(), BTreeSet::new());
+    let mut out = AgentEffort::default();
     let text = |r: &crate::ledger::Record, k: &str| r.get(k).and_then(Value::as_str).map(str::to_string);
     for r in ledger.read(None, None) {
-        let by_agent = text(&r, "actor").is_some_and(|a| crate::provenance::is_agent(&a));
-        if by_agent && text(&r, "op").as_deref() == Some("set") && text(&r, "field").as_deref() == Some("effort_hours") {
-            paths.extend(text(&r, "path").map(|p| p.replace('\\', "/")));
-            ids.extend(text(&r, "id"));
+        if !text(&r, "actor").is_some_and(|a| crate::provenance::is_agent(&a)) {
+            continue;
         }
+        let (ids, paths) = match (text(&r, "op").as_deref(), text(&r, "field").as_deref()) {
+            (Some("set"), Some("effort_hours")) => (&mut out.set_ids, &mut out.set_paths),
+            (Some("create"), _) => (&mut out.created_ids, &mut out.created_paths),
+            _ => continue,
+        };
+        ids.extend(text(&r, "id").filter(|i| !i.is_empty()));
+        paths.extend(text(&r, "path").map(|p| p.replace('\\', "/")));
     }
     errors.extend(ledger.warnings.iter().map(|w| format!("journal: {w}")));
-    Some((paths, ids))
+    Some(out)
 }
 
 /// `--tidied`: the reveal's counts from the vault. `imported_past` and `imported_done` count
 /// `archive/` notes by `archived_reason`; `live_by_source` counts the active tasks in `tasks/` by
 /// `created_by` (none named is `unknown`); `effort_estimated` counts those tasks with at least one
-/// `op: set` of `effort_hours` by an `agent:` actor in the journal, even if the student overrode it
-/// since. A folder that is missing is `null` for what it feeds and a named line in `errors`; a vault
+/// `op: set` of `effort_hours` by an `agent:` actor in the journal (or an agent `create` of a note
+/// whose `effort_source` is `inferred`), even if the student overrode it since. A folder that is missing is `null` for what it feeds and a named line in `errors`; a vault
 /// that does not exist is all `null`. Nothing is created, written or fetched.
 pub fn tidied(vault: &Path) -> Value {
     let mut errors = Vec::new();
@@ -393,7 +433,7 @@ pub fn tidied(vault: &Path) -> Value {
         let tasks = folder_notes(vault, "tasks", &mut errors).map(|notes| {
             notes.into_iter().filter(|(_, m)| field_text(m, "status").as_deref().unwrap_or("active") == "active").collect::<Vec<_>>()
         });
-        let sets = agent_effort_sets(vault, &mut errors);
+        let sets = agent_effort(vault, &mut errors);
         if let Some(tasks) = &tasks {
             let mut by_source: BTreeMap<String, usize> = BTreeMap::new();
             for (_, meta) in tasks {
@@ -401,9 +441,8 @@ pub fn tidied(vault: &Path) -> Value {
             }
             live = Some(by_source);
         }
-        if let (Some(tasks), Some((paths, ids))) = (&tasks, &sets) {
-            let set_by_agent = |(path, meta): &&(String, Mapping)| paths.contains(path) || field_text(meta, "id").is_some_and(|id| ids.contains(&id));
-            effort = Some(tasks.iter().filter(set_by_agent).count());
+        if let (Some(tasks), Some(sets)) = (&tasks, &sets) {
+            effort = Some(tasks.iter().filter(|(path, meta)| sets.estimated(path, meta)).count());
         }
     }
     json!({
@@ -772,27 +811,29 @@ END:VEVENT
 
     // ---- `by_course`: the reveal's per-course counts ----
 
-    /// An event with a CATEGORIES line, as Blackboard writes the section id.
+    /// An event with an optional CATEGORIES line, as Blackboard writes the section id.
     fn vevent_in(uid: &str, summary: &str, categories: Option<&str>, description: &str) -> String {
         let cat = categories.map(|c| format!("CATEGORIES:{c}\n")).unwrap_or_default();
         format!("BEGIN:VEVENT\nUID:{uid}\nSUMMARY:{summary}\n{cat}DESCRIPTION:{description}\nDTSTART:20260905T235900\nEND:VEVENT\n")
     }
 
-    fn by_course(v: &Value, slug: &str, key: &str) -> Value {
-        v["by_course"][slug][key].clone()
+    fn by_course(v: &Value, key: &str, field: &str) -> Value {
+        v["by_course"][key][field].clone()
+    }
+
+    /// Every number in `by_course` under `field`, summed over all keys (`unmatched` included).
+    fn sum_over_keys(v: &Value, field: &str) -> u64 {
+        v["by_course"].as_object().unwrap().values().map(|b| b[field].as_u64().unwrap()).sum()
     }
 
     fn two_class_banner() -> String {
         let meets = json!([{"meetingType": "CLAS", "monday": true, "beginTime": "0900", "endTime": "0950",
                             "startDate": "08/20/2026", "endDate": "12/05/2026"}]);
-        banner_rows(vec![
-            json!({"term": "202640", "courseReferenceNumber": "90001", "subject": "SYN", "courseNumber": "110",
-                   "scheduleDescription": "Lecture", "statusIndicator": "IR", "meetingTimes": meets.clone()}),
-            json!({"term": "202640", "courseReferenceNumber": "90002", "subject": "SYN", "courseNumber": "120",
-                   "scheduleDescription": "Lecture", "statusIndicator": "IR", "meetingTimes": meets.clone()}),
-            json!({"term": "202640", "courseReferenceNumber": "90003", "subject": "ZZT", "courseNumber": "999",
-                   "scheduleDescription": "Lecture", "statusIndicator": "IR", "meetingTimes": meets}),
-        ])
+        let row = |crn: &str, subject: &str, number: &str| {
+            json!({"term": "202640", "courseReferenceNumber": crn, "subject": subject, "courseNumber": number,
+                   "scheduleDescription": "Lecture", "statusIndicator": "IR", "meetingTimes": meets.clone()})
+        };
+        banner_rows(vec![row("90001", "SYN", "110"), row("90002", "SYN", "120"), row("90003", "ZZT", "999")])
     }
 
     fn full_preview(feed: &str) -> Value {
@@ -801,12 +842,15 @@ END:VEVENT
         preview(&inputs, &chicago(), now())
     }
 
+    /// Course one is LMS key `_900001_1` ("SYN 110"), course two `_900002_1` ("SYN 120").
     fn all_mapped_feed() -> String {
         ics(&[
-            vevent_in("BB-ASSIGN-1", "Homework 2 [SYN-110-003-FALL2026]", None, "x"),
-            vevent_in("BB-ASSIGN-2", "Kapitel 2 Quiz", Some("SYN-120-001-FALL2026"), "x"),
+            // The LMS course key in the UID: ingest's uid pass.
+            vevent_in("UA_900001_1-HW2", "Homework 2", None, "x"),
+            // The human code in CATEGORIES, and at the head of a SUMMARY.
+            vevent_in("BB-ASSIGN-2", "Kapitel 2 Quiz", Some("SYN 120"), "x"),
             vevent_in("BB-ASSIGN-3", "SYN 120: Reading", None, "x"),
-            // No course text at all; the grades bundle puts column _71_1 in course _900001_1 (SYN 110).
+            // No course text at all; the grades bundle holds column _71_1 in course _900001_1.
             vevent_in(&format!("{GB}_71_1"), "Renamed", None, "x"),
         ])
     }
@@ -814,40 +858,95 @@ END:VEVENT
     #[test]
     fn per_course_counts_sum_to_the_totals_when_every_item_maps() {
         let v = full_preview(&all_mapped_feed());
-        let sum = |key: &str| -> u64 { ["syn-110", "syn-120"].iter().map(|s| by_course(&v, s, key).as_u64().unwrap()).sum() };
         assert_eq!(count(&v, "assignments_upcoming"), json!(4), "{v}");
-        assert_eq!(sum("assignments_upcoming"), 4, "{v}");
-        assert_eq!(count(&v, "turned_in"), json!(1), "{v}");
-        assert_eq!(sum("turned_in"), 1, "{v}");
-        assert_eq!(by_course(&v, "syn-110", "turned_in"), json!(1), "{v}");
+        assert_eq!(by_course(&v, "_900001_1", "assignments_upcoming"), json!(2), "{v}");
+        assert_eq!(by_course(&v, "_900002_1", "assignments_upcoming"), json!(2), "{v}");
+        assert_eq!(by_course(&v, "unmatched", "assignments_upcoming"), json!(0), "{v}");
+        assert_eq!(by_course(&v, "_900001_1", "turned_in"), json!(1), "{v}");
         assert_eq!(count(&v, "class_times"), json!(2), "ZZT 999 is not in the course list: {v}");
-        assert_eq!(sum("class_times"), 2, "{v}");
+        for (field, total) in [("assignments_upcoming", 4), ("turned_in", 1), ("class_times", 2)] {
+            assert_eq!(sum_over_keys(&v, field), total, "{field}: {v}");
+        }
     }
 
     #[test]
-    fn an_item_matching_no_course_is_in_the_totals_and_in_no_bucket() {
+    fn an_item_reaching_no_course_is_under_unmatched_and_the_buckets_still_sum_to_the_totals() {
         let feed = ics(&[
-            vevent_in("BB-ASSIGN-1", "Homework [SYN-110-003-FALL2026]", None, "x"),
+            vevent_in("UA_900001_1-HW", "Homework", None, "x"),
             vevent_in("BB-ASSIGN-2", "Orphan [ZZT-999-001-FALL2026]", None, "x"),
-            // The title names a course mid-sentence and the description names one: neither is a match.
-            vevent_in("BB-ASSIGN-3", "Quiz covering SYN 120", None, "SYN 120 reading"),
-            vevent_in("BB-ASSIGN-4", "Quiz A", None, "x"),
+            // Ingest's rule: a SUMMARY that names a course code at a boundary is that course, wherever
+            // in the sentence. Only DESCRIPTION is never read, and SYN 1100 is not SYN 110.
+            vevent_in("BB-ASSIGN-3", "Quiz covering SYN 120", None, "x"),
+            vevent_in("BB-ASSIGN-4", "Quiz A", None, "SYN 120 reading"),
+            vevent_in("BB-ASSIGN-5", "Quiz B", Some("SYN 1100"), "x"),
         ]);
         let v = full_preview(&feed);
-        assert_eq!(count(&v, "assignments_upcoming"), json!(4), "{v}");
-        assert_eq!(by_course(&v, "syn-110", "assignments_upcoming"), json!(1), "{v}");
-        assert_eq!(by_course(&v, "syn-120", "assignments_upcoming"), json!(0), "{v}");
+        assert_eq!(count(&v, "assignments_upcoming"), json!(5), "{v}");
+        assert_eq!(by_course(&v, "_900001_1", "assignments_upcoming"), json!(1), "{v}");
+        assert_eq!(by_course(&v, "_900002_1", "assignments_upcoming"), json!(1), "{v}");
+        assert_eq!(by_course(&v, "unmatched", "assignments_upcoming"), json!(3), "{v}");
+        assert_eq!(sum_over_keys(&v, "assignments_upcoming"), 5, "{v}");
     }
 
     #[test]
-    fn a_section_id_matches_at_a_token_boundary_only() {
-        // SYN-1100 is not SYN 110; PH-106 would not match either course.
-        let feed = ics(&[
-            vevent_in("BB-ASSIGN-1", "Thing [SYN-1100-001]", None, "x"),
-            vevent_in("BB-ASSIGN-2", "Thing", Some("SYN110.55555.202640"), "x"),
+    fn attribution_is_ingests_own_rule_over_each_courses_pairs() {
+        // The claim is `ingest::match_course` over the pairs `config.ingest` writes for the course,
+        // so the proof's course is the course the vault's task gets, whatever that rule is.
+        let c = courses();
+        let list = read_courses(&c, &mut Vec::new()).unwrap();
+        assert_eq!(course_pairs(&list[0]), [("_900001_1".to_string(), "_900001_1".to_string()), ("SYN 110".into(), "_900001_1".into())]);
+        let (events, _) = ingest::parse_ics(&all_mapped_feed(), &chicago());
+        for e in &events {
+            let theirs: BTreeSet<String> =
+                list.iter().filter(|c| ingest::match_course(e, &course_pairs(c)).is_some()).map(|c| c.key.clone()).collect();
+            let ours = claiming_keys(e, &list, None);
+            assert_eq!(ours, theirs, "{}", e.uid);
+        }
+    }
+
+    /// What the app totals for the kept courses: every bucket whose code set is empty or names a kept code.
+    fn kept_total(v: &Value, kept: &[&str], field: &str) -> u64 {
+        v["by_course"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|b| {
+                let codes = b["codes"].as_array().unwrap();
+                codes.is_empty() || codes.iter().any(|c| kept.contains(&c.as_str().unwrap()))
+            })
+            .map(|b| b[field].as_u64().unwrap())
+            .sum()
+    }
+
+    #[test]
+    fn two_shells_of_one_course_are_two_keys_and_a_shared_item_sits_in_a_two_code_bucket_once() {
+        // A past-term shell and the live one share a slug and a label but not an LMS key.
+        let c = json!([
+            {"code": "_100_1", "name": "Old", "slug": "syn-110", "label": "SYN 110"},
+            {"code": "_200_1", "name": "Live", "slug": "syn-110", "label": "SYN 110"},
+        ])
+        .to_string();
+        let f = ics(&[
+            vevent_in("UA_100_1-A", "Old only", None, "x"),
+            vevent_in("UA_200_1-B", "Live only", None, "x"),
+            vevent_in("BB-ASSIGN-3", "SYN 110: Reading", None, "x"), // both shells claim it
+            vevent_in("BB-ASSIGN-4", "Nobody's", None, "x"),
         ]);
-        let v = full_preview(&feed);
-        assert_eq!(by_course(&v, "syn-110", "assignments_upcoming"), json!(1), "{v}");
+        let inputs = PreviewInputs { feed: Some(&f), courses: Some(&c), ..Default::default() };
+        let v = preview(&inputs, &chicago(), now());
+        assert_eq!(count(&v, "classes"), json!(2), "{v}");
+        assert_eq!(count(&v, "assignments_upcoming"), json!(4), "{v}");
+        assert_eq!(by_course(&v, "_100_1", "assignments_upcoming"), json!(1), "{v}");
+        assert_eq!(by_course(&v, "_200_1", "assignments_upcoming"), json!(1), "{v}");
+        assert_eq!(by_course(&v, "_100_1,_200_1", "assignments_upcoming"), json!(1), "counted once: {v}");
+        assert_eq!(v["by_course"]["_100_1,_200_1"]["codes"], json!(["_100_1", "_200_1"]), "{v}");
+        assert_eq!(by_course(&v, "unmatched", "assignments_upcoming"), json!(1), "{v}");
+        assert_eq!(sum_over_keys(&v, "assignments_upcoming"), 4, "{v}");
+        // The app's total over kept codes: removing one shell keeps the shared item, removing both drops it.
+        let both = ["_100_1", "_200_1"];
+        assert_eq!(kept_total(&v, &both, "assignments_upcoming"), 4, "{v}");
+        assert_eq!(kept_total(&v, &["_200_1"], "assignments_upcoming"), 3, "live only, shared, unmatched: {v}");
+        assert_eq!(kept_total(&v, &[], "assignments_upcoming"), 1, "only the unmatched item is always in: {v}");
     }
 
     #[test]
@@ -855,34 +954,47 @@ END:VEVENT
         let (f, c) = (all_mapped_feed(), courses());
         let inputs = PreviewInputs { feed: Some(&f), courses: Some(&c), ..Default::default() };
         let v = preview(&inputs, &chicago(), now());
-        // Without the bundle, the id-only item (_71_1) has no course; the text match does.
-        assert_eq!(by_course(&v, "syn-110", "assignments_upcoming"), json!(1), "{v}");
-        assert_eq!(by_course(&v, "syn-110", "turned_in"), Value::Null, "{v}");
-        assert_eq!(by_course(&v, "syn-110", "class_times"), Value::Null, "{v}");
+        // Without the bundle, the id-only item (_71_1) has no course: it is unmatched.
+        assert_eq!(by_course(&v, "_900001_1", "assignments_upcoming"), json!(1), "{v}");
+        assert_eq!(by_course(&v, "unmatched", "assignments_upcoming"), json!(1), "{v}");
+        assert_eq!(by_course(&v, "_900001_1", "turned_in"), Value::Null, "{v}");
+        assert_eq!(by_course(&v, "unmatched", "class_times"), Value::Null, "{v}");
         let (c, g) = (courses(), bundle());
         let no_feed = PreviewInputs { courses: Some(&c), grades: Some(&g), ..Default::default() };
         let w = preview(&no_feed, &chicago(), now());
-        assert_eq!(by_course(&w, "syn-110", "assignments_upcoming"), Value::Null, "{w}");
-        assert_eq!(by_course(&w, "syn-110", "turned_in"), Value::Null, "{w}");
+        assert_eq!(by_course(&w, "_900001_1", "assignments_upcoming"), Value::Null, "{w}");
+        assert_eq!(by_course(&w, "_900001_1", "turned_in"), Value::Null, "{w}");
     }
 
     #[test]
-    fn by_course_is_keyed_by_slug_then_label_and_null_without_a_course_list() {
+    fn by_course_is_keyed_by_code_then_slug_then_label_and_null_without_a_course_list() {
         let c = json!([
-            {"code": "_1_1", "name": "A", "slug": "", "label": "SYN 110"},
-            {"code": "_2_1", "name": "B", "slug": "syn-120", "label": ""},
-            {"code": "_3_1", "name": "C", "slug": "", "label": ""},
+            {"code": "_1_1", "name": "A", "slug": "syn-110", "label": "SYN 110"},
+            {"code": "", "name": "B", "slug": "syn-120", "label": "SYN 120"},
+            {"code": "", "name": "C", "slug": "", "label": "SYN 130"},
+            {"code": "", "name": "D", "slug": "", "label": ""},
         ])
         .to_string();
         let f = all_mapped_feed();
         let inputs = PreviewInputs { feed: Some(&f), courses: Some(&c), ..Default::default() };
         let v = preview(&inputs, &chicago(), now());
-        assert_eq!(count(&v, "classes"), json!(3), "{v}");
+        assert_eq!(count(&v, "classes"), json!(4), "{v}");
         let keys: Vec<&String> = v["by_course"].as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["SYN 110", "syn-120"], "a course with neither slug nor label has no key: {v}");
-        assert_eq!(by_course(&v, "SYN 110", "assignments_upcoming"), json!(1), "{v}");
+        assert_eq!(keys, ["SYN 130", "_1_1", "syn-120", "unmatched"], "a course with none of the three has no key: {v}");
+        assert_eq!(by_course(&v, "syn-120", "assignments_upcoming"), json!(2), "{v}");
         let none = PreviewInputs { feed: Some(&f), ..Default::default() };
         assert_eq!(count(&preview(&none, &chicago(), now()), "by_course"), Value::Null);
+    }
+
+    #[test]
+    fn a_crlf_feed_with_a_folded_summary_buckets_like_an_lf_one() {
+        // CRLF line ends, and a SUMMARY folded in the middle of the course code's line.
+        let crlf = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:BB-ASSIGN-1\r\nSUMMARY:Reading for SYN\r\n  110 today\r\nDTSTART:20260905T235900\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:UA_900002_1-X\r\nSUMMARY:Other\r\nDTSTART:20260906T235900\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let v = full_preview(crlf);
+        assert_eq!(count(&v, "assignments_upcoming"), json!(2), "{v}");
+        assert_eq!(by_course(&v, "_900001_1", "assignments_upcoming"), json!(1), "the folded SUMMARY names SYN 110: {v}");
+        assert_eq!(by_course(&v, "_900002_1", "assignments_upcoming"), json!(1), "{v}");
+        assert_eq!(by_course(&v, "unmatched", "assignments_upcoming"), json!(0), "{v}");
     }
 
     /// The module is read-only by construction: nothing above `mod tests` names a writer or a socket.

@@ -319,9 +319,30 @@ fn archive_note(id: &str, title: &str, reason: &str) -> String {
 
 /// One journal line, as the engine writes it: sorted keys, Python `json.dumps` separators.
 fn journal_line(seq: u32, actor: &str, path: &str, field: &str) -> String {
+    record_line(seq, "set", actor, path, &format!("\"{field}\""))
+}
+
+/// The id a note's journal records carry: the note's own `id:`, as the engine writes it.
+fn note_id_of(path: &str) -> &'static str {
+    match path {
+        "tasks/quiz-a.md" => "task_00000000a1",
+        "tasks/quiz-b.md" => "task_00000000a2",
+        "tasks/essay.md" => "task_00000000a3",
+        "tasks/reading.md" => "task_00000000a4",
+        "archive/old-1.md" => "task_00000000b1",
+        "tasks/mail.md" => "task_00000000a7",
+        "tasks/typed.md" => "task_00000000a8",
+        "tasks/self.md" => "task_00000000a9",
+        _ => "task_00000000zz",
+    }
+}
+
+/// `field` is a JSON literal (`"effort_hours"` or `null`, a `create` having none).
+fn record_line(seq: u32, op: &str, actor: &str, path: &str, field: &str) -> String {
+    let id = note_id_of(path);
     format!(
-        "{{\"actor\": \"{actor}\", \"device\": \"testbox\", \"evidence\": null, \"field\": \"{field}\", \
-         \"id\": \"task_{seq:010}\", \"new\": 2.0, \"old\": 1.5, \"op\": \"set\", \"path\": \"{path}\", \
+        "{{\"actor\": \"{actor}\", \"device\": \"testbox\", \"evidence\": null, \"field\": {field}, \
+         \"id\": \"{id}\", \"new\": 2.0, \"old\": 1.5, \"op\": \"{op}\", \"path\": \"{path}\", \
          \"run_id\": \"run-{seq}\", \"seq\": {seq}, \"ts\": \"2026-08-30T12:00:0{seq}.000Z\", \"via\": \"cli\"}}\n"
     )
 }
@@ -492,12 +513,75 @@ fn preview_by_course_buckets_the_inline_captures_by_course() {
     let v = scratch("bycourse");
     let c = captures("bycourse");
     let j = json_of(&preview(&v, &c, true));
-    // The feed carries no course text: _71_1 and _73_1 reach SYN 110 through the grades bundle's
-    // course; BB-ASSIGN-2 reaches no course, so it is in the totals and in no bucket.
-    assert_eq!(j["by_course"]["syn-110"]["assignments_upcoming"], json!(2), "{j}");
-    assert_eq!(j["by_course"]["syn-110"]["turned_in"], json!(1), "{j}");
-    assert_eq!(j["by_course"]["syn-110"]["class_times"], Value::Null, "{j}");
-    assert_eq!(j["by_course"]["syn-120"]["assignments_upcoming"], json!(0), "{j}");
+    // The feed carries no course text: _71_1 and _73_1 reach the course with LMS key _900001_1
+    // through the grades bundle (a uid pin); BB-ASSIGN-2 reaches no course, so it is under
+    // `unmatched`, which keeps the buckets summing to the totals.
+    assert_eq!(j["by_course"]["_900001_1"]["assignments_upcoming"], json!(2), "{j}");
+    assert_eq!(j["by_course"]["_900001_1"]["turned_in"], json!(1), "{j}");
+    assert_eq!(j["by_course"]["_900001_1"]["class_times"], Value::Null, "{j}");
+    assert_eq!(j["by_course"]["_900002_1"]["assignments_upcoming"], json!(0), "{j}");
+    assert_eq!(j["by_course"]["unmatched"]["assignments_upcoming"], json!(1), "{j}");
     assert_eq!(j["assignments_upcoming"], json!(3), "the totals stay as they were: {j}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+fn append_journal(v: &Path, lines: &[String]) {
+    let path = v.join("state/journal/2026-08-30.jsonl");
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str(&lines.concat());
+    std::fs::write(&path, text).unwrap();
+}
+
+fn put_task(v: &Path, name: &str, id: Option<&str>, source: &str) {
+    let id_line = id.map(|i| format!("id: {i}\n")).unwrap_or_default();
+    let text = format!("---\n{id_line}title: {name}\nstatus: active\neffort_hours: 1.0\neffort_source: {source}\ncreated_by: gmail\n---\n\nBody.\n");
+    std::fs::write(v.join(format!("tasks/{name}.md")), text).unwrap();
+}
+
+#[test]
+fn tidied_counts_an_agent_create_of_an_inferred_note_and_nothing_else_that_creates() {
+    let v = tidy_vault("tidy-gmail");
+    put_task(&v, "mail", Some("task_00000000a7"), "inferred"); // agent create, inferred: counted
+    put_task(&v, "typed", Some("task_00000000a8"), "user"); // agent create, effort typed: not counted
+    put_task(&v, "self", Some("task_00000000a9"), "inferred"); // the student's own create: not counted
+    append_journal(
+        &v,
+        &[
+            record_line(6, "create", "agent:knowlu.gmail", "tasks/mail.md", "null"),
+            record_line(7, "create", "agent:knowlu.gmail", "tasks/typed.md", "null"),
+            record_line(8, "create", "student", "tasks/self.md", "null"),
+        ],
+    );
+    let j = json_of(&tidied(&v));
+    assert_eq!(j["effort_estimated"], json!(3), "quiz-a, reading and the Gmail task: {j}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn tidied_joins_a_record_to_a_note_by_path_only_when_the_note_has_no_id() {
+    let v = tidy_vault("tidy-path");
+    // A note re-created at a path an agent once set (a record carrying the old note's id): not counted.
+    put_task(&v, "reused", Some("task_00000000a5"), "user");
+    // A note with no id at all: its path is the only join, so the agent's set counts.
+    put_task(&v, "noid", None, "user");
+    append_journal(
+        &v,
+        &[journal_line(6, "agent:knowlu.enrich", "tasks/reused.md", "effort_hours"), journal_line(7, "agent:knowlu.enrich", "tasks/noid.md", "effort_hours")],
+    );
+    let j = json_of(&tidied(&v));
+    assert_eq!(j["effort_estimated"], json!(3), "quiz-a, reading and noid, not reused: {j}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn tidied_reads_notes_written_with_crlf() {
+    let v = tidy_vault("tidy-crlf");
+    let crlf = |t: String| t.replace('\n', "\r\n");
+    std::fs::write(v.join("tasks/crlf.md"), crlf(task_note("task_00000000c1", "Crlf", "blackboard"))).unwrap();
+    std::fs::write(v.join("archive/crlf-old.md"), crlf(archive_note("task_00000000c2", "Crlf old", "imported-past"))).unwrap();
+    let j = json_of(&tidied(&v));
+    assert_eq!(j["live_by_source"]["blackboard"], json!(3), "{j}");
+    assert_eq!(j["imported_past"], json!(3), "{j}");
+    assert_eq!(j["errors"], json!([]), "{j}");
     let _ = std::fs::remove_dir_all(&v);
 }
