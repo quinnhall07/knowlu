@@ -111,7 +111,9 @@ pub const JOB_ORDER: [&str; 17] = [
 /// That holds only while their runners write nothing to the vault and hold neither the notes gate
 /// (F8h) nor the school session lock; a runner that ever does must come off this list. An abandoned
 /// runner keeps its thread: `Drop` still joins it, after setting the stop it is expected to heed.
-const ABANDON_AT_ONCE: [&str; 2] = ["mail.canary", "mail.first_pass"];
+/// Every other running job is waited for, with no time limit: an abandoned writer would write after
+/// Sign out's `on_sign_out` (§14.51 r1, C1; F1 test 30 pins this list).
+pub const ABANDON_AT_ONCE: [&str; 2] = ["mail.canary", "mail.first_pass"];
 /// The closed-set reason of a job whose runner panicked; the page maps it to its fix. It is reachable
 /// only under unwinding (tests and the dev profile): the release profile has `panic = "abort"`.
 pub const REASON_JOB_CRASHED: &str = "job_crashed";
@@ -150,6 +152,8 @@ struct Core {
     /// Running jobs a drain gave up on (§4.10: waiting for mail writes nothing). Their thread ends
     /// on its own; whatever it returns is read as `Stopped`.
     abandoned: BTreeSet<String>,
+    /// When the first [`Queue::drain`] began (`journal::now_ts`); what the page counts its elapsed time from.
+    drain_began: Option<String>,
     chain: Chain,
     /// A `BeforeConfig` chain has ended in this queue (given up, or a slot failed with none left). Only
     /// then does a `school.courses` pushed onto an unsettled account start a chain itself (C1).
@@ -439,7 +443,7 @@ impl Queue {
             if matches!(r.state, JobState::Pending | JobState::Held) && !name.starts_with(INDICATOR_PREFIX) { order.push(name.clone()); }
         }
         order.sort_by_key(|j| (JOB_ORDER.iter().position(|c| c == j).unwrap_or(JOB_ORDER.len()), j.clone()));
-        let mut core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false, frozen: false, abandoned: BTreeSet::new(), chain: Chain::default(), chain_ended: false, no_rank_owed: false, partial_no_rank: false, dir: deps.data_dir.clone() };
+        let mut core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false, frozen: false, abandoned: BTreeSet::new(), drain_began: None, chain: Chain::default(), chain_ended: false, no_rank_owed: false, partial_no_rank: false, dir: deps.data_dir.clone() };
         // A resumed `school.courses` that waits on an unsettled account needs a slot to settle it.
         if core.order.iter().any(|j| j == "school.courses") && !core.state.account_settled { core.push_job("slot.partial"); }
         core.mark_account_wait();
@@ -550,6 +554,17 @@ impl Queue {
         self.inner.cv.notify_all();
     }
     pub fn stop_requested(&self) -> bool { self.inner.stop.load(Ordering::SeqCst) }
+    /// The drain's progress for the page (§4.10): the job it is waiting for, `long` for a slot only (one
+    /// engine child can run to `CHILD_TIMEOUT`), and when the drain began. `None` before a drain and
+    /// once nothing it waits for is running. A slot is named before a lane job, the longer wait.
+    pub fn exiting(&self) -> Option<crate::onboarding_state::ExitingNow> {
+        let g = self.inner.lock();
+        let since = g.drain_began.clone()?;
+        let mut running: Vec<&String> = g.state.jobs.iter().filter(|(_, r)| r.state == JobState::Running).map(|(n, _)| n).collect();
+        running.sort_by_key(|n| !n.starts_with("slot."));
+        let job = running.first()?.to_string();
+        Some(crate::onboarding_state::ExitingNow { long: job.starts_with("slot."), job, since })
+    }
     /// Waits for each lane's running job to reach its safe point. A running `mail.canary` or
     /// `mail.first_pass` is not waited for: it is set back to `pending` and left to end on its own
     /// (waiting for mail writes nothing, §4.10). Sets the stop itself (idempotent), so no job can
@@ -557,6 +572,7 @@ impl Queue {
     pub fn drain(&self) {
         self.request_stop();
         let mut g = self.inner.lock();
+        g.drain_began.get_or_insert_with(|| knowlu_engine::journal::now_ts(None));
         let waiting_mail: Vec<String> = g.state.jobs.iter()
             .filter(|(n, r)| r.state == JobState::Running && ABANDON_AT_ONCE.contains(&n.as_str())).map(|(n, _)| n.clone()).collect();
         for job in waiting_mail {

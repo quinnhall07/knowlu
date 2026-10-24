@@ -2078,6 +2078,95 @@ fn test_29_the_live_request_stop_is_stop_both_and_nothing_else_calls_the_queues_
     assert!(f.starts_with("pub fn stop_both"), "{f}");
 }
 
+// ---- test 30, F8f2's half: the drain never abandons a writer -----------------------------------------------------
+
+#[test]
+fn test_30_the_drain_waits_for_a_capture_that_ignores_the_stop_and_nothing_writes_after_the_sign_out() {
+    let r = rig("t30-wait", state_at(3, true), true);
+    let marker = r.dir.join("answers-marker.txt");
+    let m = marker.clone();
+    // Ignores the stop for 600 ms, then writes: it stands for the answers file and the pending link.
+    r.fake.behave("school.capture", move || { std::thread::sleep(Duration::from_millis(600)); std::fs::write(&m, "late").unwrap(); Outcome::Done(BTreeMap::new()) });
+    r.q.enqueue("school.capture");
+    r.wait_started("school.capture");
+    r.q.request_stop();
+    r.q.drain();
+    assert!(marker.exists(), "the drain returned before the capture wrote");
+    assert_eq!(r.state_of("school.capture"), JobState::Done, "waited for, not abandoned");
+    std::fs::remove_file(&marker).unwrap(); // the fake `on_sign_out`
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(!marker.exists(), "something wrote after the sign-out's delete");
+    r.log.assert_clean();
+}
+
+#[test]
+fn test_30_a_fake_canary_and_first_pass_are_abandoned_at_once_and_the_list_is_exactly_those_two() {
+    assert_eq!(ABANDON_AT_ONCE, ["mail.canary", "mail.first_pass"], "the one list; a runner that writes anywhere never joins it");
+    let r = rig("t30-canary", state_at(5, true), true);
+    let gate = r.fake.block("mail.first_pass", false);
+    r.q.enqueue("mail.first_pass");
+    r.wait_started("mail.first_pass");
+    let began = Instant::now();
+    r.q.drain();
+    assert!(began.elapsed() < Duration::from_secs(2), "the drain waited for the first pass");
+    assert_eq!(r.state_of("mail.first_pass"), JobState::Pending);
+    gate.release();
+    let src = src_of("onboarding_jobs.rs");
+    let drain = &src[src.find("pub fn drain(").expect("drain")..];
+    let drain = &drain[..drain.find("\n    }").unwrap()];
+    assert!(!drain.contains("wait_timeout") && !drain.contains("Instant"), "the drain has no time limit:\n{drain}");
+}
+
+/// Blocks `jobs` past the stop, drains on another thread, and returns what `exiting()` said while the
+/// drain waited, with the instants around the drain's start.
+fn exiting_during_drain(tag: &str, state: OnboardingState, jobs: &[&str]) -> (Option<ExitingNow>, Option<ExitingNow>, String, String) {
+    let r = rig(tag, state, true);
+    let gates: Vec<_> = jobs.iter().map(|j| r.fake.block(j, false)).collect();
+    for j in jobs { r.q.enqueue(j); }
+    for j in jobs { r.wait_started(j); }
+    r.q.request_stop();
+    let before_drain = r.q.exiting();
+    let (seen, lo, hi) = std::thread::scope(|sc| {
+        let lo = knowlu_engine::journal::now_ts(None);
+        let t = sc.spawn(|| r.q.drain());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let seen = loop {
+            if let Some(e) = r.q.exiting() { break e; }
+            assert!(Instant::now() < deadline, "exiting() never named a job while the drain waited");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let hi = knowlu_engine::journal::now_ts(None);
+        for g in &gates { g.release(); }
+        t.join().unwrap();
+        (seen, lo, hi)
+    });
+    assert!(r.q.exiting().is_none(), "nothing running once the drain has returned");
+    (before_drain, Some(seen), lo, hi)
+}
+
+#[test]
+fn test_30_while_the_drain_waits_exiting_names_the_job_long_for_a_slot_only_and_the_drains_start() {
+    let (before, seen, lo, hi) = exiting_during_drain("t30-short", state_at(5, true), &["mail.setup"]);
+    assert!(before.is_none(), "the stop alone is not a drain");
+    let e = seen.unwrap();
+    assert_eq!((e.job.as_str(), e.long), ("mail.setup", false), "mail.setup is short once F8d's checks land");
+    assert!(e.since.as_str() >= lo.as_str() && e.since.as_str() <= hi.as_str(), "since {} is the drain's start, in [{lo}, {hi}]", e.since);
+    let (_, seen, ..) = exiting_during_drain("t30-capture", state_at(3, true), &["school.capture"]);
+    assert!(!seen.unwrap().long, "school.capture is not long");
+    // A slot beside a running lane job: the page is told about the slot, the longer wait.
+    let (_, seen, ..) = exiting_during_drain("t30-slot", state_at(5, false), &["school.store", "slot.partial"]);
+    let e = seen.unwrap();
+    assert_eq!((e.job.as_str(), e.long), ("slot.partial", true), "a slot is long, and it is the job named when it runs beside a lane job");
+}
+
+#[test]
+fn test_30_onboarding_status_answers_the_queues_exiting() {
+    let src = src_of("onboarding_state.rs");
+    let at = src.find("pub fn onboarding_status(").expect("onboarding_status");
+    let body = enclosing_fn(&src, at);
+    assert!(body.contains("queue.exiting()"), "the status answers the drain's progress:\n{body}");
+}
+
 #[test]
 fn test_24_the_three_exit_commands_are_async_wrappers_and_the_one_live_drain_is_inside_the_live_seam() {
     let src = src_of("onboarding_state.rs");
