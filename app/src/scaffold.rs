@@ -911,7 +911,9 @@ pub fn put_new_file_with(root: &Path, rel: &str, text: &str, seams: &PutSeams) -
     }
     if let Some(put) = found(&target)? { return Ok(put); }
     let temp = dir.join(format!("{TEMP_PREFIX}{name}-{}", std::process::id()));
-    let placed = std::fs::write(&temp, text).map_err(|e| format!("{}: {e}", temp.display())).and_then(|()| {
+    // Flushed to disk before the link, so a power loss never leaves a zero-length file at the final name.
+    let flushed = std::fs::File::create(&temp).and_then(|mut f| { use std::io::Write; f.write_all(text.as_bytes())?; f.sync_all() });
+    let placed = flushed.map_err(|e| format!("{}: {e}", temp.display())).and_then(|()| {
         if let Some(hook) = seams.after_temp { hook(&target)?; }
         let linked = match seams.hard_link { Some(f) => f(&temp, &target), None => std::fs::hard_link(&temp, &target) };
         match linked {
@@ -950,9 +952,8 @@ fn move_no_replace(_from: &Path, _to: &Path) -> std::io::Result<()> {
 /// The slug a new note for this course gets: the row's own, else its human code's, else its name's
 /// (as `lms_link::courses_from_json` derives one), else its key's.
 pub fn course_note_slug(c: &crate::onboarding_state::CourseAnswer) -> String {
-    let s = c.slug.trim();
-    if !s.is_empty() { return s.to_string(); }
-    let from = [c.code.trim(), c.name.trim(), c.lms_key.trim()].into_iter().find(|t| !t.is_empty()).unwrap_or_default();
+    // Whatever the source, the slug is cleaned: it names a file under `courses/`, never a path (`../tasks/x`).
+    let from = [c.slug.trim(), c.code.trim(), c.name.trim(), c.lms_key.trim()].into_iter().find(|t| !t.is_empty()).unwrap_or_default();
     knowlu_engine::ingest::slugify(from)
 }
 

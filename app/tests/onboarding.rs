@@ -2160,7 +2160,7 @@ fn school_apply_writes_the_bytes_build_into_writes_for_the_same_school() {
         if choice.unitid != "100751" {
             assert_eq!(preset, "none", "{tag}");
             // Vault text is written CRLF on Windows (pystr::write_text), as build_into's is.
-            assert_eq!(config_bytes(&vault, "events.yaml"), campus_yaml("none").unwrap().replace('\n', "\r\n").as_bytes(), "{tag}: events preset none");
+            assert_eq!(config_bytes(&vault, "events.yaml"), knowlu_engine::pystr::universal_newlines(campus_yaml("none").unwrap()).replace('\n', knowlu_engine::pystr::NEWLINE).as_bytes(), "{tag}: events preset none");
         }
         if choice.unitid.is_empty() {
             let text = String::from_utf8(config_bytes(&vault, "campus.yaml")).unwrap();
@@ -2369,5 +2369,41 @@ fn a_restored_course_note_is_not_touched_and_its_own_slug_is_recorded() {
     assert!(!restored.iter().any(|(f, _)| f.trim_end_matches(".md") == slugs["_1004_1"]), "the fourth course has a note of its own");
     let touched = journal_for(&vault).into_iter().filter(|r| r["path"].as_str().is_some_and(|p| restored.iter().any(|(f, _)| p.contains(f)))).count();
     assert_eq!(touched, 0, "no journal record names a restored note");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F6a review r1, I-1 (controller's ruling): one note per slug, first row wins. Two code-less rows of
+/// the same name make one note on the first run, with no error, and both keys record the shared slug.
+#[test]
+fn two_codeless_rows_of_one_name_share_one_note_on_the_first_run() {
+    let (root, vault, data) = f6a_vault("shared-slug");
+    let rows = vec![f6a_course("", "Quilting Basics", "_2001_1"), f6a_course("", "Quilting Basics", "_2002_1")];
+    update_answers(&data, &|a| a.courses = rows.clone()).unwrap();
+    let before = course_files(&vault);
+    let out = run_school_courses_in(&data, &vault);
+    assert!(matches!(out, Outcome::Done(_)), "no error on the first run: {out:?}");
+    assert_eq!(course_files(&vault).len(), before.len() + 1, "one note for the one slug");
+    let slugs = load_answers(&data).unwrap().unwrap().slugs;
+    assert_eq!(slugs["_2001_1"], "quilting-basics");
+    assert_eq!(slugs["_2002_1"], slugs["_2001_1"], "both rows record the shared slug: {slugs:?}");
+    assert!(matches!(run_school_courses_in(&data, &vault), Outcome::Done(_)));
+    assert_eq!(load_answers(&data).unwrap().unwrap().slugs, slugs, "a retry changes nothing");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F6a review r1, M1: a row's own slug is cleaned before it names a file, so a separator never lets a
+/// note land outside `courses/`.
+#[test]
+fn a_row_slug_with_path_separators_cannot_place_a_note_outside_courses() {
+    let (root, vault, data) = f6a_vault("slug-path");
+    let mut evil = f6a_course("QLT 101", "Quilting Basics", "_3001_1");
+    evil.slug = "../tasks/evil".into();
+    update_answers(&data, &|a| a.courses = vec![evil.clone()]).unwrap();
+    let tasks_before = std::fs::read_dir(vault.join("tasks")).unwrap().count();
+    assert!(matches!(run_school_courses_in(&data, &vault), Outcome::Done(_)));
+    assert_eq!(std::fs::read_dir(vault.join("tasks")).unwrap().count(), tasks_before, "nothing under tasks/");
+    let slug = load_answers(&data).unwrap().unwrap().slugs["_3001_1"].clone();
+    assert!(!slug.contains('/') && !slug.contains('.'), "{slug}");
+    assert!(vault.join("courses").join(format!("{slug}.md")).exists());
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -375,7 +375,9 @@ pub struct ExistingNote {
 /// **One note per course** (§14.15, I5): the kept rows are walked in captured order, and a kept row
 /// whose trimmed, **non-empty** human `code` equals an earlier kept row's reuses that row's slug and
 /// does no create (two shells of one course). An empty `code` never matches another row, so two
-/// typed rows with no code are two courses, two creates, two slugs.
+/// typed rows with no code are two courses unless they would share a note: **one note per slug**
+/// (today's seed rule, `seeded_courses`), so a later row whose slug equals an earlier row's reuses
+/// that note on the first run, with no create and no error, and both rows record the shared slug.
 /// An absent or unreadable answers file is an error (`Outcome::Failed`), never "no courses".
 pub fn run_school_courses(
     data_dir: &Path,
@@ -388,21 +390,21 @@ pub fn run_school_courses(
         Err(e) => return Outcome::Failed(e),
     };
     let nonempty = |t: &str| (!t.trim().is_empty()).then(|| t.trim().to_string());
-    let (mut by_code, mut slugs) = (BTreeMap::<String, String>::new(), BTreeMap::<String, String>::new());
+    let (mut by_code, mut by_slug, mut slugs) = (BTreeMap::<String, String>::new(), BTreeMap::<String, String>::new(), BTreeMap::<String, String>::new());
     for c in answers.kept_courses() {
         let code = nonempty(&c.code);
         let (lms, derived) = (nonempty(&c.lms_key), crate::scaffold::course_note_slug(c));
-        // A restored note matches by its path, its `source_uid` or its `code` (the LMS key, or a typed human code).
-        let restored = existing.iter().find(|n| {
-            n.slug == derived
-                || lms.as_deref().is_some_and(|k| n.source_uid.trim() == k || n.code.trim() == k)
-                || code.as_deref().is_some_and(|k| n.code.trim() == k)
-        });
-        let slug = match (code.as_ref().and_then(|k| by_code.get(k)), restored) {
+        // A restored note matches by `source_uid`, then `code` (the LMS key, or a typed human code), then its path.
+        let restored = lms.as_deref().and_then(|k| existing.iter().find(|n| n.source_uid.trim() == k))
+            .or_else(|| existing.iter().find(|n| lms.as_deref().is_some_and(|k| n.code.trim() == k) || code.as_deref().is_some_and(|k| n.code.trim() == k)))
+            .or_else(|| existing.iter().find(|n| n.slug == derived));
+        let earlier = code.as_ref().and_then(|k| by_code.get(k)).or_else(|| by_slug.get(&derived));
+        let slug = match (earlier, restored) {
             (Some(earlier), _) => earlier.clone(),
             (None, Some(note)) => note.slug.clone(),
             (None, None) => match create(c) { Ok(s) => s, Err(e) => return Outcome::Failed(e) },
         };
+        by_slug.insert(derived, slug.clone());
         if let Some(k) = code { by_code.insert(k, slug.clone()); }
         slugs.insert(c.key(), slug);
     }
