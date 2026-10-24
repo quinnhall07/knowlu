@@ -862,8 +862,9 @@ pub fn skip_step(state: &mut OnboardingState, step: u8, source: &str) -> Result<
 }
 
 /// F2e: deletes the answers file and both pending credentials, then rewinds an unfinished
-/// `onboarding.json` to step 2 (jobs pending, `account_settled`, `school`, `step10_confirmed_at` and
-/// `handover` cleared, skips kept).
+/// `onboarding.json` to step 2: every job record and every skip removed, `account_settled`, `school`,
+/// `step10_confirmed_at` and `handover` cleared (F2b2a r3 ruling: a step-2 file is a fresh install's, so
+/// the next `Queue::start` queues nothing, and the student answers and skips steps 3 to 10 again).
 /// A finished file is left alone. `account::sign_out_clean` calls the real-store wrapper.
 pub fn on_sign_out_with(data_dir: &Path, pending: &dyn PendingStore) -> Result<(), String> {
     // Every step runs; the failures are collected, so one stuck file never keeps the rest on the device.
@@ -888,10 +889,14 @@ pub fn on_sign_out_with(data_dir: &Path, pending: &dyn PendingStore) -> Result<(
             s.step = 2;
             s.account_settled = false;
             s.school = None;
-            // A step-2 file is a fresh install's: no confirmation or hand-over from before the sign-out.
+            // A step-2 file is a fresh install's: no confirmation or hand-over from before the sign-out,
+            // and no job record or skip. A kept `pending` record would be queued by the next
+            // `Queue::start` before its step is redone (a skipped mail job among them); the redone
+            // answers and proceeds queue each job afresh.
             s.step10_confirmed_at = None;
             s.handover.clear();
-            for job in s.jobs.values_mut() { *job = JobRecord::default(); }
+            s.jobs.clear();
+            s.skips.clear();
             if let Err(e) = save_state(data_dir, &s) { failed.push(e); }
         }
     }

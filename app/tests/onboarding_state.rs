@@ -465,9 +465,12 @@ fn test_17_on_sign_out_deletes_the_answers_and_the_pending_links_and_rewinds_to_
     let Loaded::Ok(after) = load_state(&d) else { panic!("an unfinished file is rewritten, not removed") };
     assert_eq!(after.step, 2);
     assert!(!after.finished);
-    assert!(ordinal_job_states(&after).iter().all(|s| *s == JobState::Pending), "every job is pending again: {:?}", after.jobs);
+    // F2b2a r3 ruling: a step-2 file is a fresh install's. No job record survives (a `pending` one would be
+    // queued again by the next `Queue::start`, a `skipped` mail one would come back), and no skip does.
+    assert!(!before.jobs.is_empty() && !before.skips.is_empty(), "the file had jobs and skips to clear");
+    assert!(after.jobs.is_empty(), "no job record is kept: {:?}", ordinal_job_states(&after));
     assert!(!after.account_settled && after.school.is_none());
-    assert_eq!(after.skips, before.skips, "the skips are kept");
+    assert!(after.skips.is_empty(), "the skips are cleared: the student answers steps 3 to 10 again: {:?}", after.skips);
     assert_eq!(after.started_at, before.started_at);
 }
 

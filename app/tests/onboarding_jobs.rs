@@ -767,7 +767,7 @@ fn test_09_a_canary_that_never_notices_the_stop_is_abandoned_at_once_by_finish_a
                 assert!(saved.handover.iter().any(|h| h.item == "mail.canary" && h.signal == "mail_json"), "{:?}", saved.handover);
             }
             _ => {
-                // The rewind resets every job to pending, so the canary's own state says nothing on this arm:
+                // The rewind clears every job record, so the canary's own state says nothing on this arm:
                 // the closed gate and the time bound above are its test. Only the rewind is checked here.
                 // Sign-out deleted the session, so the checks report none (controller ruling, F2a review r1, I-1).
                 let resumed = resume(load_state(&r.dir), &SignedOut);
@@ -868,7 +868,8 @@ fn test_17_sign_out_stops_abandons_saves_freezes_signs_out_relaunches_with_pick_
     let Loaded::Ok(rewound) = load_state(&r.dir) else { panic!("rewound, not removed") };
     assert_eq!(rewound.step, 2);
     assert!(rewound.school.is_none() && !rewound.account_settled);
-    assert!(rewound.jobs.values().all(|j| j.state == JobState::Pending), "{:?}", rewound.jobs);
+    // F2b2a r3 ruling: no job record survives the rewind (the old "every job pending" held vacuously on none).
+    assert!(rewound.jobs.is_empty(), "{:?}", rewound.jobs);
     canary.release(); // the abandoned canary's fake thread ends; it never noticed the stop
 }
 
@@ -1760,20 +1761,24 @@ fn test_02_school_apply_is_enqueued_but_does_not_start_until_the_school_is_confi
 
 #[test]
 fn test_17_after_a_rewind_with_no_answers_file_the_config_jobs_stay_pending_and_run_once_the_answers_are_saved() {
-    let r = rig_full("t17-noanswers-queue", state_applied(8, true), true, vec![ok_reading(true, 10, 10)], false, |_| {});
+    // The real path (F2b2a r3): sign-out deletes the answers and rewinds the file, which keeps no job record,
+    // and a new queue starts over it. The config jobs come back only through the redone proceeds.
+    let r = rig("t17-noanswers-queue", state_applied(8, true), true);
+    let r = relaunch(&sign_out_and_exit(r));
     assert!(!answers_path(&r.dir).exists());
-    for j in ["school.courses", "config.ingest"] { r.q.enqueue(j); }
+    redo_school(&r);
+    proceed(&r, 3);
+    proceed(&r, 8);
     r.idle();
-    for j in ["school.courses", "config.ingest"] {
+    let config = ["school.courses", "registrar.confirm", "config.ingest"];
+    for j in config {
         assert!(!r.log.ran(j), "{j} started with no answers file: {:?}", r.log.all());
         assert_eq!(r.state_of(j), JobState::Pending, "{j} waits");
     }
-    // The student answers step 3 again: the file is back, and asking again runs them.
-    let out = onboarding_answer_inner(&r.dir, 3, &capture_answer(), &mut |_| {});
-    assert_eq!(out["ok"], true, "{out}");
-    for j in ["school.courses", "config.ingest"] { r.q.enqueue(j); }
+    // The student answers step 3 again: the file is back, and the saved answer wakes them.
+    recapture(&r);
     r.idle();
-    for j in ["school.courses", "config.ingest"] { assert_eq!(r.state_of(j), JobState::Done, "{j}: {:?}", r.log.all()); }
+    for j in config { assert_eq!(r.state_of(j), JobState::Done, "{j}: {:?}", r.log.all()); }
     // An unreadable file is the same as an absent one.
     std::fs::write(answers_path(&r.dir), "{ broken").unwrap();
     let before = r.log.started().len();
@@ -3238,18 +3243,96 @@ fn test_33_step_8s_first_proceed_still_queues_its_no_rank_slot_after_step_3s() {
     assert_eq!(r.log.scopes("slot.partial").last().map(String::as_str), Some("NoRank"), "{:?}", r.log.all());
 }
 
+// ---- F2b2a fix round 3: a sign-out rewind, then a relaunch over the rewound file (the real path) -----------------------
+
+/// Signs out through the real command over the fake seams (their `sign_out` runs `on_sign_out_with`), then
+/// drops the old queue, as the process's exit does. Answers the profile folder, which is kept.
+fn sign_out_and_exit(r: Rig) -> PathBuf {
+    let out = onboarding_sign_out_inner(&Seams::new(&r), &ExitGuard::default());
+    assert_eq!(out["ok"], true, "{out}");
+    let dir = r.dir.clone();
+    drop(r);
+    dir
+}
+
+/// The next launch over `dir`, as production does it: the file is loaded and resumed (the student signed in
+/// again), and a new queue starts over the resumed state. The folder is not scratched.
+fn relaunch(dir: &Path) -> Rig {
+    let resumed = resume(load_state(dir), &Proven);
+    assert_eq!(resumed.step, 3, "signed in again, a rewound file resumes at step 3");
+    let state = resumed.state.expect("an unfinished file resumes");
+    let fake = Arc::new(Fake::default());
+    let ent = Arc::new(Ent(AtomicBool::new(true), AtomicUsize::new(0)));
+    let readings: VecDeque<Reading> = (0..4).map(|_| ok_reading(true, 10, 10)).collect();
+    let deps = Deps { data_dir: dir.to_path_buf(), runner: fake.clone(), entitlement: ent.clone(), sync_view: Arc::new(Syncs(Mutex::new(readings))) };
+    let q = Queue::start(deps, state);
+    Rig { log: fake.log.clone(), q, fake, ent, dir: dir.to_path_buf() }
+}
+
+/// Step 3's school redone on the relaunched queue: chosen (the rewind cleared it), then confirmed.
+fn redo_school(r: &Rig) {
+    r.q.update_state(|s| s.school = Some(School { unitid: None, label: "Example Test College".into(), path: SchoolPath::Paste, confirmed: false })).unwrap();
+    r.q.confirm_school();
+}
+/// Step 3's capture redone: the typed list `unlisted_rig` answers, saved to a new answers file.
+fn recapture(r: &Rig) {
+    let typed = serde_json::json!({"capture": {"courses": three_courses(), "registrar_rows": [], "feeds": {}}});
+    assert_eq!(answer_through(r, 3, typed)["ok"], true);
+}
+
+#[test]
+fn test_17_a_relaunch_after_a_sign_out_rewind_starts_no_job_and_the_redone_steps_end_on_a_no_rank_slot() {
+    // Before the sign-out: a step-8 run with its lane jobs and `slot.partial` done, and step 5's mail
+    // skipped before any answer, so its three jobs are `skipped` records.
+    let r = unlisted_rig("t17-relaunch", |_| {});
+    let out = skip_and_stop_mail(false, 5, "mail", &mut || r.q.update_state(|s| skip_step(s, 5, "mail")).and_then(|x| x), &mut || r.q.skip_mail());
+    assert_eq!(out["ok"], true, "{out}");
+    for step in [3u8, 7, 8] { proceed(&r, step); }
+    r.idle();
+    r.q.update_state(|s| s.step = 8).unwrap();
+    let before = r.q.snapshot();
+    for j in ["school.apply", "school.courses", "registrar.confirm", "config.ingest", "slot.partial"] { assert_eq!(before.jobs[j].state, JobState::Done, "{j}"); }
+    for j in ["mail.setup", "mail.canary", "mail.first_pass"] { assert_eq!(before.jobs[j].state, JobState::Skipped, "{j}"); }
+    assert!(before.skips.iter().any(|k| (k.step, k.source.as_str()) == (5, "mail")));
+    // The next launch, over the rewound file: a fresh install's, so nothing is queued and nothing runs.
+    let r = relaunch(&sign_out_and_exit(r));
+    r.idle();
+    assert!(!r.log.ran("mail.setup"), "mail.setup started with no step-5 answer: {:?}", r.log.all());
+    assert!(r.log.started().is_empty(), "a job ran from the rewound file: {:?}", r.log.all());
+    let fresh = r.q.snapshot();
+    assert!(fresh.jobs.is_empty() && fresh.skips.is_empty(), "jobs {:?}, skips {:?}", fresh.jobs, fresh.skips);
+    // Steps 3 and 8 redone through the answer path: step 8's proceed is new work, so its NoRank slot follows config.ingest.
+    redo_school(&r);
+    recapture(&r);
+    proceed(&r, 3);
+    r.idle();
+    proceed(&r, 8);
+    r.idle();
+    assert_eq!(r.state_of("config.ingest"), JobState::Done, "{:?}", r.log.all());
+    let ingested = pos_of(&r, "end:config.ingest");
+    let no_rank = r.log.all().iter().rposition(|e| e == "scope:slot.partial:NoRank");
+    assert!(no_rank.is_some_and(|at| at > ingested), "no NoRank slot after config.ingest: {:?}", r.log.all());
+    assert!(!r.log.ran("mail.setup"), "still no step-5 answer: {:?}", r.log.all());
+}
+
 #[test]
 fn test_33_a_proceed_after_a_sign_out_rewind_queues_its_slot_again() {
     let r = unlisted_rig("t33-slot-rewind", |_| {});
     proceed(&r, 3);
     proceed(&r, 8);
     r.idle();
-    let before = runs_of(&r, "slot.partial");
-    // What `on_sign_out_with` does to the jobs: every record back to its default.
-    r.q.update_state(|s| for j in s.jobs.values_mut() { *j = JobRecord::default(); }).unwrap();
-    proceed(&r, 3); // the student redoes the steps; step 8 alone would wait on the rewound school jobs
+    assert_eq!(r.state_of("slot.partial"), JobState::Done);
+    // The real path (F2b2a r3): the sign-out rewinds the file, and a new queue starts over it.
+    let r = relaunch(&sign_out_and_exit(r));
+    r.idle();
+    redo_school(&r);
+    recapture(&r);
+    proceed(&r, 3);
+    r.idle();
+    let after_3 = runs_of(&r, "slot.partial");
     proceed(&r, 8);
     r.idle();
-    assert_eq!(runs_of(&r, "config.ingest"), 2);
-    assert!(runs_of(&r, "slot.partial") > before, "{:?}", r.log.all());
+    assert_eq!(runs_of(&r, "config.ingest"), 1, "{:?}", r.log.all());
+    assert_eq!(runs_of(&r, "slot.partial"), after_3 + 1, "step 8's proceed asked for its own slot: {:?}", r.log.all());
+    assert_eq!(r.log.scopes("slot.partial").last().map(String::as_str), Some("NoRank"), "{:?}", r.log.all());
 }
