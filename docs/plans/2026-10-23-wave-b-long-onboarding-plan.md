@@ -3,8 +3,15 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:subagent-driven-development (recommended)
 > or superpowers:executing-plans to run this plan task by task. Steps use checkbox (`- [ ]`) syntax.
 
-**Status: ruled; ready for T0.** Quinn ruled Q-B3, Q-B10, Q-B11, Q-B14 and the direction (5b,
-Departures) on 2026-10-23 (§5.0). Q-B15 to Q-B19 stand as decided by the controller. The plan was
+**Status: T0 done (2026-10-24, on `feat/o4-school-sign-in` at `1d3c467`); ready for T1.** T0's
+record is in §13 (dated 2026-10-24) and its amendments in §14.42: seven premises did not hold as
+written, and each is amended where it lands (the lanes not yet merged, `grades` and course notes,
+the entitlement-refused sync, the feed host, the sync hold, `mode_device`, a `campus.yaml` race).
+None reopens a ruling.
+
+Quinn ruled Q-B3, Q-B10, Q-B11, Q-B14 and the direction (5b,
+Departures) on 2026-10-23 (§5.0). Q-B15 to Q-B19 stand as decided by the controller; **Q-B20**, new
+at T0, waits for the controller before F8e (§5). The plan was
 reviewed and passed in round 8, and its minors are closed. Round 8 (`docs/reports/2026-10-23-wave-b-plan-review-r8.md`, 2026-10-23)
 passed with 0 critical, 0 important and 3 minor findings plus one note, closed in §14.40 with no
 further review round. Rounds 1-7 failed and are answered in §14.1-§14.39 (round 1 in §14.1-§14.10,
@@ -13,7 +20,7 @@ further review round. Rounds 1-7 failed and are answered in §14.1-§14.39 (roun
 every existing function, command, target, lock and seam the plan reuses, checked against the code
 for its signature, the credential it reads and its other callers. No finding reopened a ruling.
 Nothing is built until its spikes (§3) pass.
-§5's questions remain open for Quinn and the controller, each with a recommendation.
+§5's questions are all ruled or decided (§5.0), but Q-B20.
 
 **Date:** 2026-10-23. **Lanes:** O3 and O4, wave B of the onboarding redesign.
 
@@ -107,8 +114,14 @@ not reused where this read found them moved.
   "Today" column says sign-out deletes every kept profile; it does not (§5, Q-B9).
 - **The console's first slot would fire at step 2.** `scheduler::spawn` runs a slot at launch when
   `state/today.md` is absent and the vault is app-scheduled on its own device (`scheduler.rs:1155-1163`
-  here; `spawn` at `:1129` on `02e9e73`, review r1), which a step-2 vault is. Onboarding mode must
-  not call `scheduler::spawn` (P-3, §3).
+  here; `spawn` at `:1134` on `1d3c467`, T0), which a step-2 vault is. Onboarding mode must
+  not call `scheduler::spawn` (P-3, §3). **`spawn` does three other things onboarding mode then
+  skips** (T0, 2026-10-24): it primes `Scheduler.mode_device` (`:1154`; otherwise the `Default`
+  placeholder `(Script, true)`, `:146`, which `commands::attach_scheduler` reports on every poll,
+  `commands.rs:59-71`), so F4 primes it itself; it takes and clears `quit_at` and computes
+  `startup_missed` (`:1137-1149`); and it starts the housekeeping thread (`:1229`), which re-primes
+  `mode_device`, runs the debounced backup, prunes logs and checks for updates. The last two are
+  benign (§13, 2026-10-24).
 - **The vault's config is written once, at creation, from the whole wizard plan.** `create_vault_in`
   takes a `WizardPlan` (`onboarding.rs:621`) and `scaffold::build_into` writes `config/campus.yaml`,
   `events.yaml`, `ingest.yaml` (feed, `course_map`, coursework mappings, calendars) and `runners.yaml`
@@ -142,7 +155,7 @@ not reused where this read found them moved.
   (§4.10, F2b).
 - **A skipped `sync` still exits 0 under the name `sync`** (review r4, I-2). `run_slot_with` names a
   step by `args[0]` with the child's exit code (`scheduler.rs:1060-1067`); the skip is recorded only in
-  `state/sync-status.json` (`totals.skipped`, `engine/src/sync.rs:2523-2553`), which
+  `state/sync-status.json` (`totals.skipped`, `engine/src/sync.rs:2524-2554`), which
   `state::refresh_sync` reads into `cs.sync` at the slot's end (`scheduler.rs:1116`). §4.3 reads it
   there.
 - **`slot_argv` names nothing it leaves out** (review r4, I-3). It omits `grades` without a bundle and
@@ -180,6 +193,15 @@ not reused where this read found them moved.
   `coursework` unconditionally and `ingest` for every cloud vault, the feed living in the account
   (`scheduler.rs:529`, `:538`). So a slot before `ingest.yaml` exists must leave both out itself
   (`SlotScope::BeforeConfig`, §4.3).
+- **`grades` writes nothing without course notes** (T0, 2026-10-24). The engine's `grades` matches
+  the bundle's courses to the vault's course notes (`grades.rs:405-415`) and skips every course it
+  cannot match, so on a vault with none it writes no grade note (`:538-541`). So `BeforeConfig` leaves
+  `grades` out too, and the first grades run only after `school.courses` (§4.3).
+- **An entitlement-refused sync is a skip** (T0). `sync::record_gated_skip` writes `ok: false`
+  **with** `skipped: "no entitlement"` (`sync.rs:2462-2475`), so §4.3 reads it as "neither".
+- **The account never returns a stored feed's host** (T0). `GET /account` selects only `kind` and
+  `added_at` from the sources (`cloud/supabase/functions/account/index.ts:192`), so §4.7 suggests no
+  school from the account.
 - **A closed mail-backfill batch starts a whole slot** (review r5, I-4): `real_env`'s `on_closed`
   spawns `scheduler::run_slot` (`mail/live.rs:118-123`). F8m routes it to the queue in onboarding
   mode.
@@ -388,7 +410,8 @@ bounds how long Open Knowlu, Finish later, close or Sign out can wait at a stage
   slot steps (the step is then killed as `CHILD_TIMEOUT` already kills, and re-run by the first-run
   slot), or the wait as designed with its seconds shown.
 - **The first full slot plus the mail canary usually exceeds 3 minutes:** the queue already runs
-  `sync` and `grades` right after payment and the canary in step 5's background. If the wait after step
+  `sync` right after payment, `grades` (with `coursework`, `ingest` and `judge`) in the `NoRank` slot
+  once `config.ingest` is `done` (T0, 2026-10-24), and the canary in step 5's background. If the wait after step
   10 still exceeds 3 minutes, the number goes to Quinn, with the one exception that would shorten it
   (§5, Q-B1: `ingest.yaml` created at step 4 and extended by line at steps 6-8). The ruled cap stands
   until Quinn says otherwise.
@@ -573,8 +596,9 @@ account already entitled sees "nothing to pay" and continues. Proof: `entitlemen
 `school.store` (the pending feed link to the account, `PUT /account/sources`, §4.11),
 `school.apply` (creates `campus.yaml` and `events.yaml` once, §4.9), `school.courses` (the course
 notes through `write`, once the account is settled, §4.9), `registrar.confirm` (R24's write, as the
-student, after `school.courses`); in the serial queue, `slot.partial` (`sync`, `grades`; `ingest` and
-`judge` follow `config.ingest`, §4.3). Resume: at step 4; the entitlement is re-asked first (today's
+student, after `school.courses`); in the serial queue, `slot.partial` (`sync` only; `grades`,
+`coursework`, `ingest` and `judge` follow `config.ingest`, since `grades` writes nothing before the
+course notes exist; §4.3, T0 2026-10-24). Resume: at step 4; the entitlement is re-asked first (today's
 re-ask on entering the panel); the course list and feed link come from §4.5's and §4.11's stores,
 never from a new capture.
 
@@ -586,7 +610,9 @@ to 3 minutes), `mail.first_pass`. Proof: `forwarding` (`on`, `guided`, `off`), `
 Skip: yes; cost "date changes and new work announced by email are missed". Resume: at step 5;
 `mail::live::on_start` resumes an interrupted setup as today.
 
-**Step 6, Google: Gmail and Calendar (needs O2).** Ask: **one** Google consent for `gmail.readonly`
+**Step 6, Google: Gmail and Calendar (needs O2).** *T0 (2026-10-24): O2 has no branch yet, so F11b
+first builds this step on today's separate consents (one `google_connect` per scope), and F11f adds
+the one consent and the forwarding fallback below once O2 merges (§8).* Ask: **one** Google consent for `gmail.readonly`
 and `calendar.readonly` together on the sign-in client, while the account count of Gmail-permission
 holders is under 100 (O2's server count); otherwise, or on decline or a failed first read, Gmail
 forwarding through the mail window; or Skip. The consent is opened and polled with the
@@ -653,9 +679,17 @@ promised, and its "still coming" line until each handed-over job is done.
   waits only for its own inputs (below). Creating a config file needs no hold: no engine step reads
   that file until the job that creates it is `done`.
 - **Note writes and `sync` take turns, and wait rather than refuse** (review r3, I-B). The hold
-  the console's note writes take against a sync (`run_confirm`'s, `week.rs:103-117`: `vault_io`, then
-  `state/sync.lock`) **refuses** when a sync holds the lock, and a slot's `sync` that meets it is
-  skipped at exit 0. So inside onboarding, one in-process **notes gate** (in `onboarding_jobs.rs`)
+  against a sync is taken by two callers only (corrected at T0, 2026-10-24): `week::run_confirm`
+  (`week.rs:103-117`: `vault_io`, then `state/sync.lock`) and `registrar::spawn` (private,
+  `registrar.rs:96-104`, the same order through `week::hold_sync_lock`). The console's
+  ordinary note writes through `commands::mutate` take `vault_io` only, never `sync.lock`. The hold
+  **refuses** when a sync holds the lock, and a slot's `sync` that meets it is skipped at exit 0.
+  The lane's note jobs take `run_confirm`'s hold (F8h, unchanged). **Never nested** (the planner,
+  at T0): `vault_io` is a `std::sync::Mutex`, which is not re-entrant, and `hold_sync_lock` opens a
+  second handle whose `try_lock` refuses even inside one process (`week.rs:122-130`). So a lane job
+  takes the two itself (with `hold_sync_lock`, `pub(crate)`) only around an engine child it starts;
+  around a path that takes them itself, `registrar.confirm`'s `registrar::spawn`, it takes neither
+  and retries that call on its "a sync is running" refusal, by the same 250 ms and 30-second rule. So inside onboarding, one in-process **notes gate** (in `onboarding_jobs.rs`)
   orders them: a lane job that writes a note (`school.courses`, `registrar.confirm`) holds the gate
   for its run, and the queue holds it around every slot job (`slot.partial`, `slot.first_full`). Each
   side **blocks** on the gate, never refuses. With the gate held, the lane job then takes
@@ -672,15 +706,20 @@ promised, and its "still coming" line until each handed-over job is done.
   record**, never the step: after the slot, `cs.sync` (filled by `state::refresh_sync` from
   `state/sync-status.json`) must show an `at` at or after the slot's **`RunSummary.started`** (both
   `journal::now_ts`, UTC to the millisecond, so the strings compare; review r5, M2) with no
-  `skipped` reason. Three readings (review r5, M2):
-  - fresh, no `skipped`, `ok`: "first sync" is `done` and `account_settled` is set;
-  - fresh, no `skipped`, `ok: false` (an error, or the engine's entitlement refusal, which writes
-    `ok: false` with no skip; `sync.rs:2439-2453`): "first sync" is `failed`, with the status's
-    `last_error` mapped to its fix, and `account_settled` is not set (a later slot's fresh `ok` run
-    turns both into the first reading);
-  - `skipped` set (no account, no session), or no fresh stamp at all: neither. **A sync that met a
-    held `sync.lock` writes no status** (`sync.rs:2524-2528`), so only the stale-stamp rule catches
-    it; the item stays `pending` for the next slot.
+  `skipped` reason. Three readings (review r5, M2; the second and third corrected at T0,
+  2026-10-24):
+  - fresh, no `skipped`, `ok`: "first sync" is `done`; `account_settled` is set **only if the
+    cursor also shows `pulled_to_end`** (below);
+  - fresh, no `skipped`, `ok: false` (an error: transport, the account service, a cursor that could
+    not be saved): "first sync" is `failed`, with the status's `last_error` mapped to its fix, and
+    `account_settled` is not set (a later slot's fresh `ok` run turns both into the first reading);
+  - `skipped` set (no account, no session, **and the engine's entitlement refusal**, which
+    `sync::record_gated_skip` writes as `ok: false` with `skipped: "no entitlement"`,
+    `sync.rs:2462-2475`), or no fresh stamp at all: neither. The entitlement case cannot arise while
+    the hold works (a `sync` is `held` until `Entitled`); if the entitlement lapses mid-onboarding it
+    stays `pending` behind the hold. **A sync that met a held `sync.lock` writes no status**
+    (`sync.rs:2524-2528`), so only the stale-stamp rule catches it; the item stays `pending` for the
+    next slot.
 - **Named jobs, each with a state:** `pending`, `running`, `done` (with its proof numbers), `failed`
   (a closed-set reason and its fix), `skipped` (the student's), `held` (waiting for the entitlement).
   States are written to `onboarding.json` as they change, so a quit loses at most the running job.
@@ -698,15 +737,35 @@ promised, and its "still coming" line until each handed-over job is done.
   always finds the grade notes (O1's first-sight `imported-done` needs `state/today.md` absent and
   `grades/` present), and `ingest::is_first_run` holds until the full slot.
 - **Config before its readers.** `ingest`, `coursework`, every calendar read and step 10's
-  proposals wait for `config.ingest` (§4.9); `grades` waits for `school.apply` (and for
-  `school.courses` too if T0 finds it reads course notes); `registrar.confirm` waits for
+  proposals wait for `config.ingest` (§4.9); `grades` waits for `school.apply` **and**
+  `school.courses` (T0, 2026-10-24: it reads course notes, `grades.rs:405-415`, and writes nothing
+  without them), so it runs first in the `NoRank` slot, which waits for `config.ingest` (itself after
+  `school.courses`) and, for the capture's `lms`, for `school.apply`; `registrar.confirm` waits for
   `school.courses`; `school.courses` waits for `account_settled` (§4.9); `config.ingest` waits for
-  `school.courses` and for `school.store` and `calendar.store` to settle (§4.11). T0 confirms that
-  `sync`, `grades` and `judge`'s Gmail pull run correctly with no `ingest.yaml`; any that does not
-  waits for `config.ingest` too.
+  `school.courses` and for `school.store` and `calendar.store` to settle (§4.11). T0 confirmed that
+  `sync` and `judge`'s Gmail pull run correctly with no `ingest.yaml`.
+- **A `school.apply` that lands mid-slot** (T0). A slot reads `campus.yaml`'s row once, at its start
+  (`scheduler.rs:732`), and the grades capture reads `lms` from that row later (`:945`). A
+  `school.apply` that creates `campus.yaml` between the two leaves that slot's grades capture a named
+  skip (`grades (skipped: …)`), and the next slot reads the file. The queue's rule above keeps this
+  out of `NoRank` and `slot.first_full`; it can arise only from a `school.apply` retried by "Try
+  again" while a slot runs, and costs one slot's grades.
 - **`account_settled`** is true when step 2's restore reached the account, or when a later `sync`
   reports in `state/sync-status.json` that it ran and reached the account (the rule above; never its
-  exit code, which is always 0). Until then `school.courses` is `pending` with the reason "waiting to reach your account".
+  exit code, which is always 0) **and** the sync cursor shows the account's copy read to its end:
+  `pulled_to_end` in `state/sync-cursor.json` (`sync::load_cursor`, `sync.rs:238`; the field at
+  `:227`, set sticky at `:2618-2620` when a pull returns `more: false`). A fresh `ok` sync whose pull
+  still had pages left has not seen every restored course note, so `school.courses` could duplicate
+  one (§14.15). Read only: no `sync.rs` edit. Until then `school.courses` is `pending` with the reason
+  "waiting to reach your account".
+  **A `sync` pulls one page per run** (`sync.rs:2598-2620`; "more to come — the next slot continues",
+  `:2668-2670`), and the only slot onboarding runs before `school.courses` is `BeforeConfig`. So,
+  without a rule, an account with more than one page (a restore that failed at step 2 on a down
+  network, then a large account) would leave `school.courses`, `config.ingest` and the `NoRank` slot
+  waiting for ever. **The rule** (T0, 2026-10-24; Q-B20): after a `BeforeConfig` slot whose sync
+  reads fresh, no skip, `ok`, but `pulled_to_end` is false, the queue enqueues the next
+  `slot.partial` (`BeforeConfig` again) at once, up to 10 in a row; past that, `school.courses` is
+  `failed` with "Try again", which re-arms the count. F8e owns it; F1 test 16 covers it.
 - **`slot.partial`** (after payment, and again after `config.ingest`): **the same slot as any other,
   with the steps its scope leaves out named** (review r4 I-3; the layer corrected in review r5 I-3).
   F8s adds `scheduler::run_slot_inner_scoped(cs, sch, Some(app), late, scope)`, which builds the
@@ -718,17 +777,22 @@ promised, and its "still coming" line until each handed-over job is done.
   **onboarding's own `AppHandle`**, so the grades capture and the mail pass exist; with no tray,
   `tray::set_state` does nothing (`tray.rs:150-151`). Three scopes (§13.1, row "slot_argv"):
   - `BeforeConfig`, the run after payment and before `config.ingest` is `done`: leaves out
-    `coursework`, `ingest`, `judge` and `rank`. It must: `slot_argv` always includes `coursework`
-    and, on a cloud vault, `ingest` (`scheduler.rs:529`, `:538`), so nothing today would leave them
-    out for a missing `ingest.yaml`;
-  - `NoRank`, the run after `config.ingest`: leaves out `rank` only;
+    `coursework`, `grades`, `ingest`, `judge` and `rank`, so its one engine step is `sync`. It must:
+    `slot_argv` always includes `coursework` and, on a cloud vault, `ingest` (`scheduler.rs:529`,
+    `:538`), so nothing today would leave them out for a missing `ingest.yaml`. **`grades` is left
+    out whole** (T0, 2026-10-24): the grades capture stage and the engine step, as one row
+    `grades (not yet: your courses are not in yet)`, because the engine step writes nothing before
+    the course notes exist (`grades.rs:405-415`, `:538-541`) and a captured bundle would only be
+    deleted unread (F8s deletes it on every path);
+  - `NoRank`, the run after `config.ingest` (and `school.apply`): leaves out `rank` only, so it runs
+    the vault's first `grades`, with the capture, before its first `ingest`;
   - `Full`: today's slot.
   Each step a scope leaves out is named at exit 0 as `<step> (not yet: <why>)` (for example
   `rank (not yet: the first full slot ranks)`). **These rows do not join the runner log** (review
   r5, M3): the filter at `scheduler.rs:1036-1037` matches `(skipped:` forms only, so a scope's
   rows stay in the summary and out of `state/runner-log.md`, a vault file, which onboarding's
   phases have no reason to fill. Everything else is the slot's own: the session refresh, the
-  entitlement and privacy holds, the grades capture and its named skip, the mail pass, backup,
+  entitlement and privacy holds, the grades capture and its named skip (in `NoRank` and `Full`), the mail pass, backup,
   telemetry, their runner-log lines and the stop checks.
 - **`slot.first_full`** (on step 10's confirm): `run_slot_inner_scoped(…, Some(app), …, Full)`,
   which runs the slot's own mail pass when a mailbox is connected (no second mail step; review r3,
@@ -742,7 +806,7 @@ promised, and its "still coming" line until each handed-over job is done.
   the next slot the queue runs (`judge`'s pull in `NoRank` or `slot.first_full`). A slot started
   there would rank before `config.ingest` (ending `is_first_run`), take `sync.lock` outside the notes
   gate, escape the drain, and hold `sch.running`, so the queue's own slot would get the stale
-  `sch.last` back (`scheduler.rs:783-786`). **A batch that closes after `slot.first_full` has run**
+  `sch.last` back (`scheduler.rs:782-786`). **A batch that closes after `slot.first_full` has run**
   (review r6, M3) has no queued slot left to pull it: it waits for the first scheduled slot after
   the reveal (the normal console's, at the next slot time), which is acceptable because backfills are
   never waited for (§4.6). The rail's and the reveal's `older_mail` line says so in that case (the
@@ -836,7 +900,12 @@ Inputs: the jobs' states, the skips, `step10_confirmed_at`, now. **Required befo
 (spec §1.5, Quinn's list, each only if its source is connected): first `sync`; first `coursework`;
 first `ingest`; first `grades`; class times (step 10 confirmed); mail (forwarding verified by the
 canary **and** the first mail pass delivered); Gmail (the first read, or the canary for forwarding);
-effort and ranking (`slot.first_full` done). Syllabus reads join the list in O5.
+effort and ranking (`slot.first_full` done). Syllabus reads join the list in O5. **"First grades"
+is marked only by a slot whose `grades` ran** (T0, 2026-10-24): `NoRank`, or `slot.first_full` if
+`NoRank` was stopped; a `BeforeConfig` slot's `grades (not yet: …)` row never marks it, and a
+`grades (skipped: …)` row (no bundle, no LMS, a `campus.yaml` that landed mid-slot) leaves it
+pending for the next slot. So the order of the gate's items is first `sync`, then `grades`,
+`coursework` and `ingest` together in `NoRank`, then effort and ranking.
 
 **Opens** when every required item is `done`, `failed` or `skipped`, **or** when now is 3 minutes after
 `step10_confirmed_at`, whichever is first. **Never waits for** a backfill (Gmail forwarding's 120 days,
@@ -848,10 +917,13 @@ with its fix, never hidden. The gate is re-evaluated each time `onboarding_statu
 
 At step 2 the account may already hold a vault (C3′'s restore) and this device may already hold
 sessions. Each step checks, before it asks, what proves it done. **Config never syncs, so a restored
-vault has no `campus.yaml`** (review r2, M5): its school is never "proven". Instead, step 3 on a
-restored install **suggests** the school (the curated row whose LMS host is the host of the
-account's stored feed, if T0 finds the account returns that host to the device; no match, no
-suggestion) as a confirm, and its proof is the restored course
+vault has no `campus.yaml`** (review r2, M5): its school is never "proven". **The account does not
+say which school either** (T0, 2026-10-24): `GET /account` returns a stored feed's `kind` and
+`added_at` only (`cloud/supabase/functions/account/index.ts:192`), never its host, and this plan
+makes no cloud change. So step 3 on a restored install suggests a school only from what **this
+device** keeps: `onboarding.json`'s `school` (unitid and label, §4.5) from an earlier onboarding of
+this profile, as a confirm; with none, step 3 asks for the school as a fresh install does. Its proof
+is the restored course
 notes' count; this device still needs the school sign-in where the row has grades or a registrar
 (sessions are per device), and `school.apply` creates `campus.yaml` after the confirm. The other
 checks: payment (entitled), school email
@@ -1023,7 +1095,7 @@ until the account or the vault holds it, and **never silently lost** (R-C3'-exec
 | Q-B10 | **Yes.** Add the `onboarding_step` event, gated on the privacy page naming it first | F7b, S7 |
 | Q-B11 | **O4 merges first, then O3, with no release tag in between.** Amendment A18 is recorded | §11, A18 |
 | Q-B14 | **The allow list, with a fallback to the mailbox's own `mail-session-<id>` folder** on a refused host, as recommended. The deny-list alternative is closed | S3, S4c |
-| Design direction | **5b, Departures, as the spine, with the grafts listed in `docs/design/2026-10-23-directions/README.md`** ("Grafts" and "Round 3"). Build from `5b-departures-board/index.html`, `screens.json` and `BRIEF.md` | F10, F11a-F11e, S6b |
+| Design direction | **5b, Departures, as the spine, with the grafts listed in `docs/design/2026-10-23-directions/README.md`** ("Grafts" and "Round 3"). Build from `5b-departures-board/index.html`, `screens.json` and `BRIEF.md` | F10, F11a-F11f, S6b |
 
 - **Decided by the controller, standing:** Q-B15 to Q-B19, as written below. Quinn re-ruled none of
   them.
@@ -1157,6 +1229,19 @@ The questions below are kept as they were argued; each one's ruling or decision 
   `coursework` and, on a cloud vault, `ingest`, whatever `ingest.yaml` holds, and step 4's text already
   promised they follow `config.ingest`. *Alternative:* let T0 show each runs cleanly with no
   `ingest.yaml` and keep `NoRank` only; that runs `ingest` before the `course_map` exists.
+  **Amended at T0 (2026-10-24, the controller's call):** `BeforeConfig` leaves `grades` out too
+  (capture and step, one `grades (not yet: …)` row), so its one engine step is `sync`; `grades`
+  reads course notes and writes nothing before `school.courses` (§4.3).
+- **Q-B20 (new at T0, 2026-10-24; for the controller): how many `BeforeConfig` slots may run while
+  the account is still being read?** *Recommend:* re-run `slot.partial` (`BeforeConfig`) at once
+  after each fresh `ok` sync whose cursor is short of `pulled_to_end`, up to 10 in a row, then
+  `school.courses` is `failed` with "Try again" (§4.3). *Why:* a sync pulls one page per run, and
+  `account_settled` now waits for the end of the account's copy, so without a re-run a large account
+  whose step-2 restore failed would stall onboarding until the 3-minute cap and past it. *Price:*
+  each re-run is a whole slot (session refresh, mail pass, backup, telemetry), seconds each.
+  *Alternative:* a `sync`-only job outside the slot, which needs a second path into the engine child
+  and the notes gate; or leave `pulled_to_end` out and accept a duplicate course note on a
+  multi-page account.
 
 ---
 
@@ -1177,7 +1262,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | `app/src/onboarding_gate.rs` (new) | the reveal gate, a pure function (review r8's note) | F9 | none |
 | `app/src/main.rs` | onboarding mode; the window's close prevented and handed to a thread running `onboarding_quit`'s inner; moved and new commands | F4, F5, F5b, S6r | every lane adding a command: recount |
 | `app/src/commands.rs` | `switch_profile` refuses in onboarding mode | F4b | console lanes (one function) |
-| `app/src/scheduler.rs` | `run_slot_inner_scoped` and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}` (wrappers keep all 35 call sites); a stop flag, never cleared, checked before each stage; the bundle delete on every path; one call at a slot's end that clears the slot's `handover` items (together about fifty-five lines); otherwise the queue only calls its public functions | F8s | O1 (merged first) |
+| `app/src/scheduler.rs` | `run_slot_inner_scoped` and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}` (wrappers keep all 35 call sites); a stop flag, never cleared, checked before each stage; the bundle delete on every path; one call at a slot's end that clears the slot's `handover` items; `prime_mode_device` (T0) (together about sixty lines); otherwise the queue only calls its public functions | F8s | O1 (merged first) |
 | `engine/src/onboarding.rs` (new), `engine/src/cli.rs` | the read-only command: `--preview` and the `cli.rs` entry (F7a), `--tidied` (F7c) | F7a, F7c | L5 (`cli.rs`) |
 | `engine/src/uievents.rs` | one action, only if Q-B10 is ruled yes | F7b | none |
 | `app/static/onboarding.{js,css}` (new) | the screens | F11a-F11e | none |
@@ -1223,7 +1308,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F2g | `onboarding_state.rs`: `onboarding_attach_session`, step 2 again's re-attach (three-way account match, move on a match, a local delete of the pending session and a refusal on a mismatch) | `implementer`, reviewed by `contract-reviewer` | specified and tested over seams, off the contract list; a wrong move attaches another account's token to the vault (review r5, I-2) | F2b (chained after it in the same file, review r6 M2) |
 | F2h | `onboarding_state.rs`: `onboarding_entitlement` and `onboarding_checkout`, the vault-target versions of `entitlement_now` and `open_checkout` | `implementer`, reviewed by `contract-reviewer` | specified, public `account.rs` functions only, tested on a `127.0.0.1:0` listener (review r5, I-1) | F2g (the same file's chain: F2a, F2d, F2e, F2b, F2g, F2h; review r6 M2) |
 | F3 | Step-2 vault with defaults, without campus or events files; `account_settled`; picker flag | `test-writer` then `implementer` | writes a vault; tests first | F2a |
-| F4 | Onboarding mode in `run_console`; the window's close prevented, then `onboarding_quit`'s inner on its own thread | `implementer` | P-3's five changes; the close off the event loop (review r5, I-5) | F2a, F2b, T0 |
+| F4 | Onboarding mode in `run_console`; the window's close prevented, then `onboarding_quit`'s inner on its own thread; `mode_device` primed (T0) | `implementer` | P-3's five changes; the close off the event loop (review r5, I-5) | F2a, F2b, F8s (`prime_mode_device`), T0 |
 | F4b | `switch_profile` refuses in onboarding mode | `implementer` | specified, tested in F1 (review r4, M6) | F2a |
 | F5 | Moved and new commands registered | `mechanical` | a list edit, recounted, pinned | F4, F2b, F2g, F2h, F8d, F8lb |
 | F5b | Shell list: the retired panels' commands, after F10 | `mechanical` | `main.rs` is never F10's (review r1, I8) | F10 |
@@ -1236,7 +1321,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F8e | Order rules and the local lane: config before readers, slot order, `account_settled` from the sync status, step 10's gate | `implementer` | as F8a | F8a |
 | F8h | The notes gate and the lane's `sync.lock` retry (holding nothing between tries) | `implementer` | split out of F8e (review r4, M4) | F8e |
 | F8f | Stop and drain at safe points; the save freeze; hand-over items | `implementer` | as F8a | F8a, F1 |
-| F8s | `scheduler.rs`: `run_slot_inner_scoped` (the seams from `Some(app)`) and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}`; the stop before each stage (never cleared); the bundle deleted on every path; the slot's hand-over clearing | `implementer` | `scheduler.rs` is off the contract list; its tests are F1's 15 and 18 (review r3 M5, r4 I-3, M1, r5 I-3) | F1 |
+| F8s | `scheduler.rs`: `run_slot_inner_scoped` (the seams from `Some(app)`) and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}`; the stop before each stage (never cleared); the bundle deleted on every path; the slot's hand-over clearing; `prime_mode_device` (T0) | `implementer` | `scheduler.rs` is off the contract list; its tests are F1's 15, 18 and 27 (review r3 M5, r4 I-3, M1, r5 I-3; T0) | F1 |
 | F8b | Runners: the school step (capture, answers, pending feed, preview) | `implementer`, reviewed by `contract-reviewer` (its capture handles the bearer link; review r7, I-1) | specified | F8a, F7a, S4d, F8la |
 | F8c | Runners: the local lane (stores, apply, courses, registrar, config) | `implementer` | specified | F8e, F6a, F6b |
 | F8g | Runners: the partial (`BeforeConfig`, then `NoRank`) and full slots, each with onboarding's `AppHandle` | `implementer` | specified | F8e, F8f, F8h, F8s |
@@ -1249,7 +1334,8 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F11t | Failing static tests for the onboarding screens | `test-writer` | test first (review r1 minor) | F2b |
 | F11a | The step frame and the rail | `console-ui` | `app/static` | F11t, F10 |
 | F11e | Steps 3 and 4; step 2's sign-in again in onboarding mode | `console-ui` | `app/static` | F11a, F8b, F8c, F8g, F2g, F2h, F8lb (review r7 M1) |
-| F11b | Steps 5, 6 and 7 | `console-ui` | `app/static` | F11a, F8d, F8lb (step 7's paste; review r7 M1), O2 merged |
+| F11b | Steps 5, 6 and 7; step 6 on today's separate consents (`google_connect` with each scope, `google_status`) | `console-ui` | `app/static` | F11a, F8d, F8lb (step 7's paste; review r7 M1). No longer O2 (T0, 2026-10-24: O2 has no branch) |
+| F11f | Step 6's combined Gmail-and-Calendar ask and the forwarding fallback, over O2's cloud half | `console-ui` | `app/static`; O2's contract only | F11b, O2 merged; may follow wave B (§8) |
 | F11c | Steps 8 and 10 | `console-ui` | `app/static` | F11a, F8d |
 | F11d | The reveal and the main page's "still coming" line | `console-ui` | `app/static` | F11a, F9 |
 | F12 | `scripts/wizard-check.py` rewritten | `test-writer` | the walk-through is the page's test | F11a-F11e |
@@ -1264,44 +1350,68 @@ one file; a task that finds it needs more stops and asks for a split.
 
 ## T0. Branches and checks (main session)
 
-- [ ] After O1 merges: `feat/o4-school-sign-in` and `feat/o3-long-onboarding`, each from `origin/main`.
-  Commit this plan and the spec on the first, if `main` lacks them.
-- [ ] Record the state of: L6 (merged? then `main.rs` is free), L5 (merged? then O5 can follow
+*Run 2026-10-24 by the main session on `feat/o4-school-sign-in`, cut from `origin/main` `1d3c467`
+with O1 merged. Results in §13 (2026-10-24) and §14.42.*
+
+- [x] After O1 merges: `feat/o4-school-sign-in` and `feat/o3-long-onboarding`, each from `origin/main`.
+  Commit this plan and the spec on the first, if `main` lacks them. *O4's branch is cut; the plan is
+  on `main`. O3's branch is cut from `main` after O4 merges (A18).*
+- [x] Record the state of: L6 (merged? then `main.rs` is free), L5 (merged? then O5 can follow
   directly), O0's `fix/current-term-courses` (needed by S-F's class count), O2 (needed before F11b's
-  step 6), L8 (testers' "nothing to pay"), L1 (not started; it rebases on O4).
-- [ ] Re-read every `file:line` this plan cites on the branch; record drift as dated lines in §13.
-- [ ] Re-confirm P-3's five changes (§3) and S-F's read; a sixth finding goes to the planner.
-- [ ] Confirm `PUT /account/sources` still refuses without an entitlement (Q-B2's premise).
-- [ ] Confirm that `sync`, `grades` and `judge`'s Gmail pull run correctly on a vault with no
+  step 6), L8 (testers' "nothing to pay"), L1 (not started; it rebases on O4). *L6, L8, O0 (#63)
+  and #19 are merged. **L5, O2 and L1 are not merged and have no branch**: O5 cannot follow
+  directly (§8), and F11b builds step 6 on today's separate consents, the combined ask moving to
+  F11f after O2 (§7, §8).*
+- [x] Re-read every `file:line` this plan cites on the branch; record drift as dated lines in §13.
+  *The code is byte-identical to `49b0b43`; three lines drifted by one, now corrected.*
+- [x] Re-confirm P-3's five changes (§3) and S-F's read; a sixth finding goes to the planner.
+  *The five hold. The sixth: onboarding mode leaves `Scheduler.mode_device` at its placeholder;
+  F4 now primes it (§13, §14.42). S-F's code read is re-read live in T3.*
+- [x] Confirm `PUT /account/sources` still refuses without an entitlement (Q-B2's premise).
+  *Holds (`handler.ts:126`, `entitlement.ts:89`).*
+- [x] Confirm that `sync`, `grades` and `judge`'s Gmail pull run correctly on a vault with no
   `config/ingest.yaml`, and that onboarding mode never reaches a reader of `campus.yaml` or
   `events.yaml` before `school.apply` (§4.3, §4.9). Any that does not goes to the planner before F8c.
-- [ ] Confirm how the scheduler bounds a running step (its timeout), which §4.10's wait relies on.
-- [ ] For round 2's answers, name in §13: the hold a console note write takes against a running `sync`
+  *`sync`, `judge` and Gmail hold, and no engine file reads `campus.yaml`. **`grades` does not**: it
+  needs course notes, so `BeforeConfig` leaves it out (§4.3). The app's slot reads `campus.yaml`'s
+  row at its start (`scheduler.rs:732`), a named skip before `school.apply`; the mid-slot case is
+  in §4.3.*
+- [x] Confirm how the scheduler bounds a running step (its timeout), which §4.10's wait relies on.
+  *`CHILD_TIMEOUT`, 20 minutes, with `kill_tree` (`scheduler.rs:597-611`).*
+- [x] For round 2's answers, name in §13: the hold a console note write takes against a running `sync`
   (§4.3's local lane); the record a `sync` leaves that says it reached the account (`account_settled`);
   whether `grades` reads course notes (§4.3); whether the account returns a stored feed's host to the
   device (§4.7's suggestion); that `std::fs::hard_link` refuses an existing target on the vault's
   volume (§4.9); and that `scheduler::spawn`'s first-run slot fires for a step-2 vault after a
   relaunch from onboarding (App mode, `device_ok`; §4.10). Any that does not hold goes to the planner.
-- [ ] For round 3's answers: that `Scheduler` is managed state in onboarding mode even though
+  *Named in §13 (2026-10-24). Four did not hold as written and are amended: only `run_confirm` and
+  `registrar::spawn` take the sync hold; an entitlement-refused sync is a skip, and `account_settled`
+  also needs `pulled_to_end`; `grades` reads course notes; the account returns no host. `hard_link`
+  and the first-run slot hold.*
+- [x] For round 3's answers: that `Scheduler` is managed state in onboarding mode even though
   `scheduler::spawn` is not called (the stop flag lives on it). *Answered by review r4 from the code,
   so no longer T0's:* Sign out does **not** relaunch or end anything (`account.rs:710-729`; now
   `onboarding_sign_out`'s job, §4.10), and a skipped sync leaves **no** signal in its step name, only in
-  `state/sync-status.json` (now read there, §4.3).
-- [ ] For round 4's answers, as corrected by review r5 (I-2) and §13.1: **confirm no re-attach path
+  `state/sync-status.json` (now read there, §4.3). *Holds: managed unconditionally in `run_console`
+  (`main.rs:161`).*
+- [x] For round 4's answers, as corrected by review r5 (I-2) and §13.1: **confirm no re-attach path
   exists** on the lane branch (today `attach_in` refuses a vault with `cloud.yaml` and the sign-in
   commands save only to the pending target), so F2g's is the only one; if a lane has added one since,
   it goes to the planner before F2g. *Answered by §13.1 from the code:* the three sign-in commands
   are on the console's list (`main.rs:194`); `switch_profile` has no inner function (F4b adds one);
-  `cs.sync` carries `at`, `ok` and `skipped` (`sync.rs:2408-2417`).
+  `cs.sync` carries `at`, `ok` and `skipped` (`sync.rs:2408-2417`). *Holds: no re-attach path.*
 - [ ] **The ruled direction's files** (Quinn, 2026-10-23). `docs/design/2026-10-23-directions/` is
   in the main checkout (`C:\Users\danie\GitHub\knowlu\docs\design\2026-10-23-directions`), untracked
   there on 2026-10-23 and absent from this worktree. Before F10, F11a-F11e or S6b is dispatched,
   commit at least `README.md` and `5b-departures-board/` to `main` (docs only), or give each brief
-  the main checkout's path, so the console-ui agents read the same files.
-- [ ] For round 5's answers: re-run §13.1's reuse audit on the lane branches (each row's `file:line`,
+  the main checkout's path, so the console-ui agents read the same files. *Not in T0's report of
+  2026-10-24; still open, and due before F10, F11a-F11e or S6b is dispatched.*
+- [x] For round 5's answers: re-run §13.1's reuse audit on the lane branches (each row's `file:line`,
   signature, target and callers) and record drift in §13; recount `run_slot_inner` and
   `run_slot_with`'s call sites (35 here, with `run_slot`'s); confirm `scheduler::run_slot` still has exactly the four
-  callers §4.3 names, and that nothing else in `app/src` starts a slot.
+  callers §4.3 names, and that nothing else in `app/src` starts a slot. *All 54 rows hold on
+  `feat/o4-school-sign-in`, the `SyncStatus` row as now corrected; 35 call sites; four callers;
+  `main.rs:42`'s `--run-slot-once` is the only other slot starter, outside the console process.*
 
 ## T1, T2, T3. The spikes (main session)
 
@@ -1529,7 +1639,8 @@ job runners as a trait so tests pass fakes.
 7. **Skips:** account, payment, the school step and "Your week" refuse a skip; every other step takes
    one and records it.
 8. **Config before its readers (§4.3, §4.9):** no fake `ingest`, `coursework` or calendar read starts
-   before `config.ingest` is `done`; no `grades` before `school.apply`; no `registrar.confirm` before
+   before `config.ingest` is `done`; no `grades` (capture or engine step) before `school.apply` and
+   `school.courses` are both `done`, so none in a `BeforeConfig` slot (T0); no `registrar.confirm` before
    `school.courses`; no `school.courses` before `account_settled`; no `config.ingest` before
    `school.courses` and both feed stores have settled.
 9. **Quitting and finishing (§4.10, review r1 I2, review r2 I3 and M5):**
@@ -1592,8 +1703,14 @@ job runners as a trait so tests pass fakes.
     `totals.skipped` ("another sync is running"; then "no session") leaves the gate's "first sync"
     not done and `account_settled` false; a status stamped before the slot's `RunSummary.started` (a
     stale run, which is also what a lock-held sync leaves, since it writes none) does the same; a
-    fresh status with no skip and `ok` settles both; a fresh status with no skip and `ok: false`
-    makes "first sync" `failed` with its fix and leaves `account_settled` false (review r5, M2). A lane job retrying on a held
+    fresh status with no skip and `ok` settles both **when the fake cursor has `pulled_to_end`**; a
+    fresh status with no skip and `ok: false` makes "first sync" `failed` with its fix and leaves
+    `account_settled` false (review r5, M2). **T0's cases (2026-10-24):** a fresh status with
+    `ok: false` and `skipped: "no entitlement"` (the shape `record_gated_skip` writes) is "neither":
+    "first sync" not done, not `failed`, `account_settled` false; a fresh `ok` status with
+    `pulled_to_end` false marks "first sync" `done`, leaves `account_settled` false and enqueues one
+    more `BeforeConfig` `slot.partial`, up to 10 in a row, after which `school.courses` is `failed`
+    and its "Try again" re-arms the count (Q-B20); the cursor is read, never written. A lane job retrying on a held
     `sync.lock` holds neither `vault_io` nor the lock between tries (a fake `vault_io` user gets it
     within one retry interval; review r4, M2).
 17. **Sign-out mid-onboarding (review r3 I-C, review r4 I-1):**
@@ -1617,9 +1734,10 @@ job runners as a trait so tests pass fakes.
       `grades (skipped: …)` row and the runner log gains its line as it does for a full slot; `rank`
       is not in the recorded argv and is the row `rank (not yet: the first full slot ranks)`, with
       **no runner-log line** for it and no `state/today.md` written;
-    - `BeforeConfig` on a cloud vault with no `ingest.yaml`: the recorded argv is `sync` then
-      `grades` only (with a bundle), and `coursework`, `ingest`, `judge` and `rank` are each a
-      `(not yet: …)` row with no runner-log line;
+    - `BeforeConfig` on a cloud vault with no `ingest.yaml` (amended at T0, 2026-10-24): the
+      recorded argv is `sync` only; the capture seam is **never called** (a fake that fails if it
+      is) and no bundle is written; `coursework`, `grades`, `ingest`, `judge` and `rank` are each a
+      `(not yet: …)` row with no runner-log line, `grades` once (its capture and step together);
     - with a capture seam present and a mail seam with a due mailbox, both run under `NoRank` exactly
       as under `Full` (the seams are the scope's, not dropped by it);
     - with a privacy update pending, the held steps are named exactly as in a full slot.
@@ -1686,6 +1804,14 @@ job runners as a trait so tests pass fakes.
       not pass `finish` to `capture_calendar_link_with`;
     - the console's handler list holds neither `capture_calendar_link` nor `paste_calendar_link`
       (F5's pin).
+27. **Onboarding mode primes the scheduler's cached mode (T0, 2026-10-24; F4),** in
+    `app/tests/scheduler.rs`: a `Scheduler::default()` reports `(Script, true)` through
+    `commands::attach_scheduler` (today's placeholder, pinned so the test fails if it changes
+    unnoticed); after F4's priming call on a step-2 vault (App mode, this device), the envelope's
+    `topline.scheduler` reads `mode: "app"`, `device_ok: true`; and a source pin over `main.rs`
+    asserts the onboarding arm calls `scheduler::prime_mode_device` (F8s) before the window is built. Also in test 6 (the
+    gate): a `grades (not yet: …)` row never marks "first grades", and a `grades (skipped: …)` row
+    leaves it pending.
 Tests 21, 22 and 26 touch the real Credential Manager, so the test-writer's sign-off rule for such tests
 applies (the controller gives it at dispatch); every other test here uses fakes.
 Acceptance: as S1's. Size: M (test files; the cap is for implementer and console-ui tasks).
@@ -1822,6 +1948,20 @@ that need that loop to open and close their windows, for up to an engine child's
 returns at once; a second close meets F2b's guard. The normal console's hide-to-tray arm and the
 `lms_link` window's `Destroyed` arm are unchanged. Size: S (about 40 lines in `main.rs`).
 
+**What skipping `spawn` also skips** (T0, 2026-10-24; F1 test 27). `scheduler::spawn` is where
+`Scheduler.mode_device` is first primed (`scheduler.rs:1154`) and where the housekeeping thread that
+re-primes it every minute starts (`:1229`, `:1255`). Without it the cache keeps its `Default`
+placeholder `(Script, true)` (`:146`), and `commands::attach_scheduler` puts that into every
+envelope's `topline.scheduler` (`commands.rs:59-71`). So the onboarding arm calls
+`scheduler::prime_mode_device(&cs, &sch)` (F8s: the one line `spawn` runs at `:1154`, moved into a
+`pub fn` that `spawn` then calls, no behaviour change) once, after managing `Scheduler` and before
+building the window. A step-2 vault is App mode on this device from birth (F3 test 1), so one
+priming holds for the whole of onboarding. **The rest is benign, and F4 adds nothing for it:**
+`spawn`'s `quit_at` take-and-clear and `startup_missed` (`:1137-1149`) run at the first normal launch
+after the reveal, when `quit_at` is the finish's own stamp (Q-B18), so no slot reads as missed; the
+housekeeping thread's debounced backup, log prune, entitlement refresh (`:1269`) and update check wait
+for that launch too, and each onboarding slot runs its own backup and entitlement refresh.
+
 **F4b (implementer), `switch_profile` refuses in onboarding mode** (review r4, M6). F1's test 20. In
 `app/src/commands.rs`: if `switch_profile` has no inner function, add one taking the launch mode
 (the wrapper reads it from managed state), and in onboarding mode return the named refusal "finish
@@ -1940,15 +2080,23 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
 - **F8e, order and the local lane.** The second, serial lane for §4.3's local jobs; the
   config-before-readers rules; `account_settled` and "first sync" read from `cs.sync` after
   `state::refresh_sync` (§4.3's three readings: an `at` at or after the summary's
-  `RunSummary.started`, no `skipped`, and `ok` for `done` and `account_settled`, `ok: false` for
-  `failed`; review r4 I-2, r5 M2); which scope each `slot.partial` gets (F8g); slot order; and step
+  `RunSummary.started`, no `skipped`, and `ok` for `done`, `ok: false` for `failed`; any `skipped`,
+  `"no entitlement"` included, for neither; review r4 I-2, r5 M2, T0); `account_settled` also needs
+  the cursor's `pulled_to_end`, read with `sync::load_cursor` and never written, and short of it the
+  next `BeforeConfig` slot is enqueued, up to 10 in a row (§4.3, Q-B20; T0, 2026-10-24); `grades`
+  after `school.apply` and `school.courses`; which scope each `slot.partial` gets (F8g); slot order; and step
   10's proposals flag in
-  `onboarding_status`. F1's tests 4, 8, 11, 14's ordering and 16's status half. Size: S (about 65
-  lines).
+  `onboarding_status`. F1's tests 4, 8, 11, 14's ordering and 16's status half. Size: S (about 75
+  lines with T0's re-run rule; past 80, the `account_settled` reading moves to its own piece).
 - **F8h, the notes gate** (split out now, review r4 M4). The in-process gate both sides block on, the
   lock order (gate, `vault_io`, `sync.lock`), and the lane's retry on `sync.lock` every 250 ms for up
   to 30 seconds, **taking and dropping `vault_io` and the lock on each try** so neither is held
-  while it sleeps (review r4, M2). F1's test 16's gate and retry halves. Size: S (about 45 lines).
+  while it sleeps (review r4, M2). **Never around a path that takes them itself** (T0, §4.3):
+  `registrar.confirm`'s write goes through `registrar::spawn`, which locks `vault_io` and
+  `sync.lock` itself, so the retry wraps that call and its refusal, holding neither (a nested
+  `vault_io` deadlocks; a nested `sync.lock` refuses). F1's test 16's gate and retry halves; F1 test
+  16 also runs `registrar.confirm`'s fake through the retry and fails if `vault_io` is held on
+  entry. Size: S (about 45 lines).
 - **F8f, stop, drain, freeze and hand-over** (in `onboarding_jobs.rs`). Setting the stop, each job
   kind's safe point (§4.10's table), the wait, the **save freeze** that `onboarding_sign_out` sets
   after its last save (a later save is refused and logged; review r4, I-1), and the hand-over items
@@ -1968,7 +2116,9 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
     `main.rs:42`'s `--run-slot-once`, `run_slot` and `run_slot_inner` themselves, and `run_slot`'s
     four callers) changes (review r5, M4).
   - `SlotScope::{Full, NoRank, BeforeConfig}` (§4.3, Q-B19): `NoRank` drops `rank` from
-    `slot_argv`'s output; `BeforeConfig` drops `coursework`, `ingest`, `judge` and `rank`. Each
+    `slot_argv`'s output; `BeforeConfig` drops `coursework`, `grades`, `ingest`, `judge` and `rank`,
+    and **does not start the grades capture stage at all** (T0, 2026-10-24: one row
+    `grades (not yet: your courses are not in yet)` stands for both; F1 test 18). Each
     dropped step is the row `<step> (not yet: <why>)` at exit 0, pushed where today's named skips
     are, and **outside the runner-log filter** (`scheduler.rs:1036-1037` matches `(skipped:` forms
     only; review r5, M3), so no `state/runner-log.md` line is written for it.
@@ -1978,7 +2128,9 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
     line. **The grades bundle's delete runs on every path**, a stop included (review r4, M1): the
     stop skips stages, never that cleanup.
   - The slot's end clears `handover`'s slot items.
-  Size: S (about 55 lines).
+  - `pub fn prime_mode_device(cs, sch)` (T0; F1 test 27): `spawn`'s line at `:1154` moved into a
+    function, which `spawn` then calls; F4 calls it in onboarding mode. About 4 lines.
+  Size: S (about 60 lines).
 - **F8b, the school step's runners.** `school.capture`: S4d's visible sign-in, then the hidden reads
   through `grades::capture_hidden`, the LMS capture (`lms_link::capture_link_only`, F8la's
   validate-only seam, never `capture_calendar_link` or `lms_link::finish`; review r7, I-1) and the
@@ -2001,9 +2153,10 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   - Both call `scheduler::run_slot_inner_scoped(&cs, &sch, Some(&app), false, scope)` with the
     queue's own `AppHandle` (review r5, I-3), so the grades capture and the mail pass exist; with no
     tray, `tray::set_state` does nothing (`tray.rs:150-151`).
-  - `slot.partial`: `BeforeConfig` while `config.ingest` is not `done`, `NoRank` once it is (§4.3,
-    Q-B19), so its named skips, runner-log lines, privacy hold, session refresh and stop checks are
-    the slot's own; no child loop of its own.
+  - `slot.partial`: `BeforeConfig` while `config.ingest` is not `done`, `NoRank` once it and
+    `school.apply` are (§4.3, Q-B19; `school.apply` added at T0), so its named skips, runner-log
+    lines, privacy hold, session refresh and stop checks are the slot's own; no child loop of its
+    own. A `BeforeConfig` run may repeat while the account is still being read (F8e, Q-B20).
   - `slot.first_full`: `Full`, which already runs the slot's mail pass before its engine steps
     (`scheduler.rs:966`), so **no second mail step** is added (review r3, M1).
   - A summary with `reason` set (a refusal: script mode, another device) is the job's `failed` with
@@ -2067,7 +2220,7 @@ picker keeps its restore-from-backup link and the adopt path. The old panels 3-1
 why. **Static files only:** F10 never edits `main.rs`; its report names any shell command left with
 no caller, for F5b. C1's rulings on those panels are carried or retired per §9's row A10. Size: M.
 
-## F11t, F11a-F11e. The onboarding screens and the rail
+## F11t, F11a-F11f. The onboarding screens and the rail
 
 **F11t (test-writer), first (review r1 minor).** Failing static tests in a new
 `app/tests/onboarding_static.rs` that pin:
@@ -2120,9 +2273,13 @@ count. Each piece edits about 80 lines or fewer of code and adds fixture renders
   `account_id`, whose `wrong_account` refusal shows its sentence and the way to the picker
   (`onboarding_sign_out`). Size: S (about 80 lines; if
   past, step 2 moves to its own piece).
-- **F11b:** steps 5, 6 and 7; step 6 uses O2's combined consent and its forwarding fallback,
-  through the vault-target `google_connect` and `google_status` (§4.2). Size: S
-  (about 80 lines; if the forwarding fallback pushes it past, step 7 moves to its own piece).
+- **F11b:** steps 5, 6 and 7; step 6 on today's separate consents, one vault-target
+  `google_connect` per scope (`calendar`, `gmail`), polled by `google_status` (§4.2; amended at T0,
+  2026-10-24, because O2 has no branch). Size: S (about 80 lines; if past, step 7 moves to its own
+  piece).
+- **F11f (after O2 merges):** step 6's one consent for both scopes and the forwarding fallback
+  through the mail window, over O2's cloud half and its holder count, in the same design slot; F11t
+  gains its pins in the same task. Size: S (about 50 lines).
 - **F11c:** steps 8 and 10, with step 10's proposals waiting on `config.ingest` (§4.2). Step 10's
   confirm is today's `commitments_confirm`, which refuses by name while a `sync` child holds
   `sync.lock` ("a sync is running; try again in a moment", `week.rs:101`); the step shows that
@@ -2166,17 +2323,26 @@ still coming, and Open Knowlu handing it over. Run in the repository's `.wv/` ve
 - **O0 (fixes):** the current-term filter must be on `main` before T3 (S-F's class count) and F15.
 - **O2 (Gmail permission first, wave A):** its cloud half (the combined Gmail-and-Calendar ask on the
   one client; the count of permission holders) and its forwarding fallback must be on `main` before
-  F11b builds step 6. Until then step 6 offers today's separate consents.
-- **L1 (Microsoft 365 older mail):** after O1, O3 and O4 (Q10). It runs on `school-session` where the
+  step 6 makes the combined ask. **At T0 (2026-10-24) O2 is not merged and has no branch**, so F11b
+  builds step 6 on today's separate consents (`account::google_connect` with each scope, polled by
+  `google_status`, both through the vault's session), and F11f adds the combined ask and the
+  forwarding fallback once O2 merges. If wave B ships first, its step 6 is the separate-consent form,
+  and the ledger's §1.3 Q8 row is met by F11f, not F11b. Proof keys are unchanged (`gmail` is
+  `granted` or `skipped` until F11f adds `forwarding`).
+- **L1 (Microsoft 365 older mail):** after O1, O3 and O4 (Q10); at T0 (2026-10-24) not started, no
+  branch, as planned. It runs on `school-session` where the
   row is shared. Its plan needs two amendments before it starts: its decision 19's browser arguments
   go into `SCHOOL_BROWSER_ARGS` (the mail window no longer has a folder of its own at a shared school,
   and S-G may already have added them), and its `init.js` closure stays on the mail window only (S3's
   test 4). Its privacy row follows S7's page version.
-- **L5, then O5 and O6 (wave C):** L5 is not merged. O5 fills step 9, adds `syllabi_found` to step 3's
+- **L5, then O5 and O6 (wave C):** L5 is not merged and, at T0 (2026-10-24), has no branch, so O5
+  cannot follow wave B directly: it waits for L5 to be cut, built and merged, and step 9 stays absent
+  meanwhile (§4.2). Nothing in wave B waits for either. O5 fills step 9, adds `syllabi_found` to step 3's
   proof and syllabus rows to step 10, and joins the syllabus reads to the reveal gate's list, all
   under §4's contract. O6's late window is outside onboarding.
-- **L8 (testers):** an entitled tester's step 4 reads "nothing to pay"; no code here beyond reading
-  `entitlement_now`.
+- **L8 (testers):** merged (T0). An entitled tester's step 4 reads "nothing to pay"; no code here
+  beyond reading the entitlement through F2h's `onboarding_entitlement` (the vault's session; never
+  `entitlement_now`, §4.3).
 
 ## 9. Rule-file and signed-spec amendments this plan needs
 
@@ -2213,12 +2379,14 @@ behaviour, before it merges.
 |---|---|---|---|
 | §1.2 | Every step: why, ask, proof; "reading…" lets the student go on | F11a-F11e | §4.1 states; F11t; F15 |
 | §1.3 | Eleven steps in the ruled order; step 9 absent until O5 | F2a, F11a-F11e | F12's walk; §4.2 |
-| §1.3, Q8 | One Google consent for Gmail and Calendar at step 6 | F11b (O2's cloud half) | F11t; F15 |
+| §1.3, Q8 | One Google consent for Gmail and Calendar at step 6 | F11f (O2's cloud half; F11b builds the separate-consent form until O2 merges, T0) | F11t; F15 after F11f |
 | §1.4, Q2 | Payment right after step 3's proof; no gate change | F2a, F8a, F11e | F1 test 3; `entitle.rs` absent from the diff (F14) |
 | §1.4 B | Step 3's counts from raw captures, before any note is written | F7a, F8b | S-F (T3, with the patch's saved feed); F7a's tests; F1 test 3 |
 | §1.5 | Background work starts on each answer and never blocks | F8a-F8h | F1 tests 3-5, 8, 11; S-G (T3) |
 | `CLAUDE.md` "left out and named" (r4 I-3) | `slot.partial` is the slot itself minus `rank`: every step it leaves out is named, with its runner-log line | F8s, F8g | F1 test 18 |
-| `CLAUDE.md` "left out and named" (r5 I-3, M3; §13.1) | The scoped slots carry the grades and mail seams (onboarding's `AppHandle`); before `ingest.yaml` no `coursework`, `ingest` or `judge` runs; a scope's rows are named `(not yet: …)` and kept out of the runner log | F8s, F8g | F1 test 18 |
+| `CLAUDE.md` "left out and named" (r5 I-3, M3; §13.1) | The scoped slots carry the grades and mail seams (onboarding's `AppHandle`); before `ingest.yaml` no `coursework`, `grades` (capture or step; T0), `ingest` or `judge` runs; a scope's rows are named `(not yet: …)` and kept out of the runner log | F8s, F8g | F1 test 18 |
+| §1.11 (T0, Q-B20) | `account_settled` waits until the account's copy is read to its end (`pulled_to_end`, read only); a multi-page account re-runs `BeforeConfig`, bounded, never stalls; an entitlement-refused sync is never the first sync | F8e, F8g | F1 test 16's T0 cases |
+| §1.9, Q13 (T0) | The onboarding console reports the vault's real scheduler mode, never the `Default` placeholder | F4, F8s | F1 test 27 |
 | §1.4, Q2 (r5 I-1) | Checkout, the entitlement poll and the queue's hold read the vault's own session, never the pending target step 2 emptied | F2h, F8a, F11e | F1 tests 3, 22; F11t |
 | §1.6 (r5 I-2) | Signing in again attaches only the vault's own account; a mismatch moves nothing and leaves no other account's session on the machine | F2g, F11e | F1 tests 10, 21; F11t |
 | §1.5 (r5 I-4) | No slot starts outside the queue in onboarding mode; a closed backfill batch waits for the queue's next `judge` | F8m | F1 test 23 |
@@ -2250,7 +2418,7 @@ behaviour, before it merges.
 | R-C3'-exec-40/41 (r2 I1) | A feed the account cannot take is kept in `ingest.yaml`, never lost; a rejected paste is never sent; the link survives a quit on this device only | F2d, F2c, F6b, F8c | F1 test 13; F6b's feed tests; F2c's tests |
 | §2.7 (r3 M6) | The privacy page names the waiting feed link and the answers file, and that an abandoned setup keeps them until finish, sign-out or deletion | S7 | the guard; Quinn's read |
 | §1.11 (r2 I5) | A restore that could not reach the account never leads to duplicate course notes; `course_map` names restored notes | F3, F6a, F6b, F8e | F3 test 5; F1 test 14; F6a and F6b's restored-note tests |
-| §1.11 | Restored or adopted installs skip proven steps; a restored install's school is suggested, never assumed | F2a, F11e | F1 test 2; F3 test 3 |
+| §1.11 | Restored or adopted installs skip proven steps; a restored install's school is suggested only from this device's own `onboarding.json`, never from the account, never assumed (T0) | F2a, F11e | F1 test 2; F3 test 3 |
 | §1.11 | C1's rulings carried or retired | F10, F13 | §9 row A10 |
 | §2.3, Q1 | One kept school profile at a shared school, after S-A | S2, S4a-S4d | S-A (T1, T2); S3; S10 |
 | §2.4 | Under the profile's app data; guard; no password; never synced | S2 | S1 tests 1-2 |
@@ -2281,7 +2449,7 @@ behaviour, before it merges.
    README's grafts). Q-B1 stands at "no exception needed". Still Quinn's: each spike's verdict when
    one fails, every "why" line, the privacy page, and §9's signatures.
 3. **Controller:** each spike's record before the tasks that depend on it (§7); Q-B2, Q-B4 to Q-B9,
-   Q-B12 to Q-B19.
+   Q-B12 to Q-B19, and Q-B20 (T0's new question) before F8e.
 4. **Quinn reads:** every "why" line (F11a-F11e), the privacy page (S7), and signs §9's amendments.
 5. **S9, then F14** before each push; each lane PR merges on green CI and its reviewer's PASS
    (`contract-reviewer` for `account.rs`); **no release tag between the O4 and O3 merges.**
@@ -2309,6 +2477,10 @@ tightened"** rows held but a brief now says what the code requires. T0 re-runs t
 branches. Tally (corrected in review r6, M4): 54 rows; 12 "No" (7 of them review r5's I-1 to I-5,
 4 found by this audit, 1 by review r6's I-2), 7 "Holds, tightened" (the `sign_out_with` row
 rewritten for review r6's I-1, and `renderFirstRun`'s reader added for its M1), 35 "Holds".
+**T0's re-run (2026-10-24, `feat/o4-school-sign-in` at `1d3c467`):** every row's `file:line`,
+signature, target and callers held, but the `SyncStatus` row's reading was wrong (corrected in
+place, still "Holds, tightened"), and two rows are added: `Cursor.pulled_to_end` ("Holds") and
+`Scheduler.mode_device` ("No"). Tally now 56 rows: 13 "No", 7 "Holds, tightened", 36 "Holds".
 
 | Function, command or seam | file:line | What the plan assumes | Holds? |
 |---|---|---|---|
@@ -2336,7 +2508,9 @@ rewritten for review r6's I-1, and `renderFirstRun`'s reader added for its M1), 
 | `scheduler::slot_argv` | `scheduler.rs:520` | a slot before `ingest.yaml` names `coursework` and `ingest` as skipped | **No**: both always run on a cloud vault (`:529`, `:538`). Fixed: `BeforeConfig` (§4.3, F8s, Q-B19; audit) |
 | runner-log skip filter | `scheduler.rs:1036-1037` | scope rows | Holds: no `rank (` form; F8s's `(not yet:` rows stay out (M3) |
 | `RunSummary.started` | `scheduler.rs:793` | "sync ran" compares to it | Holds: `now_ts(None)`, the format of `SyncStatus.at` (M2) |
-| `SyncStatus` | `engine/src/sync.rs:2408` | `ok`, `at`, `skipped` | Holds, tightened: an entitlement-gated sync is `ok: false` with no skip, now `failed` (M2) |
+| `SyncStatus` | `engine/src/sync.rs:2408` | `ok`, `at`, `skipped` | Holds, tightened (corrected at T0, 2026-10-24): an entitlement-gated sync is `ok: false` **with** `skipped: "no entitlement"` (`record_gated_skip`, `sync.rs:2462-2475`), so it reads as "neither", not `failed`; round 5's reading was wrong |
+| `Cursor.pulled_to_end`, `sync::load_cursor` (T0) | `engine/src/sync.rs:227`, `:238`; set `:2618-2620` | `account_settled` | Holds: sticky once a pull returns `more: false`; one page per sync run, so F8e re-runs `BeforeConfig` (Q-B20); read only |
+| `Scheduler.mode_device` (T0) | `scheduler.rs:68`, `:146`; primed `:1154`, `:1255`; read `commands.rs:59-71` | (unstated: kept right in onboarding mode) | **No**: primed only by `spawn` and its housekeeping thread, so onboarding mode would report `(Script, true)`. Fixed: F8s's `prime_mode_device`, called by F4 (F1 test 27) |
 | `state::refresh_sync` | `state.rs:174` | fills `cs.sync` at the slot's end | Holds (`scheduler.rs:1116`) |
 | `scheduler::run_slot` callers | `tray.rs:49`; `scheduler.rs:1162`, `:1206`; `mail/live.rs:121` | none fires in onboarding mode | **No** for `mail/live.rs:121`. Fixed: F8m (I-4). The tray and `spawn` do not exist there |
 | `mail::live::real_env`, `start_setup`, `on_start` | `mail/live.rs:111`, `:130`, `:146` | kept in onboarding mode | Holds but for `on_closed` (row above) |
@@ -2357,7 +2531,7 @@ rewritten for review r6's I-1, and `renderFirstRun`'s reader added for its M1), 
 | `uievents::ACTIONS` | `engine/src/uievents.rs:11` | closed at 11 | Holds |
 | `grades::capture_hidden`, `open_visible` | `grades.rs:669`, `:574` | S4a moves them to the shared folder | Holds: both use `session_dir(data_dir)` today; `Capturing` is one per process |
 | `grades::forget`, `is_session_dir` | `grades.rs:288`, `:279` | never deletes the shared folder | Holds: exact `lms-session` only, `-> bool` |
-| `grades::campus_of` | `grades.rs:329` | the slot reads `campus.yaml` at its start | Holds: before `school.apply` the step is a named skip |
+| `grades::campus_of` | `grades.rs:329` | the slot reads `campus.yaml` at its start | Holds: before `school.apply` the step is a named skip; a `school.apply` landing mid-slot is one too (§4.3, T0) |
 | `WindowHost::open_window` (`mail::open_visible`, `open_hidden`) | `mail/live.rs:68-74` | take a profile path | Holds (S4c passes `school-session`) |
 | `scheduler::mail_pass`, `MailWindow::try_take` | `scheduler.rs:443` | the slot's mail pass | Holds: a held window is a named skip |
 | `lms_link::LmsSession` | `main.rs:167` | managed in the console | Holds |
@@ -2367,6 +2541,54 @@ rewritten for review r6's I-1, and `renderFirstRun`'s reader added for its M1), 
 | `credentials::write`, `exists`, `delete` | `credentials.rs:17-60` | any target | Holds |
 | `scaffold::runners_yaml`, `debug_port` | `scaffold.rs:656`; `debug_port.rs:9` | App mode and device from birth; a port only with the env var | Holds |
 
+- **2026-10-24, T0 part B: citation drift (main session, `feat/o4-school-sign-in` at `1d3c467`).**
+  The app and engine code this plan cites is byte-identical to `49b0b43`, so all 54 rows of §13.1
+  held as cited, and of about 75 other citations three were off by one, now corrected in place:
+  `scheduler.rs:783-786` is `:782-786` (§4.3, the stale `sch.last`); `sync.rs:2523-2553` is
+  `:2524-2554` (the skipped-sync record); review r1's `spawn` at `:1129` is `:1134` (the code-read
+  facts and the r1 line below). `run_slot_inner`, `run_slot_with` and
+  `run_slot` have 35 call sites; `scheduler::run_slot` has exactly the four callers §4.3 names;
+  `main.rs:42`'s `--run-slot-once` is the only other slot starter, and runs in its own process,
+  never in onboarding mode.
+- **2026-10-24, T0 part A: premises that hold (main session).** L6, L8, O0 (#63) and #19 are merged.
+  `PUT /account/sources` refuses without an entitlement (`cloud/supabase/functions/account/handler.ts:126`,
+  `entitlement.ts:89`). `sync` and `judge`'s Gmail pull run correctly with no `config/ingest.yaml`,
+  and no engine file reads `campus.yaml`. `CHILD_TIMEOUT` is 20 minutes, the child killed by
+  `kill_tree` (`scheduler.rs:597-611`). The first-run slot fires after a relaunch from onboarding
+  (`device_name` matches; `needs_first_run` tests `state/today.md`, `scheduler.rs:271`). No re-attach
+  path exists, so F2g's is the only one. `Scheduler` is managed unconditionally in `run_console`
+  (`main.rs:161`). `std::fs::hard_link` onto an existing target on NTFS fails with
+  `ERROR_ALREADY_EXISTS` ("Cannot create a file when that file already exists") and leaves the
+  target untouched (§4.9).
+- **2026-10-24, T0 part A: premises that did not hold, each amended (main session; the planner's
+  edits, §14.42).**
+  1. **L5, O2 and L1 are not merged and have no branch.** O5 cannot follow wave B directly (§8);
+     F11b builds step 6 on today's separate consents and the new F11f adds O2's combined ask after
+     O2 merges (§4.2 step 6, §7, §8, the ledger's §1.3 Q8 row).
+  2. **`grades` reads course notes** (`grades.rs:405-415`) and with none skips every course and
+     writes no grade note (`:538-541`). The controller's call: `BeforeConfig` leaves `grades` out,
+     capture and step, as `grades (not yet: …)`; `grades` runs first in `NoRank`, after
+     `school.courses` and `school.apply` (§4.3, §4.6, F8s, F8e, F8g, F1 tests 8 and 18, Q-B19).
+  3. **An entitlement-refused sync is `skipped: "no entitlement"`** with `ok: false`
+     (`sync.rs:2462-2475`), not an unskipped `ok: false`. §4.3's readings and §13.1's `SyncStatus`
+     row are corrected: it reads as "neither". The controller's call: `account_settled` also needs
+     the cursor's sticky `pulled_to_end` (`sync.rs:227`, `:2618-2620`), read only. The planner adds,
+     because a sync pulls one page per run, the bounded `BeforeConfig` re-run (Q-B20, for the
+     controller; §4.3, F8e, F1 test 16).
+  4. **The account never returns a stored feed's host** (`account/index.ts:192` selects
+     `kind,added_at`). The controller's call: §4.7's read-back suggestion is dropped, and the school
+     a restored install is offered comes only from this device's `onboarding.json`. No cloud change.
+  5. **The hold against a sync is taken only by `week::run_confirm` and `registrar::spawn`;**
+     `commands::mutate` takes `vault_io` only. §4.3's wording is corrected; the lane's jobs were
+     right as written.
+  6. **Onboarding mode leaves `Scheduler.mode_device` at its placeholder** (`scheduler.rs:146`,
+     primed only at `:1154` and `:1255`, both inside `spawn`), and `attach_scheduler` reports it on
+     every poll. F4 now calls F8s's `prime_mode_device` (F1 test 27). `spawn`'s `quit_at` clear and
+     `startup_missed` (`:1137-1149`) and the housekeeping thread are skipped too; benign (F4).
+  7. **Minor:** `campus.yaml`'s row is read at slot start (`scheduler.rs:732`) and `lms` at the
+     grades step (`:945`), so a `school.apply` between them gives one named skip; noted in §4.3.
+  Not reported by T0: the ruled direction's files (T0's open box, before F10) and S-F's code read
+  (re-read live in T3).
 - **2026-10-23, review r4's code reads (planner, this tree).** `onboarding::relaunch` spawns the new
   process with `--after-pid` and returns (`onboarding.rs:391-412`); `relaunch_with` is a wrapper
   (`:415`). `account::sign_out` builds its `close` and `clean` closures and returns
@@ -2401,7 +2623,7 @@ rewritten for review r6's I-1, and `renderFirstRun`'s reader added for its M1), 
   (Q-B10); O1's `gradable_id` and `gradebook_done` are public (S-F). P-3's answer and S-F's code-read
   answer are in §3; T0 re-confirms both.
 - **2026-10-23, review r1's drift (reviewer, against `02e9e73`).** All of the planner's findings held.
-  Line drifts: `scheduler::spawn` at `:1129`, and its first-run slot needs App mode and `device_ok`;
+  Line drifts: `scheduler::spawn` at `:1129` (`:1134` on `1d3c467`, T0), and its first-run slot needs App mode and `device_ok`;
   `run_slot_inner` at `:726`; `slot_argv` at `:515`. The grades window carries wry's default
   arguments (`debug_port::WRY_DEFAULT_ARGS`), not none. The mail window's debug port is added only
   when `KNOWLU_MAIL_DEBUG_PORT` is set. The text above is corrected; T0 re-reads every line on the
@@ -2980,3 +3202,43 @@ Recorded in §5.0. The task edits each ruling needs:
 - **Q-B15 to Q-B19** stand as the controller decided. Q-B1 stands at "no exception".
 - **The evening ranking rule** is out of wave B. Its draft note is
   `docs/specs/2026-10-23-evening-ranking-rule-draft.md`.
+
+### 14.42 T0 (2026-10-24): what did not hold, and the amendments
+
+T0 ran on `feat/o4-school-sign-in` at `1d3c467`; its record is in §13 (2026-10-24). Part B found
+three one-line drifts, corrected in place. Part A found seven premises that did not hold, amended
+as follows (docs only; no ruling reopened):
+1. **Lanes not merged** (L5, O2, L1; no branches). §8 says O5 waits for L5; F11b no longer depends
+   on O2 and builds step 6 on today's separate consents; a new task **F11f** (`console-ui`, after O2
+   merges, possibly after wave B) adds the combined ask and the forwarding fallback; the §1.3 Q8
+   ledger row moves to F11f. *Trade-off for Quinn and the controller:* if wave B ships before O2,
+   step 6 asks twice (Calendar, then Gmail) rather than once.
+2. **`grades` needs course notes.** `BeforeConfig` now leaves out `grades`, the capture stage with
+   the engine step, as one `(not yet: …)` row, so a bundle is never captured only to be deleted;
+   `NoRank` waits for `school.apply` as well as `config.ingest`, and runs the vault's first
+   `grades` before its first `ingest`, as O1's order wants. The gate's "first grades" is marked
+   only by a slot whose `grades` ran (§4.6). §4.2 step 4, S-E's note, F8s, F8e, F8g, F1 tests 8 and
+   18 and Q-B19 are amended. The step-3 proof's grade count is unaffected: it comes from the raw
+   bundle via F7a, not from the engine step.
+3. **The entitlement-refused sync is a skip.** It reads as "neither" (§4.3; §13.1's row corrected),
+   which the hold makes unreachable in practice. `account_settled` now also needs `pulled_to_end`,
+   read only. **New, for the controller (Q-B20):** a sync pulls one page per run, so the queue
+   re-runs `BeforeConfig` while the cursor is short of the end, up to 10 in a row, then fails
+   `school.courses` with "Try again". Without it, a multi-page account whose step-2 restore failed
+   would stall onboarding. F8e, F8g, F1 test 16 and the ledger carry it.
+4. **No host from the account.** §4.7's suggestion comes only from this device's `onboarding.json`;
+   otherwise step 3 asks as on a fresh install. No cloud change; the §1.11 ledger row is amended.
+5. **The sync hold's takers.** §4.3 now names `run_confirm` and `registrar::spawn` only, and says
+   `commands::mutate` takes `vault_io` only. The lane's jobs are unchanged, with one rule the
+   planner added while reading `registrar.rs:96-104`: the lane never takes `vault_io` or `sync.lock`
+   around `registrar::spawn`, which takes both itself (a nested `std` mutex deadlocks; a second
+   `try_lock` handle refuses), and retries that call on its refusal instead (§4.3, F8h, F1 test 16).
+6. **`mode_device` in onboarding mode.** F8s adds `prime_mode_device` (`spawn`'s own line, moved
+   into a function), F4 calls it once, and F1 test 27 pins it. The rest of what skipping `spawn`
+   skips (`quit_at`, `startup_missed`, housekeeping) is recorded in F4 as benign. §13.1 gains this
+   row and a `pulled_to_end` row (56 rows: 13 "No", 7 "Holds, tightened", 36 "Holds").
+7. **`campus.yaml` mid-slot.** §4.3 notes the named skip, and that the queue's `NoRank` rule keeps
+   it to a retried `school.apply`.
+
+Still open from T0: the ruled direction's files on the lane branches (before F10, F11a-F11f or
+S6b), and Q-B20. Next: T1.
