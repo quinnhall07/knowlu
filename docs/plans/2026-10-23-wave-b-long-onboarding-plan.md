@@ -4,8 +4,8 @@
 > or superpowers:executing-plans to run this plan task by task. Steps use checkbox (`- [ ]`) syntax.
 
 **Status: T0 done and its amendments reviewed (PASS with minors, closed in §14.43; on `main` as
-`cb3b661`); T1 under way (S-A phase 1's first half recorded in §13; its 10-minute restart check
-pending).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
+`cb3b661`); S-A phase 1 PASS (§13), so T2 (phase 2, WebView2) is next; F10's review gaps in §9
+A10 assigned before F11 (§14.44).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
 record is in §13 (dated 2026-10-24) and its amendments in §14.42: seven premises did not hold as
 written, and each is amended where it lands (the lanes not yet merged, `grades` and course notes,
 the entitlement-refused sync, the feed host, the sync hold, `mode_device`, a `campus.yaml` race).
@@ -584,7 +584,31 @@ school's curated row from `onboarding.json`'s `school.unitid`, never from the va
 found that later jobs need (the course list, the registrar rows) is saved at once to
 `onboarding-answers.json` (§4.5), and a captured or pasted feed link to its pending credential
 (§4.11), so a quit after step 3 never needs the school window again. The student may
-go Back and pick another school freely until payment. Proof: `classes`, `class_times` (registrar-matched, or `null`),
+go Back and pick another school freely until payment. **C1's page rules, carried (F10's review,
+2026-10-24; §9 A10):**
+- **"My school isn't listed" (R-OB-4).** Beside the school search, a free-text school name. It
+  leads to the feed-link paste fallback (`school.path = paste`); the typed name is the `school`
+  label with no unitid, and `school.apply` writes `campus.yaml` for it as `campus_config_yaml`
+  does today for a school with no unitid (`curated: false`, the `none` events preset; F6a's test).
+- **The capture trigger (R-C1-42).** Where step 3 opens today's windows (not shared), the capture
+  runs on the student's **second press** ("I'm signed in"), never when the window opens, and never
+  while the window is on the identity provider's page (mid-MFA): the press is refused there with a
+  line, as today. On the shared folder (S4d) the trigger is the signed-in test (`users/me` 200),
+  which an identity-provider page never passes.
+- **A campus login never outlives its screen (R-C1-40, the page's half).** Leaving step 3 by Next,
+  Back, Finish later or Sign out calls `close_lms_window` for every non-shared window step 3
+  opened. Windows on `school-session` are S4d's, closed by it.
+- **Every captured course can be removed (R-C1-51, the page's half).** Enrolment comes back
+  unfiltered (past terms, organisations, TA roles), so the school proof lists the captured courses,
+  after O0's current-term filter where it applies, each with Remove. A removal is an
+  `onboarding_answer(3, …)` that marks the row removed in `onboarding-answers.json` (F2d); removed
+  rows are never made notes by `school.courses`, never enter `config.ingest`'s `course_map`, and
+  the proof's counts are totalled in Rust over the kept rows from `school.preview`'s per-course
+  counts, so they match the list with no second fetch (F7a, F8b). The list is
+  editable until payment; after it, `school.courses` has run and a course is removed in the
+  console, as today.
+
+Proof: `classes`, `class_times` (registrar-matched, or `null`),
 `assignments_upcoming`, `turned_in`, `grades_courses`, `syllabi_found` (`null` until O5). Skip: no;
 the paste is the only way round, and its cost is named (no grades, no registrar class times, no
 turned-in filter for LMS work, school email needs its own sign-in). Resume: at step 3; with a kept
@@ -594,7 +618,9 @@ school session the captures re-run hidden and silent; otherwise the student sign
 checkout in the browser (**`onboarding_checkout`**), polled by **`onboarding_entitlement`** (F2h,
 review r5 I-1: both read the vault's own session through `config/cloud.yaml`, because step 2 moved
 it off the pending target that `open_checkout` and `entitlement_now` read); a tester or any
-account already entitled sees "nothing to pay" and continues. Proof: `entitlement` (`trialing`,
+account already entitled sees "nothing to pay" and continues. **A `comp` account never sees the
+trial's terms** (F10's review): no "no free plan after the trial" line, no checkout button; only
+"nothing to pay" and Next. Proof: `entitlement` (`trialing`,
 `active` or `comp`) and `trial_end`. Skip: no. Jobs on entitlement, in the local lane (§4.3):
 `school.store` (the pending feed link to the account, `PUT /account/sources`, §4.11),
 `school.apply` (creates `campus.yaml` and `events.yaml` once, §4.9), `school.courses` (the course
@@ -610,7 +636,9 @@ never from a new capture.
 the mail window (today's `mail_setup_start` and its progress). Jobs: `mail.setup`, `mail.canary` (up
 to 3 minutes), `mail.first_pass`. Proof: `forwarding` (`on`, `guided`, `off`), `canary_seconds`,
 `to_review` (cards from the first pass), `older_mail` (the backfill's state, never waited for).
-Skip: yes; cost "date changes and new work announced by email are missed". Resume: at step 5;
+Skip: yes; cost "date changes and new work announced by email are missed", and beside the skip the
+mail spec's risk-12 line, kept from the deleted wizard test: "If your school's rules don't allow
+forwarding your school email, skip this." Resume: at step 5;
 `mail::live::on_start` resumes an interrupted setup as today.
 
 **Step 6, Google: Gmail and Calendar (needs O2).** *T0 (2026-10-24): O2 has no branch yet, so F11b
@@ -628,6 +656,10 @@ once entitled; or `mail.canary` for forwarding), `google.calendar_read` (through
 `gmail_items` (things to do from Gmail), `calendar` (`granted`, `skipped`), `events_this_week`.
 Skip: yes; cost "club, job and internship tasks from Gmail are missed; your own events are not
 counted as busy time". Resume: at step 6; a grant already on the account is `already-done`.
+**The Google testing disclosure** (kept from the deleted wizard test, F10's review): while Google
+reviews Knowlu, step 6 shows Settings' `GOOGLE_TESTING` sentence (`console.js:2195`, "While Google
+reviews Knowlu, this works only for invited testers, and the connection needs renewing about once a
+week.") beside the consent, the same text from one source, never a copy.
 
 **Step 7, Another calendar.** Shown only when step 6 granted no calendar. Ask: paste an iCal link
 (validated on the device as today, through `onboarding_paste_link`, F8l) or Skip. The link goes first to its pending credential (§4.11).
@@ -644,7 +676,17 @@ it is confirmed. Jobs: `coursework.discover`; then, on leaving step 8 (or skippi
 saved answers (§4.9), after `school.courses` and once both feed stores have settled (§4.11); then
 `slot.partial` (`sync`, `coursework`, `grades`, `ingest`, `judge`) in the serial queue. Proof per
 site: `books_or_sections`, `assignments`, `done`. Skip: yes, per site; cost "that site's due dates
-are missing unless the LMS feed carries them".
+are missing unless the LMS feed carries them". **C1's page rules, carried (F10's review):**
+- **Discovery in flight disables Next** (R-C1-55): while `discover_coursework` runs for any site,
+  Next (and Skip for that site) is disabled, with the "reading…" state of §4.1.
+- **A blank row is never sent as ignored** (R-OB-1): a book or section row whose course the
+  student left blank is sent as unanswered and asked again; only an explicit "not a class" goes
+  into `zybooks_ignore`.
+- **No invented slug** (R-OB-1): a row's course is sent as the captured course's key from the
+  answers file; its slug comes only from `school.courses`'s recorded slug (§4.5), never derived on
+  the page from the LMS id or the name.
+- **No password field but ours**: the zyBooks and VHL login fields are the only password inputs in
+  onboarding, pinned by id (F11t).
 
 **Step 9, Syllabi (wave C, O5).** In wave B this step is **absent**: not shown, not counted as
 skipped, and not on the rail. O5 fills it with L5's reads under this same contract (proof `read`,
@@ -840,7 +882,8 @@ promised, and its "still coming" line until each handed-over job is done.
 
 `knowlu-engine onboarding --vault <v> --json` with exactly one mode:
 - `--preview --feed <ics file> --courses <json file> [--grades <bundle>] [--registrar <file>]`:
-  step 3's counts (`classes`, `class_times`, `assignments_upcoming`, `turned_in`, `grades_courses`)
+  step 3's counts (`classes`, `class_times`, `assignments_upcoming`, `turned_in`, `grades_courses`;
+  also per course key as `by_course`, F10's review)
   from the raw captures, counting only what is due after now in the vault's zone, and joining
   turned-in items by O1's id rule only.
 - `--tidied`: the reveal's counts from the vault: `imported_past` and `imported_done` (archive notes by
@@ -864,7 +907,7 @@ contracts (§9, Quinn's).
 
   | Answer | From | Needed by |
   |---|---|---|
-  | the course list (code, name, label, the LMS's course key) | step 3's capture, or the paste fallback's typed list | `school.courses`, `config.ingest`'s `course_map` |
+  | the course list (code, name, label, the LMS's course key, and per row `removed` and `school.preview`'s counts: R-C1-51, F10's review) | step 3's capture, or the paste fallback's typed list; step 3's Remove; `school.preview` | `school.courses`, `config.ingest`'s `course_map`, step 3's proof totals (kept rows only) |
   | the registrar rows | step 3's capture | `registrar.confirm` |
   | each course's slug, after `school.courses` (a restored note's slug where one matched, §4.9) | `school.courses` | `config.ingest`'s `course_map`, step 8's suggestions |
   | `google_calendar` (a flag) | step 6 | `config.ingest` |
@@ -1343,11 +1386,11 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F2c | `account.rs`: `pub fn sign_out_clean(dir, id, api_base)` (today's clean plus `on_sign_out`; the base a parameter so tests stay local), used by `sign_out` with `api_base()`; the two pending names in `delete_local_data`'s credential loop | `contract-engineer`, then `contract-reviewer` | `account.rs` is on the contract list | F2e, S5 merged |
 | F2g | `onboarding_state.rs`: `onboarding_attach_session`, step 2 again's re-attach (three-way account match, move on a match, a local delete of the pending session and a refusal on a mismatch) | `implementer`, reviewed by `contract-reviewer` | specified and tested over seams, off the contract list; a wrong move attaches another account's token to the vault (review r5, I-2) | F2b (chained after it in the same file, review r6 M2) |
 | F2h | `onboarding_state.rs`: `onboarding_entitlement` and `onboarding_checkout`, the vault-target versions of `entitlement_now` and `open_checkout` | `implementer`, reviewed by `contract-reviewer` | specified, public `account.rs` functions only, tested on a `127.0.0.1:0` listener (review r5, I-1) | F2g (the same file's chain: F2a, F2d, F2e, F2b, F2g, F2h; review r6 M2) |
-| F3 | Step-2 vault with defaults, without campus or events files; `account_settled`; picker flag | `test-writer` then `implementer` | writes a vault; tests first | F2a |
+| F3 | Step-2 vault with defaults, without campus or events files; `account_settled`; picker flag; the name picked in Rust past profiles and folders on disk; the old flow's errors rewritten; F10's interim name loop deleted (F10's review) | `test-writer` then `implementer` | writes a vault; tests first; the static change is a deletion only | F2a, F10 |
 | F4 | Onboarding mode in `run_console`; the window's close prevented, then `onboarding_quit`'s inner on its own thread; `mode_device` primed (T0); one update check at launch (T0 review M3) | `implementer` | P-3's five changes; the close off the event loop (review r5, I-5) | F2a, F2b, F8s (`prime_mode_device`, `spawn_update_check`), T0 |
 | F4b | `switch_profile` refuses in onboarding mode | `implementer` | specified, tested in F1 (review r4, M6) | F2a |
 | F5 | Moved and new commands registered | `mechanical` | a list edit, recounted, pinned | F4, F2b, F2g, F2h, F8d, F8lb |
-| F5b | Shell list: the retired panels' commands, after F10 | `mechanical` | `main.rs` is never F10's (review r1, I8) | F10 |
+| F5b | Shell list: the retired panels' commands, after F10; five move to the console's list and are never deleted (F10's review) | `mechanical` | `main.rs` is never F10's (review r1, I8) | F10, F5 |
 | F6a | `school.apply` (`campus.yaml`, `events.yaml`) and `school.courses` (course notes), create-new | `test-writer` then `implementer` | vault bytes; tests first | F3 |
 | F6b | `config.ingest`: `ingest.yaml` once, create-new, feeds per §4.11 | `test-writer` then `implementer` | as F6a | F6a |
 | F7a | `knowlu-engine onboarding --preview` and its `cli.rs` entry | `test-writer` then `implementer` | engine, deterministic, off the contract list | T0 |
@@ -1369,7 +1412,8 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F10 | Shell steps 1-2 in the ruled direction (5b); old wizard removed (static files only) | `console-ui` | `app/static`, the `console.js` queue | direction ruled (5b, 2026-10-23) |
 | F11t | Failing static tests for the onboarding screens | `test-writer` | test first (review r1 minor) | F2b |
 | F11a | The step frame and the rail | `console-ui` | `app/static` | F11t, F10 |
-| F11e | Steps 3 and 4; step 2's sign-in again in onboarding mode | `console-ui` | `app/static` | F11a, F8b, F8c, F8g, F2g, F2h, F8lb (review r7 M1) |
+| F11e1 | Step 3's school choice ("isn't listed" included), sign-in and capture rules (second press, close on leaving); step 2's sign-in again | `console-ui` | `app/static` | F11a, F8b, F2g, F8lb (review r7 M1) |
+| F11e2 | Step 3's proof with the removable course list; step 4, its `comp` state included | `console-ui` | `app/static` | F11e1, F8c, F8g, F2d, F2h, F7a (`by_course`) |
 | F11b | Steps 5, 6 and 7; step 6 on today's separate consents (`google_connect` with each scope, `google_status`) | `console-ui` | `app/static` | F11a, F8d, F8lb (step 7's paste; review r7 M1). No longer O2 (T0, 2026-10-24: O2 has no branch) |
 | F11f | Step 6's combined Gmail-and-Calendar ask and the forwarding fallback, over O2's cloud half | `console-ui` | `app/static`; O2's contract only | F11b, O2 merged; may follow wave B (§8) |
 | F11c | Steps 8 and 10 | `console-ui` | `app/static` | F11a, F8d |
@@ -1711,7 +1755,10 @@ job runners as a trait so tests pass fakes.
 12. **Answers survive a quit (review r2, I2):** run steps 3-8 through the fakes once without a quit,
     and once with a quit and reload at each of steps 4, 6 and 8 (after step 8's confirms, before
     leaving it); the text `config.ingest` hands F6b's builder is byte-equal in every run, and its
-    `course_map` is never empty when step 3 found courses.
+    `course_map` is never empty when step 3 found courses. **Removed courses** (F10's review,
+    R-C1-51): with one captured course removed at step 3 (and a quit and reload after the removal),
+    that course is in no `school.courses` create, not in `course_map`, and not in step 3's totals,
+    which equal the sums of the kept rows' saved `by_course` counts; a re-capture clears the mark.
 13. **The feed is never silently lost (review r2, I1):** with a fake account store, (a) a store that
     fails twice leaves the feed `failed` and `config.ingest`'s text carries the link, with
     `feed_kept_on_device` set; (b) a quit after payment and before `school.store`, then a reload,
@@ -1882,7 +1929,10 @@ Split so that each edits about 80 lines or fewer of one file (review r2 I6, revi
   test 12's save path; §4.5, §4.11. The answers struct, its load and save, the rule that an absent or
   unreadable answers file past step 3 resumes the step it served, and the two pending-credential names
   (constants), written, read and deleted through `credentials::write`, `exists` and `delete`,
-  unedited. Size: S (about 60 lines).
+  unedited. The course row carries `removed` (F10's review, R-C1-51), set by step 3's Remove through
+  `onboarding_answer` and cleared by a re-capture, and the per-course counts `school.preview`
+  saves; a `kept_courses()` accessor is the only way `school.courses`, `config.ingest` and
+  `onboarding_status`'s step-3 totals read the list. Size: S (about 65 lines).
 - **F2e (implementer), `on_sign_out(profile_dir, profile_id)`.** F1's test 17; §4.5's rewind. Deletes
   the answers file and both pending credentials where they exist, then, for an unfinished
   `onboarding.json`, rewrites it at **step 2** with every job `pending` and the feed states,
@@ -1981,10 +2031,27 @@ Split so that each edits about 80 lines or fewer of one file (review r2 I6, revi
    (a local listener on `127.0.0.1:0` serving the account's answer); false after a restore whose
    account could not be reached (a port bound then closed, so the connection is refused), with the
    vault kept, as today.
+6. **The name is Rust's** (F10's review, 2026-10-24). Step 2 asks no name: Rust picks "Knowlu",
+   then "Knowlu 2", "Knowlu 3", stepping past every name that is **either** a registered profile
+   **or** a folder already on disk at the vault's destination (a leftover folder with no profile
+   included), so `dest_for`'s "already exists" refusal is never reached on the step-2 path. Cases:
+   a registered "Knowlu" gives "Knowlu 2"; an unregistered `Knowlu` folder on disk gives
+   "Knowlu 2"; both "Knowlu" and a "Knowlu 2" folder give "Knowlu 3"; no folder is ever written
+   into or renamed.
+7. **The old flow's errors are rewritten** for the new one: `onboarding.rs`'s "press Finish again"
+   and "pick another name" sentences have no step to point to (step 2 has no Finish and no name
+   field). On the step-2 path a failure that today says either reads as a named error with step 2's
+   own retry ("Try again"), and a test asserts neither old sentence is reachable from it. The adopt
+   and restore-from-backup paths keep their own wording.
 Then the code in `onboarding.rs` and `scaffold.rs`: a step-2 variant of `build_into` that omits the
-three files, with `onboarding.json` written last, after the rename. Today's `create_vault_in` stays for
+three files, with `onboarding.json` written last, after the rename; the name picker (test 6); the
+rewritten errors (test 7). **F10's interim page loop**, which steps the name on the page until the
+create succeeds, is removed in the same task (its static test with it), since Rust now picks the
+name; F3's report lists the removal. This makes F3 touch `app/static` once, a deletion of F10's
+loop only. Today's `create_vault_in` stays for
 the adopt and restore-from-backup paths. Size: S (about 60 lines in `onboarding.rs`, about 30 in
-`scaffold.rs`; review r3, M4).
+`scaffold.rs`; review r3, M4), plus about 25 in `onboarding.rs` for the name and the errors (F10's
+review); past 80 in `onboarding.rs`, the name picker moves to its own piece (F3b), after F3.
 
 ## F4. Onboarding mode (implementer)
 
@@ -2058,7 +2125,16 @@ Recount both lists by script and pin the new names in the test that pins the lis
 
 **F5b (mechanical, after F10).** In the shell's list, remove only the commands F10 left with no
 caller in the shell's page (each named in F10's report); recount and pin. F10 itself never edits
-`main.rs` (review r1, I8). Size: XS.
+`main.rs` (review r1, I8). **Which go and which move** (F10's review, 2026-10-24):
+- **Moved, never deleted:** `campus_search`, `store_credentials`, `discover_coursework`,
+  `open_lms_window` and `close_lms_window`. Steps 3 and 8 call them in onboarding mode, so they are
+  on the console's list by F5 (F5b runs after F5 and checks that they are) and only then leave the
+  shell's list. Their functions and tests stay.
+- **May go from the shell's list:** `google_connect_url`, `google_connected`,
+  `paste_calendar_link` and `capture_calendar_link`, the shell's pending-target commands, which no
+  onboarding screen may call (F11t). Their functions stay unless a later task removes them with
+  their tests: `capture_calendar_link_with` keeps today's `finish` arm (F8la).
+Size: XS.
 
 ## F6a, F6b. The answers into the vault, each file once (test-writer, then implementer)
 
@@ -2072,6 +2148,9 @@ two tasks go back to the planner). Tests in `app/tests/onboarding.rs`, then the 
   first) and records each course's slug in the answers file. Tests:
   - each file's bytes equal what today's `build_into` writes for the same school (the same answers
     sent through both paths, compared byte for byte); an uncurated school gets events preset `none`;
+    **a school typed as "isn't listed"** (R-OB-4, F10's review: a name, no unitid) gets the bytes
+    `campus_config_yaml` writes for that choice today (`curated: false`) and preset `none`;
+  - `school.courses` creates notes for `kept_courses()` only; a removed row gets none (R-C1-51);
   - a file already present with other bytes is kept, unchanged, and the job reports "kept your
     existing settings"; present with equal bytes, the job is simply `done` (a resume);
   - **a file created between the existence check and the put-in-place** (the test creates it after
@@ -2124,7 +2203,10 @@ F7a and extended to `--tidied` in F7c:
 - **F7a, `--preview` and the `cli.rs` entry.** Its own tests: upcoming items only (due after now in
   the vault's zone); turned-in items joined by `gradable_id` and `gradebook_done` only, never by
   title; a bundle with an Overall column counts no extra item; a missing `--grades` gives
-  `turned_in: null` and `grades_courses: null`; exactly one mode, or a named usage line at exit 0.
+  `turned_in: null` and `grades_courses: null`; exactly one mode, or a named usage line at exit 0;
+  **`by_course`** (F10's review, R-C1-51): the same counts per course key of `--courses`, in key
+  order, whose sums over all keys equal the totals (an item matched to no course counts in the
+  totals only, under `unmatched`), so the app can total kept rows without a second run.
   The new module, its JSON output through `ledger::dumps_value`, and the `cli.rs` entry. **And
   `CLAUDE.md`'s line** (Q-B3 ruled yes, 2026-10-23): §9 A11's drafted text, added under "Command and
   app contracts" in the commit that adds the command, and in no other. Size: S (about 70 lines, plus
@@ -2218,7 +2300,11 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   `school_session`'s lock. The course list and registrar rows go to the answers file at once; a
   captured or pasted link to its pending credential (§4.11). The validation-fetched feed is written
   to the profile's `tmp\` for F7a and deleted after `school.preview`. `school.preview`: F7a's
-  `--preview`. Depends on S-G's record. Size: S (about 70 lines).
+  `--preview`. **Removable rows** (F10's review, R-C1-51): F7a's counts are also reported per course
+  key, saved beside each course row in the answers file, so the feed file is still deleted after the
+  one preview; `onboarding_status` (Rust, never the page) totals the proof over `kept_courses()`, so
+  a Remove changes the proof with no second fetch or preview. Depends on S-G's record. Size: S
+  (about 75 lines).
 - **F8c, the local lane's runners.** `school.store` and `calendar.store` (the account call, one retry,
   the feed states of §4.11, the pending credential deleted on success). **The call** (review r8, M1)
   is `lms_link::store_source(&cfg.api_base, &cfg.session_credential_target, kind, &link)` with
@@ -2325,8 +2411,30 @@ no caller, for F5b. C1's rulings on those panels are carried or retired per §9'
 - that the skip control is absent on steps 2, 3, 4 and 10, and that every skip shows its cost key;
 - that the reveal's button is disabled while `onboarding_status` says a local-lane job is not `done`;
 - that step 10 asks for proposals only when `onboarding_status` says they are ready (§4.2);
-- that the main page's "still coming" line reads `handover`.
-Size: S.
+- that the main page's "still coming" line reads `handover`;
+- **C1's rules F10 retired from the shell, carried here** (F10's review, 2026-10-24; §9 A10):
+  - R-C1-42: step 3's window-open handler calls no capture command; the capture is called only
+    from the second press's handler, and a refusal on the identity provider's page is shown;
+  - R-C1-40: every exit from step 3 (Next, Back, Finish later, Sign out) calls `close_lms_window`
+    for a non-shared window;
+  - R-C1-51: step 3's proof renders every captured course with a Remove control that calls
+    `onboarding_answer`, and the proof's counts come from `onboarding_status`, never computed;
+  - R-OB-4: step 3 has the "my school isn't listed" free-text field, leading to the paste
+    fallback;
+  - R-C1-55: step 8's Next and the site's Skip are disabled while `discover_coursework` is in
+    flight;
+  - R-OB-1: step 8 never sends a blank row as ignored (only the explicit "not a class" control
+    adds to `zybooks_ignore`), and no handler builds a slug from an LMS id or a name;
+  - **no password field but ours, by id**: F10's whole-page "no password field" check becomes an
+    allow-list of the zyBooks and VHL login fields' ids when F11c adds them, as
+    `static_assets.rs:516-535` does today; any other `type="password"` fails. **This test is never
+    deleted**, only its allow-list extended;
+  - step 4 on a `comp` entitlement shows "nothing to pay" and no trial terms ("no free plan after
+    the trial" is absent from that state's render);
+  - step 5's skip shows the risk-12 line ("If your school's rules don't allow forwarding your
+    school email, skip this.");
+  - step 6 shows `GOOGLE_TESTING` beside the consent, by reference to the one constant.
+Size: S (about 30 more lines for these pins).
 
 **Common brief (console-ui):** §4 whole, and the ruled direction: **5b, Departures**
 (`docs/design/2026-10-23-directions/5b-departures-board/`: `index.html`, `screens.json`, `BRIEF.md`),
@@ -2346,24 +2454,33 @@ count. Each piece edits about 80 lines or fewer of code and adds fixture renders
   "finishing <job>…" state of §4.10) and the rail; and one line in `console.js`'s `renderFirstRun`
   (`:1542`) so a `(not yet:` row reads as skipped (review r6, M1). Size: S (about 70 lines of `onboarding.js`, plus
   CSS).
-- **F11e:** steps 3 and 4, including the restored install's school suggestion (§4.7) and the feed
+- **F11e (two pieces, F11e1 and F11e2; "F11e" elsewhere means both):** steps 3 and 4, including the restored install's school suggestion (§4.7) and the feed
   kept on this device (§4.11), step 4 through `onboarding_checkout` and `onboarding_entitlement`; and
   step 2's sign-in again inside onboarding mode (§4.2, review r4 I-1), reusing the shell's step-2
   sign-in markup where the direction allows, then `onboarding_attach_session` with the sign-in's
   `account_id`, whose `wrong_account` refusal shows its sentence and the way to the picker
-  (`onboarding_sign_out`). Size: S (about 80 lines; if
-  past, step 2 moves to its own piece).
+  (`onboarding_sign_out`). **C1's page rules at step 3 and 4** (F10's review, §4.2): the "my school
+  isn't listed" field (R-OB-4); the second-press capture, never on open or on the identity
+  provider's page (R-C1-42); `close_lms_window` on every exit for non-shared windows (R-C1-40); the
+  removable course list at the proof (R-C1-51); and step 4's `comp` state, "nothing to pay" with no
+  trial terms. Size: M; **split** (F10's review): **F11e1** steps 3's school choice, the sign-in
+  and its capture rules, and step 2 again; **F11e2** step 3's proof with the removable list, and
+  step 4. Each about 80 lines.
 - **F11b:** steps 5, 6 and 7; step 6 on today's separate consents, one vault-target
   `google_connect` per scope (`calendar`, `gmail`), polled by `google_status` (§4.2; amended at T0,
-  2026-10-24, because O2 has no branch). Size: S (about 80 lines; if past, step 7 moves to its own
-  piece).
+  2026-10-24, because O2 has no branch). Step 5's skip carries the risk-12 line, and step 6 shows
+  the `GOOGLE_TESTING` disclosure beside the consent, referencing the one constant (F10's review,
+  §4.2). Size: S (about 80 lines; if past, step 7 moves to its own piece).
 - **F11f (after O2 merges):** step 6's one consent for both scopes and the forwarding fallback
   through the mail window, over O2's cloud half and its holder count, in the same design slot; F11t
   gains its pins in the same task. Size: S (about 50 lines).
 - **F11c:** steps 8 and 10, with step 10's proposals waiting on `config.ingest` (§4.2). Step 10's
   confirm is today's `commitments_confirm`, which refuses by name while a `sync` child holds
   `sync.lock` ("a sync is running; try again in a moment", `week.rs:101`); the step shows that
-  sentence and its Try again, as the console does (§13.1). Size: S
+  sentence and its Try again, as the console does (§13.1). **Step 8's C1 rules** (F10's review,
+  §4.2): Next and the site's Skip disabled while discovery is in flight (R-C1-55); a blank row is
+  never sent as ignored, and a row's course is sent as its key, never a slug made on the page
+  (R-OB-1); the zyBooks and VHL password fields added to F11t's allow-list by id. Size: S
   (about 80 lines; the same rule, step 10 moving out).
 - **F11d:** the reveal, and the main page's "still coming" line from `handover`, each item dropped at
   its own signal; the `older_mail` line's "after the next scheduled run" case when a batch closed
@@ -2373,7 +2490,9 @@ count. Each piece edits about 80 lines or fewer of code and adds fixture renders
 
 `scripts/wizard-check.py` rewritten to walk steps 1-11 against fixtures (no network, no school),
 including a quit and resume at steps 3, 4 and 10, a skip at 5 and 8, the reveal with one item
-still coming, and Open Knowlu handing it over. Run in the repository's `.wv/` venv. Size: M.
+still coming, and Open Knowlu handing it over; and (F10's review) one course removed at step 3's
+proof, one walk through "my school isn't listed" to the paste, and a `comp` account's step 4. Run
+in the repository's `.wv/` venv. **Its pass is the O3 merge gate** (§8). Size: M.
 
 ## F13, F14, F15. Docs, review, live proof
 
@@ -2421,6 +2540,12 @@ still coming, and Open Knowlu handing it over. Run in the repository's `.wv/` ve
   meanwhile (§4.2). Nothing in wave B waits for either. O5 fills step 9, adds `syllabi_found` to step 3's
   proof and syllabus rows to step 10, and joins the syllabus reads to the reveal gate's list, all
   under §4's contract. O6's late window is outside onboarding.
+- **The merge gate for O3** (F10's review, 2026-10-24). F10 retires the old wizard's panels 3-10,
+  so a `feat/o3-long-onboarding` with F10 but without F11a-F11e leaves onboarding with no school,
+  payment or mail step. **`feat/o3-long-onboarding` never merges to `main` before F12's
+  walk-through passes** on it (steps 1-11 against fixtures, F12), whatever else is green; task
+  branches (`feat/o3-f10` and the rest) merge into the lane branch, never into `main`. F14 checks
+  the gate before its PASS.
 - **L8 (testers):** merged (T0). An entitled tester's step 4 reads "nothing to pay"; no code here
   beyond reading the entitlement through F2h's `onboarding_entitlement` (the vault's session; never
   `entitlement_now`, §4.3).
@@ -2442,7 +2567,7 @@ behaviour, before it merges.
 | A7 | Cloud design §4.2 and §11a's "keep nothing" rows | the long onboarding's steps, payment's place, the reveal | Q2, Q7, Q12, Q13 | F13 | O3 |
 | A8 | Email spec D6, §4.2 step 6 | school mail is set up inside onboarding, not at the console's first open | Q13 | F13 | O3 |
 | A9 | Gmail connect spec | step 6's place; one consent for Gmail and Calendar (O2 drafts its half) | Q4, Q8 | F13 | O3 |
-| A10 | C1, C1b, C1c specs; C1's rulings R-C1-40, -41, -42, -47, -48, -51, -55 and R-OB-1, -2, -4 | each carried (R-C1-40/41 for the incognito fallback; R-C1-42's capture trigger; R-C1-47/48/51 in F6a, F6b; R-C1-55's casing pins in F11t; R-OB-1 at step 8; R-OB-2 at step 3) or retired (R-OB-4's timezone suggestion, Q-B12) | Q2, Q12, Q13 | F13 | O3 |
+| A10 | C1, C1b, C1c specs; C1's rulings R-C1-40, -41, -42, -47, -48, -51, -55 and R-OB-1, -2, -4 | each carried, with the task that carries it (corrected after F10's review, 2026-10-24, which found the page halves unassigned): **R-C1-40/41** the incognito fallback (S4b) and, the page's half, `close_lms_window` on leaving step 3 (F11e1); **R-C1-42** the second-press capture trigger, never on open or on the identity provider's page (F11e1, F11t); **R-C1-47/48** in F6a, F6b; **R-C1-51** the data half in F6a, F6b and the page's half, the removable course list at step 3's proof (F2d, F8b, F7a's `by_course`, F11e2, F11t); **R-C1-55** the casing pins and "discovery in flight disables Next" (F11c, F11t); **R-OB-1** at step 8, with "a blank row is never ignored" and "no invented slug" (F11c, F11t); **R-OB-2** at step 3; **R-OB-4** the school search and its "isn't listed" free-text fallback (F11e1, F6a). Retired: R-OB-4's timezone suggestion only (Q-B12). Also carried from tests F10 deleted: mail risk 12 at step 5's skip and `GOOGLE_TESTING` at step 6 (F11b), and the password check as an allow-list by id (F11c, F11t; never deleted) | Q2, Q12, Q13 | F13 | O3 |
 | A11 | `CLAUDE.md`, "Command and app contracts" | the `onboarding` command never writes, reaches no network, exits 0 (Q-B3); onboarding mode runs no scheduler until the reveal. **Nothing about config writes:** §4.9 needs no rule change. **Ruled yes (Quinn, 2026-10-23).** The line, drafted here and added to `CLAUDE.md` by F7a in the commit that adds the command: "`onboarding` (`--preview`, `--tidied`) never writes, reaches no network, is never gated and always exits 0; an unreadable input is a named `null`. Onboarding mode runs no scheduler, tray or autostart until the reveal." | Q-B3 | this plan (text); F7a lands it | O3 (ruled) |
 | A17 | `CLAUDE.md`, engine invariants ("never rewrite a vault file wholesale") | **only if** Quinn rules Q-B1's candidate exception: `ingest.yaml` extended in place during onboarding | Q-B1 | F13 | O3 (Quinn's word), conditional |
 | A18 | The onboarding spec, §9's dependency line | O4 merges first, O3 second, no tag between; they still ship together. **Ruled (Quinn, 2026-10-23, Q-B11)** | Q-B11 | F13 | both (ruled) |
@@ -2520,6 +2645,9 @@ behaviour, before it merges.
 | §11 | Each signed text amended in its lane before merge | S8, F13 | §9; Quinn's signatures |
 | Rule 2 | No frozen reference changes | F7a, F7c | the shared `surface_oracle` test; F14 |
 | (plan) | Only `account.rs` from the contract list, by contract-engineer | S5, S7, F2c | S9; F14 |
+| §9 A10, C1's page rules (F10's review) | R-C1-40's close on leaving, R-C1-42's second-press trigger, R-C1-51's removable courses, R-C1-55's disabled Next, R-OB-1's blank-row and slug rules, R-OB-4's "isn't listed", the risk-12 line, `GOOGLE_TESTING`, the password allow-list, the `comp` state | F11e1, F11e2, F11b, F11c; F2d, F8b, F7a (the course list) | F11t's C1 pins; F1 test 12 (removal survives a quit); F7a's `by_course` test; F12 |
+| §1.9 (F10's review) | Rust names the vault past profiles and folders on disk; the old flow's errors are gone from the step-2 path | F3 | F3 tests 6-7 |
+| (plan; F10's review) | `feat/o3-long-onboarding` never merges to `main` before F12's walk-through passes | F12, F14 | §8's merge gate; F14 checks it |
 
 ## 11. Checkpoints
 
@@ -3367,3 +3495,37 @@ two new facts, each edited where it lands:
 - **S-A phase 1** (first half) is recorded in §13: on a fresh Edge profile, the LMS asked for a
   password and "stay signed in?" with no MFA prompt; Outlook then came up at once with no prompt; the
   registrar in about 1 second with no prompt. The 10-minute restart check passed (all three signed in); S-A phase 1 PASS.
+
+### 14.44 F10's review (8292301 on `feat/o3-f10`): §9 A10's unassigned C1 rules
+
+F10's review found that §9's row A10 claimed C1's rulings "carried" while their page halves, and
+three rules held only by tests F10 deleted, had no later task. Each now has one, before F11 is
+dispatched (§4.2 steps 3-8, the tasks named, A10 rewritten with its carrier per ruling):
+- **R-C1-40, page half:** `close_lms_window` on every exit from step 3 for non-shared windows
+  (F11e1, F11t).
+- **R-C1-42:** the capture on the second press only, never on open, never on the identity
+  provider's page; on the shared folder the signed-in test is the trigger (F11e1, F11t).
+- **R-C1-51, UI half:** chosen as a removable list rather than a filter, since nothing on the
+  device can tell an organisation or a TA role from a class with certainty. Every captured course is
+  listed at step 3's proof with Remove; `removed` lives on the answers file's course row (F2d);
+  `school.courses` and `course_map` use `kept_courses()` only (F6a); and so that the page computes
+  no count and the feed is not kept, F7a's preview also reports `by_course`, and Rust totals the
+  kept rows (F7a, F8b, F11e2; F1 test 12, F6a's test). **F11e splits** into F11e1 and F11e2 to stay
+  under the size cap.
+- **R-C1-55:** discovery in flight disables Next (F11c, F11t).
+- **R-OB-1:** a blank row is never sent as ignored; no slug is made on the page (F11c, F11t).
+- **R-OB-4:** "my school isn't listed" at step 3, to the paste fallback; `school.apply` writes the
+  no-unitid school as today (F11e1, F6a's test).
+- **From the deleted tests:** mail risk 12's line at step 5's skip and `GOOGLE_TESTING` at step 6
+  (F11b, F11t); the password check, now an allow-list by id that F11c extends and that is never
+  deleted (F11t).
+- **F5b:** five commands move to the console's list and are never deleted; four of the shell's
+  pending-target commands may go from the shell's list.
+- **F3:** Rust picks "Knowlu", "Knowlu 2", … past profiles and folders on disk; the old flow's
+  "press Finish again" and "pick another name" errors are rewritten; F10's interim name loop is
+  deleted (F3 tests 6-7; F3 now depends on F10).
+- **Payment:** a `comp` account sees "nothing to pay", never the trial's terms (F11e2, F11t).
+- **Merge gate:** `feat/o3-long-onboarding` never merges to `main` before F12's walk-through passes
+  (§8; F12 walks the new cases; F14 checks it).
+Two choices were the planner's and are open to the controller: the removable list over a filter, and
+`by_course` (an engine output change in F7a) over keeping the feed file until payment.
