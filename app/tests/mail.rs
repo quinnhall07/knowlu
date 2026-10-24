@@ -3575,6 +3575,25 @@ fn a_stop_while_the_canary_is_awaited_ends_within_one_poll_sends_no_second_canar
     assert!(r.clk.at() - NOW < 180, "never CANARY_WAIT");
 }
 
+#[test]
+fn a_retry_or_done_after_the_stop_sends_no_canary() {
+    // The blocked mailbox waits on the student; the stop comes first, and a Retry that arrives anyway (it is
+    // refused once the run has left its wait, or taken in the instant before) never sends a canary (F8d review).
+    let r = rig("f8d-retry-after-stop");
+    r.sv.lock().unwrap().canary_arrives = false;
+    let kept = json!({ "result": "ok", "forwarding": "on", "to": "ours", "keep_copy": true, "changed": false });
+    queue(&r, "m365/forwarding_set.js", vec![kept]);
+    let shared = r.start(curated_m365(), true);
+    until("the blocked state", || shared.progress().blocked);
+    assert_eq!(r.sv.lock().unwrap().canaries, 1);
+    shared.stop();
+    let _ = shared.answer(Answer::Retry);
+    let _ = shared.answer(Answer::Done);
+    let p = wait(&shared);
+    assert_eq!(p.ended, Some("stopped"), "{p:?}");
+    assert_eq!(r.sv.lock().unwrap().canaries, 1, "no canary after the stop");
+}
+
 fn answer_address(shared: &Shared) {
     until("the question", || shared.progress().ask == Some("school_address"));
     // An answer to a different question is not taken.

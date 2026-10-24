@@ -7,7 +7,7 @@
 //! **While a [`Queue`] is live it is the only writer of `onboarding.json`**: the commands (F2) and the
 //! window's exits (F4) change the file through the queue's methods, never `save_state` directly. The
 //! one exception is the sign-out rewind, which writes after [`Queue::freeze`] (F8f, F2e).
-use crate::onboarding_state::{confirm_school, load_answers, proposals_ready, save_state, school_apply_may_run, update_answers, update_answers_unless, Answers, CourseAnswer, HandoverItem, JobRecord, JobState, OnboardingState, PendingStore};
+use crate::onboarding_state::{confirm_school, load_answers, proposals_ready, save_state, school_apply_may_run, update_answers, Answers, CourseAnswer, HandoverItem, JobRecord, JobState, OnboardingState, PendingStore};
 use crate::scheduler::SlotScope;
 use serde::Serialize;
 use serde_json::Value;
@@ -1062,7 +1062,7 @@ impl SetupRun for crate::mail::setup::Shared {
 /// `mail.setup`: passes the queue's stop to the run ("after the current step") and returns only once the
 /// run has ended, so no setup write lands after Sign out's clean. A stopped run is `Stopped` (pending,
 /// resumed at the next launch). The setup's provider, the service's own string from the run's progress,
-/// goes to `mail_provider` through the answers lock, refused once the stop is set; an empty provider
+/// goes to `mail_provider` through `update_answers`, stop or not (the drain waits for this runner); an empty provider
 /// (the run ended before it was resolved) records nothing.
 pub fn run_mail_setup(data_dir: &Path, run: &dyn SetupRun, stop: &AtomicBool) -> Outcome {
     let mut told = false;
@@ -1072,8 +1072,10 @@ pub fn run_mail_setup(data_dir: &Path, run: &dyn SetupRun, stop: &AtomicBool) ->
     }
     let (p, stopping) = (run.progress(), stop.load(Ordering::SeqCst));
     if !p.provider.is_empty() {
-        // The record is advisory (F2b keeps the item when it is absent), so a refusal never fails a setup.
-        let _ = update_answers_unless(data_dir, &|| stop.load(Ordering::SeqCst), &|a| a.mail_provider = Some(p.provider.to_string()));
+        // Written even after a stop: the drain waits for this runner, so the write lands before `on_sign_out`
+        // and `write_finish`, and finish needs the provider to leave a never-driven first pass out. It is
+        // advisory (F2b keeps the item when it is absent), so a refusal never fails a setup.
+        let _ = update_answers(data_dir, &|a| a.mail_provider = Some(p.provider.to_string()));
     }
     match p.ended {
         Some("finished") => Outcome::Done(BTreeMap::new()),

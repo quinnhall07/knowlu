@@ -2449,7 +2449,8 @@ fn test_30_the_mail_setup_runner_passes_the_stop_on_and_returns_only_after_the_r
     assert_eq!(out, Outcome::Stopped, "a stopped setup is pending, never failed");
     assert!(start.elapsed() >= Duration::from_millis(360), "it returned before the run had ended");
     assert_eq!(run.stops.load(Ordering::SeqCst), 1, "the run's stop is called once");
-    assert_eq!(load_answers(&dir).unwrap(), None, "a stop seen means no answers write (the setup resumes and records then)");
+    // The drain waits for this runner, so the write lands before `on_sign_out` and `write_finish`; finish needs it.
+    assert_eq!(load_answers(&dir).unwrap().and_then(|a| a.mail_provider).as_deref(), Some("m365"), "the provider is recorded after a stop too");
 }
 
 #[test]
@@ -2543,5 +2544,22 @@ fn test_30_the_canary_and_first_pass_watch_write_nothing_heed_the_stop_each_poll
         let count = |_: Duration| { ticks.fetch_add(1, Ordering::SeqCst); };
         assert_eq!(watch(&|| false, &never, &count), Outcome::Waiting(REASON_MAIL_NOT_YET.into()), "{name}: parked, not failed");
         assert_eq!(ticks.load(Ordering::SeqCst) as u64, MAIL_WATCH_BUDGET.as_secs() / MAIL_WATCH_POLL.as_secs(), "{name}: bounded by its budget");
+    }
+}
+
+#[test]
+fn test_32_the_setup_runners_only_answers_write_is_one_update_answers_for_mail_provider() {
+    let src = src_of("onboarding_jobs.rs");
+    let from = src.find("pub fn run_mail_setup(").expect("run_mail_setup");
+    let body = &src[from..from + src[from..].find("
+}
+").expect("its end")];
+    assert_eq!(body.matches("update_answers(").count(), 1, "one answers write:
+{body}");
+    assert!(body.contains("mail_provider = Some("), "and it is the provider:
+{body}");
+    for other in ["save_answers", "update_answers_unless", "save_state", "load_answers", "std::fs::write"] {
+        assert!(!body.contains(other), "no other answers write in the setup runner ({other}):
+{body}");
     }
 }

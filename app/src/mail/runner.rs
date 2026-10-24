@@ -876,6 +876,10 @@ impl Runner<'_> {
 
     /// Asks the service for one canary; `None` when it would not send one. The inner value is its sent time.
     fn send_canary(&mut self) -> Option<Option<jiff::Timestamp>> {
+        // No canary goes out once the stop is set, whichever path asks (the step, a retry, "I've done this").
+        if self.sh.stopping() {
+            return None;
+        }
         let sent = self.client().canary(&self.id).ok()?;
         Some(sent["sent_at"].as_str().and_then(|s| s.parse::<jiff::Timestamp>().ok()))
     }
