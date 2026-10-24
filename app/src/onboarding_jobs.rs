@@ -184,6 +184,10 @@ pub struct ExistingNote {
 /// `school.courses`: creates a note only for a course with none (`create` returns the new slug),
 /// and records every kept course's slug **by [`CourseAnswer::key`]**, a restored note's own where one
 /// matched, in the answers file ([`Answers::slugs`]).
+/// **One note per course** (§14.15, I5): the kept rows are walked in captured order, and a kept row
+/// whose trimmed, **non-empty** human `code` equals an earlier kept row's reuses that row's slug and
+/// does no create (two shells of one course). An empty `code` never matches another row, so two
+/// typed rows with no code are two courses, two creates, two slugs.
 /// An absent or unreadable answers file is an error (`Outcome::Failed`), never "no courses".
 pub fn run_school_courses(
     _data_dir: &Path,
@@ -221,7 +225,9 @@ pub fn ingest_handoff(_answers: &Answers, _pending: &dyn PendingStore) -> Ingest
 /// [`crate::onboarding_state::preview_courses`] and hands it to `engine` (the
 /// `knowlu-engine onboarding --preview` call, the feed, grades and registrar files beside it), then
 /// saves the output's `by_course` through [`crate::onboarding_state::save_preview`]. An absent or
-/// unreadable answers file is `Failed`, never a preview of no courses.
+/// unreadable answers file is `Failed`, never a preview of no courses. An `engine` error, or a
+/// `save_preview` error (an output whose `by_course` is `null`, absent or not an object), is `Failed`
+/// too, and the saved buckets are left exactly as they were.
 pub fn run_school_preview(_data_dir: &Path, _engine: &mut dyn FnMut(&Value) -> Result<Value, String>) -> Outcome {
     todo!("F8b: school.preview")
 }

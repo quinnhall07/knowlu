@@ -238,9 +238,10 @@ impl Answers {
     /// `course_map` and the step-3 totals read the list only through this.
     pub fn kept_courses(&self) -> Vec<&CourseAnswer> { todo!("F2d: kept_courses") }
     /// A re-capture: replaces the list with `captured`, every row un-removed and its `captured_label`
-    /// set to its captured `label`. A captured row's own
-    /// non-empty `fragments` win (a new gradebook pin is never lost); a captured row with none, whose
-    /// [`CourseAnswer::key`] matches an old row's, keeps that row's `fragments`.
+    /// set to its captured `label` **first**, before any key is compared, so the match below uses the
+    /// key the new row will keep. A captured row's own non-empty `fragments` win (a new gradebook pin
+    /// is never lost); a captured row with none, whose [`CourseAnswer::key`] matches an old row's,
+    /// keeps that row's `fragments`.
     pub fn recapture(&mut self, _captured: Vec<CourseAnswer>) { todo!("F2d: recapture") }
 }
 

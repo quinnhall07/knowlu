@@ -1838,3 +1838,52 @@ fn test_12_every_registrar_row_reaches_registrar_confirm_whatever_was_removed() 
         assert_eq!(registrar_confirm_rows(&a), rows, "after removing {key}, every row, in captured order");
     }
 }
+
+// ---- F1 review r5 ------------------------------------------------------------------------------------------
+
+#[test]
+fn test_14_rows_with_no_human_code_are_never_the_same_course_and_a_trimmed_code_match_is() {
+    // Two typed rows (the paste fallback) with no code and different labels: two courses. Two shells
+    // whose codes differ only by surrounding spaces: one course.
+    let dir = scratch("t14-empty-code");
+    let capture = serde_json::json!({"capture": {"courses": [
+        course("", "Lab", ""), course("", "Seminar", ""),
+        course("WVG 105", "Weaving Lab", "_1003_1"), course(" WVG 105 ", "Weaving Lab", "_0993_1"),
+    ]}});
+    assert_eq!(onboarding_answer_inner(&dir, 3, &capture, &mut |_| {})["ok"], true);
+    let created = RefCell::new(Vec::<String>::new());
+    let out = run_school_courses(&dir, &[], &mut |c| {
+        let k = c.key();
+        created.borrow_mut().push(k.clone());
+        Ok(k.to_lowercase().replace(['_', ' '], "-"))
+    });
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    assert_eq!(*created.borrow(), ["Lab", "Seminar", "_1003_1"], "an empty code matches nothing; a trimmed equal code is the same course");
+    let slugs = load_answers(&dir).unwrap().unwrap().slugs;
+    assert_eq!(slugs.get("Lab").map(String::as_str), Some("lab"), "{slugs:?}");
+    assert_eq!(slugs.get("Seminar").map(String::as_str), Some("seminar"), "{slugs:?}");
+    assert_ne!(slugs.get("Lab"), slugs.get("Seminar"), "Seminar never takes Lab's note: {slugs:?}");
+    assert_eq!(slugs.get("_0993_1"), slugs.get("_1003_1"), "the second WVG shell reuses the first's slug: {slugs:?}");
+}
+
+#[test]
+fn test_12_a_failed_preview_is_failed_and_leaves_the_saved_buckets_as_they_were() {
+    let dir = scratch("t12-preview-fails");
+    assert_eq!(onboarding_answer_inner(&dir, 3, &capture_answer(), &mut |_| {})["ok"], true);
+    save_preview(&dir, &serde_json::json!({
+        "_1001_1": {"codes": ["_1001_1"], "class_times": 0, "assignments_upcoming": 7, "turned_in": 0},
+    })).unwrap();
+    let before = load_answers(&dir).unwrap().unwrap().buckets;
+    let answers: [Result<Value, String>; 4] = [
+        Err("knowlu-engine could not be started".into()),
+        Ok(serde_json::json!({"by_course": null, "classes": null, "errors": ["courses: not given"]})),
+        Ok(serde_json::json!({"classes": 3, "errors": []})),
+        Ok(serde_json::json!({"by_course": [1, 2], "errors": []})),
+    ];
+    for answer in answers {
+        let shown = format!("{answer:?}");
+        let out = run_school_preview(&dir, &mut |_| answer.clone());
+        assert!(matches!(out, Outcome::Failed(_)), "{shown}: {out:?}");
+        assert_eq!(load_answers(&dir).unwrap().unwrap().buckets, before, "{shown} changed the saved buckets");
+    }
+}
