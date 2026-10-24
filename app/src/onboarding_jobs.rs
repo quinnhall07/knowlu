@@ -1,17 +1,22 @@
 //! The job queue (plan §4.3, F8a-F8h) and the runners that are pure enough to test: the feed store,
 //! `school.courses`, the `config.ingest` hand-over, the link commands that only validate.
 //!
-//! **F1 stub.** Types and signatures are the contract `app/tests/onboarding_jobs.rs` writes
-//! against; every function panics (`todo!`) until F8 replaces it.
-use crate::onboarding_state::{Answers, CourseAnswer, HandoverItem, OnboardingState, PendingStore};
+//! **F8a** is the queue's core (below). The runners, the notes gate and the link commands further
+//! down are still F1 stubs: their types and signatures are the contract `app/tests/onboarding_jobs.rs`
+//! writes against, and each panics (`todo!`, naming its task) until that task replaces it.
+//! **While a [`Queue`] is live it is the only writer of `onboarding.json`**: the commands (F2) and the
+//! window's exits (F4) change the file through the queue's methods, never `save_state` directly. The
+//! one exception is the sign-out rewind, which writes after [`Queue::freeze`] (F8f, F2e).
+use crate::onboarding_state::{save_state, Answers, CourseAnswer, HandoverItem, JobRecord, JobState, OnboardingState, PendingStore};
 use crate::scheduler::SlotScope;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// The two threads: the serial queue (every job that runs an engine child or a window) and the
 /// local lane (`school.store`, `calendar.store`, `school.apply`, `school.courses`,
@@ -86,25 +91,208 @@ pub struct Deps {
 /// The queue's `BeforeConfig` chain stops at this many runs (Q-B20).
 pub const CHAIN_BACKSTOP: u32 = 50;
 
-pub struct Queue { _inner: Arc<Mutex<()>> }
+// ---- the core (F8a): states, persistence, the two serial threads, the entitlement hold ----------------
+
+const LANE: [&str; 6] = ["school.store", "calendar.store", "school.apply", "school.courses", "registrar.confirm", "config.ingest"];
+/// Device-side before payment; every other job is held until the vault is `Entitled` (§4.3).
+const UNGATED: [&str; 2] = ["school.capture", "school.preview"];
+/// The order a resumed queue runs its jobs in: step order, then ask order within a step (§4.2).
+/// A name not listed sorts after these, by name.
+pub const JOB_ORDER: [&str; 17] = [
+    "school.capture", "school.preview", "school.store", "school.apply", "school.courses", "registrar.confirm",
+    "mail.setup", "mail.canary", "mail.first_pass", "google.gmail_first_read", "calendar.store", "calendar.read", "google.calendar_read",
+    "coursework.discover", "config.ingest", "slot.partial", "slot.first_full",
+];
+/// The closed-set reason of a job whose runner panicked; the page maps it to its fix. It is reachable
+/// only under unwinding (tests and the dev profile): the release profile has `panic = "abort"`.
+pub const REASON_JOB_CRASHED: &str = "job_crashed";
+
+struct Core {
+    state: OnboardingState,
+    /// Jobs in the order their asks were answered, until they finish; a running job stays in it.
+    order: Vec<String>,
+    /// False until the start thread has read the entitlement once; gated jobs wait for it.
+    ready: bool,
+    entitled: bool,
+    busy: [bool; 2],
+    /// `Waiting` and `Stopped` jobs: not picked again until something else changes (no spin).
+    parked: BTreeSet<String>,
+    shutdown: bool,
+}
+
+impl Core {
+    fn lane(job: &str) -> usize { LANE.contains(&job) as usize }
+    fn pick(&self, lane: usize) -> Option<String> {
+        let runnable = |j: &&String| Core::lane(j) == lane && !self.parked.contains(*j) && self.state.jobs.get(*j).is_some_and(|r| r.state == JobState::Pending);
+        self.order.iter().find(|j| runnable(j) && (self.ready || UNGATED.contains(&j.as_str()))).cloned()
+    }
+    /// A gated job is `held` while not entitled and `pending` again once it is.
+    fn settle(&mut self) {
+        for j in self.order.iter().filter(|j| !UNGATED.contains(&j.as_str())) {
+            if let Some(r) = self.state.jobs.get_mut(j) {
+                match (r.state, self.entitled) {
+                    (JobState::Pending, false) => r.state = JobState::Held,
+                    (JobState::Held, true) => r.state = JobState::Pending,
+                    _ => {}
+                }
+            }
+        }
+    }
+    fn finish(&mut self, job: &str, lane: usize, out: Outcome) {
+        self.busy[lane] = false;
+        let (state, proof, reason) = match out {
+            Outcome::Done(p) => (JobState::Done, p, None),
+            Outcome::Failed(r) => (JobState::Failed, BTreeMap::new(), Some(r)),
+            Outcome::Slot(SlotRun { reason: Some(r), .. }) => (JobState::Failed, BTreeMap::new(), Some(r)),
+            Outcome::Slot(_) => (JobState::Done, BTreeMap::new(), None),
+            Outcome::Waiting(r) => (JobState::Pending, BTreeMap::new(), Some(r)),
+            Outcome::Stopped => (JobState::Pending, BTreeMap::new(), None),
+        };
+        if state == JobState::Pending { self.parked.insert(job.to_string()); } else { self.order.retain(|j| j != job); self.parked.clear(); }
+        self.state.jobs.insert(job.to_string(), JobRecord { state, proof, reason });
+    }
+}
+
+struct Inner { deps: Deps, core: Mutex<Core>, cv: Condvar, stop: AtomicBool }
+
+impl Inner {
+    fn lock(&self) -> MutexGuard<'_, Core> { self.core.lock().unwrap_or_else(|e| e.into_inner()) }
+    /// The one path every change persists through, the queue being the only writer of the file while
+    /// it is live (F8f puts the freeze here).
+    fn persist(&self, c: &Core) {
+        if let Err(e) = save_state(&self.deps.data_dir, &c.state) { eprintln!("onboarding: could not save the job states: {e}"); }
+    }
+    /// Reads the entitlement without holding the lock: a cache short of `Entitled` gets one refresh.
+    /// Under unwinding (tests and dev; release is `panic = "abort"`), a panic in either call reads as
+    /// "not entitled", so the jobs stay held rather than the thread dying.
+    fn read_entitlement(&self, refresh: bool) -> bool {
+        let e = &self.deps.entitlement;
+        let read = || { if !e.entitled() && refresh { e.refresh(); } e.entitled() };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).unwrap_or(false)
+    }
+}
+
+/// `slot.partial` is `BeforeConfig` until `config.ingest` is done, then `NoRank` (F8e refines it).
+fn scope_for(job: &str, s: &OnboardingState) -> Option<SlotScope> {
+    let ingested = s.jobs.get("config.ingest").is_some_and(|r| r.state == JobState::Done);
+    match job {
+        "slot.first_full" => Some(SlotScope::Full),
+        "slot.partial" => Some(if ingested { SlotScope::NoRank } else { SlotScope::BeforeConfig }),
+        _ => None,
+    }
+}
+
+/// The one startup read (a cache short of `Entitled` gets one refresh), on its own detached thread so
+/// that `school.capture` and `school.preview` never wait for it and a drop never waits on a refresh. It leaves a newer `wake()` read alone.
+fn startup(inner: Arc<Inner>) {
+    let ent = inner.read_entitlement(true);
+    let mut g = inner.lock();
+    // The queue was dropped while the refresh ran (this thread is detached): write nothing.
+    if g.shutdown { return; }
+    // A wake's read is newer, so a stale `false` here never undoes it; a fresh `true` is always kept.
+    g.entitled |= ent;
+    g.ready = true;
+    g.settle();
+    inner.persist(&g);
+    inner.cv.notify_all();
+}
+
+fn work(inner: Arc<Inner>, lane: usize) {
+    let mut g = inner.lock();
+    while !g.shutdown {
+        let Some(job) = g.pick(lane) else { g = inner.cv.wait(g).unwrap_or_else(|e| e.into_inner()); continue };
+        g.busy[lane] = true;
+        g.state.jobs.insert(job.clone(), JobRecord { state: JobState::Running, ..Default::default() });
+        inner.persist(&g);
+        let scope = scope_for(&job, &g.state);
+        drop(g);
+        let run = || inner.deps.runner.run(&job, scope, &inner.stop);
+        // Holds under unwinding only (tests and dev): in release `panic = "abort"` ends the process.
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|_| Outcome::Failed(REASON_JOB_CRASHED.into()));
+        g = inner.lock();
+        g.finish(&job, lane, out);
+        g.settle();
+        inner.persist(&g);
+        inner.cv.notify_all();
+    }
+}
+
+pub struct Queue { inner: Arc<Inner>, threads: Vec<JoinHandle<()>> }
+
+impl Drop for Queue {
+    fn drop(&mut self) {
+        // A running job sees the stop (never cleared, §4.10) and returns, so the joins end.
+        self.inner.stop.store(true, Ordering::SeqCst);
+        self.inner.lock().shutdown = true;
+        self.inner.cv.notify_all();
+        for t in self.threads.drain(..) { let _ = t.join(); }
+    }
+}
 
 impl Queue {
     /// Spawns the serial thread and the lane thread, over `state` (running jobs already `pending`).
-    pub fn start(_deps: Deps, _state: OnboardingState) -> Queue { todo!("F8a: start the queue") }
+    pub fn start(deps: Deps, mut state: OnboardingState) -> Queue {
+        let mut order = Vec::new();
+        for (name, r) in state.jobs.iter_mut() {
+            if r.state == JobState::Running { r.state = JobState::Pending; }
+            if matches!(r.state, JobState::Pending | JobState::Held) { order.push(name.clone()); }
+        }
+        order.sort_by_key(|j| (JOB_ORDER.iter().position(|c| c == j).unwrap_or(JOB_ORDER.len()), j.clone()));
+        let core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false };
+        let inner = Arc::new(Inner { deps, core: Mutex::new(core), cv: Condvar::new(), stop: AtomicBool::new(false) });
+        let spawn = |lane: usize, name: &str| {
+            let i = inner.clone();
+            std::thread::Builder::new().name(name.into()).spawn(move || work(i, lane)).expect("the onboarding queue could not start a thread")
+        };
+        // The start read is detached, not joined: a refresh can take a minute, and `startup` writes
+        // nothing once the queue is dropped.
+        let i = inner.clone();
+        std::thread::Builder::new().name("onboarding-start".into()).spawn(move || startup(i)).expect("the onboarding queue could not start a thread");
+        let threads = vec![spawn(0, QUEUE_THREAD), spawn(1, LANE_THREAD)];
+        Queue { inner, threads }
+    }
     /// An ask was answered: the job is `pending` (or `held`) and runs when its inputs are ready.
-    pub fn enqueue(&self, _job: &str) { todo!("F8a: enqueue") }
+    pub fn enqueue(&self, job: &str) {
+        let mut g = self.inner.lock();
+        g.parked.clear();
+        if !g.order.iter().any(|j| j == job) {
+            g.order.push(job.to_string());
+            g.state.jobs.insert(job.to_string(), JobRecord::default());
+        }
+        g.settle();
+        self.inner.persist(&g);
+        self.inner.cv.notify_all();
+    }
     /// The entitlement changed (F2h's poll): re-test the hold.
-    pub fn wake(&self) { todo!("F8a: wake") }
+    pub fn wake(&self) {
+        let ent = self.inner.read_entitlement(false);
+        let mut g = self.inner.lock();
+        (g.entitled, g.parked) = (ent, BTreeSet::new());
+        g.settle();
+        self.inner.persist(&g);
+        self.inner.cv.notify_all();
+    }
     /// "Try again" on a job (resets the chain count for `school.courses` while unsettled).
     pub fn retry(&self, _job: &str) { todo!("F8e: retry") }
     /// Step 10's confirm: stamps `step10_confirmed_at` and enqueues `slot.first_full`.
-    pub fn confirm_step10(&self, _at: &str) { todo!("F8e: confirm step 10") }
+    pub fn confirm_step10(&self, at: &str) {
+        self.inner.lock().state.step10_confirmed_at = Some(at.to_string());
+        self.enqueue("slot.first_full");
+    }
     /// The student confirmed the school offered at step 3: marks it confirmed on the live state and
     /// wakes the queue, so a `school.apply` that was waiting on it can start (§4.7).
     pub fn confirm_school(&self) { todo!("F8e: confirm the school") }
-    pub fn snapshot(&self) -> OnboardingState { todo!("F8a: snapshot") }
+    pub fn snapshot(&self) -> OnboardingState { self.inner.lock().state.clone() }
     /// True when nothing is running and nothing runnable is waiting, within `timeout`.
-    pub fn wait_idle(&self, _timeout: Duration) -> bool { todo!("F8a: wait idle") }
+    pub fn wait_idle(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut g = self.inner.lock();
+        while !(g.ready && !g.busy.contains(&true) && g.pick(0).is_none() && g.pick(1).is_none()) {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else { return false };
+            g = self.inner.cv.wait_timeout(g, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        true
+    }
     pub fn request_stop(&self) { todo!("F8f: stop") }
     pub fn stop_requested(&self) -> bool { todo!("F8f: stop requested") }
     /// Waits for each lane's running job to reach its safe point.
