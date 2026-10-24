@@ -1895,3 +1895,113 @@ fn test_34_onboarding_skip_5_mail_records_the_skip_and_calls_skip_mail_once_and_
     let out = skip(true, 5, "mail", false);
     assert_eq!((out["ok"].clone(), out["exiting"].clone(), stopped.get()), (false.into(), true.into(), 2), "an exit under way refuses it outright: {out}");
 }
+
+// ---- test 38 (F2b2b): the patient read at launch -----------------------------------------------------------------
+
+/// Holds `path` open with no sharing for `ms`, on another thread (a reader gets a sharing violation).
+#[cfg(windows)]
+fn hold_file(path: &Path, ms: u64) -> std::thread::JoinHandle<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true).share_mode(0).open(path).expect("hold the file");
+    std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_millis(ms)); drop(f); })
+}
+
+fn launch_file(tag: &str, bytes: &[u8]) -> PathBuf {
+    let d = scratch(tag);
+    std::fs::write(state_path(&d), bytes).unwrap();
+    d
+}
+
+#[cfg(windows)]
+#[test]
+fn test_38_a_file_held_then_released_inside_the_backoff_loads_and_nothing_is_rewritten() {
+    let mut s = OnboardingState::new("2026-10-24T09:00:00Z", 6);
+    s.finished = true;
+    let d = scratch("t38-held-released");
+    save_state(&d, &s).unwrap();
+    let bytes = std::fs::read(state_path(&d)).unwrap();
+    let held = hold_file(&state_path(&d), 1500);
+    let got = load_state_for_launch(&d);
+    held.join().unwrap();
+    assert_eq!(got, Ok(Loaded::Ok(s)), "the read waited out the hold");
+    assert_eq!(std::fs::read(state_path(&d)).unwrap(), bytes, "no rewrite");
+}
+
+#[cfg(windows)]
+#[test]
+fn test_38_a_file_held_past_the_backoff_is_the_named_fatal_and_nothing_is_written() {
+    let d = scratch("t38-held-past");
+    save_state(&d, &OnboardingState::new("2026-10-24T09:00:00Z", 6)).unwrap();
+    let bytes = std::fs::read(state_path(&d)).unwrap();
+    let held = hold_file(&state_path(&d), 4500);
+    let t = std::time::Instant::now();
+    let got = load_state_for_launch(&d);
+    let waited = t.elapsed();
+    held.join().unwrap();
+    let Err(why) = got else { panic!("a file still held after the backoff is fatal, not a state: {got:?}") };
+    assert!(why.contains("could not read this profile's setup file") && why.contains("Nothing was changed"), "{why}");
+    assert!(waited >= std::time::Duration::from_millis(3100) && waited < std::time::Duration::from_millis(4400), "25 ms, 200 ms, 1 s and 2 s, about 3.2 s: {waited:?}");
+    assert_eq!(std::fs::read(state_path(&d)).unwrap(), bytes, "nothing written, nothing opened");
+    assert!(!why.contains(&d.display().to_string()), "no path in the sentence: {why}");
+}
+
+#[test]
+fn test_38_a_version_this_build_does_not_know_is_fatal_and_writes_nothing() {
+    let full = OnboardingState::new("2026-10-24T09:00:00Z", 4);
+    let mut as_v2 = serde_json::to_value(&full).unwrap();
+    as_v2["version"] = 2.into();
+    for (tag, bytes) in [("full", as_v2.to_string()), ("new-shape", r#"{"version": 2, "phases": [1, 2]}"#.to_string())] {
+        let d = launch_file(&format!("t38-v2-{tag}"), bytes.as_bytes());
+        let Err(why) = load_state_for_launch(&d) else { panic!("{tag}: a newer file is fatal") };
+        assert!(why.contains("newer Knowlu") && why.contains("Nothing was changed"), "{tag}: {why}");
+        assert_eq!(std::fs::read(state_path(&d)).unwrap(), bytes.as_bytes(), "{tag}: untouched");
+    }
+}
+
+#[test]
+fn test_38_only_bytes_that_were_read_and_do_not_parse_may_be_rewritten_and_the_read_itself_writes_nothing() {
+    for (tag, bytes) in [("truncated", &b"{\"version\": 1, \"step\": 4,"[..]), ("garbage", &b"not json at all"[..]), ("not-utf8", &[0xff, 0xfe, 0x00, 0x7b][..])] {
+        let d = launch_file(&format!("t38-parse-{tag}"), bytes);
+        let got = load_state_for_launch(&d);
+        assert!(matches!(got, Ok(Loaded::Unreadable(_))), "{tag}: a file that does not parse is the rewritable case: {got:?}");
+        assert_eq!(std::fs::read(state_path(&d)).unwrap(), bytes, "{tag}: the read itself writes nothing");
+        // The queue's one save rewrites it from a fresh state at the derived step (test 2).
+        let r = resume(got.unwrap(), &Checks::restored(2));
+        assert!(r.state.is_some() && r.mode == LaunchMode::Onboarding, "{tag}");
+    }
+    let d = scratch("t38-absent");
+    assert_eq!(load_state_for_launch(&d), Ok(Loaded::Absent));
+    let mut finished = OnboardingState::new("2026-10-24T09:00:00Z", 11);
+    finished.finished = true;
+    save_state(&d, &finished).unwrap();
+    assert_eq!(load_state_for_launch(&d), Ok(Loaded::Ok(finished)));
+}
+
+#[test]
+fn test_38_the_launch_read_is_the_only_one_that_retries_and_load_state_keeps_its_one_attempt() {
+    let src = src_of("onboarding_state.rs");
+    let body = fn_body(&src, "pub fn load_state(");
+    assert!(!body.contains("sleep"), "load_state does not wait: {body}");
+    assert!(fn_body(&src, "pub fn load_state_for_launch").contains("sleep"), "the launch read does");
+}
+
+// ---- test 39 (F2b2b): vault_only ---------------------------------------------------------------------------------
+
+#[test]
+fn test_39_a_cloud_yaml_naming_another_host_leaks_neither_the_vault_path_nor_the_profile_directory() {
+    let root = scratch("t39-vault-only");
+    let vault = root.join("vault");
+    std::fs::create_dir_all(vault.join("config")).unwrap();
+    std::fs::write(vault.join("config").join("cloud.yaml"),
+        "api_base: 'https://elsewhere.example.invalid/functions/v1'\nanon_key: 'anon'\nsession_credential_target: 'knowlu/test/session'\naccount_id: 'acc-1'\n").unwrap();
+    let ent = entitlement_in(&vault, &root.join("appdata"));
+    let checkout = checkout_url_in(&vault, "monthly").expect_err("another host is refused");
+    let ent_err = ent["error"].as_str().unwrap_or_default().to_string();
+    assert_eq!(ent["ok"], false, "{ent}");
+    let profile = std::env::var("USERPROFILE").unwrap_or_default();
+    for (what, text) in [("entitlement_in", &ent_err), ("checkout_url_in", &checkout)] {
+        assert!(text.contains("different service"), "{what} keeps the sentence: {text}");
+        assert!(!text.contains(&vault.display().to_string()), "{what} names the vault: {text}");
+        assert!(profile.is_empty() || !text.to_lowercase().contains(&profile.to_lowercase()), "{what} names the profile directory: {text}");
+    }
+}
