@@ -781,3 +781,10 @@ pub async fn install_update(app: tauri::AppHandle, sch: State<'_, Scheduler>, up
         Err(e) => { crate::updates::note_error(&up, &e); json!({ "ok": false, "error": e }) }
     })
 }
+
+/// F4b: `switch_profile`'s refusal in onboarding mode (review r4, M6). **F1 stub.** In onboarding
+/// mode it answers `{ok: false, error: "finish or leave setup first"}` before anything is written
+/// (`quit_at` unchanged); in the normal console the command behaves as it does today.
+pub fn switch_profile_inner(_cs: &ConsoleState, _mode: crate::onboarding_state::LaunchMode) -> Value {
+    todo!("F4b: switch_profile refuses in onboarding mode")
+}

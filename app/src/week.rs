@@ -98,7 +98,7 @@ pub fn commitments_confirm_inner(cs: &ConsoleState, view: &str, confirm: &Value)
 }
 
 /// What a confirm answers while a sync holds [`knowlu_engine::sync::RUN_LOCK_FILE`].
-const SYNC_RUNNING: &str = "a sync is running; try again in a moment";
+pub const SYNC_RUNNING: &str = "a sync is running; try again in a moment";
 
 /// Writes the input and runs the child under `vault_io` AND the sync run lock (Plan ruling Q9-a;
 /// W1 P1P2-important). The child writes `commitments/` notes, a synced folder, and no sync may

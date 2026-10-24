@@ -91,6 +91,8 @@ pub struct Scheduler {
     /// `commands::first_run_value`), and nothing else nests them. The lock is held for one push or one
     /// assignment, never across a child process, a network call or `vault_io`.
     pub live: Mutex<LiveSlot>,
+    /// F1 stub (F8s): onboarding's stop. Never cleared by anything; no stage checks it yet.
+    pub stop: AtomicBool,
 }
 
 /// What `Scheduler.live` holds: the steps the running slot has recorded so far, in `RunSummary.steps`'
@@ -146,6 +148,7 @@ impl Default for Scheduler {
             mode_device: Mutex::new((SchedulerMode::Script, true)),
             attempts: Mutex::new(HashMap::new()),
             live: Mutex::new(LiveSlot::default()),
+            stop: AtomicBool::new(false),
         }
     }
 }
@@ -721,6 +724,30 @@ pub fn run_slot(app: &AppHandle, late: bool) -> RunSummary {
     let sch = app.state::<Scheduler>();
     run_slot_inner(&cs, &sch, Some(app), late)
 }
+
+/// Which engine steps a slot runs (plan §4.3, Q-B19). **F1 stub:** `run_slot_scoped` ignores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotScope {
+    /// Today's slot.
+    Full,
+    /// Everything but `rank`: the row `rank (not yet: the first full slot ranks)`.
+    NoRank,
+    /// `sync` only; `coursework`, `grades` (capture and step, once), `ingest`, `judge` and `rank` are
+    /// `<step> (not yet: ...)` rows.
+    BeforeConfig,
+}
+
+/// F8s: `run_slot_with`'s body with a scope and the stop checks. **F1 stub:** runs today's slot.
+pub fn run_slot_scoped(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHandle>, late: bool, grades: &GradesSeam, mail: &MailSeam, scope: SlotScope) -> RunSummary {
+    let _ = scope;
+    run_slot_with(cs, sch, tray_app, late, grades, mail)
+}
+
+/// F8s: the one line `spawn` runs to prime the cached `(mode, device_ok)`. **F1 stub.**
+pub fn prime_mode_device(_cs: &ConsoleState, _sch: &Scheduler) { todo!("F8s: prime_mode_device") }
+
+/// F8s: the housekeeping tick's update check, as a function. **F1 stub.**
+pub fn spawn_update_check(_app: &AppHandle) { todo!("F8s: spawn_update_check") }
 
 /// Refuses outright — no child spawned, no run record written — unless this vault's `local` entry
 /// says `scheduler: app` AND this is the designated device (review item 7, ruling R-T12b): on the

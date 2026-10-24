@@ -883,3 +883,15 @@ pub fn finish_with(
 pub fn paste_calendar_link(kind: String, url: String) -> Value {
     finish(&kind, &url)
 }
+
+// ---- F8la: the capture and paste that only validate (review r6 I-2, r7 I-1) -----------------------------
+
+/// `finish_with` with a store seam that sends nothing and answers `Err("kept on this computer until
+/// payment")`: `stored` is `false` and the `note` says why. **F1 stub.**
+pub fn validate_only(_kind: &str, _url: &str, _fetch: &dyn Fn(&str) -> Result<String, String>) -> Value {
+    todo!("F8la: validate_only")
+}
+
+/// The capture over [`validate_only`] and today's fetch; `school.capture` calls this, never
+/// `capture_calendar_link`. **F1 stub.**
+pub fn capture_link_only(_app: &tauri::AppHandle, _unitid: &str) -> Value { todo!("F8la: capture_link_only") }

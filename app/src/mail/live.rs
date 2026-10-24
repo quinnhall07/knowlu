@@ -213,3 +213,10 @@ pub fn sweep_at_launch(data_dir: &Path, window: Option<MailWindow>) -> Option<Ma
     let _ = crate::mail_session::start_up_sweep(data_dir);
     Some(window)
 }
+
+/// What a closed backfill batch does (F8m, review r5 I-4). **F1 stub.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchClosed { RunSlot, TellQueue }
+
+/// Onboarding mode tells the queue (no slot starts outside it); the normal console runs a slot.
+pub fn on_batch_closed(_mode: crate::onboarding_state::LaunchMode) -> BatchClosed { todo!("F8m: on_batch_closed") }
