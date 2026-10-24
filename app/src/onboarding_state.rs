@@ -1,7 +1,7 @@
 //! `onboarding.json`, `onboarding-answers.json`, resume, skips, the three exits and the account
 //! commands of step 2 again and step 4 (plan §4.5, §4.7, §4.10; F2a-F2h).
 //!
-//! **Still F1 stubs here:** F2g's and F2h's account commands, F8b's `save_preview`, `save_pairs` and
+//! **Still F1 stubs here:** F2h's account commands, F8b's `save_preview`, `save_pairs` and
 //! `preview_courses` (each panics, naming its task). The answers, the three exits, the status and the
 //! commands are F2b's.
 use serde::{Deserialize, Serialize};
@@ -1151,26 +1151,52 @@ pub fn onboarding_retry(app: tauri::AppHandle, job: String) -> Value {
 
 /// A local delete of the pending session and nothing else: never a revoke (review r6, I-1).
 /// `credentials::delete`'s not-found result is ignored.
-pub fn forget_pending_local(_target: &str) { todo!("F2g: the local forget") }
+pub fn forget_pending_local(target: &str) {
+    if !crate::credentials::exists(target) { return; }
+    if let Err(e) = crate::credentials::delete(target) { eprintln!("Knowlu: the pending sign-in could not be deleted ({e})"); }
+}
+
+const REFUSED_OTHER_ACCOUNT: &str = "This setup belongs to another Knowlu account: sign in with that one, or choose another profile.";
+const REFUSED_NO_SIGN_IN: &str = "Knowlu has no sign-in to attach: sign in again.";
+const REFUSED_CLOUD_CONFIG: &str = "This profile's account settings cannot be read: sign in again, or choose another profile.";
+const REFUSED_MOVE: &str = "Knowlu could not keep that sign-in on this profile: sign in again.";
 
 /// Moves the pending session onto the vault's own target only when the pending session, the
 /// sign-in's answer and `config/cloud.yaml` name one account. Otherwise `forget_pending` runs and the
 /// answer is the named refusal (`wrong_account: true` where it applies). `after_attach` is the
-/// best-effort entitlement refresh, a seam so a test makes no request.
+/// best-effort entitlement refresh, a seam so a test makes no request. No sentence names an account.
 pub fn attach_session_in(
-    _vault: &Path,
-    _pending_target: &str,
-    _expected_account_id: &str,
-    _forget_pending: &dyn Fn(),
-    _after_attach: &dyn Fn(),
+    vault: &Path,
+    pending_target: &str,
+    expected_account_id: &str,
+    forget_pending: &dyn Fn(),
+    after_attach: &dyn Fn(),
 ) -> Value {
-    todo!("F2g: attach the session")
+    let refuse = |wrong_account: bool, why: &str| {
+        forget_pending();
+        serde_json::json!({ "ok": false, "wrong_account": wrong_account, "error": why })
+    };
+    let Ok((pending_id, _)) = crate::account::load_session(pending_target) else { return refuse(false, REFUSED_NO_SIGN_IN) };
+    let cfg = match crate::account::cloud_config(vault) {
+        Ok(c) if !c.session_credential_target.is_empty() => c,
+        _ => return refuse(false, REFUSED_CLOUD_CONFIG),
+    };
+    if pending_id != expected_account_id || pending_id != cfg.account_id { return refuse(true, REFUSED_OTHER_ACCOUNT); }
+    if crate::account::move_session(pending_target, &cfg.session_credential_target).is_err() { return refuse(false, REFUSED_MOVE); }
+    after_attach();
+    serde_json::json!({ "ok": true, "wrong_account": false, "error": Value::Null })
 }
 
 /// The command: passes `account::PENDING_TARGET` and the real seams.
 #[tauri::command(async)]
-pub fn onboarding_attach_session(_cs: tauri::State<'_, crate::state::ConsoleState>, _account_id: String) -> Value {
-    todo!("F2g: onboarding_attach_session")
+pub fn onboarding_attach_session(cs: tauri::State<'_, crate::state::ConsoleState>, account_id: String) -> Value {
+    attach_session_in(
+        &cs.vault,
+        crate::account::PENDING_TARGET,
+        &account_id,
+        &|| forget_pending_local(crate::account::PENDING_TARGET),
+        &|| { let _ = crate::account::refresh_entitlement(&cs.vault, &cs.data_dir); },
+    )
 }
 
 /// `account::refresh_entitlement` on the vault's own session, answered as `entitlement_now`'s
