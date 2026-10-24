@@ -1,11 +1,12 @@
 # Deadline ordering: one formula for Must do (draft)
 
-**Status: DRAFT r2 for Quinn, 2026-10-24.** Nothing here is ruled. Review r1 failed (4 important,
-9 minor); r2 folds in every finding, mapped in §13. It answers Quinn's question on the evening rule
-("Why 8pm? Is there a general formula we can come up with to decide what should come first based
-on how long it will take and when it is due?"). Quinn chose to ship the 20:00 rule now (PR #65,
-`feat/evening-ranking`) and to spec the general formula to replace it later. This is that spec. It
-needs Quinn's answers in §11 before a plan is written.
+**Status: DRAFT r3 for Quinn, 2026-10-24.** Nothing here is ruled. Review r1 failed (4 important,
+9 minor) and review r2 failed narrowly (2 important, 5 minor); r2 and r3 fold in every finding,
+mapped in §13. It answers Quinn's question on the evening rule ("Why 8pm? Is there a general
+formula we can come up with to decide what should come first based on how long it will take and
+when it is due?"). Quinn chose to ship the 20:00 rule now and to spec the general formula to
+replace it later. The 20:00 rule (PR #65) is merged: it is on `main` as `7b3e10c`. This is the
+spec that replaces it. It needs Quinn's answers in §11 before a plan is written.
 
 **Builds on:** `docs/specs/2026-10-23-evening-ranking-rule-draft.md` (ruled 2026-10-24: the hour,
 penalty steps out, no evening rewrite of `today.md`, "tonight" ends at local midnight) and its plan
@@ -14,14 +15,17 @@ window, ruled Q6 2026-10-23); `docs/surface/anatomy.md` §3.4 (the meter). Ranki
 `2026-08-11-personal-ops-system-design.md`; the cloud design wins where they disagree, and it says
 nothing about order beyond decision 11 (`rank` never calls a model).
 
-**Code read for this draft:** the `feat/evening-ranking` worktree: `engine/src/ranking.rs`
+**Code read for this draft:** the 20:00 rule's branch as it stood before merging (the merged code is
+on `main` at `7b3e10c`, which the plan reads): `engine/src/ranking.rs`
 (`pressure`, `rank`, `rank_at`, `EVENING_HOUR`, `closes_tonight`, `partition_must_do`,
 `designate_today_explained`), `engine/src/surface.rs` (`load_at`, `build_state_with`,
 `build_state_preview`, `with_window`, `meter`, `must_do`, `group_label`, `sort_rows`, `row`),
 `engine/src/weekcal.rs` (`with_day_window`, `window`, `blocks_from_busy`, `free_blocks`),
 `engine/src/scheduling.rs`, `engine/src/models.rs`, `engine/src/render.rs::capacity_breakdown`, and
 the three `surface-today-*.json` references. The planner had no shell; the plan's first task
-re-confirms every symbol against the branch it starts from.
+re-confirms every symbol against `main`, which it branches from.
+
+"The 20:00 rule" below means the code merged as `7b3e10c`, which is what `main` ranks by today.
 
 ---
 
@@ -30,9 +34,11 @@ re-confirms every symbol against the branch it starts from.
 **Keep today's order while it is safe. When it would make something late, order Must do by when
 it is really due, and use the hours to decide what fits and how long overdue work may go first.**
 
-0. **Is today's order safe?** Walk today's Must do order (pressure order) adding remaining hours
-   against the student's time from now. If every item with a deadline still finishes at least 30
-   minutes before it, nothing changes (Q2 asks whether to reorder even then).
+0. **Is today's order safe?** Walk today's Must do order, adding remaining hours against the
+   student's time from now. ("Today's order" in this spec always means pressure order, `rank` with
+   no moment: the order before the 20:00 step, which this spec removes.) If every item with a
+   deadline still finishes at least 30 minutes before it, nothing changes (Q2 asks whether to
+   reorder even then).
 1. **Deadline order.** Otherwise, Must do work with a deadline ahead is ordered earliest deadline
    first. A deadline is the due time, or, for a past-due item with a known late window (O6), the
    window's close. Earliest-deadline-first (Jackson's rule) minimises the worst lateness on one
@@ -66,9 +72,9 @@ would cost tonight's work. Quinn rules this in Q1.
   `rank_override`s by position. So Must do today is in **slack order**: a big essay due tonight
   whose start-by is days past outranks a small item due yesterday.
 - `partition_must_do`: slack ≤ 0 is Must do. Duration decides membership only through `start_by`.
-- PR #65 adds `rank_at(tasks, today, cal, moment)`: from `EVENING_HOUR` (20:00) on, tasks whose due
-  falls on the moment's date and after it lead, by due time; everything else keeps pressure order;
-  overrides still win. `rank` is `rank_at(.., None)`.
+- On `main` (`7b3e10c`), `rank_at(tasks, today, cal, moment)`: from `EVENING_HOUR` (20:00) on,
+  tasks whose due falls on the moment's date and after it lead, by due time; everything else keeps
+  pressure order; overrides still win. `rank` is `rank_at(.., None)`.
 - `surface::meter` fills the **whole day's** capacity (`capacity_breakdown`, not what is left from
   now) with Must do work in rank order, skipping what does not fit; the skipped tasks are
   `spill_items`. `spill_hours` and the block counts do not depend on order.
@@ -79,14 +85,14 @@ would cost tonight's work. Quinn rules this in Q1.
   `with_day_window(day, ..)` replaces the window for every date sharing `day`'s weekday, and ignores
   `start >= end`, so a window ending at midnight (`00:00`) cannot be expressed.
 
-None of this uses the time of day except PR #65's step, and none of it asks whether the Must do
+None of this uses the time of day except the 20:00 step, and none of it asks whether the Must do
 work can all be finished before its deadlines.
 
 ## 2. The formula
 
 ### 2.1 When it runs and on what
 
-- **Only with a moment `m`** whose date is the day being ranked (the guard PR #65 uses). No moment,
+- **Only with a moment `m`** whose date is the day being ranked (the guard the 20:00 rule uses). No moment,
   or a moment on another day: the order is exactly `rank`'s.
 - **`m` is truncated to the minute** (seconds and below dropped) before anything else. Due times
   are minute-precise already (`coerce_datetime`), so every comparison below is on whole minutes.
@@ -121,7 +127,8 @@ In what follows, the first two classes are **dated** and the third is **overdue*
 The walk needs "how much of the student's time lies between now and this deadline". **One timeline
 serves every item and depends on no task**, so that the scheduling theory behind steps 1 and 2
 holds exactly, a later deadline never has less time than an earlier one, and adding or finishing
-an unrelated task never changes another item's verdict.
+an unrelated task never changes the time available to another item. (It can still change that
+item's verdict the honest way, by adding to or taking from the work ahead of it.)
 
 **The timeline** runs from `m` forward, date by date, to the last deadline (at most 365 days,
 `start_by`'s bound). Each date contributes its free blocks **from its planning window's start to
@@ -137,7 +144,21 @@ local midnight**:
 - **counting:** civil minutes, as every capacity figure in the engine is (`hours_between` on civil
   `DateTime`s). On the autumn fall-back day the repeated hour is counted once; on the spring
   day the skipped hour counts as if it existed. Both fall between 01:00 and 03:00, outside any
-  window that starts in the morning, so in practice neither is ever counted.
+  window that starts in the morning, so in practice neither is ever counted;
+- **busy time at and across midnight** (review r2, M2):
+  - a calendar event is subtracted as a `DateTime` span (`subtract`), so one ending at `00:00` takes
+    the evening to midnight, and one from 23:00 to 01:00 takes 23:00–24:00 from its start date; its
+    after-midnight part falls before the next date's window opens and takes nothing;
+  - a commitment is a start and end time on a weekday, so it cannot cross midnight: one ending at
+    23:59 takes the evening to 23:59. One written across midnight (a 22:00–02:00 shift) has its end
+    before its start, and `weekly_span_block` and `active_spans` drop it, so that evening reads as
+    free. That is today's behaviour everywhere, not this spec's; §12 lists it;
+  - **can a span reach `blocks_from_busy` with its end before its start?** A commitment cannot (both
+    readers above drop it). A template class can: `class_busy` does not check, and the cursor walk
+    (`weekcal.rs`, `blocks_from_busy`) then cuts the free block at the class's start without moving
+    the cursor past it, so the time before it is counted twice. **The new method drops any busy span
+    whose end is not after its start before the walk**; existing callers keep today's behaviour (a
+    separate fix, §12).
 
 `A(d)` is the whole minutes of the timeline before `d`. It never grows as `m` advances and never
 shrinks as `d` moves later. So with no progress and no new estimate, a "fits" can turn into "won't
@@ -197,8 +218,10 @@ Walk the deadline order keeping a running total `t` of work minutes. Add each it
 
 This is Moore–Hodgson's algorithm. On the timeline's minutes it is exact: no other choice leaves
 fewer items late. The kept items, in deadline order, all meet their deadlines. The won't-fit items
-are the set `W`. For each, the walk records the kept items ahead of it at the moment it was
-removed, which the wording needs (§3).
+are the set `W`. For each, the walk records **its prefix at the moment of removal**: every other
+item kept at that point, up to and including the item whose addition overflowed (which may be the
+removed item itself, or an item after it). The wording needs it (§3): any of those items, not only
+the ones ahead of it, could have made the difference.
 
 - **No margin here.** The walk names something "won't fit" only when even exact estimates miss.
 - **Slices are not applied.** `start_by` caps each day's work on one task at the session slice,
@@ -231,7 +254,7 @@ archived: VISION's "nothing missed" holds.
 
 The fixture's week template (window 08:00–18:00; Friday classes 12:00–12:50 and 13:00–13:45; a
 45-minute minimum block), nothing busy in the evenings, estimates exact. In each, pressure order is
-the order `rank` gives today; the plan's tests assert it first, as PR #65's do.
+the order `rank` gives with no moment; the plan's tests assert it first, as the 20:00 rule's do.
 
 **(a) The 5b case, after O6.** Friday 23:00. A (0.5h) and B (0.25h) are due 23:59; a 2h late lab's
 window closes Wednesday, and pressure puts the lab first. Step 0: 120 minutes of lab before A,
@@ -248,7 +271,7 @@ holds while `3h + 1h ≤ A(23:59) − 30 min`:
 | 19:30 | 4h29 | no; the lab cannot go first either | task, lab |
 
 The crossover is 23:59 minus the two items minus the margin: 7:29 pm for a 3h lab, 9:29 pm for 1h,
-9:59 pm for 30 minutes. PR #65 puts the task first at 20:00 in all three cases; the formula lets a
+9:59 pm for 30 minutes. The 20:00 rule puts the task first at 20:00 in all three cases; the formula lets a
 short overdue item go first while tonight's task is still safe.
 
 **(c) A daytime clash, which the 20:00 rule cannot see.** Friday 09:00. An 11h essay is due 23:59; a
@@ -299,11 +322,16 @@ first estimated. The last two rows are **placeholders**.
   `Task`s `rank` already receives: no new note field, no new `Task` field, `rank` pure over the
   same input.
 - **The wording changes, not the order.** A `W` item reads **"may not fit"**, never a flat "won't
-  fit", when its own estimate is a placeholder **or any kept item ahead of it at its removal has
-  one** (review r1, I4). Example: Friday 21:00, 179 minutes left; X is unestimated (1.0h stored), Y
-  is a real 2.5h, both due 23:59. Y is removed (210 > 179), but if X really takes 15 minutes, Y
-  fits; so Y reads "may not fit · depends on 1 item with no time estimate yet". The read model
-  decides this from the walk's record (§2.6) and the notes' frontmatter, which `Loaded` holds.
+  fit", when its own estimate is a placeholder **or any other item in its prefix at removal has
+  one** (§2.6: every item kept at that point, up to and including the one that overflowed; reviews
+  r1 I4 and r2 I1). Two cases, both Friday 21:00 with 179 minutes left, Y a real 2.5h and X
+  unestimated (1.0h stored), both due 23:59:
+  - **X first** in pressure order: X fits (60), X+Y = 210 > 179, Y (the longest) is removed. If X
+    really takes 15 minutes, Y fits.
+  - **Y first** in pressure order: Y fits (150), Y+X = 210 > 179 when X is added, and Y is still
+    the longest, so Y is removed although X comes after it. If X really takes 15 minutes, Y fits.
+  In both, Y reads "may not fit · depends on 1 item with no time estimate yet". The read model
+  decides this from the walk's record and the notes' frontmatter, which `Loaded` holds.
 - **Low confidence is still an estimate** and is used as is. The 30-minute margin is the only
   allowance for error, and it protects on-time work.
 - Better estimates come from the learning loop (`docs/surface/anatomy.md`'s `took:` prompt), not
@@ -311,13 +339,13 @@ first estimated. The last two rows are **placeholders**.
 
 ## 4. How it meets what exists
 
-- **Pressure** is unchanged and still computed for every task. It is today's order (step 0), orders
+- **Pressure** is unchanged and still computed for every task. It is the order step 0 checks, orders
   Recommended and everything outside Must do, breaks deadline ties (§5) and orders the overdue items
   among themselves in step 3.
 - **Must do membership** is unchanged: slack ≤ 0, decided by `start_by` as today. The formula
   changes order only. `W` items stay Must do.
 - **`rank_override`** keeps winning: overrides are taken out before the formula and inserted after,
-  as both `rank` and PR #65 do. **The walk does not charge them** in v1: a pinned item's hours are
+  as `rank` and the 20:00 rule both do. **The walk does not charge them** in v1: a pinned item's hours are
   not counted against anyone's deadline (Q8). Where a pinned Must do item exists, every
   "fits" sentence says so (§7).
 - **The designation reads pressure order, decided** (review r1, M5). `designate_today_explained`,
@@ -331,9 +359,9 @@ first estimated. The last two rows are **placeholders**.
   formula runs, a group is a run of consecutive rows with the same label, and rows keep rank order
   (`sort_rows` is not applied to Must do). A label repeats only when the order really interleaves.
   **Labels read from the moment:** a task due today at 10:00, seen at 15:00, is past due and reads
-  `Overdue`, not `Due today`; `group_label` keeps its date rule for everything not yet due. PR #65's
-  open Q-1 ("does `Due today` sort by due time after the hour?") is answered by this: rows follow
-  the order.
+  `Overdue`, not `Due today`; `group_label` keeps its date rule for everything not yet due. The
+  20:00 rule's plan left its Q-1 open ("does `Due today` sort by due time after the hour?"); this
+  answers it: rows follow the order.
 - **The meter.** `fit_blocks`, `spill_blocks`, `capped` and `spill_hours` keep their formulas over
   the whole day's capacity, so "how much doesn't fit today" does not change. `spill_items` lists `W`
   first, in deadline order, then the existing first-fit spill of the rest in the new order. Each
@@ -360,25 +388,36 @@ first estimated. The last two rows are **placeholders**.
   the next kept item. One pass, no search.
 - **`W`'s order:** deadline, then scored position.
 - **Same notes, day, moment and calendar give the same order** (VISION commitment 1). The moment is
-  an input like the day, as PR #65 made it. No model, no network, no write: `rank` and `surface` stay
+  an input like the day, as the 20:00 rule made it. No model, no network, no write: `rank` and `surface` stay
   pure and `surface` still never writes.
 
 ## 6. The 20:00 step: deleted
 
 **Proposed (Q5): delete `EVENING_HOUR`, `closes_tonight` and the evening branch of `rank_at` in the
 same change that adds the formula.** Keep `rank_at` itself, its moment, `rank --now` and
-`surface::load_at`: the formula needs exactly that plumbing, and PR #65 built it.
+`surface::load_at`: the formula needs exactly that plumbing, and the 20:00 rule (`7b3e10c`) built it.
 
 - **Why not keep both:** two rules over the same rows would disagree in example (b) between 20:00
   and the crossover (the hour says the task first; the formula says the lab still fits). The order
   would flip at 20:00 for no reason the page can give.
-- **What it costs:** PR #65's tests that assert the hour are retired in that change, with this
-  spec's ruling named in the commit message. R14 says "changing it needs a new ruling"; R3 asserts
-  the task leads at 20:00, and under the formula the 2h overdue task still fits in front (2h + 1h
-  plus the margin within 3h59). The tests that state invariants the formula keeps (no moment equals
-  `rank`, a moment on another day changes nothing, overrides win, Must do and the takes unchanged,
-  determinism, undated tasks never move) are kept, re-pointed where their setup relied on the hour.
-  The plan's first task runs each against the formula and records which is which.
+- **What it costs** (review r2, M4): the tests that assert the hour are retired in that change,
+  with this spec's ruling named in the commit message. By the planner's arithmetic on the
+  pre-merge code, they are:
+
+  | File | Test | Why it goes |
+  |---|---|---|
+  | `ranking.rs` | R3 `at_the_hour_a_task_due_tonight_leads_an_overdue_one` | the 2h overdue task still fits in front (2h + 1h plus the margin within 3h59) |
+  | `ranking.rs` | R14 `evening_hour_is_twenty_hundred` | the constant goes; it says "changing it needs a new ruling" |
+  | `cli.rs` | `an_evening_run_writes_the_evening_order_to_today_md` (C3) | at 21:00 on its `vault-s1` copy the 0.5h overdue reflection fits ahead of the probe and leads |
+  | `cli.rs` | `now_without_today_ranks_the_day_of_now` (C5) | it asserts the probe first at 21:00, as C3 does |
+  | `surface.rs` | `load_at_an_evening_moment_reorders_and_load_does_not` (S1) | the same probe-first assertion |
+  | `surface.rs` | `build_state_after_the_hour_leads_must_do_with_due_today` (S2) | at 21:00 the first run is `Overdue` (the reflection) |
+
+  `evening_rank.rs` (E1-E3) is **not** retired: its golden and reference checks and its bad-`--now`
+  refusal hold under the formula. The other hour-era tests (R1, R2, R4-R13, R15, C1, C2, C4, S3,
+  S5) are kept where they pass, re-pointed where their setup relied on the hour. **T0 runs every one
+  of them on `main` and records each as retire or keep, by name**; this table is its starting point,
+  not its result.
 - **The ruled evening behaviour survives:** at 11 pm tonight's items lead (example (a)); a late
   item with a later window ranks below them; a no-window late item yields once it would cost
   tonight's work (step 3). Ruling (b) holds (only a window's close counts), (c) holds (no evening
@@ -396,7 +435,8 @@ Plain, specific, never an instruction to give up. Knowlu names the item; the stu
     precise "11:59 pm" the source never gave. The read model sees the raw `due` in `Loaded`;
   - with a known late window (after O6): "Won't fit before 11:59 pm · late until Fri, −20%";
   - a placeholder in play (§3): "May not fit before 11:59 pm · no time estimate yet" (its own), or
-    "May not fit before 11:59 pm · depends on 2 items with no time estimate yet" (ahead of it).
+    "May not fit before 11:59 pm · depends on 2 items with no time estimate yet" (others in its
+    prefix at removal, before or after it).
 - **Its explanation** (on demand, beside the start-by `why`, which is unchanged): "3.0h left and
   1.5h of your time before it's due, counting evenings to midnight. Doing the others first keeps 2
   on time."
@@ -421,20 +461,22 @@ renders it (`app/static`). Wording lives in the engine, as every other row line 
   vaults Must do is exactly two past-due tasks with no window (`cs-100-hw-01`,
   `task-erste-reflexion`) and nothing dated, so step 0 finds today's order safe at any moment (no
   dated item to miss) and the order is the goldens'. A test drives `rank --today 2026-08-28 --now
-  <T>` at 09:00, 19:30, 21:00 and 23:58 against both goldens (PR #65's E1, extended).
+  <T>` at 09:00, 19:30, 21:00 and 23:58 against both goldens (`evening_rank.rs`'s E1, extended in a
+  new file).
 - `surface-today-{s1,s1-migrated,full}.json`: **these have a moment** (`--now 2026-08-28T09:00`), so
   the formula runs on them. They stay byte-identical: step 0 is safe (same order); the two rows form
   one consecutive `Overdue` run whose rank order equals `sort_rows`'s order there; all three
   `spill_items` are empty; every new field is omitted when absent. A test proves it on the parsed
-  blocks at 09:00 and 21:00 before any code changes (PR #65's E2, extended). No §4.6 regeneration.
+  blocks at 09:00 and 21:00 before any code changes (`evening_rank.rs`'s E2, extended in a new
+  file). No §4.6 regeneration.
 - `oracle.rs` and `surface_oracle.rs` run unedited and green at every commit.
 - **Who writes the reference tests (review r1, M8; the controller's call, proposed here):** a test
   that reads a frozen reference or a `surface-today-*.json` and asserts against it is an oracle test
   in all but file name, so it is treated as contract-list work: `contract-engineer` writes it and
   `contract-reviewer` reviews it. The extended E1 and E2 go in a new file,
-  `engine/tests/deadline_order_oracle.rs`, so PR #65's `evening_rank.rs` stays as PR #65's
-  ruling (Q-2 there: `test-writer`, reviewed by `contract-reviewer`) made it, apart from retiring
-  its hour tests (§6).
+  `engine/tests/deadline_order_oracle.rs`. `evening_rank.rs` on `main` stays unedited, as the
+  20:00 rule's plan ruled it (its Q-2: `test-writer`, reviewed by `contract-reviewer`); none of its
+  tests is retired (§6).
 
 **New behaviour tests** (names are the plan's; behaviour is not). In memory on the vault-s1 week
 template where they can be, on temp-dir copies of a fixture vault where they need notes. **No
@@ -446,7 +488,12 @@ fixture is edited or added.**
   runs from its window's start to the next date's `00:00`; an event on one Friday subtracts only
   there; the next Friday's evening is counted on its own; the filter applies before the cut at `m`;
   whole minutes; existing `free_blocks`, `window` and `with_day_window` results are unchanged; a
-  `--window` preview applies to every matching weekday.
+  `--window` preview applies to every matching weekday. Busy time at midnight (review r2, M2): a
+  calendar event ending at the next date's `00:00` takes the evening to midnight; an event from
+  23:00 to 01:00 takes 23:00–24:00 from its start date and nothing from the next; a commitment
+  ending at 23:59 takes the evening to 23:59; a commitment written 22:00–02:00 is dropped, as
+  today; a template class with its end before its start is dropped by the new method, so no
+  minute is counted twice (while `free_blocks` keeps today's result for it).
 - D4, the walk: example (d) names the longest; a tie names the later deadline, then the lower
   pressure; nothing is named when everything fits; example (f)'s two deadlines both fit, and adding
   a small task due tonight leaves `A` unchanged.
@@ -454,16 +501,21 @@ fixture is edited or added.**
   longer one that cannot fit.
 - D6, assembly: non-Must-do tasks keep their exact indexes; Must do membership unchanged; the
   designation, given `rank`'s list, gives today's takes; overrides win and are not charged.
-- D7, placeholders (review r1, I4): the X-and-Y case of §3 orders as stored and Y reads "may not
-  fit · depends on 1 item"; a placeholder `W` item reads "may not fit · no time estimate yet"; with
-  no placeholder in play the line reads "Won't fit".
+- D7, placeholders (reviews r1 I4, r2 I1), Friday 21:00, 179 minutes left, Y a real 2.5h, X
+  unestimated (1.0h stored), both due 23:59:
+  - **X first** in pressure order: Y is removed and reads "may not fit · depends on 1 item";
+  - **Y first** in pressure order: Y is removed when X's addition overflows, X comes after it, and
+    Y still reads "may not fit · depends on 1 item";
+  - both cases order exactly as the stored figures give; the walk's record for Y names X;
+  - a placeholder `W` item reads "may not fit · no time estimate yet"; with no placeholder anywhere
+    in the prefix the line reads "Won't fit".
 - D8, determinism: two runs equal; reversed input of distinct keys gives the same order.
 - D9, the read model: consecutive-run groups with rows in rank order; a task due 10:00 seen at
   15:00 is labelled `Overdue`; `spill_items` lists `W` first; totals unchanged; the row line only on
   `W` rows; a bare-date due prints no clock time; the pinned-item meter sentence.
 - D10, `today.md` at a moment: an unsafe Must do is written in the new order, with no new line.
 
-**Tests that change:** PR #65's hour tests are retired in the replacing commit (§6). Every other
+**Tests that change:** the hour tests §6 lists are retired in the replacing commit. Every other
 existing test passes unedited; the plan's first task lists the engine and app tests that build a
 page or run `rank` with dated Must do work at a clock time (app tests resolve a pinned date to
 12:00) and confirms each.
@@ -487,19 +539,20 @@ page or run `rank` with dated Must do work at a clock time (app tests resolve a 
 **The interface between the ranking tasks and the read-model task**, settled now (review r1, M7):
 `ranking.rs` exposes one pure function, `plan_at(tasks, today, cal, moment)`, returning the order
 (what `rank_at` returns), whether step 0 found today's order safe, and for each `W` item its slug,
-deadline, work minutes, the minutes `A(d)` gave it, and the slugs of the kept items ahead of it at
-its removal. `rank_at` becomes `plan_at(..).order`. `surface.rs` reads only that, plus the
+deadline, work minutes, the minutes `A(d)` gave it, and **the slugs of every other item in its
+prefix at removal**: all items kept at that point, up to and including the one whose addition
+overflowed, whether before or after it in the order (§2.6). `rank_at` becomes `plan_at(..).order`. `surface.rs` reads only that, plus the
 frontmatter it already holds; it never recomputes the walk.
 
 | Task | What | Agent | Why | After |
 |---|---|---|---|---|
-| T0 | Branch after PR #65 merges; re-confirm symbols; run PR #65's tests against the formula's expectations and list retire/keep | main session | git and judgment | PR #65 |
+| T0 | Branch from `main` (at or after `7b3e10c`); re-confirm symbols; run every hour-era test in `ranking.rs`, `cli.rs` and `surface.rs` against the formula's expectations and record each by name as retire or keep (§6's table is the start) | main session | git and judgment | none |
 | T1a | Red: `weekcal.rs` per-date method, D3 | `test-writer` | specified failing tests | T0 |
 | T2a | `weekcal.rs`: the per-date method; `blocks_from_busy` takes a `DateTime` end internally | `implementer` (high) | a calendar every page reads; existing results must not move | T1a |
 | T1b | Red: `ranking.rs` D1, D2, D4-D8 against `plan_at` | `test-writer` | as T1a | T2a |
 | T2b | `ranking.rs`: deadlines, timeline, steps 0-1, `plan_at`'s type | `implementer` (high) | reorders every page | T1b |
 | T2c | `ranking.rs`: steps 2-3, assembly, the 20:00 step removed; `cli.rs`: designation from `rank`'s list | `implementer` (high) | as T2b; the run path that writes `today.md` | T2b |
-| T3 | Red: `surface.rs` D9, D10; `deadline_order_oracle.rs` (E1, E2 extended) | `test-writer` for D9-D10; `contract-engineer` for the oracle file | §8, M8 | T2c |
+| T3 | Red: `surface.rs` D9, D10; `deadline_order_oracle.rs` (E1, E2 extended) | `test-writer` for D9-D10; `contract-engineer` for the oracle file | the oracle file asserts against frozen and read-model references, so it is **treated as contract-list work** (§8) | T2c |
 | T4 | `surface.rs`: `plan_at`, groups, labels, meter, the row line, designation from `rank`'s list | `implementer` (high) | the read model; references must not move | T3 |
 | T5 | The row line and the meter line in the console | `console-ui` | `app/static` | T4 |
 | T6 | Docs: `engine-commands.md`'s `rank`, `anatomy.md` §3.4 and the Must do block, HANDOFF | `docs-keeper` | references | T4 |
@@ -514,16 +567,18 @@ task is sized to stay under about 80 lines of change. Nothing on the contract li
 Asked one at a time, in this order, each with a recommendation. Q1 to Q3 decide the formula; the
 rest tune it.
 
-- **Q1. Should overdue work always come first?** Today it does, all day. The 8 pm rule already says
-  no after 8 pm, because tonight's on-time work is a sure grade and late work may not be.
-  **Recommend: overdue work comes first only while doing it first still lets tonight's (and every
+- **Q1. When should overdue work come first?** Today the list is ordered by how far behind each
+  item is, so an overdue item usually leads but not always; after 8 pm, tonight's work leads. The
+  8 pm rule exists because tonight's on-time work is a sure grade and late work may not be.
+  **Recommend: overdue work goes first only while doing it first still lets tonight's (and every
   other) on-time work finish with half an hour to spare.** Most of the day nothing changes; when it
-  would cost an on-time grade, the on-time work goes first.
+  would cost an on-time grade, the on-time work goes first, at whatever hour that happens.
 - **Q2. Should Knowlu reorder the daytime list when nothing is at risk?** Sorting strictly by due
   time would move things around all day: at 9 am a half-hour reflection due yesterday would jump
   above an 11-hour essay due tonight, though both fit easily (example (e)), and the noon and 6 pm
-  `today.md` would change too. **Recommend: no. Keep today's order unless it would make something
-  late or leave it under half an hour to spare; only then switch to the deadline order.**
+  `today.md` would change too. **Recommend: no. Keep the usual order (by how far behind) unless it
+  would make something late or leave it under half an hour to spare; only then switch to the
+  deadline order.**
 - **Q3. Which hours count as the student's when Knowlu checks whether work fits?** Only the planned
   day (8 to 6 in the fixture) says everything due tonight won't fit by 8 pm, which is plainly
   wrong. Counting only the evening before each deadline makes answers flip oddly (example (f)).
@@ -535,8 +590,8 @@ rest tune it.
   careful both ways: don't risk on-time work for late work, and don't tell a student something
   won't fit unless it truly can't. One value for everyone; a setting only if the pilot asks.
 - **Q5. Remove the 8 pm rule once this ships?** **Recommend: yes.** Running both would flip the
-  order at 8 pm for no reason the page could give. The plumbing PR #65 built stays; only the hour
-  goes, and its tests are retired with this ruling named.
+  order at 8 pm for no reason the page could give. The plumbing the 8 pm rule built stays; only the
+  hour goes, and the tests that check the hour are retired with this ruling named.
 - **Q6. How should Must do be grouped on the page?** Grouping all "Due today" rows together can draw
   them out of order once an overdue item sits between two of them. **Recommend: a new heading each
   time the label changes, rows in Knowlu's order, and a task whose due time already passed today
@@ -563,21 +618,39 @@ rest tune it.
 - O6's late window itself (the deadline function has one place for its close, §2.2), and penalty
   steps (evening ruling b).
 - The meter's capacity being the whole day's window rather than what is left from now: an existing
-  gap, shared with PR #65; noted, not changed.
+  gap, shared with the 20:00 rule; noted, not changed.
+- Two `weekcal.rs` gaps the timeline works around rather than fixes (§2.3): a commitment written
+  across midnight (a night shift) is dropped as inverted, so that evening reads as free; and a
+  template class with its end before its start makes `free_blocks` count the time before it twice.
+  Each is today's behaviour on every page and wants its own small fix.
 - Nudges and lock-in reading `W` (VISION's "a deadline at real risk"); each needs its own spec.
 - Weighting by grade share (Q9), a per-vault margin (Q4) or evening bound (Q3), learning from actual
   durations.
 - Any change to pressure, `start_by`, slack, Must do membership, Recommended or the designation.
 - `CLAUDE.md`: "same input, same order" already holds with the moment as an input.
 
-## 13. Review r1 (FAIL), how each finding was folded in
+## 13. Reviews r1 and r2 (FAIL), how each finding was folded in
+
+**Review r2** (narrow FAIL):
+
+| Finding | Where it landed |
+|---|---|
+| I1, the placeholder rule must take in the whole prefix at removal, up to and including the item that overflowed | §2.6 (the walk's record), §3 (both orders), §10 (`plan_at`'s record), D7 (the Y-first case) |
+| I2, Q1's premise was false | Q1 opens with how the list is ordered today and after 8 pm |
+| M1, "never changes another item's verdict" | §2.3: "never changes the time available to another item" |
+| M2, busy spans at and across midnight; inverted spans | §2.3 (events, commitments, template classes; the new method drops inverted spans); D3; §12 |
+| M3, "treated as contract-list work" in §10 | §10, T3's row |
+| M4, the hour tests to retire | §6's table: R3, R14, C3, C5, S1, S2; `evening_rank.rs` kept; T0 records each by name |
+| M5, PR #65 merged as `7b3e10c` | the header, §1, §6, §8, §10 (T0 branches from `main`), §11, §12 |
+
+**Review r1** (FAIL):
 
 | Finding | Where it landed |
 |---|---|
 | I1, `with_day_window` is weekday-keyed and drops a midnight end | §2.3: a new per-date method with a `DateTime` end bound, settled; §1 states the limit; D3 over ten dates |
 | I2, verdicts can move the wrong way; an unrelated task can flip one; uncounted evenings | §2.3: every evening to midnight, one timeline independent of tasks, monotone in `m` and `d`; example (f); Q3 |
 | I3, "nothing tight, exactly as today" was false | §0 and §2.4: step 0 keeps pressure order when safe; example (e); Q2 asks whether to reorder anyway |
-| I4, a placeholder ahead of a named item | §3: "may not fit" when the item's own or any kept item ahead of it is a placeholder; D7; Q10 |
+| I4, a placeholder ahead of a named item | §3: "may not fit" when a placeholder is in play (widened in r3 to the whole prefix at removal, review r2 I1); D7; Q10 |
 | M1, Q9 against §5 | §5 and Q9 now state one rule: most work, later deadline, lower pressure |
 | M2, "the rest fits" with pins | §4 and §7: the meter sentence names the pinned item |
 | M3, rounding `m`; fall-back day | §2.1: truncated to the minute; §2.3: civil minutes, the repeated hour counted once |
