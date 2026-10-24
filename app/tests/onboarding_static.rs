@@ -821,7 +821,14 @@ fn a_refused_retrys_line_survives_the_polls_and_clears_on_the_next_click() {
     // `S.error`; the student's next click and a step change (`OB.show`) do.
     let c = code(&read("onboarding.js"));
     let clears = |body: &str| body.contains("S.error = \"\"");
-    assert!(!clears(function(&c, "load")), "a status poll must not clear a refused retry's line");
+    // Any assignment to `S.error` (either spacing, either quote), a clearing helper or a bulk assign
+    // counts, so the poll can't clear the action line by another spelling (F11b0 review m4).
+    let assigns = |body: &str| body.match_indices("S.error").any(|(i, _)| {
+        let rest = body[i + "S.error".len()..].trim_start();
+        rest.starts_with('=') && !rest.starts_with("==")
+    });
+    let load = function(&c, "load");
+    assert!(!assigns(load) && !load.contains("clearError") && !load.contains("Object.assign(S"), "a status poll must not clear a refused retry's line");
     assert!(clears(function(&c, "onClick")), "the student's next click clears the line");
     let show = c.find("OB.show = function").expect("OB.show");
     assert!(clears(enclosing_fn(&c, show + c[show..].find('{').unwrap() + 1)), "a step change clears the line");
