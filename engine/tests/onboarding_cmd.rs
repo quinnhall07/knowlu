@@ -339,7 +339,11 @@ fn note_id_of(path: &str) -> &'static str {
 
 /// `field` is a JSON literal (`"effort_hours"` or `null`, a `create` having none).
 fn record_line(seq: u32, op: &str, actor: &str, path: &str, field: &str) -> String {
-    let id = note_id_of(path);
+    record_with_id(seq, op, actor, path, note_id_of(path), field)
+}
+
+/// A record with the note id given outright, for a record about a note other than the one now at `path`.
+fn record_with_id(seq: u32, op: &str, actor: &str, path: &str, id: &str, field: &str) -> String {
     format!(
         "{{\"actor\": \"{actor}\", \"device\": \"testbox\", \"evidence\": null, \"field\": {field}, \
          \"id\": \"{id}\", \"new\": 2.0, \"old\": 1.5, \"op\": \"{op}\", \"path\": \"{path}\", \
@@ -566,7 +570,7 @@ fn tidied_joins_a_record_to_a_note_by_path_only_when_the_note_has_no_id() {
     put_task(&v, "noid", None, "user");
     append_journal(
         &v,
-        &[journal_line(6, "agent:knowlu.enrich", "tasks/reused.md", "effort_hours"), journal_line(7, "agent:knowlu.enrich", "tasks/noid.md", "effort_hours")],
+        &[record_with_id(6, "set", "agent:knowlu.enrich", "tasks/reused.md", "task_00000000d0", "\"effort_hours\""), journal_line(7, "agent:knowlu.enrich", "tasks/noid.md", "effort_hours")],
     );
     let j = json_of(&tidied(&v));
     assert_eq!(j["effort_estimated"], json!(3), "quiz-a, reading and noid, not reused: {j}");

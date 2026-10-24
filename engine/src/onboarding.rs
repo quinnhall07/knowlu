@@ -93,9 +93,10 @@ fn read_courses(text: &str, errors: &mut Vec<String>) -> Option<Vec<Course>> {
     )
 }
 
-/// The first course (in list order) one of whose codes is `code`.
-fn course_with_code(courses: &[Course], code: &str) -> Option<usize> {
-    courses.iter().position(|c| c.codes.iter().any(|k| k == code))
+/// The keys of every course (not only the first) one of whose codes is `code`: a past-term shell
+/// and the live shell of one course both carry it, and both claim the class.
+fn courses_with_code(courses: &[Course], code: &str) -> BTreeSet<String> {
+    courses.iter().filter(|c| !c.key.is_empty() && c.codes.iter().any(|k| k == code)).map(|c| c.key.clone()).collect()
 }
 
 /// One course's `(fragment, key)` pairs as `config.ingest` writes them into `course_map` (R-C1-48):
@@ -181,12 +182,13 @@ struct Grades {
 
 /// The registrar's matched class times: Banner's series read `Reading::Whole` (a partly read row is
 /// not counted, as the registrar's own confirm skips it) whose course code (a lab's " Lab" dropped)
-/// is a code in the course list. Nothing is written and nothing is fetched.
+/// is a code in the course list; each is returned as the keys of every course that carries the code
+/// (the match set, as for a feed item). Nothing is written and nothing is fetched.
 ///
 /// A student whose classes are all online has no `CLAS` meeting with a day and times, so the parse
 /// fails: `class_times` is `null` plus a named `registrar:` line in `errors`. The reveal treats that
 /// as a named outcome (no class times to show), never as a failure.
-fn read_registrar(text: &str, school: Option<&str>, courses: &[Course], errors: &mut Vec<String>) -> Option<Vec<usize>> {
+fn read_registrar(text: &str, school: Option<&str>, courses: &[Course], errors: &mut Vec<String>) -> Option<Vec<BTreeSet<String>>> {
     let Some(key) = school else {
         errors.push("registrar: no school given".to_string());
         return None;
@@ -205,8 +207,8 @@ fn read_registrar(text: &str, school: Option<&str>, courses: &[Course], errors: 
                 let crn = uid.rsplit_once('-').map_or("", |(_, crn)| crn);
                 parsed.seen.get(crn) == Some(&crate::registrar::Reading::Whole)
             };
-            let named = |title: &str| course_with_code(courses, &compact(title.strip_suffix(" Lab").unwrap_or(title)));
-            Some(parsed.series.iter().filter(|s| whole(&s.source_uid)).filter_map(|s| named(&s.title)).collect())
+            let named = |title: &str| courses_with_code(courses, &compact(title.strip_suffix(" Lab").unwrap_or(title)));
+            Some(parsed.series.iter().filter(|s| whole(&s.source_uid)).map(|s| named(&s.title)).filter(|k| !k.is_empty()).collect())
         }
         Err(e) => {
             errors.push(format!("registrar: {e}"));
@@ -254,8 +256,8 @@ fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: Da
                 add(&codes, 1);
             }
         }
-        for idx in class_times.iter().flatten() {
-            add(&BTreeSet::from([list[*idx].key.clone()]).into_iter().filter(|k| !k.is_empty()).collect(), 2);
+        for keys in class_times.iter().flatten() {
+            add(keys, 2);
         }
         let entry = |(n, codes): &([Option<usize>; 3], Vec<String>)| {
             json!({"assignments_upcoming": n[0], "class_times": n[2], "codes": codes, "turned_in": n[1]})
@@ -947,6 +949,29 @@ END:VEVENT
         assert_eq!(kept_total(&v, &both, "assignments_upcoming"), 4, "{v}");
         assert_eq!(kept_total(&v, &["_200_1"], "assignments_upcoming"), 3, "live only, shared, unmatched: {v}");
         assert_eq!(kept_total(&v, &[], "assignments_upcoming"), 1, "only the unmatched item is always in: {v}");
+    }
+
+    #[test]
+    fn a_class_time_two_shells_both_name_sits_in_their_two_code_bucket_once() {
+        // The old shell is listed first and carries the same "SYN 110": the meeting is claimed by
+        // both, so removing the old shell must not take the class with it.
+        let c = json!([
+            {"code": "_100_1", "name": "Old", "slug": "syn-110", "label": "SYN 110"},
+            {"code": "_200_1", "name": "Live", "slug": "syn-110", "label": "SYN 110"},
+            {"code": "_300_1", "name": "Other", "slug": "syn-120", "label": "SYN 120"},
+        ])
+        .to_string();
+        let b = banner_rows(vec![banner_row("90001", "110", "Lecture", json!([clas(Some("0900"))]))]);
+        let f = ics(&[]);
+        let inputs = PreviewInputs { feed: Some(&f), courses: Some(&c), registrar: Some(&b), school: Some("ua"), ..Default::default() };
+        let v = preview(&inputs, &chicago(), now());
+        assert_eq!(count(&v, "class_times"), json!(1), "one meeting, one class time: {v}");
+        assert_eq!(by_course(&v, "_100_1,_200_1", "class_times"), json!(1), "{v}");
+        assert_eq!(by_course(&v, "_100_1", "class_times"), json!(0), "{v}");
+        assert_eq!(sum_over_keys(&v, "class_times"), 1, "{v}");
+        assert_eq!(kept_total(&v, &["_200_1"], "class_times"), 1, "the old shell removed: {v}");
+        assert_eq!(kept_total(&v, &["_100_1"], "class_times"), 1, "the live shell removed: {v}");
+        assert_eq!(kept_total(&v, &["_300_1"], "class_times"), 0, "both removed: {v}");
     }
 
     #[test]
