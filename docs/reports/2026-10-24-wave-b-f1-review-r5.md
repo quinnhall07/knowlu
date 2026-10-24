@@ -22,3 +22,6 @@ Reviewer, pre-build, on `git diff a22d07b..a2383f9`, against the plan at a22d07b
 2. **The order inside `recapture`** (`onboarding_state.rs:240-243`) is unpinned. `captured_label` must be overwritten before the key match that carries fragments over. Say so in the doc.
 
 ## Safety: pass
+
+## Controller check of the r5 fixes (9fe9191)
+All three items closed: the same-course rule is in `run_school_courses`' doc, with a test for empty codes (two creates) and for codes differing only by whitespace (one create); `run_school_preview`'s failure outcomes are documented, with a test over four failing outputs; `recapture`'s order is documented. Verified from the diff. **F1 PASSES**; no r6.
