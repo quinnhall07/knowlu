@@ -40,8 +40,9 @@ pub struct PreviewInputs<'a> {
 /// course's key is its LMS course key (`code`; the slug, then the label, when it is empty). The bucket
 /// is named by those keys joined with `,` (its `codes` array is the set): one key in the usual case,
 /// two for an item a past and a current shell both claim, and `unmatched` (empty `codes`) for an item
-/// no course claims. The buckets sum to the totals; the app totals every bucket whose `codes` is empty
-/// or names a kept course, which is what ingest will import. `null` when there is no course list.
+/// no course claims. The buckets sum to the `assignments_upcoming`, `turned_in` and `class_times`
+/// totals, and with a course list the `graded: true` buckets count to `grades_courses`; the app
+/// totals every bucket whose `codes` is empty or names a kept course, which is what ingest will import. `null` when there is no course list.
 /// Each course's own bucket (present even at zero counts) also carries `graded`: `true` when the
 /// grades bundle has a graded item column for it, `false` when it has none, `null` with no bundle;
 /// multi-code buckets and `unmatched` carry none. Class times sit in their buckets for display
@@ -330,19 +331,25 @@ fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: Da
         };
         Value::Object(buckets.iter().map(|(k, b)| (k.clone(), entry(k, b))).collect())
     });
+    // With a course list, the count of graded single-course buckets (so it equals what the app totals
+    // over the buckets, a bundle course left out of the list included or not); else the bundle-wide count.
+    let grades_courses = match (&by_course, &grades) {
+        (Some(Value::Object(buckets)), Some(_)) => Some(buckets.values().filter(|b| b["graded"] == json!(true)).count()),
+        _ => grades.as_ref().map(|g| g.courses),
+    };
     json!({
         "assignments_upcoming": feed.as_ref().map(Vec::len),
         "by_course": by_course,
         "class_times": class_times.as_ref().map(Vec::len),
         "classes": courses.as_ref().map(Vec::len),
         "errors": errors,
-        "grades_courses": grades.as_ref().map(|g| g.courses),
+        "grades_courses": grades_courses,
         "turned_in": turned_in,
     })
 }
 
 /// The `by_course` key of the items (and class times) that no course claims: they count in the
-/// totals, so the buckets sum to the totals, and under this key so the app can leave them out of a
+/// totals, so the buckets sum to those totals, and under this key so the app can leave them out of a
 /// kept-courses total. (An LMS course key never reads like this.)
 const UNMATCHED: &str = "unmatched";
 
@@ -834,7 +841,16 @@ END:VEVENT
             ],
         })
         .to_string();
-        let v = run(&ics(&[]), Some(&bundle));
+        // All three bundle courses are listed, so the bucket count and the bundle-wide count agree.
+        let list = json!([
+            {"code": "_900001_1", "name": "One", "slug": "syn-110", "label": "SYN 110"},
+            {"code": "_900002_1", "name": "Two", "slug": "syn-120", "label": "SYN 120"},
+            {"code": "_900003_1", "name": "Three", "slug": "syn-130", "label": "SYN 130"},
+        ])
+        .to_string();
+        let f = ics(&[]);
+        let inputs = PreviewInputs { feed: Some(&f), courses: Some(&list), grades: Some(&bundle), ..Default::default() };
+        let v = preview(&inputs, &chicago(), now());
         assert_eq!(count(&v, "grades_courses"), json!(1), "only the exempt course has a graded row: {v}");
     }
 
@@ -1060,6 +1076,27 @@ END:VEVENT
         assert_eq!(by_course(&w, "_900001_1", "graded"), Value::Null, "{w}");
         assert_eq!(by_course(&w, "_900002_1", "graded"), Value::Null, "{w}");
         assert!(w["by_course"]["_900001_1"].get("graded").is_some(), "null, but present: {w}");
+    }
+
+    #[test]
+    fn grades_courses_is_the_count_of_graded_buckets_when_courses_are_given() {
+        // The bundle grades course one (_900001_1), which this list leaves out: the bundle-wide count
+        // would say 1, the buckets say 0, and the top level must equal the buckets.
+        let c = json!([{"code": "_900002_1", "name": "Synthetic Studies II", "slug": "syn-120", "label": "SYN 120"}]).to_string();
+        let (f, g) = (ics(&[]), bundle());
+        let inputs = PreviewInputs { feed: Some(&f), courses: Some(&c), grades: Some(&g), ..Default::default() };
+        let v = preview(&inputs, &chicago(), now());
+        assert_eq!(by_course(&v, "_900002_1", "graded"), json!(false), "{v}");
+        assert_eq!(count(&v, "grades_courses"), json!(0), "{v}");
+        // With the graded course listed it is 1, and with no bundle it stays null.
+        let both = courses();
+        let inputs = PreviewInputs { feed: Some(&f), courses: Some(&both), grades: Some(&g), ..Default::default() };
+        assert_eq!(count(&preview(&inputs, &chicago(), now()), "grades_courses"), json!(1));
+        let none = PreviewInputs { feed: Some(&f), courses: Some(&c), ..Default::default() };
+        assert_eq!(count(&preview(&none, &chicago(), now()), "grades_courses"), Value::Null);
+        // Without `--courses` nothing changes: the bundle-wide count.
+        let no_courses = PreviewInputs { feed: Some(&f), grades: Some(&g), ..Default::default() };
+        assert_eq!(count(&preview(&no_courses, &chicago(), now()), "grades_courses"), json!(1));
     }
 
     #[test]
