@@ -812,3 +812,62 @@ fn the_frame_re_enables_only_the_buttons_it_disabled_and_a_leave_hook_cannot_blo
     let leaving = function(&c, "leaving");
     assert!(leaving.contains(".catch(") && leaving.contains("3000"), "each hook is caught and the wait is capped");
 }
+
+// ---- F11b0: the frame's fixes (plan section 14.53, items 2-4) --------------------------------------
+
+#[test]
+fn a_refused_retrys_line_survives_the_polls_and_clears_on_the_next_click() {
+    // The frame runs under a stub DOM here, so this reads the code: a poll (`load`) never clears
+    // `S.error`; the student's next click and a step change (`OB.show`) do.
+    let c = code(&read("onboarding.js"));
+    let clears = |body: &str| body.contains("S.error = \"\"");
+    // Any assignment to `S.error` (either spacing, either quote), a clearing helper or a bulk assign
+    // counts, so the poll can't clear the action line by another spelling (F11b0 review m4).
+    let assigns = |body: &str| body.match_indices("S.error").any(|(i, _)| {
+        let rest = body[i + "S.error".len()..].trim_start();
+        rest.starts_with('=') && !rest.starts_with("==")
+    });
+    let load = function(&c, "load");
+    assert!(!assigns(load) && !load.contains("clearError") && !load.contains("Object.assign(S"), "a status poll must not clear a refused retry's line");
+    assert!(clears(function(&c, "onClick")), "the student's next click clears the line");
+    let show = c.find("OB.show = function").expect("OB.show");
+    assert!(clears(enclosing_fn(&c, show + c[show..].find('{').unwrap() + 1)), "a step change clears the line");
+}
+
+#[test]
+fn the_rail_row_does_not_read_status_found_which_has_no_producer() {
+    let c = code(&read("onboarding.js"));
+    assert!(!function(&c, "rowModel").contains("found"), "rowModel reads no `found` until a task names a producer");
+}
+
+#[test]
+fn a_past_rows_reading_follows_its_job_records() {
+    let row = |i: usize, jobs: &str| node(&format!("h.rowModel(h.rows[{i}], {{step: 5, jobs: {jobs}}})"));
+    let (account, none) = (row(0, "{}"), row(1, "{}"));
+    assert_eq!(account["st"], "Done", "an empty job list reads Done once past: {account}");
+    assert_eq!(none["st"], "Not yet", "jobs with no records read Not yet: {none}");
+    assert_ne!(none["cls"], "done", "{none}");
+    let mixed = row(1, r#"{"school.capture": {"state": "done", "proof": {"classes": 3}}, "school.preview": {"state": "skipped"}}"#);
+    assert_eq!((&mixed["st"], &mixed["pf"]), (&serde_json::json!("Done"), &serde_json::json!("3 classes")), "done mixed with skipped reads Done: {mixed}");
+    let skipped = row(1, r#"{"school.capture": {"state": "skipped"}, "school.preview": {"state": "skipped"}}"#);
+    assert_eq!(skipped["st"], "Skipped", "all skipped reads Skipped: {skipped}");
+}
+
+#[test]
+fn the_four_mail_and_feed_reasons_have_their_own_words() {
+    let w = |k: &str| node(&format!("h.reasonWords(\"{k}\")")).as_str().unwrap().to_string();
+    let fallback = w("some_new_reason_key");
+    for k in ["mail_setup_cancelled", "mail_setup_failed", "mail_not_yet", "feed_kept_on_device"] {
+        let words = w(k);
+        assert!(words != fallback && !words.contains('_'), "{k} still answers the generic fallback: {words:?}");
+    }
+    let waiting = w("mail_not_yet").to_lowercase();
+    assert!(!waiting.contains("failed") && !waiting.contains("couldn't"), "mail_not_yet is a wait, not a failure: {waiting:?}");
+}
+
+#[test]
+fn the_seam_comment_names_both_hooks_of_the_panel_seam() {
+    let head: String = read("onboarding.js").lines().take(8).collect::<Vec<_>>().join("\n");
+    assert!(head.contains("registerPanel(n, {render, onStatus})"), "the header names {{render, onStatus}}: {head}");
+    assert!(head.contains("registerLeave"), "the header names registerLeave");
+}
