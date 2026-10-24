@@ -1468,10 +1468,11 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F2g | `onboarding_state.rs`: `onboarding_attach_session`, step 2 again's re-attach (three-way account match, move on a match, a local delete of the pending session and a refusal on a mismatch) | `implementer`, reviewed by `contract-reviewer` | specified and tested over seams, off the contract list; a wrong move attaches another account's token to the vault (review r5, I-2) | F2b (chained after it in the same file, review r6 M2) |
 | F2h | `onboarding_state.rs`: `onboarding_entitlement` and `onboarding_checkout`, the vault-target versions of `entitlement_now` and `open_checkout` | `implementer`, reviewed by `contract-reviewer` | specified, public `account.rs` functions only, tested on a `127.0.0.1:0` listener (review r5, I-1) | F2g (the same file's chain: F2a, F2d, F2e, F2b, F2g, F2h; review r6 M2) |
 | F2b2a | `onboarding_state.rs`: the step-5 answer and `mail_kind`, the proceeds of steps 3, 7 and 8 (one lane on every path), the confirmed-school guard, the Skip's call to `skip_mail` (§14.52.1, .3; about 45 lines; tests 33, 34's F2b2a part) | `implementer` | specified, off the contract list, tested over the fake queue | F2h (the file's chain), F8f2, F8d2 (`skip_mail`; r2 R2-2) |
-| F2b2b | Two files (r3 m-b). `onboarding_state.rs`: m-1, m-2, the failed-lane refusal and `failed_job`, `vault_only`, `load_state_for_launch` (backoff to about 3.2 s), the `mail.connect` hand-over rule and its `mail_signal` arms (`CanaryVerified` and the new `TurnedOff`; never cleared on `Disconnected`, r2 R2-1), `REGISTRAR_FILE` and its deletes (option A only). `mail/commands.rs`: `disconnect_with` applies `TurnedOff` through `apply_mail_signal` right after step 0 (about 3 lines; r3 R3-2; `scheduler.rs` is not edited). Re-counted in r3: about 75 lines, so the patient read stays; past 80 it and test 38's read half move to F4c (§14.52.1, .5, .8; tests 38's read half while the read is here, 39, 40) | `implementer` | as F2b2a | F2b2a (`onboarding_state.rs`'s chain), S4c (`mail/commands.rs`'s other writer, which edits `disconnect_with`) |
+| F2b2b | `onboarding_state.rs` only (r4 R4-1): m-1, m-2, the failed-lane refusal and `failed_job`, `vault_only`, `load_state_for_launch` (backoff to about 3.2 s), the `mail.connect` hand-over rule and its `mail_signal` arms (`CanaryVerified` and the new `TurnedOff`; never cleared on `Disconnected`, r2 R2-1), `REGISTRAR_FILE` and its deletes (option A only). Re-counted in r4: about 72 lines, so the patient read stays; past 80 (Q8 = yes makes it about 82) it and test 38's read half move to F4c (§14.52.1, .5, .8; tests 38's read half while the read is here, 39, 40's hand-over cases) | `implementer` | as F2b2a | F2b2a (`onboarding_state.rs`'s chain) |
+| F2b2c | `mail/commands.rs`: `disconnect_with` applies `MailSignal::TurnedOff` through `apply_mail_signal` right after step 0, before any network call (about 3 lines; §14.52.1, r3 R3-2, r4 R4-1; `scheduler.rs` is not edited). **Collision note:** S4c also edits `disconnect_with`; it is not a dependency, and whichever of the two lands second rebases and keeps both (test 40's Disconnect cases, written first) | `implementer` | specified, about three lines, tested over `disconnect_with`'s fakes | F2b2b (the variant). Nothing on F2b2c's path waits on S4c |
 | F3 | Step-2 vault with defaults, without campus or events files; `account_settled`; picker flag; the name picked in Rust past profiles and folders on disk; the old flow's errors rewritten; F10's interim name loop deleted (F10's review) | `test-writer` then `implementer` | writes a vault; tests first; the static change is a deletion only | F2a, F10 |
 | F4 | Onboarding mode in `run_console`; the window's close prevented, then `onboarding_quit`'s inner on its own thread; `mode_device` primed (T0); one update check at launch (T0 review M3); `LaunchMode` managed; the `Queue` moved to F4c (§14.51, §14.52.5) | `implementer` | P-3's five changes; the close off the event loop (review r5, I-5) | F2a, F2b, F8s (`prime_mode_device`, `spawn_update_check`), T0 |
-| F4c | `main.rs`'s onboarding arm: `load_state_for_launch` (rewrite only unparseable bytes; a lasting I/O error or an unknown version is a named fatal that writes nothing), `Queue::start(F8w1's Deps, resume(loaded, LiveChecks))` and `.manage(queue)`; `install_update` refused in onboarding mode (`commands.rs`); test 27's pin extended; if F2b2b passes 80 lines, the patient read itself and test 38's read half move here (§14.52.5, .8, r2 n2; test 38) | `implementer` | specified; `main.rs`'s chain is F4, F5, F4c, F5b, S6r | F4, F5, F2b2b, F8w2 (so F8w1, F8g), F4b |
+| F4c | `main.rs`'s onboarding arm: `load_state_for_launch` (rewrite only unparseable bytes; a lasting I/O error or an unknown version is a named fatal that writes nothing), `Queue::start(F8w1's Deps, resume(loaded, LiveChecks))` and `.manage(queue)`; `install_update` refused in onboarding mode (`commands.rs`); test 27's pin extended; if F2b2b passes 80 lines, the patient read itself and test 38's read half move here (§14.52.5, .8, r2 n2; test 38) | `implementer` | specified; `main.rs`'s chain is F4, F5, F4c, F5b, S6r | F4, F5, F2b2b, F8w2 (so F8w1, F8g), F4b. **Not Q7:** F4c goes ahead with F8w1's interim `registrar.confirm` arm, and F8h-runner's arm follows (r4 n-2, the controller's call) |
 | F4b | `switch_profile` refuses in onboarding mode | `implementer` | specified, tested in F1 (review r4, M6) | F2a |
 | F5 | Moved and new commands registered (none new from §14.52's rulings: step 5 rides `onboarding_answer`, and the mail commands are already on the console's list; one, `onboarding_mail_not_now` on the console's list, only if Q8 is yes, r3 m-a) | `mechanical` | a list edit, recounted, pinned | F4, F2b, F2g, F2h, F8d, F8lb; F2b2b only if Q8 is yes |
 | F5b | Shell list: the retired panels' commands, after F10; five move to the console's list and are never deleted (F10's review) | `mechanical` | `main.rs` is never F10's (review r1, I8) | F10, F5 |
@@ -1483,23 +1484,24 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F7b | One `uievents` action (only if Q-B10 is yes) | `implementer` | a closed vocabulary; its page sentence first | F7a, S7 |
 | F8a | The queue's core: states, persistence, the serial thread, holds | `implementer` | orchestration over fakes | F1, F2a |
 | F8e | Order rules and the local lane: config before readers, slot order, `account_settled` from the sync status, step 10's gate | `implementer` | as F8a | F8a |
-| F8h | The notes gate and the lane's `sync.lock` retry (holding nothing between tries); `retry_on_sync_running`; `registrar.confirm` also waits for `school.apply`; **provisional on Q7**: `registrar.confirm`'s runner over `registrar::write_registrar` (option A) or `write_registrar_parsed` (option B), `registrar_file_missing` and its Try again (§14.52.4; about 80 lines; test 36). The retry and the input rule go ahead; the runner waits for Q7 | `implementer` | split out of F8e (review r4, M4) | F8e; the runner also F2b2b (`REGISTRAR_FILE`, option A) or F7d (option B) |
+| F8h | The notes gate and the lane's `sync.lock` retry (holding nothing between tries); `retry_on_sync_running`; `registrar.confirm` also waits for `school.apply` (§14.52.4; about 45 lines; test 36's F8h cases). Not gated on Q7; the runner is F8h-runner's (r4 n-2) | `implementer` | split out of F8e (review r4, M4) | F8e |
+| F8h-runner | **Gated on Q7.** `registrar.confirm`'s runner over `registrar::write_registrar` (option A) or `write_registrar_parsed` (option B), `registrar_file_missing` and its Try again, and the `registrar.confirm` arm in `onboarding_live.rs`, replacing F8w1's interim `Waiting("registrar_runner_pending")` (§14.52.4, r4 n-2; about 35 lines; test 36's F8h-runner cases and test 37's `registrar.confirm` row, written first) | `implementer` | specified once Q7 is answered | Q7, F8h, F8w1 (the arm it replaces), F8b's registrar half, and F2b2b (`REGISTRAR_FILE`, option A) or F7d (option B); last in `onboarding_jobs.rs`'s chain when it is dispatched. Nothing but the wave-B ship waits on it |
 | F7d | **Only under Q7's option B.** Engine: `--preview`'s `registrar_series`, and `commitments --registrar-parsed` over `run_parsed` (§14.52.4; about 60 lines; test 36's B half, written first) | `test-writer`, then `implementer` | engine, off the contract list; a command contract change, so a §9 amendment, Quinn's | F7a, Q7 = B |
 | F8f | Stop and drain at safe points; the save freeze; hand-over items | `implementer` | as F8a | F8a, F1 |
 | F8f2 | The drain abandons no writer (only `ABANDON_AT_ONCE`, pinned); `exiting()` for the page (§14.51 r1) | `implementer` | as F8a; F1 test 30's first half written first | F8f (or folded into F8f's fix round) |
 | F8a2 | The crash-loop guard: `JobRecord.crashes`, paused with `job_crashed` at a second running start; `Queue::start` persists once (§14.51 r1) | `implementer` | as F8a; `STATE_VERSION` stays 1; its test (F1's 31) written first | F8f2 (the file's chain) |
 | F8s2 | `scheduler.rs` and F8m's arm of `mail/live.rs`: the normal console clears `handover` (the slot item at a run slot's end; canary and disconnect from the unfiltered list, timestamps parsed, no disconnect while a setup is pending; first pass at a closed backfill batch, clearing only itself after the canary; `BackfillNeverDriven` from a verified Guided or held row; one lock around every write, never across the network; §14.51 r1-r3) | `implementer` | off the contract list; its test (F1's 32) written first | F8f merged, F8s, F8m |
 | F8s | `scheduler.rs`: `run_slot_inner_scoped` (the seams from `Some(app)`) and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}`; the stop before each stage (never cleared); the bundle deleted on every path; the slot's hand-over clearing; `prime_mode_device` (T0) and `spawn_update_check` (T0 review M3) | `implementer` | `scheduler.rs` is off the contract list; its tests are F1's 15, 18 and 27 (review r3 M5, r4 I-3, M1, r5 I-3; T0) | F1 |
-| F8b | Runners: the school step (capture, answers, pending feed, preview), the capture half writing through today's unfenced helpers (F8b2 converts the writes that have merged); **its registrar half is provisional on Q7 and held**: the raw response kept in `onboarding-registrar.json` (option A) or `registrar_series` saved in the answers file (option B), written through F8b2's `write_capture_file_for_gen` from the start (§14.52.2, .4; r3 m-c) | `implementer`, reviewed by `contract-reviewer` (its capture handles the bearer link; review r7, I-1) | specified; the registrar half is not dispatched until Q7 | the capture half: F8a, F7a, S4d, F8la. The held registrar half, dispatched separately: F8b2 (the fenced helper), and F2b2b (option A) or F7d (option B). Nothing depends on the registrar half but F8h's runner, so F8d2 and F8b2 wait only on the capture half (r3 R3-1) |
+| F8b | Runners: the school step (capture, answers, pending feed, preview), the capture half writing through today's unfenced helpers (F8b2 converts the writes that have merged); **its registrar half is provisional on Q7 and held**: the raw response kept in `onboarding-registrar.json` (option A) or `registrar_series` saved in the answers file (option B), written through F8b2's `write_capture_file_for_gen` from the start (§14.52.2, .4; r3 m-c) | `implementer`, reviewed by `contract-reviewer` (its capture handles the bearer link; review r7, I-1) | specified; the registrar half is not dispatched until Q7 | the capture half: F8a, F7a, S4d, F8la. The held registrar half, dispatched separately: F8b2 (the fenced helper), and F2b2b (option A) or F7d (option B). Nothing depends on the registrar half but F8h-runner, so F8d2 and F8b2 wait only on the capture half (r3 R3-1) |
 | F8b2 | `Queue::set_school` (step 3's school answer; refused once `school.apply` has a record); `change_school` under the queue lock, then `ANSWERS_LOCK`: deletes the answers file, pending links and every capture file, and bumps `SCHOOL_GEN`; `job_context` (school and generation read together; one in-memory entry per job from `push_job`, or from the worker marking a resumed job running, until it leaves `order`; §14.52 r2 n1, r3 n1); the four fenced writers; the merged F8b writes converted to them; the `rerun` set (§14.52.2; S, about 45 lines in `onboarding_jobs.rs` and 35 in `onboarding_state.rs`; test 35) | `implementer`, reviewed by `contract-reviewer` | a stale capture writing a bearer link is the risk F8l's review guarded | F8b's capture half and F8d2 (`onboarding_jobs.rs`'s chain: F8b, F8d2, F8b2, F8g; r3 R3-1), F2b2b (in `onboarding_state.rs`'s) |
-| F8c | Runners: the local lane (stores, apply, courses, config); `registrar.confirm` moved to F8h (§14.52.4). Merged | `implementer` | specified | F8e, F6a, F6b |
-| F8g | Runners: the partial (`BeforeConfig`, then `NoRank`) and full slots, each with onboarding's `AppHandle` (held by the runner); a queue stop returns before the slot; a slot the stop cut short is `Stopped` (§14.51 r1); sets the in-memory `judge_seen` and `ingest_seen` facts the Google reads wait for on every queued Google job, pending, held or waiting (no `onboarding.json` change; §14.52 r2 n1); the job-name dispatch is F8w1's (§14.52.4; about 78 lines) | `implementer` | specified | F8e, F8f, F8h, F8s, F8b2 (`job_context`, and the chain F8b, F8d2, F8b2, F8g), F8d2 |
+| F8c | Runners: the local lane (stores, apply, courses, config); `registrar.confirm` moved to F8h-runner (§14.52.4, r4 n-2). Merged | `implementer` | specified | F8e, F6a, F6b |
+| F8g | Runners: the partial (`BeforeConfig`, then `NoRank`) and full slots, each with onboarding's `AppHandle` (held by the runner); a queue stop returns before the slot; a slot the stop cut short is `Stopped` (§14.51 r1); sets the in-memory `judge_seen` and `ingest_seen` facts the Google reads wait for on every queued Google job, pending, held or waiting (no `onboarding.json` change; §14.52 r2 n1); the job-name dispatch is F8w1's (§14.52.4; about 78 lines) | `implementer` | specified | F8e, F8f, F8h (alone, never F8h-runner; r4 n-2), F8s, F8b2 (`job_context`, and the chain F8b, F8d2, F8b2, F8g), F8d2 |
 | F8d | Runners: mail, Google, calendars, coursework; the stop checks in `mail/runner.rs`'s confirm and canary waits; `mail_provider` recorded as the service's string through `update_answers` (§14.51 r2, r3); the canary's 180 s kept. **Merged into O3 at `62f6c73`** (carrying `ad006ca` and `cb2b2bf`); the queue and guard follow-ups are F8d2's (§14.52.1, r2 R2-2; its merged test-34 parts were not written first) | `implementer` | specified | F8a |
 | F8d2 | `mail.rs`: `mail_setup_start` refused in onboarding mode (an inner taking `LaunchMode`, about 6 lines). `onboarding_jobs.rs` (about 30 lines): `Queue::skip_mail` (pending or held mail jobs `skipped`; a running `mail.setup` stopped and landed `skipped`), `MAIL_FIRST_PASS_LOOKS` (1) with `mail_batch_closed` clearing `parked` and notifying, and `retry_at` (30 s, `mail_window_busy` alone) with the idle `wait_timeout` (§14.52.1, r2 R2-2; test 34's F8d2 parts, written first) | `implementer` | specified, off the contract list, tested over the fake queue and a fake clock | F8d, F8b's capture half (`onboarding_jobs.rs`'s chain: F8b, F8d2, F8b2, F8g; r3 R3-1). Nothing else |
 | F8m | `mail/live.rs`: in onboarding mode a closed backfill batch tells the queue, never starts a slot | `implementer` | specified, about ten lines, tested in F1 (review r5, I-4) | F8a |
 | F8la | `lms_link.rs`: `capture_calendar_link_with`, `validate_only` and `capture_link_only`, the validate-only seam | `implementer`, reviewed by `contract-reviewer` | a bearer link stored under the wrong session reaches another account (review r6 I-2, r7 I-1) | F1, S4b merged |
 | F8lb | `onboarding_capture_link` and `onboarding_paste_link` over F8la's seam; the link to its pending credential | `implementer`, reviewed by `contract-reviewer` | as F8la | F8la, F8b, F8c, F8g, F8d (last in `onboarding_jobs.rs`'s chain), F2d |
-| F8w1 | New `onboarding_live.rs`: `LiveRunner` (every `JOB_ORDER` name to its runner; an unknown name is `Failed`), `LiveEntitlement`, `LiveSyncView`: the live `Deps` (§14.52.4; test 37) | `implementer` | specified glue over built runners; its own file, so no chain | F8b, F8b2, F8c, F8g, F8h |
+| F8w1 | New `onboarding_live.rs`: `LiveRunner` (every `JOB_ORDER` name to its runner; an unknown name is `Failed`; `registrar.confirm` an interim `Waiting("registrar_runner_pending")` until F8h-runner replaces it, r4 n-2), `LiveEntitlement`, `LiveSyncView`: the live `Deps` (§14.52.4; test 37) | `implementer` | specified glue over built runners; its own file, so no chain | F8b's capture half, F8b2, F8c, F8g, F8h (not F8h-runner, so not Q7) |
 | F8w2 | The same file: the mail seams (`start_setup` with the file's unitid and the window wait, the canary's list reading, `batch_closed_noted`), the two Google reads over `--tidied` after their slot facts, and the network-free `LiveChecks` (§14.52.1, .4; tests 34, 37) | `implementer` | as F8w1 | F8w1, F8d, F8d2 (r2 R2-2), F8s2 (`mail_signals`); F7c's `--tidied` is on O3 at `623a5f8`, F7a's merge, which carried F7c r4 |
 | F9 | The reveal gate, in its own `onboarding_gate.rs` | `implementer` | a pure function, tested in F1; its own file, so no chain (review r8's note) | F1 |
 | F10 | Shell steps 1-2 in the ruled direction (5b); old wizard removed (static files only) | `console-ui` | `app/static`, the `console.js` queue | direction ruled (5b, 2026-10-23) |
@@ -4660,7 +4662,7 @@ its test first, failing before the code, as for 29-32.
          (`:302-305`), and before `list_addresses` or any network call, it calls
          `apply_mail_signal(d.data_dir, MailSignal::TurnedOff)` (`onboarding_state.rs:173`, through
          `update_finished`, `:163-170`) and ignores the result, as `mail/live.rs:162` does. About 3
-         lines.
+         lines, **F2b2c's** (r4 R4-1), after F2b2b adds the variant.
        - So it lands whether or not the service's `delete_address` (`:321`) later succeeds. A
          successful delete purges the row on the service, which is why reading "every row in
          `turned_off`" from the list (r2's rule) would almost never have fired.
@@ -4684,9 +4686,9 @@ its test first, failing before the code, as for 29-32.
      - It does not block finish. Finish never waits up to `CONFIRM_WAIT` for a setup.
      - A `mail.setup` that is `done` hands over its open `mail.canary` and `mail.first_pass` as
        today.
-     Owner: **F2b2b** (`handover_for`, `TurnedOff` and `mail_signal`'s two arms, the constant, and
-     Disconnect's event, about 3 lines in `mail/commands.rs`; r3 R3-2), **F11d** (the line). Test
-     40.
+     Owner: **F2b2b** (`handover_for`, `TurnedOff` and `mail_signal`'s two arms, the constant; in
+     `onboarding_state.rs` only), **F2b2c** (Disconnect's event, about 3 lines in
+     `mail/commands.rs`; r4 R4-1), **F11d** (the line). Test 40.
    - **What F8d's brief already said.** It names the runners and their stop, now built over a
      `SetupRun` seam and **merged into O3 at `62f6c73`** (carrying `ad006ca` and `cb2b2bf`). It does
      not say who starts the run, where the unitid comes from, or the enqueue; this item adds those
@@ -4827,8 +4829,12 @@ its test first, failing before the code, as for 29-32.
      its seams built from the app. An unknown name is `Failed("unknown_job")`, never a panic. It
      wires the school jobs (F8b), the lane (F8c's `run_feed_store` over `VaultFeedAccount`,
      `run_school_apply` with the choice from `onboarding.json`'s school, `run_school_courses_in`,
-     `run_config_ingest_in` with the profile id and the vault's zone), `registrar.confirm` (F8h's
-     runner, below) and the two slots (F8g's slot runner). `LiveEntitlement` is
+     `run_config_ingest_in` with the profile id and the vault's zone) and the two slots (F8g's slot
+     runner). **The `registrar.confirm` arm is not F8w1's; it lands with F8h-runner** (r4 n-2, the
+     controller's call). Until then, F8w1's table answers that name with
+     `Waiting("registrar_runner_pending")`, which parks it, keeps finish refused ("still saving")
+     and is never `Failed`. So F8w1 and F4c go ahead before Q7, and no build ships wave B until
+     F8h-runner replaces the arm. `LiveEntitlement` is
      `scheduler::entitlement_state(cs) == Entitled`, with `refresh` calling
      `account::refresh_entitlement`. `LiveSyncView` reads `state/sync-status.json` and
      `sync::load_cursor` and nothing else: no `vault_io`, no network (the `SyncView` contract).
@@ -4878,7 +4884,9 @@ its test first, failing before the code, as for 29-32.
        status read then shows `already-done`. F4c calls these before the window exists, so none may
        wait on the network.
      Size: S (about 80 lines).
-   - **`registrar.confirm`'s runner is F8h's** (it is the retry's only caller). "R24's existing
+   - **`registrar.confirm`'s runner is F8h-runner's** (r4 n-2: F8h is split into **F8h**, the
+     retry, the notes gate and the input rule, which go ahead, and **F8h-runner**, the runner, its
+     Try-again rule and the F8w1 arm, gated on Q7; both `implementer`). "R24's existing
      write path" takes the registrar's **raw** response. `registrar::run_file` and `spawn`
      (`registrar.rs:72-106`) write the fetched bytes to `tmp\` and run `commitments --registrar`,
      which parses Banner JSON (`engine/src/registrar.rs`, `parse_banner`). The answers file holds
@@ -4887,8 +4895,8 @@ its test first, failing before the code, as for 29-32.
      (`engine/src/registrar.rs:371`) takes a `Parsed`, whose `series` carry each section's
      `source_uid` and the term (`:67-90`).
      **PROVISIONAL, pending Quinn (Q7)** (r1 I4): what the device keeps for the confirm is a privacy
-     choice. **Neither F8b's registrar half nor F8h's runner is dispatched until Q7 is answered.**
-     F8h's retry, the notes gate and the input rule below do not depend on it and go ahead. Both
+     choice. **Neither F8b's registrar half nor F8h-runner is dispatched until Q7 is answered.**
+     F8h (the retry, the notes gate and the input rule below) does not depend on it and goes ahead. Both
      options are written out so that either answer can be executed:
      - **Option A, keep the raw response** (recommended):
        - F8b writes it at capture to `<profile data>\onboarding-registrar.json` (temp file and
@@ -4926,7 +4934,7 @@ its test first, failing before the code, as for 29-32.
          generation writes nothing), runs `--preview --registrar` on it, and deletes it on every
          path once the preview returns. `change_school` deletes any such file left by a crash, as it
          does option A's. Nothing raw outlives the preview call.
-       - F8h's runner writes `registrar_series` to a `tmp\` file, calls the new flag through a
+       - F8h-runner writes `registrar_series` to a `tmp\` file, calls the new flag through a
          `write_registrar_parsed` twin of the function above, and deletes the file on every path.
        - **F7d's equivalence test** (r2, Q7 B gap 2) compares `--registrar <raw>` with
          `--registrar-parsed <its preview JSON>` on two scratch copies of one vault. The notes and
@@ -4937,25 +4945,26 @@ its test first, failing before the code, as for 29-32.
          amendment, Quinn's. **The `CLAUDE.md` contract line and the
          `docs/reference/engine-commands.md` entry are `docs-keeper`'s** (r2, Q7 B gap 3), landed
          with F7d's merge. It needs no privacy-page change.
-     - **The runner, under either option** (F8h): no registrar rows is `Done`, writes nothing and
+     - **The runner, under either option** (F8h-runner): no registrar rows is `Done`, writes nothing and
        makes no call. **Rows present with nothing to send** (option A's file missing, or option B's
        `registrar_series` empty) is `Failed("registrar_file_missing")`, never `Done` (r1 I5). Its
        fix is "Knowlu lost the class times it read from your school. Press Try again to read them
        again; you may need to sign in to your school once more." Try again on that reason enqueues
-       `school.capture` ahead of `registrar.confirm` (`Queue::retry`, F8h, about 4 lines), so the
+       `school.capture` ahead of `registrar.confirm` (`Queue::retry`, F8h-runner, about 4 lines), so the
        capture rewrites what the confirm needs. A `failed` confirm keeps finish refused (ruling 8's
        "needs Try again" line), so this is never silent. Otherwise the runner is
        `retry_on_sync_running(sleep, || write_registrar(…))` (or `write_registrar_parsed`), which
-       F8h builds from its stub, with `school` from `registrar::school_of(vault)`. **`registrar.confirm` also waits for
-       `school.apply`** (one line in `inputs_ready`, F8h), because `school_of` reads `campus.yaml`,
+       F8h builds from its stub and F8h-runner calls, with `school` from `registrar::school_of(vault)`. **`registrar.confirm` also waits for
+       `school.apply`** (one line in `inputs_ready`, F8h, not gated), because `school_of` reads `campus.yaml`,
        which `school.apply` creates. Today it waits only for `school.courses`. `Done`'s proof is the
        engine report's count of written classes; a refusal past the 30 s budget is
        `Failed("registrar_sync_busy")`; any other error is `Failed` with the engine's line, never
        the bytes. Holds neither `vault_io` nor `sync.lock` itself (§4.3; test 16's fake already pins
        it).
-     - Size: F8h becomes S (about 80 lines with the retry, the runner, its `write_registrar` or
-       `write_registrar_parsed`, the Try-again rule and the input rule). F7d, only under option B,
-       is S (about 60 lines of engine code).
+     - Size (r4 n-2): **F8h** stays S (about 45 lines: the notes gate, `retry_on_sync_running` and
+       the input rule). **F8h-runner** is S (about 35 lines: the runner, its `write_registrar` or
+       `write_registrar_parsed`, the Try-again rule, and replacing F8w1's interim arm in
+       `onboarding_live.rs`). F7d, only under option B, is S (about 60 lines of engine code).
    - Test 36 (registrar) and test 37 (the glue).
 
 5. **F4c: the queue in the onboarding arm** (F4 r1, I-1 and the follow-up; `implementer`; after
@@ -5012,14 +5021,17 @@ its test first, failing before the code, as for 29-32.
      the confirmed-school guard in the wrapper, and the Skip's call to `skip_mail`. Size: S, about
      45 lines. It depends on **F8d2** for `skip_mail` (r2 R2-2). Tests 33 and 34's F2b2a part.
    - **F2b2b**: the items below, ruling 5's `load_state_for_launch`, `REGISTRAR_FILE` and its
-     deletes (option A only), and ruling 1's `mail.connect` hand-over rule. **Two files** (r3 m-b):
-     `onboarding_state.rs` and, for Disconnect's `TurnedOff` event, `mail/commands.rs`. Size,
-     re-counted in r3: S, about 75 lines (m-1 3, m-2 1, the refusal and `failed_job` 10,
-     `vault_only` 8, the patient read 25, the registrar file 8, `mail.connect` 15, `TurnedOff` and
-     its arm 2, all in `onboarding_state.rs`; Disconnect's event 3 in `mail/commands.rs`; r3 removed
-     r2's 6 lines in `scheduler.rs`). Past 80, the patient read moves to F4c, and **test 38's
-     read half moves with it** (r2 n2): F4c then writes all of 38 first. Tests 38's read half
-     (while the read stays here), 39 and 40.
+     deletes (option A only), and ruling 1's `mail.connect` hand-over rule. **`onboarding_state.rs`
+     only** (r4 R4-1). Size, re-counted in r4: S, about 72 lines (m-1 3, m-2 1, the refusal and
+     `failed_job` 10, `vault_only` 8, the patient read 25, the registrar file 8, `mail.connect` 15,
+     `TurnedOff` and its arm 2). Past 80, the patient read moves to F4c, and **test 38's read half
+     moves with it** (r2 n2): F4c then writes all of 38 first. Tests 38's read half (while the read
+     stays here), 39 and 40's hand-over cases.
+   - **F2b2c** (r4 R4-1; `implementer`): Disconnect's `TurnedOff` event in `disconnect_with`
+     (`mail/commands.rs`, about 3 lines, ruling 1). It depends on F2b2b for the variant and on
+     nothing else. **Collision note, not a dependency:** S4c also edits `disconnect_with` (its
+     `school_mail` use, §7's file table). Neither needs the other's code; whichever lands second
+     rebases onto the first and keeps both. Test 40's Disconnect cases, written first.
    F2b2b's items:
    - **m-1:** `onboarding_finish_inner` on a finished snapshot (`onboarding_state.rs:970`) answers
      `restart_needed("Knowlu has finished setting up. Open it again.")`, `{ok: false, restart:
@@ -5078,13 +5090,17 @@ its test first, failing before the code, as for 29-32.
   - the new school's trigger, sent while the stale run was still going, runs it again at once;
   - a new capture whose course shares `_1001_1` with the old school's carries no old pairs;
   - `set_school` is refused once `school.apply` has a record, and the same school only confirms.
-- **36 (F8h; its option-specific cases are written once Q7 is answered):**
-  - no rows makes no call and is `Done`;
-  - rows with nothing to send is `Failed("registrar_file_missing")` with its fix, and Try again
-    queues `school.capture` before `registrar.confirm`;
-  - the call waits for `school.apply`;
-  - two `week::SYNC_RUNNING` refusals, then success, is `Done`, and the file is deleted;
-  - a refusal past the budget is `registrar_sync_busy`, and the file is kept;
+- **36 (F8h and F8h-runner, r4 n-2; F8h-runner's cases are written once Q7 is answered):**
+  - (F8h) the job waits for `school.apply` (`inputs_ready`);
+  - (F8h) `retry_on_sync_running` over a counting fake: two `week::SYNC_RUNNING` refusals, then
+    success, is the success; a refusal past the budget is the busy refusal;
+  - (F8h-runner) no rows makes no call and is `Done`;
+  - (F8h-runner) rows with nothing to send is `Failed("registrar_file_missing")` with its fix, and
+    Try again queues `school.capture` before `registrar.confirm`;
+  - (F8h-runner) two refusals, then success, is `Done`, and the file is deleted; a refusal past the
+    budget is `registrar_sync_busy`, and the file is kept;
+  - (F8h-runner) F8w1's interim `registrar_runner_pending` arm is gone, and test 37's table gains
+    the `registrar.confirm` row;
   - option A: the file is gone after `change_school`, finish and `on_sign_out_with`, and
     `run_file`'s existing tests pass unedited;
   - option B (F7d's tests, engine): `--registrar-parsed` over `--preview`'s `registrar_series`
@@ -5095,7 +5111,8 @@ its test first, failing before the code, as for 29-32.
     success, on a preview failure, and after `change_school`.
 - **37 (F8w1, F8w2):**
   - every `JOB_ORDER` name but `coursework.discover` dispatches to its runner (a table over
-    counting fakes); an unknown name is `Failed`;
+    counting fakes); an unknown name is `Failed`; until F8h-runner lands, `registrar.confirm` is
+    `Waiting("registrar_runner_pending")` and is never `Failed` (r4 n-2);
   - `LiveSyncView` and `LiveChecks` make no request (a source pin finds no `ureq`, client or
     `refresh_` call in them);
   - the three checks with no local source answer `false`;
@@ -5114,7 +5131,7 @@ its test first, failing before the code, as for 29-32.
   once the stop is set; a `failed` `school.courses` gives the "needs Try again" refusal and
   `failed_job`; with a `cloud.yaml` naming another host, neither error text contains the vault's
   path or the user-profile directory.
-- **40 (F2b2b, F11t):**
+- **40 (F2b2b, F2b2c, F11t; the Disconnect cases are F2b2c's, r4 R4-1):**
   - `onboarding_finish` with `mail.setup` pending (never started), `Waiting`, `failed` and
     stopped-to-`pending` (four cases) writes no `mail.setup`, `mail.canary` or `mail.first_pass`
     item, and writes one `mail.connect` item with signal `mail_json` and cost key
@@ -5129,7 +5146,7 @@ its test first, failing before the code, as for 29-32.
     - (b) the setup was interrupted: a `mail.json` with a `pending_setups` record and its address,
       run through `clean_unfinished` (a fake client), then the same slot, keeps it too;
     - in both, `Disconnected` is given and clears nothing but its own items;
-  - **Disconnect clears `mail.connect` whether or not the service delete succeeds** (r3 R3-2),
+  - (F2b2c) **Disconnect clears `mail.connect` whether or not the service delete succeeds** (r3 R3-2),
     over `disconnect_with`'s seam with a fake client and host, and a finished `onboarding.json`
     holding `mail.connect`:
     - `delete_address` answering `Ok`, `NotFound` or an error, and `list_addresses` failing,
@@ -5154,7 +5171,7 @@ its test first, failing before the code, as for 29-32.
      that press on every path. If Quinn says yes, the page sends it on entering step 5 at a shared
      school, and nothing else changes.
   2. **Q7: what the device keeps for `registrar.confirm`** (ruling 4; logged as Q7; F8b's
-     registrar half and F8h's runner wait on it).
+     registrar half and F8h-runner wait on it; F4c does not, r4 n-2).
      - **A:** the school's raw answer, kept in app data until the confirm. It is a new on-device
        data class: titles, sections, times, possibly instructor names and enrolment statuses. S7's
        privacy page names it, and `PRIVACY_VERSION` moves only with that page.
@@ -5177,9 +5194,10 @@ its test first, failing before the code, as for 29-32.
      - it goes on the **console's** `generate_handler!` list in `main.rs` (the main page calls it,
        in normal mode). That is **F5's**: F5's list gains one name and is recounted, F5 gains
        F2b2b as a dependency, and its row's "none new from §14.52" becomes "one, under Q8";
-     - F2b2b writes it (about 10 lines more, still under 80 with the patient read), F11d adds the
-       button, and test 40 gains the case: it clears `mail.connect`, and on an unfinished file it
-       changes no byte.
+     - F2b2b writes it, about 10 lines more. That takes F2b2b from about 72 to about 82 lines, past
+       80, so **the patient read and test 38's read half move to F4c** (r4 n-1; F2b2b is then
+       about 57). F11d adds the button, and test 40 gains the case: it clears `mail.connect`, and
+       on an unfinished file it changes no byte.
 
 Tasks changed: §4.2 (step 5's resume line; the proceed answers of steps 3, 7 and 8; step 5's
 press), §4.3 (`registrar.confirm` after `school.apply`), §4.5 (`mail_kind`; under option A,
@@ -5188,18 +5206,21 @@ mail row: `mail.connect`), F1 (tests 33-40 and test 19's case), F2b (`finish_rea
 follow-ups to F2b2b), new **F2b2a** and **F2b2b**, F4 (the queue moves to F4c), new **F4c**, F7d (new,
 only under option B), F8b (the registrar half provisional; its writes unfenced until F8b2), new
 **F8b2** (`job_context`'s map and lifetime; it converts only F8b's merged writes, and F8b's held
-registrar half is written fenced), F8c (`registrar.confirm` moves to F8h), F8d (merged at
+registrar half is written fenced), F8c (`registrar.confirm` moves to F8h-runner), F8d (merged at
 `62f6c73`; the step-5 run's seams to F8w2), new **F8d2** (`mail_setup_start`'s guard, `skip_mail`,
 the first pass's one look and the batch wake, and the timed re-pick; straight after F8b in
-`onboarding_jobs.rs`'s chain), F2b2b (`mail/commands.rs`'s Disconnect event), F5 (one command only
-if Q8 is yes), F8g (the dispatch moves to
-F8w1; the in-memory `judge` and `ingest` facts, set on every queued Google job), F8h (the
-registrar runner, provisional; `registrar_file_missing`; the input rule), new **F8w1** and **F8w2**,
+`onboarding_jobs.rs`'s chain), new **F2b2c** (`mail/commands.rs`'s Disconnect event; r4), F5 (one
+command only if Q8 is yes), F8g (the dispatch moves to
+F8w1; the in-memory `judge` and `ingest` facts, set on every queued Google job; depends on F8h
+alone), F8h (the input rule; split in r4), new **F8h-runner** (the registrar runner, gated on Q7;
+`registrar_file_missing`; F8w1's `registrar.confirm` arm), new **F8w1** (with an interim
+`registrar.confirm` arm) and **F8w2**,
 S7 (the registrar file, under option A only), F11t (the step-5 commands, the proceeds,
 `finish_ready`, the outstanding exit, `mail.connect`), F11a (the outstanding exit), F11b (step 5's
 answer, polling and Skip; step 7's proceed), F11c (step 8's proceed), F11d (`finish_ready` only; the
 `mail.connect` line), F11e1 (the school answer and step 3's proceed), §7 (rows F2b, F2b2a, F2b2b,
-F4, F4c, F5, F7d, F8b, F8b2, F8c, F8d, F8d2, F8g, F8h, F8w1, F8w2, F11t, F11b, F11c, F11d, F11e1),
+F2b2c, F4, F4c, F5, F7d, F8b, F8b2, F8c, F8d, F8d2, F8g, F8h, F8h-runner, F8w1, F8w2, F11t, F11b,
+F11c, F11d, F11e1),
 and the questions for Quinn (Q8 added in r2).
 
 **Revised after review r1** (FAIL: six Important, five Minor, no Critical; revised in place).
@@ -5257,4 +5278,22 @@ and the questions for Quinn (Q8 added in r2).
   size re-counts at about 75, so the patient read stays.
 - **m-c:** F8b2 converts the F8b writes that have merged. F8b's held registrar half is written
   through `write_capture_file_for_gen` from the start.
+
+**Revised after review r4** (FAIL: one Important, two Minor; report
+`docs/reports/2026-10-24-wave-b-plan-14-52-review-r4.md`; revised in place, targeted). It
+supersedes r3's "F2b2b (with S4c)" above.
+- **R4-1:** Disconnect's `TurnedOff` event is new task **F2b2c** (`implementer`,
+  `mail/commands.rs`, about 3 lines, test 40's Disconnect cases). It depends on F2b2b for the
+  variant and has a collision note with S4c instead of a dependency: whichever lands second
+  rebases. F2b2b goes back to `onboarding_state.rs` only, drops S4c, and re-counts at about 72
+  lines.
+- **n-1:** Q8's "if yes" says F2b2b grows to about 82, past 80, so the patient read and test 38's
+  read half move to F4c.
+- **n-2:** F8h is split. **F8h** (the notes gate, the retry and the input rule, about 45 lines) is
+  not gated, and F8g depends on it alone. **F8h-runner** (the runner, `registrar_file_missing` and
+  its Try again, and the `registrar.confirm` arm in `onboarding_live.rs`, about 35 lines) is gated
+  on Q7. F8w1 ships an interim `Waiting("registrar_runner_pending")` arm, so **F4c goes ahead
+  without Q7** (the controller's call) and the arm follows. Finish stays refused, and wave B does
+  not ship, until F8h-runner lands. Test 36 names each case's owner, and test 37 pins the interim
+  arm.
 
