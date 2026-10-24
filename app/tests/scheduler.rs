@@ -3308,7 +3308,7 @@ fn f4_run_console_has_an_onboarding_arm_that_skips_the_tray_autostart_and_spawn_
     let body = &main[main.find("fn run_console").expect("run_console")..];
     let (before_builder, builder) = body.split_once("tauri::Builder::default()").expect("the builder");
     assert!(before_builder.contains("onboarding_state::load_state(") && before_builder.contains("onboarding_state::launch_mode("), "the mode is read before the builder");
-        let setup = &builder[builder.find(".setup(move |app|").expect("setup")..builder.find(".on_window_event(").expect("window events")];
+    let setup = &builder[builder.find(".setup(move |app|").expect("setup")..builder.find(".on_window_event(").expect("window events")];
     let (onboarding_arm, normal_arm) = setup.split_once("} else {").expect("setup splits on the mode");
     assert!(onboarding_arm.contains("app.manage(LaunchMode::Onboarding)") && normal_arm.contains("app.manage(LaunchMode::Normal)"), "each arm manages its mode");
     assert!(onboarding_arm.contains("scheduler::prime_mode_device") && onboarding_arm.contains("scheduler::spawn_update_check") && onboarding_arm.contains("maximize"));
@@ -3322,6 +3322,7 @@ fn f4_run_console_has_an_onboarding_arm_that_skips_the_tray_autostart_and_spawn_
     let events = &builder[builder.find(".on_window_event(").unwrap()..builder.find(".invoke_handler(").unwrap()];
     assert!(events.contains("api.prevent_close()") && events.contains("onboarding_state::close_requested("), "the close is prevented and handed to a thread: {events}");
     assert!(!events.contains("onboarding_quit"), "the event loop never runs the quit itself");
+    assert!(events.contains("} else { let _ = w.hide(); }"), "the normal console still hides to the tray on close");
 }
 
 #[test]
