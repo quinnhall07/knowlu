@@ -104,100 +104,77 @@
   <p class="hint">Rows you leave blank will come back as questions over the next few days.</p>
 </section>
 <section class="picker" id="picker" hidden>
-  <h1>Knowlu</h1>
+  <div class="su-brand"><span class="su-mark" aria-hidden="true"></span><b>Knowlu</b></div>
+  <h1>Choose a profile</h1>
   <p class="lede" id="pick-lede"></p>
   <div id="pick-list"></div>
-  <div class="wiz-nav"><button class="b" id="pick-adopt">Use an existing vault…</button><button class="b" id="pick-restore-backup" title="This restores from a local Backups folder on this device, never from your account — sign in instead to bring back your account&rsquo;s vault.">Restore from a backup folder…</button><button class="b pri y" id="pick-add">Create a new vault…</button></div>
-  <div class="wiz-nav" id="pick-restore-options" hidden>
+  <p class="su-small"><button class="su-link" id="pick-add" type="button">Add a profile</button></p>
+  <div class="pick-nav"><button class="b" id="pick-adopt">Use an existing vault&hellip;</button><button class="b" id="pick-restore-backup" title="This restores from a local Backups folder on this device, never from your account &mdash; sign in instead to bring back your account&rsquo;s vault.">Restore from a backup folder&hellip;</button></div>
+  <div class="pick-nav" id="pick-restore-options" hidden>
     <input type="text" id="pick-restore-name" placeholder="Knowlu">
     <label><input type="checkbox" id="pick-restore-autostart" checked> Start Knowlu with Windows</label>
     <button class="b pri y" id="pick-restore-go">Restore</button>
   </div>
 </section>
-<section class="wiz" id="wizard" hidden>
-  <div class="wiz-hd"><h1>Knowlu</h1><span class="n" id="wiz-step"></span></div>
-  <div class="wiz-panel" id="wiz-welcome" hidden><h2>Welcome</h2>
-    <p class="lede">Knowlu answers one question every morning: what should I work on today, and in what order?</p>
-    <p id="wiz-privacy"></p>
-    <p class="meta">Knowlu costs $9.99 a month after a 7-day trial. You can cancel any time, in Settings.</p>
+<section class="setup" id="setup" hidden aria-label="Set up Knowlu">
+  <div class="su-rail" role="group" aria-label="Setup progress">
+    <div class="su-rail-head"><span class="su-mark" aria-hidden="true"></span><b>Knowlu</b><span class="su-dim">Setup</span></div>
+    <div class="su-rail-title"><h2>Your sources</h2><span class="su-dim" id="su-stepno"></span></div>
+    <ol class="su-rail-list" id="su-rail">
+      <li class="su-row" data-rail="account"><span class="su-shape" aria-hidden="true"></span><span class="su-nm">Your account</span><span class="su-st"></span><span class="su-pf"></span></li>
+      <li class="su-row" data-rail="school"><span class="su-shape" aria-hidden="true"></span><span class="su-nm">Your school</span><span class="su-st"></span><span class="su-pf">Classes, assignments, grades and syllabi</span></li>
+      <li class="su-row" data-rail="payment"><span class="su-shape" aria-hidden="true"></span><span class="su-nm">Payment</span><span class="su-st"></span><span class="su-pf">$9.99 a month, after 7 days free</span></li>
+      <li class="su-row" data-rail="email"><span class="su-shape" aria-hidden="true"></span><span class="su-nm">School email</span><span class="su-st"></span><span class="su-pf">Date changes your teachers send</span></li>
+      <li class="su-row" data-rail="google"><span class="su-shape" aria-hidden="true"></span><span class="su-nm">Google: Gmail and Calendar</span><span class="su-st"></span><span class="su-pf">Club and job deadlines, your calendar</span></li>
+      <li class="su-row" data-rail="homework"><span class="su-shape" aria-hidden="true"></span><span class="su-nm">Homework sites</span><span class="su-st"></span><span class="su-pf">Due dates from homework sites</span></li>
+      <li class="su-row" data-rail="syllabi"><span class="su-shape" aria-hidden="true"></span><span class="su-nm">Syllabi</span><span class="su-st"></span><span class="su-pf">Exam dates, grade weights and late rules</span></li>
+      <li class="su-row" data-rail="week"><span class="su-shape" aria-hidden="true"></span><span class="su-nm">Your week</span><span class="su-st"></span><span class="su-pf">Check class times, exams and late rules</span></li>
+      <li class="su-row" data-rail="reveal"><span class="su-shape" aria-hidden="true"></span><span class="su-nm">Here&rsquo;s your week</span><span class="su-st"></span><span class="su-pf">Opens when everything has run once</span></li>
+    </ol>
+    <div class="su-rail-foot"><span class="su-dim" id="su-left"></span></div>
   </div>
-  <div class="wiz-panel" id="wiz-account" hidden><h2>Your account</h2>
-    <label><input type="checkbox" id="wiz-18"> I am 18 or older</label>
-    <label><input type="checkbox" id="wiz-terms"> I accept the <a href="terms.html" class="policy" data-policy="terms" id="wiz-terms-link">terms</a> and the <a href="privacy.html" class="policy" data-policy="privacy" id="wiz-privacy-link">privacy policy</a></label>
-    <div class="wiz-row"><button class="b pri y" id="wiz-google-signin">Continue with Google</button></div>
-    <p class="meta">Knowlu asks Google for your email address and your name, and nothing else. Your calendar and your mail are separate permissions, asked for later, and you can say no to both.</p>
-    <div class="wiz-row"><input type="text" id="wiz-email" placeholder="Or use your email address"><button class="b" id="wiz-magic">Email me a code</button></div>
-    <div class="wiz-row" id="wiz-code-row" hidden><input type="text" id="wiz-code" placeholder="The code from the email"><button class="b pri y" id="wiz-code-go">Sign in with the code</button></div>
-    <p class="meta" id="wiz-account-note"></p>
+  <div class="su-main">
+    <section class="su-step" id="su-welcome" hidden aria-labelledby="su-h-welcome">
+      <h1 id="su-h-welcome" tabindex="-1">Welcome to Knowlu</h1>
+      <p class="su-why">Knowlu answers one question every morning: what&rsquo;s next? Next, you&rsquo;ll connect the places that already know your work, about 10 minutes.</p>
+      <p class="su-body">You&rsquo;ll need your school sign-in and your phone, in case your school asks for a phone approval. Everything after your school can be skipped, and each step says what skipping costs.</p>
+      <div class="su-actions"><button class="b pri y su-btn" id="su-start">Start with your account</button></div>
+      <p class="su-small">Used Knowlu on another computer? <button class="su-link" id="su-returning" type="button">Sign in, and it picks up your plan</button></p>
+      <p class="su-privacy" id="su-privacy"></p>
+    </section>
+    <section class="su-step" id="su-account" hidden aria-labelledby="su-h-account">
+      <h1 id="su-h-account" tabindex="-1">Your account</h1>
+      <p class="su-why">Your plan lives in your account, so it&rsquo;s safe if this computer isn&rsquo;t.</p>
+      <div class="su-actions"><button class="b pri y su-btn" id="su-google">Continue with Google</button><button class="b su-btn" id="su-use-code">Email me a code</button></div>
+      <div class="su-field" id="su-email-field" hidden><label for="su-email">Your email address</label><div class="su-inline"><input type="text" id="su-email" autocomplete="email" inputmode="email"><button class="b pri y su-btn" id="su-magic">Send the code</button></div></div>
+      <label class="su-opt"><input type="checkbox" id="su-18"><span>I&rsquo;m 18 or older and agree to the <a href="terms.html" class="policy" data-policy="terms">terms</a> and <a href="privacy.html" class="policy" data-policy="privacy">privacy notice</a>.</span></label>
+      <p class="su-privacy">Google shares your name and email with Knowlu, nothing else. Mail and calendar come later, as a separate yes or no.</p>
+      <p class="su-cost"><b>What it costs:</b> $9.99 a month after 7 days free. You&rsquo;ll see what Knowlu found at your school before you pay. There&rsquo;s no free plan after the trial.</p>
+      <p class="su-err" id="su-error" role="alert"></p>
+    </section>
+    <section class="su-step" id="su-browser" hidden aria-labelledby="su-h-browser">
+      <h1 id="su-h-browser" tabindex="-1">Finish in your browser</h1>
+      <p class="su-why">Google asks you to pick your account. Knowlu is waiting here.</p>
+      <div class="su-ext"><b>Google sign-in is open in your browser</b><span class="su-host">accounts.google.com</span><span class="su-small">Your name and email only.</span></div>
+      <p class="su-small">If you close the browser tab, nothing is saved. When the wait ends, this step comes back.</p>
+      <p class="su-err" id="su-browser-error" role="alert"></p>
+    </section>
+    <section class="su-step" id="su-code" hidden aria-labelledby="su-h-code">
+      <h1 id="su-h-code" tabindex="-1">Check your email</h1>
+      <p class="su-why" id="su-code-why"></p>
+      <div class="su-field"><label for="su-code-in">Code from your email</label><input type="text" id="su-code-in" class="su-mono" autocomplete="one-time-code" inputmode="numeric"></div>
+      <p class="su-err" id="su-code-error" role="alert"></p>
+      <div class="su-actions"><button class="b pri y su-btn" id="su-code-go">Continue</button><button class="su-link" id="su-resend" type="button">Send a new code</button><button class="su-link" id="su-other-email" type="button">Use a different email</button></div>
+    </section>
+    <section class="su-step" id="su-done" hidden aria-labelledby="su-h-done">
+      <h1 id="su-h-done" tabindex="-1">Your account</h1>
+      <p class="su-proof"><svg class="su-check" viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="12.5"/><path d="M8.5 14.5l3.8 3.8 7.4-8"/></svg><span>Signed in as <b id="su-signed-as"></b>.</span></p>
+      <p class="su-body" id="su-folder-line"></p>
+      <p class="su-small" id="su-restore-line"></p>
+      <p class="su-err" id="su-done-error" role="alert"></p>
+      <div class="su-actions"><button class="b pri y su-btn" id="su-continue">Continue</button><button class="b su-btn" id="su-retry" hidden>Try again</button><span class="su-small" id="su-enter">or press Enter</span></div>
+    </section>
   </div>
-  <div class="wiz-panel" id="wiz-subscribe" hidden><h2>Subscribe</h2>
-    <p class="lede">$9.99 a month, or $69.99 for the academic year. Seven days free first; your card is taken now and not charged until the trial ends. Cancel any time in Settings.</p>
-    <div class="wiz-row"><button class="b pri y" id="wiz-sub-month">Start the trial &mdash; $9.99/month</button><button class="b" id="wiz-sub-year">$69.99 / academic year</button></div>
-    <p class="meta" id="wiz-sub-note"></p>
-  </div>
-  <div class="wiz-panel" id="wiz-mail" hidden><h2>Next: connect your school email</h2>
-    <p class="lede">Knowlu sets up forwarding from your school mailbox, reads what arrives for things you have to do, and proposes each one for you to approve. It starts when Knowlu first opens.</p>
-    <div class="wiz-row"><button class="b" id="wiz-mail-notnow">Not now</button><span class="meta" id="wiz-mail-note"></span></div>
-    <p class="meta">If your school's rules don't allow forwarding your school email, skip this.</p>
-  </div>
-  <div class="wiz-panel" id="wiz-vault" hidden><h2>Name this setup</h2>
-    <p class="lede">Knowlu keeps your work as plain files you can open, copy and take with you.</p>
-    <div class="wiz-row"><input type="text" id="wiz-name" placeholder="Name"></div>
-    <p class="meta" id="wiz-vault-path"></p>
-  </div>
-  <div class="wiz-panel" id="wiz-calendars" hidden><h2>Connect your calendars</h2>
-    <p class="lede">Two things, and Knowlu needs both before it can tell you what to do today: what your school says is due, and what your week already looks like.</p>
-    <h3>Your school</h3>
-    <p class="meta">Start typing its name. Every US college and university is in this list.</p>
-    <div class="wiz-row"><input type="text" id="wiz-school" placeholder="Search for your school" autocomplete="off"><span class="meta" id="wiz-school-picked"></span></div>
-    <div id="wiz-school-hits" class="wiz-hits"></div>
-    <p class="meta"><button class="b" id="wiz-school-none">My school isn&rsquo;t listed</button></p>
-    <div class="wiz-row" id="wiz-school-free" hidden><input type="text" id="wiz-school-name" placeholder="Your school&rsquo;s name"><input type="text" id="wiz-school-state" placeholder="State, e.g. AL"></div>
-    <p class="meta">Sign in the way you always do. Knowlu opens your school&rsquo;s own page in a window, you sign in there, and Knowlu keeps only the calendar link &mdash; never what you type into it.</p>
-    <div class="wiz-row" id="wiz-lms-kind" hidden><span class="meta">Which does your school use?</span><button class="b" data-lms="blackboard">Blackboard</button><button class="b" data-lms="canvas">Canvas</button></div>
-    <div class="wiz-row"><button class="b pri y" id="wiz-lms-open">Sign in to my school</button><button class="b" id="wiz-lms-capture" hidden>I have signed in &mdash; find my calendar</button><span class="meta" id="wiz-lms-state"></span></div>
-    <p class="meta">Or paste the link yourself: Blackboard &rarr; Calendar &rarr; Calendar Settings &rarr; Share Calendar. Canvas &rarr; Calendar &rarr; Calendar Feed.</p>
-    <input type="text" id="wiz-ics" placeholder="Paste the school feed link (it ends in .ics)">
-    <p class="meta" id="wiz-ics-note"></p>
-    <div id="wiz-courses" hidden>
-      <h3>Your classes</h3>
-      <p class="meta" id="wiz-courses-note"></p>
-      <div id="wiz-course-rows"></div>
-      <div class="wiz-row"><input type="text" id="wiz-course-add" placeholder="Add a course code, e.g. CS 100"><button class="b" id="wiz-course-add-go">Add</button></div>
-    </div>
-    <h3>Your own calendar</h3>
-    <p class="meta">This is what makes today&rsquo;s page know your day is already half full. In Google Calendar: <b>Settings</b> &rarr; click your calendar under <b>Settings for my calendars</b> &rarr; <b>Integrate calendar</b> &rarr; copy the <b>Secret address in iCal format</b>. Press <b>Reset</b> beside it first if that address has ever been shared with anyone &mdash; whoever holds it can read your calendar.</p>
-    <input type="text" id="wiz-cal-ics" placeholder="Paste the secret iCal address">
-    <p class="meta" id="wiz-cal-note"></p>
-    <div class="wiz-row" id="wiz-google-row"><button class="b" id="wiz-google">Sign in with Google instead</button><span class="meta">Reads your Google Calendar so Knowlu knows when you are busy. Read-only, and you can disconnect at any time. While Knowlu is in Google's testing programme this works for invited testers and the connection needs renewing about once a week.</span></div>
-    <p class="meta" id="wiz-google-note"></p>
-  </div>
-  <div class="wiz-panel" id="wiz-logins" hidden><h2>Coursework logins</h2>
-    <p class="lede">Optional. Stored in Windows Credential Manager on this machine &mdash; never in the vault, never in a backup, and never sent to us.</p>
-    <div class="wiz-row"><input type="text" id="wiz-zy-user" placeholder="zyBooks email"><input type="password" id="wiz-zy-pass" placeholder="zyBooks password"></div>
-    <div class="wiz-row"><input type="text" id="wiz-vhl-user" placeholder="VHL email"><input type="password" id="wiz-vhl-pass" placeholder="VHL password"></div>
-    <datalist id="wiz-course-codes"></datalist>
-    <div id="wiz-map" hidden>
-      <h3 id="wiz-map-heading">Which class is which?</h3>
-      <p class="meta" id="wiz-map-note">Knowlu found these on your accounts. Confirm the course each one belongs to &mdash; without this, Knowlu can see the work but not what it is for.</p>
-      <div id="wiz-map-rows"></div>
-    </div>
-  </div>
-  <div class="wiz-panel" id="wiz-gmail" hidden><h2>Gmail</h2>
-    <p class="lede">Knowlu can read your Gmail for things you have to do and propose each one for you to approve. You can skip this and connect later in Settings.</p>
-    <p class="meta">While Google reviews Knowlu, this works only for invited testers, and the connection needs renewing about once a week.</p>
-    <div class="wiz-row"><button class="b" id="wiz-gmail-connect">Connect Gmail directly (Google testers only)</button></div>
-    <p class="meta" id="wiz-gmail-note"></p>
-  </div>
-  <div class="wiz-panel" id="wiz-slots" hidden><h2>When should Knowlu look?</h2>
-    <div class="wiz-row"><input type="text" id="wiz-tz" placeholder="Timezone"><input type="text" id="wiz-slot1" placeholder="12:00"><input type="text" id="wiz-slot2" placeholder="18:00"></div>
-    <label><input type="checkbox" id="wiz-autostart" checked> Start Knowlu with Windows</label>
-  </div>
-  <div class="wiz-panel" id="wiz-finish" hidden><h2>Ready</h2><p class="lede" id="wiz-summary"></p>
-    <p class="meta">Your first look runs as soon as you finish, and today&rsquo;s page will be waiting.</p>
-    <p class="meta" id="wiz-restore-note"></p>
-  </div>
-  <div class="wiz-nav"><span class="crit" id="wiz-error"></span><button class="b" id="wiz-back">Back</button><button class="b pri y" id="wiz-next">Next</button></div>
 </section>
 <aside class="drawer" id="drawer" hidden></aside>
 <aside class="setpanel" id="settings" hidden>

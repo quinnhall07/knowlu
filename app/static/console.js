@@ -31,14 +31,14 @@
     return window.__TAURI__.core.invoke(cmd, args || {});
   }
 
-  // R-C1b-exec-9: the wizard's subscribe panel and the upgrade overlay both need to ask this same
+  // R-C1b-exec-9: the upgrade overlay (and, before F10, the wizard's subscribe panel) asks this same
   // question — is this account entitled right now — and each used to carry its own copy of the
   // status test. One copy, resolved `true` only on `ok` plus an active or trialing status, `false`
   // on anything else, a refusal or a dropped invoke included: nobody downstream of this has to
   // remember to `.catch`.
   // L8 S5 (spec 3.4): the same answer with the plan beside the status, `{ entitled, plan }`, and the
-  // same fall-back — not entitled, no plan — on any failure. Every place the wizard records
-  // `WIZ.entitled` asks this one, so the plan is known wherever the status is.
+  // same fall-back — not entitled, no plan — on any failure. Every caller asks this one, so the plan
+  // is known wherever the status is.
   function checkEntitlement() {
     return invoke("entitlement_now", {}).then(function (r) {
       var yes = !!(r && r.ok && (r.status === "active" || r.status === "trialing"));
@@ -2251,7 +2251,7 @@
   // minutes after minting), starting at 3 s and backing off to 10 s. Then the row says Google was
   // not heard from and offers "Check again", which re-reads the status and never mints a new link.
   // `mySeq` is taken on every click and Settings close bumps `SET.googleSeq`, so a stale poll never
-  // repaints the row (as `WIZ.googleSeq` does).
+  // repaints the row (as `SET.googleSeq` does).
   var GOOGLE_POLLING = "Waiting for Google… finish in your browser.";
   var GOOGLE_LINK_LIFETIME_MS = 600000;
   var GOOGLE_NO_ANSWER = "Didn’t hear back from Google.";
@@ -2962,7 +2962,7 @@
     EL("upgrade").hidden = true;
   }
   /** The overlay is the console window's own surface and nothing paints it, so its busy state is one
-   *  flag and two writes rather than a `WIZ` field. Without it, two presses on Continue with Google
+   *  flag and two writes rather than a state field. Without it, two presses on Continue with Google
    *  are two commands, two loopback listeners and two browser tabs — and the second callback meets a
    *  closed port. */
   var UP_BUSY = false;
@@ -2985,7 +2985,7 @@
     });
   }
   EL("upgrade").addEventListener("click", function (e) {
-    // The same branch the wizard has, and it matters more here: this window has a working console to
+    // The same branch the setup shell has, and it matters more here: this window has a working console to
     // lose, and a plain navigation to `terms.html` would lose it while the user is ticking the box
     // that says they accept it.
     var policy = e.target.closest("a.policy");
@@ -3019,7 +3019,7 @@
       }
       upBusy(true);
       // **`ageAttested`, not the Rust spelling** — Tauri v2 camel-cases every argument key, and the
-      // wizard's own call carries the same comment for the same reason.
+      // setup shell's own call carries the same comment for the same reason.
       invoke("send_magic_link", { email: EL("up-email").value.trim(), ageAttested: EL("up-18").checked }).then(function (r) {
         upBusy(false);
         if (!r.ok && String(r.error || "").indexOf(UNREACHABLE) === 0) { upgradeUnreachable(); return; }
@@ -3166,8 +3166,8 @@
   // ---- end L4 re-consent
 
   // Plan 4a Task 2: the console is one of three things this window can be. `launch_state` says
-  // which: a console over a resolved profile, the picker (more than one profile), or the wizard
-  // (none). The console's own listeners are bound only on the console path — a picker window has
+  // which: a console over a resolved profile, the picker (more than one profile), or the setup
+  // shell (none). The console's own listeners are bound only on the console path — a picker window has
   // no deck, no nav and no poll.
   function bootConsole() {
     window.addEventListener("hashchange", function () { route(location.hash.slice(1)); });
@@ -3189,7 +3189,7 @@
     // Spec §11a: and one look at the account, which is what raises the upgrade overlay on the first
     // launch after C1 for an install that already existed. Once per launch, never on a timer — an
     // install that has an account never sees it, and one that dismissed it is asked again tomorrow.
-    // D6: the wizard's announcement was taken and setup has not begun: it begins now, in this window,
+    // D6: the mail announcement was taken at the old wizard's end and setup has not begun: it begins now, in this window,
     // but only once the privacy answer is in; while an update is owed it waits (the offer marker stays).
     checkAccount().then(function () { return mailFirstOpen(); });
   }
@@ -3197,12 +3197,15 @@
   function renderPicker(l) {
     var ps = l.profiles || [];
     EL("picker").hidden = false;
+    EL("setup").hidden = true;
     document.querySelector(".app").hidden = true;
-    EL("pick-lede").textContent = ps.length ? "Which vault?" : "No profile on this machine yet.";
+    EL("pick-lede").textContent = ps.length ? "Each profile is its own plan folder and account on this computer." : "No profile on this machine yet.";
+    // `setup_unfinished` is the launch state's own flag for a profile whose setup stopped early (F3);
+    // the page says so and offers Continue setup, which is the same open. It reads nothing else.
     EL("pick-list").innerHTML = ps.map(function (p) {
       return '<div class="row pick" data-profile="' + h(p.id) + '"><div class="ttl"><span class="a">' + h(p.name) +
-        '</span><span class="meta">' + h(p.vault) + "</span></div>" +
-        '<div class="acts"><button class="b pri y" data-open="' + h(p.id) + '">Open</button></div></div>';
+        '</span><span class="meta">' + (p.setup_unfinished ? "Setup not finished" : h(p.vault)) + "</span></div>" +
+        '<div class="acts"><button class="b pri y" data-open="' + h(p.id) + '">' + (p.setup_unfinished ? "Continue setup" : "Open") + "</button></div></div>";
     }).join("");
   }
 
@@ -3222,16 +3225,15 @@
   });
 
   // C3' Task 9, step 6 (P3: built to yes): the LOCAL `Backups\` mirror, never the account — the
-  // account's own copy arrives by signing in, through the wizard's own Finish (H11a), with no route
+  // account's own copy arrives by signing in, through the setup shell's account step (H11a), with no route
   // and no code to type. `pick_folder` and `restore_vault` have both existed since C1 with no caller;
   // this is the first one. Only two fields of a restored vault's plan are ever read
   // (`finish_or_roll_back` -> `finish_profile_in`: the autostart choice and the local-judgment offer
   // marker), so the rest of this minimal plan is never looked at — the fields still have to be the
   // shapes `WizardPlan` requires to deserialize.
   //
-  // M3 (fix round 1): a name and an autostart choice, asked rather than assumed — the SAME two
-  // things panel 4 and panel 8 of the nine-panel wizard ask, with the SAME defaults ("Knowlu",
-  // Start Knowlu with Windows checked). Without a name, a second restore always landed at
+  // M3 (fix round 1): a name and an autostart choice, asked rather than assumed, with the defaults
+  // the setup shell makes a folder with ("Knowlu", Start Knowlu with Windows checked). Without a name, a second restore always landed at
   // `<home>\Knowlu\Knowlu` and the second one was refused outright ("already exists"); forcing
   // autostart enabled it without asking.
   var PICK_RESTORE_BACKUP = "";
@@ -3245,7 +3247,7 @@
     }).catch(function () {});
   });
   EL("pick-restore-go").addEventListener("click", function () {
-    // N6 (fix round 2): disabled before the call, the same guard the wizard's own Finish already
+    // N6 (fix round 2): disabled before the call, the same guard the shell's own Continue has
     // has (R2-3) — a double click used to start two `restore_vault` calls, the second losing the
     // rename race and writing its error into #pick-lede while the first was already relaunching.
     // Re-enabled on EITHER outcome: a refusal must leave the button pressable again.
@@ -3260,7 +3262,7 @@
       if (!a.ok) { EL("pick-lede").textContent = a.error; go.disabled = false; return; }
       // N6 nit (fix round 3): open_profile can itself answer ok: false (the profile vanished, the
       // relaunch failed to spawn) — before this, that left the button disabled with no message at
-      // all, the one outcome neither the wizard's own Finish nor pick-adopt's own chain guards
+      // all, the one outcome neither the shell's Continue nor pick-adopt's own chain guards
       // against either. Shown and re-enabled here rather than left silent.
       return invoke("open_profile", { id: a.profile.id }).then(function (o) {
         if (o && o.ok === false) { EL("pick-lede").textContent = o.error; go.disabled = false; }
@@ -3268,979 +3270,230 @@
     }).catch(function () { go.disabled = false; });
   });
 
-  // R-P4a-15, the picker's other door: the same wizard, opened from a machine that already has a
-  // profile. The shell carries every wizard command, so nothing has to be relaunched to get here.
+  // R-P4a-15, the picker's other door: the setup shell, opened from a machine that already has a
+  // profile. The shell carries the sign-in commands, so nothing has to be relaunched to get here.
   EL("pick-add").addEventListener("click", function () {
-    invoke("launch_state", {}).then(function (l) { startWizard(l || {}); }).catch(function () {});
+    invoke("launch_state", {}).then(function (l) { startSetup(l || {}); }).catch(function () {});
   });
 
-  // ---- C1 Task 17: onboarding (cloud design §4.2). TEN panels in this same document — no second
-  // webview, no bundler. NOTHING reaches this machine's disk until Finish, except the account (which
-  // is not this machine) and the coursework credentials, written the moment the user leaves panel 6
-  // (decision 3).
-  var PANELS = ["welcome", "account", "subscribe", "mail", "vault", "calendars", "logins", "gmail", "slots", "finish"];
+  // ---- O3 F10: the setup shell. Steps 1 and 2 only (welcome, your account), in this same document.
+  // Everything after the account is the onboarding mode's (the rail's other rows are its benefits,
+  // static words). The shell holds no vault until the account is signed in: it signs in, makes the
+  // folder with its defaults, and relaunches into that profile. It computes nothing and shows only
+  // what a command answered.
+  //
   // **One string, two languages.** `account::UNREACHABLE` is the first clause of every transport
   // failure the Rust side emits, and this is the page's copy of it. They are pinned to each other by
   // `static_assets.rs::the_unreachable_clause_is_one_string_on_both_sides`, the same way `PRIVACY` is
   // pinned to the site's — because a guard that silently stops matching is worse than no guard.
   var UNREACHABLE = "the account service could not be reached";
   var PRIVACY = "Your tasks and notes live in a plain-text folder on this machine and in your Knowlu account, so every computer you sign in on opens on the same day; our servers keep them encrypted at rest, beside your account, the judgments made for you and what you correct, and none of it is ever sold or shared.";
-  // Escaped on purpose: the shipped page carries no bare network literal (console spec §7).
-  var ICS_OK = /^https:\/\/\S+(\.ics($|\?)|\/calendar\/)/i;
-  // Windows' reserved device names, matched on the part before the first dot — the same list
-  // `onboarding.rs`'s RESERVED holds (R-P4a-23).
-  var RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
-  // `parent` comes from `launch_state.default_parent` (`%USERPROFILE%\Knowlu`) and is never picked:
-  // spec §4.1 — the app creates the folder and nobody is asked about it. It is still in WIZ because
-  // `dest()` is what the credential target is derived from, and a rename on the vault panel has to
-  // move the coursework logins with it (R-P4a-23).
-  var WIZ = { mailOffer: true, step: 0, parent: "", name: "Knowlu", email: "", accountId: "", entitled: false,
-              // L8 S5: the plan the entitlement answer carried, `null` until it has answered, so the
-              // tester form is never drawn on a guess; `entryCheck` is true while the on-entry ask is out.
-              plan: null, entryCheck: false,
-              // The Google round trip runs in the system browser and can take a minute; `busy` is
-              // what disables #wiz-google-signin meanwhile and `accountNote` is the status line —
-              // both painted by `renderWizard`, the file's own A-5 rule (state lives on WIZ, never
-              // written to the DOM straight from inside a click handler).
-              busy: false, accountNote: "",
-              ics: "", icsNote: "", cal: "", calNote: "",
-              // Task 11 re-review N1 (R-C3'-exec-41): what the paste or capture said about the link it
-              // checked — `{ url, stored }` when it validated, `null` when it was refused. `feedFlags`
-              // turns it into the plan's per-feed flags at Finish, for the value the field holds then.
-              icsFeed: null, calFeed: null,
-              // C2 final review A-5 (m59+m60): the Google flow's own state, rendered by
-              // `renderWizard()` like every other wizard field — a direct DOM write from inside
-              // the click handler was invisible to it and got wiped by the next render a Back, a
-              // Next or an unrelated poll caused. `google` is whether the calendar grant is
-              // connected (what `wizFinish` used to read off a bare module-level `WIZ_GOOGLE`);
-              // `googleNote` is the status line (its own element now — `wiz-cal-note` belongs to
-              // the personal iCal field, not this one); `googlePolling` drives the button's
-              // disabled state for the WHOLE poll, not only after it succeeds; `googleSeq` is the
-              // cancellation token `wizGo` bumps on leaving the panel, the same shape
-              // `schoolSeq` uses for the typeahead.
-              google: false, googleNote: "", googlePolling: false, googleSeq: 0,
-              // The Gmail panel's own flow (D11): the same shape, its own token. Nothing here reaches
-              // the plan — Next never waits on it and Finish never reads it.
-              gmail: false, gmailNote: "", gmailPolling: false, gmailSeq: 0,
-              // R-OB-4: the school the student picked — a unitid, a name, a state and (once
-              // something establishes it) an LMS kind. The LIST is never here: `campus_search` is a
-              // command, and the page holds only the ten rows it is showing.
-              campus: { unitid: "", name: "", state: "", lms: "" },
-              // R-OB-1 and R-OB-2. `map` is one row per discovered book/section, each with the
-              // student's confirmed course; `courses` is the enrolment, captured or typed. Both end
-              // up in the plan, and both are allowed to be empty — a student with no coursework
-              // logins has nothing to map, and a campus whose API we cannot read is typed in.
-              map: [], courses: [],
-              // **`campus` is declared once, above.** A second `campus:` key here would silently
-              // replace the choice object with a string, `WIZ.campus.unitid` would be `undefined` in
-              // every `lms_link` call, and `wizFinish` would send a `campus_choice` serde cannot read.
-              // The bundled list is gone with it: Task 14c takes it out of `launch_state`.
-              // R-C1-42: the sign-in window's own state is one boolean — the session directory is the
-              // app's and never crosses the IPC, and `close_lms_window` takes no argument.
-              // R-C1-55: `discovering` is the in-flight latch on `coursework-discover` (a second
-              // Next would log into both vendors again, concurrently, and the two answers would
-              // decide the mapping panel between them); `checkoutOpened` is what makes the
-              // subscribe panel silent until the browser has actually been sent somewhere;
-              // `schoolSeq` drops a typeahead answer a later keystroke has already overtaken.
-              // R-C1b-exec-10: `discovered` is whether a discovery has FINISHED at least once,
-              // rows or none — the first `coursework` run files an empty parse as an issue rather
-              // than an empty semester, so a student who saw nothing here can still go on honestly.
-              // R-C1c-plan-3: `mapWarned` is whether the blank-row sentence has been shown once.
-              // `wizStep` sets `WIZ.step` BEFORE the panel branch runs and `renderWizard` hides
-              // every other panel, so a sentence written on the way out is a sentence nobody reads
-              // — the first Next stays on the panel to show it, the second goes on.
-              lmsOpen: false, discovering: false, discovered: false, mapWarned: false, checkoutOpened: false, schoolSeq: 0,
-              tz: "", tzTouched: false, slots: ["12:00", "18:00"], autostart: true,
-              zy: false, vhl: false, credVault: "", error: "",
-              // M1 (fix round 1): what Finish's own restore found, painted the ordinary A-5 way —
-              // set once `create_vault`/`restore_vault` resolves (`restoreSentence`, in `wizFinish`),
-              // read here by `renderWizard` like every other wizard field. Blank until then: a
-              // sentence claiming an outcome before Finish has even run is the bug this replaces.
-              restoreNote: "" };
 
-  // The trim and the trailing-separator strip are not cosmetic. `dest_for` in onboarding.rs trims
-  // both halves and joins them with PathBuf::join, which never doubles a separator — and
-  // storeCredentials derives the credential target from the string THIS function produced. A page
-  // that spelled the path differently from the backend would file a password under a target name
-  // the new vault's own ingest.yaml never mentions, and the first coursework run would find nothing.
-  function dest() {
-    var p = WIZ.parent.trim().replace(/[\\/]+$/, ""), n = WIZ.name.trim();
-    return p && n ? p + "\\" + n : "";
-  }
+  // The five screens: welcome, account (the ask), browser (Google is open), code (the emailed code)
+  // and done (signed in, the folder made). State lives on `SU` and `renderSetup` is its one painter.
+  var SU = null;
+  // The rail's one row that changes here, and the two words under it, per screen.
+  var SU_RAIL = {
+    welcome: { no: "Before you start", left: "About 9 minutes left" },
+    account: { no: "Step 1 of 9", left: "About 9 minutes left" },
+    browser: { no: "Step 1 of 9", left: "About 9 minutes left" },
+    code: { no: "Step 1 of 9", left: "About 9 minutes left" },
+    done: { no: "Step 2 of 9", left: "About 8 minutes left" }
+  };
 
-  // R-C1-42: one sentence for a validated school feed, wherever it came from. The courses clause is
-  // added ONLY above zero — a real Blackboard feed reported 156 events across 0 courses, because
-  // `summarise` counts only SUMMARY lines that lead with a course code, and "across 0 courses" reads
-  // as a failure to a student whose feed is perfectly good.
-  function feedSummary(link) {
-    var s = "Found " + link.events + " events";
-    if (link.courses > 0) { s += " across " + link.courses + " courses"; }
-    return s + ".";
-  }
-
-  function startWizard(l) {
-    EL("wizard").hidden = false;
+  function startSetup(l, at) {
+    SU = { l: l || {}, step: at || "welcome", email: "", codeEmail: "", emailOpen: false, busy: false, making: false,
+           error: "", codeError: "", doneError: "", folder: "", profileId: "", restore: "" };
+    EL("setup").hidden = false;
     EL("picker").hidden = true;
     document.querySelector(".app").hidden = true;
-    WIZ.tz = l.tz || "";
-    WIZ.parent = l.default_parent || "";
-    EL("wiz-name").value = WIZ.name;
-    EL("wiz-privacy").textContent = PRIVACY;
-    EL("wiz-tz").value = WIZ.tz;
-    EL("wiz-slot1").value = WIZ.slots[0];
-    EL("wiz-slot2").value = WIZ.slots[1];
-    renderWizard();
+    EL("su-privacy").textContent = PRIVACY;
+    renderSetup();
   }
 
-  function renderWizard() {
-    PANELS.forEach(function (p, i) { EL("wiz-" + p).hidden = i !== WIZ.step; });
-    EL("wiz-step").textContent = "step " + (WIZ.step + 1) + " of " + PANELS.length;
-    // Spec §7 (a): hidden, not disabled. A greyed Back that does nothing is the control Quinn
-    // pressed; a Back that is not on screen at step 0 asks no question.
-    EL("wiz-back").hidden = WIZ.step === 0;
-    EL("wiz-next").textContent = WIZ.step === PANELS.length - 1 ? "Finish" : "Next";
-    // Spec §7 (b): the ONE writer of this property. `wizGo`'s discovery latch and `wizFinish`'s
-    // re-entry guard both set `WIZ.busy` and call renderWizard, so a path that forgets to clear it
-    // is a path renderWizard still recovers from on the next render — which a direct DOM write was
-    // not. The file's own A-5 rule, applied to the last field that escaped it.
-    EL("wiz-next").disabled = WIZ.busy;
-    EL("wiz-error").textContent = WIZ.error;
-    EL("wiz-mail-note").textContent = WIZ.mailOffer ? "" : "Skipped. You can connect it any time in Settings.";
-    EL("wiz-mail-notnow").hidden = !WIZ.mailOffer;
-    EL("wiz-account-note").textContent = WIZ.accountId ? "Signed in as " + WIZ.email : WIZ.accountNote;
-    EL("wiz-google-signin").disabled = WIZ.busy;
-    // F10: the emailed-code door spends the same 20/hour budget as the Google button, so two quick
-    // presses are worth the same guard.
-    EL("wiz-magic").disabled = WIZ.busy;
-    EL("wiz-code-go").disabled = WIZ.busy;
-    // Silent until the checkout page has actually been opened: on a panel nobody has pressed yet,
-    // "waiting for your browser" reads as *a page failed to open* (R-C1-55, M1).
-    EL("wiz-sub-note").textContent = WIZ.entitled ? (WIZ.plan === "tester" ? "Your account is already set up. Nothing to pay." : "Your subscription is active.")
-      : (WIZ.checkoutOpened ? "Waiting for the payment page in your browser…" : "");
-    // L8 S5 (spec 3.4): no price on a panel an entitled account is looking at, and none while the
-    // on-entry ask is out. For the plan tester the lede goes and the heading is retitled; the note
-    // above is the one place the nothing-to-pay line is written.
-    var tester = WIZ.entitled && WIZ.plan === "tester";
-    EL("wiz-sub-month").hidden = WIZ.entitled || WIZ.entryCheck;
-    EL("wiz-sub-year").hidden = WIZ.entitled || WIZ.entryCheck;
-    document.querySelector("#wiz-subscribe .lede").hidden = tester || WIZ.entryCheck;
-    document.querySelector("#wiz-subscribe h2").textContent = tester ? "You're all set" : "Subscribe";
-    EL("wiz-vault-path").textContent = dest() ? "Your files will be at " + dest() : "";
-    EL("wiz-lms-state").textContent = WIZ.icsNote;
-    // R-C1-42: the capture is a SECOND press, and it only exists once a window is open. Firing it as
-    // the window opens would read the identity provider's page, not the school's — the student has
-    // not signed in yet, and the answer would be "finish signing in first" every time.
-    EL("wiz-lms-capture").hidden = !WIZ.lmsOpen;
-    // F4: the sign-in page is looked up by school, so the button waits for one to be picked.
-    EL("wiz-lms-open").disabled = !WIZ.campus.unitid;
-    EL("wiz-ics-note").textContent = WIZ.ics && !ICS_OK.test(WIZ.ics) ? "That does not look like a calendar feed link." : "";
-    EL("wiz-cal-note").textContent = WIZ.calNote;
-    // A-5: driven entirely by WIZ state, so returning to this panel (or any other re-render while
-    // on it) always shows the truth — connected, mid-poll, or neither — never a stale DOM write.
-    EL("wiz-google-note").textContent = WIZ.googleNote;
-    EL("wiz-google").disabled = WIZ.google || WIZ.googlePolling;
-    EL("wiz-gmail-note").textContent = WIZ.gmailNote;
-    EL("wiz-gmail-connect").disabled = WIZ.gmail || WIZ.gmailPolling;
-    EL("wiz-summary").textContent = dest() + ", looking at " + WIZ.slots.join(" and ") + " " + WIZ.tz + ".";
-    // M1 (fix round 1): painted from WIZ, like every other wizard field — blank until `wizFinish`
-    // has an actual answer from `restore_into`, never a claim made before Finish has even run.
-    EL("wiz-restore-note").textContent = WIZ.restoreNote;
+  function suShow(step) {
+    SU.step = step;
+    renderSetup();
+    var head = EL("su-h-" + step);
+    if (head) { head.focus(); }
   }
 
-  // Panel 6 leaves: write whatever was typed straight into Credential Manager, then clear the
-  // inputs — a crash must never leave a password in page memory longer than it has to be. On a
-  // FAILED write the fields stay full (review round 1, IMPORTANT 2): clearing them would leave a
-  // panel the user cannot retype into and a flag claiming a login that is not there.
-  function clearCredentialFields() {
-    ["wiz-zy-pass", "wiz-vhl-pass", "wiz-zy-user", "wiz-vhl-user"].forEach(function (id) { EL(id).value = ""; });
-  }
-  function storeCredentials() {
-    var jobs = [], stored = [], half = false;
-    [["zybooks", "wiz-zy-user", "wiz-zy-pass"], ["vhl", "wiz-vhl-user", "wiz-vhl-pass"]].forEach(function (t) {
-      var u = EL(t[1]).value.trim(), s = EL(t[2]).value;
-      if (!u && !s) { return; }
-      // Half a login is a typo, not a choice. Skipping it silently left the user certain they had
-      // connected zyBooks (review round 1, minor).
-      if (!u || !s) { half = true; return; }
-      stored.push(t[0]);
-      // `dest()`: the vault does not exist yet, so the credential target is derived from the path
-      // Finish will create — the same path `create_vault` derives the vault's own
-      // `credential_target:` lines from, so the two always name the same entry.
-      jobs.push(invoke("store_credentials", { vault: dest(), source: t[0], user: u, secret: s }));
-    });
-    if (half) { WIZ.error = "Enter both the email and the password, or leave both empty."; return Promise.resolve(false); }
-    if (!jobs.length) { return Promise.resolve(true); }
-    return Promise.all(jobs).then(function (rs) {
-      var bad = rs.filter(function (r) { return r && !r.ok; });
-      if (bad.length) { WIZ.error = bad[0].error; return false; }
-      // Only now. These flags become `enabled: true` and a `credential_target:` line in the new
-      // vault's ingest.yaml; set before the write resolved, they promised a login that a failed
-      // write had not stored (review round 1, IMPORTANT 2).
-      stored.forEach(function (src) { if (src === "zybooks") { WIZ.zy = true; } else { WIZ.vhl = true; } });
-      // Re-typed logins are a new answer: a discovery already finished for the OLD ones must not
-      // stand in for one against these.
-      if (stored.length) { WIZ.discovered = false; WIZ.mapWarned = false; }
-      WIZ.credVault = dest();   // R-P4a-23: the path these entries are keyed to.
-      clearCredentialFields();
-      return true;
-    }).catch(function () { WIZ.error = "the credential could not be stored"; return false; });
+  function renderSetup() {
+    ["welcome", "account", "browser", "code", "done"].forEach(function (s) { EL("su-" + s).hidden = SU.step !== s; });
+    var r = SU_RAIL[SU.step];
+    EL("su-stepno").textContent = r.no;
+    EL("su-left").textContent = r.left;
+    // The account row: Now while the ask is open, Done with its proof once signed in; the school row
+    // is the next one. Nothing else in the rail moves in the shell.
+    var rows = {};
+    document.querySelectorAll("#su-rail .su-row").forEach(function (li) { rows[li.getAttribute("data-rail")] = li; li.className = "su-row"; });
+    var acct = rows.account, done = SU.step === "done";
+    if (SU.step !== "welcome") { acct.classList.add(done ? "done" : "now"); }
+    if (done) { rows.school.classList.add("next"); }
+    acct.querySelector(".su-st").textContent = SU.step === "welcome" ? "" : (done ? "Done" : "Now");
+    acct.querySelector(".su-pf").textContent = done ? "Signed in as " + SU.email : "";
+    EL("su-email-field").hidden = !SU.emailOpen;
+    EL("su-google").disabled = SU.busy;
+    EL("su-use-code").disabled = SU.busy;
+    EL("su-magic").disabled = SU.busy;
+    EL("su-code-go").disabled = SU.busy;
+    EL("su-error").textContent = SU.error;
+    EL("su-browser-error").textContent = SU.error;
+    EL("su-code-error").textContent = SU.codeError;
+    EL("su-code-why").textContent = "Knowlu sent a code to " + SU.codeEmail + ".";
+    EL("su-signed-as").textContent = SU.email;
+    EL("su-folder-line").textContent = SU.making ? "Setting up your plan folder on this computer…"
+      : (SU.folder ? "Your plan folder is ready on this computer: " + SU.folder + ". It’s plain text files you can open." : "");
+    EL("su-restore-line").textContent = SU.restore;
+    EL("su-done-error").textContent = SU.doneError;
+    EL("su-continue").disabled = SU.making || !SU.profileId || SU.busy;
+    EL("su-retry").hidden = SU.making || !!SU.profileId;
+    EL("su-enter").hidden = SU.making || !SU.profileId;
   }
 
-  // R-P4a review round 1, IMPORTANT 3: the slots panel's answers live in WIZ, read on every keystroke
-  // and again on the way out, so the Finish summary and the plan `create_vault` receives are the same
-  // numbers the user is looking at. **No campus read here** (R-OB-4): the school is the question
-  // *which school?*, it belongs on the calendars panel where it is used, and reading it three panels
-  // after `open_lms_window` needed it is why every sign-in used to answer "no sign-in page is known
-  // for that school yet".
-  function readSlotsPanel() {
-    WIZ.tz = EL("wiz-tz").value.trim() || WIZ.tz;
-    WIZ.slots = [EL("wiz-slot1").value.trim() || "12:00", EL("wiz-slot2").value.trim() || "18:00"];
-    WIZ.autostart = EL("wiz-autostart").checked;
-  }
-
-  // A refusal belongs on screen AND has to register as an answer to THIS press. `#wiz-error` sits
-  // at the left of the nav row, so a second Next against the same unmet gate rewrote the same red
-  // sentence and looked like nothing happened at all. One re-flow, one animation frame, and the
-  // sentence arrives again.
-  function flashError() {
-    var el = EL("wiz-error");
-    el.classList.remove("flash");
-    void el.offsetWidth;
-    el.classList.add("flash");
-  }
-
-  // The discovery command states a reason and nothing else now (onboarding.rs's own rule); the
-  // page is what appends the way forward, and a reason that already ends in a stop needs its own
-  // trimmed before the page's own sentence follows it.
-  function tidy(s) { return String(s || "").replace(/[.\s]+$/, ""); }
-
-  function wizValid() {
-    WIZ.error = "";
-    if (WIZ.step === 1 && !WIZ.accountId) { WIZ.error = "Sign in first."; }
-    if (WIZ.step === 2 && !WIZ.entitled) { WIZ.error = "Finish the payment page in your browser, then come back."; }
-    if (WIZ.step === 4) {
-      var n = WIZ.name.trim();
-      if (!n) { WIZ.error = "Give this setup a name."; }
-      else if (/[\\/:]/.test(n)) { WIZ.error = "A name has no slashes or colons."; }
-      else if (/[*?"<>|]/.test(n)) { WIZ.error = "A name has no * ? \" < > or | either."; }
-      else if (/[. ]$/.test(n)) { WIZ.error = "A name cannot end in a dot or a space."; }
-      else if (RESERVED_NAME.test(n.split(".")[0])) { WIZ.error = "That name is reserved by Windows."; }
-    }
-    // Panel 4 is the calendars panel. Neither feed is compulsory — a student with no personal
-    // calendar still gets a ranked day, and one whose school defeats the capture can come back — but
-    // a link that is there and malformed is caught here rather than at Finish.
-    if (WIZ.step === 5 && WIZ.ics && !ICS_OK.test(WIZ.ics)) { WIZ.error = "That does not look like a calendar feed link."; }
-    if (WIZ.step === 5 && WIZ.cal && !ICS_OK.test(WIZ.cal)) { WIZ.error = "That does not look like a secret iCal address."; }
-    return !WIZ.error;
-  }
-
-  function wizGo(n) {
-    // R-C1b-exec-9: the only thing that ever set WIZ.entitled true used to be the two-minute poll
-    // below, and a student who came back to the wizard after that poll had already given up found
-    // Next refusing forever with no way to ask again. One re-ask, here, before the refusal — and
-    // never from inside it, since an account that truly is not entitled must not ask the service
-    // forever.
-    if (n > WIZ.step && WIZ.step === 2 && !WIZ.entitled) {
-      WIZ.busy = true; renderWizard();
-      return checkEntitlement().then(function (r) {
-        WIZ.busy = false;
-        if (r.entitled) { WIZ.plan = r.plan; WIZ.entitled = true; }
-        return wizStep(n);
-      });
-    }
-    return wizStep(n);
-  }
-
-  function wizStep(n) {
-    if (n > WIZ.step && !wizValid()) { renderWizard(); flashError(); return Promise.resolve(); }
-    // A refusal belongs to the panel that raised it: stepping back clears it rather than carrying
-    // a red line about a field that is no longer on screen.
-    if (n < WIZ.step) { WIZ.error = ""; }
-    var leaving = WIZ.step;
-    if (leaving === 8) { readSlotsPanel(); }
-    // Leaving the calendar panel closes the sign-in window and deletes its session, whether or not a
-    // link was captured: a campus login must not outlive the panel that opened it. R-C1-40/R-C1-42 —
-    // no argument: the app knows which directory it opened, and the page never holds a temp path.
-    if (leaving === 5 && WIZ.lmsOpen) {
-      invoke("close_lms_window", {}).catch(function () {});
-      WIZ.lmsOpen = false;
-    }
-    // A-5: cancel any Google poll in flight — bumping the token is enough, the loop checks it on
-    // its own next wake and stops touching the page. Only the "still polling" flag is cleared here
-    // (not `googleNote`): a consent that already finished, or one still open in the browser, is
-    // still true when the student comes back to this panel, and the note should still say so.
-    if (leaving === 5 && WIZ.googlePolling) {
-      WIZ.googleSeq += 1;
-      WIZ.googlePolling = false;
-    }
-    // D11: the same for the Gmail panel (step 6); a connect that already finished stays true.
-    if (leaving === 7 && WIZ.gmailPolling) {
-      WIZ.gmailSeq += 1;
-      WIZ.gmailPolling = false;
-    }
-    WIZ.step = Math.max(0, Math.min(PANELS.length - 1, n));
-    if (leaving === 6 && n > leaving) {
-      // R-C1-55, I3: one discovery at a time. `discover_coursework` spawns the engine and logs into
-      // zyBooks and VHL; a second Next while the first is in flight starts a second child, with two
-      // more vendor logins racing the first, and the two `WIZ.map` assignments decide the panel
-      // between them. The latch refuses the re-entry and the disabled button says so on screen.
-      if (WIZ.discovering) { WIZ.step = leaving; renderWizard(); return Promise.resolve(); }
-      return storeCredentials().then(function (ok) {
-        if (!ok) { WIZ.step = leaving; renderWizard(); return; }
-        // R-OB-1: the credentials are in Credential Manager now, so this is the first moment discovery
-        // can run. Stay on the panel while it does — the mapping is the whole point of having asked
-        // for the logins — and let Next work again the moment the rows are on screen.
-        if (!WIZ.zy && !WIZ.vhl) { renderWizard(); return; }
-        if (WIZ.map.length || WIZ.discovered) {
-          // R-C1c-plan-3: the first Next after a finished discovery with blank, un-ignored rows
-          // writes the sentence and stays here — `WIZ.step` was advanced above, so putting it back
-          // is what keeps the panel, and its note, on screen. The next Next goes on whatever the
-          // rows say: this is a sentence, not a gate.
-          if (!WIZ.mapWarned && noteUnmapped()) { WIZ.mapWarned = true; WIZ.step = leaving; }
-          renderWizard();
-          return;
-        }
-        WIZ.step = leaving;
-        WIZ.discovering = true;
-        WIZ.busy = true;
-        EL("wiz-map").hidden = false;
-        EL("wiz-map-note").textContent = "Looking up your books and sections…";
-        renderWizard();
-        return invoke("discover_coursework", { vault: dest(), zybooks: WIZ.zy, vhl: WIZ.vhl }).then(function (d) {
-          WIZ.map = ((d && d.rows) || []).map(function (r) {
-            return { source: r.source, key: r.key, detail: r.detail, suggested: r.suggested, course: r.suggested || "", ignore: !!r.ignored };
-          });
-          // R-C1b-exec-10: set BEFORE renderMapping() runs — the first `coursework` run files an
-          // empty parse as an issue rather than an empty semester, so a finished discovery that
-          // found nothing is still a finished discovery, and renderMapping() has to know that on
-          // this very paint or the panel it is about to draw is the empty one nobody could see.
-          WIZ.discovered = true;
-          EL("wiz-map-note").textContent = WIZ.map.length
-            ? (d && d.note ? tidy(d.note) + ". " : "Knowlu found these on your accounts. ") + "Confirm the course each one belongs to — without this, Knowlu can see the work but not what it is for."
-            : tidy((d && d.note) || "We could not reach your coursework sites") + ". You can go on — Knowlu will try again on its first run.";
-          renderMapping();
-        }).catch(function () {
-          WIZ.discovered = true;
-          EL("wiz-map-note").textContent = "We could not look those up. You can go on — Knowlu will try again on its first run.";
-          renderMapping();
-        }).then(function () {
-          // Both outcomes, always: a latch a rejected promise leaves set is a Next button that never
-          // comes back. Repainted here rather than left for a later render: nothing else touches the
-          // DOM once this chain settles, and a WIZ field nobody repaints is a Next button nobody can
-          // press.
-          WIZ.discovering = false;
-          WIZ.busy = false;
-          renderWizard();
-        });
-      });
-    }
-    // L8 S5 (spec 3.4): on entering the subscribe step, ask status and plan first, so a granted
-    // account sees the nothing-to-pay form at once (relaunch or step back) and never a price. An
-    // answer of no changes nothing here: the prices come back and the step behaves as today.
-    if (WIZ.step === 2 && leaving !== 2 && !WIZ.entitled) {
-      WIZ.entryCheck = true;
-      renderWizard();
-      return checkEntitlement().then(function (r) {
-        WIZ.entryCheck = false;
-        if (r.entitled) { WIZ.plan = r.plan; WIZ.entitled = true; WIZ.error = ""; }
-        renderWizard();
-      });
-    }
-    renderWizard();
-    return Promise.resolve();
-  }
-
-  function wizRegister(plan) {
-    return invoke("create_vault", { name: WIZ.name, plan: plan });
-  }
-
-  // M1 (fix round 1): the one place all three of Finish's restore outcomes are worded, so a student
+  // M1 (fix round 1): the one place all three of the restore's outcomes are worded, so a student
   // never reads a claim the actual result disagrees with. `restored` is `create_vault`'s own
   // `{notes, records, empty, warnings}` (H11a's `sync::Restored`, C3' Task 9). `empty` alone cannot
   // tell "the account truly has nothing yet" from "the account could not be reached just now" —
-  // `restore_into` folds a failed pull into the same `empty: true` so Finish never rolls the vault
-  // back over a hotel Wi-Fi — so `warnings` (non-empty only on the failed-pull fold) is what tells
-  // the two apart here.
+  // `restore_into` folds a failed pull into the same `empty: true` so setup never rolls the vault
+  // back over a hotel Wi-Fi — so `ok` is what tells the two apart here.
   // N3 (fix round 2): keyed on `ok` (an explicit field `create_vault`'s own envelope carries,
   // C3' Task 9's `sync::Restored.ok`), never on `warnings.length` — a perfectly successful pull can
   // carry warnings too (a refused sync card, an oversize row), and reading those as "could not be
-  // reached" was the round 1 bug. Item 2 (N2's own follow-on): the offline sentence now says the
-  // notes arrive over the next SYNCS, plural — one page at a time, so a large account takes more
-  // than one.
+  // reached" was the round 1 bug. The offline sentence says the notes arrive over the next SYNCS,
+  // plural — one page at a time, so a large account takes more than one.
   function restoreSentence(restored) {
     if (!restored) { return ""; }
-    if (!restored.ok) { return "Your account could not be reached just now; your vault will fill in over the next syncs."; }
-    if (!restored.empty) { return "Your account already had a vault here — it just came back."; }
-    return "Your account had no vault yet — this is the first one.";
+    if (!restored.ok) { return "Your account could not be reached just now; your plan will fill in over the next syncs."; }
+    if (!restored.empty) { return "Your account already had a plan, and it just came back."; }
+    return "Your account had no plan yet, so this is the first one.";
   }
 
-  // R-P4a-23: the logins panel's entries are keyed to the path as it stood then, and Back → rename is
-  // exactly what the refused-Finish panel asks for. Say where they went and send the user back to
-  // panel 6 — the logins panel, which is where the fields are — rather than build a vault whose
-  // ingest.yaml points at an entry that is not there.
-  function credentialsStranded() {
-    WIZ.error = "Your logins were saved for " + WIZ.credVault + "; re-enter them.";
-    WIZ.zy = false;
-    WIZ.vhl = false;
-    WIZ.credVault = "";
-    WIZ.step = 6;
-    WIZ.busy = false;
-    renderWizard();
+  // The folder's name: "Knowlu", then "Knowlu 2", "Knowlu 3": the first one no profile on this
+  // machine already has. `dest_for` still refuses a folder that exists and its sentence is shown.
+  function suName() {
+    var taken = {};
+    (SU.l.profiles || []).forEach(function (p) { taken[String(p.name).toLowerCase()] = true; });
+    var n = "Knowlu", i = 2;
+    while (taken[n.toLowerCase()]) { n = "Knowlu " + i; i += 1; }
+    return n;
   }
 
-  // D6, risk 12: Not now is the whole of the choice. Nothing is set up in the wizard; the marker
-  // `offer_mail` writes at Finish is all the console's first open reads.
-  function wizNotNow() {
-    WIZ.mailOffer = false;
-    return wizGo(WIZ.step + 1);
+  // The defaults the account step makes a folder with (spec §1.9 A): the system's zone, the checks at
+  // 12:00 and 18:00, start with Windows. No school, no feed, no coursework login and no mail offer:
+  // each is asked on its own step, after the account.
+  function suPlan() {
+    return { ics_url: null, personal_calendar: null, ics_validated: false, ics_stored: false,
+             personal_calendar_validated: false, personal_calendar_stored: false, google_calendar: false,
+             offer_mail: false, timezone: SU.l.tz || "", slots: ["12:00", "18:00"],
+             zybooks: false, vhl: false, autostart: true };
   }
 
-  function wizFinish() {
-    // R2-3: disabled FIRST, before any await (including the `google_connected` re-read below) — a
-    // second Finish click landing in that window used to start a second `retarget_credentials`/
-    // `wizRegister` flow racing the first. Every failure path below re-enables it exactly as before.
-    // Painted immediately, synchronously, before readSlotsPanel or any await: the DOM `disabled`
-    // property is what actually stops a second physical click from ever reaching this function again
-    // — `WIZ.busy` alone is an in-memory flag nothing reads at the door.
-    WIZ.busy = true;
-    renderWizard();
-    readSlotsPanel();
-    // R-OB-1 and R-OB-2: the confirmed mapping and the course list, in the shapes `WizardPlan` takes.
-    // An ignored row contributes nothing but its place in `zybooks_ignore:`; a row with no course
-    // contributes nothing at all, which leaves that source unmapped and is the student's choice to
-    // have made. **`course` carries the confirmed course code and `label` the human title** (R-C1-47,
-    // I3): `create_vault_in` slugs `course` and only `course` — a mapping sent with an empty one is
-    // dropped there, which is a login taken and a book left `not in config; skipped` forever.
-    var zyRows = WIZ.map.filter(function (r) { return r.source === "zybooks" && !r.ignore && r.course; });
-    var vhlRows = WIZ.map.filter(function (r) { return r.source === "vhl" && !r.ignore && r.course; });
-    var codes = {};
-    zyRows.concat(vhlRows).forEach(function (r) { codes[r.course] = true; });
-    // Final review, I4 (a C1 Task 17 bug predating this branch): only a TYPED course belongs here —
-    // it carries `slug: ""`, and this is the only place anything derives one for it. A CAPTURED
-    // course already carries its own slug and is covered by the engine's `course_fragments`
-    // (`app/src/scaffold.rs`); sending it here too would give its LMS id a *second*, phantom
-    // `[id, ""]` entry that `create_vault_in` derives an ENGINE slug for on the empty second
-    // element — and because `course_map_lines` is first-wins by key with the page's entries first,
-    // that phantom slug wins over the real one `course_fragments` would have written, so the id
-    // ends up pointing at a course that doesn't exist (D4's `[LMS id -> slug]` guarantee broken).
-    WIZ.courses.forEach(function (c) { if (c.code && !c.slug) { codes[c.code] = true; } });
-    // A-5 (b): re-read the truth rather than trust the poll loop's last tick. A consent that
-    // finished (in the browser, or after the poll was cancelled by leaving and returning to the
-    // panel) after the loop last checked must still birth the vault with the `cloud:google` entry
-    // — `WIZ.google` is only the FALLBACK, used when this one extra call itself fails.
-    return invoke("google_connected").then(function (status) {
-      return (status && status.ok) ? status.calendar === true : WIZ.google;
-    }).catch(function () { return WIZ.google; }).then(function (googleCalendar) {
-      var icsFlags = feedFlags(WIZ.icsFeed, WIZ.ics), calFlags = feedFlags(WIZ.calFeed, WIZ.cal);
-      var plan = { ics_url: WIZ.ics || null, personal_calendar: WIZ.cal || null,
-                   ics_validated: icsFlags.validated, ics_stored: icsFlags.stored,
-                   personal_calendar_validated: calFlags.validated, personal_calendar_stored: calFlags.stored,
-                   google_calendar: googleCalendar, offer_mail: WIZ.mailOffer,
-                   timezone: WIZ.tz, slots: WIZ.slots,
-                   zybooks: WIZ.zy, vhl: WIZ.vhl, autostart: WIZ.autostart,
-                   campus_choice: WIZ.campus,
-                   zybooks_courses: zyRows.map(function (r) { return { code: r.key, course: r.course, label: r.course }; }),
-                   vhl_sections: vhlRows.map(function (r) { return { section: r.key, course: r.course, label: r.course }; }),
-                   // The second element is the slug, and the page has none: an empty string is what
-                   // tells `create_vault_in` to derive one from the fragment with the ENGINE's rule.
-                   course_map: Object.keys(codes).map(function (c) { return [c, ""]; }),
-                   // Final review, I2: only the rows the student explicitly ticked as ignored — never
-                   // a blank one. A blank zyBooks row must stay UNMAPPED so the engine files a
-                   // coursework-map card for it (R-OB-1), the same as a blank VHL row; putting it in
-                   // this list instead made it `not in config; skipped` on every healthy run, forever,
-                   // and made noteUnmapped's "N of these will be asked about in the app" false for
-                   // zyBooks.
-                   zybooks_ignore: WIZ.map.filter(function (r) { return r.source === "zybooks" && r.ignore; })
-                                          .map(function (r) { return r.key; }),
-                   courses: WIZ.courses };
-      // Before anything is created: move the credentials if the path has changed since they were
-      // written, so Credential Manager and the vault's `credential_target:` lines agree the moment
-      // the vault exists. The secret never comes back to the page — the move happens in the command.
-      var moved = (WIZ.credVault && WIZ.credVault !== dest())
-        ? invoke("retarget_credentials", { from_vault: WIZ.credVault, to_vault: dest() })
-        : Promise.resolve({ ok: true, error: null });
-      return moved.then(function (rt) {
-        if (!rt || !rt.ok) { credentialsStranded(); return; }
-        if (WIZ.credVault) { WIZ.credVault = dest(); }
-        return wizRegister(plan).then(function (r) {
-          if (!r.ok) { WIZ.error = r.error; WIZ.busy = false; renderWizard(); return; }
-          // M1 (fix round 1): painted before the relaunch — `restoreSentence` reads what Finish's own
-          // restore actually found, never the claim the OLD static sentence made before Finish ran.
-          WIZ.restoreNote = restoreSentence(r.restored);
-          renderWizard();
-          // R-C1-31, corrected by the final review (Minor 8): `entitlement_now` writes NO cache —
-          // it only reads the PENDING session, which `create_vault` has just moved onto this
-          // profile, so this call typically finds nothing there any more and resolves to null. The
-          // real first cache write is the in-slot refresh D1 added (`scheduler::run_slot_inner`,
-          // spec §2), keyed off the profile's own vault and data dir. Left in place as a harmless
-          // best-effort poll rather than removed here.
-          // Best effort in both directions: a refusal, or a build where the command is not yet
-          // registered, must never stop a finished wizard from opening.
-          return invoke("entitlement_now", {}).catch(function () { return null; }).then(function () {
-            return invoke("finish_onboarding", { id: r.profile.id });
-          });
-        });
-      });
-    }).catch(function (e) { WIZ.error = String(e.message || e); WIZ.busy = false; renderWizard(); });
+  // The account is signed in (by Google or by the code): make the folder with the defaults, which
+  // also brings back the account's own copy (H11a), then wait on Continue to relaunch into it.
+  function suSignedIn(r) {
+    SU.email = r.email || ""; SU.busy = false; SU.error = ""; SU.codeError = "";
+    suShow("done");
+    suMakeFolder();
   }
 
-  // The Checkout page is in the system browser, so the app cannot be told when it is done: it asks.
-  // Every three seconds for two minutes, then it stops and the button can be pressed again — a poll
-  // that never ends is a poll that runs all night on a laptop somebody closed.
-  function pollEntitlement() {
-    var tries = 0;
-    var tick = function () {
-      // The student can leave panel 2 without waiting on this — Back, or the pre-ask in `wizGo`
-      // already got a yes — and a poll that kept ticking behind a panel nobody is looking at is a
-      // poll that outlives the question it was asked.
-      if (WIZ.entitled || WIZ.step !== 2) { return; }
-      tries += 1;
-      checkEntitlement().then(function (r) {
-        // The re-review's blocking finding: the student can leave panel 2 while this reply is still
-        // in flight, and a yes that lands after they moved on must not act on a panel nobody is
-        // looking at either — the same stand-down, checked again now that the wait is over.
-        if (WIZ.entitled || WIZ.step !== 2) { return; }
-        if (r.entitled) {
-          WIZ.plan = r.plan; WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return;
-        }
-        if (tries < 40) { setTimeout(tick, 3000); }
-        else { WIZ.error = "Still not subscribed. When the payment page is done, press Next."; renderWizard(); }
-      });
-    };
-    setTimeout(tick, 3000);
+  function suMakeFolder() {
+    SU.making = true; SU.doneError = ""; renderSetup();
+    return invoke("create_vault", { name: suName(), plan: suPlan() }).then(function (r) {
+      SU.making = false;
+      if (!r.ok) { SU.doneError = r.error; renderSetup(); return; }
+      SU.profileId = r.profile.id; SU.folder = r.profile.vault; SU.restore = restoreSentence(r.restored);
+      renderSetup();
+    }).catch(function () { SU.making = false; SU.doneError = UNREACHABLE; renderSetup(); });
   }
 
-  EL("wizard").addEventListener("click", function (e) {
-    if (e.target.closest("#wiz-mail-notnow")) { wizNotNow(); return; }
-    if (e.target.closest("#wiz-back")) { wizGo(WIZ.step - 1); return; }
-    if (e.target.closest("#wiz-next")) { if (WIZ.step === PANELS.length - 1) { wizFinish(); } else { wizGo(WIZ.step + 1); } return; }
-    // Spec D1. One command, no arguments: the URL, the loopback port, the verifier and both tokens
-    // are Rust's, and the page never sees any of them. The browser round trip can take a minute, so
-    // the button says what is happening — `WIZ.busy` is what renderWizard paints (Task 6).
-    if (e.target.closest("#wiz-google-signin")) {
-      if (!(EL("wiz-18").checked && EL("wiz-terms").checked)) {
-        WIZ.error = "Tick both boxes to create an account."; renderWizard(); return;
-      }
-      WIZ.busy = true; WIZ.error = ""; WIZ.accountNote = "Finish signing in, in your browser…";
-      renderWizard();
-      // **`ageAttested`, not the Rust spelling** — the checkbox `google_sign_in` now refuses on
-      // before it binds a listener (F2), the same gate `send_magic_link` has always had.
-      invoke("google_sign_in", { ageAttested: EL("wiz-18").checked }).then(function (r) {
-        WIZ.busy = false; WIZ.accountNote = "";
-        if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
-        WIZ.accountId = r.account_id; WIZ.email = r.email; WIZ.error = "";
-        wizGo(2);
-      }).catch(function () { WIZ.busy = false; WIZ.accountNote = ""; WIZ.error = UNREACHABLE; renderWizard(); });
-      return;
-    }
-    if (e.target.closest("#wiz-magic")) {
-      if (WIZ.busy) { return; }
-      if (!(EL("wiz-18").checked && EL("wiz-terms").checked)) {
-        WIZ.error = "Tick both boxes to create an account."; renderWizard(); return;
-      }
-      // **`ageAttested`, not the Rust spelling.** Tauri v2 camel-cases every argument key; sent
-      // snake_case the invoke is rejected before the command's body runs.
-      WIZ.busy = true; renderWizard();
-      invoke("send_magic_link", { email: EL("wiz-email").value.trim(), ageAttested: EL("wiz-18").checked }).then(function (r) {
-        WIZ.busy = false;
-        WIZ.error = r.ok ? "" : r.error;
-        EL("wiz-code-row").hidden = !r.ok;
-        WIZ.accountNote = r.ok ? "We emailed you a code. Type it below." : "";
-        renderWizard();
-      }).catch(function () { WIZ.busy = false; WIZ.error = UNREACHABLE; renderWizard(); });
-      return;
-    }
-    if (e.target.closest("#wiz-code-go")) {
-      if (WIZ.busy) { return; }
-      WIZ.busy = true; renderWizard();
-      invoke("verify_email_code", { email: EL("wiz-email").value.trim(), code: EL("wiz-code").value }).then(function (r) {
-        WIZ.busy = false;
-        EL("wiz-code").value = "";
-        if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
-        WIZ.accountId = r.account_id; WIZ.email = r.email; WIZ.error = "";
-        EL("wiz-code-row").hidden = true;
-        wizGo(2);
-      }).catch(function () { WIZ.busy = false; WIZ.error = UNREACHABLE; renderWizard(); });
-      return;
-    }
+  // Continue relaunches into the new profile (`finish_onboarding`); a refusal is shown and the
+  // button comes back.
+  function suContinue() {
+    if (SU.making || !SU.profileId || SU.busy) { return; }
+    SU.busy = true; renderSetup();
+    invoke("finish_onboarding", { id: SU.profileId }).then(function (o) {
+      if (o && o.ok === false) { SU.busy = false; SU.doneError = o.error; renderSetup(); }
+    }).catch(function () { SU.busy = false; renderSetup(); });
+  }
+
+  // One box says both things (spec §4.2 step 2: 18 or older, and the terms); every door checks it first.
+  function suTicked() {
+    if (EL("su-18").checked) { return true; }
+    SU.error = "Tick the box to create an account."; renderSetup(); return false;
+  }
+
+  // Spec D1. One command: the URL, the loopback port, the verifier and both tokens are Rust's, and
+  // the page never sees any of them. **`ageAttested`, not the Rust spelling** (Tauri v2 camel-cases
+  // every argument key). The browser round trip can take a minute, so the screen says where to look.
+  function suGoogle() {
+    if (SU.busy || !suTicked()) { return; }
+    SU.busy = true; SU.error = ""; suShow("browser");
+    invoke("google_sign_in", { ageAttested: EL("su-18").checked }).then(function (r) {
+      SU.busy = false;
+      if (!r.ok) { SU.error = r.error; suShow("account"); return; }
+      suSignedIn(r);
+    }).catch(function () { SU.busy = false; SU.error = UNREACHABLE; suShow("account"); });
+  }
+
+  // The emailed code spends the same 20 an hour as the Google button, so a second press while one is
+  // in flight is refused, and both doors share the one latch.
+  function suSendCode(email, fromCodeStep) {
+    if (SU.busy || !suTicked()) { return; }
+    SU.busy = true; SU.error = ""; SU.codeError = ""; renderSetup();
+    invoke("send_magic_link", { email: email, ageAttested: EL("su-18").checked }).then(function (r) {
+      SU.busy = false;
+      if (!r.ok) { if (fromCodeStep) { SU.codeError = r.error; renderSetup(); } else { SU.error = r.error; renderSetup(); } return; }
+      SU.codeEmail = email; EL("su-code-in").value = "";
+      suShow("code");
+    }).catch(function () { SU.busy = false; SU.error = UNREACHABLE; renderSetup(); });
+  }
+
+  function suVerify() {
+    if (SU.busy) { return; }
+    SU.busy = true; SU.codeError = ""; renderSetup();
+    invoke("verify_email_code", { email: SU.codeEmail, code: EL("su-code-in").value }).then(function (r) {
+      SU.busy = false; EL("su-code-in").value = "";
+      if (!r.ok) { SU.codeError = r.error; renderSetup(); return; }
+      suSignedIn(r);
+    }).catch(function () { SU.busy = false; SU.codeError = UNREACHABLE; renderSetup(); });
+  }
+
+  EL("setup").addEventListener("click", function (e) {
     // **The two policies open in the system browser, not in this window.** `app/static/` holds four
     // files, so a plain navigation to `terms.html` loses the only window Knowlu has — while the user
     // is being asked to tick a box saying they accept it. The `href` stays because it is the honest
     // markup and the static test reads it; this is what actually happens.
     var policy = e.target.closest("a.policy");
-    if (policy) {
-      e.preventDefault();
-      invoke("open_policy", { which: policy.getAttribute("data-policy") }).catch(function () {});
-      return;
-    }
-    if (e.target.closest("#wiz-sub-month") || e.target.closest("#wiz-sub-year")) {
-      var which = e.target.closest("#wiz-sub-year") ? "academic_year" : "monthly";
-      // R-C1b-exec-9: ask before opening a second Checkout page — an account the service already
-      // calls entitled goes straight to the vault panel, never back through Stripe.
-      checkEntitlement().then(function (r) {
-        if (r.entitled) { WIZ.plan = r.plan; WIZ.entitled = true; WIZ.error = ""; renderWizard(); wizGo(3); return; }
-        return invoke("open_checkout", { plan: which }).then(function (r) {
-          if (!r.ok) { WIZ.error = r.error; renderWizard(); return; }
-          WIZ.checkoutOpened = true;
-          renderWizard();
-          pollEntitlement();
-        });
-      }).catch(function () {});
-      return;
-    }
-    if (e.target.closest("#wiz-lms-open")) {
-      // F4: no school picked, no sign-in page to open. The button is disabled then; this is the backstop.
-      if (!WIZ.campus.unitid) { return; }
-      WIZ.icsNote = "Opening your school’s sign-in page…";
-      renderWizard();
-      invoke("open_lms_window", { unitid: WIZ.campus.unitid }).then(function (r) {
-        if (!r.ok) {
-          WIZ.icsNote = r.error;
-          // Nobody has curated this school, so nobody knows which LMS it runs. Ask, once — the answer
-          // is what C2's server-side fetch will need too.
-          EL("wiz-lms-kind").hidden = !!WIZ.campus.lms;
-          renderWizard();
-          return;
-        }
-        // **R-C1-42: the capture is not chained onto the open.** The window has just landed on the
-        // identity provider, the student has typed nothing yet, and a capture fired here reads the
-        // login page. The second button is what says "I am signed in now".
-        WIZ.lmsOpen = true;
-        WIZ.icsNote = "Sign in there, then press the button beside this one.";
-        renderWizard();
-      }).catch(function () { WIZ.icsNote = "That did not work — paste the link below instead."; renderWizard(); });
-      return;
-    }
-    if (e.target.closest("#wiz-lms-capture")) {
-      WIZ.icsNote = "Looking for your calendar link…";
-      renderWizard();
-      invoke("capture_calendar_link", { unitid: WIZ.campus.unitid }).then(function (c) {
-        if (c.ok && c.link) {
-          WIZ.ics = c.link.url;
-          WIZ.icsFeed = { url: c.link.url, stored: c.stored === true };
-          WIZ.icsNote = feedSummary(c.link);
-          // `note` is the one thing `PUT /account/sources` could not do. Finish tries that save again
-          // and keeps the link on this machine if it still can't, so it is a sentence beside the
-          // count, not a failure.
-          if (c.note) { WIZ.icsNote += " " + c.note; }
-        } else {
-          WIZ.icsNote = (c.error || "No link found") + " — paste it below instead.";
-        }
-        renderWizard();
-        // R-OB-2, in the same sitting and the same window: the enrolled course list. Its own
-        // outcome — a campus can give the calendar and not the courses — so a failure here shows
-        // the typed field and says nothing about the link that just worked.
-        return invoke("capture_courses", { unitid: WIZ.campus.unitid }).then(function (cl) {
-          WIZ.courses = (cl && cl.courses) || [];
-          EL("wiz-courses").hidden = false;
-          EL("wiz-courses-note").textContent = WIZ.courses.length
-            ? "These are the classes Knowlu found. Remove any you are not taking."
-            : "Knowlu could not read your class list — type the codes yourself, e.g. CS 100.";
-          renderCourses();
-        });
-      }).catch(function () { WIZ.icsNote = "That did not work — paste the link below instead."; renderWizard(); });
-      return;
-    }
+    if (policy) { e.preventDefault(); invoke("open_policy", { which: policy.getAttribute("data-policy") }).catch(function () {}); return; }
+    if (e.target.closest("#su-start") || e.target.closest("#su-returning")) { suShow("account"); return; }
+    if (e.target.closest("#su-google")) { suGoogle(); return; }
+    if (e.target.closest("#su-use-code")) { SU.emailOpen = true; renderSetup(); EL("su-email").focus(); return; }
+    if (e.target.closest("#su-magic")) { suSendCode(EL("su-email").value.trim(), false); return; }
+    if (e.target.closest("#su-code-go")) { suVerify(); return; }
+    if (e.target.closest("#su-resend")) { suSendCode(SU.codeEmail, true); return; }
+    if (e.target.closest("#su-other-email")) { SU.emailOpen = true; SU.codeError = ""; suShow("account"); EL("su-email").focus(); return; }
+    if (e.target.closest("#su-retry")) { suMakeFolder(); return; }
+    if (e.target.closest("#su-continue")) { suContinue(); }
   });
-  EL("wiz-name").addEventListener("input", function () { WIZ.name = EL("wiz-name").value; renderWizard(); });
-  EL("wiz-ics").addEventListener("input", function () { WIZ.ics = EL("wiz-ics").value.trim(); renderWizard(); });
-  EL("wiz-ics").addEventListener("change", function () {
-    WIZ.ics = EL("wiz-ics").value.trim();
-    if (!WIZ.ics) { WIZ.icsNote = ""; renderWizard(); return; }
-    // The pasted path validates exactly as the captured one does — same command, same sentence.
-    var sent = WIZ.ics;
-    invoke("paste_calendar_link", { kind: "lms_ics", url: sent }).then(function (r) {
-      WIZ.icsFeed = r.ok ? { url: sent, stored: r.stored === true } : null;
-      WIZ.icsNote = r.ok ? feedSummary(r.link) : r.error;
-      if (r.ok && r.note) { WIZ.icsNote += " " + r.note; }
-      renderWizard();
-    }).catch(function () {});
+  // Enter does what the screen's primary button does, from a field or from nowhere in particular.
+  EL("setup").addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" || e.target.closest("button, a")) { return; }
+    if (e.target.id === "su-email") { e.preventDefault(); suSendCode(EL("su-email").value.trim(), false); }
+    else if (e.target.id === "su-code-in") { e.preventDefault(); suVerify(); }
+    else if (SU.step === "done") { e.preventDefault(); suContinue(); }
   });
-  /// Task 11 re-review N1 (R-C3'-exec-41): the plan's two flags for one feed, true only for the
-  /// value the field holds NOW. A link typed over after its check is neither validated nor stored,
-  /// so Finish never sends it to the account (`onboarding::create_vault_in` keeps it in the vault).
-  function feedFlags(feed, value) {
-    var same = !!(feed && value && feed.url === value);
-    return { validated: same, stored: same && feed.stored === true };
-  }
-  /// One row per enrolled course, removable (Task 14b, I2: the capture is unfiltered — past terms,
-  /// organisations and TA roles come back with the rest, and the student is the only one who can say
-  /// which are this semester's). The vault identifier is made in Rust at Finish, from the code; the
-  /// page never invents one.
-  function renderCourses() {
-    EL("wiz-course-rows").innerHTML = WIZ.courses.map(function (c, i) {
-      // R-C1c-plan-2: the human code first, the school's own name beside it — and just the name
-      // when there was no code to read, or when the two are the same string (a typed course is
-      // both). The page never reads a code out of a name: that rule lives in
-      // `scaffold::course_code_in_name`, and a second copy here would drift from it in silence.
-      var lead = (c.label && c.label !== c.name) ? h(c.label) + " &middot; " + h(c.name) : h(c.name || c.code);
-      return '<div class="wiz-row" data-course="' + i + '"><span class="meta">' + lead +
-             '</span><button class="b" data-drop="' + i + '">Remove</button></div>';
-    }).join("");
-    renderCourseCodes();
-  }
-
-  /// D5: the codes a mapping row offers, so a student picks a class rather than typing one from
-  /// memory — the VHL row that nobody filled is why `sections: {}` reached the engine.
-  ///
-  /// The VALUE is the human code the capture read (R-C1c-plan-2's `label`) and the course's own
-  /// slug otherwise: `create_vault_in` slugs whatever the row carries, and both of those slug to
-  /// the note the course already has. The LMS's opaque key would not — it would make a second
-  /// course. The LABEL is what the student recognises (M4), so the list reads as their class list
-  /// rather than as identifiers.
-  function renderCourseCodes() {
-    EL("wiz-course-codes").innerHTML = WIZ.courses.map(function (c) {
-      return '<option value="' + h(c.label || c.slug) + '">' + h(c.name || c.code) + "</option>";
-    }).join("");
-  }
-  EL("wiz-courses").addEventListener("click", function (e) {
-    var drop = e.target.closest("[data-drop]");
-    if (drop) { WIZ.courses.splice(Number(drop.getAttribute("data-drop")), 1); renderCourses(); return; }
-    if (e.target.closest("#wiz-course-add-go")) {
-      var code = EL("wiz-course-add").value.trim();
-      if (code) { WIZ.courses.push({ code: code, name: code, slug: "", label: code }); EL("wiz-course-add").value = ""; renderCourses(); }
-    }
-  });
-
-  /// R-OB-1. One row per discovered book or section: what it is, what we think it is, and a field the
-  /// student corrects. A row left blank is a source that stays unmapped — which is a choice, and is
-  /// why the panel says what the consequence is rather than refusing Next.
-  function renderMapping() {
-    // A finished discovery that found nothing still has a note to show — only an UNfinished one
-    // (nothing asked yet) has no panel to paint.
-    EL("wiz-map").hidden = WIZ.map.length === 0 && !WIZ.discovered;
-    EL("wiz-map-heading").hidden = WIZ.map.length === 0;
-    EL("wiz-map-rows").innerHTML = WIZ.map.map(function (r, i) {
-      // D6: a row nobody can guess for says so. Computed at paint, never on every keystroke —
-      // re-rendering the rows under the cursor would take the focus out of the field being typed
-      // into — so the hint goes on the next paint, which is what the student has already answered.
-      var hint = (!r.suggested && !r.course) ? '<span class="meta">type the course this belongs to</span>' : "";
-      return '<div class="wiz-row" data-map="' + i + '"><span class="meta">' + h(r.key) +
-             (r.detail ? " &middot; " + h(r.detail) : "") + '</span>' +
-             '<input type="text" list="wiz-course-codes" data-course-for="' + i + '" value="' + h(r.course || r.suggested || "") +
-             '" placeholder="Course code, e.g. CS 100">' + hint +
-             '<label><input type="checkbox" data-ignore-for="' + i + '"' + (r.ignore ? " checked" : "") + '> Ignore</label></div>';
-    }).join("");
-  }
-
-  /// D6: leaving the logins panel with rows still blank is a choice, not a refusal
-  /// (R-C1b-exec-10 already lets Next through) — but it has a consequence, and the panel says what
-  /// it is: the engine files a coursework-map card for each one (R-OB-1) and the app asks about it
-  /// there. Silent when nothing is blank; the singular reads correctly without a special case.
-  ///
-  /// Returns the count, so the caller can decide whether there is anything to stay for.
-  function noteUnmapped() {
-    var n = WIZ.map.filter(function (r) { return !r.ignore && !r.course; }).length;
-    if (n) { EL("wiz-map-note").textContent = n + " of these will be asked about in the app"; }
-    return n;
-  }
-  EL("wiz-map").addEventListener("input", function (e) {
-    var f = e.target.getAttribute("data-course-for");
-    if (f !== null) { WIZ.map[Number(f)].course = e.target.value.trim(); }
-  });
-  EL("wiz-map").addEventListener("change", function (e) {
-    var g = e.target.getAttribute("data-ignore-for");
-    if (g !== null) { WIZ.map[Number(g)].ignore = e.target.checked; renderMapping(); }
-  });
-
-  // The personal calendar: same command, same validation, a different kind — and a different sentence,
-  // because "courses" means nothing about somebody's own week.
-  EL("wiz-cal-ics").addEventListener("change", function () {
-    WIZ.cal = EL("wiz-cal-ics").value.trim();
-    if (!WIZ.cal) { WIZ.calNote = ""; renderWizard(); return; }
-    var sent = WIZ.cal;
-    invoke("paste_calendar_link", { kind: "calendar_ics", url: sent }).then(function (r) {
-      WIZ.calFeed = r.ok ? { url: sent, stored: r.stored === true } : null;
-      // Zero is a connection, not a failure: an address that fetches and holds nothing is somebody
-      // who has not put anything in their calendar yet (`validate_for`).
-      WIZ.calNote = !r.ok ? r.error
-        : (r.link.events === 0 ? "Connected — nothing on it yet." : "Found " + r.link.events + " things already on your calendar.");
-      if (r.ok && r.note) { WIZ.calNote += " " + r.note; }
-      renderWizard();
-    }).catch(function () {});
-  });
-
-  // The wizard's one place to show an out-of-band failure on the current panel — the same
-  // `WIZ.error` / `renderWizard()` pair every other wizard error already uses.
-  function showWizardError(msg) { WIZ.error = msg; renderWizard(); }
-
-  // C2 (§11a): one Google connect for the calendars now, Gmail later and only if asked. The scope
-  // named here is "calendar" — the *sensitive* one, which carries a lighter review and no CASA.
-  // Nothing is written to the vault here: the wizard creates it at Finish, so this sets a flag on
-  // the plan and `scaffold::ingest_yaml` writes the `calendars:` entry when the vault is born.
-  //
-  // A-5 (m59+m60): every field this poll touches lives on `WIZ` and is painted by `renderWizard()`
-  // — never a direct DOM write — and `mySeq` is the cancellation check: `wizGo` bumps
-  // `WIZ.googleSeq` on leaving this panel, and a poll whose own captured value no longer matches
-  // stops touching the page at all, rather than writing a note onto a panel the student is no
-  // longer looking at (or, worse, one a LATER click on this same button has since restarted).
-  document.getElementById("wiz-google").addEventListener("click", async () => {
-    var got = await invoke("google_connect_url", { scope: "calendar" });
-    if (!got.ok) { showWizardError(got.error); return; }
-    var opened = await invoke("open_external", { url: got.url });
-    if (!opened.ok) { showWizardError(opened.error); return; }
-    var mySeq = ++WIZ.googleSeq;
-    WIZ.googlePolling = true;
-    WIZ.googleNote = "Finish signing in to Google in your browser — this may take a moment.";
-    renderWizard();
-    // The consent window closes itself, so there is nothing else to tell us the round trip finished.
-    // Twenty tries at three seconds is a minute, which is longer than a consent takes and shorter
-    // than a student will sit staring at it; giving up is a message, never a silent stall.
-    for (var i = 0; i < 20; i++) {
-      await new Promise(function (r) { setTimeout(r, 3000); });
-      if (WIZ.googleSeq !== mySeq) { return; }
-      var status = await invoke("google_connected");
-      if (WIZ.googleSeq !== mySeq) { return; }
-      if (status.ok && status.calendar) {
-        WIZ.google = true;
-        WIZ.googlePolling = false;
-        WIZ.googleNote = "Google Calendar connected — already on your calendar.";
-        renderWizard();
-        return;
-      }
-    }
-    WIZ.googlePolling = false;
-    WIZ.googleNote = "Google did not finish connecting. You can try again, or use the secret address above.";
-    renderWizard();
-  });
-
-  // ---- D11: the Gmail panel's Connect Gmail. The wizard's own commands with `scope: "gmail"`, the
-  // calendar button's poll shape and its own token (`WIZ.gmailSeq`, bumped by `wizGo`). Skip is the
-  // default path: Next is never gated on this, and nothing about it is written to the plan.
-  document.getElementById("wiz-gmail-connect").addEventListener("click", async () => {
-    var got = await invoke("google_connect_url", { scope: "gmail" });
-    if (!got.ok) { showWizardError(got.error); return; }
-    var opened = await invoke("open_external", { url: got.url });
-    if (!opened.ok) { showWizardError(opened.error); return; }
-    var mySeq = ++WIZ.gmailSeq;
-    WIZ.gmailPolling = true;
-    WIZ.gmailNote = "Finish signing in to Google in your browser — this may take a moment.";
-    renderWizard();
-    for (var i = 0; i < 20; i++) {
-      await new Promise(function (r) { setTimeout(r, 3000); });
-      if (WIZ.gmailSeq !== mySeq) { return; }
-      var status = await invoke("google_connected");
-      if (WIZ.gmailSeq !== mySeq) { return; }
-      if (status.ok && status.gmail) {
-        WIZ.gmail = true;
-        WIZ.gmailPolling = false;
-        WIZ.gmailNote = "Gmail is connected.";
-        renderWizard();
-        return;
-      }
-    }
-    WIZ.gmailPolling = false;
-    WIZ.gmailNote = GOOGLE_TIMEOUT;
-    renderWizard();
-  });
-
-  // ---- R-OB-4: the school typeahead.
-  //
-  // **The page never holds the list and never fetches it.** `app/tauri.conf.json`'s CSP names the IPC
-  // origin and nothing else — no `'self'` — so a `fetch` of a bundled asset is refused before it
-  // reaches the asset protocol, and that file is the controller's outside C0's three keys, so widening
-  // it would be a hand-off for a thing that needs none. `campus_search` is Rust's, answers with ten
-  // rows, and the page holds ten rows however long the list gets.
-  // R-C1-55, M6: one search per keystroke, and only the newest answer may paint — `renderSchoolHits`
-  // overwrites `__hits`, which is what a click indexes into, so an overtaken answer would hand the
-  // student a row that is not the one they clicked. `null` means "overtaken, do not paint".
-  // `campus_search` is an in-process filter over a `OnceLock`ed list today, so this is insurance.
-  function schoolHits(q) {
-    var seq = (WIZ.schoolSeq += 1);
-    return invoke("campus_search", { query: q })
-      .then(function (r) { return seq === WIZ.schoolSeq ? ((r && r.hits) || []) : null; })
-      .catch(function () { return seq === WIZ.schoolSeq ? [] : null; });
-  }
-
-  function renderSchoolHits(hits) {
-    EL("wiz-school-hits").innerHTML = hits.map(function (r, i) {
-      // [unitid, name, city, state, lms]
-      return '<div class="hit" data-school="' + i + '" tabindex="0">' + h(r[1]) +
-             '<span class="meta"> &middot; ' + h(r[2]) + ", " + h(r[3]) + "</span></div>";
-    }).join("");
-    EL("wiz-school-hits").__hits = hits;
-  }
-
-  function pickSchool(r) {
-    // r[4] is the curated LMS kind, "" for an uncurated school: a curated school is never asked.
-    WIZ.campus = { unitid: String(r[0]), name: r[1], state: r[3], lms: r[4] || "" };
-    EL("wiz-lms-kind").hidden = true;
-    EL("wiz-school").value = r[1];
-    EL("wiz-school-hits").innerHTML = "";
-    EL("wiz-school-free").hidden = true;
-    EL("wiz-school-picked").textContent = r[2] + ", " + r[3];
-    WIZ.icsNote = "";
-    // The timezone is a SUGGESTION from the state, and only into a field the student has not touched:
-    // a typed value wins, and a state we do not know leaves the OS zone alone. Rust owns the table
-    // (`scaffold::state_timezone`); the page only asks.
-    invoke("timezone_for_state", { state: r[3] }).then(function (t) {
-      if (t && t.ok && t.timezone && !WIZ.tzTouched) { WIZ.tz = t.timezone; EL("wiz-tz").value = t.timezone; }
-    }).catch(function () {});
-    renderWizard();
-  }
-
-  EL("wiz-school").addEventListener("input", function () {
-    schoolHits(EL("wiz-school").value).then(function (hits) { if (hits) { renderSchoolHits(hits); } });
-  });
-  EL("wiz-school-hits").addEventListener("click", function (e) {
-    var hit = e.target.closest("[data-school]");
-    if (hit) { pickSchool(EL("wiz-school-hits").__hits[Number(hit.getAttribute("data-school"))]); }
-  });
-  // Keyboard-selectable: a typeahead you can only click is a typeahead that fails the person typing.
-  EL("wiz-school-hits").addEventListener("keydown", function (e) {
-    var hit = e.target.closest("[data-school]");
-    if (hit && (e.key === "Enter" || e.key === " ")) {
-      e.preventDefault();
-      pickSchool(EL("wiz-school-hits").__hits[Number(hit.getAttribute("data-school"))]);
-    }
-  });
-  EL("wiz-school").addEventListener("keydown", function (e) {
-    if (e.key === "ArrowDown") {
-      var first = EL("wiz-school-hits").querySelector("[data-school]");
-      if (first) { e.preventDefault(); first.focus(); }
-    }
-  });
-  // The bundled list is not all of them: a new campus, a satellite, somewhere abroad. A name and a
-  // state is enough to make a vault, and that school simply has no curated feeds.
-  EL("wiz-school-none").addEventListener("click", function () {
-    EL("wiz-school-free").hidden = false;
-    EL("wiz-school-hits").innerHTML = "";
-  });
-  EL("wiz-school-free").addEventListener("input", function () {
-    WIZ.campus = { unitid: "", name: EL("wiz-school-name").value.trim(), state: EL("wiz-school-state").value.trim().toUpperCase(), lms: WIZ.campus.unitid ? "" : (WIZ.campus.lms || "") };
-    // Ruling 2026-10-02: a hand-typed school is asked its LMS directly, once name and state are both in.
-    var typed = !!(WIZ.campus.name && WIZ.campus.state);
-    EL("wiz-lms-kind").hidden = !(typed && !WIZ.campus.lms);
-    WIZ.icsNote = typed ? "Sign-in isn’t available for schools that aren’t listed yet - paste your calendar link below." : "";
-    EL("wiz-school-picked").textContent = "";
-    renderWizard();
-  });
-  // The two-button fallback for a school whose LMS nothing established — shown by the sign-in handler
-  // when `open_lms_window` says it does not know where to go.
-  EL("wiz-lms-kind").addEventListener("click", function (e) {
-    var b = e.target.closest("[data-lms]");
-    if (b) { WIZ.campus.lms = b.getAttribute("data-lms"); EL("wiz-lms-kind").hidden = true; renderWizard(); }
-  });
-  // The slots panel, live: the summary on the finish panel is rendered from WIZ, so these are what
-  // keep it true.
-  ["wiz-tz", "wiz-slot1", "wiz-slot2"].forEach(function (id) {
-    EL(id).addEventListener("input", function () { readSlotsPanel(); renderWizard(); });
-  });
-  // A suggestion must never overwrite an answer: once the student types a zone, picking a school
-  // stops proposing one.
-  EL("wiz-tz").addEventListener("input", function () { WIZ.tzTouched = true; });
-  EL("wiz-autostart").addEventListener("change", function () { readSlotsPanel(); renderWizard(); });
 
   // The one seam the headless checks use (S13). Nothing in the app calls these; they exist so a
-  // Playwright page can put the wizard, the picker or the settings overlay on screen without a
+  // Playwright page can put the setup shell, the picker or the settings overlay on screen without a
   // Tauri backend. `openSettings` is the console's own function, unchanged — with no backend its
   // two invokes reject and the rows keep their static markup, which is exactly the layout
   // `console-shots.py` is looking at; `settings-check.py` is the one that drives them with answers.
-  window.KNOWLU_SHOTS = { startWizard: startWizard, renderPicker: renderPicker, openSettings: openSettings, openReport: openReport };
+  window.KNOWLU_SHOTS = { startSetup: startSetup, renderPicker: renderPicker, openSettings: openSettings, openReport: openReport };
 
   invoke("launch_state", {}).then(function (l) {
     if (l && l.mode === "console") { bootConsole(); return; }
-    if (l && l.mode === "wizard") { startWizard(l); return; }
+    if (l && l.mode === "wizard") { startSetup(l); return; }
     renderPicker(l || { profiles: [] });
   }).catch(function () { bootConsole(); });
 })();
