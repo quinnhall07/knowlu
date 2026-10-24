@@ -3475,6 +3475,8 @@
   window.KNOWLU_SHOTS = { startSetup: startSetup, renderPicker: renderPicker, openSettings: openSettings, openReport: openReport };
 
   invoke("launch_state", {}).then(function (l) {
+    // Onboarding mode is onboarding.js's: nothing here may draw the picker or boot the console over it.
+    if (l && l.mode === "onboarding") { return; }
     if (l && l.mode === "console") { bootConsole(); return; }
     if (l && l.mode === "wizard") { startSetup(l); return; }
     renderPicker(l || { profiles: [] });

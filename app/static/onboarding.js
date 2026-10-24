@@ -145,10 +145,10 @@
     else if (skip) { m.cls = "skipped"; m.st = "Skipped"; m.pf = costWords(skip.cost_key); }
     else if (run) { m.cls = "reading"; m.st = "Reading"; m.pf = run.line; }
     else if (recs.length && recs.every(function (x) { return x.state === "done"; })) { m.cls = "done"; m.st = "Done"; m.pf = recs.map(function (x) { return x.line; }).join(", "); }
-    else if (recs.some(function (x) { return x.state === "held"; })) { m.st = "Waiting"; m.pf = "Starts once your plan is active"; }
-    else if (past && recs.length) { m.st = "Not yet"; m.pf = "Not yet"; }
+    else if (recs.some(function (x) { return x.state === "held"; })) { m.cls = ""; m.st = "Waiting"; m.pf = "Starts once your plan is active"; }
+    else if (past && recs.length) { m.cls = ""; m.st = "Not yet"; m.pf = "Not yet"; }
     var found = ((s && s.found) || []).filter(function (f) { return r.src.indexOf(f.source) !== -1; })[0];
-    if (found && !bad && !skip) { m.pf = "Found at your school: " + found.reason; }
+    if (found && !bad && !skip) { m.pf = "Found at your school: " + reasonWords(found.reason); }
     return m;
   }
   function railHtml(s) {
@@ -171,8 +171,8 @@
   var panels = {}, leaveHooks = [];
   OB.registerPanel = function (n, def) { panels[n] = def; };
   OB.registerLeave = function (fn) { leaveHooks.push(fn); };
-  OB.show = function (n) { S.step = n; renderPane(); renderRail(); };
-  OB.refresh = function () { renderPane(); renderRail(); };
+  OB.show = function (n) { S.step = n; renderPane(true); renderRail(); };
+  OB.refresh = function () { renderPane(true); renderRail(); };
 
   function frameHtml() {
     return '<div class="su-rail" role="group" aria-label="Setup progress">' +
@@ -200,8 +200,11 @@
     return st === "proof" ? (m.proof || "") : "";
   }
 
-  function renderPane() {
-    if (!S.mounted) { return; }
+  // The pane is rewritten on a step change or an explicit refresh only, never on a poll, so what a
+  // student has typed into a step survives the status coming in.
+  function renderPane(force) {
+    if (!S.mounted || (!force && S.paneStep === S.step)) { return; }
+    S.paneStep = S.step;
     var n = S.step, p = panels[n], m = p ? (p.render(S.status) || {}) : {};
     EL("ob-title").textContent = m.title || TITLES[n] || "Setup";
     EL("ob-why").textContent = m.why || WHY[n] || "";
@@ -230,10 +233,16 @@
     el.textContent = closing ? closingText() : S.error;
     EL("onboarding").classList.toggle("ob-closing-now", closing);
     // A control re-enables nothing while the page is closing.
-    EL("onboarding").querySelectorAll("button").forEach(function (b) { b.disabled = closing; });
+    // Only the buttons this frame disabled itself: a step's own disabled button stays as it left it.
+    EL("onboarding").querySelectorAll("button").forEach(function (b) {
+      if (closing) { if (!b.disabled) { b.disabled = true; b.setAttribute("data-ob-closed", "1"); } }
+      else if (b.hasAttribute("data-ob-closed")) { b.disabled = false; b.removeAttribute("data-ob-closed"); }
+    });
   }
   function leaving() {
-    return Promise.all(leaveHooks.map(function (f) { try { return f(); } catch (e) { return null; } }));
+    // A hook that throws, rejects or never answers must not keep the student from leaving.
+    var hooks = leaveHooks.map(function (f) { return Promise.resolve().then(f).catch(function () { return null; }); });
+    return Promise.race([Promise.all(hooks), new Promise(function (done) { setTimeout(done, 3000); })]);
   }
   function afterExit(a) {
     if (a && a.restart) { renderRestart(a.error); return; }
@@ -259,7 +268,10 @@
     S.mounted = false;
   }
   function retryJob(job) {
-    invoke("onboarding_retry", { job: job }).then(load).catch(function () {});
+    invoke("onboarding_retry", { job: job }).then(function (a) {
+      if (a && a.ok === false) { S.error = a.error || "Knowlu couldn't retry that. Try again."; renderClosing(); return; }
+      return load();
+    }).catch(function () {});
   }
 
   // ---- status, polling, the shots hook ---------------------------------------------------------------
@@ -302,6 +314,7 @@
 
   OB.exitLine = exitLine; OB.elapsedText = elapsedText; OB.reasonWords = reasonWords; OB.costWords = costWords;
   OB.openKnowluEnabled = openKnowluEnabled; OB.isClosing = isClosing; OB.revealModel = revealModel; OB.railRow = railRow;
+  OB.rowModel = rowModel; OB.rows = ROWS;
   OB.finishLater = finishLater; OB.signOut = signOut; OB.renderRestart = renderRestart;
 
   // The headless shots open the frame at a step against a staged status (never a live one).

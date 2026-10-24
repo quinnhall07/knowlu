@@ -2,7 +2,6 @@
    The frame is F10's setup shell (`.setup`, `.su-*`) grown past step 2, so every token and the rail's
    row shapes come from console.css; this sheet adds only what the frame needs on top. Every class
    it adds starts `ob-`. */
-.ob { z-index: 40; }
 .ob-main { display: flex; flex-direction: column; }
 .ob-bar { display: flex; gap: 20px; justify-content: flex-end; padding: 14px 56px 0; font-size: 13.5px; }
 .ob-bar .su-link { color: var(--su-ink-2); }
@@ -14,11 +13,11 @@
 .ob-state.ob-failed { color: var(--su-amber); }
 .ob-proof:empty { display: none; }
 /* The rail's states beyond the shell's now, done and next: reading, failed, skipped. */
-.su-row.done .su-st { color: var(--su-ink); }
-.su-row.failed .su-nm, .su-row.failed .su-st { color: var(--su-amber); }
-.su-row.failed .su-shape { background: none; transform: none; border: 2px solid var(--su-amber); }
-.su-row.reading .su-nm, .su-row.reading .su-st { color: var(--su-ink); }
-.su-row.reading .su-shape { background: none; transform: none; border: 2px dotted var(--su-ink); }
-.su-row.skipped .su-shape { background: var(--su-ink-3); transform: none; height: 2px; margin-top: 9px; border-radius: 0; }
-.su-row .su-pf .su-link { font-size: 13px; margin-left: 6px; color: var(--su-amber); }
+.ob .su-row.done .su-st { color: var(--su-ink); }
+.ob .su-row.failed .su-nm, .ob .su-row.failed .su-st { color: var(--su-amber); }
+.ob .su-row.failed .su-shape { background: none; transform: none; border: 2px solid var(--su-amber); }
+.ob .su-row.reading .su-nm, .ob .su-row.reading .su-st { color: var(--su-ink); }
+.ob .su-row.reading .su-shape { background: none; transform: none; border: 2px dotted var(--su-ink); }
+.ob .su-row.skipped .su-shape { background: var(--su-ink-3); transform: none; height: 2px; margin-top: 9px; border-radius: 0; }
+.ob .su-row .su-pf .su-link { font-size: 13px; margin-left: 6px; color: var(--su-amber); }
 .ob-closing-now .su-link, .ob-closing-now .su-btn { pointer-events: none; }
