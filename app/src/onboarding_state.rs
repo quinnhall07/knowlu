@@ -41,7 +41,14 @@ pub struct JobRecord {
     pub proof: BTreeMap<String, Option<i64>>,
     /// A closed-set reason (and for `failed`, its fix is the page's).
     pub reason: Option<String>,
+    /// Launches that found this job `running` (the crash-loop guard, F8a2): kept while it runs, 0 on
+    /// every fresh record. Never written at 0, so a file from before it keeps its bytes and
+    /// `STATE_VERSION` stays 1.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub crashes: u8,
 }
+
+fn is_zero(n: &u8) -> bool { *n == 0 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -114,9 +114,16 @@ pub const JOB_ORDER: [&str; 17] = [
 /// Every other running job is waited for, with no time limit: an abandoned writer would write after
 /// Sign out's `on_sign_out` (§14.51 r1, C1; F1 test 30 pins this list).
 pub const ABANDON_AT_ONCE: [&str; 2] = ["mail.canary", "mail.first_pass"];
-/// The closed-set reason of a job whose runner panicked; the page maps it to its fix. It is reachable
-/// only under unwinding (tests and the dev profile): the release profile has `panic = "abort"`.
+/// The closed-set reason of a job the crash-loop guard paused (found `running` at two starts, the
+/// release profile's way, since it has `panic = "abort"`) and of one whose runner panicked under
+/// unwinding (tests and dev). The page maps it to its fix, [`JOB_CRASHED_FIX`]. Only
+/// [`Queue::retry`] may write over a record that carries it.
 pub const REASON_JOB_CRASHED: &str = "job_crashed";
+/// Launches that find a job `running` before it is paused with [`REASON_JOB_CRASHED`].
+const CRASH_LIMIT: u8 = 2;
+/// What the page says on a `job_crashed` job's row, beside its Try again (F11; §4.3's second
+/// closed-set fix, §14.51 r1 I5). It blames no step: a Windows shutdown or End task counts too.
+pub const JOB_CRASHED_FIX: &str = "Knowlu stopped twice while this step was running, so it has paused it. Press Try again to run it once more.";
 /// `school.courses` when the `BeforeConfig` chain ended without the account's copy read to its end
 /// (§4.3, Q-B20); "Try again" starts a new chain. **Still a sentence, not a key** (review r1, M5):
 /// F1's tests 16 pin these words with `contains`, so it becomes `account_unfinished` only when that
@@ -209,12 +216,27 @@ impl Core {
             _ => true,
         }
     }
+    /// `failed` with [`REASON_JOB_CRASHED`]: the crash-loop guard's pause (or a panic's).
+    fn is_paused(&self, job: &str) -> bool {
+        self.state.jobs.get(job).is_some_and(|r| r.state == JobState::Failed && r.reason.as_deref() == Some(REASON_JOB_CRASHED))
+    }
+    /// The student's Try again asks for `job`: the one writer allowed over a paused record. A paused job
+    /// is put back to `pending` with a count of `CRASH_LIMIT - 1`, so it runs once more and one more
+    /// kill pauses it again. Any other job is pushed as [`Core::push_job`] does.
+    fn press(&mut self, job: &str) {
+        let paused = self.is_paused(job);
+        if paused { self.order.retain(|j| j != job); self.state.jobs.remove(job); }
+        self.push_job(job);
+        if let Some(r) = self.state.jobs.get_mut(job).filter(|_| paused) { r.crashes = CRASH_LIMIT - 1; }
+    }
     /// Adds `job` as `pending` unless it is already queued. A progress indicator is never a job.
     /// `school.courses` pushed while the account is unsettled, after a chain has ended and with no
     /// slot queued to settle it, starts a new chain, so it cannot wait for ever (Q-B20). Before any
     /// chain has ended it waits for the slot that payment asks for (C1, test 14).
     fn push_job(&mut self, job: &str) {
         if job.starts_with(INDICATOR_PREFIX) { return; }
+        // A paused job stays paused until the student presses Try again ([`Core::press`]).
+        if self.is_paused(job) { return; }
         self.parked.clear();
         if job == "school.courses" && !self.state.account_settled && self.chain_ended && !self.order.iter().any(|j| j == "slot.partial") {
             (self.chain, self.chain_ended) = (Chain::default(), false);
@@ -281,7 +303,7 @@ impl Core {
             Outcome::Stopped => (JobState::Pending, BTreeMap::new(), None),
         };
         if state == JobState::Pending { self.parked.insert(job.to_string()); } else { self.order.retain(|j| j != job); self.parked.clear(); }
-        self.state.jobs.insert(job.to_string(), JobRecord { state, proof, reason });
+        self.state.jobs.insert(job.to_string(), JobRecord { state, proof, reason, ..Default::default() });
         if job == "config.ingest" || job == "slot.partial" { self.pay_no_rank(); }
     }
     /// Reads what a slot that ended left in the sync status and cursor (§4.3's three readings): sets
@@ -387,7 +409,9 @@ fn work(inner: Arc<Inner>, lane: usize) {
     while !g.shutdown {
         let Some(job) = inner.next(&g, lane) else { g = inner.cv.wait(g).unwrap_or_else(|e| e.into_inner()); continue };
         g.busy[lane] = true;
-        g.state.jobs.insert(job.clone(), JobRecord { state: JobState::Running, ..Default::default() });
+        // The running record keeps the count it is counting (the crash-loop guard); `finish` resets it.
+        let crashes = g.state.jobs.get(&job).map_or(0, |r| r.crashes);
+        g.state.jobs.insert(job.clone(), JobRecord { state: JobState::Running, crashes, ..Default::default() });
         inner.persist(&g);
         let scope = scope_for(&job, &g.state);
         // A `NoRank` slot starting is the owed one, whatever asked for it (so it is never run twice).
@@ -435,11 +459,16 @@ impl Drop for Queue {
 }
 
 impl Queue {
-    /// Spawns the serial thread and the lane thread, over `state` (running jobs already `pending`).
+    /// Spawns the serial thread and the lane thread, over `state`. A job found `running` was killed:
+    /// it counts one crash and goes back to `pending`, and at its second it is `failed` with
+    /// [`REASON_JOB_CRASHED`] and not run (the guard, F8a2). The result is saved once, before any thread.
     pub fn start(deps: Deps, mut state: OnboardingState) -> Queue {
         let mut order = Vec::new();
         for (name, r) in state.jobs.iter_mut() {
-            if r.state == JobState::Running { r.state = JobState::Pending; }
+            if r.state == JobState::Running {
+                r.crashes = r.crashes.saturating_add(1);
+                if r.crashes >= CRASH_LIMIT { (r.state, r.reason) = (JobState::Failed, Some(REASON_JOB_CRASHED.into())); } else { r.state = JobState::Pending; }
+            }
             if matches!(r.state, JobState::Pending | JobState::Held) && !name.starts_with(INDICATOR_PREFIX) { order.push(name.clone()); }
         }
         order.sort_by_key(|j| (JOB_ORDER.iter().position(|c| c == j).unwrap_or(JOB_ORDER.len()), j.clone()));
@@ -447,6 +476,9 @@ impl Queue {
         // A resumed `school.courses` that waits on an unsettled account needs a slot to settle it.
         if core.order.iter().any(|j| j == "school.courses") && !core.state.account_settled { core.push_job("slot.partial"); }
         core.mark_account_wait();
+        // Before the start read (which can take a minute) and before the ungated jobs run, so a job that
+        // kills the process every time cannot outrun its own count (§14.51 r1, M2).
+        if let Err(e) = save_state(&deps.data_dir, &core.state) { eprintln!("onboarding: could not save the job states: {e}"); }
         let inner = Arc::new(Inner { deps, core: Mutex::new(core), cv: Condvar::new(), stop: AtomicBool::new(false), batch_closed: AtomicBool::new(false) });
         let spawn = |lane: usize, name: &str| {
             let i = inner.clone();
@@ -499,18 +531,17 @@ impl Queue {
             if job != FIRST_SYNC { return; }
             g.state.jobs.insert(job.into(), JobRecord::default());
             if !g.state.account_settled { (g.chain, g.chain_ended) = (Chain::default(), false); }
-            g.push_job("slot.partial");
+            g.press("slot.partial");
             g.settle();
             self.inner.persist(&g);
             return self.inner.cv.notify_all();
         }
         if job == "school.courses" && !g.state.account_settled {
             (g.chain, g.chain_ended) = (Chain::default(), false);
-            g.push_job("slot.partial");
+            g.press("slot.partial");
         }
-        g.order.retain(|j| j != job);
-        g.state.jobs.remove(job);
-        g.push_job(job);
+        // A failed job is out of the order; a paused one comes back with a count of one (`press`).
+        g.press(job);
         g.settle();
         self.inner.persist(&g);
         self.inner.cv.notify_all();

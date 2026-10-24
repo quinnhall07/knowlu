@@ -2426,3 +2426,176 @@ fn test_17_update_state_rolls_back_a_change_whose_save_failed() {
     assert_eq!(r.q.snapshot().skips, before.skips, "the change is not kept in memory");
     let _ = std::fs::remove_dir(&path);
 }
+
+// ======================================================================================================
+// F8a2, test 31: the crash-loop guard (a job found `running` at two starts in a row is paused).
+// ======================================================================================================
+
+fn running_with(job: &str, crashes: u8) -> OnboardingState {
+    let mut s = state_at(5, true);
+    s.jobs.insert(job.into(), JobRecord { state: JobState::Running, crashes, ..Default::default() });
+    s
+}
+fn on_disk(dir: &Path, job: &str) -> JobRecord {
+    match load_state(dir) { Loaded::Ok(s) => s.jobs.get(job).cloned().unwrap_or_else(|| panic!("no {job} on disk")), other => panic!("the file: {other:?}") }
+}
+
+#[test]
+fn test_31_a_job_found_running_is_pending_with_a_count_of_one_on_disk_before_any_job_runs() {
+    // The start's entitlement read is held at its refresh, so nothing but `Queue::start` has written yet.
+    let dir = scratch("t31-persist");
+    let fake = Arc::new(Fake::default());
+    let ent = Arc::new(Racy { paid: AtomicBool::new(false), stale_next: AtomicBool::new(false), refreshing: AtomicBool::new(false), gate: Gate::new() });
+    let deps = Deps { data_dir: dir.clone(), runner: fake.clone(), entitlement: ent.clone(), sync_view: Arc::new(Syncs(Mutex::new(VecDeque::new()))) };
+    let q = Queue::start(deps, running_with("mail.setup", 0));
+    let rec = on_disk(&dir, "mail.setup");
+    assert_eq!((rec.state, rec.crashes), (JobState::Pending, 1), "start saved the resumed job before it spawned a thread");
+    assert!(!fake.log.ran("mail.setup"), "{:?}", fake.log.all());
+    ent.paid.store(true, Ordering::SeqCst);
+    q.wake();
+    ent.gate.release();
+    assert!(q.wait_idle(Duration::from_secs(20)), "{:?}", fake.log.all());
+    assert_eq!(q.snapshot().jobs["mail.setup"].state, JobState::Done);
+}
+
+#[test]
+fn test_31_the_second_running_start_pauses_the_job_with_job_crashed_and_never_runs_it() {
+    let r = rig_full("t31-pause", running_with("school.capture", 1), true, vec![], false, |_| {});
+    r.idle();
+    let rec = r.job("school.capture");
+    assert_eq!((rec.state, rec.reason.as_deref()), (JobState::Failed, Some(REASON_JOB_CRASHED)));
+    assert!(!r.log.ran("school.capture"), "{:?}", r.log.all());
+    assert_eq!(on_disk(&r.dir, "school.capture").state, JobState::Failed);
+    assert!(JOB_CRASHED_FIX.contains("stopped twice") && JOB_CRASHED_FIX.contains("Try again"), "{JOB_CRASHED_FIX}");
+}
+
+#[test]
+fn test_31_a_job_that_ends_normally_reads_zero_and_a_zero_is_never_written() {
+    let r = rig_full("t31-normal", running_with("school.capture", 0), true, vec![], false, |_| {});
+    r.idle();
+    assert_eq!((r.state_of("school.capture"), r.job("school.capture").crashes), (JobState::Done, 0));
+    let text = std::fs::read_to_string(state_path(&r.dir)).unwrap();
+    assert!(!text.contains("crashes"), "{text}");
+}
+
+#[test]
+fn test_31_an_abandoned_canary_reads_zero_and_its_late_return_keeps_zero() {
+    let r = rig_full("t31-abandon", running_with("mail.canary", 0), true, vec![], false, |_| {});
+    let gate = r.fake.block("mail.canary", false);
+    r.wait_started("mail.canary");
+    assert_eq!(r.job("mail.canary").crashes, 1, "the running insert keeps the count it is counting");
+    r.q.drain();
+    let rec = r.job("mail.canary");
+    assert_eq!((rec.state, rec.crashes), (JobState::Pending, 0), "an abandoned job was not running when the process ended");
+    gate.release();
+    r.wait_log("end:mail.canary");
+    r.idle();
+    assert_eq!((r.state_of("mail.canary"), r.job("mail.canary").crashes), (JobState::Pending, 0));
+}
+
+#[test]
+fn test_31_try_again_on_a_job_crashed_job_sets_the_count_to_one_so_one_more_kill_pauses_it() {
+    let r = rig_full("t31-retry", running_with("school.capture", 1), true, vec![], false, |_| {});
+    r.idle();
+    assert_eq!(r.state_of("school.capture"), JobState::Failed);
+    let gate = r.fake.block("school.capture", true);
+    r.q.retry("school.capture");
+    r.wait_started("school.capture");
+    let killed = r.q.snapshot();
+    assert_eq!((killed.jobs["school.capture"].state, killed.jobs["school.capture"].crashes), (JobState::Running, 1));
+    // The process dies here: the next launch finds the file as it stands.
+    let next = rig_full("t31-retry-next", killed, true, vec![], false, |_| {});
+    next.idle();
+    assert_eq!((next.state_of("school.capture"), next.job("school.capture").reason.as_deref()), (JobState::Failed, Some(REASON_JOB_CRASHED)));
+    assert!(!next.log.ran("school.capture"));
+    gate.release();
+}
+
+#[test]
+fn test_31_a_file_written_before_the_field_loads_at_version_one_as_zero_and_keeps_its_bytes() {
+    let dir = scratch("t31-bytes");
+    // Written by hand, in the engine's JSON style (sorted keys), with no `crashes` key anywhere: a file from before the field.
+    let old = br#"{"account_settled": true, "finished": false, "handover": [], "jobs": {"mail.setup": {"proof": {}, "reason": "setup_failed", "state": "failed"}, "school.capture": {"proof": {"courses": 3}, "reason": null, "state": "done"}}, "school": null, "skips": [], "started_at": "2026-10-24T09:00:00Z", "step": 5, "step10_confirmed_at": null, "version": 1}"#.to_vec();
+    std::fs::write(state_path(&dir), &old).unwrap();
+    let Loaded::Ok(loaded) = load_state(&dir) else { panic!("unreadable") };
+    assert_eq!(loaded.version, 1);
+    assert!(loaded.jobs.values().all(|j| j.crashes == 0));
+    save_state(&dir, &loaded).unwrap();
+    assert_eq!(std::fs::read(state_path(&dir)).unwrap(), old, "a load and a save change no byte");
+    // A count above zero is the only thing that writes the key.
+    let mut counted = loaded.clone();
+    counted.jobs.get_mut("mail.setup").unwrap().crashes = 1;
+    save_state(&dir, &counted).unwrap();
+    assert!(String::from_utf8_lossy(&std::fs::read(state_path(&dir)).unwrap()).contains("\"crashes\": 1"));
+}
+
+#[test]
+fn test_31_a_slot_found_running_twice_on_an_unsettled_account_stays_paused_and_try_again_runs_it_once() {
+    let mut state = running_with("slot.partial", 1);
+    state.account_settled = false;
+    state.jobs.insert("school.courses".into(), pending_job());
+    let r = rig_full("t31-slot", state, true, vec![ok_reading(true, 10, 10)], true, |_| {});
+    r.idle();
+    let rec = on_disk(&r.dir, "slot.partial");
+    assert_eq!((rec.state, rec.reason.as_deref(), rec.crashes), (JobState::Failed, Some(REASON_JOB_CRASHED), 2), "start's own slot push never overwrites a paused one");
+    assert!(!r.log.ran("slot.partial"), "{:?}", r.log.all());
+    assert_eq!(r.state_of("school.courses"), JobState::Pending, "courses waits, with its reason");
+    r.q.retry("slot.partial");
+    r.idle();
+    assert_eq!(r.log.started().iter().filter(|j| *j == "slot.partial").count(), 1);
+    assert_eq!((r.state_of("slot.partial"), r.job("slot.partial").crashes), (JobState::Done, 0));
+}
+
+fn paused_slot() -> JobRecord { JobRecord { state: JobState::Failed, reason: Some(REASON_JOB_CRASHED.into()), crashes: 2, ..Default::default() } }
+fn failed_first_sync() -> JobRecord { JobRecord { state: JobState::Failed, reason: Some(REASON_FIRST_SYNC_FAILED.into()), ..Default::default() } }
+
+#[test]
+fn test_31_try_again_on_first_sync_lifts_a_paused_slot_and_runs_it_once() {
+    let mut state = state_at(8, true);
+    state.jobs.insert(FIRST_SYNC.into(), failed_first_sync());
+    state.jobs.insert("slot.partial".into(), paused_slot());
+    let r = rig_full("t31-fs-a", state, true, vec![ok_reading(true, 10, 10)], true, |_| {});
+    r.idle();
+    assert!(!r.log.ran("slot.partial"), "paused until the student presses");
+    r.q.retry(FIRST_SYNC);
+    r.idle();
+    assert_eq!(r.log.started().iter().filter(|j| *j == "slot.partial").count(), 1);
+    assert_eq!((r.state_of("slot.partial"), r.job("slot.partial").crashes), (JobState::Done, 0));
+    assert_eq!(r.state_of(FIRST_SYNC), JobState::Done, "the first sync was read again");
+}
+
+#[test]
+fn test_31_one_more_kill_after_the_first_sync_press_pauses_the_slot_again_with_a_way_to_try_again() {
+    let mut state = state_at(8, true);
+    state.jobs.insert(FIRST_SYNC.into(), failed_first_sync());
+    state.jobs.insert("slot.partial".into(), paused_slot());
+    let r = rig_full("t31-fs-b", state, true, vec![], true, |_| {});
+    r.idle();
+    let gate = r.fake.block("slot.partial", true);
+    r.q.retry(FIRST_SYNC);
+    r.wait_started("slot.partial");
+    let killed = r.q.snapshot();
+    assert_eq!((killed.jobs["slot.partial"].state, killed.jobs["slot.partial"].crashes), (JobState::Running, 1));
+    let next = rig_full("t31-fs-b-next", killed, true, vec![], true, |_| {});
+    next.idle();
+    let slot = next.job("slot.partial");
+    assert_eq!((slot.state, slot.reason.as_deref()), (JobState::Failed, Some(REASON_JOB_CRASHED)), "paused again, with its fix");
+    assert!(!next.log.ran("slot.partial"));
+    assert_ne!(next.state_of(FIRST_SYNC), JobState::Done);
+    gate.release();
+}
+
+#[test]
+fn test_31_try_again_on_school_courses_of_an_unsettled_account_lifts_a_paused_slot() {
+    let mut state = state_at(8, false);
+    state.jobs.insert("school.courses".into(), JobRecord { state: JobState::Failed, reason: Some(REASON_ACCOUNT_UNFINISHED.into()), ..Default::default() });
+    state.jobs.insert("slot.partial".into(), paused_slot());
+    let r = rig_full("t31-sc", state, true, vec![ok_reading(true, 10, 10)], true, |_| {});
+    r.idle();
+    assert!(!r.log.ran("slot.partial"));
+    r.q.retry("school.courses");
+    r.idle();
+    assert_eq!(r.log.started().iter().filter(|j| *j == "slot.partial").count(), 1);
+    assert_eq!(r.state_of("slot.partial"), JobState::Done);
+    assert_eq!(r.state_of("school.courses"), JobState::Done, "the settled account lets the courses run");
+}
