@@ -3637,7 +3637,8 @@ fn test_32_a_slot_with_no_account_reads_no_list_so_it_clears_nothing() {
     let text = src_text("scheduler.rs");
     let body = &text[text.find("pub fn run_slot_inner_scoped").expect("run_slot_inner_scoped")..];
     let body = &body[..body.find("let pass =").expect("the pass")];
-    assert!(body.contains("MAIL_NO_ACCOUNT"), "the slot's mail_rows names a client it could not build");
+    let code: String = body.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+    assert!(code.contains("Some(Err(_)) => Err(MAIL_NO_ACCOUNT)"), "the slot's mail_rows names a client it could not build");
 }
 
 #[test]
