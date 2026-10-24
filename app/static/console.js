@@ -3371,16 +3371,6 @@
     return "Your account had no plan yet, so this is the first one.";
   }
 
-  // The folder's name: "Knowlu", then "Knowlu 2", "Knowlu 3".
-  function suCandidate(i) { return i === 1 ? "Knowlu" : "Knowlu " + i; }
-  // INTERIM: `dest_for` refuses a folder that exists, and one can outlive a reinstall, so this page
-  // tries the next name when create_vault says "already exists" (to 20, then a named error).
-  // F3 moves naming into Rust and this loop goes with it.
-  var SU_NAME_CAP = 20;
-  function suTaken(name) {
-    return (SU.l.profiles || []).some(function (p) { return String(p.name).toLowerCase() === name.toLowerCase(); });
-  }
-
   // The defaults the account step makes a folder with (spec §1.9 A): the system's zone, the checks at
   // 12:00 and 18:00, start with Windows. No school, no feed, no coursework login and no mail offer:
   // each is asked on its own step, after the account.
@@ -3399,17 +3389,10 @@
     suMakeFolder();
   }
 
-  function suMakeFolder(i) {
-    i = i || 1;
-    while (i <= SU_NAME_CAP && suTaken(suCandidate(i))) { i += 1; }
+  // Rust picks the name ("Knowlu", then "Knowlu 2", "Knowlu 3"); the page asks none.
+  function suMakeFolder() {
     SU.making = true; SU.doneError = ""; renderSetup();
-    if (i > SU_NAME_CAP) {
-      SU.making = false;
-      SU.doneError = "Knowlu could not find a free folder name (Knowlu to Knowlu 20 are all taken). Remove or rename one in your Knowlu folder, then try again.";
-      renderSetup(); return Promise.resolve();
-    }
-    return invoke("create_vault", { name: suCandidate(i), plan: suPlan() }).then(function (r) {
-      if (!r.ok && String(r.error || "").indexOf("already exists") !== -1) { return suMakeFolder(i + 1); }
+    return invoke("create_vault_defaults").then(function (r) {
       SU.making = false;
       if (!r.ok) { SU.doneError = r.error; renderSetup(); return; }
       SU.profileId = r.profile.id; SU.folder = r.profile.vault; SU.restore = restoreSentence(r.restored);
@@ -3483,7 +3466,7 @@
     if (e.target.closest("#su-code-go")) { suVerify(); return; }
     if (e.target.closest("#su-resend")) { suSendCode(SU.codeEmail, true); return; }
     if (e.target.closest("#su-other-email")) { SU.emailOpen = true; SU.codeError = ""; suShow("account"); EL("su-email").focus(); return; }
-    if (e.target.closest("#su-retry")) { suMakeFolder(1); return; }
+    if (e.target.closest("#su-retry")) { suMakeFolder(); return; }
     if (e.target.closest("#su-continue")) { suContinue(); }
   });
   // Enter does what the screen's primary button does, from a field or from nowhere in particular.

@@ -150,7 +150,7 @@ pub fn launch_state(app: tauri::AppHandle) -> Value {
     match app.try_state::<Onboarding>() {
         Some(o) => json!({
             "ok": true, "error": Value::Null, "mode": o.mode,
-            "profiles": serde_json::to_value(&*o.profiles.lock().unwrap_or_else(|e| e.into_inner())).unwrap_or(Value::Null),
+            "profiles": profiles_with_setup_state(&o.root, &o.profiles.lock().unwrap_or_else(|e| e.into_inner())),
             "machine": knowlu_engine::journal::device_name(),
             "tz": jiff::tz::TimeZone::system().iana_name().unwrap_or("America/Chicago"),
             // The wizard's default folders (cloud design §4.1 and §11a, 2026-09-09): the vault's
@@ -817,23 +817,106 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
     out
 }
 
-/// **F3 stub.** The name step 2 gives the new vault: "Knowlu", then "Knowlu 2", "Knowlu 3", stepping
-/// past every name that is a registered profile in `root` or a folder already under `home`'s vault
-/// parent. Writes and renames nothing.
-pub fn pick_vault_name_in(_root: &Path, _home: &Path) -> Result<String, String> {
-    todo!("F3: the name picker")
+/// The name step 2 gives the new vault: "Knowlu", then "Knowlu 2", "Knowlu 3", stepping past every
+/// name that is a registered profile in `root` **or** a folder already under `home`'s vault parent
+/// (a leftover with no profile too), so `dest_for`'s "already exists" is never reached. It only
+/// looks: nothing is written into, made or renamed.
+pub fn pick_vault_name_in(root: &Path, home: &Path) -> Result<String, String> {
+    let taken: Vec<String> = profiles::load(root)?.into_iter().map(|p| p.name.to_lowercase()).collect();
+    let parent = PathBuf::from(default_folders_in(home).0);
+    (1..=999).map(|n| if n == 1 { "Knowlu".to_string() } else { format!("Knowlu {n}") })
+        .find(|name| !taken.contains(&name.to_lowercase()) && !parent.join(name).exists())
+        .ok_or_else(|| "Knowlu could not find a free folder name; remove or rename one in your Knowlu folder. Try again".to_string())
 }
 
-/// **F3 stub.** Step 2's create: a vault from the defaults (no school files; `onboarding.json` last),
-/// then today's restore from the account. Same envelope as `create_vault_in`, with `restored.ok`.
-pub fn create_vault_defaults_in(_root: &Path, _home: &Path) -> Value {
-    todo!("F3: step 2's vault with defaults")
+/// Step 2's create (F3, spec §1.9 A): a vault from the defaults (Windows' zone, noon and six, start
+/// with Windows; **no school files**, §4.9), the session moved onto it, then today's restore from the
+/// account. `onboarding.json` is written last of the vault's own steps, at step 3 (§4.7: a restored
+/// vault has no `campus.yaml` and the account never names the school), with `account_settled` only
+/// when the restore reached the account (`restored.ok`, §4.9). Every failure says "Try again" and
+/// leaves the sign-in where a retry finds it. The adopt and restore-from-backup paths keep
+/// `create_vault_in` and their own wording.
+pub fn create_vault_defaults_in(root: &Path, home: &Path) -> Value {
+    let fail = |e: String| json!({ "ok": false, "error": e, "profile": Value::Null });
+    let account_id = match crate::account::load_session(crate::account::PENDING_TARGET) {
+        Ok((id, _)) => id,
+        Err(_) => return fail("Your sign-in is no longer on this computer. Sign in again to continue.".into()),
+    };
+    let human_actor = match account_human_actor(&account_id) {
+        Ok(token) => token,
+        Err(why) => return fail(format!("Knowlu could not reach your account to check for an existing plan ({why}). Check the connection, then Try again.")),
+    };
+    let named = pick_vault_name_in(root, home).and_then(|n| vault_dest_in(home, &n).map(|(d, b)| (n, d, b)));
+    let (name, dest, backups) = match named {
+        Ok(v) => v,
+        Err(e) => return fail(format!("Knowlu could not make your plan folder ({}). Try again.", e.replace(" — pick another name", ""))),
+    };
+    let profile_id = profiles::id_for(&dest);
+    let tz = jiff::tz::TimeZone::system().iana_name().unwrap_or("America/Chicago").to_string();
+    let slots = vec!["12:00".to_string(), "18:00".to_string()];
+    let Ok(plan) = serde_json::from_value::<WizardPlan>(json!({ "timezone": tz, "slots": slots, "zybooks": false, "vhl": false, "autostart": true })) else {
+        return fail("Knowlu could not read its own defaults. Try again.".into());
+    };
+    let vp = crate::scaffold::VaultPlan {
+        profile_id: profile_id.clone(), ics_url: None, personal_calendar: None, google_calendar: false,
+        timezone: tz, slots, device: knowlu_engine::journal::device_name(), campus: String::new(),
+        campus_choice: Default::default(), zybooks: false, vhl: false, zybooks_courses: Vec::new(),
+        vhl_sections: Vec::new(), zybooks_ignore: Vec::new(), course_map: Vec::new(), courses: Vec::new(),
+        api_base: crate::account::api_base(), anon_key: crate::account::anon_key(), account_id, human_actor,
+    };
+    if let Err(e) = crate::scaffold::create_vault_defaults(&dest, &vp) {
+        return fail(format!("Knowlu could not make your plan folder ({e}). Try again."));
+    }
+    let session = crate::account::session_target(&profile_id);
+    // Undo this create, sign-in included: the pending session goes back, so the retry finds it.
+    let undo = |why: String| {
+        let _ = crate::account::move_session(&session, crate::account::PENDING_TARGET);
+        let _ = std::fs::remove_dir_all(&dest);
+        let _ = std::fs::remove_file(crate::onboarding_state::state_path(&profiles::profile_dir(root, &profile_id)));
+        fail(format!("{why}. Try again."))
+    };
+    if let Err(e) = crate::account::move_session(crate::account::PENDING_TARGET, &session) {
+        let _ = std::fs::remove_dir_all(&dest);
+        return fail(format!("Knowlu could not attach your sign-in to the new folder ({e}). Try again."));
+    }
+    let restored = match knowlu_engine::sync::restore_into(&dest) {
+        Ok(r) => r,
+        Err(e) => return undo(format!("Knowlu could not read your account's copy of your plan ({e})")),
+    };
+    let mut state = crate::onboarding_state::OnboardingState::new(&jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(), 3);
+    state.account_settled = restored.ok;
+    if let Err(e) = crate::onboarding_state::save_state(&profiles::profile_dir(root, &profile_id), &state) {
+        return undo(format!("Knowlu could not save your setup progress ({e})"));
+    }
+    let mut out = finish_or_roll_back(root, &dest, Some(name), &plan, Some(backups));
+    if out["ok"] != true {
+        let why = out["error"].as_str().unwrap_or("the profile could not be finished").to_string();
+        return undo(why);
+    }
+    out["restored"] = json!({ "notes": restored.notes, "records": restored.records, "empty": restored.empty, "warnings": restored.warnings, "ok": restored.ok });
+    out
 }
 
-/// **F3 stub.** The picker's profile rows, each carrying `setup_unfinished` from its
-/// `onboarding.json` (what `launch_state` serves under `profiles`).
-pub fn profiles_with_setup_state(_root: &Path, _profiles: &[Profile]) -> Value {
-    todo!("F3: setup_unfinished on launch_state's profiles")
+/// The picker's profile rows, each with `setup_unfinished` from its own `onboarding.json`: true when
+/// the file says setup is not finished (an unreadable file too, as `launch_mode` reads it), false for
+/// a finished file or none. What `launch_state` serves under `profiles`.
+pub fn profiles_with_setup_state(root: &Path, profiles: &[Profile]) -> Value {
+    Value::Array(profiles.iter().map(|p| {
+        let unfinished = crate::onboarding_state::launch_mode(&crate::onboarding_state::load_state(&profiles::profile_dir(root, &p.id))) == crate::onboarding_state::LaunchMode::Onboarding;
+        let mut row = serde_json::to_value(p).unwrap_or(Value::Null);
+        row["setup_unfinished"] = json!(unfinished);
+        row
+    }).collect())
+}
+
+/// Step 2's create from the shell, over the handle-free core. The page asks no name.
+#[tauri::command(async)]
+pub fn create_vault_defaults(app: tauri::AppHandle) -> Value {
+    let root = match app.try_state::<Onboarding>() { Some(o) => o.root.clone(), None => return json!({ "ok": false, "error": "not in onboarding", "profile": Value::Null }) };
+    let home = match home_dir() { Ok(h) => h, Err(e) => return json!({ "ok": false, "error": e, "profile": Value::Null }) };
+    let out = create_vault_defaults_in(&root, &home);
+    if out["ok"] == true { refresh(&app, &root); }
+    out
 }
 
 #[tauri::command(async)]

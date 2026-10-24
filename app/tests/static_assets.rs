@@ -3090,22 +3090,12 @@ fn the_account_step_makes_the_folder_says_what_it_restored_and_relaunches_on_con
     }
     assert!(!plan.contains("campus_choice") && !plan.contains("courses"), "no school and no classes before their steps");
     assert!(js.contains("SU.folder = r.profile.vault"), "the folder is shown as the command named it");
-    // The name: "Knowlu", then "Knowlu 2", "Knowlu 3": the first no profile on this machine has, and
-    // when `dest_for` answers "already exists" (a folder that outlived a reinstall) the next one, to
-    // 20, then a named error. F3 moves naming into Rust and this loop goes with it.
-    let name = js.split("function suCandidate(").nth(1).and_then(|s| s.split("
-  }
-").next()).expect("suCandidate");
-    assert!(name.contains("\"Knowlu\"") && name.contains("\"Knowlu \" + i"), "{name}");
+    // The name is Rust's (F3): the page asks none, loops none, and sends no plan.
     let make = js.split("function suMakeFolder(").nth(1).and_then(|s| s.split("
   }
 ").next()).expect("suMakeFolder");
-    assert!(make.contains("invoke(\"create_vault\", { name: suCandidate(i), plan: suPlan() })"));
-    assert!(make.contains("already exists") && make.contains("suMakeFolder(i + 1)"), "an existing folder tries the next name");
-    assert!(make.contains("i > SU_NAME_CAP") && js.contains("var SU_NAME_CAP = 20;"), "capped at 20");
-    assert!(make.contains("Knowlu 20") || make.contains("SU_NAME_CAP"), "the cap is named in the error");
-    assert!(js.contains("F3 moves naming into Rust"), "the interim says what retires it");
-    assert!(js.contains("invoke(\"create_vault\""));
+    assert!(make.contains("invoke(\"create_vault_defaults\")"), "{make}");
+    assert!(!js.contains("suCandidate") && !js.contains("SU_NAME_CAP") && !js.contains("suTaken"), "the interim name loop is gone");
     // Continue is the relaunch; it waits for the folder and for itself, and a refusal is shown.
     let go = js.split("function suContinue(").nth(1).and_then(|s| s.split("\n  }\n").next()).expect("suContinue");
     assert!(go.contains("if (SU.making || !SU.profileId || SU.busy) { return; }"), "no relaunch before the folder, none twice");
