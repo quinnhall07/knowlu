@@ -711,12 +711,19 @@ pub fn write_cloud_yaml_if_absent(vault: &Path, plan: &VaultPlan) -> Result<(), 
 /// (`write::create` → `ids::rel`) and nothing it writes names the vault's own location, so the
 /// records the rename carries into `dest` are the records seeding `dest` directly would have
 /// written. `the_move_does_not_leak_the_staging_path_into_the_journal` pins that.
-pub fn create_vault(dest: &Path, plan: &VaultPlan) -> Result<(), String> {
+pub fn create_vault(dest: &Path, plan: &VaultPlan) -> Result<(), String> { create_vault_with(dest, plan, true) }
+
+/// Step 2's vault (F3, §4.9): the same staged create, without `config/campus.yaml`, `events.yaml` and
+/// `ingest.yaml`, which `school.apply` and `config.ingest` create once their answers are known.
+/// `plan.campus` is never looked up, so `campus_yaml` is not called.
+pub fn create_vault_defaults(dest: &Path, plan: &VaultPlan) -> Result<(), String> { create_vault_with(dest, plan, false) }
+
+fn create_vault_with(dest: &Path, plan: &VaultPlan, school_files: bool) -> Result<(), String> {
     if dest.exists() { return Err(format!("{}: already exists", dest.display())); }
     let parent = dest.parent().ok_or_else(|| format!("{}: no parent folder", dest.display()))?;
     std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     let staging: PathBuf = parent.join(format!(".knowlu-new-{}", knowlu_engine::ids::new_id("stage")));
-    let built = build_into(&staging, plan).and_then(|()| seed_writes(&staging, plan));
+    let built = build_into(&staging, plan, school_files).and_then(|()| seed_writes(&staging, plan));
     match built.and_then(|()| std::fs::rename(&staging, dest).map_err(|e| format!("{}: {e}", dest.display()))) {
         Ok(()) => Ok(()),
         Err(e) => { let _ = std::fs::remove_dir_all(&staging); Err(e) }
@@ -730,7 +737,7 @@ fn write_file(root: &Path, rel: &str, text: &str) -> Result<(), String> {
     knowlu_engine::pystr::write_text(&path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn build_into(root: &Path, plan: &VaultPlan) -> Result<(), String> {
+fn build_into(root: &Path, plan: &VaultPlan, school_files: bool) -> Result<(), String> {
     for folder in ["tasks", "approvals", "archive", "courses", "issues", "info", "grades", "state", "state/journal", "config"] {
         let path = root.join(folder);
         std::fs::create_dir_all(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -746,23 +753,25 @@ fn build_into(root: &Path, plan: &VaultPlan) -> Result<(), String> {
     // first task and every course note are written as it. Create-new: never rewritten. The adopt
     // path and the backup-folder restore copy or keep a vault and never reach this.
     knowlu_engine::journal::create_actor_file(root, plan.human_actor).map_err(|e| e.to_string())?;
-    let campus = campus_yaml(&plan.campus).ok_or_else(|| format!("unknown campus preset {:?}", plan.campus))?;
-    write_file(root, "config/events.yaml", campus)?;
-    write_file(root, "config/campus.yaml", &campus_config_yaml(&plan.campus_choice)?)?;
-    write_file(root, "config/ingest.yaml", &ingest_yaml(plan)?)?;
-    // Review round 1, I1: make the emitter unable to produce an unreadable file at all — a
-    // duplicate `course_map`/`courses`/`sections` key (`ingest_yaml` walks a `Vec`; two rows
-    // mapping the same book would otherwise write the same key twice) makes `serde_yaml_ng`'s
-    // `Mapping` deserializer refuse the whole file, which is `config unreadable: …` and every book
-    // and section "not in config; skipped" — the first-slot failure this task exists to remove,
-    // arrived at from the write side instead of the read side. The engine's OWN loader decides —
-    // not a second, hand-rolled parse call — so this fails exactly where `coursework-discover`/
-    // `coursework`/`judge` would fail, and `create_vault` is already all-or-nothing, so a plan bug
-    // refuses the wizard loudly instead of handing a student a vault that never syncs.
-    let (_, ingest_warnings) = knowlu_engine::coursework::load_coursework_config(root)
-        .map_err(|e| format!("config/ingest.yaml would not parse: {e}"))?;
-    if !ingest_warnings.is_empty() {
-        return Err(format!("config/ingest.yaml would not parse: {}", ingest_warnings.join("; ")));
+    if school_files {
+        let campus = campus_yaml(&plan.campus).ok_or_else(|| format!("unknown campus preset {:?}", plan.campus))?;
+        write_file(root, "config/events.yaml", campus)?;
+        write_file(root, "config/campus.yaml", &campus_config_yaml(&plan.campus_choice)?)?;
+        write_file(root, "config/ingest.yaml", &ingest_yaml(plan)?)?;
+        // Review round 1, I1: make the emitter unable to produce an unreadable file at all — a
+        // duplicate `course_map`/`courses`/`sections` key (`ingest_yaml` walks a `Vec`; two rows
+        // mapping the same book would otherwise write the same key twice) makes `serde_yaml_ng`'s
+        // `Mapping` deserializer refuse the whole file, which is `config unreadable: …` and every book
+        // and section "not in config; skipped" — the first-slot failure this task exists to remove,
+        // arrived at from the write side instead of the read side. The engine's OWN loader decides —
+        // not a second, hand-rolled parse call — so this fails exactly where `coursework-discover`/
+        // `coursework`/`judge` would fail, and `create_vault` is already all-or-nothing, so a plan bug
+        // refuses the wizard loudly instead of handing a student a vault that never syncs.
+        let (_, ingest_warnings) = knowlu_engine::coursework::load_coursework_config(root)
+            .map_err(|e| format!("config/ingest.yaml would not parse: {e}"))?;
+        if !ingest_warnings.is_empty() {
+            return Err(format!("config/ingest.yaml would not parse: {}", ingest_warnings.join("; ")));
+        }
     }
     write_file(root, "config/runners.yaml", &runners_yaml(plan)?)?;
     write_file(root, "config/cloud.yaml", &cloud_yaml(plan)?)?;
