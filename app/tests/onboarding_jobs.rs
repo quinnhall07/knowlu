@@ -1439,7 +1439,7 @@ fn test_16_a_lane_job_retrying_on_a_held_sync_lock_holds_neither_vault_io_nor_th
     // Always refused: gives up after thirty seconds of tries, never having run the work.
     let total = RefCell::new(Duration::ZERO);
     let never = retry_with_hold(&vault_io, &|| Err::<Box<dyn std::any::Any>, _>(knowlu::week::SYNC_RUNNING.to_string()), &|d| *total.borrow_mut() += d, &mut || Ok(1));
-    assert!(never.is_err());
+    assert_eq!(never, Err(knowlu::week::SYNC_RUNNING.to_string()), "past the budget is the busy refusal itself");
     assert_eq!(*total.borrow(), RETRY_BUDGET);
     assert_eq!(RETRY_BUDGET, Duration::from_secs(30));
 }
@@ -1462,6 +1462,11 @@ fn test_16_registrar_confirm_is_entered_with_vault_io_free_and_retries_only_on_t
     let other = retry_on_sync_running::<i32>(&|_| panic!("slept"), &mut || { n.set(n.get() + 1); Err("a sync is running; try again in a moment!".to_string()) });
     assert!(other.is_err());
     assert_eq!(n.get(), 1, "only week::SYNC_RUNNING itself is retried");
+    // Always busy: thirty seconds of sleeps, then the busy refusal itself (review: F8h-runner maps it).
+    let slept = RefCell::new(Duration::ZERO);
+    let busy = retry_on_sync_running::<i32>(&|d| *slept.borrow_mut() += d, &mut || Err(knowlu::week::SYNC_RUNNING.to_string()));
+    assert_eq!(busy, Err(knowlu::week::SYNC_RUNNING.to_string()));
+    assert_eq!(*slept.borrow(), RETRY_BUDGET);
     // The pin: onboarding_jobs.rs compares the constant and never a copy of its words.
     let src = src_of("onboarding_jobs.rs");
     assert!(src.contains("SYNC_RUNNING"), "the retry compares week::SYNC_RUNNING");
@@ -1755,7 +1760,7 @@ fn test_02_school_apply_is_enqueued_but_does_not_start_until_the_school_is_confi
 
 #[test]
 fn test_17_after_a_rewind_with_no_answers_file_the_config_jobs_stay_pending_and_run_once_the_answers_are_saved() {
-    let r = rig_full("t17-noanswers-queue", state_at(8, true), true, vec![ok_reading(true, 10, 10)], false, |_| {});
+    let r = rig_full("t17-noanswers-queue", state_applied(8, true), true, vec![ok_reading(true, 10, 10)], false, |_| {});
     assert!(!answers_path(&r.dir).exists());
     for j in ["school.courses", "config.ingest"] { r.q.enqueue(j); }
     r.idle();
