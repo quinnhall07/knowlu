@@ -157,6 +157,8 @@ struct Core {
     /// A `slot.partial` ask merged into one that may not run `NoRank` (I1): one `NoRank` slot is owed
     /// once `config.ingest` is done. Not persisted, like the chain.
     no_rank_owed: bool,
+    /// The last `slot.partial` started as `NoRank` (read only while it is running, r3).
+    partial_no_rank: bool,
     /// The profile's app data: where the answers file the config jobs read lives.
     dir: std::path::PathBuf,
 }
@@ -385,7 +387,10 @@ fn work(inner: Arc<Inner>, lane: usize) {
         inner.persist(&g);
         let scope = scope_for(&job, &g.state);
         // A `NoRank` slot starting is the owed one, whatever asked for it (so it is never run twice).
-        if scope == Some(SlotScope::NoRank) && job == "slot.partial" { g.no_rank_owed = false; }
+        if job == "slot.partial" {
+            g.partial_no_rank = scope == Some(SlotScope::NoRank);
+            if g.partial_no_rank { g.no_rank_owed = false; }
+        }
         drop(g);
         let run = || inner.deps.runner.run(&job, scope, &inner.stop);
         // Holds under unwinding only (tests and dev): in release `panic = "abort"` ends the process.
@@ -434,7 +439,7 @@ impl Queue {
             if matches!(r.state, JobState::Pending | JobState::Held) && !name.starts_with(INDICATOR_PREFIX) { order.push(name.clone()); }
         }
         order.sort_by_key(|j| (JOB_ORDER.iter().position(|c| c == j).unwrap_or(JOB_ORDER.len()), j.clone()));
-        let mut core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false, frozen: false, abandoned: BTreeSet::new(), chain: Chain::default(), chain_ended: false, no_rank_owed: false, dir: deps.data_dir.clone() };
+        let mut core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false, frozen: false, abandoned: BTreeSet::new(), chain: Chain::default(), chain_ended: false, no_rank_owed: false, partial_no_rank: false, dir: deps.data_dir.clone() };
         // A resumed `school.courses` that waits on an unsettled account needs a slot to settle it.
         if core.order.iter().any(|j| j == "school.courses") && !core.state.account_settled { core.push_job("slot.partial"); }
         core.mark_account_wait();
@@ -452,11 +457,16 @@ impl Queue {
     }
     /// An ask was answered: the job is `pending` (or `held`) and runs when its inputs are ready.
     /// A `slot.partial` ask that merges into a queued one owes a `NoRank` slot (I1), unless the queued
-    /// one is `pending` with `config.ingest` already done, so it is sure to run as `NoRank` itself.
+    /// one is `pending` with `config.ingest` already done, so it is sure to run as `NoRank` itself, or
+    /// is already running as `NoRank`.
     pub fn enqueue(&self, job: &str) {
         let mut g = self.inner.lock();
         if job == "slot.partial" && g.order.iter().any(|j| j == job) {
-            let covered = g.job_state(job) == Some(JobState::Pending) && proposals_ready(&g.state);
+            let covered = match g.job_state(job) {
+                Some(JobState::Pending) => proposals_ready(&g.state),
+                Some(JobState::Running) => g.partial_no_rank,
+                _ => false,
+            };
             if !covered { g.no_rank_owed = true; }
         }
         g.push_job(job);
@@ -475,10 +485,21 @@ impl Queue {
     }
     /// "Try again" on a `failed` job puts it back to `pending`; any other state is left alone. For
     /// `school.courses` while the account is unsettled that also starts a new chain: one `BeforeConfig`
-    /// slot, the count reset (Q-B20).
+    /// slot, the count reset (Q-B20). A progress indicator is never deleted (§4.6, r3): a failed
+    /// `first.sync` is reset to `pending` and the slot that re-reads it is queued; any other
+    /// indicator (`first.grades`, F8g's) is left as it is, still named with its fix.
     pub fn retry(&self, job: &str) {
         let mut g = self.inner.lock();
         if g.job_state(job) != Some(JobState::Failed) { return; }
+        if job.starts_with(INDICATOR_PREFIX) {
+            if job != FIRST_SYNC { return; }
+            g.state.jobs.insert(job.into(), JobRecord::default());
+            if !g.state.account_settled { (g.chain, g.chain_ended) = (Chain::default(), false); }
+            g.push_job("slot.partial");
+            g.settle();
+            self.inner.persist(&g);
+            return self.inner.cv.notify_all();
+        }
         if job == "school.courses" && !g.state.account_settled {
             (g.chain, g.chain_ended) = (Chain::default(), false);
             g.push_job("slot.partial");
@@ -989,6 +1010,41 @@ mod order_tests {
         q.wake();
         idle(&q);
         assert_eq!(fake.scopes().iter().filter(|s| *s == "NoRank").count(), 1, "the debt is paid once: {:?}", fake.log());
+    }
+
+    #[test]
+    fn r3_try_again_on_a_failed_first_sync_keeps_its_record_and_queues_one_slot_to_re_read_it() {
+        let mut s = state(false);
+        s.jobs.insert(FIRST_SYNC.into(), JobRecord { state: JobState::Failed, reason: Some(REASON_FIRST_SYNC_FAILED.into()), ..Default::default() });
+        s.jobs.insert("first.grades".into(), JobRecord { state: JobState::Failed, reason: Some("x".into()), ..Default::default() });
+        let (q, fake, _d) = rig("r3", s, vec![ok(true, 3)], true);
+        let hold = fake.gate("slot.partial");
+        q.retry(FIRST_SYNC);
+        assert!(q.snapshot().jobs.contains_key(FIRST_SYNC), "the record is kept, never deleted");
+        assert_eq!(job(&q, FIRST_SYNC), JobRecord::default(), "kept, pending, no reason");
+        assert!(q.snapshot().jobs.contains_key("slot.partial"), "the slot that re-reads it is queued");
+        wait_for("the slot", || fake.count("start:slot.partial") == 1);
+        q.retry(FIRST_SYNC); // pending now: nothing more is queued
+        q.retry("first.grades"); // F8g's: never deleted
+        hold.store(true, Ordering::SeqCst);
+        idle(&q);
+        assert_eq!(fake.count("start:slot.partial"), 1, "{:?}", fake.log());
+        assert_eq!(job(&q, FIRST_SYNC).state, JobState::Done);
+        assert_eq!(job(&q, "first.grades").state, JobState::Failed, "a failed indicator nothing re-reads stays named");
+    }
+
+    #[test]
+    fn r3_an_ask_merged_into_a_slot_already_running_as_no_rank_owes_nothing() {
+        let mut s = state(true);
+        for j in ["school.courses", "config.ingest"] { s.jobs.insert(j.into(), done_rec()); }
+        let (q, fake, _d) = rig("r3-norank", s, vec![ok(true, 1), ok(true, 2)], true);
+        let hold = fake.gate("slot.partial");
+        q.enqueue("slot.partial");
+        wait_for("the slot", || fake.count("start:slot.partial") == 1);
+        q.enqueue("slot.partial");
+        hold.store(true, Ordering::SeqCst);
+        idle(&q);
+        assert_eq!(fake.scopes(), ["NoRank"], "{:?}", fake.log());
     }
 
     #[test]
