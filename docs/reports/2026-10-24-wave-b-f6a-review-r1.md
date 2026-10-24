@@ -25,3 +25,11 @@ All six are upheld. Ruling 6 (the serial-lane sweep) depends on F6b staying on t
 2. **Match in a fixed order** (`onboarding_jobs.rs:396-400`): `source_uid` first, then `code`, then slug.
 3. **Use the platform newline constant.** The preset-none pin should use `pystr::NEWLINE` (or the crate's equivalent), not a literal `"\r\n"`.
 4. **Plan text:** the temp name is `.knowlu-tmp-<name>-<pid>`. §4.9 should say so; that goes to the planner.
+
+## Controller check of the r1 fixes (d90e081)
+- **I-1 closed.** A within-run `by_slug` map means a later same-slug row reuses the note, with no create and no error. The new test covers two codeless rows with one name.
+- **I-2 closed.** The temp file is `sync_all`ed before the link.
+- **M1 closed.** Every slug source is slugified, and a new test feeds `../tasks/evil`.
+- **M2 closed.** Notes are matched by source_uid, then code, then slug.
+- **M3 closed.**
+- Verified from the diff, and onboarding.rs runs 62/62. **F6a passes.**
