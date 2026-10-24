@@ -5,7 +5,8 @@
 
 **Status: T0 done and its amendments reviewed (PASS with minors, closed in §14.43; on `main` as
 `cb3b661`); S-A phase 1 PASS (§13), so T2 (phase 2, WebView2) is next; F10's review gaps in §9
-A10 assigned before F11 (§14.44).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
+A10 assigned before F11 (§14.44); a removed course's feed items left out by ingest, new task F6c
+(§14.45).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
 record is in §13 (dated 2026-10-24) and its amendments in §14.42: seven premises did not hold as
 written, and each is amended where it lands (the lanes not yet merged, `grades` and course notes,
 the entitlement-refused sync, the feed host, the sync hold, `mode_device`, a `campus.yaml` race).
@@ -603,8 +604,10 @@ go Back and pick another school freely until payment. **C1's page rules, carried
   after O0's current-term filter where it applies, each with Remove. A removal is an
   `onboarding_answer(3, …)` that marks the row removed in `onboarding-answers.json` (F2d); removed
   rows are never made notes by `school.courses`, never enter `config.ingest`'s `course_map`, and
-  the proof's counts are totalled in Rust over the kept rows from `school.preview`'s per-course
-  counts, so they match the list with no second fetch (F7a, F8b). The list is
+  **their feed items are never imported**: `ingest.yaml` carries their pairs as `course_exclude`
+  (F6b), and ingest leaves out an item only they claim (F6c; 2026-10-24, §14.45). The proof's
+  counts are totalled in Rust from `school.preview`'s match-set buckets the same way, so they equal
+  what the vault will hold, with no second fetch (F7a, F8b). The list is
   editable until payment; after it, `school.courses` has run and a course is removed in the
   console, as today.
 
@@ -1020,7 +1023,7 @@ An existing file is **kept, never replaced**: no wholesale rewrite exists anywhe
 |---|---|---|---|
 | `.gitignore`, `config/planning.yaml`, `week_template.yaml`, `actor.yaml`, `runners.yaml`, `cloud.yaml` | F3, inside today's staged create | step 2 | all defaults (slots, Windows' zone, device) or the account |
 | `config/campus.yaml`, `config/events.yaml` | `school.apply` (F6a) | after payment | the school is picked and its path settled (curated: its row and preset; uncurated: the LMS kind from the window or the paste, events preset `none`) |
-| `config/ingest.yaml` | `config.ingest` (F6b) | on leaving step 8, after `school.courses` and both feed stores settle | each feed per §4.11 (`ics_url: ''` when the account holds it; the link itself when the account could not take it or the paste was rejected), `course_map` (step 3's course list and `school.courses`' slugs, R-C1-48's pairs), calendars (steps 6, 7), books, sections and `zybooks_ignore` (step 8), all from `onboarding-answers.json` |
+| `config/ingest.yaml` | `config.ingest` (F6b) | on leaving step 8, after `school.courses` and both feed stores settle | each feed per §4.11 (`ics_url: ''` when the account holds it; the link itself when the account could not take it or the paste was rejected), `course_map` (step 3's kept courses and `school.courses`' slugs, R-C1-48's pairs), `course_exclude` (the removed courses' pairs, only when one was removed; §14.45), calendars (steps 6, 7), books, sections and `zybooks_ignore` (step 8), all from `onboarding-answers.json` |
 | `courses/*.md` | `school.courses` (F6a) | after payment, once `account_settled` | notes, created through `write` as the student, as today's seeds are |
 
 - **How "create-new" behaves** (review r2, M4). The text is built and parse-checked first (for
@@ -1344,6 +1347,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | `app/src/scheduler.rs` | `run_slot_inner_scoped` and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}` (wrappers keep all 35 call sites); a stop flag, never cleared, checked before each stage; the bundle delete on every path; one call at a slot's end that clears the slot's `handover` items; `prime_mode_device` (T0) (together about sixty lines); otherwise the queue only calls its public functions | F8s | O1 (merged first) |
 | `engine/src/onboarding.rs` (new), `engine/src/cli.rs` | the read-only command: `--preview` and the `cli.rs` entry (F7a), `--tidied` (F7c) | F7a, F7c | L5 (`cli.rs`) |
 | `engine/src/uievents.rs` | one action, only if Q-B10 is ruled yes | F7b | none |
+| `engine/src/ingest.rs`, `engine/tests/ingest_exclude.rs` (new) | `course_exclude` read and applied at attribution (§14.45) | F6c | O1 (merged), L5 if it edits ingest |
 | `app/static/onboarding.{js,css}` (new) | the screens | F11a-F11e | none |
 | `app/static/index.html`, `console.js` | the old wizard removed; the hook (F10); `renderFirstRun`'s `(not yet:` reading, one line (F11a, after F10) | F10, F11a | `console.js` queue |
 | `app/tests/*` (new files per module), `app/tests/static_assets.rs`, `scripts/wizard-check.py` | tests | S1, S3, S6t, F1, F7a, F7c, F11t, F12 | console lanes (static tests) |
@@ -1392,8 +1396,9 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F5 | Moved and new commands registered | `mechanical` | a list edit, recounted, pinned | F4, F2b, F2g, F2h, F8d, F8lb |
 | F5b | Shell list: the retired panels' commands, after F10; five move to the console's list and are never deleted (F10's review) | `mechanical` | `main.rs` is never F10's (review r1, I8) | F10, F5 |
 | F6a | `school.apply` (`campus.yaml`, `events.yaml`) and `school.courses` (course notes), create-new | `test-writer` then `implementer` | vault bytes; tests first | F3 |
-| F6b | `config.ingest`: `ingest.yaml` once, create-new, feeds per §4.11 | `test-writer` then `implementer` | as F6a | F6a |
-| F7a | `knowlu-engine onboarding --preview` and its `cli.rs` entry | `test-writer` then `implementer` | engine, deterministic, off the contract list | T0 |
+| F6b | `config.ingest`: `ingest.yaml` once, create-new, feeds per §4.11; `course_exclude` for removed courses (§14.45) | `test-writer` then `implementer` | as F6a | F6a |
+| F6c | `ingest.rs`: read `course_exclude`; an item only a removed course claims is not imported (§14.45) | `test-writer` then `implementer`; `reviewer` with the oracle runs | engine, every vault's import; off the contract list, but the frozen references ride on ingest | T0 (before F15; independent of F6a and F6b) |
+| F7a | `knowlu-engine onboarding --preview` and its `cli.rs` entry; `by_course` by code and match set, through `ingest::match_course` (§14.45) | `test-writer` then `implementer` | engine, deterministic, off the contract list | T0 |
 | F7c | `knowlu-engine onboarding --tidied` | `test-writer` then `implementer` | as F7a | F7a |
 | F7b | One `uievents` action (only if Q-B10 is yes) | `implementer` | a closed vocabulary; its page sentence first | F7a, S7 |
 | F8a | The queue's core: states, persistence, the serial thread, holds | `implementer` | orchestration over fakes | F1, F2a |
@@ -1758,7 +1763,11 @@ job runners as a trait so tests pass fakes.
     `course_map` is never empty when step 3 found courses. **Removed courses** (F10's review,
     R-C1-51): with one captured course removed at step 3 (and a quit and reload after the removal),
     that course is in no `school.courses` create, not in `course_map`, and not in step 3's totals,
-    which equal the sums of the kept rows' saved `by_course` counts; a re-capture clears the mark.
+    which equal the sum of the saved `by_course` buckets whose code set is empty or names a kept
+    course; a re-capture clears the mark. **Its items never become tasks** (2026-10-24, §14.45): the
+    text `config.ingest` hands F6b carries the removed course's pairs under `course_exclude` and in
+    no `course_map` entry, and a bucket that names only the removed code is out of the totals (the
+    engine half, that ingest imports none of those items, is F6c's first test).
 13. **The feed is never silently lost (review r2, I1):** with a fake account store, (a) a store that
     fails twice leaves the feed `failed` and `config.ingest`'s text carries the link, with
     `feed_kept_on_device` set; (b) a quit after payment and before `school.store`, then a reload,
@@ -2136,7 +2145,7 @@ caller in the shell's page (each named in F10's report); recount and pin. F10 it
   their tests: `capture_calendar_link_with` keeps today's `finish` arm (F8la).
 Size: XS.
 
-## F6a, F6b. The answers into the vault, each file once (test-writer, then implementer)
+## F6a, F6b, F6c. The answers into the vault, each file once (test-writer, then implementer)
 
 **Brief:** §4.9, §4.2 steps 3-8, Q-B1 as recommended (no exception; if Quinn rules otherwise, these
 two tasks go back to the planner). Tests in `app/tests/onboarding.rs`, then the code in `scaffold.rs`:
@@ -2185,8 +2194,36 @@ two tasks go back to the planner). Tests in `app/tests/onboarding.rs`, then the 
     `restore_capability_url` for that link); the same for the other calendar;
   - **`course_map` names restored notes** (review r2, I5): with two restored course notes, the map's
     slugs for those courses are the restored notes' slugs;
-  - a skipped step 6, 7 or 8 leaves its section empty, exactly as today's wizard writes it.
-  Size: S (about 50 lines in `scaffold.rs`).
+  - a skipped step 6, 7 or 8 leaves its section empty, exactly as today's wizard writes it;
+  - **`course_exclude`** (2026-10-24, §14.45): with a course removed at step 3, its pairs (its
+    code fragments and its gradebook uid pins, built exactly as `course_map`'s are) are written as
+    one single-line flow sequence `course_exclude: [...]` through `yaml_scalar`, and appear in no
+    `course_map` entry; with nothing removed the key is **absent**, so the bytes still equal
+    `build_into`'s (the first test above holds unchanged).
+  Size: S (about 55 lines in `scaffold.rs`).
+- **F6c (test-writer, then implementer), ingest drops a removed course's items** (2026-10-24, the
+  controller's call after the F7c review; §14.45). `engine/src/ingest.rs`, off the contract list.
+  Where `course_map` is read (`ingest.rs:1251-1254`), also read `course_exclude` as fragments,
+  empty when absent. At attribution (`:883`, and the institutional-noise test at `:788`): an item
+  is matched with `match_course` over `course_map` **first**; only when that is `None` is it
+  matched over the excluded fragments, and a hit there means the item is **not imported**: no
+  task, no update, no archive on its account. A kept course always wins an item both claim. The run
+  names the count in one line ("N item(s) from courses you removed were left out"), and no other
+  reader of `ingest.yaml` changes. Tests, inline in `ingest.rs`'s `mod tests` on synthetic codes:
+  - **a removed course's item never becomes a task** (F1 test 12's spirit, end to end through
+    `sync_tasks_with_grades`): an item whose summary names only an excluded fragment, and one pinned
+    only by an excluded uid, create no note and no journal record;
+  - an item matching a kept fragment and an excluded one is created under the kept slug;
+  - an unmatched item is still created course-less (`:883`'s rule unchanged);
+  - a task already in the vault whose item is now excluded is left untouched (no update, no
+    archive);
+  - with no `course_exclude` key, every existing ingest test and `oracle.rs` and
+    `surface_oracle.rs` pass unedited (no frozen reference changes, Rule 2);
+  - `commitments`, `enrich`, `cloudmodel` and `coursework` read an `ingest.yaml` carrying the key
+    with no warning and the same result as without it (each ignores the key), in a new
+    `engine/tests/ingest_exclude.rs` through each reader's public entry; a reader with none is named
+    in the report for the reviewer rather than edited.
+  Size: S (about 35 lines in `ingest.rs`). Reviewed by `reviewer`, with the oracle runs shown.
 
 ## F7a, F7c. `knowlu-engine onboarding` (test-writer, then implementer)
 
@@ -2204,9 +2241,27 @@ F7a and extended to `--tidied` in F7c:
   the vault's zone); turned-in items joined by `gradable_id` and `gradebook_done` only, never by
   title; a bundle with an Overall column counts no extra item; a missing `--grades` gives
   `turned_in: null` and `grades_courses: null`; exactly one mode, or a named usage line at exit 0;
-  **`by_course`** (F10's review, R-C1-51): the same counts per course key of `--courses`, in key
-  order, whose sums over all keys equal the totals (an item matched to no course counts in the
-  totals only, under `unmatched`), so the app can total kept rows without a second run.
+  **`by_course`** (F10's review, R-C1-51; amended 2026-10-24, §14.45): the same counts per course,
+  so the app can total kept rows without a second run.
+  - **Keyed by the LMS course `code`** (F7c review, Important 2), falling back to the slug, then the
+    label, only when `code` is empty; a past-term shell and the current shell of one course are two
+    keys, never one.
+  - **Attribution is ingest's own rule, never a second matcher** (F7c review, Important 3): F7a
+    builds the `(fragment, key)` pairs exactly as F6b writes `course_map` (codes and gradebook uid
+    pins alike) and calls `ingest::match_course`, the shared `match_course_fields` behind it
+    (`ingest.rs:258-305`); no prefix rule, course-order precedence or bundle fallback of its own.
+    The bundle's legitimate role is ingest's uid pin, built as a pair.
+  - **Buckets by match set** (§14.45, so a removal is totalled as ingest will import it): each item
+    is matched against each course's pairs **one course at a time** with `ingest::match_course`,
+    and counted once under the sorted set of codes that matched it: usually one code (that course's
+    own bucket), several for an item two courses both claim (a past and a current shell), or none
+    (`unmatched`). The buckets sum to the totals. The app (F2d's `onboarding_status`) totals the
+    proof as every bucket whose set is empty or names at least one kept code, which is exactly what
+    F6c's ingest imports.
+  - Tests: an item two kept courses' pairs both match sits in one two-code bucket and counts once;
+    removing one of the two keeps it; removing both drops it; "Quiz covering SYN 120"-style
+    summaries and bracketed section ids land where `ingest::match_course` puts them (one case
+    each, with synthetic codes); the unmatched item is in `unmatched` and in the totals.
   The new module, its JSON output through `ledger::dumps_value`, and the `cli.rs` entry. **And
   `CLAUDE.md`'s line** (Q-B3 ruled yes, 2026-10-23): §9 A11's drafted text, added under "Command and
   app contracts" in the commit that adds the command, and in no other. Size: S (about 70 lines, plus
@@ -2251,9 +2306,9 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   `sync.lock` itself, so the retry wraps that call and its refusal, holding neither (a nested
   `vault_io` deadlocks; a nested `sync.lock` refuses). **The refusal is matched on the constant,
   never a copied string** (T0 review M2): `week::SYNC_RUNNING` (`week.rs:101`, "a sync is running;
-  try again in a moment"), which `hold_sync_lock` returns for both callers, becomes `pub(crate)`
-  (a one-word edit in `week.rs`, F8h's only change there), and the retry compares the error with
-  it. F1's test 16's gate and retry halves; F1 test 16 also runs `registrar.confirm`'s fake through
+  try again in a moment"), which `hold_sync_lock` returns for both callers, and the retry compares
+  the error with it. **It is already `pub`** (F1 made it so in `8cc0caf`; corrected 2026-10-24,
+  §14.45), so F8h does not touch `week.rs`. F1's test 16's gate and retry halves; F1 test 16 also runs `registrar.confirm`'s fake through
   the retry, the fake refusing with `week::SYNC_RUNNING` itself, and fails if `vault_io` is held on
   entry. Size: S (about 45 lines).
 - **F8f, stop, drain, freeze and hand-over** (in `onboarding_jobs.rs`). Setting the stop, each job
@@ -2301,9 +2356,11 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   captured or pasted link to its pending credential (§4.11). The validation-fetched feed is written
   to the profile's `tmp\` for F7a and deleted after `school.preview`. `school.preview`: F7a's
   `--preview`. **Removable rows** (F10's review, R-C1-51): F7a's counts are also reported per course
-  key, saved beside each course row in the answers file, so the feed file is still deleted after the
-  one preview; `onboarding_status` (Rust, never the page) totals the proof over `kept_courses()`, so
-  a Remove changes the proof with no second fetch or preview. Depends on S-G's record. Size: S
+  key, saved in the answers file (the match-set buckets, keyed by code; §14.45), so the feed file is
+  still deleted after the one preview; `onboarding_status` (Rust, never the page) totals the proof
+  as every bucket whose set is empty or names a kept code, which is what F6c's ingest will import,
+  so a Remove changes the proof with no second fetch or preview. F8b also saves each course's pairs
+  (code fragments, gradebook uid pins) as F6b needs them for `course_map` and `course_exclude`. Depends on S-G's record. Size: S
   (about 75 lines).
 - **F8c, the local lane's runners.** `school.store` and `calendar.store` (the account call, one retry,
   the feed states of §4.11, the pending credential deleted on success). **The call** (review r8, M1)
@@ -2646,6 +2703,7 @@ behaviour, before it merges.
 | Rule 2 | No frozen reference changes | F7a, F7c | the shared `surface_oracle` test; F14 |
 | (plan) | Only `account.rs` from the contract list, by contract-engineer | S5, S7, F2c | S9; F14 |
 | §9 A10, C1's page rules (F10's review) | R-C1-40's close on leaving, R-C1-42's second-press trigger, R-C1-51's removable courses, R-C1-55's disabled Next, R-OB-1's blank-row and slug rules, R-OB-4's "isn't listed", the risk-12 line, `GOOGLE_TESTING`, the password allow-list, the `comp` state | F11e1, F11e2, F11b, F11c; F2d, F8b, F7a (the course list) | F11t's C1 pins; F1 test 12 (removal survives a quit); F7a's `by_course` test; F12 |
+| R-C1-51 (2026-10-24, §14.45) | A removed course hides its feed items: ingest imports nothing only a removed course claims, a kept course wins an item both claim, and step 3's totals equal what the vault will hold; attribution is ingest's one shared rule | F6b, F6c, F7a, F8b | F6c's tests; F6b's `course_exclude` test; F7a's match-set tests; F1 test 12 |
 | §1.9 (F10's review) | Rust names the vault past profiles and folders on disk; the old flow's errors are gone from the step-2 path | F3 | F3 tests 6-7 |
 | (plan; F10's review) | `feat/o3-long-onboarding` never merges to `main` before F12's walk-through passes | F12, F14 | §8's merge gate; F14 checks it |
 
@@ -3475,8 +3533,9 @@ two new facts, each edited where it lands:
   more run (two in a row stop the chain); a failed reading stops it at once. "Try again" on
   `school.courses` while unsettled resets the count and enqueues one `BeforeConfig` slot (§4.3, Q-B20,
   F8e, F1 test 16).
-- **M2.** F8h matches `registrar::spawn`'s refusal on `week::SYNC_RUNNING` (`week.rs:101`, made
-  `pub(crate)`), never on a copied string; test 16's fake refuses with the same constant.
+- **M2.** F8h matches `registrar::spawn`'s refusal on `week::SYNC_RUNNING` (`week.rs:101`, already
+  `pub` since F1's `8cc0caf`, so no `week.rs` edit; corrected in §14.45), never on a copied string;
+  test 16's fake refuses with the same constant.
 - **M3.** One update check at an onboarding-mode launch. The check lives only in the housekeeping
   tick (`scheduler.rs:1284`) and Check now (`commands.rs:729`), and `commands::updates_dir` is
   `pub(crate)`, out of `main.rs`'s reach; so F8s moves the tick's body into
@@ -3529,3 +3588,44 @@ dispatched (§4.2 steps 3-8, the tasks named, A10 rewritten with its carrier per
   (§8; F12 walks the new cases; F14 checks it).
 Two choices were the planner's and are open to the controller: the removable list over a filter, and
 `by_course` (an engine output change in F7a) over keeping the feed file until payment.
+
+### 14.45 A removed course's feed items, and F8h's constant (2026-10-24)
+
+From the F7c review (`docs/reports/2026-10-24-wave-b-f7c-review-r1.md`, on `feat/o3-f7a`): its
+"outside this diff" note and Important findings 2 and 3, with the controller's calls.
+1. **A removed course hid nothing.** R-C1-51 kept a removed course out of `course_map`, but ingest
+   still imported its feed items as course-less tasks (`ingest.rs:883` keeps an unmatched item), so
+   the removal hid nothing and step 3's kept totals under-counted the vault. **The controller's
+   call:** an item ingest's shared rule would attribute to a removed course is not imported.
+   - **Where the list travels.** The handoff that carries `course_map` is `config/ingest.yaml`,
+     written once by `config.ingest` (F6b's builder, run by F8c), not by F8b. So **F6b** writes the
+     removed courses' pairs as `course_exclude` (absent when nothing was removed, so today's bytes
+     hold), and F8b only saves each course's pairs in the answers file. A separate key rather than
+     marked `course_map` entries, because `commitments`, `enrich`, `cloudmodel` and `judge`'s tier 1
+     all read `course_map` too (`commitments.rs:769`, `cloudmodel.rs:340-351`, `ingest.rs:258-269`),
+     and none of them should see a removed course.
+   - **The ingest side is new task F6c** (`ingest.rs`, off the contract list; test-writer then
+     implementer, `reviewer` with the oracle runs), its first test being that a removed course's item
+     never becomes a task; F1 test 12 carries the app half.
+   - **One refinement the call needed, and the smallest alternative to a per-course bucket.** A
+     plain "first match over the whole list, then drop if that course was removed" would, for a
+     past-term shell and the current shell of one course that both claim an item, drop the live
+     course's item whenever the old shell is removed, the very case removal exists for. So ingest
+     matches over `course_map` first and over `course_exclude` only when nothing kept claims the
+     item: **a kept course always wins.** A static per-course bucket cannot total that once the
+     removal set changes, so F7a's buckets are keyed by the **set** of codes that each claim the
+     item (matched one course at a time with `ingest::match_course`): one code in the usual case,
+     which is that course's own bucket as the controller asked, two for a shared item, none for
+     `unmatched`. The app totals every bucket that is empty or names a kept code, which equals what
+     F6c imports. If the controller prefers strict per-course buckets, the price is that a shared
+     item is miscounted when one of its courses is removed.
+2. **`by_course` keys on the LMS course `code`** (review Important 2), falling back to the slug and
+   then the label only when `code` is empty (F7a).
+3. **One attribution rule** (review Important 3): F7a and F7c call ingest's shared rule
+   (`ingest::match_course`, over `match_course_fields`), with pairs built as F6b builds
+   `course_map`, uid pins included; no prefix rule, order precedence or bundle fallback of their own
+   (F7a).
+4. **F8h does not touch `week.rs`.** `week::SYNC_RUNNING` is already `pub` (F1, `8cc0caf`); F8h and
+   §14.43's M2 are corrected.
+Tasks changed: F6b (the key and its test), F6c (new), F7a (`by_course`), F8b (saves each course's
+pairs; totals by match set), F8h, F1 test 12; §4.2 step 3, §4.9's `ingest.yaml` row, §6, §7 and §10.
