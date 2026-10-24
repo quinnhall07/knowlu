@@ -871,3 +871,50 @@ fn the_seam_comment_names_both_hooks_of_the_panel_seam() {
     assert!(head.contains("registerPanel(n, {render, onStatus})"), "the header names {{render, onStatus}}: {head}");
     assert!(head.contains("registerLeave"), "the header names registerLeave");
 }
+
+// ---- F11c: steps 8 and 10's rows and the panels' poll rule ----------------------------------------
+
+#[test]
+fn steps_eight_and_tens_past_rows_follow_their_job_records() {
+    // rows[5] is Homework sites (at step 8), rows[6] is Your week (at step 10); m5's rule, over each.
+    let row = |i: usize, step: u8, jobs: &str| node(&format!("h.rowModel(h.rows[{i}], {{step: {step}, jobs: {jobs}}})"));
+    let none = row(5, 10, "{}");
+    assert_eq!((&none["st"], &none["pf"]), (&serde_json::json!("Not yet"), &serde_json::json!("Not yet")), "a past homework row with no job records: {none}");
+    assert_ne!(none["cls"], "done", "{none}");
+    let none = row(6, 11, "{}");
+    assert_eq!(none["st"], "Not yet", "a past week row with no job records: {none}");
+    assert_ne!(none["cls"], "done", "{none}");
+    let done = row(5, 10, r#"{"coursework.discover": {"state": "done", "proof": {"books_or_sections": 2, "assignments": 5}}}"#);
+    assert_eq!((&done["st"], &done["pf"]), (&serde_json::json!("Done"), &serde_json::json!("2 books or sections, 5 assignments")), "{done}");
+    let mixed = row(6, 11, r#"{"config.ingest": {"state": "done", "proof": {"events_this_week": 6}}, "slot.partial": {"state": "skipped"}}"#);
+    assert_eq!((&mixed["st"], &mixed["pf"]), (&serde_json::json!("Done"), &serde_json::json!("6 events this week")), "done mixed with skipped reads Done: {mixed}");
+    let skipped = row(6, 11, r#"{"config.ingest": {"state": "skipped"}, "slot.partial": {"state": "skipped"}}"#);
+    assert_eq!(skipped["st"], "Skipped", "all skipped reads Skipped: {skipped}");
+    let site_skip = row(5, 10, r#"{"coursework.discover": {"state": "skipped"}}"#);
+    assert_eq!(site_skip["st"], "Skipped", "{site_skip}");
+}
+
+#[test]
+fn the_step_eight_and_ten_panels_never_redraw_the_pane_from_a_poll() {
+    let c = code(&read("onboarding.js"));
+    let flat = c.split_whitespace().collect::<Vec<_>>().join(" ");
+    for (n, name) in [(8, "onStatus8"), (10, "onStatus10")] {
+        assert!(flat.contains(&format!("OB.registerPanel({n}, {{ render: render{n}, onStatus: {name} }})")), "step {n} registers through the seam");
+        let body = function(&c, name);
+        assert!(!body.contains("refresh") && !body.contains(".show("), "{name} must not redraw the pane (a poll wipes #ob-ask)");
+    }
+    assert!(flat.contains("OB.registerLeave("), "step 8 clears its login fields when the student leaves");
+}
+
+#[test]
+fn step_eights_proceed_is_one_answer_sent_after_the_skips_and_every_answer_clears_the_action_line() {
+    let c = code(&read("onboarding.js"));
+    let leave = function(&c, "leaveStep8");
+    let flat = leave.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("invoke(\"onboarding_answer\", { step: 8, answer: { proceed: true } })"), "step 8's proceed: {flat}");
+    for f in ["storeLogins", "answerRow", "skipSite", "leaveStep8", "confirm10"] {
+        assert!(function(&c, f).contains("OB.clearError()"), "{f} sends an answer, so it clears the action line first");
+    }
+    let skip = function(&c, "skipSite");
+    assert!(skip.contains("onboarding_skip") && skip.contains("leaveStep8()"), "the last skip leaves the step, after the skip call returns");
+}

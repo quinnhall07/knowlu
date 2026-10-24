@@ -21,3 +21,12 @@
 .ob .su-row.skipped .su-shape { background: var(--su-ink-3); transform: none; height: 2px; margin-top: 9px; border-radius: 0; }
 .ob .su-row .su-pf .su-link { font-size: 13px; margin-left: 6px; color: var(--su-amber); }
 .ob-closing-now .su-link, .ob-closing-now .su-btn { pointer-events: none; }
+/* F11c: steps 8 and 10 */
+.ob-site { margin: 18px 0 0; max-width: 64ch; }
+.ob-h2 { margin: 18px 0 6px; font-size: 20px; font-weight: 700; }
+.ob-row8, .ob-prop { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--su-rule); }
+.ob-key { font-weight: 600; }
+.ob-row-line { color: var(--su-ink-2); font-size: 13.5px; }
+.ob-list { margin: 0; padding-left: 18px; color: var(--su-ink); }
+.ob-prop button[aria-pressed="true"] { border-color: var(--su-ink); background: var(--su-board-2); }
+.ob-course, .ob-level { min-height: 36px; background: var(--su-board); color: var(--su-ink); border: 1px solid var(--su-rule-2); border-radius: 6px; padding: 0 8px; }
