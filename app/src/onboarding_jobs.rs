@@ -103,6 +103,11 @@ pub const JOB_ORDER: [&str; 17] = [
     "mail.setup", "mail.canary", "mail.first_pass", "google.gmail_first_read", "calendar.store", "calendar.read", "google.calendar_read",
     "coursework.discover", "config.ingest", "slot.partial", "slot.first_full",
 ];
+/// Jobs a drain never waits for: waiting for mail writes nothing, so they start again from the top (§4.10).
+/// That holds only while their runners write nothing to the vault and hold neither the notes gate
+/// (F8h) nor the school session lock; a runner that ever does must come off this list. An abandoned
+/// runner keeps its thread: `Drop` still joins it, after setting the stop it is expected to heed.
+const ABANDON_AT_ONCE: [&str; 2] = ["mail.canary", "mail.first_pass"];
 /// The closed-set reason of a job whose runner panicked; the page maps it to its fix. It is reachable
 /// only under unwinding (tests and the dev profile): the release profile has `panic = "abort"`.
 pub const REASON_JOB_CRASHED: &str = "job_crashed";
@@ -118,6 +123,11 @@ struct Core {
     /// `Waiting` and `Stopped` jobs: not picked again until something else changes (no spin).
     parked: BTreeSet<String>,
     shutdown: bool,
+    /// Set by [`Queue::freeze`], never cleared: `persist` writes nothing from then on (F2b's sign-out).
+    frozen: bool,
+    /// Running jobs a drain gave up on (§4.10: waiting for mail writes nothing). Their thread ends
+    /// on its own; whatever it returns is read as `Stopped`.
+    abandoned: BTreeSet<String>,
 }
 
 impl Core {
@@ -158,9 +168,18 @@ struct Inner { deps: Deps, core: Mutex<Core>, cv: Condvar, stop: AtomicBool, bat
 impl Inner {
     fn lock(&self) -> MutexGuard<'_, Core> { self.core.lock().unwrap_or_else(|e| e.into_inner()) }
     /// The one path every change persists through, the queue being the only writer of the file while
-    /// it is live (F8f puts the freeze here).
+    /// it is live. A frozen queue refuses (the freeze lives in `Core`, so a write in flight finishes
+    /// before [`Queue::freeze`] returns, and none starts after it).
+    fn try_persist(&self, c: &Core) -> Result<(), String> {
+        if c.frozen { return Err("the onboarding file is frozen: a save after the freeze is refused".into()); }
+        save_state(&self.deps.data_dir, &c.state)
+    }
     fn persist(&self, c: &Core) {
-        if let Err(e) = save_state(&self.deps.data_dir, &c.state) { eprintln!("onboarding: could not save the job states: {e}"); }
+        if let Err(e) = self.try_persist(c) { eprintln!("onboarding: could not save the job states: {e}"); }
+    }
+    /// The next job for `lane`; none once the stop is set (checked under the lock `request_stop` takes).
+    fn next(&self, c: &Core, lane: usize) -> Option<String> {
+        if self.stop.load(Ordering::SeqCst) { None } else { c.pick(lane) }
     }
     /// Reads the entitlement without holding the lock: a cache short of `Entitled` gets one refresh.
     /// Under unwinding (tests and dev; release is `panic = "abort"`), a panic in either call reads as
@@ -200,7 +219,7 @@ fn startup(inner: Arc<Inner>) {
 fn work(inner: Arc<Inner>, lane: usize) {
     let mut g = inner.lock();
     while !g.shutdown {
-        let Some(job) = g.pick(lane) else { g = inner.cv.wait(g).unwrap_or_else(|e| e.into_inner()); continue };
+        let Some(job) = inner.next(&g, lane) else { g = inner.cv.wait(g).unwrap_or_else(|e| e.into_inner()); continue };
         g.busy[lane] = true;
         g.state.jobs.insert(job.clone(), JobRecord { state: JobState::Running, ..Default::default() });
         inner.persist(&g);
@@ -210,6 +229,8 @@ fn work(inner: Arc<Inner>, lane: usize) {
         // Holds under unwinding only (tests and dev): in release `panic = "abort"` ends the process.
         let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|_| Outcome::Failed(REASON_JOB_CRASHED.into()));
         g = inner.lock();
+        // A job the drain abandoned already reads `pending`; whatever it returns late changes nothing.
+        let out = if g.abandoned.remove(&job) { Outcome::Stopped } else { out };
         g.finish(&job, lane, out);
         g.settle();
         inner.persist(&g);
@@ -238,7 +259,7 @@ impl Queue {
             if matches!(r.state, JobState::Pending | JobState::Held) { order.push(name.clone()); }
         }
         order.sort_by_key(|j| (JOB_ORDER.iter().position(|c| c == j).unwrap_or(JOB_ORDER.len()), j.clone()));
-        let core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false };
+        let core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false, frozen: false, abandoned: BTreeSet::new() };
         let inner = Arc::new(Inner { deps, core: Mutex::new(core), cv: Condvar::new(), stop: AtomicBool::new(false), batch_closed: AtomicBool::new(false) });
         let spawn = |lane: usize, name: &str| {
             let i = inner.clone();
@@ -287,23 +308,59 @@ impl Queue {
     pub fn wait_idle(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         let mut g = self.inner.lock();
-        while !(g.ready && !g.busy.contains(&true) && g.pick(0).is_none() && g.pick(1).is_none()) {
+        while !(g.ready && !g.busy.contains(&true) && self.inner.next(&g, 0).is_none() && self.inner.next(&g, 1).is_none()) {
             let Some(left) = deadline.checked_duration_since(Instant::now()) else { return false };
             g = self.inner.cv.wait_timeout(g, left).unwrap_or_else(|e| e.into_inner()).0;
         }
         true
     }
-    pub fn request_stop(&self) { todo!("F8f: stop") }
-    pub fn stop_requested(&self) -> bool { todo!("F8f: stop requested") }
-    /// Waits for each lane's running job to reach its safe point.
-    pub fn drain(&self) { todo!("F8f: drain") }
+    /// Sets the stop (§4.10): no job starts after this returns, and each running job sees the flag at
+    /// its own safe point. It is never cleared. Set under the lock a worker holds while it picks and
+    /// marks a job busy, so a job is either already busy (the drain waits for it) or never starts.
+    pub fn request_stop(&self) {
+        let _g = self.inner.lock();
+        self.inner.stop.store(true, Ordering::SeqCst);
+        self.inner.cv.notify_all();
+    }
+    pub fn stop_requested(&self) -> bool { self.inner.stop.load(Ordering::SeqCst) }
+    /// Waits for each lane's running job to reach its safe point. A running `mail.canary` or
+    /// `mail.first_pass` is not waited for: it is set back to `pending` and left to end on its own
+    /// (waiting for mail writes nothing, §4.10). Sets the stop itself (idempotent), so no job can
+    /// start after a drain that was reached without [`Queue::request_stop`]. Call it off the main thread.
+    pub fn drain(&self) {
+        self.request_stop();
+        let mut g = self.inner.lock();
+        let waiting_mail: Vec<String> = g.state.jobs.iter()
+            .filter(|(n, r)| r.state == JobState::Running && ABANDON_AT_ONCE.contains(&n.as_str())).map(|(n, _)| n.clone()).collect();
+        for job in waiting_mail {
+            g.state.jobs.insert(job.clone(), JobRecord::default());
+            g.parked.insert(job.clone());
+            g.abandoned.insert(job);
+        }
+        let held = |g: &Core, lane: usize| g.busy[lane] && !g.abandoned.iter().any(|j| Core::lane(j) == lane);
+        while held(&g, 0) || held(&g, 1) { g = self.inner.cv.wait(g).unwrap_or_else(|e| e.into_inner()); }
+    }
     /// Persists now; refused after [`Queue::freeze`].
-    pub fn save(&self) -> Result<(), String> { todo!("F8f: save") }
-    pub fn freeze(&self) { todo!("F8f: freeze") }
-    pub fn is_frozen(&self) -> bool { todo!("F8f: is frozen") }
+    pub fn save(&self) -> Result<(), String> {
+        let g = self.inner.lock();
+        self.inner.try_persist(&g)
+    }
+    /// After this no save the queue makes lands (F2b's sign-out sets it after its last save). Never
+    /// cleared. F2a's `save_state` has no such flag, so the rewind written after it always lands.
+    pub fn freeze(&self) { self.inner.lock().frozen = true; }
+    pub fn is_frozen(&self) -> bool { self.inner.lock().frozen }
     /// Finish's write, through the queue's own state: sets `finished` and `handover` on the live
     /// state and saves it, so no later save can write an older, unfinished copy over it.
-    pub fn finish(&self, _handover: Vec<HandoverItem>) -> Result<(), String> { todo!("F8f: finish") }
+    pub fn finish(&self, handover: Vec<HandoverItem>) -> Result<(), String> {
+        let mut g = self.inner.lock();
+        if g.frozen { return Err("the onboarding file is frozen: finish is refused".into()); }
+        let before = (g.state.finished, std::mem::replace(&mut g.state.handover, handover));
+        g.state.finished = true;
+        let saved = self.inner.try_persist(&g);
+        // A failed save leaves the live state as it was, so a later save cannot write a finish that never landed.
+        if saved.is_err() { (g.state.finished, g.state.handover) = before; }
+        saved
+    }
     /// F8m: a closed backfill batch tells the queue; nothing is started.
     pub fn mail_batch_closed(&self) { self.inner.batch_closed.store(true, Ordering::SeqCst); }
     /// True once a batch has closed under this queue (the rail's `older_mail` line reads it).
@@ -451,4 +508,161 @@ pub fn paste_link_inner(
     _fetch: &dyn Fn(&str) -> Result<String, String>,
 ) -> Value {
     todo!("F8lb: onboarding_paste_link")
+}
+
+#[cfg(test)]
+mod stop_tests {
+    //! F8f's own tests over the queue alone (F1's test 9 and 17 go through F2b's exits, which are
+    //! still stubs): the stop, the drain, the abandoned mail job, the freeze and finish's write.
+    use super::*;
+
+    struct Gates(Mutex<BTreeSet<String>>);
+    impl Gates {
+        fn open(&self, job: &str) { self.0.lock().unwrap().insert(job.into()); }
+        fn is_open(&self, job: &str) -> bool { self.0.lock().unwrap().contains(job) }
+    }
+    /// Every job waits for its gate; `heed` jobs also end at the stop, as `Stopped`.
+    struct Blocking { gates: Arc<Gates>, ran: Mutex<Vec<String>>, heed: Vec<&'static str> }
+    impl Runner for Blocking {
+        fn run(&self, job: &str, _scope: Option<SlotScope>, stop: &AtomicBool) -> Outcome {
+            self.ran.lock().unwrap().push(job.into());
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !self.gates.is_open(job) {
+                assert!(Instant::now() < deadline, "a gate was never opened");
+                if self.heed.contains(&job) && stop.load(Ordering::SeqCst) { return Outcome::Stopped; }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Outcome::Done(BTreeMap::new())
+        }
+    }
+    struct Paid;
+    impl Entitlement for Paid { fn entitled(&self) -> bool { true } fn refresh(&self) {} }
+    struct NoSync;
+    impl SyncView for NoSync { fn read(&self, _s: &str) -> (Option<SyncStatus>, Option<SyncCursor>) { (None, None) } }
+
+    fn rig(tag: &str, heed: Vec<&'static str>) -> (Queue, Arc<Gates>, Arc<Blocking>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("knowlu-f8f-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gates = Arc::new(Gates(Mutex::new(BTreeSet::new())));
+        let runner = Arc::new(Blocking { gates: gates.clone(), ran: Mutex::new(Vec::new()), heed });
+        let deps = Deps { data_dir: dir.clone(), runner: runner.clone(), entitlement: Arc::new(Paid), sync_view: Arc::new(NoSync) };
+        (Queue::start(deps, OnboardingState::new("2026-10-24T09:00:00Z", 8)), gates, runner, dir)
+    }
+    fn wait_for(what: &str, cond: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !cond() { assert!(Instant::now() < deadline, "timed out waiting for {what}"); std::thread::sleep(Duration::from_millis(2)); }
+    }
+    fn state_in(dir: &Path, job: &str) -> JobState {
+        match crate::onboarding_state::load_state(dir) {
+            crate::onboarding_state::Loaded::Ok(s) => s.jobs[job].state,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_stop_starts_nothing_new_and_the_drain_waits_for_the_running_job_in_each_lane() {
+        let (q, gates, runner, dir) = rig("drain", vec![]);
+        for j in ["coursework.discover", "school.apply", "mail.setup", "school.courses"] { q.enqueue(j); }
+        wait_for("both lanes busy", || runner.ran.lock().unwrap().len() == 2);
+        q.request_stop();
+        assert!(q.stop_requested());
+        let done = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|sc| {
+            let t = sc.spawn(|| { q.drain(); done.store(true, Ordering::SeqCst); });
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!done.load(Ordering::SeqCst), "the drain returned with two jobs running");
+            gates.open("coursework.discover");
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!done.load(Ordering::SeqCst), "the drain returned with the lane job running");
+            gates.open("school.apply");
+            t.join().unwrap();
+        });
+        assert!(q.wait_idle(Duration::from_secs(5)), "nothing runnable counts once the stop is set");
+        assert_eq!(runner.ran.lock().unwrap().len(), 2, "mail.setup and school.courses never started");
+        q.save().unwrap();
+        assert_eq!(state_in(&dir, "coursework.discover"), JobState::Done);
+        assert_eq!(state_in(&dir, "mail.setup"), JobState::Pending);
+    }
+
+    #[test]
+    fn a_running_mail_canary_is_abandoned_at_once_and_its_late_return_changes_nothing() {
+        let (q, gates, runner, dir) = rig("canary", vec![]);
+        q.enqueue("mail.canary");
+        wait_for("the canary", || !runner.ran.lock().unwrap().is_empty());
+        q.request_stop();
+        let began = Instant::now();
+        q.drain();
+        assert!(began.elapsed() < Duration::from_secs(2), "the drain waited for the canary");
+        q.save().unwrap();
+        assert_eq!(state_in(&dir, "mail.canary"), JobState::Pending);
+        gates.open("mail.canary"); // it ends `Done` after the abandon
+        assert!(q.wait_idle(Duration::from_secs(10)));
+        assert_eq!(q.snapshot().jobs["mail.canary"].state, JobState::Pending, "abandoned, so it runs again from the start");
+        q.save().unwrap();
+        assert_eq!(state_in(&dir, "mail.canary"), JobState::Pending);
+    }
+
+    #[test]
+    fn a_frozen_queue_writes_nothing_and_finish_writes_through_the_queues_own_state() {
+        let (q, _gates, _runner, dir) = rig("freeze", vec![]);
+        q.enqueue("school.capture");
+        q.request_stop();
+        q.save().unwrap();
+        let handover = vec![HandoverItem { item: "slot.first_full".into(), signal: "slot_end".into() }];
+        q.finish(handover.clone()).unwrap();
+        let on_disk = std::fs::read(crate::onboarding_state::state_path(&dir)).unwrap();
+        assert!(q.snapshot().finished && q.snapshot().handover == handover);
+        assert!(!q.is_frozen());
+        q.freeze();
+        assert!(q.is_frozen());
+        assert!(q.save().is_err() && q.finish(Vec::new()).is_err());
+        q.enqueue("school.preview");
+        q.wake();
+        assert_eq!(std::fs::read(crate::onboarding_state::state_path(&dir)).unwrap(), on_disk, "no queue write lands after the freeze");
+        // The rewind goes through F2a's save, which has no freeze, and lands.
+        crate::onboarding_state::save_state(&dir, &OnboardingState::new("2026-10-24T09:00:00Z", 2)).unwrap();
+        assert_ne!(std::fs::read(crate::onboarding_state::state_path(&dir)).unwrap(), on_disk);
+    }
+
+    #[test]
+    fn an_abandoned_canary_returning_after_the_freeze_leaves_the_file_unchanged() {
+        let (q, gates, runner, dir) = rig("canary-freeze", vec![]);
+        q.enqueue("mail.canary");
+        wait_for("the canary", || !runner.ran.lock().unwrap().is_empty());
+        q.drain(); // sets the stop itself (M-5)
+        assert!(q.stop_requested());
+        q.save().unwrap();
+        q.freeze();
+        let on_disk = std::fs::read(crate::onboarding_state::state_path(&dir)).unwrap();
+        gates.open("mail.canary");
+        assert!(q.wait_idle(Duration::from_secs(10)));
+        assert_eq!(std::fs::read(crate::onboarding_state::state_path(&dir)).unwrap(), on_disk, "the late return wrote nothing");
+        assert_eq!(q.snapshot().jobs["mail.canary"].state, JobState::Pending);
+    }
+
+    #[test]
+    fn a_failed_finish_save_leaves_the_live_state_unfinished() {
+        let (q, _gates, _runner, dir) = rig("finish-fail", vec![]);
+        q.request_stop();
+        q.save().unwrap();
+        // The state file becomes a folder, so no rename can land.
+        let path = crate::onboarding_state::state_path(&dir);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let handover = vec![HandoverItem { item: "slot.first_full".into(), signal: "slot_end".into() }];
+        assert!(q.finish(handover).is_err());
+        let s = q.snapshot();
+        assert!(!s.finished && s.handover.is_empty(), "a finish that never landed is not kept in memory");
+        let _ = std::fs::remove_dir(&path);
+    }
+
+    #[test]
+    fn a_delivered_first_pass_clears_the_canary_and_setup_items_too_but_no_slot_item() {
+        let mut s = OnboardingState::new("2026-10-24T09:00:00Z", 11);
+        let item = |i: &str, sig: &str| HandoverItem { item: i.into(), signal: sig.into() };
+        s.handover = vec![item("slot.first_full", "slot_end"), item("mail.setup", "mail_json"), item("mail.canary", "mail_json"), item("mail.first_pass", "mail_json")];
+        s.mail_signal(crate::onboarding_state::MailSignal::FirstPassDelivered);
+        assert_eq!(s.handover, vec![item("slot.first_full", "slot_end")]);
+    }
 }
