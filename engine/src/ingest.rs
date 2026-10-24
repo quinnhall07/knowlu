@@ -310,7 +310,9 @@ pub fn match_course_fields(
 ///
 /// Two passes, and the order is load-bearing:
 /// **(a) uid pins** — a fragment that is a *case-sensitive* substring of the raw uid always wins.
-/// This is how course-less gradebook items get pinned by their Blackboard item id.
+/// This is how course-less gradebook items get pinned by their Blackboard item id. A fragment in
+/// the pin form `_<digits>_<digits>` is bounded (see [`uid_claims`]): `_71_1` does not claim
+/// `…-_71_10` or `…-_5_71_1`.
 /// **(b) course codes** — matched only against `SUMMARY` and `CATEGORIES` values, never
 /// `DESCRIPTION`, which would attribute an event by an incidental mention.
 pub fn match_course(event: &Event, course_map: &[(String, String)]) -> Option<String> {
@@ -754,6 +756,8 @@ fn json_dumps_unicode(s: &str) -> String {
 /// Sync parsed events into `tasks/`, creating and surgically updating notes.
 ///
 /// The order of the guards is the whole logic, and each one exists for a live reason:
+/// 0. **Removed course** (`course_exclude`, [`sync_tasks_excluding`]; this entry point passes none):
+///    an item only an excluded fragment claims is left out whole, before every guard below.
 /// 1. **Institutional noise** with no course match is skipped — registrar deadlines and other
 ///    schools' exam periods are well-formed VEVENTs that are not assignments.
 /// 2. **No date** is skipped: the ranking engine cannot place an undated task.
@@ -1316,7 +1320,8 @@ fn run_lines_on(
     let course_exclude: Vec<(String, String)> = config
         .get("course_exclude")
         .and_then(|v| v.as_sequence())
-        .map(|s| s.iter().filter_map(|f| Some((f.as_str()?.to_string(), String::new()))).collect())
+        // An empty fragment is a substring of every uid and would leave out the whole feed.
+        .map(|s| s.iter().filter_map(|f| Some(f.as_str()?.to_string())).filter(|f| !f.trim().is_empty()).map(|f| (f, String::new())).collect())
         .unwrap_or_default();
     let mut journal = crate::journal::Journal::new(vault);
     // O1: the gradebook half. `grades/` is read lockless: a concurrent grades write can make a note
@@ -2903,6 +2908,7 @@ mod tests {
             assert_eq!(names(&v, "tasks"), Vec::<String>::new(), "{lines:?}");
             assert_eq!(names(&v, "archive"), Vec::<String>::new());
             assert_eq!(journal_len(&v), 0, "no journal record on a left-out item's account");
+            assert!(load_seen(&v).is_empty(), "left-out uids stay out of the seen ledger");
             assert!(
                 lines.iter().any(|l| l.contains(&format!("2 {LEFT_OUT}"))),
                 "the run names the count: {lines:?}"
@@ -2944,6 +2950,8 @@ mod tests {
             assert_eq!(before, vec!["task-syn-120-quiz-1.md".to_string()], "{lines:?}");
             let bytes = std::fs::read(v.join("tasks").join(&before[0])).unwrap();
             let records = journal_len(&v);
+            // Delete the ledger too, so the known-by-uid backfill path is the one under test.
+            std::fs::remove_file(v.join("state").join("ingest-seen.md")).unwrap();
 
             pystr::write_text(&v.join("config").join("ingest.yaml"), &format!("{HEAD}{KEPT_AND_REMOVED}")).unwrap();
             // The feed moves the due date, which today is an in-place update.
@@ -2954,6 +2962,7 @@ mod tests {
             assert_eq!(std::fs::read(v.join("tasks").join(&before[0])).unwrap(), bytes, "no update: {lines:?}");
             assert_eq!(journal_len(&v), records, "no journal record");
             assert!(!lines.iter().any(|l| l.starts_with("updated ")), "{lines:?}");
+            assert!(!load_seen(&v).contains("bb:syn120-1"), "no backfill for a left-out uid");
             let _ = std::fs::remove_dir_all(&v);
         }
 
@@ -2966,6 +2975,70 @@ mod tests {
                 assert_eq!(code, 0, "{lines:?}");
                 assert_eq!(names(&v, "tasks"), vec!["task-syn-120-quiz-1.md".to_string()], "{tag}: {lines:?}");
                 assert!(!lines.iter().any(|l| l.contains(LEFT_OUT)), "{tag}: {lines:?}");
+                let _ = std::fs::remove_dir_all(&v);
+            }
+        }
+
+        /// An empty fragment would be a substring of every uid; reading drops it.
+        #[test]
+        fn an_empty_fragment_leaves_nothing_out() {
+            for (tag, key) in [("empty", "['']"), ("blank", "[' ', SYN 120]")] {
+                let v = vault(tag, &format!("course_exclude: {key}
+"));
+                let (code, lines) = go(&v, &[vevent("bb:free-1", "Reading response", LATER)]);
+                assert_eq!(code, 0, "{lines:?}");
+                assert_eq!(names(&v, "tasks"), vec!["task-reading-response.md".to_string()], "{tag}: {lines:?}");
+                assert!(!lines.iter().any(|l| l.contains(LEFT_OUT)), "{tag}: {lines:?}");
+                let _ = std::fs::remove_dir_all(&v);
+            }
+        }
+
+        /// A turned-in grade row marks an existing task done, unless its course was removed: a done
+        /// mark is a write on that item's account. The kept run is the control.
+        #[test]
+        fn the_gradebook_does_not_mark_a_left_out_task_done() {
+            use serde_json::json;
+            let item = format!("{GB}_13_1");
+            for (tag, exclude, want) in [("gb-kept", "", "done"), ("gb-removed", "course_exclude: [SYN 120]
+", "active")] {
+                let v = vault(tag, "course_map:
+  SYN 110: syn-110
+");
+                // Not a first run, so the grade does not archive the item on creation.
+                std::fs::create_dir_all(v.join("state")).unwrap();
+                pystr::write_text(&v.join("state").join("today.md"), "# Today
+").unwrap();
+                std::fs::create_dir_all(v.join("courses")).unwrap();
+                pystr::write_text(&v.join("courses").join("syn-120.md"), "---
+title: Synthetic Studies
+code: _900_1
+---
+").unwrap();
+                let (code, lines) = go(&v, &[vevent(&item, "SYN 120 Quiz One", LATER)]);
+                assert_eq!(code, 0, "{lines:?}");
+                let bundle: crate::grades::Bundle = serde_json::from_value(json!({
+                    "schema": 1, "lms": "blackboard", "host": "lms.example.test",
+                    "fetched_at": "2026-08-29T12:00:00Z", "user_id": "_77_1",
+                    "courses": [{"membership": {"courseId": "_900_1"},
+                        "columns": [{"id": "_13_1", "name": "SYN 120 Quiz One", "score": {"possible": 40.0}}],
+                        "grades": [{"columnId": "_13_1", "userId": "_77_1", "status": "NeedsGrading", "exempt": false, "displayGrade": null}],
+                        "categories": null}],
+                })).unwrap();
+                let gctx = crate::write::WriteContext::new(crate::grades::ACTOR, "local-runner");
+                let mut journal = crate::journal::Journal::new(&v);
+                let report = crate::grades::apply(&v, &bundle, &gctx, &mut journal);
+                assert!(report.not_written.is_empty(), "{:?}", report.not_written);
+
+                pystr::write_text(&v.join("config").join("ingest.yaml"), &format!("{HEAD}course_map:
+  SYN 110: syn-110
+{exclude}")).unwrap();
+                let (code, lines) = go(&v, &[vevent(&item, "SYN 120 Quiz One", LATER)]);
+                assert_eq!(code, 0, "{lines:?}");
+                let task = names(&v, "tasks").into_iter().find(|n| n.contains("quiz-one")).unwrap_or_else(|| panic!("{tag}: task moved: {lines:?}"));
+                let text = pystr::read_text(&v.join("tasks").join(&task)).unwrap();
+                let meta = split_frontmatter(&text).unwrap().0;
+                let status = crate::yaml::get(&meta, "status").and_then(crate::yaml::text).unwrap_or_default();
+                assert_eq!(status, want, "{tag}: {lines:?}");
                 let _ = std::fs::remove_dir_all(&v);
             }
         }
