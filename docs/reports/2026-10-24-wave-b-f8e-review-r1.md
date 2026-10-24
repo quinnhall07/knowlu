@@ -28,3 +28,28 @@ The reviewer checked `git diff 1019847..37fda19`, which touches `onboarding_jobs
 
 ## Rulings
 All five are accepted. For ruling 3, the plan's line :2513 will read "settled" instead of "done" in the next plan pass.
+
+## Review r2 (30b103d): FAIL
+Closed: I3, I4, I5, M1–M4, M6, M7.
+
+### Critical
+- **C1. F1 test 14 is red.** I2's automatic chain uses up the test's only reading. The test also expects the reason "waiting to reach your account" (§4.3:827-828), and no code sets it; it was already red at r1.
+  - Fix: start the automatic chain only after a chain has already ended in this queue (a `chain_ended` flag). The resume case stays in `Queue::start`.
+  - While the account is unsettled, set the waiting reason on a pending `school.courses`.
+
+### Important
+- **I1 is only partly fixed.** The chain case is still open. The step-8 ask merges into a chain slot while `config.ingest` cannot yet be Done, so NoRank is lost. The same loss follows a `config.ingest` that finishes after the slot.
+  - Fix: a `no_rank_owed` flag. Set it when a `slot.partial` ask merges, unless the existing slot is Pending and `proposals_ready` already holds.
+  - When `config.ingest` goes Done, or a `slot.partial` ends, push one `slot.partial` if the flag is set, `proposals_ready` holds and none is in order. Then clear the flag. Add a test for the chain case.
+
+### Minor
+- `load_answers` runs under the lock on every pick. It is bounded; caching is optional.
+- Test 14 and test 16 match reasons as prose. A test-writer follow-up will match them against the constants, which then become keys. Until then, F11 maps `first_sync_failed`.
+
+### Questions
+1. I1: see above.
+2. No deadlock.
+3. The `test_03_resumed` setup change is legitimate (the F1 tests contradicted each other). It is recorded for the F1 owner.
+4. The prose reason is accepted as a tracked exception.
+
+**Two failed rounds:** the controller escalates the r2 fixes to Opus (CLAUDE.md: two failed attempts means one level up).
