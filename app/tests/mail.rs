@@ -6104,3 +6104,33 @@ fn test_40_disconnect_changes_no_byte_of_an_unfinished_or_missing_onboarding_jso
     assert_eq!(disconnect(&n, &svc)["ok"], json!(true));
     assert!(!state_path(&n.dir).exists(), "Disconnect never creates the file");
 }
+
+#[test]
+fn test_40_the_slots_mail_signals_never_give_turned_off_whatever_the_list_holds() {
+    use knowlu::onboarding_state::MailSignal;
+    use knowlu::scheduler::mail_signals;
+    let started = "2026-10-24T14:00:00Z";
+    let row = |id: &str, status: &str, verified: Option<&str>| {
+        json!({ "address_id": id, "provider": "m365", "address": KNOWLU, "status": status, "last_canary_ok_at": verified })
+    };
+    let mut off = MailState::default();
+    off.turned_off.push(A.to_string());
+    off.turned_off.push(B.to_string());
+    let pending_setup = |id: &str| PendingSetup { address_id: id.to_string(), placed: false, backfilled: false, shown: false };
+    let mut pending = MailState::default();
+    pending.pending_setups.push(pending_setup(A));
+    let live = MailState::default();
+    let table: Vec<(&str, Vec<Value>, &MailState)> = vec![
+        ("empty list", vec![], &live),
+        ("empty list with a pending setup", vec![], &pending),
+        ("every row turned off", vec![row(A, "active", None), row(B, "active", None)], &off),
+        ("every row revoked", vec![row(A, "revoked", None), row(B, "revoked", None)], &live),
+        ("a verified row", vec![row(A, "active", Some("2026-10-24T15:00:00Z"))], &live),
+        ("a verified row that is turned off", vec![row(A, "active", Some("2026-10-24T15:00:00Z"))], &off),
+        ("a row verified before the start", vec![row(A, "active", Some("2026-10-23T15:00:00Z"))], &live),
+    ];
+    for (case, rows, mail) in table {
+        let got = mail_signals(&rows, mail, started);
+        assert!(!got.contains(&MailSignal::TurnedOff), "{case}: {got:?}");
+    }
+}
