@@ -89,7 +89,7 @@ regex = "1.13.1"
 # (which is `Windows_NT` on every Windows machine ever). `windows` is already a direct dependency
 # for the credential store, the tray's message boxes and the child-process wait; this adds two more
 # of its own feature flags, not a new crate.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security_Credentials", "Wdk_System_SystemServices", "Win32_System_SystemInformation", "Win32_UI_Shell"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security_Credentials", "Wdk_System_SystemServices", "Win32_System_SystemInformation", "Win32_UI_Shell", "Win32_Storage_FileSystem"] }
 # The mail window's external-scheme cancel (email plan T9.2, T0.S3): WebView2's
 # `LaunchingExternalUriScheme`, reached through `with_webview`. Both are ALREADY in Cargo.lock as
 # wry's own (webview2-com 0.38.2, windows-core 0.61.2, the versions `PlatformWebview::controller()`
