@@ -1,9 +1,16 @@
 //! `knowlu-engine onboarding` (Wave B plan §4.4, F7a). Read-only: step 3's counts from raw captures.
-//! STUB: F7a's tests are written against these signatures; the implementation is F7a part 2.
+//!
+//! Arithmetic over files: it writes nothing, opens no socket, and an input it cannot read is a
+//! `null` count and a named line in `errors`, never a failure.
+
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
-use serde_json::Value;
+use serde_json::{json, Value};
+
+use crate::ingest::{self, Due};
 
 /// The raw captures `--preview` reads, as text. `None` is an input that was not given.
 #[derive(Debug, Default, Clone)]
@@ -14,12 +21,189 @@ pub struct PreviewInputs<'a> {
     pub courses: Option<&'a str>,
     /// The v2 grades bundle (`grades::Bundle` JSON).
     pub grades: Option<&'a str>,
+    /// The registrar's raw answer (Banner JSON, as `commitments --registrar` reads it).
+    pub registrar: Option<&'a str>,
+    /// The registrar's school key (`registrar::SCHOOLS`); `registrar` is unreadable without it.
+    pub school: Option<&'a str>,
 }
 
 /// Step 3's counts. Keys: `classes`, `class_times`, `assignments_upcoming`, `turned_in`,
 /// `grades_courses` (each a number or `null`) and `errors` (an array of lines).
-pub fn preview(_inputs: &PreviewInputs, _tz: &TimeZone, _now: DateTime) -> Value {
-    Value::Null
+pub fn preview(inputs: &PreviewInputs, tz: &TimeZone, now: DateTime) -> Value {
+    preview_inner(inputs, &[], tz, now)
+}
+
+/// A course code with its separators dropped: `SYN 110`, `syn-110`, `SYN110` all read `SYN110`.
+fn compact(code: &str) -> String {
+    code.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
+}
+
+/// An input that is required must be given and readable; `unread` names the ones whose file
+/// could not be read, which are an error of their own, not "not given".
+fn input<'a>(name: &str, text: Option<&'a str>, unread: &[&str], required: bool, errors: &mut Vec<String>) -> Option<&'a str> {
+    if unread.contains(&name) {
+        errors.push(format!("{name}: the file could not be read"));
+        return None;
+    }
+    if text.is_none() && required {
+        errors.push(format!("{name}: not given"));
+    }
+    text
+}
+
+/// The course list: its length and the codes its labels and slugs compact to.
+fn read_courses(text: &str, errors: &mut Vec<String>) -> Option<(usize, BTreeSet<String>)> {
+    let Some(list) = serde_json::from_str::<Value>(text).ok().and_then(|v| v.as_array().cloned()) else {
+        errors.push("courses: not a JSON array of courses".to_string());
+        return None;
+    };
+    let mut codes = BTreeSet::new();
+    for course in &list {
+        for key in ["label", "slug"] {
+            if let Some(code) = course.get(key).and_then(Value::as_str).map(compact).filter(|c| !c.is_empty()) {
+                codes.insert(code);
+            }
+        }
+    }
+    Some((list.len(), codes))
+}
+
+/// The distinct UIDs of the feed's items due after `now` in the vault's zone. A date-only due on
+/// today's date is today's work (ingest's rule), so it counts. Institutional noise and an event
+/// with no due are not items. `None` when the text is not a calendar.
+fn read_feed(text: &str, tz: &TimeZone, now: DateTime, errors: &mut Vec<String>) -> Option<Vec<String>> {
+    if !text.contains("BEGIN:VCALENDAR") {
+        errors.push("feed: not a calendar".to_string());
+        return None;
+    }
+    let (events, _malformed) = ingest::parse_ics(text, tz);
+    let upcoming: BTreeSet<String> = events
+        .into_iter()
+        .filter(|e| !ingest::is_institutional_noise(&e.uid))
+        .filter(|e| match e.due {
+            Some(Due::DateTime(dt)) => dt > now,
+            Some(Due::Date(d)) => d >= now.date(),
+            None => false,
+        })
+        .map(|e| e.uid)
+        .collect();
+    Some(upcoming.into_iter().collect())
+}
+
+/// From the v2 bundle: the item columns whose row says turned in (O1's rule), and how many courses
+/// have at least one item column. An Overall column is neither; a course whose capture failed has
+/// no columns to count.
+fn read_grades(text: &str, tz: &TimeZone, errors: &mut Vec<String>) -> Option<(BTreeSet<String>, usize)> {
+    let Ok(bundle) = serde_json::from_str::<crate::grades::Bundle>(text) else {
+        errors.push("grades: not a v2 grades bundle".to_string());
+        return None;
+    };
+    let (mut done, mut courses) = (BTreeSet::new(), 0);
+    for course in bundle.courses.iter().filter(|c| c.error.is_none()) {
+        let mut items = 0;
+        for column in &course.columns {
+            let Some(id) = column["id"].as_str().filter(|s| !s.is_empty()) else { continue };
+            let row = course.grades.iter().find(|r| r["columnId"].as_str() == Some(id));
+            let fields = crate::grades::column_to_fields(column, row, tz);
+            if fields.kind != crate::grades::Kind::Item {
+                continue;
+            }
+            items += 1;
+            if ingest::gradebook_done(fields.status.as_str(), fields.score) {
+                done.insert(id.to_string());
+            }
+        }
+        courses += usize::from(items > 0);
+    }
+    Some((done, courses))
+}
+
+/// The registrar's matched class times: Banner's series whose course code (a lab's " Lab" dropped)
+/// is a code in the course list. Nothing is written and nothing is fetched.
+fn read_registrar(text: &str, school: Option<&str>, codes: &BTreeSet<String>, errors: &mut Vec<String>) -> Option<usize> {
+    let Some(key) = school else {
+        errors.push("registrar: no school given".to_string());
+        return None;
+    };
+    if crate::registrar::school(key).is_none() {
+        errors.push("registrar: unknown school".to_string());
+        return None;
+    }
+    let Ok(json) = serde_json::from_str::<Value>(text) else {
+        errors.push("registrar: not JSON".to_string());
+        return None;
+    };
+    match crate::registrar::parse_banner(&json, key) {
+        Ok(parsed) => Some(
+            parsed.series.iter().filter(|s| codes.contains(&compact(s.title.strip_suffix(" Lab").unwrap_or(&s.title)))).count(),
+        ),
+        Err(e) => {
+            errors.push(format!("registrar: {e}"));
+            None
+        }
+    }
+}
+
+fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: DateTime) -> Value {
+    let mut errors = Vec::new();
+    let feed = input("feed", inputs.feed, unread, true, &mut errors).and_then(|t| read_feed(t, tz, now, &mut errors));
+    let courses = input("courses", inputs.courses, unread, true, &mut errors).and_then(|t| read_courses(t, &mut errors));
+    let grades = input("grades", inputs.grades, unread, false, &mut errors).and_then(|t| read_grades(t, tz, &mut errors));
+    let registrar = input("registrar", inputs.registrar, unread, false, &mut errors);
+    let class_times = match (registrar, &courses) {
+        (Some(text), Some((_, codes))) => read_registrar(text, inputs.school, codes, &mut errors),
+        _ => None,
+    };
+    let turned_in = match (&feed, &grades) {
+        (Some(uids), Some((done, _))) => {
+            Some(uids.iter().filter(|u| ingest::gradable_id(u).is_some_and(|id| done.contains(id))).count())
+        }
+        _ => None,
+    };
+    json!({
+        "assignments_upcoming": feed.as_ref().map(Vec::len),
+        "class_times": class_times,
+        "classes": courses.as_ref().map(|c| c.0),
+        "errors": errors,
+        "grades_courses": grades.as_ref().map(|g| g.1),
+        "turned_in": turned_in,
+    })
+}
+
+/// The files `--preview` reads, by path (the command's arguments).
+#[derive(Debug, Default, Clone)]
+pub struct PreviewFiles {
+    pub feed: Option<PathBuf>,
+    pub courses: Option<PathBuf>,
+    pub grades: Option<PathBuf>,
+    pub registrar: Option<PathBuf>,
+    pub school: Option<String>,
+}
+
+/// `--preview`: read the files (an unreadable one is a named error and a `null`), count, and return
+/// the one JSON line, through `ledger::dumps_value`.
+pub fn run_preview(files: &PreviewFiles, tz: &TimeZone, now: DateTime) -> String {
+    let mut unread = Vec::new();
+    let mut read = |name: &'static str, path: &Option<PathBuf>| {
+        let path = path.as_ref()?;
+        match std::fs::read_to_string(path) {
+            Ok(text) => Some(text),
+            Err(_) => {
+                unread.push(name);
+                None
+            }
+        }
+    };
+    let (feed, courses) = (read("feed", &files.feed), read("courses", &files.courses));
+    let (grades, registrar) = (read("grades", &files.grades), read("registrar", &files.registrar));
+    let inputs = PreviewInputs {
+        feed: feed.as_deref(),
+        courses: courses.as_deref(),
+        grades: grades.as_deref(),
+        registrar: registrar.as_deref(),
+        school: files.school.as_deref(),
+    };
+    crate::ledger::dumps_value(&preview_inner(&inputs, &unread, tz, now))
 }
 
 #[cfg(test)]
@@ -85,7 +269,7 @@ mod tests {
 
     fn run(feed: &str, grades: Option<&str>) -> Value {
         let c = courses();
-        let inputs = PreviewInputs { feed: Some(feed), courses: Some(&c), grades };
+        let inputs = PreviewInputs { feed: Some(feed), courses: Some(&c), grades, ..Default::default() };
         preview(&inputs, &chicago(), now())
     }
 
@@ -171,6 +355,55 @@ mod tests {
         assert_eq!(count(&w, "assignments_upcoming"), json!(1), "{w}");
     }
 
+    /// A Banner answer, invented: SYN 110 meets (matches the course list), ZZT 999 meets (no such
+    /// course), SYN 120 is online with no meeting time (no class time to count).
+    fn banner() -> String {
+        let row = |crn: &str, subject: &str, number: &str, meetings: Value| {
+            json!({"term": "202640", "courseReferenceNumber": crn, "subject": subject, "courseNumber": number,
+                   "scheduleDescription": "Lecture", "statusIndicator": "IR", "meetingTimes": meetings})
+        };
+        let meets = json!([{"meetingType": "CLAS", "monday": true, "wednesday": true, "beginTime": "0900",
+                            "endTime": "0950", "startDate": "08/20/2026", "endDate": "12/05/2026"}]);
+        json!({"data": {"registrations": [
+            row("90001", "SYN", "110", meets.clone()),
+            row("90002", "ZZT", "999", meets),
+            row("90003", "SYN", "120", json!([])),
+        ]}})
+        .to_string()
+    }
+
+    fn with_registrar(registrar: Option<&str>, school: Option<&str>) -> Value {
+        let c = courses();
+        let f = ics(&[]);
+        let inputs = PreviewInputs { feed: Some(&f), courses: Some(&c), registrar, school, ..Default::default() };
+        preview(&inputs, &chicago(), now())
+    }
+
+    #[test]
+    fn class_times_count_registrar_series_that_name_a_course_in_the_list() {
+        let v = with_registrar(Some(&banner()), Some("ua"));
+        assert_eq!(count(&v, "class_times"), json!(1), "{v}");
+        assert_eq!(count(&v, "errors"), json!([]), "{v}");
+    }
+
+    #[test]
+    fn no_registrar_is_a_null_class_times_and_no_error() {
+        let v = with_registrar(None, None);
+        assert_eq!(count(&v, "class_times"), Value::Null, "{v}");
+        assert_eq!(count(&v, "errors"), json!([]), "{v}");
+    }
+
+    #[test]
+    fn an_unreadable_registrar_or_a_missing_school_is_null_and_a_named_error() {
+        let b = banner();
+        for (registrar, school) in [(Some("not json"), Some("ua")), (Some(b.as_str()), None), (Some(b.as_str()), Some("zz"))] {
+            let v = with_registrar(registrar, school);
+            assert_eq!(count(&v, "class_times"), Value::Null, "{v}");
+            let errors = count(&v, "errors");
+            assert!(errors.as_array().is_some_and(|e| e.len() == 1 && e[0].as_str().is_some_and(|s| s.contains("registrar"))), "{v}");
+        }
+    }
+
     #[test]
     fn grades_courses_are_courses_with_an_item_column() {
         // Course one has item columns; course two only an Overall; course three failed.
@@ -189,7 +422,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_input_is_a_null_field_and_a_named_error() {
-        let inputs = PreviewInputs { feed: Some("this is not a calendar"), courses: Some("{not json"), grades: Some("[]") };
+        let inputs = PreviewInputs { feed: Some("this is not a calendar"), courses: Some("{not json"), grades: Some("[]"), ..Default::default() };
         let v = preview(&inputs, &chicago(), now());
         assert_eq!(count(&v, "classes"), Value::Null, "{v}");
         assert_eq!(count(&v, "grades_courses"), Value::Null, "{v}");

@@ -254,3 +254,58 @@ fn two_modes_print_the_same_usage_line_and_exit_zero() {
     assert!(text.contains("onboarding: exactly one mode"), "{text}");
     let _ = std::fs::remove_dir_all(&v);
 }
+
+fn banner_file(tag: &str) -> PathBuf {
+    let meets = json!([{"meetingType": "CLAS", "monday": true, "wednesday": true, "beginTime": "0900",
+                        "endTime": "0950", "startDate": "08/20/2026", "endDate": "12/05/2026"}]);
+    let row = |crn: &str, subject: &str, number: &str| {
+        json!({"term": "202640", "courseReferenceNumber": crn, "subject": subject, "courseNumber": number,
+               "scheduleDescription": "Lecture", "statusIndicator": "IR", "meetingTimes": meets.clone()})
+    };
+    let dir = std::env::temp_dir().join(format!("knowlu-onboarding-cmd-{}-{tag}-registrar", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("registrar.json");
+    std::fs::write(&path, json!({"data": {"registrations": [row("90001", "SYN", "110"), row("90002", "ZZT", "999")]}}).to_string()).unwrap();
+    path
+}
+
+#[test]
+fn registrar_and_school_give_class_times_and_write_nothing() {
+    let v = scratch("registrar");
+    let c = captures("registrar");
+    let r = banner_file("registrar");
+    let before = snapshot(&v);
+    let out = run(
+        &v,
+        &["--preview".as_ref(), "--feed".as_ref(), c.feed.as_os_str(), "--courses".as_ref(), c.courses.as_os_str(),
+          "--registrar".as_ref(), r.as_os_str(), "--school".as_ref(), "ua".as_ref()],
+    );
+    let j = json_of(&out);
+    assert_eq!(j["class_times"], json!(1), "{j}");
+    assert_eq!(j["errors"], json!([]), "{j}");
+    assert_eq!(snapshot(&v), before);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn without_registrar_class_times_is_null_and_no_error() {
+    let v = scratch("noregistrar");
+    let c = captures("noregistrar");
+    let j = json_of(&preview(&v, &c, true));
+    assert_eq!(j["class_times"], Value::Null, "{j}");
+    assert_eq!(j["errors"], json!([]), "{j}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn tidied_alone_prints_a_named_not_built_line_and_exits_zero() {
+    let v = scratch("tidied");
+    let before = snapshot(&v);
+    let out = run(&v, &["--tidied".as_ref()]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("onboarding: --tidied is not built yet"), "{text}");
+    assert_eq!(snapshot(&v), before);
+    let _ = std::fs::remove_dir_all(&v);
+}
