@@ -664,6 +664,9 @@ Acceptance: `scripts/ci/eol-check.ps1` clean; no source file in the diff. Size: 
 *(T0's base, citation, clock and retire records, the review rounds and the controller's answers go
 here, dated, newest first.)*
 
+- **2026-10-24, checkpoint: contract-reviewer on T1o (`088c8f1`): PASS.**
+  - **The coverage rule.** DO2 compares four blocks, by the plan's ruling. `evening_rank.rs`'s E3, which is kept unedited, still guards `the_day`, `verdict`, `ahead` and `topline` at 21:00, and `surface_oracle.rs` guards every byte at 09:00. **Any later lane that removes E3 must first widen DO2 to E3's set.**
+  - **The doc comment.** DO2's doc comment calls the excluded blocks clock-driven. Only `now`, `revision`, the runs panel and `runs_warn` are; the rest are excluded by the plan's ruling. The comment is left as committed, and this note records the correction.
 - **2026-10-24, T0 (the controller).**
   - **Base.** `feat/deadline-ordering` was branched from `origin/main` at `7b3e10c`, and `docs/deadline-ordering` (`6eff47d`, plan r4, PASS) was merged as `b1de78f`.
   - **Citations.** Every symbol in T0's list exists on the base. There is no drift in names. Visibility is recorded for the implementers:
