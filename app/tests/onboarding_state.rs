@@ -1548,3 +1548,83 @@ fn test_17_no_session_and_no_answers_keeps_step_2_now_and_asks_step_3_after_the_
     checks.session.set(true);
     assert_eq!(resume(load_state(&d), &checks).step, 3);
 }
+
+// ---- F2b: step 3 over an unreadable answers file (F2d review r1, I-2) and the provider field -------------------------
+
+#[test]
+fn test_12_a_step_3_capture_replaces_an_unreadable_answers_file_with_only_what_it_captured() {
+    let d = scratch("t12-unreadable-capture");
+    // A real earlier file, then damage: the old content must not leak into the new file.
+    let mut old = full_answers();
+    old.google_calendar = Some(true);
+    save_answers(&d, &old).unwrap();
+    std::fs::write(answers_path(&d), "{ not json").unwrap();
+    assert!(load_answers(&d).is_err(), "the setup: the file is unreadable");
+    let capture = serde_json::json!({"capture": {"courses": [row("QLT 101", "Quilting Basics", "_1001_1", false)]}});
+    let enqueued = std::cell::RefCell::new(Vec::<String>::new());
+    let out = onboarding_answer_inner(&d, 3, &capture, &mut |j| enqueued.borrow_mut().push(j.to_string()));
+    assert_eq!(out["ok"], true, "step 3's capture never refuses over a bad file: {out}");
+    assert_eq!(*enqueued.borrow(), ["school.preview"]);
+    let now = load_answers(&d).expect("readable now").expect("a file");
+    assert_eq!(now.courses.len(), 1);
+    assert_eq!(now.courses[0].key(), "_1001_1");
+    assert!(now.google_calendar.is_none() && now.feeds.is_empty() && now.rows.is_empty() && now.buckets.is_empty(), "only the new capture: {now:?}");
+    // Any other step still refuses an unreadable file and leaves its bytes.
+    std::fs::write(answers_path(&d), "{ not json").unwrap();
+    let out = onboarding_answer_inner(&d, 6, &serde_json::json!({"google_calendar": true}), &mut |j| panic!("enqueued {j}"));
+    assert_eq!(out["ok"], false, "{out}");
+    assert_eq!(std::fs::read_to_string(answers_path(&d)).unwrap(), "{ not json");
+}
+
+#[test]
+fn test_12_the_captured_registrar_rows_and_feed_states_are_saved_with_the_courses() {
+    let d = scratch("t12-capture-rest");
+    let rows = serde_json::json!([{"code": "QLT 101", "days": "MWF", "start": "09:00", "end": "09:50"}]);
+    let capture = serde_json::json!({"capture": {"courses": [row("QLT 101", "Quilting Basics", "_1001_1", false)], "registrar_rows": rows, "feeds": {"lms_ics": "validated"}}});
+    assert_eq!(onboarding_answer_inner(&d, 3, &capture, &mut |_| {})["ok"], true);
+    let a = load_answers(&d).unwrap().unwrap();
+    assert_eq!(a.registrar_rows.len(), 1);
+    assert_eq!(a.feeds.get("lms_ics"), Some(&FeedState::Validated));
+}
+
+#[test]
+fn test_12_the_other_answers_are_saved_and_a_remove_or_a_label_for_no_course_is_refused() {
+    let d = scratch("t12-other-answers");
+    let capture = serde_json::json!({"capture": {"courses": [row("QLT 101", "Quilting Basics", "_1001_1", false)]}});
+    assert_eq!(onboarding_answer_inner(&d, 3, &capture, &mut |_| {})["ok"], true);
+    let book = BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "quilting-basics".into() };
+    assert_eq!(onboarding_answer_inner(&d, 8, &serde_json::json!({"row": book}), &mut |_| {})["ok"], true);
+    assert_eq!(onboarding_answer_inner(&d, 8, &serde_json::json!({"row": book}), &mut |_| {})["ok"], true, "the same row twice is one row");
+    assert_eq!(onboarding_answer_inner(&d, 8, &serde_json::json!({"zybooks_ignore": "ZYB-X"}), &mut |_| {})["ok"], true);
+    assert_eq!(onboarding_answer_inner(&d, 8, &serde_json::json!({"zybooks_ignore": "ZYB-X"}), &mut |_| {})["ok"], true);
+    let a = load_answers(&d).unwrap().unwrap();
+    assert_eq!((a.rows.len(), a.zybooks_ignore.len()), (1, 1));
+    let before = std::fs::read(answers_path(&d)).unwrap();
+    for (step, shape) in [
+        (3, serde_json::json!({"remove": "no-such-course"})),
+        (3, serde_json::json!({"label": {"key": "no-such-course", "label": "x"}})),
+        (6, serde_json::json!({"remove": "_1001_1"})),
+        (3, serde_json::json!({"remove": "_1001_1", "google_calendar": true})),
+        (3, serde_json::json!("remove")),
+    ] {
+        let out = onboarding_answer_inner(&d, step, &shape, &mut |j| panic!("enqueued {j}"));
+        assert_eq!(out["ok"], false, "{shape} at step {step}: {out}");
+    }
+    assert_eq!(std::fs::read(answers_path(&d)).unwrap(), before, "a refused answer changes no byte");
+}
+
+#[test]
+fn test_12_mail_provider_is_the_services_string_and_an_answers_file_without_it_keeps_its_bytes() {
+    let d = scratch("t12-provider");
+    let a = full_answers();
+    save_answers(&d, &a).unwrap();
+    let bytes = std::fs::read(answers_path(&d)).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("mail_provider"), "none recorded, no key written");
+    let loaded = load_answers(&d).unwrap().unwrap();
+    assert_eq!(loaded.mail_provider, None);
+    save_answers(&d, &loaded).unwrap();
+    assert_eq!(std::fs::read(answers_path(&d)).unwrap(), bytes, "load and save leave the bytes alone");
+    update_answers(&d, &|a| a.mail_provider = Some("m365".into())).unwrap();
+    assert_eq!(load_answers(&d).unwrap().unwrap().mail_provider.as_deref(), Some("m365"));
+    assert!(std::fs::read_to_string(answers_path(&d)).unwrap().contains("\"mail_provider\""));
+}

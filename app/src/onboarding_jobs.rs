@@ -349,6 +349,15 @@ impl Queue {
     /// cleared. F2a's `save_state` has no such flag, so the rewind written after it always lands.
     pub fn freeze(&self) { self.inner.lock().frozen = true; }
     pub fn is_frozen(&self) -> bool { self.inner.lock().frozen }
+    /// F2b: a change to the live state (a skip) under the queue's lock, saved at once, so the queue
+    /// stays the only writer of the file. Refused after the freeze.
+    pub fn update_state<T>(&self, change: impl FnOnce(&mut OnboardingState) -> T) -> Result<T, String> {
+        let mut g = self.inner.lock();
+        if g.frozen { return Err("the onboarding file is frozen: a change is refused".into()); }
+        let out = change(&mut g.state);
+        self.inner.try_persist(&g)?;
+        Ok(out)
+    }
     /// Finish's write, through the queue's own state: sets `finished` and `handover` on the live
     /// state and saves it, so no later save can write an older, unfinished copy over it.
     pub fn finish(&self, handover: Vec<HandoverItem>) -> Result<(), String> {

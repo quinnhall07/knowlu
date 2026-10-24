@@ -1,9 +1,9 @@
 //! `onboarding.json`, `onboarding-answers.json`, resume, skips, the three exits and the account
 //! commands of step 2 again and step 4 (plan §4.5, §4.7, §4.10; F2a-F2h).
 //!
-//! **F1 stub.** The types and signatures are the contract `app/tests/onboarding_state.rs` and
-//! `app/tests/onboarding_jobs.rs` write against. Every function panics (`todo!`) until the F2 tasks
-//! replace it, except the two path helpers, which are the plan's own words.
+//! **Still F1 stubs here:** F2g's and F2h's account commands, F8b's `save_preview`, `save_pairs` and
+//! `preview_courses` (each panics, naming its task). The answers, the three exits, the status and the
+//! commands are F2b's.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -301,6 +301,11 @@ pub struct Answers {
     /// [`Bucket`]: its `codes` and its counts by name. Written only by [`save_preview`].
     #[serde(default)]
     pub buckets: BTreeMap<String, Bucket>,
+    /// The service's own string for the mail setup's provider (`m365`, `google` or `other`), written by
+    /// F8d's runner through [`update_answers`] and read by [`onboarding_finish_inner`] before it deletes
+    /// this file. Absent keeps today's bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail_provider: Option<String>,
 }
 
 impl Answers {
@@ -394,12 +399,88 @@ pub fn save_pairs(_data_dir: &Path, _pairs: &BTreeMap<String, Vec<String>>) -> R
 /// step 6's `google.gmail_first_read` by the Gmail grant (the consent poll, `google_status`), or
 /// `mail.canary` by the forwarding setup's end (F8d, F11b). No shape here enqueues any of the three.
 pub fn onboarding_answer_inner(
-    _data_dir: &Path,
-    _step: u8,
-    _answer: &Value,
-    _enqueue: &mut dyn FnMut(&str),
+    data_dir: &Path,
+    step: u8,
+    answer: &Value,
+    enqueue: &mut dyn FnMut(&str),
 ) -> Value {
-    todo!("F2b: onboarding_answer")
+    let refuse = |why: &str| serde_json::json!({ "ok": false, "error": why });
+    // One key, one shape: anything else (`buckets`, `pairs`, two keys at once) is refused unread.
+    let Some((name, body)) = answer.as_object().filter(|o| o.len() == 1).and_then(|o| o.iter().next()) else {
+        return refuse("that answer has no shape Knowlu knows");
+    };
+    let text = |v: &Value| v.as_str().map(str::to_string);
+    let (saved, jobs): (Result<(), String>, &[&str]) = match (step, name.as_str()) {
+        (3, "capture") => {
+            #[derive(Deserialize)]
+            struct Capture {
+                courses: Vec<CourseAnswer>,
+                #[serde(default)]
+                registrar_rows: Vec<RegistrarRow>,
+                #[serde(default)]
+                feeds: BTreeMap<String, FeedState>,
+            }
+            let Ok(c) = serde_json::from_value::<Capture>(body.clone()) else { return refuse("step 3's capture is not a course list") };
+            // A page never supplies pairs: a matching row keeps the ones `save_pairs` wrote.
+            let courses: Vec<CourseAnswer> = c.courses.into_iter().map(|mut r| { r.fragments.clear(); r }).collect();
+            let saved = replace_answers(data_dir, &|a| {
+                a.recapture(courses.clone());
+                a.registrar_rows = c.registrar_rows.clone();
+                a.feeds.extend(c.feeds.clone());
+            });
+            (saved, &["school.preview"])
+        }
+        (3, "remove") => {
+            let Some(key) = text(body) else { return refuse("a removal names a course key") };
+            if let Err(e) = require_course(data_dir, &key) { return refuse(&e); }
+            (update_answers(data_dir, &|a| { for c in a.courses.iter_mut().filter(|c| c.key() == key) { c.removed = true; } }), &[])
+        }
+        (3, "label") => {
+            let (Some(key), Some(label)) = (text(&body["key"]), text(&body["label"])) else { return refuse("a label edit names a course key and a label") };
+            if let Err(e) = require_course(data_dir, &key) { return refuse(&e); }
+            (update_answers(data_dir, &|a| { for c in a.courses.iter_mut().filter(|c| c.key() == key) { c.label = label.clone(); } }), &[])
+        }
+        (6, "google_calendar") => {
+            let Some(on) = body.as_bool() else { return refuse("the calendar answer is yes or no") };
+            (update_answers(data_dir, &|a| a.google_calendar = Some(on)), if on { &["google.calendar_read"] } else { &[] })
+        }
+        (8, "row") => {
+            let Ok(row) = serde_json::from_value::<BookRow>(body.clone()) else { return refuse("a homework row names a source, a key and a course") };
+            let saved = update_answers(data_dir, &|a| match a.rows.iter_mut().find(|r| r.source == row.source && r.key == row.key) {
+                Some(old) => *old = row.clone(),
+                None => a.rows.push(row.clone()),
+            });
+            (saved, &[])
+        }
+        (8, "zybooks_ignore") => {
+            let Some(key) = text(body) else { return refuse("an ignored section is a key") };
+            let saved = update_answers(data_dir, &|a| { if !a.zybooks_ignore.contains(&key) { a.zybooks_ignore.push(key.clone()); } });
+            (saved, &[])
+        }
+        _ => return refuse("that answer has no shape Knowlu knows at this step"),
+    };
+    if let Err(e) = saved { return refuse(&e); }
+    // Saved first: a quit between the save and an enqueue loses nothing, since the answer is on disk.
+    for job in jobs { enqueue(job); }
+    serde_json::json!({ "ok": true, "error": Value::Null })
+}
+
+/// Step 3's capture: like [`update_answers`], but an unreadable (or absent) file is **replaced** by
+/// what the capture holds, never merged into and never refused (F2d review r1, I-2). The re-capture is
+/// the student's own do-over, so the damaged file is the one thing it is allowed to discard.
+fn replace_answers(data_dir: &Path, change: &dyn Fn(&mut Answers)) -> Result<(), String> {
+    let _held = ANSWERS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mut a = load_answers(data_dir).ok().flatten().unwrap_or_default();
+    change(&mut a);
+    save_answers(data_dir, &a)
+}
+
+/// A remove or a label edit names a saved course by its key; no such course changes no byte.
+fn require_course(data_dir: &Path, key: &str) -> Result<(), String> {
+    match load_answers(data_dir)? {
+        Some(a) if a.courses.iter().any(|c| c.key() == key) => Ok(()),
+        _ => Err("no course has that key".into()),
+    }
 }
 
 /// `Ok(None)` is an absent file; an unreadable one is `Err`, never "no answers".
@@ -680,25 +761,152 @@ pub trait ExitSeams {
     fn snapshot(&self) -> OnboardingState;
     /// Writes `finished: true` and `handover`, deletes the answers file, applies autostart.
     fn write_finish(&self, handover: Vec<HandoverItem>) -> Result<(), String>;
+    /// The answers file's recorded `mail_provider`, read before `write_finish` deletes the file.
+    /// Default: none recorded, which keeps every mail item in the hand-over.
+    fn mail_provider(&self) -> Option<String> { None }
 }
 
 /// One exit at a time: a second exit while one drains answers `{ok: true, exiting: true}`.
 #[derive(Default)]
 pub struct ExitGuard(pub std::sync::atomic::AtomicBool);
 
+/// The process's one guard, shared by the three commands and F4's close handler.
+pub fn exit_guard() -> std::sync::Arc<ExitGuard> {
+    static GUARD: std::sync::OnceLock<std::sync::Arc<ExitGuard>> = std::sync::OnceLock::new();
+    GUARD.get_or_init(Default::default).clone()
+}
+
+/// One call sets both stops (§14.51): the scheduler's, which a slot in flight checks between its
+/// stages, then the queue's. The live `ExitSeams::request_stop` is this call and nothing else.
+pub fn stop_both(sch: &crate::scheduler::Scheduler, queue: &crate::onboarding_jobs::Queue) {
+    sch.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    queue.request_stop();
+}
+
+/// The recorded mail provider, or `None` for an absent or unreadable answers file or no record.
+pub fn recorded_mail_provider(data_dir: &Path) -> Option<String> {
+    load_answers(data_dir).ok().flatten().and_then(|a| a.mail_provider)
+}
+
+/// A first pass the app never drives, so no batch will ever close and a handed-over item would never
+/// clear (§14.51 r3): a Guided provider, or one whose backfill is held until C3.
+pub fn backfill_never_driven(p: crate::mail_steps::Provider) -> bool {
+    p == crate::mail_steps::Provider::Guided || crate::mail_steps::backfill_held_for_c3(p)
+}
+
+fn already_exiting() -> Value { serde_json::json!({ "ok": true, "exiting": true }) }
+/// A relaunch (or a sign-out, or a finish write) that failed: the process stays, stopped, and the page
+/// shows its one restart screen, whose button is `onboarding_quit` (§4.10, review r4 M5).
+fn restart_needed(why: String) -> Value { serde_json::json!({ "ok": false, "restart": true, "error": why }) }
+fn begin(g: &ExitGuard) -> bool { g.0.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() }
+fn release(g: &ExitGuard) { g.0.store(false, std::sync::atomic::Ordering::SeqCst); }
+
 /// Finish later and the window's close: stop, drain, save, stamp `quit_at`, flush, exit.
-pub fn onboarding_quit_inner(_s: &dyn ExitSeams, _g: &ExitGuard) -> Value { todo!("F2b: onboarding_quit") }
-/// Stop, drain, save, freeze, sign out, relaunch `--pick`, exit; no flush.
-pub fn onboarding_sign_out_inner(_s: &dyn ExitSeams, _g: &ExitGuard) -> Value { todo!("F2b: onboarding_sign_out") }
+pub fn onboarding_quit_inner(s: &dyn ExitSeams, g: &ExitGuard) -> Value {
+    if !begin(g) { return already_exiting(); }
+    s.request_stop();
+    s.drain();
+    // A save that fails (a frozen queue after a failed sign-out) must not keep the process alive.
+    if let Err(e) = s.save() { eprintln!("onboarding: the last save did not land: {e}"); }
+    s.stamp_quit_at();
+    s.flush();
+    s.exit();
+    serde_json::json!({ "ok": true, "error": Value::Null })
+}
+
+/// Stop, drain, save, freeze, sign out, relaunch `--pick`, exit; no flush. The sign-out (whose clean
+/// runs `on_sign_out`) and the freeze come only after the drain has returned, so no writer is left to
+/// put back what the rewind deleted (§14.51 r1, C1).
+pub fn onboarding_sign_out_inner(s: &dyn ExitSeams, g: &ExitGuard) -> Value {
+    if !begin(g) { return already_exiting(); }
+    s.request_stop();
+    s.drain();
+    if let Err(e) = s.save() { eprintln!("onboarding: the last save did not land: {e}"); }
+    s.freeze_saves();
+    if let Err(e) = s.sign_out() { release(g); return restart_needed(e); }
+    if let Err(e) = s.relaunch(&["--pick"]) { release(g); return restart_needed(e); }
+    s.exit();
+    serde_json::json!({ "ok": true, "error": Value::Null })
+}
+
+/// Why Open Knowlu is not offered yet, if it is not: a lane job that is not `done` (`config.ingest`
+/// must be; the two feed stores may also be `failed`, which settles them for `config.ingest`, §4.11),
+/// or a gate that is still closed.
+fn finish_refusal(state: &OnboardingState, now_secs: i64) -> Option<String> {
+    let st = |j: &str| state.jobs.get(j).map(|r| r.state);
+    let lane_open = st("config.ingest") != Some(JobState::Done)
+        || ["school.apply", "school.courses", "registrar.confirm"].iter().any(|j| st(j).is_some_and(|s| s != JobState::Done))
+        || ["school.store", "calendar.store"].iter().any(|j| st(j).is_some_and(|s| !matches!(s, JobState::Done | JobState::Failed | JobState::Skipped)));
+    if lane_open { return Some("Knowlu is still saving your setup. Try again in a moment.".into()); }
+    let confirmed = state.step10_confirmed_at.as_deref().and_then(|t| t.parse::<jiff::Timestamp>().ok()).map(|t| t.as_second());
+    if !crate::onboarding_gate::gate(&gate_items(state), confirmed, now_secs).open {
+        return Some("Knowlu is still reading your first week.".into());
+    }
+    None
+}
+
 /// Refuse while the gate is closed (`now_secs` against the cap) or a lane job is not `done`; then
 /// stop, drain, save, `write_finish`, `relaunch_with`, and today's quit path.
-pub fn onboarding_finish_inner(_s: &dyn ExitSeams, _g: &ExitGuard, _now_secs: i64) -> Value {
-    todo!("F2b: onboarding_finish")
+pub fn onboarding_finish_inner(s: &dyn ExitSeams, g: &ExitGuard, now_secs: i64) -> Value {
+    if !begin(g) { return already_exiting(); }
+    if let Some(why) = finish_refusal(&s.snapshot(), now_secs) {
+        release(g);
+        return serde_json::json!({ "ok": false, "error": why });
+    }
+    s.request_stop();
+    s.drain();
+    let mut handover = handover_for(&s.snapshot());
+    // Read before `write_finish` deletes the answers file. No provider recorded keeps the item.
+    if s.mail_provider().is_some_and(|p| backfill_never_driven(crate::mail_steps::Provider::from_service(&p))) {
+        handover.retain(|h| h.item != "mail.first_pass");
+    }
+    if let Err(e) = s.write_finish(handover) { release(g); return restart_needed(e); }
+    s.stamp_quit_at();
+    // The spawn before the flush, so the child waits on our pid while the flush runs (`switch_profile`).
+    if let Err(e) = s.relaunch_with() { release(g); return restart_needed(e); }
+    s.flush();
+    s.exit();
+    serde_json::json!({ "ok": true, "error": Value::Null })
 }
-/// F4's close handler: spawns [`onboarding_quit_inner`] on its own thread and returns at once.
-pub fn close_requested(_s: std::sync::Arc<dyn ExitSeams + Send + Sync>, _g: std::sync::Arc<ExitGuard>) {
-    todo!("F2b: the close never waits on the event loop")
+
+/// F4's close handler: spawns [`onboarding_quit_inner`] on its own thread and returns at once, so the
+/// event loop never waits on a drain.
+pub fn close_requested(s: std::sync::Arc<dyn ExitSeams + Send + Sync>, g: std::sync::Arc<ExitGuard>) {
+    let spawned = std::thread::Builder::new().name("onboarding-close".into()).spawn(move || { onboarding_quit_inner(&*s, &g); });
+    if let Err(e) = spawned { eprintln!("onboarding: the close could not start its thread: {e}"); }
 }
+
+/// The reveal gate's items from the state: every required job under its own name (§4.6), and each
+/// skip as a source the student did not connect. A held, running or pending job is still coming; a
+/// failed one is named with its reason and, until F8g's closed set supplies one, the plain fix.
+fn gate_items(state: &OnboardingState) -> Vec<crate::onboarding_gate::GateItem> {
+    use crate::onboarding_gate::{GateItem, ItemState};
+    let mut items: Vec<GateItem> = state.jobs.iter()
+        .filter(|(name, r)| (SLOT_ITEMS.contains(&name.as_str()) || MAIL_ITEMS.contains(&name.as_str())) && r.state != JobState::Skipped)
+        .map(|(name, r)| GateItem {
+            key: name.clone(),
+            state: match r.state {
+                JobState::Done => ItemState::Done,
+                JobState::Failed => ItemState::Failed { reason: r.reason.clone().unwrap_or_default(), fix: "Try again".into() },
+                _ => ItemState::Pending,
+            },
+            connected: true,
+            backfill: false,
+        }).collect();
+    items.extend(state.skips.iter().map(|k| GateItem {
+        key: if k.source == "google" { "gmail".to_string() } else { k.source.clone() },
+        state: ItemState::Skipped { cost_key: k.cost_key.clone() },
+        connected: false,
+        backfill: false,
+    }));
+    items
+}
+
+/// The drain's progress, as the page words it (§4.10): the running job, whether it is a slot (`long`)
+/// and when the drain began.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitingNow { pub job: String, pub long: bool, pub since: String }
+
 /// Every required item of §4.6 not `done`, each with its clearing signal.
 pub fn handover_for(state: &OnboardingState) -> Vec<HandoverItem> {
     // A skipped job is the student's own choice (the gate lists it as not connected), never "coming".
@@ -710,10 +918,191 @@ pub fn handover_for(state: &OnboardingState) -> Vec<HandoverItem> {
     state.jobs.keys().filter(|k| open(k)).filter_map(|k| signal(k).map(|s| HandoverItem { item: k.clone(), signal: s.to_string() })).collect()
 }
 
-/// `onboarding_status`'s body: the file plus the live job states, the gate, and whether step 10's
-/// proposals may be asked (only once `config.ingest` is `done`). Keys: `jobs`, `proposals_ready`,
-/// `gate`.
-pub fn status_inner(_state: &OnboardingState, _now_secs: i64) -> Value { todo!("F2b: onboarding_status") }
+/// Step 10 asks for proposals only once `config.ingest` has written the file they read (§4.2, §4.3).
+pub fn proposals_ready(state: &OnboardingState) -> bool {
+    state.jobs.get("config.ingest").is_some_and(|j| j.state == JobState::Done)
+}
+
+/// `onboarding_status`'s body over a state that was read: the file plus the live job states, the
+/// gate (re-evaluated at `now_secs`), and whether step 10's proposals may be asked. Keys: `ok`,
+/// `jobs`, `proposals_ready`, `gate`, `step`, `skips`, `handover`, `account_settled`.
+pub fn status_inner(state: &OnboardingState, now_secs: i64) -> Value {
+    use serde_json::json;
+    let confirmed = state.step10_confirmed_at.as_deref().and_then(|t| t.parse::<jiff::Timestamp>().ok()).map(|t| t.as_second());
+    let g = crate::onboarding_gate::gate(&gate_items(state), confirmed, now_secs);
+    json!({
+        "ok": true, "error": Value::Null,
+        "step": state.step, "account_settled": state.account_settled, "skips": state.skips, "handover": state.handover,
+        "jobs": state.jobs, "proposals_ready": proposals_ready(state),
+        "gate": {
+            "open": g.open,
+            "still_coming": g.still_coming,
+            "failed": g.failed.iter().map(|(key, reason, fix)| json!({ "key": key, "reason": reason, "fix": fix })).collect::<Vec<_>>(),
+            "not_connected": g.not_connected.iter().map(|n| json!({ "key": n.key, "cost_key": n.cost_key })).collect::<Vec<_>>(),
+        },
+    })
+}
+
+/// `onboarding_status` fails closed (§14.50): when the jobs could not be read the answer is
+/// `{ok: false, error}` with no gate and no item list, because the gate opens on an empty list.
+/// `answers` adds step 3's proof totals, `exiting` the drain's progress (`null` when none).
+pub fn status_for(read: Result<OnboardingState, String>, answers: Option<&Answers>, exiting: Option<ExitingNow>, now_secs: i64) -> Value {
+    let state = match read {
+        Ok(s) => s,
+        Err(e) => return serde_json::json!({ "ok": false, "error": e }),
+    };
+    let mut v = status_inner(&state, now_secs);
+    v["step3"] = answers.map_or(Value::Null, |a| serde_json::json!(step3_totals(a)));
+    v["exiting"] = exiting.map_or(Value::Null, |e| serde_json::json!({ "job": e.job, "long": e.long, "since": e.since }));
+    v
+}
+
+// ---- the live seams and the commands (F2b; registered in F5) -------------------------------------
+
+/// `ExitSeams` over the running app: the managed `Scheduler`, `Queue` and `ConsoleState`. Cheap to
+/// build, so F4's close handler makes one per close. A missing piece (no queue in a normal console)
+/// makes its seam a no-op, never a panic.
+pub struct LiveExit { app: tauri::AppHandle }
+impl LiveExit {
+    pub fn new(app: tauri::AppHandle) -> LiveExit { LiveExit { app } }
+}
+
+impl ExitSeams for LiveExit {
+    fn request_stop(&self) {
+        use tauri::Manager;
+        if let (Some(sch), Some(queue)) = (self.app.try_state::<crate::scheduler::Scheduler>(), self.app.try_state::<crate::onboarding_jobs::Queue>()) {
+            stop_both(&sch, &queue);
+        }
+    }
+    fn drain(&self) {
+        use tauri::Manager;
+        if let Some(queue) = self.app.try_state::<crate::onboarding_jobs::Queue>() { queue.drain(); }
+    }
+    fn save(&self) -> Result<(), String> {
+        use tauri::Manager;
+        self.app.try_state::<crate::onboarding_jobs::Queue>().map_or(Ok(()), |queue| queue.save())
+    }
+    fn freeze_saves(&self) {
+        use tauri::Manager;
+        if let Some(queue) = self.app.try_state::<crate::onboarding_jobs::Queue>() { queue.freeze(); }
+    }
+    fn sign_out(&self) -> Result<(), String> {
+        use tauri::Manager;
+        let cs = self.app.try_state::<crate::state::ConsoleState>().ok_or("Knowlu's setup is not running")?;
+        let id = cs.settings.lock().unwrap_or_else(|e| e.into_inner()).profile_id.clone();
+        crate::account::sign_out(self.app.clone(), Some(id)).map(|_| ())
+    }
+    fn relaunch(&self, args: &[&str]) -> Result<(), String> { crate::onboarding::relaunch(args.iter().copied()) }
+    fn relaunch_with(&self) -> Result<(), String> {
+        use tauri::Manager;
+        let cs = self.app.try_state::<crate::state::ConsoleState>().ok_or("Knowlu's setup is not running")?;
+        crate::onboarding::relaunch_with(&cs.vault)
+    }
+    fn stamp_quit_at(&self) {
+        use tauri::Manager;
+        let Some(cs) = self.app.try_state::<crate::state::ConsoleState>() else { return };
+        let mut s = cs.settings.lock().unwrap_or_else(|e| e.into_inner());
+        s.quit_at = Some(knowlu_engine::journal::now_ts(None));
+        let _ = s.save(&cs.settings_path);
+    }
+    /// Today's quit path (push and back up under a 10 s cap); the process ends in its `then`, as
+    /// `switch_profile`'s does, because the flush's worker is joined before the call returns.
+    fn flush(&self) {
+        use tauri::Manager;
+        let Some(cs) = self.app.try_state::<crate::state::ConsoleState>() else { return };
+        let logs = cs.data_dir.join("logs");
+        crate::state::quit_flush(&cs, std::time::Duration::from_secs(10), move |q| {
+            let _ = std::fs::create_dir_all(&logs);
+            let stamp = knowlu_engine::journal::now_ts(None).replace(':', "");
+            let _ = std::fs::write(logs.join(format!("quit-{stamp}.txt")), format!("synced={} backed_up={} timed_out={} onboarding=1\n", q.synced, q.backed_up, q.timed_out));
+            std::process::exit(0);
+        });
+    }
+    fn exit(&self) { self.app.exit(0); }
+    fn snapshot(&self) -> OnboardingState {
+        use tauri::Manager;
+        // No queue reads as a state with nothing done, so Open Knowlu is refused.
+        self.app.try_state::<crate::onboarding_jobs::Queue>().map_or_else(|| OnboardingState::new(&knowlu_engine::journal::now_ts(None), 0), |queue| queue.snapshot())
+    }
+    fn write_finish(&self, handover: Vec<HandoverItem>) -> Result<(), String> {
+        use tauri::Manager;
+        use tauri_plugin_autostart::ManagerExt;
+        let queue = self.app.try_state::<crate::onboarding_jobs::Queue>().ok_or("Knowlu's setup is not running")?;
+        let cs = self.app.try_state::<crate::state::ConsoleState>().ok_or("Knowlu's setup is not running")?;
+        queue.finish(handover)?;
+        match std::fs::remove_file(answers_path(&cs.data_dir)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => eprintln!("onboarding: the answers file could not be deleted: {e}"),
+            _ => {}
+        }
+        let on = cs.settings.lock().unwrap_or_else(|e| e.into_inner()).autostart;
+        let al = self.app.autolaunch();
+        let _ = if on { al.enable() } else { al.disable() };
+        Ok(())
+    }
+    fn mail_provider(&self) -> Option<String> {
+        use tauri::Manager;
+        self.app.try_state::<crate::state::ConsoleState>().and_then(|cs| recorded_mail_provider(&cs.data_dir))
+    }
+}
+
+/// Finish later, and the window's close through F4. Async: the drain never runs on the event loop.
+#[tauri::command(async)]
+pub fn onboarding_quit(app: tauri::AppHandle) -> Value { onboarding_quit_inner(&LiveExit::new(app), &exit_guard()) }
+
+/// Sign out of setup: drains, rewinds to step 2 and reopens the picker.
+#[tauri::command(async)]
+pub fn onboarding_sign_out(app: tauri::AppHandle) -> Value { onboarding_sign_out_inner(&LiveExit::new(app), &exit_guard()) }
+
+/// Open Knowlu: refused until the gate opens and the lane is done; then hands over and relaunches.
+#[tauri::command(async)]
+pub fn onboarding_finish(app: tauri::AppHandle) -> Value {
+    onboarding_finish_inner(&LiveExit::new(app), &exit_guard(), jiff::Timestamp::now().as_second())
+}
+
+fn no_setup() -> Value { serde_json::json!({ "ok": false, "error": "Knowlu's setup is not running" }) }
+
+/// The file plus the live job states, the gate and step 3's totals; fails closed (§14.50). The drain's
+/// progress (`exiting`) waits for F8f2's `Queue::exiting()`.
+#[tauri::command]
+pub fn onboarding_status(app: tauri::AppHandle) -> Value {
+    use tauri::Manager;
+    let (Some(queue), Some(cs)) = (app.try_state::<crate::onboarding_jobs::Queue>(), app.try_state::<crate::state::ConsoleState>()) else { return no_setup() };
+    let answers = load_answers(&cs.data_dir).ok().flatten();
+    status_for(Ok(queue.snapshot()), answers.as_ref(), None, jiff::Timestamp::now().as_second())
+}
+
+/// Records the answer in the answers file, enqueues its jobs, then wakes the queue.
+#[tauri::command(async)]
+pub fn onboarding_answer(app: tauri::AppHandle, step: u8, answer: Value) -> Value {
+    use tauri::Manager;
+    let (Some(queue), Some(cs)) = (app.try_state::<crate::onboarding_jobs::Queue>(), app.try_state::<crate::state::ConsoleState>()) else { return no_setup() };
+    let out = onboarding_answer_inner(&cs.data_dir, step, &answer, &mut |job| queue.enqueue(job));
+    // The jobs that wait for the answers file (`school.courses`, `registrar.confirm`, `config.ingest`)
+    // are woken by nothing else: a saved answer wakes the queue even when it enqueued no job.
+    if out["ok"] == true { queue.wake(); }
+    out
+}
+
+/// A skip the step takes, recorded with its cost key in the live state and saved.
+#[tauri::command]
+pub fn onboarding_skip(app: tauri::AppHandle, step: u8, source: String) -> Value {
+    use tauri::Manager;
+    let Some(queue) = app.try_state::<crate::onboarding_jobs::Queue>() else { return no_setup() };
+    match queue.update_state(|s| skip_step(s, step, &source)).and_then(|r| r) {
+        Ok(()) => serde_json::json!({ "ok": true, "error": Value::Null }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    }
+}
+
+/// "Try again" on a job the page lists.
+#[tauri::command]
+pub fn onboarding_retry(app: tauri::AppHandle, job: String) -> Value {
+    use tauri::Manager;
+    let Some(queue) = app.try_state::<crate::onboarding_jobs::Queue>() else { return no_setup() };
+    if !queue.snapshot().jobs.contains_key(&job) { return serde_json::json!({ "ok": false, "error": "that job is not part of this setup" }); }
+    queue.retry(&job);
+    serde_json::json!({ "ok": true, "error": Value::Null })
+}
 
 // ---- step 2 again, and step 4 (F2g, F2h) ---------------------------------------------------------
 
