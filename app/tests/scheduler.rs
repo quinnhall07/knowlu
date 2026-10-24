@@ -3065,7 +3065,20 @@ fn assert_nothing_ran(r: &PrivacyRig, s: &knowlu::scheduler::RunSummary, runner_
 
 #[test]
 fn test_15_a_stop_set_before_the_slot_starts_no_stage_and_survives_the_slot() {
+    // A session sits at the vault's generated target, long expired, so a slot that did start its
+    // session stage would refresh it against the counting listener: the "no refresh hit" below proves
+    // the stage was skipped, not just that there was nothing to refresh. Lock first, so the credential
+    // is cleaned up before the lock is released.
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let r = accepted_rig("o3-15-before", true);
+    let target = format!("knowlu/test-l4-gate-{}-o3-15-before/session", std::process::id());
+    let _cred_cleanup = CredCleanup(target.clone());
+    knowlu::account::save_session(&target, "acc-1", &knowlu::account::Session {
+        access_token: "stale-at".into(),
+        refresh_token: "stale-rt".into(),
+        expires_at: 0,
+        email: "a@example.invalid".into(),
+    }).unwrap();
     let dated = test_row("blackboard", Some("2026-10-01"));
     let grades = GradesSeam { row: Some(&dated), capture: Some(&panic_capture), window_open: false };
     let mail = MailSeam { mailboxes: &one_due_mailbox, pass: Some(&panic_pass), window_open: false };
@@ -3079,6 +3092,8 @@ fn test_15_a_stop_set_before_the_slot_starts_no_stage_and_survives_the_slot() {
     let s2 = run_slot_scoped(&r.cs, &sch, None, false, &grades, &mail, SlotScope::NoRank);
     assert_nothing_ran(&r, &s2, &log_before);
     assert!(sch.stop.load(Ordering::SeqCst));
+    assert_eq!(r.listener.hits(), 0, "no session refresh request reached the service");
+    assert_eq!(knowlu::account::load_session(&target).map(|(_, s)| s.access_token).ok().as_deref(), Some("stale-at"), "the session was not touched");
 }
 
 #[test]
@@ -3139,6 +3154,7 @@ fn test_18_before_config_runs_sync_only_never_captures_and_names_every_other_ste
         let rows = rows_starting(&named, step);
         assert_eq!(rows.len(), 1, "{step} is one row (grades once: its capture and step together): {named:?}");
         assert!(rows[0].starts_with(&format!("{step} (not yet:")), "{}", rows[0]);
+        if step == "grades" { assert_eq!(rows[0], "grades (not yet: your courses are not in yet)", "§4.3: one row stands for the capture and the step"); }
     }
     assert!(!runner_log_of(&r).contains("not yet"), "no runner-log line for a scope's rows");
 }
@@ -3218,6 +3234,9 @@ fn src_text(file: &str) -> String {
 fn test_27_main_primes_the_mode_and_checks_for_an_update_once_and_never_installs() {
     let main = src_text("main.rs");
     assert!(main.contains("scheduler::prime_mode_device"), "the onboarding arm primes the cached mode before the window is built");
+    // Before the window is built: the console's build call is the last `.build(` of the app in this file.
+    let (prime, build) = (main.find("scheduler::prime_mode_device"), main.rfind(".build(tauri::generate_context!())"));
+    assert!(matches!((prime, build), (Some(p), Some(b)) if p < b), "prime_mode_device ({prime:?}) comes before the console window is built ({build:?})");
     assert_eq!(main.matches("scheduler::spawn_update_check").count(), 1, "the onboarding arm calls spawn_update_check exactly once");
     for banned in ["install_staged", "hold_for_install"] {
         assert!(!main.contains(banned), "onboarding has no install path: main.rs names {banned}");
