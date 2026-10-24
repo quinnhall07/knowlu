@@ -1528,8 +1528,8 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F10 | Shell steps 1-2 in the ruled direction (5b); old wizard removed (static files only) | `console-ui` | `app/static`, the `console.js` queue | direction ruled (5b, 2026-10-23) |
 | F11t | Failing static tests for the onboarding screens; §14.52's pins: step 5's answer and its three allowed mail commands (the seven others never called), the proceeds of steps 3, 7 and 8, Open Knowlu on `finish_ready` only, the closing state held while an exit call is outstanding. §14.58's pins, each before its piece: `account_status` called on mount and at the step moves only, never on the poll; the strip's figures read from fields, never summed; step 8's "Found" line only from `homework_sites`; `window` sent only after an answer; the state select's codes equal `STATE_TZ`'s (F11e1) | `test-writer` | test first (review r1 minor) | F2b |
 | F11c1 | F11c's follow-up, the page half of §14.57.1-.2 that F11c merged without: step 8 calls `onboarding_discover_coursework` and `onboarding_store_credentials` and sends no `vault`; step 10 sends `(10, {"confirmed": true})` after `commitments_confirm` succeeds and before `OB.show(11)`; F11t's two pins (about 15 lines in `onboarding.js`) | `test-writer` (pins), then `console-ui` | `app/static` | F2b3, F5c; in the panel merge order after F11p1 and before F11p2 (§14.58.7, r1 m-6) |
-| F11p0 | The display face (Big Shoulders Text, latin woff2, 600 and 700) and the wordmark images, after a licence check: open licences only, recorded in `SOURCES.md` with URL, SHA-256 and licence text; the wordmark under `app/static/brand/` once Q-B23 is answered; Public Sans only on Q-B22's yes; `.gitattributes` gains `*.woff2 binary` and `*.png binary`, and `scripts/ci/eol-check.ps1` passes (§14.58.2, r1 m-6) | main session | network fetch, a licence judgment and hashes; no subagent downloads | none |
-| F11p1 | The look (§14.58.4): the faces applied in `.setup`; the wordmark (or its CSS fallback) in the rail head; the light "day board" token set, started from Windows' setting with no stored choice; the rail's done lines for the account ("Signed in as …") and payment ("Trial on. First charge …") from `account_status`, read on mount and at the step moves only; the rail foot with "About N minutes left" and Finish later; `?fixture=` answering four commands for shots (about 60 lines in `onboarding.js`, 35 in `console.css`, 10 in `onboarding.css`). Acceptance: side-by-side shots (§14.58.7) | `test-writer` (pins), then `console-ui` | `app/static`; pinned and shot-compared | F11p0, F11c (merged); first in the panel merge order |
+| F11p0 | Quinn's font ruling (signed 2026-10-24, §14.58.2): PT Serif Caption 400 (the logo) and Zilla Slab 400, 600 and 700 (all other text), latin woff2, only the weights used, each after a licence check (SIL OFL 1.1 from the upstream file; anything else stops and goes to Quinn), recorded in `SOURCES.md` with URL, SHA-256 and licence text (`OFL-pt-serif-caption.txt`, `OFL-zilla-slab.txt`); no Big Shoulders, no Public Sans, no wordmark PNG; `.gitattributes` gains `*.woff2 binary` and `*.png binary`, and `scripts/ci/eol-check.ps1` passes (§14.58.2, r1 m-6) | main session | network fetch, a licence judgment and hashes; no subagent downloads | none |
+| F11p1 | The look (§14.58.4): Zilla Slab for every piece of text in `.setup` and `.picker` (the setup frame and onboarding) through one scoped token, the console's own faces untouched; the logo in the rail head set in PT Serif Caption with the red block behind "lu"; the light "day board" token set, started from Windows' setting with no stored choice; the rail's done lines for the account ("Signed in as …") and payment ("Trial on. First charge …") from `account_status`, read on mount and at the step moves only; the rail foot with "About N minutes left" and Finish later; `?fixture=` answering four commands for shots (about 60 lines in `onboarding.js`, 35 in `console.css`, 10 in `onboarding.css`). Acceptance: side-by-side shots (§14.58.7) | `test-writer` (pins), then `console-ui` | `app/static`; pinned and shot-compared | F11p0, F11c (merged); first in the panel merge order |
 | F11p2 | The bottom week strip (Your week, Monday to Sunday counts, Later; past days dimmed; "Week of …"; hidden at steps 2, 4, 10 and 11 and without the fields) and step 8 as one site at a time in "Knowlu's form", with "Found at your school: …" only from `homework_sites` (§14.58.5; about 70 lines in `onboarding.js`, 20 in `onboarding.css`). Acceptance: side-by-side shots | `test-writer` (pins), then `console-ui` | `app/static` | F11p1, F11c1 (step 8's wrappers land first; r1 m-6). Live data needs F7f, F2b4 and F8b; the merge does not |
 | F11p3 | Step 10 as `o9-your-week` (§14.58.6): the summary card from `step3`, "Show the class times", the firmness segmented control, the day-window question through `commitments_confirm`'s existing `window` key, the sticky Confirm bar; no late-rule question until O5 (about 75 lines in `onboarding.js`, 25 in `onboarding.css`; past 80, the day-window question splits off as F11p4). Acceptance: side-by-side shots | `test-writer` (pins), then `console-ui` | `app/static`; the window is a vault write through the existing engine path | F11p2 |
 | F11a | The step frame and the rail | `console-ui` | `app/static` | F11t, F10 |
@@ -3334,7 +3334,7 @@ behaviour, before it merges.
 | `CLAUDE.md` rule 1 (§14.57.4, r1) | No student gets one student's zone: `America/Chicago` only inside `STATE_TZ`; without an IANA zone, `runners.yaml` is step 2's bytes with the final school's state's zone, written once at `school.apply` | F3z | test 44 (bytes, school change, IANA and refusal cases; the source pin) |
 | `VISION.md`, D5 amendment (§14.57.10) | A student can correct a class's hours at step 10, as a user write the agents then never re-set; signed by Quinn, 2026-10-24 | F7e, F5d, F11c2 | tests 45, 46; F11t's step-10 pin |
 | Q9 (signed, §14.57.4) | An unlisted school's state is asked, and that state's zone is used; no student gets a default zone | F3z, F11e1 | test 44's Q9 cases; F11t's `STATE_TZ` pin |
-| Quinn's front-end pass (§14.58) | The shared look matches the 5b prototype before the remaining screens: the display face and wordmark (open licences only), the light theme, the week strip, step 8's one-site form, the rail's lines and foot, step 10's layout | F11p0-F11p3, F7f, F2b4 | tests 47, 48; F11t's §14.58 pins; side-by-side shots compared by `reviewer` for every screen task |
+| Quinn's front-end pass (§14.58) | The shared look matches the 5b prototype before the remaining screens: Zilla Slab for all text and PT Serif Caption for the logo (Quinn's font ruling; OFL only), the light theme, the week strip, step 8's one-site form, the rail's lines and foot, step 10's layout | F11p0-F11p3, F7f, F2b4 | tests 47, 48; F11t's §14.58 pins; side-by-side shots compared by `reviewer` for every screen task |
 | Spec §1.3, step 8 | Homework sites asked "only those step 3 found mentioned, when known": the "Found at your school" line comes only from feed evidence | F7f, F2b4, F11p2 | test 47's host cases; F11t's pin |
 
 ## 11. Checkpoints
@@ -3354,7 +3354,9 @@ behaviour, before it merges.
 7. **Side-by-side shots** (Quinn, 2026-10-24; §14.58.7): every screen task (F11p1-F11p3, F11d,
    F11c2, F11b, F11e1, F11e2, F11f) is shot beside its prototype screen at 1280x800, in headless
    Edge, against invented data. The `reviewer` compares each pair in the task's review before it
-   merges. Quinn signed the privacy line, Q9 and D5 on 2026-10-24 (§14.58). Q-B22 and Q-B23 are open.
+   merges. Quinn signed the privacy line, Q9, D5 and the fonts on 2026-10-24 (§14.58; Q-B22 and Q-B23 answered). Typeface differences
+   from the prototype are expected; the reviewer judges layout, content and states. Q-B24 (the
+   console's main page in Zilla Slab) is a follow-up, not in scope.
 
 ## 12. Out of scope
 
@@ -6096,8 +6098,8 @@ lines). It splits by what each piece edits, and each piece is merged before the 
 
 | Piece | Scope | Files |
 |---|---|---|
-| **F11p0** | Licence check and vendoring: the condensed display face and the wordmark | `app/static/fonts/**`, `app/static/fonts/SOURCES.md`, the wordmark image |
-| **F11p1** | The look: faces applied, the wordmark in the rail head, the light theme, the rail's detail lines and its foot, the fixture path for shots | `console.css`'s `.setup` block, `onboarding.css`, `onboarding.js`'s frame and rail |
+| **F11p0** | Licence check and vendoring: PT Serif Caption (the logo) and Zilla Slab (all other text), per Quinn's font ruling | `app/static/fonts/**`, `app/static/fonts/SOURCES.md`, `.gitattributes` |
+| **F11p1** | The look: Zilla Slab applied to the setup frame and onboarding, the PT Serif Caption logo in the rail head, the light theme, the rail's detail lines and its foot, the fixture path for shots | `console.css`'s `.setup` block, `onboarding.css`, `onboarding.js`'s frame and rail |
 | **F11p2** | The bottom week strip, and step 8 as one homework site at a time in a framed form | `onboarding.js`'s strip and step 8, `onboarding.css` |
 | **F11p3** | Step 10 to the prototype's `o9-your-week` layout | `onboarding.js`'s step 10, `onboarding.css` |
 
@@ -6110,25 +6112,33 @@ fields.
 
 - **Main session**, because it fetches files from the network, judges a licence and records
   hashes. A subagent never downloads.
-- **The display face is Big Shoulders Text** (the prototype's `.fig`, `.lab` and step `h1`). It is
-  vendored as latin-subset woff2 at the weights the onboarding screens use (600 and 700), the same way
-  `SOURCES.md` records Instrument Sans: the source URL, the SHA-256 and the licence text as
-  `OFL-big-shoulders.txt`, fetched from the upstream repository.
-- **Licence check first.** Each file is vendored only if its licence is the SIL Open Font License
-  1.1 or another open licence that permits bundling in a sold app. Anything else stops F11p0, and
-  the finding goes to Quinn. Big Shoulders is published under the OFL; F11p0 confirms that from the
-  upstream licence file, never from memory.
-- **Public Sans, the prototype's reading face** (BRIEF R3.8), is not on Quinn's list. Today the
-  page keeps Instrument Sans for body text. That is question **Q-B22** below, and F11p0 vendors
-  Public Sans only if Quinn says yes.
-- **The wordmark is an image**, `docs/design/assets/Knowlu_Wordmark_Red.png`, plus the
-  prototype's `Knowlu_Wordmark_Night.png` for dark. It is not a font, and no record says which
-  serif typeface drew it. F11p0 copies the two images to `app/static/brand/`. The fonts folder
-  holds only fonts, and `SOURCES.md` gains a line pointing at the brand folder. This needs Quinn's
-  confirmation that the mark is Knowlu's own artwork (question **Q-B23**). Until then, F11p1 shows the
-  text "Knowlu" in the display face with a red "lu" block drawn in CSS, and swaps in the image
-  when Q-B23 is answered.
-- No network call at run time: every face and image is a local file, as today.
+- **Quinn's font ruling, signed 2026-10-24** (Quinn's own message). It answers Q-B22 and Q-B23,
+  and it supersedes this section's first draft:
+  - **The Knowlu logo is set in PT Serif Caption**, the face the prototype's wordmark images use.
+  - **All other text in the setup frame and onboarding is Zilla Slab**, headings and body alike.
+    This replaces the prototype's Big Shoulders Text and Public Sans, so neither is vendored.
+- **What F11p0 vendors**, each as a latin-subset woff2, only the weights used. Each is recorded in
+  `SOURCES.md` the way Instrument Sans is: the source URL, the SHA-256, and the licence text
+  fetched from upstream.
+  - **PT Serif Caption, Regular (400)**: the only weight the logo needs. Its licence goes in as
+    `OFL-pt-serif-caption.txt`.
+  - **Zilla Slab at 400, 600 and 700**: body, then labels and buttons, then headings and figures.
+    F11p1 uses only these three; a rule that needs another weight maps to the nearest of them.
+    Its licence goes in as `OFL-zilla-slab.txt`.
+- **Licence check first.** Each file is vendored only under the SIL Open Font License 1.1, which
+  Quinn named for PT Serif Caption, read from the upstream licence file, never from memory. If a
+  file carries another licence (PT Serif first shipped under ParaType's own free licence), F11p0
+  stops, and the finding goes to Quinn before anything is committed.
+- **The logo is rendered from the font, not shipped as the PNGs.** Quinn left the choice open, and
+  the font is the simpler and sharper path:
+  - Text scales at any Windows display scale without blur. A PNG needs a large raster for 150%,
+    and a second asset for each theme.
+  - The font has to be vendored anyway, to record its licence.
+  - F11p1 sets "Know" and "lu" in PT Serif Caption, with a `--su-brand` (`#BC4444`) block behind
+    "lu", as the two images show. The letters are the theme's ink in both themes, and the block
+    keeps its red (compare `Knowlu_Wordmark_Red.png` and `Knowlu_Wordmark_Night.png`).
+  - No image is copied into `app/static`.
+- No network call at run time: every face is a local file, as today.
 
 #### 14.58.3 The two fields the strip and step 8 need (F7f, F2b4)
 
@@ -6212,12 +6222,21 @@ mentioned, when known", spec §1.3's table), so both are named here.
 F11t's pins for this piece come first (`test-writer`). Behaviour pins are never loosened. A pin
 that fixes only a button's place (Finish later's) is moved with a one-line justification in the
 test.
-- **Faces.** `@font-face` for F11p0's files beside the console's, in `console.css`. The `.setup`
-  block uses the display face for the step `h1`, the rail title, figures and the strip's labels,
-  with tabular figures, as the prototype's `.fig` and `.lab` do. Body text stays Instrument Sans
-  unless Q-B22 says otherwise. The old comment that says the faces "are not vendored yet" goes.
-- **The wordmark** in the rail head replaces today's `su-mark` square and the bold "Knowlu". It is
-  the image after Q-B23, or, until then, the CSS fallback in §14.58.2. Its `alt` is "Knowlu".
+- **Faces (Quinn's font ruling, §14.58.2).**
+  - `@font-face` for F11p0's files goes beside the console's, in `console.css`.
+  - In `.setup` and `.picker` (the setup frame, steps 1-2 and the onboarding steps), **every piece
+    of text is Zilla Slab**: headings, body, the rail, buttons, inputs, figures, the strip, and
+    the host lines the shell sets in mono today. This happens through one scoped font token, so
+    the console's own `--sans` and `--mono` (Instrument Sans, JetBrains Mono) are untouched.
+  - Weights are 400, 600 and 700 only.
+  - Figures ask for `font-variant-numeric: tabular-nums`. If Zilla Slab has no tabular figures,
+    the figures stay proportional, and F11p1's report says so beside the shots. It is not a
+    blocker.
+  - The old comment that says the faces "are not vendored yet" goes.
+- **The logo** in the rail head replaces today's `su-mark` square and the bold "Knowlu". It is set
+  in PT Serif Caption, with the red block behind "lu" (§14.58.2), and the whole mark reads
+  "Knowlu" to a screen reader (`aria-label`, with the two spans `aria-hidden`). F11t pins that
+  the logo's family is PT Serif Caption and that no other rule in the frame uses that family.
 - **The light "day board" theme.** `.setup` and `.picker` gain a `data-theme="light"` token set
   with the same token names (`--su-ground`, `--su-board`, `--su-ink`, …), taken from the
   prototype's `:root[data-theme="light"]` block. Figures and labels step up to 700 on light, as the
@@ -6361,6 +6380,12 @@ R3.5, round 2), top to bottom:
     `o4*`; step 6 `o5*`; the reveal `r1-reveal`.
   - Every fixture is invented: the prototype's sample student or new made-up data, never a real
     student's classes, school or mail.
+  - **Typeface differences are expected** (Quinn's font ruling, §14.58.2). The prototype is set in
+    Big Shoulders Text and Public Sans, and the built screens are set in Zilla Slab, with PT Serif
+    Caption for the logo. So line lengths, wraps and heights differ. The `reviewer` judges
+    **layout, content and states**: the regions and their order, what each says, which controls
+    exist, and how each state looks. A difference that comes only from the face is noted once,
+    not counted against the task.
   - The task saves the pairs under `docs/reports/shots/{task}/`. The `reviewer` compares each pair
     and records, in the task's review report, what differs and whether each difference is
     intended. **No screen task merges without that comparison.**
@@ -6370,7 +6395,7 @@ R3.5, round 2), top to bottom:
   - F2b4 depends on F2b3 (the same file's chain: F2b3, then F2b4) and on F7f's key names, which
     this section fixes, not on F7f's merge. Collision note with F3z in `onboarding_state.rs`.
   - F8b gains F2b4 (the three fields it saves).
-  - F11p0 depends on nothing; Q-B22 and Q-B23 add files to it, never block it.
+  - F11p0 depends on nothing (Q-B22 and Q-B23 are answered by Quinn's font ruling).
   - F11p1 depends on F11p0 and F11c (merged).
   - F11p2 depends on F11p1. Its live data needs F7f, F2b4 and F8b, but its merge does not.
   - F11p3 depends on F11p2.
@@ -6380,16 +6405,19 @@ R3.5, round 2), top to bottom:
 - **§8's O3-to-`main` checklist** gains: F11c2 merged (step 10's hours Edit, Quinn's D5); and every
   screen task's review report holds its side-by-side comparison.
 
-#### 14.58.8 Two questions for Quinn
+#### 14.58.8 Questions for Quinn
 
-- **Q-B22, the reading face.** The prototype sets body text in Public Sans (BRIEF R3.8), and the app
-  uses Instrument Sans. Quinn's list named the display face and the wordmark only. The shots will
-  show the difference in every paragraph. Recommended: vendor Public Sans too (it is under the
-  OFL, one more file), so the built screens match what Quinn approved. F11p0 adds it on a yes.
-- **Q-B23, the wordmark.** It is an image with no recorded source. Recommended: confirm it is
-  Knowlu's own artwork and ship the two images. If it was drawn from a font, name the font, and
-  F11p0 checks that font's licence before the image ships.
+- **Q-B22, the reading face: answered.** Quinn ruled on 2026-10-24 (signed): all text other than
+  the logo is Zilla Slab, replacing Public Sans and Big Shoulders Text (§14.58.2).
+- **Q-B23, the wordmark: answered.** Quinn ruled on 2026-10-24 (signed): the logo is set in PT
+  Serif Caption. The plan renders it from the font (§14.58.2).
 - (Named Q-B22 and Q-B23 because the spec's Q10 and Q11 already exist.)
+- **Q-B24, follow-up and not in scope: should the console's main page switch to Zilla Slab too?**
+  Wave B changes only the setup frame and onboarding. The daily page keeps Instrument Sans and
+  JetBrains Mono, so a student moves from one face to another at the reveal. Recommended:
+  switch it in its own task after wave B, with its own shots against `m1-today`. That keeps this
+  wave's diff to onboarding, and it leaves the console page's static tests and shots alone until
+  then.
 
 #### 14.58.9 Checks
 
@@ -6439,7 +6467,7 @@ R3.5, round 2), top to bottom:
     detects binary content and lists it as `i/-text`, which passes. The seven vendored woff2 files
     and the PNGs under `docs/design/` are committed today with CI green, so they pass now.
     - Auto-detection is a heuristic, so **F11p0 adds `*.woff2 binary` and `*.png binary`** to
-      `.gitattributes`. That covers the new fonts, the wordmark and every shot under
+      `.gitattributes`. That covers the new fonts and every shot under
       `docs/reports/shots/`. F11p0 then runs `scripts/ci/eol-check.ps1` and records its line.
     - `binary` means `-text -diff`, so these rows read `attr/-text`. No rule in the script
       matches them except the CRLF/mixed test, which a `-text` row never trips.
