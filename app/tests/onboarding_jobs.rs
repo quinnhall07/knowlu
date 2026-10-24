@@ -722,9 +722,10 @@ fn test_09_a_canary_that_never_notices_the_stop_is_abandoned_at_once_by_finish_a
                 assert!(saved.handover.iter().any(|h| h.item == "mail.canary" && h.signal == "mail_json"), "{:?}", saved.handover);
             }
             _ => {
+                // The rewind resets every job to pending, so the canary's own state says nothing on this arm:
+                // the closed gate and the time bound above are its test. Only the rewind is checked here.
                 let resumed = resume(load_state(&r.dir), &Proven);
-                let st = resumed.state.expect("a rewound file resumes inside onboarding");
-                assert_eq!(st.jobs.get("mail.canary").map(|j| j.state).unwrap_or(JobState::Pending), JobState::Pending);
+                assert_eq!((resumed.mode, resumed.step), (LaunchMode::Onboarding, 2));
             }
         }
         gate.release();
@@ -955,7 +956,7 @@ fn test_25_quit_and_finish_flush_after_the_drain_and_before_the_exit_with_quit_a
 const LMS_LINK: &str = "https://lms.example.invalid/feed/tok-5c19e0.ics";
 
 fn course(code: &str, name: &str, key: &str) -> CourseAnswer {
-    CourseAnswer { code: code.into(), name: name.into(), label: name.split(' ').next().unwrap().into(), lms_key: key.into(), removed: false, counts: Default::default() }
+    CourseAnswer { code: code.into(), name: name.into(), label: name.split(' ').next().unwrap().into(), lms_key: key.into(), removed: false, slug: String::new(), fragments: Vec::new() }
 }
 fn three_courses() -> Vec<CourseAnswer> {
     vec![course("QLT 101", "Quilting Basics", "_1001_1"), course("KNT 220", "Knotwork Theory", "_1002_1"), course("WVG 105", "Weaving Lab", "_1003_1")]
@@ -1039,6 +1040,7 @@ fn steps_3_to_8(tag: &str, quits: &[u8]) -> String {
     quit(8);
     let h = handoff(&dir, &pending);
     assert_eq!(h.course_map.len(), 3, "course_map is never empty when step 3 found courses: {h:?}");
+    assert!(h.course_exclude.is_empty(), "nothing was removed, so nothing is excluded: {h:?}");
     serde_json::to_string(&h).unwrap()
 }
 
@@ -1197,6 +1199,24 @@ fn test_16_at_payment_with_the_account_settled_the_note_jobs_and_sync_never_over
     }
     assert!(r.log.steps().contains(&("slot.partial".to_string(), "sync".to_string())), "sync is not skipped");
     assert!(r.log.pos("end:slot.partial").unwrap() < r.log.pos("start:school.courses").unwrap(), "the notes waited for the slot's sync to end");
+}
+
+#[test]
+fn test_16_a_note_job_mid_write_holds_the_gate_and_a_slot_asked_for_meanwhile_waits_for_it() {
+    // The other half of the gate (§14.19 I-B): school.courses is mid-write when slot.partial is asked
+    // for. A lane that did not take the gate would let the slot's sync collide with the write.
+    let r = rig("t16-notes-first", state_at(4, true), true);
+    let write = r.fake.block("school.courses", false);
+    r.q.enqueue("school.courses");
+    r.wait_started("school.courses");
+    r.q.enqueue("slot.partial");
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!r.log.ran("slot.partial"), "the slot started while a note job held the gate: {:?}", r.log.all());
+    write.release();
+    r.idle();
+    r.log.assert_clean();
+    assert!(r.log.pos("end:school.courses").unwrap() < r.log.pos("start:slot.partial").unwrap(), "{:?}", r.log.all());
+    assert_eq!(r.state_of("slot.partial"), JobState::Done);
 }
 
 #[test]
@@ -1582,28 +1602,55 @@ fn test_12_a_course_removed_at_step_3_reaches_no_note_and_no_course_map_entry_an
         assert_eq!(out["ok"], true, "{out}");
     };
     give(3, capture_answer());
-    give(3, serde_json::json!({"counts": {
-        "QLT 101": {"class_times": 3, "assignments_upcoming": 7},
-        "KNT 220": {"class_times": 2, "assignments_upcoming": 11},
-        "WVG 105": {"class_times": 1, "assignments_upcoming": 4},
+    // F8b's saves after the preview: each course's pairs, and the match-set buckets (§14.45).
+    give(3, serde_json::json!({"pairs": {
+        "QLT 101": ["QLT 101", "_1001_1"], "KNT 220": ["KNT 220", "_1002_1"], "WVG 105": ["WVG 105", "_1003_1"],
     }}));
+    give(3, serde_json::json!({"buckets": {
+        "QLT 101": {"codes": ["QLT 101"], "class_times": 3, "assignments_upcoming": 7},
+        "KNT 220": {"codes": ["KNT 220"], "class_times": 2, "assignments_upcoming": 11},
+        "WVG 105": {"codes": ["WVG 105"], "class_times": 1, "assignments_upcoming": 4},
+        "KNT 220,QLT 101": {"codes": ["KNT 220", "QLT 101"], "assignments_upcoming": 100},
+        "unmatched": {"codes": [], "assignments_upcoming": 1000},
+    }}));
+    // A label edit is display only (§14.46): it changes no pair.
+    give(3, serde_json::json!({"label": {"key": "KNT 220", "label": "Knots, edited"}}));
     give(3, serde_json::json!({"remove": "KNT 220"}));
     // A quit and a reload: nothing here but the folder.
     let reloaded = load_answers(&dir).unwrap().expect("the answers file survived");
     let totals = step3_totals(&reloaded);
     assert_eq!(totals.get("classes"), Some(&2), "{totals:?}");
-    assert_eq!(totals.get("assignments_upcoming"), Some(&11), "7 + 4, the removed row's 11 is not in it: {totals:?}");
+    assert_eq!(totals.get("assignments_upcoming"), Some(&1111), "7 + 4 + the shared 100 + the unmatched 1000; the removed row's own 11 is out: {totals:?}");
     let created = RefCell::new(Vec::<String>::new());
     let out = run_school_courses(&dir, &[], &mut |c| { created.borrow_mut().push(c.code.clone()); Ok(c.name.to_lowercase().replace(' ', "-")) });
     assert!(matches!(out, Outcome::Done(_)), "{out:?}");
     assert_eq!(*created.borrow(), ["QLT 101", "WVG 105"], "the removed course gets no note");
     let h = handoff(&dir, &pending);
-    let codes: Vec<&str> = h.course_map.iter().map(|(c, _)| c.as_str()).collect();
-    assert_eq!(codes, ["QLT 101", "WVG 105"], "course_map is the kept rows only");
-    assert!(!serde_json::to_string(&h).unwrap().contains("knotwork"), "nothing of the removed course reaches config.ingest");
-    // A re-capture is the student asking again: the mark is cleared.
+    let map_fragments: Vec<&str> = h.course_map.iter().map(|(f, _)| f.as_str()).collect();
+    assert_eq!(map_fragments, ["QLT 101", "_1001_1", "WVG 105", "_1003_1"], "course_map is the kept rows' pairs only");
+    assert_eq!(h.course_exclude, ["KNT 220", "_1002_1"], "the removed course's pairs, built as course_map's are, so ingest leaves out its items");
+    // Narrowed (§14.45): the removed course's name or slug is in no course_map entry; its fragments are only under course_exclude.
+    let map_text = serde_json::to_string(&h.course_map).unwrap();
+    assert!(!map_text.contains("knotwork") && !map_text.contains("KNT 220") && !map_text.contains("_1002_1"), "course_map: {map_text}");
+    // One source of pairs (§14.46): after the label edit, the pairs in the --courses list the preview
+    // is given are byte-equal to that course's lines in the text (course_map's, or course_exclude).
+    let now = load_answers(&dir).unwrap().unwrap();
+    let listed = preview_courses(&now);
+    for c in listed.as_array().expect("one object per course") {
+        let code = c["code"].as_str().unwrap();
+        let in_text: Vec<&str> = if code == "KNT 220" {
+            h.course_exclude.iter().map(String::as_str).collect()
+        } else {
+            let slug = &now.slugs[code];
+            h.course_map.iter().filter(|(_, s)| s == slug).map(|(f, _)| f.as_str()).collect()
+        };
+        assert_eq!(serde_json::to_string(&in_text).unwrap(), serde_json::to_string(&c["pairs"]).unwrap(), "{code}: the pairs in --courses and in the text");
+    }
+    assert!(listed.as_array().unwrap().iter().any(|c| c["code"] == "KNT 220" && c["label"] == "Knots, edited"), "the edit shows as the label only");
+    // A re-capture is the student asking again: the mark is cleared, and nothing is excluded.
     give(3, capture_answer());
     assert_eq!(load_answers(&dir).unwrap().unwrap().kept_courses().len(), 3);
+    assert!(handoff(&dir, &pending).course_exclude.is_empty(), "with nothing removed the key is absent");
 }
 
 #[test]
@@ -1669,4 +1716,28 @@ fn test_19_the_finished_file_survives_the_next_quit_and_the_sign_out_arm_starts_
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(r.log.started().len(), before, "no job starts on the sign-out arm: {:?}", r.log.all());
     assert_eq!(std::fs::read(state_path(&r.dir)).unwrap(), rewound, "and nothing is saved over the rewind");
+}
+
+#[test]
+fn test_12_a_fragment_a_kept_course_also_contributes_is_never_put_in_course_exclude() {
+    // A lecture and its lab share the human code "CS 100" (§14.46); the lab is removed.
+    let dir = scratch("t12-shared");
+    let pending = FakePending::default();
+    let give = |a: Value| {
+        let out = onboarding_answer_inner(&dir, 3, &a, &mut |_| {});
+        assert_eq!(out["ok"], true, "{out}");
+    };
+    give(serde_json::json!({"capture": {"courses": [
+        course("CS 100", "Intro Computing", "_3001_1"),
+        course("CS 100 LAB", "Intro Computing Lab", "_3002_1"),
+    ]}}));
+    give(serde_json::json!({"pairs": {"CS 100": ["CS 100", "_3001_1"], "CS 100 LAB": ["CS 100", "CS 100 LAB", "_3002_1"]}}));
+    give(serde_json::json!({"remove": "CS 100 LAB"}));
+    run_school_courses(&dir, &[], &mut |c| Ok(c.name.to_lowercase().replace(' ', "-")));
+    let h = handoff(&dir, &pending);
+    assert_eq!(h.course_exclude, ["CS 100 LAB", "_3002_1"], "only the lab's own fragments: {h:?}");
+    assert!(h.course_map.iter().any(|(f, _)| f == "CS 100"), "the shared fragment stays in course_map: {h:?}");
+    // The lab's pairs, as the preview is given them, still list the shared fragment (they are the lab's own pairs).
+    let listed = preview_courses(&load_answers(&dir).unwrap().unwrap());
+    assert_eq!(listed[1]["pairs"], serde_json::json!(["CS 100", "CS 100 LAB", "_3002_1"]));
 }

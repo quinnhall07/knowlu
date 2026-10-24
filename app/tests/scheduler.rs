@@ -3234,9 +3234,11 @@ fn src_text(file: &str) -> String {
 fn test_27_main_primes_the_mode_and_checks_for_an_update_once_and_never_installs() {
     let main = src_text("main.rs");
     assert!(main.contains("scheduler::prime_mode_device"), "the onboarding arm primes the cached mode before the window is built");
-    // Before the window is built: the console's build call is the last `.build(` of the app in this file.
-    let (prime, build) = (main.find("scheduler::prime_mode_device"), main.rfind(".build(tauri::generate_context!())"));
-    assert!(matches!((prime, build), (Some(p), Some(b)) if p < b), "prime_mode_device ({prime:?}) comes before the console window is built ({build:?})");
+    // Before the window is built, inside `run_console`'s own body (a prime in `run_shell` would not count).
+    let start = main.find("fn run_console").expect("main.rs defines run_console");
+    let body = &main[start..];
+    let (prime, build) = (body.find("scheduler::prime_mode_device"), body.find(".build(tauri::generate_context!())"));
+    assert!(matches!((prime, build), (Some(p), Some(b)) if p < b), "run_console primes the mode ({prime:?}) before it builds the window ({build:?})");
     assert_eq!(main.matches("scheduler::spawn_update_check").count(), 1, "the onboarding arm calls spawn_update_check exactly once");
     for banned in ["install_staged", "hold_for_install"] {
         assert!(!main.contains(banned), "onboarding has no install path: main.rs names {banned}");

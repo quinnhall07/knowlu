@@ -200,8 +200,12 @@ pub struct IngestHandoff {
     pub feed_kept_on_device: bool,
     pub calendar_url: String,
     pub calendar_kept_on_device: bool,
-    /// Course code to slug: the restored note's where one matched.
+    /// Fragment to slug, over the **kept** courses only: each kept course's saved `fragments` (its
+    /// code when none are saved) paired with its slug (a restored note's where one matched).
     pub course_map: Vec<(String, String)>,
+    /// The removed courses' fragments (§14.45), in no `course_map` entry; empty when none was removed
+    /// (and then F6b writes no `course_exclude` key at all).
+    pub course_exclude: Vec<String>,
     pub google_calendar: bool,
     pub books: Vec<(String, String, String)>,
     pub zybooks_ignore: Vec<String>,

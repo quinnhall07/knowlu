@@ -64,10 +64,13 @@ fn full_state() -> OnboardingState {
 fn full_answers() -> Answers {
     let mut a = Answers::default();
     a.courses = vec![
-        CourseAnswer { code: "QLT 101".into(), name: "Quilting Basics".into(), label: "Quilting".into(), lms_key: "_1001_1".into(), removed: false, counts: [("class_times".to_string(), 3), ("assignments_upcoming".to_string(), 7)].into() },
-        CourseAnswer { code: "KNT 220".into(), name: "Knotwork Theory".into(), label: "Knots".into(), lms_key: "_1002_1".into(), removed: true, counts: [("class_times".to_string(), 2)].into() },
+        CourseAnswer { code: "QLT 101".into(), name: "Quilting Basics".into(), label: "Quilting".into(), lms_key: "_1001_1".into(), removed: false, slug: "quilting-basics".into(), fragments: vec!["QLT 101".into(), "_1001_1".into()] },
+        CourseAnswer { code: "KNT 220".into(), name: "Knotwork Theory".into(), label: "Knots".into(), lms_key: "_1002_1".into(), removed: true, slug: String::new(), fragments: vec!["KNT 220".into()] },
     ];
     a.registrar_rows = vec![RegistrarRow { code: "QLT 101".into(), days: "MWF".into(), start: "09:00".into(), end: "09:50".into() }];
+    put_bucket(&mut a, &["QLT 101"], &[("class_times", 3)]);
+    put_bucket(&mut a, &["KNT 220", "QLT 101"], &[("assignments_upcoming", 2)]);
+    put_bucket(&mut a, &[], &[("turned_in", 1)]);
     a.slugs.insert("QLT 101".into(), "quilting-basics".into());
     a.google_calendar = Some(true);
     a.feeds.insert("lms_ics".into(), FeedState::Validated);
@@ -840,23 +843,39 @@ fn test_22_the_pending_target_is_named_only_inside_f2gs_command_wrapper() {
 // pending store (test 26) and the real-store sign-out wrapper (test 17).
 // ======================================================================================================
 
-fn counted(code: &str, name: &str, key: &str, removed: bool, ct: i64, au: i64, ti: i64) -> CourseAnswer {
+fn row(code: &str, name: &str, key: &str, removed: bool) -> CourseAnswer {
     CourseAnswer {
         code: code.into(), name: name.into(), label: name.split(' ').next().unwrap().into(), lms_key: key.into(), removed,
-        counts: [("class_times", ct), ("assignments_upcoming", au), ("turned_in", ti)].into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        slug: String::new(), fragments: vec![code.to_string(), key.to_string()],
     }
 }
 
-/// Three captured courses with `school.preview`'s per-course counts; the middle one is removed.
+fn counts(pairs: &[(&str, i64)]) -> BTreeMap<String, i64> { pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect() }
+/// A bucket as the engine writes it: named by its sorted keys, carrying them as `codes`.
+fn put_bucket(a: &mut Answers, codes: &[&str], c: &[(&str, i64)]) {
+    let mut sorted: Vec<String> = codes.iter().map(|s| s.to_string()).collect();
+    sorted.sort();
+    a.buckets.insert(bucket_key(codes), Bucket { codes: sorted, counts: c.iter().map(|(k, v)| (k.to_string(), *v)).collect() });
+}
+
+/// Three captured courses with `school.preview`'s match-set buckets (§14.45); the middle is removed.
+/// QLT and KNT share the "QLT 101|KNT 220" bucket (an item both claim), WVG has its own, and one item
+/// matched no course.
 fn three_with_one_removed() -> Answers {
-    Answers {
+    let mut a = Answers {
         courses: vec![
-            counted("QLT 101", "Quilting Basics", "_1001_1", false, 3, 7, 2),
-            counted("KNT 220", "Knotwork Theory", "_1002_1", true, 2, 11, 5),
-            counted("WVG 105", "Weaving Lab", "_1003_1", false, 1, 4, 0),
+            row("QLT 101", "Quilting Basics", "_1001_1", false),
+            row("KNT 220", "Knotwork Theory", "_1002_1", true),
+            row("WVG 105", "Weaving Lab", "_1003_1", false),
         ],
         ..Default::default()
-    }
+    };
+    put_bucket(&mut a, &["QLT 101"], &[("class_times", 3), ("assignments_upcoming", 7), ("turned_in", 2)]);
+    put_bucket(&mut a, &["KNT 220"], &[("class_times", 2), ("assignments_upcoming", 11), ("turned_in", 5)]);
+    put_bucket(&mut a, &["WVG 105"], &[("class_times", 1), ("assignments_upcoming", 4), ("turned_in", 0)]);
+    put_bucket(&mut a, &["KNT 220", "QLT 101"], &[("assignments_upcoming", 100)]);
+    put_bucket(&mut a, &[], &[("assignments_upcoming", 1000)]);
+    a
 }
 
 #[test]
@@ -876,38 +895,76 @@ fn test_12_kept_courses_leaves_out_a_removed_row_and_keeps_the_captured_order() 
 }
 
 #[test]
-fn test_12_step_3s_totals_are_the_sums_of_the_kept_rows_saved_counts_and_the_removed_row_is_in_none() {
-    let t = step3_totals(&three_with_one_removed());
-    assert_eq!(t.get("classes"), Some(&2), "{t:?}");
-    assert_eq!(t.get("class_times"), Some(&4), "3 + 1, not 3 + 2 + 1: {t:?}");
-    assert_eq!(t.get("assignments_upcoming"), Some(&11), "7 + 4: {t:?}");
-    assert_eq!(t.get("turned_in"), Some(&2), "2 + 0: {t:?}");
-    // Removing the other two leaves the one row's own counts.
-    let mut a = three_with_one_removed();
-    a.courses[0].removed = true;
-    let t = step3_totals(&a);
-    assert_eq!((t.get("classes"), t.get("assignments_upcoming")), (Some(&1), Some(&4)), "{t:?}");
+fn test_12_the_course_key_is_the_code_then_the_slug_then_the_label_like_by_course() {
+    let mut c = row("QLT 101", "Quilting Basics", "_1_1", false);
+    c.slug = "quilting".into();
+    assert_eq!(c.key(), "QLT 101");
+    c.code = String::new();
+    assert_eq!(c.key(), "quilting", "no code: the slug");
+    c.slug = String::new();
+    assert_eq!(c.key(), "Quilting", "no code and no slug: the label");
 }
 
 #[test]
-fn test_12_a_re_capture_clears_the_removed_mark() {
+fn test_12_step_3s_totals_add_every_bucket_that_is_unmatched_or_names_a_kept_course() {
+    let a = three_with_one_removed();
+    let t = step3_totals(&a);
+    assert_eq!(t.get("classes"), Some(&2), "{t:?}");
+    assert_eq!(t.get("class_times"), Some(&4), "QLT 3 + WVG 1; the removed course's own bucket (2) is out: {t:?}");
+    // 7 (QLT) + 4 (WVG) + 100 (shared by a kept and a removed course: still imported) + 1000 (unmatched,
+    // still imported course-less); the removed course's own 11 is out.
+    assert_eq!(t.get("assignments_upcoming"), Some(&1111), "{t:?}");
+    assert_eq!(t.get("turned_in"), Some(&2), "2 + 0; the removed course's 5 is out: {t:?}");
+}
+
+#[test]
+fn test_12_a_two_code_bucket_stays_while_one_of_its_courses_is_kept_and_drops_when_both_are_removed() {
     let mut a = three_with_one_removed();
-    a.recapture(vec![
-        counted("QLT 101", "Quilting Basics", "_1001_1", false, 0, 0, 0),
-        counted("KNT 220", "Knotwork Theory", "_1002_1", false, 0, 0, 0),
-    ]);
+    let shared = |a: &Answers| step3_totals(a).get("assignments_upcoming").copied();
+    assert_eq!(shared(&a), Some(1111), "KNT removed, QLT kept: the shared bucket stays");
+    a.courses[0].removed = true; // QLT removed too: only WVG and unmatched remain
+    assert_eq!(shared(&a), Some(1004), "both removed: the shared 100 and both own buckets are out; WVG 4 + unmatched 1000");
+    a.courses[1].removed = false; // KNT kept again, QLT removed
+    assert_eq!(shared(&a), Some(1115), "KNT 11 + shared 100 + WVG 4 + unmatched 1000");
+    let mut none_kept = three_with_one_removed();
+    for c in &mut none_kept.courses { c.removed = true; }
+    let t = step3_totals(&none_kept);
+    assert_eq!((t.get("classes"), t.get("assignments_upcoming")), (Some(&0), Some(&1000)), "only the unmatched bucket: {t:?}");
+}
+
+#[test]
+fn test_12_a_re_capture_clears_the_removed_mark_and_keeps_a_matching_rows_fragments() {
+    let mut a = three_with_one_removed();
+    let mut fresh_knt = row("KNT 220", "Knotwork Theory", "_1002_1", false);
+    fresh_knt.fragments = Vec::new();
+    a.recapture(vec![row("QLT 101", "Quilting Basics", "_1001_1", false), fresh_knt]);
     assert!(a.courses.iter().all(|c| !c.removed), "a re-capture is the student asking again: {:?}", a.courses);
     assert_eq!(a.kept_courses().len(), 2);
+    assert_eq!(a.courses[1].fragments, ["KNT 220", "_1002_1"], "same key, so the saved fragments stay until the next preview");
+}
+
+#[test]
+fn test_12_remove_and_re_capture_identify_a_row_by_its_key_when_it_has_no_code() {
+    let d = scratch("t12-nocode");
+    let mut codeless = row("", "Lab Section", "_2001_1", false);
+    codeless.slug = "lab-section".into();
+    let capture = serde_json::json!({"capture": {"courses": [row("QLT 101", "Quilting Basics", "_1001_1", false), codeless.clone()]}});
+    assert_eq!(onboarding_answer_inner(&d, 3, &capture, &mut |_| {})["ok"], true);
+    assert_eq!(onboarding_answer_inner(&d, 3, &serde_json::json!({"remove": "lab-section"}), &mut |_| {})["ok"], true, "removed by its slug, since it has no code");
+    let a = load_answers(&d).unwrap().unwrap();
+    assert!(a.courses[1].removed && !a.courses[0].removed, "{:?}", a.courses);
+    assert_eq!(onboarding_answer_inner(&d, 3, &capture, &mut |_| {})["ok"], true);
+    assert_eq!(load_answers(&d).unwrap().unwrap().kept_courses().len(), 2, "the re-capture cleared it");
 }
 
 #[test]
 fn test_12_a_removal_given_through_the_answer_inner_survives_a_reload_and_a_re_capture_clears_it() {
     let d = scratch("t12-removed");
-    let capture = serde_json::json!({"capture": {"courses": three_with_one_removed().courses.iter().map(|c| CourseAnswer { removed: false, ..c.clone() }).collect::<Vec<_>>()}});
-    let enqueued = std::cell::RefCell::new(Vec::<String>::new());
-    let out = onboarding_answer_inner(&d, 3, &capture, &mut |j| enqueued.borrow_mut().push(j.to_string()));
+    let courses: Vec<CourseAnswer> = three_with_one_removed().courses.into_iter().map(|c| CourseAnswer { removed: false, ..c }).collect();
+    let capture = serde_json::json!({"capture": {"courses": courses}});
+    let out = onboarding_answer_inner(&d, 3, &capture, &mut |_| {});
     assert_eq!(out["ok"], true, "{out}");
-    let out = onboarding_answer_inner(&d, 3, &serde_json::json!({"remove": "KNT 220"}), &mut |j| enqueued.borrow_mut().push(j.to_string()));
+    let out = onboarding_answer_inner(&d, 3, &serde_json::json!({"remove": "KNT 220"}), &mut |_| {});
     assert_eq!(out["ok"], true, "{out}");
     // Nothing in memory: a fresh read of the file.
     let reloaded = load_answers(&d).unwrap().expect("the answers file");
@@ -919,15 +976,51 @@ fn test_12_a_removal_given_through_the_answer_inner_survives_a_reload_and_a_re_c
 }
 
 #[test]
-fn test_12_the_answer_inner_saves_before_it_enqueues_and_enqueues_nothing_for_an_answer_it_refused() {
-    let d = scratch("t12-order");
-    let saw = std::cell::RefCell::new(Vec::<bool>::new());
-    let dir = d.clone();
-    let out = onboarding_answer_inner(&d, 6, &serde_json::json!({"google_calendar": true}), &mut |_| {
-        saw.borrow_mut().push(matches!(load_answers(&dir), Ok(Some(a)) if a.google_calendar == Some(true)));
-    });
+fn test_12_the_buckets_and_pairs_answers_are_saved_and_total_as_the_buckets_say() {
+    let d = scratch("t12-buckets");
+    let a = three_with_one_removed();
+    let courses: Vec<CourseAnswer> = a.courses.iter().cloned().map(|c| CourseAnswer { removed: false, fragments: Vec::new(), ..c }).collect();
+    onboarding_answer_inner(&d, 3, &serde_json::json!({"capture": {"courses": courses}}), &mut |_| {});
+    let out = onboarding_answer_inner(&d, 3, &serde_json::json!({"buckets": a.buckets}), &mut |j| panic!("a buckets answer enqueued {j}"));
     assert_eq!(out["ok"], true, "{out}");
-    assert!(saw.borrow().iter().all(|s| *s), "the file already held the answer when each job was enqueued: {:?}", saw.borrow());
+    let out = onboarding_answer_inner(&d, 3, &serde_json::json!({"pairs": {"KNT 220": ["KNT 220", "_1002_1"]}}), &mut |j| panic!("a pairs answer enqueued {j}"));
+    assert_eq!(out["ok"], true, "{out}");
+    onboarding_answer_inner(&d, 3, &serde_json::json!({"remove": "KNT 220"}), &mut |_| {});
+    let saved = load_answers(&d).unwrap().unwrap();
+    assert_eq!(saved.buckets, a.buckets);
+    assert_eq!(saved.courses[1].fragments, ["KNT 220", "_1002_1"]);
+    assert_eq!(step3_totals(&saved), step3_totals(&a), "the same totals as the in-memory answers");
+}
+
+#[test]
+fn test_12_the_answer_inner_saves_before_it_enqueues_and_enqueues_exactly_the_jobs_the_answer_asks_for() {
+    let d = scratch("t12-order");
+    let (enqueued, saw) = (std::cell::RefCell::new(Vec::<String>::new()), std::cell::RefCell::new(Vec::<bool>::new()));
+    let courses = vec![row("QLT 101", "Quilting Basics", "_1001_1", false)];
+    let answer = |step: u8, a: serde_json::Value, held_by_then: &dyn Fn(&Answers) -> bool| {
+        enqueued.borrow_mut().clear();
+        saw.borrow_mut().clear();
+        let dir = d.clone();
+        let out = onboarding_answer_inner(&d, step, &a, &mut |j| {
+            enqueued.borrow_mut().push(j.to_string());
+            saw.borrow_mut().push(matches!(load_answers(&dir), Ok(Some(ref a)) if held_by_then(a)));
+        });
+        assert_eq!(out["ok"], true, "{out}");
+        assert!(saw.borrow().iter().all(|s| *s), "the file already held the answer when each job was enqueued: {:?}", saw.borrow());
+        (enqueued.borrow().clone(), saw.borrow().len())
+    };
+    let (jobs, checked) = answer(3, serde_json::json!({"capture": {"courses": courses}}), &|a| a.courses.len() == 1);
+    assert_eq!(jobs, ["school.preview"], "step 3's capture asks for the preview");
+    assert_eq!(checked, 1, "and the save was checked at that enqueue, not vacuously");
+    let (jobs, checked) = answer(6, serde_json::json!({"google_calendar": true}), &|a| a.google_calendar == Some(true));
+    assert_eq!(jobs, ["google.calendar_read"]);
+    assert_eq!(checked, 1);
+    let (jobs, _) = answer(6, serde_json::json!({"google_calendar": false}), &|a| a.google_calendar == Some(false));
+    assert!(jobs.is_empty(), "a declined calendar asks for nothing: {jobs:?}");
+    let (jobs, _) = answer(3, serde_json::json!({"remove": "QLT 101"}), &|a| a.courses[0].removed);
+    assert!(jobs.is_empty(), "a Remove asks for no job: {jobs:?}");
+    let (jobs, _) = answer(8, serde_json::json!({"zybooks_ignore": "ZYB-ONBOARDING"}), &|a| a.zybooks_ignore == ["ZYB-ONBOARDING"]);
+    assert!(jobs.is_empty(), "{jobs:?}");
     let refused = onboarding_answer_inner(&d, 6, &serde_json::json!({"nonsense": 1}), &mut |j| panic!("enqueued {j} for a refused answer"));
     assert_eq!(refused["ok"], false, "{refused}");
 }
@@ -988,4 +1081,51 @@ fn test_17_the_real_store_wrapper_deletes_this_profiles_pending_links_rewinds_an
     let Loaded::Ok(after) = load_state(&d) else { panic!("rewritten, not removed") };
     assert_eq!((after.step, after.finished, after.school.is_none()), (2, false, true));
     on_sign_out(&d, &id).expect("a second sign-out with nothing left to delete is not an error");
+}
+
+// ---- F1 review r2 / §14.46: bucket codes, one source of pairs -------------------------------------------------
+
+#[test]
+fn test_12_the_app_reads_a_buckets_codes_and_never_parses_its_name() {
+    let mut a = Answers { courses: vec![row("WVG 105", "Weaving Lab", "_1003_1", false), row("KNT 220", "Knotwork Theory", "_1002_1", true)], ..Default::default() };
+    // Names that parse to nothing sensible: only `codes` counts.
+    a.buckets.insert("zz-opaque-1".into(), Bucket { codes: vec!["WVG 105".into()], counts: counts(&[("class_times", 2)]) });
+    a.buckets.insert("zz-opaque-2".into(), Bucket { codes: vec!["KNT 220".into()], counts: counts(&[("class_times", 40)]) });
+    a.buckets.insert("zz-opaque-3".into(), Bucket { codes: vec![], counts: counts(&[("class_times", 300)]) });
+    // A zero single-course bucket (the engine always writes one) changes nothing.
+    a.buckets.insert(bucket_key(&["WVG 105"]), Bucket { codes: vec!["WVG 105".into()], counts: counts(&[("class_times", 0)]) });
+    assert_eq!(step3_totals(&a).get("class_times"), Some(&302), "2 + 300; the removed course's 40 is out: {:?}", step3_totals(&a));
+}
+
+#[test]
+fn test_12_bucket_names_are_the_sorted_keys_joined_by_a_comma_and_a_row_may_have_no_code() {
+    assert_eq!(bucket_key(&["QLT 101", "KNT 220"]), "KNT 220,QLT 101");
+    assert_eq!(bucket_key(&[]), "unmatched");
+    // A bucket names a codeless row by its slug (the key), and totals count it when that row is kept.
+    let mut lab = row("", "Lab Section", "_2001_1", false);
+    lab.slug = "lab-section".into();
+    let mut a = Answers { courses: vec![lab], ..Default::default() };
+    a.buckets.insert(bucket_key(&["lab-section"]), Bucket { codes: vec!["lab-section".into()], counts: counts(&[("class_times", 5)]) });
+    assert_eq!(step3_totals(&a).get("class_times"), Some(&5));
+    a.courses[0].removed = true;
+    assert_eq!(step3_totals(&a).get("class_times").copied().unwrap_or(0), 0);
+}
+
+#[test]
+fn test_12_a_label_edit_is_display_only_and_the_preview_courses_carry_the_saved_pairs_unchanged() {
+    let d = scratch("t12-pairs");
+    let give = |step: u8, a: serde_json::Value| {
+        let out = onboarding_answer_inner(&d, step, &a, &mut |_| {});
+        assert_eq!(out["ok"], true, "{out}");
+    };
+    let mut qlt = row("QLT 101", "Quilting Basics", "_1001_1", false);
+    qlt.fragments = Vec::new();
+    give(3, serde_json::json!({"capture": {"courses": [qlt]}}));
+    give(3, serde_json::json!({"pairs": {"QLT 101": ["QLT 101", "QLT-101", "_1001_1"]}}));
+    let before = preview_courses(&load_answers(&d).unwrap().unwrap());
+    give(3, serde_json::json!({"label": {"key": "QLT 101", "label": "Quilting, edited"}}));
+    let after = preview_courses(&load_answers(&d).unwrap().unwrap());
+    assert_eq!(after[0]["label"], "Quilting, edited");
+    assert_eq!(after[0]["pairs"], serde_json::json!(["QLT 101", "QLT-101", "_1001_1"]));
+    assert_eq!(serde_json::to_string(&before[0]["pairs"]).unwrap(), serde_json::to_string(&after[0]["pairs"]).unwrap(), "byte for byte");
 }

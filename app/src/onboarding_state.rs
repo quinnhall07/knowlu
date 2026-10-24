@@ -133,9 +133,40 @@ pub struct CourseAnswer {
     /// removed row is read by nobody; [`Answers::kept_courses`] is the only way to the list.
     #[serde(default)]
     pub removed: bool,
-    /// `school.preview`'s `by_course` counts for this course, by name (`class_times`,
-    /// `assignments_upcoming`, `turned_in`, `grades_courses`). Empty until a preview has run.
+    /// The course's slug where the LMS gives one; only for [`CourseAnswer::key`] (not the note's slug,
+    /// which `school.courses` records in [`Answers::slugs`]).
     #[serde(default)]
+    pub slug: String,
+    /// The course's pairs as F8b saves them for `course_map` and `course_exclude` (§14.45): its code
+    /// fragments and its gradebook uid pins, built as F6b writes `course_map`'s. Empty until
+    /// `school.preview` has run; the hand-over then falls back to the course's code.
+    #[serde(default)]
+    pub fragments: Vec<String>,
+}
+
+impl CourseAnswer {
+    /// The key `by_course` uses, and so Remove's and a re-capture's identity for a row (§14.45):
+    /// the LMS course `code`, then the slug, then the label, each only when the one before is empty.
+    pub fn key(&self) -> String { todo!("F2d: the course key") }
+}
+
+/// The name of a match-set bucket as the engine's `by_course` writes it (F7a, 904a92c): the sorted
+/// course keys joined by `,`; [`UNMATCHED`] for an item no course claims. The app never parses the
+/// name: it reads [`Bucket::codes`].
+pub fn bucket_key(codes: &[&str]) -> String {
+    let mut c: Vec<&str> = codes.to_vec();
+    c.sort_unstable();
+    if c.is_empty() { UNMATCHED.to_string() } else { c.join(",") }
+}
+pub const UNMATCHED: &str = "unmatched";
+
+/// One `by_course` bucket: the course keys that claimed its items (empty for [`UNMATCHED`]) and the
+/// counts by name (`class_times`, `assignments_upcoming`, `turned_in`, `grades_courses`). A
+/// single-course bucket always exists, with zero counts when nothing landed in it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Bucket {
+    pub codes: Vec<String>,
+    #[serde(flatten)]
     pub counts: BTreeMap<String, i64>,
 }
 
@@ -171,26 +202,38 @@ pub struct Answers {
     pub feeds: BTreeMap<String, FeedState>,
     pub rows: Vec<BookRow>,
     pub zybooks_ignore: Vec<String>,
+    /// `school.preview`'s `by_course` match-set buckets (§14.45), by [`bucket_key`], each a [`Bucket`]: its `codes` and its
+    /// counts by name.
+    #[serde(default)]
+    pub buckets: BTreeMap<String, Bucket>,
 }
 
 impl Answers {
     /// The courses that were not removed, in captured order. `school.courses`, `config.ingest`'s
     /// `course_map` and the step-3 totals read the list only through this.
     pub fn kept_courses(&self) -> Vec<&CourseAnswer> { todo!("F2d: kept_courses") }
-    /// A re-capture: replaces the list with `captured`, every row un-removed, and keeps the counts
-    /// of a row whose code is unchanged until the next preview.
+    /// A re-capture: replaces the list with `captured`, every row un-removed. A row whose
+    /// [`CourseAnswer::key`] matches an old one keeps that row's `fragments` until the next preview.
     pub fn recapture(&mut self, _captured: Vec<CourseAnswer>) { todo!("F2d: recapture") }
 }
 
-/// Step 3's proof totals, over the kept rows only: `classes` is the number of kept rows and every
-/// other key the sum of the kept rows' saved `by_course` counts (`onboarding_status` returns this).
+/// Step 3's proof totals (§14.45): `classes` is the number of kept rows; every other key is the sum,
+/// over **every bucket whose `codes` is empty ([`UNMATCHED`]) or contains at least one kept course's
+/// key**, of that count. A bucket naming only removed courses is out; one naming a kept and a removed
+/// course stays. This is exactly what F6c's ingest imports (`onboarding_status` returns it).
 pub fn step3_totals(_a: &Answers) -> BTreeMap<String, i64> { todo!("F2d: the step-3 totals") }
 
 /// The answer-recording inner of `onboarding_answer(step, answer)` (F2b): saves the answer to the
-/// answers file **first**, then calls `enqueue` once per job the answer asks for. Shapes by step:
-/// 3 `{"capture": {"courses": [CourseAnswer], "registrar_rows": [..], "feeds": {kind: state}}}`,
-/// `{"remove": <code>}`, `{"counts": {<code>: {name: n}}}`; 6 `{"google_calendar": bool}`; 8
-/// `{"row": BookRow}` or `{"zybooks_ignore": <key>}`. Answers `{ok, error?}`; nothing is held in
+/// answers file **first**, then calls `enqueue` once per job the answer asks for. Shapes and jobs:
+/// - 3 `{"capture": {"courses": [CourseAnswer], "registrar_rows": [..] (default empty), "feeds":
+///   {kind: state} (default empty)}}` enqueues `school.preview`;
+/// - 3 `{"remove": <CourseAnswer::key>}`, `{"buckets": {<bucket_key>: {"codes": [..], name: n, ..}}}` and
+///   `{"pairs": {<key>: [fragment, ..]}}` and `{"label": {"key": <key>, "label": <text>}}` (display
+///   only: it changes no pairs and no bucket) enqueue nothing;
+/// - 6 `{"google_calendar": bool}` enqueues `google.calendar_read` for `true`, nothing for `false`;
+/// - 8 `{"row": BookRow}` or `{"zybooks_ignore": <key>}` enqueue nothing (`config.ingest` is asked
+///   for on leaving the step).
+/// Answers `{ok, error?}`; an unknown shape is `ok: false` and enqueues nothing. Nothing is held in
 /// memory, so a quit between two calls loses nothing.
 pub fn onboarding_answer_inner(
     _data_dir: &Path,
@@ -379,3 +422,9 @@ pub fn entitlement_in(_vault: &Path, _data_dir: &Path) -> Value { todo!("F2h: on
 
 /// The consent-then-checkout core on the vault's own session; returns the URL and opens nothing.
 pub fn checkout_url_in(_vault: &Path, _plan: &str) -> Result<String, String> { todo!("F2h: onboarding_checkout") }
+
+/// The `--courses` list `school.preview` passes to `knowlu-engine onboarding --preview` (§14.46): one
+/// object per captured course (removed rows included, so their items are attributed and bucketed),
+/// carrying `code`, `name`, `label`, `lms_key` and **`pairs`**, the row's saved `fragments`, passed
+/// through byte for byte. The label is display only: editing it changes no pair.
+pub fn preview_courses(_a: &Answers) -> Value { todo!("F8b: the --courses list") }
