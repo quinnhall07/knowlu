@@ -450,6 +450,14 @@ vault afterwards. No account, no live vault, no OS input.
 *(T0's base, citation and clock records, the review rounds and the controller's answers go here,
 dated, newest first.)*
 
+- **2026-10-24, T7 scratch demo (main session).** The engine was built at `209e768` (code as at
+  `123ee02`). It ran on a scratch copy of `vault-s1-migrated` (`scripts\scratch-vault.ps1`), with one
+  added task, "Demo essay due tonight" (1.0h, due `2026-08-28T23:59`). The command was
+  `surface --view today --today 2026-08-28 --now <T> --build-sha pinned`. At `T19:59`, Must do's
+  groups are `Overdue` (2 rows, first "CS 100 HW 01 Introduction to C"), then `Due today` (1 row,
+  first the demo essay). At `T20:00`, they are `Due today` (1 row, the demo essay), then `Overdue`
+  (2 rows, the same first row). Both exits were 0, matching the expectation. The scratch vault was
+  deleted afterwards. No account, no live vault, no OS input.
 - **2026-10-24, T0 (main session).** Branch `feat/evening-ranking` from `docs/evening-ranking`
   (`2023817`, on `cb3b661`; engine unchanged since `1d3c467`, whose CI was green). The clock record
   holds: `oracle.rs:86` runs `--today 2026-08-28 --runner manual` with no time; `surface_oracle.rs:22`
