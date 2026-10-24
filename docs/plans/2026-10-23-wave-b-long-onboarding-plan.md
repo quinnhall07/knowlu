@@ -2762,7 +2762,11 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
       `:389-391`), so an empty list with a record left is a setup in flight or a delete still owed,
       not a disconnect. A list that could not be read is no proof (`scheduler.rs:468-469`), so it
       gives nothing. The handover items carry no address id (`HandoverItem`,
-      `onboarding_state.rs:81-85`), so "no live row" is the account's whole list.
+      `onboarding_state.rs:81-85`), so "no live row" is the account's whole list. **A known
+      limitation, not a bug** (§14.51 r4, n1): because the items name no mailbox, on an account
+      with several mailboxes one verified row clears the mail items for all of them; this predates
+      §14.51 (F8f's `HandoverItem` shape), and per-mailbox items would be a later change to that
+      struct, not F8s2's.
     - `mail_signals` **never** gives `FirstPassDelivered` (R1). It gives **`BackfillNeverDriven`**
       (a new `MailSignal` variant, §14.51 r3, I-1) beside `CanaryVerified` when the verified row's
       `Provider::from_service(row["provider"])` (`mail_steps.rs:138-143`) is one F2b's
@@ -2908,10 +2912,19 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   next launch. With both checks, `mail.setup` ends within one `POLL`, 5 s (`:74`). `mail/runner.rs`
   is off the contract list; the edit is about 10 lines. **F8d also records the provider** the
   setup ran for in the answers file's `mail_provider` (F2b's field), which F2b's finish reads (R1):
-  the service row's own `provider` string (`m365`, `google` or `other`, the names
+  the service's own `provider` string (`m365`, `google` or `other`, the names
   `Provider::from_service` reads, `mail_steps.rs:138-143`), stored as given and never a Rust enum
   name, and written **only through `update_answers`** (`onboarding_state.rs:421-426`, under
-  `ANSWERS_LOCK`), never a bare load and save (§14.51 r3, m-b). The Google reads and `coursework.discover` check the stop after their
+  `ANSWERS_LOCK`), never a bare load and save (§14.51 r3, m-b). **Where the string is read**
+  (§14.51 r4, n2; checked): not from the address reply and not from a `list_addresses` lookup, but
+  from the run's own progress. The runner does map its enum to the service's string
+  (`provider_name`, `mail/runner.rs:226-232`, the same string it sends to `mint_address`, `:259`),
+  and publishes it as `Progress.provider` once the provider is known (`:292-295`; the field is
+  `pub provider: &'static str`, "`m365`, `google` or `other` once known", `mail/setup.rs:133-134`).
+  So F8d's `mail.setup` runner reads `Shared::progress().provider` from the run it holds, with no
+  network call and no mapping of its own, and records it when it is non-empty (an empty string
+  means the run ended before its provider was resolved: nothing is recorded, and F2b keeps the
+  item). The Google reads and `coursework.discover` check the stop after their
   call and before any write. Size: S (about 80 lines with the stop handling, plus about 10 in
   `mail/runner.rs`).
 - **F8m, the backfill hook** (in `app/src/mail/live.rs`; review r5, I-4). F1's test 23. A pure
@@ -4532,4 +4545,10 @@ Tasks changed in r3: §4.10 (the hand-over table's mail row), F1 test 32 (the ne
 provider-write cases), F2b (`backfill_never_driven`, the service string), F8d (`update_answers`, the
 string), F8s2 (`BackfillNeverDriven`, the request's thread and the lock, the `sent_at` sentence),
 §7 (rows F2b, F8d, F8s2).
+
+**Review r4: PASS**, with two brief notes added: n1 in F8s2 (items name no mailbox, so one verified
+row clears the mail items of every mailbox on the account; a known limitation of `HandoverItem`,
+`onboarding_state.rs:81-85`), and n2 in F8d (the provider string is read from the run's
+`Progress.provider`, which the runner sets from its own `provider_name` mapping,
+`mail/runner.rs:226-232, 292-295`, `mail/setup.rs:133-134`; no address reply or extra lookup).
 
