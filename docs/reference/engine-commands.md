@@ -13,7 +13,8 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   is `--now`, else none when `--today` is given (daytime order, as the golden harness runs), else the
   vault's wall clock. `--now` is strict `%Y-%m-%dT%H:%M` (no seconds, no bare date); a bad value is
   `BadNow`, exit 2, before the run starts, so nothing is written. `--now` pins the ranking moment
-  only, no timestamp the engine writes (the footer and the run record keep the wall clock). Beyond
+  only (a `--now` on a different day from `--today` ranks as daytime, so the evening step stays
+  off), no timestamp the engine writes (the footer and the run record keep the wall clock). Beyond
   the day, exactly as `--today`, a `--now` with no `--today` dates the run's writes (the info pass,
   the approvals budget and pass, the proposal count) by `--now`'s day, so `rank --now` is a real run,
   never a dry run. Its events pass runs in this order (`cli.rs`; events spec §6.1, P16): D9's

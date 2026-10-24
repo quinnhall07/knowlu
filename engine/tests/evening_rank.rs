@@ -3,7 +3,9 @@
 //! This file asserts against the frozen golden files, so it follows `oracle.rs` to the letter:
 //! every run is on a scratch COPY of a fixture vault in the temp directory, the footer is stripped
 //! the same way, and nothing here ever writes under `tests/fixtures/`. A golden is never
-//! regenerated; if the engine disagrees with one, the engine is wrong.
+//! regenerated; if the engine disagrees with one, the engine is wrong. The one difference: the
+//! `surface` runs read the fixture in place, because `surface` never writes (as in
+//! `surface_oracle.rs`); every `rank` run, which does write, is on a copy.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -97,7 +99,11 @@ fn rank_refuses_a_bad_now_with_exit_2() {
     let (vault, output) = rank_at(FIXTURE, "badnow", "tonight");
     assert_eq!(output.status.code(), Some(2), "stdout:\n{}", String::from_utf8_lossy(&output.stdout));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--now"), "stderr should name --now:\n{stderr}");
+    // The engine's own message, not clap's rejection of an argument.
+    assert!(
+        stderr.contains("--now must look like YYYY-MM-DDTHH:MM, got \"tonight\""),
+        "stderr should carry BadNow's message:\n{stderr}"
+    );
     let _ = std::fs::remove_dir_all(&vault);
 }
 
@@ -113,8 +119,11 @@ fn surface_at(fixture: &str, now: &str) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).expect("surface prints one JSON document")
 }
 
-/// The ranking-bearing parts of a state. `now`, `revision`, the runs panel, "closed this week" and
-/// `nav_counts.runs_warn` read the clock, so they differ at 21:00 for clock reasons, not ranking ones.
+/// The ranking-bearing parts of a state: `must_do`, `recommended`, `meter`, `the_day`, `verdict`,
+/// `ahead`, `topline` and `nav_counts` (without `runs_warn`). Left out because they read the clock,
+/// so they differ at 21:00 for clock reasons, not ranking ones: `now`, `revision`, the runs panel,
+/// "closed this week" and `nav_counts.runs_warn`. `delta`, `gauge`, `decisions`, `coming_up`,
+/// `good_to_know` and the panels are not ranking output and are not compared.
 fn ranked_parts(state: &serde_json::Value) -> serde_json::Value {
     let mut nav = state["nav_counts"].clone();
     nav.as_object_mut().expect("nav_counts is an object").remove("runs_warn");
@@ -122,6 +131,10 @@ fn ranked_parts(state: &serde_json::Value) -> serde_json::Value {
         "must_do": state["must_do"],
         "recommended": state["recommended"],
         "meter": state["meter"],
+        "the_day": state["the_day"],
+        "verdict": state["verdict"],
+        "ahead": state["ahead"],
+        "topline": state["topline"],
         "nav_counts": nav,
     })
 }
