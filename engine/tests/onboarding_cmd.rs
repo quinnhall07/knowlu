@@ -589,3 +589,171 @@ fn tidied_reads_notes_written_with_crlf() {
     assert_eq!(j["errors"], json!([]), "{j}");
     let _ = std::fs::remove_dir_all(&v);
 }
+
+// ---- F7f (test 47): weekday buckets, homework_sites, --tz ----
+
+/// One feed item. `dtstart` is written as given (floating local, or `...Z`); `extra` are whole lines.
+fn item(uid: &str, summary: &str, dtstart: &str, description: &str, extra: &[&str]) -> String {
+    let lines: String = extra.iter().map(|l| format!("{l}\n")).collect();
+    format!("BEGIN:VEVENT\nUID:{uid}\nSUMMARY:{summary}\nDESCRIPTION:{description}\nDTSTART:{dtstart}\n{lines}END:VEVENT\n")
+}
+
+/// A scratch vault plus a feed made of `items`, previewed with `extra` flags after the usual ones.
+fn preview_items(tag: &str, items: &[String], extra: &[&str]) -> (PathBuf, Output) {
+    let v = scratch(tag);
+    let c = captures(tag);
+    std::fs::write(&c.feed, format!("BEGIN:VCALENDAR\nVERSION:2.0\n{}END:VCALENDAR\n", items.concat())).unwrap();
+    let mut args: Vec<&std::ffi::OsStr> = vec!["--preview".as_ref(), "--feed".as_ref(), c.feed.as_os_str(), "--courses".as_ref(), c.courses.as_os_str()];
+    args.extend(extra.iter().map(|s| std::ffi::OsStr::new(*s)));
+    let out = run(&v, &args);
+    (v, out)
+}
+
+const DAYS: [&str; 8] = ["due_mon", "due_tue", "due_wed", "due_thu", "due_fri", "due_sat", "due_sun", "due_later"];
+
+fn day_counts(v: &Value) -> Vec<Value> {
+    DAYS.iter().map(|k| v[*k].clone()).collect()
+}
+
+#[test]
+fn preview_buckets_count_upcoming_items_by_local_weekday_and_sum_to_the_total() {
+    // NOW is Tuesday 2026-09-01, so the week is 08-31 .. 09-06.
+    let items = [
+        item("BB-1", "SYN 110 Quiz", "20260901T235900", "x", &[]),
+        item("BB-2", "SYN 110 Lab", "20260902T100000", "x", &[]),
+        item("BB-3", "SYN 110 Essay", "20260902T230000", "x", &[]),
+        item("BB-4", "SYN 110 Set", "20260904T235900", "x", &[]),
+        item("BB-5", "SYN 110 Read", "20260906T235900", "x", &[]),
+        item("BB-6", "SYN 110 Next week", "20260907T000000", "x", &[]),
+        item("BB-7", "SYN 120 Memo", "20260903T120000", "x", &[]),
+        item("BB-8", "Unclaimed", "20260920T120000", "x", &[]),
+        item("BB-9", "SYN 110 Past", "20260831T235900", "x", &[]),
+    ];
+    let (v, out) = preview_items("f7f-days", &items, &[]);
+    let j = json_of(&out);
+    let n = |a: i64| json!(a);
+    let one = &j["by_course"]["_900001_1"];
+    assert_eq!(day_counts(one), vec![n(0), n(1), n(2), n(0), n(1), n(0), n(1), n(1)], "{j}");
+    assert_eq!(day_counts(&j["by_course"]["_900002_1"]), vec![n(0), n(0), n(0), n(1), n(0), n(0), n(0), n(0)], "{j}");
+    assert_eq!(day_counts(&j["by_course"]["unmatched"]), vec![n(0), n(0), n(0), n(0), n(0), n(0), n(0), n(1)], "{j}");
+    assert_eq!(day_counts(&j), vec![n(0), n(1), n(2), n(1), n(1), n(0), n(1), n(2)], "{j}");
+    assert_eq!(j["assignments_upcoming"], json!(8), "the past item is left out: {j}");
+    assert_eq!(j["week_of"], json!("2026-08-31"), "{j}");
+    assert_eq!(j["week_today"], json!(1), "{j}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn preview_day_counts_are_null_exactly_when_the_total_is() {
+    let v = scratch("f7f-null");
+    let mut c = captures("f7f-null");
+    c.feed = c.feed.with_file_name("does-not-exist.ics");
+    let j = json_of(&preview(&v, &c, true));
+    assert_eq!(j["assignments_upcoming"], Value::Null, "{j}");
+    for k in DAYS {
+        assert!(j.get(k).is_some() && j["by_course"]["_900001_1"].get(k).is_some(), "{k} is present, as null: {j}");
+    }
+    assert_eq!(day_counts(&j), vec![Value::Null; 8], "{j}");
+    assert_eq!(day_counts(&j["by_course"]["_900001_1"]), vec![Value::Null; 8], "{j}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn preview_one_due_time_lands_on_different_days_under_different_tz() {
+    // 03:30Z on Wednesday 09-02 is Wednesday in UTC, Tuesday 20:30 in Los Angeles, Tuesday 22:30 in Chicago.
+    let items = [item("BB-1", "SYN 110 Quiz", "20260902T033000Z", "x", &[])];
+    let (v1, utc) = preview_items("f7f-utc", &items, &["--tz", "UTC"]);
+    let (v2, la) = preview_items("f7f-la", &items, &["--tz", "America/Los_Angeles"]);
+    let (v3, vault) = preview_items("f7f-vaultzone", &items, &[]);
+    let (utc, la, vault) = (json_of(&utc), json_of(&la), json_of(&vault));
+    assert_eq!((utc["due_wed"].clone(), utc["due_tue"].clone()), (json!(1), json!(0)), "{utc}");
+    assert_eq!((la["due_wed"].clone(), la["due_tue"].clone()), (json!(0), json!(1)), "{la}");
+    assert_eq!((utc["zone"].clone(), la["zone"].clone()), (json!("UTC"), json!("America/Los_Angeles")));
+    assert_eq!(vault["zone"], json!("America/Chicago"), "no flag: the vault's zone (ingest.yaml): {vault}");
+    assert_eq!(vault["due_tue"], json!(1), "{vault}");
+    for v in [v1, v2, v3] {
+        let _ = std::fs::remove_dir_all(&v);
+    }
+}
+
+#[test]
+fn preview_with_a_bad_tz_is_a_named_line_and_exit_zero() {
+    let (v, out) = preview_items("f7f-badtz", &[], &["--tz", "Mars/Olympus_Mons"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("onboarding: bad --tz"), "{text}");
+    assert!(serde_json::from_str::<Value>(&text).is_err(), "no counts in another zone: {text}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn preview_with_tz_still_writes_nothing() {
+    let (v, _) = preview_items("f7f-ro", &[], &["--tz", "UTC"]);
+    let before = snapshot(&v);
+    let c = captures("f7f-ro");
+    json_of(&run(&v, &["--preview".as_ref(), "--feed".as_ref(), c.feed.as_os_str(), "--courses".as_ref(), c.courses.as_os_str(), "--tz".as_ref(), "UTC".as_ref()]));
+    assert_eq!(snapshot(&v), before);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn homework_sites_come_only_from_a_listed_host_and_are_sorted_by_course() {
+    let items = [
+        item("BB-1", "SYN 110 Ch 1", "20260905T120000", "Do it at https://learn.zybooks.com/zybook/SYN110/chapter/1", &[]),
+        item("BB-2", "SYN 110 Unit 2", "20260906T120000", "x", &["URL:https://WWW.VHLCentral.com:8443/unit2"]),
+        item("BB-3", "SYN 120 Ch 3", "20260905T130000", "see http://zybooks.com/x", &[]),
+        item("BB-4", "Unclaimed", "20260905T140000", "https://vhlcentral.com/y", &[]),
+    ];
+    let (v, out) = preview_items("f7f-sites", &items, &[]);
+    let j = json_of(&out);
+    assert_eq!(
+        j["homework_sites"],
+        json!({"vhl": ["_900001_1", "unmatched"], "zybooks": ["_900001_1", "_900002_1"]}),
+        "{j}"
+    );
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn homework_sites_never_match_a_substring_a_bare_name_or_a_userinfo_lookalike() {
+    let items = [
+        item("BB-1", "SYN 110 A", "20260905T120000", "https://notzybooks.com/a", &[]),
+        item("BB-2", "SYN 110 B", "20260905T130000", "x", &["URL:https://zybooks.com.example.org/b"]),
+        item("BB-3", "SYN 120 C", "20260905T140000", "Open zybooks.com or zyBooks or vhlcentral.com (no scheme)", &[]),
+        item("BB-4", "SYN 120 D", "20260905T150000", "https://zybooks.com@evil.example.org/d", &[]),
+        item("BB-5", "SYN 120 E", "20260905T160000", "https://example.org/?next=https://vhlcentral.com", &[]),
+    ];
+    let (v, out) = preview_items("f7f-nosites", &items, &[]);
+    let j = json_of(&out);
+    assert_eq!(j["homework_sites"], json!({}), "a site with no evidence is absent: {j}");
+    assert_eq!(day_counts(&j).len(), 8, "{j}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn homework_sites_is_empty_without_a_readable_course_list() {
+    let v = scratch("f7f-nocourses");
+    let c = captures("f7f-nocourses");
+    let feed = [item("BB-1", "SYN 110 Ch 1", "20260905T120000", "https://learn.zybooks.com/zybook/SYN110", &[])];
+    std::fs::write(&c.feed, format!("BEGIN:VCALENDAR\nVERSION:2.0\n{}END:VCALENDAR\n", feed.concat())).unwrap();
+    let none = json_of(&run(&v, &["--preview".as_ref(), "--feed".as_ref(), c.feed.as_os_str()]));
+    assert_eq!(none["homework_sites"], json!({}), "no --courses: {none}");
+    let bad = c.feed.with_file_name("not-a-list.json");
+    std::fs::write(&bad, "{\"not\": \"an array\"}").unwrap();
+    let bad = json_of(&run(&v, &["--preview".as_ref(), "--feed".as_ref(), c.feed.as_os_str(), "--courses".as_ref(), bad.as_os_str()]));
+    assert_eq!(bad["homework_sites"], json!({}), "a courses file that is not an array: {bad}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn a_host_ends_at_a_comma_a_semicolon_or_a_bang() {
+    let items = [
+        item("BB-1", "SYN 110 A", "20260905T120000", "visit https://zybooks.com, then submit", &[]),
+        item("BB-2", "SYN 110 B", "20260905T130000", "open https://vhlcentral.com; then submit", &[]),
+        item("BB-3", "SYN 120 C", "20260905T140000", "go to https://learn.zybooks.com! now", &[]),
+    ];
+    let (v, out) = preview_items("f7f-punct", &items, &[]);
+    let j = json_of(&out);
+    assert_eq!(j["homework_sites"], json!({"vhl": ["_900001_1"], "zybooks": ["_900001_1", "_900002_1"]}), "{j}");
+    let _ = std::fs::remove_dir_all(&v);
+}

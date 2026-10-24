@@ -272,6 +272,8 @@ fn read_registrar(text: &str, school: Option<&str>, courses: &[Course], errors: 
 
 fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: DateTime) -> Value {
     let mut errors = Vec::new();
+    let today = usize::try_from(now.date().weekday().to_monday_zero_offset()).unwrap_or(0);
+    let monday = now.date().checked_sub(jiff::Span::new().days(today as i64)).unwrap_or(now.date());
     let feed = input("feed", inputs.feed, unread, true, &mut errors).and_then(|t| read_feed(t, tz, now, &mut errors));
     let courses = input("courses", inputs.courses, unread, true, &mut errors).and_then(|t| read_courses(t, &mut errors));
     let grades = input("grades", inputs.grades, unread, false, &mut errors).and_then(|t| read_grades(t, tz, &mut errors));
@@ -287,10 +289,12 @@ fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: Da
     };
     let by_course = courses.as_ref().map(|list| {
         let zero = |on: bool| on.then_some(0);
-        let empty = [zero(feed.is_some()), zero(feed.is_some() && grades.is_some()), zero(class_times.is_some())];
+        // Slots 0-2 are the three counts; 3.. are `DAYS`, null with the feed.
+        let empty: [Option<usize>; 11] =
+            std::array::from_fn(|i| zero(match i { 0 | 3.. => feed.is_some(), 1 => feed.is_some() && grades.is_some(), _ => class_times.is_some() }));
         // Every keyed course has its own bucket from the start; a set of two or more codes (an item
         // two courses both claim) is added when an item lands there.
-        let mut buckets: BTreeMap<String, ([Option<usize>; 3], Vec<String>)> = BTreeMap::new();
+        let mut buckets: BTreeMap<String, ([Option<usize>; 11], Vec<String>)> = BTreeMap::new();
         for c in list.iter().filter(|c| !c.key.is_empty()) {
             buckets.insert(c.key.clone(), (empty, vec![c.key.clone()]));
         }
@@ -305,6 +309,7 @@ fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: Da
         for item in feed.iter().flatten() {
             let codes = claiming_keys(item, list, grades.as_ref());
             add(&codes, 0);
+            add(&codes, 3 + day_of(item, monday));
             if is_done(item) {
                 add(&codes, 1);
             }
@@ -322,8 +327,11 @@ fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: Da
                 Some(g) => json!(mine.into_iter().any(|c| !c.code.is_empty() && g.graded_lms.contains(&c.code))),
             })
         };
-        let entry = |k: &str, (n, codes): &([Option<usize>; 3], Vec<String>)| {
+        let entry = |k: &str, (n, codes): &([Option<usize>; 11], Vec<String>)| {
             let mut v = json!({"assignments_upcoming": n[0], "class_times": n[2], "codes": codes, "turned_in": n[1]});
+            for (name, count) in DAYS.iter().zip(&n[3..]) {
+                v[*name] = json!(count);
+            }
             if let (true, Some(g)) = (codes.len() == 1, graded(k)) {
                 v["graded"] = g;
             }
@@ -337,15 +345,88 @@ fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: Da
         (Some(Value::Object(buckets)), Some(_)) => Some(buckets.values().filter(|b| b["graded"] == json!(true)).count()),
         _ => grades.as_ref().map(|g| g.courses),
     };
-    json!({
+    let mut out = json!({
         "assignments_upcoming": feed.as_ref().map(Vec::len),
         "by_course": by_course,
         "class_times": class_times.as_ref().map(Vec::len),
         "classes": courses.as_ref().map(Vec::len),
         "errors": errors,
         "grades_courses": grades_courses,
+        "homework_sites": courses.as_deref().map_or(json!({}), |list| homework_sites(feed.as_deref().unwrap_or(&[]), list, grades.as_ref())),
         "turned_in": turned_in,
-    })
+        "week_of": monday.to_string(),
+        "week_today": today,
+        "zone": tz.iana_name(),
+    });
+    let mut totals = [0usize; 8];
+    for item in feed.iter().flatten() {
+        totals[day_of(item, monday)] += 1;
+    }
+    for (name, total) in DAYS.iter().zip(totals) {
+        out[*name] = json!(feed.as_ref().map(|_| total));
+    }
+    out
+}
+
+/// The per-day count names of every bucket and the top level: Monday to Sunday of the preview's
+/// week, then everything after it.
+const DAYS: [&str; 8] = ["due_mon", "due_tue", "due_wed", "due_thu", "due_fri", "due_sat", "due_sun", "due_later"];
+
+/// Which of [`DAYS`] an item's due date (already in the preview's zone) falls on, by its offset from
+/// the week's `monday`; an offset outside 0..=6 is `due_later`.
+fn day_of(item: &ingest::Event, monday: jiff::civil::Date) -> usize {
+    let date = match item.due {
+        Some(Due::DateTime(dt)) => dt.date(),
+        Some(Due::Date(d)) => d,
+        None => return 7,
+    };
+    monday.until(date).ok().and_then(|s| usize::try_from(s.get_days()).ok()).filter(|d| *d < 7).unwrap_or(7)
+}
+
+/// The homework sites (`zybooks`, `vhl`) and the host each is linked from, exactly or as a dot-suffix.
+const SITE_HOSTS: [(&str, &str); 2] = [("zybooks", "zybooks.com"), ("vhl", "vhlcentral.com")];
+
+/// The sites a text links to. A link is `http://` or `https://` at the start of the text or after a
+/// space or an opening quote or bracket (so a `?next=https://...` inside another link is not one);
+/// its host is the authority after any userinfo, without a port or trailing dot, lower-cased.
+fn linked_sites(text: &str) -> BTreeSet<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    let mut sites = BTreeSet::new();
+    for scheme in ["http://", "https://"] {
+        for (at, _) in lower.match_indices(scheme) {
+            if lower[..at].chars().next_back().is_some_and(|c| !(c.is_whitespace() || "\"'<>([".contains(c))) {
+                continue;
+            }
+            let authority = lower[at + scheme.len()..].split(|c: char| c.is_whitespace() || "/?#,;!\\\"'<>)]".contains(c)).next().unwrap_or("");
+            let host = authority.rsplit('@').next().unwrap_or("");
+            let host = host.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h);
+            let host = host.trim_end_matches('.');
+            sites.extend(SITE_HOSTS.iter().filter(|(_, h)| host == *h || host.ends_with(&format!(".{h}"))).map(|(s, _)| *s));
+        }
+    }
+    sites
+}
+
+/// Site to the sorted course keys whose items link it (an item no course claims adds `unmatched`).
+/// Evidence is the item's `description` and the `URL:` line of its `raw`; nothing else is read.
+fn homework_sites(items: &[ingest::Event], courses: &[Course], grades: Option<&Grades>) -> Value {
+    let mut found: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    for item in items {
+        let urls = item.raw.split('\n').filter_map(ingest::parse_property).filter(|(n, _, _)| n == "URL").map(|(_, _, v)| ingest::unescape(&v));
+        let text = std::iter::once(item.description.clone()).chain(urls).collect::<Vec<_>>().join("\n");
+        let sites = linked_sites(&text);
+        if sites.is_empty() {
+            continue;
+        }
+        let mut keys = claiming_keys(item, courses, grades);
+        if keys.is_empty() {
+            keys.insert(UNMATCHED.to_string());
+        }
+        for site in sites {
+            found.entry(site).or_default().extend(keys.iter().cloned());
+        }
+    }
+    json!(found)
 }
 
 /// The `by_course` key of the items (and class times) that no course claims: they count in the

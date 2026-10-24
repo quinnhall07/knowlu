@@ -104,6 +104,9 @@ enum Command {
         /// The registrar's school key (`registrar::SCHOOLS`), with `--registrar`.
         #[arg(long)]
         school: Option<String>,
+        /// The preview's zone, an IANA name. Without it: the vault's, else the computer's, else UTC.
+        #[arg(long)]
+        tz: Option<String>,
     },
     /// Fetch, refresh the series file, and print the current commitment proposals — the
     /// phase-2 confirm screen's data source (spec §5.1, R14). Writes no note, no card and no
@@ -534,11 +537,17 @@ fn main() -> ExitCode {
             println!("{}", knowlu_engine::surface::state_json(&state));
             ExitCode::SUCCESS
         }
-        Command::Onboarding { vault, json: _, preview, tidied, now, feed, courses, grades, registrar, school } => {
+        Command::Onboarding { vault, json: _, preview, tidied, now, feed, courses, grades, registrar, school, tz } => {
             // Read-only and always exit 0: a usage problem is a named line, never a failure.
-            let tz = cli::vault_zone(&vault);
+            let tz = match tz.as_deref() {
+                None => cli::vault_zone(&vault),
+                Some(name) => match jiff::tz::TimeZone::get(name) {
+                    Ok(z) => z,
+                    Err(_) => { println!("onboarding: bad --tz {name:?}; expected an IANA zone name"); return ExitCode::SUCCESS; }
+                },
+            };
             let now = match now {
-                None => cli::local_now(&vault),
+                None => jiff::Timestamp::now().to_zoned(tz.clone()).datetime(),
                 Some(n) => match n.parse::<jiff::civil::DateTime>() {
                     Ok(dt) => dt,
                     Err(_) => { println!("onboarding: bad --now {n:?}; expected YYYY-MM-DDTHH:MM"); return ExitCode::SUCCESS; }
