@@ -6,7 +6,8 @@
 **Status: T0 done and its amendments reviewed (PASS with minors, closed in §14.43; on `main` as
 `cb3b661`); S-A phase 1 PASS (§13), so T2 (phase 2, WebView2) is next; F10's review gaps in §9
 A10 assigned before F11 (§14.44); a removed course's feed items left out by ingest, new task F6c
-(§14.45); shared fragments, the pin form and one source of pairs (§14.46).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
+(§14.45); shared fragments, the pin form and one source of pairs (§14.46); the kept grades count and class
+times on removal (§14.47).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
 record is in §13 (dated 2026-10-24) and its amendments in §14.42: seven premises did not hold as
 written, and each is amended where it lands (the lanes not yet merged, `grades` and course notes,
 the entitlement-refused sync, the feed host, the sync hold, `mode_device`, a `campus.yaml` race).
@@ -607,7 +608,9 @@ go Back and pick another school freely until payment. **C1's page rules, carried
   **their feed items are never imported**: `ingest.yaml` carries their pairs as `course_exclude`
   (F6b), and ingest leaves out an item only they claim (F6c; 2026-10-24, §14.45). The proof's
   counts are totalled in Rust from `school.preview`'s match-set buckets the same way, so they equal
-  what the vault will hold, with no second fetch (F7a, F8b). The list is
+  what the vault will hold, with no second fetch (F7a, F8b); `grades_courses` counts kept courses
+  marked `graded`, and **a removal never removes a class time**, since the registrar holds only the
+  current term (§14.47). The list is
   editable until payment; after it, `school.courses` has run and a course is removed in the
   console, as today.
 
@@ -1771,7 +1774,11 @@ job runners as a trait so tests pass fakes.
     pairs** (§14.46): after a step-3 label is edited, each course's `pairs` in the fake
     `--preview` call's `--courses` are byte-equal to that course's lines in `config.ingest`'s text
     (`course_map`, or `course_exclude` less any fragment a kept course shares), and a fragment a kept course also contributes is never in
-    `course_exclude`.
+    `course_exclude`. **Grades and class times on removal** (§14.47): with a fake preview whose
+    single-course buckets carry `graded: true` for two courses, removing one of them makes step 3's
+    `grades_courses` 1, and removing a `graded: false` course leaves it unchanged; with every
+    bucket `graded: null`, `grades_courses` is `null`; and step 3's `class_times` is the same
+    before and after any removal, and every registrar row still reaches `registrar.confirm`.
 13. **The feed is never silently lost (review r2, I1):** with a fake account store, (a) a store that
     fails twice leaves the feed `failed` and `config.ingest`'s text carries the link, with
     `feed_kept_on_device` set; (b) a quit after payment and before `school.store`, then a reload,
@@ -2203,7 +2210,10 @@ two tasks go back to the planner). Tests in `app/tests/onboarding.rs`, then the 
     code fragments and its gradebook uid pins, built exactly as `course_map`'s are) are written as
     one single-line flow sequence `course_exclude: [...]` through `yaml_scalar`, and appear in no
     `course_map` entry; with nothing removed the key is **absent**, so the bytes still equal
-    `build_into`'s (the first test above holds unchanged);
+    `build_into`'s (the first test above holds unchanged). **Removal never touches class times**
+    (§14.47, the controller's G5): `course_exclude` governs feed items only; the registrar's rows
+    are the current term's alone and reach the vault through `registrar.confirm` whatever was
+    removed, so F6b writes nothing for them and needs no code for this;
   - **a fragment a kept course also contributes is never excluded** (§14.46, F7c review r2): a
     lecture and its lab both contribute `CS 100`-style human codes (`course_fragments`,
     `scaffold.rs:420-429`); with the lab removed and the lecture kept, the shared fragment stays in
@@ -2290,10 +2300,23 @@ F7a and extended to `--tidied` in F7c:
     (`unmatched`). The buckets sum to the totals. The app (F2d's `onboarding_status`) totals the
     proof as every bucket whose set is empty or names at least one kept code, which is exactly what
     F6c's ingest imports.
+  - **`graded` on each single-course bucket** (§14.47, the controller's call): every course in
+    `--courses` has its own single-code bucket, present even when all its counts are zero, and that
+    bucket carries `graded: true` when the grades bundle has a graded item column for the course,
+    `false` when the bundle has none for it, and `null` when no bundle was given. Multi-code buckets
+    carry no `graded`. The app's kept `grades_courses` is the number of kept single-course buckets
+    with `graded: true` (and `null` when every bucket is `null`); the total `grades_courses` equals
+    the count over all single-course buckets.
+  - **Class times are never removed** (§14.47, the controller's G5): the registrar holds only the
+    current term, so every class time is counted in every total and imported whatever the student
+    removes; `class_times` stays a total for the proof, and its buckets (by match set, F7c review r2
+    Important 1) are for display only, never subtracted on a removal.
   - Tests: an item two kept courses' pairs both match sits in one two-code bucket and counts once;
-    removing one of the two keeps it; removing both drops it; **class times by match set too**
-    (F7c review r2, Important 1): two shells carrying one registrar code and one meeting give one
-    two-code `class_times` bucket, so removing the old shell keeps the class time; with `pairs`
+    removing one of the two keeps it; removing both drops it; **class times** (F7c review r2,
+    Important 1; §14.47): two shells carrying one registrar code and one meeting give one two-code
+    `class_times` bucket, and the kept `class_times` total is unchanged after removing either shell
+    or both; **`graded`**: a bundle grading one of two courses gives `true` and `false`, no bundle
+    gives `null` on both, and a course with no feed items still has its bucket; with `pairs`
     given, an edited label changes no bucket (§14.46); "Quiz covering SYN 120"-style
     summaries and bracketed section ids land where `ingest::match_course` puts them (one case
     each, with synthetic codes); the unmatched item is in `unmatched` and in the totals.
@@ -2394,7 +2417,10 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   key, saved in the answers file (the match-set buckets, keyed by code; §14.45), so the feed file is
   still deleted after the one preview; `onboarding_status` (Rust, never the page) totals the proof
   as every bucket whose set is empty or names a kept code, which is what F6c's ingest will import,
-  so a Remove changes the proof with no second fetch or preview. F8b also saves each course's pairs
+  so a Remove changes the proof with no second fetch or preview. **Two exceptions** (§14.47): kept
+  `grades_courses` is the count of kept single-course buckets with `graded: true` (`null` when no
+  bundle was given), and `class_times` is never reduced by a removal, since the registrar holds only
+  the current term and every class time is imported whatever is removed. F8b also saves each course's pairs
   (code fragments, gradebook uid pins) as F6b needs them for `course_map` and `course_exclude`.
   **One source of pairs** (§14.46, F7c review r2 Minor 1): F8b builds each course's pairs once, at
   capture, with `scaffold::course_fragments` (made `pub(crate)` if it is not) and the bundle's
@@ -3671,6 +3697,10 @@ From the F7c review (`docs/reports/2026-10-24-wave-b-f7c-review-r1.md`, on `feat
    §14.43's M2 are corrected.
 Tasks changed: F6b (the key and its test), F6c (new), F7a (`by_course`), F8b (saves each course's
 pairs; totals by match set), F8h, F1 test 12; §4.2 step 3, §4.9's `ingest.yaml` row, §6, §7 and §10.
+**What removal never touches** (added 2026-10-24, the controller's G5; §14.47): class times. The
+registrar holds only the current term, so every class time is counted in every total and imported
+whatever the student removes; `course_exclude` and the kept totals govern feed items (and, by
+`graded`, the grades count) only.
 
 ### 14.46 Shared fragments, the pin form, one source of pairs (2026-10-24)
 
@@ -3702,3 +3732,24 @@ diff" and Minor 1), with the planner's choices:
 Tasks changed: F6b (shared-fragment rule; pin lines; tests), F6c (bounded pin pass; tests; reader
 test for pins; oracle stop rule), F7a (pairs from `--courses`; class times by match set), F8b (one
 source of pairs, passed to `--preview`), F1 test 12 (pairs byte-equal).
+
+### 14.47 The grades count and class times on removal (2026-10-24, the controller's calls)
+
+1. **Per-course grades.** Step 3's `grades_courses` ("grades for N courses") could not be totalled
+   over kept rows, because `by_course`'s buckets carried no grades signal. Now every course in
+   `--courses` has its own single-code bucket (present even with zero counts), carrying
+   `graded: true` (the bundle has a graded item column for it), `false` (the bundle has none for
+   it) or `null` (no bundle); multi-code buckets carry none. The kept `grades_courses` counts kept
+   single-course buckets with `graded: true`, and is `null` when every bucket is `null` (F7a, F8b,
+   F1 test 12).
+2. **Class times are never removed** (G5). The registrar holds only the current term, so every
+   class time is counted in every total and imported whatever the student removes; no code change,
+   since the proof already counts an unattributed class time in every total. This **supersedes
+   §14.46 item 4's purpose**: F7a still buckets class times by match set (the r2 review's fix), but
+   only for display; the kept `class_times` total never falls on a removal, and F7a's two-shell test
+   now asserts the total is unchanged after removing either shell or both. Recorded beside §14.45
+   (its closing note), in F6b (`course_exclude` governs feed items only) and in F8b (the two
+   exceptions to the bucket rule).
+Tasks changed: F7a (`graded` on single-course buckets, every course a bucket, class-time buckets for
+display only, tests), F8b (kept `grades_courses` and `class_times` rules), F6b (a note that removal
+never touches class times; no code), F1 test 12 (grades and class-time expectations).
