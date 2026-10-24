@@ -50,7 +50,32 @@ pub fn pressure(task: &Task, today: Date, cal: &WeekCalendar) -> f64 {
 /// in both. Keys are computed once per task (decorate-sort-undecorate) to match Python's `key=`
 /// semantics — `pressure` walks up to 365 days of capacity, so calling it from a comparator would
 /// be both slower and, for NaN, differently ordered.
+///
+/// `rank` has no moment: it is `rank_at` with `None`, so it is the pressure order and nothing else.
 pub fn rank(tasks: &[Task], today: Date, cal: &WeekCalendar) -> Vec<Task> {
+    rank_at(tasks, today, cal, None)
+}
+
+/// The hour from which tasks closing tonight outrank the rest: 20:00 in the vault's zone.
+/// Quinn's ruling (a), 2026-10-24.
+pub const EVENING_HOUR: Time = Time::constant(20, 0, 0, 0);
+
+/// When a task closes tonight, as seen from moment `m`, or `None` if it does not.
+///
+/// v1: a task closes tonight when its `due` falls on `m`'s date and is strictly after `m`. A due
+/// time already passed, or equal to the moment, has closed. **This is the one place O6's late-window
+/// close goes**: a late task whose window closes tonight returns that close here. Daily late-penalty
+/// steps are out of v1 (ruling b), so only a window's close counts.
+fn closes_tonight(task: &Task, m: DateTime) -> Option<DateTime> {
+    task.due.filter(|due| due.date() == m.date() && *due > m)
+}
+
+/// `rank` at a moment. With `None`, or before `EVENING_HOUR`, or when the moment is not on `today`,
+/// this is exactly the pressure order. From `EVENING_HOUR` on, tasks closing tonight (see
+/// `closes_tonight`) come first, earliest close first, ties keeping the pressure order (stable
+/// sort on exact `DateTime`s, no float key); every other task keeps its pressure order after them.
+/// Rank overrides are inserted last, as `rank` always did, so they still win. Deterministic, no model.
+pub fn rank_at(tasks: &[Task], today: Date, cal: &WeekCalendar, moment: Option<DateTime>) -> Vec<Task> {
     let mut decorated: Vec<(f64, i64, Task)> = tasks
         .iter()
         .map(|t| (pressure(t, today, cal), -t.importance, t.clone()))
@@ -61,6 +86,19 @@ pub fn rank(tasks: &[Task], today: Date, cal: &WeekCalendar) -> Vec<Task> {
     let mut overridden: Vec<Task> = scored.iter().filter(|t| t.rank_override.is_some()).cloned().collect();
     let mut result: Vec<Task> = scored.into_iter().filter(|t| t.rank_override.is_none()).collect();
 
+    if let Some(m) = moment.filter(|m| m.date() == today && m.time() >= EVENING_HOUR) {
+        let mut closing: Vec<(DateTime, Task)> = Vec::new();
+        let mut rest: Vec<Task> = Vec::new();
+        for t in result {
+            match closes_tonight(&t, m) {
+                Some(at) => closing.push((at, t)),
+                None => rest.push(t),
+            }
+        }
+        closing.sort_by_key(|(at, _)| *at);
+        result = closing.into_iter().map(|(_, t)| t).chain(rest).collect();
+    }
+
     overridden.sort_by_key(|t| t.rank_override.unwrap_or(0));
     for task in overridden {
         let target = task.rank_override.unwrap_or(1) - 1;
@@ -68,15 +106,6 @@ pub fn rank(tasks: &[Task], today: Date, cal: &WeekCalendar) -> Vec<Task> {
         result.insert(index, task);
     }
     result
-}
-
-/// The hour from which tasks closing tonight outrank the rest: 20:00 in the vault's zone.
-/// Quinn's ruling (a), 2026-10-24.
-pub const EVENING_HOUR: Time = Time::constant(20, 0, 0, 0);
-
-/// `rank` at a moment: from `EVENING_HOUR` on, tasks closing tonight come first. (Red stub: T2.)
-pub fn rank_at(_tasks: &[Task], _today: Date, _cal: &WeekCalendar, _moment: Option<DateTime>) -> Vec<Task> {
-    todo!("evening T2")
 }
 
 /// Split into (must do today no matter what, everything recommendable).
