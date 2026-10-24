@@ -298,14 +298,162 @@ fn without_registrar_class_times_is_null_and_no_error() {
     let _ = std::fs::remove_dir_all(&v);
 }
 
+// ---- F7c: `--tidied`, the reveal's counts read from the vault ----
+
+fn tidied(vault: &Path) -> Output {
+    run(vault, &["--tidied".as_ref()])
+}
+
+fn task_note(id: &str, title: &str, created_by: &str) -> String {
+    format!(
+        "---\nid: {id}\ntitle: {title}\nstatus: active\neffort_hours: 1.5\neffort_source: inferred\n\
+         importance: 3\ncreated_by: {created_by}\nsource_uid: \"{created_by}:{id}\"\n---\n\nBody.\n"
+    )
+}
+
+fn archive_note(id: &str, title: &str, reason: &str) -> String {
+    format!(
+        "---\nid: {id}\ntitle: {title}\nstatus: archived\narchived_reason: {reason}\ncreated_by: blackboard\n---\n\nBody.\n"
+    )
+}
+
+/// One journal line, as the engine writes it: sorted keys, Python `json.dumps` separators.
+fn journal_line(seq: u32, actor: &str, path: &str, field: &str) -> String {
+    format!(
+        "{{\"actor\": \"{actor}\", \"device\": \"testbox\", \"evidence\": null, \"field\": \"{field}\", \
+         \"id\": \"task_{seq:010}\", \"new\": 2.0, \"old\": 1.5, \"op\": \"set\", \"path\": \"{path}\", \
+         \"run_id\": \"run-{seq}\", \"seq\": {seq}, \"ts\": \"2026-08-30T12:00:0{seq}.000Z\", \"via\": \"cli\"}}\n"
+    )
+}
+
+/// A vault built inline. Live tasks: two from `blackboard`, one `gmail`, one `zybooks`. Archive:
+/// two `imported-past`, one `imported-done`, one archived for another reason. The journal: an agent
+/// set the effort of `quiz-a` and `reading`; the student set `quiz-b`'s; an agent set only the
+/// importance of `essay`; an agent set the effort of an archived note (not live, so not counted).
+fn tidy_vault(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("knowlu-onboarding-cmd-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["config", "tasks", "archive", "state/journal"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    let put = |rel: &str, text: String| std::fs::write(dir.join(rel), text).unwrap();
+    put("config/ingest.yaml", "timezone: America/Chicago\n".to_string());
+    put("tasks/quiz-a.md", task_note("task_00000000a1", "Quiz A", "blackboard"));
+    put("tasks/quiz-b.md", task_note("task_00000000a2", "Quiz B", "blackboard"));
+    put("tasks/essay.md", task_note("task_00000000a3", "Essay", "gmail"));
+    put("tasks/reading.md", task_note("task_00000000a4", "Reading", "zybooks"));
+    put("archive/old-1.md", archive_note("task_00000000b1", "Old 1", "imported-past"));
+    put("archive/old-2.md", archive_note("task_00000000b2", "Old 2", "imported-past"));
+    put("archive/done-1.md", archive_note("task_00000000b3", "Done 1", "imported-done"));
+    put("archive/other-1.md", archive_note("task_00000000b4", "Other 1", "completed"));
+    let journal = [
+        journal_line(1, "agent:knowlu.enrich", "tasks/quiz-a.md", "effort_hours"),
+        journal_line(2, "student", "tasks/quiz-b.md", "effort_hours"),
+        journal_line(3, "agent:knowlu.enrich", "tasks/essay.md", "importance"),
+        journal_line(4, "agent:knowlu.enrich", "tasks/reading.md", "effort_hours"),
+        journal_line(5, "agent:knowlu.enrich", "archive/old-1.md", "effort_hours"),
+    ];
+    put("state/journal/2026-08-30.jsonl", journal.concat());
+    dir
+}
+
 #[test]
-fn tidied_alone_prints_a_named_not_built_line_and_exits_zero() {
-    let v = scratch("tidied");
-    let before = snapshot(&v);
-    let out = run(&v, &["--tidied".as_ref()]);
-    assert_eq!(out.status.code(), Some(0), "{out:?}");
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(text.contains("onboarding: --tidied is not built yet"), "{text}");
-    assert_eq!(snapshot(&v), before);
+fn tidied_counts_archive_notes_by_archived_reason() {
+    let v = tidy_vault("tidy-archive");
+    let j = json_of(&tidied(&v));
+    assert_eq!(j["imported_past"], json!(2), "{j}");
+    assert_eq!(j["imported_done"], json!(1), "another archived_reason is neither: {j}");
+    assert_eq!(j["errors"], json!([]), "{j}");
     let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn tidied_counts_live_tasks_by_created_by() {
+    let v = tidy_vault("tidy-live");
+    let j = json_of(&tidied(&v));
+    assert_eq!(j["live_by_source"], json!({"blackboard": 2, "gmail": 1, "zybooks": 1}), "archive notes are not live: {j}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn tidied_effort_estimated_counts_live_tasks_an_agent_set_the_effort_of() {
+    let v = tidy_vault("tidy-effort");
+    let j = json_of(&tidied(&v));
+    assert_eq!(
+        j["effort_estimated"],
+        json!(2),
+        "quiz-a and reading; not the student's set, not another field, not an archived note: {j}"
+    );
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn tidied_writes_nothing_to_the_vault_or_its_journal() {
+    let v = tidy_vault("tidy-writes");
+    let before = snapshot(&v);
+    json_of(&tidied(&v));
+    assert_eq!(snapshot(&v), before, "the vault's bytes, journal included, must not change");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn tidied_runs_without_a_cloud_config_and_is_not_gated() {
+    let v = tidy_vault("tidy-ungated");
+    assert!(!v.join("config/cloud.yaml").exists());
+    let out = tidied(&v);
+    json_of(&out);
+    assert!(!String::from_utf8_lossy(&out.stdout).to_lowercase().contains("entitlement"), "{out:?}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn tidied_same_input_gives_the_same_bytes_with_sorted_keys() {
+    let v = tidy_vault("tidy-twice");
+    let a = tidied(&v);
+    let b = tidied(&v);
+    assert_eq!(a.status.code(), Some(0), "{a:?}");
+    assert_eq!(a.stdout, b.stdout);
+    let text = String::from_utf8_lossy(&a.stdout).to_string();
+    let at = |k: &str| text.find(&format!("\"{k}\"")).unwrap_or_else(|| panic!("no {k} in {text}"));
+    assert!(at("effort_estimated") < at("errors") && at("errors") < at("imported_done"), "{text}");
+    assert!(at("imported_done") < at("imported_past") && at("imported_past") < at("live_by_source"), "{text}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn tidied_with_no_archive_folder_nulls_only_the_archive_counts() {
+    let v = tidy_vault("tidy-noarchive");
+    std::fs::remove_dir_all(v.join("archive")).unwrap();
+    let j = json_of(&tidied(&v));
+    assert_eq!(j["imported_past"], Value::Null, "{j}");
+    assert_eq!(j["imported_done"], Value::Null, "{j}");
+    assert_eq!(j["effort_estimated"], json!(2), "the other counts still stand: {j}");
+    let errors = j["errors"].as_array().unwrap_or_else(|| panic!("errors is an array: {j}"));
+    assert!(errors.iter().any(|e| e.as_str().is_some_and(|s| s.contains("archive"))), "{j}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn tidied_with_no_journal_nulls_effort_estimated_and_names_it() {
+    let v = tidy_vault("tidy-nojournal");
+    std::fs::remove_dir_all(v.join("state")).unwrap();
+    let j = json_of(&tidied(&v));
+    assert_eq!(j["effort_estimated"], Value::Null, "an unread journal is not zero: {j}");
+    assert_eq!(j["imported_past"], json!(2), "{j}");
+    assert_eq!(j["live_by_source"], json!({"blackboard": 2, "gmail": 1, "zybooks": 1}), "{j}");
+    let errors = j["errors"].as_array().unwrap_or_else(|| panic!("errors is an array: {j}"));
+    assert!(errors.iter().any(|e| e.as_str().is_some_and(|s| s.contains("journal"))), "{j}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn tidied_on_a_vault_that_does_not_exist_is_all_null_a_named_error_and_exit_zero() {
+    let v = std::env::temp_dir().join(format!("knowlu-onboarding-cmd-{}-tidy-missing", std::process::id()));
+    let _ = std::fs::remove_dir_all(&v);
+    let j = json_of(&tidied(&v));
+    for key in ["imported_past", "imported_done", "effort_estimated", "live_by_source"] {
+        assert_eq!(j[key], Value::Null, "{key}: {j}");
+    }
+    assert!(j["errors"].as_array().is_some_and(|e| !e.is_empty()), "{j}");
+    assert!(!v.exists(), "the command must not create the vault");
 }
