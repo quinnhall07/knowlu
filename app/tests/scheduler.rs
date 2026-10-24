@@ -3199,6 +3199,59 @@ fn test_18_a_pending_privacy_update_holds_the_same_steps_by_the_same_names_in_ev
     assert_eq!((privacy_rows(&full), privacy_rows(&no_rank)), (1, 1));
 }
 
+// ---- F8s review r1, minors 1 and 3 -------------------------------------------------------------------------
+
+#[test]
+fn test_15_a_stopped_slot_whose_judge_would_be_a_named_skip_adds_no_runner_log_line() {
+    // "canceled": the judge plan is `Skip(no entitlement)`, which a running slot logs.
+    let r = privacy_rig("o3-15-judge-skip", "canceled", true);
+    let dated = test_row("blackboard", Some("2026-10-01"));
+    let grades = GradesSeam { row: Some(&dated), capture: Some(&panic_capture), window_open: false };
+    let mail = MailSeam { mailboxes: &one_due_mailbox, pass: Some(&panic_pass), window_open: false };
+    let sch = Scheduler::default();
+    sch.stop.store(true, Ordering::SeqCst);
+    let log_before = r.runner_log();
+    let s = run_slot_scoped(&r.cs, &sch, None, false, &grades, &mail, SlotScope::Full);
+    assert_nothing_ran(&r, &s, &log_before);
+    assert!(!names_of(&s).iter().any(|n| n.contains("no entitlement")), "the skip is not named: {:?}", names_of(&s));
+}
+
+#[test]
+fn test_15_a_stop_set_after_the_privacy_hold_was_read_names_no_held_step_and_logs_none() {
+    let r = accepted_rig("o3-15-late", false);
+    r.set_privacy(Some("2026-01-01"));
+    let sch = Scheduler::default();
+    let late_stop = || { sch.stop.store(true, Ordering::SeqCst); Ok(Vec::new()) };
+    let grades = GradesSeam { row: None, capture: None, window_open: false };
+    let mail = MailSeam { mailboxes: &late_stop, pass: Some(&panic_pass), window_open: false };
+    let s = run_slot_scoped(&r.cs, &sch, None, false, &grades, &mail, SlotScope::Full);
+    let named = names_of(&s);
+    assert!(sch.stop.load(Ordering::SeqCst), "the mail stage's mailbox read set the stop");
+    assert!(r.children_started().is_empty(), "{:?}", r.children_started());
+    for step in ["sync", "coursework", "ingest", "judge", "rank"] {
+        assert!(rows_starting(&named, step).iter().all(|n| n.contains("not run")), "{step}: {named:?}");
+    }
+    let log = r.runner_log();
+    for step in ["sync", "coursework", "ingest", "judge"] {
+        assert!(!log.contains(&format!("{step} {HELD}")), "{step} has no held line in the runner log:\n{log}");
+    }
+    assert!(s.engine_ok && s.reason.is_none(), "{s:?}");
+}
+
+#[test]
+fn test_18_before_config_keeps_the_judge_skip_its_entitlement_name_and_log_line() {
+    let r = privacy_rig("o3-18-before-judge-skip", "canceled", false);
+    let _ = std::fs::remove_file(r.v.join("config").join("ingest.yaml"));
+    let grades = GradesSeam { row: None, capture: None, window_open: false };
+    let mail = MailSeam { mailboxes: &no_mailbox, pass: None, window_open: false };
+    let s = run_slot_scoped(&r.cs, &Scheduler::default(), None, false, &grades, &mail, SlotScope::BeforeConfig);
+    let named = names_of(&s);
+    assert_eq!(rows_starting(&named, "judge"), ["judge (skipped: no entitlement)"], "one row, its own name: {named:?}");
+    assert!(runner_log_of(&r).contains("local ok judge (skipped: no entitlement)"), "and its log line");
+    assert!(!runner_log_of(&r).contains("not yet"), "a scope's rows stay out of the log");
+    assert_eq!(r.children_started(), ["sync"]);
+}
+
 // ---- test 27: onboarding mode primes the scheduler's cached mode ---------------------------------------------------
 
 fn topline_scheduler(sch: &Scheduler) -> Value {

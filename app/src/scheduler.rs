@@ -1092,7 +1092,10 @@ pub fn run_slot_scoped(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&App
         judge = JudgePlan::Skip("judge (skipped: privacy update not accepted)");
     }
     if let JudgePlan::Skip(note) = &judge {
-        steps.push(((*note).to_string(), 0));
+        // A stopped slot names the step not run instead (§4.10: it adds no run-log line).
+        if !halted(sch, &mut steps, "judge") {
+            steps.push(((*note).to_string(), 0));
+        }
     }
     // The engine steps: `slot_argv` is not edited. Held, its `sync`, `coursework` and `ingest` entries are
     // dropped by `args[0]` and each becomes a named skip after judge's row, in `slot_argv`'s order; an
@@ -1106,7 +1109,7 @@ pub fn run_slot_scoped(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&App
         scope_row(sch, &mut steps, &a[0], if a[0] == "rank" { "the first full slot ranks" } else { "your courses are not in yet" });
     }
     let mut argv = kept;
-    if privacy_held {
+    if privacy_held && !sch.stop.load(Ordering::SeqCst) {
         let (held, kept): (Vec<_>, Vec<_>) = argv.into_iter().partition(|(_, a)| matches!(a[0].as_str(), "sync" | "coursework" | "ingest"));
         for (_, a) in &held {
             steps.push((format!("{} (skipped: {HELD})", a[0]), 0));
@@ -1168,7 +1171,8 @@ pub fn run_slot_scoped(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&App
             }
         })
         .collect();
-    if !skips.is_empty() {
+    // A stopped slot writes no run-log line (§4.10), whatever named skip an earlier stage pushed.
+    if !skips.is_empty() && !sch.stop.load(Ordering::SeqCst) {
         let _io = lock(&cs.vault_io);
         for note in &skips {
             let _ = knowlu_engine::cli::append_run_log(&cs.vault, "local", "ok", note, None);
