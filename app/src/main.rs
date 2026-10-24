@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use tauri::Manager;
-use knowlu::{account, commands, grades, lms_link, mail, onboarding, profiles, registrar, report, scheduler, state::{app_data_root, resolve_vault, ConsoleState}, tray, week};
+use knowlu::{account, commands, grades, lms_link, mail, onboarding, profiles, onboarding_state::{self, LaunchMode}, registrar, report, scheduler, state::{app_data_root, resolve_vault, ConsoleState}, tray, week};
 
 /// A missing/bad vault is fatal before any window exists, so it has to reach the user some way
 /// other than a console that may not be attached (the exe carries `windows_subsystem = "windows"`
@@ -143,6 +143,9 @@ fn run_console(p: profiles::Profile, root: std::path::PathBuf) -> ! {
     // `Box::leak` because `tauri_plugin_autostart` wants `&'static str` for the arguments it
     // registers — unchanged from today, and the reason autostart relaunches THIS profile.
     let vault_str: &'static str = Box::leak(vault.to_string_lossy().into_owned().into_boxed_str());
+    // F4: the launch mode comes from `onboarding.json`, read before the builder. An absent or finished
+    // file is the normal console; an unfinished or unreadable one is onboarding mode (F2a).
+    let onboarding = onboarding_state::launch_mode(&onboarding_state::load_state(&data_dir)) == LaunchMode::Onboarding;
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.set_focus(); } }))
         .plugin(tauri_plugin_window_state::Builder::default().build())
@@ -165,17 +168,28 @@ fn run_console(p: profiles::Profile, root: std::path::PathBuf) -> ! {
             // Phase 3: the registrar's sign-in window is `lms_link`'s, so the console holds its
             // session directory as the wizard does.
             app.manage(lms_link::LmsSession::default());
-            tray::build(app.handle())?;
-            use tauri_plugin_autostart::ManagerExt;
-            let al = app.autolaunch();
-            if autostart { let _ = al.enable(); } else { let _ = al.disable(); }
             // H4 (email plan): the mail launch sweep, retried profile deletes and an open backfill's
             // resume, on its own thread. After `manage(cs)` (it reads `ConsoleState`) and before the
             // scheduler, so a slot never meets a leftover `mail-setup`.
             knowlu::mail::live::on_start(app.handle());
             // The scheduler's tick and housekeeping threads (Task 12) — inert unless
             // `config/runners.yaml`'s `local` entry says `scheduler: app`.
-            scheduler::spawn(app.handle().clone());
+            if onboarding {
+                // F4: no tray, no autostart and no scheduler until the reveal. Skipping `spawn` skips
+                // its priming of the cached mode, so it is primed here (T0); one update check runs at
+                // launch, and onboarding has no install path.
+                app.manage(LaunchMode::Onboarding);
+                scheduler::prime_mode_device(&app.state::<ConsoleState>(), &app.state::<scheduler::Scheduler>());
+                scheduler::spawn_update_check(app.handle());
+                if let Some(w) = app.get_webview_window("main") { let _ = w.maximize(); }
+            } else {
+                app.manage(LaunchMode::Normal);
+                tray::build(app.handle())?;
+                use tauri_plugin_autostart::ManagerExt;
+                let al = app.autolaunch();
+                if autostart { let _ = al.enable(); } else { let _ = al.disable(); }
+                scheduler::spawn(app.handle().clone());
+            }
             Ok(())
         })
         // Closing the console window hides it to the tray instead of ending the process — Knowlu
@@ -184,11 +198,18 @@ fn run_console(p: profiles::Profile, root: std::path::PathBuf) -> ! {
         // closes it early (grades spec §4), and its kept session is never wiped here. The
         // registrar's sign-in window (`lms_link::WINDOW`, `lms-signin`) is a campus session: it
         // closes for real, and its throwaway directory is wiped on `Destroyed` (phase 3, R4-f).
-        .on_window_event(|w, e| {
+        .on_window_event(move |w, e| {
             if w.label() == lms_link::WINDOW {
                 if matches!(e, tauri::WindowEvent::Destroyed) { lms_link::wipe_session(w.app_handle()); }
             } else if w.label() == "main" {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = e { api.prevent_close(); let _ = w.hide(); }
+                if let tauri::WindowEvent::CloseRequested { api, .. } = e {
+                    api.prevent_close();
+                    // Onboarding mode: the quit drains on its own thread, never on this event loop
+                    // (review r5, I-5); a second close meets the exit guard.
+                    if onboarding {
+                        onboarding_state::close_requested(std::sync::Arc::new(onboarding_state::LiveExit::new(w.app_handle().clone())), onboarding_state::exit_guard());
+                    } else { let _ = w.hide(); }
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![commands::state, commands::note, commands::mark_seen, commands::ui_event, commands::set_fields, commands::create_task, commands::delete_note, commands::remove_lane_date, commands::decide, commands::answer_card, week::commitment_proposals, week::commitments_confirm, week::your_week, week::preview_window, registrar::open_registrar_window, registrar::capture_registrar, registrar::close_registrar_window, commands::close_info, commands::open_issue, commands::resolve_issue, commands::set_body, commands::profile, commands::set_preferences, commands::set_interests, commands::dropped_events, commands::sync, commands::backup_now, commands::get_settings, commands::set_settings, commands::set_profile_name, commands::copy_diagnostics, commands::copy_text, commands::settings_context, commands::switch_profile, commands::check_for_updates, commands::install_update, onboarding::launch_state, onboarding::pick_folder, onboarding::pick_file, account::google_sign_in, account::send_magic_link, account::verify_email_code, account::sign_out, account::open_policy, account::entitlement_now, account::open_checkout, account::account_status, account::open_portal, account::attach_account, account::delete_my_data, account::google_status, account::google_connect, account::google_disconnect, account::privacy_status, account::accept_privacy, report::report_preview, report::report_send, grades::grades_status, grades::grades_connect, grades::grades_refresh, grades::grades_forget, mail::mail_status, mail::mail_setup_start, mail::mail_setup_progress, mail::mail_setup_answer, mail::mail_setup_stop, mail::mail_sign_in, mail::mail_disconnect, mail::mail_rotate, mail::mail_keep_session, mail::mail_applied])

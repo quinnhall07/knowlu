@@ -3298,6 +3298,32 @@ fn test_27_main_primes_the_mode_and_checks_for_an_update_once_and_never_installs
     }
 }
 
+/// F4 (plan 2315): the onboarding arm of `run_console`, as source text (the same stand-in the mail and
+/// handler-list tests use). The mode is read before the builder; the tray, the autostart calls and
+/// `scheduler::spawn` live only in the normal arm; the main window's close is prevented and handed to
+/// `close_requested`, which runs the quit on its own thread (review r5, I-5).
+#[test]
+fn f4_run_console_has_an_onboarding_arm_that_skips_the_tray_autostart_and_spawn_and_hands_the_close_to_a_thread() {
+    let main = src_text("main.rs");
+    let body = &main[main.find("fn run_console").expect("run_console")..];
+    let (before_builder, builder) = body.split_once("tauri::Builder::default()").expect("the builder");
+    assert!(before_builder.contains("onboarding_state::load_state(") && before_builder.contains("onboarding_state::launch_mode("), "the mode is read before the builder");
+        let setup = &builder[builder.find(".setup(move |app|").expect("setup")..builder.find(".on_window_event(").expect("window events")];
+    let (onboarding_arm, normal_arm) = setup.split_once("} else {").expect("setup splits on the mode");
+    assert!(onboarding_arm.contains("app.manage(LaunchMode::Onboarding)") && normal_arm.contains("app.manage(LaunchMode::Normal)"), "each arm manages its mode");
+    assert!(onboarding_arm.contains("scheduler::prime_mode_device") && onboarding_arm.contains("scheduler::spawn_update_check") && onboarding_arm.contains("maximize"));
+    for skipped in ["tray::build", "scheduler::spawn(", "autolaunch"] {
+        assert!(!onboarding_arm.contains(skipped), "the onboarding arm skips {skipped}");
+        assert!(normal_arm.contains(skipped), "the normal arm keeps {skipped}");
+    }
+    for kept in ["app.manage(scheduler::Scheduler::default())", "app.manage(knowlu::updates::Updates::default())", "app.manage(lms_link::LmsSession::default())", "mail::live::on_start"] {
+        assert!(setup.find(kept).is_some_and(|at| at < setup.find("if onboarding").unwrap_or(0)), "{kept} runs before the split, in both modes");
+    }
+    let events = &builder[builder.find(".on_window_event(").unwrap()..builder.find(".invoke_handler(").unwrap()];
+    assert!(events.contains("api.prevent_close()") && events.contains("onboarding_state::close_requested("), "the close is prevented and handed to a thread: {events}");
+    assert!(!events.contains("onboarding_quit"), "the event loop never runs the quit itself");
+}
+
 #[test]
 fn test_27_the_housekeeping_tick_calls_spawn_update_check_and_the_check_lives_only_inside_it() {
     let sched = src_text("scheduler.rs");
