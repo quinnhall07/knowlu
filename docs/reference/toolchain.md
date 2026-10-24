@@ -18,6 +18,12 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
 - The **one** release profile is the workspace root's (`opt-level = "z"`, `lto`, `codegen-units = 1`,
   `panic = "abort"`, `strip`); Cargo ignores `[profile.*]` in members. **`cargo test --release` will
   not link** — test in the dev profile.
+- **`os error 193` ("%1 is not a valid Win32 application") from a test that runs the real engine**
+  means `target/debug/knowlu-engine.exe` is zero bytes. `app/build.rs` stages a zero-byte sidecar
+  placeholder in `app/binaries/` when none is there, and `tauri-build` copies it next to the built
+  app as `knowlu-engine.exe` — over the real engine. Cargo still thinks the engine is up to date, so
+  a plain rebuild leaves it at zero bytes. Fix: `touch engine/src/main.rs`, then
+  `cargo build -p knowlu-engine`.
 - `ureq` is built with its non-default **`cookies`** feature and VHL does not work without it: CAS
   login on `www.vhlcentral.com`, dashboard on `m3a.vhlcentral.com`, one jar scoped to `.vhlcentral.com`
   — `vhl::default_opener` owns one agent; a fresh agent per request reads as a dead session.
