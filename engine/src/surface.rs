@@ -18,7 +18,7 @@ use serde_yaml_ng::Mapping;
 
 use crate::models::{apply_slice_default, load_task_notes, Task};
 use crate::planning::{load_planning, PlanningConfig};
-use crate::ranking::{designate_today_explained, partition_must_do, rank, Take};
+use crate::ranking::{designate_today_explained, partition_must_do, rank_at, Take};
 use crate::render::{capacity_breakdown, py_float, round2, runway_days, short_date, status_word};
 use crate::scheduling::{add_days, days_between, slack_days, DEFAULT_BUFFER_DAYS};
 use crate::weekcal::WeekCalendar;
@@ -221,10 +221,37 @@ pub fn load(vault: &Path, today: Date) -> Loaded {
     load_with(vault, today, None)
 }
 
-/// [`load`] at a moment: the evening step's input (evening plan T4). STUB (T1c): ignores the
-/// moment, so the reorder tests fail on their assertions. T4 gives `load_with`'s body `rank_at`.
-pub fn load_at(vault: &Path, today: Date, preview: Option<&Window>, _moment: Option<DateTime>) -> Loaded {
-    load_with(vault, today, preview)
+/// [`load`] at a moment: the evening step's input (evening plan T4). `moment` is the civil
+/// wall-clock the page displays; `None` ranks as `load` always has.
+pub fn load_at(vault: &Path, today: Date, preview: Option<&Window>, moment: Option<DateTime>) -> Loaded {
+    let planning = load_planning(&vault.join("config").join("planning.yaml"));
+    let mut unreadable = Vec::new();
+    let notes = load_task_notes(&vault.join("tasks"), Some(&mut unreadable));
+    let metas: BTreeMap<String, Mapping> =
+        notes.iter().map(|(t, m)| (t.slug.clone(), m.clone())).collect();
+    let mut tasks: Vec<Task> = notes.into_iter().map(|(t, _)| t).collect();
+    apply_slice_default(&mut tasks, planning.slice_hours);
+    let events = crate::calfeed::read_snapshot(&vault.join("state").join("calendar.md"))
+        .into_values()
+        .flatten()
+        .collect();
+    let current = WeekCalendar::for_vault(vault, events);
+    let (cal, against) = match preview {
+        Some(window) => (with_window(current.clone(), today, window), Some(current)),
+        None => {
+            let set = crate::commitments::load(vault);
+            let base = crate::commitments::baseline(vault, &set, &current, today)
+                .filter(|base| *base != current.window(today));
+            let against = base.map(|(start, end)| current.clone().with_day_window(today, start, end));
+            (current, against)
+        }
+    };
+    let ranked = rank_at(&tasks, today, &cal, moment);
+    let takes = designate_today_explained(&ranked, today, &cal, Some(&planning));
+    let moved = against
+        .and_then(|base| crate::commitments::moved(&ranked, today, &cal, &base, Some(&planning)));
+    let accepted = accepted_events(vault, &crate::eventledger::load_ledger(vault, None));
+    Loaded { tasks, metas, unreadable, cal, planning, ranked, takes, moved, accepted }
 }
 
 /// A planning window per weekday (`DAY_KEYS` order), as `commitments::parse_window` returns it.
@@ -252,34 +279,7 @@ fn with_window(mut cal: WeekCalendar, today: Date, window: &Window) -> WeekCalen
 /// proposed window and `moved` diffs it against the **current** window. Both designations come
 /// from the same ranked list. Writes nothing.
 fn load_with(vault: &Path, today: Date, preview: Option<&Window>) -> Loaded {
-    let planning = load_planning(&vault.join("config").join("planning.yaml"));
-    let mut unreadable = Vec::new();
-    let notes = load_task_notes(&vault.join("tasks"), Some(&mut unreadable));
-    let metas: BTreeMap<String, Mapping> =
-        notes.iter().map(|(t, m)| (t.slug.clone(), m.clone())).collect();
-    let mut tasks: Vec<Task> = notes.into_iter().map(|(t, _)| t).collect();
-    apply_slice_default(&mut tasks, planning.slice_hours);
-    let events = crate::calfeed::read_snapshot(&vault.join("state").join("calendar.md"))
-        .into_values()
-        .flatten()
-        .collect();
-    let current = WeekCalendar::for_vault(vault, events);
-    let (cal, against) = match preview {
-        Some(window) => (with_window(current.clone(), today, window), Some(current)),
-        None => {
-            let set = crate::commitments::load(vault);
-            let base = crate::commitments::baseline(vault, &set, &current, today)
-                .filter(|base| *base != current.window(today));
-            let against = base.map(|(start, end)| current.clone().with_day_window(today, start, end));
-            (current, against)
-        }
-    };
-    let ranked = rank(&tasks, today, &cal);
-    let takes = designate_today_explained(&ranked, today, &cal, Some(&planning));
-    let moved = against
-        .and_then(|base| crate::commitments::moved(&ranked, today, &cal, &base, Some(&planning)));
-    let accepted = accepted_events(vault, &crate::eventledger::load_ledger(vault, None));
-    Loaded { tasks, metas, unreadable, cal, planning, ranked, takes, moved, accepted }
+    load_at(vault, today, preview, None)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2155,8 +2155,8 @@ fn build_state_with(
     seen_at: Option<&str>,
     preview: Option<&Window>,
 ) -> State {
-    let l = load_with(vault, today, preview);
     let civil = now.datetime();
+    let l = load_at(vault, today, preview, Some(civil));
     // `closed_this_week`'s "not closed yet" bound compares against journal `ts` values, which
     // are UTC ISO strings — `civil` above is the vault-LOCAL wall clock (it feeds the page's
     // displayed `now`), so this is a separate conversion, not a reuse of `civil`.
