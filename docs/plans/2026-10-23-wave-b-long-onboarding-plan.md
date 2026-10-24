@@ -788,7 +788,10 @@ promised, and its "still coming" line until each handed-over job is done.
   `onboarding_jobs.rs`, so F9's caller, F11's screens and F1 share one spelling):
   `grades_read_failed`, with the fix "Knowlu couldn't read your grades this time. It will try again
   on its next run, or press Try again now. If it keeps failing, reconnect your school in Settings
-  after setup." Every other `failed` reason this plan names (for example "waiting to reach your
+  after setup." **The second** (§14.51; F8a2): `job_crashed`, with the fix "Knowlu stopped twice
+  while this step was running, so it has paused it. Press Try again to run it once more." (the
+  queue already names an unwinding panic `job_crashed`, `REASON_JOB_CRASHED`; F8a2 adds the fix
+  beside it). Every other `failed` reason this plan names (for example "waiting to reach your
   account", the sync status's `last_error`) joins the same constants as its task builds it.
   States are written to `onboarding.json` as they change, so a quit loses at most the running job.
 - **Device-side before payment, everything else after.** `school.capture` and `school.preview` need
@@ -1097,7 +1100,50 @@ flight **at its next safe point**, never at the end of everything queued (review
 **nothing ever clears it**, not the scheduler at a slot's start and not the queue: it lives for the
 process, and every way out of onboarding ends the process by its own command (below). So a stop
 set while the queue is between dequeuing a slot and starting it still stops that slot before its first
-stage. The normal console never sets it.
+stage. The normal console never sets it. **Two flags, one call** (F8f review I-1, §14.51): the
+queue keeps its own stop (`Inner.stop`, which `Queue::request_stop` sets) and the slot checks
+`sch.stop`; F2b's live `ExitSeams::request_stop` sets **`sch.stop` first, then the queue's**, in one
+call, so a slot in flight sees the stop at its next stage boundary. Neither is ever cleared.
+
+**The drain is bounded by its runners, never by abandoning a writer** (F8f review I-2; §14.51 as
+revised after its review r1, C1). Only a runner that writes **nothing anywhere** (no vault, answers
+file, credential, `mail.json` or account) may be abandoned: today's `ABANDON_AT_ONCE`, the canary and
+the first mail pass (`onboarding_jobs.rs:106-110`, whose doc already states that rule). Every other
+running job is **waited for**, as F8f's drain does today (`onboarding_jobs.rs:340-341`), because an
+abandoned writer's thread keeps running (`:108-109`) and would write after the exit's next steps:
+after Sign out's `on_sign_out` it would put back the answers file or a pending link the sign-out
+deleted. The wait is bounded because **every waited-for runner heeds the stop at its safe points
+and writes nothing once it has seen it** (F8b, F8d, F8g; each names its bound):
+- `school.capture`: the stop is checked between its reads and before each write; a running hidden
+  read ends within `grades::SETTLE` (45 s, `grades.rs:460`) plus the read's 30-second agent timeout
+  (`grades.rs:506`); an open visible school sign-in is closed at the stop, never left to
+  `SIGN_IN_LIMIT`'s 15 minutes (`grades.rs:462`). About 75 s at worst;
+- `school.preview`, the Google reads, `coursework.discover`: the call in hand (an engine read or one
+  request), then no write;
+- `mail.setup`: `Shared::stop`, which ends the run after its current step (`mail/setup.rs:251-252`;
+  the run checks it between steps and in its window waits, `mail/runner.rs:462, 481, 598, 662`).
+  Two waits do not check it today: the address confirm, up to `CONFIRM_WAIT`, 15 minutes
+  (`runner.rs:72, 800-812`), and the canary step, `FORWARD_SETTLE` plus two `CANARY_WAIT`s
+  (`runner.rs:64, 68, 844-884`). **F8d adds the check to both** (§14.51 r2, R2), and a wait the stop
+  ended is recorded as a stop to resume, never as a failed confirm or canary, so `mail.setup` ends
+  within one `POLL` (5 s, `runner.rs:74`);
+- a slot: its running stage. **The stop never kills a running engine child** (§14.51 r2, the
+  controller's ruling, G7): the child is waited for, at worst one `CHILD_TIMEOUT` (20 minutes,
+  `scheduler.rs:28`), and the page says so;
+- a local-lane job: seconds, within the account call's 30 s (`account.rs:40`).
+Why not "check the stop before each write" alone: that is a check-then-act with nothing ordering it
+against `on_sign_out`'s deletes on another thread, so it narrows the window and never closes it;
+the wait closes it, because the exits run `on_sign_out`, the freeze and the flush only after the
+drain returns. The stop checks are there to keep the wait short, and the wait keeps it safe.
+`quit_flush`'s 10-second cap runs **after** the drain, never alongside it. **The page's words**
+(F11a, from F2b's progress answer, which names the job, whether it is a slot (`long`) and when the
+drain began):
+- from the start: "Finishing <job>…";
+- from 15 seconds, for any other job: "Still finishing <job>. Knowlu closes by itself within a
+  minute or two, once it's saved." (§14.51 r2, m3);
+- from 15 seconds, for a slot: "Saving what Knowlu has read so far. This can take up to 20 minutes,
+  and Knowlu closes by itself when it's done.", with the time elapsed since the drain began beside
+  it (§14.51 r2, R2; F11a).
 
 **The three exits, each one command in F2b** (review r4, I-1; `relaunch` only spawns, so each command
 ends the process itself):
@@ -1115,7 +1161,8 @@ ends the process itself):
   runs first, so the flush's `vault_io` meets no job.
 - **One exit at a time.** A second exit while one is draining (a second click on the window's close,
   Finish later after Sign out) is answered `{ok: true, exiting: true}` and does nothing (one
-  `AtomicBool` in F2b).
+  `AtomicBool` in F2b). Every job the drain waits for reaches its safe point within its own bound
+  (above), so the first exit always ends; the second close is never the only way out.
 
 - **A relaunch that fails never leaves a live, stopped process** (review r4, M5). If `relaunch` or
   `relaunch_with` returns an error (`current_exe`, the spawn), the command does not stay running with
@@ -1127,8 +1174,13 @@ ends the process itself):
   in onboarding mode with a named line ("finish or leave setup first"; F4b), and no onboarding screen
   calls `switch_profile` or `delete_my_data` (F11t pins both; Settings is not reachable in onboarding
   mode). Account deletion stays the normal console's, after the reveal.
-- The page shows "finishing <job>…" while a command drains. A job interrupted anyway (a crash) is
-  `pending` on the next launch.
+- The page shows "finishing <job>…" while a command drains (the words above). A job interrupted
+  anyway (a crash) is `pending` on the next launch, **unless it was running at two launches in a
+  row** (§14.51, the crash-loop guard; F8a2): then it is `failed` with `job_crashed`, so a job that
+  takes the app down every time it runs cannot do it at every launch (release builds are
+  `panic = "abort"`, and the queue resumes a pending job first). The count cannot tell a crash from
+  any other kill (a Windows shutdown, End task, a crash in the job on the other lane), so the words
+  blame no step, and Try again always runs it.
 - **Open Knowlu needs the local lane done.** `school.apply`, `school.courses`, `registrar.confirm`
   and `config.ingest` (and through it both feed stores, settled per §4.11) are seconds of local work.
   Open Knowlu is enabled only when all are `done`; a failure shows its fix and Try again. One case
@@ -1143,7 +1195,7 @@ ends the process itself):
   |---|---|---|
   | the slot (`slot.partial`'s rest, `slot.first_full`) | `scheduler::spawn`'s first-run slot, since a slot stopped before `rank` leaves no `state/today.md` (App mode and `device_ok` hold for a step-2 vault; T0 confirms), or the next slot | the first slot after the reveal ends, whatever its outcome |
   | the Gmail first read, a calendar read | that slot's `judge` and `ingest` | the same slot's end |
-  | an open mail setup, the canary, the first mail pass | `mail::live::on_start` and the mail lane | `mail.json` records forwarding verified (the canary), the first pass delivered, or the mailbox disconnected; never by a slot |
+  | an open mail setup, the canary, the first mail pass | `mail::live::on_start` and the mail lane | in the normal console (F8s2, §14.51 r1 and r2): forwarding verified (clears `mail.setup` and `mail.canary`), from a listed row's `last_canary_ok_at` at or after `started_at`, both parsed as timestamps (`mail/runner.rs:872`), and disconnected (clears all three), from the **unfiltered** address list (every row `revoked` or turned off, or no row with no `pending_setups` entry), both at the slot's mail stage; the first pass delivered (clears **only** `mail.first_pass`, and only once `mail.setup` and `mail.canary` are gone), from the first closed backfill batch (`on_closed`, `mail/backfill.rs:387-388`, `mail/live.rs:120-131`); never by the slot's end. **A first pass the app never drives is never waited for** (Guided, or Microsoft 365 until C3; §14.51 r3): F2b's finish leaves `mail.first_pass` out when the recorded provider is one of those, and, when none was recorded, `CanaryVerified` from such a row clears it (`BackfillNeverDriven`); the Settings mail row carries the guided step (D13, `mail_steps.rs:88-92`) |
 
 - **The main page's "still coming" line** reads `handover` and drops each item at its own signal. A
   failure then shows where that path's failures show (the Runs view, the issues panel, the mail row).
@@ -1409,12 +1461,12 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F2a | `onboarding_state.rs`: `onboarding.json`, resume derivation, skips, `LaunchMode` | `implementer` | specified | F1 |
 | F2d | `onboarding_state.rs`: the answers file, the pending-credential names, the absent and unreadable rules | `implementer` | specified (review r3, M4) | F2a |
 | F2e | `onboarding_state::on_sign_out`: delete answers and pending links, rewind to step 2 | `implementer` | specified, tested in F1 (review r3 I-C, r4 I-1) | F2d |
-| F2b | `onboarding_state.rs`: the commands and the three exits (quit, sign-out, finish), each draining and ending the process | `implementer` | specified | F2a, F2d, F2e (the file's chain, review r7 M2), F8f |
+| F2b | `onboarding_state.rs`: the commands and the three exits (quit, sign-out, finish), each draining and ending the process; `stop_both` and the progress answer; a never-driven provider's first pass (Guided or held) left out of `handover`; `backfill_never_driven` (§14.51 r2, r3) | `implementer` | specified | F2a, F2d, F2e (the file's chain, review r7 M2), F8f, F8f2 |
 | F2c | `account.rs`: `pub fn sign_out_clean(dir, id, api_base)` (today's clean plus `on_sign_out`; the base a parameter so tests stay local), used by `sign_out` with `api_base()`; the two pending names in `delete_local_data`'s credential loop | `contract-engineer`, then `contract-reviewer` | `account.rs` is on the contract list | F2e, S5 merged |
 | F2g | `onboarding_state.rs`: `onboarding_attach_session`, step 2 again's re-attach (three-way account match, move on a match, a local delete of the pending session and a refusal on a mismatch) | `implementer`, reviewed by `contract-reviewer` | specified and tested over seams, off the contract list; a wrong move attaches another account's token to the vault (review r5, I-2) | F2b (chained after it in the same file, review r6 M2) |
 | F2h | `onboarding_state.rs`: `onboarding_entitlement` and `onboarding_checkout`, the vault-target versions of `entitlement_now` and `open_checkout` | `implementer`, reviewed by `contract-reviewer` | specified, public `account.rs` functions only, tested on a `127.0.0.1:0` listener (review r5, I-1) | F2g (the same file's chain: F2a, F2d, F2e, F2b, F2g, F2h; review r6 M2) |
 | F3 | Step-2 vault with defaults, without campus or events files; `account_settled`; picker flag; the name picked in Rust past profiles and folders on disk; the old flow's errors rewritten; F10's interim name loop deleted (F10's review) | `test-writer` then `implementer` | writes a vault; tests first; the static change is a deletion only | F2a, F10 |
-| F4 | Onboarding mode in `run_console`; the window's close prevented, then `onboarding_quit`'s inner on its own thread; `mode_device` primed (T0); one update check at launch (T0 review M3) | `implementer` | P-3's five changes; the close off the event loop (review r5, I-5) | F2a, F2b, F8s (`prime_mode_device`, `spawn_update_check`), T0 |
+| F4 | Onboarding mode in `run_console`; the window's close prevented, then `onboarding_quit`'s inner on its own thread; `mode_device` primed (T0); one update check at launch (T0 review M3); `LaunchMode` and the `Queue` managed (§14.51) | `implementer` | P-3's five changes; the close off the event loop (review r5, I-5) | F2a, F2b, F8s (`prime_mode_device`, `spawn_update_check`), T0 |
 | F4b | `switch_profile` refuses in onboarding mode | `implementer` | specified, tested in F1 (review r4, M6) | F2a |
 | F5 | Moved and new commands registered | `mechanical` | a list edit, recounted, pinned | F4, F2b, F2g, F2h, F8d, F8lb |
 | F5b | Shell list: the retired panels' commands, after F10; five move to the console's list and are never deleted (F10's review) | `mechanical` | `main.rs` is never F10's (review r1, I8) | F10, F5 |
@@ -1428,11 +1480,14 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F8e | Order rules and the local lane: config before readers, slot order, `account_settled` from the sync status, step 10's gate | `implementer` | as F8a | F8a |
 | F8h | The notes gate and the lane's `sync.lock` retry (holding nothing between tries) | `implementer` | split out of F8e (review r4, M4) | F8e |
 | F8f | Stop and drain at safe points; the save freeze; hand-over items | `implementer` | as F8a | F8a, F1 |
+| F8f2 | The drain abandons no writer (only `ABANDON_AT_ONCE`, pinned); `exiting()` for the page (§14.51 r1) | `implementer` | as F8a; F1 test 30's first half written first | F8f (or folded into F8f's fix round) |
+| F8a2 | The crash-loop guard: `JobRecord.crashes`, paused with `job_crashed` at a second running start; `Queue::start` persists once (§14.51 r1) | `implementer` | as F8a; `STATE_VERSION` stays 1; its test (F1's 31) written first | F8f2 (the file's chain) |
+| F8s2 | `scheduler.rs` and F8m's arm of `mail/live.rs`: the normal console clears `handover` (the slot item at a run slot's end; canary and disconnect from the unfiltered list, timestamps parsed, no disconnect while a setup is pending; first pass at a closed backfill batch, clearing only itself after the canary; `BackfillNeverDriven` from a verified Guided or held row; one lock around every write, never across the network; §14.51 r1-r3) | `implementer` | off the contract list; its test (F1's 32) written first | F8f merged, F8s, F8m |
 | F8s | `scheduler.rs`: `run_slot_inner_scoped` (the seams from `Some(app)`) and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}`; the stop before each stage (never cleared); the bundle deleted on every path; the slot's hand-over clearing; `prime_mode_device` (T0) and `spawn_update_check` (T0 review M3) | `implementer` | `scheduler.rs` is off the contract list; its tests are F1's 15, 18 and 27 (review r3 M5, r4 I-3, M1, r5 I-3; T0) | F1 |
 | F8b | Runners: the school step (capture, answers, pending feed, preview) | `implementer`, reviewed by `contract-reviewer` (its capture handles the bearer link; review r7, I-1) | specified | F8a, F7a, S4d, F8la |
 | F8c | Runners: the local lane (stores, apply, courses, registrar, config) | `implementer` | specified | F8e, F6a, F6b |
-| F8g | Runners: the partial (`BeforeConfig`, then `NoRank`) and full slots, each with onboarding's `AppHandle` | `implementer` | specified | F8e, F8f, F8h, F8s |
-| F8d | Runners: mail, Google, calendars, coursework | `implementer` | specified | F8a |
+| F8g | Runners: the partial (`BeforeConfig`, then `NoRank`) and full slots, each with onboarding's `AppHandle` (held by the runner); a queue stop returns before the slot; a slot the stop cut short is `Stopped` (§14.51 r1) | `implementer` | specified | F8e, F8f, F8h, F8s |
+| F8d | Runners: mail, Google, calendars, coursework; the stop checks in `mail/runner.rs`'s confirm and canary waits; `mail_provider` recorded as the service's string through `update_answers` (§14.51 r2, r3) | `implementer` | specified | F8a |
 | F8m | `mail/live.rs`: in onboarding mode a closed backfill batch tells the queue, never starts a slot | `implementer` | specified, about ten lines, tested in F1 (review r5, I-4) | F8a |
 | F8la | `lms_link.rs`: `capture_calendar_link_with`, `validate_only` and `capture_link_only`, the validate-only seam | `implementer`, reviewed by `contract-reviewer` | a bearer link stored under the wrong session reaches another account (review r6 I-2, r7 I-1) | F1, S4b merged |
 | F8lb | `onboarding_capture_link` and `onboarding_paste_link` over F8la's seam; the link to its pending credential | `implementer`, reviewed by `contract-reviewer` | as F8la | F8la, F8b, F8c, F8g, F8d (last in `onboarding_jobs.rs`'s chain), F2d |
@@ -1967,6 +2022,110 @@ job runners as a trait so tests pass fakes.
     read** (F9 review r1, the implementer's ruling 4; F2b): with the jobs read failing (an
     unreadable queue state, through a fake), `onboarding_status` answers `{ok: false, error}` and
     no gate output at all, never `{ok: true}` with an empty item list, which would open the gate.
+
+Tests 29-32 (§14.51) came after F1 merged, so **each owner writes its test first, in its own task**,
+failing before the code and passing after; the numbering keeps one list.
+
+29. **One call sets both stops (F8f review I-1; F2b, F8g)**, in `app/tests/onboarding_jobs.rs`: with a
+    `Scheduler::default()` and a queue over a fake runner whose `slot.first_full` waits on a gate and
+    then loops "stage by stage" checking `sch.stop` as `run_slot_scoped` does, F2b's
+    `stop_both(&sch, &queue)` (the one function its live `ExitSeams::request_stop` calls) sets
+    `sch.stop` and the queue's stop; the fake slot starts no stage after the call and returns
+    `Stopped`, so the job reads `pending`. A source pin over `onboarding_state.rs`: the live seam's
+    `request_stop` calls `stop_both` and nothing else calls `Queue::request_stop` there. **F8g's
+    half** (§14.51 r1, I1), in `app/tests/scheduler.rs` over the fake engine the existing slot tests
+    use: the **real** `run_slot_scoped` run with `sch.stop` set before it (and, second case, set by
+    the fake engine during `sync`) returns a summary with `(not run: stopped)` rows
+    (`scheduler.rs:741-748`), and F8g's `slot_outcome(&summary)` maps it to `Outcome::Stopped`, so
+    the job reads `pending` and is in `handover` at finish, never `done`; a summary with no such row
+    and no `reason` maps to `Outcome::Slot` (done); one with `reason` to `Failed`; and the slot
+    runner, handed a queue stop already set, returns `Stopped` without calling the slot (a fake slot
+    function counting calls).
+30. **The drain never abandons a writer (F8f review I-2, §14.51 r1 C1; F8f2, F8b, F8d)**, in
+    `onboarding_jobs.rs`'s tests. F8f2's half: a fake `school.capture` that ignores the stop for
+    600 ms and then writes a marker file (standing in for the answers file and the pending link) is
+    **waited for**: the drain does not return before the marker is written, and a fake
+    `on_sign_out` run after the drain deletes it and nothing writes it again (the marker is absent
+    1 s later, the fake's thread joined); a fake `mail.canary` is still abandoned at once (today's
+    test, unchanged); `ABANDON_AT_ONCE` is exactly the canary and the first pass (a pin); and while
+    the drain waits, the progress answer names the running job with `long: false`, `long: true` for
+    a slot only (`mail.setup` is short once F8d's checks land, §14.51 r2), and the drain's start
+    instant for F11a's elapsed time. F8b's half (written in F8b): the real `school.capture` runner over
+    fake reads, with the stop set during its first read, starts no second read, writes no answers
+    file and no pending credential (fake stores record nothing), and returns `Stopped`; with a fake
+    visible sign-in open, the stop closes it within one poll. F8d's half (written in F8d): the
+    `mail.setup` runner, on the queue stop, calls the run's `Shared::stop` and returns only after the
+    run has ended (a fake run); the Google reads and `coursework.discover` write nothing after the
+    stop. **And over the real setup runner with a fake clock and client** (§14.51 r2, R2), in
+    `mail/runner.rs`'s tests: a stop set while `confirm_address` polls an address that never
+    confirms, and a stop set during the canary step (in `FORWARD_SETTLE`, and in `canary_back` with
+    no canary back), each end the run within one `POLL` of fake time, never at `CONFIRM_WAIT` or
+    `CANARY_WAIT`; neither step is recorded `Failed`; the run's end is `End::Stopped` (or its
+    `Withdrawn` form, `runner.rs:185-186`); and a step left `Done` before the stop stays `Done`.
+31. **A job running at two launches in a row is paused (F8a review r2 I-2; F8a2)**, in
+    `onboarding_jobs.rs`'s tests, with no panic needed: an `onboarding.json` holding `school.capture`
+    `running` with no count is started, and **before any job runs the file on disk already reads**
+    `pending` with a count of 1 (`Queue::start` persists once, synchronously; §14.51 r1 M2); saved
+    `running` again with that count and started, it reads `failed` with `job_crashed` and its fix,
+    and the fake runner records no call; a job that ends normally reads 0; an abandoned
+    `mail.canary` reads 0, and its late return keeps 0 (M1); Try again on a `job_crashed` job sets
+    the count to 1, so one more kill pauses it at once; a file written before the field (no key)
+    loads at version 1 as 0, and a count of 0 is not written, so that file's bytes are unchanged by a
+    load and save.
+32. **The normal console clears the hand-over (F8s follow-up; F8s2)**, in `app/tests/scheduler.rs`,
+    over the fake engine the existing slot tests use. The slot half: a finished `onboarding.json`
+    with one slot item and one mail item, after a slot that runs, keeps only the mail item and is
+    saved; byte-identical after a slot refused in script mode, on another device and because one is
+    already running; with no `onboarding.json`, none exists after; an unfinished or unreadable one is
+    byte-identical after. The mail half, over the pure
+    `mail_signals(listed, &mail_state, started_at)` given the **unfiltered** list:
+    - a row whose `last_canary_ok_at` is at or after `started_at` gives `CanaryVerified`; a row
+      `confirmed` with no `last_canary_ok_at`, or one older than `started_at`, gives nothing (I2);
+      **both are compared as parsed timestamps** (§14.51 r2, m1), in cases where a string
+      comparison answers the other way: a `last_canary_ok_at` of `2026-10-24T10:00:00-05:00`
+      (15:00 UTC) against a `started_at` of `2026-10-24T14:30:00Z` gives `CanaryVerified`;
+      `2026-10-24T15:00:00+02:00` (13:00 UTC) against `2026-10-24T14:00:00Z` gives nothing;
+      `2026-10-24T14:00:00.5Z` against `2026-10-24T14:00:00Z` gives `CanaryVerified` (`.` sorts
+      before `Z`); an unparseable value on either side gives nothing;
+    - every row `revoked` or turned off in `mail.json` gives `Disconnected`; an `Ok` list with **no
+      row** gives `Disconnected` only when `mail.json` has no `pending_setups` entry (an abandoned
+      setup deleted its address, `mail/runner.rs:386-391`), and **nothing while one is there** (a
+      setup still in flight, or a delete the service did not take; §14.51 r2, R3); one live row
+      gives nothing; a list that could not be read gives nothing (I4);
+    - a `last_reconcile` entry alone gives nothing (I3); no case of `mail_signals` returns
+      `FirstPassDelivered` (the "every live row held" shortcut is gone, §14.51 r2, R1);
+    - a source pin: `mail_step` calls `mail_signals` on `listed` before its filter
+      (`scheduler.rs:469-480`).
+    The delivered half: the normal-console arm of `real_env`'s `on_closed` applies
+    `FirstPassDelivered` to a finished `onboarding.json` before it starts its slot (a pin over
+    `mail/live.rs`, and `apply_mail_signal(dir, signal)` driven directly): with `mail.first_pass`
+    alone left of the mail items it is cleared, and the slot item is not; with `mail.canary` or
+    `mail.setup` still there, `FirstPassDelivered` alone clears nothing, `mail.first_pass` included
+    (R1); and the hook's path, given a fake list whose row carries a fresh `last_canary_ok_at`,
+    clears all three in one save, while given an unreadable list it clears none. **The lock**
+    (§14.51 r2, m2): two threads applying a slot end and a mail signal to the same file at once,
+    each through `update_finished` with a fake save that sleeps between load and write, leave both
+    changes on disk (neither lost).
+    **F2b's half** (written in F2b, R1): `onboarding_finish` with a `mail.first_pass` job not done and
+    the answers file's `mail_provider` of `m365` writes no `mail.first_pass` item (and still writes
+    `mail.setup` and `mail.canary` if they are open); **with `other` (Guided) the same** (§14.51 r3,
+    I-1); with `google`, or no provider recorded, it writes the item as `handover_for` gives it; and
+    `backfill_never_driven` is true for exactly Guided and M365.
+    **The never-driven half** (written in F8s2, r3 I-1): `mail_signals` over a row with a fresh
+    `last_canary_ok_at` and `provider: "other"` gives `CanaryVerified` and `BackfillNeverDriven`,
+    and applied to a finished file holding `mail.canary` and `mail.first_pass` it clears both; the
+    **M365 setup pending at finish** case: a finished file whose `mail.setup`, `mail.canary` and
+    `mail.first_pass` were all handed over (no `mail_provider` recorded), then a slot whose list has
+    an `m365` row with a fresh `last_canary_ok_at`, leaves no mail item; the same row as `google`
+    clears the setup and canary and keeps `mail.first_pass` for its batch.
+    **No lock across the network** (r3, m-a): with the hook's fake list blocking on a channel, a
+    slot-end `update_finished` on another thread completes before the list is released (the lock
+    was not held), and a source pin over `mail/live.rs`: the list call sits inside the spawned
+    thread, before `run_slot`, and outside `update_finished`'s closure.
+    **The provider's write** (written in F8d, r3 m-b): the setup's provider lands in the answers
+    file as the service's string through `update_answers`, a source pin finds no other
+    `save_answers` or answers write in F8d's runner, and an answers file with no `mail_provider`
+    loads and saves to the same bytes.
 Tests 21, 22 and 26 touch the real Credential Manager, so the test-writer's sign-off rule for such tests
 applies (the controller gives it at dispatch); every other test here uses fakes.
 Acceptance: as S1's. Size: M (test files; the cap is for implementer and console-ui tasks).
@@ -2017,6 +2176,45 @@ Split so that each edits about 80 lines or fewer of one file (review r2 I6, revi
   `onboarding_quit` is also what F4's close handler runs on its own thread. A relaunch error returns
   `{ok: false, restart: true}` and exits nothing until `onboarding_quit` (§4.10, review r4 M5). Size: S
   (about 80 lines; if past, the three exits move to their own piece, F2f, the same agent).
+  **§14.51's additions** (F1 test 29, which F2b writes first; about 15 more lines, so the F2f split
+  above is likely):
+  - **One call sets both stops.** `pub fn stop_both(sch: &Scheduler, queue: &Queue)` sets
+    `sch.stop`, then `queue.request_stop()`; the live `ExitSeams::request_stop` is that call and
+    nothing else, so a slot in flight (which checks `sch.stop`) and the queue (which checks its own)
+    both see it.
+  - **The drain never runs on the main thread.** The live `drain` seam is reached only from the three
+    `#[tauri::command(async)]` wrappers and F4's spawned close thread; no sync command or event
+    handler calls it (F1 test 24 gains a pin: all three wrappers carry `async`).
+  - **The progress answer** for the page's words (§4.10): while an exit drains, `onboarding_status`
+    answers `exiting: {job, long, since}` from the queue's `exiting()` (F8f2; `long` is true for a
+    slot only, §14.51 r2), so the page picks its line and counts the elapsed time from `since`; the
+    page keeps no limit of its own.
+  - **A held provider's first pass is not handed over** (§14.51 r2, R1; F1 test 32's F2b half).
+    Microsoft 365's backfill is held until C3, and nothing on this build drives it
+    (`mail_steps.rs:88-95`; the setup ends at the guided backfill as `End::ForwardingSet`,
+    `mail/runner.rs:465-472`), so no batch closes and a handed-over `mail.first_pass` would never
+    clear. **The same holds for a Guided provider** ("other", `Provider::from_service`'s fallback,
+    `mail_steps.rs:138-143`; §14.51 r3, I-1): the app never drives its backfill either
+    (`rearm_backfill` refuses both, `mail_steps.rs:442-445`; the slot's mail stage skips Guided
+    rows, `scheduler.rs:478`). So F2b adds `pub fn backfill_never_driven(p: Provider) -> bool`
+    (`p == Provider::Guided || backfill_held_for_c3(p)`), and `onboarding_finish` drops
+    `mail.first_pass` from `handover_for`'s list (`onboarding_state.rs:703-711`) when the answers
+    file's `mail_provider`, read back with `Provider::from_service`, is never driven; `mail.setup`
+    and `mail.canary` are kept if open. The Settings mail row already carries the guided step (D13).
+    `Answers` gains `mail_provider: Option<String>` holding **the service's own string** (`m365`,
+    `google` or `other`), with `#[serde(default, skip_serializing_if = "Option::is_none")]`, so
+    today's answers files keep their bytes; F8d writes it, and finish reads it before it deletes the
+    answers file. No provider recorded keeps the item, the side that hides nothing; F8s2 then clears
+    it from the address row (below, and F8s2's brief).
+  - **Sign out's order is the safety** (§14.51 r1, C1): `on_sign_out` (through `account::sign_out`)
+    and the freeze run only after the drain has returned, and the drain returns only when every
+    writer has (F8f2 abandons none). F1 test 25's order assertions gain it: the fake drain's return
+    precedes the fake sign-out.
+  - **Step 3 over an unreadable answers file** (F2d review r1, I-2): step 3's capture writes a fresh
+    answers file from what it captured, replacing the unreadable one, never merging into it and never
+    refusing. F1 test 12 gains the case (an unreadable answers file, then a step-3 answer, gives a
+    readable file holding only the new capture). F8b's `school.capture` writes through the same F2d
+    path, so it inherits the rule.
 - **F2c (contract-engineer, then contract-reviewer; after S5 has merged).** Tests first in
   `app/tests/account.rs` (its `CREDMAN_LOCK`, generated ids, `Drop` cleanup), then `account.rs`, kept
   to two small edits (the reviewer's suggestions, reviews r3 and r4 M3):
@@ -2130,6 +2328,15 @@ that need that loop to open and close their windows, for up to an engine child's
 returns at once; a second close meets F2b's guard. The normal console's hide-to-tray arm and the
 `lms_link` window's `Destroyed` arm are unchanged. Size: S (about 40 lines in `main.rs`; about 45
 with the two calls below).
+
+**Two managed values the guards need** (§14.51). F4b's `switch_profile` refusal reads `LaunchMode`
+from managed state and F8m's `on_closed` looks for the `Queue`; both are inert until F4 manages
+them, so the onboarding arm calls `.manage(LaunchMode::Onboarding)` and `.manage(queue)` (the normal
+arm manages `LaunchMode::Normal` and no queue). F1 test 27's `main.rs` pin gains both. **An
+unreadable `onboarding.json` (T0 review M5) is rewritten by the queue's start**: F4 passes the
+state F2a derived for it (§14.49: no `school`, so step 2 or 3) to `Queue::start`, which persists
+once before any job runs (F8a2, §14.51 r1 M2), so the rewrite lands at launch; F4 writes no file
+of its own.
 
 **What skipping `spawn` also skips** (T0, 2026-10-24; F1 test 27). `scheduler::spawn` is where
 `Scheduler.mode_device` is first primed (`scheduler.rs:1154`) and where the housekeeping thread that
@@ -2400,8 +2607,40 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   The hold's test is `scheduler::entitlement_state(cs) == Entitled`, re-read when F2h's
   `onboarding_entitlement` wakes it and once at the queue's start after a relaunch, where a cache
   short of `Entitled` gets one `account::refresh_entitlement` first (§4.3; review r5, I-1). It never
-  reads the pending target. The queue holds onboarding's `AppHandle` for F8g. F1's tests 3 and 5.
-  Size: S (about 70 lines).
+  reads the pending target. **The real `Runner` holds onboarding's `AppHandle`** for F8g (F8a's
+  ruling 3, corrected 2026-10-24, §14.51); the queue holds none. F1's tests 3 and 5. Size: S (about
+  70 lines). Merged.
+- **F8a2, the crash-loop guard** (F8a review r2, I-2; §14.51; `implementer`, after F8f2 in
+  `onboarding_jobs.rs`'s chain; F1 test 31, written first). Release builds are `panic = "abort"`, so
+  a job that takes the process down every time it runs would do it at every launch, because
+  `Queue::start` turns a `running` job back to `pending` and the queue runs it first. So:
+  - `JobRecord` (F2a's, in `onboarding_state.rs:37-44`) gains `crashes: u8` with
+    `#[serde(default, skip_serializing_if = "is_zero")]`. **`STATE_VERSION` stays 1**: an old file
+    lacks the key and reads as 0, a count of 0 is never written (so today's files keep their bytes),
+    and no struct in the file has `deny_unknown_fields`, so nothing older refuses the key.
+  - `Queue::start` (`onboarding_jobs.rs:255-274`): a job found `running` gets `crashes += 1`;
+    below 2 it is `pending`, at 2 it is `failed` with `REASON_JOB_CRASHED` (`:113`) and its fix
+    (§4.3's second closed-set entry) and is not run. **Then `start` persists once, synchronously,
+    before it spawns a thread** (§14.51 r1, M2): today it persists nothing (the first save is
+    `startup`'s, `:215`, after an entitlement read that can take a minute), and `school.capture` and
+    `school.preview` are picked before that read (`UNGATED`, `:98`, `:137`), so without the save a
+    resumed job could crash again before its count reached the disk, and the guard would never trip.
+  - `work`'s `running` insert (`:224`) keeps the record's `crashes`, since today it replaces the
+    whole record with `..Default::default()`, which would reset the count it is counting.
+  - **One rule for the count's reset** (M1): every write of a fresh record sets it to 0. That is
+    `Core::finish`'s insert (`:162`) for every normal end, done, failed, waiting or stopped, and the
+    drain's `JobRecord::default()` for an abandoned job (`:336`), whose late return then goes through
+    `finish` as `Stopped` (`:233-234`) and stays 0. An abandoned job was not running when the process
+    ended, so it is not a kill to count.
+  - Try again on a `job_crashed` job sets `crashes` to 1 and `pending`, so one more kill pauses it
+    at the next start, not two.
+  **It counts every kill, not only crashes** (§14.51 r1, I5): a Windows shutdown, End task, or a
+  crash in the job on the other lane all leave a job `running`. A clean exit never counts, because
+  every exit drains first and nothing is left running. Two such kills in a row during the same job
+  are rare, and the price is one press of Try again, so the guard stays, and its words blame no step.
+  Student-facing: the fix of §4.3, "Knowlu stopped twice while this step was running, so it has
+  paused it. Press Try again to run it once more.", on the job's row with its Try again (F11's
+  existing failed state; no new screen). Size: XS (about 25 lines over the two files).
 - **F8e, order and the local lane.** The second, serial lane for §4.3's local jobs; the
   config-before-readers rules; `account_settled` and "first sync" read from `cs.sync` after
   `state::refresh_sync` (§4.3's three readings: an `at` at or after the summary's
@@ -2414,6 +2653,10 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   10's proposals flag in
   `onboarding_status`. F1's tests 4, 8, 11, 14's ordering and 16's status half. Size: S (about 75
   lines with T0's re-run rule; past 80, the `account_settled` reading moves to its own piece).
+  **What is already built** (§14.51): the second, serial lane is F8a's (`LANE`, its own thread), and
+  `confirm_step10` exists, so F8e adds neither; what remains is the rules above and **step 10's gate
+  refinement** (the proposals flag in `onboarding_status` read from `config.ingest`'s state, F1 test
+  11). F8e's brief should start from F8a's merged lane and name each rule's test, not rebuild them.
 - **F8h, the notes gate** (split out now, review r4 M4). The in-process gate both sides block on, the
   lock order (gate, `vault_io`, `sync.lock`), and the lane's retry on `sync.lock` every 250 ms for up
   to 30 seconds, **taking and dropping `vault_io` and the lock on each try** so neither is held
@@ -2434,6 +2677,22 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   queue and the lane persist through; F2a's file save has no such flag, so F2e's rewind, which writes
   through F2a after the freeze, always lands (review r5, M1; F1 test 17 asserts both halves). F1's
   tests 9 and 17's freeze half. Size: S (about 60 lines).
+- **F8f2, the drain waits for writers, and says so** (F8f review I-2; §14.51 as revised after its
+  review r1, C1; `implementer`, after F8f in `onboarding_jobs.rs`'s chain, or folded into F8f's fix
+  round if it is still open, the controller's call; F1 test 30's first half, written first).
+  - **No new abandonment and no time limit.** `ABANDON_AT_ONCE` (`onboarding_jobs.rs:110`) stays
+    the canary and the first pass, the only runners that write nothing anywhere; its doc's rule
+    (`:106-109`) is the rule, and test 30 pins the list. Every other running job is waited for, as
+    `drain` does today (`:340-341`). An abandoned writer would keep its thread (`:108-109`) and
+    write after Sign out's `on_sign_out`, putting back the answers file or a pending link; the wait
+    is what prevents that, because F2b runs the sign-out only after the drain returns.
+  - **The bound is each runner's**, by its own stop checks (F8b, F8d, F8g; §4.10 lists each).
+  - **The progress for the page:** `pub fn exiting(&self) -> Option<Exiting>`, with the running
+    job, `long` (a slot only; `mail.setup` ends within one poll once F8d's checks land, §14.51 r2)
+    and the instant the drain began, which F2b's `onboarding_status` answers as `exiting` (§4.10's
+    words and F11a's elapsed time).
+  - Composition: the drain returns, then F2b's `quit_flush` (10 s) runs; the two never overlap.
+  Size: XS (about 15 lines).
 - **F8s, the scheduler's half** (in `scheduler.rs`; tests are F1's 15 and 18, written first by
   `test-writer`, review r3 M5).
   - The stop flag: an `AtomicBool` on `Scheduler`, **never cleared** by anything (review r3, I-A).
@@ -2463,7 +2722,90 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   - `pub fn spawn_update_check(app)` (T0 review M3; F1 test 27): the housekeeping tick's update
     check (`:1285-1310`) moved into a function, which the tick then calls; F4 calls it once. A move,
     about 6 new lines.
-  Size: S (about 66 lines).
+  Size: S (about 66 lines). Merged; its "slot's end clears `handover`'s slot items" was not built
+  (F8f's `slot_ended` was a stub then), so it moves to F8s2.
+- **F8s2, the normal console clears the hand-over** (F8s follow-up; §14.51; `implementer`, in
+  `scheduler.rs`, after F8f has merged `slot_ended` and `mail_signal`; F1 test 32, written first).
+  - **The slot item.** At the end of `run_slot_scoped`'s body, on the paths where the slot ran
+    (whatever its outcome), load `onboarding.json` from the profile's folder through F2a's load:
+    absent or unreadable, do nothing and write nothing (the scheduler never creates or repairs it);
+    unfinished, do nothing (the queue owns it until the reveal); finished with `handover` items,
+    call `slot_ended()` and save when it changed anything, all through `update_finished` (below).
+    Never on a refused slot (script mode, another device, a slot already running): those return
+    before the body, and the call sits after them.
+  - **One lock for every normal-console write** (§14.51 r2, m2). Two threads can write a finished
+    `onboarding.json` at once: the slot's end (or its mail stage) and `on_closed`'s
+    `FirstPassDelivered` (`mail/live.rs:120-131`, whose slot starts on another thread). So
+    `onboarding_state.rs` gains `static ONBOARDING_JSON_LOCK: Mutex<()>` and
+    `pub fn update_finished(dir, change: impl FnOnce(&mut OnboardingState) -> bool)`: under the lock,
+    F2a's load, `change` only on a finished file, F2a's save only when it changed anything; the shape
+    of `MailState::update` (`mail_session.rs:39-44, 300-307`). Both of F8s2's writers use it and
+    nothing else in the normal console writes the file. In onboarding mode the queue is the file's
+    only writer (`onboarding_jobs.rs:170-172`) and F8s2 never touches an unfinished file, so the
+    two never meet.
+  - **The canary and the disconnect** are read at the slot's mail stage, never at the slot's end,
+    from **the unfiltered list**: in `mail_step`, right after `let Ok(listed) = (mail.mailboxes)()`
+    and before the filter that drops revoked, turned-off and guided rows (`scheduler.rs:469-480`;
+    §14.51 r1, I4). A pure `mail_signals(listed: &[Value], mail: &MailState, started_at: &str) ->
+    Vec<MailSignal>`, applied through `mail_signal` inside one `update_finished`:
+    - `CanaryVerified` when a row's `last_canary_ok_at` is at or after `onboarding.json`'s
+      `started_at`. That field is the canary's return, read the same way by the setup's own wait
+      (`mail/runner.rs:868-877`); a row's `confirmed` status is the provider's address confirmation,
+      which comes before the canary (`runner.rs:819-820`), so it is not the signal (I2). `mail.json`
+      holds no verified flag (`MailState`, `mail_session.rs:87-166`). **Both values are parsed as
+      timestamps** (`jiff::Timestamp`, as the setup parses the field at `runner.rs:872`) and compared
+      as instants, never as strings; an unparseable one on either side gives nothing (§14.51 r2, m1).
+    - `Disconnected` when the list was read (`Ok`) and **no live row is left**: every row `revoked`
+      or turned off in `mail.json`, or no row at all **with no `pending_setups` entry in `mail.json`**
+      (§14.51 r2, R3). A setup that changed nothing deletes its address and then its record
+      (`revoke`, `mail/runner.rs:378-394`: the record goes only when the service took the delete,
+      `:389-391`), so an empty list with a record left is a setup in flight or a delete still owed,
+      not a disconnect. A list that could not be read is no proof (`scheduler.rs:468-469`), so it
+      gives nothing. The handover items carry no address id (`HandoverItem`,
+      `onboarding_state.rs:81-85`), so "no live row" is the account's whole list.
+    - `mail_signals` **never** gives `FirstPassDelivered` (R1). It gives **`BackfillNeverDriven`**
+      (a new `MailSignal` variant, §14.51 r3, I-1) beside `CanaryVerified` when the verified row's
+      `Provider::from_service(row["provider"])` (`mail_steps.rs:138-143`) is one F2b's
+      `backfill_never_driven` names (Guided, or held until C3), since no batch will ever close for
+      it. That clears `mail.first_pass` alone, under the first-pass arm's rule (after the canary
+      items), and needs no answers file: it covers a provider F8d never recorded (a setup still
+      pending at finish).
+  - **The first pass delivered is the first closed backfill batch** (§14.51 r1, I3, ruled):
+    `last_reconcile` is written only after a normal slot's recover pass and never for Microsoft 365
+    (`mail/slot.rs:246-251`), so it is not the signal. A backfill pass that closed its batch calls
+    `on_closed` (`mail/backfill.rs:387-388`); the normal-console arm of `real_env`'s `on_closed`
+    (`mail/live.rs:128-131`, F8m's) calls `onboarding_state::apply_mail_signal(dir,
+    FirstPassDelivered)` before it starts its slot, through `update_finished`. That is the event
+    onboarding's own `mail.first_pass` waits for (F8m's `mail_batch_closed`), so the console and
+    onboarding read one fact.
+  - **The first-pass signal clears only `mail.first_pass`, and only after the canary** (§14.51 r2,
+    R1). F8f's merged `mail_signal` clears all three items on `FirstPassDelivered`
+    (`onboarding_state.rs:126`), which would hide an open setup or canary; F8s2 changes that arm to
+    clear `mail.first_pass` alone, and only when neither `mail.setup` nor `mail.canary` is still in
+    `handover` (they clear at `CanaryVerified`). The order holds in the setup itself: its backfill
+    step runs only after its canary step is `Done` (`mail/runner.rs:558-573`), so a closed batch
+    follows a canary that came back. **So the signal is not lost to the console's lag:** when the
+    file still holds `mail.setup` or `mail.canary`, the hook first lists the addresses once (the
+    client as `mail.rs:717` builds it) and applies `mail_signals` (which reads `CanaryVerified` from
+    the row), then `FirstPassDelivered`, both in one `update_finished`. A list it cannot read
+    applies nothing; the backfill's next closed batch tries again. **The request runs in the
+    spawned slot thread, before its `run_slot`** (`mail/live.rs:129-131`; §14.51 r3, m-a), never on
+    the backfill's own thread, so a slow request never holds up the backfill's next pass; and
+    **`ONBOARDING_JSON_LOCK` is never held across a network call**: the list is read first, without
+    the lock, and the lock is taken only to load, apply and save. The slot's mail stage keeps the
+    same order (its list is already read at `scheduler.rs:469` before `mail_signals` and
+    `update_finished`). **One residual lag, accepted** (§14.51 r3, m-c): the setup accepts any
+    canary as back when the service's `sent_at` does not parse (`(Some(_), None) => true`,
+    `mail/runner.rs:875`), so its backfill can start on a `last_canary_ok_at` older than
+    `started_at`, which `CanaryVerified` does not count; `mail.canary`, and with it
+    `mail.first_pass`, then stay until a later canary or batch clears them. The doc comment at
+    `:119-122` is corrected with it. **No provider shortcut on an empty list:** a never-driven
+    provider's first pass is dropped at finish (F2b) or cleared by `BackfillNeverDriven` from a
+    verified row, never inferred from a list's shape.
+  - The "still coming" line drops each item as it clears (F11's, reading `handover`; no new words).
+  Files: `scheduler.rs`, `mail/live.rs` (about 10 lines in F8m's normal arm), and in
+  `onboarding_state.rs` the lock, `update_finished`, `apply_mail_signal`, `mail_signal`'s
+  first-pass arm and the `BackfillNeverDriven` variant. Size: S (about 65 lines).
 - **F8b, the school step's runners.** `school.capture`: S4d's visible sign-in, then the hidden reads
   through `grades::capture_hidden`, the LMS capture (`lms_link::capture_link_only`, F8la's
   validate-only seam, never `capture_calendar_link` or `lms_link::finish`; review r7, I-1) and the
@@ -2486,8 +2828,16 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   `onboarding --preview` inside `--courses`** (a `pairs` array per course). A label the student
   typed or edited at step 3 is display only and never re-derives a fragment, so the proof, the
   `course_map` and the `course_exclude` all use identical pairs. F1 test 12 asserts the pairs in
-  `--courses` equal those in `config.ingest`'s text, byte for byte, after an edited label. Depends on S-G's record. Size: S
-  (about 75 lines).
+  `--courses` equal those in `config.ingest`'s text, byte for byte, after an edited label.
+  **The stop** (§14.51 r1, C1; F1 test 30's F8b half, written first): the drain waits for
+  `school.capture` and `school.preview`, so each keeps that wait short and writes nothing once it
+  has seen the stop. `school.capture` checks the stop before each read and before each write (the
+  answers file, a pending credential), returns `Stopped` at the first it sees, and closes an open
+  visible sign-in at the stop (polling it from its wait, one `grades::POLL`, `grades.rs:463`)
+  rather than leaving it to `SIGN_IN_LIMIT` (`grades.rs:462`); a hidden read in hand ends within
+  `grades::SETTLE` plus its 30-second agent timeout (`grades.rs:460, 506`). `school.preview`
+  checks it after the engine call and before saving the buckets. Depends on S-G's record. Size: S
+  (about 80 lines with the stop checks).
 - **F8c, the local lane's runners.** `school.store` and `calendar.store` (the account call, one retry,
   the feed states of §4.11, the pending credential deleted on success). **The call** (review r8, M1)
   is `lms_link::store_source(&cfg.api_base, &cfg.session_credential_target, kind, &link)` with
@@ -2518,10 +2868,52 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
     (`scheduler.rs:966`), so **no second mail step** is added (review r3, M1).
   - A summary with `reason` set (a refusal: script mode, another device) is the job's `failed` with
     that reason, never `done`; F3's test 1 makes it unreachable for a step-2 vault.
-  Size: S (about 55 lines with the first-grades mapping and its constants, §14.50).
+  - **The runner holds the `AppHandle`** (F8a's ruling 3; §14.51), and reaches `Scheduler` through
+    it. **A stop already set on the queue** (the `stop` the runner is handed) returns `Stopped`
+    before `run_slot_inner_scoped` is called; once the slot runs, it sees `sch.stop`, which F2b's
+    `stop_both` sets (§4.10's two flags). The slot call is an inner taking the slot function, so F1
+    test 29's half passes a fake.
+  - **A slot the stop cut short is `Stopped`, never `done`** (§14.51 r1, I1). A stopped
+    `run_slot_scoped` sets no `reason`; it pushes `<stage> (not run: stopped)` rows at exit 0
+    (`scheduler.rs:741-748`), and `Core::finish` makes any `Outcome::Slot` without a `reason` `Done`
+    (`onboarding_jobs.rs:157`), so Finish later during `slot.first_full`'s `sync` would record a
+    slot whose `rank` never ran as done and never retry it. So a pure
+    `slot_outcome(&RunSummary) -> Outcome`: a `reason` is `Failed` (today's rule); any step row
+    ending `(not run: stopped)` is `Stopped` (the job back to `pending`, and at finish into
+    `handover`); otherwise `Slot`. A stop set after the last stage began leaves no such row, and the
+    slot did run every stage, so `done` is then right. `Core::finish` is not edited. The first-grades
+    mapping and F8e's sync readings still read the rows of a stopped slot (its stages that ran are
+    real). F1 test 29's F8g half drives the real `run_slot_scoped`.
+  Size: S (about 65 lines with the first-grades mapping and its constants, §14.50, the stop check
+  and `slot_outcome`).
 - **F8d, the remaining runners.** `mail.setup`, `mail.canary` and `mail.first_pass` (the mail
   commands' inner functions); `google.gmail_first_read` and `google.calendar_read`;
-  `coursework.discover`. Size: S (about 70 lines).
+  `coursework.discover`. **The stop** (§14.51 r1, C1; F1 test 30's F8d half, written first): the
+  drain waits for each of these but the canary and the first pass, so each writes nothing once it
+  has seen the stop. `mail.setup`'s runner passes the queue's stop to the run's `Shared::stop`
+  ("after the current step", `mail/setup.rs:251-252`) and returns only when the run has ended
+  (`Shared`'s wait, `:274`), so no setup write lands after Sign out's clean. The setup checks it
+  between steps and in its window waits (`mail/runner.rs:462, 481, 598, 662`) but not in two long
+  waits, which **F8d gives the check** (§14.51 r2, R2, ruled; F1 test 30's runner cases):
+  - `confirm_address`'s poll, up to `CONFIRM_WAIT`, 15 minutes (`runner.rs:72, 800-812`): checked
+    each `POLL` beside the deadline;
+  - the canary step: `canary_after_set`'s `FORWARD_SETTLE` loop and `canary_back`'s wait
+    (`runner.rs:844-884`): checked each `POLL`.
+  **A wait the stop ended is a stop, never a failure:** the confirm returns the outcome the window
+  waits already return for a stop (`Outcome::Cancelled`, `:598-599`) if the step machine records it
+  as un-failed, else a new stop outcome it does; the canary arm (`:558-565`) returns that outcome,
+  not `Outcome::Failed`, when `canary_after_set` returned false with the stop set. The run then ends
+  as `End::Stopped` through `finished_end` (`:461-463`), with today's withdraw rule
+  (`:185-186`), and onboarding's `mail.setup` job is `Stopped` (pending), so it runs again at the
+  next launch. With both checks, `mail.setup` ends within one `POLL`, 5 s (`:74`). `mail/runner.rs`
+  is off the contract list; the edit is about 10 lines. **F8d also records the provider** the
+  setup ran for in the answers file's `mail_provider` (F2b's field), which F2b's finish reads (R1):
+  the service row's own `provider` string (`m365`, `google` or `other`, the names
+  `Provider::from_service` reads, `mail_steps.rs:138-143`), stored as given and never a Rust enum
+  name, and written **only through `update_answers`** (`onboarding_state.rs:421-426`, under
+  `ANSWERS_LOCK`), never a bare load and save (§14.51 r3, m-b). The Google reads and `coursework.discover` check the stop after their
+  call and before any write. Size: S (about 80 lines with the stop handling, plus about 10 in
+  `mail/runner.rs`).
 - **F8m, the backfill hook** (in `app/src/mail/live.rs`; review r5, I-4). F1's test 23. A pure
   `on_batch_closed(mode) -> BatchClosed::{RunSlot, TellQueue}`, and in `real_env`'s `on_closed`: when
   the app manages F8a's queue (onboarding mode), call its `mail_batch_closed()`, which records the
@@ -2650,7 +3042,12 @@ mode. Every screen reads `onboarding_status`, calls only §4.5's and F5's comman
 count. Each piece edits about 80 lines or fewer of code and adds fixture renders (the console's
 `?fixture=` path) for its steps' states. Acceptance for each: its share of F11t's tests passes.
 - **F11a:** the step frame (why, ask, proof, the states of §4.1, Finish later, Sign out, the
-  "finishing <job>…" state of §4.10) and the rail; and one line in `console.js`'s `renderFirstRun`
+  "finishing <job>…" state of §4.10, with its two 15-second lines picked from F2b's
+  `exiting: {job, long, since}` and an F11t pin on each line's text; §14.51) and the rail. **The
+  slot line carries an elapsed-time counter** (§14.51 r2, the controller's ruling): "<m> min <s> s"
+  since `since`, ticking each second from the page's own clock against that instant, beside "This
+  can take up to 20 minutes"; it counts up only, never down, and shows no estimate. An F11t pin
+  renders the line at `since` 75 s ago as "1 min 15 s"; and one line in `console.js`'s `renderFirstRun`
   (`:1542`) so a `(not yet:` row reads as skipped (review r6, M1). **The shots hook** (F10 review r2,
   Important 3; §14.48): `scripts/console-shots.py:91` calls `KNOWLU_SHOTS.startWizard`, which F10
   removed, so the shots run aborts (not a CI gate). F11a adds `KNOWLU_SHOTS.startOnboarding(step)`,
@@ -3926,4 +4323,213 @@ the controller's ruling that F9 keeps `first_grades_marked` (a bare `grades` row
    no gate output, never an empty item list, which F9 would open on. F1 test 28's second half.
 Tasks changed: F8g (the first-grades mapping and the closed-set constants), F2b (`onboarding_status`
 fails closed), F1 (new test 28), §4.3 (the first-grades note and the closed set's first entry).
+
+### 14.51 Two stops, a bounded drain, a crash-loop guard, the console's hand-over (2026-10-24)
+
+From the F8f review (I-1, I-2), the F8a review r2 (I-2) and the F8s follow-up, checked against the
+code on `feat/o3-long-onboarding` (`onboarding_jobs.rs`, `onboarding_state.rs`, `scheduler.rs`,
+`mail_session.rs`, `mail/commands.rs`). Each item has an owner, a test the owner writes first (F1
+merged before them, so the tests are numbered 29-32 in F1's list but written in their tasks) and the
+words where the student sees anything.
+1. **The slots never saw the queue's stop.** `Queue::request_stop` sets `Inner.stop`, which the
+   runner is handed; `run_slot_scoped` checks `sch.stop`; nothing joined them, so Finish later during
+   `slot.first_full` ran every stage. **Ruling: F2b joins them**, with
+   `stop_both(sch, queue)` (sets `sch.stop`, then the queue's), the one body of the live
+   `ExitSeams::request_stop`; every exit already starts with that seam (§4.10's table), so no other
+   path needs it. A `Deps` field was rejected: `Scheduler.stop` is a field of managed state, not an
+   `Arc`, so a `Deps` field would change `Scheduler` or carry a closure over the `AppHandle` for one
+   store. **F8g adds the belt:** its slot runner returns `Stopped` before calling the slot when the
+   queue's stop is already set. Test 29. No words (the page's drain lines, item 2).
+2. **The drain had no limit.** *Revised after review r1 (C1), below; the first ruling, a 45-second
+   limit that abandoned `school.capture`, `mail.setup` and the other serial jobs, is withdrawn.*
+   **Ruling: F8f2 abandons no writer; the drain waits, and each runner bounds the wait by its own
+   stop checks** (F8b, F8d, F8g). Only `ABANDON_AT_ONCE`'s canary and first pass, which write
+   nothing anywhere, are abandoned. The page (F11a, from F2b's `exiting: {job, long, since}`;
+   wording as revised in r2): "Finishing <job>…"; from 15 s, "Still finishing <job>. Knowlu closes
+   by itself within a minute or two, once it's saved."; for a slot from 15 s, "Saving what Knowlu
+   has read so far. This can take up to 20 minutes, and Knowlu closes by itself when it's done.",
+   with an elapsed-time counter. `quit_flush`'s 10 s runs after the drain returns. Test 30.
+3. **The crash-loop guard.** **Ruling: F8a2** (after F8f2 in `onboarding_jobs.rs`; the field in
+   F2a's `onboarding_state.rs`). `JobRecord.crashes: u8`, `#[serde(default, skip_serializing_if =
+   "is_zero")]`, so **`STATE_VERSION` stays 1**: old files read 0, a 0 is never written (today's
+   bytes unchanged), and nothing denies unknown fields. A job found `running` at start counts one;
+   at two it is `failed` with `job_crashed` (`REASON_JOB_CRASHED`, which the queue already uses for
+   an unwinding panic) and is not run; `start` then persists once before any thread starts (r1 M2).
+   `work`'s `running` insert must keep the count (today it resets the whole record); every fresh
+   record, an abandoned job's included, is 0 (r1 M1); Try again sets it to 1. The fix, §4.3's second
+   closed-set entry, reworded after r1 I5: "Knowlu stopped twice while this step was running, so it
+   has paused it. Press Try again to run it once more." Test 31.
+4. **The console's hand-over clearing was never built** (F8s merged without it; `slot_ended` was a
+   stub). **Ruling: new task F8s2** (`implementer`, `scheduler.rs` and F8m's normal arm of
+   `mail/live.rs`, after F8f merges). The slot item clears at the end of a slot that ran, for a
+   finished `onboarding.json` only; refused slots and absent, unfinished or unreadable files write
+   nothing. *The mail signals are revised after review r1 (I2-I4), below.* Test 32. No new words:
+   the "still coming" line drops the item.
+5. **Notes placed in the briefs:**
+   - **F2b:** the drain runs only from the three `async` commands and F4's thread (test 24's pin);
+     step 3's capture replaces an unreadable answers file (F2d review r1, I-2; a test 12 case).
+   - **F8e:** the second lane (F8a) and `confirm_step10` are built; only the rules and step 10's
+     gate refinement remain.
+   - **F8g:** the runner holds the `AppHandle` (F8a's ruling 3); F8a's brief is corrected.
+   - **F4:** manages `LaunchMode` and the `Queue` (F4b's and F8m's guards are inert without them;
+     a test 27 pin); an unreadable `onboarding.json` is rewritten by passing F2a's derived state to
+     `Queue::start` (T0 review M5).
+   - **Open, owner unassigned: the `America/Chicago` fallback** (`onboarding.rs:155` in
+     `launch_state`, `:867` in the step-2 create) when Windows reports no IANA name. It is the
+     founder's own zone hard-coded for every student, so it reads as a rule-1 bug. Options: (a) F3
+     takes it, and when Windows names no zone, step 2 writes the zone from the school's state
+     (`scaffold::STATE_TZ`) at step 3's confirm instead, which needs §4.9 to allow the zone to be
+     written then rather than at step 2; (b) a fixed-offset zone from the system's current offset,
+     wrong across a DST change; (c) keep it and show the zone in Settings for correction.
+     Recommendation: (a), owned by F3, with a test that a machine reporting no IANA name never gets
+     `America/Chicago` from the step-2 path. The controller's call; nothing in wave B blocks on it.
+Tasks changed: §4.3 (the second closed-set entry), §4.10 (two flags, one call; the drain's limit and
+its words; the crash guard; the hand-over table's mail row), F1 (tests 29-32, each its owner's), F2b
+(`stop_both`, the progress answer, the main-thread rule, the unreadable answers rule), F4 (two
+managed values, the rewrite), F8a (the `AppHandle` corrected) and new F8a2, F8e (what is built),
+F8f2 (new), F8g (the runner's stop check), F8s (the clearing moved) and new F8s2, F11a (the drain
+lines), §7 (rows F2b, F4, F8f2, F8a2, F8s2, F8g).
+
+**Revised after review r1** (`docs/reports/2026-10-24-wave-b-plan-14-51-review-r1.md`, on
+e64d420: FAIL, one Critical, five Important, three Minor). Each fix cites the code it rests on, in
+`feat/o3-long-onboarding`.
+- **C1, an abandoned writer wrote after the exit. Ruling: the exit waits for every writer**, and
+  the runners' stop checks bound the wait. Only runners that write nothing anywhere are abandoned:
+  `ABANDON_AT_ONCE`, the canary and the first pass (`onboarding_jobs.rs:106-110`, whose doc already
+  says so). An abandoned thread keeps running (`:108-109`), and the drain otherwise waits for every
+  busy job (`:340-341`); F2b runs `on_sign_out` and the freeze only after the drain returns
+  (§4.10's table), so a waited-for writer can never write after them. **Why waiting over "check the
+  stop before each write" alone:** the check is check-then-act, and nothing orders it against
+  `on_sign_out`'s deletes on the exit's thread (no lock is shared between the capture's answers or
+  credential writes and F2e's deletes), so it narrows the window without closing it; waiting
+  closes it by construction and needs no new lock. The checks are kept as the bound: each
+  waited-for runner checks the stop at its safe points and writes nothing after it, which keeps the
+  wait at about 75 s for `school.capture` (`grades::SETTLE`, 45 s, `grades.rs:460`, plus the 30 s
+  agent timeout, `:506`; the visible sign-in closed at the stop, not left to the 15-minute
+  `SIGN_IN_LIMIT`, `:462`), seconds for the preview, the Google reads, `coursework.discover` and the
+  lane, and a slot's running stage (one `CHILD_TIMEOUT` at worst, `scheduler.rs:28`). `mail.setup`
+  ends after its current step (`Shared::stop`, `mail/setup.rs:251-252`); *r2 corrects this bound:
+  the confirm and canary waits did not check the stop, and F8d now adds both checks (R2 below).*
+  The page says it is waiting and that Knowlu closes by itself (§4.10's two lines). Test 30's fake
+  `school.capture` now writes a marker after the stop, and the test asserts it is waited for and
+  never written back after a fake `on_sign_out`. Owners: F8f2 (the list stays, the progress), F8b
+  and F8d (the stop checks), F2b (the order pin in test 25).
+- **I1, a part-stopped slot was `done`. Ruling: F8g's `slot_outcome` maps a summary with any
+  `(not run: stopped)` row to `Stopped`.** A stopped slot sets no `reason` and pushes those rows at
+  exit 0 (`scheduler.rs:741-748`), and `Core::finish` makes a reason-less `Outcome::Slot` `Done`
+  (`onboarding_jobs.rs:157`). Test 29's F8g half drives the real `run_slot_scoped` with the stop set
+  before it and during `sync`. `Core::finish` is unchanged.
+- **I2, the canary read the wrong field. Ruling: `CanaryVerified` is a row's `last_canary_ok_at` at
+  or after `started_at`**, the field the setup's own canary wait reads (`mail/runner.rs:868-877`);
+  `confirmed` is the provider's confirmation, before the canary (`:819-820`). Test 32.
+- **I3, `last_reconcile` is not "first pass delivered". Ruling, now: the first closed backfill
+  batch.** `last_reconcile` is written only after a slot's recover pass and never for Microsoft 365
+  (`mail/slot.rs:249`); a closed batch calls `on_closed` (`mail/backfill.rs:387-388`), and F8m's
+  normal-console arm (`mail/live.rs:128-131`) applies `FirstPassDelivered` before its slot; it is
+  the same event onboarding's `mail.first_pass` waits for. The `open_backfills` marker
+  (`backfill.rs:86-104`) was not chosen: its absence also means "never opened", so it needs a
+  remembered earlier state the hand-over item does not carry. *Microsoft 365's case is ruled again
+  in r2 (R1): the r1 shortcut is withdrawn.* Test 32.
+- **I4, the disconnect needed the unfiltered list. Ruling: `mail_signals` reads `listed` before
+  `mail_step`'s filter** (`scheduler.rs:469-480`), and `Disconnected` is an `Ok` list with no live
+  row: every row `revoked` or turned off, or **no row at all**, since a setup that changed nothing
+  deletes its address (`mail/runner.rs:378-394`). An unreadable list gives nothing
+  (`scheduler.rs:468-469`). Items carry no address id (`onboarding_state.rs:81-85`), so the test is
+  over the whole list. Test 32 gains the row-absent and unreadable-list cases.
+- **I5, the guard counts every kill. Ruling: keep the guard, say so, reword.** A Windows shutdown,
+  End task or a crash in the job on the other lane all leave a job `running`; a clean exit never
+  does, because every exit drains first. Two kills in a row during one job are rare and cost one Try
+  again. The fix: "Knowlu stopped twice while this step was running, so it has paused it. Press Try
+  again to run it once more." (the reviewer's words; §4.3, F8a2).
+- **M1:** one rule, every fresh record's count is 0: `Core::finish`'s insert
+  (`onboarding_jobs.rs:162`) and the drain's `JobRecord::default()` for an abandoned job (`:336`),
+  whose late return goes through `finish` as `Stopped` (`:233-234`). F8a2's earlier "an abandoned
+  job keeps it" is withdrawn. Test 31.
+- **M2:** `Queue::start` persists nothing today (`:255-274`; the first save is `startup`'s, `:215`,
+  after the entitlement read), and the ungated jobs run before it (`:98`, `:137`), so F8a2 makes
+  `start` persist once, synchronously, before its threads. Test 31 reads the file before any job
+  runs. F4's M5 rewrite relies on the same save.
+- **M3:** the slot line says "several minutes" (one stage can run to `CHILD_TIMEOUT`, 20 minutes);
+  r2 replaces it with "up to 20 minutes" and a counter.
+Tasks changed in r1: §4.3 (the `job_crashed` words), §4.10 (the drain paragraph rewritten, the
+one-exit line, the kill note, the hand-over table's mail row), F1 tests 29-32, F2b (the progress
+answer's `long`, the sign-out order pin), F8a2 (the persist, the reset rule, the kill note), F8b
+and F8d (the stop checks and their bounds), F8f2 (rewritten: no limit, no new abandonment),
+F8g (`slot_outcome`), F8s2 (the three mail signals, `mail/live.rs`), F4 (the rewrite's timing),
+F11a (`long`), §7 (rows F8f2, F8a2, F8s2, F8g).
+
+**Revised after review r2** (the "Review r2" section of the same report, on 93474f4: FAIL, narrow;
+C1, I1, I2, I5, M1 and M2 closed). The controller's rulings, each with its code reference:
+- **R1, the Microsoft 365 shortcut hid open items. Ruling (the reviewer's fix): a held provider's
+  first pass is never handed over, and the first-pass signal clears only itself, after the canary.**
+  F8f's `mail_signal` clears all three items on `FirstPassDelivered` (`onboarding_state.rs:126`),
+  and r1's shortcut fired on an empty list, so it could hide an open setup or canary. Now: F2b's
+  finish drops `mail.first_pass` from `handover_for`'s list (`onboarding_state.rs:703-711`) when
+  the answers file's `mail_provider` (written by F8d) is held (`backfill_held_for_c3`,
+  `mail_steps.rs:93-95`), and the Settings mail row carries the guided step (D13,
+  `mail_steps.rs:88-92`; the setup ends there as `End::ForwardingSet`, `mail/runner.rs:465-472`).
+  F8s2 changes `mail_signal`'s first-pass arm to clear `mail.first_pass` alone, and only when
+  `mail.setup` and `mail.canary` are gone; the `on_closed` hook reads `CanaryVerified` from the
+  address list first, so a batch that closes before a slot has seen the canary is not lost (the
+  backfill runs only after the canary step is `Done`, `runner.rs:558-573`). `mail_signals` never
+  gives `FirstPassDelivered`; the shortcut is gone. Owners: F2b, F8d, F8s2. Test 32's F2b half and
+  its delivered half.
+- **R2, the `mail.setup` wait was understated. Ruling: F8d adds the stop check to the confirm poll
+  (`CONFIRM_WAIT`, 15 minutes, `runner.rs:72, 800-812`) and to the canary wait (`FORWARD_SETTLE`'s
+  loop and `canary_back`, `:844-884`), and a wait the stop ended is a stop, never a failed confirm
+  or canary** (the canary arm, `:558-565`, returns the stop outcome; the run ends `End::Stopped`
+  through `finished_end`, `:461-463`). `mail.setup` then ends within one `POLL`, 5 s (`:74`), and is
+  no longer `long`. Test 30's runner cases, over the real setup runner with a fake clock.
+- **R2, the slot (the controller's ruling, G7): the stop never kills a running engine child.** The
+  child is waited for, at worst one `CHILD_TIMEOUT`, 20 minutes (`scheduler.rs:28`), and the page
+  says so: "Saving what Knowlu has read so far. This can take up to 20 minutes, and Knowlu closes by
+  itself when it's done.", with an elapsed-time counter from `exiting.since` (F11a's brief, with an
+  F11t pin).
+- **R3, an empty list read as a disconnect mid-setup. Ruling: no row is `Disconnected` only when
+  `mail.json` has no `pending_setups` entry.** `revoke` deletes the address first and drops the
+  record only when the service took the delete (`mail/runner.rs:386-391`), so a record left means a
+  setup in flight or a delete owed. Test 32 gains the empty-list-with-record case.
+- **m1: both timestamps are parsed** (`jiff::Timestamp`, as `runner.rs:872` parses
+  `last_canary_ok_at`) and compared as instants; test 32 gains three mixed-format cases, each one a
+  string comparison gets wrong (an offset against `Z`, both ways, and a fractional second).
+- **m2: one process-wide lock, owned by F8s2.** `ONBOARDING_JSON_LOCK` and `update_finished` in
+  `onboarding_state.rs`, the shape of `MailState::update` (`mail_session.rs:39-44, 300-307`), around
+  every normal-console load, change and save: the slot-end clearing and `on_closed`'s signal
+  (`mail/live.rs:120-131`) can run on two threads at once. In onboarding mode the queue is the only
+  writer (`onboarding_jobs.rs:170-172`). Test 32's lock case.
+- **m3: the capture line reads "within a minute or two"** (§4.10, F11a).
+Tasks changed in r2: §4.10 (the `mail.setup` and slot bounds, the two lines, the hand-over table's
+mail row), F1 tests 30 and 32, F2b (the held provider's first pass, `Answers.mail_provider`,
+`long` for a slot only), F8d (the two stop checks, the provider recorded), F8f2 (`long`), F8s2 (the
+lock, the timestamps, the pending-setup rule, the first-pass arm, the hook's canary read, the
+shortcut removed), F11a (the counter), §7 (rows F2b, F8d, F8s2).
+
+**Revised after review r3** (FAIL, narrow: one Important, three Minor; the hook's canary read was
+judged safe and stays). The controller's rulings, each with its code reference:
+- **I-1, a Guided provider's first pass never cleared. Ruling: the drop is keyed on "the app never
+  drives this provider's backfill"**, Guided or held until C3: `Provider::from_service` falls back
+  to Guided for any name but the two it knows (`mail_steps.rs:138-143`), `rearm_backfill` refuses
+  both (`:442-445`), and the slot's mail stage skips Guided rows (`scheduler.rs:478`), so no batch
+  ever closes for either. F2b's `backfill_never_driven(p)` names them and finish drops
+  `mail.first_pass` for a recorded provider of either kind. **Without the answers file** (an M365
+  or Guided setup still pending at finish, so no provider recorded), F8s2's `mail_signals` gives
+  `BackfillNeverDriven` beside `CanaryVerified` when the verified row's own provider is never
+  driven, which clears `mail.first_pass` after the canary items. Test 32 gains the Guided finish
+  case, the Guided row case and the M365-pending-at-finish case. Owners: F2b, F8s2.
+- **m-a: the lock is never held across the network.** The hook's address list is read in the
+  spawned slot thread before its `run_slot` (`mail/live.rs:129-131`), off the backfill's thread and
+  outside `update_finished`; the lock covers only load, apply and save. Test 32's blocking-list
+  case and a source pin. Owner: F8s2.
+- **m-b: F8d writes `mail_provider` only through `update_answers`** (`onboarding_state.rs:421-430`,
+  `ANSWERS_LOCK`), never `save_answers` (`:418`) on a copy it loaded; the value is the service's own
+  string (`m365`, `google`, `other`), read back with `Provider::from_service`; the field is
+  `#[serde(default, skip_serializing_if = "Option::is_none")]`, so today's answers bytes are
+  unchanged. Test 32's provider-write case. Owner: F8d (the field is F2b's).
+- **m-c: one sentence in F8s2's brief.** An unparseable `sent_at` makes the setup accept an older
+  canary (`mail/runner.rs:875`), which `CanaryVerified` does not count, so `mail.canary` and
+  `mail.first_pass` can stay until a later canary or batch. Accepted, not fixed.
+Tasks changed in r3: §4.10 (the hand-over table's mail row), F1 test 32 (the never-driven, lock and
+provider-write cases), F2b (`backfill_never_driven`, the service string), F8d (`update_answers`, the
+string), F8s2 (`BackfillNeverDriven`, the request's thread and the lock, the `sent_at` sentence),
+§7 (rows F2b, F8d, F8s2).
 
