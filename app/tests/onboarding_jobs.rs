@@ -1963,3 +1963,20 @@ fn test_03_a_runner_that_panics_fails_its_job_with_the_closed_set_reason_and_the
     assert_eq!(r.job("mail.setup").reason.as_deref(), Some(REASON_JOB_CRASHED));
     assert_eq!(r.state_of("mail.canary"), JobState::Done);
 }
+
+#[test]
+fn test_03_every_job_name_these_tests_use_is_in_the_resume_order() {
+    // Every dotted job-name literal in this file whose first part is a job family. A job left out of
+    // `JOB_ORDER` resumes after `slot.first_full` (a missing `calendar.read` once did).
+    const FAMILIES: [&str; 8] = ["school", "calendar", "mail", "google", "coursework", "registrar", "config", "slot"];
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("onboarding_jobs.rs")).unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    for lit in src.split('"').skip(1).step_by(2) {
+        let Some((family, rest)) = lit.split_once('.') else { continue };
+        let name_like = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c == '_');
+        if FAMILIES.contains(&family) && name_like(family) && name_like(rest) && !["rs", "json", "yaml", "md"].contains(&rest) { seen.insert(lit.to_string()); }
+    }
+    assert!(seen.len() >= 15, "the scan found too few jobs: {seen:?}");
+    let missing: Vec<&String> = seen.iter().filter(|j| !JOB_ORDER.contains(&j.as_str())).collect();
+    assert!(missing.is_empty(), "not in JOB_ORDER: {missing:?}");
+}

@@ -98,12 +98,13 @@ const LANE: [&str; 6] = ["school.store", "calendar.store", "school.apply", "scho
 const UNGATED: [&str; 2] = ["school.capture", "school.preview"];
 /// The order a resumed queue runs its jobs in: step order, then ask order within a step (§4.2).
 /// A name not listed sorts after these, by name.
-const CANON: [&str; 16] = [
+pub const JOB_ORDER: [&str; 17] = [
     "school.capture", "school.preview", "school.store", "school.apply", "school.courses", "registrar.confirm",
-    "mail.setup", "mail.canary", "mail.first_pass", "google.gmail_first_read", "calendar.store", "google.calendar_read",
+    "mail.setup", "mail.canary", "mail.first_pass", "google.gmail_first_read", "calendar.store", "calendar.read", "google.calendar_read",
     "coursework.discover", "config.ingest", "slot.partial", "slot.first_full",
 ];
-/// The closed-set reason of a job whose runner panicked; the page maps it to its fix.
+/// The closed-set reason of a job whose runner panicked; the page maps it to its fix. It is reachable
+/// only under unwinding (tests and the dev profile): the release profile has `panic = "abort"`.
 pub const REASON_JOB_CRASHED: &str = "job_crashed";
 
 struct Core {
@@ -113,8 +114,6 @@ struct Core {
     /// False until the start thread has read the entitlement once; gated jobs wait for it.
     ready: bool,
     entitled: bool,
-    /// Set by [`Queue::wake`]: its read is newer than the start thread's, which then writes nothing.
-    woken: bool,
     busy: [bool; 2],
     /// `Waiting` and `Stopped` jobs: not picked again until something else changes (no spin).
     parked: BTreeSet<String>,
@@ -164,7 +163,8 @@ impl Inner {
         if let Err(e) = save_state(&self.deps.data_dir, &c.state) { eprintln!("onboarding: could not save the job states: {e}"); }
     }
     /// Reads the entitlement without holding the lock: a cache short of `Entitled` gets one refresh.
-    /// A panic in either call reads as "not entitled", so the jobs stay held rather than the thread dying.
+    /// Under unwinding (tests and dev; release is `panic = "abort"`), a panic in either call reads as
+    /// "not entitled", so the jobs stay held rather than the thread dying.
     fn read_entitlement(&self, refresh: bool) -> bool {
         let e = &self.deps.entitlement;
         let read = || { if !e.entitled() && refresh { e.refresh(); } e.entitled() };
@@ -182,12 +182,15 @@ fn scope_for(job: &str, s: &OnboardingState) -> Option<SlotScope> {
     }
 }
 
-/// The one startup read (a cache short of `Entitled` gets one refresh), on its own thread so that
-/// `school.capture` and `school.preview` never wait for it. It leaves a newer `wake()` read alone.
+/// The one startup read (a cache short of `Entitled` gets one refresh), on its own detached thread so
+/// that `school.capture` and `school.preview` never wait for it and a drop never waits on a refresh. It leaves a newer `wake()` read alone.
 fn startup(inner: Arc<Inner>) {
     let ent = inner.read_entitlement(true);
     let mut g = inner.lock();
-    if !g.woken { g.entitled = ent; }
+    // The queue was dropped while the refresh ran (this thread is detached): write nothing.
+    if g.shutdown { return; }
+    // A wake's read is newer, so a stale `false` here never undoes it; a fresh `true` is always kept.
+    g.entitled |= ent;
     g.ready = true;
     g.settle();
     inner.persist(&g);
@@ -204,6 +207,7 @@ fn work(inner: Arc<Inner>, lane: usize) {
         let scope = scope_for(&job, &g.state);
         drop(g);
         let run = || inner.deps.runner.run(&job, scope, &inner.stop);
+        // Holds under unwinding only (tests and dev): in release `panic = "abort"` ends the process.
         let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|_| Outcome::Failed(REASON_JOB_CRASHED.into()));
         g = inner.lock();
         g.finish(&job, lane, out);
@@ -233,15 +237,18 @@ impl Queue {
             if r.state == JobState::Running { r.state = JobState::Pending; }
             if matches!(r.state, JobState::Pending | JobState::Held) { order.push(name.clone()); }
         }
-        order.sort_by_key(|j| (CANON.iter().position(|c| c == j).unwrap_or(CANON.len()), j.clone()));
-        let core = Core { state, order, ready: false, entitled: false, woken: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false };
+        order.sort_by_key(|j| (JOB_ORDER.iter().position(|c| c == j).unwrap_or(JOB_ORDER.len()), j.clone()));
+        let core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false };
         let inner = Arc::new(Inner { deps, core: Mutex::new(core), cv: Condvar::new(), stop: AtomicBool::new(false) });
         let spawn = |lane: usize, name: &str| {
             let i = inner.clone();
             std::thread::Builder::new().name(name.into()).spawn(move || work(i, lane)).expect("the onboarding queue could not start a thread")
         };
-        let starter = { let i = inner.clone(); std::thread::Builder::new().name("onboarding-start".into()).spawn(move || startup(i)).expect("the onboarding queue could not start a thread") };
-        let threads = vec![spawn(0, QUEUE_THREAD), spawn(1, LANE_THREAD), starter];
+        // The start read is detached, not joined: a refresh can take a minute, and `startup` writes
+        // nothing once the queue is dropped.
+        let i = inner.clone();
+        std::thread::Builder::new().name("onboarding-start".into()).spawn(move || startup(i)).expect("the onboarding queue could not start a thread");
+        let threads = vec![spawn(0, QUEUE_THREAD), spawn(1, LANE_THREAD)];
         Queue { inner, threads }
     }
     /// An ask was answered: the job is `pending` (or `held`) and runs when its inputs are ready.
@@ -260,7 +267,7 @@ impl Queue {
     pub fn wake(&self) {
         let ent = self.inner.read_entitlement(false);
         let mut g = self.inner.lock();
-        (g.entitled, g.woken, g.parked) = (ent, true, BTreeSet::new());
+        (g.entitled, g.parked) = (ent, BTreeSet::new());
         g.settle();
         self.inner.persist(&g);
         self.inner.cv.notify_all();
