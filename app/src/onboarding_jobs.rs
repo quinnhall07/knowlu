@@ -172,6 +172,12 @@ struct Core {
     partial_no_rank: bool,
     /// The profile's app data: where the answers file the config jobs read lives.
     dir: std::path::PathBuf,
+    /// F8d2: when a job parked on a reason in [`RETRY_REASONS`] is picked again; read against the queue's clock.
+    retry_at: BTreeMap<String, Instant>,
+    /// F8d2: mail jobs the student skipped while they ran: a `Stopped` or `Waiting` end lands `skipped`.
+    skipping: BTreeSet<String>,
+    /// F8d2: the running `mail.setup`'s run, once its glue hands it over ([`Queue::attach_setup_run`]).
+    setup_run: Option<Arc<dyn SetupRun>>,
 }
 
 impl Core {
@@ -215,6 +221,12 @@ impl Core {
             "slot.partial" => !done("config.ingest") || settled("school.apply"),
             _ => true,
         }
+    }
+    /// F8d2: unparks every job whose retry time has come; true when any did.
+    fn unpark_due(&mut self, now: Instant) -> bool {
+        let due: Vec<String> = self.retry_at.iter().filter(|(_, at)| **at <= now).map(|(j, _)| j.clone()).collect();
+        for j in &due { self.retry_at.remove(j); self.parked.remove(j); }
+        !due.is_empty()
     }
     /// `failed` with [`REASON_JOB_CRASHED`]: the crash-loop guard's pause (or a panic's).
     fn is_paused(&self, job: &str) -> bool {
@@ -294,7 +306,12 @@ impl Core {
     }
     fn finish(&mut self, job: &str, lane: usize, out: Outcome) {
         self.busy[lane] = false;
+        // F8d2: a mail job the student skipped while it ran lands `skipped` when it stops or parks;
+        // one that ended done or failed keeps its truthful end.
+        let skipped = self.skipping.remove(job) && matches!(out, Outcome::Stopped | Outcome::Waiting(_));
+        if job == "mail.setup" { self.setup_run = None; }
         let (state, proof, reason) = match out {
+            _ if skipped => (JobState::Skipped, BTreeMap::new(), None),
             Outcome::Done(p) => (JobState::Done, p, None),
             Outcome::Failed(r) => (JobState::Failed, BTreeMap::new(), Some(r)),
             Outcome::Slot(SlotRun { reason: Some(r), .. }) => (JobState::Failed, BTreeMap::new(), Some(r)),
@@ -351,7 +368,7 @@ impl Core {
     }
 }
 
-struct Inner { deps: Deps, core: Mutex<Core>, cv: Condvar, stop: AtomicBool, batch_closed: AtomicBool }
+struct Inner { deps: Deps, core: Mutex<Core>, cv: Condvar, stop: AtomicBool, batch_closed: AtomicBool, clock: Arc<dyn RetryClock> }
 
 impl Inner {
     fn lock(&self) -> MutexGuard<'_, Core> { self.core.lock().unwrap_or_else(|e| e.into_inner()) }
@@ -368,6 +385,19 @@ impl Inner {
     /// The next job for `lane`; none once the stop is set (checked under the lock `request_stop` takes).
     fn next(&self, c: &Core, lane: usize) -> Option<String> {
         if self.stop.load(Ordering::SeqCst) { None } else { c.pick(lane) }
+    }
+    /// F8d2: the idle wait. With a retry time pending (and no stop) it wakes at that time on the
+    /// queue's clock, at least every [`CLOCK_LOOK`] so a clock the test moves by hand is noticed;
+    /// otherwise it waits for a notify, as before. A stop ends the timer's wait: nothing is re-picked.
+    fn idle<'a>(&self, g: MutexGuard<'a, Core>) -> MutexGuard<'a, Core> {
+        let next = if self.stop.load(Ordering::SeqCst) { None } else { g.retry_at.values().min().copied() };
+        match next {
+            Some(at) => {
+                let left = at.saturating_duration_since(self.clock.now()).min(CLOCK_LOOK);
+                self.cv.wait_timeout(g, left).unwrap_or_else(|e| e.into_inner()).0
+            }
+            None => self.cv.wait(g).unwrap_or_else(|e| e.into_inner()),
+        }
     }
     /// Reads the entitlement without holding the lock: a cache short of `Entitled` gets one refresh.
     /// Under unwinding (tests and dev; release is `panic = "abort"`), a panic in either call reads as
@@ -407,8 +437,10 @@ fn startup(inner: Arc<Inner>) {
 fn work(inner: Arc<Inner>, lane: usize) {
     let mut g = inner.lock();
     while !g.shutdown {
-        let Some(job) = inner.next(&g, lane) else { g = inner.cv.wait(g).unwrap_or_else(|e| e.into_inner()); continue };
+        if g.unpark_due(inner.clock.now()) { inner.cv.notify_all(); }
+        let Some(job) = inner.next(&g, lane) else { g = inner.idle(g); continue };
         g.busy[lane] = true;
+        g.retry_at.remove(&job);
         // The running record keeps the count it is counting (the crash-loop guard); `finish` resets it.
         let crashes = g.state.jobs.get(&job).map_or(0, |r| r.crashes);
         g.state.jobs.insert(job.clone(), JobRecord { state: JobState::Running, crashes, ..Default::default() });
@@ -436,7 +468,9 @@ fn work(inner: Arc<Inner>, lane: usize) {
         // A job the drain abandoned already reads `pending`; whatever it returns late changes nothing.
         let abandoned = g.abandoned.remove(&job);
         let out = if abandoned { Outcome::Stopped } else { out };
+        let retry = matches!(&out, Outcome::Waiting(r) if RETRY_REASONS.contains(&r.as_str()));
         g.finish(&job, lane, out);
+        if retry && g.job_state(&job) == Some(JobState::Pending) { g.retry_at.insert(job.clone(), inner.clock.now() + MAIL_RETRY_AFTER); }
         let counting = !inner.stop.load(Ordering::SeqCst);
         if let Some((s, started, (status, cursor))) = reading.filter(|_| !abandoned) { g.after_slot(s, &started, counting, status, cursor); }
         if job == "slot.partial" && counting && !abandoned { g.after_partial(); }
@@ -462,7 +496,9 @@ impl Queue {
     /// Spawns the serial thread and the lane thread, over `state`. A job found `running` was killed:
     /// it counts one crash and goes back to `pending`, and at its second it is `failed` with
     /// [`REASON_JOB_CRASHED`] and not run (the guard, F8a2). The result is saved once, before any thread.
-    pub fn start(deps: Deps, mut state: OnboardingState) -> Queue {
+    pub fn start(deps: Deps, state: OnboardingState) -> Queue { Queue::start_with_clock(deps, state, Arc::new(WallClock)) }
+    /// [`Queue::start`] over a clock the retry timer reads (F8d2): a test moves its own by hand.
+    pub fn start_with_clock(deps: Deps, mut state: OnboardingState, clock: Arc<dyn RetryClock>) -> Queue {
         let mut order = Vec::new();
         for (name, r) in state.jobs.iter_mut() {
             if r.state == JobState::Running {
@@ -472,14 +508,14 @@ impl Queue {
             if matches!(r.state, JobState::Pending | JobState::Held) && !name.starts_with(INDICATOR_PREFIX) { order.push(name.clone()); }
         }
         order.sort_by_key(|j| (JOB_ORDER.iter().position(|c| c == j).unwrap_or(JOB_ORDER.len()), j.clone()));
-        let mut core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false, frozen: false, abandoned: BTreeSet::new(), drain_began: None, chain: Chain::default(), chain_ended: false, no_rank_owed: false, partial_no_rank: false, dir: deps.data_dir.clone() };
+        let mut core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false, frozen: false, abandoned: BTreeSet::new(), drain_began: None, chain: Chain::default(), chain_ended: false, no_rank_owed: false, partial_no_rank: false, dir: deps.data_dir.clone(), retry_at: BTreeMap::new(), skipping: BTreeSet::new(), setup_run: None };
         // A resumed `school.courses` that waits on an unsettled account needs a slot to settle it.
         if core.order.iter().any(|j| j == "school.courses") && !core.state.account_settled { core.push_job("slot.partial"); }
         core.mark_account_wait();
         // Before the start read (which can take a minute) and before the ungated jobs run, so a job that
         // kills the process every time cannot outrun its own count (§14.51 r1, M2).
         if let Err(e) = save_state(&deps.data_dir, &core.state) { eprintln!("onboarding: could not save the job states: {e}"); }
-        let inner = Arc::new(Inner { deps, core: Mutex::new(core), cv: Condvar::new(), stop: AtomicBool::new(false), batch_closed: AtomicBool::new(false) });
+        let inner = Arc::new(Inner { deps, core: Mutex::new(core), cv: Condvar::new(), stop: AtomicBool::new(false), batch_closed: AtomicBool::new(false), clock });
         let spawn = |lane: usize, name: &str| {
             let i = inner.clone();
             std::thread::Builder::new().name(name.into()).spawn(move || work(i, lane)).expect("the onboarding queue could not start a thread")
@@ -647,7 +683,51 @@ impl Queue {
         saved
     }
     /// F8m: a closed backfill batch tells the queue; nothing is started.
-    pub fn mail_batch_closed(&self) { self.inner.batch_closed.store(true, Ordering::SeqCst); }
+    /// It also unparks every parked job and wakes the threads, so a `mail.first_pass` that looked once
+    /// and parked on `mail_not_yet` looks again (F8d2; [`MAIL_FIRST_PASS_LOOKS`]).
+    pub fn mail_batch_closed(&self) {
+        let mut g = self.inner.lock();
+        self.inner.batch_closed.store(true, Ordering::SeqCst);
+        g.parked.clear();
+        self.inner.cv.notify_all();
+    }
+    /// F8d2: the student skipped step 5's email. A pending or held `mail.setup`, `mail.canary` and
+    /// `mail.first_pass` become `skipped` and leave the order; one that is running is marked, and the
+    /// run handed over by [`Queue::attach_setup_run`] is stopped (after its current step), so its
+    /// `Stopped` (or a watch's `Waiting`) lands `skipped`, not `pending`. A job that is not queued is left
+    /// alone, and a skipped mail job is never handed over (`handover_for`).
+    pub fn skip_mail(&self) {
+        let mut g = self.inner.lock();
+        let mut run = None;
+        for job in MAIL_JOBS {
+            match g.job_state(job) {
+                Some(JobState::Pending | JobState::Held) => {
+                    g.order.retain(|j| j != job);
+                    g.parked.remove(job);
+                    g.retry_at.remove(job);
+                    g.state.jobs.insert(job.to_string(), JobRecord { state: JobState::Skipped, ..Default::default() });
+                }
+                Some(JobState::Running) => {
+                    g.skipping.insert(job.to_string());
+                    if job == "mail.setup" { run = g.setup_run.clone(); }
+                }
+                _ => {}
+            }
+        }
+        self.inner.persist(&g);
+        self.inner.cv.notify_all();
+        drop(g);
+        if let Some(run) = run { run.stop(); }
+    }
+    /// F8d2: the `mail.setup` glue hands over the run it started, so [`Queue::skip_mail`] can stop it.
+    /// A skip that came first stops the run at once. The queue forgets it when the job ends.
+    pub fn attach_setup_run(&self, run: Arc<dyn SetupRun>) {
+        let mut g = self.inner.lock();
+        let late = g.skipping.contains("mail.setup");
+        if !late { g.setup_run = Some(run.clone()); }
+        drop(g);
+        if late { run.stop(); }
+    }
     /// True once a batch has closed under this queue (the rail's `older_mail` line reads it).
     pub fn batch_closed_noted(&self) -> bool { self.inner.batch_closed.load(Ordering::SeqCst) }
 }
@@ -1162,6 +1242,31 @@ pub const REASON_MAIL_NOT_YET: &str = "mail_not_yet";
 pub const MAIL_WATCH_POLL: Duration = Duration::from_secs(5);
 pub const MAIL_WATCH_BUDGET: Duration = Duration::from_secs(180);
 
+/// `mail.setup` found the mail window held by another holder (`on_start`'s sweep or resume) for the
+/// whole minute it polled: `pending`, re-picked on a timer ([`MAIL_RETRY_AFTER`]), since the window's
+/// release tells the queue nothing (§14.52.1, r1 m2).
+pub const REASON_MAIL_WINDOW_BUSY: &str = "mail_window_busy";
+/// `Waiting` reasons the queue re-picks on a timer: a closed list, today this one.
+pub const RETRY_REASONS: [&str; 1] = [REASON_MAIL_WINDOW_BUSY];
+/// How long a job parked on a [`RETRY_REASONS`] reason waits before it is picked again.
+pub const MAIL_RETRY_AFTER: Duration = Duration::from_secs(30);
+/// How often `mail.first_pass` looks for a closed batch: once. It sits on the serial queue in front of
+/// the Google reads and the slots, so it never waits; [`Queue::mail_batch_closed`] wakes it to look again.
+pub const MAIL_FIRST_PASS_LOOKS: u32 = 1;
+/// The mail jobs a skip of step 5 takes out.
+const MAIL_JOBS: [&str; 3] = ["mail.setup", "mail.canary", "mail.first_pass"];
+/// The longest an idle thread sleeps while a retry time is pending, so a moved clock is noticed.
+const CLOCK_LOOK: Duration = Duration::from_millis(250);
+
+/// The time the retry timer reads. The queue's is [`WallClock`]; a test moves its own by hand.
+pub trait RetryClock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+pub struct WallClock;
+impl RetryClock for WallClock {
+    fn now(&self) -> Instant { Instant::now() }
+}
+
 /// A running mail setup as `mail.setup`'s runner holds it: [`crate::mail::setup::Shared`], or a fake.
 pub trait SetupRun: Send + Sync {
     fn stop(&self);
@@ -1215,8 +1320,16 @@ fn run_mail_watch(check: &dyn Fn() -> bool, stop: &AtomicBool, sleep: &dyn Fn(Du
 /// `mail.canary`: `back` is the unfiltered address list's canary reading (F8s2's `CanaryVerified`).
 pub fn run_mail_canary(back: &dyn Fn() -> bool, stop: &AtomicBool, sleep: &dyn Fn(Duration)) -> Outcome { run_mail_watch(back, stop, sleep) }
 
-/// `mail.first_pass`: `closed` is F8m's `batch_closed_noted`. The backfill itself is never waited for.
-pub fn run_mail_first_pass(closed: &dyn Fn() -> bool, stop: &AtomicBool, sleep: &dyn Fn(Duration)) -> Outcome { run_mail_watch(closed, stop, sleep) }
+/// `mail.first_pass`: `closed` is F8m's `batch_closed_noted`. The backfill itself is never waited for:
+/// it looks [`MAIL_FIRST_PASS_LOOKS`] (once) and never sleeps (`_sleep` stays for the watches' shape). With no
+/// batch closed it is `Waiting(mail_not_yet)`, parked until [`Queue::mail_batch_closed`] wakes it (F8d2).
+pub fn run_mail_first_pass(closed: &dyn Fn() -> bool, stop: &AtomicBool, _sleep: &dyn Fn(Duration)) -> Outcome {
+    for _ in 0..MAIL_FIRST_PASS_LOOKS {
+        if closed() { return Outcome::Done(BTreeMap::new()); }
+        if stop.load(Ordering::SeqCst) { return Outcome::Stopped; }
+    }
+    Outcome::Waiting(REASON_MAIL_NOT_YET.into())
+}
 
 /// What a read hands back: its proof counts, or a named outcome that is not a failure (no runtime, model,
 /// account, session, entitlement or network; `coursework` always exits 0).
