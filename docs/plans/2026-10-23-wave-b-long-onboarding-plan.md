@@ -950,9 +950,13 @@ contracts (§9, Quinn's).
   r3, I-C): it means the answers were deleted or never saved, never that there were none.
 - **Sign-out during onboarding rewinds to step 2** (review r3 I-C; the step corrected in review r4,
   I-1). Sign-out deletes the answers file and the pending feed links (§4.11), the school folder (S5)
-  and the session. So, in the same call, `onboarding.json` is rewritten to **step 2** with every job
-  `pending`, the feed states, `account_settled` and `school` cleared (`school` added in the T0
-  review, M5; §4.7), and the skips kept. The next open of this
+  and the session. So, in the same call, `onboarding.json` is rewritten to **step 2** with **`jobs`
+  and `skips` emptied**, and the feed states, `account_settled` and `school` cleared (`school` added
+  in the T0 review, M5; §4.7). A step-2 file is a fresh install's: the student answers and skips
+  steps 3-10 again (§14.54, the controller's ruling from F2b2a's fix rounds; it replaces "every job
+  `pending`, skips kept", under which a relaunch queued every pending record, so a skipped email
+  setup restarted with no answer and a restored `slot.partial` ran as `BeforeConfig` with no `NoRank`
+  after `config.ingest`). The next open of this
   profile lands on step 2's sign-in inside onboarding mode (§4.2), then step 3, which asks again what
   the deleted files held: the school sign-in and capture, then steps 6-8's confirms (a grant already
   on the account shows `already-done`; stored homework logins, which sign-out keeps, pre-fill step 8).
@@ -1928,8 +1932,9 @@ job runners as a trait so tests pass fakes.
       last save made, saves frozen, the fake sign-out called, the fake relaunch called with `--pick`,
       and the fake exit called, in that order;
     - `on_sign_out` (inside the fake sign-out) deletes the answers file and the pending fake and
-      rewrites `onboarding.json` to **step 2** with every job `pending`, the feed states,
-      `account_settled` and `school` cleared, skips kept;
+      rewrites `onboarding.json` to **step 2** with `jobs` and `skips` empty and the feed states,
+      `account_settled` and `school` cleared (§14.54); a relaunch over the rewound file queues no
+      job;
     - **no save lands after the rewind**: a save the fake queue attempts after the freeze is refused,
       and the file read back is the rewound one;
     - signing in again (test 10's fake) and resuming lands at step 3, and no config job runs before
@@ -2165,8 +2170,9 @@ Split so that each edits about 80 lines or fewer of one file (review r2 I6, revi
   `onboarding_status`'s step-3 totals read the list. Size: S (about 65 lines).
 - **F2e (implementer), `on_sign_out(profile_dir, profile_id)`.** F1's test 17; §4.5's rewind. Deletes
   the answers file and both pending credentials where they exist, then, for an unfinished
-  `onboarding.json`, rewrites it at **step 2** with every job `pending` and the feed states,
-  `account_settled` and `school` cleared (`school`: T0 review M5, §4.7); a finished file is left alone; every failure is returned, never
+  `onboarding.json`, rewrites it at **step 2** with `jobs` and `skips` emptied and the feed states,
+  `account_settled` and `school` cleared (`school`: T0 review M5, §4.7; the emptying, §14.54, from
+  F2b2a's fix rounds, built in `on_sign_out_with`); a finished file is left alone; every failure is returned, never
   panicked, so the sign-out goes on. Size: S (about 35 lines).
 - **F2b (implementer), the commands.** F1's test 9's finish bullets and tests 12, 17's command half
   and 19; §4.5, §4.10. The `onboarding_status`, `onboarding_answer` (saves each answer to the answers
@@ -4638,7 +4644,9 @@ its test first, failing before the code, as for 29-32.
    - **Skip while the setup runs.** `mail_setup_stop` is not the page's, so step 5's Skip is
      `onboarding_skip(5, "mail")` in every state. F2b2a records the skip (today) and calls
      `Queue::skip_mail()` (**F8d2**, in `onboarding_jobs.rs`; F2b2a waits for it). That makes a pending or held
-     `mail.setup`, `mail.canary` and `mail.first_pass` `skipped` and drops them from the order. For
+     `mail.setup`, `mail.canary` and `mail.first_pass` `skipped` and drops them from the order. **A
+     mail job with no record yet also gets a `skipped` record** (§14.54, from F2b2a's fix rounds),
+     so an early skip holds: choosing school email after a step-5 skip starts nothing (G10). For
      a running `mail.setup` it marks the job and calls the run's `Shared::stop` (after the current
      step, `mail/setup.rs:251-252`). The runner's `Stopped` then lands as `skipped`, not `pending`.
      **The controller's call, after F8d2's review:** after a skip, a `Failed` end lands `skipped`
@@ -4664,6 +4672,9 @@ its test first, failing before the code, as for 29-32.
        `mail.first_pass`, which mean nothing without it. In their place, `handover_for` writes one
        item, `{item: "mail.connect", signal: "mail_json"}`, with cost key `mail_setup_unfinished`
        (`COST_MAIL_UNFINISHED`, beside `COST_MAIL`).
+     - **A `skipped` `mail.setup` never gets `mail.connect`**, any more than a `done` one does,
+       whether or not the job has any history (a `skipped` record `skip_mail` wrote with no run
+       before it counts the same; §14.54, for F2b2b). The skip's own cost line covers it.
      - The main page shows it as a not-connected line with its Settings button, never as "still
        coming": "Finish connecting your email in Settings." (§4.2's cost wording, "date changes and
        new work announced by email are missed", beside it as for a skip).
@@ -4840,6 +4851,12 @@ its test first, failing before the code, as for 29-32.
    - A repeat of any proceed changes nothing (one copy per job). Each saves no answer, so it can
      never be refused on an unreadable answers file. The jobs that read that file wait for it
      (`inputs_ready`).
+   - **How "changes nothing" is built** (§14.54, from F2b2a's fix rounds). The answer path
+     enqueues through `answer_enqueuer`, over **`Queue::enqueue_once(job) -> bool`**. It leaves a
+     job alone when it is `done`, `failed`, `skipped`, queued or running, and answers true only
+     when it newly queued the job. `slot.partial` is asked only if an earlier job in the same answer
+     was newly queued. `school.preview` stays on plain `enqueue`, so a re-capture rebuilds it. A
+     `failed` job stays failed: only Try again (`onboarding_retry`) re-runs one.
    - **`coursework.discover` is not enqueued in wave B.** Step 8's discovery is the page's
      `discover_coursework` (F5 moves it; F11t's R-C1-55 pin already gates Next on it), which never
      writes. A confirmed row reaches the answers file only through `(8, {"row"})` (R-OB-1: a row is
@@ -5100,7 +5117,9 @@ its test first, failing before the code, as for 29-32.
 1; the rest of 34 is F8d2's, F8w2's, F2b2a's and F11t's):
 - **33 (F2b2a):** each proceed and the step-5 shape enqueue exactly their jobs in order. `(3,
   proceed)` is refused, enqueuing nothing, with no school or an unconfirmed one. The step-5
-  `gmail` and unknown shapes are refused and change no byte. A repeat enqueues nothing new.
+  `gmail` and unknown shapes are refused and change no byte. A repeat enqueues nothing new: over
+  `enqueue_once`, a `done`, `failed`, `skipped`, queued or running job is left alone, a repeat asks
+  no `slot.partial`, and a re-capture still rebuilds `school.preview` (§14.54).
   `mail_kind` round-trips, and an answers file without it keeps its bytes. End to end over the fake
   queue: the unlisted paste path with no registrar rows ends with all four lane jobs `done` and
   `finish_ready: true`.
@@ -5190,6 +5209,8 @@ its test first, failing before the code, as for 29-32.
     `mail_setup_unfinished`;
   - with `mail.setup` `done`, the canary and first pass are handed over as today and no
     `mail.connect` is written;
+  - with `mail.setup` `skipped`, both after a run and as a bare record `skip_mail` wrote with no
+    history, no `mail.connect` is written (§14.54);
   - `CanaryVerified` and `TurnedOff` each clear `mail.connect` (`mail_signal` directly), and a
     slot's end does not;
   - **the two no-row cases keep it** (r2 R2-1):
@@ -5456,4 +5477,29 @@ F11a r2 minors (`docs/reports/2026-10-24-wave-b-f11a-review-r2.md`, m2-m6) their
 Tasks changed: F11b (m2, m3, m5's frame change and fixtures, M3, the seam and m4), F11c (m5's
 fixtures, the seam and m4), F11d (the pin amended by `test-writer` first, `openKnowluEnabled`, M7,
 the seam and m4), F11e1 and F11e2 (the seam and m4), and §7's rows for those five.
+
+### 14.54 From F2b2a's fix rounds: a clean rewind, `enqueue_once`, an early skip (2026-10-24)
+
+Recorded as built, with the controller's ruling on the first item.
+1. **Sign-out empties `jobs` and `skips`** (the controller's ruling). `on_sign_out_with` rewrites
+   an unfinished `onboarding.json` at step 2 with `s.jobs` and `s.skips` cleared, instead of every
+   record reset to `pending` with the skips kept. A step-2 file is a fresh install's, and the
+   student answers and skips steps 3-10 again.
+   - **Why:** a relaunch queued every `pending` record. A skipped email setup restarted with no
+     answer, and a restored `slot.partial` ran as `BeforeConfig`, with no `NoRank` after
+     `config.ingest`.
+   - **Updated:** §4.5's rewind, F1 test 17's bullet and F2e's brief. §14.20's round-3 wording is
+     history; this ruling supersedes it.
+2. **`Queue::enqueue_once(job) -> bool`.**
+   - It leaves a job alone when it is `done`, `failed`, `skipped`, queued or running, and answers
+     true only when it newly queued the job.
+   - The answer path enqueues through `answer_enqueuer`. `slot.partial` is asked only if an earlier
+     job in the same answer was newly queued. `school.preview` stays on plain `enqueue`, so a
+     re-capture rebuilds it.
+   - A `failed` job stays failed, and only Try again re-runs it. That is §14.52.3's "a repeat
+     changes nothing", now spelled out there and in test 33.
+3. **`skip_mail` writes `skipped` records for mail jobs with no record**, so an early skip holds.
+   G10: choosing school email after a step-5 skip starts nothing (§14.52.1's skip text).
+4. **For F2b2b.** The `mail.connect` item excludes `skipped` as well as `done`, whether or not the
+   job has any history. This is in §14.52.1, and test 40 gains the two `skipped` cases.
 
