@@ -303,6 +303,9 @@ pub fn disconnect_with(d: &Disconnect, address_id: &str) -> Value {
         return json!({ "ok": false, "error": "could not record the mailbox as turned off; nothing was changed",
                        "steps": [], "needs_you": false, "address": Value::Null });
     }
+    // The student's own off switch clears the not-connected hand-over item whatever the calls below answer
+    // (§14.52.1, r3 R3-2); a finished file only, and a failed save is not Disconnect's to report.
+    let _ = crate::onboarding_state::apply_mail_signal(d.data_dir, crate::onboarding_state::MailSignal::TurnedOff);
     let rows = match d.client.list_addresses() {
         Ok(rows) => rows,
         Err(e) => return json!({ "ok": false, "error": e.name(), "steps": [], "needs_you": false, "address": Value::Null }),

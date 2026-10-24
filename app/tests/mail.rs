@@ -6032,3 +6032,75 @@ fn test_34_mail_setup_start_refuses_in_onboarding_mode_and_starts_nothing() {
     let body = &src[from..from + src[from..].find("\n}\n").expect("its end")];
     assert!(body.contains("setup_start_inner("), "the wrapper calls the inner:\n{body}");
 }
+
+// ---- test 40 (F2b2c): Disconnect's TurnedOff event clears mail.connect (r3 R3-2, r4 R4-1) ---------------------
+
+use knowlu::onboarding_state::{load_state, save_state, state_path, HandoverItem, Loaded, OnboardingState};
+
+/// A service listing one mailbox, answering the list with `list_status` and the delete with `delete_status`.
+fn t40_service(list_status: u16, delete_status: u16) -> Service {
+    Service::start(false, move |req| {
+        let path = req.path.split("/mail").nth(1).unwrap_or("").to_string();
+        match (req.method.as_str(), path.as_str()) {
+            ("GET", "/addresses") if list_status != 200 => (list_status, r#"{"error":"failed"}"#.to_string()),
+            ("GET", "/addresses") => (200, json!({ "addresses": [row_for("m365")] }).to_string()),
+            ("DELETE", p) if p.starts_with("/addresses/") => (delete_status, r#"{"deleted":true}"#.to_string()),
+            _ => (404, r#"{"error":"no such route"}"#.to_string()),
+        }
+    })
+}
+
+fn t40_file(dir: &Path, finished: bool) {
+    let mut s = OnboardingState::new("2026-10-24T14:00:00Z", 11);
+    s.finished = finished;
+    s.handover = ["mail.connect", "mail.canary"]
+        .iter()
+        .map(|i| HandoverItem { item: i.to_string(), signal: "mail_json".into() })
+        .collect();
+    save_state(dir, &s).unwrap();
+}
+
+fn t40_items(dir: &Path) -> Vec<String> {
+    match load_state(dir) {
+        Loaded::Ok(s) => s.handover.into_iter().map(|h| h.item).collect(),
+        other => panic!("onboarding.json did not load: {other:?}"),
+    }
+}
+
+#[test]
+fn test_40_disconnect_clears_mail_connect_whether_or_not_the_service_delete_succeeds() {
+    for (case, list, delete) in [("delete ok", 200, 200), ("delete not found", 200, 404), ("delete error", 200, 500), ("list fails", 500, 200)] {
+        let r = rig(&format!("t40-clear-{}", case.replace(' ', "-")));
+        profile(&r.dir, &format!("mail-session-{A}"));
+        t40_file(&r.dir, true);
+        let svc = t40_service(list, delete);
+        let out = disconnect(&r, &svc);
+        assert_eq!(out["ok"], json!(list == 200 && delete != 500), "{case}: {out}");
+        assert!(MailState::load(&r.dir).unwrap().is_turned_off(A), "{case}");
+        assert_eq!(t40_items(&r.dir), ["mail.canary"], "{case}: mail.connect went, nothing else did");
+    }
+}
+
+#[test]
+fn test_40_a_failed_step_0_keeps_mail_connect() {
+    let r = rig("t40-step0");
+    t40_file(&r.dir, true);
+    std::fs::write(r.dir.join("mail.json"), "not json").unwrap();
+    let svc = t40_service(200, 200);
+    assert_eq!(disconnect(&r, &svc)["ok"], json!(false));
+    assert_eq!(t40_items(&r.dir), ["mail.connect", "mail.canary"], "turn_off was refused, so nothing was turned off");
+}
+
+#[test]
+fn test_40_disconnect_changes_no_byte_of_an_unfinished_or_missing_onboarding_json() {
+    let r = rig("t40-unfinished");
+    t40_file(&r.dir, false);
+    let before = std::fs::read(state_path(&r.dir)).unwrap();
+    let svc = t40_service(200, 200);
+    assert_eq!(disconnect(&r, &svc)["ok"], json!(true));
+    assert_eq!(std::fs::read(state_path(&r.dir)).unwrap(), before, "an unfinished file is the queue's");
+    let n = rig("t40-none");
+    let svc = t40_service(200, 200);
+    assert_eq!(disconnect(&n, &svc)["ok"], json!(true));
+    assert!(!state_path(&n.dir).exists(), "Disconnect never creates the file");
+}
