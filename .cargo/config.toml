@@ -1,0 +1,11 @@
+# Every process cargo starts (rustc, the linker, tests, `cargo run`) gets this workspace's target/
+# as its temp directory, not the user's %TEMP%. Tests make a scratch vault per process id and most
+# never remove it; in %TEMP% they had reached ~700k entries and slowed every tool that lists that
+# directory. In target/ they go with `cargo clean`. It is target/ itself, not a folder inside it,
+# because the linker needs the directory to exist and cargo creates target/ before building
+# anything. std::env::temp_dir() reads TMP first, then TEMP (Windows). target/ sits inside this
+# checkout, so git is stopped there: a scratch dir must still read as "not a repository".
+[env]
+TMP = { value = "target", relative = true, force = true }
+TEMP = { value = "target", relative = true, force = true }
+GIT_CEILING_DIRECTORIES = { value = "target", relative = true, force = true }
