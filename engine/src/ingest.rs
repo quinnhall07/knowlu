@@ -2690,4 +2690,231 @@ mod tests {
             assert_eq!(notes.iter().filter(|n| n.0 == "tasks").count(), 2, "only the future feed items are live: {notes:?}");
         }
     }
+
+    // -- F6c (plan 2026-10-23 wave B, §14.45 and §14.46): a removed course's items, and the
+    // bounded uid pin. Synthetic codes and ids only; every vault is a temp dir.
+
+    /// The bounded uid pin (§14.46). A fragment of the exact form `_<digits>_<digits>` matches the
+    /// uid only when no ASCII letter, digit or `_` precedes it and no ASCII digit follows it.
+    mod bounded_pin {
+        use super::*;
+
+        const GB: &str = "_blackboard.platform.gradebook2.GradableItem-";
+
+        fn pins(order: &[(&str, &str)]) -> Vec<(String, String)> {
+            order.iter().map(|(f, s)| (f.to_string(), s.to_string())).collect()
+        }
+
+        fn attributed(uid: &str, map: &[(String, String)]) -> Option<String> {
+            match_course_fields(&format!("{GB}{uid}"), "Quiz", map)
+        }
+
+        #[test]
+        fn pin_71_1_does_not_claim_71_10_in_either_order() {
+            for order in [[("_71_1", "a-101"), ("_71_10", "b-202")], [("_71_10", "b-202"), ("_71_1", "a-101")]] {
+                let map = pins(&order);
+                assert_eq!(attributed("_71_10", &map), Some("b-202".to_string()), "{order:?}");
+                assert_eq!(attributed("_71_1", &map), Some("a-101".to_string()), "{order:?}");
+            }
+        }
+
+        #[test]
+        fn a_lone_pin_does_not_claim_a_longer_id_that_starts_with_it() {
+            let map = pins(&[("_71_1", "a-101")]);
+            assert_eq!(attributed("_71_10", &map), None);
+            assert_eq!(attributed("_71_1", &map), Some("a-101".to_string()));
+        }
+
+        /// The plan's own example, kept as written: `_171_1` never contains `_71_1`, so this holds
+        /// today and must keep holding.
+        #[test]
+        fn a_lone_pin_does_not_claim_171_1() {
+            let map = pins(&[("_71_1", "a-101")]);
+            assert_eq!(attributed("_171_1", &map), None);
+        }
+
+        /// What the "not preceded" half of the bound is for: a pin inside a longer id whose front
+        /// part is a digit or an underscore (`_5_71_1` holds `_71_1`; so does `__71_1`).
+        #[test]
+        fn a_lone_pin_does_not_claim_an_id_it_sits_inside_the_tail_of() {
+            let map = pins(&[("_71_1", "a-101")]);
+            assert_eq!(attributed("_5_71_1", &map), None, "preceded by a digit");
+            assert_eq!(attributed("x_71_1", &map), None, "preceded by a letter");
+            assert_eq!(attributed("_9__71_1", &map), None, "preceded by an underscore");
+        }
+
+        #[test]
+        fn a_pin_at_the_very_end_of_the_uid_matches() {
+            let map = pins(&[("_71_1", "a-101")]);
+            assert_eq!(match_course_fields("x-_71_1", "", &map), Some("a-101".to_string()));
+            assert_eq!(match_course_fields("_71_1", "", &map), Some("a-101".to_string()));
+        }
+
+        #[test]
+        fn a_pin_followed_by_a_non_digit_matches() {
+            let map = pins(&[("_71_1", "a-101")]);
+            assert_eq!(match_course_fields("x-_71_1@x", "", &map), Some("a-101".to_string()));
+            assert_eq!(match_course_fields("x-_71_1.ics", "", &map), Some("a-101".to_string()));
+        }
+
+        /// Only the exact pin form is bounded; every other fragment keeps today's substring test.
+        #[test]
+        fn a_fragment_that_is_not_a_pin_keeps_the_substring_test() {
+            let map = pins(&[("SYN-110", "syn-110"), ("_71_1_", "odd"), ("_71", "short")]);
+            assert_eq!(match_course_fields("xSYN-110x", "", &map), Some("syn-110".to_string()));
+            assert_eq!(match_course_fields("a_71_1_9", "", &pins(&[("_71_1_", "odd")])), Some("odd".to_string()));
+            assert_eq!(match_course_fields("a_71_9", "", &pins(&[("_71", "short")])), Some("short".to_string()));
+        }
+
+        /// A pin that fails its bound still falls through to pass (b), the title test, unchanged.
+        #[test]
+        fn a_pin_that_fails_the_bound_falls_through_to_the_title_pass() {
+            let map = pins(&[("_71_1", "a-101"), ("SYN 110", "syn-110")]);
+            assert_eq!(
+                match_course_fields(&format!("{GB}_71_10"), "SYN 110 Quiz", &map),
+                Some("syn-110".to_string())
+            );
+        }
+    }
+
+    /// `course_exclude` end to end: `run_lines_on` over an inline feed and a config in a temp vault.
+    /// The key is a single-line flow sequence of fragments (F6b writes it that way, §14.45).
+    mod course_exclude {
+        use super::*;
+
+        const DAY: Date = Date::constant(2026, 8, 29);
+        const GB: &str = "_blackboard.platform.gradebook2.GradableItem-";
+        const HEAD: &str = "ics_url: \"https://example.invalid/learn.ics\"\ntimezone: America/Chicago\n";
+        const KEPT_AND_REMOVED: &str = "course_map:\n  SYN 110: syn-110\n  _900071_1: syn-110\ncourse_exclude: [SYN 120, _900072_1]\n";
+        const LEFT_OUT: &str = "item(s) from courses you removed were left out";
+
+        fn vault(tag: &str, config: &str) -> PathBuf {
+            let d = std::env::temp_dir().join(format!("knowlu-f6c-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(d.join("config")).unwrap();
+            std::fs::create_dir_all(d.join("tasks")).unwrap();
+            pystr::write_text(&d.join("config").join("ingest.yaml"), &format!("{HEAD}{config}")).unwrap();
+            d
+        }
+
+        fn vevent(uid: &str, title: &str, due: &str) -> String {
+            format!("BEGIN:VEVENT\nUID:{uid}\nSUMMARY:{title}\nDESCRIPTION:from the feed\nDTSTART:{due}\nEND:VEVENT\n")
+        }
+
+        fn go(v: &Path, events: &[String]) -> (i32, Vec<String>) {
+            let text = format!("BEGIN:VCALENDAR\nVERSION:2.0\n{}END:VCALENDAR\n", events.concat());
+            let fetch = move |_: &str| -> Result<String, String> { Ok(text.clone()) };
+            run_lines_on(v, "cli", None, Some(&fetch), Some(DAY))
+        }
+
+        fn names(v: &Path, folder: &str) -> Vec<String> {
+            let mut out: Vec<String> = std::fs::read_dir(v.join(folder))
+                .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+                .unwrap_or_default();
+            out.sort();
+            out
+        }
+
+        fn journal_len(v: &Path) -> usize {
+            std::fs::read_dir(v.join("state").join("journal"))
+                .map(|rd| {
+                    rd.flatten()
+                        .map(|e| pystr::read_text(&e.path()).unwrap().lines().filter(|l| !l.trim().is_empty()).count())
+                        .sum::<usize>()
+                })
+                .unwrap_or(0)
+        }
+
+        const LATER: &str = "20260905T235900";
+
+        #[test]
+        fn a_removed_courses_item_never_becomes_a_task() {
+            let v = vault("removed", KEPT_AND_REMOVED);
+            let by_code = vevent("bb:syn120-1", "SYN 120 Quiz 1", LATER);
+            let by_pin = vevent(&format!("{GB}_900072_1"), "Quiz 2", LATER);
+            let (code, lines) = go(&v, &[by_code, by_pin]);
+            assert_eq!(code, 0, "{lines:?}");
+            assert_eq!(names(&v, "tasks"), Vec::<String>::new(), "{lines:?}");
+            assert_eq!(names(&v, "archive"), Vec::<String>::new());
+            assert_eq!(journal_len(&v), 0, "no journal record on a left-out item's account");
+            assert!(
+                lines.iter().any(|l| l.contains(&format!("2 {LEFT_OUT}"))),
+                "the run names the count: {lines:?}"
+            );
+            let _ = std::fs::remove_dir_all(&v);
+        }
+
+        #[test]
+        fn a_kept_course_wins_an_item_both_claim() {
+            let v = vault("kept-wins", KEPT_AND_REMOVED);
+            let by_title = vevent("bb:both-1", "SYN 110 and SYN 120 joint lab", LATER);
+            let by_pin = vevent(&format!("{GB}_900071_1"), "SYN 120 Quiz 3", LATER);
+            let (code, lines) = go(&v, &[by_title, by_pin]);
+            assert_eq!(code, 0, "{lines:?}");
+            let tasks = names(&v, "tasks");
+            assert_eq!(tasks.len(), 2, "{tasks:?} {lines:?}");
+            assert!(tasks.iter().all(|t| t.starts_with("syn-110-")), "both under the kept slug: {tasks:?}");
+            assert!(!lines.iter().any(|l| l.contains(LEFT_OUT)), "nothing was left out: {lines:?}");
+            let _ = std::fs::remove_dir_all(&v);
+        }
+
+        #[test]
+        fn an_unmatched_item_is_still_imported_course_less() {
+            let v = vault("unmatched", KEPT_AND_REMOVED);
+            let (code, lines) = go(&v, &[vevent("bb:free-1", "Reading response", LATER)]);
+            assert_eq!(code, 0, "{lines:?}");
+            assert_eq!(names(&v, "tasks"), vec!["task-reading-response.md".to_string()], "{lines:?}");
+            assert!(!lines.iter().any(|l| l.contains(LEFT_OUT)), "{lines:?}");
+            let _ = std::fs::remove_dir_all(&v);
+        }
+
+        /// A task already in the vault whose item is now excluded: no update, no archive.
+        #[test]
+        fn an_existing_task_is_left_untouched_when_its_course_is_removed() {
+            let v = vault("existing", "course_map:\n  SYN 110: syn-110\n");
+            let (code, lines) = go(&v, &[vevent("bb:syn120-1", "SYN 120 Quiz 1", LATER)]);
+            assert_eq!(code, 0, "{lines:?}");
+            let before = names(&v, "tasks");
+            assert_eq!(before, vec!["task-syn-120-quiz-1.md".to_string()], "{lines:?}");
+            let bytes = std::fs::read(v.join("tasks").join(&before[0])).unwrap();
+            let records = journal_len(&v);
+
+            pystr::write_text(&v.join("config").join("ingest.yaml"), &format!("{HEAD}{KEPT_AND_REMOVED}")).unwrap();
+            // The feed moves the due date, which today is an in-place update.
+            let (code, lines) = go(&v, &[vevent("bb:syn120-1", "SYN 120 Quiz 1", "20260912T235900")]);
+            assert_eq!(code, 0, "{lines:?}");
+            assert_eq!(names(&v, "tasks"), before, "still in tasks/");
+            assert_eq!(names(&v, "archive"), Vec::<String>::new(), "not archived");
+            assert_eq!(std::fs::read(v.join("tasks").join(&before[0])).unwrap(), bytes, "no update: {lines:?}");
+            assert_eq!(journal_len(&v), records, "no journal record");
+            assert!(!lines.iter().any(|l| l.starts_with("updated ")), "{lines:?}");
+            let _ = std::fs::remove_dir_all(&v);
+        }
+
+        /// No key, or an empty one: nothing changes, and no line is added.
+        #[test]
+        fn with_no_course_exclude_key_nothing_changes() {
+            for (tag, extra) in [("nokey", ""), ("emptykey", "course_exclude: []\n")] {
+                let v = vault(tag, &format!("course_map:\n  SYN 110: syn-110\n{extra}"));
+                let (code, lines) = go(&v, &[vevent("bb:syn120-1", "SYN 120 Quiz 1", LATER)]);
+                assert_eq!(code, 0, "{lines:?}");
+                assert_eq!(names(&v, "tasks"), vec!["task-syn-120-quiz-1.md".to_string()], "{tag}: {lines:?}");
+                assert!(!lines.iter().any(|l| l.contains(LEFT_OUT)), "{tag}: {lines:?}");
+                let _ = std::fs::remove_dir_all(&v);
+            }
+        }
+
+        /// An excluded pin is bounded too: `_900072_1` leaves out its own item and not `_900072_10`.
+        #[test]
+        fn an_excluded_pin_is_bounded() {
+            let v = vault("bounded", "course_exclude: [_900072_1]\n");
+            let own = vevent(&format!("{GB}_900072_1"), "Quiz A", LATER);
+            let other = vevent(&format!("{GB}_900072_10"), "Quiz B", LATER);
+            let (code, lines) = go(&v, &[own, other]);
+            assert_eq!(code, 0, "{lines:?}");
+            assert_eq!(names(&v, "tasks"), vec!["task-quiz-b.md".to_string()], "{lines:?}");
+            assert!(lines.iter().any(|l| l.contains(&format!("1 {LEFT_OUT}"))), "{lines:?}");
+            let _ = std::fs::remove_dir_all(&v);
+        }
+    }
 }
