@@ -3371,16 +3371,6 @@
     return "Your account had no plan yet, so this is the first one.";
   }
 
-  // The defaults the account step makes a folder with (spec §1.9 A): the system's zone, the checks at
-  // 12:00 and 18:00, start with Windows. No school, no feed, no coursework login and no mail offer:
-  // each is asked on its own step, after the account.
-  function suPlan() {
-    return { ics_url: null, personal_calendar: null, ics_validated: false, ics_stored: false,
-             personal_calendar_validated: false, personal_calendar_stored: false, google_calendar: false,
-             offer_mail: false, timezone: SU.l.tz || "", slots: ["12:00", "18:00"],
-             zybooks: false, vhl: false, autostart: true };
-  }
-
   // The account is signed in (by Google or by the code): make the folder with the defaults, which
   // also brings back the account's own copy (H11a), then wait on Continue to relaunch into it.
   function suSignedIn(r) {

@@ -819,13 +819,19 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
 
 /// The name step 2 gives the new vault: "Knowlu", then "Knowlu 2", "Knowlu 3", stepping past every
 /// name that is a registered profile in `root` **or** a folder already under `home`'s vault parent
-/// (a leftover with no profile too), so `dest_for`'s "already exists" is never reached. It only
-/// looks: nothing is written into, made or renamed.
+/// (a leftover with no profile too), so `dest_for`'s "already exists" is never reached. A candidate
+/// whose path already has a profile's identity is passed too: its id is registered, or its app-data
+/// folder exists (a profile renamed, its folder moved), since reusing it would overwrite that profile's
+/// session and settings. It only looks: nothing is written into, made or renamed.
 pub fn pick_vault_name_in(root: &Path, home: &Path) -> Result<String, String> {
-    let taken: Vec<String> = profiles::load(root)?.into_iter().map(|p| p.name.to_lowercase()).collect();
+    let known = profiles::load(root)?;
     let parent = PathBuf::from(default_folders_in(home).0);
     (1..=999).map(|n| if n == 1 { "Knowlu".to_string() } else { format!("Knowlu {n}") })
-        .find(|name| !taken.contains(&name.to_lowercase()) && !parent.join(name).exists())
+        .find(|name| {
+            let dest = parent.join(name);
+            let id = profiles::id_for(&dest);
+            !known.iter().any(|p| p.id == id || p.name.eq_ignore_ascii_case(name)) && !dest.exists() && !profiles::profile_dir(root, &id).exists()
+        })
         .ok_or_else(|| "Knowlu could not find a free folder name; remove or rename one in your Knowlu folder. Try again".to_string())
 }
 
@@ -837,6 +843,12 @@ pub fn pick_vault_name_in(root: &Path, home: &Path) -> Result<String, String> {
 /// leaves the sign-in where a retry finds it. The adopt and restore-from-backup paths keep
 /// `create_vault_in` and their own wording.
 pub fn create_vault_defaults_in(root: &Path, home: &Path) -> Value {
+    create_vault_defaults_with(root, home, &knowlu_engine::sync::restore_into)
+}
+
+/// [`create_vault_defaults_in`] with the restore passed in, so a test can make it fail (a real
+/// `restore_into` refuses only a vault that is not fresh, which this call just made).
+pub fn create_vault_defaults_with(root: &Path, home: &Path, restore: &dyn Fn(&Path) -> Result<knowlu_engine::sync::Restored, String>) -> Value {
     let fail = |e: String| json!({ "ok": false, "error": e, "profile": Value::Null });
     let account_id = match crate::account::load_session(crate::account::PENDING_TARGET) {
         Ok((id, _)) => id,
@@ -868,24 +880,30 @@ pub fn create_vault_defaults_in(root: &Path, home: &Path) -> Value {
         return fail(format!("Knowlu could not make your plan folder ({e}). Try again."));
     }
     let session = crate::account::session_target(&profile_id);
-    // Undo this create, sign-in included: the pending session goes back, so the retry finds it.
+    let pdir = profiles::profile_dir(root, &profile_id);
+    let pdir_is_new = !pdir.exists();
+    // Undo this create, sign-in included: the pending session goes back, so the retry finds it. What
+    // cannot be undone is named, never dropped (a vanished folder is not a failure).
     let undo = |why: String| {
-        let _ = crate::account::move_session(&session, crate::account::PENDING_TARGET);
-        let _ = std::fs::remove_dir_all(&dest);
-        let _ = std::fs::remove_file(crate::onboarding_state::state_path(&profiles::profile_dir(root, &profile_id)));
-        fail(format!("{why}. Try again."))
+        // A failed removal of something that is no longer there is not a failure.
+        let gone = |r: std::io::Result<()>, p: &Path| r.or_else(|e| if p.exists() { Err(e) } else { Ok(()) });
+        let mut left = Vec::new();
+        if let Err(e) = crate::account::move_session(&session, crate::account::PENDING_TARGET) { left.push(format!("your sign-in could not be put back ({e})")); }
+        if let Err(e) = gone(std::fs::remove_dir_all(&dest), &dest) { left.push(format!("the new folder {} could not be removed ({e})", dest.display())); }
+        let (cleared, left_at) = if pdir_is_new { (std::fs::remove_dir_all(&pdir), pdir.clone()) } else { let f = crate::onboarding_state::state_path(&pdir); (std::fs::remove_file(&f), f) };
+        if let Err(e) = gone(cleared, &left_at) { left.push(format!("{} could not be cleared ({e})", left_at.display())); }
+        fail(if left.is_empty() { format!("{why}. Try again.") } else { format!("{why}. Also {}. Try again.", left.join(" and ")) })
     };
     if let Err(e) = crate::account::move_session(crate::account::PENDING_TARGET, &session) {
-        let _ = std::fs::remove_dir_all(&dest);
-        return fail(format!("Knowlu could not attach your sign-in to the new folder ({e}). Try again."));
+        return undo(format!("Knowlu could not attach your sign-in to the new folder ({e})"));
     }
-    let restored = match knowlu_engine::sync::restore_into(&dest) {
+    let restored = match restore(&dest) {
         Ok(r) => r,
         Err(e) => return undo(format!("Knowlu could not read your account's copy of your plan ({e})")),
     };
     let mut state = crate::onboarding_state::OnboardingState::new(&jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(), 3);
     state.account_settled = restored.ok;
-    if let Err(e) = crate::onboarding_state::save_state(&profiles::profile_dir(root, &profile_id), &state) {
+    if let Err(e) = crate::onboarding_state::save_state(&pdir, &state) {
         return undo(format!("Knowlu could not save your setup progress ({e})"));
     }
     let mut out = finish_or_roll_back(root, &dest, Some(name), &plan, Some(backups));

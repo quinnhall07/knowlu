@@ -1977,3 +1977,99 @@ fn step_two_failures_say_try_again_never_the_old_finish_or_name_sentences() {
     drop(session);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// F3 review r1, 1: a profile renamed and its folder moved still owns the id of `<home>\Knowlu\Knowlu`.
+/// The name is free and no folder is there, yet the candidate is passed: reusing it would overwrite that
+/// profile's session and settings. So is a candidate whose app-data folder is there with no registration.
+#[test]
+fn the_vault_name_steps_past_a_candidate_that_a_renamed_profile_or_its_folder_still_owns() {
+    let root = tmp("f3-name-renamed");
+    let home = root.join("home");
+    let would_be = home.join("Knowlu").join("Knowlu");
+    knowlu::profiles::register(&root, "Biology", &would_be).unwrap();
+    assert!(!would_be.exists(), "no folder is there");
+    assert_eq!(pick_vault_name_in(&root, &home).unwrap(), "Knowlu 2");
+
+    let root = tmp("f3-name-orphan-profile-dir");
+    let home = root.join("home");
+    let id = knowlu::profiles::id_for(&home.join("Knowlu").join("Knowlu"));
+    std::fs::create_dir_all(knowlu::profiles::profile_dir(&root, &id)).unwrap();
+    assert_eq!(pick_vault_name_in(&root, &home).unwrap(), "Knowlu 2");
+}
+
+/// What a failed step 2 leaves: no vault, no profile folder, no session at the profile's target, and the
+/// sign-in back where a retry finds it. The error is step 2's own.
+#[cfg(windows)]
+fn assert_step_two_undone(out: &serde_json::Value, home: &Path, app_data: &Path, session: &mut PendingSession) {
+    assert_eq!(out["ok"], false, "{out}");
+    assert_no_old_sentence(out);
+    let error = out["error"].as_str().unwrap_or_default();
+    assert!(error.contains("Try again") && !error.contains("could not be"), "named, and nothing left undone: {out}");
+    let vault = step2_vault(home, "Knowlu");
+    let id = knowlu::profiles::id_for(&vault);
+    session.expect_move_to(&id);
+    assert!(!vault.exists(), "the vault is gone");
+    assert!(!knowlu::profiles::profile_dir(app_data, &id).exists(), "the profile folder this call made is gone");
+    assert!(!knowlu::credentials::exists(&knowlu::account::session_target(&id)), "nothing at the profile's session target");
+    assert!(knowlu::credentials::exists(knowlu::account::PENDING_TARGET), "the sign-in is back for the retry");
+    assert!(knowlu::profiles::load(app_data).unwrap().is_empty(), "no profile is registered");
+}
+
+/// F3 review r1, 2: a restore that fails (a seam: a real one refuses only a vault that is not fresh).
+#[cfg(windows)]
+#[test]
+fn step_two_undoes_everything_when_the_restore_fails() {
+    let root = tmp("f3-undo-restore");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    let mut session = PendingSession::new("acc-f3-undo-restore");
+    let out = knowlu::onboarding::create_vault_defaults_with(&app_data, &home, &|_| Err("the copy will not read".to_string()));
+    assert!(out["error"].as_str().unwrap_or_default().contains("the copy will not read"), "{out}");
+    assert_step_two_undone(&out, &home, &app_data, &mut session);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F3 review r1, 2: `onboarding.json` cannot be saved (a file stands where the `profiles` folder goes).
+#[cfg(windows)]
+#[test]
+fn step_two_undoes_everything_when_the_setup_file_cannot_be_saved() {
+    let root = tmp("f3-undo-save");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    std::fs::create_dir_all(&app_data).unwrap();
+    std::fs::write(app_data.join("profiles"), b"a file, not a folder").unwrap();
+    let mut session = PendingSession::new("acc-f3-undo-save");
+    let out = create_vault_defaults_in(&app_data, &home);
+    assert!(out["error"].as_str().unwrap_or_default().contains("setup progress"), "{out}");
+    assert_eq!(out["ok"], false);
+    let vault = step2_vault(&home, "Knowlu");
+    let id = knowlu::profiles::id_for(&vault);
+    session.expect_move_to(&id);
+    assert!(!vault.exists() && !knowlu::credentials::exists(&knowlu::account::session_target(&id)));
+    assert!(knowlu::credentials::exists(knowlu::account::PENDING_TARGET), "the sign-in is back for the retry");
+    assert_no_old_sentence(&out);
+    assert!(out["error"].as_str().unwrap_or_default().contains("Try again") && !out["error"].as_str().unwrap_or_default().contains("could not be put back"), "{out}");
+    assert!(app_data.join("profiles").is_file(), "the file that was there is not touched");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F3 review r1, 2: the finish fails at the registry (a read-only `profiles.json` cannot be replaced).
+#[cfg(windows)]
+#[test]
+fn step_two_undoes_everything_when_the_profile_cannot_be_registered() {
+    let root = tmp("f3-undo-finish");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    std::fs::create_dir_all(&app_data).unwrap();
+    let registry = knowlu::profiles::registry_path(&app_data);
+    std::fs::write(&registry, b"[]").unwrap();
+    let mut perms = std::fs::metadata(&registry).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&registry, perms).unwrap();
+    let mut session = PendingSession::new("acc-f3-undo-finish");
+    let out = create_vault_defaults_in(&app_data, &home);
+    let mut perms = std::fs::metadata(&registry).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&registry, perms).unwrap();
+    assert!(out["error"].as_str().unwrap_or_default().contains("nothing is half-made"), "it failed at the finish, not before: {out}");
+    assert_step_two_undone(&out, &home, &app_data, &mut session);
+    let _ = std::fs::remove_dir_all(&root);
+}
