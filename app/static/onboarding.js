@@ -302,7 +302,7 @@
     return '<div class="su-field"><label>Email or username</label>' + user + '</div><div class="su-field"><label>Password</label>' + pass + '</div>' +
       '<p class="su-privacy">Stored only on this computer, in Windows Credential Manager, and used only to read ' + esc(name) + '.</p>' +
       '<p class="su-small">If you skip ' + esc(name) + ", its due dates are missing unless your school's calendar feed carries them.</p>" +
-      '<div class="su-actions"><button class="b pri y su-btn" type="button" data-act8="signin" data-site="' + site + '">Sign in to ' + esc(name) + '</button>' +
+      '<div class="su-actions"><button class="b pri y su-btn" type="button" data-act8="signin" data-site="' + site + '"' + (discovering ? " disabled" : "") + '>Sign in to ' + esc(name) + '</button>' +
       '<button class="b su-btn" type="button" id="' + SKIP_ID[site] + '" data-act8="skip" data-site="' + site + '"' + (discovering ? " disabled" : "") + '>Skip ' + esc(name) + '</button></div>';
   }
   function rowHtml(site, x) {
@@ -317,7 +317,7 @@
       ' <span class="ob-row-line" role="status">' + esc(x.saved || "") + '</span></div>';
   }
   function siteHtml(site) {
-    var f = w8.site[site], name = SITE_NAMES[site], note = f.line ? '<p class="ob-state ob-failed" role="alert">' + esc(f.line) + '</p>' : "";
+    var f = w8.site[site], name = SITE_NAMES[site], note = '<p class="ob-state ob-failed" role="alert" id="ob-8-note-' + site + '"' + (f.line ? "" : " hidden") + '>' + esc(f.line) + '</p>';
     if (f.stage === "skipped") { return '<h2 class="ob-h2">' + esc(name) + '</h2><p class="ob-state" data-state="skipped">' + esc(costWords(HOMEWORK_COST + site)) + '</p>'; }
     if (f.stage === "done") { return '<h2 class="ob-h2">' + esc(name) + '</h2><p class="ob-state">' + esc(name) + ' is set up.</p>'; }
     if (f.stage === "storing" || f.stage === "reading") { return '<h2 class="ob-h2">' + esc(name) + '</h2><p class="ob-state" data-state="reading">Reading ' + esc(name) + '… This can take a minute.</p>'; }
@@ -328,6 +328,10 @@
     }
     return '<h2 class="ob-h2">' + esc(name) + ' sign-in</h2>' + note + loginHtml(site);
   }
+  function say8(site, text) {
+    var el = EL("ob-8-note-" + site);
+    if (el) { el.textContent = text; el.hidden = !text; }
+  }
   function paintSite(site) {
     var host = EL("ob-8-" + site);
     if (host) { host.innerHTML = siteHtml(site); }
@@ -337,6 +341,7 @@
     var next = EL("ob-next-8");
     if (next) { next.disabled = discovering || !SITES.every(settled8) || w8.proceeding; }
     SITES.forEach(function (s) { var b = EL(SKIP_ID[s]); if (b) { b.disabled = discovering; } });
+    document.querySelectorAll("#ob-step-8 [data-act8=\"signin\"]").forEach(function (b) { b.disabled = discovering; });
   }
   // ==== F11c, step 8 (continues) =================================================================
   function storeLogins(site) {
@@ -344,8 +349,8 @@
     if (discovering) { return; }
     var user = (z ? EL("ob-zybooks-username") : EL("ob-vhl-username")).value;
     var secret = (z ? EL("ob-zybooks-password") : EL("ob-vhl-password")).value;
-    if (!vault) { f.line = "Knowlu can't find your setup folder. Close setup and open it again."; paintSite(site); return; }
-    if (!user || !secret) { f.line = "Type your " + SITE_NAMES[site] + " email or username and password first."; paintSite(site); return; }
+    if (!vault) { say8(site, "Knowlu can't find your setup folder yet. Try again in a moment."); return; }
+    if (!user || !secret) { say8(site, "Type your " + SITE_NAMES[site] + " email or username and password first."); return; }
     OB.clearError();
     f.stage = "storing"; f.line = "";
     invoke("store_credentials", { vault: vault, source: site, user: user, secret: secret }).then(function (a) {
@@ -433,7 +438,9 @@
   // Class times show as set (read from `your_week`); the calendar's meetings are asked for only once
   // the status says `proposals_ready`. Confirming is today's `commitments_confirm`, which can refuse
   // by name while a sync runs: the sentence shows, with a Try again.
-  var w10 = { asked: false, busy: false, ingestFailed: false };
+  var w10 = { asked: false, busy: false, reg: "" };
+  var KINDS10 = [["class", "Class"], ["lab", "Lab"], ["work", "Work"], ["club", "Club"], ["meeting", "Meeting"], ["office-hours", "Office hours"]];
+  var LEVELS10 = [["hard", "Must keep"], ["soft", "Usually"], ["optional", "Optional"]];
   function say10(text) {
     var el = EL("ob-10-line"), retry = EL("ob-step10-retry");
     if (el) { el.textContent = text; el.hidden = !text; }
@@ -441,7 +448,7 @@
   }
   function setConfirm10() {
     var b = EL("ob-10-confirm");
-    if (b) { b.disabled = w10.busy || !(w10.asked || w10.ingestFailed); }
+    if (b) { b.disabled = w10.busy; }
   }
   function loadSet10() {
     invoke("your_week", {}).then(function (r) {
@@ -449,7 +456,7 @@
       if (!host) { return; }
       var w = r && r.ok && r.week ? r.week : null;
       var rows = ((w && w.commitments) || []).map(function (c) {
-        return '<li><span class="a">' + esc(c.title) + '</span> <span class="su-dim">' + esc(c.when || "") + '</span></li>';
+        return editRowHtml(c);
       }).join("") + ((w && w.uncovered_courses) || []).map(function (u) {
         return '<li><span class="a">' + esc(u.title) + '</span> <span class="su-dim">no class times found. Knowlu will ask this week.</span></li>';
       }).join("");
@@ -459,8 +466,30 @@
       if (host) { host.innerHTML = '<p class="ob-state">Knowlu could not read your class times just now.</p>'; }
     });
   }
+  function editRowHtml(c) {
+    var kinds = KINDS10.map(function (k) { return '<option value="' + k[0] + '"' + (c.kind === k[0] ? " selected" : "") + '>' + k[1] + '</option>'; }).join("");
+    var levels = LEVELS10.map(function (l) { return '<option value="' + l[0] + '"' + ((c.level || "soft") === l[0] ? " selected" : "") + '>' + l[1] + '</option>'; }).join("");
+    return '<li class="ob-set" data-id="' + esc(c.id) + '" data-kind="' + esc(c.kind) + '" data-level="' + esc(c.level || "soft") + '"><span class="a">' + esc(c.title) + '</span> <span class="su-dim">' + esc(c.when || "") + '</span> ' +
+      '<button class="su-link" type="button" data-act10="edit">Edit</button>' +
+      '<span class="ob-edit" hidden> <select class="ob-kind" aria-label="What it is">' + kinds + '</select> <select class="ob-level" aria-label="How firm it is">' + levels + '</select> ' +
+      '<button class="b su-btn" type="button" data-act10="save">Save</button> <span class="ob-row-line" role="status"></span></span></li>';
+  }
+  // Edit saves through the console's own set_fields (a kind and a level; no command edits a class's hours).
+  function saveEdit10(row) {
+    var line = row.querySelector(".ob-row-line"), kind = row.querySelector(".ob-kind").value, level = row.querySelector(".ob-level").value;
+    var fields = {};
+    if (kind !== row.getAttribute("data-kind")) { fields.kind = kind; }
+    if (level !== row.getAttribute("data-level")) { fields.level = level; }
+    if (!Object.keys(fields).length) { line.textContent = "Nothing changed."; return; }
+    OB.clearError();
+    invoke("set_fields", { view: "today", id: row.getAttribute("data-id"), fields: fields }).then(function (env) {
+      if (env && env.ok === false) { line.textContent = env.error || "Knowlu couldn't save that. Try again."; return; }
+      row.setAttribute("data-kind", kind); row.setAttribute("data-level", level);
+      line.textContent = "Saved.";
+    }).catch(function () { line.textContent = "Knowlu couldn't save that. Try again."; });
+  }
   function propHtml(p) {
-    var lv = ["hard", "soft", "optional"].map(function (l) { return '<option value="' + l + '"' + (p.level === l ? " selected" : "") + '>' + l.charAt(0).toUpperCase() + l.slice(1) + '</option>'; }).join("");
+    var lv = ["hard", "soft", "optional"].map(function (l) { return '<option value="' + l + '"' + ((p.level || "soft") === l ? " selected" : "") + '>' + l.charAt(0).toUpperCase() + l.slice(1) + '</option>'; }).join("");
     return '<div class="ob-prop" data-key="' + esc(p.source_uid) + '" data-answer=""><span class="a">' + esc(p.title) + '</span> <span class="su-dim">' + esc(p.when || "") + (p.where ? " · " + esc(p.where) : "") + '</span> ' +
       '<button class="b su-btn" type="button" data-act10="mine" aria-pressed="false">Mine</button> <button class="b su-btn" type="button" data-act10="not" aria-pressed="false">Not mine</button> ' +
       '<select class="ob-level" aria-label="How firm is ' + esc(p.title) + '">' + lv + '</select></div>';
@@ -500,6 +529,11 @@
     if (!b || !EL("ob-step-10")) { return; }
     var act = b.getAttribute("data-act10"), row = b.closest(".ob-prop");
     if (act === "confirm") { confirm10(); return; }
+    if (act === "edit" || act === "save") {
+      var set = b.closest(".ob-set");
+      if (act === "save") { saveEdit10(set); } else { set.querySelector(".ob-edit").hidden = !set.querySelector(".ob-edit").hidden; }
+      return;
+    }
     if (!row) { return; }
     // A second press on the pressed button puts the row back to unanswered.
     var next = row.getAttribute("data-answer") === act ? "" : act;
@@ -507,12 +541,13 @@
     row.querySelectorAll("[data-act10]").forEach(function (x) { x.setAttribute("aria-pressed", String(x.getAttribute("data-act10") === next)); });
   }
   function render10(status) {
-    w10.asked = false; w10.busy = false; w10.ingestFailed = false;
+    w10.asked = false; w10.busy = false;
+    w10.reg = (status && status.jobs && status.jobs["registrar.confirm"] && status.jobs["registrar.confirm"].state) || "";
     Promise.resolve().then(function () { loadSet10(); askProposals(status); });
     return { ask: '<div id="ob-step-10"><h2 class="ob-h2">Class times</h2><div id="ob-10-set"><p class="ob-state">Reading your class times…</p></div>' +
       '<h2 class="ob-h2">Meetings on your calendar</h2><div id="ob-10-prop"><p class="ob-state" id="ob-10-wait">Knowlu is reading your calendars…</p></div>' +
       '<p class="ob-state ob-failed" id="ob-10-line" role="alert" hidden></p>' +
-      '<div class="su-actions"><button class="b pri y su-btn" type="button" id="ob-10-confirm" data-act10="confirm" disabled>Confirm my week</button>' +
+      '<div class="su-actions"><button class="b pri y su-btn" type="button" id="ob-10-confirm" data-act10="confirm">Confirm my week</button>' +
       '<button class="b su-btn" type="button" id="ob-step10-retry" data-act10="confirm" hidden>Try again</button></div></div>' };
   }
   // A poll fills this panel's own nodes in place; it never redraws the pane.
@@ -520,10 +555,11 @@
     askProposals(status);
     var rec = status && status.jobs && status.jobs["config.ingest"], wait = EL("ob-10-wait");
     if (rec && rec.state === "failed" && wait && !w10.asked) {
-      w10.ingestFailed = true;
       wait.innerHTML = esc(reasonWords(rec.reason)) + ' <button class="su-link" type="button" data-retry="config.ingest">Try again</button>';
-      setConfirm10();
     }
+    // The class times appear when the registrar's step finishes, so they are read again then.
+    var reg = status && status.jobs && status.jobs["registrar.confirm"];
+    if (reg && reg.state === "done" && w10.reg !== "done") { w10.reg = "done"; loadSet10(); }
   }
   OB.registerPanel(10, { render: render10, onStatus: onStatus10 });
   if (EL("onboarding")) { EL("onboarding").addEventListener("click", onClick10); }

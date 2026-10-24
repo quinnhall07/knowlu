@@ -240,6 +240,8 @@ const ALLOWED: &[&str] = &[
     "open_lms_window", "capture_courses", "close_lms_window", "google_sign_in", "send_magic_link", "verify_email_code",
     "google_connect", "google_status", "mail_setup_progress",
     "your_week", "commitment_proposals", "commitments_confirm", "launch_state",
+    // F11c review I-1: the console's own edit of a confirmed commitment (its kind and its level).
+    "set_fields",
 ];
 
 #[test]
@@ -917,4 +919,42 @@ fn step_eights_proceed_is_one_answer_sent_after_the_skips_and_every_answer_clear
     }
     let skip = function(&c, "skipSite");
     assert!(skip.contains("onboarding_skip") && skip.contains("leaveStep8()"), "the last skip leaves the step, after the skip call returns");
+}
+
+// ---- F11c review r1: step 10's Edit (I-1), the firmness default (M5), the poll pin's reach (M6) ------
+
+#[test]
+fn step_tens_class_time_rows_have_an_edit_that_saves_through_the_consoles_set_fields() {
+    let c = code(&read("onboarding.js"));
+    assert!(c.contains("data-act10=\"edit\""), "each class-time row has an Edit control");
+    let at = c.find("invoke(\"set_fields\"").expect("Edit saves through the console's set_fields");
+    let save = enclosing_fn(&c, at);
+    assert!(save.contains("OB.clearError()") && save.contains("fields") && save.contains(".error"), "the save clears the line and shows a refusal");
+    assert!(save.contains("view: \"today\""), "the console's view for a write from setup is today's");
+}
+
+#[test]
+fn a_proposal_with_no_level_defaults_the_firmness_to_soft_as_the_confirm_does() {
+    let c = code(&read("onboarding.js"));
+    assert!(function(&c, "propHtml").contains("(p.level || \"soft\")"), "the select's default matches confirm10's fallback");
+}
+
+#[test]
+fn the_poll_pin_follows_the_functions_a_panels_onstatus_calls() {
+    let c = code(&read("onboarding.js"));
+    for name in ["onStatus10", "askProposals", "setConfirm10", "loadSet10"] {
+        let body = function(&c, name);
+        assert!(!body.contains("refresh") && !body.contains(".show("), "{name} runs from a poll and must not redraw the pane");
+    }
+}
+
+#[test]
+fn step_eights_empty_field_message_and_the_other_sites_sign_in_do_not_redraw_or_stay_live() {
+    let c = code(&read("onboarding.js"));
+    let flat = function(&c, "paintNext").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("signin"), "paintNext holds every Sign in while a discovery runs: {flat}");
+    let store = function(&c, "storeLogins");
+    let empty = &store[store.find("!user || !secret").expect("the empty check")..];
+    let branch = &empty[..empty.find('}').unwrap()];
+    assert!(!branch.contains("paintSite("), "an empty-field message must not redraw the form and wipe the typed username");
 }
