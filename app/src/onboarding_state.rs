@@ -1,7 +1,7 @@
 //! `onboarding.json`, `onboarding-answers.json`, resume, skips, the three exits and the account
 //! commands of step 2 again and step 4 (plan §4.5, §4.7, §4.10; F2a-F2h).
 //!
-//! **Still F1 stubs here:** F2h's account commands, F8b's `save_preview`, `save_pairs` and
+//! **Still F1 stubs here:** F8b's `save_preview`, `save_pairs` and
 //! `preview_courses` (each panics, naming its task). The answers, the three exits, the status and the
 //! commands are F2b's.
 use serde::{Deserialize, Serialize};
@@ -1296,10 +1296,45 @@ pub fn onboarding_attach_session(cs: tauri::State<'_, crate::state::ConsoleState
 
 /// `account::refresh_entitlement` on the vault's own session, answered as `entitlement_now`'s
 /// envelope (`ok`, `error`, `status`, `plan`, `current_period_end`).
-pub fn entitlement_in(_vault: &Path, _data_dir: &Path) -> Value { todo!("F2h: onboarding_entitlement") }
+pub fn entitlement_in(vault: &Path, data_dir: &Path) -> Value {
+    // The profile's own target through `cloud.yaml`; a refusal or a missing session leaves the cache as it was.
+    match crate::account::refresh_entitlement(vault, data_dir) {
+        Ok(c) => serde_json::json!({ "ok": true, "error": Value::Null, "status": c.status, "plan": c.plan, "current_period_end": c.current_period_end }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e, "status": Value::Null }),
+    }
+}
+
+/// Step 4's poll: the vault's session (never the pending one), and on `Entitled` a wake for the queue's hold.
+#[tauri::command(async)]
+pub fn onboarding_entitlement(app: tauri::AppHandle) -> Value {
+    use tauri::Manager;
+    let Some(cs) = app.try_state::<crate::state::ConsoleState>() else { return no_setup() };
+    let out = entitlement_in(&cs.vault, &cs.data_dir);
+    if out["ok"] == true && crate::scheduler::entitlement_state(&cs) == crate::account::EntitlementState::Entitled {
+        if let Some(queue) = app.try_state::<crate::onboarding_jobs::Queue>() { queue.wake(); }
+    }
+    out
+}
 
 /// The consent-then-checkout core on the vault's own session; returns the URL and opens nothing.
-pub fn checkout_url_in(_vault: &Path, _plan: &str) -> Result<String, String> { todo!("F2h: onboarding_checkout") }
+pub fn checkout_url_in(vault: &Path, plan: &str) -> Result<String, String> {
+    let cfg = crate::account::cloud_config(vault)?;
+    let auth = crate::account::auth_base(&cfg.api_base)?;
+    let now = jiff::Timestamp::now().as_second();
+    let token = crate::account::valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now)?;
+    crate::account::checkout_url_at(&cfg.api_base, &token, plan)
+}
+
+/// Step 4's checkout: the link from the core, opened here (the page opens nothing itself).
+#[tauri::command(async)]
+pub fn onboarding_checkout(app: tauri::AppHandle, plan: String) -> Value {
+    use tauri::Manager;
+    let Some(cs) = app.try_state::<crate::state::ConsoleState>() else { return no_setup() };
+    match checkout_url_in(&cs.vault, &plan).and_then(|url| crate::account::open_in_browser(&url)) {
+        Ok(()) => serde_json::json!({ "ok": true, "error": Value::Null }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    }
+}
 
 /// The `--courses` list `school.preview` passes to `knowlu-engine onboarding --preview` (§14.46): one
 /// object per captured course (removed rows included, so their items are attributed and bucketed),
