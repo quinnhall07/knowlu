@@ -2493,12 +2493,9 @@ fn test_31_try_again_on_a_job_crashed_job_sets_the_count_to_one_so_one_more_kill
 #[test]
 fn test_31_a_file_written_before_the_field_loads_at_version_one_as_zero_and_keeps_its_bytes() {
     let dir = scratch("t31-bytes");
-    let mut s = state_at(5, true);
-    s.jobs.insert("school.capture".into(), JobRecord { state: JobState::Done, proof: BTreeMap::from([("courses".to_string(), Some(3))]), ..Default::default() });
-    s.jobs.insert("mail.setup".into(), JobRecord { state: JobState::Failed, reason: Some("setup_failed".into()), ..Default::default() });
-    save_state(&dir, &s).unwrap();
-    let old = std::fs::read(state_path(&dir)).unwrap();
-    assert!(!String::from_utf8_lossy(&old).contains("crashes"), "no key for a zero count: the file is today's");
+    // Written by hand, in the engine's JSON style (sorted keys), with no `crashes` key anywhere: a file from before the field.
+    let old = br#"{"account_settled": true, "finished": false, "handover": [], "jobs": {"mail.setup": {"proof": {}, "reason": "setup_failed", "state": "failed"}, "school.capture": {"proof": {"courses": 3}, "reason": null, "state": "done"}}, "school": null, "skips": [], "started_at": "2026-10-24T09:00:00Z", "step": 5, "step10_confirmed_at": null, "version": 1}"#.to_vec();
+    std::fs::write(state_path(&dir), &old).unwrap();
     let Loaded::Ok(loaded) = load_state(&dir) else { panic!("unreadable") };
     assert_eq!(loaded.version, 1);
     assert!(loaded.jobs.values().all(|j| j.crashes == 0));
@@ -2509,4 +2506,21 @@ fn test_31_a_file_written_before_the_field_loads_at_version_one_as_zero_and_keep
     counted.jobs.get_mut("mail.setup").unwrap().crashes = 1;
     save_state(&dir, &counted).unwrap();
     assert!(String::from_utf8_lossy(&std::fs::read(state_path(&dir)).unwrap()).contains("\"crashes\": 1"));
+}
+
+#[test]
+fn test_31_a_slot_found_running_twice_on_an_unsettled_account_stays_paused_and_try_again_runs_it_once() {
+    let mut state = running_with("slot.partial", 1);
+    state.account_settled = false;
+    state.jobs.insert("school.courses".into(), pending_job());
+    let r = rig_full("t31-slot", state, true, vec![ok_reading(true, 10, 10)], true, |_| {});
+    r.idle();
+    let rec = on_disk(&r.dir, "slot.partial");
+    assert_eq!((rec.state, rec.reason.as_deref(), rec.crashes), (JobState::Failed, Some(REASON_JOB_CRASHED), 2), "start's own slot push never overwrites a paused one");
+    assert!(!r.log.ran("slot.partial"), "{:?}", r.log.all());
+    assert_eq!(r.state_of("school.courses"), JobState::Pending, "courses waits, with its reason");
+    r.q.retry("slot.partial");
+    r.idle();
+    assert_eq!(r.log.started().iter().filter(|j| *j == "slot.partial").count(), 1);
+    assert_eq!((r.state_of("slot.partial"), r.job("slot.partial").crashes), (JobState::Done, 0));
 }

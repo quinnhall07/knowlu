@@ -114,8 +114,10 @@ pub const JOB_ORDER: [&str; 17] = [
 /// Every other running job is waited for, with no time limit: an abandoned writer would write after
 /// Sign out's `on_sign_out` (§14.51 r1, C1; F1 test 30 pins this list).
 pub const ABANDON_AT_ONCE: [&str; 2] = ["mail.canary", "mail.first_pass"];
-/// The closed-set reason of a job whose runner panicked; the page maps it to its fix. It is reachable
-/// only under unwinding (tests and the dev profile): the release profile has `panic = "abort"`.
+/// The closed-set reason of a job the crash-loop guard paused (found `running` at two starts, the
+/// release profile's way, since it has `panic = "abort"`) and of one whose runner panicked under
+/// unwinding (tests and dev). The page maps it to its fix, [`JOB_CRASHED_FIX`]. Only
+/// [`Queue::retry`] may write over a record that carries it.
 pub const REASON_JOB_CRASHED: &str = "job_crashed";
 /// Launches that find a job `running` before it is paused with [`REASON_JOB_CRASHED`].
 const CRASH_LIMIT: u8 = 2;
@@ -220,6 +222,9 @@ impl Core {
     /// chain has ended it waits for the slot that payment asks for (C1, test 14).
     fn push_job(&mut self, job: &str) {
         if job.starts_with(INDICATOR_PREFIX) { return; }
+        // A paused job stays paused until the student presses Try again (`retry` removes the record first).
+        let paused = self.state.jobs.get(job).is_some_and(|r| r.state == JobState::Failed && r.reason.as_deref() == Some(REASON_JOB_CRASHED));
+        if paused { return; }
         self.parked.clear();
         if job == "school.courses" && !self.state.account_settled && self.chain_ended && !self.order.iter().any(|j| j == "slot.partial") {
             (self.chain, self.chain_ended) = (Chain::default(), false);
