@@ -1195,7 +1195,7 @@ ends the process itself):
   |---|---|---|
   | the slot (`slot.partial`'s rest, `slot.first_full`) | `scheduler::spawn`'s first-run slot, since a slot stopped before `rank` leaves no `state/today.md` (App mode and `device_ok` hold for a step-2 vault; T0 confirms), or the next slot | the first slot after the reveal ends, whatever its outcome |
   | the Gmail first read, a calendar read | that slot's `judge` and `ingest` | the same slot's end |
-  | an open mail setup, the canary, the first mail pass | `mail::live::on_start` and the mail lane | in the normal console (F8s2, §14.51 r1 and r2): forwarding verified (clears `mail.setup` and `mail.canary`), from a listed row's `last_canary_ok_at` at or after `started_at`, both parsed as timestamps (`mail/runner.rs:872`), and disconnected (clears all three), from the **unfiltered** address list (every row `revoked` or turned off, or no row with no `pending_setups` entry), both at the slot's mail stage; the first pass delivered (clears **only** `mail.first_pass`, and only once `mail.setup` and `mail.canary` are gone), from the first closed backfill batch (`on_closed`, `mail/backfill.rs:387-388`, `mail/live.rs:120-131`); never by the slot's end. **A held provider's first pass is never handed over** (Microsoft 365 until C3): F2b's finish leaves `mail.first_pass` out, and the Settings mail row carries the guided step (D13, `mail_steps.rs:88-92`) |
+  | an open mail setup, the canary, the first mail pass | `mail::live::on_start` and the mail lane | in the normal console (F8s2, §14.51 r1 and r2): forwarding verified (clears `mail.setup` and `mail.canary`), from a listed row's `last_canary_ok_at` at or after `started_at`, both parsed as timestamps (`mail/runner.rs:872`), and disconnected (clears all three), from the **unfiltered** address list (every row `revoked` or turned off, or no row with no `pending_setups` entry), both at the slot's mail stage; the first pass delivered (clears **only** `mail.first_pass`, and only once `mail.setup` and `mail.canary` are gone), from the first closed backfill batch (`on_closed`, `mail/backfill.rs:387-388`, `mail/live.rs:120-131`); never by the slot's end. **A first pass the app never drives is never waited for** (Guided, or Microsoft 365 until C3; §14.51 r3): F2b's finish leaves `mail.first_pass` out when the recorded provider is one of those, and, when none was recorded, `CanaryVerified` from such a row clears it (`BackfillNeverDriven`); the Settings mail row carries the guided step (D13, `mail_steps.rs:88-92`) |
 
 - **The main page's "still coming" line** reads `handover` and drops each item at its own signal. A
   failure then shows where that path's failures show (the Runs view, the issues panel, the mail row).
@@ -1461,7 +1461,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F2a | `onboarding_state.rs`: `onboarding.json`, resume derivation, skips, `LaunchMode` | `implementer` | specified | F1 |
 | F2d | `onboarding_state.rs`: the answers file, the pending-credential names, the absent and unreadable rules | `implementer` | specified (review r3, M4) | F2a |
 | F2e | `onboarding_state::on_sign_out`: delete answers and pending links, rewind to step 2 | `implementer` | specified, tested in F1 (review r3 I-C, r4 I-1) | F2d |
-| F2b | `onboarding_state.rs`: the commands and the three exits (quit, sign-out, finish), each draining and ending the process; `stop_both` and the progress answer; a held provider's first pass left out of `handover` (§14.51 r2) | `implementer` | specified | F2a, F2d, F2e (the file's chain, review r7 M2), F8f, F8f2 |
+| F2b | `onboarding_state.rs`: the commands and the three exits (quit, sign-out, finish), each draining and ending the process; `stop_both` and the progress answer; a never-driven provider's first pass (Guided or held) left out of `handover`; `backfill_never_driven` (§14.51 r2, r3) | `implementer` | specified | F2a, F2d, F2e (the file's chain, review r7 M2), F8f, F8f2 |
 | F2c | `account.rs`: `pub fn sign_out_clean(dir, id, api_base)` (today's clean plus `on_sign_out`; the base a parameter so tests stay local), used by `sign_out` with `api_base()`; the two pending names in `delete_local_data`'s credential loop | `contract-engineer`, then `contract-reviewer` | `account.rs` is on the contract list | F2e, S5 merged |
 | F2g | `onboarding_state.rs`: `onboarding_attach_session`, step 2 again's re-attach (three-way account match, move on a match, a local delete of the pending session and a refusal on a mismatch) | `implementer`, reviewed by `contract-reviewer` | specified and tested over seams, off the contract list; a wrong move attaches another account's token to the vault (review r5, I-2) | F2b (chained after it in the same file, review r6 M2) |
 | F2h | `onboarding_state.rs`: `onboarding_entitlement` and `onboarding_checkout`, the vault-target versions of `entitlement_now` and `open_checkout` | `implementer`, reviewed by `contract-reviewer` | specified, public `account.rs` functions only, tested on a `127.0.0.1:0` listener (review r5, I-1) | F2g (the same file's chain: F2a, F2d, F2e, F2b, F2g, F2h; review r6 M2) |
@@ -1482,12 +1482,12 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F8f | Stop and drain at safe points; the save freeze; hand-over items | `implementer` | as F8a | F8a, F1 |
 | F8f2 | The drain abandons no writer (only `ABANDON_AT_ONCE`, pinned); `exiting()` for the page (§14.51 r1) | `implementer` | as F8a; F1 test 30's first half written first | F8f (or folded into F8f's fix round) |
 | F8a2 | The crash-loop guard: `JobRecord.crashes`, paused with `job_crashed` at a second running start; `Queue::start` persists once (§14.51 r1) | `implementer` | as F8a; `STATE_VERSION` stays 1; its test (F1's 31) written first | F8f2 (the file's chain) |
-| F8s2 | `scheduler.rs` and F8m's arm of `mail/live.rs`: the normal console clears `handover` (the slot item at a run slot's end; canary and disconnect from the unfiltered list, timestamps parsed, no disconnect while a setup is pending; first pass at a closed backfill batch, clearing only itself after the canary; one lock around every write; §14.51 r1, r2) | `implementer` | off the contract list; its test (F1's 32) written first | F8f merged, F8s, F8m |
+| F8s2 | `scheduler.rs` and F8m's arm of `mail/live.rs`: the normal console clears `handover` (the slot item at a run slot's end; canary and disconnect from the unfiltered list, timestamps parsed, no disconnect while a setup is pending; first pass at a closed backfill batch, clearing only itself after the canary; `BackfillNeverDriven` from a verified Guided or held row; one lock around every write, never across the network; §14.51 r1-r3) | `implementer` | off the contract list; its test (F1's 32) written first | F8f merged, F8s, F8m |
 | F8s | `scheduler.rs`: `run_slot_inner_scoped` (the seams from `Some(app)`) and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}`; the stop before each stage (never cleared); the bundle deleted on every path; the slot's hand-over clearing; `prime_mode_device` (T0) and `spawn_update_check` (T0 review M3) | `implementer` | `scheduler.rs` is off the contract list; its tests are F1's 15, 18 and 27 (review r3 M5, r4 I-3, M1, r5 I-3; T0) | F1 |
 | F8b | Runners: the school step (capture, answers, pending feed, preview) | `implementer`, reviewed by `contract-reviewer` (its capture handles the bearer link; review r7, I-1) | specified | F8a, F7a, S4d, F8la |
 | F8c | Runners: the local lane (stores, apply, courses, registrar, config) | `implementer` | specified | F8e, F6a, F6b |
 | F8g | Runners: the partial (`BeforeConfig`, then `NoRank`) and full slots, each with onboarding's `AppHandle` (held by the runner); a queue stop returns before the slot; a slot the stop cut short is `Stopped` (§14.51 r1) | `implementer` | specified | F8e, F8f, F8h, F8s |
-| F8d | Runners: mail, Google, calendars, coursework; the stop checks in `mail/runner.rs`'s confirm and canary waits; `mail_provider` recorded (§14.51 r2) | `implementer` | specified | F8a |
+| F8d | Runners: mail, Google, calendars, coursework; the stop checks in `mail/runner.rs`'s confirm and canary waits; `mail_provider` recorded as the service's string through `update_answers` (§14.51 r2, r3) | `implementer` | specified | F8a |
 | F8m | `mail/live.rs`: in onboarding mode a closed backfill batch tells the queue, never starts a slot | `implementer` | specified, about ten lines, tested in F1 (review r5, I-4) | F8a |
 | F8la | `lms_link.rs`: `capture_calendar_link_with`, `validate_only` and `capture_link_only`, the validate-only seam | `implementer`, reviewed by `contract-reviewer` | a bearer link stored under the wrong session reaches another account (review r6 I-2, r7 I-1) | F1, S4b merged |
 | F8lb | `onboarding_capture_link` and `onboarding_paste_link` over F8la's seam; the link to its pending credential | `implementer`, reviewed by `contract-reviewer` | as F8la | F8la, F8b, F8c, F8g, F8d (last in `onboarding_jobs.rs`'s chain), F2d |
@@ -2107,9 +2107,25 @@ failing before the code and passing after; the numbering keeps one list.
     each through `update_finished` with a fake save that sleeps between load and write, leave both
     changes on disk (neither lost).
     **F2b's half** (written in F2b, R1): `onboarding_finish` with a `mail.first_pass` job not done and
-    the answers file's `mail_provider` naming Microsoft 365 writes no `mail.first_pass` item (and
-    still writes `mail.setup` and `mail.canary` if they are open); with Gmail, or no provider
-    recorded, it writes the item as `handover_for` gives it.
+    the answers file's `mail_provider` of `m365` writes no `mail.first_pass` item (and still writes
+    `mail.setup` and `mail.canary` if they are open); **with `other` (Guided) the same** (§14.51 r3,
+    I-1); with `google`, or no provider recorded, it writes the item as `handover_for` gives it; and
+    `backfill_never_driven` is true for exactly Guided and M365.
+    **The never-driven half** (written in F8s2, r3 I-1): `mail_signals` over a row with a fresh
+    `last_canary_ok_at` and `provider: "other"` gives `CanaryVerified` and `BackfillNeverDriven`,
+    and applied to a finished file holding `mail.canary` and `mail.first_pass` it clears both; the
+    **M365 setup pending at finish** case: a finished file whose `mail.setup`, `mail.canary` and
+    `mail.first_pass` were all handed over (no `mail_provider` recorded), then a slot whose list has
+    an `m365` row with a fresh `last_canary_ok_at`, leaves no mail item; the same row as `google`
+    clears the setup and canary and keeps `mail.first_pass` for its batch.
+    **No lock across the network** (r3, m-a): with the hook's fake list blocking on a channel, a
+    slot-end `update_finished` on another thread completes before the list is released (the lock
+    was not held), and a source pin over `mail/live.rs`: the list call sits inside the spawned
+    thread, before `run_slot`, and outside `update_finished`'s closure.
+    **The provider's write** (written in F8d, r3 m-b): the setup's provider lands in the answers
+    file as the service's string through `update_answers`, a source pin finds no other
+    `save_answers` or answers write in F8d's runner, and an answers file with no `mail_provider`
+    loads and saves to the same bytes.
 Tests 21, 22 and 26 touch the real Credential Manager, so the test-writer's sign-off rule for such tests
 applies (the controller gives it at dispatch); every other test here uses fakes.
 Acceptance: as S1's. Size: M (test files; the cap is for implementer and console-ui tasks).
@@ -2177,13 +2193,19 @@ Split so that each edits about 80 lines or fewer of one file (review r2 I6, revi
     Microsoft 365's backfill is held until C3, and nothing on this build drives it
     (`mail_steps.rs:88-95`; the setup ends at the guided backfill as `End::ForwardingSet`,
     `mail/runner.rs:465-472`), so no batch closes and a handed-over `mail.first_pass` would never
-    clear. `onboarding_finish` therefore drops `mail.first_pass` from `handover_for`'s list
-    (`onboarding_state.rs:703-711`) when the answers file's `mail_provider` is held
-    (`backfill_held_for_c3`); `mail.setup` and `mail.canary` are kept if open. The Settings mail row
-    already carries the guided step (D13). `Answers` gains `mail_provider: Option<String>`
-    (`#[serde(default, skip_serializing_if = "Option::is_none")]`, so today's answers files keep
-    their bytes), which F8d writes; finish reads it before it deletes the answers file. No provider
-    recorded keeps the item, the side that hides nothing.
+    clear. **The same holds for a Guided provider** ("other", `Provider::from_service`'s fallback,
+    `mail_steps.rs:138-143`; §14.51 r3, I-1): the app never drives its backfill either
+    (`rearm_backfill` refuses both, `mail_steps.rs:442-445`; the slot's mail stage skips Guided
+    rows, `scheduler.rs:478`). So F2b adds `pub fn backfill_never_driven(p: Provider) -> bool`
+    (`p == Provider::Guided || backfill_held_for_c3(p)`), and `onboarding_finish` drops
+    `mail.first_pass` from `handover_for`'s list (`onboarding_state.rs:703-711`) when the answers
+    file's `mail_provider`, read back with `Provider::from_service`, is never driven; `mail.setup`
+    and `mail.canary` are kept if open. The Settings mail row already carries the guided step (D13).
+    `Answers` gains `mail_provider: Option<String>` holding **the service's own string** (`m365`,
+    `google` or `other`), with `#[serde(default, skip_serializing_if = "Option::is_none")]`, so
+    today's answers files keep their bytes; F8d writes it, and finish reads it before it deletes the
+    answers file. No provider recorded keeps the item, the side that hides nothing; F8s2 then clears
+    it from the address row (below, and F8s2's brief).
   - **Sign out's order is the safety** (§14.51 r1, C1): `on_sign_out` (through `account::sign_out`)
     and the freeze run only after the drain has returned, and the drain returns only when every
     writer has (F8f2 abandons none). F1 test 25's order assertions gain it: the fake drain's return
@@ -2741,7 +2763,13 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
       not a disconnect. A list that could not be read is no proof (`scheduler.rs:468-469`), so it
       gives nothing. The handover items carry no address id (`HandoverItem`,
       `onboarding_state.rs:81-85`), so "no live row" is the account's whole list.
-    - `mail_signals` **never** gives `FirstPassDelivered` (R1).
+    - `mail_signals` **never** gives `FirstPassDelivered` (R1). It gives **`BackfillNeverDriven`**
+      (a new `MailSignal` variant, §14.51 r3, I-1) beside `CanaryVerified` when the verified row's
+      `Provider::from_service(row["provider"])` (`mail_steps.rs:138-143`) is one F2b's
+      `backfill_never_driven` names (Guided, or held until C3), since no batch will ever close for
+      it. That clears `mail.first_pass` alone, under the first-pass arm's rule (after the canary
+      items), and needs no answers file: it covers a provider F8d never recorded (a setup still
+      pending at finish).
   - **The first pass delivered is the first closed backfill batch** (§14.51 r1, I3, ruled):
     `last_reconcile` is written only after a normal slot's recover pass and never for Microsoft 365
     (`mail/slot.rs:246-251`), so it is not the signal. A backfill pass that closed its batch calls
@@ -2757,17 +2785,27 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
     `handover` (they clear at `CanaryVerified`). The order holds in the setup itself: its backfill
     step runs only after its canary step is `Done` (`mail/runner.rs:558-573`), so a closed batch
     follows a canary that came back. **So the signal is not lost to the console's lag:** when the
-    file still holds `mail.setup` or `mail.canary`, the `on_closed` hook first lists the addresses
-    once (the client as `mail.rs:717` builds it) and applies `mail_signals` (which reads
-    `CanaryVerified` from the row), then `FirstPassDelivered`, both in one `update_finished`. A list
-    it cannot read applies nothing; the backfill's next closed batch tries again. The doc comment at
-    `:119-122` is corrected with it. **No
-    Microsoft 365 shortcut:** a held provider's first pass is never handed over (F2b, R1), so nothing
-    here infers delivery from a provider.
+    file still holds `mail.setup` or `mail.canary`, the hook first lists the addresses once (the
+    client as `mail.rs:717` builds it) and applies `mail_signals` (which reads `CanaryVerified` from
+    the row), then `FirstPassDelivered`, both in one `update_finished`. A list it cannot read
+    applies nothing; the backfill's next closed batch tries again. **The request runs in the
+    spawned slot thread, before its `run_slot`** (`mail/live.rs:129-131`; §14.51 r3, m-a), never on
+    the backfill's own thread, so a slow request never holds up the backfill's next pass; and
+    **`ONBOARDING_JSON_LOCK` is never held across a network call**: the list is read first, without
+    the lock, and the lock is taken only to load, apply and save. The slot's mail stage keeps the
+    same order (its list is already read at `scheduler.rs:469` before `mail_signals` and
+    `update_finished`). **One residual lag, accepted** (§14.51 r3, m-c): the setup accepts any
+    canary as back when the service's `sent_at` does not parse (`(Some(_), None) => true`,
+    `mail/runner.rs:875`), so its backfill can start on a `last_canary_ok_at` older than
+    `started_at`, which `CanaryVerified` does not count; `mail.canary`, and with it
+    `mail.first_pass`, then stay until a later canary or batch clears them. The doc comment at
+    `:119-122` is corrected with it. **No provider shortcut on an empty list:** a never-driven
+    provider's first pass is dropped at finish (F2b) or cleared by `BackfillNeverDriven` from a
+    verified row, never inferred from a list's shape.
   - The "still coming" line drops each item as it clears (F11's, reading `handover`; no new words).
   Files: `scheduler.rs`, `mail/live.rs` (about 10 lines in F8m's normal arm), and in
-  `onboarding_state.rs` the lock, `update_finished`, `apply_mail_signal` and `mail_signal`'s
-  first-pass arm. Size: S (about 60 lines).
+  `onboarding_state.rs` the lock, `update_finished`, `apply_mail_signal`, `mail_signal`'s
+  first-pass arm and the `BackfillNeverDriven` variant. Size: S (about 65 lines).
 - **F8b, the school step's runners.** `school.capture`: S4d's visible sign-in, then the hidden reads
   through `grades::capture_hidden`, the LMS capture (`lms_link::capture_link_only`, F8la's
   validate-only seam, never `capture_calendar_link` or `lms_link::finish`; review r7, I-1) and the
@@ -2869,9 +2907,11 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   (`:185-186`), and onboarding's `mail.setup` job is `Stopped` (pending), so it runs again at the
   next launch. With both checks, `mail.setup` ends within one `POLL`, 5 s (`:74`). `mail/runner.rs`
   is off the contract list; the edit is about 10 lines. **F8d also records the provider** the
-  setup ran for in the answers file's `mail_provider` (F2b's field; the runner's `provider`,
-  `runner.rs:470`, or the service row's, `Provider::from_service`, `scheduler.rs:475`), which
-  F2b's finish reads (R1). The Google reads and `coursework.discover` check the stop after their
+  setup ran for in the answers file's `mail_provider` (F2b's field), which F2b's finish reads (R1):
+  the service row's own `provider` string (`m365`, `google` or `other`, the names
+  `Provider::from_service` reads, `mail_steps.rs:138-143`), stored as given and never a Rust enum
+  name, and written **only through `update_answers`** (`onboarding_state.rs:421-426`, under
+  `ANSWERS_LOCK`), never a bare load and save (§14.51 r3, m-b). The Google reads and `coursework.discover` check the stop after their
   call and before any write. Size: S (about 80 lines with the stop handling, plus about 10 in
   `mail/runner.rs`).
 - **F8m, the backfill hook** (in `app/src/mail/live.rs`; review r5, I-4). F1's test 23. A pure
@@ -4463,4 +4503,33 @@ mail row), F1 tests 30 and 32, F2b (the held provider's first pass, `Answers.mai
 `long` for a slot only), F8d (the two stop checks, the provider recorded), F8f2 (`long`), F8s2 (the
 lock, the timestamps, the pending-setup rule, the first-pass arm, the hook's canary read, the
 shortcut removed), F11a (the counter), §7 (rows F2b, F8d, F8s2).
+
+**Revised after review r3** (FAIL, narrow: one Important, three Minor; the hook's canary read was
+judged safe and stays). The controller's rulings, each with its code reference:
+- **I-1, a Guided provider's first pass never cleared. Ruling: the drop is keyed on "the app never
+  drives this provider's backfill"**, Guided or held until C3: `Provider::from_service` falls back
+  to Guided for any name but the two it knows (`mail_steps.rs:138-143`), `rearm_backfill` refuses
+  both (`:442-445`), and the slot's mail stage skips Guided rows (`scheduler.rs:478`), so no batch
+  ever closes for either. F2b's `backfill_never_driven(p)` names them and finish drops
+  `mail.first_pass` for a recorded provider of either kind. **Without the answers file** (an M365
+  or Guided setup still pending at finish, so no provider recorded), F8s2's `mail_signals` gives
+  `BackfillNeverDriven` beside `CanaryVerified` when the verified row's own provider is never
+  driven, which clears `mail.first_pass` after the canary items. Test 32 gains the Guided finish
+  case, the Guided row case and the M365-pending-at-finish case. Owners: F2b, F8s2.
+- **m-a: the lock is never held across the network.** The hook's address list is read in the
+  spawned slot thread before its `run_slot` (`mail/live.rs:129-131`), off the backfill's thread and
+  outside `update_finished`; the lock covers only load, apply and save. Test 32's blocking-list
+  case and a source pin. Owner: F8s2.
+- **m-b: F8d writes `mail_provider` only through `update_answers`** (`onboarding_state.rs:421-430`,
+  `ANSWERS_LOCK`), never `save_answers` (`:418`) on a copy it loaded; the value is the service's own
+  string (`m365`, `google`, `other`), read back with `Provider::from_service`; the field is
+  `#[serde(default, skip_serializing_if = "Option::is_none")]`, so today's answers bytes are
+  unchanged. Test 32's provider-write case. Owner: F8d (the field is F2b's).
+- **m-c: one sentence in F8s2's brief.** An unparseable `sent_at` makes the setup accept an older
+  canary (`mail/runner.rs:875`), which `CanaryVerified` does not count, so `mail.canary` and
+  `mail.first_pass` can stay until a later canary or batch. Accepted, not fixed.
+Tasks changed in r3: §4.10 (the hand-over table's mail row), F1 test 32 (the never-driven, lock and
+provider-write cases), F2b (`backfill_never_driven`, the service string), F8d (`update_answers`, the
+string), F8s2 (`BackfillNeverDriven`, the request's thread and the lock, the `sent_at` sentence),
+§7 (rows F2b, F8d, F8s2).
 
