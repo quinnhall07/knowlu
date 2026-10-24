@@ -1476,7 +1476,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F2b2c | `mail/commands.rs`: `disconnect_with` applies `MailSignal::TurnedOff` through `apply_mail_signal` right after step 0, before any network call (about 3 lines; §14.52.1, r3 R3-2, r4 R4-1; `scheduler.rs` is not edited). **Collision note:** S4c also edits `disconnect_with`; it is not a dependency, and whichever of the two lands second rebases and keeps both (test 40's Disconnect cases, written first) | `implementer` | specified, about three lines, tested over `disconnect_with`'s fakes | F2b2b (the variant). Nothing on F2b2c's path waits on S4c |
 | F3 | Step-2 vault with defaults, without campus or events files; `account_settled`; picker flag; the name picked in Rust past profiles and folders on disk; the old flow's errors rewritten; F10's interim name loop deleted (F10's review) | `test-writer` then `implementer` | writes a vault; tests first; the static change is a deletion only | F2a, F10 |
 | F4 | Onboarding mode in `run_console`; the window's close prevented, then `onboarding_quit`'s inner on its own thread; `mode_device` primed (T0); one update check at launch (T0 review M3); `LaunchMode` managed; the `Queue` moved to F4c (§14.51, §14.52.5) | `implementer` | P-3's five changes; the close off the event loop (review r5, I-5) | F2a, F2b, F8s (`prime_mode_device`, `spawn_update_check`), T0 |
-| F4c | `main.rs`'s onboarding arm: `load_state_for_launch` (rewrite only unparseable bytes; a lasting I/O error or an unknown version is a named fatal that writes nothing), `Queue::start(F8w1's Deps, resume(loaded, LiveChecks))` and `.manage(queue)`; `LiveChecks` managed too, as `Arc<dyn ResumeChecks>`, for step 3's advance (§14.55, one line); `install_update` refused in onboarding mode (`commands.rs`); test 27's pin extended; if F2b2b passes 80 lines, the patient read itself and test 38's read half move here (§14.52.5, .8, r2 n2; test 38) | `implementer` | specified; `main.rs`'s chain is F4, F5, F4c, F5b, S6r | F4, F5, F2b2b, F8w2 (so F8w1, F8g), F4b. **Not Q7:** F4c goes ahead with F8w1's interim `registrar.confirm` arm, and F8h-runner's arm follows (r4 n-2, the controller's call) |
+| F4c | `main.rs`'s onboarding arm: `load_state_for_launch` (rewrite only unparseable bytes; a lasting I/O error or an unknown version is a named fatal that writes nothing), `Queue::start(F8w1's Deps, resume(loaded, LiveChecks))` and `.manage(queue)`; `LiveChecks` managed too, as exactly `ManagedChecks` (F8b2-advance's alias), for step 3's advance (§14.55, one line; test 38 pins the type); `install_update` refused in onboarding mode (`commands.rs`); test 27's pin extended; if F2b2b passes 80 lines, the patient read itself and test 38's read half move here (§14.52.5, .8, r2 n2; test 38) | `implementer` | specified; `main.rs`'s chain is F4, F5, F4c, F5b, S6r | F4, F5, F2b2b, F8w2 (so F8w1, F8g), F4b. **Not Q7:** F4c goes ahead with F8w1's interim `registrar.confirm` arm, and F8h-runner's arm follows (r4 n-2, the controller's call) |
 | F4b | `switch_profile` refuses in onboarding mode | `implementer` | specified, tested in F1 (review r4, M6) | F2a |
 | F5 | Moved and new commands registered (none new from §14.52's rulings: step 5 rides `onboarding_answer`, and the mail commands are already on the console's list; one, `onboarding_mail_not_now` on the console's list, only if Q8 is yes, r3 m-a) | `mechanical` | a list edit, recounted, pinned | F4, F2b, F2g, F2h, F8d, F8lb; F2b2b only if Q8 is yes |
 | F5b | Shell list: the retired panels' commands, after F10; five move to the console's list and are never deleted (F10's review) | `mechanical` | `main.rs` is never F10's (review r1, I8) | F10, F5 |
@@ -1498,11 +1498,11 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F8s | `scheduler.rs`: `run_slot_inner_scoped` (the seams from `Some(app)`) and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}`; the stop before each stage (never cleared); the bundle deleted on every path; the slot's hand-over clearing; `prime_mode_device` (T0) and `spawn_update_check` (T0 review M3) | `implementer` | `scheduler.rs` is off the contract list; its tests are F1's 15, 18 and 27 (review r3 M5, r4 I-3, M1, r5 I-3; T0) | F1 |
 | F8b | Runners: the school step (capture, answers, pending feed, preview), the capture half writing through today's unfenced helpers (F8b2 converts the writes that have merged); **its registrar half is provisional on Q7 and held**: the raw response kept in `onboarding-registrar.json` (option A) or `registrar_series` saved in the answers file (option B), written through F8b2's `write_capture_file_for_gen` from the start (§14.52.2, .4; r3 m-c) | `implementer`, reviewed by `contract-reviewer` (its capture handles the bearer link; review r7, I-1) | specified; the registrar half is not dispatched until Q7 | the capture half: F8a, F7a, S4d, F8la, and F8d2 (`onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8g; r5 reorder). The held registrar half, dispatched separately: F8b2 (the fenced helper), and F2b2b (option A) or F7d (option B). Nothing depends on the registrar half but F8h-runner, so F8b2 waits only on the capture half (r3 R3-1), and nothing waits on F8b but F8b2, F8w1, F8lb and F11e1, so the F2b2 tasks go ahead before S4d |
 | F8b2 | `Queue::set_school` (step 3's school answer; refused once `school.apply` has a record); `change_school` under the queue lock, then `ANSWERS_LOCK`: deletes the answers file, pending links and every capture file, and bumps `SCHOOL_GEN`; `job_context` (school and generation read together; one in-memory entry per job from `push_job`, or from the worker marking a resumed job running, until it leaves `order`; §14.52 r2 n1, r3 n1); the four fenced writers; the merged F8b writes converted to them; the `rerun` set (§14.52.2; S, about 45 lines in `onboarding_jobs.rs` and 35 in `onboarding_state.rs`; test 35; the advance's caller is F8b2-advance's, §14.55) | `implementer`, reviewed by `contract-reviewer` | a stale capture writing a bearer link is the risk F8l's review guarded | F8b's capture half (`onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8b2-advance, F8g; r5 reorder, §14.55), F2b2b (in `onboarding_state.rs`'s) |
-| F8b2-advance | The advance's caller (§14.55): `Queue::advance_after_school(&dyn ResumeChecks)` under the queue lock, persisted once; step 3's proceed runs it between its own jobs and the passed steps' jobs (step 6's `google.gmail_first_read`, and `google.calendar_read` only when the new `ResumeChecks::google_calendar_granted()` (default `false`) is true; step 7's `calendar.store`; step 8's `config.ingest`), with `slot.partial` asked once, last, through one `answer_enqueuer`; the checks from a managed `Arc<dyn ResumeChecks>` (about 35 lines: 10 in `onboarding_jobs.rs`, 25 in `onboarding_state.rs`; test 33's advance cases, written first) | `implementer`, reviewed by `contract-reviewer` | specified, over the fake queue and fake checks | F8b2 (both files' chains) |
+| F8b2-advance | The advance's caller (§14.55): `Queue::advance_after_school(&dyn ResumeChecks)` under the queue lock, persisted once; step 3's proceed runs it between its own jobs and the passed steps' jobs (step 6's `google.gmail_first_read`, and `google.calendar_read` only when the new `ResumeChecks::google_calendar_granted()` (default `self.google_granted()`) is true; step 7's `calendar.store`; step 8's `config.ingest`), with `slot.partial` asked once, last, through one `answer_enqueuer`; `earliest_unproven`'s step-7 rung (`google_granted && !google_calendar_granted` lands at 7; review I-1); the checks as `pub type ManagedChecks = Arc<dyn ResumeChecks + Send + Sync>` (review m-1) (about 38 lines: 10 in `onboarding_jobs.rs`, 28 in `onboarding_state.rs`; test 33's advance cases, Gmail-only included, written first) | `implementer`, reviewed by `contract-reviewer` | specified, over the fake queue and fake checks | F8b2 (both files' chains) |
 | F8c | Runners: the local lane (stores, apply, courses, config); `registrar.confirm` moved to F8h-runner (§14.52.4, r4 n-2). Merged | `implementer` | specified | F8e, F6a, F6b |
 | F8g | Runners: the partial (`BeforeConfig`, then `NoRank`) and full slots, each with onboarding's `AppHandle` (held by the runner); a queue stop returns before the slot; a slot the stop cut short is `Stopped` (§14.51 r1); sets the in-memory `judge_seen` and `ingest_seen` facts the Google reads wait for on every queued Google job, pending, held or waiting (no `onboarding.json` change; §14.52 r2 n1); the job-name dispatch is F8w1's (§14.52.4; about 78 lines) | `implementer` | specified | F8e, F8f, F8h (alone, never F8h-runner; r4 n-2), F8s, F8b2 (`job_context`), F8b2-advance (the chain F8d2, F8b, F8b2, F8b2-advance, F8g; §14.55), F8d2 |
 | F8d | Runners: mail, Google, calendars, coursework; the stop checks in `mail/runner.rs`'s confirm and canary waits; `mail_provider` recorded as the service's string through `update_answers` (§14.51 r2, r3); the canary's 180 s kept. **Merged into O3 at `62f6c73`** (carrying `ad006ca` and `cb2b2bf`); the queue and guard follow-ups are F8d2's (§14.52.1, r2 R2-2; its merged test-34 parts were not written first) | `implementer` | specified | F8a |
-| F8d2 | `mail.rs`: `mail_setup_start` refused in onboarding mode (an inner taking `LaunchMode`, about 6 lines). `onboarding_jobs.rs` (**about 115 lines**, corrected after F8d2's review; r2's "about 30" left out the seams): `Queue::skip_mail` (pending or held mail jobs `skipped`; a running `mail.setup` stopped and landed `skipped`), `Queue::attach_setup_run(Arc<dyn SetupRun>)` (the run the glue started, so a skip can stop it), `MAIL_FIRST_PASS_LOOKS` (1) with `mail_batch_closed` clearing `parked` and notifying, `retry_at` (30 s, `mail_window_busy` alone) with the idle `wait_timeout`, and the `RetryClock` seam (`Queue::start_with_clock`; `Queue::start` keeps its signature over `WallClock`). Its fix round adds `Queue::mail_skipped(job)` for F8w2's glue (§14.52.1, r2 R2-2; test 34's F8d2 parts, written first) | `implementer` | specified, off the contract list, tested over the fake queue and a fake clock | **F8d alone**; first in `onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8g (r5 reorder), so it never waits on S4d. Collision note, not a dependency: F8h (in progress) also edits `onboarding_jobs.rs`, in other functions; if F8h lands first, F8d2 rebases on it |
+| F8d2 | `mail.rs`: `mail_setup_start` refused in onboarding mode (an inner taking `LaunchMode`, about 6 lines). `onboarding_jobs.rs` (**about 115 lines**, corrected after F8d2's review; r2's "about 30" left out the seams; **accepted after the fact, not a precedent**: the next task whose size runs this far past its estimate is split, never re-sized, review m-2): `Queue::skip_mail` (pending or held mail jobs `skipped`; a running `mail.setup` stopped and landed `skipped`), `Queue::attach_setup_run(Arc<dyn SetupRun>)` (the run the glue started, so a skip can stop it), `MAIL_FIRST_PASS_LOOKS` (1) with `mail_batch_closed` clearing `parked` and notifying, `retry_at` (30 s, `mail_window_busy` alone) with the idle `wait_timeout`, and the `RetryClock` seam (`Queue::start_with_clock`; `Queue::start` keeps its signature over `WallClock`). Its fix round adds `Queue::mail_skipped(job)` for F8w2's glue (§14.52.1, r2 R2-2; test 34's F8d2 parts, written first) | `implementer` | specified, off the contract list, tested over the fake queue and a fake clock | **F8d alone**; first in `onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8g (r5 reorder), so it never waits on S4d. Collision note, not a dependency: F8h (in progress) also edits `onboarding_jobs.rs`, in other functions; if F8h lands first, F8d2 rebases on it |
 | F8m | `mail/live.rs`: in onboarding mode a closed backfill batch tells the queue, never starts a slot | `implementer` | specified, about ten lines, tested in F1 (review r5, I-4) | F8a |
 | F8la | `lms_link.rs`: `capture_calendar_link_with`, `validate_only` and `capture_link_only`, the validate-only seam | `implementer`, reviewed by `contract-reviewer` | a bearer link stored under the wrong session reaches another account (review r6 I-2, r7 I-1) | F1, S4b merged |
 | F8lb | `onboarding_capture_link` and `onboarding_paste_link` over F8la's seam; the link to its pending credential | `implementer`, reviewed by `contract-reviewer` | as F8la | F8la, F8b, F8c, F8g, F8d (last in `onboarding_jobs.rs`'s chain), F2d |
@@ -1514,10 +1514,11 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F11a | The step frame and the rail | `console-ui` | `app/static` | F11t, F10 |
 | F11e1 | Step 3's school choice ("isn't listed" included), sign-in and capture rules (second press, close on leaving, through `registerLeave`); step 2's sign-in again. Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3) | `console-ui` | `app/static` | F11a, F8b, F2g, F8lb (review r7 M1), F8b2 (the school answer), F2b2a (step 3's proceed) |
 | F11e2 | Step 3's proof with the removable course list; step 4, its `comp` state included. Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3) | `console-ui` | `app/static` | F11e1, F8c, F8g, F2d, F2h, F7a (`by_course`) |
-| F11b | Steps 5, 6 and 7; step 6 on today's separate consents (`google_connect` with each scope, `google_status`); step 5 by `onboarding_answer(5, {mail})`, `mail_setup_progress` and `mail_setup_answer`, its Skip through `onboarding_skip`; step 7's proceed (§14.52.1, .3). Through the frame's seam, `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()`. Frame fixes in `onboarding.js` (§14.53.2): a refused retry's line clears on the next action, never a poll (m2); `rowModel`'s `found` read dropped (m3); the past-row rule, with fixtures for a past row with no job records and for mixed `done` and `skipped` (m5); words for `mail_setup_cancelled`, `mail_setup_failed`, `mail_not_yet` and `feed_kept_on_device` (M3) | `console-ui` | `app/static` | F11a, F8d, F8lb (step 7's paste; review r7 M1), F2b2a. No longer O2 (T0, 2026-10-24: O2 has no branch) |
+| F11b | Steps 5, 6 and 7; step 6 on today's separate consents (`google_connect` with each scope, `google_status`); step 5 by `onboarding_answer(5, {mail})`, `mail_setup_progress` and `mail_setup_answer`, its Skip through `onboarding_skip`; step 7's proceed (§14.52.1, .3). Through the frame's seam, `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()`. Fixtures for steps 5-7's rows: a past row with no job records, and mixed `done` and `skipped` (m5, over F11b0's rule). The frame fixes are F11b0's | `console-ui` | `app/static` | F11a, F11b0, F8d, F8lb (step 7's paste; review r7 M1), F2b2a. No longer O2 (T0, 2026-10-24: O2 has no branch) |
+| F11b0 | The frame's fixes in `onboarding.js`, split out of F11b (§14.53.2, review m-3): a refused retry's line clears on the student's next action, never a poll (m2); `rowModel`'s `found` read dropped (m3); `rowModel`'s past-row rule (m5); the sentences for `mail_setup_cancelled`, `mail_setup_failed`, `mail_not_yet` and `feed_kept_on_device` (M3); `onboarding.js:4`'s seam comment naming `{render, onStatus}` and `registerLeave`. Per file: `app/static/onboarding.js` about 15 lines (m2 4, m3 2 removed, m5 4, M3 4, the comment 1); `app/tests/onboarding_static.rs` about 45 lines of new cases (m2's two polls and a click, m3's source pin, m5's four row readings over generic fixtures, M3's four keys against the fallback) | `test-writer` (the cases, first), then `console-ui` | `app/static`; the test file only gains cases, and no pin is loosened | F11a |
 | F11f | Step 6's combined Gmail-and-Calendar ask and the forwarding fallback, over O2's cloud half | `console-ui` | `app/static`; O2's contract only | F11b, O2 merged; may follow wave B (§8) |
-| F11c | Steps 8 and 10; step 8's proceed (§14.52.3). Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3). Fixtures for steps 8 and 10's rows: a past row with no job records, and mixed `done` and `skipped` (m5) | `console-ui` | `app/static` | F11a, F8d, F2b2a, F11b (m5's `rowModel` rule, which its fixtures read) |
-| F11d | The reveal and the main page's "still coming" line; Open Knowlu is `ok && finish_ready && !exiting`, with no `gate.open` read (§14.52.6, §14.53.1); `revealModel` carries and shows `gate.failed[].fix` (M7); `mail.connect` as a not-connected line with its Settings button (§14.52.1). Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` | `test-writer` first (amends the pin at `app/tests/onboarding_static.rs:488` and `:496`, justified in §14.53.1, and adds M7's `fix` assertion), then `console-ui` | `app/static`; the one test edit loosens a page pin that re-derived the rule, never a contract test | F11a, F9, F2b2b, F11b (the frame's `onboarding.js` edits first) |
+| F11c | Steps 8 and 10; step 8's proceed (§14.52.3). Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3). Fixtures for steps 8 and 10's rows: a past row with no job records, and mixed `done` and `skipped` (m5) | `console-ui` | `app/static` | F11a, F8d, F2b2a, F11b0 (m5's `rowModel` rule, which its fixtures read; review m-3) |
+| F11d | The reveal and the main page's "still coming" line; Open Knowlu is `ok && finish_ready && !exiting`, with no `gate.open` read (§14.52.6, §14.53.1); `revealModel` carries and shows `gate.failed[].fix` (M7); `mail.connect` as a not-connected line with its Settings button (§14.52.1). Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` | `test-writer` first (amends the pin at `app/tests/onboarding_static.rs:488` and `:496`, justified in §14.53.1, and adds M7's `fix` assertion), then `console-ui` | `app/static`; the one test edit loosens a page pin that re-derived the rule, never a contract test | F11a, F9, F2b2b, F11b0 (the frame's `onboarding.js` edits first; review m-3) |
 | F12 | `scripts/wizard-check.py` rewritten | `test-writer` | the walk-through is the page's test | F11a-F11e |
 | F13 | References, HANDOFF, O3's amendment drafts | `docs-keeper` | docs | F2a-F12 |
 | F14 | Review | `reviewer` | before a push | F2a-F13 |
@@ -5209,7 +5210,9 @@ its test first, failing before the code, as for 29-32.
   - version 2 writes nothing;
   - unparseable bytes are rewritten at the derived step;
   - `install_update`'s inner refuses in onboarding mode;
-  - test 27's pins.
+  - test 27's pins;
+  - (§14.55, review m-1) a source pin: the onboarding arm manages a `ManagedChecks` value, and no
+    other `Arc<dyn ResumeChecks` spelling appears in `main.rs` or `onboarding_state.rs`.
 - **39 (F2b2b):** m-1's restart answer; `exiting_now` is false with only the guard held and true
   once the stop is set; a `failed` `school.courses` gives the "needs Try again" refusal and
   `failed_job`; with a `cloud.yaml` naming another host, neither error text contains the vault's
@@ -5440,12 +5443,12 @@ F11a r2 minors (`docs/reports/2026-10-24-wave-b-f11a-review-r2.md`, m2-m6) their
      reading `open`.
 
 2. **F11a r2's minors, owned.**
-   - **m2 (F11b).** A refused `onboarding_retry` sets `S.error` (`onboarding.js:272`), and the
+   - **m2 (F11b0; split out of F11b, review m-3).** A refused `onboarding_retry` sets `S.error` (`onboarding.js:272`), and the
      poll clears it (`:284`) about 2 s later. It now clears on the student's next action instead:
      the next click on a control in the frame or a panel, an answer sent, or a step change
      (`OB.show`). A poll never clears it. Test: a refused retry's line survives two polls and is
      gone after the next click.
-   - **m3 (F11b).** `status.found` has no producer: `status_inner` emits no `found` key
+   - **m3 (F11b0).** `status.found` has no producer: `status_inner` emits no `found` key
      (`onboarding_state.rs:1052`'s key list). So `rowModel`'s read (`onboarding.js:150-151`) is
      dropped until a task names a producer. That task then adds the read back with its own word
      map, never `reasonWords`. Test: a source pin that `rowModel` does not read `found`.
@@ -5455,7 +5458,7 @@ F11a r2 minors (`docs/reports/2026-10-24-wave-b-f11a-review-r2.md`, m2-m6) their
      own nodes in place. `OB.refresh()` is for a panel's own action (an answer's reply), never for
      a poll. Each panel task's tests include a source pin that its `onStatus` body does not name
      `refresh`.
-   - **m5 (F11b fixes the frame; F11b and F11c add fixtures).** Two past-row readings are wrong in
+   - **m5 (F11b0 fixes the frame; F11b and F11c add fixtures).** Two past-row readings are wrong in
      `rowModel` (`onboarding.js:136-153`):
      - a past row whose `jobs` list is not empty but has no job records reads "Done" (`:139`);
      - a past row whose jobs are a mix of `done` and `skipped` reads "Not yet" (`:149`).
@@ -5465,9 +5468,9 @@ F11a r2 minors (`docs/reports/2026-10-24-wave-b-f11a-review-r2.md`, m2-m6) their
      - a row whose records are all `done` or `skipped`, with at least one `done`, reads "Done",
        with the done jobs' lines;
      - all `skipped` with no skip record reads "Skipped".
-     F11b changes `rowModel` (about 4 lines). F11b's fixtures cover steps 5-7's rows in both cases,
+     F11b0 changes `rowModel` (about 4 lines). F11b's fixtures cover steps 5-7's rows in both cases,
      and F11c's cover steps 8 and 10's rows.
-   - **M3 (F11b).** Four reason keys have no words, so they fall to the generic fallback
+   - **M3 (F11b0).** Four reason keys have no words, so they fall to the generic fallback
      (`onboarding.js:63`): `mail_setup_cancelled`, `mail_setup_failed`, `mail_not_yet` and
      `feed_kept_on_device`. F11b adds each to `REASON_WORDS`, using the plan's existing sentence
      where §4.2 or §4.10 has one, and otherwise a sentence in the same plain style, which the
@@ -5484,9 +5487,19 @@ F11a r2 minors (`docs/reports/2026-10-24-wave-b-f11a-review-r2.md`, m2-m6) their
      and capped at 3 s by the frame (F11a r1 I3).
    No panel reaches into the frame's state (`S`) or its element ids other than its own nodes
    under `#ob-ask`. `onboarding.js:4`'s comment, which names `{render}` alone, is corrected by
-   F11b when it first edits the file.
+   F11b0.
 
-Tasks changed: F11b (m2, m3, m5's frame change and fixtures, M3, the seam and m4), F11c (m5's
+4. **F11b0, the frame's fixes, split out of F11b** (review of §14.53-55, m-3).
+   - Owners: `test-writer` writes the cases first, then `console-ui`.
+   - It holds every `onboarding.js` frame fix in item 2: m2, m3, m5's `rowModel` rule, M3's
+     sentences, and the seam comment.
+   - Size, per file: about 15 lines in `app/static/onboarding.js`, and about 45 lines of new cases
+     in `app/tests/onboarding_static.rs`.
+   - It depends on F11a alone. F11b, F11c and F11d depend on F11b0, not on F11b, so the panels do
+     not wait on one another.
+
+Tasks changed: new F11b0 (m2, m3, m5's frame change, M3, the seam comment; review m-3), F11b
+(m5's fixtures, the seam and m4), F11c (m5's
 fixtures, the seam and m4), F11d (the pin amended by `test-writer` first, `openKnowluEnabled`, M7,
 the seam and m4), F11e1 and F11e2 (the seam and m4), and §7's rows for those five.
 
@@ -5550,14 +5563,29 @@ From F2b2a's r4 review (PASS; F2b2a is merged into O3).
   - With no production checks the advance does not run, and the student walks steps 4-8 as on any
     path.
 - **`ResumeChecks::google_calendar_granted()`** (the controller's ruling). It is a new trait
-  method in `onboarding_state.rs` (`ResumeChecks`, beside `google_granted` at `:723`), with a
-  default body answering `false`, so F1's existing fakes compile unedited.
+  method in `onboarding_state.rs` (`ResumeChecks`, beside `google_granted` at `:723`).
+  - **Its default body is `self.google_granted()`, not `false`** (review of §14.53-55, I-1).
+    With the I-1 rung below, a default of `false` would move F1 test 2's everything-proven
+    advance (`app/tests/onboarding_state.rs:1592-1593`, `[4, 5, 6, 7, 8]` and step 10) to step
+    7. Delegating keeps every existing fake's meaning (a fake granting Google grants both scopes),
+    and no test is edited.
+  - An implementor that can tell the scopes apart overrides it. `LiveChecks` inherits the
+    default, which is `false` there (below).
+  - **`earliest_unproven` gains the step-7 rung** (I-1; about 2 lines in `onboarding_state.rs`,
+    `:764-772`, with its doc comment corrected). After `!c.google_granted() → 6`, it reads
+    `!c.google_calendar_granted() → 7`, then the homework rung. Step 7 is the one asked when step 6
+    granted no calendar (§4.2), so a Gmail-only grant lands there.
+  - The advance then passes 4-6 only. It asks for `google.gmail_first_read` alone, and no step-7
+    or step-8 job. Step 7's own proceed asks for `calendar.store`, and the walked path goes on from
+    there.
+  - The unreadable-file ladder is unchanged: with no `school` it still stops at 3 (§14.49).
   - **Its source** is the one `google_status` reports per-scope grants from: the account's
     `scopes` list, read as `GoogleStatus.calendar` (`account.rs:2050-2069`, `CALENDAR_SCOPE`).
   - **That source is a network read** (`google_status_at` calls the service), and `LiveChecks`
     must make none (test 37's pin; F4c calls the checks before the window exists). So
-    `LiveChecks` answers `false` for it, as for `google_granted`, which has no local source
-    either (ruling 4, "a check with no local source answers false").
+    `LiveChecks` answers `false` for it: it inherits the default over its `google_granted`,
+    which has no local source either and answers `false` (ruling 4, "a check with no local source
+    answers false").
   - **Consequence in production today:** `google_granted` is `false`, so the advance stops at
     step 6 at the latest (in fact at 5, since `school_mailbox_active` is `false` too). Step 6 is
     walked, and its own consent poll asks for the reads.
@@ -5572,11 +5600,17 @@ From F2b2a's r4 review (PASS; F2b2a is merged into O3).
     queue lock, persisted once, as `confirm_school` is (`onboarding_jobs.rs:610-616`). The checks
     make no request (test 37's pin), so no lock is held across the network.
   - The step-3 proceed's wrapper in `onboarding_state.rs` calls it between the two enqueue halves
-    above. It reads the checks from a managed `Arc<dyn ResumeChecks>` when one is managed.
-  - **F4c manages `LiveChecks`** (one line beside `.manage(queue)`; F4c already builds it for
-    `resume`).
-  - Size: about 35 lines for F8b2-advance (about 10 in `onboarding_jobs.rs`; about 25 in
-    `onboarding_state.rs`, the trait method and step 6's reads included). F8b2 stays at about 80
+    above. It reads the checks from managed state when they are managed.
+  - **One alias names that state** (review m-1): `pub type ManagedChecks = Arc<dyn ResumeChecks +
+    Send + Sync>;` in `onboarding_state.rs`, defined by F8b2-advance. The wrapper asks Tauri for
+    exactly `State<ManagedChecks>`, and F4c manages exactly that type. A different `Arc` type would
+    compile, but the lookup would quietly find nothing.
+  - **F4c manages `LiveChecks` as `ManagedChecks`** (one line beside `.manage(queue)`; F4c already
+    builds it for `resume`). F4c's test 38 gains a source pin: `main.rs`'s onboarding arm contains
+    `.manage(` with a `ManagedChecks` value, and no other `Arc<dyn ResumeChecks` spelling appears
+    in `main.rs` or `onboarding_state.rs`.
+  - Size: about 38 lines for F8b2-advance (about 10 in `onboarding_jobs.rs`; about 28 in
+    `onboarding_state.rs`: the trait method, the alias, the step-7 rung and step 6's reads). F8b2 stays at about 80
     (45 and 35).
   - Chain: `onboarding_jobs.rs` runs F8d2, F8b, F8b2, F8b2-advance, F8g. F8b2-advance depends on
     F8b2. F8g follows it in the chain. F8w2 depends on it for the trait method `LiveChecks`
@@ -5588,11 +5622,17 @@ From F2b2a's r4 review (PASS; F2b2a is merged into O3).
     `school.courses`, `registrar.confirm`, `google.gmail_first_read`, `google.calendar_read` (the
     fake's `google_calendar_granted` is true), `calendar.store`, `config.ingest` and one
     `slot.partial`, in that order, and the slot runs as `NoRank`. Each Google read then waits for
-    its slot fact and ends `done`. With `google_calendar_granted` false (and `google_granted`
-    true), no `google.calendar_read` is enqueued, and `finish_ready` is still reached. After step 10's confirm and
+    its slot fact and ends `done`. After step 10's confirm and
     the fake `slot.first_full`, `onboarding_status` answers `finish_ready: true`;
   - **partly proven** (restored and entitled only): the advance lands at 5, and no step-7 or
     step-8 job is enqueued;
+  - **Gmail only** (I-1; everything proven but `google_calendar_granted` false): the advance
+    passes 4-6 and lands at **7**. It enqueues `google.gmail_first_read` and no
+    `google.calendar_read`. It queues no step-7 or step-8 job (`calendar.store`,
+    `config.ingest`), and asks for one `slot.partial`, last, as always. Step 7's proceed then
+    enqueues `calendar.store`;
+  - **the default:** a fake that overrides only `google_granted` answers the same for
+    `google_calendar_granted`, and F1 test 2's advance tail passes unedited;
   - **a repeat** proceed enqueues nothing and leaves the step at 10;
   - **with no managed checks**, the proceed enqueues its own five jobs and stays at 3.
 - **Ruled by the controller (was open):** a proven step 6 (`google_granted`) would otherwise pass
