@@ -1,7 +1,8 @@
 /* Knowlu onboarding: the step frame and the rail (O3 F11a, the 5b "Departures" direction).
    A classic script, loaded after console.js. It shows what `onboarding_status` answers and
    computes nothing: no count, no gate, no job state is derived here. The steps' own content is
-   F11b-F11e's; they hang on `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`.
+   F11b-F11e's; they hang on `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`;
+   a panel that sends an answer calls `clearError()` to clear the action line.
    Pure helpers (the exit line, the words for a reason or a cost, the rail's rows) hang on
    `window.KNOWLU_ONBOARDING` so the static tests can run them under node. */
 (function () {
@@ -47,8 +48,8 @@
     calendar_link_missing: "Knowlu doesn't have your calendar link yet. Add it from the calendar step.",
     mail_setup_cancelled: "Email setup was stopped before it finished. Press Try again when you're ready.",
     mail_setup_failed: "Knowlu couldn't finish connecting your school email. Press Try again.",
-    mail_not_yet: "Your school email isn't ready yet. Knowlu will check again shortly.",
-    feed_kept_on_device: "Your calendar link is saved on this computer only and was not sent anywhere."
+    mail_not_yet: "Knowlu is still waiting on your school email. It keeps checking.",
+    feed_kept_on_device: "Knowlu couldn't save your calendar link to your account yet. It's kept on this computer until then. Press Try again."
   };
   var COST_WORDS = {
     mail_dates_missed: "Skipped: date changes and new work announced by email are missed.",
@@ -172,10 +173,11 @@
     5: "Teachers announce date changes by email.", 6: "Gmail and your calendar hold what your school does not.", 7: "Add the calendar Knowlu should treat as busy time.",
     8: "Homework sites hold due dates your school does not.", 10: "Check your class times so the week fits around them.", 11: "Everything has run once. Here is your week."
   };
-  var S = { status: null, step: 0, fixed: null, outstanding: false, lastLine: "", error: "", mounted: false };
+  var S = { status: null, step: 0, fixed: null, outstanding: false, lastLine: "", error: "", pollError: "", mounted: false };
   var panels = {}, leaveHooks = [];
   OB.registerPanel = function (n, def) { panels[n] = def; };
   OB.registerLeave = function (fn) { leaveHooks.push(fn); };
+  OB.clearError = function () { S.error = ""; };
   OB.show = function (n) { S.error = ""; S.step = n; renderPane(true); renderRail(); };
   OB.refresh = function () { renderPane(true); renderRail(); };
 
@@ -234,8 +236,8 @@
     if (!S.mounted) { return; }
     var closing = isClosing(S.outstanding, S.status && S.status.exiting);
     var el = EL("ob-closing");
-    el.hidden = !closing && !S.error;
-    el.textContent = closing ? closingText() : S.error;
+    el.hidden = !closing && !(S.error || S.pollError);
+    el.textContent = closing ? closingText() : (S.error || S.pollError);
     EL("onboarding").classList.toggle("ob-closing-now", closing);
     // A control re-enables nothing while the page is closing.
     // Only the buttons this frame disabled itself: a step's own disabled button stays as it left it.
@@ -285,7 +287,8 @@
     return ask.then(function (s) {
       S.status = s || { ok: false };
       if (!S.mounted) { return; }
-      if (S.status.ok === false) { S.error = S.status.error || "Knowlu couldn't read your setup."; renderClosing(); return; }
+      if (S.status.ok === false) { S.pollError = S.status.error || "Knowlu couldn't read your setup."; renderClosing(); return; }
+      S.pollError = "";
       if (!S.step) { S.step = Number(S.status.step) || 3; renderPane(); }
       var p = panels[S.step];
       if (p && p.onStatus) { p.onStatus(S.status); }
