@@ -240,6 +240,8 @@ const ALLOWED: &[&str] = &[
     "open_lms_window", "capture_courses", "close_lms_window", "google_sign_in", "send_magic_link", "verify_email_code",
     "google_connect", "google_status", "mail_setup_progress",
     "your_week", "commitment_proposals", "commitments_confirm", "launch_state",
+    // F11p1 (section 14.58.4): the rail's account and payment lines, read from this computer only.
+    "account_status",
     // F11c review I-1: the console's own edit of a confirmed commitment (its kind and its level).
     "set_fields",
 ];
@@ -966,4 +968,67 @@ fn an_edit_menu_keeps_a_kind_it_has_no_label_for_selected_and_sends_only_what_ch
     assert!(row.contains("indexOf") || row.contains(".some("), "a kind outside the label list is added as the selected option, in the engine's own word");
     let save = function(&c, "saveEdit10");
     assert!(save.contains("!== row.getAttribute(\"data-kind\")") && save.contains("!== row.getAttribute(\"data-level\")"), "each field is sent only when its control differs from the row's own value");
+}
+
+// ---- F11p1 (section 14.58.4): the look, the rail's lines and its foot -------------------------------
+// Conventions fixed here for `console-ui`: `rowModel`'s input `s` carries `account` (the answer of
+// `account_status`, or null/absent when the call failed); `h.minutesLeft(step)` is the foot's N;
+// the one account loader is `loadAccount`.
+
+fn pf(row: usize, account: &str) -> String {
+    let v = node(&format!("h.rowModel(h.rows[{row}], {{step: 5, jobs: {{}}, account: {account}}})"));
+    v["pf"].as_str().unwrap_or_default().to_string()
+}
+
+#[test]
+fn the_rails_account_and_payment_lines_come_from_account_status() {
+    let acct = |st: &str, end: &str| format!("{{ok: true, email: \"ada@example.test\", status: {st}, current_period_end: {end}}}");
+    assert_eq!(pf(0, &acct("\"trialing\"", "\"2026-11-12T12:00:00Z\"")), "Signed in as ada@example.test");
+    assert_eq!(pf(2, &acct("\"trialing\"", "\"2026-11-12T12:00:00Z\"")), "Trial on. First charge November 12.");
+    assert_eq!(pf(2, &acct("\"active\"", "\"2026-12-03T12:00:00Z\"")), "Paid. Renews December 3.");
+    assert_eq!(pf(2, &acct("\"comped\"", "null")), "Nothing to pay.");
+}
+
+#[test]
+fn the_payment_row_has_no_detail_line_without_a_status_an_end_date_or_an_answer() {
+    // r1 m-4: a null entitlement, a trial with no end date and a failed call each show the state word only.
+    for account in ["{ok: true, email: \"ada@example.test\", status: null, current_period_end: null}",
+                    "{ok: true, email: \"ada@example.test\", status: \"trialing\", current_period_end: null}",
+                    "{ok: true, email: \"ada@example.test\", status: \"active\", current_period_end: null}",
+                    "null", "{ok: false, error: \"x\"}"] {
+        assert_eq!(pf(2, account), "", "no payment detail line for {account}");
+    }
+}
+
+#[test]
+fn account_status_is_read_on_mount_and_at_two_step_moves_never_on_the_poll() {
+    let c = code(&read("onboarding.js"));
+    assert_eq!(invoked(&c).iter().filter(|n| *n == "account_status").count(), 1, "one call site, in one loader");
+    assert!(function(&c, "loadAccount").contains("account_status"));
+    for name in ["poll", "load"] {
+        assert!(!function(&c, name).contains("loadAccount") && !function(&c, name).contains("account_status"), "{name} runs on the poll");
+    }
+    assert!(c.matches("loadAccount(").count() >= 4, "a definition and the mount, the step 2 move and the step 4 move");
+}
+
+#[test]
+fn the_rail_head_is_one_labelled_logo_and_the_foot_holds_the_minutes_and_finish_later() {
+    let c = code(&read("onboarding.js"));
+    let frame = function(&c, "frameHtml");
+    assert!(frame.contains("aria-label=\"Knowlu\"") && frame.contains("su-logo") && !frame.contains("su-mark"), "the old square is gone");
+    let foot = frame.find("su-rail-foot").expect("the rail has a foot");
+    assert!(frame.find("ob-finish-later").is_some_and(|at| at > foot), "Finish later moved to the foot");
+    assert!(frame.find("ob-sign-out").is_some_and(|at| at < foot), "Sign out stays in the top bar");
+    assert!(c.contains("About ") && c.contains(" minutes left"));
+    let m: Vec<i64> = [2, 5, 7, 8, 11].iter().map(|n| node(&format!("h.minutesLeft({n})")).as_i64().expect("a whole number")).collect();
+    assert!(m.windows(2).all(|w| w[0] >= w[1]) && m[2] > m[3] && m[4] == 1, "never up, step 7 counts until it is past, at least 1: {m:?}");
+}
+
+#[test]
+fn the_fixture_path_answers_the_four_commands_and_the_page_follows_windows_light_setting() {
+    let c = code(&read("onboarding.js"));
+    let inv = function(&c, "invoke");
+    for cmd in ["onboarding_status", "account_status", "your_week", "commitment_proposals"] { assert!(inv.contains(cmd), "?fixture= answers {cmd}"); }
+    assert!(c.contains("prefers-color-scheme") && c.contains("data-theme"), "the theme starts from Windows' setting");
+    assert!(!c.contains("setItem"), "onboarding stores no theme choice");
 }
