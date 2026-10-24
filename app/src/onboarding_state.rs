@@ -64,6 +64,18 @@ pub struct Skip {
     pub cost_key: String,
 }
 
+/// The two clearing signals a [`HandoverItem`] carries (§4.10): a slot's end, or `mail.json`.
+pub const SIGNAL_SLOT_END: &str = "slot_end";
+pub const SIGNAL_MAIL_JSON: &str = "mail_json";
+/// Required items a slot finishes (§4.10's first two table rows): the slot, the first reads of the
+/// slot's own steps, the Gmail first read and a calendar read.
+const SLOT_ITEMS: [&str; 9] = [
+    "first.sync", "first.coursework", "first.ingest", "first.grades", "slot.partial", "slot.first_full",
+    "google.gmail_first_read", "calendar.read", "google.calendar_read",
+];
+/// Required items only `mail.json` clears: an open setup, the canary, the first pass.
+const MAIL_ITEMS: [&str; 3] = ["mail.setup", "mail.canary", "mail.first_pass"];
+
 /// One required item not yet `done` at Open Knowlu, with the signal that clears it (§4.10):
 /// `slot_end` or `mail_json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,9 +115,18 @@ impl OnboardingState {
     }
     /// The first slot after the reveal ended (or the first onboarding slot to end, before it):
     /// clears the `slot_end` handover items and no other (§4.10).
-    pub fn slot_ended(&mut self) { todo!("F8f: clear the slot items") }
-    /// A mail signal read from `mail.json`: clears only its own item (§4.10).
-    pub fn mail_signal(&mut self, _signal: MailSignal) { todo!("F8f: clear the mail items") }
+    pub fn slot_ended(&mut self) { self.handover.retain(|h| h.signal != SIGNAL_SLOT_END); }
+    /// A mail signal read from `mail.json`: clears only its own item (§4.10). Forwarding verified
+    /// means the setup is no longer open, so it clears `mail.setup` with the canary; a disconnect
+    /// clears all three. No slot item is ever touched.
+    pub fn mail_signal(&mut self, signal: MailSignal) {
+        let gone: &[&str] = match signal {
+            MailSignal::CanaryVerified => &["mail.setup", "mail.canary"],
+            MailSignal::FirstPassDelivered => &["mail.first_pass"],
+            MailSignal::Disconnected => &MAIL_ITEMS,
+        };
+        self.handover.retain(|h| h.signal != SIGNAL_MAIL_JSON || !gone.contains(&h.item.as_str()));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -648,7 +669,15 @@ pub fn close_requested(_s: std::sync::Arc<dyn ExitSeams + Send + Sync>, _g: std:
     todo!("F2b: the close never waits on the event loop")
 }
 /// Every required item of §4.6 not `done`, each with its clearing signal.
-pub fn handover_for(_state: &OnboardingState) -> Vec<HandoverItem> { todo!("F8f: the hand-over list") }
+pub fn handover_for(state: &OnboardingState) -> Vec<HandoverItem> {
+    // A skipped job is the student's own choice (the gate lists it as not connected), never "coming".
+    let open = |name: &str| state.jobs.get(name).is_some_and(|j| !matches!(j.state, JobState::Done | JobState::Skipped));
+    let signal = |name: &str| {
+        if SLOT_ITEMS.contains(&name) { Some(SIGNAL_SLOT_END) } else if MAIL_ITEMS.contains(&name) { Some(SIGNAL_MAIL_JSON) } else { None }
+    };
+    // `jobs` is a `BTreeMap`, so the walk is already sorted by item.
+    state.jobs.keys().filter(|k| open(k)).filter_map(|k| signal(k).map(|s| HandoverItem { item: k.clone(), signal: s.to_string() })).collect()
+}
 
 /// `onboarding_status`'s body: the file plus the live job states, the gate, and whether step 10's
 /// proposals may be asked (only once `config.ingest` is `done`). Keys: `jobs`, `proposals_ready`,
