@@ -664,6 +664,27 @@ Acceptance: `scripts/ci/eol-check.ps1` clean; no source file in the diff. Size: 
 *(T0's base, citation, clock and retire records, the review rounds and the controller's answers go
 here, dated, newest first.)*
 
+- **2026-10-24, T0 (the controller).**
+  - **Base.** `feat/deadline-ordering` was branched from `origin/main` at `7b3e10c`, and `docs/deadline-ordering` (`6eff47d`, plan r4, PASS) was merged as `b1de78f`.
+  - **Citations.** Every symbol in T0's list exists on the base. There is no drift in names. Visibility is recorded for the implementers:
+    - private: `ranking::closes_tonight`; `surface::{with_window, build_state_with, sort_rows, group_label}`; `weekcal::{subtract, class_busy, weekly_span_block, active_spans, blocks_from_busy}`;
+    - public: the rest.
+    - Tests in each file's own module reach the private ones.
+  - **Clock record.**
+    - `oracle.rs:86` runs `--today 2026-08-28` with no `--now`.
+    - `surface_oracle.rs:17,22,44` pins `--now 2026-08-28T09:00`.
+    - No `late_policy` appears under `engine/tests/fixtures`.
+    - All three `surface-today-*.json` have `"spill_items": []`.
+  - **Retire record.** Line numbers are on the base.
+    - **Retire:** R3 (:461), R4 (:469), R7 (:512), R14 (:615) and R15 (:624) in `ranking.rs`; C3 (`cli.rs:1663`); S1 (`surface.rs:4476`).
+    - **Re-point:** C5 (`cli.rs:1707`, last assertion) and S2 (`surface.rs:4487`, the 21:00 half).
+    - **Keep:** R1, R2, R5, R6 and R8-R13; C1, C2 and C4; S3 (:4501) and S4 (:4514); and E1-E3 (`evening_rank.rs`).
+    - Label drift: `surface.rs`'s evening block holds four tests (S1-S4), not five. The test the reviews called "S5" (`the_meter_spills_the_overdue_lab_after_the_hour`) is S4, and is kept.
+  - **Clock-dependent tests outside the evening blocks.**
+    - `named_issues.rs` (surface at 09:00, issues panel only) and `surface_oracle.rs` (09:00). No app test calls `surface`, `rank` or `build_state` at a clock time; app `12:00`s are runner slot times.
+  - **Open lanes.**
+    - `feat/o3-long-onboarding` touches none of `weekcal.rs`, `ranking.rs`, `cli.rs` or `surface.rs`. It rewrites much of `app/static` (12 files), so T5 (`console.js`) carries a collision note: rebase onto whichever lands second.
+  - **Workspace on the base:** `cargo test --workspace -j 2 --no-fail-fast` passes, with no failures and only the accepted `.rsrc` warning.
 - **2026-10-24, the controller.** Q-1 to Q-3 approved as recommended. The re-point of C5's last
   assertion and of S2's 21:00 half is explicitly allowed (plan review r1 M1); §2 records it.
 
