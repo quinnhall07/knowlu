@@ -2405,3 +2405,143 @@ fn test_17_update_state_rolls_back_a_change_whose_save_failed() {
     assert_eq!(r.q.snapshot().skips, before.skips, "the change is not kept in memory");
     let _ = std::fs::remove_dir(&path);
 }
+
+// ---- F8d: the mail, Google and coursework runners (test 30's F8d half) ---------------------------------------------
+
+use knowlu::mail::setup::Progress;
+
+/// A fake setup run: it ends on its own (`alone`), or `end_after` the stop; `progress` reads `ended` only once it has.
+struct FakeRun {
+    alone: bool,
+    end_after: Duration,
+    ended: &'static str,
+    provider: &'static str,
+    stops: AtomicUsize,
+    stopped_at: Mutex<Option<Instant>>,
+}
+impl FakeRun {
+    fn new(alone: bool, ended: &'static str, provider: &'static str) -> FakeRun {
+        FakeRun { alone, end_after: Duration::from_millis(300), ended, provider, stops: AtomicUsize::new(0), stopped_at: Mutex::new(None) }
+    }
+    fn done(&self) -> bool { self.alone || self.stopped_at.lock().unwrap().is_some_and(|at| at.elapsed() >= self.end_after) }
+}
+impl SetupRun for FakeRun {
+    fn stop(&self) { self.stops.fetch_add(1, Ordering::SeqCst); self.stopped_at.lock().unwrap().get_or_insert_with(Instant::now); }
+    fn wait_done(&self, t: Duration) -> bool { std::thread::sleep(t.min(Duration::from_millis(10))); self.done() }
+    fn progress(&self) -> Progress {
+        Progress { status: "running", provider: self.provider, ended: self.done().then_some(self.ended), ..Default::default() }
+    }
+}
+
+#[test]
+fn test_30_the_mail_setup_runner_passes_the_stop_on_and_returns_only_after_the_run_has_ended() {
+    let dir = scratch("f8d-setup-stop");
+    let run = FakeRun::new(false, "stopped", "m365");
+    let stop = AtomicBool::new(false);
+    let start = Instant::now();
+    let out = std::thread::scope(|sc| {
+        let t = sc.spawn(|| run_mail_setup(&dir, &run, &stop));
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(run.stops.load(Ordering::SeqCst), 0, "no stop yet, so no call");
+        stop.store(true, Ordering::SeqCst);
+        t.join().unwrap()
+    });
+    assert_eq!(out, Outcome::Stopped, "a stopped setup is pending, never failed");
+    assert!(start.elapsed() >= Duration::from_millis(360), "it returned before the run had ended");
+    assert_eq!(run.stops.load(Ordering::SeqCst), 1, "the run's stop is called once");
+    assert_eq!(load_answers(&dir).unwrap(), None, "a stop seen means no answers write (the setup resumes and records then)");
+}
+
+#[test]
+fn test_30_a_queue_stop_already_set_stops_the_run_at_once() {
+    let dir = scratch("f8d-setup-prestopped");
+    let run = FakeRun::new(false, "stopped", "google");
+    assert_eq!(run_mail_setup(&dir, &run, &AtomicBool::new(true)), Outcome::Stopped);
+    assert_eq!(run.stops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn test_32_a_finished_setup_records_the_services_provider_string_through_the_answers_file_and_nothing_else_changes() {
+    for provider in ["m365", "google", "other"] {
+        let dir = scratch(&format!("f8d-provider-{provider}"));
+        update_answers(&dir, &|a| a.google_calendar = Some(true)).unwrap();
+        let out = run_mail_setup(&dir, &FakeRun::new(true, "finished", provider), &AtomicBool::new(false));
+        assert_eq!(out, Outcome::Done(BTreeMap::new()), "{provider}");
+        let a = load_answers(&dir).unwrap().unwrap();
+        assert_eq!(a.mail_provider.as_deref(), Some(provider), "stored as the service gives it");
+        assert_eq!(a.google_calendar, Some(true), "the other answers are kept");
+    }
+}
+
+#[test]
+fn test_32_a_run_that_ended_before_its_provider_was_known_records_nothing() {
+    let dir = scratch("f8d-provider-none");
+    let out = run_mail_setup(&dir, &FakeRun::new(true, "failed", ""), &AtomicBool::new(false));
+    assert!(matches!(out, Outcome::Failed(_)), "{out:?}");
+    assert_eq!(load_answers(&dir).unwrap(), None, "no file is started for an empty provider");
+}
+
+#[test]
+fn test_30_the_other_ends_of_a_setup_map_to_closed_set_reasons_and_never_quote_the_runs_line() {
+    let dir = scratch("f8d-setup-ends");
+    let go = |ended: &'static str, stop: bool| run_mail_setup(&dir, &FakeRun::new(true, ended, "google"), &AtomicBool::new(stop));
+    assert_eq!(go("stopped", false), Outcome::Stopped, "a run that stopped itself is pending");
+    assert_eq!(go("cancelled", false), Outcome::Failed(REASON_MAIL_CANCELLED.into()));
+    assert_eq!(go("failed", false), Outcome::Failed(REASON_MAIL_SETUP_FAILED.into()));
+    assert_eq!(go("needs_you", false), Outcome::Failed(REASON_MAIL_SETUP_FAILED.into()));
+    assert_eq!(go("failed", true), Outcome::Stopped, "ended by the stop, so it resumes rather than reading as a failure");
+    assert_eq!(go("finished", true), Outcome::Done(BTreeMap::new()), "a setup that finished despite the stop is done");
+}
+
+fn counts(k: &str, n: i64) -> BTreeMap<String, Option<i64>> { BTreeMap::from([(k.to_string(), Some(n))]) }
+
+#[test]
+fn test_30_the_reads_write_nothing_after_the_stop_and_a_named_outcome_is_never_a_failure() {
+    type Run = fn(&AtomicBool, &dyn Fn() -> Result<Read, String>, &dyn Fn(&BTreeMap<String, Option<i64>>) -> Result<(), String>) -> Outcome;
+    let runners: [(&str, Run); 3] = [("gmail", run_gmail_first_read), ("calendar", run_calendar_read), ("coursework", run_coursework_discover)];
+    for (name, run) in runners {
+        let (reads, writes) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let stop = AtomicBool::new(false);
+        let read = || { reads.fetch_add(1, Ordering::SeqCst); Ok(Read::Counts(counts("n", 4))) };
+        let keep = |_: &BTreeMap<String, Option<i64>>| { writes.fetch_add(1, Ordering::SeqCst); Ok(()) };
+        assert_eq!(run(&stop, &read, &keep), Outcome::Done(counts("n", 4)), "{name}");
+        assert_eq!((reads.load(Ordering::SeqCst), writes.load(Ordering::SeqCst)), (1, 1), "{name}");
+        // The stop is set while the call is in hand: its answer is dropped, nothing is written.
+        let late = || { stop.store(true, Ordering::SeqCst); Ok(Read::Counts(counts("n", 4))) };
+        assert_eq!(run(&stop, &late, &keep), Outcome::Stopped, "{name}");
+        assert_eq!(writes.load(Ordering::SeqCst), 1, "{name}: no write after the stop");
+        // A stop already set starts no call at all.
+        assert_eq!(run(&stop, &read, &keep), Outcome::Stopped, "{name}");
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "{name}: no second call");
+        let fresh = AtomicBool::new(false);
+        let named = || Ok(Read::Named("no_entitlement".into()));
+        assert_eq!(run(&fresh, &named, &keep), Outcome::Waiting("no_entitlement".into()), "{name}: pending with its reason, not failed");
+        let bad = || Err("the read failed".to_string());
+        assert_eq!(run(&fresh, &bad, &keep), Outcome::Failed("the read failed".into()), "{name}");
+        let refuse = |_: &BTreeMap<String, Option<i64>>| Err("disk".to_string());
+        assert_eq!(run(&fresh, &read, &refuse), Outcome::Failed("disk".into()), "{name}: a write that fails is failed");
+        assert_eq!(writes.load(Ordering::SeqCst), 1, "{name}");
+    }
+}
+
+#[test]
+fn test_30_the_canary_and_first_pass_watch_write_nothing_heed_the_stop_each_poll_and_are_bounded() {
+    type Watch = fn(&dyn Fn() -> bool, &AtomicBool, &dyn Fn(Duration)) -> Outcome;
+    let watchers: [(&str, Watch); 2] = [("canary", run_mail_canary), ("first pass", run_mail_first_pass)];
+    for (name, watch) in watchers {
+        let (polls, sleeps) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let sleep = |d: Duration| { assert_eq!(d, MAIL_WATCH_POLL); sleeps.fetch_add(1, Ordering::SeqCst); };
+        let stop = AtomicBool::new(false);
+        let third = || polls.fetch_add(1, Ordering::SeqCst) >= 2;
+        assert_eq!(watch(&third, &stop, &sleep), Outcome::Done(BTreeMap::new()), "{name}");
+        assert_eq!(sleeps.load(Ordering::SeqCst), 2, "{name}: waited between polls only");
+        let (n, stopper) = (AtomicUsize::new(0), AtomicBool::new(false));
+        let stops_on_two = |_: Duration| { if n.fetch_add(1, Ordering::SeqCst) == 1 { stopper.store(true, Ordering::SeqCst); } };
+        assert_eq!(watch(&|| false, &stopper, &stops_on_two), Outcome::Stopped, "{name}: pending again, from the top");
+        assert_eq!(n.load(Ordering::SeqCst), 2, "{name}: ended within one poll of the stop");
+        let (ticks, never) = (AtomicUsize::new(0), AtomicBool::new(false));
+        let count = |_: Duration| { ticks.fetch_add(1, Ordering::SeqCst); };
+        assert_eq!(watch(&|| false, &never, &count), Outcome::Waiting(REASON_MAIL_NOT_YET.into()), "{name}: parked, not failed");
+        assert_eq!(ticks.load(Ordering::SeqCst) as u64, MAIL_WATCH_BUDGET.as_secs() / MAIL_WATCH_POLL.as_secs(), "{name}: bounded by its budget");
+    }
+}

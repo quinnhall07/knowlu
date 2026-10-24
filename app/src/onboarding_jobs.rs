@@ -7,7 +7,7 @@
 //! **While a [`Queue`] is live it is the only writer of `onboarding.json`**: the commands (F2) and the
 //! window's exits (F4) change the file through the queue's methods, never `save_state` directly. The
 //! one exception is the sign-out rewind, which writes after [`Queue::freeze`] (F8f, F2e).
-use crate::onboarding_state::{confirm_school, load_answers, proposals_ready, save_state, school_apply_may_run, update_answers, Answers, CourseAnswer, HandoverItem, JobRecord, JobState, OnboardingState, PendingStore};
+use crate::onboarding_state::{confirm_school, load_answers, proposals_ready, save_state, school_apply_may_run, update_answers, update_answers_unless, Answers, CourseAnswer, HandoverItem, JobRecord, JobState, OnboardingState, PendingStore};
 use crate::scheduler::SlotScope;
 use serde::Serialize;
 use serde_json::Value;
@@ -1029,6 +1029,112 @@ pub fn put_ingest_text(vault: &Path, data_dir: &Path, text: &str, seams: &crate:
             Outcome::Failed(format!("Knowlu could not save your course settings on {volume} ({e}). Check that {volume} is a normal drive with free space, then Try again."))
         }
     }
+}
+
+// ---- the mail, Google and coursework runners (F8d) ---------------------------------------------------------
+//
+// Each is the pure core over a seam; the job-name dispatch that builds the seams from the app is the
+// `Runner` impl's. Every one heeds the queue's stop at its safe point and writes nothing once it has seen it.
+
+/// `mail.setup` ended with the user's window closed: a closed-set reason, never the run's own line.
+pub const REASON_MAIL_CANCELLED: &str = "mail_setup_cancelled";
+/// `mail.setup` ended failed (or needing the student, which a first setup never does).
+pub const REASON_MAIL_SETUP_FAILED: &str = "mail_setup_failed";
+/// The canary or first pass did not show in its budget: `pending` again, not failed.
+pub const REASON_MAIL_NOT_YET: &str = "mail_not_yet";
+/// How often the canary and first-pass watches look, and how long each looks (the setup's `CANARY_WAIT`).
+pub const MAIL_WATCH_POLL: Duration = Duration::from_secs(5);
+pub const MAIL_WATCH_BUDGET: Duration = Duration::from_secs(180);
+
+/// A running mail setup as `mail.setup`'s runner holds it: [`crate::mail::setup::Shared`], or a fake.
+pub trait SetupRun: Send + Sync {
+    fn stop(&self);
+    fn wait_done(&self, timeout: Duration) -> bool;
+    fn progress(&self) -> crate::mail::setup::Progress;
+}
+
+impl SetupRun for crate::mail::setup::Shared {
+    fn stop(&self) { crate::mail::setup::Shared::stop(self) }
+    fn wait_done(&self, timeout: Duration) -> bool { crate::mail::setup::Shared::wait_done(self, timeout) }
+    fn progress(&self) -> crate::mail::setup::Progress { crate::mail::setup::Shared::progress(self) }
+}
+
+/// `mail.setup`: passes the queue's stop to the run ("after the current step") and returns only once the
+/// run has ended, so no setup write lands after Sign out's clean. A stopped run is `Stopped` (pending,
+/// resumed at the next launch). The setup's provider, the service's own string from the run's progress,
+/// goes to `mail_provider` through the answers lock, refused once the stop is set; an empty provider
+/// (the run ended before it was resolved) records nothing.
+pub fn run_mail_setup(data_dir: &Path, run: &dyn SetupRun, stop: &AtomicBool) -> Outcome {
+    let mut told = false;
+    loop {
+        if stop.load(Ordering::SeqCst) && !told { run.stop(); told = true; }
+        if run.wait_done(Duration::from_millis(50)) { break; }
+    }
+    let (p, stopping) = (run.progress(), stop.load(Ordering::SeqCst));
+    if !p.provider.is_empty() {
+        // The record is advisory (F2b keeps the item when it is absent), so a refusal never fails a setup.
+        let _ = update_answers_unless(data_dir, &|| stop.load(Ordering::SeqCst), &|a| a.mail_provider = Some(p.provider.to_string()));
+    }
+    match p.ended {
+        Some("finished") => Outcome::Done(BTreeMap::new()),
+        _ if stopping || p.ended == Some("stopped") => Outcome::Stopped,
+        Some("cancelled") => Outcome::Failed(REASON_MAIL_CANCELLED.into()),
+        _ => Outcome::Failed(REASON_MAIL_SETUP_FAILED.into()),
+    }
+}
+
+/// Polls `check` every [`MAIL_WATCH_POLL`] for [`MAIL_WATCH_BUDGET`]: `Done` when it holds, `Stopped` at a
+/// poll that finds the stop, else `Waiting`. It writes nothing anywhere (the [`ABANDON_AT_ONCE`] rule).
+fn run_mail_watch(check: &dyn Fn() -> bool, stop: &AtomicBool, sleep: &dyn Fn(Duration)) -> Outcome {
+    for _ in 0..MAIL_WATCH_BUDGET.as_secs() / MAIL_WATCH_POLL.as_secs() {
+        if check() { return Outcome::Done(BTreeMap::new()); }
+        if stop.load(Ordering::SeqCst) { return Outcome::Stopped; }
+        sleep(MAIL_WATCH_POLL);
+    }
+    Outcome::Waiting(REASON_MAIL_NOT_YET.into())
+}
+
+/// `mail.canary`: `back` is the unfiltered address list's canary reading (F8s2's `CanaryVerified`).
+pub fn run_mail_canary(back: &dyn Fn() -> bool, stop: &AtomicBool, sleep: &dyn Fn(Duration)) -> Outcome { run_mail_watch(back, stop, sleep) }
+
+/// `mail.first_pass`: `closed` is F8m's `batch_closed_noted`. The backfill itself is never waited for.
+pub fn run_mail_first_pass(closed: &dyn Fn() -> bool, stop: &AtomicBool, sleep: &dyn Fn(Duration)) -> Outcome { run_mail_watch(closed, stop, sleep) }
+
+/// What a read hands back: its proof counts, or a named outcome that is not a failure (no runtime, model,
+/// account, session, entitlement or network; `coursework` always exits 0).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Read {
+    Counts(BTreeMap<String, Option<i64>>),
+    Named(String),
+}
+
+/// One call, then (if the stop has not been seen) `keep` writes its result. The stop is read before the
+/// call and after it, before any write; a call in hand is waited for, its answer dropped on a stop.
+fn run_checked_read(
+    stop: &AtomicBool,
+    read: &dyn Fn() -> Result<Read, String>,
+    keep: &dyn Fn(&BTreeMap<String, Option<i64>>) -> Result<(), String>,
+) -> Outcome {
+    if stop.load(Ordering::SeqCst) { return Outcome::Stopped; }
+    let got = read();
+    if stop.load(Ordering::SeqCst) { return Outcome::Stopped; }
+    match got {
+        Err(e) => Outcome::Failed(e),
+        Ok(Read::Named(reason)) => Outcome::Waiting(reason),
+        Ok(Read::Counts(proof)) => match keep(&proof) { Ok(()) => Outcome::Done(proof), Err(e) => Outcome::Failed(e) },
+    }
+}
+
+/// `google.gmail_first_read` (`judge`'s Gmail pull); `google.calendar_read` (through `ingest`);
+/// `coursework.discover`. Each checks the stop after its call and before any write.
+pub fn run_gmail_first_read(stop: &AtomicBool, read: &dyn Fn() -> Result<Read, String>, keep: &dyn Fn(&BTreeMap<String, Option<i64>>) -> Result<(), String>) -> Outcome {
+    run_checked_read(stop, read, keep)
+}
+pub fn run_calendar_read(stop: &AtomicBool, read: &dyn Fn() -> Result<Read, String>, keep: &dyn Fn(&BTreeMap<String, Option<i64>>) -> Result<(), String>) -> Outcome {
+    run_checked_read(stop, read, keep)
+}
+pub fn run_coursework_discover(stop: &AtomicBool, read: &dyn Fn() -> Result<Read, String>, keep: &dyn Fn(&BTreeMap<String, Option<i64>>) -> Result<(), String>) -> Outcome {
+    run_checked_read(stop, read, keep)
 }
 
 #[cfg(test)]

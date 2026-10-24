@@ -3108,6 +3108,8 @@ struct Sv {
     /// Called as each canary is asked for (the test reads the progress and the clock there).
     on_canary: Option<Box<dyn Fn() + Send>>,
     confirming: bool,
+    /// The address never reads `confirmed` (the provider's mail never comes), whatever `confirming` says.
+    never_confirm: bool,
     hint: Option<String>,
     /// The `since` of each backfill batch opened.
     batches: Vec<String>,
@@ -3144,7 +3146,7 @@ fn setup_service(sv: &Arc<Mutex<Sv>>, ev: &Events) -> Service {
             }
             ("GET", "/addresses") => {
                 let ok_at = (s.canary_sent && s.canary_arrives).then(|| "2026-10-02T10:00:40Z");
-                let status = if ok_at.is_some() { "active" } else if s.confirming { "confirmed" } else { "pending" };
+                let status = if ok_at.is_some() { "active" } else if s.confirming && !s.never_confirm { "confirmed" } else { "pending" };
                 let row = json!({
                     "address_id": A, "provider": s.provider, "address": KNOWLU, "mailbox_hint": s.hint,
                     "status": status, "backfill_since": s.backfill_since, "last_canary_ok_at": ok_at,
@@ -3488,6 +3490,89 @@ fn a_forwarding_just_set_is_given_time_to_start_and_a_second_canary_before_the_s
     assert_eq!(capped.events().iter().filter(|e| *e == "svc canary").count(), 2, "asked twice, refused once");
     shared.stop();
     wait(&shared);
+}
+
+/// A clock that moves only when the runner waits and sets the setup's stop on the third wait after `when`
+/// first reads true (F8d, F1 test 30's runner cases); `tripped` is the fake second the stop was set.
+struct TripClk {
+    clk: Arc<SClk>,
+    setups: Arc<Setups>,
+    when: Box<dyn Fn() -> bool + Send>,
+    seen: AtomicU32,
+    tripped: Arc<AtomicI64>,
+}
+
+impl Clock for TripClk {
+    fn now(&self) -> i64 {
+        self.clk.at()
+    }
+    fn sleep(&self, secs: i64) {
+        self.clk.0.fetch_add(secs, Ordering::SeqCst);
+        if (self.when)() && self.seen.fetch_add(1, Ordering::SeqCst) == 2 {
+            self.tripped.store(self.clk.at(), Ordering::SeqCst);
+            self.setups.current().expect("a setup is running").stop();
+        }
+    }
+}
+
+/// Runs `kind` on a rig whose clock stops the setup once `when` holds; returns the ended progress and how many
+/// fake seconds the run took to end after the stop.
+fn stopped_while(r: &Rig, kind: Kind, when: Box<dyn Fn() -> bool + Send>) -> (Progress, i64) {
+    let tripped = Arc::new(AtomicI64::new(0));
+    let clock = TripClk { clk: r.clk.clone(), setups: r.setups.clone(), when, seen: AtomicU32::new(0), tripped: tripped.clone() };
+    let env = Env { clock: Box::new(clock), ..r.env() };
+    let shared = r.setups.start(r.plan(kind, true), env).expect("a setup started");
+    let p = wait(&shared);
+    let at = tripped.load(Ordering::SeqCst);
+    assert!(at > 0, "the stop was never set: {p:?}");
+    (p, r.clk.at() - at)
+}
+
+fn assert_stop_not_failure(p: &Progress, step: &str, took: i64) {
+    assert_eq!(p.ended, Some("stopped"), "a stop, never a failure: {p:?}");
+    assert!(took <= 5, "it ended within one POLL of the stop, not at the wait's limit: {took} s");
+    assert_eq!(row(p, step).state, "skipped", "{step} is neither failed nor done");
+    assert_eq!(row(p, "sign_in").state, "done", "a step done before the stop stays done");
+    assert!(!p.blocked && p.offers.is_empty(), "no blocked mailbox is offered a retry");
+}
+
+#[test]
+fn a_stop_during_the_address_confirm_ends_the_run_within_one_poll_and_is_not_a_failed_confirm() {
+    let r = rig("f8d-confirm");
+    r.sv.lock().unwrap().never_confirm = true;
+    r.host.lock().unwrap().title_address = Some(HINT_PAGE.to_string());
+    let setups = r.setups.clone();
+    let when = Box::new(move || setups.current().is_some_and(|c| c.progress().sentence == "Knowlu is confirming the address"));
+    let (p, took) = stopped_while(&r, Kind::Gmail, when);
+    assert_stop_not_failure(&p, "confirm_address", took);
+    assert!(r.clk.at() - NOW < 15 * 60, "never CONFIRM_WAIT");
+    assert!(!r.events().contains(&"svc canary".to_string()), "nothing after the confirm ran");
+}
+
+#[test]
+fn a_stop_while_forwarding_settles_sends_no_canary_and_is_not_a_failed_canary() {
+    let r = rig("f8d-settle");
+    r.sv.lock().unwrap().canary_arrives = false;
+    let setups = r.setups.clone();
+    let when = Box::new(move || setups.current().is_some_and(|c| c.progress().sentence == "waiting for Outlook to start forwarding"));
+    let (p, took) = stopped_while(&r, curated_m365(), when);
+    assert_stop_not_failure(&p, "canary", took);
+    assert_eq!(r.sv.lock().unwrap().canaries, 0, "no canary was sent after the stop");
+    assert_eq!(row(&p, "forwarding").state, "done");
+}
+
+#[test]
+fn a_stop_while_the_canary_is_awaited_ends_within_one_poll_sends_no_second_canary_and_is_not_blocked() {
+    let r = rig("f8d-canary-back");
+    r.sv.lock().unwrap().canary_arrives = false;
+    // Forwarding was already on to Knowlu (nothing changed): no settle, one canary waited for.
+    let kept = json!({ "result": "ok", "forwarding": "on", "to": "ours", "keep_copy": true, "changed": false });
+    queue(&r, "m365/forwarding_set.js", vec![kept]);
+    let sv = r.sv.clone();
+    let (p, took) = stopped_while(&r, curated_m365(), Box::new(move || sv.lock().unwrap().canaries >= 1));
+    assert_stop_not_failure(&p, "canary", took);
+    assert_eq!(r.sv.lock().unwrap().canaries, 1, "never the second");
+    assert!(r.clk.at() - NOW < 180, "never CANARY_WAIT");
 }
 
 fn answer_address(shared: &Shared) {
