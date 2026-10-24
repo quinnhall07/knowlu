@@ -42,6 +42,10 @@ pub struct PreviewInputs<'a> {
 /// two for an item a past and a current shell both claim, and `unmatched` (empty `codes`) for an item
 /// no course claims. The buckets sum to the totals; the app totals every bucket whose `codes` is empty
 /// or names a kept course, which is what ingest will import. `null` when there is no course list.
+/// Each course's own bucket (present even at zero counts) also carries `graded`: `true` when the
+/// grades bundle has a graded item column for it, `false` when it has none, `null` with no bundle;
+/// multi-code buckets and `unmatched` carry none. Class times sit in their buckets for display
+/// only: a removal never subtracts one (§14.47).
 pub fn preview(inputs: &PreviewInputs, tz: &TimeZone, now: DateTime) -> Value {
     preview_inner(inputs, &[], tz, now)
 }
@@ -193,7 +197,7 @@ fn read_grades(text: &str, tz: &TimeZone, errors: &mut Vec<String>) -> Option<Gr
         errors.push("grades: not a v2 grades bundle".to_string());
         return None;
     };
-    let (mut done, mut courses, mut owner) = (BTreeSet::new(), 0, BTreeMap::new());
+    let (mut done, mut courses, mut owner, mut graded_lms) = (BTreeSet::new(), 0, BTreeMap::new(), BTreeSet::new());
     for course in bundle.courses.iter().filter(|c| c.error.is_none()) {
         let lms = course.membership["courseId"].as_str().unwrap_or("").to_string();
         let mut graded = false;
@@ -211,8 +215,11 @@ fn read_grades(text: &str, tz: &TimeZone, errors: &mut Vec<String>) -> Option<Gr
             }
         }
         courses += usize::from(graded);
+        if graded && !lms.is_empty() {
+            graded_lms.insert(lms);
+        }
     }
-    Some(Grades { done, courses, owner })
+    Some(Grades { done, courses, owner, graded_lms })
 }
 
 /// What the bundle gives: the done item columns, the count of courses with a graded item, and each
@@ -221,6 +228,8 @@ struct Grades {
     done: BTreeSet<String>,
     courses: usize,
     owner: BTreeMap<String, String>,
+    /// The LMS course keys with a graded item column (what `grades_courses` counts), for `graded`.
+    graded_lms: BTreeSet<String>,
 }
 
 /// The registrar's matched class times: Banner's series read `Reading::Whole` (a partly read row is
@@ -302,10 +311,24 @@ fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: Da
         for keys in class_times.iter().flatten() {
             add(keys, 2);
         }
-        let entry = |(n, codes): &([Option<usize>; 3], Vec<String>)| {
-            json!({"assignments_upcoming": n[0], "class_times": n[2], "codes": codes, "turned_in": n[1]})
+        // `graded` is on each course's own bucket only: true when the bundle has a graded item column
+        // for it, false when it has none, null with no bundle (a multi-code bucket and `unmatched`
+        // carry none). Two entries sharing a key are graded if either is.
+        let graded = |key: &str| -> Option<Value> {
+            let mine = list.iter().filter(|c| c.key == key);
+            list.iter().any(|c| c.key == key).then(|| match &grades {
+                None => Value::Null,
+                Some(g) => json!(mine.into_iter().any(|c| !c.code.is_empty() && g.graded_lms.contains(&c.code))),
+            })
         };
-        Value::Object(buckets.iter().map(|(k, b)| (k.clone(), entry(b))).collect())
+        let entry = |k: &str, (n, codes): &([Option<usize>; 3], Vec<String>)| {
+            let mut v = json!({"assignments_upcoming": n[0], "class_times": n[2], "codes": codes, "turned_in": n[1]});
+            if let (true, Some(g)) = (codes.len() == 1, graded(k)) {
+                v["graded"] = g;
+            }
+            v
+        };
+        Value::Object(buckets.iter().map(|(k, b)| (k.clone(), entry(k, b))).collect())
     });
     json!({
         "assignments_upcoming": feed.as_ref().map(Vec::len),
@@ -1013,9 +1036,46 @@ END:VEVENT
         assert_eq!(by_course(&v, "_100_1,_200_1", "class_times"), json!(1), "{v}");
         assert_eq!(by_course(&v, "_100_1", "class_times"), json!(0), "{v}");
         assert_eq!(sum_over_keys(&v, "class_times"), 1, "{v}");
-        assert_eq!(kept_total(&v, &["_200_1"], "class_times"), 1, "the old shell removed: {v}");
-        assert_eq!(kept_total(&v, &["_100_1"], "class_times"), 1, "the live shell removed: {v}");
-        assert_eq!(kept_total(&v, &["_300_1"], "class_times"), 0, "both removed: {v}");
+        // §14.47: the registrar holds only the current term, so a removal never subtracts a class
+        // time. The buckets are for display; the app keeps the total (1) whichever shell, or both,
+        // the student removes, so nothing here reads `kept_total` for `class_times`.
+        assert_eq!(count(&v, "class_times"), json!(1), "{v}");
+    }
+
+    #[test]
+    fn graded_marks_each_single_course_bucket_and_a_course_with_no_items_still_has_one() {
+        // No feed items at all: both courses still have a bucket, with zero counts.
+        let (c, f) = (courses(), ics(&[]));
+        let g = bundle(); // course one has a graded item column; course two only an Overall column
+        let with = PreviewInputs { feed: Some(&f), courses: Some(&c), grades: Some(&g), ..Default::default() };
+        let v = preview(&with, &chicago(), now());
+        assert_eq!(by_course(&v, "_900001_1", "graded"), json!(true), "{v}");
+        assert_eq!(by_course(&v, "_900002_1", "graded"), json!(false), "{v}");
+        assert_eq!(by_course(&v, "_900002_1", "assignments_upcoming"), json!(0), "{v}");
+        assert!(v["by_course"]["unmatched"].get("graded").is_none(), "{v}");
+        assert_eq!(count(&v, "grades_courses"), json!(1), "the total counts the true buckets: {v}");
+        // No bundle: null on both.
+        let without = PreviewInputs { feed: Some(&f), courses: Some(&c), ..Default::default() };
+        let w = preview(&without, &chicago(), now());
+        assert_eq!(by_course(&w, "_900001_1", "graded"), Value::Null, "{w}");
+        assert_eq!(by_course(&w, "_900002_1", "graded"), Value::Null, "{w}");
+        assert!(w["by_course"]["_900001_1"].get("graded").is_some(), "null, but present: {w}");
+    }
+
+    #[test]
+    fn a_multi_code_bucket_carries_no_graded() {
+        let c = json!([
+            {"code": "_100_1", "name": "Old", "slug": "syn-110", "label": "SYN 110"},
+            {"code": "_200_1", "name": "Live", "slug": "syn-110", "label": "SYN 110"},
+        ])
+        .to_string();
+        let f = ics(&[vevent_in("BB-ASSIGN-3", "SYN 110: Reading", None, "x")]);
+        let g = bundle();
+        let inputs = PreviewInputs { feed: Some(&f), courses: Some(&c), grades: Some(&g), ..Default::default() };
+        let v = preview(&inputs, &chicago(), now());
+        assert_eq!(by_course(&v, "_100_1,_200_1", "assignments_upcoming"), json!(1), "{v}");
+        assert!(v["by_course"]["_100_1,_200_1"].get("graded").is_none(), "{v}");
+        assert_eq!(by_course(&v, "_100_1", "graded"), json!(false), "neither shell is in the bundle: {v}");
     }
 
     /// A course list whose first entry carries saved `pairs` (strings, and `[fragment, slug]` pairs
