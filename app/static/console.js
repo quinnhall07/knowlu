@@ -3293,12 +3293,14 @@
   // and done (signed in, the folder made). State lives on `SU` and `renderSetup` is its one painter.
   var SU = null;
   // The rail's one row that changes here, and the two words under it, per screen.
+  // The numbering is plan §4.2's: welcome is step 1, the account step 2, of the ten steps wave B shows
+  // (eleven, less the absent step 9). One estimate, the spec's, until S-E measures real times.
   var SU_RAIL = {
-    welcome: { no: "Before you start", left: "About 9 minutes left" },
-    account: { no: "Step 1 of 9", left: "About 9 minutes left" },
-    browser: { no: "Step 1 of 9", left: "About 9 minutes left" },
-    code: { no: "Step 1 of 9", left: "About 9 minutes left" },
-    done: { no: "Step 2 of 9", left: "About 8 minutes left" }
+    welcome: { no: "Step 1 of 10", left: "About 10 minutes" },
+    account: { no: "Step 2 of 10", left: "About 10 minutes" },
+    browser: { no: "Step 2 of 10", left: "About 10 minutes" },
+    code: { no: "Step 2 of 10", left: "About 10 minutes" },
+    done: { no: "Step 2 of 10", left: "About 10 minutes" }
   };
 
   function startSetup(l, at) {
@@ -3369,14 +3371,14 @@
     return "Your account had no plan yet, so this is the first one.";
   }
 
-  // The folder's name: "Knowlu", then "Knowlu 2", "Knowlu 3": the first one no profile on this
-  // machine already has. `dest_for` still refuses a folder that exists and its sentence is shown.
-  function suName() {
-    var taken = {};
-    (SU.l.profiles || []).forEach(function (p) { taken[String(p.name).toLowerCase()] = true; });
-    var n = "Knowlu", i = 2;
-    while (taken[n.toLowerCase()]) { n = "Knowlu " + i; i += 1; }
-    return n;
+  // The folder's name: "Knowlu", then "Knowlu 2", "Knowlu 3".
+  function suCandidate(i) { return i === 1 ? "Knowlu" : "Knowlu " + i; }
+  // INTERIM: `dest_for` refuses a folder that exists, and one can outlive a reinstall, so this page
+  // tries the next name when create_vault says "already exists" (to 20, then a named error).
+  // F3 moves naming into Rust and this loop goes with it.
+  var SU_NAME_CAP = 20;
+  function suTaken(name) {
+    return (SU.l.profiles || []).some(function (p) { return String(p.name).toLowerCase() === name.toLowerCase(); });
   }
 
   // The defaults the account step makes a folder with (spec §1.9 A): the system's zone, the checks at
@@ -3397,9 +3399,17 @@
     suMakeFolder();
   }
 
-  function suMakeFolder() {
+  function suMakeFolder(i) {
+    i = i || 1;
+    while (i <= SU_NAME_CAP && suTaken(suCandidate(i))) { i += 1; }
     SU.making = true; SU.doneError = ""; renderSetup();
-    return invoke("create_vault", { name: suName(), plan: suPlan() }).then(function (r) {
+    if (i > SU_NAME_CAP) {
+      SU.making = false;
+      SU.doneError = "Knowlu could not find a free folder name (Knowlu to Knowlu 20 are all taken). Remove or rename one in your Knowlu folder, then try again.";
+      renderSetup(); return Promise.resolve();
+    }
+    return invoke("create_vault", { name: suCandidate(i), plan: suPlan() }).then(function (r) {
+      if (!r.ok && String(r.error || "").indexOf("already exists") !== -1) { return suMakeFolder(i + 1); }
       SU.making = false;
       if (!r.ok) { SU.doneError = r.error; renderSetup(); return; }
       SU.profileId = r.profile.id; SU.folder = r.profile.vault; SU.restore = restoreSentence(r.restored);
@@ -3420,7 +3430,7 @@
   // One box says both things (spec §4.2 step 2: 18 or older, and the terms); every door checks it first.
   function suTicked() {
     if (EL("su-18").checked) { return true; }
-    SU.error = "Tick the box to create an account."; renderSetup(); return false;
+    SU.error = "Tick the box to continue."; renderSetup(); return false;
   }
 
   // Spec D1. One command: the URL, the loopback port, the verifier and both tokens are Rust's, and
@@ -3473,7 +3483,7 @@
     if (e.target.closest("#su-code-go")) { suVerify(); return; }
     if (e.target.closest("#su-resend")) { suSendCode(SU.codeEmail, true); return; }
     if (e.target.closest("#su-other-email")) { SU.emailOpen = true; SU.codeError = ""; suShow("account"); EL("su-email").focus(); return; }
-    if (e.target.closest("#su-retry")) { suMakeFolder(); return; }
+    if (e.target.closest("#su-retry")) { suMakeFolder(1); return; }
     if (e.target.closest("#su-continue")) { suContinue(); }
   });
   // Enter does what the screen's primary button does, from a field or from nowhere in particular.

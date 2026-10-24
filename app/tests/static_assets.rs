@@ -2939,13 +2939,15 @@ fn the_setup_shell_has_its_screens_a_nine_row_rail_and_no_retired_panel() {
     for id in ["su-welcome", "su-account", "su-browser", "su-code", "su-done"] {
         assert!(html.contains(&format!("id=\"{id}\"")), "screen {id}");
     }
-    // The rail is the direction's "Your sources": nine rows, the account first, the reveal last.
+    // The rail is the direction's "Your sources": eight rows in wave B (Syllabi is absent until O5,
+    // plan §4.2 step 9: not shown, not counted, not on the rail), the account first, the reveal last.
     let rail = html.split("id=\"su-rail\"").nth(1).and_then(|s| s.split("</ol>").next()).expect("the rail");
-    assert_eq!(rail.matches("data-rail=\"").count(), 9, "nine rows");
+    assert_eq!(rail.matches("data-rail=\"").count(), 8, "eight rows");
+    assert!(!rail.to_lowercase().contains("syllab") && !rail.contains("late rules"), "no syllabus word on the rail in wave B");
     assert!(rail.find("data-rail=\"account\"").unwrap() < rail.find("data-rail=\"school\"").unwrap());
     assert!(rail.find("data-rail=\"week\"").unwrap() < rail.find("data-rail=\"reveal\"").unwrap());
     // A row ahead says what its step brings, never what it will find (BRIEF R3.1).
-    assert!(rail.contains("Classes, assignments, grades and syllabi") && rail.contains("$9.99 a month, after 7 days free"));
+    assert!(rail.contains("Classes, assignments and grades") && rail.contains("$9.99 a month, after 7 days free"));
     // Retired with the wizard: its section, its ten panels' ids and its nav.
     assert!(!html.contains("id=\"wizard\"") && !html.contains("wiz-"), "no wizard markup survives");
     let js = read("console.js");
@@ -2955,6 +2957,12 @@ fn the_setup_shell_has_its_screens_a_nine_row_rail_and_no_retired_panel() {
     for gone in ["startWizard", "renderWizard", "wizGo", "wizFinish", "PANELS", "WIZ.", "wiz-"] {
         assert!(!js.contains(gone), "console.js still names {gone}");
     }
+    // The step counter follows §4.2's numbering (welcome is step 1, the account step 2) over the ten
+    // steps wave B shows (eleven, less the absent step 9).
+    assert!(js.contains("welcome: { no: \"Step 1 of 10\"") && js.contains("account: { no: \"Step 2 of 10\"") && js.contains("done: { no: \"Step 2 of 10\""), "the counter");
+    assert!(!js.contains("of 9\""), "no nine-step counter");
+    // One time estimate, the spec's, until S-E measures real times.
+    assert!(js.contains("left: \"About 10 minutes\"") && !js.contains("minutes left"), "one estimate");
     assert!(js.contains("window.KNOWLU_SHOTS = { startSetup: startSetup, renderPicker: renderPicker, openSettings: openSettings, openReport: openReport }"), "the shots seam");
     // The shell hides by attribute, and a class `display` beats the UA's `[hidden]`: each rule is the
     // only thing that hides its element.
@@ -3023,7 +3031,7 @@ fn the_account_step_leads_with_google_asks_for_no_password_and_gates_on_the_box(
     // Tauri v2 camel-cases argument keys; `age_attested` is a rejected invoke and a shell whose
     // sign-in never starts, with a sentence that blames the network.
     assert!(js.contains("ageAttested:"), "the attestation travels camel-cased");
-    assert!(js.contains("Tick the box to create an account."), "the page says why a sign-in was refused");
+    assert!(js.contains("Tick the box to continue."), "the page says why a sign-in was refused");
     // Policy links open in the browser: a plain navigation would lose the only window.
     let click = js.split("EL(\"setup\").addEventListener(\"click\"").nth(1).and_then(|s| s.split("EL(\"setup\").addEventListener(\"keydown\"").next()).expect("the shell's click listener");
     assert!(click.contains("a.policy") && click.contains("preventDefault()") && click.contains("\"open_policy\""));
@@ -3079,10 +3087,22 @@ fn the_account_step_makes_the_folder_says_what_it_restored_and_relaunches_on_con
     }
     assert!(!plan.contains("campus_choice") && !plan.contains("courses"), "no school and no classes before their steps");
     assert!(js.contains("SU.folder = r.profile.vault"), "the folder is shown as the command named it");
-    // The name: "Knowlu", then "Knowlu 2", "Knowlu 3": the first no profile on this machine has.
-    let name = js.split("function suName(").nth(1).and_then(|s| s.split("\n  }\n").next()).expect("suName");
+    // The name: "Knowlu", then "Knowlu 2", "Knowlu 3": the first no profile on this machine has, and
+    // when `dest_for` answers "already exists" (a folder that outlived a reinstall) the next one, to
+    // 20, then a named error. F3 moves naming into Rust and this loop goes with it.
+    let name = js.split("function suCandidate(").nth(1).and_then(|s| s.split("
+  }
+").next()).expect("suCandidate");
     assert!(name.contains("\"Knowlu\"") && name.contains("\"Knowlu \" + i"), "{name}");
-    assert!(js.contains("invoke(\"create_vault\", { name: suName(), plan: suPlan() })"));
+    let make = js.split("function suMakeFolder(").nth(1).and_then(|s| s.split("
+  }
+").next()).expect("suMakeFolder");
+    assert!(make.contains("invoke(\"create_vault\", { name: suCandidate(i), plan: suPlan() })"));
+    assert!(make.contains("already exists") && make.contains("suMakeFolder(i + 1)"), "an existing folder tries the next name");
+    assert!(make.contains("i > SU_NAME_CAP") && js.contains("var SU_NAME_CAP = 20;"), "capped at 20");
+    assert!(make.contains("Knowlu 20") || make.contains("SU_NAME_CAP"), "the cap is named in the error");
+    assert!(js.contains("F3 moves naming into Rust"), "the interim says what retires it");
+    assert!(js.contains("invoke(\"create_vault\""));
     // Continue is the relaunch; it waits for the folder and for itself, and a refusal is shown.
     let go = js.split("function suContinue(").nth(1).and_then(|s| s.split("\n  }\n").next()).expect("suContinue");
     assert!(go.contains("if (SU.making || !SU.profileId || SU.busy) { return; }"), "no relaunch before the folder, none twice");
@@ -3135,4 +3155,14 @@ fn the_entitlement_helper_and_the_upgrade_overlays_subscribe_ask_first() {
     for stale in ["fill them in below", "fill those in below"] {
         assert!(!js.contains(stale) && !onboarding_rs.contains(stale), "stale sentence: {stale}");
     }
+}
+
+/// The welcome screen renders the privacy sentence from the one constant the site's page is pinned to.
+#[test]
+fn the_welcome_screen_renders_the_privacy_sentence_from_privacy() {
+    let html = read("index.html");
+    let welcome = html.split("id=\"su-welcome\"").nth(1).and_then(|s| s.split("id=\"su-account\"").next()).expect("the welcome step");
+    assert!(welcome.contains("id=\"su-privacy\""), "the line has its element in #su-welcome");
+    let js = read("console.js");
+    assert!(js.contains("EL(\"su-privacy\").textContent = PRIVACY;"), "its text is set from PRIVACY");
 }
