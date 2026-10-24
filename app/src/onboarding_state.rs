@@ -117,12 +117,13 @@ impl OnboardingState {
     /// clears the `slot_end` handover items and no other (§4.10).
     pub fn slot_ended(&mut self) { self.handover.retain(|h| h.signal != SIGNAL_SLOT_END); }
     /// A mail signal read from `mail.json`: clears only its own item (§4.10). Forwarding verified
-    /// means the setup is no longer open, so it clears `mail.setup` with the canary; a disconnect
-    /// clears all three. No slot item is ever touched.
+    /// means the setup is no longer open, so it clears `mail.setup` with the canary; a delivered first
+    /// pass implies both, so it clears all three too; a disconnect clears all three. No slot item is
+    /// ever touched.
     pub fn mail_signal(&mut self, signal: MailSignal) {
         let gone: &[&str] = match signal {
             MailSignal::CanaryVerified => &["mail.setup", "mail.canary"],
-            MailSignal::FirstPassDelivered => &["mail.first_pass"],
+            MailSignal::FirstPassDelivered => &["mail.setup", "mail.canary", "mail.first_pass"],
             MailSignal::Disconnected => &MAIL_ITEMS,
         };
         self.handover.retain(|h| h.signal != SIGNAL_MAIL_JSON || !gone.contains(&h.item.as_str()));

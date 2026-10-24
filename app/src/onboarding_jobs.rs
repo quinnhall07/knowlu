@@ -104,6 +104,9 @@ pub const JOB_ORDER: [&str; 17] = [
     "coursework.discover", "config.ingest", "slot.partial", "slot.first_full",
 ];
 /// Jobs a drain never waits for: waiting for mail writes nothing, so they start again from the top (§4.10).
+/// That holds only while their runners write nothing to the vault and hold neither the notes gate
+/// (F8h) nor the school session lock; a runner that ever does must come off this list. An abandoned
+/// runner keeps its thread: `Drop` still joins it, after setting the stop it is expected to heed.
 const ABANDON_AT_ONCE: [&str; 2] = ["mail.canary", "mail.first_pass"];
 /// The closed-set reason of a job whose runner panicked; the page maps it to its fix. It is reachable
 /// only under unwinding (tests and the dev profile): the release profile has `panic = "abort"`.
@@ -322,8 +325,10 @@ impl Queue {
     pub fn stop_requested(&self) -> bool { self.inner.stop.load(Ordering::SeqCst) }
     /// Waits for each lane's running job to reach its safe point. A running `mail.canary` or
     /// `mail.first_pass` is not waited for: it is set back to `pending` and left to end on its own
-    /// (waiting for mail writes nothing, §4.10). Call [`Queue::request_stop`] first.
+    /// (waiting for mail writes nothing, §4.10). Sets the stop itself (idempotent), so no job can
+    /// start after a drain that was reached without [`Queue::request_stop`]. Call it off the main thread.
     pub fn drain(&self) {
+        self.request_stop();
         let mut g = self.inner.lock();
         let waiting_mail: Vec<String> = g.state.jobs.iter()
             .filter(|(n, r)| r.state == JobState::Running && ABANDON_AT_ONCE.contains(&n.as_str())).map(|(n, _)| n.clone()).collect();
@@ -349,8 +354,12 @@ impl Queue {
     pub fn finish(&self, handover: Vec<HandoverItem>) -> Result<(), String> {
         let mut g = self.inner.lock();
         if g.frozen { return Err("the onboarding file is frozen: finish is refused".into()); }
-        (g.state.finished, g.state.handover) = (true, handover);
-        self.inner.try_persist(&g)
+        let before = (g.state.finished, std::mem::replace(&mut g.state.handover, handover));
+        g.state.finished = true;
+        let saved = self.inner.try_persist(&g);
+        // A failed save leaves the live state as it was, so a later save cannot write a finish that never landed.
+        if saved.is_err() { (g.state.finished, g.state.handover) = before; }
+        saved
     }
     /// F8m: a closed backfill batch tells the queue; nothing is started.
     pub fn mail_batch_closed(&self) { todo!("F8m: mail batch closed") }
@@ -613,5 +622,46 @@ mod stop_tests {
         // The rewind goes through F2a's save, which has no freeze, and lands.
         crate::onboarding_state::save_state(&dir, &OnboardingState::new("2026-10-24T09:00:00Z", 2)).unwrap();
         assert_ne!(std::fs::read(crate::onboarding_state::state_path(&dir)).unwrap(), on_disk);
+    }
+
+    #[test]
+    fn an_abandoned_canary_returning_after_the_freeze_leaves_the_file_unchanged() {
+        let (q, gates, runner, dir) = rig("canary-freeze", vec![]);
+        q.enqueue("mail.canary");
+        wait_for("the canary", || !runner.ran.lock().unwrap().is_empty());
+        q.drain(); // sets the stop itself (M-5)
+        assert!(q.stop_requested());
+        q.save().unwrap();
+        q.freeze();
+        let on_disk = std::fs::read(crate::onboarding_state::state_path(&dir)).unwrap();
+        gates.open("mail.canary");
+        assert!(q.wait_idle(Duration::from_secs(10)));
+        assert_eq!(std::fs::read(crate::onboarding_state::state_path(&dir)).unwrap(), on_disk, "the late return wrote nothing");
+        assert_eq!(q.snapshot().jobs["mail.canary"].state, JobState::Pending);
+    }
+
+    #[test]
+    fn a_failed_finish_save_leaves_the_live_state_unfinished() {
+        let (q, _gates, _runner, dir) = rig("finish-fail", vec![]);
+        q.request_stop();
+        q.save().unwrap();
+        // The state file becomes a folder, so no rename can land.
+        let path = crate::onboarding_state::state_path(&dir);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let handover = vec![HandoverItem { item: "slot.first_full".into(), signal: "slot_end".into() }];
+        assert!(q.finish(handover).is_err());
+        let s = q.snapshot();
+        assert!(!s.finished && s.handover.is_empty(), "a finish that never landed is not kept in memory");
+        let _ = std::fs::remove_dir(&path);
+    }
+
+    #[test]
+    fn a_delivered_first_pass_clears_the_canary_and_setup_items_too_but_no_slot_item() {
+        let mut s = OnboardingState::new("2026-10-24T09:00:00Z", 11);
+        let item = |i: &str, sig: &str| HandoverItem { item: i.into(), signal: sig.into() };
+        s.handover = vec![item("slot.first_full", "slot_end"), item("mail.setup", "mail_json"), item("mail.canary", "mail_json"), item("mail.first_pass", "mail_json")];
+        s.mail_signal(crate::onboarding_state::MailSignal::FirstPassDelivered);
+        assert_eq!(s.handover, vec![item("slot.first_full", "slot_end")]);
     }
 }
