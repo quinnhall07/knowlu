@@ -1,15 +1,19 @@
 //! The job queue (plan §4.3, F8a-F8h) and the runners that are pure enough to test: the feed store,
 //! `school.courses`, the `config.ingest` hand-over, the link commands that only validate.
 //!
-//! **F1 stub.** Types and signatures are the contract `app/tests/onboarding_jobs.rs` writes
-//! against; every function panics (`todo!`) until F8 replaces it.
+//! **F8a** is the queue's core (below). The runners, the notes gate and the link commands further
+//! down are still F1 stubs: their types and signatures are the contract `app/tests/onboarding_jobs.rs`
+//! writes against, and each panics (`todo!`, naming its task) until that task replaces it.
+//! **While a [`Queue`] is live it is the only writer of `onboarding.json`**: the commands (F2) and the
+//! window's exits (F4) change the file through the queue's methods, never `save_state` directly. The
+//! one exception is the sign-out rewind, which writes after [`Queue::freeze`] (F8f, F2e).
 use crate::onboarding_state::{save_state, Answers, CourseAnswer, HandoverItem, JobRecord, JobState, OnboardingState, PendingStore};
 use crate::scheduler::SlotScope;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -92,14 +96,25 @@ pub const CHAIN_BACKSTOP: u32 = 50;
 const LANE: [&str; 6] = ["school.store", "calendar.store", "school.apply", "school.courses", "registrar.confirm", "config.ingest"];
 /// Device-side before payment; every other job is held until the vault is `Entitled` (§4.3).
 const UNGATED: [&str; 2] = ["school.capture", "school.preview"];
+/// The order a resumed queue runs its jobs in: step order, then ask order within a step (§4.2).
+/// A name not listed sorts after these, by name.
+const CANON: [&str; 16] = [
+    "school.capture", "school.preview", "school.store", "school.apply", "school.courses", "registrar.confirm",
+    "mail.setup", "mail.canary", "mail.first_pass", "google.gmail_first_read", "calendar.store", "google.calendar_read",
+    "coursework.discover", "config.ingest", "slot.partial", "slot.first_full",
+];
+/// The closed-set reason of a job whose runner panicked; the page maps it to its fix.
+pub const REASON_JOB_CRASHED: &str = "job_crashed";
 
 struct Core {
     state: OnboardingState,
     /// Jobs in the order their asks were answered, until they finish; a running job stays in it.
     order: Vec<String>,
-    /// False until the serial thread has read the entitlement once at start.
+    /// False until the start thread has read the entitlement once; gated jobs wait for it.
     ready: bool,
     entitled: bool,
+    /// Set by [`Queue::wake`]: its read is newer than the start thread's, which then writes nothing.
+    woken: bool,
     busy: [bool; 2],
     /// `Waiting` and `Stopped` jobs: not picked again until something else changes (no spin).
     parked: BTreeSet<String>,
@@ -110,7 +125,7 @@ impl Core {
     fn lane(job: &str) -> usize { LANE.contains(&job) as usize }
     fn pick(&self, lane: usize) -> Option<String> {
         let runnable = |j: &&String| Core::lane(j) == lane && !self.parked.contains(*j) && self.state.jobs.get(*j).is_some_and(|r| r.state == JobState::Pending);
-        self.ready.then(|| self.order.iter().find(runnable).cloned()).flatten()
+        self.order.iter().find(|j| runnable(j) && (self.ready || UNGATED.contains(&j.as_str()))).cloned()
     }
     /// A gated job is `held` while not entitled and `pending` again once it is.
     fn settle(&mut self) {
@@ -143,15 +158,17 @@ struct Inner { deps: Deps, core: Mutex<Core>, cv: Condvar, stop: AtomicBool }
 
 impl Inner {
     fn lock(&self) -> MutexGuard<'_, Core> { self.core.lock().unwrap_or_else(|e| e.into_inner()) }
-    /// The one path every change persists through (F8f puts the freeze here).
+    /// The one path every change persists through, the queue being the only writer of the file while
+    /// it is live (F8f puts the freeze here).
     fn persist(&self, c: &Core) {
         if let Err(e) = save_state(&self.deps.data_dir, &c.state) { eprintln!("onboarding: could not save the job states: {e}"); }
     }
     /// Reads the entitlement without holding the lock: a cache short of `Entitled` gets one refresh.
+    /// A panic in either call reads as "not entitled", so the jobs stay held rather than the thread dying.
     fn read_entitlement(&self, refresh: bool) -> bool {
         let e = &self.deps.entitlement;
-        if !e.entitled() && refresh { e.refresh(); }
-        e.entitled()
+        let read = || { if !e.entitled() && refresh { e.refresh(); } e.entitled() };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).unwrap_or(false)
     }
 }
 
@@ -165,15 +182,19 @@ fn scope_for(job: &str, s: &OnboardingState) -> Option<SlotScope> {
     }
 }
 
+/// The one startup read (a cache short of `Entitled` gets one refresh), on its own thread so that
+/// `school.capture` and `school.preview` never wait for it. It leaves a newer `wake()` read alone.
+fn startup(inner: Arc<Inner>) {
+    let ent = inner.read_entitlement(true);
+    let mut g = inner.lock();
+    if !g.woken { g.entitled = ent; }
+    g.ready = true;
+    g.settle();
+    inner.persist(&g);
+    inner.cv.notify_all();
+}
+
 fn work(inner: Arc<Inner>, lane: usize) {
-    if lane == 0 {
-        let ent = inner.read_entitlement(true);
-        let mut g = inner.lock();
-        (g.entitled, g.ready) = (ent, true);
-        g.settle();
-        inner.persist(&g);
-        inner.cv.notify_all();
-    }
     let mut g = inner.lock();
     while !g.shutdown {
         let Some(job) = g.pick(lane) else { g = inner.cv.wait(g).unwrap_or_else(|e| e.into_inner()); continue };
@@ -183,7 +204,7 @@ fn work(inner: Arc<Inner>, lane: usize) {
         let scope = scope_for(&job, &g.state);
         drop(g);
         let run = || inner.deps.runner.run(&job, scope, &inner.stop);
-        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|_| Outcome::Failed("the job stopped unexpectedly".into()));
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|_| Outcome::Failed(REASON_JOB_CRASHED.into()));
         g = inner.lock();
         g.finish(&job, lane, out);
         g.settle();
@@ -196,6 +217,8 @@ pub struct Queue { inner: Arc<Inner>, threads: Vec<JoinHandle<()>> }
 
 impl Drop for Queue {
     fn drop(&mut self) {
+        // A running job sees the stop (never cleared, §4.10) and returns, so the joins end.
+        self.inner.stop.store(true, Ordering::SeqCst);
         self.inner.lock().shutdown = true;
         self.inner.cv.notify_all();
         for t in self.threads.drain(..) { let _ = t.join(); }
@@ -210,13 +233,15 @@ impl Queue {
             if r.state == JobState::Running { r.state = JobState::Pending; }
             if matches!(r.state, JobState::Pending | JobState::Held) { order.push(name.clone()); }
         }
-        let core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false };
+        order.sort_by_key(|j| (CANON.iter().position(|c| c == j).unwrap_or(CANON.len()), j.clone()));
+        let core = Core { state, order, ready: false, entitled: false, woken: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false };
         let inner = Arc::new(Inner { deps, core: Mutex::new(core), cv: Condvar::new(), stop: AtomicBool::new(false) });
         let spawn = |lane: usize, name: &str| {
             let i = inner.clone();
             std::thread::Builder::new().name(name.into()).spawn(move || work(i, lane)).expect("the onboarding queue could not start a thread")
         };
-        let threads = vec![spawn(0, QUEUE_THREAD), spawn(1, LANE_THREAD)];
+        let starter = { let i = inner.clone(); std::thread::Builder::new().name("onboarding-start".into()).spawn(move || startup(i)).expect("the onboarding queue could not start a thread") };
+        let threads = vec![spawn(0, QUEUE_THREAD), spawn(1, LANE_THREAD), starter];
         Queue { inner, threads }
     }
     /// An ask was answered: the job is `pending` (or `held`) and runs when its inputs are ready.
@@ -235,7 +260,7 @@ impl Queue {
     pub fn wake(&self) {
         let ent = self.inner.read_entitlement(false);
         let mut g = self.inner.lock();
-        (g.entitled, g.parked) = (ent, BTreeSet::new());
+        (g.entitled, g.woken, g.parked) = (ent, true, BTreeSet::new());
         g.settle();
         self.inner.persist(&g);
         self.inner.cv.notify_all();

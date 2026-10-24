@@ -1887,3 +1887,79 @@ fn test_12_a_failed_preview_is_failed_and_leaves_the_saved_buckets_as_they_were(
         assert_eq!(load_answers(&dir).unwrap().unwrap().buckets, before, "{shown} changed the saved buckets");
     }
 }
+
+// ---- F8a review r1: resume order, wake racing the start, a drop that hangs, the crash reason --------------
+
+fn pending_job() -> JobRecord { JobRecord { state: JobState::Pending, ..Default::default() } }
+
+#[test]
+fn test_03_resumed_jobs_run_in_step_and_ask_order_not_alphabetical_order() {
+    let mut state = state_at(8, true);
+    for j in ["mail.canary", "mail.setup", "mail.first_pass", "coursework.discover", "school.preview", "config.ingest", "school.courses", "school.store"] {
+        state.jobs.insert(j.into(), pending_job());
+    }
+    state.jobs.get_mut("mail.canary").unwrap().state = JobState::Running;
+    state.jobs.get_mut("mail.setup").unwrap().state = JobState::Held;
+    let r = rig_full("t03-resume", state, true, vec![], false, |_| {});
+    r.idle();
+    let started = r.log.started();
+    let serial: Vec<&str> = started.iter().map(String::as_str).filter(|j| !LANE_JOBS.contains(j)).collect();
+    assert_eq!(serial, ["school.preview", "mail.setup", "mail.canary", "mail.first_pass", "coursework.discover"]);
+    let lane: Vec<&str> = started.iter().map(String::as_str).filter(|j| LANE_JOBS.contains(j)).collect();
+    assert_eq!(lane, ["school.store", "school.courses", "config.ingest"]);
+    r.log.assert_clean();
+}
+
+/// `entitled()` answers `paid`, except the first read after `refresh` returns, which is stale
+/// (false): the start thread's final read, taken before the student's payment reached it. `refresh`
+/// waits on a gate.
+struct Racy { paid: AtomicBool, stale_next: AtomicBool, refreshing: AtomicBool, gate: Arc<Gate> }
+impl Entitlement for Racy {
+    fn entitled(&self) -> bool { !self.stale_next.swap(false, Ordering::SeqCst) && self.paid.load(Ordering::SeqCst) }
+    fn refresh(&self) {
+        self.refreshing.store(true, Ordering::SeqCst);
+        self.gate.wait(&AtomicBool::new(false), false);
+        self.stale_next.store(true, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn test_03_a_wake_during_the_start_refresh_is_not_overwritten_by_the_start_reading_stale() {
+    let dir = scratch("t03-wake-race");
+    let fake = Arc::new(Fake::default());
+    let ent = Arc::new(Racy { paid: AtomicBool::new(false), stale_next: AtomicBool::new(false), refreshing: AtomicBool::new(false), gate: Gate::new() });
+    let deps = Deps { data_dir: dir.clone(), runner: fake.clone(), entitlement: ent.clone(), sync_view: Arc::new(Syncs(Mutex::new(VecDeque::new()))) };
+    let q = Queue::start(deps, state_at(4, true));
+    q.enqueue("mail.setup");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !ent.refreshing.load(Ordering::SeqCst) { assert!(Instant::now() < deadline, "the start never refreshed"); std::thread::sleep(Duration::from_millis(2)); }
+    ent.paid.store(true, Ordering::SeqCst);
+    q.wake();
+    ent.gate.release();
+    assert!(q.wait_idle(Duration::from_secs(20)), "{:?}", fake.log.all());
+    assert_eq!(q.snapshot().jobs["mail.setup"].state, JobState::Done, "held for good by the stale start reading");
+}
+
+#[test]
+fn test_09_dropping_the_queue_sets_the_stop_so_a_running_job_ends_and_the_joins_return() {
+    let r = rig_full("t09-drop", state_at(5, true), true, vec![], false, |_| {});
+    r.fake.block("mail.canary", true);
+    r.q.enqueue("mail.canary");
+    r.wait_started("mail.canary");
+    let started = Instant::now();
+    let Rig { q, log, .. } = r;
+    drop(q);
+    assert!(started.elapsed() < Duration::from_secs(10), "the drop waited for a job that honours the stop");
+    assert!(log.pos("abandoned:mail.canary").is_some(), "{:?}", log.all());
+}
+
+#[test]
+fn test_03_a_runner_that_panics_fails_its_job_with_the_closed_set_reason_and_the_queue_goes_on() {
+    let r = rig_full("t03-panic", state_at(5, true), true, vec![], false, |f| f.behave("mail.setup", || panic!("a fake runner crash")));
+    r.q.enqueue("mail.setup");
+    r.q.enqueue("mail.canary");
+    r.idle();
+    assert_eq!(r.job("mail.setup").state, JobState::Failed);
+    assert_eq!(r.job("mail.setup").reason.as_deref(), Some(REASON_JOB_CRASHED));
+    assert_eq!(r.state_of("mail.canary"), JobState::Done);
+}
