@@ -560,6 +560,9 @@ impl Runner<'_> {
                 if self.canary_ok || self.canary_after_set() {
                     self.canary_ok = true;
                     Outcome::Done
+                } else if self.sh.stopping() {
+                    // A wait the stop ended is a stop to resume, never a failed canary (F8d).
+                    Outcome::Cancelled
                 } else {
                     Outcome::Failed
                 }
@@ -804,6 +807,10 @@ impl Runner<'_> {
             if self.address_confirmed() {
                 return Outcome::Done;
             }
+            // A stop is checked each POLL (F8d): the step ends un-failed and the run resumes later.
+            if self.sh.stopping() {
+                return Outcome::Cancelled;
+            }
             if self.clock().now() >= deadline {
                 return Outcome::Failed;
             }
@@ -846,13 +853,22 @@ impl Runner<'_> {
         if self.clock().now() < set_at + FORWARD_SETTLE {
             self.say(SETTLING);
             while self.clock().now() < set_at + FORWARD_SETTLE {
+                if self.sh.stopping() {
+                    return false;
+                }
                 self.clock().sleep(POLL.min(set_at + FORWARD_SETTLE - self.clock().now()));
             }
             self.say("waiting for the test message");
         }
+        if self.sh.stopping() {
+            return false;
+        }
         let Some(first) = self.send_canary() else { return false };
         if self.canary_back(first) {
             return true;
+        }
+        if self.sh.stopping() {
+            return false;
         }
         self.say(SETTLING);
         self.send_canary().is_some() && self.canary_back(first)
@@ -860,6 +876,10 @@ impl Runner<'_> {
 
     /// Asks the service for one canary; `None` when it would not send one. The inner value is its sent time.
     fn send_canary(&mut self) -> Option<Option<jiff::Timestamp>> {
+        // No canary goes out once the stop is set, whichever path asks (the step, a retry, "I've done this").
+        if self.sh.stopping() {
+            return None;
+        }
         let sent = self.client().canary(&self.id).ok()?;
         Some(sent["sent_at"].as_str().and_then(|s| s.parse::<jiff::Timestamp>().ok()))
     }
@@ -879,7 +899,7 @@ impl Runner<'_> {
                     return true;
                 }
             }
-            if self.clock().now() >= deadline {
+            if self.sh.stopping() || self.clock().now() >= deadline {
                 return false;
             }
             self.clock().sleep(POLL);
