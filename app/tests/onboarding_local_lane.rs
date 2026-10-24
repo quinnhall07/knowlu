@@ -12,11 +12,16 @@ use std::sync::Mutex;
 const LMS_LINK: &str = "https://lms.example.invalid/feed/tok-8c01.ics";
 const CAL_LINK: &str = "https://cal.example.invalid/private/tok-8c02.ics";
 
-fn scratch(tag: &str) -> PathBuf {
+/// A scratch folder that is removed when it goes out of scope, a failed assertion included.
+struct Dir(PathBuf);
+impl std::ops::Deref for Dir { type Target = PathBuf; fn deref(&self) -> &PathBuf { &self.0 } }
+impl Drop for Dir { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+
+fn scratch(tag: &str) -> Dir {
     let d = std::env::temp_dir().join(format!("knowlu-o3-lane-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    d
+    Dir(d)
 }
 
 #[derive(Default)]
@@ -89,8 +94,34 @@ fn a_validated_feed_whose_pending_credential_is_gone_is_failed_by_name_and_never
     assert_eq!(out, Outcome::Failed(REASON_LMS_LINK_MISSING.into()));
     assert_eq!(acct.calls.load(Ordering::SeqCst), 0);
     assert_eq!(feed(&dir, "lms_ics"), Some(FeedState::Failed), "settled, so config.ingest is not held for ever");
+    // Try again after config.ingest wrote the link into ingest.yaml (and deleted the credential): nothing to send, and
+    // not a failure; a link truly lost is named by config.ingest, which checks before it writes.
     let out = run_feed_store(&dir, "lms_ics", &Pending::default(), &acct, &NoWindow);
-    assert_eq!(out, Outcome::Failed(REASON_LMS_LINK_MISSING.into()), "a retry says the same");
+    assert_eq!(out, Outcome::Done(BTreeMap::new()), "a retry of a failed store with no credential left");
+    assert_eq!((acct.calls.load(Ordering::SeqCst), feed(&dir, "lms_ics")), (0, Some(FeedState::Failed)));
+}
+
+/// Saves `stored` fails after the account took the link: the file is made unreadable by the call itself.
+struct Sabotage<'a>(&'a Path, Acct);
+impl FeedAccount for Sabotage<'_> {
+    fn put_source(&self, kind: &str, link: &str) -> Result<(), String> {
+        self.1.put_source(kind, link)?;
+        std::fs::write(answers_path(self.0), "{ broken").unwrap();
+        Ok(())
+    }
+}
+
+#[test]
+fn a_stored_state_that_cannot_be_saved_after_the_account_call_fails_and_keeps_the_link() {
+    let dir = scratch("save");
+    answers_with(&dir, &[("lms_ics", FeedState::Validated)]);
+    let pending = Pending::default();
+    pending.put(PENDING_LMS, LMS_LINK).unwrap();
+    let acct = Sabotage(&dir, Acct::default());
+    let out = run_feed_store(&dir, "lms_ics", &pending, &acct, &NoWindow);
+    assert!(matches!(&out, Outcome::Failed(e) if !e.contains(LMS_LINK)), "{out:?}");
+    assert_eq!(acct.1.calls.load(Ordering::SeqCst), 1, "the account call was not repeated");
+    assert_eq!(pending.get(PENDING_LMS).as_deref(), Some(LMS_LINK), "the credential stays until the state is saved");
 }
 
 #[test]
@@ -122,14 +153,14 @@ fn back_to_another_school_clears_the_school_steps_jobs_and_leaves_the_rest() {
 fn the_login_flags_come_from_step_8s_rows() {
     let mut a = Answers::default();
     assert_eq!((ingest_base_for(&a, "p", "UTC").zybooks, ingest_base_for(&a, "p", "UTC").vhl), (false, false));
-    a.rows = vec![BookRow { source: "vhl".into(), key: "4471".into(), course_slug: "knotwork-theory".into() }];
+    a.rows = vec![BookRow { source: "vhl".into(), key: "4471".into(), course_slug: "knotwork-theory".into() }, BookRow { source: "zybooks".into(), key: "ZYB-0".into(), course_slug: " ".into() }];
     let b = ingest_base_for(&a, "profile-8c", "America/Chicago");
     assert_eq!((b.zybooks, b.vhl, b.profile_id.as_str(), b.timezone.as_str()), (false, true, "profile-8c", "America/Chicago"));
     a.rows.push(BookRow { source: "zybooks".into(), key: "ZYB-1".into(), course_slug: "quilting-basics".into() });
     assert!(ingest_base_for(&a, "p", "UTC").zybooks);
 }
 
-fn ingest_rig(tag: &str, feeds: &[(&str, FeedState)]) -> (PathBuf, PathBuf, Pending) {
+fn ingest_rig(tag: &str, feeds: &[(&str, FeedState)]) -> (Dir, PathBuf, PathBuf, Pending) {
     let root = scratch(tag);
     let (vault, data) = (root.join("vault"), root.join("data"));
     std::fs::create_dir_all(vault.join("config")).unwrap();
@@ -142,12 +173,12 @@ fn ingest_rig(tag: &str, feeds: &[(&str, FeedState)]) -> (PathBuf, PathBuf, Pend
     let pending = Pending::default();
     pending.put(PENDING_LMS, LMS_LINK).unwrap();
     pending.put(PENDING_CALENDAR, CAL_LINK).unwrap();
-    (vault, data, pending)
+    (root, vault, data, pending)
 }
 
 #[test]
 fn config_ingest_in_the_lane_writes_the_file_and_then_deletes_both_pending_links() {
-    let (vault, data, pending) = ingest_rig("settle", &[("lms_ics", FeedState::Stored)]);
+    let (_root, vault, data, pending) = ingest_rig("settle", &[("lms_ics", FeedState::Stored)]);
     let out = run_config_ingest_in(&vault, &data, "profile-8c", "America/Chicago", &pending);
     assert!(matches!(out, Outcome::Done(_)), "{out:?}");
     assert!(vault.join("config").join("ingest.yaml").exists());
@@ -156,7 +187,7 @@ fn config_ingest_in_the_lane_writes_the_file_and_then_deletes_both_pending_links
 
 #[test]
 fn a_feed_still_being_validated_holds_config_ingest_and_touches_nothing() {
-    let (vault, data, pending) = ingest_rig("hold", &[("lms_ics", FeedState::Validated)]);
+    let (_root, vault, data, pending) = ingest_rig("hold", &[("lms_ics", FeedState::Validated)]);
     let out = run_config_ingest_in(&vault, &data, "profile-8c", "UTC", &pending);
     assert_eq!(out, Outcome::Waiting(REASON_FEEDS_NOT_SETTLED.into()));
     assert!(!vault.join("config").join("ingest.yaml").exists());
@@ -165,7 +196,7 @@ fn a_feed_still_being_validated_holds_config_ingest_and_touches_nothing() {
 
 #[test]
 fn a_link_missing_failure_leaves_the_other_credential_alone_and_names_the_re_paste() {
-    let (vault, data, pending) = ingest_rig("missing", &[("lms_ics", FeedState::Failed)]);
+    let (_root, vault, data, pending) = ingest_rig("missing", &[("lms_ics", FeedState::Failed)]);
     pending.delete(PENDING_LMS).unwrap();
     let out = run_config_ingest_in(&vault, &data, "profile-8c", "UTC", &pending);
     assert_eq!(out, Outcome::Failed(REASON_LMS_LINK_MISSING.into()));
@@ -175,12 +206,64 @@ fn a_link_missing_failure_leaves_the_other_credential_alone_and_names_the_re_pas
 
 #[test]
 fn an_existing_ingest_file_with_other_bytes_keeps_a_failed_feeds_link() {
-    let (vault, data, pending) = ingest_rig("kept", &[("lms_ics", FeedState::Failed)]);
+    let (_root, vault, data, pending) = ingest_rig("kept", &[("lms_ics", FeedState::Failed)]);
     std::fs::create_dir_all(vault.join("config")).unwrap();
     std::fs::write(vault.join("config").join("ingest.yaml"), "# a restored file\n").unwrap();
     let out = run_config_ingest_in(&vault, &data, "profile-8c", "UTC", &pending);
-    assert!(matches!(&out, Outcome::Done(p) if p.contains_key(KEPT_EXISTING_KEY)), "{out:?}");
+    let Outcome::Done(proof) = &out else { panic!("{out:?}") };
+    assert!(proof.contains_key(KEPT_EXISTING_KEY), "{out:?}");
+    assert_eq!(proof.get("lms_link_not_placed"), Some(&Some(1)), "in neither the file nor the account: {proof:?}");
+    assert!(!proof.contains_key("feed_kept_on_device"), "{proof:?}");
     assert_eq!(pending.get(PENDING_LMS).as_deref(), Some(LMS_LINK), "the file did not take the link, so it is not thrown away");
+}
+
+#[test]
+fn an_existing_ingest_file_with_other_bytes_and_every_feed_stored_still_deletes_the_links() {
+    let (_root, vault, data, pending) = ingest_rig("kept-stored", &[("lms_ics", FeedState::Stored), ("calendar_ics", FeedState::Stored)]);
+    std::fs::create_dir_all(vault.join("config")).unwrap();
+    std::fs::write(vault.join("config").join("ingest.yaml"), "# a restored file
+").unwrap();
+    let out = run_config_ingest_in(&vault, &data, "profile-8c", "UTC", &pending);
+    assert!(matches!(&out, Outcome::Done(p) if p.contains_key(KEPT_EXISTING_KEY) && p.len() == 1), "{out:?}");
+    assert!(pending.get(PENDING_LMS).is_none() && pending.get(PENDING_CALENDAR).is_none());
+}
+
+#[test]
+fn a_link_the_file_took_is_named_per_feed_in_the_proof_and_never_by_its_text() {
+    let (_root, vault, data, pending) = ingest_rig("placed", &[("lms_ics", FeedState::Failed), ("calendar_ics", FeedState::Rejected)]);
+    let out = run_config_ingest_in(&vault, &data, "profile-8c", "UTC", &pending);
+    let Outcome::Done(proof) = &out else { panic!("{out:?}") };
+    assert_eq!(proof.get("feed_kept_on_device"), Some(&Some(1)));
+    assert_eq!(proof.get("calendar_kept_on_device"), Some(&Some(1)));
+    assert!(!format!("{proof:?}").contains("https") && proof.len() == 2, "{proof:?}");
+    let text = std::fs::read_to_string(vault.join("config").join("ingest.yaml")).unwrap();
+    assert!(text.contains(LMS_LINK) && text.contains(CAL_LINK), "the links are in the file");
+    assert!(pending.get(PENDING_LMS).is_none() && pending.get(PENDING_CALENDAR).is_none(), "and out of the credential store");
+}
+
+#[test]
+fn the_calendar_feed_holds_config_ingest_while_it_is_being_validated() {
+    let (_root, vault, data, pending) = ingest_rig("hold-cal", &[("lms_ics", FeedState::Stored), ("calendar_ics", FeedState::Validated)]);
+    let out = run_config_ingest_in(&vault, &data, "profile-8c", "UTC", &pending);
+    assert_eq!(out, Outcome::Waiting(REASON_FEEDS_NOT_SETTLED.into()));
+    assert!(!vault.join("config").join("ingest.yaml").exists() && pending.get(PENDING_CALENDAR).is_some());
+}
+
+/// A credential store that cannot delete the calendar link.
+struct Stuck(Pending);
+impl PendingStore for Stuck {
+    fn put(&self, n: &str, l: &str) -> Result<(), String> { self.0.put(n, l) }
+    fn get(&self, n: &str) -> Option<String> { self.0.get(n) }
+    fn delete(&self, n: &str) -> Result<(), String> { if n == PENDING_CALENDAR { Err("locked".into()) } else { self.0.delete(n) } }
+}
+
+#[test]
+fn a_pending_link_that_cannot_be_deleted_is_named_in_the_proof() {
+    let (_root, vault, data, inner) = ingest_rig("stuck", &[("lms_ics", FeedState::Stored)]);
+    let pending = Stuck(inner);
+    let out = run_config_ingest_in(&vault, &data, "profile-8c", "UTC", &pending);
+    assert!(matches!(&out, Outcome::Done(p) if p.get("pending_link_not_deleted") == Some(&Some(1))), "{out:?}");
+    assert_eq!(settle_pending_after_ingest(&pending), 1);
 }
 
 #[test]

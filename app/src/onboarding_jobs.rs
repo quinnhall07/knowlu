@@ -673,6 +673,9 @@ pub fn run_feed_store(
     };
     // The link comes from the pending credential alone, so a quit after payment needs no school window (§4.11).
     let Some(link) = pending.get(name).filter(|l| !l.trim().is_empty()) else {
+        // A retry of a `failed` store whose link `config.ingest` already wrote into ingest.yaml (and so deleted)
+        // has nothing to send; a link truly lost is named by `config.ingest`, which checks before it writes.
+        if answers.feeds.get(kind) == Some(&FeedState::Failed) { return Outcome::Done(BTreeMap::new()); }
         return kept(if kind == "lms_ics" { REASON_LMS_LINK_MISSING } else { REASON_CALENDAR_LINK_MISSING });
     };
     // One retry, as `create_vault_in` does. The service's words are never kept: they can carry the link.
@@ -851,9 +854,10 @@ pub fn registrar_confirm_rows(answers: &Answers) -> Vec<crate::onboarding_state:
     answers.registrar_rows.clone()
 }
 
-/// After `config.ingest` has written the file: deletes both pending credentials.
-pub fn settle_pending_after_ingest(pending: &dyn PendingStore) {
-    for name in [crate::onboarding_state::PENDING_LMS, crate::onboarding_state::PENDING_CALENDAR] { let _ = pending.delete(name); }
+/// After `config.ingest` has written the file: deletes both pending credentials. Returns how many
+/// could not be deleted (a link that stays is reported, never dropped silently).
+pub fn settle_pending_after_ingest(pending: &dyn PendingStore) -> usize {
+    [crate::onboarding_state::PENDING_LMS, crate::onboarding_state::PENDING_CALENDAR].iter().filter(|n| pending.delete(n).is_err()).count()
 }
 
 /// Back to another school before payment: deletes the pending links, the feed states and the
@@ -1006,9 +1010,9 @@ pub fn run_config_ingest_with(
 }
 
 /// `config.ingest`'s base from the answers file: which homework logins the student stored comes from
-/// step 8's confirmed rows (a row with a vendor key), the profile id and time zone from the vault.
+/// step 8's confirmed rows (a row with a key and a slug, as `config.ingest`'s mappings), the profile id and time zone from the vault.
 pub fn ingest_base_for(answers: &Answers, profile_id: &str, timezone: &str) -> IngestBase {
-    let has = |source: &str| answers.rows.iter().any(|r| r.source == source && !r.key.trim().is_empty());
+    let has = |source: &str| answers.rows.iter().any(|r| r.source == source && !r.key.trim().is_empty() && !r.course_slug.trim().is_empty());
     IngestBase { profile_id: profile_id.to_string(), timezone: timezone.to_string(), zybooks: has("zybooks"), vhl: has("vhl") }
 }
 
@@ -1016,6 +1020,10 @@ pub fn ingest_base_for(answers: &Answers, profile_id: &str, timezone: &str) -> I
 /// then, once the file is written, [`settle_pending_after_ingest`]. A feed still `validated` holds the
 /// job (`Waiting`, nothing touched), and a `*_link_missing` failure settles nothing. A file already
 /// there with other bytes did not take a kept link, so a `failed` or `rejected` feed's link stays.
+/// The proof names, per feed and never with the link: `feed_kept_on_device` / `calendar_kept_on_device`
+/// (the link went into ingest.yaml, not the account), `lms_link_not_placed` / `calendar_link_not_placed`
+/// (an existing file kept other bytes: the link is in neither file nor account), and
+/// `pending_link_not_deleted` (a pending credential that could not be deleted).
 pub fn run_config_ingest_in(vault: &Path, data_dir: &Path, profile_id: &str, timezone: &str, pending: &dyn PendingStore) -> Outcome {
     let answers = match load_answers(data_dir) {
         Ok(Some(a)) => a,
@@ -1024,12 +1032,15 @@ pub fn run_config_ingest_in(vault: &Path, data_dir: &Path, profile_id: &str, tim
     };
     let base = ingest_base_for(&answers, profile_id, timezone);
     let out = run_config_ingest(vault, data_dir, &base, pending);
-    if let Outcome::Done(proof) = &out {
-        let h = ingest_handoff(&answers, pending);
-        let link_unplaced = proof.contains_key(KEPT_EXISTING_KEY) && (h.feed_kept_on_device || h.calendar_kept_on_device);
-        if !link_unplaced { settle_pending_after_ingest(pending); }
+    let Outcome::Done(mut proof) = out else { return out };
+    let h = ingest_handoff(&answers, pending);
+    let existing_kept = proof.contains_key(KEPT_EXISTING_KEY);
+    let any_kept = h.feed_kept_on_device || h.calendar_kept_on_device;
+    for (kept, placed, unplaced) in [(h.feed_kept_on_device, "feed_kept_on_device", "lms_link_not_placed"), (h.calendar_kept_on_device, "calendar_kept_on_device", "calendar_link_not_placed")] {
+        if kept { proof.insert((if existing_kept { unplaced } else { placed }).to_string(), Some(1)); }
     }
-    out
+    if !(existing_kept && any_kept) && settle_pending_after_ingest(pending) > 0 { proof.insert("pending_link_not_deleted".into(), Some(1)); }
+    Outcome::Done(proof)
 }
 
 /// The reason key of a `config.ingest` that found a kept course with no recorded slug.
