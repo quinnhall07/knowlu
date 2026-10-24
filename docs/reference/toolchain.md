@@ -33,6 +33,14 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   file-scoped `CREDMAN_LOCK` mutex and every test that writes, reads or deletes a real credential
   takes it, under a generated test id with a `Drop` guard that deletes what it wrote. A new test file
   that touches the store carries its own lock.
+- **Temp files live in `target/`.** `.cargo/config.toml` sets `TMP` and `TEMP` to the checkout's
+  `target/` for what cargo starts when run inside the checkout (cargo reads config from the current
+  directory, so `--manifest-path` from elsewhere falls back to `%TEMP%`; a `CARGO_TARGET_DIR`
+  elsewhere leaves `target/` uncreated and the link fails), so `std::env::temp_dir()` in a test is `target/`: most tests
+  leave a scratch vault per process id behind, and in `%TEMP%` those had reached ~700k entries
+  (2026-10-24), slowing every tool that lists it. `cargo clean` removes them. It is `target/` itself
+  because the linker needs the directory to exist before anything is built, and
+  `GIT_CEILING_DIRECTORIES` stops git there so a scratch dir still reads as "not a repository".
 - **Line endings: LF everywhere in this repo** (`.gitattributes`: `* text=auto eol=lf`; `*.ps1` are
   CRLF). `engine/tests/fixtures/**` is `-text`: those bytes are the contract — several are compared
   byte for byte and they are CRLF because vaults are — **never re-encode them**. The engine still
