@@ -13,6 +13,7 @@ pub const STATE_FILE: &str = "onboarding.json";
 /// The only `version` this build reads; a file of any other is `Loaded::Unreadable`.
 pub const STATE_VERSION: u32 = 1;
 pub const ANSWERS_FILE: &str = "onboarding-answers.json";
+// REGISTRAR_FILE and its deletes (write_finish, on_sign_out_with) go here under Q7 option A (§14.52.4); not built until Quinn answers.
 /// The two pending-credential names under `knowlu/<profile_id>/` (§4.11).
 pub const PENDING_LMS: &str = "pending-lms_ics";
 pub const PENDING_CALENDAR: &str = "pending-calendar_ics";
@@ -132,10 +133,12 @@ impl OnboardingState {
     pub fn mail_signal(&mut self, signal: MailSignal) {
         let open = |item: &str| self.handover.iter().any(|h| h.item == item);
         let gone: &[&str] = match signal {
-            MailSignal::CanaryVerified => &["mail.setup", "mail.canary"],
+            MailSignal::CanaryVerified => &["mail.setup", "mail.canary", "mail.connect"],
             MailSignal::FirstPassDelivered | MailSignal::BackfillNeverDriven if open("mail.setup") || open("mail.canary") => &[],
             MailSignal::FirstPassDelivered | MailSignal::BackfillNeverDriven => &["mail.first_pass"],
             MailSignal::Disconnected => &MAIL_ITEMS,
+            // The student's own off switch clears the not-connected item and nothing else (§14.52.1).
+            MailSignal::TurnedOff => &["mail.connect"],
         };
         self.handover.retain(|h| h.signal != SIGNAL_MAIL_JSON || !gone.contains(&h.item.as_str()));
     }
@@ -150,6 +153,8 @@ pub enum MailSignal {
     /// batch will ever close for it (§14.51 r3, I-1).
     BackfillNeverDriven,
     Disconnected,
+    /// The student's own off switch (Disconnect's step 0), applied by `disconnect_with`.
+    TurnedOff,
 }
 
 /// Every normal-console load, change and save of a finished `onboarding.json` takes this one lock
@@ -230,15 +235,45 @@ pub fn save_state(data_dir: &Path, s: &OnboardingState) -> Result<(), String> {
 /// A missing file is `Absent`; any other failure to read or parse is `Unreadable`, never "finished".
 pub fn load_state(data_dir: &Path) -> Loaded {
     let path = state_path(data_dir);
-    match std::fs::read_to_string(&path) {
+    match std::fs::read(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Loaded::Absent,
         Err(e) => Loaded::Unreadable(format!("{}: cannot be read ({e})", path.display())),
-        Ok(text) => match serde_json::from_str::<OnboardingState>(&text) {
-            Ok(s) if s.version != STATE_VERSION => Loaded::Unreadable(format!("{}: is version {}, which this build does not know", path.display(), s.version)),
-            Ok(s) => Loaded::Ok(s),
-            Err(e) => Loaded::Unreadable(format!("{}: is not an onboarding file ({e})", path.display())),
-        },
+        Ok(bytes) => parse_state(&path, &bytes),
     }
+}
+
+fn parse_state(path: &Path, bytes: &[u8]) -> Loaded {
+    match serde_json::from_slice::<OnboardingState>(bytes) {
+        Ok(s) if s.version != STATE_VERSION => Loaded::Unreadable(format!("{}: is version {}, which this build does not know", path.display(), s.version)),
+        Ok(s) => Loaded::Ok(s),
+        Err(e) => Loaded::Unreadable(format!("{}: is not an onboarding file ({e})", path.display())),
+    }
+}
+
+/// Waits between the launch read's tries: about 3.2 s in all (an antivirus scan can hold the file at an autostart login).
+const LAUNCH_READ_PAUSES: [std::time::Duration; 4] = [
+    std::time::Duration::from_millis(25), std::time::Duration::from_millis(200), std::time::Duration::from_secs(1), std::time::Duration::from_secs(2),
+];
+const FATAL_UNREAD: &str = "Knowlu could not read this profile's setup file (onboarding.json). Close any program that may be using it, then open Knowlu again. Nothing was changed.";
+const FATAL_NEWER: &str = "This profile was set up by a newer Knowlu. Install the latest version, then open it again. Nothing was changed.";
+
+/// The patient read the onboarding arm launches from (§14.52.5). A read error that is not "not found" is
+/// retried after each pause, then `Err(fatal)`; a `version` this build does not know is `Err(fatal)` too.
+/// **Only bytes that were read and do not parse come back `Unreadable`** (the one case the queue's save may
+/// rewrite). This writes nothing.
+pub fn load_state_for_launch(data_dir: &Path) -> Result<Loaded, String> {
+    let path = state_path(data_dir);
+    let mut pauses = LAUNCH_READ_PAUSES.iter();
+    let bytes = loop {
+        match std::fs::read(&path) {
+            Ok(b) => break b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Loaded::Absent),
+            Err(_) => match pauses.next() { Some(p) => std::thread::sleep(*p), None => return Err(FATAL_UNREAD.into()) },
+        }
+    };
+    let version = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| v["version"].as_u64());
+    if version.is_some_and(|v| v != u64::from(STATE_VERSION)) { return Err(FATAL_NEWER.into()); }
+    Ok(parse_state(&path, &bytes))
 }
 
 // ---- the answers file (§4.5) -------------------------------------------------------------------
@@ -566,11 +601,14 @@ fn file_only(e: String, data_dir: &Path) -> String {
     e.replace(&answers_path(data_dir).display().to_string(), ANSWERS_FILE).replace(&data_dir.display().to_string(), "")
 }
 
-/// True once an exit has begun: the queue's stop is set or the exit guard is held. An answer or a skip
+/// An error with the vault's displayed path taken out: `cloud_config`'s errors begin with `<vault>nfigoud.yaml`, and the
+/// vault path carries the Windows user name. The service's own sentence is kept.
+fn vault_only(e: String, vault: &Path) -> String { e.replace(&vault.display().to_string(), "") }
+
+/// True once an exit has begun: the queue's stop is set (every exit sets it right after taking the guard, and
+/// finish's refusal check holds the guard with no stop, so the guard alone is not an exit, m-2). An answer or a skip
 /// written then could put back what Sign out just deleted, or land after the last save.
-pub fn exiting_now(queue: &crate::onboarding_jobs::Queue, g: &ExitGuard) -> bool {
-    queue.stop_requested() || g.0.load(std::sync::atomic::Ordering::SeqCst)
-}
+pub fn exiting_now(queue: &crate::onboarding_jobs::Queue, _g: &ExitGuard) -> bool { queue.stop_requested() }
 
 fn refused_exiting() -> Value { serde_json::json!({ "ok": false, "exiting": true, "error": "Knowlu is closing setup. Open it again to carry on." }) }
 
@@ -836,6 +874,8 @@ pub fn proposals_ready(state: &OnboardingState) -> bool {
 
 /// The skip cost keys the rail, the reveal gate (F9) and the page name; a contract, never retyped.
 pub const COST_MAIL: &str = "mail_dates_missed";
+/// The cost key of the `mail.connect` item (§14.52.1): the page words it "Finish connecting your email in Settings."
+pub const COST_MAIL_UNFINISHED: &str = "mail_setup_unfinished";
 pub const COST_GOOGLE: &str = "gmail_and_calendar_missed";
 pub const COST_CALENDAR: &str = "calendar_busy_time_missed";
 /// Step 8's key is per site: this prefix and the site (`zybooks`, `vhl`).
@@ -1000,14 +1040,22 @@ pub fn onboarding_sign_out_inner(s: &dyn ExitSeams, g: &ExitGuard) -> Value {
     serde_json::json!({ "ok": true, "error": Value::Null })
 }
 
+const LANE_REQUIRED: [&str; 4] = ["school.apply", "school.courses", "registrar.confirm", "config.ingest"];
+/// The first of the four required lane jobs that is `failed`: `status_inner`'s `failed_job`.
+fn failed_lane_job(state: &OnboardingState) -> Option<&'static str> {
+    LANE_REQUIRED.into_iter().find(|j| state.jobs.get(*j).is_some_and(|r| r.state == JobState::Failed))
+}
+
 /// Why Open Knowlu is not offered yet, if it is not: a lane job that is not `done` (`config.ingest`
 /// must be; the two feed stores may also be `failed`, which settles them for `config.ingest`, §4.11),
 /// or a gate that is still closed.
 fn finish_refusal(state: &OnboardingState, now_secs: i64) -> Option<String> {
     let st = |j: &str| state.jobs.get(j).map(|r| r.state);
+    // A failed lane job is named before "still saving": only Try again moves it (F8e r3).
+    if failed_lane_job(state).is_some() { return Some("Something in your setup needs Try again before Knowlu opens.".into()); }
     // The four local jobs must exist and be done: a crash between two enqueues can leave one unrecorded,
     // and finish deletes the only copy of the answers it would have read.
-    let lane_open = ["school.apply", "school.courses", "registrar.confirm", "config.ingest"].iter().any(|j| st(j) != Some(JobState::Done))
+    let lane_open = LANE_REQUIRED.iter().any(|j| st(j) != Some(JobState::Done))
         || ["school.store", "calendar.store"].iter().any(|j| st(j).is_some_and(|s| !matches!(s, JobState::Done | JobState::Failed | JobState::Skipped)));
     if lane_open { return Some("Knowlu is still saving your setup. Try again in a moment.".into()); }
     // Class times are the step 10 confirm (§4.6): nothing opens the reveal before it.
@@ -1024,10 +1072,10 @@ fn finish_refusal(state: &OnboardingState, now_secs: i64) -> Option<String> {
 pub fn onboarding_finish_inner(s: &dyn ExitSeams, g: &ExitGuard, now_secs: i64) -> Value {
     if !begin(g) { return already_exiting(); }
     let before = s.snapshot();
-    // A second Open Knowlu after the first one landed has nothing left to write.
+    // A finished file under a live process: the earlier finish's relaunch failed, so the restart screen is the way on (m-1).
     if before.finished {
         release(g);
-        return serde_json::json!({ "ok": true, "finished": true, "error": Value::Null });
+        return restart_needed("Knowlu has finished setting up. Open it again.".into());
     }
     if let Some(why) = finish_refusal(&before, now_secs) {
         release(g);
@@ -1101,8 +1149,14 @@ pub fn handover_for(state: &OnboardingState) -> Vec<HandoverItem> {
     let signal = |name: &str| {
         if SLOT_ITEMS.contains(&name) { Some(SIGNAL_SLOT_END) } else if MAIL_ITEMS.contains(&name) { Some(SIGNAL_MAIL_JSON) } else { None }
     };
-    // `jobs` is a `BTreeMap`, so the walk is already sorted by item.
-    state.jobs.keys().filter(|k| open(k)).filter_map(|k| signal(k).map(|s| HandoverItem { item: k.clone(), signal: s.to_string() })).collect()
+    // A setup not done and not skipped is never resumed (`on_start` cleans it up): one not-connected item in
+    // place of the three, which mean nothing without it (§14.52.1). A skipped one never gets it; no record, none.
+    let unfinished = open("mail.setup");
+    // `jobs` is a `BTreeMap`, so the walk is already sorted by item; "mail.connect" goes in its place.
+    let mut items: Vec<HandoverItem> = state.jobs.keys().filter(|k| open(k) && !(unfinished && MAIL_ITEMS.contains(&k.as_str())))
+        .filter_map(|k| signal(k).map(|s| HandoverItem { item: k.clone(), signal: s.to_string() })).collect();
+    if unfinished { items.push(HandoverItem { item: "mail.connect".into(), signal: SIGNAL_MAIL_JSON.into() }); items.sort_by(|a, b| a.item.cmp(&b.item)); }
+    items
 }
 
 /// `onboarding_status`'s body over a state that was read: the file plus the live job states, the
@@ -1117,7 +1171,7 @@ pub fn status_inner(state: &OnboardingState, now_secs: i64) -> Value {
         "step": state.step, "account_settled": state.account_settled, "skips": state.skips, "handover": state.handover,
         "jobs": state.jobs, "proposals_ready": proposals_ready(state),
         // The page's Open Knowlu reads this, never the job states: one rule, the one finish refuses on.
-        "finish_ready": finish_refusal(state, now_secs).is_none(),
+        "finish_ready": finish_refusal(state, now_secs).is_none(), "failed_job": failed_lane_job(state),
         "gate": {
             "open": g.open,
             "still_coming": g.still_coming,
@@ -1369,7 +1423,7 @@ pub fn entitlement_in(vault: &Path, data_dir: &Path) -> Value {
     // The profile's own target through `cloud.yaml`; a refusal or a missing session leaves the cache as it was.
     match crate::account::refresh_entitlement(vault, data_dir) {
         Ok(c) => serde_json::json!({ "ok": true, "error": Value::Null, "status": c.status, "plan": c.plan, "current_period_end": c.current_period_end }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e, "status": Value::Null }),
+        Err(e) => serde_json::json!({ "ok": false, "error": vault_only(e, vault), "status": Value::Null }),
     }
 }
 
@@ -1387,7 +1441,7 @@ pub fn onboarding_entitlement(app: tauri::AppHandle) -> Value {
 
 /// The consent-then-checkout core on the vault's own session; returns the URL and opens nothing.
 pub fn checkout_url_in(vault: &Path, plan: &str) -> Result<String, String> {
-    let cfg = crate::account::cloud_config(vault)?;
+    let cfg = crate::account::cloud_config(vault).map_err(|e| vault_only(e, vault))?;
     let auth = crate::account::auth_base(&cfg.api_base)?;
     let now = jiff::Timestamp::now().as_second();
     let token = crate::account::valid_access_token_at(&auth, &cfg.anon_key, &cfg.session_credential_target, now)?;

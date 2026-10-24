@@ -2282,10 +2282,12 @@ impl ExitSeams for Provided<'_> {
     fn mail_provider(&self) -> Option<String> { recorded_mail_provider(&self.0.dir) }
 }
 
-/// A finishable state with the three mail items open.
+/// A finishable state whose setup is done (F2b2b: an unfinished one is `mail.connect`, test 40) and whose
+/// canary and first pass are open.
 fn finishable_with_mail() -> OnboardingState {
     let mut s = finishable();
-    for j in ["mail.setup", "mail.canary", "mail.first_pass"] { s.jobs.insert(j.into(), JobRecord { state: JobState::Pending, ..Default::default() }); }
+    for j in ["mail.canary", "mail.first_pass"] { s.jobs.insert(j.into(), JobRecord { state: JobState::Pending, ..Default::default() }); }
+    s.jobs.insert("mail.setup".into(), JobRecord { state: JobState::Done, ..Default::default() });
     s
 }
 
@@ -2303,11 +2305,11 @@ fn handed_over(tag: &str, provider: Option<&str>) -> Vec<String> {
 
 #[test]
 fn test_32_finish_leaves_a_never_driven_providers_first_pass_out_of_the_handover() {
-    assert_eq!(handed_over("t32-m365", Some("m365")), ["mail.canary", "mail.setup"], "held until C3: setup and canary kept, first pass dropped");
-    assert_eq!(handed_over("t32-other", Some("other")), ["mail.canary", "mail.setup"], "Guided is never driven either");
-    assert_eq!(handed_over("t32-google", Some("google")), ["mail.canary", "mail.first_pass", "mail.setup"], "Gmail's batch closes, so it is waited for");
-    assert_eq!(handed_over("t32-none", None), ["mail.canary", "mail.first_pass", "mail.setup"], "no provider recorded keeps the item");
-    assert_eq!(handed_over("t32-unknown", Some("something-else")), ["mail.canary", "mail.setup"], "an unknown service string reads as Guided, as from_service does");
+    assert_eq!(handed_over("t32-m365", Some("m365")), ["mail.canary"], "held until C3: the canary kept, first pass dropped");
+    assert_eq!(handed_over("t32-other", Some("other")), ["mail.canary"], "Guided is never driven either");
+    assert_eq!(handed_over("t32-google", Some("google")), ["mail.canary", "mail.first_pass"], "Gmail's batch closes, so it is waited for");
+    assert_eq!(handed_over("t32-none", None), ["mail.canary", "mail.first_pass"], "no provider recorded keeps the item");
+    assert_eq!(handed_over("t32-unknown", Some("something-else")), ["mail.canary"], "an unknown service string reads as Guided, as from_service does");
 }
 
 #[test]
@@ -2400,7 +2402,7 @@ fn test_09_a_second_finish_after_the_first_landed_writes_nothing() {
     guard.0.store(false, Ordering::SeqCst);
     let before = r.log.all();
     let again = onboarding_finish_inner(&seams, &guard, epoch(CONFIRMED) + 180);
-    assert_eq!((again["ok"].clone(), again["finished"].clone()), (true.into(), true.into()), "{again}");
+    assert_eq!((again["ok"].clone(), again["restart"].clone()), (false.into(), true.into()), "m-1: a live process with a finished file is the restart screen: {again}");
     assert_eq!(r.log.all(), before, "no stop, drain, write, relaunch or exit the second time");
     assert!(!guard.0.load(Ordering::SeqCst), "the guard is released");
 }
@@ -2428,12 +2430,12 @@ fn test_17_sign_out_runs_only_after_the_drain_returns_and_a_writer_that_ignores_
 }
 
 #[test]
-fn test_12_the_stop_and_the_exit_guard_refuse_an_answer_and_a_skip_through_the_live_check() {
+fn test_12_the_stop_refuses_an_answer_and_a_skip_through_the_live_check_and_the_guard_alone_does_not() {
     let r = rig("t12-stop-refuses", state_at(8, true), false);
     let guard = ExitGuard::default();
     assert!(!exiting_now(&r.q, &guard));
     guard.0.store(true, Ordering::SeqCst);
-    assert!(exiting_now(&r.q, &guard), "a held exit guard refuses");
+    assert!(!exiting_now(&r.q, &guard), "a held exit guard alone does not (m-2: every exit sets the stop right after taking it)");
     guard.0.store(false, Ordering::SeqCst);
     r.q.request_stop();
     assert!(exiting_now(&r.q, &guard), "the queue's stop refuses");
@@ -3335,4 +3337,204 @@ fn test_33_a_proceed_after_a_sign_out_rewind_queues_its_slot_again() {
     assert_eq!(runs_of(&r, "config.ingest"), 1, "{:?}", r.log.all());
     assert_eq!(runs_of(&r, "slot.partial"), after_3 + 1, "step 8's proceed asked for its own slot: {:?}", r.log.all());
     assert_eq!(r.log.scopes("slot.partial").last().map(String::as_str), Some("NoRank"), "{:?}", r.log.all());
+}
+
+// ---- test 39 (F2b2b): m-1, m-2 and the failed-lane refusal ---------------------------------------------------------
+
+#[test]
+fn test_39_a_finish_on_a_finished_snapshot_is_the_restart_screen_and_releases_the_guard() {
+    let mut s = finishable();
+    s.finished = true;
+    let r = rig("t39-finished", s, false);
+    let guard = ExitGuard::default();
+    let out = onboarding_finish_inner(&Seams::new(&r), &guard, epoch(CONFIRMED) + 180);
+    assert_eq!((out["ok"].clone(), out["restart"].clone()), (false.into(), true.into()), "{out}");
+    assert_eq!(out["error"], "Knowlu has finished setting up. Open it again.");
+    assert!(r.log.all().is_empty(), "nothing stopped, written or exited: {:?}", r.log.all());
+    assert!(!guard.0.load(Ordering::SeqCst), "the guard is released as before");
+}
+
+#[test]
+fn test_39_exiting_now_is_false_with_only_the_guard_held_and_true_once_the_stop_is_set() {
+    let r = rig("t39-exiting", state_at(8, true), false);
+    let guard = ExitGuard::default();
+    guard.0.store(true, Ordering::SeqCst);
+    assert!(!exiting_now(&r.q, &guard), "finish's refusal check holds the guard with no stop set");
+    let ask = serde_json::json!({"zybooks_ignore": "ZYB-DURING-THE-CHECK"});
+    let out = answer_unless_exiting_with(&|| exiting_now(&r.q, &guard), &r.dir, 8, &ask, &mut |_| {}, false);
+    assert_eq!(out["ok"], true, "an answer sent during the refusal check is not told setup is closing: {out}");
+    r.q.request_stop();
+    assert!(exiting_now(&r.q, &guard), "the stop is the exit");
+    let late = answer_unless_exiting_with(&|| exiting_now(&r.q, &guard), &r.dir, 8, &serde_json::json!({"zybooks_ignore": "ZYB-LATE"}), &mut |_| {}, false);
+    assert_eq!((late["ok"].clone(), late["exiting"].clone()), (false.into(), true.into()), "{late}");
+}
+
+const NEEDS_TRY_AGAIN: &str = "Something in your setup needs Try again before Knowlu opens.";
+
+#[test]
+fn test_39_a_failed_lane_job_gives_the_needs_try_again_refusal_and_failed_job_names_it() {
+    let at = epoch(CONFIRMED) + 600;
+    for job in ["school.apply", "school.courses", "registrar.confirm", "config.ingest"] {
+        let reason = if job == "school.courses" { REASON_ACCOUNT_UNFINISHED } else { "could_not_write_config" };
+        let mut s = finishable();
+        s.jobs.insert(job.into(), JobRecord { state: JobState::Failed, reason: Some(reason.into()), ..Default::default() });
+        let status = status_inner(&s, at);
+        assert_eq!((status["finish_ready"].clone(), status["failed_job"].clone()), (false.into(), job.into()), "{job}: {status}");
+        let r = rig(&format!("t39-failed-{job}"), s, false);
+        let out = onboarding_finish_inner(&Seams::new(&r), &ExitGuard::default(), at);
+        assert_eq!((out["ok"].clone(), out["error"].clone()), (false.into(), NEEDS_TRY_AGAIN.into()), "{job}: {out}");
+        assert!(r.log.all().is_empty(), "{job}: a refusal stops nothing: {:?}", r.log.all());
+    }
+    // Named before "still saving": another lane job still pending does not hide the failed one.
+    let mut s = finishable();
+    s.jobs.insert("config.ingest".into(), JobRecord { state: JobState::Pending, ..Default::default() });
+    s.jobs.insert("school.apply".into(), JobRecord { state: JobState::Failed, ..Default::default() });
+    let r = rig("t39-failed-and-pending", s.clone(), false);
+    let out = onboarding_finish_inner(&Seams::new(&r), &ExitGuard::default(), at);
+    assert_eq!(out["error"], NEEDS_TRY_AGAIN, "{out}");
+    assert_eq!(status_inner(&s, at)["failed_job"], "school.apply");
+    // Pending or running keeps "still saving", with no failed_job.
+    s.jobs.insert("school.apply".into(), JobRecord { state: JobState::Done, ..Default::default() });
+    let r = rig("t39-pending-only", s.clone(), false);
+    let out = onboarding_finish_inner(&Seams::new(&r), &ExitGuard::default(), at);
+    assert_eq!(out["error"], "Knowlu is still saving your setup. Try again in a moment.", "{out}");
+    assert!(status_inner(&s, at)["failed_job"].is_null(), "no failed lane job, no name");
+    // A failed feed store settles for config.ingest (4.11): it is neither refused nor named.
+    let mut s = finishable();
+    s.jobs.insert("school.store".into(), JobRecord { state: JobState::Failed, ..Default::default() });
+    let status = status_inner(&s, at);
+    assert_eq!((status["finish_ready"].clone(), status["failed_job"].is_null()), (true.into(), true), "{status}");
+}
+
+// ---- test 40 (F2b2b): the mail.connect hand-over ----------------------------------------------------------------------
+
+#[path = "support/slot_rig.rs"]
+mod slot_rig;
+use knowlu::mail_session::{MailState, PendingSetup};
+
+fn mail_jobs(setup: Option<JobRecord>, others: Option<JobState>) -> OnboardingState {
+    let mut s = finishable();
+    if let Some(r) = setup { s.jobs.insert("mail.setup".into(), r); }
+    if let Some(st) = others {
+        for j in ["mail.canary", "mail.first_pass"] { s.jobs.insert(j.into(), JobRecord { state: st, ..Default::default() }); }
+    }
+    s
+}
+
+/// Finishes `s` over the fake seams (finish is never refused because of the mail jobs) and returns the
+/// saved file's mail hand-over items as `(item, signal)`.
+fn mail_handover(tag: &str, s: OnboardingState) -> Vec<(String, String)> {
+    let r = rig(tag, s, false);
+    let out = onboarding_finish_inner(&Provided(Seams::new(&r)), &ExitGuard::default(), epoch(CONFIRMED) + 180);
+    assert_eq!(out["ok"], true, "{tag}: finish is not refused for the mail jobs: {out}");
+    let Loaded::Ok(saved) = load_state(&r.dir) else { panic!("saved") };
+    saved.handover.iter().filter(|h| h.item.starts_with("mail.")).map(|h| (h.item.clone(), h.signal.clone())).collect()
+}
+
+fn with_reason(state: JobState, reason: Option<&str>) -> JobRecord { JobRecord { state, reason: reason.map(str::to_string), ..Default::default() } }
+
+#[test]
+fn test_40_a_setup_not_done_at_finish_hands_over_one_mail_connect_item_and_no_mail_job() {
+    assert_eq!(COST_MAIL_UNFINISHED, "mail_setup_unfinished");
+    let connect = vec![("mail.connect".to_string(), "mail_json".to_string())];
+    for (case, rec) in [
+        ("never started", with_reason(JobState::Pending, None)),
+        ("waiting", with_reason(JobState::Pending, Some("mail_window_busy"))),
+        ("failed", with_reason(JobState::Failed, Some("mail_setup_failed"))),
+        ("stopped back to pending", with_reason(JobState::Pending, Some("mail_setup_cancelled"))),
+        ("held", with_reason(JobState::Held, None)),
+    ] {
+        let s = mail_jobs(Some(rec), Some(JobState::Pending));
+        assert_eq!(handover_for(&s).into_iter().filter(|h| h.item.starts_with("mail.")).map(|h| (h.item, h.signal)).collect::<Vec<_>>(), connect, "{case}: handover_for");
+        assert_eq!(mail_handover(&format!("t40-{}", case.replace(' ', "-")), s), connect, "{case}: no mail.setup, mail.canary or mail.first_pass, one mail.connect");
+    }
+}
+
+#[test]
+fn test_40_a_done_setup_hands_over_its_open_canary_and_first_pass_and_no_mail_connect() {
+    let got = mail_handover("t40-done", mail_jobs(Some(with_reason(JobState::Done, None)), Some(JobState::Pending)));
+    assert_eq!(got.iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["mail.canary", "mail.first_pass"], "{got:?}");
+    let none = mail_handover("t40-done-closed", mail_jobs(Some(with_reason(JobState::Done, None)), Some(JobState::Done)));
+    assert!(none.is_empty(), "{none:?}");
+}
+
+#[test]
+fn test_40_a_skipped_setup_never_gets_mail_connect_after_a_run_or_as_a_bare_record() {
+    let mut after_a_run = mail_jobs(Some(JobRecord { state: JobState::Skipped, reason: Some("mail_setup_cancelled".into()), proof: BTreeMap::from([("rows".to_string(), Some(1))]), ..Default::default() }), Some(JobState::Skipped));
+    after_a_run.skips.push(Skip { step: 5, source: "mail".into(), cost_key: COST_MAIL.into() });
+    let bare = mail_jobs(Some(with_reason(JobState::Skipped, None)), Some(JobState::Skipped));
+    let bare_setup_only = mail_jobs(Some(with_reason(JobState::Skipped, None)), None);
+    for (case, s) in [("after a run", after_a_run), ("bare skip_mail records", bare), ("a bare setup record alone", bare_setup_only)] {
+        assert!(handover_for(&s).iter().all(|h| !h.item.starts_with("mail.")), "{case}: handover_for");
+        assert!(mail_handover(&format!("t40-skip-{}", case.replace(' ', "-")), s).is_empty(), "{case}: nothing mail is handed over");
+    }
+}
+
+fn finished_with(items: &[(&str, &str)]) -> OnboardingState {
+    let mut s = state_at(11, true);
+    s.finished = true;
+    s.handover = items.iter().map(|(i, g)| HandoverItem { item: i.to_string(), signal: g.to_string() }).collect();
+    s
+}
+fn names(s: &OnboardingState) -> Vec<&str> { s.handover.iter().map(|h| h.item.as_str()).collect() }
+
+#[test]
+fn test_40_canary_verified_and_turned_off_clear_mail_connect_and_nothing_else_does() {
+    let mk = || finished_with(&[("mail.connect", "mail_json"), ("slot.first_full", "slot_end")]);
+    for keep in [MailSignal::Disconnected, MailSignal::FirstPassDelivered, MailSignal::BackfillNeverDriven] {
+        let mut s = mk();
+        s.mail_signal(keep);
+        assert_eq!(names(&s), ["mail.connect", "slot.first_full"], "{keep:?} leaves it");
+    }
+    let mut s = mk();
+    s.slot_ended();
+    assert_eq!(names(&s), ["mail.connect"], "a slot's end does not clear it");
+    for clear in [MailSignal::CanaryVerified, MailSignal::TurnedOff] {
+        let mut s = mk();
+        s.mail_signal(clear);
+        assert_eq!(names(&s), ["slot.first_full"], "{clear:?} clears it and no slot item");
+    }
+}
+
+#[test]
+fn test_40_turned_off_is_applied_to_a_finished_file_only_through_apply_mail_signal() {
+    let d = scratch("t40-turned-off");
+    save_state(&d, &finished_with(&[("mail.connect", "mail_json")])).unwrap();
+    assert_eq!(apply_mail_signal(&d, MailSignal::TurnedOff), Ok(true));
+    let Loaded::Ok(after) = load_state(&d) else { panic!("saved") };
+    assert!(after.handover.is_empty(), "{after:?}");
+    let mut unfinished = state_at(5, true);
+    unfinished.handover = vec![HandoverItem { item: "mail.connect".into(), signal: "mail_json".into() }];
+    save_state(&d, &unfinished).unwrap();
+    let bytes = std::fs::read(state_path(&d)).unwrap();
+    assert_eq!(apply_mail_signal(&d, MailSignal::TurnedOff), Ok(false));
+    assert_eq!(std::fs::read(state_path(&d)).unwrap(), bytes, "an unfinished file is not touched");
+}
+
+/// A normal slot's reading: `listed` is the account's address list (an `Ok` and empty one here), with
+/// `Disconnected` really given, applied to the finished file in `d`. Returns the file's item names.
+fn slot_reading(d: &Path, listed: &[Value]) -> Vec<String> {
+    let mail = MailState::load(d).unwrap();
+    let Loaded::Ok(before) = load_state(d) else { panic!("the finished file") };
+    assert!(knowlu::scheduler::mail_signals(listed, &mail, &before.started_at).contains(&MailSignal::Disconnected), "the slot gave Disconnected");
+    knowlu::scheduler::apply_listed_signals(d, false, listed, &[]);
+    let Loaded::Ok(after) = load_state(d) else { panic!("the finished file") };
+    after.handover.iter().map(|h| h.item.clone()).collect()
+}
+
+#[test]
+fn test_40_the_two_no_row_cases_keep_mail_connect_and_disconnected_clears_only_its_own_items() {
+    // (a) The setup never started: no mail.json, an empty and Ok list.
+    let d = scratch("t40-norow-a");
+    save_state(&d, &finished_with(&[("mail.connect", "mail_json"), ("mail.canary", "mail_json"), ("slot.first_full", "slot_end")])).unwrap();
+    assert_eq!(slot_reading(&d, &[]), ["mail.connect", "slot.first_full"], "(a) Disconnected cleared the canary and kept mail.connect");
+    // (b) The setup was interrupted: a pending record, removed by the start-up clean, then the same slot.
+    let d = scratch("t40-norow-b");
+    save_state(&d, &finished_with(&[("mail.connect", "mail_json")])).unwrap();
+    MailState::update(&d, |s| { s.pending_setups = vec![PendingSetup { address_id: slot_rig::ID.into(), placed: false, backfilled: false, shown: false }]; true }).unwrap();
+    let svc = slot_rig::Svc::start(vec![slot_rig::row("pending", "m365")]);
+    assert!(knowlu::mail::setup::clean_unfinished(&d, &svc.client()).is_empty());
+    assert!(svc.calls().iter().any(|c| c.starts_with("DELETE /addresses/")), "the interrupted address was removed: {:?}", svc.calls());
+    assert!(MailState::load(&d).unwrap().pending_setups.is_empty(), "no pending record is left");
+    assert_eq!(slot_reading(&d, &[]), ["mail.connect"], "(b) the empty list after the clean keeps it");
 }
