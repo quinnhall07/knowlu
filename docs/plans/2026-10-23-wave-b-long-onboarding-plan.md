@@ -1498,7 +1498,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F8s | `scheduler.rs`: `run_slot_inner_scoped` (the seams from `Some(app)`) and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}`; the stop before each stage (never cleared); the bundle deleted on every path; the slot's hand-over clearing; `prime_mode_device` (T0) and `spawn_update_check` (T0 review M3) | `implementer` | `scheduler.rs` is off the contract list; its tests are F1's 15, 18 and 27 (review r3 M5, r4 I-3, M1, r5 I-3; T0) | F1 |
 | F8b | Runners: the school step (capture, answers, pending feed, preview), the capture half writing through today's unfenced helpers (F8b2 converts the writes that have merged); **its registrar half is provisional on Q7 and held**: the raw response kept in `onboarding-registrar.json` (option A) or `registrar_series` saved in the answers file (option B), written through F8b2's `write_capture_file_for_gen` from the start (§14.52.2, .4; r3 m-c) | `implementer`, reviewed by `contract-reviewer` (its capture handles the bearer link; review r7, I-1) | specified; the registrar half is not dispatched until Q7 | the capture half: F8a, F7a, S4d, F8la, and F8d2 (`onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8g; r5 reorder). The held registrar half, dispatched separately: F8b2 (the fenced helper), and F2b2b (option A) or F7d (option B). Nothing depends on the registrar half but F8h-runner, so F8b2 waits only on the capture half (r3 R3-1), and nothing waits on F8b but F8b2, F8w1, F8lb and F11e1, so the F2b2 tasks go ahead before S4d |
 | F8b2 | `Queue::set_school` (step 3's school answer; refused once `school.apply` has a record); `change_school` under the queue lock, then `ANSWERS_LOCK`: deletes the answers file, pending links and every capture file, and bumps `SCHOOL_GEN`; `job_context` (school and generation read together; one in-memory entry per job from `push_job`, or from the worker marking a resumed job running, until it leaves `order`; §14.52 r2 n1, r3 n1); the four fenced writers; the merged F8b writes converted to them; the `rerun` set (§14.52.2; S, about 45 lines in `onboarding_jobs.rs` and 35 in `onboarding_state.rs`; test 35; the advance's caller is F8b2-advance's, §14.55) | `implementer`, reviewed by `contract-reviewer` | a stale capture writing a bearer link is the risk F8l's review guarded | F8b's capture half (`onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8b2-advance, F8g; r5 reorder, §14.55), F2b2b (in `onboarding_state.rs`'s) |
-| F8b2-advance | The advance's caller (§14.55): `Queue::advance_after_school(&dyn ResumeChecks)` under the queue lock, persisted once; step 3's proceed runs it between its own jobs and the passed steps' jobs (step 6's `google.gmail_first_read`, and `google.calendar_read` only when the new `ResumeChecks::google_calendar_granted()` (default `self.google_granted()`) is true; step 7's `calendar.store`; step 8's `config.ingest`), with `slot.partial` asked once, last, through one `answer_enqueuer`; `earliest_unproven`'s step-7 rung (`google_granted && !google_calendar_granted` lands at 7; review I-1); the checks as `pub type ManagedChecks = Arc<dyn ResumeChecks + Send + Sync>` (review m-1) (about 38 lines: 10 in `onboarding_jobs.rs`, 28 in `onboarding_state.rs`; test 33's advance cases, Gmail-only included, written first) | `implementer`, reviewed by `contract-reviewer` | specified, over the fake queue and fake checks | F8b2 (both files' chains) |
+| F8b2-advance | The advance's caller (§14.55): `Queue::advance_after_school(&dyn ResumeChecks)` under the queue lock, persisted once; step 3's proceed runs it between its own jobs and the passed steps' jobs (step 6's `google.gmail_first_read`, and `google.calendar_read` only when the new `ResumeChecks::google_calendar_granted()` (default `self.google_granted()`) is true; step 7's `calendar.store`; step 8's `config.ingest`), with `slot.partial` asked once, last, through one `answer_enqueuer`; `earliest_unproven`'s step-7 rung (`google_granted && !google_calendar_granted` lands at 7; review I-1); the checks as `pub type ManagedChecks = Arc<dyn ResumeChecks + Send + Sync>` (review m-1); **§14.56**: `handover_for` treats no `mail.setup` record and no step-5 `mail` skip as unfinished mail (`mail.connect`), the advance writes a bare `done` `mail.setup` record when it passes step 5 on `school_mailbox_active`, and `FATAL_UNKNOWN_VERSION` beside `FATAL_NEWER` (about 46 lines: 10 in `onboarding_jobs.rs`, 36 in `onboarding_state.rs`; test 40's §14.56 cases, test 38's version-0 case; test 33's advance cases, Gmail-only included, written first) | `implementer`, reviewed by `contract-reviewer` | specified, over the fake queue and fake checks | F8b2 (both files' chains) |
 | F8c | Runners: the local lane (stores, apply, courses, config); `registrar.confirm` moved to F8h-runner (§14.52.4, r4 n-2). Merged | `implementer` | specified | F8e, F6a, F6b |
 | F8g | Runners: the partial (`BeforeConfig`, then `NoRank`) and full slots, each with onboarding's `AppHandle` (held by the runner); a queue stop returns before the slot; a slot the stop cut short is `Stopped` (§14.51 r1); sets the in-memory `judge_seen` and `ingest_seen` facts the Google reads wait for on every queued Google job, pending, held or waiting (no `onboarding.json` change; §14.52 r2 n1); the job-name dispatch is F8w1's (§14.52.4; about 78 lines) | `implementer` | specified | F8e, F8f, F8h (alone, never F8h-runner; r4 n-2), F8s, F8b2 (`job_context`), F8b2-advance (the chain F8d2, F8b, F8b2, F8b2-advance, F8g; §14.55), F8d2 |
 | F8d | Runners: mail, Google, calendars, coursework; the stop checks in `mail/runner.rs`'s confirm and canary waits; `mail_provider` recorded as the service's string through `update_answers` (§14.51 r2, r3); the canary's 180 s kept. **Merged into O3 at `62f6c73`** (carrying `ad006ca` and `cb2b2bf`); the queue and guard follow-ups are F8d2's (§14.52.1, r2 R2-2; its merged test-34 parts were not written first) | `implementer` | specified | F8a |
@@ -4671,7 +4671,8 @@ its test first, failing before the code, as for 29-32.
      - A **running** `mail.setup` is waited for by the drain (F8f2, ruling R2's 5 s bound), so at
        finish it has ended.
      - A `mail.setup` that is **not `done`** at finish (pending and never started, `Waiting`,
-       stopped back to `pending`, or `failed`) is **not handed over**. Neither are `mail.canary` and
+       stopped back to `pending`, or `failed`), **or with no record at all and no step-5 `mail`
+       skip** (§14.56), is **not handed over**. Neither are `mail.canary` and
        `mail.first_pass`, which mean nothing without it. In their place, `handover_for` writes one
        item, `{item: "mail.connect", signal: "mail_json"}`, with cost key `mail_setup_unfinished`
        (`COST_MAIL_UNFINISHED`, beside `COST_MAIL`).
@@ -5044,8 +5045,12 @@ its test first, failing before the code, as for 29-32.
      - an I/O error that outlasts the retries is `fatal` (the existing message box): "Knowlu could
        not read this profile's setup file (onboarding.json). Close any program that may be using it,
        then open Knowlu again. Nothing was changed.";
-     - a `version` this build does not know (a downgrade) is `fatal` too: "This profile was set up by
-       a newer Knowlu. Install the latest version, then open it again. Nothing was changed."
+     - a `version` this build does not know is `fatal` too. Above this build's (a downgrade): "This
+       profile was set up by a newer Knowlu. Install the latest version, then open it again.
+       Nothing was changed." Any other unknown version (0, or one below): "This profile's setup file
+       (onboarding.json) is in a form this Knowlu doesn't recognise. Install the latest version,
+       then open it again. Nothing was changed." (§14.56, after F2b2b's review: the one sentence
+       read "newer" for version 0.)
      The two sentences are the controller's to edit (error text, not product or privacy).
    - **The queue.** `Queue::start(deps, state)` with F8w1's `Deps` and the state from
      `onboarding_state::resume(loaded, &LiveChecks)` (F2a's derived state; `running` jobs are back to
@@ -5207,7 +5212,8 @@ its test first, failing before the code, as for 29-32.
     loads with no rewrite;
   - held past it, the read writes nothing, and the launch is the named fatal (through an inner that
     returns the decision);
-  - version 2 writes nothing;
+  - version 2 writes nothing and reads "newer Knowlu"; version 0 writes nothing and reads
+    `FATAL_UNKNOWN_VERSION` (§14.56, F8b2-advance's case);
   - unparseable bytes are rewritten at the derived step;
   - `install_update`'s inner refuses in onboarding mode;
   - test 27's pins;
@@ -5227,6 +5233,9 @@ its test first, failing before the code, as for 29-32.
     `mail.connect` is written;
   - with `mail.setup` `skipped`, both after a run and as a bare record `skip_mail` wrote with no
     history, no `mail.connect` is written (§14.54);
+  - (F8b2-advance, §14.56) no `mail.setup` record and no step-5 `mail` skip writes one
+    `mail.connect`; a step-5 `mail` skip with or without its record writes none; a bare `done`
+    record from the advance's proven-mailbox pass writes no mail item at all;
   - `CanaryVerified` and `TurnedOff` each clear `mail.connect` (`mail_signal` directly), and a
     slot's end does not;
   - **the two no-row cases keep it** (r2 R2-1):
@@ -5637,7 +5646,8 @@ From F2b2a's r4 review (PASS; F2b2a is merged into O3).
     `school.courses`, `registrar.confirm`, `google.gmail_first_read`, `google.calendar_read` (the
     fake's `google_calendar_granted` is true), `calendar.store`, `config.ingest` and one
     `slot.partial`, in that order, and the slot runs as `NoRank`. Each Google read then waits for
-    its slot fact and ends `done`. After step 10's confirm and
+    its slot fact and ends `done`. The advance has written a bare `done` `mail.setup` record,
+    and `handover` holds no `mail.connect` (§14.56). After step 10's confirm and
     the fake `slot.first_full`, `onboarding_status` answers `finish_ready: true`;
   - **partly proven** (restored and entitled only): the advance lands at 5, and no step-7 or
     step-8 job is enqueued;
@@ -5660,4 +5670,62 @@ From F2b2a's r4 review (PASS; F2b2a is merged into O3).
   - F8g and F8w2 gain F8b2-advance; both already came after F8b2.
   - F4c's one line adds no edge: F4c already follows F8w2.
   - No cycle.
+
+### 14.56 Step 5 neither answered nor skipped is unfinished mail (2026-10-24)
+
+From F2b2b's review (`docs/reports/2026-10-24-wave-b-f2b2b-review.md`; F2b2b is merged into O3 at
+`3c865fa`).
+- **The gap.** A student can reach finish having neither answered nor skipped step 5. The backend
+  never advances `state.step`, and three places key only on job records that exist:
+  - `finish_refusal`;
+  - `gate_items` (`onboarding_state.rs:1110-1123`);
+  - `handover_for` (`:1146-1160`), whose `unfinished` is `open("mail.setup")` and so is false with
+    no record (its comment: "no record, none").
+  So if step 5's answer is refused and the page moves on anyway, there is no mail job, no skip and
+  no `mail.connect`, and email is lost silently. The page computes nothing, so the guard belongs in
+  the backend. Step 5 is always shown (§4.2 step 5), so "no record" never means "no step 5".
+- **Ruling: the smallest form, in `handover_for` plus one record.**
+  - **`handover_for`'s rule.** `unfinished` becomes "`mail.setup` is open, **or** there is no
+    `mail.setup` record and no step-5 `mail` skip (`Skip { step: 5, source: "mail", .. }`,
+    `:69-73`)". Either way, the one `mail.connect` item replaces the three, as today. About 2 lines.
+  - **The proven-mailbox pass records itself.** When `advance_after_school` passes step 5 because
+    `school_mailbox_active` holds, it inserts a bare `done` `mail.setup` record if none exists.
+    That record has no proof and no run, and `enqueue_once` and the walked path already leave a
+    `done` job alone. So the pass gets no item, and neither do `mail.canary` and
+    `mail.first_pass`, which have no records. About 3 lines.
+  - **Not chosen:** a `proven_steps` field, which is a new key in `onboarding.json` and needs
+    `STATE_VERSION` thought; and a `finish_refusal` rule, which would block finish on mail, which
+    §14.52.1 rules out ("it does not block finish").
+  - In production today, `LiveChecks`'s `school_mailbox_active` is `false` (ruling 4), so the
+    advance never passes step 5 there. The record matters once a local source exists, and for
+    test 33's all-proven case.
+- **Owner: F8b2-advance**, for both halves (`onboarding_state.rs`, about 5 lines).
+  - It already writes the advance, and the rule must never land before the record: with the rule
+    alone, test 33's all-proven case would hand over a `mail.connect` for a proven mailbox.
+  - F2b2c is `mail/commands.rs` only (§14.52, r4 R4-1), and F2b2b is merged, so neither takes
+    it.
+  - F8b2-advance grows from about 38 to about 46 lines, including the sentence below, and stays S.
+- **`FATAL_NEWER` for any unknown version** (the same review). `load_state_for_launch`
+  (`:274-275`) answers `FATAL_NEWER` for any `version != STATE_VERSION`, so a version-0 file reads
+  "set up by a newer Knowlu".
+  - The ruling is two sentences, split on the comparison:
+    - above `STATE_VERSION`, `FATAL_NEWER` as it is;
+    - any other unknown version, a new `FATAL_UNKNOWN_VERSION`, worded in §14.52.5 above.
+  - F1's test (`app/tests/onboarding_state.rs:1948-1958`) keeps passing unedited, since version 2
+    still reads "newer Knowlu". Test 38 gains a version-0 case that reads the new sentence and
+    writes nothing.
+  - The owner is F8b2-advance, as a one-line rider in the same file's chain. The sentences are the
+    controller's to edit (§14.52.5).
+- **Test 40 gains** (F8b2-advance, written first):
+  - finish with no `mail.setup` record and no step-5 `mail` skip writes one `mail.connect` item,
+    with signal `mail_json` and cost key `mail_setup_unfinished`;
+  - a step-5 `mail` skip writes none, with its `skipped` record (§14.54) and also without one;
+  - after the advance passed step 5 on `school_mailbox_active`: one bare `done` `mail.setup`
+    record, and no `mail.connect`, `mail.canary` or `mail.first_pass` item;
+  - an advance that lands at 5 writes no `mail.setup` record, and a finish from there writes
+    `mail.connect`.
+- **Test 33's all-proven case** also asserts the bare `done` `mail.setup` record and no
+  `mail.connect` in `handover`.
+- **§7, re-walked:** F8b2-advance gains no dependency (it already follows F8b2, which follows
+  F2b2b), and nothing new depends on it. No cycle.
 
