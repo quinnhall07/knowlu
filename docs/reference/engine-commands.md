@@ -3,8 +3,20 @@
 Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads stays short.
 `CLAUDE.md` keeps the rules; this file keeps the reference. Update it with the code.
 
-- `rank --vault <v> [--today YYYY-MM-DD] [--runner manual|local|cloud] [--run-id <id>]` — no new
-  flag for events. Its events pass runs in this order (`cli.rs`; events spec §6.1, P16): D9's
+- `rank --vault <v> [--today YYYY-MM-DD] [--now YYYY-MM-DDTHH:MM] [--runner manual|local|cloud]
+  [--run-id <id>]` — no new flag for events. **The evening order** (spec
+  `docs/specs/2026-10-23-evening-ranking-rule-draft.md`; `ranking::rank_at`): from 20:00 vault time
+  (`ranking::EVENING_HOUR`), tasks due later the same day come first, earliest due first, ties
+  keeping the pressure order; every other task keeps the pressure order below them, and `rank_override`
+  still wins. Before the hour, or with no moment, the order is unchanged. **The day and the moment**
+  (`cli::rank_clock`): the day is `--today`, else `--now`'s date, else the machine's date; the moment
+  is `--now`, else none when `--today` is given (daytime order, as the golden harness runs), else the
+  vault's wall clock. `--now` is strict `%Y-%m-%dT%H:%M` (no seconds, no bare date); a bad value is
+  `BadNow`, exit 2, before the run starts, so nothing is written. `--now` pins the ranking moment
+  only, no timestamp the engine writes (the footer and the run record keep the wall clock). Beyond
+  the day, exactly as `--today`, a `--now` with no `--today` dates the run's writes (the info pass,
+  the approvals budget and pass, the proposal count) by `--now`'s day, so `rank --now` is a real run,
+  never a dry run. Its events pass runs in this order (`cli.rs`; events spec §6.1, P16): D9's
   rebuild of a rejected `event-accept` card's declines and the series carry
   (`eventcarry::run`), then series inheritance of a settled `event-check` answer, then the roster,
   then the cards (obligation `event-accept` cards, the digest only with `event_cards` off, `unsure`
@@ -113,6 +125,8 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   `rank`, `surface` and `write` are never gated.
 - `surface --vault <v> --view today|overdue|week|later|all|decisions|good-to-know|issues|runs
   [--today] [--now] [--seen-at] [--build-sha] [--window <flow-sequence>]` — the read model as JSON.
+  Its `--now` is also the ranking moment: the page ranks in the evening order from 20:00 on that
+  moment's day (`surface::load_at`); the note drawer (`note_detail`) keeps `load`.
   Never writes. `--window` (today view only) previews a planning-day `window:` edit — invalid input
   exits 2 — and reports `moved` against the current window without writing one.
 - `commitments --vault <v> [--today YYYY-MM-DD] [--json] [--confirm <file> [--actor quinn] [--via dashboard]]`

@@ -148,6 +148,9 @@ fact. The settings panel is an **overlay** over a running console, and nothing i
   `spill_blocks = max(0, ceil(must_hours × 2) − fit_blocks)`. One block = 30 minutes.
 - **The form is the argument** (§11.6): blocks that fit sit inside a bordered, accented container;
   blocks that do not are drawn **outside it in outline red**. Today that reads 10 in, 39 out.
+- **After 20:00 the spill list follows the evening order.** The meter reads the same ranked list, so
+  which tasks spill can change at the hour: tasks due tonight are counted first and an overdue task
+  may move into the spill (spec §1, S5). The totals (`must_hours`, `fit_blocks`) do not change.
 - **Spill blocks are hoverable and name their tasks** (§12.6 #5). This is Runway's threshold strip
   folded in: the meter answers *how much* doesn't fit, the hover answers *what*.
 - **Capped at 120 spill blocks**, then `… and N more`. A freshman in week three generates unbounded
@@ -180,6 +183,12 @@ fact. The settings panel is an **overlay** over a running console, and nothing i
 - **Answers:** what is actually at risk?
 - **Computed by:** `surface::must_do → state.must_do`, via `ranking::partition_must_do` (slack ≤ 0),
   grouped by horizon, sorted `start_by` then `due`.
+- **After 20:00 the groups follow the evening order.** The page ranks at its own `now`
+  (`surface::load_at`); from 20:00 vault time, tasks due later tonight come first, so the `Due today`
+  group leads `Overdue`. The set is unchanged, only the order. Inside `Due today` the group keeps
+  its existing `start_by`-then-`due` sort (**pending Q-1: whether it sorts by due time after the
+  hour**; see the evening plan's §3). `state/today.md` keeps the daytime order unless a slot runs
+  after 20:00.
 - **Row carries:** pip · title · source chip · **`start by`** · **slack** · progress track · hours ·
   ⚑ · optional flag span (`you: 100% · zyBooks: 60%`, `conflicts with …`, `extended → 9/18`) ·
   optional merge span · optional amend badge.
