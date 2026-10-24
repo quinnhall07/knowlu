@@ -6009,3 +6009,26 @@ fn mail_keep_session_off_stops_the_slot_and_holds_the_window_until_every_profile
     assert!(knowlu::mail::MailWindow::try_take().is_some(), "the toggle let the mail window go when it was done");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ---- O3 F8d2, plan test 34: the onboarding-mode guard on mail_setup_start ---------------------------------------------
+
+/// `mail_setup_start`'s inner refuses in onboarding mode with its named line and starts nothing (the
+/// queue's `mail.setup` is the only thing that starts a setup then); in the normal console it is the start.
+#[test]
+fn test_34_mail_setup_start_refuses_in_onboarding_mode_and_starts_nothing() {
+    use knowlu::onboarding_state::LaunchMode;
+    let starts = std::cell::Cell::new(0usize);
+    let start = || { starts.set(starts.get() + 1); json!({ "ok": true, "error": null }) };
+    let out = knowlu::mail::setup_start_inner(LaunchMode::Onboarding, start);
+    assert_eq!(out["ok"], json!(false), "{out}");
+    assert_eq!(out["error"], json!("setup starts school email itself"), "{out}");
+    assert_eq!(starts.get(), 0, "nothing started");
+    let out = knowlu::mail::setup_start_inner(LaunchMode::Normal, start);
+    assert_eq!(out, json!({ "ok": true, "error": null }), "the normal console starts as before");
+    assert_eq!(starts.get(), 1);
+    // The command routes through the inner, with the managed launch mode.
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("mail.rs")).unwrap();
+    let from = src.find("pub fn mail_setup_start(").expect("the command");
+    let body = &src[from..from + src[from..].find("\n}\n").expect("its end")];
+    assert!(body.contains("setup_start_inner("), "the wrapper calls the inner:\n{body}");
+}

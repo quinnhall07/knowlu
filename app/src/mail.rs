@@ -743,8 +743,22 @@ pub fn mail_status(cs: State<'_, ConsoleState>) -> Value {
 
 #[tauri::command(async)]
 pub fn mail_setup_start(app: tauri::AppHandle, cs: State<'_, ConsoleState>, provider: String) -> Value {
-    let unitid = Some(crate::grades::campus_of(&cs.vault).unitid).filter(|u| !u.is_empty());
-    commands::setup_start_with(&cs.data_dir, &provider, unitid, |kind| live::start_setup(&app, kind).map(|_| ()))
+    // F8d2: the launch mode is managed state in the app; absent, it reads as the normal console.
+    let mode = app.try_state::<crate::onboarding_state::LaunchMode>().map(|m| *m).unwrap_or(crate::onboarding_state::LaunchMode::Normal);
+    setup_start_inner(mode, || {
+        let unitid = Some(crate::grades::campus_of(&cs.vault).unitid).filter(|u| !u.is_empty());
+        commands::setup_start_with(&cs.data_dir, &provider, unitid, |kind| live::start_setup(&app, kind).map(|_| ()))
+    })
+}
+
+/// F8d2: `mail_setup_start`'s body with the launch mode passed in. In onboarding mode the queue's
+/// `mail.setup` is the only thing that starts a setup; a page call that won the mail window first would
+/// make the queue's run fail, so it is refused before anything starts.
+pub fn setup_start_inner(mode: crate::onboarding_state::LaunchMode, start: impl FnOnce() -> Value) -> Value {
+    if mode == crate::onboarding_state::LaunchMode::Onboarding {
+        return json!({ "ok": false, "error": "setup starts school email itself" });
+    }
+    start()
 }
 
 #[tauri::command]

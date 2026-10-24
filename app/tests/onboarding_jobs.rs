@@ -2751,9 +2751,10 @@ fn test_30_the_reads_write_nothing_after_the_stop_and_a_named_outcome_is_never_a
 }
 
 #[test]
-fn test_30_the_canary_and_first_pass_watch_write_nothing_heed_the_stop_each_poll_and_are_bounded() {
+fn test_30_the_canary_watch_writes_nothing_heed_the_stop_each_poll_and_are_bounded() {
     type Watch = fn(&dyn Fn() -> bool, &AtomicBool, &dyn Fn(Duration)) -> Outcome;
-    let watchers: [(&str, Watch); 2] = [("canary", run_mail_canary), ("first pass", run_mail_first_pass)];
+    // F8d2: the first pass no longer polls for a budget; it looks once (`MAIL_FIRST_PASS_LOOKS`, test 34 below).
+    let watchers: [(&str, Watch); 1] = [("canary", run_mail_canary)];
     for (name, watch) in watchers {
         let (polls, sleeps) = (AtomicUsize::new(0), AtomicUsize::new(0));
         let sleep = |d: Duration| { assert_eq!(d, MAIL_WATCH_POLL); sleeps.fetch_add(1, Ordering::SeqCst); };
@@ -2787,4 +2788,252 @@ fn test_32_the_setup_runners_only_answers_write_is_one_update_answers_for_mail_p
         assert!(!body.contains(other), "no other answers write in the setup runner ({other}):
 {body}");
     }
+}
+
+// ---- F8d2: the mail queue additions (test 34's F8d2 parts, written first) ---------------------------------------
+
+/// A clock the test moves by hand: `retry_at` is read against it, so no test waits 30 real seconds.
+struct FakeClock { base: Instant, moved: Mutex<Duration> }
+impl FakeClock {
+    fn new() -> Arc<FakeClock> { Arc::new(FakeClock { base: Instant::now(), moved: Mutex::new(Duration::ZERO) }) }
+    fn advance(&self, by: Duration) { *self.moved.lock().unwrap() += by; }
+}
+impl RetryClock for FakeClock {
+    fn now(&self) -> Instant { self.base + *self.moved.lock().unwrap() }
+}
+
+/// `rig_full`'s queue (answers saved, school confirmed), started over a fake clock.
+fn rig_timed(tag: &str, mut state: OnboardingState, entitled: bool, setup: impl FnOnce(&Fake)) -> (Rig, Arc<FakeClock>) {
+    let dir = scratch(tag);
+    save_answers(&dir, &Answers { courses: three_courses(), ..Default::default() }).unwrap();
+    state.school = Some(School { unitid: Some("900001".into()), label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: true });
+    let fake = Arc::new(Fake::default());
+    setup(&fake);
+    let ent = Arc::new(Ent(AtomicBool::new(entitled), AtomicUsize::new(0)));
+    let deps = Deps { data_dir: dir.clone(), runner: fake.clone(), entitlement: ent.clone(), sync_view: Arc::new(Syncs(Mutex::new(VecDeque::new()))) };
+    let clock = FakeClock::new();
+    let q = Queue::start_with_clock(deps, state, clock.clone());
+    (Rig { log: fake.log.clone(), q, fake, ent, dir }, clock)
+}
+
+fn runs_of(r: &Rig, job: &str) -> usize { r.log.started().iter().filter(|j| *j == job).count() }
+fn nap() { std::thread::sleep(Duration::from_millis(600)); }
+
+#[test]
+fn test_34_a_job_parked_on_mail_window_busy_is_picked_again_after_30_seconds_and_no_other_reason_is() {
+    assert_eq!(TIMER_RETRY_AFTER, Duration::from_secs(30));
+    assert_eq!(REASON_MAIL_WINDOW_BUSY, "mail_window_busy");
+    let tries = Arc::new(AtomicUsize::new(0));
+    let t = tries.clone();
+    let (r, clock) = rig_timed("t34-retry", state_at(5, true), true, move |f| {
+        f.behave("mail.setup", move || {
+            if t.fetch_add(1, Ordering::SeqCst) == 0 { Outcome::Waiting(REASON_MAIL_WINDOW_BUSY.into()) } else { Outcome::Done(BTreeMap::new()) }
+        });
+        f.behave("mail.first_pass", || Outcome::Waiting(REASON_MAIL_NOT_YET.into()));
+    });
+    r.q.enqueue("mail.setup");
+    r.q.enqueue("mail.first_pass");
+    r.wait_for("both to park", |r| r.job("mail.setup").reason.as_deref() == Some(REASON_MAIL_WINDOW_BUSY) && r.job("mail.first_pass").reason.as_deref() == Some(REASON_MAIL_NOT_YET));
+    clock.advance(Duration::from_secs(29));
+    nap();
+    assert_eq!(tries.load(Ordering::SeqCst), 1, "29 s is not 30");
+    assert_eq!(runs_of(&r, "mail.first_pass"), 1);
+    assert_eq!(r.state_of("mail.setup"), JobState::Pending);
+    clock.advance(Duration::from_secs(2));
+    r.wait_for("the setup to run again", |r| r.state_of("mail.setup") == JobState::Done);
+    assert_eq!(tries.load(Ordering::SeqCst), 2);
+    // (A job that ends done unparks the others, as it always has, so the first pass is checked alone below.)
+    let (r, clock) = rig_timed("t34-retry-other", state_at(5, true), true, |f| {
+        f.behave("mail.first_pass", || Outcome::Waiting(REASON_MAIL_NOT_YET.into()));
+    });
+    r.q.enqueue("mail.first_pass");
+    r.wait_for("the first pass to park", |r| r.job("mail.first_pass").reason.as_deref() == Some(REASON_MAIL_NOT_YET));
+    clock.advance(Duration::from_secs(300));
+    nap();
+    assert_eq!(runs_of(&r, "mail.first_pass"), 1, "a parked mail_not_yet is not on the timer: only mail_window_busy is");
+}
+
+#[test]
+fn test_34_a_stop_during_the_retry_wait_starts_nothing() {
+    let (r, clock) = rig_timed("t34-retry-stop", state_at(5, true), true, |f| {
+        f.behave("mail.setup", || Outcome::Waiting(REASON_MAIL_WINDOW_BUSY.into()));
+    });
+    r.q.enqueue("mail.setup");
+    r.wait_for("the setup to park", |r| r.job("mail.setup").reason.as_deref() == Some(REASON_MAIL_WINDOW_BUSY));
+    r.q.request_stop();
+    clock.advance(Duration::from_secs(120));
+    nap();
+    assert_eq!(runs_of(&r, "mail.setup"), 1, "the retry timer starts nothing once the stop is set: {:?}", r.log.all());
+    assert_eq!(r.state_of("mail.setup"), JobState::Pending);
+}
+
+#[test]
+fn test_34_skip_mail_with_the_setup_pending_or_held_marks_the_three_jobs_skipped_and_none_is_handed_over() {
+    let mail = ["mail.setup", "mail.canary", "mail.first_pass"];
+    let (r, _clock) = rig_timed("t34-skip-held", state_at(5, true), false, |_| {});
+    for j in mail { r.q.enqueue(j); }
+    r.idle();
+    for j in mail { assert_eq!(r.state_of(j), JobState::Held, "{j}"); }
+    r.q.skip_mail();
+    for j in mail { assert_eq!(r.state_of(j), JobState::Skipped, "{j}"); }
+    assert!(handover_for(&r.q.snapshot()).iter().all(|h| !h.item.starts_with("mail.")), "a skipped mail job is never handed over");
+    r.ent.0.store(true, Ordering::SeqCst);
+    r.q.wake();
+    r.idle();
+    nap();
+    for j in mail { assert!(!r.log.ran(j), "{j} ran after the skip: {:?}", r.log.all()); }
+    // A job parked on the window timer is skipped too, and the timer does not bring it back.
+    let (r, clock) = rig_timed("t34-skip-parked", state_at(5, true), true, |f| {
+        f.behave("mail.setup", || Outcome::Waiting(REASON_MAIL_WINDOW_BUSY.into()));
+    });
+    r.q.enqueue("mail.setup");
+    r.wait_for("the setup to park", |r| r.job("mail.setup").reason.as_deref() == Some(REASON_MAIL_WINDOW_BUSY));
+    r.q.skip_mail();
+    assert_eq!(r.state_of("mail.setup"), JobState::Skipped);
+    clock.advance(Duration::from_secs(60));
+    nap();
+    assert_eq!(runs_of(&r, "mail.setup"), 1);
+    assert_eq!(r.state_of("mail.setup"), JobState::Skipped);
+    // Other jobs are left alone.
+    r.q.enqueue("coursework.discover");
+    r.idle();
+    assert_eq!(r.state_of("coursework.discover"), JobState::Done);
+}
+
+#[test]
+fn test_34_skip_mail_with_the_setup_running_stops_the_run_and_the_job_lands_skipped_not_pending() {
+    let run = Arc::new(FakeRun::new(false, "stopped", "google"));
+    let (r, _clock) = rig_timed("t34-skip-running", state_at(5, true), true, {
+        let run = run.clone();
+        move |f| {
+            f.behave("mail.setup", move || {
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while run.stops.load(Ordering::SeqCst) == 0 {
+                    assert!(Instant::now() < deadline, "the run was never stopped");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Outcome::Stopped
+            });
+        }
+    });
+    r.q.attach_setup_run(run.clone());
+    for j in ["mail.setup", "mail.canary", "mail.first_pass"] { r.q.enqueue(j); }
+    r.wait_started("mail.setup");
+    assert_eq!(r.state_of("mail.setup"), JobState::Running);
+    assert_eq!(run.stops.load(Ordering::SeqCst), 0, "nothing stops the run before the skip");
+    r.q.skip_mail();
+    r.wait_for("the setup to land", |r| r.state_of("mail.setup") != JobState::Running);
+    assert_eq!(r.state_of("mail.setup"), JobState::Skipped, "Stopped lands as skipped, not pending");
+    assert_eq!(run.stops.load(Ordering::SeqCst), 1, "the run's stop is called once");
+    r.idle();
+    nap();
+    for j in ["mail.canary", "mail.first_pass"] {
+        assert_eq!(r.state_of(j), JobState::Skipped, "{j}");
+        assert!(!r.log.ran(j), "{j} ran");
+    }
+    assert!(handover_for(&r.q.snapshot()).iter().all(|h| !h.item.starts_with("mail.")));
+}
+
+#[test]
+fn test_34_a_run_attached_after_the_skip_is_stopped_at_once() {
+    let gate = Arc::new(Mutex::new(None));
+    let g2 = gate.clone();
+    let (r, _clock) = rig_timed("t34-skip-late", state_at(5, true), true, move |f| { *g2.lock().unwrap() = Some(f.block("mail.setup", false)); });
+    r.q.enqueue("mail.setup");
+    r.wait_started("mail.setup");
+    r.q.skip_mail();
+    let run = Arc::new(FakeRun::new(false, "stopped", "google"));
+    r.q.attach_setup_run(run.clone());
+    assert_eq!(run.stops.load(Ordering::SeqCst), 1, "the skip came first, so the run is stopped as it is handed over");
+    gate.lock().unwrap().as_ref().unwrap().release();
+    r.wait_for("the setup to land", |r| r.state_of("mail.setup") != JobState::Running);
+    assert_eq!(r.state_of("mail.setup"), JobState::Done, "a setup that ended on its own despite the skip keeps its truthful end");
+}
+
+#[test]
+fn test_34_mail_first_pass_looks_once_parks_and_runs_again_after_mail_batch_closed() {
+    assert_eq!(MAIL_FIRST_PASS_LOOKS, 1);
+    // The runner itself: one look, no sleep.
+    let looks = AtomicUsize::new(0);
+    let never_sleep = |_: Duration| panic!("the first pass never waits");
+    let out = run_mail_first_pass(&|| { looks.fetch_add(1, Ordering::SeqCst); false }, &AtomicBool::new(false), &never_sleep);
+    assert_eq!(out, Outcome::Waiting(REASON_MAIL_NOT_YET.into()));
+    assert_eq!(looks.load(Ordering::SeqCst), MAIL_FIRST_PASS_LOOKS as usize);
+    assert_eq!(run_mail_first_pass(&|| true, &AtomicBool::new(false), &never_sleep), Outcome::Done(BTreeMap::new()));
+    assert_eq!(run_mail_first_pass(&|| false, &AtomicBool::new(true), &never_sleep), Outcome::Stopped);
+    // On the queue: it parks, does not spin, and wakes when a batch closes.
+    let (closed, seen) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+    let (c, s) = (closed.clone(), seen.clone());
+    let (r, _clock) = rig_timed("t34-first-pass", state_at(5, true), true, move |f| {
+        f.behave("mail.first_pass", move || {
+            run_mail_first_pass(&|| { s.fetch_add(1, Ordering::SeqCst); c.load(Ordering::SeqCst) }, &AtomicBool::new(false), &|_| panic!("no wait"))
+        });
+    });
+    r.q.enqueue("mail.first_pass");
+    r.wait_for("the first pass to park", |r| r.job("mail.first_pass").reason.as_deref() == Some(REASON_MAIL_NOT_YET));
+    nap();
+    assert_eq!(seen.load(Ordering::SeqCst), 1, "one look, and no spin while parked");
+    closed.store(true, Ordering::SeqCst);
+    r.q.mail_batch_closed();
+    r.wait_for("the first pass to be done", |r| r.state_of("mail.first_pass") == JobState::Done);
+    assert_eq!(seen.load(Ordering::SeqCst), 2, "it looked again after the batch closed");
+}
+
+// ---- F8d2 fix round: the skip seam, a failed end after a skip, and the retry spacing ------------------------------------
+
+#[test]
+fn test_34_a_skip_that_lands_before_any_run_is_attached_is_readable_through_mail_skipped() {
+    let gate = Arc::new(Mutex::new(None));
+    let g2 = gate.clone();
+    let (r, _clock) = rig_timed("t34-skipped-seam", state_at(5, true), true, move |f| { *g2.lock().unwrap() = Some(f.block("mail.setup", false)); });
+    assert!(!r.q.mail_skipped("mail.setup"), "not before the skip");
+    r.q.enqueue("mail.setup");
+    r.wait_started("mail.setup");
+    assert!(!r.q.mail_skipped("mail.setup"), "running, not skipped");
+    r.q.skip_mail(); // no setup run has been attached: the marker is all the glue can read
+    assert!(r.q.mail_skipped("mail.setup"), "the glue checks this on each window poll and before start_setup");
+    assert!(!r.q.mail_skipped("mail.canary"), "only the running job is marked");
+    gate.lock().unwrap().as_ref().unwrap().release();
+    r.wait_for("the setup to land", |r| r.state_of("mail.setup") != JobState::Running);
+    assert!(!r.q.mail_skipped("mail.setup"), "the marker goes when the job ends");
+}
+
+#[test]
+fn test_34_a_failed_end_after_a_skip_lands_skipped_and_a_done_end_stays_done() {
+    for (outcome, want) in [(Outcome::Failed(REASON_MAIL_SETUP_FAILED.into()), JobState::Skipped), (Outcome::Done(BTreeMap::new()), JobState::Done)] {
+        let gate = Arc::new(Mutex::new(None));
+        let g2 = gate.clone();
+        let (r, _clock) = rig_timed("t34-skip-failed", state_at(5, true), true, move |f| {
+            *g2.lock().unwrap() = Some(f.block("mail.setup", false));
+            f.behave("mail.setup", move || outcome.clone());
+        });
+        r.q.enqueue("mail.setup");
+        r.wait_started("mail.setup");
+        r.q.skip_mail();
+        gate.lock().unwrap().as_ref().unwrap().release();
+        r.wait_for("the setup to land", |r| r.state_of("mail.setup") != JobState::Running);
+        assert_eq!(r.state_of("mail.setup"), want);
+    }
+}
+
+#[test]
+fn test_34_a_parked_window_busy_job_is_not_re_picked_by_other_jobs_finishing_before_its_30_seconds() {
+    let (r, clock) = rig_timed("t34-spacing", state_at(5, true), true, |f| {
+        f.behave("mail.setup", || Outcome::Waiting(REASON_MAIL_WINDOW_BUSY.into()));
+    });
+    r.q.enqueue("mail.setup");
+    r.wait_for("the setup to park", |r| r.job("mail.setup").reason.as_deref() == Some(REASON_MAIL_WINDOW_BUSY));
+    // A lane-1 job ends done, which unparks every parked job; the retry time still holds the setup back.
+    r.q.enqueue("calendar.store");
+    r.wait_for("the lane job", |r| r.state_of("calendar.store") == JobState::Done);
+    // And a serial job, for the other thread.
+    r.q.enqueue("coursework.discover");
+    r.wait_for("the serial job", |r| r.state_of("coursework.discover") == JobState::Done);
+    nap();
+    assert_eq!(runs_of(&r, "mail.setup"), 1, "re-picked before its 30 s: {:?}", r.log.all());
+    clock.advance(Duration::from_secs(29));
+    nap();
+    assert_eq!(runs_of(&r, "mail.setup"), 1);
+    clock.advance(Duration::from_secs(2));
+    r.wait_for("the setup to be picked again", |r| runs_of(r, "mail.setup") >= 2);
 }
