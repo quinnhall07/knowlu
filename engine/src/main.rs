@@ -30,6 +30,10 @@ enum Command {
         /// Pin the run date (YYYY-MM-DD). Without it, the system date is used.
         #[arg(long)]
         today: Option<String>,
+        /// Pin the ranking moment, YYYY-MM-DDTHH:MM in vault time. Without it, a run with
+        /// --today has no moment and ranks as daytime.
+        #[arg(long)]
+        now: Option<String>,
         #[arg(long, default_value = "manual", value_parser = ["manual", "local", "cloud"])]
         runner: String,
         /// Reuse a run id the caller already started.
@@ -463,8 +467,8 @@ fn main() -> ExitCode {
         }
     }
     match cli.command {
-        Command::Rank { vault, today, runner, run_id } => {
-            match cli::run(&vault, today.as_deref(), &runner, run_id.as_deref()) {
+        Command::Rank { vault, today, now, runner, run_id } => {
+            match cli::run_at(&vault, today.as_deref(), now.as_deref(), &runner, run_id.as_deref()) {
                 Ok(outcome) => {
                     println!("wrote {}", outcome.output.display());
                     println!("{} {}", outcome.status, outcome.summary);

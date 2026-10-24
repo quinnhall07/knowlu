@@ -38,7 +38,7 @@ use crate::models::{apply_slice_default, load_tasks};
 use crate::passes::{detect_external, verify_tail, VERIFY_TAIL_LIMIT};
 use crate::planning::load_planning;
 use crate::pystr;
-use crate::ranking::{designate_today, rank};
+use crate::ranking::{designate_today, rank_at};
 use crate::runs::{end_run, git_sha, start_run};
 use crate::render::{render_today, RenderOpts};
 use crate::weekcal::WeekCalendar;
@@ -68,6 +68,7 @@ pub struct RunOutcome {
 pub enum RunError {
     BadRunId(String),
     BadDate(String),
+    BadNow(String),
     Io(String),
 }
 
@@ -79,6 +80,7 @@ impl RunError {
         match self {
             RunError::BadRunId(_) => "BadRunId",
             RunError::BadDate(_) => "BadDate",
+            RunError::BadNow(_) => "BadNow",
             RunError::Io(_) => "Io",
         }
     }
@@ -90,7 +92,7 @@ impl RunError {
     /// Task 17 sweep. `scripts/local-run.ps1` tests only for non-zero.)
     pub fn exit_code(&self) -> u8 {
         match self {
-            RunError::BadRunId(_) | RunError::BadDate(_) => 2,
+            RunError::BadRunId(_) | RunError::BadDate(_) | RunError::BadNow(_) => 2,
             RunError::Io(_) => 1,
         }
     }
@@ -104,6 +106,9 @@ impl std::fmt::Display for RunError {
                 "--run-id must look like <runner>-YYYY-MM-DDTHH:MM:SSZ, got {v:?}"
             ),
             RunError::BadDate(v) => write!(f, "--today must be an ISO date, got {v:?}"),
+            RunError::BadNow(v) => {
+                write!(f, "--now must look like YYYY-MM-DDTHH:MM, got {v:?}")
+            }
             RunError::Io(m) => write!(f, "{m}"),
         }
     }
@@ -311,6 +316,41 @@ fn calendar_fetcher<'a>(
     }
 }
 
+/// Resolve the day and the ranking moment for `rank`.
+///
+/// `--today` is the day when given, else `--now`'s date, else `system_today`. The moment is
+/// `--now`, else none when `--today` is given (the run ranks as daytime), else `wall`.
+///
+/// `--now` is strict `%Y-%m-%dT%H:%M`, the parse `models::coerce_datetime` makes: a bare date,
+/// seconds and a space are refused as `BadNow`. Single-digit fields are accepted.
+pub fn rank_clock(
+    today_iso: Option<&str>,
+    now_iso: Option<&str>,
+    system_today: Date,
+    wall: DateTime,
+) -> Result<(Date, Option<DateTime>), RunError> {
+    let today = match today_iso {
+        Some(iso) => Some(
+            Date::strptime("%Y-%m-%d", iso).map_err(|_| RunError::BadDate(iso.to_string()))?,
+        ),
+        None => None,
+    };
+    let pinned = match now_iso {
+        Some(iso) => Some(
+            DateTime::strptime("%Y-%m-%dT%H:%M", iso)
+                .map_err(|_| RunError::BadNow(iso.to_string()))?,
+        ),
+        None => None,
+    };
+    let day = today.or(pinned.map(|n| n.date())).unwrap_or(system_today);
+    let moment = match (pinned, today) {
+        (Some(n), _) => Some(n),
+        (None, Some(_)) => None,
+        (None, None) => Some(wall),
+    };
+    Ok((day, moment))
+}
+
 /// Rank, run the passes, and write `state/today.md`.
 ///
 /// Mirrors `cli.run`'s step order exactly. Returns what the run record carried, so a caller can
@@ -318,6 +358,18 @@ fn calendar_fetcher<'a>(
 pub fn run(
     vault: &Path,
     today_iso: Option<&str>,
+    runner: &str,
+    run_id: Option<&str>,
+) -> Result<RunOutcome, RunError> {
+    run_at(vault, today_iso, None, runner, run_id)
+}
+
+/// [`run`] with `--now`, which pins the ranking moment (and, with no `--today`, the day) and
+/// nothing the engine writes. Builds the real fetchers, then [`run_with_at`].
+pub fn run_at(
+    vault: &Path,
+    today_iso: Option<&str>,
+    now_iso: Option<&str>,
     runner: &str,
     run_id: Option<&str>,
 ) -> Result<RunOutcome, RunError> {
@@ -343,9 +395,10 @@ pub fn run(
     // (spec §4.2); P16's `commitments::refresh_series` reads it after `load_calendar_events` runs.
     let stash: SeriesStash = RefCell::new(BTreeMap::new());
     let calendar = calendar_fetcher(&cloud, &stash);
-    run_with(
+    run_with_at(
         vault,
         today_iso,
+        now_iso,
         runner,
         run_id,
         Fetchers { calendar: Some(&calendar), events: Some(&events), series: Some(&stash) },
@@ -362,17 +415,27 @@ pub fn run_with(
     run_id: Option<&str>,
     fetchers: Fetchers<'_>,
 ) -> Result<RunOutcome, RunError> {
+    run_with_at(vault, today_iso, None, runner, run_id, fetchers)
+}
+
+/// [`run_with`] with `--now` (see [`rank_clock`] for how the day and the moment resolve). The
+/// moment feeds `rank_at` only; the footer, the run record and `crash` keep the wall clock.
+pub fn run_with_at(
+    vault: &Path,
+    today_iso: Option<&str>,
+    now_iso: Option<&str>,
+    runner: &str,
+    run_id: Option<&str>,
+    fetchers: Fetchers<'_>,
+) -> Result<RunOutcome, RunError> {
     if let Some(id) = run_id {
         if !run_id_is_well_formed(id) {
             return Err(RunError::BadRunId(id.to_string()));
         }
     }
     let now = local_now(vault);
-    let today = match today_iso {
-        Some(iso) => Date::strptime("%Y-%m-%d", iso)
-            .map_err(|_| RunError::BadDate(iso.to_string()))?,
-        None => Timestamp::now().to_zoned(TimeZone::system()).date(),
-    };
+    let system_today = Timestamp::now().to_zoned(TimeZone::system()).date();
+    let (today, moment) = rank_clock(today_iso, now_iso, system_today, now)?;
     let via = match runner {
         "local" => "local-runner",
         "cloud" => "cloud-routine",
@@ -572,7 +635,7 @@ pub fn run_with(
     let mut skipped: Vec<String> = Vec::new();
     let mut tasks = load_tasks(&vault.join("tasks"), Some(&mut skipped));
     apply_slice_default(&mut tasks, planning.slice_hours);
-    let ranked = rank(&tasks, today, &cal);
+    let ranked = rank_at(&tasks, today, &cal, moment);
     let designated = designate_today(&ranked, today, &cal, Some(&planning));
 
     // Gauge counts (S2 §7.7; plan 2 Task 7, F6). Three integers on the record `rank` already
@@ -1520,6 +1583,138 @@ calendars:
         assert_eq!(count(&passes.counts, "unmigrated"), 1, "{}", passes.message);
         assert_eq!(count(&passes.counts, "external"), 0);
         assert!(out.output.is_file(), "the page still renders");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    // -----------------------------------------------------------------------
+    // The evening moment: `rank_clock`, `run_at`, `run_with_at` (evening plan T1b, C1-C5)
+    // -----------------------------------------------------------------------
+
+    use jiff::civil::{date, datetime};
+
+    /// A copy of `vault-s1` plus one task due tonight (2026-08-28T23:59), written to the COPY only.
+    fn evening_vault(name: &str) -> PathBuf {
+        let vault = fixture(name, "tests/fixtures/vault-s1");
+        std::fs::write(
+            vault.join("tasks").join("evening-probe.md"),
+            "---\nid: task_e5e0000001\ntitle: \"Evening probe\"\ncourse: cs-100\ndomain: school\n\
+             due: 2026-08-28T23:59\neffort_hours: 1.0\neffort_confidence: low\n\
+             effort_source: inferred\nimportance: 2\nstatus: active\nprogress: 0\n\
+             created_by: claude\n---\n\nBody text.\n",
+        )
+        .unwrap();
+        vault
+    }
+
+    /// The first bullet under `## Must do` in a rendered page.
+    fn first_must_do_line(vault: &Path) -> String {
+        let page = std::fs::read_to_string(vault.join("state").join("today.md")).unwrap();
+        let mut lines = page.lines().skip_while(|l| *l != "## Must do");
+        lines.next();
+        lines
+            .find(|l| l.starts_with("- "))
+            .unwrap_or_else(|| panic!("no Must do line in:\n{page}"))
+            .to_string()
+    }
+
+    fn run_evening(vault: &Path, today: Option<&str>, now: Option<&str>) -> RunOutcome {
+        run_with_at(vault, today, now, "manual", None, Fetchers::default()).unwrap()
+    }
+
+    #[test]
+    fn rank_clock_resolves_the_day_and_the_moment() {
+        let system_today = date(2030, 1, 2);
+        let wall = datetime(2030, 1, 2, 12, 34, 0, 0);
+        let day = date(2026, 8, 28);
+
+        let alone = rank_clock(Some("2026-08-28"), None, system_today, wall).unwrap();
+        assert_eq!(alone, (day, None), "--today with no --now has no moment");
+        let neither = rank_clock(None, None, system_today, wall).unwrap();
+        assert_eq!(neither, (system_today, Some(wall)));
+        let both = rank_clock(Some("2026-08-28"), Some("2026-08-28T21:00"), system_today, wall)
+            .unwrap();
+        assert_eq!(both, (day, Some(datetime(2026, 8, 28, 21, 0, 0, 0))));
+
+        // Strict, but single-digit fields are accepted (plan 9.2, finding 4).
+        let short = rank_clock(Some("2026-08-28"), Some("2026-8-28T9:00"), system_today, wall)
+            .unwrap();
+        assert_eq!(short.1, Some(datetime(2026, 8, 28, 9, 0, 0, 0)));
+
+        for bad in ["2026-08-28", "21:00", "2026-08-28T21:00:00", "2026-08-28 21:00", "tonight"] {
+            let err = rank_clock(Some("2026-08-28"), Some(bad), system_today, wall).unwrap_err();
+            assert!(matches!(err, RunError::BadNow(_)), "{bad:?} gave {err:?}");
+            assert_eq!(err.exit_code(), 2, "{bad:?}");
+        }
+        let err = rank_clock(Some("2026-13-45"), None, system_today, wall).unwrap_err();
+        assert!(matches!(err, RunError::BadDate(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_bad_now_writes_nothing() {
+        let vault = evening_vault("badnow");
+        let err = run_at(&vault, Some("2026-08-28"), Some("tonight"), "manual", None).unwrap_err();
+        assert!(matches!(err, RunError::BadNow(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 2);
+        assert!(!vault.join("state").exists(), "no run record, no journal, no page");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn an_evening_run_writes_the_evening_order_to_today_md() {
+        let vault = evening_vault("eveningrun");
+        run_evening(&vault, Some("2026-08-28"), Some("2026-08-28T21:00"));
+        assert!(first_must_do_line(&vault).contains("Evening probe"), "at 21:00");
+        let _ = std::fs::remove_dir_all(&vault);
+
+        let vault = evening_vault("daytimerun");
+        run_evening(&vault, Some("2026-08-28"), Some("2026-08-28T19:59"));
+        assert!(
+            first_must_do_line(&vault).contains("CS 100 HW 01"),
+            "at 19:59 the page is the golden's order"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Every file under `dir`, concatenated.
+    fn read_tree(dir: &Path) -> String {
+        let mut out = String::new();
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            if entry.file_type().unwrap().is_dir() {
+                out.push_str(&read_tree(&entry.path()));
+            } else {
+                out.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn now_pins_only_the_ranking_moment() {
+        let vault = evening_vault("nowpins");
+        run_evening(&vault, Some("2026-08-28"), Some("2026-08-28T21:00"));
+        let page = std::fs::read_to_string(vault.join("state").join("today.md")).unwrap();
+        let footer = page.lines().find(|l| l.starts_with("*Generated ")).expect("footer");
+        // Not compared with the wall clock's date: UTC and local time can disagree near midnight.
+        assert!(!footer.contains("2026-08-28"), "the footer carries the pinned date: {footer}");
+        let runs = read_tree(&vault.join("state").join("runs"));
+        assert!(!runs.is_empty(), "the run left a record");
+        assert!(!runs.contains("\"ts\": \"2026-08-28"), "a run record ts took the pinned day");
+        assert!(!runs.contains("2026-08-28T21:00"), "a run record carries the pinned stamp");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn now_without_today_ranks_the_day_of_now() {
+        let other = date(2030, 1, 2);
+        let wall = datetime(2030, 1, 2, 12, 0, 0, 0);
+        let resolved = rank_clock(None, Some("2026-08-28T21:00"), other, wall).unwrap();
+        assert_eq!(resolved, (date(2026, 8, 28), Some(datetime(2026, 8, 28, 21, 0, 0, 0))));
+
+        let vault = evening_vault("nowonly");
+        run_evening(&vault, None, Some("2026-08-28T21:00"));
+        let page = std::fs::read_to_string(vault.join("state").join("today.md")).unwrap();
+        assert!(page.starts_with("# Today — Friday, August 28"), "{page}");
+        assert!(first_must_do_line(&vault).contains("Evening probe"));
         let _ = std::fs::remove_dir_all(&vault);
     }
 

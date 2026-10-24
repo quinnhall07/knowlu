@@ -18,7 +18,7 @@ use serde_yaml_ng::Mapping;
 
 use crate::models::{apply_slice_default, load_task_notes, Task};
 use crate::planning::{load_planning, PlanningConfig};
-use crate::ranking::{designate_today_explained, partition_must_do, rank, Take};
+use crate::ranking::{designate_today_explained, partition_must_do, rank_at, Take};
 use crate::render::{capacity_breakdown, py_float, round2, runway_days, short_date, status_word};
 use crate::scheduling::{add_days, days_between, slack_days, DEFAULT_BUFFER_DAYS};
 use crate::weekcal::WeekCalendar;
@@ -221,6 +221,39 @@ pub fn load(vault: &Path, today: Date) -> Loaded {
     load_with(vault, today, None)
 }
 
+/// [`load`] at a moment: the evening step's input (evening plan T4). `moment` is the civil
+/// wall-clock the page displays; `None` ranks as `load` always has.
+pub fn load_at(vault: &Path, today: Date, preview: Option<&Window>, moment: Option<DateTime>) -> Loaded {
+    let planning = load_planning(&vault.join("config").join("planning.yaml"));
+    let mut unreadable = Vec::new();
+    let notes = load_task_notes(&vault.join("tasks"), Some(&mut unreadable));
+    let metas: BTreeMap<String, Mapping> =
+        notes.iter().map(|(t, m)| (t.slug.clone(), m.clone())).collect();
+    let mut tasks: Vec<Task> = notes.into_iter().map(|(t, _)| t).collect();
+    apply_slice_default(&mut tasks, planning.slice_hours);
+    let events = crate::calfeed::read_snapshot(&vault.join("state").join("calendar.md"))
+        .into_values()
+        .flatten()
+        .collect();
+    let current = WeekCalendar::for_vault(vault, events);
+    let (cal, against) = match preview {
+        Some(window) => (with_window(current.clone(), today, window), Some(current)),
+        None => {
+            let set = crate::commitments::load(vault);
+            let base = crate::commitments::baseline(vault, &set, &current, today)
+                .filter(|base| *base != current.window(today));
+            let against = base.map(|(start, end)| current.clone().with_day_window(today, start, end));
+            (current, against)
+        }
+    };
+    let ranked = rank_at(&tasks, today, &cal, moment);
+    let takes = designate_today_explained(&ranked, today, &cal, Some(&planning));
+    let moved = against
+        .and_then(|base| crate::commitments::moved(&ranked, today, &cal, &base, Some(&planning)));
+    let accepted = accepted_events(vault, &crate::eventledger::load_ledger(vault, None));
+    Loaded { tasks, metas, unreadable, cal, planning, ranked, takes, moved, accepted }
+}
+
 /// A planning window per weekday (`DAY_KEYS` order), as `commitments::parse_window` returns it.
 pub type Window = [Option<(jiff::civil::Time, jiff::civil::Time)>; 7];
 
@@ -246,34 +279,7 @@ fn with_window(mut cal: WeekCalendar, today: Date, window: &Window) -> WeekCalen
 /// proposed window and `moved` diffs it against the **current** window. Both designations come
 /// from the same ranked list. Writes nothing.
 fn load_with(vault: &Path, today: Date, preview: Option<&Window>) -> Loaded {
-    let planning = load_planning(&vault.join("config").join("planning.yaml"));
-    let mut unreadable = Vec::new();
-    let notes = load_task_notes(&vault.join("tasks"), Some(&mut unreadable));
-    let metas: BTreeMap<String, Mapping> =
-        notes.iter().map(|(t, m)| (t.slug.clone(), m.clone())).collect();
-    let mut tasks: Vec<Task> = notes.into_iter().map(|(t, _)| t).collect();
-    apply_slice_default(&mut tasks, planning.slice_hours);
-    let events = crate::calfeed::read_snapshot(&vault.join("state").join("calendar.md"))
-        .into_values()
-        .flatten()
-        .collect();
-    let current = WeekCalendar::for_vault(vault, events);
-    let (cal, against) = match preview {
-        Some(window) => (with_window(current.clone(), today, window), Some(current)),
-        None => {
-            let set = crate::commitments::load(vault);
-            let base = crate::commitments::baseline(vault, &set, &current, today)
-                .filter(|base| *base != current.window(today));
-            let against = base.map(|(start, end)| current.clone().with_day_window(today, start, end));
-            (current, against)
-        }
-    };
-    let ranked = rank(&tasks, today, &cal);
-    let takes = designate_today_explained(&ranked, today, &cal, Some(&planning));
-    let moved = against
-        .and_then(|base| crate::commitments::moved(&ranked, today, &cal, &base, Some(&planning)));
-    let accepted = accepted_events(vault, &crate::eventledger::load_ledger(vault, None));
-    Loaded { tasks, metas, unreadable, cal, planning, ranked, takes, moved, accepted }
+    load_at(vault, today, preview, None)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2149,8 +2155,8 @@ fn build_state_with(
     seen_at: Option<&str>,
     preview: Option<&Window>,
 ) -> State {
-    let l = load_with(vault, today, preview);
     let civil = now.datetime();
+    let l = load_at(vault, today, preview, Some(civil));
     // `closed_this_week`'s "not closed yet" bound compares against journal `ts` values, which
     // are UTC ISO strings — `civil` above is the vault-LOCAL wall clock (it feeds the page's
     // displayed `now`), so this is a separate conversion, not a reuse of `civil`.
@@ -4409,5 +4415,123 @@ mod carried_tests {
         snapshot(&v, &mut after);
         assert!(before == after, "surface wrote into the vault");
         let _ = std::fs::remove_dir_all(&v);
+    }
+}
+
+/// The evening step on the page (evening plan T1c, S1-S3 and S5). Scratch copies are in the temp
+/// directory; the fixtures are only ever read in place, by `load_at` and `build_state`, which
+/// never write.
+#[cfg(test)]
+mod evening_tests {
+    use super::tests::{pinned_today, TODAY};
+    use super::*;
+    use std::path::PathBuf;
+
+    fn copy_tree(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let target = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+
+    /// A private copy of `vault-s1` (process id plus the test's own name, so parallel tests never
+    /// share one).
+    fn scratch_s1(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("knowlu-evening-surface-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        copy_tree(Path::new("tests/fixtures/vault-s1"), &dir);
+        dir
+    }
+
+    /// One active task note: `id`, slug (the file name), effort and due, written to the COPY only.
+    fn put_task(vault: &Path, slug: &str, id: &str, hours: f64, due: &str) {
+        let text = format!(
+            "---\nid: {id}\ntitle: \"{slug}\"\ncourse: cs-100\ndomain: school\ndue: {due}\n\
+             effort_hours: {hours:?}\neffort_confidence: low\neffort_source: inferred\nimportance: 2\n\
+             status: active\nprogress: 0\ncreated_by: claude\n---\n\nBody text.\n"
+        );
+        std::fs::write(vault.join("tasks").join(format!("{slug}.md")), text).unwrap();
+    }
+
+    fn at(hour: i8, minute: i8) -> DateTime {
+        TODAY.at(hour, minute, 0, 0)
+    }
+
+    /// The civil moment `m` in the vault's zone, as `surface` hands it to `build_state`.
+    fn zoned_at(m: DateTime) -> jiff::Zoned {
+        m.to_zoned(jiff::tz::TimeZone::get("America/Chicago").unwrap()).unwrap()
+    }
+
+    fn slugs(l: &Loaded) -> Vec<String> {
+        l.ranked.iter().map(|t| t.slug.clone()).collect()
+    }
+
+    #[test]
+    fn load_at_an_evening_moment_reorders_and_load_does_not() {
+        let vault = scratch_s1("s1");
+        put_task(&vault, "evening-probe", "task_e5e0000001", 1.0, "2026-08-28T23:59");
+        let evening = slugs(&load_at(&vault, TODAY, None, Some(at(21, 0))));
+        assert_eq!(evening.first().map(String::as_str), Some("evening-probe"), "21:00 ranks tonight's task first: {evening:?}");
+        let plain = slugs(&load(&vault, TODAY));
+        assert_ne!(plain.first().map(String::as_str), Some("evening-probe"), "load has no moment: {plain:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn build_state_after_the_hour_leads_must_do_with_due_today() {
+        let vault = scratch_s1("s2");
+        put_task(&vault, "evening-probe", "task_e5e0000001", 1.0, "2026-08-28T23:59");
+        let label = |m: DateTime| {
+            let s = build_state(&vault, View::Today, TODAY, &zoned_at(m), None);
+            s.must_do.groups.first().map(|g| g.label.clone())
+        };
+        assert_eq!(label(at(9, 0)).as_deref(), Some("Overdue"), "by day, the overdue homework leads");
+        assert_eq!(label(at(21, 0)).as_deref(), Some("Due today"), "after the hour, tonight's task leads");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// No fixture task is due on 2026-08-28, so the moment cannot move any fixture's ranking.
+    #[test]
+    fn the_fixture_vaults_rank_the_same_at_nine_and_nine_pm() {
+        for fixture in ["vault-s1", "vault-s1-migrated", "vault-full"] {
+            let vault = PathBuf::from("tests/fixtures").join(fixture);
+            let evening = slugs(&load_at(&vault, pinned_today(), None, Some(at(21, 0))));
+            let plain = slugs(&load(&vault, pinned_today()));
+            assert!(!plain.is_empty(), "{fixture} ranks something");
+            assert_eq!(evening, plain, "{fixture}: the evening moment changed a fixture's order");
+        }
+    }
+
+    /// The meter's spill swaps after the hour on purpose (spec section 1): the overdue lab fits
+    /// by day and the evening task spills; at night the task fits and the lab spills.
+    #[test]
+    fn the_meter_spills_the_overdue_lab_after_the_hour() {
+        let vault = scratch_s1("s5");
+        for entry in std::fs::read_dir(vault.join("tasks")).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        put_task(&vault, "overdue-lab", "task_1ab0000001", 3.0, "2026-08-26T23:59");
+        put_task(&vault, "evening-probe", "task_e5e0000001", 1.0, "2026-08-28T23:59");
+        // Exactly 3.0h of capacity on Friday 2026-08-28: 08:00-11:00, no classes.
+        std::fs::write(
+            vault.join("config").join("week_template.yaml"),
+            "day_start: \"08:00\"\nday_end: \"11:00\"\nmin_block_minutes: 45\nclasses:\n  mon: []\n  tue: []\n  \
+             wed: []\n  thu: []\n  fri: []\n  sat: []\n  sun: []\n",
+        )
+        .unwrap();
+        let meter_at = |m: DateTime| build_state(&vault, View::Today, TODAY, &zoned_at(m), None).meter;
+        let ids = |m: &Meter| m.spill_items.iter().map(|i| i.id.clone()).collect::<Vec<_>>();
+        let (day, night) = (meter_at(at(9, 0)), meter_at(at(21, 0)));
+        assert_eq!(ids(&day), ["task_e5e0000001"], "9am: the lab fits, the task spills");
+        assert_eq!(ids(&night), ["task_1ab0000001"], "9pm: the task fits, the lab spills");
+        assert_eq!((day.spill_hours, night.spill_hours), (1.0, 1.0));
+        assert_eq!(day.spill_blocks, night.spill_blocks);
+        let _ = std::fs::remove_dir_all(&vault);
     }
 }
