@@ -2073,3 +2073,300 @@ fn step_two_undoes_everything_when_the_profile_cannot_be_registered() {
     assert_step_two_undone(&out, &home, &app_data, &mut session);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---- O3 F6a: `school.apply` and `school.courses` create each file once (plan F6a; §4.9) ------------
+// No Credential Manager: a vault from `create_vault_defaults`, a scratch app-data dir for the answers
+// file, invented schools and courses only.
+use knowlu::onboarding_jobs::{run_school_apply, run_school_apply_with, run_school_courses_in, Outcome, KEPT_EXISTING_KEY};
+use knowlu::onboarding_state::{load_answers, update_answers, CourseAnswer};
+use knowlu::scaffold::{campus_yaml, events_preset_for, put_new_file, put_new_file_with, CampusChoice, Put, PutSeams, VaultPlan, TEMP_PREFIX};
+
+fn f6a_plan(dest: &Path, campus: &str, choice: &CampusChoice) -> VaultPlan {
+    VaultPlan {
+        profile_id: knowlu::profiles::id_for(dest),
+        ics_url: None,
+        personal_calendar: None,
+        google_calendar: false,
+        timezone: "America/Chicago".into(),
+        slots: vec!["12:00".into(), "18:00".into()],
+        device: "M".into(),
+        campus: campus.into(),
+        campus_choice: choice.clone(),
+        zybooks: false,
+        vhl: false,
+        zybooks_courses: Vec::new(),
+        vhl_sections: Vec::new(),
+        zybooks_ignore: Vec::new(),
+        course_map: Vec::new(),
+        courses: Vec::new(),
+        api_base: knowlu::account::api_base(),
+        anon_key: "anon".into(),
+        account_id: "acc-1".into(),
+        human_actor: knowlu_engine::journal::HUMAN_ACTOR,
+    }
+}
+
+/// A step-2 vault (no school files) under a fresh scratch root, and a sibling app-data dir.
+fn f6a_vault(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let root = tmp(&format!("f6a-{tag}"));
+    let vault = root.join("vault");
+    knowlu::scaffold::create_vault_defaults(&vault, &f6a_plan(&vault, "none", &CampusChoice::default())).unwrap();
+    let data = root.join("appdata");
+    std::fs::create_dir_all(&data).unwrap();
+    (root, vault, data)
+}
+
+fn school(unitid: &str, name: &str, state: &str, lms: &str) -> CampusChoice {
+    CampusChoice { unitid: unitid.into(), name: name.into(), state: state.into(), lms: lms.into() }
+}
+
+fn f6a_course(code: &str, name: &str, key: &str) -> CourseAnswer {
+    let label: String = name.split(' ').next().unwrap().into();
+    CourseAnswer { code: code.into(), name: name.into(), captured_label: label.clone(), label, lms_key: key.into(), removed: false, slug: String::new(), fragments: Vec::new() }
+}
+
+fn config_bytes(vault: &Path, file: &str) -> Vec<u8> { std::fs::read(vault.join("config").join(file)).unwrap() }
+
+fn strays_in_config(vault: &Path) -> Vec<String> {
+    std::fs::read_dir(vault.join("config")).unwrap().flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.starts_with(TEMP_PREFIX)).collect()
+}
+
+fn proof_of(out: &Outcome) -> std::collections::BTreeMap<String, Option<i64>> {
+    match out { Outcome::Done(p) => p.clone(), other => panic!("expected Done, got {other:?}") }
+}
+
+/// F6a test 1: `school.apply`'s two files are byte for byte what `build_into` writes for the same
+/// school (the same choice sent through `create_vault` and through the job); an uncurated school and a
+/// school typed as "isn't listed" (a name, no unitid) get events preset `none`; the latter's
+/// `campus.yaml` says `curated: false`.
+#[test]
+fn school_apply_writes_the_bytes_build_into_writes_for_the_same_school() {
+    let cases = [
+        ("a-curated-school", school("100751", "The University of Alabama", "AL", "blackboard")),
+        ("an-uncurated-school", school("999001", "Example State College", "OH", "canvas")),
+        ("a-school-that-isnt-listed", school("", "St. Mary's Example College", "", "")),
+    ];
+    for (tag, choice) in cases {
+        let (root, vault, _data) = f6a_vault(tag);
+        let preset = events_preset_for(&choice.unitid);
+        let reference = root.join("reference");
+        knowlu::scaffold::create_vault(&reference, &f6a_plan(&reference, preset, &choice)).unwrap();
+        let out = run_school_apply(&vault, &choice);
+        assert!(matches!(out, Outcome::Done(_)), "{tag}: {out:?}");
+        for f in ["campus.yaml", "events.yaml"] {
+            assert_eq!(config_bytes(&vault, f), config_bytes(&reference, f), "{tag}: config/{f} differs from build_into's");
+        }
+        if choice.unitid != "100751" {
+            assert_eq!(preset, "none", "{tag}");
+            assert_eq!(config_bytes(&vault, "events.yaml"), campus_yaml("none").unwrap().as_bytes(), "{tag}: events preset none");
+        }
+        if choice.unitid.is_empty() {
+            let text = String::from_utf8(config_bytes(&vault, "campus.yaml")).unwrap();
+            assert!(text.contains("curated: false"), "{tag}: {text}");
+        }
+        assert!(strays_in_config(&vault).is_empty(), "{tag}: no temp file is left behind");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// F6a test 3: a file already there with other bytes is kept unchanged and the job reports "kept your
+/// existing settings"; with equal bytes the job is simply `done` (a resume).
+#[test]
+fn school_apply_keeps_a_file_with_other_bytes_and_a_resume_is_simply_done() {
+    let (root, vault, _data) = f6a_vault("keeps");
+    let choice = school("999001", "Example State College", "OH", "canvas");
+    std::fs::write(vault.join("config").join("campus.yaml"), b"name: my own settings\n").unwrap();
+    let out = run_school_apply(&vault, &choice);
+    let proof = proof_of(&out);
+    assert_eq!(config_bytes(&vault, "campus.yaml"), b"name: my own settings\n", "an existing file is never replaced");
+    assert_eq!(proof.get(KEPT_EXISTING_KEY).copied().flatten(), Some(1), "reports it kept your existing settings: {proof:?}");
+    assert!(vault.join("config").join("events.yaml").exists(), "the file that was absent is still created");
+    // A resume: both files now hold what this school would write, so nothing is "kept".
+    std::fs::remove_file(vault.join("config").join("campus.yaml")).unwrap();
+    assert!(matches!(run_school_apply(&vault, &choice), Outcome::Done(_)));
+    let (before, ev_before) = (config_bytes(&vault, "campus.yaml"), config_bytes(&vault, "events.yaml"));
+    let again = proof_of(&run_school_apply(&vault, &choice));
+    assert_eq!(again.get(KEPT_EXISTING_KEY).copied().flatten().unwrap_or(0), 0, "equal bytes are a resume, not a kept file: {again:?}");
+    assert_eq!((config_bytes(&vault, "campus.yaml"), config_bytes(&vault, "events.yaml")), (before, ev_before));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F6a test 4: a file created between the existence check and the put-in-place (the seam creates it
+/// once the temp file is written) is kept, the helper reports it existing, and nothing is replaced.
+#[test]
+fn a_file_created_mid_way_is_kept_and_reported_existing() {
+    let (root, vault, _data) = f6a_vault("midway");
+    let final_path = vault.join("config").join("campus.yaml");
+    let racer = |p: &Path| -> Result<(), String> { std::fs::write(p, b"somebody else's bytes\n").map_err(|e| e.to_string()) };
+    let seams = PutSeams { after_temp: Some(&racer), ..Default::default() };
+    let put = put_new_file_with(&vault, "config/campus.yaml", "name: ours\n", &seams).unwrap();
+    assert_eq!(put, Put::Existing { same_bytes: false });
+    assert_eq!(std::fs::read(&final_path).unwrap(), b"somebody else's bytes\n", "never replaced");
+    assert!(strays_in_config(&vault).is_empty(), "the temp file is removed");
+    // The same race, but the other writer wrote the very bytes we meant to: still existing, same bytes.
+    std::fs::remove_file(&final_path).unwrap();
+    let twin = |p: &Path| -> Result<(), String> { std::fs::write(p, b"name: ours\n").map_err(|e| e.to_string()) };
+    let seams = PutSeams { after_temp: Some(&twin), ..Default::default() };
+    assert_eq!(put_new_file_with(&vault, "config/campus.yaml", "name: ours\n", &seams).unwrap(), Put::Existing { same_bytes: true });
+    // And with nothing in the way the real helper creates it, once.
+    std::fs::remove_file(&final_path).unwrap();
+    assert_eq!(put_new_file(&vault, "config/campus.yaml", "name: ours\n").unwrap(), Put::Created);
+    assert_eq!(put_new_file(&vault, "config/campus.yaml", "name: other\n").unwrap(), Put::Existing { same_bytes: false });
+    assert_eq!(std::fs::read(&final_path).unwrap(), b"name: ours\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F6a test 5: a failure part-way leaves no partial file at the final name, and a stray temp file (a
+/// crash's) is removed on the next run.
+#[test]
+fn a_failure_part_way_leaves_no_partial_file_and_a_stray_temp_is_swept_next_run() {
+    let (root, vault, _data) = f6a_vault("partial");
+    let final_path = vault.join("config").join("events.yaml");
+    let boom = |_: &Path| -> Result<(), String> { Err("the disk went away".to_string()) };
+    let seams = PutSeams { after_temp: Some(&boom), ..Default::default() };
+    let err = put_new_file_with(&vault, "config/events.yaml", "preset: none\n", &seams).unwrap_err();
+    assert!(err.contains("the disk went away"), "{err}");
+    assert!(!final_path.exists(), "no partial file at the final name");
+    assert!(strays_in_config(&vault).is_empty(), "the failed run cleans its own temp file");
+    // A crash's leftover: the next run removes it, whatever file it was heading for.
+    let stray = vault.join("config").join(format!("{TEMP_PREFIX}events.yaml-left-by-a-crash"));
+    std::fs::write(&stray, b"half a fi").unwrap();
+    assert_eq!(put_new_file(&vault, "config/events.yaml", "preset: none\n").unwrap(), Put::Created);
+    assert!(!stray.exists(), "the stray temp file is removed on the next run");
+    assert_eq!(std::fs::read(&final_path).unwrap(), b"preset: none\n");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn not_supported() -> std::io::Error { std::io::Error::new(std::io::ErrorKind::Unsupported, "hard links are not supported here") }
+
+/// F6a test 6, first two bullets: with the hard link forced to fail "not supported", the run-time
+/// fallback (a no-replace move) puts the file in place with the same bytes; with a file already at the
+/// final name the fallback refuses too, and the file is kept.
+#[test]
+fn when_hard_links_are_not_supported_the_fallback_puts_the_file_in_place_and_never_replaces() {
+    let (root, vault, _data) = f6a_vault("fallback");
+    let final_path = vault.join("config").join("campus.yaml");
+    let no_link = |_: &Path, _: &Path| -> std::io::Result<()> { Err(not_supported()) };
+    let seams = PutSeams { hard_link: Some(&no_link), ..Default::default() };
+    assert_eq!(put_new_file_with(&vault, "config/campus.yaml", "name: ours\n", &seams).unwrap(), Put::Created);
+    assert_eq!(std::fs::read(&final_path).unwrap(), b"name: ours\n", "same bytes through the fallback");
+    assert!(strays_in_config(&vault).is_empty(), "the fallback leaves no temp file");
+    // A file at the final name: the fallback must refuse (no MOVEFILE_REPLACE_EXISTING) and keep it.
+    std::fs::write(&final_path, b"kept bytes\n").unwrap();
+    let put = put_new_file_with(&vault, "config/campus.yaml", "name: ours\n", &seams).unwrap();
+    assert_eq!(put, Put::Existing { same_bytes: false });
+    assert_eq!(std::fs::read(&final_path).unwrap(), b"kept bytes\n", "the fallback never replaces");
+    // …and when the file shows up only after the temp file is written, the fallback refuses then too.
+    std::fs::remove_file(&final_path).unwrap();
+    let racer = |p: &Path| -> Result<(), String> { std::fs::write(p, b"raced in\n").map_err(|e| e.to_string()) };
+    let seams = PutSeams { hard_link: Some(&no_link), after_temp: Some(&racer), ..Default::default() };
+    assert_eq!(put_new_file_with(&vault, "config/campus.yaml", "name: ours\n", &seams).unwrap(), Put::Existing { same_bytes: false });
+    assert_eq!(std::fs::read(&final_path).unwrap(), b"raced in\n");
+    assert!(strays_in_config(&vault).is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F6a test 6, third bullet: both steps forced to fail, `school.apply` is `failed` with a fix that
+/// names the volume, and nothing is left at the final name.
+#[test]
+fn with_both_steps_failing_school_apply_fails_with_a_fix_that_names_the_volume() {
+    let (root, vault, _data) = f6a_vault("both-fail");
+    let no_link = |_: &Path, _: &Path| -> std::io::Result<()> { Err(not_supported()) };
+    let no_move = |_: &Path, _: &Path| -> std::io::Result<()> { Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "the volume refused")) };
+    let seams = PutSeams { hard_link: Some(&no_link), move_no_replace: Some(&no_move), ..Default::default() };
+    let out = run_school_apply_with(&vault, &school("999001", "Example State College", "OH", "canvas"), &seams);
+    let Outcome::Failed(fix) = out else { panic!("both steps failing must fail the job, got {out:?}") };
+    let volume = match vault.components().next() { Some(std::path::Component::Prefix(p)) => p.as_os_str().to_string_lossy().to_string(), other => panic!("{other:?}") };
+    assert!(fix.contains(&volume), "the fix names the volume {volume}: {fix}");
+    assert!(!vault.join("config").join("campus.yaml").exists(), "nothing at the final name");
+    assert!(strays_in_config(&vault).is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn journal_for(vault: &Path) -> Vec<serde_json::Value> {
+    let dir = vault.join("state").join("journal");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    files.sort();
+    files.iter().flat_map(|p| std::fs::read_to_string(p).unwrap().replace("\r\n", "\n").lines()
+        .filter(|l| !l.trim().is_empty()).map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()).collect::<Vec<_>>()).collect()
+}
+
+fn course_files(vault: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(vault.join("courses")).unwrap().flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    v.sort();
+    v
+}
+
+/// F6a test 2: `school.courses` makes a note for each kept course and none for a removed row (R-C1-51),
+/// as the student through `write`, so the journal holds a `create` record for each, and the answers
+/// file records each kept course's slug by its key.
+#[test]
+fn school_courses_makes_notes_for_kept_courses_only_as_the_student() {
+    let (root, vault, data) = f6a_vault("courses");
+    let mut removed = f6a_course("WVG 105", "Weaving Lab", "_1003_1");
+    removed.removed = true;
+    let rows = vec![f6a_course("QLT 101", "Quilting Basics", "_1001_1"), f6a_course("KNT 220", "Knotwork Theory", "_1002_1"), removed];
+    update_answers(&data, &|a| a.courses = rows.clone()).unwrap();
+    let before = course_files(&vault);
+    let out = run_school_courses_in(&data, &vault);
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    let slugs = load_answers(&data).unwrap().unwrap().slugs;
+    assert_eq!(slugs.len(), 2, "one slug per kept course, none for the removed row: {slugs:?}");
+    assert!(!slugs.contains_key("_1003_1"));
+    let after = course_files(&vault);
+    assert_eq!(after.len(), before.len() + 2, "{after:?}");
+    for key in ["_1001_1", "_1002_1"] {
+        let slug = &slugs[key];
+        let note = vault.join("courses").join(format!("{slug}.md"));
+        assert!(note.exists(), "courses/{slug}.md");
+        let rel = format!("courses/{slug}.md");
+        let rec = journal_for(&vault).into_iter().find(|r| r["op"] == "create" && r["path"].as_str().is_some_and(|p| p.replace(std::path::MAIN_SEPARATOR, "/").ends_with(&rel)))
+            .unwrap_or_else(|| panic!("a journal `create` record for {rel}"));
+        assert_eq!(rec["actor"], "student", "{rec}");
+        assert_eq!(rec["via"], "dashboard", "console_ctx(vault): {rec}");
+    }
+    let all: String = after.iter().map(|f| std::fs::read_to_string(vault.join("courses").join(f)).unwrap()).collect();
+    assert!(!all.contains("Weaving Lab") && !all.contains("_1003_1"), "nothing of the removed row reaches the vault");
+    // A rerun makes no second note for a course that has one.
+    assert!(matches!(run_school_courses_in(&data, &vault), Outcome::Done(_)));
+    assert_eq!(course_files(&vault), after, "no second note on a rerun");
+    assert_eq!(load_answers(&data).unwrap().unwrap().slugs, slugs);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F6a test 7 (review r2, I5): a course note already present (a C3' restore) is not touched, no second
+/// one is made for it, whether it matches by path, `source_uid` or code, and the answers file's slug
+/// for that course is the restored note's own.
+#[test]
+fn a_restored_course_note_is_not_touched_and_its_own_slug_is_recorded() {
+    let (root, vault, data) = f6a_vault("restored");
+    let note = |extra: &str| format!("---\ntitle: Restored\n{extra}status: active\n---\n\nmy own notes\n");
+    let restored = [
+        ("path-kept.md", note("")),
+        ("by-uid-kept.md", note("source_uid: _1002_1\n")),
+        ("by-code-kept.md", note("code: _1003_1\n")),
+    ];
+    for (f, text) in &restored { std::fs::write(vault.join("courses").join(f), text).unwrap(); }
+    let mut by_path = f6a_course("QLT 101", "Quilting Basics", "_1001_1");
+    by_path.slug = "path-kept".into();
+    let rows = vec![by_path, f6a_course("KNT 220", "Knotwork Theory", "_1002_1"), f6a_course("WVG 105", "Weaving Lab", "_1003_1"), f6a_course("DYE 110", "Dyeing Basics", "_1004_1")];
+    update_answers(&data, &|a| a.courses = rows.clone()).unwrap();
+    let before = course_files(&vault);
+    let out = run_school_courses_in(&data, &vault);
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    for (f, text) in &restored {
+        assert_eq!(std::fs::read_to_string(vault.join("courses").join(f)).unwrap(), *text, "{f} is untouched");
+    }
+    let after = course_files(&vault);
+    assert_eq!(after.len(), before.len() + 1, "only the course with no note gets one: {after:?}");
+    let slugs = load_answers(&data).unwrap().unwrap().slugs;
+    assert_eq!(slugs["_1001_1"], "path-kept");
+    assert_eq!(slugs["_1002_1"], "by-uid-kept");
+    assert_eq!(slugs["_1003_1"], "by-code-kept");
+    assert!(!restored.iter().any(|(f, _)| f.trim_end_matches(".md") == slugs["_1004_1"]), "the fourth course has a note of its own");
+    let touched = journal_for(&vault).into_iter().filter(|r| r["path"].as_str().is_some_and(|p| restored.iter().any(|(f, _)| p.contains(f)))).count();
+    assert_eq!(touched, 0, "no journal record names a restored note");
+    let _ = std::fs::remove_dir_all(&root);
+}

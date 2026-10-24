@@ -853,3 +853,46 @@ fn seed_writes(vault: &Path, plan: &VaultPlan) -> Result<(), String> {
     }
     Ok(())
 }
+
+// ---- F6a: create-new for the answer-built files (§4.9) ---------------------------------------------
+
+/// A stray temp file in `config/` starts with this; the helper removes any it finds on its next run.
+pub const TEMP_PREFIX: &str = ".knowlu-tmp-";
+
+/// What the create-new helper found: it made the file, or one was already there and was kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Put {
+    Created,
+    /// A file was at the final name (at the existence check, or created before the put-in-place).
+    /// `same_bytes` is true when it already holds exactly the bytes asked for.
+    Existing { same_bytes: bool },
+}
+
+/// The seams the create-new helper's tests drive; `None` is the real thing, and `Default` is all `None`.
+#[derive(Default)]
+pub struct PutSeams<'a> {
+    /// Called with the final path after the temp file is written and before the put-in-place. An `Err`
+    /// aborts the run: the temp file is removed and nothing is left at the final name.
+    pub after_temp: Option<&'a dyn Fn(&Path) -> Result<(), String>>,
+    /// Replaces `std::fs::hard_link(temp, final)`.
+    pub hard_link: Option<&'a dyn Fn(&Path, &Path) -> std::io::Result<()>>,
+    /// Replaces the fallback, `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` (temp, final).
+    pub move_no_replace: Option<&'a dyn Fn(&Path, &Path) -> std::io::Result<()>>,
+}
+
+/// Creates `<root>/<rel>` with `text` only if nothing is there: temp file in `config/`, then a hard link
+/// (never `rename`); on any hard-link error but `AlreadyExists`, the no-replace move. An existing file
+/// is kept, never replaced. The temp file is removed on every path, and strays are removed first.
+pub fn put_new_file(_root: &Path, _rel: &str, _text: &str) -> Result<Put, String> {
+    todo!("F6a: create-new helper")
+}
+
+pub fn put_new_file_with(_root: &Path, _rel: &str, _text: &str, _seams: &PutSeams) -> Result<Put, String> {
+    todo!("F6a: create-new helper")
+}
+
+/// One `courses/<slug>.md` note for a kept course, through `write::create` as the vault's human
+/// (`console_ctx`, journal first). Returns the slug it made.
+pub fn create_course_note(_vault: &Path, _c: &crate::onboarding_state::CourseAnswer) -> Result<String, String> {
+    todo!("F6a: course note")
+}

@@ -451,3 +451,23 @@ pub fn paste_link_inner(
 ) -> Value {
     todo!("F8lb: onboarding_paste_link")
 }
+
+/// `Done`'s proof key: how many files `school.apply` kept because they held other bytes ("kept your
+/// existing settings"). Absent or `Some(0)` when nothing was kept.
+pub const KEPT_EXISTING_KEY: &str = "kept_existing_settings";
+
+/// `school.apply`: creates `config/campus.yaml` and `config/events.yaml` once (F6a), each through
+/// [`crate::scaffold::put_new_file`]. The events preset is `events_preset_for(choice.unitid)`.
+pub fn run_school_apply(_vault: &Path, _choice: &crate::scaffold::CampusChoice) -> Outcome {
+    todo!("F6a: school.apply")
+}
+
+pub fn run_school_apply_with(_vault: &Path, _choice: &crate::scaffold::CampusChoice, _seams: &crate::scaffold::PutSeams) -> Outcome {
+    todo!("F6a: school.apply")
+}
+
+/// `school.courses` against a real vault: finds the notes already in `<vault>/courses/` (a C3' restore),
+/// then runs [`run_school_courses`] with [`crate::scaffold::create_course_note`] as `create`.
+pub fn run_school_courses_in(_data_dir: &Path, _vault: &Path) -> Outcome {
+    todo!("F6a: school.courses in a vault")
+}
