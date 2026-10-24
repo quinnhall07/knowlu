@@ -777,3 +777,38 @@ fn a_blank_row_is_never_ignored_and_no_slug_is_made_on_the_page() {
         assert!(!l.contains(".replace(") && !l.contains("toLowerCase"), "a slug is never derived on the page: {l}");
     }
 }
+
+// ---- F11a review r1: entering onboarding, the frame's buttons, the rail's classes -----------------
+
+#[test]
+fn launch_state_names_onboarding_and_the_dispatcher_leaves_it_to_the_frame() {
+    let rs = fs::read_to_string("src/onboarding.rs").expect("src/onboarding.rs");
+    // The function's body alone, comment lines dropped, so a comment can never satisfy the pin (r2 m1).
+    let after = rs.split("pub fn launch_state(").nth(1).expect("launch_state");
+    let body: String = after[..after.find("\n}\n").expect("launch_state's end")]
+        .lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+    assert!(body.contains("try_state::<crate::onboarding_state::LaunchMode>") && body.contains("\"onboarding\""), "launch_state answers mode onboarding from the managed LaunchMode");
+    let js = code(&read("console.js"));
+    let tail = js.split("invoke(\"launch_state\", {}).then(function (l) {").last().expect("the dispatcher");
+    let first = tail.trim_start().lines().next().unwrap_or("");
+    assert!(first.contains("l.mode === \"onboarding\"") && first.contains("return"), "the dispatcher's first line returns on onboarding: {first}");
+    assert!(code(&read("onboarding.css")).find("z-index").is_none(), "no z-index stopgap");
+}
+
+#[test]
+fn a_not_yet_or_waiting_rail_row_never_wears_the_done_class() {
+    let row = |state: &str| node(&format!("h.rowModel(h.rows[1], {{step: 5, jobs: {{\"school.capture\": {{state: \"{state}\"}}}}}})"));
+    for state in ["pending", "held"] {
+        let r = row(state);
+        assert_ne!(r["cls"], "done", "{state}: {r}");
+    }
+    assert_eq!(row("done")["cls"], "done");
+}
+
+#[test]
+fn the_frame_re_enables_only_the_buttons_it_disabled_and_a_leave_hook_cannot_block_an_exit() {
+    let c = code(&read("onboarding.js"));
+    assert!(c.contains("data-ob-closed"), "the frame marks the buttons it disables");
+    let leaving = function(&c, "leaving");
+    assert!(leaving.contains(".catch(") && leaving.contains("3000"), "each hook is caught and the wait is capped");
+}
