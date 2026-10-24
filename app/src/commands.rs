@@ -666,7 +666,21 @@ pub fn settings_context(cs: State<'_, ConsoleState>) -> Value {
 /// outlast the child's patience, and then the single-instance plugin closes whichever window loses
 /// — the documented fallback, and better than a switch that silently discards a push.
 #[tauri::command(async)]
-pub fn switch_profile(cs: State<'_, ConsoleState>) -> Value {
+pub fn switch_profile(app: tauri::AppHandle, cs: State<'_, ConsoleState>) -> Value {
+    // F4b: the launch mode is managed state once F4 registers it; until then (or in the normal
+    // console) it is absent, which reads as the normal console.
+    use tauri::Manager;
+    let mode = app.try_state::<crate::onboarding_state::LaunchMode>().map(|m| *m).unwrap_or(crate::onboarding_state::LaunchMode::Normal);
+    switch_profile_inner(&cs, mode)
+}
+
+/// F4b: `switch_profile`'s body, with the launch mode passed in (review r4, M6). In onboarding mode
+/// it answers `{ok: false, error: "finish or leave setup first"}` before anything is written
+/// (`quit_at` unchanged); in the normal console it is the switch above, unchanged.
+pub fn switch_profile_inner(cs: &ConsoleState, mode: crate::onboarding_state::LaunchMode) -> Value {
+    if mode == crate::onboarding_state::LaunchMode::Onboarding {
+        return json!({ "ok": false, "error": "finish or leave setup first" });
+    }
     {
         let mut s = cs.settings.lock().unwrap_or_else(|e| e.into_inner());
         s.quit_at = Some(knowlu_engine::journal::now_ts(None));
@@ -676,7 +690,7 @@ pub fn switch_profile(cs: State<'_, ConsoleState>) -> Value {
         return json!({ "ok": false, "error": e });
     }
     let logs = cs.data_dir.join("logs");
-    crate::state::quit_flush(&cs, std::time::Duration::from_secs(10), move |q| {
+    crate::state::quit_flush(cs, std::time::Duration::from_secs(10), move |q| {
         let _ = std::fs::create_dir_all(&logs);
         let stamp = knowlu_engine::journal::now_ts(None).replace(':', "");
         let _ = std::fs::write(logs.join(format!("quit-{stamp}.txt")), format!("synced={} backed_up={} timed_out={} switch=1\n", q.synced, q.backed_up, q.timed_out));
@@ -780,11 +794,4 @@ pub async fn install_update(app: tauri::AppHandle, sch: State<'_, Scheduler>, up
         Ok(()) => { crate::updates::clear_action_error(&up); json!({ "ok": true, "error": Value::Null }) }
         Err(e) => { crate::updates::note_error(&up, &e); json!({ "ok": false, "error": e }) }
     })
-}
-
-/// F4b: `switch_profile`'s refusal in onboarding mode (review r4, M6). **F1 stub.** In onboarding
-/// mode it answers `{ok: false, error: "finish or leave setup first"}` before anything is written
-/// (`quit_at` unchanged); in the normal console the command behaves as it does today.
-pub fn switch_profile_inner(_cs: &ConsoleState, _mode: crate::onboarding_state::LaunchMode) -> Value {
-    todo!("F4b: switch_profile refuses in onboarding mode")
 }
