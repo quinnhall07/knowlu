@@ -4,3 +4,7 @@
 # Frozen test fixtures are bytes. Several are golden files compared byte-for-byte, and users'
 # vaults are CRLF on Windows, so these stay exactly as committed — never re-encoded.
 engine/tests/fixtures/** -text
+# Fonts and images are bytes; never guess.
+*.woff2 binary
+*.ttf binary
+*.png binary
