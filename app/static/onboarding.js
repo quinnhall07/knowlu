@@ -15,16 +15,32 @@
   var OB = {};
   window.KNOWLU_ONBOARDING = OB;
 
-  // The one Tauri call site. Without a backend (the headless shots) `?fixture=` names a status
-  // file, the same dev-only path the console's own page takes; nothing else is answered.
+  // The one Tauri call site. Without a backend (the headless shots) `?fixture=` names a file, the same
+  // dev-only path the console's own page takes. It answers four commands, each from its own key:
+  // {"onboarding_status": ..., "account_status": ..., "your_week": ..., "commitment_proposals": ...};
+  // a file with no `onboarding_status` key is read as the status itself. Nothing else is answered.
   function invoke(cmd, args) {
     if (!(window.__TAURI__ && window.__TAURI__.core)) {
       var fx = new URLSearchParams(location.search).get("fixture");
-      if (fx && cmd === "onboarding_status") { return fetch(fx).then(function (r) { return r.json(); }); }
+      if (fx && (cmd === "onboarding_status" || cmd === "account_status" || cmd === "your_week" || cmd === "commitment_proposals")) {
+        return fetch(fx).then(function (r) { return r.json(); }).then(function (d) {
+          if (d && d[cmd] !== undefined) { return d[cmd]; }
+          if (cmd === "onboarding_status" && d && d.account_status === undefined && d.your_week === undefined && d.commitment_proposals === undefined) { return d; }
+          throw new Error("no fixture for " + cmd);
+        });
+      }
       return Promise.reject(new Error("no engine: __TAURI__ is absent"));
     }
     return window.__TAURI__.core.invoke(cmd, args || {});
   }
+
+  // The day board: the page starts in Windows' light or dark setting and follows it. Nothing is stored.
+  var LIGHT = typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: light)") : null;
+  function applyTheme() {
+    ["setup", "onboarding", "picker"].forEach(function (id) { if (EL(id)) { EL(id).setAttribute("data-theme", LIGHT && LIGHT.matches ? "light" : "dark"); } });
+  }
+  applyTheme();
+  if (LIGHT && LIGHT.addEventListener) { LIGHT.addEventListener("change", applyTheme); }
 
   // ---- the words: a key never reaches the student, only a sentence ------------------------------
   var STATES = ["intro", "asking", "reading", "proof", "failed", "skipped", "already-done"];
@@ -120,6 +136,29 @@
     });
     return out.length ? out.join(", ") : "Done";
   }
+  // The rail's done lines for the account and payment rows, from `account_status` (this computer only).
+  var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  var NOT_ENTITLED = ["canceled", "cancelled", "past_due", "unpaid", "incomplete", "incomplete_expired", "expired", "paused"];
+  function dayWords(iso) {
+    var t = Date.parse(iso);
+    return isFinite(t) ? MONTHS[new Date(t).getMonth()] + " " + new Date(t).getDate() : "";
+  }
+  function accountLine(id, a) {
+    if (!(a && a.ok === true)) { return ""; }
+    if (id === "account") { return a.email ? "Signed in as " + a.email : ""; }
+    var day = a.current_period_end ? dayWords(a.current_period_end) : "";
+    if (a.status === "trialing") { return day ? "Trial on. First charge " + day + "." : ""; }
+    if (a.status === "active") { return day ? "Paid. Renews " + day + "." : ""; }
+    return a.status && NOT_ENTITLED.indexOf(a.status) === -1 ? "Nothing to pay." : "";
+  }
+  // The foot's estimate: each remaining step's time (spec 1.3, the middle of its range, rounded up to a
+  // whole minute), summed. A display estimate, never a count of jobs. Step 9 is absent in wave B.
+  var STEP_MINUTES = { 1: 1, 2: 1, 3: 2, 4: 2, 5: 1, 6: 1, 7: 1, 8: 1, 10: 2, 11: 1 };
+  function minutesLeft(step) {
+    var n = 0;
+    Object.keys(STEP_MINUTES).forEach(function (k) { if (Number(k) >= Number(step)) { n += STEP_MINUTES[k]; } });
+    return Math.max(1, n);
+  }
   function railRow(job, rec) {
     var st = (rec && rec.state) || "pending";
     var line = st === "failed" ? reasonWords(rec.reason) : st === "done" ? proofLine(rec.proof) : st === "running" ? "Reading…"
@@ -155,11 +194,15 @@
     }
     else if (recs.some(function (x) { return x.state === "held"; })) { m.cls = ""; m.st = "Waiting"; m.pf = "Starts once your plan is active"; }
     else if (past && r.jobs.length) { m.cls = ""; m.st = "Not yet"; m.pf = "Not yet"; }
+    if (past && (r.id === "account" || r.id === "payment")) { m.pf = accountLine(r.id, s && s.account); }
     return m;
   }
-  function railHtml(s) {
+  function railHtml(s, account) {
+    var view = {};
+    Object.keys(s || {}).forEach(function (k) { view[k] = s[k]; });
+    view.account = account || null;
     return ROWS.map(function (r) {
-      var m = rowModel(r, s);
+      var m = rowModel(r, view);
       var retry = m.retry ? ' <button class="su-link" type="button" data-retry="' + esc(m.retry) + '">Try again</button>' : "";
       return '<li class="su-row ' + m.cls + '" data-rail="' + m.id + '"><span class="su-shape" aria-hidden="true"></span><span class="su-nm">' + esc(m.nm) +
         '</span><span class="su-st">' + esc(m.st) + '</span><span class="su-pf">' + esc(m.pf) + retry + '</span></li>';
@@ -173,21 +216,28 @@
     5: "Teachers announce date changes by email.", 6: "Gmail and your calendar hold what your school does not.", 7: "Add the calendar Knowlu should treat as busy time.",
     8: "Homework sites hold due dates your school does not.", 10: "Check your class times so the week fits around them.", 11: "Everything has run once. Here is your week."
   };
-  var S = { status: null, step: 0, fixed: null, outstanding: false, lastLine: "", error: "", pollError: "", mounted: false };
+  var S = { account: null, status: null, step: 0, fixed: null, outstanding: false, lastLine: "", error: "", pollError: "", mounted: false };
   var panels = {}, leaveHooks = [];
   OB.registerPanel = function (n, def) { panels[n] = def; };
   OB.registerLeave = function (fn) { leaveHooks.push(fn); };
   OB.clearError = function () { S.error = ""; };
-  OB.show = function (n) { S.error = ""; S.step = n; renderPane(true); renderRail(); };
+  OB.show = function (n) {
+    var from = S.step;
+    S.error = ""; S.step = n; renderPane(true); renderRail();
+    // The account and payment lines are read again when the step moves past 2 or past 4, never on the poll.
+    if (from <= 2 && n > 2) { loadAccount(); } else if (from <= 4 && n > 4) { loadAccount(); }
+  };
   OB.refresh = function () { renderPane(true); renderRail(); };
 
   function frameHtml() {
+    // The top bar holds Sign out only; Finish later is in the rail's foot.
+    var bar = '<div class="ob-bar"><button class="su-link" id="ob-sign-out" type="button">Sign out</button></div>';
     return '<div class="su-rail" role="group" aria-label="Setup progress">' +
-      '<div class="su-rail-head"><span class="su-mark" aria-hidden="true"></span><b>Knowlu</b><span class="su-dim">Setup</span></div>' +
+      '<div class="su-rail-head"><span class="su-logo" role="img" aria-label="Knowlu"><span aria-hidden="true">Know</span><span class="su-lu" aria-hidden="true">lu</span></span><span class="su-dim">Setup</span></div>' +
       '<div class="su-rail-title"><h2>Your sources</h2><span class="su-dim" id="ob-stepno"></span></div>' +
-      '<ol class="su-rail-list" id="ob-rail" aria-live="polite"></ol></div>' +
-      '<div class="su-main ob-main"><div class="ob-bar"><button class="su-link" id="ob-finish-later" type="button">Finish later</button>' +
-      '<button class="su-link" id="ob-sign-out" type="button">Sign out</button></div>' +
+      '<ol class="su-rail-list" id="ob-rail" aria-live="polite"></ol>' +
+      '<div class="su-rail-foot"><span class="su-dim" id="ob-left"></span><button class="su-link" id="ob-finish-later" type="button">Finish later</button></div></div>' +
+      '<div class="su-main ob-main">' + bar +
       '<p class="ob-closing" id="ob-closing" role="status" hidden></p>' +
       '<section class="su-step ob-step" id="ob-pane" aria-labelledby="ob-title"><h1 id="ob-title" tabindex="-1"></h1>' +
       '<p class="su-why" id="ob-why"></p><div id="ob-ask"></div><div class="ob-proof" id="ob-proof"></div></section></div>';
@@ -222,7 +272,9 @@
   }
   function renderRail() {
     if (!S.mounted) { return; }
-    EL("ob-rail").innerHTML = railHtml(S.status);
+    EL("ob-rail").innerHTML = railHtml(S.status, S.account);
+    var left = minutesLeft(Number(S.status && S.status.step) || S.step);
+    EL("ob-left").textContent = "About " + left + (left === 1 ? " minute left" : " minutes left");
     renderClosing();
   }
 
@@ -567,6 +619,12 @@
   if (EL("onboarding")) { EL("onboarding").addEventListener("click", onClick10); }
   // ==== F11c, step 10 (ends) =====================================================================
 
+  // The one reader of `account_status`: on mount and at the step 2 and step 4 moves, never from the poll.
+  function loadAccount() {
+    invoke("account_status", {}).then(function (a) { S.account = a && a.ok === true ? a : null; renderRail(); })
+      .catch(function () { S.account = null; renderRail(); });
+  }
+
   // ---- status, polling, the shots hook ---------------------------------------------------------------
   function load() {
     var ask = S.fixed ? Promise.resolve(S.fixed) : invoke("onboarding_status", {});
@@ -602,13 +660,14 @@
     if (!root.getAttribute("data-wired")) { root.addEventListener("click", onClick); root.setAttribute("data-wired", "1"); }
     if (S.step) { renderPane(); }
     renderRail();
+    loadAccount();
     if (!S.tick) { S.tick = setInterval(renderClosing, 1000); }
     load().catch(function () {}).then(function () { if (!S.fixed) { setTimeout(poll, 2000); } });
   }
 
   OB.exitLine = exitLine; OB.elapsedText = elapsedText; OB.reasonWords = reasonWords; OB.costWords = costWords;
   OB.openKnowluEnabled = openKnowluEnabled; OB.isClosing = isClosing; OB.revealModel = revealModel; OB.railRow = railRow;
-  OB.rowModel = rowModel; OB.rows = ROWS;
+  OB.rowModel = rowModel; OB.rows = ROWS; OB.minutesLeft = minutesLeft;
   OB.finishLater = finishLater; OB.signOut = signOut; OB.renderRestart = renderRestart;
 
   // The headless shots open the frame at a step against a staged status (never a live one).
