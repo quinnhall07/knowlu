@@ -2821,7 +2821,7 @@ fn nap() { std::thread::sleep(Duration::from_millis(600)); }
 
 #[test]
 fn test_34_a_job_parked_on_mail_window_busy_is_picked_again_after_30_seconds_and_no_other_reason_is() {
-    assert_eq!(MAIL_RETRY_AFTER, Duration::from_secs(30));
+    assert_eq!(TIMER_RETRY_AFTER, Duration::from_secs(30));
     assert_eq!(REASON_MAIL_WINDOW_BUSY, "mail_window_busy");
     let tries = Arc::new(AtomicUsize::new(0));
     let t = tries.clone();
@@ -2977,4 +2977,63 @@ fn test_34_mail_first_pass_looks_once_parks_and_runs_again_after_mail_batch_clos
     r.q.mail_batch_closed();
     r.wait_for("the first pass to be done", |r| r.state_of("mail.first_pass") == JobState::Done);
     assert_eq!(seen.load(Ordering::SeqCst), 2, "it looked again after the batch closed");
+}
+
+// ---- F8d2 fix round: the skip seam, a failed end after a skip, and the retry spacing ------------------------------------
+
+#[test]
+fn test_34_a_skip_that_lands_before_any_run_is_attached_is_readable_through_mail_skipped() {
+    let gate = Arc::new(Mutex::new(None));
+    let g2 = gate.clone();
+    let (r, _clock) = rig_timed("t34-skipped-seam", state_at(5, true), true, move |f| { *g2.lock().unwrap() = Some(f.block("mail.setup", false)); });
+    assert!(!r.q.mail_skipped("mail.setup"), "not before the skip");
+    r.q.enqueue("mail.setup");
+    r.wait_started("mail.setup");
+    assert!(!r.q.mail_skipped("mail.setup"), "running, not skipped");
+    r.q.skip_mail(); // no setup run has been attached: the marker is all the glue can read
+    assert!(r.q.mail_skipped("mail.setup"), "the glue checks this on each window poll and before start_setup");
+    assert!(!r.q.mail_skipped("mail.canary"), "only the running job is marked");
+    gate.lock().unwrap().as_ref().unwrap().release();
+    r.wait_for("the setup to land", |r| r.state_of("mail.setup") != JobState::Running);
+    assert!(!r.q.mail_skipped("mail.setup"), "the marker goes when the job ends");
+}
+
+#[test]
+fn test_34_a_failed_end_after_a_skip_lands_skipped_and_a_done_end_stays_done() {
+    for (outcome, want) in [(Outcome::Failed(REASON_MAIL_SETUP_FAILED.into()), JobState::Skipped), (Outcome::Done(BTreeMap::new()), JobState::Done)] {
+        let gate = Arc::new(Mutex::new(None));
+        let g2 = gate.clone();
+        let (r, _clock) = rig_timed("t34-skip-failed", state_at(5, true), true, move |f| {
+            *g2.lock().unwrap() = Some(f.block("mail.setup", false));
+            f.behave("mail.setup", move || outcome.clone());
+        });
+        r.q.enqueue("mail.setup");
+        r.wait_started("mail.setup");
+        r.q.skip_mail();
+        gate.lock().unwrap().as_ref().unwrap().release();
+        r.wait_for("the setup to land", |r| r.state_of("mail.setup") != JobState::Running);
+        assert_eq!(r.state_of("mail.setup"), want);
+    }
+}
+
+#[test]
+fn test_34_a_parked_window_busy_job_is_not_re_picked_by_other_jobs_finishing_before_its_30_seconds() {
+    let (r, clock) = rig_timed("t34-spacing", state_at(5, true), true, |f| {
+        f.behave("mail.setup", || Outcome::Waiting(REASON_MAIL_WINDOW_BUSY.into()));
+    });
+    r.q.enqueue("mail.setup");
+    r.wait_for("the setup to park", |r| r.job("mail.setup").reason.as_deref() == Some(REASON_MAIL_WINDOW_BUSY));
+    // A lane-1 job ends done, which unparks every parked job; the retry time still holds the setup back.
+    r.q.enqueue("calendar.store");
+    r.wait_for("the lane job", |r| r.state_of("calendar.store") == JobState::Done);
+    // And a serial job, for the other thread.
+    r.q.enqueue("coursework.discover");
+    r.wait_for("the serial job", |r| r.state_of("coursework.discover") == JobState::Done);
+    nap();
+    assert_eq!(runs_of(&r, "mail.setup"), 1, "re-picked before its 30 s: {:?}", r.log.all());
+    clock.advance(Duration::from_secs(29));
+    nap();
+    assert_eq!(runs_of(&r, "mail.setup"), 1);
+    clock.advance(Duration::from_secs(2));
+    r.wait_for("the setup to be picked again", |r| runs_of(r, "mail.setup") >= 2);
 }

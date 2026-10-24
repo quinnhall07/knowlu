@@ -172,7 +172,7 @@ struct Core {
     partial_no_rank: bool,
     /// The profile's app data: where the answers file the config jobs read lives.
     dir: std::path::PathBuf,
-    /// F8d2: when a job parked on a reason in [`RETRY_REASONS`] is picked again; read against the queue's clock.
+    /// F8d2: when a job parked on a reason in [`TIMER_RETRY_REASONS`] is picked again; read against the queue's clock.
     retry_at: BTreeMap<String, Instant>,
     /// F8d2: mail jobs the student skipped while they ran: a `Stopped` or `Waiting` end lands `skipped`.
     skipping: BTreeSet<String>,
@@ -187,8 +187,9 @@ impl Core {
             Core::lane(j) == lane && self.waiting(j) && (self.ready || UNGATED.contains(&j.as_str())) && self.inputs_ready(j) && !self.notes_conflict(j)
         }).cloned()
     }
-    /// `pending` and not parked by a `Waiting` or `Stopped` outcome.
-    fn waiting(&self, job: &str) -> bool { !self.parked.contains(job) && self.job_state(job) == Some(JobState::Pending) }
+    /// `pending`, not parked by a `Waiting` or `Stopped` outcome, and not holding a retry time: a job
+    /// parked on a timer reason waits for its 30 s however many other jobs finish meanwhile (F8d2).
+    fn waiting(&self, job: &str) -> bool { !self.parked.contains(job) && !self.retry_at.contains_key(job) && self.job_state(job) == Some(JobState::Pending) }
     /// The note jobs and the slots take turns (§4.3). Decided here, under the lock that marks a job
     /// running, so the two never overlap and no thread has to wait for the other. With the account
     /// settled the lane's config jobs are ready first, so a slot also waits for a note job or
@@ -306,9 +307,9 @@ impl Core {
     }
     fn finish(&mut self, job: &str, lane: usize, out: Outcome) {
         self.busy[lane] = false;
-        // F8d2: a mail job the student skipped while it ran lands `skipped` when it stops or parks;
-        // one that ended done or failed keeps its truthful end.
-        let skipped = self.skipping.remove(job) && matches!(out, Outcome::Stopped | Outcome::Waiting(_));
+        // F8d2: a mail job the student skipped while it ran lands `skipped` when it stops, parks or fails (a
+        // student who chose to skip is never told to finish connecting); one that ended done stays done.
+        let skipped = self.skipping.remove(job) && matches!(out, Outcome::Stopped | Outcome::Waiting(_) | Outcome::Failed(_));
         if job == "mail.setup" { self.setup_run = None; }
         let (state, proof, reason) = match out {
             _ if skipped => (JobState::Skipped, BTreeMap::new(), None),
@@ -468,9 +469,9 @@ fn work(inner: Arc<Inner>, lane: usize) {
         // A job the drain abandoned already reads `pending`; whatever it returns late changes nothing.
         let abandoned = g.abandoned.remove(&job);
         let out = if abandoned { Outcome::Stopped } else { out };
-        let retry = matches!(&out, Outcome::Waiting(r) if RETRY_REASONS.contains(&r.as_str()));
+        let retry = matches!(&out, Outcome::Waiting(r) if TIMER_RETRY_REASONS.contains(&r.as_str()));
         g.finish(&job, lane, out);
-        if retry && g.job_state(&job) == Some(JobState::Pending) { g.retry_at.insert(job.clone(), inner.clock.now() + MAIL_RETRY_AFTER); }
+        if retry && g.job_state(&job) == Some(JobState::Pending) { g.retry_at.insert(job.clone(), inner.clock.now() + TIMER_RETRY_AFTER); }
         let counting = !inner.stop.load(Ordering::SeqCst);
         if let Some((s, started, (status, cursor))) = reading.filter(|_| !abandoned) { g.after_slot(s, &started, counting, status, cursor); }
         if job == "slot.partial" && counting && !abandoned { g.after_partial(); }
@@ -719,6 +720,10 @@ impl Queue {
         drop(g);
         if let Some(run) = run { run.stop(); }
     }
+    /// F8d2: true while `job` is running and the student has skipped it. The `mail.setup` glue checks it on
+    /// each window poll and once more right before `start_setup`, since a skip that lands while no run is
+    /// attached ([`Queue::attach_setup_run`]) has no run to stop. The marker goes when the job ends.
+    pub fn mail_skipped(&self, job: &str) -> bool { self.inner.lock().skipping.contains(job) }
     /// F8d2: the `mail.setup` glue hands over the run it started, so [`Queue::skip_mail`] can stop it.
     /// A skip that came first stops the run at once. The queue forgets it when the job ends.
     pub fn attach_setup_run(&self, run: Arc<dyn SetupRun>) {
@@ -1258,13 +1263,13 @@ pub const MAIL_WATCH_POLL: Duration = Duration::from_secs(5);
 pub const MAIL_WATCH_BUDGET: Duration = Duration::from_secs(180);
 
 /// `mail.setup` found the mail window held by another holder (`on_start`'s sweep or resume) for the
-/// whole minute it polled: `pending`, re-picked on a timer ([`MAIL_RETRY_AFTER`]), since the window's
+/// whole minute it polled: `pending`, re-picked on a timer ([`TIMER_RETRY_AFTER`]), since the window's
 /// release tells the queue nothing (§14.52.1, r1 m2).
 pub const REASON_MAIL_WINDOW_BUSY: &str = "mail_window_busy";
 /// `Waiting` reasons the queue re-picks on a timer: a closed list, today this one.
-pub const RETRY_REASONS: [&str; 1] = [REASON_MAIL_WINDOW_BUSY];
-/// How long a job parked on a [`RETRY_REASONS`] reason waits before it is picked again.
-pub const MAIL_RETRY_AFTER: Duration = Duration::from_secs(30);
+pub const TIMER_RETRY_REASONS: [&str; 1] = [REASON_MAIL_WINDOW_BUSY];
+/// How long a job parked on a [`TIMER_RETRY_REASONS`] reason waits before it is picked again.
+pub const TIMER_RETRY_AFTER: Duration = Duration::from_secs(30);
 /// How often `mail.first_pass` looks for a closed batch: once. It sits on the serial queue in front of
 /// the Google reads and the slots, so it never waits; [`Queue::mail_batch_closed`] wakes it to look again.
 pub const MAIL_FIRST_PASS_LOOKS: u32 = 1;
