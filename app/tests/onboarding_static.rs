@@ -783,7 +783,10 @@ fn a_blank_row_is_never_ignored_and_no_slug_is_made_on_the_page() {
 #[test]
 fn launch_state_names_onboarding_and_the_dispatcher_leaves_it_to_the_frame() {
     let rs = fs::read_to_string("src/onboarding.rs").expect("src/onboarding.rs");
-    let body = rs.split("pub fn launch_state(").nth(1).expect("launch_state");
+    // The function's body alone, comment lines dropped, so a comment can never satisfy the pin (r2 m1).
+    let after = rs.split("pub fn launch_state(").nth(1).expect("launch_state");
+    let body: String = after[..after.find("\n}\n").expect("launch_state's end")]
+        .lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
     assert!(body.contains("try_state::<crate::onboarding_state::LaunchMode>") && body.contains("\"onboarding\""), "launch_state answers mode onboarding from the managed LaunchMode");
     let js = code(&read("console.js"));
     let tail = js.split("invoke(\"launch_state\", {}).then(function (l) {").last().expect("the dispatcher");
