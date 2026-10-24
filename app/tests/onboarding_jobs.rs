@@ -168,15 +168,23 @@ impl Runner for Fake {
     }
 }
 
-struct Ent(AtomicBool);
+/// `.0` entitled, `.1` the number of `refresh` calls.
+struct Ent(AtomicBool, AtomicUsize);
 impl Entitlement for Ent {
     fn entitled(&self) -> bool { self.0.load(Ordering::SeqCst) }
-    fn refresh(&self) {}
+    fn refresh(&self) { self.1.fetch_add(1, Ordering::SeqCst); }
 }
 
-/// A status `at` the fake stamps just after the slot's own `started`.
+/// A status `at` the fake stamps 1 ms after the slot's own `started`, in the journal's own format.
 const FRESH: &str = "@fresh";
 const STALE: &str = "2000-01-01T00:00:00.000Z";
+
+/// A real `journal::now_ts` timestamp 1 ms later than `started`, so a reading counts as this slot's
+/// only if the queue compares timestamps, not strings it could match by prefix.
+fn one_ms_after(started: &str) -> String {
+    let t: jiff::Timestamp = started.parse().unwrap_or_else(|e| panic!("{started}: {e}"));
+    knowlu_engine::journal::now_ts(Some(t.checked_add(jiff::SignedDuration::from_millis(1)).unwrap()))
+}
 
 fn status(at: &str, ok: bool, skipped: Option<&str>) -> SyncStatus {
     SyncStatus { at: at.into(), ok, skipped: skipped.map(str::to_string), last_error: (!ok && skipped.is_none()).then(|| "transport".to_string()) }
@@ -193,7 +201,7 @@ impl SyncView for Syncs {
         let next = self.0.lock().unwrap().pop_front();
         match next {
             Some((Some(mut s), c)) => {
-                if s.at == FRESH { s.at = format!("{slot_started}~"); }
+                if s.at == FRESH { s.at = one_ms_after(slot_started); }
                 (Some(s), c)
             }
             Some((None, c)) => (None, c),
@@ -216,11 +224,21 @@ fn state_at(step: u8, settled: bool) -> OnboardingState {
     s
 }
 
+/// A rig as a real run looks at step 4 or later: the answers file holds the three captured courses
+/// (no feeds) and the school is confirmed. A queue that gates on either would otherwise be held for
+/// good, and one that ignored them would pass every test below unproven.
 fn rig_with(tag: &str, state: OnboardingState, entitled: bool, readings: Vec<Reading>, setup: impl FnOnce(&Fake)) -> Rig {
+    rig_full(tag, state, entitled, readings, true, setup)
+}
+fn rig_full(tag: &str, mut state: OnboardingState, entitled: bool, readings: Vec<Reading>, answers: bool, setup: impl FnOnce(&Fake)) -> Rig {
     let dir = scratch(tag);
+    if answers { save_answers(&dir, &Answers { courses: three_courses(), ..Default::default() }).unwrap(); }
+    if state.school.is_none() {
+        state.school = Some(School { unitid: Some("900001".into()), label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: true });
+    }
     let fake = Arc::new(Fake::default());
     setup(&fake);
-    let ent = Arc::new(Ent(AtomicBool::new(entitled)));
+    let ent = Arc::new(Ent(AtomicBool::new(entitled), AtomicUsize::new(0)));
     let deps = Deps {
         data_dir: dir.clone(),
         runner: fake.clone(),
@@ -252,7 +270,8 @@ impl Rig {
 #[test]
 fn test_03_without_an_entitlement_every_gated_job_is_held_and_never_started_then_runs_in_enqueue_order() {
     let r = rig("t03", state_at(4, true), false);
-    let gated = ["school.store", "calendar.store", "school.apply", "school.courses", "registrar.confirm", "config.ingest", "slot.partial", "slot.first_full"];
+    // `slot.first_full` is not enqueued by hand: step 10's confirm asks for it, after the entitlement.
+    let gated = ["school.store", "calendar.store", "school.apply", "school.courses", "registrar.confirm", "config.ingest", "slot.partial"];
     for j in ["school.capture", "school.preview"].into_iter().chain(gated) { r.q.enqueue(j); }
     r.wait_for("the device-side jobs", |r| r.state_of("school.preview") == JobState::Done);
     r.idle();
@@ -261,9 +280,12 @@ fn test_03_without_an_entitlement_every_gated_job_is_held_and_never_started_then
         assert_eq!(r.state_of(j), JobState::Held, "{j} is held, not failed and not pending");
         assert!(!r.log.ran(j), "{j} was started while not entitled");
     }
+    assert_eq!(r.ent.1.load(Ordering::SeqCst), 1, "one entitlement refresh at queue start, none per job");
     r.log.push("entitled");
     r.ent.0.store(true, Ordering::SeqCst);
     r.q.wake();
+    r.idle();
+    r.q.confirm_step10("2026-10-24T12:00:00Z");
     r.idle();
     let at = r.log.pos("entitled").unwrap();
     let started = r.log.started();
@@ -273,7 +295,8 @@ fn test_03_without_an_entitlement_every_gated_job_is_held_and_never_started_then
         assert!(r.log.pos(&format!("start:{j}")).unwrap() > at, "{j} started after the entitlement");
     }
     let serial: Vec<&String> = started.iter().filter(|j| j.starts_with("slot.")).collect();
-    assert_eq!(serial, ["slot.partial", "slot.first_full"].iter().collect::<Vec<_>>());
+    assert_eq!(serial, ["slot.partial", "slot.first_full"].iter().collect::<Vec<_>>(), "the full slot comes from step 10's confirm");
+    assert_eq!(r.q.snapshot().step10_confirmed_at.as_deref(), Some("2026-10-24T12:00:00Z"));
     r.log.assert_clean();
 }
 
@@ -364,6 +387,8 @@ fn test_06_a_grades_not_yet_row_never_marks_first_grades_and_a_skipped_row_leave
 
 // ---- test 4: slot order and scope -------------------------------------------------------------------------------
 
+// The step order below is the FAKE's own (`steps_of`): this test pins the scope each slot is handed and the
+// order the queue hands them in. The real argv order of a slot's steps is pinned by test 18 in scheduler.rs.
 const CANON: [&str; 6] = ["sync", "coursework", "grades", "ingest", "judge", "rank"];
 
 /// Enqueues the whole onboarding in `order` (account unsettled, so the first slot's `sync` settles it),
@@ -560,10 +585,9 @@ impl ExitSeams for Seams<'_> {
     fn exit(&self) { self.log.push("exit"); self.exits.fetch_add(1, Ordering::SeqCst); }
     fn snapshot(&self) -> OnboardingState { self.q.snapshot() }
     fn write_finish(&self, handover: Vec<HandoverItem>) -> Result<(), String> {
-        let mut s = self.q.snapshot();
-        s.finished = true;
-        s.handover = handover;
-        save_state(&self.dir, &s)?;
+        // Through the queue, as the real seam does: its own state is set and saved, so a later save of
+        // that state (the next quit's) cannot write an unfinished copy over it.
+        self.q.finish(handover)?;
         let _ = std::fs::remove_file(answers_path(&self.dir));
         self.log.push("write_finish");
         Ok(())
@@ -658,20 +682,53 @@ fn test_09_finish_at_the_cap_waits_for_the_running_ingest_starts_neither_judge_n
     assert!(seams.index("write_finish") < seams.index("relaunch_with"));
 }
 
+/// §4.7's checks, all proven but the ones nothing here needs: only `resume` reading a saved file.
+struct Proven;
+impl ResumeChecks for Proven {
+    fn session_present(&self) -> bool { true }
+    fn restored_course_count(&self) -> usize { 3 }
+    fn entitled(&self) -> bool { true }
+    fn school_mailbox_active(&self) -> bool { false }
+    fn google_granted(&self) -> bool { false }
+    fn homework_login_stored(&self) -> bool { false }
+    fn class_commitments_cover_courses(&self) -> bool { false }
+    fn account_school(&self) -> Option<School> { None }
+    fn answers_ok(&self) -> bool { true }
+}
+
+/// A canary that never notices the stop (its gate stays closed): the exit must not wait for it. The
+/// canary's own thread is released at the end so no fake waits out its 30 s guard.
 #[test]
-fn test_09_a_canary_running_at_finish_is_abandoned_at_once() {
-    let s = finishable();
-    let r = rig("t09-finish-canary", s, true);
-    r.fake.block("mail.canary", true);
-    r.q.enqueue("mail.canary");
-    r.wait_started("mail.canary");
-    let seams = Seams::new(&r);
-    let out = onboarding_finish_inner(&seams, &ExitGuard::default(), epoch(CONFIRMED) + 180);
-    assert_eq!(out["ok"], true, "{out}");
-    assert!(r.log.pos("abandoned:mail.canary").is_some(), "no gate was released: the canary noticed the stop");
-    let Loaded::Ok(saved) = load_state(&r.dir) else { panic!("saved") };
-    assert_eq!(saved.jobs["mail.canary"].state, JobState::Pending);
-    assert!(saved.handover.iter().any(|h| h.item == "mail.canary" && h.signal == "mail_json"), "{:?}", saved.handover);
+fn test_09_a_canary_that_never_notices_the_stop_is_abandoned_at_once_by_finish_and_by_sign_out() {
+    for arm in ["finish", "sign_out"] {
+        let r = rig(&format!("t09-canary-{arm}"), finishable(), true);
+        let gate = r.fake.block("mail.canary", false);
+        r.q.enqueue("mail.canary");
+        r.wait_started("mail.canary");
+        let seams = Seams::new(&r);
+        let began = Instant::now();
+        let out = match arm {
+            "finish" => onboarding_finish_inner(&seams, &ExitGuard::default(), epoch(CONFIRMED) + 180),
+            _ => onboarding_sign_out_inner(&seams, &ExitGuard::default()),
+        };
+        let took = began.elapsed();
+        assert!(!*gate.open.lock().unwrap(), "{arm}: the gate was still closed when the exit returned");
+        assert!(took < Duration::from_secs(2), "{arm}: the exit waited {took:?} for a canary that never stops");
+        assert_eq!(out["ok"], true, "{arm}: {out}");
+        match arm {
+            "finish" => {
+                let Loaded::Ok(saved) = load_state(&r.dir) else { panic!("saved") };
+                assert_eq!(saved.jobs["mail.canary"].state, JobState::Pending, "abandoned, so it runs again from the start");
+                assert!(saved.handover.iter().any(|h| h.item == "mail.canary" && h.signal == "mail_json"), "{:?}", saved.handover);
+            }
+            _ => {
+                let resumed = resume(load_state(&r.dir), &Proven);
+                let st = resumed.state.expect("a rewound file resumes inside onboarding");
+                assert_eq!(st.jobs.get("mail.canary").map(|j| j.state).unwrap_or(JobState::Pending), JobState::Pending);
+            }
+        }
+        gate.release();
+    }
 }
 
 #[test]
@@ -747,16 +804,16 @@ fn test_17_sign_out_stops_abandons_saves_freezes_signs_out_relaunches_with_pick_
     s.jobs.insert("school.capture".into(), JobRecord { state: JobState::Done, ..Default::default() });
     let r = rig("t17-order", s, true);
     save_answers(&r.dir, &Answers { feeds: BTreeMap::from([("lms_ics".to_string(), FeedState::Validated)]), ..Default::default() }).unwrap();
-    r.fake.block("mail.canary", true);
+    let canary = r.fake.block("mail.canary", false);
     r.q.enqueue("mail.canary");
     r.wait_started("mail.canary");
     let seams = Seams::new(&r);
     seams.pending.put(PENDING_LMS, "https://lms.example.invalid/feed/tok-t17.ics").unwrap();
     let out = onboarding_sign_out_inner(&seams, &ExitGuard::default());
     assert_eq!(out["ok"], true, "{out}");
-    let order = ["set_stop", "abandoned:mail.canary", "save", "freeze", "sign_out frozen=true file_step=8", "relaunch:--pick", "exit"];
+    let order = ["set_stop", "save", "freeze", "sign_out frozen=true file_step=8", "relaunch:--pick", "exit"];
     let at: Vec<usize> = order.iter().map(|e| seams.index(e)).collect();
-    assert!(at.windows(2).all(|w| w[0] < w[1]), "stop, canary abandoned, last save, freeze, sign-out, relaunch --pick, exit, in that order: {:?}", r.log.all());
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "stop, last save, freeze, sign-out, relaunch --pick, exit, in that order: {:?}", r.log.all());
     assert!(r.log.pos("flush").is_none(), "no push: the session is about to go");
     // on_sign_out ran inside the fake sign-out: answers and pending link gone, file rewound.
     assert!(!answers_path(&r.dir).exists());
@@ -765,6 +822,7 @@ fn test_17_sign_out_stops_abandons_saves_freezes_signs_out_relaunches_with_pick_
     assert_eq!(rewound.step, 2);
     assert!(rewound.school.is_none() && !rewound.account_settled);
     assert!(rewound.jobs.values().all(|j| j.state == JobState::Pending), "{:?}", rewound.jobs);
+    canary.release(); // the abandoned canary's fake thread ends; it never noticed the stop
 }
 
 #[test]
@@ -943,44 +1001,42 @@ fn handoff(dir: &Path, pending: &FakePending) -> IngestHandoff { ingest_handoff(
 
 // ---- test 12: the answers survive a quit ---------------------------------------------------------------------------------
 
-/// Steps 3-8 through the fakes. `quits` names the steps after which the process "quits": nothing in
-/// memory survives, the answers file is read again from disk and must equal what was given so far.
+/// Steps 3-8 through the fakes, every answer given through `onboarding_answer_inner` (the inner of
+/// the `onboarding_answer` command), which saves it before it enqueues. `quits` names the steps after
+/// which the process "quits": the only thing kept across a quit is the folder, and the next step reads
+/// the file afresh and writes it back, so a field the file format drops changes the hand-over.
 fn steps_3_to_8(tag: &str, quits: &[u8]) -> String {
     let dir = scratch(tag);
     let pending = FakePending::default();
-    // What the student has answered so far, kept in memory beside the file.
-    let mut given = Answers::default();
-    let quit = |at: u8, given: &Answers| {
+    let answer = |step: u8, a: Value| {
+        let out = onboarding_answer_inner(&dir, step, &a, &mut |_| {});
+        assert_eq!(out["ok"], true, "step {step}: {out}");
+    };
+    let quit = |at: u8| {
         if quits.contains(&at) {
-            let reloaded = load_answers(&dir).unwrap().expect("the answers file survived the quit");
-            assert_eq!(&reloaded, given, "a quit at step {at} lost an answer");
+            let a = load_answers(&dir).unwrap().unwrap_or_else(|| panic!("a quit at step {at} lost the answers file"));
+            save_answers(&dir, &a).unwrap();
         }
     };
-    let apply = |given: &mut Answers, change: &dyn Fn(&mut Answers)| {
-        update_answers(&dir, change).unwrap();
-        change(given);
-    };
     // Step 3: the capture.
-    apply(&mut given, &|a| {
-        a.courses = three_courses();
-        a.registrar_rows = vec![RegistrarRow { code: "QLT 101".into(), days: "MWF".into(), start: "09:00".into(), end: "09:50".into() }];
-        a.feeds.insert("lms_ics".into(), FeedState::Validated);
-    });
+    answer(3, serde_json::json!({"capture": {
+        "courses": three_courses(),
+        "registrar_rows": [RegistrarRow { code: "QLT 101".into(), days: "MWF".into(), start: "09:00".into(), end: "09:50".into() }],
+        "feeds": {"lms_ics": "validated"},
+    }}));
     pending.put(PENDING_LMS, LMS_LINK).unwrap();
     // Step 4: payment, then the local lane: the feed is stored and the course notes are made.
     run_feed_store(&dir, "lms_ics", &pending, &Acct::ok(), &NoWindow);
     run_school_courses(&dir, &[], &mut |c| Ok(c.name.to_lowercase().replace(' ', "-")));
-    given.feeds.insert("lms_ics".into(), FeedState::Stored);
-    for c in three_courses() { given.slugs.insert(c.code, c.name.to_lowercase().replace(' ', "-")); }
-    quit(4, &given);
+    quit(4);
     // Step 6: Google Calendar granted.
-    apply(&mut given, &|a| a.google_calendar = Some(true));
-    quit(6, &given);
+    answer(6, serde_json::json!({"google_calendar": true}));
+    quit(6);
     // Step 8: each confirmed row is saved as it is confirmed.
-    apply(&mut given, &|a| a.rows.push(BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "quilting-basics".into() }));
-    apply(&mut given, &|a| a.zybooks_ignore.push("ZYB-ONBOARDING".into()));
+    answer(8, serde_json::json!({"row": BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "quilting-basics".into() }}));
+    answer(8, serde_json::json!({"zybooks_ignore": "ZYB-ONBOARDING"}));
     // After step 8's confirms, before leaving it.
-    quit(8, &given);
+    quit(8);
     let h = handoff(&dir, &pending);
     assert_eq!(h.course_map.len(), 3, "course_map is never empty when step 3 found courses: {h:?}");
     serde_json::to_string(&h).unwrap()
@@ -1117,22 +1173,36 @@ fn slow_notes(r: &Rig) {
     }
 }
 
+/// The slot's `sync` step is held open for 50 ms while the two note jobs are asked for, so a missing
+/// notes gate is an overlap every time, not only on a lucky schedule. Returns when the queue is idle.
+fn slot_holds_sync_while_notes_are_asked_for(r: &Rig) {
+    slow_notes(r);
+    let sync = r.fake.block_step("slot.partial", "sync");
+    r.q.enqueue("slot.partial");
+    r.wait_log("step:slot.partial:sync");
+    for j in ["school.courses", "registrar.confirm"] { r.q.enqueue(j); }
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!r.log.ran("school.courses") && !r.log.ran("registrar.confirm"), "a note job started while sync was running: {:?}", r.log.all());
+    sync.release();
+    r.idle();
+}
+
 #[test]
 fn test_16_at_payment_with_the_account_settled_the_note_jobs_and_sync_never_overlap_and_none_fails() {
     let r = rig("t16-settled", state_at(4, true), true);
-    slow_notes(&r);
-    for j in ["school.courses", "registrar.confirm", "slot.partial"] { r.q.enqueue(j); }
-    r.idle();
+    slot_holds_sync_while_notes_are_asked_for(&r);
     r.log.assert_clean();
     for j in ["school.courses", "registrar.confirm", "slot.partial"] {
         assert_eq!(r.state_of(j), JobState::Done, "{j} neither failed nor was skipped: {:?}", r.log.all());
     }
     assert!(r.log.steps().contains(&("slot.partial".to_string(), "sync".to_string())), "sync is not skipped");
+    assert!(r.log.pos("end:slot.partial").unwrap() < r.log.pos("start:school.courses").unwrap(), "the notes waited for the slot's sync to end");
 }
 
 #[test]
 fn test_16_with_the_account_unsettled_sync_runs_first_and_the_note_jobs_after_it() {
     let r = rig("t16-unsettled", state_at(4, false), true);
+    // Asked for in the other order: the notes first. Sync still runs first, because the account is not reached.
     slow_notes(&r);
     for j in ["school.courses", "registrar.confirm", "slot.partial"] { r.q.enqueue(j); }
     r.idle();
@@ -1488,4 +1558,115 @@ fn test_26_the_consoles_handler_list_holds_neither_storing_command() {
     for banned in ["lms_link::capture_calendar_link", "lms_link::paste_calendar_link"] {
         assert!(!console.iter().any(|n| n == banned), "the console's list holds {banned}");
     }
+}
+
+// ======================================================================================================
+// F1 review r1: removed courses (test 12), the unconfirmed school (test 2b), the answers gate after a
+// rewind (test 17), the finish write through the queue (test 19).
+// ======================================================================================================
+
+fn capture_answer() -> Value {
+    serde_json::json!({"capture": {
+        "courses": three_courses(),
+        "registrar_rows": [RegistrarRow { code: "QLT 101".into(), days: "MWF".into(), start: "09:00".into(), end: "09:50".into() }],
+        "feeds": {},
+    }})
+}
+
+#[test]
+fn test_12_a_course_removed_at_step_3_reaches_no_note_and_no_course_map_entry_and_stays_removed_after_a_quit() {
+    let dir = scratch("t12-removed");
+    let pending = FakePending::default();
+    let give = |step: u8, a: Value| {
+        let out = onboarding_answer_inner(&dir, step, &a, &mut |_| {});
+        assert_eq!(out["ok"], true, "{out}");
+    };
+    give(3, capture_answer());
+    give(3, serde_json::json!({"counts": {
+        "QLT 101": {"class_times": 3, "assignments_upcoming": 7},
+        "KNT 220": {"class_times": 2, "assignments_upcoming": 11},
+        "WVG 105": {"class_times": 1, "assignments_upcoming": 4},
+    }}));
+    give(3, serde_json::json!({"remove": "KNT 220"}));
+    // A quit and a reload: nothing here but the folder.
+    let reloaded = load_answers(&dir).unwrap().expect("the answers file survived");
+    let totals = step3_totals(&reloaded);
+    assert_eq!(totals.get("classes"), Some(&2), "{totals:?}");
+    assert_eq!(totals.get("assignments_upcoming"), Some(&11), "7 + 4, the removed row's 11 is not in it: {totals:?}");
+    let created = RefCell::new(Vec::<String>::new());
+    let out = run_school_courses(&dir, &[], &mut |c| { created.borrow_mut().push(c.code.clone()); Ok(c.name.to_lowercase().replace(' ', "-")) });
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    assert_eq!(*created.borrow(), ["QLT 101", "WVG 105"], "the removed course gets no note");
+    let h = handoff(&dir, &pending);
+    let codes: Vec<&str> = h.course_map.iter().map(|(c, _)| c.as_str()).collect();
+    assert_eq!(codes, ["QLT 101", "WVG 105"], "course_map is the kept rows only");
+    assert!(!serde_json::to_string(&h).unwrap().contains("knotwork"), "nothing of the removed course reaches config.ingest");
+    // A re-capture is the student asking again: the mark is cleared.
+    give(3, capture_answer());
+    assert_eq!(load_answers(&dir).unwrap().unwrap().kept_courses().len(), 3);
+}
+
+#[test]
+fn test_02_school_apply_is_enqueued_but_does_not_start_until_the_school_is_confirmed() {
+    let mut s = state_at(3, true);
+    s.school = Some(School { unitid: Some("900001".into()), label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: false });
+    let r = rig("t02-apply", s, true);
+    r.q.enqueue("school.apply");
+    r.idle();
+    assert!(!r.log.ran("school.apply"), "an offered school is assumed nothing about: {:?}", r.log.all());
+    assert!(matches!(r.state_of("school.apply"), JobState::Pending | JobState::Held), "{:?}", r.state_of("school.apply"));
+    r.q.confirm_school();
+    r.idle();
+    assert!(r.log.ran("school.apply"), "confirmed, so it runs: {:?}", r.log.all());
+    assert_eq!(r.state_of("school.apply"), JobState::Done);
+    assert!(r.q.snapshot().school.is_some_and(|s| s.confirmed));
+}
+
+#[test]
+fn test_17_after_a_rewind_with_no_answers_file_the_config_jobs_stay_pending_and_run_once_the_answers_are_saved() {
+    let r = rig_full("t17-noanswers-queue", state_at(8, true), true, vec![ok_reading(true, 10, 10)], false, |_| {});
+    assert!(!answers_path(&r.dir).exists());
+    for j in ["school.courses", "config.ingest"] { r.q.enqueue(j); }
+    r.idle();
+    for j in ["school.courses", "config.ingest"] {
+        assert!(!r.log.ran(j), "{j} started with no answers file: {:?}", r.log.all());
+        assert_eq!(r.state_of(j), JobState::Pending, "{j} waits");
+    }
+    // The student answers step 3 again: the file is back, and asking again runs them.
+    let out = onboarding_answer_inner(&r.dir, 3, &capture_answer(), &mut |_| {});
+    assert_eq!(out["ok"], true, "{out}");
+    for j in ["school.courses", "config.ingest"] { r.q.enqueue(j); }
+    r.idle();
+    for j in ["school.courses", "config.ingest"] { assert_eq!(r.state_of(j), JobState::Done, "{j}: {:?}", r.log.all()); }
+    // An unreadable file is the same as an absent one.
+    std::fs::write(answers_path(&r.dir), "{ broken").unwrap();
+    let before = r.log.started().len();
+    r.q.enqueue("registrar.confirm");
+    r.idle();
+    assert_eq!(r.log.started().len(), before, "no config job runs on an unreadable answers file");
+}
+
+#[test]
+fn test_19_the_finished_file_survives_the_next_quit_and_the_sign_out_arm_starts_no_job_afterwards() {
+    let r = rig("t19-finished-survives", finishable(), true);
+    let mut seams = Seams::new(&r);
+    seams.relaunch_fails = true;
+    let guard = ExitGuard::default();
+    let out = onboarding_finish_inner(&seams, &guard, epoch(CONFIRMED) + 180);
+    assert_eq!(out["restart"], true, "{out}");
+    let _ = onboarding_quit_inner(&seams, &guard);
+    let Loaded::Ok(after) = load_state(&r.dir) else { panic!("saved") };
+    assert!(after.finished, "the quit's save did not write an unfinished copy over finish's write");
+    // The sign-out arm: after a failed relaunch the stop holds, the freeze holds, nothing starts.
+    let r = rig("t19-signout-quiet", state_at(8, true), true);
+    let mut seams = Seams::new(&r);
+    seams.relaunch_fails = true;
+    let out = onboarding_sign_out_inner(&seams, &ExitGuard::default());
+    assert_eq!(out["restart"], true, "{out}");
+    let rewound = std::fs::read(state_path(&r.dir)).unwrap();
+    let before = r.log.started().len();
+    r.q.enqueue("school.capture");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(r.log.started().len(), before, "no job starts on the sign-out arm: {:?}", r.log.all());
+    assert_eq!(std::fs::read(state_path(&r.dir)).unwrap(), rewound, "and nothing is saved over the rewind");
 }

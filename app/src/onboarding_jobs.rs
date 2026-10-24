@@ -98,6 +98,9 @@ impl Queue {
     pub fn retry(&self, _job: &str) { todo!("F8e: retry") }
     /// Step 10's confirm: stamps `step10_confirmed_at` and enqueues `slot.first_full`.
     pub fn confirm_step10(&self, _at: &str) { todo!("F8e: confirm step 10") }
+    /// The student confirmed the school offered at step 3: marks it confirmed on the live state and
+    /// wakes the queue, so a `school.apply` that was waiting on it can start (§4.7).
+    pub fn confirm_school(&self) { todo!("F8e: confirm the school") }
     pub fn snapshot(&self) -> OnboardingState { todo!("F8a: snapshot") }
     /// True when nothing is running and nothing runnable is waiting, within `timeout`.
     pub fn wait_idle(&self, _timeout: Duration) -> bool { todo!("F8a: wait idle") }
