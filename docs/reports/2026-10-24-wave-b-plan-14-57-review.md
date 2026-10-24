@@ -18,3 +18,12 @@ Reviewer: `reviewer`. Filed by the controller.
 - m-2: a double-pressed step-10 confirm can stamp twice. Guard inside `confirm_step10` under the lock.
 - m-3: hold F7e and F5d on Quinn's D5 signature. Move step 10's hours Edit into a separate F11c follow-up.
 - m-4: the F3z row's refusal needs its condition (no IANA zone). Add a test 44 case where an IANA zone accepts an unlisted school.
+
+---
+
+## r2 (b3a53bf): PASS
+All r1 findings are closed, and §7 has no cycle; every size is within the cap. Four minors were folded in at §14.57.13:
+- n-1: F11c2 is on §8's checklist and in the merge order.
+- n-2: the schedule-file wait applies only while the file is absent.
+- n-3: F3z's place in the onboarding_jobs.rs chain.
+- n-4: F7e's fixed `meets` message.

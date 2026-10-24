@@ -1484,14 +1484,15 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F2b2b | `onboarding_state.rs` only (r4 R4-1): m-1, m-2, the failed-lane refusal and `failed_job`, `vault_only`, `load_state_for_launch` (backoff to about 3.2 s), the `mail.connect` hand-over rule and its `mail_signal` arms (`CanaryVerified` and the new `TurnedOff`; never cleared on `Disconnected`, r2 R2-1), `REGISTRAR_FILE` and its deletes (option A only). Re-counted in r4: about 72 lines, so the patient read stays; past 80 (Q8 = yes makes it about 82) it and test 38's read half move to F4c (§14.52.1, .5, .8; tests 38's read half while the read is here, 39, 40's hand-over cases) | `implementer` | as F2b2a | F2b2a (`onboarding_state.rs`'s chain) |
 | F2b2c | `mail/commands.rs`: `disconnect_with` applies `MailSignal::TurnedOff` through `apply_mail_signal` right after step 0, before any network call (about 3 lines; §14.52.1, r3 R3-2, r4 R4-1; `scheduler.rs` is not edited). **Collision note:** S4c also edits `disconnect_with`; it is not a dependency, and whichever of the two lands second rebases and keeps both (test 40's Disconnect cases, written first) | `implementer` | specified, about three lines, tested over `disconnect_with`'s fakes | F2b2b (the variant). Nothing on F2b2c's path waits on S4c |
 | F2b3 | `onboarding_state.rs` (§14.57.1-.3, .9): `courses: [{key, code, label}]` in `status_for` from `kept_courses()` (`null` with no readable answers file); the `(10, {"confirmed": true})` arm, with the wrapper calling `queue.confirm_step10(now)`; in `onboarding_jobs.rs`, `confirm_step10` returns without restamping, pushing or persisting when `step10_confirmed_at` is already set, under its lock (r1 m-2, about 3 lines); the `(8, {"row"})` arm refusing a `course_slug` that is not a kept course's key; `onboarding_mail_not_now` (Q8 = yes) through `update_finished` (about 43 lines; test 41, written first, calls the wrapper twice) | `implementer` | specified, off the contract list, tested over the fake queue | F2b2b (merged). Collision notes: F8b2-advance in `onboarding_state.rs`; F8c2 and F3z in `onboarding_jobs.rs`; the second to land rebases |
+| F2b4 | `onboarding_state.rs` (§14.58.3): `Answers` gains `week_of`, `week_today` and `homework_sites` (serde default, skipped when empty, so old files keep their bytes); `status_for` adds `week: {of, today}` and `homework_sites: {site: [code]}` over the kept courses (`null` with no readable answers file). About 20 lines; test 48, written first | `implementer` | specified, off the contract list | F2b3 (the file's chain), F7f's key names (fixed in §14.58.3, not its merge). Collision note with F3z in `onboarding_state.rs` |
 | F3 | Step-2 vault with defaults, without campus or events files; `account_settled`; picker flag; the name picked in Rust past profiles and folders on disk; the old flow's errors rewritten; F10's interim name loop deleted (F10's review) | `test-writer` then `implementer` | writes a vault; tests first; the static change is a deletion only | F2a, F10 |
-| F3z | The zone without the `America/Chicago` default (Quinn's answer as relayed, §14.57.4, r1): step 2's runner plan (the two default slots, `journal::device_name()`) moves into one shared builder in `scaffold.rs`; when Windows' zone has no IANA name, `onboarding.rs:155` answers `tz: null` and `:873`'s step-2 create leaves `runners.yaml` out; **`school.apply`** (`onboarding_jobs.rs`, when the school is final) then creates it create-new as `scaffold::runners_yaml` over the shared builder's plan with only the zone set, `state_timezone` of the campus row's state; a job that reads `runners.yaml` waits on `school.apply` in `inputs_ready`; `config.ingest`'s zone read from the vault's `runners.yaml`; the school answer is refused **only when Windows' zone has no IANA name and the school has no state**, until Q9; with an IANA zone an unlisted school is accepted (about 45 lines over `onboarding.rs`, `scaffold.rs`, `onboarding_jobs.rs` and the school answer's wrapper; test 44, written first, with its bytes, school-change and IANA cases; a source pin that the literal lives only in `STATE_TZ`) | `test-writer` then `implementer` | writes a vault config file; §4.9's create-new helper; no contract-list file | F3, F8b2 (the school answer). Collision notes: F5c in `onboarding.rs`; F2b3 and F8c2 in `onboarding_jobs.rs` (it joins that file's chain after F8b2-advance) |
+| F3z | The zone without the `America/Chicago` default (Quinn's answer as relayed, §14.57.4, r1): step 2's runner plan (the two default slots, `journal::device_name()`) moves into one shared builder in `scaffold.rs`; when Windows' zone has no IANA name, `onboarding.rs:155` answers `tz: null` and `:873`'s step-2 create leaves `runners.yaml` out; **`school.apply`** (`onboarding_jobs.rs`, when the school is final) then creates it create-new as `scaffold::runners_yaml` over the shared builder's plan with only the zone set, `state_timezone` of the campus row's state; a job that reads `runners.yaml` waits on `school.apply` in `inputs_ready`; `config.ingest`'s zone read from the vault's `runners.yaml`; the wait in `inputs_ready` only while `runners.yaml` is absent, for `config.ingest`, `slot.partial` and `slot.first_full` (r2 n-2); **Q9, signed**: `School` gains `state: Option<String>` (skipped when `None`), the unlisted school answer must carry a `STATE_TZ` code or is refused with "Choose your school's state." whatever the zone, and the state fills `campus.yaml` (about 55 lines over `onboarding.rs`, `scaffold.rs`, `onboarding_jobs.rs` and `onboarding_state.rs`; test 44, written first, with its bytes, school-change, present-file, Q9 and IANA cases; a source pin that the literal lives only in `STATE_TZ`) | `test-writer` then `implementer` | writes a vault config file; §4.9's create-new helper; no contract-list file | F3, F8b2 (the school answer), F8g (**`onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8b2-advance, F8g, F3z, then F8lb and F8h-runner**; r2 n-3). Collision notes: F5c in `onboarding.rs`; F2b3, F2b4 in `onboarding_state.rs`; F2b3 and F8c2 in `onboarding_jobs.rs` |
 | F4 | Onboarding mode in `run_console`; the window's close prevented, then `onboarding_quit`'s inner on its own thread; `mode_device` primed (T0); one update check at launch (T0 review M3); `LaunchMode` managed; the `Queue` moved to F4c (§14.51, §14.52.5) | `implementer` | P-3's five changes; the close off the event loop (review r5, I-5) | F2a, F2b, F8s (`prime_mode_device`, `spawn_update_check`), T0 |
 | F4c | `main.rs`'s onboarding arm: `load_state_for_launch` (rewrite only unparseable bytes; a lasting I/O error or an unknown version is a named fatal that writes nothing), `Queue::start(F8w1's Deps, resume(loaded, LiveChecks))` and `.manage(queue)`; `LiveChecks` managed too, as exactly `ManagedChecks` (F8b2-advance's alias), for step 3's advance (§14.55, one line; test 38 pins the type); `install_update` refused in onboarding mode (`commands.rs`); test 27's pin extended; if F2b2b passes 80 lines, the patient read itself and test 38's read half move here (§14.52.5, .8, r2 n2; test 38) | `implementer` | specified; `main.rs`'s chain is F4, F5, F4c, F5b, S6r | F4, F5, F2b2b, F8w2 (so F8w1, F8g), F4b. **Not Q7:** F4c goes ahead with F8w1's interim `registrar.confirm` arm, and F8h-runner's arm follows (r4 n-2, the controller's call) |
 | F4b | `switch_profile` refuses in onboarding mode | `implementer` | specified, tested in F1 (review r4, M6) | F2a |
 | F5 | Moved and new commands registered (none new from §14.52's rulings: step 5 rides `onboarding_answer`, and the mail commands are already on the console's list; `onboarding_mail_not_now` (Q8 = yes) and the two step-8 wrappers are F5c's, after F5, §14.57) | `mechanical` | a list edit, recounted, pinned | F4, F2b, F2g, F2h, F8d, F8lb |
 | F5c | `onboarding.rs`: `onboarding_discover_coursework(zybooks, vhl)` and `onboarding_store_credentials(source, user, secret)`, each reading `cs.vault` from `ConsoleState` and calling today's function unchanged (about 20 lines); the console's `generate_handler!` list gains them and F2b3's `onboarding_mail_not_now`, three names, recounted (§14.57.1, .9; test 43, written first) | `implementer`, reviewed by `contract-reviewer` (a credential write path) | specified; no contract-list file; the page never carries a path | F5, F2b3 (the Not now command); `main.rs`'s chain after F4c. Collision note: F3z also edits `onboarding.rs`; the second to land rebases |
-| F5d | **Held on Quinn's D5 signature** (r1 m-3). `commands.rs`: `EDITABLE` gains `meets` (15 names), and `set_fields` routes a `meets` value through `commitments::answer_literal`, never `literal_for` (§14.57.10; about 10 lines; test 46, written first) | `implementer` | specified; writes through `write` with `console_ctx`, off the contract list | F7e |
+| F5d | D5 signed by Quinn, 2026-10-24 (§14.58). `commands.rs`: `EDITABLE` gains `meets` (15 names), and `set_fields` routes a `meets` value through `commitments::answer_literal`, never `literal_for` (§14.57.10; about 10 lines; test 46, written first) | `implementer` | specified; writes through `write` with `console_ctx`, off the contract list | F7e |
 | F5b | Shell list: the retired panels' commands, after F10; five move to the console's list and are never deleted (F10's review) | `mechanical` | `main.rs` is never F10's (review r1, I8) | F10, F5 |
 | F6a | `school.apply` (`campus.yaml`, `events.yaml`) and `school.courses` (course notes), create-new | `test-writer` then `implementer` | vault bytes; tests first | F3 |
 | F6b | `config.ingest`: `ingest.yaml` once, create-new, feeds per §4.11; `course_exclude` for removed courses (§14.45) | `test-writer` then `implementer` | as F6a | F6a |
@@ -1502,14 +1503,15 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F8a | The queue's core: states, persistence, the serial thread, holds | `implementer` | orchestration over fakes | F1, F2a |
 | F8e | Order rules and the local lane: config before readers, slot order, `account_settled` from the sync status, step 10's gate | `implementer` | as F8a | F8a |
 | F8h | The notes gate and the lane's `sync.lock` retry (holding nothing between tries); `retry_on_sync_running`; `registrar.confirm` also waits for `school.apply` (§14.52.4; about 45 lines; test 36's F8h cases). Not gated on Q7; the runner is F8h-runner's (r4 n-2) | `implementer` | split out of F8e (review r4, M4) | F8e |
-| F8h-runner | **Q7 answered A (§14.57.6): dispatchable, option A only.** `registrar.confirm`'s runner over `registrar::write_registrar`, `registrar_file_missing` and its Try again, and the `registrar.confirm` arm in `onboarding_live.rs`, replacing F8w1's interim `Waiting("registrar_runner_pending")` (§14.52.4, r4 n-2; about 35 lines; test 36's F8h-runner cases and test 37's `registrar.confirm` row, written first) | `implementer` | specified (Q7 answered A) | F8h, F8w1 (the arm it replaces), F8w2 (the other writer of `onboarding_live.rs`; r5 m-3), F8b's registrar half, and F2b2b (`REGISTRAR_FILE`); last in `onboarding_jobs.rs`'s chain when it is dispatched. Nothing but the wave-B ship waits on it |
-| F7e | **Held on Quinn's D5 signature** (r1 m-3). Engine, `commitments.rs` (§14.57.10): `CONSOLE_FIELDS` gains `meets`; `check_console_edit` accepts it on a confirmed, non-planning-day commitment only when the value is a non-empty list that the existing `answer_literal` (`:3690`) accepts, which also gives the one-line literal (r1 m-1: no second emitter; `yamlemit.rs` unedited). About 20 lines; test 45, written first | `test-writer`, then `implementer`; reviewed by `contract-reviewer` | the literal becomes vault bytes; amends phase-2 spec D5 (Quinn signs if D5 is signed) | Quinn's D5 signature |
+| F8h-runner | **Q7 answered A (§14.57.6): dispatchable, option A only.** `registrar.confirm`'s runner over `registrar::write_registrar`, `registrar_file_missing` and its Try again, and the `registrar.confirm` arm in `onboarding_live.rs`, replacing F8w1's interim `Waiting("registrar_runner_pending")` (§14.52.4, r4 n-2; about 35 lines; test 36's F8h-runner cases and test 37's `registrar.confirm` row, written first) | `implementer` | specified (Q7 answered A) | F8h, F8w1 (the arm it replaces), F8w2 (the other writer of `onboarding_live.rs`; r5 m-3), F8b's registrar half, F2b2b (`REGISTRAR_FILE`) and F3z (r2 n-3); last in `onboarding_jobs.rs`'s chain when it is dispatched. Nothing but the wave-B ship waits on it |
+| F7e | D5 signed by Quinn, 2026-10-24 (§14.58). Engine, `commitments.rs` (§14.57.10): `CONSOLE_FIELDS` gains `meets`; `check_console_edit` accepts it on a confirmed, non-planning-day commitment only when the value is a non-empty list that the existing `answer_literal` (`:3690`) accepts, which also gives the one-line literal (r1 m-1: no second emitter; `yamlemit.rs` unedited); any `answer_literal` error becomes the one message "A class time needs at least one day, and a start before its end." (r2 n-4). About 20 lines; test 45, written first | `test-writer`, then `implementer`; reviewed by `contract-reviewer` | the literal becomes vault bytes; amends phase-2 spec D5 (signed; §9 A19) | none |
+| F7f | Engine, `onboarding.rs` (§14.58.3): `--preview`'s buckets gain `due_mon`..`due_sun` and `due_later` (upcoming items by local weekday in the preview's Monday-to-Sunday week; the eight sum to `assignments_upcoming`, `null` when it is); the top level gains the eight totals, `week_of` and `week_today`, and `homework_sites` (site to sorted course keys, from a closed host list in an item's `description` or `URL:` line; absent without evidence). About 50 lines; test 47, written first; still read-only, exit 0 | `test-writer`, then `implementer` | engine, deterministic, off the contract list; no frozen reference | F7a (merged) |
 | F8f | Stop and drain at safe points; the save freeze; hand-over items | `implementer` | as F8a | F8a, F1 |
 | F8f2 | The drain abandons no writer (only `ABANDON_AT_ONCE`, pinned); `exiting()` for the page (§14.51 r1) | `implementer` | as F8a; F1 test 30's first half written first | F8f (or folded into F8f's fix round) |
 | F8a2 | The crash-loop guard: `JobRecord.crashes`, paused with `job_crashed` at a second running start; `Queue::start` persists once (§14.51 r1) | `implementer` | as F8a; `STATE_VERSION` stays 1; its test (F1's 31) written first | F8f2 (the file's chain) |
 | F8s2 | `scheduler.rs` and F8m's arm of `mail/live.rs`: the normal console clears `handover` (the slot item at a run slot's end; canary and disconnect from the unfiltered list, timestamps parsed, no disconnect while a setup is pending; first pass at a closed backfill batch, clearing only itself after the canary; `BackfillNeverDriven` from a verified Guided or held row; one lock around every write, never across the network; §14.51 r1-r3) | `implementer` | off the contract list; its test (F1's 32) written first | F8f merged, F8s, F8m |
 | F8s | `scheduler.rs`: `run_slot_inner_scoped` (the seams from `Some(app)`) and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}`; the stop before each stage (never cleared); the bundle deleted on every path; the slot's hand-over clearing; `prime_mode_device` (T0) and `spawn_update_check` (T0 review M3) | `implementer` | `scheduler.rs` is off the contract list; its tests are F1's 15, 18 and 27 (review r3 M5, r4 I-3, M1, r5 I-3; T0) | F1 |
-| F8b | Runners: the school step (capture, answers, pending feed, preview), the capture half writing through today's unfenced helpers (F8b2 converts the writes that have merged); **its registrar half is option A (Q7 answered, §14.57.6), dispatchable after F8b2**: the raw response kept in `onboarding-registrar.json`, written through F8b2's `write_capture_file_for_gen` from the start (§14.52.2, .4; r3 m-c) | `implementer`, reviewed by `contract-reviewer` (its capture handles the bearer link; review r7, I-1) | specified; the registrar half is dispatched as its own piece after F8b2 | the capture half: F8a, F7a, S4d, F8la, and F8d2 (`onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8g; r5 reorder). The held registrar half, dispatched separately: F8b2 (the fenced helper) and F2b2b (`REGISTRAR_FILE`). Nothing depends on the registrar half but F8h-runner, so F8b2 waits only on the capture half (r3 R3-1), and nothing waits on F8b but F8b2, F8w1, F8lb and F11e1, so the F2b2 tasks go ahead before S4d |
+| F8b | Runners: the school step (capture, answers, pending feed, preview), the capture half writing through today's unfenced helpers (F8b2 converts the writes that have merged); **its registrar half is option A (Q7 answered, §14.57.6), dispatchable after F8b2**: the raw response kept in `onboarding-registrar.json`, written through F8b2's `write_capture_file_for_gen` from the start (§14.52.2, .4; r3 m-c). `save_preview` takes the preview's whole answer and stores `week_of`, `week_today` and `homework_sites` beside the buckets (§14.58.3, about 4 lines) | `implementer`, reviewed by `contract-reviewer` (its capture handles the bearer link; review r7, I-1) | specified; the registrar half is dispatched as its own piece after F8b2 | the capture half: F8a, F7a, S4d, F8la, and F8d2 (`onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8g; r5 reorder). The held registrar half, dispatched separately: F8b2 (the fenced helper) and F2b2b (`REGISTRAR_FILE`). Nothing depends on the registrar half but F8h-runner, so F8b2 waits only on the capture half (r3 R3-1), and nothing waits on F8b but F8b2, F8w1, F8lb and F11e1, so the F2b2 tasks go ahead before S4d |
 | F8b2 | `Queue::set_school` (step 3's school answer; refused once `school.apply` has a record); `change_school` under the queue lock, then `ANSWERS_LOCK`: deletes the answers file, pending links and every capture file, and bumps `SCHOOL_GEN`; `job_context` (school and generation read together; one in-memory entry per job from `push_job`, or from the worker marking a resumed job running, until it leaves `order`; §14.52 r2 n1, r3 n1); the four fenced writers; the merged F8b writes converted to them; the `rerun` set (§14.52.2; S, about 45 lines in `onboarding_jobs.rs` and 35 in `onboarding_state.rs`; test 35; the advance's caller is F8b2-advance's, §14.55) | `implementer`, reviewed by `contract-reviewer` | a stale capture writing a bearer link is the risk F8l's review guarded | F8b's capture half (`onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8b2-advance, F8g; r5 reorder, §14.55), F2b2b (in `onboarding_state.rs`'s) |
 | F8b2-advance | The advance's caller (§14.55): `Queue::advance_after_school(&dyn ResumeChecks)` under the queue lock, persisted once; step 3's proceed runs it between its own jobs and the passed steps' jobs (step 6's `google.gmail_first_read`, and `google.calendar_read` only when the new `ResumeChecks::google_calendar_granted()` (default `self.google_granted()`) is true; step 7's `calendar.store`; step 8's `config.ingest`), with `slot.partial` asked once, last, through one `answer_enqueuer`; `earliest_unproven`'s step-7 rung (`google_granted && !google_calendar_granted` lands at 7; review I-1); the checks as `pub type ManagedChecks = Arc<dyn ResumeChecks + Send + Sync>` (review m-1); **§14.56**: `handover_for` treats no `mail.setup` record and no step-5 `mail` skip as unfinished mail (`mail.connect`), the advance writes a bare `done` `mail.setup` record when it passes step 5 on `school_mailbox_active`, and `FATAL_UNKNOWN_VERSION` beside `FATAL_NEWER` (about 46 lines: 10 in `onboarding_jobs.rs`, 36 in `onboarding_state.rs`; test 40's §14.56 cases, test 38's version-0 case; test 33's advance cases, Gmail-only included, written first) | `implementer`, reviewed by `contract-reviewer` | specified, over the fake queue and fake checks | F8b2 (both files' chains) |
 | F8c | Runners: the local lane (stores, apply, courses, config); `registrar.confirm` moved to F8h-runner (§14.52.4, r4 n-2). Merged | `implementer` | specified | F8e, F6a, F6b |
@@ -1519,21 +1521,25 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F8d2 | `mail.rs`: `mail_setup_start` refused in onboarding mode (an inner taking `LaunchMode`, about 6 lines). `onboarding_jobs.rs` (**about 115 lines**, corrected after F8d2's review; r2's "about 30" left out the seams; **accepted after the fact, not a precedent**: the next task whose size runs this far past its estimate is split, never re-sized, review m-2): `Queue::skip_mail` (pending or held mail jobs `skipped`; a running `mail.setup` stopped and landed `skipped`), `Queue::attach_setup_run(Arc<dyn SetupRun>)` (the run the glue started, so a skip can stop it), `MAIL_FIRST_PASS_LOOKS` (1) with `mail_batch_closed` clearing `parked` and notifying, `retry_at` (30 s, `mail_window_busy` alone) with the idle `wait_timeout`, and the `RetryClock` seam (`Queue::start_with_clock`; `Queue::start` keeps its signature over `WallClock`). Its fix round adds `Queue::mail_skipped(job)` for F8w2's glue (§14.52.1, r2 R2-2; test 34's F8d2 parts, written first) | `implementer` | specified, off the contract list, tested over the fake queue and a fake clock | **F8d alone**; first in `onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8g (r5 reorder), so it never waits on S4d. Collision note, not a dependency: F8h (in progress) also edits `onboarding_jobs.rs`, in other functions; if F8h lands first, F8d2 rebases on it |
 | F8m | `mail/live.rs`: in onboarding mode a closed backfill batch tells the queue, never starts a slot | `implementer` | specified, about ten lines, tested in F1 (review r5, I-4) | F8a |
 | F8la | `lms_link.rs`: `capture_calendar_link_with`, `validate_only` and `capture_link_only`, the validate-only seam | `implementer`, reviewed by `contract-reviewer` | a bearer link stored under the wrong session reaches another account (review r6 I-2, r7 I-1) | F1, S4b merged |
-| F8lb | `onboarding_capture_link` and `onboarding_paste_link` over F8la's seam; the link to its pending credential | `implementer`, reviewed by `contract-reviewer` | as F8la | F8la, F8b, F8c, F8g, F8d (last in `onboarding_jobs.rs`'s chain), F2d |
+| F8lb | `onboarding_capture_link` and `onboarding_paste_link` over F8la's seam; the link to its pending credential | `implementer`, reviewed by `contract-reviewer` | as F8la | F8la, F8b, F8c, F8g, F8d, F3z (after F3z in `onboarding_jobs.rs`'s chain, r2 n-3), F2d |
 | F8w1 | New `onboarding_live.rs`: `LiveRunner` (every `JOB_ORDER` name to its runner; an unknown name is `Failed`; `registrar.confirm` an interim `Waiting("registrar_runner_pending")` until F8h-runner replaces it, r4 n-2), `LiveEntitlement`, `LiveSyncView`: the live `Deps` (§14.52.4; test 37) | `implementer` | specified glue over built runners; its own file, so no chain | F8b's capture half, F8b2, F8c, F8g, F8h (not F8h-runner, so not Q7) |
 | F8w2 | The same file: the mail seams (`start_setup` with the file's unitid and the window wait; `Queue::mail_skipped("mail.setup")` checked on every window poll and once more just before `start_setup`, returning `skipped` without starting; `Queue::attach_setup_run` with the run's `Shared` right after `start_setup` returns; the canary's list reading, `batch_closed_noted`), the two Google reads over `--tidied` after their slot facts, and the network-free `LiveChecks` (§14.52.1, .4; tests 34, 37) | `implementer` | as F8w1 | F8w1, F8d, F8d2 (r2 R2-2), F8b2-advance (`google_calendar_granted`, which `LiveChecks` answers `false` in an explicit body; §14.55, r2 n-1), F8s2 (`mail_signals`); F7c's `--tidied` is on O3 at `623a5f8`, F7a's merge, which carried F7c r4 |
 | F9 | The reveal gate, in its own `onboarding_gate.rs` | `implementer` | a pure function, tested in F1; its own file, so no chain (review r8's note) | F1 |
 | F10 | Shell steps 1-2 in the ruled direction (5b); old wizard removed (static files only) | `console-ui` | `app/static`, the `console.js` queue | direction ruled (5b, 2026-10-23) |
-| F11t | Failing static tests for the onboarding screens; §14.52's pins: step 5's answer and its three allowed mail commands (the seven others never called), the proceeds of steps 3, 7 and 8, Open Knowlu on `finish_ready` only, the closing state held while an exit call is outstanding | `test-writer` | test first (review r1 minor) | F2b |
+| F11t | Failing static tests for the onboarding screens; §14.52's pins: step 5's answer and its three allowed mail commands (the seven others never called), the proceeds of steps 3, 7 and 8, Open Knowlu on `finish_ready` only, the closing state held while an exit call is outstanding. §14.58's pins, each before its piece: `account_status` called on mount and at the step moves only, never on the poll; the strip's figures read from fields, never summed; step 8's "Found" line only from `homework_sites`; `window` sent only after an answer; the state select's codes equal `STATE_TZ`'s (F11e1) | `test-writer` | test first (review r1 minor) | F2b |
+| F11p0 | The display face (Big Shoulders Text, latin woff2, 600 and 700) and the wordmark images, after a licence check: open licences only, recorded in `SOURCES.md` with URL, SHA-256 and licence text; the wordmark under `app/static/brand/` once Q-B23 is answered; Public Sans only on Q-B22's yes (§14.58.2) | main session | network fetch, a licence judgment and hashes; no subagent downloads | none |
+| F11p1 | The look (§14.58.4): the faces applied in `.setup`; the wordmark (or its CSS fallback) in the rail head; the light "day board" token set, started from Windows' setting with no stored choice; the rail's done lines for the account ("Signed in as …") and payment ("Trial on. First charge …") from `account_status`, read on mount and at the step moves only; the rail foot with "About N minutes left" and Finish later; `?fixture=` answering four commands for shots (about 60 lines in `onboarding.js`, 35 in `console.css`, 10 in `onboarding.css`). Acceptance: side-by-side shots (§14.58.7) | `test-writer` (pins), then `console-ui` | `app/static`; pinned and shot-compared | F11p0, F11c (merged); first in the panel merge order |
+| F11p2 | The bottom week strip (Your week, Monday to Sunday counts, Later; past days dimmed; "Week of …"; hidden at steps 2, 4, 10 and 11 and without the fields) and step 8 as one site at a time in "Knowlu's form", with "Found at your school: …" only from `homework_sites` (§14.58.5; about 70 lines in `onboarding.js`, 20 in `onboarding.css`). Acceptance: side-by-side shots | `test-writer` (pins), then `console-ui` | `app/static` | F11p1. Live data needs F7f, F2b4 and F8b; the merge does not. Collision note with F11c's wrapper follow-up in step 8 |
+| F11p3 | Step 10 as `o9-your-week` (§14.58.6): the summary card from `step3`, "Show the class times", the firmness segmented control, the day-window question through `commitments_confirm`'s existing `window` key, the sticky Confirm bar; no late-rule question until O5 (about 75 lines in `onboarding.js`, 25 in `onboarding.css`; past 80, the day-window question splits off as F11p4). Acceptance: side-by-side shots | `test-writer` (pins), then `console-ui` | `app/static`; the window is a vault write through the existing engine path | F11p2 |
 | F11a | The step frame and the rail | `console-ui` | `app/static` | F11t, F10 |
-| F11e1 | Step 3's school choice ("isn't listed" included), sign-in and capture rules (second press, close on leaving, through `registerLeave`); step 2's sign-in again. Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3) | `console-ui` | `app/static` | F11a, F8b, F2g, F8lb (review r7 M1), F8b2 (the school answer), F2b2a (step 3's proceed) |
-| F11e2 | Step 3's proof with the removable course list; step 4, its `comp` state included. Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3) | `console-ui` | `app/static` | F11e1, F8c, F8g, F2d, F2h, F7a (`by_course`) |
-| F11b | Steps 5, 6 and 7; step 6 on today's separate consents (`google_connect` with each scope, `google_status`); step 5 by `onboarding_answer(5, {mail})`, `mail_setup_progress` and `mail_setup_answer`, its Skip through `onboarding_skip`; step 7's proceed (§14.52.1, .3). Step 5's answer is sent only from the "Connect school email" press, never on entering the step (Q1, §14.57.5). Through the frame's seam, `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()`. Fixtures for steps 5-7's rows: a past row with no job records, and mixed `done` and `skipped` (m5, over F11b0's rule). The frame fixes are F11b0's | `console-ui` | `app/static` | F11a, F11b0, F8d, F8lb (step 7's paste; review r7 M1), F2b2a. No longer O2 (T0, 2026-10-24: O2 has no branch) |
-| F11b0 | The frame's fixes in `onboarding.js`, split out of F11b (§14.53.2, review m-3): a refused retry's line clears on the student's next action, never a poll (m2); `rowModel`'s `found` read dropped (m3); `rowModel`'s past-row rule (m5); the sentences for `mail_setup_cancelled`, `mail_setup_failed`, `mail_not_yet` and `feed_kept_on_device` (M3); `onboarding.js:4`'s seam comment naming `{render, onStatus}` and `registerLeave`. Per file: `app/static/onboarding.js` about 15 lines (m2 4, m3 2 removed, m5 4, M3 4, the comment 1); `app/tests/onboarding_static.rs` about 45 lines of new cases (m2's two polls and a click, m3's source pin, m5's four row readings over generic fixtures, M3's four keys against the fallback) | `test-writer` (the cases, first), then `console-ui` | `app/static`; the test file only gains cases, and no pin is loosened | F11a. Collision note: the panel tasks share `onboarding.js` and `onboarding_static.rs` and merge serially, F11b0, F11d, F11c, F11b, then F11e1 and F11e2, each rebased on the one before (§14.53.5) |
+| F11e1 | Step 3's school choice ("isn't listed" included), sign-in and capture rules (second press, close on leaving, through `registerLeave`); step 2's sign-in again. Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3) | `console-ui` | `app/static` | F11a, F8b, F2g, F8lb (review r7 M1), F8b2 (the school answer), F2b2a (step 3's proceed), F3z (Q9: the "isn't listed" form's state select, its codes pinned to `STATE_TZ`), F11p3 (the panel merge order, §14.58.7) |
+| F11e2 | Step 3's proof with the removable course list; step 4, its `comp` state included. Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3) | `console-ui` | `app/static` | F11e1, F8c, F8g, F2d, F2h, F7a (`by_course`), F11p3 (§14.58.7) |
+| F11b | Steps 5, 6 and 7; step 6 on today's separate consents (`google_connect` with each scope, `google_status`); step 5 by `onboarding_answer(5, {mail})`, `mail_setup_progress` and `mail_setup_answer`, its Skip through `onboarding_skip`; step 7's proceed (§14.52.1, .3). Step 5's answer is sent only from the "Connect school email" press, never on entering the step (Q1, §14.57.5). Through the frame's seam, `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()`. Fixtures for steps 5-7's rows: a past row with no job records, and mixed `done` and `skipped` (m5, over F11b0's rule). The frame fixes are F11b0's | `console-ui` | `app/static` | F11a, F11b0, F8d, F8lb (step 7's paste; review r7 M1), F2b2a, F11p3 (the panel merge order, §14.58.7). No longer O2 (T0, 2026-10-24: O2 has no branch) |
+| F11b0 | The frame's fixes in `onboarding.js`, split out of F11b (§14.53.2, review m-3): a refused retry's line clears on the student's next action, never a poll (m2); `rowModel`'s `found` read dropped (m3); `rowModel`'s past-row rule (m5); the sentences for `mail_setup_cancelled`, `mail_setup_failed`, `mail_not_yet` and `feed_kept_on_device` (M3); `onboarding.js:4`'s seam comment naming `{render, onStatus}` and `registerLeave`. Per file: `app/static/onboarding.js` about 15 lines (m2 4, m3 2 removed, m5 4, M3 4, the comment 1); `app/tests/onboarding_static.rs` about 45 lines of new cases (m2's two polls and a click, m3's source pin, m5's four row readings over generic fixtures, M3's four keys against the fallback) | `test-writer` (the cases, first), then `console-ui` | `app/static`; the test file only gains cases, and no pin is loosened | F11a. Collision note: the panel tasks share `onboarding.js` and `onboarding_static.rs` and merge serially, each rebased on the one before. The order since §14.58.7: F11b0 and F11c (merged), F11p1, F11p2, F11p3, F11d, F11c2, F11b, F11e1, F11e2 (superseding §14.53.5's) |
 | F11f | Step 6's combined Gmail-and-Calendar ask and the forwarding fallback, over O2's cloud half | `console-ui` | `app/static`; O2's contract only | F11b, O2 merged; may follow wave B (§8) |
 | F11c | Steps 8 and 10; step 8's proceed (§14.52.3). Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3). Fixtures for steps 8 and 10's rows: a past row with no job records, and mixed `done` and `skipped` (m5) | `console-ui` | `app/static` | F11a, F8d, F2b2a, F11b0 (m5's `rowModel` rule, which its fixtures read; review m-3); its fix round (F11c review I-1): F2b3 (`courses`, the `(10, {"confirmed"})` answer), F5c (the step-8 wrappers, no `vault` from the page) (§14.57). Step 10's hours Edit is F11c2's, not the fix round's (r1 m-3) |
-| F11c2 | Step 10's hours Edit: one more field in the Edit, sent as `set_fields(view, id, {"meets": [...]})`; F11t's pin that step 10 sends only `kind`, `level` and `meets`. If Quinn declines D5, this task instead shows the "choose Not mine and add the class again in Settings" line, after checking Settings can add a class by hand (§14.57.10) | `console-ui` (F11t's pin by `test-writer`, first) | `app/static` | F11c (merged, fix round included), F5d; or, if D5 is declined, F11c alone. In the panel chain after F11c |
-| F11d | The reveal and the main page's "still coming" line; Open Knowlu is `ok && finish_ready && !exiting`, with no `gate.open` read (§14.52.6, §14.53.1); `revealModel` carries and shows `gate.failed[].fix` (M7); `mail.connect` as a not-connected line with its Settings button (§14.52.1). Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` | `test-writer` first (amends the pin at `app/tests/onboarding_static.rs:488` and `:496`, justified in §14.53.1, and adds M7's `fix` assertion), then `console-ui` | `app/static`; the one test edit loosens a page pin that re-derived the rule, never a contract test | F11a, F9, F2b2b, F11b0 (the frame's `onboarding.js` edits first; review m-3); F2b3 and F5c for the main page's "Not now" beside "Finish connecting your email in Settings." (`onboarding_mail_not_now`; Q8 = yes, §14.57.9) |
+| F11c2 | Step 10's hours Edit (D5 signed by Quinn, 2026-10-24; the fallback line dropped): one more field in the Edit, sent as `set_fields(view, id, {"meets": [...]})`, showing the engine's one fixed refusal; F11t's pin that step 10 sends only `kind`, `level` and `meets` (§14.57.10). Acceptance: side-by-side shots (§14.58.7). On §8's O3-to-`main` checklist (r2 n-1) | `console-ui` (F11t's pin by `test-writer`, first) | `app/static` | F11c (merged, fix round included), F5d, F11p3; in the panel merge order after F11d (§14.58.7) |
+| F11d | The reveal and the main page's "still coming" line; Open Knowlu is `ok && finish_ready && !exiting`, with no `gate.open` read (§14.52.6, §14.53.1); `revealModel` carries and shows `gate.failed[].fix` (M7); `mail.connect` as a not-connected line with its Settings button (§14.52.1). Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` | `test-writer` first (amends the pin at `app/tests/onboarding_static.rs:488` and `:496`, justified in §14.53.1, and adds M7's `fix` assertion), then `console-ui` | `app/static`; the one test edit loosens a page pin that re-derived the rule, never a contract test | F11a, F9, F2b2b, F11b0 (the frame's `onboarding.js` edits first; review m-3); F2b3 and F5c for the main page's "Not now" beside "Finish connecting your email in Settings." (`onboarding_mail_not_now`; Q8 = yes, §14.57.9); F11p3 (the panel merge order; side-by-side shots against `r1-reveal`, §14.58.7) |
 | F12 | `scripts/wizard-check.py` rewritten | `test-writer` | the walk-through is the page's test | F11a-F11e |
 | F13 | References, HANDOFF, O3's amendment drafts | `docs-keeper` | docs | F2a-F12 |
 | F14 | Review | `reviewer` | before a push | F2a-F13 |
@@ -3212,6 +3218,8 @@ it no longer aborts. Size: M.
       F8w1's interim `registrar.confirm` arm;
     - F15's live proof reached `finish_ready: true` on the build being merged, with a school whose
       registrar gave class times, so `registrar.confirm` really ran.
+    - **F11c2 has merged** (step 10's hours Edit, D5 signed by Quinn; r2 n-1), and every screen
+      task's review report holds its side-by-side comparison with the prototype (§14.58.7).
     - **S7 is merged and its privacy page is deployed** (§14.57.6, r1 I-2). The raw class list is
       kept on the student's computer during setup, so no wave-B build reaches a student before the
       page that names it is live. The `integrator` checks the deployed page's text and
@@ -3246,6 +3254,7 @@ behaviour, before it merges.
 | A14 | `site/privacy.html`, `PRIVACY_VERSION` | the kept school sign-in and its uses | Q1 | S7 | O4 |
 | A15 | L1's plan (`2026-10-18-c3-m365-backfill-plan.md`) and the M365 redesign's decision 19 | arguments on the shared folder (§8) | Q1, Q10 | L1's planner | L1 |
 | A16 | Syllabus spec §3.1, §15.2; L5's command placement | deferred to O5 (wave C) | Q1, Q13 | O5 | O5 |
+| A19 | Commitment model phase-2 spec, D5 | the console may set a confirmed commitment's `meets` as well as `kind` and `level` (§14.57.10). **Signed by Quinn, 2026-10-24**; the dated line is drafted by F13 | D5 (signed) | F13 | O3 |
 
 ---
 
@@ -3322,7 +3331,10 @@ behaviour, before it merges.
 | (plan; §14.52 r5 m-1) | O3 never merges to `main` while `registrar_runner_pending` is in `app/src`, or before F15's live proof reaches `finish_ready: true` with registrar rows | F8h-runner, F15, `integrator` | §8's O3-to-`main` checklist (not CI); F14 confirms it |
 | §2.7, Q7 = A (§14.57.6, r1 I-2) | The kept class list during setup, and the confirmed class times syncing to the account, are on the privacy page before any wave-B build is released | S7, `integrator` | §8's O3-to-`main` checklist (S7 merged, page deployed); Quinn's read |
 | `CLAUDE.md` rule 1 (§14.57.4, r1) | No student gets one student's zone: `America/Chicago` only inside `STATE_TZ`; without an IANA zone, `runners.yaml` is step 2's bytes with the final school's state's zone, written once at `school.apply` | F3z | test 44 (bytes, school change, IANA and refusal cases; the source pin) |
-| `VISION.md`, D5 amendment (§14.57.10) | A student can correct a class's hours at step 10, as a user write the agents then never re-set; held on Quinn's signature | F7e, F5d, F11c2 | tests 45, 46; F11t's step-10 pin |
+| `VISION.md`, D5 amendment (§14.57.10) | A student can correct a class's hours at step 10, as a user write the agents then never re-set; signed by Quinn, 2026-10-24 | F7e, F5d, F11c2 | tests 45, 46; F11t's step-10 pin |
+| Q9 (signed, §14.57.4) | An unlisted school's state is asked, and that state's zone is used; no student gets a default zone | F3z, F11e1 | test 44's Q9 cases; F11t's `STATE_TZ` pin |
+| Quinn's front-end pass (§14.58) | The shared look matches the 5b prototype before the remaining screens: the display face and wordmark (open licences only), the light theme, the week strip, step 8's one-site form, the rail's lines and foot, step 10's layout | F11p0-F11p3, F7f, F2b4 | tests 47, 48; F11t's §14.58 pins; side-by-side shots compared by `reviewer` for every screen task |
+| Spec §1.3, step 8 | Homework sites asked "only those step 3 found mentioned, when known": the "Found at your school" line comes only from feed evidence | F7f, F2b4, F11p2 | test 47's host cases; F11t's pin |
 
 ## 11. Checkpoints
 
@@ -3338,6 +3350,10 @@ behaviour, before it merges.
 5. **S9, then F14** before each push; each lane PR merges on green CI and its reviewer's PASS
    (`contract-reviewer` for `account.rs`); **no release tag between the O4 and O3 merges.**
 6. **Quinn's go** for S10 and F15.
+7. **Side-by-side shots** (Quinn, 2026-10-24; §14.58.7): every screen task (F11p1-F11p3, F11d,
+   F11c2, F11b, F11e1, F11e2, F11f) is shot beside its prototype screen at 1280x800, in headless
+   Edge, against invented data. The `reviewer` compares each pair in the task's review before it
+   merges. Quinn signed the privacy line, Q9 and D5 on 2026-10-24 (§14.58). Q-B22 and Q-B23 are open.
 
 ## 12. Out of scope
 
@@ -5836,19 +5852,33 @@ here for Quinn's signature at the next checkpoint (§11); a relayed answer is no
        default slots and `journal::device_name()`), with only `timezone` set to the state's zone.
        Step 2's defaults move into one shared builder that both callers use, so the two can never
        drift.
-     - A job that reads `runners.yaml` before `school.apply` waits on it (one line in
-       `inputs_ready`). F3z checks `JOB_ORDER` for any such reader.
+     - **The wait applies only while `runners.yaml` is absent** (r2 n-2). A job that reads the
+       file waits on `school.apply` in `inputs_ready` only when `config/runners.yaml` does not
+       exist. With an IANA zone, step 2 wrote it, and nothing waits. The readers are `config.ingest`
+       (its `timezone`), `slot.partial` and `slot.first_full` (the slot reads the vault's zone and
+       slot times). F3z checks `JOB_ORDER` for any other reader and names it in its report.
    - §4.9's table is amended: `school.apply` writes this one file, after payment.
    - `config.ingest`'s `timezone` reads the vault's `runners.yaml` zone, never Windows' again, so
      the two files agree.
-   - **Still open, Quinn's (Q9):** an unlisted school, or a row with no state, has no zone.
-     Recommended: step 3's "isn't listed" form asks for the state in one select, and the zone is
-     that state's.
-     - Until Q9 is answered, the school answer is refused **only when Windows' zone has no IANA
-       name and the school has no state** (r1 m-4). The refusal reads "Choose your school's state
-       so Knowlu can set your time zone." and writes nothing.
-     - With an IANA zone, an unlisted school is accepted as today, because step 2 already wrote
-       `runners.yaml`.
+   - **Q9, signed by Quinn on 2026-10-24** (Quinn's own message, not relayed). Step 3's "isn't
+     listed" form asks for the school's state in one select, and that state's zone is used. The
+     interim refusal is replaced:
+     - `School` (`onboarding_state.rs:58-66`) gains `state: Option<String>`, serde default and
+       skipped when `None`, so a file without it keeps its bytes and `STATE_VERSION` stays.
+     - The unlisted form of `(3, {"school"})` carries `state`, a code in `scaffold::STATE_TZ`. The
+       answer refuses a missing or unknown code with "Choose your school's state." and writes
+       nothing, **whatever Windows' zone is**. The state also fills `campus.yaml`'s `state:`, so an
+       unlisted school's campus file is no longer missing it.
+     - The zone rule is item 4's for every school. A listed school takes its campus row's state; an
+       unlisted school takes the state the student chose. With an IANA zone, step 2's file stands.
+     - A listed row with no state is not expected (the campus table carries one). If one appears,
+       the answer asks for the state as the unlisted form does.
+     - Owners: **F3z** for the backend (the field, the answer's check, `school.apply`'s use);
+       **F11e1** for the select. The page's list of codes is static, and an F11t pin checks that
+       it equals `STATE_TZ`'s codes, read from `scaffold.rs`.
+     - Test 44's refusal case becomes: an unlisted school with no state, or with `ZZ`, is refused
+       and writes nothing, with and without an IANA zone; an unlisted school with `CA` and no IANA
+       zone gets `America/Los_Angeles`.
    - A source pin: the literal `America/Chicago` appears in `app/src` only inside
      `scaffold::STATE_TZ`.
    - Owner **F3z** (new).
@@ -5867,9 +5897,10 @@ here for Quinn's signature at the next checkpoint (§11); a relayed answer is no
      §14.52.2) and F8h-runner (over `registrar::write_registrar`).
    - **F7d is not built.** Option B, F7d and test 36's option-B cases are dropped from the plan
      (r1's trim).
-   - **The privacy-page line is S7's**, for Quinn to read and sign; `PRIVACY_VERSION` moves with
-     it. Corrected after r1 I-2: confirmed commitments do sync to the account (only confirmed notes
-     and decline markers leave the device). Draft, short and plain for Quinn's read:
+   - **The privacy-page line is S7's**; `PRIVACY_VERSION` moves with it. Corrected after r1 I-2:
+     confirmed commitments do sync to the account (only confirmed notes and decline markers leave
+     the device). **Approved verbatim by Quinn on 2026-10-24** (Quinn's own message). S7 uses it
+     word for word:
      "While you set up Knowlu, the class list your school sends (course names, sections, times,
      and sometimes instructors) stays on this computer and is deleted when setup finishes or you
      sign out. The class times you confirm become part of your plan, which syncs to your Knowlu
@@ -5899,10 +5930,14 @@ here for Quinn's signature at the next checkpoint (§11); a relayed answer is no
      - **the school is final first** (r1 I-1(b)): the student picks a Texas row and then changes
        to a California row before payment. No `runners.yaml` exists until `school.apply`, and then
        it holds `America/Los_Angeles`. An existing `runners.yaml` is kept, create-new;
-     - a job that reads `runners.yaml` waits until `school.apply` is done;
-     - with no IANA zone, an unlisted school (no state) is refused and writes nothing;
-     - **with an IANA zone** (r1 m-4), an unlisted school is accepted, step 2's `runners.yaml`
-       is unchanged, and `school.apply` writes no zone;
+     - with no `runners.yaml`, `config.ingest`, `slot.partial` and `slot.first_full` wait until
+       `school.apply` is done; **with `runners.yaml` present** (an IANA zone), none of them waits
+       on `school.apply` (r2 n-2);
+     - Q9's cases (item 4): an unlisted school with no state, or with `ZZ`, is refused and writes
+       nothing, with and without an IANA zone; an unlisted school with `CA` and no IANA zone gets
+       `America/Los_Angeles`, and its `campus.yaml` carries `state: CA`;
+     - **with an IANA zone** (r1 m-4), an unlisted school with a state is accepted, step 2's
+       `runners.yaml` is unchanged, and `school.apply` writes no zone;
      - the source pin.
    - F11t (test-writer) gains three pins: step 8 never sends `vault`; step 10 sends
      `(10, {"confirmed": true})` after `commitments_confirm` and before `OB.show(11)`; step 5
@@ -5974,36 +6009,39 @@ here for Quinn's signature at the next checkpoint (§11); a relayed answer is no
         one-line text, and §2.2's rules through `strict_meets`. It also gives the canonical
         single-line flow sequence (r1 m-1: **no second emitter**, and `yamlemit.rs` is not
         edited). If `answer_literal` accepts an empty list, `check_console_edit` refuses it.
-        Its messages name `answer_meets`, so F7e words the console's refusal as `meets` without
-        changing `answer_literal`'s card messages.
+      - **Any `Err` from `answer_literal` becomes one fixed message** (r2 n-4): "A class time
+        needs at least one day, and a start before its end." The card's own wording, which names
+        `answer_meets`, never reaches the console. `answer_literal` is not changed.
       - About 20 lines and the tests below.
     - **App half, F5d** (`implementer`; `commands.rs`, off the contract list): `EDITABLE` gains
       `meets` (15 names). `set_fields` routes a `meets` value through `answer_literal`, never
       `literal_for`. About 10 lines.
-    - **Held on Quinn's D5 signature** (r1 m-3). F7e and F5d do not start until Quinn signs the
-      amendment below. F11c's fix round does **not** wait on them. Step 10's hours Edit is its own
-      task, **F11c2** (`console-ui`, after F5d): one more field in step 10's Edit, sent through
-      `set_fields`, with F11t's pin that the page sends only `kind`, `level` and `meets`.
-    - **For Quinn to sign:** this amends phase-2 spec D5, which listed only `kind` and `level`. If
-      D5 is one of Quinn's signed decisions, the amendment is Quinn's. Recommended: sign it, for the
-      reason above. If Quinn says no, step 10 shows under each registrar row: "If this time is
-      wrong, choose Not mine and add the class again in Settings with the right time." That is
-      honest only if Settings can add a class by hand. F11c2 checks this before using the sentence,
-      and F7e and F5d are then not built.
+    - **D5 amended and signed by Quinn on 2026-10-24** (Quinn's own message): students may edit
+      a class's hours (`meets`). The r1 hold on F7e and F5d is released. F11c's fix round does
+      not wait on them. Step 10's hours Edit is its own task, **F11c2** (`console-ui`, after F5d
+      and F11p3): one more field in step 10's Edit, sent through `set_fields`, with F11t's pin that
+      the page sends only `kind`, `level` and `meets`.
+    - **Signed:** this amends phase-2 spec D5, which listed only `kind` and `level`. Quinn signed
+      the amendment on 2026-10-24. F13 drafts the dated amendment line in the phase-2 spec (§9).
+      The "choose Not mine and add the class again in Settings" fallback is dropped.
     - **Tests:**
       - **45 (F7e):** a valid `meets` passes the check and `answer_literal` gives one line that
         `parse_entry` reads back to the same meets. An unknown day, a repeated day, `start >=
         end`, an empty list, a non-list, a planning-day note, an unconfirmed note and a task note
-        are each refused, and nothing is written.
+        are each refused, and nothing is written. Every refused `meets` value answers the one
+        fixed message (r2 n-4), and no message names `answer_meets`.
       - **46 (F5d):** `set_fields(…, {"meets": …})` writes one `meets:` line with the journal
         record first, and the user is the actor. A refused value changes no byte.
 11. **§7, re-walked (items 9-10, as r1 left them):**
-    - F7e depends on Quinn's D5 signature and nothing else.
+    - F7e depends on nothing new (Quinn signed D5 on 2026-10-24; §14.58).
     - F5d depends on F7e.
-    - F11c2 depends on F5d and F11c. F11c's fix round depends on F2b3 and F5c only.
+    - F11c2 depends on F5d, F11c and F11p3 (§14.58). F11c's fix round depends on F2b3 and F5c
+      only.
     - F11d gains F2b3 and F5c, for the Not now command.
-    - F3z gains F8b2-advance's file chain in `onboarding_jobs.rs` (it edits `school.apply` and
-      `inputs_ready`).
+    - **F3z's place in `onboarding_jobs.rs`'s chain** (r2 n-3): F8d2, F8b, F8b2, F8b2-advance,
+      F8g, **F3z**, then F8lb and F8h-runner. F3z edits `school.apply` and `inputs_ready`, and it
+      depends on F8g. F8lb and F8h-runner now follow F3z. F2b3's and F8c2's small edits to the
+      same file are collision notes, never chain links.
     - No cycle.
 12. **r1 revision** (`docs/reports/2026-10-24-wave-b-plan-14-57-review.md`, FAIL on bc0a7ee).
     Each finding and where it is answered:
@@ -6024,4 +6062,311 @@ here for Quinn's signature at the next checkpoint (§11); a relayed answer is no
       option-B cases are removed. §14.52's history keeps its record of them.
     - Sizes: F7e falls from about 50 to about 20 lines, F2b3 rises to about 43, and F3z to about
       45. All are within the cap. §7 is re-walked in item 11 and has no cycle.
+13. **r2: PASS with four minors, each closed here.**
+    - **n-1:** F11c2 is on §8's O3-to-`main` checklist, and the panel merge order has it after
+      F11c (§14.58.7).
+    - **n-2:** the `runners.yaml` wait applies only while the file is absent. The waiting jobs are
+      named (`config.ingest`, `slot.partial`, `slot.first_full`), and test 44 has the present-file
+      case (items 4, 7).
+    - **n-3:** F3z sits after F8g in `onboarding_jobs.rs`'s chain (item 11).
+    - **n-4:** F7e maps any `answer_literal` error to one fixed `meets` message (item 10, test 45).
+
+### 14.58 Quinn's signatures, and a front-end pass before the remaining screens (2026-10-24)
+
+Quinn answered directly on 2026-10-24, in Quinn's own messages. These are **signed**, not relayed:
+
+1. **The privacy line** (§14.57.6) is approved verbatim. S7 uses it word for word.
+2. **Q9** (§14.57.4): step 3's "isn't listed" form gets a state select, and that state's zone is
+   used. The interim refusal is replaced. The backend is F3z's, the select is F11e1's, and the
+   cases are test 44's.
+3. **D5** (§14.57.10): amended and signed. Students may edit a class's hours (`meets`). The hold
+   on F7e and F5d is released. F11c2 builds the hours Edit, and the fallback sentence is dropped.
+   §9 gains **A19**, the dated amendment line in the phase-2 spec, drafted by F13.
+4. **A front-end pass on the shared look, before the remaining onboarding screens are built**:
+   **F11p**, below. It goes first in the panel merge order, ahead of F11d, F11b, F11e1, F11e2 and
+   F11c2. Its reference is the 5b prototype
+   (`docs/design/2026-10-23-directions/5b-departures-board/index.html` and `BRIEF.md`, R2, R3 and
+   rounds 2-3).
+
+#### 14.58.1 What F11p covers, and how it splits
+
+F11p is too big for one task under the 80-line cap (its `onboarding.js` share alone is about 150
+lines). It splits by what each piece edits, and each piece is merged before the next starts:
+
+| Piece | Scope | Files |
+|---|---|---|
+| **F11p0** | Licence check and vendoring: the condensed display face and the wordmark | `app/static/fonts/**`, `app/static/fonts/SOURCES.md`, the wordmark image |
+| **F11p1** | The look: faces applied, the wordmark in the rail head, the light theme, the rail's detail lines and its foot, the fixture path for shots | `console.css`'s `.setup` block, `onboarding.css`, `onboarding.js`'s frame and rail |
+| **F11p2** | The bottom week strip, and step 8 as one homework site at a time in a framed form | `onboarding.js`'s strip and step 8, `onboarding.css` |
+| **F11p3** | Step 10 to the prototype's `o9-your-week` layout | `onboarding.js`'s step 10, `onboarding.css` |
+
+The data the pieces need that the status does not carry yet comes from two small backend tasks,
+**F7f** (engine) and **F2b4** (app), in §14.58.3. F11p1 needs neither. F11p2 reads the fields they
+add, but it does not wait for them: an absent field hides its line, and its fixtures carry the
+fields.
+
+#### 14.58.2 F11p0: the faces and the wordmark (main session)
+
+- **Main session**, because it fetches files from the network, judges a licence and records
+  hashes. A subagent never downloads.
+- **The display face is Big Shoulders Text** (the prototype's `.fig`, `.lab` and step `h1`). It is
+  vendored as latin-subset woff2 at the weights the onboarding screens use (600 and 700), the same way
+  `SOURCES.md` records Instrument Sans: the source URL, the SHA-256 and the licence text as
+  `OFL-big-shoulders.txt`, fetched from the upstream repository.
+- **Licence check first.** Each file is vendored only if its licence is the SIL Open Font License
+  1.1 or another open licence that permits bundling in a sold app. Anything else stops F11p0, and
+  the finding goes to Quinn. Big Shoulders is published under the OFL; F11p0 confirms that from the
+  upstream licence file, never from memory.
+- **Public Sans, the prototype's reading face** (BRIEF R3.8), is not on Quinn's list. Today the
+  page keeps Instrument Sans for body text. That is question **Q-B22** below, and F11p0 vendors
+  Public Sans only if Quinn says yes.
+- **The wordmark is an image**, `docs/design/assets/Knowlu_Wordmark_Red.png`, plus the
+  prototype's `Knowlu_Wordmark_Night.png` for dark. It is not a font, and no record says which
+  serif typeface drew it. F11p0 copies the two images to `app/static/brand/`. The fonts folder
+  holds only fonts, and `SOURCES.md` gains a line pointing at the brand folder. This needs Quinn's
+  confirmation that the mark is Knowlu's own artwork (question **Q-B23**). Until then, F11p1 shows the
+  text "Knowlu" in the display face with a red "lu" block drawn in CSS, and swaps in the image
+  when Q-B23 is answered.
+- No network call at run time: every face and image is a local file, as today.
+
+#### 14.58.3 The two fields the strip and step 8 need (F7f, F2b4)
+
+Quinn asked for the strip to be fed from what the status already carries, or for the needed field
+to be named. **The status does not carry it.** `onboarding_status`'s `step3` is
+`step3_totals` (`onboarding_state.rs:439-458`), and the engine's `--preview`
+(`engine/src/onboarding.rs:33-50`) gives totals and per-course buckets, never dates. The same holds
+for step 8's "Found at your school" reason: nothing in wave B records why a homework site is
+asked. The onboarding spec's step 8 already asks for that reason ("only those step 3 found
+mentioned, when known", spec §1.3's table), so both are named here.
+
+- **F7f (engine, `onboarding.rs`; `test-writer` then `implementer`; off the contract list).**
+  `--preview` gains, still reading only and still exiting 0:
+  - **Per-day counts in every bucket**: `due_mon`, `due_tue`, `due_wed`, `due_thu`, `due_fri`,
+    `due_sat`, `due_sun` and `due_later`. Each counts that bucket's upcoming items (the ones
+    `assignments_upcoming` counts) by their due date's local weekday, in the vault's zone, within
+    the Monday-to-Sunday week that holds the preview's `now`. `due_later` counts the rest. The
+    eight sum to the bucket's `assignments_upcoming`, and they are `null` exactly when it is.
+  - These are scalar count names, so they flow through today's code without a change:
+    `Bucket.counts` is a flattened map of names to `Option<i64>` (`:341-351`), and `step3_totals`
+    sums every name over the kept buckets (`:445-451`). A removed course's items leave the strip
+    as they leave the totals.
+  - **Top level**: the same eight totals; `week_of`, the week's Monday as `YYYY-MM-DD`; and
+    `week_today`, the preview day's index (0 for Monday). The page needs no date arithmetic.
+  - **`homework_sites`**: an object from site (`zybooks`, `vhl`) to the sorted course keys whose
+    upcoming or turned-in items link that site. Evidence is an item's `description` or the `URL:`
+    line of its `raw` (`ingest::Event`, `ingest.rs:40-46`) holding a host from a closed list in the
+    engine (`zybooks.com`, `vhlcentral.com`). Nothing else in the
+    item is read for this. An item no course claims adds `unmatched`. A site with no evidence is
+    absent, never an empty guess.
+  - About 50 lines. **Test 47**, written first: a fixed `now` and zone; items due Monday, Sunday
+    and the next Monday land in `due_mon`, `due_sun` and `due_later`; the eight sum to
+    `assignments_upcoming` per bucket; a missing feed gives `null` for all eight; `week_of` and
+    `week_today` for a Thursday `now`; a zyBooks link in a claimed item's description names its
+    course; a vendor name with no host names nothing. The engine's existing preview tests pass
+    unedited, the key-order test included (keys stay sorted). `docs/reference/engine-commands.md`'s
+    `onboarding` entry gains the new keys (F13). No frozen reference is touched.
+- **F2b4 (app, `onboarding_state.rs`; `implementer`; off the contract list).**
+  - `Answers` gains `week_of: Option<String>`, `week_today: Option<u8>` and
+    `homework_sites: BTreeMap<String, Vec<String>>`. Each has a serde default and is skipped when
+    empty, so an answers file without them keeps its bytes.
+  - `status_for` adds `week: {of, today}` (`null` without both) and `homework_sites: {site:
+    [code]}`, mapped through the kept courses to their human codes. A removed course drops out, and
+    `unmatched` stays as `unmatched`. Both are `null` with no readable answers file, as `step3` is.
+  - **F8b's `save_preview`** stores the three from the preview's answer beside the buckets. Its
+    signature takes the preview's whole answer, not only `by_course`. This amends F8b's brief by
+    about 4 lines. F8b has not merged (`save_preview` is still `todo!` at `:464`), so this is a
+    brief change, not a follow-up.
+  - About 20 lines. **Test 48**, written first: an answers file without the fields reads and
+    re-saves byte-identical; with them, the status carries `week` and `homework_sites`; a removed
+    course leaves `homework_sites`; there is no answers file.
+- **What the student sees from these** is in F11p2 (§14.58.5). The answers file and its new fields
+  are deleted at finish and sign-out with the rest of the file (§4.10), and never leave the
+  computer.
+
+#### 14.58.4 F11p1: the look, the rail's lines and its foot (`console-ui`)
+
+F11t's pins for this piece come first (`test-writer`). Behaviour pins are never loosened. A pin
+that fixes only a button's place (Finish later's) is moved with a one-line justification in the
+test.
+- **Faces.** `@font-face` for F11p0's files beside the console's, in `console.css`. The `.setup`
+  block uses the display face for the step `h1`, the rail title, figures and the strip's labels,
+  with tabular figures, as the prototype's `.fig` and `.lab` do. Body text stays Instrument Sans
+  unless Q-B22 says otherwise. The old comment that says the faces "are not vendored yet" goes.
+- **The wordmark** in the rail head replaces today's `su-mark` square and the bold "Knowlu". It is
+  the image after Q-B23, or, until then, the CSS fallback in §14.58.2. Its `alt` is "Knowlu".
+- **The light "day board" theme.** `.setup` and `.picker` gain a `data-theme="light"` token set
+  with the same token names (`--su-ground`, `--su-board`, `--su-ink`, …), taken from the
+  prototype's `:root[data-theme="light"]` block. Figures and labels step up to 700 on light, as the
+  prototype does. The page starts in Windows' setting (`prefers-color-scheme`) and follows it if
+  it changes. Onboarding has no theme switch and stores no choice, so nothing new is saved. The
+  console's own palette is untouched.
+- **The rail's detail lines.** A done row says what was proved:
+  - **Your account:** "Signed in as {email}", from `account_status`'s `email` (`account.rs:1167`).
+    That command reads this computer only, with no network.
+  - **Payment:** with `status: trialing`, "Trial on. First charge {Month D}." from
+    `current_period_end`; with `active`, "Paid. Renews {Month D}."; with any other entitled
+    answer, "Nothing to pay.".
+  - The page calls `account_status` once when the frame mounts, and again only when the step moves
+    past 2 or past 4, **never on the status poll**. Every other row keeps its proof line from the
+    job records (`proofLine`).
+  - `account_status` joins the commands this plan names for the onboarding page
+    (`onboarding_static.rs`'s allow list). It is already on the console's list, so F5's lists are
+    unchanged.
+- **The rail's foot**: "About N minutes left" and **Finish later**.
+  - N is the sum of the remaining steps' times, taken from the onboarding spec's table (§1.3,
+    "Student's time", the middle of each range) as one constant in `onboarding.js`. Step 9 is
+    absent in wave B and is left out. Step 7 counts until the status moves past it. N is rounded
+    up, with a minimum of 1. It is a display estimate, never a count of jobs.
+  - Finish later moves from the top bar to the foot, with its id and its handler unchanged. Sign
+    out stays in the top bar.
+- **Shots need more than the status.** Without a backend, `?fixture=` answers only
+  `onboarding_status` (`onboarding.js:18-24`). It now accepts a file shaped
+  `{"onboarding_status": …, "account_status": …, "your_week": …, "commitment_proposals": …}`.
+  Each command reads its own key, and a file without an `onboarding_status` key is read as the
+  status, as today. This is dev-only, as before.
+- About 60 lines in `onboarding.js`, 35 in `console.css` and 10 in `onboarding.css`.
+
+#### 14.58.5 F11p2: the week strip and step 8's one-site form (`console-ui`)
+
+F11t's pins come first (`test-writer`).
+- **The bottom week strip.** A strip pinned to the bottom of the step pane:
+  - It reads "Your week", the seven days Monday to Sunday with each day's count, and "Later" with
+    its count. Each count is `step3.due_*`.
+  - Days before `week.today` are drawn as past, dimmed with no count. The strip's label carries
+    `week.of` ("Week of October 19"), so a student who resumes in a later week sees which week was
+    counted.
+  - It shows counts only: no titles, hours or order before the reveal (BRIEF R2.1).
+  - It appears from step 3's proof on, and on steps 5 to 8. It is hidden at 2, 4, 10 and 11, as the
+    prototype hides it at payment and Your week (BRIEF R3.2).
+  - With no `due_*` field, or all `null`, it is hidden.
+  - The page sums nothing: each figure is a field.
+- **Step 8: one site at a time, in a framed form.**
+  - One site's form shows at a time. Sites with a `homework_sites` entry go first, then the rest,
+    zyBooks before VHL. After a site is confirmed or skipped, the next shows. Every site stays
+    reachable from a "Show {site}" link, so the order never hides one.
+  - The form sits in the prototype's frame for Knowlu's own form (BRIEF R2.7). It is labelled
+    "Knowlu's form", with "Stored only on this computer, in Windows Credential Manager, and used
+    only to read {site}."
+  - A site with an entry shows "Found at your school: assignments in {codes} link to {site}." A site
+    without one shows the spec's step-8 line and no "Found" line. The page never writes a reason
+    it was not given.
+  - Every credential rule F11c pinned stays: the allow list by id, `clearCredentialFields` the
+    moment the write returns, and no `vault` argument once F11c's wrapper follow-up is in.
+    Step 8's proceed is unchanged.
+  - **Collision note:** F11c's wrapper follow-up (F5c's two commands) edits the same step-8 code.
+    Whichever lands second rebases.
+- About 70 lines in `onboarding.js` and 20 in `onboarding.css`.
+
+#### 14.58.6 F11p3: step 10 as `o9-your-week` (`console-ui`), and what its two questions write
+
+F11t's pins come first (`test-writer`). The layout follows the prototype's `o9-your-week` (BRIEF
+R3.5, round 2), top to bottom:
+- **The summary card**: "{classes} classes and {class_times} class times, set from your school's
+  registrar. Nothing to type." The figures are `step3.classes` and `step3.class_times`. Under it,
+  "Show the class times" opens today's rows from `your_week`, each with its Edit. F11c2 adds the
+  hours to that Edit.
+- **"Questions only you can answer"**: the firmness of each repeating calendar event, then the day
+  window. The late-rule question is not built (ruled below).
+- **The firmness control**: each repeating event from `commitment_proposals` gets a three-way
+  segmented control (Must keep, Usually, Optional; F11c's `LEVELS10` words) with Knowlu's level
+  preselected, beside Mine and Not mine. It replaces F11c's select. What it sends is unchanged:
+  `mine: [{source_uid, level}]`.
+- **The sticky Confirm bar**: "Confirm my week" pinned to the bottom of the pane, with "{n} of {m}
+  answered. Anything you leave blank comes back as a question over the next few days." `m` is the
+  number of questions on screen and `n` the number the student has answered. Both count the
+  student's own presses, never a status figure. The confirm's order is unchanged:
+  `commitments_confirm`, then `(10, {"confirmed": true})`, then `OB.show(11)` (§14.57.2).
+
+**What the two questions write (Quinn asked for a ruling on each):**
+- **The late-rule question is not built in wave B.** It would write a course's late-work rule, and
+  no such field exists. Nothing in the engine reads or writes a late rule (a search of
+  `engine/src` finds none), and the rules come from syllabi, which arrive with L5 and O5 in wave C
+  (spec §1.3, step 9). Building it now would need a new vault field and a ranking change, each
+  with its own spec. **Ruled: no late-rule question, and no placeholder, until O5.** O5 adds it
+  under §4's contract.
+- **The day-window question is a vault write through an existing path, with no new answer
+  shape.** It asks when the student's day starts and ends:
+  - The answer is the `planning-day` note in `commitments/` (its `window:`). It is written by
+    `commitments --confirm`'s existing `window` key (`ConfirmInput.window`, `commitments.rs:5008-5016`),
+    which today's `commitments_confirm` (`week.rs:75`) passes through unchanged.
+  - The engine validates the window strictly before any write and refuses bad input by name,
+    having written nothing (`confirm`, `:5074-5083`). It writes as the student, journal first.
+    Because the student set it, an agent never re-sets it (`journal.human_set`).
+  - Knowlu's guess is the window proposal that `commitment_proposals` already returns (`window:
+    true`, its times in `meets`; `proposal_value`, `commitments.rs:3102-3116`). F11c's step 10
+    filters it out today. With a guess, the question preselects its times. With none (no calendar
+    connected), the two time fields start empty.
+  - The page sends `window` only when the student answered. It sends `JSON.stringify` of the
+    proposal's own `meets` unchanged, or, when the student changed the times, of
+    `[{days, start, end}]` over the proposal's days (every day when there is no proposal). JSON is
+    valid flow YAML, so the page composes no YAML. Leaving it blank sends no `window`, and the
+    engine writes no planning day.
+  - The planning-day note is a confirmed note, so it syncs to the account, as the approved privacy
+    line says of everything the student confirms.
+  - Test: F11t pins that `window` appears in `commitments_confirm`'s argument only after an
+    answer, and that a blank question sends none. The engine's existing `--confirm` window tests
+    cover the write.
+- About 75 lines in `onboarding.js` and 25 in `onboarding.css`. If it runs past 80 in
+  `onboarding.js`, the day-window question splits off as F11p4. The task stops and asks, per §7's
+  rule, rather than growing.
+
+#### 14.58.7 Merge order, the side-by-side shots, and §7 re-walked
+
+- **The panel merge order** (it supersedes §14.53.5's and the F11b0 row's): F11b0 and F11c
+  (merged), then **F11p1, F11p2, F11p3**, then F11d, **F11c2** (after F11c, r2 n-1), F11b,
+  F11e1, F11e2. Each one is rebased on the one before. F11p0 lands before F11p1 and touches no
+  panel file.
+- **The side-by-side rule, for F11p and every later screen task** (F11d, F11c2, F11b, F11e1,
+  F11e2, F11f):
+  - Each screen the task builds is shot in headless Edge at 1280x800 against an invented fixture
+    (`?fixture=`, §14.58.4). It is shot beside the prototype's matching screen,
+    `index.html?shot=1&theme={dark|light}#{id}`, in both themes where the prototype has the light
+    shot.
+  - The pairs are: rail and frame `o4-school-email`; strip `o2p-proof` and `o4-school-email`;
+    step 8 `o7-zybooks` and `o7-vhl`; step 10 `o9-your-week`; step 3 the `o2*` screens; step 5
+    `o4*`; step 6 `o5*`; the reveal `r1-reveal`.
+  - Every fixture is invented: the prototype's sample student or new made-up data, never a real
+    student's classes, school or mail.
+  - The task saves the pairs under `docs/reports/shots/{task}/`. The `reviewer` compares each pair
+    and records, in the task's review report, what differs and whether each difference is
+    intended. **No screen task merges without that comparison.**
+  - A shot is taken from a headless browser's own render, never from the live desktop.
+- **§7, re-walked:**
+  - F7f depends on F7a (merged).
+  - F2b4 depends on F2b3 (the same file's chain: F2b3, then F2b4) and on F7f's key names, which
+    this section fixes, not on F7f's merge. Collision note with F3z in `onboarding_state.rs`.
+  - F8b gains F2b4 (the three fields it saves).
+  - F11p0 depends on nothing; Q-B22 and Q-B23 add files to it, never block it.
+  - F11p1 depends on F11p0 and F11c (merged).
+  - F11p2 depends on F11p1. Its live data needs F7f, F2b4 and F8b, but its merge does not.
+  - F11p3 depends on F11p2.
+  - F11d, F11c2, F11b, F11e1 and F11e2 each gain F11p3 (the order above). F11c2 also depends on
+    F5d. F11e1 also depends on F3z (Q9's `state` in the school answer).
+  - Nothing new points back. No cycle.
+- **§8's O3-to-`main` checklist** gains: F11c2 merged (step 10's hours Edit, Quinn's D5); and every
+  screen task's review report holds its side-by-side comparison.
+
+#### 14.58.8 Two questions for Quinn
+
+- **Q-B22, the reading face.** The prototype sets body text in Public Sans (BRIEF R3.8), and the app
+  uses Instrument Sans. Quinn's list named the display face and the wordmark only. The shots will
+  show the difference in every paragraph. Recommended: vendor Public Sans too (it is under the
+  OFL, one more file), so the built screens match what Quinn approved. F11p0 adds it on a yes.
+- **Q-B23, the wordmark.** It is an image with no recorded source. Recommended: confirm it is
+  Knowlu's own artwork and ship the two images. If it was drawn from a font, name the font, and
+  F11p0 checks that font's licence before the image ships.
+- (Named Q-B22 and Q-B23 because the spec's Q10 and Q11 already exist.)
+
+#### 14.58.9 Checks
+
+- **VISION and the two rules.** Nothing here names a person or a machine. The theme follows each
+  student's Windows setting. The zone comes from each student's own school or chosen state. The
+  "Found" line comes only from the student's own feed. No frozen reference is touched: F7f adds
+  keys to `--preview` only, and `surface` is unchanged. The new answers-file fields stay on the
+  computer and are deleted with the file.
+- **The contract list.** No task here edits a file on it. F7e's `meets` write goes through
+  `write_literals` with `console_ctx` and is reviewed by `contract-reviewer` (r1's answer).
+- **Sizes.** F7f is about 50 lines, F2b4 about 20, F3z about 55, F11p1 about 60, F11p2 about 70
+  and F11p3 about 75 in their largest file. All are within the cap, and F11p3 has its named split.
+- **§7** is re-walked in §14.58.7 and has no cycle.
 
