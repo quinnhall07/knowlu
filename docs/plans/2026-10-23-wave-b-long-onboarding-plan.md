@@ -3,15 +3,17 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:subagent-driven-development (recommended)
 > or superpowers:executing-plans to run this plan task by task. Steps use checkbox (`- [ ]`) syntax.
 
-**Status: T0 done (2026-10-24, on `feat/o4-school-sign-in` at `1d3c467`); ready for T1.** T0's
+**Status: T0 done and its amendments reviewed (PASS with minors, closed in §14.43; on `main` as
+`cb3b661`); T1 under way (S-A phase 1's first half recorded in §13; its 10-minute restart check
+pending).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
 record is in §13 (dated 2026-10-24) and its amendments in §14.42: seven premises did not hold as
 written, and each is amended where it lands (the lanes not yet merged, `grades` and course notes,
 the entitlement-refused sync, the feed host, the sync hold, `mode_device`, a `campus.yaml` race).
 None reopens a ruling.
 
 Quinn ruled Q-B3, Q-B10, Q-B11, Q-B14 and the direction (5b,
-Departures) on 2026-10-23 (§5.0). Q-B15 to Q-B19 stand as decided by the controller; **Q-B20**, new
-at T0, waits for the controller before F8e (§5). The plan was
+Departures) on 2026-10-23 (§5.0). Q-B15 to Q-B19 stand as decided by the controller; Q-B20, new
+at T0, is decided by the controller and Q-B21 ruled by Quinn, both on 2026-10-24 (§5, §14.43). The plan was
 reviewed and passed in round 8, and its minors are closed. Round 8 (`docs/reports/2026-10-23-wave-b-plan-review-r8.md`, 2026-10-23)
 passed with 0 critical, 0 important and 3 minor findings plus one note, closed in §14.40 with no
 further review round. Rounds 1-7 failed and are answered in §14.1-§14.39 (round 1 in §14.1-§14.10,
@@ -20,7 +22,7 @@ further review round. Rounds 1-7 failed and are answered in §14.1-§14.39 (roun
 every existing function, command, target, lock and seam the plan reuses, checked against the code
 for its signature, the credential it reads and its other callers. No finding reopened a ruling.
 Nothing is built until its spikes (§3) pass.
-§5's questions are all ruled or decided (§5.0), but Q-B20.
+§5's questions are all ruled or decided (§5.0; Q-B20 and Q-B21 in §5).
 
 **Date:** 2026-10-23. **Lanes:** O3 and O4, wave B of the onboarding redesign.
 
@@ -271,7 +273,8 @@ not reused where this read found them moved.
   larger work is split (§14, I7).
 - **Line endings:** LF in every file this plan edits; `*.ps1` stay CRLF.
 - **Every live step is the controller's** (§3, F15, S10): a dev build against staging, a scratch profile,
-  Quinn at the machine only to sign in or answer Duo, structure and counts only, and the scratch
+  Quinn at the machine only to sign in or answer the school's MFA (Okta at the founder's school),
+  structure and counts only, and the scratch
   profile removed afterwards (profile, vault, credentials, autostart).
 
 ---
@@ -283,7 +286,7 @@ Quinn with its finding, never a quiet redesign (spec §10). Every live spike fol
 - **Where:** a scratch profile made for the spike (`scripts\scratch-vault.ps1` where a vault is
   needed), at the founder's school, a dev build against **staging**, never a live vault or prod.
 - **Who does what:** the controller launches processes, reads files and records; Quinn types only
-  the school sign-in, the Duo answer and, where a step needs it, the Stripe test checkout in the
+  the school sign-in, the answer to the school's MFA (Okta at the founder's school) and, where a step needs it, the Stripe test checkout in the
   browser. No synthetic keyboard or mouse input; screenshots by window handle only.
 - **No debug port near a school page** (§14, I5). The proof harness's remote-debugging port may be
   attached to the app's main window only. No window on a school folder ever carries one, and if the
@@ -310,7 +313,7 @@ rows) and, if reachable, Simple Syllabus come up **silently** later? How many MF
 
 **Phase 1, no code (Edge, a scratch user-data folder).** The controller starts Microsoft Edge with a
 new, empty `--user-data-dir` under the scratchpad and the LMS host's start page (a process launch with
-a URL, not input). Quinn signs in and answers Duo. The controller then starts the same Edge profile at
+a URL, not input). Quinn signs in and answers the school's MFA (Okta at the founder's school). The controller then starts the same Edge profile at
 the school mailbox's start page, then at the registrar's start page, then at Simple Syllabus if the
 school has one. For each, record: signed in without a prompt (yes or no), prompts shown (password,
 MFA), seconds to a signed-in page. Then close Edge, wait 10 minutes, and repeat the three opens
@@ -762,10 +765,26 @@ promised, and its "still coming" line until each handed-over job is done.
   `:2668-2670`), and the only slot onboarding runs before `school.courses` is `BeforeConfig`. So,
   without a rule, an account with more than one page (a restore that failed at step 2 on a down
   network, then a large account) would leave `school.courses`, `config.ingest` and the `NoRank` slot
-  waiting for ever. **The rule** (T0, 2026-10-24; Q-B20): after a `BeforeConfig` slot whose sync
-  reads fresh, no skip, `ok`, but `pulled_to_end` is false, the queue enqueues the next
-  `slot.partial` (`BeforeConfig` again) at once, up to 10 in a row; past that, `school.courses` is
-  `failed` with "Try again", which re-arms the count. F8e owns it; F1 test 16 covers it.
+  waiting for ever. **The rule** (T0, 2026-10-24; Q-B20, decided by the controller after the T0
+  review's M1). A page is at most 500 records (`MAX_PAGE`,
+  `cloud/supabase/functions/sync-pull/handler.ts:5`), so a fixed 10 runs would read only about
+  5,000; the chain is bounded by progress instead:
+  - **Continue** while the cursor moves: after a `BeforeConfig` slot whose sync reads fresh, no
+    skip, `ok`, with `pulled_to_end` false **and** `record_cursor` or `note_cursor` greater than at
+    the previous reading, the queue enqueues the next `slot.partial` (`BeforeConfig` again) at once.
+  - **Stop** on a fresh `ok` run where neither cursor moved: `school.courses` is `failed`
+    ("couldn't finish reading your account") with "Try again".
+  - **Between re-runs:** a *skipped* or stale reading (no session, a held `sync.lock`, no fresh
+    stamp) is not progress and not a stop: it counts toward the backstop, leaves the previous
+    cursor as the comparison, and enqueues one more `BeforeConfig`; two such readings in a row stop
+    the chain as above. A *failed* reading (`ok: false`, no skip) stops it at once: "first sync" is
+    `failed` with its fix and `school.courses` `failed` with "Try again".
+  - **Backstop:** 50 `BeforeConfig` runs in one chain (every run counts, whatever its reading);
+    the 51st is not enqueued and `school.courses` is `failed` with "Try again".
+  - **Try again** on `school.courses` while `account_settled` is false resets the count and
+    enqueues one `BeforeConfig` `slot.partial`, which starts a new chain; once settled, it re-runs
+    `school.courses` itself.
+  F8e owns it; F1 test 16 covers it.
 - **`slot.partial`** (after payment, and again after `config.ingest`): **the same slot as any other,
   with the steps its scope leaves out named** (review r4 I-3; the layer corrected in review r5 I-3).
   F8s adds `scheduler::run_slot_inner_scoped(cs, sch, Some(app), late, scope)`, which builds the
@@ -862,7 +881,8 @@ contracts (§9, Quinn's).
 - **Sign-out during onboarding rewinds to step 2** (review r3 I-C; the step corrected in review r4,
   I-1). Sign-out deletes the answers file and the pending feed links (§4.11), the school folder (S5)
   and the session. So, in the same call, `onboarding.json` is rewritten to **step 2** with every job
-  `pending`, the feed states and `account_settled` cleared, and the skips kept. The next open of this
+  `pending`, the feed states, `account_settled` and `school` cleared (`school` added in the T0
+  review, M5; §4.7), and the skips kept. The next open of this
   profile lands on step 2's sign-in inside onboarding mode (§4.2), then step 3, which asks again what
   the deleted files held: the school sign-in and capture, then steps 6-8's confirms (a grant already
   on the account shows `already-done`; stored homework logins, which sign-out keeps, pre-fill step 8).
@@ -922,7 +942,14 @@ say which school either** (T0, 2026-10-24): `GET /account` returns a stored feed
 `added_at` only (`cloud/supabase/functions/account/index.ts:192`), never its host, and this plan
 makes no cloud change. So step 3 on a restored install suggests a school only from what **this
 device** keeps: `onboarding.json`'s `school` (unitid and label, §4.5) from an earlier onboarding of
-this profile, as a confirm; with none, step 3 asks for the school as a fresh install does. Its proof
+this profile, as a confirm; with none, step 3 asks for the school as a fresh install does. **On a
+new device, step 3 always asks for the school** (T0 review M5): the profile is new, so it has no
+`onboarding.json`, and nothing else on the device or the account names the school. **Sign-out
+clears `school`** with the rest of the rewind (§4.5): the answers, the pending links, the school
+folder and the session go, and the school choice goes with them, so the rewound file names nothing
+the next sign-in has not confirmed. So the stored-school arm arises only when this profile resumes
+an onboarding it left without signing out (a quit, Finish later, a crash) after step 3 saved the
+school. F1 test 2 covers both arms. Its proof
 is the restored course
 notes' count; this device still needs the school sign-in where the row has grades or a registrar
 (sessions are per device), and `school.apply` creates `campus.yaml` after the confirm. The other
@@ -1098,7 +1125,9 @@ until the account or the vault holds it, and **never silently lost** (R-C3'-exec
 | Design direction | **5b, Departures, as the spine, with the grafts listed in `docs/design/2026-10-23-directions/README.md`** ("Grafts" and "Round 3"). Build from `5b-departures-board/index.html`, `screens.json` and `BRIEF.md` | F10, F11a-F11f, S6b |
 
 - **Decided by the controller, standing:** Q-B15 to Q-B19, as written below. Quinn re-ruled none of
-  them.
+  them. **Q-B20** (new at T0) was decided by the controller on 2026-10-24 (below).
+- **Q-B21, ruled by Quinn on 2026-10-24:** wave B may ship with two Google consents in step 6
+  (Calendar, then Gmail) until O2 and F11f combine them (below).
 - **Q-B1** was not in this ruling set. It stands at its recommendation, "no exception": every config
   file is created once, and `CLAUDE.md` needs no change. A17 stays unused.
 - **Q-B2, Q-B4 to Q-B9, Q-B12 and Q-B13** are the controller's, at the recommendations below.
@@ -1241,7 +1270,14 @@ The questions below are kept as they were argued; each one's ruling or decision 
   each re-run is a whole slot (session refresh, mail pass, backup, telemetry), seconds each.
   *Alternative:* a `sync`-only job outside the slot, which needs a second path into the engine child
   and the notes gate; or leave `pulled_to_end` out and accept a duplicate course note on a
-  multi-page account.
+  multi-page account. **Decided by the controller (2026-10-24, T0 review M1):** not a fixed 10,
+  since a page is at most 500 records (`sync-pull/handler.ts:5`) and 10 runs read about 5,000. The
+  chain continues while the cursor moves, stops on a run where it did not, and has a backstop of
+  50 runs; skipped and failed readings and Try again are as §4.3 states.
+- **Q-B21 (new after T0's review, M4): may wave B ship with step 6 asking for Google consent
+  twice?** If wave B ships before O2, F11b's step 6 asks once for Calendar and once for Gmail; F11f
+  combines them after O2. **Ruled by Quinn (2026-10-24): yes.** Ship with two Google consents in
+  step 6 until O2 and F11f combine them.
 
 ---
 
@@ -1308,7 +1344,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F2g | `onboarding_state.rs`: `onboarding_attach_session`, step 2 again's re-attach (three-way account match, move on a match, a local delete of the pending session and a refusal on a mismatch) | `implementer`, reviewed by `contract-reviewer` | specified and tested over seams, off the contract list; a wrong move attaches another account's token to the vault (review r5, I-2) | F2b (chained after it in the same file, review r6 M2) |
 | F2h | `onboarding_state.rs`: `onboarding_entitlement` and `onboarding_checkout`, the vault-target versions of `entitlement_now` and `open_checkout` | `implementer`, reviewed by `contract-reviewer` | specified, public `account.rs` functions only, tested on a `127.0.0.1:0` listener (review r5, I-1) | F2g (the same file's chain: F2a, F2d, F2e, F2b, F2g, F2h; review r6 M2) |
 | F3 | Step-2 vault with defaults, without campus or events files; `account_settled`; picker flag | `test-writer` then `implementer` | writes a vault; tests first | F2a |
-| F4 | Onboarding mode in `run_console`; the window's close prevented, then `onboarding_quit`'s inner on its own thread; `mode_device` primed (T0) | `implementer` | P-3's five changes; the close off the event loop (review r5, I-5) | F2a, F2b, F8s (`prime_mode_device`), T0 |
+| F4 | Onboarding mode in `run_console`; the window's close prevented, then `onboarding_quit`'s inner on its own thread; `mode_device` primed (T0); one update check at launch (T0 review M3) | `implementer` | P-3's five changes; the close off the event loop (review r5, I-5) | F2a, F2b, F8s (`prime_mode_device`, `spawn_update_check`), T0 |
 | F4b | `switch_profile` refuses in onboarding mode | `implementer` | specified, tested in F1 (review r4, M6) | F2a |
 | F5 | Moved and new commands registered | `mechanical` | a list edit, recounted, pinned | F4, F2b, F2g, F2h, F8d, F8lb |
 | F5b | Shell list: the retired panels' commands, after F10 | `mechanical` | `main.rs` is never F10's (review r1, I8) | F10 |
@@ -1321,7 +1357,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F8e | Order rules and the local lane: config before readers, slot order, `account_settled` from the sync status, step 10's gate | `implementer` | as F8a | F8a |
 | F8h | The notes gate and the lane's `sync.lock` retry (holding nothing between tries) | `implementer` | split out of F8e (review r4, M4) | F8e |
 | F8f | Stop and drain at safe points; the save freeze; hand-over items | `implementer` | as F8a | F8a, F1 |
-| F8s | `scheduler.rs`: `run_slot_inner_scoped` (the seams from `Some(app)`) and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}`; the stop before each stage (never cleared); the bundle deleted on every path; the slot's hand-over clearing; `prime_mode_device` (T0) | `implementer` | `scheduler.rs` is off the contract list; its tests are F1's 15, 18 and 27 (review r3 M5, r4 I-3, M1, r5 I-3; T0) | F1 |
+| F8s | `scheduler.rs`: `run_slot_inner_scoped` (the seams from `Some(app)`) and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}`; the stop before each stage (never cleared); the bundle deleted on every path; the slot's hand-over clearing; `prime_mode_device` (T0) and `spawn_update_check` (T0 review M3) | `implementer` | `scheduler.rs` is off the contract list; its tests are F1's 15, 18 and 27 (review r3 M5, r4 I-3, M1, r5 I-3; T0) | F1 |
 | F8b | Runners: the school step (capture, answers, pending feed, preview) | `implementer`, reviewed by `contract-reviewer` (its capture handles the bearer link; review r7, I-1) | specified | F8a, F7a, S4d, F8la |
 | F8c | Runners: the local lane (stores, apply, courses, registrar, config) | `implementer` | specified | F8e, F6a, F6b |
 | F8g | Runners: the partial (`BeforeConfig`, then `NoRank`) and full slots, each with onboarding's `AppHandle` | `implementer` | specified | F8e, F8f, F8h, F8s |
@@ -1622,7 +1658,13 @@ job runners as a trait so tests pass fakes.
    is an error, never "no answers" (§4.5).
 2. **Resume:** an unfinished file reopens at its `step`; `running` jobs come back `pending`; an
    unreadable file resumes at the earliest step §4.7's checks do not prove (driven by fakes of each
-   check), never as finished; an absent file on a registered profile is a normal launch.
+   check), never as finished; an absent file on a registered profile is a normal launch. **The
+   school at step 3 on a restored install** (T0 review M5, §4.7): with fakes of a restore that
+   brought course notes, (a) a new profile with no `onboarding.json` reaches step 3 with no school
+   suggested and the school asked for, as on a fresh install, and the fake account is never asked
+   for a school; (b) a file left by a quit after step 3 saved `school` offers that school as a
+   confirm and assumes nothing (`school.apply` does not run until it is confirmed); (c) a file
+   rewound by `on_sign_out` has no `school` and behaves as (a).
 3. **Holds:** with the entitlement fake answering "not entitled", every vault-writing or gated job is
    `held` and never started; `school.capture` and `school.preview` run; after "entitled", the held
    jobs run in the order they were enqueued.
@@ -1708,19 +1750,27 @@ job runners as a trait so tests pass fakes.
     `account_settled` false (review r5, M2). **T0's cases (2026-10-24):** a fresh status with
     `ok: false` and `skipped: "no entitlement"` (the shape `record_gated_skip` writes) is "neither":
     "first sync" not done, not `failed`, `account_settled` false; a fresh `ok` status with
-    `pulled_to_end` false marks "first sync" `done`, leaves `account_settled` false and enqueues one
-    more `BeforeConfig` `slot.partial`, up to 10 in a row, after which `school.courses` is `failed`
-    and its "Try again" re-arms the count (Q-B20); the cursor is read, never written. A lane job retrying on a held
+    `pulled_to_end` false marks "first sync" `done`, leaves `account_settled` false and, when the
+    fake cursor moved, enqueues one more `BeforeConfig` `slot.partial` (Q-B20, as decided after the
+    T0 review): a fresh `ok` run with the cursor unmoved stops the chain and fails `school.courses`
+    with "Try again"; one skipped reading between moving runs enqueues one more and keeps the
+    previous cursor as the comparison, two in a row stop the chain; a failed reading stops it at
+    once; a fake cursor that moves on every run stops at exactly 50 runs; "Try again" while
+    unsettled resets the count and enqueues exactly one `BeforeConfig` slot; the cursor is read,
+    never written. A lane job retrying on a held
     `sync.lock` holds neither `vault_io` nor the lock between tries (a fake `vault_io` user gets it
-    within one retry interval; review r4, M2).
+    within one retry interval; review r4, M2). `registrar.confirm`'s fake is entered with
+    `vault_io` free (it fails if held) and refuses with `week::SYNC_RUNNING` itself, the constant,
+    never a typed copy of its text; the retry treats that, and only that, as "try again" (T0 review
+    M2).
 17. **Sign-out mid-onboarding (review r3 I-C, review r4 I-1):**
     - `onboarding_sign_out` at step 8, with a fake `mail.canary` waiting, `school.capture` done, a
       feed `validated` and its pending-credential fake set: the stop is set, the canary abandoned, the
       last save made, saves frozen, the fake sign-out called, the fake relaunch called with `--pick`,
       and the fake exit called, in that order;
     - `on_sign_out` (inside the fake sign-out) deletes the answers file and the pending fake and
-      rewrites `onboarding.json` to **step 2** with every job `pending`, the feed states and
-      `account_settled` cleared, skips kept;
+      rewrites `onboarding.json` to **step 2** with every job `pending`, the feed states,
+      `account_settled` and `school` cleared, skips kept;
     - **no save lands after the rewind**: a save the fake queue attempts after the freeze is refused,
       and the file read back is the rewound one;
     - signing in again (test 10's fake) and resuming lands at step 3, and no config job runs before
@@ -1809,7 +1859,11 @@ job runners as a trait so tests pass fakes.
     `commands::attach_scheduler` (today's placeholder, pinned so the test fails if it changes
     unnoticed); after F4's priming call on a step-2 vault (App mode, this device), the envelope's
     `topline.scheduler` reads `mode: "app"`, `device_ok: true`; and a source pin over `main.rs`
-    asserts the onboarding arm calls `scheduler::prime_mode_device` (F8s) before the window is built. Also in test 6 (the
+    asserts the onboarding arm calls `scheduler::prime_mode_device` (F8s) before the window is built,
+    and calls `scheduler::spawn_update_check` exactly once, and names neither `install_staged` nor
+    `hold_for_install`; a second pin over `scheduler.rs` asserts the housekeeping tick calls
+    `spawn_update_check` too, and that `check_and_stage_blocking` appears only inside it (T0 review
+    M3). Also in test 6 (the
     gate): a `grades (not yet: …)` row never marks "first grades", and a `grades (skipped: …)` row
     leaves it pending.
 Tests 21, 22 and 26 touch the real Credential Manager, so the test-writer's sign-off rule for such tests
@@ -1831,8 +1885,8 @@ Split so that each edits about 80 lines or fewer of one file (review r2 I6, revi
   unedited. Size: S (about 60 lines).
 - **F2e (implementer), `on_sign_out(profile_dir, profile_id)`.** F1's test 17; §4.5's rewind. Deletes
   the answers file and both pending credentials where they exist, then, for an unfinished
-  `onboarding.json`, rewrites it at **step 2** with every job `pending` and the feed states and
-  `account_settled` cleared; a finished file is left alone; every failure is returned, never
+  `onboarding.json`, rewrites it at **step 2** with every job `pending` and the feed states,
+  `account_settled` and `school` cleared (`school`: T0 review M5, §4.7); a finished file is left alone; every failure is returned, never
   panicked, so the sign-out goes on. Size: S (about 35 lines).
 - **F2b (implementer), the commands.** F1's test 9's finish bullets and tests 12, 17's command half
   and 19; §4.5, §4.10. The `onboarding_status`, `onboarding_answer` (saves each answer to the answers
@@ -1946,7 +2000,8 @@ that need that loop to open and close their windows, for up to an engine child's
 `main` in onboarding mode, `CloseRequested` calls `api.prevent_close()`, spawns a thread running
 `onboarding_quit`'s inner (F2b, which shows "finishing <job>…" and exits the process itself), and
 returns at once; a second close meets F2b's guard. The normal console's hide-to-tray arm and the
-`lms_link` window's `Destroyed` arm are unchanged. Size: S (about 40 lines in `main.rs`).
+`lms_link` window's `Destroyed` arm are unchanged. Size: S (about 40 lines in `main.rs`; about 45
+with the two calls below).
 
 **What skipping `spawn` also skips** (T0, 2026-10-24; F1 test 27). `scheduler::spawn` is where
 `Scheduler.mode_device` is first primed (`scheduler.rs:1154`) and where the housekeeping thread that
@@ -1961,6 +2016,23 @@ priming holds for the whole of onboarding. **The rest is benign, and F4 adds not
 after the reveal, when `quit_at` is the finish's own stamp (Q-B18), so no slot reads as missed; the
 housekeeping thread's debounced backup, log prune, entitlement refresh (`:1269`) and update check wait
 for that launch too, and each onboarding slot runs its own backup and entitlement refresh.
+
+**One update check at an onboarding-mode launch** (T0 review M3, the controller's call). Today the
+check runs only from the housekeeping thread, at its first tick and daily (`scheduler.rs:1284-1310`),
+and from Check now (`commands.rs:729`), so a student who stays in onboarding would never see a new
+version. `main.rs` is the binary over the `knowlu` library and `commands::updates_dir` is
+`pub(crate)` (`commands.rs:702`), so the tick cannot be copied into `main.rs`, and should not be. So
+F8s moves the tick's spawned body (`scheduler.rs:1285-1310`: `try_state::<updates::Updates>()`,
+`commands::updates_dir()`, `updates::check_and_stage_blocking`, the recording, the single-flight
+silence) into `pub fn scheduler::spawn_update_check(app: &AppHandle)`, which the housekeeping tick
+then calls (no behaviour change), and the onboarding arm calls it **once**, after managing
+`Updates`. `updates.rs` (contract list) is not edited. It never blocks the window and never installs: onboarding has no install path
+(`install_update` and `hold_for_install` stay uncalled, F11t), so a staged update is offered by the
+normal console, as today. *Open for the controller:* the check stages but cannot install, so a student
+who never finishes onboarding still runs the old version; installing from onboarding would need
+`hold_for_install` and a drain like §4.10's, which this plan does not add. F1 test 27 gains a
+source pin: the onboarding arm calls `scheduler::spawn_update_check` once. Size, with the priming:
+S (about 45 lines in `main.rs`).
 
 **F4b (implementer), `switch_profile` refuses in onboarding mode** (review r4, M6). F1's test 20. In
 `app/src/commands.rs`: if `switch_profile` has no inner function, add one taking the launch mode
@@ -2083,7 +2155,8 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   `RunSummary.started`, no `skipped`, and `ok` for `done`, `ok: false` for `failed`; any `skipped`,
   `"no entitlement"` included, for neither; review r4 I-2, r5 M2, T0); `account_settled` also needs
   the cursor's `pulled_to_end`, read with `sync::load_cursor` and never written, and short of it the
-  next `BeforeConfig` slot is enqueued, up to 10 in a row (§4.3, Q-B20; T0, 2026-10-24); `grades`
+  next `BeforeConfig` slot is enqueued while the cursor moves, with a backstop of 50 (§4.3, Q-B20;
+  T0, 2026-10-24); `grades`
   after `school.apply` and `school.courses`; which scope each `slot.partial` gets (F8g); slot order; and step
   10's proposals flag in
   `onboarding_status`. F1's tests 4, 8, 11, 14's ordering and 16's status half. Size: S (about 75
@@ -2094,8 +2167,12 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   while it sleeps (review r4, M2). **Never around a path that takes them itself** (T0, §4.3):
   `registrar.confirm`'s write goes through `registrar::spawn`, which locks `vault_io` and
   `sync.lock` itself, so the retry wraps that call and its refusal, holding neither (a nested
-  `vault_io` deadlocks; a nested `sync.lock` refuses). F1's test 16's gate and retry halves; F1 test
-  16 also runs `registrar.confirm`'s fake through the retry and fails if `vault_io` is held on
+  `vault_io` deadlocks; a nested `sync.lock` refuses). **The refusal is matched on the constant,
+  never a copied string** (T0 review M2): `week::SYNC_RUNNING` (`week.rs:101`, "a sync is running;
+  try again in a moment"), which `hold_sync_lock` returns for both callers, becomes `pub(crate)`
+  (a one-word edit in `week.rs`, F8h's only change there), and the retry compares the error with
+  it. F1's test 16's gate and retry halves; F1 test 16 also runs `registrar.confirm`'s fake through
+  the retry, the fake refusing with `week::SYNC_RUNNING` itself, and fails if `vault_io` is held on
   entry. Size: S (about 45 lines).
 - **F8f, stop, drain, freeze and hand-over** (in `onboarding_jobs.rs`). Setting the stop, each job
   kind's safe point (§4.10's table), the wait, the **save freeze** that `onboarding_sign_out` sets
@@ -2130,7 +2207,10 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   - The slot's end clears `handover`'s slot items.
   - `pub fn prime_mode_device(cs, sch)` (T0; F1 test 27): `spawn`'s line at `:1154` moved into a
     function, which `spawn` then calls; F4 calls it in onboarding mode. About 4 lines.
-  Size: S (about 60 lines).
+  - `pub fn spawn_update_check(app)` (T0 review M3; F1 test 27): the housekeeping tick's update
+    check (`:1285-1310`) moved into a function, which the tick then calls; F4 calls it once. A move,
+    about 6 new lines.
+  Size: S (about 66 lines).
 - **F8b, the school step's runners.** `school.capture`: S4d's visible sign-in, then the hidden reads
   through `grades::capture_hidden`, the LMS capture (`lms_link::capture_link_only`, F8la's
   validate-only seam, never `capture_calendar_link` or `lms_link::finish`; review r7, I-1) and the
@@ -2326,7 +2406,8 @@ still coming, and Open Knowlu handing it over. Run in the repository's `.wv/` ve
   step 6 makes the combined ask. **At T0 (2026-10-24) O2 is not merged and has no branch**, so F11b
   builds step 6 on today's separate consents (`account::google_connect` with each scope, polled by
   `google_status`, both through the vault's session), and F11f adds the combined ask and the
-  forwarding fallback once O2 merges. If wave B ships first, its step 6 is the separate-consent form,
+  forwarding fallback once O2 merges. If wave B ships first, its step 6 is the separate-consent form
+  (Quinn ruled this acceptable, Q-B21, 2026-10-24),
   and the ledger's §1.3 Q8 row is met by F11f, not F11b. Proof keys are unchanged (`gmail` is
   `granted` or `skipped` until F11f adds `forwarding`).
 - **L1 (Microsoft 365 older mail):** after O1, O3 and O4 (Q10); at T0 (2026-10-24) not started, no
@@ -2449,7 +2530,7 @@ behaviour, before it merges.
    README's grafts). Q-B1 stands at "no exception needed". Still Quinn's: each spike's verdict when
    one fails, every "why" line, the privacy page, and §9's signatures.
 3. **Controller:** each spike's record before the tasks that depend on it (§7); Q-B2, Q-B4 to Q-B9,
-   Q-B12 to Q-B19, and Q-B20 (T0's new question) before F8e.
+   Q-B12 to Q-B20 (Q-B20 decided 2026-10-24).
 4. **Quinn reads:** every "why" line (F11a-F11e), the privacy page (S7), and signs §9's amendments.
 5. **S9, then F14** before each push; each lane PR merges on green CI and its reviewer's PASS
    (`contract-reviewer` for `account.rs`); **no release tag between the O4 and O3 merges.**
@@ -2541,6 +2622,17 @@ place, still "Holds, tightened"), and two rows are added: `Cursor.pulled_to_end`
 | `credentials::write`, `exists`, `delete` | `credentials.rs:17-60` | any target | Holds |
 | `scaffold::runners_yaml`, `debug_port` | `scaffold.rs:656`; `debug_port.rs:9` | App mode and device from birth; a port only with the env var | Holds |
 
+- **2026-10-24, T1: S-A phase 1, first half (main session; Quinn at the machine).** A fresh Edge
+  profile on a new, empty `--user-data-dir`, at the founder's school. **New fact:** the school's MFA
+  is **Okta, not Duo** (Quinn and this spike); the plan's wording is corrected. Results, in host
+  kinds and counts only:
+  - the LMS: a password and a "stay signed in?" prompt, **no MFA prompt**; signed in;
+  - Outlook (the school mailbox), opened next on the same profile: signed in at once, **no prompt**;
+  - the registrar, opened next: signed in in about 1 second, **no prompt**.
+  Prompts in all: one password, one "stay signed in?", zero MFA. Simple Syllabus: not recorded.
+  **Restart check (2026-10-24):** Edge was closed (forced), and after 10 minutes the same profile
+  reopened at all three; all three came up signed in with no prompt (Quinn). **S-A phase 1: PASS.**
+  Edge may lean on the Windows account, so phase 2 (WebView2, T2) is still the deciding test.
 - **2026-10-24, T0 part B: citation drift (main session, `feat/o4-school-sign-in` at `1d3c467`).**
   The app and engine code this plan cites is byte-identical to `49b0b43`, so all 54 rows of §13.1
   held as cited, and of about 75 other citations three were off by one, now corrected in place:
@@ -3242,3 +3334,36 @@ as follows (docs only; no ruling reopened):
 
 Still open from T0: the ruled direction's files on the lane branches (before F10, F11a-F11f or
 S6b), and Q-B20. Next: T1.
+
+### 14.43 The T0 amendments' review (2026-10-24): PASS with minors, closed
+
+The review passed; the plan went to `main` as `cb3b661`. The controller's calls on its minors, and
+two new facts, each edited where it lands:
+- **M1 (Q-B20 decided).** The `BeforeConfig` re-run is bounded by progress, not by 10: it continues
+  while `record_cursor` or `note_cursor` moved, stops on a fresh `ok` run where neither did, and has
+  a backstop of 50 runs, because a page is at most 500 records (`MAX_PAGE`,
+  `cloud/supabase/functions/sync-pull/handler.ts:5`) and 10 runs would read about 5,000. Between
+  re-runs, a skipped or stale reading counts toward the backstop, is not progress, and enqueues one
+  more run (two in a row stop the chain); a failed reading stops it at once. "Try again" on
+  `school.courses` while unsettled resets the count and enqueues one `BeforeConfig` slot (§4.3, Q-B20,
+  F8e, F1 test 16).
+- **M2.** F8h matches `registrar::spawn`'s refusal on `week::SYNC_RUNNING` (`week.rs:101`, made
+  `pub(crate)`), never on a copied string; test 16's fake refuses with the same constant.
+- **M3.** One update check at an onboarding-mode launch. The check lives only in the housekeeping
+  tick (`scheduler.rs:1284`) and Check now (`commands.rs:729`), and `commands::updates_dir` is
+  `pub(crate)`, out of `main.rs`'s reach; so F8s moves the tick's body into
+  `scheduler::spawn_update_check(app)`, the tick calls it, and F4 calls it once (F1 test 27's pins).
+  **Open for the controller:** onboarding has no install path, so the check stages an update that
+  only the normal console can install; a student who never finishes onboarding still runs the old
+  version.
+- **M4 (Q-B21, ruled by Quinn 2026-10-24).** If wave B ships before O2, step 6 asks for Google
+  consent twice (Calendar, then Gmail) until O2 and F11f combine them. Quinn: ship it that way (§5).
+- **M5.** §4.7 now says plainly that on a new device step 3 always asks for the school. Sign-out
+  clears `school` from `onboarding.json` with the rest of the rewind (§4.5, F2e, F1 test 17), so a
+  stored school is offered only on a resume without a sign-out. F1 test 2 covers the no-school arm,
+  the stored-school arm and the rewound file.
+- **Okta, not Duo.** The school's MFA is Okta at the founder's school (Quinn, and S-A phase 1); §2
+  and §3 now say "the school's MFA (Okta at the founder's school)".
+- **S-A phase 1** (first half) is recorded in §13: on a fresh Edge profile, the LMS asked for a
+  password and "stay signed in?" with no MFA prompt; Outlook then came up at once with no prompt; the
+  registrar in about 1 second with no prompt. The 10-minute restart check passed (all three signed in); S-A phase 1 PASS.
