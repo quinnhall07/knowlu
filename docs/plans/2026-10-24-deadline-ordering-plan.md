@@ -3,7 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:subagent-driven-development (recommended)
 > or superpowers:executing-plans to run this plan task by task. Steps use checkbox (`- [ ]`) syntax.
 
-**Status: r3, awaiting plan review r3.** Review r2 (2026-10-24): narrow FAIL, 2 important, 1 minor,
+**Status: r4, awaiting plan review r4.** Review r3 (2026-10-24): FAIL on one point (the
+explanation's count), folded in (§9.3). Review r2: narrow FAIL, 2 important, 1 minor,
 folded in (§9.2). Review r1: FAIL, 4 important, 6 minor, folded in (§9.1). Q-1 to Q-3 approved by the controller as recommended, with r1 M1's re-point (§2,
 §3). No task starts before the review passes (§7).
 
@@ -515,13 +516,14 @@ Acceptance: DS1-DS5, DS12, DS13 green; T1o's file, `surface_oracle.rs` and every
   is the placeholder: "May not fit before 11:59 pm · no time estimate yet".
 - **DS11** `fit_why_comes_from_the_prefix_at_removal` (plan review r2, I1), on DP21's set at 21:00:
   - **C**, which fits alone (150 of 150 minutes) but was removed when K overflowed: "2.5h left;
-    doing it would leave 1 other (due 11:59 pm) late." It must **not** read "you have 2.5h before
-    it's due", which would read as fitting;
+    doing it would leave other work due by 11:59 pm late." It must **not** read "you have 2.5h
+    before it's due", which would read as fitting;
   - **B**, which does not fit alone (120 minutes of work, 90 available): "2.0h left; you have 1.5h
     before it's due.";
-  - example (d)'s **Y**, which overflowed itself: "2.5h left; doing it would leave 1 other (due
-    11:59 pm) late.";
-  - an overflower with a bare-date due prints "(due tonight)" or "(due Sat)", never a clock time.
+  - example (d)'s **Y**, which overflowed itself: "2.5h left; doing it would leave other work due
+    by 11:59 pm late." (doing Y would leave both X and Z late, which is why no count is printed);
+  - an overflower with a bare-date due prints "due by tonight" or "due by Sat", never a clock time;
+  - no explanation contains "1 other" (plan review r3).
 - **DS14** `needs_enrichment_alone_is_not_a_placeholder` (guard after T4b): X with a real
   `effort_confidence: medium` and `needs_enrichment: true`: Y reads "Won't fit before 11:59 pm".
 
@@ -533,12 +535,14 @@ Acceptance: DS6-DS11 fail at run time; DS14 green; everything else green. Size: 
 - [ ] **Bare date** (one helper): the raw `due` value in `metas` has no time part.
 - [ ] `row`: `fit_text` and `fit_why` for `W` rows only, per DS6-DS11, using T4b's placeholder
   helper and the `WontFit` record. `fit_why`: when `work_minutes > available_minutes`, "<work> left;
-  you have <available> before it's due."; otherwise "<work> left; doing it would leave 1 other
-  (due <overflow_deadline>) late." (Moore–Hodgson removes one item per overflow, so keeping this
-  one makes exactly the overflow miss at that point; the overflower is `overflower`, or this item
-  when it overflowed itself, and the other is then one of `prefix`.) Times print as "11:59 pm",
-  "8:30 am"; another day prefixes its short weekday (`WEEKDAYS`); a bare date (this item's or the
-  overflower's) prints "tonight" or the weekday alone.
+  you have <available> before it's due."; otherwise "<work> left; doing it would leave other work
+  due by <overflow_deadline> late." No count and no item name (plan review r3): doing it can leave
+  more than one item late, and the late one can be due earlier than the overflower; the only true
+  claim is that the work due by that time cannot all be on time. `overflower` is the item whose
+  addition overflowed (this item when it overflowed itself) and supplies the deadline and whether
+  it is a bare date. Times print as "11:59 pm", "8:30 am"; another day prefixes its short weekday
+  (`WEEKDAYS`); a bare date (this item's or the overflower's) prints "tonight" or the weekday alone
+  ("due by tonight", "due by Sat").
 - [ ] No new wording outside these fields; `render.rs` is untouched (Q7: no `today.md` line).
 
 Acceptance: DS1-DS14 green; T1o's file, `surface_oracle.rs` and every existing `surface.rs` test
@@ -626,7 +630,7 @@ Acceptance: `scripts/ci/eol-check.ps1` clean; no source file in the diff. Size: 
 | §5 | Integer minutes; total tie-breaks; deterministic | T3a-T3c | DP2, DP12, DP20 |
 | §6, Q5 | The 20:00 step deleted; hour tests retired or re-pointed by name; plumbing kept | T0, T3c | T0's record; T7 |
 | §7, Q7 | Row line, bare dates, weekday, meter line, words never used | T4b, T4c, T5 | DS6, DS7, DS8, DS12; T5 screenshots |
-| §7 (edited after the ruling, r2 I1) | The explanation from the prefix at removal: "you have Xh" only when the item does not fit alone, else "would leave 1 other (due …) late" | T3b, T4c | DP11, DP14, DS11 |
+| §7 (edited after the ruling, r2 I1, r3) | The explanation from the prefix at removal: "you have Xh" only when the item does not fit alone, else "would leave other work due by … late", with no count | T3b, T4c | DP11, DP14, DS11 |
 | §8 | Goldens and references byte-identical, never regenerated, at four moments | T1o | DO1, DO2; `oracle.rs`, `surface_oracle.rs` unedited |
 | §8, M8 | The oracle file is contract-list work | T1o, T7 | `contract-engineer` wrote it; `contract-reviewer`'s read |
 | §9 | `rank` model-free; no note field, no journal record | all | T7 |
@@ -663,12 +667,21 @@ here, dated, newest first.)*
 - **2026-10-24, the controller.** Q-1 to Q-3 approved as recommended. The re-point of C5's last
   assertion and of S2's 21:00 half is explicitly allowed (plan review r1 M1); §2 records it.
 
+### 9.3 Plan review r3 (FAIL on one point; answered 2026-10-24)
+
+1. **The count in the explanation:** "would leave 1 other (due 11:59 pm) late" could be false twice
+   over: doing example (d)'s Y leaves both X and Z late, and the item left late can be due before the
+   overflower. The wording is now "doing it would leave other work due by 11:59 pm late" ("due by
+   tonight" / "due by Sat" for a bare date), and the justification "keeping this one makes exactly
+   that overflow miss" is removed (T4c, DS11's C and Y; spec §7 and its after-ruling paragraph).
+   Nothing else changed.
+
 ### 9.2 Plan review r2 (narrow FAIL; answered 2026-10-24)
 
 1. **I1, the explanation's source:** `WontFit` drops `kept_count` and `kept_minutes` and records, at
    removal, `prefix`, `prefix_minutes`, `overflower` and `overflow_deadline` (header, T3b). "You have
    Xh before it's due" is printed only when the item does not fit alone; otherwise "doing it would
-   leave 1 other (due …) late" (T4c). DP14 pins DP21's B and C records; DS11 tests C (fits alone,
+   leave 1 other (due …) late" (T4c; the count was dropped in r3, §9.3). DP14 pins DP21's B and C records; DS11 tests C (fits alone,
    removed when K overflows), B and Y. The spec's §7 and §10 follow, and its status line says the
    explanation was edited after the ruling.
 2. **I2, the S2 re-point:** its 21:00 half asserts only `groups[0].label == "Overdue"`; DS1 covers

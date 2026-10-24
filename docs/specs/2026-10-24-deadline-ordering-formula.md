@@ -6,11 +6,15 @@ Review r1 failed (4 important, 9 minor), review r2 failed narrowly (2 important,
 r3 passed (one nit, folded into §10); every finding is mapped in §13. Its plan is
 `docs/plans/2026-10-24-deadline-ordering-plan.md`.
 
-**Edited after the ruling, for Quinn to see** (2026-10-24, from plan reviews r1 I3 and r2 I1): the
-won't-fit row's **explanation** in §7, and the walk's record that feeds it in §10. The explanation is not one of Q7's ruled strings ("Won't fit before 11:59 pm", "Won't fit by
-Wed", the meter line), and none of those changed. The old example could read as if an item fitted
-when it did not; the new wording says either "you have 1.5h before it's due" (it cannot fit alone)
-or "doing it would leave 1 other (due 11:59 pm) late" (it fits alone, but not with the others).
+**Edited after the ruling, for Quinn to see** (2026-10-24, from plan reviews r1 I3, r2 I1 and r3):
+the won't-fit row's **explanation** in §7, and the walk's record that feeds it in §10. The
+explanation is not one of Q7's ruled strings ("Won't fit before 11:59 pm", "Won't fit by Wed", the
+meter line), and none of those changed. The old example could read as if an item fitted when it did
+not; the new wording says either "you have 1.5h before it's due" (it cannot fit alone) or "doing it
+would leave other work due by 11:59 pm late" (it fits alone, but not with the others). Plan review
+r3 dropped a count from the second form ("leave 1 other (due 11:59 pm) late"): doing the item can
+leave more than one other item late, and the late one can be due before the time named. The only
+claim that always holds is that the work due by that time cannot all be on time.
 
 It answers Quinn's question on the evening rule ("Why 8pm? Is there a general formula we can come
 up with to decide what should come first based on how long it will take and when it is due?").
@@ -447,15 +451,16 @@ Plain, specific, never an instruction to give up. Knowlu names the item; the stu
     "May not fit before 11:59 pm · depends on 2 items with no time estimate yet" (others in its
     prefix at removal, before or after it).
 - **Its explanation** (on demand, beside the start-by `why`, which is unchanged) comes from the
-  walk's record at the item's removal (§2.6; plan reviews r1 I3 and r2 I1; **edited after the
+  walk's record at the item's removal (§2.6; plan reviews r1 I3, r2 I1 and r3; **edited after the
   ruling**, see the status line):
   - when the item does not fit alone (its work exceeds the time before its deadline): "2.0h left;
     you have 1.5h before it's due.";
   - otherwise, when it fits alone but was removed at an overflow: "2.5h left; doing it would leave
-    1 other (due 11:59 pm) late." The time is the overflowing item's deadline (a bare date prints
-    "tonight" or the weekday alone). Moore–Hodgson removes one item per overflow, so keeping this
-    one makes exactly that overflow miss. It never says "you have 2.5h" of an item that fits alone,
-    which would read as fitting.
+    other work due by 11:59 pm late." The time is the overflowing item's deadline; a bare date
+    prints "due by tonight" or "due by Sat", never a clock time. It gives no count and names no
+    item: doing it can leave more than one other item late, and the one left late can be due
+    before the overflowing item. What always holds is that the work due by that time cannot all be
+    on time. It never says "you have 2.5h" of an item that fits alone, which would read as fitting.
   Your time counts evenings to midnight (§2.3).
 - **On the meter,** when `W` is not empty, a line under the existing sentence: "If something has to
   give: Lab 3 (3.0h). Everything else fits by its deadline." With more than one: "If something has
