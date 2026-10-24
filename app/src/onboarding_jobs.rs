@@ -532,8 +532,15 @@ impl Queue {
     /// A `slot.partial` ask that merges into a queued one owes a `NoRank` slot (I1), unless the queued
     /// one is `pending` with `config.ingest` already done, so it is sure to run as `NoRank` itself, or
     /// is already running as `NoRank`.
-    pub fn enqueue(&self, job: &str) {
+    pub fn enqueue(&self, job: &str) { self.enqueue_with(job, false) }
+    /// An answer or a proceed (§14.52.3: a repeat changes nothing): like [`Queue::enqueue`], but a job that
+    /// already has a `done`, `failed` or `skipped` record is left alone, under the same lock. A failed job
+    /// is re-run only by Try again ([`Core::press`]); skipped mail jobs stay skipped. `slot.partial` is
+    /// exempt: a second ask is its own merge rule (I1), and step 8 needs a `NoRank` slot after step 3's.
+    pub fn enqueue_once(&self, job: &str) { self.enqueue_with(job, true) }
+    fn enqueue_with(&self, job: &str, once: bool) {
         let mut g = self.inner.lock();
+        if once && job != "slot.partial" && matches!(g.job_state(job), Some(JobState::Done | JobState::Failed | JobState::Skipped)) { return; }
         if job == "slot.partial" && g.order.iter().any(|j| j == job) {
             let covered = match g.job_state(job) {
                 Some(JobState::Pending) => proposals_ready(&g.state),

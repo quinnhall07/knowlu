@@ -3042,7 +3042,7 @@ fn test_34_a_parked_window_busy_job_is_not_re_picked_by_other_jobs_finishing_bef
 
 /// What the `onboarding_answer` command does: the confirmed-school fact comes from the queue's live state.
 fn answer_through(r: &Rig, step: u8, a: Value) -> Value {
-    let out = answer_unless_exiting_with(&|| false, &r.dir, step, &a, &mut |j| r.q.enqueue(j), school_apply_may_run(&r.q.snapshot()));
+    let out = answer_unless_exiting_with(&|| false, &r.dir, step, &a, &mut |j| r.q.enqueue_once(j), school_apply_may_run(&r.q.snapshot()));
     if out["ok"] == true { r.q.wake(); }
     out
 }
@@ -3112,4 +3112,77 @@ fn test_34_the_skip_on_step_5_records_the_skip_and_skips_the_queued_mail_jobs_an
     r.wait_for("the setup to land", |r| r.state_of("mail.setup") != JobState::Running);
     assert_eq!(r.state_of("mail.setup"), JobState::Skipped, "a failed end after a skip lands skipped");
     assert!(handover_for(&r.q.snapshot()).iter().all(|h| !h.item.starts_with("mail.")), "a skipped mail job is never handed over: {:?}", handover_for(&r.q.snapshot()));
+}
+
+// ---- F2b2a fix round: a repeat of an answer or a proceed changes nothing once its job has finished ----------------------
+
+fn proceed(r: &Rig, step: u8) { assert_eq!(answer_through(r, step, serde_json::json!({"proceed": true}))["ok"], true, "step {step}"); }
+
+/// The unlisted paste path's rig: a confirmed school without a unitid, the typed list answered.
+fn unlisted_rig(tag: &str, setup: impl FnOnce(&Fake)) -> Rig {
+    let mut s = state_at(3, true);
+    s.school = Some(School { unitid: None, label: "Example Test College".into(), path: SchoolPath::Paste, confirmed: true });
+    let r = rig_full(tag, s, true, vec![ok_reading(true, 10, 10)], false, setup);
+    let typed = serde_json::json!({"capture": {"courses": three_courses(), "registrar_rows": [], "feeds": {}}});
+    assert_eq!(answer_through(&r, 3, typed)["ok"], true);
+    r
+}
+
+#[test]
+fn test_33_a_repeated_step_5_answer_after_setup_and_canary_are_done_starts_nothing() {
+    let r = rig_with("t33-repeat-done", state_at(5, true), true, vec![], |_| {});
+    let school = serde_json::json!({"mail": {"provider": "school"}});
+    assert_eq!(answer_through(&r, 5, school.clone())["ok"], true);
+    r.idle();
+    for j in ["mail.setup", "mail.canary"] { assert_eq!(r.state_of(j), JobState::Done, "{j}"); }
+    assert_eq!(answer_through(&r, 5, school)["ok"], true, "the answer still saves");
+    r.idle();
+    for j in ["mail.setup", "mail.canary", "mail.first_pass"] { assert_eq!(runs_of(&r, j), 1, "{j} ran again: {:?}", r.log.all()); }
+    for j in ["mail.setup", "mail.canary"] { assert_eq!(r.state_of(j), JobState::Done, "{j}"); }
+}
+
+#[test]
+fn test_33_a_repeated_step_3_or_8_proceed_after_its_jobs_are_done_re_runs_nothing() {
+    let r = unlisted_rig("t33-repeat-proceeds", |_| {});
+    proceed(&r, 3);
+    proceed(&r, 8);
+    r.idle();
+    let lane = ["school.store", "school.apply", "school.courses", "registrar.confirm", "config.ingest"];
+    for j in lane { assert_eq!(r.state_of(j), JobState::Done, "{j}"); }
+    proceed(&r, 3);
+    proceed(&r, 8);
+    r.idle();
+    for j in lane { assert_eq!(runs_of(&r, j), 1, "{j} ran again: {:?}", r.log.all()); assert_eq!(r.state_of(j), JobState::Done, "{j}"); }
+}
+
+#[test]
+fn test_33_a_failed_job_stays_failed_after_a_repeated_proceed() {
+    let r = unlisted_rig("t33-repeat-failed", |f| f.behave("calendar.store", || Outcome::Failed("could_not_store".into())));
+    proceed(&r, 7);
+    r.idle();
+    assert_eq!(r.state_of("calendar.store"), JobState::Failed);
+    proceed(&r, 7);
+    r.idle();
+    assert_eq!(runs_of(&r, "calendar.store"), 1, "only Try again re-runs a failed job: {:?}", r.log.all());
+    assert_eq!(r.state_of("calendar.store"), JobState::Failed);
+}
+
+#[test]
+fn test_33_a_step_5_answer_after_a_step_5_skip_saves_but_leaves_the_mail_jobs_skipped() {
+    let mut gate = None;
+    let r = rig_with("t33-answer-after-skip", state_at(5, true), true, vec![], |f| {
+        gate = Some(f.block("mail.setup", false));
+        f.behave("mail.setup", || Outcome::Failed(REASON_MAIL_SETUP_FAILED.into()));
+    });
+    let school = serde_json::json!({"mail": {"provider": "school"}});
+    assert_eq!(answer_through(&r, 5, school.clone())["ok"], true);
+    r.wait_started("mail.setup");
+    skip_and_stop_mail(false, 5, "mail", &mut || r.q.update_state(|s| skip_step(s, 5, "mail")).and_then(|x| x), &mut || r.q.skip_mail());
+    gate.unwrap().release();
+    r.wait_for("the setup to land", |r| r.state_of("mail.setup") != JobState::Running);
+    assert_eq!(answer_through(&r, 5, school)["ok"], true, "the answer saves");
+    r.idle();
+    assert_eq!(load_answers(&r.dir).unwrap().unwrap().mail_kind.as_deref(), Some("school"));
+    for j in ["mail.setup", "mail.canary", "mail.first_pass"] { assert_eq!(r.state_of(j), JobState::Skipped, "{j}"); }
+    assert_eq!((runs_of(&r, "mail.setup"), runs_of(&r, "mail.canary")), (1, 0), "{:?}", r.log.all());
 }

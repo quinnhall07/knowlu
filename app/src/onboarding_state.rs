@@ -1247,7 +1247,7 @@ pub fn onboarding_answer(app: tauri::AppHandle, step: u8, answer: Value) -> Valu
     let (Some(queue), Some(cs)) = (app.try_state::<crate::onboarding_jobs::Queue>(), app.try_state::<crate::state::ConsoleState>()) else { return no_setup() };
     // The school fact is read from the queue's live state (its lock is released before the answers lock is taken).
     let confirmed = school_apply_may_run(&queue.snapshot());
-    let out = answer_unless_exiting_with(&|| exiting_now(&queue, &exit_guard()), &cs.data_dir, step, &answer, &mut |job| queue.enqueue(job), confirmed);
+    let out = answer_unless_exiting_with(&|| exiting_now(&queue, &exit_guard()), &cs.data_dir, step, &answer, &mut |job| queue.enqueue_once(job), confirmed);
     // The jobs that wait for the answers file (`school.courses`, `registrar.confirm`, `config.ingest`)
     // are woken by nothing else: a saved answer wakes the queue even when it enqueued no job.
     if out["ok"] == true { queue.wake(); }
