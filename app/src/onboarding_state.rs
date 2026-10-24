@@ -208,7 +208,9 @@ impl CourseAnswer {
     /// **`captured_label`**, each trimmed, the first that is not empty (as the engine reads its own
     /// `code`, `slug`, `label`). Never the human `code`, which two shells share, and never the
     /// editable `label`, so a label edit changes no key, no bucket and no Remove.
-    pub fn key(&self) -> String { todo!("F2d: the course key") }
+    pub fn key(&self) -> String {
+        [&self.lms_key, &self.slug, &self.captured_label].iter().map(|f| f.trim()).find(|t| !t.is_empty()).unwrap_or_default().to_string()
+    }
 }
 
 /// The name of a match-set bucket as the engine's `by_course` writes it (F7a, 904a92c): the sorted
@@ -282,13 +284,24 @@ pub struct Answers {
 impl Answers {
     /// The courses that were not removed, in captured order. `school.courses`, `config.ingest`'s
     /// `course_map` and the step-3 totals read the list only through this.
-    pub fn kept_courses(&self) -> Vec<&CourseAnswer> { todo!("F2d: kept_courses") }
+    pub fn kept_courses(&self) -> Vec<&CourseAnswer> { self.courses.iter().filter(|c| !c.removed).collect() }
     /// A re-capture: replaces the list with `captured`, every row un-removed and its `captured_label`
     /// set to its captured `label` **first**, before any key is compared, so the match below uses the
     /// key the new row will keep. A captured row's own non-empty `fragments` win (a new gradebook pin
     /// is never lost); a captured row with none, whose [`CourseAnswer::key`] matches an old row's,
     /// keeps that row's `fragments`.
-    pub fn recapture(&mut self, _captured: Vec<CourseAnswer>) { todo!("F2d: recapture") }
+    pub fn recapture(&mut self, captured: Vec<CourseAnswer>) {
+        let old: Vec<(String, Vec<String>)> = self.courses.iter().map(|c| (c.key(), c.fragments.clone())).collect();
+        self.courses = captured.into_iter().map(|mut c| {
+            c.removed = false;
+            c.captured_label = c.label.clone();
+            if c.fragments.is_empty() {
+                let key = c.key();
+                if let Some((_, f)) = old.iter().find(|(k, _)| !key.is_empty() && *k == key) { c.fragments = f.clone(); }
+            }
+            c
+        }).collect();
+    }
 }
 
 /// Step 3's proof totals (§14.45, §14.47), what F6c's ingest and `registrar.confirm` will import
@@ -304,7 +317,26 @@ impl Answers {
 /// A count name is **`null`** when every bucket carrying it carries `null` (its input was missing), so
 /// the proof shows nothing rather than 0; with **no buckets at all** (no preview yet, or a failed one)
 /// every count name is `null` and only `classes` is a number.
-pub fn step3_totals(_a: &Answers) -> BTreeMap<String, Option<i64>> { todo!("F2d: the step-3 totals") }
+pub fn step3_totals(a: &Answers) -> BTreeMap<String, Option<i64>> {
+    let kept: Vec<String> = a.kept_courses().iter().map(|c| c.key()).collect();
+    let is_kept = |b: &Bucket| b.codes.is_empty() || b.codes.iter().any(|c| kept.contains(c));
+    // Every count name starts null; a name sums over the buckets that count for it and stays null
+    // while every bucket carrying it carries null.
+    let mut t: BTreeMap<String, Option<i64>> = ["assignments_upcoming", "turned_in", "class_times", "grades_courses"].iter().map(|n| (n.to_string(), None)).collect();
+    for b in a.buckets.values() {
+        for (name, n) in &b.counts {
+            let counted = name == "class_times" || is_kept(b);
+            let slot = t.entry(name.clone()).or_insert(None);
+            if let (true, Some(n)) = (counted, n) { *slot = Some(slot.unwrap_or(0) + n); }
+        }
+    }
+    let single = || a.buckets.values().filter(|b| b.codes.len() == 1);
+    if single().any(|b| b.graded.is_some()) {
+        t.insert("grades_courses".into(), Some(single().filter(|b| b.graded == Some(true) && is_kept(b)).count() as i64));
+    }
+    t.insert("classes".into(), Some(kept.len() as i64));
+    t
+}
 
 /// F8b's seam after `school.preview`: parses the engine's `by_course` object (its nulls included)
 /// into [`Answers::buckets`], **replacing** the earlier preview's (never merged with them), and saves.
@@ -349,11 +381,31 @@ pub fn onboarding_answer_inner(
 }
 
 /// `Ok(None)` is an absent file; an unreadable one is `Err`, never "no answers".
-pub fn load_answers(_data_dir: &Path) -> Result<Option<Answers>, String> { todo!("F2d: load answers") }
-pub fn save_answers(_data_dir: &Path, _a: &Answers) -> Result<(), String> { todo!("F2d: save answers") }
+pub fn load_answers(data_dir: &Path) -> Result<Option<Answers>, String> {
+    let path = answers_path(data_dir);
+    match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: cannot be read ({e})", path.display())),
+        Ok(text) => serde_json::from_str::<Answers>(&text).map(Some).map_err(|e| {
+            // Category, line and column only: serde's own text can quote the file's content (a course label).
+            format!("{}: is not an answers file ({:?} at line {}, column {})", path.display(), e.classify(), e.line(), e.column())
+        }),
+    }
+}
+/// Temp file and rename in app data (never a vault file), as [`save_state`].
+pub fn save_answers(data_dir: &Path, a: &Answers) -> Result<(), String> {
+    write_atomic(&answers_path(data_dir), &serde_json::to_value(a).map_err(|e| e.to_string())?)
+}
+static ANSWERS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Load (or start empty), change, save: how each answer is written the moment it is given.
-pub fn update_answers(_data_dir: &Path, _change: &dyn Fn(&mut Answers)) -> Result<(), String> {
-    todo!("F2d: update answers")
+pub fn update_answers(data_dir: &Path, change: &dyn Fn(&mut Answers)) -> Result<(), String> {
+    // Held across load, change and save, so a Remove and a `save_preview` never overwrite each other.
+    let _held = ANSWERS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // An unreadable file is an error here: it is never started over from empty and written back.
+    let mut a = load_answers(data_dir)?.unwrap_or_default();
+    change(&mut a);
+    save_answers(data_dir, &a)
 }
 
 // ---- the pending credentials (§4.11) -------------------------------------------------------------
@@ -370,13 +422,28 @@ pub trait PendingStore {
 pub struct CredPending { pub profile_id: String }
 
 impl PendingStore for CredPending {
-    fn put(&self, _name: &str, _link: &str) -> Result<(), String> { todo!("F2d: write the pending credential") }
-    fn get(&self, _name: &str) -> Option<String> { todo!("F2d: read the pending credential") }
-    fn delete(&self, _name: &str) { todo!("F2d: delete the pending credential") }
+    fn put(&self, name: &str, link: &str) -> Result<(), String> {
+        crate::credentials::write(&crate::credentials::target_for(&self.profile_id, name), &self.profile_id, link)
+    }
+    fn get(&self, name: &str) -> Option<String> {
+        let target = crate::credentials::target_for(&self.profile_id, name);
+        if !crate::credentials::exists(&target) { return None; }
+        knowlu_engine::wincred::read_credential(&target).ok().map(|c| c.password.expose().to_string())
+    }
+    fn delete(&self, name: &str) {
+        let target = crate::credentials::target_for(&self.profile_id, name);
+        if crate::credentials::exists(&target) { let _ = crate::credentials::delete(&target); }
+    }
 }
 
 /// `lms_ics` to [`PENDING_LMS`], `calendar_ics` to [`PENDING_CALENDAR`].
-pub fn pending_name(_kind: &str) -> Option<&'static str> { todo!("F2d: the pending name for a feed kind") }
+pub fn pending_name(kind: &str) -> Option<&'static str> {
+    match kind {
+        "lms_ics" => Some(PENDING_LMS),
+        "calendar_ics" => Some(PENDING_CALENDAR),
+        _ => None,
+    }
+}
 
 // ---- resume and LaunchMode (§4.5, §4.7) ----------------------------------------------------------
 
@@ -445,9 +512,10 @@ fn earliest_unproven(c: &dyn ResumeChecks, has_school: bool) -> u8 {
 /// After the student confirms the school at step 3 (the state then holds a confirmed `school`): moves
 /// the state to the earliest step past 3 the checks do not prove and returns the steps it passed
 /// through, each `already-done` with its proof (§4.7). Nothing changes while the school is
-/// unconfirmed, the state is not at step 3, or the restore brought no courses (step 3 still needs its capture).
+/// unconfirmed, the state is not at step 3, the restore brought no courses (step 3 still needs its
+/// capture), or the answers file is absent or unreadable (step 3 is asked again, never skipped).
 pub fn advance_after_school(state: &mut OnboardingState, checks: &dyn ResumeChecks) -> Vec<u8> {
-    if state.step != 3 || !school_apply_may_run(state) { return Vec::new(); }
+    if state.step != 3 || !school_apply_may_run(state) || !checks.answers_ok() { return Vec::new(); }
     let next = earliest_unproven(checks, true);
     if next <= 3 { return Vec::new(); }
     state.step = next;
@@ -466,6 +534,11 @@ pub fn resume(loaded: Loaded, checks: &dyn ResumeChecks) -> Resume {
         for j in s.jobs.values_mut().filter(|j| j.state == JobState::Running) { j.state = JobState::Pending; }
         // A school is never trusted across a quit: it is offered again as a confirm.
         if let Some(sc) = s.school.as_mut() { sc.confirmed = false; }
+    }
+    // Past step 3 an absent or unreadable answers file means they were deleted or never saved, never
+    // that there were none: step 3 is asked again (§4.5, §14.49).
+    if !checks.answers_ok() {
+        if let Some(s) = state.as_mut().filter(|s| s.step > 3) { s.step = 3; }
     }
     // A profile with no session resumes at step 2's sign-in whatever the file's step, which is kept.
     // With a session, a file at step 2 or below (a rewound file, or a vault just made) lands on step 3.
