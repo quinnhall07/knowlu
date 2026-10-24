@@ -1,7 +1,7 @@
 /* Knowlu onboarding: the step frame and the rail (O3 F11a, the 5b "Departures" direction).
    A classic script, loaded after console.js. It shows what `onboarding_status` answers and
    computes nothing: no count, no gate, no job state is derived here. The steps' own content is
-   F11b-F11e's; they hang on `KNOWLU_ONBOARDING.registerPanel(n, {render})`.
+   F11b-F11e's; they hang on `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`.
    Pure helpers (the exit line, the words for a reason or a cost, the rail's rows) hang on
    `window.KNOWLU_ONBOARDING` so the static tests can run them under node. */
 (function () {
@@ -44,7 +44,11 @@
     courses_not_recorded: "Knowlu couldn't record your classes yet. Press Try again.",
     feeds_not_settled: "Knowlu is still saving your calendar links. Try again in a moment.",
     lms_link_missing: "Knowlu doesn't have your school's calendar link yet. Add it from the school step.",
-    calendar_link_missing: "Knowlu doesn't have your calendar link yet. Add it from the calendar step."
+    calendar_link_missing: "Knowlu doesn't have your calendar link yet. Add it from the calendar step.",
+    mail_setup_cancelled: "Email setup was stopped before it finished. Press Try again when you're ready.",
+    mail_setup_failed: "Knowlu couldn't finish connecting your school email. Press Try again.",
+    mail_not_yet: "Your school email isn't ready yet. Knowlu will check again shortly.",
+    feed_kept_on_device: "Your calendar link is saved on this computer only and was not sent anywhere."
   };
   var COST_WORDS = {
     mail_dates_missed: "Skipped: date changes and new work announced by email are missed.",
@@ -144,11 +148,12 @@
     if (bad) { m.cls = "failed"; m.st = "Needs a look"; m.pf = bad.line; m.retry = bad.job; }
     else if (skip) { m.cls = "skipped"; m.st = "Skipped"; m.pf = costWords(skip.cost_key); }
     else if (run) { m.cls = "reading"; m.st = "Reading"; m.pf = run.line; }
-    else if (recs.length && recs.every(function (x) { return x.state === "done"; })) { m.cls = "done"; m.st = "Done"; m.pf = recs.map(function (x) { return x.line; }).join(", "); }
+    else if (recs.length && recs.every(function (x) { return x.state === "skipped"; })) { m.cls = "skipped"; m.st = "Skipped"; m.pf = "Skipped"; }
+    else if (recs.length && recs.every(function (x) { return x.state === "done" || x.state === "skipped"; })) {
+      m.cls = "done"; m.st = "Done"; m.pf = recs.filter(function (x) { return x.state === "done"; }).map(function (x) { return x.line; }).join(", ");
+    }
     else if (recs.some(function (x) { return x.state === "held"; })) { m.cls = ""; m.st = "Waiting"; m.pf = "Starts once your plan is active"; }
-    else if (past && recs.length) { m.cls = ""; m.st = "Not yet"; m.pf = "Not yet"; }
-    var found = ((s && s.found) || []).filter(function (f) { return r.src.indexOf(f.source) !== -1; })[0];
-    if (found && !bad && !skip) { m.pf = "Found at your school: " + reasonWords(found.reason); }
+    else if (past && r.jobs.length) { m.cls = ""; m.st = "Not yet"; m.pf = "Not yet"; }
     return m;
   }
   function railHtml(s) {
@@ -171,7 +176,7 @@
   var panels = {}, leaveHooks = [];
   OB.registerPanel = function (n, def) { panels[n] = def; };
   OB.registerLeave = function (fn) { leaveHooks.push(fn); };
-  OB.show = function (n) { S.step = n; renderPane(true); renderRail(); };
+  OB.show = function (n) { S.error = ""; S.step = n; renderPane(true); renderRail(); };
   OB.refresh = function () { renderPane(true); renderRail(); };
 
   function frameHtml() {
@@ -281,7 +286,6 @@
       S.status = s || { ok: false };
       if (!S.mounted) { return; }
       if (S.status.ok === false) { S.error = S.status.error || "Knowlu couldn't read your setup."; renderClosing(); return; }
-      S.error = "";
       if (!S.step) { S.step = Number(S.status.step) || 3; renderPane(); }
       var p = panels[S.step];
       if (p && p.onStatus) { p.onStatus(S.status); }
@@ -293,6 +297,7 @@
     load().catch(function () {}).then(function () { setTimeout(poll, 2000); });
   }
   function onClick(e) {
+    S.error = "";
     if (e.target.closest("#ob-finish-later") || e.target.closest("[data-act=finishLater]")) { finishLater(); return; }
     if (e.target.closest("#ob-sign-out")) { signOut(); return; }
     var r = e.target.closest("[data-retry]");
