@@ -151,8 +151,10 @@
     if (a.status === "active") { return day ? "Paid. Renews " + day + "." : ""; }
     return "";
   }
-  // The foot's estimate: each remaining step's time (spec 1.3, the middle of its range) in seconds,
-  // (step 7, shown only to a student with no Google calendar who must paste a link, takes the top of its range), summed and rounded up to a whole minute. A display estimate, never a count of jobs. Step 9 is absent.
+  // The foot's estimate: the time each remaining step takes, in seconds.
+  // Each is the middle of its range in the spec (1.3), summed and rounded up to a whole minute.
+  // Step 7 takes the top of its range so that it still counts after rounding.
+  // This is a display estimate, never a count of jobs. Step 9 is absent.
   var STEP_SECONDS = { 3: 120, 4: 90, 5: 30, 6: 30, 7: 60, 8: 60, 10: 120, 11: 30 };
   function minutesLeft(step) {
     var n = 0;
