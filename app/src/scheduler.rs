@@ -725,7 +725,8 @@ pub fn run_slot(app: &AppHandle, late: bool) -> RunSummary {
     run_slot_inner(&cs, &sch, Some(app), late)
 }
 
-/// Which engine steps a slot runs (plan §4.3, Q-B19). **F1 stub:** `run_slot_scoped` ignores it.
+/// Which engine steps a slot runs (plan §4.3, Q-B19). Each step a scope leaves out is the row
+/// `<step> (not yet: <why>)` at exit 0, which the runner-log filter does not match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotScope {
     /// Today's slot.
@@ -737,17 +738,65 @@ pub enum SlotScope {
     BeforeConfig,
 }
 
-/// F8s: `run_slot_with`'s body with a scope and the stop checks. **F1 stub:** runs today's slot.
-pub fn run_slot_scoped(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHandle>, late: bool, grades: &GradesSeam, mail: &MailSeam, scope: SlotScope) -> RunSummary {
-    let _ = scope;
-    run_slot_with(cs, sch, tray_app, late, grades, mail)
+/// True, and the row `<name> (not run: stopped)`, once onboarding has set `Scheduler.stop`. The flag
+/// is read before every stage and never cleared; a stop skips stages and is never a failure.
+fn halted(sch: &Scheduler, steps: &mut SlotSteps, name: &str) -> bool {
+    let stopped = sch.stop.load(Ordering::SeqCst);
+    if stopped {
+        steps.push((format!("{name} (not run: stopped)"), 0));
+    }
+    stopped
 }
 
-/// F8s: the one line `spawn` runs to prime the cached `(mode, device_ok)`. **F1 stub.**
-pub fn prime_mode_device(_cs: &ConsoleState, _sch: &Scheduler) { todo!("F8s: prime_mode_device") }
+/// A step the scope leaves out: its `(not yet: ...)` row, or `(not run: stopped)` if the stop is set.
+fn scope_row(sch: &Scheduler, steps: &mut SlotSteps, name: &str, why: &str) {
+    if !halted(sch, steps, name) {
+        steps.push((format!("{name} (not yet: {why})"), 0));
+    }
+}
 
-/// F8s: the housekeeping tick's update check, as a function. **F1 stub.**
-pub fn spawn_update_check(_app: &AppHandle) { todo!("F8s: spawn_update_check") }
+/// What `scope` leaves out of `slot_argv`'s steps (`grades` is the capture stage's, handled there).
+fn scope_off(scope: SlotScope) -> &'static [&'static str] {
+    match scope {
+        SlotScope::Full => &[],
+        SlotScope::NoRank => &["rank"],
+        SlotScope::BeforeConfig => &["coursework", "ingest", "judge", "rank"],
+    }
+}
+
+/// T0: the cached `(mode, device_ok)`, primed at once by `spawn` and by onboarding mode, so neither
+/// reports the `Default` placeholder until the housekeeping pass.
+pub fn prime_mode_device(cs: &ConsoleState, sch: &Scheduler) {
+    *lock(&sch.mode_device) = (mode(&cs.vault), device_ok(&cs.vault));
+}
+
+/// The update check, on its own thread (R-P4a-24: one HTTPS round trip on a captive-portal wifi must
+/// not hold the housekeeping loop). The tick calls it at launch and daily; onboarding calls it once.
+pub fn spawn_update_check(app: &AppHandle) {
+    let h = app.clone();
+    std::thread::spawn(move || {
+        let Some(up) = h.try_state::<crate::updates::Updates>() else { return };
+        // The command's own resolver, not a copy of it (final review, I3): the staging folder a tick
+        // downloads into and the one *Check now* downloads into are the same folder.
+        let r = match crate::commands::updates_dir() {
+            // m4: no private folder to stage in is a failed check, recorded quietly like any other.
+            Err(e) => Err(e),
+            // The blocking twin: a std thread with no runtime under it (B4 / R-P4a-12).
+            Ok(dir) => crate::updates::check_and_stage_blocking(&h, &up, &dir),
+        };
+        // m2: a single-flight refusal is not a check; background work never touches that field.
+        if r.as_ref().err().map(String::as_str) != Some(crate::updates::ALREADY_CHECKING) {
+            crate::updates::record_check(&up, r, &knowlu_engine::journal::now_ts(None));
+        }
+        let sch = h.state::<Scheduler>();
+        let offer = crate::updates::update_offer(*lock(&sch.running), lock(&up.staged).as_ref());
+        // Braced deliberately: the guard must drop before `up` does.
+        {
+            let g = lock(&up.item);
+            if let Some(item) = g.as_ref() { let _ = item.set_enabled(offer.is_some()); }
+        }
+    });
+}
 
 /// Refuses outright — no child spawned, no run record written — unless this vault's `local` entry
 /// says `scheduler: app` AND this is the designated device (review item 7, ruling R-T12b): on the
@@ -756,6 +805,12 @@ pub fn spawn_update_check(_app: &AppHandle) { todo!("F8s: spawn_update_check") }
 /// `paused` does NOT gate this — an explicit "Run now" always attempts to run; only the tick
 /// thread's own automatic firing respects `paused`.
 pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHandle>, late: bool) -> RunSummary {
+    run_slot_inner_scoped(cs, sch, tray_app, late, SlotScope::Full)
+}
+
+/// `run_slot_inner` with a scope (F8s): onboarding's queue passes its own `AppHandle`, so the grades
+/// capture and the mail pass exist there too (with no tray, `tray::set_state` does nothing).
+pub fn run_slot_inner_scoped(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHandle>, late: bool, scope: SlotScope) -> RunSummary {
     let campus = crate::grades::campus_of(&cs.vault);
     let row = crate::scaffold::curated(&campus.unitid);
     let capture = |host: &'static str| crate::grades::capture_hidden(tray_app.expect("only called with an app handle"), &cs.data_dir, host);
@@ -786,7 +841,7 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
         pass: tray_app.map(|_| &pass as &dyn Fn(&[serde_json::Value]) -> Result<String, &'static str>),
         window_open: tray_app.is_some_and(|app| app.get_webview_window(crate::mail::WINDOW).is_some()),
     };
-    run_slot_with(cs, sch, tray_app, late, &seam, &mail)
+    run_slot_scoped(cs, sch, tray_app, late, &seam, &mail, scope)
 }
 
 /// `run_slot_inner`'s body, with the grades step's inputs (the curated row, the capture, the window
@@ -799,6 +854,15 @@ pub fn run_slot_inner(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppH
 /// `coursework`, `ingest`, `grades`, `judge` and `mail` steps that would have run into
 /// `<step> (skipped: privacy update not accepted)`; `rank`, the backup and telemetry run as always.
 pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHandle>, late: bool, grades: &GradesSeam, mail: &MailSeam) -> RunSummary {
+    run_slot_scoped(cs, sch, tray_app, late, grades, mail, SlotScope::Full)
+}
+
+/// `run_slot_with`'s body with a scope and the stop (F8s, plan §4.3, §4.10). **The stop is read before
+/// every stage** the body starts (session, entitlement, privacy, grades, mail, each engine child,
+/// backup, telemetry): a stopped slot's unstarted stages are `<stage> (not run: stopped)` rows at exit
+/// 0, no failure and no run-log line, and nothing clears the flag. The grades bundle's delete below
+/// runs on every path, a stop included.
+pub fn run_slot_scoped(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHandle>, late: bool, grades: &GradesSeam, mail: &MailSeam, scope: SlotScope) -> RunSummary {
     if mode(&cs.vault) != SchedulerMode::App {
         return refuse(sch, late, "scheduler is script on this vault");
     }
@@ -864,7 +928,7 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
     //
     // Exit code **0** either way, like every other named step here: a network refusing the refresh is
     // not a slot that failed.
-    if let Ok(cfg) = crate::account::cloud_config(&cs.vault) {
+    if let Some(cfg) = crate::account::cloud_config(&cs.vault).ok().filter(|_| !halted(sch, &mut steps, "session")) {
         steps.start("session");
         // `cloud_config`'s own host check (R-C1-59 I1) compares scheme and host only, never the
         // path, so a hand-edited `cloud.yaml` whose `api_base` names the right host but the wrong
@@ -917,6 +981,7 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
     // stale cache, is what a student reads as "no entitlement".
     if crate::account::cloud_config(&cs.vault).is_ok()
         && entitlement_state(cs) != crate::account::EntitlementState::Entitled
+        && !halted(sch, &mut steps, "entitlement")
     {
         // Exit code **0** on both arms, like every other named step here: an account service that
         // could not be reached is not a slot that failed, and an amber tray twice a day for a
@@ -946,7 +1011,7 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
     if est == crate::account::EntitlementState::Entitled {
         if let Ok(cfg) = crate::account::cloud_config(&cs.vault) {
             let mut gate = crate::account::privacy_gate(crate::account::load_privacy_cache(&cs.data_dir).as_ref(), &cfg.account_id);
-            if gate != crate::account::PrivacyGate::Accepted {
+            if gate != crate::account::PrivacyGate::Accepted && !halted(sch, &mut steps, "privacy") {
                 steps.start("privacy");
                 match crate::account::refresh_privacy(&cs.vault, &cs.data_dir) {
                     Ok(found) => {
@@ -957,7 +1022,8 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
                     Err(e) => steps.push((format!("privacy (check failed: {e})"), 0)),
                 }
             }
-            privacy_held = gate == crate::account::PrivacyGate::Older;
+            // A stopped slot names no privacy skip: it adds no run-log line.
+            privacy_held = gate == crate::account::PrivacyGate::Older && !sch.stop.load(Ordering::SeqCst);
         }
     }
     const HELD: &str = "privacy update not accepted";
@@ -968,7 +1034,18 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
     // Held: `grades_step` gets a stand-in capture that only records that it would have run and answers
     // `Busy` (never `SignedOut`, which would write a mark), so its own earlier skips keep their names and
     // only a capture that would have run becomes the privacy skip. The real capture is never called.
-    steps.start("grades");
+    //
+    // `BeforeConfig` leaves it out whole (one row stands for the capture and the engine step; a bundle
+    // captured before the course notes exist would only be deleted unread); a stop leaves it out too.
+    let grades_off = if scope == SlotScope::BeforeConfig {
+        scope_row(sch, &mut steps, "grades", "your courses are not in yet");
+        true
+    } else {
+        halted(sch, &mut steps, "grades")
+    };
+    if !grades_off {
+        steps.start("grades");
+    }
     let lms = crate::grades::campus_of(&cs.vault).lms;
     let would_capture = std::cell::Cell::new(false);
     let stand_in = |_host: &'static str| {
@@ -977,11 +1054,15 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
     };
     let capture: Option<&dyn Fn(&'static str) -> Result<serde_json::Value, crate::grades::CaptureError>> =
         if privacy_held && grades.capture.is_some() { Some(&stand_in) } else { grades.capture };
-    let grades_bundle = match grades_step(grades.row, &lms, est, &cs.data_dir, grades.window_open, capture) {
-        GradesStep::Captured(path) => Some(path),
-        GradesStep::Skip(name) => {
-            steps.push((if would_capture.get() { format!("grades (skipped: {HELD})") } else { name }, 0));
-            None
+    let grades_bundle = if grades_off {
+        None
+    } else {
+        match grades_step(grades.row, &lms, est, &cs.data_dir, grades.window_open, capture) {
+            GradesStep::Captured(path) => Some(path),
+            GradesStep::Skip(name) => {
+                steps.push((if would_capture.get() { format!("grades (skipped: {HELD})") } else { name }, 0));
+                None
+            }
         }
     };
     // The mail step, after the grades capture and before the child-process loop starts with `sync` (spec §4.11, F6):
@@ -990,16 +1071,21 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
     //
     // Held: the same seam with a pass that answers `Err(HELD)`, so `mail_step`'s own skips and its "no
     // mailbox, no row" keep their names and only a pass that would have run is the privacy skip.
-    steps.start("mail");
+    let mail_off = halted(sch, &mut steps, "mail");
+    if !mail_off {
+        steps.start("mail");
+    }
     let held_pass = |_due: &[serde_json::Value]| -> Result<String, &'static str> { Err(HELD) };
     let held_mail = MailSeam {
         mailboxes: mail.mailboxes,
         pass: mail.pass.map(|_| &held_pass as &dyn Fn(&[serde_json::Value]) -> Result<String, &'static str>),
         window_open: mail.window_open,
     };
-    match mail_step(est, &cs.data_dir, jiff::Timestamp::now().as_second(), if privacy_held { &held_mail } else { mail }) {
-        Some(row) => steps.push((row, 0)),
-        None => steps.idle(),
+    if !mail_off {
+        match mail_step(est, &cs.data_dir, jiff::Timestamp::now().as_second(), if privacy_held { &held_mail } else { mail }) {
+            Some(row) => steps.push((row, 0)),
+            None => steps.idle(),
+        }
     }
     let mut judge = judge_plan_for(est, cs);
     if privacy_held && matches!(judge, JudgePlan::Cloud { .. }) {
@@ -1013,7 +1099,13 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
     // entry it did not emit (`ingest` without a feed) gets no row. The exe is only the entries' program, so a
     // missing engine still reads as `engine: ...` below.
     let exe = engine_exe();
-    let mut argv = slot_argv(&cs.vault, exe.as_deref().unwrap_or(Path::new("")), &judge, grades_bundle.as_deref());
+    let argv = slot_argv(&cs.vault, exe.as_deref().unwrap_or(Path::new("")), &judge, grades_bundle.as_deref());
+    // The scope first: a step it leaves out is a `(not yet: ...)` row, outside the runner-log filter below.
+    let (cut, kept): (Vec<_>, Vec<_>) = argv.into_iter().partition(|(_, a)| scope_off(scope).contains(&a[0].as_str()));
+    for (_, a) in &cut {
+        scope_row(sch, &mut steps, &a[0], if a[0] == "rank" { "the first full slot ranks" } else { "your courses are not in yet" });
+    }
+    let mut argv = kept;
     if privacy_held {
         let (held, kept): (Vec<_>, Vec<_>) = argv.into_iter().partition(|(_, a)| matches!(a[0].as_str(), "sync" | "coursework" | "ingest"));
         for (_, a) in &held {
@@ -1085,6 +1177,9 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
     match exe {
         Ok(_) => {
             for (i, (e, args)) in argv.into_iter().enumerate() {
+                if halted(sch, &mut steps, &args[0]) {
+                    continue;
+                }
                 let log = log_dir(cs).join(format!("slot-{}-{}-{}.txt", started.replace(':', ""), i, args[0]));
                 steps.start(&args[0]);
                 let code = run_child(&e, &args, &log, CHILD_TIMEOUT);
@@ -1092,6 +1187,12 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
                     engine_ok = false;
                 }
                 steps.push((args[0].clone(), code));
+            }
+        }
+        // A stop before the engine is even found names the steps not run, not a failure.
+        Err(_) if sch.stop.load(Ordering::SeqCst) => {
+            for (_, a) in &argv {
+                halted(sch, &mut steps, &a[0]);
             }
         }
         Err(e) => {
@@ -1108,12 +1209,14 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
     // step can rewrite — so it takes `vault_io` like every other vault-touching step. Taken HERE,
     // after the child wait and scoped to the engine call alone: `vault_io` is never held across a
     // child process (see `ConsoleState::vault_io`), which may run for twenty minutes.
-    steps.start("backup");
-    let backed = { let _io = lock(&cs.vault_io); state::run_backup(cs, jiff::Timestamp::now()) };
-    match backed {
-        Ok(st) => steps.push(("backup".to_string(), if st.last_error.is_none() { 0 } else { 1 })),
-        // No backup folder set: no step is recorded, so nothing is in progress either.
-        Err(_) => steps.idle(),
+    if !halted(sch, &mut steps, "backup") {
+        steps.start("backup");
+        let backed = { let _io = lock(&cs.vault_io); state::run_backup(cs, jiff::Timestamp::now()) };
+        match backed {
+            Ok(st) => steps.push(("backup".to_string(), if st.last_error.is_none() { 0 } else { 1 })),
+            // No backup folder set: no step is recorded, so nothing is in progress either.
+            Err(_) => steps.idle(),
+        }
     }
     // Spec §6: batched to `/telemetry` at each slot. **Never a failure** — a student on a train has
     // nothing to apologise for, and an analytics upload has no business turning a slot amber. Every
@@ -1127,6 +1230,7 @@ pub fn run_slot_with(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&AppHa
     let telemetry = match est {
         crate::account::EntitlementState::NoAccount => ("telemetry (skipped: no account)".to_string(), 0),
         crate::account::EntitlementState::Unreadable => ("telemetry (skipped: cloud.yaml unreadable)".to_string(), 0),
+        _ if sch.stop.load(Ordering::SeqCst) => ("telemetry (not run: stopped)".to_string(), 0),
         _ => {
             steps.start("telemetry");
             match crate::telemetry::send(&cs.vault, &cs.data_dir, &cs.vault_io) {
@@ -1178,7 +1282,7 @@ pub fn spawn(app: AppHandle) {
         // Prime the cached `(mode, device_ok)` immediately, rather than leaving it at the
         // `Default` placeholder until the housekeeping thread's first 60 s pass (review item 5).
         let sch = app.state::<Scheduler>();
-        *lock(&sch.mode_device) = (mode(&cs.vault), device_ok(&cs.vault));
+        prime_mode_device(&cs, &sch);
         // The first slot of a never-ranked vault runs now (`needs_first_run`), under the same
         // guards the tick applies — an app-scheduled vault on its designated device — and on its
         // own thread so the window is never held. `run_slot` serialises against a slot already in
@@ -1309,37 +1413,7 @@ pub fn spawn(app: AppHandle) {
             // inside `check_and_stage` (`CHECK_TIMEOUT`/`DOWNLOAD_TIMEOUT`), and single-flighted,
             // so this thread cannot pile up behind a slow one either: a second one refuses at once.
             if n == 1 || n % 8640 == 0 {
-                let h = house.clone();
-                std::thread::spawn(move || {
-                    let Some(up) = h.try_state::<crate::updates::Updates>() else { return };
-                    // The command's own resolver, not a copy of it (final review, I3): the staging
-                    // folder a tick downloads into and the one *Check now* downloads into are the
-                    // same folder, and stay the same folder if either ever moves.
-                    let r = match crate::commands::updates_dir() {
-                        // m4: no private folder to stage in is a failed check, recorded quietly
-                        // like any other — never a stage into the shared system temp directory.
-                        Err(e) => Err(e),
-                        // The blocking twin: this is a std thread with no runtime under it, not a
-                        // command (B4 / R-P4a-12) — `block_on` inside a command would panic.
-                        Ok(dir) => crate::updates::check_and_stage_blocking(&h, &up, &dir),
-                    };
-                    // m2: a single-flight refusal is not a check — a manual one is already in
-                    // flight and will record its own outcome. The tick says NOTHING rather than
-                    // stamping `last_check` or planting an action error the user never caused;
-                    // this thread is background work, and background work never touches that field.
-                    if r.as_ref().err().map(String::as_str) != Some(crate::updates::ALREADY_CHECKING) {
-                        crate::updates::record_check(&up, r, &knowlu_engine::journal::now_ts(None));
-                    }
-                    let sch = h.state::<Scheduler>();
-                    let offer = crate::updates::update_offer(*lock(&sch.running), lock(&up.staged).as_ref());
-                    // Braced deliberately: as the closure's tail expression, `lock(&up.item)`'s
-                    // guard would outlive `up` itself and fail to borrow-check. The inner block
-                    // drops the guard first, which is what the borrow checker is asking for.
-                    {
-                        let g = lock(&up.item);
-                        if let Some(item) = g.as_ref() { let _ = item.set_enabled(offer.is_some()); }
-                    }
-                });
+                spawn_update_check(&house);
             }
         }
     });
