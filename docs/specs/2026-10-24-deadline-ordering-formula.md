@@ -1,12 +1,15 @@
-# Deadline ordering: one formula for Must do (draft)
+# Deadline ordering: one formula for Must do (ruled 2026-10-24)
 
-**Status: DRAFT r3 for Quinn, 2026-10-24.** Nothing here is ruled. Review r1 failed (4 important,
-9 minor) and review r2 failed narrowly (2 important, 5 minor); r2 and r3 fold in every finding,
-mapped in §13. It answers Quinn's question on the evening rule ("Why 8pm? Is there a general
-formula we can come up with to decide what should come first based on how long it will take and
-when it is due?"). Quinn chose to ship the 20:00 rule now and to spec the general formula to
-replace it later. The 20:00 rule (PR #65) is merged: it is on `main` as `7b3e10c`. This is the
-spec that replaces it. It needs Quinn's answers in §11 before a plan is written.
+**Status: RULED by Quinn, 2026-10-24.** Quinn ruled all ten §11 questions as recommended, signed
+directly on 2026-10-24. Where the body says "proposed" or "Q*n* asks", read "ruled as recommended".
+Review r1 failed (4 important, 9 minor), review r2 failed narrowly (2 important, 5 minor), review
+r3 passed (one nit, folded into §10); every finding is mapped in §13. Its plan is
+`docs/plans/2026-10-24-deadline-ordering-plan.md`.
+
+It answers Quinn's question on the evening rule ("Why 8pm? Is there a general formula we can come
+up with to decide what should come first based on how long it will take and when it is due?").
+Quinn chose to ship the 20:00 rule now and to spec the general formula to replace it later. The
+20:00 rule (PR #65) is merged: it is on `main` as `7b3e10c`. This is the spec that replaces it.
 
 **Builds on:** `docs/specs/2026-10-23-evening-ranking-rule-draft.md` (ruled 2026-10-24: the hour,
 penalty steps out, no evening rewrite of `today.md`, "tonight" ends at local midnight) and its plan
@@ -37,8 +40,8 @@ it is really due, and use the hours to decide what fits and how long overdue wor
 0. **Is today's order safe?** Walk today's Must do order, adding remaining hours against the
    student's time from now. ("Today's order" in this spec always means pressure order, `rank` with
    no moment: the order before the 20:00 step, which this spec removes.) If every item with a
-   deadline still finishes at least 30 minutes before it, nothing changes (Q2 asks whether to
-   reorder even then).
+   deadline still finishes at least 30 minutes before it, nothing changes (ruled Q2: no daytime
+   reorder when nothing is at risk).
 1. **Deadline order.** Otherwise, Must do work with a deadline ahead is ordered earliest deadline
    first. A deadline is the due time, or, for a past-due item with a known late window (O6), the
    window's close. Earliest-deadline-first (Jackson's rule) minimises the worst lateness on one
@@ -61,7 +64,7 @@ moment (`rank --today`, the golden harness) the order is today's, byte for byte.
 no late window keeps leading". That would undo the ruled evening spec's §3, where a no-window late
 item ranks **below** tonight's items after the hour ("an on-time submission tonight is a certain
 grade; an unknown late rule is not"). Step 3 keeps both: it leads when it fits and yields when it
-would cost tonight's work. Quinn rules this in Q1.
+would cost tonight's work. Quinn ruled this in Q1.
 
 ## 1. What exists today
 
@@ -198,7 +201,7 @@ the margin: `t (up to and including it) ≤ A(d) − 30`.
 - **Not safe:** steps 1 to 3 produce the order.
 
 So the order changes only when today's order would make something late or leave it under 30
-minutes to spare. Q2 asks Quinn whether to reorder by deadline always instead (example (e) shows the
+minutes to spare. Quinn ruled (Q2) against reordering by deadline always (example (e) shows the
 difference).
 
 ### 2.5 Step 1: deadline order
@@ -289,9 +292,9 @@ and miss two.
 **(e) Daytime, nothing tight (review r1, I3).** Friday 09:00. An 11h essay is due 23:59 (start-by
 days past; review r1 puts its pressure near 153) and a 0.5h reflection was due yesterday (near 108),
 so today's order is essay, reflection. Step 0: the essay finishes after 11h of 13h14, more than 30
-minutes spare: safe, and the order stays essay, reflection. If Quinn rules "always reorder" (Q2),
-step 3 puts the reflection first (0.5h + 11h still leaves 1h44), so the daytime order and the
-12:00 and 18:00 `today.md` change even though nothing was at risk.
+minutes spare: safe, and the order stays essay, reflection. "Always reorder" (declined, Q2) would
+have put the reflection first (0.5h + 11h still leaves 1h44), changing the daytime order and the
+12:00 and 18:00 `today.md` even though nothing was at risk.
 
 **(f) Verdicts move one way (review r1, I2).** Thursday 19:00, a 5h item P. Due Friday 07:59, the
 time before it is Thursday 19:00–24:00, exactly 5h: it fits (with no margin to spare, step 0 calls
@@ -355,7 +358,7 @@ first estimated. The last two rows are **placeholders**.
   designations it does today. `cli.rs` and `surface.rs` each keep both lists.
 - **The console's Must do block.** First-appearance grouping and the per-group `sort_rows` would
   hide the order: in step 3's merge an overdue item can sit between two items due today, and
-  first-appearance grouping would draw the second one above it. **Proposed (Q6):** when the
+  first-appearance grouping would draw the second one above it. **Ruled (Q6):** when the
   formula runs, a group is a run of consecutive rows with the same label, and rows keep rank order
   (`sort_rows` is not applied to Must do). A label repeats only when the order really interleaves.
   **Labels read from the moment:** a task due today at 10:00, seen at 15:00, is past due and reads
@@ -393,7 +396,7 @@ first estimated. The last two rows are **placeholders**.
 
 ## 6. The 20:00 step: deleted
 
-**Proposed (Q5): delete `EVENING_HOUR`, `closes_tonight` and the evening branch of `rank_at` in the
+**Ruled (Q5): delete `EVENING_HOUR`, `closes_tonight` and the evening branch of `rank_at` in the
 same change that adds the formula.** Keep `rank_at` itself, its moment, `rank --now` and
 `surface::load_at`: the formula needs exactly that plumbing, and the 20:00 rule (`7b3e10c`) built it.
 
@@ -448,7 +451,7 @@ Plain, specific, never an instruction to give up. Knowlu names the item; the stu
 - **The spill hover** names a `W` item as "won't fit before Wed 11:59 pm" (or "by Wed") and any
   other spill item as today ("doesn't fit in today's hours").
 - **Never** "skip", "drop", "give up" or "let go" in the page text: the item is still the
-  student's to do. Q7 asks Quinn to rule the words.
+  student's to do. Quinn ruled these words (Q7).
 
 The row line is a new optional read-model field, omitted from the JSON when absent. The console
 renders it (`app/static`). Wording lives in the engine, as every other row line does.
@@ -560,12 +563,19 @@ frontmatter it already holds; it never recomputes the walk.
 
 T4 runs after T2c, because it consumes `plan_at`. T2a, T2b-T2c and T4 edit disjoint files
 (`weekcal.rs`; `ranking.rs` and `cli.rs`; `surface.rs`); T5 only `app/static`. Each implementer
-task is sized to stay under about 80 lines of change. Nothing on the contract list changes.
+task is sized to stay under about 80 lines of change. Nothing on the contract list changes (the new
+oracle file is treated as contract-list work, T3).
 
-## 11. Questions for Quinn
+## 11. Quinn's answers (2026-10-24)
 
-Asked one at a time, in this order, each with a recommendation. Q1 to Q3 decide the formula; the
-rest tune it.
+**All ten ruled as recommended, signed directly by Quinn on 2026-10-24:** Q1, overdue work leads
+while it costs nothing; Q2, no daytime reorder when nothing is at risk; Q3, the planned day plus
+evenings to midnight; Q4, a 30-minute margin; Q5, the 8 pm rule removed; Q6, a new heading each
+time the label changes, and a due time already passed today shows `Overdue`; Q7, "Won't fit before
+11:59 pm" / "Won't fit by Wed" and the meter line as written; Q8, pins not counted yet; Q9, the
+longest item, then the later due, then the less urgent; Q10, placeholders give "may not fit".
+
+The questions as they were asked, with the recommendations Quinn approved:
 
 - **Q1. When should overdue work come first?** Today the list is ordered by how far behind each
   item is, so an overdue item usually leads but not always; after 8 pm, tonight's work leads. The
