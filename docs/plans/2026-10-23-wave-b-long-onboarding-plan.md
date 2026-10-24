@@ -6,7 +6,7 @@
 **Status: T0 done and its amendments reviewed (PASS with minors, closed in §14.43; on `main` as
 `cb3b661`); S-A phase 1 PASS (§13), so T2 (phase 2, WebView2) is next; F10's review gaps in §9
 A10 assigned before F11 (§14.44); a removed course's feed items left out by ingest, new task F6c
-(§14.45).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
+(§14.45); shared fragments, the pin form and one source of pairs (§14.46).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
 record is in §13 (dated 2026-10-24) and its amendments in §14.42: seven premises did not hold as
 written, and each is amended where it lands (the lanes not yet merged, `grades` and course notes,
 the entitlement-refused sync, the feed host, the sync hold, `mode_device`, a `campus.yaml` race).
@@ -1397,7 +1397,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F5b | Shell list: the retired panels' commands, after F10; five move to the console's list and are never deleted (F10's review) | `mechanical` | `main.rs` is never F10's (review r1, I8) | F10, F5 |
 | F6a | `school.apply` (`campus.yaml`, `events.yaml`) and `school.courses` (course notes), create-new | `test-writer` then `implementer` | vault bytes; tests first | F3 |
 | F6b | `config.ingest`: `ingest.yaml` once, create-new, feeds per §4.11; `course_exclude` for removed courses (§14.45) | `test-writer` then `implementer` | as F6a | F6a |
-| F6c | `ingest.rs`: read `course_exclude`; an item only a removed course claims is not imported (§14.45) | `test-writer` then `implementer`; `reviewer` with the oracle runs | engine, every vault's import; off the contract list, but the frozen references ride on ingest | T0 (before F15; independent of F6a and F6b) |
+| F6c | `ingest.rs`: read `course_exclude`; an item only a removed course claims is not imported (§14.45); the uid pass bounded for pin-form fragments (§14.46) | `test-writer` then `implementer`; `reviewer` with the oracle runs | engine, every vault's import; off the contract list, but the frozen references ride on ingest | T0 (before F15; independent of F6a and F6b) |
 | F7a | `knowlu-engine onboarding --preview` and its `cli.rs` entry; `by_course` by code and match set, through `ingest::match_course` (§14.45) | `test-writer` then `implementer` | engine, deterministic, off the contract list | T0 |
 | F7c | `knowlu-engine onboarding --tidied` | `test-writer` then `implementer` | as F7a | F7a |
 | F7b | One `uievents` action (only if Q-B10 is yes) | `implementer` | a closed vocabulary; its page sentence first | F7a, S7 |
@@ -1767,7 +1767,11 @@ job runners as a trait so tests pass fakes.
     course; a re-capture clears the mark. **Its items never become tasks** (2026-10-24, §14.45): the
     text `config.ingest` hands F6b carries the removed course's pairs under `course_exclude` and in
     no `course_map` entry, and a bucket that names only the removed code is out of the totals (the
-    engine half, that ingest imports none of those items, is F6c's first test).
+    engine half, that ingest imports none of those items, is F6c's first test). **One source of
+    pairs** (§14.46): after a step-3 label is edited, each course's `pairs` in the fake
+    `--preview` call's `--courses` are byte-equal to that course's lines in `config.ingest`'s text
+    (`course_map` or `course_exclude`), and a fragment a kept course also contributes is never in
+    `course_exclude`.
 13. **The feed is never silently lost (review r2, I1):** with a fake account store, (a) a store that
     fails twice leaves the feed `failed` and `config.ingest`'s text carries the link, with
     `feed_kept_on_device` set; (b) a quit after payment and before `school.store`, then a reload,
@@ -2199,8 +2203,18 @@ two tasks go back to the planner). Tests in `app/tests/onboarding.rs`, then the 
     code fragments and its gradebook uid pins, built exactly as `course_map`'s are) are written as
     one single-line flow sequence `course_exclude: [...]` through `yaml_scalar`, and appear in no
     `course_map` entry; with nothing removed the key is **absent**, so the bytes still equal
-    `build_into`'s (the first test above holds unchanged).
-  Size: S (about 55 lines in `scaffold.rs`).
+    `build_into`'s (the first test above holds unchanged);
+  - **a fragment a kept course also contributes is never excluded** (§14.46, F7c review r2): a
+    lecture and its lab both contribute `CS 100`-style human codes (`course_fragments`,
+    `scaffold.rs:420-429`); with the lab removed and the lecture kept, the shared fragment stays in
+    `course_map` and is absent from `course_exclude`, and only the lab's own code goes there. A
+    test with two enrolments sharing a human code, one removed, asserts exactly that;
+  - **uid pins** (§14.46): each course's gradebook pins, in the one pin form (the column id as the
+    grade note keeps it in `source_uid`, `_<digits>_<digits>`), are written as `course_map`
+    entries for kept courses and in `course_exclude` for removed ones, after that course's code
+    fragments. With no grades bundle there are no pins and the bytes equal `build_into`'s; with
+    pins, they are `build_into`'s plus the pin lines, in the answers file's order (a test).
+  Size: S (about 65 lines in `scaffold.rs`).
 - **F6c (test-writer, then implementer), ingest drops a removed course's items** (2026-10-24, the
   controller's call after the F7c review; §14.45). `engine/src/ingest.rs`, off the contract list.
   Where `course_map` is read (`ingest.rs:1251-1254`), also read `course_exclude` as fragments,
@@ -2209,7 +2223,13 @@ two tasks go back to the planner). Tests in `app/tests/onboarding.rs`, then the 
   matched over the excluded fragments, and a hit there means the item is **not imported**: no
   task, no update, no archive on its account. A kept course always wins an item both claim. The run
   names the count in one line ("N item(s) from courses you removed were left out"), and no other
-  reader of `ingest.yaml` changes. Tests, inline in `ingest.rs`'s `mod tests` on synthetic codes:
+  reader of `ingest.yaml` changes. **The uid pass is bounded for pins** (§14.46, F7c review r2):
+  today pass (a) of `match_course_fields` (`ingest.rs:275-279`) is a case-sensitive substring test
+  in list order, so a pin `_71_1` also matches `…GradableItem-_71_10` and `…-_171_1`. For a
+  fragment of the pin form (`_<digits>_<digits>`, exactly), pass (a) now requires the match to be
+  **bounded**: not preceded by an ASCII letter, digit or `_`, and not followed by an ASCII digit.
+  Every other fragment keeps today's substring test, and pass (b) is unchanged. The change is in the
+  shared rule, so `judge`'s tier 1 and F7a's preview get it too, which is the point of sharing it. Tests, inline in `ingest.rs`'s `mod tests` on synthetic codes:
   - **a removed course's item never becomes a task** (F1 test 12's spirit, end to end through
     `sync_tasks_with_grades`): an item whose summary names only an excluded fragment, and one pinned
     only by an excluded uid, create no note and no journal record;
@@ -2217,13 +2237,24 @@ two tasks go back to the planner). Tests in `app/tests/onboarding.rs`, then the 
   - an unmatched item is still created course-less (`:883`'s rule unchanged);
   - a task already in the vault whose item is now excluded is left untouched (no update, no
     archive);
+  - **the bounded pin** (§14.46): with pins `_71_1 -> a-101` and `_71_10 -> b-202` in either order,
+    `GradableItem-_71_10` goes to `b-202` and `GradableItem-_71_1` to `a-101`; a pin `_71_1` alone
+    does not claim `GradableItem-_171_1` or `GradableItem-_71_10`; a pin at the very end of the uid
+    and one followed by a non-digit (`-_71_1@x`) both match; `a_uid_pin_beats_everything_and_is_case_sensitive`
+    (`ingest.rs:1505`) passes unedited; a non-pin fragment that is a substring of the uid still
+    matches as today;
   - with no `course_exclude` key, every existing ingest test and `oracle.rs` and
     `surface_oracle.rs` pass unedited (no frozen reference changes, Rule 2);
   - `commitments`, `enrich`, `cloudmodel` and `coursework` read an `ingest.yaml` carrying the key
-    with no warning and the same result as without it (each ignores the key), in a new
+    with no warning and the same result as without it (each ignores the key), and likewise one
+    whose `course_map` carries pin-form keys (§14.46: `commitments` reads `course_map`'s keys as
+    sources, `commitments.rs:710-769`, and a pin must add no claimant or warning there), in a new
     `engine/tests/ingest_exclude.rs` through each reader's public entry; a reader with none is named
     in the report for the reviewer rather than edited.
-  Size: S (about 35 lines in `ingest.rs`). Reviewed by `reviewer`, with the oracle runs shown.
+  Size: S (about 50 lines in `ingest.rs` with the bounded pin). Reviewed by `reviewer`, with the
+  oracle runs shown: `oracle.rs` and `surface_oracle.rs` unedited and green, which shows no frozen
+  reference relied on a pin's prefix match. If either goes red on the bounded pin, F6c stops and the
+  finding goes to the planner; the reference is never regenerated (Rule 2).
 
 ## F7a, F7c. `knowlu-engine onboarding` (test-writer, then implementer)
 
@@ -2247,8 +2278,9 @@ F7a and extended to `--tidied` in F7c:
     label, only when `code` is empty; a past-term shell and the current shell of one course are two
     keys, never one.
   - **Attribution is ingest's own rule, never a second matcher** (F7c review, Important 3): F7a
-    builds the `(fragment, key)` pairs exactly as F6b writes `course_map` (codes and gradebook uid
-    pins alike) and calls `ingest::match_course`, the shared `match_course_fields` behind it
+    takes each course's `(fragment, key)` pairs from `--courses`'s `pairs` (§14.46: the very pairs
+    F8b saved and F6b writes, codes and gradebook uid pins alike; its own derivation remains only
+    for a list without `pairs`, which no app path sends) and calls `ingest::match_course`, the shared `match_course_fields` behind it
     (`ingest.rs:258-305`); no prefix rule, course-order precedence or bundle fallback of its own.
     The bundle's legitimate role is ingest's uid pin, built as a pair.
   - **Buckets by match set** (§14.45, so a removal is totalled as ingest will import it): each item
@@ -2259,7 +2291,10 @@ F7a and extended to `--tidied` in F7c:
     proof as every bucket whose set is empty or names at least one kept code, which is exactly what
     F6c's ingest imports.
   - Tests: an item two kept courses' pairs both match sits in one two-code bucket and counts once;
-    removing one of the two keeps it; removing both drops it; "Quiz covering SYN 120"-style
+    removing one of the two keeps it; removing both drops it; **class times by match set too**
+    (F7c review r2, Important 1): two shells carrying one registrar code and one meeting give one
+    two-code `class_times` bucket, so removing the old shell keeps the class time; with `pairs`
+    given, an edited label changes no bucket (§14.46); "Quiz covering SYN 120"-style
     summaries and bracketed section ids land where `ingest::match_course` puts them (one case
     each, with synthetic codes); the unmatched item is in `unmatched` and in the totals.
   The new module, its JSON output through `ledger::dumps_value`, and the `cli.rs` entry. **And
@@ -2360,7 +2395,14 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   still deleted after the one preview; `onboarding_status` (Rust, never the page) totals the proof
   as every bucket whose set is empty or names a kept code, which is what F6c's ingest will import,
   so a Remove changes the proof with no second fetch or preview. F8b also saves each course's pairs
-  (code fragments, gradebook uid pins) as F6b needs them for `course_map` and `course_exclude`. Depends on S-G's record. Size: S
+  (code fragments, gradebook uid pins) as F6b needs them for `course_map` and `course_exclude`.
+  **One source of pairs** (§14.46, F7c review r2 Minor 1): F8b builds each course's pairs once, at
+  capture, with `scaffold::course_fragments` (made `pub(crate)` if it is not) and the bundle's
+  column ids in the pin form, saves them in the answers file, and **passes the same saved pairs to
+  `onboarding --preview` inside `--courses`** (a `pairs` array per course). A label the student
+  typed or edited at step 3 is display only and never re-derives a fragment, so the proof, the
+  `course_map` and the `course_exclude` all use identical pairs. F1 test 12 asserts the pairs in
+  `--courses` equal those in `config.ingest`'s text, byte for byte, after an edited label. Depends on S-G's record. Size: S
   (about 75 lines).
 - **F8c, the local lane's runners.** `school.store` and `calendar.store` (the account call, one retry,
   the feed states of §4.11, the pending credential deleted on success). **The call** (review r8, M1)
@@ -2703,7 +2745,7 @@ behaviour, before it merges.
 | Rule 2 | No frozen reference changes | F7a, F7c | the shared `surface_oracle` test; F14 |
 | (plan) | Only `account.rs` from the contract list, by contract-engineer | S5, S7, F2c | S9; F14 |
 | §9 A10, C1's page rules (F10's review) | R-C1-40's close on leaving, R-C1-42's second-press trigger, R-C1-51's removable courses, R-C1-55's disabled Next, R-OB-1's blank-row and slug rules, R-OB-4's "isn't listed", the risk-12 line, `GOOGLE_TESTING`, the password allow-list, the `comp` state | F11e1, F11e2, F11b, F11c; F2d, F8b, F7a (the course list) | F11t's C1 pins; F1 test 12 (removal survives a quit); F7a's `by_course` test; F12 |
-| R-C1-51 (2026-10-24, §14.45) | A removed course hides its feed items: ingest imports nothing only a removed course claims, a kept course wins an item both claim, and step 3's totals equal what the vault will hold; attribution is ingest's one shared rule | F6b, F6c, F7a, F8b | F6c's tests; F6b's `course_exclude` test; F7a's match-set tests; F1 test 12 |
+| R-C1-51 (2026-10-24, §14.45, §14.46) | A removed course hides its feed items: ingest imports nothing only a removed course claims, a kept course wins an item both claim, a shared fragment is never excluded, a pin claims only its own column, and step 3's totals equal what the vault will hold; attribution is ingest's one shared rule over one set of pairs | F6b, F6c, F7a, F8b | F6c's tests (the bounded pin included); F6b's `course_exclude` and shared-fragment tests; F7a's match-set tests; F1 test 12 |
 | §1.9 (F10's review) | Rust names the vault past profiles and folders on disk; the old flow's errors are gone from the step-2 path | F3 | F3 tests 6-7 |
 | (plan; F10's review) | `feat/o3-long-onboarding` never merges to `main` before F12's walk-through passes | F12, F14 | §8's merge gate; F14 checks it |
 
@@ -3629,3 +3671,34 @@ From the F7c review (`docs/reports/2026-10-24-wave-b-f7c-review-r1.md`, on `feat
    §14.43's M2 are corrected.
 Tasks changed: F6b (the key and its test), F6c (new), F7a (`by_course`), F8b (saves each course's
 pairs; totals by match set), F8h, F1 test 12; §4.2 step 3, §4.9's `ingest.yaml` row, §6, §7 and §10.
+
+### 14.46 Shared fragments, the pin form, one source of pairs (2026-10-24)
+
+From the F7c review, round 2 (`docs/reports/2026-10-24-wave-b-f7c-review-r2.md`, "Outside this
+diff" and Minor 1), with the planner's choices:
+1. **A fragment two courses share, one of them removed.** `course_fragments` gives a lecture and its
+   lab the same human code. F6b now puts a fragment in `course_exclude` only when no kept course
+   also contributes it (a test with two enrolments, one removed). F6c's kept-first match already
+   made such an entry harmless, so this is defence in depth and keeps the file honest.
+2. **The pin form.** A gradebook uid pin's fragment is the column id exactly as the grade note
+   keeps it in `source_uid` (`_<digits>_<digits>`), never with the `GradableItem-` prefix and never
+   partial. It goes in `course_map` for a kept course and `course_exclude` for a removed one (F6b).
+   To stop `_71_1` claiming `-_71_10` or `-_171_1`, F6c makes ingest's uid pass **bounded for
+   pin-form fragments only** (no ASCII letter, digit or `_` before, no digit after); every other
+   fragment keeps the substring test, `ingest.rs:1505`'s pin test passes unedited, and the oracles
+   must stay unedited and green, or F6c stops. Because the rule is shared, `judge`'s tier 1 and F7a
+   get the bound too. F6c's reader tests add that a pin key in `course_map` gives `commitments` no
+   new claimant. *Open for the controller:* this changes the shared rule in every vault, not only
+   onboarding's; the alternative (bounding only `course_exclude`'s pins) would leave the collision in
+   `course_map` and attribute kept and removed items by different rules.
+3. **One source of pairs (Minor 1): the first option.** F8b builds each course's pairs once at
+   capture (`course_fragments` and the bundle's column ids), saves them, and passes them to
+   `onboarding --preview` in `--courses`; F7a uses them and no longer re-derives from the label. An
+   edited label is display only. F1 test 12 checks the pairs are byte-equal in `--courses` and in
+   `config.ingest`'s text. Pinning `lms_link`'s label to `course_fragments` was not chosen, because
+   a typed label (the paste fallback) has no `lms_link` origin to pin.
+4. **Also from round 2** (its Important 1, for F7a's next round): class times are bucketed by match
+   set like feed items (F7a's tests).
+Tasks changed: F6b (shared-fragment rule; pin lines; tests), F6c (bounded pin pass; tests; reader
+test for pins; oracle stop rule), F7a (pairs from `--courses`; class times by match set), F8b (one
+source of pairs, passed to `--preview`), F1 test 12 (pairs byte-equal).
