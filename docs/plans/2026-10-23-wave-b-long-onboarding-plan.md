@@ -1476,7 +1476,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F2b2c | `mail/commands.rs`: `disconnect_with` applies `MailSignal::TurnedOff` through `apply_mail_signal` right after step 0, before any network call (about 3 lines; §14.52.1, r3 R3-2, r4 R4-1; `scheduler.rs` is not edited). **Collision note:** S4c also edits `disconnect_with`; it is not a dependency, and whichever of the two lands second rebases and keeps both (test 40's Disconnect cases, written first) | `implementer` | specified, about three lines, tested over `disconnect_with`'s fakes | F2b2b (the variant). Nothing on F2b2c's path waits on S4c |
 | F3 | Step-2 vault with defaults, without campus or events files; `account_settled`; picker flag; the name picked in Rust past profiles and folders on disk; the old flow's errors rewritten; F10's interim name loop deleted (F10's review) | `test-writer` then `implementer` | writes a vault; tests first; the static change is a deletion only | F2a, F10 |
 | F4 | Onboarding mode in `run_console`; the window's close prevented, then `onboarding_quit`'s inner on its own thread; `mode_device` primed (T0); one update check at launch (T0 review M3); `LaunchMode` managed; the `Queue` moved to F4c (§14.51, §14.52.5) | `implementer` | P-3's five changes; the close off the event loop (review r5, I-5) | F2a, F2b, F8s (`prime_mode_device`, `spawn_update_check`), T0 |
-| F4c | `main.rs`'s onboarding arm: `load_state_for_launch` (rewrite only unparseable bytes; a lasting I/O error or an unknown version is a named fatal that writes nothing), `Queue::start(F8w1's Deps, resume(loaded, LiveChecks))` and `.manage(queue)`; `install_update` refused in onboarding mode (`commands.rs`); test 27's pin extended; if F2b2b passes 80 lines, the patient read itself and test 38's read half move here (§14.52.5, .8, r2 n2; test 38) | `implementer` | specified; `main.rs`'s chain is F4, F5, F4c, F5b, S6r | F4, F5, F2b2b, F8w2 (so F8w1, F8g), F4b. **Not Q7:** F4c goes ahead with F8w1's interim `registrar.confirm` arm, and F8h-runner's arm follows (r4 n-2, the controller's call) |
+| F4c | `main.rs`'s onboarding arm: `load_state_for_launch` (rewrite only unparseable bytes; a lasting I/O error or an unknown version is a named fatal that writes nothing), `Queue::start(F8w1's Deps, resume(loaded, LiveChecks))` and `.manage(queue)`; `LiveChecks` managed too, as `Arc<dyn ResumeChecks>`, for step 3's advance (§14.55, one line); `install_update` refused in onboarding mode (`commands.rs`); test 27's pin extended; if F2b2b passes 80 lines, the patient read itself and test 38's read half move here (§14.52.5, .8, r2 n2; test 38) | `implementer` | specified; `main.rs`'s chain is F4, F5, F4c, F5b, S6r | F4, F5, F2b2b, F8w2 (so F8w1, F8g), F4b. **Not Q7:** F4c goes ahead with F8w1's interim `registrar.confirm` arm, and F8h-runner's arm follows (r4 n-2, the controller's call) |
 | F4b | `switch_profile` refuses in onboarding mode | `implementer` | specified, tested in F1 (review r4, M6) | F2a |
 | F5 | Moved and new commands registered (none new from §14.52's rulings: step 5 rides `onboarding_answer`, and the mail commands are already on the console's list; one, `onboarding_mail_not_now` on the console's list, only if Q8 is yes, r3 m-a) | `mechanical` | a list edit, recounted, pinned | F4, F2b, F2g, F2h, F8d, F8lb; F2b2b only if Q8 is yes |
 | F5b | Shell list: the retired panels' commands, after F10; five move to the console's list and are never deleted (F10's review) | `mechanical` | `main.rs` is never F10's (review r1, I8) | F10, F5 |
@@ -1497,16 +1497,17 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F8s2 | `scheduler.rs` and F8m's arm of `mail/live.rs`: the normal console clears `handover` (the slot item at a run slot's end; canary and disconnect from the unfiltered list, timestamps parsed, no disconnect while a setup is pending; first pass at a closed backfill batch, clearing only itself after the canary; `BackfillNeverDriven` from a verified Guided or held row; one lock around every write, never across the network; §14.51 r1-r3) | `implementer` | off the contract list; its test (F1's 32) written first | F8f merged, F8s, F8m |
 | F8s | `scheduler.rs`: `run_slot_inner_scoped` (the seams from `Some(app)`) and `run_slot_scoped` with `SlotScope::{Full, NoRank, BeforeConfig}`; the stop before each stage (never cleared); the bundle deleted on every path; the slot's hand-over clearing; `prime_mode_device` (T0) and `spawn_update_check` (T0 review M3) | `implementer` | `scheduler.rs` is off the contract list; its tests are F1's 15, 18 and 27 (review r3 M5, r4 I-3, M1, r5 I-3; T0) | F1 |
 | F8b | Runners: the school step (capture, answers, pending feed, preview), the capture half writing through today's unfenced helpers (F8b2 converts the writes that have merged); **its registrar half is provisional on Q7 and held**: the raw response kept in `onboarding-registrar.json` (option A) or `registrar_series` saved in the answers file (option B), written through F8b2's `write_capture_file_for_gen` from the start (§14.52.2, .4; r3 m-c) | `implementer`, reviewed by `contract-reviewer` (its capture handles the bearer link; review r7, I-1) | specified; the registrar half is not dispatched until Q7 | the capture half: F8a, F7a, S4d, F8la, and F8d2 (`onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8g; r5 reorder). The held registrar half, dispatched separately: F8b2 (the fenced helper), and F2b2b (option A) or F7d (option B). Nothing depends on the registrar half but F8h-runner, so F8b2 waits only on the capture half (r3 R3-1), and nothing waits on F8b but F8b2, F8w1, F8lb and F11e1, so the F2b2 tasks go ahead before S4d |
-| F8b2 | `Queue::set_school` (step 3's school answer; refused once `school.apply` has a record); `change_school` under the queue lock, then `ANSWERS_LOCK`: deletes the answers file, pending links and every capture file, and bumps `SCHOOL_GEN`; `job_context` (school and generation read together; one in-memory entry per job from `push_job`, or from the worker marking a resumed job running, until it leaves `order`; §14.52 r2 n1, r3 n1); the four fenced writers; the merged F8b writes converted to them; the `rerun` set (§14.52.2; S, about 45 lines in `onboarding_jobs.rs` and 35 in `onboarding_state.rs`; test 35) | `implementer`, reviewed by `contract-reviewer` | a stale capture writing a bearer link is the risk F8l's review guarded | F8b's capture half (`onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8g; r5 reorder), F2b2b (in `onboarding_state.rs`'s) |
+| F8b2 | `Queue::set_school` (step 3's school answer; refused once `school.apply` has a record); `change_school` under the queue lock, then `ANSWERS_LOCK`: deletes the answers file, pending links and every capture file, and bumps `SCHOOL_GEN`; `job_context` (school and generation read together; one in-memory entry per job from `push_job`, or from the worker marking a resumed job running, until it leaves `order`; §14.52 r2 n1, r3 n1); the four fenced writers; the merged F8b writes converted to them; the `rerun` set (§14.52.2; S, about 45 lines in `onboarding_jobs.rs` and 35 in `onboarding_state.rs`; test 35; the advance's caller is F8b2-advance's, §14.55) | `implementer`, reviewed by `contract-reviewer` | a stale capture writing a bearer link is the risk F8l's review guarded | F8b's capture half (`onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8b2-advance, F8g; r5 reorder, §14.55), F2b2b (in `onboarding_state.rs`'s) |
+| F8b2-advance | The advance's caller (§14.55): `Queue::advance_after_school(&dyn ResumeChecks)` under the queue lock, persisted once; step 3's proceed runs it between its own jobs and the passed steps' jobs (step 6's `google.gmail_first_read`, and `google.calendar_read` only when the new `ResumeChecks::google_calendar_granted()` (default `false`) is true; step 7's `calendar.store`; step 8's `config.ingest`), with `slot.partial` asked once, last, through one `answer_enqueuer`; the checks from a managed `Arc<dyn ResumeChecks>` (about 35 lines: 10 in `onboarding_jobs.rs`, 25 in `onboarding_state.rs`; test 33's advance cases, written first) | `implementer`, reviewed by `contract-reviewer` | specified, over the fake queue and fake checks | F8b2 (both files' chains) |
 | F8c | Runners: the local lane (stores, apply, courses, config); `registrar.confirm` moved to F8h-runner (§14.52.4, r4 n-2). Merged | `implementer` | specified | F8e, F6a, F6b |
-| F8g | Runners: the partial (`BeforeConfig`, then `NoRank`) and full slots, each with onboarding's `AppHandle` (held by the runner); a queue stop returns before the slot; a slot the stop cut short is `Stopped` (§14.51 r1); sets the in-memory `judge_seen` and `ingest_seen` facts the Google reads wait for on every queued Google job, pending, held or waiting (no `onboarding.json` change; §14.52 r2 n1); the job-name dispatch is F8w1's (§14.52.4; about 78 lines) | `implementer` | specified | F8e, F8f, F8h (alone, never F8h-runner; r4 n-2), F8s, F8b2 (`job_context`, and the chain F8d2, F8b, F8b2, F8g), F8d2 |
+| F8g | Runners: the partial (`BeforeConfig`, then `NoRank`) and full slots, each with onboarding's `AppHandle` (held by the runner); a queue stop returns before the slot; a slot the stop cut short is `Stopped` (§14.51 r1); sets the in-memory `judge_seen` and `ingest_seen` facts the Google reads wait for on every queued Google job, pending, held or waiting (no `onboarding.json` change; §14.52 r2 n1); the job-name dispatch is F8w1's (§14.52.4; about 78 lines) | `implementer` | specified | F8e, F8f, F8h (alone, never F8h-runner; r4 n-2), F8s, F8b2 (`job_context`), F8b2-advance (the chain F8d2, F8b, F8b2, F8b2-advance, F8g; §14.55), F8d2 |
 | F8d | Runners: mail, Google, calendars, coursework; the stop checks in `mail/runner.rs`'s confirm and canary waits; `mail_provider` recorded as the service's string through `update_answers` (§14.51 r2, r3); the canary's 180 s kept. **Merged into O3 at `62f6c73`** (carrying `ad006ca` and `cb2b2bf`); the queue and guard follow-ups are F8d2's (§14.52.1, r2 R2-2; its merged test-34 parts were not written first) | `implementer` | specified | F8a |
 | F8d2 | `mail.rs`: `mail_setup_start` refused in onboarding mode (an inner taking `LaunchMode`, about 6 lines). `onboarding_jobs.rs` (**about 115 lines**, corrected after F8d2's review; r2's "about 30" left out the seams): `Queue::skip_mail` (pending or held mail jobs `skipped`; a running `mail.setup` stopped and landed `skipped`), `Queue::attach_setup_run(Arc<dyn SetupRun>)` (the run the glue started, so a skip can stop it), `MAIL_FIRST_PASS_LOOKS` (1) with `mail_batch_closed` clearing `parked` and notifying, `retry_at` (30 s, `mail_window_busy` alone) with the idle `wait_timeout`, and the `RetryClock` seam (`Queue::start_with_clock`; `Queue::start` keeps its signature over `WallClock`). Its fix round adds `Queue::mail_skipped(job)` for F8w2's glue (§14.52.1, r2 R2-2; test 34's F8d2 parts, written first) | `implementer` | specified, off the contract list, tested over the fake queue and a fake clock | **F8d alone**; first in `onboarding_jobs.rs`'s chain: F8d2, F8b, F8b2, F8g (r5 reorder), so it never waits on S4d. Collision note, not a dependency: F8h (in progress) also edits `onboarding_jobs.rs`, in other functions; if F8h lands first, F8d2 rebases on it |
 | F8m | `mail/live.rs`: in onboarding mode a closed backfill batch tells the queue, never starts a slot | `implementer` | specified, about ten lines, tested in F1 (review r5, I-4) | F8a |
 | F8la | `lms_link.rs`: `capture_calendar_link_with`, `validate_only` and `capture_link_only`, the validate-only seam | `implementer`, reviewed by `contract-reviewer` | a bearer link stored under the wrong session reaches another account (review r6 I-2, r7 I-1) | F1, S4b merged |
 | F8lb | `onboarding_capture_link` and `onboarding_paste_link` over F8la's seam; the link to its pending credential | `implementer`, reviewed by `contract-reviewer` | as F8la | F8la, F8b, F8c, F8g, F8d (last in `onboarding_jobs.rs`'s chain), F2d |
 | F8w1 | New `onboarding_live.rs`: `LiveRunner` (every `JOB_ORDER` name to its runner; an unknown name is `Failed`; `registrar.confirm` an interim `Waiting("registrar_runner_pending")` until F8h-runner replaces it, r4 n-2), `LiveEntitlement`, `LiveSyncView`: the live `Deps` (§14.52.4; test 37) | `implementer` | specified glue over built runners; its own file, so no chain | F8b's capture half, F8b2, F8c, F8g, F8h (not F8h-runner, so not Q7) |
-| F8w2 | The same file: the mail seams (`start_setup` with the file's unitid and the window wait; `Queue::mail_skipped("mail.setup")` checked on every window poll and once more just before `start_setup`, returning `skipped` without starting; `Queue::attach_setup_run` with the run's `Shared` right after `start_setup` returns; the canary's list reading, `batch_closed_noted`), the two Google reads over `--tidied` after their slot facts, and the network-free `LiveChecks` (§14.52.1, .4; tests 34, 37) | `implementer` | as F8w1 | F8w1, F8d, F8d2 (r2 R2-2), F8s2 (`mail_signals`); F7c's `--tidied` is on O3 at `623a5f8`, F7a's merge, which carried F7c r4 |
+| F8w2 | The same file: the mail seams (`start_setup` with the file's unitid and the window wait; `Queue::mail_skipped("mail.setup")` checked on every window poll and once more just before `start_setup`, returning `skipped` without starting; `Queue::attach_setup_run` with the run's `Shared` right after `start_setup` returns; the canary's list reading, `batch_closed_noted`), the two Google reads over `--tidied` after their slot facts, and the network-free `LiveChecks` (§14.52.1, .4; tests 34, 37) | `implementer` | as F8w1 | F8w1, F8d, F8d2 (r2 R2-2), F8b2-advance (`google_calendar_granted`, which `LiveChecks` answers `false`; §14.55), F8s2 (`mail_signals`); F7c's `--tidied` is on O3 at `623a5f8`, F7a's merge, which carried F7c r4 |
 | F9 | The reveal gate, in its own `onboarding_gate.rs` | `implementer` | a pure function, tested in F1; its own file, so no chain (review r8's note) | F1 |
 | F10 | Shell steps 1-2 in the ruled direction (5b); old wizard removed (static files only) | `console-ui` | `app/static`, the `console.js` queue | direction ruled (5b, 2026-10-23) |
 | F11t | Failing static tests for the onboarding screens; §14.52's pins: step 5's answer and its three allowed mail commands (the seven others never called), the proceeds of steps 3, 7 and 8, Open Knowlu on `finish_ready` only, the closing state held while an exit call is outstanding | `test-writer` | test first (review r1 minor) | F2b |
@@ -4333,7 +4334,8 @@ no `school`. A restored, entitled account with a corrupt file would resume past 
   everything-proven rung's `10` all become `3`; each of those rungs also asserts
   `r.school == SchoolOffer::Ask`. A new tail asserts the advance: on the everything-proven checks,
   confirming the school moves to step 10 with steps 4-8 `already-done`; on `Checks::restored(3)`
-  alone, to step 4.
+  alone, to step 4. (**§14.55**: the advance is run by step 3's proceed, never by the school answer
+  alone, and that proceed also asks for every passed step's jobs, so the lane can finish.)
 - **Tasks changed:** F2a (the rule in `earliest_unproven`; its brief), F1 test 2 (the ladder and the
   new tail), §4.5's unreadable-file bullet. F2a's I-1 ruling (a session present and a file step of
   2 or below resumes at 3) is recorded in F2a's brief too.
@@ -4938,8 +4940,8 @@ its test first, failing before the code, as for 29-32.
        `cloud.yaml`'s target exists); `restored_course_count` (`courses/*.md`); `entitled` (the
        cache); `homework_login_stored` (either vendor's credential exists); `answers_ok`
        (`load_answers` is `Ok(Some)`); `account_school` is always `None` (T0). **A check with no
-       local source answers `false`**: `school_mailbox_active`, `google_granted` and
-       `class_commitments_cover_courses`. False is the side that asks again, and each step's own
+       local source answers `false`**: `school_mailbox_active`, `google_granted`,
+       `google_calendar_granted` (§14.55) and `class_commitments_cover_courses`. False is the side that asks again, and each step's own
        status read then shows `already-done`. F4c calls these before the window exists, so none may
        wait on the network.
      Size: S (about 80 lines).
@@ -5123,6 +5125,15 @@ its test first, failing before the code, as for 29-32.
   `mail_kind` round-trips, and an answers file without it keeps its bytes. End to end over the fake
   queue: the unlisted paste path with no registrar rows ends with all four lane jobs `done` and
   `finish_ready: true`.
+  - **(F8b2-advance, §14.55) the advance:**
+    - **all proven:** `(3, proceed)` lands at step 10 and enqueues `school.store`,
+      `school.apply`, `school.courses`, `registrar.confirm`, `google.gmail_first_read`,
+      `google.calendar_read` (only when `google_calendar_granted` is true), `calendar.store`,
+      `config.ingest` and one `slot.partial`, in that order. The slot runs as `NoRank`. After step 10's confirm and
+      the fake `slot.first_full`, it reaches `finish_ready: true`;
+    - **partly proven:** the advance lands at 5 and enqueues no step-7 or step-8 job;
+    - **a repeat** proceed changes nothing;
+    - **no managed checks:** the proceed does not advance.
 - **34 (F8d2, F8w2, F2b2a, F11t; r2 R2-2).** Each part names its owner, who writes it first:
   - (F8w2) the `mail.setup` glue calls its start seam with the file's unitid while `campus.yaml`
     names another, and `None` for an unlisted school;
@@ -5186,7 +5197,8 @@ its test first, failing before the code, as for 29-32.
     end over the fake queue, the no-rows case reaches `finish_ready: true`;
   - `LiveSyncView` and `LiveChecks` make no request (a source pin finds no `ureq`, client or
     `refresh_` call in them);
-  - the three checks with no local source answer `false`;
+  - the four checks with no local source answer `false` (`google_calendar_granted` added,
+    §14.55);
   - a Google read waits until its slot fact holds, and after a relaunch it waits for one more
     slot; `onboarding.json`'s bytes carry no new key.
 - **38 (F4c; the read's half is F2b2b's while the patient read is, F4c's if it moves, r2 n2):**
@@ -5502,4 +5514,95 @@ Recorded as built, with the controller's ruling on the first item.
    G10: choosing school email after a step-5 skip starts nothing (§14.52.1's skip text).
 4. **For F2b2b.** The `mail.connect` item excludes `skipped` as well as `done`, whether or not the
    job has any history. This is in §14.52.1, and test 40 gains the two `skipped` cases.
+
+### 14.55 The advance past proven steps asks for their jobs (2026-10-24)
+
+From F2b2a's r4 review (PASS; F2b2a is merged into O3).
+- **The gap.** `advance_after_school` (`onboarding_state.rs:779-785`) moves a confirmed step-3
+  state to the earliest step the checks do not prove (`earliest_unproven`, `:764-772`). It can
+  jump straight to 10, and it returns the passed steps (4-8, never 9) as `already-done`. §14.49
+  says confirming the school moves to step 10. But lane jobs are asked for only when a shown step
+  is left (§14.52.3; the proceeds at `:539-544`). A passed step 7 or 8 is never left, so
+  `calendar.store` and `config.ingest` never run, no `NoRank` slot runs, and `finish_refusal`
+  (`:952-954`) answers "still saving" for ever. Nothing calls `advance_after_school` in production
+  yet, so nothing breaks today.
+- **Ruling.**
+  - **The advance is run by step 3's proceed**, `(3, {"proceed": true})`, never by the school
+    answer alone. The student still sees step 3's proof and presses Next. That press already owns
+    the step's enqueue seam.
+  - In one `onboarding_answer` call, with one `answer_enqueuer` (`:610-617`), the proceed:
+    - enqueues its own jobs, without `slot.partial`;
+    - runs the advance;
+    - asks for each **passed** step's jobs, in step order, through `enqueue_once`:
+      - step 6's Google first reads, when step 6 is passed as proven (the controller's call, so the
+        all-proven path holds the same data as the walked one): `google.gmail_first_read`, and
+        `google.calendar_read` **only when `checks.google_calendar_granted()` is true** (the
+        controller's ruling), so no read is ever asked for a scope the student did not grant.
+        Step 6 owns that read on the walked path (§4.2 step 6);
+      - step 7's `calendar.store`;
+      - step 8's `config.ingest`;
+    - asks for `slot.partial` **once**, last.
+  - Because `slot.partial` comes after `config.ingest`, F8e's order gives the `NoRank` run.
+  - No other passed step starts jobs: steps 4 and 5 have none to ask once proven. The step it lands on is
+    asked as usual: step 8's own proceed, or step 10's confirm.
+  - A repeat proceed finds the state past 3, so the advance changes nothing, and `enqueue_once`
+    leaves every job alone (§14.54).
+  - With no production checks the advance does not run, and the student walks steps 4-8 as on any
+    path.
+- **`ResumeChecks::google_calendar_granted()`** (the controller's ruling). It is a new trait
+  method in `onboarding_state.rs` (`ResumeChecks`, beside `google_granted` at `:723`), with a
+  default body answering `false`, so F1's existing fakes compile unedited.
+  - **Its source** is the one `google_status` reports per-scope grants from: the account's
+    `scopes` list, read as `GoogleStatus.calendar` (`account.rs:2050-2069`, `CALENDAR_SCOPE`).
+  - **That source is a network read** (`google_status_at` calls the service), and `LiveChecks`
+    must make none (test 37's pin; F4c calls the checks before the window exists). So
+    `LiveChecks` answers `false` for it, as for `google_granted`, which has no local source
+    either (ruling 4, "a check with no local source answers false").
+  - **Consequence in production today:** `google_granted` is `false`, so the advance stops at
+    step 6 at the latest (in fact at 5, since `school_mailbox_active` is `false` too). Step 6 is
+    walked, and its own consent poll asks for the reads.
+  - The calendar rule takes effect, unchanged, once a local per-scope source exists. Any such
+    source must give `google_granted` and `google_calendar_granted` from the same record. Adding
+    one is not ruled here.
+  - The `LiveChecks` line is F8w2's.
+- **Owner: the advance is split out of F8b2 into F8b2-advance** (`implementer`, reviewed by
+  `contract-reviewer`), straight after F8b2. With the new check the work passes 110 lines, the
+  split point this section set. It wires the caller beside `Queue::set_school`.
+  - `Queue::advance_after_school(&dyn ResumeChecks) -> Vec<u8>` in `onboarding_jobs.rs`, under the
+    queue lock, persisted once, as `confirm_school` is (`onboarding_jobs.rs:610-616`). The checks
+    make no request (test 37's pin), so no lock is held across the network.
+  - The step-3 proceed's wrapper in `onboarding_state.rs` calls it between the two enqueue halves
+    above. It reads the checks from a managed `Arc<dyn ResumeChecks>` when one is managed.
+  - **F4c manages `LiveChecks`** (one line beside `.manage(queue)`; F4c already builds it for
+    `resume`).
+  - Size: about 35 lines for F8b2-advance (about 10 in `onboarding_jobs.rs`; about 25 in
+    `onboarding_state.rs`, the trait method and step 6's reads included). F8b2 stays at about 80
+    (45 and 35).
+  - Chain: `onboarding_jobs.rs` runs F8d2, F8b, F8b2, F8b2-advance, F8g. F8b2-advance depends on
+    F8b2. F8g follows it in the chain. F8w2 depends on it for the trait method `LiveChecks`
+    implements.
+- **Test 33 gains an end-to-end case**, written first by F8b2-advance, over the fake queue and a
+  fake `ResumeChecks`:
+  - **all proven:** a confirmed school, restored courses and no registrar rows. `(3, proceed)`
+    lands at step 10 with steps 4-8 `already-done`. It enqueues `school.store`, `school.apply`,
+    `school.courses`, `registrar.confirm`, `google.gmail_first_read`, `google.calendar_read` (the
+    fake's `google_calendar_granted` is true), `calendar.store`, `config.ingest` and one
+    `slot.partial`, in that order, and the slot runs as `NoRank`. Each Google read then waits for
+    its slot fact and ends `done`. With `google_calendar_granted` false (and `google_granted`
+    true), no `google.calendar_read` is enqueued, and `finish_ready` is still reached. After step 10's confirm and
+    the fake `slot.first_full`, `onboarding_status` answers `finish_ready: true`;
+  - **partly proven** (restored and entitled only): the advance lands at 5, and no step-7 or
+    step-8 job is enqueued;
+  - **a repeat** proceed enqueues nothing and leaves the step at 10;
+  - **with no managed checks**, the proceed enqueues its own five jobs and stays at 3.
+- **Ruled by the controller (was open):** a proven step 6 (`google_granted`) would otherwise pass
+  without `google.gmail_first_read`, which on the walked path only the grant's consent poll asks
+  for (`:463`). So the advance asks for step 6's reads too, as above, ahead of `calendar.store`,
+  `config.ingest` and the one `slot.partial`.
+- **§7, re-walked:**
+  - F8b2 still depends on F8b's capture half and F2b2b.
+  - F8b2-advance depends on F8b2.
+  - F8g and F8w2 gain F8b2-advance; both already came after F8b2.
+  - F4c's one line adds no edge: F4c already follows F8w2.
+  - No cycle.
 
