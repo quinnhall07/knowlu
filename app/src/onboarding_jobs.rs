@@ -216,15 +216,27 @@ impl Core {
             _ => true,
         }
     }
+    /// `failed` with [`REASON_JOB_CRASHED`]: the crash-loop guard's pause (or a panic's).
+    fn is_paused(&self, job: &str) -> bool {
+        self.state.jobs.get(job).is_some_and(|r| r.state == JobState::Failed && r.reason.as_deref() == Some(REASON_JOB_CRASHED))
+    }
+    /// The student's Try again asks for `job`: the one writer allowed over a paused record. A paused job
+    /// is put back to `pending` with a count of `CRASH_LIMIT - 1`, so it runs once more and one more
+    /// kill pauses it again. Any other job is pushed as [`Core::push_job`] does.
+    fn press(&mut self, job: &str) {
+        let paused = self.is_paused(job);
+        if paused { self.order.retain(|j| j != job); self.state.jobs.remove(job); }
+        self.push_job(job);
+        if let Some(r) = self.state.jobs.get_mut(job).filter(|_| paused) { r.crashes = CRASH_LIMIT - 1; }
+    }
     /// Adds `job` as `pending` unless it is already queued. A progress indicator is never a job.
     /// `school.courses` pushed while the account is unsettled, after a chain has ended and with no
     /// slot queued to settle it, starts a new chain, so it cannot wait for ever (Q-B20). Before any
     /// chain has ended it waits for the slot that payment asks for (C1, test 14).
     fn push_job(&mut self, job: &str) {
         if job.starts_with(INDICATOR_PREFIX) { return; }
-        // A paused job stays paused until the student presses Try again (`retry` removes the record first).
-        let paused = self.state.jobs.get(job).is_some_and(|r| r.state == JobState::Failed && r.reason.as_deref() == Some(REASON_JOB_CRASHED));
-        if paused { return; }
+        // A paused job stays paused until the student presses Try again ([`Core::press`]).
+        if self.is_paused(job) { return; }
         self.parked.clear();
         if job == "school.courses" && !self.state.account_settled && self.chain_ended && !self.order.iter().any(|j| j == "slot.partial") {
             (self.chain, self.chain_ended) = (Chain::default(), false);
@@ -519,21 +531,17 @@ impl Queue {
             if job != FIRST_SYNC { return; }
             g.state.jobs.insert(job.into(), JobRecord::default());
             if !g.state.account_settled { (g.chain, g.chain_ended) = (Chain::default(), false); }
-            g.push_job("slot.partial");
+            g.press("slot.partial");
             g.settle();
             self.inner.persist(&g);
             return self.inner.cv.notify_all();
         }
         if job == "school.courses" && !g.state.account_settled {
             (g.chain, g.chain_ended) = (Chain::default(), false);
-            g.push_job("slot.partial");
+            g.press("slot.partial");
         }
-        // Try again on a paused job runs it once more: one more kill pauses it at the next start.
-        let paused = g.state.jobs.get(job).is_some_and(|r| r.reason.as_deref() == Some(REASON_JOB_CRASHED));
-        g.order.retain(|j| j != job);
-        g.state.jobs.remove(job);
-        g.push_job(job);
-        if let Some(r) = g.state.jobs.get_mut(job).filter(|_| paused) { r.crashes = CRASH_LIMIT - 1; }
+        // A failed job is out of the order; a paused one comes back with a count of one (`press`).
+        g.press(job);
         g.settle();
         self.inner.persist(&g);
         self.inner.cv.notify_all();

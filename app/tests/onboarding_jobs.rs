@@ -2524,3 +2524,57 @@ fn test_31_a_slot_found_running_twice_on_an_unsettled_account_stays_paused_and_t
     assert_eq!(r.log.started().iter().filter(|j| *j == "slot.partial").count(), 1);
     assert_eq!((r.state_of("slot.partial"), r.job("slot.partial").crashes), (JobState::Done, 0));
 }
+
+fn paused_slot() -> JobRecord { JobRecord { state: JobState::Failed, reason: Some(REASON_JOB_CRASHED.into()), crashes: 2, ..Default::default() } }
+fn failed_first_sync() -> JobRecord { JobRecord { state: JobState::Failed, reason: Some(REASON_FIRST_SYNC_FAILED.into()), ..Default::default() } }
+
+#[test]
+fn test_31_try_again_on_first_sync_lifts_a_paused_slot_and_runs_it_once() {
+    let mut state = state_at(8, true);
+    state.jobs.insert(FIRST_SYNC.into(), failed_first_sync());
+    state.jobs.insert("slot.partial".into(), paused_slot());
+    let r = rig_full("t31-fs-a", state, true, vec![ok_reading(true, 10, 10)], true, |_| {});
+    r.idle();
+    assert!(!r.log.ran("slot.partial"), "paused until the student presses");
+    r.q.retry(FIRST_SYNC);
+    r.idle();
+    assert_eq!(r.log.started().iter().filter(|j| *j == "slot.partial").count(), 1);
+    assert_eq!((r.state_of("slot.partial"), r.job("slot.partial").crashes), (JobState::Done, 0));
+    assert_eq!(r.state_of(FIRST_SYNC), JobState::Done, "the first sync was read again");
+}
+
+#[test]
+fn test_31_one_more_kill_after_the_first_sync_press_pauses_the_slot_again_with_a_way_to_try_again() {
+    let mut state = state_at(8, true);
+    state.jobs.insert(FIRST_SYNC.into(), failed_first_sync());
+    state.jobs.insert("slot.partial".into(), paused_slot());
+    let r = rig_full("t31-fs-b", state, true, vec![], true, |_| {});
+    r.idle();
+    let gate = r.fake.block("slot.partial", true);
+    r.q.retry(FIRST_SYNC);
+    r.wait_started("slot.partial");
+    let killed = r.q.snapshot();
+    assert_eq!((killed.jobs["slot.partial"].state, killed.jobs["slot.partial"].crashes), (JobState::Running, 1));
+    let next = rig_full("t31-fs-b-next", killed, true, vec![], true, |_| {});
+    next.idle();
+    let slot = next.job("slot.partial");
+    assert_eq!((slot.state, slot.reason.as_deref()), (JobState::Failed, Some(REASON_JOB_CRASHED)), "paused again, with its fix");
+    assert!(!next.log.ran("slot.partial"));
+    assert_ne!(next.state_of(FIRST_SYNC), JobState::Done);
+    gate.release();
+}
+
+#[test]
+fn test_31_try_again_on_school_courses_of_an_unsettled_account_lifts_a_paused_slot() {
+    let mut state = state_at(8, false);
+    state.jobs.insert("school.courses".into(), JobRecord { state: JobState::Failed, reason: Some(REASON_ACCOUNT_UNFINISHED.into()), ..Default::default() });
+    state.jobs.insert("slot.partial".into(), paused_slot());
+    let r = rig_full("t31-sc", state, true, vec![ok_reading(true, 10, 10)], true, |_| {});
+    r.idle();
+    assert!(!r.log.ran("slot.partial"));
+    r.q.retry("school.courses");
+    r.idle();
+    assert_eq!(r.log.started().iter().filter(|j| *j == "slot.partial").count(), 1);
+    assert_eq!(r.state_of("slot.partial"), JobState::Done);
+    assert_eq!(r.state_of("school.courses"), JobState::Done, "the settled account lets the courses run");
+}
