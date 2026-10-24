@@ -2933,7 +2933,7 @@ fn closed_this_week_offers_undo_only_where_the_engine_says_so() {
 
 /// The five screens the shell has, in the page, and nothing of the retired panels 3 to 10.
 #[test]
-fn the_setup_shell_has_its_screens_a_nine_row_rail_and_no_retired_panel() {
+fn the_setup_shell_has_its_screens_an_eight_row_rail_and_no_retired_panel() {
     let html = read("index.html");
     assert!(html.contains("id=\"setup\""), "the shell");
     for id in ["su-welcome", "su-account", "su-browser", "su-code", "su-done"] {
@@ -2948,6 +2948,9 @@ fn the_setup_shell_has_its_screens_a_nine_row_rail_and_no_retired_panel() {
     assert!(rail.find("data-rail=\"week\"").unwrap() < rail.find("data-rail=\"reveal\"").unwrap());
     // A row ahead says what its step brings, never what it will find (BRIEF R3.1).
     assert!(rail.contains("Classes, assignments and grades") && rail.contains("$9.99 a month, after 7 days free"));
+    // Payment (step 4) and step 10 have no skip (§4.2), so the welcome never promises that
+    // everything after the school can be skipped (F10 review r2, I1).
+    assert!(html.contains("Most steps after your school can be skipped") && !html.contains("Everything after your school can be skipped"));
     // Retired with the wizard: its section, its ten panels' ids and its nav.
     assert!(!html.contains("id=\"wizard\"") && !html.contains("wiz-"), "no wizard markup survives");
     let js = read("console.js");
