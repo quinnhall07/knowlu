@@ -1507,12 +1507,12 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F10 | Shell steps 1-2 in the ruled direction (5b); old wizard removed (static files only) | `console-ui` | `app/static`, the `console.js` queue | direction ruled (5b, 2026-10-23) |
 | F11t | Failing static tests for the onboarding screens; §14.52's pins: step 5's answer and its three allowed mail commands (the seven others never called), the proceeds of steps 3, 7 and 8, Open Knowlu on `finish_ready` only, the closing state held while an exit call is outstanding | `test-writer` | test first (review r1 minor) | F2b |
 | F11a | The step frame and the rail | `console-ui` | `app/static` | F11t, F10 |
-| F11e1 | Step 3's school choice ("isn't listed" included), sign-in and capture rules (second press, close on leaving); step 2's sign-in again | `console-ui` | `app/static` | F11a, F8b, F2g, F8lb (review r7 M1), F8b2 (the school answer), F2b2a (step 3's proceed) |
-| F11e2 | Step 3's proof with the removable course list; step 4, its `comp` state included | `console-ui` | `app/static` | F11e1, F8c, F8g, F2d, F2h, F7a (`by_course`) |
-| F11b | Steps 5, 6 and 7; step 6 on today's separate consents (`google_connect` with each scope, `google_status`); step 5 by `onboarding_answer(5, {mail})`, `mail_setup_progress` and `mail_setup_answer`, its Skip through `onboarding_skip`; step 7's proceed (§14.52.1, .3) | `console-ui` | `app/static` | F11a, F8d, F8lb (step 7's paste; review r7 M1), F2b2a. No longer O2 (T0, 2026-10-24: O2 has no branch) |
+| F11e1 | Step 3's school choice ("isn't listed" included), sign-in and capture rules (second press, close on leaving, through `registerLeave`); step 2's sign-in again. Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3) | `console-ui` | `app/static` | F11a, F8b, F2g, F8lb (review r7 M1), F8b2 (the school answer), F2b2a (step 3's proceed) |
+| F11e2 | Step 3's proof with the removable course list; step 4, its `comp` state included. Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3) | `console-ui` | `app/static` | F11e1, F8c, F8g, F2d, F2h, F7a (`by_course`) |
+| F11b | Steps 5, 6 and 7; step 6 on today's separate consents (`google_connect` with each scope, `google_status`); step 5 by `onboarding_answer(5, {mail})`, `mail_setup_progress` and `mail_setup_answer`, its Skip through `onboarding_skip`; step 7's proceed (§14.52.1, .3). Through the frame's seam, `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()`. Frame fixes in `onboarding.js` (§14.53.2): a refused retry's line clears on the next action, never a poll (m2); `rowModel`'s `found` read dropped (m3); the past-row rule, with fixtures for a past row with no job records and for mixed `done` and `skipped` (m5); words for `mail_setup_cancelled`, `mail_setup_failed`, `mail_not_yet` and `feed_kept_on_device` (M3) | `console-ui` | `app/static` | F11a, F8d, F8lb (step 7's paste; review r7 M1), F2b2a. No longer O2 (T0, 2026-10-24: O2 has no branch) |
 | F11f | Step 6's combined Gmail-and-Calendar ask and the forwarding fallback, over O2's cloud half | `console-ui` | `app/static`; O2's contract only | F11b, O2 merged; may follow wave B (§8) |
-| F11c | Steps 8 and 10; step 8's proceed (§14.52.3) | `console-ui` | `app/static` | F11a, F8d, F2b2a |
-| F11d | The reveal and the main page's "still coming" line; Open Knowlu reads `finish_ready` only (§14.52.6); `mail.connect` as a not-connected line with its Settings button (§14.52.1) | `console-ui` | `app/static` | F11a, F9, F2b2b |
+| F11c | Steps 8 and 10; step 8's proceed (§14.52.3). Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3). Fixtures for steps 8 and 10's rows: a past row with no job records, and mixed `done` and `skipped` (m5) | `console-ui` | `app/static` | F11a, F8d, F2b2a, F11b (m5's `rowModel` rule, which its fixtures read) |
+| F11d | The reveal and the main page's "still coming" line; Open Knowlu is `ok && finish_ready && !exiting`, with no `gate.open` read (§14.52.6, §14.53.1); `revealModel` carries and shows `gate.failed[].fix` (M7); `mail.connect` as a not-connected line with its Settings button (§14.52.1). Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` | `test-writer` first (amends the pin at `app/tests/onboarding_static.rs:488` and `:496`, justified in §14.53.1, and adds M7's `fix` assertion), then `console-ui` | `app/static`; the one test edit loosens a page pin that re-derived the rule, never a contract test | F11a, F9, F2b2b, F11b (the frame's `onboarding.js` edits first) |
 | F12 | `scripts/wizard-check.py` rewritten | `test-writer` | the walk-through is the page's test | F11a-F11e |
 | F13 | References, HANDOFF, O3's amendment drafts | `docs-keeper` | docs | F2a-F12 |
 | F14 | Review | `reviewer` | before a push | F2a-F13 |
@@ -5026,7 +5026,8 @@ its test first, failing before the code, as for 29-32.
    refusals read the same function) and **F11d**: the reveal's Open Knowlu reads `finish_ready` and
    nothing else (no job state, no gate field). F11t's pin "the reveal's button is disabled while
    `onboarding_status` says a local-lane job is not `done`" becomes "enabled exactly when
-   `finish_ready` is true".
+   `finish_ready` is true". **§14.53 settles the conflict with F11t's `gate.open` case**: the rule
+   is `ok && finish_ready && !exiting`, and F11d amends the pin.
 
 7. **`exiting: null` is not "not closing" while an exit call is outstanding** (F8f2 to F11a).
    `Queue::exiting()` is `None` once the drain has returned (`onboarding_jobs.rs`, `exiting`), but
@@ -5348,4 +5349,86 @@ r3 notes, and r4's "finish stays refused" for a school with no registrar rows.
   F4c on F8w2. F8h-runner depends on F8w2, F8b's registrar half and Q7, and F15 on F8h-runner.
   None of these points back. S4d is still the only outside dependency, and only F8b's capture
   half and the tasks after it wait on it.
+
+### 14.53 Open Knowlu's one rule, and F11a's carried minors (2026-10-24)
+
+O3 is at `f939f6e`, with F11a and F8h merged. This settles one conflict before F11d and gives the
+F11a r2 minors (`docs/reports/2026-10-24-wave-b-f11a-review-r2.md`, m2-m6) their owners.
+
+1. **Open Knowlu is `ok && finish_ready && !exiting`; the `gate.open` read goes, and the pin is
+   amended** (the controller's preference, ruled).
+   - **The conflict.** §14.52.6 says the button reads `finish_ready` and nothing else. F11t's pin
+     `the_reveals_button_follows_the_servers_one_rule_and_re_derives_nothing`
+     (`app/tests/onboarding_static.rs:488`) requires a closed `gate.open` to disable it, and F11a
+     built `openKnowluEnabled` (`app/static/onboarding.js:91-93`) as `ok && finish_ready &&
+     gate.open && !exiting`.
+   - **Why the ruling holds.** `finish_ready` is `finish_refusal(state, now).is_none()`
+     (`onboarding_state.rs:1062`). `finish_refusal` refuses whenever the gate is closed
+     (`:958-960`). It uses the same `gate(&gate_items(state), confirmed, now_secs)` that
+     `status_inner` reports as `gate.open` (`:1056`), over the same state and `now`. So the server
+     never answers `finish_ready: true` with `gate.open: false`, and the extra read only re-derives
+     part of the rule on the page, which §14.52.6 forbids.
+   - **F11d's change.**
+     - The pin is edited first, by `test-writer` (F11d's test-first step; `console-ui` does not
+       edit `app/tests`):
+       - line 488's case becomes `assert!(enabled(status(r#"{"gate": {"open": false}}"#)), "the
+         page reads finish_ready, not the gate")`;
+       - line 496's source check gains `&& !f.contains("gate")`;
+       - the other cases are unchanged.
+     - The plan justifies the edit (this ruling): the old case pinned a re-derivation that §14.52.6
+       rules out. The edit only loosens a pin, never a contract test, and no `#[ignore]` is touched.
+     - Then `console-ui` drops `s.gate && s.gate.open === true &&` from `openKnowluEnabled`.
+   - The gate's lists still drive the reveal's words (`revealModel`); only the button stops
+     reading `open`.
+
+2. **F11a r2's minors, owned.**
+   - **m2 (F11b).** A refused `onboarding_retry` sets `S.error` (`onboarding.js:272`), and the
+     poll clears it (`:284`) about 2 s later. It now clears on the student's next action instead:
+     the next click on a control in the frame or a panel, an answer sent, or a step change
+     (`OB.show`). A poll never clears it. Test: a refused retry's line survives two polls and is
+     gone after the next click.
+   - **m3 (F11b).** `status.found` has no producer: `status_inner` emits no `found` key
+     (`onboarding_state.rs:1052`'s key list). So `rowModel`'s read (`onboarding.js:150-151`) is
+     dropped until a task names a producer. That task then adds the read back with its own word
+     map, never `reasonWords`. Test: a source pin that `rowModel` does not read `found`.
+   - **m4 (every panel task: F11b, F11c, F11d, F11e1, F11e2).** The panel seam rule: a panel
+     never calls `OB.refresh()` from `onStatus`, because a refresh rewrites `#ob-ask`
+     (`onboarding.js:211`) and wipes what the student is typing. `onStatus` updates the panel's
+     own nodes in place. `OB.refresh()` is for a panel's own action (an answer's reply), never for
+     a poll. Each panel task's tests include a source pin that its `onStatus` body does not name
+     `refresh`.
+   - **m5 (F11b fixes the frame; F11b and F11c add fixtures).** Two past-row readings are wrong in
+     `rowModel` (`onboarding.js:136-153`):
+     - a past row whose `jobs` list is not empty but has no job records reads "Done" (`:139`);
+     - a past row whose jobs are a mix of `done` and `skipped` reads "Not yet" (`:149`).
+     The rule:
+     - a row with an empty `jobs` list (account, payment) reads "Done" once past;
+     - a row with jobs and no records, and no skip, reads "Not yet";
+     - a row whose records are all `done` or `skipped`, with at least one `done`, reads "Done",
+       with the done jobs' lines;
+     - all `skipped` with no skip record reads "Skipped".
+     F11b changes `rowModel` (about 4 lines). F11b's fixtures cover steps 5-7's rows in both cases,
+     and F11c's cover steps 8 and 10's rows.
+   - **M3 (F11b).** Four reason keys have no words, so they fall to the generic fallback
+     (`onboarding.js:63`): `mail_setup_cancelled`, `mail_setup_failed`, `mail_not_yet` and
+     `feed_kept_on_device`. F11b adds each to `REASON_WORDS`, using the plan's existing sentence
+     where §4.2 or §4.10 has one, and otherwise a sentence in the same plain style, which the
+     reviewer checks. Test: none of the four answers the fallback sentence.
+   - **M7 (F11d).** `revealModel` (`onboarding.js:94-101`) drops `gate.failed[].fix`. F11d carries
+     it into the model and shows it beside the item's words, with the Try again. The server's
+     `fix` (`onboarding_state.rs:1066`) is shown as written, never re-worded. Test: the existing
+     reveal test (`onboarding_static.rs:500`) gains `m.failed[0].fix == "Try again"`.
+
+3. **The seam the next panels use** (F11b, F11c, F11d, F11e1, F11e2). The frame's seam is:
+   - `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` (`onboarding.js:172`; `render`
+     builds the step's ask, `onStatus` receives each poll's status, `:287`);
+   - `KNOWLU_ONBOARDING.registerLeave(fn)` (`:173`) for a step's close-on-leaving work, caught
+     and capped at 3 s by the frame (F11a r1 I3).
+   No panel reaches into the frame's state (`S`) or its element ids other than its own nodes
+   under `#ob-ask`. `onboarding.js:4`'s comment, which names `{render}` alone, is corrected by
+   F11b when it first edits the file.
+
+Tasks changed: F11b (m2, m3, m5's frame change and fixtures, M3, the seam and m4), F11c (m5's
+fixtures, the seam and m4), F11d (the pin amended by `test-writer` first, `openKnowluEnabled`, M7,
+the seam and m4), F11e1 and F11e2 (the seam and m4), and §7's rows for those five.
 
