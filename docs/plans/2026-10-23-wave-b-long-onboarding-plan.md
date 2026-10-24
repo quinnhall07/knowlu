@@ -7,7 +7,8 @@
 `cb3b661`); S-A phase 1 PASS (§13), so T2 (phase 2, WebView2) is next; F10's review gaps in §9
 A10 assigned before F11 (§14.44); a removed course's feed items left out by ingest, new task F6c
 (§14.45); shared fragments, the pin form and one source of pairs (§14.46); the kept grades count and class
-times on removal (§14.47); F10 review r2's owners and F5b's three retirements (§14.48).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
+times on removal (§14.47); F10 review r2's owners and F5b's three retirements (§14.48); an unreadable file never resumes past
+the school (§14.49); a failed first grades and a gate that fails closed (§14.50).** T0 ran 2026-10-24 on `feat/o4-school-sign-in` at `1d3c467`. T0's
 record is in §13 (dated 2026-10-24) and its amendments in §14.42: seven premises did not hold as
 written, and each is amended where it lands (the lanes not yet merged, `grades` and course notes,
 the entitlement-refused sync, the feed host, the sync hold, `mode_device`, a `campus.yaml` race).
@@ -771,8 +772,24 @@ promised, and its "still coming" line until each handed-over job is done.
     stays `pending` behind the hold. **A sync that met a held `sync.lock` writes no status**
     (`sync.rs:2524-2528`), so only the stale-stamp rule catches it; the item stays `pending` for the
     next slot.
+- **First grades, from the step row** (F9 review r1, §14.50). The gate's "first grades" reads the
+  slot's bare `grades` row (the engine child's step, with its real exit code): exit 0 marks it
+  (F9's `first_grades_marked`), a non-zero exit makes it `failed` (F9's `first_grades_failed`,
+  mapped by F8g), and a `(skipped:` or `(not yet:` row leaves it `pending`. **The same blind spot as
+  `sync`'s, noted, not fixed:** the engine can also skip at exit 0 under the bare name `grades`
+  (for example `grades (skipped: the vault is busy…)` printed by the child itself), which would mark
+  first grades with nothing written. In onboarding this is barely reachable, because the queue is
+  serial and holds the notes gate around every slot, so nothing else holds the vault while its
+  `grades` runs. Unlike `sync`, `grades` has no status record to read instead; if it ever shows up,
+  the fix is a status line from the engine, not a guess from the step name.
 - **Named jobs, each with a state:** `pending`, `running`, `done` (with its proof numbers), `failed`
   (a closed-set reason and its fix), `skipped` (the student's), `held` (waiting for the entitlement).
+  **The closed set's first written entry** (§14.50; owned by F8g, as constants in
+  `onboarding_jobs.rs`, so F9's caller, F11's screens and F1 share one spelling):
+  `grades_read_failed`, with the fix "Knowlu couldn't read your grades this time. It will try again
+  on its next run, or press Try again now. If it keeps failing, reconnect your school in Settings
+  after setup." Every other `failed` reason this plan names (for example "waiting to reach your
+  account", the sync status's `last_error`) joins the same constants as its task builds it.
   States are written to `onboarding.json` as they change, so a quit loses at most the running job.
 - **Device-side before payment, everything else after.** `school.capture` and `school.preview` need
   no entitlement and run at once. Every job that writes the vault, stores on the account or runs a
@@ -948,7 +965,10 @@ contracts (§9, Quinn's).
   (F8f), never in F2a's file save (review r5, M1): `on_sign_out`'s rewind writes through F2a
   directly, after the freeze, and must land.
 - **Unreadable file:** never read as "finished". Onboarding resumes at the earliest step not proven by
-  what the account and this device hold (§4.7), and the file is rewritten from that.
+  what the account and this device hold (§4.7), and the file is rewritten from that. **Never past
+  step 3** (§14.49): the school is never proven and the rewritten file has none, so the resume is
+  step 2 (no session) or step 3's school confirm; after it, proven steps pass through as
+  `already-done`.
 - **Absent file on a registered profile:** a normal launch (every install before this lane).
 - **Commands (console list, onboarding mode):** `onboarding_status` (the file plus live job states),
   `onboarding_answer(step, answer)` (records the answer and enqueues its jobs), `onboarding_skip(step,
@@ -1710,7 +1730,12 @@ job runners as a trait so tests pass fakes.
    is an error, never "no answers" (§4.5).
 2. **Resume:** an unfinished file reopens at its `step`; `running` jobs come back `pending`; an
    unreadable file resumes at the earliest step §4.7's checks do not prove (driven by fakes of each
-   check), never as finished; an absent file on a registered profile is a normal launch. **The
+   check), never as finished, **and never past step 3, because the school is never proven** (F2a
+   review I-2, ruled in §14.49): with a session present, every rung of the ladder resumes at **3**
+   with `school: SchoolOffer::Ask`, whatever the other checks prove (the restored, entitled,
+   mailbox, Google, login and week rungs included); with no session it resumes at 2, as now. After
+   the school is confirmed, the next step is the earliest one past 3 the checks do not prove, each
+   proven step passed through as `already-done` (with every check proven, step 10); an absent file on a registered profile is a normal launch. **The
    school at step 3 on a restored install** (T0 review M5, §4.7): with fakes of a restore that
    brought course notes, (a) a new profile with no `onboarding.json` reaches step 3 with no school
    suggested and the school asked for, as on a fresh install, and the fake account is never asked
@@ -1933,6 +1958,15 @@ job runners as a trait so tests pass fakes.
     M3). Also in test 6 (the
     gate): a `grades (not yet: …)` row never marks "first grades", and a `grades (skipped: …)` row
     leaves it pending.
+28. **First grades from the slot's rows (F9 review r1, §14.50; F8g)**, in `app/tests/onboarding_jobs.rs`
+    with fake slot summaries: a bare `grades` row at exit 1 makes `first.grades`
+    `Failed { reason, fix }` equal to the two constants, and F9's output lists it with that fix and
+    does not count it as done; a later fake slot with `grades` at exit 0 makes it `Done`; a
+    `grades (skipped: …)` or `grades (not yet: …)` row leaves the state unchanged; "Try again" on
+    it enqueues exactly one slot. **`onboarding_status` never hands F9 an empty list it did not
+    read** (F9 review r1, the implementer's ruling 4; F2b): with the jobs read failing (an
+    unreadable queue state, through a fake), `onboarding_status` answers `{ok: false, error}` and
+    no gate output at all, never `{ok: true}` with an empty item list, which would open the gate.
 Tests 21, 22 and 26 touch the real Credential Manager, so the test-writer's sign-off rule for such tests
 applies (the controller gives it at dispatch); every other test here uses fakes.
 Acceptance: as S1's. Size: M (test files; the cap is for implementer and console-ui tasks).
@@ -1943,7 +1977,12 @@ Split so that each edits about 80 lines or fewer of one file (review r2 I6, revi
 - **F2a (implementer), `onboarding.json`.** F1's tests 1 (its `onboarding.json` half), 2, 7 and 10;
   §4.5, §4.7. The file's struct, load and save (temp file and rename: app data, never a vault file),
   resume derivation from §4.7's checks, the unreadable-file rule, the no-session rule (resume at step
-  2's sign-in whatever the file's step; review r4, I-1), skip rules and `LaunchMode`. Size: S (about
+  2's sign-in whatever the file's step; review r4, I-1), skip rules and `LaunchMode`. **The school
+  is never a rung** (§14.49): `earliest_unproven` stops at 3 whenever the state it resumes has no
+  `school`, which an unreadable file's rewrite never has, so an unreadable file resumes at 2 (no
+  session) or 3; the steps past 3 are then derived after the school's confirm, proven ones passed
+  through as `already-done`. With a session present, a file step of 2 or below resumes at 3 (F2a
+  review I-1, the controller's ruling). Size: S (about
   80 lines; if the no-session rule pushes past, it moves to F2d).
 - **F2d (implementer), the answers file and the pending names.** F1's test 1 (its answers half) and
   test 12's save path; §4.5, §4.11. The answers struct, its load and save, the rule that an absent or
@@ -1961,7 +2000,9 @@ Split so that each edits about 80 lines or fewer of one file (review r2 I6, revi
 - **F2b (implementer), the commands.** F1's test 9's finish bullets and tests 12, 17's command half
   and 19; §4.5, §4.10. The `onboarding_status`, `onboarding_answer` (saves each answer to the answers
   file before enqueuing its jobs), `onboarding_skip` and `onboarding_retry` commands (registered in
-  F5), each a thin wrapper; and the three exits of §4.10's table, each an inner function over seams
+  F5), each a thin wrapper. **`onboarding_status` fails closed** (F9 review r1; §14.50; F1 test
+  28's second half): when the jobs cannot be read, it answers `{ok: false, error}` with no gate
+  output, never an empty item list, because F9 opens the gate on an empty list; and the three exits of §4.10's table, each an inner function over seams
   (drain, sign-out, relaunch, exit) so F1 drives them with fakes, and a `#[tauri::command]` wrapper
   passing the real ones:
   - `onboarding_quit`: stop, drain, save, stamp `quit_at`, `state::quit_flush` (10 s) exiting in its
@@ -2458,6 +2499,14 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
   (about 70 lines).
 - **F8g, the slot runners.** Both hold the notes gate for their run (§4.3), and after each, F8e reads
   `cs.sync` for "first sync" and `account_settled`.
+  - **First grades** (F9 review r1, §14.50; F1 test 28): after each slot, F8g reads the summary's
+    `(name, exit)` rows with F9's `first_grades_marked` and `first_grades_failed`. Marked makes
+    `first.grades` `Done`; failed (and not marked) makes it `Failed { reason: GRADES_READ_FAILED,
+    fix: GRADES_READ_FAILED_FIX }`, the closed-set constants of §4.3; neither leaves it as it was.
+    A later slot whose `grades` exits 0 turns a `Failed` into `Done`, and "Try again" on the item
+    enqueues the next `NoRank` (or, after step 10, `slot.first_full`) slot. At finish, a failed
+    first grades goes into `handover` like any unfinished item, cleared by the first slot whose
+    `grades` exits 0.
   - Both call `scheduler::run_slot_inner_scoped(&cs, &sch, Some(&app), false, scope)` with the
     queue's own `AppHandle` (review r5, I-3), so the grades capture and the mail pass exist; with no
     tray, `tray::set_state` does nothing (`tray.rs:150-151`).
@@ -2469,7 +2518,7 @@ computed in any of them. Runners are a trait; F1's tests drive every piece with 
     (`scheduler.rs:966`), so **no second mail step** is added (review r3, M1).
   - A summary with `reason` set (a refusal: script mode, another device) is the job's `failed` with
     that reason, never `done`; F3's test 1 makes it unreachable for a step-2 vault.
-  Size: S (about 40 lines).
+  Size: S (about 55 lines with the first-grades mapping and its constants, §14.50).
 - **F8d, the remaining runners.** `mail.setup`, `mail.canary` and `mail.first_pass` (the mail
   commands' inner functions); `google.gmail_first_read` and `google.calendar_read`;
   `coursework.discover`. Size: S (about 70 lines).
@@ -3823,4 +3872,58 @@ controller's fix). Each gap now has a task:
 Tasks changed: F5 (no `timezone_for_state`), F5b (three retirements and their pin), F11a (the shots
 hook), F11c (credential clearing), F11t (its pin), F12 (the shots script), F13 (stale README line;
 the routed `account.rs` comment; the follow-up deletions), §9 A10.
+
+### 14.49 An unreadable `onboarding.json` never resumes past the school (2026-10-24)
+
+From the F2a review r1 (`docs/reports/2026-10-24-wave-b-f2a-review-r1.md`, I-2, on
+`feat/o3-f2a`). The unreadable-file ladder (`earliest_unproven`, `onboarding_state.rs:420`) treated
+step 3 as proven by a restore, but §4.7 says the school is never proven, and the rewritten file has
+no `school`. A restored, entitled account with a corrupt file would resume past step 3 with
+`school: None`, so `school.apply` could never run.
+- **Chosen: (a), the ladder stops at 3 whenever the state has no `school`.** Since an unreadable
+  file's rewrite never has one, an unreadable file always resumes at 2 (no session) or 3. It is the
+  simplest rule, it is honest (nothing proves the school), and its cost is one confirm on a rare
+  path: after the school is confirmed, every later step the checks prove is passed through as
+  `already-done` (§4.7's existing rule), so the student re-answers nothing else.
+- **Not chosen:** (b), a screen rule that asks the school first at any step with no school, splits
+  the resume rule between F2a and F11 and leaves the file's step wrong; (c), proving step 3 by an
+  existing `campus.yaml`, makes the resume read a vault config file, a second source for the school
+  beside `onboarding.json`, for a corrupt-file case only. (c)'s suggestion (offer that school as the
+  confirm) could be added later without changing (a)'s rule.
+- **F1 test 2's assertion change** (`app/tests/onboarding_state.rs:236-245`): in `ladder`, the
+  no-session rung keeps `2`, and **every other rung expects `3`**:
+  `(Checks::at_least_signed_in(), 3)` is unchanged, and `(Checks::restored(3), 4)`, the entitled
+  rung's `5`, the mailbox rung's `6`, the Google rung's `8`, the login rung's `10` and the
+  everything-proven rung's `10` all become `3`; each of those rungs also asserts
+  `r.school == SchoolOffer::Ask`. A new tail asserts the advance: on the everything-proven checks,
+  confirming the school moves to step 10 with steps 4-8 `already-done`; on `Checks::restored(3)`
+  alone, to step 4.
+- **Tasks changed:** F2a (the rule in `earliest_unproven`; its brief), F1 test 2 (the ladder and the
+  new tail), §4.5's unreadable-file bullet. F2a's I-1 ruling (a session present and a file step of
+  2 or below resumes at 3) is recorded in F2a's brief too.
+
+### 14.50 A failed first grades, its reason, and a gate that fails closed (2026-10-24)
+
+From the F9 review r1 (`docs/reports/2026-10-24-wave-b-f9-review-r1.md`, on `feat/o3-f9`), after
+the controller's ruling that F9 keeps `first_grades_marked` (a bare `grades` row at exit 0) and adds
+`first_grades_failed` (a bare `grades` row at a non-zero exit):
+1. **The caller's mapping goes to F8g**, not F2b, because F8g already reads each slot's result into
+   the gate's items (`first sync` and `account_settled` after each slot). After each slot: marked
+   gives `first.grades` `Done`; failed and not marked gives `Failed { reason, fix }`; neither leaves
+   it as it was; a later exit-0 `grades` turns `Failed` into `Done`; "Try again" enqueues the next
+   `NoRank` or `slot.first_full`; at finish a failed first grades goes to `handover` like any
+   unfinished item. **The closed set gains its first written entry** (§4.3), as constants in
+   `onboarding_jobs.rs`: reason `grades_read_failed`, fix "Knowlu couldn't read your grades this
+   time. It will try again on its next run, or press Try again now. If it keeps failing, reconnect
+   your school in Settings after setup." Each part is something the student can do or can count
+   on: an automatic retry, a button, and a Settings action that exists after the reveal (the
+   school row, S6b; Settings is unreachable during onboarding, hence "after setup"). F1 test 28.
+2. **M3, noted beside §4.3's sync note:** the engine can skip at exit 0 under the bare name
+   `grades` (the vault busy), which would mark first grades with nothing written. Barely reachable
+   in onboarding, where the queue is serial and holds the notes gate around every slot; no fix in
+   wave B, and if it appears, the fix is an engine status line, not a guess from the step name.
+3. **`onboarding_status` fails closed (F2b):** a jobs read that fails is `{ok: false, error}` with
+   no gate output, never an empty item list, which F9 would open on. F1 test 28's second half.
+Tasks changed: F8g (the first-grades mapping and the closed-set constants), F2b (`onboarding_status`
+fails closed), F1 (new test 28), §4.3 (the first-grades note and the closed set's first entry).
 
