@@ -2904,3 +2904,90 @@ fn uid_pins_follow_their_courses_code_fragments_in_course_map_and_course_exclude
     assert!(!text.contains("'_72_1': "), "no map entry for a removed pin");
     let _ = std::fs::remove_dir_all(&r.root);
 }
+
+// ---- F6b review r1: the guards on a feed that has not settled, and the redacted Debug --------------------
+
+fn f6b_no_file(r: &F6b) {
+    assert!(!r.vault.join("config").join("ingest.yaml").exists(), "nothing is created");
+    assert!(strays_in_config(&r.vault).is_empty() && !f6b_check_root(r).exists());
+}
+
+/// I-1: a feed that is `failed` or `rejected` whose pending credential is gone (or unreadable) cannot
+/// have its link written: the job fails with that feed's key, creates nothing, and touches no credential.
+#[test]
+fn a_kept_feed_with_no_pending_link_fails_with_its_key_and_creates_nothing() {
+    for (lms, cal, want) in [
+        (FeedState::Failed, FeedState::Stored, "lms_link_missing"),
+        (FeedState::Rejected, FeedState::Stored, "lms_link_missing"),
+        (FeedState::Stored, FeedState::Failed, "calendar_link_missing"),
+        (FeedState::Stored, FeedState::Rejected, "calendar_link_missing"),
+    ] {
+        let mut s = Scn::quilting();
+        s.lms = Some(lms);
+        s.cal = Some(cal);
+        let r = f6b_rig(&format!("nolink-{lms:?}-{cal:?}").to_lowercase(), &s);
+        // The other feed's link stays where it waits; the missing one is gone.
+        let (gone, other) = if want.starts_with("lms") { (PENDING_LMS, PENDING_CALENDAR) } else { (PENDING_CALENDAR, PENDING_LMS) };
+        r.pending.delete(gone).unwrap();
+        r.pending.put(other, "https://example.invalid/feeds/other-token.ics").unwrap();
+        let out = run_config_ingest(&r.vault, &r.data, &r.base, &r.pending);
+        assert!(out == Outcome::Failed(want.into()), "{want}: {out:?}");
+        f6b_no_file(&r);
+        assert!(r.pending.get(gone).is_none() && r.pending.get(other).as_deref() == Some("https://example.invalid/feeds/other-token.ics"), "no credential is touched");
+        let _ = std::fs::remove_dir_all(&r.root);
+    }
+}
+
+/// I-2: a feed still `validated` has not settled, so the job waits (`pending`, with the reason), creates
+/// nothing and leaves the waiting link where it is.
+#[test]
+fn a_validated_feed_makes_config_ingest_wait_and_creates_nothing() {
+    for (lms, cal) in [(FeedState::Validated, FeedState::Stored), (FeedState::Stored, FeedState::Validated), (FeedState::Validated, FeedState::Validated)] {
+        let mut s = Scn::quilting();
+        s.lms = Some(lms);
+        s.cal = Some(cal);
+        let r = f6b_rig(&format!("validated-{lms:?}-{cal:?}").to_lowercase(), &s);
+        r.pending.put(PENDING_LMS, F6B_LMS_LINK).unwrap();
+        r.pending.put(PENDING_CALENDAR, F6B_CAL_LINK).unwrap();
+        let out = run_config_ingest(&r.vault, &r.data, &r.base, &r.pending);
+        assert!(out == Outcome::Waiting("feeds_not_settled".into()), "{out:?}");
+        f6b_no_file(&r);
+        assert!(r.pending.get(PENDING_LMS).as_deref() == Some(F6B_LMS_LINK) && r.pending.get(PENDING_CALENDAR).as_deref() == Some(F6B_CAL_LINK), "the waiting links stay");
+        let _ = std::fs::remove_dir_all(&r.root);
+    }
+}
+
+/// M4: a `stored` feed whose pending credential is still there (F8c deletes it after the job) is written
+/// blank, with no link in the file, and the credential is untouched by this job.
+#[test]
+fn a_stored_feed_with_its_pending_link_still_present_is_written_blank_and_the_link_stays() {
+    let s = Scn::quilting();
+    let r = f6b_rig("stored-pending", &s);
+    r.pending.put(PENDING_LMS, F6B_LMS_LINK).unwrap();
+    r.pending.put(PENDING_CALENDAR, F6B_CAL_LINK).unwrap();
+    let expected = f6b_expected(&r, "stored-pending", &s);
+    let out = run_config_ingest(&r.vault, &r.data, &r.base, &r.pending);
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    let got = f6b_written(&r);
+    assert!(got == expected, "the same bytes as a stored feed with no pending link");
+    let text = String::from_utf8(got).unwrap();
+    assert!(!text.contains("example.invalid"), "a stored feed leaves no link in the file");
+    assert!(r.pending.get(PENDING_LMS).as_deref() == Some(F6B_LMS_LINK) && r.pending.get(PENDING_CALENDAR).as_deref() == Some(F6B_CAL_LINK), "this job deletes nothing");
+    let _ = std::fs::remove_dir_all(&r.root);
+}
+
+/// M5: `Debug` on the hand-over never prints a link (the field still carries it for the builder).
+#[test]
+fn the_hand_over_never_prints_a_feed_link() {
+    let mut s = Scn::quilting();
+    s.lms = Some(FeedState::Failed);
+    s.cal = Some(FeedState::Rejected);
+    let r = f6b_rig("debug", &s);
+    let answers = load_answers(&r.data).unwrap().unwrap();
+    let h = knowlu::onboarding_jobs::ingest_handoff(&answers, &r.pending);
+    assert!(h.ics_url == F6B_LMS_LINK && h.calendar_url == F6B_CAL_LINK, "the builder still gets the links");
+    let shown = format!("{h:?} {h:#?}");
+    assert!(!shown.contains("example.invalid") && !shown.contains("token"), "Debug redacts the links");
+    assert!(shown.contains("feed_kept_on_device: true"), "and still says a link is kept");
+    let _ = std::fs::remove_dir_all(&r.root);
+}

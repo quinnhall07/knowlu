@@ -474,7 +474,7 @@ pub fn run_school_courses(
 
 /// What `config.ingest` hands F6b's builder, from the answers file alone. Serialised, it is the
 /// text the byte-equality of test 12 compares.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct IngestHandoff {
     /// `''` for a stored feed; the link itself for a `failed` or `rejected` one.
     pub ics_url: String,
@@ -489,9 +489,24 @@ pub struct IngestHandoff {
     /// no `course_map` entry; empty when none was removed (and then F6b writes no `course_exclude` key).
     pub course_exclude: Vec<String>,
     pub google_calendar: bool,
-    /// Step 8's confirmed rows, `(source, key, course slug)` in the order they were saved.
+    /// Step 8's confirmed rows, `(source, key, course slug)` in the order they were saved. Step 8 never
+    /// saves a row with a key and a blank slug; `config.ingest` drops one rather than write a mapping the
+    /// engine would skip.
     pub books: Vec<(String, String, String)>,
     pub zybooks_ignore: Vec<String>,
+}
+
+/// `Debug` never prints a feed link (a log line or a failed assertion must not carry one).
+impl std::fmt::Debug for IngestHandoff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let shown = |link: &str| if link.is_empty() { "" } else { "<redacted>" }.to_string();
+        f.debug_struct("IngestHandoff")
+            .field("ics_url", &shown(&self.ics_url)).field("feed_kept_on_device", &self.feed_kept_on_device)
+            .field("calendar_url", &shown(&self.calendar_url)).field("calendar_kept_on_device", &self.calendar_kept_on_device)
+            .field("course_map", &self.course_map).field("course_exclude", &self.course_exclude)
+            .field("google_calendar", &self.google_calendar).field("books", &self.books).field("zybooks_ignore", &self.zybooks_ignore)
+            .finish()
+    }
 }
 
 /// A course's pairs for `course_map` / `course_exclude`: its saved `fragments` (code fragments, then
@@ -664,7 +679,17 @@ pub fn run_config_ingest_with(
     if answers.kept_courses().iter().any(|c| answers.slugs.get(&c.key()).is_none_or(|s| s.trim().is_empty())) {
         return Outcome::Failed(REASON_COURSES_NOT_RECORDED.into());
     }
+    // A feed still `validated` has not settled (F8c holds the job for it too); the write cannot be undone.
+    if ["lms_ics", "calendar_ics"].iter().any(|k| answers.feeds.get(*k) == Some(&crate::onboarding_state::FeedState::Validated)) {
+        return Outcome::Waiting(REASON_FEEDS_NOT_SETTLED.into());
+    }
     let h = ingest_handoff(&answers, pending);
+    // A feed the account did not take must have its link in the pending credential: without it the link
+    // would be lost for good once the file is written, so nothing is created and the credential is left alone.
+    for (feed, kept, key) in [("lms_ics", h.feed_kept_on_device, REASON_LMS_LINK_MISSING), ("calendar_ics", h.calendar_kept_on_device, REASON_CALENDAR_LINK_MISSING)] {
+        let unsettled = matches!(answers.feeds.get(feed), Some(crate::onboarding_state::FeedState::Failed | crate::onboarding_state::FeedState::Rejected));
+        if unsettled && !kept { return Outcome::Failed(key.into()); }
+    }
     // One mapping per book or section, first wins (a duplicate key is a file the engine refuses whole).
     let (mut zybooks_courses, mut vhl_sections) = (Vec::<BookMapping>::new(), Vec::<SectionMapping>::new());
     for (source, key, slug) in h.books.iter().filter(|(_, k, s)| !k.trim().is_empty() && !s.trim().is_empty()) {
@@ -697,6 +722,17 @@ pub fn run_config_ingest_with(
 
 /// The reason key of a `config.ingest` that found a kept course with no recorded slug.
 pub const REASON_COURSES_NOT_RECORDED: &str = "courses_not_recorded";
+/// `Waiting`'s reason while a feed is still `validated`.
+pub const REASON_FEEDS_NOT_SETTLED: &str = "feeds_not_settled";
+/// A feed that is `failed` or `rejected` whose pending credential is gone: the link cannot be kept.
+pub const REASON_LMS_LINK_MISSING: &str = "lms_link_missing";
+pub const REASON_CALENDAR_LINK_MISSING: &str = "calendar_link_missing";
+
+/// Deletes the check's scratch root when dropped, so a panic cannot leave the text (it may hold a feed link) on disk.
+struct ScratchRoot(std::path::PathBuf);
+impl Drop for ScratchRoot {
+    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+}
 
 /// The drive a vault is on (`C:`), for the fix a failed save names.
 fn volume_of(vault: &Path) -> String {
@@ -716,17 +752,18 @@ fn volume_of(vault: &Path) -> String {
 pub fn put_ingest_text(vault: &Path, data_dir: &Path, text: &str, seams: &crate::scaffold::PutSeams) -> Outcome {
     use crate::scaffold::{put_new_file_with, Put};
     let text = knowlu_engine::pystr::universal_newlines(text).replace('\n', knowlu_engine::pystr::NEWLINE);
-    let scratch = data_dir.join("tmp").join(format!("ingest-check-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&scratch);
+    let guard = ScratchRoot(data_dir.join("tmp").join(format!("ingest-check-{}", std::process::id())));
+    let scratch = guard.0.as_path();
+    let _ = std::fs::remove_dir_all(scratch);
     let checked = std::fs::create_dir_all(scratch.join("config"))
         .and_then(|()| std::fs::write(scratch.join("config").join("ingest.yaml"), text.as_bytes()))
         .map_err(|e| format!("could not write the check file ({e})"))
-        .and_then(|()| match knowlu_engine::coursework::load_coursework_config(&scratch) {
+        .and_then(|()| match knowlu_engine::coursework::load_coursework_config(scratch) {
             Ok((_, w)) if w.is_empty() => Ok(()),
             Ok((_, w)) => Err(format!("{} problem(s) reading it back", w.len())),
             Err(_) => Err("it could not be read back".to_string()),
         });
-    let _ = std::fs::remove_dir_all(&scratch);
+    drop(guard);
     if let Err(e) = checked {
         return Outcome::Failed(format!("Knowlu built a course settings file it could not use ({e}), so it saved nothing. Try again."));
     }
