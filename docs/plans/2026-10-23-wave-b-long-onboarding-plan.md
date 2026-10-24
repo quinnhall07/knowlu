@@ -1770,7 +1770,7 @@ job runners as a trait so tests pass fakes.
     engine half, that ingest imports none of those items, is F6c's first test). **One source of
     pairs** (§14.46): after a step-3 label is edited, each course's `pairs` in the fake
     `--preview` call's `--courses` are byte-equal to that course's lines in `config.ingest`'s text
-    (`course_map` or `course_exclude`), and a fragment a kept course also contributes is never in
+    (`course_map`, or `course_exclude` less any fragment a kept course shares), and a fragment a kept course also contributes is never in
     `course_exclude`.
 13. **The feed is never silently lost (review r2, I1):** with a fake account store, (a) a store that
     fails twice leaves the feed `failed` and `config.ingest`'s text carries the link, with
