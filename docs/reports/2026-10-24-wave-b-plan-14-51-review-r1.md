@@ -37,3 +37,20 @@ The reviewer checked plan mode on `git diff 6448794..e64d420` against the code i
 - No slot is abandoned.
 - There are no vault writes after exit.
 - Each new task has an owner and a test.
+
+## Review r2 (93474f4): FAIL, narrow
+Closed: C1, I1, I2, I5, M1, M2.
+
+### Important
+- **R1. The M365 shortcut hides open items.** `FirstPassDelivered` also clears `mail.setup` and `mail.canary`, and the rule fires on an empty list.
+  - Fix: F2b's finish leaves `mail.first_pass` out of `handover` for a held provider. Any first-pass signal clears only `mail.first_pass`, and only after `CanaryVerified`.
+- **R2. The `mail.setup` wait is understated.** `confirm_address` polls up to `CONFIRM_WAIT`, 15 min (`runner.rs:72`, `:800-812`), and never checks the stop.
+  - Ruling: F8d adds stop checks to the confirm and canary waits. A stopped wait is recorded as resume, never as a failed outcome.
+  - A slot's worst case (20 min, `CHILD_TIMEOUT`) needs honest wording. The controller rules: the page states "up to 20 minutes" and shows the elapsed time, and the stop does not kill the child (G7 in the away log).
+- **R3. An empty list is read as disconnected while a setup is still pending.**
+  - Fix: no row counts as disconnected only when `mail.json` has no `pending_setups` entry (`runner.rs:389`). Add that case to test 32.
+
+### Minor
+- **m1. Timestamps.** `last_canary_ok_at` and `started_at` must both be parsed as timestamps, not compared as strings. Add a mixed-format case.
+- **m2. Lost updates.** Two writers can save `onboarding.json` at once in the normal console (`live.rs:120-131` and `slot_ended`). Use one process-wide lock around load, modify and save.
+- **m3. Wording.** Capture's line should read "within a minute or two".
