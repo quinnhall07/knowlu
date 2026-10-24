@@ -18,7 +18,9 @@ use crate::ingest::{self, Due};
 pub struct PreviewInputs<'a> {
     /// The LMS calendar feed (ICS text).
     pub feed: Option<&'a str>,
-    /// The captured course list: a JSON array of `{code, name, slug, label}`.
+    /// The captured course list: a JSON array of `{code, name, slug, label}`, each optionally with
+    /// `pairs` (the fragments the app saved for it: codes and gradebook uid pins; a string or a
+    /// `[fragment, slug]` pair each), which are then its only fragments.
     pub courses: Option<&'a str>,
     /// The v2 grades bundle (`grades::Bundle` JSON).
     pub grades: Option<&'a str>,
@@ -65,13 +67,17 @@ fn input<'a>(name: &str, text: Option<&'a str>, unread: &[&str], required: bool,
 /// One course of the captured list. `key` is the `by_course` key: the LMS course key (`code`),
 /// else the slug, else the label; empty when it has none of the three, and then it has no bucket.
 /// Two enrolments of one course in different terms share a slug but never a `code`, so a removed
-/// past-term shell can never take a live course's counts with it. `codes` are what the label and
-/// slug compact to, for the registrar's class times.
+/// past-term shell can never take a live course's counts with it. `codes` are what the registrar's
+/// class times are matched against: the saved pairs' fragments compacted, or, for an entry with no
+/// `pairs`, its label and slug compacted. `pairs` are the fragments the app saved for the course
+/// (`course_map`'s keys: the codes and the gradebook uid pins), so a label the student edited is
+/// display only and moves no bucket (§14.46); `None` when the entry carries none.
 struct Course {
     key: String,
     code: String,
     label: String,
     codes: Vec<String>,
+    pairs: Option<Vec<String>>,
 }
 
 /// The course list, in the order captured.
@@ -85,12 +91,29 @@ fn read_courses(text: &str, errors: &mut Vec<String>) -> Option<Vec<Course>> {
         list.iter()
             .map(|c| {
                 let (code, slug, label) = (field(c, "code"), field(c, "slug"), field(c, "label"));
-                let codes = [&label, &slug].iter().map(|t| compact(t)).filter(|t| !t.is_empty()).collect();
+                let pairs = saved_pairs(c);
+                let codes = match &pairs {
+                    Some(fragments) => fragments.iter().map(|f| compact(f)).filter(|t| !t.is_empty()).collect(),
+                    None => [&label, &slug].iter().map(|t| compact(t)).filter(|t| !t.is_empty()).collect(),
+                };
                 let key = [&code, &slug, &label].into_iter().find(|t| !t.is_empty()).cloned().unwrap_or_default();
-                Course { key, code, label, codes }
+                Course { key, code, label, codes, pairs }
             })
             .collect(),
     )
+}
+
+/// A course entry's saved `pairs`: an array whose elements are a fragment string or a
+/// `[fragment, slug]` pair (`course_map`'s own shape); `None` when the entry has no such array. The
+/// value half of a pair is not read: the bucket key is the course's, whatever slug the pair names.
+fn saved_pairs(course: &Value) -> Option<Vec<String>> {
+    let list = course.get("pairs")?.as_array()?;
+    let fragment = |p: &Value| match p {
+        Value::String(f) => Some(f.clone()),
+        Value::Array(a) => a.first().and_then(Value::as_str).map(str::to_string),
+        _ => None,
+    };
+    Some(list.iter().filter_map(fragment).map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect())
 }
 
 /// The keys of every course (not only the first) one of whose codes is `code`: a past-term shell
@@ -99,14 +122,17 @@ fn courses_with_code(courses: &[Course], code: &str) -> BTreeSet<String> {
     courses.iter().filter(|c| !c.key.is_empty() && c.codes.iter().any(|k| k == code)).map(|c| c.key.clone()).collect()
 }
 
-/// One course's `(fragment, key)` pairs as `config.ingest` writes them into `course_map` (R-C1-48):
-/// its LMS course key and its human code (the label), both pointing at the course's `by_course` key.
+/// One course's `(fragment, key)` pairs as `config.ingest` writes them into `course_map`: the very
+/// pairs the app saved for it when the entry carries `pairs` (§14.46), else, for an entry without,
+/// derived as R-C1-48 does: its LMS course key and its human code (the label). Each points at the
+/// course's `by_course` key.
 /// A course is matched on its own pairs (see [`claiming_keys`]), so two shells that share a label
 /// both claim an item that names it; no fragment is dropped for being named first elsewhere.
 fn course_pairs(c: &Course) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     if !c.key.is_empty() {
-        for fragment in [&c.code, &c.label].into_iter().filter(|f| !f.is_empty()) {
+        let derived = [c.code.clone(), c.label.clone()];
+        for fragment in c.pairs.as_deref().unwrap_or(&derived).iter().filter(|f| !f.is_empty()) {
             if !out.iter().any(|(f, _)| f == fragment) {
                 out.push((fragment.clone(), c.key.clone()));
             }
@@ -292,7 +318,8 @@ fn claiming_keys(item: &ingest::Event, courses: &[Course], grades: Option<&Grade
         .iter()
         .filter(|c| !c.key.is_empty())
         .filter(|c| {
-            let pin = owner.filter(|lms| !c.code.is_empty() && &c.code == *lms).map(|_| (item.uid.clone(), c.key.clone()));
+            // Saved pairs already carry the course's pins; only a derived course takes the bundle's.
+            let pin = owner.filter(|lms| c.pairs.is_none() && !c.code.is_empty() && &c.code == *lms).map(|_| (item.uid.clone(), c.key.clone()));
             let map: Vec<(String, String)> = pin.into_iter().chain(course_pairs(c)).collect();
             ingest::match_course(item, &map).is_some()
         })
@@ -972,6 +999,59 @@ END:VEVENT
         assert_eq!(kept_total(&v, &["_200_1"], "class_times"), 1, "the old shell removed: {v}");
         assert_eq!(kept_total(&v, &["_100_1"], "class_times"), 1, "the live shell removed: {v}");
         assert_eq!(kept_total(&v, &["_300_1"], "class_times"), 0, "both removed: {v}");
+    }
+
+    /// A course list whose first entry carries saved `pairs` (strings, and `[fragment, slug]` pairs
+    /// as `course_map` holds them) and whose label the student has since edited.
+    fn courses_with_saved_pairs() -> String {
+        json!([
+            {"code": "_900001_1", "name": "Synthetic Studies I", "slug": "renamed-slug", "label": "My edited label",
+             "pairs": ["_900001_1", ["SYN 110", "syn-110"]]},
+            {"code": "_900002_1", "name": "Synthetic Studies II", "slug": "syn-120", "label": "SYN 120"},
+        ])
+        .to_string()
+    }
+
+    #[test]
+    fn a_provided_pair_overrides_an_edited_label() {
+        let c = courses_with_saved_pairs();
+        let f = ics(&[
+            vevent_in("BB-ASSIGN-1", "SYN 110: Reading", None, "x"), // the saved human code
+            vevent_in("BB-ASSIGN-2", "SYN 110: Quiz", None, "x"),
+            vevent_in("BB-ASSIGN-3", "My edited label: notes", None, "x"), // the edited label: no longer a fragment
+            vevent_in("BB-ASSIGN-4", "SYN 120: Lab", None, "x"), // a course with no `pairs` derives its own
+        ]);
+        let b = banner_rows(vec![banner_row("90001", "110", "Lecture", json!([clas(Some("0900"))]))]);
+        let inputs = PreviewInputs { feed: Some(&f), courses: Some(&c), registrar: Some(&b), school: Some("ua"), ..Default::default() };
+        let v = preview(&inputs, &chicago(), now());
+        assert_eq!(by_course(&v, "_900001_1", "assignments_upcoming"), json!(2), "{v}");
+        assert_eq!(by_course(&v, "_900002_1", "assignments_upcoming"), json!(1), "{v}");
+        assert_eq!(by_course(&v, "unmatched", "assignments_upcoming"), json!(1), "{v}");
+        // The class time names SYN 110, which the saved pairs carry; the label plays no part.
+        assert_eq!(by_course(&v, "_900001_1", "class_times"), json!(1), "{v}");
+    }
+
+    #[test]
+    fn saved_pairs_carry_the_gradebook_pins_and_the_bundle_pins_nothing_of_its_own() {
+        let g = bundle(); // column _71_1 is held in course _900001_1
+        let feed = ics(&[vevent(&format!("{GB}_71_1"), "Renamed", "20260905T235900")]);
+        let run = |c: &str| {
+            let inputs = PreviewInputs { feed: Some(&feed), courses: Some(c), grades: Some(&g), ..Default::default() };
+            preview(&inputs, &chicago(), now())
+        };
+        // Saved pairs with the pin: claimed by its fragment.
+        let with_pin = json!([{"code": "_900001_1", "slug": "syn-110", "label": "SYN 110", "pairs": ["SYN 110", "_71_1"]}]).to_string();
+        let v = run(&with_pin);
+        assert_eq!(by_course(&v, "_900001_1", "assignments_upcoming"), json!(1), "{v}");
+        assert_eq!(by_course(&v, "_900001_1", "turned_in"), json!(1), "{v}");
+        // Saved pairs without it: the bundle is not consulted for this course.
+        let without = json!([{"code": "_900001_1", "slug": "syn-110", "label": "SYN 110", "pairs": ["SYN 110"]}]).to_string();
+        let w = run(&without);
+        assert_eq!(by_course(&w, "_900001_1", "assignments_upcoming"), json!(0), "{w}");
+        assert_eq!(by_course(&w, "unmatched", "assignments_upcoming"), json!(1), "{w}");
+        // No `pairs` at all: the engine's own derivation, with the bundle's pin, as before.
+        let derived = json!([{"code": "_900001_1", "slug": "syn-110", "label": "SYN 110"}]).to_string();
+        assert_eq!(by_course(&run(&derived), "_900001_1", "assignments_upcoming"), json!(1));
     }
 
     #[test]
