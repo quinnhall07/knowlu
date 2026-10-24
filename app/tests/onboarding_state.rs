@@ -884,7 +884,9 @@ fn ent_rig(line: u32, replies: Vec<(u16, String)>, with_session: bool) -> Ent {
 }
 #[cfg(windows)]
 fn entitlement_body(status: &str) -> String {
-    format!(r#"{{"status":"{status}","current_period_end":null,"plan":"monthly","checked_at":"2026-10-24T09:00:00.000Z"}}"#)
+    // `checked_at` is now: the entitlement is fresh for 72 hours, so a fixed date fails once it ages.
+    let now = knowlu_engine::journal::now_ts(None);
+    format!(r#"{{"status":"{status}","current_period_end":null,"plan":"monthly","checked_at":"{now}"}}"#)
 }
 #[cfg(windows)]
 fn bearer_of(req: &str, token: &str) -> bool {
