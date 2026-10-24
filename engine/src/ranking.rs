@@ -10,7 +10,7 @@
 //! Both numbers fall out of the interaction between the 2.0h session slice and the 4.0h daily
 //! budget, so the fixture pins the interaction rather than either mechanism alone.
 
-use jiff::civil::Date;
+use jiff::civil::{Date, DateTime, Time};
 
 use crate::models::Task;
 use crate::planning::PlanningConfig;
@@ -68,6 +68,15 @@ pub fn rank(tasks: &[Task], today: Date, cal: &WeekCalendar) -> Vec<Task> {
         result.insert(index, task);
     }
     result
+}
+
+/// The hour from which tasks closing tonight outrank the rest: 20:00 in the vault's zone.
+/// Quinn's ruling (a), 2026-10-24.
+pub const EVENING_HOUR: Time = Time::constant(20, 0, 0, 0);
+
+/// `rank` at a moment: from `EVENING_HOUR` on, tasks closing tonight come first. (Red stub: T2.)
+pub fn rank_at(_tasks: &[Task], _today: Date, _cal: &WeekCalendar, _moment: Option<DateTime>) -> Vec<Task> {
+    todo!("evening T2")
 }
 
 /// Split into (must do today no matter what, everything recommendable).
@@ -353,5 +362,252 @@ mod tests {
         assert_eq!((takes[0].hours, takes[0].block_index, takes[0].capped_by), (2.0, 2, "slice"));
         assert_eq!((takes[1].hours, takes[1].block_index, takes[1].capped_by), (1.0, 2, "block"));
         assert_eq!(takes[1].block_after, 0.0);
+    }
+
+    // ---- The evening rule (R1-R15). Invented tasks on the vault-s1 week template. ----
+
+    /// Friday 2026-08-28; `at(27, ..)` is Thursday, `at(29, ..)` Saturday.
+    const D: Date = Date::constant(2026, 8, 28);
+
+    fn at(day: i8, hour: i8, minute: i8) -> DateTime {
+        DateTime::constant(2026, 8, day, hour, minute, 0, 0)
+    }
+
+    fn week() -> WeekCalendar {
+        WeekCalendar::from_file(Path::new("tests/fixtures/vault-s1/config/week_template.yaml"), Vec::new())
+    }
+
+    fn task(slug: &str, due: Option<DateTime>, effort: f64, importance: i64) -> Task {
+        Task {
+            slug: slug.into(),
+            title: slug.into(),
+            due,
+            effort_hours: effort,
+            importance,
+            status: "active".into(),
+            progress: 0,
+            course: None,
+            domain: "school".into(),
+            rank_override: None,
+            slice_hours: None,
+            conflicts_with: None,
+        }
+    }
+
+    fn slugs(tasks: &[Task]) -> Vec<String> {
+        tasks.iter().map(|t| t.slug.clone()).collect()
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// An overdue task (Wednesday) and one due tonight, the overdue one with the higher pressure.
+    fn overdue_and_tonight() -> Vec<Task> {
+        vec![task("tonight", Some(at(28, 23, 59)), 1.0, 3), task("overdue", Some(at(26, 23, 59)), 2.0, 3)]
+    }
+
+    fn assert_overdue_leads(tasks: &[Task]) {
+        let cal = week();
+        assert_eq!(slugs(&rank(tasks, D, &cal))[0], "overdue", "setup: the overdue task must lead under rank");
+    }
+
+    #[test]
+    fn rank_at_with_no_moment_is_rank() {
+        let (tasks, cal, _) = fixture();
+        assert_eq!(rank_at(&tasks, TODAY, &cal, None), rank(&tasks, TODAY, &cal));
+        let mem = overdue_and_tonight();
+        assert_eq!(rank_at(&mem, D, &week(), None), rank(&mem, D, &week()));
+    }
+
+    #[test]
+    fn before_the_hour_nothing_changes() {
+        let tasks = overdue_and_tonight();
+        assert_overdue_leads(&tasks);
+        let cal = week();
+        assert_eq!(rank_at(&tasks, D, &cal, Some(at(28, 19, 59))), rank(&tasks, D, &cal));
+    }
+
+    #[test]
+    fn at_the_hour_a_task_due_tonight_leads_an_overdue_one() {
+        let tasks = overdue_and_tonight();
+        assert_overdue_leads(&tasks);
+        let got = rank_at(&tasks, D, &week(), Some(at(28, 20, 0)));
+        assert_eq!(slugs(&got), names(&["tonight", "overdue"]));
+    }
+
+    #[test]
+    fn closing_tonight_orders_by_due_time_then_pressure() {
+        let tasks = vec![
+            task("due-2100", Some(at(28, 21, 0)), 1.0, 1),
+            task("big-2359", Some(at(28, 23, 59)), 12.0, 3),
+            task("small-2359", Some(at(28, 23, 59)), 1.0, 3),
+        ];
+        let cal = week();
+        let ranked = slugs(&rank(&tasks, D, &cal));
+        assert_ne!(ranked[0], "due-2100", "setup: the 21:00 task must not already lead");
+        assert_eq!(ranked[..2], names(&["big-2359", "small-2359"])[..], "setup: big has the higher pressure");
+        let got = rank_at(&tasks, D, &cal, Some(at(28, 20, 30)));
+        assert_eq!(slugs(&got), names(&["due-2100", "big-2359", "small-2359"]));
+    }
+
+    #[test]
+    fn a_due_time_already_passed_is_not_closing_tonight() {
+        let tasks = vec![
+            task("passed-1900", Some(at(28, 19, 0)), 1.0, 3),
+            task("equal-2100", Some(at(28, 21, 0)), 1.0, 3),
+            task("overdue", Some(at(26, 23, 59)), 2.0, 3),
+        ];
+        let cal = week();
+        assert_eq!(slugs(&rank(&tasks, D, &cal))[0], "overdue", "setup");
+        assert_eq!(rank_at(&tasks, D, &cal, Some(at(28, 21, 0))), rank(&tasks, D, &cal));
+    }
+
+    #[test]
+    fn a_past_due_task_with_no_window_is_not_closing_tonight() {
+        let tasks = vec![
+            task("tonight", Some(at(28, 22, 0)), 1.0, 3),
+            task("overdue-old", Some(at(25, 23, 59)), 2.0, 3),
+            task("overdue-today", Some(at(28, 8, 0)), 8.0, 3),
+        ];
+        let cal = week();
+        let ranked = rank(&tasks, D, &cal);
+        assert_ne!(ranked[0].slug, "tonight", "setup");
+        let got = slugs(&rank_at(&tasks, D, &cal, Some(at(28, 21, 0))));
+        let mut want = names(&["tonight"]);
+        want.extend(slugs(&ranked).into_iter().filter(|s| s != "tonight"));
+        assert_eq!(got, want, "the overdue tasks keep rank's order below tonight's item");
+    }
+
+    #[test]
+    fn tonight_ends_at_local_midnight() {
+        let cal = week();
+        let tasks = vec![task("after-midnight", Some(at(29, 0, 30)), 1.0, 3), task("overdue", Some(at(26, 23, 59)), 2.0, 3)];
+        assert_eq!(slugs(&rank(&tasks, D, &cal))[0], "overdue", "setup");
+        assert_eq!(rank_at(&tasks, D, &cal, Some(at(28, 23, 0))), rank(&tasks, D, &cal));
+
+        let sat = Date::constant(2026, 8, 29);
+        let tasks = vec![task("later", Some(at(29, 23, 59)), 1.0, 3), task("overdue", Some(at(26, 23, 59)), 2.0, 3)];
+        assert_eq!(slugs(&rank(&tasks, sat, &cal))[0], "overdue", "setup");
+        assert_eq!(rank_at(&tasks, sat, &cal, Some(at(29, 0, 30))), rank(&tasks, sat, &cal));
+    }
+
+    #[test]
+    fn a_moment_on_another_day_changes_nothing() {
+        let tasks = overdue_and_tonight();
+        assert_overdue_leads(&tasks);
+        let cal = week();
+        for moment in [at(29, 21, 0), at(27, 21, 0)] {
+            assert_eq!(rank_at(&tasks, D, &cal, Some(moment)), rank(&tasks, D, &cal), "{moment}");
+        }
+    }
+
+    #[test]
+    fn a_rank_override_still_wins_after_the_hour() {
+        let mut pinned = task("pinned", Some(at(26, 23, 59)), 2.0, 3);
+        pinned.rank_override = Some(1);
+        let tasks = vec![
+            task("tonight", Some(at(28, 23, 59)), 1.0, 3),
+            pinned,
+            task("overdue-old", Some(at(25, 23, 59)), 2.0, 3),
+        ];
+        let cal = week();
+        assert_eq!(slugs(&rank(&tasks, D, &cal)), names(&["pinned", "overdue-old", "tonight"]), "setup");
+        let got = rank_at(&tasks, D, &cal, Some(at(28, 21, 0)));
+        assert_eq!(slugs(&got), names(&["pinned", "tonight", "overdue-old"]));
+    }
+
+    #[test]
+    fn the_evening_order_keeps_must_do_and_the_takes() {
+        let mut tasks = overdue_and_tonight();
+        tasks.push(task("far", Some(DateTime::constant(2026, 9, 7, 12, 0, 0, 0)), 1.0, 3));
+        let cal = week();
+        let moment = Some(at(28, 21, 0));
+        let evening = rank_at(&tasks, D, &cal, moment);
+        let daytime = rank(&tasks, D, &cal);
+        assert_ne!(slugs(&evening), slugs(&daytime), "the evening order must differ for this test to mean anything");
+        let sorted_must = |ranked: &[Task]| {
+            let mut s = slugs(&partition_must_do(ranked, D, &cal).0);
+            s.sort();
+            s
+        };
+        assert_eq!(sorted_must(&evening), sorted_must(&daytime));
+        assert_eq!(
+            designate_today_explained(&evening, D, &cal, None),
+            designate_today_explained(&daytime, D, &cal, None)
+        );
+    }
+
+    #[test]
+    fn the_evening_order_is_deterministic() {
+        let tasks = vec![
+            task("tonight-2100", Some(at(28, 21, 0)), 1.0, 3),
+            task("tonight-2300", Some(at(28, 23, 0)), 4.0, 4),
+            task("overdue-a", Some(at(26, 23, 59)), 2.0, 3),
+            task("overdue-b", Some(at(24, 23, 59)), 3.0, 2),
+            task("far", Some(DateTime::constant(2026, 9, 7, 12, 0, 0, 0)), 1.0, 3),
+        ];
+        let cal = week();
+        let mut pressures: Vec<u64> = tasks.iter().map(|t| pressure(t, D, &cal).to_bits()).collect();
+        pressures.sort();
+        pressures.dedup();
+        assert_eq!(pressures.len(), tasks.len(), "setup: every pressure differs");
+        let moment = Some(at(28, 20, 15));
+        let first = rank_at(&tasks, D, &cal, moment);
+        assert_eq!(first, rank_at(&tasks, D, &cal, moment));
+        let mut reversed = tasks.clone();
+        reversed.reverse();
+        assert_eq!(first, rank_at(&reversed, D, &cal, moment));
+    }
+
+    #[test]
+    fn undated_tasks_never_close_tonight() {
+        let mut tasks = overdue_and_tonight();
+        tasks.push(task("undated", None, 1.0, 3));
+        let cal = week();
+        let daytime = slugs(&rank(&tasks, D, &cal));
+        assert_eq!(daytime.last().unwrap(), "undated", "setup");
+        let got = slugs(&rank_at(&tasks, D, &cal, Some(at(28, 21, 0))));
+        assert_eq!(got, names(&["tonight", "overdue", "undated"]));
+    }
+
+    #[test]
+    fn a_bare_date_due_today_closes_at_2359() {
+        let meta: serde_yaml_ng::Mapping = serde_yaml_ng::from_str("due: 2026-08-28\neffort_hours: 1.0\n").unwrap();
+        let bare = Task::from_meta(&meta, "bare".into()).unwrap();
+        let tasks = vec![bare, task("overdue", Some(at(26, 23, 59)), 2.0, 3)];
+        let cal = week();
+        assert_eq!(slugs(&rank(&tasks, D, &cal))[0], "overdue", "setup");
+        let got = rank_at(&tasks, D, &cal, Some(at(28, 21, 0)));
+        assert_eq!(slugs(&got), names(&["bare", "overdue"]));
+    }
+
+    #[test]
+    fn evening_hour_is_twenty_hundred() {
+        assert_eq!(
+            EVENING_HOUR,
+            Time::constant(20, 0, 0, 0),
+            "20:00 is Quinn's ruling (a), 2026-10-24; changing it needs a new ruling"
+        );
+    }
+
+    #[test]
+    fn everything_else_keeps_the_pressure_order() {
+        let tasks = vec![
+            task("overdue-a", Some(at(26, 23, 59)), 2.0, 3),
+            task("tonight-2200", Some(at(28, 22, 0)), 1.0, 3),
+            task("overdue-b", Some(at(24, 23, 59)), 3.0, 2),
+            task("tonight-2330", Some(at(28, 23, 30)), 2.0, 3),
+            task("far", Some(DateTime::constant(2026, 9, 7, 12, 0, 0, 0)), 1.0, 3),
+            task("undated", None, 1.0, 3),
+        ];
+        let cal = week();
+        let closing = ["tonight-2200", "tonight-2330"];
+        let rest = |ranked: Vec<Task>| -> Vec<String> {
+            slugs(&ranked).into_iter().filter(|s| !closing.contains(&s.as_str())).collect()
+        };
+        let evening = rank_at(&tasks, D, &cal, Some(at(28, 21, 0)));
+        assert_eq!(slugs(&evening)[..2], names(&closing)[..], "the closing group leads, by due time");
+        assert_eq!(rest(evening), rest(rank(&tasks, D, &cal)));
     }
 }
