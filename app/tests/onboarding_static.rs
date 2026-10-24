@@ -240,6 +240,8 @@ const ALLOWED: &[&str] = &[
     "open_lms_window", "capture_courses", "close_lms_window", "google_sign_in", "send_magic_link", "verify_email_code",
     "google_connect", "google_status", "mail_setup_progress",
     "your_week", "commitment_proposals", "commitments_confirm", "launch_state",
+    // F11c review I-1: the console's own edit of a confirmed commitment (its kind and its level).
+    "set_fields",
 ];
 
 #[test]
@@ -870,4 +872,98 @@ fn the_seam_comment_names_both_hooks_of_the_panel_seam() {
     let head: String = read("onboarding.js").lines().take(8).collect::<Vec<_>>().join("\n");
     assert!(head.contains("registerPanel(n, {render, onStatus})"), "the header names {{render, onStatus}}: {head}");
     assert!(head.contains("registerLeave"), "the header names registerLeave");
+}
+
+// ---- F11c: steps 8 and 10's rows and the panels' poll rule ----------------------------------------
+
+#[test]
+fn steps_eight_and_tens_past_rows_follow_their_job_records() {
+    // rows[5] is Homework sites (at step 8), rows[6] is Your week (at step 10); m5's rule, over each.
+    let row = |i: usize, step: u8, jobs: &str| node(&format!("h.rowModel(h.rows[{i}], {{step: {step}, jobs: {jobs}}})"));
+    let none = row(5, 10, "{}");
+    assert_eq!((&none["st"], &none["pf"]), (&serde_json::json!("Not yet"), &serde_json::json!("Not yet")), "a past homework row with no job records: {none}");
+    assert_ne!(none["cls"], "done", "{none}");
+    let none = row(6, 11, "{}");
+    assert_eq!(none["st"], "Not yet", "a past week row with no job records: {none}");
+    assert_ne!(none["cls"], "done", "{none}");
+    let done = row(5, 10, r#"{"coursework.discover": {"state": "done", "proof": {"books_or_sections": 2, "assignments": 5}}}"#);
+    assert_eq!((&done["st"], &done["pf"]), (&serde_json::json!("Done"), &serde_json::json!("2 books or sections, 5 assignments")), "{done}");
+    let mixed = row(6, 11, r#"{"config.ingest": {"state": "done", "proof": {"events_this_week": 6}}, "slot.partial": {"state": "skipped"}}"#);
+    assert_eq!((&mixed["st"], &mixed["pf"]), (&serde_json::json!("Done"), &serde_json::json!("6 events this week")), "done mixed with skipped reads Done: {mixed}");
+    let skipped = row(6, 11, r#"{"config.ingest": {"state": "skipped"}, "slot.partial": {"state": "skipped"}}"#);
+    assert_eq!(skipped["st"], "Skipped", "all skipped reads Skipped: {skipped}");
+    let site_skip = row(5, 10, r#"{"coursework.discover": {"state": "skipped"}}"#);
+    assert_eq!(site_skip["st"], "Skipped", "{site_skip}");
+}
+
+#[test]
+fn the_step_eight_and_ten_panels_never_redraw_the_pane_from_a_poll() {
+    let c = code(&read("onboarding.js"));
+    let flat = c.split_whitespace().collect::<Vec<_>>().join(" ");
+    for (n, name) in [(8, "onStatus8"), (10, "onStatus10")] {
+        assert!(flat.contains(&format!("OB.registerPanel({n}, {{ render: render{n}, onStatus: {name} }})")), "step {n} registers through the seam");
+        let body = function(&c, name);
+        assert!(!body.contains("refresh") && !body.contains(".show("), "{name} must not redraw the pane (a poll wipes #ob-ask)");
+    }
+    assert!(flat.contains("OB.registerLeave("), "step 8 clears its login fields when the student leaves");
+}
+
+#[test]
+fn step_eights_proceed_is_one_answer_sent_after_the_skips_and_every_answer_clears_the_action_line() {
+    let c = code(&read("onboarding.js"));
+    let leave = function(&c, "leaveStep8");
+    let flat = leave.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("invoke(\"onboarding_answer\", { step: 8, answer: { proceed: true } })"), "step 8's proceed: {flat}");
+    for f in ["storeLogins", "answerRow", "skipSite", "leaveStep8", "confirm10"] {
+        assert!(function(&c, f).contains("OB.clearError()"), "{f} sends an answer, so it clears the action line first");
+    }
+    let skip = function(&c, "skipSite");
+    assert!(skip.contains("onboarding_skip") && skip.contains("leaveStep8()"), "the last skip leaves the step, after the skip call returns");
+}
+
+// ---- F11c review r1: step 10's Edit (I-1), the firmness default (M5), the poll pin's reach (M6) ------
+
+#[test]
+fn step_tens_class_time_rows_have_an_edit_that_saves_through_the_consoles_set_fields() {
+    let c = code(&read("onboarding.js"));
+    assert!(c.contains("data-act10=\"edit\""), "each class-time row has an Edit control");
+    let at = c.find("invoke(\"set_fields\"").expect("Edit saves through the console's set_fields");
+    let save = enclosing_fn(&c, at);
+    assert!(save.contains("OB.clearError()") && save.contains("fields") && save.contains(".error"), "the save clears the line and shows a refusal");
+    assert!(save.contains("view: \"today\""), "the console's view for a write from setup is today's");
+}
+
+#[test]
+fn a_proposal_with_no_level_defaults_the_firmness_to_soft_as_the_confirm_does() {
+    let c = code(&read("onboarding.js"));
+    assert!(function(&c, "propHtml").contains("(p.level || \"soft\")"), "the select's default matches confirm10's fallback");
+}
+
+#[test]
+fn the_poll_pin_follows_the_functions_a_panels_onstatus_calls() {
+    let c = code(&read("onboarding.js"));
+    for name in ["onStatus10", "askProposals", "setConfirm10", "loadSet10"] {
+        let body = function(&c, name);
+        assert!(!body.contains("refresh") && !body.contains(".show("), "{name} runs from a poll and must not redraw the pane");
+    }
+}
+
+#[test]
+fn step_eights_empty_field_message_and_the_other_sites_sign_in_do_not_redraw_or_stay_live() {
+    let c = code(&read("onboarding.js"));
+    let flat = function(&c, "paintNext").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("signin"), "paintNext holds every Sign in while a discovery runs: {flat}");
+    let store = function(&c, "storeLogins");
+    let empty = &store[store.find("!user || !secret").expect("the empty check")..];
+    let branch = &empty[..empty.find('}').unwrap()];
+    assert!(!branch.contains("paintSite("), "an empty-field message must not redraw the form and wipe the typed username");
+}
+
+#[test]
+fn an_edit_menu_keeps_a_kind_it_has_no_label_for_selected_and_sends_only_what_changed() {
+    let c = code(&read("onboarding.js"));
+    let row = function(&c, "editRowHtml");
+    assert!(row.contains("indexOf") || row.contains(".some("), "a kind outside the label list is added as the selected option, in the engine's own word");
+    let save = function(&c, "saveEdit10");
+    assert!(save.contains("!== row.getAttribute(\"data-kind\")") && save.contains("!== row.getAttribute(\"data-level\")"), "each field is sent only when its control differs from the row's own value");
 }

@@ -281,6 +281,292 @@
     }).catch(function () {});
   }
 
+  // ==== F11c, step 8: homework sites (begins) ===================================================
+  // Logins go to Credential Manager through `store_credentials` and the fields are emptied the moment
+  // it answers; a confirmed row goes to `onboarding_answer` as the course's key, never a made-up slug.
+  var discovering = false;
+  var SITES = ["zybooks", "vhl"];
+  var SKIP_ID = { zybooks: "ob-skip-8-zybooks", vhl: "ob-skip-8-vhl" };
+  var w8 = { status: null, proceeding: false, site: { zybooks: { stage: "login", rows: [], line: "" }, vhl: { stage: "login", rows: [], line: "" } } };
+
+  function clearCredentialFields(site) {
+    var u = site === "vhl" ? EL("ob-vhl-username") : EL("ob-zybooks-username");
+    var p = site === "vhl" ? EL("ob-vhl-password") : EL("ob-zybooks-password");
+    if (u) { u.value = ""; }
+    if (p) { p.value = ""; }
+  }
+  function loginHtml(site) {
+    var z = site === "zybooks", name = SITE_NAMES[site];
+    var user = z ? '<input id="ob-zybooks-username" type="text" autocomplete="off" spellcheck="false">' : '<input id="ob-vhl-username" type="text" autocomplete="off" spellcheck="false">';
+    var pass = z ? '<input id="ob-zybooks-password" type="password" autocomplete="off">' : '<input id="ob-vhl-password" type="password" autocomplete="off">';
+    return '<div class="su-field"><label>Email or username</label>' + user + '</div><div class="su-field"><label>Password</label>' + pass + '</div>' +
+      '<p class="su-privacy">Stored only on this computer, in Windows Credential Manager, and used only to read ' + esc(name) + '.</p>' +
+      '<p class="su-small">If you skip ' + esc(name) + ", its due dates are missing unless your school's calendar feed carries them.</p>" +
+      '<div class="su-actions"><button class="b pri y su-btn" type="button" data-act8="signin" data-site="' + site + '"' + (discovering ? " disabled" : "") + '>Sign in to ' + esc(name) + '</button>' +
+      '<button class="b su-btn" type="button" id="' + SKIP_ID[site] + '" data-act8="skip" data-site="' + site + '"' + (discovering ? " disabled" : "") + '>Skip ' + esc(name) + '</button></div>';
+  }
+  function rowHtml(site, x) {
+    var head = '<div class="ob-row8" data-key="' + esc(x.key) + '"><span class="ob-key">' + esc(x.key) + (x.detail ? ' <span class="su-dim">' + esc(x.detail) + '</span>' : "") + '</span> ';
+    if (x.mapped || x.ignored) { return head + '<span class="ob-row-line">' + (x.ignored ? "Knowlu leaves this one out." : "Already set.") + '</span></div>'; }
+    var opts = ((w8.status && w8.status.courses) || []).map(function (c) {
+      return '<option value="' + esc(c.key) + '"' + (x.suggested && c.code === x.suggested ? " selected" : "") + '>' + esc(c.label || c.code) + '</option>';
+    }).join("");
+    return head + '<select class="ob-course" aria-label="Class for ' + esc(x.key) + '"><option value="">Choose a class</option>' + opts + '</select> ' +
+      '<button class="b su-btn" type="button" data-act8="confirm" data-site="' + site + '" data-key="' + esc(x.key) + '">Confirm</button>' +
+      (site === "zybooks" ? ' <button class="su-link ob-not-a-class" type="button" data-act8="ignore" data-site="' + site + '" data-key="' + esc(x.key) + '">Not a class</button>' : "") +
+      ' <span class="ob-row-line" role="status">' + esc(x.saved || "") + '</span></div>';
+  }
+  function siteHtml(site) {
+    var f = w8.site[site], name = SITE_NAMES[site], note = '<p class="ob-state ob-failed" role="alert" id="ob-8-note-' + site + '"' + (f.line ? "" : " hidden") + '>' + esc(f.line) + '</p>';
+    if (f.stage === "skipped") { return '<h2 class="ob-h2">' + esc(name) + '</h2><p class="ob-state" data-state="skipped">' + esc(costWords(HOMEWORK_COST + site)) + '</p>'; }
+    if (f.stage === "done") { return '<h2 class="ob-h2">' + esc(name) + '</h2><p class="ob-state">' + esc(name) + ' is set up.</p>'; }
+    if (f.stage === "storing" || f.stage === "reading") { return '<h2 class="ob-h2">' + esc(name) + '</h2><p class="ob-state" data-state="reading">Reading ' + esc(name) + '… This can take a minute.</p>'; }
+    if (f.stage === "rows") {
+      return '<h2 class="ob-h2">' + esc(name) + '</h2><p class="su-small">Choose the class each one belongs to. Leave one blank and Knowlu asks again later.</p>' + note +
+        f.rows.map(function (x) { return rowHtml(site, x); }).join("") +
+        '<div class="su-actions"><button class="b su-btn" type="button" data-act8="done" data-site="' + site + '">That\'s all for ' + esc(name) + '</button></div>';
+    }
+    return '<h2 class="ob-h2">' + esc(name) + ' sign-in</h2>' + note + loginHtml(site);
+  }
+  function say8(site, text) {
+    var el = EL("ob-8-note-" + site);
+    if (el) { el.textContent = text; el.hidden = !text; }
+  }
+  function paintSite(site) {
+    var host = EL("ob-8-" + site);
+    if (host) { host.innerHTML = siteHtml(site); }
+  }
+  function settled8(site) { return w8.site[site].stage === "done" || w8.site[site].stage === "skipped"; }
+  function paintNext() {
+    var next = EL("ob-next-8");
+    if (next) { next.disabled = discovering || !SITES.every(settled8) || w8.proceeding; }
+    SITES.forEach(function (s) { var b = EL(SKIP_ID[s]); if (b) { b.disabled = discovering; } });
+    document.querySelectorAll("#ob-step-8 [data-act8=\"signin\"]").forEach(function (b) { b.disabled = discovering; });
+  }
+  // ==== F11c, step 8 (continues) =================================================================
+  function storeLogins(site) {
+    var f = w8.site[site], vault = w8.status && w8.status.vault, z = site === "zybooks";
+    if (discovering) { return; }
+    var user = (z ? EL("ob-zybooks-username") : EL("ob-vhl-username")).value;
+    var secret = (z ? EL("ob-zybooks-password") : EL("ob-vhl-password")).value;
+    if (!vault) { say8(site, "Knowlu can't find your setup folder yet. Try again in a moment."); return; }
+    if (!user || !secret) { say8(site, "Type your " + SITE_NAMES[site] + " email or username and password first."); return; }
+    OB.clearError();
+    f.stage = "storing"; f.line = "";
+    invoke("store_credentials", { vault: vault, source: site, user: user, secret: secret }).then(function (a) {
+      clearCredentialFields(site);
+      if (a && a.ok) { discoverSite(site); return; }
+      f.stage = "login"; f.line = (a && a.error) || "Knowlu couldn't save your sign-in. Try again."; paintSite(site);
+    }).catch(function () {
+      clearCredentialFields(site);
+      f.stage = "login"; f.line = "Knowlu couldn't save your sign-in. Try again."; paintSite(site);
+    });
+    paintSite(site);
+  }
+  function discoverSite(site) {
+    var f = w8.site[site];
+    discovering = true; f.stage = "reading"; f.line = ""; paintSite(site); paintNext();
+    invoke("discover_coursework", { vault: w8.status && w8.status.vault, zybooks: site === "zybooks", vhl: site === "vhl" }).then(function (r) {
+      f.rows = ((r && r.rows) || []).filter(function (x) { return x.source === site; });
+      f.line = (r && r.note) || "";
+      f.stage = f.rows.length ? "rows" : "login";
+      if (!f.rows.length) { f.line = f.line || "Knowlu found nothing on " + SITE_NAMES[site] + ". Check your sign-in and try again."; }
+    }).catch(function () {
+      f.stage = "login"; f.line = "Knowlu couldn't reach " + SITE_NAMES[site] + ". Try again in a moment.";
+    }).then(function () { discovering = false; paintSite(site); paintNext(); });
+  }
+  function answerRow(b) {
+    var site = b.getAttribute("data-site"), key = b.getAttribute("data-key"), row = b.closest(".ob-row8");
+    var line = row.querySelector(".ob-row-line"), sel = row.querySelector(".ob-course");
+    var ignore = b.classList.contains("ob-not-a-class");
+    if (!ignore && !(sel && sel.value)) { line.textContent = "Choose a class first, or leave this one blank."; return; }
+    OB.clearError();
+    var answer = ignore ? { zybooks_ignore: key } : { row: { source: site, key: key, course_slug: sel.value } };
+    invoke("onboarding_answer", { step: 8, answer: answer }).then(function (a) {
+      line.textContent = a && a.ok ? (ignore ? "Left out." : "Saved.") : ((a && a.error) || "Knowlu couldn't save that. Try again.");
+    }).catch(function () { line.textContent = "Knowlu couldn't save that. Try again."; });
+  }
+  function skipSite(site) {
+    if (discovering) { return; }
+    OB.clearError();
+    invoke("onboarding_skip", { step: 8, source: site }).then(function (a) {
+      var f = w8.site[site];
+      if (a && a.ok === false) { f.line = a.error || "Knowlu couldn't skip that. Try again."; paintSite(site); return; }
+      f.stage = "skipped"; f.line = ""; paintSite(site); paintNext();
+      if (SITES.every(settled8)) { leaveStep8(); }
+    }).catch(function () { w8.site[site].line = "Knowlu couldn't skip that. Try again."; paintSite(site); });
+  }
+  // Leaving step 8 is one answer, sent after any skip calls (plan 14.52.3): it starts the jobs after it.
+  function leaveStep8() {
+    if (w8.proceeding || discovering) { return; }
+    w8.proceeding = true; paintNext(); OB.clearError();
+    var say = function (t) { var el = EL("ob-8-line"); if (el) { el.textContent = t; el.hidden = !t; } };
+    invoke("onboarding_answer", { step: 8, answer: { proceed: true } }).then(function (a) {
+      w8.proceeding = false; paintNext();
+      if (a && a.ok === true) { OB.show(10); return; }
+      say((a && a.error) || "Knowlu couldn't move on. Try again.");
+    }).catch(function () { w8.proceeding = false; paintNext(); say("Knowlu couldn't move on. Try again."); });
+  }
+  function onClick8(e) {
+    var b = e.target.closest("[data-act8]");
+    if (!b || !EL("ob-step-8")) { return; }
+    var act = b.getAttribute("data-act8"), site = b.getAttribute("data-site");
+    if (act === "signin") { storeLogins(site); }
+    else if (act === "skip") { skipSite(site); }
+    else if (act === "done") { w8.site[site].stage = "done"; paintSite(site); paintNext(); }
+    else if (act === "next") { leaveStep8(); }
+    else if (act === "confirm" || act === "ignore") { answerRow(b); }
+  }
+  function render8(status) {
+    w8.status = status; w8.proceeding = false;
+    SITES.forEach(function (s) {
+      var skipped = ((status && status.skips) || []).some(function (k) { return k.step === 8 && k.source === s; });
+      if (skipped) { w8.site[s].stage = "skipped"; }
+    });
+    return { ask: '<div id="ob-step-8"><div class="ob-site" id="ob-8-zybooks">' + siteHtml("zybooks") + '</div><div class="ob-site" id="ob-8-vhl">' + siteHtml("vhl") + '</div>' +
+      '<p class="ob-state ob-failed" id="ob-8-line" role="alert" hidden></p>' +
+      '<div class="su-actions"><button class="b pri y su-btn" type="button" id="ob-next-8" data-act8="next"' + (discovering || !SITES.every(settled8) ? " disabled" : "") + '>Next</button></div></div>' };
+  }
+  // A poll updates nothing on this panel: a re-draw would wipe what the student is typing.
+  function onStatus8(status) { w8.status = status; }
+  OB.registerPanel(8, { render: render8, onStatus: onStatus8 });
+  OB.registerLeave(function () { clearCredentialFields("zybooks"); clearCredentialFields("vhl"); });
+  if (EL("onboarding")) { EL("onboarding").addEventListener("click", onClick8); }
+  // ==== F11c, step 8 (ends) ======================================================================
+
+  // ==== F11c, step 10: your week (begins) ========================================================
+  // Class times show as set (read from `your_week`); the calendar's meetings are asked for only once
+  // the status says `proposals_ready`. Confirming is today's `commitments_confirm`, which can refuse
+  // by name while a sync runs: the sentence shows, with a Try again.
+  var w10 = { asked: false, busy: false, reg: "" };
+  var KINDS10 = [["class", "Class"], ["lab", "Lab"], ["work", "Work"], ["club", "Club"], ["meeting", "Meeting"], ["office-hours", "Office hours"]];
+  var LEVELS10 = [["hard", "Must keep"], ["soft", "Usually"], ["optional", "Optional"]];
+  function say10(text) {
+    var el = EL("ob-10-line"), retry = EL("ob-step10-retry");
+    if (el) { el.textContent = text; el.hidden = !text; }
+    if (retry) { retry.hidden = !text; }
+  }
+  function setConfirm10() {
+    var b = EL("ob-10-confirm");
+    if (b) { b.disabled = w10.busy; }
+  }
+  function loadSet10() {
+    invoke("your_week", {}).then(function (r) {
+      var host = EL("ob-10-set");
+      if (!host) { return; }
+      var w = r && r.ok && r.week ? r.week : null;
+      var rows = ((w && w.commitments) || []).map(function (c) {
+        return editRowHtml(c);
+      }).join("") + ((w && w.uncovered_courses) || []).map(function (u) {
+        return '<li><span class="a">' + esc(u.title) + '</span> <span class="su-dim">no class times found. Knowlu will ask this week.</span></li>';
+      }).join("");
+      host.innerHTML = rows ? '<ul class="ob-list">' + rows + '</ul>' : '<p class="ob-state">Knowlu has no class times to show yet. It will ask in the coming days.</p>';
+    }).catch(function () {
+      var host = EL("ob-10-set");
+      if (host) { host.innerHTML = '<p class="ob-state">Knowlu could not read your class times just now.</p>'; }
+    });
+  }
+  function editRowHtml(c) {
+    // A kind with no label here (event, exam, task-block) stays selected, under the engine's own word.
+    var known = KINDS10.some(function (k) { return k[0] === c.kind; });
+    var kinds = (known ? "" : '<option value="' + esc(c.kind || "") + '" selected>' + esc(c.kind || "") + '</option>') + KINDS10.map(function (k) { return '<option value="' + k[0] + '"' + (c.kind === k[0] ? " selected" : "") + '>' + k[1] + '</option>'; }).join("");
+    var levels = LEVELS10.map(function (l) { return '<option value="' + l[0] + '"' + ((c.level || "soft") === l[0] ? " selected" : "") + '>' + l[1] + '</option>'; }).join("");
+    return '<li class="ob-set" data-id="' + esc(c.id) + '" data-kind="' + esc(c.kind) + '" data-level="' + esc(c.level || "soft") + '"><span class="a">' + esc(c.title) + '</span> <span class="su-dim">' + esc(c.when || "") + '</span> ' +
+      '<button class="su-link" type="button" data-act10="edit">Edit</button>' +
+      '<span class="ob-edit" hidden> <select class="ob-kind" aria-label="What it is">' + kinds + '</select> <select class="ob-level" aria-label="How firm it is">' + levels + '</select> ' +
+      '<button class="b su-btn" type="button" data-act10="save">Save</button> <span class="ob-row-line" role="status"></span></span></li>';
+  }
+  // Edit saves through the console's own set_fields (a kind and a level; no command edits a class's hours).
+  function saveEdit10(row) {
+    var line = row.querySelector(".ob-row-line"), kind = row.querySelector(".ob-kind").value, level = row.querySelector(".ob-level").value;
+    var fields = {};
+    if (kind !== row.getAttribute("data-kind")) { fields.kind = kind; }
+    if (level !== row.getAttribute("data-level")) { fields.level = level; }
+    if (!Object.keys(fields).length) { line.textContent = "Nothing changed."; return; }
+    OB.clearError();
+    invoke("set_fields", { view: "today", id: row.getAttribute("data-id"), fields: fields }).then(function (env) {
+      if (env && env.ok === false) { line.textContent = env.error || "Knowlu couldn't save that. Try again."; return; }
+      row.setAttribute("data-kind", kind); row.setAttribute("data-level", level);
+      line.textContent = "Saved.";
+    }).catch(function () { line.textContent = "Knowlu couldn't save that. Try again."; });
+  }
+  function propHtml(p) {
+    var lv = ["hard", "soft", "optional"].map(function (l) { return '<option value="' + l + '"' + ((p.level || "soft") === l ? " selected" : "") + '>' + l.charAt(0).toUpperCase() + l.slice(1) + '</option>'; }).join("");
+    return '<div class="ob-prop" data-key="' + esc(p.source_uid) + '" data-answer=""><span class="a">' + esc(p.title) + '</span> <span class="su-dim">' + esc(p.when || "") + (p.where ? " · " + esc(p.where) : "") + '</span> ' +
+      '<button class="b su-btn" type="button" data-act10="mine" aria-pressed="false">Mine</button> <button class="b su-btn" type="button" data-act10="not" aria-pressed="false">Not mine</button> ' +
+      '<select class="ob-level" aria-label="How firm is ' + esc(p.title) + '">' + lv + '</select></div>';
+  }
+  function askProposals(s) {
+    if (!(s && s.proposals_ready) || w10.asked) { return; }
+    w10.asked = true;
+    invoke("commitment_proposals", {}).then(function (r) {
+      var host = EL("ob-10-prop");
+      if (!host) { return; }
+      var ps = ((r && r.proposals) || []).filter(function (p) { return !p.window; });
+      host.innerHTML = ps.length ? '<p class="su-small">Knowlu found these repeating on your calendar. Mark each one, or leave it blank and Knowlu asks again later.</p>' + ps.map(propHtml).join("")
+        : '<p class="ob-state">' + esc((r && r.error) || "Knowlu found nothing repeating on your calendar.") + '</p>';
+    }).catch(function () {
+      var host = EL("ob-10-prop");
+      if (host) { host.innerHTML = '<p class="ob-state">Knowlu could not read your calendars just now. Your class times can still be confirmed.</p>'; }
+    }).then(setConfirm10);
+  }
+  // ==== F11c, step 10 (continues) ================================================================
+  function confirm10() {
+    if (w10.busy) { return; }
+    var mine = [], notMine = [];
+    document.querySelectorAll("#ob-10-prop .ob-prop").forEach(function (r) {
+      var key = r.getAttribute("data-key"), a = r.getAttribute("data-answer"), lv = r.querySelector(".ob-level");
+      if (a === "mine") { mine.push({ source_uid: key, level: lv ? lv.value : "soft" }); }
+      else if (a === "not") { notMine.push(key); }
+    });
+    w10.busy = true; say10(""); setConfirm10(); OB.clearError();
+    invoke("commitments_confirm", { view: "today", confirm: { mine: mine, not_mine: notMine } }).then(function (env) {
+      w10.busy = false; setConfirm10();
+      if (!env || env.ok !== true) { say10("Knowlu couldn't save your week: " + ((env && env.error) || "something went wrong") + "."); return; }
+      OB.show(11);
+    }).catch(function () { w10.busy = false; setConfirm10(); say10("Knowlu couldn't save your week. Try again."); });
+  }
+  function onClick10(e) {
+    var b = e.target.closest("[data-act10]");
+    if (!b || !EL("ob-step-10")) { return; }
+    var act = b.getAttribute("data-act10"), row = b.closest(".ob-prop");
+    if (act === "confirm") { confirm10(); return; }
+    if (act === "edit" || act === "save") {
+      var set = b.closest(".ob-set");
+      if (act === "save") { saveEdit10(set); } else { set.querySelector(".ob-edit").hidden = !set.querySelector(".ob-edit").hidden; }
+      return;
+    }
+    if (!row) { return; }
+    // A second press on the pressed button puts the row back to unanswered.
+    var next = row.getAttribute("data-answer") === act ? "" : act;
+    row.setAttribute("data-answer", next);
+    row.querySelectorAll("[data-act10]").forEach(function (x) { x.setAttribute("aria-pressed", String(x.getAttribute("data-act10") === next)); });
+  }
+  function render10(status) {
+    w10.asked = false; w10.busy = false;
+    w10.reg = (status && status.jobs && status.jobs["registrar.confirm"] && status.jobs["registrar.confirm"].state) || "";
+    Promise.resolve().then(function () { loadSet10(); askProposals(status); });
+    return { ask: '<div id="ob-step-10"><h2 class="ob-h2">Class times</h2><div id="ob-10-set"><p class="ob-state">Reading your class times…</p></div>' +
+      '<h2 class="ob-h2">Meetings on your calendar</h2><div id="ob-10-prop"><p class="ob-state" id="ob-10-wait">Knowlu is reading your calendars…</p></div>' +
+      '<p class="ob-state ob-failed" id="ob-10-line" role="alert" hidden></p>' +
+      '<div class="su-actions"><button class="b pri y su-btn" type="button" id="ob-10-confirm" data-act10="confirm">Confirm my week</button>' +
+      '<button class="b su-btn" type="button" id="ob-step10-retry" data-act10="confirm" hidden>Try again</button></div></div>' };
+  }
+  // A poll fills this panel's own nodes in place; it never redraws the pane.
+  function onStatus10(status) {
+    askProposals(status);
+    var rec = status && status.jobs && status.jobs["config.ingest"], wait = EL("ob-10-wait");
+    if (rec && rec.state === "failed" && wait && !w10.asked) {
+      wait.innerHTML = esc(reasonWords(rec.reason)) + ' <button class="su-link" type="button" data-retry="config.ingest">Try again</button>';
+    }
+    // The class times appear when the registrar's step finishes, so they are read again then.
+    var reg = status && status.jobs && status.jobs["registrar.confirm"];
+    if (reg && reg.state === "done" && w10.reg !== "done") { w10.reg = "done"; loadSet10(); }
+  }
+  OB.registerPanel(10, { render: render10, onStatus: onStatus10 });
+  if (EL("onboarding")) { EL("onboarding").addEventListener("click", onClick10); }
+  // ==== F11c, step 10 (ends) =====================================================================
+
   // ---- status, polling, the shots hook ---------------------------------------------------------------
   function load() {
     var ask = S.fixed ? Promise.resolve(S.fixed) : invoke("onboarding_status", {});
