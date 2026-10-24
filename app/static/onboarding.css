@@ -1,0 +1,23 @@
+/* O3 F11a: the onboarding step frame and the rail, in the ruled direction (5b, Departures).
+   The frame is F10's setup shell (`.setup`, `.su-*`) grown past step 2, so every token and the rail's
+   row shapes come from console.css; this sheet adds only what the frame needs on top. Every class
+   it adds starts `ob-`. */
+.ob-main { display: flex; flex-direction: column; }
+.ob-bar { display: flex; gap: 20px; justify-content: flex-end; padding: 14px 56px 0; font-size: 13.5px; }
+.ob-bar .su-link { color: var(--su-ink-2); }
+.ob button[disabled].su-link { color: var(--su-ink-3); cursor: not-allowed; text-decoration-style: dashed; }
+.ob-closing { margin: 12px 56px 0; padding: 10px 14px; max-width: 64ch; background: var(--su-board-2); border-left: 3px solid var(--su-amber); color: var(--su-ink); font-size: 14.5px; }
+.ob-closing[hidden] { display: none; }
+.ob-step { flex: 1; }
+.ob-state { max-width: 64ch; margin: 16px 0 0; color: var(--su-ink-2); font-size: 14.5px; }
+.ob-state.ob-failed { color: var(--su-amber); }
+.ob-proof:empty { display: none; }
+/* The rail's states beyond the shell's now, done and next: reading, failed, skipped. */
+.ob .su-row.done .su-st { color: var(--su-ink); }
+.ob .su-row.failed .su-nm, .ob .su-row.failed .su-st { color: var(--su-amber); }
+.ob .su-row.failed .su-shape { background: none; transform: none; border: 2px solid var(--su-amber); }
+.ob .su-row.reading .su-nm, .ob .su-row.reading .su-st { color: var(--su-ink); }
+.ob .su-row.reading .su-shape { background: none; transform: none; border: 2px dotted var(--su-ink); }
+.ob .su-row.skipped .su-shape { background: var(--su-ink-3); transform: none; height: 2px; margin-top: 9px; border-radius: 0; }
+.ob .su-row .su-pf .su-link { font-size: 13px; margin-left: 6px; color: var(--su-amber); }
+.ob-closing-now .su-link, .ob-closing-now .su-btn { pointer-events: none; }

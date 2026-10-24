@@ -159,7 +159,13 @@ pub fn launch_state(app: tauri::AppHandle) -> Value {
             "default_parent": default_folders().map(|(p, _)| p),
             "default_backup": default_folders().map(|(_, b)| b),
         }),
-        None => json!({ "ok": true, "error": Value::Null, "mode": "console" }),
+        // The console process: `"onboarding"` when launch managed `LaunchMode::Onboarding` (F4), so
+        // the page starts setup instead of booting the normal console (F11a review C1).
+        None => {
+            let onboarding = app.try_state::<crate::onboarding_state::LaunchMode>()
+                .is_some_and(|m| *m == crate::onboarding_state::LaunchMode::Onboarding);
+            json!({ "ok": true, "error": Value::Null, "mode": if onboarding { "onboarding" } else { "console" } })
+        }
     }
 }
 
