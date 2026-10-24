@@ -817,6 +817,25 @@ pub fn create_vault_in(root: &Path, home: &Path, name: &str, plan: &WizardPlan) 
     out
 }
 
+/// **F3 stub.** The name step 2 gives the new vault: "Knowlu", then "Knowlu 2", "Knowlu 3", stepping
+/// past every name that is a registered profile in `root` or a folder already under `home`'s vault
+/// parent. Writes and renames nothing.
+pub fn pick_vault_name_in(_root: &Path, _home: &Path) -> Result<String, String> {
+    todo!("F3: the name picker")
+}
+
+/// **F3 stub.** Step 2's create: a vault from the defaults (no school files; `onboarding.json` last),
+/// then today's restore from the account. Same envelope as `create_vault_in`, with `restored.ok`.
+pub fn create_vault_defaults_in(_root: &Path, _home: &Path) -> Value {
+    todo!("F3: step 2's vault with defaults")
+}
+
+/// **F3 stub.** The picker's profile rows, each carrying `setup_unfinished` from its
+/// `onboarding.json` (what `launch_state` serves under `profiles`).
+pub fn profiles_with_setup_state(_root: &Path, _profiles: &[Profile]) -> Value {
+    todo!("F3: setup_unfinished on launch_state's profiles")
+}
+
 #[tauri::command(async)]
 pub fn create_vault(app: tauri::AppHandle, name: String, plan: WizardPlan) -> Value {
     let root = match app.try_state::<Onboarding>() { Some(o) => o.root.clone(), None => return json!({ "ok": false, "error": "not in onboarding", "profile": Value::Null }) };

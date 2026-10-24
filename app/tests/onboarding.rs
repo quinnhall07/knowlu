@@ -1640,3 +1640,340 @@ fn create_vault_sets_the_mail_offer_marker_only_when_offered() {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+// -- O3 F3: step 2 makes the vault with defaults (plan "F3. Step 2: the vault with defaults") ------
+//
+// `create_vault_defaults_in` is step 2's create: no name, no plan, no school files. These tests need
+// the same real pending session every `create_vault_in` test above needs, so they take the same
+// `PendingSession` (CREDMAN_LOCK, restore on drop). Neither old sentence ("press Finish again",
+// "pick another name") may be reachable from it.
+use knowlu::onboarding::{create_vault_defaults_in, pick_vault_name_in, profiles_with_setup_state};
+use knowlu::onboarding_state::{load_state, save_state, Loaded, OnboardingState};
+
+/// The vault step 2 made under `home` for `name`.
+fn step2_vault(home: &Path, name: &str) -> PathBuf { home.join("Knowlu").join(name) }
+
+/// The pending session again, after a first create moved it onto its profile. Only the entry is
+/// rewritten: the `PendingSession` guard that owns it is still alive and still cleans up.
+#[cfg(windows)]
+fn refill_pending(account_id: &str) {
+    let s = knowlu::account::Session {
+        access_token: "test-at".into(),
+        refresh_token: "test-rt".into(),
+        expires_at: jiff::Timestamp::now().as_second() + 3600,
+        email: "knowlu-test@example.invalid".into(),
+    };
+    knowlu::account::save_session(knowlu::account::PENDING_TARGET, account_id, &s).expect("pending session");
+}
+
+/// The three files the school's answer creates, after payment (§4.9).
+const SCHOOL_FILES: [&str; 3] = ["config/campus.yaml", "config/events.yaml", "config/ingest.yaml"];
+
+#[cfg(windows)]
+fn assert_no_school_files(vault: &Path) {
+    for f in SCHOOL_FILES {
+        assert!(!vault.join(f).exists(), "{f} must not exist after step 2");
+    }
+}
+
+/// F3 test 1: the defaults, the session move, the unfinished `onboarding.json` and a runner the
+/// app's scheduler accepts; and a second and third profile are "Knowlu 2" and "Knowlu 3".
+#[cfg(windows)]
+#[test]
+fn step_two_makes_a_vault_from_the_defaults_and_names_the_next_ones() {
+    let root = tmp("f3-defaults");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    let mut session = PendingSession::new("acc-f3-defaults");
+    for (i, name) in ["Knowlu", "Knowlu 2", "Knowlu 3"].into_iter().enumerate() {
+        if i > 0 { refill_pending("acc-f3-defaults"); }
+        let out = create_vault_defaults_in(&app_data, &home);
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["profile"]["name"], name, "{out}");
+        let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+        session.expect_move_to(&id);
+        let vault = step2_vault(&home, name);
+        assert!(vault.is_dir(), "{name} is made under the default parent");
+        if i > 0 { continue; }
+
+        // The zone is Windows', the slots are noon and six, the device is this machine.
+        let runners = knowlu_engine::pystr::read_text(&vault.join("config").join("runners.yaml")).expect("runners.yaml");
+        let zone = jiff::tz::TimeZone::system().iana_name().unwrap_or("America/Chicago").to_string();
+        assert!(runners.contains(&zone), "the runner's tz is Windows' zone {zone}: {runners}");
+        assert!(runners.contains("12:00") && runners.contains("18:00"), "{runners}");
+        assert!(runners.contains("name: local"), "{runners}");
+        assert!(runners.contains("scheduler: app"), "run_slot_with refuses a runner that is not the app's: {runners}");
+        assert!(runners.contains(&knowlu_engine::journal::device_name()), "this device is named: {runners}");
+        // The vault names the profile's session target; the session is off the pending target.
+        let cloud = knowlu_engine::pystr::read_text(&vault.join("config").join("cloud.yaml")).expect("cloud.yaml");
+        assert!(cloud.contains(&knowlu::credentials::target_for(&id, "session")), "{cloud}");
+        assert!(knowlu::credentials::exists(&knowlu::account::session_target(&id)), "the session moved onto the profile");
+        assert!(!knowlu::credentials::exists(knowlu::account::PENDING_TARGET), "and off the pending target");
+        // Settings: autostart on.
+        let dir = knowlu::profiles::profile_dir(&app_data, &id);
+        let (settings, bad) = knowlu::state::Settings::load(&dir.join("settings.json"), &vault);
+        assert!(bad.is_none(), "{bad:?}");
+        assert!(settings.autostart && settings.profile_id == id);
+        assert!(dir.join("settings.json").is_file(), "settings were written, not defaulted");
+        // The unfinished onboarding file, at step 3.
+        match load_state(&dir) {
+            Loaded::Ok(s) => assert!(s.step == 3 && !s.finished, "unfinished at step 3: {s:?}"),
+            other => panic!("onboarding.json: {other:?}"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F3 test 2: nothing about a school exists after step 2 (the files wait for `school.apply`).
+#[cfg(windows)]
+#[test]
+fn step_two_writes_no_campus_events_or_ingest_file() {
+    let root = tmp("f3-no-school");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    let mut session = PendingSession::new("acc-f3-no-school");
+    let out = create_vault_defaults_in(&app_data, &home);
+    assert_eq!(out["ok"], true, "{out}");
+    session.expect_move_to(out["profile"]["id"].as_str().expect("a profile id"));
+    let vault = step2_vault(&home, "Knowlu");
+    assert_no_school_files(&vault);
+    // The files that are all defaults are there.
+    for f in ["config/planning.yaml", "config/week_template.yaml", "config/actor.yaml", "config/runners.yaml", "config/cloud.yaml", ".gitignore"] {
+        assert!(vault.join(f).is_file(), "{f} is made at step 2");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F3 test 3: a restore from the account's copy goes through the same call, writes none of the three
+/// school files (config never syncs), and `onboarding.json` lands at the step §4.7 derives: 3, since
+/// a restored vault has no `campus.yaml` and the account never says which school.
+#[cfg(windows)]
+#[test]
+fn step_two_restore_writes_no_school_files_and_lands_at_the_derived_step() {
+    let root = tmp("f3-restore");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    let mut session = PendingSession::new("acc-f3-restore");
+    let device = "aaaaaaaaaaaaaaaa";
+    let note_text = "---\nid: task_0000000098\n---\nfrom the account\n";
+    let record = serde_json::json!({
+        "op": "create", "path": "tasks/from-account.md", "actor": "student", "via": "dashboard",
+        "device": device, "ts": "2026-08-01T10:00:00.000Z", "id": "task_0000000098",
+        "new": { "id": "task_0000000098" }
+    });
+    let record_body = knowlu_engine::ledger::dumps_value(&record);
+    let page = serde_json::json!({
+        "records": [{ "seq": 1, "device": device, "record_hash": knowlu_engine::sync::sha256_hex(record_body.as_bytes()), "body": record_body }],
+        "notes": [{ "path": "tasks/from-account.md", "device": device, "deleted": false, "body": note_text }],
+        "record_cursor": 1, "note_cursor": 1, "more": false
+    });
+    let (base, handle) = restore_loopback(&knowlu_engine::ledger::dumps_value(&page));
+    unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
+    let out = create_vault_defaults_in(&app_data, &home);
+    assert_eq!(out["ok"], true, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    assert_eq!(out["restored"]["notes"], 1, "{out}");
+    let vault = step2_vault(&home, "Knowlu");
+    assert_eq!(knowlu_engine::pystr::read_text(&vault.join("tasks").join("from-account.md")).expect("the restored note"), note_text);
+    assert_no_school_files(&vault);
+    match load_state(&knowlu::profiles::profile_dir(&app_data, &id)) {
+        Loaded::Ok(s) => assert!(s.step == 3 && !s.finished && s.account_settled, "{s:?}"),
+        other => panic!("onboarding.json: {other:?}"),
+    }
+    handle.join().expect("the loopback thread did not panic");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F3 test 4: each profile row carries `setup_unfinished`, from its own `onboarding.json`: true for
+/// an unfinished file, false for a finished one and for none.
+#[test]
+fn launch_state_profiles_carry_setup_unfinished() {
+    let root = tmp("f3-unfinished");
+    let make = |name: &str| {
+        let v = root.join("vaults").join(name);
+        std::fs::create_dir_all(&v).unwrap();
+        knowlu::profiles::register(&root, name, &v).unwrap()
+    };
+    let (open, done, none) = (make("open"), make("done"), make("none"));
+    let mut st = OnboardingState::new("2026-10-24T00:00:00.000Z", 3);
+    save_state(&knowlu::profiles::profile_dir(&root, &open.id), &st).unwrap();
+    st.finished = true;
+    save_state(&knowlu::profiles::profile_dir(&root, &done.id), &st).unwrap();
+    let all = vec![open.clone(), done.clone(), none.clone()];
+    let rows = profiles_with_setup_state(&root, &all);
+    let rows = rows.as_array().expect("an array of profiles");
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    let flag = |p: &knowlu::profiles::Profile| {
+        let row = rows.iter().find(|r| r["id"] == p.id.as_str()).expect("the profile is listed");
+        assert_eq!(row["name"], p.name.as_str(), "the row keeps the profile's own fields");
+        row["setup_unfinished"].clone()
+    };
+    assert_eq!(flag(&open), true);
+    assert_eq!(flag(&done), false);
+    assert_eq!(flag(&none), false);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F3 test 5, reached: an account that answered (here an empty page) settles, whether or not it held
+/// anything. The file says so.
+#[cfg(windows)]
+#[test]
+fn account_settled_is_true_when_the_account_was_reached() {
+    let root = tmp("f3-settled");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    let mut session = PendingSession::new("acc-f3-settled");
+    let (base, handle) = restore_loopback(EMPTY_PULL_PAGE);
+    unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
+    let out = create_vault_defaults_in(&app_data, &home);
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(out["restored"]["ok"], true, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    match load_state(&knowlu::profiles::profile_dir(&app_data, &id)) {
+        Loaded::Ok(s) => assert!(s.account_settled, "{s:?}"),
+        other => panic!("onboarding.json: {other:?}"),
+    }
+    handle.join().expect("the loopback thread did not panic");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F3 test 5, refused: the token probe is answered, then the restore's connection is refused (the
+/// listener is gone). The vault is kept, as today, and `account_settled` stays false so the courses
+/// wait. (A base that refuses from the first request would stop at the probe, before any vault
+/// exists; that is test 7's case.)
+#[cfg(windows)]
+#[test]
+fn account_settled_is_false_when_the_restore_could_not_reach_the_account() {
+    let root = tmp("f3-unsettled");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    let mut session = PendingSession::new("acc-f3-unsettled");
+    let (base, handle) = multi_loopback(vec![(200, EMPTY_PULL_PAGE)]);
+    unsafe { std::env::set_var("KNOWLU_API_BASE", &base) };
+    let out = create_vault_defaults_in(&app_data, &home);
+    handle.join().expect("the probe was served once");
+    assert_eq!(out["ok"], true, "the vault is kept: {out}");
+    assert_eq!(out["restored"]["ok"], false, "{out}");
+    let id = out["profile"]["id"].as_str().expect("a profile id").to_string();
+    session.expect_move_to(&id);
+    assert!(step2_vault(&home, "Knowlu").is_dir(), "the vault is kept");
+    match load_state(&knowlu::profiles::profile_dir(&app_data, &id)) {
+        Loaded::Ok(s) => assert!(!s.account_settled && s.step == 3, "{s:?}"),
+        other => panic!("onboarding.json: {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The folders directly under `<home>\Knowlu` that are not the backups root, sorted.
+fn vault_folders(home: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(home.join("Knowlu")).map(|rd| {
+        rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n != "Backups").collect()
+    }).unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// F3 test 6: the name is Rust's. It steps past a registered profile's name and past a folder that
+/// is on disk with no profile, and it writes into and renames nothing.
+#[test]
+fn the_vault_name_steps_past_registered_profiles_and_folders_on_disk() {
+    let register = |root: &Path, name: &str| {
+        let v = root.join("elsewhere").join(name);
+        std::fs::create_dir_all(&v).unwrap();
+        knowlu::profiles::register(root, name, &v).unwrap();
+    };
+    let folder = |home: &Path, name: &str| {
+        let d = home.join("Knowlu").join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("keep.txt"), b"mine").unwrap();
+    };
+
+    // Nothing yet: "Knowlu".
+    let root = tmp("f3-name-none");
+    assert_eq!(pick_vault_name_in(&root, &root.join("home")).unwrap(), "Knowlu");
+
+    // A registered "Knowlu": "Knowlu 2".
+    let root = tmp("f3-name-registered");
+    register(&root, "Knowlu");
+    assert_eq!(pick_vault_name_in(&root, &root.join("home")).unwrap(), "Knowlu 2");
+
+    // An unregistered Knowlu folder on disk: "Knowlu 2", the folder untouched.
+    let root = tmp("f3-name-folder");
+    let home = root.join("home");
+    folder(&home, "Knowlu");
+    let (before, names) = (fingerprint(&home), vault_folders(&home));
+    assert_eq!(pick_vault_name_in(&root, &home).unwrap(), "Knowlu 2");
+    assert_eq!(fingerprint(&home), before, "nothing is written into the existing folder");
+    assert_eq!(vault_folders(&home), names, "no folder is made or renamed");
+
+    // "Knowlu" and a "Knowlu 2" folder: "Knowlu 3".
+    let root = tmp("f3-name-two-folders");
+    let home = root.join("home");
+    folder(&home, "Knowlu");
+    folder(&home, "Knowlu 2");
+    let (before, names) = (fingerprint(&home), vault_folders(&home));
+    assert_eq!(pick_vault_name_in(&root, &home).unwrap(), "Knowlu 3");
+    assert_eq!(fingerprint(&home), before);
+    assert_eq!(vault_folders(&home), names);
+
+    // A registered "Knowlu" and a leftover "Knowlu 2" folder with no profile: "Knowlu 3".
+    let root = tmp("f3-name-mixed");
+    let home = root.join("home");
+    register(&root, "Knowlu");
+    folder(&home, "Knowlu 2");
+    assert_eq!(pick_vault_name_in(&root, &home).unwrap(), "Knowlu 3");
+    assert_eq!(vault_folders(&home), vec!["Knowlu 2".to_string()]);
+}
+
+/// F3 test 6, end to end: a leftover "Knowlu" folder is never the destination, so `dest_for`'s
+/// "already exists" refusal is never reached and the leftover keeps its bytes.
+#[cfg(windows)]
+#[test]
+fn step_two_with_a_leftover_folder_makes_the_next_name_and_leaves_it_alone() {
+    let root = tmp("f3-leftover");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    let left = step2_vault(&home, "Knowlu");
+    std::fs::create_dir_all(&left).unwrap();
+    std::fs::write(left.join("keep.txt"), b"mine").unwrap();
+    let before = fingerprint(&left);
+    let mut session = PendingSession::new("acc-f3-leftover");
+    let out = create_vault_defaults_in(&app_data, &home);
+    assert_eq!(out["ok"], true, "{out}");
+    session.expect_move_to(out["profile"]["id"].as_str().expect("a profile id"));
+    assert_eq!(out["profile"]["name"], "Knowlu 2", "{out}");
+    assert!(step2_vault(&home, "Knowlu 2").join("config").join("planning.yaml").is_file());
+    assert_eq!(fingerprint(&left), before, "the leftover folder is untouched");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The two sentences of the old Finish panel, which have no step to point to on step 2.
+#[cfg(windows)]
+fn assert_no_old_sentence(out: &serde_json::Value) {
+    let e = out["error"].as_str().unwrap_or_default().to_lowercase();
+    assert!(!e.contains("press finish again"), "step 2 has no Finish: {e}");
+    assert!(!e.contains("pick another name"), "step 2 has no name field: {e}");
+}
+
+/// F3 test 7: an account that cannot be reached for the token check refuses step 2 with step 2's own
+/// retry ("Try again"), makes nothing, and keeps the sign-in for that retry. Today's create says
+/// "press Finish again" for exactly this.
+#[cfg(windows)]
+#[test]
+fn step_two_failures_say_try_again_never_the_old_finish_or_name_sentences() {
+    let root = tmp("f3-errors");
+    let (home, app_data) = (root.join("home"), root.join("appdata"));
+    let session = PendingSession::new("acc-f3-errors");
+    unsafe { std::env::set_var("KNOWLU_API_BASE", closed_loopback_base()) };
+    let out = create_vault_defaults_in(&app_data, &home);
+    assert_eq!(out["ok"], false, "{out}");
+    assert_no_old_sentence(&out);
+    assert!(out["error"].as_str().unwrap_or_default().contains("Try again"), "a named error with step 2's retry: {out}");
+    assert!(!step2_vault(&home, "Knowlu").exists(), "nothing is made");
+    assert!(knowlu::credentials::exists(knowlu::account::PENDING_TARGET), "the sign-in stays for the retry");
+
+    // No pending session at all: also a named error, never the old sentences.
+    let _ = knowlu::credentials::delete(knowlu::account::PENDING_TARGET);
+    let out = create_vault_defaults_in(&app_data, &home);
+    assert_eq!(out["ok"], false, "{out}");
+    assert_no_old_sentence(&out);
+    assert!(!out["error"].as_str().unwrap_or_default().is_empty(), "{out}");
+    drop(session);
+    let _ = std::fs::remove_dir_all(&root);
+}
