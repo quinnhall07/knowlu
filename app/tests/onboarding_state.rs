@@ -472,6 +472,21 @@ fn test_17_on_sign_out_deletes_the_answers_and_the_pending_links_and_rewinds_to_
 }
 
 #[test]
+fn test_17_a_rewound_file_has_no_step_10_stamp_and_no_hand_over_items() {
+    // A step-2 file behaves as a fresh install: a confirmation from before the sign-out must not
+    // reach step 10's gate or `slot.first_full`.
+    let d = scratch("t17-stamp");
+    let before = full_state();
+    assert!(before.step10_confirmed_at.is_some() && !before.handover.is_empty());
+    save_state(&d, &before).unwrap();
+    on_sign_out_with(&d, &FakePending::default()).expect("the rewind");
+    let Loaded::Ok(after) = load_state(&d) else { panic!("rewritten, not removed") };
+    assert_eq!(after.step, 2);
+    assert!(after.step10_confirmed_at.is_none(), "the step-10 stamp is cleared");
+    assert!(after.handover.is_empty(), "the hand-over items are cleared");
+}
+
+#[test]
 fn test_17_a_finished_file_is_not_touched_by_sign_out() {
     let d = scratch("t17-finished");
     let mut s = full_state();

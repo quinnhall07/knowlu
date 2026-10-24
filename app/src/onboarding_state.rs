@@ -596,7 +596,8 @@ pub fn skip_step(state: &mut OnboardingState, step: u8, source: &str) -> Result<
 }
 
 /// F2e: deletes the answers file and both pending credentials, then rewinds an unfinished
-/// `onboarding.json` to step 2 (jobs pending, `account_settled` and `school` cleared, skips kept).
+/// `onboarding.json` to step 2 (jobs pending, `account_settled`, `school`, `step10_confirmed_at` and
+/// `handover` cleared, skips kept).
 /// A finished file is left alone. `account::sign_out_clean` calls the real-store wrapper.
 pub fn on_sign_out_with(data_dir: &Path, pending: &dyn PendingStore) -> Result<(), String> {
     // Every step runs; the failures are collected, so one stuck file never keeps the rest on the device.
@@ -618,6 +619,9 @@ pub fn on_sign_out_with(data_dir: &Path, pending: &dyn PendingStore) -> Result<(
             s.step = 2;
             s.account_settled = false;
             s.school = None;
+            // A step-2 file is a fresh install's: no confirmation or hand-over from before the sign-out.
+            s.step10_confirmed_at = None;
+            s.handover.clear();
             for job in s.jobs.values_mut() { *job = JobRecord::default(); }
             if let Err(e) = save_state(data_dir, &s) { failed.push(e); }
         }
