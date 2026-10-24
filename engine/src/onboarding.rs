@@ -352,7 +352,7 @@ fn preview_inner(inputs: &PreviewInputs, unread: &[&str], tz: &TimeZone, now: Da
         "classes": courses.as_ref().map(Vec::len),
         "errors": errors,
         "grades_courses": grades_courses,
-        "homework_sites": homework_sites(feed.as_deref().unwrap_or(&[]), courses.as_deref().unwrap_or(&[]), grades.as_ref()),
+        "homework_sites": courses.as_deref().map_or(json!({}), |list| homework_sites(feed.as_deref().unwrap_or(&[]), list, grades.as_ref())),
         "turned_in": turned_in,
         "week_of": monday.to_string(),
         "week_today": today,
@@ -397,7 +397,7 @@ fn linked_sites(text: &str) -> BTreeSet<&'static str> {
             if lower[..at].chars().next_back().is_some_and(|c| !(c.is_whitespace() || "\"'<>([".contains(c))) {
                 continue;
             }
-            let authority = lower[at + scheme.len()..].split(|c: char| c.is_whitespace() || "/?#\\\"'<>)]".contains(c)).next().unwrap_or("");
+            let authority = lower[at + scheme.len()..].split(|c: char| c.is_whitespace() || "/?#,;!\\\"'<>)]".contains(c)).next().unwrap_or("");
             let host = authority.rsplit('@').next().unwrap_or("");
             let host = host.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h);
             let host = host.trim_end_matches('.');

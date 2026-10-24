@@ -729,3 +729,31 @@ fn homework_sites_never_match_a_substring_a_bare_name_or_a_userinfo_lookalike() 
     assert_eq!(day_counts(&j).len(), 8, "{j}");
     let _ = std::fs::remove_dir_all(&v);
 }
+
+#[test]
+fn homework_sites_is_empty_without_a_readable_course_list() {
+    let v = scratch("f7f-nocourses");
+    let c = captures("f7f-nocourses");
+    let feed = [item("BB-1", "SYN 110 Ch 1", "20260905T120000", "https://learn.zybooks.com/zybook/SYN110", &[])];
+    std::fs::write(&c.feed, format!("BEGIN:VCALENDAR\nVERSION:2.0\n{}END:VCALENDAR\n", feed.concat())).unwrap();
+    let none = json_of(&run(&v, &["--preview".as_ref(), "--feed".as_ref(), c.feed.as_os_str()]));
+    assert_eq!(none["homework_sites"], json!({}), "no --courses: {none}");
+    let bad = c.feed.with_file_name("not-a-list.json");
+    std::fs::write(&bad, "{\"not\": \"an array\"}").unwrap();
+    let bad = json_of(&run(&v, &["--preview".as_ref(), "--feed".as_ref(), c.feed.as_os_str(), "--courses".as_ref(), bad.as_os_str()]));
+    assert_eq!(bad["homework_sites"], json!({}), "a courses file that is not an array: {bad}");
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn a_host_ends_at_a_comma_a_semicolon_or_a_bang() {
+    let items = [
+        item("BB-1", "SYN 110 A", "20260905T120000", "visit https://zybooks.com, then submit", &[]),
+        item("BB-2", "SYN 110 B", "20260905T130000", "open https://vhlcentral.com; then submit", &[]),
+        item("BB-3", "SYN 120 C", "20260905T140000", "go to https://learn.zybooks.com! now", &[]),
+    ];
+    let (v, out) = preview_items("f7f-punct", &items, &[]);
+    let j = json_of(&out);
+    assert_eq!(j["homework_sites"], json!({"vhl": ["_900001_1"], "zybooks": ["_900001_1", "_900002_1"]}), "{j}");
+    let _ = std::fs::remove_dir_all(&v);
+}
