@@ -601,7 +601,7 @@ fn file_only(e: String, data_dir: &Path) -> String {
     e.replace(&answers_path(data_dir).display().to_string(), ANSWERS_FILE).replace(&data_dir.display().to_string(), "")
 }
 
-/// An error with the vault's displayed path taken out: `cloud_config`'s errors begin with `<vault>nfigoud.yaml`, and the
+/// An error with the vault's displayed path taken out: `cloud_config`'s errors begin with `<vault>\config\cloud.yaml`, and the
 /// vault path carries the Windows user name. The service's own sentence is kept.
 fn vault_only(e: String, vault: &Path) -> String { e.replace(&vault.display().to_string(), "") }
 
