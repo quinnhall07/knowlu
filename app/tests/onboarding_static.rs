@@ -986,7 +986,9 @@ fn the_rails_account_and_payment_lines_come_from_account_status() {
     assert_eq!(pf(0, &acct("\"trialing\"", "\"2026-11-12T12:00:00Z\"")), "Signed in as ada@example.test");
     assert_eq!(pf(2, &acct("\"trialing\"", "\"2026-11-12T12:00:00Z\"")), "Trial on. First charge November 12.");
     assert_eq!(pf(2, &acct("\"active\"", "\"2026-12-03T12:00:00Z\"")), "Paid. Renews December 3.");
-    assert_eq!(pf(2, &acct("\"comped\"", "null")), "Nothing to pay.");
+    // Review r1 I-1: the engine's only no-charge case is `active` with plan `tester`; `none` and unknown words show nothing.
+    assert_eq!(pf(2, "{ok: true, email: \"ada@example.test\", status: \"active\", plan: \"tester\", current_period_end: null}"), "Nothing to pay.");
+    assert_eq!(pf(2, &acct("\"none\"", "null")), "");
 }
 
 #[test]

@@ -20,8 +20,7 @@ with their proof lines ("Signed in as ...", "Trial on. First charge October 31."
 ## Differences that remain
 
 - **Faces.** Zilla Slab and PT Serif Caption, not Big Shoulders and Public Sans (Quinn's ruling), so
-  wraps and heights differ. Zilla's tabular figures are wide ("3 1" in a date); proportional figures
-  are not available in the vendored files.
+  wraps and heights differ. Figures are proportional (no tabular-nums rule), so "October 31" has no gap.
 - **Steps 1 and 2 (the shell) keep today's foot**: "About 10 minutes", no Finish later. The shell's
   estimate is pinned elsewhere (`static_assets.rs`) and its rail has no Finish later; the prototype shows
   "About 9 minutes left" and Finish later there. Its step count reads "of 10", not "of 9" (no syllabi step).
@@ -31,6 +30,9 @@ with their proof lines ("Signed in as ...", "Trial on. First charge October 31."
 - **Step 8** is the built page: both sites' sign-in forms stacked, not the prototype's one-site card with
   "Knowlu's form", the "Found at your school" lines or the bottom week strip. Those are F11p2.
   Its rail shows Your week as "Reading" from the fixture; the prototype's sub-rows are not built.
-- **The logo's "lu"** is cream on the red block in both themes (the prototype's light shot has dark ink
-  there); cream keeps the contrast on #BC4444. The picker's brand keeps its square mark.
+- **The logo's "lu"** takes the theme's ink on the `--su-brand` block, as in the prototype. The picker's
+  brand keeps its square mark.
 - Top-right Sign out on step 8 is built; the prototype has none.
+- **Fixture file shape (dev only):** `?fixture=` reads each command from its own key; a file with none of
+  the `account_status`, `your_week` or `commitment_proposals` keys is read as the status itself.
+- **Minutes left** on the built step 8 reads "About 4 minutes left" (the prototype's mock reads 4 too).

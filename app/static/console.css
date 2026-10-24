@@ -678,7 +678,6 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .setup[hidden] { display: none; }
 .setup button, .setup input, .picker button, .picker input { font-family: var(--su-font); }
 .setup select, .setup textarea, .picker select { font-family: var(--su-font); }
-.setup, .picker { font-variant-numeric: tabular-nums; }
 /* The light "day board": the same token names, from the prototype's light block. It starts from
    Windows' setting (onboarding.js sets data-theme); nothing is stored. Labels and figures step up to 700. */
 .setup[data-theme="light"], .picker[data-theme="light"] {
@@ -691,7 +690,7 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 .setup[data-theme="light"] .su-row .su-st, .setup[data-theme="light"] .su-field label, .setup[data-theme="light"] .su-cost b { font-weight: 700; }
 /* The logo: the one rule that uses the caption face; the red block sits behind "lu". */
 .su-logo { font-family: "PT Serif Caption", Georgia, serif; font-size: 25px; line-height: 1; letter-spacing: .01em; color: var(--su-ink); white-space: nowrap; }
-.su-logo .su-lu { background: #BC4444; color: #F1EDE4; padding: 1px 2px 0; margin-left: 1px; }
+.su-logo .su-lu { background: var(--su-brand); color: inherit; padding: 1px 2px 0; margin-left: 1px; }
 .setup :focus-visible, .picker :focus-visible { outline: 2px solid var(--su-focus); outline-offset: 2px; }
 .su-dim { color: var(--su-ink-3); font-size: 12.5px; }
 .su-small { color: var(--su-ink-2); font-size: 13.5px; margin: 14px 0 0; }

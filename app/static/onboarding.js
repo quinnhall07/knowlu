@@ -138,7 +138,6 @@
   }
   // The rail's done lines for the account and payment rows, from `account_status` (this computer only).
   var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-  var NOT_ENTITLED = ["canceled", "cancelled", "past_due", "unpaid", "incomplete", "incomplete_expired", "expired", "paused"];
   function dayWords(iso) {
     var t = Date.parse(iso);
     return isFinite(t) ? MONTHS[new Date(t).getMonth()] + " " + new Date(t).getDate() : "";
@@ -147,17 +146,18 @@
     if (!(a && a.ok === true)) { return ""; }
     if (id === "account") { return a.email ? "Signed in as " + a.email : ""; }
     var day = a.current_period_end ? dayWords(a.current_period_end) : "";
+    if (a.status === "active" && a.plan === "tester") { return "Nothing to pay."; }
     if (a.status === "trialing") { return day ? "Trial on. First charge " + day + "." : ""; }
     if (a.status === "active") { return day ? "Paid. Renews " + day + "." : ""; }
-    return a.status && NOT_ENTITLED.indexOf(a.status) === -1 ? "Nothing to pay." : "";
+    return "";
   }
-  // The foot's estimate: each remaining step's time (spec 1.3, the middle of its range, rounded up to a
-  // whole minute), summed. A display estimate, never a count of jobs. Step 9 is absent in wave B.
-  var STEP_MINUTES = { 1: 1, 2: 1, 3: 2, 4: 2, 5: 1, 6: 1, 7: 1, 8: 1, 10: 2, 11: 1 };
+  // The foot's estimate: each remaining step's time (spec 1.3, the middle of its range) in seconds,
+  // (step 7, shown only to a student with no Google calendar who must paste a link, takes the top of its range), summed and rounded up to a whole minute. A display estimate, never a count of jobs. Step 9 is absent.
+  var STEP_SECONDS = { 3: 120, 4: 90, 5: 30, 6: 30, 7: 60, 8: 60, 10: 120, 11: 30 };
   function minutesLeft(step) {
     var n = 0;
-    Object.keys(STEP_MINUTES).forEach(function (k) { if (Number(k) >= Number(step)) { n += STEP_MINUTES[k]; } });
-    return Math.max(1, n);
+    Object.keys(STEP_SECONDS).forEach(function (k) { if (Number(k) >= Number(step)) { n += STEP_SECONDS[k]; } });
+    return Math.max(1, Math.ceil(n / 60));
   }
   function railRow(job, rec) {
     var st = (rec && rec.state) || "pending";
