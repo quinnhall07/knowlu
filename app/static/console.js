@@ -1539,7 +1539,7 @@
       // network is not a failed slot, for the tray or the retry ladder), but a check mark would say
       // it worked. It shows as failed, with a note; the "didn't finish" line below still reads codes.
       var unchecked = String(s[0]).indexOf("entitlement (refresh failed") === 0;
-      var state = String(s[0]).indexOf("(skipped:") !== -1 ? "skipped" : (s[1] === 0 && !unchecked ? "done" : "failed");
+      var state = (String(s[0]).indexOf("(skipped:") !== -1 || String(s[0]).indexOf("(not yet:") !== -1) ? "skipped" : (s[1] === 0 && !unchecked ? "done" : "failed");
       rows.push(firstRunRow(state, says, unchecked ? "couldn't check — will retry" : null));
     });
     // The live slot's step in progress (`Scheduler.live.current`), last, where the next row lands.
