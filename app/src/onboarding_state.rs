@@ -1136,14 +1136,14 @@ pub fn onboarding_finish(app: tauri::AppHandle) -> Value {
 
 fn no_setup() -> Value { serde_json::json!({ "ok": false, "error": "Knowlu's setup is not running" }) }
 
-/// The file plus the live job states, the gate and step 3's totals; fails closed (§14.50). The drain's
-/// progress (`exiting`) waits for F8f2's `Queue::exiting()`.
+/// The file plus the live job states, the gate, step 3's totals and the drain's progress (`exiting`,
+/// from `Queue::exiting()`); fails closed (§14.50).
 #[tauri::command]
 pub fn onboarding_status(app: tauri::AppHandle) -> Value {
     use tauri::Manager;
     let (Some(queue), Some(cs)) = (app.try_state::<crate::onboarding_jobs::Queue>(), app.try_state::<crate::state::ConsoleState>()) else { return no_setup() };
     let answers = load_answers(&cs.data_dir).ok().flatten();
-    status_for(Ok(queue.snapshot()), answers.as_ref(), None, jiff::Timestamp::now().as_second())
+    status_for(Ok(queue.snapshot()), answers.as_ref(), queue.exiting(), jiff::Timestamp::now().as_second())
 }
 
 /// Records the answer in the answers file, enqueues its jobs, then wakes the queue.
