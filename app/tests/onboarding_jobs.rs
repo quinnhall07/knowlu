@@ -542,7 +542,7 @@ struct FakePending(Mutex<BTreeMap<String, String>>);
 impl PendingStore for FakePending {
     fn put(&self, name: &str, link: &str) -> Result<(), String> { self.0.lock().unwrap().insert(name.into(), link.into()); Ok(()) }
     fn get(&self, name: &str) -> Option<String> { self.0.lock().unwrap().get(name).cloned() }
-    fn delete(&self, name: &str) { self.0.lock().unwrap().remove(name); }
+    fn delete(&self, name: &str) -> Result<(), String> { self.0.lock().unwrap().remove(name); Ok(()) }
 }
 
 /// The exit seams over a real queue: the process-level ones are fakes that only log.

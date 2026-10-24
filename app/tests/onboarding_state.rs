@@ -33,7 +33,7 @@ impl PendingStore for FakePending {
         Ok(())
     }
     fn get(&self, name: &str) -> Option<String> { self.0.lock().unwrap().get(name).cloned() }
-    fn delete(&self, name: &str) { self.0.lock().unwrap().remove(name); }
+    fn delete(&self, name: &str) -> Result<(), String> { self.0.lock().unwrap().remove(name); Ok(()) }
 }
 
 const LMS_LINK: &str = "https://lms.example.invalid/feed/tok-7f3a9c.ics";
@@ -1205,10 +1205,10 @@ fn test_26_cred_pending_round_trips_put_get_delete_under_knowlu_profile_pending_
     assert_eq!(store.get(PENDING_CALENDAR), None, "the other name is its own credential");
     store.put(PENDING_LMS, CAL_LINK).expect("a second put replaces");
     assert_eq!(store.get(PENDING_LMS).as_deref(), Some(CAL_LINK));
-    store.delete(PENDING_LMS);
+    store.delete(PENDING_LMS).unwrap();
     assert_eq!(store.get(PENDING_LMS), None);
     assert!(!knowlu::credentials::exists(&format!("knowlu/{id}/{PENDING_LMS}")));
-    store.delete(PENDING_LMS); // not-found is not an error: this must not panic
+    store.delete(PENDING_LMS).unwrap(); // not-found is not an error: this must not panic
     assert_eq!(pending_name("lms_ics"), Some(PENDING_LMS));
     assert_eq!(pending_name("calendar_ics"), Some(PENDING_CALENDAR));
     assert_eq!(pending_name("nonsense"), None);
