@@ -31,3 +31,6 @@ Reviewer, on `git diff fa232ec..81b54a0` (`feat/o3-f9`; one file, `app/src/onboa
 
 ## Controller's ruling
 F9 keeps `first_grades_marked` (exit 0 only), adds `first_grades_failed(steps) -> bool` (a bare `grades` row with a non-zero exit) with tests, and folds in M1 and M2. The planner assigns the caller's `Failed { reason, fix }` mapping, plus M3's note.
+
+## Controller check of the r1 fixes (f2f3821)
+I1 closed (`first_grades_marked` is exit 0 only; `first_grades_failed` added, with unit tests over exit 0/1/2/-1 and the scoped rows); M1 closed (the `Failed` arm first, with a test); M2 closed. Verified from the diff. **F9 passes.** The `Failed { reason, fix }` mapping is F8g's (plan §14.50).
