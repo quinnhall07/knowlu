@@ -1,0 +1,1491 @@
+//! O3 F1: the job queue, the gate, the exits, the feed and course runners, the link commands that only
+//! validate (plan tests 3-6, 8, 9, 11-14, 16, 17's exits, 19, 23-26). No window, no network, no engine
+//! child: the queue takes its runner as a trait and every test passes a fake. Test numbers are the
+//! plan's (`docs/plans/2026-10-23-wave-b-long-onboarding-plan.md`, F1). Invented data only.
+use knowlu::onboarding_gate::*;
+use knowlu::onboarding_jobs::*;
+use knowlu::onboarding_state::*;
+use knowlu::scheduler::SlotScope;
+use serde_json::Value;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+fn scratch(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("knowlu-o3-jobs-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+// ---- the fakes -------------------------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct Log(Arc<Mutex<Vec<String>>>);
+impl Log {
+    fn push(&self, s: impl Into<String>) { self.0.lock().unwrap().push(s.into()); }
+    fn all(&self) -> Vec<String> { self.0.lock().unwrap().clone() }
+    fn pos(&self, s: &str) -> Option<usize> { self.all().iter().position(|e| e == s) }
+    /// `start:<job>` events, in order, as job names.
+    fn started(&self) -> Vec<String> { self.all().iter().filter_map(|e| e.strip_prefix("start:").map(str::to_string)).collect() }
+    fn ran(&self, job: &str) -> bool { self.pos(&format!("start:{job}")).is_some() }
+    /// The scope each run of `job` was handed.
+    fn scopes(&self, job: &str) -> Vec<String> {
+        self.all().iter().filter_map(|e| e.strip_prefix(&format!("scope:{job}:")).map(str::to_string)).collect()
+    }
+    /// Engine steps the fake slots ran, in order, as `(job, step)`.
+    fn steps(&self) -> Vec<(String, String)> {
+        self.all().iter().filter_map(|e| {
+            let rest = e.strip_prefix("step:")?;
+            let (job, step) = rest.split_once(':')?;
+            Some((job.to_string(), step.to_string()))
+        }).collect()
+    }
+    /// The fakes' own tripwires: overlap, or a job on the wrong thread.
+    fn assert_clean(&self) {
+        let bad: Vec<String> = self.all().into_iter().filter(|e| e.starts_with("OVERLAP:") || e.starts_with("MISROUTED:")).collect();
+        assert!(bad.is_empty(), "{bad:?}");
+    }
+}
+
+struct Gate { open: Mutex<bool>, cv: Condvar }
+impl Gate {
+    fn new() -> Arc<Gate> { Arc::new(Gate { open: Mutex::new(false), cv: Condvar::new() }) }
+    fn release(&self) { *self.open.lock().unwrap() = true; self.cv.notify_all(); }
+    /// True when released; false when the stop was seen first and `honor_stop` is set.
+    fn wait(&self, stop: &AtomicBool, honor_stop: bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut g = self.open.lock().unwrap();
+        while !*g {
+            assert!(Instant::now() < deadline, "a fake gate was never released");
+            if honor_stop && stop.load(Ordering::SeqCst) { return false; }
+            g = self.cv.wait_timeout(g, Duration::from_millis(5)).unwrap().0;
+        }
+        true
+    }
+}
+
+const LANE_JOBS: [&str; 6] = ["school.store", "calendar.store", "school.apply", "school.courses", "registrar.confirm", "config.ingest"];
+const NOTE_JOBS: [&str; 4] = ["school.courses", "registrar.confirm", "slot.partial", "slot.first_full"];
+
+/// Sets a flag while held and records an overlap if it was already set.
+struct Busy<'a>(&'a AtomicBool);
+impl<'a> Busy<'a> {
+    fn enter(flag: &'a AtomicBool, log: &Log, what: &str) -> Busy<'a> {
+        if flag.swap(true, Ordering::SeqCst) { log.push(format!("OVERLAP:{what}")); }
+        Busy(flag)
+    }
+}
+impl Drop for Busy<'_> { fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); } }
+
+fn steps_of(scope: SlotScope) -> &'static [&'static str] {
+    match scope {
+        SlotScope::Full => &["sync", "coursework", "grades", "ingest", "judge", "rank"],
+        SlotScope::NoRank => &["sync", "coursework", "grades", "ingest", "judge"],
+        SlotScope::BeforeConfig => &["sync"],
+    }
+}
+
+type Behavior = Arc<dyn Fn() -> Outcome + Send + Sync>;
+
+#[derive(Default)]
+struct Fake {
+    log: Log,
+    /// job -> (gate, does the job notice the stop)
+    blocks: Mutex<BTreeMap<String, (Arc<Gate>, bool)>>,
+    /// `<job>/<step>` -> gate a fake slot waits on inside that step.
+    step_blocks: Mutex<BTreeMap<String, Arc<Gate>>>,
+    behaviors: Mutex<BTreeMap<String, Behavior>>,
+    serial_busy: AtomicBool,
+    notes_busy: AtomicBool,
+    clock: AtomicUsize,
+}
+impl Fake {
+    fn block(&self, job: &str, honor_stop: bool) -> Arc<Gate> {
+        let g = Gate::new();
+        self.blocks.lock().unwrap().insert(job.to_string(), (g.clone(), honor_stop));
+        g
+    }
+    fn block_step(&self, job: &str, step: &str) -> Arc<Gate> {
+        let g = Gate::new();
+        self.step_blocks.lock().unwrap().insert(format!("{job}/{step}"), g.clone());
+        g
+    }
+    fn behave(&self, job: &str, f: impl Fn() -> Outcome + Send + Sync + 'static) {
+        self.behaviors.lock().unwrap().insert(job.to_string(), Arc::new(f));
+    }
+    fn next_started(&self) -> String {
+        let n = self.clock.fetch_add(1, Ordering::SeqCst);
+        format!("2026-10-24T12:{:02}:{:02}.000Z", n / 60, n % 60)
+    }
+}
+
+impl Runner for Fake {
+    fn run(&self, job: &str, scope: Option<SlotScope>, stop: &AtomicBool) -> Outcome {
+        let thread = std::thread::current().name().unwrap_or("").to_string();
+        let lane = LANE_JOBS.contains(&job);
+        self.log.push(format!("start:{job}"));
+        if let Some(s) = scope { self.log.push(format!("scope:{job}:{s:?}")); }
+        // A lane job must run on the lane's thread and nothing else may: the lane never starts an
+        // engine child or a window (a serial job here would).
+        if lane != (thread == LANE_THREAD) { self.log.push(format!("MISROUTED:{job}:{thread}")); }
+        let _serial = (!lane).then(|| Busy::enter(&self.serial_busy, &self.log, job));
+        let _notes = NOTE_JOBS.contains(&job).then(|| Busy::enter(&self.notes_busy, &self.log, job));
+        let block = self.blocks.lock().unwrap().get(job).cloned();
+        if let Some((gate, honor)) = block {
+            if !gate.wait(stop, honor) {
+                self.log.push(format!("abandoned:{job}"));
+                return Outcome::Stopped;
+            }
+        }
+        let behavior = self.behaviors.lock().unwrap().get(job).cloned();
+        let out = if let Some(b) = behavior {
+            b()
+        } else if let Some(scope) = scope {
+            let started = self.next_started();
+            let mut ran = Vec::new();
+            for step in steps_of(scope) {
+                if stop.load(Ordering::SeqCst) {
+                    self.log.push(format!("stopped_before:{job}:{step}"));
+                    self.log.push(format!("end:{job}"));
+                    return Outcome::Stopped;
+                }
+                self.log.push(format!("step:{job}:{step}"));
+                let gate = self.step_blocks.lock().unwrap().get(&format!("{job}/{step}")).cloned();
+                if let Some(g) = gate { g.wait(stop, false); }
+                ran.push((step.to_string(), 0));
+            }
+            Outcome::Slot(SlotRun { started, steps: ran, reason: None })
+        } else {
+            std::thread::sleep(Duration::from_millis(3));
+            Outcome::Done(BTreeMap::new())
+        };
+        self.log.push(format!("end:{job}"));
+        out
+    }
+}
+
+struct Ent(AtomicBool);
+impl Entitlement for Ent {
+    fn entitled(&self) -> bool { self.0.load(Ordering::SeqCst) }
+    fn refresh(&self) {}
+}
+
+/// A status `at` the fake stamps just after the slot's own `started`.
+const FRESH: &str = "@fresh";
+const STALE: &str = "2000-01-01T00:00:00.000Z";
+
+fn status(at: &str, ok: bool, skipped: Option<&str>) -> SyncStatus {
+    SyncStatus { at: at.into(), ok, skipped: skipped.map(str::to_string), last_error: (!ok && skipped.is_none()).then(|| "transport".to_string()) }
+}
+fn cursor(pulled_to_end: bool, record: i64, note: i64) -> SyncCursor { SyncCursor { pulled_to_end, record_cursor: record, note_cursor: note } }
+type Reading = (Option<SyncStatus>, Option<SyncCursor>);
+/// A fresh, unskipped, `ok` reading.
+fn ok_reading(pulled_to_end: bool, record: i64, note: i64) -> Reading { (Some(status(FRESH, true, None)), Some(cursor(pulled_to_end, record, note))) }
+
+/// One reading per slot the queue reads; once they run out, a stale one (no status at all).
+struct Syncs(Mutex<VecDeque<Reading>>);
+impl SyncView for Syncs {
+    fn read(&self, slot_started: &str) -> Reading {
+        let next = self.0.lock().unwrap().pop_front();
+        match next {
+            Some((Some(mut s), c)) => {
+                if s.at == FRESH { s.at = format!("{slot_started}~"); }
+                (Some(s), c)
+            }
+            Some((None, c)) => (None, c),
+            None => (None, None),
+        }
+    }
+}
+
+struct Rig {
+    q: Queue,
+    log: Log,
+    fake: Arc<Fake>,
+    ent: Arc<Ent>,
+    dir: PathBuf,
+}
+
+fn state_at(step: u8, settled: bool) -> OnboardingState {
+    let mut s = OnboardingState::new("2026-10-24T09:00:00Z", step);
+    s.account_settled = settled;
+    s
+}
+
+fn rig_with(tag: &str, state: OnboardingState, entitled: bool, readings: Vec<Reading>, setup: impl FnOnce(&Fake)) -> Rig {
+    let dir = scratch(tag);
+    let fake = Arc::new(Fake::default());
+    setup(&fake);
+    let ent = Arc::new(Ent(AtomicBool::new(entitled)));
+    let deps = Deps {
+        data_dir: dir.clone(),
+        runner: fake.clone(),
+        entitlement: ent.clone(),
+        sync_view: Arc::new(Syncs(Mutex::new(readings.into()))),
+    };
+    let q = Queue::start(deps, state);
+    Rig { log: fake.log.clone(), q, fake, ent, dir }
+}
+fn rig(tag: &str, state: OnboardingState, entitled: bool) -> Rig { rig_with(tag, state, entitled, vec![ok_reading(true, 10, 10)], |_| {}) }
+
+impl Rig {
+    fn job(&self, name: &str) -> JobRecord { self.q.snapshot().jobs.get(name).cloned().unwrap_or_else(|| panic!("no job {name}")) }
+    fn state_of(&self, name: &str) -> JobState { self.job(name).state }
+    fn idle(&self) { assert!(self.q.wait_idle(Duration::from_secs(20)), "the queue never went idle: {:?}", self.log.all()); }
+    fn wait_for(&self, what: &str, cond: impl Fn(&Rig) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !cond(self) {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}: {:?}", self.log.all());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    fn wait_started(&self, job: &str) { self.wait_for(&format!("{job} to start"), |r| r.log.ran(job)); }
+    fn wait_log(&self, event: &str) { self.wait_for(event, |r| r.log.pos(event).is_some()); }
+}
+
+// ---- test 3: holds -----------------------------------------------------------------------------------------
+
+#[test]
+fn test_03_without_an_entitlement_every_gated_job_is_held_and_never_started_then_runs_in_enqueue_order() {
+    let r = rig("t03", state_at(4, true), false);
+    let gated = ["school.store", "calendar.store", "school.apply", "school.courses", "registrar.confirm", "config.ingest", "slot.partial", "slot.first_full"];
+    for j in ["school.capture", "school.preview"].into_iter().chain(gated) { r.q.enqueue(j); }
+    r.wait_for("the device-side jobs", |r| r.state_of("school.preview") == JobState::Done);
+    r.idle();
+    assert_eq!(r.state_of("school.capture"), JobState::Done, "school.capture needs no entitlement");
+    for j in gated {
+        assert_eq!(r.state_of(j), JobState::Held, "{j} is held, not failed and not pending");
+        assert!(!r.log.ran(j), "{j} was started while not entitled");
+    }
+    r.log.push("entitled");
+    r.ent.0.store(true, Ordering::SeqCst);
+    r.q.wake();
+    r.idle();
+    let at = r.log.pos("entitled").unwrap();
+    let started = r.log.started();
+    let lane: Vec<&String> = started.iter().filter(|j| LANE_JOBS.contains(&j.as_str())).collect();
+    assert_eq!(lane, LANE_JOBS.iter().collect::<Vec<_>>(), "the held lane jobs run in the order they were enqueued");
+    for j in gated {
+        assert!(r.log.pos(&format!("start:{j}")).unwrap() > at, "{j} started after the entitlement");
+    }
+    let serial: Vec<&String> = started.iter().filter(|j| j.starts_with("slot.")).collect();
+    assert_eq!(serial, ["slot.partial", "slot.first_full"].iter().collect::<Vec<_>>());
+    r.log.assert_clean();
+}
+
+// ---- test 5: serial -------------------------------------------------------------------------------------------
+
+#[test]
+fn test_05_two_serial_jobs_never_run_at_once() {
+    let r = rig("t05", state_at(5, true), true);
+    let jobs = ["school.capture", "school.preview", "coursework.discover", "mail.setup", "mail.canary", "mail.first_pass", "google.gmail_first_read", "slot.partial"];
+    for j in jobs { r.q.enqueue(j); }
+    r.idle();
+    r.log.assert_clean();
+    for j in jobs { assert!(r.log.ran(j), "{j} never ran: {:?}", r.log.all()); }
+}
+
+// ---- test 6: the gate (pure) ------------------------------------------------------------------------------------
+
+fn item(key: &str, state: ItemState) -> GateItem { GateItem { key: key.into(), state, connected: true, backfill: false } }
+fn pending(key: &str) -> GateItem { item(key, ItemState::Pending) }
+
+#[test]
+fn test_06_the_gate_opens_when_every_required_item_is_done_failed_or_skipped() {
+    let t0 = Some(1_000);
+    let mut items = vec![item("first.sync", ItemState::Done), item("first.grades", ItemState::Done), pending("effort_ranking")];
+    let g = gate(&items, t0, 1_010);
+    assert!(!g.open, "an item is still pending");
+    assert_eq!(g.still_coming, ["effort_ranking"]);
+    items[2] = item("effort_ranking", ItemState::Failed { reason: "ranking_failed".into(), fix: "Try again".into() });
+    items.push(item("gmail", ItemState::Skipped { cost_key: "gmail_missed".into() }));
+    let g = gate(&items, t0, 1_010);
+    assert!(g.open, "done, failed and skipped all count");
+    assert_eq!(g.failed, [("effort_ranking".to_string(), "ranking_failed".to_string(), "Try again".to_string())], "a failed item is listed with its reason, never hidden");
+    assert!(g.still_coming.is_empty());
+}
+
+#[test]
+fn test_06_the_gate_opens_at_exactly_three_minutes_after_the_confirm_with_the_rest_still_coming() {
+    let items = [item("first.sync", ItemState::Done), pending("first.grades"), pending("effort_ranking")];
+    let confirmed = 5_000;
+    assert_eq!(CAP_SECS, 180);
+    let before = gate(&items, Some(confirmed), confirmed + 179);
+    assert!(!before.open, "one second early");
+    let at = gate(&items, Some(confirmed), confirmed + 180);
+    assert!(at.open, "exactly 3:00");
+    assert_eq!(at.still_coming, ["first.grades", "effort_ranking"], "the rest are listed as still coming");
+    assert!(!gate(&items, None, confirmed + 10_000).open, "no confirm yet, no cap");
+}
+
+#[test]
+fn test_06_a_backfill_is_listed_but_never_waited_for_and_an_unconnected_source_is_not_required() {
+    let mut backfill = pending("backfill.gmail_120_days");
+    backfill.backfill = true;
+    let mut unconnected = pending("mail");
+    unconnected.connected = false;
+    let items = [item("first.sync", ItemState::Done), backfill, unconnected];
+    let g = gate(&items, Some(0), 1);
+    assert!(g.open, "a backfill in progress and an unconnected source do not hold the gate");
+    assert_eq!(g.still_coming, ["backfill.gmail_120_days"], "the backfill is listed; the unconnected source is not");
+}
+
+#[test]
+fn test_06_skips_are_listed_with_their_cost_keys() {
+    let items = [
+        item("first.sync", ItemState::Done),
+        item("mail", ItemState::Skipped { cost_key: "mail_dates_missed".into() }),
+        item("gmail", ItemState::Skipped { cost_key: "gmail_and_calendar_missed".into() }),
+    ];
+    let g = gate(&items, Some(0), 1);
+    assert!(g.open);
+    assert_eq!(
+        g.not_connected,
+        [
+            NotConnected { key: "mail".into(), cost_key: "mail_dates_missed".into() },
+            NotConnected { key: "gmail".into(), cost_key: "gmail_and_calendar_missed".into() },
+        ]
+    );
+}
+
+#[test]
+fn test_06_a_grades_not_yet_row_never_marks_first_grades_and_a_skipped_row_leaves_it_pending() {
+    let row = |n: &str| vec![("sync".to_string(), 0), (n.to_string(), 0)];
+    assert!(!first_grades_marked(&row("grades (not yet: your courses are not in yet)")));
+    assert!(!first_grades_marked(&row("grades (skipped: not connected)")));
+    assert!(!first_grades_marked(&row("grades (skipped: Blackboard unreachable)")));
+    assert!(first_grades_marked(&row("grades")), "a slot whose grades ran marks it");
+    assert!(!first_grades_marked(&[("sync".to_string(), 0)]), "a slot with no grades row does not");
+}
+
+// ---- test 4: slot order and scope -------------------------------------------------------------------------------
+
+const CANON: [&str; 6] = ["sync", "coursework", "grades", "ingest", "judge", "rank"];
+
+/// Enqueues the whole onboarding in `order` (account unsettled, so the first slot's `sync` settles it),
+/// waits for `config.ingest`, asks for a second slot, then confirms step 10.
+fn run_whole_onboarding(tag: &str, order: &[&str]) -> Rig {
+    let r = rig_with(tag, state_at(4, false), true, vec![ok_reading(true, 10, 10), ok_reading(true, 10, 10), ok_reading(true, 10, 10)], |_| {});
+    for j in order { r.q.enqueue(j); }
+    r.wait_for("config.ingest", |r| r.state_of("config.ingest") == JobState::Done);
+    r.q.enqueue("slot.partial");
+    r.idle();
+    r.log.push("confirm");
+    r.q.confirm_step10("2026-10-24T12:40:00Z");
+    r.idle();
+    r
+}
+
+#[test]
+fn test_04_whatever_order_the_asks_were_answered_in_a_slots_steps_keep_the_canonical_order() {
+    let orders: [&[&str]; 3] = [
+        &["school.apply", "school.courses", "slot.partial", "config.ingest", "registrar.confirm"],
+        &["config.ingest", "registrar.confirm", "school.courses", "school.apply", "slot.partial"],
+        &["slot.partial", "registrar.confirm", "config.ingest", "school.apply", "school.courses"],
+    ];
+    for (i, order) in orders.iter().enumerate() {
+        let r = run_whole_onboarding(&format!("t04-{i}"), order);
+        r.log.assert_clean();
+        let all = r.log.all();
+        // Per slot run, the steps appear in the canonical relative order.
+        let mut per_run: Vec<Vec<String>> = Vec::new();
+        for e in &all {
+            if e.starts_with("start:slot.") { per_run.push(Vec::new()); }
+            if let Some(step) = e.strip_prefix("step:").and_then(|x| x.split_once(':')).map(|(_, s)| s.to_string()) {
+                per_run.last_mut().expect("a step inside a slot").push(step);
+            }
+        }
+        assert!(per_run.len() >= 3, "a before-config slot, a no-rank slot and the first full slot ran: {all:?}");
+        for steps in &per_run {
+            let idx: Vec<usize> = steps.iter().map(|s| CANON.iter().position(|c| c == s).unwrap()).collect();
+            assert!(idx.windows(2).all(|w| w[0] < w[1]), "steps out of order: {steps:?}");
+        }
+        // `rank` only in slot.first_full, only after step 10's confirm, and never before the first ingest.
+        let ranks: Vec<usize> = all.iter().enumerate().filter(|(_, e)| e.ends_with(":rank")).map(|(i, _)| i).collect();
+        assert_eq!(ranks.len(), 1, "exactly one rank: {all:?}");
+        assert!(all[ranks[0]].starts_with("step:slot.first_full:"), "{}", all[ranks[0]]);
+        assert!(ranks[0] > r.log.pos("confirm").unwrap());
+        let first_ingest = all.iter().position(|e| e.ends_with(":ingest")).expect("an ingest ran");
+        assert!(ranks[0] > first_ingest);
+    }
+}
+
+#[test]
+fn test_04_a_partial_slot_is_handed_before_config_until_config_ingest_is_done_and_no_rank_after() {
+    let r = run_whole_onboarding("t04-scopes", &["school.apply", "school.courses", "config.ingest", "slot.partial"]);
+    let scopes = r.log.scopes("slot.partial");
+    assert_eq!(scopes, ["BeforeConfig", "NoRank"], "the scope each slot.partial was handed");
+    assert_eq!(r.log.scopes("slot.first_full"), ["Full"]);
+}
+
+// ---- test 8: config before its readers --------------------------------------------------------------------------
+
+fn pos_of(r: &Rig, e: &str) -> usize { r.log.pos(e).unwrap_or_else(|| panic!("no {e}: {:?}", r.log.all())) }
+
+#[test]
+fn test_08_no_reader_of_the_config_starts_before_config_ingest_and_the_jobs_wait_for_their_inputs() {
+    let r = rig_with("t08", state_at(4, false), true, vec![ok_reading(true, 10, 10), ok_reading(true, 10, 10), ok_reading(true, 10, 10)], |_| {});
+    // A deliberately scrambled order.
+    for j in ["calendar.read", "google.calendar_read", "config.ingest", "slot.partial", "registrar.confirm", "school.courses", "calendar.store", "school.store", "school.apply"] {
+        r.q.enqueue(j);
+    }
+    r.wait_for("config.ingest", |r| r.state_of("config.ingest") == JobState::Done);
+    r.q.enqueue("slot.partial");
+    r.idle();
+    r.log.assert_clean();
+    let ci_end = pos_of(&r, "end:config.ingest");
+    for reader in ["calendar.read", "google.calendar_read"] {
+        assert!(pos_of(&r, &format!("start:{reader}")) > ci_end, "{reader} started before config.ingest was done");
+    }
+    assert!(pos_of(&r, "start:config.ingest") > pos_of(&r, "end:school.courses"), "config.ingest waits for school.courses");
+    for store in ["school.store", "calendar.store"] {
+        assert!(pos_of(&r, "start:config.ingest") > pos_of(&r, &format!("end:{store}")), "config.ingest waits for {store} to settle");
+    }
+    assert!(pos_of(&r, "start:registrar.confirm") > pos_of(&r, "end:school.courses"), "registrar.confirm waits for school.courses");
+    // `ingest` and `coursework` (engine steps) appear only in a slot that started after config.ingest;
+    // `grades` only after school.apply and school.courses are both done, so never in a BeforeConfig slot.
+    for (job, step) in r.log.steps() {
+        let at = r.log.all().iter().position(|e| e == &format!("step:{job}:{step}")).unwrap();
+        if matches!(step.as_str(), "coursework" | "ingest") { assert!(at > ci_end, "{step} ran before config.ingest was done"); }
+        if step == "grades" {
+            assert!(at > pos_of(&r, "end:school.apply") && at > pos_of(&r, "end:school.courses"), "grades ran before the course notes exist");
+        }
+    }
+    assert_eq!(r.log.scopes("slot.partial"), ["BeforeConfig", "NoRank"]);
+}
+
+#[test]
+fn test_08_school_courses_does_not_start_before_the_account_is_settled_and_config_ingest_waits_for_it() {
+    // The account is never reached: every reading is a skip, so the chain stops and the notes never start.
+    let r = rig_with("t08-unsettled", state_at(4, false), true, vec![], |_| {});
+    for j in ["config.ingest", "school.courses", "school.apply", "slot.partial"] { r.q.enqueue(j); }
+    r.idle();
+    assert!(!r.log.ran("school.courses"), "no school.courses before account_settled: {:?}", r.log.all());
+    assert!(!r.log.ran("config.ingest"), "no config.ingest before school.courses");
+    assert!(r.log.ran("school.apply"), "school.apply does not need the account");
+    assert_eq!(r.job("school.courses").state, JobState::Failed, "the chain stopped; Try again is the student's");
+}
+
+// ---- test 11: the local lane --------------------------------------------------------------------------------------
+
+fn proposals_ready(r: &Rig) -> bool {
+    let v: Value = status_inner(&r.q.snapshot(), 0);
+    v["proposals_ready"].as_bool().unwrap_or_else(|| panic!("status has no proposals_ready: {v}"))
+}
+
+#[test]
+fn test_11_config_ingest_runs_and_finishes_while_a_canary_holds_the_serial_queue() {
+    let r = rig("t11", state_at(8, true), true);
+    let canary = r.fake.block("mail.canary", false);
+    let config = r.fake.block("config.ingest", false);
+    for j in ["school.apply", "school.courses"] { r.q.enqueue(j); }
+    r.wait_for("the notes", |r| r.state_of("school.courses") == JobState::Done);
+    r.q.enqueue("mail.canary");
+    r.wait_started("mail.canary");
+    assert!(!proposals_ready(&r), "config.ingest has not been asked for yet");
+    // Leaving step 8: config.ingest is enqueued while the canary holds the queue.
+    r.q.enqueue("config.ingest");
+    r.wait_started("config.ingest");
+    assert_eq!(r.state_of("config.ingest"), JobState::Running);
+    assert!(!proposals_ready(&r), "not ready while config.ingest runs");
+    config.release();
+    r.wait_for("config.ingest to finish", |r| r.state_of("config.ingest") == JobState::Done);
+    assert!(r.log.pos("end:mail.canary").is_none(), "config.ingest did not wait for the canary's three minutes");
+    assert!(proposals_ready(&r), "ready once config.ingest is done");
+    canary.release();
+    r.idle();
+    r.log.assert_clean();
+}
+
+#[test]
+fn test_11_step_10s_proposals_are_not_ready_while_config_ingest_is_pending() {
+    let r = rig("t11-pending", state_at(8, true), false);
+    r.q.enqueue("config.ingest");
+    r.idle();
+    assert!(matches!(r.state_of("config.ingest"), JobState::Held | JobState::Pending));
+    assert!(!proposals_ready(&r));
+}
+
+// ---- the exits' seams (tests 9, 17, 19, 25) -----------------------------------------------------------------------
+
+#[derive(Default)]
+struct FakePending(Mutex<BTreeMap<String, String>>);
+impl PendingStore for FakePending {
+    fn put(&self, name: &str, link: &str) -> Result<(), String> { self.0.lock().unwrap().insert(name.into(), link.into()); Ok(()) }
+    fn get(&self, name: &str) -> Option<String> { self.0.lock().unwrap().get(name).cloned() }
+    fn delete(&self, name: &str) { self.0.lock().unwrap().remove(name); }
+}
+
+/// The exit seams over a real queue: the process-level ones are fakes that only log.
+struct Seams<'a> {
+    q: &'a Queue,
+    log: Log,
+    dir: PathBuf,
+    pending: FakePending,
+    relaunch_fails: bool,
+    exits: AtomicUsize,
+}
+impl<'a> Seams<'a> {
+    fn new(r: &'a Rig) -> Seams<'a> {
+        Seams { q: &r.q, log: r.log.clone(), dir: r.dir.clone(), pending: FakePending::default(), relaunch_fails: false, exits: AtomicUsize::new(0) }
+    }
+    fn index(&self, e: &str) -> usize { self.log.pos(e).unwrap_or_else(|| panic!("no {e:?} in {:?}", self.log.all())) }
+}
+impl ExitSeams for Seams<'_> {
+    fn request_stop(&self) { self.log.push("set_stop"); self.q.request_stop(); }
+    fn drain(&self) { self.q.drain(); self.log.push("drained"); }
+    fn save(&self) -> Result<(), String> { self.log.push("save"); self.q.save() }
+    fn freeze_saves(&self) { self.q.freeze(); self.log.push("freeze"); }
+    fn sign_out(&self) -> Result<(), String> {
+        let step = match load_state(&self.dir) { Loaded::Ok(s) => s.step as i64, _ => -1 };
+        self.log.push(format!("sign_out frozen={} file_step={step}", self.q.is_frozen()));
+        on_sign_out_with(&self.dir, &self.pending)
+    }
+    fn relaunch(&self, args: &[&str]) -> Result<(), String> {
+        if self.relaunch_fails { return Err("the spawn failed".into()); }
+        self.log.push(format!("relaunch:{}", args.join(" ")));
+        Ok(())
+    }
+    fn relaunch_with(&self) -> Result<(), String> {
+        if self.relaunch_fails { return Err("the spawn failed".into()); }
+        self.log.push("relaunch_with");
+        Ok(())
+    }
+    fn stamp_quit_at(&self) { self.log.push("quit_at"); }
+    fn flush(&self) { self.log.push("flush"); }
+    fn exit(&self) { self.log.push("exit"); self.exits.fetch_add(1, Ordering::SeqCst); }
+    fn snapshot(&self) -> OnboardingState { self.q.snapshot() }
+    fn write_finish(&self, handover: Vec<HandoverItem>) -> Result<(), String> {
+        let mut s = self.q.snapshot();
+        s.finished = true;
+        s.handover = handover;
+        save_state(&self.dir, &s)?;
+        let _ = std::fs::remove_file(answers_path(&self.dir));
+        self.log.push("write_finish");
+        Ok(())
+    }
+}
+
+fn epoch(ts: &str) -> i64 { ts.parse::<jiff::Timestamp>().unwrap().as_second() }
+const CONFIRMED: &str = "2026-10-24T12:00:00Z";
+
+/// A state ready to finish: every lane job done, step 10 confirmed at [`CONFIRMED`].
+fn finishable() -> OnboardingState {
+    let mut s = state_at(11, true);
+    for j in LANE_JOBS { s.jobs.insert(j.into(), JobRecord { state: JobState::Done, ..Default::default() }); }
+    s.step10_confirmed_at = Some(CONFIRMED.into());
+    s
+}
+
+// ---- test 9: quitting and finishing ------------------------------------------------------------------------------
+
+/// Finish later during a running serial job and a running lane job, with one more of each queued
+/// behind them: the exit stops new starts in both, waits only for the two running jobs, then saves.
+fn quit_during_running_jobs(tag: &str, serial_notices_stop: bool) -> (Rig, Value) {
+    let r = rig(tag, state_at(8, true), true);
+    let discover = r.fake.block("coursework.discover", serial_notices_stop);
+    let apply = r.fake.block("school.apply", false);
+    r.q.enqueue("coursework.discover");
+    r.q.enqueue("school.apply");
+    r.wait_started("coursework.discover");
+    r.wait_started("school.apply");
+    r.q.enqueue("mail.setup");
+    r.q.enqueue("school.courses");
+    let seams = Seams::new(&r);
+    let guard = ExitGuard::default();
+    let out = std::thread::scope(|sc| {
+        let exit = sc.spawn(|| onboarding_quit_inner(&seams, &guard));
+        r.wait_for("the stop", |r| r.q.stop_requested());
+        discover.release();
+        apply.release();
+        exit.join().unwrap()
+    });
+    (r, out)
+}
+
+#[test]
+fn test_09_finish_later_waits_only_for_the_running_jobs_and_the_next_load_shows_them_done() {
+    let (r, out) = quit_during_running_jobs("t09-quit-done", false);
+    assert_eq!(out["ok"], true, "{out}");
+    assert!(!r.log.ran("mail.setup"), "the queue starts nothing new after the stop");
+    assert!(!r.log.ran("school.courses"), "nor does the local lane");
+    let Loaded::Ok(saved) = load_state(&r.dir) else { panic!("the exit saves") };
+    assert_eq!(saved.jobs["coursework.discover"].state, JobState::Done);
+    assert_eq!(saved.jobs["school.apply"].state, JobState::Done);
+    assert!(matches!(saved.jobs.get("mail.setup").map(|j| j.state), None | Some(JobState::Pending)));
+    r.log.assert_clean();
+}
+
+#[test]
+fn test_09_a_job_that_noticed_the_stop_is_pending_on_the_next_load() {
+    let (r, out) = quit_during_running_jobs("t09-quit-stopped", true);
+    assert_eq!(out["ok"], true, "{out}");
+    assert!(!r.log.ran("mail.setup") && !r.log.ran("school.courses"));
+    let Loaded::Ok(saved) = load_state(&r.dir) else { panic!("the exit saves") };
+    assert_eq!(saved.jobs["coursework.discover"].state, JobState::Pending, "stopped, so it runs again next time");
+    assert_eq!(saved.jobs["school.apply"].state, JobState::Done, "a lane job's safe point is its end");
+}
+
+#[test]
+fn test_09_finish_at_the_cap_waits_for_the_running_ingest_starts_neither_judge_nor_rank_and_hands_the_slot_over() {
+    let s = finishable();
+    let r = rig("t09-finish-slot", s, true);
+    let ingest = r.fake.block_step("slot.first_full", "ingest");
+    r.q.enqueue("slot.first_full");
+    r.wait_log("step:slot.first_full:ingest");
+    let seams = Seams::new(&r);
+    let guard = ExitGuard::default();
+    let out = std::thread::scope(|sc| {
+        let finish = sc.spawn(|| onboarding_finish_inner(&seams, &guard, epoch(CONFIRMED) + 180));
+        r.wait_for("the stop", |r| r.q.stop_requested());
+        assert!(r.log.pos("drained").is_none(), "finish waits for ingest to end");
+        ingest.release();
+        finish.join().unwrap()
+    });
+    assert_eq!(out["ok"], true, "{out}");
+    let all = r.log.all();
+    assert!(!all.iter().any(|e| e == "step:slot.first_full:judge" || e == "step:slot.first_full:rank"), "{all:?}");
+    assert!(r.log.pos("stopped_before:slot.first_full:judge").is_some());
+    let Loaded::Ok(saved) = load_state(&r.dir) else { panic!("saved") };
+    assert!(saved.finished);
+    assert_eq!(saved.jobs["slot.first_full"].state, JobState::Pending, "the slot is pending");
+    assert!(saved.handover.iter().any(|h| h.item == "slot.first_full" && h.signal == "slot_end"), "handover names it: {:?}", saved.handover);
+    assert!(!answers_path(&r.dir).exists(), "the answers file is deleted on finish");
+    assert!(seams.index("write_finish") < seams.index("relaunch_with"));
+}
+
+#[test]
+fn test_09_a_canary_running_at_finish_is_abandoned_at_once() {
+    let s = finishable();
+    let r = rig("t09-finish-canary", s, true);
+    r.fake.block("mail.canary", true);
+    r.q.enqueue("mail.canary");
+    r.wait_started("mail.canary");
+    let seams = Seams::new(&r);
+    let out = onboarding_finish_inner(&seams, &ExitGuard::default(), epoch(CONFIRMED) + 180);
+    assert_eq!(out["ok"], true, "{out}");
+    assert!(r.log.pos("abandoned:mail.canary").is_some(), "no gate was released: the canary noticed the stop");
+    let Loaded::Ok(saved) = load_state(&r.dir) else { panic!("saved") };
+    assert_eq!(saved.jobs["mail.canary"].state, JobState::Pending);
+    assert!(saved.handover.iter().any(|h| h.item == "mail.canary" && h.signal == "mail_json"), "{:?}", saved.handover);
+}
+
+#[test]
+fn test_09_finish_is_refused_while_a_lane_job_is_not_done_or_the_gate_is_closed() {
+    let mut s = finishable();
+    s.jobs.insert("config.ingest".into(), JobRecord { state: JobState::Failed, reason: Some("could_not_write_config".into()), ..Default::default() });
+    let r = rig("t09-refuse-lane", s, false);
+    let seams = Seams::new(&r);
+    let out = onboarding_finish_inner(&seams, &ExitGuard::default(), epoch(CONFIRMED) + 600);
+    assert_eq!(out["ok"], false, "{out}");
+    assert!(r.log.all().is_empty(), "a refusal stops nothing, saves nothing, exits nothing: {:?}", r.log.all());
+    // A closed gate: the lane is done but step 10 was confirmed ten seconds ago and an item is pending.
+    let mut s = finishable();
+    s.jobs.insert("slot.first_full".into(), JobRecord { state: JobState::Pending, ..Default::default() });
+    let r = rig("t09-refuse-gate", s, false);
+    let seams = Seams::new(&r);
+    let out = onboarding_finish_inner(&seams, &ExitGuard::default(), epoch(CONFIRMED) + 10);
+    assert_eq!(out["ok"], false, "{out}");
+    assert!(r.log.all().is_empty(), "{:?}", r.log.all());
+}
+
+#[test]
+fn test_09_the_handover_lists_every_required_item_not_done_with_its_clearing_signal() {
+    let mut s = state_at(11, true);
+    let job = |st| JobRecord { state: st, ..Default::default() };
+    for (k, st) in [
+        ("first.sync", JobState::Done), ("first.grades", JobState::Pending), ("first.ingest", JobState::Failed),
+        ("slot.first_full", JobState::Pending), ("google.gmail_first_read", JobState::Pending),
+        ("mail.canary", JobState::Pending), ("mail.first_pass", JobState::Done), ("coursework.discover", JobState::Pending),
+    ] {
+        s.jobs.insert(k.into(), job(st));
+    }
+    let want: Vec<(&str, &str)> = vec![
+        ("first.grades", "slot_end"), ("first.ingest", "slot_end"), ("google.gmail_first_read", "slot_end"),
+        ("mail.canary", "mail_json"), ("slot.first_full", "slot_end"),
+    ];
+    let got: Vec<(String, String)> = handover_for(&s).into_iter().map(|h| (h.item, h.signal)).collect();
+    assert_eq!(got, want.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>(), "sorted by item; done items and non-required jobs are absent");
+}
+
+#[test]
+fn test_09_a_slot_end_clears_the_slot_items_and_a_mail_item_only_its_own_signal_or_a_disconnect() {
+    let mk = || {
+        let mut s = state_at(11, true);
+        s.finished = true;
+        s.handover = vec![
+            HandoverItem { item: "slot.first_full".into(), signal: "slot_end".into() },
+            HandoverItem { item: "google.gmail_first_read".into(), signal: "slot_end".into() },
+            HandoverItem { item: "mail.canary".into(), signal: "mail_json".into() },
+            HandoverItem { item: "mail.first_pass".into(), signal: "mail_json".into() },
+        ];
+        s
+    };
+    fn names(s: &OnboardingState) -> Vec<&str> { s.handover.iter().map(|h| h.item.as_str()).collect() }
+    let mut s = mk();
+    s.slot_ended();
+    assert_eq!(names(&s), ["mail.canary", "mail.first_pass"], "a slot's end does not clear a mail item");
+    s.mail_signal(MailSignal::CanaryVerified);
+    assert_eq!(names(&s), ["mail.first_pass"]);
+    s.mail_signal(MailSignal::FirstPassDelivered);
+    assert!(s.handover.is_empty());
+    let mut s = mk();
+    s.mail_signal(MailSignal::Disconnected);
+    assert_eq!(names(&s), ["slot.first_full", "google.gmail_first_read"], "a disconnect clears both mail items and no slot item");
+}
+
+// ---- test 17: sign out mid-onboarding ------------------------------------------------------------------------------
+
+#[test]
+fn test_17_sign_out_stops_abandons_saves_freezes_signs_out_relaunches_with_pick_and_exits_in_that_order() {
+    let mut s = state_at(8, true);
+    s.school = Some(School { unitid: "900001".into(), label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: true });
+    s.jobs.insert("school.capture".into(), JobRecord { state: JobState::Done, ..Default::default() });
+    let r = rig("t17-order", s, true);
+    save_answers(&r.dir, &Answers { feeds: BTreeMap::from([("lms_ics".to_string(), FeedState::Validated)]), ..Default::default() }).unwrap();
+    r.fake.block("mail.canary", true);
+    r.q.enqueue("mail.canary");
+    r.wait_started("mail.canary");
+    let seams = Seams::new(&r);
+    seams.pending.put(PENDING_LMS, "https://lms.example.invalid/feed/tok-t17.ics").unwrap();
+    let out = onboarding_sign_out_inner(&seams, &ExitGuard::default());
+    assert_eq!(out["ok"], true, "{out}");
+    let order = ["set_stop", "abandoned:mail.canary", "save", "freeze", "sign_out frozen=true file_step=8", "relaunch:--pick", "exit"];
+    let at: Vec<usize> = order.iter().map(|e| seams.index(e)).collect();
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "stop, canary abandoned, last save, freeze, sign-out, relaunch --pick, exit, in that order: {:?}", r.log.all());
+    assert!(r.log.pos("flush").is_none(), "no push: the session is about to go");
+    // on_sign_out ran inside the fake sign-out: answers and pending link gone, file rewound.
+    assert!(!answers_path(&r.dir).exists());
+    assert!(seams.pending.get(PENDING_LMS).is_none());
+    let Loaded::Ok(rewound) = load_state(&r.dir) else { panic!("rewound, not removed") };
+    assert_eq!(rewound.step, 2);
+    assert!(rewound.school.is_none() && !rewound.account_settled);
+    assert!(rewound.jobs.values().all(|j| j.state == JobState::Pending), "{:?}", rewound.jobs);
+}
+
+#[test]
+fn test_17_no_save_lands_after_the_rewind() {
+    let r = rig("t17-frozen", state_at(8, true), true);
+    let seams = Seams::new(&r);
+    let out = onboarding_sign_out_inner(&seams, &ExitGuard::default());
+    assert_eq!(out["ok"], true, "{out}");
+    let rewound = std::fs::read(state_path(&r.dir)).expect("the rewound file");
+    assert!(r.q.is_frozen());
+    assert!(r.q.save().is_err(), "a save the queue attempts after the freeze is refused");
+    r.q.enqueue("school.capture");
+    r.idle();
+    assert_eq!(std::fs::read(state_path(&r.dir)).unwrap(), rewound, "the file read back is the rewound one");
+}
+
+// ---- test 19: a failed relaunch -----------------------------------------------------------------------------------------
+
+#[test]
+fn test_19_a_failed_relaunch_keeps_what_was_written_starts_no_job_and_the_next_quit_exits() {
+    // Finish: the state it wrote stands.
+    let r = rig("t19-finish", finishable(), true);
+    let mut seams = Seams::new(&r);
+    seams.relaunch_fails = true;
+    let guard = ExitGuard::default();
+    let out = onboarding_finish_inner(&seams, &guard, epoch(CONFIRMED) + 180);
+    assert_eq!((out["ok"].clone(), out["restart"].clone()), (false.into(), true.into()), "{out}");
+    let Loaded::Ok(saved) = load_state(&r.dir) else { panic!("saved") };
+    assert!(saved.finished, "finished: true is kept");
+    assert_eq!(seams.exits.load(Ordering::SeqCst), 0);
+    let before = r.log.started().len();
+    r.q.enqueue("school.capture");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(r.log.started().len(), before, "the stop holds: no job starts");
+    let out = onboarding_quit_inner(&seams, &guard);
+    assert_ne!(out["exiting"], true, "the failed relaunch released the exit guard: {out}");
+    assert_eq!(seams.exits.load(Ordering::SeqCst), 1, "the following onboarding_quit calls the fake exit");
+
+    // Sign out: the rewind it made stands.
+    let r = rig("t19-signout", state_at(8, true), true);
+    let mut seams = Seams::new(&r);
+    seams.relaunch_fails = true;
+    let guard = ExitGuard::default();
+    let out = onboarding_sign_out_inner(&seams, &guard);
+    assert_eq!((out["ok"].clone(), out["restart"].clone()), (false.into(), true.into()), "{out}");
+    let Loaded::Ok(rewound) = load_state(&r.dir) else { panic!("rewound") };
+    assert_eq!(rewound.step, 2);
+    let _ = onboarding_quit_inner(&seams, &guard);
+    assert_eq!(seams.exits.load(Ordering::SeqCst), 1);
+}
+
+// ---- test 24: the window's close ---------------------------------------------------------------------------------------------
+
+struct Plain {
+    gate: Arc<Gate>,
+    drains: AtomicUsize,
+    exits: AtomicUsize,
+    log: Log,
+}
+impl ExitSeams for Plain {
+    fn request_stop(&self) { self.log.push("set_stop"); }
+    fn drain(&self) { self.drains.fetch_add(1, Ordering::SeqCst); self.gate.wait(&AtomicBool::new(false), false); }
+    fn save(&self) -> Result<(), String> { Ok(()) }
+    fn freeze_saves(&self) {}
+    fn sign_out(&self) -> Result<(), String> { Ok(()) }
+    fn relaunch(&self, _args: &[&str]) -> Result<(), String> { Ok(()) }
+    fn relaunch_with(&self) -> Result<(), String> { Ok(()) }
+    fn stamp_quit_at(&self) {}
+    fn flush(&self) {}
+    fn exit(&self) { self.exits.fetch_add(1, Ordering::SeqCst); }
+    fn snapshot(&self) -> OnboardingState { state_at(8, true) }
+    fn write_finish(&self, _handover: Vec<HandoverItem>) -> Result<(), String> { Ok(()) }
+}
+
+#[test]
+fn test_24_the_close_returns_at_once_a_second_close_starts_no_second_drain_and_the_exit_is_called_once() {
+    let gate = Gate::new();
+    let plain = Arc::new(Plain { gate: gate.clone(), drains: AtomicUsize::new(0), exits: AtomicUsize::new(0), log: Log::default() });
+    let guard = Arc::new(ExitGuard::default());
+    let t0 = Instant::now();
+    close_requested(plain.clone(), guard.clone());
+    assert!(t0.elapsed() < Duration::from_secs(1), "the close handler's own call does not block on the drain");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while plain.drains.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "the spawned thread never started draining");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(plain.exits.load(Ordering::SeqCst), 0, "still draining");
+    let second = onboarding_quit_inner(&*plain, &guard);
+    assert_eq!((second["ok"].clone(), second["exiting"].clone()), (true.into(), true.into()), "{second}");
+    assert_eq!(plain.drains.load(Ordering::SeqCst), 1, "no second drain");
+    gate.release();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while plain.exits.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "the exit was never called");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(plain.exits.load(Ordering::SeqCst), 1, "the fake exit is called once");
+}
+
+// ---- test 25: today's quit path -----------------------------------------------------------------------------------------------
+
+#[test]
+fn test_25_quit_and_finish_flush_after_the_drain_and_before_the_exit_with_quit_at_stamped_and_sign_out_flushes_nothing() {
+    let r = rig("t25-quit", state_at(8, true), true);
+    let seams = Seams::new(&r);
+    onboarding_quit_inner(&seams, &ExitGuard::default());
+    let (drained, stamped, flushed, exited) = (seams.index("drained"), seams.index("quit_at"), seams.index("flush"), seams.index("exit"));
+    assert!(drained < stamped && stamped < flushed && flushed < exited, "{:?}", r.log.all());
+
+    let r = rig("t25-finish", finishable(), true);
+    let seams = Seams::new(&r);
+    let out = onboarding_finish_inner(&seams, &ExitGuard::default(), epoch(CONFIRMED) + 180);
+    assert_eq!(out["ok"], true, "{out}");
+    let (drained, spawned, stamped, flushed, exited) =
+        (seams.index("drained"), seams.index("relaunch_with"), seams.index("quit_at"), seams.index("flush"), seams.index("exit"));
+    assert!(drained < spawned, "the spawn comes after the drain");
+    assert!(spawned < flushed, "the spawn comes before the flush, so the child waits on our pid while it runs");
+    assert!(stamped < flushed && flushed < exited, "{:?}", r.log.all());
+
+    let r = rig("t25-signout", state_at(8, true), true);
+    let seams = Seams::new(&r);
+    onboarding_sign_out_inner(&seams, &ExitGuard::default());
+    assert!(r.log.pos("flush").is_none() && r.log.pos("quit_at").is_none(), "sign out pushes nothing: {:?}", r.log.all());
+}
+
+// ---- shared answers for tests 12-14 ------------------------------------------------------------------------------------
+
+const LMS_LINK: &str = "https://lms.example.invalid/feed/tok-5c19e0.ics";
+
+fn course(code: &str, name: &str, key: &str) -> CourseAnswer {
+    CourseAnswer { code: code.into(), name: name.into(), label: name.split(' ').next().unwrap().into(), lms_key: key.into() }
+}
+fn three_courses() -> Vec<CourseAnswer> {
+    vec![course("QLT 101", "Quilting Basics", "_1001_1"), course("KNT 220", "Knotwork Theory", "_1002_1"), course("WVG 105", "Weaving Lab", "_1003_1")]
+}
+
+struct Acct {
+    fail_first: usize,
+    calls: AtomicUsize,
+    sent: Mutex<Vec<(String, String)>>,
+}
+impl Acct {
+    fn ok() -> Acct { Acct { fail_first: 0, calls: AtomicUsize::new(0), sent: Mutex::new(Vec::new()) } }
+    fn failing(n: usize) -> Acct { Acct { fail_first: n, ..Acct::ok() } }
+    fn calls(&self) -> usize { self.calls.load(Ordering::SeqCst) }
+}
+impl FeedAccount for Acct {
+    fn put_source(&self, kind: &str, link: &str) -> Result<(), String> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n < self.fail_first { return Err("the account service could not be reached".into()); }
+        self.sent.lock().unwrap().push((kind.into(), link.into()));
+        Ok(())
+    }
+}
+
+/// A fake that fails if a school window is opened: a resumed store needs none.
+struct NoWindow;
+impl SchoolWindows for NoWindow {
+    fn open_school_window(&self) { panic!("a school window was opened"); }
+}
+
+fn feed_rig(tag: &str, state: FeedState, link: &str) -> (PathBuf, FakePending) {
+    let dir = scratch(tag);
+    let mut a = Answers { courses: three_courses(), ..Default::default() };
+    a.feeds.insert("lms_ics".into(), state);
+    save_answers(&dir, &a).unwrap();
+    let pending = FakePending::default();
+    pending.put(PENDING_LMS, link).unwrap();
+    (dir, pending)
+}
+
+fn feed_state(dir: &Path) -> Option<FeedState> { load_answers(dir).unwrap().unwrap().feeds.get("lms_ics").copied() }
+fn handoff(dir: &Path, pending: &FakePending) -> IngestHandoff { ingest_handoff(&load_answers(dir).unwrap().unwrap(), pending) }
+
+// ---- test 12: the answers survive a quit ---------------------------------------------------------------------------------
+
+/// Steps 3-8 through the fakes. `quits` names the steps after which the process "quits": nothing in
+/// memory survives, the answers file is read again from disk and must equal what was given so far.
+fn steps_3_to_8(tag: &str, quits: &[u8]) -> String {
+    let dir = scratch(tag);
+    let pending = FakePending::default();
+    // What the student has answered so far, kept in memory beside the file.
+    let mut given = Answers::default();
+    let quit = |at: u8, given: &Answers| {
+        if quits.contains(&at) {
+            let reloaded = load_answers(&dir).unwrap().expect("the answers file survived the quit");
+            assert_eq!(&reloaded, given, "a quit at step {at} lost an answer");
+        }
+    };
+    let apply = |given: &mut Answers, change: &dyn Fn(&mut Answers)| {
+        update_answers(&dir, change).unwrap();
+        change(given);
+    };
+    // Step 3: the capture.
+    apply(&mut given, &|a| {
+        a.courses = three_courses();
+        a.registrar_rows = vec![RegistrarRow { code: "QLT 101".into(), days: "MWF".into(), start: "09:00".into(), end: "09:50".into() }];
+        a.feeds.insert("lms_ics".into(), FeedState::Validated);
+    });
+    pending.put(PENDING_LMS, LMS_LINK).unwrap();
+    // Step 4: payment, then the local lane: the feed is stored and the course notes are made.
+    run_feed_store(&dir, "lms_ics", &pending, &Acct::ok(), &NoWindow);
+    run_school_courses(&dir, &[], &mut |c| Ok(c.name.to_lowercase().replace(' ', "-")));
+    given.feeds.insert("lms_ics".into(), FeedState::Stored);
+    for c in three_courses() { given.slugs.insert(c.code, c.name.to_lowercase().replace(' ', "-")); }
+    quit(4, &given);
+    // Step 6: Google Calendar granted.
+    apply(&mut given, &|a| a.google_calendar = Some(true));
+    quit(6, &given);
+    // Step 8: each confirmed row is saved as it is confirmed.
+    apply(&mut given, &|a| a.rows.push(BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "quilting-basics".into() }));
+    apply(&mut given, &|a| a.zybooks_ignore.push("ZYB-ONBOARDING".into()));
+    // After step 8's confirms, before leaving it.
+    quit(8, &given);
+    let h = handoff(&dir, &pending);
+    assert_eq!(h.course_map.len(), 3, "course_map is never empty when step 3 found courses: {h:?}");
+    serde_json::to_string(&h).unwrap()
+}
+
+#[test]
+fn test_12_the_text_config_ingest_hands_the_builder_is_byte_equal_with_or_without_quits() {
+    let straight = steps_3_to_8("t12-straight", &[]);
+    for (i, quits) in [vec![4u8], vec![6], vec![8], vec![4, 6, 8]].into_iter().enumerate() {
+        assert_eq!(steps_3_to_8(&format!("t12-quit-{i}"), &quits), straight, "quits at {quits:?} changed the hand-over");
+    }
+    assert!(straight.contains("quilting-basics") && straight.contains("zybooks_ignore"), "{straight}");
+}
+
+// ---- test 13: the feed is never silently lost -----------------------------------------------------------------------
+
+#[test]
+fn test_13a_a_store_that_fails_twice_leaves_the_feed_failed_and_the_link_in_the_text() {
+    let (dir, pending) = feed_rig("t13a", FeedState::Validated, LMS_LINK);
+    let acct = Acct::failing(2);
+    let out = run_feed_store(&dir, "lms_ics", &pending, &acct, &NoWindow);
+    assert!(matches!(out, Outcome::Failed(_)), "kept on this computer: {out:?}");
+    assert_eq!(acct.calls(), 2, "one retry, as create_vault_in does");
+    assert_eq!(feed_state(&dir), Some(FeedState::Failed));
+    assert_eq!(pending.get(PENDING_LMS).as_deref(), Some(LMS_LINK), "the link stays where it waits");
+    let h = handoff(&dir, &pending);
+    assert_eq!(h.ics_url, LMS_LINK, "config.ingest's text carries the link");
+    assert!(h.feed_kept_on_device);
+}
+
+#[test]
+fn test_13b_a_quit_after_payment_and_before_school_store_stores_the_link_from_the_pending_credential() {
+    // Reload: only the files and the pending store exist. No school window is opened (NoWindow panics).
+    let (dir, pending) = feed_rig("t13b", FeedState::Validated, LMS_LINK);
+    let acct = Acct::ok();
+    let out = run_feed_store(&dir, "lms_ics", &pending, &acct, &NoWindow);
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    assert_eq!(*acct.sent.lock().unwrap(), [("lms_ics".to_string(), LMS_LINK.to_string())]);
+    assert_eq!(feed_state(&dir), Some(FeedState::Stored));
+    assert!(pending.get(PENDING_LMS).is_none(), "stored, so the pending credential is deleted");
+}
+
+#[test]
+fn test_13c_a_rejected_paste_is_never_sent_to_the_store_and_its_link_is_in_the_text() {
+    let (dir, pending) = feed_rig("t13c", FeedState::Rejected, LMS_LINK);
+    let acct = Acct::ok();
+    run_feed_store(&dir, "lms_ics", &pending, &acct, &NoWindow);
+    assert_eq!(acct.calls(), 0, "a rejected link is never sent");
+    assert_eq!(feed_state(&dir), Some(FeedState::Rejected));
+    assert_eq!(handoff(&dir, &pending).ics_url, LMS_LINK);
+}
+
+#[test]
+fn test_13d_a_stored_feed_gives_an_empty_ics_url_and_the_pending_credential_is_deleted() {
+    let (dir, pending) = feed_rig("t13d", FeedState::Stored, LMS_LINK);
+    let h = handoff(&dir, &pending);
+    assert_eq!(h.ics_url, "");
+    assert!(!h.feed_kept_on_device);
+    settle_pending_after_ingest(&pending);
+    assert!(pending.get(PENDING_LMS).is_none() && pending.get(PENDING_CALENDAR).is_none(), "deleted after config.ingest");
+}
+
+#[test]
+fn test_13e_back_to_another_school_before_payment_deletes_the_waiting_link() {
+    let (dir, pending) = feed_rig("t13e", FeedState::Validated, LMS_LINK);
+    pending.put(PENDING_CALENDAR, "https://cal.example.invalid/private/tok-77.ics").unwrap();
+    let mut state = state_at(3, false);
+    state.school = Some(School { unitid: "900001".into(), label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: true });
+    state.jobs.insert("school.capture".into(), JobRecord { state: JobState::Done, ..Default::default() });
+    change_school(&dir, &pending, &mut state).expect("back to the picker");
+    assert!(pending.get(PENDING_LMS).is_none() && pending.get(PENDING_CALENDAR).is_none());
+    assert!(state.school.is_none());
+    if let Some(a) = load_answers(&dir).unwrap() { assert!(a.feeds.is_empty(), "the old school's feed states are gone: {a:?}"); }
+}
+
+// ---- test 14: no duplicate course note --------------------------------------------------------------------------------
+
+fn restored_notes() -> Vec<ExistingNote> {
+    vec![
+        ExistingNote { slug: "quilting-basics-restored".into(), source_uid: "_1001_1".into(), code: "QLT 101".into() },
+        ExistingNote { slug: "knotwork-restored".into(), source_uid: "_1002_1".into(), code: "KNT 220".into() },
+    ]
+}
+
+#[test]
+fn test_14_school_courses_waits_for_the_account_then_creates_notes_only_for_courses_with_none() {
+    // Step 2's restore answered ok: false, so account_settled is false through payment.
+    let r = rig_with("t14", state_at(4, false), true, vec![ok_reading(true, 2, 2)], |_| {});
+    save_answers(&r.dir, &Answers { courses: three_courses(), ..Default::default() }).unwrap();
+    let created = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let (dir, created) = (r.dir.clone(), created.clone());
+        r.fake.behave("school.courses", move || {
+            run_school_courses(&dir, &restored_notes(), &mut |c| {
+                created.lock().unwrap().push(c.code.clone());
+                Ok("weaving-lab".to_string())
+            })
+        });
+    }
+    r.q.enqueue("school.courses");
+    r.idle();
+    let waiting = r.job("school.courses");
+    assert_eq!(waiting.state, JobState::Pending);
+    assert_eq!(waiting.reason.as_deref(), Some("waiting to reach your account"));
+    assert!(!r.log.ran("school.courses") && created.lock().unwrap().is_empty());
+    // A sync status reporting the account reached, carrying two course notes, settles it.
+    r.q.enqueue("slot.partial");
+    r.idle();
+    assert!(r.q.snapshot().account_settled);
+    assert_eq!(r.state_of("school.courses"), JobState::Done);
+    assert_eq!(*created.lock().unwrap(), ["WVG 105"], "a note only for the course with none");
+    let slugs = load_answers(&r.dir).unwrap().unwrap().slugs;
+    assert_eq!(slugs.get("QLT 101").map(String::as_str), Some("quilting-basics-restored"), "the restored note's own slug");
+    assert_eq!(slugs.get("KNT 220").map(String::as_str), Some("knotwork-restored"));
+    assert_eq!(slugs.get("WVG 105").map(String::as_str), Some("weaving-lab"));
+}
+
+#[test]
+fn test_14_a_restored_note_is_matched_by_its_source_uid_as_well_as_its_code() {
+    let dir = scratch("t14-uid");
+    save_answers(&dir, &Answers { courses: three_courses(), ..Default::default() }).unwrap();
+    let mut notes = restored_notes();
+    notes.push(ExistingNote { slug: "weaving-old".into(), source_uid: "_1003_1".into(), code: String::new() });
+    let out = run_school_courses(&dir, &notes, &mut |c| panic!("a note was made for {}", c.code));
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    assert_eq!(load_answers(&dir).unwrap().unwrap().slugs.get("WVG 105").map(String::as_str), Some("weaving-old"));
+}
+
+// ---- test 16: the notes gate and sync ----------------------------------------------------------------------------------------
+
+fn slow_notes(r: &Rig) {
+    for j in ["school.courses", "registrar.confirm"] {
+        r.fake.behave(j, || { std::thread::sleep(Duration::from_millis(40)); Outcome::Done(BTreeMap::new()) });
+    }
+}
+
+#[test]
+fn test_16_at_payment_with_the_account_settled_the_note_jobs_and_sync_never_overlap_and_none_fails() {
+    let r = rig("t16-settled", state_at(4, true), true);
+    slow_notes(&r);
+    for j in ["school.courses", "registrar.confirm", "slot.partial"] { r.q.enqueue(j); }
+    r.idle();
+    r.log.assert_clean();
+    for j in ["school.courses", "registrar.confirm", "slot.partial"] {
+        assert_eq!(r.state_of(j), JobState::Done, "{j} neither failed nor was skipped: {:?}", r.log.all());
+    }
+    assert!(r.log.steps().contains(&("slot.partial".to_string(), "sync".to_string())), "sync is not skipped");
+}
+
+#[test]
+fn test_16_with_the_account_unsettled_sync_runs_first_and_the_note_jobs_after_it() {
+    let r = rig("t16-unsettled", state_at(4, false), true);
+    slow_notes(&r);
+    for j in ["school.courses", "registrar.confirm", "slot.partial"] { r.q.enqueue(j); }
+    r.idle();
+    r.log.assert_clean();
+    let sync = r.log.pos("step:slot.partial:sync").expect("sync ran");
+    assert!(sync < r.log.pos("start:school.courses").unwrap() && sync < r.log.pos("start:registrar.confirm").unwrap(), "{:?}", r.log.all());
+}
+
+fn first_sync(r: &Rig) -> JobRecord { r.q.snapshot().jobs.get("first.sync").cloned().unwrap_or_default() }
+fn courses_failed_with(r: &Rig, words: &str) {
+    let c = r.job("school.courses");
+    assert_eq!(c.state, JobState::Failed, "{:?}", r.log.all());
+    assert!(c.reason.as_deref().unwrap_or("").contains(words), "{:?}", c.reason);
+}
+
+/// An unsettled account, `school.courses` and one `slot.partial` asked for, then the readings play out.
+fn chain(tag: &str, readings: Vec<Reading>) -> Rig {
+    let r = rig_with(tag, state_at(4, false), true, readings, |_| {});
+    r.q.enqueue("school.courses");
+    r.q.enqueue("slot.partial");
+    r.idle();
+    r
+}
+fn skipped(why: &str) -> Reading { (Some(status(FRESH, true, Some(why))), Some(cursor(false, 0, 0))) }
+fn runs(r: &Rig) -> usize { r.log.scopes("slot.partial").len() }
+
+#[test]
+fn test_16_a_skipped_or_stale_reading_is_not_a_sync_and_two_in_a_row_stop_the_chain() {
+    let r = chain("t16-skip", vec![skipped("another sync is running"), skipped("no session")]);
+    assert_eq!(first_sync(&r).state, JobState::Pending, "first sync is not done");
+    assert!(!r.q.snapshot().account_settled);
+    assert_eq!(runs(&r), 2);
+    courses_failed_with(&r, "couldn't finish reading your account");
+    // A stale stamp (before the slot's own start; also what a lock-held sync leaves) does the same.
+    let stale: Reading = (Some(status(STALE, true, None)), Some(cursor(true, 9, 9)));
+    let r = chain("t16-stale", vec![stale.clone(), stale]);
+    assert_eq!(first_sync(&r).state, JobState::Pending);
+    assert!(!r.q.snapshot().account_settled, "a stale run does not settle the account even with pulled_to_end");
+}
+
+#[test]
+fn test_16_a_fresh_ok_run_to_the_end_settles_both_and_a_fresh_error_is_failed_with_its_fix() {
+    let r = chain("t16-ok", vec![ok_reading(true, 10, 10)]);
+    assert_eq!(first_sync(&r).state, JobState::Done);
+    assert!(r.q.snapshot().account_settled);
+    assert_eq!(r.state_of("school.courses"), JobState::Done);
+    let r = chain("t16-fail", vec![(Some(status(FRESH, false, None)), Some(cursor(false, 0, 0)))]);
+    let first = first_sync(&r);
+    assert_eq!(first.state, JobState::Failed);
+    assert!(!first.reason.unwrap_or_default().is_empty(), "failed with its fix");
+    assert!(!r.q.snapshot().account_settled);
+    assert_eq!(runs(&r), 1, "a failed reading stops the chain at once");
+    assert_eq!(r.state_of("school.courses"), JobState::Failed);
+}
+
+#[test]
+fn test_16_t0_a_no_entitlement_skip_is_neither_done_nor_failed() {
+    let gated: Reading = (Some(status(FRESH, false, Some("no entitlement"))), Some(cursor(false, 0, 0)));
+    let r = chain("t16-gated", vec![gated.clone(), gated]);
+    assert_eq!(first_sync(&r).state, JobState::Pending, "neither done nor failed");
+    assert!(!r.q.snapshot().account_settled);
+}
+
+#[test]
+fn test_16_t0_a_run_that_moved_the_cursor_marks_first_sync_done_and_enqueues_one_more_until_it_ends() {
+    let r = chain("t16-moving", vec![ok_reading(false, 5, 5), ok_reading(true, 9, 9)]);
+    assert_eq!(r.log.scopes("slot.partial"), ["BeforeConfig", "BeforeConfig"]);
+    assert_eq!(first_sync(&r).state, JobState::Done);
+    assert!(r.q.snapshot().account_settled);
+    assert_eq!(r.state_of("school.courses"), JobState::Done);
+}
+
+#[test]
+fn test_16_t0_an_unmoved_cursor_stops_the_chain_and_fails_school_courses_with_try_again() {
+    let r = chain("t16-unmoved", vec![ok_reading(false, 5, 5), ok_reading(false, 5, 5)]);
+    assert_eq!(runs(&r), 2);
+    assert_eq!(first_sync(&r).state, JobState::Done, "the run was fresh and ok");
+    assert!(!r.q.snapshot().account_settled);
+    courses_failed_with(&r, "couldn't finish reading your account");
+}
+
+#[test]
+fn test_16_t0_one_skipped_reading_between_moving_runs_keeps_the_previous_cursor_as_the_comparison() {
+    let r = chain("t16-between", vec![ok_reading(false, 5, 5), skipped("another sync is running"), ok_reading(false, 9, 9), ok_reading(true, 12, 12)]);
+    assert_eq!(runs(&r), 4, "{:?}", r.log.all());
+    assert!(r.q.snapshot().account_settled);
+    assert_eq!(r.state_of("school.courses"), JobState::Done);
+    // Two skipped in a row after a moving run stop it.
+    let r = chain("t16-between-two", vec![ok_reading(false, 5, 5), skipped("no session"), skipped("no session")]);
+    assert_eq!(runs(&r), 3);
+    courses_failed_with(&r, "couldn't finish reading your account");
+}
+
+#[test]
+fn test_16_t0_a_failed_reading_between_moving_runs_stops_the_chain_at_once() {
+    let r = chain("t16-between-fail", vec![ok_reading(false, 5, 5), (Some(status(FRESH, false, None)), Some(cursor(false, 5, 5))), ok_reading(true, 9, 9)]);
+    assert_eq!(runs(&r), 2);
+    assert_eq!(first_sync(&r).state, JobState::Failed);
+    assert_eq!(r.state_of("school.courses"), JobState::Failed);
+}
+
+#[test]
+fn test_16_t0_a_cursor_that_moves_on_every_run_stops_at_exactly_fifty_and_try_again_starts_one_slot() {
+    assert_eq!(CHAIN_BACKSTOP, 50);
+    let mut readings: Vec<Reading> = (1..=50).map(|i| ok_reading(false, i, i)).collect();
+    readings.push(ok_reading(true, 99, 99));
+    let r = chain("t16-backstop", readings);
+    assert_eq!(runs(&r), 50, "the 51st is not enqueued");
+    courses_failed_with(&r, "couldn't finish reading your account");
+    // Try again while unsettled resets the count and enqueues exactly one BeforeConfig slot.
+    r.q.retry("school.courses");
+    r.idle();
+    assert_eq!(runs(&r), 51, "exactly one more");
+    assert_eq!(r.log.scopes("slot.partial")[50], "BeforeConfig");
+    assert!(r.q.snapshot().account_settled);
+    assert_eq!(r.state_of("school.courses"), JobState::Done);
+}
+
+#[test]
+fn test_16_a_lane_job_retrying_on_a_held_sync_lock_holds_neither_vault_io_nor_the_lock_between_tries() {
+    let vault_io = Mutex::new(());
+    let lock_held = Arc::new(AtomicBool::new(false));
+    struct Token(Arc<AtomicBool>);
+    impl Drop for Token { fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); } }
+    let refusals = Cell::new(3usize);
+    let sleeps = RefCell::new(Vec::<Duration>::new());
+    let works = Cell::new(0usize);
+    let held = lock_held.clone();
+    let take = || -> Result<Box<dyn std::any::Any>, String> {
+        if refusals.get() > 0 { refusals.set(refusals.get() - 1); return Err(knowlu::week::SYNC_RUNNING.to_string()); }
+        held.store(true, Ordering::SeqCst);
+        Ok(Box::new(Token(held.clone())))
+    };
+    let sleep = |d: Duration| {
+        assert!(vault_io.try_lock().is_ok(), "a vault_io user gets it between tries");
+        assert!(!lock_held.load(Ordering::SeqCst), "the sync lock is not held between tries");
+        sleeps.borrow_mut().push(d);
+    };
+    let out = retry_with_hold(&vault_io, &take, &sleep, &mut || { works.set(works.get() + 1); Ok(7) });
+    assert_eq!(out, Ok(7));
+    assert_eq!(*sleeps.borrow(), vec![RETRY_INTERVAL; 3], "every 250 ms");
+    assert_eq!(RETRY_INTERVAL, Duration::from_millis(250));
+    assert_eq!(works.get(), 1);
+    // Any other refusal is not "try again".
+    let sleeps2 = RefCell::new(0usize);
+    let other = retry_with_hold(&vault_io, &|| Err::<Box<dyn std::any::Any>, _>("disk error".to_string()), &|_| *sleeps2.borrow_mut() += 1, &mut || Ok(1));
+    assert_eq!(other, Err("disk error".to_string()));
+    assert_eq!(*sleeps2.borrow(), 0);
+    // Always refused: gives up after thirty seconds of tries, never having run the work.
+    let total = RefCell::new(Duration::ZERO);
+    let never = retry_with_hold(&vault_io, &|| Err::<Box<dyn std::any::Any>, _>(knowlu::week::SYNC_RUNNING.to_string()), &|d| *total.borrow_mut() += d, &mut || Ok(1));
+    assert!(never.is_err());
+    assert_eq!(*total.borrow(), RETRY_BUDGET);
+    assert_eq!(RETRY_BUDGET, Duration::from_secs(30));
+}
+
+#[test]
+fn test_16_registrar_confirm_is_entered_with_vault_io_free_and_retries_only_on_the_sync_running_constant() {
+    let vault_io = Mutex::new(());
+    let tries = Cell::new(0usize);
+    let sleeps = Cell::new(0usize);
+    let fake_registrar = || -> Result<i32, String> {
+        assert!(vault_io.try_lock().is_ok(), "registrar.confirm's fake is entered with vault_io free");
+        tries.set(tries.get() + 1);
+        if tries.get() <= 2 { Err(knowlu::week::SYNC_RUNNING.to_string()) } else { Ok(42) }
+    };
+    let out = retry_on_sync_running(&|_| sleeps.set(sleeps.get() + 1), &mut || fake_registrar());
+    assert_eq!(out, Ok(42));
+    assert_eq!((tries.get(), sleeps.get()), (3, 2));
+    // A typed copy of the sentence is not the constant, and nothing else is "try again".
+    let n = Cell::new(0usize);
+    let other = retry_on_sync_running::<i32>(&|_| panic!("slept"), &mut || { n.set(n.get() + 1); Err("a sync is running; try again in a moment!".to_string()) });
+    assert!(other.is_err());
+    assert_eq!(n.get(), 1, "only week::SYNC_RUNNING itself is retried");
+    // The pin: onboarding_jobs.rs compares the constant and never a copy of its words.
+    let src = src_of("onboarding_jobs.rs");
+    assert!(src.contains("SYNC_RUNNING"), "the retry compares week::SYNC_RUNNING");
+    assert!(!src.contains("a sync is running"), "no copy of the sentence");
+}
+
+// ---- test 23: no slot outside the queue ----------------------------------------------------------------------------------
+
+#[test]
+fn test_23_a_closed_batch_tells_the_queue_in_onboarding_mode_and_runs_a_slot_in_the_normal_console() {
+    use knowlu::mail::live::{on_batch_closed, BatchClosed};
+    assert_eq!(on_batch_closed(LaunchMode::Onboarding), BatchClosed::TellQueue);
+    assert_eq!(on_batch_closed(LaunchMode::Normal), BatchClosed::RunSlot);
+}
+
+#[test]
+fn test_23_with_a_queue_a_closed_batch_enqueues_nothing_starts_no_slot_and_leaves_the_next_slots_order() {
+    let r = rig("t23", state_at(4, false), true);
+    let before = r.q.snapshot().jobs;
+    r.q.mail_batch_closed();
+    r.idle();
+    assert!(r.q.batch_closed_noted(), "the queue records it for the rail's older_mail line");
+    assert_eq!(r.q.snapshot().jobs, before, "no job was enqueued");
+    assert!(r.log.started().is_empty(), "no slot was started: {:?}", r.log.all());
+    // The next slot the queue runs is unchanged: still before-config, in the order it was asked for.
+    r.q.enqueue("slot.partial");
+    r.idle();
+    assert_eq!(r.log.started(), ["slot.partial"]);
+    assert_eq!(r.log.scopes("slot.partial"), ["BeforeConfig"]);
+}
+
+// ---- test 26: onboarding never stores a link at capture or paste -------------------------------------------------------------
+
+/// Source text with its comment lines removed.
+fn src_of(file: &str) -> String {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(file);
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+        .lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n")
+}
+
+/// The top-level function that contains byte `at` of `src`: from the nearest line starting `fn `,
+/// `pub fn ` or `#[...]`-less signature before it to the next lone `}`.
+fn enclosing_fn(src: &str, at: usize) -> &str {
+    let start = ["\nfn ", "\npub fn ", "\npub(crate) fn "].iter().filter_map(|p| src[..at].rfind(p)).max().map(|i| i + 1).unwrap_or(0);
+    let end = src[at..].find("\n}").map(|i| at + i + 2).unwrap_or(src.len());
+    &src[start..end]
+}
+
+/// A listener nothing may connect to: counts the connections it sees.
+struct Tripwire {
+    base: String,
+    hits: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+impl Tripwire {
+    fn start() -> Tripwire {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        l.set_nonblocking(true).unwrap();
+        let base = format!("http://127.0.0.1:{}/functions/v1", l.local_addr().unwrap().port());
+        let (hits, stop) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
+        let (h, s) = (hits.clone(), stop.clone());
+        let join = std::thread::spawn(move || {
+            while !s.load(Ordering::SeqCst) {
+                match l.accept() {
+                    Ok(_) => { h.fetch_add(1, Ordering::SeqCst); }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        Tripwire { base, hits, stop, join: Some(join) }
+    }
+}
+impl Drop for Tripwire {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(j) = self.join.take() { let _ = j.join(); }
+    }
+}
+
+/// `KNOWLU_API_BASE` is process-global; this file's only test that sets it takes this lock and
+/// restores the variable on any exit path. No Credential Manager is touched: the pending credential
+/// is a fake store.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+struct ApiBase(Option<std::ffi::OsString>);
+impl ApiBase {
+    fn set(v: &str) -> ApiBase {
+        let prev = std::env::var_os("KNOWLU_API_BASE");
+        unsafe { std::env::set_var("KNOWLU_API_BASE", v) };
+        ApiBase(prev)
+    }
+}
+impl Drop for ApiBase {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(v) => unsafe { std::env::set_var("KNOWLU_API_BASE", v) },
+            None => unsafe { std::env::remove_var("KNOWLU_API_BASE") },
+        }
+    }
+}
+
+const GOOD_ICS: &str = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:QLT 101 Homework 4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+const EMPTY_ICS: &str = "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n";
+
+#[test]
+fn test_26_a_pasted_link_is_validated_and_kept_on_this_computer_and_nothing_is_sent_to_any_server() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let wire = Tripwire::start();
+    let _api = ApiBase::set(&wire.base);
+    let dir = scratch("t26-paste");
+    let pending = FakePending::default();
+    let out = paste_link_inner(&dir, &pending, "lms_ics", LMS_LINK, &|_| Ok(GOOD_ICS.to_string()));
+    assert_eq!((out["ok"].clone(), out["stored"].clone()), (true.into(), false.into()), "{out}");
+    assert!(out["note"].as_str().unwrap_or_default().contains("kept on this computer until payment"), "its note says why: {out}");
+    assert_eq!(pending.get(PENDING_LMS).as_deref(), Some(LMS_LINK), "the generated pending credential is written");
+    assert_eq!(load_answers(&dir).unwrap().unwrap().feeds.get("lms_ics"), Some(&FeedState::Validated));
+    assert_eq!(wire.hits.load(Ordering::SeqCst), 0, "the listener received no request");
+}
+
+#[test]
+fn test_26_a_link_that_fails_validation_answers_not_ok_and_is_kept_as_rejected() {
+    let dir = scratch("t26-rejected");
+    let pending = FakePending::default();
+    let out = paste_link_inner(&dir, &pending, "lms_ics", LMS_LINK, &|_| Ok(EMPTY_ICS.to_string()));
+    assert_eq!(out["ok"], false, "{out}");
+    assert_eq!(load_answers(&dir).unwrap().unwrap().feeds.get("lms_ics"), Some(&FeedState::Rejected));
+    assert_eq!(pending.get(PENDING_LMS).as_deref(), Some(LMS_LINK), "the rejected link is kept too (§4.11)");
+}
+
+#[test]
+fn test_26_neither_state_nor_jobs_name_the_storing_capture_or_paste() {
+    for file in ["onboarding_jobs.rs", "onboarding_state.rs"] {
+        let src = src_of(file);
+        for banned in ["lms_link::finish(", "capture_calendar_link(", "paste_calendar_link("] {
+            assert!(!src.contains(banned), "{file} names {banned}");
+        }
+    }
+}
+
+#[test]
+fn test_26_store_source_appears_only_in_the_store_runner_over_the_vaults_session_never_the_pending_one() {
+    let jobs = src_of("onboarding_jobs.rs");
+    let state = src_of("onboarding_state.rs");
+    assert!(jobs.contains("store_source("), "F8c's store runner calls store_source");
+    for (file, src) in [("onboarding_jobs.rs", &jobs), ("onboarding_state.rs", &state)] {
+        for (at, _) in src.match_indices("store_source(") {
+            let f = enclosing_fn(src, at);
+            assert!(f.contains("session_credential_target"), "{file}: store_source( outside a call that names session_credential_target:\n{f}");
+            assert!(!f.contains("PENDING_TARGET"), "{file}: store_source( beside PENDING_TARGET:\n{f}");
+        }
+    }
+    assert!(!jobs.contains("PENDING_TARGET"), "PENDING_TARGET appears in onboarding_jobs.rs nowhere");
+}
+
+#[test]
+fn test_26_capture_link_only_goes_through_validate_only_and_never_hands_finish_over() {
+    let src = src_of("lms_link.rs");
+    assert!(src.contains("fn capture_calendar_link_with"), "F8la splits the capture body out");
+    let at = src.find("pub fn capture_link_only").expect("capture_link_only exists");
+    let body = enclosing_fn(&src, at + 7);
+    assert!(body.contains("validate_only"), "capture_link_only names validate_only:\n{body}");
+    assert!(body.contains("capture_calendar_link_with"), "{body}");
+    assert!(!body.contains("finish"), "capture_link_only passes no `finish`:\n{body}");
+}
+
+#[test]
+fn test_26_the_consoles_handler_list_holds_neither_storing_command() {
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs")).unwrap();
+    const OPEN: &str = "generate_handler![";
+    let mut rest = src.as_str();
+    let mut console: Option<Vec<String>> = None;
+    while let Some(at) = rest.find(OPEN) {
+        let body = &rest[at + OPEN.len()..];
+        let list: Vec<String> = body[..body.find(']').unwrap()].split(',').map(|n| n.trim().to_string()).collect();
+        if list.iter().any(|n| n == "commands::state") { console = Some(list); }
+        rest = &body[body.find(']').unwrap()..];
+    }
+    let console = console.expect("the console's list");
+    for banned in ["lms_link::capture_calendar_link", "lms_link::paste_calendar_link"] {
+        assert!(!console.iter().any(|n| n == banned), "the console's list holds {banned}");
+    }
+}
