@@ -22,7 +22,8 @@ pub const LANE_THREAD: &str = "onboarding-lane";
 /// What a runner hands back. `Stopped` is a safe-point stop: the job goes back to `pending`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    Done(BTreeMap<String, i64>),
+    /// The job's proof counts, `None` where its input was missing; copied into [`crate::onboarding_state::JobRecord::proof`].
+    Done(BTreeMap<String, Option<i64>>),
     Failed(String),
     /// Not able to run yet; stays `pending` with this reason.
     Waiting(String),
@@ -181,7 +182,8 @@ pub struct ExistingNote {
 }
 
 /// `school.courses`: creates a note only for a course with none (`create` returns the new slug),
-/// and records every course's slug, a restored note's own where one matched, in the answers file.
+/// and records every kept course's slug **by [`CourseAnswer::key`]**, a restored note's own where one
+/// matched, in the answers file ([`Answers::slugs`]).
 /// An absent or unreadable answers file is an error (`Outcome::Failed`), never "no courses".
 pub fn run_school_courses(
     _data_dir: &Path,
@@ -213,6 +215,13 @@ pub struct IngestHandoff {
 
 pub fn ingest_handoff(_answers: &Answers, _pending: &dyn PendingStore) -> IngestHandoff {
     todo!("F6b, F8c: the config.ingest hand-over")
+}
+
+/// What F8c's `registrar.confirm` hands R24's write: **every** saved registrar row, in captured order,
+/// a removed course's included (§14.47, G5: removal never touches class times). From the answers
+/// file alone.
+pub fn registrar_confirm_rows(_answers: &Answers) -> Vec<crate::onboarding_state::RegistrarRow> {
+    todo!("F8c: the registrar rows to confirm")
 }
 
 /// After `config.ingest` has written the file: deletes both pending credentials.

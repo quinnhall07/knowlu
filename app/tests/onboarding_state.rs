@@ -51,7 +51,11 @@ fn full_state() -> OnboardingState {
         ("mail.setup", JobState::Skipped),
     ] {
         let mut rec = JobRecord { state, ..Default::default() };
-        if state == JobState::Done { rec.proof.insert("classes".into(), 4); rec.proof.insert("assignments_upcoming".into(), 17); }
+        if state == JobState::Done {
+            rec.proof.insert("classes".into(), Some(4));
+            rec.proof.insert("assignments_upcoming".into(), Some(17));
+            rec.proof.insert("turned_in".into(), None); // no grades bundle: null, which must survive the round trip
+        }
         if state == JobState::Failed { rec.reason = Some("could_not_write_config".into()); }
         s.jobs.insert(name.into(), rec);
     }
@@ -74,7 +78,7 @@ fn full_answers() -> Answers {
     put_bucket(&mut a, &[], &[("turned_in", 1)]);
     // A count whose input was missing is `null`, and survives the round trip as `null`.
     a.buckets.get_mut(UNMATCHED).unwrap().counts.insert("class_times".into(), None);
-    a.slugs.insert("QLT 101".into(), "quilting-basics".into());
+    a.slugs.insert("_1001_1".into(), "quilting-basics".into()); // by the row's key, the LMS course key
     a.google_calendar = Some(true);
     a.feeds.insert("lms_ics".into(), FeedState::Validated);
     a.feeds.insert("calendar_ics".into(), FeedState::Rejected);
@@ -860,7 +864,7 @@ fn counts(pairs: &[(&str, i64)]) -> BTreeMap<String, Option<i64>> { pairs.iter()
 fn put_bucket(a: &mut Answers, codes: &[&str], c: &[(&str, i64)]) {
     let mut sorted: Vec<String> = codes.iter().map(|s| s.to_string()).collect();
     sorted.sort();
-    a.buckets.insert(bucket_key(codes), Bucket { codes: sorted, counts: counts(c) });
+    a.buckets.insert(bucket_key(codes), Bucket { codes: sorted, graded: None, counts: counts(c) });
 }
 /// A total as `step3_totals` gives it: a number, or `None` (absent) / `Some(None)` (null).
 fn total(t: &BTreeMap<String, Option<i64>>, name: &str) -> Option<i64> { t.get(name).copied().flatten() }
@@ -882,6 +886,8 @@ fn three_with_one_removed() -> Answers {
     put_bucket(&mut a, &["_1003_1"], &[("class_times", 1), ("assignments_upcoming", 4), ("turned_in", 0)]);
     put_bucket(&mut a, &["_1002_1", "_1001_1"], &[("assignments_upcoming", 100)]);
     put_bucket(&mut a, &[], &[("assignments_upcoming", 1000)]);
+    // §14.47: the bundle grades QLT and KNT, and has no graded column for WVG.
+    for (key, graded) in [("_1001_1", true), ("_1002_1", true), ("_1003_1", false)] { a.buckets.get_mut(key).unwrap().graded = Some(graded); }
     a
 }
 
@@ -917,11 +923,12 @@ fn test_12_step_3s_totals_add_every_bucket_that_is_unmatched_or_names_a_kept_cou
     let a = three_with_one_removed();
     let t = step3_totals(&a);
     assert_eq!(total(&t, "classes"), Some(2), "{t:?}");
-    assert_eq!(total(&t, "class_times"), Some(4), "QLT 3 + WVG 1; the removed course's own bucket (2) is out: {t:?}");
+    assert_eq!(total(&t, "class_times"), Some(6), "3 + 2 + 1: a removal never removes a class time (§14.47): {t:?}");
     // 7 (QLT) + 4 (WVG) + 100 (shared by a kept and a removed course: still imported) + 1000 (unmatched,
     // still imported course-less); the removed course's own 11 is out.
     assert_eq!(total(&t, "assignments_upcoming"), Some(1111), "{t:?}");
     assert_eq!(total(&t, "turned_in"), Some(2), "2 + 0; the removed course's 5 is out: {t:?}");
+    assert_eq!(total(&t, "grades_courses"), Some(1), "kept and graded: QLT only (KNT removed, WVG not graded): {t:?}");
 }
 
 #[test]
@@ -1029,8 +1036,8 @@ fn test_12_an_engine_shaped_by_course_with_nulls_is_saved_and_totals_null_where_
     // `onboarding --preview` with no grades bundle and no registrar: `turned_in` and `class_times`
     // are `null` in every bucket (F7a), never 0.
     let by_course = serde_json::json!({
-        "_1001_1": {"assignments_upcoming": 7, "class_times": null, "codes": ["_1001_1"], "turned_in": null},
-        "_1002_1": {"assignments_upcoming": 11, "class_times": null, "codes": ["_1002_1"], "turned_in": null},
+        "_1001_1": {"assignments_upcoming": 7, "class_times": null, "codes": ["_1001_1"], "graded": null, "turned_in": null},
+        "_1002_1": {"assignments_upcoming": 11, "class_times": null, "codes": ["_1002_1"], "graded": null, "turned_in": null},
         "_1001_1,_1002_1": {"assignments_upcoming": 100, "class_times": null, "codes": ["_1001_1", "_1002_1"], "turned_in": null},
         "unmatched": {"assignments_upcoming": 2, "class_times": null, "codes": [], "turned_in": null},
     });
@@ -1048,6 +1055,7 @@ fn test_12_an_engine_shaped_by_course_with_nulls_is_saved_and_totals_null_where_
     assert_eq!(t.get("assignments_upcoming"), Some(&Some(109)), "7 + shared 100 + unmatched 2: {t:?}");
     assert_eq!(t.get("turned_in"), Some(&None), "no grades bundle: null, never 0: {t:?}");
     assert_eq!(t.get("class_times"), Some(&None), "no registrar: null, never 0: {t:?}");
+    assert_eq!(t.get("grades_courses"), Some(&None), "every single-course bucket graded: null (no bundle): null, never 0: {t:?}");
 }
 
 #[test]
@@ -1057,9 +1065,9 @@ fn test_12_two_shells_sharing_a_human_code_are_two_keys_and_removing_one_leaves_
     let (spring, fall) = (row("KNT 220", "Knotwork Theory", "_0990_1", false), row("KNT 220", "Knotwork Theory", "_1002_1", false));
     assert_eq!(onboarding_answer_inner(&d, 3, &serde_json::json!({"capture": {"courses": [spring, fall]}}), &mut |_| {})["ok"], true);
     save_preview(&d, &serde_json::json!({
-        "_0990_1": {"assignments_upcoming": 3, "class_times": 0, "codes": ["_0990_1"], "turned_in": 0},
-        "_1002_1": {"assignments_upcoming": 5, "class_times": 1, "codes": ["_1002_1"], "turned_in": 0},
-        "_0990_1,_1002_1": {"assignments_upcoming": 40, "class_times": 0, "codes": ["_0990_1", "_1002_1"], "turned_in": 0},
+        "_0990_1": {"assignments_upcoming": 3, "class_times": 1, "codes": ["_0990_1"], "graded": false, "turned_in": 0},
+        "_1002_1": {"assignments_upcoming": 5, "class_times": 0, "codes": ["_1002_1"], "graded": true, "turned_in": 0},
+        "_0990_1,_1002_1": {"assignments_upcoming": 40, "class_times": 1, "codes": ["_0990_1", "_1002_1"], "turned_in": 0},
         "unmatched": {"assignments_upcoming": 0, "class_times": 0, "codes": [], "turned_in": 0},
     })).unwrap();
     assert_eq!(onboarding_answer_inner(&d, 3, &serde_json::json!({"remove": "_0990_1"}), &mut |_| {})["ok"], true);
@@ -1067,7 +1075,7 @@ fn test_12_two_shells_sharing_a_human_code_are_two_keys_and_removing_one_leaves_
     let kept: Vec<&str> = a.kept_courses().iter().map(|c| c.lms_key.as_str()).collect();
     assert_eq!(kept, ["_1002_1"], "only the spring shell is removed, never both: {:?}", a.courses);
     let t = step3_totals(&a);
-    assert_eq!((total(&t, "classes"), total(&t, "assignments_upcoming"), total(&t, "class_times")), (Some(1), Some(45), Some(1)), "fall 5 + shared 40: {t:?}");
+    assert_eq!((total(&t, "classes"), total(&t, "assignments_upcoming"), total(&t, "class_times")), (Some(1), Some(45), Some(2)), "fall 5 + shared 40; both class times stay (§14.47): {t:?}");
     let listed = preview_courses(&a);
     let codes: Vec<&str> = listed.as_array().unwrap().iter().map(|c| c["code"].as_str().unwrap()).collect();
     assert_eq!(codes, ["_0990_1", "_1002_1"], "the engine is given two keys, so it buckets two shells apart");
@@ -1170,12 +1178,12 @@ fn test_17_the_real_store_wrapper_deletes_this_profiles_pending_links_rewinds_an
 fn test_12_the_app_reads_a_buckets_codes_and_never_parses_its_name() {
     let mut a = Answers { courses: vec![row("WVG 105", "Weaving Lab", "_1003_1", false), row("KNT 220", "Knotwork Theory", "_1002_1", true)], ..Default::default() };
     // Names that parse to nothing sensible: only `codes` counts.
-    a.buckets.insert("zz-opaque-1".into(), Bucket { codes: vec!["_1003_1".into()], counts: counts(&[("class_times", 2)]) });
-    a.buckets.insert("zz-opaque-2".into(), Bucket { codes: vec!["_1002_1".into()], counts: counts(&[("class_times", 40)]) });
-    a.buckets.insert("zz-opaque-3".into(), Bucket { codes: vec![], counts: counts(&[("class_times", 300)]) });
+    a.buckets.insert("zz-opaque-1".into(), Bucket { codes: vec!["_1003_1".into()], graded: None, counts: counts(&[("assignments_upcoming", 2)]) });
+    a.buckets.insert("zz-opaque-2".into(), Bucket { codes: vec!["_1002_1".into()], graded: None, counts: counts(&[("assignments_upcoming", 40)]) });
+    a.buckets.insert("zz-opaque-3".into(), Bucket { codes: vec![], graded: None, counts: counts(&[("assignments_upcoming", 300)]) });
     // A zero single-course bucket (the engine always writes one) changes nothing.
-    a.buckets.insert(bucket_key(&["_1003_1"]), Bucket { codes: vec!["_1003_1".into()], counts: counts(&[("class_times", 0)]) });
-    assert_eq!(total(&step3_totals(&a), "class_times"), Some(302), "2 + 300; the removed course's 40 is out: {:?}", step3_totals(&a));
+    a.buckets.insert(bucket_key(&["_1003_1"]), Bucket { codes: vec!["_1003_1".into()], graded: None, counts: counts(&[("assignments_upcoming", 0)]) });
+    assert_eq!(total(&step3_totals(&a), "assignments_upcoming"), Some(302), "2 + 300; the removed course's 40 is out: {:?}", step3_totals(&a));
 }
 
 /// The engine's key for one `--courses` entry (F7a, `onboarding.rs`'s `read_courses`): `code`, then
@@ -1256,4 +1264,66 @@ fn test_12_every_preview_entry_carries_pairs_and_a_row_with_fragments_never_send
         }
     }
     assert_eq!(entries[2]["pairs"], serde_json::json!(["WVG 105"]), "none saved: the hand-over's own fallback, the human code");
+}
+
+#[test]
+fn test_01_a_null_proof_count_survives_the_round_trip_as_null_never_0_or_absent() {
+    let d = scratch("t01-nullproof");
+    let mut s = unfinished(3);
+    let mut rec = JobRecord { state: JobState::Done, ..Default::default() };
+    rec.proof.insert("assignments_upcoming".into(), Some(0));
+    rec.proof.insert("turned_in".into(), None);
+    s.jobs.insert("school.preview".into(), rec);
+    save_state(&d, &s).unwrap();
+    let text = std::fs::read_to_string(state_path(&d)).unwrap();
+    let on_disk: serde_json::Value = serde_json::from_str(&text).expect("onboarding.json is JSON");
+    let proof = &on_disk["jobs"]["school.preview"]["proof"];
+    assert_eq!(proof["turned_in"], serde_json::Value::Null, "written as null: {text}");
+    assert!(proof.as_object().is_some_and(|m| m.contains_key("turned_in")), "and present, not dropped: {text}");
+    assert_eq!(proof["assignments_upcoming"], 0, "a real 0 stays 0: {text}");
+    let Loaded::Ok(back) = load_state(&d) else { panic!("readable") };
+    assert_eq!(back.jobs["school.preview"].proof.get("turned_in"), Some(&None));
+    assert_eq!(back, s);
+}
+
+/// A fake `--preview` `by_course` for the three courses (§14.47): QLT and KNT graded, WVG not (or, with
+/// `graded` `None`, no bundle: `null` on every single-course bucket); class times in every kind of
+/// bucket, KNT's own and the KNT-QLT pair's included.
+fn graded_preview(graded: [Option<bool>; 3]) -> serde_json::Value {
+    let g = |i: usize| serde_json::json!(graded[i]);
+    serde_json::json!({
+        "_1001_1": {"assignments_upcoming": 7, "class_times": 3, "codes": ["_1001_1"], "graded": g(0), "turned_in": 0},
+        "_1002_1": {"assignments_upcoming": 11, "class_times": 2, "codes": ["_1002_1"], "graded": g(1), "turned_in": 0},
+        "_1003_1": {"assignments_upcoming": 4, "class_times": 1, "codes": ["_1003_1"], "graded": g(2), "turned_in": 0},
+        "_1001_1,_1002_1": {"assignments_upcoming": 100, "class_times": 10, "codes": ["_1001_1", "_1002_1"], "turned_in": 0},
+        "unmatched": {"assignments_upcoming": 1000, "class_times": 100, "codes": [], "turned_in": 0},
+    })
+}
+
+#[test]
+fn test_12_grades_courses_counts_kept_graded_courses_and_class_times_never_fall_on_a_removal() {
+    let keys = ["_1001_1", "_1002_1", "_1003_1"];
+    let rows = || vec![row("QLT 101", "Quilting Basics", keys[0], false), row("KNT 220", "Knotwork Theory", keys[1], false), row("WVG 105", "Weaving Lab", keys[2], false)];
+    // Capture, the fake preview, then `removed` (by key); the totals as the file then gives them.
+    let totals_after = |tag: &str, graded: [Option<bool>; 3], removed: &[&str]| {
+        let d = scratch(tag);
+        assert_eq!(onboarding_answer_inner(&d, 3, &serde_json::json!({"capture": {"courses": rows()}}), &mut |_| {})["ok"], true);
+        save_preview(&d, &graded_preview(graded)).unwrap();
+        for k in removed { assert_eq!(onboarding_answer_inner(&d, 3, &serde_json::json!({"remove": k}), &mut |_| {})["ok"], true); }
+        step3_totals(&load_answers(&d).unwrap().unwrap())
+    };
+    let bundle = [Some(true), Some(true), Some(false)];
+    let t = totals_after("t12-g-none", bundle, &[]);
+    assert_eq!(total(&t, "grades_courses"), Some(2), "QLT and KNT are graded: {t:?}");
+    let t = totals_after("t12-g-knt", bundle, &["_1002_1"]);
+    assert_eq!(total(&t, "grades_courses"), Some(1), "removing a graded course takes it off: {t:?}");
+    let t = totals_after("t12-g-wvg", bundle, &["_1003_1"]);
+    assert_eq!(total(&t, "grades_courses"), Some(2), "removing a course with no graded column changes nothing: {t:?}");
+    let t = totals_after("t12-g-null", [None, None, None], &["_1002_1"]);
+    assert_eq!(t.get("grades_courses"), Some(&None), "no bundle: null, never 0: {t:?}");
+    // Class times: 3 + 2 + 1 + 10 + 100 whatever is removed, one course, two, or all three.
+    for (i, removed) in [&[][..], &["_1002_1"], &["_1001_1", "_1002_1"], &keys[..]].into_iter().enumerate() {
+        let t = totals_after(&format!("t12-ct-{i}"), bundle, removed);
+        assert_eq!(total(&t, "class_times"), Some(116), "removing {removed:?} removed a class time: {t:?}");
+    }
 }

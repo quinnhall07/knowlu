@@ -1151,9 +1151,9 @@ fn test_14_school_courses_waits_for_the_account_then_creates_notes_only_for_cour
     assert_eq!(r.state_of("school.courses"), JobState::Done);
     assert_eq!(*created.lock().unwrap(), ["WVG 105"], "a note only for the course with none");
     let slugs = load_answers(&r.dir).unwrap().unwrap().slugs;
-    assert_eq!(slugs.get("QLT 101").map(String::as_str), Some("quilting-basics-restored"), "the restored note's own slug");
-    assert_eq!(slugs.get("KNT 220").map(String::as_str), Some("knotwork-restored"));
-    assert_eq!(slugs.get("WVG 105").map(String::as_str), Some("weaving-lab"));
+    assert_eq!(slugs.get("_1001_1").map(String::as_str), Some("quilting-basics-restored"), "the restored note's own slug");
+    assert_eq!(slugs.get("_1002_1").map(String::as_str), Some("knotwork-restored"));
+    assert_eq!(slugs.get("_1003_1").map(String::as_str), Some("weaving-lab"));
 }
 
 #[test]
@@ -1164,7 +1164,7 @@ fn test_14_a_restored_note_is_matched_by_its_source_uid_as_well_as_its_code() {
     notes.push(ExistingNote { slug: "weaving-old".into(), source_uid: "_1003_1".into(), code: String::new() });
     let out = run_school_courses(&dir, &notes, &mut |c| panic!("a note was made for {}", c.code));
     assert!(matches!(out, Outcome::Done(_)), "{out:?}");
-    assert_eq!(load_answers(&dir).unwrap().unwrap().slugs.get("WVG 105").map(String::as_str), Some("weaving-old"));
+    assert_eq!(load_answers(&dir).unwrap().unwrap().slugs.get("_1003_1").map(String::as_str), Some("weaving-old"));
 }
 
 // ---- test 16: the notes gate and sync ----------------------------------------------------------------------------------------
@@ -1611,9 +1611,9 @@ fn test_12_a_course_removed_at_step_3_reaches_no_note_and_no_course_map_entry_an
     // gradebook column id in the pin form), then the preview's match-set buckets as the engine writes them.
     save_pairs(&dir, &pairs_of(&[("_1001_1", &["QLT 101", "_71_1"]), ("_1002_1", &["KNT 220", "_72_1"]), ("_1003_1", &["WVG 105", "_73_1"])])).unwrap();
     save_preview(&dir, &serde_json::json!({
-        "_1001_1": {"codes": ["_1001_1"], "class_times": 3, "assignments_upcoming": 7, "turned_in": 0},
-        "_1002_1": {"codes": ["_1002_1"], "class_times": 2, "assignments_upcoming": 11, "turned_in": 0},
-        "_1003_1": {"codes": ["_1003_1"], "class_times": 1, "assignments_upcoming": 4, "turned_in": 0},
+        "_1001_1": {"codes": ["_1001_1"], "class_times": 3, "assignments_upcoming": 7, "graded": true, "turned_in": 0},
+        "_1002_1": {"codes": ["_1002_1"], "class_times": 2, "assignments_upcoming": 11, "graded": true, "turned_in": 0},
+        "_1003_1": {"codes": ["_1003_1"], "class_times": 1, "assignments_upcoming": 4, "graded": false, "turned_in": 0},
         "_1001_1,_1002_1": {"codes": ["_1001_1", "_1002_1"], "class_times": 0, "assignments_upcoming": 100, "turned_in": 0},
         "unmatched": {"codes": [], "class_times": 0, "assignments_upcoming": 1000, "turned_in": 0},
     })).unwrap();
@@ -1625,6 +1625,10 @@ fn test_12_a_course_removed_at_step_3_reaches_no_note_and_no_course_map_entry_an
     let totals = step3_totals(&reloaded);
     assert_eq!(totals.get("classes"), Some(&Some(2)), "{totals:?}");
     assert_eq!(totals.get("assignments_upcoming"), Some(&Some(1111)), "7 + 4 + the shared 100 + the unmatched 1000; the removed row's own 11 is out: {totals:?}");
+    // §14.47: the removed course was graded, so the grades count falls by one; no class time falls.
+    assert_eq!(totals.get("grades_courses"), Some(&Some(1)), "QLT; KNT removed, WVG has no graded column: {totals:?}");
+    assert_eq!(totals.get("class_times"), Some(&Some(6)), "3 + 2 + 1: the removed course's class times are still imported: {totals:?}");
+    assert_eq!(registrar_confirm_rows(&reloaded), reloaded.registrar_rows, "every registrar row still reaches registrar.confirm");
     let created = RefCell::new(Vec::<String>::new());
     let out = run_school_courses(&dir, &[], &mut |c| { created.borrow_mut().push(c.code.clone()); Ok(c.name.to_lowercase().replace(' ', "-")) });
     assert!(matches!(out, Outcome::Done(_)), "{out:?}");
@@ -1638,7 +1642,7 @@ fn test_12_a_course_removed_at_step_3_reaches_no_note_and_no_course_map_entry_an
     assert!(!map_text.contains("knotwork") && !map_text.contains("KNT 220") && !map_text.contains("_72_1"), "course_map: {map_text}");
     // One source of pairs (§14.46): after the label edit, the pairs in the --courses list the preview
     // is given are byte-equal to that course's lines in the text (course_map's, or course_exclude).
-    // The entry's `code` is the row's key (the LMS course key); its slug comes by its human code.
+    // The entry's `code` is the row's key (the LMS course key), which is also its key in `slugs`.
     let now = load_answers(&dir).unwrap().unwrap();
     let listed = preview_courses(&now);
     for c in listed.as_array().expect("one object per course") {
@@ -1647,7 +1651,7 @@ fn test_12_a_course_removed_at_step_3_reaches_no_note_and_no_course_map_entry_an
         let in_text: Vec<&str> = if row.removed {
             h.course_exclude.iter().map(String::as_str).collect()
         } else {
-            let slug = &now.slugs[&row.code];
+            let slug = &now.slugs[key];
             h.course_map.iter().filter(|(_, s)| s == slug).map(|(f, _)| f.as_str()).collect()
         };
         assert_eq!(serde_json::to_string(&in_text).unwrap(), serde_json::to_string(&c["pairs"]).unwrap(), "{key}: the pairs in --courses and in the text");
@@ -1767,4 +1771,58 @@ fn test_12_removing_a_past_terms_shell_excludes_only_its_own_pin_and_the_live_sh
     assert_eq!(h.course_exclude, ["_81_1"], "the spring shell's own pin only; the shared human code is the live shell's too: {h:?}");
     let map_fragments: Vec<&str> = h.course_map.iter().map(|(f, _)| f.as_str()).collect();
     assert_eq!(map_fragments, ["KNT 220", "_82_1"], "{h:?}");
+}
+
+#[test]
+fn test_03_a_runners_null_proof_count_reaches_the_job_record_and_the_saved_file_as_null() {
+    let proof: BTreeMap<String, Option<i64>> = [("assignments_upcoming".to_string(), Some(3)), ("turned_in".to_string(), None)].into();
+    let r = rig_with("t03-nullproof", state_at(3, false), false, vec![], |f| {
+        let p = proof.clone();
+        f.behave("school.preview", move || Outcome::Done(p.clone()));
+    });
+    r.q.enqueue("school.preview");
+    r.idle();
+    assert_eq!(r.state_of("school.preview"), JobState::Done);
+    assert_eq!(r.job("school.preview").proof, proof, "null stays null on the live state, never 0");
+    let Loaded::Ok(saved) = load_state(&r.dir) else { panic!("the queue saves as states change") };
+    assert_eq!(saved.jobs["school.preview"].proof, proof, "and in onboarding.json");
+}
+
+#[test]
+fn test_14_two_kept_shells_of_one_human_code_get_two_slugs_each_under_its_own_key() {
+    // "KNT 220" from spring (`_0990_1`) and fall (`_1002_1`), both kept: two rows, two notes, two slugs.
+    let dir = scratch("t14-two-shells");
+    let capture = serde_json::json!({"capture": {"courses": [
+        course("KNT 220", "Knotwork Theory", "_0990_1"), course("KNT 220", "Knotwork Theory", "_1002_1"),
+    ]}});
+    assert_eq!(onboarding_answer_inner(&dir, 3, &capture, &mut |_| {})["ok"], true);
+    let created = RefCell::new(Vec::<String>::new());
+    let out = run_school_courses(&dir, &[], &mut |c| {
+        created.borrow_mut().push(c.lms_key.clone());
+        Ok(format!("knotwork-theory{}", if c.lms_key == "_0990_1" { "-spring" } else { "" }))
+    });
+    assert!(matches!(out, Outcome::Done(_)), "{out:?}");
+    assert_eq!(*created.borrow(), ["_0990_1", "_1002_1"], "one create per kept shell");
+    let slugs = load_answers(&dir).unwrap().unwrap().slugs;
+    assert_eq!(slugs.get("_0990_1").map(String::as_str), Some("knotwork-theory-spring"), "{slugs:?}");
+    assert_eq!(slugs.get("_1002_1").map(String::as_str), Some("knotwork-theory"), "{slugs:?}");
+    assert!(!slugs.contains_key("KNT 220"), "never keyed by the human code, where one shell would overwrite the other: {slugs:?}");
+}
+
+#[test]
+fn test_12_every_registrar_row_reaches_registrar_confirm_whatever_was_removed() {
+    // §14.47 (G5): the registrar holds only the current term, so a removal never removes a class time.
+    let dir = scratch("t12-registrar");
+    let rows = vec![
+        RegistrarRow { code: "QLT 101".into(), days: "MWF".into(), start: "09:00".into(), end: "09:50".into() },
+        RegistrarRow { code: "KNT 220".into(), days: "TR".into(), start: "11:00".into(), end: "12:15".into() },
+        RegistrarRow { code: "WVG 105".into(), days: "W".into(), start: "14:00".into(), end: "16:50".into() },
+    ];
+    let capture = serde_json::json!({"capture": {"courses": three_courses(), "registrar_rows": rows}});
+    assert_eq!(onboarding_answer_inner(&dir, 3, &capture, &mut |_| {})["ok"], true);
+    for key in ["_1002_1", "_1001_1", "_1003_1"] {
+        assert_eq!(onboarding_answer_inner(&dir, 3, &serde_json::json!({"remove": key}), &mut |_| {})["ok"], true);
+        let a = load_answers(&dir).unwrap().unwrap();
+        assert_eq!(registrar_confirm_rows(&a), rows, "after removing {key}, every row, in captured order");
+    }
 }

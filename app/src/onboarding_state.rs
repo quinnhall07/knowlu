@@ -34,8 +34,9 @@ pub enum JobState {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct JobRecord {
     pub state: JobState,
-    /// Counts only.
-    pub proof: BTreeMap<String, i64>,
+    /// Counts only, each `null` where its input is missing (as the engine's `--preview` writes it),
+    /// so a null survives the round trip and the rail never shows 0 for "not known".
+    pub proof: BTreeMap<String, Option<i64>>,
     /// A closed-set reason (and for `failed`, its fix is the page's).
     pub reason: Option<String>,
 }
@@ -173,6 +174,12 @@ pub const UNMATCHED: &str = "unmatched";
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Bucket {
     pub codes: Vec<String>,
+    /// §14.47: on a **single-course** bucket, `true` when the grades bundle has a graded item column
+    /// for the course, `false` when it has none, `null` when no bundle was given. Multi-code buckets
+    /// and `unmatched` carry none; absent and `null` read the same, since only single-course buckets
+    /// are counted for `grades_courses`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graded: Option<bool>,
     #[serde(flatten)]
     pub counts: BTreeMap<String, Option<i64>>,
 }
@@ -202,7 +209,9 @@ pub struct BookRow {
 pub struct Answers {
     pub courses: Vec<CourseAnswer>,
     pub registrar_rows: Vec<RegistrarRow>,
-    /// Course code to the slug `school.courses` settled on (a restored note's own where one matched).
+    /// [`CourseAnswer::key`] (the LMS course key, then the slug, then the label; never the human code,
+    /// which two shells share) to the slug `school.courses` settled on (a restored note's own where
+    /// one matched). Two kept shells of one human code have two entries.
     pub slugs: BTreeMap<String, String>,
     pub google_calendar: Option<bool>,
     /// `lms_ics` or `calendar_ics` to its state.
@@ -225,12 +234,18 @@ impl Answers {
     pub fn recapture(&mut self, _captured: Vec<CourseAnswer>) { todo!("F2d: recapture") }
 }
 
-/// Step 3's proof totals (§14.45): `classes` is the number of kept rows; every other name is the sum,
-/// over **every bucket whose `codes` is empty ([`UNMATCHED`]) or contains at least one kept course's
-/// key**, of that count's numbers. A bucket naming only removed courses is out; one naming a kept and a
-/// removed course stays. A name is **`null`** when every bucket carrying it carries `null` (its input
-/// was missing), so the proof shows nothing rather than 0. This is exactly what F6c's ingest imports
-/// (`onboarding_status` returns it).
+/// Step 3's proof totals (§14.45, §14.47), what F6c's ingest and `registrar.confirm` will import
+/// (`onboarding_status` returns it):
+/// - `classes`: the number of kept rows;
+/// - `assignments_upcoming`, `turned_in` (every feed count): the sum, over **every bucket whose
+///   `codes` is empty ([`UNMATCHED`]) or contains at least one kept course's key**, of that count's
+///   numbers. A bucket naming only removed courses is out; one naming a kept and a removed course stays;
+/// - `class_times`: the sum over **every** bucket, whatever was removed (§14.47, G5: the registrar
+///   holds only the current term, and every class time is imported); its buckets are display only;
+/// - `grades_courses`: the number of **kept single-course buckets with `graded: true`**; `null` when
+///   every single-course bucket's `graded` is `null` (no bundle).
+/// A count name is **`null`** when every bucket carrying it carries `null` (its input was missing), so
+/// the proof shows nothing rather than 0.
 pub fn step3_totals(_a: &Answers) -> BTreeMap<String, Option<i64>> { todo!("F2d: the step-3 totals") }
 
 /// F8b's seam after `school.preview`: parses the engine's `by_course` object (its nulls included)
