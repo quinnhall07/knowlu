@@ -2159,7 +2159,8 @@ fn school_apply_writes_the_bytes_build_into_writes_for_the_same_school() {
         }
         if choice.unitid != "100751" {
             assert_eq!(preset, "none", "{tag}");
-            assert_eq!(config_bytes(&vault, "events.yaml"), campus_yaml("none").unwrap().as_bytes(), "{tag}: events preset none");
+            // Vault text is written CRLF on Windows (pystr::write_text), as build_into's is.
+            assert_eq!(config_bytes(&vault, "events.yaml"), campus_yaml("none").unwrap().replace('\n', "\r\n").as_bytes(), "{tag}: events preset none");
         }
         if choice.unitid.is_empty() {
             let text = String::from_utf8(config_bytes(&vault, "campus.yaml")).unwrap();
