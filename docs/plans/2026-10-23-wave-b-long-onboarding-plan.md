@@ -6264,6 +6264,12 @@ test.
     "Student's time", the middle of each range) as one constant in `onboarding.js`. Step 9 is
     absent in wave B and is left out. Step 7 counts until the status moves past it. N is rounded
     up, with a minimum of 1. It is a display estimate, never a count of jobs.
+  - **Step 7 is 60 s, the top of its 0-60 s range, not the midpoint** (controller's ruling after
+    F11p1 review r2, 2026-10-24). With 30 s, steps 7 and 8 both round to 4 minutes and step 7
+    drops out of the estimate. The higher figure keeps it counted after rounding. A student who
+    reaches step 7 is always pasting a link, so 60 s is fair. Don't "correct" this back to 30 s;
+    the pin `m[2] > m[3]` depends on it. The seconds are 3:120, 4:90, 5:30, 6:30, 7:60, 8:60,
+    10:120, 11:30, summed and then rounded up once.
   - Finish later moves from the top bar to the foot, with its id and its handler unchanged. Sign
     out stays in the top bar.
 - **Shots need more than the status.** Without a backend, `?fixture=` answers only
