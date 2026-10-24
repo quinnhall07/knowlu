@@ -467,7 +467,9 @@
     });
   }
   function editRowHtml(c) {
-    var kinds = KINDS10.map(function (k) { return '<option value="' + k[0] + '"' + (c.kind === k[0] ? " selected" : "") + '>' + k[1] + '</option>'; }).join("");
+    // A kind with no label here (event, exam, task-block) stays selected, under the engine's own word.
+    var known = KINDS10.some(function (k) { return k[0] === c.kind; });
+    var kinds = (known || !c.kind ? "" : '<option value="' + esc(c.kind) + '" selected>' + esc(c.kind) + '</option>') + KINDS10.map(function (k) { return '<option value="' + k[0] + '"' + (c.kind === k[0] ? " selected" : "") + '>' + k[1] + '</option>'; }).join("");
     var levels = LEVELS10.map(function (l) { return '<option value="' + l[0] + '"' + ((c.level || "soft") === l[0] ? " selected" : "") + '>' + l[1] + '</option>'; }).join("");
     return '<li class="ob-set" data-id="' + esc(c.id) + '" data-kind="' + esc(c.kind) + '" data-level="' + esc(c.level || "soft") + '"><span class="a">' + esc(c.title) + '</span> <span class="su-dim">' + esc(c.when || "") + '</span> ' +
       '<button class="su-link" type="button" data-act10="edit">Edit</button>' +

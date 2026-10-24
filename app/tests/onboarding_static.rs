@@ -958,3 +958,12 @@ fn step_eights_empty_field_message_and_the_other_sites_sign_in_do_not_redraw_or_
     let branch = &empty[..empty.find('}').unwrap()];
     assert!(!branch.contains("paintSite("), "an empty-field message must not redraw the form and wipe the typed username");
 }
+
+#[test]
+fn an_edit_menu_keeps_a_kind_it_has_no_label_for_selected_and_sends_only_what_changed() {
+    let c = code(&read("onboarding.js"));
+    let row = function(&c, "editRowHtml");
+    assert!(row.contains("indexOf") || row.contains(".some("), "a kind outside the label list is added as the selected option, in the engine's own word");
+    let save = function(&c, "saveEdit10");
+    assert!(save.contains("!== row.getAttribute(\"data-kind\")") && save.contains("!== row.getAttribute(\"data-level\")"), "each field is sent only when its control differs from the row's own value");
+}
