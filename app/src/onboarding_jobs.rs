@@ -153,7 +153,7 @@ impl Core {
     }
 }
 
-struct Inner { deps: Deps, core: Mutex<Core>, cv: Condvar, stop: AtomicBool }
+struct Inner { deps: Deps, core: Mutex<Core>, cv: Condvar, stop: AtomicBool, batch_closed: AtomicBool }
 
 impl Inner {
     fn lock(&self) -> MutexGuard<'_, Core> { self.core.lock().unwrap_or_else(|e| e.into_inner()) }
@@ -239,7 +239,7 @@ impl Queue {
         }
         order.sort_by_key(|j| (JOB_ORDER.iter().position(|c| c == j).unwrap_or(JOB_ORDER.len()), j.clone()));
         let core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false };
-        let inner = Arc::new(Inner { deps, core: Mutex::new(core), cv: Condvar::new(), stop: AtomicBool::new(false) });
+        let inner = Arc::new(Inner { deps, core: Mutex::new(core), cv: Condvar::new(), stop: AtomicBool::new(false), batch_closed: AtomicBool::new(false) });
         let spawn = |lane: usize, name: &str| {
             let i = inner.clone();
             std::thread::Builder::new().name(name.into()).spawn(move || work(i, lane)).expect("the onboarding queue could not start a thread")
@@ -305,8 +305,9 @@ impl Queue {
     /// state and saves it, so no later save can write an older, unfinished copy over it.
     pub fn finish(&self, _handover: Vec<HandoverItem>) -> Result<(), String> { todo!("F8f: finish") }
     /// F8m: a closed backfill batch tells the queue; nothing is started.
-    pub fn mail_batch_closed(&self) { todo!("F8m: mail batch closed") }
-    pub fn batch_closed_noted(&self) -> bool { todo!("F8m: batch closed noted") }
+    pub fn mail_batch_closed(&self) { self.inner.batch_closed.store(true, Ordering::SeqCst); }
+    /// True once a batch has closed under this queue (the rail's `older_mail` line reads it).
+    pub fn batch_closed_noted(&self) -> bool { self.inner.batch_closed.load(Ordering::SeqCst) }
 }
 
 // ---- the notes gate and the sync-lock retry (F8h) -------------------------------------------------

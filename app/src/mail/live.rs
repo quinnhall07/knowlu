@@ -5,7 +5,8 @@
 //! deletes that failed before, then **an open backfill resumes** on its kept profile, hidden.
 //!
 //! A closed backfill batch starts a slot at once (spec §4.8 step 1): the hook runs `scheduler::run_slot` on
-//! its own thread, which never runs two slots (a slot already in progress is left alone).
+//! its own thread, which never runs two slots (a slot already in progress is left alone). In onboarding mode
+//! it tells the onboarding queue instead and starts none (F8m).
 use super::host::Host;
 use super::recover::{Mailbox, Place, SystemClock, WindowMailbox};
 use super::setup::{Env, Kind, Plan, Shared, SETUPS};
@@ -115,7 +116,15 @@ fn real_env(app: &AppHandle, data_dir: &Path, client: MailClient, guard: MailWin
         client,
         clock: Box::new(SystemClock),
         // A closed backfill batch starts a slot now (§4.8 step 1): `judge` pulls it without waiting.
+        // In onboarding mode it tells the queue instead and starts no slot (F8m): the queue's next `judge` pulls it.
         on_closed: Box::new(move || {
+            let mode = slot_app.try_state::<crate::onboarding_state::LaunchMode>().map(|m| *m).unwrap_or(crate::onboarding_state::LaunchMode::Normal);
+            if on_batch_closed(mode) == BatchClosed::TellQueue {
+                if let Some(q) = slot_app.try_state::<crate::onboarding_jobs::Queue>() {
+                    q.mail_batch_closed();
+                }
+                return;
+            }
             let app = slot_app.clone();
             std::thread::spawn(move || {
                 let _ = crate::scheduler::run_slot(&app, false);
@@ -214,9 +223,14 @@ pub fn sweep_at_launch(data_dir: &Path, window: Option<MailWindow>) -> Option<Ma
     Some(window)
 }
 
-/// What a closed backfill batch does (F8m, review r5 I-4). **F1 stub.**
+/// What a closed backfill batch does (F8m, review r5 I-4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchClosed { RunSlot, TellQueue }
 
 /// Onboarding mode tells the queue (no slot starts outside it); the normal console runs a slot.
-pub fn on_batch_closed(_mode: crate::onboarding_state::LaunchMode) -> BatchClosed { todo!("F8m: on_batch_closed") }
+pub fn on_batch_closed(mode: crate::onboarding_state::LaunchMode) -> BatchClosed {
+    match mode {
+        crate::onboarding_state::LaunchMode::Onboarding => BatchClosed::TellQueue,
+        crate::onboarding_state::LaunchMode::Normal => BatchClosed::RunSlot,
+    }
+}
