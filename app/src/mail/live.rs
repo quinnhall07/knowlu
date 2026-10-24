@@ -117,6 +117,7 @@ fn real_env(app: &AppHandle, data_dir: &Path, client: MailClient, guard: MailWin
         clock: Box::new(SystemClock),
         // A closed backfill batch starts a slot now (§4.8 step 1): `judge` pulls it without waiting.
         // In onboarding mode it tells the queue instead and starts no slot (F8m): the queue's next `judge` pulls it.
+        // In the normal console the first closed batch also clears the hand-over's `mail.first_pass` (F8s2), and only that.
         on_closed: Box::new(move || {
             let mode = slot_app.try_state::<crate::onboarding_state::LaunchMode>().map(|m| *m).unwrap_or(crate::onboarding_state::LaunchMode::Normal);
             if on_batch_closed(mode) == BatchClosed::TellQueue {
@@ -127,11 +128,43 @@ fn real_env(app: &AppHandle, data_dir: &Path, client: MailClient, guard: MailWin
             }
             let app = slot_app.clone();
             std::thread::spawn(move || {
+                // F8s2 (§14.51 r1-r3): the first closed batch is the first pass delivered. The address list
+                // is read here, off the backfill's thread and before `run_slot`, so a slow request never
+                // holds up the backfill's next pass.
+                if let Some(cs) = app.try_state::<ConsoleState>() {
+                    first_pass_closed(&cs.data_dir, &|| client_for(&cs.vault).and_then(|c| c.list_addresses().map_err(|e| e.name())));
+                }
                 let _ = crate::scheduler::run_slot(&app, false);
             });
         }),
         guard: Some(guard),
     }
+}
+
+/// The normal console's closed-batch hook (F8s2): the first closed backfill batch is the first pass
+/// delivered, so a finished `onboarding.json`'s `mail.first_pass` clears. It clears only itself, and only
+/// once `mail.setup` and `mail.canary` are gone, so when either is still held the address list is read
+/// once (no lock held) and the canary read from its rows (`scheduler::mail_signals`) goes first, in the
+/// same save; a list that cannot be read applies nothing and the next closed batch tries again. A file
+/// that is absent, unreadable or unfinished is left alone.
+///
+/// One accepted lag (§14.51 r3, m-c): the setup accepts any canary as back when the service's `sent_at`
+/// does not parse (`mail/runner.rs:875`), so its backfill can start on a `last_canary_ok_at` older than
+/// the onboarding start, which `CanaryVerified` does not count; the items then stay until a later canary
+/// or batch clears them.
+pub fn first_pass_closed(data_dir: &Path, list: &dyn Fn() -> Result<Vec<Value>, &'static str>) {
+    use crate::onboarding_state::{apply_mail_signal, load_state, Loaded, MailSignal};
+    let Loaded::Ok(s) = load_state(data_dir) else { return };
+    if !s.finished {
+        return;
+    }
+    if !s.handover.iter().any(|h| h.item == "mail.setup" || h.item == "mail.canary") {
+        let _ = apply_mail_signal(data_dir, MailSignal::FirstPassDelivered);
+        return;
+    }
+    let pending_before = crate::mail_session::MailState::load(data_dir).map_or(true, |m| !m.pending_setups.is_empty());
+    let Ok(listed) = list() else { return };
+    crate::scheduler::apply_listed_signals(data_dir, pending_before, &listed, &[MailSignal::FirstPassDelivered]);
 }
 
 /// Starts a setup for `kind` on the console's profile. `Err` is a fixed sentence: no account, the mail

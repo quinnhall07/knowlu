@@ -432,6 +432,10 @@ pub struct MailSeam<'a> {
     pub window_open: bool,
 }
 
+/// `MailSeam::mailboxes`'s answer for a profile whose mail client could not be built: no account, no row, and no
+/// hand-over signal (an unread list never says "disconnected").
+pub const MAIL_NO_ACCOUNT: &str = "no account";
+
 fn no_mailboxes() -> Result<Vec<serde_json::Value>, &'static str> { Ok(Vec::new()) }
 
 /// A pass that did not run because the mail window was taken meanwhile (a setup, a repair sign-in).
@@ -454,6 +458,63 @@ impl MailSeam<'static> {
     pub fn empty() -> MailSeam<'static> { MailSeam { mailboxes: &no_mailboxes, pass: None, window_open: false } }
 }
 
+/// What the account's **unfiltered** address list says about the onboarding hand-over's mail items
+/// (F8s2, §14.51): pure, and never `FirstPassDelivered` (that is the first closed backfill batch,
+/// `mail::live::first_pass_closed`). `CanaryVerified` is a row's `last_canary_ok_at` at or after
+/// `started_at`, both parsed as instants (the field the setup's own canary wait reads, never
+/// `confirmed`, which comes before the canary); an unparseable value on either side gives nothing.
+/// `BackfillNeverDriven` goes beside it when a verified row's provider is one the app never drives.
+/// `Disconnected` is no live row: every row revoked or turned off, or no row and no `pending_setups`
+/// entry (a record left is a setup in flight or a delete owed).
+///
+/// Known limitation (n1, §14.51 r4): hand-over items carry no address id, so on an account with
+/// several mailboxes one verified row clears the mail items for all of them. Per-mailbox items would
+/// be a later change to `HandoverItem`.
+pub fn mail_signals(listed: &[serde_json::Value], mail: &crate::mail_session::MailState, started_at: &str) -> Vec<crate::onboarding_state::MailSignal> {
+    use crate::onboarding_state::{backfill_never_driven, MailSignal};
+    let mut out = Vec::new();
+    if let Ok(started) = started_at.parse::<jiff::Timestamp>() {
+        let verified: Vec<&serde_json::Value> = listed
+            .iter()
+            .filter(|r| r["last_canary_ok_at"].as_str().and_then(|t| t.parse::<jiff::Timestamp>().ok()).is_some_and(|t| t >= started))
+            .collect();
+        if !verified.is_empty() {
+            out.push(MailSignal::CanaryVerified);
+        }
+        if verified.iter().any(|r| backfill_never_driven(crate::mail_steps::Provider::from_service(r["provider"].as_str().unwrap_or("")))) {
+            out.push(MailSignal::BackfillNeverDriven);
+        }
+    }
+    let live = |r: &serde_json::Value| r["status"].as_str() != Some("revoked") && !r["address_id"].as_str().is_some_and(|i| mail.is_turned_off(i));
+    if listed.iter().all(|r| !live(r)) && (!listed.is_empty() || mail.pending_setups.is_empty()) {
+        out.push(MailSignal::Disconnected);
+    }
+    out
+}
+
+/// A finished `onboarding.json`'s mail items against `listed`, then `then`, in one locked save. The list
+/// was read before this, so the lock is never held across a network call. Does nothing for an absent,
+/// unreadable or unfinished file, an unreadable `mail.json` (it cannot say what is turned off) or no signal.
+/// `pending_before`: `mail.json` held a `pending_setups` entry (or could not be read) before the list was asked for.
+pub fn apply_listed_signals(data_dir: &Path, pending_before: bool, listed: &[serde_json::Value], then: &[crate::onboarding_state::MailSignal]) {
+    use crate::onboarding_state::{apply_mail_signals, load_state, Loaded};
+    let Loaded::Ok(s) = load_state(data_dir) else { return };
+    let Ok(mail) = crate::mail_session::MailState::load(data_dir) else { return };
+    if !s.finished || s.handover.is_empty() {
+        return;
+    }
+    let mut signals = mail_signals(listed, &mail, &s.started_at);
+    // A setup that wrote its pending record while the list was out is a setup in flight, not a disconnect:
+    // `mail` above is read after the list, `pending_before` before it, and either one holding a record keeps the items.
+    if pending_before {
+        signals.retain(|g| *g != crate::onboarding_state::MailSignal::Disconnected);
+    }
+    signals.extend_from_slice(then);
+    if !signals.is_empty() {
+        let _ = apply_mail_signals(data_dir, &signals);
+    }
+}
+
 /// **The slot's mail decision** (spec §4.11, test 36): the whole `RunSummary` row, or `None` for no row.
 /// With no mailbox connected (none listed, or only revoked, guided or turned-off ones) there is no row; with
 /// one, a named skip at exit 0 in this order: no entitlement, saved sign-in off, not due, mail window open;
@@ -466,7 +527,15 @@ pub fn mail_step(est: crate::account::EntitlementState, data_dir: &Path, now: i6
     let pass = mail.pass?;
     let skip = |why: &str| Some(format!("mail (skipped: {why})"));
     // A list the service could not give is no proof there is no mailbox: named, never silent (Checkpoint D).
-    let Ok(listed) = (mail.mailboxes)() else { return skip("could not read your mailboxes") };
+    let pending_before = crate::mail_session::MailState::load(data_dir).map_or(true, |m| !m.pending_setups.is_empty());
+    let listed = match (mail.mailboxes)() {
+        Ok(listed) => listed,
+        // A client that could not be built is no account, so no mailbox and no row: as it was when this was an empty `Ok`.
+        Err(MAIL_NO_ACCOUNT) => return None,
+        Err(_) => return skip("could not read your mailboxes"),
+    };
+    // F8s2: the hand-over reads the list as the service gave it, before the filter below drops any row.
+    apply_listed_signals(data_dir, pending_before, &listed, &[]);
     let state = MailState::load(data_dir);
     let rows: Vec<serde_json::Value> = listed
         .into_iter()
@@ -826,7 +895,10 @@ pub fn run_slot_inner_scoped(cs: &ConsoleState, sch: &Scheduler, tray_app: Optio
     let mail_client = || crate::mail::live::client_for(&cs.vault);
     let mail_rows = || match tray_app.map(|_| mail_client()) {
         Some(Ok(client)) => client.list_addresses().map_err(|e| e.name()),
-        _ => Ok(Vec::new()),
+        // No app handle has no mailbox; a client that could not be built (no cloud.yaml, no session target) is
+        // `MAIL_NO_ACCOUNT`, never an empty `Ok`: a list nothing read is no proof of a disconnect (F8s2 review r1).
+        Some(Err(_)) => Err(MAIL_NO_ACCOUNT),
+        None => Ok(Vec::new()),
     };
     let pass = |due: &[serde_json::Value]| {
         let app = tray_app.expect("only called with an app handle");
@@ -1249,6 +1321,14 @@ pub fn run_slot_scoped(cs: &ConsoleState, sch: &Scheduler, tray_app: Option<&App
     // Fix round 1, review I4: the slot's own `sync` step is a child process and cannot fill
     // `cs.sync` itself, so this reads back what it (or its own skip) left in `state/sync-status.json`.
     state::refresh_sync(cs);
+    // F8s2 (§4.10, §14.51): a slot that ran, whatever its outcome, ends the hand-over's slot items in a
+    // finished `onboarding.json`; the three refusals above returned before this. An absent, unreadable
+    // or unfinished file is left alone (`update_finished`), and the lock covers only load and save.
+    let _ = crate::onboarding_state::update_finished(&cs.data_dir, |s| {
+        let before = s.handover.len();
+        s.slot_ended();
+        s.handover.len() != before
+    });
     let steps = steps.steps;
     let ok = steps.iter().all(|(_, c)| *c == 0);
     let summary = RunSummary { started, ended: knowlu_engine::journal::now_ts(None), steps, ok, engine_ok, late, reason: None, attempts: 1 };

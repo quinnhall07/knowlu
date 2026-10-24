@@ -3335,3 +3335,373 @@ fn test_27_the_housekeeping_tick_calls_spawn_update_check_and_the_check_lives_on
     assert_eq!(sched.matches("check_and_stage_blocking").count(), 1, "and appears nowhere else");
     assert!(sched.matches("spawn_update_check(").count() >= 2, "the tick calls it as well as defining it");
 }
+
+// ======================================================================================================
+// O3 F1 test 32 (F8s2): the normal console clears the onboarding hand-over. Invented data only; the engine
+// is the `cmd` stand-in, the mail list a closure, the service never asked.
+// ======================================================================================================
+
+use knowlu::onboarding_state::{apply_mail_signal, load_state, save_state, state_path, update_finished, HandoverItem, Loaded, MailSignal, OnboardingState};
+use knowlu::scheduler::mail_signals;
+
+fn t32_item(i: &str) -> HandoverItem {
+    HandoverItem { item: i.into(), signal: if i.starts_with("mail.") { "mail_json" } else { "slot_end" }.into() }
+}
+fn t32_finished(items: &[&str]) -> OnboardingState {
+    let mut s = OnboardingState::new("2026-10-24T14:00:00Z", 11);
+    s.finished = true;
+    s.handover = items.iter().map(|i| t32_item(i)).collect();
+    s
+}
+fn t32_names(dir: &Path) -> Vec<String> {
+    match load_state(dir) {
+        Loaded::Ok(s) => s.handover.into_iter().map(|h| h.item).collect(),
+        other => panic!("onboarding.json did not load: {other:?}"),
+    }
+}
+fn t32_bytes(dir: &Path) -> Option<Vec<u8>> { std::fs::read(state_path(dir)).ok() }
+fn t32_slot(cs: &ConsoleState, sch: &Scheduler) -> knowlu::scheduler::RunSummary {
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd"))]);
+    run_slot_with(cs, sch, None, false, &GradesSeam { row: None, capture: None, window_open: false }, &MailSeam::empty())
+}
+fn t32_clean(v: &Path, cs: &ConsoleState) {
+    let _ = std::fs::remove_dir_all(&cs.data_dir);
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn test_32_a_slot_that_ran_clears_the_slot_items_of_a_finished_file_and_keeps_the_mail_items() {
+    let (v, cs) = app_slot_vault("o3-32-ran");
+    save_state(&cs.data_dir, &t32_finished(&["first.sync", "mail.canary"])).unwrap();
+    let s = t32_slot(&cs, &Scheduler::default());
+    assert!(s.reason.is_none(), "the slot ran: {s:?}");
+    assert_eq!(t32_names(&cs.data_dir), ["mail.canary"], "the slot item went, the mail item stayed");
+    t32_clean(&v, &cs);
+}
+
+#[test]
+fn test_32_a_refused_slot_leaves_the_file_byte_identical() {
+    let hand = ["first.sync", "mail.canary"];
+    // Script mode: vault-full's runners.yaml has no `scheduler: app`.
+    let v = scratch("o3-32-script");
+    let cs = open(&v, "o3-32-script");
+    save_state(&cs.data_dir, &t32_finished(&hand)).unwrap();
+    let before = t32_bytes(&cs.data_dir);
+    let s = t32_slot(&cs, &Scheduler::default());
+    assert_eq!(s.reason.as_deref(), Some("scheduler is script on this vault"));
+    assert_eq!(t32_bytes(&cs.data_dir), before, "script mode");
+    t32_clean(&v, &cs);
+    // Another device.
+    let (v, cs) = app_slot_vault("o3-32-device");
+    let other = std::fs::read_to_string(v.join("config").join("runners.yaml")).unwrap().replace(&knowlu_engine::journal::device_name(), "some-other-device");
+    std::fs::write(v.join("config").join("runners.yaml"), other).unwrap();
+    save_state(&cs.data_dir, &t32_finished(&hand)).unwrap();
+    let before = t32_bytes(&cs.data_dir);
+    let s = t32_slot(&cs, &Scheduler::default());
+    assert_eq!(s.reason.as_deref(), Some("not the designated device"));
+    assert_eq!(t32_bytes(&cs.data_dir), before, "another device");
+    t32_clean(&v, &cs);
+    // A slot already running.
+    let (v, cs) = app_slot_vault("o3-32-busy");
+    save_state(&cs.data_dir, &t32_finished(&hand)).unwrap();
+    let before = t32_bytes(&cs.data_dir);
+    let sch = Scheduler::default();
+    *lock(&sch.running) = true;
+    t32_slot(&cs, &sch);
+    assert_eq!(t32_bytes(&cs.data_dir), before, "a slot already running");
+    t32_clean(&v, &cs);
+}
+
+#[test]
+fn test_32_no_file_none_made_and_an_unfinished_or_unreadable_one_is_byte_identical() {
+    let (v, cs) = app_slot_vault("o3-32-files");
+    t32_slot(&cs, &Scheduler::default());
+    assert!(!state_path(&cs.data_dir).exists(), "the scheduler never creates the file");
+    let mut unfinished = t32_finished(&["first.sync"]);
+    unfinished.finished = false;
+    save_state(&cs.data_dir, &unfinished).unwrap();
+    let before = t32_bytes(&cs.data_dir);
+    t32_slot(&cs, &Scheduler::default());
+    assert_eq!(t32_bytes(&cs.data_dir), before, "unfinished: the queue owns it");
+    std::fs::write(state_path(&cs.data_dir), "{ not an onboarding file").unwrap();
+    let before = t32_bytes(&cs.data_dir);
+    t32_slot(&cs, &Scheduler::default());
+    assert_eq!(t32_bytes(&cs.data_dir), before, "unreadable: never repaired here");
+    t32_clean(&v, &cs);
+}
+
+// ---- the mail half: the pure `mail_signals` over the unfiltered list ------------------------------------------
+
+use knowlu::mail_session::PendingSetup;
+
+const T32_START: &str = "2026-10-24T14:00:00Z";
+
+fn t32_row(provider: &str, status: &str, canary: Option<&str>) -> Value {
+    json!({ "address_id": rig::ID, "provider": provider, "status": status, "last_canary_ok_at": canary })
+}
+fn t32_signals(rows: &[Value], mail: &MailState, started: &str) -> Vec<MailSignal> { mail_signals(rows, mail, started) }
+
+#[test]
+fn test_32_a_canary_at_or_after_the_start_is_verified_and_a_confirmed_row_alone_is_not() {
+    let m = MailState::default();
+    let fresh = t32_row("google", "active", Some("2026-10-24T14:05:00Z"));
+    assert_eq!(t32_signals(&[fresh], &m, T32_START), [MailSignal::CanaryVerified]);
+    assert!(t32_signals(&[t32_row("google", "confirmed", None)], &m, T32_START).is_empty(), "confirmed is the provider's, before the canary");
+    assert!(t32_signals(&[t32_row("google", "active", Some("2026-10-24T13:59:59Z"))], &m, T32_START).is_empty(), "older than started_at");
+}
+
+#[test]
+fn test_32_the_canary_and_the_start_are_compared_as_instants_not_strings() {
+    let m = MailState::default();
+    let at = |canary: &str, start: &str| t32_signals(&[t32_row("google", "active", Some(canary))], &m, start);
+    // 10:00-05:00 is 15:00 UTC: after 14:30Z, though the string sorts before it.
+    assert_eq!(at("2026-10-24T10:00:00-05:00", "2026-10-24T14:30:00Z"), [MailSignal::CanaryVerified]);
+    // 15:00+02:00 is 13:00 UTC: before 14:00Z, though the string sorts after it.
+    assert!(at("2026-10-24T15:00:00+02:00", "2026-10-24T14:00:00Z").is_empty());
+    // A fraction: '.' sorts before 'Z', so a string comparison calls it older.
+    assert_eq!(at("2026-10-24T14:00:00.5Z", "2026-10-24T14:00:00Z"), [MailSignal::CanaryVerified]);
+    assert!(at("not a time", T32_START).is_empty(), "unparseable canary");
+    assert!(at("2026-10-24T14:05:00Z", "not a time").is_empty(), "unparseable start");
+}
+
+#[test]
+fn test_32_disconnected_reads_the_unfiltered_list_and_waits_for_a_pending_setup() {
+    let mut m = MailState::default();
+    assert_eq!(t32_signals(&[t32_row("google", "revoked", None)], &m, T32_START), [MailSignal::Disconnected], "every row revoked");
+    assert_eq!(t32_signals(&[], &m, T32_START), [MailSignal::Disconnected], "no row, no setup in flight");
+    assert!(t32_signals(&[t32_row("google", "active", None)], &m, T32_START).is_empty(), "one live row");
+    m.turned_off.push(rig::ID.to_string());
+    assert_eq!(t32_signals(&[t32_row("google", "active", None)], &m, T32_START), [MailSignal::Disconnected], "every row turned off");
+    let mut pending = MailState::default();
+    pending.pending_setups.push(PendingSetup { address_id: rig::ID.to_string(), placed: false, backfilled: false, shown: false });
+    assert!(t32_signals(&[], &pending, T32_START).is_empty(), "an empty list with a record left is a setup in flight or a delete owed");
+}
+
+#[test]
+fn test_32_no_signal_is_a_first_pass_and_a_last_reconcile_alone_gives_nothing() {
+    let mut m = MailState::default();
+    m.last_reconcile.insert(rig::ID.to_string(), "2026-10-24T15:00:00Z".to_string());
+    let rows = [t32_row("m365", "active", None)];
+    assert!(t32_signals(&rows, &m, T32_START).is_empty(), "a last_reconcile entry is not the first pass");
+    for provider in ["google", "m365", "other"] {
+        let all = t32_signals(&[t32_row(provider, "active", Some("2026-10-24T15:00:00Z"))], &m, T32_START);
+        assert!(!all.contains(&MailSignal::FirstPassDelivered), "{provider}: {all:?}");
+    }
+}
+
+#[test]
+fn test_32_a_list_the_service_could_not_give_clears_nothing_and_a_live_row_clears_nothing() {
+    let (v, cs) = app_slot_vault("o3-32-unread");
+    save_state(&cs.data_dir, &t32_finished(&["mail.setup", "mail.canary", "mail.first_pass"])).unwrap();
+    let before = t32_bytes(&cs.data_dir);
+    let unreadable = || Err("unreachable");
+    let pass = |_: &[Value]| Ok("mail: nothing to check".to_string());
+    t32_mail_slot(&cs, &MailSeam { mailboxes: &unreadable, pass: Some(&pass), window_open: false });
+    assert_eq!(t32_bytes(&cs.data_dir), before, "an unreadable list is no proof");
+    let live = || Ok(vec![t32_row("google", "active", None)]);
+    t32_mail_slot(&cs, &MailSeam { mailboxes: &live, pass: Some(&pass), window_open: false });
+    assert_eq!(t32_bytes(&cs.data_dir), before, "one live row, no fresh canary");
+    t32_clean(&v, &cs);
+}
+
+fn t32_mail_slot(cs: &ConsoleState, mail: &MailSeam) {
+    let _guard = ENGINE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvSeam::set(&[("KNOWLU_ENGINE_EXE", std::ffi::OsStr::new("cmd"))]);
+    run_slot_with(cs, &Scheduler::default(), None, false, &GradesSeam { row: None, capture: None, window_open: false }, mail);
+}
+
+#[test]
+fn test_32_mail_step_reads_the_signals_from_the_list_before_its_filter() {
+    let text = src_text("scheduler.rs");
+    let body = &text[text.find("pub fn mail_step").expect("mail_step")..];
+    let (signals, filter) = (body.find("apply_listed_signals("), body.find(".filter("));
+    assert!(matches!((signals, filter), (Some(s), Some(f)) if s < f), "the signals ({signals:?}) before the filter ({filter:?})");
+}
+
+// ---- the delivered half: the first closed backfill batch --------------------------------------------------------
+
+use knowlu::mail::live::first_pass_closed;
+
+fn t32_dir(tag: &str) -> PathBuf { mail_dir(&format!("o3-32-{tag}")) }
+
+#[test]
+fn test_32_a_delivered_first_pass_clears_only_itself_and_only_after_the_canary() {
+    let d = t32_dir("delivered");
+    save_state(&d, &t32_finished(&["first.sync", "mail.first_pass"])).unwrap();
+    apply_mail_signal(&d, MailSignal::FirstPassDelivered).unwrap();
+    assert_eq!(t32_names(&d), ["first.sync"], "mail.first_pass alone; the slot item is not touched");
+    for open in ["mail.canary", "mail.setup"] {
+        save_state(&d, &t32_finished(&[open, "mail.first_pass"])).unwrap();
+        let before = t32_bytes(&d);
+        apply_mail_signal(&d, MailSignal::FirstPassDelivered).unwrap();
+        assert_eq!(t32_bytes(&d), before, "{open} still open: a delivered first pass clears nothing, mail.first_pass included");
+    }
+}
+
+#[test]
+fn test_32_the_closed_batch_hook_reads_the_canary_from_the_list_then_clears_all_three_in_one_save() {
+    let d = t32_dir("hook");
+    let all = ["mail.setup", "mail.canary", "mail.first_pass"];
+    save_state(&d, &t32_finished(&all)).unwrap();
+    let fresh = || Ok(vec![t32_row("google", "active", Some("2026-10-24T14:05:00Z"))]);
+    first_pass_closed(&d, &fresh);
+    assert!(t32_names(&d).is_empty(), "the canary came back and the batch closed");
+    save_state(&d, &t32_finished(&all)).unwrap();
+    let before = t32_bytes(&d);
+    let unreadable = || Err("unreachable");
+    first_pass_closed(&d, &unreadable);
+    assert_eq!(t32_bytes(&d), before, "a list it cannot read applies nothing");
+    let stale = || Ok(vec![t32_row("google", "active", Some("2026-10-24T13:00:00Z"))]);
+    first_pass_closed(&d, &stale);
+    assert_eq!(t32_bytes(&d), before, "a canary older than started_at is not counted (the accepted lag)");
+    // With the canary items already gone it needs no list at all.
+    save_state(&d, &t32_finished(&["first.sync", "mail.first_pass"])).unwrap();
+    first_pass_closed(&d, &|| panic!("no list is read when the canary items are gone"));
+    assert_eq!(t32_names(&d), ["first.sync"]);
+}
+
+#[test]
+fn test_32_two_writers_on_one_finished_file_each_keep_their_change() {
+    let d = t32_dir("lock");
+    save_state(&d, &t32_finished(&["first.sync", "mail.setup", "mail.canary"])).unwrap();
+    std::thread::scope(|sc| {
+        sc.spawn(|| {
+            update_finished(&d, |s| {
+                std::thread::sleep(Duration::from_millis(200)); // between load and save
+                s.slot_ended();
+                true
+            })
+            .unwrap();
+        });
+        sc.spawn(|| {
+            std::thread::sleep(Duration::from_millis(50));
+            apply_mail_signal(&d, MailSignal::CanaryVerified).unwrap();
+        });
+    });
+    assert!(t32_names(&d).is_empty(), "neither change was lost: {:?}", t32_names(&d));
+}
+
+#[test]
+fn test_32_a_guided_row_or_a_pending_m365_setup_clears_the_first_pass_with_the_canary() {
+    let m = MailState::default();
+    let other = t32_signals(&[t32_row("other", "active", Some("2026-10-24T14:05:00Z"))], &m, T32_START);
+    assert_eq!(other, [MailSignal::CanaryVerified, MailSignal::BackfillNeverDriven]);
+    let d = t32_dir("never");
+    save_state(&d, &t32_finished(&["mail.canary", "mail.first_pass"])).unwrap();
+    for s in other {
+        apply_mail_signal(&d, s).unwrap();
+    }
+    assert!(t32_names(&d).is_empty());
+    // A slot whose list has the row: M365 clears all three, Google keeps the first pass for its batch.
+    for (provider, left) in [("m365", Vec::<&str>::new()), ("google", vec!["mail.first_pass"])] {
+        let (v, cs) = app_slot_vault(&format!("o3-32-pending-{provider}"));
+        save_state(&cs.data_dir, &t32_finished(&["mail.setup", "mail.canary", "mail.first_pass"])).unwrap();
+        let rows = || Ok(vec![t32_row(provider, "active", Some("2026-10-24T14:05:00Z"))]);
+        let pass = |_: &[Value]| Ok("mail: nothing to check".to_string());
+        t32_mail_slot(&cs, &MailSeam { mailboxes: &rows, pass: Some(&pass), window_open: false });
+        assert_eq!(t32_names(&cs.data_dir), left, "{provider}");
+        t32_clean(&v, &cs);
+    }
+}
+
+#[test]
+fn test_32_the_hook_holds_no_lock_across_its_list_call() {
+    let d = t32_dir("net");
+    save_state(&d, &t32_finished(&["first.sync", "mail.setup", "mail.canary", "mail.first_pass"])).unwrap();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let gate = std::sync::Mutex::new(gate);
+    let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+    let (done_tx, done) = std::sync::mpsc::channel::<()>();
+    std::thread::scope(|sc| {
+        sc.spawn(|| {
+            let blocking = || {
+                entered_tx.send(()).unwrap();
+                let _ = gate.lock().unwrap().recv();
+                Ok(vec![t32_row("google", "active", Some("2026-10-24T14:05:00Z"))])
+            };
+            first_pass_closed(&d, &blocking);
+        });
+        entered.recv_timeout(Duration::from_secs(10)).expect("the hook asked for the list");
+        sc.spawn(|| {
+            update_finished(&d, |s| { s.slot_ended(); true }).unwrap();
+            done_tx.send(()).unwrap();
+        });
+        let finished = done.recv_timeout(Duration::from_secs(5)).is_ok();
+        release.send(()).unwrap();
+        assert!(finished, "a slot-end write completed while the list was still out: the lock was not held");
+    });
+    assert!(t32_names(&d).is_empty());
+}
+
+#[test]
+fn test_32_the_normal_console_hook_runs_in_the_spawned_thread_before_run_slot_and_outside_the_lock() {
+    let live = src_text("mail/live.rs");
+    let at = live.find("on_closed: Box::new").expect("real_env's on_closed");
+    let rest = &live[at..];
+    let (spawn, hook, run) = (rest.find("thread::spawn"), rest.find("first_pass_closed("), rest.find("run_slot("));
+    assert!(matches!((spawn, hook, run), (Some(s), Some(h), Some(r)) if s < h && h < r), "spawn {spawn:?} < hook {hook:?} < run_slot {run:?}");
+    let f = &live[live.find("pub fn first_pass_closed").expect("first_pass_closed")..];
+    let f = &f[..f.find("\n}").unwrap_or(f.len())];
+    let (list, apply) = (f.find("list()"), f.find("apply_listed_signals("));
+    assert!(matches!((list, apply), (Some(l), Some(a)) if l < a), "the list ({list:?}) is read before the locked write ({apply:?}), never inside it");
+}
+
+// ---- F8s2 review r1: a list that was never read, and a setup that records itself while the list is out ------------
+
+#[test]
+fn test_32_a_slot_with_no_account_reads_no_list_so_it_clears_nothing() {
+    let d = t32_dir("noacct");
+    save_state(&d, &t32_finished(&["first.sync", "mail.setup", "mail.canary", "mail.first_pass"])).unwrap();
+    let before = t32_bytes(&d);
+    // `mail_rows` reports a client that could not be built (no cloud.yaml, no session target) as this, never
+    // as an empty `Ok`: an empty list the service did not give is no proof of a disconnect.
+    let no_client = || Err(knowlu::scheduler::MAIL_NO_ACCOUNT);
+    let pass = |_: &[Value]| panic!("no pass without a mailbox");
+    let seam = MailSeam { mailboxes: &no_client, pass: Some(&pass), window_open: false };
+    assert_eq!(mail_step(EntitlementState::Entitled, &d, rig::NOW, &seam), None, "no account, no row: as before");
+    assert_eq!(t32_bytes(&d), before, "and the hand-over is not touched");
+    let text = src_text("scheduler.rs");
+    let body = &text[text.find("pub fn run_slot_inner_scoped").expect("run_slot_inner_scoped")..];
+    let body = &body[..body.find("let pass =").expect("the pass")];
+    let code: String = body.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+    assert!(code.contains("Some(Err(_)) => Err(MAIL_NO_ACCOUNT)"), "the slot's mail_rows names a client it could not build");
+}
+
+#[test]
+fn test_32_a_setup_that_records_itself_while_the_list_is_out_is_not_read_as_a_disconnect() {
+    let all = ["mail.setup", "mail.canary", "mail.first_pass"];
+    let record = |d: &Path| {
+        MailState::update(d, |s| {
+            s.pending_setups.push(PendingSetup { address_id: rig::ID.to_string(), placed: false, backfilled: false, shown: false });
+            true
+        })
+        .unwrap();
+    };
+    let d = t32_dir("racehook");
+    save_state(&d, &t32_finished(&all)).unwrap();
+    let before = t32_bytes(&d);
+    first_pass_closed(&d, &|| { record(&d); Ok(Vec::new()) });
+    assert_eq!(t32_bytes(&d), before, "the hook: the record appeared after the list was asked for");
+    let d = t32_dir("racestep");
+    save_state(&d, &t32_finished(&all)).unwrap();
+    let before = t32_bytes(&d);
+    let rows = || { record(&d); Ok(Vec::new()) };
+    let pass = |_: &[Value]| Ok("mail: x".to_string());
+    mail_step(EntitlementState::Entitled, &d, rig::NOW, &MailSeam { mailboxes: &rows, pass: Some(&pass), window_open: false });
+    assert_eq!(t32_bytes(&d), before, "the mail stage: same");
+}
+
+#[test]
+fn test_32_a_record_that_goes_while_the_list_is_out_still_keeps_the_items_because_it_was_there_before() {
+    let d = t32_dir("racegone");
+    MailState::update(&d, |s| {
+        s.pending_setups.push(PendingSetup { address_id: rig::ID.to_string(), placed: false, backfilled: false, shown: false });
+        true
+    })
+    .unwrap();
+    save_state(&d, &t32_finished(&["mail.setup", "mail.canary", "mail.first_pass"])).unwrap();
+    let before = t32_bytes(&d);
+    first_pass_closed(&d, &|| { MailState::update(&d, |s| { s.pending_setups.clear(); true }).unwrap(); Ok(Vec::new()) });
+    assert_eq!(t32_bytes(&d), before, "the setup was in flight when the list was asked for");
+}
