@@ -2085,12 +2085,27 @@ fn test_30_the_drain_waits_for_a_capture_that_ignores_the_stop_and_nothing_write
     let r = rig("t30-wait", state_at(3, true), true);
     let marker = r.dir.join("answers-marker.txt");
     let m = marker.clone();
-    // Ignores the stop for 600 ms, then writes: it stands for the answers file and the pending link.
-    r.fake.behave("school.capture", move || { std::thread::sleep(Duration::from_millis(600)); std::fs::write(&m, "late").unwrap(); Outcome::Done(BTreeMap::new()) });
+    // Ignores the stop until the test releases it, then writes: it stands for the answers file and the pending link.
+    let gate = r.fake.block("school.capture", false);
+    r.fake.behave("school.capture", move || { std::fs::write(&m, "late").unwrap(); Outcome::Done(BTreeMap::new()) });
     r.q.enqueue("school.capture");
     r.wait_started("school.capture");
     r.q.request_stop();
-    r.q.drain();
+    let done = AtomicBool::new(false);
+    std::thread::scope(|sc| {
+        let t = sc.spawn(|| { r.q.drain(); done.store(true, Ordering::SeqCst); });
+        // The release comes only once the drain is waiting (it has named the running job).
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while r.q.exiting().is_none() {
+            assert!(Instant::now() < deadline, "the drain never began to wait");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        let (returned, written) = (done.load(Ordering::SeqCst), marker.exists());
+        gate.release();
+        t.join().unwrap();
+        assert!(!returned && !written, "the drain returned (or the capture wrote) while the capture ignored the stop");
+    });
     assert!(marker.exists(), "the drain returned before the capture wrote");
     assert_eq!(r.state_of("school.capture"), JobState::Done, "waited for, not abandoned");
     std::fs::remove_file(&marker).unwrap(); // the fake `on_sign_out`
@@ -2106,15 +2121,27 @@ fn test_30_a_fake_canary_and_first_pass_are_abandoned_at_once_and_the_list_is_ex
     let gate = r.fake.block("mail.first_pass", false);
     r.q.enqueue("mail.first_pass");
     r.wait_started("mail.first_pass");
-    let began = Instant::now();
-    r.q.drain();
-    assert!(began.elapsed() < Duration::from_secs(2), "the drain waited for the first pass");
+    // On its own thread with a deadline: a drain that waited for the first pass fails here, never hangs the suite.
+    let done = AtomicBool::new(false);
+    let finished = std::thread::scope(|sc| {
+        let t = sc.spawn(|| { r.q.drain(); done.store(true, Ordering::SeqCst); });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !done.load(Ordering::SeqCst) && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(5)); }
+        let finished = done.load(Ordering::SeqCst);
+        gate.release(); // lets a wrongly waiting drain end before the join
+        t.join().unwrap();
+        finished
+    });
+    assert!(finished, "the drain waited for the first pass");
     assert_eq!(r.state_of("mail.first_pass"), JobState::Pending);
-    gate.release();
     let src = src_of("onboarding_jobs.rs");
+    assert_eq!(src.matches("abandoned.insert").count(), 1, "one place abandons a job");
     let drain = &src[src.find("pub fn drain(").expect("drain")..];
     let drain = &drain[..drain.find("\n    }").unwrap()];
-    assert!(!drain.contains("wait_timeout") && !drain.contains("Instant"), "the drain has no time limit:\n{drain}");
+    for word in ["wait_timeout", "timeout", "Instant", "Duration", "sleep", "return", "break"] {
+        assert!(!drain.contains(word), "the drain has no time limit or early way out ({word}):\n{drain}");
+    }
+    assert!(drain.contains("abandoned.insert") && drain.contains("ABANDON_AT_ONCE.contains"), "the one abandonment reads the list:\n{drain}");
 }
 
 /// Blocks `jobs` past the stop, drains on another thread, and returns what `exiting()` said while the
