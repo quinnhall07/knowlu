@@ -1628,3 +1628,48 @@ fn test_12_mail_provider_is_the_services_string_and_an_answers_file_without_it_k
     assert_eq!(load_answers(&d).unwrap().unwrap().mail_provider.as_deref(), Some("m365"));
     assert!(std::fs::read_to_string(answers_path(&d)).unwrap().contains("\"mail_provider\""));
 }
+
+#[test]
+fn test_12_step_3_accepts_only_the_validated_or_rejected_feed_states_from_the_page() {
+    let d = scratch("t12-feed-states");
+    let courses = vec![row("QLT 101", "Quilting Basics", "_1001_1", false)];
+    for bad in ["stored", "failed"] {
+        let capture = serde_json::json!({"capture": {"courses": courses, "feeds": {"lms_ics": bad}}});
+        let out = onboarding_answer_inner(&d, 3, &capture, &mut |j| panic!("enqueued {j}"));
+        assert_eq!(out["ok"], false, "{bad}: {out}");
+        assert!(!answers_path(&d).exists(), "{bad} wrote a file");
+    }
+    for good in ["validated", "rejected"] {
+        let capture = serde_json::json!({"capture": {"courses": courses, "feeds": {"lms_ics": good}}});
+        assert_eq!(onboarding_answer_inner(&d, 3, &capture, &mut |_| {})["ok"], true, "{good}");
+    }
+}
+
+#[test]
+fn test_12_an_answer_refusal_names_the_answers_file_and_never_the_app_data_path() {
+    let d = scratch("t12-file-only");
+    std::fs::write(answers_path(&d), "{ not json").unwrap();
+    let out = onboarding_answer_inner(&d, 6, &serde_json::json!({"google_calendar": true}), &mut |_| {});
+    let err = out["error"].as_str().unwrap().to_string();
+    assert_eq!(out["ok"], false);
+    assert!(err.contains("onboarding-answers.json"), "{err}");
+    assert!(!err.contains(&d.display().to_string()), "the app-data path (and the user name in it) is not in the error: {err}");
+    let out = onboarding_answer_inner(&d, 3, &serde_json::json!({"remove": "x"}), &mut |_| {});
+    assert_eq!(out["ok"], false);
+    assert!(!out["error"].as_str().unwrap().contains(&d.display().to_string()), "{out}");
+}
+
+#[test]
+fn test_12_an_answer_or_a_skip_is_refused_outright_while_an_exit_is_under_way() {
+    let d = scratch("t12-exiting");
+    let capture = serde_json::json!({"capture": {"courses": [row("QLT 101", "Quilting Basics", "_1001_1", false)]}});
+    let out = answer_unless_exiting(true, &d, 3, &capture, &mut |j| panic!("enqueued {j}"));
+    assert_eq!((out["ok"].clone(), out["exiting"].clone()), (false.into(), true.into()), "{out}");
+    assert!(!answers_path(&d).exists(), "nothing was written");
+    assert_eq!(answer_unless_exiting(false, &d, 3, &capture, &mut |_| {})["ok"], true);
+    let applied = Cell::new(0);
+    let out = skip_unless_exiting(true, &mut || { applied.set(applied.get() + 1); Ok(()) });
+    assert_eq!((out["ok"].clone(), out["exiting"].clone(), applied.get()), (false.into(), true.into(), 0), "{out}");
+    assert_eq!(skip_unless_exiting(false, &mut || { applied.set(applied.get() + 1); Ok(()) })["ok"], true);
+    assert_eq!(applied.get(), 1);
+}

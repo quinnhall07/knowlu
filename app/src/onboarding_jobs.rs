@@ -354,8 +354,10 @@ impl Queue {
     pub fn update_state<T>(&self, change: impl FnOnce(&mut OnboardingState) -> T) -> Result<T, String> {
         let mut g = self.inner.lock();
         if g.frozen { return Err("the onboarding file is frozen: a change is refused".into()); }
+        let before = g.state.clone();
         let out = change(&mut g.state);
-        self.inner.try_persist(&g)?;
+        // A change that never landed is not kept in memory, so a later save cannot write it.
+        if let Err(e) = self.inner.try_persist(&g) { g.state = before; return Err(e); }
         Ok(out)
     }
     /// Finish's write, through the queue's own state: sets `finished` and `handover` on the live

@@ -59,12 +59,14 @@ impl Gate {
     fn wait(&self, stop: &AtomicBool, honor_stop: bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut g = self.open.lock().unwrap();
-        while !*g {
-            assert!(Instant::now() < deadline, "a fake gate was never released");
+        // The stop is looked at before the gate, so a release that lands in the same instant as the
+        // stop still reads as "the job noticed the stop" (the helper is the test's, not an assertion).
+        loop {
             if honor_stop && stop.load(Ordering::SeqCst) { return false; }
+            if *g { return true; }
+            assert!(Instant::now() < deadline, "a fake gate was never released");
             g = self.cv.wait_timeout(g, Duration::from_millis(5)).unwrap().0;
         }
-        true
     }
 }
 
@@ -2177,4 +2179,113 @@ fn test_28_a_status_that_read_its_jobs_carries_the_gate_the_exiting_progress_and
     assert_eq!(capped["exiting"], serde_json::json!({"job": "slot.first_full", "long": true, "since": "2026-10-24T12:03:00Z"}));
     let totals = status_for(Ok(finishable()), Some(&Answers { courses: three_courses(), ..Default::default() }), None, 0);
     assert_eq!(totals["step3"]["classes"], 3);
+}
+
+// ---- F2b review r1: the gate's class times, the lane jobs, the sign-out order, the stop's refusals ------------------
+
+#[test]
+fn test_09_finish_is_refused_before_step_10_is_confirmed_and_the_gate_lists_class_times() {
+    let mut s = finishable();
+    s.step10_confirmed_at = None;
+    let r = rig("t09-unconfirmed", s.clone(), false);
+    let seams = Seams::new(&r);
+    let out = onboarding_finish_inner(&seams, &ExitGuard::default(), epoch(CONFIRMED) + 100_000);
+    assert_eq!(out["ok"], false, "{out}");
+    assert!(r.log.all().is_empty(), "a refusal stops nothing: {:?}", r.log.all());
+    let status = status_for(Ok(s), None, None, epoch(CONFIRMED) + 100_000);
+    assert_eq!(status["gate"]["open"], false, "no confirm, no cap: {status}");
+    assert_eq!(status["gate"]["still_coming"], serde_json::json!(["class_times"]));
+    let confirmed = finishable();
+    assert_eq!(status_for(Ok(confirmed), None, None, epoch(CONFIRMED))["gate"]["open"], true, "confirmed, nothing else coming");
+}
+
+#[test]
+fn test_09_finish_needs_the_four_local_jobs_present_and_done_and_only_the_stores_may_be_absent() {
+    for missing in ["school.apply", "school.courses", "registrar.confirm", "config.ingest"] {
+        let mut s = finishable();
+        s.jobs.remove(missing);
+        let r = rig(&format!("t09-absent-{missing}"), s, false);
+        let seams = Seams::new(&r);
+        let out = onboarding_finish_inner(&seams, &ExitGuard::default(), epoch(CONFIRMED) + 600);
+        assert_eq!(out["ok"], false, "{missing} absent: {out}");
+        assert!(r.log.all().is_empty(), "{missing}: {:?}", r.log.all());
+    }
+    let mut s = finishable();
+    for store in ["school.store", "calendar.store"] { s.jobs.remove(store); }
+    let r = rig("t09-no-stores", s, false);
+    let out = onboarding_finish_inner(&Seams::new(&r), &ExitGuard::default(), epoch(CONFIRMED) + 600);
+    assert_eq!(out["ok"], true, "no store job is fine: {out}");
+}
+
+#[test]
+fn test_09_a_second_finish_after_the_first_landed_writes_nothing() {
+    let r = rig("t09-twice", finishable(), false);
+    let seams = Seams::new(&r);
+    let guard = ExitGuard::default();
+    assert_eq!(onboarding_finish_inner(&seams, &guard, epoch(CONFIRMED) + 180)["ok"], true);
+    // In life the first one ended the process; with fakes the guard is still held, so release it.
+    guard.0.store(false, Ordering::SeqCst);
+    let before = r.log.all();
+    let again = onboarding_finish_inner(&seams, &guard, epoch(CONFIRMED) + 180);
+    assert_eq!((again["ok"].clone(), again["finished"].clone()), (true.into(), true.into()), "{again}");
+    assert_eq!(r.log.all(), before, "no stop, drain, write, relaunch or exit the second time");
+    assert!(!guard.0.load(Ordering::SeqCst), "the guard is released");
+}
+
+#[test]
+fn test_17_sign_out_runs_only_after_the_drain_returns_and_a_writer_that_ignores_the_stop_is_waited_for() {
+    let r = rig("t17-drain-first", state_at(8, true), true);
+    // A writer that ignores the stop for a moment, standing in for school.capture writing the answers file.
+    let capture = r.fake.block("school.capture", false);
+    r.q.enqueue("school.capture");
+    r.wait_started("school.capture");
+    let seams = Seams::new(&r);
+    let out = std::thread::scope(|sc| {
+        let exit = sc.spawn(|| onboarding_sign_out_inner(&seams, &ExitGuard::default()));
+        r.wait_for("the stop", |r| r.q.stop_requested());
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(r.log.pos("drained").is_none() && !r.log.all().iter().any(|e| e.starts_with("sign_out")), "the sign-out waits for the writer: {:?}", r.log.all());
+        capture.release();
+        exit.join().unwrap()
+    });
+    assert_eq!(out["ok"], true, "{out}");
+    let order = ["set_stop", "end:school.capture", "drained", "save", "freeze", "sign_out frozen=true file_step=8", "relaunch:--pick", "exit"];
+    let at: Vec<usize> = order.iter().map(|e| seams.index(e)).collect();
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "stop, the writer's end, drain, save, freeze, sign-out, relaunch, exit: {:?}", r.log.all());
+}
+
+#[test]
+fn test_12_the_stop_and_the_exit_guard_refuse_an_answer_and_a_skip_through_the_live_check() {
+    let r = rig("t12-stop-refuses", state_at(8, true), false);
+    let guard = ExitGuard::default();
+    assert!(!exiting_now(&r.q, &guard));
+    guard.0.store(true, Ordering::SeqCst);
+    assert!(exiting_now(&r.q, &guard), "a held exit guard refuses");
+    guard.0.store(false, Ordering::SeqCst);
+    r.q.request_stop();
+    assert!(exiting_now(&r.q, &guard), "the queue's stop refuses");
+    let late = serde_json::json!({"zybooks_ignore": "ZYB-LATE"});
+    let out = answer_unless_exiting(exiting_now(&r.q, &guard), &r.dir, 8, &late, &mut |_| {});
+    assert_eq!(out["ok"], false, "{out}");
+    let rows = load_answers(&r.dir).unwrap().map(|a| a.zybooks_ignore).unwrap_or_default();
+    assert!(rows.is_empty(), "no late row after the stop: {rows:?}");
+    let src = src_of("onboarding_state.rs");
+    for name in ["pub fn onboarding_answer(", "pub fn onboarding_skip("] {
+        let body = enclosing_fn(&src, src.find(name).unwrap());
+        assert!(body.contains("exiting_now("), "{name} asks the live check:\n{body}");
+    }
+}
+
+#[test]
+fn test_17_update_state_rolls_back_a_change_whose_save_failed() {
+    let r = rig("t17-rollback", state_at(8, true), false);
+    r.q.save().unwrap();
+    let path = state_path(&r.dir);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let before = r.q.snapshot();
+    let out = r.q.update_state(|s| { s.skips.push(Skip { step: 5, source: "mail".into(), cost_key: COST_MAIL.into() }); });
+    assert!(out.is_err(), "the save could not land");
+    assert_eq!(r.q.snapshot().skips, before.skips, "the change is not kept in memory");
+    let _ = std::fs::remove_dir(&path);
 }

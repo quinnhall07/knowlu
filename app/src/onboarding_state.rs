@@ -421,6 +421,9 @@ pub fn onboarding_answer_inner(
                 feeds: BTreeMap<String, FeedState>,
             }
             let Ok(c) = serde_json::from_value::<Capture>(body.clone()) else { return refuse("step 3's capture is not a course list") };
+            // The page may say only what a paste proved: a link is `validated` or `rejected`. `stored`
+            // and `failed` are the store job's words.
+            if c.feeds.values().any(|s| !matches!(s, FeedState::Validated | FeedState::Rejected)) { return refuse("a feed is validated or rejected here"); }
             // A page never supplies pairs: a matching row keeps the ones `save_pairs` wrote.
             let courses: Vec<CourseAnswer> = c.courses.into_iter().map(|mut r| { r.fragments.clear(); r }).collect();
             let saved = replace_answers(data_dir, &|a| {
@@ -432,12 +435,12 @@ pub fn onboarding_answer_inner(
         }
         (3, "remove") => {
             let Some(key) = text(body) else { return refuse("a removal names a course key") };
-            if let Err(e) = require_course(data_dir, &key) { return refuse(&e); }
+            if let Err(e) = require_course(data_dir, &key) { return refuse(&file_only(e, data_dir)); }
             (update_answers(data_dir, &|a| { for c in a.courses.iter_mut().filter(|c| c.key() == key) { c.removed = true; } }), &[])
         }
         (3, "label") => {
             let (Some(key), Some(label)) = (text(&body["key"]), text(&body["label"])) else { return refuse("a label edit names a course key and a label") };
-            if let Err(e) = require_course(data_dir, &key) { return refuse(&e); }
+            if let Err(e) = require_course(data_dir, &key) { return refuse(&file_only(e, data_dir)); }
             (update_answers(data_dir, &|a| { for c in a.courses.iter_mut().filter(|c| c.key() == key) { c.label = label.clone(); } }), &[])
         }
         (6, "google_calendar") => {
@@ -459,7 +462,7 @@ pub fn onboarding_answer_inner(
         }
         _ => return refuse("that answer has no shape Knowlu knows at this step"),
     };
-    if let Err(e) = saved { return refuse(&e); }
+    if let Err(e) = saved { return refuse(&file_only(e, data_dir)); }
     // Saved first: a quit between the save and an enqueue loses nothing, since the answer is on disk.
     for job in jobs { enqueue(job); }
     serde_json::json!({ "ok": true, "error": Value::Null })
@@ -473,6 +476,34 @@ fn replace_answers(data_dir: &Path, change: &dyn Fn(&mut Answers)) -> Result<(),
     let mut a = load_answers(data_dir).ok().flatten().unwrap_or_default();
     change(&mut a);
     save_answers(data_dir, &a)
+}
+
+/// An error that names the answers file by its name only: the app-data path carries the Windows user name.
+fn file_only(e: String, data_dir: &Path) -> String {
+    e.replace(&answers_path(data_dir).display().to_string(), ANSWERS_FILE).replace(&data_dir.display().to_string(), "")
+}
+
+/// True once an exit has begun: the queue's stop is set or the exit guard is held. An answer or a skip
+/// written then could put back what Sign out just deleted, or land after the last save.
+pub fn exiting_now(queue: &crate::onboarding_jobs::Queue, g: &ExitGuard) -> bool {
+    queue.stop_requested() || g.0.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn refused_exiting() -> Value { serde_json::json!({ "ok": false, "exiting": true, "error": "Knowlu is closing setup. Open it again to carry on." }) }
+
+/// [`onboarding_answer_inner`], refused outright (nothing written, nothing enqueued) while `stopping`.
+pub fn answer_unless_exiting(stopping: bool, data_dir: &Path, step: u8, answer: &Value, enqueue: &mut dyn FnMut(&str)) -> Value {
+    if stopping { return refused_exiting(); }
+    onboarding_answer_inner(data_dir, step, answer, enqueue)
+}
+
+/// A skip recorded through `apply`, refused outright while `stopping`.
+pub fn skip_unless_exiting(stopping: bool, apply: &mut dyn FnMut() -> Result<(), String>) -> Value {
+    if stopping { return refused_exiting(); }
+    match apply() {
+        Ok(()) => serde_json::json!({ "ok": true, "error": Value::Null }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    }
 }
 
 /// A remove or a label edit names a saved course by its key; no such course changes no byte.
@@ -834,10 +865,13 @@ pub fn onboarding_sign_out_inner(s: &dyn ExitSeams, g: &ExitGuard) -> Value {
 /// or a gate that is still closed.
 fn finish_refusal(state: &OnboardingState, now_secs: i64) -> Option<String> {
     let st = |j: &str| state.jobs.get(j).map(|r| r.state);
-    let lane_open = st("config.ingest") != Some(JobState::Done)
-        || ["school.apply", "school.courses", "registrar.confirm"].iter().any(|j| st(j).is_some_and(|s| s != JobState::Done))
+    // The four local jobs must exist and be done: a crash between two enqueues can leave one unrecorded,
+    // and finish deletes the only copy of the answers it would have read.
+    let lane_open = ["school.apply", "school.courses", "registrar.confirm", "config.ingest"].iter().any(|j| st(j) != Some(JobState::Done))
         || ["school.store", "calendar.store"].iter().any(|j| st(j).is_some_and(|s| !matches!(s, JobState::Done | JobState::Failed | JobState::Skipped)));
     if lane_open { return Some("Knowlu is still saving your setup. Try again in a moment.".into()); }
+    // Class times are the step 10 confirm (§4.6): nothing opens the reveal before it.
+    if state.step10_confirmed_at.is_none() { return Some("Confirm your first week before Knowlu opens.".into()); }
     let confirmed = state.step10_confirmed_at.as_deref().and_then(|t| t.parse::<jiff::Timestamp>().ok()).map(|t| t.as_second());
     if !crate::onboarding_gate::gate(&gate_items(state), confirmed, now_secs).open {
         return Some("Knowlu is still reading your first week.".into());
@@ -849,7 +883,13 @@ fn finish_refusal(state: &OnboardingState, now_secs: i64) -> Option<String> {
 /// stop, drain, save, `write_finish`, `relaunch_with`, and today's quit path.
 pub fn onboarding_finish_inner(s: &dyn ExitSeams, g: &ExitGuard, now_secs: i64) -> Value {
     if !begin(g) { return already_exiting(); }
-    if let Some(why) = finish_refusal(&s.snapshot(), now_secs) {
+    let before = s.snapshot();
+    // A second Open Knowlu after the first one landed has nothing left to write.
+    if before.finished {
+        release(g);
+        return serde_json::json!({ "ok": true, "finished": true, "error": Value::Null });
+    }
+    if let Some(why) = finish_refusal(&before, now_secs) {
         release(g);
         return serde_json::json!({ "ok": false, "error": why });
     }
@@ -893,6 +933,13 @@ fn gate_items(state: &OnboardingState) -> Vec<crate::onboarding_gate::GateItem> 
             connected: true,
             backfill: false,
         }).collect();
+    // Class times: the step 10 confirm. Pending until it is stamped, so an empty list never opens the gate.
+    items.push(GateItem {
+        key: "class_times".into(),
+        state: if state.step10_confirmed_at.is_some() { ItemState::Done } else { ItemState::Pending },
+        connected: true,
+        backfill: false,
+    });
     items.extend(state.skips.iter().map(|k| GateItem {
         key: if k.source == "google" { "gmail".to_string() } else { k.source.clone() },
         state: ItemState::Skipped { cost_key: k.cost_key.clone() },
@@ -1036,7 +1083,7 @@ impl ExitSeams for LiveExit {
         }
         let on = cs.settings.lock().unwrap_or_else(|e| e.into_inner()).autostart;
         let al = self.app.autolaunch();
-        let _ = if on { al.enable() } else { al.disable() };
+        if let Err(e) = if on { al.enable() } else { al.disable() } { eprintln!("onboarding: autostart could not be set: {e}"); }
         Ok(())
     }
     fn mail_provider(&self) -> Option<String> {
@@ -1076,7 +1123,7 @@ pub fn onboarding_status(app: tauri::AppHandle) -> Value {
 pub fn onboarding_answer(app: tauri::AppHandle, step: u8, answer: Value) -> Value {
     use tauri::Manager;
     let (Some(queue), Some(cs)) = (app.try_state::<crate::onboarding_jobs::Queue>(), app.try_state::<crate::state::ConsoleState>()) else { return no_setup() };
-    let out = onboarding_answer_inner(&cs.data_dir, step, &answer, &mut |job| queue.enqueue(job));
+    let out = answer_unless_exiting(exiting_now(&queue, &exit_guard()), &cs.data_dir, step, &answer, &mut |job| queue.enqueue(job));
     // The jobs that wait for the answers file (`school.courses`, `registrar.confirm`, `config.ingest`)
     // are woken by nothing else: a saved answer wakes the queue even when it enqueued no job.
     if out["ok"] == true { queue.wake(); }
@@ -1088,10 +1135,7 @@ pub fn onboarding_answer(app: tauri::AppHandle, step: u8, answer: Value) -> Valu
 pub fn onboarding_skip(app: tauri::AppHandle, step: u8, source: String) -> Value {
     use tauri::Manager;
     let Some(queue) = app.try_state::<crate::onboarding_jobs::Queue>() else { return no_setup() };
-    match queue.update_state(|s| skip_step(s, step, &source)).and_then(|r| r) {
-        Ok(()) => serde_json::json!({ "ok": true, "error": Value::Null }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e }),
-    }
+    skip_unless_exiting(exiting_now(&queue, &exit_guard()), &mut || queue.update_state(|s| skip_step(s, step, &source)).and_then(|r| r))
 }
 
 /// "Try again" on a job the page lists.
