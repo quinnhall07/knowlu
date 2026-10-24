@@ -255,6 +255,27 @@ fn contains_bounded(haystack: &str, fragment: &str) -> bool {
     false
 }
 
+/// A gradebook uid pin in its one form, `_<digits>_<digits>` exactly (§14.46).
+fn is_pin_form(fragment: &str) -> bool {
+    let mut parts = fragment.split('_');
+    let digits = |p: Option<&str>| p.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    parts.next() == Some("") && digits(parts.next()) && digits(parts.next()) && parts.next().is_none()
+}
+
+/// Pass (a) for one fragment: a case-sensitive substring of the uid. A fragment in the pin form
+/// matches only where no ASCII letter, digit or `_` precedes it and no ASCII digit follows it, so
+/// `_71_1` claims neither `…-_71_10` nor `…-_5_71_1`. Every other fragment keeps the substring test.
+fn uid_claims(uid: &str, fragment: &str) -> bool {
+    if !is_pin_form(fragment) {
+        return uid.contains(fragment);
+    }
+    uid.match_indices(fragment).any(|(start, found)| {
+        let before_ok = uid[..start].chars().next_back().is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+        let after_ok = uid[start + found.len()..].chars().next().is_none_or(|c| !c.is_ascii_digit());
+        before_ok && after_ok
+    })
+}
+
 /// The two passes [`match_course`] runs, over haystacks the caller supplies.
 ///
 /// Split out so `judge`'s tier-1 course heuristic is the same rule this module applies to a feed
@@ -273,7 +294,7 @@ pub fn match_course_fields(
     course_map: &[(String, String)],
 ) -> Option<String> {
     for (fragment, slug) in course_map {
-        if uid.contains(fragment.as_str()) {
+        if uid_claims(uid, fragment) {
             return Some(slug.clone());
         }
     }
@@ -773,6 +794,33 @@ pub fn sync_tasks_with_grades(
     first_run: bool,
     grades: &GradeIndex,
 ) -> Vec<String> {
+    sync_tasks_excluding(events, vault, course_map, &[], ctx, journal, today, first_run, grades)
+}
+
+/// True when no kept `course_map` fragment claims the item and an excluded one does (§14.45).
+fn is_left_out(event: &Event, course_map: &[(String, String)], course_exclude: &[(String, String)]) -> bool {
+    !course_exclude.is_empty()
+        && match_course(event, course_map).is_none()
+        && match_course(event, course_exclude).is_some()
+}
+
+/// [`sync_tasks_with_grades`] plus `course_exclude` (plan wave B F6c, §14.45): an item that no
+/// `course_map` fragment claims but an excluded fragment does belongs to a course the student
+/// removed, so it is left out whole: no task, no update, no archive, no journal record, and **no
+/// seen-ledger entry** (re-adding the course must import it). A kept course always wins. One log
+/// line names the count when it is above zero. An empty `course_exclude` is today's behaviour.
+#[allow(clippy::too_many_arguments)]
+pub fn sync_tasks_excluding(
+    events: &[Event],
+    vault: &Path,
+    course_map: &[(String, String)],
+    course_exclude: &[(String, String)],
+    ctx: Option<&crate::write::WriteContext>,
+    journal: &mut crate::journal::Journal,
+    today: Option<Date>,
+    first_run: bool,
+    grades: &GradeIndex,
+) -> Vec<String> {
     let default_ctx = crate::write::WriteContext::new("agent:ingest.blackboard", "cli");
     let ctx = ctx.unwrap_or(&default_ctx);
     let stamp_date = today.unwrap_or_else(|| jiff::Zoned::now().date());
@@ -784,7 +832,12 @@ pub fn sync_tasks_with_grades(
     let tasks_dir = vault.join("tasks");
     let _ = std::fs::create_dir_all(&tasks_dir);
 
+    let mut left_out = 0usize;
     for event in events {
+        if is_left_out(event, course_map, course_exclude) {
+            left_out += 1;
+            continue;
+        }
         if is_institutional_noise(&event.uid) && match_course(event, course_map).is_none() {
             log.push(format!("skipped (institutional calendar entry): {}", event.title));
             continue;
@@ -966,6 +1019,9 @@ pub fn sync_tasks_with_grades(
             }
             Err(err) => log.push(format!("skipped (unwritable): {err}")),
         }
+    }
+    if left_out > 0 {
+        log.push(format!("{left_out} item(s) from courses you removed were left out"));
     }
     log
 }
@@ -1255,13 +1311,23 @@ fn run_lines_on(
         .and_then(|v| v.as_mapping())
         .map(|m| m.iter().filter_map(|(k, v)| Some((k.as_str()?.to_string(), v.as_str()?.to_string()))).collect())
         .unwrap_or_default();
+    // F6c (§14.45): `course_exclude` is a flow sequence of bare fragments; the slug is unused, so the
+    // pairs reuse `match_course` and its one rule. No other reader of `ingest.yaml` looks at it.
+    let course_exclude: Vec<(String, String)> = config
+        .get("course_exclude")
+        .and_then(|v| v.as_sequence())
+        .map(|s| s.iter().filter_map(|f| Some((f.as_str()?.to_string(), String::new()))).collect())
+        .unwrap_or_default();
     let mut journal = crate::journal::Journal::new(vault);
     // O1: the gradebook half. `grades/` is read lockless: a concurrent grades write can make a note
     // be missed this run, which only defers the mark to the next run (see `grade_index`).
     let grades = grade_index(vault);
     let mut log =
-        sync_tasks_with_grades(&events, vault, &course_map, Some(&ctx), &mut journal, today, first_run, &grades);
-    log.extend(mark_gradebook_done(&events, vault, &grades, &ctx, &mut journal));
+        sync_tasks_excluding(&events, vault, &course_map, &course_exclude, Some(&ctx), &mut journal, today, first_run, &grades);
+    // A left-out item gets no write of any kind, the gradebook's "done" mark included.
+    let kept: Vec<Event> =
+        events.iter().filter(|e| !is_left_out(e, &course_map, &course_exclude)).cloned().collect();
+    log.extend(mark_gradebook_done(&kept, vault, &grades, &ctx, &mut journal));
     if first_run {
         log.push(format!("ingest: first run — {} item(s) already past were archived",
             log.iter().filter(|l| l.starts_with("archived (imported-past)")).count()));
