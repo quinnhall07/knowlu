@@ -701,6 +701,10 @@ pub fn school_apply_may_run(state: &OnboardingState) -> bool { state.school.as_r
 pub fn confirm_school(state: &mut OnboardingState) {
     if let Some(s) = state.school.as_mut() { s.confirmed = true; }
 }
+/// Step 10 asks for proposals only once `config.ingest` has written the file they read (§4.2, §4.3).
+pub fn proposals_ready(state: &OnboardingState) -> bool {
+    state.jobs.get("config.ingest").is_some_and(|j| j.state == JobState::Done)
+}
 
 /// The skip cost keys the rail, the reveal gate (F9) and the page name; a contract, never retyped.
 pub const COST_MAIL: &str = "mail_dates_missed";
@@ -963,11 +967,6 @@ pub fn handover_for(state: &OnboardingState) -> Vec<HandoverItem> {
     };
     // `jobs` is a `BTreeMap`, so the walk is already sorted by item.
     state.jobs.keys().filter(|k| open(k)).filter_map(|k| signal(k).map(|s| HandoverItem { item: k.clone(), signal: s.to_string() })).collect()
-}
-
-/// Step 10 asks for proposals only once `config.ingest` has written the file they read (§4.2, §4.3).
-pub fn proposals_ready(state: &OnboardingState) -> bool {
-    state.jobs.get("config.ingest").is_some_and(|j| j.state == JobState::Done)
 }
 
 /// `onboarding_status`'s body over a state that was read: the file plus the live job states, the

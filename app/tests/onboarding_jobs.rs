@@ -1917,7 +1917,7 @@ fn test_03_resumed_jobs_run_in_step_and_ask_order_not_alphabetical_order() {
     }
     state.jobs.get_mut("mail.canary").unwrap().state = JobState::Running;
     state.jobs.get_mut("mail.setup").unwrap().state = JobState::Held;
-    let r = rig_full("t03-resume", state, true, vec![], false, |_| {});
+    let r = rig_full("t03-resume", state, true, vec![], true, |_| {});
     r.idle();
     let started = r.log.started();
     let serial: Vec<&str> = started.iter().map(String::as_str).filter(|j| !LANE_JOBS.contains(j)).collect();

@@ -7,7 +7,7 @@
 //! **While a [`Queue`] is live it is the only writer of `onboarding.json`**: the commands (F2) and the
 //! window's exits (F4) change the file through the queue's methods, never `save_state` directly. The
 //! one exception is the sign-out rewind, which writes after [`Queue::freeze`] (F8f, F2e).
-use crate::onboarding_state::{load_answers, save_state, update_answers, Answers, CourseAnswer, HandoverItem, JobRecord, JobState, OnboardingState, PendingStore};
+use crate::onboarding_state::{confirm_school, load_answers, proposals_ready, save_state, school_apply_may_run, update_answers, Answers, CourseAnswer, HandoverItem, JobRecord, JobState, OnboardingState, PendingStore};
 use crate::scheduler::SlotScope;
 use serde::Serialize;
 use serde_json::Value;
@@ -75,8 +75,10 @@ pub struct SyncCursor {
 }
 
 pub trait SyncView: Send + Sync {
-    /// Read once after each `BeforeConfig`/`NoRank` slot ends; `slot_started` is its
-    /// `RunSummary.started`.
+    /// Read once after each slot job ends (`BeforeConfig`, `NoRank` and `Full`); `slot_started` is its
+    /// `RunSummary.started`. **The read runs while that job still counts as running** (so a note job
+    /// cannot start beside it): a real view reads the two state files only, takes no `vault_io` and
+    /// makes no network call.
     fn read(&self, slot_started: &str) -> (Option<SyncStatus>, Option<SyncCursor>);
 }
 
@@ -96,6 +98,8 @@ pub const CHAIN_BACKSTOP: u32 = 50;
 const LANE: [&str; 6] = ["school.store", "calendar.store", "school.apply", "school.courses", "registrar.confirm", "config.ingest"];
 /// Device-side before payment; every other job is held until the vault is `Entitled` (§4.3).
 const UNGATED: [&str; 2] = ["school.capture", "school.preview"];
+/// The lane jobs that write notes: they and the slots never run at once (§4.3, F8h's gate guards the runners).
+const NOTE_JOBS: [&str; 2] = ["school.courses", "registrar.confirm"];
 /// The order a resumed queue runs its jobs in: step order, then ask order within a step (§4.2).
 /// A name not listed sorts after these, by name.
 pub const JOB_ORDER: [&str; 17] = [
@@ -111,6 +115,24 @@ const ABANDON_AT_ONCE: [&str; 2] = ["mail.canary", "mail.first_pass"];
 /// The closed-set reason of a job whose runner panicked; the page maps it to its fix. It is reachable
 /// only under unwinding (tests and the dev profile): the release profile has `panic = "abort"`.
 pub const REASON_JOB_CRASHED: &str = "job_crashed";
+/// `school.courses` when the `BeforeConfig` chain ended without the account's copy read to its end
+/// (§4.3, Q-B20); "Try again" starts a new chain. **Still a sentence, not a key** (review r1, M5):
+/// F1's tests 16 pin these words with `contains`, so it becomes `account_unfinished` only when that
+/// test changes. Every other reason in this file is a short key the page maps to text.
+pub const REASON_ACCOUNT_UNFINISHED: &str = "couldn't finish reading your account";
+/// A `pending` `school.courses` while the account is unsettled (§4.3:827-828). **A sentence, not a
+/// key**, for the same reason: F1's test 14 pins these words exactly.
+pub const REASON_WAITING_FOR_ACCOUNT: &str = "waiting to reach your account";
+/// "First sync" when a fresh run of `sync` reported an error: a closed-set key, never the status's own text (the page maps it).
+pub const REASON_FIRST_SYNC_FAILED: &str = "first_sync_failed";
+/// A progress indicator the queue keeps in `jobs` beside the real jobs: never picked, never resumed.
+pub const FIRST_SYNC: &str = "first.sync";
+const INDICATOR_PREFIX: &str = "first.";
+
+/// The `BeforeConfig` chain's memory (§4.3, Q-B20): runs so far, readings in a row that were not a
+/// sync, and the cursors at the last reading. Not persisted: a relaunch starts a new chain.
+#[derive(Default)]
+struct Chain { runs: u32, not_a_sync: u32, prev: (i64, i64) }
 
 struct Core {
     state: OnboardingState,
@@ -128,13 +150,108 @@ struct Core {
     /// Running jobs a drain gave up on (§4.10: waiting for mail writes nothing). Their thread ends
     /// on its own; whatever it returns is read as `Stopped`.
     abandoned: BTreeSet<String>,
+    chain: Chain,
+    /// A `BeforeConfig` chain has ended in this queue (given up, or a slot failed with none left). Only
+    /// then does a `school.courses` pushed onto an unsettled account start a chain itself (C1).
+    chain_ended: bool,
+    /// A `slot.partial` ask merged into one that may not run `NoRank` (I1): one `NoRank` slot is owed
+    /// once `config.ingest` is done. Not persisted, like the chain.
+    no_rank_owed: bool,
+    /// The last `slot.partial` started as `NoRank` (read only while it is running, r3).
+    partial_no_rank: bool,
+    /// The profile's app data: where the answers file the config jobs read lives.
+    dir: std::path::PathBuf,
 }
 
 impl Core {
     fn lane(job: &str) -> usize { LANE.contains(&job) as usize }
     fn pick(&self, lane: usize) -> Option<String> {
-        let runnable = |j: &&String| Core::lane(j) == lane && !self.parked.contains(*j) && self.state.jobs.get(*j).is_some_and(|r| r.state == JobState::Pending);
-        self.order.iter().find(|j| runnable(j) && (self.ready || UNGATED.contains(&j.as_str()))).cloned()
+        self.order.iter().find(|j| {
+            Core::lane(j) == lane && self.waiting(j) && (self.ready || UNGATED.contains(&j.as_str())) && self.inputs_ready(j) && !self.notes_conflict(j)
+        }).cloned()
+    }
+    /// `pending` and not parked by a `Waiting` or `Stopped` outcome.
+    fn waiting(&self, job: &str) -> bool { !self.parked.contains(job) && self.job_state(job) == Some(JobState::Pending) }
+    /// The note jobs and the slots take turns (§4.3). Decided here, under the lock that marks a job
+    /// running, so the two never overlap and no thread has to wait for the other. With the account
+    /// settled the lane's config jobs are ready first, so a slot also waits for a note job or
+    /// `config.ingest` that is running or ready: it then runs once, with the scope the finished
+    /// config earns, rather than as `BeforeConfig` with a `NoRank` run behind it.
+    fn notes_conflict(&self, job: &str) -> bool {
+        let running = |f: fn(&str) -> bool| self.state.jobs.iter().any(|(n, r)| r.state == JobState::Running && f(n));
+        let (note, slot, config): (fn(&str) -> bool, fn(&str) -> bool, fn(&str) -> bool) =
+            (|n| NOTE_JOBS.contains(&n), |n| n.starts_with("slot."), |n| NOTE_JOBS.contains(&n) || n == "config.ingest");
+        if note(job) { running(slot) }
+        else if slot(job) { running(config) || self.order.iter().any(|n| config(n) && self.waiting(n) && self.inputs_ready(n)) }
+        else { false }
+    }
+    fn job_state(&self, job: &str) -> Option<JobState> { self.state.jobs.get(job).map(|r| r.state) }
+    /// A job waits only for its own inputs (§4.3): config before its readers, the notes after the
+    /// account, a `NoRank` slot (whose `grades` reads the course notes) after `school.apply`. A job
+    /// nothing names is always ready.
+    fn inputs_ready(&self, job: &str) -> bool {
+        let done = |n: &str| self.job_state(n) == Some(JobState::Done);
+        let settled = |n: &str| matches!(self.job_state(n), None | Some(JobState::Done | JobState::Failed | JobState::Skipped));
+        // An absent or unreadable answers file is never "no answers" (§4.5): no config job runs.
+        let answers = || matches!(load_answers(&self.dir), Ok(Some(_)));
+        match job {
+            "school.apply" => school_apply_may_run(&self.state),
+            "school.courses" => self.state.account_settled && answers(),
+            "registrar.confirm" => done("school.courses") && answers(),
+            "config.ingest" => done("school.courses") && settled("school.store") && settled("calendar.store") && answers(),
+            "calendar.read" | "google.calendar_read" => done("config.ingest"),
+            "slot.first_full" => done("config.ingest") && settled("school.apply"),
+            "slot.partial" => !done("config.ingest") || settled("school.apply"),
+            _ => true,
+        }
+    }
+    /// Adds `job` as `pending` unless it is already queued. A progress indicator is never a job.
+    /// `school.courses` pushed while the account is unsettled, after a chain has ended and with no
+    /// slot queued to settle it, starts a new chain, so it cannot wait for ever (Q-B20). Before any
+    /// chain has ended it waits for the slot that payment asks for (C1, test 14).
+    fn push_job(&mut self, job: &str) {
+        if job.starts_with(INDICATOR_PREFIX) { return; }
+        self.parked.clear();
+        if job == "school.courses" && !self.state.account_settled && self.chain_ended && !self.order.iter().any(|j| j == "slot.partial") {
+            (self.chain, self.chain_ended) = (Chain::default(), false);
+            self.push_job("slot.partial");
+        }
+        if !self.order.iter().any(|j| j == job) {
+            self.order.push(job.to_string());
+            self.state.jobs.insert(job.to_string(), JobRecord::default());
+        }
+    }
+    /// The chain has ended: a `school.courses` that nothing will settle (no slot is queued to read
+    /// the account) stops waiting.
+    fn fail_courses(&mut self) {
+        self.chain_ended = true;
+        if matches!(self.job_state("school.courses"), Some(JobState::Pending | JobState::Held)) {
+            self.order.retain(|j| j != "school.courses");
+            self.state.jobs.insert("school.courses".into(), JobRecord { state: JobState::Failed, reason: Some(REASON_ACCOUNT_UNFINISHED.into()), ..Default::default() });
+        }
+    }
+    /// After a `slot.partial` ended (not stopped): with the account unsettled and no slot left to
+    /// settle it, the chain has ended.
+    fn after_partial(&mut self) {
+        if !self.state.account_settled && !self.order.iter().any(|j| j == "slot.partial") { self.fail_courses(); }
+    }
+    /// Pays the owed `NoRank` slot (I1) once it can run as one: `config.ingest` done and no
+    /// `slot.partial` already queued (a queued one runs `NoRank` and pays it when it starts).
+    fn pay_no_rank(&mut self) {
+        if self.no_rank_owed && proposals_ready(&self.state) && !self.order.iter().any(|j| j == "slot.partial") {
+            self.no_rank_owed = false;
+            self.push_job("slot.partial");
+        }
+    }
+    /// A pending `school.courses` on an unsettled account says why it waits (§4.3:827-828); the
+    /// reason goes once the account settles or the job moves on.
+    fn mark_account_wait(&mut self) {
+        let settled = self.state.account_settled;
+        if let Some(r) = self.state.jobs.get_mut("school.courses") {
+            let waits = r.state == JobState::Pending && !settled;
+            if waits { r.reason = Some(REASON_WAITING_FOR_ACCOUNT.into()); }
+            else if matches!(r.state, JobState::Pending | JobState::Held) && r.reason.as_deref() == Some(REASON_WAITING_FOR_ACCOUNT) { r.reason = None; }
+        }
     }
     /// A gated job is `held` while not entitled and `pending` again once it is.
     fn settle(&mut self) {
@@ -147,6 +264,7 @@ impl Core {
                 }
             }
         }
+        self.mark_account_wait();
     }
     fn finish(&mut self, job: &str, lane: usize, out: Outcome) {
         self.busy[lane] = false;
@@ -160,6 +278,50 @@ impl Core {
         };
         if state == JobState::Pending { self.parked.insert(job.to_string()); } else { self.order.retain(|j| j != job); self.parked.clear(); }
         self.state.jobs.insert(job.to_string(), JobRecord { state, proof, reason });
+        if job == "config.ingest" || job == "slot.partial" { self.pay_no_rank(); }
+    }
+    /// Reads what a slot that ended left in the sync status and cursor (§4.3's three readings): sets
+    /// "first sync" and `account_settled`, and while the account is unsettled keeps the `BeforeConfig`
+    /// chain going or ends it (Q-B20). `started` and the status's `at` are both `journal::now_ts`.
+    fn after_slot(&mut self, scope: SlotScope, started: &str, counting: bool, status: Option<SyncStatus>, cursor: Option<SyncCursor>) {
+        // `Some(ok)` only for a fresh stamp with no `skipped`; anything else is not a sync.
+        let ran = status.filter(|s| s.at.as_str() >= started && s.skipped.is_none()).map(|s| s.ok);
+        match ran {
+            Some(true) => {
+                self.state.jobs.insert(FIRST_SYNC.into(), JobRecord { state: JobState::Done, ..Default::default() });
+                if cursor.is_some_and(|c| c.pulled_to_end) { self.settle_account(); }
+            }
+            // A settled account's sync that fails later is a retry's business, not a first sync undone.
+            Some(false) if self.state.account_settled && self.job_state(FIRST_SYNC) == Some(JobState::Done) => {}
+            Some(false) => { self.state.jobs.insert(FIRST_SYNC.into(), JobRecord { state: JobState::Failed, reason: Some(REASON_FIRST_SYNC_FAILED.into()), ..Default::default() }); }
+            None => {}
+        }
+        // A stopped queue counts nothing: the chain starts over when the queue does.
+        if scope != SlotScope::BeforeConfig || self.state.account_settled || !counting { return; }
+        self.chain.runs += 1;
+        let cursors = cursor.map(|c| (c.record_cursor, c.note_cursor));
+        let more = match ran {
+            Some(false) => false,
+            Some(true) => {
+                self.chain.not_a_sync = 0;
+                let moved = cursors.is_some_and(|c| c.0 > self.chain.prev.0 || c.1 > self.chain.prev.1);
+                self.chain.prev = cursors.unwrap_or(self.chain.prev);
+                moved
+            }
+            None => { self.chain.not_a_sync += 1; self.chain.not_a_sync < 2 }
+        };
+        if more && self.chain.runs < CHAIN_BACKSTOP { return self.push_job("slot.partial"); }
+        self.fail_courses();
+    }
+    /// The account's copy has been read to its end. A `school.courses` that gave up waiting for it
+    /// goes back to `pending` (M3).
+    fn settle_account(&mut self) {
+        self.state.account_settled = true;
+        let gave_up = self.state.jobs.get("school.courses").is_some_and(|r| r.state == JobState::Failed && r.reason.as_deref() == Some(REASON_ACCOUNT_UNFINISHED));
+        if gave_up {
+            self.state.jobs.remove("school.courses");
+            self.push_job("school.courses");
+        }
     }
 }
 
@@ -193,7 +355,7 @@ impl Inner {
 
 /// `slot.partial` is `BeforeConfig` until `config.ingest` is done, then `NoRank` (F8e refines it).
 fn scope_for(job: &str, s: &OnboardingState) -> Option<SlotScope> {
-    let ingested = s.jobs.get("config.ingest").is_some_and(|r| r.state == JobState::Done);
+    let ingested = proposals_ready(s);
     match job {
         "slot.first_full" => Some(SlotScope::Full),
         "slot.partial" => Some(if ingested { SlotScope::NoRank } else { SlotScope::BeforeConfig }),
@@ -224,14 +386,32 @@ fn work(inner: Arc<Inner>, lane: usize) {
         g.state.jobs.insert(job.clone(), JobRecord { state: JobState::Running, ..Default::default() });
         inner.persist(&g);
         let scope = scope_for(&job, &g.state);
+        // A `NoRank` slot starting is the owed one, whatever asked for it (so it is never run twice).
+        if job == "slot.partial" {
+            g.partial_no_rank = scope == Some(SlotScope::NoRank);
+            if g.partial_no_rank { g.no_rank_owed = false; }
+        }
         drop(g);
         let run = || inner.deps.runner.run(&job, scope, &inner.stop);
         // Holds under unwinding only (tests and dev): in release `panic = "abort"` ends the process.
         let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|_| Outcome::Failed(REASON_JOB_CRASHED.into()));
+        // The status and cursor are read with no lock held, while the slot still counts as running,
+        // so nothing the reading unlocks can start beside it.
+        let reading = match (&out, scope) {
+            (Outcome::Slot(SlotRun { started, reason: None, .. }), Some(s)) => {
+                let read = || inner.deps.sync_view.read(started);
+                Some((s, started.clone(), std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).unwrap_or((None, None))))
+            }
+            _ => None,
+        };
         g = inner.lock();
         // A job the drain abandoned already reads `pending`; whatever it returns late changes nothing.
-        let out = if g.abandoned.remove(&job) { Outcome::Stopped } else { out };
+        let abandoned = g.abandoned.remove(&job);
+        let out = if abandoned { Outcome::Stopped } else { out };
         g.finish(&job, lane, out);
+        let counting = !inner.stop.load(Ordering::SeqCst);
+        if let Some((s, started, (status, cursor))) = reading.filter(|_| !abandoned) { g.after_slot(s, &started, counting, status, cursor); }
+        if job == "slot.partial" && counting && !abandoned { g.after_partial(); }
         g.settle();
         inner.persist(&g);
         inner.cv.notify_all();
@@ -256,10 +436,13 @@ impl Queue {
         let mut order = Vec::new();
         for (name, r) in state.jobs.iter_mut() {
             if r.state == JobState::Running { r.state = JobState::Pending; }
-            if matches!(r.state, JobState::Pending | JobState::Held) { order.push(name.clone()); }
+            if matches!(r.state, JobState::Pending | JobState::Held) && !name.starts_with(INDICATOR_PREFIX) { order.push(name.clone()); }
         }
         order.sort_by_key(|j| (JOB_ORDER.iter().position(|c| c == j).unwrap_or(JOB_ORDER.len()), j.clone()));
-        let core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false, frozen: false, abandoned: BTreeSet::new() };
+        let mut core = Core { state, order, ready: false, entitled: false, busy: [false; 2], parked: BTreeSet::new(), shutdown: false, frozen: false, abandoned: BTreeSet::new(), chain: Chain::default(), chain_ended: false, no_rank_owed: false, partial_no_rank: false, dir: deps.data_dir.clone() };
+        // A resumed `school.courses` that waits on an unsettled account needs a slot to settle it.
+        if core.order.iter().any(|j| j == "school.courses") && !core.state.account_settled { core.push_job("slot.partial"); }
+        core.mark_account_wait();
         let inner = Arc::new(Inner { deps, core: Mutex::new(core), cv: Condvar::new(), stop: AtomicBool::new(false), batch_closed: AtomicBool::new(false) });
         let spawn = |lane: usize, name: &str| {
             let i = inner.clone();
@@ -273,13 +456,20 @@ impl Queue {
         Queue { inner, threads }
     }
     /// An ask was answered: the job is `pending` (or `held`) and runs when its inputs are ready.
+    /// A `slot.partial` ask that merges into a queued one owes a `NoRank` slot (I1), unless the queued
+    /// one is `pending` with `config.ingest` already done, so it is sure to run as `NoRank` itself, or
+    /// is already running as `NoRank`.
     pub fn enqueue(&self, job: &str) {
         let mut g = self.inner.lock();
-        g.parked.clear();
-        if !g.order.iter().any(|j| j == job) {
-            g.order.push(job.to_string());
-            g.state.jobs.insert(job.to_string(), JobRecord::default());
+        if job == "slot.partial" && g.order.iter().any(|j| j == job) {
+            let covered = match g.job_state(job) {
+                Some(JobState::Pending) => proposals_ready(&g.state),
+                Some(JobState::Running) => g.partial_no_rank,
+                _ => false,
+            };
+            if !covered { g.no_rank_owed = true; }
         }
+        g.push_job(job);
         g.settle();
         self.inner.persist(&g);
         self.inner.cv.notify_all();
@@ -293,16 +483,53 @@ impl Queue {
         self.inner.persist(&g);
         self.inner.cv.notify_all();
     }
-    /// "Try again" on a job (resets the chain count for `school.courses` while unsettled).
-    pub fn retry(&self, _job: &str) { todo!("F8e: retry") }
-    /// Step 10's confirm: stamps `step10_confirmed_at` and enqueues `slot.first_full`.
+    /// "Try again" on a `failed` job puts it back to `pending`; any other state is left alone. For
+    /// `school.courses` while the account is unsettled that also starts a new chain: one `BeforeConfig`
+    /// slot, the count reset (Q-B20). A progress indicator is never deleted (§4.6, r3): a failed
+    /// `first.sync` is reset to `pending` and the slot that re-reads it is queued; any other
+    /// indicator (`first.grades`, F8g's) is left as it is, still named with its fix.
+    pub fn retry(&self, job: &str) {
+        let mut g = self.inner.lock();
+        if g.job_state(job) != Some(JobState::Failed) { return; }
+        if job.starts_with(INDICATOR_PREFIX) {
+            if job != FIRST_SYNC { return; }
+            g.state.jobs.insert(job.into(), JobRecord::default());
+            if !g.state.account_settled { (g.chain, g.chain_ended) = (Chain::default(), false); }
+            g.push_job("slot.partial");
+            g.settle();
+            self.inner.persist(&g);
+            return self.inner.cv.notify_all();
+        }
+        if job == "school.courses" && !g.state.account_settled {
+            (g.chain, g.chain_ended) = (Chain::default(), false);
+            g.push_job("slot.partial");
+        }
+        g.order.retain(|j| j != job);
+        g.state.jobs.remove(job);
+        g.push_job(job);
+        g.settle();
+        self.inner.persist(&g);
+        self.inner.cv.notify_all();
+    }
+    /// Step 10's confirm: stamps `step10_confirmed_at` and enqueues `slot.first_full` **under one
+    /// lock**, so no status read or finish ever sees the confirm without its slot job (F2b r2, m-3).
     pub fn confirm_step10(&self, at: &str) {
-        self.inner.lock().state.step10_confirmed_at = Some(at.to_string());
-        self.enqueue("slot.first_full");
+        let mut g = self.inner.lock();
+        g.state.step10_confirmed_at = Some(at.to_string());
+        g.push_job("slot.first_full");
+        g.settle();
+        self.inner.persist(&g);
+        self.inner.cv.notify_all();
     }
     /// The student confirmed the school offered at step 3: marks it confirmed on the live state and
     /// wakes the queue, so a `school.apply` that was waiting on it can start (§4.7).
-    pub fn confirm_school(&self) { todo!("F8e: confirm the school") }
+    pub fn confirm_school(&self) {
+        let mut g = self.inner.lock();
+        confirm_school(&mut g.state);
+        g.parked.clear();
+        self.inner.persist(&g);
+        self.inner.cv.notify_all();
+    }
     pub fn snapshot(&self) -> OnboardingState { self.inner.lock().state.clone() }
     /// True when nothing is running and nothing runnable is waiting, within `timeout`.
     pub fn wait_idle(&self, timeout: Duration) -> bool {
@@ -825,7 +1052,10 @@ mod stop_tests {
         let gates = Arc::new(Gates(Mutex::new(BTreeSet::new())));
         let runner = Arc::new(Blocking { gates: gates.clone(), ran: Mutex::new(Vec::new()), heed });
         let deps = Deps { data_dir: dir.clone(), runner: runner.clone(), entitlement: Arc::new(Paid), sync_view: Arc::new(NoSync) };
-        (Queue::start(deps, OnboardingState::new("2026-10-24T09:00:00Z", 8)), gates, runner, dir)
+        // `school.apply` waits for a confirmed school (F8e), so the stop tests confirm one.
+        let mut state = OnboardingState::new("2026-10-24T09:00:00Z", 8);
+        state.school = Some(crate::onboarding_state::School { unitid: None, label: "Example Test College".into(), path: crate::onboarding_state::SchoolPath::Shared, confirmed: true });
+        (Queue::start(deps, state), gates, runner, dir)
     }
     fn wait_for(what: &str, cond: impl Fn() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -942,5 +1172,269 @@ mod stop_tests {
         s.handover = vec![item("slot.first_full", "slot_end"), item("mail.setup", "mail_json"), item("mail.canary", "mail_json"), item("mail.first_pass", "mail_json")];
         s.mail_signal(crate::onboarding_state::MailSignal::FirstPassDelivered);
         assert_eq!(s.handover, vec![item("slot.first_full", "slot_end")]);
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    //! F8e's own tests (review r1): the gaps F1's rigs do not reach. A fake runner logs what starts
+    //! and the scope each slot got; a scripted view plays the sync status back.
+    use super::*;
+    use crate::onboarding_state::{save_answers, School, SchoolPath};
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Default)]
+    struct Fake { log: Mutex<Vec<String>>, gates: Mutex<BTreeMap<String, Arc<AtomicBool>>>, failing: Mutex<BTreeSet<String>>, clock: AtomicUsize }
+    impl Fake {
+        fn log(&self) -> Vec<String> { self.log.lock().unwrap().clone() }
+        fn count(&self, e: &str) -> usize { self.log().iter().filter(|x| *x == e).count() }
+        fn scopes(&self) -> Vec<String> { self.log().iter().filter_map(|e| e.strip_prefix("scope:").map(str::to_string)).collect() }
+        fn gate(&self, job: &str) -> Arc<AtomicBool> {
+            let g = Arc::new(AtomicBool::new(false));
+            self.gates.lock().unwrap().insert(job.into(), g.clone());
+            g
+        }
+    }
+    impl Runner for Fake {
+        fn run(&self, job: &str, scope: Option<SlotScope>, _stop: &AtomicBool) -> Outcome {
+            self.log.lock().unwrap().push(format!("start:{job}"));
+            if let Some(s) = scope { self.log.lock().unwrap().push(format!("scope:{s:?}")); }
+            let gate = self.gates.lock().unwrap().get(job).cloned();
+            if let Some(g) = gate {
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while !g.load(Ordering::SeqCst) { assert!(Instant::now() < deadline, "a gate was never opened"); std::thread::sleep(Duration::from_millis(2)); }
+            }
+            if self.failing.lock().unwrap().contains(job) { return Outcome::Failed("boom".into()); }
+            let n = self.clock.fetch_add(1, Ordering::SeqCst);
+            match scope {
+                Some(_) => Outcome::Slot(SlotRun { started: format!("2026-10-24T12:{:02}:{:02}.000Z", n / 60, n % 60), steps: Vec::new(), reason: None }),
+                None => Outcome::Done(BTreeMap::new()),
+            }
+        }
+    }
+    struct Paid;
+    impl Entitlement for Paid { fn entitled(&self) -> bool { true } fn refresh(&self) {} }
+    type Reading = (Option<SyncStatus>, Option<SyncCursor>);
+    /// Plays one reading per slot; a status whose `at` is empty is stamped with the slot's own start.
+    struct Syncs(Mutex<VecDeque<Reading>>);
+    impl SyncView for Syncs {
+        fn read(&self, started: &str) -> Reading {
+            match self.0.lock().unwrap().pop_front() {
+                Some((Some(mut s), c)) => { if s.at.is_empty() { s.at = started.to_string(); } (Some(s), c) }
+                other => other.unwrap_or((None, None)),
+            }
+        }
+    }
+    fn ok(end: bool, n: i64) -> Reading {
+        (Some(SyncStatus { at: String::new(), ok: true, skipped: None, last_error: None }), Some(SyncCursor { pulled_to_end: end, record_cursor: n, note_cursor: n }))
+    }
+    fn failed() -> Reading {
+        (Some(SyncStatus { at: String::new(), ok: false, skipped: None, last_error: Some("x".into()) }), Some(SyncCursor { pulled_to_end: false, record_cursor: 0, note_cursor: 0 }))
+    }
+    fn state(settled: bool) -> OnboardingState {
+        let mut s = OnboardingState::new("2026-10-24T09:00:00Z", 8);
+        s.account_settled = settled;
+        s.school = Some(School { unitid: None, label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: true });
+        s
+    }
+    fn rig(tag: &str, s: OnboardingState, readings: Vec<Reading>, answers: bool) -> (Queue, Arc<Fake>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("knowlu-f8e-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        if answers { save_answers(&dir, &Answers::default()).unwrap(); }
+        let fake = Arc::new(Fake::default());
+        let deps = Deps { data_dir: dir.clone(), runner: fake.clone(), entitlement: Arc::new(Paid), sync_view: Arc::new(Syncs(Mutex::new(readings.into()))) };
+        (Queue::start(deps, s), fake, dir)
+    }
+    fn wait_for(what: &str, cond: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !cond() { assert!(Instant::now() < deadline, "timed out waiting for {what}"); std::thread::sleep(Duration::from_millis(2)); }
+    }
+    fn job(q: &Queue, name: &str) -> JobRecord { q.snapshot().jobs.get(name).cloned().unwrap_or_default() }
+    fn done_rec() -> JobRecord { JobRecord { state: JobState::Done, ..Default::default() } }
+    fn idle(q: &Queue) { assert!(q.wait_idle(Duration::from_secs(20)), "the queue never went idle"); }
+
+    #[test]
+    fn a_before_config_slot_still_running_when_config_ingest_ends_is_followed_by_the_no_rank_slot() {
+        let mut s = state(true);
+        s.jobs.insert("school.courses".into(), done_rec());
+        let (q, fake, _d) = rig("i1", s, vec![ok(true, 1), ok(true, 2)], true);
+        let hold = fake.gate("slot.partial");
+        q.enqueue("slot.partial");
+        wait_for("the first slot", || fake.count("start:slot.partial") == 1);
+        q.enqueue("config.ingest");
+        wait_for("config.ingest", || job(&q, "config.ingest").state == JobState::Done);
+        q.enqueue("slot.partial"); // the step-8 ask merges into the running slot
+        fake.gates.lock().unwrap().remove("slot.partial");
+        hold.store(true, Ordering::SeqCst);
+        idle(&q);
+        assert_eq!(fake.scopes(), ["BeforeConfig", "NoRank"], "{:?}", fake.log());
+    }
+
+    #[test]
+    fn i1_a_step_8_ask_merged_into_a_running_chain_slot_runs_exactly_one_no_rank_after_config_ingest() {
+        let (q, fake, _d) = rig("i1-chain", state(false), vec![ok(false, 5), ok(true, 9)], true);
+        let hold = fake.gate("slot.partial");
+        q.enqueue("slot.partial");
+        q.enqueue("school.courses");
+        wait_for("the chain's first slot", || fake.count("start:slot.partial") == 1);
+        q.enqueue("config.ingest");
+        q.enqueue("slot.partial"); // the step-8 ask merges into the running chain slot
+        hold.store(true, Ordering::SeqCst);
+        wait_for("config.ingest", || job(&q, "config.ingest").state == JobState::Done);
+        idle(&q);
+        assert_eq!(fake.scopes(), ["BeforeConfig", "BeforeConfig", "NoRank"], "{:?}", fake.log());
+        q.wake();
+        idle(&q);
+        assert_eq!(fake.scopes().iter().filter(|s| *s == "NoRank").count(), 1, "the debt is paid once: {:?}", fake.log());
+    }
+
+    #[test]
+    fn r3_try_again_on_a_failed_first_sync_keeps_its_record_and_queues_one_slot_to_re_read_it() {
+        let mut s = state(false);
+        s.jobs.insert(FIRST_SYNC.into(), JobRecord { state: JobState::Failed, reason: Some(REASON_FIRST_SYNC_FAILED.into()), ..Default::default() });
+        s.jobs.insert("first.grades".into(), JobRecord { state: JobState::Failed, reason: Some("x".into()), ..Default::default() });
+        let (q, fake, _d) = rig("r3", s, vec![ok(true, 3)], true);
+        let hold = fake.gate("slot.partial");
+        q.retry(FIRST_SYNC);
+        assert!(q.snapshot().jobs.contains_key(FIRST_SYNC), "the record is kept, never deleted");
+        assert_eq!(job(&q, FIRST_SYNC), JobRecord::default(), "kept, pending, no reason");
+        assert!(q.snapshot().jobs.contains_key("slot.partial"), "the slot that re-reads it is queued");
+        wait_for("the slot", || fake.count("start:slot.partial") == 1);
+        q.retry(FIRST_SYNC); // pending now: nothing more is queued
+        q.retry("first.grades"); // F8g's: never deleted
+        hold.store(true, Ordering::SeqCst);
+        idle(&q);
+        assert_eq!(fake.count("start:slot.partial"), 1, "{:?}", fake.log());
+        assert_eq!(job(&q, FIRST_SYNC).state, JobState::Done);
+        assert_eq!(job(&q, "first.grades").state, JobState::Failed, "a failed indicator nothing re-reads stays named");
+    }
+
+    #[test]
+    fn r3_an_ask_merged_into_a_slot_already_running_as_no_rank_owes_nothing() {
+        let mut s = state(true);
+        for j in ["school.courses", "config.ingest"] { s.jobs.insert(j.into(), done_rec()); }
+        let (q, fake, _d) = rig("r3-norank", s, vec![ok(true, 1), ok(true, 2)], true);
+        let hold = fake.gate("slot.partial");
+        q.enqueue("slot.partial");
+        wait_for("the slot", || fake.count("start:slot.partial") == 1);
+        q.enqueue("slot.partial");
+        hold.store(true, Ordering::SeqCst);
+        idle(&q);
+        assert_eq!(fake.scopes(), ["NoRank"], "{:?}", fake.log());
+    }
+
+    #[test]
+    fn c1_school_courses_waits_with_its_reason_until_a_slot_reads_the_account_and_starts_no_chain_itself() {
+        let (q, fake, _d) = rig("c1", state(false), vec![ok(true, 2)], true);
+        q.enqueue("school.courses");
+        idle(&q);
+        let c = job(&q, "school.courses");
+        assert_eq!((c.state, c.reason.as_deref()), (JobState::Pending, Some(REASON_WAITING_FOR_ACCOUNT)), "{:?}", fake.log());
+        assert!(fake.log().is_empty(), "no chain was ended, so none is started: {:?}", fake.log());
+        q.enqueue("slot.partial");
+        wait_for("school.courses", || job(&q, "school.courses").state == JobState::Done);
+        assert!(q.snapshot().account_settled);
+        assert_eq!(job(&q, "school.courses").reason, None);
+    }
+
+    #[test]
+    fn school_courses_enqueued_after_a_chain_ended_starts_a_chain_and_a_failed_slot_ends_the_wait() {
+        // A chain ends (two readings that are not a sync) before school.courses is asked for.
+        let (q, fake, _d) = rig("i2", state(false), vec![(None, None), (None, None), ok(true, 1)], true);
+        q.enqueue("slot.partial");
+        idle(&q);
+        assert_eq!(fake.scopes().len(), 2, "{:?}", fake.log());
+        q.enqueue("school.courses");
+        idle(&q);
+        assert_eq!(fake.scopes()[2..], ["BeforeConfig"], "{:?}", fake.log());
+        assert_eq!(job(&q, "school.courses").state, JobState::Done);
+        // The slot itself fails: nothing is left to settle the account, so the job gives up.
+        let (q, fake, _d) = rig("i2-fail", state(false), vec![], true);
+        fake.failing.lock().unwrap().insert("slot.partial".into());
+        q.enqueue("school.courses");
+        q.enqueue("slot.partial");
+        idle(&q);
+        let c = job(&q, "school.courses");
+        assert_eq!((c.state, c.reason.as_deref()), (JobState::Failed, Some(REASON_ACCOUNT_UNFINISHED)));
+        assert!(!fake.log().contains(&"start:school.courses".to_string()));
+    }
+
+    #[test]
+    fn a_resumed_school_courses_on_an_unsettled_account_gets_its_slot() {
+        let mut s = state(false);
+        s.jobs.insert("school.courses".into(), JobRecord::default());
+        let (q, fake, _d) = rig("i2-resume", s, vec![ok(true, 1)], true);
+        wait_for("school.courses", || job(&q, "school.courses").state == JobState::Done);
+        idle(&q);
+        assert_eq!(fake.scopes(), ["BeforeConfig"], "{:?}", fake.log());
+    }
+
+    #[test]
+    fn a_failed_sync_after_the_account_settled_does_not_undo_first_sync() {
+        let mut s = state(true);
+        s.jobs.insert(FIRST_SYNC.into(), done_rec());
+        let (q, _f, _d) = rig("i3", s, vec![failed()], true);
+        q.enqueue("slot.partial");
+        idle(&q);
+        assert_eq!(job(&q, FIRST_SYNC).state, JobState::Done);
+    }
+
+    #[test]
+    fn the_full_slot_waits_for_school_apply_as_well_as_config_ingest() {
+        let mut s = state(true);
+        s.school.as_mut().unwrap().confirmed = false;
+        s.jobs.insert("config.ingest".into(), done_rec());
+        let (q, fake, _d) = rig("i4", s, vec![ok(true, 1)], true);
+        q.enqueue("school.apply");
+        q.confirm_step10("2026-10-24T12:00:00Z");
+        idle(&q);
+        assert!(fake.log().is_empty(), "nothing starts while school.apply is unconfirmed: {:?}", fake.log());
+        q.confirm_school();
+        wait_for("the full slot", || job(&q, "slot.first_full").state == JobState::Done);
+        assert_eq!(fake.log()[..2], ["start:school.apply", "start:slot.first_full"], "{:?}", fake.log());
+    }
+
+    #[test]
+    fn no_config_job_runs_without_a_readable_answers_file_and_both_run_once_it_is_saved() {
+        let mut s = state(true);
+        s.jobs.insert("school.courses".into(), done_rec()); // registrar.confirm and config.ingest have their input
+        let (q, fake, dir) = rig("i5", s, vec![], false);
+        for j in ["registrar.confirm", "config.ingest"] { q.enqueue(j); }
+        idle(&q);
+        assert!(fake.log().is_empty(), "{:?}", fake.log());
+        std::fs::write(crate::onboarding_state::answers_path(&dir), "{ broken").unwrap();
+        q.wake();
+        idle(&q);
+        assert!(fake.log().is_empty(), "an unreadable file is not no answers: {:?}", fake.log());
+        save_answers(&dir, &Answers::default()).unwrap();
+        q.wake();
+        wait_for("both jobs", || job(&q, "registrar.confirm").state == JobState::Done && job(&q, "config.ingest").state == JobState::Done);
+    }
+
+    #[test]
+    fn a_school_courses_that_gave_up_runs_when_a_later_slot_settles_the_account() {
+        let (q, fake, _d) = rig("m3", state(false), vec![(None, None), (None, None), ok(true, 5)], true);
+        q.enqueue("school.courses");
+        q.enqueue("slot.partial");
+        idle(&q);
+        assert_eq!(job(&q, "school.courses").reason.as_deref(), Some(REASON_ACCOUNT_UNFINISHED), "{:?}", fake.log());
+        q.enqueue("slot.partial");
+        wait_for("school.courses", || job(&q, "school.courses").state == JobState::Done);
+        assert!(q.snapshot().account_settled);
+    }
+
+    #[test]
+    fn retry_takes_failed_jobs_only_and_an_indicator_is_never_a_job() {
+        let mut s = state(true);
+        s.jobs.insert("school.apply".into(), done_rec());
+        let (q, fake, _d) = rig("m1", s, vec![], true);
+        q.retry("school.apply");
+        q.enqueue(FIRST_SYNC);
+        idle(&q);
+        assert!(fake.log().is_empty(), "{:?}", fake.log());
+        assert!(!q.snapshot().jobs.contains_key(FIRST_SYNC));
+        assert_eq!(job(&q, "school.apply").state, JobState::Done);
     }
 }
