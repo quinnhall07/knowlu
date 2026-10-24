@@ -32,3 +32,6 @@ The reviewer checked `git diff 4346a2f..d3fa42e` (tests 2548d0b, code d3fa42e). 
 - **1, 4, 5 and 6:** agreed.
 - **2:** agreed, with the guard from Important 2.
 - **3:** rejected (Important 1).
+
+## Controller check of the r1 fixes (4de4184)
+I-1 closed (per-feed `*_link_missing` Failed, no file, credential untouched; 4 cases tested); I-2 closed (`Waiting(feeds_not_settled)`, tested); M1 (ScratchRoot Drop guard; under release panic=abort it is moot, under unwinding it holds), M3, M4, M5 (redacting Debug, tested) closed. onboarding 81/81, scaffold 32/32. **F6b passes.** F8c notes: M2 (login flags from rows), the step 3/7 re-paste rewind for `*_link_missing`.
