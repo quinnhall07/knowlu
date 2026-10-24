@@ -3619,3 +3619,61 @@ fn test_32_the_normal_console_hook_runs_in_the_spawned_thread_before_run_slot_an
     let (list, apply) = (f.find("list()"), f.find("apply_listed_signals("));
     assert!(matches!((list, apply), (Some(l), Some(a)) if l < a), "the list ({list:?}) is read before the locked write ({apply:?}), never inside it");
 }
+
+// ---- F8s2 review r1: a list that was never read, and a setup that records itself while the list is out ------------
+
+#[test]
+fn test_32_a_slot_with_no_account_reads_no_list_so_it_clears_nothing() {
+    let d = t32_dir("noacct");
+    save_state(&d, &t32_finished(&["first.sync", "mail.setup", "mail.canary", "mail.first_pass"])).unwrap();
+    let before = t32_bytes(&d);
+    // `mail_rows` reports a client that could not be built (no cloud.yaml, no session target) as this, never
+    // as an empty `Ok`: an empty list the service did not give is no proof of a disconnect.
+    let no_client = || Err(knowlu::scheduler::MAIL_NO_ACCOUNT);
+    let pass = |_: &[Value]| panic!("no pass without a mailbox");
+    let seam = MailSeam { mailboxes: &no_client, pass: Some(&pass), window_open: false };
+    assert_eq!(mail_step(EntitlementState::Entitled, &d, rig::NOW, &seam), None, "no account, no row: as before");
+    assert_eq!(t32_bytes(&d), before, "and the hand-over is not touched");
+    let text = src_text("scheduler.rs");
+    let body = &text[text.find("pub fn run_slot_inner_scoped").expect("run_slot_inner_scoped")..];
+    let body = &body[..body.find("let pass =").expect("the pass")];
+    assert!(body.contains("MAIL_NO_ACCOUNT"), "the slot's mail_rows names a client it could not build");
+}
+
+#[test]
+fn test_32_a_setup_that_records_itself_while_the_list_is_out_is_not_read_as_a_disconnect() {
+    let all = ["mail.setup", "mail.canary", "mail.first_pass"];
+    let record = |d: &Path| {
+        MailState::update(d, |s| {
+            s.pending_setups.push(PendingSetup { address_id: rig::ID.to_string(), placed: false, backfilled: false, shown: false });
+            true
+        })
+        .unwrap();
+    };
+    let d = t32_dir("racehook");
+    save_state(&d, &t32_finished(&all)).unwrap();
+    let before = t32_bytes(&d);
+    first_pass_closed(&d, &|| { record(&d); Ok(Vec::new()) });
+    assert_eq!(t32_bytes(&d), before, "the hook: the record appeared after the list was asked for");
+    let d = t32_dir("racestep");
+    save_state(&d, &t32_finished(&all)).unwrap();
+    let before = t32_bytes(&d);
+    let rows = || { record(&d); Ok(Vec::new()) };
+    let pass = |_: &[Value]| Ok("mail: x".to_string());
+    mail_step(EntitlementState::Entitled, &d, rig::NOW, &MailSeam { mailboxes: &rows, pass: Some(&pass), window_open: false });
+    assert_eq!(t32_bytes(&d), before, "the mail stage: same");
+}
+
+#[test]
+fn test_32_a_record_that_goes_while_the_list_is_out_still_keeps_the_items_because_it_was_there_before() {
+    let d = t32_dir("racegone");
+    MailState::update(&d, |s| {
+        s.pending_setups.push(PendingSetup { address_id: rig::ID.to_string(), placed: false, backfilled: false, shown: false });
+        true
+    })
+    .unwrap();
+    save_state(&d, &t32_finished(&["mail.setup", "mail.canary", "mail.first_pass"])).unwrap();
+    let before = t32_bytes(&d);
+    first_pass_closed(&d, &|| { MailState::update(&d, |s| { s.pending_setups.clear(); true }).unwrap(); Ok(Vec::new()) });
+    assert_eq!(t32_bytes(&d), before, "the setup was in flight when the list was asked for");
+}

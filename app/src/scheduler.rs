@@ -432,6 +432,10 @@ pub struct MailSeam<'a> {
     pub window_open: bool,
 }
 
+/// `MailSeam::mailboxes`'s answer for a profile whose mail client could not be built: no account, no row, and no
+/// hand-over signal (an unread list never says "disconnected").
+pub const MAIL_NO_ACCOUNT: &str = "no account";
+
 fn no_mailboxes() -> Result<Vec<serde_json::Value>, &'static str> { Ok(Vec::new()) }
 
 /// A pass that did not run because the mail window was taken meanwhile (a setup, a repair sign-in).
@@ -491,7 +495,8 @@ pub fn mail_signals(listed: &[serde_json::Value], mail: &crate::mail_session::Ma
 /// A finished `onboarding.json`'s mail items against `listed`, then `then`, in one locked save. The list
 /// was read before this, so the lock is never held across a network call. Does nothing for an absent,
 /// unreadable or unfinished file, an unreadable `mail.json` (it cannot say what is turned off) or no signal.
-pub fn apply_listed_signals(data_dir: &Path, listed: &[serde_json::Value], then: &[crate::onboarding_state::MailSignal]) {
+/// `pending_before`: `mail.json` held a `pending_setups` entry (or could not be read) before the list was asked for.
+pub fn apply_listed_signals(data_dir: &Path, pending_before: bool, listed: &[serde_json::Value], then: &[crate::onboarding_state::MailSignal]) {
     use crate::onboarding_state::{apply_mail_signals, load_state, Loaded};
     let Loaded::Ok(s) = load_state(data_dir) else { return };
     let Ok(mail) = crate::mail_session::MailState::load(data_dir) else { return };
@@ -499,6 +504,11 @@ pub fn apply_listed_signals(data_dir: &Path, listed: &[serde_json::Value], then:
         return;
     }
     let mut signals = mail_signals(listed, &mail, &s.started_at);
+    // A setup that wrote its pending record while the list was out is a setup in flight, not a disconnect:
+    // `mail` above is read after the list, `pending_before` before it, and either one holding a record keeps the items.
+    if pending_before {
+        signals.retain(|g| *g != crate::onboarding_state::MailSignal::Disconnected);
+    }
     signals.extend_from_slice(then);
     if !signals.is_empty() {
         let _ = apply_mail_signals(data_dir, &signals);
@@ -517,9 +527,15 @@ pub fn mail_step(est: crate::account::EntitlementState, data_dir: &Path, now: i6
     let pass = mail.pass?;
     let skip = |why: &str| Some(format!("mail (skipped: {why})"));
     // A list the service could not give is no proof there is no mailbox: named, never silent (Checkpoint D).
-    let Ok(listed) = (mail.mailboxes)() else { return skip("could not read your mailboxes") };
+    let pending_before = crate::mail_session::MailState::load(data_dir).map_or(true, |m| !m.pending_setups.is_empty());
+    let listed = match (mail.mailboxes)() {
+        Ok(listed) => listed,
+        // A client that could not be built is no account, so no mailbox and no row: as it was when this was an empty `Ok`.
+        Err(MAIL_NO_ACCOUNT) => return None,
+        Err(_) => return skip("could not read your mailboxes"),
+    };
     // F8s2: the hand-over reads the list as the service gave it, before the filter below drops any row.
-    apply_listed_signals(data_dir, &listed, &[]);
+    apply_listed_signals(data_dir, pending_before, &listed, &[]);
     let state = MailState::load(data_dir);
     let rows: Vec<serde_json::Value> = listed
         .into_iter()
@@ -879,7 +895,10 @@ pub fn run_slot_inner_scoped(cs: &ConsoleState, sch: &Scheduler, tray_app: Optio
     let mail_client = || crate::mail::live::client_for(&cs.vault);
     let mail_rows = || match tray_app.map(|_| mail_client()) {
         Some(Ok(client)) => client.list_addresses().map_err(|e| e.name()),
-        _ => Ok(Vec::new()),
+        // No app handle has no mailbox; a client that could not be built (no cloud.yaml, no session target) is
+        // `MAIL_NO_ACCOUNT`, never an empty `Ok`: a list nothing read is no proof of a disconnect (F8s2 review r1).
+        Some(Err(_)) => Err(MAIL_NO_ACCOUNT),
+        None => Ok(Vec::new()),
     };
     let pass = |due: &[serde_json::Value]| {
         let app = tray_app.expect("only called with an app handle");

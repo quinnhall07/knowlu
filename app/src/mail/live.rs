@@ -162,8 +162,9 @@ pub fn first_pass_closed(data_dir: &Path, list: &dyn Fn() -> Result<Vec<Value>, 
         let _ = apply_mail_signal(data_dir, MailSignal::FirstPassDelivered);
         return;
     }
+    let pending_before = crate::mail_session::MailState::load(data_dir).map_or(true, |m| !m.pending_setups.is_empty());
     let Ok(listed) = list() else { return };
-    crate::scheduler::apply_listed_signals(data_dir, &listed, &[MailSignal::FirstPassDelivered]);
+    crate::scheduler::apply_listed_signals(data_dir, pending_before, &listed, &[MailSignal::FirstPassDelivered]);
 }
 
 /// Starts a setup for `kind` on the console's profile. `Err` is a fixed sentence: no account, the mail
