@@ -116,14 +116,18 @@ impl OnboardingState {
     /// The first slot after the reveal ended (or the first onboarding slot to end, before it):
     /// clears the `slot_end` handover items and no other (§4.10).
     pub fn slot_ended(&mut self) { self.handover.retain(|h| h.signal != SIGNAL_SLOT_END); }
-    /// A mail signal read from `mail.json`: clears only its own item (§4.10). Forwarding verified
-    /// means the setup is no longer open, so it clears `mail.setup` with the canary; a delivered first
-    /// pass implies both, so it clears all three too; a disconnect clears all three. No slot item is
-    /// ever touched.
+    /// A mail signal read from `mail.json` or the address list: clears only its own item (§4.10).
+    /// Forwarding verified means the setup is no longer open, so it clears `mail.setup` with the
+    /// canary; a disconnect clears all three. A delivered first pass (or a first pass the app never
+    /// drives) clears `mail.first_pass` **alone**, and only once `mail.setup` and `mail.canary` are
+    /// gone (§14.51 r2, R1): a closed batch cannot hide an open setup or canary. No slot item is ever
+    /// touched.
     pub fn mail_signal(&mut self, signal: MailSignal) {
+        let open = |item: &str| self.handover.iter().any(|h| h.item == item);
         let gone: &[&str] = match signal {
             MailSignal::CanaryVerified => &["mail.setup", "mail.canary"],
-            MailSignal::FirstPassDelivered => &["mail.setup", "mail.canary", "mail.first_pass"],
+            MailSignal::FirstPassDelivered | MailSignal::BackfillNeverDriven if open("mail.setup") || open("mail.canary") => &[],
+            MailSignal::FirstPassDelivered | MailSignal::BackfillNeverDriven => &["mail.first_pass"],
             MailSignal::Disconnected => &MAIL_ITEMS,
         };
         self.handover.retain(|h| h.signal != SIGNAL_MAIL_JSON || !gone.contains(&h.item.as_str()));
@@ -131,7 +135,48 @@ impl OnboardingState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MailSignal { CanaryVerified, FirstPassDelivered, Disconnected }
+pub enum MailSignal {
+    CanaryVerified,
+    /// The first closed backfill batch (`mail/live.rs`'s hook).
+    FirstPassDelivered,
+    /// A verified row whose provider's backfill the app never drives (Guided, or held until C3), so no
+    /// batch will ever close for it (§14.51 r3, I-1).
+    BackfillNeverDriven,
+    Disconnected,
+}
+
+/// Every normal-console load, change and save of a finished `onboarding.json` takes this one lock
+/// (§14.51 r2, m2): the slot's end and `on_closed`'s signal run on two threads. In onboarding mode the
+/// queue is the file's only writer. Never held across a network call: callers read first, then apply.
+static ONBOARDING_JSON_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Under [`ONBOARDING_JSON_LOCK`]: load, `change` on a **finished** file only, save only when `change`
+/// returned true. An absent, unreadable or unfinished file is left as it is (`Ok(false)`): the
+/// scheduler never creates or repairs it, and the queue owns it until the reveal.
+pub fn update_finished(data_dir: &Path, change: impl FnOnce(&mut OnboardingState) -> bool) -> Result<bool, String> {
+    let _held = ONBOARDING_JSON_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let Loaded::Ok(mut s) = load_state(data_dir) else { return Ok(false) };
+    if !s.finished || !change(&mut s) {
+        return Ok(false);
+    }
+    save_state(data_dir, &s).map(|()| true)
+}
+
+/// One signal applied to a finished file through [`update_finished`].
+pub fn apply_mail_signal(data_dir: &Path, signal: MailSignal) -> Result<bool, String> {
+    apply_mail_signals(data_dir, &[signal])
+}
+
+/// Signals applied in order, in one save.
+pub fn apply_mail_signals(data_dir: &Path, signals: &[MailSignal]) -> Result<bool, String> {
+    update_finished(data_dir, |s| {
+        let before = s.handover.clone();
+        for sig in signals {
+            s.mail_signal(*sig);
+        }
+        s.handover != before
+    })
+}
 
 /// What reading `onboarding.json` found. An unreadable file is never read as finished or absent.
 #[derive(Debug, Clone, PartialEq)]

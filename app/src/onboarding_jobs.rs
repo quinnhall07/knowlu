@@ -1166,10 +1166,15 @@ mod stop_tests {
     }
 
     #[test]
-    fn a_delivered_first_pass_clears_the_canary_and_setup_items_too_but_no_slot_item() {
+    fn a_delivered_first_pass_clears_only_itself_and_only_after_the_canary_items_are_gone() {
+        // §14.51 r2, R1 withdrew the old "clears all three": a closed batch must not hide an open setup.
         let mut s = OnboardingState::new("2026-10-24T09:00:00Z", 11);
         let item = |i: &str, sig: &str| HandoverItem { item: i.into(), signal: sig.into() };
         s.handover = vec![item("slot.first_full", "slot_end"), item("mail.setup", "mail_json"), item("mail.canary", "mail_json"), item("mail.first_pass", "mail_json")];
+        let held = s.handover.clone();
+        s.mail_signal(crate::onboarding_state::MailSignal::FirstPassDelivered);
+        assert_eq!(s.handover, held, "the setup and canary are still open: nothing clears");
+        s.mail_signal(crate::onboarding_state::MailSignal::CanaryVerified);
         s.mail_signal(crate::onboarding_state::MailSignal::FirstPassDelivered);
         assert_eq!(s.handover, vec![item("slot.first_full", "slot_end")]);
     }
