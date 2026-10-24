@@ -27,3 +27,11 @@ Reviewer, on `git diff 25c25a3..d5ff94e`. Filed by the controller. Nothing on th
 `refresh_entitlement` can take about 60 s, plus any wait on `SESSION_REFRESH_LOCK`. No §4.10 exit drops the `Queue` today.
 
 Ruling: detach. `startup` checks `shutdown` under the lock and returns without saving if it is set, so a detached starter never writes a stale `onboarding.json`.
+
+## Controller check of the r2 fixes (6f89263)
+- **I-1 closed.** `JOB_ORDER` adds `calendar.read`. A source-scan test checks that every job name the F1 tests use is listed, and it requires the scan to find at least 15 names.
+- **I-2 closed.** The doc comments now say the panic handling holds under unwinding only (tests and dev).
+- **M-1 closed.** `g.entitled |= ent` keeps a fresh `true` and never undoes a wake, so `woken` was removed.
+- **Detach closed.** The start thread is detached, and `startup` writes nothing once `shutdown` is set.
+- Verified from the diff. **F8a passes.**
+- Follow-up for the planner: a crash-loop guard. A job found `running` at start twice in a row becomes `failed` with `job_crashed`.
