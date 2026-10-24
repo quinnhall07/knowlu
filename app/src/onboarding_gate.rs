@@ -37,7 +37,7 @@ pub struct NotConnected {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateOutput {
     pub open: bool,
-    /// Every required item not yet `done`, plus every backfill in progress.
+    /// Every required item still pending, plus every backfill in progress.
     pub still_coming: Vec<String>,
     /// `(key, reason, fix)` of each failed item.
     pub failed: Vec<(String, String, String)>,
@@ -50,7 +50,8 @@ pub struct GateOutput {
 ///
 /// Required means connected and not a backfill. A backfill is listed as still coming while it is
 /// pending and never holds the gate. A failed item is listed in `failed`, not in `still_coming`; a
-/// skipped item is listed in `not_connected` with its cost key, whether or not it is connected.
+/// failed or skipped item is listed whether or not it is connected (a skip with its cost key in
+/// `not_connected`).
 pub fn gate(items: &[GateItem], step10_confirmed_at_secs: Option<i64>, now_secs: i64) -> GateOutput {
     let mut out = GateOutput { open: false, still_coming: vec![], failed: vec![], not_connected: vec![] };
     let mut required_pending = false;
@@ -59,8 +60,8 @@ pub fn gate(items: &[GateItem], step10_confirmed_at_secs: Option<i64>, now_secs:
             ItemState::Skipped { cost_key } => {
                 out.not_connected.push(NotConnected { key: it.key.clone(), cost_key: cost_key.clone() });
             }
-            _ if !it.connected => {}
             ItemState::Failed { reason, fix } => out.failed.push((it.key.clone(), reason.clone(), fix.clone())),
+            _ if !it.connected => {}
             ItemState::Pending => {
                 out.still_coming.push(it.key.clone());
                 required_pending |= !it.backfill;
@@ -73,9 +74,59 @@ pub fn gate(items: &[GateItem], step10_confirmed_at_secs: Option<i64>, now_secs:
     out
 }
 
-/// "First grades" is marked only by a slot whose `grades` ran (T0, 2026-10-24): a row named
-/// `grades (not yet: …)` or `grades (skipped: …)` never marks it, so only the bare `grades` row does.
-/// The exit code is not read here: a failed `grades` ran, and its failure is the caller's to name.
+/// "First grades" is marked only by a slot whose `grades` ran and succeeded (T0, 2026-10-24; review
+/// r1, I1): the bare `grades` row at exit 0. A `grades (not yet: …)` or `grades (skipped: …)` row never
+/// marks it, and a bare row with a non-zero exit is [`first_grades_failed`], never done.
 pub fn first_grades_marked(steps: &[(String, i32)]) -> bool {
-    steps.iter().any(|(name, _)| name == "grades")
+    steps.iter().any(|(name, code)| name == "grades" && *code == 0)
+}
+
+/// A slot whose `grades` ran and failed: the bare `grades` row at a non-zero exit. The caller makes
+/// `first.grades` an [`ItemState::Failed`] (reason and fix are its to assign); the scoped
+/// `(not yet: …)` and `(skipped: …)` rows are neither marked nor failed.
+pub fn first_grades_failed(steps: &[(String, i32)]) -> bool {
+    steps.iter().any(|(name, code)| name == "grades" && *code != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(name: &str, code: i32) -> Vec<(String, i32)> {
+        vec![("sync".to_string(), 0), (name.to_string(), code)]
+    }
+
+    #[test]
+    fn a_bare_grades_row_marks_at_exit_zero_and_fails_at_any_other_exit() {
+        assert!(first_grades_marked(&row("grades", 0)));
+        assert!(!first_grades_failed(&row("grades", 0)));
+        for code in [1, 2, -1] {
+            assert!(!first_grades_marked(&row("grades", code)), "exit {code} never marks");
+            assert!(first_grades_failed(&row("grades", code)), "exit {code} is failed");
+        }
+    }
+
+    #[test]
+    fn scoped_grades_rows_are_neither_marked_nor_failed() {
+        for name in ["grades (not yet: your courses are not in yet)", "grades (skipped: not connected)"] {
+            for code in [0, 1] {
+                assert!(!first_grades_marked(&row(name, code)), "{name} at {code}");
+                assert!(!first_grades_failed(&row(name, code)), "{name} at {code}");
+            }
+        }
+        assert!(!first_grades_failed(&[("sync".to_string(), 1)]), "another step's failure is not grades'");
+    }
+
+    #[test]
+    fn a_failed_item_that_is_not_connected_is_still_listed() {
+        let items = [GateItem {
+            key: "mail".into(),
+            state: ItemState::Failed { reason: "r".into(), fix: "f".into() },
+            connected: false,
+            backfill: false,
+        }];
+        let g = gate(&items, None, 0);
+        assert_eq!(g.failed, [("mail".to_string(), "r".to_string(), "f".to_string())]);
+        assert!(g.open, "an unconnected item never holds the gate");
+    }
 }
