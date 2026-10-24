@@ -1593,6 +1593,11 @@ fn capture_answer() -> Value {
     }})
 }
 
+/// `save_pairs`' argument: each row's pairs by its key (the LMS course key).
+fn pairs_of(rows: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
+    rows.iter().map(|(k, f)| (k.to_string(), f.iter().map(|s| s.to_string()).collect())).collect()
+}
+
 #[test]
 fn test_12_a_course_removed_at_step_3_reaches_no_note_and_no_course_map_entry_and_stays_removed_after_a_quit() {
     let dir = scratch("t12-removed");
@@ -1602,51 +1607,52 @@ fn test_12_a_course_removed_at_step_3_reaches_no_note_and_no_course_map_entry_an
         assert_eq!(out["ok"], true, "{out}");
     };
     give(3, capture_answer());
-    // F8b's saves after the preview: each course's pairs, and the match-set buckets (§14.45).
-    give(3, serde_json::json!({"pairs": {
-        "QLT 101": ["QLT 101", "_1001_1"], "KNT 220": ["KNT 220", "_1002_1"], "WVG 105": ["WVG 105", "_1003_1"],
-    }}));
-    give(3, serde_json::json!({"buckets": {
-        "QLT 101": {"codes": ["QLT 101"], "class_times": 3, "assignments_upcoming": 7},
-        "KNT 220": {"codes": ["KNT 220"], "class_times": 2, "assignments_upcoming": 11},
-        "WVG 105": {"codes": ["WVG 105"], "class_times": 1, "assignments_upcoming": 4},
-        "KNT 220,QLT 101": {"codes": ["KNT 220", "QLT 101"], "assignments_upcoming": 100},
-        "unmatched": {"codes": [], "assignments_upcoming": 1000},
-    }}));
+    // F8b's two seams (never page answers): each course's pairs by its key (the human code, then a
+    // gradebook column id in the pin form), then the preview's match-set buckets as the engine writes them.
+    save_pairs(&dir, &pairs_of(&[("_1001_1", &["QLT 101", "_71_1"]), ("_1002_1", &["KNT 220", "_72_1"]), ("_1003_1", &["WVG 105", "_73_1"])])).unwrap();
+    save_preview(&dir, &serde_json::json!({
+        "_1001_1": {"codes": ["_1001_1"], "class_times": 3, "assignments_upcoming": 7, "turned_in": 0},
+        "_1002_1": {"codes": ["_1002_1"], "class_times": 2, "assignments_upcoming": 11, "turned_in": 0},
+        "_1003_1": {"codes": ["_1003_1"], "class_times": 1, "assignments_upcoming": 4, "turned_in": 0},
+        "_1001_1,_1002_1": {"codes": ["_1001_1", "_1002_1"], "class_times": 0, "assignments_upcoming": 100, "turned_in": 0},
+        "unmatched": {"codes": [], "class_times": 0, "assignments_upcoming": 1000, "turned_in": 0},
+    })).unwrap();
     // A label edit is display only (§14.46): it changes no pair.
-    give(3, serde_json::json!({"label": {"key": "KNT 220", "label": "Knots, edited"}}));
-    give(3, serde_json::json!({"remove": "KNT 220"}));
+    give(3, serde_json::json!({"label": {"key": "_1002_1", "label": "Knots, edited"}}));
+    give(3, serde_json::json!({"remove": "_1002_1"}));
     // A quit and a reload: nothing here but the folder.
     let reloaded = load_answers(&dir).unwrap().expect("the answers file survived");
     let totals = step3_totals(&reloaded);
-    assert_eq!(totals.get("classes"), Some(&2), "{totals:?}");
-    assert_eq!(totals.get("assignments_upcoming"), Some(&1111), "7 + 4 + the shared 100 + the unmatched 1000; the removed row's own 11 is out: {totals:?}");
+    assert_eq!(totals.get("classes"), Some(&Some(2)), "{totals:?}");
+    assert_eq!(totals.get("assignments_upcoming"), Some(&Some(1111)), "7 + 4 + the shared 100 + the unmatched 1000; the removed row's own 11 is out: {totals:?}");
     let created = RefCell::new(Vec::<String>::new());
     let out = run_school_courses(&dir, &[], &mut |c| { created.borrow_mut().push(c.code.clone()); Ok(c.name.to_lowercase().replace(' ', "-")) });
     assert!(matches!(out, Outcome::Done(_)), "{out:?}");
     assert_eq!(*created.borrow(), ["QLT 101", "WVG 105"], "the removed course gets no note");
     let h = handoff(&dir, &pending);
     let map_fragments: Vec<&str> = h.course_map.iter().map(|(f, _)| f.as_str()).collect();
-    assert_eq!(map_fragments, ["QLT 101", "_1001_1", "WVG 105", "_1003_1"], "course_map is the kept rows' pairs only");
-    assert_eq!(h.course_exclude, ["KNT 220", "_1002_1"], "the removed course's pairs, built as course_map's are, so ingest leaves out its items");
+    assert_eq!(map_fragments, ["QLT 101", "_71_1", "WVG 105", "_73_1"], "course_map is the kept rows' pairs only");
+    assert_eq!(h.course_exclude, ["KNT 220", "_72_1"], "the removed course's pairs, built as course_map's are, so ingest leaves out its items");
     // Narrowed (§14.45): the removed course's name or slug is in no course_map entry; its fragments are only under course_exclude.
     let map_text = serde_json::to_string(&h.course_map).unwrap();
-    assert!(!map_text.contains("knotwork") && !map_text.contains("KNT 220") && !map_text.contains("_1002_1"), "course_map: {map_text}");
+    assert!(!map_text.contains("knotwork") && !map_text.contains("KNT 220") && !map_text.contains("_72_1"), "course_map: {map_text}");
     // One source of pairs (§14.46): after the label edit, the pairs in the --courses list the preview
     // is given are byte-equal to that course's lines in the text (course_map's, or course_exclude).
+    // The entry's `code` is the row's key (the LMS course key); its slug comes by its human code.
     let now = load_answers(&dir).unwrap().unwrap();
     let listed = preview_courses(&now);
     for c in listed.as_array().expect("one object per course") {
-        let code = c["code"].as_str().unwrap();
-        let in_text: Vec<&str> = if code == "KNT 220" {
+        let key = c["code"].as_str().unwrap();
+        let row = now.courses.iter().find(|r| r.lms_key == key).unwrap_or_else(|| panic!("--courses code {key} is no row's LMS key"));
+        let in_text: Vec<&str> = if row.removed {
             h.course_exclude.iter().map(String::as_str).collect()
         } else {
-            let slug = &now.slugs[code];
+            let slug = &now.slugs[&row.code];
             h.course_map.iter().filter(|(_, s)| s == slug).map(|(f, _)| f.as_str()).collect()
         };
-        assert_eq!(serde_json::to_string(&in_text).unwrap(), serde_json::to_string(&c["pairs"]).unwrap(), "{code}: the pairs in --courses and in the text");
+        assert_eq!(serde_json::to_string(&in_text).unwrap(), serde_json::to_string(&c["pairs"]).unwrap(), "{key}: the pairs in --courses and in the text");
     }
-    assert!(listed.as_array().unwrap().iter().any(|c| c["code"] == "KNT 220" && c["label"] == "Knots, edited"), "the edit shows as the label only");
+    assert!(listed.as_array().unwrap().iter().any(|c| c["code"] == "_1002_1" && c["label"] == "Knots, edited"), "the edit shows as the label only");
     // A re-capture is the student asking again: the mark is cleared, and nothing is excluded.
     give(3, capture_answer());
     assert_eq!(load_answers(&dir).unwrap().unwrap().kept_courses().len(), 3);
@@ -1731,13 +1737,34 @@ fn test_12_a_fragment_a_kept_course_also_contributes_is_never_put_in_course_excl
         course("CS 100", "Intro Computing", "_3001_1"),
         course("CS 100 LAB", "Intro Computing Lab", "_3002_1"),
     ]}}));
-    give(serde_json::json!({"pairs": {"CS 100": ["CS 100", "_3001_1"], "CS 100 LAB": ["CS 100", "CS 100 LAB", "_3002_1"]}}));
-    give(serde_json::json!({"remove": "CS 100 LAB"}));
+    // The pins are gradebook column ids (`_91_1`, `_92_1`), never the course ids (`_3001_1`, `_3002_1`).
+    save_pairs(&dir, &pairs_of(&[("_3001_1", &["CS 100", "_91_1"]), ("_3002_1", &["CS 100", "CS 100 LAB", "_92_1"])])).unwrap();
+    give(serde_json::json!({"remove": "_3002_1"}));
     run_school_courses(&dir, &[], &mut |c| Ok(c.name.to_lowercase().replace(' ', "-")));
     let h = handoff(&dir, &pending);
-    assert_eq!(h.course_exclude, ["CS 100 LAB", "_3002_1"], "only the lab's own fragments: {h:?}");
+    assert_eq!(h.course_exclude, ["CS 100 LAB", "_92_1"], "only the lab's own fragments: {h:?}");
     assert!(h.course_map.iter().any(|(f, _)| f == "CS 100"), "the shared fragment stays in course_map: {h:?}");
     // The lab's pairs, as the preview is given them, still list the shared fragment (they are the lab's own pairs).
     let listed = preview_courses(&load_answers(&dir).unwrap().unwrap());
-    assert_eq!(listed[1]["pairs"], serde_json::json!(["CS 100", "CS 100 LAB", "_3002_1"]));
+    assert_eq!(listed[1]["pairs"], serde_json::json!(["CS 100", "CS 100 LAB", "_92_1"]));
+}
+
+#[test]
+fn test_12_removing_a_past_terms_shell_excludes_only_its_own_pin_and_the_live_shell_keeps_its_note_and_code() {
+    // "KNT 220" from spring (`_0990_1`) and from fall (`_1002_1`): one human code, two LMS keys.
+    let dir = scratch("t12-shells");
+    let pending = FakePending::default();
+    let capture = serde_json::json!({"capture": {"courses": [
+        course("KNT 220", "Knotwork Theory", "_0990_1"), course("KNT 220", "Knotwork Theory", "_1002_1"),
+    ]}});
+    assert_eq!(onboarding_answer_inner(&dir, 3, &capture, &mut |_| {})["ok"], true);
+    save_pairs(&dir, &pairs_of(&[("_0990_1", &["KNT 220", "_81_1"]), ("_1002_1", &["KNT 220", "_82_1"])])).unwrap();
+    assert_eq!(onboarding_answer_inner(&dir, 3, &serde_json::json!({"remove": "_0990_1"}), &mut |_| {})["ok"], true);
+    let created = RefCell::new(Vec::<String>::new());
+    run_school_courses(&dir, &[], &mut |c| { created.borrow_mut().push(c.lms_key.clone()); Ok("knotwork-theory".into()) });
+    assert_eq!(*created.borrow(), ["_1002_1"], "the live shell gets its note; the removed one none");
+    let h = handoff(&dir, &pending);
+    assert_eq!(h.course_exclude, ["_81_1"], "the spring shell's own pin only; the shared human code is the live shell's too: {h:?}");
+    let map_fragments: Vec<&str> = h.course_map.iter().map(|(f, _)| f.as_str()).collect();
+    assert_eq!(map_fragments, ["KNT 220", "_82_1"], "{h:?}");
 }
