@@ -1042,7 +1042,7 @@ pub fn handover_for(state: &OnboardingState) -> Vec<HandoverItem> {
 
 /// `onboarding_status`'s body over a state that was read: the file plus the live job states, the
 /// gate (re-evaluated at `now_secs`), and whether step 10's proposals may be asked. Keys: `ok`,
-/// `jobs`, `proposals_ready`, `gate`, `step`, `skips`, `handover`, `account_settled`.
+/// `jobs`, `proposals_ready`, `finish_ready`, `gate`, `step`, `skips`, `handover`, `account_settled`.
 pub fn status_inner(state: &OnboardingState, now_secs: i64) -> Value {
     use serde_json::json;
     let confirmed = state.step10_confirmed_at.as_deref().and_then(|t| t.parse::<jiff::Timestamp>().ok()).map(|t| t.as_second());
@@ -1051,6 +1051,8 @@ pub fn status_inner(state: &OnboardingState, now_secs: i64) -> Value {
         "ok": true, "error": Value::Null,
         "step": state.step, "account_settled": state.account_settled, "skips": state.skips, "handover": state.handover,
         "jobs": state.jobs, "proposals_ready": proposals_ready(state),
+        // The page's Open Knowlu reads this, never the job states: one rule, the one finish refuses on.
+        "finish_ready": finish_refusal(state, now_secs).is_none(),
         "gate": {
             "open": g.open,
             "still_coming": g.still_coming,

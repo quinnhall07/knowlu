@@ -607,6 +607,27 @@ fn finishable() -> OnboardingState {
     s
 }
 
+/// F11t review I5: the status carries `finish_ready`, the same rule finish refuses on, so the page's
+/// Open Knowlu never re-derives the job states.
+#[test]
+fn test_09_the_status_says_finish_ready_exactly_when_finish_would_not_refuse() {
+    let at = epoch(CONFIRMED) + 180;
+    assert_eq!(status_inner(&finishable(), at)["finish_ready"], true);
+    let mut absent = finishable();
+    absent.jobs.remove("registrar.confirm");
+    assert_eq!(status_inner(&absent, at)["finish_ready"], false, "an absent lane job is not ready");
+    let mut store = finishable();
+    store.jobs.insert("school.store".into(), JobRecord { state: JobState::Running, ..Default::default() });
+    assert_eq!(status_inner(&store, at)["finish_ready"], false, "a running store is not settled");
+    let mut unconfirmed = finishable();
+    unconfirmed.step10_confirmed_at = None;
+    assert_eq!(status_inner(&unconfirmed, at)["finish_ready"], false, "step 10 is not confirmed");
+    let mut coming = finishable();
+    coming.jobs.insert("slot.first_full".into(), JobRecord { state: JobState::Pending, ..Default::default() });
+    assert_eq!(status_inner(&coming, epoch(CONFIRMED) + 10)["finish_ready"], false, "the gate is still closed before the cap");
+    assert_eq!(status_inner(&coming, at)["finish_ready"], true, "and opens at the cap with the slot still coming");
+}
+
 // ---- test 9: quitting and finishing ------------------------------------------------------------------------------
 
 /// Finish later during a running serial job and a running lane job, with one more of each queued
