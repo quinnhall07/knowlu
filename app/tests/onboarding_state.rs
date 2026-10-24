@@ -767,6 +767,56 @@ fn test_21_the_forget_is_local_the_pending_credential_goes_and_the_profiles_is_u
     assert!(!out["error"].as_str().unwrap_or_default().is_empty(), "the named refusal, never a delete error: {out}");
 }
 
+/// Contract review r1, I-1: the session that was checked is the session that is saved, even if the
+/// pending credential changes between the check and the write; the swapped one is deleted too.
+#[cfg(windows)]
+#[test]
+fn test_21_the_session_that_was_checked_is_the_one_saved_when_the_pending_credential_changes_mid_attach() {
+    let r = attach_rig(line!(), "acc-1");
+    let checked = real::saved(&r.pending, "acc-1", "checked");
+    let out = attach_session_with(
+        &r.vault, &r.pending, "acc-1", &|| {}, &|| {},
+        &|| { real::saved(&r.pending, "acc-9", "swapped-in"); },
+        &|t, id, s| knowlu::account::save_session(t, id, s),
+    );
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(real::load(&r.profile).unwrap(), ("acc-1".to_string(), checked), "the checked session, not the swapped one, is on the profile");
+    assert!(real::load(&r.pending).is_err(), "the swapped pending credential is deleted too");
+}
+
+/// Review r1, m-5: a `cloud.yaml` naming no target, or the pending target itself, is the cloud-config refusal.
+#[cfg(windows)]
+#[test]
+fn test_21_a_cloud_yaml_naming_no_target_or_the_pending_target_is_refused_with_one_forget_and_nothing_moved() {
+    for pending_named in [false, true] {
+        let r = attach_rig(line!(), "acc-1");
+        real::saved(&r.pending, "acc-1", "pending");
+        let earlier = real::saved(&r.profile, "acc-1", "earlier");
+        let target = if pending_named { r.pending.clone() } else { String::new() };
+        std::fs::write(r.vault.join("config").join("cloud.yaml"), format!(
+            "api_base: '{}'\nanon_key: 'anon'\nsession_credential_target: '{target}'\naccount_id: 'acc-1'\n", knowlu::account::api_base())).unwrap();
+        let (out, forgot, refreshed) = r.run("acc-1");
+        assert_eq!(out["ok"], false, "{out}");
+        assert!(!out["error"].as_str().unwrap_or_default().is_empty(), "{out}");
+        assert_eq!((forgot, refreshed), (1, 0), "pending_named={pending_named}");
+        assert_eq!(real::load(&r.profile).unwrap(), ("acc-1".to_string(), earlier), "nothing moved");
+    }
+}
+
+/// Review r1, m-5: a save that fails leaves the profile's earlier session as it was.
+#[cfg(windows)]
+#[test]
+fn test_21_a_failed_save_keeps_the_profiles_old_session() {
+    let r = attach_rig(line!(), "acc-1");
+    real::saved(&r.pending, "acc-1", "pending");
+    let earlier = real::saved(&r.profile, "acc-1", "earlier");
+    let forgot = Cell::new(0usize);
+    let out = attach_session_with(&r.vault, &r.pending, "acc-1", &|| forgot.set(forgot.get() + 1), &|| panic!("refreshed after a failed save"), &|| {}, &|_, _, _| Err("disk full".into()));
+    assert_eq!(out["ok"], false, "{out}");
+    assert_eq!(forgot.get(), 1);
+    assert_eq!(real::load(&r.profile).unwrap(), ("acc-1".to_string(), earlier), "the old session is untouched");
+}
+
 /// Source text with its comment lines removed, so a pin reads code and a comment may say "never X".
 fn code_of(src: &str) -> String {
     src.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n")

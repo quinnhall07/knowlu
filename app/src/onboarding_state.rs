@@ -1102,9 +1102,12 @@ impl ExitSeams for LiveExit {
         let queue = self.app.try_state::<crate::onboarding_jobs::Queue>().ok_or("Knowlu's setup is not running")?;
         let cs = self.app.try_state::<crate::state::ConsoleState>().ok_or("Knowlu's setup is not running")?;
         queue.finish(handover)?;
-        match std::fs::remove_file(answers_path(&cs.data_dir)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => eprintln!("onboarding: the answers file could not be deleted: {e}"),
-            _ => {}
+        {
+            let _held = ANSWERS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            match std::fs::remove_file(answers_path(&cs.data_dir)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => eprintln!("onboarding: the answers file could not be deleted: {e}"),
+                _ => {}
+            }
         }
         let on = cs.settings.lock().unwrap_or_else(|e| e.into_inner()).autostart;
         let al = self.app.autolaunch();
@@ -1178,8 +1181,10 @@ pub fn onboarding_retry(app: tauri::AppHandle, job: String) -> Value {
 /// A local delete of the pending session and nothing else: never a revoke (review r6, I-1).
 /// `credentials::delete`'s not-found result is ignored.
 pub fn forget_pending_local(target: &str) {
-    if !crate::credentials::exists(target) { return; }
-    if let Err(e) = crate::credentials::delete(target) { eprintln!("Knowlu: the pending sign-in could not be deleted ({e})"); }
+    // Always asked to delete; not-found is the quiet case, and a failure is logged only if the credential is still there.
+    if let Err(e) = crate::credentials::delete(target) {
+        if crate::credentials::exists(target) { eprintln!("Knowlu: the pending sign-in could not be deleted ({e})"); }
+    }
 }
 
 const REFUSED_OTHER_ACCOUNT: &str = "This setup belongs to another Knowlu account: sign in with that one, or choose another profile.";
@@ -1198,17 +1203,36 @@ pub fn attach_session_in(
     forget_pending: &dyn Fn(),
     after_attach: &dyn Fn(),
 ) -> Value {
+    attach_session_with(vault, pending_target, expected_account_id, forget_pending, after_attach, &|| {}, &crate::account::save_session)
+}
+
+/// [`attach_session_in`] with two more seams: `after_load` runs between the check and the write (a test
+/// swaps the pending credential there) and `save` writes the profile's session (a test fails it).
+/// **The session that was checked is the session that is saved**: it is held from the load, never
+/// re-read from the pending target, so a sign-in finishing as another account in between cannot reach
+/// the profile. The pending credential is deleted only after the write succeeds.
+pub fn attach_session_with(
+    vault: &Path,
+    pending_target: &str,
+    expected_account_id: &str,
+    forget_pending: &dyn Fn(),
+    after_attach: &dyn Fn(),
+    after_load: &dyn Fn(),
+    save: &dyn Fn(&str, &str, &crate::account::Session) -> Result<(), String>,
+) -> Value {
     let refuse = |wrong_account: bool, why: &str| {
         forget_pending();
         serde_json::json!({ "ok": false, "wrong_account": wrong_account, "error": why })
     };
-    let Ok((pending_id, _)) = crate::account::load_session(pending_target) else { return refuse(false, REFUSED_NO_SIGN_IN) };
+    let Ok((pending_id, session)) = crate::account::load_session(pending_target) else { return refuse(false, REFUSED_NO_SIGN_IN) };
+    after_load();
     let cfg = match crate::account::cloud_config(vault) {
-        Ok(c) if !c.session_credential_target.is_empty() => c,
+        Ok(c) if !c.session_credential_target.is_empty() && c.session_credential_target != pending_target => c,
         _ => return refuse(false, REFUSED_CLOUD_CONFIG),
     };
     if pending_id != expected_account_id || pending_id != cfg.account_id { return refuse(true, REFUSED_OTHER_ACCOUNT); }
-    if crate::account::move_session(pending_target, &cfg.session_credential_target).is_err() { return refuse(false, REFUSED_MOVE); }
+    if save(&cfg.session_credential_target, &pending_id, &session).is_err() { return refuse(false, REFUSED_MOVE); }
+    forget_pending_local(pending_target);
     after_attach();
     serde_json::json!({ "ok": true, "wrong_account": false, "error": Value::Null })
 }
