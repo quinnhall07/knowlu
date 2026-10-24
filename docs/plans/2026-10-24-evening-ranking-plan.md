@@ -450,6 +450,14 @@ vault afterwards. No account, no live vault, no OS input.
 *(T0's base, citation and clock records, the review rounds and the controller's answers go here,
 dated, newest first.)*
 
+- **2026-10-24, T0 (main session).** Branch `feat/evening-ranking` from `docs/evening-ranking`
+  (`2023817`, on `cb3b661`; engine unchanged since `1d3c467`, whose CI was green). The clock record
+  holds: `oracle.rs:86` runs `--today 2026-08-28 --runner manual` with no time; `surface_oracle.rs:22`
+  and `:44` pin `--now 2026-08-28T09:00`. Every task `due:` across the three fixture vaults is
+  2026-08-20, 08-26T23:59, 08-27T10:59, 08-31T23:59, 09-01 or 09-25T09:00, none on 08-28 or 08-29.
+  Symbols: both reviews checked them against `cb3b661` with no drift. Wave B's F7a (`onboarding`
+  arm in the engine's `main.rs`) is on `feat/o3-f7a` and not on `main`; L5 is unbuilt. Neither
+  touches `Command::Rank`'s arm or `cli.rs`'s rank path.
 - **2026-10-24, controller's rulings.** Q-2: `test-writer` writes `evening_rank.rs`,
   `contract-reviewer` reviews it. Q-3: the zone split stays; a follow-up. `--now` without `--today`
   takes `--now`'s day. The meter's spill swap is intended. `surface.rs`'s turn: L7 has merged and L5
