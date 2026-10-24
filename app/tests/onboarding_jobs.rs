@@ -3042,7 +3042,7 @@ fn test_34_a_parked_window_busy_job_is_not_re_picked_by_other_jobs_finishing_bef
 
 /// What the `onboarding_answer` command does: the confirmed-school fact comes from the queue's live state.
 fn answer_through(r: &Rig, step: u8, a: Value) -> Value {
-    let out = answer_unless_exiting_with(&|| false, &r.dir, step, &a, &mut |j| r.q.enqueue_once(j), school_apply_may_run(&r.q.snapshot()));
+    let out = answer_unless_exiting_with(&|| false, &r.dir, step, &a, &mut answer_enqueuer(&r.q), school_apply_may_run(&r.q.snapshot()));
     if out["ok"] == true { r.q.wake(); }
     out
 }
@@ -3185,4 +3185,71 @@ fn test_33_a_step_5_answer_after_a_step_5_skip_saves_but_leaves_the_mail_jobs_sk
     assert_eq!(load_answers(&r.dir).unwrap().unwrap().mail_kind.as_deref(), Some("school"));
     for j in ["mail.setup", "mail.canary", "mail.first_pass"] { assert_eq!(r.state_of(j), JobState::Skipped, "{j}"); }
     assert_eq!((runs_of(&r, "mail.setup"), runs_of(&r, "mail.canary")), (1, 0), "{:?}", r.log.all());
+}
+
+// ---- F2b2a fix round 2: the preview refreshes, an early skip holds, and the slot is asked for only on new work ----------
+
+#[test]
+fn test_33_a_second_step_3_capture_after_a_done_preview_runs_the_preview_again() {
+    let r = unlisted_rig("t33-recapture", |_| {});
+    r.idle();
+    assert_eq!((r.state_of("school.preview"), runs_of(&r, "school.preview")), (JobState::Done, 1));
+    let again = serde_json::json!({"capture": {"courses": three_courses(), "registrar_rows": [], "feeds": {}}});
+    assert_eq!(answer_through(&r, 3, again)["ok"], true);
+    r.idle();
+    assert_eq!(runs_of(&r, "school.preview"), 2, "the new list gets its own preview: {:?}", r.log.all());
+}
+
+#[test]
+fn test_34_a_skip_made_before_any_mail_job_exists_holds_against_a_later_step_5_answer() {
+    let r = rig_with("t34-early-skip", state_at(5, true), true, vec![], |_| {});
+    assert!(r.q.snapshot().jobs.get("mail.setup").is_none(), "no mail job yet");
+    let out = skip_and_stop_mail(false, 5, "mail", &mut || r.q.update_state(|s| skip_step(s, 5, "mail")).and_then(|x| x), &mut || r.q.skip_mail());
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(answer_through(&r, 5, serde_json::json!({"mail": {"provider": "school"}}))["ok"], true, "the answer saves");
+    r.idle();
+    for j in ["mail.setup", "mail.canary", "mail.first_pass"] { assert_eq!((r.state_of(j), runs_of(&r, j)), (JobState::Skipped, 0), "{j}: {:?}", r.log.all()); }
+    assert!(handover_for(&r.q.snapshot()).iter().all(|h| !h.item.starts_with("mail.")), "never handed over");
+}
+
+#[test]
+fn test_33_a_repeated_step_3_and_8_proceed_after_everything_is_done_leaves_the_slot_run_count_unchanged() {
+    let r = unlisted_rig("t33-slot-repeat", |_| {});
+    proceed(&r, 3);
+    proceed(&r, 8);
+    r.idle();
+    let slots = runs_of(&r, "slot.partial");
+    assert!(slots >= 1, "the first proceeds asked for it: {:?}", r.log.all());
+    proceed(&r, 3);
+    proceed(&r, 8);
+    r.idle();
+    assert_eq!(runs_of(&r, "slot.partial"), slots, "a repeat with no new work costs no slot: {:?}", r.log.all());
+}
+
+#[test]
+fn test_33_step_8s_first_proceed_still_queues_its_no_rank_slot_after_step_3s() {
+    let r = unlisted_rig("t33-slot-step8", |_| {});
+    proceed(&r, 3);
+    r.idle();
+    let after_3 = runs_of(&r, "slot.partial");
+    proceed(&r, 8);
+    r.idle();
+    assert_eq!(runs_of(&r, "slot.partial"), after_3 + 1, "{:?}", r.log.all());
+    assert_eq!(r.log.scopes("slot.partial").last().map(String::as_str), Some("NoRank"), "{:?}", r.log.all());
+}
+
+#[test]
+fn test_33_a_proceed_after_a_sign_out_rewind_queues_its_slot_again() {
+    let r = unlisted_rig("t33-slot-rewind", |_| {});
+    proceed(&r, 3);
+    proceed(&r, 8);
+    r.idle();
+    let before = runs_of(&r, "slot.partial");
+    // What `on_sign_out_with` does to the jobs: every record back to its default.
+    r.q.update_state(|s| for j in s.jobs.values_mut() { *j = JobRecord::default(); }).unwrap();
+    proceed(&r, 3); // the student redoes the steps; step 8 alone would wait on the rewound school jobs
+    proceed(&r, 8);
+    r.idle();
+    assert_eq!(runs_of(&r, "config.ingest"), 2);
+    assert!(runs_of(&r, "slot.partial") > before, "{:?}", r.log.all());
 }

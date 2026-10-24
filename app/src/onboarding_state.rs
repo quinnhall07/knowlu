@@ -603,6 +603,19 @@ pub fn skip_unless_exiting(stopping: bool, apply: &mut dyn FnMut() -> Result<(),
     }
 }
 
+/// The enqueue seam of one `onboarding_answer` call (§14.52.3). `school.preview` is a plain `enqueue`: a
+/// re-capture must rebuild it for the new list. Every other job goes through `enqueue_once`, so a repeat
+/// changes nothing. `slot.partial` (which `enqueue_once` does not guard) is asked for only if an earlier job
+/// of this same answer was newly queued, so a repeat with no new work costs no slot.
+pub fn answer_enqueuer(queue: &crate::onboarding_jobs::Queue) -> impl FnMut(&str) + '_ {
+    let mut new_work = false;
+    move |job| match job {
+        "school.preview" => queue.enqueue(job),
+        "slot.partial" => { if new_work { queue.enqueue(job); } }
+        _ => new_work |= queue.enqueue_once(job),
+    }
+}
+
 /// [`skip_unless_exiting`], then (step 5's `mail` only, and only once the skip is recorded) `stop_mail`,
 /// which the command points at `Queue::skip_mail`: a pending or held mail job becomes `skipped`, and a
 /// running setup is stopped. Called on a repeat press too; `skip_mail` is safe to repeat.
@@ -1247,7 +1260,7 @@ pub fn onboarding_answer(app: tauri::AppHandle, step: u8, answer: Value) -> Valu
     let (Some(queue), Some(cs)) = (app.try_state::<crate::onboarding_jobs::Queue>(), app.try_state::<crate::state::ConsoleState>()) else { return no_setup() };
     // The school fact is read from the queue's live state (its lock is released before the answers lock is taken).
     let confirmed = school_apply_may_run(&queue.snapshot());
-    let out = answer_unless_exiting_with(&|| exiting_now(&queue, &exit_guard()), &cs.data_dir, step, &answer, &mut |job| queue.enqueue_once(job), confirmed);
+    let out = answer_unless_exiting_with(&|| exiting_now(&queue, &exit_guard()), &cs.data_dir, step, &answer, &mut answer_enqueuer(&queue), confirmed);
     // The jobs that wait for the answers file (`school.courses`, `registrar.confirm`, `config.ingest`)
     // are woken by nothing else: a saved answer wakes the queue even when it enqueued no job.
     if out["ok"] == true { queue.wake(); }
