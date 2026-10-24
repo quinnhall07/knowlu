@@ -882,6 +882,9 @@ pub fn create_vault_defaults_with(root: &Path, home: &Path, restore: &dyn Fn(&Pa
     let session = crate::account::session_target(&profile_id);
     let pdir = profiles::profile_dir(root, &profile_id);
     let pdir_is_new = !pdir.exists();
+    // Set only once `save_state` has succeeded: a profile folder that was already there keeps any
+    // `onboarding.json` this call did not write.
+    let state_written = std::cell::Cell::new(false);
     // Undo this create, sign-in included: the pending session goes back, so the retry finds it. What
     // cannot be undone is named, never dropped (a vanished folder is not a failure).
     let undo = |why: String| {
@@ -890,7 +893,7 @@ pub fn create_vault_defaults_with(root: &Path, home: &Path, restore: &dyn Fn(&Pa
         let mut left = Vec::new();
         if let Err(e) = crate::account::move_session(&session, crate::account::PENDING_TARGET) { left.push(format!("your sign-in could not be put back ({e})")); }
         if let Err(e) = gone(std::fs::remove_dir_all(&dest), &dest) { left.push(format!("the new folder {} could not be removed ({e})", dest.display())); }
-        let (cleared, left_at) = if pdir_is_new { (std::fs::remove_dir_all(&pdir), pdir.clone()) } else { let f = crate::onboarding_state::state_path(&pdir); (std::fs::remove_file(&f), f) };
+        let (cleared, left_at) = if pdir_is_new { (std::fs::remove_dir_all(&pdir), pdir.clone()) } else if !state_written.get() { (Ok(()), pdir.clone()) } else { let f = crate::onboarding_state::state_path(&pdir); (std::fs::remove_file(&f), f) };
         if let Err(e) = gone(cleared, &left_at) { left.push(format!("{} could not be cleared ({e})", left_at.display())); }
         fail(if left.is_empty() { format!("{why}. Try again.") } else { format!("{why}. Also {}. Try again.", left.join(" and ")) })
     };
@@ -906,6 +909,7 @@ pub fn create_vault_defaults_with(root: &Path, home: &Path, restore: &dyn Fn(&Pa
     if let Err(e) = crate::onboarding_state::save_state(&pdir, &state) {
         return undo(format!("Knowlu could not save your setup progress ({e})"));
     }
+    state_written.set(true);
     let mut out = finish_or_roll_back(root, &dest, Some(name), &plan, Some(backups));
     if out["ok"] != true {
         let why = out["error"].as_str().unwrap_or("the profile could not be finished").to_string();
