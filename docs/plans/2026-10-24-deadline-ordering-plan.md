@@ -664,6 +664,19 @@ Acceptance: `scripts/ci/eol-check.ps1` clean; no source file in the diff. Size: 
 *(T0's base, citation, clock and retire records, the review rounds and the controller's answers go
 here, dated, newest first.)*
 
+- **2026-10-25, T4b review (FAIL, two Important) and Quinn's ruling (signed) on the pin clause.**
+  - **I-1, the pin is named in every form of the line (Q8).** Quinn approved the wording:
+    several items: "If something has to give: B and C (4.5h). Everything else fits by its deadline,
+    not counting Lab Pin, which you pinned."; a placeholder: "If something has to give: Y (2.5h).
+    This may not all fit: 1 item has no time estimate yet, and Lab Pin, which you pinned, isn't
+    counted." Two DS12 cases are added for them in the fix round.
+  - **I-2, a bare-date deadline:** `SpillItem.deadline` is the date alone (`"2026-08-28"`) when the
+    note's `due` has no time, so the hover never prints an 11:59 pm the source never gave (§7). A
+    DS5 case pins it.
+  - **Carried to T5:** the console must not hide `spill_items` when `spill_blocks == 0`.
+  - **T1g's DS14** asserts "never May not fit" until T4c; after T4c a test-writer tightens it to
+    the plan's exact "Won't fit before 11:59 pm".
+
 - **2026-10-25, Quinn's ruling (signed), from T4a's review m-2: "Overdue" follows the clock
   everywhere on the page.** `group_label` reads `due <= m` as Overdue (T4a). `horizon()`, which drives
   `nav_counts.overdue` and the Overdue view, still goes by date, so a task due 10:00 read at 15:00 is
