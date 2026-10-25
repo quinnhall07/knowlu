@@ -5147,4 +5147,46 @@ mod evening_tests {
         assert_eq!(label.as_deref(), Some("Due today"), "the plan treats it as open at 10:00");
         let _ = std::fs::remove_dir_all(&vault);
     }
+
+    // ---- Deadline ordering T1h: the nav's Overdue follows the clock (plan section 9, 2026-10-25). ----
+
+    /// The probe's slug in the Overdue and This week views, and the nav's overdue count, at `m`.
+    fn overdue_facts(vault: &Path, m: DateTime) -> (i64, bool, bool) {
+        let view = |v: View| build_state(vault, v, TODAY, &zoned_at(m), None);
+        let has = |s: &State| s.list.as_ref().unwrap().rows.iter().any(|r| r.slug == "ds-probe");
+        let overdue = view(View::Overdue);
+        let week = view(View::Week);
+        (overdue.nav_counts.overdue.count, has(&overdue), has(&week))
+    }
+
+    /// T1h: a due time passed today is overdue in the nav count, the Overdue view and not This week.
+    #[test]
+    fn a_due_time_passed_today_is_overdue_in_the_nav() {
+        let vault = scratch_s1("t1h");
+        let (before_count, before_listed, before_week) = overdue_facts(&vault, at(9, 0));
+        assert!(!before_listed && !before_week, "setup: no probe yet");
+        put_probe(&vault, "ds-probe", "Probe", Some(1.0), "low", "2026-08-28T10:00", 3, "");
+        let (early_count, early_listed, early_week) = overdue_facts(&vault, at(9, 0));
+        assert_eq!(early_count, before_count, "09:00: not yet due, so not counted overdue");
+        assert!(!early_listed, "09:00: not in the Overdue view");
+        assert!(early_week, "setup: at 09:00 the probe is in This week");
+        let (late_count, late_listed, late_week) = overdue_facts(&vault, at(15, 0));
+        assert_eq!(late_count, before_count + 1, "15:00: counted in nav_counts.overdue");
+        assert!(late_listed, "15:00: listed in the Overdue view");
+        assert!(!late_week, "15:00: not in This week");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// T1h (guard): with no moment the horizon goes by date, so the probe is not overdue on D.
+    #[test]
+    fn with_no_moment_the_horizon_goes_by_date() {
+        let vault = scratch_s1("t1h-date");
+        let base = nav_counts(&load(&vault, pinned_today()), TODAY, 0, 0, 0, 0).overdue.count;
+        put_probe(&vault, "ds-probe", "Probe", Some(1.0), "low", "2026-08-28T10:00", 3, "");
+        let l = load(&vault, pinned_today());
+        assert_eq!(nav_counts(&l, TODAY, 0, 0, 0, 0).overdue.count, base, "counted by date: not overdue on D");
+        assert!(!ranked_list(&l, TODAY, "overdue", &[]).rows.iter().any(|r| r.slug == "ds-probe"));
+        assert!(ranked_list(&l, TODAY, "week", &[]).rows.iter().any(|r| r.slug == "ds-probe"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
 }
