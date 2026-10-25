@@ -705,9 +705,9 @@ fn no_password_field_on_the_page_but_ours_by_id() {
 #[test]
 fn the_login_fields_are_cleared_in_both_arms_the_moment_the_write_returns() {
     let c = code(&read("onboarding.js"));
-    let at = c.find("invoke(\"store_credentials\"").expect("step 8 stores logins");
+    let at = c.find("invoke(\"onboarding_store_credentials\"").expect("step 8 stores logins");
     let handler = enclosing_fn(&c, at);
-    let after = &handler[handler.find("invoke(\"store_credentials\"").unwrap()..];
+    let after = &handler[handler.find("invoke(\"onboarding_store_credentials\"").unwrap()..];
     let then = after.find(".then(").expect("the answer is read in a then");
     let first_clear = after[then..].find("clearCredentialFields(").expect("the answer's handler clears the fields");
     let first_branch = after[then..].find("if (").unwrap_or(usize::MAX);
@@ -723,7 +723,7 @@ fn a_credential_value_is_read_only_inside_the_store_handler_and_goes_nowhere_els
     let c = code(&read("onboarding.js"));
     let base = c.as_ptr() as usize;
     let span = |s: &str| (s.as_ptr() as usize - base, s.as_ptr() as usize - base + s.len());
-    let handler = span(enclosing_fn(&c, c.find("invoke(\"store_credentials\"").unwrap()));
+    let handler = span(enclosing_fn(&c, c.find("invoke(\"onboarding_store_credentials\"").unwrap()));
     let clear = span(function(&c, "clearCredentialFields"));
     let mut lookups = 0;
     for id in LOGIN_FIELD_IDS {
@@ -745,7 +745,7 @@ fn a_credential_value_is_read_only_inside_the_store_handler_and_goes_nowhere_els
     }
     // Plan ~3032: no credential value is assigned to anything that outlives the handler. Inside the
     // handler, a statement that reads `.value` on its right side assigns only to a local it declares.
-    let h = enclosing_fn(&c, c.find("invoke(\"store_credentials\"").unwrap());
+    let h = enclosing_fn(&c, c.find("invoke(\"onboarding_store_credentials\"").unwrap());
     for stmt in h.split(';') {
         let Some(eq) = stmt.find('=').filter(|&e| !stmt[e..].starts_with("==") && !stmt[e..].starts_with("=>")) else { continue };
         if !stmt[eq + 1..].contains(".value") { continue; }
@@ -763,7 +763,7 @@ const LOGIN_FIELD_IDS: [&str; 4] = ["ob-zybooks-username", "ob-zybooks-password"
 #[test]
 fn discovery_in_flight_disables_next_and_the_sites_skip() {
     let c = code(&read("onboarding.js"));
-    let f = enclosing_fn(&c, c.find("invoke(\"discover_coursework\"").expect("discover"));
+    let f = enclosing_fn(&c, c.find("invoke(\"onboarding_discover_coursework\"").expect("discover"));
     assert!(f.contains("discovering = true"), "R-C1-55: the flag is raised before the call");
     assert!(f.contains("discovering = false"), "…and lowered when it returns");
     assert!(c.contains("var discovering") && enclosing_fn_or_top(&c, "discovering", "disabled"), "Next and Skip read it into `disabled`");
