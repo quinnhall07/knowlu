@@ -1648,7 +1648,7 @@ fn test_12_the_other_answers_are_saved_and_a_remove_or_a_label_for_no_course_is_
     let d = scratch("t12-other-answers");
     let capture = serde_json::json!({"capture": {"courses": [row("QLT 101", "Quilting Basics", "_1001_1", false)]}});
     assert_eq!(onboarding_answer_inner(&d, 3, &capture, &mut |_| {})["ok"], true);
-    let book = BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "quilting-basics".into() };
+    let book = BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "_1001_1".into() };
     assert_eq!(onboarding_answer_inner(&d, 8, &serde_json::json!({"row": book}), &mut |_| {})["ok"], true);
     assert_eq!(onboarding_answer_inner(&d, 8, &serde_json::json!({"row": book}), &mut |_| {})["ok"], true, "the same row twice is one row");
     assert_eq!(onboarding_answer_inner(&d, 8, &serde_json::json!({"zybooks_ignore": "ZYB-X"}), &mut |_| {})["ok"], true);
