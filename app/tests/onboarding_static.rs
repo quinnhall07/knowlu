@@ -1052,7 +1052,7 @@ fn the_shells_screens_count_eleven_ten_and_nine_minutes_left() {
     // and 540 seconds, rounded up (step 1 is 30 s, step 2 is 45 s, and step 9 is absent).
     let got: Vec<i64> = [1, 2, 3].iter().map(|n| node(&format!("h.minutesLeft({n})")).as_i64().expect("a whole number")).collect();
     assert_eq!(got, vec![11, 10, 9], "minutesLeft(1), (2), (3)");
-    assert_eq!(node("h.minutesLeft(4)").as_i64(), Some(8), "the count from step 4 on does not move");
+    assert_eq!(node("h.minutesLeft(4)").as_i64(), Some(7), "the count from step 4 on does not move (420 s, unchanged by F11p1s)");
 }
 
 #[test]
