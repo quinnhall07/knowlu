@@ -5096,10 +5096,8 @@ mod evening_tests {
         put_xyz(&vault, "medium", "needs_enrichment: true\n", "low");
         assert!(!is_placeholder(&load(&vault, pinned_today()), "ds-x"), "setup");
         assert_eq!(wont_slugs(&vault, at(21, 0)), ["ds-y"], "setup: the walk names Y");
-        // The plan's text is "Won't fit before 11:59 pm" (DS6 pins it); here only that the line is
-        // never the placeholder wording, which holds against the stub and after T4c.
-        let line = fit_of(&vault, at(21, 0), "ds-y").0.unwrap_or_default();
-        assert!(!line.contains("May not fit"), "{line:?}");
+        // Y is the walk's overflower with a real estimate: the plan's exact text, never "May not fit".
+        assert_eq!(fit_of(&vault, at(21, 0), "ds-y").0, some("Won't fit before 11:59 pm"));
         let _ = std::fs::remove_dir_all(&vault);
     }
 
