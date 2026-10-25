@@ -3726,8 +3726,8 @@ fn test_41_not_now_without_mail_connect_changes_nothing_and_the_command_reads_th
 
 // ======================================================================================================
 // F5c (test 43): the two step-8 wrappers read the vault from `ConsoleState`; the page never sends a path.
-// Invented values only; nothing here reaches the Credential Manager (the unknown-source refusal returns
-// before `credentials::write`).
+// Invented values only; nothing here calls `store_credentials` or reaches the Credential Manager: the
+// unknown-source refusal is checked through its pure seam, `credential_source_refusal` (§14.60.3).
 // ======================================================================================================
 
 #[test]
@@ -3739,14 +3739,37 @@ fn test_43_the_seam_hands_the_inner_the_console_vault_and_nothing_else() {
     assert_eq!(*seen.borrow(), vec![vault.to_string_lossy().into_owned()], "the inner is called once, with cs.vault");
 }
 
+/// §14.60.3: the refusal is checked through `credential_source_refusal`, a pure seam, and never through the
+/// real `store_credentials` — so this case can never reach Credential Manager, whatever the allowlist holds.
+/// The source pin below is what ties the seam to the command: refusal first, before any target or write.
 #[test]
 fn test_43_a_wrapped_store_with_an_unknown_source_is_refused_and_never_echoes_the_secret() {
     const INVENTED: &str = "invented-secret-f5c-0001";
-    let out = knowlu::onboarding::on_console_vault(Path::new("invented-vault-root"), |v| {
-        knowlu::onboarding::store_credentials(v, "nowhere".into(), "invented-user".into(), INVENTED.into())
-    });
-    assert_eq!(out["ok"], false);
-    assert!(!out.to_string().contains(INVENTED), "the answer carried the secret");
+    let refusal = knowlu::onboarding::credential_source_refusal;
+    for source in ["nowhere", "session", PENDING_LMS, PENDING_CALENDAR, "ZyBooks", "VHL", "", "zybooks "] {
+        let out = knowlu::onboarding::on_console_vault(Path::new("invented-vault-root"), |_v| {
+            refusal(source).unwrap_or_else(|| panic!("{source:?} is refused"))
+        });
+        assert_eq!(out, serde_json::json!({ "ok": false, "error": format!("unknown source {source}") }), "{source:?}'s refusal is today's envelope");
+        assert!(!out.to_string().contains(INVENTED), "the answer carried the secret");
+    }
+    for known in ["zybooks", "vhl"] { assert_eq!(refusal(known), None, "{known} is stored, never refused"); }
+
+    let src = src_of("onboarding.rs");
+    // The seam takes the source alone, so a refusal cannot carry the user or the secret; and it is pure.
+    let at = src.find("pub fn credential_source_refusal(source: &str) -> Option<Value> {").expect("the seam's signature");
+    let seam = enclosing_fn(&src, at + 7);
+    for bad in ["credentials::", "wincred", "target_for", "id_for", "secret", "user"] {
+        assert!(!seam.contains(bad), "the seam is pure and sees only the source ({bad}):\n{seam}");
+    }
+    // `store_credentials` asks the seam first and returns its refusal before a target is built or written.
+    let at = src.find("pub fn store_credentials(vault: String, source: String, user: String, secret: String) -> Value {").expect("the command");
+    let body = enclosing_fn(&src, at + 7);
+    let first = body.lines().nth(1).unwrap_or("").trim();
+    assert_eq!(first, "if let Some(refused) = credential_source_refusal(&source) { return refused; }", "the refusal is the first line:\n{body}");
+    let (ask, target, write) = (body.find("credential_source_refusal(").unwrap(), body.find("target_for(").expect("target"), body.find("credentials::write(").expect("write"));
+    assert!(ask < target && target < write, "refusal, then target, then write:\n{body}");
+    assert_eq!(body.matches("credentials::write(").count(), 1, "one write, after the refusal:\n{body}");
 }
 
 #[test]

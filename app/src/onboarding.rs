@@ -1131,12 +1131,21 @@ pub fn finish_or_roll_back(root: &Path, dest: &Path, name: Option<String>, plan:
     json!({ "ok": false, "error": format!("{why}{tail}"), "profile": Value::Null })
 }
 
+/// The sources `store_credentials` stores, and its answer for any other (plan §14.60.3): `None` for
+/// `zybooks` and `vhl`, the refusal envelope for anything else — `session`, a pending-link name, a
+/// different case. Pure: it sees the source alone, builds no target and never reaches Credential
+/// Manager, so a test checks the refusal here instead of through the real write.
+pub fn credential_source_refusal(source: &str) -> Option<Value> {
+    if ["zybooks", "vhl"].contains(&source) { None } else { Some(json!({ "ok": false, "error": format!("unknown source {source}") })) }
+}
+
 /// Panel 5's write, made the moment the user leaves the panel (decision 3) — the vault folder need
 /// not exist yet: the target is derived from the path the user chose, not from anything on disk.
-/// **The secret is never returned, never logged and never echoed back to the page.**
+/// **The secret is never returned, never logged and never echoed back to the page.** The source is
+/// checked first, by [`credential_source_refusal`], before any target is built or written.
 #[tauri::command(async)]
 pub fn store_credentials(vault: String, source: String, user: String, secret: String) -> Value {
-    if !["zybooks", "vhl"].contains(&source.as_str()) { return json!({ "ok": false, "error": format!("unknown source {source}") }); }
+    if let Some(refused) = credential_source_refusal(&source) { return refused; }
     let target = crate::credentials::target_for(&profiles::id_for(Path::new(&vault)), &source);
     match crate::credentials::write(&target, &user, &secret) {
         Ok(()) => json!({ "ok": true, "error": Value::Null, "target": target }),
