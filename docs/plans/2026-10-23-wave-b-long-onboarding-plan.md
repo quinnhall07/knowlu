@@ -6585,3 +6585,13 @@ shell has no command that ends the process (below) and `console-ui` never edits 
    after it. It goes ahead of F11c1, which waits on F2b3 and F5c. §7 has no cycle: F11p1s depends
    on F11p1 and nothing new, and F11c1 gains F11p1s as its predecessor in the order.
 
+
+#### 14.59.7 Quinn's ruling from F11p1s's review (2026-10-24)
+
+- **The welcome copy carries no number.** The review found the welcome's "about 10 minutes" beside
+  the rail foot's "About 11 minutes left". Quinn ruled (signed): drop the number, so the copy reads
+  "...connect the places that already know your work." The foot is the one figure, from
+  `STEP_SECONDS`, and a pin keeps any minutes figure out of `su-why`.
+- **Unowned, after wave B:** the browser screen's "Open the browser again" and "Use an emailed code
+  instead" buttons are in the prototype but in no task. The first needs Rust (only Rust holds the
+  sign-in URL), so it goes to the planner after wave B.
