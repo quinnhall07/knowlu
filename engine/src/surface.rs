@@ -620,17 +620,18 @@ fn fit_lines(l: &Loaded, slug: &str, today: Date) -> (Option<String>, Option<Str
     let depends = w.prefix.iter().filter(|s| is_placeholder(l, s)).count();
     let line = if is_placeholder(l, slug) {
         format!("May not fit {lead} {when} \u{b7} no time estimate yet")
-    } else if depends > 0 {
+    } else if depends > 0 && w.work_minutes <= w.available_minutes {
         format!("May not fit {lead} {when} \u{b7} depends on {depends} item{} with no time estimate yet", if depends == 1 { "" } else { "s" })
     } else {
         format!("Won't fit {lead} {when}")
     };
-    let hours = |minutes: i64| format!("{:.1}h", round1(minutes.max(0) as f64 / 60.0));
+    // Work rounds up and time rounds down to the tenth (6 minutes), so the reason never reads as fitting.
+    let work = format!("{:.1}h", ((w.work_minutes.max(0) + 5) / 6) as f64 / 10.0);
     let why = if w.work_minutes > w.available_minutes {
-        format!("{} left; you have {} before it's due.", hours(w.work_minutes), hours(w.available_minutes))
+        format!("{work} left; you have {:.1}h before it's due.", (w.available_minutes.max(0) / 6) as f64 / 10.0)
     } else {
         let late = deadline_words(l, &w.overflower, w.overflow_deadline, today);
-        format!("{} left; doing it would leave other work due by {late} late.", hours(w.work_minutes))
+        format!("{work} left; doing it would leave other work due by {late} late.")
     };
     (Some(line), Some(why))
 }
@@ -5145,6 +5146,67 @@ mod evening_tests {
         let groups = groups_at(&vault, m);
         let label = groups.iter().find(|(_, rows)| rows.iter().any(|s| s == "ds-probe")).map(|(l, _)| l.clone());
         assert_eq!(label.as_deref(), Some("Due today"), "the plan treats it as open at 10:00");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    // ---- Deadline ordering T4c review (plan section 9, 2026-10-25): rounding and Quinn's rulings. ----
+
+    /// I-1: work rounds up and available time rounds down to the tenth, so 180 against 179 minutes
+    /// never reads as fitting.
+    #[test]
+    fn the_reason_never_reads_as_fitting_at_180_against_179() {
+        let vault = probe_vault("t4c-round");
+        put_probe(&vault, "ds-y", "Y", Some(3.0), "low", DUE, 3, "");
+        let walk = load_at(&vault, pinned_today(), None, Some(at(21, 0))).plan.wont_fit;
+        assert_eq!(walk.iter().map(|w| (w.work_minutes, w.available_minutes)).collect::<Vec<_>>(), [(180, 179)], "setup");
+        assert_eq!(fit_of(&vault, at(21, 0), "ds-y").1, some("3.0h left; you have 2.9h before it's due."));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Quinn: an item that cannot fit alone reads "Won't fit" even with a placeholder ahead of it.
+    #[test]
+    fn an_item_that_cannot_fit_alone_says_wont_fit_despite_a_placeholder_ahead() {
+        let vault = probe_vault("t4c-alone");
+        put_probe(&vault, "ds-x", "X", Some(1.0), "unset", DUE, 5, "");
+        put_probe(&vault, "ds-y", "Y", Some(3.0), "low", DUE, 3, "");
+        let walk = load_at(&vault, pinned_today(), None, Some(at(21, 0))).plan.wont_fit;
+        let y = walk.iter().find(|w| w.slug == "ds-y").expect("setup: Y is named");
+        assert!(y.work_minutes > y.available_minutes, "setup: Y cannot fit alone");
+        assert!(y.prefix.iter().any(|s| s == "ds-x"), "setup: the placeholder is in Y's prefix");
+        assert_eq!(fit_of(&vault, at(21, 0), "ds-y").0, some("Won't fit before 11:59 pm"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// T4c ruling: a bare date with a placeholder in the prefix reads "May not fit by <day>".
+    #[test]
+    fn a_bare_date_with_a_placeholder_in_the_prefix_reads_may_not_fit_by_the_day() {
+        let vault = probe_vault("t4c-bare");
+        put_probe(&vault, "ds-x", "X", Some(1.0), "unset", "2026-08-29", 5, "");
+        put_probe(&vault, "ds-y", "Y", Some(18.5), "low", "2026-08-29", 3, "");
+        let walk = load_at(&vault, pinned_today(), None, Some(at(21, 0))).plan.wont_fit;
+        let y = walk.iter().find(|w| w.slug == "ds-y").expect("setup: Y is named");
+        assert!(y.work_minutes <= y.available_minutes, "setup: Y fits alone ({y:?})");
+        assert_eq!(
+            fit_of(&vault, at(21, 0), "ds-y").0,
+            some("May not fit by Sat \u{b7} depends on 1 item with no time estimate yet")
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// T4c ruling: an item that is itself a placeholder reads "no time estimate yet", whatever else
+    /// is in its prefix.
+    #[test]
+    fn a_placeholder_with_another_in_its_prefix_reads_no_time_estimate_yet() {
+        let vault = probe_vault("t4c-own");
+        put_probe(&vault, "ds-x", "X", Some(1.0), "unset", DUE, 5, "");
+        put_probe(&vault, "ds-y", "Y", Some(2.5), "unset", DUE, 3, "");
+        let walk = load_at(&vault, pinned_today(), None, Some(at(21, 0))).plan.wont_fit;
+        let y = walk.iter().find(|w| w.slug == "ds-y").expect("setup: Y is named");
+        assert!(y.prefix.iter().any(|s| s == "ds-x"), "setup: another placeholder is in the prefix");
+        assert_eq!(
+            fit_of(&vault, at(21, 0), "ds-y").0,
+            some("May not fit before 11:59 pm \u{b7} no time estimate yet")
+        );
         let _ = std::fs::remove_dir_all(&vault);
     }
 
