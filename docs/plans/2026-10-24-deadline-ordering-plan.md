@@ -664,6 +664,18 @@ Acceptance: `scripts/ci/eol-check.ps1` clean; no source file in the diff. Size: 
 *(T0's base, citation, clock and retire records, the review rounds and the controller's answers go
 here, dated, newest first.)*
 
+- **2026-10-25, Quinn's ruling (signed), from T4a's review m-2: "Overdue" follows the clock
+  everywhere on the page.** `group_label` reads `due <= m` as Overdue (T4a). `horizon()`, which drives
+  `nav_counts.overdue` and the Overdue view, still goes by date, so a task due 10:00 read at 15:00 is
+  Overdue in Must do but "This week" in the nav. Quinn ruled that the nav follows the moment too.
+  **New task T4d** (after T4c, before T5): T1h first (red, a probe due `D 10:00` at `D 15:00` is in
+  `nav_counts.overdue` and the Overdue view and not in This week; at `D 09:00` it is not overdue);
+  then `horizon()` takes the page's moment, with no moment exactly as today. `surface_oracle.rs`
+  must stay green unedited; if it moves, stop and report. `test-writer` then `implementer`; size S.
+- **2026-10-25, T4a review m-1 (folded into T4b):** `Loaded.moment` is stored truncated to the
+  minute, as `plan_at`'s is. **m-3 (carried to T1g):** a guard that `moved` reads `scored` needs a
+  planning-day note in the scratch copy; DS4's `moved` half is `None` on both sides.
+
 - **2026-10-24, checkpoint: contract-reviewer on T1o (`088c8f1`): PASS.**
   - **The coverage rule.** DO2 compares four blocks, by the plan's ruling. `evening_rank.rs`'s E3, which is kept unedited, still guards `the_day`, `verdict`, `ahead` and `topline` at 21:00, and `surface_oracle.rs` guards every byte at 09:00. **Any later lane that removes E3 must first widen DO2 to E3's set.**
   - **The doc comment.** DO2's doc comment calls the excluded blocks clock-driven. Only `now`, `revision`, the runs panel and `runs_warn` are; the rest are excluded by the plan's ruling. The comment is left as committed, and this note records the correction.
