@@ -108,6 +108,53 @@ pub fn rank_at(tasks: &[Task], today: Date, cal: &WeekCalendar, moment: Option<D
     result
 }
 
+/// The spare time step 0 and step 3 require: Quinn's Q4, 2026-10-24. Stub constant (T1b); the real value.
+pub const FIT_MARGIN_MINUTES: i64 = 30;
+
+/// An item that cannot fit before its deadline (stub type, T1b; filled in by T3b).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WontFit {
+    pub slug: String,
+    pub deadline: DateTime,
+    pub work_minutes: i64,
+    pub available_minutes: i64,
+    pub prefix: Vec<String>,
+    pub prefix_minutes: i64,
+    pub overflower: String,
+    pub overflow_deadline: DateTime,
+}
+
+/// The deadline plan (stub type, T1b).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeadlinePlan {
+    pub order: Vec<Task>,
+    pub safe: bool,
+    pub wont_fit: Vec<WontFit>,
+}
+
+/// Whole minutes of work left on a task (stub, T1b; T3a).
+pub fn work_minutes(_task: &Task) -> i64 {
+    todo!("deadline T3a")
+}
+
+/// Free time from a moment forward, to local midnight each date (stub, T1b; T3a).
+pub struct Timeline {}
+
+impl Timeline {
+    pub fn build(_cal: &WeekCalendar, _from: DateTime, _until: DateTime) -> Timeline {
+        todo!("deadline T3a")
+    }
+
+    pub fn before(&self, _d: DateTime) -> i64 {
+        todo!("deadline T3a")
+    }
+}
+
+/// `rank_at`'s successor (stub, T1b; T3a).
+pub fn plan_at(_tasks: &[Task], _today: Date, _cal: &WeekCalendar, _moment: Option<DateTime>) -> DeadlinePlan {
+    todo!("deadline T3a")
+}
+
 /// Split into (must do today no matter what, everything recommendable).
 ///
 /// A task is must-do when its slack is zero or negative: starting any later than today means
@@ -638,5 +685,138 @@ mod tests {
         let evening = rank_at(&tasks, D, &cal, Some(at(28, 21, 0)));
         assert_eq!(slugs(&evening)[..2], names(&closing)[..], "the closing group leads, by due time");
         assert_eq!(rest(evening), rest(rank(&tasks, D, &cal)));
+    }
+
+    // ---- Deadline ordering: the timeline and step 0 (DP1-DP10). ----
+
+    /// `at` with seconds, for the minute-truncation tests.
+    fn at_s(day: i8, hour: i8, minute: i8, second: i8) -> DateTime {
+        DateTime::constant(2026, 8, day, hour, minute, second, 0)
+    }
+
+    fn assert_first(tasks: &[Task], slug: &str) {
+        assert_eq!(slugs(&rank(tasks, D, &week()))[0], slug, "setup: {slug} must lead under rank");
+    }
+
+    /// A 3h overdue lab and a 1h task due tonight; the lab leads under `rank`.
+    fn lab_and_homework() -> Vec<Task> {
+        vec![task("lab", Some(at(26, 23, 59)), 3.0, 3), task("hw", Some(at(28, 23, 59)), 1.0, 3)]
+    }
+
+    /// DP10's pair: the 23:59 task leads under `rank`, the 21:00 one must go first.
+    fn late_big_and_early_small() -> Vec<Task> {
+        vec![task("big-2359", Some(at(28, 23, 59)), 2.0, 4), task("small-2100", Some(at(28, 21, 0)), 0.5, 2)]
+    }
+
+    #[test]
+    fn fit_margin_is_thirty_minutes() {
+        assert_eq!(
+            FIT_MARGIN_MINUTES, 30,
+            "30 minutes is Quinn's Q4 ruling, 2026-10-24; changing it needs a new ruling"
+        );
+    }
+
+    #[test]
+    fn work_is_whole_minutes() {
+        assert_eq!(work_minutes(&task("a", None, 2.79, 3)), 167);
+        assert_eq!(work_minutes(&task("b", None, 0.5, 3)), 30);
+        let mut progressed = task("c", None, 3.1, 3);
+        progressed.progress = 10;
+        assert_eq!(work_minutes(&progressed), 167);
+    }
+
+    #[test]
+    fn the_timeline_runs_to_midnight_and_cuts_at_the_moment() {
+        let cal = week();
+        let until = at(28, 23, 59);
+        assert_eq!(Timeline::build(&cal, at(28, 21, 0), until).before(until), 179);
+        assert_eq!(Timeline::build(&cal, at(28, 15, 0), until).before(until), 539);
+        assert_eq!(Timeline::build(&cal, at(28, 9, 0), until).before(until), 794);
+    }
+
+    #[test]
+    fn the_cut_comes_after_the_block_filter() {
+        // 08:00-12:00 is a real block; cut at 11:30 it is 30 minutes, under the 45-minute minimum.
+        let timeline = Timeline::build(&week(), at(28, 11, 30), at(28, 23, 59));
+        assert_eq!(timeline.before(at(28, 12, 0)), 30);
+    }
+
+    #[test]
+    fn available_time_never_shrinks_as_the_deadline_moves_later() {
+        let timeline = Timeline::build(&week(), at(27, 19, 0), at(28, 23, 59));
+        assert_eq!(timeline.before(at(28, 7, 59)), 300);
+        assert_eq!(timeline.before(at(28, 12, 0)), 540);
+    }
+
+    #[test]
+    fn the_moment_is_truncated_to_the_minute() {
+        let tasks = vec![task("due-2100", Some(at(28, 21, 0)), 1.0, 3), task("big", Some(at(28, 23, 59)), 2.5, 3)];
+        let cal = week();
+        assert_first(&tasks, "due-2100");
+        assert_eq!(
+            plan_at(&tasks, D, &cal, Some(at_s(28, 21, 0, 45))),
+            plan_at(&tasks, D, &cal, Some(at(28, 21, 0)))
+        );
+        // Due at 21:00 and seen at 21:00:30 is overdue, not on time: it goes after the dated big task.
+        let plan = plan_at(&tasks, D, &cal, Some(at_s(28, 21, 0, 30)));
+        assert!(!plan.safe);
+        assert_eq!(slugs(&plan.order), names(&["big", "due-2100"]));
+    }
+
+    #[test]
+    fn no_moment_or_another_day_is_rank() {
+        let tasks = late_big_and_early_small();
+        let cal = week();
+        assert_first(&tasks, "big-2359");
+        for moment in [None, Some(at(29, 19, 30)), Some(at(27, 19, 30))] {
+            let plan = plan_at(&tasks, D, &cal, moment);
+            assert_eq!(plan.order, rank(&tasks, D, &cal), "moment {moment:?}");
+            assert!(plan.safe, "moment {moment:?}");
+            assert!(plan.wont_fit.is_empty(), "moment {moment:?}");
+        }
+    }
+
+    #[test]
+    fn a_safe_pressure_order_is_kept_with_dated_items() {
+        let tasks = vec![task("essay", Some(at(28, 23, 59)), 11.0, 5), task("reflection", Some(at(27, 23, 59)), 0.5, 1)];
+        let cal = week();
+        assert_first(&tasks, "essay");
+        let plan = plan_at(&tasks, D, &cal, Some(at(28, 9, 0)));
+        assert_eq!(plan.order, rank(&tasks, D, &cal));
+        assert!(plan.safe);
+    }
+
+    #[test]
+    fn under_thirty_minutes_spare_is_unsafe() {
+        let tasks = lab_and_homework();
+        let cal = week();
+        assert_first(&tasks, "lab");
+        assert!(plan_at(&tasks, D, &cal, Some(at(28, 19, 29))).safe, "240 minutes in 270, 30 spare");
+        assert!(!plan_at(&tasks, D, &cal, Some(at(28, 19, 30))).safe, "240 minutes in 269, 29 spare");
+    }
+
+    #[test]
+    fn unsafe_dated_items_go_in_deadline_order() {
+        let tasks = late_big_and_early_small();
+        let cal = week();
+        assert_first(&tasks, "big-2359");
+        let plan = plan_at(&tasks, D, &cal, Some(at(28, 19, 30)));
+        assert!(!plan.safe);
+        assert_eq!(slugs(&plan.order), names(&["small-2100", "big-2359"]));
+        assert!(plan.wont_fit.is_empty());
+
+        // Same due time: ties keep the pressure order.
+        let tied = vec![
+            task("c-2359", Some(at(28, 23, 59)), 0.5, 5),
+            task("qa-2100", Some(at(28, 21, 0)), 0.6, 3),
+            task("qb-2100", Some(at(28, 21, 0)), 0.6, 2),
+        ];
+        assert_first(&tied, "c-2359");
+        let ranked = slugs(&rank(&tied, D, &cal));
+        let mut expected: Vec<String> = ranked.iter().filter(|s| s.ends_with("2100")).cloned().collect();
+        expected.push("c-2359".into());
+        let plan = plan_at(&tied, D, &cal, Some(at(28, 19, 30)));
+        assert!(!plan.safe);
+        assert_eq!(slugs(&plan.order), expected);
     }
 }
