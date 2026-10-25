@@ -1144,6 +1144,24 @@ pub fn store_credentials(vault: String, source: String, user: String, secret: St
     }
 }
 
+/// F5c's seam (plan §14.57.1): hands `inner` the console's vault as the string today's step-8 functions take.
+/// The page never carries a path; the two wrappers below read `cs.vault` and nothing else.
+pub fn on_console_vault(vault: &Path, inner: impl FnOnce(String) -> Value) -> Value { inner(vault.to_string_lossy().into_owned()) }
+
+/// Step 8's lookup on the console (plan §14.57.1): `discover_coursework` over the vault `ConsoleState`
+/// holds. The page sends the two source flags and never a path. The shell keeps the path-taking original.
+#[tauri::command(async)]
+pub fn onboarding_discover_coursework(cs: tauri::State<'_, crate::state::ConsoleState>, zybooks: bool, vhl: bool) -> Value {
+    on_console_vault(&cs.vault, |v| discover_coursework(v, zybooks, vhl))
+}
+
+/// Step 8's sign-in on the console: `store_credentials` over the vault `ConsoleState` holds, with the same
+/// guarantee (the secret is never returned, logged or echoed). The page sends no path.
+#[tauri::command(async)]
+pub fn onboarding_store_credentials(cs: tauri::State<'_, crate::state::ConsoleState>, source: String, user: String, secret: String) -> Value {
+    on_console_vault(&cs.vault, |v| store_credentials(v, source, user, secret))
+}
+
 /// R-P4a-23. Panel 5's write is keyed to `<parent>\<name>` **as it stood then**, and the wizard
 /// invites the user to go back and change it — the refused-Finish panel says "pick another name" in
 /// so many words. Coming forward again `storeCredentials` finds the fields blanked and writes
