@@ -244,6 +244,8 @@ const ALLOWED: &[&str] = &[
     "account_status",
     // F11c review I-1: the console's own edit of a confirmed commitment (its kind and its level).
     "set_fields",
+    // F11c1 (section 14.57.1): step 8's two console wrappers, which read the vault from ConsoleState.
+    "onboarding_discover_coursework", "onboarding_store_credentials",
 ];
 
 #[test]
@@ -1154,4 +1156,61 @@ fn the_welcome_copy_carries_no_minutes_figure() {
         }
     }
     assert!(!text.contains("minute"), "no minutes figure in the welcome copy: {text}");
+}
+
+// ---- F11c1: step 8's console wrappers (no vault) and step 10's confirmed answer (section 14.57.1-.2) ----
+
+/// The text of every `invoke("name", ...)` call to `name` in `body`, parentheses balanced.
+fn invoke_calls<'a>(body: &'a str, name: &str) -> Vec<&'a str> {
+    let sk = skeleton(body);
+    let mut out = Vec::new();
+    for (at, _) in body.match_indices(&format!("invoke(\"{name}\"")) {
+        let mut depth = 0i32;
+        for (k, b) in sk[at..].bytes().enumerate() {
+            if b == b'(' { depth += 1; }
+            if b == b')' { depth -= 1; if depth == 0 { out.push(&body[at..at + k + 1]); break; } }
+        }
+    }
+    out
+}
+
+#[test]
+fn step_eight_calls_the_console_wrappers_and_never_the_path_taking_commands() {
+    let names = invoked(&code(&read("onboarding.js")));
+    for want in ["onboarding_discover_coursework", "onboarding_store_credentials"] {
+        assert!(names.iter().any(|n| n == want), "step 8 must call {want}");
+    }
+    for old in ["discover_coursework", "store_credentials"] {
+        assert!(!names.iter().any(|n| n == old), "onboarding.js must not call the path-taking {old}");
+    }
+}
+
+#[test]
+fn no_step_eight_call_passes_a_vault() {
+    let c = code(&read("onboarding.js"));
+    for (f, cmd) in [("storeLogins", "onboarding_store_credentials"), ("discoverSite", "onboarding_discover_coursework")] {
+        let body = function(&c, f);
+        let calls = invoke_calls(body, cmd);
+        assert_eq!(calls.len(), 1, "{f} must call {cmd} exactly once");
+        assert!(!calls[0].contains("vault"), "{f} sends no vault, the console reads it from its own state: {}", calls[0]);
+        let others = body.matches("invoke(").count() - 1;
+        assert_eq!(others, 0, "{f} makes no other call");
+    }
+}
+
+#[test]
+fn step_tens_confirmed_answer_follows_a_successful_confirm_and_precedes_the_next_screen() {
+    let c = code(&read("onboarding.js"));
+    let flat = function(&c, "confirm10").split_whitespace().collect::<Vec<_>>().join(" ");
+    let answer = "invoke(\"onboarding_answer\", { step: 10, answer: { confirmed: true } })";
+    assert_eq!(flat.matches(answer).count(), 1, "step 10 sends (10, {{confirmed: true}}) once: {flat}");
+    let confirm = flat.find("invoke(\"commitments_confirm\"").expect("confirm10 calls commitments_confirm");
+    let guard = flat[confirm..].find("env.ok !== true").map(|i| confirm + i).expect("the refusal guard");
+    let guard_end = guard + flat[guard..].find("return;").expect("the guard returns");
+    let sent = flat.find(answer).unwrap();
+    let show = flat.find("OB.show(11)").expect("confirm10 shows step 11");
+    assert!(confirm < guard_end && guard_end < sent, "the answer is sent only after the confirm succeeded (past the refusal's return)");
+    assert!(sent < show, "the answer is sent before OB.show(11)");
+    let catch = flat.find(".catch(").expect("a catch arm");
+    assert!(sent < catch, "the answer is not sent from the failure arm");
 }
