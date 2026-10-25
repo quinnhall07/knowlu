@@ -4523,4 +4523,88 @@ mod evening_tests {
         assert_eq!(day.spill_blocks, night.spill_blocks);
         let _ = std::fs::remove_dir_all(&vault);
     }
+
+    /// The `must_do` groups at `m` as (label, row slugs) pairs, in page order.
+    fn groups_at(vault: &Path, m: DateTime) -> Vec<(String, Vec<String>)> {
+        let s = build_state(vault, View::Today, TODAY, &zoned_at(m), None);
+        s.must_do
+            .groups
+            .iter()
+            .map(|g| (g.label.clone(), g.rows.iter().map(|r| r.slug.clone()).collect()))
+            .collect()
+    }
+
+    fn pair(label: &str, slugs: &[&str]) -> (String, Vec<String>) {
+        (label.to_string(), slugs.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// DS1 (deadline-ordering T1e): a group is a consecutive run of one label in rank order, so a
+    /// label may recur when another sits between its rows.
+    #[test]
+    fn must_do_groups_are_consecutive_runs_in_rank_order() {
+        let vault = scratch_s1("ds1");
+        put_task(&vault, "ds-probe", "task_d50000001", 1.0, "2026-08-28T23:59");
+        assert_eq!(
+            groups_at(&vault, at(21, 0)),
+            [
+                pair("Overdue", &["task-erste-reflexion"]),
+                pair("Due today", &["ds-probe"]),
+                pair("Overdue", &["cs-100-hw-01"]),
+            ],
+            "at 21:00 the short reflection, then tonight's probe, then the homework"
+        );
+        assert_eq!(
+            groups_at(&vault, at(9, 0)),
+            [
+                pair("Overdue", &["cs-100-hw-01", "task-erste-reflexion"]),
+                pair("Due today", &["ds-probe"]),
+            ],
+            "at 09:00 the overdue pair, then the probe"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// DS2: a due time that has passed today reads Overdue, not Due today.
+    #[test]
+    fn a_due_time_passed_today_reads_overdue() {
+        let vault = scratch_s1("ds2");
+        put_task(&vault, "ds-probe", "task_d50000002", 1.0, "2026-08-28T10:00");
+        let label_of = |m: DateTime| {
+            groups_at(&vault, m)
+                .into_iter()
+                .find(|(_, rows)| rows.iter().any(|s| s == "ds-probe"))
+                .map(|(label, _)| label)
+        };
+        assert_eq!(label_of(at(15, 0)).as_deref(), Some("Overdue"), "10:00 has passed at 15:00");
+        assert_eq!(label_of(at(9, 0)).as_deref(), Some("Due today"), "10:00 is ahead at 09:00");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// DS3: rows inside one run keep rank order; `sort_rows` (start-by) would invert these two.
+    #[test]
+    fn rows_inside_a_run_keep_rank_order() {
+        let vault = scratch_s1("ds3");
+        put_task(&vault, "ds-short", "task_d50000003", 1.0, "2026-08-28T21:30");
+        put_task(&vault, "ds-long", "task_d50000004", 4.5, "2026-08-28T23:59");
+        let today_rows: Vec<String> = groups_at(&vault, at(18, 0))
+            .into_iter()
+            .filter(|(label, _)| label == "Due today")
+            .flat_map(|(_, rows)| rows)
+            .collect();
+        assert_eq!(today_rows, ["ds-short", "ds-long"], "rank order, not start-by order");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// DS4 (guard): the designation and `moved` read pressure order, so the moment does not change
+    /// them.
+    #[test]
+    fn the_designation_and_moved_read_pressure_order() {
+        let vault = scratch_s1("ds4");
+        put_task(&vault, "ds-probe", "task_d50000001", 1.0, "2026-08-28T23:59");
+        let evening = load_at(&vault, pinned_today(), None, Some(at(21, 0)));
+        let plain = load(&vault, pinned_today());
+        assert_eq!(format!("{:?}", evening.takes), format!("{:?}", plain.takes), "takes");
+        assert_eq!(format!("{:?}", evening.moved), format!("{:?}", plain.moved), "moved");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
 }
