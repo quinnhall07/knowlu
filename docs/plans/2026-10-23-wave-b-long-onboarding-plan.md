@@ -6210,7 +6210,8 @@ mentioned, when known", spec §1.3's table), so both are named here.
   - **F8b's `save_preview`** stores the three from the preview's answer beside the buckets. Its
     signature takes the preview's whole answer, not only `by_course`. This amends F8b's brief by
     about 4 lines. F8b has not merged (`save_preview` is still `todo!` at `:464`), so this is a
-    brief change, not a follow-up.
+    brief change, not a follow-up. Every preview **replaces** all three fields, clearing any the
+    new answer lacks, never merging (F2b4 review m-3): a re-run step 3 must not keep old "Found" evidence.
   - About 20 lines. **Test 48**, written first: an answers file without the fields reads and
     re-saves byte-identical; with them, the status carries `week` and `homework_sites`; a removed
     course leaves `homework_sites`; there is no answers file.
