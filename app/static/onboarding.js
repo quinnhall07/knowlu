@@ -211,6 +211,41 @@
     }).join("");
   }
 
+  // ---- the week strip (F11p2) ----------------------------------------------------------------------
+  // Counts only, each one a `step3.due_*` field as given; the page sums nothing. Past days (before
+  // `week.today`) show dimmed with no count. The label follows `week.of` with no date arithmetic.
+  var DAYS = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"]];
+  var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  var STRIP_STEPS = [3, 5, 6, 7, 8];
+  function weekStripModel(status, step) {
+    var w = status && status.week, s3 = status && status.step3;
+    if (STRIP_STEPS.indexOf(Number(step)) === -1 || !w || typeof w !== "object" || !s3 || typeof s3 !== "object") { return null; }
+    var keys = DAYS.map(function (d) { return "due_" + d[0]; }).concat(["due_later"]);
+    if (keys.every(function (k) { return s3[k] === undefined || s3[k] === null; })) { return null; }
+    var parts = String(w.of || "").split("-"), month = MONTHS[Number(parts[1]) - 1], today = Number(w.today) || 0;
+    return {
+      label: month ? "Week of " + month + " " + Number(parts[2]) : "This week",
+      days: DAYS.map(function (d, i) { return { name: d[1], past: i < today, count: i < today ? null : (s3["due_" + d[0]] === undefined ? null : s3["due_" + d[0]]) }; }),
+      later: s3.due_later === undefined ? null : s3.due_later
+    };
+  }
+  function weekStripHtml(status, step) {
+    var m = weekStripModel(status, step);
+    if (!m) { return ""; }
+    var cell = function (name, count, past) {
+      return '<li class="ob-day' + (past ? " ob-past" : "") + '"><span class="ob-dn">' + esc(name) + '</span>' + (count === null ? "" : '<span class="ob-dc">' + esc(String(count)) + '</span>') + '</li>';
+    };
+    return '<div class="ob-week-head"><strong>Your week</strong> <span class="su-dim">' + esc(m.label) + '</span></div><ul class="ob-days">' +
+      m.days.map(function (d) { return cell(d.name, d.count, d.past); }).join("") + cell("Later", m.later, false) + '</ul>';
+  }
+  function renderWeek() {
+    var el = EL("ob-week");
+    if (!el) { return; }
+    var html = weekStripHtml(S.status, S.step);
+    el.innerHTML = html; el.hidden = !html;
+  }
+  OB.weekStripModel = weekStripModel; OB.weekStripHtml = weekStripHtml;
+
   // ---- the frame -----------------------------------------------------------------------------------
   var TITLES = { 2: "Your account", 3: "Your school", 4: "Payment", 5: "School email", 6: "Google: Gmail and Calendar", 7: "Another calendar", 8: "Homework sites", 10: "Your week", 11: "Here's your week" };
   var WHY = {
@@ -242,7 +277,8 @@
       '<div class="su-main ob-main">' + bar +
       '<p class="ob-closing" id="ob-closing" role="status" hidden></p>' +
       '<section class="su-step ob-step" id="ob-pane" aria-labelledby="ob-title"><h1 id="ob-title" tabindex="-1"></h1>' +
-      '<p class="su-why" id="ob-why"></p><div id="ob-ask"></div><div class="ob-proof" id="ob-proof"></div></section></div>';
+      '<p class="su-why" id="ob-why"></p><div id="ob-ask"></div><div class="ob-proof" id="ob-proof"></div></section>' +
+      '<div class="ob-week" id="ob-week" role="region" aria-label="Your week" hidden></div></div>';
   }
 
   // The step's state block, by section 4.1's seven states. A step's own markup comes from its panel.
@@ -271,6 +307,7 @@
     EL("ob-proof").innerHTML = stateHtml(m);
     EL("ob-pane").setAttribute("data-step", String(n));
     EL("ob-stepno").textContent = "Step " + (n > 9 ? n - 1 : n) + " of 10";
+    renderWeek();
   }
   function renderRail() {
     if (!S.mounted) { return; }
@@ -341,7 +378,24 @@
   var discovering = false;
   var SITES = ["zybooks", "vhl"];
   var SKIP_ID = { zybooks: "ob-skip-8-zybooks", vhl: "ob-skip-8-vhl" };
-  var w8 = { status: null, proceeding: false, site: { zybooks: { stage: "login", rows: [], line: "" }, vhl: { stage: "login", rows: [], line: "" } } };
+  var w8 = { status: null, cur: "zybooks", proceeding: false, site: { zybooks: { stage: "login", rows: [], line: "" }, vhl: { stage: "login", rows: [], line: "" } } };
+
+  // Sites with a `homework_sites` entry first, then the rest, zyBooks before VHL (even `unmatched` alone is evidence).
+  function hasEntry(status, site) { var h = status && status.homework_sites; return !!(h && Array.isArray(h[site]) && h[site].length); }
+  function siteOrder(status) {
+    return SITES.filter(function (s) { return hasEntry(status, s); }).concat(SITES.filter(function (s) { return !hasEntry(status, s); }));
+  }
+  // The word `unmatched` is the engine's, never the student's: it is left out of the codes.
+  // One code alone; two "A and B"; three or more "A, B and C" (no serial comma).
+  function joinCodes(codes) {
+    return codes.length < 2 ? codes.join("") : codes.slice(0, -1).join(", ") + " and " + codes[codes.length - 1];
+  }
+  function foundLine(status, site) {
+    if (!hasEntry(status, site)) { return ""; }
+    var codes = status.homework_sites[site].filter(function (c) { return String(c).toLowerCase() !== "unmatched"; });
+    return "Found at your school: " + (codes.length ? "assignments in " + joinCodes(codes) : "some assignments at your school") + " link to " + SITE_NAMES[site] + ".";
+  }
+  OB.siteOrder = siteOrder; OB.foundLine = foundLine;
 
   function clearCredentialFields(site) {
     var u = site === "vhl" ? EL("ob-vhl-username") : EL("ob-zybooks-username");
@@ -349,12 +403,13 @@
     if (u) { u.value = ""; }
     if (p) { p.value = ""; }
   }
+  // The frame closes after the stored-only line; the skip consequence and the buttons sit outside it.
   function loginHtml(site) {
     var z = site === "zybooks", name = SITE_NAMES[site];
     var user = z ? '<input id="ob-zybooks-username" type="text" autocomplete="off" spellcheck="false">' : '<input id="ob-vhl-username" type="text" autocomplete="off" spellcheck="false">';
     var pass = z ? '<input id="ob-zybooks-password" type="password" autocomplete="off">' : '<input id="ob-vhl-password" type="password" autocomplete="off">';
-    return '<div class="su-field"><label>Email or username</label>' + user + '</div><div class="su-field"><label>Password</label>' + pass + '</div>' +
-      '<p class="su-privacy">Stored only on this computer, in Windows Credential Manager, and used only to read ' + esc(name) + '.</p>' +
+    return '<div class="su-field"><label for="ob-' + site + '-username">Email or username</label>' + user + '</div><div class="su-field"><label for="ob-' + site + '-password">Password</label>' + pass + '</div>' +
+      '<p class="su-privacy">Stored only on this computer, in Windows Credential Manager, and used only to read ' + esc(name) + '.</p></div>' +
       '<p class="su-small">If you skip ' + esc(name) + ", its due dates are missing unless your school's calendar feed carries them.</p>" +
       '<div class="su-actions"><button class="b pri y su-btn" type="button" data-act8="signin" data-site="' + site + '"' + (discovering ? " disabled" : "") + '>Sign in to ' + esc(name) + '</button>' +
       '<button class="b su-btn" type="button" id="' + SKIP_ID[site] + '" data-act8="skip" data-site="' + site + '"' + (discovering ? " disabled" : "") + '>Skip ' + esc(name) + '</button></div>';
@@ -372,15 +427,17 @@
   }
   function siteHtml(site) {
     var f = w8.site[site], name = SITE_NAMES[site], note = '<p class="ob-state ob-failed" role="alert" id="ob-8-note-' + site + '"' + (f.line ? "" : " hidden") + '>' + esc(f.line) + '</p>';
-    if (f.stage === "skipped") { return '<h2 class="ob-h2">' + esc(name) + '</h2><p class="ob-state" data-state="skipped">' + esc(costWords(HOMEWORK_COST + site)) + '</p>'; }
-    if (f.stage === "done") { return '<h2 class="ob-h2">' + esc(name) + '</h2><p class="ob-state">' + esc(name) + ' is set up.</p>'; }
-    if (f.stage === "storing" || f.stage === "reading") { return '<h2 class="ob-h2">' + esc(name) + '</h2><p class="ob-state" data-state="reading">Reading ' + esc(name) + '… This can take a minute.</p>'; }
+    if (f.stage === "skipped") { return '<h2 class="ob-h2" tabindex="-1">' + esc(name) + '</h2><p class="ob-state" data-state="skipped">' + esc(costWords(HOMEWORK_COST + site)) + '</p>'; }
+    if (f.stage === "done") { return '<h2 class="ob-h2" tabindex="-1">' + esc(name) + '</h2><p class="ob-state">' + esc(name) + ' is set up.</p>'; }
+    if (f.stage === "storing" || f.stage === "reading") { return '<h2 class="ob-h2" tabindex="-1">' + esc(name) + '</h2><p class="ob-state" data-state="reading">Reading ' + esc(name) + '… This can take a minute.</p>'; }
     if (f.stage === "rows") {
-      return '<h2 class="ob-h2">' + esc(name) + '</h2><p class="su-small">Choose the class each one belongs to. Leave one blank and Knowlu asks again later.</p>' + note +
+      return '<h2 class="ob-h2" tabindex="-1">' + esc(name) + '</h2><p class="su-small">Choose the class each one belongs to. Leave one blank and Knowlu asks again later.</p>' + note +
         f.rows.map(function (x) { return rowHtml(site, x); }).join("") +
         '<div class="su-actions"><button class="b su-btn" type="button" data-act8="done" data-site="' + site + '">That\'s all for ' + esc(name) + '</button></div>';
     }
-    return '<h2 class="ob-h2">' + esc(name) + ' sign-in</h2>' + note + loginHtml(site);
+    var found = foundLine(w8.status, site);
+    return '<div class="ob-form"><p class="ob-form-tag">Knowlu\'s form</p><h2 class="ob-h2" tabindex="-1">' + esc(name) + ' sign-in</h2>' +
+      (found ? '<p class="ob-found">' + esc(found) + '</p>' : "") + note + loginHtml(site);
   }
   function say8(site, text) {
     var el = EL("ob-8-note-" + site);
@@ -391,6 +448,27 @@
     if (host) { host.innerHTML = siteHtml(site); }
   }
   function settled8(site) { return w8.site[site].stage === "done" || w8.site[site].stage === "skipped"; }
+  // One site's form shows at a time; the other stays a "Show {site}" link away.
+  function paintView8() {
+    SITES.forEach(function (s) { var h = EL("ob-8-" + s); if (h) { h.hidden = s !== w8.cur; } });
+    var host = EL("ob-8-show");
+    if (host) {
+      host.innerHTML = SITES.filter(function (s) { return s !== w8.cur; }).map(function (s) {
+        return '<button class="su-link" type="button" data-act8="show" data-site="' + s + '">Show ' + esc(SITE_NAMES[s]) + '</button>';
+      }).join(" ");
+    }
+  }
+  // A student action moved the form: the pressed button is gone, so the current site's heading takes focus.
+  function focusSite8() {
+    var host = EL("ob-8-" + w8.cur), h = host && host.querySelector("h2");
+    if (h) { h.focus(); }
+  }
+  function advance8(site) {
+    if (w8.cur !== site) { return; }
+    var next = siteOrder(w8.status).filter(function (s) { return !settled8(s); })[0];
+    if (next) { w8.cur = next; }
+    paintView8(); focusSite8();
+  }
   function paintNext() {
     var next = EL("ob-next-8");
     if (next) { next.disabled = discovering || !SITES.every(settled8) || w8.proceeding; }
@@ -445,7 +523,7 @@
     invoke("onboarding_skip", { step: 8, source: site }).then(function (a) {
       var f = w8.site[site];
       if (a && a.ok === false) { f.line = a.error || "Knowlu couldn't skip that. Try again."; paintSite(site); return; }
-      f.stage = "skipped"; f.line = ""; paintSite(site); paintNext();
+      f.stage = "skipped"; f.line = ""; paintSite(site); paintNext(); advance8(site);
       if (SITES.every(settled8)) { leaveStep8(); }
     }).catch(function () { w8.site[site].line = "Knowlu couldn't skip that. Try again."; paintSite(site); });
   }
@@ -466,7 +544,8 @@
     var act = b.getAttribute("data-act8"), site = b.getAttribute("data-site");
     if (act === "signin") { storeLogins(site); }
     else if (act === "skip") { skipSite(site); }
-    else if (act === "done") { w8.site[site].stage = "done"; paintSite(site); paintNext(); }
+    else if (act === "done") { w8.site[site].stage = "done"; paintSite(site); paintNext(); advance8(site); }
+    else if (act === "show") { w8.cur = site; paintView8(); focusSite8(); }
     else if (act === "next") { leaveStep8(); }
     else if (act === "confirm" || act === "ignore") { answerRow(b); }
   }
@@ -476,7 +555,13 @@
       var skipped = ((status && status.skips) || []).some(function (k) { return k.step === 8 && k.source === s; });
       if (skipped) { w8.site[s].stage = "skipped"; }
     });
-    return { ask: '<div id="ob-step-8"><div class="ob-site" id="ob-8-zybooks">' + siteHtml("zybooks") + '</div><div class="ob-site" id="ob-8-vhl">' + siteHtml("vhl") + '</div>' +
+    var order = siteOrder(status);
+    w8.cur = order.filter(function (s) { return !settled8(s); })[0] || order[0];
+    return { ask: '<div id="ob-step-8">' + order.map(function (s) {
+      return '<div class="ob-site" id="ob-8-' + s + '"' + (s === w8.cur ? "" : " hidden") + '>' + siteHtml(s) + '</div>';
+    }).join("") + '<p class="ob-show8" id="ob-8-show">' + SITES.filter(function (s) { return s !== w8.cur; }).map(function (s) {
+      return '<button class="su-link" type="button" data-act8="show" data-site="' + s + '">Show ' + esc(SITE_NAMES[s]) + '</button>';
+    }).join(" ") + '</p>' +
       '<p class="ob-state ob-failed" id="ob-8-line" role="alert" hidden></p>' +
       '<div class="su-actions"><button class="b pri y su-btn" type="button" id="ob-next-8" data-act8="next"' + (discovering || !SITES.every(settled8) ? " disabled" : "") + '>Next</button></div></div>' };
   }
@@ -642,7 +727,7 @@
       if (!S.step) { S.step = Number(S.status.step) || 3; renderPane(); }
       var p = panels[S.step];
       if (p && p.onStatus) { p.onStatus(S.status); }
-      renderRail();
+      renderWeek(); renderRail();
     });
   }
   function poll() {
