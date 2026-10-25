@@ -26,5 +26,6 @@ and `{name}-{dark|light}-prototype.png`.
 - The label reads "Week of October 19" from `week.of`, in the strip's header.
 - Step 8 shows one site's form; the other is a "Show {site}" link under the frame. The prototype's
   "Knowlu's form" tag is built as a small caps label inside the frame.
+- The frame ends at the stored-only line; the "If you skip ..." line and the Sign in and Skip buttons sit outside it, as in the prototype. Two found codes read "CS 201 and BIO 101".
 - "unmatched" never appears; the unmatched-only site gets "some assignments at your school".
 - The prototype's syllabi sub-step and its rail sub-rows are not built.

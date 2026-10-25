@@ -1391,3 +1391,43 @@ fn step_eight_sits_in_knowlus_own_frame_with_the_stored_only_here_line() {
     let css = code(&read("onboarding.css"));
     assert!(css.contains("ob-form"), "the frame has a style");
 }
+
+#[test]
+fn the_found_line_joins_codes_with_and_and_no_serial_comma() {
+    helper("foundLine");
+    let line = |m: &str| node(&format!("h.foundLine({}, \"zybooks\")", sites(m))).as_str().unwrap_or("?").to_string();
+    assert_eq!(line(r#"{zybooks: ["CS 201"]}"#), "Found at your school: assignments in CS 201 link to zyBooks.");
+    assert_eq!(line(r#"{zybooks: ["CS 201", "BIO 101"]}"#), "Found at your school: assignments in CS 201 and BIO 101 link to zyBooks.");
+    assert_eq!(line(r#"{zybooks: ["CS 201", "BIO 101", "MAT 150"]}"#), "Found at your school: assignments in CS 201, BIO 101 and MAT 150 link to zyBooks.");
+}
+
+#[test]
+fn focus_follows_show_and_advance_onto_the_current_sites_heading() {
+    let c = code(&read("onboarding.js"));
+    let site = function(&c, "siteHtml");
+    assert_eq!(site.matches("<h2 class=\"ob-h2\" tabindex=\"-1\">").count(), 5, "every stage's site heading takes focus: {site}");
+    assert!(!site.contains("<h2 class=\"ob-h2\">"), "no site heading without tabindex");
+    assert!(function(&c, "focusSite8").contains(".focus()"), "the heading is focused");
+    assert!(function(&c, "advance8").contains("focusSite8()"), "Skip, Done and advance focus it");
+    assert!(function(&c, "onClick8").contains("focusSite8()"), "Show focuses it");
+    assert!(!function(&c, "paintView8").contains("focus"), "a repaint alone moves no focus");
+}
+
+#[test]
+fn the_week_strip_is_a_named_region_and_the_login_labels_name_their_inputs() {
+    let c = code(&read("onboarding.js"));
+    assert!(c.contains("role=\"region\" aria-label=\"Your week\""), "the strip is a named region");
+    let login = function(&c, "loginHtml");
+    for s in ["username", "password"] {
+        assert!(login.contains(&format!("for=\"ob-' + site + '-{s}\"")), "label for the {s} input: {login}");
+    }
+}
+
+#[test]
+fn the_form_frame_closes_after_the_stored_only_line() {
+    let c = code(&read("onboarding.js"));
+    let login = function(&c, "loginHtml");
+    let (privacy, close, skip, btn) = (login.find("Stored only on this computer").unwrap(), login.find("</p></div>").expect("frame closes"), login.find("If you skip").unwrap(), login.find("su-actions").unwrap());
+    assert!(privacy < close && close < skip && skip < btn, "frame ends after the privacy line, before the consequence and the buttons");
+    assert!(!function(&c, "siteHtml").contains("loginHtml(site) + '</div>'"), "siteHtml adds no closing div after the buttons");
+}
