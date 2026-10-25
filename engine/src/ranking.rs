@@ -191,8 +191,10 @@ fn deadline(task: &Task, m: DateTime) -> Option<DateTime> {
 /// `rank_at`'s successor. With no moment, or a moment not on `today`, this is `rank`. Otherwise Must
 /// do (non-override, slack <= 0) is checked in pressure order against the timeline (step 0); when
 /// every dated item keeps `FIT_MARGIN_MINUTES` spare the order is `rank`'s, else dated items go in
-/// deadline order (step 1), then overdue ones in pressure order, refilled into Must do's positions.
-/// The walk (step 2) and the overdue merge (step 3) come later. Deterministic, no model.
+/// deadline order (step 1), the fit walk drops what cannot fit (step 2), and the order is the kept
+/// items, then overdue ones in pressure order, then the dropped (`wont_fit`, by deadline and scored
+/// position), refilled into Must do's positions. The overdue merge (step 3) comes later.
+/// Deterministic, no model.
 pub fn plan_at(tasks: &[Task], today: Date, cal: &WeekCalendar, moment: Option<DateTime>) -> DeadlinePlan {
     let Some(m) = moment.filter(|m| m.date() == today) else {
         return DeadlinePlan { order: rank(tasks, today, cal), safe: true, wont_fit: Vec::new() };
@@ -214,16 +216,52 @@ pub fn plan_at(tasks: &[Task], today: Date, cal: &WeekCalendar, moment: Option<D
         total += work_minutes(&result[i]);
         deadline(&result[i], m).is_none_or(|d| total <= timeline.before(d) - FIT_MARGIN_MINUTES)
     });
+    let mut wont_fit = Vec::new();
     if !safe {
         let mut dated: Vec<(DateTime, usize)> =
             positions.iter().filter_map(|&i| deadline(&result[i], m).map(|d| (d, i))).collect();
         dated.sort();
+        // Step 2, the walk (spec §2.6). Each record is made at the removal, from what is kept then.
+        let mut kept: Vec<(DateTime, usize)> = Vec::new();
+        let mut removed: Vec<(DateTime, usize, WontFit)> = Vec::new();
+        let mut t = 0;
+        for &(d, i) in &dated {
+            kept.push((d, i));
+            t += work_minutes(&result[i]);
+            if t <= timeline.before(d) {
+                continue;
+            }
+            let pos = (0..kept.len())
+                .max_by_key(|&p| (work_minutes(&result[kept[p].1]), kept[p].0, kept[p].1))
+                .unwrap_or(0);
+            let (rd, ri) = kept.remove(pos);
+            let work = work_minutes(&result[ri]);
+            t -= work;
+            let slugs_kept: Vec<String> = kept.iter().map(|&(_, k)| result[k].slug.clone()).collect();
+            removed.push((rd, ri, WontFit {
+                slug: result[ri].slug.clone(),
+                deadline: rd,
+                work_minutes: work,
+                available_minutes: timeline.before(rd),
+                prefix: slugs_kept,
+                prefix_minutes: t,
+                overflower: result[i].slug.clone(),
+                overflow_deadline: d,
+            }));
+        }
+        removed.sort_by_key(|(rd, ri, _)| (*rd, *ri));
         let overdue = positions.iter().copied().filter(|&i| deadline(&result[i], m).is_none());
-        let refill: Vec<Task> =
-            dated.iter().map(|(_, i)| *i).chain(overdue).map(|i| result[i].clone()).collect();
+        let refill: Vec<Task> = kept
+            .iter()
+            .map(|&(_, i)| i)
+            .chain(overdue)
+            .chain(removed.iter().map(|&(_, i, _)| i))
+            .map(|i| result[i].clone())
+            .collect();
         for (&position, task) in positions.iter().zip(refill) {
             result[position] = task;
         }
+        wont_fit = removed.into_iter().map(|(_, _, w)| w).collect();
     }
     let mut overridden = overridden;
     overridden.sort_by_key(|t| t.rank_override.unwrap_or(0));
@@ -231,7 +269,7 @@ pub fn plan_at(tasks: &[Task], today: Date, cal: &WeekCalendar, moment: Option<D
         let index = (task.rank_override.unwrap_or(1) - 1).max(0).min(result.len() as i64) as usize;
         result.insert(index, task);
     }
-    DeadlinePlan { order: result, safe, wont_fit: Vec::new() }
+    DeadlinePlan { order: result, safe, wont_fit }
 }
 
 /// Split into (must do today no matter what, everything recommendable).
