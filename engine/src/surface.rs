@@ -567,7 +567,7 @@ pub fn meter(l: &Loaded, today: Date) -> Meter {
             id: note_id(l, &t.slug),
             title: t.title.clone(),
             hours: round1(t.remaining_hours()),
-            deadline: Some(w.deadline.strftime("%Y-%m-%dT%H:%M").to_string()),
+            deadline: Some(spill_deadline(l, &t.slug, w.deadline)),
         })
         .collect();
     for t in must.iter().filter(|t| !wont.iter().any(|(w, _)| w.slug == t.slug)) {
@@ -588,6 +588,13 @@ pub fn meter(l: &Loaded, today: Date) -> Meter {
         capacity_text: cap.text,
         give_text,
     }
+}
+
+/// A spill item's deadline: `YYYY-MM-DDTHH:MM`, or the date alone when the note's `due` gave no
+/// time (spec §7: never print an 11:59 pm the source did not give).
+fn spill_deadline(l: &Loaded, slug: &str, deadline: DateTime) -> String {
+    let timed = meta_text(l.metas.get(slug), "due").is_none_or(|d| d.contains(':'));
+    deadline.strftime(if timed { "%Y-%m-%dT%H:%M" } else { "%Y-%m-%d" }).to_string()
 }
 
 /// A note has no real time estimate yet: `effort_confidence: unset`, or no `effort_hours` key
@@ -622,11 +629,16 @@ fn give_text(l: &Loaded, must: &[Task], wont: &[(&Task, &crate::ranking::WontFit
     slugs.sort_unstable();
     slugs.dedup();
     let n = slugs.iter().filter(|s| is_placeholder(l, s)).count();
+    let pinned: Vec<&str> = must.iter().filter(|t| t.rank_override.is_some()).map(|t| t.title.as_str()).collect();
     if n > 0 {
         let (noun, verb) = if n == 1 { ("item", "has") } else { ("items", "have") };
-        text.push_str(&format!(" This may not all fit: {n} {noun} {verb} no time estimate yet."));
-    } else if wont.len() == 1 {
-        let pinned: Vec<&str> = must.iter().filter(|t| t.rank_override.is_some()).map(|t| t.title.as_str()).collect();
+        text.push_str(&format!(" This may not all fit: {n} {noun} {verb} no time estimate yet"));
+        if !pinned.is_empty() {
+            text.push_str(&format!(", and {}, which you pinned, isn't counted", join_titles(&pinned)));
+        }
+        text.push('.');
+    } else if wont.len() == 1 || !pinned.is_empty() {
+        // The assurance is for a single named item, or whenever a pin has to be named (Q8).
         text.push_str(" Everything else fits by its deadline");
         if !pinned.is_empty() {
             text.push_str(&format!(", not counting {}, which you pinned", join_titles(&pinned)));
@@ -4809,6 +4821,52 @@ mod evening_tests {
             meter_at(&vault, at(21, 0)).give_text.as_deref(),
             Some("If something has to give: B and C (4.5h)."),
         );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// DS12 (T4b review I-1, Quinn's wording): several won't-fit items plus a pinned Must do item
+    /// name the pin after the assurance.
+    #[test]
+    fn the_meter_line_names_a_pin_with_several_items() {
+        let vault = probe_vault("ds12c");
+        put_probe(&vault, "ds-k", "K", Some(1.0), "low", DUE, 3, "");
+        put_probe(&vault, "ds-b", "B", Some(2.0), "low", "2026-08-28T22:30", 3, "");
+        put_probe(&vault, "ds-c", "C", Some(2.5), "low", "2026-08-28T23:30", 3, "");
+        put_probe(&vault, "ds-d", "D", Some(0.5), "low", "2026-08-26T23:59", 3, "");
+        put_probe(&vault, "ds-pin", "Lab Pin", Some(0.5), "low", DUE, 2, "rank_override: 1\n");
+        assert_eq!(wont_slugs(&vault, at(21, 0)), ["ds-b", "ds-c"], "setup: the pin leaves DP21's walk alone");
+        assert_eq!(
+            meter_at(&vault, at(21, 0)).give_text.as_deref(),
+            Some("If something has to give: B and C (4.5h). Everything else fits by its deadline, not counting Lab Pin, which you pinned."),
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// DS12 (T4b review I-1): a placeholder in play plus a pin; the pin is named in the same line.
+    #[test]
+    fn the_meter_line_names_a_pin_with_a_placeholder() {
+        let vault = probe_vault("ds12d");
+        put_xyz(&vault, "unset", "", "low");
+        put_probe(&vault, "ds-pin", "Lab Pin", Some(0.5), "low", DUE, 2, "rank_override: 1\n");
+        assert_eq!(wont_slugs(&vault, at(21, 0)), ["ds-y"], "setup: the pin leaves the walk alone");
+        assert_eq!(
+            meter_at(&vault, at(21, 0)).give_text.as_deref(),
+            Some("If something has to give: Y (2.5h). This may not all fit: 1 item has no time estimate yet, and Lab Pin, which you pinned, isn't counted."),
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// DS5 (T4b review I-2): a `due` with no time part gives a date-only spill deadline.
+    #[test]
+    fn a_bare_date_spill_deadline_has_no_time() {
+        let vault = probe_vault("ds5b");
+        put_probe(&vault, "ds-x", "X", Some(1.0), "low", "2026-08-28", 5, "");
+        put_probe(&vault, "ds-y", "Y", Some(2.5), "low", "2026-08-28", 3, "");
+        put_probe(&vault, "ds-z", "Z", Some(1.5), "low", "2026-08-28", 1, "");
+        assert_eq!(wont_slugs(&vault, at(21, 0)), ["ds-y"], "setup: the walk names Y");
+        let first = meter_at(&vault, at(21, 0)).spill_items.into_iter().next();
+        assert_eq!(first.as_ref().map(|i| i.title.as_str()), Some("Y"));
+        assert_eq!(first.and_then(|i| i.deadline).as_deref(), Some("2026-08-28"));
         let _ = std::fs::remove_dir_all(&vault);
     }
 
