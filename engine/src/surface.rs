@@ -18,7 +18,7 @@ use serde_yaml_ng::Mapping;
 
 use crate::models::{apply_slice_default, load_task_notes, Task};
 use crate::planning::{load_planning, PlanningConfig};
-use crate::ranking::{designate_today_explained, partition_must_do, rank_at, Take};
+use crate::ranking::{designate_today_explained, partition_must_do, plan_at, rank, DeadlinePlan, Take};
 use crate::render::{capacity_breakdown, py_float, round2, runway_days, short_date, status_word};
 use crate::scheduling::{add_days, days_between, slack_days, DEFAULT_BUFFER_DAYS};
 use crate::weekcal::WeekCalendar;
@@ -93,6 +93,11 @@ pub struct Loaded {
     pub cal: WeekCalendar,
     pub planning: PlanningConfig,
     pub ranked: Vec<Task>,
+    /// The deadline plan `ranked` is the order of; `plan.order == ranked`.
+    pub plan: DeadlinePlan,
+    /// The civil moment the plan was made at, only when it is on `today` (the day `plan_at` runs
+    /// the formula for); `None` is the plain pressure order and the date-rule groups.
+    pub moment: Option<DateTime>,
     pub takes: Vec<Take>,
     /// §6.4's "what moved": today's plan against the day's first window (or, in the `--window`
     /// preview, against the current window). `None` with no planning-day note, and whenever the
@@ -221,8 +226,9 @@ pub fn load(vault: &Path, today: Date) -> Loaded {
     load_with(vault, today, None)
 }
 
-/// [`load`] at a moment: the evening step's input (evening plan T4). `moment` is the civil
-/// wall-clock the page displays; `None` ranks as `load` always has.
+/// [`load`] at a moment: the page's read of the vault under the deadline formula. `moment` is the
+/// civil wall-clock the page displays; `None` (or a moment on another day) ranks as `load` always
+/// has. `ranked` is the plan's order; the designation and `moved` read the pressure order.
 pub fn load_at(vault: &Path, today: Date, preview: Option<&Window>, moment: Option<DateTime>) -> Loaded {
     let planning = load_planning(&vault.join("config").join("planning.yaml"));
     let mut unreadable = Vec::new();
@@ -246,12 +252,15 @@ pub fn load_at(vault: &Path, today: Date, preview: Option<&Window>, moment: Opti
             (current, against)
         }
     };
-    let ranked = rank_at(&tasks, today, &cal, moment);
-    let takes = designate_today_explained(&ranked, today, &cal, Some(&planning));
+    let scored = rank(&tasks, today, &cal);
+    let plan = plan_at(&tasks, today, &cal, moment);
+    let ranked = plan.order.clone();
+    let takes = designate_today_explained(&scored, today, &cal, Some(&planning));
     let moved = against
-        .and_then(|base| crate::commitments::moved(&ranked, today, &cal, &base, Some(&planning)));
+        .and_then(|base| crate::commitments::moved(&scored, today, &cal, &base, Some(&planning)));
     let accepted = accepted_events(vault, &crate::eventledger::load_ledger(vault, None));
-    Loaded { tasks, metas, unreadable, cal, planning, ranked, takes, moved, accepted }
+    let moment = moment.filter(|m| m.date() == today);
+    Loaded { tasks, metas, unreadable, cal, planning, ranked, plan, moment, takes, moved, accepted }
 }
 
 /// A planning window per weekday (`DAY_KEYS` order), as `commitments::parse_window` returns it.
@@ -798,9 +807,10 @@ fn sort_rows(l: &Loaded, paired: Vec<(&Task, Row)>) -> Vec<Row> {
     keyed.into_iter().map(|(_, r)| r).collect()
 }
 
-fn group_label(task: &Task, today: Date) -> String {
+fn group_label(task: &Task, today: Date, moment: Option<DateTime>) -> String {
     match task.due {
         None => "No due date".to_string(),
+        Some(due) if moment.is_some_and(|m| due <= m) => "Overdue".into(),
         Some(due) => {
             let gap = days_between(due.date(), today);
             if gap < 0 {
@@ -818,16 +828,21 @@ fn group_label(task: &Task, today: Date) -> String {
 
 pub fn must_do(vault: &Path, l: &Loaded, today: Date, amendments: &[PendingAmendment]) -> MustDo {
     let (must, _) = partition_must_do(&l.ranked, today, &l.cal);
-    // `must` is already in rank order; group boundaries follow it, rows are re-sorted per group
-    // below. Each group's member list is a single `Vec<(&Task, Row)>`, pushed one pair at a time
-    // from the same `task` this loop is already holding — never two lists built separately and
-    // matched up after the fact.
+    // `must` is already in rank order. With no moment, group boundaries follow first appearance and
+    // rows are re-sorted per group below; with one, a group is a run of consecutive rows with one
+    // label and rows keep rank order (spec §4, Q6). Each group's member list is a single
+    // `Vec<(&Task, Row)>`, pushed one pair at a time from the same `task` this loop is already
+    // holding — never two lists built separately and matched up after the fact.
     let mut labels: Vec<String> = Vec::new();
     let mut members: Vec<Vec<(&Task, Row)>> = Vec::new();
     for task in &must {
-        let label = group_label(task, today);
+        let label = group_label(task, today, l.moment);
         let r = row(l, task, today, amendments);
-        match labels.iter().position(|l| *l == label) {
+        let found = match l.moment {
+            Some(_) => labels.len().checked_sub(1).filter(|&i| labels[i] == label),
+            None => labels.iter().position(|seen| *seen == label),
+        };
+        match found {
             Some(i) => members[i].push((task, r)),
             None => {
                 labels.push(label);
@@ -839,7 +854,10 @@ pub fn must_do(vault: &Path, l: &Loaded, today: Date, amendments: &[PendingAmend
         .into_iter()
         .zip(members)
         .map(|(label, pairs)| {
-            let rows = sort_rows(l, pairs);
+            let rows = match l.moment {
+                Some(_) => pairs.into_iter().map(|(_, r)| r).collect(),
+                None => sort_rows(l, pairs),
+            };
             let hours = nz(round1(rows.iter().map(|r| r.hours).sum()));
             Group { label, count: rows.len() as i64, hours, rows }
         })
