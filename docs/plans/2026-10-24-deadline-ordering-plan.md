@@ -664,6 +664,23 @@ Acceptance: `scripts/ci/eol-check.ps1` clean; no source file in the diff. Size: 
 *(T0's base, citation, clock and retire records, the review rounds and the controller's answers go
 here, dated, newest first.)*
 
+- **2026-10-25, T4c review (FAIL, two Important) and Quinn's rulings (signed).**
+  - **I-1, rounding:** "3.0h left; you have 3.0h" printed for 180 against 179 minutes. Fix: work
+    rounds **up** and available time rounds **down** to the tenth, so the reason never reads as
+    fitting. A test at 179 against 180.
+  - **I-2, the drawer:** `note_detail` loads with no moment, so its row has no `fit_text`/`fit_why`.
+    **Controller ruling:** the console (T5) shows the row line and its reason from the list row's
+    own fields, in the row and in its drawer, and never from `note_detail`. T5's brief carries it, so
+    the drawer cannot disagree with the row (R22). No engine change.
+  - **Quinn, "can't fit alone":** when an item's own work is more than the time before its own
+    deadline (`work_minutes > available_minutes`), its row reads "Won't fit …" even if a placeholder
+    is in its prefix, because no estimate could make it fit. Its own placeholder still reads
+    "May not fit … · no time estimate yet". A test.
+  - **Quinn, the stored 1.0h:** kept. A placeholder's reason prints "1.0h left; …" as the spec reads.
+  - **Tests for T4c's rulings:** a bare date with a placeholder in its prefix reads "May not fit by
+    Sat · …"; an item that is itself a placeholder with another in its prefix reads "… · no time
+    estimate yet".
+
 - **2026-10-25, T4b review (FAIL, two Important) and Quinn's ruling (signed) on the pin clause.**
   - **I-1, the pin is named in every form of the line (Q8).** Quinn approved the wording:
     several items: "If something has to give: B and C (4.5h). Everything else fits by its deadline,
