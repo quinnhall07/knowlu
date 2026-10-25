@@ -259,7 +259,10 @@ pub fn load_at(vault: &Path, today: Date, preview: Option<&Window>, moment: Opti
     let moved = against
         .and_then(|base| crate::commitments::moved(&scored, today, &cal, &base, Some(&planning)));
     let accepted = accepted_events(vault, &crate::eventledger::load_ledger(vault, None));
-    let moment = moment.filter(|m| m.date() == today);
+    // Spec §2.1: `m` is cut to the minute before anything else, as `plan_at` cuts it.
+    let moment = moment
+        .filter(|m| m.date() == today)
+        .map(|m| m.with().second(0).subsec_nanosecond(0).build().unwrap_or(m));
     Loaded { tasks, metas, unreadable, cal, planning, ranked, plan, moment, takes, moved, accepted }
 }
 
@@ -550,14 +553,31 @@ pub fn meter(l: &Loaded, today: Date) -> Meter {
     let fit = (cap.capacity * 2.0).floor() as i64;
     let spill = ((must_h * 2.0).ceil() as i64 - fit).max(0);
     let mut remaining = cap.capacity;
-    let mut items = Vec::new();
-    for t in &must {
+    // The walk's won't-fit items lead (spec §4), each with its deadline; today's first-fit spill of
+    // the rest follows in rank order.
+    let wont: Vec<(&Task, &crate::ranking::WontFit)> = l
+        .plan
+        .wont_fit
+        .iter()
+        .filter_map(|w| l.ranked.iter().find(|t| t.slug == w.slug).map(|t| (t, w)))
+        .collect();
+    let mut items: Vec<SpillItem> = wont
+        .iter()
+        .map(|(t, w)| SpillItem {
+            id: note_id(l, &t.slug),
+            title: t.title.clone(),
+            hours: round1(t.remaining_hours()),
+            deadline: Some(w.deadline.strftime("%Y-%m-%dT%H:%M").to_string()),
+        })
+        .collect();
+    for t in must.iter().filter(|t| !wont.iter().any(|(w, _)| w.slug == t.slug)) {
         if remaining >= t.remaining_hours() {
             remaining -= t.remaining_hours();
         } else {
             items.push(SpillItem { id: note_id(l, &t.slug), title: t.title.clone(), hours: round1(t.remaining_hours()), deadline: None });
         }
     }
+    let give_text = give_text(l, &must, &wont);
     Meter {
         block_minutes: BLOCK_MINUTES,
         fit_blocks: fit,
@@ -566,8 +586,54 @@ pub fn meter(l: &Loaded, today: Date) -> Meter {
         spill_hours: round1((must_h - cap.capacity).max(0.0)),
         spill_items: items,
         capacity_text: cap.text,
-        give_text: None,
+        give_text,
     }
+}
+
+/// A note has no real time estimate yet: `effort_confidence: unset`, or no `effort_hours` key
+/// (spec §3). `needs_enrichment` alone does not count. The one helper the meter and the row lines use.
+pub(crate) fn is_placeholder(l: &Loaded, slug: &str) -> bool {
+    l.metas.get(slug).is_some_and(|m| {
+        meta_text(Some(m), "effort_confidence").as_deref() == Some("unset") || crate::yaml::get(m, "effort_hours").is_none()
+    })
+}
+
+/// "A", "A and B", "A, B and C".
+fn join_titles(titles: &[&str]) -> String {
+    match titles {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// Spec §7's meter line: what has to give, and only when the walk named something. With a
+/// placeholder in play (a `W` item or any item in a `W` item's prefix) the assurance that
+/// everything else fits (and its pin clause) gives way to "This may not all fit". The assurance is
+/// only for a single named item (spec §7's examples); with more than one the line is the naming alone.
+fn give_text(l: &Loaded, must: &[Task], wont: &[(&Task, &crate::ranking::WontFit)]) -> Option<String> {
+    if wont.is_empty() {
+        return None;
+    }
+    let titles: Vec<&str> = wont.iter().map(|(t, _)| t.title.as_str()).collect();
+    let hours: f64 = wont.iter().map(|(t, _)| t.remaining_hours()).sum();
+    let mut text = format!("If something has to give: {} ({:.1}h).", join_titles(&titles), round1(hours));
+    let mut slugs: Vec<&str> = wont.iter().flat_map(|(t, w)| std::iter::once(t.slug.as_str()).chain(w.prefix.iter().map(String::as_str))).collect();
+    slugs.sort_unstable();
+    slugs.dedup();
+    let n = slugs.iter().filter(|s| is_placeholder(l, s)).count();
+    if n > 0 {
+        let (noun, verb) = if n == 1 { ("item", "has") } else { ("items", "have") };
+        text.push_str(&format!(" This may not all fit: {n} {noun} {verb} no time estimate yet."));
+    } else if wont.len() == 1 {
+        let pinned: Vec<&str> = must.iter().filter(|t| t.rank_override.is_some()).map(|t| t.title.as_str()).collect();
+        text.push_str(" Everything else fits by its deadline");
+        if !pinned.is_empty() {
+            text.push_str(&format!(", not counting {}, which you pinned", join_titles(&pinned)));
+        }
+        text.push('.');
+    }
+    Some(text)
 }
 
 /// `round(x, 1)`, half to EVEN — matching `render::round2` one line's reasoning up a decimal
