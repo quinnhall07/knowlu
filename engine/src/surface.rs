@@ -696,6 +696,12 @@ pub struct Row {
     pub flag_text: Option<String>,
     pub merge_text: Option<String>,
     pub conflict_text: Option<String>,
+    /// "Won't fit before 11:59 pm" on a won't-fit row (T4c); always `None` until then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fit_text: Option<String>,
+    /// Why it won't fit (T4c); always `None` until then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fit_why: Option<String>,
     pub why: String,
     /// `"od"` (overdue start) / `"soon"` (due within 2 days) / `""` — the mockup's pip classes.
     pub urgency: String,
@@ -796,6 +802,8 @@ pub fn row(l: &Loaded, task: &Task, today: Date, amendments: &[PendingAmendment]
         flag_text: None,
         merge_text: None,
         conflict_text: task.conflicts_with.as_ref().map(|c| format!("⚠ conflicts with {c}")),
+        fit_text: None,
+        fit_why: None,
         why: why
             .as_ref()
             .map(|w| {
@@ -4823,6 +4831,209 @@ mod evening_tests {
             .collect();
         assert_eq!(rows.len(), 3, "the three probes are Must do");
         assert_eq!(rows, expected, "the preview's Must do rows follow plan_at on the previewed calendar");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    // ---- Deadline ordering T1g: the row line and placeholders (DS6-DS11, DS14) and two guards. ----
+
+    /// The Must do row for `slug` at `m`, as (`fit_text`, `fit_why`).
+    fn fit_of(vault: &Path, m: DateTime, slug: &str) -> (Option<String>, Option<String>) {
+        let state = build_state(vault, View::Today, TODAY, &zoned_at(m), None);
+        let row = state
+            .must_do
+            .groups
+            .iter()
+            .flat_map(|g| g.rows.iter())
+            .find(|r| r.slug == slug)
+            .unwrap_or_else(|| panic!("no Must do row for {slug}"));
+        (row.fit_text.clone(), row.fit_why.clone())
+    }
+
+    fn wont_slugs(vault: &Path, m: DateTime) -> Vec<String> {
+        load_at(vault, pinned_today(), None, Some(m)).plan.wont_fit.iter().map(|w| w.slug.clone()).collect()
+    }
+
+    fn some(s: &str) -> Option<String> {
+        Some(s.to_string())
+    }
+
+    /// DS6: only a won't-fit row carries the line.
+    #[test]
+    fn the_row_line_is_only_on_wont_fit_rows() {
+        let vault = probe_vault("ds6");
+        put_xyz(&vault, "low", "", "low");
+        assert_eq!(fit_of(&vault, at(21, 0), "ds-y").0, some("Won't fit before 11:59 pm"));
+        assert_eq!(fit_of(&vault, at(21, 0), "ds-x").0, None);
+        assert_eq!(fit_of(&vault, at(21, 0), "ds-z").0, None);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// DS7: a later day names its weekday. 2026-08-28 is a Friday.
+    #[test]
+    fn a_later_day_names_its_weekday() {
+        let vault = probe_vault("ds7");
+        put_probe(&vault, "ds-sat", "Sat", Some(5.0), "low", "2026-08-29T08:30", 3, "");
+        assert_eq!(wont_slugs(&vault, at(21, 0)), ["ds-sat"], "setup: 3.5h of time for 5h of work");
+        assert_eq!(fit_of(&vault, at(21, 0), "ds-sat").0, some("Won't fit before Sat 8:30 am"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// DS8: a bare date never prints a clock time.
+    #[test]
+    fn a_bare_date_due_prints_no_clock_time() {
+        let vault = probe_vault("ds8");
+        put_probe(&vault, "ds-tonight", "Tonight", Some(10.0), "low", "2026-08-28", 3, "");
+        assert_eq!(wont_slugs(&vault, at(21, 0)), ["ds-tonight"], "setup");
+        assert_eq!(fit_of(&vault, at(21, 0), "ds-tonight").0, some("Won't fit by tonight"));
+        let _ = std::fs::remove_dir_all(&vault);
+        let vault = probe_vault("ds8b");
+        put_probe(&vault, "ds-sat", "Sat", Some(40.0), "low", "2026-08-29", 3, "");
+        assert_eq!(wont_slugs(&vault, at(21, 0)), ["ds-sat"], "setup");
+        assert_eq!(fit_of(&vault, at(21, 0), "ds-sat").0, some("Won't fit by Sat"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// DS9: a placeholder in the prefix makes the verdict "may not fit", whichever item is first.
+    /// X is a placeholder by `effort_confidence: unset`, and again by having no `effort_hours` key.
+    #[test]
+    fn a_placeholder_in_the_prefix_reads_may_not_fit_in_both_orders() {
+        let want = some("May not fit before 11:59 pm \u{b7} depends on 1 item with no time estimate yet");
+        for (x_importance, y_importance, label) in [(5, 3, "X first"), (3, 5, "Y first")] {
+            for (x_hours, x_confidence) in [(Some(1.0), "unset"), (None, "low")] {
+                let vault = probe_vault("ds9");
+                put_probe(&vault, "ds-x", "X", x_hours, x_confidence, DUE, x_importance, "");
+                put_probe(&vault, "ds-y", "Y", Some(2.5), "low", DUE, y_importance, "");
+                let order = slugs(&load(&vault, pinned_today()));
+                let first = if x_importance > y_importance { "ds-x" } else { "ds-y" };
+                assert_eq!(order[0], first, "setup: {label}");
+                assert_eq!(wont_slugs(&vault, at(21, 0)), ["ds-y"], "setup: {label} names Y");
+                assert_eq!(fit_of(&vault, at(21, 0), "ds-y").0, want, "{label}, X {x_hours:?} {x_confidence}");
+                let _ = std::fs::remove_dir_all(&vault);
+            }
+        }
+    }
+
+    /// DS10: the named item's own estimate is the placeholder.
+    #[test]
+    fn a_placeholder_wont_fit_item_reads_no_time_estimate_yet() {
+        let vault = probe_vault("ds10");
+        put_xyz(&vault, "low", "", "unset");
+        assert_eq!(
+            fit_of(&vault, at(21, 0), "ds-y").0,
+            some("May not fit before 11:59 pm \u{b7} no time estimate yet")
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// DS11: the explanation comes from the walk's record at removal.
+    #[test]
+    fn fit_why_comes_from_the_prefix_at_removal() {
+        let late = "doing it would leave other work due by 11:59 pm late.";
+        // DP21's set: B does not fit alone; C fits alone but is removed when K overflows.
+        let vault = probe_vault("ds11");
+        put_probe(&vault, "ds-k", "K", Some(1.0), "low", DUE, 3, "");
+        put_probe(&vault, "ds-b", "B", Some(2.0), "low", "2026-08-28T22:30", 3, "");
+        put_probe(&vault, "ds-c", "C", Some(2.5), "low", "2026-08-28T23:30", 3, "");
+        put_probe(&vault, "ds-d", "D", Some(0.5), "low", "2026-08-26T23:59", 3, "");
+        assert_eq!(wont_slugs(&vault, at(21, 0)), ["ds-b", "ds-c"], "setup: DP21's walk");
+        let b = fit_of(&vault, at(21, 0), "ds-b").1;
+        let c = fit_of(&vault, at(21, 0), "ds-c").1;
+        assert_eq!(b, some("2.0h left; you have 1.5h before it's due."));
+        assert_eq!(c, some(&format!("2.5h left; {late}")));
+        assert!(!c.unwrap_or_default().contains("you have"), "C fits alone and must not read as fitting");
+        let _ = std::fs::remove_dir_all(&vault);
+        // Example (d): Y overflowed itself; no count and no "1 other".
+        let vault = probe_vault("ds11y");
+        put_xyz(&vault, "low", "", "low");
+        let y = fit_of(&vault, at(21, 0), "ds-y").1;
+        assert_eq!(y, some(&format!("2.5h left; {late}")));
+        assert!(!y.unwrap_or_default().contains("1 other"));
+        let _ = std::fs::remove_dir_all(&vault);
+        // An overflower with a bare-date due prints "tonight", never a clock time.
+        let vault = probe_vault("ds11t");
+        put_probe(&vault, "ds-k", "K", Some(1.0), "low", "2026-08-28", 3, "");
+        put_probe(&vault, "ds-c", "C", Some(2.5), "low", "2026-08-28T23:30", 3, "");
+        assert_eq!(wont_slugs(&vault, at(21, 0)), ["ds-c"], "setup: K overflows and C goes");
+        assert_eq!(
+            fit_of(&vault, at(21, 0), "ds-c").1,
+            some("2.5h left; doing it would leave other work due by tonight late.")
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+        // ... and a later bare date prints the weekday alone. Saturday has 1139 minutes before its
+        // end; nine 2h items due Saturday overflow it, and C (the longest, 150) is removed.
+        let vault = probe_vault("ds11s");
+        for n in 1..=9 {
+            put_probe(&vault, &format!("ds-f{n}"), &format!("F{n}"), Some(2.0), "low", "2026-08-29", 3, "");
+        }
+        put_probe(&vault, "ds-c", "C", Some(2.5), "low", "2026-08-28T23:30", 3, "");
+        let walk = load_at(&vault, pinned_today(), None, Some(at(21, 0))).plan.wont_fit;
+        assert_eq!(walk.iter().map(|w| w.slug.as_str()).collect::<Vec<_>>(), ["ds-c"], "setup: the ninth overflows, C goes");
+        assert_eq!(walk[0].overflower, "ds-f9", "setup: a bare Saturday date overflowed");
+        assert_eq!(
+            fit_of(&vault, at(21, 0), "ds-c").1,
+            some("2.5h left; doing it would leave other work due by Sat late.")
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// DS14 (guard): `needs_enrichment` alone is not a placeholder.
+    #[test]
+    fn needs_enrichment_alone_is_not_a_placeholder() {
+        let vault = probe_vault("ds14");
+        put_xyz(&vault, "medium", "needs_enrichment: true\n", "low");
+        assert!(!is_placeholder(&load(&vault, pinned_today()), "ds-x"), "setup");
+        assert_eq!(wont_slugs(&vault, at(21, 0)), ["ds-y"], "setup: the walk names Y");
+        // The plan's text is "Won't fit before 11:59 pm" (DS6 pins it); here only that the line is
+        // never the placeholder wording, which holds against the stub and after T4c.
+        let line = fit_of(&vault, at(21, 0), "ds-y").0.unwrap_or_default();
+        assert!(!line.contains("May not fit"), "{line:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// T4a review m-3 (guard): with a planning-day note `moved` is Some, and the moment does not
+    /// change it (it reads the pressure order).
+    #[test]
+    fn moved_reads_the_pressure_order_with_a_planning_day() {
+        let vault = scratch_s1("moved");
+        put_task(&vault, "ds-probe", "task_d50000001", 1.0, "2026-08-28T23:59");
+        std::fs::create_dir_all(vault.join("commitments")).unwrap();
+        std::fs::write(
+            vault.join("commitments").join("planning-day.md"),
+            "---\nid: cmt_00000000b1\ntype: commitment\nkind: planning-day\nstatus: confirmed\n\
+             window: [{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"22:00\"}]\n---\n\nInvented.\n",
+        )
+        .unwrap();
+        // Friday is busy 08:00-17:30 in the COPY's template, so only the widened evening has room.
+        std::fs::write(
+            vault.join("config").join("week_template.yaml"),
+            "day_start: \"08:00\"\nday_end: \"18:00\"\nmin_block_minutes: 45\nclasses:\n  mon: []\n  tue: []\n  wed: []\n  \
+             thu: []\n  fri: [[\"08:00\", \"17:30\"]]\n  sat: []\n  sun: []\n",
+        )
+        .unwrap();
+        // The day's first window was 08:00-18:00; the note has since widened it.
+        std::fs::create_dir_all(vault.join("state")).unwrap();
+        std::fs::write(
+            vault.join("state").join("plan.json"),
+            "{\"date\": \"2026-08-28\", \"end\": \"18:00\", \"start\": \"08:00\"}\n",
+        )
+        .unwrap();
+        let plain = load(&vault, pinned_today());
+        assert!(plain.moved.is_some(), "setup: a widened window moves work, so the comparison is real");
+        let evening = load_at(&vault, pinned_today(), None, Some(at(21, 0)));
+        assert_eq!(format!("{:?}", evening.moved), format!("{:?}", plain.moved), "moved");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// T4a review m-1 (guard): the page's moment is cut to the minute, as the plan's is, so a task
+    /// due 10:00:30 seen at 10:00:45 is still open and not labelled Overdue.
+    #[test]
+    fn the_page_moment_is_truncated_to_the_minute() {
+        let vault = probe_vault("minute");
+        put_probe(&vault, "ds-probe", "Probe", Some(1.0), "low", "2026-08-28T10:00:30", 3, "");
+        let m = TODAY.at(10, 0, 45, 0);
+        let groups = groups_at(&vault, m);
+        let label = groups.iter().find(|(_, rows)| rows.iter().any(|s| s == "ds-probe")).map(|(l, _)| l.clone());
+        assert_eq!(label.as_deref(), Some("Due today"), "the plan treats it as open at 10:00");
         let _ = std::fs::remove_dir_all(&vault);
     }
 }
