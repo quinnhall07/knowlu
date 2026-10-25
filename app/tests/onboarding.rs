@@ -2991,3 +2991,32 @@ fn the_hand_over_never_prints_a_feed_link() {
     assert!(shown.contains("feed_kept_on_device: true"), "and still says a link is kept");
     let _ = std::fs::remove_dir_all(&r.root);
 }
+
+/// F11p1s (wave-B plan §14.59, Q-B25): the shell's Finish later quits through one new command. The
+/// shell has no queue, no scheduler and no close prevention, so `setup_quit` is on `run_shell`'s
+/// handler list and never on the console's.
+#[test]
+fn setup_quit_is_on_the_shells_handler_list_and_not_the_consoles() {
+    let src = std::fs::read_to_string("src/main.rs").expect("src/main.rs");
+    let after_shell = src.split("fn run_shell").nth(1).expect("run_shell");
+    let (shell, console) = after_shell.split_once("fn run_console").expect("run_console follows run_shell");
+    assert!(shell.contains("onboarding::setup_quit"), "run_shell's generate_handler! list names onboarding::setup_quit");
+    assert!(!console.contains("setup_quit"), "run_console's list never names setup_quit");
+    assert_eq!(src.matches("onboarding::setup_quit").count(), 1, "named once, on the shell's list");
+}
+
+/// F11p1s: `setup_quit` answers `{ok: false, error: "not in onboarding"}` outside the shell, as
+/// `open_profile` does, and only then calls `app.exit(0)`. It writes, signs out and deletes nothing.
+#[test]
+fn setup_quit_checks_it_is_in_the_shell_before_it_exits() {
+    let src = std::fs::read_to_string("src/onboarding.rs").expect("src/onboarding.rs");
+    let after = src.split("pub fn setup_quit(").nth(1).expect("onboarding.rs defines pub fn setup_quit(");
+    let body = after.split("\n}\n").next().expect("a body");
+    let state = body.find("try_state::<Onboarding>()").expect("it looks for the shell's Onboarding state");
+    let exit = body.find("app.exit(0)").expect("it exits with app.exit(0)");
+    assert!(state < exit, "the Onboarding check comes before app.exit(0)");
+    assert!(body.contains("not in onboarding"), "outside the shell it answers `not in onboarding`");
+    for banned in ["write", "remove", "delete", "sign_out", "profiles::"] {
+        assert!(!body.contains(banned), "setup_quit does nothing but exit: it names {banned}");
+    }
+}

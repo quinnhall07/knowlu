@@ -155,7 +155,7 @@
   // Each is the middle of its range in the spec (1.3), summed and rounded up to a whole minute.
   // Step 7 takes the top of its range so that it still counts after rounding.
   // This is a display estimate, never a count of jobs. Step 9 is absent.
-  var STEP_SECONDS = { 3: 120, 4: 90, 5: 30, 6: 30, 7: 60, 8: 60, 10: 120, 11: 30 };
+  var STEP_SECONDS = { 1: 30, 2: 45, 3: 120, 4: 90, 5: 30, 6: 30, 7: 60, 8: 60, 10: 120, 11: 30 };
   function minutesLeft(step) {
     var n = 0;
     Object.keys(STEP_SECONDS).forEach(function (k) { if (Number(k) >= Number(step)) { n += STEP_SECONDS[k]; } });

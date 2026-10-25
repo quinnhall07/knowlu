@@ -5,7 +5,7 @@
 .ob-main { display: flex; flex-direction: column; }
 .ob-bar { display: flex; gap: 20px; justify-content: flex-end; padding: 14px 56px 0; font-size: 13.5px; }
 .ob-bar .su-link { color: var(--su-ink-2); }
-.ob button[disabled].su-link { color: var(--su-ink-3); cursor: not-allowed; text-decoration-style: dashed; }
+.ob button[disabled].su-link, .setup button[disabled].su-link { color: var(--su-ink-3); cursor: not-allowed; text-decoration-style: dashed; }
 .ob-closing { margin: 12px 56px 0; padding: 10px 14px; max-width: 64ch; background: var(--su-board-2); border-left: 3px solid var(--su-amber); color: var(--su-ink); font-size: 14.5px; }
 .ob-closing[hidden] { display: none; }
 .ob-step { flex: 1; }
@@ -31,8 +31,8 @@
 .ob-prop button[aria-pressed="true"] { border-color: var(--su-ink); background: var(--su-board-2); }
 .ob-course, .ob-level { min-height: 36px; background: var(--su-board); color: var(--su-ink); border: 1px solid var(--su-rule-2); border-radius: 6px; padding: 0 8px; }
 /* F11p1: the rail's foot (minutes left, Finish later) and the top bar that keeps only Sign out. */
-.ob .su-rail-foot .su-link { color: var(--su-ink); font-size: 14.5px; font-weight: 600; }
-.ob .su-rail-foot .su-dim { font-size: 13.5px; }
+.ob .su-rail-foot .su-link, .setup .su-rail-foot .su-link { color: var(--su-ink); font-size: 14.5px; font-weight: 600; }
+.ob .su-rail-foot .su-dim, .setup .su-rail-foot .su-dim { font-size: 13.5px; }
 .ob .su-rail-head { justify-content: space-between; }
 .ob .su-rail-head .su-dim { margin-left: 0; }
 .ob .su-row .su-pf { font-size: 13.5px; }

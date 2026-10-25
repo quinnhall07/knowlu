@@ -387,6 +387,14 @@ pub fn open_profile(app: tauri::AppHandle, id: String) -> Value {
     }
 }
 
+/// The shell's Finish later (wave-B plan §14.59, Q-B25): quit the setup window, nothing else.
+#[tauri::command]
+pub fn setup_quit(app: tauri::AppHandle) -> Value {
+    if app.try_state::<Onboarding>().is_none() { return json!({ "ok": false, "error": "not in onboarding" }); }
+    app.exit(0);
+    json!({ "ok": true, "error": Value::Null })
+}
+
 /// The argv a relaunch hands the child: what the caller is asking for, then the `--after-pid <us>`
 /// handshake (R-P4a-1) — without which `tauri-plugin-single-instance`, whose lock is keyed on the
 /// app identifier and is still held here, kills the arriving window instead of the leaving one.
