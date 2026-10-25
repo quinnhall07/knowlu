@@ -629,10 +629,48 @@
     }).catch(function () { line.textContent = "Knowlu couldn't save that. Try again."; });
   }
   function propHtml(p) {
-    var lv = ["hard", "soft", "optional"].map(function (l) { return '<option value="' + l + '"' + ((p.level || "soft") === l ? " selected" : "") + '>' + l.charAt(0).toUpperCase() + l.slice(1) + '</option>'; }).join("");
-    return '<div class="ob-prop" data-key="' + esc(p.source_uid) + '" data-answer=""><span class="a">' + esc(p.title) + '</span> <span class="su-dim">' + esc(p.when || "") + (p.where ? " · " + esc(p.where) : "") + '</span> ' +
-      '<button class="b su-btn" type="button" data-act10="mine" aria-pressed="false">Mine</button> <button class="b su-btn" type="button" data-act10="not" aria-pressed="false">Not mine</button> ' +
-      '<select class="ob-level" aria-label="How firm is ' + esc(p.title) + '">' + lv + '</select></div>';
+    return '<div class="ob-prop" data-key="' + esc(p.source_uid) + '" data-answer="" data-level="' + esc(p.level || "soft") + '"><span class="a">' + esc(p.title) + '</span> <span class="su-dim">' + esc(p.when || "") + (p.where ? " · " + esc(p.where) : "") + '</span> ' +
+      firmnessHtml10(p.level) + ' <button class="b su-btn" type="button" data-act10="mine" aria-pressed="false">Mine</button> <button class="b su-btn" type="button" data-act10="not" aria-pressed="false">Not mine</button></div>';
+  }
+  // The pure helpers (F11p3): the summary line, the proposal split, the firmness control, the confirm object, the bar's count.
+  function summaryLine10(st) {
+    var s3 = st && st.step3;
+    if (!s3 || s3.classes == null || s3.class_times == null) { return ""; }
+    return s3.classes + " classes and " + s3.class_times + " class times, set from your school's registrar. Nothing to type.";
+  }
+  function splitProposals10(r) {
+    var ps = (r && r.proposals) || [];
+    return { events: ps.filter(function (p) { return !p.window; }), window: ps.filter(function (p) { return p.window; })[0] || null };
+  }
+  function firmnessHtml10(level) {
+    var on = LEVELS10.some(function (l) { return l[0] === level; }) ? level : "soft";
+    return '<span class="ob-seg" role="group" aria-label="How firm">' + LEVELS10.map(function (l) {
+      return '<button class="b su-btn" type="button" data-level="' + l[0] + '" aria-pressed="' + (l[0] === on) + '">' + l[1] + '</button>';
+    }).join("") + '</span>';
+  }
+  function confirmArg10(rows) {
+    var mine = [], notMine = [];
+    rows.forEach(function (r) {
+      if (r.answer === "mine") { mine.push({ source_uid: r.key, level: r.level }); } else if (r.answer === "not") { notMine.push(r.key); }
+    });
+    return { mine: mine, not_mine: notMine };
+  }
+  // `win` is the day-window question (F11p4); null means it is not on screen, so it is not counted.
+  function answeredCount10(rows, win) {
+    var n = rows.filter(function (r) { return r.answer === "mine" || r.answer === "not"; }).length;
+    return { n: n + (win && win.answered ? 1 : 0), m: rows.length + (win ? 1 : 0) };
+  }
+  function confirmBarLine10(n, m) { return n + " of " + m + " answered. Anything you leave blank comes back as a question over the next few days."; }
+  OB.summaryLine10 = summaryLine10; OB.splitProposals10 = splitProposals10; OB.firmnessHtml10 = firmnessHtml10;
+  OB.confirmArg10 = confirmArg10; OB.answeredCount10 = answeredCount10; OB.confirmBarLine10 = confirmBarLine10;
+  function rows10() {
+    return Array.prototype.map.call(document.querySelectorAll("#ob-10-prop .ob-prop"), function (r) {
+      return { key: r.getAttribute("data-key"), answer: r.getAttribute("data-answer"), level: r.getAttribute("data-level") };
+    });
+  }
+  function paintBar10() {
+    var el = EL("ob-10-count"), c = answeredCount10(rows10(), null);
+    if (el) { el.textContent = confirmBarLine10(c.n, c.m); }
   }
   function askProposals(s) {
     if (!(s && s.proposals_ready) || w10.asked) { return; }
@@ -640,9 +678,10 @@
     invoke("commitment_proposals", {}).then(function (r) {
       var host = EL("ob-10-prop");
       if (!host) { return; }
-      var ps = ((r && r.proposals) || []).filter(function (p) { return !p.window; });
+      var ps = splitProposals10(r).events;
       host.innerHTML = ps.length ? '<p class="su-small">Knowlu found these repeating on your calendar. Mark each one, or leave it blank and Knowlu asks again later.</p>' + ps.map(propHtml).join("")
         : '<p class="ob-state">' + esc((r && r.error) || "Knowlu found nothing repeating on your calendar.") + '</p>';
+      paintBar10();
     }).catch(function () {
       var host = EL("ob-10-prop");
       if (host) { host.innerHTML = '<p class="ob-state">Knowlu could not read your calendars just now. Your class times can still be confirmed.</p>'; }
@@ -651,14 +690,8 @@
   // ==== F11c, step 10 (continues) ================================================================
   function confirm10() {
     if (w10.busy) { return; }
-    var mine = [], notMine = [];
-    document.querySelectorAll("#ob-10-prop .ob-prop").forEach(function (r) {
-      var key = r.getAttribute("data-key"), a = r.getAttribute("data-answer"), lv = r.querySelector(".ob-level");
-      if (a === "mine") { mine.push({ source_uid: key, level: lv ? lv.value : "soft" }); }
-      else if (a === "not") { notMine.push(key); }
-    });
     w10.busy = true; say10(""); setConfirm10(); OB.clearError();
-    invoke("commitments_confirm", { view: "today", confirm: { mine: mine, not_mine: notMine } }).then(function (env) {
+    invoke("commitments_confirm", { view: "today", confirm: confirmArg10(rows10()) }).then(function (env) {
       w10.busy = false; setConfirm10();
       if (!env || env.ok !== true) { say10("Knowlu couldn't save your week: " + ((env && env.error) || "something went wrong") + "."); return; }
       w10.busy = true; setConfirm10();
@@ -670,8 +703,14 @@
     }).catch(function () { w10.busy = false; setConfirm10(); say10("Knowlu couldn't save your week. Try again."); });
   }
   function onClick10(e) {
-    var b = e.target.closest("[data-act10]");
+    var lv = e.target.closest(".ob-seg button"), b = e.target.closest("[data-act10]");
+    if (lv && EL("ob-step-10")) {
+      lv.closest(".ob-prop").setAttribute("data-level", lv.getAttribute("data-level"));
+      lv.parentNode.querySelectorAll("button").forEach(function (x) { x.setAttribute("aria-pressed", String(x === lv)); });
+      return;
+    }
     if (!b || !EL("ob-step-10")) { return; }
+    if (b.getAttribute("data-act10") === "times") { var set = EL("ob-10-set"); set.hidden = !set.hidden; b.setAttribute("aria-expanded", String(!set.hidden)); return; }
     var act = b.getAttribute("data-act10"), row = b.closest(".ob-prop");
     if (act === "confirm") { confirm10(); return; }
     if (act === "edit" || act === "save") {
@@ -684,16 +723,21 @@
     var next = row.getAttribute("data-answer") === act ? "" : act;
     row.setAttribute("data-answer", next);
     row.querySelectorAll("[data-act10]").forEach(function (x) { x.setAttribute("aria-pressed", String(x.getAttribute("data-act10") === next)); });
+    paintBar10();
   }
   function render10(status) {
     w10.asked = false; w10.busy = false;
     w10.reg = (status && status.jobs && status.jobs["registrar.confirm"] && status.jobs["registrar.confirm"].state) || "";
     Promise.resolve().then(function () { loadSet10(); askProposals(status); });
-    return { ask: '<div id="ob-step-10"><h2 class="ob-h2">Class times</h2><div id="ob-10-set"><p class="ob-state">Reading your class times…</p></div>' +
-      '<h2 class="ob-h2">Meetings on your calendar</h2><div id="ob-10-prop"><p class="ob-state" id="ob-10-wait">Knowlu is reading your calendars…</p></div>' +
+    var sum = summaryLine10(status);
+    return { ask: '<div id="ob-step-10">' + (sum ? '<div class="ob-card"><p>' + esc(sum) + '</p>' : '<div class="ob-card">') +
+      '<button class="su-link" type="button" data-act10="times" aria-expanded="false">Show the class times</button><div id="ob-10-set" hidden><p class="ob-state">Reading your class times…</p></div></div>' +
+      '<h2 class="ob-h2">Questions only you can answer</h2><p class="su-small">Your calendar repeats these. How firm is each? The preselected level is Knowlu&#39;s guess.</p>' +
+      '<div id="ob-10-prop"><p class="ob-state" id="ob-10-wait">Knowlu is reading your calendars…</p></div>' +
+      '<div class="ob-10-bar" id="ob-10-bar"><p class="ob-state" id="ob-10-count"></p>' +
       '<p class="ob-state ob-failed" id="ob-10-line" role="alert" hidden></p>' +
       '<div class="su-actions"><button class="b pri y su-btn" type="button" id="ob-10-confirm" data-act10="confirm">Confirm my week</button>' +
-      '<button class="b su-btn" type="button" id="ob-step10-retry" data-act10="confirm" hidden>Try again</button></div></div>' };
+      '<button class="b su-btn" type="button" id="ob-step10-retry" data-act10="confirm" hidden>Try again</button></div></div></div>' };
   }
   // A poll fills this panel's own nodes in place; it never redraws the pane.
   function onStatus10(status) {
