@@ -326,10 +326,13 @@ fn count_of(tasks: &[&Task]) -> NavCount {
 }
 
 /// Horizon of a dated task relative to `today`: "overdue" (< today), "week" (today ..= today+6),
-/// "later" (> today+6); undated tasks are their own bucket and are never dropped.
-pub fn horizon(task: &Task, today: Date) -> &'static str {
+/// "later" (> today+6); undated tasks are their own bucket and are never dropped. With the page's
+/// `moment`, a task due at or before it is "overdue" whatever its date (as `group_label` reads it);
+/// with none, the horizon goes by date alone.
+pub fn horizon(task: &Task, today: Date, moment: Option<DateTime>) -> &'static str {
     match task.due {
         None => "undated",
+        Some(due) if moment.is_some_and(|m| due <= m) => "overdue",
         Some(due) => {
             let gap = days_between(due.date(), today);
             if gap < 0 {
@@ -355,7 +358,7 @@ pub fn nav_counts(
     runs_warn: i64,
 ) -> NavCounts {
     let (must, _) = partition_must_do(&l.ranked, today, &l.cal);
-    let by = |h: &str| l.ranked.iter().filter(|t| horizon(t, today) == h).collect::<Vec<_>>();
+    let by = |h: &str| l.ranked.iter().filter(|t| horizon(t, today, l.moment) == h).collect::<Vec<_>>();
     NavCounts {
         today: count_of(&must.iter().collect::<Vec<_>>()),
         overdue: count_of(&by("overdue")),
@@ -1060,7 +1063,7 @@ pub fn ranked_list(l: &Loaded, today: Date, horizon_name: &str, amendments: &[Pe
     let paired: Vec<(&Task, Row)> = l
         .ranked
         .iter()
-        .filter(|t| horizon_name == "all" || horizon(t, today) == horizon_name)
+        .filter(|t| horizon_name == "all" || horizon(t, today, l.moment) == horizon_name)
         .map(|t| (t, row(l, t, today, amendments)))
         .collect();
     let rows = sort_rows(l, paired);
