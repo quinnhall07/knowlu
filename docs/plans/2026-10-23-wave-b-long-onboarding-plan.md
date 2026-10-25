@@ -6633,3 +6633,12 @@ the code:
      Manager. Otherwise add the file-scoped `CREDMAN_LOCK`, a generated test id and a `Drop`
      guard, as `app/tests/account.rs` does.
    - The assertion itself is not weakened.
+
+### 14.61 Carries from F11p2's review (2026-10-25)
+
+- **Step 8's focus after failures.** A failed Skip, a failed sign-in, the "storing" repaint and the end
+  of reading a site repaint the site and lose keyboard focus. Add `focusSite8()` after `paintSite`
+  in those paths, about four lines, the next time step 8 is touched. Owner: the next step-8 task
+  (F11e1 or F11e2), with a source pin.
+- **Offered to Quinn, not in scope:** the prototype's "4 turned in, kept off your list" on the week
+  strip. The data exists (`step3.turned_in`); adding it is an amendment to §14.58.5.
