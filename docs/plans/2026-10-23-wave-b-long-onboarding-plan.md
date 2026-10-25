@@ -1527,7 +1527,8 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F9 | The reveal gate, in its own `onboarding_gate.rs` | `implementer` | a pure function, tested in F1; its own file, so no chain (review r8's note) | F1 |
 | F10 | Shell steps 1-2 in the ruled direction (5b); old wizard removed (static files only) | `console-ui` | `app/static`, the `console.js` queue | direction ruled (5b, 2026-10-23) |
 | F11t | Failing static tests for the onboarding screens; §14.52's pins: step 5's answer and its three allowed mail commands (the seven others never called), the proceeds of steps 3, 7 and 8, Open Knowlu on `finish_ready` only, the closing state held while an exit call is outstanding. §14.58's pins, each before its piece: `account_status` called on mount and at the step moves only, never on the poll; the strip's figures read from fields, never summed; step 8's "Found" line only from `homework_sites`; `window` sent only after an answer; the state select's codes equal `STATE_TZ`'s (F11e1) | `test-writer` | test first (review r1 minor) | F2b |
-| F11c1 | F11c's follow-up, the page half of §14.57.1-.2 that F11c merged without: step 8 calls `onboarding_discover_coursework` and `onboarding_store_credentials` and sends no `vault`; step 10 sends `(10, {"confirmed": true})` after `commitments_confirm` succeeds and before `OB.show(11)`; F11t's two pins (about 15 lines in `onboarding.js`) | `test-writer` (pins), then `console-ui` | `app/static` | F2b3, F5c; in the panel merge order after F11p1 and before F11p2 (§14.58.7, r1 m-6) |
+| F11p1s | The shell's steps 1-2 get F11p1's rail foot (§14.59; Q-B25, signed): "About N minutes left" from `minutesLeft` (`STEP_SECONDS` gains steps 1 and 2) and Finish later, which calls the new shell command `setup_quit` (quits; disabled while the folder is being made or Continue is relaunching). About 8 lines in `onboarding.rs`, 1 in `main.rs`'s shell list, 15 in `console.js`. Acceptance: side-by-side shots against `o0-welcome`, `o1-account`, `o1g-google`, `o1c-code`, `o1d-signed-in` | `test-writer` (pins), `mechanical` (the command), then `console-ui` | the page is `app/static`; the command is six specified lines, pinned | F11p1 (merged); next in the panel merge order |
+| F11c1 | F11c's follow-up, the page half of §14.57.1-.2 that F11c merged without: step 8 calls `onboarding_discover_coursework` and `onboarding_store_credentials` and sends no `vault`; step 10 sends `(10, {"confirmed": true})` after `commitments_confirm` succeeds and before `OB.show(11)`; F11t's two pins (about 15 lines in `onboarding.js`) | `test-writer` (pins), then `console-ui` | `app/static` | F2b3, F5c; in the panel merge order after F11p1s and before F11p2 (§14.58.7, §14.59, r1 m-6) |
 | F11p0 | Quinn's font ruling (signed 2026-10-24, §14.58.2): PT Serif Caption 400 (the logo) and Zilla Slab 400, 600 and 700 (all other text), latin woff2, only the weights used, each after a licence check (SIL OFL 1.1 from the upstream file; anything else stops and goes to Quinn), recorded in `SOURCES.md` with URL, SHA-256 and licence text (`OFL-pt-serif-caption.txt`, `OFL-zilla-slab.txt`); no Big Shoulders, no Public Sans, no wordmark PNG; `.gitattributes` gains `*.woff2 binary` and `*.png binary`, and `scripts/ci/eol-check.ps1` passes (§14.58.2, r1 m-6) | main session | network fetch, a licence judgment and hashes; no subagent downloads | none |
 | F11p1 | The look (§14.58.4): Zilla Slab for every piece of text in `.setup` and `.picker` (the setup frame and onboarding) through one scoped token, the console's own faces untouched; the logo in the rail head set in PT Serif Caption with the red block behind "lu"; the light "day board" token set, started from Windows' setting with no stored choice; the rail's done lines for the account ("Signed in as …") and payment ("Trial on. First charge …") from `account_status`, read on mount and at the step moves only; the rail foot with "About N minutes left" and Finish later; `?fixture=` answering four commands for shots (about 60 lines in `onboarding.js`, 35 in `console.css`, 10 in `onboarding.css`). Acceptance: side-by-side shots (§14.58.7) | `test-writer` (pins), then `console-ui` | `app/static`; pinned and shot-compared | F11p0, F11c (merged); first in the panel merge order |
 | F11p2 | The bottom week strip (Your week, Monday to Sunday counts, Later; past days dimmed; "Week of …"; hidden at steps 2, 4, 10 and 11 and without the fields) and step 8 as one site at a time in "Knowlu's form", with "Found at your school: …" only from `homework_sites` (§14.58.5; about 70 lines in `onboarding.js`, 20 in `onboarding.css`). Acceptance: side-by-side shots | `test-writer` (pins), then `console-ui` | `app/static` | F11p1, F11c1 (step 8's wrappers land first; r1 m-6). Live data needs F7f, F2b4 and F8b; the merge does not |
@@ -1536,7 +1537,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F11e1 | Step 3's school choice ("isn't listed" included), sign-in and capture rules (second press, close on leaving, through `registerLeave`); step 2's sign-in again. Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3) | `console-ui` | `app/static` | F11a, F8b, F2g, F8lb (review r7 M1), F8b2 (the school answer), F2b2a (step 3's proceed), F3z (Q9: the "isn't listed" form's state select, its codes pinned to `STATE_TZ`), F11p3 (the panel merge order, §14.58.7) |
 | F11e2 | Step 3's proof with the removable course list; step 4, its `comp` state included. Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3) | `console-ui` | `app/static` | F11e1, F8c, F8g, F2d, F2h, F7a (`by_course`), F11p3 (§14.58.7) |
 | F11b | Steps 5, 6 and 7; step 6 on today's separate consents (`google_connect` with each scope, `google_status`); step 5 by `onboarding_answer(5, {mail})`, `mail_setup_progress` and `mail_setup_answer`, its Skip through `onboarding_skip`; step 7's proceed (§14.52.1, .3). Step 5's answer is sent only from the "Connect school email" press, never on entering the step (Q1, §14.57.5). Through the frame's seam, `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()`. Fixtures for steps 5-7's rows: a past row with no job records, and mixed `done` and `skipped` (m5, over F11b0's rule). The frame fixes are F11b0's | `console-ui` | `app/static` | F11a, F11b0, F8d, F8lb (step 7's paste; review r7 M1), F2b2a, F11p3 (the panel merge order, §14.58.7). No longer O2 (T0, 2026-10-24: O2 has no branch) |
-| F11b0 | The frame's fixes in `onboarding.js`, split out of F11b (§14.53.2, review m-3): a refused retry's line clears on the student's next action, never a poll (m2); `rowModel`'s `found` read dropped (m3); `rowModel`'s past-row rule (m5); the sentences for `mail_setup_cancelled`, `mail_setup_failed`, `mail_not_yet` and `feed_kept_on_device` (M3); `onboarding.js:4`'s seam comment naming `{render, onStatus}` and `registerLeave`. Per file: `app/static/onboarding.js` about 15 lines (m2 4, m3 2 removed, m5 4, M3 4, the comment 1); `app/tests/onboarding_static.rs` about 45 lines of new cases (m2's two polls and a click, m3's source pin, m5's four row readings over generic fixtures, M3's four keys against the fallback) | `test-writer` (the cases, first), then `console-ui` | `app/static`; the test file only gains cases, and no pin is loosened | F11a. Collision note: the panel tasks share `onboarding.js` and `onboarding_static.rs` and merge serially, each rebased on the one before. The order since §14.58.7: F11b0 and F11c (merged), F11p1, F11c1, F11p2, F11p3, F11d, F11c2, F11b, F11e1, F11e2 (superseding §14.53.5's) |
+| F11b0 | The frame's fixes in `onboarding.js`, split out of F11b (§14.53.2, review m-3): a refused retry's line clears on the student's next action, never a poll (m2); `rowModel`'s `found` read dropped (m3); `rowModel`'s past-row rule (m5); the sentences for `mail_setup_cancelled`, `mail_setup_failed`, `mail_not_yet` and `feed_kept_on_device` (M3); `onboarding.js:4`'s seam comment naming `{render, onStatus}` and `registerLeave`. Per file: `app/static/onboarding.js` about 15 lines (m2 4, m3 2 removed, m5 4, M3 4, the comment 1); `app/tests/onboarding_static.rs` about 45 lines of new cases (m2's two polls and a click, m3's source pin, m5's four row readings over generic fixtures, M3's four keys against the fallback) | `test-writer` (the cases, first), then `console-ui` | `app/static`; the test file only gains cases, and no pin is loosened | F11a. Collision note: the panel tasks share `onboarding.js` and `onboarding_static.rs` and merge serially, each rebased on the one before. The order since §14.58.7 and §14.59: F11b0 and F11c (merged), F11p1, F11p1s, F11c1, F11p2, F11p3, F11d, F11c2, F11b, F11e1, F11e2 (superseding §14.53.5's) |
 | F11f | Step 6's combined Gmail-and-Calendar ask and the forwarding fallback, over O2's cloud half | `console-ui` | `app/static`; O2's contract only | F11b, O2 merged; may follow wave B (§8) |
 | F11c | Steps 8 and 10; step 8's proceed (§14.52.3). Through `KNOWLU_ONBOARDING.registerPanel(n, {render, onStatus})` and `registerLeave`; `onStatus` never calls `OB.refresh()` (§14.53.2-.3). Fixtures for steps 8 and 10's rows: a past row with no job records, and mixed `done` and `skipped` (m5) | `console-ui` | `app/static` | F11a, F8d, F2b2a, F11b0 (m5's `rowModel` rule, which its fixtures read; review m-3); merged at c810b22 without the page half that waits on F2b3 and F5c, which is now **F11c1** (§14.58.10); that half needs F2b3 (`courses`, the `(10, {"confirmed"})` answer), F5c (the step-8 wrappers, no `vault` from the page) (§14.57). Step 10's hours Edit is F11c2's, not the fix round's (r1 m-3) |
 | F11c2 | Step 10's hours Edit (D5 signed by Quinn, 2026-10-24; the fallback line dropped): one more field in the Edit, sent as `set_fields(view, id, {"meets": [...]})`, showing the engine's one fixed refusal; F11t's pin that step 10 sends only `kind`, `level` and `meets` (§14.57.10). Acceptance: side-by-side shots (§14.58.7). On §8's O3-to-`main` checklist (r2 n-1) | `console-ui` (F11t's pin by `test-writer`, first) | `app/static` | F11c (merged, fix round included), F5d, F11p3; in the panel merge order after F11d (§14.58.7) |
@@ -3351,7 +3352,7 @@ behaviour, before it merges.
 5. **S9, then F14** before each push; each lane PR merges on green CI and its reviewer's PASS
    (`contract-reviewer` for `account.rs`); **no release tag between the O4 and O3 merges.**
 6. **Quinn's go** for S10 and F15.
-7. **Side-by-side shots** (Quinn, 2026-10-24; §14.58.7): every screen task (F11p1-F11p3, F11d,
+7. **Side-by-side shots** (Quinn, 2026-10-24; §14.58.7): every screen task (F11p1-F11p3, F11p1s, F11d,
    F11c2, F11b, F11e1, F11e2, F11f) is shot beside its prototype screen at 1280x800, in headless
    Edge, against invented data. The `reviewer` compares each pair in the task's review before it
    merges. Quinn signed the privacy line, Q9, D5 and the fonts on 2026-10-24 (§14.58; Q-B22 and Q-B23 answered). Typeface differences
@@ -6370,7 +6371,7 @@ R3.5, round 2), top to bottom:
 #### 14.58.7 Merge order, the side-by-side shots, and §7 re-walked
 
 - **The panel merge order** (it supersedes §14.53.5's and the F11b0 row's): F11b0 and F11c
-  (merged), then **F11p1, F11c1, F11p2, F11p3**, then F11d, **F11c2** (after F11c, r2 n-1),
+  (merged), then **F11p1, F11p1s (§14.59), F11c1, F11p2, F11p3**, then F11d, **F11c2** (after F11c, r2 n-1),
   F11b, F11e1, F11e2. Each one is rebased on the one before. F11c1 is F11c's follow-up (§14.58.10,
   r1 m-6). If F2b3 and F5c are not merged when F11p1 lands, F11p2 waits for F11c1 rather than
   reordering. F11p0 lands before F11p1 and touches no
@@ -6483,4 +6484,96 @@ R3.5, round 2), top to bottom:
     - `binary` means `-text -diff`, so these rows read `attr/-text`. No rule in the script
       matches them except the CRLF/mixed test, which a `-text` row never trips.
     - This is a rule-adjacent file, so the main session makes the edit, and the commit says why.
+
+### 14.59 Finish later and the minutes left on the shell's screens (F11p1s, 2026-10-24)
+
+Quinn ruled Q-B25 yes (signed, 2026-10-24; §14.58.8). The shell's welcome and account screens
+(step 1, and step 2's account, browser, code and signed-in screens; F10's shots `o0-welcome`,
+`o1-account`, `o1c-code`, `o1d-signed-in`) get the rail foot's "About N minutes left" line and
+Finish later, in the form F11p1 gave the setup frame. Q-B24 (the console page in Zilla Slab) stays
+its own task after wave B and is not here.
+
+**One task, F11p1s**: `test-writer` (the pins, first), then `mechanical` (the six-line command
+below), then `console-ui` (the page). It is one `console-ui` task with a Rust prelude, because the
+shell has no command that ends the process (below) and `console-ui` never edits `app/src`.
+
+1. **Files.**
+   - `app/src/onboarding.rs`: the new `setup_quit` command, beside `open_profile`. About 8 lines.
+   - `app/src/main.rs`: `run_shell`'s `generate_handler!` list gains `onboarding::setup_quit`. That
+     list has 30 names by this read (`main.rs:107`); the task recounts before quoting a number.
+     `run_console`'s list is unchanged.
+   - `app/static/index.html`: the shell's `su-rail-foot` (`:134`) gains
+     `<button class="su-link" id="su-finish-later" type="button">Finish later</button>` after
+     `su-left`.
+   - `app/static/console.js`: `SU_RAIL` (`:3298-3304`) loses its `left` strings. `renderSetup`
+     writes `su-left` from `KNOWLU_ONBOARDING.minutesLeft` and sets the button's `disabled`. One
+     click handler calls `setup_quit`. About 15 lines.
+   - `app/static/onboarding.js`: `STEP_SECONDS` (`:158`) gains `1: 30` and `2: 45`. One line.
+   - `app/static/onboarding.css`: the two `.ob .su-rail-foot` rules (`:34-35`) are widened to the
+     shell's foot as well, so both feet share one rule set and nothing is copied.
+   - Tests: `app/tests/static_assets.rs`, `app/tests/onboarding_static.rs` and
+     `app/tests/onboarding.rs`, as item 4 lists.
+2. **What Finish later does on a shell screen: it quits, through `setup_quit`.**
+   - The shell (`run_shell`, `main.rs:87-109`) has no queue, no `ConsoleState`, no scheduler and no
+     close prevention, and no command in its list ends the process. `open_profile` exits only after
+     a relaunch. So **before sign-in there is nothing to save, and Finish later simply quits.**
+   - `setup_quit(app)`: when the shell's `Onboarding` state is absent, it answers
+     `{ok: false, error: "not in onboarding"}`, as `open_profile` does (`onboarding.rs:379`).
+     Otherwise it calls `app.exit(0)` and nothing else. It writes no file, signs nothing out and
+     deletes nothing. The sign-in window's session is wiped on exit by the handler that already
+     runs (`lms_link.rs:100`).
+   - Finish later is **disabled while `SU.making`** (`create_vault_defaults` is running, so a folder
+     is never left half-made) **and while `suContinue` is relaunching** (`SU.busy` on the done
+     screen). It is enabled on the welcome, account, code and browser screens. A Google sign-in in
+     flight dies with the process, and nothing is written.
+   - **What the next launch finds:**
+     - Before the folder was made, nothing changed: the shell opens at welcome. A pending session
+       a finished sign-in left in Credential Manager is overwritten by the next sign-in, as today.
+     - After the done screen made the folder, the profile is listed "Setup not finished" (F3,
+       §1.9 A). Opening it resumes onboarding at step 2, where F2g's re-attach moves the pending
+       session, or asks the student to sign in again if it is gone.
+   - No confirm dialog: nothing is lost, which is the same reason onboarding's Finish later asks
+     none.
+   - The prototype hides Finish later on some of these screens. Quinn's ruling overrides that, and
+     the reviewer reads the difference as intended.
+3. **The minute count for steps 1 and 2.**
+   - `STEP_SECONDS` gains step 1 at 30 s and step 2 at 45 s: the spec's §1.3 table gives 30 s, and
+     the middle of 30-60 s. It stays one constant, in `onboarding.js`.
+   - The shell asks `minutesLeft(1)` on welcome and `minutesLeft(2)` on the account, browser and
+     code screens. On the done screen it asks `minutesLeft(3)`, because step 2's work is over and
+     only Continue remains. The counter keeps "Step 2 of 10".
+   - With today's constant those are 11, 10 and 9 minutes: 615, 585 and 540 seconds, rounded up.
+     The shell knows no skips, so it counts every step from the current one to 11, less the absent
+     9.
+   - The line reads "About N minutes left" in the same words as F11p1's foot. If
+     `KNOWLU_ONBOARDING` is missing, `su-left` stays empty rather than showing a guess.
+   - Adding steps 1 and 2 does not change the count on any step from 3 on, because `minutesLeft`
+     sums only from the current step.
+4. **Pinned static tests, written first** (`test-writer`):
+   - `static_assets.rs:2968`'s pin of the one fixed estimate (`left: "About 10 minutes"`, and no
+     "minutes left") is replaced, citing Quinn's Q-B25 in the test. The new pin: `SU_RAIL` carries no
+     `left`, and `renderSetup` writes `su-left` from `minutesLeft`. The step-counter pin at `:2965`
+     is unchanged.
+   - `onboarding_static.rs`, run under node:
+     - `minutesLeft(1)`, `(2)` and `(3)` are 11, 10 and 9;
+     - the shell's foot holds `su-left`, then `su-finish-later`, in that order;
+     - the button's click calls `setup_quit` and no onboarding exit command (`onboarding_quit`,
+       `onboarding_sign_out`, `onboarding_finish`);
+     - the button is disabled while `SU.making` and while the done screen's Continue is busy;
+     - the foot's rules are the same selectors for both feet.
+   - `onboarding.rs` (Rust, source pins over `main.rs`, split as `registrar.rs:226` does):
+     `setup_quit` is on `run_shell`'s list and not on `run_console`'s; its body checks `Onboarding`
+     before `app.exit(0)`.
+5. **Side-by-side shots** (§14.58.7's rule; typeface differences expected):
+   - The built screens, through `KNOWLU_SHOTS.startSetup(l, at)` (`console.js:3475`), against
+     invented data: welcome, account, browser, code, and done with a made-up folder and email.
+   - Each sits beside the prototype's `o0-welcome`, `o1-account`, `o1g-google`, `o1c-code` and
+     `o1d-signed-in`, at 1280x800 in headless Edge, dark and light.
+   - The pairs go in `docs/reports/shots/F11p1s/`, and the `reviewer` compares layout, content and
+     states before the merge.
+6. **The panel merge order:** F11p1 (done), **F11p1s**, F11c1, F11p2, F11p3, F11d, F11c2, F11b,
+   F11e1, F11e2. F11p1s comes first among the rest: it depends only on F11p1, and it shares
+   `onboarding.js` (`STEP_SECONDS`), `onboarding.css` and `onboarding_static.rs` with the tasks
+   after it. It goes ahead of F11c1, which waits on F2b3 and F5c. §7 has no cycle: F11p1s depends
+   on F11p1 and nothing new, and F11c1 gains F11p1s as its predecessor in the order.
 
