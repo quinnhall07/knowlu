@@ -2964,8 +2964,16 @@ fn the_setup_shell_has_its_screens_an_eight_row_rail_and_no_retired_panel() {
     // steps wave B shows (eleven, less the absent step 9).
     assert!(js.contains("welcome: { no: \"Step 1 of 10\"") && js.contains("account: { no: \"Step 2 of 10\"") && js.contains("done: { no: \"Step 2 of 10\""), "the counter");
     assert!(!js.contains("of 9\""), "no nine-step counter");
-    // One time estimate, the spec's, until S-E measures real times.
-    assert!(js.contains("left: \"About 10 minutes\"") && !js.contains("minutes left"), "one estimate");
+    // Quinn's Q-B25 (2026-10-24) replaced the one fixed "About 10 minutes": the shell's foot now
+    // counts down like the setup frame's (plan §14.59). The estimates are still the spec's, until S-E
+    // measures real times; they live in onboarding.js's STEP_SECONDS, so SU_RAIL carries no `left`.
+    let rail_start = js.find("var SU_RAIL = {").expect("SU_RAIL");
+    let su_rail = &js[rail_start..rail_start + js[rail_start..].find("};").expect("SU_RAIL closes")];
+    assert!(!su_rail.contains("left:") && !js.contains("About 10 minutes"), "SU_RAIL carries no `left` string");
+    let render = &js[js.find("function renderSetup(").expect("renderSetup")..];
+    let render = &render[..render.find("\n  }\n").expect("renderSetup closes")];
+    assert!(render.contains("KNOWLU_ONBOARDING") && render.contains("minutesLeft(") && render.contains("su-left"), "renderSetup writes su-left from minutesLeft");
+    assert!(!render.contains("r.left"), "and not from the rail table");
     assert!(js.contains("window.KNOWLU_SHOTS = { startSetup: startSetup, renderPicker: renderPicker, openSettings: openSettings, openReport: openReport }"), "the shots seam");
     // The shell hides by attribute, and a class `display` beats the UA's `[hidden]`: each rule is the
     // only thing that hides its element.

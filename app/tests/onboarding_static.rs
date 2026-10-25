@@ -1034,3 +1034,99 @@ fn the_fixture_path_answers_the_four_commands_and_the_page_follows_windows_light
     assert!(c.contains("prefers-color-scheme") && c.contains("data-theme"), "the theme starts from Windows' setting");
     assert!(!c.contains("setItem"), "onboarding stores no theme choice");
 }
+
+// ---- F11p1s: the shell's minutes line and Finish later (plan §14.59, Quinn's Q-B25) ---------------
+
+/// Evaluates `expr` under node with `SU` bound to `su_json`. For the one expression the page's
+/// `renderSetup` assigns to the button's `disabled`; nothing else runs.
+fn eval_with_su(expr: &str, su_json: &str) -> bool {
+    let out = Command::new("node").arg("-e").arg("const SU = JSON.parse(process.env.SU_JSON); console.log(JSON.stringify(Boolean(eval(process.env.SU_EXPR))));")
+        .env("SU_JSON", su_json).env("SU_EXPR", expr).output().expect("node must be installed");
+    assert!(out.status.success(), "node failed on `{expr}`: {}", String::from_utf8_lossy(&out.stderr));
+    serde_json::from_slice(&out.stdout).expect("a boolean")
+}
+
+#[test]
+fn the_shells_screens_count_eleven_ten_and_nine_minutes_left() {
+    // Welcome asks minutesLeft(1), account/browser/code ask (2), the done screen asks (3): 615, 585
+    // and 540 seconds, rounded up (step 1 is 30 s, step 2 is 45 s, and step 9 is absent).
+    let got: Vec<i64> = [1, 2, 3].iter().map(|n| node(&format!("h.minutesLeft({n})")).as_i64().expect("a whole number")).collect();
+    assert_eq!(got, vec![11, 10, 9], "minutesLeft(1), (2), (3)");
+    assert_eq!(node("h.minutesLeft(4)").as_i64(), Some(8), "the count from step 4 on does not move");
+}
+
+#[test]
+fn the_shells_foot_holds_the_minutes_line_then_finish_later() {
+    let html = read("index.html");
+    let at = html.find("class=\"su-rail-foot\"").expect("the shell's rail has a foot");
+    let foot = &html[at..at + html[at..].find("</div>").expect("the foot closes")];
+    let left = foot.find("id=\"su-left\"").expect("the foot holds su-left");
+    let button = foot.find("id=\"su-finish-later\"").expect("the foot holds su-finish-later");
+    assert!(left < button, "the button sits after the minutes line");
+    assert!(foot.contains("<button") && foot.contains("type=\"button\"") && foot.contains("Finish later</button>"), "a plain button reading Finish later: {foot}");
+    assert!(foot.contains("su-link"), "it wears su-link, as the setup frame's does");
+}
+
+/// The click handler's text: the delegated `closest("#su-finish-later")` branch of `console.js`, plus
+/// the body of any `function` that branch calls.
+fn finish_later_handler(c: &str) -> String {
+    let at = c.find("closest(\"#su-finish-later\")").expect("console.js handles a click on #su-finish-later");
+    let line = c[at..].split('\n').next().unwrap_or("").to_string();
+    let mut text = line.clone();
+    for part in line.split(|ch: char| !(ch.is_alphanumeric() || ch == '_')) {
+        if !part.is_empty() && c.contains(&format!("function {part}(")) { text.push_str(function(c, part)); }
+    }
+    text
+}
+
+#[test]
+fn the_shells_finish_later_calls_setup_quit_and_no_onboarding_exit() {
+    let c = code(&read("console.js"));
+    let handler = finish_later_handler(&c);
+    assert_eq!(invoked(&handler), vec!["setup_quit".to_string()], "one command: {handler}");
+    for banned in ["onboarding_quit", "onboarding_sign_out", "onboarding_finish", "sign_out", "open_profile", "finish_onboarding"] {
+        assert!(!handler.contains(banned), "the shell's Finish later never calls {banned}");
+    }
+}
+
+/// The `disabled` expression `renderSetup` gives the button.
+fn finish_later_disabled(c: &str) -> String {
+    let render = function(c, "renderSetup");
+    let key = "EL(\"su-finish-later\").disabled =";
+    let at = render.find(key).expect("renderSetup sets the button's disabled");
+    let rest = &render[at + key.len()..];
+    rest[..rest.find(';').expect("a statement")].trim().to_string()
+}
+
+#[test]
+fn the_shells_finish_later_is_disabled_while_making_and_while_continue_relaunches() {
+    let expr = finish_later_disabled(&code(&read("console.js")));
+    assert!(eval_with_su(&expr, r#"{"step":"done","making":true,"busy":false}"#), "disabled while the folder is being made: {expr}");
+    assert!(eval_with_su(&expr, r#"{"step":"done","making":false,"busy":true}"#), "disabled while Continue relaunches: {expr}");
+    assert!(!eval_with_su(&expr, r#"{"step":"done","making":false,"busy":false}"#), "enabled on a settled done screen: {expr}");
+    assert!(!eval_with_su(&expr, r#"{"step":"welcome","making":false,"busy":false}"#), "enabled on welcome: {expr}");
+}
+
+#[test]
+fn the_shells_finish_later_stays_enabled_while_a_sign_in_or_a_code_send_is_in_flight() {
+    let expr = finish_later_disabled(&code(&read("console.js")));
+    for step in ["welcome", "account", "browser", "code"] {
+        let su = format!(r#"{{"step":"{step}","making":false,"busy":true}}"#);
+        assert!(!eval_with_su(&expr, &su), "enabled on {step} with SU.busy set (never tied to SU.busy alone): {expr}");
+    }
+}
+
+#[test]
+fn the_rail_foots_styles_are_widened_to_the_shell_and_not_copied() {
+    let css = code(&read("onboarding.css"));
+    for decl in ["font-size: 14.5px", "font-size: 13.5px"] {
+        assert_eq!(css.matches(decl).count(), 1, "{decl} appears in one rule, which both feet share");
+        let at = css.find(decl).unwrap();
+        let start = css[..at].rfind('}').map_or(0, |i| i + 1);
+        let selectors = &css[start..start + css[start..at].rfind('{').expect("a rule")];
+        let list: Vec<&str> = selectors.split(',').map(str::trim).collect();
+        assert!(list.len() >= 2, "the rule's selector list was widened: {selectors}");
+        assert!(list.iter().any(|s| s.starts_with(".ob ") && s.contains(".su-rail-foot")), "it still serves the setup frame: {selectors}");
+        assert!(list.iter().any(|s| (s.starts_with(".setup ") || s.starts_with("#setup ")) && s.contains(".su-rail-foot")), "and the shell's foot: {selectors}");
+    }
+}
