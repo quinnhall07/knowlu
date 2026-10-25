@@ -3296,11 +3296,11 @@
   // The numbering is plan §4.2's: welcome is step 1, the account step 2, of the ten steps wave B shows
   // (eleven, less the absent step 9). One estimate, the spec's, until S-E measures real times.
   var SU_RAIL = {
-    welcome: { no: "Step 1 of 10", left: "About 10 minutes" },
-    account: { no: "Step 2 of 10", left: "About 10 minutes" },
-    browser: { no: "Step 2 of 10", left: "About 10 minutes" },
-    code: { no: "Step 2 of 10", left: "About 10 minutes" },
-    done: { no: "Step 2 of 10", left: "About 10 minutes" }
+    welcome: { no: "Step 1 of 10" },
+    account: { no: "Step 2 of 10" },
+    browser: { no: "Step 2 of 10" },
+    code: { no: "Step 2 of 10" },
+    done: { no: "Step 2 of 10" }
   };
 
   function startSetup(l, at) {
@@ -3324,7 +3324,11 @@
     ["welcome", "account", "browser", "code", "done"].forEach(function (s) { EL("su-" + s).hidden = SU.step !== s; });
     var r = SU_RAIL[SU.step];
     EL("su-stepno").textContent = r.no;
-    EL("su-left").textContent = r.left;
+    // The minutes line: the welcome counts from step 1, the ask from 2, the done screen from 3 (step 2's
+    // work is over). Empty if onboarding.js is absent, never a guess.
+    var OBJ = window.KNOWLU_ONBOARDING;
+    EL("su-left").textContent = OBJ ? "About " + OBJ.minutesLeft(SU.step === "welcome" ? 1 : (SU.step === "done" ? 3 : 2)) + " minutes left" : "";
+    EL("su-finish-later").disabled = SU.making || (SU.step === "done" && SU.busy);
     // The account row: Now while the ask is open, Done with its proof once signed in; the school row
     // is the next one. Nothing else in the rail moves in the shell.
     var rows = {};
@@ -3457,6 +3461,7 @@
     if (e.target.closest("#su-resend")) { suSendCode(SU.codeEmail, true); return; }
     if (e.target.closest("#su-other-email")) { SU.emailOpen = true; SU.codeError = ""; suShow("account"); EL("su-email").focus(); return; }
     if (e.target.closest("#su-retry")) { suMakeFolder(); return; }
+    if (e.target.closest("#su-finish-later")) { invoke("setup_quit").catch(function () {}); return; }
     if (e.target.closest("#su-continue")) { suContinue(); }
   });
   // Enter does what the screen's primary button does, from a field or from nowhere in particular.
