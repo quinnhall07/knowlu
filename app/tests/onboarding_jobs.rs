@@ -1108,6 +1108,8 @@ fn test_42_the_handoff_translates_a_book_rows_course_key_through_the_slugs() {
     let mut a = Answers { courses: three_courses(), ..Default::default() };
     a.slugs.insert("_1001_1".into(), "cs-100".into());
     a.slugs.insert("_1002_1".into(), "knotwork-theory".into());
+    a.courses.push(course("DYE 130", "Dye Chemistry", "_1004_1"));
+    a.slugs.insert("_1004_1".into(), "  ".into());
     a.courses[1].removed = true; // removed after its row was saved
     let row = |source: &str, key: &str, course: &str| BookRow { source: source.into(), key: key.into(), course_slug: course.into() };
     a.rows = vec![
@@ -1115,6 +1117,7 @@ fn test_42_the_handoff_translates_a_book_rows_course_key_through_the_slugs() {
         row("zybooks", "ZYB-B", "_1003_1"), // kept, no slug
         row("vhl", "4471", "_1002_1"),      // has a slug, but the course was removed
         row("vhl", "4472", "_9999_1"),      // not a course at all
+        row("zybooks", "ZYB-C", "_1004_1"), // kept, but its slug is blank (review m-2)
     ];
     let before = ingest_handoff(&Answers { rows: Vec::new(), ..a.clone() }, &FakePending::default()).course_map;
     let h = ingest_handoff(&a, &FakePending::default());

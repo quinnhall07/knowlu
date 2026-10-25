@@ -1180,7 +1180,8 @@ pub fn run_config_ingest_with(
 }
 
 /// `config.ingest`'s base from the answers file: which homework logins the student stored comes from
-/// step 8's confirmed rows (a row with a key and a slug, as `config.ingest`'s mappings), the profile id and time zone from the vault.
+/// step 8's confirmed rows (any row with a key and a course, kept or not: the flag follows the stored login, and a row
+/// `ingest_handoff` drops for a removed course is asked about by `coursework` later), the profile id and time zone from the vault.
 pub fn ingest_base_for(answers: &Answers, profile_id: &str, timezone: &str) -> IngestBase {
     let has = |source: &str| answers.rows.iter().any(|r| r.source == source && !r.key.trim().is_empty() && !r.course_slug.trim().is_empty());
     IngestBase { profile_id: profile_id.to_string(), timezone: timezone.to_string(), zybooks: has("zybooks"), vhl: has("vhl") }
