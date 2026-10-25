@@ -1082,7 +1082,7 @@ fn steps_3_to_8(tag: &str, quits: &[u8]) -> String {
     answer(6, serde_json::json!({"google_calendar": true}));
     quit(6);
     // Step 8: each confirmed row is saved as it is confirmed.
-    answer(8, serde_json::json!({"row": BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "quilting-basics".into() }}));
+    answer(8, serde_json::json!({"row": BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "_1001_1".into() }}));
     answer(8, serde_json::json!({"zybooks_ignore": "ZYB-ONBOARDING"}));
     // After step 8's confirms, before leaving it.
     quit(8);
@@ -3537,4 +3537,165 @@ fn test_40_the_two_no_row_cases_keep_mail_connect_and_disconnected_clears_only_i
     assert!(svc.calls().iter().any(|c| c.starts_with("DELETE /addresses/")), "the interrupted address was removed: {:?}", svc.calls());
     assert!(MailState::load(&d).unwrap().pending_setups.is_empty(), "no pending record is left");
     assert_eq!(slot_reading(&d, &[]), ["mail.connect"], "(b) the empty list after the clean keeps it");
+}
+
+// ---- test 41 (F2b3): the courses list, step 10's confirm, step 8's course key, Not now ----------------------------------
+
+#[test]
+fn test_41_courses_lists_the_kept_courses_in_order_leaves_a_removed_one_out_and_is_null_without_answers() {
+    let mut courses = three_courses();
+    courses[1].removed = true;
+    let out = status_for(Ok(finishable()), Some(&Answers { courses, ..Default::default() }), None, 0);
+    assert_eq!(out["courses"], serde_json::json!([
+        {"key": "_1001_1", "code": "QLT 101", "label": "Quilting"},
+        {"key": "_1003_1", "code": "WVG 105", "label": "Weaving"},
+    ]), "{out}");
+    let none = status_for(Ok(finishable()), None, None, 0);
+    assert!(none.get("courses").is_some_and(Value::is_null), "no readable answers file: null, never an empty list: {none}");
+    let empty = status_for(Ok(finishable()), Some(&Answers::default()), None, 0);
+    assert_eq!(empty["courses"], serde_json::json!([]), "a file with no course is an empty list: {empty}");
+    let src = src_of("onboarding_state.rs");
+    let body = enclosing_fn(&src, src.find("pub fn onboarding_status(").unwrap());
+    assert!(!body.contains("vault"), "the status never carries the vault:\n{body}");
+}
+
+fn confirm_answer(r: &Rig, at: &str) -> Value {
+    answer_on_queue(&r.q, &r.dir, 10, &serde_json::json!({"confirmed": true}), at, &|| r.q.stop_requested())
+}
+
+#[test]
+fn test_41_the_step_10_confirm_stamps_once_and_pushes_one_slot_and_a_second_press_changes_nothing() {
+    let r = rig("t41-confirm", state_at(10, true), false);
+    r.q.save().unwrap();
+    let first = confirm_answer(&r, "2026-10-24T12:00:00.000Z");
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(first["confirm_step10"], true, "{first}");
+    let (state, jobs, bytes) = (r.q.snapshot(), r.q.snapshot().jobs, std::fs::read(state_path(&r.dir)).unwrap());
+    assert_eq!(state.step10_confirmed_at.as_deref(), Some("2026-10-24T12:00:00.000Z"));
+    assert!(jobs.contains_key("slot.first_full"), "the confirm pushed its slot: {jobs:?}");
+    let second = confirm_answer(&r, "2026-10-24T12:09:09.000Z");
+    assert_eq!(second["ok"], true, "{second}");
+    assert_eq!(r.q.snapshot(), state, "the second press restamps nothing and pushes nothing");
+    assert_eq!(r.q.snapshot().jobs, jobs);
+    assert_eq!(std::fs::read(state_path(&r.dir)).unwrap(), bytes, "the file's bytes are as the first press left them");
+    assert!(load_answers(&r.dir).unwrap().is_some_and(|a| a.rows.is_empty()), "the answer saved nothing");
+}
+
+#[test]
+fn test_41_a_repeat_is_refused_by_confirm_step10_itself_under_the_queues_lock() {
+    let r = rig("t41-guard", state_at(10, true), false);
+    r.q.confirm_step10("2026-10-24T12:00:00Z");
+    let before = r.q.snapshot();
+    r.q.confirm_step10("2026-10-24T12:30:00Z");
+    assert_eq!(r.q.snapshot(), before, "confirm_step10 itself refuses a repeat");
+    assert_eq!(r.q.snapshot().step10_confirmed_at.as_deref(), Some("2026-10-24T12:00:00Z"));
+}
+
+#[test]
+fn test_41_the_confirm_is_refused_while_setup_is_closing_and_only_true_at_step_10_is_a_confirm() {
+    let r = rig("t41-closing", state_at(10, true), false);
+    for (step, shape) in [(10, serde_json::json!({"confirmed": false})), (10, serde_json::json!({"confirmed": "yes"})), (9, serde_json::json!({"confirmed": true})), (8, serde_json::json!({"confirmed": true}))] {
+        let out = answer_on_queue(&r.q, &r.dir, step, &shape, "2026-10-24T12:00:00Z", &|| false);
+        assert_eq!(out["ok"], false, "step {step} {shape}: {out}");
+        assert!(out.get("confirm_step10").is_none_or(|v| v != true), "{out}");
+    }
+    assert!(r.q.snapshot().step10_confirmed_at.is_none(), "none of those confirmed");
+    r.q.request_stop();
+    let out = confirm_answer(&r, "2026-10-24T12:00:00Z");
+    assert_eq!((out["ok"].clone(), out["exiting"].clone()), (false.into(), true.into()), "{out}");
+    assert!(r.q.snapshot().step10_confirmed_at.is_none(), "a closing setup is not confirmed");
+    assert!(!r.q.snapshot().jobs.contains_key("slot.first_full"));
+}
+
+#[test]
+fn test_41_the_onboarding_answer_command_is_answer_on_queue_and_nothing_else_calls_confirm_step10() {
+    let src = src_of("onboarding_state.rs");
+    let body = enclosing_fn(&src, src.find("pub fn onboarding_answer(").unwrap());
+    assert!(body.contains("answer_on_queue(") && body.contains("exiting_now("), "the command is the wrapper over the tested inner:\n{body}");
+    let inner = enclosing_fn(&src, src.find("pub fn answer_on_queue(").unwrap());
+    assert!(inner.contains("confirm_step10("), "the inner confirms:\n{inner}");
+    assert_eq!(src.matches("confirm_step10(").count(), 1, "one caller in the state file");
+}
+
+#[test]
+fn test_41_a_step_8_row_for_an_unknown_course_key_is_refused_and_changes_no_byte() {
+    let r = rig("t41-row", state_at(8, true), false);
+    let before = std::fs::read(answers_path(&r.dir)).unwrap();
+    for course_slug in ["quilting-basics", "", "_9999_1"] {
+        let row = BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: course_slug.into() };
+        let out = onboarding_answer_inner(&r.dir, 8, &serde_json::json!({"row": row}), &mut |_| panic!("enqueued"));
+        assert_eq!(out["ok"], false, "{course_slug:?}: {out}");
+        assert_eq!(std::fs::read(answers_path(&r.dir)).unwrap(), before, "{course_slug:?} changed a byte");
+    }
+    let good = BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "_1001_1".into() };
+    assert_eq!(onboarding_answer_inner(&r.dir, 8, &serde_json::json!({"row": good}), &mut |_| {})["ok"], true);
+    assert_eq!(load_answers(&r.dir).unwrap().unwrap().rows, [good], "a kept course's key is saved as given");
+    let d = scratch("t41-row-none");
+    let row = BookRow { source: "vhl".into(), key: "V-1".into(), course_slug: "_1001_1".into() };
+    assert_eq!(onboarding_answer_inner(&d, 8, &serde_json::json!({"row": row}), &mut |_| {})["ok"], false, "no answers file, no course");
+    assert!(!answers_path(&d).exists(), "and none is made");
+}
+
+#[test]
+fn test_41_a_removed_courses_key_is_refused_by_the_row_answer() {
+    let r = rig("t41-row-removed", state_at(8, true), false);
+    assert_eq!(onboarding_answer_inner(&r.dir, 3, &serde_json::json!({"remove": "_1002_1"}), &mut |_| {})["ok"], true);
+    let before = std::fs::read(answers_path(&r.dir)).unwrap();
+    let row = BookRow { source: "zybooks".into(), key: "ZYB-KNT".into(), course_slug: "_1002_1".into() };
+    assert_eq!(onboarding_answer_inner(&r.dir, 8, &serde_json::json!({"row": row}), &mut |_| {})["ok"], false);
+    assert_eq!(std::fs::read(answers_path(&r.dir)).unwrap(), before);
+}
+
+fn not_now_file(d: &Path, finished: bool, items: &[(&str, &str)], skips: Vec<Skip>) -> Vec<u8> {
+    let mut s = finished_with(items);
+    s.finished = finished;
+    s.skips = skips;
+    save_state(d, &s).unwrap();
+    std::fs::read(state_path(d)).unwrap()
+}
+
+#[test]
+fn test_41_not_now_removes_mail_connect_records_one_step_5_mail_skip_and_a_repeat_changes_no_byte() {
+    let d = scratch("t41-not-now");
+    let other = Skip { step: 7, source: "calendar".into(), cost_key: COST_CALENDAR.into() };
+    not_now_file(&d, true, &[("mail.connect", "mail_json"), ("slot.first_full", "slot_end")], vec![other.clone()]);
+    let out = mail_not_now_in(&d);
+    assert_eq!(out["ok"], true, "{out}");
+    let Loaded::Ok(s) = load_state(&d) else { panic!("the finished file") };
+    assert_eq!(names(&s), ["slot.first_full"], "mail.connect went, the slot item stayed");
+    assert_eq!(s.skips, [other, Skip { step: 5, source: "mail".into(), cost_key: COST_MAIL.into() }]);
+    let after = std::fs::read(state_path(&d)).unwrap();
+    assert_eq!(mail_not_now_in(&d)["ok"], true);
+    assert_eq!(std::fs::read(state_path(&d)).unwrap(), after, "a repeat changes no byte");
+    assert!(!d.join("mail.json").exists(), "no mailbox exists to turn off, so no mail.json is written");
+}
+
+#[test]
+fn test_41_not_now_keeps_an_existing_mail_skip_once_and_changes_no_byte_of_an_unfinished_file() {
+    let d = scratch("t41-not-now-skip");
+    let skip = Skip { step: 5, source: "mail".into(), cost_key: COST_MAIL.into() };
+    not_now_file(&d, true, &[("mail.connect", "mail_json")], vec![skip.clone()]);
+    assert_eq!(mail_not_now_in(&d)["ok"], true);
+    let Loaded::Ok(s) = load_state(&d) else { panic!("the finished file") };
+    assert_eq!((names(&s).len(), s.skips), (0, vec![skip]), "one skip, not two");
+    let u = scratch("t41-not-now-unfinished");
+    let before = not_now_file(&u, false, &[("mail.connect", "mail_json")], vec![]);
+    assert_eq!(mail_not_now_in(&u)["ok"], true);
+    assert_eq!(std::fs::read(state_path(&u)).unwrap(), before, "an unfinished file is the queue's");
+    let n = scratch("t41-not-now-none");
+    assert_eq!(mail_not_now_in(&n)["ok"], true);
+    assert!(!state_path(&n).exists(), "Not now never creates the file");
+}
+
+#[test]
+fn test_41_not_now_without_mail_connect_changes_nothing_and_the_command_reads_the_data_dir_only() {
+    let d = scratch("t41-not-now-connected");
+    let before = not_now_file(&d, true, &[("slot.first_full", "slot_end")], vec![]);
+    assert_eq!(mail_not_now_in(&d)["ok"], true);
+    assert_eq!(std::fs::read(state_path(&d)).unwrap(), before, "connected mail is never marked skipped by a stale press");
+    let src = src_of("onboarding_state.rs");
+    let at = src.find("pub fn onboarding_mail_not_now(").expect("the command");
+    assert!(src[..at].trim_end().ends_with("#[tauri::command]"), "a plain command");
+    let body = enclosing_fn(&src, at);
+    assert!(body.contains("mail_not_now_in(") && body.contains("data_dir") && !body.contains("vault"), "data dir only:\n{body}");
 }

@@ -599,6 +599,8 @@ impl Queue {
     /// lock**, so no status read or finish ever sees the confirm without its slot job (F2b r2, m-3).
     pub fn confirm_step10(&self, at: &str) {
         let mut g = self.inner.lock();
+        // One stamp and one slot job however fast the presses come: the repeat is refused under the lock (§14.57.2).
+        if g.state.step10_confirmed_at.is_some() { return; }
         g.state.step10_confirmed_at = Some(at.to_string());
         g.push_job("slot.first_full");
         g.settle();

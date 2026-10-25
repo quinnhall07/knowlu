@@ -482,7 +482,9 @@ pub fn save_pairs(_data_dir: &Path, _pairs: &BTreeMap<String, Vec<String>>) -> R
 /// - 5 `{"mail": {"provider": "school"}}` saves `mail_kind` and enqueues `mail.setup`, `mail.canary`
 ///   and `mail.first_pass`, in that order (§14.52.1). `gmail` and every other kind or shape is refused unread;
 /// - 8 `{"row": BookRow}` or `{"zybooks_ignore": <key>}` enqueue nothing (`config.ingest` is asked
-///   for on leaving the step);
+///   for on leaving the step). A row's `course_slug` is a kept course's **key**, else it is refused;
+/// - 10 `{"confirmed": true}` saves and enqueues nothing and answers `confirm_step10: true`, which
+///   [`answer_on_queue`] turns into the queue's one stamp (§14.57.2);
 /// - the proceeds, `{"proceed": true}` (§14.52.3), each saves nothing: 3 enqueues `school.store`,
 ///   `school.apply`, `school.courses`, `registrar.confirm`, `slot.partial` and is refused unread unless
 ///   `school_confirmed` (the wrapper reads it from the queue's live state with [`school_apply_may_run`]);
@@ -552,6 +554,8 @@ pub fn onboarding_answer_checked(
         }
         (8, "row") => {
             let Ok(row) = serde_json::from_value::<BookRow>(body.clone()) else { return refuse("a homework row names a source, a key and a course") };
+            // `course_slug` carries a kept course's **key** (§14.57.3): no slug-shaped value is saved.
+            if let Err(e) = require_kept_course(data_dir, &row.course_slug) { return refuse(&file_only(e, data_dir)); }
             let saved = update_answers_unless(data_dir, stopping, &|a| match a.rows.iter_mut().find(|r| r.source == row.source && r.key == row.key) {
                 Some(old) => *old = row.clone(),
                 None => a.rows.push(row.clone()),
@@ -570,6 +574,8 @@ pub fn onboarding_answer_checked(
             }
             (update_answers_unless(data_dir, stopping, &|a| a.mail_kind = Some("school".into())), &["mail.setup", "mail.canary", "mail.first_pass"])
         }
+        // Step 10's confirm saves and enqueues nothing: `answer_on_queue` stamps it (§14.57.2).
+        (10, "confirmed") if body.as_bool() == Some(true) => return serde_json::json!({ "ok": true, "error": Value::Null, "confirm_step10": true }),
         // A proceed saves nothing, so an unreadable answers file never refuses it.
         (3 | 7 | 8, "proceed") if body.as_bool() == Some(true) => match step {
             3 if !school_confirmed => return refuse("choose and confirm your school first"),
@@ -667,6 +673,14 @@ pub fn skip_and_stop_mail(stopping: bool, step: u8, source: &str, apply: &mut dy
 fn require_course(data_dir: &Path, key: &str) -> Result<(), String> {
     match load_answers(data_dir)? {
         Some(a) if a.courses.iter().any(|c| c.key() == key) => Ok(()),
+        _ => Err("no course has that key".into()),
+    }
+}
+
+/// A homework row names a **kept** course by its key (§14.57.3): a removed course is not offered by the status's `courses`.
+fn require_kept_course(data_dir: &Path, key: &str) -> Result<(), String> {
+    match load_answers(data_dir)? {
+        Some(a) if a.kept_courses().iter().any(|c| c.key() == key) => Ok(()),
         _ => Err("no course has that key".into()),
     }
 }
@@ -1191,6 +1205,8 @@ pub fn status_for(read: Result<OnboardingState, String>, answers: Option<&Answer
     };
     let mut v = status_inner(&state, now_secs);
     v["step3"] = answers.map_or(Value::Null, |a| serde_json::json!(step3_totals(a)));
+    // Step 8's course choice: the kept courses in the file's order; the page derives nothing from it (§14.57.1).
+    v["courses"] = answers.map_or(Value::Null, |a| Value::Array(a.kept_courses().iter().map(|c| serde_json::json!({ "key": c.key(), "code": c.code, "label": c.label })).collect()));
     v["exiting"] = exiting.map_or(Value::Null, |e| serde_json::json!({ "job": e.job, "long": e.long, "since": e.since }));
     v
 }
@@ -1317,14 +1333,42 @@ pub fn onboarding_status(app: tauri::AppHandle) -> Value {
 pub fn onboarding_answer(app: tauri::AppHandle, step: u8, answer: Value) -> Value {
     use tauri::Manager;
     let (Some(queue), Some(cs)) = (app.try_state::<crate::onboarding_jobs::Queue>(), app.try_state::<crate::state::ConsoleState>()) else { return no_setup() };
+    answer_on_queue(&queue, &cs.data_dir, step, &answer, &knowlu_engine::journal::now_ts(None), &|| exiting_now(&queue, &exit_guard()))
+}
+
+/// The body of [`onboarding_answer`] over a queue, so a test calls it as the command does. `now` is the
+/// stamp step 10's confirm records (§14.57.2).
+pub fn answer_on_queue(queue: &crate::onboarding_jobs::Queue, data_dir: &Path, step: u8, answer: &Value, now: &str, stopping: &dyn Fn() -> bool) -> Value {
     // The school fact is read from the queue's live state (its lock is released before the answers lock is taken).
     let confirmed = school_apply_may_run(&queue.snapshot());
-    let out = answer_unless_exiting_with(&|| exiting_now(&queue, &exit_guard()), &cs.data_dir, step, &answer, &mut answer_enqueuer(&queue), confirmed);
+    let out = answer_unless_exiting_with(stopping, data_dir, step, answer, &mut answer_enqueuer(queue), confirmed);
     // The jobs that wait for the answers file (`school.courses`, `registrar.confirm`, `config.ingest`)
     // are woken by nothing else: a saved answer wakes the queue even when it enqueued no job.
-    if out["ok"] == true { queue.wake(); }
+    if out["ok"] == true {
+        if out["confirm_step10"] == true { queue.confirm_step10(now); }
+        queue.wake();
+    }
     out
 }
+
+/// "Not now" beside "Finish connecting your email in Settings." (Q8, §14.57.9): on a finished file it drops
+/// `mail.connect` and records step 5's `mail` skip once, as the Skip press does. No vault, no `mail.json`
+/// (no mailbox exists to turn off), no call. Without `mail.connect` (mail was connected meanwhile) it changes nothing.
+pub fn mail_not_now_in(data_dir: &Path) -> Value {
+    let done = update_finished(data_dir, |s| {
+        if !s.handover.iter().any(|h| h.item == "mail.connect") { return false; }
+        s.mail_signal(MailSignal::TurnedOff);
+        skip_step(s, 5, "mail").is_ok()
+    });
+    match done {
+        Ok(_) => serde_json::json!({ "ok": true, "error": Value::Null }),
+        Err(e) => serde_json::json!({ "ok": false, "error": file_only(e, data_dir) }),
+    }
+}
+
+/// The main page's "Not now": `mail_not_now_in` over the app-data folder.
+#[tauri::command]
+pub fn onboarding_mail_not_now(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value { mail_not_now_in(&cs.data_dir) }
 
 /// A skip the step takes, recorded with its cost key in the live state and saved.
 #[tauri::command]
