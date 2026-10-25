@@ -898,4 +898,122 @@ mod tests {
         assert!(!plan.safe);
         assert_eq!(slugs(&plan.order), expected);
     }
+
+    // ---- Deadline ordering: the walk and its record (DP11-DP14, DP20). ----
+
+    fn assert_rank(tasks: &[Task], expected: &[&str]) {
+        assert_eq!(slugs(&rank(tasks, D, &week())), names(expected), "setup: the rank order");
+    }
+
+    /// An item the walk named, with the record it must carry.
+    fn wont_fit(slug: &str, deadline: DateTime, work: i64, available: i64, prefix: &[&str], prefix_minutes: i64, overflower: &str, overflow_deadline: DateTime) -> WontFit {
+        WontFit {
+            slug: slug.into(),
+            deadline,
+            work_minutes: work,
+            available_minutes: available,
+            prefix: names(prefix),
+            prefix_minutes,
+            overflower: overflower.into(),
+            overflow_deadline,
+        }
+    }
+
+    #[test]
+    fn the_walk_names_the_longest() {
+        let tasks = vec![
+            task("x", Some(at(28, 23, 59)), 1.0, 5),
+            task("y", Some(at(28, 23, 59)), 2.5, 3),
+            task("z", Some(at(28, 23, 59)), 1.5, 1),
+        ];
+        assert_rank(&tasks, &["x", "y", "z"]);
+        let plan = plan_at(&tasks, D, &week(), Some(at(28, 21, 0)));
+        assert!(!plan.safe);
+        assert_eq!(slugs(&plan.order), names(&["x", "z", "y"]));
+        assert_eq!(plan.wont_fit, vec![wont_fit("y", at(28, 23, 59), 150, 179, &["x"], 60, "y", at(28, 23, 59))]);
+    }
+
+    #[test]
+    fn a_walk_tie_names_the_later_deadline_then_the_lower_pressure() {
+        let cal = week();
+        // Equal work, different deadlines: 90 + 90 > 179 at the second; the later deadline goes.
+        let tasks = vec![task("p-2300", Some(at(28, 23, 0)), 1.5, 3), task("q-2359", Some(at(28, 23, 59)), 1.5, 3)];
+        let plan = plan_at(&tasks, D, &cal, Some(at(28, 21, 0)));
+        assert!(!plan.safe);
+        assert_eq!(plan.wont_fit.iter().map(|w| w.slug.as_str()).collect::<Vec<_>>(), ["q-2359"]);
+
+        // Equal work and deadline: the one later in rank's order goes, whichever that is.
+        for (r_importance, s_importance) in [(5, 1), (1, 5)] {
+            let tasks = vec![
+                task("r", Some(at(28, 23, 59)), 1.5, r_importance),
+                task("s", Some(at(28, 23, 59)), 1.5, s_importance),
+            ];
+            let ranked = slugs(&rank(&tasks, D, &cal));
+            let plan = plan_at(&tasks, D, &cal, Some(at(28, 21, 0)));
+            assert!(!plan.safe);
+            let named: Vec<String> = plan.wont_fit.iter().map(|w| w.slug.clone()).collect();
+            assert_eq!(named, vec![ranked[1].clone()], "rank order {ranked:?}");
+        }
+    }
+
+    #[test]
+    fn an_unsafe_order_can_name_nothing() {
+        let tasks = lab_and_homework();
+        assert_first(&tasks, "lab");
+        let plan = plan_at(&tasks, D, &week(), Some(at(28, 19, 30)));
+        assert!(!plan.safe);
+        assert_eq!(slugs(&plan.order), names(&["hw", "lab"]));
+        assert!(plan.wont_fit.is_empty());
+    }
+
+    #[test]
+    fn the_prefix_names_a_later_overflower() {
+        let cal = week();
+        let now = Some(at(28, 21, 0));
+        // Y first under rank: X's addition overflows, Y is removed, X comes after it.
+        let y_first = vec![task("y", Some(at(28, 23, 59)), 2.5, 5), task("x", Some(at(28, 23, 59)), 1.0, 1)];
+        assert_rank(&y_first, &["y", "x"]);
+        let plan = plan_at(&y_first, D, &cal, now);
+        assert_eq!(plan.wont_fit, vec![wont_fit("y", at(28, 23, 59), 150, 179, &["x"], 60, "x", at(28, 23, 59))]);
+
+        // X first: Y overflows itself.
+        let x_first = vec![task("y", Some(at(28, 23, 59)), 2.5, 1), task("x", Some(at(28, 23, 59)), 1.0, 5)];
+        assert_rank(&x_first, &["x", "y"]);
+        let plan = plan_at(&x_first, D, &cal, now);
+        assert_eq!(plan.wont_fit, vec![wont_fit("y", at(28, 23, 59), 150, 179, &["x"], 60, "y", at(28, 23, 59))]);
+
+        // DP21's set without D: B overflows itself at 22:30; C fits alone but K's addition removes it.
+        let set = vec![
+            task("k", Some(at(28, 23, 59)), 1.0, 3),
+            task("b", Some(at(28, 22, 30)), 2.0, 3),
+            task("c", Some(at(28, 23, 30)), 2.5, 3),
+        ];
+        let plan = plan_at(&set, D, &cal, now);
+        assert!(!plan.safe);
+        assert_eq!(
+            plan.wont_fit,
+            vec![
+                wont_fit("b", at(28, 22, 30), 120, 90, &[], 0, "b", at(28, 22, 30)),
+                wont_fit("c", at(28, 23, 30), 150, 150, &["k"], 60, "k", at(28, 23, 59)),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_plan_is_deterministic() {
+        let cal = week();
+        let tasks = vec![
+            task("k", Some(at(28, 23, 59)), 1.0, 3),
+            task("b", Some(at(28, 22, 30)), 2.0, 4),
+            task("c", Some(at(28, 23, 30)), 2.5, 2),
+        ];
+        let pressures: Vec<f64> = tasks.iter().map(|t| pressure(t, D, &cal)).collect();
+        assert!(pressures[0] != pressures[1] && pressures[1] != pressures[2] && pressures[0] != pressures[2], "setup: all keys differ");
+        let now = Some(at(28, 21, 0));
+        let plan = plan_at(&tasks, D, &cal, now);
+        assert_eq!(plan, plan_at(&tasks, D, &cal, now));
+        let mut reversed = tasks.clone();
+        reversed.reverse();
+        assert_eq!(plan, plan_at(&reversed, D, &cal, now));
+    }
 }
