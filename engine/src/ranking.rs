@@ -108,10 +108,10 @@ pub fn rank_at(tasks: &[Task], today: Date, cal: &WeekCalendar, moment: Option<D
     result
 }
 
-/// The spare time step 0 and step 3 require: Quinn's Q4, 2026-10-24. Stub constant (T1b); the real value.
+/// The spare time step 0 and step 3 require: Quinn's Q4, 2026-10-24.
 pub const FIT_MARGIN_MINUTES: i64 = 30;
 
-/// An item that cannot fit before its deadline (stub type, T1b; filled in by T3b).
+/// An item that cannot fit before its deadline (filled in by T3b).
 #[derive(Debug, Clone, PartialEq)]
 pub struct WontFit {
     pub slug: String,
@@ -124,7 +124,7 @@ pub struct WontFit {
     pub overflow_deadline: DateTime,
 }
 
-/// The deadline plan (stub type, T1b).
+/// The deadline plan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeadlinePlan {
     pub order: Vec<Task>,
@@ -132,27 +132,106 @@ pub struct DeadlinePlan {
     pub wont_fit: Vec<WontFit>,
 }
 
-/// Whole minutes of work left on a task (stub, T1b; T3a).
-pub fn work_minutes(_task: &Task) -> i64 {
-    todo!("deadline T3a")
+/// Whole minutes of work left on a task: `round_ties_even(hours * 60)`, so every figure after this
+/// is an integer.
+pub fn work_minutes(task: &Task) -> i64 {
+    (task.remaining_hours() * 60.0).round_ties_even() as i64
 }
 
-/// Free time from a moment forward, to local midnight each date (stub, T1b; T3a).
-pub struct Timeline {}
+/// Free time from a moment forward, to local midnight each date: `weekcal`'s midnight blocks per
+/// date, the date of the moment cut to start at it. Civil minutes, no task involved.
+pub struct Timeline {
+    blocks: Vec<(DateTime, DateTime)>,
+}
 
 impl Timeline {
-    pub fn build(_cal: &WeekCalendar, _from: DateTime, _until: DateTime) -> Timeline {
-        todo!("deadline T3a")
+    /// `from` is truncated to the minute. Each date from `from`'s to `until`'s (at most 365) has its
+    /// blocks computed whole, minimum filter included, and only then clipped to start at `from`.
+    pub fn build(cal: &WeekCalendar, from: DateTime, until: DateTime) -> Timeline {
+        let from = from.with().second(0).subsec_nanosecond(0).build().unwrap_or(from);
+        let mut blocks = Vec::new();
+        let mut date = from.date();
+        for _ in 0..365 {
+            if date > until.date() {
+                break;
+            }
+            for block in cal.free_blocks_to_midnight(date) {
+                let start = block.start.max(from);
+                if block.end > start {
+                    blocks.push((start, block.end));
+                }
+            }
+            match date.tomorrow() {
+                Ok(next) => date = next,
+                Err(_) => break,
+            }
+        }
+        Timeline { blocks }
     }
 
-    pub fn before(&self, _d: DateTime) -> i64 {
-        todo!("deadline T3a")
+    /// `A(d)`: whole minutes of the timeline before `d`. Never shrinks as `d` moves later.
+    pub fn before(&self, d: DateTime) -> i64 {
+        self.blocks
+            .iter()
+            .map(|(start, end)| {
+                let end = (*end).min(d);
+                if end > *start { start.duration_until(end).as_secs() / 60 } else { 0 }
+            })
+            .sum()
     }
 }
 
-/// `rank_at`'s successor (stub, T1b; T3a).
-pub fn plan_at(_tasks: &[Task], _today: Date, _cal: &WeekCalendar, _moment: Option<DateTime>) -> DeadlinePlan {
-    todo!("deadline T3a")
+/// The deadline an item is held to at moment `m`: its `due` while that is after `m`, else `None`
+/// (overdue, no window). **This is the one place O6's late-window close goes**: a late item whose
+/// window closes after `m` returns that close here. Daily late-penalty steps are out of v1.
+fn deadline(task: &Task, m: DateTime) -> Option<DateTime> {
+    task.due.filter(|due| *due > m)
+}
+
+/// `rank_at`'s successor. With no moment, or a moment not on `today`, this is `rank`. Otherwise Must
+/// do (non-override, slack <= 0) is checked in pressure order against the timeline (step 0); when
+/// every dated item keeps `FIT_MARGIN_MINUTES` spare the order is `rank`'s, else dated items go in
+/// deadline order (step 1), then overdue ones in pressure order, refilled into Must do's positions.
+/// The walk (step 2) and the overdue merge (step 3) come later. Deterministic, no model.
+pub fn plan_at(tasks: &[Task], today: Date, cal: &WeekCalendar, moment: Option<DateTime>) -> DeadlinePlan {
+    let Some(m) = moment.filter(|m| m.date() == today) else {
+        return DeadlinePlan { order: rank(tasks, today, cal), safe: true, wont_fit: Vec::new() };
+    };
+    let m = m.with().second(0).subsec_nanosecond(0).build().unwrap_or(m);
+    let mut decorated: Vec<(f64, i64, Task)> =
+        tasks.iter().map(|t| (pressure(t, today, cal), -t.importance, t.clone())).collect();
+    decorated.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
+    let (overridden, mut result): (Vec<Task>, Vec<Task>) =
+        decorated.into_iter().map(|(_, _, t)| t).partition(|t| t.rank_override.is_some());
+
+    let positions: Vec<usize> = (0..result.len())
+        .filter(|&i| slack_days(&result[i], today, cal, DEFAULT_BUFFER_DAYS) <= 0.0)
+        .collect();
+    let last = positions.iter().filter_map(|&i| deadline(&result[i], m)).max();
+    let timeline = Timeline::build(cal, m, last.unwrap_or(m));
+    let mut total = 0;
+    let safe = positions.iter().all(|&i| {
+        total += work_minutes(&result[i]);
+        deadline(&result[i], m).is_none_or(|d| total <= timeline.before(d) - FIT_MARGIN_MINUTES)
+    });
+    if !safe {
+        let mut dated: Vec<(DateTime, usize)> =
+            positions.iter().filter_map(|&i| deadline(&result[i], m).map(|d| (d, i))).collect();
+        dated.sort();
+        let overdue = positions.iter().copied().filter(|&i| deadline(&result[i], m).is_none());
+        let refill: Vec<Task> =
+            dated.iter().map(|(_, i)| *i).chain(overdue).map(|i| result[i].clone()).collect();
+        for (&position, task) in positions.iter().zip(refill) {
+            result[position] = task;
+        }
+    }
+    let mut overridden = overridden;
+    overridden.sort_by_key(|t| t.rank_override.unwrap_or(0));
+    for task in overridden {
+        let index = (task.rank_override.unwrap_or(1) - 1).max(0).min(result.len() as i64) as usize;
+        result.insert(index, task);
+    }
+    DeadlinePlan { order: result, safe, wont_fit: Vec::new() }
 }
 
 /// Split into (must do today no matter what, everything recommendable).
