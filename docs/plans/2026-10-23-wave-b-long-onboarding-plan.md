@@ -6424,6 +6424,11 @@ R3.5, round 2), top to bottom:
   switch it in its own task after wave B, with its own shots against `m1-today`. That keeps this
   wave's diff to onboarding, and it leaves the console page's static tests and shots alone until
   then.
+  **Answered.** Quinn ruled on 2026-10-24 (signed): yes, Zilla Slab. It is still its own task
+  after wave B, as recommended.
+- **Q-B25: should the shell's welcome and account screens also get Finish later and the minutes
+  left line? Answered.** Quinn ruled on 2026-10-24 (signed): yes. The planner adds the task to the
+  panel order (it touches the shell's screens, F10's shots `o0-welcome` and `o1-account`).
 
 #### 14.58.9 Checks
 
