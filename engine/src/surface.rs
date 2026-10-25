@@ -634,7 +634,8 @@ fn give_text(l: &Loaded, must: &[Task], wont: &[(&Task, &crate::ranking::WontFit
         let (noun, verb) = if n == 1 { ("item", "has") } else { ("items", "have") };
         text.push_str(&format!(" This may not all fit: {n} {noun} {verb} no time estimate yet"));
         if !pinned.is_empty() {
-            text.push_str(&format!(", and {}, which you pinned, isn't counted", join_titles(&pinned)));
+            let be = if pinned.len() == 1 { "isn't" } else { "aren't" };
+            text.push_str(&format!(", and {}, which you pinned, {be} counted", join_titles(&pinned)));
         }
         text.push('.');
     } else if wont.len() == 1 || !pinned.is_empty() {
@@ -4852,6 +4853,21 @@ mod evening_tests {
         assert_eq!(
             meter_at(&vault, at(21, 0)).give_text.as_deref(),
             Some("If something has to give: Y (2.5h). This may not all fit: 1 item has no time estimate yet, and Lab Pin, which you pinned, isn't counted."),
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// T4b round-2 review: two pins read "aren't counted", not "isn't counted".
+    #[test]
+    fn the_meter_line_pluralises_two_pins_with_a_placeholder() {
+        let vault = probe_vault("ds12e");
+        put_xyz(&vault, "unset", "", "low");
+        put_probe(&vault, "ds-pin", "Lab Pin", Some(0.5), "low", DUE, 2, "rank_override: 1\n");
+        put_probe(&vault, "ds-pin2", "Quiz 4", Some(0.5), "low", DUE, 2, "rank_override: 2\n");
+        assert_eq!(wont_slugs(&vault, at(21, 0)), ["ds-y"], "setup: the pins leave the walk alone");
+        assert_eq!(
+            meter_at(&vault, at(21, 0)).give_text.as_deref(),
+            Some("If something has to give: Y (2.5h). This may not all fit: 1 item has no time estimate yet, and Lab Pin and Quiz 4, which you pinned, aren't counted."),
         );
         let _ = std::fs::remove_dir_all(&vault);
     }
