@@ -228,6 +228,8 @@ const BANNED: &[&str] = &[
     "sign_out", "switch_profile", "delete_my_data", "open_external", "retarget_credentials",
     // The queue's mail.setup owns the run; a page-started run would not be drained (ruling, review r2).
     "mail_setup_start",
+    // F11c1 review m-3: the path-taking originals stay off the page in any form (section 14.57.1).
+    "store_credentials", "discover_coursework",
 ];
 
 /// Only commands the plan names: section 4.5's list, F5's, the step-2 sign-in, step 5's
@@ -236,7 +238,7 @@ const BANNED: &[&str] = &[
 const ALLOWED: &[&str] = &[
     "onboarding_status", "onboarding_answer", "onboarding_skip", "onboarding_retry", "onboarding_finish", "onboarding_quit",
     "onboarding_sign_out", "onboarding_attach_session", "onboarding_entitlement", "onboarding_checkout",
-    "onboarding_capture_link", "onboarding_paste_link", "campus_search", "store_credentials", "discover_coursework",
+    "onboarding_capture_link", "onboarding_paste_link", "campus_search",
     "open_lms_window", "capture_courses", "close_lms_window", "google_sign_in", "send_magic_link", "verify_email_code",
     "google_connect", "google_status", "mail_setup_progress",
     "your_week", "commitment_proposals", "commitments_confirm", "launch_state",
@@ -244,6 +246,8 @@ const ALLOWED: &[&str] = &[
     "account_status",
     // F11c review I-1: the console's own edit of a confirmed commitment (its kind and its level).
     "set_fields",
+    // F11c1 (section 14.57.1): step 8's two console wrappers, which read the vault from ConsoleState.
+    "onboarding_discover_coursework", "onboarding_store_credentials",
 ];
 
 #[test]
@@ -290,7 +294,7 @@ fn each_step_calls_the_commands_the_plan_gives_it() {
         ("step 4", &["onboarding_checkout", "onboarding_entitlement"]),
         ("step 6", &["google_connect", "google_status"]),
         ("step 7", &["onboarding_paste_link"]),
-        ("step 8", &["store_credentials", "discover_coursework"]),
+        ("step 8", &["onboarding_store_credentials", "onboarding_discover_coursework"]),
         ("step 10", &["your_week", "commitment_proposals", "commitments_confirm"]),
     ] {
         for c in cmds { assert!(names.iter().any(|n| n == c), "{step} must call {c}"); }
@@ -703,9 +707,9 @@ fn no_password_field_on_the_page_but_ours_by_id() {
 #[test]
 fn the_login_fields_are_cleared_in_both_arms_the_moment_the_write_returns() {
     let c = code(&read("onboarding.js"));
-    let at = c.find("invoke(\"store_credentials\"").expect("step 8 stores logins");
+    let at = c.find("invoke(\"onboarding_store_credentials\"").expect("step 8 stores logins");
     let handler = enclosing_fn(&c, at);
-    let after = &handler[handler.find("invoke(\"store_credentials\"").unwrap()..];
+    let after = &handler[handler.find("invoke(\"onboarding_store_credentials\"").unwrap()..];
     let then = after.find(".then(").expect("the answer is read in a then");
     let first_clear = after[then..].find("clearCredentialFields(").expect("the answer's handler clears the fields");
     let first_branch = after[then..].find("if (").unwrap_or(usize::MAX);
@@ -721,7 +725,7 @@ fn a_credential_value_is_read_only_inside_the_store_handler_and_goes_nowhere_els
     let c = code(&read("onboarding.js"));
     let base = c.as_ptr() as usize;
     let span = |s: &str| (s.as_ptr() as usize - base, s.as_ptr() as usize - base + s.len());
-    let handler = span(enclosing_fn(&c, c.find("invoke(\"store_credentials\"").unwrap()));
+    let handler = span(enclosing_fn(&c, c.find("invoke(\"onboarding_store_credentials\"").unwrap()));
     let clear = span(function(&c, "clearCredentialFields"));
     let mut lookups = 0;
     for id in LOGIN_FIELD_IDS {
@@ -743,7 +747,7 @@ fn a_credential_value_is_read_only_inside_the_store_handler_and_goes_nowhere_els
     }
     // Plan ~3032: no credential value is assigned to anything that outlives the handler. Inside the
     // handler, a statement that reads `.value` on its right side assigns only to a local it declares.
-    let h = enclosing_fn(&c, c.find("invoke(\"store_credentials\"").unwrap());
+    let h = enclosing_fn(&c, c.find("invoke(\"onboarding_store_credentials\"").unwrap());
     for stmt in h.split(';') {
         let Some(eq) = stmt.find('=').filter(|&e| !stmt[e..].starts_with("==") && !stmt[e..].starts_with("=>")) else { continue };
         if !stmt[eq + 1..].contains(".value") { continue; }
@@ -761,7 +765,7 @@ const LOGIN_FIELD_IDS: [&str; 4] = ["ob-zybooks-username", "ob-zybooks-password"
 #[test]
 fn discovery_in_flight_disables_next_and_the_sites_skip() {
     let c = code(&read("onboarding.js"));
-    let f = enclosing_fn(&c, c.find("invoke(\"discover_coursework\"").expect("discover"));
+    let f = enclosing_fn(&c, c.find("invoke(\"onboarding_discover_coursework\"").expect("discover"));
     assert!(f.contains("discovering = true"), "R-C1-55: the flag is raised before the call");
     assert!(f.contains("discovering = false"), "…and lowered when it returns");
     assert!(c.contains("var discovering") && enclosing_fn_or_top(&c, "discovering", "disabled"), "Next and Skip read it into `disabled`");
@@ -1154,4 +1158,63 @@ fn the_welcome_copy_carries_no_minutes_figure() {
         }
     }
     assert!(!text.contains("minute"), "no minutes figure in the welcome copy: {text}");
+}
+
+// ---- F11c1: step 8's console wrappers (no vault) and step 10's confirmed answer (section 14.57.1-.2) ----
+
+/// The text of every `invoke("name", ...)` call to `name` in `body`, parentheses balanced.
+fn invoke_calls<'a>(body: &'a str, name: &str) -> Vec<&'a str> {
+    let sk = skeleton(body);
+    let mut out = Vec::new();
+    for (at, _) in body.match_indices(&format!("invoke(\"{name}\"")) {
+        let mut depth = 0i32;
+        for (k, b) in sk[at..].bytes().enumerate() {
+            if b == b'(' { depth += 1; }
+            if b == b')' { depth -= 1; if depth == 0 { out.push(&body[at..at + k + 1]); break; } }
+        }
+    }
+    out
+}
+
+#[test]
+fn step_eight_calls_the_console_wrappers_and_never_the_path_taking_commands() {
+    let names = invoked(&code(&read("onboarding.js")));
+    for want in ["onboarding_discover_coursework", "onboarding_store_credentials"] {
+        assert!(names.iter().any(|n| n == want), "step 8 must call {want}");
+    }
+    for old in ["discover_coursework", "store_credentials"] {
+        assert!(!names.iter().any(|n| n == old), "onboarding.js must not call the path-taking {old}");
+    }
+}
+
+#[test]
+fn no_step_eight_call_passes_a_vault() {
+    let c = code(&read("onboarding.js"));
+    for (f, cmd) in [("storeLogins", "onboarding_store_credentials"), ("discoverSite", "onboarding_discover_coursework")] {
+        let body = function(&c, f);
+        let calls = invoke_calls(body, cmd);
+        assert_eq!(calls.len(), 1, "{f} must call {cmd} exactly once");
+        assert!(!calls[0].contains("vault"), "{f} sends no vault, the console reads it from its own state: {}", calls[0]);
+        // F11c1 review I-1: onboarding_status never carries a vault (section 14.57.1), so no guard may read one.
+        assert!(!body.contains("vault"), "{f} reads no vault at all");
+        let others = body.matches("invoke(").count() - 1;
+        assert_eq!(others, 0, "{f} makes no other call");
+    }
+}
+
+#[test]
+fn step_tens_confirmed_answer_follows_a_successful_confirm_and_precedes_the_next_screen() {
+    let c = code(&read("onboarding.js"));
+    let flat = function(&c, "confirm10").split_whitespace().collect::<Vec<_>>().join(" ");
+    let answer = "invoke(\"onboarding_answer\", { step: 10, answer: { confirmed: true } })";
+    assert_eq!(flat.matches(answer).count(), 1, "step 10 sends (10, {{confirmed: true}}) once: {flat}");
+    let confirm = flat.find("invoke(\"commitments_confirm\"").expect("confirm10 calls commitments_confirm");
+    let guard = flat[confirm..].find("env.ok !== true").map(|i| confirm + i).expect("the refusal guard");
+    let guard_end = guard + flat[guard..].find("return;").expect("the guard returns");
+    let sent = flat.find(answer).unwrap();
+    let show = flat.find("OB.show(11)").expect("confirm10 shows step 11");
+    assert!(confirm < guard_end && guard_end < sent, "the answer is sent only after the confirm succeeded (past the refusal's return)");
+    assert!(sent < show, "the answer is sent before OB.show(11)");
+    let catch = flat.find(".catch(").expect("a catch arm");
+    assert!(sent < catch, "the answer is not sent from the failure arm");
 }
