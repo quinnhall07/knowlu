@@ -2037,6 +2037,17 @@ fn test_48_an_answers_file_without_the_week_fields_keeps_its_bytes_and_the_statu
     assert_eq!(s["week"], serde_json::json!({ "of": "2026-10-19", "today": 3 }));
     // KNT (_1002_1) is removed: it leaves zybooks' list, and vhl, left with nobody, is absent. `unmatched` stays as it is.
     assert_eq!(s["homework_sites"], serde_json::json!({ "zybooks": ["QLT 101", "unmatched"] }));
+    // Review m-2: a code two kept shells share is named once; a stray key is dropped; an unmatched-only site stays.
+    update_answers(&d, &|a| {
+        a.courses.push(row("QLT 101", "Quilting Basics (lab)", "_1004_1", false));
+        a.homework_sites.clear();
+        a.homework_sites.insert("zybooks".into(), vec!["_1001_1".into(), "_9999_1".into(), "_1004_1".into()]);
+        a.homework_sites.insert("vhl".into(), vec!["unmatched".into()]);
+    }).unwrap();
+    assert_eq!(st()["homework_sites"], serde_json::json!({ "vhl": ["unmatched"], "zybooks": ["QLT 101"] }));
+    // Review m-1: sites that map to nothing are null, the same as none stored, never `{}`.
+    update_answers(&d, &|a| { a.homework_sites.clear(); a.homework_sites.insert("vhl".into(), vec!["_1002_1".into()]); }).unwrap();
+    assert_eq!(st()["homework_sites"], serde_json::Value::Null);
     // Half a week is no week.
     update_answers(&d, &|a| a.week_today = None).unwrap();
     assert_eq!(st()["week"], serde_json::Value::Null);

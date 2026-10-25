@@ -1236,7 +1236,7 @@ pub fn status_for(read: Result<OnboardingState, String>, answers: Option<&Answer
     v["courses"] = answers.map_or(Value::Null, |a| Value::Array(a.kept_courses().iter().map(|c| serde_json::json!({ "key": c.key(), "code": c.code, "label": c.label })).collect()));
     // The week strip's and step 8's "Found at your school" feeds (§14.58.3): both null without a stored preview.
     v["week"] = answers.and_then(|a| Some(serde_json::json!({ "of": a.week_of.as_ref()?, "today": a.week_today? }))).unwrap_or(Value::Null);
-    v["homework_sites"] = answers.filter(|a| !a.homework_sites.is_empty()).map_or(Value::Null, |a| serde_json::json!(homework_site_codes(a)));
+    v["homework_sites"] = answers.map(homework_site_codes).filter(|m| !m.is_empty()).map_or(Value::Null, |m| serde_json::json!(m));
     v["exiting"] = exiting.map_or(Value::Null, |e| serde_json::json!({ "job": e.job, "long": e.long, "since": e.since }));
     v
 }
