@@ -398,6 +398,16 @@ pub struct Answers {
     /// Absent keeps today's bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mail_kind: Option<String>,
+    /// F7f's `week_of` (the preview week's Monday, `YYYY-MM-DD`) and `week_today` (the preview day's index,
+    /// 0 for Monday), stored by F8b's `save_preview` beside the buckets (§14.58.3). Absent keeps today's bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub week_of: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub week_today: Option<u8>,
+    /// F7f's `homework_sites`: a site (`zybooks`, `vhl`) to the course keys (or `unmatched`) whose items link
+    /// it. Read only through [`status_for`], which maps the keys to the kept courses' codes. Empty keeps today's bytes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub homework_sites: BTreeMap<String, Vec<String>>,
 }
 
 impl Answers {
@@ -1195,6 +1205,23 @@ pub fn status_inner(state: &OnboardingState, now_secs: i64) -> Value {
     })
 }
 
+/// [`Answers::homework_sites`] over the kept courses: each key becomes its course's human code (a code two
+/// shells share is named once), a removed or unknown course drops out, `unmatched` stays as the word (the page
+/// never renders it as a code), and a site left with nobody is absent.
+fn homework_site_codes(a: &Answers) -> BTreeMap<String, Vec<String>> {
+    let kept = a.kept_courses();
+    let mut out = BTreeMap::new();
+    for (site, keys) in &a.homework_sites {
+        let mut codes: Vec<String> = Vec::new();
+        for k in keys {
+            let name = if k == UNMATCHED { Some(UNMATCHED.to_string()) } else { kept.iter().find(|c| c.key() == *k).map(|c| c.code.clone()) };
+            if let Some(n) = name { if !codes.contains(&n) { codes.push(n); } }
+        }
+        if !codes.is_empty() { out.insert(site.clone(), codes); }
+    }
+    out
+}
+
 /// `onboarding_status` fails closed (§14.50): when the jobs could not be read the answer is
 /// `{ok: false, error}` with no gate and no item list, because the gate opens on an empty list.
 /// `answers` adds step 3's proof totals, `exiting` the drain's progress (`null` when none).
@@ -1207,6 +1234,9 @@ pub fn status_for(read: Result<OnboardingState, String>, answers: Option<&Answer
     v["step3"] = answers.map_or(Value::Null, |a| serde_json::json!(step3_totals(a)));
     // Step 8's course choice: the kept courses in the file's order; the page derives nothing from it (§14.57.1).
     v["courses"] = answers.map_or(Value::Null, |a| Value::Array(a.kept_courses().iter().map(|c| serde_json::json!({ "key": c.key(), "code": c.code, "label": c.label })).collect()));
+    // The week strip's and step 8's "Found at your school" feeds (§14.58.3): both null without a stored preview.
+    v["week"] = answers.and_then(|a| Some(serde_json::json!({ "of": a.week_of.as_ref()?, "today": a.week_today? }))).unwrap_or(Value::Null);
+    v["homework_sites"] = answers.filter(|a| !a.homework_sites.is_empty()).map_or(Value::Null, |a| serde_json::json!(homework_site_codes(a)));
     v["exiting"] = exiting.map_or(Value::Null, |e| serde_json::json!({ "job": e.job, "long": e.long, "since": e.since }));
     v
 }
