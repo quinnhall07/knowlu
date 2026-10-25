@@ -521,6 +521,9 @@ pub struct SpillItem {
     pub id: String,
     pub title: String,
     pub hours: f64,
+    /// The deadline of a won't-fit item (T4b); always `None` until then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -532,6 +535,9 @@ pub struct Meter {
     pub spill_hours: f64,
     pub spill_items: Vec<SpillItem>,
     pub capacity_text: String,
+    /// "If something has to give: ..." (T4b); always `None` until then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub give_text: Option<String>,
 }
 
 /// The day laid out in 30-minute blocks: how many today's capacity fits, how many must-do work
@@ -549,7 +555,7 @@ pub fn meter(l: &Loaded, today: Date) -> Meter {
         if remaining >= t.remaining_hours() {
             remaining -= t.remaining_hours();
         } else {
-            items.push(SpillItem { id: note_id(l, &t.slug), title: t.title.clone(), hours: round1(t.remaining_hours()) });
+            items.push(SpillItem { id: note_id(l, &t.slug), title: t.title.clone(), hours: round1(t.remaining_hours()), deadline: None });
         }
     }
     Meter {
@@ -560,6 +566,7 @@ pub fn meter(l: &Loaded, today: Date) -> Meter {
         spill_hours: round1((must_h - cap.capacity).max(0.0)),
         spill_items: items,
         capacity_text: cap.text,
+        give_text: None,
     }
 }
 
@@ -4623,6 +4630,133 @@ mod evening_tests {
         let plain = load(&vault, pinned_today());
         assert_eq!(format!("{:?}", evening.takes), format!("{:?}", plain.takes), "takes");
         assert_eq!(format!("{:?}", evening.moved), format!("{:?}", plain.moved), "moved");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    // ---- Deadline ordering T1f: the meter and its line (DS5, DS12, DS13). ----
+
+    /// A probe note in the COPY: `id`, a title, optional `effort_hours`, its `effort_confidence`,
+    /// `due`, `importance`, and any extra frontmatter lines (`rank_override`, `needs_enrichment`).
+    fn put_probe(vault: &Path, slug: &str, title: &str, hours: Option<f64>, confidence: &str, due: &str, importance: i64, extra: &str) {
+        let effort = hours.map(|h| format!("effort_hours: {h:?}\n")).unwrap_or_default();
+        // Note ids are `task_` plus ten hex digits: the slug's first five bytes, in hex.
+        let id: String = slug.bytes().take(5).map(|b| format!("{b:02x}")).collect();
+        let text = format!(
+            "---\nid: task_{id:0<10}\ntitle: \"{title}\"\ncourse: cs-100\ndomain: school\ndue: {due}\n\
+             {effort}effort_confidence: {confidence}\neffort_source: inferred\nimportance: {importance}\n\
+             {extra}status: active\nprogress: 0\ncreated_by: claude\n---\n\nBody text.\n"
+        );
+        std::fs::write(vault.join("tasks").join(format!("{slug}.md")), text).unwrap();
+    }
+
+    /// `scratch_s1` with the fixture's own tasks removed, so only the probes are Must do work.
+    fn probe_vault(name: &str) -> PathBuf {
+        let vault = scratch_s1(name);
+        for entry in std::fs::read_dir(vault.join("tasks")).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        vault
+    }
+
+    const DUE: &str = "2026-08-28T23:59";
+
+    /// X 1h, Y 2.5h, Z 1.5h, all due `D 23:59`, in that pressure order (setup asserts it).
+    fn put_xyz(vault: &Path, x_confidence: &str, x_extra: &str, y_confidence: &str) {
+        put_probe(vault, "ds-x", "X", Some(1.0), x_confidence, DUE, 5, x_extra);
+        put_probe(vault, "ds-y", "Y", Some(2.5), y_confidence, DUE, 3, "");
+        put_probe(vault, "ds-z", "Z", Some(1.5), "low", DUE, 1, "");
+        let order = slugs(&load(vault, pinned_today()));
+        assert_eq!(order, ["ds-x", "ds-y", "ds-z"], "setup: pressure order");
+        let wont: Vec<String> =
+            load_at(vault, pinned_today(), None, Some(at(21, 0))).plan.wont_fit.iter().map(|w| w.slug.clone()).collect();
+        assert_eq!(wont, ["ds-y"], "setup: the walk names Y");
+    }
+
+    fn meter_at(vault: &Path, m: DateTime) -> Meter {
+        build_state(vault, View::Today, TODAY, &zoned_at(m), None).meter
+    }
+
+    /// DS5: a won't-fit item leads `spill_items` with its deadline; the totals are the 09:00 page's.
+    #[test]
+    fn spill_items_list_wont_fit_first_and_totals_hold() {
+        let vault = probe_vault("ds5");
+        put_xyz(&vault, "low", "", "low");
+        let (night, day) = (meter_at(&vault, at(21, 0)), meter_at(&vault, at(9, 0)));
+        let first = night.spill_items.first();
+        assert_eq!(first.map(|i| i.title.as_str()), Some("Y"), "the won't-fit item leads the spill");
+        assert_eq!(first.and_then(|i| i.deadline.as_deref()), Some("2026-08-28T23:59"));
+        assert_eq!(
+            (night.fit_blocks, night.spill_blocks, night.capped, night.spill_hours),
+            (day.fit_blocks, day.spill_blocks, day.capped, day.spill_hours),
+            "the totals' formulas are untouched"
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// DS12: the meter line names what has to give, and only when something does.
+    #[test]
+    fn the_meter_line_names_what_has_to_give() {
+        let vault = probe_vault("ds12");
+        // No W (at 09:00 everything fits): the line is absent.
+        put_xyz(&vault, "low", "needs_enrichment: true\n", "low");
+        assert_eq!(meter_at(&vault, at(9, 0)).give_text, None, "no W, no line");
+        // One item; `needs_enrichment` alone is not a placeholder.
+        assert_eq!(
+            meter_at(&vault, at(21, 0)).give_text.as_deref(),
+            Some("If something has to give: Y (2.5h). Everything else fits by its deadline."),
+        );
+        // A pinned Must do item: the clause says so.
+        put_probe(&vault, "ds-pin", "Lab Pin", Some(0.5), "low", DUE, 2, "rank_override: 1\n");
+        assert_eq!(
+            meter_at(&vault, at(21, 0)).give_text.as_deref(),
+            Some("If something has to give: Y (2.5h). Everything else fits by its deadline, not counting Lab Pin, which you pinned."),
+        );
+        std::fs::remove_file(vault.join("tasks").join("ds-pin.md")).unwrap();
+        // X a placeholder (`effort_confidence: unset`) in Y's prefix: one item has no estimate.
+        put_xyz(&vault, "unset", "", "low");
+        let one = meter_at(&vault, at(21, 0)).give_text.unwrap_or_default();
+        assert!(one.contains("This may not all fit: 1 item has no time estimate yet."), "{one:?}");
+        // X and Y both placeholders: two items.
+        put_xyz(&vault, "unset", "", "unset");
+        let two = meter_at(&vault, at(21, 0)).give_text.unwrap_or_default();
+        assert!(two.contains("This may not all fit: 2 items have no time estimate yet."), "{two:?}");
+        let _ = std::fs::remove_dir_all(&vault);
+
+        // Two items (DP21's set): B and C, hours summed.
+        let vault = probe_vault("ds12b");
+        put_probe(&vault, "ds-k", "K", Some(1.0), "low", DUE, 3, "");
+        put_probe(&vault, "ds-b", "B", Some(2.0), "low", "2026-08-28T22:30", 3, "");
+        put_probe(&vault, "ds-c", "C", Some(2.5), "low", "2026-08-28T23:30", 3, "");
+        put_probe(&vault, "ds-d", "D", Some(0.5), "low", "2026-08-26T23:59", 3, "");
+        let wont: Vec<String> =
+            load_at(&vault, pinned_today(), None, Some(at(21, 0))).plan.wont_fit.iter().map(|w| w.slug.clone()).collect();
+        assert_eq!(wont, ["ds-b", "ds-c"], "setup: DP21's walk");
+        assert_eq!(
+            meter_at(&vault, at(21, 0)).give_text.as_deref(),
+            Some("If something has to give: B and C (4.5h)."),
+        );
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// DS13 (guard): the `--window` preview ranks at the page's moment, on the previewed calendar.
+    #[test]
+    fn the_window_preview_ranks_at_the_page_moment() {
+        let vault = probe_vault("ds13");
+        put_xyz(&vault, "low", "", "low");
+        let window = "[{days: [mon, tue, wed, thu, fri], start: \"08:00\", end: \"22:00\"}]";
+        let m = at(21, 0);
+        let state = build_state_preview(&vault, View::Today, TODAY, &zoned_at(m), None, window).unwrap();
+        let rows: Vec<String> =
+            state.must_do.groups.iter().flat_map(|g| g.rows.iter().map(|r| r.slug.clone())).collect();
+        let previewed = load_at(&vault, TODAY, Some(&crate::commitments::parse_window(window).unwrap()), Some(m));
+        let expected: Vec<String> = plan_at(&previewed.tasks, TODAY, &previewed.cal, Some(m))
+            .order
+            .iter()
+            .map(|t| t.slug.clone())
+            .filter(|s| rows.contains(s))
+            .collect();
+        assert_eq!(rows.len(), 3, "the three probes are Must do");
+        assert_eq!(rows, expected, "the preview's Must do rows follow plan_at on the previewed calendar");
         let _ = std::fs::remove_dir_all(&vault);
     }
 }
