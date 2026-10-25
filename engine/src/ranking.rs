@@ -981,12 +981,18 @@ mod tests {
         assert_eq!(plan.wont_fit.iter().map(|w| w.slug.as_str()).collect::<Vec<_>>(), ["q-2359"]);
 
         // Equal work and deadline: the one later in rank's order goes, whichever that is.
+        let mut earlier: Option<Vec<String>> = None;
         for (r_importance, s_importance) in [(5, 1), (1, 5)] {
             let tasks = vec![
                 task("r", Some(at(28, 23, 59)), 1.5, r_importance),
                 task("s", Some(at(28, 23, 59)), 1.5, s_importance),
             ];
             let ranked = slugs(&rank(&tasks, D, &cal));
+            // Guard (T3b review): the two pairs really do rank in opposite orders.
+            if let Some(first) = &earlier {
+                assert_ne!(&ranked, first, "setup: the importance pairs must give different rank orders");
+            }
+            earlier = Some(ranked.clone());
             let plan = plan_at(&tasks, D, &cal, Some(at(28, 21, 0)));
             assert!(!plan.safe);
             let named: Vec<String> = plan.wont_fit.iter().map(|w| w.slug.clone()).collect();
@@ -1053,5 +1059,130 @@ mod tests {
         let mut reversed = tasks.clone();
         reversed.reverse();
         assert_eq!(plan, plan_at(&reversed, D, &cal, now));
+    }
+
+    #[test]
+    fn a_prefix_holds_kept_items_before_and_after_the_removed_one() {
+        // At D 21:00 the timeline gives before(22:00)=60, before(23:30)=150, before(23:59)=179.
+        // The walk has no margin (spec 2.6). Deadline order: a (30 min, 22:00), c (120 min, 23:30),
+        // k (60 min, 23:59).
+        //   a: t = 30  <= 60   kept.
+        //   c: t = 150 <= 150  kept (exactly full).
+        //   k: t = 210 >  179  overflow; the longest kept is c (120), removed.
+        // Kept after the removal: a, k (t = 90). So c's prefix is [a, k]: a came before c, k after.
+        // (Step 0 is unsafe: 210 > 179 - 30.) The brief's 2.5h c cannot work: 30 + 150 > 150.
+        let tasks = vec![
+            task("a", Some(at(28, 22, 0)), 0.5, 3),
+            task("c", Some(at(28, 23, 30)), 2.0, 3),
+            task("k", Some(at(28, 23, 59)), 1.0, 3),
+        ];
+        let plan = plan_at(&tasks, D, &week(), Some(at(28, 21, 0)));
+        assert!(!plan.safe);
+        assert_eq!(plan.wont_fit, vec![wont_fit("c", at(28, 23, 30), 120, 150, &["a", "k"], 90, "k", at(28, 23, 59))]);
+        assert_eq!(slugs(&plan.order), names(&["a", "k", "c"]));
+    }
+
+    #[test]
+    fn progress_over_100_counts_as_no_work() {
+        // Controller ruling (T3b review): work_minutes clamps at 0, never negative.
+        let mut done = task("done", Some(at(28, 23, 59)), 2.0, 3);
+        done.progress = 150;
+        assert_eq!(work_minutes(&done), 0);
+
+        // Inside a walk it must not hide another item's overflow: 3h = 180 > 179 at 23:59.
+        let tasks = vec![done, task("big", Some(at(28, 23, 59)), 3.0, 3)];
+        let plan = plan_at(&tasks, D, &week(), Some(at(28, 21, 0)));
+        assert!(!plan.safe);
+        assert_eq!(plan.wont_fit, vec![wont_fit("big", at(28, 23, 59), 180, 179, &["done"], 0, "big", at(28, 23, 59))]);
+    }
+
+    // ---- Deadline ordering: the merge, assembly and the run path (DP15-DP19, DP21). ----
+
+    #[test]
+    fn the_lab_leads_until_1929_and_yields_at_1930() {
+        let tasks = lab_and_homework();
+        let cal = week();
+        assert_first(&tasks, "lab");
+        for moment in [at(28, 15, 0), at(28, 19, 29)] {
+            assert_eq!(plan_at(&tasks, D, &cal, Some(moment)).order, rank(&tasks, D, &cal), "{moment:?}");
+        }
+        assert_eq!(slugs(&plan_at(&tasks, D, &cal, Some(at(28, 19, 30))).order), names(&["hw", "lab"]));
+    }
+
+    #[test]
+    fn a_daytime_clash_puts_the_essay_first() {
+        let tasks = vec![task("essay", Some(at(28, 23, 59)), 11.0, 3), task("lab", Some(at(20, 23, 59)), 3.0, 3)];
+        assert_rank(&tasks, &["lab", "essay"]);
+        let plan = plan_at(&tasks, D, &week(), Some(at(28, 9, 0)));
+        assert_eq!(slugs(&plan.order), names(&["essay", "lab"]));
+        assert!(plan.wont_fit.is_empty());
+    }
+
+    #[test]
+    fn a_shorter_overdue_item_goes_ahead_of_a_longer_one() {
+        let tasks = vec![
+            task("long-overdue", Some(at(26, 23, 59)), 2.5, 3),
+            task("short-overdue", Some(at(26, 23, 59)), 0.5, 3),
+            task("k", Some(at(28, 23, 59)), 1.0, 3),
+        ];
+        assert_rank(&tasks, &["long-overdue", "short-overdue", "k"]);
+        let plan = plan_at(&tasks, D, &week(), Some(at(28, 21, 0)));
+        assert_eq!(slugs(&plan.order), names(&["short-overdue", "k", "long-overdue"]));
+    }
+
+    #[test]
+    fn everything_outside_must_do_keeps_its_index() {
+        let mut tasks = lab_and_homework();
+        tasks.push(task("later", Some(DateTime::constant(2026, 9, 7, 23, 59, 0, 0)), 1.0, 3));
+        tasks.push(task("undated", None, 1.0, 3));
+        let cal = week();
+        let ranked = rank(&tasks, D, &cal);
+        let must: Vec<bool> = ranked.iter().map(|t| slack_days(t, D, &cal, DEFAULT_BUFFER_DAYS) <= 0.0).collect();
+        assert_eq!(must.iter().filter(|m| **m).count(), 2, "setup: only the lab and hw are Must do");
+        let plan = plan_at(&tasks, D, &cal, Some(at(28, 19, 30)));
+        assert!(!plan.safe);
+        assert_eq!(plan.order.len(), ranked.len());
+        for (i, is_must) in must.iter().enumerate() {
+            if !is_must {
+                assert_eq!(plan.order[i], ranked[i], "index {i}");
+            }
+        }
+        let mut in_plan: Vec<String> = (0..must.len()).filter(|&i| must[i]).map(|i| plan.order[i].slug.clone()).collect();
+        let mut in_rank: Vec<String> = (0..must.len()).filter(|&i| must[i]).map(|i| ranked[i].slug.clone()).collect();
+        in_plan.sort();
+        in_rank.sort();
+        assert_eq!(in_plan, in_rank);
+    }
+
+    #[test]
+    fn overrides_win_and_are_not_charged() {
+        let mut pinned = task("pinned", Some(at(26, 23, 59)), 3.0, 3);
+        pinned.rank_override = Some(1);
+        let tasks = vec![pinned, task("hw", Some(at(28, 23, 59)), 1.0, 3)];
+        let plan = plan_at(&tasks, D, &week(), Some(at(28, 21, 0)));
+        assert_eq!(slugs(&plan.order), names(&["pinned", "hw"]));
+        assert!(plan.wont_fit.is_empty());
+    }
+
+    #[test]
+    fn the_merge_runs_before_wont_fit_items() {
+        // The walk: b overflows itself (120 > 90); c fits (150 <= 150); k overflows (210 > 179) and c,
+        // the longest of c and k, is removed. d (30) fits ahead of k: 30 + 60 <= 179 - 30.
+        let tasks = vec![
+            task("k", Some(at(28, 23, 59)), 1.0, 3),
+            task("b", Some(at(28, 22, 30)), 2.0, 3),
+            task("c", Some(at(28, 23, 30)), 2.5, 3),
+            task("d", Some(at(26, 23, 59)), 0.5, 3),
+        ];
+        let plan = plan_at(&tasks, D, &week(), Some(at(28, 21, 0)));
+        assert!(!plan.safe);
+        assert_eq!(
+            plan.wont_fit,
+            vec![
+                wont_fit("b", at(28, 22, 30), 120, 90, &[], 0, "b", at(28, 22, 30)),
+                wont_fit("c", at(28, 23, 30), 150, 150, &["k"], 60, "k", at(28, 23, 59)),
+            ]
+        );
+        assert_eq!(slugs(&plan.order), names(&["d", "k", "b", "c"]));
     }
 }

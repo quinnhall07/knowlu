@@ -1675,6 +1675,27 @@ calendars:
         let _ = std::fs::remove_dir_all(&vault);
     }
 
+    #[test]
+    fn an_unsafe_run_writes_the_new_order_and_no_new_line() {
+        // 21:00: the 1h probe (due 23:59) and the two overdue tasks cannot all fit with spare time,
+        // so Erste Reflexion (0.5h) goes ahead of the probe and CS 100 HW 01 (2.5h) does not.
+        let vault = evening_vault("unsaferun");
+        run_evening(&vault, Some("2026-08-28"), Some("2026-08-28T21:00"));
+        let line = first_must_do_line(&vault);
+        assert!(line.contains("Erste Reflexion"), "at 21:00: {line}");
+        let page = std::fs::read_to_string(vault.join("state").join("today.md")).unwrap();
+        assert!(!page.contains("fit"), "no new line about fitting:\n{page}");
+        let _ = std::fs::remove_dir_all(&vault);
+
+        let vault = evening_vault("unsafedaytime");
+        run_evening(&vault, Some("2026-08-28"), Some("2026-08-28T09:00"));
+        let line = first_must_do_line(&vault);
+        assert!(line.contains("CS 100 HW 01"), "at 09:00: {line}");
+        let page = std::fs::read_to_string(vault.join("state").join("today.md")).unwrap();
+        assert!(!page.contains("fit"), "no new line about fitting:\n{page}");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
     /// Every file under `dir`, concatenated.
     fn read_tree(dir: &Path) -> String {
         let mut out = String::new();
