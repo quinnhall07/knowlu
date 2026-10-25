@@ -419,8 +419,9 @@ impl WeekCalendar {
     /// spec Q3, evening ruling d), so a window's end no longer cuts the day. Busy time is the
     /// template's classes plus the active commitment spans, as `template_blocks` builds it, with
     /// any span whose end is not after its start dropped, so an inverted class or a span written
-    /// across midnight counts no minute twice. An event is subtracted on its start date only (a
-    /// 23:00-01:00 event takes that evening, nothing of the next date's window), then the minimum
+    /// across midnight counts no minute twice. Each timed event is subtracted as a `DateTime` span
+    /// wherever it overlaps this date's blocks (a 23:00-01:00 event takes 23:00-24:00 here, and
+    /// takes from the next date only if that date's window opens before 01:00), then the minimum
     /// filter runs. `free_blocks` is unchanged and keeps today's behaviour for an inverted class.
     pub fn free_blocks_to_midnight(&self, day: Date) -> Vec<Block> {
         let Ok(next) = day.tomorrow() else {
