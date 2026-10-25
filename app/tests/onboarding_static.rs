@@ -228,6 +228,8 @@ const BANNED: &[&str] = &[
     "sign_out", "switch_profile", "delete_my_data", "open_external", "retarget_credentials",
     // The queue's mail.setup owns the run; a page-started run would not be drained (ruling, review r2).
     "mail_setup_start",
+    // F11c1 review m-3: the path-taking originals stay off the page in any form (section 14.57.1).
+    "store_credentials", "discover_coursework",
 ];
 
 /// Only commands the plan names: section 4.5's list, F5's, the step-2 sign-in, step 5's
@@ -236,7 +238,7 @@ const BANNED: &[&str] = &[
 const ALLOWED: &[&str] = &[
     "onboarding_status", "onboarding_answer", "onboarding_skip", "onboarding_retry", "onboarding_finish", "onboarding_quit",
     "onboarding_sign_out", "onboarding_attach_session", "onboarding_entitlement", "onboarding_checkout",
-    "onboarding_capture_link", "onboarding_paste_link", "campus_search", "store_credentials", "discover_coursework",
+    "onboarding_capture_link", "onboarding_paste_link", "campus_search",
     "open_lms_window", "capture_courses", "close_lms_window", "google_sign_in", "send_magic_link", "verify_email_code",
     "google_connect", "google_status", "mail_setup_progress",
     "your_week", "commitment_proposals", "commitments_confirm", "launch_state",
@@ -1193,6 +1195,8 @@ fn no_step_eight_call_passes_a_vault() {
         let calls = invoke_calls(body, cmd);
         assert_eq!(calls.len(), 1, "{f} must call {cmd} exactly once");
         assert!(!calls[0].contains("vault"), "{f} sends no vault, the console reads it from its own state: {}", calls[0]);
+        // F11c1 review I-1: onboarding_status never carries a vault (section 14.57.1), so no guard may read one.
+        assert!(!body.contains("vault"), "{f} reads no vault at all");
         let others = body.matches("invoke(").count() - 1;
         assert_eq!(others, 0, "{f} makes no other call");
     }

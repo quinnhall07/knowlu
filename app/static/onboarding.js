@@ -399,11 +399,10 @@
   }
   // ==== F11c, step 8 (continues) =================================================================
   function storeLogins(site) {
-    var f = w8.site[site], vault = w8.status && w8.status.vault, z = site === "zybooks";
+    var f = w8.site[site], z = site === "zybooks";
     if (discovering) { return; }
     var user = (z ? EL("ob-zybooks-username") : EL("ob-vhl-username")).value;
     var secret = (z ? EL("ob-zybooks-password") : EL("ob-vhl-password")).value;
-    if (!vault) { say8(site, "Knowlu can't find your setup folder yet. Try again in a moment."); return; }
     if (!user || !secret) { say8(site, "Type your " + SITE_NAMES[site] + " email or username and password first."); return; }
     OB.clearError();
     f.stage = "storing"; f.line = "";
@@ -582,7 +581,7 @@
         w10.busy = false; setConfirm10();
         if (a && a.ok === true) { OB.show(11); return; }
         say10((a && a.error) || "Knowlu couldn't move on. Try again.");
-      });
+      }, function () { w10.busy = false; setConfirm10(); say10("Your week is saved, but Knowlu couldn't move on. Try again."); });
     }).catch(function () { w10.busy = false; setConfirm10(); say10("Knowlu couldn't save your week. Try again."); });
   }
   function onClick10(e) {
