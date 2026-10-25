@@ -3723,3 +3723,49 @@ fn test_41_not_now_without_mail_connect_changes_nothing_and_the_command_reads_th
     let body = enclosing_fn(&src, at);
     assert!(body.contains("mail_not_now_in(") && body.contains("data_dir") && !body.contains("vault"), "data dir only:\n{body}");
 }
+
+// ======================================================================================================
+// F5c (test 43): the two step-8 wrappers read the vault from `ConsoleState`; the page never sends a path.
+// Invented values only; nothing here reaches the Credential Manager (the unknown-source refusal returns
+// before `credentials::write`).
+// ======================================================================================================
+
+#[test]
+fn test_43_the_seam_hands_the_inner_the_console_vault_and_nothing_else() {
+    let vault = Path::new("invented-vault-root").join("a");
+    let seen = RefCell::new(Vec::<String>::new());
+    let out = knowlu::onboarding::on_console_vault(&vault, |v| { seen.borrow_mut().push(v); serde_json::json!({"ok": true}) });
+    assert_eq!(out["ok"], true);
+    assert_eq!(*seen.borrow(), vec![vault.to_string_lossy().into_owned()], "the inner is called once, with cs.vault");
+}
+
+#[test]
+fn test_43_a_wrapped_store_with_an_unknown_source_is_refused_and_never_echoes_the_secret() {
+    const INVENTED: &str = "invented-secret-f5c-0001";
+    let out = knowlu::onboarding::on_console_vault(Path::new("invented-vault-root"), |v| {
+        knowlu::onboarding::store_credentials(v, "nowhere".into(), "invented-user".into(), INVENTED.into())
+    });
+    assert_eq!(out["ok"], false);
+    assert!(!out.to_string().contains(INVENTED), "the answer carried the secret");
+}
+
+#[test]
+fn test_43_each_wrapper_calls_its_inner_with_cs_vault_and_neither_takes_a_vault_argument() {
+    let src = src_of("onboarding.rs");
+    for (name, inner) in [("onboarding_discover_coursework", "discover_coursework("), ("onboarding_store_credentials", "store_credentials(")] {
+        let at = src.find(&format!("pub fn {name}(")).unwrap_or_else(|| panic!("{name} exists"));
+        assert!(src[..at].trim_end().ends_with("#[tauri::command(async)]"), "{name} is an async command");
+        let body = enclosing_fn(&src, at + 7);
+        let sig = &body[..body.find(')').unwrap()];
+        assert!(sig.contains("cs: tauri::State<'_, crate::state::ConsoleState>"), "{name} reads ConsoleState:\n{sig}");
+        assert!(!sig.contains("vault"), "{name} takes no vault argument:\n{sig}");
+        assert!(body.contains("on_console_vault(&cs.vault"), "{name} reads cs.vault:\n{body}");
+        assert!(body.contains(inner), "{name} calls today's function:\n{body}");
+        for bad in ["format!", "println!", "eprintln!", "log"] {
+            assert!(!body.contains(bad), "{name} must not format or log (it holds a secret or a path):\n{body}");
+        }
+    }
+    // Today's functions are called unchanged: the shell's list still needs their `vault` argument.
+    assert!(src.contains("pub fn discover_coursework(vault: String, zybooks: bool, vhl: bool)"));
+    assert!(src.contains("pub fn store_credentials(vault: String, source: String, user: String, secret: String)"));
+}

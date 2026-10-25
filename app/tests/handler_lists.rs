@@ -126,6 +126,31 @@ fn the_console_list_names_the_two_privacy_commands_and_the_wizard_list_neither()
     }
 }
 
+/// O3 F5c (test 43; plan §14.57.1, .9): the two step-8 wrappers and F2b3's `onboarding_mail_not_now` are
+/// in the console's list and none in the wizard's. The wizard keeps the two path-taking commands.
+#[test]
+fn the_console_list_names_the_three_onboarding_commands_f5c_adds_and_the_wizard_list_none() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let lists = handler_lists(&src);
+    let console = list_with(&lists, "commands::state");
+    let wizard = list_with(&lists, "onboarding::finish_onboarding");
+    const F5C: [&str; 3] = [
+        "onboarding::onboarding_discover_coursework",
+        "onboarding::onboarding_store_credentials",
+        "onboarding_state::onboarding_mail_not_now",
+    ];
+    for name in F5C {
+        assert_eq!(console.iter().filter(|n| *n == name).count(), 1, "the console list names {name} once");
+        assert!(!wizard.iter().any(|n| n == name), "the wizard list must not name {name}");
+    }
+    for name in ["onboarding::discover_coursework", "onboarding::store_credentials"] {
+        assert!(wizard.iter().any(|n| n == name), "the wizard list keeps {name}");
+        assert!(!console.iter().any(|n| n == name), "the console list must not name the path-taking {name}");
+    }
+    assert_eq!(console.len(), 74, "the console list's count; recount it when a command is added");
+}
+
 #[test]
 fn the_parser_reads_a_list_by_its_names() {
     let text = "x.invoke_handler(tauri::generate_handler![a::one, b::two,\n c::three])\n\
