@@ -38,7 +38,7 @@ use crate::models::{apply_slice_default, load_tasks};
 use crate::passes::{detect_external, verify_tail, VERIFY_TAIL_LIMIT};
 use crate::planning::load_planning;
 use crate::pystr;
-use crate::ranking::{designate_today, rank_at};
+use crate::ranking::{designate_today, rank, rank_at};
 use crate::runs::{end_run, git_sha, start_run};
 use crate::render::{render_today, RenderOpts};
 use crate::weekcal::WeekCalendar;
@@ -636,7 +636,9 @@ pub fn run_with_at(
     let mut tasks = load_tasks(&vault.join("tasks"), Some(&mut skipped));
     apply_slice_default(&mut tasks, planning.slice_hours);
     let ranked = rank_at(&tasks, today, &cal, moment);
-    let designated = designate_today(&ranked, today, &cal, Some(&planning));
+    // The designation reads pressure order, never the formula's (spec §4): Recommended's takes are
+    // the same whatever order Must do is shown in.
+    let designated = designate_today(&rank(&tasks, today, &cal), today, &cal, Some(&planning));
 
     // Gauge counts (S2 §7.7; plan 2 Task 7, F6). Three integers on the record `rank` already
     // writes every run — the trend history the gauge could never backfill, because nothing else
@@ -1660,22 +1662,6 @@ calendars:
     }
 
     #[test]
-    fn an_evening_run_writes_the_evening_order_to_today_md() {
-        let vault = evening_vault("eveningrun");
-        run_evening(&vault, Some("2026-08-28"), Some("2026-08-28T21:00"));
-        assert!(first_must_do_line(&vault).contains("Evening probe"), "at 21:00");
-        let _ = std::fs::remove_dir_all(&vault);
-
-        let vault = evening_vault("daytimerun");
-        run_evening(&vault, Some("2026-08-28"), Some("2026-08-28T19:59"));
-        assert!(
-            first_must_do_line(&vault).contains("CS 100 HW 01"),
-            "at 19:59 the page is the golden's order"
-        );
-        let _ = std::fs::remove_dir_all(&vault);
-    }
-
-    #[test]
     fn an_unsafe_run_writes_the_new_order_and_no_new_line() {
         // 21:00: the 1h probe (due 23:59) and the two overdue tasks cannot all fit with spare time,
         // so Erste Reflexion (0.5h) goes ahead of the probe and CS 100 HW 01 (2.5h) does not.
@@ -1735,7 +1721,7 @@ calendars:
         run_evening(&vault, None, Some("2026-08-28T21:00"));
         let page = std::fs::read_to_string(vault.join("state").join("today.md")).unwrap();
         assert!(page.starts_with("# Today — Friday, August 28"), "{page}");
-        assert!(first_must_do_line(&vault).contains("Evening probe"));
+        assert!(first_must_do_line(&vault).contains("Erste Reflexion"));
         let _ = std::fs::remove_dir_all(&vault);
     }
 

@@ -4473,17 +4473,6 @@ mod evening_tests {
     }
 
     #[test]
-    fn load_at_an_evening_moment_reorders_and_load_does_not() {
-        let vault = scratch_s1("s1");
-        put_task(&vault, "evening-probe", "task_e5e0000001", 1.0, "2026-08-28T23:59");
-        let evening = slugs(&load_at(&vault, TODAY, None, Some(at(21, 0))));
-        assert_eq!(evening.first().map(String::as_str), Some("evening-probe"), "21:00 ranks tonight's task first: {evening:?}");
-        let plain = slugs(&load(&vault, TODAY));
-        assert_ne!(plain.first().map(String::as_str), Some("evening-probe"), "load has no moment: {plain:?}");
-        let _ = std::fs::remove_dir_all(&vault);
-    }
-
-    #[test]
     fn build_state_after_the_hour_leads_must_do_with_due_today() {
         let vault = scratch_s1("s2");
         put_task(&vault, "evening-probe", "task_e5e0000001", 1.0, "2026-08-28T23:59");
@@ -4492,7 +4481,7 @@ mod evening_tests {
             s.must_do.groups.first().map(|g| g.label.clone())
         };
         assert_eq!(label(at(9, 0)).as_deref(), Some("Overdue"), "by day, the overdue homework leads");
-        assert_eq!(label(at(21, 0)).as_deref(), Some("Due today"), "after the hour, tonight's task leads");
+        assert_eq!(label(at(21, 0)).as_deref(), Some("Overdue"), "at 21:00 the short overdue reflection fits ahead of tonight's task");
         let _ = std::fs::remove_dir_all(&vault);
     }
 

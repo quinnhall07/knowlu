@@ -10,7 +10,7 @@
 //! Both numbers fall out of the interaction between the 2.0h session slice and the 4.0h daily
 //! budget, so the fixture pins the interaction rather than either mechanism alone.
 
-use jiff::civil::{Date, DateTime, Time};
+use jiff::civil::{Date, DateTime};
 
 use crate::models::Task;
 use crate::planning::PlanningConfig;
@@ -51,91 +51,77 @@ pub fn pressure(task: &Task, today: Date, cal: &WeekCalendar) -> f64 {
 /// semantics — `pressure` walks up to 365 days of capacity, so calling it from a comparator would
 /// be both slower and, for NaN, differently ordered.
 ///
-/// `rank` has no moment: it is `rank_at` with `None`, so it is the pressure order and nothing else.
+/// `rank` has no moment: the pressure order and nothing else. (`plan_at` with no moment returns this.)
 pub fn rank(tasks: &[Task], today: Date, cal: &WeekCalendar) -> Vec<Task> {
-    rank_at(tasks, today, cal, None)
+    let (overridden, result) = pressure_sorted(tasks, today, cal);
+    insert_overrides(result, overridden)
 }
 
-/// The hour from which tasks closing tonight outrank the rest: 20:00 in the vault's zone.
-/// Quinn's ruling (a), 2026-10-24.
-pub const EVENING_HOUR: Time = Time::constant(20, 0, 0, 0);
-
-/// When a task closes tonight, as seen from moment `m`, or `None` if it does not.
-///
-/// v1: a task closes tonight when its `due` falls on `m`'s date and is strictly after `m`. A due
-/// time already passed, or equal to the moment, has closed. **This is the one place O6's late-window
-/// close goes**: a late task whose window closes tonight returns that close here. Daily late-penalty
-/// steps are out of v1 (ruling b), so only a window's close counts.
-fn closes_tonight(task: &Task, m: DateTime) -> Option<DateTime> {
-    task.due.filter(|due| due.date() == m.date() && *due > m)
-}
-
-/// `rank` at a moment. With `None`, or before `EVENING_HOUR`, or when the moment is not on `today`,
-/// this is exactly the pressure order. From `EVENING_HOUR` on, tasks closing tonight (see
-/// `closes_tonight`) come first, earliest close first, ties keeping the pressure order (stable
-/// sort on exact `DateTime`s, no float key); every other task keeps its pressure order after them.
-/// Rank overrides are inserted last, as `rank` always did, so they still win. Deterministic, no model.
-pub fn rank_at(tasks: &[Task], today: Date, cal: &WeekCalendar, moment: Option<DateTime>) -> Vec<Task> {
-    let mut decorated: Vec<(f64, i64, Task)> = tasks
-        .iter()
-        .map(|t| (pressure(t, today, cal), -t.importance, t.clone()))
-        .collect();
+/// The scored list split into (rank-overridden, the rest), the rest in pressure order.
+fn pressure_sorted(tasks: &[Task], today: Date, cal: &WeekCalendar) -> (Vec<Task>, Vec<Task>) {
+    let mut decorated: Vec<(f64, i64, Task)> =
+        tasks.iter().map(|t| (pressure(t, today, cal), -t.importance, t.clone())).collect();
     decorated.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
-    let scored: Vec<Task> = decorated.into_iter().map(|(_, _, t)| t).collect();
+    decorated.into_iter().map(|(_, _, t)| t).partition(|t| t.rank_override.is_some())
+}
 
-    let mut overridden: Vec<Task> = scored.iter().filter(|t| t.rank_override.is_some()).cloned().collect();
-    let mut result: Vec<Task> = scored.into_iter().filter(|t| t.rank_override.is_none()).collect();
-
-    if let Some(m) = moment.filter(|m| m.date() == today && m.time() >= EVENING_HOUR) {
-        let mut closing: Vec<(DateTime, Task)> = Vec::new();
-        let mut rest: Vec<Task> = Vec::new();
-        for t in result {
-            match closes_tonight(&t, m) {
-                Some(at) => closing.push((at, t)),
-                None => rest.push(t),
-            }
-        }
-        closing.sort_by_key(|(at, _)| *at);
-        result = closing.into_iter().map(|(_, t)| t).chain(rest).collect();
-    }
-
+/// Rank overrides are inserted last, in override order, so they still win.
+fn insert_overrides(mut result: Vec<Task>, mut overridden: Vec<Task>) -> Vec<Task> {
     overridden.sort_by_key(|t| t.rank_override.unwrap_or(0));
     for task in overridden {
-        let target = task.rank_override.unwrap_or(1) - 1;
-        let index = target.max(0).min(result.len() as i64) as usize;
+        let index = (task.rank_override.unwrap_or(1) - 1).max(0).min(result.len() as i64) as usize;
         result.insert(index, task);
     }
     result
 }
 
+/// `rank` at a moment: the order of `plan_at` (the deadline formula, spec §2). With `None`, or a
+/// moment not on `today`, or when today's pressure order is safe, this is exactly the pressure order.
+/// Deterministic, no model.
+pub fn rank_at(tasks: &[Task], today: Date, cal: &WeekCalendar, moment: Option<DateTime>) -> Vec<Task> {
+    plan_at(tasks, today, cal, moment).order
+}
+
 /// The spare time step 0 and step 3 require: Quinn's Q4, 2026-10-24.
 pub const FIT_MARGIN_MINUTES: i64 = 30;
 
-/// An item that cannot fit before its deadline (filled in by T3b).
+/// An item the fit walk (spec §2.6) removed because it cannot fit before its deadline. Each record
+/// is made at the moment of removal, from the items kept then.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WontFit {
     pub slug: String,
     pub deadline: DateTime,
     pub work_minutes: i64,
+    /// `A(d)`: whole minutes of the timeline before `deadline`.
     pub available_minutes: i64,
+    /// Every other item kept at removal, up to and including the overflower.
     pub prefix: Vec<String>,
+    /// The prefix's work, in minutes, at removal.
     pub prefix_minutes: i64,
+    /// The item whose addition overflowed (may be this one).
     pub overflower: String,
+    /// The overflower's deadline.
     pub overflow_deadline: DateTime,
 }
 
-/// The deadline plan.
+/// The deadline plan: the Must do order the page and `today.md` use, whether today's pressure order
+/// was safe, and what the walk removed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeadlinePlan {
     pub order: Vec<Task>,
+    /// Step 0: every dated item in pressure order keeps `FIT_MARGIN_MINUTES` spare.
     pub safe: bool,
+    /// The items that cannot fit, ordered by (deadline, scored index), not by removal order. Empty
+    /// when `safe`.
     pub wont_fit: Vec<WontFit>,
 }
 
 /// Whole minutes of work left on a task: `round_ties_even(hours * 60)`, so every figure after this
-/// is an integer.
+/// is an integer. Clamped at 0: a `progress` over 100 is no work, never negative work that could
+/// hide another item's overflow (controller ruling, T3b review). `pressure` and
+/// `Task::remaining_hours` are unchanged.
 pub fn work_minutes(task: &Task) -> i64 {
-    (task.remaining_hours() * 60.0).round_ties_even() as i64
+    ((task.remaining_hours() * 60.0).round_ties_even() as i64).max(0)
 }
 
 /// Free time from a moment forward, to local midnight each date: `weekcal`'s midnight blocks per
@@ -181,30 +167,27 @@ impl Timeline {
     }
 }
 
-/// The deadline an item is held to at moment `m`: its `due` while that is after `m`, else `None`
-/// (overdue, no window). **This is the one place O6's late-window close goes**: a late item whose
-/// window closes after `m` returns that close here. Daily late-penalty steps are out of v1.
+/// The deadline an item is held to at moment `m`: its `due` while that is after `m` (an item due
+/// exactly at `m` has closed), else `None` (overdue, no window). **This is the one place O6's
+/// late-window close goes**: a late item whose window closes after `m` returns that close here.
+/// Daily late-penalty steps are out of v1 (ruling b), so only a window's close will count.
 fn deadline(task: &Task, m: DateTime) -> Option<DateTime> {
     task.due.filter(|due| *due > m)
 }
 
-/// `rank_at`'s successor. With no moment, or a moment not on `today`, this is `rank`. Otherwise Must
-/// do (non-override, slack <= 0) is checked in pressure order against the timeline (step 0); when
-/// every dated item keeps `FIT_MARGIN_MINUTES` spare the order is `rank`'s, else dated items go in
-/// deadline order (step 1), the fit walk drops what cannot fit (step 2), and the order is the kept
-/// items, then overdue ones in pressure order, then the dropped (`wont_fit`, by deadline and scored
-/// position), refilled into Must do's positions. The overdue merge (step 3) comes later.
-/// Deterministic, no model.
+/// The deadline plan (spec §2). With no moment, or a moment not on `today`, this is `rank`. Otherwise
+/// Must do (non-override, slack <= 0) is checked in pressure order against the timeline (step 0);
+/// when every dated item keeps `FIT_MARGIN_MINUTES` spare the order is `rank`'s, else dated items go
+/// in deadline order (step 1), the fit walk drops what cannot fit (step 2), overdue items are merged
+/// into the kept order while they cost no kept item its margin (step 3), and the dropped items
+/// (`wont_fit`, by deadline and scored position) go last. The result is refilled into Must do's
+/// positions; overrides are inserted as `rank` does. Deterministic, no model.
 pub fn plan_at(tasks: &[Task], today: Date, cal: &WeekCalendar, moment: Option<DateTime>) -> DeadlinePlan {
     let Some(m) = moment.filter(|m| m.date() == today) else {
         return DeadlinePlan { order: rank(tasks, today, cal), safe: true, wont_fit: Vec::new() };
     };
     let m = m.with().second(0).subsec_nanosecond(0).build().unwrap_or(m);
-    let mut decorated: Vec<(f64, i64, Task)> =
-        tasks.iter().map(|t| (pressure(t, today, cal), -t.importance, t.clone())).collect();
-    decorated.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
-    let (overridden, mut result): (Vec<Task>, Vec<Task>) =
-        decorated.into_iter().map(|(_, _, t)| t).partition(|t| t.rank_override.is_some());
+    let (overridden, mut result) = pressure_sorted(tasks, today, cal);
 
     let positions: Vec<usize> = (0..result.len())
         .filter(|&i| slack_days(&result[i], today, cal, DEFAULT_BUFFER_DAYS) <= 0.0)
@@ -250,11 +233,10 @@ pub fn plan_at(tasks: &[Task], today: Date, cal: &WeekCalendar, moment: Option<D
             }));
         }
         removed.sort_by_key(|(rd, ri, _)| (*rd, *ri));
-        let overdue = positions.iter().copied().filter(|&i| deadline(&result[i], m).is_none());
-        let refill: Vec<Task> = kept
-            .iter()
-            .map(|&(_, i)| i)
-            .chain(overdue)
+        let overdue: Vec<usize> =
+            positions.iter().copied().filter(|&i| deadline(&result[i], m).is_none()).collect();
+        let refill: Vec<Task> = merge_overdue(&result, &kept, overdue, &timeline)
+            .into_iter()
             .chain(removed.iter().map(|&(_, i, _)| i))
             .map(|i| result[i].clone())
             .collect();
@@ -263,13 +245,35 @@ pub fn plan_at(tasks: &[Task], today: Date, cal: &WeekCalendar, moment: Option<D
         }
         wont_fit = removed.into_iter().map(|(_, _, w)| w).collect();
     }
-    let mut overridden = overridden;
-    overridden.sort_by_key(|t| t.rank_override.unwrap_or(0));
-    for task in overridden {
-        let index = (task.rank_override.unwrap_or(1) - 1).max(0).min(result.len() as i64) as usize;
-        result.insert(index, task);
+    DeadlinePlan { order: insert_overrides(result, overridden), safe, wont_fit }
+}
+
+/// Step 3 (spec §2.7). `kept` is the walk's survivors in deadline order; `overdue` is in scored
+/// order. From the front, the first overdue item that leaves every remaining kept item its
+/// `FIT_MARGIN_MINUTES` goes next; with none, the next kept item. Returns indexes into `items`.
+fn merge_overdue(items: &[Task], kept: &[(DateTime, usize)], mut overdue: Vec<usize>, timeline: &Timeline) -> Vec<usize> {
+    let mut merged = Vec::new();
+    let (mut t, mut next) = (0, 0);
+    while next < kept.len() || !overdue.is_empty() {
+        let placeable = overdue.iter().position(|&o| {
+            let mut ahead = t + work_minutes(&items[o]);
+            kept[next..].iter().all(|&(d, k)| {
+                ahead += work_minutes(&items[k]);
+                ahead <= timeline.before(d) - FIT_MARGIN_MINUTES
+            })
+        });
+        let index = match placeable {
+            Some(p) => overdue.remove(p),
+            None if next < kept.len() => {
+                next += 1;
+                kept[next - 1].1
+            }
+            None => break,
+        };
+        t += work_minutes(&items[index]);
+        merged.push(index);
     }
-    DeadlinePlan { order: result, safe, wont_fit }
+    merged
 }
 
 /// Split into (must do today no matter what, everything recommendable).
@@ -622,29 +626,6 @@ mod tests {
     }
 
     #[test]
-    fn at_the_hour_a_task_due_tonight_leads_an_overdue_one() {
-        let tasks = overdue_and_tonight();
-        assert_overdue_leads(&tasks);
-        let got = rank_at(&tasks, D, &week(), Some(at(28, 20, 0)));
-        assert_eq!(slugs(&got), names(&["tonight", "overdue"]));
-    }
-
-    #[test]
-    fn closing_tonight_orders_by_due_time_then_pressure() {
-        let tasks = vec![
-            task("due-2100", Some(at(28, 21, 0)), 1.0, 1),
-            task("big-2359", Some(at(28, 23, 59)), 12.0, 3),
-            task("small-2359", Some(at(28, 23, 59)), 1.0, 3),
-        ];
-        let cal = week();
-        let ranked = slugs(&rank(&tasks, D, &cal));
-        assert_ne!(ranked[0], "due-2100", "setup: the 21:00 task must not already lead");
-        assert_eq!(ranked[..2], names(&["big-2359", "small-2359"])[..], "setup: big has the higher pressure");
-        let got = rank_at(&tasks, D, &cal, Some(at(28, 20, 30)));
-        assert_eq!(slugs(&got), names(&["due-2100", "big-2359", "small-2359"]));
-    }
-
-    #[test]
     fn a_due_time_already_passed_is_not_closing_tonight() {
         let tasks = vec![
             task("passed-1900", Some(at(28, 19, 0)), 1.0, 3),
@@ -670,19 +651,6 @@ mod tests {
         let mut want = names(&["tonight"]);
         want.extend(slugs(&ranked).into_iter().filter(|s| s != "tonight"));
         assert_eq!(got, want, "the overdue tasks keep rank's order below tonight's item");
-    }
-
-    #[test]
-    fn tonight_ends_at_local_midnight() {
-        let cal = week();
-        let tasks = vec![task("after-midnight", Some(at(29, 0, 30)), 1.0, 3), task("overdue", Some(at(26, 23, 59)), 2.0, 3)];
-        assert_eq!(slugs(&rank(&tasks, D, &cal))[0], "overdue", "setup");
-        assert_eq!(rank_at(&tasks, D, &cal, Some(at(28, 23, 0))), rank(&tasks, D, &cal));
-
-        let sat = Date::constant(2026, 8, 29);
-        let tasks = vec![task("later", Some(at(29, 23, 59)), 1.0, 3), task("overdue", Some(at(26, 23, 59)), 2.0, 3)];
-        assert_eq!(slugs(&rank(&tasks, sat, &cal))[0], "overdue", "setup");
-        assert_eq!(rank_at(&tasks, sat, &cal, Some(at(29, 0, 30))), rank(&tasks, sat, &cal));
     }
 
     #[test]
@@ -773,35 +741,6 @@ mod tests {
         assert_eq!(slugs(&rank(&tasks, D, &cal))[0], "overdue", "setup");
         let got = rank_at(&tasks, D, &cal, Some(at(28, 21, 0)));
         assert_eq!(slugs(&got), names(&["bare", "overdue"]));
-    }
-
-    #[test]
-    fn evening_hour_is_twenty_hundred() {
-        assert_eq!(
-            EVENING_HOUR,
-            Time::constant(20, 0, 0, 0),
-            "20:00 is Quinn's ruling (a), 2026-10-24; changing it needs a new ruling"
-        );
-    }
-
-    #[test]
-    fn everything_else_keeps_the_pressure_order() {
-        let tasks = vec![
-            task("overdue-a", Some(at(26, 23, 59)), 2.0, 3),
-            task("tonight-2200", Some(at(28, 22, 0)), 1.0, 3),
-            task("overdue-b", Some(at(24, 23, 59)), 3.0, 2),
-            task("tonight-2330", Some(at(28, 23, 30)), 2.0, 3),
-            task("far", Some(DateTime::constant(2026, 9, 7, 12, 0, 0, 0)), 1.0, 3),
-            task("undated", None, 1.0, 3),
-        ];
-        let cal = week();
-        let closing = ["tonight-2200", "tonight-2330"];
-        let rest = |ranked: Vec<Task>| -> Vec<String> {
-            slugs(&ranked).into_iter().filter(|s| !closing.contains(&s.as_str())).collect()
-        };
-        let evening = rank_at(&tasks, D, &cal, Some(at(28, 21, 0)));
-        assert_eq!(slugs(&evening)[..2], names(&closing)[..], "the closing group leads, by due time");
-        assert_eq!(rest(evening), rest(rank(&tasks, D, &cal)));
     }
 
     // ---- Deadline ordering: the timeline and step 0 (DP1-DP10). ----
