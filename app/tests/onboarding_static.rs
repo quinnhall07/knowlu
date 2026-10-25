@@ -1119,14 +1119,39 @@ fn the_shells_finish_later_stays_enabled_while_a_sign_in_or_a_code_send_is_in_fl
 #[test]
 fn the_rail_foots_styles_are_widened_to_the_shell_and_not_copied() {
     let css = code(&read("onboarding.css"));
-    for decl in ["font-size: 14.5px", "font-size: 13.5px"] {
-        assert_eq!(css.matches(decl).count(), 1, "{decl} appears in one rule, which both feet share");
-        let at = css.find(decl).unwrap();
-        let start = css[..at].rfind('}').map_or(0, |i| i + 1);
-        let selectors = &css[start..start + css[start..at].rfind('{').expect("a rule")];
-        let list: Vec<&str> = selectors.split(',').map(str::trim).collect();
-        assert!(list.len() >= 2, "the rule's selector list was widened: {selectors}");
-        assert!(list.iter().any(|s| s.starts_with(".ob ") && s.contains(".su-rail-foot")), "it still serves the setup frame: {selectors}");
-        assert!(list.iter().any(|s| (s.starts_with(".setup ") || s.starts_with("#setup ")) && s.contains(".su-rail-foot")), "and the shell's foot: {selectors}");
+    // Rules found by selector, not by counting declarations anywhere in the file.
+    let rules: Vec<(Vec<&str>, &str)> = css
+        .split('}')
+        .filter_map(|chunk| {
+            let (sel, body) = chunk.split_once('{')?;
+            Some((sel.split(',').map(str::trim).collect(), body))
+        })
+        .collect();
+    for (tail, size) in [(".su-rail-foot .su-link", "font-size: 14.5px"), (".su-rail-foot .su-dim", "font-size: 13.5px")] {
+        let hits: Vec<_> = rules.iter().filter(|(list, _)| list.iter().any(|s| s.ends_with(tail))).collect();
+        assert_eq!(hits.len(), 1, "{tail} is styled in exactly one rule, which both feet share");
+        let (list, body) = hits[0];
+        assert!(list.iter().any(|s| s.starts_with(".ob ") && s.ends_with(tail)), "it still serves the setup frame: {list:?}");
+        assert!(list.iter().any(|s| (s.starts_with(".setup ") || s.starts_with("#setup ")) && s.ends_with(tail)), "and the shell's foot: {list:?}");
+        assert!(body.contains(size), "{tail} carries {size}: {body}");
     }
+}
+
+/// Quinn's ruling (2026-10-24): the welcome copy carries no number. The rail foot, from
+/// `STEP_SECONDS`, gives the one figure.
+#[test]
+fn the_welcome_copy_carries_no_minutes_figure() {
+    let html = read("index.html");
+    let at = html.find("class=\"su-why\"").expect("the su-why element");
+    let rest = &html[at..];
+    let text = &rest[..rest.find("</p>").expect("its end")].to_lowercase();
+    let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let spelled = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "fifteen", "twenty", "thirty", "half", "couple", "few"];
+    for pair in words.windows(2) {
+        if pair[1].starts_with("minute") {
+            assert!(!pair[0].chars().any(|c| c.is_ascii_digit()), "a digit before minute: {text}");
+            assert!(!spelled.contains(&pair[0]), "a spelled number before minute: {text}");
+        }
+    }
+    assert!(!text.contains("minute"), "no minutes figure in the welcome copy: {text}");
 }

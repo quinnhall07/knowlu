@@ -3,13 +3,13 @@
    row shapes come from console.css; this sheet adds only what the frame needs on top. Every class
    it adds starts `ob-`. */
 .ob-main { display: flex; flex-direction: column; }
-.ob-bar { display: flex; gap: 20px; justify-content: flex-end; padding: 14px 56px 0; font-size:13.5px; }
+.ob-bar { display: flex; gap: 20px; justify-content: flex-end; padding: 14px 56px 0; font-size: 13.5px; }
 .ob-bar .su-link { color: var(--su-ink-2); }
-.ob button[disabled].su-link { color: var(--su-ink-3); cursor: not-allowed; text-decoration-style: dashed; }
-.ob-closing { margin: 12px 56px 0; padding: 10px 14px; max-width: 64ch; background: var(--su-board-2); border-left: 3px solid var(--su-amber); color: var(--su-ink); font-size:14.5px; }
+.ob button[disabled].su-link, .setup button[disabled].su-link { color: var(--su-ink-3); cursor: not-allowed; text-decoration-style: dashed; }
+.ob-closing { margin: 12px 56px 0; padding: 10px 14px; max-width: 64ch; background: var(--su-board-2); border-left: 3px solid var(--su-amber); color: var(--su-ink); font-size: 14.5px; }
 .ob-closing[hidden] { display: none; }
 .ob-step { flex: 1; }
-.ob-state { max-width: 64ch; margin: 16px 0 0; color: var(--su-ink-2); font-size:14.5px; }
+.ob-state { max-width: 64ch; margin: 16px 0 0; color: var(--su-ink-2); font-size: 14.5px; }
 .ob-state.ob-failed { color: var(--su-amber); }
 .ob-proof:empty { display: none; }
 /* The rail's states beyond the shell's now, done and next: reading, failed, skipped. */
@@ -26,7 +26,7 @@
 .ob-h2 { margin: 18px 0 6px; font-size: 20px; font-weight: 700; }
 .ob-row8, .ob-prop { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--su-rule); }
 .ob-key { font-weight: 600; }
-.ob-row-line { color: var(--su-ink-2); font-size:13.5px; }
+.ob-row-line { color: var(--su-ink-2); font-size: 13.5px; }
 .ob-list { margin: 0; padding-left: 18px; color: var(--su-ink); }
 .ob-prop button[aria-pressed="true"] { border-color: var(--su-ink); background: var(--su-board-2); }
 .ob-course, .ob-level { min-height: 36px; background: var(--su-board); color: var(--su-ink); border: 1px solid var(--su-rule-2); border-radius: 6px; padding: 0 8px; }
@@ -35,4 +35,4 @@
 .ob .su-rail-foot .su-dim, .setup .su-rail-foot .su-dim { font-size: 13.5px; }
 .ob .su-rail-head { justify-content: space-between; }
 .ob .su-rail-head .su-dim { margin-left: 0; }
-.ob .su-row .su-pf { font-size:13.5px; }
+.ob .su-row .su-pf { font-size: 13.5px; }
