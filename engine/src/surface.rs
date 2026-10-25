@@ -593,8 +593,46 @@ pub fn meter(l: &Loaded, today: Date) -> Meter {
 /// A spill item's deadline: `YYYY-MM-DDTHH:MM`, or the date alone when the note's `due` gave no
 /// time (spec §7: never print an 11:59 pm the source did not give).
 fn spill_deadline(l: &Loaded, slug: &str, deadline: DateTime) -> String {
-    let timed = meta_text(l.metas.get(slug), "due").is_none_or(|d| d.contains(':'));
-    deadline.strftime(if timed { "%Y-%m-%dT%H:%M" } else { "%Y-%m-%d" }).to_string()
+    deadline.strftime(if is_bare_due(l, slug) { "%Y-%m-%d" } else { "%Y-%m-%dT%H:%M" }).to_string()
+}
+
+/// The note's raw `due` has no time part; the one test spill deadlines and row lines both use.
+fn is_bare_due(l: &Loaded, slug: &str) -> bool {
+    meta_text(l.metas.get(slug), "due").is_some_and(|d| !d.contains(':'))
+}
+
+/// When a deadline reads on the page: "11:59 pm", "Sat 8:30 am"; a bare date, "tonight" or "Sat".
+fn deadline_words(l: &Loaded, slug: &str, deadline: DateTime, today: Date) -> String {
+    let day = WEEKDAYS[deadline.date().weekday().to_monday_zero_offset() as usize];
+    let (bare, later) = (is_bare_due(l, slug), deadline.date() != today);
+    if bare {
+        return if later { day.to_string() } else { "tonight".to_string() };
+    }
+    let time = format!("{}:{:02} {}", (deadline.hour() + 11) % 12 + 1, deadline.minute(), if deadline.hour() < 12 { "am" } else { "pm" });
+    if later { format!("{day} {time}") } else { time }
+}
+
+/// A won't-fit row's line and its explanation (spec §7, from the walk's record at removal).
+fn fit_lines(l: &Loaded, slug: &str, today: Date) -> (Option<String>, Option<String>) {
+    let Some(w) = l.plan.wont_fit.iter().find(|w| w.slug == slug) else { return (None, None) };
+    let when = deadline_words(l, slug, w.deadline, today);
+    let lead = if is_bare_due(l, slug) { "by" } else { "before" };
+    let depends = w.prefix.iter().filter(|s| is_placeholder(l, s)).count();
+    let line = if is_placeholder(l, slug) {
+        format!("May not fit {lead} {when} \u{b7} no time estimate yet")
+    } else if depends > 0 {
+        format!("May not fit {lead} {when} \u{b7} depends on {depends} item{} with no time estimate yet", if depends == 1 { "" } else { "s" })
+    } else {
+        format!("Won't fit {lead} {when}")
+    };
+    let hours = |minutes: i64| format!("{:.1}h", round1(minutes.max(0) as f64 / 60.0));
+    let why = if w.work_minutes > w.available_minutes {
+        format!("{} left; you have {} before it's due.", hours(w.work_minutes), hours(w.available_minutes))
+    } else {
+        let late = deadline_words(l, &w.overflower, w.overflow_deadline, today);
+        format!("{} left; doing it would leave other work due by {late} late.", hours(w.work_minutes))
+    };
+    (Some(line), Some(why))
 }
 
 /// A note has no real time estimate yet: `effort_confidence: unset`, or no `effort_hours` key
@@ -709,10 +747,10 @@ pub struct Row {
     pub flag_text: Option<String>,
     pub merge_text: Option<String>,
     pub conflict_text: Option<String>,
-    /// "Won't fit before 11:59 pm" on a won't-fit row (T4c); always `None` until then.
+    /// "Won't fit before 11:59 pm" on a won't-fit row, "May not fit ..." with a placeholder in play.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fit_text: Option<String>,
-    /// Why it won't fit (T4c); always `None` until then.
+    /// Why it won't fit, from the walk's record at removal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fit_why: Option<String>,
     pub why: String,
@@ -791,6 +829,7 @@ pub fn row(l: &Loaded, task: &Task, today: Date, amendments: &[PendingAmendment]
             sentence: amend_sentence(&a.changes),
         });
     let hours = round1(task.remaining_hours());
+    let (fit_text, fit_why) = fit_lines(l, &task.slug, today);
     Row {
         id,
         slug: task.slug.clone(),
@@ -815,8 +854,8 @@ pub fn row(l: &Loaded, task: &Task, today: Date, amendments: &[PendingAmendment]
         flag_text: None,
         merge_text: None,
         conflict_text: task.conflicts_with.as_ref().map(|c| format!("⚠ conflicts with {c}")),
-        fit_text: None,
-        fit_why: None,
+        fit_text,
+        fit_why,
         why: why
             .as_ref()
             .map(|w| {
