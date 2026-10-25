@@ -576,7 +576,7 @@
   // Class times show as set (read from `your_week`); the calendar's meetings are asked for only once
   // the status says `proposals_ready`. Confirming is today's `commitments_confirm`, which can refuse
   // by name while a sync runs: the sentence shows, with a Try again.
-  var w10 = { asked: false, busy: false, reg: "" };
+  var w10 = { asked: false, busy: false, reg: "", proposal: null, win: { answered: false, start: "", end: "" } };
   var KINDS10 = [["class", "Class"], ["lab", "Lab"], ["work", "Work"], ["club", "Club"], ["meeting", "Meeting"], ["office-hours", "Office hours"]];
   var LEVELS10 = [["hard", "Must keep"], ["soft", "Usually"], ["optional", "Optional"]];
   function say10(text) {
@@ -648,12 +648,26 @@
       return '<button class="b su-btn" type="button" data-level="' + l[0] + '" aria-pressed="' + (l[0] === on) + '">' + l[1] + '</button>';
     }).join("") + '</span>';
   }
-  function confirmArg10(rows) {
+  function windowFields10(p) {
+    var m = p && p.meets && p.meets[0];
+    return { start: (m && m.start) || "", end: (m && m.end) || "" };
+  }
+  // The `window` string for commitments_confirm, or null: unanswered or a blank time sends no key.
+  function windowArg10(p, win) {
+    if (!win || !win.answered || !win.start || !win.end) { return null; }
+    var f = windowFields10(p);
+    if (p && p.meets && f.start === win.start && f.end === win.end) { return JSON.stringify(p.meets); }
+    var days = (p && p.meets && p.meets[0] && p.meets[0].days) || ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    return JSON.stringify([{ days: days, start: win.start, end: win.end }]);
+  }
+  function confirmArg10(rows, proposal, win) {
     var mine = [], notMine = [];
     rows.forEach(function (r) {
       if (r.answer === "mine") { mine.push({ source_uid: r.key, level: r.level }); } else if (r.answer === "not") { notMine.push(r.key); }
     });
-    return { mine: mine, not_mine: notMine };
+    var out = { mine: mine, not_mine: notMine }, w = windowArg10(proposal, win);
+    if (w !== null) { out.window = w; }
+    return out;
   }
   // `win` is the day-window question (F11p4); null means it is not on screen, so it is not counted.
   function answeredCount10(rows, win) {
@@ -662,15 +676,25 @@
   }
   function confirmBarLine10(n, m) { return n + " of " + m + " answered. Anything you leave blank comes back as a question over the next few days."; }
   OB.summaryLine10 = summaryLine10; OB.splitProposals10 = splitProposals10; OB.firmnessHtml10 = firmnessHtml10;
-  OB.confirmArg10 = confirmArg10; OB.answeredCount10 = answeredCount10; OB.confirmBarLine10 = confirmBarLine10;
+  OB.confirmArg10 = confirmArg10; OB.windowFields10 = windowFields10; OB.windowArg10 = windowArg10; OB.answeredCount10 = answeredCount10; OB.confirmBarLine10 = confirmBarLine10;
   function rows10() {
     return Array.prototype.map.call(document.querySelectorAll("#ob-10-prop .ob-prop"), function (r) {
       return { key: r.getAttribute("data-key"), answer: r.getAttribute("data-answer"), level: r.getAttribute("data-level") };
     });
   }
   function paintBar10() {
-    var el = EL("ob-10-count"), c = answeredCount10(rows10(), null);
+    var el = EL("ob-10-count"), c = answeredCount10(rows10(), w10.win);
     if (el) { el.textContent = confirmBarLine10(c.n, c.m); }
+  }
+  // The guess goes into the two time inputs until the student has touched them.
+  function fillWindow10() {
+    var a = EL("ob-10-wstart"), b = EL("ob-10-wend"), f = windowFields10(w10.proposal);
+    if (!a || !b || w10.win.answered) { return; }
+    a.value = w10.win.start = f.start; b.value = w10.win.end = f.end;
+  }
+  function readWindow10() {
+    var a = EL("ob-10-wstart"), b = EL("ob-10-wend");
+    if (a && b) { w10.win.start = a.value; w10.win.end = b.value; }
   }
   function askProposals(s) {
     if (!(s && s.proposals_ready) || w10.asked) { return; }
@@ -678,7 +702,8 @@
     invoke("commitment_proposals", {}).then(function (r) {
       var host = EL("ob-10-prop");
       if (!host) { return; }
-      var ps = splitProposals10(r).events;
+      var sp = splitProposals10(r), ps = sp.events;
+      w10.proposal = sp.window; fillWindow10();
       host.innerHTML = ps.length ? '<p class="su-small">Knowlu found these repeating on your calendar. Mark each one, or leave it blank and Knowlu asks again later.</p>' + ps.map(propHtml).join("")
         : '<p class="ob-state">' + esc((r && r.error) || "Knowlu found nothing repeating on your calendar.") + '</p>';
       paintBar10();
@@ -691,7 +716,7 @@
   function confirm10() {
     if (w10.busy) { return; }
     w10.busy = true; say10(""); setConfirm10(); OB.clearError();
-    invoke("commitments_confirm", { view: "today", confirm: confirmArg10(rows10()) }).then(function (env) {
+    invoke("commitments_confirm", { view: "today", confirm: confirmArg10(rows10(), w10.proposal, w10.win) }).then(function (env) {
       w10.busy = false; setConfirm10();
       if (!env || env.ok !== true) { say10("Knowlu couldn't save your week: " + ((env && env.error) || "something went wrong") + "."); return; }
       w10.busy = true; setConfirm10();
@@ -712,6 +737,11 @@
     if (!b || !EL("ob-step-10")) { return; }
     if (b.getAttribute("data-act10") === "times") { var set = EL("ob-10-set"); set.hidden = !set.hidden; b.setAttribute("aria-expanded", String(!set.hidden)); return; }
     var act = b.getAttribute("data-act10"), row = b.closest(".ob-prop");
+    if (act === "win") {
+      readWindow10(); w10.win.answered = !w10.win.answered;
+      b.setAttribute("aria-pressed", String(w10.win.answered)); paintBar10();
+      return;
+    }
     if (act === "confirm") { confirm10(); return; }
     if (act === "edit" || act === "save") {
       var set = b.closest(".ob-set");
@@ -726,14 +756,17 @@
     paintBar10();
   }
   function render10(status) {
-    w10.asked = false; w10.busy = false;
+    w10.asked = false; w10.busy = false; w10.proposal = null; w10.win = { answered: false, start: "", end: "" };
     w10.reg = (status && status.jobs && status.jobs["registrar.confirm"] && status.jobs["registrar.confirm"].state) || "";
-    Promise.resolve().then(function () { loadSet10(); askProposals(status); });
+    Promise.resolve().then(function () { loadSet10(); askProposals(status); paintBar10(); });
     var sum = summaryLine10(status);
     return { ask: '<div id="ob-step-10">' + (sum ? '<div class="ob-card"><p>' + esc(sum) + '</p>' : '<div class="ob-card">') +
       '<button class="su-link" type="button" data-act10="times" aria-expanded="false">Show the class times</button><div id="ob-10-set" hidden><p class="ob-state">Reading your class times…</p></div></div>' +
       '<h2 class="ob-h2">Questions only you can answer</h2><p class="su-small">Your calendar repeats these. How firm is each? The preselected level is Knowlu&#39;s guess.</p>' +
       '<div id="ob-10-prop"><p class="ob-state" id="ob-10-wait">Knowlu is reading your calendars…</p></div>' +
+      '<div class="ob-prop ob-win" id="ob-10-win"><span class="a">When does your day run?</span> <span class="su-dim">Knowlu plans inside this window. The times shown are its guess.</span> ' +
+      '<label>Wake <input type="time" id="ob-10-wstart" aria-label="Day starts"></label> <label>Bed <input type="time" id="ob-10-wend" aria-label="Day ends"></label> ' +
+      '<button class="b su-btn" type="button" data-act10="win" aria-pressed="false">That&#39;s right</button></div>' +
       '<div class="ob-10-bar" id="ob-10-bar"><p class="ob-state" id="ob-10-count"></p>' +
       '<p class="ob-state ob-failed" id="ob-10-line" role="alert" hidden></p>' +
       '<div class="su-actions"><button class="b pri y su-btn" type="button" id="ob-10-confirm" data-act10="confirm">Confirm my week</button>' +
@@ -751,7 +784,17 @@
     if (reg && reg.state === "done" && w10.reg !== "done") { w10.reg = "done"; loadSet10(); }
   }
   OB.registerPanel(10, { render: render10, onStatus: onStatus10 });
-  if (EL("onboarding")) { EL("onboarding").addEventListener("click", onClick10); }
+  if (EL("onboarding")) {
+    EL("onboarding").addEventListener("click", onClick10);
+    // Typing a time is an answer: the student has set the window themselves.
+    EL("onboarding").addEventListener("change", function (e) {
+      if (!e.target.closest || !e.target.closest("#ob-10-win")) { return; }
+      readWindow10(); w10.win.answered = true;
+      var btn = document.querySelector("#ob-10-win [data-act10=win]");
+      if (btn) { btn.setAttribute("aria-pressed", "true"); }
+      paintBar10();
+    });
+  }
   // ==== F11c, step 10 (ends) =====================================================================
 
   // The one reader of `account_status`: on mount and at the step 2 and step 4 moves, never from the poll.
