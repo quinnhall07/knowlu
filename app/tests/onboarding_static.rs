@@ -292,7 +292,7 @@ fn each_step_calls_the_commands_the_plan_gives_it() {
         ("step 4", &["onboarding_checkout", "onboarding_entitlement"]),
         ("step 6", &["google_connect", "google_status"]),
         ("step 7", &["onboarding_paste_link"]),
-        ("step 8", &["store_credentials", "discover_coursework"]),
+        ("step 8", &["onboarding_store_credentials", "onboarding_discover_coursework"]),
         ("step 10", &["your_week", "commitment_proposals", "commitments_confirm"]),
     ] {
         for c in cmds { assert!(names.iter().any(|n| n == c), "{step} must call {c}"); }

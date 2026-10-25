@@ -407,7 +407,7 @@
     if (!user || !secret) { say8(site, "Type your " + SITE_NAMES[site] + " email or username and password first."); return; }
     OB.clearError();
     f.stage = "storing"; f.line = "";
-    invoke("store_credentials", { vault: vault, source: site, user: user, secret: secret }).then(function (a) {
+    invoke("onboarding_store_credentials", { source: site, user: user, secret: secret }).then(function (a) {
       clearCredentialFields(site);
       if (a && a.ok) { discoverSite(site); return; }
       f.stage = "login"; f.line = (a && a.error) || "Knowlu couldn't save your sign-in. Try again."; paintSite(site);
@@ -420,7 +420,7 @@
   function discoverSite(site) {
     var f = w8.site[site];
     discovering = true; f.stage = "reading"; f.line = ""; paintSite(site); paintNext();
-    invoke("discover_coursework", { vault: w8.status && w8.status.vault, zybooks: site === "zybooks", vhl: site === "vhl" }).then(function (r) {
+    invoke("onboarding_discover_coursework", { zybooks: site === "zybooks", vhl: site === "vhl" }).then(function (r) {
       f.rows = ((r && r.rows) || []).filter(function (x) { return x.source === site; });
       f.line = (r && r.note) || "";
       f.stage = f.rows.length ? "rows" : "login";
@@ -577,7 +577,12 @@
     invoke("commitments_confirm", { view: "today", confirm: { mine: mine, not_mine: notMine } }).then(function (env) {
       w10.busy = false; setConfirm10();
       if (!env || env.ok !== true) { say10("Knowlu couldn't save your week: " + ((env && env.error) || "something went wrong") + "."); return; }
-      OB.show(11);
+      w10.busy = true; setConfirm10();
+      return invoke("onboarding_answer", { step: 10, answer: { confirmed: true } }).then(function (a) {
+        w10.busy = false; setConfirm10();
+        if (a && a.ok === true) { OB.show(11); return; }
+        say10((a && a.error) || "Knowlu couldn't move on. Try again.");
+      });
     }).catch(function () { w10.busy = false; setConfirm10(); say10("Knowlu couldn't save your week. Try again."); });
   }
   function onClick10(e) {
