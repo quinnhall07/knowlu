@@ -1357,7 +1357,7 @@ pub fn answer_on_queue(queue: &crate::onboarding_jobs::Queue, data_dir: &Path, s
 pub fn mail_not_now_in(data_dir: &Path) -> Value {
     let done = update_finished(data_dir, |s| {
         if !s.handover.iter().any(|h| h.item == "mail.connect") { return false; }
-        s.mail_signal(MailSignal::TurnedOff);
+        s.handover.retain(|h| h.item != "mail.connect");
         skip_step(s, 5, "mail").is_ok()
     });
     match done {
