@@ -561,7 +561,7 @@ mod tests {
         assert_eq!(takes[1].block_after, 0.0);
     }
 
-    // ---- The evening rule (R1-R15). Invented tasks on the vault-s1 week template. ----
+    // ---- The evening rule's kept tests (R1-R15; R3, R4, R7, R14, R15 retired with the 8 pm rule, Q5). Invented tasks on the vault-s1 week template. ----
 
     /// Friday 2026-08-28; `at(27, ..)` is Thursday, `at(29, ..)` Saturday.
     const D: Date = Date::constant(2026, 8, 28);
