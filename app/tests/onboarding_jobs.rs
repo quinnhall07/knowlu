@@ -1101,6 +1101,27 @@ fn test_12_the_text_config_ingest_hands_the_builder_is_byte_equal_with_or_withou
     assert!(straight.contains("quilting-basics") && straight.contains("zybooks_ignore"), "{straight}");
 }
 
+/// Test 42 (F8c2, §14.57.3): a book row's `course_slug` holds a course key; the hand-over translates it
+/// through `answers.slugs`, and leaves out a row whose key has no slug or is not a kept course's.
+#[test]
+fn test_42_the_handoff_translates_a_book_rows_course_key_through_the_slugs() {
+    let mut a = Answers { courses: three_courses(), ..Default::default() };
+    a.slugs.insert("_1001_1".into(), "cs-100".into());
+    a.slugs.insert("_1002_1".into(), "knotwork-theory".into());
+    a.courses[1].removed = true; // removed after its row was saved
+    let row = |source: &str, key: &str, course: &str| BookRow { source: source.into(), key: key.into(), course_slug: course.into() };
+    a.rows = vec![
+        row("zybooks", "ZYB-A", "_1001_1"), // kept, has a slug
+        row("zybooks", "ZYB-B", "_1003_1"), // kept, no slug
+        row("vhl", "4471", "_1002_1"),      // has a slug, but the course was removed
+        row("vhl", "4472", "_9999_1"),      // not a course at all
+    ];
+    let before = ingest_handoff(&Answers { rows: Vec::new(), ..a.clone() }, &FakePending::default()).course_map;
+    let h = ingest_handoff(&a, &FakePending::default());
+    assert_eq!(h.books, vec![("zybooks".to_string(), "ZYB-A".to_string(), "cs-100".to_string())], "{h:?}");
+    assert_eq!(h.course_map, before, "course_map is unchanged");
+}
+
 // ---- test 13: the feed is never silently lost -----------------------------------------------------------------------
 
 #[test]

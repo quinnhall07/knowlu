@@ -2486,8 +2486,8 @@ fn f6b_rig(tag: &str, s: &Scn) -> F6b {
         if let Some(st) = s.cal { a.feeds.insert("calendar_ics".into(), st); }
         if s.step8 {
             a.rows = vec![
-                BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "quilting-basics".into() },
-                BookRow { source: "vhl".into(), key: "4471".into(), course_slug: "knotwork-theory".into() },
+                BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "_1001_1".into() },
+                BookRow { source: "vhl".into(), key: "4471".into(), course_slug: "_1002_1".into() },
             ];
             a.zybooks_ignore = vec!["HowToUseZyBooks2".into(), "ZYB-OLD-9".into()];
         }

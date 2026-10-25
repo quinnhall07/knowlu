@@ -153,10 +153,10 @@ fn back_to_another_school_clears_the_school_steps_jobs_and_leaves_the_rest() {
 fn the_login_flags_come_from_step_8s_rows() {
     let mut a = Answers::default();
     assert_eq!((ingest_base_for(&a, "p", "UTC").zybooks, ingest_base_for(&a, "p", "UTC").vhl), (false, false));
-    a.rows = vec![BookRow { source: "vhl".into(), key: "4471".into(), course_slug: "knotwork-theory".into() }, BookRow { source: "zybooks".into(), key: "ZYB-0".into(), course_slug: " ".into() }];
+    a.rows = vec![BookRow { source: "vhl".into(), key: "4471".into(), course_slug: "_1002_1".into() }, BookRow { source: "zybooks".into(), key: "ZYB-0".into(), course_slug: " ".into() }];
     let b = ingest_base_for(&a, "profile-8c", "America/Chicago");
     assert_eq!((b.zybooks, b.vhl, b.profile_id.as_str(), b.timezone.as_str()), (false, true, "profile-8c", "America/Chicago"));
-    a.rows.push(BookRow { source: "zybooks".into(), key: "ZYB-1".into(), course_slug: "quilting-basics".into() });
+    a.rows.push(BookRow { source: "zybooks".into(), key: "ZYB-1".into(), course_slug: "_1001_1".into() });
     assert!(ingest_base_for(&a, "p", "UTC").zybooks);
 }
 

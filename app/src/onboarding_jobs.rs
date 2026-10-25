@@ -987,6 +987,12 @@ pub fn ingest_handoff(answers: &Answers, pending: &dyn PendingStore) -> IngestHa
             if !kept_fragments.contains(&f) && !course_exclude.contains(&f) { course_exclude.push(f); }
         }
     }
+    // A row's `course_slug` holds a course key (§14.57.3). It becomes that course's slug; a row whose key is
+    // not a kept course's (removed after the row was saved) or has no slug is left out, as `course_map` does.
+    let kept_keys: BTreeSet<String> = answers.kept_courses().iter().map(|c| c.key()).collect();
+    let books = answers.rows.iter().filter(|r| kept_keys.contains(&r.course_slug))
+        .filter_map(|r| answers.slugs.get(&r.course_slug).map(|s| s.trim()).filter(|s| !s.is_empty())
+            .map(|s| (r.source.clone(), r.key.clone(), s.to_string()))).collect();
     IngestHandoff {
         feed_kept_on_device: lms.is_some(),
         calendar_kept_on_device: calendar.is_some(),
@@ -995,7 +1001,7 @@ pub fn ingest_handoff(answers: &Answers, pending: &dyn PendingStore) -> IngestHa
         course_map,
         course_exclude,
         google_calendar: answers.google_calendar == Some(true),
-        books: answers.rows.iter().map(|r| (r.source.clone(), r.key.clone(), r.course_slug.clone())).collect(),
+        books,
         zybooks_ignore: answers.zybooks_ignore.clone(),
     }
 }
