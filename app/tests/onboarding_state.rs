@@ -2005,3 +2005,53 @@ fn test_39_a_cloud_yaml_naming_another_host_leaks_neither_the_vault_path_nor_the
         assert!(profile.is_empty() || !text.to_lowercase().contains(&profile.to_lowercase()), "{what} names the profile directory: {text}");
     }
 }
+
+// ---- test 48 (F2b4): the week and the homework sites the strip and step 8 read (§14.58.3) ------------------------
+
+#[test]
+fn test_48_an_answers_file_without_the_week_fields_keeps_its_bytes_and_the_status_carries_them_only_when_set() {
+    let d = scratch("t48-week");
+    save_answers(&d, &three_with_one_removed()).unwrap();
+    let bytes = std::fs::read(answers_path(&d)).unwrap();
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    for key in ["week_of", "week_today", "homework_sites"] { assert!(!text.contains(key), "{key}: none recorded, no key written"); }
+    // An old file (written before the fields) reads, re-saves byte-identical, and gives a null week and null sites.
+    let loaded = load_answers(&d).unwrap().unwrap();
+    assert_eq!((loaded.week_of.clone(), loaded.week_today, loaded.homework_sites.is_empty()), (None, None, true));
+    save_answers(&d, &loaded).unwrap();
+    assert_eq!(std::fs::read(answers_path(&d)).unwrap(), bytes, "load and save leave the bytes alone");
+    let st = || status_for(Ok(OnboardingState::new("2026-10-24T09:00:00Z", 3)), load_answers(&d).unwrap().as_ref(), None, 0);
+    let bare = st();
+    assert_eq!(bare["week"], serde_json::Value::Null, "no week stored: null");
+    assert_eq!(bare["homework_sites"], serde_json::Value::Null, "no sites stored: null");
+    // With them: the week is {of, today}; the sites map the kept courses' keys to their human codes.
+    update_answers(&d, &|a| {
+        a.week_of = Some("2026-10-19".into());
+        a.week_today = Some(3);
+        a.homework_sites.insert("zybooks".into(), vec!["_1001_1".into(), "_1002_1".into(), "unmatched".into()]);
+        a.homework_sites.insert("vhl".into(), vec!["_1002_1".into()]);
+    }).unwrap();
+    let on_disk = std::fs::read_to_string(answers_path(&d)).unwrap();
+    for key in ["\"week_of\"", "\"week_today\"", "\"homework_sites\""] { assert!(on_disk.contains(key), "{key}"); }
+    let s = st();
+    assert_eq!(s["week"], serde_json::json!({ "of": "2026-10-19", "today": 3 }));
+    // KNT (_1002_1) is removed: it leaves zybooks' list, and vhl, left with nobody, is absent. `unmatched` stays as it is.
+    assert_eq!(s["homework_sites"], serde_json::json!({ "zybooks": ["QLT 101", "unmatched"] }));
+    // Review m-2: a code two kept shells share is named once; a stray key is dropped; an unmatched-only site stays.
+    update_answers(&d, &|a| {
+        a.courses.push(row("QLT 101", "Quilting Basics (lab)", "_1004_1", false));
+        a.homework_sites.clear();
+        a.homework_sites.insert("zybooks".into(), vec!["_1001_1".into(), "_9999_1".into(), "_1004_1".into()]);
+        a.homework_sites.insert("vhl".into(), vec!["unmatched".into()]);
+    }).unwrap();
+    assert_eq!(st()["homework_sites"], serde_json::json!({ "vhl": ["unmatched"], "zybooks": ["QLT 101"] }));
+    // Review m-1: sites that map to nothing are null, the same as none stored, never `{}`.
+    update_answers(&d, &|a| { a.homework_sites.clear(); a.homework_sites.insert("vhl".into(), vec!["_1002_1".into()]); }).unwrap();
+    assert_eq!(st()["homework_sites"], serde_json::Value::Null);
+    // Half a week is no week.
+    update_answers(&d, &|a| a.week_today = None).unwrap();
+    assert_eq!(st()["week"], serde_json::Value::Null);
+    // No answers file at all: both are null, as step3 is.
+    let none = status_for(Ok(OnboardingState::new("2026-10-24T09:00:00Z", 3)), None, None, 0);
+    assert_eq!((&none["week"], &none["homework_sites"]), (&serde_json::Value::Null, &serde_json::Value::Null));
+}
