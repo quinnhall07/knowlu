@@ -1493,7 +1493,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F5 | Moved and new commands registered (none new from §14.52's rulings: step 5 rides `onboarding_answer`, and the mail commands are already on the console's list; `onboarding_mail_not_now` (Q8 = yes) and the two step-8 wrappers are F5c's, after F5, §14.57) | `mechanical` | a list edit, recounted, pinned | F4, F2b, F2g, F2h, F8d, F8lb |
 | F5c | `onboarding.rs`: `onboarding_discover_coursework(zybooks, vhl)` and `onboarding_store_credentials(source, user, secret)`, each reading `cs.vault` from `ConsoleState` and calling today's function unchanged (about 20 lines); the console's `generate_handler!` list gains them and F2b3's `onboarding_mail_not_now`, three names, recounted (§14.57.1, .9; test 43, written first) | `implementer`, reviewed by `contract-reviewer` (a credential write path) | specified; no contract-list file; the page never carries a path | F5, F2b3 (the Not now command); `main.rs`'s chain after F4c. Collision note: F3z also edits `onboarding.rs`; the second to land rebases |
 | F5d | D5 signed by Quinn, 2026-10-24 (§14.58). `commands.rs`: `EDITABLE` gains `meets` (15 names), and `set_fields` routes a `meets` value through `commitments::answer_literal`, never `literal_for` (§14.57.10; about 10 lines; test 46, written first) | `implementer` | specified; writes through `write` with `console_ctx`, off the contract list | F7e |
-| F5b | Shell list: the retired panels' commands, after F10; five move to the console's list and are never deleted (F10's review) | `mechanical` | `main.rs` is never F10's (review r1, I8) | F10, F5 |
+| F5b | Shell list: the retired panels' commands, after F10; three move to the console's list and are never deleted (F10's review); `store_credentials` and `discover_coursework` stay on the shell's list and never move (§14.60); the pinned console count of 74 is raised by its own count, never loosened | `mechanical` | `main.rs` is never F10's (review r1, I8) | F10, F5 |
 | F6a | `school.apply` (`campus.yaml`, `events.yaml`) and `school.courses` (course notes), create-new | `test-writer` then `implementer` | vault bytes; tests first | F3 |
 | F6b | `config.ingest`: `ingest.yaml` once, create-new, feeds per §4.11; `course_exclude` for removed courses (§14.45) | `test-writer` then `implementer` | as F6a | F6a |
 | F6c | `ingest.rs`: read `course_exclude`; an item only a removed course claims is not imported (§14.45); the uid pass bounded for pin-form fragments (§14.46) | `test-writer` then `implementer`; `reviewer` with the oracle runs | engine, every vault's import; off the contract list, but the frozen references ride on ingest | T0 (before F15; independent of F6a and F6b) |
@@ -1522,7 +1522,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F8m | `mail/live.rs`: in onboarding mode a closed backfill batch tells the queue, never starts a slot | `implementer` | specified, about ten lines, tested in F1 (review r5, I-4) | F8a |
 | F8la | `lms_link.rs`: `capture_calendar_link_with`, `validate_only` and `capture_link_only`, the validate-only seam | `implementer`, reviewed by `contract-reviewer` | a bearer link stored under the wrong session reaches another account (review r6 I-2, r7 I-1) | F1, S4b merged |
 | F8lb | `onboarding_capture_link` and `onboarding_paste_link` over F8la's seam; the link to its pending credential | `implementer`, reviewed by `contract-reviewer` | as F8la | F8la, F8b, F8c, F8g, F8d, F3z (after F3z in `onboarding_jobs.rs`'s chain, r2 n-3), F2d |
-| F8w1 | New `onboarding_live.rs`: `LiveRunner` (every `JOB_ORDER` name to its runner; an unknown name is `Failed`; `registrar.confirm` an interim `Waiting("registrar_runner_pending")` until F8h-runner replaces it, r4 n-2), `LiveEntitlement`, `LiveSyncView`: the live `Deps` (§14.52.4; test 37) | `implementer` | specified glue over built runners; its own file, so no chain | F8b's capture half, F8b2, F8c, F8g, F8h (not F8h-runner, so not Q7) |
+| F8w1 | New `onboarding_live.rs`: `LiveRunner` (every `JOB_ORDER` name to its runner; an unknown name is `Failed`; `registrar.confirm` an interim `Waiting("registrar_runner_pending")` until F8h-runner replaces it, r4 n-2), `LiveEntitlement`, `LiveSyncView`: the live `Deps` (§14.52.4; test 37). Its `config.ingest` arm derives the profile id by `profiles::id_for(vault)`, as the credential write does, with a test that the two targets agree (§14.60.2) | `implementer` | specified glue over built runners; its own file, so no chain | F8b's capture half, F8b2, F8c, F8g, F8h (not F8h-runner, so not Q7) |
 | F8w2 | The same file: the mail seams (`start_setup` with the file's unitid and the window wait; `Queue::mail_skipped("mail.setup")` checked on every window poll and once more just before `start_setup`, returning `skipped` without starting; `Queue::attach_setup_run` with the run's `Shared` right after `start_setup` returns; the canary's list reading, `batch_closed_noted`), the two Google reads over `--tidied` after their slot facts, and the network-free `LiveChecks` (§14.52.1, .4; tests 34, 37) | `implementer` | as F8w1 | F8w1, F8d, F8d2 (r2 R2-2), F8b2-advance (`google_calendar_granted`, which `LiveChecks` answers `false` in an explicit body; §14.55, r2 n-1), F8s2 (`mail_signals`); F7c's `--tidied` is on O3 at `623a5f8`, F7a's merge, which carried F7c r4 |
 | F9 | The reveal gate, in its own `onboarding_gate.rs` | `implementer` | a pure function, tested in F1; its own file, so no chain (review r8's note) | F1 |
 | F10 | Shell steps 1-2 in the ruled direction (5b); old wizard removed (static files only) | `console-ui` | `app/static`, the `console.js` queue | direction ruled (5b, 2026-10-23) |
@@ -2421,10 +2421,12 @@ mode. Size: XS (about 15 lines).
 
 ## F5. Command lists (mechanical)
 
-Into the console's `generate_handler!` list: `onboarding::campus_search`,
-`onboarding::store_credentials` (**not** `timezone_for_state`: no page calls it and Q-B12 retired
-its suggestion; F5b, §14.48),
-`onboarding::discover_coursework`, `lms_link::open_lms_window`, `capture_courses`,
+Into the console's `generate_handler!` list: `onboarding::campus_search` (**not**
+`timezone_for_state`: no page calls it and Q-B12 retired its suggestion; F5b, §14.48), **never the
+path-taking `onboarding::store_credentials` or `onboarding::discover_coursework`** (§14.57.1: the
+page sends no path; F5c's wrappers `onboarding_store_credentials` and
+`onboarding_discover_coursework` are the console's, and `app/tests/handler_lists.rs` pins the two
+path-taking names console-absent; F5c review, §14.60), `lms_link::open_lms_window`, `capture_courses`,
 `close_lms_window`, F8l's `onboarding_capture_link` and `onboarding_paste_link` (**never**
 `lms_link::capture_calendar_link` or `paste_calendar_link`, which store under the pending session;
 review r6, I-2), and F2b's seven commands
@@ -2438,10 +2440,12 @@ Recount both lists by script and pin the new names in the test that pins the lis
 **F5b (mechanical, after F10).** In the shell's list, remove only the commands F10 left with no
 caller in the shell's page (each named in F10's report); recount and pin. F10 itself never edits
 `main.rs` (review r1, I8). **Which go and which move** (F10's review, 2026-10-24):
-- **Moved, never deleted:** `campus_search`, `store_credentials`, `discover_coursework`,
-  `open_lms_window` and `close_lms_window`. Steps 3 and 8 call them in onboarding mode, so they are
-  on the console's list by F5 (F5b runs after F5 and checks that they are) and only then leave the
-  shell's list. Their functions and tests stay.
+- **Moved, never deleted:** `campus_search`, `open_lms_window` and `close_lms_window`. Step 3 calls
+  them in onboarding mode, so they are on the console's list by F5 (F5b runs after F5 and checks
+  that they are) and only then leave the shell's list. Their functions and tests stay.
+- **Stay on the shell's list and never move** (F5c review, §14.60): `store_credentials` and
+  `discover_coursework`, which take a vault path. Step 8 calls F5c's wrappers instead, and
+  `handler_lists.rs` pins the two path-taking names console-absent. F5b leaves them where they are.
 - **May go from the shell's list:** `google_connect_url`, `google_connected`,
   `paste_calendar_link` and `capture_calendar_link`, the shell's pending-target commands, which no
   onboarding screen may call (F11t). Their functions stay unless a later task removes them with
@@ -6595,3 +6599,37 @@ shell has no command that ends the process (below) and `console-ui` never edits 
 - **Unowned, after wave B:** the browser screen's "Open the browser again" and "Use an emailed code
   instead" buttons are in the prototype but in no task. The first needs Rust (only Rust holds the
   sign-in URL), so it goes to the planner after wave B.
+
+### 14.60 From F5c's contract review: the handler lists, one profile id, a guarded test (2026-10-24)
+
+F5c is merged into `feat/o3-long-onboarding`. Its review
+(`docs/reports/2026-10-24-wave-b-f5c-review.md`) found an Important problem in this plan, not in
+the code:
+
+1. **F5 and F5b no longer move the path-taking commands.** F5 used to add
+   `onboarding::store_credentials` and `onboarding::discover_coursework` to the console's list, and
+   F5b checked them there before taking them off the shell's. That contradicts §14.57.1 (the page
+   never sends a path). It also contradicts F5c's pin in `app/tests/handler_lists.rs`: the two
+   path-taking names are console-absent, the console carries `onboarding_discover_coursework` and
+   `onboarding_store_credentials`, and the console count is 74.
+   - **F5 is amended:** those two names are dropped from the console's list.
+   - **F5b is amended:** they stay on the shell's list and never move.
+   - **The handler-list line:** whichever of F5 or F5b lands next merges the same
+     `generate_handler!` line and raises the pinned 74 by its own count. It never deletes or
+     loosens the pin's console half (the two names console-absent, the two wrappers present).
+     The second of the two rebases and recounts again.
+2. **One profile id for `ingest.yaml` and the stored login** (the review's minor). Whichever task
+   first wires `run_config_ingest_in` at runtime (F8w1's `LiveRunner` arm for `config.ingest`,
+   unless another task gets there first) derives the profile id exactly as the credential write
+   does: `profiles::id_for(vault)`, which `store_credentials` uses (`onboarding.rs:1130`) through
+   F5c's wrapper. With any other derivation, `ingest.yaml` and the stored login can name different
+   Credential Manager targets for a profile whose id isn't vault-derived. That task adds a test:
+   for one vault, the target `ingest.yaml` names equals the target the wrapper wrote.
+3. **Test 43's refusal case touches the real Credential Manager unguarded.** Its case in
+   `app/tests/onboarding_jobs.rs` (about `:3743`) calls the real `store_credentials` without
+   `CREDMAN_LOCK` or a `Drop` guard, against `CLAUDE.md`'s rule for credential tests.
+   - The fix goes to the task in item 2 or to F11c1, whichever is first (`test-writer`).
+   - **Recommended: check the refusal through a seam**, so the case never reaches Credential
+     Manager. Otherwise add the file-scoped `CREDMAN_LOCK`, a generated test id and a `Drop`
+     guard, as `app/tests/account.rs` does.
+   - The assertion itself is not weakened.
