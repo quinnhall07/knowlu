@@ -82,7 +82,7 @@ fn full_answers() -> Answers {
     a.google_calendar = Some(true);
     a.feeds.insert("lms_ics".into(), FeedState::Validated);
     a.feeds.insert("calendar_ics".into(), FeedState::Rejected);
-    a.rows = vec![BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "quilting-basics".into() }];
+    a.rows = vec![BookRow { source: "zybooks".into(), key: "ZYB-QLT-101".into(), course_slug: "_1001_1".into() }];
     a.zybooks_ignore = vec!["ZYB-ONBOARDING".into()];
     a
 }
