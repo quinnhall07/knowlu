@@ -1218,3 +1218,176 @@ fn step_tens_confirmed_answer_follows_a_successful_confirm_and_precedes_the_next
     let catch = flat.find(".catch(").expect("a catch arm");
     assert!(sent < catch, "the answer is not sent from the failure arm");
 }
+
+// ---- F11p2: the bottom week strip and step 8's one-site form (plan section 14.58.5) --------------
+//
+// Helpers these pins fix, for F11p2 to add to `window.KNOWLU_ONBOARDING` (all pure, none sums):
+// - `weekStripModel(status, step)`: `null` when the strip is hidden, else
+//   `{label, days: [{name, past, count}] (Monday first, seven), later}`. `count` is `step3.due_*`
+//   as given; a past day (index below `week.today`) has `past: true` and `count: null`.
+// - `weekStripHtml(status, step)`: `""` when hidden, else the strip's markup (past days wear `ob-past`).
+// - `siteOrder(status)`: the sites in the order step 8 shows them.
+// - `foundLine(status, site)`: the "Found at your school" sentence, `""` when there is none.
+
+fn helper(name: &str) {
+    assert_eq!(node(&format!("typeof h.{name}")), serde_json::json!("function"), "onboarding.js must expose KNOWLU_ONBOARDING.{name} (F11p2)");
+}
+
+/// A status with invented counts: Monday 2, Tuesday 0, Wednesday 3, Thursday 1, Friday 4, Saturday 0,
+/// Sunday 5, later 9; the week of Monday 2026-10-19, today Wednesday (index 2).
+const STATUS_WEEK: &str = r#"{step: 5, week: {of: "2026-10-19", today: 2}, homework_sites: null,
+  step3: {classes: 2, due_mon: 2, due_tue: 0, due_wed: 3, due_thu: 1, due_fri: 4, due_sat: 0, due_sun: 5, due_later: 9}}"#;
+
+fn strip_text(html: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch { '<' => { in_tag = true; out.push(' '); } '>' => in_tag = false, c if !in_tag => out.push(c), _ => {} }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn the_week_strip_reads_your_week_the_seven_days_and_later_from_the_step3_fields() {
+    helper("weekStripModel");
+    let m = node(&format!("h.weekStripModel({STATUS_WEEK}, 5)"));
+    assert!(m.is_object(), "the strip shows at step 5: {m}");
+    let days = m["days"].as_array().expect("seven days");
+    assert_eq!(days.len(), 7);
+    for (d, want) in days.iter().zip(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]) {
+        assert!(d["name"].as_str().unwrap_or_default().starts_with(want), "Monday first: {d}");
+    }
+    let counts: Vec<_> = days.iter().map(|d| d["count"].clone()).collect();
+    assert_eq!(counts[2..], [3, 1, 4, 0, 5].map(|n| serde_json::json!(n)), "today onward carry their own fields (a 0 stays 0)");
+    assert_eq!(m["later"], serde_json::json!(9));
+    assert!(m["label"].as_str().is_some_and(|l| l.contains("Week of October 19")), "label: {}", m["label"]);
+}
+
+#[test]
+fn past_days_are_dimmed_with_no_count_and_today_is_not() {
+    helper("weekStripModel");
+    helper("weekStripHtml");
+    let m = node(&format!("h.weekStripModel({STATUS_WEEK}, 5)"));
+    let flags: Vec<_> = m["days"].as_array().expect("days").iter().map(|d| (d["past"].as_bool(), d["count"].is_null())).collect();
+    assert_eq!(flags, vec![(Some(true), true), (Some(true), true), (Some(false), false), (Some(false), false), (Some(false), false), (Some(false), false), (Some(false), false)]);
+    let html = node(&format!("h.weekStripHtml({STATUS_WEEK}, 5)")).as_str().unwrap_or_default().to_string();
+    assert_eq!(html.matches("ob-past").count(), 2, "two past days wear ob-past: {html}");
+    let text = strip_text(&html);
+    for want in ["Your week", "Week of October 19", "Later", "Mon", "Sun"] { assert!(text.contains(want), "{want} in: {text}"); }
+    // Counts only: today's and later days' figures, then Later's; Monday's 2 (a past day) is not shown.
+    let digits: Vec<&str> = text.split_whitespace().filter(|w| w.chars().all(|c| c.is_ascii_digit())).collect();
+    assert_eq!(digits, vec!["19", "3", "1", "4", "0", "5", "9"], "the label's 19, then the five live days, then Later: {text}");
+}
+
+#[test]
+fn the_week_label_follows_week_of_without_date_arithmetic_across_a_month() {
+    helper("weekStripModel");
+    let s = r#"{week: {of: "2026-11-02", today: 0}, step3: {due_mon: 1, due_tue: 1, due_wed: 1, due_thu: 1, due_fri: 1, due_sat: 1, due_sun: 1, due_later: 1}}"#;
+    let m = node(&format!("h.weekStripModel({s}, 6)"));
+    assert!(m["label"].as_str().is_some_and(|l| l.contains("Week of November 2")), "label: {}", m["label"]);
+    assert!(m["days"].as_array().expect("days").iter().all(|d| d["past"] == serde_json::json!(false)), "Monday is today, nothing is past");
+}
+
+#[test]
+fn the_strip_shows_from_step_three_and_on_five_to_eight_and_hides_at_two_four_ten_and_eleven() {
+    helper("weekStripModel");
+    helper("weekStripHtml");
+    for step in [3, 5, 6, 7, 8] {
+        assert!(node(&format!("h.weekStripModel({STATUS_WEEK}, {step})")).is_object(), "shown at step {step}");
+    }
+    for step in [2, 4, 10, 11] {
+        assert!(node(&format!("h.weekStripModel({STATUS_WEEK}, {step})")).is_null(), "hidden at step {step}");
+        assert_eq!(node(&format!("h.weekStripHtml({STATUS_WEEK}, {step})")), serde_json::json!(""), "no markup at step {step}");
+    }
+}
+
+#[test]
+fn the_strip_is_hidden_without_week_without_the_due_fields_or_with_all_of_them_null() {
+    helper("weekStripModel");
+    let nulls = r#"{due_mon: null, due_tue: null, due_wed: null, due_thu: null, due_fri: null, due_sat: null, due_sun: null, due_later: null}"#;
+    let counts = r#"{due_mon: 1, due_tue: 1, due_wed: 1, due_thu: 1, due_fri: 1, due_sat: 1, due_sun: 1, due_later: 1}"#;
+    for (name, status) in [
+        ("week is null", format!("{{week: null, step3: {counts}}}")),
+        ("no week key", format!("{{step3: {counts}}}")),
+        ("step3 has no due fields", r#"{week: {of: "2026-10-19", today: 2}, step3: {classes: 2}}"#.to_string()),
+        ("every due field is null", format!("{{week: {{of: \"2026-10-19\", today: 2}}, step3: {nulls}}}")),
+        ("step3 is null", r#"{week: {of: "2026-10-19", today: 2}, step3: null}"#.to_string()),
+        ("no status yet", "null".to_string()),
+    ] {
+        assert!(node(&format!("h.weekStripModel({status}, 5)")).is_null(), "hidden when {name}");
+    }
+}
+
+#[test]
+fn the_page_sums_nothing_for_the_strip_and_the_strip_is_pinned_to_the_pane_bottom() {
+    helper("weekStripModel");
+    let c = code(&read("onboarding.js"));
+    let model = function(&c, "weekStripModel");
+    assert!(!model.contains("reduce(") && !model.contains("+=") && !model.contains("+ s.") && !model.contains("+ due"), "each figure is a field, never a sum: {model}");
+    let css = code(&read("onboarding.css"));
+    assert!(css.contains("ob-past"), "past days have a dimmed style");
+    assert!(css.contains("ob-week") && (css.contains("sticky") || css.contains("position: absolute") || css.contains("position: fixed")), "the strip is pinned to the bottom of the step pane");
+}
+
+fn sites(js_map: &str) -> String { format!("{{homework_sites: {js_map}}}") }
+
+#[test]
+fn step_eight_shows_sites_with_evidence_first_then_zybooks_before_vhl() {
+    helper("siteOrder");
+    let order = |m: &str| node(&format!("h.siteOrder({})", sites(m)));
+    assert_eq!(order("null"), serde_json::json!(["zybooks", "vhl"]), "no evidence: zyBooks first");
+    assert_eq!(order(r#"{vhl: ["BIO 101"]}"#), serde_json::json!(["vhl", "zybooks"]), "evidence first");
+    assert_eq!(order(r#"{vhl: ["BIO 101"], zybooks: ["CS 201"]}"#), serde_json::json!(["zybooks", "vhl"]), "both: zyBooks first");
+    assert_eq!(order(r#"{vhl: ["unmatched"]}"#), serde_json::json!(["vhl", "zybooks"]), "unmatched is still evidence of the site");
+    assert_eq!(node("h.siteOrder(null)"), serde_json::json!(["zybooks", "vhl"]), "no status");
+}
+
+#[test]
+fn the_found_line_names_the_codes_in_the_order_given_and_only_for_a_site_with_an_entry() {
+    helper("foundLine");
+    let line = |m: &str, site: &str| node(&format!("h.foundLine({}, \"{site}\")", sites(m))).as_str().unwrap_or("?").to_string();
+    let l = line(r#"{zybooks: ["MAT 150", "CS 201"]}"#, "zybooks");
+    assert!(l.starts_with("Found at your school: assignments in ") && l.ends_with(" link to zyBooks."), "{l}");
+    let (a, b) = (l.find("MAT 150").expect("first code"), l.find("CS 201").expect("second code"));
+    assert!(a < b, "codes keep the order the status gave them (LMS-key order), not alphabetical: {l}");
+    assert_eq!(line(r#"{zybooks: ["CS 201"]}"#, "vhl"), "", "a site without an entry has no Found line");
+    assert_eq!(line("null", "zybooks"), "", "null homework_sites: no Found line at all");
+    assert_eq!(line(r#"{vhl: ["BIO 101"]}"#, "zybooks"), "");
+    assert!(line(r#"{vhl: ["BIO 101"]}"#, "vhl").ends_with(" link to VHL."));
+    assert_eq!(node("h.foundLine(null, \"vhl\")"), serde_json::json!(""), "no status yet");
+}
+
+#[test]
+fn the_word_unmatched_never_reaches_the_page_and_an_unmatched_only_site_gets_the_plain_sentence() {
+    helper("foundLine");
+    let line = |m: &str| node(&format!("h.foundLine({}, \"vhl\")", sites(m))).as_str().unwrap_or("?").to_string();
+    assert_eq!(line(r#"{vhl: ["unmatched"]}"#), "Found at your school: some assignments at your school link to VHL.");
+    let both = line(r#"{vhl: ["BIO 101", "unmatched"]}"#);
+    assert!(both.contains("BIO 101") && !both.to_lowercase().contains("unmatched"), "a code and unmatched: {both}");
+    assert!(both.starts_with("Found at your school: assignments in BIO 101 link to VHL"), "{both}");
+    let first = line(r#"{vhl: ["unmatched", "BIO 101"]}"#);
+    assert!(first.contains("BIO 101") && !first.to_lowercase().contains("unmatched"), "unmatched first: {first}");
+}
+
+#[test]
+fn one_site_form_shows_at_a_time_and_every_site_stays_reachable_from_a_show_link() {
+    helper("siteOrder");
+    let c = code(&read("onboarding.js"));
+    let render = function(&c, "render8");
+    assert!(render.contains("siteOrder("), "render8 orders the sites by siteOrder: {render}");
+    let flat = c.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("Show "), "every site stays reachable from a Show {{site}} link");
+    assert!(c.contains("data-act8=\"show\""), "the link is a step 8 action");
+    assert!(function(&c, "onClick8").contains("\"show\""), "onClick8 handles it");
+}
+
+#[test]
+fn step_eight_sits_in_knowlus_own_frame_with_the_stored_only_here_line() {
+    let c = code(&read("onboarding.js")).replace("\\'", "'").replace("&#39;", "'");
+    assert!(c.contains("Knowlu's form"), "the frame is labelled Knowlu's form");
+    let login = function(&c, "loginHtml");
+    assert!(login.contains("Stored only on this computer, in Windows Credential Manager, and used only to read "), "the privacy line stays: {login}");
+    assert!(c.contains("foundLine("), "the Found line comes from foundLine");
+    let css = code(&read("onboarding.css"));
+    assert!(css.contains("ob-form"), "the frame has a style");
+}
