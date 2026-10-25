@@ -346,12 +346,22 @@ impl WeekCalendar {
 
     /// Sort, cursor walk and clamp to `window(day)`'s end — unchanged from before commitments, now
     /// shared by `template_blocks` and `template_only_blocks`.
-    fn blocks_from_busy(&self, day: Date, mut busy: Vec<(DateTime, DateTime)>) -> Vec<Block> {
+    fn blocks_from_busy(&self, day: Date, busy: Vec<(DateTime, DateTime)>) -> Vec<Block> {
+        let end_of_day = DateTime::from_parts(day, self.window(day).1);
+        self.walk_busy(day, busy, end_of_day)
+    }
+
+    /// The cursor walk from `window(day)`'s start to `end_of_day`, which is a `DateTime` so the
+    /// midnight method can end on the next date's `00:00`.
+    fn walk_busy(
+        &self,
+        day: Date,
+        mut busy: Vec<(DateTime, DateTime)>,
+        end_of_day: DateTime,
+    ) -> Vec<Block> {
         busy.sort();
 
-        let (window_start, window_end) = self.window(day);
-        let mut cursor = DateTime::from_parts(day, window_start);
-        let end_of_day = DateTime::from_parts(day, window_end);
+        let mut cursor = DateTime::from_parts(day, self.window(day).0);
         let mut blocks = Vec::new();
         for (start, end) in busy {
             let boundary = start.min(end_of_day);
@@ -404,9 +414,30 @@ impl WeekCalendar {
     }
 
     /// `day`'s free blocks from its window's start to the next date's `00:00`, keyed by the date.
-    /// Red stub: the body is T2 (deadline-ordering plan).
-    pub fn free_blocks_to_midnight(&self, _day: Date) -> Vec<Block> {
-        todo!("deadline T2")
+    ///
+    /// *Reason:* the timeline is the planned day plus every evening to local midnight (deadline
+    /// spec Q3, evening ruling d), so a window's end no longer cuts the day. Busy time is the
+    /// template's classes plus the active commitment spans, as `template_blocks` builds it, with
+    /// any span whose end is not after its start dropped, so an inverted class or a span written
+    /// across midnight counts no minute twice. An event is subtracted on its start date only (a
+    /// 23:00-01:00 event takes that evening, nothing of the next date's window), then the minimum
+    /// filter runs. `free_blocks` is unchanged and keeps today's behaviour for an inverted class.
+    pub fn free_blocks_to_midnight(&self, day: Date) -> Vec<Block> {
+        let Ok(next) = day.tomorrow() else {
+            return Vec::new();
+        };
+        let mut busy = self.class_busy(day);
+        busy.extend(
+            self.active_spans(day)
+                .into_iter()
+                .map(|(s, e, _)| (DateTime::from_parts(day, s), DateTime::from_parts(day, e))),
+        );
+        busy.retain(|(start, end)| end > start);
+        let mut blocks = self.walk_busy(day, busy, DateTime::from_parts(next, Time::midnight()));
+        for event in self.events.iter().filter(|e| !e.all_day) {
+            blocks = subtract(&blocks, event.start, event.end);
+        }
+        self.min_filter(blocks)
     }
 
     pub fn template_capacity(&self, day: Date) -> f64 {
