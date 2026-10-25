@@ -1527,7 +1527,7 @@ The questions below are kept as they were argued; each one's ruling or decision 
 | F9 | The reveal gate, in its own `onboarding_gate.rs` | `implementer` | a pure function, tested in F1; its own file, so no chain (review r8's note) | F1 |
 | F10 | Shell steps 1-2 in the ruled direction (5b); old wizard removed (static files only) | `console-ui` | `app/static`, the `console.js` queue | direction ruled (5b, 2026-10-23) |
 | F11t | Failing static tests for the onboarding screens; §14.52's pins: step 5's answer and its three allowed mail commands (the seven others never called), the proceeds of steps 3, 7 and 8, Open Knowlu on `finish_ready` only, the closing state held while an exit call is outstanding. §14.58's pins, each before its piece: `account_status` called on mount and at the step moves only, never on the poll; the strip's figures read from fields, never summed; step 8's "Found" line only from `homework_sites`; `window` sent only after an answer; the state select's codes equal `STATE_TZ`'s (F11e1) | `test-writer` | test first (review r1 minor) | F2b |
-| F11p1s | The shell's steps 1-2 get F11p1's rail foot (§14.59; Q-B25, signed): "About N minutes left" from `minutesLeft` (`STEP_SECONDS` gains steps 1 and 2) and Finish later, which calls the new shell command `setup_quit` (quits; disabled while the folder is being made or Continue is relaunching). About 8 lines in `onboarding.rs`, 1 in `main.rs`'s shell list, 15 in `console.js`. Acceptance: side-by-side shots against `o0-welcome`, `o1-account`, `o1g-google`, `o1c-code`, `o1d-signed-in` | `test-writer` (pins), `mechanical` (the command), then `console-ui` | the page is `app/static`; the command is six specified lines, pinned | F11p1 (merged); next in the panel merge order |
+| F11p1s | The shell's steps 1-2 get F11p1's rail foot (§14.59; Q-B25, signed): "About N minutes left" from `minutesLeft` (`STEP_SECONDS` gains steps 1 and 2) and Finish later, which calls the new shell command `setup_quit` (quits; disabled while the folder is being made or Continue is relaunching). About 8 lines in `onboarding.rs`, 1 in `main.rs`'s shell list, 15 in `console.js`. Acceptance: side-by-side shots against `o0-welcome`, `o1-account`, `o1g-google`, `o1c-code`, `o1d-signed-in` | `test-writer` (pins), `mechanical` (the command), then `console-ui` | the page is `app/static`; the command is six specified lines, pinned | F11p1 (merged); next in the panel merge order. Collision note: F5b also edits `run_shell`'s list; F11p1s lands after F5b if F5b is in flight, and the second to land rebases and recounts |
 | F11c1 | F11c's follow-up, the page half of §14.57.1-.2 that F11c merged without: step 8 calls `onboarding_discover_coursework` and `onboarding_store_credentials` and sends no `vault`; step 10 sends `(10, {"confirmed": true})` after `commitments_confirm` succeeds and before `OB.show(11)`; F11t's two pins (about 15 lines in `onboarding.js`) | `test-writer` (pins), then `console-ui` | `app/static` | F2b3, F5c; in the panel merge order after F11p1s and before F11p2 (§14.58.7, §14.59, r1 m-6) |
 | F11p0 | Quinn's font ruling (signed 2026-10-24, §14.58.2): PT Serif Caption 400 (the logo) and Zilla Slab 400, 600 and 700 (all other text), latin woff2, only the weights used, each after a licence check (SIL OFL 1.1 from the upstream file; anything else stops and goes to Quinn), recorded in `SOURCES.md` with URL, SHA-256 and licence text (`OFL-pt-serif-caption.txt`, `OFL-zilla-slab.txt`); no Big Shoulders, no Public Sans, no wordmark PNG; `.gitattributes` gains `*.woff2 binary` and `*.png binary`, and `scripts/ci/eol-check.ps1` passes (§14.58.2, r1 m-6) | main session | network fetch, a licence judgment and hashes; no subagent downloads | none |
 | F11p1 | The look (§14.58.4): Zilla Slab for every piece of text in `.setup` and `.picker` (the setup frame and onboarding) through one scoped token, the console's own faces untouched; the logo in the rail head set in PT Serif Caption with the red block behind "lu"; the light "day board" token set, started from Windows' setting with no stored choice; the rail's done lines for the account ("Signed in as …") and payment ("Trial on. First charge …") from `account_status`, read on mount and at the step moves only; the rail foot with "About N minutes left" and Finish later; `?fixture=` answering four commands for shots (about 60 lines in `onboarding.js`, 35 in `console.css`, 10 in `onboarding.css`). Acceptance: side-by-side shots (§14.58.7) | `test-writer` (pins), then `console-ui` | `app/static`; pinned and shot-compared | F11p0, F11c (merged); first in the panel merge order |
@@ -6489,7 +6489,7 @@ R3.5, round 2), top to bottom:
 
 Quinn ruled Q-B25 yes (signed, 2026-10-24; §14.58.8). The shell's welcome and account screens
 (step 1, and step 2's account, browser, code and signed-in screens; F10's shots `o0-welcome`,
-`o1-account`, `o1c-code`, `o1d-signed-in`) get the rail foot's "About N minutes left" line and
+`o1-account`, `o1g-google`, `o1c-code`, `o1d-signed-in`) get the rail foot's "About N minutes left" line and
 Finish later, in the form F11p1 gave the setup frame. Q-B24 (the console page in Zilla Slab) stays
 its own task after wave B and is not here.
 
@@ -6502,6 +6502,8 @@ shell has no command that ends the process (below) and `console-ui` never edits 
    - `app/src/main.rs`: `run_shell`'s `generate_handler!` list gains `onboarding::setup_quit`. That
      list has 30 names by this read (`main.rs:107`); the task recounts before quoting a number.
      `run_console`'s list is unchanged.
+     **Collision note** (review m-1): F5b also edits that one-line list. If F5b is in flight,
+     F11p1s lands after it. Whichever lands second rebases and recounts the list.
    - `app/static/index.html`: the shell's `su-rail-foot` (`:134`) gains
      `<button class="su-link" id="su-finish-later" type="button">Finish later</button>` after
      `su-left`.
@@ -6524,8 +6526,10 @@ shell has no command that ends the process (below) and `console-ui` never edits 
      runs (`lms_link.rs:100`).
    - Finish later is **disabled while `SU.making`** (`create_vault_defaults` is running, so a folder
      is never left half-made) **and while `suContinue` is relaunching** (`SU.busy` on the done
-     screen). It is enabled on the welcome, account, code and browser screens. A Google sign-in in
-     flight dies with the process, and nothing is written.
+     screen). It is enabled on the welcome, account, code and browser screens. **It stays enabled
+     while a sign-in is in flight** (review m-2): it is never tied to `SU.busy` as a whole, which
+     is set during a Google sign-in or a code send. A Google sign-in in flight dies with the
+     process, and nothing is written.
    - **What the next launch finds:**
      - Before the folder was made, nothing changed: the shell opens at welcome. A pending session
        a finished sign-in left in Credential Manager is overwritten by the next sign-in, as today.
@@ -6552,7 +6556,8 @@ shell has no command that ends the process (below) and `console-ui` never edits 
 4. **Pinned static tests, written first** (`test-writer`):
    - `static_assets.rs:2968`'s pin of the one fixed estimate (`left: "About 10 minutes"`, and no
      "minutes left") is replaced, citing Quinn's Q-B25 in the test. The new pin: `SU_RAIL` carries no
-     `left`, and `renderSetup` writes `su-left` from `minutesLeft`. The step-counter pin at `:2965`
+     `left`, and `renderSetup` writes `su-left` from `minutesLeft`. It keeps the old pin's comment
+     (review m-3): "the spec's estimates, until S-E measures real times". The step-counter pin at `:2965`
      is unchanged.
    - `onboarding_static.rs`, run under node:
      - `minutesLeft(1)`, `(2)` and `(3)` are 11, 10 and 9;
@@ -6560,6 +6565,8 @@ shell has no command that ends the process (below) and `console-ui` never edits 
      - the button's click calls `setup_quit` and no onboarding exit command (`onboarding_quit`,
        `onboarding_sign_out`, `onboarding_finish`);
      - the button is disabled while `SU.making` and while the done screen's Continue is busy;
+     - **it stays enabled with `SU.busy` set on the account, browser and code screens** (a sign-in
+       or a code send in flight), so its `disabled` never reads `SU.busy` alone (review m-2);
      - the foot's rules are the same selectors for both feet.
    - `onboarding.rs` (Rust, source pins over `main.rs`, split as `registrar.rs:226` does):
      `setup_quit` is on `run_shell`'s list and not on `run_console`'s; its body checks `Onboarding`
