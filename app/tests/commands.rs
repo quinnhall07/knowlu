@@ -982,6 +982,77 @@ fn kind_and_level_are_editable_only_on_a_confirmed_commitment() {
     assert!(task["error"].as_str().unwrap().contains("commitment"), "{task}");
 }
 
+const MEETS_NOTE: &str = "---\nid: cmt_00000000c2\ntype: commitment\nkind: class\nlevel: hard\ntitle: \"Invented Seminar\"\n\
+    meets: [{days: [wed], start: \"18:00\", end: \"19:00\"}]\nstatus: confirmed\n---\n\nInvented.\n";
+
+fn meets_vault(name: &str) -> (PathBuf, ConsoleState) {
+    let v = student_scratch(name);
+    std::fs::create_dir_all(v.join("commitments")).unwrap();
+    std::fs::write(v.join("commitments/invented-seminar.md"), MEETS_NOTE).unwrap();
+    let cs = ConsoleState::open(v.clone(), std::env::temp_dir().join(format!("qo-{name}-data-{}", std::process::id())));
+    (v, cs)
+}
+
+fn set_meets(cs: &ConsoleState, id: &str, value: serde_json::Value) -> serde_json::Value {
+    let mut f = serde_json::Map::new();
+    f.insert("meets".into(), value);
+    set_fields_inner(cs, "today", id, f).unwrap()
+}
+
+/// O3 test 46 (F5d, D5 amended 2026-10-24). `meets` is editable (15 names) and routed through
+/// `check_console_edit` then `answer_literal`, never `literal_for`: the exact canonical line is
+/// asserted (f7e review, Minor 4), since `literal_for` would write JSON that a "one line" check
+/// also passes. The send is `"9:00"`; the note gets `'09:00'`. The write is the student's, via the
+/// console, journalled; `write` itself puts the record before the note (its contract, not re-tested).
+#[test]
+fn set_fields_writes_one_canonical_meets_line_as_the_student() {
+    assert_eq!(knowlu::commands::EDITABLE.len(), 15);
+    assert!(knowlu::commands::EDITABLE.contains(&"meets"));
+    let (v, cs) = meets_vault("meets-ok");
+    let env = set_meets(&cs, "cmt_00000000c2", json!([{ "days": ["mon"], "start": "9:00", "end": "10:00" }]));
+    assert_eq!(env["ok"], true, "{env}");
+    let text = std::fs::read_to_string(v.join("commitments/invented-seminar.md")).unwrap().replace("\r\n", "\n");
+    let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("meets:")).collect();
+    assert_eq!(lines, vec!["meets: [{days: [mon], end: '10:00', start: '09:00'}]"], "{text}");
+    assert_eq!(text, MEETS_NOTE.replace("meets: [{days: [wed], start: \"18:00\", end: \"19:00\"}]", lines[0]), "only that line changed");
+    let recs: Vec<_> = journal_records(&v).into_iter().filter(|r| r["field"] == "meets").collect();
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    assert_eq!((recs[0]["id"].as_str(), recs[0]["actor"].as_str(), recs[0]["via"].as_str()), (Some("cmt_00000000c2"), Some("student"), Some("dashboard")), "{}", recs[0]);
+}
+
+/// Test 46, refusals: one fixed message, no byte of the note changed, no journal record; and a
+/// task note or an unconfirmed commitment is refused the same way.
+#[test]
+fn set_fields_refuses_a_bad_or_misplaced_meets_and_writes_nothing() {
+    let (v, cs) = meets_vault("meets-bad");
+    std::fs::write(v.join("commitments/draft.md"), MEETS_NOTE.replace("cmt_00000000c2", "cmt_00000000c3").replace("status: confirmed", "status: proposed")).unwrap();
+    let task = first_id(&cs);
+    let paths = ["commitments/invented-seminar.md", "commitments/draft.md", "tasks/ph-106-exam-1-prep.md"];
+    let before: Vec<Vec<u8>> = paths.iter().map(|p| std::fs::read(v.join(p)).unwrap()).collect();
+    let journal_before = journal_records(&v);
+    let fixed = "A class time needs at least one day, and a start before its end.";
+    let good = json!([{ "days": ["mon"], "start": "09:00", "end": "10:00" }]);
+    for bad in [
+        json!([{ "days": ["mon"], "start": "11:00", "end": "10:00" }]),
+        json!([{ "days": [], "start": "09:00", "end": "10:00" }]),
+        json!([{ "days": ["mon", "mon"], "start": "09:00", "end": "10:00" }]),
+        json!([]),
+        json!("mon 9-10"),
+    ] {
+        let env = set_meets(&cs, "cmt_00000000c2", bad.clone());
+        assert_eq!(env["ok"], false, "{bad}: {env}");
+        assert_eq!(env["error"], fixed, "{bad}: {env}");
+    }
+    for id in ["cmt_00000000c3", task.as_str()] {
+        let env = set_meets(&cs, id, good.clone());
+        assert_eq!(env["ok"], false, "{id}: {env}");
+        assert!(env["error"].as_str().unwrap().contains("commitment"), "{env}");
+    }
+    let after: Vec<Vec<u8>> = paths.iter().map(|p| std::fs::read(v.join(p)).unwrap()).collect();
+    assert_eq!(before, after, "not one byte changed");
+    assert_eq!(journal_records(&v), journal_before, "no journal record");
+}
+
 /// Review I1: an answer carrying a line break or `---` is refused by the engine's
 /// `answer_literal` before any write. The card is byte-for-byte untouched, nothing is journaled,
 /// and it can still be answered afterwards.
