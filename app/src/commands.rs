@@ -145,7 +145,7 @@ pub fn ui_event_inner(cs: &ConsoleState, action: &str, view: &str, object_id: Op
 /// Frontmatter fields the console may edit. Anything else (`id`, `source_uid`, `judgment`, …) is
 /// refused rather than silently ignored. `kind` and `level` are a commitment's (phase-2 spec D5):
 /// `knowlu_engine::commitments::check_console_edit` refuses them anywhere else and any value off
-/// §2.2's lists. `meets` is a confirmed class's time (F5d, D5 amended 2026-10-24): the same check
+/// §2.2's lists. `meets` is a confirmed commitment's times (not the planning day's) (F5d, D5 amended 2026-10-24): the same check
 /// refuses it anywhere else, and its literal is the engine's `answer_literal`, never `literal_for`.
 /// The page's own list (`console.js`, the drawer's) keeps the first twelve.
 pub const EDITABLE: [&str; 15] = ["title", "course", "due", "effort_hours", "importance", "importance_reason", "status", "progress", "slice_hours", "domain", "rank_override", "effort_confidence", "kind", "level", "meets"];
