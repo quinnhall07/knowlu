@@ -682,6 +682,18 @@
   function confirmBarLine10(n, m) { return n + " of " + m + " answered. Anything you leave blank comes back as a question over the next few days."; }
   OB.summaryLine10 = summaryLine10; OB.splitProposals10 = splitProposals10; OB.firmnessHtml10 = firmnessHtml10;
   OB.winPair10 = winPair10; OB.confirmArg10 = confirmArg10; OB.windowFields10 = windowFields10; OB.windowArg10 = windowArg10; OB.answeredCount10 = answeredCount10; OB.confirmBarLine10 = confirmBarLine10;
+  // One rule for a press on a row: a firmness press is Mine (never over Not mine); a second Mine clears the row.
+  function rowAfter10(row, press) {
+    if (press === "level") { return { answer: row.answer === "not" ? "not" : "mine", picked: row.answer === "not" ? row.picked : true }; }
+    var next = row.answer === press ? "" : press;
+    return { answer: next, picked: next === "" || next === "not" ? false : row.picked };
+  }
+  OB.rowAfter10 = rowAfter10;
+  function setRow10(row, st) {
+    row.setAttribute("data-answer", st.answer);
+    if (st.picked) { row.setAttribute("data-picked", "1"); } else { row.removeAttribute("data-picked"); }
+    row.querySelectorAll("[data-act10]").forEach(function (x) { x.setAttribute("aria-pressed", String(x.getAttribute("data-act10") === st.answer)); });
+  }
   function rows10() {
     return Array.prototype.map.call(document.querySelectorAll("#ob-10-prop .ob-prop"), function (r) {
       return { key: r.getAttribute("data-key"), answer: r.getAttribute("data-answer"), level: r.getAttribute("data-level"), picked: r.getAttribute("data-picked") === "1" };
@@ -760,7 +772,8 @@
     var lv = e.target.closest(".ob-seg button"), b = e.target.closest("[data-act10]");
     if (lv && EL("ob-step-10")) {
       lv.closest(".ob-prop").setAttribute("data-level", lv.getAttribute("data-level"));
-      lv.closest(".ob-prop").setAttribute("data-picked", "1"); paintBar10();
+      var lr = lv.closest(".ob-prop");
+      setRow10(lr, rowAfter10({ answer: lr.getAttribute("data-answer") || "", picked: lr.getAttribute("data-picked") === "1" }, "level")); paintBar10();
       lv.parentNode.querySelectorAll("button").forEach(function (x) { x.setAttribute("aria-pressed", String(x === lv)); });
       return;
     }
@@ -780,9 +793,7 @@
     }
     if (!row) { return; }
     // A second press on the pressed button puts the row back to unanswered.
-    var next = row.getAttribute("data-answer") === act ? "" : act;
-    row.setAttribute("data-answer", next);
-    row.querySelectorAll("[data-act10]").forEach(function (x) { x.setAttribute("aria-pressed", String(x.getAttribute("data-act10") === next)); });
+    setRow10(row, rowAfter10({ answer: row.getAttribute("data-answer") || "", picked: row.getAttribute("data-picked") === "1" }, act));
     paintBar10();
   }
   function render10(status) {
