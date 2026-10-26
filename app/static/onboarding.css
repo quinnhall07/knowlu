@@ -59,3 +59,11 @@
 .ob-seg button[aria-pressed="true"] { background: var(--su-ink); color: var(--su-board); }
 .ob-10-bar { position: sticky; bottom: 0; margin-top: 18px; padding: 10px 0 12px; background: var(--su-board); border-top: 1px solid var(--su-rule-2); }
 .ob-10-bar .ob-state { margin: 0 0 6px; }
+.ob-prop > .a, .ob-prop > .su-dim { flex: 1 1 auto; min-width: 0; text-align: left; }
+.ob-prop:not(.ob-win) > .a { order: 0; }
+.ob-prop:not(.ob-win) > .su-dim { order: 2; flex: 1 0 100%; margin-top: -6px; }
+.ob-prop:not(.ob-win) > .ob-ctl { order: 1; }
+.ob-prop .ob-ctl { display: inline-flex; flex-wrap: nowrap; flex: none; gap: 8px; margin-left: auto; align-items: center; }
+.ob-win { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.ob-win .ob-wpair { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ob-win button:disabled { opacity: .5; }

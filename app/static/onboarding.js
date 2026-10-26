@@ -630,7 +630,7 @@
   }
   function propHtml(p) {
     return '<div class="ob-prop" data-key="' + esc(p.source_uid) + '" data-answer="" data-level="' + esc(p.level || "soft") + '"><span class="a">' + esc(p.title) + '</span> <span class="su-dim">' + esc(p.when || "") + (p.where ? " · " + esc(p.where) : "") + '</span> ' +
-      firmnessHtml10(p.level) + ' <button class="b su-btn" type="button" data-act10="mine" aria-pressed="false">Mine</button> <button class="b su-btn" type="button" data-act10="not" aria-pressed="false">Not mine</button></div>';
+      '<span class="ob-ctl">' + firmnessHtml10(p.level, p.title) + ' <button class="b su-btn" type="button" data-act10="mine" aria-pressed="false">Mine</button> <button class="b su-btn" type="button" data-act10="not" aria-pressed="false">Not mine</button></span></div>';
   }
   // The pure helpers (F11p3): the summary line, the proposal split, the firmness control, the confirm object, the bar's count.
   function summaryLine10(st) {
@@ -642,28 +642,32 @@
     var ps = (r && r.proposals) || [];
     return { events: ps.filter(function (p) { return !p.window; }), window: ps.filter(function (p) { return p.window; })[0] || null };
   }
-  function firmnessHtml10(level) {
+  function firmnessHtml10(level, title) {
     var on = LEVELS10.some(function (l) { return l[0] === level; }) ? level : "soft";
-    return '<span class="ob-seg" role="group" aria-label="How firm">' + LEVELS10.map(function (l) {
+    return '<span class="ob-seg" role="group" aria-label="How firm is ' + esc(title || "") + '">' + LEVELS10.map(function (l) {
       return '<button class="b su-btn" type="button" data-level="' + l[0] + '" aria-pressed="' + (l[0] === on) + '">' + l[1] + '</button>';
     }).join("") + '</span>';
   }
   function windowFields10(p) {
-    var m = p && p.meets && p.meets[0];
-    return { start: (m && m.start) || "", end: (m && m.end) || "" };
+    var ms = (p && p.meets) || [], m = ms[0], f = { start: (m && m.start) || "", end: (m && m.end) || "" };
+    if (ms.length > 1) { f.entries = ms.map(function (x) { return { days: x.days, start: x.start || "", end: x.end || "" }; }); }
+    return f;
   }
-  // The `window` string for commitments_confirm, or null: unanswered or a blank time sends no key.
+  function winEntries10(win) { return win.entries || [{ start: win.start, end: win.end }]; }
+  function winSet10(win) { return !!win && winEntries10(win).every(function (e) { return e.start && e.end; }); }
+  // The `window` string for commitments_confirm, or null: unanswered or any blank time sends no key.
   function windowArg10(p, win) {
-    if (!win || !win.answered || !win.start || !win.end) { return null; }
-    var f = windowFields10(p);
-    if (p && p.meets && f.start === win.start && f.end === win.end) { return JSON.stringify(p.meets); }
-    var days = (p && p.meets && p.meets[0] && p.meets[0].days) || ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
-    return JSON.stringify([{ days: days, start: win.start, end: win.end }]);
+    if (!win || !win.answered || !winSet10(win)) { return null; }
+    var es = winEntries10(win), ms = (p && p.meets) || [];
+    if (!ms.length) { return JSON.stringify([{ days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], start: es[0].start, end: es[0].end }]); }
+    var same = ms.every(function (m, i) { return !es[i] || (es[i].start === m.start && es[i].end === m.end); });
+    if (same) { return JSON.stringify(ms); }
+    return JSON.stringify(ms.map(function (m, i) { return es[i] ? { days: m.days, start: es[i].start, end: es[i].end } : m; }));
   }
   function confirmArg10(rows, proposal, win) {
     var mine = [], notMine = [];
     rows.forEach(function (r) {
-      if (r.answer === "mine") { mine.push({ source_uid: r.key, level: r.level }); } else if (r.answer === "not") { notMine.push(r.key); }
+      if (r.answer !== "not" && (r.answer === "mine" || r.picked)) { mine.push({ source_uid: r.key, level: r.level }); } else if (r.answer === "not") { notMine.push(r.key); }
     });
     var out = { mine: mine, not_mine: notMine }, w = windowArg10(proposal, win);
     if (w !== null) { out.window = w; }
@@ -671,30 +675,53 @@
   }
   // `win` is the day-window question (F11p4); null means it is not on screen, so it is not counted.
   function answeredCount10(rows, win) {
-    var n = rows.filter(function (r) { return r.answer === "mine" || r.answer === "not"; }).length;
-    return { n: n + (win && win.answered ? 1 : 0), m: rows.length + (win ? 1 : 0) };
+    var n = rows.filter(function (r) { return r.answer === "mine" || r.answer === "not" || r.picked; }).length;
+    return { n: n + (win && win.answered && winEntries10(win).every(function (e) { return e.start !== "" && e.end !== ""; }) ? 1 : 0), m: rows.length + (win ? 1 : 0) };
   }
   function confirmBarLine10(n, m) { return n + " of " + m + " answered. Anything you leave blank comes back as a question over the next few days."; }
   OB.summaryLine10 = summaryLine10; OB.splitProposals10 = splitProposals10; OB.firmnessHtml10 = firmnessHtml10;
   OB.confirmArg10 = confirmArg10; OB.windowFields10 = windowFields10; OB.windowArg10 = windowArg10; OB.answeredCount10 = answeredCount10; OB.confirmBarLine10 = confirmBarLine10;
   function rows10() {
     return Array.prototype.map.call(document.querySelectorAll("#ob-10-prop .ob-prop"), function (r) {
-      return { key: r.getAttribute("data-key"), answer: r.getAttribute("data-answer"), level: r.getAttribute("data-level") };
+      return { key: r.getAttribute("data-key"), answer: r.getAttribute("data-answer"), level: r.getAttribute("data-level"), picked: r.getAttribute("data-picked") === "1" };
     });
   }
   function paintBar10() {
     var el = EL("ob-10-count"), c = answeredCount10(rows10(), w10.win);
     if (el) { el.textContent = confirmBarLine10(c.n, c.m); }
   }
-  // The guess goes into the two time inputs until the student has touched them.
+  var DAYS10 = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+  function daysLabel10(ds) {
+    var ix = (ds || []).map(function (d) { return DAYS10.indexOf(d); }), cap = function (k) { return DAYS10[k].charAt(0).toUpperCase() + DAYS10[k].slice(1); };
+    var run = ix.length > 1 && ix.every(function (k, n) { return k >= 0 && (n === 0 || k === ix[n - 1] + 1); });
+    return run ? cap(ix[0]) + "–" + cap(ix[ix.length - 1]) : ix.filter(function (k) { return k >= 0; }).map(cap).join(", ");
+  }
+  function winPair10(i, head, e) {
+    return '<span class="ob-wpair" data-i="' + i + '">' + (head ? '<span class="su-dim">' + esc(head) + '</span> ' : '') +
+      '<label>Wake <input type="time" class="ob-wt" data-k="start" value="' + esc(e.start) + '"></label> <label>Bed <input type="time" class="ob-wt" data-k="end" value="' + esc(e.end) + '"></label></span>';
+  }
+  function syncWin10() {
+    var b = document.querySelector("#ob-10-win [data-act10=win]");
+    if (b) { b.disabled = !winSet10(w10.win); }
+  }
+  // The guess goes into the time inputs (one pair per entry) until the student has touched them.
   function fillWindow10() {
-    var a = EL("ob-10-wstart"), b = EL("ob-10-wend"), f = windowFields10(w10.proposal);
-    if (!a || !b || w10.win.answered) { return; }
-    a.value = w10.win.start = f.start; b.value = w10.win.end = f.end;
+    var host = EL("ob-10-wins"), f = windowFields10(w10.proposal);
+    if (!host || w10.win.answered) { return; }
+    var es = f.entries || [f];
+    host.innerHTML = es.map(function (e, i) { return winPair10(i, f.entries ? daysLabel10(e.days) : "", e); }).join(" ");
+    w10.win.start = f.start; w10.win.end = f.end;
+    if (f.entries) { w10.win.entries = es.map(function (e) { return { start: e.start, end: e.end }; }); } else { delete w10.win.entries; }
+    syncWin10();
   }
   function readWindow10() {
-    var a = EL("ob-10-wstart"), b = EL("ob-10-wend");
-    if (a && b) { w10.win.start = a.value; w10.win.end = b.value; }
+    var pairs = document.querySelectorAll("#ob-10-wins .ob-wpair"), es = Array.prototype.map.call(pairs, function (p) {
+      return { start: p.querySelector("[data-k=start]").value, end: p.querySelector("[data-k=end]").value };
+    });
+    if (!es.length) { return; }
+    w10.win.start = es[0].start; w10.win.end = es[0].end;
+    if (es.length > 1) { w10.win.entries = es; } else { delete w10.win.entries; }
+    syncWin10();
   }
   function askProposals(s) {
     if (!(s && s.proposals_ready) || w10.asked) { return; }
@@ -704,7 +731,7 @@
       if (!host) { return; }
       var sp = splitProposals10(r), ps = sp.events;
       w10.proposal = sp.window; fillWindow10();
-      host.innerHTML = ps.length ? '<p class="su-small">Knowlu found these repeating on your calendar. Mark each one, or leave it blank and Knowlu asks again later.</p>' + ps.map(propHtml).join("")
+      host.innerHTML = ps.length ? ps.map(propHtml).join("")
         : '<p class="ob-state">' + esc((r && r.error) || "Knowlu found nothing repeating on your calendar.") + '</p>';
       paintBar10();
     }).catch(function () {
@@ -731,6 +758,7 @@
     var lv = e.target.closest(".ob-seg button"), b = e.target.closest("[data-act10]");
     if (lv && EL("ob-step-10")) {
       lv.closest(".ob-prop").setAttribute("data-level", lv.getAttribute("data-level"));
+      lv.closest(".ob-prop").setAttribute("data-picked", "1"); paintBar10();
       lv.parentNode.querySelectorAll("button").forEach(function (x) { x.setAttribute("aria-pressed", String(x === lv)); });
       return;
     }
@@ -738,8 +766,8 @@
     if (b.getAttribute("data-act10") === "times") { var set = EL("ob-10-set"); set.hidden = !set.hidden; b.setAttribute("aria-expanded", String(!set.hidden)); return; }
     var act = b.getAttribute("data-act10"), row = b.closest(".ob-prop");
     if (act === "win") {
-      readWindow10(); w10.win.answered = !w10.win.answered;
-      b.setAttribute("aria-pressed", String(w10.win.answered)); paintBar10();
+      readWindow10(); w10.win.answered = true;
+      b.setAttribute("aria-pressed", "true"); paintBar10();
       return;
     }
     if (act === "confirm") { confirm10(); return; }
@@ -765,8 +793,8 @@
       '<h2 class="ob-h2">Questions only you can answer</h2><p class="su-small">Your calendar repeats these. How firm is each? The preselected level is Knowlu&#39;s guess.</p>' +
       '<div id="ob-10-prop"><p class="ob-state" id="ob-10-wait">Knowlu is reading your calendars…</p></div>' +
       '<div class="ob-prop ob-win" id="ob-10-win"><span class="a">When does your day run?</span> <span class="su-dim">Knowlu plans inside this window. The times shown are its guess.</span> ' +
-      '<label>Wake <input type="time" id="ob-10-wstart" aria-label="Day starts"></label> <label>Bed <input type="time" id="ob-10-wend" aria-label="Day ends"></label> ' +
-      '<button class="b su-btn" type="button" data-act10="win" aria-pressed="false">That&#39;s right</button></div>' +
+      '<span id="ob-10-wins">' + winPair10(0, "", { start: "", end: "" }) + '</span> ' +
+      '<button class="b su-btn" type="button" data-act10="win" aria-pressed="false" disabled>That&#39;s right</button></div>' +
       '<div class="ob-10-bar" id="ob-10-bar"><p class="ob-state" id="ob-10-count"></p>' +
       '<p class="ob-state ob-failed" id="ob-10-line" role="alert" hidden></p>' +
       '<div class="su-actions"><button class="b pri y su-btn" type="button" id="ob-10-confirm" data-act10="confirm">Confirm my week</button>' +
