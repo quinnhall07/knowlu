@@ -148,9 +148,13 @@ fact. The settings panel is an **overlay** over a running console, and nothing i
   `spill_blocks = max(0, ceil(must_hours × 2) − fit_blocks)`. One block = 30 minutes.
 - **The form is the argument** (§11.6): blocks that fit sit inside a bordered, accented container;
   blocks that do not are drawn **outside it in outline red**. Today that reads 10 in, 39 out.
-- **After 20:00 the spill list follows the evening order.** The meter reads the same ranked list, so
-  which tasks spill can change at the hour: tasks due tonight are counted first and an overdue task
-  may move into the spill (spec §1, S5). The totals (`must_hours`, `fit_blocks`) do not change.
+- **`W` leads the spill list.** Items that cannot fit before their deadline (`W`, the deadline
+  formula's "won't fit" set) come first in `spill_items`, each with its `deadline` (the date alone
+  for a bare-date `due`); today's first-fit spill of the rest follows in rank order. The totals
+  (`must_hours`, `fit_blocks`) do not change. `give_text` is the line under the meter ("If something
+  has to give: B and C (4.5h). Everything else fits by its deadline, not counting Lab Pin, which you
+  pinned."), absent with no `W`; with a placeholder in play it reads "This may not all fit: N
+  item(s) have no time estimate yet", and the pin clause is named in every form (Q8).
 - **Spill blocks are hoverable and name their tasks** (§12.6 #5). This is Runway's threshold strip
   folded in: the meter answers *how much* doesn't fit, the hover answers *what*.
 - **Capped at 120 spill blocks**, then `… and N more`. A freshman in week three generates unbounded
@@ -183,12 +187,15 @@ fact. The settings panel is an **overlay** over a running console, and nothing i
 - **Answers:** what is actually at risk?
 - **Computed by:** `surface::must_do → state.must_do`, via `ranking::partition_must_do` (slack ≤ 0),
   grouped by horizon, sorted `start_by` then `due`.
-- **After 20:00 the groups follow the evening order.** The page ranks at its own `now`
-  (`surface::load_at`); from 20:00 vault time, tasks due later tonight come first, so the `Due today`
-  group leads `Overdue`. The set is unchanged, only the order. Inside `Due today` the group keeps
-  its existing `start_by`-then-`due` sort (**pending Q-1: whether it sorts by due time after the
-  hour**; see the evening plan's §3). `state/today.md` keeps the daytime order unless a slot runs
-  after 20:00.
+- **The groups follow the deadline order.** The page ranks at its own `now` (`surface::load_at`;
+  spec `docs/specs/2026-10-24-deadline-ordering-formula.md`). With a moment, a group is a run of
+  **consecutive** rows with one label and rows keep rank order, so a label can appear twice. Labels
+  go by the moment: a task due at or before it reads `Overdue` (a task due 10:00 read at 15:00 is
+  overdue), and the nav's Overdue count and view follow the same clock. With no moment the groups
+  and their `start_by`-then-`due` sort are as before. A `W` row carries `fit_text` ("Won't fit
+  before 11:59 pm"; "May not fit ..." when a placeholder estimate is in play) and `fit_why` (the
+  reason, from the walk's record at removal); the console reads both from the list row, never from
+  `note_detail`. `state/today.md` keeps the order of its own run's moment.
 - **Row carries:** pip · title · source chip · **`start by`** · **slack** · progress track · hours ·
   ⚑ · optional flag span (`you: 100% · zyBooks: 60%`, `conflicts with …`, `extended → 9/18`) ·
   optional merge span · optional amend badge.

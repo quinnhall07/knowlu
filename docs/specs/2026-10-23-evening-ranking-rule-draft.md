@@ -1,6 +1,6 @@
 # The evening ranking rule (ruled 2026-10-24)
 
-**Status: RULED by Quinn, 2026-10-24.** Quinn ruled the behaviour on 2026-10-23 and approved all
+**Status: RULED by Quinn, 2026-10-24; the 20:00 step is replaced by `docs/specs/2026-10-24-deadline-ordering-formula.md` (Quinn's Q5, 2026-10-24).** Quinn ruled the behaviour on 2026-10-23 and approved all
 four of this note's recommendations on 2026-10-24 (§5). The file keeps its `-draft` name so links
 hold. **Not part of wave B** (O3/O4): no task in
 `docs/plans/2026-10-23-wave-b-long-onboarding-plan.md` builds it. Its plan is
