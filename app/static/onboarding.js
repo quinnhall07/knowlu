@@ -128,7 +128,7 @@
     var h = '<div id="ob-step-11" class="ob-reveal">';
     if (m.failed.length) {
       h += '<h2 class="ob-h2">Needs another try</h2><ul class="ob-list">' + m.failed.map(function (f) {
-        return '<li class="ob-rv-item"><b>' + txt(cap(f.name)) + '.</b> ' + txt(f.text) + (f.fix ? ' <span class="su-dim">' + txt(f.fix) + '</span>' : "") +
+        return '<li class="ob-rv-item"><b>' + txt(cap(f.name)) + '.</b> ' + txt(f.text) + (f.fix && f.fix !== "Try again" ? ' <span class="su-dim">' + txt(f.fix) + '</span>' : "") +
           ' <button class="b su-btn" type="button" data-retry="' + esc(f.key) + '">Try again</button></li>';
       }).join("") + '</ul>';
     }

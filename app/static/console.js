@@ -1592,15 +1592,15 @@
     "mail.first_pass": "Your first emails are still being read."
   };
   function handoverHtml(items) {
-    var out = (items || []).map(function (h) {
-      var k = h && h.item;
+    var out = (items || []).map(function (it) {
+      var k = it && it.item;
       if (k === "mail.connect") {
-        return '<span class="ho-line">' + h(HANDOVER_WORDS[k]) + '</span><button class="b" type="button" data-settings>Settings</button>' +
-          '<button class="b" type="button" data-ho-notnow>Not now</button>';
+        return '<div class="ho-row"><span class="ho-line">' + h(HANDOVER_WORDS[k]) + '</span><button class="b" type="button" data-settings>Settings</button>' +
+          '<button class="b" type="button" data-ho-notnow>Not now</button></div>';
       }
-      return '<span class="ho-line">' + h(HANDOVER_WORDS[k] || "Something is still coming.") + '</span>';
+      return '<div class="ho-row"><span class="ho-line">' + h(HANDOVER_WORDS[k] || "Something is still coming.") + '</span></div>';
     });
-    return out.length ? '<span class="ho-head">Still coming:</span> ' + out.join(" ") : "";
+    return out.length ? '<div class="ho-head">Still coming</div>' + out.join("") : "";
   }
   function loadHandover() {
     return invoke("onboarding_handover", {}).then(function (r) {

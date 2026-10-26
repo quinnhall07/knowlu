@@ -357,8 +357,9 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
 /* ---- Task 15: sync/backup/scheduler topline, the Runs view, interaction events ---- */
 .syncline { font-family: var(--mono); font-size: 11px; color: var(--t3); display: flex; gap: var(--s3); align-items: baseline; flex-wrap: wrap; margin: 0 0 var(--s2); }
 .syncline button { font: inherit; }
-.handover { display: flex; gap: var(--s3); align-items: baseline; flex-wrap: wrap; margin: 0 0 var(--s3); padding: var(--s2) var(--s3); border-left: 3px solid var(--acc); background: var(--s2c); border-radius: var(--r2); font-size: 13px; color: var(--t2); }
+.handover { display: flex; flex-direction: column; gap: var(--s2); margin: 0 0 var(--s3); padding: var(--s2) var(--s3); border-left: 3px solid var(--acc); background: var(--s2c); border-radius: var(--r2); font-size: 13px; color: var(--t2); }
 .handover[hidden] { display: none; }
+.handover .ho-row { display: flex; gap: var(--s3); align-items: baseline; flex-wrap: wrap; }
 .handover .ho-head { font-family: var(--mono); font-size: 11px; color: var(--t3); }
 .calm { color: var(--acc); }
 .amber { color: var(--warn); }
