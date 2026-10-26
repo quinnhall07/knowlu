@@ -346,12 +346,22 @@ impl WeekCalendar {
 
     /// Sort, cursor walk and clamp to `window(day)`'s end — unchanged from before commitments, now
     /// shared by `template_blocks` and `template_only_blocks`.
-    fn blocks_from_busy(&self, day: Date, mut busy: Vec<(DateTime, DateTime)>) -> Vec<Block> {
+    fn blocks_from_busy(&self, day: Date, busy: Vec<(DateTime, DateTime)>) -> Vec<Block> {
+        let end_of_day = DateTime::from_parts(day, self.window(day).1);
+        self.walk_busy(day, busy, end_of_day)
+    }
+
+    /// The cursor walk from `window(day)`'s start to `end_of_day`, which is a `DateTime` so the
+    /// midnight method can end on the next date's `00:00`.
+    fn walk_busy(
+        &self,
+        day: Date,
+        mut busy: Vec<(DateTime, DateTime)>,
+        end_of_day: DateTime,
+    ) -> Vec<Block> {
         busy.sort();
 
-        let (window_start, window_end) = self.window(day);
-        let mut cursor = DateTime::from_parts(day, window_start);
-        let end_of_day = DateTime::from_parts(day, window_end);
+        let mut cursor = DateTime::from_parts(day, self.window(day).0);
         let mut blocks = Vec::new();
         for (start, end) in busy {
             let boundary = start.min(end_of_day);
@@ -398,6 +408,34 @@ impl WeekCalendar {
             if event.all_day {
                 continue;
             }
+            blocks = subtract(&blocks, event.start, event.end);
+        }
+        self.min_filter(blocks)
+    }
+
+    /// `day`'s free blocks from its window's start to the next date's `00:00`, keyed by the date.
+    ///
+    /// *Reason:* the timeline is the planned day plus every evening to local midnight (deadline
+    /// spec Q3, evening ruling d), so a window's end no longer cuts the day. Busy time is the
+    /// template's classes plus the active commitment spans, as `template_blocks` builds it, with
+    /// any span whose end is not after its start dropped, so an inverted class or a span written
+    /// across midnight counts no minute twice. Each timed event is subtracted as a `DateTime` span
+    /// wherever it overlaps this date's blocks (a 23:00-01:00 event takes 23:00-24:00 here, and
+    /// takes from the next date only if that date's window opens before 01:00), then the minimum
+    /// filter runs. `free_blocks` is unchanged and keeps today's behaviour for an inverted class.
+    pub fn free_blocks_to_midnight(&self, day: Date) -> Vec<Block> {
+        let Ok(next) = day.tomorrow() else {
+            return Vec::new();
+        };
+        let mut busy = self.class_busy(day);
+        busy.extend(
+            self.active_spans(day)
+                .into_iter()
+                .map(|(s, e, _)| (DateTime::from_parts(day, s), DateTime::from_parts(day, e))),
+        );
+        busy.retain(|(start, end)| end > start);
+        let mut blocks = self.walk_busy(day, busy, DateTime::from_parts(next, Time::midnight()));
+        for event in self.events.iter().filter(|e| !e.all_day) {
             blocks = subtract(&blocks, event.start, event.end);
         }
         self.min_filter(blocks)
@@ -1280,5 +1318,180 @@ mod tests {
             ],
             "a malformed series file must still leave the weekly rule in effect"
         );
+    }
+
+    // --- deadline ordering, T1a: the date-keyed midnight method (DW1-DW8) ---
+
+    fn dt(month: i8, day: i8, hour: i8, minute: i8) -> DateTime {
+        DateTime::constant(2026, month, day, hour, minute, 0, 0)
+    }
+
+    fn blk(start: DateTime, end: DateTime) -> Block {
+        Block { start, end }
+    }
+
+    fn event(start: DateTime, end: DateTime) -> CalEvent {
+        CalEvent { title: "Busy".into(), start, end, all_day: false }
+    }
+
+    fn friday_span(start: Time, end: Time) -> CommitmentSpan {
+        CommitmentSpan {
+            day: "fri",
+            start,
+            end,
+            from: None,
+            until: None,
+            title: "Shift".into(),
+            kind: "work".into(),
+            source_uid: "test:dw-shift".into(),
+        }
+    }
+
+    /// Ten consecutive dates from `first`.
+    fn ten_dates(first: Date) -> Vec<Date> {
+        (0..10).map(|n| first.checked_add(jiff::Span::new().days(n)).expect("in range")).collect()
+    }
+
+    fn next_midnight(date: Date) -> DateTime {
+        DateTime::from_parts(date.tomorrow().expect("in range"), Time::midnight())
+    }
+
+    #[test]
+    fn midnight_blocks_run_from_window_start_to_midnight() {
+        let friday = Date::constant(2026, 8, 28);
+        assert_eq!(
+            cal(Vec::new()).free_blocks_to_midnight(friday),
+            vec![blk(dt(8, 28, 8, 0), dt(8, 28, 12, 0)), blk(dt(8, 28, 13, 45), dt(8, 29, 0, 0))],
+            "the 12:50-13:00 gap is under the minimum and filtered"
+        );
+    }
+
+    #[test]
+    fn midnight_blocks_are_keyed_by_date_over_ten_days() {
+        let calendar = cal(vec![event(dt(8, 24, 19, 0), dt(8, 24, 21, 0))]);
+        let dates = ten_dates(Date::constant(2026, 8, 24));
+        assert_eq!(dates[9], Date::constant(2026, 9, 2));
+        for date in &dates {
+            let blocks = calendar.free_blocks_to_midnight(*date);
+            assert_eq!(blocks.last().map(|b| b.end), Some(next_midnight(*date)), "{date}");
+        }
+        assert_eq!(
+            calendar.free_blocks_to_midnight(dates[0]),
+            vec![
+                blk(dt(8, 24, 8, 0), dt(8, 24, 11, 0)),
+                blk(dt(8, 24, 12, 50), dt(8, 24, 19, 0)),
+                blk(dt(8, 24, 21, 0), dt(8, 25, 0, 0)),
+            ],
+            "the Monday 08-24 event subtracts on its own date"
+        );
+        assert_eq!(
+            calendar.free_blocks_to_midnight(dates[7]),
+            vec![blk(dt(8, 31, 8, 0), dt(8, 31, 11, 0)), blk(dt(8, 31, 12, 50), dt(9, 1, 0, 0))],
+            "and not on Monday 08-31"
+        );
+    }
+
+    #[test]
+    fn an_event_ending_at_midnight_takes_the_evening() {
+        let calendar = cal(vec![event(dt(8, 28, 20, 0), dt(8, 29, 0, 0))]);
+        assert_eq!(
+            calendar.free_blocks_to_midnight(Date::constant(2026, 8, 28)),
+            vec![blk(dt(8, 28, 8, 0), dt(8, 28, 12, 0)), blk(dt(8, 28, 13, 45), dt(8, 28, 20, 0))]
+        );
+    }
+
+    #[test]
+    fn an_event_crossing_midnight_takes_only_its_start_dates_evening() {
+        let calendar = cal(vec![event(dt(8, 28, 23, 0), dt(8, 29, 1, 0))]);
+        let saturday = Date::constant(2026, 8, 29);
+        assert_eq!(
+            calendar.free_blocks_to_midnight(Date::constant(2026, 8, 28)),
+            vec![blk(dt(8, 28, 8, 0), dt(8, 28, 12, 0)), blk(dt(8, 28, 13, 45), dt(8, 28, 23, 0))]
+        );
+        assert_eq!(
+            calendar.free_blocks_to_midnight(saturday),
+            cal(Vec::new()).free_blocks_to_midnight(saturday),
+            "its after-midnight part falls before the next window opens"
+        );
+        assert_eq!(
+            calendar.free_blocks_to_midnight(saturday),
+            vec![blk(dt(8, 29, 8, 0), dt(8, 30, 0, 0))]
+        );
+    }
+
+    #[test]
+    fn commitments_at_midnight() {
+        let friday = Date::constant(2026, 8, 28);
+        let late = cal(Vec::new()).with_commitments(
+            vec![friday_span(Time::constant(19, 0, 0, 0), Time::constant(23, 59, 0, 0))],
+            [None; 7],
+        );
+        assert_eq!(
+            late.free_blocks_to_midnight(friday),
+            vec![blk(dt(8, 28, 8, 0), dt(8, 28, 12, 0)), blk(dt(8, 28, 13, 45), dt(8, 28, 19, 0))],
+            "the one minute after 23:59 is under the minimum"
+        );
+        let overnight = cal(Vec::new()).with_commitments(
+            vec![friday_span(Time::constant(22, 0, 0, 0), Time::constant(2, 0, 0, 0))],
+            [None; 7],
+        );
+        assert_eq!(
+            overnight.free_blocks_to_midnight(friday),
+            vec![blk(dt(8, 28, 8, 0), dt(8, 28, 12, 0)), blk(dt(8, 28, 13, 45), dt(8, 29, 0, 0))],
+            "a span written 22:00-02:00 is dropped, so the evening is as with no span"
+        );
+    }
+
+    #[test]
+    fn an_inverted_class_counts_no_minute_twice() {
+        let yaml = "day_start: \"08:00\"\nday_end: \"18:00\"\nmin_block_minutes: 45\n\
+                    classes:\n  fri:\n    - [\"14:00\", \"13:00\"]\n";
+        let blocks = cal_with_yaml(yaml, Vec::new()).free_blocks_to_midnight(Date::constant(2026, 8, 28));
+        assert!(blocks.windows(2).all(|w| w[0].end <= w[1].start), "blocks must not overlap");
+        let minutes: i64 = blocks.iter().map(|b| (b.hours() * 60.0).round() as i64).sum();
+        assert!(minutes <= 16 * 60, "no more than 08:00 to midnight, got {minutes}");
+        assert_eq!(blocks, vec![blk(dt(8, 28, 8, 0), dt(8, 29, 0, 0))], "the inverted class is dropped");
+    }
+
+    #[test]
+    fn the_midnight_method_honours_the_window_start() {
+        let friday = Date::constant(2026, 8, 28);
+        let calendar = cal(Vec::new()).with_day_window(
+            friday,
+            Time::constant(10, 0, 0, 0),
+            Time::constant(16, 0, 0, 0),
+        );
+        let mut fridays = 0;
+        for date in ten_dates(friday) {
+            let blocks = calendar.free_blocks_to_midnight(date);
+            let want = if day_key(date) == "fri" { 10 } else { 8 };
+            assert_eq!(blocks[0].start.time(), Time::constant(want, 0, 0, 0), "{date}");
+            assert_eq!(blocks.last().unwrap().end, next_midnight(date), "{date}");
+            fridays += (day_key(date) == "fri") as i32;
+        }
+        assert_eq!(fridays, 2);
+    }
+
+    /// Guard: green on the base. The literals were read off the base (vault-s1 and vault-full
+    /// carry the same week_template.yaml).
+    #[test]
+    fn existing_blocks_are_unchanged() {
+        let friday = Date::constant(2026, 8, 28);
+        for template in [TEMPLATE, "tests/fixtures/vault-full/config/week_template.yaml"] {
+            let calendar = WeekCalendar::from_file(Path::new(template), Vec::new());
+            assert_eq!(
+                calendar.free_blocks(friday),
+                vec![blk(dt(8, 28, 8, 0), dt(8, 28, 12, 0)), blk(dt(8, 28, 13, 45), dt(8, 28, 18, 0))]
+            );
+            assert_eq!(
+                calendar.template_blocks(friday),
+                vec![
+                    blk(dt(8, 28, 8, 0), dt(8, 28, 12, 0)),
+                    blk(dt(8, 28, 12, 50), dt(8, 28, 13, 0)),
+                    blk(dt(8, 28, 13, 45), dt(8, 28, 18, 0)),
+                ]
+            );
+            assert_eq!(calendar.capacity(friday), 8.25);
+        }
     }
 }
