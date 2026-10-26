@@ -1567,11 +1567,21 @@ pub fn preview_courses(_a: &Answers) -> Value { todo!("F8b: the --courses list")
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> PathBuf {
+    /// A scratch folder that removes itself when the test ends, pass or fail.
+    struct Scratch(PathBuf);
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf { &self.0 }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    fn scratch(tag: &str) -> Scratch {
         let d = std::env::temp_dir().join(format!("knowlu-handover-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        d
+        Scratch(d)
     }
 
     fn save(d: &Path, finished: bool, items: &[(&str, &str)]) -> Vec<u8> {
