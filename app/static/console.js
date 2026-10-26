@@ -140,11 +140,11 @@
     var onlyDl = nd > 0 && nn === 0 && !m.spill_blocks;
     var tail = !nd ? h(items.length) + " items with nowhere to go"
       : nn === 0 ? (nd === 1 ? "1 item won't make its deadline" : nd + " items won't make their deadline")
-      : items.length + " items: " + nn + " with nowhere to go, " + nd + " won't make their deadline";
+      : items.length + " items: " + nn + " with nowhere to go, " + (nd === 1 ? "1 won't make its deadline" : nd + " won't make their deadline");
     EL("meterkey").innerHTML = '<span class="a">&#9632; <b>' + h(m.fit_blocks) + " blocks</b> fit inside the day</span>" +
       (onlyDl ? "" : '<span class="c">&#9633; <b>' + h(m.spill_blocks) + " blocks</b> do not</span>") +
       (m.capped ? "<span>… and " + h(m.capped) + " more</span>" : "") +
-      (m.spill_hours || items.length ? '<span title="' + h(items.map(spillTip).join("\n")) + '">' + (m.spill_hours ? h(fmtH(m.spill_hours)) + " across " : "") + tail + "</span>" : "");
+      (m.spill_hours || items.length ? '<span title="' + h(items.map(spillTip).join("\n")) + '">' + (m.spill_hours ? h(fmtH(m.spill_hours)) + (nd ? " over; " : " across ") : "") + tail + "</span>" : "");
     EL("overflow").textContent = state.verdict.overflow_sentence || "";
     var give = EL("give"); if (give) { give.textContent = m.give_text || ""; give.hidden = !m.give_text; }
   }
