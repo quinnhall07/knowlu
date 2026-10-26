@@ -6709,3 +6709,6 @@ F11d's test-writer found a gap. The normal console has no way to read `handover`
   - **On the main page, `mail.connect` gets its own "Not connected" heading** and §14.52.1's cost line, kept apart from the "Still coming" rows. It keeps its Settings and Not now buttons.
   - **The reveal's "Knowlu finishes these after you open it"** covers only the items that really finish without the student.
   - **The handover read** runs at boot, on focus and on every 60-second poll, and after Not now. An envelope applied after an action or a Sync doesn't re-read it, so a cleared item can stay up to 60 seconds. This amends §14.63's "after every `state` refresh".
+- **F11d review r2: PASS, with two carries.**
+  - **To F11e2:** in the reveal's mixed case (`mail.setup` with an item that finishes alone), the mail rows are listed apart from "Knowlu finishes these", and that pin's mixed case is amended.
+  - **To F7c/F9:** after Not now, the main page shows the step-5 skip's cost line (§14.57.9). `onboarding_handover` sends only handover names, so that task reads the skips too.
