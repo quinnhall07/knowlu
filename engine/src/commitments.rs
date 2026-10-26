@@ -11213,6 +11213,70 @@ mod phase2_tests {
         assert!(check_console_edit(&v, "commitments/planning-day.md", "level", &word("hard")).is_err());
     }
 
+    /// Wave-B test 45 (F7e, D5 amended 2026-10-24): `meets` is a console field. It passes only on
+    /// a confirmed, non-planning-day commitment, only as a non-empty list `answer_literal`
+    /// accepts, and every refused value answers the one fixed message. Nothing is written.
+    #[test]
+    fn a_meets_edit_passes_only_as_a_valid_list_on_a_confirmed_class() {
+        const MSG: &str = "A class time needs at least one day, and a start before its end.";
+        let v = week_vault("meets-edit");
+        run(&v, &input(&[("gcal-series:cs100", "hard")], &[], Some("[{days: [mon], start: \"08:00\", end: \"22:00\"}]")));
+        std::fs::write(
+            v.join("commitments").join("pending-club.md"),
+            "---\ntype: commitment\nkind: club\nstatus: proposed\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            v.join("commitments").join("day-window.md"),
+            "---\ntype: commitment\nkind: planning-day\nstatus: confirmed\n---\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(v.join("tasks")).unwrap();
+        std::fs::write(v.join("tasks").join("essay.md"), "---\ntype: task\ntitle: Essay\nstatus: confirmed\n---\n").unwrap();
+        let j = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let snapshot = |rels: &[&str]| -> Vec<String> { rels.iter().map(|r| std::fs::read_to_string(v.join(r)).unwrap()).collect() };
+        let rels = ["commitments/cs-100.md", "commitments/pending-club.md", "commitments/day-window.md", "tasks/essay.md"];
+        let before = snapshot(&rels);
+
+        assert!(CONSOLE_FIELDS.contains(&"meets"));
+        let good = j(r#"[{"days": ["wed", "mon"], "start": "9:00", "end": "10:15"}, {"days": ["fri"], "start": "15:00", "end": "16:00"}]"#);
+        assert_eq!(check_console_edit(&v, "commitments/cs-100.md", "meets", &good), Ok(()));
+        let literal = answer_literal(&good).unwrap();
+        assert!(!literal.contains('\n') && literal.starts_with("[{days: [wed, mon]"), "{literal}");
+        assert!(literal.contains("start: '09:00'") && literal.contains("end: '16:00'"), "{literal}");
+
+        for bad in [
+            r#"[]"#,
+            r#"[{"days": ["mon"], "start": "15:00", "end": "14:00"}]"#,
+            r#"[{"days": ["mon"], "start": "15:00", "end": "15:00"}]"#,
+            r#"[{"days": ["someday"], "start": "14:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon", "mon"], "start": "14:00", "end": "15:00"}]"#,
+            r#"[{"days": [], "start": "14:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon"], "start": "14:00", "end": "15:00", "room": "B1"}]"#,
+            r#"[{"days": ["mon\nx"], "start": "14:00", "end": "15:00"}]"#,
+            r#"{"days": ["mon"], "start": "14:00", "end": "15:00"}"#,
+            r#""mon 14:00""#,
+            r#"null"#,
+        ] {
+            let err = check_console_edit(&v, "commitments/cs-100.md", "meets", &j(bad)).unwrap_err();
+            assert_eq!(err, MSG, "{bad}");
+            assert!(!err.contains("answer_meets"), "{bad}");
+        }
+
+        // Not a confirmed class: refused even for a valid value (the existing refusals).
+        for rel in ["commitments/pending-club.md", "commitments/day-window.md", "tasks/essay.md"] {
+            assert!(check_console_edit(&v, rel, "meets", &good).is_err(), "{rel}");
+        }
+        assert!(check_console_edit(&v, "commitments/pending-club.md", "meets", &good).unwrap_err().contains("confirmed commitment"));
+        assert!(check_console_edit(&v, "commitments/day-window.md", "meets", &good).unwrap_err().contains("confirmed commitment"));
+
+        // Other fields behave as before.
+        assert_eq!(check_console_edit(&v, "commitments/cs-100.md", "level", &serde_json::json!("soft")), Ok(()));
+        assert!(check_console_edit(&v, "commitments/cs-100.md", "kind", &serde_json::json!("urgent")).unwrap_err().contains("kind"));
+        assert!(check_console_edit(&v, "commitments/cs-100.md", "window", &good).is_err());
+        assert_eq!(snapshot(&rels), before, "a check writes nothing");
+    }
+
     #[test]
     fn only_a_pending_ask_card_is_answerable() {
         let v = three_courses("answerable");
