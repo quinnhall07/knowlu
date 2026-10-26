@@ -4220,7 +4220,7 @@ dispatched (§4.2 steps 3-8, the tasks named, A10 rewritten with its carrier per
 - **From the deleted tests:** mail risk 12's line at step 5's skip and `GOOGLE_TESTING` at step 6
   (F11b, F11t); the password check, now an allow-list by id that F11c extends and that is never
   deleted (F11t).
-- **F5b:** five commands move to the console's list and are never deleted; four of the shell's
+- **F5b:** three commands move to the console's list (§14.60 kept the two path-taking ones on the shell's) and are never deleted; four of the shell's
   pending-target commands may go from the shell's list.
 - **F3:** Rust picks "Knowlu", "Knowlu 2", … past profiles and folders on disk; the old flow's
   "press Finish again" and "pick another name" errors are rewritten; F10's interim name loop is
@@ -6712,3 +6712,6 @@ F11d's test-writer found a gap. The normal console has no way to read `handover`
 - **F11d review r2: PASS, with two carries.**
   - **To F11e2:** in the reveal's mixed case (`mail.setup` with an item that finishes alone), the mail rows are listed apart from "Knowlu finishes these", and that pin's mixed case is amended.
   - **To F7c/F9:** after Not now, the main page shows the step-5 skip's cost line (§14.57.9). `onboarding_handover` sends only handover names, so that task reads the skips too.
+- **F5b review: PASS (2026-10-25).** The wizard list goes from 31 to 21.
+  - **Controller ruling on m1:** `lms_link::capture_courses` stays on the shell's list. No page calls it, and the plan never named it. It can only fail, but it does no harm there. Its removal is left to whichever later task revisits the shell's list, and `handler_lists.rs`'s comment records it as the controller's call.
+  - **m2:** fixed. F5b's summary line now says three commands move to the console, not five.

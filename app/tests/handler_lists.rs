@@ -152,7 +152,7 @@ fn the_console_list_names_the_three_onboarding_commands_f5c_adds_and_the_wizard_
 }
 
 /// Plan §14.63: the main page's `onboarding_handover` is on the console's list once and not on the wizard's,
-/// and the wizard's count stays 31.
+/// and the wizard's count is 21 (F5b).
 #[test]
 fn the_console_list_names_onboarding_handover_once_and_the_wizard_list_does_not() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
@@ -162,7 +162,7 @@ fn the_console_list_names_onboarding_handover_once_and_the_wizard_list_does_not(
     let wizard = list_with(&lists, "onboarding::finish_onboarding");
     assert_eq!(console.iter().filter(|n| *n == "onboarding_state::onboarding_handover").count(), 1);
     assert!(!wizard.iter().any(|n| n == "onboarding_state::onboarding_handover"));
-    assert_eq!(wizard.len(), 31, "the wizard list's count is unchanged");
+    assert_eq!(wizard.len(), 21, "the wizard list's count; recount it when a command is added or retired");
 }
 
 #[test]
@@ -200,13 +200,44 @@ fn the_console_list_names_the_fourteen_f5_commands_once_and_the_wizard_list_none
     ];
     for name in F5 {
         assert_eq!(console.iter().filter(|n| *n == name).count(), 1, "the console list names {name} once");
-        // The four shared names stay on the wizard's list until F5b moves them; the rest are the console's.
-        if name.starts_with("onboarding_state::") {
+        // F5b took the campus and school-window names off the wizard's list; `capture_courses` stays on it.
+        if name != "lms_link::capture_courses" {
             assert!(!wizard.iter().any(|n| n == name), "the wizard list must not name {name}");
         }
     }
     // Plan F5: never the two that store under the pending session (review r6, I-2).
     for name in ["lms_link::capture_calendar_link", "lms_link::paste_calendar_link"] {
+        assert!(!console.iter().any(|n| n == name), "the console list must not name {name}");
+    }
+}
+
+/// Plan F5b (plan 14.48 and 14.60): the three moved names are console-present and wizard-absent; the seven retired or
+/// pending-target names are on neither list or wizard-absent; the two path-taking names stay on the wizard's.
+#[test]
+fn f5b_moves_three_retires_seven_and_keeps_the_path_taking_two_on_the_wizard() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let lists = handler_lists(&src);
+    let console = list_with(&lists, "commands::state");
+    let wizard = list_with(&lists, "onboarding::finish_onboarding");
+    for name in ["onboarding::campus_search", "lms_link::open_lms_window", "lms_link::close_lms_window"] {
+        assert_eq!(console.iter().filter(|n| *n == name).count(), 1, "the console list names {name} once");
+        assert!(!wizard.iter().any(|n| n == name), "the wizard list must not name {name}");
+    }
+    for name in ["account::open_external", "onboarding::retarget_credentials", "onboarding::timezone_for_state"] {
+        assert!(!console.iter().any(|n| n == name), "the console list must not name {name}");
+        assert!(!wizard.iter().any(|n| n == name), "the wizard list must not name {name}");
+    }
+    for name in [
+        "account::google_connect_url",
+        "account::google_connected",
+        "lms_link::paste_calendar_link",
+        "lms_link::capture_calendar_link",
+    ] {
+        assert!(!wizard.iter().any(|n| n == name), "the wizard list must not name {name}");
+    }
+    for name in ["onboarding::store_credentials", "onboarding::discover_coursework"] {
+        assert!(wizard.iter().any(|n| n == name), "the wizard list keeps {name}");
         assert!(!console.iter().any(|n| n == name), "the console list must not name {name}");
     }
 }
