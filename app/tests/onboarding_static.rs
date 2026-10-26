@@ -1773,3 +1773,19 @@ fn a_two_entry_pair_puts_its_days_in_each_label_and_a_single_pair_keeps_wake_and
     let one = node(r#"h.winPair10(0, "", {start: "", end: ""})"#).as_str().unwrap_or_default().to_string();
     assert!(one.contains("Wake <input") && one.contains("Bed <input"), "one pair keeps Wake/Bed: {one}");
 }
+
+#[test]
+fn a_firmness_press_shows_mine_pressed_and_pressing_mine_again_clears_the_row() {
+    helper10("rowAfter10");
+    let press = |row: &str, how: &str| node(&format!(r#"h.rowAfter10({row}, "{how}")"#));
+    let a = press(r#"{answer: "", picked: false}"#, "level");
+    assert_eq!(a, serde_json::json!({"answer": "mine", "picked": true}), "a firmness press is Mine, pressed: {a}");
+    let b = press(r#"{answer: "mine", picked: true}"#, "mine");
+    assert_eq!(b, serde_json::json!({"answer": "", "picked": false}), "Mine again clears the row and its picked mark: {b}");
+    let c = press(r#"{answer: "not", picked: false}"#, "level");
+    assert_eq!(c["answer"], serde_json::json!("not"), "a firmness press never overrides Not mine: {c}");
+    let d = press(r#"{answer: "", picked: true}"#, "not");
+    assert_eq!(d, serde_json::json!({"answer": "not", "picked": false}), "Not mine overrides and clears picked: {d}");
+    let click = function(&code(&read("onboarding.js")), "onClick10").to_string();
+    assert!(click.contains("rowAfter10"), "the click handler uses the one rule");
+}
