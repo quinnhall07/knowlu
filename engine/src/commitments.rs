@@ -11038,6 +11038,44 @@ mod phase2_tests {
         assert!(empty.is_err(), "a window naming no day is invalid (Q4-b)");
     }
 
+    /// Plan §14.58.10 m-6, test 49: step 10's page sends the window as JSON text; the note's
+    /// line must be the YAML spelling's bytes, and an unknown day must be refused before a write.
+    #[test]
+    fn a_json_spelled_window_writes_the_yaml_spellings_bytes() {
+        let json = "[{\"days\":[\"mon\",\"tue\"],\"start\":\"08:00\",\"end\":\"22:30\"}]";
+        let yaml = "[{days: [mon, tue], start: '08:00', end: '22:30'}]";
+        let (vj, vy) = (week_vault("win49json"), week_vault("win49yaml"));
+        assert_eq!(run(&vj, &input(&[], &[], Some(json))).window, Some("created"));
+        assert_eq!(run(&vy, &input(&[], &[], Some(yaml))).window, Some("created"));
+        let read = |v: &Path| std::fs::read_to_string(v.join(FOLDER).join("planning-day.md")).unwrap();
+        let line = |text: &str| text.lines().find(|l| l.starts_with("window:")).map(str::to_string);
+        // The opaque `id:` is minted per vault; every other byte must match.
+        let no_id = |t: String| t.split("
+").filter(|l| !l.starts_with("id: ")).collect::<Vec<_>>().join("
+");
+        let (a, b) = (read(&vj), read(&vy));
+        assert!(line(&a).is_some(), "{a}");
+        assert_eq!(line(&a), line(&b), "the window: line, byte for byte");
+        assert_eq!(no_id(a), no_id(b), "the whole note but its id");
+        // An edit through an existing note writes the same bytes too.
+        let (ej, ey) = (week_vault("win49editj"), week_vault("win49edity"));
+        run(&ej, &input(&[], &[], Some(WEEKDAYS_8_22)));
+        run(&ey, &input(&[], &[], Some(WEEKDAYS_8_22)));
+        assert_eq!(run(&ej, &input(&[], &[], Some(json))).window, Some("updated"));
+        assert_eq!(run(&ey, &input(&[], &[], Some(yaml))).window, Some("updated"));
+        assert_eq!(no_id(read(&ej)), no_id(read(&ey)), "an update writes the same bytes");
+    }
+
+    #[test]
+    fn a_json_window_with_an_unknown_day_is_refused_before_any_write() {
+        let v = week_vault("win49day");
+        let bad = "[{\"days\":[\"mon\",\"funday\"],\"start\":\"08:00\",\"end\":\"22:30\"}]";
+        let got = confirm(&v, &input(&[("gcal-series:cs100", "hard")], &["gcal-series:chess"], Some(bad)), TODAY, &human(), &mut Journal::new(&*v));
+        assert!(got.is_err(), "{got:?}");
+        assert!(files(&v, FOLDER).is_empty(), "not even the rows");
+        assert!(journal_records(&v).is_empty());
+    }
+
     // -----------------------------------------------------------------------------------------
     // Q5 — `commitments::overview`: the Schedule view's read (D3, §4).
     // -----------------------------------------------------------------------------------------
