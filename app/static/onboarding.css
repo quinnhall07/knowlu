@@ -50,3 +50,21 @@
 .ob-form-tag { margin: 12px 0 0; color: var(--su-ink-3); font-size: 12.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
 .ob-found { margin: 6px 0 0; color: var(--su-ink); font-size: 14.5px; }
 .ob-show8 { margin: 10px 0 0; font-size: 13.5px; }
+/* F11p3: step 10 as o9-your-week: the summary card, the segmented firmness control, the sticky Confirm bar. */
+.ob-card { margin: 14px 0 0; padding: 12px 16px; background: var(--su-board-2); border: 1px solid var(--su-rule-2); border-radius: 8px; max-width: 64ch; }
+.ob-card p { margin: 0 0 6px; }
+.ob-seg { display: inline-flex; border: 1px solid var(--su-rule-2); border-radius: 6px; overflow: hidden; }
+.ob-seg button { border: 0; border-radius: 0; border-left: 1px solid var(--su-rule-2); }
+.ob-seg button:first-child { border-left: 0; }
+.ob-seg button[aria-pressed="true"] { background: var(--su-ink); color: var(--su-board); }
+.ob-10-bar { position: sticky; bottom: 0; margin-top: 18px; padding: 10px 0 12px; background: var(--su-board); border-top: 1px solid var(--su-rule-2); }
+.ob-10-bar .ob-state { margin: 0 0 6px; }
+.ob-prop > .a, .ob-prop > .su-dim { flex: 1 1 auto; min-width: 0; text-align: left; }
+.ob-prop:not(.ob-win) > .a { order: 0; }
+.ob-prop:not(.ob-win) > .su-dim { order: 2; flex: 1 0 100%; margin-top: -6px; }
+.ob-prop:not(.ob-win) > .ob-ctl { order: 1; }
+.ob-prop .ob-ctl { display: inline-flex; flex-wrap: nowrap; flex: none; gap: 8px; margin-left: auto; align-items: center; }
+.ob-win { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.ob-win .ob-wpair { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+#ob-10-wins { display: inline-grid; grid-template-columns: auto; gap: 8px; vertical-align: top; }
+.ob-win button:disabled { opacity: .5; }

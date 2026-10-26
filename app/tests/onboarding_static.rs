@@ -1431,3 +1431,361 @@ fn the_form_frame_closes_after_the_stored_only_line() {
     assert!(privacy < close && close < skip && skip < btn, "frame ends after the privacy line, before the consequence and the buttons");
     assert!(!function(&c, "siteHtml").contains("loginHtml(site) + '</div>'"), "siteHtml adds no closing div after the buttons");
 }
+
+// ---- F11p3: step 10 as `o9-your-week` (plan section 14.58.6) ------------------------------------
+//
+// Helpers these pins fix, for F11p3 to add to `window.KNOWLU_ONBOARDING` (all pure, none sums):
+// - `summaryLine10(status)`: "{classes} classes and {class_times} class times, set from your school's
+//   registrar. Nothing to type." from `step3.classes` and `step3.class_times`; `""` when either is
+//   missing or null (a count of 0 is a count).
+// - `splitProposals10(reply)`: `{events: [...], window: p | null}` from a `commitment_proposals`
+//   reply; `events` are the proposals with no `window: true`, `window` the one that has it.
+// - `firmnessHtml10(level)`: the three-way segmented control's markup (a `role="group"` of three
+//   buttons, Must keep / Usually / Optional, each with `data-level`, `aria-pressed="true"` on
+//   `level`, "soft" when none).
+// - `windowFields10(proposal)`: `{start, end}` preselected from the window proposal's first meet,
+//   both `""` when there is no proposal.
+// - `windowArg10(proposal, win)`: the `window` string for `commitments_confirm`, or `null`. `win` is
+//   `{answered, start, end}`. Not answered, or a blank time, is `null`. Times equal to the proposal's
+//   own send `JSON.stringify(proposal.meets)` unchanged; otherwise `JSON.stringify([{days, start,
+//   end}])` over the proposal's days (all seven, "mon".."sun", with no proposal).
+// - `confirmArg10(rows, proposal, win)`: the `confirm` object. `rows` are `{key, answer, level}`;
+//   `{mine: [{source_uid, level}], not_mine: [key]}`, plus `window` only when `windowArg10` is not null.
+// - `answeredCount10(rows, win)`: `{n, m}`; `m` is the rows plus the one window question, `n` the
+//   rows answered "mine" or "not" plus the window if `win.answered` (the student's own presses).
+// - `confirmBarLine10(n, m)`: "{n} of {m} answered. Anything you leave blank comes back as a
+//   question over the next few days."
+
+fn helper10(name: &str) {
+    assert_eq!(node(&format!("typeof h.{name}")), serde_json::json!("function"), "onboarding.js must expose KNOWLU_ONBOARDING.{name} (F11p3)");
+}
+
+const WIN_PROP: &str = r#"{source_uid: "win-1", window: true, meets: [{days: ["mon", "tue", "wed", "thu", "fri"], start: "07:30", end: "23:30"}]}"#;
+const WIN_MEETS: &str = r#"[{"days":["mon","tue","wed","thu","fri"],"start":"07:30","end":"23:30"}]"#;
+
+#[test]
+fn the_summary_card_reads_the_classes_and_class_times_from_step3() {
+    helper10("summaryLine10");
+    let s = node(r#"h.summaryLine10({step3: {classes: 4, class_times: 11}})"#);
+    assert_eq!(s, serde_json::json!("4 classes and 11 class times, set from your school's registrar. Nothing to type."));
+    let zero = node(r#"h.summaryLine10({step3: {classes: 0, class_times: 0}})"#);
+    assert!(zero.as_str().is_some_and(|t| t.starts_with("0 classes and 0 class times")), "a 0 is a count: {zero}");
+    for st in [r#"{step3: {classes: 4}}"#, r#"{step3: {classes: null, class_times: 11}}"#, r#"{step3: null}"#, "null"] {
+        assert_eq!(node(&format!("h.summaryLine10({st})")), serde_json::json!(""), "no card text for {st}");
+    }
+}
+
+#[test]
+fn step_tens_pane_has_the_card_the_class_times_toggle_and_the_questions_heading() {
+    let c = code(&read("onboarding.js"));
+    let r = function(&c, "render10");
+    for want in ["summaryLine10", "Show the class times", "Questions only you can answer"] {
+        assert!(r.contains(want), "render10 must carry {want}: {r}");
+    }
+}
+
+#[test]
+fn the_proposals_split_into_events_and_the_one_window_proposal() {
+    helper10("splitProposals10");
+    let v = node(&format!(r#"h.splitProposals10({{proposals: [{{source_uid: "cal-a1", title: "Chess club", window: false}}, {WIN_PROP}, {{source_uid: "cal-b2", title: "Pool shift"}}]}})"#));
+    let ev: Vec<_> = v["events"].as_array().expect("events").iter().map(|e| e["source_uid"].as_str().unwrap_or_default().to_string()).collect();
+    assert_eq!(ev, vec!["cal-a1", "cal-b2"], "the window proposal is not an event");
+    assert_eq!(v["window"]["source_uid"], serde_json::json!("win-1"));
+    for reply in [r#"{proposals: []}"#, "null"] {
+        let none = node(&format!("h.splitProposals10({reply})"));
+        assert!(none["window"].is_null() && none["events"] == serde_json::json!([]), "no calendar ({reply}): {none}");
+    }
+}
+
+#[test]
+fn the_firmness_control_is_three_buttons_with_the_engines_level_pressed_and_no_select() {
+    helper10("firmnessHtml10");
+    let pressed_word = |html: &str| -> String {
+        let at = html.find("aria-pressed=\"true\"").expect("one button is pressed");
+        let end = html[at..].find("</button>").map(|i| at + i).expect("a closing button");
+        strip_text(&html[at..end])
+    };
+    for (lvl, word) in [("hard", "Must keep"), ("soft", "Usually"), ("optional", "Optional")] {
+        let html = node(&format!(r#"h.firmnessHtml10("{lvl}")"#)).as_str().unwrap_or_default().to_string();
+        assert!(html.contains("role=\"group\"") && !html.contains("<select"), "a segmented group, not a select: {html}");
+        let t = strip_text(&html);
+        for w in ["Must keep", "Usually", "Optional"] { assert!(t.contains(w), "{w} in: {t}"); }
+        assert_eq!(html.matches("aria-pressed=\"true\"").count(), 1, "exactly one pressed: {html}");
+        assert!(pressed_word(&html).contains(word), "{lvl} presses {word}: {html}");
+        assert!(html.contains(&format!("data-level=\"{lvl}\"")), "each button names its engine level: {html}");
+    }
+    let none = node(r#"h.firmnessHtml10("")"#).as_str().unwrap_or_default().to_string();
+    assert!(pressed_word(&none).contains("Usually"), "soft is the default: {none}");
+}
+
+#[test]
+fn an_event_row_keeps_mine_and_not_mine_beside_the_segmented_control_in_place_of_the_select() {
+    let c = code(&read("onboarding.js"));
+    let row = function(&c, "propHtml");
+    assert!(row.contains("firmnessHtml10") && !row.contains("<select"), "F11c's select is replaced: {row}");
+    assert!(row.contains("data-act10=\"mine\"") && row.contains("data-act10=\"not\""), "Mine and Not mine stay");
+    assert!(row.contains("p.level"), "Knowlu's level is preselected from the proposal");
+}
+
+#[test]
+fn what_the_confirm_sends_for_events_is_unchanged_mine_with_its_level_and_not_mine_keys() {
+    helper10("confirmArg10");
+    let rows = r#"[{key: "cal-a1", answer: "mine", level: "hard"}, {key: "cal-b2", answer: "not", level: "soft"}, {key: "cal-c3", answer: "", level: "optional"}]"#;
+    let v = node(&format!(r#"h.confirmArg10({rows}, null, {{answered: false, start: "", end: ""}})"#));
+    assert_eq!(v, serde_json::json!({"mine": [{"source_uid": "cal-a1", "level": "hard"}], "not_mine": ["cal-b2"]}), "no window key; an unanswered row sends nothing");
+}
+
+#[test]
+fn the_window_key_appears_only_after_an_answer_and_a_blank_question_sends_none() {
+    helper10("windowArg10");
+    helper10("confirmArg10");
+    for win in [r#"{answered: false, start: "07:30", end: "23:30"}"#, r#"{answered: true, start: "", end: "23:30"}"#, r#"{answered: true, start: "07:30", end: ""}"#] {
+        assert!(node(&format!("h.windowArg10({WIN_PROP}, {win})")).is_null(), "no window for {win}");
+        assert!(node(&format!("h.windowArg10(null, {win})")).is_null(), "no window for {win} without a proposal");
+        let v = node(&format!("h.confirmArg10([], {WIN_PROP}, {win})"));
+        assert!(v.get("window").is_none(), "confirm has no window key for {win}: {v}");
+    }
+}
+
+#[test]
+fn an_unchanged_window_sends_the_proposals_own_meets_as_json_and_a_changed_one_sends_days_start_end() {
+    helper10("windowArg10");
+    helper10("confirmArg10");
+    let same = node(&format!(r#"h.windowArg10({WIN_PROP}, {{answered: true, start: "07:30", end: "23:30"}})"#));
+    assert_eq!(same, serde_json::json!(WIN_MEETS), "JSON.stringify of the proposal's meets, unchanged");
+    let changed = node(&format!(r#"h.windowArg10({WIN_PROP}, {{answered: true, start: "08:00", end: "23:30"}})"#));
+    assert_eq!(changed, serde_json::json!(r#"[{"days":["mon","tue","wed","thu","fri"],"start":"08:00","end":"23:30"}]"#), "the proposal's days, the student's times");
+    let none = node(r#"h.windowArg10(null, {answered: true, start: "06:45", end: "22:15"})"#);
+    assert_eq!(none, serde_json::json!(r#"[{"days":["mon","tue","wed","thu","fri","sat","sun"],"start":"06:45","end":"22:15"}]"#), "every day with no proposal");
+    let v = node(&format!(r#"h.confirmArg10([], {WIN_PROP}, {{answered: true, start: "07:30", end: "23:30"}})"#));
+    assert_eq!(v["window"], serde_json::json!(WIN_MEETS), "confirm carries it under `window`");
+}
+
+#[test]
+fn the_window_question_preselects_the_guess_and_starts_empty_without_one() {
+    helper10("windowFields10");
+    assert_eq!(node(&format!("h.windowFields10({WIN_PROP})")), serde_json::json!({"start": "07:30", "end": "23:30"}));
+    assert_eq!(node("h.windowFields10(null)"), serde_json::json!({"start": "", "end": ""}));
+}
+
+#[test]
+fn the_window_goes_to_the_engine_through_commitments_confirm_and_nowhere_else() {
+    let c = code(&read("onboarding.js"));
+    let body = function(&c, "confirm10");
+    assert_eq!(invoke_calls(body, "commitments_confirm").len(), 1, "one confirm call");
+    assert!(body.contains("confirmArg10"), "confirm10 builds its confirm object with the pure helper: {body}");
+    assert!(!c.contains("planning-day") && !c.contains("planning_day"), "the page names no planning-day note and writes none");
+}
+
+#[test]
+fn the_bar_counts_the_questions_on_screen_and_the_students_own_presses() {
+    helper10("answeredCount10");
+    helper10("confirmBarLine10");
+    let rows = r#"[{answer: "mine"}, {answer: "not"}, {answer: ""}]"#;
+    assert_eq!(node(&format!("h.answeredCount10({rows}, {{answered: false}})")), serde_json::json!({"n": 2, "m": 4}), "three events and the window");
+    assert_eq!(node(&format!("h.answeredCount10({rows}, {{answered: true}})")), serde_json::json!({"n": 3, "m": 4}));
+    assert_eq!(node("h.answeredCount10([], {answered: false})"), serde_json::json!({"n": 0, "m": 1}), "the window question alone");
+    assert_eq!(node("h.confirmBarLine10(2, 4)"), serde_json::json!("2 of 4 answered. Anything you leave blank comes back as a question over the next few days."));
+}
+
+#[test]
+fn the_sticky_bar_holds_confirm_and_the_count_and_the_segmented_control_is_styled() {
+    let c = code(&read("onboarding.js"));
+    let r = function(&c, "render10");
+    assert!(r.contains("ob-10-bar") && r.contains("Confirm my week") && r.contains("data-act10=\"confirm\""), "the confirm button sits in the bar: {r}");
+    assert!(c.contains("confirmBarLine10("), "the page paints the count line from the helper");
+    let css = code(&read("onboarding.css"));
+    assert!(css.contains("ob-10-bar") && css.contains("position: sticky"), "the bar is pinned to the pane's bottom");
+    assert!(css.contains("ob-seg"), "the segmented control has a style");
+}
+
+#[test]
+fn step_tens_move_on_failure_sentence_stays_and_no_late_rule_question_exists() {
+    let c = code(&read("onboarding.js"));
+    assert!(function(&c, "confirm10").contains("Your week is saved, but Knowlu couldn't move on."), "F11c1's message stays");
+    let lower = c.to_lowercase();
+    for banned in ["late rule", "late work", "late_rule", "late-rule", "laterule"] {
+        assert!(!lower.contains(banned), "no late-rule question or placeholder until O5: found {banned}");
+    }
+    assert!(function(&c, "render10").contains("When does your day run?"), "the day-window question is asked in the pane");
+}
+
+// ---- F11p3/F11p4 review: the two-entry window, "That's right", names, firmness means Mine --------
+//
+// Helper shape changes these pins fix, for the implementer (the pins above stay as they are):
+// - `windowFields10(proposal)` keeps `{start, end}` (the first entry) and ADDS `entries`: every meet as
+//   `{days, start, end}`, in order. (The older pin compares a one-entry proposal with exact equality
+//   to `{start, end}`; so `entries` is added only when the proposal has more than one meet, or that
+//   older pin is updated by its owner. Either way these pins read `entries` on a two-entry proposal.)
+// - `win` may carry `entries: [{start, end}, ...]`, parallel to the proposal's meets. When present it
+//   wins over `win.start`/`win.end` (which still mean the first entry, as before).
+//   `windowArg10` sends `null` unless `answered` and every time in every entry is set. If no entry
+//   differs from the proposal it sends `JSON.stringify(proposal.meets)`; otherwise every meet, each
+//   with its own days, only the changed entry's times replaced.
+// - `answeredCount10(rows, win)`: `win.answered` counts only when every time is set (the pair, or
+//   every `entries` pair); a "That's right" on empty fields counts for nothing.
+// - `firmnessHtml10(level, title)`: the group's aria-label is "How firm is {title}" (escaped).
+// - A row may carry `picked: true`: the student pressed a firmness level (`data-picked` on the row).
+//   `confirmArg10` sends a picked row whose answer is not "not" in `mine` with its level;
+//   `answeredCount10` counts it. "not" still overrides.
+
+const WIN2_PROP: &str = r#"{source_uid: "win-1", window: true, meets: [{days: ["mon","tue","wed","thu","fri"], start: "07:30", end: "22:00"}, {days: ["sat","sun"], start: "10:00", end: "22:00"}]}"#;
+const WIN2_MEETS: &str = r#"[{"days":["mon","tue","wed","thu","fri"],"start":"07:30","end":"22:00"},{"days":["sat","sun"],"start":"10:00","end":"22:00"}]"#;
+const WIN2_SAME: &str = r#"[{start: "07:30", end: "22:00"}, {start: "10:00", end: "22:00"}]"#;
+
+#[test]
+fn a_two_entry_window_proposal_exposes_both_entries_through_windowfields() {
+    helper10("windowFields10");
+    let f = node(&format!("h.windowFields10({WIN2_PROP})"));
+    let want: serde_json::Value = serde_json::from_str(WIN2_MEETS).unwrap();
+    assert_eq!(f["entries"], want, "both entries, weekdays then the weekend: {f}");
+}
+
+#[test]
+fn an_untouched_two_entry_window_sends_no_window_key() {
+    helper10("confirmArg10");
+    let v = node(&format!(r#"h.confirmArg10([], {WIN2_PROP}, {{answered: false, entries: {WIN2_SAME}}})"#));
+    assert!(v.get("window").is_none(), "no window key: {v}");
+}
+
+#[test]
+fn thats_right_on_a_two_entry_window_sends_both_entries_unchanged() {
+    helper10("windowArg10");
+    let w = node(&format!(r#"h.windowArg10({WIN2_PROP}, {{answered: true, entries: {WIN2_SAME}}})"#));
+    assert_eq!(w, serde_json::json!(WIN2_MEETS), "JSON.stringify(proposal.meets), both entries");
+    let v = node(&format!(r#"h.confirmArg10([], {WIN2_PROP}, {{answered: true, entries: {WIN2_SAME}}})"#));
+    assert_eq!(v["window"], serde_json::json!(WIN2_MEETS));
+}
+
+#[test]
+fn an_edited_weekday_start_sends_both_entries_with_only_that_one_changed() {
+    helper10("windowArg10");
+    let edited = r#"[{start: "08:00", end: "22:00"}, {start: "10:00", end: "22:00"}]"#;
+    let w = node(&format!(r#"h.windowArg10({WIN2_PROP}, {{answered: true, entries: {edited}}})"#));
+    let got: serde_json::Value = serde_json::from_str(w.as_str().unwrap_or("null")).expect("a JSON window string");
+    let mut want: serde_json::Value = serde_json::from_str(WIN2_MEETS).unwrap();
+    want[0]["start"] = serde_json::json!("08:00");
+    assert_eq!(got, want, "the weekend entry is the proposal's own; no day is dropped");
+    let weekend = r#"[{start: "07:30", end: "22:00"}, {start: "09:00", end: "23:00"}]"#;
+    let w = node(&format!(r#"h.windowArg10({WIN2_PROP}, {{answered: true, entries: {weekend}}})"#));
+    let got: serde_json::Value = serde_json::from_str(w.as_str().unwrap_or("null")).expect("a JSON window string");
+    let mut want: serde_json::Value = serde_json::from_str(WIN2_MEETS).unwrap();
+    want[1]["start"] = serde_json::json!("09:00");
+    want[1]["end"] = serde_json::json!("23:00");
+    assert_eq!(got, want, "an edited weekend entry changes only that entry");
+    let blank = r#"[{start: "07:30", end: "22:00"}, {start: "", end: "22:00"}]"#;
+    assert!(node(&format!(r#"h.windowArg10({WIN2_PROP}, {{answered: true, entries: {blank}}})"#)).is_null(), "a blank time in any entry sends none");
+}
+
+#[test]
+fn thats_right_sets_the_answer_and_never_toggles_it_off() {
+    let c = code(&read("onboarding.js"));
+    let click = function(&c, "onClick10");
+    let at = click.find("\"win\"").expect("onClick10 handles the That's right button");
+    let branch = &click[at..at + click[at..].find("return;").expect("the branch returns")];
+    assert!(branch.contains("answered = true"), "That's right sets the answer: {branch}");
+    assert!(!branch.contains("!w10.win.answered") && !branch.contains("answered = !"), "it never toggles off, so a typed time is still sent: {branch}");
+}
+
+#[test]
+fn a_blank_window_is_not_counted_as_answered_until_both_times_are_set() {
+    helper10("answeredCount10");
+    for win in [
+        r#"{answered: true, start: "", end: ""}"#,
+        r#"{answered: true, start: "07:00", end: ""}"#,
+        r#"{answered: true, entries: [{start: "", end: ""}]}"#,
+        r#"{answered: true, entries: [{start: "07:30", end: "22:00"}, {start: "", end: ""}]}"#,
+    ] {
+        assert_eq!(node(&format!("h.answeredCount10([], {win})")), serde_json::json!({"n": 0, "m": 1}), "not counted for {win}");
+    }
+    for win in [r#"{answered: true, start: "07:00", end: "22:00"}"#, &format!(r#"{{answered: true, entries: {WIN2_SAME}}}"#)] {
+        assert_eq!(node(&format!("h.answeredCount10([], {win})")), serde_json::json!({"n": 1, "m": 1}), "counted for {win}");
+    }
+}
+
+#[test]
+fn the_firmness_control_names_its_event() {
+    helper10("firmnessHtml10");
+    let html = node(r#"h.firmnessHtml10("soft", "Chess club")"#).as_str().unwrap_or_default().to_string();
+    assert!(html.contains("aria-label=\"How firm is Chess club\""), "named for the event: {html}");
+    let odd = node(r#"h.firmnessHtml10("soft", "Bob's \"<b>\" lab")"#).as_str().unwrap_or_default().to_string();
+    assert!(!odd.contains("<b>") && odd.contains("How firm is Bob"), "the title is escaped: {odd}");
+    let c = code(&read("onboarding.js"));
+    assert!(function(&c, "propHtml").contains("firmnessHtml10(p.level, p.title)"), "each row passes its title");
+}
+
+#[test]
+fn the_time_inputs_accessible_name_starts_with_their_visible_label() {
+    let c = code(&read("onboarding.js"));
+    let mut seen = 0;
+    for (at, _) in c.match_indices("type=\"time\"") {
+        let tag = &c[at..at + c[at..].find('>').expect("a closing >")];
+        seen += 1;
+        if let Some(i) = tag.find("aria-label=\"") {
+            let name = &tag[i + 12..];
+            assert!(name.starts_with("Wake") || name.starts_with("Bed"), "the name must start with the visible label (Wake/Bed): {tag}");
+        }
+    }
+    assert!(seen >= 1, "the page has time inputs");
+    assert!(c.contains("Wake") && c.contains("Bed"), "the visible labels stay");
+}
+
+#[test]
+fn picking_a_firmness_level_counts_as_mine_and_not_mine_still_overrides() {
+    helper10("confirmArg10");
+    helper10("answeredCount10");
+    let rows = r#"[{key: "cal-a1", answer: "", level: "hard", picked: true}, {key: "cal-b2", answer: "", level: "soft", picked: false}, {key: "cal-c3", answer: "not", level: "optional", picked: true}, {key: "cal-d4", answer: "mine", level: "soft", picked: true}]"#;
+    let v = node(&format!(r#"h.confirmArg10({rows}, null, {{answered: false, start: "", end: ""}})"#));
+    assert_eq!(v, serde_json::json!({"mine": [{"source_uid": "cal-a1", "level": "hard"}, {"source_uid": "cal-d4", "level": "soft"}], "not_mine": ["cal-c3"]}),
+        "a level press alone is Mine at that level; Not mine overrides; no press sends nothing");
+    assert_eq!(node(&format!(r#"h.answeredCount10({rows}, {{answered: false}})"#)), serde_json::json!({"n": 3, "m": 5}), "the level-only row counts as answered");
+    let c = code(&read("onboarding.js"));
+    assert!(function(&c, "rows10").contains("picked"), "rows10 reads whether a level was pressed");
+    assert!(function(&c, "onClick10").contains("data-picked"), "a level press marks its row picked");
+}
+
+#[test]
+fn step_ten_has_one_intro_sentence_above_the_event_rows() {
+    let c = code(&read("onboarding.js"));
+    assert!(!c.contains("found these repeating"), "askProposals' second intro is gone");
+    assert!(!function(&c, "askProposals").contains("su-small"), "askProposals adds no intro paragraph");
+    assert_eq!(c.matches("Your calendar repeats these.").count(), 1, "the one intro stays");
+}
+
+#[test]
+fn an_answer_typed_into_the_blank_pair_before_the_guess_arrives_sends_all_seven_days_and_no_guess_entry() {
+    helper10("confirmArg10");
+    // The student typed into the blank pair; the two-entry guess arrived afterwards and was never shown (`from: null`).
+    let v = node(&format!(r#"h.confirmArg10([], {WIN2_PROP}, {{answered: true, from: null, start: "08:00", end: "23:00"}})"#));
+    let got: serde_json::Value = serde_json::from_str(v["window"].as_str().unwrap_or("null")).expect("a JSON window string");
+    let want = serde_json::json!([{"days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "start": "08:00", "end": "23:00"}]);
+    assert_eq!(got, want, "one entry over all seven days with the typed times; no 07:30/10:00 guess entry: {v}");
+    // A guess that was shown (`from` is that guess) still sends its own days.
+    let shown = node(&format!(r#"h.confirmArg10([], null, {{answered: true, from: {WIN2_PROP}, entries: {WIN2_SAME}}})"#));
+    assert_eq!(shown["window"], serde_json::json!(WIN2_MEETS), "the shown guess is what an unchanged answer sends");
+}
+
+#[test]
+fn a_two_entry_pair_puts_its_days_in_each_label_and_a_single_pair_keeps_wake_and_bed() {
+    helper10("winPair10");
+    let two = node(r#"h.winPair10(0, "Mon–Fri", {start: "07:30", end: "22:00"})"#).as_str().unwrap_or_default().to_string();
+    assert!(two.contains("Mon–Fri wake") && two.contains("Mon–Fri bed"), "days inside each label: {two}");
+    let one = node(r#"h.winPair10(0, "", {start: "", end: ""})"#).as_str().unwrap_or_default().to_string();
+    assert!(one.contains("Wake <input") && one.contains("Bed <input"), "one pair keeps Wake/Bed: {one}");
+}
+
+#[test]
+fn a_firmness_press_shows_mine_pressed_and_pressing_mine_again_clears_the_row() {
+    helper10("rowAfter10");
+    let press = |row: &str, how: &str| node(&format!(r#"h.rowAfter10({row}, "{how}")"#));
+    let a = press(r#"{answer: "", picked: false}"#, "level");
+    assert_eq!(a, serde_json::json!({"answer": "mine", "picked": true}), "a firmness press is Mine, pressed: {a}");
+    let b = press(r#"{answer: "mine", picked: true}"#, "mine");
+    assert_eq!(b, serde_json::json!({"answer": "", "picked": false}), "Mine again clears the row and its picked mark: {b}");
+    let c = press(r#"{answer: "not", picked: false}"#, "level");
+    assert_eq!(c["answer"], serde_json::json!("not"), "a firmness press never overrides Not mine: {c}");
+    let d = press(r#"{answer: "", picked: true}"#, "not");
+    assert_eq!(d, serde_json::json!({"answer": "not", "picked": false}), "Not mine overrides and clears picked: {d}");
+    let click = function(&code(&read("onboarding.js")), "onClick10").to_string();
+    assert!(click.contains("rowAfter10"), "the click handler uses the one rule");
+}
