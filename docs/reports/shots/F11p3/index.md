@@ -19,7 +19,7 @@ shows a firmness press as Mine (the bar counts it) beside one marked Mine.
 | light | f10-your-week-light-two-entry-window.png |
 
 The two-entry shots use a window proposal with two groups: Mon–Fri 07:30 to 22:00 and Sat–Sun 10:00
-to 23:00, one labelled Wake / Bed pair each, headed by its days. Both entries are sent on That's right.
+to 23:00, one pair each, stacked, with its days inside each label ("Mon-Fri wake", "Mon-Fri bed"; a single pair keeps Wake / Bed). Re-shot in review round 2. Both entries are sent on That's right.
 
 The built shots show the class times opened and one event marked Mine, scrolled to the day-window
 question ("When does your day run?", the time inputs preselected from the window proposal's guess,
