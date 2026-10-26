@@ -1751,3 +1751,25 @@ fn step_ten_has_one_intro_sentence_above_the_event_rows() {
     assert!(!function(&c, "askProposals").contains("su-small"), "askProposals adds no intro paragraph");
     assert_eq!(c.matches("Your calendar repeats these.").count(), 1, "the one intro stays");
 }
+
+#[test]
+fn an_answer_typed_into_the_blank_pair_before_the_guess_arrives_sends_all_seven_days_and_no_guess_entry() {
+    helper10("confirmArg10");
+    // The student typed into the blank pair; the two-entry guess arrived afterwards and was never shown (`from: null`).
+    let v = node(&format!(r#"h.confirmArg10([], {WIN2_PROP}, {{answered: true, from: null, start: "08:00", end: "23:00"}})"#));
+    let got: serde_json::Value = serde_json::from_str(v["window"].as_str().unwrap_or("null")).expect("a JSON window string");
+    let want = serde_json::json!([{"days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "start": "08:00", "end": "23:00"}]);
+    assert_eq!(got, want, "one entry over all seven days with the typed times; no 07:30/10:00 guess entry: {v}");
+    // A guess that was shown (`from` is that guess) still sends its own days.
+    let shown = node(&format!(r#"h.confirmArg10([], null, {{answered: true, from: {WIN2_PROP}, entries: {WIN2_SAME}}})"#));
+    assert_eq!(shown["window"], serde_json::json!(WIN2_MEETS), "the shown guess is what an unchanged answer sends");
+}
+
+#[test]
+fn a_two_entry_pair_puts_its_days_in_each_label_and_a_single_pair_keeps_wake_and_bed() {
+    helper10("winPair10");
+    let two = node(r#"h.winPair10(0, "Mon–Fri", {start: "07:30", end: "22:00"})"#).as_str().unwrap_or_default().to_string();
+    assert!(two.contains("Mon–Fri wake") && two.contains("Mon–Fri bed"), "days inside each label: {two}");
+    let one = node(r#"h.winPair10(0, "", {start: "", end: ""})"#).as_str().unwrap_or_default().to_string();
+    assert!(one.contains("Wake <input") && one.contains("Bed <input"), "one pair keeps Wake/Bed: {one}");
+}
