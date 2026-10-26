@@ -6675,3 +6675,26 @@ F11c2, F11b, F11e1 and F11e2 each depend on it (§14.58.7).
   JSON writes the same canonical `window:` line as the YAML spelling, and a bad day is refused
   before any write (§14.58.10, m-6). If it fails, both wait, and the fix is an engine
   `implementer` task. The page never composes YAML.
+
+### 14.63 How the main page reads `handover` (controller ruling, 2026-10-25)
+
+F11d's test-writer found a gap. The normal console has no way to read `handover`:
+- `onboarding_status` is not on the console's handler list;
+- `launch_state` returns only `mode` in console mode;
+- `commands::state` carries the vault's read model, not app data.
+
+**Ruling:** add one console command, `onboarding_state::onboarding_handover`, next to `onboarding_mail_not_now`.
+- **Where it reads.** It reads `onboarding.json` from `ConsoleState.data_dir` through `load_state`, and never writes.
+  - A finished file returns `{ok: true, error: null, items: [{item}]}`, where the items are `handover`'s in file order.
+  - An absent, unreadable or unfinished file returns `items: []`. The file is never created or repaired.
+- **What it sends.** The page gets the item names only. The signal stays the engine's business, and the page shows each item's words from its own table. `mail.connect` maps to "Finish connecting your email in Settings." with Settings and Not now.
+- **Where it goes.** It joins the console `generate_handler!` list, so the console count moves from 74 to 75 and `app/tests/handler_lists.rs` pins the new count. It stays off the shell list.
+- **When the page reads it.**
+  - at boot in console mode;
+  - after every `state` refresh the console already makes, so an item drops when its signal clears it, without a new poll;
+  - after "Not now" returns `ok`.
+- **Who builds it.**
+  - `implementer` writes the command, TDD-first in `onboarding_state.rs`'s tests: absent, unfinished, finished with items, finished and empty.
+  - `console-ui` writes the line in `console.js`.
+  - Neither file is on the contract list.
+- **Why not `launch_state`.** It is read once at boot, but the items clear while the console runs (§4.10).
