@@ -11050,9 +11050,7 @@ mod phase2_tests {
         let read = |v: &Path| std::fs::read_to_string(v.join(FOLDER).join("planning-day.md")).unwrap();
         let line = |text: &str| text.lines().find(|l| l.starts_with("window:")).map(str::to_string);
         // The opaque `id:` is minted per vault; every other byte must match.
-        let no_id = |t: String| t.split("
-").filter(|l| !l.starts_with("id: ")).collect::<Vec<_>>().join("
-");
+        let no_id = |t: String| t.split('\n').filter(|l| !l.starts_with("id: ")).collect::<Vec<_>>().join("\n");
         let (a, b) = (read(&vj), read(&vy));
         assert!(line(&a).is_some(), "{a}");
         assert_eq!(line(&a), line(&b), "the window: line, byte for byte");
