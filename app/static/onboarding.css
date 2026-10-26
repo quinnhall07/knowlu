@@ -68,3 +68,8 @@
 .ob-win .ob-wpair { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 #ob-10-wins { display: inline-grid; grid-template-columns: auto; gap: 8px; vertical-align: top; }
 .ob-win button:disabled { opacity: .5; }
+.ob-set .ob-edit:not([hidden]) { display: block; margin-top: 8px; }
+.ob-hent { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: 8px 0; padding: 8px 10px; border: 1px solid var(--su-rule-2); border-radius: 6px; }
+.ob-hent legend { padding: 0 4px; color: var(--su-ink-2); font-size: 13px; }
+.ob-hent .ob-hday[aria-pressed="true"] { background: var(--su-ink); color: var(--su-board); }
+.ob-hent label { display: inline-flex; gap: 6px; align-items: center; font-size: 13.5px; }
