@@ -2118,7 +2118,10 @@ fn test_29_stop_both_sets_the_schedulers_stop_and_the_queues_so_a_slot_in_flight
         entitlement: Arc::new(Ent(AtomicBool::new(true), AtomicUsize::new(0))),
         sync_view: Arc::new(Syncs(Mutex::new(VecDeque::new()))),
     };
-    let mut state = state_at(11, true);
+    // The full slot waits for `config.ingest` done and `school.apply` settled (F8e r1 I4), so the
+    // state is the one a real step-10 confirm sees: both done, or the slot never starts.
+    let mut state = state_applied(11, true);
+    state.jobs.insert("config.ingest".into(), JobRecord { state: JobState::Done, ..Default::default() });
     state.school = Some(School { unitid: Some("900001".into()), label: "Example Test College".into(), path: SchoolPath::Shared, confirmed: true });
     let q = Queue::start(deps, state);
     q.enqueue("slot.first_full");
