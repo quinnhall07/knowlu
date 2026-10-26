@@ -3652,7 +3652,8 @@ pub const CONSOLE_KINDS: [&str; 9] =
 
 /// Phase-2 spec D5, the engine half of `set_fields`' checks (Plan ruling Q8-a): `field` (one of
 /// [`CONSOLE_FIELDS`]) may be set on `target` only when it is a confirmed note under
-/// `commitments/` other than the planning day, and only to a word on §2.2's list. Reads only.
+/// `commitments/` other than the planning day: `kind` and `level` only to a word on §2.2's list,
+/// `meets` only to a non-empty list `answer_literal` accepts with no day repeated (F7e). Reads only.
 pub fn check_console_edit(vault: &Path, target: &str, field: &str, value: &serde_json::Value) -> Result<(), String> {
     let path = crate::ids::resolve_target(vault, target).map_err(|e| e.to_string())?;
     let rel = crate::ids::rel(vault, &path);
@@ -3678,11 +3679,12 @@ pub fn check_console_edit(vault: &Path, target: &str, field: &str, value: &serde
         if answer_literal(value).is_err() {
             return Err(MEETS_MSG.to_string());
         }
-        // `answer_literal` lets an empty or repeated `days` through; a class time may not.
+        // `answer_literal` folds a repeated day into one (`parse_entry`), which would write what the
+        // student didn't send; a class time may not repeat a day. (An empty `days` it already refuses.)
         for entry in list {
             let days = entry.get("days").and_then(|d| d.as_array()).map(Vec::as_slice).unwrap_or_default();
             let distinct: BTreeSet<&str> = days.iter().filter_map(|d| d.as_str()).collect();
-            if days.is_empty() || distinct.len() != days.len() {
+            if distinct.len() != days.len() {
                 return Err(MEETS_MSG.to_string());
             }
         }
@@ -11263,6 +11265,11 @@ mod phase2_tests {
         let literal = answer_literal(&good).unwrap();
         assert!(!literal.contains('\n') && literal.starts_with("[{days: [wed, mon]"), "{literal}");
         assert!(literal.contains("start: '09:00'") && literal.contains("end: '16:00'"), "{literal}");
+        // The whole line, so a swapped or dropped field fails (F7e review m2).
+        assert_eq!(
+            literal,
+            "[{days: [wed, mon], end: '10:15', start: '09:00'}, {days: [fri], end: '16:00', start: '15:00'}]"
+        );
 
         for bad in [
             r#"[]"#,
