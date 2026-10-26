@@ -1132,7 +1132,8 @@ fn an_edit_menu_keeps_a_kind_it_has_no_label_for_selected_and_sends_only_what_ch
     let row = function(&c, "editRowHtml");
     assert!(row.contains("indexOf") || row.contains(".some("), "a kind outside the label list is added as the selected option, in the engine's own word");
     let save = function(&c, "saveEdit10");
-    assert!(save.contains("!== row.getAttribute(\"data-kind\")") && save.contains("!== row.getAttribute(\"data-level\")"), "each field is sent only when its control differs from the row's own value");
+    // F11c2 review r1: what is sent is decided by editFields10; the old check re-derived it.
+    assert!(save.contains("getAttribute(\"data-kind\")") && save.contains("getAttribute(\"data-level\")") && save.contains("editFields10("), "saveEdit10 reads the row's own kind and level into `was` and lets editFields10 decide what is sent");
 }
 
 // ---- F11p1 (section 14.58.4): the look, the rail's lines and its foot -------------------------------
@@ -2025,4 +2026,44 @@ fn step_ten_sends_only_kind_level_and_meets_through_set_fields() {
     for k in &keys { assert!(["kind", "level", "meets"].contains(k), "step 10 may send only kind, level and meets, not {k}"); }
     for k in ["kind", "level", "meets"] { assert!(keys.contains(&k), "editFields10 can send {k}"); }
     assert!(!function(&c, "saveEdit10").contains("fields."), "saveEdit10 sends what editFields10 built and adds no key of its own");
+}
+
+// ---- F11c2 review round 1 (M1 day order, M2 label refresh, M3 focus) ---------------------------------
+
+#[test]
+fn the_edit_treats_day_order_within_an_entry_as_no_change() {
+    helper10("editFields10");
+    let was = r#"{kind: "class", level: "hard", meets: [{days: ["thu", "tue"], start: "09:00", end: "10:00"}]}"#;
+    let call = |now: &str| node(&format!("h.editFields10({was}, {now})"));
+    let sorted = r#"meets: [{days: ["tue", "thu"], start: "09:00", end: "10:00"}]"#;
+    assert_eq!(call(&format!("{{kind: \"class\", level: \"hard\", {sorted}}}")), serde_json::json!({}), "the same days in another order send nothing");
+    assert_eq!(call(&format!("{{kind: \"class\", level: \"soft\", {sorted}}}")), serde_json::json!({"level": "soft"}), "a level-only change sends only level");
+    let more = r#"[{days: ["tue", "thu", "fri"], start: "09:00", end: "10:00"}]"#;
+    assert_eq!(call(&format!("{{kind: \"class\", level: \"hard\", meets: {more}}}")), serde_json::json!({"meets": [{"days": ["tue", "thu", "fri"], "start": "09:00", "end": "10:00"}]}), "another day is a change, sent whole");
+    let time = r#"[{days: ["tue", "thu"], start: "09:00", end: "10:30"}]"#;
+    assert_eq!(call(&format!("{{kind: \"class\", level: \"hard\", meets: {time}}}")), serde_json::json!({"meets": [{"days": ["tue", "thu"], "start": "09:00", "end": "10:30"}]}), "a time is a change");
+    let added = r#"[{days: ["thu", "tue"], start: "09:00", end: "10:00"}, {days: ["wed"], start: "11:00", end: "12:00"}]"#;
+    assert_eq!(call(&format!("{{kind: \"class\", level: \"hard\", meets: {added}}}")), serde_json::json!({"meets": [
+        {"days": ["thu", "tue"], "start": "09:00", "end": "10:00"}, {"days": ["wed"], "start": "11:00", "end": "12:00"}]}), "an added entry is a change");
+    assert_eq!(call(r#"{kind: "class", level: "hard", meets: []}"#), serde_json::json!({"meets": []}), "a removed entry is a change");
+}
+
+#[test]
+fn a_save_that_sent_meets_refreshes_the_rows_time_label() {
+    let c = code(&read("onboarding.js"));
+    let save = function(&c, "saveEdit10");
+    // The pin on `fields.` forbids `fields.meets` here, so the guard is any quoted "meets" test on fields.
+    assert!(save.contains("loadSet10("), "after a successful save the set is reloaded so the row's time label shows the new hours");
+    assert!(save[..save.find("loadSet10(").unwrap()].contains("\"meets\""), "the reload is guarded by whether meets was sent (a quoted \"meets\" test on fields)");
+}
+
+#[test]
+fn add_and_remove_move_focus_to_the_new_entry_and_the_add_button() {
+    let c = code(&read("onboarding.js"));
+    let at = c.find("act === \"addhr\" || act === \"rmhr\"").expect("the add/remove branch");
+    let rest = &c[at..];
+    let branch = &rest[..rest.find("act === \"edit\"").expect("the next branch")];
+    assert!(branch.matches(".focus()").count() >= 2, "both Add and Remove move focus: {branch}");
+    assert!(branch.contains(".ob-hday"), "after Add focus goes to the new entry's first day button");
+    assert!(branch.contains("[data-act10=\"addhr\"]"), "after Remove focus goes to the Add another time button");
 }
