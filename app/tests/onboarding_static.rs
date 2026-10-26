@@ -493,7 +493,11 @@ fn the_reveals_button_follows_the_servers_one_rule_and_re_derives_nothing() {
     assert!(!enabled(status(r#"{"finish_ready": false}"#)), "finish_ready false");
     assert!(!enabled(status(r#"{"finish_ready": null}"#)), "an absent finish_ready is not ready");
     assert!(!enabled(status(r#"{"ok": false}"#)), "a failed status is not ready");
-    assert!(!enabled(status(r#"{"gate": {"open": false}}"#)), "a closed gate");
+    // Amended by F11d (plan section 14.53.1, ruled): "`finish_ready` is `finish_refusal(state, now).is_none()`.
+    // `finish_refusal` refuses whenever the gate is closed ... So the server never answers `finish_ready: true`
+    // with `gate.open: false`, and the extra read only re-derives part of the rule on the page, which
+    // section 14.52.6 forbids." The old case pinned that re-derivation; the page now reads `finish_ready` alone.
+    assert!(enabled(status(r#"{"gate": {"open": false}}"#)), "the page reads finish_ready, not the gate");
     assert!(!enabled(status(r#"{"exiting": {"job": "slot.partial", "long": true, "since": "x"}}"#)), "while an exit drains");
     // The page does not re-derive job states: an absent registrar.confirm and a running
     // school.store change nothing when the server says ready; all-done jobs change nothing when not.
@@ -501,7 +505,7 @@ fn the_reveals_button_follows_the_servers_one_rule_and_re_derives_nothing() {
     assert!(!enabled(status(r#"{"finish_ready": false, "jobs": {"registrar.confirm": {"state": "done"}, "school.apply": {"state": "done"}, "school.courses": {"state": "done"}, "config.ingest": {"state": "done"}}}"#)));
     let c = code(&read("onboarding.js"));
     let f = function(&c, "openKnowluEnabled");
-    assert!(f.contains("finish_ready") && !f.contains("jobs") && !f.contains("registrar.confirm"), "it reads finish_ready only");
+    assert!(f.contains("finish_ready") && !f.contains("jobs") && !f.contains("registrar.confirm") && !f.contains("gate"), "it reads finish_ready only");
 }
 
 #[test]
@@ -517,6 +521,7 @@ fn the_reveal_names_a_failed_item_in_words_with_a_try_again_and_a_long_chain_as_
     let words = node("h.reasonWords(\"first_sync_failed\")");
     assert_eq!(failed[0]["text"], words, "the shown text is reasonWords(reason), not the server's one-word fix: {failed:?}");
     assert_ne!(failed[0]["text"], "Try again");
+    assert_eq!(failed[0]["fix"], "Try again", "M7: the server's fix is carried as written, never re-worded: {failed:?}");
     assert_eq!(failed[0]["retry"], true, "beside a Try again control");
     let coming = m["stillComing"].as_array().expect("stillComing list");
     assert_eq!(coming.len(), 2, "every unfinished item is listed while the chain runs");
@@ -559,6 +564,80 @@ fn the_main_pages_still_coming_line_reads_handover() {
     let js = code(&read("console.js"));
     assert!(js.contains("handover"), "console.js reads the hand-over list (F11d)");
     assert!(js.to_lowercase().contains("still coming"), "and says `still coming`");
+}
+
+// ---- F11d: the reveal's words, the not-connected mail line, the main page's "Not now", the seam --------
+
+fn reveal_status() -> serde_json::Value {
+    serde_json::json!({"ok": true, "finish_ready": true, "gate": {
+        "open": true,
+        "still_coming": ["backfill.older_mail"],
+        "failed": [{"key": "first.sync", "reason": "first_sync_failed", "fix": "Check your connection, then try again"}],
+        "not_connected": [{"key": "mail.connect", "cost_key": "mail_setup_unfinished"},
+                          {"key": "mail", "cost_key": "mail_dates_missed"}]}})
+}
+
+#[test]
+fn the_reveal_shows_the_servers_fix_beside_a_failed_items_words_and_its_try_again() {
+    let html = node(&format!("h.revealHtml(h.revealModel({}), true)", reveal_status()));
+    let html = html.as_str().expect("revealHtml(model, openEnabled) returns the reveal's markup as a string");
+    let words = node("h.reasonWords(\"first_sync_failed\")");
+    assert!(html.contains(words.as_str().unwrap()), "the item's words are shown: {html}");
+    assert!(html.contains("Check your connection, then try again"), "M7: the server's fix is shown as written: {html}");
+    assert!(html.contains("data-retry=\"first.sync\""), "beside the Try again control, which names the job it retries: {html}");
+    assert!(!html.contains("first_sync_failed"), "no raw reason key: {html}");
+}
+
+#[test]
+fn mail_connect_is_a_not_connected_line_with_a_settings_button_never_still_coming() {
+    let m = node(&format!("h.revealModel({})", reveal_status()));
+    let nc = m["notConnected"].as_array().expect("notConnected list");
+    let mail = nc.iter().find(|n| n["key"] == "mail.connect").expect("mail.connect is listed as not connected");
+    assert_eq!(mail["cost"], "Finish connecting your email in Settings.", "{mail}");
+    assert_eq!(mail["settings"], true, "it carries its Settings button: {mail}");
+    let other = nc.iter().find(|n| n["key"] == "mail").expect("the other skipped item");
+    assert_eq!(other["settings"], false, "only mail.connect gets the Settings button: {other}");
+    let coming: Vec<_> = m["stillComing"].as_array().unwrap().iter().map(|c| c["key"].as_str().unwrap().to_string()).collect();
+    assert!(!coming.iter().any(|k| k == "mail.connect"), "never in still coming: {coming:?}");
+    let html = node(&format!("h.revealHtml(h.revealModel({}), true)", reveal_status()));
+    let html = html.as_str().unwrap();
+    assert!(html.contains("Finish connecting your email in Settings."), "{html}");
+    assert!(html.contains("data-act=\"settings\""), "the Settings button: {html}");
+    assert!(!html.contains("mail.connect") && !html.contains("mail_setup_unfinished"), "no raw key: {html}");
+}
+
+#[test]
+fn the_reveals_open_knowlu_button_is_disabled_exactly_when_the_rule_says() {
+    let model = format!("h.revealModel({})", reveal_status());
+    let on = node(&format!("h.revealHtml({model}, true)"));
+    let off = node(&format!("h.revealHtml({model}, false)"));
+    let (on, off) = (on.as_str().unwrap(), off.as_str().unwrap());
+    let button = |h: &str| { let at = h.find("id=\"ob-open-knowlu\"").expect("an Open Knowlu button with id ob-open-knowlu"); h[h[..at].rfind('<').unwrap()..at + h[at..].find('>').unwrap()].to_string() };
+    assert!(!button(on).contains("disabled"), "enabled: {}", button(on));
+    assert!(button(off).contains("disabled"), "disabled: {}", button(off));
+    assert!(on.contains("Open Knowlu"), "{on}");
+}
+
+#[test]
+fn the_reveal_registers_through_the_seam_and_its_poll_never_redraws_the_pane() {
+    let c = code(&read("onboarding.js"));
+    let flat = c.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("OB.registerPanel(11, { render: render11, onStatus: onStatus11 })"), "the reveal registers through the seam");
+    let body = function(&c, "onStatus11");
+    assert!(!body.contains("refresh") && !body.contains(".show("), "onStatus11 must not redraw the pane (a poll wipes #ob-ask)");
+    assert!(flat.matches("OB.registerLeave(").count() >= 2, "the reveal registers its own leave hook beside step 8's");
+    assert!(function(&c, "render11").contains("revealHtml("), "the reveal is drawn by revealHtml");
+}
+
+#[test]
+fn the_main_page_offers_not_now_beside_the_unfinished_mail_line_and_calls_the_command() {
+    let js = code(&read("console.js"));
+    let at = js.find("invoke(\"onboarding_mail_not_now\"").expect("console.js calls onboarding_mail_not_now (Q8, section 14.57.9)");
+    assert!(js[at..].contains("{}") || js[at..at + 80].contains("onboarding_mail_not_now\")"), "it takes no argument");
+    assert!(js.contains("Not now"), "the button reads `Not now`");
+    assert!(js.contains("Finish connecting your email in Settings."), "beside the unfinished-mail line, in the page's own words");
+    assert!(js.contains("mail.connect"), "the line is the hand-over's mail.connect item");
+    assert!(js.contains("Settings"), "with its Settings button");
 }
 
 // ---- F11e1/F11e2: steps 2, 3 and 4 ----------------------------------------------------------------
