@@ -173,7 +173,7 @@ fn the_parser_reads_a_list_by_its_names() {
     assert_eq!(lists, vec![vec!["a::one", "b::two", "c::three"], vec!["d::four"]]);
 }
 
-/// Plan F5 (§14.60): the fourteen wizard-state commands are on the console's list once each and not on
+/// Plan F5 (§14.60): the fourteen commands are on the console's list once each; the ten `onboarding_state` ones are not on
 /// the wizard's.
 #[test]
 fn the_console_list_names_the_fourteen_f5_commands_once_and_the_wizard_list_none() {
@@ -200,6 +200,13 @@ fn the_console_list_names_the_fourteen_f5_commands_once_and_the_wizard_list_none
     ];
     for name in F5 {
         assert_eq!(console.iter().filter(|n| *n == name).count(), 1, "the console list names {name} once");
+        // The four shared names stay on the wizard's list until F5b moves them; the rest are the console's.
+        if name.starts_with("onboarding_state::") {
+            assert!(!wizard.iter().any(|n| n == name), "the wizard list must not name {name}");
+        }
     }
-    assert!(!wizard.iter().any(|n| n == "onboarding_state::onboarding_status"), "the wizard list must not name the console's status");
+    // Plan F5: never the two that store under the pending session (review r6, I-2).
+    for name in ["lms_link::capture_calendar_link", "lms_link::paste_calendar_link"] {
+        assert!(!console.iter().any(|n| n == name), "the console list must not name {name}");
+    }
 }

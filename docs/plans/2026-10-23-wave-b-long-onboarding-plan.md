@@ -6698,7 +6698,7 @@ F11d's test-writer found a gap. The normal console has no way to read `handover`
   - `console-ui` writes the line in `console.js`.
   - Neither file is on the contract list.
 - **Why not `launch_state`.** It is read once at boot, but the items clear while the console runs (§4.10).
-- **Found while building F11d (2026-10-25).** None of the page's `onboarding_*` commands is on a handler list yet: `status`, `answer`, `skip`, `retry`, `finish`, `quit`, `sign_out`, `attach_session`, `checkout` and `entitlement`. Registering them is F5's job (a list edit), which is still open. So F11d's Open Knowlu (`onboarding_finish`) works only once F5 lands.
+- **Found while building F11d (2026-10-25).** None of the page's `onboarding_*` commands is on a handler list yet: `status`, `answer`, `skip`, `retry`, `finish`, `quit`, `sign_out`, `attach_session`, `checkout` and `entitlement`. Registering them is F5's job (a list edit), which is still open. F5 registers them, but Open Knowlu (`onboarding_finish`) still refuses ("still saving") until F4c manages the `Queue` in `run_console`, because without one every queue-backed command returns its named no-setup envelope (F5 review m3). A smoke after F5 that sees the refusal is not a regression.
   - **F5 runs right after F11d merges.** It shares F11d's `generate_handler!` line, so it rebases onto the console count of 75 and raises it by its own count (§14.60).
   - **F5's list must name each command above.** Each goes on the list its process serves: the console process runs in onboarding mode (`LaunchMode::Onboarding`).
 - **F11d review r1 (controller rulings, 2026-10-25).**
