@@ -186,7 +186,7 @@ fact. The settings panel is an **overlay** over a running console, and nothing i
 
 - **Answers:** what is actually at risk?
 - **Computed by:** `surface::must_do → state.must_do`, via `ranking::partition_must_do` (slack ≤ 0),
-  grouped by horizon, sorted `start_by` then `due`.
+  grouped by horizon, sorted `start_by` then `due` when the page has no moment (with one, see below).
 - **The groups follow the deadline order.** The page ranks at its own `now` (`surface::load_at`;
   spec `docs/specs/2026-10-24-deadline-ordering-formula.md`). With a moment, a group is a run of
   **consecutive** rows with one label and rows keep rank order, so a label can appear twice. Labels

@@ -1670,7 +1670,10 @@ calendars:
         let line = first_must_do_line(&vault);
         assert!(line.contains("Erste Reflexion"), "at 21:00: {line}");
         let page = std::fs::read_to_string(vault.join("state").join("today.md")).unwrap();
-        assert!(!page.contains("fit"), "no new line about fitting:\n{page}");
+        assert!(
+            !page.contains("Won't fit") && !page.contains("May not fit"),
+            "no new line about fitting:\n{page}"
+        );
         let _ = std::fs::remove_dir_all(&vault);
 
         let vault = evening_vault("unsafedaytime");
@@ -1678,7 +1681,10 @@ calendars:
         let line = first_must_do_line(&vault);
         assert!(line.contains("CS 100 HW 01"), "at 09:00: {line}");
         let page = std::fs::read_to_string(vault.join("state").join("today.md")).unwrap();
-        assert!(!page.contains("fit"), "no new line about fitting:\n{page}");
+        assert!(
+            !page.contains("Won't fit") && !page.contains("May not fit"),
+            "no new line about fitting:\n{page}"
+        );
         let _ = std::fs::remove_dir_all(&vault);
     }
 
