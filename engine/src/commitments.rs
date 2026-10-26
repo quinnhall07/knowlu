@@ -3643,7 +3643,7 @@ pub fn ask_withdrawal_reason(meta: &Mapping, proposals: &[Proposal], set: &Commi
 
 /// The fields the console may set on a confirmed commitment (phase-2 spec D5); `window` is not
 /// one of them: it goes through `--confirm`.
-pub const CONSOLE_FIELDS: [&str; 2] = ["kind", "level"];
+pub const CONSOLE_FIELDS: [&str; 3] = ["kind", "level", "meets"];
 
 /// The kinds a confirmed commitment may be given from the console: §2.2's list without
 /// `planning-day` (Plan ruling Q8-b).
@@ -3668,6 +3668,25 @@ pub fn check_console_edit(vault: &Path, target: &str, field: &str, value: &serde
         || field_text(&meta, "kind").as_deref() == Some(PLANNING_DAY)
     {
         return Err(format!("{field} can only be set on a confirmed commitment, not {rel}"));
+    }
+    if field == "meets" {
+        // F7e (D5 amended 2026-10-24): a class time is a non-empty list `answer_literal` accepts.
+        const MEETS_MSG: &str = "A class time needs at least one day, and a start before its end.";
+        let Some(list) = value.as_array().filter(|list| !list.is_empty()) else {
+            return Err(MEETS_MSG.to_string());
+        };
+        if answer_literal(value).is_err() {
+            return Err(MEETS_MSG.to_string());
+        }
+        // `answer_literal` lets an empty or repeated `days` through; a class time may not.
+        for entry in list {
+            let days = entry.get("days").and_then(|d| d.as_array()).map(Vec::as_slice).unwrap_or_default();
+            let distinct: BTreeSet<&str> = days.iter().filter_map(|d| d.as_str()).collect();
+            if days.is_empty() || distinct.len() != days.len() {
+                return Err(MEETS_MSG.to_string());
+            }
+        }
+        return Ok(());
     }
     let word = value.as_str().ok_or_else(|| format!("{field} must be one word"))?;
     let known = match field {
