@@ -1950,3 +1950,79 @@ fn a_firmness_press_shows_mine_pressed_and_pressing_mine_again_clears_the_row() 
     let click = function(&code(&read("onboarding.js")), "onClick10").to_string();
     assert!(click.contains("rowAfter10"), "the click handler uses the one rule");
 }
+
+// ---- F11c2 (D5, plan section 14.57.10): step 10's Edit gains the class's hours ---------------------
+//
+// Shapes `console-ui` must meet (all pure helpers on `window.KNOWLU_ONBOARDING`, none sums):
+// - `hoursEntries10(row)`: the entries the Edit's hours control is prefilled with, from the
+//   `your_week` commitment row's own `meets`: `[{days: ["mon", ...], start: "HH:MM", end: "HH:MM"}]`,
+//   copied as given (lowercase day keys); `[]` when the row has none.
+// - `editFields10(was, now)`: `was` and `now` are `{kind, level, meets}`; returns the `fields` object
+//   for `set_fields`: only the keys that differ, `meets` as the whole array of `{days, start, end}`
+//   (never a string, never a per-entry patch); `{}` when nothing differs.
+// - `saveEdit10` sends `invoke("set_fields", {view: "today", id, fields})` and shows `env.error`
+//   as the engine gave it. The engine's one refusal sentence is not copied into the page, and no
+//   other hours message and no fallback line is invented (D5 dropped the fallback).
+
+const ROW_MEETS: &str = r#"[{days: ["mon", "wed", "fri"], start: "12:00", end: "12:50"}, {days: ["tue"], start: "09:00", end: "10:15"}]"#;
+
+#[test]
+fn the_edits_hours_are_prefilled_from_the_rows_own_meets_with_lowercase_day_keys() {
+    helper10("hoursEntries10");
+    let got = node(&format!("h.hoursEntries10({{id: \"c1\", kind: \"class\", level: \"hard\", meets: {ROW_MEETS}}})"));
+    assert_eq!(got, serde_json::json!([
+        {"days": ["mon", "wed", "fri"], "start": "12:00", "end": "12:50"},
+        {"days": ["tue"], "start": "09:00", "end": "10:15"}]));
+    for row in [r#"{id: "c1", kind: "class"}"#, r#"{id: "c1", meets: []}"#, r#"{id: "c1", meets: null}"#] {
+        assert_eq!(node(&format!("h.hoursEntries10({row})")), serde_json::json!([]), "no hours to prefill for {row}");
+    }
+}
+
+#[test]
+fn the_edit_sends_meets_as_the_whole_array_and_only_the_keys_that_changed() {
+    helper10("editFields10");
+    let was = format!("{{kind: \"class\", level: \"hard\", meets: {ROW_MEETS}}}");
+    let call = |now: &str| node(&format!("h.editFields10({was}, {now})"));
+    assert_eq!(call(&was), serde_json::json!({}), "nothing differs, nothing is sent");
+    let moved = r#"{kind: "class", level: "hard", meets: [{days: ["mon", "wed", "fri"], start: "13:00", end: "13:50"}, {days: ["tue"], start: "09:00", end: "10:15"}]}"#;
+    assert_eq!(call(moved), serde_json::json!({"meets": [
+        {"days": ["mon", "wed", "fri"], "start": "13:00", "end": "13:50"},
+        {"days": ["tue"], "start": "09:00", "end": "10:15"}]}), "meets alone, as the whole array");
+    let dropped = r#"{kind: "class", level: "hard", meets: [{days: ["tue"], start: "09:00", end: "10:15"}]}"#;
+    assert_eq!(call(dropped), serde_json::json!({"meets": [{"days": ["tue"], "start": "09:00", "end": "10:15"}]}), "removing an entry is a change");
+    let all = format!("{{kind: \"lab\", level: \"soft\", meets: [{{days: [\"thu\"], start: \"14:00\", end: \"16:00\"}}]}}");
+    assert_eq!(call(&all), serde_json::json!({"kind": "lab", "level": "soft", "meets": [{"days": ["thu"], "start": "14:00", "end": "16:00"}]}), "kind, level and meets travel together");
+    let level_only = format!("{{kind: \"class\", level: \"soft\", meets: {ROW_MEETS}}}");
+    assert_eq!(call(&level_only), serde_json::json!({"level": "soft"}), "an untouched meets is never re-sent");
+}
+
+#[test]
+fn the_edit_shows_the_hours_control_and_the_engines_refusal_verbatim_with_nothing_invented() {
+    let raw = read("onboarding.js");
+    let c = code(&raw);
+    assert!(function(&c, "editRowHtml").contains("hoursEntries10"), "the Edit's markup is prefilled by hoursEntries10");
+    let save = function(&c, "saveEdit10");
+    assert!(save.contains("editFields10"), "the fields come from the one pure helper");
+    assert!(save.contains("env.error ||"), "the engine's refusal is the line, as given");
+    assert!(!raw.contains("needs at least one day"), "the engine's one fixed refusal lives in the engine, not copied into the page");
+    assert!(!raw.contains("start before its end"), "no second hours sentence in the page");
+}
+
+#[test]
+fn step_ten_sends_only_kind_level_and_meets_through_set_fields() {
+    let c = code(&read("onboarding.js"));
+    assert_eq!(c.matches("invoke(\"set_fields\"").count(), 1, "one set_fields call in the onboarding page");
+    let at = c.find("invoke(\"set_fields\"").unwrap();
+    let call = &c[at..at + c[at..].find(')').unwrap()];
+    assert!(call.contains("view: \"today\"") && call.contains("id:") && call.contains("fields: fields"), "the shape is (view, id, fields): {call}");
+    // The keys editFields10 can put in `fields` are these three and no other.
+    let helper = function(&c, "editFields10");
+    let keys: Vec<&str> = helper.match_indices("fields.").map(|(i, _)| {
+        let rest = &helper[i + 7..];
+        &rest[..rest.find(|ch: char| !ch.is_alphanumeric() && ch != '_').unwrap_or(rest.len())]
+    }).collect();
+    assert!(!keys.is_empty(), "editFields10 assigns fields.<key>");
+    for k in &keys { assert!(["kind", "level", "meets"].contains(k), "step 10 may send only kind, level and meets, not {k}"); }
+    for k in ["kind", "level", "meets"] { assert!(keys.contains(&k), "editFields10 can send {k}"); }
+    assert!(!function(&c, "saveEdit10").contains("fields."), "saveEdit10 sends what editFields10 built and adds no key of its own");
+}
