@@ -37,3 +37,22 @@ There are no Critical findings and three Important ones.
 - No contract-list or frozen-reference file is touched.
 
 The 13 other failing pins in `onboarding_static.rs` are the red placeholders for steps 2-6 (later tasks), not this task's.
+
+## Round 2 (`a2a2844..da50160`): FAIL on one point
+
+Every round-1 finding is closed on the normal path, and test 49 closes I-2.
+
+### Important
+- **R2-I1. A window typed before the calendar guess arrives is sent with the guess's days.**
+  - **Failure:** `fillWindow10` skips a guess that arrives after the student has answered. `confirm10` then passes the late guess, so the weekend entry is written unseen.
+  - **Fix:** remember which guess the visible pairs came from. An answer typed into the blank pair sends all seven days. A pin covers it.
+
+### Minor
+- **R2-m1.** A firmness press counts as Mine, but Mine never shows as pressed. Fix: the press sets Mine itself.
+- **R2-m2.** With two entries, the Wake/Bed names are ambiguous. Fix: the days go inside each label.
+- **R2-m3.** Test 49 had a raw line break inside a string. Fixed in `060375b`.
+- **R2-m4.** The two pairs don't align in columns (optional).
+
+### Implementer rulings, both accepted
+- **Layout:** the title and the controls share one line, with the time on the line below. `.ob-win` has its own rule.
+- **Blank times:** `answeredCount10` treats an empty string as blank. No real path brings an `undefined` time.
