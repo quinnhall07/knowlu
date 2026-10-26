@@ -643,22 +643,52 @@
     var known = KINDS10.some(function (k) { return k[0] === c.kind; });
     var kinds = (known ? "" : '<option value="' + esc(c.kind || "") + '" selected>' + esc(c.kind || "") + '</option>') + KINDS10.map(function (k) { return '<option value="' + k[0] + '"' + (c.kind === k[0] ? " selected" : "") + '>' + k[1] + '</option>'; }).join("");
     var levels = LEVELS10.map(function (l) { return '<option value="' + l[0] + '"' + ((c.level || "soft") === l[0] ? " selected" : "") + '>' + l[1] + '</option>'; }).join("");
-    return '<li class="ob-set" data-id="' + esc(c.id) + '" data-kind="' + esc(c.kind) + '" data-level="' + esc(c.level || "soft") + '"><span class="a">' + esc(c.title) + '</span> <span class="su-dim">' + esc(c.when || "") + '</span> ' +
+    return '<li class="ob-set" data-id="' + esc(c.id) + '" data-kind="' + esc(c.kind) + '" data-level="' + esc(c.level || "soft") + '" data-meets="' + esc(JSON.stringify(hoursEntries10(c))) + '"><span class="a">' + esc(c.title) + '</span> <span class="su-dim">' + esc(c.when || "") + '</span> ' +
       '<button class="su-link" type="button" data-act10="edit">Edit</button>' +
-      '<span class="ob-edit" hidden> <select class="ob-kind" aria-label="What it is">' + kinds + '</select> <select class="ob-level" aria-label="How firm it is">' + levels + '</select> ' +
+      '<span class="ob-edit" hidden> <select class="ob-kind" aria-label="What it is">' + kinds + '</select> <select class="ob-level" aria-label="How firm it is">' + levels + '</select> <span class="ob-hours">' + hoursHtml10(hoursEntries10(c)) + '</span> ' +
       '<button class="b su-btn" type="button" data-act10="save">Save</button> <span class="ob-row-line" role="status"></span></span></li>';
   }
-  // Edit saves through the console's own set_fields (a kind and a level; no command edits a class's hours).
-  function saveEdit10(row) {
-    var line = row.querySelector(".ob-row-line"), kind = row.querySelector(".ob-kind").value, level = row.querySelector(".ob-level").value;
+  // The Edit's hours (D5): one block per meets entry, day toggles plus labelled times; the labels name the entry when there are several.
+  function hoursEntries10(row) {
+    return ((row && row.meets) || []).map(function (m) { return { days: (m.days || []).slice(), start: m.start, end: m.end }; });
+  }
+  function editFields10(was, now) {
     var fields = {};
-    if (kind !== row.getAttribute("data-kind")) { fields.kind = kind; }
-    if (level !== row.getAttribute("data-level")) { fields.level = level; }
+    if (now.kind !== was.kind) { fields.kind = now.kind; }
+    if (now.level !== was.level) { fields.level = now.level; }
+    if (JSON.stringify(now.meets) !== JSON.stringify(was.meets)) { fields.meets = now.meets; }
+    return fields;
+  }
+  OB.hoursEntries10 = hoursEntries10; OB.editFields10 = editFields10;
+  function hoursHtml10(es) {
+    var many = es.length > 1;
+    return es.map(function (e, i) {
+      var n = many ? "Time " + (i + 1) + " " : "", name = many ? "time " + (i + 1) : "time";
+      return '<fieldset class="ob-hent"><legend>' + (many ? "Time " + (i + 1) : "Time") + '</legend> ' + DAYS10.map(function (d) {
+        var lab = d.charAt(0).toUpperCase() + d.slice(1);
+        return '<button class="b su-btn ob-hday" type="button" data-act10="day" data-day="' + d + '" aria-pressed="' + (e.days.indexOf(d) >= 0) + '" aria-label="' + n + lab + '">' + lab + '</button>';
+      }).join("") + ' <label>' + n + 'start <input type="time" class="ob-hs" value="' + esc(e.start || "") + '"></label> <label>' + n + 'end <input type="time" class="ob-he" value="' + esc(e.end || "") + '"></label> ' +
+        '<button class="su-link" type="button" data-act10="rmhr" aria-label="Remove ' + name + '">Remove</button></fieldset>';
+    }).join("") + '<button class="su-link" type="button" data-act10="addhr">Add another time</button>';
+  }
+  function readHours10(row) {
+    return Array.prototype.map.call(row.querySelectorAll(".ob-hent"), function (f) {
+      return { days: DAYS10.filter(function (d) { return f.querySelector('[data-day="' + d + '"]').getAttribute("aria-pressed") === "true"; }), start: f.querySelector(".ob-hs").value, end: f.querySelector(".ob-he").value };
+    });
+  }
+  // Edit saves through the console's own set_fields: only what changed, from editFields10; the engine's refusal shows as given.
+  function saveEdit10(row) {
+    var line = row.querySelector(".ob-row-line"), id = row.getAttribute("data-id");
+    var was = { kind: row.getAttribute("data-kind"), level: row.getAttribute("data-level"), meets: JSON.parse(row.getAttribute("data-meets") || "[]") };
+    var now = { kind: row.querySelector(".ob-kind").value, level: row.querySelector(".ob-level").value, meets: readHours10(row) };
+    var fields = editFields10(was, now);
     if (!Object.keys(fields).length) { line.textContent = "Nothing changed."; return; }
     OB.clearError();
-    invoke("set_fields", { view: "today", id: row.getAttribute("data-id"), fields: fields }).then(function (env) {
+    invoke("set_fields", { view: "today", id: id, fields: fields }).then(function (env) {
       if (env && env.ok === false) { line.textContent = env.error || "Knowlu couldn't save that. Try again."; return; }
-      row.setAttribute("data-kind", kind); row.setAttribute("data-level", level);
+      if (now.kind !== row.getAttribute("data-kind")) { row.setAttribute("data-kind", now.kind); }
+      if (now.level !== row.getAttribute("data-level")) { row.setAttribute("data-level", now.level); }
+      row.setAttribute("data-meets", JSON.stringify(now.meets));
       line.textContent = "Saved.";
     }).catch(function () { line.textContent = "Knowlu couldn't save that. Try again."; });
   }
@@ -820,6 +850,13 @@
       return;
     }
     if (act === "confirm") { confirm10(); return; }
+    if (act === "day") { b.setAttribute("aria-pressed", String(b.getAttribute("aria-pressed") !== "true")); return; }
+    if (act === "addhr" || act === "rmhr") {
+      var hs = b.closest(".ob-set"), es = readHours10(hs), at = Array.prototype.indexOf.call(hs.querySelectorAll(".ob-hent"), b.closest(".ob-hent"));
+      if (act === "addhr") { es.push({ days: [], start: "", end: "" }); } else { es.splice(at, 1); }
+      hs.querySelector(".ob-hours").innerHTML = hoursHtml10(es);
+      return;
+    }
     if (act === "edit" || act === "save") {
       var set = b.closest(".ob-set");
       if (act === "save") { saveEdit10(set); } else { set.querySelector(".ob-edit").hidden = !set.querySelector(".ob-edit").hidden; }
