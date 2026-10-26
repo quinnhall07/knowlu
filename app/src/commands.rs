@@ -145,8 +145,10 @@ pub fn ui_event_inner(cs: &ConsoleState, action: &str, view: &str, object_id: Op
 /// Frontmatter fields the console may edit. Anything else (`id`, `source_uid`, `judgment`, …) is
 /// refused rather than silently ignored. `kind` and `level` are a commitment's (phase-2 spec D5):
 /// `knowlu_engine::commitments::check_console_edit` refuses them anywhere else and any value off
-/// §2.2's lists. The page's own list (`console.js`, the drawer's) keeps the first twelve.
-pub const EDITABLE: [&str; 14] = ["title", "course", "due", "effort_hours", "importance", "importance_reason", "status", "progress", "slice_hours", "domain", "rank_override", "effort_confidence", "kind", "level"];
+/// §2.2's lists. `meets` is a confirmed class's time (F5d, D5 amended 2026-10-24): the same check
+/// refuses it anywhere else, and its literal is the engine's `answer_literal`, never `literal_for`.
+/// The page's own list (`console.js`, the drawer's) keeps the first twelve.
+pub const EDITABLE: [&str; 15] = ["title", "course", "due", "effort_hours", "importance", "importance_reason", "status", "progress", "slice_hours", "domain", "rank_override", "effort_confidence", "kind", "level", "meets"];
 /// Fields whose literal must go through `write::to_literal` so a colon or quote in free text
 /// survives as YAML; every other editable field is passed through as the literal the page sent.
 pub const QUOTED: [&str; 5] = ["title", "course", "importance_reason", "domain", "effort_confidence"];
@@ -223,6 +225,12 @@ pub fn set_fields_inner(cs: &ConsoleState, view: &str, id: &str, fields: serde_j
             if k == "status" && v.is_null() { return Err("status cannot be empty".to_string()); }
             if knowlu_engine::commitments::CONSOLE_FIELDS.contains(&k.as_str()) {
                 knowlu_engine::commitments::check_console_edit(&cs.vault, id, k, v)?;
+                if k == "meets" {
+                    let lit = knowlu_engine::commitments::answer_literal(v)
+                        .map_err(|_| "A class time needs at least one day, and a start before its end.".to_string())?;
+                    literals.push((k.clone(), lit));
+                    continue;
+                }
             }
             literals.push((k.clone(), literal_for(k, v)?));
         }
