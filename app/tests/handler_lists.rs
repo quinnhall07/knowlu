@@ -148,7 +148,7 @@ fn the_console_list_names_the_three_onboarding_commands_f5c_adds_and_the_wizard_
         assert!(wizard.iter().any(|n| n == name), "the wizard list keeps {name}");
         assert!(!console.iter().any(|n| n == name), "the console list must not name the path-taking {name}");
     }
-    assert_eq!(console.len(), 75, "the console list's count; recount it when a command is added");
+    assert_eq!(console.len(), 89, "the console list's count; recount it when a command is added");
 }
 
 /// Plan §14.63: the main page's `onboarding_handover` is on the console's list once and not on the wizard's,
@@ -171,4 +171,42 @@ fn the_parser_reads_a_list_by_its_names() {
                 y.invoke_handler(tauri::generate_handler![d::four])";
     let lists = handler_lists(text);
     assert_eq!(lists, vec![vec!["a::one", "b::two", "c::three"], vec!["d::four"]]);
+}
+
+/// Plan F5 (§14.60): the fourteen commands are on the console's list once each; the ten `onboarding_state` ones are not on
+/// the wizard's.
+#[test]
+fn the_console_list_names_the_fourteen_f5_commands_once_and_the_wizard_list_none() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let lists = handler_lists(&src);
+    let console = list_with(&lists, "commands::state");
+    let wizard = list_with(&lists, "onboarding::finish_onboarding");
+    const F5: [&str; 14] = [
+        "onboarding::campus_search",
+        "lms_link::open_lms_window",
+        "lms_link::capture_courses",
+        "lms_link::close_lms_window",
+        "onboarding_state::onboarding_status",
+        "onboarding_state::onboarding_answer",
+        "onboarding_state::onboarding_skip",
+        "onboarding_state::onboarding_retry",
+        "onboarding_state::onboarding_finish",
+        "onboarding_state::onboarding_quit",
+        "onboarding_state::onboarding_sign_out",
+        "onboarding_state::onboarding_attach_session",
+        "onboarding_state::onboarding_entitlement",
+        "onboarding_state::onboarding_checkout",
+    ];
+    for name in F5 {
+        assert_eq!(console.iter().filter(|n| *n == name).count(), 1, "the console list names {name} once");
+        // The four shared names stay on the wizard's list until F5b moves them; the rest are the console's.
+        if name.starts_with("onboarding_state::") {
+            assert!(!wizard.iter().any(|n| n == name), "the wizard list must not name {name}");
+        }
+    }
+    // Plan F5: never the two that store under the pending session (review r6, I-2).
+    for name in ["lms_link::capture_calendar_link", "lms_link::paste_calendar_link"] {
+        assert!(!console.iter().any(|n| n == name), "the console list must not name {name}");
+    }
 }
