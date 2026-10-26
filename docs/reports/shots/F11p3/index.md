@@ -21,11 +21,8 @@ shows a firmness press as Mine (the bar counts it) beside one marked Mine.
 The two-entry shots use a window proposal with two groups: Mon–Fri 07:30 to 22:00 and Sat–Sun 10:00
 to 23:00, one pair each, stacked, with its days inside each label ("Mon-Fri wake", "Mon-Fri bed"; a single pair keeps Wake / Bed). Re-shot in review round 2. Both entries are sent on That's right.
 
-The built shots show the class times opened and one event marked Mine, scrolled to the day-window
-question ("When does your day run?", the time inputs preselected from the window proposal's guess,
-07:30 and 23:30). The bar reads "1 of 4 answered": three events and the window, which counts once the
-student presses That's right or sets a time (F11p4). The prototype's late-rule question and
-syllabus groups are out of scope (no late-rule question until O5).
+The prototype's late-rule question and syllabus groups are out of scope (no late-rule question
+until O5). The current pair is described in the note below.
 
 Review round 2: the built pair is re-shot with three events. The first is marked Mine; the second
 had a firmness press (Optional), which now shows Mine pressed too; the bar reads "2 of 4 answered".

@@ -56,3 +56,14 @@ Every round-1 finding is closed on the normal path, and test 49 closes I-2.
 ### Implementer rulings, both accepted
 - **Layout:** the title and the controls share one line, with the time on the line below. `.ob-win` has its own rule.
 - **Blank times:** `answeredCount10` treats an empty string as blank. No real path brings an `undefined` time.
+
+## Round 3 (`da50160..407c6db`): PASS
+
+Every round-2 finding is closed:
+- **R2-I1:** the window remembers which guess it was drawn from.
+- **R2-m1:** a firmness press shows Mine pressed, and a second Mine press clears the row.
+- **R2-m2:** each label names its days.
+- **R2-m3:** fixed.
+- **R2-m4:** the pairs stack.
+
+The only Minor left was a stale paragraph in the shots index, which the controller fixed before merging. The controller also confirmed the 13 remaining failures by name: they are the red pins for steps 2-6, waiting for later tasks. Test 49 passes.
