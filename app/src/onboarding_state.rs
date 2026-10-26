@@ -1400,6 +1400,21 @@ pub fn mail_not_now_in(data_dir: &Path) -> Value {
 #[tauri::command]
 pub fn onboarding_mail_not_now(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value { mail_not_now_in(&cs.data_dir) }
 
+/// What the main page reads (§14.63): the names of a finished file's `handover`, in file order, and nothing
+/// else (the signal is the engine's business). An absent, unreadable or unfinished file gives no items.
+/// Reads only: the file is never created or repaired here.
+pub fn handover_in(data_dir: &Path) -> Value {
+    let items: Vec<Value> = match load_state(data_dir) {
+        Loaded::Ok(s) if s.finished => s.handover.iter().map(|h| serde_json::json!({ "item": h.item })).collect(),
+        _ => Vec::new(),
+    };
+    serde_json::json!({ "ok": true, "error": Value::Null, "items": items })
+}
+
+/// The main page's hand-over line: `handover_in` over the app-data folder.
+#[tauri::command]
+pub fn onboarding_handover(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value { handover_in(&cs.data_dir) }
+
 /// A skip the step takes, recorded with its cost key in the live state and saved.
 #[tauri::command]
 pub fn onboarding_skip(app: tauri::AppHandle, step: u8, source: String) -> Value {
@@ -1547,3 +1562,74 @@ pub fn onboarding_checkout(app: tauri::AppHandle, plan: String) -> Value {
 /// hand-over writes no pair either) (as [`crate::onboarding_jobs::IngestHandoff::course_map`] does), so the preview and
 /// `ingest.yaml` still read one list.
 pub fn preview_courses(_a: &Answers) -> Value { todo!("F8b: the --courses list") }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch folder that removes itself when the test ends, pass or fail.
+    struct Scratch(PathBuf);
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf { &self.0 }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    fn scratch(tag: &str) -> Scratch {
+        let d = std::env::temp_dir().join(format!("knowlu-handover-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        Scratch(d)
+    }
+
+    fn save(d: &Path, finished: bool, items: &[(&str, &str)]) -> Vec<u8> {
+        let mut s = OnboardingState::new("2026-10-25T09:00:00Z", 10);
+        s.finished = finished;
+        s.handover = items.iter().map(|(i, g)| HandoverItem { item: (*i).into(), signal: (*g).into() }).collect();
+        save_state(d, &s).unwrap();
+        std::fs::read(state_path(d)).unwrap()
+    }
+
+    #[test]
+    fn handover_of_an_absent_file_is_empty_and_creates_nothing() {
+        let d = scratch("absent");
+        assert_eq!(handover_in(&d), serde_json::json!({ "ok": true, "error": null, "items": [] }));
+        assert!(!state_path(&d).exists(), "reading never creates the file");
+    }
+
+    #[test]
+    fn handover_of_an_unfinished_file_is_empty_and_changes_no_byte() {
+        let d = scratch("unfinished");
+        let before = save(&d, false, &[("mail.connect", "mail_json")]);
+        assert_eq!(handover_in(&d), serde_json::json!({ "ok": true, "error": null, "items": [] }));
+        assert_eq!(std::fs::read(state_path(&d)).unwrap(), before);
+    }
+
+    #[test]
+    fn handover_of_an_unreadable_file_is_empty_and_is_not_repaired() {
+        let d = scratch("unreadable");
+        std::fs::write(state_path(&d), b"{ not json").unwrap();
+        assert_eq!(handover_in(&d), serde_json::json!({ "ok": true, "error": null, "items": [] }));
+        assert_eq!(std::fs::read(state_path(&d)).unwrap(), b"{ not json");
+    }
+
+    #[test]
+    fn handover_of_a_finished_file_lists_the_names_in_file_order_with_no_signal_and_changes_no_byte() {
+        let d = scratch("two");
+        let before = save(&d, true, &[("slot.first_full", "slot_end"), ("mail.connect", "mail_json")]);
+        let out = handover_in(&d);
+        assert_eq!(out, serde_json::json!({ "ok": true, "error": null, "items": [{ "item": "slot.first_full" }, { "item": "mail.connect" }] }));
+        assert!(out["items"].as_array().unwrap().iter().all(|i| i.get("signal").is_none()), "names only");
+        assert_eq!(std::fs::read(state_path(&d)).unwrap(), before, "a read changes no byte");
+    }
+
+    #[test]
+    fn handover_of_a_finished_empty_file_is_empty() {
+        let d = scratch("empty");
+        let before = save(&d, true, &[]);
+        assert_eq!(handover_in(&d), serde_json::json!({ "ok": true, "error": null, "items": [] }));
+        assert_eq!(std::fs::read(state_path(&d)).unwrap(), before);
+    }
+}

@@ -148,7 +148,21 @@ fn the_console_list_names_the_three_onboarding_commands_f5c_adds_and_the_wizard_
         assert!(wizard.iter().any(|n| n == name), "the wizard list keeps {name}");
         assert!(!console.iter().any(|n| n == name), "the console list must not name the path-taking {name}");
     }
-    assert_eq!(console.len(), 74, "the console list's count; recount it when a command is added");
+    assert_eq!(console.len(), 75, "the console list's count; recount it when a command is added");
+}
+
+/// Plan §14.63: the main page's `onboarding_handover` is on the console's list once and not on the wizard's,
+/// and the wizard's count stays 31.
+#[test]
+fn the_console_list_names_onboarding_handover_once_and_the_wizard_list_does_not() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let lists = handler_lists(&src);
+    let console = list_with(&lists, "commands::state");
+    let wizard = list_with(&lists, "onboarding::finish_onboarding");
+    assert_eq!(console.iter().filter(|n| *n == "onboarding_state::onboarding_handover").count(), 1);
+    assert!(!wizard.iter().any(|n| n == "onboarding_state::onboarding_handover"));
+    assert_eq!(wizard.len(), 31, "the wizard list's count is unchanged");
 }
 
 #[test]

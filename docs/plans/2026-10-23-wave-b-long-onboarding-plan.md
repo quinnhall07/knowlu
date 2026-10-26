@@ -6675,3 +6675,40 @@ F11c2, F11b, F11e1 and F11e2 each depend on it (§14.58.7).
   JSON writes the same canonical `window:` line as the YAML spelling, and a bad day is refused
   before any write (§14.58.10, m-6). If it fails, both wait, and the fix is an engine
   `implementer` task. The page never composes YAML.
+
+### 14.63 How the main page reads `handover` (controller ruling, 2026-10-25)
+
+F11d's test-writer found a gap. The normal console has no way to read `handover`:
+- `onboarding_status` is not on the console's handler list;
+- `launch_state` returns only `mode` in console mode;
+- `commands::state` carries the vault's read model, not app data.
+
+**Ruling:** add one console command, `onboarding_state::onboarding_handover`, next to `onboarding_mail_not_now`.
+- **Where it reads.** It reads `onboarding.json` from `ConsoleState.data_dir` through `load_state`, and never writes.
+  - A finished file returns `{ok: true, error: null, items: [{item}]}`, where the items are `handover`'s in file order.
+  - An absent, unreadable or unfinished file returns `items: []`. The file is never created or repaired.
+- **What it sends.** The page gets the item names only. The signal stays the engine's business, and the page shows each item's words from its own table. `mail.connect` maps to "Finish connecting your email in Settings." with Settings and Not now.
+- **Where it goes.** It joins the console `generate_handler!` list, so the console count moves from 74 to 75 and `app/tests/handler_lists.rs` pins the new count. It stays off the shell list.
+- **When the page reads it.**
+  - at boot in console mode;
+  - after every `state` refresh the console already makes, so an item drops when its signal clears it, without a new poll;
+  - after "Not now" returns `ok`.
+- **Who builds it.**
+  - `implementer` writes the command, TDD-first in `onboarding_state.rs`'s tests: absent, unfinished, finished with items, finished and empty.
+  - `console-ui` writes the line in `console.js`.
+  - Neither file is on the contract list.
+- **Why not `launch_state`.** It is read once at boot, but the items clear while the console runs (§4.10).
+- **Found while building F11d (2026-10-25).** None of the page's `onboarding_*` commands is on a handler list yet: `status`, `answer`, `skip`, `retry`, `finish`, `quit`, `sign_out`, `attach_session`, `checkout` and `entitlement`. Registering them is F5's job (a list edit), which is still open. So F11d's Open Knowlu (`onboarding_finish`) works only once F5 lands.
+  - **F5 runs right after F11d merges.** It shares F11d's `generate_handler!` line, so it rebases onto the console count of 75 and raises it by its own count (§14.60).
+  - **F5's list must name each command above.** Each goes on the list its process serves: the console process runs in onboarding mode (`LaunchMode::Onboarding`).
+- **F11d review r1 (controller rulings, 2026-10-25).**
+  - **The reveal has no Settings button.**
+    - The reason: during setup, `mail.connect` never appears in `gate.not_connected`; it exists only in `handover`, after finish. The console's Settings panel would also open behind `.setup`, and `mail_setup_start` refuses in onboarding mode.
+    - So §4 step 11's "each skip with its cost and its Settings button" becomes "each skip with its cost". The Settings button is the main page's (§14.52.1).
+    - The reveal-side `settings` flag goes, along with its button and its pin.
+  - **On the main page, `mail.connect` gets its own "Not connected" heading** and §14.52.1's cost line, kept apart from the "Still coming" rows. It keeps its Settings and Not now buttons.
+  - **The reveal's "Knowlu finishes these after you open it"** covers only the items that really finish without the student.
+  - **The handover read** runs at boot, on focus and on every 60-second poll, and after Not now. An envelope applied after an action or a Sync doesn't re-read it, so a cleared item can stay up to 60 seconds. This amends §14.63's "after every `state` refresh".
+- **F11d review r2: PASS, with two carries.**
+  - **To F11e2:** in the reveal's mixed case (`mail.setup` with an item that finishes alone), the mail rows are listed apart from "Knowlu finishes these", and that pin's mixed case is amended.
+  - **To F7c/F9:** after Not now, the main page shows the step-5 skip's cost line (§14.57.9). `onboarding_handover` sends only handover names, so that task reads the skips too.

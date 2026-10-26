@@ -110,15 +110,49 @@
   function isClosing(outstanding, exiting) { return !!outstanding || !!exiting; }
   // The reveal's one rule is the server's: `finish_ready` is read, never re-derived.
   function openKnowluEnabled(s) {
-    return !!(s && s.ok === true && s.finish_ready === true && s.gate && s.gate.open === true && !s.exiting);
+    return !!(s && s.ok === true && s.finish_ready === true && !s.exiting);
   }
   function revealModel(s) {
     var g = (s && s.gate) || {};
     return {
-      failed: (g.failed || []).map(function (f) { return { key: f.key, name: jobWords(f.key), text: reasonWords(f.reason), retry: true }; }),
+      failed: (g.failed || []).map(function (f) { return { key: f.key, name: jobWords(f.key), text: reasonWords(f.reason), fix: f.fix, retry: true }; }),
       stillComing: (g.still_coming || []).map(function (k) { return { key: k, words: jobWords(k) }; }),
       notConnected: (g.not_connected || []).map(function (n) { return { key: n.key, name: jobWords(n.key), cost: costWords(n.cost_key) }; })
     };
+  }
+  // The reveal's gate-driven part. The words are the page's own; the fix is the server's, as written.
+  function cap(t) { t = String(t == null ? "" : t); return t.charAt(0).toUpperCase() + t.slice(1); }
+  // Text between tags needs only & < > escaped, so a sentence's apostrophe shows as typed.
+  function txt(t) { return String(t == null ? "" : t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+  // With mail.setup pending, mail.setup/canary/first_pass become one mail.connect at finish and wait on the student.
+  function finishesAlone(items) {
+    var keys = items.map(function (c) { return c.key; }), trio = ["mail.setup", "mail.canary", "mail.first_pass"];
+    var needsStudent = keys.indexOf("mail.setup") >= 0;
+    return keys.some(function (k) { return !(needsStudent && trio.indexOf(k) >= 0); });
+  }
+  function revealHtml(m, openEnabled) {
+    var h = '<div id="ob-step-11" class="ob-reveal">';
+    if (m.failed.length) {
+      h += '<h2 class="ob-h2">Needs another try</h2><ul class="ob-list">' + m.failed.map(function (f) {
+        return '<li class="ob-rv-item"><b>' + txt(cap(f.name)) + '.</b> ' + txt(f.text) + (f.fix && f.fix !== "Try again" ? ' <span class="su-dim">' + txt(f.fix) + '</span>' : "") +
+          ' <button class="b su-btn" type="button" data-retry="' + esc(f.key) + '">Try again</button></li>';
+      }).join("") + '</ul>';
+    }
+    if (m.notConnected.length) {
+      h += '<h2 class="ob-h2">Not connected</h2><ul class="ob-list">' + m.notConnected.map(function (n) {
+        return '<li class="ob-rv-item"><b>' + txt(cap(n.name)) + '.</b> ' + txt(n.cost) + '</li>';
+      }).join("") + '</ul>';
+    }
+    if (m.stillComing.length) {
+      h += '<h2 class="ob-h2">Still coming</h2><ul class="ob-list">' + m.stillComing.map(function (c) {
+        return '<li class="ob-rv-item">' + txt(cap(c.words)) + '</li>';
+      }).join("") + '</ul>' + (finishesAlone(m.stillComing) ? '<p class="su-small">Knowlu finishes these after you open it, and your page fills in as each one ends.</p>' : "");
+    }
+    if (!m.failed.length && !m.notConnected.length && !m.stillComing.length) {
+      h += '<p class="ob-state">Nothing is left. Everything you connected ran once.</p>';
+    }
+    return h + '<div class="su-actions"><button class="b pri y su-btn" type="button" id="ob-open-knowlu" data-act="openKnowlu"' +
+      (openEnabled ? "" : " disabled") + '>Open Knowlu</button></div></div>';
   }
 
   // ---- the rail ----------------------------------------------------------------------------------
@@ -838,6 +872,29 @@
   }
   // ==== F11c, step 10 (ends) =====================================================================
 
+  // ==== F11d, step 11: the reveal ===================================================================
+  // The poll fills the reveal's own node in place; it never redraws the pane. Open Knowlu reads the
+  // server's `finish_ready` through openKnowluEnabled, and the server refuses it again on press.
+  var w11 = { html: "", opening: false };
+  function revealFor(status) { return revealHtml(revealModel(status), openKnowluEnabled(status)); }
+  function render11(status) {
+    w11.html = revealHtml(revealModel(status), openKnowluEnabled(status)); w11.opening = false;
+    return { ask: w11.html };
+  }
+  function onStatus11(status) {
+    var el = EL("ob-step-11"), html = revealFor(status);
+    if (!el || html === w11.html) { return; }
+    w11.html = html; el.outerHTML = html; renderClosing();
+  }
+  OB.registerPanel(11, { render: render11, onStatus: onStatus11 });
+  OB.registerLeave(function () { w11.html = ""; });
+  function openKnowlu() {
+    if (S.outstanding || w11.opening) { return; }
+    w11.opening = true; S.outstanding = true; S.error = ""; renderClosing();
+    leaving().then(function () { return invoke("onboarding_finish", {}); }).then(function (a) { w11.opening = false; afterExit(a); }).catch(function () { w11.opening = false; exitFailed(); });
+  }
+  // ==== F11d (ends) ================================================================================
+
   // The one reader of `account_status`: on mount and at the step 2 and step 4 moves, never from the poll.
   function loadAccount() {
     invoke("account_status", {}).then(function (a) { S.account = a && a.ok === true ? a : null; renderRail(); })
@@ -866,6 +923,7 @@
     S.error = "";
     if (e.target.closest("#ob-finish-later") || e.target.closest("[data-act=finishLater]")) { finishLater(); return; }
     if (e.target.closest("#ob-sign-out")) { signOut(); return; }
+    if (e.target.closest("#ob-open-knowlu")) { openKnowlu(); return; }
     var r = e.target.closest("[data-retry]");
     if (r) { retryJob(r.getAttribute("data-retry")); }
   }
@@ -885,7 +943,7 @@
   }
 
   OB.exitLine = exitLine; OB.elapsedText = elapsedText; OB.reasonWords = reasonWords; OB.costWords = costWords;
-  OB.openKnowluEnabled = openKnowluEnabled; OB.isClosing = isClosing; OB.revealModel = revealModel; OB.railRow = railRow;
+  OB.openKnowluEnabled = openKnowluEnabled; OB.isClosing = isClosing; OB.revealModel = revealModel; OB.revealHtml = revealHtml; OB.railRow = railRow;
   OB.rowModel = rowModel; OB.rows = ROWS; OB.minutesLeft = minutesLeft;
   OB.finishLater = finishLater; OB.signOut = signOut; OB.renderRestart = renderRestart;
 

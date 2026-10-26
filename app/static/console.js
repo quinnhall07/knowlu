@@ -1579,7 +1579,48 @@
     }
   }
 
+  // F11d (section 14.63): what the hand-over still waits on, one line under the sync line. The command
+  // sends item names only; the words are this table's. An item leaves when its own signal clears it.
+  var HANDOVER_WORDS = {
+    "mail.connect": "Finish connecting your email in Settings.",
+    "slot.first_full": "Your full week is still coming.",
+    "slot.partial": "Your first week is still coming.",
+    "google.gmail_first_read": "Your Gmail is still coming.",
+    "google.calendar_read": "Your Google calendar is still coming.",
+    "mail.setup": "Your school email is still being connected.",
+    "mail.canary": "Your email forwarding is still being tested.",
+    "mail.first_pass": "Your first emails are still being read."
+  };
+  function handoverHtml(items) {
+    var list = items || [], html = "";
+    var conn = list.filter(function (it) { return it && it.item === "mail.connect"; });
+    var rest = list.filter(function (it) { return !(it && it.item === "mail.connect"); });
+    if (conn.length) {
+      html += '<div class="ho-head">Not connected</div><div class="ho-row"><span class="ho-line">' + h(HANDOVER_WORDS["mail.connect"]) +
+        ' Without it, date changes and new work announced by email are missed.</span><button class="b" type="button" data-settings>Settings</button>' +
+        '<button class="b" type="button" data-ho-notnow>Not now</button></div>';
+    }
+    if (rest.length) {
+      html += '<div class="ho-head">Still coming</div>' + rest.map(function (it) {
+        return '<div class="ho-row"><span class="ho-line">' + h(HANDOVER_WORDS[it && it.item] || "Something is still coming.") + '</span></div>';
+      }).join("");
+    }
+    return html;
+  }
+  function loadHandover() {
+    return invoke("onboarding_handover", {}).then(function (r) {
+      var el = EL("handover");
+      if (!el) { return; }
+      var html = r && r.ok === true ? handoverHtml(r.items) : "";
+      el.innerHTML = html; el.hidden = !html;
+    }).catch(function () {});
+  }
+  function handoverNotNow() {
+    invoke("onboarding_mail_not_now", {}).then(function (r) { if (r && r.ok === true) { return loadHandover(); } }).catch(function () {});
+  }
+
   function poll() {
+    loadHandover();
     return invoke("state", { view: stateView() }).then(function (env) {
       // R-C1c-plan-1: the block is on the envelope exactly while the vault has never been ranked,
       // which IS D7's "until the first read model exists" — `surface::build_state` has no failure
@@ -2111,6 +2152,7 @@
     var syncBtn = e.target.closest("[data-sync]"); if (syncBtn) { runSync(); return; }
     var backupBtn = e.target.closest("[data-backup]"); if (backupBtn) { invoke("backup_now", { view: stateView() }).then(applyEnvelope).catch(function () {}); return; }
     var gear = e.target.closest("[data-settings]"); if (gear) { openSettings(); return; }
+    if (e.target.closest("[data-ho-notnow]")) { handoverNotNow(); return; }
     // Plan 4a Task 8: *Restart to update*. A slot that started between the offer and the click is
     // waited out and the install retried; any other refusal comes back in the envelope and is shown
     // on the banner with Try again (`installUpdate`).

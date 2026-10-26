@@ -493,7 +493,11 @@ fn the_reveals_button_follows_the_servers_one_rule_and_re_derives_nothing() {
     assert!(!enabled(status(r#"{"finish_ready": false}"#)), "finish_ready false");
     assert!(!enabled(status(r#"{"finish_ready": null}"#)), "an absent finish_ready is not ready");
     assert!(!enabled(status(r#"{"ok": false}"#)), "a failed status is not ready");
-    assert!(!enabled(status(r#"{"gate": {"open": false}}"#)), "a closed gate");
+    // Amended by F11d (plan section 14.53.1, ruled): "`finish_ready` is `finish_refusal(state, now).is_none()`.
+    // `finish_refusal` refuses whenever the gate is closed ... So the server never answers `finish_ready: true`
+    // with `gate.open: false`, and the extra read only re-derives part of the rule on the page, which
+    // section 14.52.6 forbids." The old case pinned that re-derivation; the page now reads `finish_ready` alone.
+    assert!(enabled(status(r#"{"gate": {"open": false}}"#)), "the page reads finish_ready, not the gate");
     assert!(!enabled(status(r#"{"exiting": {"job": "slot.partial", "long": true, "since": "x"}}"#)), "while an exit drains");
     // The page does not re-derive job states: an absent registrar.confirm and a running
     // school.store change nothing when the server says ready; all-done jobs change nothing when not.
@@ -501,7 +505,7 @@ fn the_reveals_button_follows_the_servers_one_rule_and_re_derives_nothing() {
     assert!(!enabled(status(r#"{"finish_ready": false, "jobs": {"registrar.confirm": {"state": "done"}, "school.apply": {"state": "done"}, "school.courses": {"state": "done"}, "config.ingest": {"state": "done"}}}"#)));
     let c = code(&read("onboarding.js"));
     let f = function(&c, "openKnowluEnabled");
-    assert!(f.contains("finish_ready") && !f.contains("jobs") && !f.contains("registrar.confirm"), "it reads finish_ready only");
+    assert!(f.contains("finish_ready") && !f.contains("jobs") && !f.contains("registrar.confirm") && !f.contains("gate"), "it reads finish_ready only");
 }
 
 #[test]
@@ -517,6 +521,7 @@ fn the_reveal_names_a_failed_item_in_words_with_a_try_again_and_a_long_chain_as_
     let words = node("h.reasonWords(\"first_sync_failed\")");
     assert_eq!(failed[0]["text"], words, "the shown text is reasonWords(reason), not the server's one-word fix: {failed:?}");
     assert_ne!(failed[0]["text"], "Try again");
+    assert_eq!(failed[0]["fix"], "Try again", "M7: the server's fix is carried as written, never re-worded: {failed:?}");
     assert_eq!(failed[0]["retry"], true, "beside a Try again control");
     let coming = m["stillComing"].as_array().expect("stillComing list");
     assert_eq!(coming.len(), 2, "every unfinished item is listed while the chain runs");
@@ -559,6 +564,162 @@ fn the_main_pages_still_coming_line_reads_handover() {
     let js = code(&read("console.js"));
     assert!(js.contains("handover"), "console.js reads the hand-over list (F11d)");
     assert!(js.to_lowercase().contains("still coming"), "and says `still coming`");
+}
+
+// ---- F11d: the reveal's words, the not-connected mail line, the main page's "Not now", the seam --------
+
+fn reveal_status() -> serde_json::Value {
+    serde_json::json!({"ok": true, "finish_ready": true, "gate": {
+        "open": true,
+        "still_coming": ["backfill.older_mail"],
+        "failed": [{"key": "first.sync", "reason": "first_sync_failed", "fix": "Check your connection, then try again"}],
+        // Review r1 ruling (plan 14.63): "during setup, `mail.connect` never appears in `gate.not_connected`; it
+        // exists only in `handover`, after finish." So the fixture carries only the skip the server does send.
+        "not_connected": [{"key": "mail", "cost_key": "mail_dates_missed"}]}})
+}
+
+#[test]
+fn the_reveal_shows_the_servers_fix_beside_a_failed_items_words_and_its_try_again() {
+    let html = node(&format!("h.revealHtml(h.revealModel({}), true)", reveal_status()));
+    let html = html.as_str().expect("revealHtml(model, openEnabled) returns the reveal's markup as a string");
+    let words = node("h.reasonWords(\"first_sync_failed\")");
+    assert!(html.contains(words.as_str().unwrap()), "the item's words are shown: {html}");
+    assert!(html.contains("Check your connection, then try again"), "M7: the server's fix is shown as written: {html}");
+    assert!(html.contains("data-retry=\"first.sync\""), "beside the Try again control, which names the job it retries: {html}");
+    assert!(!html.contains("first_sync_failed"), "no raw reason key: {html}");
+}
+
+// Review r1 ruling (plan 14.63, "The reveal has no Settings button"): "So section 4 step 11's 'each skip with its
+// cost and its Settings button' becomes 'each skip with its cost'. The Settings button is the main page's
+// (section 14.52.1). The reveal-side `settings` flag goes, along with its button and its pin."
+#[test]
+fn the_reveal_has_no_settings_button_and_a_skip_shows_its_cost_sentence() {
+    let m = node(&format!("h.revealModel({})", reveal_status()));
+    for n in m["notConnected"].as_array().expect("notConnected list") {
+        assert!(n.get("settings").is_none(), "no `settings` key on a reveal item: {n}");
+    }
+    let html = node(&format!("h.revealHtml(h.revealModel({}), true)", reveal_status()));
+    let html = html.as_str().unwrap();
+    assert!(!html.contains("data-act=\"settings\""), "the reveal never has a Settings button: {html}");
+    let cost = node("h.costWords(\"mail_dates_missed\")");
+    assert!(html.contains(cost.as_str().unwrap()), "a skip shows its cost sentence: {html}");
+    assert!(!html.contains("mail_dates_missed"), "no raw cost key: {html}");
+    let c = code(&read("onboarding.js"));
+    assert!(!c.contains("data-act=\\\"settings\\\"") && !c.contains("data-act=\"settings\"") && !c.contains("data-act='settings'"), "the markup is gone from the page's code");
+}
+
+// Review r1 ruling (plan 14.63): "The reveal's 'Knowlu finishes these after you open it' covers only the items
+// that really finish without the student." A pending `mail.setup` turns mail.setup, mail.canary and
+// mail.first_pass into one `mail.connect` at hand-over (`handover_for`), which waits on the student.
+#[test]
+fn the_reveal_promises_a_finish_only_for_items_that_finish_without_the_student() {
+    const PROMISE: &str = "Knowlu finishes these after you open it";
+    let html = |coming: &str| {
+        let s = format!(r#"{{"ok": true, "finish_ready": true, "gate": {{"open": true, "still_coming": {coming}, "failed": [], "not_connected": []}}}}"#);
+        let out = node(&format!("h.revealHtml(h.revealModel({s}), true)"));
+        out.as_str().expect("markup string").to_string()
+    };
+    let only_mail = html(r#"["mail.setup", "mail.canary", "mail.first_pass"]"#);
+    assert!(!only_mail.contains(PROMISE), "these become mail.connect and need the student: {only_mail}");
+    let with_backfill = html(r#"["mail.setup", "backfill.older_mail"]"#);
+    assert!(with_backfill.contains(PROMISE), "the backfill really finishes alone: {with_backfill}");
+    assert!(html(r#"["backfill.older_mail"]"#).contains(PROMISE), "a plain still-coming item keeps the sentence");
+    assert!(html(r#"["mail.canary"]"#).contains(PROMISE), "without a pending mail.setup the canary is a real hand-over item");
+}
+
+// ---- the main page (console.js): the hand-over's lines ----
+
+/// `handoverHtml(items)` from console.js, run under node. The page is an IIFE with no export, so the
+/// harness appends one line inside the wrapper to lift the function out; the source is otherwise as shipped.
+fn main_handover_html(items: &str) -> String {
+    const HARNESS: &str = r#"
+const fs = require("fs"), vm = require("vm");
+process.on("unhandledRejection", () => {});
+const stub = () => new Proxy(function () {}, { get: (t, k) => (k === Symbol.toPrimitive ? () => "" : stub()), apply: () => stub(), construct: () => stub(), set: () => true });
+const g = { document: stub(), location: { search: "", hash: "", href: "http://localhost/", pathname: "/", origin: "http://localhost" },
+  URLSearchParams, URL, console, Date, JSON, Math, navigator: { userAgent: "node", language: "en" },
+  localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+  requestAnimationFrame: () => 0, setTimeout: () => 0, setInterval: () => 0, clearTimeout() {}, clearInterval() {},
+  addEventListener() {}, removeEventListener() {}, fetch: () => { throw new Error("tests never leave the machine"); },
+  __TAURI__: { core: { invoke: () => new Promise(() => {}) } } };
+g.window = g;
+const ctx = vm.createContext(g);
+let src = fs.readFileSync(process.argv[1], "utf8");
+const at = src.lastIndexOf("})();");
+if (at < 0) { console.log(JSON.stringify({ __nowrapper: true })); process.exit(0); }
+src = src.slice(0, at) + "\nglobalThis.__handoverHtml = typeof handoverHtml === 'function' ? handoverHtml : null;\n" + src.slice(at);
+vm.runInContext(src, ctx);
+if (!g.__handoverHtml) { console.log(JSON.stringify({ __missing: true })); process.exit(0); }
+console.log(JSON.stringify(g.__handoverHtml(JSON.parse(process.env.HO_ITEMS))));
+"#;
+    let out = Command::new("node").arg("-e").arg(HARNESS).arg(Path::new("static/console.js"))
+        .env("HO_ITEMS", items).output().expect("node must be installed");
+    assert!(out.status.success(), "node failed: {}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert!(v.get("__missing").is_none() && v.get("__nowrapper").is_none(), "console.js must keep `function handoverHtml(items)` inside its wrapper: {v}");
+    v.as_str().expect("handoverHtml returns the markup string").to_string()
+}
+
+/// The text from `heading` to the next of the other headings (or the end).
+fn section<'a>(html: &'a str, heading: &str, others: &[&str]) -> &'a str {
+    let at = html.find(heading).unwrap_or_else(|| panic!("no `{heading}` heading: {html}"));
+    let end = others.iter().filter_map(|o| html[at + heading.len()..].find(o).map(|i| at + heading.len() + i)).min().unwrap_or(html.len());
+    &html[at..end]
+}
+
+// Review r1 ruling (plan 14.63): "On the main page, `mail.connect` gets its own 'Not connected' heading and
+// section 14.52.1's cost line, kept apart from the 'Still coming' rows. It keeps its Settings and Not now buttons."
+#[test]
+fn the_main_page_files_mail_connect_under_not_connected_with_its_cost_and_the_rest_under_still_coming() {
+    const COST: &str = "date changes and new work announced by email are missed";
+    let html = main_handover_html(r#"[{"item": "slot.first_full"}, {"item": "mail.connect"}]"#);
+    let nc = section(&html, "Not connected", &["Still coming"]);
+    assert!(nc.contains("Finish connecting your email in Settings."), "{html}");
+    assert!(nc.contains(COST), "section 14.52.1's cost line sits with it: {html}");
+    assert!(nc.contains("data-settings") && nc.contains("Settings</button>"), "its Settings button: {html}");
+    assert!(nc.contains("Not now"), "and Not now: {html}");
+    assert!(!nc.contains("Your full week is still coming."), "still-coming rows are kept apart: {html}");
+    let sc = section(&html, "Still coming", &["Not connected"]);
+    assert!(sc.contains("Your full week is still coming."), "{html}");
+    assert!(!sc.contains("Finish connecting") && !sc.contains("data-settings") && !sc.contains("Not now") && !sc.contains(COST), "mail.connect is never under Still coming: {html}");
+    let only_mail = main_handover_html(r#"[{"item": "mail.connect"}]"#);
+    assert!(!only_mail.contains("Still coming"), "no empty Still coming heading: {only_mail}");
+    let only_slot = main_handover_html(r#"[{"item": "slot.first_full"}]"#);
+    assert!(!only_slot.contains("Not connected") && !only_slot.contains("data-settings"), "{only_slot}");
+    assert_eq!(main_handover_html("[]"), "", "nothing left shows nothing");
+}
+
+#[test]
+fn the_reveals_open_knowlu_button_is_disabled_exactly_when_the_rule_says() {
+    let model = format!("h.revealModel({})", reveal_status());
+    let on = node(&format!("h.revealHtml({model}, true)"));
+    let off = node(&format!("h.revealHtml({model}, false)"));
+    let (on, off) = (on.as_str().unwrap(), off.as_str().unwrap());
+    let button = |h: &str| { let at = h.find("id=\"ob-open-knowlu\"").expect("an Open Knowlu button with id ob-open-knowlu"); h[h[..at].rfind('<').unwrap()..at + h[at..].find('>').unwrap()].to_string() };
+    assert!(!button(on).contains("disabled"), "enabled: {}", button(on));
+    assert!(button(off).contains("disabled"), "disabled: {}", button(off));
+    assert!(on.contains("Open Knowlu"), "{on}");
+}
+
+#[test]
+fn the_reveal_registers_through_the_seam_and_its_poll_never_redraws_the_pane() {
+    let c = code(&read("onboarding.js"));
+    let flat = c.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("OB.registerPanel(11, { render: render11, onStatus: onStatus11 })"), "the reveal registers through the seam");
+    let body = function(&c, "onStatus11");
+    assert!(!body.contains("refresh") && !body.contains(".show("), "onStatus11 must not redraw the pane (a poll wipes #ob-ask)");
+    assert!(flat.matches("OB.registerLeave(").count() >= 2, "the reveal registers its own leave hook beside step 8's");
+    assert!(function(&c, "render11").contains("revealHtml("), "the reveal is drawn by revealHtml");
+}
+
+#[test]
+fn the_main_page_offers_not_now_beside_the_unfinished_mail_line_and_calls_the_command() {
+    let js = code(&read("console.js"));
+    assert!(js.contains("invoke(\"onboarding_mail_not_now\", {})"), "console.js calls onboarding_mail_not_now (Q8, section 14.57.9) with an empty argument object");
+    assert!(js.contains("Not now"), "the button reads `Not now`");
+    assert!(js.contains("Finish connecting your email in Settings."), "beside the unfinished-mail line, in the page's own words");
+    assert!(js.contains("mail.connect"), "the line is the hand-over's mail.connect item");
+    assert!(js.contains("Settings"), "with its Settings button");
 }
 
 // ---- F11e1/F11e2: steps 2, 3 and 4 ----------------------------------------------------------------
