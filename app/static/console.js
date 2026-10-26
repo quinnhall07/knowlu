@@ -124,13 +124,23 @@
     var m = state.meter, fits = EL("fits"), spill = EL("spill"), i;
     fits.innerHTML = ""; spill.innerHTML = "";
     for (i = 0; i < m.fit_blocks; i++) { fits.appendChild(document.createElement("i")); }
-    for (i = 0; i < m.spill_blocks; i++) { var b = document.createElement("i"); if (m.spill_items[i]) { b.title = m.spill_items[i].title + " · " + fmtH(m.spill_items[i].hours); } spill.appendChild(b); }
+    var byId = {}, items = m.spill_items || [];
+    function addRows(rs) { (rs || []).forEach(function (r) { byId[r.id] = r; }); }
+    if (state.must_do) { (state.must_do.groups || []).forEach(function (g) { addRows(g.rows); }); }
+    if (state.list) { addRows(state.list.rows); }
+    // A spill item with a deadline is named by its row's own fit_text; any other by the plain words.
+    function spillTip(it) {
+      var r = it.deadline ? byId[it.id] : null;
+      return it.title + " · " + fmtH(it.hours) + " · " + (it.deadline ? (r && r.fit_text ? r.fit_text : "due " + it.deadline.replace("T", " ")) : "doesn't fit in today's hours");
+    }
+    for (i = 0; i < m.spill_blocks; i++) { var b = document.createElement("i"); if (items[i]) { b.title = spillTip(items[i]); } spill.appendChild(b); }
     EL("metersub").textContent = "1 block = 30 min · " + m.capacity_text;
     EL("meterkey").innerHTML = '<span class="a">&#9632; <b>' + h(m.fit_blocks) + " blocks</b> fit inside the day</span>" +
       '<span class="c">&#9633; <b>' + h(m.spill_blocks) + " blocks</b> do not</span>" +
       (m.capped ? "<span>… and " + h(m.capped) + " more</span>" : "") +
-      (m.spill_hours ? "<span>" + h(fmtH(m.spill_hours)) + " across " + h(m.spill_items.length) + " items with nowhere to go</span>" : "");
+      (m.spill_hours || items.length ? '<span title="' + h(items.map(spillTip).join("\n")) + '">' + (m.spill_hours ? h(fmtH(m.spill_hours)) + " across " : "") + h(items.length) + " items with nowhere to go</span>" : "");
     EL("overflow").textContent = state.verdict.overflow_sentence || "";
+    var give = EL("give"); if (give) { give.textContent = m.give_text || ""; give.hidden = !m.give_text; }
   }
 
   // A chip's displayed text is often a formatted string (a "P" prefix, an "h" suffix, a T/space
@@ -141,6 +151,9 @@
   }
   function hrsCell(hours, displayHtml) { return editChip("hrs", "effort_hours", hours, displayHtml); }
 
+  // The rows the lists last rendered, by id: the drawer shows a row's fit_text and fit_why from
+  // here, never from note_detail (loaded without a moment), so it cannot disagree with the row.
+  var ROWS = {};
   function rowHtml(r) {
     var chips = '<span>' + h(r.source_tag) + "</span>";
     if (r.start_by) { chips += '<span class="sb' + (r.overdue_start ? " od" : "") + '">' + (r.overdue_start ? "OVERDUE START" : "start by " + h(r.start_by) + " · " + h(Math.round(r.slack_days)) + "d slack") + "</span>"; }
@@ -154,6 +167,8 @@
     if (r.oversized) { chips += '<span class="os">' + h(fmtH(r.hours)) + " in one piece</span>"; }
     if (r.amend_badge) { chips += '<span class="amend" title="' + h(r.amend_badge.proposal) + '">' + h(r.amend_badge.sentence) + "</span>"; }
     if (r.conflict_text) { chips += '<span class="cf">' + h(r.conflict_text) + "</span>"; }
+    if (r.fit_text) { chips += '<span class="cf fit">' + h(r.fit_text) + "</span>"; }
+    ROWS[r.id] = r;
     if (r.flag_text) { chips += '<span class="fl">' + h(r.flag_text) + "</span>"; }
     if (r.merge_text) { chips += '<span class="mg">' + h(r.merge_text) + "</span>"; }
     if (r.judged) { chips += '<button class="flag" data-flag="' + h(r.id) + '" title="AI-judged — flag it">&#9873;</button>'; }
@@ -161,7 +176,7 @@
     // on it exclusively) — the "status" chip above is the click-to-edit surface for status text.
     var track = '<span class="track"><i style="width:' + h(r.progress_pct) + '%"></i></span>';
     return '<div class="row ' + h(r.urgency) + '" data-id="' + h(r.id) + '" data-kind="task"><span class="pip"></span><div class="ttl">' + editChip("a", "title", r.title, h(r.title)) + '<span class="b">' + chips + "</span></div>" + track + hrsCell(r.hours, h(fmtH(r.hours))) +
-      '<div class="why" hidden>' + h(r.why) + "</div></div>";
+      '<div class="why" hidden>' + h(r.why) + (r.fit_why ? '<div class="fitwhy">' + h(r.fit_why) + "</div>" : "") + "</div></div>";
   }
 
   // Task 13: rebind pointer-drag progress after every list render (paint rewrites innerHTML,
@@ -1450,6 +1465,7 @@
     if (current.view === "today") { renderVerdict(state); renderMeter(state); renderMoved(state); renderGrades(state); }
     if (reordered) { watchSeen(); return; }   // hold only renderMustDo/renderRecommended or renderList below
     current.state = state; current.revision = state.revision;
+    ROWS = {};
     if (current.view === "today") { renderMustDo(state); renderRecommended(state); }
     else if (listViews[current.view]) { renderList(state); }
     else if (VIEW_RENDERERS[current.view]) { VIEW_RENDERERS[current.view](state); }
@@ -1604,6 +1620,11 @@
   // EDITABLE) render read-only in the drawer — never a data-field, always class="ro".
   var DRAWER_RO = { id: 1, source_uid: 1, also_uids: 1, judgment: 1 };
 
+  function drawerFit(id) {
+    var r = ROWS[id];
+    if (!r || !r.fit_text) { return ""; }
+    return '<p class="fit-line">' + h(r.fit_text) + "</p>" + (r.fit_why ? '<p class="fit-why">' + h(r.fit_why) + "</p>" : "");
+  }
   function openDrawer(id) {
     dropSavedToast();
     invoke("note", { id: id }).then(function (env) {
@@ -1617,7 +1638,7 @@
       });
       var hist = (n.history || []).map(function (r) { return "<div>" + h(r.ts.slice(0, 16).replace("T", " ")) + " · " + h(r.text) + "</div>"; }).join("") || "<div>no journal history</div>";
       clearStaleEditing(d);
-      d.innerHTML = '<button class="close">&times;</button><h2>' + h(title) + '</h2><dl data-id="' + h(id) + '" data-kind="' + h(n.folder) + '">' + dl + "</dl>" + bodyViewHtml(n) +
+      d.innerHTML = '<button class="close">&times;</button><h2>' + h(title) + '</h2>' + drawerFit(id) + '<dl data-id="' + h(id) + '" data-kind="' + h(n.folder) + '">' + dl + "</dl>" + bodyViewHtml(n) +
         '<button class="b crit" data-del="' + h(id) + '" data-title="' + h(title) + '">Delete&hellip;</button>' +
         '<div class="hist"><b>history</b>' + hist + "</div>";
       // The note's own kind (its folder — tasks/approvals/issues/info/courses) rides on the

@@ -269,6 +269,10 @@ input[type=text]:focus { outline: 2px solid var(--acc); outline-offset: -1px; bo
 .row .why { grid-column: 1 / -1; font-size: 12px; color: var(--t3); padding: 0 0 var(--s2) 13px; }
 .row.unreadable .ttl .a { color: var(--crit); font-family: var(--mono); font-size: 12px; }
 .overflow { font-family: var(--mono); font-size: 11.5px; color: var(--warn); margin: var(--s2) 0 0; }
+.overflow.give { color: var(--t3); }
+.row .fitwhy { margin-top: 2px; }
+#drawer .fit-line { font-family: var(--mono); font-size: 11.5px; color: var(--warn); margin: 0 0 var(--s2); }
+#drawer .fit-why { font-size: 12px; color: var(--t3); margin: 0 0 var(--s3); }
 /* R33(b): index.html puts #allday and #commitments as siblings of .day (#theday), not
    children — ".day .allday"/".day .commit" never matched anything. #allday already carries
    class="allday" itself, so it needs no ancestor; #commitments' rows carry class="commit". */
