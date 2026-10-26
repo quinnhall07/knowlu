@@ -231,7 +231,7 @@ order alone too) and green, unedited, at every later commit.
   2026-08-28 --now 2026-08-28T<T> --build-sha pinned`, `T` in 09:00 and 21:00, on each fixture in
   place (`surface` never writes): `must_do`, `recommended`, `meter` and `nav_counts` without
   `runs_warn` equal those parsed from the matching `surface-today-*.json` (the clock-driven
-  regions differ for clock reasons and are not compared, as `evening_rank.rs`'s E2 does).
+  regions differ for clock reasons and are not compared, as `evening_rank.rs`'s E3 does).
 
 Acceptance: both green on the base; `contract-reviewer` reads the file before T1a (§7). Size: S.
 
