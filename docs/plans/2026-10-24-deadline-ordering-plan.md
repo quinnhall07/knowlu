@@ -664,6 +664,19 @@ Acceptance: `scripts/ci/eol-check.ps1` clean; no source file in the diff. Size: 
 *(T0's base, citation, clock and retire records, the review rounds and the controller's answers go
 here, dated, newest first.)*
 
+- **2026-10-25, T7 scratch demo (the controller), at `f79a3c3`'s engine.** Each part ran on its own scratch copy of `vault-s1-migrated`. Both copies were deleted afterwards. No account, live vault or OS input was used.
+  - **The added task:** 1h, due `2026-08-28T23:59`.
+    - **19:29 (safe):** Overdue [CS 100 HW 01, Erste Reflexion], then Due today [the task].
+    - **19:30 (unsafe):** three runs: Overdue [CS 100 HW 01], Due today [the task], Overdue [Erste Reflexion].
+    - **21:00:** Overdue [Erste Reflexion], Due today [the task], Overdue [CS 100 HW 01].
+    - This matches the plan's expectation at every clock.
+  - **Example (d) at 21:00:** X (1h), Y (2.5h) and Z (1.5h), all due 23:59, with the s1 tasks removed. Every line matches §4 (d) and Q8.
+    - Order: X, Z, Y.
+    - Y's `fit_text` is "Won't fit before 11:59 pm".
+    - Y's `fit_why` is "2.5h left; doing it would leave other work due by 11:59 pm late."
+    - `give_text` is "If something has to give: Task Y (2.5h). Everything else fits by its deadline."
+    - `spill_items` is [Task Y, `2026-08-28T23:59`].
+
 - **2026-10-25, T4c review (FAIL, two Important) and Quinn's rulings (signed).**
   - **I-1, rounding:** "3.0h left; you have 3.0h" printed for 180 against 179 minutes. Fix: work
     rounds **up** and available time rounds **down** to the tenth, so the reason never reads as
