@@ -656,7 +656,14 @@
     var fields = {};
     if (now.kind !== was.kind) { fields.kind = now.kind; }
     if (now.level !== was.level) { fields.level = now.level; }
-    if (JSON.stringify(now.meets) !== JSON.stringify(was.meets)) { fields.meets = now.meets; }
+    // Days within an entry compare in week order, so a reordered day list alone is no change.
+    var order = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    var norm = function (ms) {
+      return JSON.stringify((ms || []).map(function (m) {
+        return { days: (m.days || []).slice().sort(function (a, b) { return order.indexOf(a) - order.indexOf(b); }), start: m.start, end: m.end };
+      }));
+    };
+    if (norm(now.meets) !== norm(was.meets)) { fields.meets = now.meets; }
     return fields;
   }
   OB.hoursEntries10 = hoursEntries10; OB.editFields10 = editFields10;
@@ -690,6 +697,7 @@
       if (now.level !== row.getAttribute("data-level")) { row.setAttribute("data-level", now.level); }
       row.setAttribute("data-meets", JSON.stringify(now.meets));
       line.textContent = "Saved.";
+      if ("meets" in fields) { loadSet10(); }
     }).catch(function () { line.textContent = "Knowlu couldn't save that. Try again."; });
   }
   function propHtml(p) {
@@ -855,6 +863,7 @@
       var hs = b.closest(".ob-set"), es = readHours10(hs), at = Array.prototype.indexOf.call(hs.querySelectorAll(".ob-hent"), b.closest(".ob-hent"));
       if (act === "addhr") { es.push({ days: [], start: "", end: "" }); } else { es.splice(at, 1); }
       hs.querySelector(".ob-hours").innerHTML = hoursHtml10(es);
+      if (act === "addhr") { hs.querySelector(".ob-hent:last-of-type .ob-hday").focus(); } else { hs.querySelector('[data-act10="addhr"]').focus(); }
       return;
     }
     if (act === "edit" || act === "save") {

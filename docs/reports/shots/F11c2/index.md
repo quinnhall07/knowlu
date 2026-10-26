@@ -18,3 +18,6 @@ hours sentence of its own.
 
 Each entry is a group ("Time 1", "Time 2") with Mon..Sun toggles (pressed = a day), labelled start and end times
 ("Time 1 start") and Remove; "Add another time" follows the last entry. With one entry the labels read "start" / "end".
+
+The built shots are 1280x900, not the 1280x800 of the design's section 14.58.7: an open Edit with two entries is
+taller than 800 px and would crop the Save row and the second entry.
