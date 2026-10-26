@@ -3643,7 +3643,7 @@ pub fn ask_withdrawal_reason(meta: &Mapping, proposals: &[Proposal], set: &Commi
 
 /// The fields the console may set on a confirmed commitment (phase-2 spec D5); `window` is not
 /// one of them: it goes through `--confirm`.
-pub const CONSOLE_FIELDS: [&str; 2] = ["kind", "level"];
+pub const CONSOLE_FIELDS: [&str; 3] = ["kind", "level", "meets"];
 
 /// The kinds a confirmed commitment may be given from the console: §2.2's list without
 /// `planning-day` (Plan ruling Q8-b).
@@ -3652,7 +3652,8 @@ pub const CONSOLE_KINDS: [&str; 9] =
 
 /// Phase-2 spec D5, the engine half of `set_fields`' checks (Plan ruling Q8-a): `field` (one of
 /// [`CONSOLE_FIELDS`]) may be set on `target` only when it is a confirmed note under
-/// `commitments/` other than the planning day, and only to a word on §2.2's list. Reads only.
+/// `commitments/` other than the planning day: `kind` and `level` only to a word on §2.2's list,
+/// `meets` only to a non-empty list `answer_literal` accepts with no day repeated (F7e). Reads only.
 pub fn check_console_edit(vault: &Path, target: &str, field: &str, value: &serde_json::Value) -> Result<(), String> {
     let path = crate::ids::resolve_target(vault, target).map_err(|e| e.to_string())?;
     let rel = crate::ids::rel(vault, &path);
@@ -3668,6 +3669,26 @@ pub fn check_console_edit(vault: &Path, target: &str, field: &str, value: &serde
         || field_text(&meta, "kind").as_deref() == Some(PLANNING_DAY)
     {
         return Err(format!("{field} can only be set on a confirmed commitment, not {rel}"));
+    }
+    if field == "meets" {
+        // F7e (D5 amended 2026-10-24): a class time is a non-empty list `answer_literal` accepts.
+        const MEETS_MSG: &str = "A class time needs at least one day, and a start before its end.";
+        let Some(list) = value.as_array().filter(|list| !list.is_empty()) else {
+            return Err(MEETS_MSG.to_string());
+        };
+        if answer_literal(value).is_err() {
+            return Err(MEETS_MSG.to_string());
+        }
+        // `answer_literal` folds a repeated day into one (`parse_entry`), which would write what the
+        // student didn't send; a class time may not repeat a day. (An empty `days` it already refuses.)
+        for entry in list {
+            let days = entry.get("days").and_then(|d| d.as_array()).map(Vec::as_slice).unwrap_or_default();
+            let distinct: BTreeSet<&str> = days.iter().filter_map(|d| d.as_str()).collect();
+            if distinct.len() != days.len() {
+                return Err(MEETS_MSG.to_string());
+            }
+        }
+        return Ok(());
     }
     let word = value.as_str().ok_or_else(|| format!("{field} must be one word"))?;
     let known = match field {
@@ -11211,6 +11232,75 @@ mod phase2_tests {
         assert!(check_console_edit(&v, "commitments/cs-100.md", "kind", &serde_json::json!(3)).is_err());
         assert!(check_console_edit(&v, "tasks/essay.md", "kind", &word("class")).unwrap_err().contains("commitment"));
         assert!(check_console_edit(&v, "commitments/planning-day.md", "level", &word("hard")).is_err());
+    }
+
+    /// Wave-B test 45 (F7e, D5 amended 2026-10-24): `meets` is a console field. It passes only on
+    /// a confirmed, non-planning-day commitment, only as a non-empty list `answer_literal`
+    /// accepts, and every refused value answers the one fixed message. Nothing is written.
+    #[test]
+    fn a_meets_edit_passes_only_as_a_valid_list_on_a_confirmed_class() {
+        const MSG: &str = "A class time needs at least one day, and a start before its end.";
+        let v = week_vault("meets-edit");
+        run(&v, &input(&[("gcal-series:cs100", "hard")], &[], Some("[{days: [mon], start: \"08:00\", end: \"22:00\"}]")));
+        std::fs::write(
+            v.join("commitments").join("pending-club.md"),
+            "---\ntype: commitment\nkind: club\nstatus: proposed\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            v.join("commitments").join("day-window.md"),
+            "---\ntype: commitment\nkind: planning-day\nstatus: confirmed\n---\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(v.join("tasks")).unwrap();
+        std::fs::write(v.join("tasks").join("essay.md"), "---\ntype: task\ntitle: Essay\nstatus: confirmed\n---\n").unwrap();
+        let j = |s: &str| -> serde_json::Value { serde_json::from_str(s).unwrap() };
+        let snapshot = |rels: &[&str]| -> Vec<String> { rels.iter().map(|r| std::fs::read_to_string(v.join(r)).unwrap()).collect() };
+        let rels = ["commitments/cs-100.md", "commitments/pending-club.md", "commitments/day-window.md", "tasks/essay.md"];
+        let before = snapshot(&rels);
+
+        assert!(CONSOLE_FIELDS.contains(&"meets"));
+        let good = j(r#"[{"days": ["wed", "mon"], "start": "9:00", "end": "10:15"}, {"days": ["fri"], "start": "15:00", "end": "16:00"}]"#);
+        assert_eq!(check_console_edit(&v, "commitments/cs-100.md", "meets", &good), Ok(()));
+        let literal = answer_literal(&good).unwrap();
+        assert!(!literal.contains('\n') && literal.starts_with("[{days: [wed, mon]"), "{literal}");
+        assert!(literal.contains("start: '09:00'") && literal.contains("end: '16:00'"), "{literal}");
+        // The whole line, so a swapped or dropped field fails (F7e review m2).
+        assert_eq!(
+            literal,
+            "[{days: [wed, mon], end: '10:15', start: '09:00'}, {days: [fri], end: '16:00', start: '15:00'}]"
+        );
+
+        for bad in [
+            r#"[]"#,
+            r#"[{"days": ["mon"], "start": "15:00", "end": "14:00"}]"#,
+            r#"[{"days": ["mon"], "start": "15:00", "end": "15:00"}]"#,
+            r#"[{"days": ["someday"], "start": "14:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon", "mon"], "start": "14:00", "end": "15:00"}]"#,
+            r#"[{"days": [], "start": "14:00", "end": "15:00"}]"#,
+            r#"[{"days": ["mon"], "start": "14:00", "end": "15:00", "room": "B1"}]"#,
+            r#"[{"days": ["mon\nx"], "start": "14:00", "end": "15:00"}]"#,
+            r#"{"days": ["mon"], "start": "14:00", "end": "15:00"}"#,
+            r#""mon 14:00""#,
+            r#"null"#,
+        ] {
+            let err = check_console_edit(&v, "commitments/cs-100.md", "meets", &j(bad)).unwrap_err();
+            assert_eq!(err, MSG, "{bad}");
+            assert!(!err.contains("answer_meets"), "{bad}");
+        }
+
+        // Not a confirmed class: refused even for a valid value (the existing refusals).
+        for rel in ["commitments/pending-club.md", "commitments/day-window.md", "tasks/essay.md"] {
+            assert!(check_console_edit(&v, rel, "meets", &good).is_err(), "{rel}");
+        }
+        assert!(check_console_edit(&v, "commitments/pending-club.md", "meets", &good).unwrap_err().contains("confirmed commitment"));
+        assert!(check_console_edit(&v, "commitments/day-window.md", "meets", &good).unwrap_err().contains("confirmed commitment"));
+
+        // Other fields behave as before.
+        assert_eq!(check_console_edit(&v, "commitments/cs-100.md", "level", &serde_json::json!("soft")), Ok(()));
+        assert!(check_console_edit(&v, "commitments/cs-100.md", "kind", &serde_json::json!("urgent")).unwrap_err().contains("kind"));
+        assert!(check_console_edit(&v, "commitments/cs-100.md", "window", &good).is_err());
+        assert_eq!(snapshot(&rels), before, "a check writes nothing");
     }
 
     #[test]
