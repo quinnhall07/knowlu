@@ -52,7 +52,7 @@
     "google.calendar_read": "reading your calendar", "coursework.discover": "finding your homework sites", "config.ingest": "setting up your sources",
     "slot.partial": "reading your first week", "slot.first_full": "building your week", "first.sync": "your first sync with your account",
     "first.coursework": "your homework sites", "first.ingest": "your calendar and feeds", "first.grades": "your grades",
-    "backfill.older_mail": "your older email", "class_times": "your class times", "gmail": "Gmail", "mail": "school email", "mail.connect": "your school email"
+    "backfill.older_mail": "your older email", "class_times": "your class times", "gmail": "Gmail", "mail": "school email"
   };
   var REASON_WORDS = {
     first_sync_failed: "Knowlu couldn't finish the first sync with your account. It will try again on its next run, or press Try again now.",
@@ -117,13 +117,19 @@
     return {
       failed: (g.failed || []).map(function (f) { return { key: f.key, name: jobWords(f.key), text: reasonWords(f.reason), fix: f.fix, retry: true }; }),
       stillComing: (g.still_coming || []).map(function (k) { return { key: k, words: jobWords(k) }; }),
-      notConnected: (g.not_connected || []).map(function (n) { return { key: n.key, name: jobWords(n.key), cost: costWords(n.cost_key), settings: n.key === "mail.connect" }; })
+      notConnected: (g.not_connected || []).map(function (n) { return { key: n.key, name: jobWords(n.key), cost: costWords(n.cost_key) }; })
     };
   }
   // The reveal's gate-driven part. The words are the page's own; the fix is the server's, as written.
   function cap(t) { t = String(t == null ? "" : t); return t.charAt(0).toUpperCase() + t.slice(1); }
   // Text between tags needs only & < > escaped, so a sentence's apostrophe shows as typed.
   function txt(t) { return String(t == null ? "" : t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+  // With mail.setup pending, mail.setup/canary/first_pass become one mail.connect at finish and wait on the student.
+  function finishesAlone(items) {
+    var keys = items.map(function (c) { return c.key; }), trio = ["mail.setup", "mail.canary", "mail.first_pass"];
+    var needsStudent = keys.indexOf("mail.setup") >= 0;
+    return keys.some(function (k) { return !(needsStudent && trio.indexOf(k) >= 0); });
+  }
   function revealHtml(m, openEnabled) {
     var h = '<div id="ob-step-11" class="ob-reveal">';
     if (m.failed.length) {
@@ -134,14 +140,13 @@
     }
     if (m.notConnected.length) {
       h += '<h2 class="ob-h2">Not connected</h2><ul class="ob-list">' + m.notConnected.map(function (n) {
-        return '<li class="ob-rv-item"><b>' + txt(cap(n.name)) + '.</b> ' + txt(n.cost) +
-          (n.settings ? ' <button class="b su-btn" type="button" data-act="settings">Settings</button>' : "") + '</li>';
+        return '<li class="ob-rv-item"><b>' + txt(cap(n.name)) + '.</b> ' + txt(n.cost) + '</li>';
       }).join("") + '</ul>';
     }
     if (m.stillComing.length) {
       h += '<h2 class="ob-h2">Still coming</h2><ul class="ob-list">' + m.stillComing.map(function (c) {
         return '<li class="ob-rv-item">' + txt(cap(c.words)) + '</li>';
-      }).join("") + '</ul><p class="su-small">Knowlu finishes these after you open it, and your page fills in as each one ends.</p>';
+      }).join("") + '</ul>' + (finishesAlone(m.stillComing) ? '<p class="su-small">Knowlu finishes these after you open it, and your page fills in as each one ends.</p>' : "");
     }
     if (!m.failed.length && !m.notConnected.length && !m.stillComing.length) {
       h += '<p class="ob-state">Nothing is left. Everything you connected ran once.</p>';
@@ -882,14 +887,12 @@
     w11.html = html; el.outerHTML = html; renderClosing();
   }
   OB.registerPanel(11, { render: render11, onStatus: onStatus11 });
-  OB.registerLeave(function () { w11.opening = false; });
+  OB.registerLeave(function () { w11.html = ""; });
   function openKnowlu() {
     if (S.outstanding || w11.opening) { return; }
     w11.opening = true; S.outstanding = true; S.error = ""; renderClosing();
     leaving().then(function () { return invoke("onboarding_finish", {}); }).then(function (a) { w11.opening = false; afterExit(a); }).catch(function () { w11.opening = false; exitFailed(); });
   }
-  // Settings is the console's own overlay, opened through the hook the tray uses.
-  function openSettings11() { if (window.KNOWLU_OPEN_SETTINGS) { window.KNOWLU_OPEN_SETTINGS(); } }
   // ==== F11d (ends) ================================================================================
 
   // The one reader of `account_status`: on mount and at the step 2 and step 4 moves, never from the poll.
@@ -921,8 +924,7 @@
     if (e.target.closest("#ob-finish-later") || e.target.closest("[data-act=finishLater]")) { finishLater(); return; }
     if (e.target.closest("#ob-sign-out")) { signOut(); return; }
     if (e.target.closest("#ob-open-knowlu")) { openKnowlu(); return; }
-    if (e.target.closest("[data-act=settings]")) { openSettings11(); return; }
-    var r =e.target.closest("[data-retry]");
+    var r = e.target.closest("[data-retry]");
     if (r) { retryJob(r.getAttribute("data-retry")); }
   }
   function startOnboarding(step, status) {

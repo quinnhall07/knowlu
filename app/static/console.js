@@ -1592,15 +1592,20 @@
     "mail.first_pass": "Your first emails are still being read."
   };
   function handoverHtml(items) {
-    var out = (items || []).map(function (it) {
-      var k = it && it.item;
-      if (k === "mail.connect") {
-        return '<div class="ho-row"><span class="ho-line">' + h(HANDOVER_WORDS[k]) + '</span><button class="b" type="button" data-settings>Settings</button>' +
-          '<button class="b" type="button" data-ho-notnow>Not now</button></div>';
-      }
-      return '<div class="ho-row"><span class="ho-line">' + h(HANDOVER_WORDS[k] || "Something is still coming.") + '</span></div>';
-    });
-    return out.length ? '<div class="ho-head">Still coming</div>' + out.join("") : "";
+    var list = items || [], html = "";
+    var conn = list.filter(function (it) { return it && it.item === "mail.connect"; });
+    var rest = list.filter(function (it) { return !(it && it.item === "mail.connect"); });
+    if (conn.length) {
+      html += '<div class="ho-head">Not connected</div><div class="ho-row"><span class="ho-line">' + h(HANDOVER_WORDS["mail.connect"]) +
+        ' Without it, date changes and new work announced by email are missed.</span><button class="b" type="button" data-settings>Settings</button>' +
+        '<button class="b" type="button" data-ho-notnow>Not now</button></div>';
+    }
+    if (rest.length) {
+      html += '<div class="ho-head">Still coming</div>' + rest.map(function (it) {
+        return '<div class="ho-row"><span class="ho-line">' + h(HANDOVER_WORDS[it && it.item] || "Something is still coming.") + '</span></div>';
+      }).join("");
+    }
+    return html;
   }
   function loadHandover() {
     return invoke("onboarding_handover", {}).then(function (r) {
