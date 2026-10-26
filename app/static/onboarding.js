@@ -658,7 +658,8 @@
   // The `window` string for commitments_confirm, or null: unanswered or any blank time sends no key.
   function windowArg10(p, win) {
     if (!win || !win.answered || !winSet10(win)) { return null; }
-    var es = winEntries10(win), ms = (p && p.meets) || [];
+    // `win.from` is the guess the visible pairs were drawn from (null for the blank pair); it wins over `p`.
+    var es = winEntries10(win), ms = ((("from" in win) ? win.from : p) || {}).meets || [];
     if (!ms.length) { return JSON.stringify([{ days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], start: es[0].start, end: es[0].end }]); }
     var same = ms.every(function (m, i) { return !es[i] || (es[i].start === m.start && es[i].end === m.end); });
     if (same) { return JSON.stringify(ms); }
@@ -680,7 +681,7 @@
   }
   function confirmBarLine10(n, m) { return n + " of " + m + " answered. Anything you leave blank comes back as a question over the next few days."; }
   OB.summaryLine10 = summaryLine10; OB.splitProposals10 = splitProposals10; OB.firmnessHtml10 = firmnessHtml10;
-  OB.confirmArg10 = confirmArg10; OB.windowFields10 = windowFields10; OB.windowArg10 = windowArg10; OB.answeredCount10 = answeredCount10; OB.confirmBarLine10 = confirmBarLine10;
+  OB.winPair10 = winPair10; OB.confirmArg10 = confirmArg10; OB.windowFields10 = windowFields10; OB.windowArg10 = windowArg10; OB.answeredCount10 = answeredCount10; OB.confirmBarLine10 = confirmBarLine10;
   function rows10() {
     return Array.prototype.map.call(document.querySelectorAll("#ob-10-prop .ob-prop"), function (r) {
       return { key: r.getAttribute("data-key"), answer: r.getAttribute("data-answer"), level: r.getAttribute("data-level"), picked: r.getAttribute("data-picked") === "1" };
@@ -697,8 +698,9 @@
     return run ? cap(ix[0]) + "–" + cap(ix[ix.length - 1]) : ix.filter(function (k) { return k >= 0; }).map(cap).join(", ");
   }
   function winPair10(i, head, e) {
-    return '<span class="ob-wpair" data-i="' + i + '">' + (head ? '<span class="su-dim">' + esc(head) + '</span> ' : '') +
-      '<label>Wake <input type="time" class="ob-wt" data-k="start" value="' + esc(e.start) + '"></label> <label>Bed <input type="time" class="ob-wt" data-k="end" value="' + esc(e.end) + '"></label></span>';
+    var pre = head ? esc(head) + " " : "", wake = head ? "wake" : "Wake", bed = head ? "bed" : "Bed";
+    return '<span class="ob-wpair" data-i="' + i + '">' +
+      '<label>' + pre + wake + ' <input type="time" class="ob-wt" data-k="start" value="' + esc(e.start) + '"></label> <label>' + pre + bed + ' <input type="time" class="ob-wt" data-k="end" value="' + esc(e.end) + '"></label></span>';
   }
   function syncWin10() {
     var b = document.querySelector("#ob-10-win [data-act10=win]");
@@ -710,7 +712,7 @@
     if (!host || w10.win.answered) { return; }
     var es = f.entries || [f];
     host.innerHTML = es.map(function (e, i) { return winPair10(i, f.entries ? daysLabel10(e.days) : "", e); }).join(" ");
-    w10.win.start = f.start; w10.win.end = f.end;
+    w10.win.start = f.start; w10.win.end = f.end; w10.win.from = w10.proposal;
     if (f.entries) { w10.win.entries = es.map(function (e) { return { start: e.start, end: e.end }; }); } else { delete w10.win.entries; }
     syncWin10();
   }
@@ -784,7 +786,7 @@
     paintBar10();
   }
   function render10(status) {
-    w10.asked = false; w10.busy = false; w10.proposal = null; w10.win = { answered: false, start: "", end: "" };
+    w10.asked = false; w10.busy = false; w10.proposal = null; w10.win = { answered: false, from: null, start: "", end: "" };
     w10.reg = (status && status.jobs && status.jobs["registrar.confirm"] && status.jobs["registrar.confirm"].state) || "";
     Promise.resolve().then(function () { loadSet10(); askProposals(status); paintBar10(); });
     var sum = summaryLine10(status);

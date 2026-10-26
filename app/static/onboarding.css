@@ -66,4 +66,5 @@
 .ob-prop .ob-ctl { display: inline-flex; flex-wrap: nowrap; flex: none; gap: 8px; margin-left: auto; align-items: center; }
 .ob-win { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
 .ob-win .ob-wpair { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+#ob-10-wins { display: inline-grid; grid-template-columns: auto; gap: 8px; vertical-align: top; }
 .ob-win button:disabled { opacity: .5; }
