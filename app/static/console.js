@@ -135,10 +135,16 @@
     }
     for (i = 0; i < m.spill_blocks; i++) { var b = document.createElement("i"); if (items[i]) { b.title = spillTip(items[i]); } spill.appendChild(b); }
     EL("metersub").textContent = "1 block = 30 min · " + m.capacity_text;
+    // An item with a deadline can fit today's hours and still miss it: "nowhere to go" is only for the rest.
+    var nd = items.filter(function (it) { return it.deadline; }).length, nn = items.length - nd;
+    var onlyDl = nd > 0 && nn === 0 && !m.spill_blocks;
+    var tail = !nd ? h(items.length) + " items with nowhere to go"
+      : nn === 0 ? (nd === 1 ? "1 item won't make its deadline" : nd + " items won't make their deadline")
+      : items.length + " items: " + nn + " with nowhere to go, " + nd + " won't make their deadline";
     EL("meterkey").innerHTML = '<span class="a">&#9632; <b>' + h(m.fit_blocks) + " blocks</b> fit inside the day</span>" +
-      '<span class="c">&#9633; <b>' + h(m.spill_blocks) + " blocks</b> do not</span>" +
+      (onlyDl ? "" : '<span class="c">&#9633; <b>' + h(m.spill_blocks) + " blocks</b> do not</span>") +
       (m.capped ? "<span>… and " + h(m.capped) + " more</span>" : "") +
-      (m.spill_hours || items.length ? '<span title="' + h(items.map(spillTip).join("\n")) + '">' + (m.spill_hours ? h(fmtH(m.spill_hours)) + " across " : "") + h(items.length) + " items with nowhere to go</span>" : "");
+      (m.spill_hours || items.length ? '<span title="' + h(items.map(spillTip).join("\n")) + '">' + (m.spill_hours ? h(fmtH(m.spill_hours)) + " across " : "") + tail + "</span>" : "");
     EL("overflow").textContent = state.verdict.overflow_sentence || "";
     var give = EL("give"); if (give) { give.textContent = m.give_text || ""; give.hidden = !m.give_text; }
   }
