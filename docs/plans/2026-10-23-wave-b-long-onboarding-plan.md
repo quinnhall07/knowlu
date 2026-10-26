@@ -6701,3 +6701,11 @@ F11d's test-writer found a gap. The normal console has no way to read `handover`
 - **Found while building F11d (2026-10-25).** None of the page's `onboarding_*` commands is on a handler list yet: `status`, `answer`, `skip`, `retry`, `finish`, `quit`, `sign_out`, `attach_session`, `checkout` and `entitlement`. Registering them is F5's job (a list edit), which is still open. So F11d's Open Knowlu (`onboarding_finish`) works only once F5 lands.
   - **F5 runs right after F11d merges.** It shares F11d's `generate_handler!` line, so it rebases onto the console count of 75 and raises it by its own count (§14.60).
   - **F5's list must name each command above.** Each goes on the list its process serves: the console process runs in onboarding mode (`LaunchMode::Onboarding`).
+- **F11d review r1 (controller rulings, 2026-10-25).**
+  - **The reveal has no Settings button.**
+    - The reason: during setup, `mail.connect` never appears in `gate.not_connected`; it exists only in `handover`, after finish. The console's Settings panel would also open behind `.setup`, and `mail_setup_start` refuses in onboarding mode.
+    - So §4 step 11's "each skip with its cost and its Settings button" becomes "each skip with its cost". The Settings button is the main page's (§14.52.1).
+    - The reveal-side `settings` flag goes, along with its button and its pin.
+  - **On the main page, `mail.connect` gets its own "Not connected" heading** and §14.52.1's cost line, kept apart from the "Still coming" rows. It keeps its Settings and Not now buttons.
+  - **The reveal's "Knowlu finishes these after you open it"** covers only the items that really finish without the student.
+  - **The handover read** runs at boot, on focus and on every 60-second poll, and after Not now. An envelope applied after an action or a Sync doesn't re-read it, so a cleared item can stay up to 60 seconds. This amends §14.63's "after every `state` refresh".
