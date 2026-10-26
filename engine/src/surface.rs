@@ -5254,4 +5254,48 @@ mod evening_tests {
         assert!(ranked_list(&l, TODAY, "week", &[]).rows.iter().any(|r| r.slug == "ds-probe"));
         let _ = std::fs::remove_dir_all(&vault);
     }
+
+    /// T4c/T1h review minor 3: an item that is its own placeholder AND cannot fit alone reads the
+    /// placeholder line (the rule order puts "own placeholder" first), not "Won't fit".
+    #[test]
+    fn a_placeholder_that_cannot_fit_alone_reads_no_time_estimate_yet() {
+        for (name, hours, confidence) in [("t4c-nohours", None, "low"), ("t4c-unset", Some(1.0), "unset")] {
+            let vault = probe_vault(name);
+            put_probe(&vault, "ds-y", "Y", hours, confidence, "2026-08-28T21:30", 3, "");
+            let walk = load_at(&vault, pinned_today(), None, Some(at(21, 0))).plan.wont_fit;
+            let y = walk.iter().find(|w| w.slug == "ds-y").expect("setup: Y is named");
+            assert!(y.work_minutes > y.available_minutes, "setup: Y cannot fit alone ({y:?})");
+            assert_eq!(
+                fit_of(&vault, at(21, 0), "ds-y").0,
+                some("May not fit before 9:30 pm \u{b7} no time estimate yet"),
+                "{name}"
+            );
+            let _ = std::fs::remove_dir_all(&vault);
+        }
+    }
+
+    /// Review minor 4: a task due exactly at the moment is overdue (`due <= m`), not in This week.
+    #[test]
+    fn a_task_due_exactly_at_the_moment_is_overdue_in_the_nav() {
+        let vault = scratch_s1("t1h-exact");
+        let (base, _, _) = overdue_facts(&vault, at(15, 0));
+        put_probe(&vault, "ds-probe", "Probe", Some(1.0), "low", "2026-08-28T15:00", 3, "");
+        let (count, listed, in_week) = overdue_facts(&vault, at(15, 0));
+        assert_eq!(count, base + 1, "counted in nav_counts.overdue at exactly the due moment");
+        assert!(listed, "listed in the Overdue view");
+        assert!(!in_week, "not in This week");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// Review minor 4: a bare date is overdue only from 23:59, so it is not overdue at 21:00.
+    #[test]
+    fn a_bare_date_is_not_overdue_at_nine_pm() {
+        let vault = scratch_s1("t1h-bare");
+        let (base, _, _) = overdue_facts(&vault, at(21, 0));
+        put_probe(&vault, "ds-probe", "Probe", Some(1.0), "low", "2026-08-28", 3, "");
+        let (count, listed, _) = overdue_facts(&vault, at(21, 0));
+        assert_eq!(count, base, "a bare date is not counted overdue at 21:00");
+        assert!(!listed, "and is not in the Overdue view");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
 }
