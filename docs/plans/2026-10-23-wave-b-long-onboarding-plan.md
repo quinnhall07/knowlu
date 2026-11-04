@@ -420,6 +420,19 @@ passes for build and mail; its LMS read was the 401 above. Step 4: reopening the
 fails `LABEL_IN_USE`, 250 ms builds; a read after reopening is untested because of the 401. Step 5
 passes. Step 6 passes for mail, fails for the LMS.
 
+**Public class search, tested the same day with no sign-in.** Banner's anonymous class search at the
+founder's school answered: term set by one POST, then JSON. It listed 10,076 sections for the term, in
+the same row shape the registrar parser reads (`courseReferenceNumber`, `sequenceNumber`,
+`meetingsFaculty[].meetingTime` with days, times, building, room, dates). Finding a section by subject and
+number, then filtering on section: 21 sampled sections, 21 found exactly one row, with the same section
+and the same times. `resetDataForm` was called before each search; a search without it is untested. No
+student data was involved. Not yet checked: how many real LMS course names carry subject, number and
+section (`202640-BUI-100-101` is the shape `course_code_in_name` already reads), and any school but
+this one.
+
+**Ruling, Quinn, 2026-11-04: the registrar is optional.** Onboarding must not depend on the registrar
+sign-in. Replanning goes through the planner; which source replaces it is open until then.
+
 ### S-E: real first-run timings
 
 **Question.** How long does each step and each background job take, so the copy ("about 10 minutes")
