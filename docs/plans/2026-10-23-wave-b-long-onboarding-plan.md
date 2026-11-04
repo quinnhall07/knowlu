@@ -388,6 +388,38 @@ build's mail debug port stays available only to a mail window on its own `mail-s
 - **Step 5 fails:** the LMS capture keeps its incognito window; the student signs in twice at step 3
   (LMS capture, then the shared profile). Goes to Quinn: Q1's "one sign-in" is not met.
 
+### Results of the 2026-11-04 live run (S-A phase 2 and S-B)
+
+Quinn at the machine, the throwaway build, one shared folder, no debug port. The folder was deleted
+afterwards. "Restart" here means a new process and a gap, not a Windows restart.
+
+**S-A phase 2 does not pass; the branch is "Phase 1 passes and phase 2 fails".** Goes to Quinn and the
+planner before any O4 task is dispatched.
+
+| Surface | Silent? | Seconds | Result | Prompts (Quinn's tally) |
+|---|---|---|---|---|
+| LMS first sign-in (visible) | n/a | 552 | `users/me` 200 | sign-in, no MFA |
+| Grades read, next process | no, shown | 219 | 401 hidden; after sign-in 200, memberships 200, gradebook 200 | signed in again |
+| Registrar at its start page | no, shown | 183 | 35 calls, 200, never JSON; closed by Quinn | none: the public menu, never signed in |
+| Registrar after one click on the schedule entry | no, shown | 70 | rows call answered, 14 calls | no password, no MFA |
+| School mailbox, first time | no, shown | 94 | mailbox reached | 1 MFA, "stay signed in" accepted |
+| School mailbox, later (two runs) | yes | 3.3, 3.2 | mailbox reached | none |
+| LMS, any later hidden window (20 tries) | no | 30 to 45 each | 401 | never asked; a hidden window cannot |
+| LMS capture, non-incognito (shown) | no, shown | 170 | feed 200, 1 link, course list 200 | password, no MFA |
+
+- The LMS stops at its own login page in every new process, including minutes after a sign-in. Its
+  sign-in does not survive the process on this folder, and clicking through asked for the password
+  even with a live MFA session. Why is not known.
+- The registrar's start page is public, so it never redirects on its own: the app must navigate past
+  it. A click went straight through; the rows call then answered.
+- The mailbox session held 22 minutes across processes, silently. Longer lifetimes are not measured.
+
+**S-B.** Step 1 built both ways with no HRESULT; the second window's load was not confirmed, which does
+not matter under one argument string. Step 2 passes (every read worked on `MAIL_BROWSER_ARGS`). Step 3
+passes for build and mail; its LMS read was the 401 above. Step 4: reopening the same label with no wait
+fails `LABEL_IN_USE`, 250 ms builds; a read after reopening is untested because of the 401. Step 5
+passes. Step 6 passes for mail, fails for the LMS.
+
 ### S-E: real first-run timings
 
 **Question.** How long does each step and each background job take, so the copy ("about 10 minutes")
