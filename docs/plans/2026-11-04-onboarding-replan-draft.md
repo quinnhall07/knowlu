@@ -1,8 +1,8 @@
 # Wave B replan after the 2026-11-04 live sign-in run: draft
 
-**Status: DRAFT r2, answering review r1 (`docs/reports/2026-11-04-onboarding-replan-review-r1.md`). Not
-yet re-reviewed; nothing dispatched.** Quinn has ruled RQ1, RQ2 and RQ6 to RQ10 (§10). RQ3, RQ4 and RQ5
-wait on R0a. RQ11 to RQ13 are new in r2, and RQ11 needs Quinn's OK before S7. This draft amends
+**Status: DRAFT r3, answering review r2 (`docs/reports/2026-11-04-onboarding-replan-review-r2.md`). Not
+yet re-reviewed; nothing dispatched.** Quinn has ruled RQ1, RQ2 and RQ6 to RQ13 (§10). RQ3, RQ4 and RQ5
+wait on R0a. RQ14 is new in r3 and holds S7. This draft amends
 `docs/plans/2026-10-23-wave-b-long-onboarding-plan.md` ("the plan") and does not edit it. Once the open
 questions are ruled, the rulings fold into the plan as a new §14 entry, and this file is its record.
 
@@ -81,7 +81,8 @@ student may decline "stay signed in", or their school may treat them differently
   an `AtLms` school. The step never assumes the mailbox is silent.
 - A hidden LMS read that fails shows one visible window at the link (§7.4), even at an `AtMailbox` school.
 
-A2 pins both fallbacks with a test. The row is relied on only after a second account's check (A4).
+A2 pins both fallbacks with a test. The row is relied on only after a friend's account at the founder's
+school has passed the check (A4, RQ13).
 
 ## 3. Checked against VISION and the two rules
 
@@ -97,7 +98,8 @@ A2 pins both fallbacks with a test. The row is relied on only after a second acc
 - **Fetch on device, think in the cloud.** The read runs on the student's computer, anonymously. The
   cloud never fetches it, and nothing reaches a model. `VISION.md` names this source (RQ10, done).
 - **Data minimization.** One query per course, public data only. The bundle and every unconfirmed row
-  are deleted at setup end and at sign-out, and no decline marker carries a section (§6.12, RQ11).
+  are deleted at setup end and at sign-out, no decline marker carries a section, and no backup holds
+  class-search data (§6.12, RQ11). One small list outlives setup, by ruling (RQ12, RQ14).
 - **Failures are visible.** Each course ends in a named state (§6.5). A school that closes guest
   search reads as closed, never as "no classes".
 - **Rule 1, no single-user assumptions.** Class search, the link prefix and the sign-in place are all
@@ -112,12 +114,13 @@ per task, tests never leave the machine, no new capability, every live step the 
 **Contract list:** the only contract-list file touched in the whole replan is `app/src/account.rs`,
 by the plan's existing S5, S7 and F2c. No new task touches the list: the purge at sign-out sits inside
 `on_sign_out`, which F2c's `sign_out_clean` already calls, and that function keeps its signature.
-`commitments.rs`, `registrar.rs`, `backup.rs`, `scaffold.rs`, `lms_link.rs` and `grades.rs` are off the
-list, but C2a to C2c and C8 can silently damage vault meaning, student data or a session, so they take
-stronger agents or reviewers than the list alone would require.
+The launch sweep only reads `account::session_target` and `wincred::read_credential`, both already
+public. `commitments.rs`, `registrar.rs`, `backup.rs`, `scaffold.rs`, `lms_link.rs` and `grades.rs` are
+off the list, but C2a to C2e and C8 can silently damage vault meaning, student data or a session, so
+they take stronger agents or reviewers than the list alone would require.
 
 Task ids are new and do not collide: `R` decision runs, `C` common, `A` outcome A, `B` outcome B.
-**Counts:** 3 decision runs, 16 common tasks plus T3b, 4 for outcome A, 4 for outcome B.
+**Counts:** 3 decision runs, 18 common tasks plus T3b, 4 for outcome A, 4 for outcome B.
 
 ### 4.1 Decision runs (common; first)
 
@@ -129,7 +132,7 @@ Task ids are new and do not collide: `R` decision runs, `C` common, `A` outcome 
 
 ### 4.2 Common to both outcomes
 
-**What needs no sign-in result:** C0, C1, C2a, C2b, C2c, C3, C4, C5a, C5b, C7, C8 and C10. C1's and C4's
+**What needs no sign-in result:** C0, C1, C2a to C2e, C3, C4, C5a, C5b, C7, C8 and C10. C1's and C4's
 exact keys wait on R0b, not on R0a.
 
 **What does:** C5c, C5d and C6 are common to both outcomes but cannot land before the result. C5c
@@ -139,33 +142,36 @@ writes through F8b2's fenced writer. F8b2 follows F8b, and F8b now follows A2 or
 |---|---|---|---|---|---|
 | C0 | `scaffold.rs`: `ClassSearch`, `Curated.class_search`, `Curated.lms_sign_in`, `None` on every row | `mechanical` | one struct and two fields, checked by the compiler; ends the `Curated` collisions | no | none |
 | C1 | Engine: `section_in_name`, `parse_class_search`, the `School` row's name shape | `test-writer`, then `implementer` | specified and test-checked | no | R0b for `parse_class_search`'s keys; `section_in_name` needs nothing |
-| C2a | Engine: the `classsearch:` source row, tier, keep-alive, `classify` arm, note body, and never a card | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | a wrong tier silently reverses which source wins; the syllabus plan gave the same edit to `integrator` | no, but vault meaning | C1 |
-| C2b | Engine: what stays local: `purge_class_search`, the no-time block, `uncovered_courses`' new input, Not mine with no marker, the backup guard | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | a miss leaks section data or makes the approved privacy text false | no, but student data | C2a; RQ11 for the purge's callers, not its code |
-| C2c | Engine: a registrar read adopts a class-search note (§6.6) | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | it re-keys a confirmed note | no, but vault meaning | C2a, C1 (`registrar.rs`) |
+| C2a | Engine: the `classsearch:` source row, tier, keep-alive, `classify` arm, note body, never a card, never a successor. About 30 lines in `commitments.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | a wrong tier silently reverses which source wins; the syllabus plan gave the same edit to `integrator` | no, but vault meaning | C1 |
+| C2b | Engine: `purge_class_search`, the no-time block, `uncovered_courses`' new input. About 75 lines in `commitments.rs`, 2 in `cli.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | a miss makes the approved privacy text false, or undoes RQ9 | no, but student data | C2a |
+| C2c | Engine: a registrar read adopts a class-search note (§6.6). About 30 lines in `registrar.rs`, 8 in `commitments.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | it re-keys a confirmed note | no, but vault meaning | C1, C2a, **C2b** |
+| C2d | Engine: Not mine with no marker, the guard in `create_marker_as`, fixed words in `confirm`'s warnings. About 35 lines in `commitments.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | a miss sends a section off the device | no, but student data | C2b |
+| C2e | Engine: backups never hold class-search data. About 15 lines in `commitments.rs`, 25 in `backup.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | a miss outlives the purge for 30 days | no, but student data | C2b |
 | C3 | Engine: `commitments --class-search`; `onboarding --preview --class-search` | `test-writer`, then `implementer` | specified; both read-only of notes | no | C1, C2a, C2b |
 | C4 | App: `app/src/class_search.rs` (the fetch), and the founder's row once curated | `test-writer`, then `implementer` | specified; proven on a local fake server | no | C0, C1, R0b; RQ7's check for the row |
 | C5a | Queue: `registrar.confirm` out of `onboarding_jobs.rs` and its tests | `test-writer`, then `implementer`; `contract-reviewer` reads the diff | a removal, but 30 test references need judging one by one | no | none; lands at the head of that file's chain |
 | C5b | State: the registrar pieces out of `onboarding_state.rs` and its tests | `test-writer`, then `implementer`; `contract-reviewer` reads the diff | the file holds capture state | no | C5a |
 | C5c | Queue: `school.class_search`, `class_times.apply`, and `proposals_ready` waits for both | `test-writer`, then `implementer`; `contract-reviewer` reads the diff | orchestration; a stale capture must not land | no | C3, C4, C5b, **F8b, F8b2**; takes F8h-runner's place in the `onboarding_jobs.rs` chain |
-| C5d | Purge callers: finish, sign-out, `change_school`, launch | `test-writer`, then `implementer`; `contract-reviewer` reads the diff | the privacy text rests on it | no | C2b, C5c, F2e; RQ11 |
-| C6 | Page: step 10's class-search group, the proof line, the job labels | `test-writer` (pins), then `console-ui` | `app/static` | no | C3, **C5c**, F11p3 |
+| C5d | Purge callers: finish, sign-out, `change_school`, and the launch sweep over every profile. About 50 lines in `onboarding_state.rs`, 2 in `main.rs` | `test-writer`, then `implementer`; `contract-reviewer` reads the diff | the privacy text rests on it | no | C2b, C5c, F2e |
+| C6 | Page: step 10's class-search group, the proof line, the job labels | `test-writer` (pins), then `console-ui` | `app/static` | no | C3, **C5c**, F11p3; last in the panel merge order, after F11e2 |
 | C7 | Page: the week strip's "N turned in, kept off your list" note (amends §14.58.5) | `test-writer` (pins), then `console-ui` | `app/static`; Quinn's addition | no | none |
 | C8 | App: the LMS sign-in link; hidden and visible windows open at it; the `read_hidden` seam | `test-writer`, then `implementer`; `contract-reviewer` reads the diff | a wrong host leaks a session (the plan's Q-B6) | no, but sessions | C0; lands before S4a and S4b |
-| C9 | Docs: amendment drafts, the curation check, reference pages | `docs-keeper` | docs only | no | C0 to C8, C10 |
+| C9 | Docs: amendment drafts, the curation check, reference pages | `docs-keeper` | docs only | no | C0 to C8, C10; F13 follows it |
 | C10 | Page: the first-day screen and Schedule treat a `classsearch:` row as its own source | `test-writer` (pins), then `console-ui` | `app/static`; Critical 2's second screen | no | C2a |
 
 **Files with more than one task, and their order:**
 
 | File | Order |
 |---|---|
-| `scaffold.rs` | C0, S2, C4's row, C8's row, then A1 or B1 |
+| `scaffold.rs` | C0, C8's row, C4's row if its curation check passes, S2, then A1 or B1 |
 | `lms_link.rs` | C8, then S4b |
 | `grades.rs` | C8, then S4a |
-| `commitments.rs` | C2a, C2b, then C3's wiring |
+| `commitments.rs` | C2a, C2b, C2c, C2d, C2e, then C3's wiring |
+| `cli.rs` | C2b, then C3 |
 | engine `registrar.rs` | C1, then C2c |
 | `onboarding_jobs.rs` | C5a; the plan's chain with F8h-runner's slot now C5c; then C5d |
-| `onboarding_state.rs` | C5b, C5c, C5d, each after the plan's work in that file |
-| `onboarding.js` | C6 and C7, in the panel merge order |
+| `onboarding_state.rs` | C5b at once, ahead of the plan's remaining work there, which rebases on it; then that work; then C5c and C5d |
+| `onboarding.js` | C7 at any point; C6 last, after F11e2 |
 
 **Held for R0a's item (d) and RQ4.** S1, S2, S3, S4a, S4b, S4c, S5, S6t, S6a, S6r, S6b, S7, S8 and S9, as
 §4.5 changes them, are not common yet. If Quinn rules two folders in outcome B, they become outcome
@@ -183,7 +189,7 @@ chosen flow (§4.6).
 | A1 | Row data: the founder's school's `school_sign_in` as `AtLms` or `AtMailbox`, and `sign_in_hosts` | `implementer` | one data line plus a `CAMPUSES` test; the value cites R0a | no | R0a, S2 |
 | A2 | S4d, as A: one visible window at the row's place; the signed-in test for that place; then the hidden reads; both of §2's fallbacks | `implementer`, reviewed by `contract-reviewer` | as S4d | no | A1, S4a, S4b, **S4c**, C8. **F8b follows it** |
 | A3 | Page: step 3's one sign-in and its "stay signed in" line; step 5 asks nothing unless the mailbox asks | `console-ui` | inside F11e1 and F11b, in the panel merge order; Quinn reads the words | no | A2 |
-| A4 | S10 and F15's outcome-A checks: one prompt in all, mail and LMS silent; a second account's check that the row's value holds | main session | live; Quinn's go | no | A2, A3, T3b |
+| A4 | S10 and F15's outcome-A checks: one prompt in all, mail and LMS silent; a friend's account checks that the row's value holds (RQ13) | main session | live; Quinn's go | no | A2, A3, T3b, S9, F14 |
 
 ### 4.4 Outcome B only
 
@@ -192,7 +198,7 @@ chosen flow (§4.6).
 | B1 | Row data: `school_sign_in` as `TwoSignIns`, and `sign_in_hosts` | `implementer` | as A1 | no | R0a, S2 |
 | B2 | S4d, as B: the visible LMS sign-in at the link at step 3; step 5's visible mailbox sign-in on the folder RQ4 chose | `implementer`, reviewed by `contract-reviewer` | as S4d | no | B1, S4a, S4b, S4c, C8. **F8b follows it** |
 | B3 | Page: step 3's and step 5's words for two sign-ins; spec §1.3's "You won't sign in to these again" goes | `console-ui` | inside F11e1 and F11b; Quinn reads the words | no | B2 |
-| B4 | S10 and F15's outcome-B checks: two prompts at most, later reads silent | main session | live; Quinn's go | no | B2, B3, T3b |
+| B4 | S10 and F15's outcome-B checks: two prompts at most, later reads silent; a friend's account checks that the row's value holds (RQ13) | main session | live; Quinn's go | no | B2, B3, T3b, S9, F14 |
 
 Outcome B also needs a signed note that Q1's "one sign-in" is not met at this school. C9 drafts it.
 
@@ -221,18 +227,18 @@ exist, `lms_link::validate_only` and `capture_link_only` are still `todo!` stubs
 | S4b | `lms_link.rs` only. `registrar.rs` stays on its incognito throwaway window, so "the registrar never shares this profile" stays true |
 | S4d | Replaced by A2 or B2. Every plan row that names S4d now names "A2 or B2" |
 | S6b | The row reads "used for grades and school email" (spec §2.5 said "grades, class times and school email") |
-| S7 | The page carries RQ6's approved text, or RQ11's fallback. The approved text is true only with C5d and F2c merged, so S7's page waits for both |
+| S7 | The page carries RQ6's approved text as RQ14 settles it. The text is true only with C2e, C5d and F2c merged, so S7's page waits for all three |
 | S8 | The plan's §9 row A6 is withdrawn; rows A1 and A5 lose the registrar |
 | S10 | The registrar read leaves it. A4 or B4 holds the prompt count |
 | F8b | Capture half only: one hidden window through the link does the feed, the course list and the grades before it closes, because the session dies with the last window on the folder (§7.3). No `registrar_rows`. **Its S4d dependency becomes A2 or B2**, so it waits on R0a, and F8b2, F8b2-advance, F8g, F3z, F8lb and C5c wait with it |
 | F8b2 | The capture files it fences are `onboarding-class-search.json`, not the registrar file |
 | F8w1 | No `registrar.confirm` arm, so no interim `registrar_runner_pending`. It gains the two class-search arms, so it lands after C5c |
 | F11e1 | Step 3's sign-in follows A3 or B3 |
-| F11e2 | The proof's course list marks a course that was not found in class search with a "doesn't look like a class" hint. The student still decides (§6.4) |
+| F11e2 | The proof's course list marks a course that was not found in class search with a "doesn't look like a class" hint. The student still decides (§6.4). The hint's data comes from C5c, so it lands after C5c |
 | F11b | Step 5 follows A3 or B3 |
 | F12 | The walk-through drops its registrar fixture and adds class-search rows, and one run with no class search at all |
 | F13 | The plan's §9 rows change as C9 lists them |
-| F15 | `finish_ready: true` on the build to merge, once with class-search rows and once with class search failing or absent, and never by a registrar read |
+| F15 | `finish_ready: true` on the build to merge, once with class-search rows and once with class search failing or absent, and never by a registrar read. Its F8h-runner dependency becomes C5c, and it gains T3b |
 
 The plan's §8 O3-to-`main` checklist changes with F15: its `registrar_runner_pending` search and its "registrar
 gave class times" item go. In their place: `app/src` holds no `registrar.confirm`, and F15's two runs
@@ -259,21 +265,46 @@ T3b also records class search's seconds, and the step-3 wait it adds.
 
 ### 4.7 Order
 
-1. **At once, in parallel.** R0a and R0b. C0, C5a, C7 and C8, then C5b. The `section_in_name` tests.
+1. **At once, in parallel.** R0a and R0b. C0, C5a and C7, then C8 and C5b. The `section_in_name` tests.
    T3a follows R0a's build. `parse_class_search`'s tests wait for R0b's keys.
-2. **The engine chain.** C1, C2a, then C2b and C2c, then C3. C4 runs beside C2a once C1 and C0 are in.
-   C10 follows C2a.
-3. **R0a's result.** Item (d) goes to Quinn as RQ4, and S1 to S4c follow it, after C8. Item (c) picks A
-   or B: A1 or B1, then A2 or B2.
+2. **The engine chain.** C1, C2a, C2b, then C2c, C2d and C2e in that file order, then C3. C4 runs beside
+   C2a once C1 and C0 are in. C10 follows C2a.
+3. **R0a's result.** Item (d) goes to Quinn as RQ4. S1, then S2 once C8's row and C4's row are in, then S3,
+   then S4a to S4c. Item (c) picks A or B: A1 or B1, then A2 or B2.
 4. **The queue.** After A2 or B2, the plan's `onboarding_jobs.rs` chain: F8b, F8b2, F8b2-advance, F8g,
-   F3z, F8lb, then C5c in F8h-runner's old place, then F8w1 and C5d.
-5. **The screens.** F11e1 and F11b, with A3 or B3 inside them. F11e2 after F8g. C6 after C5c. All in the
-   panel merge order.
-6. **Live.** T3b, then A4 or B4, then F14 and the plan's §8 checklist. **No wave-B release before S7's
-   page is deployed**, as the plan already rules.
+   F3z, F8lb, then C5c in F8h-runner's old place, then F8w1, F8w2 and C5d.
+5. **The screens.** In the panel merge order: F11b and F11e1 with A3 or B3 inside them, F11e2, then C6.
+6. **The O4 tail.** S7 once RQ14, C2e, C5d and F2c are in, then S8 and S9.
+7. **Reviews and live.** C9, F12, F13, T3b, then F14, then A4 or B4, then the plan's §8 checklist. A4
+   and B4 hold S10 and F15's checks, and F15 follows F14, so the review comes first. **No wave-B release
+   before S7's page is deployed**, as the plan already rules.
 
-There is no cycle. The line runs one way: R0a, A1 or B1, A2 or B2, F8b, F8b2, F8g, F11e2. A2 and B2 depend
-on no screen. A3 and B3 depend on A2 or B2, and only their words sit inside the screens.
+**The order has no cycle: every edge was walked.** Each row below depends only on rows above it, or on
+tasks merged already. The edges are §4.1 to §4.5's and the plan's §7 table's dependency column, with S4d
+read as A2 or B2, and F8h-runner read as C5c. A task that is in no row is unchanged and sits behind no
+task here.
+
+| Layer | Tasks | Waiting on, from the layers above |
+|---|---|---|
+| 1 | R0a, R0b, C0, C5a, C7 | nothing |
+| 2 | T3a, RQ3 to RQ5, C1, C8, C5b | R0a; R0b; C0; C5a |
+| 3 | C2a, C4 | C1; C0, R0b |
+| 4 | C2b, C10 | C2a |
+| 5 | C2c, C2d, C2e, C3 | C1, C2a, C2b |
+| 6 | S1, then S2, S3, S5 | RQ4; S2 also C8's row and C4's row |
+| 7 | S4a, S4b, S4c, F2c, A1 or B1 | S3, T3a, C8; F2e, S5; R0a, RQ5, S2 |
+| 8 | F8la, S6t, then S6a, S6r, S6b | S4b; S4a to S4c; S5 |
+| 9 | A2 or B2, then A3 or B3 | A1 or B1, S4a to S4c, C8 |
+| 10 | F8b, F8b2, F8b2-advance, F8g, F3z, F8lb, in that order | A2 or B2, F8la, F2b2b, F2b4 |
+| 11 | C5c, then F8w1, F8w2, C5d | C3, C4, C5b, F8b, F8b2, F8lb; C2b, F2e |
+| 12 | F11b, F11e1, F11e2, C6 | F8lb, F8g, F3z, A3 or B3, C5c, C3 |
+| 13 | S7, S8, S9 | RQ14, C2e, C5d, F2c, A2 or B2, S4a to S4c, S5, S6b |
+| 14 | C9, F12, F13, T3b | every C task; F11e2; C9; F8w2, C6 |
+| 15 | F14, then A4 or B4, then the §8 checklist | F13, T3b, S9, A3 or B3 |
+
+Three edges were wrong in r2 and are fixed above: S2 sat before C8's row while S1 to S4c followed C8; C2c
+ran beside C2b while needing it; and §4.7 and §12 ran A4 or B4 before F14, while A4 and B4 hold F15's
+check and F15 follows F14.
 
 ## 5. The registrar is optional in both outcomes
 
@@ -362,7 +393,7 @@ Each kept course ends in exactly one state. The vocabulary is closed, and the pr
 | `ambiguous` | two or more rows match subject, number and section | no proposal: never picked |
 | `other_term` | the name's term is not the term being read | no query, no proposal |
 | `no_fit` | the name does not fit the shape | no query; the calendar, syllabus and typing paths as today |
-| `fetch_failed`, `paused`, `closed` | a network failure, a stop for politeness, guest search closed | no proposal; one named line at step 10; never a failed job |
+| `fetch_failed`, `paused`, `closed` | a network failure, a stop for politeness, guest search closed | no proposal; one named line at step 10; never a failed job; the calendar, syllabus and typing paths as today, with no Try again in wave B (§6.8) |
 
 - **Sections with no time.** Many have none, and that is an answer, not a fault. `parse_banner`'s P4
   rule holds: nothing is filled in. A read of only no-time rows is not an "empty parse" failure,
@@ -412,9 +443,13 @@ deleted, so the fact needs a home of its own. It is a new top-level block in the
 - `Overview` gains `no_time_courses`, which step 10 reads for "No set meeting time listed". Step 10
   never says "Knowlu will ask this week" about these courses.
 - `no_time_courses` ignores a block whose term is not `registrar::term_for(school, today)`, so a new term
-  asks again. The next series-file write drops the stale block.
+  asks again. The next series-file write or the next launch drops the stale block.
+- `refresh_series_held` rebuilds `SeriesFile` by hand (`commitments.rs:2446`), so it must carry the
+  block. The block is not tied to `calendars`, because purge removes that entry while the block stays.
+- A registrar read leaves it alone. The registrar may list no time either, and the block's only job is
+  to stop an ask, so it stays until the term changes.
 - A confirmed note or an answered ask needs nothing from it. Purge's two scopes treat it differently:
-  it survives setup end and goes at sign-out (§6.12, RQ12).
+  it survives setup end and goes at sign-out (§6.12, RQ12). No backup holds it (§6.12).
 
 ### 6.6 Class search's own source
 
@@ -439,21 +474,34 @@ those below it move down one: a spec E4 amendment (C9).
 | `calendar` | `Some("classsearch:")` | its own tier and keep-alive |
 | `uid` | `Some("classsearch:")` | `None` is the catch-all in `by_uid`, so the row must name its prefix |
 | `tier` | 1 | RQ1 |
-| `keep_alive` | a new arm | a read covers only the courses asked about, so an omitted row stays until purged or until its `until` passes |
+| `keep_alive` | a new arm, `KeepAlive::PerCourse` | a read covers only the courses asked about, so an omitted row stays until purged or until its `until` passes. It needs two changes in `refresh_series_held`, not one (below) |
 | `instances` | false | a weekly rule only |
 | `holds_per_kind` | false | a class-search row hides nothing, because it may not be the student's class. It can still be held, so a registrar series or note holds it |
 | `lands` | `Lands::NotWatched` | a row leaving the file never makes an ended entry or a change card, so class search can never change a confirmed note |
 
-**What the prefix settles.** `fromRegistrar`, `paintRegistrarAdded`, `registrar_proposals`,
-`RegistrarHold`, `card_reason` and the `asked` filter test `registrar:`, and `detect_changes`,
-`withdrawal_reason` and the settle pass read the row's `lands`. So none of them acts on a class-search
-key, and C2a pins each one. A confirmed class-search note holds nothing: an equal-signature row still
-closes, as for any confirmed note, and a recitation or a differently timed Google row stays proposed.
+**What the prefix settles.** `fromRegistrar`, `paintRegistrarAdded`, `registrar_proposals`, `RegistrarHold`
+and `card_reason` test `registrar:`. `withdrawal_reason` and the settle pass read the row's `lands`, and
+`detect_changes` watches only notes whose `lands` is `Carded`, so a class-search **note** is never
+watched. None of them acts on a class-search key, and C2a pins each one. A confirmed class-search note
+holds nothing: an equal-signature row still closes, as for any confirmed note, and a recitation or a
+differently timed Google row stays proposed.
 
-**Changes the prefix does need.** `classify` takes the registrar's no-eligibility branch for this
-calendar, because a series with no instances would otherwise fail `eligible`. `create`'s body gains an arm:
-"Found in your school's public class search." `asks_wait_for_registrar` does not count this calendar.
-`Proposal` needs no new field: the key names the source, and the pages test it as `fromRegistrar` does.
+**Changes the prefix does need.**
+- `classify` takes the registrar's no-eligibility branch for this calendar, because a series with no
+  instances would otherwise fail `eligible`.
+- `create`'s body gains an arm: "Found in your school's public class search."
+- `asks_wait_for_registrar` does not count this calendar.
+- `refresh_series_held`, for `PerCourse`: `configured` is true while the calendar holds an open row, which
+  covers the `None` branch. A fresh read that omits a row takes the `Some(_)` branch instead, where an old
+  `last_seen` would reach `aged_out` at `:2383`. So a new arm before `recent` keeps the row while its
+  `until` is open and drops it silently afterwards. A class-search row therefore never reaches `aged_out`,
+  and `ended` never gains a `classsearch:` key.
+- `detect_changes` leaves `classsearch:` rows out of `live` (`:4052`). Otherwise an open row could be
+  picked as a Google note's successor, and a change card would carry a section (`:4095-4120`).
+- `emit_checks_locked`'s `asked` filter (`:3994`) drops class-search rows (§6.7).
+
+`Proposal` needs no new field: the key names the source, and the pages test it as `fromRegistrar` does. An
+engine helper, `is_class_search(key)`, is the one test every guard uses.
 
 **When a later registrar read meets a class-search note.** The registrar's answer is the whole term and
 outranks class search, so it **adopts** the note. A new first step in `run_parsed`, after the parse
@@ -464,8 +512,10 @@ succeeded and under the series lock it already holds, before `confirmed` is buil
 2. The note is then the registrar's, and today's rules run unchanged. CRN present and read whole:
    changed `meets`, `until` and `where` are applied, and hand-set fields are kept. CRN absent: ended and
    listed, which is right, because the student is not registered in it. R24 makes the real section's note.
-3. That term's unconfirmed `classsearch:` rows and its no-time block go, in the merge's own series-file
-   write. The registrar has answered for the term, so a row it omitted must not linger.
+3. That term's unconfirmed `classsearch:` rows go, in the merge's own series-file write: when `news` is
+   `Some`, `refresh_series_held` discards them and their `calendars` entry without touching `aged_out`.
+   The registrar has answered for the term, so a row it omitted must not linger. The no-time block stays
+   (§6.5).
 4. A re-key that fails is a named warning, its note keeps its old key, and R24 skips that CRN, so one
    section never gets two notes. The next read tries again.
 5. An empty answer is still `Err` and writes nothing. A note from another term is left alone.
@@ -485,13 +535,22 @@ screen.**
    Not mine and the firmness control F11p3 built.
 3. The student's press writes through `commitments --confirm`: the student's token, journal first.
    A firmness press counts as a press on that row, as it does for every row at step 10.
-4. **Not mine writes no marker under a `classsearch:` key.** A decline marker syncs, and it would carry
-   a section off the device. The row is removed from the series file at once instead, under the lock.
-   `twin_keys` still marks a Google or other twin as today, and never hands a `classsearch:` key to the
-   marker writer. So a Not mine on a Google row removes its class-search twin too. No re-read brings a
-   row back, because class search runs once (RQ8) and Try again re-asks only failed courses (§6.8).
+4. **No marker ever carries a `classsearch:` key.** A decline marker syncs, and it would carry a section
+   off the device. The guard is in `create_marker_as` (`:4359`), the one place every marker is written, so
+   it covers Not mine and a rejected card's `settle_rejected` alike. It returns `Ok(None)` for such a key.
+   - **Not mine on a class-search row** removes that row from the series file at once, under the lock,
+     and `twin_keys` marks its Google or other twins as today. A same-signature Google twin is hidden
+     behind the row, so this is how it gets declined.
+   - **Not mine on a Google row** is possible only for a by-title twin, because a same-signature key is
+     collapsed away and reports stale at `:5170`. It marks the Google key and removes the row.
+   - **A rejected card** whose twin is a class-search row writes no marker for it. The row stays until
+     the purge.
+
+   No re-read brings a row back, because each job runs once per school answer (§6.8).
 5. **A row left blank is deleted at setup end** (§6.12). If its signature had collapsed a Google row,
-   that row comes back as a calendar proposal. Otherwise the course falls to today's `commitment-ask`
+   that row comes back as a calendar proposal. On the first-day screen it then wears `setupRow`'s Mine
+   preset, as every Google class row does today. That is a Google row with its own source and not a
+   class-search row, so this plan leaves it alone. Otherwise the course falls to today's `commitment-ask`
    from day 3. The student must type the time the row already had, and step 10 says so (RQ11).
 
 **Every path, checked against the code:**
@@ -499,17 +558,26 @@ screen.**
 | Path | Why no row passes without a press |
 |---|---|
 | Step 10 | `propHtml` presets nothing, and `confirmArg10` sends only rows pressed Mine or given a firmness |
-| First-day screen | `setupRow` presets class rows Mine, and Finish writes them. Purge empties these rows first, and **C10 removes the preset for `classsearch:` rows anyway**, so the rule holds if a purge failed, or under RQ11's fallback |
+| First-day screen | `setupRow` presets class rows Mine, and Finish writes them. Purge empties these rows first, and **C10 removes the preset for `classsearch:` rows anyway**, so the rule holds if a purge failed |
 | Schedule's registrar list | `registrar_proposals` and `fromRegistrar` match `registrar:` only |
-| Deck cards | `proposals` with `for_cards` drops class-search rows, as it drops office hours, so no `commitment-check` is ever filed for one |
+| Proposal cards | `commitment_passes` builds one list (`cli.rs:869`) for `withdraw_asks`, `emit_checks_locked` and `emit_asks`. The list keeps class-search rows, and `emit_checks_locked`'s `asked` filter drops them, so no `commitment-check` is ever filed for one |
+| Change cards | `detect_changes` leaves `classsearch:` rows out of `live`, so none can be a successor |
+| Rejected cards | `settle_rejected` reaches `create_marker`, and `create_marker_as`'s guard refuses the key |
 | R24 | `run_parsed`'s `mine` is built from the fetch's own `registrar:` rows |
 | Adoption | re-keys notes that are already confirmed, and creates none |
 | Bulk | no approve-all exists in the app. RQ2's "these are all mine" press is withdrawn: one press per row |
 
+**Why the filter sits in `emit_checks_locked`.** `uncovered_courses` counts coverage only from the list it
+is given (`:892`), so removing rows from `cli.rs`'s one list would make an ask fire beside a row. Every
+production proposal card passes that one filter, so `cli.rs` needs no edit. `proposals`' `for_cards`
+argument stays as it is.
+
 **The cap.** Class-search rows never become cards, at step 10 or after, so they never charge the
-15-a-day cap. While a row exists it still covers its course, so no ask fires beside it. A course whose row
-was left blank and purged gets a `commitment-ask`, and that does charge the cap, exactly as it does today.
-Confirmed notes sync. The series file, the bundle and the no-time block never leave the device.
+15-a-day cap. While a row exists it covers its course, so `emit_asks` files no ask beside it and
+`withdraw_asks` withdraws one that stood. A course whose row was left blank and purged gets a
+`commitment-ask`, and that does charge the cap, exactly as it does today. Confirmed notes sync. The series
+file, the bundle and the no-time block never leave the device. The sync tripwires read only `sync.rs`,
+`sync_rows.ts` and migration text, so they prove nothing about this. C2d's tests do.
 
 ### 6.8 Rate limits and politeness
 
@@ -524,8 +592,11 @@ Confirmed notes sync. The series file, the bundle and the no-time block never le
 - **Stop at the first refusal.** A 429, a 403 or a 5xx ends the run: the rest are `paused`, with no
   retry and no backoff loop. An answer that is not JSON, or a redirect to a sign-in, ends it as `closed`.
 - **Honest identity:** a `user-agent` naming Knowlu, its version and `knowlu.com`.
-- **Once per setup.** Try again is the student's press, at most one, after any `Retry-After`. It
-  re-asks only courses that ended `fetch_failed` or `paused`, so an answered row never returns.
+- **Once per school answer, with no Try again in wave B.** Per-course state lives only in the bundle,
+  which `class_times.apply` deletes, so a re-ask would have no record of what was answered and a rejected
+  row would come back. Both jobs go through `enqueue_once`, and neither ever ends failed. The queue's
+  `job_crashed` retry re-runs only a job that never finished. `change_school` starts a new read, after
+  purging the old school's rows. A course left `fetch_failed` or `paused` takes the other paths (§9).
 - **Each student's own computer.** The cloud never relays or caches it, so no shared list of a school's
   sections is built.
 
@@ -589,65 +660,79 @@ The student's `onboarding.json` state version stays 1: no released build has wri
 **Step 10 must see the rows.** `askProposals` latches once, on `proposals_ready`, which today means
 `config.ingest` is done, and nothing orders `class_times.apply` against it. So:
 - `proposals_ready` also requires `class_times.apply` to be done, or to have no record because the row
-  has no `class_search` or step 3 was skipped. A job stuck behind a paused or failed `school.courses`
-  does not hold it, so step 10 still opens with its calendar rows.
+  has no `class_search`. A job stuck behind a paused or failed `school.courses` does not hold it, so
+  step 10 still opens with its calendar rows.
 - The latch then normally fires once, after both, so nothing repaints.
-- **A late finish.** If `class_times.apply` ends after the latch (Try again on `school.courses`), `onStatus10`
-  adds only the rows not already on the page and leaves every existing row alone, so no pressed
-  answer is lost. `console.js`'s `reloadSetupRows` is the pattern: answers go back by key.
+- **A late finish.** If `class_times.apply` ends after the latch, because the queue's own Try again
+  freed a stuck `school.courses`, `onStatus10` adds only the rows not already on the page and leaves every
+  existing row alone, so no pressed answer is lost. `console.js`'s `reloadSetupRows` is the pattern:
+  answers go back by key.
 - `onStatus10` moves its `loadSet10` reload from `registrar.confirm` to `class_times.apply`.
 - `splitProposals10` puts `classsearch:` rows in their own group, because "Your calendar repeats
   these" is wrong for them.
 
-### 6.12 What is deleted, and when (needs Quinn's OK: RQ11)
+### 6.12 What is deleted, and when (RQ11, ruled)
 
 The approved text (RQ6) says the results "are deleted when setup finishes or you sign out". Deleting the
-bundle alone would not make that true, because `found` rows sit in the series file and age by `until`.
-So unconfirmed rows are purged:
+bundle alone would not make that true, because `found` rows sit in the series file. So unconfirmed rows
+are purged. RQ12 keeps one small list past setup, and RQ14 asks for the words that match.
 
 | Data | Where | When it goes |
 |---|---|---|
-| The raw bundle | `onboarding-class-search.json`, app data | `class_times.apply`; also `change_school`, finish and sign-out |
-| Unconfirmed rows: every `classsearch:` series, its `calendars` entry, any `ended` entry | series file | setup end, sign-out, `change_school`; one row at once on Not mine |
-| The no-time block | series file | sign-out, `change_school`, a new term, a registrar read of that term. It outlives setup end (RQ12) |
+| The raw bundle | `onboarding-class-search.json`, app data | `class_times.apply`; also `change_school`, finish, sign-out and the launch sweep |
+| Unconfirmed rows: every `classsearch:` series and its `calendars` entry | series file | setup end, sign-out, `change_school`, the launch sweep, a registrar read of that term; one row at once on Not mine |
+| The no-time block | series file | sign-out, `change_school`, and the term changing. It outlives setup end (RQ12) |
 | Confirmed notes | `commitments/` | never. They are the student's plan, and they sync, as the text says |
 
 **The operation.** `commitments::purge_class_search(vault, scope)`, with scope `Rows` or `All`, `All` adding
-the no-time block. Under the series lock it deletes those entries directly, never through `refresh_series`'s
-`aged_out` or `ended` paths, which would keep a copy. It writes only the series file, and only when
-something changed. It touches no note, writes no journal record, and needs no sign-in, entitlement or
-network. The app calls it in-process, like `commitments::overview`.
+the no-time block. Under the series lock it deletes those entries directly, never through `aged_out`. It
+also drops a block whose term has passed, and any `ended` key under `classsearch:` as a belt, though
+§6.6 means none should exist. It writes only the series file, and only when something changed. It
+touches no note, writes no journal record, and needs no sign-in, entitlement or network. The app calls
+it in-process, like `commitments::overview`.
 
 **The callers (C5d).**
-- **Setup end:** `Rows`, through `ExitSeams`, after the drain and before `write_finish`.
-- **Sign-out:** `All`, inside `on_sign_out_with`, whether or not the file is finished, as one more step
-  whose failure is collected. `on_sign_out` finds the vault from the profile's settings and keeps its
-  signature, so `account.rs` and F2c stay as they are. The text is true only once F2c has wired it.
-- **`change_school`:** `All`, since the rows belong to the old school.
-- **Launch:** `Rows`, on a profile whose setup is finished, and `All` on a signed-out one. It is a read and
-  a no-op when clean, and it retries a purge that failed.
+- **Setup end:** `Rows` and the bundle delete, through `ExitSeams`, after the drain and before `write_finish`.
+- **Sign-out:** `All` and the bundle delete, inside `on_sign_out_with`, whether or not the file is
+  finished, as one more step whose failure is collected. `on_sign_out` finds the vault from the
+  profile's settings and keeps its signature, so `account.rs` and F2c stay as they are. The text is
+  true only once F2c has wired it.
+- **`change_school`:** `All` and the bundle delete, since both belong to the old school.
+- **Launch sweep:** below.
 
-**Failure.** A purge that cannot run is a named line and never blocks Finish or sign-out. The first-day
-screen still cannot write a row with no press (C10), and the next launch retries. An abandoned setup
-keeps its rows until the student finishes or signs out, which is what the text says.
+**The launch sweep.** Sign-out relaunches `--pick`, which opens no profile, and `main.rs` has two `.setup`
+blocks, so a retry inside either would miss cases. So `onboarding_state::launch_sweep(root, seams)` runs
+once in `main`, after `app_data_root` at `:58` and before the dispatch at `:70-72`. Neither `.setup` block
+changes. It walks every profile in `profiles::load(root)`, and for each:
 
-**Backups.** `BACKUP_FOLDERS` includes `state`, and each snapshot zip is kept for 30 days, so a backup taken
-during setup would outlive the purge. A normal setup has no backup folder (`onboarding.rs`, C1), but
-a profile that has one must not break the text. So `backup::mirror` and `backup::snapshot` skip the
-series file while it holds a `classsearch:` series. Nothing is lost, because the file is generated.
-`mirror` must count the skipped file as wanted, or it would archive the mirror's older copy.
+| The profile | What runs |
+|---|---|
+| Signed out, whatever its setup state | the bundle delete, then `All` |
+| Signed in, setup finished or no `onboarding.json` | the bundle delete, then `Rows` |
+| Signed in, setup unfinished | nothing: setup still needs them |
 
-**Logs.** `--class-search` reports counts and fixed words only. No slot log or warning carries a section,
-a CRN or a time.
+**Signed out** means `wincred::read_credential(&account::session_target(id))` returns
+`CredError::NotFound`. Any other error reads as signed in, so an unreadable credential costs at most a
+`Rows` in place of an `All`. An unreadable registry or a missing vault is skipped with no failure. A
+clean profile costs one read of its series file and writes nothing.
 
-**The fallback, if Quinn does not OK the purge.** Rows then age out after the term, and C2b's purge and
-C5d drop out. C10, the `for_cards` rule, Not mine with no marker, and the backup guard all stay. S7
-carries this line instead:
+**Failure.** A purge or a bundle delete that cannot run is a named line and never blocks Finish or sign-out.
+The first-day screen still cannot write a row with no press (C10), and the next launch retries both. An
+abandoned setup keeps its rows until the student finishes or signs out, which is what the text says.
 
-> "At schools with a public class search, Knowlu looks up your classes there from this computer, without
-> signing in. The raw results are deleted when setup finishes or you sign out. Class times you did not
-> confirm stay on this computer until shortly after the term ends. The class times you confirm become
-> part of your plan, which syncs to your Knowlu account."
+**Backups.** `BACKUP_FOLDERS` includes `state`, and each snapshot zip is kept for 30 days. A normal setup has
+no backup folder (`onboarding.rs`, C1), but a profile that has one must not break the text. Skipping the
+whole series file would not do: the no-time block outlives setup, and the file's `registrar` block is
+history that cannot be regenerated. So backups take a **filtered copy**. `commitments::series_for_backup(vault)`
+returns the file's bytes without any `classsearch:` series, `calendars` entry or `ended` key and without
+the `class_search` block, through the same `file_bytes`. `mirror` and `snapshot` write those bytes for that
+one path. A file with no class-search data gives its own bytes, so other students' backups are
+unchanged. A file that cannot be read gives `None`: it is skipped for that run and still counted as
+wanted, so `mirror` never archives the older copy.
+
+**Logs and warnings.** `--class-search` reports counts and fixed words only. `confirm`'s four warnings print
+the key (`:5131`, `:5151`, `:5161`, `:5182`), so for a class-search key they print "a class-search row"
+in its place. No slot log or warning carries a section, a CRN or a time.
 
 ## 7. The LMS sign-in link
 
@@ -667,11 +752,9 @@ root-relative; `https` only; the path starts with the prefix. Refused: another h
 suffix, `//host`, userinfo (`@`), a backslash. **Exactly one distinct link passes, or the answer is
 `None`.** Two is a page Knowlu does not understand, and it never guesses.
 
-**Settled at the founder's school.** The link is in a plain cookie-less fetch (review r1, item 11), so
-there is no whole-link fallback, and C8 waits on nothing. R0a's item (e) asks only whether `/` redirects
-first. A redirect on the host is handled by the rule above. A hop off the host gives `None`, so the
-founder's row would stay on `/ultra/` until the planner has looked. Every other school proves this
-at curation (§6.10, item 5).
+**Settled at the founder's school.** The link is in a plain cookie-less fetch, so there is no whole-link
+fallback, and C8 waits on nothing. The redirect rule above stays for other schools, each of which proves
+the link at curation (§6.10, item 5).
 
 ### 7.2 Where it is used
 
@@ -735,8 +818,7 @@ Each item runs on a **fresh** folder unless it says otherwise.
   in at the mailbox only, then the LMS link hidden. This decides §2's table.
 - **(d) What carries it.** LMS sign-in alone, with no mailbox ever opened, then a new process and the
   link hidden. This decides RQ4, and it is what a student who skips school email gets.
-- **(e) The link.** Does `/` redirect first, and does every hop stay on the LMS host?
-- **(f) "Stay signed in" declined,** if time allows: the same as (a) at a shorter gap. This also feeds
+- **(e) "Stay signed in" declined,** if time allows: the same as (a) at a shorter gap. This also feeds
   §2's fallbacks.
 
 ### R0b. The class-search spike (main session, no sign-in)
@@ -777,9 +859,14 @@ Google before the rest, in all four readers of `precedence`. Then:
   `class` of that course proposed. The test names both.
 - **Can be held.** A registrar series or note of that course and kind holds a class-search row.
 - **Keep-alive.** A read omitting a course leaves its series and ends nothing. An unfetched `classsearch:`
-  calendar stays while its `until` is open. Removing a row makes no `ended` entry and no change card.
-- **Never a card.** `proposals` with `for_cards` holds no class-search row, on any vault day, and no
-  `commitment-check` is filed for one. The row still covers its course, so no ask fires beside it.
+  calendar stays while its `until` is open. A **fresh read that omits a row whose `last_seen` is older
+  than `UNSEEN_DAYS`** keeps it too, with no `ended` entry. A row past its `until` goes, with no `ended`
+  entry. Removing a row makes no `ended` entry and no change card.
+- **Never a card, always covered, tested through `rank`.** On vault days 2 and 3 a vault with a class-search
+  row files no `commitment-check` for it, files no `commitment-ask` for its course, and withdraws an ask
+  that stood. With the row gone, the ask files. `proposals`' `for_cards` output is unchanged.
+- **Never a successor.** A Google note whose series ended, beside an open class-search row of that course
+  and kind, gets no change card naming the `classsearch:` key.
 - **Body.** A note from a class-search key reads "Found in your school's public class search."
 - **Nothing else moves.** `by_uid` of a `gcal-series:` and an `ics-series:` key is unchanged, and a vault
   with no class-search row gives the same bytes as today.
@@ -789,23 +876,18 @@ unchanged, or changed and why. The list to start from: `commitments.rs` `:1289`,
 `:3994`, `:4520`, `:4609`, `:4870`, `:5321`; `console.js` `:981`, `:1041-1043`, `:1122-1125`, `:1171`.
 Line numbers are as of this draft, so find each by its text.
 
-### C2b. Engine: what stays local
+### C2b. Engine: the purge and the no-time block
 
 Tests:
-- **Purge.** `Rows` removes every `classsearch:` series, its `calendars` entry and any `ended` entry, and
-  keeps the no-time block. `All` removes the block too. A confirmed `classsearch:` note is byte-identical
-  afterwards, and no journal record appears. The series file then holds no `classsearch:` text but the
-  block's key, and after `All` none. A second run writes nothing. It runs with no entitlement.
-- **No marker.** Not mine on a `classsearch:` key writes no marker, removes the row, and exits 0. Not mine
-  on a Google twin marks the Google key, removes the class-search row, and writes no `classsearch:`
-  marker. A search of every note after both finds no `classsearch:` key. `--confirm` still writes
-  nothing at all on bad input, row removal included.
+- **Purge.** `Rows` removes every `classsearch:` series, its `calendars` entry and any `ended` key under
+  that prefix, and keeps a current no-time block. `All` removes the block too. Either drops a block whose
+  term has passed. A confirmed `classsearch:` note is byte-identical afterwards, and no journal record
+  appears. The series file then holds no `classsearch:` text but the block's key, and after `All` none.
+  A second run writes nothing. It runs with no entitlement.
 - **No-time.** A listed no-time course is not `uncovered` for `emit_asks`, `overview` or `cli.rs`. The block
-  survives `refresh_series`. A block of another term is ignored and dropped by the next write. `overview`
-  lists `no_time_courses`. The bytes are sorted and go through `ledger::dumps_value`.
-- **Backup.** With a `classsearch:` series present, neither `mirror` nor `snapshot` copies the series file,
-  and `mirror` does not archive an older copy. After a purge, both copy it as usual. Every other file
-  is unaffected.
+  survives `refresh_series_held`, survives `Rows` with its `calendars` entry gone, and survives a registrar
+  read of that term. A block of another term is ignored and dropped by the next write. `overview` lists
+  `no_time_courses`. The bytes are sorted and go through `ledger::dumps_value`.
 
 ### C2c. Engine: a registrar read adopts a class-search note
 
@@ -815,10 +897,37 @@ Tests, through `run_parsed` with invented rows:
 - CRN present with a changed time: the change applies, a hand-set field is kept, and there is exactly
   one note. CRN absent: the note ends and is listed, and R24 makes the real section's note.
 - A class-search note of another term is untouched, and an empty answer writes nothing.
-- That term's unconfirmed `classsearch:` rows and no-time block are gone after the read, and another
-  term's stay.
+- That term's unconfirmed `classsearch:` rows and `calendars` entry are gone after the read, with no
+  `ended` entry, and another term's stay. The no-time block stays.
 - A failed re-key is a named warning, R24 skips that CRN, and there is never a second note.
 - A vault with no `classsearch:` note: every existing registrar test passes unedited.
+
+### C2d. Engine: no marker, no key in a warning
+
+Tests, each through the real route. After every one, a search of every note finds no `classsearch:` key:
+- **Not mine on a class-search row** writes no marker, removes the row and exits 0. With a same-signature
+  Google twin hidden behind it, the Google key is marked.
+- **Not mine on a by-title Google twin** marks the Google key and removes the class-search row. Not mine on
+  a same-signature Google key stays stale, as today.
+- **A rejected `commitment-check` card** whose key has a class-search twin, through `settle_rejected`'s
+  `Shape::Proposal` arm, writes the Google marker only. The `Shape::Change` arm's `twin_keys` is tested the
+  same way.
+- **`create_marker_as`**, called directly with a `classsearch:` key, returns `Ok(None)` and writes nothing,
+  with no journal record.
+- **`--confirm`** still writes nothing at all on bad input, row removal included.
+- **Warnings.** Each of `confirm`'s four warnings, on a class-search key, reads "a class-search row" and
+  holds no key text. On any other key the words are today's, byte for byte.
+
+### C2e. Engine: backups
+
+`series_for_backup` and two call sites in `backup.rs`. Tests:
+- With a class-search series, a no-time block and an `ended` key under the prefix all present, no file in
+  the mirror and no entry in the snapshot zip contains `classsearch`, and no `class_search` key appears.
+- The same file's `registrar` block is present and equal in both.
+- A series file with no class-search data is copied byte for byte, and a second tick copies nothing.
+- A malformed series file is skipped for that run, and `mirror` leaves the older copy in place and
+  archives nothing.
+- Every other file is unaffected, and `backup.rs`'s existing tests pass unedited.
 
 ### C3. Engine: the two commands
 
@@ -858,16 +967,26 @@ Tests first, through the existing fakes: `school.class_search` runs between capt
 skipped with no row; it ends `Done` on every failure; `class_times.apply` waits for `school.courses`; a
 failed read leaves Open Knowlu offered; a stale generation never writes the bundle; `proposals_ready` is
 false until `class_times.apply` is done, is true with no such job, and is true when the job is stuck
-behind a paused `school.courses`.
+behind a paused `school.courses`; a second ask of either job in one school generation runs nothing; and
+no Try again exists for class search, on the page or in the queue's status.
 
 ### C5d. Purge callers
 
-Tests over fakes: `ExitSeams`' purge runs after the drain and before `write_finish`; a failed purge never
-stops Finish; `on_sign_out_with` runs `All` on a finished and an unfinished file, and collects a failure
-with the rest (its test callers take the new input); `on_sign_out` keeps its signature and finds the
-vault from settings; a missing vault is no failure; `change_school` runs `All`; launch runs `Rows` on a
-finished profile and `All` on a signed-out one, and writes nothing when clean; the bundle goes at
-finish, at sign-out and at `change_school`.
+Tests over fakes:
+- **Finish.** `ExitSeams`' purge and bundle delete run after the drain and before `write_finish`, and a
+  failed one never stops Finish.
+- **Sign-out.** `on_sign_out_with` runs `All` and deletes the bundle on a finished and an unfinished file,
+  and collects a failure with the rest (its test callers take the new input). `on_sign_out` keeps its
+  signature and finds the vault from settings. A missing vault is no failure.
+- **`change_school`** runs `All` and deletes the bundle.
+- **`launch_sweep`**, over seams for the registry, the credential read, the purge and the delete, with
+  three invented profiles: one signed out mid-setup, which gets `All` and the delete; one signed in and
+  finished, which gets `Rows` and the delete; one signed in mid-setup, which gets nothing. `NotFound`
+  reads as signed out, and any other credential error reads as signed in. A missing vault and an
+  unreadable registry are skipped. A bundle left by a failed delete at Finish goes. A clean profile
+  writes nothing.
+- **`main`.** A source pin that `launch_sweep` is called once, before the dispatch, and in neither `.setup`
+  block. No test touches a real credential.
 
 ### C6. Page: step 10
 
@@ -880,8 +999,10 @@ Pins, then the page. Every line below is a pin in `app/tests/onboarding_static.r
   class later."
 - `confirmBarLine10`'s blank-row line stays as it is, since it holds for every row: a blank class-search
   row comes back as an ask.
-- `no_time_courses` show "No set meeting time listed". They never show "Knowlu will ask this week".
-- A `closed`, `paused` or `fetch_failed` state shows one line, with no error styling.
+- `no_time_courses` show "No set meeting time listed". They never show "Knowlu will ask this week"
+  (`onboarding.js:633`). When they are the only courses to show, the empty-state line at `:635`, "It will
+  ask in the coming days", does not show either.
+- A `closed`, `paused` or `fetch_failed` state shows one line, with no error styling and no Try again.
 - The labels at `onboarding.js`'s job names and `w10.reg`'s reads move from `registrar.confirm` to
   `class_times.apply`.
 - A late `class_times.apply` adds new rows and leaves pressed rows as they were. The pin presses a row,
@@ -931,8 +1052,8 @@ The founder's row sets `lms_sign_in` to its prefix, in `scaffold.rs`'s order (§
 `docs-keeper` drafts, for Quinn's signature: spec §1.3 step 3 and §2.4's uses; a dated line retiring spec
 §4.2 item 1; the plan's §9 row A6 withdrawn and rows A1, A3 and A5 narrowed; the syllabus spec's E4 tiers; the plan's
 §14.58.5 bullet; and, on outcome B, the note on Q1. Also the curation check in `docs/reference/app.md`,
-`commitments --class-search`, Not mine's row removal and `purge_class_search` in
-`docs/reference/engine-commands.md`, the `class_search` block in `docs/surface/anatomy.md` if the overview
+`commitments --class-search`, Not mine's row removal, `purge_class_search` and backups' filtered copy in
+`docs/reference/engine-commands.md`, the launch sweep in `docs/reference/app.md`, the `class_search` block in `docs/surface/anatomy.md` if the overview
 is documented there, app data's new file, and `CLAUDE.md`'s `commitments` line if Quinn wants the
 new prefix named there (the planner may not edit it). `VISION.md` needs nothing: RQ10's line is in.
 
@@ -951,6 +1072,8 @@ with two rows blank, no planning-day note, `setup` true, Finish pressed, and nei
 - The bonus registrar button's `start` page, pointed past the public menu (§5).
 - Class search at a new term: a press, once students have used this (RQ8 keeps it out of wave B); a
   name with no section, when a course has only one section; a remote off-switch for a school's row (§6.8).
+- A Try again for class search, cut from wave B (§6.8). It needs a stored per-course record of what was
+  asked and answered, and that record would join §6.12's table and the privacy text.
 - Other student-system class searches. Banner is a minority of schools, so wider coverage needs other
   readers, each its own spec.
 
@@ -963,7 +1086,7 @@ with two rows blank, no planning-day note, `setup` true, Finish pressed, and nei
 - **RQ2. The press:** a class-search row is never written without the student's press (§6.7). Read
   strictly, that is one press per row, on every screen. r1's "these are all mine" option is withdrawn.
 - **RQ6. Privacy text:** approved as written, and the Settings row reads "used for grades and school
-  email". It holds only with the purge (RQ11).
+  email". It holds only with the purge (RQ11), and RQ12 makes one clause untrue as written (RQ14).
   > "At schools with a public class search, Knowlu looks up your classes there from this computer,
   > without signing in. The results stay on this computer and are deleted when setup finishes or you
   > sign out. The class times you confirm become part of your plan, which syncs to your Knowlu account."
@@ -974,11 +1097,17 @@ with two rows blank, no planning-day note, `setup` true, Finish pressed, and nei
 - **RQ9. No-time sections:** a section listed with no meeting time skips the later "when does this
   meet?" ask (§6.5). The accepted cost: a section whose time is simply not posted yet gets no ask.
 - **RQ10. `VISION.md`:** gains the one line. Done: it is in the file, so no task is owed.
+- **RQ11. The purge:** approved (§6.12). Every unconfirmed class-search row is deleted at setup end and at
+  sign-out. The accepted costs: a row left blank at step 10 is gone, so the student later gets an ask and
+  types a time Knowlu once had, and step 10 warns them. Not mine leaves no marker. Setup's answers
+  cannot be revisited after Finish.
+- **RQ12. The no-time record:** may outlive setup (§6.5). It holds only course keys the vault already has.
+- **RQ13. The second account:** a friend at the founder's school (A4 or B4).
 
 ### Open
 
-One at a time, each with a recommendation. RQ4 holds the S tasks, and RQ11 holds C5d and S7. The rest can
-wait for their tasks.
+One at a time, each with a recommendation. RQ4 holds the S tasks, and RQ14 holds S7. The rest can wait
+for their tasks.
 
 - **RQ3. If the link dies before 12 hours, what happens to grades? Recommended: keep one hidden try a
   slot, show the named signed-out row, and let the student sign in from Settings.** That could mean a
@@ -993,24 +1122,18 @@ wait for their tasks.
 - **RQ5. If both places work in outcome A, where does the sign-in happen? Recommended: the LMS.** A
   student who will skip school email should not have to sign in to their mailbox. If only the mailbox
   works, step 3's words must say why it opens there, and ask the student to accept "stay signed in".
-- **RQ11. Is the purge OK? Recommended: yes.** It is the only way the approved text stays true. It deletes
-  every unconfirmed class-search row at setup end and at sign-out (§6.12). The costs, in plain terms:
-  - A row left blank at step 10 is gone. The student later gets an ask and types a time Knowlu once
-    had. Step 10 warns them. This is the main price.
-  - Not mine leaves no marker, so it is remembered only by the row being gone.
-  - Setup's answers cannot be revisited after Finish, because there is nothing left to revisit.
+- **RQ14. May RQ6's approved text gain one clause? Recommended: yes.** RQ12 keeps the list of no-time
+  classes past setup, so "deleted when setup finishes" is not literally true between Finish and sign-out.
+  The smallest change adds one clause to the second sentence and leaves the rest word for word:
+  > "At schools with a public class search, Knowlu looks up your classes there from this computer,
+  > without signing in. The results stay on this computer and are deleted when setup finishes or you
+  > sign out, **except a list of which classes show no meeting time, which stays on this computer until
+  > shortly after the term ends or you sign out.** The class times you confirm become part of your plan,
+  > which syncs to your Knowlu account."
 
-  **If you refuse,** S7 carries §6.12's fallback line, which you would need to approve. Blank rows then
-  stay until shortly after the term ends. Holds C5d and S7, so it holds the release.
-- **RQ12. May the no-time record outlive setup? Recommended: yes.** RQ9 needs it after the results are
-  deleted (§6.5). It holds only course keys the vault already knows, with no section, time or room, and
-  it stays on this computer. But it is one fact from the search, kept past "setup finishes", and it goes
-  at sign-out, so a strict reader of the approved text could object. If you would rather be strict, it
-  goes at setup end, and every no-time course gets a "when does this meet?" ask, which undoes RQ9.
-- **RQ13. Who is the second account for A4's check? Recommended: one friend at the founder's school,
-  during the friends' first runs, before the row's value is relied on.** `school_sign_in` comes from one
-  account's run (§2). If no second account is available before A4, the row can still ship, because
-  §2's fallbacks cover a wrong value, at the cost of one extra visible sign-in for that student.
+  "Shortly after" is there because the list goes at the first launch or write after the term changes,
+  not on the day. "Stays on this computer" holds, because no sync or backup carries it. The only other
+  way to keep the text word for word is to undo RQ12, which undoes RQ9. Holds S7, so it holds the release.
 
 ## 11. Fidelity ledger
 
@@ -1019,11 +1142,14 @@ wait for their tasks.
 | Quinn, 2026-11-04 | The registrar is optional; onboarding does not depend on its sign-in | C5a, C5b, F8b, F8w1, F15 | C5a's and C5b's tests; F15's run with no registrar read; the plan's §8 checklist item |
 | Quinn, 2026-11-04 | What stays as a bonus keeps working as it does | C2c only | engine `registrar.rs` changes by C1's new functions and adoption; existing registrar tests unedited; `app/src/registrar.rs` absent from every diff |
 | Quinn, RQ1 | Registrar, class search, syllabus, Google, the rest | C2a, C9 | C2a's order tests |
-| Quinn, RQ2 | No row reaches a confirmed commitment without a press on that row, on any screen | C2a, C6, C10 | §6.7's path table; C10's review case; C2a's never-a-card test |
-| Quinn, RQ6 | The approved privacy text is true | C2b, C5d, F2c, S7 | C2b's purge and backup tests; C5d's caller tests; RQ11 |
+| Quinn, RQ2 | No row reaches a confirmed commitment without a press on that row, on any screen | C2a, C2d, C6, C10 | §6.7's path table; C10's review case; C2a's never-a-card and never-a-successor tests through `rank` |
+| Quinn, RQ6, RQ14 | The approved privacy text is true, literally | C2b, C2e, C5d, F2c, S7 | C2b's purge tests; C2e's backup tests; C5d's caller and sweep tests; RQ14's clause |
+| Quinn, RQ11 | Unconfirmed rows are purged at setup end and sign-out | C2b, C5d | C2b's purge tests; C5d's caller and sweep tests |
+| Quinn, RQ12 | The no-time record may outlive setup | C2b | C2b's survival tests |
+| Quinn, RQ13 | A friend at the founder's school is the second account | A4 or B4 | the check's record in A4 or B4 |
 | Quinn, RQ7 | `robots.txt` and terms read and dated before a row ships | R0b, C4, C9 | §6.10's check; `checked` date; the lawyer's list |
 | Quinn, RQ8 | Class search runs at setup only | C5c | no slot step or scheduler entry in any diff |
-| Quinn, RQ9 | A listed no-time section skips the later ask | C2b, C3, C6 | C2b's no-time tests through all three callers; C6's pin |
+| Quinn, RQ9 | A listed no-time section skips the later ask, until the term changes | C2b, C3, C6 | C2b's no-time tests through all three callers, and past a registrar read; C6's pins |
 | Quinn, RQ10 | `VISION.md` names the source | done | `VISION.md`'s source list |
 | Review r1, 4 and 5 | `registrar:` means the registrar said so; a class-search note hides nothing | C2a, C2c, C10 | C2a's holds-nothing tests; C2c's adoption tests; C10's label pin |
 | Quinn's additions | The week strip's "N turned in, kept off your list", from `step3.turned_in`, in both outcomes | C7 | C7's pins; shots; T3b's count |
@@ -1035,7 +1161,7 @@ wait for their tasks.
 | Live run | Mailbox silent after one MFA sign-in | S4c, A2 or B2 | R0a; A4 or B4 |
 | Live run | Many sections have no begin time | C1, C2b, C6 | C1's and C2b's no-time tests |
 | Live run | 15 current-term shells: some not classes | C6, C10, F11e2 | every row needs a press; hint at step 3 |
-| Live run | One account's sign-in run is a sample | A2, A4 | §2's fallbacks, tested in A2; a second account's check in A4 |
+| Live run | One account's sign-in run is a sample | A2, A4 or B4 | §2's fallbacks, tested in A2; a friend's account in A4 or B4 |
 | Spec §1.3 | Step 3 asks one sign-in | A2, A3; on outcome B, B2, B3 and a signed note | A4 or B4's prompt count |
 | Spec §1.5, Q7 | Reveal waits at most 3 minutes; failure is named | C5c | `class_times.apply` never holds the gate; a stuck job does not hold `proposals_ready`; T3b |
 | Spec §1.7, Q12 | Skips and costs unchanged | F11e1, F11b | F11t's pins |
@@ -1045,9 +1171,9 @@ wait for their tasks.
 | Spec §4.2 item 5 | Typing stays the last resort | C6 | no typing added; existing asks stand |
 | Syllabus spec §4.4, E4 | Precedence through the per-source table | C2a | C2a's order tests; RQ1 |
 | `VISION.md` commitment 4, 5 | Knowlu noticed: it proposes and waits; the student confirms; no row wears the registrar's name | C2a, C3, C6, C10 | `--class-search` writes no note (C3); C10's label pin |
-| `VISION.md` data minimization | One query a course, no bulk read, deleted after setup; no marker carries a section; backups skip the rows | C4, C2b, C5d | C4's cap tests; C2b's no-marker and backup tests; C5d's delete tests |
+| `VISION.md` data minimization | One query a course, no bulk read, deleted after setup; no marker carries a section; no backup holds class-search data; no warning prints a key | C4, C2b, C2d, C2e, C5d | C4's cap tests; C2d's and C2e's tests; C5d's delete tests |
 | `VISION.md` failures visible | Each course ends in a named state | C1, C3, C6 | C3's report; C6's lines |
-| `CLAUDE.md`, commitment proposals never leave the device | Only a confirmed note or a marker syncs, and no marker carries a class-search key | C2b | C2b's search of every note; `commitments.rs`'s tripwires stay green |
+| `CLAUDE.md`, commitment proposals never leave the device | Only a confirmed note or a marker syncs, and no marker or card carries a class-search key | C2a, C2d | C2d's search of every note after each route; C2a's successor test. The sync tripwires do not read this, so they are not the proof |
 | `CLAUDE.md`, every note write goes through `write` | Adoption's re-key is journal first; nothing re-dumps a note | C2c | C2c's journal-order test |
 | `CLAUDE.md` rule 1 | Per-school data, nothing per student | C4, C8, A1, B1 | `CAMPUSES` tests |
 | `CLAUDE.md` rule 2 | No frozen reference, no fixture touched | every task | F14 checks `engine/tests/fixtures/**` is absent from the diff |
@@ -1057,13 +1183,10 @@ wait for their tasks.
 
 ## 12. Checkpoints
 
-1. **Quinn rules RQ11 and RQ12.** RQ1, RQ2 and RQ6 to RQ10 are ruled.
-2. **`reviewer`, plan mode,** re-reads this r2 before any C or S task goes out; its report lands in
-   `docs/reports/`. Most useful targets: §6.6's adoption, §6.7's path table, and §6.12's purge.
-3. **R0a's result** picks A or B and feeds RQ3 and RQ5. Item (d) goes to Quinn as RQ4 at once. Item (e)
-   confirms the redirect behaviour only: §7.1 is settled unless a hop leaves the LMS host.
+1. **Quinn rules RQ14.** RQ1, RQ2 and RQ6 to RQ13 are ruled.
+2. **`reviewer`, plan mode,** re-reads this r3 before any C or S task goes out; its report lands in
+   `docs/reports/`. Most useful targets: §4.7's layers, §6.7's path table, and §6.12's launch sweep.
+3. **R0a's result** picks A or B and feeds RQ3 and RQ5. Item (d) goes to Quinn as RQ4 at once.
 4. The rulings fold into the plan's §14, and the plan's §7 table gains these rows, by `docs-keeper` on the
    controller's word.
-5. After the build: T3b, then Quinn's go for A4 or B4, then F14 and the plan's §8 checklist.
-
-**Rulings, Quinn, 2026-11-04 (r2):** RQ11: the purge is approved. RQ12: the no-time record may outlive setup. RQ13: a friend at the founder's school is the second account.
+5. After the build: T3b, then F14, then Quinn's go for A4 or B4, then the plan's §8 checklist.
