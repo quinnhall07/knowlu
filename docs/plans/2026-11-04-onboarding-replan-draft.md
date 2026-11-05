@@ -1065,3 +1065,5 @@ wait for their tasks.
 4. The rulings fold into the plan's §14, and the plan's §7 table gains these rows, by `docs-keeper` on the
    controller's word.
 5. After the build: T3b, then Quinn's go for A4 or B4, then F14 and the plan's §8 checklist.
+
+**Rulings, Quinn, 2026-11-04 (r2):** RQ11: the purge is approved. RQ12: the no-time record may outlive setup. RQ13: a friend at the founder's school is the second account.
