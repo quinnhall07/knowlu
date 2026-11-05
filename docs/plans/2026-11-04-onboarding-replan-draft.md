@@ -1190,3 +1190,5 @@ for their tasks.
 4. The rulings fold into the plan's §14, and the plan's §7 table gains these rows, by `docs-keeper` on the
    controller's word.
 5. After the build: T3b, then F14, then Quinn's go for A4 or B4, then the plan's §8 checklist.
+
+**Ruling, Quinn, 2026-11-04:** RQ14: the added clause in RQ6's second sentence is approved as written.
