@@ -747,3 +747,13 @@ their tasks.
    controller's word.
 5. After the build: T3b, then Quinn's go for A4 or B4, then F14 and the plan's §8 checklist.
 
+
+## Rulings, Quinn, 2026-11-04
+
+- **RQ1:** class search sits below the registrar and above the syllabus.
+- **RQ2:** a class-search row is never written without the student's press.
+- **RQ8:** class search runs at setup only in wave B.
+- **RQ9:** a section listed with no meeting time skips the later "when does this meet?" ask.
+- **RQ6:** the replacement privacy text in §10 is approved as written, and the Settings row reads "used for grades and school email".
+- **RQ7:** before a school's row ships: `robots.txt` and any posted terms read and dated in the row, and the question added to the lawyer's list.
+- **RQ10:** `VISION.md` gains the one line in §10.

@@ -85,6 +85,8 @@ is wrong.
 - **Grades from the LMS grade page and from homework platforms** (zyBooks, VHL, Pearson, McGraw-Hill
   Connect and the like), fetched on the device with the student's own sign-in; manual entry fills any
   gap.
+- **A school's public class search**, where a school offers one, on the student's computer and with no
+  sign-in.
 - **Syllabi**, found in the LMS or the school's syllabus system, or added by the student, at
   onboarding and whenever a term starts: class meetings, exam and quiz dates, assignment due dates,
   grade weights and the grading scale, office hours, and the late-work, makeup and attendance
