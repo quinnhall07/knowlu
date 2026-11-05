@@ -430,6 +430,22 @@ student data was involved. Not yet checked: how many real LMS course names carry
 section (`202640-BUI-100-101` is the shape `course_code_in_name` already reads), and any school but
 this one.
 
+**Why the LMS sign-in vanished, same day (a second throwaway probe).** Quinn's order: mail sign-in with
+MFA and "stay signed in", then the LMS.
+- The LMS session rests on session cookies. With a window open, a hidden read answered 200 in 1.4 s.
+  Five seconds after the last window closed, in the same process, it was 401. The LMS host held 4
+  session and 3 persistent cookies signed in, 3 and 3 in a new process. The sign-in host held 1 and 5,
+  then 0 and 5; its persistent cookies' shortest life was 5 hours.
+- **The fix tested: open the LMS's public school sign-in link directly.** The login page carries one
+  `/auth-saml/saml/login` link, readable with no cookies. A hidden window opened straight at it was
+  signed in in 2.9 s (`users/me` 200), never shown, no input; one run. A visible click the same evening
+  took 14 s, with no password and no MFA.
+- Unexplained: the earlier click (S-B step 5) asked for the password. How long the silent path lasts is
+  unmeasured beyond this evening, and it is untested on a fresh folder.
+- The mailbox stayed silent at about 3 hours (4.3 s).
+- Course names: 14 of 19 carry term, subject, number and section in the name; none in the code. 15
+  begin with this term.
+
 **Ruling, Quinn, 2026-11-04: the registrar is optional.** Onboarding must not depend on the registrar
 sign-in. Replanning goes through the planner; which source replaces it is open until then.
 
