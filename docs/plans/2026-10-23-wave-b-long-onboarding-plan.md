@@ -422,7 +422,7 @@ passes. Step 6 passes for mail, fails for the LMS.
 
 **Public class search, tested the same day with no sign-in.** Banner's anonymous class search at the
 founder's school answered: term set by one POST, then JSON. It listed 10,076 sections for the term, in
-the same row shape the registrar parser reads (`courseReferenceNumber`, `sequenceNumber`,
+rows whose meeting fields match the registrar parser's, inside a different wrapper (`courseReferenceNumber`, `sequenceNumber`,
 `meetingsFaculty[].meetingTime` with days, times, building, room, dates). Finding a section by subject and
 number, then filtering on section: 21 sampled sections, 21 found exactly one row, with the same section
 and the same times. `resetDataForm` was called before each search; a search without it is untested. No
