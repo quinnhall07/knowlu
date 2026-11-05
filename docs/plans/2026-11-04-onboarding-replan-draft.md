@@ -1,8 +1,8 @@
 # Wave B replan after the 2026-11-04 live sign-in run: draft
 
-**Status: DRAFT r5, answering review r4 (`docs/reports/2026-11-04-onboarding-replan-review-r4.md`). Not
-yet re-reviewed; nothing dispatched.** Quinn has ruled RQ1, RQ2 and RQ6 to RQ15 (§10). RQ3, RQ4 and RQ5
-wait on R0a. This draft amends
+**Status: DRAFT r5, PASSED review r5 (`docs/reports/2026-11-04-onboarding-replan-review-r5.md`), its three
+minors applied. Awaiting R0a and RQ3 to RQ5; nothing dispatched.** Quinn has ruled RQ1, RQ2 and RQ6 to
+RQ15 (§10). This draft amends
 `docs/plans/2026-10-23-wave-b-long-onboarding-plan.md` ("the plan") and does not edit it. Once the open
 questions are ruled, the rulings fold into the plan as a new §14 entry, and this file is its record.
 
@@ -144,7 +144,7 @@ writes through F8b2's fenced writer. F8b2 follows F8b, and F8b now follows A2 or
 | C0 | `scaffold.rs`: `ClassSearch`, `Curated.class_search`, `Curated.lms_sign_in`, `None` on every row | `mechanical` | one struct and two fields, checked by the compiler; ends the `Curated` collisions | no | none |
 | C1 | Engine: `section_in_name`, `parse_class_search`, the `School` row's name shape | `test-writer`, then `implementer` | specified and test-checked | no | R0b for `parse_class_search`'s keys; `section_in_name` needs nothing |
 | C2a | Engine: the `classsearch:` source row, tier, keep-alive, `classify` arm, note body, never a card, never a successor. About 30 lines in `commitments.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | a wrong tier silently reverses which source wins; the syllabus plan gave the same edit to `integrator` | no, but vault meaning | C1 |
-| C2b | Engine: `purge_class_search`, the no-time block, `uncovered_courses`' new input. About 80 lines in `commitments.rs`, 2 in `cli.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | a miss makes the approved privacy text false, or undoes RQ9 | no, but student data | C2a |
+| C2b | Engine: `purge_class_search`, the no-time block, `uncovered_courses`' new input. About 110 lines in `commitments.rs`, 2 in `cli.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | a miss makes the approved privacy text false, or undoes RQ9 | no, but student data | C2a |
 | C2c | Engine: a registrar read adopts a class-search note (§6.6). About 30 lines in `registrar.rs`, 8 in `commitments.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | it re-keys a confirmed note | no, but vault meaning | C1, C2a, **C2b** |
 | C2d | Engine: Not mine with no marker, the guard in `create_marker_as`, fixed words in `confirm`'s warnings. About 35 lines in `commitments.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | a miss sends a section off the device | no, but student data | C2b |
 | C2e | Engine: backups never hold class-search data. About 20 lines in `commitments.rs`, 35 in `backup.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | a miss outlives the purge for 30 days | no, but student data | C2b |
@@ -468,8 +468,10 @@ deleted, so the fact needs a home of its own. It is a new top-level block in the
   block for good. The lock is taken only then too (`:2299-2302`), and an unlocked write could rename a stale
   copy over a locked registrar write and lose `applied` and `ended` history. So `refresh_series_with` reads
   first with no lock. If a drop is due, it takes the series lock, and `refresh_series_held` re-reads under
-  it and writes. With nothing due it takes no lock and writes what it writes today. `rank` calls it on every
-  run (`cli.rs:837`). This is the record's ruled lifetime, decided by the date, and reads no credential.
+  it and writes. With nothing due it takes no lock and writes what it writes today. `refresh_series_held`
+  stores for a drop only when it holds the lock. After a failed lock (`:2313-2317`), or when the first read
+  missed the drop, it stores nothing and the block waits for the next `rank`. `rank` calls it on every run
+  (`cli.rs:837`). This is the record's ruled lifetime, decided by the date, and reads no credential.
 - **Accepted limit.** A clock set ahead past the term drops the block for real, and setting it back does
   not restore it. Those courses get the later ask. Nothing the student typed is lost.
 - A registrar read leaves it alone. The registrar may list no time either, and the block's only job is
@@ -719,8 +721,9 @@ true, because `found` rows sit in the series file. So unconfirmed rows are purge
 | The no-time block | series file | sign-out, `change_school`, the launch sweep on a confirmed signed out, and the first `rank` after the term changes (§6.5). It outlives setup end (RQ12) |
 | Confirmed notes | `commitments/` | never. They are the student's plan, and they sync, as the text says |
 
-**The operation.** `commitments::purge_class_search(vault, scope)`, with scope `Rows` or `All`, `All` adding
-the no-time block. It reads the file first, with no lock. A clean file means no lock, no `state/` folder
+**The operation.** `commitments::purge_class_search(vault, scope, today)`, with scope `Rows` or `All`, `All`
+adding the no-time block. All four callers pass `today`, so the term test reads no clock in the engine. It
+reads the file first, with no lock. A clean file means no lock, no `state/` folder
 created and no write. A dirty file takes the series lock, **re-reads the file under it**, and deletes those
 entries from that fresh copy, directly, never through `aged_out`. The first read only decides whether to
 lock, so nothing another writer stored in between is lost. It also drops a block whose term has passed
@@ -992,6 +995,9 @@ Tests:
   and writes nothing, as today.
 - **The drop holds the lock.** With nothing `fresh`, the drop takes the series lock before it writes, and a
   registrar `applied` or `ended` entry stored between the unlocked read and the lock survives it.
+- **A failed lock.** With the lock not taken, `rank` stores nothing and its warning names the lock. The same
+  holds for a drop `refresh_series_held` sees with no lock held, and the next `rank` that gets the lock
+  drops the block.
 - **What is not passed.** A block of a future term is ignored and kept through `rank`. A block whose school
   gives `term_for` `None`, or whose term cannot be placed in `School::terms`, is kept.
 - **The ask limit, pinned.** An ask filed before the block was written still stands after it (§6.5).
@@ -1283,12 +1289,13 @@ One at a time, each with a recommendation. RQ4 holds the S tasks. The rest can w
 | Quinn, 2026-11-04 | What stays as a bonus keeps working as it does | C2c only | engine `registrar.rs` changes by C1's new functions and adoption; existing registrar tests unedited; `app/src/registrar.rs` absent from every diff |
 | Quinn, RQ1 | Registrar, class search, syllabus, Google, the rest | C2a, C9 | C2a's order tests |
 | Quinn, RQ2 | No row reaches a confirmed commitment without a press on that row, on any screen | C2a, C2d, C6, C10 | §6.7's path table; C10's review case; C2a's never-a-card and never-a-successor tests through `rank` |
-| Quinn, RQ6, RQ14 | The approved privacy text, with the added clause, is true, literally | C2b, C2e, C5d, F2c, S7 | C2b's purge and term-change tests; C2e's backup tests; C5d's caller and sweep tests; S7's page |
+| Quinn, RQ6, RQ14 | The approved privacy text, with the added clause, is true, literally, with one named exception: after a failed Finish purge, a re-attached vault, or a moved vault with a new registry id, keeps its rows and bundle until sign-out | C2b, C2e, C5d, F2c, S7 | C2b's purge and term-change tests; C2e's backup tests; C5d's caller and sweep tests; S7's page |
 | Quinn, RQ15 | A failed Finish purge is retried at the next launch: confirmed signed in with `finished` true runs the bundle delete, then `Rows`, never `All` | C5d | C5d's exception case; its `onboarding.json` seam case |
 | Quinn, RQ11 | Unconfirmed rows are purged at setup end and sign-out | C2b, C5d | C2b's purge tests; C5d's caller and sweep tests |
 | Quinn, RQ12 | The no-time record may outlive setup | C2b | C2b's survival tests |
 | Review r3, 1 and 2 | The sweep runs nothing destructive short of a confirmed signed out, RQ15's row apart, read from the credential the app's own reads use | C5d | C5d's `session_answer` table; its nothing-destructive cases, 1312 and the moved vault among them; `contract-reviewer` on the diff |
 | Review r3, Minor 10 | Two accepted limits: a `lab` row covers nothing, and the no-time block stops new asks only. No `approvals.rs` edit in wave B | C2a, C2b | C2a's and C2b's limit pins; `approvals.rs` absent from every diff |
+| Review r4, 1 and Minor 2 | Every series-file write from a drop or a purge holds the series lock and re-reads under it. With no lock, a drop stores nothing and waits for the next `rank` | C2b | C2b's "The drop holds the lock", "A failed lock" and "Changed under it" tests |
 | Quinn, RQ13 | A friend at the founder's school is the second account | A4 or B4 | the check's record in A4 or B4 |
 | Quinn, RQ7 | `robots.txt` and terms read and dated before a row ships | R0b, C4, C9 | §6.10's check; `checked` date; the lawyer's list |
 | Quinn, RQ8 | Class search runs at setup only | C5c | no slot step or scheduler entry in any diff |
@@ -1327,8 +1334,7 @@ One at a time, each with a recommendation. RQ4 holds the S tasks. The rest can w
 ## 12. Checkpoints
 
 1. **Rulings.** Every question is ruled, except RQ3 to RQ5, which wait on R0a.
-2. **`reviewer`, plan mode,** re-reads this r5 before any C or S task goes out; its report lands in
-   `docs/reports/`. Most useful targets: §6.12's fail-safe rule, §4.7's layers, and §6.7's path table.
+2. **`reviewer`, plan mode,** passed this draft at r5 (`docs/reports/2026-11-04-onboarding-replan-review-r5.md`).
 3. **R0a's result** picks A or B and feeds RQ3 and RQ5. Item (d) goes to Quinn as RQ4 at once.
 4. The rulings fold into the plan's §14, and the plan's §7 table gains these rows, by `docs-keeper` on the
    controller's word.
