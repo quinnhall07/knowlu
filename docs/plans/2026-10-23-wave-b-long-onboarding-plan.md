@@ -446,6 +446,13 @@ MFA and "stay signed in", then the LMS.
 - Course names: 14 of 19 carry term, subject, number and section in the name; none in the code. 15
   begin with this term.
 
+**The next day's results (2026-11-05).**
+- The mailbox stayed silent at about 25.5 hours (4.3 s). The hidden LMS link failed about 22 hours after its pass, stalling on the sign-in host.
+- Once lapsed, the kept folder's page asked for the password only, no MFA. A visible LMS password sign-in did not restore the hidden link: it failed 6 s and about 25 minutes later.
+- **Clean run on an empty folder:** one school mailbox sign-in, one MFA, then the hidden LMS link signed in in 2.4 s, with no click and no password. A mailbox sign-in creates the session the LMS rides on; an LMS password sign-in does not. One run so far, and the registrar was not retested. Link and cookie lifetimes are being measured.
+- LMS cookies held in memory, read directly with no window open: 200 at minutes 0 and 30 so far.
+- Saved-password fill: on an empty folder the sign-in page is two-step, username first. Two hidden tries did not pass the username step; the corrected run sent no password. The login was deleted afterwards.
+
 **Ruling, Quinn, 2026-11-04: the registrar is optional.** Onboarding must not depend on the registrar
 sign-in. Replanning goes through the planner; which source replaces it is open until then.
 
