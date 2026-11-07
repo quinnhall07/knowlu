@@ -33,30 +33,27 @@
   --measure: 900px; /* main column reading width */
   --shell:  1560px; /* the whole app's max width */
 
-  --sans: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, sans-serif; /* body face */
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace; /* data/metadata face */
+  /* Q-B24 (2026-10-24): every piece of text is Zilla Slab, through the one --su-font token.
+     --sans and --mono stay as names for the old call sites and both resolve to it. */
+  --su-font: "Zilla Slab", Georgia, "Times New Roman", serif;
+  --sans: var(--su-font); /* body face */
+  --mono: var(--su-font); /* data/metadata face: figures ask for tabular-nums where they align */
+  --code: ui-monospace, SFMono-Regular, Consolas, monospace; /* pasted diagnostics only (#report-text) */
 }
 /* Deliberately single-theme: a console is dark. Every colour is painted from a
    token, so the page never borrows the host ground. */
 :root { color-scheme: dark; }
 
 /* ---- vendored fonts (S2 §6: the shipped page is offline by construction) ---- */
-@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/instrument-sans-400.woff2") format("woff2"); }
-@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 500; font-display: swap; src: url("fonts/instrument-sans-500.woff2") format("woff2"); }
-@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 600; font-display: swap; src: url("fonts/instrument-sans-600.woff2") format("woff2"); }
-@font-face { font-family: "Instrument Sans"; font-style: normal; font-weight: 700; font-display: swap; src: url("fonts/instrument-sans-700.woff2") format("woff2"); }
-@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/jetbrains-mono-400.woff2") format("woff2"); }
-@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 500; font-display: swap; src: url("fonts/jetbrains-mono-500.woff2") format("woff2"); }
-@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 600; font-display: swap; src: url("fonts/jetbrains-mono-600.woff2") format("woff2"); }
-/* F11p1: the setup frame and onboarding (`.setup`, `.picker`) set every piece of text in Zilla Slab;
-   only the logo is set in the serif caption face. The console's own faces above are untouched. */
+/* F11p1 and Q-B24: every piece of text, in the console and in `.setup`/`.picker`, is Zilla Slab;
+   only the logo is set in the serif caption face. */
 @font-face { font-family: "Zilla Slab"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/zilla-slab-400.woff2") format("woff2"); }
 @font-face { font-family: "Zilla Slab"; font-style: normal; font-weight: 600; font-display: swap; src: url("fonts/zilla-slab-600.woff2") format("woff2"); }
 @font-face { font-family: "Zilla Slab"; font-style: normal; font-weight: 700; font-display: swap; src: url("fonts/zilla-slab-700.woff2") format("woff2"); }
 @font-face { font-family: "PT Serif Caption"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/pt-serif-caption-400.ttf") format("truetype"); }
 
 * { box-sizing: border-box; }
-body { background: var(--canvas); color: var(--t1); font-family: var(--sans); font-size: 14px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
+body { background: var(--canvas); color: var(--t1); font-family: var(--sans); font-size: 14px; line-height: 1.45; font-variant-numeric: lining-nums tabular-nums; -webkit-font-smoothing: antialiased; }
 
 .app { display: grid; grid-template-columns: 264px minmax(0,1fr) 356px; min-height: 100vh; max-width: var(--shell); margin: 0 auto; }
 
@@ -70,7 +67,7 @@ nav a {
   padding: 5px var(--s2); margin-bottom: 1px; border-radius: var(--r2);
   color: var(--t3); text-decoration: none; font-size: 13.5px; font-weight: 500;
 }
-nav a .ct { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--t4); font-variant-numeric: tabular-nums; }
+nav a .ct { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--t4); font-variant-numeric: lining-nums tabular-nums; }
 nav a:hover { background: var(--s2c); color: var(--t2); }
 nav a.on { background: var(--s2c); color: var(--t1); }
 .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--hair-2); flex: none; }
@@ -141,7 +138,7 @@ h1 .no { color: var(--crit); }
 .track { height: 4px; border-radius: 2px; background: var(--s3c); position: relative; }
 .track.none { background: transparent; }
 .track i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--acc); }
-.hrs { font-family: var(--mono); font-size: 12px; color: var(--t3); text-align: right; font-variant-numeric: tabular-nums; }
+.hrs { font-family: var(--mono); font-size: 12px; color: var(--t3); text-align: right; font-variant-numeric: lining-nums tabular-nums; }
 .more { font-family: var(--mono); font-size: 11px; color: var(--t4); padding: var(--s3) 0 0; }
 
 /* ============ right rail ============ */
@@ -186,7 +183,7 @@ aside { border-left: 1px solid var(--hair); padding: var(--s5) var(--s5) var(--s
 .card .w .src, .row.dec .why .src { color: var(--t4); margin-left: var(--s2); }
 .card .cf { display: flex; gap: var(--s2); align-items: flex-start; font-family: var(--mono); font-size: 10.5px; line-height: 1.55; color: var(--warn); background: var(--warn-dim); border-radius: var(--r1); padding: var(--s2); margin-bottom: var(--s3); }
 .acts { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
-button.b { font-family: var(--sans); font-size: 12.5px; font-weight: 500; border-radius: var(--r2); padding: 4px 10px; cursor: pointer; border: 1px solid var(--hair-2); background: var(--s2c); color: var(--t2); }
+button.b { font-family: var(--sans); font-size: 12.5px; font-weight: 600; border-radius: var(--r2); padding: 4px 10px; cursor: pointer; border: 1px solid var(--hair-2); background: var(--s2c); color: var(--t2); }
 button.b:hover { border-color: var(--t4); color: var(--t1); }
 button.b.pri { background: var(--acc); border-color: var(--acc); color: #04140F; }
 button.b.pri:hover { background: #4FC79A; }
@@ -494,7 +491,7 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
    the sheet has no `.set-row[hidden]` rule, so the overlay's new `#up-code-row` would show through
    its own `hidden` attribute without this. */
 .set-row[hidden] { display: none; }
-#report-text { width: 100%; font: 12px/1.5 var(--mono); background: var(--s2c); color: var(--t2); border: 1px solid var(--hair); padding: 8px; resize: vertical; }
+#report-text { width: 100%; font: 12px/1.5 var(--code); background: var(--s2c); color: var(--t2); border: 1px solid var(--hair); padding: 8px; resize: vertical; }
 
 /* ---- C1c Task 8 (R-C1c-8): the first-run view replaces the day ---- */
 /* While `first_run` is on the envelope, `.app` carries `first-run` (console.js, renderFirstRun) and
@@ -670,7 +667,6 @@ button.b.crit:hover { background: var(--crit-dim); color: var(--crit); border-co
    Zilla Slab through the one `--su-font` token (F11p1); the console's `--sans` and `--mono` are not
    used here. Every class carries `su-`: `.mark`, `.lede` and `.row` mean something else in this sheet. */
 .setup, .picker {
-  --su-font: "Zilla Slab", Georgia, "Times New Roman", serif;
   font-family: var(--su-font);
   --su-ground: oklch(0.17 0.025 258); --su-board: oklch(0.205 0.028 258); --su-board-2: oklch(0.245 0.03 258);
   --su-rule: oklch(0.95 0.01 258 / 0.10); --su-rule-2: oklch(0.95 0.01 258 / 0.18);

@@ -709,9 +709,10 @@ All 30 tokens live at the top of `console.css`, commented with what each is *for
 - **Spacing, 4px base — every gap on the page comes from it:** 4 inside a control · 8 label to
   value · 12 row padding and column gap · 16 related rows · 24 heading to body · 32 blocks in a
   column · 48 between sections · 64 between zones. Radii 4 / 6 / 8.
-- **Type:** Instrument Sans (UI) + JetBrains Mono (all figures, times, ids). Deliberately not
-  Inter — Linear's own face and the flagged "safe" default. **Both vendored**; the page makes no
-  network request.
+- **Type:** Zilla Slab for all text (400 body, 600 labels and buttons, 700 headings and figures),
+  through the one `--su-font` token; `--sans` and `--mono` resolve to it (Q-B24, 2026-10-24).
+  Figures ask for `tabular-nums`. PT Serif Caption is the logo only. **Vendored**; the page makes
+  no network request.
 - **Widths:** `--measure 900px` (main), `--shell 1560px`. Past the shell the page gains **gutters,
   not width** — without the cap, `1fr` stretched and left an ~800px void between a task title and
   its hours at 1920.
@@ -742,7 +743,7 @@ all eight viewports ≥ 820 reported `ok` across Today and the three plan-2 view
   *Back* / *Next* bottom-right of the column. There is no rail, no topline and no nav — this window
   has no vault to render one from — and *Back* is present but does nothing on panel 1.
 - **Picker** (`1280-picker.png`) — the same centred column: **Knowlu**, the question *Which vault?*,
-  then one profile row (`Ada` over its vault path in JetBrains Mono `--t3`) with a filled *Open*
+  then one profile row (`Ada` over its vault path in `--t3`) with a filled *Open*
   button at the right edge and a hairline under it, and below that the two buttons right-aligned —
   *Use an existing vault…* outlined, *Create a new vault…* filled. The wording is R-P4a-22's, not
   the spec's *Add another…*.

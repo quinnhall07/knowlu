@@ -27,10 +27,11 @@ fn the_three_deletions_stayed_deleted_and_the_tokens_are_all_there() {
 #[test]
 fn every_font_the_page_names_is_vendored() {
     let css = read("console.css");
-    for f in ["instrument-sans-400", "instrument-sans-500", "instrument-sans-600", "instrument-sans-700", "jetbrains-mono-400", "jetbrains-mono-500", "jetbrains-mono-600"] {
-        assert!(css.contains(&format!("fonts/{f}.woff2")), "@font-face for {f}");
-        assert!(Path::new("static/fonts").join(format!("{f}.woff2")).is_file(), "{f}.woff2 vendored");
+    for f in ["zilla-slab-400", "zilla-slab-600", "zilla-slab-700", "pt-serif-caption-400"] {
+        assert!(css.contains(&format!("fonts/{f}.")), "@font-face for {f}");
+        assert!(std::fs::read_dir("static/fonts").unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with(f)), "{f} vendored");
     }
+    assert!(!css.contains("Instrument Sans") && !css.contains("JetBrains Mono"), "Q-B24: the old faces are gone");
     assert!(Path::new("static/fonts/SOURCES.md").is_file());
 }
 
@@ -3172,7 +3173,7 @@ fn f11p1_setup_and_picker_text_is_zilla_slab_through_one_token_and_only_the_logo
         assert!(css.contains(&format!("font-weight: {w}")));
     }
     assert!(css.contains("fonts/pt-serif-caption-400.ttf") && !css.contains("not vendored yet"));
-    assert!(css.contains("--su-font:") && css.contains("--sans: \"Instrument Sans\""), "one scoped token; the console's own --sans stays");
+    assert!(css.contains("--su-font:") && css.contains("--sans: var(--su-font)") && css.contains("--mono: var(--su-font)"), "Q-B24: one token; the console's --sans and --mono resolve to it");
     assert!(css.contains(".setup button, .setup input, .picker button, .picker input { font-family: var(--su-font)"), "controls follow the token");
     assert!(!css.contains(".picker button, .picker input { font-family: var(--sans)"));
     let uses = |src: &str| src.lines().filter(|l| l.contains("PT Serif Caption") && !l.contains("@font-face")).count();
