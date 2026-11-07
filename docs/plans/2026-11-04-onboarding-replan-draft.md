@@ -1262,6 +1262,15 @@ with two rows blank, no planning-day note, `setup` true, Finish pressed, and nei
   rule's one exception (§6.12). A confirmed signed in with `finished` true runs the bundle delete, then
   `Rows`, and never `All`. Without it, a student whose write failed at Finish would keep rows and the bundle
   past setup, and "deleted when setup finishes" would be untrue for them.
+- **RQ16. The school password (ruled 2026-11-07):** Knowlu keeps the student's school sign-in in Credential
+  Manager exactly as it keeps every other portal login (`knowlu/<profile_id>/<source>`, on the device,
+  never sent to the cloud), and signs the course site back in silently when its session lapses. It is the
+  default, not an opt-in. Basis: the spike's hidden fill on an empty folder signed in in 8 s with no Okta
+  prompt, once the fill waited for the page to register each box (§3, 11-07). A rejected password is asked
+  for once and never retried. The privacy page states it plainly; that wording does not hold the feature.
+  This supersedes the "about one password a day" fallback as the plan, pending the 24-hour repeat run.
+- **RQ4. One folder or two (ruled 2026-11-07):** two. The LMS signs in on its own empty folder with the
+  saved password, so it does not need the mailbox's sign-in beside it, and "Disconnect" stays per source.
 
 ### Open
 

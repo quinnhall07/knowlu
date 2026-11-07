@@ -453,6 +453,13 @@ MFA and "stay signed in", then the LMS.
 - LMS cookies held in memory, read directly with no window open: 200 at minutes 0 and 30 so far.
 - Saved-password fill: on an empty folder the sign-in page is two-step, username first. Two hidden tries did not pass the username step; the corrected run sent no password. The login was deleted afterwards.
 
+**Correction and results, 2026-11-06 and 11-07.** The 11-05 claim that "a mailbox sign-in creates the session the LMS rides on" is **withdrawn**: on 11-06 a mailbox-only sign-in (MFA, both "stay signed in" pressed) did not carry the link, which failed 6 s later on a password page. The 11-05 pass is unexplained.
+- **The LMS lapse is about 12 hours from sign-in, used or not.** After a mailbox sign-in and one LMS password (no MFA), the hidden link passed every 30 minutes up to 11 h 45 and failed every check from 12 h 15 to the run's end. A 14-hour idle gap also fails. Keeping it warm does not extend it.
+- **Saved session dropped.** LMS cookies held in memory and used every 30 minutes answered 200 to minute 158 and 401 at minute 188.
+- **No second route.** The LMS public login page holds only the one school SAML link, and its main button goes to the same link. There is no Microsoft or other provider to use.
+- **Saved password works.** A hidden window on an empty folder, filling the school's own sign-in page from Credential Manager, signed in to the LMS in 8.2 s, with no MFA and no window shown. The earlier failures were the fill's: it pressed the first button in the form (the show-password control), and it submitted in the same instant it set the value, before the page had registered it, so the page read the box as blank. The fill now focuses the box, sets it, fires input, keyup and change, leaves the box, waits 1.5 s, then presses the form's own submit. A 24-hour repeat (fresh folder every 3 hours, stop at the first failure) is running.
+- **Ruling, Quinn, 2026-11-07:** the school password is kept like every other portal login and is the default, not an opt-in (replan RQ16). The LMS and the mailbox get **two folders** (replan RQ4).
+
 **Ruling, Quinn, 2026-11-04: the registrar is optional.** Onboarding must not depend on the registrar
 sign-in. Replanning goes through the planner; which source replaces it is open until then.
 
