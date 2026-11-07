@@ -1,8 +1,10 @@
 # Wave B replan after the 2026-11-04 live sign-in run: draft
 
-**Status: DRAFT r5, PASSED review r5 (`docs/reports/2026-11-04-onboarding-replan-review-r5.md`), its three
-minors applied. Awaiting R0a and RQ3 to RQ5; nothing dispatched.** Quinn has ruled RQ1, RQ2 and RQ6 to
-RQ15 (§10). This draft amends
+**Status: DRAFT r6, revised 2026-11-07 for the 11-06 and 11-07 spike results and Quinn's rulings RQ3,
+RQ4, RQ5 and RQ16. Not yet reviewed at r6; nothing dispatched.** r5 passed review
+(`docs/reports/2026-11-04-onboarding-replan-review-r5.md`). r6 replaces outcomes A and B and the shared
+folder (§2, §4.3). Quinn has ruled RQ1 to RQ16 (§10); RQ17 and RQ18 are open. **The
+plan stands pending R0c, the 24-hour repeat run** (§2.3). This draft amends
 `docs/plans/2026-10-23-wave-b-long-onboarding-plan.md` ("the plan") and does not edit it. Once the open
 questions are ruled, the rulings fold into the plan as a new §14 entry, and this file is its record.
 
@@ -10,11 +12,14 @@ questions are ruled, the rulings fold into the plan as a new §14 entry, and thi
 
 **Authority.** The cloud design wins where it speaks. Then Quinn's ruling of 2026-11-04 (the plan's §3,
 "Results of the 2026-11-04 live run"): the registrar is optional, and onboarding must not depend on a
-registrar sign-in. That ruling retires spec §4.2 item 1 ("Registrar, automatically"), and Q1's "one
-sign-in" stands only if outcome A holds. The rest of the spec and the plan stand unless this draft
-says otherwise.
+registrar sign-in. That ruling retires spec §4.2 item 1 ("Registrar, automatically"). Quinn's rulings of
+2026-11-07 (RQ3, RQ4, RQ5, RQ16) come next: the school password is saved by default, the LMS and the
+mailbox each get their own folder, the LMS signs in hidden at setup from Knowlu's own form, and a lapsed
+LMS session signs back in silently every time. With two folders,
+Q1's "one sign-in" is not met as written, so C9 drafts a signed note on Q1 (§2.2). The rest of the spec
+and the plan stand unless this draft says otherwise.
 
-**How to read it.** §1 corrects three premises against the code. §2 says what decides A or B. §4 is
+**How to read it.** §1 corrects three premises against the code. §2 says how the LMS signs in now. §4 is
 the task list. §5 is the registrar, §6 the class-search reader (§6.6 its own source, §6.7 the press
 rule, §6.12 what is deleted), §7 the LMS link. §10 holds the rulings and the open questions.
 
@@ -53,36 +58,72 @@ One smaller fact: the app's `ureq` has no cookie jar (`app/Cargo.toml` says noth
 Banner holds the chosen term in an anonymous session. C4 carries that one session cookie by hand, on
 the stack, for one run. It is not a sign-in and is never stored.
 
-## 2. What decides outcome A or B
+## 2. How the LMS signs in (rewritten 2026-11-07)
 
-**Outcome A:** one visible sign-in on a fresh folder, then the LMS link and the mailbox are both
-silent in a new process. **Outcome B:** two visible sign-ins, the LMS and the mailbox.
+r5's outcomes A and B are **withdrawn**. They asked whether one sign-in covers both the LMS and the
+mailbox, and r5 leaned on the 11-05 claim that a mailbox sign-in carries the LMS session. That claim is
+withdrawn (the plan's §3, "Correction and results, 2026-11-06 and 11-07"). So are `A-lms`, `A-mail`, the
+`school_sign_in` enum and the shared folder.
 
-| R0a's result on a fresh folder | Outcome | Where the visible sign-in happens |
-|---|---|---|
-| LMS sign-in alone leaves the LMS link and the mailbox silent | A | the LMS (`A-lms`) |
-| Mailbox sign-in alone leaves both silent; LMS-first does not | A | the school mailbox (`A-mail`) |
-| Neither alone covers both | B | the LMS at step 3, the mailbox at step 5 |
+### 2.1 What the 11-06 and 11-07 runs settle
 
-**The link's lifetime is a separate axis.** If the link dies before 12 hours, A and B still describe
-the first run, and the cost lands on grades alone. The feed link is a bearer URL captured once, so
-assignments keep arriving. Only grades, and the marks they drive for turned-in work, need the LMS
-session. That goes to Quinn as RQ3. It adds no task to either list.
+- **The mailbox does not carry the LMS.** A mailbox-only sign-in did not carry the link. Nothing here
+  relies on one sign-in covering both.
+- **The LMS session lapses about 12 hours after sign-in, used or not.** Keeping it warm does not extend
+  it. No task keeps a window open or polls to keep a session alive.
+- **Saved cookies are dropped.** LMS cookies held in memory died near 3 hours. No task stores or replays
+  an LMS cookie.
+- **There is one route.** The LMS's public login page holds only the school's own sign-in link (§7.1).
+- **The saved password works.** A hidden window on an empty folder, filling the school's own sign-in
+  page from Credential Manager, signed in to the LMS in about 8 s, with no MFA and no window shown. The
+  earlier failures were the fill's own mistakes. §7.5 holds the rules that fixed them.
 
-**Why one shared folder is the recommendation in both.** The one silent run came after a mail sign-in with MFA
-and "stay signed in", on the same folder. The likely carrier is the sign-in host's persistent cookies,
-which the mail sign-in wrote. Two separate folders might therefore lose the silent link even in B.
-R0a's item (d) tests this directly. This draft recommends one folder in both outcomes (RQ4), but that
-is not ruled, so the S tasks wait for item (d) and RQ4 (§4.2).
+### 2.2 The design that follows
 
-**`school_sign_in` is a default, never a promise.** Its value comes from one account's R0a. Another
-student may decline "stay signed in", or their school may treat them differently. So at every value:
-- Step 5 shows the visible mailbox window whenever the hidden mailbox read asks for a sign-in, even at
-  an `AtLms` school. The step never assumes the mailbox is silent.
-- A hidden LMS read that fails shows one visible window at the link (§7.4), even at an `AtMailbox` school.
+- **Two folders (RQ4).** The LMS gets its own kept folder, used by grades and the course-list capture. The
+  school mailbox keeps its own `mail-session-<id>` folder, as the mail lane built it. "Disconnect" stays
+  per source.
+- **The school password is saved by default (RQ16).** It is stored like every other portal login: target
+  `knowlu/<profile_id>/school` in Credential Manager, written by `credentials::write`, read by
+  `wincred::read_credential`. It stays on the device. It is never sent to the cloud, returned to the page,
+  logged, or put in a run record.
+- **Step 3 (RQ5).** The student types the school username and password once, into Knowlu's own form, as
+  for every other portal login. A hidden window opens at the link and fills the school's page (§7.5). No
+  school page is shown. If that hidden sign-in fails at setup, for any reason, Knowlu shows the school's
+  own page in one visible window so the student can finish there. Knowlu never captures a password typed
+  on the school's page.
+- **A lapse (RQ3).** Every hidden LMS read that meets the school's sign-in page fills it again, silently,
+  every time.
+- **After setup, only two things reach the student.** The school rejected the saved password: it is asked for once
+  and never retried, because a retry risks a lockout. Or the fill cannot read the page. Only these show
+  the named signed-out row ("Sign in to update grades") and the Settings sign-in.
+- **Step 5 (RQ5).** One visible school-mailbox sign-in, on the mailbox's own folder: MFA once and "stay
+  signed in". After it, mail stays silent, as the mail lane built it. The saved password is not filled
+  into the mailbox.
+- **Q1.** The student now types one password and does one mailbox sign-in. Spec §1.3's "one sign-in" is
+  not met as written, so C9 drafts a signed note on Q1. In r5 that note was outcome B's alone.
+- **Rule 1.** Which host the fill may fill is curated row data (`sign_in_hosts`, S2). A row with
+  `lms_sign_in` and no `sign_in_hosts` gets no fill: the student signs in in a visible window at the link.
 
-A2 pins both fallbacks with a test. The row is relied on only after a friend's account at the founder's
-school has passed the check (A4, RQ13).
+### 2.3 Pending: R0c, the 24-hour repeat run
+
+R0c is running: a fresh folder every 3 hours, stopping at the first failure. **The plan stands pending
+it.** P1 to P3 do not depend on its answer. P4's words and P5's proof do, so they wait for it.
+
+**If R0c shows an MFA prompt on a fresh sign-in:**
+- The fill never answers MFA. An MFA page is a page the fill cannot read (§7.5), so it stops and names
+  the outcome. P2's code does not change.
+- Each lapse, about one every 12 hours, would then need a visible sign-in with MFA. RQ3's "silently every
+  time" could not hold, so RQ3 goes back to Quinn with the old choices: the signed-out row and a sign-in
+  from Settings, or grades refreshed only when the student signs in.
+- At setup, RQ5's fallback already covers it: the fill stops at MFA and the school's page opens in one
+  visible window. P4's words change to say why.
+- If MFA shows only sometimes, the same rules apply to each attempt. R0c records how often, for Quinn.
+- The password stays saved either way. It still saves the typing on every sign-in.
+- P5 counts MFA prompts as well as windows.
+
+**A sample of one.** R0c is one account. P5 repeats the check on a friend's account at the founder's
+school (RQ13) before the default is relied on.
 
 ## 3. Checked against VISION and the two rules
 
@@ -103,8 +144,14 @@ school has passed the check (A4, RQ13).
   (RQ12, RQ14).
 - **Failures are visible.** Each course ends in a named state (§6.5). A school that closes guest
   search reads as closed, never as "no classes".
-- **Rule 1, no single-user assumptions.** Class search, the link prefix and the sign-in place are all
-  curated row data, per school. Nothing is per student or hand-edited.
+- **Portal credentials never leave the device.** The school password is in Credential Manager, keyed by
+  profile, read only in the app's own process, and filled only into the school's own sign-in page on a
+  curated host over https (§7.5). No cloud call, page reply, log or run record carries it. Passes.
+- **Failures are visible.** A rejected password or a page the fill cannot read is a named row, never a
+  silent stop. A rejection is never retried, so Knowlu cannot lock a student out. Passes.
+- **Rule 1, no single-user assumptions.** Class search, the link prefix and the fill's sign-in hosts are
+  all curated row data, per school. The credential target is `knowlu/<profile_id>/school`, derived and
+  never hand-edited. Nothing is per student or hand-edited.
 - **Rule 2, frozen references.** No task touches `engine/tests/fixtures/**`. New tests use invented
   rows inline, as `engine/src/registrar.rs`'s tests already do. No frozen reference changes.
 
@@ -112,32 +159,40 @@ school has passed the check (A4, RQ13).
 
 The plan's §2 constraints all carry over: TDD with `todo!` stubs, 0 warnings, about 80 lines per file
 per task, tests never leave the machine, no new capability, every live step the controller's.
-**Contract list:** the only contract-list file touched in the whole replan is `app/src/account.rs`,
-by the plan's existing S5, S7 and F2c. No new task touches the list: the purge at sign-out sits inside
+**Contract list:** the only contract-list file the replan edits is `app/src/account.rs`, by the plan's
+existing S5, S7 and F2c. S5 now also deletes the saved school password (§4.5, RQ17), so S5 stays
+`contract-engineer`'s. **The saved password goes through the app's existing credential code:**
+`credentials::target_for`, `write`, `exists` and `delete`, and `wincred::read_credential`, all already
+public. No task plans an edit to `app/src/credentials.rs` or `engine/src/wincred.rs`. Both are on the
+contract list, so if any task finds it needs one, that edit is `contract-engineer`'s, `contract-reviewer`
+reads the diff, and the controller is told before it lands. P1 and P2 handle the password itself, so they
+are `contract-engineer`'s too, though their files are off the list. No other new task touches the list: the purge at sign-out sits inside
 `on_sign_out`, which F2c's `sign_out_clean` already calls, and that function keeps its signature.
 The launch sweep only reads `account::cloud_config`, `account::session_target` and
 `wincred::read_credential`, all already public. `commitments.rs`, `registrar.rs`, `backup.rs`, `scaffold.rs`, `lms_link.rs` and `grades.rs` are
 off the list, but C2a to C2e and C8 can silently damage vault meaning, student data or a session, so
 they take stronger agents or reviewers than the list alone would require.
 
-Task ids are new and do not collide: `R` decision runs, `C` common, `A` outcome A, `B` outcome B.
-**Counts:** 3 decision runs, 18 common tasks plus T3b, 4 for outcome A, 4 for outcome B.
+Task ids are new and do not collide: `R` decision runs, `C` common, `P` the saved school password. r5's
+`A1` to `A4` and `B1` to `B4` are withdrawn with outcomes A and B (§2), and no id is reused.
+**Counts:** 4 decision runs (R0a done), 18 common tasks plus T3b, and 6 for the saved password.
 
 ### 4.1 Decision runs (common; first)
 
 | Task | What | Agent | Why | Contract list? | Depends on |
 |---|---|---|---|---|---|
-| R0a | Tomorrow's sign-in run (brief in §8) | main session | live; Quinn at the machine; a throwaway build | no | none |
+| R0a | The sign-in runs, 11-05 to 11-07. **Done**; results in the plan's §3 and §2.1 here (brief in §8) | main session | live; Quinn at the machine; a throwaway build | no | none |
 | R0b | The class-search spike: public data, no sign-in (brief in §8) | main session | live reads are the controller's | no | none |
-| T3a | S-G alone, split from T3: hidden reads while the student is elsewhere, now through the link | main session | live; S4a-S4c depend on it | no | R0a's build |
+| R0c | The 24-hour repeat of the saved-password fill, **running** (brief in §8) | main session | live; the throwaway build | no | R0a |
+| T3a | S-G alone, split from T3: hidden reads while the student is elsewhere, now through the link | main session | live; S4a and S4b depend on it | no | R0a's build |
 
-### 4.2 Common to both outcomes
+### 4.2 Common tasks
 
 **What needs no sign-in result:** C0, C1, C2a to C2e, C3, C4, C5a, C5b, C7, C8 and C10. C1's and C4's
 exact keys wait on R0b, not on R0a.
 
-**What does:** C5c, C5d and C6 are common to both outcomes but cannot land before the result. C5c
-writes through F8b2's fenced writer. F8b2 follows F8b, and F8b now follows A2 or B2, which wait on R0a.
+**What waits on the sign-in work:** C5c, C5d and C6. C5c writes through F8b2's fenced writer. F8b2
+follows F8b, and F8b now follows P3 (§4.3). P3 does not wait on R0c.
 
 | Task | What | Agent | Why | Contract list? | Depends on |
 |---|---|---|---|---|---|
@@ -164,9 +219,11 @@ writes through F8b2's fenced writer. F8b2 follows F8b, and F8b now follows A2 or
 
 | File | Order |
 |---|---|
-| `scaffold.rs` | C0, C8's row, C4's row if its curation check passes, S2, then A1 or B1 |
-| `lms_link.rs` | C8, then S4b |
-| `grades.rs` | C8, then S4a |
+| `scaffold.rs` | C0, C8's row, C4's row if its curation check passes, then S2 (with the founder's `sign_in_hosts`) |
+| `lms_link.rs` | C8, then S4b, then P3 |
+| `grades.rs` | C8, then S4a, then P3 |
+| `onboarding.rs` | P1 only (`retarget_credentials`' source list) |
+| `school_session.rs` | S2, then S6a, then P3's step-3 sign-in |
 | `commitments.rs` | C2a, C2b, C2c, C2d, C2e, then C3's wiring |
 | `cli.rs` | C2b, then C3 |
 | engine `registrar.rs` | C1, then C2c |
@@ -175,35 +232,31 @@ writes through F8b2's fenced writer. F8b2 follows F8b, and F8b now follows A2 or
 | `main.rs` | the plan's chain, F4, F5, F4c, F5b, S6r; then C5d's call in `main` |
 | `onboarding.js` | C7 at any point; C6 last, after F11e2 |
 
-**Held for R0a's item (d) and RQ4.** S1, S2, S3, S4a, S4b, S4c, S5, S6t, S6a, S6r, S6b, S7, S8 and S9, as
-§4.5 changes them, are not common yet. If Quinn rules two folders in outcome B, they become outcome
-A's alone. So none goes out until item (d) is in and Quinn has answered RQ4, which is asked the moment
-it is. The plan's own rule points the same way: no O4 task goes out before the finding reaches Quinn
-and the planner.
+**Released by RQ4.** S1, S2, S3, S4a, S4b, S5, S6t, S6a, S6r, S6b, S7, S8 and S9, as §4.5 changes them for
+two folders, are now common. S4c is dropped (§4.5). The finding has reached Quinn and the planner, so the
+plan's rule that holds O4 tasks is met. S4a and S4b still wait on T3a for S-G.
 
 **After the rewrite, common.** **T3b** (main session): S-E and S-F's live half, moved so they time the
 chosen flow (§4.6). It depends on F4c: `main.rs` holds neither `Queue::start` nor `load_state_for_launch`
 yet, so until F4c lands no queue runs and there is nothing to time.
 
-### 4.3 Outcome A only
+### 4.3 The saved school password (RQ3, RQ16; replaces outcomes A and B)
 
 | Task | What | Agent | Why | Contract list? | Depends on |
 |---|---|---|---|---|---|
-| A1 | Row data: the founder's school's `school_sign_in` as `AtLms` or `AtMailbox`, and `sign_in_hosts` | `implementer` | one data line plus a `CAMPUSES` test; the value cites R0a | no | R0a, S2 |
-| A2 | S4d, as A: one visible window at the row's place; the signed-in test for that place; then the hidden reads; both of §2's fallbacks | `implementer`, reviewed by `contract-reviewer` | as S4d | no | A1, S4a, S4b, **S4c**, C8. **F8b follows it** |
-| A3 | Page: step 3's one sign-in and its "stay signed in" line; step 5 asks nothing unless the mailbox asks | `console-ui` | inside F11e1 and F11b, in the panel merge order; Quinn reads the words | no | A2 |
-| A4 | S10 and F15's outcome-A checks: one prompt in all, mail and LMS silent; a friend's account checks that the row's value holds (RQ13) | main session | live; Quinn's go | no | A2, A3, T3b, S9, F14 |
+| P1t | Failing tests for P1 and for P2's pure decisions (briefs in §8) | `test-writer` | specified; its one real-credential test needs the file-scoped `CREDMAN_LOCK` and the controller's sign-off, as `test-writer`'s rule says | no | S2 for the row's `sign_in_hosts` |
+| P1 | App: `app/src/school_password.rs`: save, read inside the process, the rejected mark, forget; the save command; `retarget_credentials` moves the `school` source | `contract-engineer`, then `contract-reviewer` | it holds a student's school password; a silent error leaks it or locks the account. It routes through `credentials.rs` and `wincred.rs` and edits neither | no; routes through `credentials.rs` | P1t |
+| P2 | App: `app/src/school_fill.rs`: the fill of the school's sign-in page in a hidden window (§7.5) | `contract-engineer`, then `contract-reviewer` | it puts the password into a page; a wrong host or a second submit leaks it or locks the account | no | P1, C8 |
+| P3 | Wiring: the hidden LMS reads fill on a lapse (§7.4); step 3's sign-in from the saved password replaces S4d; the rejected and unreadable outcomes show the named row | `implementer`, reviewed by `contract-reviewer` | as S4d; P2 holds the risky part | no | P2, S4a, S4b. **F8b follows it** |
+| P4 | Page: step 3's school password form and its line; step 5's own mailbox sign-in; Settings' "Update school password"; spec §1.3's "You won't sign in to these again" goes | `console-ui` | inside F11e1, F11b and S6b, in the panel merge order; Quinn reads the words | no | P3, **R0c** |
+| P5 | S10 and F15's checks: one typed password, no visible LMS window, one mailbox sign-in; a lapse past 12 hours signs back in silently; one deliberately wrong password is asked once and never retried; a friend's account repeats it (RQ13) | main session | live; Quinn's go | no | P3, P4, T3b, S9, F14, **R0c** |
 
-### 4.4 Outcome B only
+The signed note that Q1's "one sign-in" is not met as written (§2.2) is now always needed. C9 drafts it.
 
-| Task | What | Agent | Why | Contract list? | Depends on |
-|---|---|---|---|---|---|
-| B1 | Row data: `school_sign_in` as `TwoSignIns`, and `sign_in_hosts` | `implementer` | as A1 | no | R0a, S2 |
-| B2 | S4d, as B: the visible LMS sign-in at the link at step 3; step 5's visible mailbox sign-in on the folder RQ4 chose | `implementer`, reviewed by `contract-reviewer` | as S4d | no | B1, S4a, S4b, S4c, C8. **F8b follows it** |
-| B3 | Page: step 3's and step 5's words for two sign-ins; spec §1.3's "You won't sign in to these again" goes | `console-ui` | inside F11e1 and F11b; Quinn reads the words | no | B2 |
-| B4 | S10 and F15's outcome-B checks: two prompts at most, later reads silent; a friend's account checks that the row's value holds (RQ13) | main session | live; Quinn's go | no | B2, B3, T3b, S9, F14 |
+### 4.4 What happens if R0c shows MFA
 
-Outcome B also needs a signed note that Q1's "one sign-in" is not met at this school. C9 drafts it.
+No task changes. P4's words and P5's checks follow §2.3's branch, and RQ3 goes back to Quinn before P4
+goes out.
 
 ### 4.5 Existing tasks: dropped, changed, kept
 
@@ -212,33 +265,35 @@ Outcome B also needs a signed note that Q1's "one sign-in" is not met at this sc
 exist, `lms_link::validate_only` and `capture_link_only` are still `todo!` stubs, and no
 `school_session.rs` exists. The controller re-checks before the first dispatch.
 
-**Dropped (2).**
+**Dropped (3).**
 
 | Task | Why |
 |---|---|
 | F8h-runner | `registrar.confirm` leaves onboarding, so its runner and `registrar_file_missing` have no job |
 | F8b's registrar half | Onboarding no longer captures registrar rows. `REGISTRAR_FILE` and `onboarding-registrar.json`, which F2b2b's comment reserves, are never built; C5b removes the comment |
+| S4c | Two folders (RQ4): the school mailbox stays on its own `mail-session-<id>` folder, so the mail window, `mail/commands.rs` and `mail_session.rs` change nothing for O4 |
 
-**Changed (19).**
+**Changed (20).**
 
 | Task | Change |
 |---|---|
 | T3 | Split: T3a (S-G) stays early; T3b (S-E, S-F's live half) moves after the rewrite (§4.6) |
-| S1 | `add_use(Registrar)` goes; the uses are grades and school mail |
-| S2 | `shared_sign_in` becomes `school_sign_in`, an enum (`Separate`, `AtLms`, `AtMailbox`, `TwoSignIns`), every row `Separate` until A1 or B1 |
-| S3 | The registrar leaves tests 1, 3, 5 and 8; the fake-agent host pairs drop it. The navigation allow list still refuses the registrar host |
+| S1 | `add_use(Registrar)` and `add_use(SchoolMail)` go: the folder is the LMS's alone (RQ4), and its uses are grades and the course list. `profile_for` gives it to grades and the LMS capture only. The folder holds no password: that is in Credential Manager (P1) |
+| S2 | `shared_sign_in` is withdrawn, and so is r5's `school_sign_in` enum. The row keeps `sign_in_hosts`: the hosts the fill may fill on (§7.5), set on the founder's row from R0a's record, empty elsewhere. A `CAMPUSES` test refuses a host with a scheme, a path or a port |
+| S3 | The registrar leaves tests 1, 3, 5 and 8; the fake-agent host pairs drop it. Test 1 drops the school mailbox. Test 4's shared-folder navigation list and its fallback go, and so does test 7: the mail lane's own tests stand unedited. Test 4 gains one named exception: P2's fill, in the LMS folder's hidden window, on a `sign_in_hosts` host only |
 | S4b | `lms_link.rs` only. `registrar.rs` stays on its incognito throwaway window, so "the registrar never shares this profile" stays true |
-| S4d | Replaced by A2 or B2. Every plan row that names S4d now names "A2 or B2" |
-| S6b | The row reads "used for grades and school email" (spec §2.5 said "grades, class times and school email") |
-| S7 | The page carries RQ6's approved text, with RQ14's clause. The text is true only with C2e, C5d and F2c merged, so S7's page waits for all three |
+| S4d | Replaced by P3. Every plan row that names S4d now names P3 |
+| S5 | Also deletes the saved school password, `knowlu/<profile_id>/school`: at sign-out (RQ17, recommended, not ruled) and in `delete_local_data`'s source list beside `zybooks` and `vhl`. Tests in `app/tests/account.rs` under its `CREDMAN_LOCK`, with generated ids and `Drop` cleanup. `contract-engineer`, as before |
+| S6b | The row's words wait on RQ18 (recommended: "used for grades and your course list"); the mailbox keeps its own row. It gains "Update school password", which P4 builds. Forget deletes the folder and the saved password |
+| S7 | The page carries RQ6's approved text, with RQ14's clause, and one plain line that the school password is kept on this computer (RQ16). That line's words do not hold the feature. The text is true only with C2e, C5d and F2c merged, so S7's page waits for all three |
 | S8 | The plan's §9 row A6 is withdrawn; rows A1 and A5 lose the registrar |
-| S10 | The registrar read leaves it. A4 or B4 holds the prompt count |
-| F8b | Capture half only: one hidden window through the link does the feed, the course list and the grades before it closes, because the session dies with the last window on the folder (§7.3). No `registrar_rows`. **Its S4d dependency becomes A2 or B2**, so it waits on R0a, and F8b2, F8b2-advance, F8g, F3z, F8lb and C5c wait with it |
+| S10 | The registrar read and the shared mailbox leave it. P5 holds the prompt count |
+| F8b | Capture half only: one hidden window through the link does the feed, the course list and the grades before it closes, because the session dies with the last window on the folder (§7.3). No `registrar_rows`. **Its S4d dependency becomes P3**, and F8b2, F8b2-advance, F8g, F3z, F8lb and C5c wait with it |
 | F8b2 | The capture files it fences are `onboarding-class-search.json`, not the registrar file |
 | F8w1 | No `registrar.confirm` arm, so no interim `registrar_runner_pending`. It gains the two class-search arms, so it lands after C5c |
-| F11e1 | Step 3's sign-in follows A3 or B3 |
+| F11e1 | Step 3's sign-in follows P4 |
 | F11e2 | The proof's course list marks a course that was not found in class search with a "doesn't look like a class" hint. The student still decides (§6.4). The hint's data comes from C5c, so it lands after C5c |
-| F11b | Step 5 follows A3 or B3 |
+| F11b | Step 5 follows P4: the mailbox's own sign-in on its own folder |
 | F12 | The walk-through drops its registrar fixture and adds class-search rows, and one run with no class search at all |
 | F13 | The plan's §9 rows change as C9 lists them |
 | F15 | `finish_ready: true` on the build to merge, once with class-search rows and once with class search failing or absent, and never by a registrar read. Its F8h-runner dependency becomes C5c, and it gains T3b |
@@ -247,7 +302,7 @@ The plan's §8 O3-to-`main` checklist changes with F15: its `registrar_runner_pe
 gave class times" item go. In their place: `app/src` holds no `registrar.confirm`, and F15's two runs
 passed.
 
-**Kept, not altered.** S4a, S4c, S5, S6t, S6a, S6r, S9, F2c, F3z, F4c, F8la, F8lb, F8b2-advance, F8g,
+**Kept, not altered.** S4a, S6t, S6a, S6r, S9, F2c, F3z, F4c, F8la, F8lb, F8b2-advance, F8g,
 F8w2, F11d, F11f and F14. Every merged task stands. F7a's `--registrar` input stays in the engine: it
 is small, tested and documented, and it does no harm unused. S4a and S4b keep their scope and land
 after C8 (§4.2's file table).
@@ -257,7 +312,7 @@ after C8 (§4.2's file table).
 S-E and S-F's live half run **after the rewrite**, as T3b, on the chosen flow and before F15. Timing
 the old flow would measure a sign-in path that no longer exists. Moving them changes four things:
 
-- **T3 cannot move whole.** S4a, S4b and S4c depend on T3 for S-G's result, so S-G stays early as T3a.
+- **T3 cannot move whole.** S4a and S4b depend on T3 for S-G's result, so S-G stays early as T3a.
 - **S-F rides with S-E.** The plan runs them in one session and S-F's check needs a first full slot.
   This is the planner's call, not Quinn's words. The cost is that a thin step-3 proof shows up late.
 - **S-E's gates become checks on built code.** Its "before F8f" gate is past, since F8f is merged. A
@@ -268,24 +323,25 @@ T3b also records class search's seconds, and the step-3 wait it adds.
 
 ### 4.7 Order
 
-1. **At once, in parallel.** R0a and R0b. C0, C5a and C7, then C8 and C5b. The `section_in_name` tests.
-   T3a follows R0a's build. `parse_class_search`'s tests wait for R0b's keys.
+1. **At once, in parallel.** R0b, and R0c already running. C0, C5a and C7, then C8 and C5b. The
+   `section_in_name` tests. T3a on R0a's build. `parse_class_search`'s tests wait for R0b's keys.
 2. **The engine chain.** C1, C2a, C2b, then C2c, C2d and C2e in that file order, then C3. C4 runs beside
    C2a once C1 and C0 are in. C10 follows C2a.
-3. **R0a's result.** Item (d) goes to Quinn as RQ4. S1, then S2 once C8's row and C4's row are in, then S3,
-   then S4a to S4c. Item (c) picks A or B: A1 or B1, then A2 or B2.
-4. **The queue.** After A2 or B2, the plan's `onboarding_jobs.rs` chain: F8b, F8b2, F8b2-advance, F8g,
+3. **The LMS folder and the password.** S1, then S2 once C8's row and C4's row are in, then S3, then S4a
+   and S4b. P1t once S2 is in, then P1, then P2 once C8 is in, then P3.
+4. **The queue.** After P3, the plan's `onboarding_jobs.rs` chain: F8b, F8b2, F8b2-advance, F8g,
    F3z, F8lb, then C5c in F8h-runner's old place, then F8w1 and F8w2. Then `main.rs`'s chain: F4c, F5b, S6r.
    Then C5d.
-5. **The screens.** In the panel merge order: F11b and F11e1 with A3 or B3 inside them, F11e2, then C6.
+5. **The screens.** In the panel merge order: F11b and F11e1 with P4 inside them once R0c is in, F11e2,
+   then C6. P4's Settings button follows S6b.
 6. **The O4 tail.** S7 once C2e, C5d and F2c are in, then S8 and S9.
-7. **Reviews and live.** C9, F12, F13, T3b, then F14, then A4 or B4, then the plan's §8 checklist. A4
-   and B4 hold S10 and F15's checks, and F15 follows F14, so the review comes first. **No wave-B release
-   before S7's page is deployed**, as the plan already rules.
+7. **Reviews and live.** C9, F12, F13, T3b, then F14, then P5, then the plan's §8 checklist. P5 holds S10
+   and F15's checks, and F15 follows F14, so the review comes first. **No wave-B release before S7's page
+   is deployed**, as the plan already rules.
 
 **The order has no cycle.** Each row below depends only on rows above it, on earlier tasks in its own row,
 or on merged work. The edges are §4.1 to §4.5's, plus every row of the plan's §7 table: its dependency
-column and the file chains its rows name. S4d reads as A2 or B2, and F8h-runner as C5c.
+column and the file chains its rows name. S4d reads as P3, and F8h-runner as C5c.
 
 **The table is complete as far as this branch can show.** Each task in the plan's §7 table that is not
 below was read and is either merged or waits on no task below. Merge state comes from this branch's code
@@ -295,28 +351,30 @@ the ones the code leaves unclear: F5c's names are on `main.rs`'s list, F8lb's tw
 
 | Layer | Tasks | Waiting on, from the layers above |
 |---|---|---|
-| 1 | R0a, R0b, C0, C5a, C7 | nothing |
-| 2 | T3a, RQ3 to RQ5, C1, C8, C5b | R0a; R0b; C0; C5a |
+| 1 | R0a (done), R0b, C0, C5a, C7 | nothing |
+| 2 | T3a, R0c, RQ17, RQ18, C1, C8, C5b | R0a; R0b; C0; C5a |
 | 3 | C2a, C4 | C1; C0, R0b |
 | 4 | C2b, C10 | C2a |
 | 5 | C2c, C2d, C2e, C3 | C1, C2a, C2b |
-| 6 | S1, then S2, S3, S5 | RQ4; S2 also C8's row and C4's row |
-| 7 | S4a, S4b, S4c, F2c, A1 or B1 | S3, T3a, C8; F2e, S5; R0a, RQ5, S2 |
-| 8 | F8la, S6t, then S6a, S6b | S4b; S4a to S4c; S5 |
-| 9 | A2 or B2 | A1 or B1, S4a to S4c, C8 |
-| 10 | F8b, F8b2, F8b2-advance, F8g, F3z, F8lb, then F5 if open for F8lb's two commands | A2 or B2, F8la, F2b2b, F2b4 |
-| 11 | C5c, F8w1, F8w2, F4c, then F5b if open, S6r, C5d | C3, C4, C5b, F8b, F8b2, F8lb; F4, F4b, F5, F2b2b; F10, S6a; C2b, F2e |
-| 12 | F11d and F11c2 if open, then A3 or B3 inside F11b and F11e1, then F11e2, then C6 | A2 or B2, F8lb, F8g, F3z, C5c, C3 |
-| 13 | S7, F7b if Q-B10 is yes, S8, S9 | C2e, C5d, F2c, A2 or B2, S4a to S4c, S5, S6b, S6r |
-| 14 | C9, F12, F13, T3b | every C task; F11e2; C9; F4c, F8w2, C6 |
-| 15 | F14, then A4 or B4, then the §8 checklist | F13, T3b, S9, A3 or B3 |
+| 6 | S1, then S2, S3, S5 | RQ4 (ruled); S2 also C8's row and C4's row; S5 also RQ17 |
+| 7 | S4a, S4b, F2c, P1t | S3, T3a, C8; F2e, S5; S2 |
+| 8 | F8la, S6t, then S6a, S6b, and P1 | S4b; S4a and S4b; S5, RQ18; P1t |
+| 9 | P2 | P1, C8 |
+| 10 | P3 | P2, S4a, S4b |
+| 11 | F8b, F8b2, F8b2-advance, F8g, F3z, F8lb, then F5 if open for F8lb's two commands | P3, F8la, F2b2b, F2b4 |
+| 12 | C5c, F8w1, F8w2, F4c, then F5b if open, S6r, C5d | C3, C4, C5b, F8b, F8b2, F8lb; F4, F4b, F5, F2b2b; F10, S6a; C2b, F2e |
+| 13 | F11d and F11c2 if open, then P4 inside F11b and F11e1 and after S6b, then F11e2, then C6 | P3, R0c, S6b, F8lb, F8g, F3z, C5c, C3 |
+| 14 | S7, F7b if Q-B10 is yes, S8, S9 | C2e, C5d, F2c, P1 to P3, S4a, S4b, S5, S6b, S6r |
+| 15 | C9, F12, F13, T3b | every C task; F11e2; C9; F4c, F8w2, C6 |
+| 16 | F14, then P5, then the §8 checklist | F13, T3b, S9, P4, R0c |
 
 Five edges were wrong in earlier rounds and are fixed above: S2 sat before C8's row while S1 to S4c
-followed C8; C2c ran beside C2b while needing it; A4 and B4 ran before F14, while they hold F15's check
-and F15 follows F14; F4c was missing, so T3b read as ready with no queue started; and S6r sat before F4c,
-against `main.rs`'s chain. A3 and B3 also moved to layer 12, because they live inside F11b and F11e1.
+followed C8; C2c ran beside C2b while needing it; the live proof ran before F14, while it holds F15's
+check and F15 follows F14; F4c was missing, so T3b read as ready with no queue started; and S6r sat before
+F4c, against `main.rs`'s chain. r6 replaces A1 to B4 with P1t to P5 and drops S4c: P3 takes S4d's place
+before F8b, and P4 sits inside F11b and F11e1, as A3 and B3 did.
 
-## 5. The registrar is optional in both outcomes
+## 5. The registrar is optional
 
 **What stays on `main` as a bonus:**
 - `app/src/registrar.rs`, `commitments --registrar`, R24, and applied-and-listed, unchanged.
@@ -855,8 +913,11 @@ the link at curation (§6.10, item 5).
 
 - **Hidden:** `grades::open_hidden` starts at the link, and at `https://<host>/ultra/` as today when the
   row has no prefix or the link was `None`. `read_hidden`'s ending changes (§7.4).
-- **Visible:** a visible LMS sign-in opens at the link too, so the student skips the login page. That
-  may also avoid the password ask that R0a's item (b) is chasing.
+- **Visible:** a visible LMS sign-in opens at the link too, so the student skips the login page. With
+  the saved password it is only the fallback: a rejected password, a page the fill cannot read, or a
+  school row with no `sign_in_hosts`.
+- **The fill:** when the hidden window at the link lands on the school's sign-in page, P2 fills it from
+  the saved password (§7.5).
 - **Everything else stands:** no capability, cookies read per host, and `users/me` read only on the LMS
   host. A test pins that the anonymous GET sends no `cookie` header.
 
@@ -866,9 +927,14 @@ The LMS session dies when the last window on the folder closes, so F8b does the 
 list and the grades capture in **one** hidden window before it closes. After a close, the next open
 waits the measured 250 ms (S-B's step 4), and `school_session`'s lock holds it for that long.
 
+The sign-in behind the link lapses about 12 hours after it was made, used or not (§2.1). No window is
+kept open between slots and nothing keeps it warm, because neither extends it. The next hidden read
+after a lapse fills the page again (§7.4, §7.5).
+
 ### 7.4 When a hidden refresh fails
 
-No new state. It is today's signed-out path, reached from a new start page.
+C8 builds the table below with no new state: today's signed-out path, reached from a new start page.
+P3 then puts the fill in front of it (after the table).
 
 **`reached` no longer tells anything.** The link is on the LMS host, so `read_hidden`'s `reached` goes true on
 its first poll. A session that fails at the identity provider would then rest on a 401, and one transport
@@ -888,20 +954,62 @@ An identity provider that is down reads as signed out. That is the accepted cost
 sign-in row, and a press there shows what is wrong. A window that starts at `/ultra/` ends the same as
 today under `hidden_outcome`, which C8's tests pin.
 
-Always: the hidden window is destroyed, never shown, and nothing is typed. One try per slot, so a
-long-dead session costs one window a slot and never hammers the identity provider. The row stays exit
-0, so the tray stays green. The student sees the sign-in row in Settings and signs in there.
+**With the saved password (P3, RQ3).** A hidden read whose window lands on a `sign_in_hosts` page fills
+it (§7.5), silently, every time the session has lapsed. The fill's answer replaces the "not on the LMS
+host" row:
 
-**Inside onboarding** the same failure right after a visible sign-in means the session did not carry.
-`school.capture` then shows one visible window at the link, rather than sending the student to the
-paste fallback. If that is closed or fails, step 3's feed-link paste stands, with its named cost.
+| Fill outcome | Named outcome | What follows |
+|---|---|---|
+| Signed in: `users/me` answers 200 within `SETTLE` | capture | the mark clears |
+| `Rejected` (§7.5) | `SignedOut`, reason "password" | the saved password is deleted and the rejected mark set; the row reads "Sign in to update grades"; no fill again until the student saves a new password |
+| `CannotRead` before any submit | `SignedOut` | the row as above; the password stays; the next slot tries again, since nothing was sent |
+| `CannotRead` after a submit (an MFA page, an unknown page) | `SignedOut`, reason "needs you" | the fill pauses until the student signs in once in a visible window or saves the password again; no automatic retry |
+| No saved password, or the row has no `sign_in_hosts` | `SignedOut` | today's path: the named row and Settings' sign-in |
+
+Always: the hidden window is destroyed and never shown. Knowlu sends no keyboard or mouse input; the
+fill sets fields inside the page (§7.5). At most one fill per hidden read and one hidden read per slot,
+so the identity provider is never hammered. The row stays exit 0, so the tray stays green. The student
+sees the sign-in row only in the cases above, and signs in from Settings.
+
+**Inside onboarding (RQ5)**, step 3 saves the password, then one hidden window at the link fills and
+reaches `users/me` 200 (P3). **Any** failure of that hidden sign-in at setup, `Rejected` and `CannotRead`
+alike, shows the school's own page in one visible window at the link, so the student can finish there,
+rather than going to the paste fallback. Knowlu reads nothing the student types on that page. After a
+`Rejected`, the saved password is already deleted, so step 3 shows one line offering "Update school
+password". That line is the one ask, and the next fill waits for the student's new save. If the visible
+window is closed or fails, step 3's feed-link paste stands, with its named cost.
+
+### 7.5 The fill (P2)
+
+The 11-07 run found the rules below. Each is a test in P1t.
+- **Where.** Only in the LMS folder's hidden window, only on a host in the row's `sign_in_hosts`, only
+  over `https`. The host and scheme are checked again before each field. Anything else ends the attempt
+  as `CannotRead`, with nothing filled.
+- **The page is two-step.** It asks for the username, then the password. While a school session is live
+  it may ask for the password only. The fill handles both and nothing else.
+- **Each field at most once per attempt.** A field seen a second time in one attempt ends it.
+- **How a field is set.** The order the evidence block records (focus, set, the page's input events,
+  leave the box, then a wait of about 1.5 s), so the page has registered the value before the submit.
+- **Which button.** The form's own submit control, never the first button in the form: that can be a
+  show-password control.
+- **`Rejected`.** After the password's submit, the page asks for the password again or shows its own
+  error. Anything else after that submit that is not the LMS is `CannotRead` after a submit.
+- **The secret.** It is read from Credential Manager inside the app's process for that one attempt. It
+  never reaches Knowlu's page, a log, a run record, a test name or an error message, as `credentials.rs`'s
+  own rules say. Tests use invented values.
+- **Never MFA.** The fill never reads or answers an MFA page. If R0c finds one, §2.3 applies.
 
 ## 8. Task briefs
 
 Behaviour and tests only. Every test uses invented names, sections and hosts. Each `test-writer` half
 leaves its tests compiling and failing at run time.
 
-### R0a. The sign-in run (main session, Quinn at the machine)
+### R0a. The sign-in run (main session, Quinn at the machine): done
+
+**Done, 11-05 to 11-07.** The answers are in the plan's §3 and in §2.1 here. (a) The session lapses about
+12 hours from sign-in, used or not. (b) The password asks were the fill's own faults, now fixed. (c) and
+(d) The mailbox does not carry the LMS, and the LMS signs in alone from the saved password. (e) is moot:
+the fill does not rest on "stay signed in". The brief as run is kept below for the record.
 
 The plan's §3 rules apply: a throwaway build, no debug port, counts and host kinds only, folders deleted.
 Each item runs on a **fresh** folder unless it says otherwise.
@@ -916,6 +1024,15 @@ Each item runs on a **fresh** folder unless it says otherwise.
 - **(e) "Stay signed in" declined,** if time allows: the same as (a) at a shorter gap. This also feeds
   §2's fallbacks.
 
+### R0c. The 24-hour repeat run (main session): running
+
+The throwaway build, under the plan's §3 rules. A fresh, empty folder every 3 hours, a hidden window at
+the link, the fill from the test account's saved password, stopping at the first failure. Record per
+run: signed in or not, seconds, whether an MFA page appeared, and which step the page asked for. Never a
+password, a cookie, a path or a name. Afterwards the folder goes, the saved login is deleted, and the
+result is written in the plan's §3. A clean run leaves this plan as written. Any MFA page sends §2.3's
+branch to Quinn before P4 goes out.
+
 ### R0b. The class-search spike (main session, no sign-in)
 
 Public pages only. No student's courses: use a few sections from the public list itself. Record keys,
@@ -929,7 +1046,7 @@ or cross-list field; seconds per query; whether a plain `ureq`-style request is 
 
 Adds `ClassSearch` (§6.10), `Curated.class_search` and `Curated.lms_sign_in`, `None` on every row, so no
 later task edits the struct. Tests that build rows use `..CAMPUSES[0]`, so they compile unchanged. S2's
-`school_sign_in` stays S2's, because it waits on RQ4.
+`sign_in_hosts` stays S2's. r5's `school_sign_in` is withdrawn (§2).
 
 ### C1. Engine: the name and the parse
 
@@ -1159,7 +1276,7 @@ Acceptance: side-by-side shots.
 
 ### C7. Page: the week strip's turned-in note (amends §14.58.5)
 
-Quinn's addition, common to both outcomes. The plan's §14.58.5 gains one bullet:
+Quinn's addition, common to every school. The plan's §14.58.5 gains one bullet:
 - **The note.** Under the days, "N turned in, kept off your list", with N exactly `step3.turned_in`.
 - **When it shows:** only while the strip shows, and only when the field is a number of at least 1.
   `0`, `null` or absent shows nothing, with no placeholder. `null` means no grades bundle, so the count
@@ -1198,7 +1315,10 @@ The founder's row sets `lms_sign_in` to its prefix, in `scaffold.rs`'s order (§
 
 `docs-keeper` drafts, for Quinn's signature: spec §1.3 step 3 and §2.4's uses; a dated line retiring spec
 §4.2 item 1; the plan's §9 row A6 withdrawn and rows A1, A3 and A5 narrowed; the syllabus spec's E4 tiers; the plan's
-§14.58.5 bullet; and, on outcome B, the note on Q1. Also the curation check in `docs/reference/app.md`,
+§14.58.5 bullet; the note on Q1 (§2.2: one typed password and one mailbox sign-in, not "one sign-in");
+and the spec §2.4 and §2.5 lines for two folders and the saved school password. Also, in
+`docs/reference/app.md`, the `knowlu/<profile_id>/school` credential, when it is deleted, and the fill's
+rules (§7.5). Also the curation check in `docs/reference/app.md`,
 `commitments --class-search`, Not mine's row removal, `purge_class_search` and backups' filtered copy in
 `docs/reference/engine-commands.md`, the launch sweep in `docs/reference/app.md`, the `class_search` block in `docs/surface/anatomy.md` if the overview
 is documented there, app data's new file, and `CLAUDE.md`'s `commitments` line if Quinn wants the
@@ -1211,6 +1331,80 @@ Pins in `app/tests/`, over `console.js`. A `fromClassSearch(p)` mirrors `fromReg
 other source keeps today's preset. `renderRegistrar` and `paintRegistrarAdded` never list one. No
 `classsearch:` row carries the registrar's label. The test builds the review's case: step 10 confirmed
 with two rows blank, no planning-day note, `setup` true, Finish pressed, and neither row written.
+
+### P1t. Failing tests: the saved password and the fill's decisions
+
+`app/tests/school_password.rs` and `app/tests/school_fill.rs`, new. Invented usernames, passwords and
+hosts only. Every test but one runs over an injected credential store and a fake page.
+- **The target** is `credentials::target_for(profile_id, "school")`, built by that function and never by
+  hand. Two profiles never share one.
+- **Save** writes through the injected store. The save command's reply holds no secret, and neither do
+  its error text or `Debug` output.
+- **Read** happens inside the process only. No Tauri command returns it.
+- **Rejected.** Marking a rejection deletes the saved password. If the delete fails, the rejected mark
+  still blocks every fill. A new save clears the mark.
+- **Paused.** "Needs you" pauses the fill. A visible sign-in that reaches `users/me` 200, or a new save,
+  ends the pause.
+- **Forget** deletes the password and both marks.
+- **`retarget_credentials`** moves `school` with `zybooks` and `vhl`, writing the new target before it
+  deletes the old.
+- **The fill's decisions**, through a fake page, one test per rule in §7.5: a host outside
+  `sign_in_hosts`, `http`, or a redirect mid-attempt fills nothing; the username step, then the password
+  step; the password-only page; a field seen twice ends the attempt; the submit pressed is the form's own,
+  never a show-password control placed first; the wait comes before the submit; a password asked again
+  after its submit is `Rejected`; an MFA-like page after the submit is `CannotRead` after a submit; any
+  unknown page before a submit is `CannotRead` with nothing sent.
+- **One real credential test**, under a file-scoped `CREDMAN_LOCK`, with a generated profile id and a
+  `Drop` guard: save, read, forget through the real `credentials.rs` and `wincred.rs`. The controller
+  signs it off before it is written, as `test-writer`'s rule requires.
+
+### P1. App: `school_password.rs` (contract-engineer)
+
+Makes P1t's password tests pass. Routes through `credentials::target_for`, `write`, `exists` and
+`delete`, and `wincred::read_credential`, and edits neither file; if an edit to either seems needed, stop
+and tell the controller. One Tauri command saves (step 3 and Settings use it). It goes in the console's
+`generate_handler!` list beside the module; recount before quoting the number. `onboarding.rs`'s
+`retarget_credentials` list gains `school`. The marks live in the profile's app data, never in the vault,
+and hold no secret. About 80 lines. `contract-reviewer` reads the diff.
+
+### P2. App: `school_fill.rs` (contract-engineer)
+
+Makes P1t's fill tests pass. The pure decision is one function over the page's shape, the host, the
+scheme and what this attempt has filled. The window side runs it in the LMS folder's hidden window and
+nowhere else (S3 test 4's one exception). It never shows the window, and never sends keyboard or mouse
+input to the desktop. About 80 lines. `contract-reviewer` reads the diff.
+
+### P3. Wiring: the lapse and step 3 (implementer)
+
+Tests first, over `read_hidden_with`'s fakes (C8): a hidden read meeting the sign-in page runs the fill,
+then `hidden_outcome`; each row of §7.4's fill table, by name; one fill per read; a second slot after
+`Rejected` runs no fill; a slot after "needs you" runs no fill until the pause ends. On step 3, through
+`school_session`'s seam (S4d's replacement), per RQ5: the saved password leads to one hidden window and
+a signed-in LMS, with no window shown; `Rejected` and `CannotRead` each open one visible window at the
+link, and the visible window's page is never read for typed values; after `Rejected`, no fill runs
+until a new save. A window the student closes is `signed-out`, never an error. `contract-reviewer` reads
+the diff.
+
+### P4. Page: the password form and the words (console-ui)
+
+Pins in `app/tests/onboarding_static.rs` and `app/tests/static_assets.rs`. Step 3's form asks for the
+school username and password and sends them once to P1's command. The page keeps neither after the
+reply, and the reply never holds them. Under the form, one line says the password is kept on this
+computer. While the hidden sign-in runs, no school page shows. If it fails, step 3 says the school's
+page is opening so the student can finish there (RQ5). After a rejection, step 3 shows one line offering
+"Update school password", and says the school did not accept the saved one. Step 5 is one visible
+mailbox sign-in, with a line asking the student to accept "stay signed in". Settings' "Update school
+password" opens the same form. Words are Quinn's. Waits on R0c.
+
+### P5. The live proof (main session, Quinn's go)
+
+A dev build against staging on a scratch profile at the founder's school, with no debug port. Record
+counts, seconds and host kinds only. Steps: one typed password into Knowlu's form, no visible school
+page; one visible mailbox sign-in with one MFA, then mail silent; a hidden read past 12 hours signs back
+in silently. Then one deliberately wrong password on the
+test account only: it is asked for once and is never sent again. A friend's account repeats the first
+three (RQ13), never the wrong-password step. Afterwards the scratch profile, its credentials and folders
+are removed.
 
 ## 9. Follow-ups, not in wave B
 
@@ -1229,14 +1423,15 @@ with two rows blank, no planning-day note, `setup` true, Finish pressed, and nei
 
 ## 10. Rulings and open questions
 
-### Ruled, Quinn, 2026-11-04
+### Ruled, Quinn, 2026-11-04 and 2026-11-07
 
 - **RQ1. Precedence:** class search sits below the registrar and above the syllabus (§6.6). It amends the
   syllabus spec's E4 tiers (C9).
 - **RQ2. The press:** a class-search row is never written without the student's press (§6.7). Read
   strictly, that is one press per row, on every screen. r1's "these are all mine" option is withdrawn.
 - **RQ6. Privacy text:** approved, with RQ14's clause, and the Settings row reads "used for grades and
-  school email". It holds only with the purge (RQ11).
+  school email". It holds only with the purge (RQ11). The Settings words are reopened as RQ18, because
+  RQ4's two folders give the mailbox its own row. The class-search text below is unchanged.
   > "At schools with a public class search, Knowlu looks up your classes there from this computer,
   > without signing in. The results stay on this computer and are deleted when setup finishes or you
   > sign out, except a list of which classes show no meeting time, which stays on this computer until
@@ -1254,7 +1449,7 @@ with two rows blank, no planning-day note, `setup` true, Finish pressed, and nei
   types a time Knowlu once had, and step 10 warns them. Not mine leaves no marker. Setup's answers
   cannot be revisited after Finish.
 - **RQ12. The no-time record:** may outlive setup (§6.5). It holds only course keys the vault already has.
-- **RQ13. The second account:** a friend at the founder's school (A4 or B4).
+- **RQ13. The second account:** a friend at the founder's school (P5; r5 named A4 or B4).
 - **RQ14. The added clause:** approved as written, and folded into RQ6's text above. RQ12 keeps the list of
   no-time classes past setup, so the old words were not literally true. "Shortly after" means the first
   `rank` after the term changes (§6.5). "Stays on this computer" holds, because no sync or backup carries it.
@@ -1268,27 +1463,37 @@ with two rows blank, no planning-day note, `setup` true, Finish pressed, and nei
   default, not an opt-in. Basis: the spike's hidden fill on an empty folder signed in in 8 s with no Okta
   prompt, once the fill waited for the page to register each box (§3, 11-07). A rejected password is asked
   for once and never retried. The privacy page states it plainly; that wording does not hold the feature.
-  This supersedes the "about one password a day" fallback as the plan, pending the 24-hour repeat run.
+  This supersedes the "about one password a day" fallback as the plan, pending the 24-hour repeat run
+  (R0c, §2.3). Built by P1 to P4 (§4.3); the fill's rules are §7.5.
 - **RQ4. One folder or two (ruled 2026-11-07):** two. The LMS signs in on its own empty folder with the
   saved password, so it does not need the mailbox's sign-in beside it, and "Disconnect" stays per source.
+  It withdraws r5's recommendation of one shared folder, and S4c with it (§4.5).
+- **RQ3. When the LMS session lapses (ruled 2026-11-07, relayed by the coordinator):** "yes, sign back in
+  silently every time". Knowlu signs back in with the saved password whenever the session lapses (§7.4).
+  The named signed-out row ("Sign in to update grades") and the Settings sign-in appear only when the
+  school rejects the saved password, which is asked for once and never retried, or when the fill cannot
+  read the page. It holds pending R0c: if a fresh sign-in shows MFA, §2.3 sends it back to Quinn.
+- **RQ5. Where each sign-in happens (ruled 2026-11-07, relayed by the coordinator).** Setup: (1) the
+  student types their school username and password into Knowlu's own form, like every other portal
+  login and stored per RQ16, and Knowlu signs the LMS in hidden from it, with no school page shown. If
+  that hidden sign-in fails at setup, Knowlu shows the school's own page in a visible window so the
+  student can finish. (2) Then one visible school-mailbox sign-in, MFA once and "stay signed in", after
+  which mail stays silent. **Rejected:** capturing the password as the student types it on the school's
+  own page. Built by P3 and P4 (§7.4, §8).
 
 ### Open
 
-One at a time, each with a recommendation. RQ4 holds the S tasks. The rest can wait for their tasks.
+One at a time, each with a recommendation. RQ17 holds S5 and RQ18 holds S6b.
 
-- **RQ3. If the link dies before 12 hours, what happens to grades? Recommended: keep one hidden try a
-  slot, show the named signed-out row, and let the student sign in from Settings.** That could mean a
-  sign-in most days, which may be too much to ask. If so, the alternatives are to refresh grades only
-  when the student signs in, or to keep a hidden window open between slots. I do not recommend the
-  second: it costs memory all day and keeps a live session running unseen. Assignments are not at risk
-  either way. Answer after R0a.
-- **RQ4. In outcome B, one folder or two? Recommended: one, unless R0a's item (d) shows LMS-only is
-  silent by itself.** The only silent run was on a folder that also held the mail sign-in. Two folders
-  would keep "Disconnect" simple but could lose the silent link. Asked as soon as item (d) is in. It
-  holds all the S tasks (§4.2), and they hold A2 and B2, so this is the first question after R0a.
-- **RQ5. If both places work in outcome A, where does the sign-in happen? Recommended: the LMS.** A
-  student who will skip school email should not have to sign in to their mailbox. If only the mailbox
-  works, step 3's words must say why it opens there, and ask the student to accept "stay signed in".
+- **RQ17. Does sign-out delete the saved school password? Recommended: yes, at sign-out as well as at
+  Forget and at local-data deletion.** Today `zybooks` and `vhl` survive a sign-out and go only with
+  `delete_local_data`. The school folder already goes at sign-out (spec §2.5, Q9), and a school password
+  that outlived it would let the next account on this profile sign in to the last student's school
+  silently. The cost is that a student who signs out and back in types the password again. S5 carries it
+  either way, on `account.rs`, so this is `contract-engineer`'s.
+- **RQ18. The Settings row's words.** RQ6 ruled "used for grades and school email", but with two folders
+  the school mailbox has its own row. **Recommended: "School sign-in: kept on this computer, used for
+  grades and your course list"**, with the mailbox's row as the mail lane built it. S6b waits on this.
 
 ## 11. Fidelity ledger
 
@@ -1305,23 +1510,42 @@ One at a time, each with a recommendation. RQ4 holds the S tasks. The rest can w
 | Review r3, 1 and 2 | The sweep runs nothing destructive short of a confirmed signed out, RQ15's row apart, read from the credential the app's own reads use | C5d | C5d's `session_answer` table; its nothing-destructive cases, 1312 and the moved vault among them; `contract-reviewer` on the diff |
 | Review r3, Minor 10 | Two accepted limits: a `lab` row covers nothing, and the no-time block stops new asks only. No `approvals.rs` edit in wave B | C2a, C2b | C2a's and C2b's limit pins; `approvals.rs` absent from every diff |
 | Review r4, 1 and Minor 2 | Every series-file write from a drop or a purge holds the series lock and re-reads under it. With no lock, a drop stores nothing and waits for the next `rank` | C2b | C2b's "The drop holds the lock", "A failed lock" and "Changed under it" tests |
-| Quinn, RQ13 | A friend at the founder's school is the second account | A4 or B4 | the check's record in A4 or B4 |
+| Quinn, RQ13 | A friend at the founder's school is the second account | P5 | the check's record in P5 |
+| Quinn, RQ16 | The school password is saved by default, at `knowlu/<profile_id>/school`, through `credentials.rs` and `wincred.rs`, on the device only | P1, P4 | P1t's target, save and read tests; P1's diff edits neither credential file; P4's pin that the form saves with no opt-in |
+| Quinn, RQ16 | The password never reaches the cloud, the page, a log, a run record or an error | P1, P2 | P1t's reply, error and `Debug` tests; `contract-reviewer` on P1 and P2 |
+| Quinn, RQ16 | A rejected password is asked for once and never retried | P1, P3 | P1t's rejected-mark tests, the failed delete among them; P3's "no fill after `Rejected`" test; P5's wrong-password step |
+| Quinn, RQ16 | The privacy page states it in one plain line; the wording does not hold the feature | S7 | S7's page and `engine/tests/site.rs` pin; P1 to P4 do not depend on S7 |
+| Quinn, RQ3 | A lapsed session signs back in silently every time; the signed-out row and Settings' sign-in only on a rejection or an unreadable page | P3 | P3's tests over §7.4's fill table, row by row; P5's past-12-hours read |
+| Quinn, RQ5 | Setup: the password typed into Knowlu's own form, then a hidden LMS sign-in with no school page shown | P3, P4 | P3's step-3 test (one hidden window, none shown); P4's form pins; P5's count |
+| Quinn, RQ5 | A failed hidden sign-in at setup shows the school's own page in one visible window | P3, P4 | P3's `Rejected` and `CannotRead` setup tests; P4's fallback line pin |
+| Quinn, RQ5 | Then one visible mailbox sign-in, MFA once, "stay signed in", mail silent after | P4, F11b | P4's step-5 pins; P5's mailbox count |
+| Quinn, RQ5 (rejected alternative) | No password is captured from the school's page | P2, P3 | P3's test that the visible window's page is never read for typed values; `contract-reviewer` on P2 and P3 |
+| Quinn, RQ4 | Two folders: the LMS's own, and the mailbox's `mail-session-<id>` | S1, S3, §4.5 | S1's `profile_for` tests (grades and the LMS capture only); S3 test 1 without the mailbox; S4c dropped; the mail lane's tests unedited |
+| Spike, 11-07 | The fill fills only a `sign_in_hosts` host over https, each field at most once, the form's own submit after the wait | S2, P2 | S2's `CAMPUSES` test; P1t's fill-decision tests, one per §7.5 rule |
+| Spike, 11-07 | The fill never answers MFA; an unknown page after a submit pauses the fill | P2, P3 | P1t's `CannotRead` tests; P3's pause test |
+| Spike, 11-06 | The mailbox does not carry the LMS; r5's outcomes A and B and the shared folder are withdrawn | §2, §4.3 | no task depends on a mailbox sign-in for the LMS; S3 test 4's shared-folder list removed |
+| Spike, 11-06 | The LMS lapses about 12 hours from sign-in; keeping it warm extends nothing | P3 | no task keeps a window open between slots; P5's past-12-hours read |
+| Spike, 11-06 | Saved LMS cookies are dropped (they died near 3 hours) | every task | no diff stores or replays an LMS cookie; S9 checks |
+| Pending, R0c | The plan stands pending the 24-hour run; MFA on a fresh sign-in sends RQ3 back to Quinn | R0c, P4, P5 | R0c's record in the plan's §3; P4 and P5 wait on it |
+| Open, RQ17 | Sign-out deletes the saved school password (recommended) | S5 | S5's sign-out test in `app/tests/account.rs`, under `CREDMAN_LOCK` |
+| Open, RQ18 | The Settings row's words for the LMS folder | S6b | S6t's static pin, once ruled |
+| Spec §1.3, Q1 | "One sign-in" is not met as written; a signed note says so | C9 | Quinn's signature on the note |
 | Quinn, RQ7 | `robots.txt` and terms read and dated before a row ships | R0b, C4, C9 | §6.10's check; `checked` date; the lawyer's list |
 | Quinn, RQ8 | Class search runs at setup only | C5c | no slot step or scheduler entry in any diff |
 | Quinn, RQ9 | A listed no-time section skips the later ask, until the term changes | C2b, C3, C6 | C2b's no-time tests through all three callers, and past a registrar read; C6's pins |
 | Quinn, RQ10 | `VISION.md` names the source | done | `VISION.md`'s source list |
 | Review r1, 4 and 5 | `registrar:` means the registrar said so; a class-search note hides nothing | C2a, C2c, C10 | C2a's holds-nothing tests; C2c's adoption tests; C10's label pin |
-| Quinn's additions | The week strip's "N turned in, kept off your list", from `step3.turned_in`, in both outcomes | C7 | C7's pins; shots; T3b's count |
+| Quinn's additions | The week strip's "N turned in, kept off your list", from `step3.turned_in` | C7 | C7's pins; shots; T3b's count |
 | Quinn's additions | A 12-hour clock is a follow-up, not wave B | §9 | no wave-B task changes a time format |
 | Quinn's additions | The timing test runs after the rewrite, on the chosen flow | T3b | §4.6; F15 depends on T3b |
 | Quinn's additions | Class search is a per-school curated fact, confirmed by a check at curation | C4, C9, R0b | `CAMPUSES` test; `checked` date; §6.10's check in `docs/reference/app.md` |
-| Live run | Session cookies die with the last window; the link signs in hidden | C8, F8b, S4a | C8's tests; R0a; A4 or B4 |
+| Live run | Session cookies die with the last window; the link signs in hidden | C8, F8b, S4a | C8's tests; R0a; P5 |
 | Live run | The registrar's start page never redirects | §5 | follow-up, §9 |
-| Live run | Mailbox silent after one MFA sign-in | S4c, A2 or B2 | R0a; A4 or B4 |
+| Live run | Mailbox silent after one MFA sign-in, on its own folder | the mail lane, as built; P4 | P5's mailbox count |
 | Live run | Many sections have no begin time | C1, C2b, C6 | C1's and C2b's no-time tests |
 | Live run | 15 current-term shells: some not classes | C6, C10, F11e2 | every row needs a press; hint at step 3 |
-| Live run | One account's sign-in run is a sample | A2, A4 or B4 | §2's fallbacks, tested in A2; a friend's account in A4 or B4 |
-| Spec §1.3 | Step 3 asks one sign-in | A2, A3; on outcome B, B2, B3 and a signed note | A4 or B4's prompt count |
+| Live run | One account's sign-in run is a sample | P3, P5, R0c | §7.4's fallbacks, tested in P3; R0c; a friend's account in P5 |
+| Spec §1.3 | Step 3 asks one sign-in | P3, P4, and C9's signed note | P5's count: one typed password, no LMS window |
 | Spec §1.5, Q7 | Reveal waits at most 3 minutes; failure is named | C5c | `class_times.apply` never holds the gate; a stuck job does not hold `proposals_ready`; T3b |
 | Spec §1.7, Q12 | Skips and costs unchanged | F11e1, F11b | F11t's pins |
 | Spec §2.4 | Cookies per host; no capability; scripts per window | C8, S3, S4a | S3's tests; C8's no-cookie test |
@@ -1334,17 +1558,21 @@ One at a time, each with a recommendation. RQ4 holds the S tasks. The rest can w
 | `VISION.md` failures visible | Each course ends in a named state | C1, C3, C6 | C3's report; C6's lines |
 | `CLAUDE.md`, commitment proposals never leave the device | Only a confirmed note or a marker syncs, and no marker or card carries a class-search key | C2a, C2d | C2d's search of every note after each route; C2a's successor test. The sync tripwires do not read this, so they are not the proof |
 | `CLAUDE.md`, every note write goes through `write` | Adoption's re-key is journal first; nothing re-dumps a note | C2c | C2c's journal-order test |
-| `CLAUDE.md` rule 1 | Per-school data, nothing per student | C4, C8, A1, B1 | `CAMPUSES` tests |
+| `CLAUDE.md` rule 1 | Per-school data, nothing per student | C4, C8, S2, P1 | `CAMPUSES` tests; P1t's derived-target test |
+| `CLAUDE.md` credentials | The app writes `knowlu/<profile_id>/<source>`; tests that touch the real Credential Manager hold `CREDMAN_LOCK` and clean up | P1, P1t, S5 | P1t's one real test; S5's tests in `app/tests/account.rs` |
+| `CLAUDE.md` desktop safety | No synthetic keyboard or mouse input; the hidden window is never shown | P2 | P1t's fill tests run over a fake page; `contract-reviewer` on P2 |
 | `CLAUDE.md` rule 2 | No frozen reference, no fixture touched | every task | F14 checks `engine/tests/fixtures/**` is absent from the diff |
 | `CLAUDE.md` `commitments` line | Without `--confirm`, exit 0 and only the series file | C3 | C3's tests |
 | `CLAUDE.md` tests | Tests never leave the machine | C4, C8 | `127.0.0.1:0` fakes |
-| `CLAUDE.md` contract list | Only `account.rs`, by `contract-engineer` | S5, S7, F2c | S9; F14 |
+| `CLAUDE.md` contract list | Only `account.rs` is edited, by `contract-engineer`; `credentials.rs` and `wincred.rs` are used, never edited, and any edit there is `contract-engineer`'s | S5, S7, F2c, P1, P2 | S9; F14 checks both files are absent from every diff |
 
 ## 12. Checkpoints
 
-1. **Rulings.** Every question is ruled, except RQ3 to RQ5, which wait on R0a.
-2. **`reviewer`, plan mode,** passed this draft at r5 (`docs/reports/2026-11-04-onboarding-replan-review-r5.md`).
-3. **R0a's result** picks A or B and feeds RQ3 and RQ5. Item (d) goes to Quinn as RQ4 at once.
+1. **Rulings.** Every question is ruled except RQ17 (holds S5) and RQ18 (holds S6b).
+2. **`reviewer`, plan mode,** passed r5 (`docs/reports/2026-11-04-onboarding-replan-review-r5.md`). r6
+   needs its own review before any P task or changed S task goes out.
+3. **R0c's result** goes to Quinn. Clean: P4 and P5 go as written. Any MFA page: §2.3's branch, and RQ3
+   is asked again before P4.
 4. The rulings fold into the plan's §14, and the plan's §7 table gains these rows, by `docs-keeper` on the
    controller's word.
-5. After the build: T3b, then F14, then Quinn's go for A4 or B4, then the plan's §8 checklist.
+5. After the build: T3b, then F14, then Quinn's go for P5, then the plan's §8 checklist.
