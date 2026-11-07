@@ -1,11 +1,13 @@
 # A 12-hour clock on every surface that shows a time: plan
 
-**Status: r5, PASSED review r5 (0 Critical, 0 Important, 2 Minor, applied). Reviews r1 (0 Critical, 5 Important, 4 Minor), r2 (0 Critical, 2 Important,
+**Status: READY TO DISPATCH. r5 PASSED review r5 (0 Critical, 0 Important, 2 Minor, applied); Q1, Q2
+and Q3 are all ruled (`docs/notes/2026-11-07-onboarding-rulings.md` on `feat/o3-long-onboarding`). Reviews r1 (0 Critical, 5 Important, 4 Minor), r2 (0 Critical, 2 Important,
 4 Minor), r3 (0 Critical, 1 Important, 3 Minor) and r4 (0 Critical, 1 Important, 3 Minor) failed. The
 reports are `docs/reports/2026-11-07-twelve-hour-clock-plan-review-r{1,2,3,4}.md`; r5 passed by message (2026-11-07). r4 was filed
 as a report. This revision closes every finding (see the ledger's last four rows). Nothing dispatched.** Q1 is
 ruled: **today.md and the events digest stay on 24-hour time** (Quinn, 2026-11-07, relayed by the
-coordinator; §6). Q2 and Q3 are still open.
+coordinator; §6). Q2 and Q3 are ruled too (Quinn, 2026-11-07, "yes to all four"): one fixed 12-hour
+clock for every student, and both UTC displays fixed in this lane.
 
 **Date:** 2026-11-07. **Branch:** `docs/twelve-hour-clock` (from `feat/o3-long-onboarding`).
 **Source:** Quinn, 2026-11-04, replan draft §9 (`docs/plans/2026-11-04-onboarding-replan-draft.md`):
@@ -416,12 +418,8 @@ the rows it does not reach, and they name the site whenever something slips thro
   history `text`. So do the due chip's edit value, the window editor's `<input type="time">` values
   and the `windowSequence` payload (`:838`), which stay `HH:MM` and ISO.
 - Keep every Layer 2 anchor line as a single line (T4); do not reflow them.
-- If Quinn rules **no** on Q3, T5 leaves `:622` and `:1659` exactly as they are, in 24-hour UTC. T4
-  then drops their two positive pins and lists both lines as named exceptions to Layer 3. It also
-  drops the `last slot` supplement row from Layer 1, and the drawer's `stampOf` unit call stops
-  standing for `:1659`. The helpers
-  get no mode that keeps UTC. T4's zoned cases still hold for `:422`, `:474`, `:588` and `:610`, which
-  convert today.
+- Q3 is ruled yes: `:622` and `:1659` are converted to local time, like every other zoned stamp. The
+  helpers have no mode that keeps UTC.
 - **Done when** T4 passes, `static_assets.rs` and `onboarding_static.rs` stay green, and fixture
   screenshots exist of:
   - The day, Coming up, and an amendment card with a same-day move;
@@ -464,7 +462,9 @@ quotes a surface time, this plan's ledger status, and one `HANDOFF.md` line at t
    `today_md_due_move_is_pinned_whole_string` hold that line; the roster and calendar snapshot stay as
    well. (The question as asked: `golden-today-full.md` pins `09:00–10:00`, `Wed 9/2 16:00` and the
    footer `20:55`, and `golden-today-s1.md` pins its footer. The recommendation was to keep both.)
-2. **A fixed 12-hour clock, or a setting per student?** (Corrected per review r1, Important 5.)
+2. **RULED (Quinn, 2026-11-07, "yes to all four"): one fixed 12-hour clock for every student, not
+   the Windows setting.** The question as asked follows. **A fixed 12-hour clock, or a setting per
+   student?** (Corrected per review r1, Important 5.)
    Determinism does not decide this. A format taken from vault config or a flag is ordinary input, and
    the same input still gives the same bytes. Only reading the OS setting at run time would break
    that. The real constraint is that the engine's 12-hour strings are written into notes (card
@@ -475,11 +475,12 @@ quotes a surface time, this plan's ledger status, and one `HANDOFF.md` line at t
    That is not a single-user assumption, but it is a US-locale one. A setting waits until a non-US
    school signs up, and it would come with its own plan for the notes already written. Native time
    inputs already follow Windows.
-3. **Fix the UTC times in the same lane?** Two places show UTC (`journal::now_ts`) instead of local
-   time: the sync line's `last slot 14:05` (`console.js:622`) and the note drawer's history stamps
-   (`:1659`, found by review r1). T5's helpers correct both as a side effect, so the shown times move
-   by the zone offset. **Recommendation: yes.** The lines are the same and so are the helpers. A "no"
-   has its own path in T5.
+3. **RULED (Quinn, 2026-11-07, "yes to all four"): both UTC displays are fixed in this lane.** The
+   question as asked follows. **Fix the UTC times in the same lane?** Two places show UTC
+   (`journal::now_ts`) instead of local time: the sync line's `last slot 14:05` (`console.js:622`) and
+   the note drawer's history stamps (`:1659`, found by review r1). T5's helpers correct both as a side
+   effect, so the shown times move by the zone offset. The recommendation was yes, because the lines
+   are the same and so are the helpers.
 
    **The zone they convert to (review r2, Minor 2).** The helpers convert to the **machine's** zone,
    as `localHM` does today. The engine's own stamps (generated, Closed, Runs) are in the **vault's**
@@ -487,7 +488,8 @@ quotes a surface time, this plan's ledger status, and one `HANDOFF.md` line at t
    page can't use it in this lane. The two differ only when the computer's zone is not the vault's,
    for example while a student travels. Then a converted stamp and an engine stamp on one page
    disagree by the offset.
-   **Recommendation: accept the machine zone for this lane.** It's what the student's clock says, and
+   **Recommendation: accept the machine zone for this lane.** This plan proceeds on it, and the
+   rulings record does not name a zone. It's what the student's clock says, and
    it's today's behaviour for `checked`/`synced`. The alternative is a follow-up: add the vault zone to
    the read model's topline, which means regenerating all three surface references under §4.6, and
    convert with it through `Intl` inside the helpers.
@@ -508,10 +510,11 @@ quotes a surface time, this plan's ledger status, and one `HANDOFF.md` line at t
 | `CLAUDE.md`, engine invariants | Frontmatter, journal and ledger bytes never change format; display only | §2.1, T1, T2 | `clockfmt`'s module doc names the frontmatter and approval file names it feeds; `commitments.rs:9315` (file name `:9321-9322`, `title:` `:9334`) and `eventaccept.rs:398` pin the bytes; `meets` stays `HH:MM` |
 | `CLAUDE.md` | Determinism | §1, T1 | `clockfmt` is pure and reads no clock, zone or locale |
 | `CLAUDE.md` rule 1 | No single-user assumptions | §1, Q2 | one fixed format for every student |
+| **Quinn, Q2 ruling (2026-11-07, "yes to all four"; `docs/notes/2026-11-07-onboarding-rulings.md`)** | One fixed 12-hour clock for every student, not the Windows setting | §1, T1, T5, §6 Q2 | `clockfmt` and the console helpers take no format input; native time inputs left as they are |
 | Replan §9 | Wave B neither fixes nor changes the format | §5 | this lane edits no wave-B file but `console.js`; rebase by function name |
 | `CLAUDE.md` gates | TDD, 0 warnings, tests never leave the machine | T1, T2, T4 | tests before code; node runs locally; no listener |
 | `CLAUDE.md`, contract list | Fixtures go to `contract-engineer`; no cheaper agent edits `approvals.rs` | T2, T3 | T3's agent; `contract-reviewer` at Checkpoint 1; T2's digest pin restates the parser's shape and calls nothing private |
-| Q3 (open), recommended yes | The sync line and the drawer history show local time (the machine's zone; §1's two-zones note), not UTC | T4, T5 | T4's zoned `timeOf` and `stampOf` cases under `TZ=America/Chicago`; Layer 1's converted-stamp check; the `:622` and `:1659` positive pins; Checkpoint 2's screenshots of both. On a "no", T5's named exceptions apply |
+| **Quinn, Q3 ruling (2026-11-07, "yes to all four"; `docs/notes/2026-11-07-onboarding-rulings.md`)** | Both UTC displays are fixed in this lane: the sync line and the drawer history show local time (the machine's zone; §1's two-zones note), not UTC | T4, T5 | T4's zoned `timeOf` and `stampOf` cases under `TZ=America/Chicago`; Layer 1's converted-stamp check; the `:622` and `:1659` positive pins; Checkpoint 2's screenshots of both. T5's "Q3 no" path is removed |
 | Review r1 (`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r1.md`) | **I1** amendment `due_move`: §1, the §2.1 row, T2 (`due_move_with`). **I2** drawer UTC and every slicing form: the §2.2 rows, T4's forbidden-forms list. **I3** a digest test with no contract-list edit: T2's pin. **I4** clockfmt writes vault bytes: Authority, §1, the §2.1 rows, T1's pin. **I5** Q2's reason: §6 Q2. **M1** citations: §1. **M2** the raw `due` displays: the §2.1 `describe` row and the §2.2 drawer row, marked stays. **M3** the digest: dropped from the change, follows Q1. **M4** T4's cases and the Q3 row: T4, this ledger | §1 to §7 | r2 review |
 | Review r2 (`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r2.md`) | **I1** raw passthroughs and dodges: §2.2 rows split (`:639` is a raw `h(e.due)`, `:1286`'s tail, run ids and summaries allowed); T4's Layer 1 render scan over the real renderers, Layer 2's per-row anchors and raw-passthrough ban, Layer 3's widened forms. **I2** the clock path's proof: T2's whole-string `today_md_due_move_is_pinned_whole_string`, committed before the split and cross-checked against `render.rs:110-133`, plus its surface twin. **M1** the existing `commitments.rs:9315` pin replaces the new test; the module doc names approval file names. **M2** two zones: §1's note and Q3. **M3** the stripper's state machine and self-checks, including `https://` in a string, plus the lossless guard. **M4** the digest regex comment says to change it together with `approvals.rs:1244`. Mail rows added to Checkpoint 2's screenshots | §1 to §7 | r3 review |
 | Review r3 (`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r3.md`) | **I1** Layer 1 rebuilt on the simpler path: a new recording `document` (not the discarding `onboarding_static.rs:638` Proxy), `paint` only, no `invoke` stubbed with data; a supplement of rows `paint` reaches, one known string each. The rows `paint` never reaches are named: update `:422`/`:474`, sync `:588`, `regMeets` `:1057`, the drawer `:1648`, and also mail applied `:2803`/`:2806`/`:2808` (`:2834`). Each is covered by its Layer 2 pin, Layer 3 and a direct helper unit call. **M1** anchors are exact unquoted substrings, each asserted to occur once; `:396` re-anchored on `EL("closed").innerHTML` (`data-undo-close` also matched `:2148`), `:643` on `<pre class="summary">`, `:1659` on `<div>no journal history</div>`. **M2** the `JSON.stringify(v)` ban is limited to the `due` branch of `:674-675`; other keys keep it, checked by `importance → 4`. **M3** `surface-today-s1-migrated.json` is fed for its s1 blocks; the runs rows come from the supplement | T4, T5 | r4 review |
