@@ -1,9 +1,9 @@
 # A 12-hour clock on every surface that shows a time: plan
 
-**Status: DRAFT r4. Reviews r1 (0 Critical, 5 Important, 4 Minor), r2 (0 Critical, 2 Important,
-4 Minor) and r3 (0 Critical, 1 Important, 3 Minor) failed; the reports are
-`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r{1,2,3}.md`.
-This revision closes every finding (see the ledger's last three rows). Nothing dispatched.** Q1 is
+**Status: DRAFT r5. Reviews r1 (0 Critical, 5 Important, 4 Minor), r2 (0 Critical, 2 Important,
+4 Minor), r3 (0 Critical, 1 Important, 3 Minor) and r4 (0 Critical, 1 Important, 3 Minor) failed. The
+reports are `docs/reports/2026-11-07-twelve-hour-clock-plan-review-r{1,2,3}.md`; r4's findings came
+by message. This revision closes every finding (see the ledger's last four rows). Nothing dispatched.** Q1 is
 ruled: **today.md and the events digest stay on 24-hour time** (Quinn, 2026-11-07, relayed by the
 coordinator; §6). Q2 and Q3 are still open.
 
@@ -150,8 +150,10 @@ Cloud judgment text, such as a model's `why`, is not formatted by us and is out 
 
 ## 4. Tasks
 
-Order: T1 ∥ T4, then T2 → T3, T5 after T4, T6 last. The file sets are disjoint except T1/T2
-(both `eventemit.rs`, run in sequence). Extract each brief by its heading.
+Order: T1 ∥ T4, then T2 → T3. **T5 runs after both T3 and T4**, starting from a head that contains
+both (review r4, Important 1). T4's Layer 1 reads `surface-today-full.json` and expects `Wed 9/2 4pm`,
+which exists only once T3 has regenerated it. T6 runs last. The file sets are disjoint except T1 and
+T2 (both `eventemit.rs`, run in sequence). Extract each brief by its heading.
 
 ### T1. Engine: one clock formatter (`implementer`)
 
@@ -283,11 +285,17 @@ the rows it does not reach, and they name the site whenever something slips thro
   - **A new recording `document`, written for this test.** It is modelled on the
     `onboarding_static.rs:634` harness's way of lifting a function out of the IIFE, but it is not that
     harness: that `document` is a Proxy whose `set` discards every write (`:638`).
-    - `getElementById(id)` returns one recorder per id. Each recorder stores the last string assigned
-      to `innerHTML`, `textContent` or `title`, and keeps `hidden`/`disabled` as plain fields.
-    - `querySelector` returns a recorder and `querySelectorAll` returns `[]`. `classList` is a no-op.
-    - `createElement` returns a recorder, and `appendChild` records the child's `title` and
-      `textContent`.
+    - **Each recorder is a `Proxy` (review r4, Minor 1).** It records `innerHTML`, `textContent` and
+      `title` on `set`, and lets every other member through as a permissive stub, so that any other
+      member access or call succeeds. `paint` reaches `querySelectorAll`, `closest`, `prepend` and
+      `contains` through `preserveAcross` (`console.js:176`, `:188-198`). The page's startup code also
+      runs under `vm.runInContext` and touches the DOM before any test call.
+    - On a recorder, `querySelectorAll` returns `[]`, `querySelector` returns a fresh recorder, and
+      `closest`, `prepend`, `contains` and `classList.*` are no-ops (`contains` returns `false`).
+      `appendChild` records the child's `title` and `textContent`.
+    - `document.getElementById(id)` returns one recorder per id, kept across calls. Its
+      `querySelector`/`querySelectorAll` behave as on a recorder, and `createElement` returns a new
+      recorder.
     - `__TAURI__.core.invoke` returns a promise that never settles. **No `invoke` is stubbed with
       data**, and nothing awaits one.
   - **What it runs.** Lift `paint` and `current`. Call `paint(state, true)` with `current.view` set to
@@ -303,16 +311,20 @@ the rows it does not reach, and they name the site whenever something slips thro
     |---|---|---|
     | `topline.generated_at: "2026-09-01 20:55"`, `generated_by: "manual"` | `renderTopline` `:92` | `generated 2026-09-01 8:55pm by manual` |
     | `topline.last_slot.ended: "2026-09-01T14:05:00.000Z"`, `ok: true` | `renderSyncLine` `:622` | `last slot 9:05am ok` |
-    | sync `at: "2026-09-01T14:05:00.000Z"`, no error | `renderSyncLine` `:610` | `synced 9:05am` |
-    | `closed`: `when` `"2026-09-01 20:55"` and `"2026-08-31 09:30"` | `renderClosed` `:396` | `8:55pm`; `9:30am` |
+    | `topline.sync.at: "2026-09-01T14:05:00.000Z"`, with no `last_error` and no `skipped` (`console.js:600`) | `renderSyncLine` `:610` | `synced 9:05am` |
+    | `closed_this_week` (`console.js:394`): two rows whose `when` is `"2026-09-01 20:55"` and `"2026-08-31 09:30"` | `renderClosed` `:396` | `8:55pm`; `9:30am` |
     | an amendment, `due_move: "10/9 11:59pm → 10/9 1pm (EARLIER same day)"` (T2's output) | `renderMustDo` `:209` | `due 10/9 11:59pm → 10/9 1pm (EARLIER same day)` |
-    | a decision card, `changes: {due: {from: "2026-09-25T09:00", to: "2026-09-22T09:00"}, importance: 4}` | `renderDecisionsView` `:675` | `2026-09-25 9am → 2026-09-22 9am`; `importance → 4` (other keys unchanged) |
+    | one decision card in the full card shape: `id: "appr_clock12_importance"`, `kind: "amend"`, `age_days: 0`, `title: "Clock test card"`, `why: "**Why proposed:** test."`, `changes: {importance: 4}` (review r4, Minor 3) | `renderDecisionsView` `:675` | `importance → 4` (a key other than `due` stays as today) |
     | `runs_panel.expected`: one `late` row, `due: "2026-08-27 15:00"` | `renderRunsView` `:639`; `renderRuns` `:1286` | `2026-08-27 3pm`; `3pm`; `expected 2026-08-27 3pm` |
     | `runs_panel.recent`: one row, `ended: "2026-08-27 15:02"` | `renderRunsView` `:643`; `renderRuns` `:1287` | `2026-08-27 3:02pm`; `3:02pm` |
 
-    The references alone must yield `8–9am`, `10am–12pm`, `12–12:50pm` and `3–6pm` (full), `8am–12pm`,
-    `1–1:45pm` and `1:45–6pm` (s1), `Wed 9/2 4pm` (Coming up) and `2026-08-26 11:59pm` (a task's due
-    chip).
+    The references alone must yield:
+    - `8–9am`, `10am–12pm`, `12–12:50pm` and `3–6pm` (the full reference's blocks);
+    - `8am–12pm`, `1–1:45pm` and `1:45–6pm` (the s1 blocks);
+    - `Wed 9/2 4pm` (Coming up, after T3);
+    - `2026-08-26 11:59pm` (a task's due chip);
+    - `2026-09-25 9am → 2026-09-22 9am`, from `decisions.cards[1]`'s `due` change. Both references
+      already carry that card, so the supplement adds no due card (review r4, Minor 3).
   - **The scan.** Strip tags, decode entities, and remove the **allowed regions**: every delta `text`
     string, attribute values, `<pre class="summary">` contents and run ids. The test knows each of
     these strings. Then assert:
@@ -391,7 +403,7 @@ the rows it does not reach, and they name the site whenever something slips thro
   kin, and today's `:151`, `:396`, `:622`, `:639`, `:643`, `:1286`, `:1287` and `:1659` each trip a
   layer.
 
-### T5. Console: route every time through the formatter (`console-ui`, after T4)
+### T5. Console: route every time through the formatter (`console-ui`, after T3 and T4)
 
 **Why this agent:** this is `app/static` work, and T4's tests check it. **File:**
 `app/static/console.js` only.
@@ -431,7 +443,9 @@ quotes a surface time, this plan's ledger status, and one `HANDOFF.md` line at t
 ## 5. Merge order and review checkpoints
 
 - Wave B's C6, C7 and C10 edit `app/static` and `onboarding_static.rs`. This lane edits `console.js`
-  and a new test file, never `onboarding.js`. Dispatch T5 on the head that T4 was written against.
+  and a new test file, never `onboarding.js`. Dispatch T5 from a head that contains both T3 (the
+  regenerated `surface-today-full.json`) and T4 (the tests). A head with T4 alone still holds
+  `Wed 9/2 16:00`, `Fri 9/4 12:00` and `Thu 9/10 18:00`, so T5 could never pass T4 there.
   If wave B lands first, the `integrator` rebases by function name, never by line number.
 - **Checkpoint 1** (after T1 to T3): `reviewer` reads T1 and T2, and `contract-reviewer` reads T3's
   diff. The report goes in `docs/reports/`.
@@ -501,3 +515,4 @@ quotes a surface time, this plan's ledger status, and one `HANDOFF.md` line at t
 | Review r1 (`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r1.md`) | **I1** amendment `due_move`: §1, the §2.1 row, T2 (`due_move_with`). **I2** drawer UTC and every slicing form: the §2.2 rows, T4's forbidden-forms list. **I3** a digest test with no contract-list edit: T2's pin. **I4** clockfmt writes vault bytes: Authority, §1, the §2.1 rows, T1's pin. **I5** Q2's reason: §6 Q2. **M1** citations: §1. **M2** the raw `due` displays: the §2.1 `describe` row and the §2.2 drawer row, marked stays. **M3** the digest: dropped from the change, follows Q1. **M4** T4's cases and the Q3 row: T4, this ledger | §1 to §7 | r2 review |
 | Review r2 (`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r2.md`) | **I1** raw passthroughs and dodges: §2.2 rows split (`:639` is a raw `h(e.due)`, `:1286`'s tail, run ids and summaries allowed); T4's Layer 1 render scan over the real renderers, Layer 2's per-row anchors and raw-passthrough ban, Layer 3's widened forms. **I2** the clock path's proof: T2's whole-string `today_md_due_move_is_pinned_whole_string`, committed before the split and cross-checked against `render.rs:110-133`, plus its surface twin. **M1** the existing `commitments.rs:9315` pin replaces the new test; the module doc names approval file names. **M2** two zones: §1's note and Q3. **M3** the stripper's state machine and self-checks, including `https://` in a string, plus the lossless guard. **M4** the digest regex comment says to change it together with `approvals.rs:1244`. Mail rows added to Checkpoint 2's screenshots | §1 to §7 | r3 review |
 | Review r3 (`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r3.md`) | **I1** Layer 1 rebuilt on the simpler path: a new recording `document` (not the discarding `onboarding_static.rs:638` Proxy), `paint` only, no `invoke` stubbed with data; a supplement of rows `paint` reaches, one known string each. The rows `paint` never reaches are named: update `:422`/`:474`, sync `:588`, `regMeets` `:1057`, the drawer `:1648`, and also mail applied `:2803`/`:2806`/`:2808` (`:2834`). Each is covered by its Layer 2 pin, Layer 3 and a direct helper unit call. **M1** anchors are exact unquoted substrings, each asserted to occur once; `:396` re-anchored on `EL("closed").innerHTML` (`data-undo-close` also matched `:2148`), `:643` on `<pre class="summary">`, `:1659` on `<div>no journal history</div>`. **M2** the `JSON.stringify(v)` ban is limited to the `due` branch of `:674-675`; other keys keep it, checked by `importance → 4`. **M3** `surface-today-s1-migrated.json` is fed for its s1 blocks; the runs rows come from the supplement | T4, T5 | r4 review |
+| Review r4 (findings by coordinator message, 2026-11-07) | **I1** T5 runs after both T3 and T4, from a head that holds both: the §4 Order line, T5's heading and §5's dispatch sentence changed, because without T3 `surface-today-full.json` still says `Wed 9/2 16:00`. **M1** each recorder is a `Proxy` that records `innerHTML`/`textContent`/`title` and lets every other member through; `querySelectorAll` returns `[]`; `closest`, `prepend` and `contains` are no-ops (`preserveAcross`, `console.js:176`, `:188-198`; startup under `vm.runInContext`). **M2** exact key paths: `closed_this_week` (`:394`) and `topline.sync.at` (`:600`). **M3** the due change is read from both references' `decisions.cards[1]`; the supplement keeps one full-shape card (id, kind, age_days, title, why) for `importance → 4` | T4, T5, §4, §5 | r5 review |
