@@ -1,8 +1,9 @@
 # A 12-hour clock on every surface that shows a time: plan
 
-**Status: DRAFT r3. Review r1 failed (0 Critical, 5 Important, 4 Minor) and so did r2 (0 Critical,
-2 Important, 4 Minor); the reports are `docs/reports/2026-11-07-twelve-hour-clock-plan-review-r{1,2}.md`.
-This revision closes every finding (see the ledger's last two rows). Nothing dispatched.** Q1 is
+**Status: DRAFT r4. Reviews r1 (0 Critical, 5 Important, 4 Minor), r2 (0 Critical, 2 Important,
+4 Minor) and r3 (0 Critical, 1 Important, 3 Minor) failed; the reports are
+`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r{1,2,3}.md`.
+This revision closes every finding (see the ledger's last three rows). Nothing dispatched.** Q1 is
 ruled: **today.md and the events digest stay on 24-hour time** (Quinn, 2026-11-07, relayed by the
 coordinator; §6). Q2 and Q3 are still open.
 
@@ -274,67 +275,94 @@ a read-model reference. **File:** `engine/tests/fixtures/surface-today-full.json
     assert against the harness's own `new Date(iso)` hours instead.
   - Empty, `null` or unparseable input gives `""` from `timeOf` and the input unchanged from
     `stampOf`.
-There are three layers. The render scan is the net, and the two static layers name the site when
-something slips through.
 
-- **Layer 1, the render scan (review r2, Important 1).** This is the main proof.
-  - Run `console.js` under node with the `onboarding_static.rs:634` harness. Its `document` stub
-    records every string assigned to `innerHTML`, `textContent` or `title`, keyed by element id.
-    Any other property or method is a permissive stub: `querySelectorAll` returns `[]`,
-    `createElement` returns a recorder.
-  - Feed it `engine/tests/fixtures/surface-today-full.json` and `surface-today-s1-migrated.json`; the
-    latter has the runs panel's `expected` rows. The test merges in a supplement for what no reference
-    carries:
-    - `topline.generated_at` and a `last_slot` whose `ended` ends in `Z`;
-    - sync `at` and update `last_check`;
-    - two `closed` rows;
-    - an amendment whose `due_move` is T2's same-day string;
-    - a decision card with `changes.due {from, to}`;
-    - `registrar_changes` with `meets`;
-    - mail-applied rows: a changed `due` with `old`/`new`, a notice with `opened_at`, an added row
-      with `due`;
-    - a `note` reply with history, which the `invoke` stub returns for the drawer.
-  - Lift `paint` and `current` out of the wrapper. Call `paint(state, true)` with `current.view` set to
-    `today`, `runs`, `decisions` and `schedule` in turn. Call `renderMailApplied` directly. Open the
-    drawer through its `invoke("note")` path, then wait for its promise.
-  - Before scanning, strip tags, decode entities, and remove the **allowed regions**: the drawer's
-    `<dl>` frontmatter list, every delta/history `text` string, attribute values (input `value`s),
-    `<pre class="summary">` and the run ids. The test knows each of these strings.
-  - Then assert:
+There are three layers. The render scan covers every row `paint` reaches. The two static layers cover
+the rows it does not reach, and they name the site whenever something slips through.
+
+- **Layer 1, the render scan over `paint` (review r2, Important 1; r3, Important 1).**
+  - **A new recording `document`, written for this test.** It is modelled on the
+    `onboarding_static.rs:634` harness's way of lifting a function out of the IIFE, but it is not that
+    harness: that `document` is a Proxy whose `set` discards every write (`:638`).
+    - `getElementById(id)` returns one recorder per id. Each recorder stores the last string assigned
+      to `innerHTML`, `textContent` or `title`, and keeps `hidden`/`disabled` as plain fields.
+    - `querySelector` returns a recorder and `querySelectorAll` returns `[]`. `classList` is a no-op.
+    - `createElement` returns a recorder, and `appendChild` records the child's `title` and
+      `textContent`.
+    - `__TAURI__.core.invoke` returns a promise that never settles. **No `invoke` is stubbed with
+      data**, and nothing awaits one.
+  - **What it runs.** Lift `paint` and `current`. Call `paint(state, true)` with `current.view` set to
+    `today`, `runs` and `decisions` in turn. `paint` is the only renderer called.
+  - **Its inputs.**
+    - `engine/tests/fixtures/surface-today-full.json` gives the full reference's blocks, Coming up and
+      task `due`s.
+    - `surface-today-s1-migrated.json` gives the s1 blocks (review r3, Minor 3).
+    - A supplement, merged in, supplies only rows that `paint` reaches. Each row must produce its own
+      known string under `TZ=America/Chicago`:
+
+    | Supplement row | Rendered by | Known string |
+    |---|---|---|
+    | `topline.generated_at: "2026-09-01 20:55"`, `generated_by: "manual"` | `renderTopline` `:92` | `generated 2026-09-01 8:55pm by manual` |
+    | `topline.last_slot.ended: "2026-09-01T14:05:00.000Z"`, `ok: true` | `renderSyncLine` `:622` | `last slot 9:05am ok` |
+    | sync `at: "2026-09-01T14:05:00.000Z"`, no error | `renderSyncLine` `:610` | `synced 9:05am` |
+    | `closed`: `when` `"2026-09-01 20:55"` and `"2026-08-31 09:30"` | `renderClosed` `:396` | `8:55pm`; `9:30am` |
+    | an amendment, `due_move: "10/9 11:59pm → 10/9 1pm (EARLIER same day)"` (T2's output) | `renderMustDo` `:209` | `due 10/9 11:59pm → 10/9 1pm (EARLIER same day)` |
+    | a decision card, `changes: {due: {from: "2026-09-25T09:00", to: "2026-09-22T09:00"}, importance: 4}` | `renderDecisionsView` `:675` | `2026-09-25 9am → 2026-09-22 9am`; `importance → 4` (other keys unchanged) |
+    | `runs_panel.expected`: one `late` row, `due: "2026-08-27 15:00"` | `renderRunsView` `:639`; `renderRuns` `:1286` | `2026-08-27 3pm`; `3pm`; `expected 2026-08-27 3pm` |
+    | `runs_panel.recent`: one row, `ended: "2026-08-27 15:02"` | `renderRunsView` `:643`; `renderRuns` `:1287` | `2026-08-27 3:02pm`; `3:02pm` |
+
+    The references alone must yield `8–9am`, `10am–12pm`, `12–12:50pm` and `3–6pm` (full), `8am–12pm`,
+    `1–1:45pm` and `1:45–6pm` (s1), `Wed 9/2 4pm` (Coming up) and `2026-08-26 11:59pm` (a task's due
+    chip).
+  - **The scan.** Strip tags, decode entities, and remove the **allowed regions**: every delta `text`
+    string, attribute values, `<pre class="summary">` contents and run ids. The test knows each of
+    these strings. Then assert:
     - no 24-hour form: `\b(0\d|1[3-9]|2[0-3]):[0-5]\d\b`, and no ISO `T\d\d:\d\d`;
     - every remaining `\b(1[0-2]|[1-9]):[0-5]\d\b` is followed either by `am`/`pm`, or by `–` and a
       time ending in `am`/`pm`;
-    - known strings appear: `8–9am`, `10am–12pm`, `12–12:50pm` and `3–6pm` from the full reference's
-      blocks, `Wed 9/2 4pm` from Coming up, and the supplement's converted stamps.
-  - Under `TZ=America/Chicago`, the `Z` stamps must appear converted (`9:05am`).
-- **Layer 2, positive pins (review r2, Important 1).** Each pin is one row: an anchor string that is in
-  `console.js` today, plus the helper call required on the same source line. T5 must not reflow these
-  lines.
+    - every known string above is present.
+  - **Rows `paint` never reaches (review r3, Important 1).** They are named here so that nobody drops
+    them quietly. Each is covered by its Layer 2 pin, by Layer 3's forbidden forms, and by **a direct
+    node unit call of the helper it uses**, on that row's input shape:
 
-  | §2.2 row | Anchor | Required |
+    | Row | Why `paint` misses it | Helper call and expected output |
+    |---|---|---|
+    | update `:422`, `:474` | rendered from the update command's own answer | `timeOf("2026-09-01T14:05:00.000Z")` → `9:05am` |
+    | sync toast `:588` | inside `runSync()` | the same `timeOf` call → `9:05am` |
+    | registrar `regMeets` `:1057` | reached only through `your_week` and `registrar_label` | `clockRange("13:00", "14:15")` → `1–2:15pm` |
+    | the drawer history, `openDrawer` `:1648` (`:1659`) | opened through `invoke("note")` | `stampOf("2026-09-01T14:05:00.000Z")` → `2026-09-01 9:05am` |
+    | mail applied `:2803`, `:2806`, `:2808` | `renderMailApplied` runs from `invoke("mail_applied")` (`:2834`) | `stampOf("2026-08-26T23:59:00")` → `2026-08-26 11:59pm`; `stampOf("2026-08-26T23:59")` → the same |
+
+- **Layer 2, positive pins (review r2, Important 1; r3, Minor 1).** Each pin is one row: an anchor and
+  the helper call required on the same source line. **An anchor is the exact substring shown, matched
+  without any surrounding quotes. Each one occurs once in `console.js` today**; the test asserts that
+  count, so a duplicate anchor fails it. T5 must not reflow these lines.
+
+  | §2.2 row | Anchor (exact substring) | Required |
   |---|---|---|
   | `:92` | `"generated "` | `stampOf(` |
   | `:151` | `"no due date"` | `stampOf(` |
-  | `:272` | `'<div class="blk '` | `clockRange(` |
-  | `:396` | `data-undo-close` | `timeOf(` |
+  | `:272` | `<div class="blk ` | `clockRange(` |
+  | `:396` | `EL("closed").innerHTML` | `timeOf(` |
   | `:422` | `", checked "` | `timeOf(` |
   | `:474` | `"up to date (checked "` | `timeOf(` |
   | `:588` | `showNote("synced "` | `timeOf(` |
   | `:610` | `"tried "` | `timeOf(` |
   | `:622` | `t.last_slot.ended` | `timeOf(` |
   | `:639` | `function renderRunsView` (its body) | `stampOf(e.due)` |
-  | `:643` | `'<pre class="summary">'` | `stampOf(` |
-  | `:675` | `class="changes"` (its block) | `stampOf(` |
+  | `:643` | `<pre class="summary">` | `stampOf(` |
+  | `:674-675` | `class="changes"` (its block, through the `.join(" · ")`) | a `k === "due"` branch that calls `stampOf(` |
   | `:1057` | `function regMeets` (its body) | `clockRange(` |
   | `:1286` | `" — expected "` | `timeOf(` and `stampOf(` |
   | `:1287` | `r.recent.slice(0, 6)` | `timeOf(` |
-  | `:1659` | `"no journal history"` | `stampOf(` |
+  | `:1659` | `<div>no journal history</div>` | `stampOf(` |
   | `:2803` | `h(x.field) + ": "` | `stampOf(` |
   | `:2806` | `x.opened_at ?` | `stampOf(` |
   | `:2808` | `" · due "` | `stampOf(` |
 
-  These raw passthroughs are forbidden anywhere: `h(e.due)`, `h(x.due)`, `h(x.opened_at)`,
-  `h(t.generated_at)`, and `JSON.stringify(v)` on the `class="changes"` line.
+  These raw passthroughs are forbidden anywhere: `h(e.due)`, `h(x.due)`, `h(x.opened_at)` and
+  `h(t.generated_at)`. **`JSON.stringify(v)` is forbidden only on the `due` branch of the `:674-675`
+  block (review r3, Minor 2).** Other keys keep `JSON.stringify` as §2.2 says. Layer 1's
+  `importance → 4` and its `2026-09-25 9am → 2026-09-22 9am` check both halves.
 - **Layer 3, forbidden forms (review r1, Important 2; r2, Important 1).** These apply outside the four
   helpers' bodies, which are cut out first. One array lists every form, so a new one is a one-line
   addition:
@@ -377,8 +405,9 @@ something slips through.
   and the `windowSequence` payload (`:838`), which stay `HH:MM` and ISO.
 - Keep every Layer 2 anchor line as a single line (T4); do not reflow them.
 - If Quinn rules **no** on Q3, T5 leaves `:622` and `:1659` exactly as they are, in 24-hour UTC. T4
-  then drops their two positive pins, lists both lines as named exceptions to Layer 3, and adds the
-  sync line's `last slot` text and the drawer history stamps to Layer 1's allowed regions. The helpers
+  then drops their two positive pins and lists both lines as named exceptions to Layer 3. It also
+  drops the `last slot` supplement row from Layer 1, and the drawer's `stampOf` unit call stops
+  standing for `:1659`. The helpers
   get no mode that keeps UTC. T4's zoned cases still hold for `:422`, `:474`, `:588` and `:610`, which
   convert today.
 - **Done when** T4 passes, `static_assets.rs` and `onboarding_static.rs` stay green, and fixture
@@ -471,3 +500,4 @@ quotes a surface time, this plan's ledger status, and one `HANDOFF.md` line at t
 | Q3 (open), recommended yes | The sync line and the drawer history show local time (the machine's zone; §1's two-zones note), not UTC | T4, T5 | T4's zoned `timeOf` and `stampOf` cases under `TZ=America/Chicago`; Layer 1's converted-stamp check; the `:622` and `:1659` positive pins; Checkpoint 2's screenshots of both. On a "no", T5's named exceptions apply |
 | Review r1 (`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r1.md`) | **I1** amendment `due_move`: §1, the §2.1 row, T2 (`due_move_with`). **I2** drawer UTC and every slicing form: the §2.2 rows, T4's forbidden-forms list. **I3** a digest test with no contract-list edit: T2's pin. **I4** clockfmt writes vault bytes: Authority, §1, the §2.1 rows, T1's pin. **I5** Q2's reason: §6 Q2. **M1** citations: §1. **M2** the raw `due` displays: the §2.1 `describe` row and the §2.2 drawer row, marked stays. **M3** the digest: dropped from the change, follows Q1. **M4** T4's cases and the Q3 row: T4, this ledger | §1 to §7 | r2 review |
 | Review r2 (`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r2.md`) | **I1** raw passthroughs and dodges: §2.2 rows split (`:639` is a raw `h(e.due)`, `:1286`'s tail, run ids and summaries allowed); T4's Layer 1 render scan over the real renderers, Layer 2's per-row anchors and raw-passthrough ban, Layer 3's widened forms. **I2** the clock path's proof: T2's whole-string `today_md_due_move_is_pinned_whole_string`, committed before the split and cross-checked against `render.rs:110-133`, plus its surface twin. **M1** the existing `commitments.rs:9315` pin replaces the new test; the module doc names approval file names. **M2** two zones: §1's note and Q3. **M3** the stripper's state machine and self-checks, including `https://` in a string, plus the lossless guard. **M4** the digest regex comment says to change it together with `approvals.rs:1244`. Mail rows added to Checkpoint 2's screenshots | §1 to §7 | r3 review |
+| Review r3 (`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r3.md`) | **I1** Layer 1 rebuilt on the simpler path: a new recording `document` (not the discarding `onboarding_static.rs:638` Proxy), `paint` only, no `invoke` stubbed with data; a supplement of rows `paint` reaches, one known string each. The rows `paint` never reaches are named: update `:422`/`:474`, sync `:588`, `regMeets` `:1057`, the drawer `:1648`, and also mail applied `:2803`/`:2806`/`:2808` (`:2834`). Each is covered by its Layer 2 pin, Layer 3 and a direct helper unit call. **M1** anchors are exact unquoted substrings, each asserted to occur once; `:396` re-anchored on `EL("closed").innerHTML` (`data-undo-close` also matched `:2148`), `:643` on `<pre class="summary">`, `:1659` on `<div>no journal history</div>`. **M2** the `JSON.stringify(v)` ban is limited to the `due` branch of `:674-675`; other keys keep it, checked by `importance → 4`. **M3** `surface-today-s1-migrated.json` is fed for its s1 blocks; the runs rows come from the supplement | T4, T5 | r4 review |
