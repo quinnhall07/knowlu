@@ -697,7 +697,7 @@ fires `sync_run` on completion) and **`back up now`** (`backup_now` command, no 
 
 ## 5. The design system
 
-All 30 tokens live at the top of `console.css`, commented with what each is *for*.
+All 33 tokens live at the top of `console.css`, commented with what each is *for*.
 
 - **Surfaces, four lifts:** `--canvas #0A0B0D` · `--s1c #101215` · `--s2c #15181B` · `--s3c #1A1D21`.
   Hairlines `--hair #22262B` / `--hair-2 #30353B`.
@@ -709,9 +709,11 @@ All 30 tokens live at the top of `console.css`, commented with what each is *for
 - **Spacing, 4px base — every gap on the page comes from it:** 4 inside a control · 8 label to
   value · 12 row padding and column gap · 16 related rows · 24 heading to body · 32 blocks in a
   column · 48 between sections · 64 between zones. Radii 4 / 6 / 8.
-- **Type:** Zilla Slab for all text (400 body, 600 labels and buttons, 700 headings and figures),
-  through the one `--su-font` token; `--sans` and `--mono` resolve to it (Q-B24, 2026-10-24).
-  Figures ask for `tabular-nums`. PT Serif Caption is the logo only. **Vendored**; the page makes
+- **Type:** Zilla Slab for all text, through the one `--su-font` token; `--sans` and `--mono` resolve
+  to it (Q-B24, 2026-10-24). Weights: 400 body and metadata, 600 labels, sidebar links and buttons,
+  700 headings. The body asks for `lining-nums tabular-nums` (the vendored subset has `lnum` and
+  `tnum`); `.setup` and `.picker` reset it to `normal`. `--code` (system monospace) is used only by
+  `#report-text` and `.em-box code`. PT Serif Caption is the logo only. **Vendored**; the page makes
   no network request.
 - **Widths:** `--measure 900px` (main), `--shell 1560px`. Past the shell the page gains **gutters,
   not width** — without the cap, `1fr` stretched and left an ~800px void between a task title and

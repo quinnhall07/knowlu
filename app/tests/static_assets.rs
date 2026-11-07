@@ -28,9 +28,20 @@ fn the_three_deletions_stayed_deleted_and_the_tokens_are_all_there() {
 fn every_font_the_page_names_is_vendored() {
     let css = read("console.css");
     for f in ["zilla-slab-400", "zilla-slab-600", "zilla-slab-700", "pt-serif-caption-400"] {
-        assert!(css.contains(&format!("fonts/{f}.")), "@font-face for {f}");
-        assert!(std::fs::read_dir("static/fonts").unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with(f)), "{f} vendored");
+        let name = std::fs::read_dir("static/fonts").unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .find(|n| n.strip_suffix(".woff2").or_else(|| n.strip_suffix(".ttf")) == Some(f)).unwrap_or_else(|| panic!("{f} vendored"));
+        assert!(css.contains(&format!("fonts/{name}\"")), "@font-face for {name}");
     }
+    for e in std::fs::read_dir("static/fonts").unwrap() {
+        let n = e.unwrap().file_name().to_string_lossy().into_owned();
+        if n.ends_with(".woff2") || n.ends_with(".ttf") {
+            assert!(css.contains(&format!("fonts/{n}\"")), "{n} is vendored but no @font-face names it");
+        }
+    }
+    let uses: Vec<&str> = css.lines().filter(|l| l.contains("var(--code)")).collect();
+    assert_eq!(uses.len(), 2, "--code is used by exactly two rules: {uses:?}");
+    assert!(uses.iter().any(|l| l.starts_with("#report-text")) && uses.iter().any(|l| l.starts_with(".em-box code")), "--code: the report box and the copyable address");
+    assert!(css.contains("font-variant-numeric: normal"), "onboarding resets the console's figure rule");
     assert!(!css.contains("Instrument Sans") && !css.contains("JetBrains Mono"), "Q-B24: the old faces are gone");
     assert!(Path::new("static/fonts/SOURCES.md").is_file());
 }
