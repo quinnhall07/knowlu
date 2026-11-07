@@ -1,6 +1,7 @@
 # Wave B replan after the 2026-11-04 live sign-in run: draft
 
-**Status: DRAFT r9, 2026-11-07. Not yet reviewed at r9; nothing dispatched.**
+**Status: DRAFT r10, 2026-11-07. Not yet reviewed at r10; nothing dispatched.** r10 closes r9's 1
+Important and 3 Minor, as the coordinator relayed them; the ledger's "Review r9" rows name each one.
 - r6 revised it for the 11-06 and 11-07 spike results and Quinn's rulings RQ3, RQ4, RQ5 and RQ16, and
   replaced outcomes A and B and the shared folder (§2, §4.3).
 - r6, r7 and r8 failed review (`docs/reports/2026-11-07-onboarding-replan-review-r6.md`, `-r7.md` and
@@ -302,8 +303,8 @@ exist, `lms_link::validate_only` and `capture_link_only` are still `todo!` stubs
 | Task | Change |
 |---|---|
 | T3 | Split: T3a (S-G) stays early; T3b (S-E, S-F's live half) moves after the rewrite (§4.6) |
-| S1 | `add_use(Registrar)` and `add_use(SchoolMail)` go: the folder is the LMS's alone (RQ4), and its uses are grades and the course list. `profile_for` gives it to grades and the LMS capture only. The folder holds no password: that is in Credential Manager (P1) |
-| S2 | `shared_sign_in` is withdrawn, and so is r5's `school_sign_in` enum. The row keeps `sign_in_hosts`: the hosts the fill may fill on (§7.5), set on the founder's row from R0a's record, empty elsewhere. A `CAMPUSES` test refuses a host with a scheme, a path or a port. The row also gains `wrong_password_text`: the school's own "wrong password" message, as fixed text the fill may match (§7.5). It ships empty on every row, the founder's included, unless the text comes from the school's or the identity provider's public documentation, cited by date in the row (review r8, Important 3). Empty means every ending after the submit is `Rejected(Unconfirmed)`, which is safe. No wrong password is sent to learn it. A `CAMPUSES` test refuses any `wrong_password_text` holding an `@` or a token of digits only, so no username, address or id can reach the public row |
+| S1 | `add_use(Registrar)` and `add_use(SchoolMail)` go: the folder is the LMS's alone (RQ4), and its uses are grades and the course list. `profile_for` gives it to grades and the LMS capture only. The folder holds no password: that is in Credential Manager (P1). Test 5, the lock, becomes per profile (review r9, Minor 2): a second `try_take` for the same data folder is refused while the first guard lives, a `try_take` for another profile's folder succeeds beside it, dropping the guard frees it, and neither call blocks |
+| S2 | **S2 owns the lock (review r9, Minor 2).** `school_session.rs` exposes a public, per-profile, non-blocking lock: `pub fn try_take(data_dir: &Path) -> Option<SessionGuard>`, where `SessionGuard` frees the lock on drop and `None` means busy. It is keyed by the profile's data folder, so two profiles never block each other. That is unlike today's `grades.rs` `Capturing::try_take`, which is process-wide. The fill, the hidden reads, F8b's window and P1a's save all use it. P1a does not edit `school_session.rs`. `shared_sign_in` is withdrawn, and so is r5's `school_sign_in` enum. The row keeps `sign_in_hosts`: the hosts the fill may fill on (§7.5), set on the founder's row from R0a's record, empty elsewhere. A `CAMPUSES` test refuses a host with a scheme, a path or a port. The row also gains `wrong_password_text`: the school's own "wrong password" message, as fixed text the fill may match (§7.5). It ships empty on every row, the founder's included, unless the text comes from the school's or the identity provider's public documentation, cited by date in the row (review r8, Important 3). Empty means every ending after the submit is `Rejected(Unconfirmed)`, which is safe. No wrong password is sent to learn it. A `CAMPUSES` test refuses any `wrong_password_text` holding an `@` or a token of digits only, so no username, address or id can reach the public row |
 | S3 | The registrar leaves tests 1, 3, 5 and 8; the fake-agent host pairs drop it. Test 1 drops the school mailbox. Test 4's shared-folder navigation list and its fallback go, and so does test 7: the mail lane's own tests stand unedited. Test 4 gains one named exception: P2's fill, in the LMS folder's hidden window, on a `sign_in_hosts` host only |
 | S4b | `lms_link.rs` only. `registrar.rs` stays on its incognito throwaway window, so "the registrar never shares this profile" stays true |
 | S4d | Replaced by P3. Every plan row that names S4d now names P3 |
@@ -1089,6 +1090,15 @@ The 11-07 run found the rules below. Each is a test in P1t.
   leave the box, then a wait of about 1.5 s), so the page has registered the value before the submit.
 - **Which button.** The form's own submit control, never the first button in the form: that can be a
   show-password control.
+- **How it is pressed (review r9, Important 1).** By the chosen control's `click()`, or by
+  `requestSubmit(control)`, so the page's own submit handler runs. Never `form.submit()`, which skips that
+  handler. Where the page's handler does not take over, the founder's form (no `method`, empty `action`)
+  would natively `GET` its own URL with the fields in the query. The password would then sit in the
+  identity provider's logs and in the LMS folder's history on disk.
+- **A script submit's backstop (review r9, Important 1).** Before the press, the fill adds a submit
+  listener that runs after the page's own listeners. If the page has not prevented the default by then,
+  the listener prevents it, so nothing navigates and no field reaches a URL. The attempt ends
+  `Rejected(Unconfirmed)`. The in-flight mark is already set, so nothing is sent again.
 - **`Rejected`, the conservative rule (review r6, Important 1; review r7, Important 1).** Once the in-flight
   mark is written (§7.4), any ending but `users/me` 200 is `Rejected`. The school's recognised "wrong
   password" message is `Rejected(Wrong)`. Everything else is `Rejected(Unconfirmed)`, including the
@@ -1495,6 +1505,12 @@ hosts only. Every test but one runs over an injected credential store and a fake
       `formaction` or `formmethod`), fills on a listed https host and fills nothing on an off-list host;
     - a control that adds a `formmethod="get"` to that script-submit form makes it a navigation submit,
       and it fills nothing;
+    - **a script-submit form whose page script does not intercept the submit (review r9, Important 1):**
+      the backstop listener prevents the default, no navigation happens, no field appears in any URL
+      the fake page records, and the attempt is `Rejected(Unconfirmed)` with the in-flight mark set;
+    - **a navigation submit with an empty `action` (review r9, Minor 1)**, made one by a
+      `method="post"`, resolves to the page's own URL and passes or fails the same https, listed-host and
+      `POST` checks: on a listed https page it fills, and on an off-list page it fills nothing;
   - the password step's new form, whose target is off-list after an on-list username step, fills no
     password;
   - a target or host that changes between the last field and the submit sends nothing;
@@ -1519,8 +1535,10 @@ hosts only. Every test but one runs over an injected credential store and a fake
 - **Static pins on the window script (review r6, Minor 4)**, read from the same source: it picks the
   submit control from the form's own `type=submit` controls and never the first button; it reads
   `formaction` and `formmethod` from that control and the form's `action` and `method`; it fires input,
-  keyup and change, then leaves the box, in that order; the wait comes before the submit; and it reads
-  page text through a visible-text property, never `textContent` or `innerHTML`.
+  keyup and change, then leaves the box, in that order; the wait comes before the submit; it reads
+  page text through a visible-text property, never `textContent` or `innerHTML`; it presses by the
+  control's `click()` or `requestSubmit(control)`, and the text `.submit(` appears nowhere in it; and it
+  adds the backstop submit listener before the press (review r9, Important 1).
 - **One real credential test**, under a file-scoped `CREDMAN_LOCK`, with a generated profile id and a
   `Drop` guard: save, read, forget through the real `credentials.rs` and `wincred.rs`. The controller
   signs it off before it is written, as `test-writer`'s rule requires.
@@ -1534,8 +1552,9 @@ diff.
 Makes P1t's target, save, read, forget, lock and real-credential tests pass. Routes through
 `credentials::target_for`, `write`, `exists` and `delete`, and `wincred::read_credential`, and edits
 neither file. If an edit to either seems needed, stop and tell the controller. It exposes `forget`, which
-S6a's `school_forget` calls; S5's sign-out deletes the credential itself (RQ17). The save takes
-`school_session`'s lock and answers `Busy` while a fill holds it. One Tauri command saves, used by step 3
+S6a's `school_forget` calls; S5's sign-out deletes the credential itself (RQ17). The save takes S2's
+`school_session::try_take(data_dir)` and answers `Busy` when it gets `None`. P1a does not edit
+`school_session.rs`. One Tauri command saves, used by step 3
 and Settings. P1a writes the command beside the module and does **not** touch `main.rs`; S6r puts its
 name in the `generate_handler!` list (review r6, Minor 2). About 60 lines.
 
@@ -1560,7 +1579,8 @@ Makes P1t's static pins pass. The window side runs P2a's decision in the LMS fol
 nowhere else (S3 test 4's one exception). It writes and flushes the in-flight mark through P1b before the
 submitting script runs, and submits nothing if either step fails. It passes the value only as the one
 `serde_json` argument, never forwards the script's error text (§7.5), and waits `SUBMIT_SETTLE` after the
-submit. It never shows the window, and never sends keyboard or mouse input to the desktop. About 80
+submit. It presses by `click()` or `requestSubmit(control)`, never `form.submit()`. For a script submit it
+adds the last-running backstop listener first (§7.5). It never shows the window, and never sends keyboard or mouse input to the desktop. About 80
 lines. It follows P2a and P1b.
 
 ### P3. Wiring: the lapse and step 3 (implementer)
@@ -1607,6 +1627,8 @@ Pins in `app/tests/onboarding_static.rs` and `app/tests/static_assets.rs`, red u
   - at setup, `Rejected(Unconfirmed)` and `CannotRead` show the school-page line;
   - at setup, after a visible finish that followed `Unconfirmed`, the form shows once more with the
     `Unconfirmed` words and "Not now";
+  - under §2.3's MFA branch, a page flag P4 sets once R0c's result is in, the `Unconfirmed` words carry
+    no "to keep signing in for you"; with the flag off, they do (review r8, Minor 4);
   - after setup, the signed-out row's press after `Rejected` opens the form, with words matching the
     kind;
   - after setup, the row's press and Settings after `CannotRead` open the visible sign-in at the link,
@@ -1658,6 +1680,9 @@ are removed.
 ## 10. Rulings and open questions
 
 ### Ruled, Quinn, 2026-11-04 and 2026-11-07
+
+**The record of the 2026-11-07 rulings** (RQ3, RQ4, RQ5, RQ16, RQ17 and RQ18) is
+`docs/notes/2026-11-07-onboarding-rulings.md`, written by the controller (review r9, Minor 3).
 
 - **RQ1. Precedence:** class search sits below the registrar and above the syllabus (§6.6). It amends the
   syllabus spec's E4 tiers (C9).
@@ -1799,10 +1824,14 @@ checkpoint 1).
 | Review r8, Minor 1 | A save takes `school_session`'s lock and answers `Busy` during a fill | P1a | P1t's lock case; P3's concurrency test |
 | Review r8, Minor 2 | Both marks are read only after the lock is taken | P1b, P2b | P1t's lock case |
 | Review r8, Minor 3 | The in-flight mark is checked only before a fill; a live session still reads grades; the rejected mark with no password opens the form | P1b, P3 | P1t's in-flight cases; P3's two routing tests |
-| Review r8, Minor 4 | No push count stated as fact; "keep signing in for you" holds only if R0c is clean | §2.3, P4 | §2.3's text; P4's words under R0c |
+| Review r8, Minor 4 | No push count stated as fact; "keep signing in for you" holds only if R0c is clean | §2.3, P4t, P4 | §2.3's text; P4t's pin that under the MFA branch the form's `Unconfirmed` words carry no "to keep signing in for you" |
 | Review r8, Minor 5 | A 307 or 308 redirect from a listed host is an accepted limit | §7.5 | §7.5's accepted-limits paragraph |
 | Review r8, Minor 6 | P1 and P2 split into halves of about 80 lines a file | P1a, P1b, P2a, P2b | §4.3's table; the layer table, rows 8 and 9 |
 | Review r8, authority | Each relayed ruling cites "ruled by Quinn in session on 2026-11-07, recorded by the controller" | §10, §12 | checkpoint 1's record line |
+| Review r9, Important 1 | The submit is the control's `click()` or `requestSubmit(control)`, never `form.submit()`; a script submit's last-running listener prevents an unprevented default and ends `Rejected(Unconfirmed)` | P2b | P1t's non-intercepting script-submit case (nothing in any URL); P1t's static pins (no `.submit(`, the listener before the press) |
+| Review r9, Minor 1 | A navigation submit with an empty `action` resolves to the page's URL and takes the same checks | P2a | P1t's empty-`action` navigation case, listed and off-list |
+| Review r9, Minor 2 | S2 exposes `school_session::try_take(data_dir) -> Option<SessionGuard>`, per profile and non-blocking; P1a uses it and does not edit the file | S1, S2, P1a | S1's per-profile lock test; P1a's diff has no `school_session.rs` |
+| Review r9, Minor 3 | The 2026-11-07 rulings' record is `docs/notes/2026-11-07-onboarding-rulings.md` | §10, §12 | the citation in §10 and checkpoint 1 |
 | Spike, 11-06 | The mailbox does not carry the LMS; r5's outcomes A and B and the shared folder are withdrawn | §2, §4.3 | no task depends on a mailbox sign-in for the LMS; S3 test 4's shared-folder list removed |
 | Spike, 11-06 | The LMS lapses about 12 hours from sign-in; keeping it warm extends nothing | P3 | no task keeps a window open between slots; P5's past-12-hours read |
 | Spike, 11-06 | Saved LMS cookies are dropped (they died near 3 hours) | every task | no diff stores or replays an LMS cookie; S9 checks |
@@ -1849,16 +1878,16 @@ checkpoint 1).
 ## 12. Checkpoints
 
 1. **Rulings.** Every question is ruled, RQ17 and RQ18 included, so S5 and S6b are free. **Where the
-   rulings are recorded:** RQ3, RQ5, RQ16, RQ17 and RQ18 were ruled by Quinn in session on 2026-11-07,
-   recorded by the controller. Quinn's words are in that session's conversation, as relayed to the planner,
-   and in the plan's §3 for RQ4 and RQ16. **One design waits on Quinn's confirmation:** the setup split
+   rulings are recorded:** RQ3, RQ4, RQ5, RQ16, RQ17 and RQ18 were ruled by Quinn in session on
+   2026-11-07, recorded by the controller in `docs/notes/2026-11-07-onboarding-rulings.md`. RQ4 and RQ16
+   also appear in the plan's §3. **One design waits on Quinn's confirmation:** the setup split
    (§7.4, RQ5's note). RQ5 as ruled shows the school's page for any setup failure. The split sends a
    recognised "wrong password" to Knowlu's form instead. Since `wrong_password_text` ships empty (§7.5), at
    the founder's school every setup failure still opens the school's page, as RQ5 says. P3 and P4 go out
    only after Quinn confirms the split or rules otherwise.
 2. **`reviewer`, plan mode,** passed r5 (`docs/reports/2026-11-04-onboarding-replan-review-r5.md`) and
-   failed r6, r7 and r8 (`docs/reports/2026-11-07-onboarding-replan-review-r6.md`, `-r7.md`, `-r8.md`).
-   r9 needs its own review before any P task or changed S task goes out.
+   failed r6 to r8 (`docs/reports/2026-11-07-onboarding-replan-review-r6.md` to `-r8.md`) and r9 (as
+   relayed by the coordinator). r10 needs its own review before any P task or changed S task goes out.
 3. **R0c's result** goes to Quinn. Clean: P4 and P5 go as written. Any MFA page: §2.3's branch, and RQ3
    is asked again before P4.
 4. The rulings fold into the plan's §14, and the plan's §7 table gains these rows, by `docs-keeper` on the
