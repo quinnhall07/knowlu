@@ -3,19 +3,19 @@
 **Status: r10, PASSED review r10 (0 Critical, 0 Important, 5 Minor, as relayed by the coordinator), its
 five minors applied as r10's final pass. Nothing dispatched.** r10 closed r9's 1 Important and 3 Minor
 (`docs/reports/2026-11-07-onboarding-replan-review-r9.md`). The ledger's "Review r9" and "Review r10" rows
-name each finding. Dispatch still waits on checkpoint 1's confirmation of the setup split and on R0c (§12).
+name each finding. **Dispatch now waits only on R0c, the 24-hour run (§12).**
 - r6 revised it for the 11-06 and 11-07 spike results and Quinn's rulings RQ3, RQ4, RQ5 and RQ16, and
   replaced outcomes A and B and the shared folder (§2, §4.3).
 - r6, r7 and r8 failed review (`docs/reports/2026-11-07-onboarding-replan-review-r6.md`, `-r7.md` and
   `-r8.md`). Each round closes the one before, and r9 closes r8's 4 Important and 6 Minor. The ledger's
   "Review r6", "Review r7" and "Review r8" rows name each finding.
 - r5 passed review (`docs/reports/2026-11-04-onboarding-replan-review-r5.md`).
-- Quinn has ruled RQ1 to RQ18 (§10). **One design waits on Quinn's confirmation: the setup split**
-  (§7.4, checkpoint 1).
+- Quinn has ruled RQ1 to RQ18 (§10), and **confirmed the setup split on 2026-11-07** ("yes to all four";
+  `docs/notes/2026-11-07-onboarding-rulings.md`; §7.4, checkpoint 1).
 - **The plan stands pending R0c, the 24-hour repeat run** (§2.3).
 
 This draft amends `docs/plans/2026-10-23-wave-b-long-onboarding-plan.md` ("the plan") and does not edit
-it. Once the setup split is confirmed, the rulings fold into the plan as a new §14 entry, and this file is
+it. With the setup split confirmed, the rulings fold into the plan as a new §14 entry, and this file is
 its record.
 
 **Date:** 2026-11-04. **Lanes:** O3 and O4. **Branch read:** `feat/o3-long-onboarding`.
@@ -102,8 +102,8 @@ withdrawn (the plan's §3, "Correction and results, 2026-11-06 and 11-07"). So a
   school page is shown. If the school shows its recognised "wrong password" message, the student retypes
   the password in Knowlu's form, with one line, "Your school didn't accept that password". Anything else
   after the password (an MFA prompt or an unknown page), or a page the fill cannot read, opens the
-  school's own page in one visible window, and the student finishes there (§7.4). This split is pending
-  Quinn's confirmation. Knowlu never captures a password typed on the school's page, and never re-sends
+  school's own page in one visible window, and the student finishes there (§7.4). Quinn confirmed this
+  split on 2026-11-07. Knowlu never captures a password typed on the school's page, and never re-sends
   one on its own.
 - **A lapse (RQ3).** Every hidden LMS read that meets the school's sign-in page fills it again, silently,
   every time.
@@ -273,7 +273,7 @@ yet, so until F4c lands no queue runs and there is nothing to time.
 | P1b | App: `school_password.rs`, the rejected and in-flight marks, flushed and ordered; `retarget_credentials` moves `school`, never a marked one | `contract-engineer`, then `contract-reviewer` | a mark that is lost or cleared out of order re-sends a password and can lock the account | no | P1a |
 | P2a | App: `app/src/school_fill.rs`, the pure decision (§7.5) | `contract-engineer`, then `contract-reviewer` | a wrong host, method or submit kind sends the password where it must not go | no | P1t, C8 |
 | P2b | App: `school_fill.rs`, the hidden window's script: the mark before the first credential-carrying submit, the one `serde_json` argument, the capture-phase listener | `contract-engineer`, then `contract-reviewer` | it puts the password into a page | no | P2a, P1b |
-| P3 | Wiring: the hidden LMS reads fill on a lapse (§7.4); step 3's sign-in from the saved password replaces S4d; the rejected and unreadable outcomes show the named row | `implementer`, reviewed by `contract-reviewer` | as S4d; P2 holds the risky part | no | P2, S4a, S4b, and Quinn's confirmation of the setup split (§12, checkpoint 1). **F8b follows it** |
+| P3 | Wiring: the hidden LMS reads fill on a lapse (§7.4); step 3's sign-in from the saved password replaces S4d; the rejected and unreadable outcomes show the named row | `implementer`, reviewed by `contract-reviewer` | as S4d; P2 holds the risky part | no | P2, S4a, S4b (the setup split it builds was confirmed by Quinn on 2026-11-07). **F8b follows it** |
 | P4t | Failing pins for P4 (brief in §8) | `test-writer` | pins first, as C6, C7 and C10 have | no | P3 |
 | P4 | Page: step 3's school password form and its line; step 5's own mailbox sign-in; Settings' "Update school password"; spec §1.3's "You won't sign in to these again" goes | `console-ui` | inside F11e1, F11b and S6b, in the panel merge order; Quinn reads the words | no | P4t, P3, S6r, **R0c** |
 | P5 | S10 and F15's checks: one typed password, no visible LMS window, one mailbox sign-in; a lapse past 12 hours signs back in silently; one deliberately wrong password is asked once and never retried; a friend's account repeats it (RQ13) | main session | live; Quinn's go | no | P3, P4, T3b, S9, F14, **R0c** |
@@ -390,7 +390,7 @@ the ones the code leaves unclear: F5c's names are on `main.rs`'s list, F8lb's tw
 | 7 | S4a, S4b, F2c, P1t | S3, T3a, C8; F2e, S5; S2 |
 | 8 | F8la, S6t, P1a, then P1b, S6a, S6b | S4b; S4a and S4b; S6t also P1t (review r7, Minor 3); P1t; P1b also P1a; S6a also P1a; S6b also S5 and RQ18 (ruled) |
 | 9 | P2a, then P2b | P1t, C8; P2b also P2a and P1b |
-| 10 | P3 | P2, S4a, S4b; Quinn's confirmation of the setup split (checkpoint 1) |
+| 10 | P3 | P2, S4a, S4b |
 | 11 | F8b, F8b2, F8b2-advance, F8g, F3z, F8lb, then F5 if open for F8lb's two commands | P3, F8la, F2b2b, F2b4 |
 | 12 | C5c, F8w1, F8w2, F4c, then F5b if open, S6r, C5d, and P4t | C3, C4, C5b, F8b, F8b2, F8lb; F4, F4b, F5, F2b2b; F10, S6a, P1; C2b, F2e; P3 |
 | 13 | F11d and F11c2 if open, then P4 inside F11b and F11e1 and after S6b, then F11e2, then C6 | P4t, P3, S6r, R0c, S6b, F8lb, F8g, F3z, C5c, C3 |
@@ -1038,8 +1038,8 @@ fill holds it, the save answers `Busy` and writes nothing, and the page asks the
 in a moment. So a save can never clear a mark that a running fill is about to set. The row stays exit 0, so the tray stays green. The student sees
 the sign-in row only in the cases above.
 
-**Inside onboarding: the setup split (review r7, Important 3; the coordinator's design, pending Quinn's
-confirmation, checkpoint 1).** RQ5 as ruled says any failure at setup shows the school's page. This split
+**Inside onboarding: the setup split (review r7, Important 3; the coordinator's design, ruled: Quinn
+confirmed it on 2026-11-07, "yes to all four", `docs/notes/2026-11-07-onboarding-rulings.md`).** RQ5 as ruled says any failure at setup shows the school's page. This split
 narrows it in one case. Step 3 saves the password, then one hidden window at the link fills and reaches
 `users/me` 200 (P3). If it does not:
 - **`Rejected(Wrong)`.** The student goes back to Knowlu's own form at step 3, with one line: "Your school
@@ -1623,8 +1623,8 @@ Tests first, over `read_hidden_with`'s fakes (C8):
 - a live session with a stale in-flight mark reads grades, and the next would-be fill sends nothing;
 - the rejected mark with no saved password routes the row to the form.
 
-On step 3, through `school_session`'s seam (S4d's replacement), per the setup split (§7.4, pending
-Quinn's confirmation):
+On step 3, through `school_session`'s seam (S4d's replacement), per the setup split (§7.4, ruled:
+confirmed by Quinn on 2026-11-07):
 - the saved password leads to one hidden window and a signed-in LMS, with no window shown;
 - `Rejected(Wrong)` returns step 3 to Knowlu's form with the "didn't accept" state, opens no window, and
   runs no fill until a new save;
@@ -1668,8 +1668,8 @@ form shows again with one line, "Your school didn't accept that password". The s
 there, and that is the one ask. For anything else, step 3 says the school's page is opening so the
 student can finish there. That covers an MFA prompt, an unknown page, and a page the fill cannot read.
 After an `Unconfirmed` finish, the form shows once more with its own words and "Not now". After setup,
-`CannotRead` sends the student to the visible sign-in, not the form. The setup split is pending Quinn's
-confirmation. Step 5 is one visible mailbox sign-in, with a line asking the student to accept "stay
+`CannotRead` sends the student to the visible sign-in, not the form. The setup split is ruled (confirmed
+by Quinn on 2026-11-07). Step 5 is one visible mailbox sign-in, with a line asking the student to accept "stay
 signed in". Settings' "Update school password" opens the same form. Words are Quinn's. Waits on R0c.
 
 ### P5. The live proof (main session, Quinn's go)
@@ -1762,8 +1762,8 @@ are removed.
   student can finish. (2) Then one visible school-mailbox sign-in, MFA once and "stay signed in", after
   which mail stays silent. **Rejected:** capturing the password as the student types it on the school's
   own page. Built by P3 and P4 (§7.4, §8).
-  **How a setup failure splits (r8, the coordinator's design after review r7; pending Quinn's
-  confirmation, checkpoint 1).** RQ5 as ruled shows the school's page for any setup failure. The split
+  **How a setup failure splits (r8, the coordinator's design after review r7; ruled: confirmed by Quinn
+  in session on 2026-11-07, "yes to all four", recorded in `docs/notes/2026-11-07-onboarding-rulings.md`).** RQ5 as ruled shows the school's page for any setup failure. The split
   narrows that in one case. A recognised "wrong password" message from the school, after the password,
   sends the student back to Knowlu's own form, as one ask. Anything else after the password, including
   an MFA prompt or an unknown page, opens the school's own page in a visible window, where the student
@@ -1788,8 +1788,7 @@ are removed.
 
 ### Open
 
-No question is open. One design waits on Quinn's confirmation: the setup split (RQ5's note above;
-checkpoint 1).
+No question is open. The setup split is ruled (RQ5's note above; checkpoint 1).
 
 ## 11. Fidelity ledger
 
@@ -1813,7 +1812,7 @@ checkpoint 1).
 | Quinn, RQ16 | The privacy page states it in one plain line; the wording does not hold the feature | S7 | S7's page and `engine/tests/site.rs` pin; P1 to P4 do not depend on S7 |
 | Quinn, RQ3 | A lapsed session signs back in silently every time; the signed-out row and Settings' sign-in only on a rejection or an unreadable page | P3 | P3's tests over §7.4's fill table, row by row; P5's past-12-hours read |
 | Quinn, RQ5 | Setup: the password typed into Knowlu's own form, then a hidden LMS sign-in with no school page shown | P3, P4 | P3's step-3 test (one hidden window, none shown); P4's form pins; P5's count |
-| Quinn, RQ5, with the setup split (pending Quinn's confirmation) | At setup, a recognised "wrong password" returns to Knowlu's form with "Your school didn't accept that password"; anything else after the password (MFA, an unknown page), and a page the fill cannot read, opens the school's own page, where the student finishes | P3, P4 | P3's three step-3 outcome tests; P4t's setup pins; checkpoint 1's confirmation |
+| Quinn, RQ5, with the setup split (confirmed 2026-11-07, `docs/notes/2026-11-07-onboarding-rulings.md`) | At setup, a recognised "wrong password" returns to Knowlu's form with "Your school didn't accept that password"; anything else after the password (MFA, an unknown page), and a page the fill cannot read, opens the school's own page, where the student finishes | P3, P4 | P3's three step-3 outcome tests; P4t's setup pins; Quinn's confirmation in the rulings note |
 | Quinn, RQ5 | Then one visible mailbox sign-in, MFA once, "stay signed in", mail silent after | P4, F11b | P4's step-5 pins; P5's mailbox count |
 | Quinn, RQ5 (rejected alternative) | No password is captured from the school's page | P2, P3 | P3's test that the visible window's page is never read for typed values; `contract-reviewer` on P2 and P3 |
 | Quinn, RQ4 | Two folders: the LMS's own, and the mailbox's `mail-session-<id>` | S1, S3, §4.5 | S1's `profile_for` tests (grades and the LMS capture only); S3 test 1 without the mailbox; S4c dropped; the mail lane's tests unedited |
@@ -1831,7 +1830,7 @@ checkpoint 1).
 | Review r6, the setup call | A setup rejection asks once, in Knowlu's form; superseded in r8 by the setup split (review r7, Important 3) | P3, P4 | as review r7, Important 3's row |
 | Review r7, Important 1 | An in-flight mark goes to disk before the first credential-carrying submit (review r10, Minor 2); only `users/me` 200 or a new save clears it; any other ending, app close and sleep included, is `Rejected`; no mark, no submit | P1, P2 | P1t's in-flight cases; P2's diff |
 | Review r7, Important 2 | After setup, `CannotRead` offers the visible sign-in at the link, not the form | P3, P4 | P3's after-setup routing test; P4t's per-outcome pins |
-| Review r7, Important 3 | The setup split: `Rejected(Wrong)` to the form, `Rejected(Unconfirmed)` (MFA included) and `CannotRead` to the school's page; no false "didn't accept"; never a re-send; pending Quinn's confirmation | P3, P4 | P3's step-3 tests; P4t's setup pins; §2.3's MFA branch; checkpoint 1 |
+| Review r7, Important 3 | The setup split: `Rejected(Wrong)` to the form, `Rejected(Unconfirmed)` (MFA included) and `CannotRead` to the school's page; no false "didn't accept"; never a re-send; confirmed by Quinn on 2026-11-07 | P3, P4 | P3's step-3 tests; P4t's setup pins; §2.3's MFA branch; checkpoint 1 |
 | Review r7, Important 4 | The submit target comes from the chosen control (`formaction`, `formmethod`), must be https, listed and `POST` for a navigation submit (refined by review r8, Important 1), and is resolved on every page, before each field and before the submit | P2a | P1t's target cases, the password step's new form among them |
 | Review r7, Minor 1 | The conservative rule's costs are stated; `SUBMIT_SETTLE` is its own wait; P5 counts `Rejected(Unconfirmed)` | P2, P5, T3b | §7.4's cost paragraph; P5's count; T3b's value |
 | Review r7, Minor 2 | Rejection sets the mark then deletes; save writes then clears; Forget clears the marks only after a delete that worked | P1 | P1t's order cases |
@@ -1908,16 +1907,15 @@ checkpoint 1).
 1. **Rulings.** Every question is ruled, RQ17 and RQ18 included, so S5 and S6b are free. **Where the
    rulings are recorded:** RQ3, RQ4, RQ5, RQ16, RQ17 and RQ18 were ruled by Quinn in session on
    2026-11-07, recorded by the controller in `docs/notes/2026-11-07-onboarding-rulings.md`. RQ4 and RQ16
-   also appear in the plan's §3. **One design waits on Quinn's confirmation:** the setup split
-   (§7.4, RQ5's note). RQ5 as ruled shows the school's page for any setup failure. The split sends a
-   recognised "wrong password" to Knowlu's form instead. Since `wrong_password_text` ships empty (§7.5), at
-   the founder's school every setup failure still opens the school's page, as RQ5 says. P3 and P4 go out
-   only after Quinn confirms the split or rules otherwise.
+   also appear in the plan's §3. **The setup split is ruled:** Quinn confirmed it on 2026-11-07 ("yes to
+   all four"), recorded in the same note (§7.4, RQ5's note). It narrows RQ5's "any setup failure shows the
+   school's page" by sending a recognised "wrong password" to Knowlu's form. Since `wrong_password_text`
+   ships empty (§7.5), at the founder's school every setup failure still opens the school's page. P3 and
+   P4 are released from this hold, and dispatch waits only on R0c.
 2. **`reviewer`, plan mode,** passed r5 (`docs/reports/2026-11-04-onboarding-replan-review-r5.md`) and
    failed r6 to r9 (`docs/reports/2026-11-07-onboarding-replan-review-r6.md` to
    `docs/reports/2026-11-07-onboarding-replan-review-r9.md`), and **passed r10**, with five minors applied
-   in r10's final pass. The review gate is met. P tasks and changed S tasks still wait on checkpoint 1 and
-   R0c.
+   in r10's final pass. The review gate is met, and checkpoint 1 is met. Dispatch now waits only on R0c.
 3. **R0c's result** goes to Quinn. Clean: P4 and P5 go as written. Any MFA page: §2.3's branch, and RQ3
    is asked again before P4.
 4. The rulings fold into the plan's §14, and the plan's §7 table gains these rows, by `docs-keeper` on the
