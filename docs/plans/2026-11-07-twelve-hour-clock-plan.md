@@ -1,9 +1,10 @@
 # A 12-hour clock on every surface that shows a time: plan
 
-**Status: DRAFT r2. r1 failed review (`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r1.md`:
-0 Critical, 5 Important, 4 Minor), and this revision closes every finding (ledger, last row). Nothing
-dispatched.** Three questions for Quinn are in §6 and remain open. Q1 decides whether the vault's
-generated pages (`today.md`, the events digest) are in scope at all.
+**Status: DRAFT r3. Review r1 failed (0 Critical, 5 Important, 4 Minor) and so did r2 (0 Critical,
+2 Important, 4 Minor); the reports are `docs/reports/2026-11-07-twelve-hour-clock-plan-review-r{1,2}.md`.
+This revision closes every finding (see the ledger's last two rows). Nothing dispatched.** Q1 is
+ruled: **today.md and the events digest stay on 24-hour time** (Quinn, 2026-11-07, relayed by the
+coordinator; §6). Q2 and Q3 are still open.
 
 **Date:** 2026-11-07. **Branch:** `docs/twelve-hour-clock` (from `feat/o3-long-onboarding`).
 **Source:** Quinn, 2026-11-04, replan draft §9 (`docs/plans/2026-11-04-onboarding-replan-draft.md`):
@@ -14,8 +15,9 @@ to start it. Wave B's C6 leaves the format alone, and this lane changes nothing 
 spec (`meets` is `"HH:MM"` 24-hour in frontmatter, §2 of that spec's table). This plan changes
 **display only**. No frontmatter, journal, ledger, run-record or series-file byte changes format.
 One caution (review r1, Important 4): the engine's 12-hour strings are **already vault bytes**. A
-proposal or event card's title becomes approval `title:` frontmatter, and `ends_label` becomes a
-commitment note's `ends:` key. T1 moves that code without changing a byte and pins it (§4, T1).
+proposal or event card's title becomes approval `title:` frontmatter, and through its slug it names
+the approval file (`commitment-check-cs-100-mon-wed-fri-12-12-50pm-a-class.md`). `ends_label` becomes
+a commitment note's `ends:` key. T1 moves that code without changing a byte and pins it (§4, T1).
 
 ---
 
@@ -45,7 +47,8 @@ commitment labels:
   feeds both today.md and the console's amendment card (`surface.rs:877` → `AmendCard.due_move`, drawn
   at `console.js:209`). T2 splits it. `render::due_move_with(before, after, clock)` holds the wording,
   which covers days, years, EARLIER/later and same day. `render::due_move` stays as a thin wrapper that
-  passes `%H:%M`, so today.md's bytes cannot move. `surface.rs` calls `due_move_with` with
+  passes `%H:%M`, so today.md's bytes cannot move. The proof is a whole-string pin committed before
+  the split (T2), not the goldens, which hold only a three-day move. `surface.rs` calls `due_move_with` with
   `clockfmt::clock(_, true)`. The wording is written once and only the clock differs. A surface-only
   copy of the wording was rejected because two copies would drift.
 - **Console:** one set of helpers in `app/static/console.js`, next to today's `localHM` (`:455`), which
@@ -59,6 +62,15 @@ commitment labels:
 
 Determinism holds. `clockfmt` is pure and reads no clock, zone or locale. The page converts a zoned
 stamp (`...Z`) to the machine's zone for display, as `localHM` does today. That happens only in the page.
+
+**Two zones on one page (review r2, Minor 2).** The engine's naive stamps (`local_stamp`,
+`surface.rs:414-417`) are in the **vault's** zone, `cli::vault_zone`. The page's conversion of a
+`...Z` stamp uses the **machine's** zone. The read model does not expose the vault zone: no `tz` field
+appears in any surface reference or in `surface.rs`'s output types. So the helpers can't use it
+without a new read-model field, and that would mean regenerating all three references. The two zones
+differ only when the computer's zone is not the vault's, for example a student travelling. Then a
+converted stamp (sync line, drawer history, `checked`/`synced`) and an engine stamp (generated,
+Closed, Runs) would disagree by the offset. This is named in Q3.
 
 ---
 
@@ -76,11 +88,11 @@ raw value shown as stored). "Frozen" means a Python reference pins it (`CLAUDE.m
 | `eventaccept.rs:64` `ends_label` (`:231` → **`ends:` frontmatter**, asserted at `:398`), `:272` Register task body | the accepted event's commitment note, Register task | 12h | calls `clockfmt::clock` (T1), bytes unchanged and pinned |
 | `render.rs:110` `due_move` via `surface.rs:877` → `AmendCard.due_move` | console amendment card (`console.js:209`): `9/25 09:00 → 9/26 09:00` when a move is a day or less | 24h | **changes** on the surface only, through `due_move_with` (T2, §1). No surface reference pins a time: all three carry `9/25 → 9/22 (3 days EARLIER)` |
 | `surface.rs:1244` `coming_up[].when` (`Wed 9/2 16:00`) | console Coming up | 24h | **changes** to `Wed 9/2 4pm` (T2). Pinned in `surface-today-full.json` (T3) |
-| `eventemit.rs:296-302` events-digest line (`- [ ] Wed 9/2 16:00 · …`) | `approvals/events-digest-*.md` body only (default: `event_cards` off). The console never draws it and shows only counts (`console.js:307`, `:331`, `:661`) | 24h | **stays (review r1, Minor 3)**. It is a vault page like today.md, and changing it would split one folder between two formats with no console gain. It follows Q1's ruling. T2 pins it with a test that needs no contract-list edit |
+| `eventemit.rs:296-302` events-digest line (`- [ ] Wed 9/2 16:00 · …`) | `approvals/events-digest-*.md` body only (default: `event_cards` off). The console never draws it and shows only counts (`console.js:307`, `:331`, `:661`) | 24h | **stays, Q1 ruled (Quinn, 2026-11-07)**. It is a vault page like today.md, and changing it would split one folder between two formats with no console gain. T2 pins it with a test that needs no contract-list edit |
 | `surface.rs:979` `hm` → `the_day.blocks[].start/end` | console The day | 24h data | stays; the console formats it (T5). Pinned in all three surface references |
 | `surface.rs:414` `local_stamp` → `topline.generated_at`, `closed[].when`, `runs_panel.recent[].started/ended` | console status line, Closed, Runs | 24h data | stays; the console formats it (T5). Its doc ties it to today.md's footer |
 | `surface.rs:693` `due`, `:1245` `coming_up[].start`, `:2177` `now` | data only | ISO | stays |
-| `render.rs:432-435` Schedule `09:00–10:00`, `:240-245` Coming up `Wed 9/2 16:00`, `:336` footer `2026-09-01 20:55`, `:119-120` `due_move` | `state/today.md` | 24h | **stays, frozen**: `golden-today-full.md` lines 9-10, 36-38 and 40, and `golden-today-s1.md` line 29. today.md's `due_move` is not pinned. It keeps 24-hour through the `render::due_move` wrapper so that one page has one format; the surface's copy changes (row above). Q1 |
+| `render.rs:432-435` Schedule `09:00–10:00`, `:240-245` Coming up `Wed 9/2 16:00`, `:336` footer `2026-09-01 20:55`, `:119-120` `due_move` | `state/today.md` | 24h | **stays, frozen**: `golden-today-full.md` lines 9-10, 36-38 and 40, and `golden-today-s1.md` line 29. today.md's `due_move` is not pinned. It keeps 24-hour through the `render::due_move` wrapper so that one page has one format; the surface's copy changes (row above). **Q1 ruled: stays.** today.md is also the first-run marker (`ingest::is_first_run`, `ingest.rs:516`; `scheduler::needs_first_run`, `scheduler.rs:274`) and the parity oracle against the goldens |
 | `eventroster.rs:116`, `:216` | `state/events.md` roster | 24h | **stays, frozen** (`vault-full/state/events.md`), and `eventroster.rs:270` parses it back |
 | `calfeed.rs:882-889` | `state/calendar.md` snapshot | 24h | **stays, frozen** (`calendar-snapshot-gcal.md`), and `calfeed.rs:916` parses it back |
 | `commitments.rs:1951` `hm` (`meets` JSON, series file, registrar changes) | data the page reads | 24h data | stays; the commitment spec makes it `HH:MM` |
@@ -101,12 +113,16 @@ raw value shown as stored). "Frozen" means a Python reference pins it (`CLAUDE.m
 | `console.js:396` Closed `x.when.slice(11)` | `20:55` | 24h | `timeOf` |
 | `console.js:455` `localHM`, used at `:422`, `:474`, `:588`, `:610` | `checked 14:05`, `synced 14:05` | 24h, local | replaced by `timeOf` |
 | `console.js:622` sync line `last slot` | `last_slot.ended.slice(11, 16)` | 24h **and UTC**: `ended` is `journal::now_ts` (`app/src/scheduler.rs:1334`, `...Z`) | `timeOf` converts to local time (Q3) |
-| `console.js:639`, `:643` Runs view (`.slice(0, 16)`); `:1286` expected (`e.due.slice(11, 16)` and the raw `" — expected " + e.due`); `:1287` runs list (`.slice(11)`) | `15:00`, `2026-08-27 15:00` | 24h | `timeOf` / `stampOf` |
+| `console.js:639` Runs view expected row, `h(e.due)` passed through raw, with no slice (review r2) | `2026-08-27 15:00` | 24h | `stampOf` |
+| `console.js:643` Runs view recent row, `(r.ended \|\| r.started).slice(0, 16)` | `2026-08-27 15:00` | 24h | `stampOf` |
+| `console.js:1286` runs panel expected: `e.due.slice(11, 16)` **and** the raw tail `" — expected " + h(e.due)` | `15:00 … expected 2026-08-27 15:00` | 24h | `timeOf` for the first, `stampOf` for the tail |
+| `console.js:1287` runs panel recent, `.slice(11)` | `15:00` | 24h | `timeOf` |
+| `console.js:643` `h(r.run_id)` and `<pre class="summary">`; `:1287` `x.summary` | `rank-2026-08-27T20:00:00Z`, run-log text | ids and verbatim logs | **stays**: an id (`runs.rs:140`) and the engine's own summary, not a clock display. These are allowed regions in T4's render scan |
 | `console.js:1659` note drawer history `r.ts.slice(0, 16).replace("T", " ")` (review r1, Important 2) | `2026-09-01 19:55`. `r.ts` is the raw journal stamp (`surface.rs:1955`, from `journal::now_ts`) | 24h **and UTC** | `stampOf`, which converts it to local time. The `r.text` beside it stays (§2.1, `describe` row) |
 | `console.js:1654-1657` drawer frontmatter list (`due`, `executed_at`, …) | the stored value | amb | **stays (review r1, Minor 2)**. It is the note as written, and `due` is editable in place (`EDITABLE`), so the shown value must be the value the edit sends back |
-| `console.js:674-675` amend card `changes` | `due → {"from":"2026-09-25T09:00",…}` | amb | a `due` change renders `stampOf(from) → stampOf(to)`. Other keys stay as today |
+| `console.js:674-675` decision card `changes`, `JSON.stringify(v)` | `due → {"from":"2026-09-25T09:00",…}` | amb | a `due` change renders `stampOf(from) → stampOf(to)`. Other keys stay as today |
 | `console.js:1057` `regMeets` (registrar changes) | `Mon/Wed 13:00–14:15` | 24h | `clockRange` |
-| `console.js:2803-2808` mail applied `due`, `opened_at`, a `due` field's `old`/`new` | raw vault value | amb | `stampOf` for those fields only |
+| `console.js:2803` mail applied "changed" row: `x.old`/`x.new` when `x.field` is `due`; `:2806` `x.opened_at`; `:2808` `x.due` | raw vault value | amb | `stampOf` for those fields only. Other fields' `old`/`new` stay |
 | `console.js:898`, `:904`, `:1042`, `:1126`, `:1170`; `onboarding.js:646`, `:704` | engine `when` | 12h | no change |
 | `console.js:817-818`; `onboarding.js:677`, `:787` `<input type="time">` | native control (follows the Windows locale; value is `HH:MM`) | OS | no change |
 | `onboarding.js:248-275` week strip | days and counts, no clock | n/a | no change |
@@ -121,11 +137,11 @@ Cloud judgment text, such as a model's `why`, is not formatted by us and is out 
 
 - **May change:** `surface --view today`'s `coming_up[].when` and `must_do.amendments[].due_move`,
   and everything the console draws in the 24h and amb rows of §2.2 that say what to change.
-- **May not change:** `state/today.md` and the events-digest body (unless Quinn rules otherwise on
-  Q1), `state/events.md`, `state/calendar.md`, `state/calendar-series.json`, any frontmatter or journal
+- **May not change:** `state/today.md` and the events-digest body (Q1, ruled), `state/events.md`, `state/calendar.md`, `state/calendar-series.json`, any frontmatter or journal
   record, run records, the run log, `commitments` CLI text, the delta and history `text`, and the
   bytes of every 12h string in §2.1. Those last ones are vault bytes, and T1 is a pure move.
-- **Pinned by:** `engine/tests/oracle.rs` (both goldens), `eventroster.rs`'s and `calfeed.rs`'s
+- **Pinned by:** `engine/tests/oracle.rs` (both goldens), T2's `today_md_due_move_is_pinned_whole_string`
+  and digest pin, `commitments.rs:9315`, `eventaccept.rs:398`, `eventroster.rs`'s and `calfeed.rs`'s
   reference tests, `engine/tests/surface_oracle.rs`. All stay green with no edit, except
   `surface-today-full.json`, which T3 regenerates.
 
@@ -148,15 +164,21 @@ check it. **Files:** `engine/src/clockfmt.rs` (new), `engine/src/lib.rs` (one `p
 - Move `eventemit::clock` into `clockfmt::clock`. Add `clockfmt::range` with the split-by-noon rule.
   `eventemit::when_label` and `commitments::range_label` call `range`, and `eventaccept` calls `clock`.
   No `eventemit::clock` re-export is left behind.
-- **Vault bytes (review r1, Important 4).** `clockfmt`'s module doc says plainly that its output is
-  written into notes: approval `title:` frontmatter, through `proposal_title` and `what_and_when`;
-  commitment `ends:` frontmatter, through `ends_label`; and the Register task's body. A change to any
-  output therefore gives new notes a different format from old ones, and it needs a ruling and a plan
-  of its own. A test pins this: `the_clock_is_written_into_notes` in `commitments.rs`'s tests files a
-  class proposal card for `Mon/Wed/Fri 12:00–12:50` on a scratch vault, then asserts the card's
-  frontmatter `title:` line byte for byte, as `yamlemit` writes it today. Capture the expected bytes
-  from the pre-move code before moving anything. The existing `eventaccept.rs:398` assertion pins
-  `ends:`. Both tests carry a comment that points at the module doc.
+- **Vault bytes (review r1, Important 4; r2, Minor 1).** `clockfmt`'s module doc says plainly that
+  its output is written into the vault:
+  - approval `title:` frontmatter, through `proposal_title` and `what_and_when`;
+  - **approval file names**, because a card's title becomes its slug
+    (`commitment-check-cs-100-mon-wed-fri-12-12-50pm-a-class.md`);
+  - commitment `ends:` frontmatter, through `ends_label`;
+  - the Register task's body.
+
+  A change to any output therefore gives new notes a different format and different file names from
+  old ones, and it needs a ruling and a plan of its own. **The pins already exist, and T1 adds no new
+  test for this.** `commitments.rs:9315`
+  (`a_class_proposal_files_one_card_with_the_exact_title_frontmatter_and_body`) pins the file name
+  (`:9321-9322`) and the `title:` line (`:9334`) byte for byte, and `eventaccept.rs:398` pins `ends:`.
+  T1 adds a one-line comment beside each pin that points at the module doc. Both tests pass unedited
+  through the move.
 - **Done when:** every existing assertion passes unedited, including `commitments.rs:9381-9383`,
   `:10829`, `:11117`, `eventaccept.rs:391`, `:398`, the `what_and_when` tests and every oracle.
   `cargo build --workspace` and `cargo test --workspace` pass with 0 warnings.
@@ -164,24 +186,45 @@ check it. **Files:** `engine/src/clockfmt.rs` (new), `engine/src/lib.rs` (one `p
 ### T2. Engine: the surface's two 24-hour strings (`implementer`, after T1)
 
 **Why this agent:** two specified call sites, one wrapper split and their tests, all off the contract
-list. **Files:** `engine/src/surface.rs`, `engine/src/render.rs` (the `due_move` split only),
-`engine/src/eventemit.rs` (one new test, no code change).
+list. **Files:** `engine/src/surface.rs`; `engine/src/render.rs` (the whole-string pin first, then
+the `due_move` split only); `engine/src/eventemit.rs` (one new test, no code change).
 
-- Tests first.
+- **First commit, before any code moves: today.md's due-move pins (review r2, Important 2).** The
+  goldens pin only a three-day move, which shows no time, and `render.rs`'s existing due-move tests
+  check substrings (`:1016`, `:1027`, `:1033`, `:1049`). So neither proves the clock path survives
+  the split. Add `today_md_due_move_is_pinned_whole_string` to `render.rs`'s tests. It calls
+  `render::due_move` directly and uses `assert_eq!` on whole strings. These are today's outputs,
+  cross-checked by reading `render.rs:110-133`: `days_between(before, after)` is `before − after`;
+  times appear when the gap is at most one day; years appear when the years differ.
+
+  | before → after | `due_move` today |
+  |---|---|
+  | 2026-10-09T00:30 → 2026-10-08T23:00 | `10/9 00:30 → 10/8 23:00 (1 day EARLIER)` |
+  | 2026-12-31T23:00 → 2027-01-01T01:00 | `12/31/2026 23:00 → 1/1/2027 01:00 (1 day later)` |
+  | 2026-10-09T23:59 → 2026-10-09T13:00 | `10/9 23:59 → 10/9 13:00 (EARLIER same day)` |
+  | 2026-10-09T13:00 → 2026-10-09T23:59 | `10/9 13:00 → 10/9 23:59 (later same day)` |
+  | 2026-10-09T13:00 → 2026-10-09T13:00 | `10/9 13:00 → 10/9 13:00 (no change)` |
+  | 2026-09-25T09:00 → 2026-09-22T09:00 | `9/25 → 9/22 (3 days EARLIER)` |
+  | 2027-01-05T09:00 → 2026-10-05T09:00 | `1/5/2027 → 10/5/2026 (92 days EARLIER)` |
+
+  This test is committed green on the unchanged code, as its own commit. The rest of T2 must leave it
+  unedited and green. **That, not the oracle, is the proof that today.md's clock did not move.**
+- Then, tests first for the change.
+  - Amendment card: `surface.rs` gets a test for the same seven inputs, run through the card's path
+    (`due_move_with` with `clockfmt`). It expects `10/9 12:30am → 10/8 11pm (1 day EARLIER)`,
+    `12/31/2026 11pm → 1/1/2027 1am (1 day later)`, `10/9 11:59pm → 10/9 1pm (EARLIER same day)`,
+    `10/9 1pm → 10/9 11:59pm (later same day)`, `10/9 1pm → 10/9 1pm (no change)`, and the two
+    multi-day strings unchanged.
   - Coming up: change `surface.rs:2775` to `["Wed 9/2 4pm", "Fri 9/4 12pm", "Thu 9/10 6pm"]`, and
     update the `when` literals at `:4016` and `:4357`.
-  - Amendment card: a surface test for a same-day move, 2026-10-09 23:59 → 13:00, expects
-    `AmendCard.due_move == "10/9 11:59pm → 10/9 1pm (EARLIER same day)"`. A one-day move expects
-    `10/9 9am → 10/10 9am (1 day later)`, and a three-day move stays `9/25 → 9/22 (3 days EARLIER)`.
-  - today.md: `render.rs`'s due-move assertions (`:1027`, `:1033`, `:1049`) and `oracle.rs` stay as
-    they are and stay green. They prove the wrapper kept `%H:%M`.
-  - **Digest pin (review r1, Important 3, Minor 3).** `the_digest_line_keeps_its_24_hour_stamp_and_its_parse_shape`
-    in `eventemit.rs`'s tests emits a digest for an event at 16:00 on 2026-09-02 and asserts that the
+  - **Digest pin (review r1, Important 3; Q1 ruled).** `the_digest_line_keeps_its_24_hour_stamp_and_its_parse_shape`
+    in `eventemit.rs`'s tests emits a digest for an event at 16:00 on 2026-09-02. It asserts that the
     line starts `- [ ] Wed 9/2 16:00 · ` and ends with the backticked uid. It then matches that line
     against the parser's unchecked shape, restated in the test as `` ^- \[ \] .*`([^`]+)`\s*$ ``, and
-    gets the uid back from the capture. A comment names its source
-    (`approvals.rs:1244`, `UNCHECKED`). The test calls nothing private and edits no contract-list file.
-    If Q1 later moves vault pages to 12-hour, this pin flips in that change.
+    gets the uid back from the capture. The test calls nothing private and edits no contract-list file.
+    Its comment (review r2, Minor 4) says: "a copy of `approvals.rs:1244` (`UNCHECKED`): change the
+    two together, in one commit". It also cites Quinn's 2026-11-07 ruling that the digest stays
+    24-hour.
 - Code.
   - Split `render::due_move` into `due_move_with(before, after, clock: impl Fn(DateTime) -> String)`.
     `due_move` becomes a wrapper that passes `|t| t.strftime("%H:%M").to_string()`.
@@ -189,8 +232,9 @@ list. **Files:** `engine/src/surface.rs`, `engine/src/render.rs` (the `due_move`
     `surface::coming_up`'s `when` calls `clockfmt::clock(t.time(), true)` instead of `hm`.
   - `surface::hm` stays for the blocks. Nothing else in `render.rs` changes.
 - **Expected red:** `surface_today_full_is_frozen` only, because the references' `due_move` carries no
-  time. s1 and s1-migrated must stay green, and `oracle.rs` must stay green: that proves today.md did
-  not move. T3 makes the tree green, and T2 and T3 go in one push.
+  time. s1 and s1-migrated must stay green. `oracle.rs`, the existing due-move tests and
+  `today_md_due_move_is_pinned_whole_string` must stay green and unedited. T3 makes the tree green,
+  and T2 and T3 go in one push.
 
 ### T3. Regenerate `surface-today-full.json` (`contract-engineer`; `contract-reviewer` reads it)
 
@@ -230,23 +274,94 @@ a read-model reference. **File:** `engine/tests/fixtures/surface-today-full.json
     assert against the harness's own `new Date(iso)` hours instead.
   - Empty, `null` or unparseable input gives `""` from `timeOf` and the input unchanged from
     `stampOf`.
-- **Static pins (review r1, Important 2).** They run on `console.js` with **comments** stripped but
-  strings kept (a `.replace("T", " ")` lives in a string argument), and with the four helpers' bodies
-  cut out first. Outside the helpers, none of these may appear:
-  - `.slice(` with a first argument from 11 to 19;
-  - `.slice(0,` with a second argument from 13 to 19 (an hour-bearing prefix; `.slice(0, 10)` for a
-    date stays legal);
-  - `.substr(` or `.substring(`;
-  - `.replace("T"`, `.replace('T'` or a `.replace(/T/` regex;
-  - `split("T")`;
-  - `getHours(`, `getMinutes(`, `toLocaleTimeString(` or `toLocaleString(`.
+There are three layers. The render scan is the net, and the two static layers name the site when
+something slips through.
 
-  The test lists every form it forbids in one array, so a new one is a one-line addition. A
-  self-check feeds each form through the scanner and expects a hit. Positive pins: the day-block
-  template and `regMeets` call `clockRange`; the `last slot` line calls `timeOf`; the drawer history
-  calls `stampOf`.
-- Every test fails before T5, because the functions are missing and today's `:151`, `:396`, `:622`,
-  `:643`, `:1286`, `:1287` and `:1659` each trip a forbidden form.
+- **Layer 1, the render scan (review r2, Important 1).** This is the main proof.
+  - Run `console.js` under node with the `onboarding_static.rs:634` harness. Its `document` stub
+    records every string assigned to `innerHTML`, `textContent` or `title`, keyed by element id.
+    Any other property or method is a permissive stub: `querySelectorAll` returns `[]`,
+    `createElement` returns a recorder.
+  - Feed it `engine/tests/fixtures/surface-today-full.json` and `surface-today-s1-migrated.json`; the
+    latter has the runs panel's `expected` rows. The test merges in a supplement for what no reference
+    carries:
+    - `topline.generated_at` and a `last_slot` whose `ended` ends in `Z`;
+    - sync `at` and update `last_check`;
+    - two `closed` rows;
+    - an amendment whose `due_move` is T2's same-day string;
+    - a decision card with `changes.due {from, to}`;
+    - `registrar_changes` with `meets`;
+    - mail-applied rows: a changed `due` with `old`/`new`, a notice with `opened_at`, an added row
+      with `due`;
+    - a `note` reply with history, which the `invoke` stub returns for the drawer.
+  - Lift `paint` and `current` out of the wrapper. Call `paint(state, true)` with `current.view` set to
+    `today`, `runs`, `decisions` and `schedule` in turn. Call `renderMailApplied` directly. Open the
+    drawer through its `invoke("note")` path, then wait for its promise.
+  - Before scanning, strip tags, decode entities, and remove the **allowed regions**: the drawer's
+    `<dl>` frontmatter list, every delta/history `text` string, attribute values (input `value`s),
+    `<pre class="summary">` and the run ids. The test knows each of these strings.
+  - Then assert:
+    - no 24-hour form: `\b(0\d|1[3-9]|2[0-3]):[0-5]\d\b`, and no ISO `T\d\d:\d\d`;
+    - every remaining `\b(1[0-2]|[1-9]):[0-5]\d\b` is followed either by `am`/`pm`, or by `–` and a
+      time ending in `am`/`pm`;
+    - known strings appear: `8–9am`, `10am–12pm`, `12–12:50pm` and `3–6pm` from the full reference's
+      blocks, `Wed 9/2 4pm` from Coming up, and the supplement's converted stamps.
+  - Under `TZ=America/Chicago`, the `Z` stamps must appear converted (`9:05am`).
+- **Layer 2, positive pins (review r2, Important 1).** Each pin is one row: an anchor string that is in
+  `console.js` today, plus the helper call required on the same source line. T5 must not reflow these
+  lines.
+
+  | §2.2 row | Anchor | Required |
+  |---|---|---|
+  | `:92` | `"generated "` | `stampOf(` |
+  | `:151` | `"no due date"` | `stampOf(` |
+  | `:272` | `'<div class="blk '` | `clockRange(` |
+  | `:396` | `data-undo-close` | `timeOf(` |
+  | `:422` | `", checked "` | `timeOf(` |
+  | `:474` | `"up to date (checked "` | `timeOf(` |
+  | `:588` | `showNote("synced "` | `timeOf(` |
+  | `:610` | `"tried "` | `timeOf(` |
+  | `:622` | `t.last_slot.ended` | `timeOf(` |
+  | `:639` | `function renderRunsView` (its body) | `stampOf(e.due)` |
+  | `:643` | `'<pre class="summary">'` | `stampOf(` |
+  | `:675` | `class="changes"` (its block) | `stampOf(` |
+  | `:1057` | `function regMeets` (its body) | `clockRange(` |
+  | `:1286` | `" — expected "` | `timeOf(` and `stampOf(` |
+  | `:1287` | `r.recent.slice(0, 6)` | `timeOf(` |
+  | `:1659` | `"no journal history"` | `stampOf(` |
+  | `:2803` | `h(x.field) + ": "` | `stampOf(` |
+  | `:2806` | `x.opened_at ?` | `stampOf(` |
+  | `:2808` | `" · due "` | `stampOf(` |
+
+  These raw passthroughs are forbidden anywhere: `h(e.due)`, `h(x.due)`, `h(x.opened_at)`,
+  `h(t.generated_at)`, and `JSON.stringify(v)` on the `class="changes"` line.
+- **Layer 3, forbidden forms (review r1, Important 2; r2, Important 1).** These apply outside the four
+  helpers' bodies, which are cut out first. One array lists every form, so a new one is a one-line
+  addition:
+  - `.slice(` with a first argument from 10 to 19, any `.slice(-…)`, and `.slice(0,` with a second
+    argument from 13 to 19 (`.slice(0, 10)` for a date stays legal);
+  - `.substr(` and `.substring(`;
+  - `.replace(` or `.split(` whose argument is `"T"`, `'T'`, `" "` or `":"`, or a regex literal
+    whose source contains `T` or `:`. `:9`'s `h()` and `:1518`'s `/[ (]/` stay legal;
+  - `.split(" ")[1]`;
+  - `getHours(`, `getMinutes(`, `getUTCHours(`, `getUTCMinutes(`, `toTimeString(`,
+    `toLocaleTimeString(`, `toLocaleString(`, `toISOString().slice` and `Intl.DateTimeFormat`.
+- **How the static layers strip comments (review r2, Minor 3).** The scanner is a small state machine
+  that walks the source once, with a state for each string type: `"`, `'` and template literals
+  (with `\` escapes), and regex literals. A regex literal is recognised by a `/` after `(`, `,`, `=`,
+  `:`, `[`, `!`, `&`, `|`, `?`, `{`, `;` or `return`, and runs to the unescaped `/` outside a
+  character class. It drops `//` and `/* */` **only** in code state and keeps strings intact. Its
+  self-checks must all hold:
+  - `var u = "https://x.example"; x.slice(11, 16)` is a hit, because the `//` inside the string is
+    not a comment;
+  - `// x.slice(11, 16)` and `/* x.slice(11, 16) */` are not hits;
+  - `/\/\//.test(s); x.slice(11, 16)` and `` `a//b`; x.slice(11, 16) `` are hits;
+  - every form in Layer 3's array is a hit;
+  - **lossless guard:** every Layer 2 anchor is still present in the stripped text, so a stripper that
+    eats code fails loudly.
+- Every test fails before T5. The helpers are missing, the render scan finds `08:00–09:00` and its
+  kin, and today's `:151`, `:396`, `:622`, `:639`, `:643`, `:1286`, `:1287` and `:1659` each trip a
+  layer.
 
 ### T5. Console: route every time through the formatter (`console-ui`, after T4)
 
@@ -260,13 +375,21 @@ a read-model reference. **File:** `engine/tests/fixtures/surface-today-full.json
   "stays" rows stay as they are: the drawer's frontmatter list (`:1654-1657`) and the delta and
   history `text`. So do the due chip's edit value, the window editor's `<input type="time">` values
   and the `windowSequence` payload (`:838`), which stay `HH:MM` and ISO.
+- Keep every Layer 2 anchor line as a single line (T4); do not reflow them.
 - If Quinn rules **no** on Q3, T5 leaves `:622` and `:1659` exactly as they are, in 24-hour UTC. T4
-  then drops their two positive pins and lists both lines as named exceptions to the forbidden forms.
-  The helpers get no mode that keeps UTC. T4's zoned cases still hold for `:422`, `:474`, `:588` and
-  `:610`, which convert today.
+  then drops their two positive pins, lists both lines as named exceptions to Layer 3, and adds the
+  sync line's `last slot` text and the drawer history stamps to Layer 1's allowed regions. The helpers
+  get no mode that keeps UTC. T4's zoned cases still hold for `:422`, `:474`, `:588` and `:610`, which
+  convert today.
 - **Done when** T4 passes, `static_assets.rs` and `onboarding_static.rs` stay green, and fixture
-  screenshots exist of The day, Coming up, an amendment card with a same-day move, the sync line,
-  Closed, Runs, the note drawer's history and Schedule's registrar changes. Take them by `?fixture=` and headless Edge, never with synthetic input.
+  screenshots exist of:
+  - The day, Coming up, and an amendment card with a same-day move;
+  - a decision card with a `due` change;
+  - the sync line, Closed, Runs, and the note drawer's history;
+  - Schedule's registrar changes;
+  - the mail-applied rows: a changed `due`, a notice's `opened_at`, and an added row's `due`.
+
+  Take them by `?fixture=` and headless Edge, never with synthetic input.
 
 ### T6. Docs (`docs-keeper`, last)
 
@@ -291,15 +414,13 @@ quotes a surface time, this plan's ledger status, and one `HANDOFF.md` line at t
 
 ## 6. Questions for Quinn
 
-1. **Should the vault's generated pages, today.md and the events digest, stay on a 24-hour clock?**
-   `golden-today-full.md` pins `09:00–10:00`, `Wed 9/2 16:00` and the footer `20:55`, and
-   `golden-today-s1.md` pins its footer. The rule is that the engine follows them. **Recommendation:
-   yes, keep both.** Students read the console, Obsidian is gone, and nothing in `app/static` shows or
-   links today.md; the code only checks that it exists (`console.js:1477`, `scheduler.rs:274`). The
-   console shows only the digest's counts. Moving today.md would mean retiring a frozen Python
-   reference, which only you can rule. If you do, the digest follows in the same change (T2's pin
-   flips). The roster and calendar snapshot stay 24-hour in either case: they are frozen, and the
-   engine parses them back.
+1. **RULED (Quinn, 2026-11-07, relayed by the coordinator): today.md and the events digest stay on
+   24-hour time.** today.md is still needed: it is the first-run marker (`ingest::is_first_run`,
+   `ingest.rs:516`; `scheduler::needs_first_run`, `scheduler.rs:274`) and the parity oracle against
+   the frozen goldens. What it means here: §2.1's today.md and digest rows stay; T2's digest pin and its
+   `today_md_due_move_is_pinned_whole_string` hold that line; the roster and calendar snapshot stay as
+   well. (The question as asked: `golden-today-full.md` pins `09:00–10:00`, `Wed 9/2 16:00` and the
+   footer `20:55`, and `golden-today-s1.md` pins its footer. The recommendation was to keep both.)
 2. **A fixed 12-hour clock, or a setting per student?** (Corrected per review r1, Important 5.)
    Determinism does not decide this. A format taken from vault config or a flag is ordinary input, and
    the same input still gives the same bytes. Only reading the OS setting at run time would break
@@ -317,6 +438,17 @@ quotes a surface time, this plan's ledger status, and one `HANDOFF.md` line at t
    by the zone offset. **Recommendation: yes.** The lines are the same and so are the helpers. A "no"
    has its own path in T5.
 
+   **The zone they convert to (review r2, Minor 2).** The helpers convert to the **machine's** zone,
+   as `localHM` does today. The engine's own stamps (generated, Closed, Runs) are in the **vault's**
+   zone (`local_stamp`, `surface.rs:414-417`). The read model doesn't expose the vault zone, so the
+   page can't use it in this lane. The two differ only when the computer's zone is not the vault's,
+   for example while a student travels. Then a converted stamp and an engine stamp on one page
+   disagree by the offset.
+   **Recommendation: accept the machine zone for this lane.** It's what the student's clock says, and
+   it's today's behaviour for `checked`/`synced`. The alternative is a follow-up: add the vault zone to
+   the read model's topline, which means regenerating all three surface references under §4.6, and
+   convert with it through `Intl` inside the helpers.
+
 ---
 
 ## 7. Fidelity ledger
@@ -326,14 +458,16 @@ quotes a surface time, this plan's ledger status, and one `HANDOFF.md` line at t
 | Quinn, 2026-11-04 (replan §9) | A 12-hour clock for class times, on every surface that shows a time | T1 to T5 | §2's inventory; T4's tables; Checkpoint 2's screenshots |
 | Quinn, 2026-11-07 | Start it | this plan | — |
 | Caller brief | Follow eventemit's rule: minutes only when non-zero, the end always carries am/pm | §1, T1 | `clockfmt` table; existing 12h assertions unedited |
-| Caller brief | One formatter per layer | T1, T2, T5 | `clockfmt.rs`; `due_move_with` (one wording, two clocks); T4's forbidden-forms pin and its self-check |
-| `CLAUDE.md` rule 2 | No frozen Python reference regenerated; today.md keeps matching | §3, T2, T3 | `oracle.rs`, roster and snapshot tests green with no edit; T3's diff stat names one file; Q1 |
+| Caller brief | One formatter per layer | T1, T2, T5 | `clockfmt.rs`; `due_move_with` (one wording, two clocks); T4's three layers (render scan, positive pins, forbidden forms) and the stripper's self-checks |
+| `CLAUDE.md` rule 2 | No frozen Python reference regenerated; today.md keeps matching | §3, T2, T3 | `oracle.rs`, roster and snapshot tests green with no edit; `today_md_due_move_is_pinned_whole_string`, committed before the split; T3's diff stat names one file |
+| **Quinn, Q1 ruling (2026-11-07, relayed by the coordinator)** | today.md and the events digest stay on 24-hour time. today.md stays as the first-run marker and the parity oracle | §2.1, §3, T2, §6 Q1 | the §2.1 rows marked "stays, Q1 ruled"; T2's digest pin; the whole-string due-move pin; `oracle.rs` unedited |
 | Console spec §4.6 | A surface reference is regenerated only in a commit that shows the diff and says why | T3 | the three-substitution check; the commit message |
-| `CLAUDE.md`, engine invariants | Frontmatter, journal and ledger bytes never change format; display only | §2.1, T1, T2 | `clockfmt`'s module doc names the frontmatter it feeds; `the_clock_is_written_into_notes` and `eventaccept.rs:398` pin the bytes; `meets` stays `HH:MM` |
+| `CLAUDE.md`, engine invariants | Frontmatter, journal and ledger bytes never change format; display only | §2.1, T1, T2 | `clockfmt`'s module doc names the frontmatter and approval file names it feeds; `commitments.rs:9315` (file name `:9321-9322`, `title:` `:9334`) and `eventaccept.rs:398` pin the bytes; `meets` stays `HH:MM` |
 | `CLAUDE.md` | Determinism | §1, T1 | `clockfmt` is pure and reads no clock, zone or locale |
 | `CLAUDE.md` rule 1 | No single-user assumptions | §1, Q2 | one fixed format for every student |
 | Replan §9 | Wave B neither fixes nor changes the format | §5 | this lane edits no wave-B file but `console.js`; rebase by function name |
 | `CLAUDE.md` gates | TDD, 0 warnings, tests never leave the machine | T1, T2, T4 | tests before code; node runs locally; no listener |
 | `CLAUDE.md`, contract list | Fixtures go to `contract-engineer`; no cheaper agent edits `approvals.rs` | T2, T3 | T3's agent; `contract-reviewer` at Checkpoint 1; T2's digest pin restates the parser's shape and calls nothing private |
-| Q3 (open), recommended yes | The sync line and the drawer history show local time, not UTC | T4, T5 | T4's zoned `timeOf` and `stampOf` cases under `TZ=America/Chicago`; the positive pins that `last slot` calls `timeOf` and the drawer history calls `stampOf`; Checkpoint 2's screenshots of both. On a "no", T5's named exceptions apply |
+| Q3 (open), recommended yes | The sync line and the drawer history show local time (the machine's zone; §1's two-zones note), not UTC | T4, T5 | T4's zoned `timeOf` and `stampOf` cases under `TZ=America/Chicago`; Layer 1's converted-stamp check; the `:622` and `:1659` positive pins; Checkpoint 2's screenshots of both. On a "no", T5's named exceptions apply |
 | Review r1 (`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r1.md`) | **I1** amendment `due_move`: §1, the §2.1 row, T2 (`due_move_with`). **I2** drawer UTC and every slicing form: the §2.2 rows, T4's forbidden-forms list. **I3** a digest test with no contract-list edit: T2's pin. **I4** clockfmt writes vault bytes: Authority, §1, the §2.1 rows, T1's pin. **I5** Q2's reason: §6 Q2. **M1** citations: §1. **M2** the raw `due` displays: the §2.1 `describe` row and the §2.2 drawer row, marked stays. **M3** the digest: dropped from the change, follows Q1. **M4** T4's cases and the Q3 row: T4, this ledger | §1 to §7 | r2 review |
+| Review r2 (`docs/reports/2026-11-07-twelve-hour-clock-plan-review-r2.md`) | **I1** raw passthroughs and dodges: §2.2 rows split (`:639` is a raw `h(e.due)`, `:1286`'s tail, run ids and summaries allowed); T4's Layer 1 render scan over the real renderers, Layer 2's per-row anchors and raw-passthrough ban, Layer 3's widened forms. **I2** the clock path's proof: T2's whole-string `today_md_due_move_is_pinned_whole_string`, committed before the split and cross-checked against `render.rs:110-133`, plus its surface twin. **M1** the existing `commitments.rs:9315` pin replaces the new test; the module doc names approval file names. **M2** two zones: §1's note and Q3. **M3** the stripper's state machine and self-checks, including `https://` in a string, plus the lossless guard. **M4** the digest regex comment says to change it together with `approvals.rs:1244`. Mail rows added to Checkpoint 2's screenshots | §1 to §7 | r3 review |
