@@ -280,7 +280,7 @@ fn full_with_supplement() -> Value {
         "target": null, "urgency": null, "expires": null, "snooze_until": null, "source_uid": null, "first_proposed_at": "2026-08-28" }));
     st["runs_panel"]["expected"] = json!([{ "due": "2026-08-27 15:00", "runner": "cloud", "status": "late" }]);
     st["runs_panel"]["recent"] = json!([{ "ended": "2026-08-27 15:02", "started": "2026-08-27 15:01", "result": "ok", "runner": "cloud",
-        "run_id": "rank-2026-08-27T20:00:00Z", "summary": "ok" }]);
+        "run_id": "rank-2026-08-27T20:00:00Z", "summary": "zz-run-summary-zz" }]);
     st
 }
 
@@ -346,6 +346,12 @@ fn assert_scan(state: &Value, known: &[(&str, String)]) {
     for (id, html) in &by_id {
         // The page repaints an element on every view, so the same fault repeats; say it once.
         for f in clock_faults(&plain(html, &allowed)) { let line = format!("#{id}: {f}"); if !bad.contains(&line) { bad.push(line); } }
+    }
+    // Self-check: cutting an allowed string must never eat a known string, or the page text around it.
+    for a in &allowed {
+        for (id, want) in known {
+            assert!(!want.contains(a.as_str()) && !a.contains(want.as_str()), "allowed string `{a}` collides with the known string `{want}` of #{id}");
+        }
     }
     for (id, want) in known {
         let text = by_id.get(*id).map(|h| plain(h, &allowed)).unwrap_or_default();
