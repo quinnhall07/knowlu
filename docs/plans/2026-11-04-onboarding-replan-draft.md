@@ -225,11 +225,11 @@ follows F8b, and F8b now follows P3 (§4.3). P3 does not wait on R0c.
 | C2c | Engine: a registrar read adopts a class-search note (§6.6). About 30 lines in `registrar.rs`, 8 in `commitments.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | it re-keys a confirmed note | no, but vault meaning | C1, C2a, **C2b** |
 | C2d | Engine: Not mine with no marker, the guard in `create_marker_as`, fixed words in `confirm`'s warnings. About 35 lines in `commitments.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | a miss sends a section off the device | no, but student data | C2b |
 | C2e | Engine: backups never hold class-search data. About 20 lines in `commitments.rs`, 35 in `backup.rs` | `test-writer`, then `integrator`; `contract-reviewer` reads the diff | a miss outlives the purge for 30 days | no, but student data | C2b |
-| C3 | Engine: `commitments --class-search`; `onboarding --preview --class-search` | `test-writer`, then `implementer` | specified; both read-only of notes | no | C1, C2a, C2b |
+| C3 | Engine: `commitments --class-search`; `onboarding --preview --class-search` | `test-writer`, then `implementer` | specified; both read-only of notes | no | C1, C2a, C2b, **C2d, C10** (C2a review: until C2d's marker guard, a `classsearch:` twin could put a section key in a synced decline marker; until C10, a class row is preset to Mine) |
 | C4 | App: `app/src/class_search.rs` (the fetch), and the founder's row once curated | `test-writer`, then `implementer` | specified; proven on a local fake server | no | C0, C1, R0b; RQ7's check for the row |
 | C5a | Queue: `registrar.confirm` out of `onboarding_jobs.rs` and its tests | `test-writer`, then `implementer`; `contract-reviewer` reads the diff | a removal, but 30 test references need judging one by one | no | none; lands at the head of that file's chain |
 | C5b | State: the registrar pieces out of `onboarding_state.rs` and its tests | `test-writer`, then `implementer`; `contract-reviewer` reads the diff | the file holds capture state | no | C5a |
-| C5c | Queue: `school.class_search`, `class_times.apply`, and `proposals_ready` waits for both | `test-writer`, then `implementer`; `contract-reviewer` reads the diff | orchestration; a stale capture must not land | no | C3, C4, C5b, **F8b, F8b2**; takes F8h-runner's place in the `onboarding_jobs.rs` chain |
+| C5c | Queue: `school.class_search`, `class_times.apply`, and `proposals_ready` waits for both | `test-writer`, then `implementer`; `contract-reviewer` reads the diff | orchestration; a stale capture must not land | no | C2d, C10, C3, C4, C5b, **F8b, F8b2**; takes F8h-runner's place in the `onboarding_jobs.rs` chain |
 | C5d | Purge callers: finish, sign-out, `change_school`, and the fail-safe launch sweep over every profile. About 70 lines in `onboarding_state.rs`, 6 in `onboarding_jobs.rs`, 2 in `main.rs` | `test-writer`, then `implementer`; `contract-reviewer` reads the diff | the privacy text rests on it, and a wrong answer deletes a signed-in student's data | no, but student data | C2b, C5c, F2e, F4c |
 | C6 | Page: step 10's class-search group, the proof line, the job labels | `test-writer` (pins), then `console-ui` | `app/static` | no | C3, **C5c**, F11p3; last in the panel merge order, after F11e2 |
 | C7 | Page: the week strip's "N turned in, kept off your list" note (amends §14.58.5) | `test-writer` (pins), then `console-ui` | `app/static`; Quinn's addition | no | none |
@@ -385,7 +385,7 @@ the ones the code leaves unclear: F5c's names are on `main.rs`'s list, F8lb's tw
 | 2 | T3a, R0c, C1, C8, C5b | R0a; R0b; C0; C5a |
 | 3 | C2a, C4 | C1; C0, R0b |
 | 4 | C2b, C10 | C2a |
-| 5 | C2c, C2d, C2e, C3 | C1, C2a, C2b |
+| 5 | C2c, C2d, C2e, then C3 | C1, C2a, C2b; C3 also C2d and C10 (hard rule, C2a review) |
 | 6 | S1, then S2, S3, S5 | RQ4 and RQ17 (ruled); S2 also C8's row and C4's row |
 | 7 | S4a, S4b, F2c, P1t | S3, T3a, C8; F2e, S5; S2 |
 | 8 | F8la, S6t, P1a, then P1b, S6a, S6b | S4b; S4a and S4b; S6t also P1t (review r7, Minor 3); P1t; P1b also P1a; S6a also P1a; S6b also S5 and RQ18 (ruled) |
@@ -612,9 +612,14 @@ differently timed Google row stays proposed.
   covers the `None` branch. A fresh read that omits a row takes the `Some(_)` branch instead, where an old
   `last_seen` would reach `aged_out` at `:2383`. So a new arm before `recent` keeps the row while its
   `until` is open and drops it silently afterwards. On the `None` branch, a row past its `until` stays
-  until `UNSEEN_DAYS` and is then dropped silently, which is harmless because no read is coming. A
+  until `UNSEEN_DAYS` and is then dropped silently, which is harmless because no read is coming. Because
+  `configured` is decided per calendar, such a row stays for as long as another row of the same calendar is
+  still open (C2a review, Minor 2). That is harmless too: it is never proposed, holds no instances, and C2b
+  purges it. A
   class-search row therefore never reaches `aged_out`, and `ended` never gains a `classsearch:` key.
-- `detect_changes` leaves `classsearch:` rows out of `live` (`:4052`). Otherwise an open row could be
+- `detect_changes` leaves `classsearch:` rows out of `live` (`:4052`). So a same-signature class-search
+  row does not stop a Google note's ended card: a public listing never overrides the student's own
+  calendar (C2a review, open question 2). Otherwise an open row could be
   picked as a Google note's successor, and a change card would carry a section (`:4095-4120`).
 - `emit_checks_locked`'s `asked` filter (`:3994`) drops class-search rows (§6.7).
 
