@@ -809,6 +809,13 @@ The approved text (RQ6, with RQ14's clause) says the results "are deleted when s
 out", except a list of which classes show no meeting time. Deleting the bundle alone would not make that
 true, because `found` rows sit in the series file. So unconfirmed rows are purged.
 
+**Accepted limits (C2b review, 2026-11-08).**
+- A series file that cannot be parsed but holds class-search text is never rewritten by the purge. Writing
+  it as empty would lose the registrar's history. The rows stay until the next fresh read rewrites the
+  file. The purge reports a fixed-words error and prints no key.
+- A `rank` that stores the file only to drop a passed no-time block also saves that run's ageing (old
+  calendars, `ended` entries, past registrar terms). A test pins this.
+
 | Data | Where | When it goes |
 |---|---|---|
 | The raw bundle | `onboarding-class-search.json`, app data | `class_times.apply`; also `change_school`, finish, sign-out, and the launch sweep on its two deleting rows |
@@ -1345,6 +1352,12 @@ Tests, each through the real route. After every one, a search of every note find
 - Every other file is unaffected, and `backup.rs`'s existing tests pass unedited.
 
 ### C3. Engine: the two commands
+
+**From C2b's review (2026-11-08), binding on C3.** The no-time block is read at `term_for`'s term
+(`commitments.rs`), while §6.4 reads class search at `fetch_term`'s. Between the end of one term and the
+start of the next they differ, so a block written for the coming term would not suppress asks until that
+term begins. C3 writes the block under the term the reader will use, or picks the term on purpose and
+states it, with a test across the gap.
 
 Tests: `--class-search` writes the series file only, with no note, card or journal record; `found` rows
 carry `classsearch:` keys; `no_time` courses land in the block; the report holds counts and fixed words
