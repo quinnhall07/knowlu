@@ -1916,7 +1916,10 @@ No question is open. The setup split is ruled (RQ5's note above; checkpoint 1).
    failed r6 to r9 (`docs/reports/2026-11-07-onboarding-replan-review-r6.md` to
    `docs/reports/2026-11-07-onboarding-replan-review-r9.md`), and **passed r10**, with five minors applied
    in r10's final pass. The review gate is met, and checkpoint 1 is met. Dispatch now waits only on R0c.
-3. **R0c's result** goes to Quinn. Clean: P4 and P5 go as written. Any MFA page: §2.3's branch, and RQ3
+3. **R0c's result** goes to Quinn. **Result (2026-11-08): clean.** Three hidden fresh-folder sign-ins with the
+   saved password, at 16:17, 19:17 and 22:17 on 2026-11-07, all signed in with no MFA. The run was stopped by
+   the harness for low memory before run 4, and Quinn ruled it a success ("start the build, consider it a
+   success"). Clean: P4 and P5 go as written. Any MFA page: §2.3's branch, and RQ3
    is asked again before P4.
 4. The rulings fold into the plan's §14, and the plan's §7 table gains these rows, by `docs-keeper` on the
    controller's word.
