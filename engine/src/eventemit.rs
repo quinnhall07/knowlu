@@ -505,23 +505,6 @@ fn day_label(day: Date) -> String {
     format!("{} {} {}", day.strftime("%a"), day.day(), day.strftime("%b"))
 }
 
-/// `10am`, `10:30`, `7pm` — a 12-hour clock, minutes only when non-zero.
-pub(crate) fn clock(time: Time, with_meridiem: bool) -> String {
-    let hour = match time.hour() % 12 {
-        0 => 12,
-        h => h,
-    };
-    let mut out = if time.minute() == 0 {
-        hour.to_string()
-    } else {
-        format!("{hour}:{:02}", time.minute())
-    };
-    if with_meridiem {
-        out.push_str(if time.hour() < 12 { "am" } else { "pm" });
-    }
-    out
-}
-
 /// The date-and-time half of [`what_and_when`]: `Thu 1 Oct 10am–3pm`, `Thu 1 Oct` (all day), or
 /// `Thu 1 Oct – Sat 3 Oct` (several days).
 fn when_label(event: &DiscoveredEvent) -> String {
@@ -542,14 +525,9 @@ fn when_label(event: &DiscoveredEvent) -> String {
         return day; // all day
     }
     if end <= start {
-        return format!("{day} {}", clock(start.time(), true));
+        return format!("{day} {}", crate::clockfmt::clock(start.time(), true));
     }
-    let split_by_noon = (start.hour() < 12) != (end.hour() < 12);
-    format!(
-        "{day} {}\u{2013}{}",
-        clock(start.time(), split_by_noon),
-        clock(end.time(), true)
-    )
+    format!("{day} {}", crate::clockfmt::range(start.time(), end.time()))
 }
 
 /// `{title≤60} · {Ddd} {d} {Mon} {range}` — the card's title, from structured fields only.

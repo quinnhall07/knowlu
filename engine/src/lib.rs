@@ -51,6 +51,7 @@ pub mod events;
 pub mod eventfilter;
 pub mod eventfeed;
 pub mod eventroster;
+pub mod clockfmt;
 pub mod eventemit;
 pub mod eventaccept;
 pub mod eventcarry;

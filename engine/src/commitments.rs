@@ -2996,12 +2996,7 @@ fn days_label(days: &[DayKey]) -> String {
 /// F2's range: `12–12:50pm`, `8am–10pm`, `9:30–10:45am` (the start carries am/pm only when it
 /// is on the other side of noon).
 fn range_label(start: Time, end: Time) -> String {
-    let split = (start.hour() < 12) != (end.hour() < 12);
-    format!(
-        "{}\u{2013}{}",
-        crate::eventemit::clock(start, split),
-        crate::eventemit::clock(end, true)
-    )
+    crate::clockfmt::range(start, end)
 }
 
 /// `Mon/Wed/Fri 12–12:50pm` from the first entry; ` +1 more time` (` +N more times`) for the rest.
@@ -9319,6 +9314,7 @@ mod card_tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(
             paths[0],
+            // Vault bytes: this slug and the `title:` line below come from `clockfmt` (see its module doc).
             v.join("approvals").join("commitment-check-cs-100-mon-wed-fri-12-12-50pm-a-class.md")
         );
         let (meta, body, raw) = read(&paths[0]);

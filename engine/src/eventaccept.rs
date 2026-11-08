@@ -65,7 +65,7 @@ fn ends_label(end: DateTime) -> String {
     if end.time() == Time::midnight() {
         "midnight".to_string()
     } else {
-        format!("{} the next day", crate::eventemit::clock(end.time(), true))
+        format!("{} the next day", crate::clockfmt::clock(end.time(), true))
     }
 }
 
@@ -269,7 +269,7 @@ pub fn register_task(instance: &Instance) -> Option<(String, String)> {
             let when = if start.time() == Time::midnight() {
                 day_label(start.date())
             } else {
-                format!("{} {}", day_label(start.date()), crate::eventemit::clock(start.time(), true))
+                format!("{} {}", day_label(start.date()), crate::clockfmt::clock(start.time(), true))
             };
             format!(
                 "Registration closes by {when} at the latest; check the event page for the real \
@@ -395,6 +395,7 @@ mod tests {
         assert_eq!(text_of(&meets[0], "end").as_deref(), Some("23:59"));
         assert_eq!(text_of(&m, "from").as_deref(), Some("2026-10-01"));
         assert_eq!(text_of(&m, "until").as_deref(), Some("2026-10-01"));
+        // Vault bytes: `ends:` comes from `clockfmt` (see its module doc); never change this string.
         assert_eq!(text_of(&m, "ends").as_deref(), Some("1am the next day"));
         // 10pm-12am: the end is midnight.
         let inst = instance(at(10, 1, 22, 0), at(10, 2, 0, 0));
