@@ -1,6 +1,6 @@
 # A 12-hour clock on every surface that shows a time: plan
 
-**Status: READY TO DISPATCH. r5 PASSED review r5 (0 Critical, 0 Important, 2 Minor, applied); Q1, Q2
+**Status: T1 to T6 BUILT on `feat/twelve-hour-clock` (not merged; CI and Checkpoint 2 pending). Was: READY TO DISPATCH. r5 PASSED review r5 (0 Critical, 0 Important, 2 Minor, applied); Q1, Q2
 and Q3 are all ruled (`docs/notes/2026-11-07-onboarding-rulings.md` on `feat/o3-long-onboarding`). Reviews r1 (0 Critical, 5 Important, 4 Minor), r2 (0 Critical, 2 Important,
 4 Minor), r3 (0 Critical, 1 Important, 3 Minor) and r4 (0 Critical, 1 Important, 3 Minor) failed. The
 reports are `docs/reports/2026-11-07-twelve-hour-clock-plan-review-r{1,2,3,4}.md`; r5 passed by message (2026-11-07). r4 was filed
@@ -411,8 +411,9 @@ the rows it does not reach, and they name the site whenever something slips thro
 
 ### T5. Console: route every time through the formatter (`console-ui`, after T3 and T4)
 
-**Why this agent:** this is `app/static` work, and T4's tests check it. **File:**
-`app/static/console.js` only.
+**Why this agent:** this is `app/static` work, and T4's tests check it. **Files:**
+`app/static/console.js`, and `app/tests/static_assets.rs` (review finding: four assertions there pinned
+`localHM`, which T5 replaces with `timeOf`).
 
 - Add the four helpers in place of `localHM` and implement §1's rule. A string with `Z` or an offset
   goes through `new Date` and is shown in local time. A naive `YYYY-MM-DD[T ]HH:MM[:SS]` is read as

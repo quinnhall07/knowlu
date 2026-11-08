@@ -183,6 +183,11 @@ fact. The settings panel is an **overlay** over a running console, and nothing i
 - **Row carries:** pip · title · source chip · **`start by`** · **slack** · progress track · hours ·
   ⚑ · optional flag span (`you: 100% · zyBooks: 60%`, `conflicts with …`, `extended → 9/18`) ·
   optional merge span · optional amend badge.
+- **Amendment card `due_move` (12-hour clock).** `must_do.amendments[].due_move` is built by
+  `render::due_move_with` (one wording: days, years, EARLIER/later, same day) with
+  `clockfmt::clock(_, true)` as its clock, so a move of a day or less reads
+  `9/25 9am → 9/26 9am`. today.md still calls the `render::due_move` wrapper, which keeps `HH:MM`.
+  A move of more than a day shows no time (`9/25 → 9/22 (3 days EARLIER)`), so no surface reference pins one.
 - **`start_by` and slack are not optional.** `start_by` is the most decision-relevant field on the
   page — urgency is distance to *start*, not to *due*, which is the whole reason a six-hour project
   due in ten days outranks a twenty-minute quiz due tomorrow. The mockup had no slot for either;
@@ -198,6 +203,9 @@ fact. The settings panel is an **overlay** over a running console, and nothing i
 - **Answers:** where does today's work actually go?
 - **Computed by:** `surface::the_day → state.the_day`, via `WeekCalendar::events_on`/`free_blocks`
   and `ranking::designate_today_explained`.
+- **Times are data.** `the_day.blocks[].start/end` stay `HH:MM` in the payload (`surface::hm`, pinned in
+  all three surface references); the console shows them with `clockRange` (`8am–12pm`). See §4.8
+  for the whole time-display rule.
 - **Vertical, because the column is narrow** (§11.7): time above, block below, scheduled work
   nested under each open slot. An **all-day lane** sits at the top — all-day events are context and
   never subtract capacity.
@@ -371,7 +379,8 @@ fact. The settings panel is an **overlay** over a running console, and nothing i
   verdict ledger (`eventroster::relevant_events`), filtered to what's still relevant, converted and
   trimmed to the same five picks `render::upcoming` makes for `today.md`'s events section, so the
   console and `today.md` never show a different five.
-- Next five events, from the roster.
+- Next five events, from the roster. Each row's `when` is formatted by the engine with
+  `clockfmt::clock(_, true)` (`Wed 9/2 4pm`); today.md's events section keeps its 24-hour form.
 - **Distinct from the deck**, which holds *undecided* proposals. Accepted events and pending
   decisions are different information and must not share a region.
 - **"Accepted" (P8) and its provenance label (PQ3).** A row the student accepted carries an
@@ -674,11 +683,12 @@ string, since backup is additive to the sync line rather than a region of its ow
   slots that passed while the app wasn't running.
 - `engine_newer` → **`engine newer than console`** (amber) — see §3.1's caveat on what this check
   actually proves today.
-- `last_slot` present → **`last slot HH:MM ok`** (calm) or **`… failed`** (amber), timestamp from
+- `last_slot` present → **`last slot 9:05am ok`** (calm; shown in the machine's local time, converted
+  from the UTC `...Z` stamp by `timeOf`) or **`… failed`** (amber), timestamp from
   `last_slot.ended` falling back to `last_slot.started` — **omitted entirely when both are absent**
   (the "a slot is already running" placeholder summary carries neither), so the line never renders
   a hole where a time should be. When `last_slot.reason` is set the slot was **refused**, not run:
-  **`last slot HH:MM refused — <reason>`** (amber), because the engine was never invoked and
+  **`last slot 9:05am refused — <reason>`** (amber), because the engine was never invoked and
   "failed" would say the wrong thing. `run_slot_inner` stores a refusal in `Scheduler.last` for
   exactly this.
 - `scheduler.mode === "app"` → `scheduler on` (calm) or `scheduler paused` (amber); absent or
@@ -692,6 +702,29 @@ console session that hasn't polled once yet, carries none of them.
 
 Two buttons always render beside the line regardless of state: **`sync now`** (`sync` command,
 fires `sync_run` on completion) and **`back up now`** (`backup_now` command, no interaction event).
+
+### 4.8 Time display (the 12-hour clock)
+
+Plan: `docs/plans/2026-11-07-twelve-hour-clock-plan.md`. One fixed format for every student, never the
+Windows setting: `9am`, `9:05am`, `12pm`, with minutes only when non-zero. A range's end always carries
+am/pm and its start only across noon (`10am–3pm`, `7–9pm`). The format is display only.
+
+- **Where it lives.** Engine: `engine/src/clockfmt.rs` (`clock`, `range`), pure, no zone or locale.
+  Console (`app/static/console.js`): `clock12`, `clockRange`, `stampOf` (date plus clock) and `timeOf`
+  (clock only). The engine formats `coming_up[].when` and the amendment card's `due_move`; the console
+  formats everything else that is a time (the day's blocks, `generated_at`, due chips, Closed, Runs,
+  the sync line, Schedule's registrar changes, the decision card's `due` change, mail-applied rows).
+- **What stays 24-hour.** `today.md` (the first-run marker and the parity oracle) and the events
+  digest; vault frontmatter, the journal and ledgers; the drawer's frontmatter list and the delta and
+  history `text`; the due chip's edit value, the window editor's `<input type="time">` and the
+  `windowSequence` payload. Native time inputs are left as they are.
+- **Two UTC displays are now local.** The sync line's `last slot` and the note drawer's history stamp
+  were UTC slices of `journal::now_ts`; `timeOf` and `stampOf` convert a stamp with `Z` or an offset
+  through `new Date` to local time. A naive `YYYY-MM-DD[T ]HH:MM` stamp is read as written, never shifted.
+- **Known follow-up: the zone is the machine's.** Local time means the Windows time zone of the
+  machine running the console, not a per-student setting; the engine's own day arithmetic is unchanged.
+- **Vault bytes.** `clockfmt` output is also written into approval `title:` (and so file names),
+  commitment `ends:` and the Register task body; changing it needs its own ruling (see its module doc).
 
 ---
 
