@@ -1037,6 +1037,27 @@ mod tests {
         assert!(must_do(&render_amendment(same, None)).contains("(no change)"));
     }
 
+    /// today.md's due-move wording, pinned on whole strings (twelve-hour-clock plan, T2). The
+    /// goldens carry only a three-day move, which shows no time, and the tests above check
+    /// substrings, so this is what proves today.md's 24-hour clock survives the `due_move_with`
+    /// split. Quinn ruled on 2026-11-07 that today.md stays on 24-hour time.
+    #[test]
+    fn today_md_due_move_is_pinned_whole_string() {
+        let dt = |s: &str| s.parse::<DateTime>().unwrap();
+        let cases = [
+            ("2026-10-09T00:30", "2026-10-08T23:00", "10/9 00:30 → 10/8 23:00 (1 day EARLIER)"),
+            ("2026-12-31T23:00", "2027-01-01T01:00", "12/31/2026 23:00 → 1/1/2027 01:00 (1 day later)"),
+            ("2026-10-09T23:59", "2026-10-09T13:00", "10/9 23:59 → 10/9 13:00 (EARLIER same day)"),
+            ("2026-10-09T13:00", "2026-10-09T23:59", "10/9 13:00 → 10/9 23:59 (later same day)"),
+            ("2026-10-09T13:00", "2026-10-09T13:00", "10/9 13:00 → 10/9 13:00 (no change)"),
+            ("2026-09-25T09:00", "2026-09-22T09:00", "9/25 → 9/22 (3 days EARLIER)"),
+            ("2027-01-05T09:00", "2026-10-05T09:00", "1/5/2027 → 10/5/2026 (92 days EARLIER)"),
+        ];
+        for (before, after, want) in cases {
+            assert_eq!(due_move(dt(before), dt(after)), want, "{before} -> {after}");
+        }
+    }
+
     /// A mixed aware/naive pair is a bare `<` in Python and raises TypeError, which loses
     /// today.md — `render_today` runs after `process_approvals` in `cli.run`. Both sides must
     /// arrive naive, at the wall clock each states.
