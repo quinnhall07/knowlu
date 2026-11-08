@@ -4,7 +4,7 @@
 //! listener bound to `127.0.0.1:0`; the hidden read is tested over injected closures. Every host is
 //! invented (`lms.example.edu`, `idp.example.edu`).
 use knowlu::grades::{
-    hidden_outcome, hidden_start_url, open_hidden_with, read_hidden_with, CaptureError, LastRead, SETTLE,
+    hidden_outcome, hidden_start_url, open_hidden_with, read_hidden_with, visible_start_url, CaptureError, LastRead, SETTLE,
 };
 use knowlu::lms_link::{fetch_sign_in_link, sign_in_link, LoginPageError};
 use serde_json::{json, Value};
@@ -306,6 +306,24 @@ fn the_window_opens_at_the_link_when_there_is_one() {
     assert_eq!(got, Ok(()));
     assert_eq!(*at.borrow(), LINK_ON_LISTENER.replace("{port}", &port.to_string()));
     server.join().unwrap();
+}
+
+#[test]
+fn a_visible_window_opens_at_the_link_and_falls_back_to_the_home_page() {
+    let (port, server) = serve(vec![ok(PAGE)]);
+    let host = format!("127.0.0.1:{port}");
+    let origin = format!("http://{host}");
+    assert_eq!(visible_start_url(&origin, &host, Some(PREFIX)), LINK_ON_LISTENER.replace("{port}", &port.to_string()));
+    server.join().unwrap();
+    // No prefix: no GET, today's home page. A page that cannot be read: the student is present, so the same.
+    let dead = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let host = format!("127.0.0.1:{dead}");
+    let origin = format!("http://{host}");
+    assert_eq!(visible_start_url(&origin, &host, None), format!("{origin}/"));
+    assert_eq!(visible_start_url(&origin, &host, Some(PREFIX)), format!("{origin}/"));
 }
 
 // ---- `hidden_outcome`, §7.4's table, row by row -----------------------------------------------
