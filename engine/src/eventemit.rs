@@ -1207,6 +1207,28 @@ mod tests {
         assert!(load_ledger(&vault, None)["engage:1"].proposed);
     }
 
+    /// The digest line keeps its 24-hour stamp: Quinn ruled on 2026-11-07 that the events digest
+    /// stays on 24-hour time like today.md (twelve-hour-clock plan, Q1, T2). It is a vault page,
+    /// and the approvals parser reads the line's shape back.
+    #[test]
+    fn the_digest_line_keeps_its_24_hour_stamp_and_its_parse_shape() {
+        let vault = tmp("digest-24h");
+        let mut ev = event_at("lx:16", 2, 9, Some("Study group"), "");
+        ev.start = Some(date(2026, 9, 2).at(16, 0, 0, 0));
+        ev.end = Some(date(2026, 9, 2).at(17, 0, 0, 0));
+        let ledger = ledger_of(vec![opp("lx:16", "strong")]);
+        let (path, count) = emit(&vault, &[ev], &ledger, None);
+        assert_eq!(count, 1);
+        let text = pystr::read_text(&path.unwrap()).unwrap();
+        let line = text.lines().find(|l| l.starts_with("- [ ] ")).expect("an unchecked line");
+        assert!(line.starts_with("- [ ] Wed 9/2 16:00 · "), "{line}");
+        assert!(line.ends_with("`lx:16`"), "{line}");
+        // A copy of `approvals.rs:1244` (`UNCHECKED`): change the two together, in one commit.
+        let unchecked = regex::Regex::new(r"^- \[ \] .*`([^`]+)`\s*$").unwrap();
+        let caps = unchecked.captures(line).expect("the parser's unchecked shape");
+        assert_eq!(&caps[1], "lx:16");
+    }
+
     #[test]
     fn emit_digest_is_a_journaled_create_with_id() {
         // Spec §3: every note write goes through engine.write. emit_digest used to write the
