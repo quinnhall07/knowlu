@@ -1059,7 +1059,7 @@ pub fn commitments_report_with(
     let template = WeekCalendar::from_file(&vault.join("config").join("week_template.yaml"), Vec::new());
     let proposals = cm::proposals(&file, &set, &codes, &names, &template, &held, today, false);
 
-    let uncovered = cm::uncovered_courses(vault, &set, &proposals, &codes);
+    let uncovered = cm::uncovered_courses(vault, &set, &proposals, &codes, &std::collections::BTreeSet::new());
     let registrar_changes = cm::registrar_changes_json(vault, &file, &set, today);
     CommitmentsReport { proposals, uncovered, registrar_changes, warnings }
 }
