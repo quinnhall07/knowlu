@@ -206,7 +206,7 @@ are each split in two, review r8, Minor 6). Where the plan says P1 or P2, it mea
 | R0a | The sign-in runs, 11-05 to 11-07. **Done**; results in the plan's §3 and §2.1 here (brief in §8) | main session | live; Quinn at the machine; a throwaway build | no | none |
 | R0b | The class-search spike: public data, no sign-in. **Done 2026-11-08**; results under its brief in §8 | main session | live reads are the controller's | no | none |
 | R0c | The 24-hour repeat of the saved-password fill, **running** (brief in §8) | main session | live; the throwaway build | no | R0a |
-| T3a | S-G alone, split from T3: hidden reads while the student is elsewhere, now through the link | main session | live; S4a and S4b depend on it | no | R0a's build |
+| T3a | S-G alone, split from T3: hidden reads while the student is elsewhere, now through the link. **Done 2026-11-08**; results under R0b's in §8 | main session | live; S4a and S4b depend on it | no | R0a's build |
 
 ### 4.2 Common tasks
 
@@ -1201,6 +1201,19 @@ or cross-list field; seconds per query; whether a plain `ureq`-style request is 
 3. Pass, from the record in §6.3: 14 of 19 LMS names fit `TermSubjectNumberSection`.
 4. Partly done. The host has no `robots.txt` (a 404). Posted terms were not looked for: the search page's entry URL answered with a redirect and no body. The school's terms of use are still to be read, and the RQ7 question is still on the lawyer's list. The row's `checked` date waits on this.
 5. Not run here. The `lms_sign_in` link check belongs to the row that sets it (C4 and C9).
+
+### T3a. S-G, hidden reads while the student is elsewhere (main session): done
+
+**Results, 2026-11-08, 16:31-16:33 local (controller, Quinn at the machine).**
+- Setup: Quinn brought their own browser to the front, by their own click, and used it throughout.
+- What ran: three hidden saved-password sign-ins, each from an emptied folder, about a minute apart, on R0a's build.
+- Result: 3 of 3 finished signed in (`users/me` 200, silent), in 8.2 s, 8.2 s and 8.1 s.
+- Host kinds per run, from Rust only: LMS, then other (the sign-in page), then LMS.
+- Throttling: none slowed a run. The times match R0a's 8.2 s with Knowlu's own windows idle, and R0c's overnight runs.
+
+**Outcome.** "All finish", so the wave-B plan's S-G gives **no change**: no new browser arguments, and no keep-visible step.
+
+**Not covered.** S-G cases (b), Knowlu's window minimised, and (c), the onboarding page changing steps during a read, need the onboarding window, which R0a's build does not have. Both fall to P5's live proof. The registrar and mail reads were not repeated. The registrar read is gone from setup (C5a). The mail read runs in its own window, and was proven under decision 19.
 
 ### C0. `scaffold.rs`: the row's new fields
 
