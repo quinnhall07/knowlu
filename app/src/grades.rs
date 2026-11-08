@@ -570,12 +570,14 @@ fn capture(agent: &ureq::Agent, host: &str, jar: &str, user: &Value) -> Result<V
     assemble_bundle(&head, user, &memberships, &per_course).map_err(|_| CaptureError::Unreachable)
 }
 
-/// **Connect's window** (spec §4): `lms-grades`, visible, at `https://<host>/`, on the kept profile.
+/// **Connect's window** (spec §4): `lms-grades`, visible, at the sign-in link when there is one (replan §7.2),
+/// else at `https://<host>/`, on the kept profile.
 pub fn open_visible(app: &tauri::AppHandle, data_dir: &Path, host: &str) -> Result<(), String> {
     if app.get_webview_window(WINDOW).is_some() {
         return Err(CaptureError::WindowOpen.as_str().into());
     }
-    let url: tauri::Url = format!("https://{host}/").parse().map_err(|_| "the LMS address is not a URL".to_string())?;
+    let start = visible_start_url(&format!("https://{host}"), host, sign_in_prefix(host));
+    let url: tauri::Url = start.parse().map_err(|_| "the LMS address is not a URL".to_string())?;
     std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
     WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(url))
         .title("Sign in to Blackboard")
@@ -614,52 +616,59 @@ pub fn await_sign_in(app: &tauri::AppHandle, host: &str) -> Result<Value, Captur
     }
 }
 
-/// **Refresh's window**: `lms-grades`, hidden and out of the taskbar, at `https://<host>/ultra/`.
+/// **Refresh's window**: `lms-grades`, hidden and out of the taskbar, at the school's sign-in link
+/// when its row names a prefix and the public page yields one, else at `https://<host>/ultra/`
+/// ([`open_hidden_with`]). A login page that cannot be fetched is `Unreachable` and opens no window.
 pub fn open_hidden(app: &tauri::AppHandle, data_dir: &Path, host: &str) -> Result<(), CaptureError> {
     if app.get_webview_window(WINDOW).is_some() {
         return Err(CaptureError::WindowOpen);
     }
-    let url: tauri::Url = format!("https://{host}/ultra/").parse().map_err(|_| CaptureError::Unreachable)?;
-    WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(url))
-        .title("Blackboard")
-        .visible(false)
-        .focused(false)
-        .skip_taskbar(true)
-        .data_directory(session_dir(data_dir))
-        .build()
-        .map(|_| ())
-        .map_err(|_| CaptureError::Unreachable)
+    open_hidden_with(&format!("https://{host}"), host, sign_in_prefix(host), |start| {
+        let url: tauri::Url = start.parse().map_err(|_| CaptureError::Unreachable)?;
+        WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(url))
+            .title("Blackboard")
+            .visible(false)
+            .focused(false)
+            .skip_taskbar(true)
+            .data_directory(session_dir(data_dir))
+            .build()
+            .map(|_| ())
+            .map_err(|_| CaptureError::Unreachable)
+    })
 }
 
-/// **The hidden refresh's read**: up to [`SETTLE`] for the window to rest on the LMS host with
-/// `users/me` answering 200, then capture. The window is destroyed whatever happens. `users/me`
-/// answering 401 or 403, or the window never reaching the LMS host, is signed out; anything else
-/// (no answer, a 5xx) is unreachable.
+/// **The hidden refresh's read**: [`read_hidden_with`] over the real window, `users/me` and clock. Up to
+/// [`SETTLE`] for the window to rest on the LMS host with `users/me` answering 200, then capture; at the
+/// deadline [`hidden_outcome`] reads where the window is. The window is destroyed whatever happens.
 pub fn read_hidden(app: &tauri::AppHandle, host: &str) -> Result<Value, CaptureError> {
     let Some(w) = app.get_webview_window(WINDOW) else { return Err(CaptureError::Unreachable) };
     let agent = agent();
-    let deadline = Instant::now() + SETTLE;
-    let (mut reached, mut last) = (false, None);
-    let result = loop {
-        let here = w.url().ok().map(|u| u.to_string());
-        if here.as_deref().is_some_and(|u| on_host(u, host)) {
-            reached = true;
-            if let Some(jar) = jar_for(&w, host) {
-                match users_me(&agent, host, &jar) {
-                    Ok(user) => break capture(&agent, host, &jar, &user),
-                    Err(code) => last = code,
-                }
+    let began = Instant::now();
+    // The jar read for the poll that answered 200, held for the capture and dropped with this call.
+    let jar = std::cell::RefCell::new(None::<String>);
+    let previous = std::cell::Cell::new(None::<u16>);
+    let result = read_hidden_with(
+        host,
+        || w.url().ok().map(|u| u.to_string()),
+        || {
+            // A jar that cannot be read is no poll: `last` stays as the previous poll left it.
+            let held = jar_for(&w, host);
+            let me = poll_or_keep(held.as_deref(), previous.get(), |j| users_me(&agent, host, j));
+            if let Err(code) = &me {
+                previous.set(*code);
             }
-        }
-        if Instant::now() >= deadline {
-            break Err(match last {
-                _ if !reached => CaptureError::SignedOut,
-                Some(401 | 403) => CaptureError::SignedOut,
-                _ => CaptureError::Unreachable,
-            });
-        }
-        std::thread::sleep(POLL);
-    };
+            if held.is_some() {
+                *jar.borrow_mut() = held;
+            }
+            me
+        },
+        |user| match jar.borrow().as_deref() {
+            Some(held) => capture(&agent, host, held, user),
+            None => Err(CaptureError::Unreachable),
+        },
+        || began.elapsed(),
+        || std::thread::sleep(POLL),
+    );
     let _ = w.destroy();
     result
 }
@@ -820,4 +829,110 @@ pub fn grades_forget(app: tauri::AppHandle, cs: State<'_, ConsoleState>) -> Valu
             let _ = w.destroy();
         }
     })
+}
+
+// ---- C8: the link and the deadline's test (replan §7.2, §7.4); tests: `app/tests/lms_sign_in.rs`. ----
+
+/// What the last `users/me` poll said, before the deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastRead {
+    /// Never polled (the window was not on the LMS host at any poll).
+    Empty,
+    /// Polled, no HTTP answer (transport failure, or a body that was not JSON).
+    Transport,
+    /// Polled, answered with this status.
+    Status(u16),
+}
+
+/// **§7.4's table, pure**: the outcome at the deadline, from where the window is *now* and the last
+/// poll. Not on the LMS host: `SignedOut`, whatever `last` holds. On it: 401 or 403 is `SignedOut`,
+/// anything else `Unreachable`.
+pub fn hidden_outcome(on_host_now: bool, last: LastRead) -> CaptureError {
+    match (on_host_now, last) {
+        (false, _) | (true, LastRead::Status(401 | 403)) => CaptureError::SignedOut,
+        (true, _) => CaptureError::Unreachable,
+    }
+}
+
+/// The school's sign-in path prefix (`Curated::lms_sign_in`), found by its LMS host: per-school data,
+/// `None` for every row without one. The host is the only thing a window is ever driven to.
+fn sign_in_prefix(host: &str) -> Option<&'static str> {
+    crate::scaffold::CAMPUSES.iter().find(|c| c.lms_host == host).and_then(|c| c.lms_sign_in)
+}
+
+/// The URL a hidden window starts at: the sign-in link when the row has a prefix and the public page
+/// yields one, `<origin>/ultra/` when there is no prefix or the link is `None`, and `Unreachable`
+/// when the page cannot be fetched. No prefix means no GET at all. `origin` is `https://<host>`.
+pub fn hidden_start_url(origin: &str, lms_host: &str, prefix: Option<&str>) -> Result<String, CaptureError> {
+    let Some(prefix) = prefix else { return Ok(format!("{origin}/ultra/")) };
+    match crate::lms_link::fetch_sign_in_link(origin, lms_host, prefix) {
+        Ok(Some(link)) => Ok(link),
+        Ok(None) => Ok(format!("{origin}/ultra/")),
+        Err(crate::lms_link::LoginPageError::Unreachable) => Err(CaptureError::Unreachable),
+    }
+}
+
+/// The URL a visible sign-in starts at: the link when there is one, else the LMS home as today. A
+/// student is present, so a page that cannot be read is not a reason to refuse the window.
+pub fn visible_start_url(origin: &str, lms_host: &str, prefix: Option<&str>) -> String {
+    prefix
+        .and_then(|p| crate::lms_link::fetch_sign_in_link(origin, lms_host, p).ok().flatten())
+        .unwrap_or_else(|| format!("{origin}/"))
+}
+
+/// [`open_hidden`] over an injected `open(url)`: the window is opened only after [`hidden_start_url`]
+/// answered, so `Unreachable` opens none.
+pub fn open_hidden_with(
+    origin: &str,
+    lms_host: &str,
+    prefix: Option<&str>,
+    open: impl FnOnce(&str) -> Result<(), CaptureError>,
+) -> Result<(), CaptureError> {
+    let url = hidden_start_url(origin, lms_host, prefix)?;
+    open(&url)
+}
+
+/// [`read_hidden`]'s loop over injected effects, and without destroying the window (the wrapper does).
+/// `window_url` is the window's current URL; `users_me` is the `users/me` read (`Ok(user)` on 200,
+/// else `Err(status)`, `None` for no answer); `capture` turns that user into the bundle; `now` is the
+/// clock as time since the read began; `pause` is the wait between polls. Polls until `users/me`
+/// answers 200 or `now() >= SETTLE`, then [`hidden_outcome`] on the window's URL at that moment.
+pub fn read_hidden_with(
+    host: &str,
+    mut window_url: impl FnMut() -> Option<String>,
+    mut users_me: impl FnMut() -> Result<Value, Option<u16>>,
+    capture: impl FnOnce(&Value) -> Result<Value, CaptureError>,
+    mut now: impl FnMut() -> Duration,
+    mut pause: impl FnMut(),
+) -> Result<Value, CaptureError> {
+    let mut last = LastRead::Empty;
+    loop {
+        let on_host_now = window_url().is_some_and(|u| on_host(&u, host));
+        if on_host_now {
+            match users_me() {
+                Ok(user) => return capture(&user),
+                Err(Some(code)) => last = LastRead::Status(code),
+                Err(None) => last = LastRead::Transport,
+            }
+        }
+        if now() >= SETTLE {
+            // Where the window is *now*: a slow `users/me` may have outlasted a redirect to the identity provider.
+            let on_host_at_deadline = window_url().is_some_and(|u| on_host(&u, host));
+            return Err(hidden_outcome(on_host_at_deadline, last));
+        }
+        pause();
+    }
+}
+
+/// One `users/me` poll for [`read_hidden`]: no jar means no poll, and the answer is the previous one, so a
+/// jar that cannot be read leaves `last` as it was.
+pub fn poll_or_keep(
+    jar: Option<&str>,
+    previous: Option<u16>,
+    read: impl FnOnce(&str) -> Result<Value, Option<u16>>,
+) -> Result<Value, Option<u16>> {
+    match jar {
+        Some(jar) => read(jar),
+        None => Err(previous),
+    }
 }

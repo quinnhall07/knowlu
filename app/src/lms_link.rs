@@ -232,6 +232,13 @@ pub fn open_lms_window(app: tauri::AppHandle, unitid: String) -> Value {
         return json!({ "ok": false, "error": "we do not know your school's sign-in page yet — paste your calendar link below", "opened": false });
     };
     let dir = session_dir();
+    // A visible LMS sign-in opens at the school's sign-in link when its row names one (replan §7.2). An open
+    // window is only shown and focused, so the page is not fetched for it.
+    let url = start_unless_open(app.get_webview_window(WINDOW).is_some(), url.clone(), || {
+        crate::scaffold::curated(&unitid)
+            .map(|c| crate::grades::visible_start_url(&format!("https://{}", c.lms_host), c.lms_host, c.lms_sign_in))
+            .unwrap_or(url)
+    });
     match open_window_at(&app, &url, &dir) {
         // **The path is not in the envelope** (R-C1-40, I2): the page has no use for it now that
         // closing takes no argument, and a temp path handed to a page is a temp path that comes back.
@@ -895,3 +902,187 @@ pub fn validate_only(_kind: &str, _url: &str, _fetch: &dyn Fn(&str) -> Result<St
 /// The capture over [`validate_only`] and today's fetch; `school.capture` calls this, never
 /// `capture_calendar_link`. **F1 stub.**
 pub fn capture_link_only(_app: &tauri::AppHandle, _unitid: &str) -> Value { todo!("F8la: capture_link_only") }
+
+// ---- C8: the LMS sign-in link (replan §7.1); the tests are `app/tests/lms_sign_in.rs`. ----
+
+/// Why the public login page could not be read: a transport failure or a 5xx. A page that is read
+/// but holds no usable link is `Ok(None)`, never this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginPageError {
+    Unreachable,
+}
+
+/// Every `href="…"` value in `html` (either quote, or unquoted), entities decoded once. `data-href` and
+/// the like are not an `href`.
+fn hrefs(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let (bytes, mut out, mut from) = (html.as_bytes(), Vec::new(), 0);
+    while let Some(at) = lower[from..].find("href") {
+        let start = from + at;
+        from = start + 4;
+        if start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || matches!(bytes[start - 1], b'-' | b'_' | b':')) {
+            continue;
+        }
+        let mut i = from;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() { i += 1; }
+        if bytes.get(i) != Some(&b'=') { continue; }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() { i += 1; }
+        let value = match bytes.get(i) {
+            Some(&q @ (b'"' | b'\'')) => {
+                let end = html[i + 1..].find(q as char).map(|n| i + 1 + n);
+                let Some(end) = end else { continue };
+                from = end + 1;
+                &html[i + 1..end]
+            }
+            Some(_) => {
+                let end = html[i..].find(|c: char| c.is_whitespace() || c == '>').map_or(html.len(), |n| i + n);
+                from = end;
+                &html[i..end]
+            }
+            None => continue,
+        };
+        out.push(decode_entities(value));
+    }
+    out
+}
+
+/// The five named entities and numeric ones, once (so `&amp;amp;` is `&amp;`). Anything else stays as written.
+fn decode_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let decoded = rest.find(';').filter(|&n| n <= 10).and_then(|n| {
+            let name = &rest[1..n];
+            let c = match name {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                _ => name.strip_prefix('#').and_then(|d| match d.strip_prefix(['x', 'X']) {
+                    Some(h) => u32::from_str_radix(h, 16).ok(),
+                    None => d.parse().ok(),
+                }).and_then(char::from_u32),
+            };
+            c.map(|c| (c, n + 1))
+        });
+        match decoded {
+            Some((c, used)) => { out.push(c); rest = &rest[used..]; }
+            None => { out.push('&'); rest = &rest[1..]; }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One decoded `href` as the absolute `https` link on exactly `lms_host`, or `None`: any other host or
+/// port, `http`, `//host`, a relative path, userinfo (any `@`), a backslash, whitespace, or a path outside
+/// `prefix`.
+fn accepted(href: &str, lms_host: &str, prefix: &str) -> Option<String> {
+    if href.contains(['\\', '@']) || href.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    let path_and_rest = if let Some(rest) = href.strip_prefix("https://") {
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        if !rest[..end].eq_ignore_ascii_case(lms_host) { return None; }
+        &rest[end..]
+    } else if href.starts_with('/') && !href.starts_with("//") {
+        href
+    } else {
+        return None;
+    };
+    let path = &path_and_rest[..path_and_rest.find(['?', '#']).unwrap_or(path_and_rest.len())];
+    if path.split('/').any(|seg| matches!(seg.to_ascii_lowercase().replace("%2e", ".").as_str(), "." | "..")) {
+        return None;
+    }
+    path.starts_with(prefix).then(|| format!("https://{lms_host}{path_and_rest}"))
+}
+
+/// **§7.1's rules**, pure. The one distinct sign-in link in `html`, as an absolute `https` URL on
+/// exactly `lms_host` whose path starts with `prefix`; `None` for none, for two distinct, and for any
+/// refused shape (another host, a look-alike suffix, `//host`, userinfo, a backslash, `http`).
+pub fn sign_in_link(html: &str, lms_host: &str, prefix: &str) -> Option<String> {
+    if lms_host.is_empty() || !prefix.starts_with('/') {
+        return None;
+    }
+    let mut found: Vec<String> = Vec::new();
+    for link in hrefs(html).iter().filter_map(|h| accepted(h, lms_host, prefix)) {
+        if !found.contains(&link) {
+            found.push(link);
+        }
+    }
+    if found.len() == 1 { found.pop() } else { None }
+}
+
+/// The hops [`fetch_sign_in_link`] follows, and no more.
+const LOGIN_PAGE_HOPS: usize = 3;
+
+/// Where a redirect's `Location` leads, kept to `origin`'s own scheme, host and port: root-relative, or
+/// absolute on exactly `origin`. Anything else (another host, `//host`, a relative path) is `None`.
+fn same_origin_hop(origin: &str, location: &str) -> Option<String> {
+    if location.contains('\\') || location.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    if location.starts_with('/') && !location.starts_with("//") {
+        return Some(format!("{origin}{location}"));
+    }
+    let rest = location.get(..origin.len()).filter(|h| h.eq_ignore_ascii_case(origin)).map(|_| &location[origin.len()..])?;
+    match rest.chars().next() {
+        None => Some(format!("{origin}/")),
+        Some('/' | '?' | '#') => Some(format!("{origin}{rest}")),
+        _ => None,
+    }
+}
+
+/// One anonymous GET of `<origin>/` (no cookie), following at most 3 redirects and only while they stay
+/// on `origin`'s own host and port, then [`sign_in_link`]. `origin` is `https://<lms_host>` in
+/// production and `http://127.0.0.1:<port>` in tests; `lms_host` is what a link must name.
+/// `Ok(None)`: no usable link, or a 4th hop, or a hop to another host. `Err`: transport failure or 5xx.
+///
+/// Redirects are walked by hand, each hop on a fresh agent with no jar, so nothing one answer sets
+/// reaches the next request and a hop off the host is never requested.
+pub fn fetch_sign_in_link(origin: &str, lms_host: &str, prefix: &str) -> Result<Option<String>, LoginPageError> {
+    let origin = origin.trim_end_matches('/');
+    let mut url = format!("{origin}/");
+    for hop in 0..=LOGIN_PAGE_HOPS {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(15)))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .build()
+            .into();
+        let mut res = agent.get(&url).header("accept", "text/html").call().map_err(|_| LoginPageError::Unreachable)?;
+        let status = res.status().as_u16();
+        match status {
+            500..=599 => return Err(LoginPageError::Unreachable),
+            301 | 302 | 303 | 307 | 308 => {
+                let location = res.headers().get("location").and_then(|v| v.to_str().ok()).map(str::to_string);
+                let next = location.and_then(|l| same_origin_hop(origin, &l));
+                match next {
+                    Some(next) if hop < LOGIN_PAGE_HOPS => url = next,
+                    _ => return Ok(None),
+                }
+            }
+            200..=299 => {
+                // A page too big to be a login page, or not text, is a page Knowlu does not understand
+                // (`Ok(None)`); only a failure to move the bytes is a transport failure (§7.4).
+                let bytes = match res.body_mut().with_config().limit(1 << 20).read_to_vec() {
+                    Ok(bytes) => bytes,
+                    Err(ureq::Error::BodyExceedsLimit(_)) => return Ok(None),
+                    Err(_) => return Err(LoginPageError::Unreachable),
+                };
+                return Ok(String::from_utf8(bytes).ok().and_then(|body| sign_in_link(&body, lms_host, prefix)));
+            }
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+/// The start page for a visible window, asking for the link only when no window is open already.
+pub fn start_unless_open(already_open: bool, home: String, link: impl FnOnce() -> String) -> String {
+    if already_open { home } else { link() }
+}
