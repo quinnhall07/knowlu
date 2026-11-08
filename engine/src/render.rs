@@ -107,7 +107,16 @@ pub fn one_line(text: &str) -> String {
 /// a cross-year move (`1/5 → 10/5 (92 days EARLIER)` reads as a nine-month postponement) gains
 /// years; a move of a day or less is dominated by the clock (00:30 to the previous 23:00 is ninety
 /// minutes) and gains times.
+///
+/// This is the 24-hour wording today.md carries; today.md stays on 24-hour time (Quinn, 2026-11-07).
+/// The console's amendment card reads the same wording through [`due_move_with`] on a 12-hour clock.
 pub fn due_move(before: DateTime, after: DateTime) -> String {
+    due_move_with(before, after, |t| t.strftime("%H:%M").to_string())
+}
+
+/// [`due_move`]'s wording with the clock supplied by the caller: the days, the years, EARLIER/later
+/// and same-day are written once, and only the time of day differs between callers.
+pub fn due_move_with(before: DateTime, after: DateTime, clock: impl Fn(DateTime) -> String) -> String {
     let gap = crate::scheduling::days_between(before.date(), after.date());
     let mut left = short_date(before.date());
     let mut right = short_date(after.date());
@@ -116,8 +125,8 @@ pub fn due_move(before: DateTime, after: DateTime) -> String {
         right = format!("{right}/{}", after.year());
     }
     if gap.abs() <= 1 {
-        left = format!("{left} {}", before.strftime("%H:%M"));
-        right = format!("{right} {}", after.strftime("%H:%M"));
+        left = format!("{left} {}", clock(before));
+        right = format!("{right} {}", clock(after));
     }
     if gap == 0 {
         if after < before {
