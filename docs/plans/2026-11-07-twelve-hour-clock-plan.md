@@ -248,9 +248,13 @@ a read-model reference. **File:** `engine/tests/fixtures/surface-today-full.json
 
 - Regenerate it with the Git Bash command in `engine/tests/surface_oracle.rs`'s header: one JSON line
   plus CRLF, UTF-8, no BOM.
-- **Its own commit**, whose diff shows exactly three substitutions: `Wed 9/2 16:00` → `Wed 9/2 4pm`,
-  `Fri 9/4 12:00` → `Fri 9/4 12pm`, `Thu 9/10 18:00` → `Thu 9/10 6pm`. Check it by applying those three
-  substitutions to the old bytes and comparing the result with the new file. The message says why:
+- **Its own commit**, whose diff shows exactly four substitutions, each occurring once: `Wed 9/2 16:00`
+  → `Wed 9/2 4pm`, `Fri 9/4 12:00` → `Fri 9/4 12pm`, `Thu 9/10 18:00` → `Thu 9/10 6pm`, and the
+  payload hash `"revision": "697b11c05ff9"` → `"revision": "f98981fd806a"`. The fourth is
+  `surface::revision` (`surface.rs:2219`), the sha1 over the payload minus `now` and `revision`, so
+  it moves with the three strings (corrected at T3; this brief first said three). Check it by
+  applying those four substitutions to the old bytes and comparing the result with the new file,
+  and by recomputing the revision over the new payload. The message says why:
   "surface: coming_up.when on a 12-hour clock (twelve-hour-clock plan T2); console spec §4.6".
 - `git diff --stat -- engine/tests/fixtures` names one file. `surface-today-s1.json`,
   `surface-today-s1-migrated.json` and the eight Python references are byte-unchanged. Every
@@ -506,7 +510,7 @@ quotes a surface time, this plan's ledger status, and one `HANDOFF.md` line at t
 | Caller brief | One formatter per layer | T1, T2, T5 | `clockfmt.rs`; `due_move_with` (one wording, two clocks); T4's three layers (render scan, positive pins, forbidden forms) and the stripper's self-checks |
 | `CLAUDE.md` rule 2 | No frozen Python reference regenerated; today.md keeps matching | §3, T2, T3 | `oracle.rs`, roster and snapshot tests green with no edit; `today_md_due_move_is_pinned_whole_string`, committed before the split; T3's diff stat names one file |
 | **Quinn, Q1 ruling (2026-11-07, relayed by the coordinator)** | today.md and the events digest stay on 24-hour time. today.md stays as the first-run marker and the parity oracle | §2.1, §3, T2, §6 Q1 | the §2.1 rows marked "stays, Q1 ruled"; T2's digest pin; the whole-string due-move pin; `oracle.rs` unedited |
-| Console spec §4.6 | A surface reference is regenerated only in a commit that shows the diff and says why | T3 | the three-substitution check; the commit message |
+| Console spec §4.6 | A surface reference is regenerated only in a commit that shows the diff and says why | T3 | the four-substitution check (three `when` strings plus the `revision` hash, which moves with the payload); the commit message |
 | `CLAUDE.md`, engine invariants | Frontmatter, journal and ledger bytes never change format; display only | §2.1, T1, T2 | `clockfmt`'s module doc names the frontmatter and approval file names it feeds; `commitments.rs:9315` (file name `:9321-9322`, `title:` `:9334`) and `eventaccept.rs:398` pin the bytes; `meets` stays `HH:MM` |
 | `CLAUDE.md` | Determinism | §1, T1 | `clockfmt` is pure and reads no clock, zone or locale |
 | `CLAUDE.md` rule 1 | No single-user assumptions | §1, Q2 | one fixed format for every student |
