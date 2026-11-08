@@ -72,6 +72,22 @@ pub struct Curated {
     pub mail_domain: Option<&'static str>,
     /// Phase 3: the registrar Knowlu can read, or `None` (every school but UA before the pilot).
     pub registrar: Option<Registrar>,
+    /// The school's public class search, or `None` (replan §6.10). Off until its curation check passes.
+    pub class_search: Option<ClassSearch>,
+    /// The path prefix of the LMS's sign-in link (`/auth-saml/saml/login`), `None` by default (replan
+    /// §7.1). The link itself is read fresh from the public login page, never stored.
+    pub lms_sign_in: Option<&'static str>,
+}
+
+/// A curated school's public class search (replan §6.10). **Data**: adding a school is adding one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassSearch {
+    /// The key in `knowlu_engine::registrar::SCHOOLS`, which holds the term table and name shape.
+    pub school: &'static str,
+    pub host: &'static str,
+    pub prefix: &'static str,
+    /// `YYYY-MM-DD`: the date the curation check passed.
+    pub checked: &'static str,
 }
 
 /// R0's rows call for UA (spec D3 amendment), under the prefix: the signed-in student's own
@@ -98,6 +114,8 @@ pub const CAMPUSES: [Curated; 2] = [
                 Call { method: "GET", path: UA_ROWS_PATH, form: None },
             ],
         }),
+        class_search: None,
+        lms_sign_in: None,
     },
     Curated {
         unitid: "157085",
@@ -112,6 +130,8 @@ pub const CAMPUSES: [Curated; 2] = [
         mail_provider: "other",
         mail_domain: None,
         registrar: None,
+        class_search: None,
+        lms_sign_in: None,
     },
 ];
 
