@@ -115,7 +115,9 @@ pub const CAMPUSES: [Curated; 2] = [
             ],
         }),
         class_search: None,
-        lms_sign_in: None,
+        // Curation check, 2026-11-08 (replan §6.10 item 5): one anonymous, cookie-less GET of the
+        // LMS root answered 200 with exactly one link under this prefix.
+        lms_sign_in: Some("/auth-saml/saml/login"),
     },
     Curated {
         unitid: "157085",
