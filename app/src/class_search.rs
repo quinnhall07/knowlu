@@ -12,7 +12,10 @@ use crate::scaffold::ClassSearch;
 pub const GAP: Duration = Duration::from_secs(1);
 /// Distinct `(subject, number)` queries a run may make; past it the rest are `Paused`.
 pub const MAX_QUERIES: usize = 20;
-/// Seconds a run may last before it starts another query; past it the rest are `Paused`.
+/// Seconds a run may last before it starts another query; past it the rest are `Paused`. The cap is
+/// checked only before each query, and each request is allowed 30 s (`agent`), so a run's real bound
+/// is 60 s plus one query's requests: up to 30 s each, and a reset and three pages are four of them.
+/// A run past the cap pauses the queries it has not started; it never cuts one short.
 pub const MAX_SECONDS: u64 = 60;
 /// Rows asked for per page (`pageMaxSize`).
 pub const PAGE_SIZE: usize = 50;
@@ -71,10 +74,11 @@ impl Query {
 }
 
 /// The wanted sections grouped by distinct `(subject, number)`, in first-seen order, each with its
-/// section codes in the order given. A section with no subject or no number makes no query.
-pub fn queries(wanted: &[SectionRef]) -> Vec<(Query, Vec<String>)> {
+/// section codes in the order given. A section with no subject or no number makes no query, and nor
+/// does one of another term than `term` (§6.4 `other_term`).
+pub fn queries(wanted: &[SectionRef], term: &str) -> Vec<(Query, Vec<String>)> {
     let mut out: Vec<(Query, Vec<String>)> = Vec::new();
-    for w in wanted {
+    for w in wanted.iter().filter(|w| w.term == term) {
         let Some(q) = Query::new(&w.subject, &w.number) else { continue };
         match out.iter_mut().find(|(have, _)| *have == q) {
             Some((_, sections)) => sections.push(w.section.clone()),
@@ -221,6 +225,8 @@ struct Session<'a> {
     /// The clock when the last request ended.
     last: Option<Duration>,
     cookie: Option<String>,
+    /// Some query of this run has returned rows, so the cookie is known to be good.
+    proven: bool,
 }
 
 impl Session<'_> {
@@ -277,8 +283,9 @@ impl Session<'_> {
     }
 
     /// One page of one search: the answer's text and its parsed form. An answer that is not
-    /// `{data: [...]}` is `Closed`, and so is a first page with no rows (R0b: a search with no
-    /// accepted cookie answers 200 with none).
+    /// `{data: [...]}` is `Closed`, and so is a first page with no rows until a query of this run has
+    /// returned rows (R0b: a search with no accepted cookie answers 200 with none; once one has, the
+    /// cookie is proven and an empty answer is the school's "no such course").
     fn page(&mut self, q: &Query, term: &str, offset: usize) -> Result<(String, Value), Stop> {
         let target = format!(
             "{}searchResults/searchResults?txt_term={}&txt_subject={}&txt_courseNumber={}&pageOffset={offset}&pageMaxSize={PAGE_SIZE}",
@@ -287,7 +294,7 @@ impl Session<'_> {
         let (_, text) = self.call(false, &target, None)?;
         let answer: Value = serde_json::from_str(&text).map_err(|_| Stop::Closed)?;
         let empty = answer.get("data").and_then(Value::as_array).ok_or(Stop::Closed)?.is_empty();
-        if empty && offset == 0 {
+        if empty && offset == 0 && !self.proven {
             return Err(Stop::Closed);
         }
         Ok((text, answer))
@@ -299,6 +306,7 @@ impl Session<'_> {
         let (raw, mut answer) = self.page(q, term, 0)?;
         let total = answer.get("totalCount").and_then(Value::as_u64).map_or(0, |n| n as usize);
         let mut rows: Vec<Value> = answer["data"].as_array().cloned().unwrap_or_default();
+        self.proven |= !rows.is_empty();
         let mut pages = 1;
         while rows.len() < total && pages < MAX_PAGES {
             let (_, next) = self.page(q, term, pages * PAGE_SIZE)?;
@@ -311,7 +319,8 @@ impl Session<'_> {
         }
         let field = |r: &Value, key: &str| r.get(key).and_then(Value::as_str).map(str::to_string);
         let seen = |section: &String| rows.iter().any(|r| {
-            field(r, "subject").as_deref() == Some(q.subject())
+            field(r, "term").as_deref() == Some(term)
+                && field(r, "subject").as_deref() == Some(q.subject())
                 && field(r, "courseNumber").as_deref() == Some(q.number())
                 && field(r, "sequenceNumber").as_deref() == Some(section.as_str())
         });
@@ -331,13 +340,13 @@ impl Session<'_> {
 /// scheme and host (`https_base(cs)` in the app, a loopback fake in tests). Never fails: every
 /// outcome is a `Status` in the bundle.
 pub fn fetch(base: &str, cs: &ClassSearch, term: &str, wanted: &[SectionRef], pace: &mut dyn Pace) -> Bundle {
-    let groups = queries(wanted);
+    let groups = queries(wanted, term);
     let mut bundle = Bundle { school: cs.school.to_string(), term: term.to_string(), queries: Vec::new() };
     if groups.is_empty() {
         return bundle;
     }
     let started = pace.now();
-    let mut session = Session { base: base.trim_end_matches('/').to_string(), prefix: cs.prefix, pace, last: None, cookie: None };
+    let mut session = Session { base: base.trim_end_matches('/').to_string(), prefix: cs.prefix, pace, last: None, cookie: None, proven: false };
     // The first thing that ends the run; every query from then on ends the same way.
     let mut stopped: Option<Stop> = session.open(term).err();
     for (i, (q, sections)) in groups.into_iter().enumerate() {

@@ -406,6 +406,8 @@ fn a_redirect_to_a_sign_in_is_closed() {
     });
     let b = run(&fake, &clock, &courses(2));
     assert_eq!(statuses(&b), [Status::Closed, Status::Closed]);
+    assert!(fake.requests().iter().all(|r| r.path() != "/idp/login"), "a redirect is never followed: {:?}", fake.labels());
+    assert_eq!(fake.labels().len(), 3, "the term POST, a reset and the redirected search: {:?}", fake.labels());
 }
 
 #[test]
@@ -483,6 +485,56 @@ fn a_long_course_whose_wanted_sections_were_all_on_the_pages_read_is_answered() 
     assert_eq!(merged["data"].as_array().unwrap().len(), 150);
 }
 
+// ---- an empty answer after rows, another term, the term of a row -------------------------------
+
+#[test]
+fn an_empty_answer_after_rows_is_answered_and_the_run_goes_on() {
+    let clock = fresh();
+    let fake = Fake::start(clock.clone(), Duration::ZERO, banner(|subject, _| if subject == "C01" { 0 } else { 2 }));
+    let b = run(&fake, &clock, &courses(3));
+    assert_eq!(statuses(&b), [Status::Answered; 3], "rows came back for C00, so the cookie is good");
+    let empty: Value = serde_json::from_str(&b.queries[1].body).unwrap();
+    assert_eq!(empty["data"].as_array().map(Vec::len), Some(0), "an answer with no rows, which the engine reads as not found");
+    assert_eq!(fake.labels().len(), 1 + 3 * 2, "nothing extra is asked: {:?}", fake.labels());
+}
+
+#[test]
+fn a_section_of_another_term_makes_no_query() {
+    let other = SectionRef { term: "202530".into(), subject: "C01".into(), number: "100".into(), section: "001".into() };
+    let wanted = [want("C00", "100", "001"), other];
+    assert_eq!(queries(&wanted, TERM).len(), 1);
+    let clock = fresh();
+    let fake = Fake::start(clock.clone(), Duration::ZERO, banner(two_each()));
+    let b = run(&fake, &clock, &wanted);
+    assert_eq!(statuses(&b), [Status::Answered]);
+    assert_eq!(fake.labels().len(), 3, "the term POST, then one reset and one search: {:?}", fake.labels());
+    assert!(fake.requests().iter().all(|r| r.arg("txt_subject") != "C01"));
+    // Nothing of the run's term wanted: no request at all.
+    let none = SectionRef { term: "202530".into(), ..want("C00", "100", "001") };
+    let fake = Fake::start(clock.clone(), Duration::ZERO, banner(two_each()));
+    assert!(run(&fake, &clock, &[none]).queries.is_empty() && fake.requests().is_empty());
+}
+
+#[test]
+fn a_wanted_section_counts_as_seen_only_on_a_row_of_the_runs_term() {
+    let clock = fresh();
+    let good = banner(|_, _| 400);
+    // The school answers rows, but of another term.
+    let fake = Fake::start(clock.clone(), Duration::ZERO, move |req, i| {
+        let r = good(req, i);
+        if req.label() != "GET searchResults/searchResults" {
+            return r;
+        }
+        let mut v: Value = serde_json::from_str(&r.body).unwrap();
+        for row in v["data"].as_array_mut().unwrap() {
+            row["term"] = json!("199910");
+        }
+        Resp::ok(v.to_string())
+    });
+    let b = run(&fake, &clock, &[want("XYZ", "100", "001")]);
+    assert_eq!(statuses(&b), [Status::FetchFailed], "001 is on page 1, but not in this term");
+}
+
 // ---- the query type, the bundle, the source's promises ---------------------------------------
 
 #[test]
@@ -490,7 +542,7 @@ fn a_query_cannot_be_built_without_a_subject_and_a_number() {
     assert!(Query::new("", "100").is_none() && Query::new("XYZ", "").is_none() && Query::new("", "").is_none());
     let q = Query::new("XYZ", "100").unwrap();
     assert_eq!((q.subject(), q.number()), ("XYZ", "100"));
-    let got = queries(&[want("", "100", "001"), want("XYZ", "", "001"), want("XYZ", "100", "001")]);
+    let got = queries(&[want("", "100", "001"), want("XYZ", "", "001"), want("XYZ", "100", "001")], TERM);
     assert_eq!(got.len(), 1, "a section with no subject or number makes no query: {got:?}");
     // The type itself: private fields and no `Default`, so no path builds an empty one (§6.8).
     let src = include_str!("../src/class_search.rs");
