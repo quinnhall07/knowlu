@@ -886,15 +886,16 @@ fn active_courses(vault: &Path) -> Vec<(String, String)> {
 /// class proposal in `proposals` and no confirmed `class` note. Courses are compared the way the
 /// §3.5 signature compares them, by slug or code (`course_key`). A class note with no `course:`
 /// covers the course whose code leads its title (Plan ruling Q2-c). A lab or office hours covers
-/// nothing.
+/// nothing. A course in `no_time` ([`no_time_courses`], replan §6.5) counts as covered.
 pub fn uncovered_courses(
     vault: &Path,
     set: &Commitments,
     proposals: &[Proposal],
     codes: &Codes,
-    _no_time: &BTreeSet<String>,
+    no_time: &BTreeSet<String>,
 ) -> Vec<UncoveredCourse> {
     let mut covered = covered_course_keys(set, codes);
+    covered.extend(no_time.iter().map(|course| course_key(course, codes)));
     for p in proposals.iter().filter(|p| p.kind == "class") {
         if let Some(course) = p.course.as_deref() {
             covered.insert(course_key(course, codes));
@@ -1436,8 +1437,10 @@ pub struct SeriesFile {
     /// Phase-3 spec A2 item 13: the registrar block, per term calendar key. Absent from the file
     /// (and empty here) until a registrar fetch writes one.
     pub registrar: BTreeMap<String, RegistrarTerm>,
-    /// C2b stub (replan §6.5): the no-time block, `classsearch:<school>:<term>` -> the sorted course
-    /// keys that term's class search listed with no meeting time. Not read or written yet.
+    /// Replan §6.5, RQ9: the no-time block, `classsearch:<school>:<term>` -> the course keys that
+    /// term's class search listed with no meeting time; course keys only, never a section, CRN, time
+    /// or room. Absent from the file (and empty here) until written. Not tied to `calendars`: a
+    /// `Rows` purge removes that entry while the block stays ([`purge_class_search`]).
     pub class_search: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -2055,6 +2058,13 @@ pub(crate) fn file_bytes(file: &SeriesFile) -> String {
             .collect();
         value["registrar"] = serde_json::Value::Object(terms);
     }
+    // Replan §6.5: the no-time block, beside `registrar` and omitted the same way; each list is a
+    // set, so it is written sorted.
+    if !file.class_search.is_empty() {
+        let blocks: serde_json::Map<String, serde_json::Value> =
+            file.class_search.iter().map(|(key, courses)| (key.clone(), serde_json::json!({ "no_time": courses }))).collect();
+        value["class_search"] = serde_json::Value::Object(blocks);
+    }
     format!("{}\n", crate::ledger::dumps_value(&value))
 }
 
@@ -2185,6 +2195,16 @@ fn parse_file(text: &str) -> Parsed<SeriesFile> {
             file.registrar.insert(key.clone(), entry);
         }
     }
+    // Replan §6.5: the no-time block reads the registrar block's way: absent is empty, a wrong
+    // shape is a malformed file.
+    if let Some(block) = object.get("class_search") {
+        let bad = || "bad class_search".to_string();
+        for (key, entry) in block.as_object().ok_or_else(bad)? {
+            let list = entry.get("no_time").and_then(|v| v.as_array()).ok_or_else(bad)?;
+            let courses = list.iter().map(|c| c.as_str().map(str::to_string).ok_or_else(bad)).collect::<Parsed<BTreeSet<String>>>()?;
+            file.class_search.insert(key.clone(), courses);
+        }
+    }
     file.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
     Ok(file)
 }
@@ -2240,10 +2260,25 @@ pub const SERIES_LOCK_FILE: &str = "state/calendar-series.lock";
 /// An exclusive hold on [`SERIES_LOCK_FILE`], blocking until it is free (std's `File::lock`,
 /// stable since 1.89). Released when the returned handle drops, or by the OS if the process dies.
 fn lock_series_file(vault: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::create_dir_all(vault.join("state"))?;
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(vault.join(SERIES_LOCK_FILE))?;
+    let file = open_series_lock(vault)?;
     file.lock()?;
     Ok(file)
+}
+
+/// [`lock_series_file`] without the wait (std's `File::try_lock`): `None` at once when the lock is
+/// held elsewhere (replan §6.12, the launch sweep).
+fn try_lock_series_file(vault: &Path) -> std::io::Result<Option<std::fs::File>> {
+    let file = open_series_lock(vault)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(err)) => Err(err),
+    }
+}
+
+fn open_series_lock(vault: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(vault.join("state"))?;
+    std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(vault.join(SERIES_LOCK_FILE))
 }
 
 /// Writes `bytes` beside the file, then renames it over (fix round 1, M5): a crash mid-write
@@ -2295,6 +2330,11 @@ fn write_state_file(vault: &Path, name: &str, bytes: &str) -> std::io::Result<()
 ///
 /// The registrar block (phase-3 spec A2 item 13, "Every writer keeps it") is carried unchanged;
 /// a term's entry goes when its calendar leaves `calendars`.
+///
+/// The no-time block (replan §6.5) is carried, not tied to `calendars`, less any block whose term
+/// has passed. That drop happens only under the lock: with nothing `fresh`, an unlocked first read
+/// that finds a passed block takes the lock, and the file is re-read under it and stored for the
+/// drop alone. With no passed block and nothing `fresh`, no lock is taken and nothing is written.
 pub fn refresh_series(
     vault: &Path,
     fresh: &[(String, Vec<Series>)],
@@ -2315,10 +2355,58 @@ pub fn registrar_in_play(file: &SeriesFile, today: Date) -> BTreeSet<String> {
         .collect()
 }
 
-/// C2b stub (replan §6.5): the course keys the no-time block lists for the current term, empty
-/// for a block whose term is not `registrar::term_for(school, today)`. Not implemented yet.
-pub fn no_time_courses(_file: &SeriesFile, _today: Date) -> BTreeSet<String> {
-    BTreeSet::new()
+/// A no-time block's school and term, from its key `classsearch:<school>:<term>`.
+fn block_school_term(key: &str) -> Option<(&str, &str)> {
+    key.strip_prefix(CLASS_SEARCH_PREFIX)?.split_once(':')
+}
+
+/// `term` (`<year><suffix>`) placed among `school`'s terms: `(year, place in School::terms)`.
+fn term_place(school: &str, term: &str) -> Option<(i32, usize)> {
+    let year = term.get(..4).filter(|y| y.bytes().all(|b| b.is_ascii_digit()))?.parse().ok()?;
+    let at = crate::registrar::school(school)?.terms.iter().position(|(_, suffix)| Some(*suffix) == term.get(4..))?;
+    Some((year, at))
+}
+
+/// Replan §6.5, "A block's term has passed", the one test every drop uses: the block's term sorts
+/// strictly before `registrar::term_for(school, today)`, by year and then by place in
+/// `School::terms`. With no `term_for`, or a term that cannot be placed, it has not passed, and a
+/// future block has not passed either.
+fn block_passed(key: &str, today: Date) -> bool {
+    let Some((school, term)) = block_school_term(key) else { return false };
+    let now = crate::registrar::term_for(school, today).and_then(|now| term_place(school, &now));
+    matches!((term_place(school, term), now), (Some(block), Some(now)) if block < now)
+}
+
+/// Replan §6.5 (RQ9): the course keys the no-time block lists for the current term. A block whose
+/// term is not `registrar::term_for(school, today)` is ignored, so a new term asks again.
+pub fn no_time_courses(file: &SeriesFile, today: Date) -> BTreeSet<String> {
+    let current = |key: &str| {
+        block_school_term(key).is_some_and(|(school, term)| crate::registrar::term_for(school, today).as_deref() == Some(term))
+    };
+    file.class_search.iter().filter(|(key, _)| current(key)).flat_map(|(_, courses)| courses.iter().cloned()).collect()
+}
+
+/// Whether a series file's bytes can hold class-search data at all (`classsearch:` keys or the
+/// no-time block). A file without either is clean whatever its shape, and is never parsed for it.
+fn mentions_class_search(bytes: &[u8]) -> bool {
+    let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+    has(b"classsearch") || has(b"class_search")
+}
+
+/// Removes from `file` what `scope` names (replan §6.12), directly and never through `aged_out`:
+/// every `classsearch:` series (by key or calendar), `calendars` entry and `ended` entry, a block
+/// whose term has passed, and with `All` every block. Whether anything went.
+fn purge_file(file: &mut SeriesFile, scope: PurgeScope, today: Date) -> bool {
+    let size = |f: &SeriesFile| (f.series.len(), f.calendars.len(), f.ended.len(), f.class_search.len());
+    let before = size(file);
+    file.series.retain(|s| !is_class_search(&s.source_uid) && !is_class_search(&s.calendar));
+    file.calendars.retain(|calendar, _| !is_class_search(calendar));
+    file.ended.retain(|key, e| !is_class_search(key) && !is_class_search(&e.calendar));
+    match scope {
+        PurgeScope::Rows => file.class_search.retain(|key, _| !block_passed(key, today)),
+        PurgeScope::All => file.class_search.clear(),
+    }
+    size(file) != before
 }
 
 /// What [`purge_class_search`] removes (replan §6.12): `Rows` the unconfirmed `classsearch:` rows,
@@ -2350,21 +2438,72 @@ thread_local! {
     pub(crate) static BEFORE_DROP_LOCK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// C2b stub (replan §6.12): blocks on the series lock. Not implemented yet.
-pub fn purge_class_search(_vault: &Path, _scope: PurgeScope, _today: Date) -> Result<Purged, String> {
-    Ok(Purged::Clean)
+/// Replan §6.12 (RQ11, RQ12): deletes the unconfirmed class-search rows (`Rows`), or those and the
+/// no-time block (`All`), from `state/calendar-series.json`; either also drops a block whose term
+/// has passed. The first read takes no lock and only decides whether to lock: a missing or clean
+/// file takes no lock, creates no `state/` folder and writes nothing. A dirty one takes
+/// [`SERIES_LOCK_FILE`], blocking, re-reads under it and removes the entries from that fresh copy,
+/// so nothing another writer stored in between is lost. It writes only the series file, through
+/// [`file_bytes`], and only when something changed; it touches no note, marker or journal and needs
+/// no sign-in, entitlement or network. `today` comes from the caller, so no clock is read here. An
+/// error is a named line with fixed words, never a key, and nothing written.
+pub fn purge_class_search(vault: &Path, scope: PurgeScope, today: Date) -> Result<Purged, String> {
+    purge_with(vault, scope, today, true)
 }
 
-/// C2b stub: [`purge_class_search`] with a try-lock, `Ok(Purged::Busy)` at once when held.
-pub fn try_purge_class_search(_vault: &Path, _scope: PurgeScope, _today: Date) -> Result<Purged, String> {
-    Ok(Purged::Clean)
+/// [`purge_class_search`] with a try-lock (the launch sweep): `Ok(Purged::Busy)` at once, with
+/// nothing changed, when the series lock is held elsewhere.
+pub fn try_purge_class_search(vault: &Path, scope: PurgeScope, today: Date) -> Result<Purged, String> {
+    purge_with(vault, scope, today, false)
+}
+
+fn purge_with(vault: &Path, scope: PurgeScope, today: Date, wait: bool) -> Result<Purged, String> {
+    let not_purged = |why: String| format!("series file: {SERIES_FILE} {why}; class-search data not purged");
+    let parsed = |loaded: Loaded| match loaded {
+        Loaded::Read(file) => Ok(file),
+        Loaded::Malformed(why) => Err(not_purged(format!("malformed ({why})"))),
+        Loaded::Unreadable(kind) => Err(not_purged(format!("unreadable ({kind})"))),
+    };
+    let mut first = match std::fs::read(series_path(vault)) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Purged::Clean),
+        Err(err) => return Err(not_purged(format!("unreadable ({})", err.kind()))),
+        Ok(bytes) if !mentions_class_search(&bytes) => return Ok(Purged::Clean),
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => parse_file(&text).map_err(|why| not_purged(format!("malformed ({why})")))?,
+            Err(_) => return Err(not_purged("malformed (not UTF-8)".into())),
+        },
+    };
+    if !purge_file(&mut first, scope, today) {
+        return Ok(Purged::Clean);
+    }
+    #[cfg(test)]
+    BEFORE_PURGE_LOCK.with(|hook| {
+        if let Some(signal) = hook.borrow().as_ref() {
+            signal();
+        }
+    });
+    let could_not_lock = |err: std::io::Error| not_purged(format!("could not lock {SERIES_LOCK_FILE} ({})", err.kind()));
+    let _lock = match wait {
+        true => lock_series_file(vault).map_err(could_not_lock)?,
+        false => match try_lock_series_file(vault).map_err(could_not_lock)? {
+            Some(lock) => lock,
+            None => return Ok(Purged::Busy),
+        },
+    };
+    let mut file = parsed(load_series_file(vault))?;
+    if !purge_file(&mut file, scope, today) {
+        return Ok(Purged::Clean);
+    }
+    write_series_file(vault, &file_bytes(&file)).map_err(|err| not_purged(format!("could not be written ({})", err.kind())))?;
+    Ok(Purged::Changed)
 }
 
 /// [`refresh_series`], plus a registrar fetch's lists (A2 item 13, "When it is written"): they go
 /// into the term's block in this same write, under the same lock. `applied` and `ended` are
 /// appended, `status` and `unread` replaced, `last_fetch` set (and `first_fetch` on a new block).
 /// The third value says whether the file on disk now holds the returned bytes (written, or
-/// already identical): false with `fresh` empty, an unreadable file or a failed write.
+/// already identical): false with `fresh` empty and no passed no-time block dropped under the lock,
+/// an unreadable file or a failed write.
 pub fn refresh_series_with(
     vault: &Path,
     fresh: &[(String, Vec<Series>)],
@@ -2373,11 +2512,34 @@ pub fn refresh_series_with(
 ) -> (SeriesFile, Vec<String>, bool) {
     // Phase 3 final review I2: a run that may write holds the series lock from the read to the
     // rename, so a slot's `rank`, `commitments` and a registrar run never lose each other's merge.
+    // Replan §6.5: with nothing fresh, the lock is taken only for a passed no-time block that the
+    // unlocked read below finds; `refresh_series_held` re-reads under it.
     let held = match fresh.is_empty() {
+        true if passed_block_on_disk(vault, today) => {
+            #[cfg(test)]
+            BEFORE_DROP_LOCK.with(|hook| {
+                if let Some(signal) = hook.borrow().as_ref() {
+                    signal();
+                }
+            });
+            hold_series_lock(vault)
+        }
         true => SeriesLock(None, None),
         false => hold_series_lock(vault),
     };
     refresh_series_held(vault, held, fresh, today, news)
+}
+
+/// The unlocked first read of [`refresh_series_with`]: whether the file on disk holds a no-time
+/// block whose term has passed. A file that cannot be read or parsed holds none.
+fn passed_block_on_disk(vault: &Path, today: Date) -> bool {
+    match std::fs::read(series_path(vault)) {
+        Ok(bytes) if mentions_class_search(&bytes) => std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|text| parse_file(text).ok())
+            .is_some_and(|file| file.class_search.keys().any(|key| block_passed(key, today))),
+        _ => false,
+    }
 }
 
 /// A hold on [`SERIES_LOCK_FILE`] ([`hold_series_lock`]), or the warning that it could not be
@@ -2395,7 +2557,8 @@ pub fn hold_series_lock(vault: &Path) -> SeriesLock {
 }
 
 /// [`refresh_series_with`] under a lock the caller already holds (the lock is not re-entrant);
-/// it is released when this returns.
+/// it is released when this returns. A passed no-time block is dropped, and stored for alone, only
+/// when `held` holds the lock (replan §6.5); with none it is carried and waits for the next `rank`.
 pub fn refresh_series_held(
     vault: &Path,
     held: SeriesLock,
@@ -2403,7 +2566,7 @@ pub fn refresh_series_held(
     today: Date,
     news: Option<&RegistrarFetch>,
 ) -> (SeriesFile, Vec<String>, bool) {
-    let SeriesLock(_lock, lock_warning) = held;
+    let SeriesLock(lock, lock_warning) = held;
     let (old, mut warnings, writable) = match load_series_file(vault) {
         Loaded::Read(file) => (file, Vec::new(), true),
         Loaded::Malformed(why) => (
@@ -2533,8 +2696,15 @@ pub fn refresh_series_held(
         ended.insert(gone.source_uid, entry);
     }
 
-    let file = SeriesFile { calendars, ended, series, registrar: block, class_search: BTreeMap::new() };
-    let mut stored = !fresh.is_empty() && writable;
+    let mut class_search = old.class_search;
+    let blocks = class_search.len();
+    if lock.is_some() {
+        class_search.retain(|key, _| !block_passed(key, today));
+    }
+    let dropped = class_search.len() != blocks;
+
+    let file = SeriesFile { calendars, ended, series, registrar: block, class_search };
+    let mut stored = (!fresh.is_empty() || dropped) && writable;
     if stored {
         let bytes = file_bytes(&file);
         if std::fs::read(series_path(vault)).ok().as_deref() != Some(bytes.as_bytes()) {
@@ -3589,7 +3759,9 @@ pub fn emit_asks(
     }
     let set = load(vault);
     let (codes, _) = Codes::load(vault);
-    for course in uncovered_courses(vault, &set, proposals, &codes, &BTreeSet::new()) {
+    // Replan §6.5 (RQ9): a course the current term's no-time block lists gets no ask.
+    let no_time = no_time_courses(&read_series_file(vault).0, today);
+    for course in uncovered_courses(vault, &set, proposals, &codes, &no_time) {
         if filed.len() >= allowance {
             break;
         }
@@ -5321,7 +5493,8 @@ pub struct Overview {
     /// `source` is `note` (the planning day) or `template` (`week_template.yaml`).
     pub window: Vec<serde_json::Value>,
     pub uncovered_courses: Vec<UncoveredCourse>,
-    /// C2b stub: the course keys of [`no_time_courses`], sorted.
+    /// Replan §6.5: the course keys of [`no_time_courses`], sorted; step 10's "No set meeting time
+    /// listed". None of them is in `uncovered_courses`.
     pub no_time_courses: Vec<String>,
     /// Phase 3 (Plan ruling R3-d): [`crate::registrar::status`], or `null`.
     pub registrar: serde_json::Value,
@@ -5411,7 +5584,8 @@ pub fn overview(vault: &Path, today: Date) -> Overview {
             serde_json::json!({ "day": day, "start": hm(start), "end": hm(end), "source": source })
         })
         .collect();
-    let uncovered_courses = uncovered_courses(vault, &stored.set, &stored.proposals, &stored.codes, &BTreeSet::new());
+    let no_time = no_time_courses(&stored.file, today);
+    let uncovered_courses = uncovered_courses(vault, &stored.set, &stored.proposals, &stored.codes, &no_time);
     let setup = vault_day(vault, today) == 1 && stored.set.planning_day.is_none();
     let registrar = crate::registrar::status(&stored.file, today);
     let registrar_proposals = stored
@@ -5426,7 +5600,7 @@ pub fn overview(vault: &Path, today: Date) -> Overview {
         office_hours,
         window,
         uncovered_courses,
-        no_time_courses: Vec::new(),
+        no_time_courses: no_time.into_iter().collect(),
         registrar,
         registrar_proposals,
         registrar_changes,
@@ -12750,7 +12924,11 @@ mod class_search_purge_tests {
         let (file, _) = read_series_file(&v);
         let got: Vec<String> = no_time_courses(&file, TODAY).into_iter().collect();
         assert_eq!(got, ["cs-100"]);
-        assert!(no_time_courses(&file, date(2027, 2, 1)).is_empty(), "spring: every block here is another term's");
+        // C2b integrator: 2027-02-01 is in `FUTURE`'s own term (`202710`), so §6.5 reads that block
+        // then and no other; 2027-07-01 (`202740`) is a term no block here names.
+        let spring: Vec<String> = no_time_courses(&file, date(2027, 2, 1)).into_iter().collect();
+        assert_eq!(spring, ["ant-102"], "spring 2027: only the block of that term");
+        assert!(no_time_courses(&file, date(2027, 7, 1)).is_empty(), "fall 2027: every block here is another term's");
     }
 
     fn set_up_for_asks(name: &str, blocks: &[(&str, &[&str])]) -> Scratch {
