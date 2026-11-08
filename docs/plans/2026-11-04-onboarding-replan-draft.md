@@ -204,7 +204,7 @@ are each split in two, review r8, Minor 6). Where the plan says P1 or P2, it mea
 | Task | What | Agent | Why | Contract list? | Depends on |
 |---|---|---|---|---|---|
 | R0a | The sign-in runs, 11-05 to 11-07. **Done**; results in the plan's §3 and §2.1 here (brief in §8) | main session | live; Quinn at the machine; a throwaway build | no | none |
-| R0b | The class-search spike: public data, no sign-in (brief in §8) | main session | live reads are the controller's | no | none |
+| R0b | The class-search spike: public data, no sign-in. **Done 2026-11-08**; results under its brief in §8 | main session | live reads are the controller's | no | none |
 | R0c | The 24-hour repeat of the saved-password fill, **running** (brief in §8) | main session | live; the throwaway build | no | R0a |
 | T3a | S-G alone, split from T3: hidden reads while the student is elsewhere, now through the link | main session | live; S4a and S4b depend on it | no | R0a's build |
 
@@ -1182,6 +1182,25 @@ counts, seconds and status codes. Record: the rows' container; whether `term`, `
 cookie is required; whether a search needs `resetDataForm`; paging on a many-section course; any link
 or cross-list field; seconds per query; whether a plain `ureq`-style request is answered. Stay under
 §6.8's limits. Then run §6.10's curation check for the founder's school.
+
+**Results, 2026-11-08 (controller; keys, counts, seconds and statuses only).** These came from 18 requests in three short runs. Each run was serial, with a gap of at least 1 s, under a `user-agent` naming Knowlu and `knowlu.com`. No refusal came back: every answer was a 200.
+- **Container.** The answer is `{success, totalCount, data: [...]}`, and the rows are under `data`. Each meeting is at `data[].meetingsFaculty[].meetingTime`. Its keys are `beginTime`, `endTime`, `startDate`, `endDate`, the seven day booleans `monday`…`sunday`, `building`, `room`, `meetingType`, `meetingScheduleType` and `hoursWeek`, the same names `read_meetings` reads.
+- **Row keys.** `term`, `subject`, `courseNumber` and `sequenceNumber` are on every row: 29 of 29 in a 29-section course. `courseReferenceNumber` is present. The 29 subject-number-section keys are unique.
+- **Kind fields.** Present: `scheduleTypeDescription`, `instructionalMethod`, `instructionalMethodDescription`. Absent: `scheduleDescription`. The P5 title rule reads `scheduleTypeDescription` here.
+- **Link and cross-list.** Present: `isSectionLinked`, `linkIdentifier`, `crossList`, `crossListCount`. In the sample, no section was linked and none set a `linkIdentifier`. `crossList` is a string or null. It was set on all 29 sections of the one course and on 48 of 50 in a term-wide page. So `linked: true` (§6.3) is readable, but this sample never exercised it.
+- **Session cookie.** It is required. The same course query with no cookie answers 200 with `success: true` and 0 rows. An empty answer after a term POST that worked is therefore `closed`, never `not_found`, and C4's tests pin this.
+- **The reset.** It is required. The site keeps the last search's filters on the session. With no reset after a course query, a query with blank course fields came back with the previous course's 29 rows. After a reset, the same blank query returned the whole term (`totalCount` 10077). §6.2's reset before every query stays. The reader-side check in §6.3 is what catches a stale answer.
+- **A query with no subject or number lists the whole term.** That confirms §6.8's rule that the query type cannot be built without both.
+- **Paging.** `pageOffset` and `pageMaxSize` work: offset 10 with size 10 returned 10 rows, and `totalCount` gives the full count. The many-section course, 29 sections, fit on one page of 50. C4 asks for 50 and follows `totalCount` as §6.2 says.
+- **Time.** 0.95 s for the 29-section course query.
+- **Plain request.** A request with no browser headers beyond the `user-agent` and the cookie is answered, so a plain `ureq` fetch matches.
+
+**Curation check (§6.10), founder's school, 2026-11-08:**
+1. Pass. The term POST and a course search answer JSON with no sign-in.
+2. Pass. 29 of 29 sections each matched exactly one row by subject, number and section.
+3. Pass, from the record in §6.3: 14 of 19 LMS names fit `TermSubjectNumberSection`.
+4. Partly done. The host has no `robots.txt` (a 404). Posted terms were not looked for: the search page's entry URL answered with a redirect and no body. The school's terms of use are still to be read, and the RQ7 question is still on the lawyer's list. The row's `checked` date waits on this.
+5. Not run here. The `lms_sign_in` link check belongs to the row that sets it (C4 and C9).
 
 ### C0. `scaffold.rs`: the row's new fields
 
