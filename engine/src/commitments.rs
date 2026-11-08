@@ -1286,7 +1286,8 @@ pub fn registrar_class(series: &Series, codes: &Codes) -> Class {
 /// in order, first match wins, on the title trimmed of surrounding punctuation (C5).
 pub fn classify(series: &Series, codes: &Codes, planning: &[String]) -> Option<Class> {
     // Phase 3 (Plan ruling R2-e): a registrar row carries no instances and needs no eligibility.
-    if series.calendar.starts_with(crate::registrar::CALENDAR_PREFIX) {
+    // Class search too (replan §6.6): both emit a weekly rule only, the table's instances column.
+    if !Source::by_calendar(&series.calendar).instances {
         return Some(registrar_class(series, codes));
     }
     if !eligible(series) {
@@ -1481,6 +1482,10 @@ enum KeepAlive {
     GoogleFeed,
     /// Configured while the vault names the calendar as a feed, or read in 14 days.
     NamedFeed,
+    /// Class search (onboarding replan §6.6): a read covers only the courses asked about, so a
+    /// row a fresh read omits stays while its `until` is open and then goes silently, never to
+    /// `ended`; unfetched, the calendar counts as configured while it holds an open row.
+    PerCourse,
 }
 
 /// How a change to a confirmed note lands (the table's last column).
@@ -1509,15 +1514,19 @@ struct Source {
     lands: Lands,
 }
 
-/// The rows, as the spec's table. The fourth row's tier, keep-alive and instances are "as its
-/// calendar": a `by_calendar` lookup never reaches it (the third row matches any other calendar
-/// first), so only its `lands` and `holds_per_kind` are read. L5 adds one `syllabus:` row and its
-/// two keep-alive arms.
-const SOURCES: [Source; 4] = [
+/// The rows, as the spec's table, in the ruled order (replan RQ1): registrar, class search,
+/// Google, the rest. The last row's tier, keep-alive and instances are "as its calendar": a
+/// `by_calendar` lookup never reaches it (the `ics-series:` row matches any other calendar
+/// first), so only its `lands` and `holds_per_kind` are read. The class-search row (§6.6) names
+/// its prefix in both columns, because `None` is the catch-all; it holds nothing, since it may not
+/// be the student's class, and a change to its note is never watched. L5 adds one `syllabus:` row
+/// (after class search) and its two keep-alive arms.
+const SOURCES: [Source; 5] = [
     Source { calendar: Some(crate::registrar::CALENDAR_PREFIX), uid: Some(crate::registrar::CALENDAR_PREFIX), tier: 0, keep_alive: KeepAlive::InPlay, instances: false, holds_per_kind: true, lands: Lands::AppliedAndListed },
-    Source { calendar: Some("google:"), uid: Some("gcal-series:"), tier: 1, keep_alive: KeepAlive::GoogleFeed, instances: true, holds_per_kind: false, lands: Lands::Carded },
-    Source { calendar: None, uid: Some("ics-series:"), tier: 2, keep_alive: KeepAlive::NamedFeed, instances: true, holds_per_kind: false, lands: Lands::Carded },
-    Source { calendar: None, uid: None, tier: 2, keep_alive: KeepAlive::NamedFeed, instances: true, holds_per_kind: false, lands: Lands::NotWatched },
+    Source { calendar: Some(CLASS_SEARCH_PREFIX), uid: Some(CLASS_SEARCH_PREFIX), tier: 1, keep_alive: KeepAlive::PerCourse, instances: false, holds_per_kind: false, lands: Lands::NotWatched },
+    Source { calendar: Some("google:"), uid: Some("gcal-series:"), tier: 2, keep_alive: KeepAlive::GoogleFeed, instances: true, holds_per_kind: false, lands: Lands::Carded },
+    Source { calendar: None, uid: Some("ics-series:"), tier: 3, keep_alive: KeepAlive::NamedFeed, instances: true, holds_per_kind: false, lands: Lands::Carded },
+    Source { calendar: None, uid: None, tier: 3, keep_alive: KeepAlive::NamedFeed, instances: true, holds_per_kind: false, lands: Lands::NotWatched },
 ];
 
 impl Source {
@@ -1532,8 +1541,19 @@ impl Source {
     }
 }
 
-/// The one precedence between two records of one key or one signature (I2, phase-3 D7): a
-/// `registrar:` calendar first, then a `google:` one, then any other; then the lower calendar key.
+/// The class-search prefix of a series' `source_uid` (`classsearch:<school>:<term>-<crn>`) and its
+/// calendar (`classsearch:<school>:<term>`), as `registrar::parse_class_search_with` writes them.
+pub const CLASS_SEARCH_PREFIX: &str = "classsearch:";
+
+/// Whether `key` (a series' `source_uid` or its calendar) names class search: the one test every
+/// guard of §6.6 uses.
+pub fn is_class_search(key: &str) -> bool {
+    key.starts_with(CLASS_SEARCH_PREFIX)
+}
+
+/// The one precedence between two records of one key or one signature (I2, phase-3 D7, replan
+/// RQ1): a `registrar:` calendar first, then a `classsearch:` one, then a `google:` one, then any
+/// other; then the lower calendar key.
 /// Smaller wins (Plan ruling R2-f). The tier is the table's ([`Source::by_calendar`]).
 fn precedence(series: &Series) -> (u8, &str) {
     (Source::by_calendar(&series.calendar).tier, series.calendar.as_str())
@@ -2253,6 +2273,9 @@ fn write_state_file(vault: &Path, name: &str, bytes: &str) -> std::io::Result<()
 /// - A `registrar:` calendar (phase 3, D5) is configured while its term is in play (a series with
 ///   an open `until` or one under 28 days past); a row its own fresh fetch no longer returns moves
 ///   to `ended` that day, with the day before as its last instance.
+/// - A `classsearch:` calendar (replan §6.6) is configured while it holds a row whose `until` is
+///   open; a row its own fresh read omits stays while its `until` is open and then goes, and no
+///   class-search row ever moves to `ended`.
 ///
 /// The file is written only when `fresh` is non-empty and the bytes differ, whole (temp file,
 /// then rename). With `fresh` non-empty, the whole read-to-rename holds [`SERIES_LOCK_FILE`]
@@ -2350,10 +2373,16 @@ pub fn refresh_series_held(
     // Each arm is the table's keep-alive column ([`Source::by_calendar`], [`KeepAlive`]).
     let whole_term = |calendar: &str| Source::by_calendar(calendar).keep_alive == KeepAlive::InPlay;
     let in_play = registrar_in_play(&old, today);
+    // Replan §6.6: a class-search calendar counts as configured while it holds an open row.
+    let per_course = |calendar: &str| Source::by_calendar(calendar).keep_alive == KeepAlive::PerCourse;
+    let open = |s: &Series| s.until.is_none_or(|until| until >= today);
+    let open_courses: BTreeSet<String> =
+        old.series.iter().filter(|s| per_course(&s.calendar) && open(s)).map(|s| s.calendar.clone()).collect();
     let configured = |calendar: &str| match Source::by_calendar(calendar).keep_alive {
         KeepAlive::InPlay => in_play.contains(calendar),
         KeepAlive::GoogleFeed => google,
         KeepAlive::NamedFeed => names.contains(calendar),
+        KeepAlive::PerCourse => open_courses.contains(calendar),
     };
     let recent = |read: Option<Date>| read.is_some_and(|d| days_since(d, today) < UNSEEN_DAYS);
 
@@ -2379,6 +2408,13 @@ pub fn refresh_series_held(
             // D5 (Plan ruling R2-c): a registrar fetch is the whole term's truth; a row it no
             // longer returns is a dropped course, at once.
             Some(_) if whole_term(&held.calendar) => aged_out.push(held),
+            // Replan §6.6: a class-search read covers only the courses it asked about, so a row
+            // it omits stays while its `until` is open and then goes silently, never to `ended`.
+            Some(_) if per_course(&held.calendar) => {
+                if open(&held) {
+                    series.push(held);
+                }
+            }
             Some(_) if recent(held.last_seen) => series.push(held),
             Some(_) => aged_out.push(held),
             None if configured(&held.calendar) => series.push(held),
@@ -2653,8 +2689,8 @@ fn minutes(time: Time) -> i64 {
 /// **Twins** (P8 review): one real series can reach the file under two keys — an Outlook/Exchange
 /// invite keeps its own UID, so a `gcal-series:` key and an `ics-series:` key carry the same
 /// signature. Candidates are grouped by signature and one proposal is made per group, from the
-/// record [`SeriesFile::by_key`]'s precedence prefers (a `registrar:` calendar, then a `google:`
-/// calendar, then the lower calendar key; then the lower key). A key answered or held closes its signature, so a declined,
+/// record [`SeriesFile::by_key`]'s precedence prefers (a `registrar:` calendar, then a
+/// `classsearch:` one, then a `google:` one, then the lower calendar key; then the lower key). A key answered or held closes its signature, so a declined,
 /// confirmed or held twin suppresses the other.
 ///
 /// Routines feed the one window proposal (decision 3, [`window_proposal`]), never a commitment.
@@ -3989,9 +4025,11 @@ pub fn emit_checks_locked(
     // Convergence round 5: a fetch since `refresh_series` may have moved a `registrar:` key to
     // `ended`, and its withdrawn card no longer closes the question, so only a held key is filed.
     let held: BTreeSet<&str> = file.series.iter().filter(|_| good).map(|s| s.source_uid.as_str()).collect();
+    // Replan §6.7 (RQ2): a class-search row never files a card; only a press on its row confirms it.
     let asked: Vec<Proposal> = proposals
         .iter()
         .filter(|p| Source::by_uid(&p.source_uid).lands != Lands::AppliedAndListed || held.contains(p.source_uid.as_str()))
+        .filter(|p| !is_class_search(&p.source_uid))
         .cloned()
         .collect();
     let budget = std::cmp::max(0, daily_budget - crate::approvals::count_proposals_created(vault, today));
@@ -4049,9 +4087,11 @@ pub fn detect_changes(
     journal: &mut crate::journal::Journal,
 ) -> (Vec<Change>, Vec<String>) {
     let by_key = file.by_key();
+    // Replan §6.6: a class-search row is never live here, so it is never a Google note's successor
+    // and no change card carries a section.
     let live: Vec<Candidate> = by_key
         .iter()
-        .filter(|(_, series)| is_live(file, series))
+        .filter(|(_, series)| is_live(file, series) && !is_class_search(&series.calendar))
         .filter_map(|(key, series)| match classify(series, codes, planning)? {
             Class::Kind { kind, course } => Some(Candidate {
                 key,
@@ -4519,6 +4559,8 @@ fn create_confirmed_as(
             "You told Knowlu when this class meets.\n".to_string()
         } else if key.starts_with(crate::registrar::CALENDAR_PREFIX) {
             "Found in your school's class schedule.\n".to_string()
+        } else if is_class_search(&key) {
+            "Found in your school's public class search.\n".to_string()
         } else {
             "Found as a weekly series on your calendar.\n".to_string()
         };
@@ -11760,5 +11802,501 @@ mod registrar_hold_tests {
         assert_eq!(uids, [REG_KEY]);
         let again = withdraw(&v, &file);
         assert!(again.withdrawn.is_empty() && again.pending == 0, "{again:?}");
+    }
+}
+
+#[cfg(test)]
+mod class_search_tests {
+    //! C2a (onboarding replan §6.6, §6.7, RQ1, RQ2): the `classsearch:` source row. The ruled order
+    //! is **registrar, then class search, then Google, then the rest**; the tests pin that order,
+    //! never the numbers. A class-search row is a guess: it holds nothing, it can be held, it never
+    //! files a card, it is never a change's successor and its calendar is kept per course. Every
+    //! title, key, course and date is invented.
+
+    use super::*;
+    use crate::journal::Journal;
+    use crate::write::WriteContext;
+    use jiff::civil::date;
+
+    const TODAY: Date = Date::constant(2026, 9, 10);
+    const CS_CAL: &str = "classsearch:ua:202640";
+    const CS_KEY: &str = "classsearch:ua:202640-40001";
+    const CS_KEY_B: &str = "classsearch:ua:202640-40002";
+    const REG_CAL: &str = "registrar:ua:202640";
+    const REG_KEY: &str = "registrar:ua:202640-40001";
+    const GOOGLE_CAL: &str = "google:invented";
+    const GCAL_KEY: &str = "gcal-series:cs100";
+    const OTHER_CAL: &str = "personal";
+
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A vault whose one course is `cs-100` ("CS 100").
+    fn vault(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("knowlu-c2a-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("courses")).unwrap();
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        std::fs::write(dir.join("courses").join("cs-100.md"), "---\ntitle: \"CS 100\"\nslug: cs-100\n---\n\nInvented.\n")
+            .unwrap();
+        Scratch(dir)
+    }
+
+    fn t(h: i8, m: i8) -> Time {
+        Time::new(h, m, 0, 0).unwrap()
+    }
+
+    /// A weekly series on `days`, `s`-`e`, with no instances (what class search and the registrar
+    /// emit: a weekly rule only), last seen today, `first` Aug 24, `until` as given.
+    fn rule(uid: &str, cal: &str, title: &str, days: &[DayKey], s: Time, e: Time, until: Option<Date>) -> Series {
+        Series {
+            source_uid: uid.to_string(),
+            calendar: cal.to_string(),
+            title: title.to_string(),
+            where_: None,
+            event_type: None,
+            rule: Rule { freq: "WEEKLY".into(), interval: 1, until, count: None },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            instances: Vec::new(),
+            meets: vec![Meet { days: days.to_vec(), start: s, end: e }],
+            first: Some(date(2026, 8, 24)),
+            until,
+            last_seen: Some(TODAY),
+        }
+    }
+
+    /// CS 100, Mon/Wed/Fri 12:00-12:50, open-ended, from `uid` under `cal`.
+    fn cs100(uid: &str, cal: &str) -> Series {
+        rule(uid, cal, "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50), None)
+    }
+
+    /// Google's copy of the same class, with its instances; `end_minute` 50 makes it the same
+    /// signature as `cs100`, 51 a different one.
+    fn google(uid: &str, end_minute: i8) -> Series {
+        let mut s = rule(uid, GOOGLE_CAL, "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, end_minute), None);
+        s.event_type = Some("default".into());
+        s.instances = [date(2026, 9, 7), date(2026, 9, 9), date(2026, 9, 11), date(2026, 9, 14)]
+            .into_iter()
+            .map(|d| Instance { date: d, start: Some(t(12, 0)), end: Some(t(12, end_minute)) })
+            .collect();
+        s
+    }
+
+    fn file_of(series: Vec<Series>) -> SeriesFile {
+        let mut file = SeriesFile::default();
+        for s in &series {
+            file.calendars.insert(s.calendar.clone(), TODAY);
+        }
+        file.series = series;
+        file.series.sort_by(|a, b| (&a.source_uid, &a.calendar).cmp(&(&b.source_uid, &b.calendar)));
+        file
+    }
+
+    fn codes() -> Codes {
+        Codes { table: [("CS100".to_string(), "cs-100".to_string())].into_iter().collect(), names: BTreeMap::new() }
+    }
+
+    /// A confirmed class note for CS 100 keyed `uid`, meeting `days` 12:00-12:50.
+    fn note(uid: &str, days: &[DayKey]) -> Commitment {
+        Commitment {
+            id: "cmt_0001".into(),
+            path: PathBuf::from("commitments/cs-100.md"),
+            kind: "class".into(),
+            level: Level::Hard,
+            title: "CS 100".into(),
+            course: Some("cs-100".into()),
+            meets: vec![Meet { days: days.to_vec(), start: t(12, 0), end: t(12, 50) }],
+            where_: None,
+            from: Some(date(2026, 8, 24)),
+            until: None,
+            source_uid: Some(uid.into()),
+        }
+    }
+
+    fn set_of(notes: Vec<Commitment>) -> Commitments {
+        Commitments { confirmed: notes, ..Commitments::default() }
+    }
+
+    /// The proposals `rank` would card (`for_cards`), window left out, by key.
+    fn keys(file: &SeriesFile, set: &Commitments, for_cards: bool) -> Vec<String> {
+        let template = crate::weekcal::WeekCalendar::new(&Mapping::new(), Vec::new());
+        proposals(file, set, &codes(), &[], &template, &BTreeSet::new(), TODAY, for_cards)
+            .into_iter()
+            .filter(|p| !p.is_window())
+            .map(|p| p.source_uid)
+            .collect()
+    }
+
+    // ---- the ruled order (RQ1): registrar, class search, Google, the rest ----
+
+    /// The plan's order: registrar wins over class search, class search over Google, Google over
+    /// any other calendar. Red now: `classsearch:` is an unnamed calendar, so it ties "the rest"
+    /// and loses to Google.
+    #[test]
+    fn precedence_is_registrar_then_class_search_then_google_then_the_rest() {
+        let p = |cal: &str| precedence(&cs100("k", cal)).0;
+        assert!(p(REG_CAL) < p(CS_CAL), "the registrar must outrank class search");
+        assert!(p(CS_CAL) < p(GOOGLE_CAL), "class search must outrank Google (RQ1)");
+        assert!(p(GOOGLE_CAL) < p(OTHER_CAL), "Google must outrank any other calendar");
+        assert!(p(CS_CAL) < p(OTHER_CAL), "class search must outrank any other calendar");
+    }
+
+    /// Reader 1 of `precedence`: `by_key`, one record per key. Red now at the Google case.
+    #[test]
+    fn by_key_keeps_the_higher_source_of_one_key() {
+        let winner = |a: &str, b: &str| {
+            let file = file_of(vec![cs100("one-key", a), cs100("one-key", b)]);
+            file.by_key().get("one-key").map(|s| s.calendar.clone()).unwrap()
+        };
+        assert_eq!(winner(CS_CAL, GOOGLE_CAL), CS_CAL, "class search beats Google");
+        assert_eq!(winner(GOOGLE_CAL, CS_CAL), CS_CAL, "whatever the order in the file");
+        assert_eq!(winner(OTHER_CAL, CS_CAL), CS_CAL, "class search beats the rest");
+        assert_eq!(winner(CS_CAL, REG_CAL), REG_CAL, "the registrar beats class search");
+    }
+
+    /// Reader 2: the collapse of one signature in `proposals`. The class-search row and Google's
+    /// copy are one class; the proposal is class search's, for cards and for the screen alike.
+    /// Red now: the class-search row classifies as nothing, so Google's key is the proposal.
+    #[test]
+    fn one_signature_in_class_search_and_google_collapses_to_class_search() {
+        let file = file_of(vec![cs100(CS_KEY, CS_CAL), google(GCAL_KEY, 50)]);
+        assert_eq!(keys(&file, &Commitments::default(), true), [CS_KEY]);
+        assert_eq!(keys(&file, &Commitments::default(), false), [CS_KEY]);
+    }
+
+    /// Reader 3: `aged_out`'s order picks which record's calendar the `ended` entry keeps. Google
+    /// still outranks another calendar there. Green before and after: it pins the tier shift.
+    #[test]
+    fn an_ended_key_held_by_google_and_another_calendar_keeps_googles_entry() {
+        let v = vault("ended-order");
+        let mut old = file_of(vec![google("gone", 50), cs100("gone", OTHER_CAL)]);
+        old.series.iter_mut().for_each(|s| s.last_seen = Some(date(2026, 8, 1)));
+        old.calendars.insert(GOOGLE_CAL.into(), date(2026, 8, 1));
+        old.calendars.insert(OTHER_CAL.into(), date(2026, 8, 1));
+        write_series_file(&v, &file_bytes(&old)).unwrap();
+        let fresh = [(GOOGLE_CAL.to_string(), Vec::new()), (OTHER_CAL.to_string(), Vec::new())];
+        let (file, _) = refresh_series(&v, &fresh, TODAY);
+        assert_eq!(file.ended.get("gone").map(|e| e.calendar.as_str()), Some(GOOGLE_CAL), "{:?}", file.ended);
+    }
+
+    // ---- the source row's other columns ----
+
+    /// `classify` takes the registrar's no-eligibility branch for this calendar: a row with no
+    /// instances is a class (a lab when titled so). Red now: it fails `eligible`, so `None`.
+    #[test]
+    fn a_class_search_row_classifies_as_a_class_or_lab_with_no_instances() {
+        let class = classify(&cs100(CS_KEY, CS_CAL), &codes(), &[]);
+        assert_eq!(class, Some(Class::Kind { kind: "class".into(), course: Some("cs-100".into()) }));
+        let mut lab = cs100(CS_KEY_B, CS_CAL);
+        lab.title = "CS 100 Lab".into();
+        let class = classify(&lab, &codes(), &[]);
+        assert_eq!(class, Some(Class::Kind { kind: "lab".into(), course: Some("cs-100".into()) }));
+    }
+
+    /// The row's columns: a weekly rule only (`instances` false), so it hides nothing and lands
+    /// as never watched. Red now on `instances`: the catch-all row says true.
+    #[test]
+    fn the_class_search_row_is_a_weekly_rule_that_holds_nothing_and_is_never_watched() {
+        let by_cal = Source::by_calendar(CS_CAL);
+        assert!(!by_cal.instances, "class search emits a weekly rule only");
+        assert!(!by_cal.holds_per_kind, "a class-search row hides nothing");
+        let by_uid = Source::by_uid(CS_KEY);
+        assert!(!by_uid.holds_per_kind);
+        assert_eq!(by_uid.lands, Lands::NotWatched, "a class-search note is never watched");
+        assert!(by_uid.tier < Source::by_uid("gcal-series:x").tier, "by uid too: class search before Google");
+    }
+
+    /// The one test every guard uses. Red now: the stub says false.
+    #[test]
+    fn is_class_search_names_only_the_classsearch_prefix() {
+        assert!(is_class_search(CS_KEY) && is_class_search(CS_CAL));
+        for other in [REG_KEY, REG_CAL, GCAL_KEY, "ics-series:x", "card:cs-100", "window:a", ""] {
+            assert!(!is_class_search(other), "{other}");
+        }
+    }
+
+    /// Nothing else moves: the two feed keys keep their rows, and a vault with no class-search
+    /// row has the same tiers as before. Green before and after.
+    #[test]
+    fn the_feed_and_registrar_rows_are_unchanged() {
+        let (g, i, r) = (Source::by_uid(GCAL_KEY), Source::by_uid("ics-series:x"), Source::by_uid(REG_KEY));
+        assert_eq!((g.lands, i.lands, r.lands), (Lands::Carded, Lands::Carded, Lands::AppliedAndListed));
+        assert!(g.instances && i.instances && !r.instances);
+        assert!(r.holds_per_kind && !g.holds_per_kind && !i.holds_per_kind);
+        assert!(r.tier < g.tier && g.tier <= i.tier, "registrar, then Google, then the rest");
+        assert_eq!(Source::by_uid("card:cs-100").lands, Lands::NotWatched);
+    }
+
+    // ---- holds nothing, can be held (§6.6) ----
+
+    /// A class-search series holds no Google proposal: a differently timed Google `class` of the
+    /// same course is proposed beside it. Red now: the class-search row is no proposal at all.
+    #[test]
+    fn a_class_search_series_holds_no_google_proposal() {
+        let file = file_of(vec![cs100(CS_KEY, CS_CAL), google(GCAL_KEY, 51)]);
+        assert_eq!(keys(&file, &Commitments::default(), true), [CS_KEY, GCAL_KEY]);
+    }
+
+    /// A confirmed class-search note holds nothing either. Mine on lecture 001 leaves recitation
+    /// 101 (another CRN, other times) proposed AND leaves a differently timed Google `class` of that
+    /// course proposed. Red now: the recitation row is no proposal.
+    #[test]
+    fn a_confirmed_class_search_note_leaves_the_recitation_and_a_differently_timed_google_class() {
+        let recitation = rule(CS_KEY_B, CS_CAL, "CS 100", &["fri"], t(14, 0), t(14, 50), None);
+        let file = file_of(vec![cs100(CS_KEY, CS_CAL), recitation, google(GCAL_KEY, 51)]);
+        let set = set_of(vec![note(CS_KEY, &["mon", "wed", "fri"])]);
+        assert_eq!(keys(&file, &set, true), [CS_KEY_B, GCAL_KEY], "recitation 101 and the Google class stay asked");
+    }
+
+    /// A registrar series, or a confirmed registrar note, of that course and kind holds a
+    /// class-search row of it. Green before and after (guards the new row).
+    #[test]
+    fn a_registrar_series_or_note_holds_a_class_search_row() {
+        let tue = rule(CS_KEY_B, CS_CAL, "CS 100", &["tue"], t(9, 0), t(9, 50), None);
+        let file = file_of(vec![cs100(REG_KEY, REG_CAL), tue.clone()]);
+        assert_eq!(keys(&file, &Commitments::default(), true), [REG_KEY]);
+        let set = set_of(vec![note(REG_KEY, &["mon", "wed", "fri"])]);
+        assert!(keys(&file_of(vec![tue]), &set, true).is_empty());
+    }
+
+    /// Mine on a class-search row closes a Google twin of its signature. Green before and after.
+    #[test]
+    fn mine_on_a_class_search_row_closes_its_google_twin() {
+        let file = file_of(vec![cs100(CS_KEY, CS_CAL), google(GCAL_KEY, 50)]);
+        let set = set_of(vec![note(CS_KEY, &["mon", "wed", "fri"])]);
+        assert!(keys(&file, &set, true).is_empty(), "{:?}", keys(&file, &set, true));
+    }
+
+    // ---- never a card (§6.7), the filer's own guard ----
+
+    /// `emit_checks_locked` drops a class-search proposal: no `commitment-check` for it. Red now:
+    /// the proposal is filed.
+    #[test]
+    fn the_filer_files_no_check_for_a_class_search_proposal() {
+        let v = vault("filer");
+        let file = file_of(vec![cs100(CS_KEY, CS_CAL)]);
+        write_series_file(&v, &file_bytes(&file)).unwrap();
+        // Built by hand, so the test reaches the filer whatever `classify` does with the row.
+        let row = cs100(CS_KEY, CS_CAL);
+        let asked = vec![Proposal {
+            kind: "class".into(),
+            level: Level::Hard,
+            title: row.title.clone(),
+            course: Some("cs-100".into()),
+            meets: row.meets.clone(),
+            where_: None,
+            from: row.first,
+            until: None,
+            source_uid: CS_KEY.into(),
+        }];
+        let mut journal = Journal::new(&*v);
+        let ctx = WriteContext::new("agent:rank", "cli");
+        let (filed, _, warnings) = emit_checks_locked(&v, &asked, &[], Some(&file), TODAY, 15, true, &ctx, &mut journal);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(filed, 0, "a class-search row never files a card");
+        assert!(!v.join("approvals").exists() || std::fs::read_dir(v.join("approvals")).unwrap().next().is_none());
+    }
+
+    // ---- never a successor ----
+
+    /// A Google note whose series ended, beside an open class-search row of that course and kind
+    /// with other times: no change card names the `classsearch:` key. The row carries instances
+    /// here so today's code would take it. Red now: it is picked as the successor.
+    #[test]
+    fn a_class_search_row_is_never_a_successor() {
+        let mut next = rule(CS_KEY, CS_CAL, "CS 100", &["tue", "thu"], t(9, 30), t(10, 45), Some(date(2026, 12, 4)));
+        next.first = Some(date(2026, 9, 15));
+        next.instances = [date(2026, 9, 15), date(2026, 9, 17), date(2026, 9, 22)]
+            .into_iter()
+            .map(|d| Instance { date: d, start: Some(t(9, 30)), end: Some(t(10, 45)) })
+            .collect();
+        let mut file = file_of(vec![next]);
+        file.calendars.insert(GOOGLE_CAL.into(), TODAY);
+        file.ended.insert(
+            GCAL_KEY.into(),
+            Ended { calendar: GOOGLE_CAL.into(), dropped: TODAY, last_instance: Some(date(2026, 9, 9)), until: Some(date(2026, 9, 9)) },
+        );
+        let mut old = note(GCAL_KEY, &["mon", "wed", "fri"]);
+        old.until = Some(date(2026, 12, 4));
+        let fresh: BTreeSet<String> = [GOOGLE_CAL.to_string()].into_iter().collect();
+        let mut journal = Journal::new(PathBuf::from("knowlu-c2a-no-journal"));
+        let (changes, _) = detect_changes(&file, &set_of(vec![old]), &codes(), &[], &fresh, TODAY, &mut journal);
+        for c in &changes {
+            assert!(!format!("{:?}", c.change).contains("classsearch:"), "a class-search key became a successor: {c:?}");
+        }
+    }
+
+    /// The one change `detect_changes` offers for a Google note beside a same-signature open
+    /// class-search row, filed through `emit_checks`: it moves `until` to `end` and names no
+    /// class-search key, on the change or on the card.
+    fn the_until_card_is_filed_without_a_class_search_key(name: &str, file: &SeriesFile, old: Commitment, end: &str) {
+        let fresh: BTreeSet<String> = [GOOGLE_CAL.to_string()].into_iter().collect();
+        let mut journal = Journal::new(PathBuf::from("knowlu-c2a-no-journal"));
+        let (changes, warnings) = detect_changes(file, &set_of(vec![old]), &codes(), &[], &fresh, TODAY, &mut journal);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(changes.len(), 1, "the class-search row must not hide the Google note's end: {changes:?}");
+        let c = &changes[0];
+        assert_eq!(c.source_uid, GCAL_KEY);
+        assert_eq!(get(&c.change, "until"), Some(&Value::String(end.into())), "{c:?}");
+        assert!(!format!("{c:?}").contains("classsearch"), "{c:?}");
+        let v = vault(name);
+        let mut journal = Journal::new(&*v);
+        let ctx = WriteContext::new("agent:rank", "cli");
+        let (filed, n, warnings) = emit_checks(&v, &[], &changes, TODAY, 15, &ctx, &mut journal);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(n, 1, "the end card is filed");
+        let card = pystr::read_text(&filed[0]).unwrap();
+        assert!(!card.contains("classsearch"), "{card}");
+    }
+
+    /// The `ended` path: a Google note whose key ended, beside an open class-search row with the
+    /// same meeting times. The row is not live for `detect_changes`, so it neither continues the
+    /// note nor succeeds it: the end card is still filed. Green with C2a's `live` filter.
+    #[test]
+    fn an_ended_google_note_beside_a_same_signature_class_search_row_still_gets_its_end_card() {
+        let mut file = file_of(vec![cs100(CS_KEY, CS_CAL)]);
+        file.calendars.insert(GOOGLE_CAL.into(), TODAY);
+        file.ended.insert(
+            GCAL_KEY.into(),
+            Ended { calendar: GOOGLE_CAL.into(), dropped: TODAY, last_instance: Some(date(2026, 9, 9)), until: Some(date(2026, 9, 9)) },
+        );
+        let mut old = note(GCAL_KEY, &["mon", "wed", "fri"]);
+        old.until = Some(date(2026, 12, 4));
+        the_until_card_is_filed_without_a_class_search_key("ended-beside", &file, old, "2026-09-09");
+    }
+
+    /// The `continues` check: a live Google series whose `until` moved earlier than its note's,
+    /// beside an open class-search row with the same meeting times. The row does not count as the
+    /// class continuing, so the `until` card is still filed. Green with C2a's `live` filter.
+    #[test]
+    fn a_class_search_row_does_not_continue_a_google_note_whose_until_moved_earlier() {
+        let mut g = google(GCAL_KEY, 50);
+        g.until = Some(date(2026, 9, 30));
+        g.rule.until = g.until;
+        let file = file_of(vec![cs100(CS_KEY, CS_CAL), g]);
+        let mut old = note(GCAL_KEY, &["mon", "wed", "fri"]);
+        old.until = Some(date(2026, 12, 4));
+        the_until_card_is_filed_without_a_class_search_key("continues-beside", &file, old, "2026-09-30");
+    }
+
+    // ---- body ----
+
+    /// A note made from a class-search key says where it was found, and the registrar's and
+    /// Google's bodies do not change. Red now: the class-search note gets the generic line.
+    #[test]
+    fn a_note_from_a_class_search_key_reads_found_in_the_public_class_search() {
+        let v = vault("body");
+        let ctx = WriteContext::new("agent:test", "test");
+        let mut journal = Journal::new(v.as_path());
+        let map = crate::yaml::mapping_of(
+            "kind: class\nlevel: hard\ntitle: CS 100\ncourse: cs-100\nmeets: [{days: [mon], start: '12:00', end: '12:50'}]\n",
+        );
+        let body = |key: &str, journal: &mut Journal| {
+            let path = create_confirmed(&v, &map, key, TODAY, &ctx, journal).unwrap();
+            let text = pystr::read_text(&path).unwrap();
+            text.split("---\n\n").last().unwrap().to_string()
+        };
+        assert_eq!(body(CS_KEY, &mut journal), "Found in your school's public class search.\n");
+        assert_eq!(body(REG_KEY, &mut journal), "Found in your school's class schedule.\n");
+        assert_eq!(body(GCAL_KEY, &mut journal), "Found as a weekly series on your Google Calendar.\n");
+    }
+
+    // ---- keep-alive: a read covers only the courses it asked about (§6.6) ----
+
+    /// Aug 11: 30 days before today, past `UNSEEN_DAYS`.
+    const OLD: Date = Date::constant(2026, 8, 11);
+
+    /// A vault whose series file holds `rows` (class-search rows of one calendar, last seen and
+    /// read on `seen`), then `refresh_series` with `fresh`.
+    fn refresh(name: &str, rows: Vec<Series>, seen: Date, fresh: Vec<(String, Vec<Series>)>) -> SeriesFile {
+        let v = vault(name);
+        let mut old = file_of(rows);
+        old.series.iter_mut().for_each(|s| s.last_seen = Some(seen));
+        old.calendars.insert(CS_CAL.into(), seen);
+        write_series_file(&v, &file_bytes(&old)).unwrap();
+        refresh_series(&v, &fresh, TODAY).0
+    }
+
+    fn row(uid: &str, until: Option<Date>) -> Series {
+        rule(uid, CS_CAL, "CS 100", &["mon", "wed", "fri"], t(12, 0), t(12, 50), until)
+    }
+
+    fn uids(file: &SeriesFile) -> Vec<&str> {
+        file.series.iter().map(|s| s.source_uid.as_str()).collect()
+    }
+
+    fn google_read() -> Vec<(String, Vec<Series>)> {
+        vec![(GOOGLE_CAL.to_string(), vec![google(GCAL_KEY, 50)])]
+    }
+
+    fn no_class_search_ended(file: &SeriesFile) {
+        assert!(file.ended.keys().all(|k| !k.starts_with("classsearch:")), "an ended entry: {:?}", file.ended);
+    }
+
+    /// Unfetched, an old class-search calendar stays while a row's `until` is open: a read of
+    /// Google does not age it out. Red now: it ages out like a removed feed after 14 days.
+    #[test]
+    fn an_unfetched_class_search_calendar_stays_while_its_until_is_open() {
+        let file = refresh("keep-open", vec![row(CS_KEY, Some(date(2026, 12, 11)))], OLD, google_read());
+        assert!(uids(&file).contains(&CS_KEY), "{:?}", uids(&file));
+        assert!(file.calendars.contains_key(CS_CAL), "its calendars entry stays too");
+        no_class_search_ended(&file);
+    }
+
+    /// A fresh read of the calendar that omits a course leaves that row, even when its
+    /// `last_seen` is older than `UNSEEN_DAYS`, and ends nothing. Red now: it ages out with an
+    /// `ended` entry.
+    #[test]
+    fn a_fresh_read_omitting_a_row_keeps_it_even_when_long_unseen_and_ends_nothing() {
+        let fresh = vec![(CS_CAL.to_string(), vec![row(CS_KEY_B, Some(date(2026, 12, 11)))])];
+        let file = refresh("keep-omitted", vec![row(CS_KEY, Some(date(2026, 12, 11)))], OLD, fresh);
+        assert_eq!(uids(&file), [CS_KEY, CS_KEY_B]);
+        no_class_search_ended(&file);
+    }
+
+    /// On a fresh read, an omitted row past its `until` goes, silently: no `ended` entry, no card.
+    /// Recently seen: red now, because it stays as a recently seen row.
+    #[test]
+    fn a_fresh_read_drops_an_omitted_row_past_its_until_silently() {
+        let fresh = vec![(CS_CAL.to_string(), vec![row(CS_KEY_B, Some(date(2026, 12, 11)))])];
+        let file = refresh("drop-recent", vec![row(CS_KEY, Some(date(2026, 9, 1)))], TODAY, fresh);
+        assert_eq!(uids(&file), [CS_KEY_B]);
+        no_class_search_ended(&file);
+    }
+
+    /// The same, long unseen. Red now: the old row ages out with an `ended` entry.
+    #[test]
+    fn a_fresh_read_drops_a_long_unseen_row_past_its_until_with_no_ended_entry() {
+        let fresh = vec![(CS_CAL.to_string(), vec![row(CS_KEY_B, Some(date(2026, 12, 11)))])];
+        let file = refresh("drop-old", vec![row(CS_KEY, Some(date(2026, 9, 1)))], OLD, fresh);
+        assert_eq!(uids(&file), [CS_KEY_B]);
+        no_class_search_ended(&file);
+    }
+
+    /// Unfetched, a row past its `until` stays until `UNSEEN_DAYS` and is then dropped, silently.
+    /// Green before and after: it pins that the new keep-alive arm stops at the `until`.
+    #[test]
+    fn unfetched_a_row_past_its_until_stays_until_unseen_days_then_goes_silently() {
+        let past = Some(date(2026, 9, 1));
+        let recent = refresh("past-recent", vec![row(CS_KEY, past)], date(2026, 9, 5), google_read());
+        assert!(uids(&recent).contains(&CS_KEY), "{:?}", uids(&recent));
+        no_class_search_ended(&recent);
+        let old = refresh("past-old", vec![row(CS_KEY, past)], OLD, google_read());
+        assert!(!uids(&old).contains(&CS_KEY), "{:?}", uids(&old));
+        no_class_search_ended(&old);
     }
 }
