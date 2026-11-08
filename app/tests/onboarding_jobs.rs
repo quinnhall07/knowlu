@@ -609,8 +609,6 @@ const CONFIRMED: &str = "2026-10-24T12:00:00Z";
 fn finishable() -> OnboardingState {
     let mut s = state_at(11, true);
     for j in LANE_JOBS { s.jobs.insert(j.into(), JobRecord { state: JobState::Done, ..Default::default() }); }
-    // C5b: delete this line with the job's entry in `LANE_REQUIRED` (onboarding_state.rs); until then finish still reads it.
-    s.jobs.insert("registrar.confirm".into(), JobRecord { state: JobState::Done, ..Default::default() });
     s.step10_confirmed_at = Some(CONFIRMED.into());
     s
 }
@@ -622,7 +620,7 @@ fn test_09_the_status_says_finish_ready_exactly_when_finish_would_not_refuse() {
     let at = epoch(CONFIRMED) + 180;
     assert_eq!(status_inner(&finishable(), at)["finish_ready"], true);
     let mut absent = finishable();
-    absent.jobs.remove("registrar.confirm");
+    absent.jobs.remove("config.ingest");
     assert_eq!(status_inner(&absent, at)["finish_ready"], false, "an absent lane job is not ready");
     let mut store = finishable();
     store.jobs.insert("school.store".into(), JobRecord { state: JobState::Running, ..Default::default() });
@@ -1070,7 +1068,6 @@ fn steps_3_to_8(tag: &str, quits: &[u8]) -> String {
     // Step 3: the capture.
     answer(3, serde_json::json!({"capture": {
         "courses": three_courses(),
-        "registrar_rows": [RegistrarRow { code: "QLT 101".into(), days: "MWF".into(), start: "09:00".into(), end: "09:50".into() }],
         "feeds": {"lms_ics": "validated"},
     }}));
     pending.put(PENDING_LMS, LMS_LINK).unwrap();
@@ -1663,7 +1660,6 @@ fn test_26_the_consoles_handler_list_holds_neither_storing_command() {
 fn capture_answer() -> Value {
     serde_json::json!({"capture": {
         "courses": three_courses(),
-        "registrar_rows": [RegistrarRow { code: "QLT 101".into(), days: "MWF".into(), start: "09:00".into(), end: "09:50".into() }],
         "feeds": {},
     }})
 }
@@ -2364,7 +2360,7 @@ fn test_09_finish_is_refused_before_step_10_is_confirmed_and_the_gate_lists_clas
 
 #[test]
 fn test_09_finish_needs_the_four_local_jobs_present_and_done_and_only_the_stores_may_be_absent() {
-    for missing in ["school.apply", "school.courses", "registrar.confirm", "config.ingest"] {
+    for missing in ["school.apply", "school.courses", "config.ingest"] {
         let mut s = finishable();
         s.jobs.remove(missing);
         let r = rig(&format!("t09-absent-{missing}"), s, false);
@@ -3058,8 +3054,6 @@ fn test_33_the_unlisted_paste_path_with_no_registrar_rows_ends_with_the_four_lan
         assert_eq!(r.state_of(j), JobState::Done, "{j}: {:?}", r.log.all());
     }
     r.q.update_state(|s| s.step10_confirmed_at = Some(CONFIRMED.into())).unwrap();
-    // C5b: delete this line with the job's entry in `LANE_REQUIRED` (onboarding_state.rs).
-    r.q.update_state(|s| { s.jobs.insert("registrar.confirm".into(), JobRecord { state: JobState::Done, ..Default::default() }); }).unwrap();
     let out = status_inner(&r.q.snapshot(), epoch(CONFIRMED) + 180);
     assert_eq!(out["finish_ready"], true, "{out}");
 }
@@ -3359,12 +3353,34 @@ fn test_39_exiting_now_is_false_with_only_the_guard_held_and_true_once_the_stop_
     assert_eq!((late["ok"].clone(), late["exiting"].clone()), (false.into(), true.into()), "{late}");
 }
 
+/// C5b: an older file may hold a `registrar.confirm` record in any state, or none; finish never reads it.
+#[test]
+fn test_c5b_finish_never_waits_on_the_retired_registrar_job_whatever_an_old_file_holds() {
+    let at = epoch(CONFIRMED) + 600;
+    let records = [
+        None,
+        Some(JobRecord { state: JobState::Failed, reason: Some("could_not_write_config".into()), ..Default::default() }),
+        Some(JobRecord { state: JobState::Pending, ..Default::default() }),
+        Some(JobRecord { state: JobState::Running, ..Default::default() }),
+    ];
+    for (i, rec) in records.into_iter().enumerate() {
+        let mut s = finishable();
+        if let Some(rec) = rec { s.jobs.insert("registrar.confirm".into(), rec); }
+        let status = status_inner(&s, at);
+        assert_eq!(status["finish_ready"], true, "case {i}: {status}");
+        assert_eq!(status["failed_job"], serde_json::Value::Null, "case {i}: a retired failed job is never named: {status}");
+        let r = rig(&format!("c5b-finish-{i}"), s, false);
+        let out = onboarding_finish_inner(&Seams::new(&r), &ExitGuard::default(), at);
+        assert_eq!(out["ok"], true, "case {i}: {out}");
+    }
+}
+
 const NEEDS_TRY_AGAIN: &str = "Something in your setup needs Try again before Knowlu opens.";
 
 #[test]
 fn test_39_a_failed_lane_job_gives_the_needs_try_again_refusal_and_failed_job_names_it() {
     let at = epoch(CONFIRMED) + 600;
-    for job in ["school.apply", "school.courses", "registrar.confirm", "config.ingest"] {
+    for job in ["school.apply", "school.courses", "config.ingest"] {
         let reason = if job == "school.courses" { REASON_ACCOUNT_UNFINISHED } else { "could_not_write_config" };
         let mut s = finishable();
         s.jobs.insert(job.into(), JobRecord { state: JobState::Failed, reason: Some(reason.into()), ..Default::default() });

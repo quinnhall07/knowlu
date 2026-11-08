@@ -72,7 +72,6 @@ fn full_answers() -> Answers {
         CourseAnswer { code: "QLT 101".into(), name: "Quilting Basics".into(), label: "Quilting".into(), captured_label: "Quilting".into(), lms_key: "_1001_1".into(), removed: false, slug: "quilting-basics".into(), fragments: vec!["QLT 101".into(), "_71_1".into()] },
         CourseAnswer { code: "KNT 220".into(), name: "Knotwork Theory".into(), label: "Knots, edited".into(), captured_label: "Knots".into(), lms_key: "_1002_1".into(), removed: true, slug: String::new(), fragments: vec!["KNT 220".into()] },
     ];
-    a.registrar_rows = vec![RegistrarRow { code: "QLT 101".into(), days: "MWF".into(), start: "09:00".into(), end: "09:50".into() }];
     put_bucket(&mut a, &["_1001_1"], &[("class_times", 3)]);
     put_bucket(&mut a, &["_1001_1", "_1002_1"], &[("assignments_upcoming", 2)]);
     put_bucket(&mut a, &[], &[("turned_in", 1)]);
@@ -121,7 +120,6 @@ fn test_01_neither_file_holds_a_url_a_cookie_or_a_login_and_the_state_holds_no_c
     pending.put(PENDING_CALENDAR, CAL_LINK).unwrap();
     let capture = serde_json::json!({"capture": {
         "courses": full_answers().courses,
-        "registrar_rows": full_answers().registrar_rows,
         "feeds": {"lms_ics": "validated"},
     }});
     let answered = onboarding_answer_inner(&d, 3, &capture, &mut |_| {});
@@ -1633,14 +1631,51 @@ fn test_12_a_step_3_capture_replaces_an_unreadable_answers_file_with_only_what_i
 }
 
 #[test]
-fn test_12_the_captured_registrar_rows_and_feed_states_are_saved_with_the_courses() {
+fn test_12_the_captured_feed_states_are_saved_with_the_courses() {
     let d = scratch("t12-capture-rest");
-    let rows = serde_json::json!([{"code": "QLT 101", "days": "MWF", "start": "09:00", "end": "09:50"}]);
-    let capture = serde_json::json!({"capture": {"courses": [row("QLT 101", "Quilting Basics", "_1001_1", false)], "registrar_rows": rows, "feeds": {"lms_ics": "validated"}}});
+    let capture = serde_json::json!({"capture": {"courses": [row("QLT 101", "Quilting Basics", "_1001_1", false)], "feeds": {"lms_ics": "validated"}}});
     assert_eq!(onboarding_answer_inner(&d, 3, &capture, &mut |_| {})["ok"], true);
     let a = load_answers(&d).unwrap().unwrap();
-    assert_eq!(a.registrar_rows.len(), 1);
     assert_eq!(a.feeds.get("lms_ics"), Some(&FeedState::Validated));
+}
+
+// ---- C5b: the registrar pieces are out of the state (replan section 8) --------------------------------------------
+
+#[test]
+fn test_c5b_a_capture_that_still_carries_registrar_rows_saves_the_courses_and_no_rows() {
+    let d = scratch("c5b-capture");
+    let rows = serde_json::json!([{"code": "QLT 101", "days": "MWF", "start": "09:00", "end": "09:50"}]);
+    let capture = serde_json::json!({"capture": {"courses": [row("QLT 101", "Quilting Basics", "_1001_1", false)], "registrar_rows": rows, "feeds": {}}});
+    let (out, jobs) = asked(&d, 3, &capture, true);
+    assert_eq!(out["ok"], true, "an old page's field is ignored, never refused: {out}");
+    assert_eq!(jobs, vec!["school.preview"]);
+    assert_eq!(load_answers(&d).unwrap().unwrap().courses.len(), 1);
+    let raw = std::fs::read_to_string(answers_path(&d)).unwrap();
+    assert!(!raw.contains("registrar_rows"), "the file no longer records registrar rows: {raw}");
+}
+
+#[test]
+fn test_c5b_an_answers_file_an_older_build_wrote_with_registrar_rows_still_loads() {
+    let d = scratch("c5b-old-file");
+    let mut v = serde_json::to_value(full_answers()).unwrap();
+    v["registrar_rows"] = serde_json::json!([{"code": "QLT 101", "days": "MWF", "start": "09:00", "end": "09:50"}]);
+    std::fs::write(answers_path(&d), serde_json::to_string(&v).unwrap()).unwrap();
+    let loaded = load_answers(&d).unwrap().expect("the old file loads");
+    assert_eq!(loaded.courses, full_answers().courses, "the rest of the file reads as it did");
+    assert_eq!(loaded.feeds, full_answers().feeds);
+    // And without the field at all, which is what a new build writes.
+    let mut bare = serde_json::to_value(full_answers()).unwrap();
+    bare.as_object_mut().unwrap().remove("registrar_rows");
+    std::fs::write(answers_path(&d), serde_json::to_string(&bare).unwrap()).unwrap();
+    assert!(matches!(load_answers(&d), Ok(Some(_))), "a file with no registrar_rows loads too");
+}
+
+#[test]
+fn test_c5b_the_state_source_names_no_registrar_piece() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/onboarding_state.rs")).unwrap();
+    for gone in ["registrar.confirm", "RegistrarRow", "registrar_rows", "LANE_REQUIRED", "REGISTRAR_FILE"] {
+        assert!(!src.contains(gone), "onboarding_state.rs still names {gone}");
+    }
 }
 
 #[test]
@@ -1780,7 +1815,7 @@ fn test_33_each_proceed_enqueues_exactly_its_jobs_in_order_and_saves_no_answer()
     let d = scratch("t33-proceeds");
     let proceed = serde_json::json!({"proceed": true});
     for (step, want) in [
-        (3u8, vec!["school.store", "school.apply", "school.courses", "registrar.confirm", "slot.partial"]),
+        (3u8, vec!["school.store", "school.apply", "school.courses", "slot.partial"]),
         (7, vec!["calendar.store"]),
         (8, vec!["config.ingest", "slot.partial"]),
     ] {
