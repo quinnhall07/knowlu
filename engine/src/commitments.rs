@@ -12140,6 +12140,59 @@ mod class_search_tests {
         }
     }
 
+    /// The one change `detect_changes` offers for a Google note beside a same-signature open
+    /// class-search row, filed through `emit_checks`: it moves `until` to `end` and names no
+    /// class-search key, on the change or on the card.
+    fn the_until_card_is_filed_without_a_class_search_key(name: &str, file: &SeriesFile, old: Commitment, end: &str) {
+        let fresh: BTreeSet<String> = [GOOGLE_CAL.to_string()].into_iter().collect();
+        let mut journal = Journal::new(PathBuf::from("knowlu-c2a-no-journal"));
+        let (changes, warnings) = detect_changes(file, &set_of(vec![old]), &codes(), &[], &fresh, TODAY, &mut journal);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(changes.len(), 1, "the class-search row must not hide the Google note's end: {changes:?}");
+        let c = &changes[0];
+        assert_eq!(c.source_uid, GCAL_KEY);
+        assert_eq!(get(&c.change, "until"), Some(&Value::String(end.into())), "{c:?}");
+        assert!(!format!("{c:?}").contains("classsearch"), "{c:?}");
+        let v = vault(name);
+        let mut journal = Journal::new(&*v);
+        let ctx = WriteContext::new("agent:rank", "cli");
+        let (filed, n, warnings) = emit_checks(&v, &[], &changes, TODAY, 15, &ctx, &mut journal);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(n, 1, "the end card is filed");
+        let card = pystr::read_text(&filed[0]).unwrap();
+        assert!(!card.contains("classsearch"), "{card}");
+    }
+
+    /// The `ended` path: a Google note whose key ended, beside an open class-search row with the
+    /// same meeting times. The row is not live for `detect_changes`, so it neither continues the
+    /// note nor succeeds it: the end card is still filed. Green with C2a's `live` filter.
+    #[test]
+    fn an_ended_google_note_beside_a_same_signature_class_search_row_still_gets_its_end_card() {
+        let mut file = file_of(vec![cs100(CS_KEY, CS_CAL)]);
+        file.calendars.insert(GOOGLE_CAL.into(), TODAY);
+        file.ended.insert(
+            GCAL_KEY.into(),
+            Ended { calendar: GOOGLE_CAL.into(), dropped: TODAY, last_instance: Some(date(2026, 9, 9)), until: Some(date(2026, 9, 9)) },
+        );
+        let mut old = note(GCAL_KEY, &["mon", "wed", "fri"]);
+        old.until = Some(date(2026, 12, 4));
+        the_until_card_is_filed_without_a_class_search_key("ended-beside", &file, old, "2026-09-09");
+    }
+
+    /// The `continues` check: a live Google series whose `until` moved earlier than its note's,
+    /// beside an open class-search row with the same meeting times. The row does not count as the
+    /// class continuing, so the `until` card is still filed. Green with C2a's `live` filter.
+    #[test]
+    fn a_class_search_row_does_not_continue_a_google_note_whose_until_moved_earlier() {
+        let mut g = google(GCAL_KEY, 50);
+        g.until = Some(date(2026, 9, 30));
+        g.rule.until = g.until;
+        let file = file_of(vec![cs100(CS_KEY, CS_CAL), g]);
+        let mut old = note(GCAL_KEY, &["mon", "wed", "fri"]);
+        old.until = Some(date(2026, 12, 4));
+        the_until_card_is_filed_without_a_class_search_key("continues-beside", &file, old, "2026-09-30");
+    }
+
     // ---- body ----
 
     /// A note made from a class-search key says where it was found, and the registrar's and

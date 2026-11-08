@@ -9,7 +9,7 @@ use std::path::Path;
 use jiff::civil::{Date, Time};
 use serde_json::{json, Value};
 
-use crate::commitments::{Meet, Rule, Series, SeriesFile};
+use crate::commitments::{Meet, Rule, Series, SeriesFile, CLASS_SEARCH_PREFIX};
 use crate::weekcal::DayKey;
 
 /// A school whose registrar Knowlu reads. Adding one is a code change (parent §10).
@@ -414,8 +414,9 @@ pub fn parse_class_search(json: &Value, school_key: &str, want: &SectionRef, tod
 /// `NoTime` stays for a row with no day or time at all. A row of unknown-type meetings only is
 /// `PartRead` too, and so is a row with no course reference number.
 ///
-/// The series' `source_uid` is `classsearch:<school>:<term>-<crn>`. **Provisional**: C2a owns the
-/// class-search source row and may change it; its calendar key follows the same prefix.
+/// The series' `source_uid` is `classsearch:<school>:<term>-<crn>`, under calendar
+/// `classsearch:<school>:<term>`: the prefix is [`crate::commitments::CLASS_SEARCH_PREFIX`], the
+/// class-search source row's (replan C2a).
 pub fn parse_class_search_with(json: &Value, school: &str, _registered: &[&str], want: &SectionRef, today: &str) -> Result<ClassSearchRead, String> {
     let today = Date::strptime("%Y-%m-%d", today).map_err(|_| format!("today is not a YYYY-MM-DD date: {today}"))?;
     let rows = json.get("data").and_then(Value::as_array).ok_or("not a list of class-search rows")?;
@@ -480,8 +481,8 @@ pub fn parse_class_search_with(json: &Value, school: &str, _registered: &[&str],
     out.state = SectionState::Found;
     out.linked = row.get("isSectionLinked").and_then(Value::as_bool) == Some(true);
     out.series = Some(Series {
-        source_uid: format!("classsearch:{school}:{}-{crn}", want.term),
-        calendar: format!("classsearch:{school}:{}", want.term),
+        source_uid: format!("{CLASS_SEARCH_PREFIX}{school}:{}-{crn}", want.term),
+        calendar: format!("{CLASS_SEARCH_PREFIX}{school}:{}", want.term),
         title: if lab { format!("{name} Lab") } else { name },
         where_: m.place,
         event_type: Some(EVENT_TYPE.to_string()),
