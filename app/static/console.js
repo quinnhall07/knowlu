@@ -89,7 +89,7 @@
     // destroyed if the order were the other way round.
     parts.push('<span id="gauge" class="gauge"></span>');
     parts.push("<span>" + h(t.active) + " active</span>");
-    parts.push("<span>" + (t.generated_at ? "generated " + h(t.generated_at) + " by " + h(t.generated_by) : "no run recorded") + "</span>");
+    parts.push("<span>" + (t.generated_at ? "generated " + h(stampOf(t.generated_at)) + " by " + h(t.generated_by) : "no run recorded") + "</span>");
     // Plan 4a Task 7: one of the panel's two ways in (the other is the tray). Last, so the
     // gear sits at the end of the line and never moves as the facts before it change width.
     parts.push('<button class="b" type="button" data-settings title="Settings">&#9881;</button>');
@@ -148,7 +148,7 @@
     // Task 13: small editable metadata chips — click-to-edit, never the descriptive text above
     // (which is a computed sentence, not a raw field the engine will accept back).
     chips += editChip("ed", "course", r.course, h(r.course || "—"), ' title="course"');
-    chips += editChip("ed", "due", r.due, h(r.due ? r.due.replace("T", " ") : "no due date"), ' title="due"');
+    chips += editChip("ed", "due", r.due, h(r.due ? stampOf(r.due) : "no due date"), ' title="due"');
     chips += editChip("ed", "importance", r.importance, "P" + h(r.importance), ' title="importance 1–5"');
     chips += editChip("ed", "status", r.status, h(r.status), ' title="status"');
     if (r.oversized) { chips += '<span class="os">' + h(fmtH(r.hours)) + " in one piece</span>"; }
@@ -269,7 +269,7 @@
     }).join("");
     EL("theday").innerHTML = d.blocks.map(function (b) {
       var takes = b.takes.map(function (t) { return '<span class="sl"><span>' + h(t.title) + "</span><span>" + h(fmtH(t.hours)) + (t.of_hours - t.hours > 0.005 ? " of " + h(fmtH(t.of_hours)) : "") + "</span></span>"; }).join("");
-      return '<div class="blk ' + h(b.kind) + '"><span class="t">' + h(b.start) + "–" + h(b.end) + '</span><span class="w">' + h(b.label) + '</span><span class="h">' + h(fmtH(b.hours)) + "</span>" + takes + "</div>";
+      return '<div class="blk ' + h(b.kind) + '"><span class="t">' + h(clockRange(b.start, b.end)) + '</span><span class="w">' + h(b.label) + '</span><span class="h">' + h(fmtH(b.hours)) + "</span>" + takes + "</div>";
     }).join("") + (d.empty_text ? '<div class="empty">' + h(d.empty_text) + "</div>" : "");
     EL("commitments").innerHTML = d.commitments.map(function (c) { return '<div class="commit"><span>' + h(c.name) + " · recurring</span><span>" + h(fmtH(c.hours)) + "</span></div>"; }).join("");
   }
@@ -393,7 +393,7 @@
   function renderClosed(state) {
     var c = state.closed_this_week;
     EL("closed-n").textContent = c.length;
-    EL("closed").innerHTML = c.length ? c.map(function (x) { var k = x.mark === "me" ? "me" : x.mark === "agent" ? "ag" : "lp"; return '<div class="ln' + (x.undo && x.id ? " undo" : "") + '"><span class="k ' + k + '">' + h(x.mark === "me" ? "you" : x.mark) + "</span><span>" + h(x.title) + '</span><span class="rt">' + h(x.when.slice(11)) + "</span>" + (x.undo && x.id ? '<button class="b" type="button" data-undo-close="' + h(x.id) + '">Undo</button>' : "") + "</div>"; }).join("") : '<div class="empty">' + h(state.texts.closed) + "</div>";
+    EL("closed").innerHTML = c.length ? c.map(function (x) { var k = x.mark === "me" ? "me" : x.mark === "agent" ? "ag" : "lp"; return '<div class="ln' + (x.undo && x.id ? " undo" : "") + '"><span class="k ' + k + '">' + h(x.mark === "me" ? "you" : x.mark) + "</span><span>" + h(x.title) + '</span><span class="rt">' + h(timeOf(x.when)) + "</span>" + (x.undo && x.id ? '<button class="b" type="button" data-undo-close="' + h(x.id) + '">Undo</button>' : "") + "</div>"; }).join("") : '<div class="empty">' + h(state.texts.closed) + "</div>";
   }
 
   /// O1 T7b: Undo on a close the engine marked `undo`. It is the student's own `set` back to active
@@ -419,7 +419,7 @@
     // `u.held` is a bundle the RUN is holding back (R-P4a-24): downloaded, verified, and
     // deliberately not offered until the slot ends. Saying "up to date" there would be a lie about
     // a file already sitting on this machine — so it gets its own words, and the offer stays away.
-    var when = localHM(u.last_check) ? ", checked " + localHM(u.last_check) : "";
+    var when = timeOf(u.last_check) ? ", checked " + timeOf(u.last_check) : "";
     var what = u.staged ? " — " + u.staged + " ready"
       : u.held ? " — " + u.held + " staged; installs after the run"
       : u.last_error ? " — " + u.last_error.split("\n")[0]
@@ -451,12 +451,35 @@
   // and how many times a check that lost the single flight has asked again, on one shared `timer`.
   var UPD = { installing: false, attempted: false, note: false, retries: 0, timer: null };
   var ALREADY_CHECKING = "a check is already running";
-  /// A local HH:MM from an ISO stamp (the engine and the updater write UTC, `...Z`); "" if unparseable.
-  function localHM(iso) {
-    var d = new Date(iso);
-    if (!iso || isNaN(d.getTime())) { return ""; }
-    return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+  // The 12-hour clock (twelve-hour-clock plan §1): minutes only when non-zero; a range's end always
+  // carries am/pm and its start only across noon. Display only: the data stays "HH:MM" and ISO.
+  /// "13:05" -> "1:05pm"; `meridiem` false drops the suffix.
+  function clock12(hhmm, meridiem) {
+    var m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm == null ? "" : hhmm));
+    if (!m) { return String(hhmm == null ? "" : hhmm); }
+    var hr = Number(m[1]), mi = m[2];
+    return (hr % 12 === 0 ? 12 : hr % 12) + (mi === "00" ? "" : ":" + mi) + (meridiem === false ? "" : hr < 12 ? "am" : "pm");
   }
+  /// ("10:00", "15:00") -> "10am–3pm" (U+2013).
+  function clockRange(a, b) {
+    var side = function (x) { return Number(String(x).slice(0, 2)) < 12; };
+    return clock12(a, side(a) !== side(b)) + "–" + clock12(b, true);
+  }
+  /// A date-and-time stamp with its date as shown today and a 12-hour clock; anything else comes back
+  /// unchanged (`clockOnly` gives just the clock, and "" for anything unparseable). A stamp with Z or an
+  /// offset is shown in the machine's zone; a naive one is read as written and never shifted.
+  function stampOf(stamp, clockOnly) {
+    var date = "", hhmm = "", n = typeof stamp === "string" ? /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?$/.exec(stamp) : null;
+    if (n) { date = n[1]; hhmm = n[2]; }
+    else if (typeof stamp === "string" && /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}.*(?:Z|[+-]\d{2}:?\d{2})$/.test(stamp) && !isNaN(new Date(stamp).getTime())) {
+      var d = new Date(stamp), p = function (x) { return ("0" + x).slice(-2); };
+      date = d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()); hhmm = p(d.getHours()) + ":" + p(d.getMinutes());
+    }
+    if (!hhmm) { return clockOnly || stamp == null ? "" : stamp; }
+    return clockOnly ? clock12(hhmm, true) : date + " " + clock12(hhmm, true);
+  }
+  /// The clock of a stamp ("9:05am"); "" if empty or unparseable.
+  function timeOf(stamp) { return stampOf(stamp, true); }
   /// A calm toast: what happened, when nothing went wrong. Errors keep `showRefusal`.
   function showNote(message) {
     var n = document.createElement("div"); n.className = "notetoast"; n.textContent = message;
@@ -471,7 +494,7 @@
     if (u.error) { return u.error === ALREADY_CHECKING ? (retrying ? "a check is already running — the result will show here" : "a check is already running — try again shortly") : "could not check — " + String(u.error).split("\n")[0]; }
     if (u.staged) { return u.staged + " is available"; }
     if (u.held) { return u.held + " is staged; installs after the run"; }
-    return "up to date (checked " + (localHM(u.last_check) || localHM(new Date().toISOString())) + ")";
+    return "up to date (checked " + (timeOf(u.last_check) || timeOf(new Date().toISOString())) + ")";
   }
   /// `manual` is the Updates row's button: it says "checking…" and then the outcome. The quiet form
   /// (launch, and the retry below) only fills the row if the panel is open. Either way a staged
@@ -585,7 +608,7 @@
       if (!ok) { return; }
       var s = (env.state && env.state.topline && env.state.topline.sync) || {};
       if (s.skipped) { showNote(syncSays(s.skipped, "calm", "sync skipped — ")[1]); }
-      else { showNote("synced " + (localHM(s.at) || localHM(new Date().toISOString()))); }
+      else { showNote("synced " + (timeOf(s.at) || timeOf(new Date().toISOString()))); }
     }).catch(function (err) {
       setSyncBusy(false);
       showRefusal(null, "sync could not start — " + reasonOf(err));
@@ -607,7 +630,7 @@
     else if (s.at) { bits.push('<span class="calm">in step with your account</span>'); }
     else { bits.push('<span class="calm">not synced yet</span>'); }
     // `at` is stamped on every run, so a skip or an error says "tried", never "synced".
-    if (s.at && localHM(s.at)) { bits.push('<span class="calm">' + (s.last_error || s.skipped ? "tried " : "synced ") + localHM(s.at) + "</span>"); }
+    if (s.at && timeOf(s.at)) { bits.push('<span class="calm">' + (s.last_error || s.skipped ? "tried " : "synced ") + timeOf(s.at) + "</span>"); }
     if (b.last_error) { bits.push('<span class="amber">backup: ' + h(b.last_error.split("\n")[0]) + "</span>"); }
     else if (b.behind_days != null && b.behind_days >= 1) { bits.push('<span class="amber">backup ' + b.behind_days + " day" + (b.behind_days === 1 ? "" : "s") + " behind</span>"); }
     else if (b.last_ok) { bits.push('<span class="calm">backed up</span>'); }
@@ -619,7 +642,7 @@
       // neither) — then there is no time to show, and the old code rendered "last slot  ok" with a
       // hole in it. And a REFUSED slot is not a failed one: the engine was never invoked, so it
       // says refused and says why (final fix wave, C5 — `RunSummary.reason`, filled by B6).
-      var when = (t.last_slot.ended || t.last_slot.started || "").slice(11, 16);
+      var when = timeOf(t.last_slot.ended || t.last_slot.started || "");
       var why = t.last_slot.reason;
       var tries = t.last_slot.attempts || 0;
       var body = "last slot" + (when ? " " + when : "") + (why ? " refused — " + why : (t.last_slot.ok ? " ok" : " failed")) + (tries > 1 ? " (attempt " + tries + ")" : "");
@@ -636,11 +659,11 @@
     var p = state.runs_panel, html = "";
     html += p.expected.map(function (e) {
       var k = e.status === "seen" ? "gd" : e.status === "late" ? "wn" : "ms";
-      return '<div class="ln run"><span class="k ' + k + '">' + h(e.status) + '</span><span>' + h(e.runner) + '</span><span class="rt">' + h(e.due) + "</span></div>";
+      return '<div class="ln run"><span class="k ' + k + '">' + h(e.status) + '</span><span>' + h(e.runner) + '</span><span class="rt">' + h(stampOf(e.due)) + "</span></div>";
     }).join("");
     html += p.recent.map(function (r) {
       var k = r.result === "ok" ? "gd" : r.result === "running" ? "lp" : r.result === "WARN" ? "wn" : "ms";
-      return '<div class="ln run"><span class="k ' + k + '">' + h(r.result.toLowerCase()) + '</span><span>' + h(r.runner) + " " + h((r.ended || r.started || "").slice(0, 16)) + '</span><span class="rt">' + h(r.run_id) + '</span><pre class="summary">' + h(r.summary) + "</pre></div>";
+      return '<div class="ln run"><span class="k ' + k + '">' + h(r.result.toLowerCase()) + '</span><span>' + h(r.runner) + " " + h(stampOf(r.ended || r.started || "")) + '</span><span class="rt">' + h(r.run_id) + '</span><pre class="summary">' + h(r.summary) + "</pre></div>";
     }).join("");
     var warns = (p.warnings || []).concat(state.warnings || []);
     if (warns.length) { html += '<div class="warnings">' + warns.map(function (w) { return "<div>" + h(w) + "</div>"; }).join("") + "</div>"; }
@@ -672,7 +695,7 @@
         var changes = "";
         if (c.changes && typeof c.changes === "object" && !Array.isArray(c.changes)) {
           changes = '<div class="changes">' + Object.keys(c.changes).map(function (k) {
-            var v = c.changes[k]; return '<span class="k lp">' + h(k) + "</span> → " + h(typeof v === "object" ? JSON.stringify(v) : String(v));
+            var v = c.changes[k]; return '<span class="k lp">' + h(k) + "</span> → " + (k === "due" && v && typeof v === "object" ? h(stampOf(v["from"])) + " → " + h(stampOf(v.to)) : h(typeof v === "object" ? JSON.stringify(v) : String(v)));
           }).join(" · ") + "</div>";
         }
         var meta = [c.kind, c.age_days + "d old"];
@@ -1054,7 +1077,7 @@
 
   function regMeets(list) {
     return list.map(function (m) {
-      return m.days.map(function (d) { return d.charAt(0).toUpperCase() + d.slice(1, 3); }).join("/") + " " + m.start + "–" + m.end;
+      return m.days.map(function (d) { return d.charAt(0).toUpperCase() + d.slice(1, 3); }).join("/") + " " + clockRange(m.start, m.end);
     }).join(", ");
   }
 
@@ -1283,8 +1306,8 @@
   function renderRuns(state) {
     var r = state.runs_panel, html = "";
     EL("runs-n").textContent = r.warn_count ? r.warn_count + " warn" : "ok";
-    r.expected.forEach(function (e) { if (e.status !== "seen") { html += '<div class="ln run"><span class="k ' + (e.status === "late" ? "wn" : "ms") + '">' + h(e.status) + '</span><span class="rt">' + h(e.due.slice(11, 16)) + "</span><span>" + h(e.runner) + " — expected " + h(e.due) + "</span></div>"; } });
-    r.recent.slice(0, 6).forEach(function (x) { var k = x.result === "ok" ? "gd" : x.result === "WARN" ? "wn" : "ms"; html += '<div class="ln run"><span class="k ' + k + '">' + h(x.result.toLowerCase()) + '</span><span class="rt">' + h((x.ended || x.started || "").slice(11)) + "</span><span>" + h(x.runner) + " — " + h(x.summary) + "</span></div>"; });
+    r.expected.forEach(function (e) { if (e.status !== "seen") { html += '<div class="ln run"><span class="k ' + (e.status === "late" ? "wn" : "ms") + '">' + h(e.status) + '</span><span class="rt">' + h(timeOf(e.due)) + "</span><span>" + h(e.runner) + " — expected " + h(stampOf(e.due)) + "</span></div>"; } });
+    r.recent.slice(0, 6).forEach(function (x) { var k = x.result === "ok" ? "gd" : x.result === "WARN" ? "wn" : "ms"; html += '<div class="ln run"><span class="k ' + k + '">' + h(x.result.toLowerCase()) + '</span><span class="rt">' + h(timeOf(x.ended || x.started || "")) + "</span><span>" + h(x.runner) + " — " + h(x.summary) + "</span></div>"; });
     if (r.empty_text) { html += '<div class="empty">' + h(r.empty_text) + "</div>"; }
     EL("runs").innerHTML = html;
   }
@@ -1656,7 +1679,7 @@
         var attrs = EDITABLE.indexOf(k) !== -1 ? ' data-field="' + h(k) + '"' : (DRAWER_RO[k] ? ' class="ro" readonly' : "");
         dl += "<dt>" + h(k) + "</dt><dd" + attrs + ">" + h(val) + "</dd>";
       });
-      var hist = (n.history || []).map(function (r) { return "<div>" + h(r.ts.slice(0, 16).replace("T", " ")) + " · " + h(r.text) + "</div>"; }).join("") || "<div>no journal history</div>";
+      var hist = (n.history || []).map(function (r) { return "<div>" + h(stampOf(r.ts)) + " · " + h(r.text) + "</div>"; }).join("") || "<div>no journal history</div>";
       clearStaleEditing(d);
       d.innerHTML = '<button class="close">&times;</button><h2>' + h(title) + '</h2><dl data-id="' + h(id) + '" data-kind="' + h(n.folder) + '">' + dl + "</dl>" + bodyViewHtml(n) +
         '<button class="b crit" data-del="' + h(id) + '" data-title="' + h(title) + '">Delete&hellip;</button>' +
@@ -2800,12 +2823,12 @@
   function maRow(x, kind) {
     var i = MA.rows.push({ kind: kind, row: x }) - 1, main, from = "";
     if (kind === "changed") {
-      main = h(x.title) + " · " + h(x.field) + ": " + h(x.old == null ? "none" : x.old) + " → " + h(x.new == null ? "none" : x.new);
+      main = h(x.title) + " · " + h(x.field) + ": " + h(x.old == null ? "none" : x.field === "due" ? stampOf(x.old) : x.old) + " → " + h(x.new == null ? "none" : x.field === "due" ? stampOf(x.new) : x.new);
       from = [x.sender ? h(x.sender) : "", x.date ? h(x.date) : ""].filter(function (t) { return t; }).join(" · ");
     } else if (kind === "notice") {
-      main = h(x.title) + (x.opened_at ? " · " + h(x.opened_at) : "");
+      main = h(x.title) + (x.opened_at ? " · " + h(stampOf(x.opened_at)) : "");
     } else {
-      main = h(x.title) + (x.due ? " · due " + h(x.due) : "");
+      main = h(x.title) + (x.due ? " · due " + h(stampOf(x.due)) : "");
     }
     return '<div class="ma-row"><span class="ma-main">' + main + "</span>" + (from ? '<span class="ma-from">' + from + "</span>" : "") +
       (x.changed_since ? '<span class="ma-since">changed since</span>' : '<button class="b" data-ma-undo="' + i + '">Undo</button>') + "</div>";

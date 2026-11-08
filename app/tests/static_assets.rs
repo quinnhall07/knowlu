@@ -2829,9 +2829,9 @@ fn sync_now_says_what_happened() {
 #[test]
 fn the_sync_line_shows_the_last_sync_time_and_survives_a_repaint_mid_sync() {
     let js = read("console.js");
-    assert!(js.contains("function localHM("), "one local HH:MM formatter");
+    assert!(js.contains("function timeOf("), "one local 12-hour clock formatter");
     let line = js_fn(&js, "function renderSyncLine(");
-    assert!(line.contains("localHM(s.at)"), "the status's `at` is shown as a local time");
+    assert!(line.contains("timeOf(s.at)"), "the status's `at` is shown as a local time");
     assert!(line.contains("synced ") && line.contains("tried "), "ok says synced, a skip or error says tried");
     assert!(line.contains("syncing ? \" disabled\"") && line.contains("syncing…"), "a repaint during a sync keeps the busy button");
     assert!(read("console.css").contains(".notetoast"), "the calm toast is styled");
@@ -2847,7 +2847,7 @@ fn check_now_renders_every_outcome_in_the_updates_row() {
     assert!(chk.contains("could not check — "), "a rejected call says why");
     let out = js_fn(&js, "function updateOutcome(");
     assert!(out.contains("up to date (checked ") && out.contains(" is available") && out.contains("u.error"), "up to date, available, error");
-    assert!(out.contains("localHM("), "the check time is local HH:MM");
+    assert!(out.contains("timeOf("), "the check time is a local 12-hour clock");
     assert!(chk.contains("renderUpdateOffer(u, "), "the banner is raised by the same path as at startup");
     // The housekeeping thread and the startup check share one flight; the loser used to say
     // nothing and never asked again.
@@ -2861,7 +2861,7 @@ fn check_now_renders_every_outcome_in_the_updates_row() {
     assert!(chk.contains("renderUpdateOffer(u, manual !== true)"), "a quiet check is told it is quiet");
     let offer = js_fn(&js, "function renderUpdateOffer(");
     assert!(offer.contains("quiet && UPD.note"), "a quiet check never repaints a banner that shows an install message");
-    assert!(offer.contains("localHM(u.last_check)"), "the settings line shows the check time as local HH:MM");
+    assert!(offer.contains("timeOf(u.last_check)"), "the settings line shows the check time as a local 12-hour clock");
 }
 
 /// Founder report: *Restart to update* needed two presses. The first was refused (a slot running
