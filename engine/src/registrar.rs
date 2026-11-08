@@ -23,10 +23,19 @@ pub struct School {
     pub registered: &'static [&'static str],
     /// What the school calls its registrar, in the report's `unread` reasons (A2 item 11).
     pub label: &'static str,
+    /// How this school's LMS course names carry a section (replan §6.3).
+    pub name_shape: NameShape,
+}
+
+/// How a school's LMS names a course section. A new school's naming is one new variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameShape {
+    /// `209940-XYZ-100-001`: term, subject, number, section, dash-separated.
+    TermSubjectNumberSection,
 }
 
 /// UA only before the pilot (Quinn, 2026-09-23).
-pub const SCHOOLS: [School; 1] = [School { key: "ua", terms: &[(1, "10"), (6, "40")], registered: &[], label: "myBama" }];
+pub const SCHOOLS: [School; 1] = [School { key: "ua", terms: &[(1, "10"), (6, "40")], registered: &[], label: "myBama", name_shape: NameShape::TermSubjectNumberSection }];
 
 /// Every registrar calendar key, and every registrar `source_uid`, starts with this.
 pub const CALENDAR_PREFIX: &str = "registrar:";
@@ -291,6 +300,66 @@ pub fn parse_banner_with(json: &Value, school: &str, registered: &[&str]) -> Res
     }
     out.series.sort_by(|a, b| a.source_uid.cmp(&b.source_uid));
     Ok(out)
+}
+
+/// The section a course name points at (replan §6.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionRef {
+    pub term: String,
+    pub subject: String,
+    pub number: String,
+    pub section: String,
+}
+
+/// §6.3: the section a course name carries, or `None`. Never a guess.
+pub fn section_in_name(_name: &str, _shape: NameShape) -> Option<SectionRef> {
+    todo!("C1: section_in_name")
+}
+
+/// §6.4's states a class-search read can end in. The states that never reach a parse
+/// (`other_term`, `no_fit`, `fetch_failed`, `paused`, `closed`) belong to the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionState {
+    /// One row matched and was read whole.
+    Found,
+    /// One row matched and lists no day or time.
+    NoTime,
+    /// One row matched but a meeting could not be read (or crossed midnight).
+    PartRead,
+    /// The answer holds no row for this section.
+    NotFound,
+    /// Two or more rows match the section.
+    Ambiguous,
+}
+
+/// What [`parse_class_search`] read for one wanted section.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassSearchRead {
+    pub state: SectionState,
+    /// `Some` only for `Found`: the one series, `classsearch:<school>:<term>-<crn>`.
+    pub series: Option<Series>,
+    /// `Found` only: the row's `isSectionLinked` was true (§6.4).
+    pub linked: bool,
+    /// Rows whose term, subject or number differ from the query's, dropped.
+    pub dropped: usize,
+    /// `EXAM` meetings seen on the matched row.
+    pub exam: usize,
+    /// Matched rows dropped for a meeting across midnight.
+    pub midnight: usize,
+    pub warnings: Vec<String>,
+}
+
+/// Class search's answer (`{success, totalCount, data: [...]}`) → the state of `want`.
+/// `Err` only when the answer has no `data` list; an empty list is `NotFound`.
+pub fn parse_class_search(json: &Value, school_key: &str, want: &SectionRef) -> Result<ClassSearchRead, String> {
+    let registered = school(school_key).map_or(&[][..], |s| s.registered);
+    parse_class_search_with(json, school_key, registered, want)
+}
+
+/// [`parse_class_search`] with the school's registered set given. Class-search rows carry no
+/// `statusIndicator`, so a non-empty set must not drop them.
+pub fn parse_class_search_with(_json: &Value, _school: &str, _registered: &[&str], _want: &SectionRef) -> Result<ClassSearchRead, String> {
+    todo!("C1: parse_class_search")
 }
 
 /// What `commitments --registrar` did (spec §3's output).
@@ -1477,3 +1546,5 @@ mod end_tests;
 mod kept_tests;
 #[cfg(test)]
 mod block_tests;
+#[cfg(test)]
+mod class_search_tests;
