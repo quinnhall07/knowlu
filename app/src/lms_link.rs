@@ -895,3 +895,25 @@ pub fn validate_only(_kind: &str, _url: &str, _fetch: &dyn Fn(&str) -> Result<St
 /// The capture over [`validate_only`] and today's fetch; `school.capture` calls this, never
 /// `capture_calendar_link`. **F1 stub.**
 pub fn capture_link_only(_app: &tauri::AppHandle, _unitid: &str) -> Value { todo!("F8la: capture_link_only") }
+
+// ---- C8: the LMS sign-in link (replan §7.1). Stubs; the tests are `app/tests/lms_sign_in.rs`. ----
+
+/// Why the public login page could not be read: a transport failure or a 5xx. A page that is read
+/// but holds no usable link is `Ok(None)`, never this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginPageError {
+    Unreachable,
+}
+
+/// **§7.1's rules**, pure. The one distinct sign-in link in `html`, as an absolute `https` URL on
+/// exactly `lms_host` whose path starts with `prefix`; `None` for none, for two distinct, and for any
+/// refused shape (another host, a look-alike suffix, `//host`, userinfo, a backslash, `http`).
+pub fn sign_in_link(_html: &str, _lms_host: &str, _prefix: &str) -> Option<String> { todo!("C8: sign_in_link") }
+
+/// One anonymous GET of `<origin>/` (no cookie), following at most 3 redirects and only while they stay
+/// on `origin`'s own host and port, then [`sign_in_link`]. `origin` is `https://<lms_host>` in
+/// production and `http://127.0.0.1:<port>` in tests; `lms_host` is what a link must name.
+/// `Ok(None)`: no usable link, or a 4th hop, or a hop to another host. `Err`: transport failure or 5xx.
+pub fn fetch_sign_in_link(_origin: &str, _lms_host: &str, _prefix: &str) -> Result<Option<String>, LoginPageError> {
+    todo!("C8: fetch_sign_in_link")
+}

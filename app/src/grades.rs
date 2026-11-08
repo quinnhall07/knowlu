@@ -821,3 +821,55 @@ pub fn grades_forget(app: tauri::AppHandle, cs: State<'_, ConsoleState>) -> Valu
         }
     })
 }
+
+// ---- C8: the link and the deadline's test (replan §7.2, §7.4). Stubs; tests: `app/tests/lms_sign_in.rs`. ----
+
+/// What the last `users/me` poll said, before the deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastRead {
+    /// Never polled (the window was not on the LMS host at any poll).
+    Empty,
+    /// Polled, no HTTP answer (transport failure, or a body that was not JSON).
+    Transport,
+    /// Polled, answered with this status.
+    Status(u16),
+}
+
+/// **§7.4's table, pure**: the outcome at the deadline, from where the window is *now* and the last
+/// poll. Not on the LMS host: `SignedOut`, whatever `last` holds. On it: 401 or 403 is `SignedOut`,
+/// anything else `Unreachable`.
+pub fn hidden_outcome(_on_host_now: bool, _last: LastRead) -> CaptureError { todo!("C8: hidden_outcome") }
+
+/// The URL a hidden window starts at: the sign-in link when the row has a prefix and the public page
+/// yields one, `<origin>/ultra/` when there is no prefix or the link is `None`, and `Unreachable`
+/// when the page cannot be fetched. No prefix means no GET at all. `origin` is `https://<host>`.
+pub fn hidden_start_url(_origin: &str, _lms_host: &str, _prefix: Option<&str>) -> Result<String, CaptureError> {
+    todo!("C8: hidden_start_url")
+}
+
+/// [`open_hidden`] over an injected `open(url)`: the window is opened only after [`hidden_start_url`]
+/// answered, so `Unreachable` opens none.
+pub fn open_hidden_with(
+    _origin: &str,
+    _lms_host: &str,
+    _prefix: Option<&str>,
+    _open: impl FnOnce(&str) -> Result<(), CaptureError>,
+) -> Result<(), CaptureError> {
+    todo!("C8: open_hidden_with")
+}
+
+/// [`read_hidden`]'s loop over injected effects, and without destroying the window (the wrapper does).
+/// `window_url` is the window's current URL; `users_me` is the `users/me` read (`Ok(user)` on 200,
+/// else `Err(status)`, `None` for no answer); `capture` turns that user into the bundle; `now` is the
+/// clock as time since the read began; `pause` is the wait between polls. Polls until `users/me`
+/// answers 200 or `now() >= SETTLE`, then [`hidden_outcome`] on the window's URL at that moment.
+pub fn read_hidden_with(
+    _host: &str,
+    _window_url: impl FnMut() -> Option<String>,
+    _users_me: impl FnMut() -> Result<Value, Option<u16>>,
+    _capture: impl FnOnce(&Value) -> Result<Value, CaptureError>,
+    _now: impl FnMut() -> Duration,
+    _pause: impl FnMut(),
+) -> Result<Value, CaptureError> {
+    todo!("C8: read_hidden_with")
+}
