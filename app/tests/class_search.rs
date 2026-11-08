@@ -461,10 +461,26 @@ fn a_course_is_paged_by_total_count_and_the_pages_read_as_one_answer() {
 fn paging_stops_at_three_pages_and_a_course_with_unread_rows_is_fetch_failed() {
     let clock = fresh();
     let fake = Fake::start(clock.clone(), Duration::ZERO, banner(|subject, _| if subject == "C00" { 400 } else { 2 }));
-    let b = run(&fake, &clock, &courses(2));
+    // C00's wanted section, 300, sits past the 150 rows the three pages read.
+    let b = run(&fake, &clock, &[want("C00", "100", "300"), want("C01", "100", "001")]);
     assert_eq!(statuses(&b), [Status::FetchFailed, Status::Answered]);
     let offsets: Vec<String> = fake.requests().iter().filter(|r| r.method == "GET").map(|r| r.arg("pageOffset")).collect();
     assert_eq!(offsets, ["0", "50", "100", "0"], "three pages for the long course, one for the next");
+    let partial: Value = serde_json::from_str(&b.queries[0].body).unwrap();
+    assert_eq!(partial["data"].as_array().unwrap().len(), 150, "the partial read is kept");
+}
+
+#[test]
+fn a_long_course_whose_wanted_sections_were_all_on_the_pages_read_is_answered() {
+    let clock = fresh();
+    let fake = Fake::start(clock.clone(), Duration::ZERO, banner(|_, _| 400));
+    // 001 is on the first page and 150 on the third: every wanted section was read, though 250 rows were not.
+    let b = run(&fake, &clock, &[want("XYZ", "100", "001"), want("XYZ", "100", "150")]);
+    assert_eq!(statuses(&b), [Status::Answered]);
+    let offsets: Vec<String> = fake.requests().iter().filter(|r| r.method == "GET").map(|r| r.arg("pageOffset")).collect();
+    assert_eq!(offsets, ["0", "50", "100"]);
+    let merged: Value = serde_json::from_str(&b.queries[0].body).unwrap();
+    assert_eq!(merged["data"].as_array().unwrap().len(), 150);
 }
 
 // ---- the query type, the bundle, the source's promises ---------------------------------------
