@@ -500,10 +500,6 @@ impl Queue {
     /// [`Queue::start`] over a clock the retry timer reads (F8d2): a test moves its own by hand.
     pub fn start_with_clock(deps: Deps, mut state: OnboardingState, clock: Arc<dyn RetryClock>) -> Queue {
         let mut order = Vec::new();
-        // A waiting or running record of a job this build no longer has (a retired job in a file an older
-        // build wrote) is dropped: it would otherwise run off the lane with no inputs. A finished one
-        // (`done`, `failed`, `skipped`) is inert, and the finish gate still reads it.
-        state.jobs.retain(|name, r| !matches!(r.state, JobState::Pending | JobState::Held | JobState::Running) || name.starts_with(INDICATOR_PREFIX) || JOB_ORDER.contains(&name.as_str()));
         for (name, r) in state.jobs.iter_mut() {
             if r.state == JobState::Running {
                 r.crashes = r.crashes.saturating_add(1);
@@ -1795,7 +1791,7 @@ mod order_tests {
     }
 
     #[test]
-    fn no_config_job_runs_without_a_readable_answers_file_and_both_run_once_it_is_saved() {
+    fn config_ingest_does_not_run_without_a_readable_answers_file_and_runs_once_it_is_saved() {
         let mut s = state(true);
         s.jobs.insert("school.courses".into(), done_rec()); // config.ingest has its input
         s.jobs.insert("school.apply".into(), done_rec());
