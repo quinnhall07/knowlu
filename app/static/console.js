@@ -462,7 +462,7 @@
   }
   /// ("10:00", "15:00") -> "10am–3pm" (U+2013).
   function clockRange(a, b) {
-    var side = function (x) { return Number(String(x).slice(0, 2)) < 12; };
+    var side = function (x) { var m = /^(\d{1,2}):/.exec(String(x)); return m ? Number(m[1]) < 12 : true; };
     return clock12(a, side(a) !== side(b)) + "–" + clock12(b, true);
   }
   /// A date-and-time stamp with its date as shown today and a 12-hour clock; anything else comes back
@@ -695,7 +695,7 @@
         var changes = "";
         if (c.changes && typeof c.changes === "object" && !Array.isArray(c.changes)) {
           changes = '<div class="changes">' + Object.keys(c.changes).map(function (k) {
-            var v = c.changes[k]; return '<span class="k lp">' + h(k) + "</span> → " + (k === "due" && v && typeof v === "object" ? h(stampOf(v["from"])) + " → " + h(stampOf(v.to)) : h(typeof v === "object" ? JSON.stringify(v) : String(v)));
+            var v = c.changes[k]; return '<span class="k lp">' + h(k) + "</span> → " + (k === "due" && v && typeof v === "object" ? h(v["from"] == null ? "none" : stampOf(v["from"])) + " → " + h(v.to == null ? "none" : stampOf(v.to)) : h(typeof v === "object" ? JSON.stringify(v) : String(v)));
           }).join(" · ") + "</div>";
         }
         var meta = [c.kind, c.age_days + "d old"];

@@ -177,7 +177,7 @@ fn clock_range_matches_the_engines_formatter_table() {
     // The dash is U+2013. The end always carries am/pm; the start only when it is on the other side of noon.
     let rows = [("10:00", "15:00", "10am–3pm"), ("19:00", "21:00", "7–9pm"), ("10:30", "11:15", "10:30–11:15am"),
         ("11:00", "12:00", "11am–12pm"), ("12:00", "13:00", "12–1pm"), ("11:30", "12:15", "11:30am–12:15pm"),
-        ("08:00", "22:00", "8am–10pm"),
+        ("08:00", "22:00", "8am–10pm"), ("9:00", "13:00", "9am–1pm"),
         // the blocks the references carry
         ("08:00", "09:00", "8–9am"), ("10:00", "12:00", "10am–12pm"), ("12:00", "12:50", "12–12:50pm"),
         ("15:00", "18:00", "3–6pm"), ("08:00", "12:00", "8am–12pm"), ("13:00", "13:45", "1–1:45pm"), ("13:45", "18:00", "1:45–6pm"),
@@ -347,7 +347,7 @@ fn assert_scan(state: &Value, known: &[(&str, String)]) {
         // The page repaints an element on every view, so the same fault repeats; say it once.
         for f in clock_faults(&plain(html, &allowed)) { let line = format!("#{id}: {f}"); if !bad.contains(&line) { bad.push(line); } }
     }
-    // Self-check: cutting an allowed string must never eat a known string, or the page text around it.
+    // Self-check: compares the allowed strings with the known strings only (not with the page text).
     for a in &allowed {
         for (id, want) in known {
             assert!(!want.contains(a.as_str()) && !a.contains(want.as_str()), "allowed string `{a}` collides with the known string `{want}` of #{id}");
@@ -390,6 +390,15 @@ fn render_scan_full_reference_and_supplement_show_a_12_hour_clock_everywhere() {
         ("runs-view", "2026-08-27 3pm".into()), ("runs", "3pm".into()), ("runs", "expected 2026-08-27 3pm".into()),
         ("runs-view", "2026-08-27 3:02pm".into()), ("runs", "3:02pm".into()),
     ]);
+}
+
+#[test]
+fn a_due_change_that_fills_an_empty_due_reads_none_for_the_missing_side() {
+    let mut st = full_with_supplement();
+    st["decisions"]["cards"].as_array_mut().unwrap().push(json!({ "id": "appr_clock12_null", "kind": "amend", "age_days": 0,
+        "title": "Null due card", "why": "**Why proposed:** test.", "changes": { "due": { "from": null, "to": "2026-09-25T09:00" } }, "slug": "amend-clock12-null",
+        "target": null, "urgency": null, "expires": null, "snooze_until": null, "source_uid": null, "first_proposed_at": "2026-08-28" }));
+    assert_scan(&st, &[("dec-list", "none → 2026-09-25 9am".into())]);
 }
 
 #[test]
