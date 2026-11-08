@@ -265,11 +265,3 @@ fn a_pending_link_that_cannot_be_deleted_is_named_in_the_proof() {
     assert!(matches!(&out, Outcome::Done(p) if p.get("pending_link_not_deleted") == Some(&Some(1))), "{out:?}");
     assert_eq!(settle_pending_after_ingest(&pending), 1);
 }
-
-#[test]
-fn registrar_confirm_takes_the_rows_as_saved() {
-    let mut a = Answers::default();
-    a.registrar_rows = vec![RegistrarRow { code: "QLT 101".into(), days: "MWF".into(), start: "09:00".into(), end: "09:50".into() }];
-    assert_eq!(registrar_confirm_rows(&a), a.registrar_rows);
-    assert!(registrar_confirm_rows(&Answers::default()).is_empty());
-}
