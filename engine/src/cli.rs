@@ -4255,4 +4255,90 @@ events:\n  - uid: \"ics:evt-1\"\n    summary: \"Career Fair Game Plan\"\n    sta
         }
         let _ = std::fs::remove_dir_all(&vault);
     }
+
+    // ---- C2a: a class-search row never files a card and always covers its course (§6.7, RQ2) ----
+
+    const CS_CAL: &str = "classsearch:ua:202640";
+
+    /// A class-search row for `CS 100` (invented CRN 40001): Mon/Wed/Fri 12:00-12:50, no
+    /// instances (a weekly rule only, as `parse_class_search` emits), open until Dec 11.
+    fn class_search_row(title: &str) -> crate::commitments::Series {
+        use crate::commitments as cm;
+        let t = |h: i8, m: i8| Time::new(h, m, 0, 0).unwrap();
+        let until = Some(Date::constant(2026, 12, 11));
+        cm::Series {
+            source_uid: "classsearch:ua:202640-40001".into(),
+            calendar: CS_CAL.into(),
+            title: title.into(),
+            where_: None,
+            event_type: None,
+            rule: cm::Rule { freq: "WEEKLY".into(), interval: 1, until, count: None },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            instances: Vec::new(),
+            meets: vec![cm::Meet { days: vec!["mon", "wed", "fri"], start: t(12, 0), end: t(12, 50) }],
+            first: Some(Date::constant(2026, 8, 24)),
+            until,
+            last_seen: Some(P16_MONDAY),
+        }
+    }
+
+    /// Stores the row in the series file as a read of `P16_MONDAY` would.
+    fn store_class_search_row(vault: &Path, title: &str) {
+        let row = class_search_row(title);
+        crate::commitments::refresh_series(vault, &[(CS_CAL.to_string(), vec![row])], P16_MONDAY);
+    }
+
+    fn asks(vault: &Path, folder: &str) -> Vec<String> {
+        md_names(&vault.join(folder), "commitment-ask-")
+    }
+
+    /// A class-search `class` row for the course files no `commitment-check` for itself (day 2),
+    /// and covers CS 100, so no `commitment-ask` is filed on day 3 either. Red now: the row is
+    /// no coverage, and the ask is filed on day 3. The check half is a guard: today the row
+    /// classifies as nothing, and it must stay unfiled once it classifies as a class.
+    #[test]
+    fn a_class_search_class_row_files_no_check_and_no_ask_for_its_course() {
+        let vault = p16_vault("c2a-covered");
+        store_class_search_row(&vault, "CS 100");
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        assert!(checks(&vault, "approvals").is_empty(), "day 2: {:?}", checks(&vault, "approvals"));
+        assert!(asks(&vault, "approvals").is_empty(), "day 2 asks nothing");
+        rank_p16(&vault, p16_day(1), Vec::new());
+        assert!(checks(&vault, "approvals").is_empty(), "day 3: no check for a class-search row");
+        assert!(asks(&vault, "approvals").is_empty(), "day 3: the row covers CS 100, so no ask: {:?}", asks(&vault, "approvals"));
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// An ask that stood is withdrawn once a class-search row covers its course; with the row
+    /// gone, the ask files again. Red now: the standing ask is never withdrawn.
+    #[test]
+    fn a_standing_ask_is_withdrawn_by_a_class_search_row_and_files_again_without_it() {
+        let vault = p16_vault("c2a-withdraw");
+        rank_p16(&vault, p16_day(1), Vec::new());
+        assert_eq!(asks(&vault, "approvals").len(), 1, "day 3 asks when nothing covers CS 100");
+        store_class_search_row(&vault, "CS 100");
+        rank_p16(&vault, p16_day(2), Vec::new());
+        assert!(asks(&vault, "approvals").is_empty(), "the row covers CS 100: {:?}", asks(&vault, "approvals"));
+        assert_eq!(asks(&vault, "archive").len(), 1, "the ask is withdrawn into the archive");
+        std::fs::remove_file(vault.join("state").join("calendar-series.json")).unwrap();
+        rank_p16(&vault, p16_day(3), Vec::new());
+        assert_eq!(asks(&vault, "approvals").len(), 1, "with the row gone, the ask files again");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    /// The lab limit, pinned (§6.7): a course whose only class-search row is a `lab` files its ask,
+    /// as a lab-only course does today. A guard, green before and after.
+    #[test]
+    fn a_course_whose_only_class_search_row_is_a_lab_still_files_its_ask() {
+        let vault = p16_vault("c2a-lab");
+        store_class_search_row(&vault, "CS 100 Lab");
+        rank_p16(&vault, P16_MONDAY, Vec::new());
+        assert!(checks(&vault, "approvals").is_empty(), "no check for a class-search lab");
+        rank_p16(&vault, p16_day(1), Vec::new());
+        assert_eq!(asks(&vault, "approvals").len(), 1, "{:?}", asks(&vault, "approvals"));
+        assert!(checks(&vault, "approvals").is_empty());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
 }
