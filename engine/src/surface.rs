@@ -874,7 +874,7 @@ fn amend_card(vault: &Path, a: &PendingAmendment) -> AmendCard {
     let before = target_due.or(stated);
     let (due_move, stale) = match (before, after) {
         (Some(before), Some(after)) => {
-            (Some(crate::render::due_move(before, after)), target_due.is_some() && stated.is_some() && target_due != stated)
+            (Some(card_due_move(before, after)), target_due.is_some() && stated.is_some() && target_due != stated)
         }
         _ => (None, false),
     };
@@ -972,6 +972,13 @@ fn ordinal(n: usize) -> String {
         3 => "third".into(),
         n => format!("{n}th"),
     }
+}
+
+/// The amendment card's due-move: `render::due_move`'s wording on the console's 12-hour clock
+/// (`9am`, `11:59pm`). today.md keeps the 24-hour wrapper (Quinn, 2026-11-07); the wording is
+/// written once, in `render::due_move_with`, and only the clock differs.
+fn card_due_move(before: DateTime, after: DateTime) -> String {
+    crate::render::due_move_with(before, after, |t| crate::clockfmt::clock(t.time(), true))
 }
 
 /// `DateTime` as the console's block times: `"08:00"`, `"12:50"` — always today's, never a full
@@ -1241,7 +1248,7 @@ pub fn coming_up(vault: &Path, today: Date, now: DateTime) -> Vec<ComingUp> {
         .map(|e| ComingUp {
             accepted: accepted.uids.contains(&e.uid),
             provenance: provenance(&accepted, &ledger, &e.uid),
-            when: format!("{} {} {}", WEEKDAYS[e.start.date().weekday().to_monday_zero_offset() as usize], short_date(e.start.date()), hm(e.start)),
+            when: format!("{} {} {}", WEEKDAYS[e.start.date().weekday().to_monday_zero_offset() as usize], short_date(e.start.date()), crate::clockfmt::clock(e.start.time(), true)),
             start: e.start.strftime("%Y-%m-%dT%H:%M").to_string(),
             uid: e.uid,
             title: e.title,
@@ -2772,7 +2779,7 @@ mod tests {
     fn coming_up_is_the_golden_pages_three_events() {
         let now = TODAY.at(9, 0, 0, 0);
         let events = coming_up(Path::new("tests/fixtures/vault-full"), TODAY, now);
-        assert_eq!(events.iter().map(|e| e.when.as_str()).collect::<Vec<_>>(), ["Wed 9/2 16:00", "Fri 9/4 12:00", "Thu 9/10 18:00"]);
+        assert_eq!(events.iter().map(|e| e.when.as_str()).collect::<Vec<_>>(), ["Wed 9/2 4pm", "Fri 9/4 12pm", "Thu 9/10 6pm"]);
         assert_eq!(events[0].title, "Undergraduate Research Symposium");
         assert_eq!(events[0].organizer, "Office of Undergraduate Research");
     }
@@ -4007,13 +4014,33 @@ mod accepted_tests {
         let _ = std::fs::remove_dir_all(&v);
     }
 
+    /// The card's due-move on the console's 12-hour clock (twelve-hour-clock plan, T2): the same
+    /// seven inputs as `render`'s `today_md_due_move_is_pinned_whole_string`, which keeps today.md
+    /// on 24-hour time. The wording is `render::due_move_with`'s; only the clock differs.
+    #[test]
+    fn the_amendment_cards_due_move_is_on_a_12_hour_clock() {
+        let dt = |s: &str| s.parse::<DateTime>().unwrap();
+        let cases = [
+            ("2026-10-09T00:30", "2026-10-08T23:00", "10/9 12:30am → 10/8 11pm (1 day EARLIER)"),
+            ("2026-12-31T23:00", "2027-01-01T01:00", "12/31/2026 11pm → 1/1/2027 1am (1 day later)"),
+            ("2026-10-09T23:59", "2026-10-09T13:00", "10/9 11:59pm → 10/9 1pm (EARLIER same day)"),
+            ("2026-10-09T13:00", "2026-10-09T23:59", "10/9 1pm → 10/9 11:59pm (later same day)"),
+            ("2026-10-09T13:00", "2026-10-09T13:00", "10/9 1pm → 10/9 1pm (no change)"),
+            ("2026-09-25T09:00", "2026-09-22T09:00", "9/25 → 9/22 (3 days EARLIER)"),
+            ("2027-01-05T09:00", "2026-10-05T09:00", "1/5/2027 → 10/5/2026 (92 days EARLIER)"),
+        ];
+        for (before, after, want) in cases {
+            assert_eq!(card_due_move(dt(before), dt(after)), want, "{before} -> {after}");
+        }
+    }
+
     #[test]
     fn accepted_is_absent_from_the_json_when_false() {
         let row = ComingUp {
             uid: "lx:1".into(),
             title: "T".into(),
             start: "2026-09-02T16:00".into(),
-            when: "Wed 9/2 16:00".into(),
+            when: "Wed 9/2 4pm".into(),
             location: String::new(),
             organizer: String::new(),
             accepted: false,
@@ -4354,7 +4381,7 @@ mod carried_tests {
             uid: "lx:1".into(),
             title: "T".into(),
             start: "2026-09-02T16:00".into(),
-            when: "Wed 9/2 16:00".into(),
+            when: "Wed 9/2 4pm".into(),
             location: String::new(),
             organizer: String::new(),
             accepted: false,
