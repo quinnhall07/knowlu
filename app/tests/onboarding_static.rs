@@ -1491,6 +1491,85 @@ fn the_page_sums_nothing_for_the_strip_and_the_strip_is_pinned_to_the_pane_botto
     assert!(css.contains("ob-week") && (css.contains("sticky") || css.contains("position: absolute") || css.contains("position: fixed")), "the strip is pinned to the bottom of the step pane");
 }
 
+// ---- C7: the week strip's turned-in note (replan C7, amends plan section 14.58.5) ----------------
+//
+// Helper contract C7 fixes, for console-ui: `weekStripModel` gains `turnedIn`, the number
+// `step3.turned_in` as given when it is a number of at least 1, else `null`; `weekStripHtml` renders
+// it as one element of class `ob-turned-in` under the days, reading exactly "N turned in, kept off
+// your list". A count with no titles; nothing is summed.
+
+fn week_with(turned_in: &str) -> String {
+    format!(r#"{{week: {{of: "2026-10-19", today: 2}}, step3: {{due_mon: 2, due_tue: 0, due_wed: 3, due_thu: 1, due_fri: 4, due_sat: 0, due_sun: 5, due_later: 9{turned_in}}}}}"#)
+}
+
+fn turned_note(status: &str, step: u32) -> String {
+    let html = node(&format!("h.weekStripHtml({status}, {step})")).as_str().unwrap_or_default().to_string();
+    strip_text(&html)
+}
+
+#[test]
+fn the_turned_in_note_shows_the_field_as_given_under_the_days() {
+    helper("weekStripModel");
+    helper("weekStripHtml");
+    for n in [3, 1, 12] {
+        let s = week_with(&format!(", turned_in: {n}"));
+        assert_eq!(node(&format!("h.weekStripModel({s}, 5)"))["turnedIn"], serde_json::json!(n), "the model carries the field: {n}");
+        let html = node(&format!("h.weekStripHtml({s}, 5)")).as_str().unwrap_or_default().to_string();
+        assert!(html.contains("ob-turned-in"), "the note has its class: {html}");
+        let text = strip_text(&html);
+        assert!(text.ends_with(&format!("{n} turned in, kept off your list")), "the note is the last thing, under the days: {text}");
+        assert_eq!(text.matches("turned in").count(), 1, "one note: {text}");
+    }
+}
+
+#[test]
+fn the_turned_in_note_shows_nothing_for_zero_null_absent_or_a_non_count() {
+    helper("weekStripModel");
+    helper("weekStripHtml");
+    for (name, extra) in [("zero", ", turned_in: 0"), ("null: no grades bundle, unknown not zero", ", turned_in: null"), ("absent", ""), ("a string", r#", turned_in: "3""#), ("negative", ", turned_in: -2")] {
+        let s = week_with(extra);
+        assert!(node(&format!("h.weekStripModel({s}, 5)")).is_object(), "the strip itself still shows when {name}");
+        assert!(node(&format!("h.weekStripModel({s}, 5)"))["turnedIn"].is_null(), "no figure when {name}");
+        let html = node(&format!("h.weekStripHtml({s}, 5)")).as_str().unwrap_or_default().to_string();
+        let text = strip_text(&html);
+        assert!(!html.contains("ob-turned-in") && !text.contains("turned in") && !text.contains("kept off"), "no note and no placeholder when {name}: {text}");
+    }
+}
+
+#[test]
+fn the_turned_in_note_shows_only_while_the_strip_shows() {
+    helper("weekStripModel");
+    helper("weekStripHtml");
+    let s = week_with(", turned_in: 3");
+    for step in [3, 5, 6, 7, 8] {
+        assert!(turned_note(&s, step).contains("3 turned in, kept off your list"), "shown at step {step}");
+    }
+    for step in [2, 4, 10, 11] {
+        assert_eq!(node(&format!("h.weekStripHtml({s}, {step})")), serde_json::json!(""), "nothing at step {step}");
+        assert!(node(&format!("h.weekStripModel({s}, {step})")).is_null(), "no model at step {step}");
+    }
+    // A strip that hides (every due field null) takes the note with it.
+    let hidden = r#"{week: {of: "2026-10-19", today: 2}, step3: {due_mon: null, due_tue: null, due_wed: null, due_thu: null, due_fri: null, due_sat: null, due_sun: null, due_later: null, turned_in: 3}}"#;
+    assert_eq!(node(&format!("h.weekStripHtml({hidden}, 5)")), serde_json::json!(""), "no strip, so no note");
+}
+
+#[test]
+fn removing_a_course_lowers_the_note_to_the_new_field_and_the_page_adds_nothing() {
+    helper("weekStripHtml");
+    let before = turned_note(&week_with(", turned_in: 7"), 5);
+    let after = turned_note(&week_with(", turned_in: 2"), 5);
+    assert!(before.contains("7 turned in, kept off your list"), "before the removal: {before}");
+    assert!(after.contains("2 turned in, kept off your list") && !after.contains("7 turned in"), "after the removal the figure is the new field: {after}");
+    let gone = turned_note(&week_with(", turned_in: 0"), 5);
+    assert!(!gone.contains("turned in"), "every course with turned-in work removed: the note goes: {gone}");
+    let c = code(&read("onboarding.js"));
+    let model = function(&c, "weekStripModel");
+    assert!(model.contains("turned_in"), "the model reads step3.turned_in: {model}");
+    assert!(!model.contains("reduce(") && !model.contains("+=") && !model.contains("+ s."), "never a sum: {model}");
+    let css = code(&read("onboarding.css"));
+    assert!(css.contains("ob-turned-in"), "the note has a style");
+}
+
 fn sites(js_map: &str) -> String { format!("{{homework_sites: {js_map}}}") }
 
 #[test]
