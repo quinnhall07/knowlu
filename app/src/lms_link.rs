@@ -377,6 +377,46 @@ pub fn cookie_url(window_url: Option<&str>, feed: &str) -> String {
     if a == b { here.to_string() } else { feed.to_string() }
 }
 
+/// How the LMS capture window is built (S3 test 1). **S3 stub**: S4b makes a `Some(app_data)` plan the
+/// school folder, non-incognito, with [`crate::school_session::window_args`], recording
+/// `Use::CourseList`; today's incognito throwaway stays for `None` and is the only one wiped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowPlan {
+    pub data_dir: PathBuf,
+    pub incognito: bool,
+    pub browser_args: Option<&'static str>,
+    pub records_use: Option<crate::school_session::Use>,
+    /// Whether `Destroyed` and the sweep delete `data_dir`: the incognito throwaway only.
+    pub wipe_on_destroy: bool,
+}
+
+pub fn window_plan(_app_data: Option<&Path>, throwaway: &Path) -> WindowPlan {
+    WindowPlan { data_dir: throwaway.to_path_buf(), incognito: true, browser_args: None, records_use: None, wipe_on_destroy: true }
+}
+
+/// **S3 stub: [`capture_calendar_link`]'s jar read and request behind a seam** (S3 test 3). The jar is
+/// queried for `cookie_url(window_url, feed)` and the one request goes to `feed`'s host, whatever
+/// `Domain` the cookies carry. S4b moves the real body here.
+pub fn read_feed_with(
+    _feed: &str,
+    _window_url: Option<&str>,
+    _query_jar: &mut dyn FnMut(&str) -> Vec<crate::school_session::JarCookie>,
+    _send: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+) -> Value {
+    json!({ "ok": false })
+}
+
+/// **S3 stub: [`capture_courses`]'s jar read, list request and term requests behind a seam** (S3 test
+/// 3): every request goes to the host the jar was queried for.
+pub fn read_courses_with(
+    _list_url: &str,
+    _window_url: Option<&str>,
+    _query_jar: &mut dyn FnMut(&str) -> Vec<crate::school_session::JarCookie>,
+    _send: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+) -> Value {
+    no_courses()
+}
+
 /// A capture that did not produce a link, in the **same keys `finish` uses** (R-C1-41, M4): a panel
 /// reading `kind` or `note` must never find `undefined` on the paths where it is telling the student
 /// something went wrong. A capture is always a school feed, so the kind is not in doubt.

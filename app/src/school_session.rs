@@ -221,3 +221,32 @@ pub fn wrong_password_text_ok(text: &str) -> bool {
     !text.contains('@')
         && !text.split(|c: char| !c.is_alphanumeric()).any(|t| !t.is_empty() && t.chars().all(char::is_numeric))
 }
+
+// ---- S3 stubs: the seams the windows on the folder are tested through. S4a and S4b fill them. ----
+
+/// The one arguments string every window on the school folder is built with. **S3 stub**: S4a sets it
+/// equal to `mail::MAIL_BROWSER_ARGS` (S-G recorded no change). It never carries a debug port.
+pub const SCHOOL_BROWSER_ARGS: &str = "";
+
+/// A school window's browser arguments. The debug port is a parameter so the rule is testable without
+/// the environment: a window on the school folder gets [`SCHOOL_BROWSER_ARGS`] whatever port is
+/// passed, in every build. **S3 stub.**
+pub fn window_args(_debug_port: Option<u16>) -> &'static str {
+    SCHOOL_BROWSER_ARGS
+}
+
+/// One cookie a window's jar returned, for the fakes of the S3 cookie tests. `domain` is the cookie's own
+/// `Domain` attribute, which no reader may send a request to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JarCookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+}
+
+/// The folder grades' window is built on, and the use that choice records. **S3 stub**: S4a makes it
+/// [`profile_for`]'s answer for `Feature::Grades` and, whenever that is [`session_dir`], calls
+/// `add_use(Grades)` before returning. It moves off `lms-session` only on a recorded `Use::Grades`.
+pub fn grades_profile(data_dir: &Path) -> Result<PathBuf, String> {
+    profile_for(Feature::Grades, None, data_dir).ok_or_else(|| "no folder for grades".to_string())
+}

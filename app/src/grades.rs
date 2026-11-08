@@ -684,6 +684,32 @@ pub fn capture_hidden(app: &tauri::AppHandle, data_dir: &Path, host: &str) -> Re
     read_hidden(app, host)
 }
 
+/// **S3 stub: the seam for "one window at a time on the folder"** (S3 test 5). S4a makes it
+/// [`crate::school_session::take_both`] for `profile_id`, then `open`, then `read`; a busy lock or
+/// capture guard answers `Busy` and calls neither.
+pub fn capture_hidden_with(
+    _profile_id: &str,
+    open: impl FnOnce() -> Result<(), CaptureError>,
+    read: impl FnOnce() -> Result<Value, CaptureError>,
+) -> Result<Value, CaptureError> {
+    open()?;
+    read()
+}
+
+/// **S3 stub: the seam for "cookies go only where they were read"** (S3 test 3). S4a moves the jar read
+/// and every request of [`capture`] behind it. It asks `query_jar` for the cookies of
+/// [`crate::lms_link::cookie_url`]`(window_url, https://<host>/learn/api/public/v1/users/me)` and sends
+/// every request, `users/me` and the capture's, to `https://<host>/...` with `send(url, cookie_header)`,
+/// never to a cookie's `Domain`. A request to any other host is a bug.
+pub fn read_session_with(
+    _host: &str,
+    _window_url: Option<&str>,
+    _query_jar: &mut dyn FnMut(&str) -> Vec<crate::school_session::JarCookie>,
+    _send: &mut dyn FnMut(&str, &str) -> Result<String, String>,
+) -> Result<Value, CaptureError> {
+    Err(CaptureError::Unreachable)
+}
+
 /// A capture that could not start: the visible sign-in window is open, or another capture runs.
 fn busy_or_open(app: &tauri::AppHandle) -> CaptureError {
     match app.get_webview_window(WINDOW) {
