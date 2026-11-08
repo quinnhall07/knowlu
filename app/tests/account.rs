@@ -3651,3 +3651,192 @@ fn the_sign_out_clean_is_capped_read_once_and_wired_into_sign_out() {
     assert!(mentions.iter().any(|m| m.contains("pub fn valid_access_token_within(")), "{mentions:#?}");
     assert!(mentions.iter().all(|m| m.starts_with(&format!("{}: ", std::path::Path::new("src").join("account.rs").display()))), "{mentions:#?}");
 }
+
+// ---- S5: sign-out and deletion forget the school sign-in (onboarding plan §S5; replan row S5, RQ17) ----
+//
+// Sign-out and *Delete my data* delete this profile's school folder through `school_session::forget`
+// (patiently) and its saved school password, `knowlu/<profile_id>/school`, through `credentials::delete`.
+// Sign-out names a failure in its envelope (`school_profiles_left`, `school_password_left`); no failure
+// stops another deletion. Every profile id and target is generated, and every secret is synthetic.
+
+/// The saved school password's target for `id`, as RQ17 names it.
+#[cfg(windows)]
+fn school_password(id: &str) -> String {
+    knowlu::credentials::target_for(id, "school")
+}
+
+/// A kept school folder with one file in it and a recorded use, as a signed-in LMS window leaves it.
+/// Returns the file, so a test can hold it open as WebView2 holds a profile.
+#[cfg(windows)]
+fn school_folder(dir: &std::path::Path) -> std::path::PathBuf {
+    let network = knowlu::school_session::session_dir(dir).join("Default").join("Network");
+    std::fs::create_dir_all(&network).unwrap();
+    std::fs::write(network.join("Cookies"), "synthetic").unwrap();
+    knowlu::school_session::add_use(dir, knowlu::school_session::Use::Grades).expect("record a use");
+    network.join("Cookies")
+}
+
+/// Share mode 1 is FILE_SHARE_READ: a delete of the file or its folder fails while this lives.
+#[cfg(windows)]
+fn hold_open(file: &std::path::Path) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().read(true).share_mode(1).open(file).unwrap()
+}
+
+/// What the school test's close hands back to `sign_out_with`: at the release it records whether the
+/// school folder was already gone and whether the session's credential was still there.
+#[cfg(windows)]
+struct SchoolAtRelease<'a> {
+    dir: std::path::PathBuf,
+    session: String,
+    seen: &'a std::cell::Cell<Option<(bool, bool)>>,
+}
+
+#[cfg(windows)]
+impl Drop for SchoolAtRelease<'_> {
+    fn drop(&mut self) {
+        let gone = !knowlu::school_session::session_dir(&self.dir).exists();
+        self.seen.set(Some((gone, knowlu::credentials::exists(&self.session))));
+    }
+}
+
+/// RQ17 and spec §2.5: sign-out deletes this profile's school folder, its record of uses and its saved
+/// school password, and nothing of another profile's. The password goes first, before the mail window's
+/// hold, so a folder that cannot be deleted never keeps a password that signs it back in. The folder goes
+/// under the hold, and both are gone while the session's credential is still there.
+#[cfg(windows)]
+#[test]
+fn sign_out_deletes_this_profiles_school_folder_and_school_password_and_no_others() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let (root, app_root, id, dir) = signout_profile("school");
+    let their_id = knowlu::profiles::id_for(&root.join("Theirs"));
+    let theirs = knowlu::profiles::profile_dir(&app_root, &their_id);
+    let (session, mine_pw, their_pw) = (knowlu::account::session_target(&id), school_password(&id), school_password(&their_id));
+    let _cleanup = Cleanup(vec![session.clone(), mine_pw.clone(), their_pw.clone()]);
+    save_session_left(&session, 3600);
+    knowlu::credentials::write(&mine_pw, "student@example.invalid", "synthetic-school-pw").expect("my school password");
+    knowlu::credentials::write(&their_pw, "other@example.invalid", "synthetic-school-pw").expect("their school password");
+    school_folder(&dir);
+    let their_file = school_folder(&theirs);
+    std::fs::write(dir.join("settings.json"), "{}").unwrap();
+
+    let (at_hold, at_release) = (std::cell::Cell::new(None), std::cell::Cell::new(None));
+    let out = knowlu::account::sign_out_with(
+        Some(id.clone()),
+        Some(&app_root),
+        |d: &std::path::Path| {
+            at_hold.set(Some((knowlu::credentials::exists(&mine_pw), knowlu::school_session::session_dir(d).is_dir())));
+            SchoolAtRelease { dir: d.to_path_buf(), session: session.clone(), seen: &at_release }
+        },
+        |_: &std::path::Path| {},
+    )
+    .expect("sign out");
+
+    assert_eq!(at_hold.get(), Some((false, true)), "at the hold: the password already gone, the folder still there");
+    assert_eq!(at_release.get(), Some((true, true)), "at the release: the folder gone, the session's credential still there");
+    assert_eq!((out["ok"].clone(), out["had_session"].clone()), (serde_json::json!(true), serde_json::json!(true)), "{out}");
+    let left = (out["school_profiles_left"].clone(), out["school_password_left"].clone());
+    assert_eq!(left, (serde_json::json!(false), serde_json::json!(false)), "{out}");
+    assert!(!knowlu::school_session::session_dir(&dir).exists() && !dir.join("school.json").exists(), "my school folder and its uses are gone");
+    assert!(!knowlu::credentials::exists(&mine_pw) && !knowlu::credentials::exists(&session), "my school password and session are gone");
+    assert!(dir.join("settings.json").is_file(), "nothing else in my folder goes");
+    assert!(their_file.is_file() && theirs.join("school.json").is_file(), "another profile's school folder was deleted");
+    assert!(knowlu::credentials::exists(&their_pw), "another profile's school password was deleted");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// RQ17: the saved school password is keyed to the profile id alone, so it goes at a sign-out that can
+/// name no app-data folder too, and neither seam is called. A profile that never saved one has none left.
+/// An id that is not a profile id names no credential, `delete_local_data`'s rule.
+#[cfg(windows)]
+#[test]
+fn sign_out_deletes_the_saved_school_password_with_no_app_data_root() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let pid = std::process::id();
+    let id = knowlu::profiles::id_for(&std::env::temp_dir().join(format!("knowlu-s5-no-root-{pid}")));
+    let bad = format!("profile_{pid:09x}");
+    let (pw, bad_pw) = (school_password(&id), school_password(&bad));
+    let session = |i: &str| knowlu::account::session_target(i);
+    let _cleanup = Cleanup(vec![session(&id), pw.clone(), session(&bad), bad_pw.clone()]);
+    let calls = std::cell::Cell::new(0);
+    let sign_out_as = |who: &str| {
+        let seam = |_: &std::path::Path| calls.set(calls.get() + 1);
+        knowlu::account::sign_out_with(Some(who.to_string()), None, seam, seam).expect("sign out")
+    };
+
+    let out = sign_out_as(&id);
+    assert_eq!((out["ok"].clone(), out["school_password_left"].clone()), (serde_json::json!(true), serde_json::json!(false)), "{out}");
+    knowlu::credentials::write(&pw, "student@example.invalid", "synthetic-school-pw").expect("a school password");
+    knowlu::credentials::write(&bad_pw, "student@example.invalid", "synthetic-school-pw").expect("one at a bad id");
+    let out = sign_out_as(&id);
+    assert_eq!((out["ok"].clone(), out["school_password_left"].clone()), (serde_json::json!(true), serde_json::json!(false)), "{out}");
+    assert_eq!(out["school_profiles_left"], false, "no folder was named, so none is left: {out}");
+    assert!(!knowlu::credentials::exists(&pw), "the school password is gone");
+    sign_out_as(&bad);
+    assert!(knowlu::credentials::exists(&bad_pw), "an id that is not a profile id named a credential");
+    assert_eq!(calls.get(), 0, "neither seam is called without an app-data root");
+}
+
+/// A school folder WebView2 still holds is named in the envelope, `school_profiles_left`, as
+/// `mail_profiles_left` names a mail profile, once the patient delete gives up. It stops nothing else: the
+/// saved school password, the mail profiles and the session's credential still go, and the sign-out is ok.
+#[cfg(windows)]
+#[test]
+fn a_school_folder_still_held_is_reported_and_stops_nothing_else() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let (root, app_root, id, dir) = signout_profile("school-held");
+    let (session, pw) = (knowlu::account::session_target(&id), school_password(&id));
+    let _cleanup = Cleanup(vec![session.clone(), pw.clone()]);
+    save_session_left(&session, 3600);
+    knowlu::credentials::write(&pw, "student@example.invalid", "synthetic-school-pw").expect("a school password");
+    let held = hold_open(&school_folder(&dir));
+    std::fs::create_dir_all(dir.join("mail-session-mbx-new")).unwrap();
+
+    let out = knowlu::account::sign_out_with(Some(id), Some(&app_root), |_: &std::path::Path| {}, |_: &std::path::Path| {});
+    drop(held);
+    let out = out.expect("sign out");
+
+    assert_eq!((out["ok"].clone(), out["school_profiles_left"].clone()), (serde_json::json!(true), serde_json::json!(true)), "{out}");
+    let rest = (out["school_password_left"].clone(), out["mail_profiles_left"].clone(), out["had_session"].clone());
+    assert_eq!(rest, (serde_json::json!(false), serde_json::json!(false), serde_json::json!(true)), "{out}");
+    assert!(knowlu::school_session::session_dir(&dir).is_dir(), "the folder really was left");
+    assert!(!knowlu::credentials::exists(&pw), "the school password still went");
+    assert!(!dir.join("mail-session-mbx-new").exists(), "the mail profile still went");
+    assert!(!knowlu::credentials::exists(&session), "the session's credential still went");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// *Delete my data* deletes the saved school password beside the two coursework logins, and another
+/// profile's stays. The school folder goes first and patiently, as the mail profiles do: here WebView2
+/// lets go of it a moment after the wipe begins, and the app-data folder still goes whole.
+#[cfg(windows)]
+#[test]
+fn deleting_my_data_deletes_the_school_folder_patiently_and_the_saved_school_password() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _app_root, id, dir) = signout_profile("delete-school");
+    let vault = root.join("Mine");
+    std::fs::create_dir_all(vault.join("tasks")).unwrap();
+    std::fs::write(vault.join("tasks").join("a.md"), "mine").unwrap();
+    let their_id = knowlu::profiles::id_for(&root.join("Theirs"));
+    let (pw, their_pw) = (school_password(&id), school_password(&their_id));
+    let _cleanup = Cleanup(vec![pw.clone(), their_pw.clone()]);
+    knowlu::credentials::write(&pw, "student@example.invalid", "synthetic-school-pw").expect("my school password");
+    knowlu::credentials::write(&their_pw, "other@example.invalid", "synthetic-school-pw").expect("their school password");
+    let held = hold_open(&school_folder(&dir));
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400)); // past the first try, well inside the patience
+        drop(held);
+    });
+
+    knowlu::account::delete_local_data(&vault, &dir, None, &id, None, "");
+    release.join().unwrap();
+
+    assert!(!dir.exists(), "the app-data folder went whole, the school folder with it");
+    assert!(!vault.exists(), "the vault is gone");
+    assert!(!knowlu::credentials::exists(&pw), "my school password is gone");
+    assert!(knowlu::credentials::exists(&their_pw), "another profile's school password was deleted");
+    let _ = std::fs::remove_dir_all(&root);
+}
