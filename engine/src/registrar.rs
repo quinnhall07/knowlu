@@ -162,8 +162,9 @@ struct RowMeetings {
 
 /// P3: only `CLAS` meetings are read; `EXAM` is counted (`out.exam`) and any other or missing
 /// `meetingType` is counted (`out.meeting_type`) and warned, never read as `CLAS`. P4: a `CLAS`
-/// meeting with no time or no day is skipped, never filled in from another.
-fn read_meetings(row: &Value, name: &str, out: &mut Parsed) -> RowMeetings {
+/// meeting with no time or no day is skipped, never filled in from another. `prefix` opens each warning
+/// (`registrar` for `parse_banner`, `class search` for `parse_class_search`).
+fn read_meetings(row: &Value, name: &str, prefix: &str, out: &mut Parsed) -> RowMeetings {
     let mut r = RowMeetings::default();
     for mt in row.get("meetingTimes").and_then(Value::as_array).into_iter().flatten() {
         match text(mt, "meetingType") {
@@ -174,7 +175,7 @@ fn read_meetings(row: &Value, name: &str, out: &mut Parsed) -> RowMeetings {
             }
             _ => {
                 out.meeting_type += 1;
-                out.warnings.push(format!("registrar: {name} has a meeting of an unknown type; skipped"));
+                out.warnings.push(format!("{prefix}: {name} has a meeting of an unknown type; skipped"));
                 r.partial = true;
                 r.unknown = true;
                 continue;
@@ -254,7 +255,7 @@ pub fn parse_banner_with(json: &Value, school: &str, registered: &[&str]) -> Res
             out.statuses.insert(crn.to_string(), what.to_string());
             continue;
         }
-        let m = read_meetings(row, &name, &mut out);
+        let m = read_meetings(row, &name, "registrar", &mut out);
         if m.crosses {
             out.midnight += 1;
             out.warnings.push(format!("registrar: {name} meets across midnight; dropped"));
@@ -317,8 +318,8 @@ pub struct SectionRef {
 ///
 /// `TermSubjectNumberSection`: six digits, `-`, two to four capitals, `-`, three digits and an optional
 /// capital letter, `-`, one to four capitals or digits. The run starts the name (leading blanks aside)
-/// and ends at the string's end or at an ASCII character that is not a letter, digit, `-` or `_`. A
-/// further `-` group is a merged shell and does not fit; anything else is `None`.
+/// and ends at the string's end, whitespace or `(`; any other next character, a `-`, `/` or `,` that
+/// joins a merged shell included, is `None`. A merged shell is never cut down.
 pub fn section_in_name(name: &str, shape: NameShape) -> Option<SectionRef> {
     match shape {
         NameShape::TermSubjectNumberSection => term_subject_number_section(name.trim_start()),
@@ -349,7 +350,7 @@ fn term_subject_number_section(name: &str) -> Option<SectionRef> {
     let letter = run(&mut at, 0, 1, |c| c.is_ascii_uppercase())?;
     dash(&mut at)?;
     let section = run(&mut at, 1, 4, |c| c.is_ascii_uppercase() || c.is_ascii_digit())?;
-    if b.get(at).is_some_and(|c| !c.is_ascii() || c.is_ascii_alphanumeric() || *c == b'-' || *c == b'_') {
+    if name[at..].chars().next().is_some_and(|c| !c.is_whitespace() && c != '(') {
         return None;
     }
     Some(SectionRef { term: term.into(), subject: subject.into(), number: format!("{digits}{letter}"), section: section.into() })
@@ -379,7 +380,8 @@ pub struct ClassSearchRead {
     pub series: Option<Series>,
     /// `Found` only: the row's `isSectionLinked` was true (§6.4).
     pub linked: bool,
-    /// Rows whose term, subject or number differ from the query's, dropped.
+    /// Rows whose term, subject or number differ from the query's, and matched rows that ended before
+    /// `today`, dropped.
     pub dropped: usize,
     /// `EXAM` meetings seen on the matched row.
     pub exam: usize,
@@ -388,11 +390,12 @@ pub struct ClassSearchRead {
     pub warnings: Vec<String>,
 }
 
-/// Class search's answer (`{success, totalCount, data: [...]}`) → the state of `want`.
-/// `Err` only when the answer has no `data` list; an empty list is `NotFound`.
-pub fn parse_class_search(json: &Value, school_key: &str, want: &SectionRef) -> Result<ClassSearchRead, String> {
+/// Class search's answer (`{success, totalCount, data: [...]}`) → the state of `want`, read on
+/// `today` (`YYYY-MM-DD`; §6.4's `until` rule). `Err` when the answer has no `data` list or `today`
+/// is not a date; an empty list is `NotFound`.
+pub fn parse_class_search(json: &Value, school_key: &str, want: &SectionRef, today: &str) -> Result<ClassSearchRead, String> {
     let registered = school(school_key).map_or(&[][..], |s| s.registered);
-    parse_class_search_with(json, school_key, registered, want)
+    parse_class_search_with(json, school_key, registered, want, today)
 }
 
 /// [`parse_class_search`] with the school's registered set given. Class-search rows carry no
@@ -400,50 +403,58 @@ pub fn parse_class_search(json: &Value, school_key: &str, want: &SectionRef) -> 
 ///
 /// A row is the section wanted only when its `term`, `subject`, `courseNumber` and `sequenceNumber`
 /// all equal `want`'s (§6.4: the answer is never trusted to be filtered). A row whose term, subject or
-/// number differs is dropped and counted. The one matched row's `meetingsFaculty[].meetingTime` objects
-/// are lifted into the flat `meetingTimes` form and read by [`read_meetings`], so P3, P4 and the
-/// midnight rule are the registrar's, not copied.
+/// number differs is dropped and counted. So is a matched row whose meetings all end (`endDate`) before
+/// `today`; one that ends on `today` is kept. That check runs before ambiguity, so a finished twin does
+/// not make a live section ambiguous. Each matched row's `meetingsFaculty[].meetingTime` objects are
+/// lifted into the flat `meetingTimes` form and read by [`read_meetings`], so P3, P4 and the midnight
+/// rule are the registrar's, not copied. Every warning starts `class search:`.
 ///
 /// A matched row that crosses midnight is `PartRead`: `read_meetings` drops the whole row and counts it
 /// (`midnight`), as `parse_banner` does, and a meeting Knowlu could not read is what `PartRead` names.
 /// `NoTime` stays for a row with no day or time at all. A row of unknown-type meetings only is
-/// `PartRead` too.
+/// `PartRead` too, and so is a row with no course reference number.
 ///
 /// The series' `source_uid` is `classsearch:<school>:<term>-<crn>`. **Provisional**: C2a owns the
 /// class-search source row and may change it; its calendar key follows the same prefix.
-pub fn parse_class_search_with(json: &Value, school: &str, _registered: &[&str], want: &SectionRef) -> Result<ClassSearchRead, String> {
+pub fn parse_class_search_with(json: &Value, school: &str, _registered: &[&str], want: &SectionRef, today: &str) -> Result<ClassSearchRead, String> {
+    let today = Date::strptime("%Y-%m-%d", today).map_err(|_| format!("today is not a YYYY-MM-DD date: {today}"))?;
     let rows = json.get("data").and_then(Value::as_array).ok_or("not a list of class-search rows")?;
+    let name = format!("{} {}", want.subject, want.number);
     let mut dropped = 0;
-    let mut matched: Vec<&Value> = Vec::new();
+    // Each live matched row with what `read_meetings` made of it.
+    let mut matched: Vec<(&Value, RowMeetings, Parsed)> = Vec::new();
     for row in rows {
         let same = |key: &str, v: &str| text(row, key) == Some(v);
         if !(same("term", &want.term) && same("subject", &want.subject) && same("courseNumber", &want.number)) {
             dropped += 1;
         } else if same("sequenceNumber", &want.section) {
-            matched.push(row);
+            let lifted: Vec<Value> = row
+                .get("meetingsFaculty")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|f| f.get("meetingTime").filter(|m| m.is_object()).cloned())
+                .collect();
+            let mut scratch = Parsed::default();
+            let m = read_meetings(&json!({ "meetingTimes": lifted }), &name, "class search", &mut scratch);
+            if m.until.is_some_and(|u| u < today) {
+                dropped += 1;
+            } else {
+                matched.push((row, m, scratch));
+            }
         }
     }
     // The same rows in any order give the same read.
-    matched.sort_by_key(|r| text(r, "courseReferenceNumber").unwrap_or("").to_string());
+    matched.sort_by_key(|(r, _, _)| text(r, "courseReferenceNumber").unwrap_or("").to_string());
     let mut out = ClassSearchRead { state: SectionState::NotFound, series: None, linked: false, dropped, exam: 0, midnight: 0, warnings: Vec::new() };
-    let row = match matched.as_slice() {
-        [] => return Ok(out),
-        [row] => *row,
+    let (row, m, scratch) = match matched.len() {
+        0 => return Ok(out),
+        1 => matched.remove(0),
         _ => {
             out.state = SectionState::Ambiguous;
             return Ok(out);
         }
     };
-    let name = format!("{} {}", want.subject, want.number);
-    let lifted: Vec<Value> = row
-        .get("meetingsFaculty")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|f| f.get("meetingTime").filter(|m| m.is_object()).cloned())
-        .collect();
-    let mut scratch = Parsed::default();
-    let m = read_meetings(&json!({ "meetingTimes": lifted }), &name, &mut scratch);
     out.exam = scratch.exam;
     out.warnings = scratch.warnings;
     if m.crosses {

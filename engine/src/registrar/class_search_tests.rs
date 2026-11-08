@@ -30,6 +30,8 @@ fn trailing_words_are_allowed_after_a_boundary() {
 fn a_merged_shell_does_not_fit_and_is_never_cut_down() {
     assert_eq!(section_in_name("209940-XYZ-100-001-002", SHAPE), None);
     assert_eq!(section_in_name("209940-XYZ-100-001-002 Merged", SHAPE), None);
+    assert_eq!(section_in_name("209940-XYZ-100-001/002", SHAPE), None);
+    assert_eq!(section_in_name("209940-XYZ-100-001,002", SHAPE), None);
 }
 
 #[test]
@@ -135,8 +137,11 @@ fn answer(rows: Vec<Value>) -> Value {
     json!({ "success": true, "totalCount": rows.len(), "data": rows })
 }
 
+/// A day before every invented section's dates (2099).
+const TODAY: &str = "2026-11-08";
+
 fn read(rows: Vec<Value>) -> ClassSearchRead {
-    parse_class_search(&answer(rows), "ua", &want()).unwrap()
+    parse_class_search(&answer(rows), "ua", &want(), TODAY).unwrap()
 }
 
 #[test]
@@ -148,8 +153,8 @@ fn one_section_matched_among_many_is_found() {
     ]);
     assert_eq!(r.state, SectionState::Found);
     let s = r.series.expect("a found section carries its series");
-    assert!(s.source_uid.starts_with("classsearch:ua:"), "{}", s.source_uid);
-    assert!(s.source_uid.ends_with("209940-90001"), "{}", s.source_uid);
+    assert_eq!(s.source_uid, "classsearch:ua:209940-90001");
+    assert_eq!(s.calendar, "classsearch:ua:209940");
     assert_eq!(s.title, "XYZ 100");
     assert_eq!(s.meets.len(), 1);
     assert_eq!(s.meets[0].days, vec!["mon", "wed", "fri"]);
@@ -189,7 +194,7 @@ fn rows_with_another_term_subject_or_number_are_dropped_and_counted() {
     ]);
     assert_eq!(r.state, SectionState::Found, "the stale rows must not make it ambiguous");
     assert_eq!(r.dropped, 3);
-    assert!(r.series.unwrap().source_uid.ends_with("90001"));
+    assert_eq!(r.series.unwrap().source_uid, "classsearch:ua:209940-90001");
 }
 
 #[test]
@@ -217,7 +222,7 @@ fn an_answer_with_no_rows_at_all_is_not_found_never_an_error() {
 #[test]
 fn an_answer_with_no_data_list_is_an_error() {
     for v in [json!({ "success": true }), json!({ "data": "x" }), json!([]), json!({ "data": { "rows": [] } })] {
-        assert!(parse_class_search(&v, "ua", &want()).is_err(), "{v}");
+        assert!(parse_class_search(&v, "ua", &want(), TODAY).is_err(), "{v}");
     }
 }
 
@@ -256,6 +261,7 @@ fn a_course_whose_every_row_has_no_time_is_no_failure() {
         &answer(vec![mine("90001", Vec::new()), row("209940", "XYZ", "100", "002", "90002", Vec::new())]),
         "ua",
         &want(),
+        TODAY,
     );
     assert_eq!(r.unwrap().state, SectionState::NoTime, "the registrar's empty-parse failure does not apply here");
 }
@@ -272,7 +278,7 @@ fn a_meeting_across_midnight_is_dropped_and_counted() {
     let r = read(vec![mine("90001", vec![clas("2300", "0100", &["friday"])])]);
     assert_eq!(r.midnight, 1);
     assert!(r.series.is_none());
-    assert_ne!(r.state, SectionState::Found);
+    assert_eq!(r.state, SectionState::PartRead);
     assert!(r.warnings.iter().any(|w| w.contains("XYZ 100") && w.contains("midnight")), "{:?}", r.warnings);
 }
 
@@ -297,7 +303,7 @@ fn a_linked_section_carries_linked_true() {
 #[test]
 fn a_school_with_a_registered_set_still_reads_rows_that_carry_no_status() {
     let a = answer(vec![mine("90001", vec![clas("0900", "0950", &["monday"])])]);
-    let r = parse_class_search_with(&a, "ua", &["IR", "RW"], &want()).unwrap();
+    let r = parse_class_search_with(&a, "ua", &["IR", "RW"], &want(), TODAY).unwrap();
     assert_eq!(r.state, SectionState::Found);
     assert!(r.series.is_some());
 }
@@ -308,4 +314,76 @@ fn the_same_rows_in_another_order_give_the_same_read() {
     let b = mine("90001", vec![clas("0900", "0950", &["monday"])]);
     let c = row("209930", "XYZ", "100", "001", "90011", vec![clas("0800", "0850", &["monday"])]);
     assert_eq!(read(vec![a.clone(), b.clone(), c.clone()]), read(vec![c, b, a]));
+}
+
+// ---- the reviewer's follow-ups ------------------------------------------------------------
+
+#[test]
+fn a_row_of_unknown_type_meetings_only_is_part_read() {
+    let r = read(vec![mine("90001", vec![mt("LECT", json!("0900"), json!("0950"), &["monday"])])]);
+    assert_eq!(r.state, SectionState::PartRead);
+    assert!(r.series.is_none());
+}
+
+#[test]
+fn a_matched_row_with_no_crn_is_part_read_with_a_warning() {
+    let mut no_crn = mine("90001", vec![clas("0900", "0950", &["monday"])]);
+    no_crn.as_object_mut().unwrap().remove("courseReferenceNumber");
+    let r = read(vec![no_crn]);
+    assert_eq!(r.state, SectionState::PartRead);
+    assert!(r.series.is_none());
+    assert!(r.warnings.iter().any(|w| w.starts_with("class search:")), "{:?}", r.warnings);
+}
+
+#[test]
+fn every_class_search_warning_starts_with_class_search_never_registrar() {
+    let r = read(vec![mine("90001", vec![mt("LECT", json!("0900"), json!("0950"), &["monday"]), clas("2300", "0100", &["friday"])])]);
+    assert!(r.warnings.len() >= 2, "{:?}", r.warnings);
+    for w in &r.warnings {
+        assert!(w.starts_with("class search: "), "{w}");
+    }
+}
+
+#[test]
+fn parse_banners_warnings_keep_the_registrar_prefix() {
+    let a = json!({ "data": { "registrations": [{ "term": "209940", "courseReferenceNumber": "1", "subject": "XYZ", "courseNumber": "100",
+        "meetingTimes": [mt("LECT", json!("0900"), json!("0950"), &["monday"]), clas("0900", "0950", &["tuesday"])] }] } });
+    let p = parse_banner(&a, "ua").unwrap();
+    assert!(p.warnings.iter().any(|w| w == "registrar: XYZ 100 has a meeting of an unknown type; skipped"), "{:?}", p.warnings);
+}
+
+/// A section's one meeting, ending on `end` (`MM/DD/YYYY`).
+fn ending(end: &str) -> Vec<Value> {
+    let mut m = clas("0900", "0950", &["monday"]);
+    m["endDate"] = json!(end);
+    vec![m]
+}
+
+#[test]
+fn a_section_that_ended_yesterday_is_dropped_and_counted() {
+    let r = parse_class_search(&answer(vec![mine("90001", ending("11/07/2026"))]), "ua", &want(), "2026-11-08").unwrap();
+    assert_eq!(r.state, SectionState::NotFound);
+    assert_eq!(r.dropped, 1);
+    assert!(r.series.is_none());
+}
+
+#[test]
+fn a_section_that_ends_today_is_kept() {
+    let r = parse_class_search(&answer(vec![mine("90001", ending("11/08/2026"))]), "ua", &want(), "2026-11-08").unwrap();
+    assert_eq!(r.state, SectionState::Found);
+    assert_eq!(r.dropped, 0);
+}
+
+#[test]
+fn a_finished_twin_does_not_make_a_live_section_ambiguous() {
+    let rows = vec![mine("90001", ending("11/07/2026")), mine("90009", ending("12/04/2099"))];
+    let r = parse_class_search(&answer(rows), "ua", &want(), "2026-11-08").unwrap();
+    assert_eq!(r.state, SectionState::Found);
+    assert_eq!(r.dropped, 1);
+    assert_eq!(r.series.unwrap().source_uid, "classsearch:ua:209940-90009");
+}
+
+#[test]
+fn a_bad_today_is_an_error() {
+    assert!(parse_class_search(&answer(Vec::new()), "ua", &want(), "11/08/2026").is_err());
 }
