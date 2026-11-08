@@ -908,6 +908,16 @@ pub fn uncovered_courses(
         .collect()
 }
 
+/// The active courses (`active_courses`, slug order) whose `course_key` is one of `keys`'.
+fn listed_courses(vault: &Path, keys: &BTreeSet<String>, codes: &Codes) -> Vec<UncoveredCourse> {
+    let keys: BTreeSet<String> = keys.iter().map(|course| course_key(course, codes)).collect();
+    active_courses(vault)
+        .into_iter()
+        .filter(|(slug, _)| keys.contains(&course_key(slug, codes)))
+        .map(|(slug, title)| UncoveredCourse { slug, title })
+        .collect()
+}
+
 /// Every course a confirmed `class` note covers, as `course_key`s: its `course:`, or, with none,
 /// the code that leads its title (Plan ruling Q2-c). The one rule `uncovered_courses` and Q7's
 /// ask settlement and withdrawal share (review finding 3).
@@ -2321,10 +2331,12 @@ fn write_state_file(vault: &Path, name: &str, bytes: &str) -> std::io::Result<()
 ///   open; a row its own fresh read omits stays while its `until` is open and then goes, and no
 ///   class-search row ever moves to `ended`.
 ///
-/// The file is written only when `fresh` is non-empty and the bytes differ, whole (temp file,
-/// then rename). With `fresh` non-empty, the whole read-to-rename holds [`SERIES_LOCK_FILE`]
-/// exclusively, so two processes refreshing at once each keep their calendars (final review I2);
-/// a lock that cannot be taken is one warning and the run goes on unguarded. A file that could not be *read* (an I/O error, not a parse failure) is left
+/// The file is written only when the bytes differ, whole (temp file, then rename), and only when
+/// `fresh` is non-empty or a passed no-time block was dropped under the lock (below). With `fresh`
+/// non-empty, or with such a drop due, the whole read-to-rename holds [`SERIES_LOCK_FILE`]
+/// exclusively, so two processes refreshing at once each keep their calendars (final review I2).
+/// With `fresh` non-empty, a lock that cannot be taken is one warning and the run goes on
+/// unguarded; for a drop alone it is one warning and nothing is stored. A file that could not be *read* (an I/O error, not a parse failure) is left
 /// alone and not rewritten this run, with one warning; the returned data then holds only this
 /// run's fresh calendars. Warnings: the old file's, and a failed write's.
 ///
@@ -2420,9 +2432,11 @@ pub enum PurgeScope {
 /// What a purge did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purged {
-    /// The first read held nothing to remove: no lock, no write.
+    /// Nothing to remove, and nothing written. Either the first read found nothing (no lock
+    /// taken), or it did and the re-read under the lock found it already gone (the lock was taken).
     Clean,
-    /// The series file was rewritten without the entries.
+    /// Something was removed: the series file rewritten without the entries, a leftover
+    /// `calendar-series.json.tmp*` copy deleted, or both.
     Changed,
     /// [`try_purge_class_search`] found the series lock held elsewhere and changed nothing.
     Busy,
@@ -2441,10 +2455,11 @@ thread_local! {
 /// Replan §6.12 (RQ11, RQ12): deletes the unconfirmed class-search rows (`Rows`), or those and the
 /// no-time block (`All`), from `state/calendar-series.json`; either also drops a block whose term
 /// has passed. The first read takes no lock and only decides whether to lock: a missing or clean
-/// file takes no lock, creates no `state/` folder and writes nothing. A dirty one takes
-/// [`SERIES_LOCK_FILE`], blocking, re-reads under it and removes the entries from that fresh copy,
-/// so nothing another writer stored in between is lost. It writes only the series file, through
-/// [`file_bytes`], and only when something changed; it touches no note, marker or journal and needs
+/// file, with no leftover `calendar-series.json.tmp*` copy that mentions class search, takes no
+/// lock, creates no `state/` folder and writes nothing. A dirty one takes [`SERIES_LOCK_FILE`],
+/// blocking, re-reads under it and removes the entries from that fresh copy, so nothing another
+/// writer stored in between is lost; still holding the lock, it deletes every leftover copy. It
+/// writes only the series file, through [`file_bytes`], and only when something changed; it touches no note, marker or journal and needs
 /// no sign-in, entitlement or network. `today` comes from the caller, so no clock is read here. An
 /// error is a named line with fixed words, never a key, and nothing written.
 pub fn purge_class_search(vault: &Path, scope: PurgeScope, today: Date) -> Result<Purged, String> {
@@ -2464,16 +2479,18 @@ fn purge_with(vault: &Path, scope: PurgeScope, today: Date, wait: bool) -> Resul
         Loaded::Malformed(why) => Err(not_purged(format!("malformed ({why})"))),
         Loaded::Unreadable(kind) => Err(not_purged(format!("unreadable ({kind})"))),
     };
-    let mut first = match std::fs::read(series_path(vault)) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Purged::Clean),
+    let file_dirty = match std::fs::read(series_path(vault)) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
         Err(err) => return Err(not_purged(format!("unreadable ({})", err.kind()))),
-        Ok(bytes) if !mentions_class_search(&bytes) => return Ok(Purged::Clean),
+        Ok(bytes) if !mentions_class_search(&bytes) => false,
         Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(text) => parse_file(&text).map_err(|why| not_purged(format!("malformed ({why})")))?,
+            Ok(text) => purge_file(&mut parse_file(&text).map_err(|why| not_purged(format!("malformed ({why})")))?, scope, today),
             Err(_) => return Err(not_purged("malformed (not UTF-8)".into())),
         },
     };
-    if !purge_file(&mut first, scope, today) {
+    // A copy a crashed `write_state_file` left can hold class-search data the file no longer does.
+    let temps_dirty = leftover_series_temps(vault).iter().any(|tmp| std::fs::read(tmp).is_ok_and(|b| mentions_class_search(&b)));
+    if !file_dirty && !temps_dirty {
         return Ok(Purged::Clean);
     }
     #[cfg(test)]
@@ -2491,11 +2508,33 @@ fn purge_with(vault: &Path, scope: PurgeScope, today: Date, wait: bool) -> Resul
         },
     };
     let mut file = parsed(load_series_file(vault))?;
-    if !purge_file(&mut file, scope, today) {
-        return Ok(Purged::Clean);
+    let rewritten = purge_file(&mut file, scope, today);
+    if rewritten {
+        write_series_file(vault, &file_bytes(&file)).map_err(|err| not_purged(format!("could not be written ({})", err.kind())))?;
     }
-    write_series_file(vault, &file_bytes(&file)).map_err(|err| not_purged(format!("could not be written ({})", err.kind())))?;
-    Ok(Purged::Changed)
+    // Under the lock, every leftover copy goes, whatever it holds: no writer that holds the lock
+    // has one open, and the backup never copies one (§6.12).
+    let mut removed = false;
+    for tmp in leftover_series_temps(vault) {
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => removed = true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(not_purged(format!("left a copy it could not remove ({})", err.kind()))),
+        }
+    }
+    Ok(if rewritten || removed { Purged::Changed } else { Purged::Clean })
+}
+
+/// Every `state/calendar-series.json.tmp*` beside the file ([`write_state_file`]'s
+/// `<name>.tmp<pid>`, left by a crash before its rename), sorted. No `state/` folder, none.
+fn leftover_series_temps(vault: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(vault.join("state")) else { return Vec::new() };
+    let leftover = |path: &PathBuf| {
+        path.is_file() && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("calendar-series.json.tmp"))
+    };
+    let mut out: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(leftover).collect();
+    out.sort();
+    out
 }
 
 /// [`refresh_series`], plus a registrar fetch's lists (A2 item 13, "When it is written"): they go
@@ -3738,10 +3777,13 @@ fn asked_courses(vault: &Path, today: Date) -> (BTreeSet<String>, i64) {
 /// `min(budget, ASKS_PER_DAY − asks first proposed today)`. A course is skipped when its
 /// `card:<slug>` marker exists or an ask card already covers it ([`asked_courses`]). Every card
 /// goes through [`file_card`]. A card that cannot be filed is one warning, and ends this run's
-/// asks. Returns `(paths, count, warnings)`.
+/// asks. Returns `(paths, count, warnings)`. A course in `no_time` (the caller's
+/// [`no_time_courses`] of the file it already read and checked, replan §6.5) gets no ask; this
+/// never re-reads the series file, so a failed second read cannot file one (RQ9).
 pub fn emit_asks(
     vault: &Path,
     proposals: &[Proposal],
+    no_time: &BTreeSet<String>,
     today: Date,
     budget: i64,
     ctx: &crate::write::WriteContext,
@@ -3759,9 +3801,7 @@ pub fn emit_asks(
     }
     let set = load(vault);
     let (codes, _) = Codes::load(vault);
-    // Replan §6.5 (RQ9): a course the current term's no-time block lists gets no ask.
-    let no_time = no_time_courses(&read_series_file(vault).0, today);
-    for course in uncovered_courses(vault, &set, proposals, &codes, &no_time) {
+    for course in uncovered_courses(vault, &set, proposals, &codes, no_time) {
         if filed.len() >= allowance {
             break;
         }
@@ -5493,9 +5533,11 @@ pub struct Overview {
     /// `source` is `note` (the planning day) or `template` (`week_template.yaml`).
     pub window: Vec<serde_json::Value>,
     pub uncovered_courses: Vec<UncoveredCourse>,
-    /// Replan §6.5: the course keys of [`no_time_courses`], sorted; step 10's "No set meeting time
-    /// listed". None of them is in `uncovered_courses`.
-    pub no_time_courses: Vec<String>,
+    /// Replan §6.5: the active courses [`no_time_courses`] lists, as `{slug, title}`, matched by
+    /// `course_key`, in slug order; step 10's "No set meeting time listed". A listed key no active
+    /// course has is dropped, and none of these is in `uncovered_courses`. The block on disk stays
+    /// course keys only.
+    pub no_time_courses: Vec<UncoveredCourse>,
     /// Phase 3 (Plan ruling R3-d): [`crate::registrar::status`], or `null`.
     pub registrar: serde_json::Value,
     /// The current registrar proposals (key `registrar:`), as [`proposal_value`].
@@ -5600,7 +5642,7 @@ pub fn overview(vault: &Path, today: Date) -> Overview {
         office_hours,
         window,
         uncovered_courses,
-        no_time_courses: no_time.into_iter().collect(),
+        no_time_courses: listed_courses(vault, &no_time, &stored.codes),
         registrar,
         registrar_proposals,
         registrar_changes,
@@ -11417,7 +11459,7 @@ mod phase2_tests {
 
     fn file_asks(vault: &Path, today: Date, budget: i64) -> (Vec<PathBuf>, usize, Vec<String>) {
         let ctx = WriteContext::new("agent:rank", "cli");
-        emit_asks(vault, &[], today, budget, &ctx, &mut Journal::new(vault))
+        emit_asks(vault, &[], &BTreeSet::new(), today, budget, &ctx, &mut Journal::new(vault))
     }
 
     fn front_of(path: &Path) -> Mapping {
@@ -12940,7 +12982,7 @@ mod class_search_purge_tests {
 
     fn file_asks(v: &Path) -> usize {
         let ctx = WriteContext::new("agent:rank", "cli");
-        emit_asks(v, &[], TODAY, 15, &ctx, &mut Journal::new(v)).1
+        emit_asks(v, &[], &no_time_courses(&read_series_file(v).0, TODAY), TODAY, 15, &ctx, &mut Journal::new(v)).1
     }
 
     /// With the block listing `cs-100`, `emit_asks` files nothing for it; with no block, or a
@@ -12967,16 +13009,89 @@ mod class_search_purge_tests {
         assert!(v.join(&cards[0]).exists(), "the filed ask stays until the student answers it");
     }
 
-    /// `overview` lists the course keys of `no_time_courses`, sorted, in the struct and the JSON,
-    /// and does not list the course as uncovered. Red now.
+    /// `overview` lists the courses of `no_time_courses` as `{slug, title}` from the active
+    /// courses, matched by `course_key` (a key written as a code matches its slug) and in slug
+    /// order, in the struct and the JSON; a key no active course has is dropped, and none is
+    /// listed as uncovered (fix round: widened from course keys, for step 10's titles).
     #[test]
     fn overview_lists_no_time_courses_and_does_not_call_them_uncovered() {
         let v = course_file("overview");
-        put(&v, &file_of(Vec::new()), &[(NOW, &["cs-100"])]);
+        std::fs::write(v.join("courses").join("zoo-100.md"), "---\ntitle: \"ZOO 100\"\nslug: zoo-100\n---\n\nInvented.\n")
+            .unwrap();
+        put(&v, &file_of(Vec::new()), &[(NOW, &["ZOO 100", "cs-100", "gone-101"])]);
         let o = overview(&v, TODAY);
-        assert_eq!(o.no_time_courses, ["cs-100"]);
-        assert_eq!(o.to_json()["no_time_courses"], serde_json::json!(["cs-100"]));
+        let course = |slug: &str, title: &str| UncoveredCourse { slug: slug.into(), title: title.into() };
+        assert_eq!(o.no_time_courses, [course("cs-100", "CS 100"), course("zoo-100", "ZOO 100")]);
+        assert_eq!(
+            o.to_json()["no_time_courses"],
+            serde_json::json!([{"slug": "cs-100", "title": "CS 100"}, {"slug": "zoo-100", "title": "ZOO 100"}])
+        );
         assert_eq!(slugs(&o.uncovered_courses), ["ant-101"]);
+    }
+
+    fn asks_in(v: &Path) -> usize {
+        tree(v)
+            .iter()
+            .filter(|(k, bytes)| k.starts_with("approvals/") && String::from_utf8_lossy(bytes).contains("commitment-ask"))
+            .count()
+    }
+
+    /// Fix round, RQ9 robustness: `rank` hands `emit_asks` the no-time set from the file
+    /// `refresh_series` returned, so a second read that fails (the file turns malformed at the
+    /// filer's lock, after `refresh_series` and before `emit_asks`) cannot file an ask for a no-time
+    /// course. The control, with no block, files one, so the rank does reach `emit_asks`.
+    #[test]
+    fn a_failed_second_read_files_no_ask_for_a_no_time_course() {
+        let rank = |name: &str, blocks: &[(&str, &[&str])]| -> usize {
+            let v = vault(name);
+            std::fs::create_dir_all(v.join("config")).unwrap();
+            std::fs::write(v.join("config").join("actor.yaml"), "human_actor: student\n").unwrap();
+            journal_on(&v, "2026-08-20");
+            // A registrar calendar, so the filer takes its lock and the hook runs.
+            let mut file = file_of(Vec::new());
+            file.calendars.insert(REG_CAL.into(), TODAY);
+            put(&v, &file, blocks);
+            let path = v.to_path_buf();
+            AT_FILER_LOCK.with(|hook| *hook.borrow_mut() = Some(Box::new(move || write_series_file(&path, "not JSON\n").unwrap())));
+            let outcome = crate::cli::run_with(&v, Some("2026-09-10"), "manual", None, crate::cli::Fetchers::default());
+            AT_FILER_LOCK.with(|hook| *hook.borrow_mut() = None);
+            outcome.unwrap();
+            assert_eq!(on_disk(&v), "not JSON\n", "the hook ran");
+            asks_in(&v)
+        };
+        assert_eq!(rank("reread-control", &[]), 1, "the control: no block, one ask");
+        assert_eq!(rank("reread-block", &[(NOW, &["cs-100"])]), 0);
+    }
+
+    /// Fix round: under the lock a purge also deletes every `calendar-series.json.tmp*` that a
+    /// crashed `write_state_file` left. A leftover that mentions class search makes a clean file
+    /// dirty; one that does not, beside a clean file, is left alone with no lock taken.
+    #[test]
+    fn a_purge_deletes_leftover_temp_files_under_the_lock() {
+        let v = vault("tmp-dirty");
+        put(&v, &mixed(), &[(NOW, &["cs-100"])]);
+        let (a, b) = (v.join("state").join("calendar-series.json.tmp4242"), v.join("state").join("calendar-series.json.tmp-x"));
+        std::fs::write(&a, on_disk(&v)).unwrap();
+        std::fs::write(&b, "partial").unwrap();
+        assert_eq!(purge_class_search(&v, PurgeScope::Rows, TODAY), Ok(Purged::Changed));
+        assert!(!a.exists() && !b.exists());
+        assert_eq!(on_disk(&v), bytes_with(&mixed_kept(), &[(NOW, &["cs-100"])]));
+
+        let only = vault("tmp-only");
+        put(&only, &file_of(vec![google_row()]), &[]);
+        let before = on_disk(&only);
+        let left = only.join("state").join("calendar-series.json.tmp4242");
+        std::fs::write(&left, bytes_with(&mixed(), &[])).unwrap();
+        assert_eq!(try_purge_class_search(&only, PurgeScope::Rows, TODAY), Ok(Purged::Changed));
+        assert!(!left.exists());
+        assert_eq!(on_disk(&only), before, "the file itself was clean");
+
+        let clean = vault("tmp-clean");
+        put(&clean, &file_of(vec![google_row()]), &[]);
+        let other = clean.join("state").join("calendar-series.json.tmp4242");
+        std::fs::write(&other, "{}").unwrap();
+        assert_eq!(purge_class_search(&clean, PurgeScope::All, TODAY), Ok(Purged::Clean));
+        assert!(other.exists() && !lock_exists(&clean));
     }
 
     /// `commitments_report_with` (the CLI's report) reads the block too. Red now.
@@ -13099,6 +13214,25 @@ mod class_search_purge_tests {
         BEFORE_DROP_LOCK.with(|hook| *hook.borrow_mut() = None);
         assert_block_kept(&v, &later, &[]);
         assert!(lock_exists(&v), "the lock was taken");
+    }
+
+    /// **Accepted (fix round, contract review):** a store made only for the drop also saves that
+    /// run's ageing, as any store does: an `ended` entry past 28 days and a calendar unread for 14
+    /// days with no feed go in the same write. With nothing to drop they stay on disk, as today
+    /// (the no-lock test above). This pins the behaviour as it is; the spec records it.
+    #[test]
+    fn a_store_made_for_the_drop_also_saves_that_runs_ageing() {
+        let v = vault("drop-ageing");
+        let mut file = file_of(vec![google_row()]);
+        let mut old = ended(GOOGLE_CAL);
+        old.dropped = add_days(TODAY, -(ENDED_DAYS + 2));
+        file.ended.insert("gcal-series:long-gone".into(), old);
+        file.calendars.insert("old-feed".into(), add_days(TODAY, -(UNSEEN_DAYS + 6)));
+        put(&v, &file, &[(SPRING, &["cs-100"]), (NOW, &["cs-100"])]);
+        refresh_series(&v, &[], TODAY);
+        let mut aged = file_of(vec![google_row()]);
+        aged.ended.clear();
+        assert_block_kept(&v, &aged, &[(NOW, &["cs-100"])]);
     }
 
     /// A failed lock, or a drop with no lock held: nothing is stored, the warning names the lock,
