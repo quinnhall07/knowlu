@@ -2359,7 +2359,7 @@ fn test_09_finish_is_refused_before_step_10_is_confirmed_and_the_gate_lists_clas
 }
 
 #[test]
-fn test_09_finish_needs_the_four_local_jobs_present_and_done_and_only_the_stores_may_be_absent() {
+fn test_09_finish_needs_the_three_local_jobs_present_and_done_and_only_the_stores_may_be_absent() {
     for missing in ["school.apply", "school.courses", "config.ingest"] {
         let mut s = finishable();
         s.jobs.remove(missing);

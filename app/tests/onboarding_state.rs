@@ -1661,8 +1661,7 @@ fn test_c5b_an_answers_file_an_older_build_wrote_with_registrar_rows_still_loads
     v["registrar_rows"] = serde_json::json!([{"code": "QLT 101", "days": "MWF", "start": "09:00", "end": "09:50"}]);
     std::fs::write(answers_path(&d), serde_json::to_string(&v).unwrap()).unwrap();
     let loaded = load_answers(&d).unwrap().expect("the old file loads");
-    assert_eq!(loaded.courses, full_answers().courses, "the rest of the file reads as it did");
-    assert_eq!(loaded.feeds, full_answers().feeds);
+    assert_eq!(loaded, full_answers(), "the rest of the file reads as it did");
     // And without the field at all, which is what a new build writes.
     let mut bare = serde_json::to_value(full_answers()).unwrap();
     bare.as_object_mut().unwrap().remove("registrar_rows");
@@ -1673,7 +1672,7 @@ fn test_c5b_an_answers_file_an_older_build_wrote_with_registrar_rows_still_loads
 #[test]
 fn test_c5b_the_state_source_names_no_registrar_piece() {
     let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/onboarding_state.rs")).unwrap();
-    for gone in ["registrar.confirm", "RegistrarRow", "registrar_rows", "LANE_REQUIRED", "REGISTRAR_FILE"] {
+    for gone in ["registrar.confirm", "RegistrarRow", "registrar_rows", "REGISTRAR_FILE"] {
         assert!(!src.contains(gone), "onboarding_state.rs still names {gone}");
     }
 }

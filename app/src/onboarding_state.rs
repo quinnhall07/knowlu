@@ -1050,9 +1050,10 @@ pub fn onboarding_sign_out_inner(s: &dyn ExitSeams, g: &ExitGuard) -> Value {
     serde_json::json!({ "ok": true, "error": Value::Null })
 }
 
+const LANE_REQUIRED: [&str; 3] = ["school.apply", "school.courses", "config.ingest"];
 /// The first of the three required lane jobs that is `failed`: `status_inner`'s `failed_job`.
 fn failed_lane_job(state: &OnboardingState) -> Option<&'static str> {
-    ["school.apply", "school.courses", "config.ingest"].into_iter().find(|j| state.jobs.get(*j).is_some_and(|r| r.state == JobState::Failed))
+    LANE_REQUIRED.into_iter().find(|j| state.jobs.get(*j).is_some_and(|r| r.state == JobState::Failed))
 }
 
 /// Why Open Knowlu is not offered yet, if it is not: a lane job that is not `done` (`config.ingest`
@@ -1064,7 +1065,7 @@ fn finish_refusal(state: &OnboardingState, now_secs: i64) -> Option<String> {
     if failed_lane_job(state).is_some() { return Some("Something in your setup needs Try again before Knowlu opens.".into()); }
     // The three local jobs must exist and be done: a crash between two enqueues can leave one unrecorded,
     // and finish deletes the only copy of the answers it would have read.
-    let lane_open = ["school.apply", "school.courses", "config.ingest"].iter().any(|j| st(j) != Some(JobState::Done))
+    let lane_open = LANE_REQUIRED.iter().any(|j| st(j) != Some(JobState::Done))
         || ["school.store", "calendar.store"].iter().any(|j| st(j).is_some_and(|s| !matches!(s, JobState::Done | JobState::Failed | JobState::Skipped)));
     if lane_open { return Some("Knowlu is still saving your setup. Try again in a moment.".into()); }
     // Class times are the step 10 confirm (§4.6): nothing opens the reveal before it.
