@@ -70,8 +70,8 @@ impl Gate {
     }
 }
 
-const LANE_JOBS: [&str; 6] = ["school.store", "calendar.store", "school.apply", "school.courses", "registrar.confirm", "config.ingest"];
-const NOTE_JOBS: [&str; 4] = ["school.courses", "registrar.confirm", "slot.partial", "slot.first_full"];
+const LANE_JOBS: [&str; 5] = ["school.store", "calendar.store", "school.apply", "school.courses", "config.ingest"];
+const NOTE_JOBS: [&str; 3] = ["school.courses", "slot.partial", "slot.first_full"];
 
 /// Sets a flag while held and records an overlap if it was already set.
 struct Busy<'a>(&'a AtomicBool);
@@ -226,8 +226,7 @@ fn state_at(step: u8, settled: bool) -> OnboardingState {
     s
 }
 
-/// `state_at` with `school.apply` already done: `registrar.confirm` waits for it (F8h), because the
-/// school it writes under comes from the `campus.yaml` that job creates.
+/// `state_at` with `school.apply` already done.
 fn state_applied(step: u8, settled: bool) -> OnboardingState {
     let mut s = state_at(step, settled);
     s.jobs.insert("school.apply".into(), JobRecord { state: JobState::Done, ..Default::default() });
@@ -281,7 +280,7 @@ impl Rig {
 fn test_03_without_an_entitlement_every_gated_job_is_held_and_never_started_then_runs_in_enqueue_order() {
     let r = rig("t03", state_at(4, true), false);
     // `slot.first_full` is not enqueued by hand: step 10's confirm asks for it, after the entitlement.
-    let gated = ["school.store", "calendar.store", "school.apply", "school.courses", "registrar.confirm", "config.ingest", "slot.partial"];
+    let gated = ["school.store", "calendar.store", "school.apply", "school.courses", "config.ingest", "slot.partial"];
     for j in ["school.capture", "school.preview"].into_iter().chain(gated) { r.q.enqueue(j); }
     r.wait_for("the device-side jobs", |r| r.state_of("school.preview") == JobState::Done);
     r.idle();
@@ -418,9 +417,9 @@ fn run_whole_onboarding(tag: &str, order: &[&str]) -> Rig {
 #[test]
 fn test_04_whatever_order_the_asks_were_answered_in_a_slots_steps_keep_the_canonical_order() {
     let orders: [&[&str]; 3] = [
-        &["school.apply", "school.courses", "slot.partial", "config.ingest", "registrar.confirm"],
-        &["config.ingest", "registrar.confirm", "school.courses", "school.apply", "slot.partial"],
-        &["slot.partial", "registrar.confirm", "config.ingest", "school.apply", "school.courses"],
+        &["school.apply", "school.courses", "slot.partial", "config.ingest"],
+        &["config.ingest", "school.courses", "school.apply", "slot.partial"],
+        &["slot.partial", "config.ingest", "school.apply", "school.courses"],
     ];
     for (i, order) in orders.iter().enumerate() {
         let r = run_whole_onboarding(&format!("t04-{i}"), order);
@@ -465,7 +464,7 @@ fn pos_of(r: &Rig, e: &str) -> usize { r.log.pos(e).unwrap_or_else(|| panic!("no
 fn test_08_no_reader_of_the_config_starts_before_config_ingest_and_the_jobs_wait_for_their_inputs() {
     let r = rig_with("t08", state_at(4, false), true, vec![ok_reading(true, 10, 10), ok_reading(true, 10, 10), ok_reading(true, 10, 10)], |_| {});
     // A deliberately scrambled order.
-    for j in ["calendar.read", "google.calendar_read", "config.ingest", "slot.partial", "registrar.confirm", "school.courses", "calendar.store", "school.store", "school.apply"] {
+    for j in ["calendar.read", "google.calendar_read", "config.ingest", "slot.partial", "school.courses", "calendar.store", "school.store", "school.apply"] {
         r.q.enqueue(j);
     }
     r.wait_for("config.ingest", |r| r.state_of("config.ingest") == JobState::Done);
@@ -480,7 +479,6 @@ fn test_08_no_reader_of_the_config_starts_before_config_ingest_and_the_jobs_wait
     for store in ["school.store", "calendar.store"] {
         assert!(pos_of(&r, "start:config.ingest") > pos_of(&r, &format!("end:{store}")), "config.ingest waits for {store} to settle");
     }
-    assert!(pos_of(&r, "start:registrar.confirm") > pos_of(&r, "end:school.courses"), "registrar.confirm waits for school.courses");
     // `ingest` and `coursework` (engine steps) appear only in a slot that started after config.ingest;
     // `grades` only after school.apply and school.courses are both done, so never in a BeforeConfig slot.
     for (job, step) in r.log.steps() {
@@ -611,6 +609,8 @@ const CONFIRMED: &str = "2026-10-24T12:00:00Z";
 fn finishable() -> OnboardingState {
     let mut s = state_at(11, true);
     for j in LANE_JOBS { s.jobs.insert(j.into(), JobRecord { state: JobState::Done, ..Default::default() }); }
+    // C5b: delete this line with the job's entry in `LANE_REQUIRED` (onboarding_state.rs); until then finish still reads it.
+    s.jobs.insert("registrar.confirm".into(), JobRecord { state: JobState::Done, ..Default::default() });
     s.step10_confirmed_at = Some(CONFIRMED.into());
     s
 }
@@ -1242,21 +1242,19 @@ fn test_14_a_restored_note_is_matched_by_its_source_uid_as_well_as_its_code() {
 // ---- test 16: the notes gate and sync ----------------------------------------------------------------------------------------
 
 fn slow_notes(r: &Rig) {
-    for j in ["school.courses", "registrar.confirm"] {
-        r.fake.behave(j, || { std::thread::sleep(Duration::from_millis(40)); Outcome::Done(BTreeMap::new()) });
-    }
+    r.fake.behave("school.courses", || { std::thread::sleep(Duration::from_millis(40)); Outcome::Done(BTreeMap::new()) });
 }
 
-/// The slot's `sync` step is held open for 50 ms while the two note jobs are asked for, so a missing
+/// The slot's `sync` step is held open for 50 ms while the note job is asked for, so a missing
 /// notes gate is an overlap every time, not only on a lucky schedule. Returns when the queue is idle.
 fn slot_holds_sync_while_notes_are_asked_for(r: &Rig) {
     slow_notes(r);
     let sync = r.fake.block_step("slot.partial", "sync");
     r.q.enqueue("slot.partial");
     r.wait_log("step:slot.partial:sync");
-    for j in ["school.courses", "registrar.confirm"] { r.q.enqueue(j); }
+    r.q.enqueue("school.courses");
     std::thread::sleep(Duration::from_millis(50));
-    assert!(!r.log.ran("school.courses") && !r.log.ran("registrar.confirm"), "a note job started while sync was running: {:?}", r.log.all());
+    assert!(!r.log.ran("school.courses"), "a note job started while sync was running: {:?}", r.log.all());
     sync.release();
     r.idle();
 }
@@ -1266,7 +1264,7 @@ fn test_16_at_payment_with_the_account_settled_the_note_jobs_and_sync_never_over
     let r = rig("t16-settled", state_applied(4, true), true);
     slot_holds_sync_while_notes_are_asked_for(&r);
     r.log.assert_clean();
-    for j in ["school.courses", "registrar.confirm", "slot.partial"] {
+    for j in ["school.courses", "slot.partial"] {
         assert_eq!(r.state_of(j), JobState::Done, "{j} neither failed nor was skipped: {:?}", r.log.all());
     }
     assert!(r.log.steps().contains(&("slot.partial".to_string(), "sync".to_string())), "sync is not skipped");
@@ -1296,11 +1294,11 @@ fn test_16_with_the_account_unsettled_sync_runs_first_and_the_note_jobs_after_it
     let r = rig("t16-unsettled", state_applied(4, false), true);
     // Asked for in the other order: the notes first. Sync still runs first, because the account is not reached.
     slow_notes(&r);
-    for j in ["school.courses", "registrar.confirm", "slot.partial"] { r.q.enqueue(j); }
+    for j in ["school.courses", "slot.partial"] { r.q.enqueue(j); }
     r.idle();
     r.log.assert_clean();
     let sync = r.log.pos("step:slot.partial:sync").expect("sync ran");
-    assert!(sync < r.log.pos("start:school.courses").unwrap() && sync < r.log.pos("start:registrar.confirm").unwrap(), "{:?}", r.log.all());
+    assert!(sync < r.log.pos("start:school.courses").unwrap(), "{:?}", r.log.all());
 }
 
 fn first_sync(r: &Rig) -> JobRecord { r.q.snapshot().jobs.get("first.sync").cloned().unwrap_or_default() }
@@ -1414,24 +1412,6 @@ fn test_16_t0_a_cursor_that_moves_on_every_run_stops_at_exactly_fifty_and_try_ag
 }
 
 #[test]
-fn test_36_registrar_confirm_waits_for_school_apply_as_well_as_school_courses() {
-    // F8h: `school_of` reads the campus.yaml that school.apply creates, so the confirm is not ready
-    // while that job is pending, and runs once it is done.
-    let mut s = state_at(4, true);
-    s.jobs.insert("school.courses".into(), JobRecord { state: JobState::Done, ..Default::default() });
-    let r = rig("t36-waits-apply", s, true);
-    r.q.enqueue("registrar.confirm");
-    r.idle();
-    assert!(!r.log.ran("registrar.confirm"), "started before school.apply: {:?}", r.log.all());
-    assert_eq!(r.state_of("registrar.confirm"), JobState::Pending);
-    r.q.enqueue("school.apply");
-    r.idle();
-    r.log.assert_clean();
-    assert_eq!(r.state_of("registrar.confirm"), JobState::Done, "{:?}", r.log.all());
-    assert!(r.log.pos("end:school.apply").unwrap() < r.log.pos("start:registrar.confirm").unwrap(), "{:?}", r.log.all());
-}
-
-#[test]
 fn test_16_a_lane_job_retrying_on_a_held_sync_lock_holds_neither_vault_io_nor_the_lock_between_tries() {
     let vault_io = Mutex::new(());
     let lock_held = Arc::new(AtomicBool::new(false));
@@ -1470,16 +1450,16 @@ fn test_16_a_lane_job_retrying_on_a_held_sync_lock_holds_neither_vault_io_nor_th
 }
 
 #[test]
-fn test_16_registrar_confirm_is_entered_with_vault_io_free_and_retries_only_on_the_sync_running_constant() {
+fn test_16_a_retried_job_is_entered_with_vault_io_free_and_retries_only_on_the_sync_running_constant() {
     let vault_io = Mutex::new(());
     let tries = Cell::new(0usize);
     let sleeps = Cell::new(0usize);
-    let fake_registrar = || -> Result<i32, String> {
-        assert!(vault_io.try_lock().is_ok(), "registrar.confirm's fake is entered with vault_io free");
+    let fake_job = || -> Result<i32, String> {
+        assert!(vault_io.try_lock().is_ok(), "the retried job's fake is entered with vault_io free");
         tries.set(tries.get() + 1);
         if tries.get() <= 2 { Err(knowlu::week::SYNC_RUNNING.to_string()) } else { Ok(42) }
     };
-    let out = retry_on_sync_running(&|_| sleeps.set(sleeps.get() + 1), &mut || fake_registrar());
+    let out = retry_on_sync_running(&|_| sleeps.set(sleeps.get() + 1), &mut || fake_job());
     assert_eq!(out, Ok(42));
     assert_eq!((tries.get(), sleeps.get()), (3, 2));
     // A typed copy of the sentence is not the constant, and nothing else is "try again".
@@ -1731,7 +1711,6 @@ fn test_12_a_course_removed_at_step_3_reaches_no_note_and_no_course_map_entry_an
     // §14.47: the removed course was graded, so the grades count falls by one; no class time falls.
     assert_eq!(totals.get("grades_courses"), Some(&Some(1)), "QLT; KNT removed, WVG has no graded column: {totals:?}");
     assert_eq!(totals.get("class_times"), Some(&Some(6)), "3 + 2 + 1: the removed course's class times are still imported: {totals:?}");
-    assert_eq!(registrar_confirm_rows(&reloaded), reloaded.registrar_rows, "every registrar row still reaches registrar.confirm");
     let created = RefCell::new(Vec::<String>::new());
     let out = run_school_courses(&dir, &[], &mut |c| { created.borrow_mut().push(c.code.clone()); Ok(c.name.to_lowercase().replace(' ', "-")) });
     assert!(matches!(out, Outcome::Done(_)), "{out:?}");
@@ -1794,7 +1773,7 @@ fn test_17_after_a_rewind_with_no_answers_file_the_config_jobs_stay_pending_and_
     proceed(&r, 3);
     proceed(&r, 8);
     r.idle();
-    let config = ["school.courses", "registrar.confirm", "config.ingest"];
+    let config = ["school.courses", "config.ingest"];
     for j in config {
         assert!(!r.log.ran(j), "{j} started with no answers file: {:?}", r.log.all());
         assert_eq!(r.state_of(j), JobState::Pending, "{j} waits");
@@ -1806,7 +1785,7 @@ fn test_17_after_a_rewind_with_no_answers_file_the_config_jobs_stay_pending_and_
     // An unreadable file is the same as an absent one.
     std::fs::write(answers_path(&r.dir), "{ broken").unwrap();
     let before = r.log.started().len();
-    r.q.enqueue("registrar.confirm");
+    r.q.enqueue("config.ingest");
     r.idle();
     assert_eq!(r.log.started().len(), before, "no config job runs on an unreadable answers file");
 }
@@ -1917,24 +1896,6 @@ fn test_14_two_kept_shells_of_one_human_code_share_one_note_and_each_key_maps_to
     assert_eq!(slugs.get("_0990_1").map(String::as_str), Some("knotwork-theory"), "{slugs:?}");
     assert_eq!(slugs.get("_0990_1"), slugs.get("_1002_1"), "both shells name the one note: {slugs:?}");
     assert!(!slugs.contains_key("KNT 220"), "keyed by each row's key, never by the human code: {slugs:?}");
-}
-
-#[test]
-fn test_12_every_registrar_row_reaches_registrar_confirm_whatever_was_removed() {
-    // §14.47 (G5): the registrar holds only the current term, so a removal never removes a class time.
-    let dir = scratch("t12-registrar");
-    let rows = vec![
-        RegistrarRow { code: "QLT 101".into(), days: "MWF".into(), start: "09:00".into(), end: "09:50".into() },
-        RegistrarRow { code: "KNT 220".into(), days: "TR".into(), start: "11:00".into(), end: "12:15".into() },
-        RegistrarRow { code: "WVG 105".into(), days: "W".into(), start: "14:00".into(), end: "16:50".into() },
-    ];
-    let capture = serde_json::json!({"capture": {"courses": three_courses(), "registrar_rows": rows}});
-    assert_eq!(onboarding_answer_inner(&dir, 3, &capture, &mut |_| {})["ok"], true);
-    for key in ["_1002_1", "_1001_1", "_1003_1"] {
-        assert_eq!(onboarding_answer_inner(&dir, 3, &serde_json::json!({"remove": key}), &mut |_| {})["ok"], true);
-        let a = load_answers(&dir).unwrap().unwrap();
-        assert_eq!(registrar_confirm_rows(&a), rows, "after removing {key}, every row, in captured order");
-    }
 }
 
 // ---- F1 review r5 ------------------------------------------------------------------------------------------
@@ -2066,7 +2027,7 @@ fn test_03_a_runner_that_panics_fails_its_job_with_the_closed_set_reason_and_the
 fn test_03_every_job_name_these_tests_use_is_in_the_resume_order() {
     // Every dotted job-name literal in this file whose first part is a job family. A job left out of
     // `JOB_ORDER` resumes after `slot.first_full` (a missing `calendar.read` once did).
-    const FAMILIES: [&str; 8] = ["school", "calendar", "mail", "google", "coursework", "registrar", "config", "slot"];
+    const FAMILIES: [&str; 7] = ["school", "calendar", "mail", "google", "coursework", "config", "slot"];
     let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("onboarding_jobs.rs")).unwrap();
     let mut seen = std::collections::BTreeSet::new();
     for lit in src.split('"').skip(1).step_by(2) {
@@ -3093,10 +3054,12 @@ fn test_33_the_unlisted_paste_path_with_no_registrar_rows_ends_with_the_four_lan
         assert_eq!(out["ok"], true, "step {step}: {out}");
     }
     r.idle();
-    for j in ["school.apply", "school.courses", "registrar.confirm", "config.ingest", "school.store"] {
+    for j in ["school.apply", "school.courses", "config.ingest", "school.store"] {
         assert_eq!(r.state_of(j), JobState::Done, "{j}: {:?}", r.log.all());
     }
     r.q.update_state(|s| s.step10_confirmed_at = Some(CONFIRMED.into())).unwrap();
+    // C5b: delete this line with the job's entry in `LANE_REQUIRED` (onboarding_state.rs).
+    r.q.update_state(|s| { s.jobs.insert("registrar.confirm".into(), JobRecord { state: JobState::Done, ..Default::default() }); }).unwrap();
     let out = status_inner(&r.q.snapshot(), epoch(CONFIRMED) + 180);
     assert_eq!(out["finish_ready"], true, "{out}");
 }
@@ -3181,7 +3144,7 @@ fn test_33_a_repeated_step_3_or_8_proceed_after_its_jobs_are_done_re_runs_nothin
     proceed(&r, 3);
     proceed(&r, 8);
     r.idle();
-    let lane = ["school.store", "school.apply", "school.courses", "registrar.confirm", "config.ingest"];
+    let lane = ["school.store", "school.apply", "school.courses", "config.ingest"];
     for j in lane { assert_eq!(r.state_of(j), JobState::Done, "{j}"); }
     proceed(&r, 3);
     proceed(&r, 8);
@@ -3320,7 +3283,7 @@ fn test_17_a_relaunch_after_a_sign_out_rewind_starts_no_job_and_the_redone_steps
     r.idle();
     r.q.update_state(|s| s.step = 8).unwrap();
     let before = r.q.snapshot();
-    for j in ["school.apply", "school.courses", "registrar.confirm", "config.ingest", "slot.partial"] { assert_eq!(before.jobs[j].state, JobState::Done, "{j}"); }
+    for j in ["school.apply", "school.courses", "config.ingest", "slot.partial"] { assert_eq!(before.jobs[j].state, JobState::Done, "{j}"); }
     for j in ["mail.setup", "mail.canary", "mail.first_pass"] { assert_eq!(before.jobs[j].state, JobState::Skipped, "{j}"); }
     assert!(before.skips.iter().any(|k| (k.step, k.source.as_str()) == (5, "mail")));
     // The next launch, over the rewound file: a fresh install's, so nothing is queued and nothing runs.
@@ -3794,4 +3757,41 @@ fn test_43_each_wrapper_calls_its_inner_with_cs_vault_and_neither_takes_a_vault_
     // Today's functions are called unchanged: the shell's list still needs their `vault` argument.
     assert!(src.contains("pub fn discover_coursework(vault: String, zybooks: bool, vhl: bool)"));
     assert!(src.contains("pub fn store_credentials(vault: String, source: String, user: String, secret: String)"));
+}
+
+// ---- C5a: the registrar.confirm job is gone (replan §5, §8) -----------------------------------------------------
+
+#[test]
+fn test_c5a_the_retired_registrar_job_is_in_no_list_and_no_helper_of_the_queue_source() {
+    assert!(!JOB_ORDER.contains(&"registrar.confirm"), "the resume order still names the retired job: {JOB_ORDER:?}");
+    let src = src_of("onboarding_jobs.rs");
+    assert!(!src.contains("registrar.confirm"), "onboarding_jobs.rs still names the retired job");
+    assert!(!src.contains("registrar_confirm_rows"), "its row helper is gone");
+}
+
+#[test]
+fn test_c5a_an_ask_for_the_retired_job_waits_for_no_input_and_runs_off_the_lane() {
+    // Nothing is done and no answers file is saved: while the job was in `inputs_ready` it waited for
+    // `school.apply`, `school.courses` and the answers. A name no list holds is always ready, and it
+    // is no lane job (the fake's `LANE_JOBS` mirrors the queue's) and no note job.
+    let r = rig_full("c5a-ask", state_at(4, true), true, vec![ok_reading(true, 10, 10)], false, |_| {});
+    r.q.enqueue("registrar.confirm");
+    r.idle();
+    assert!(r.log.ran("registrar.confirm"), "a retired job waits for no input: {:?}", r.log.all());
+    r.log.assert_clean();
+}
+
+#[test]
+fn test_c5a_a_resumed_queue_holding_an_old_record_of_the_retired_job_starts_cleanly() {
+    // A file written before C5a: the lane's other jobs are done and the old job is still pending.
+    let mut s = state_applied(4, true);
+    s.jobs.insert("school.courses".into(), JobRecord { state: JobState::Done, ..Default::default() });
+    s.jobs.insert("registrar.confirm".into(), JobRecord { state: JobState::Pending, ..Default::default() });
+    let r = rig("c5a-resume", s, true);
+    r.q.enqueue("config.ingest");
+    r.idle();
+    r.log.assert_clean();
+    assert_eq!(r.state_of("config.ingest"), JobState::Done, "the rest of the queue runs: {:?}", r.log.all());
+    let old = r.q.snapshot().jobs.get("registrar.confirm").map(|j| j.state);
+    assert!(!matches!(old, Some(JobState::Pending | JobState::Held | JobState::Running)), "the old record is not left waiting: {old:?}");
 }

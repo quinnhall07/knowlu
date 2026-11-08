@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 /// The two threads: the serial queue (every job that runs an engine child or a window) and the
 /// local lane (`school.store`, `calendar.store`, `school.apply`, `school.courses`,
-/// `registrar.confirm`, `config.ingest`). Their names are how a fake tells where it was called from.
+/// `config.ingest`). Their names are how a fake tells where it was called from.
 pub const QUEUE_THREAD: &str = "onboarding-queue";
 pub const LANE_THREAD: &str = "onboarding-lane";
 
@@ -95,15 +95,15 @@ pub const CHAIN_BACKSTOP: u32 = 50;
 
 // ---- the core (F8a): states, persistence, the two serial threads, the entitlement hold ----------------
 
-const LANE: [&str; 6] = ["school.store", "calendar.store", "school.apply", "school.courses", "registrar.confirm", "config.ingest"];
+const LANE: [&str; 5] = ["school.store", "calendar.store", "school.apply", "school.courses", "config.ingest"];
 /// Device-side before payment; every other job is held until the vault is `Entitled` (§4.3).
 const UNGATED: [&str; 2] = ["school.capture", "school.preview"];
 /// The lane jobs that write notes: they and the slots never run at once (§4.3, F8h's gate guards the runners).
-const NOTE_JOBS: [&str; 2] = ["school.courses", "registrar.confirm"];
+const NOTE_JOBS: [&str; 1] = ["school.courses"];
 /// The order a resumed queue runs its jobs in: step order, then ask order within a step (§4.2).
 /// A name not listed sorts after these, by name.
-pub const JOB_ORDER: [&str; 17] = [
-    "school.capture", "school.preview", "school.store", "school.apply", "school.courses", "registrar.confirm",
+pub const JOB_ORDER: [&str; 16] = [
+    "school.capture", "school.preview", "school.store", "school.apply", "school.courses",
     "mail.setup", "mail.canary", "mail.first_pass", "google.gmail_first_read", "calendar.store", "calendar.read", "google.calendar_read",
     "coursework.discover", "config.ingest", "slot.partial", "slot.first_full",
 ];
@@ -215,7 +215,6 @@ impl Core {
         match job {
             "school.apply" => school_apply_may_run(&self.state),
             "school.courses" => self.state.account_settled && answers(),
-            "registrar.confirm" => done("school.apply") && done("school.courses") && answers(),
             "config.ingest" => done("school.courses") && settled("school.store") && settled("calendar.store") && answers(),
             "calendar.read" | "google.calendar_read" => done("config.ingest"),
             "slot.first_full" => done("config.ingest") && settled("school.apply"),
@@ -760,7 +759,7 @@ pub const RETRY_INTERVAL: Duration = Duration::from_millis(250);
 pub const RETRY_BUDGET: Duration = Duration::from_secs(30);
 
 /// Retries `try_once` while it refuses with `week::SYNC_RUNNING` (and only that), every
-/// [`RETRY_INTERVAL`] up to [`RETRY_BUDGET`]; holds nothing itself. For `registrar.confirm`, whose
+/// [`RETRY_INTERVAL`] up to [`RETRY_BUDGET`]; holds nothing itself. For a caller whose
 /// call takes `vault_io` and the lock itself.
 pub fn retry_on_sync_running<T>(
     sleep: &dyn Fn(Duration),
@@ -1015,13 +1014,6 @@ pub fn ingest_handoff(answers: &Answers, pending: &dyn PendingStore) -> IngestHa
 /// too, and the saved buckets are left exactly as they were.
 pub fn run_school_preview(_data_dir: &Path, _engine: &mut dyn FnMut(&Value) -> Result<Value, String>) -> Outcome {
     todo!("F8b: school.preview")
-}
-
-/// What F8c's `registrar.confirm` hands R24's write: **every** saved registrar row, in captured order,
-/// a removed course's included (§14.47, G5: removal never touches class times). From the answers
-/// file alone.
-pub fn registrar_confirm_rows(answers: &Answers) -> Vec<crate::onboarding_state::RegistrarRow> {
-    answers.registrar_rows.clone()
 }
 
 /// After `config.ingest` has written the file: deletes both pending credentials. Returns how many
@@ -1799,12 +1791,12 @@ mod order_tests {
     }
 
     #[test]
-    fn no_config_job_runs_without_a_readable_answers_file_and_both_run_once_it_is_saved() {
+    fn config_ingest_does_not_run_without_a_readable_answers_file_and_runs_once_it_is_saved() {
         let mut s = state(true);
-        s.jobs.insert("school.courses".into(), done_rec()); // registrar.confirm and config.ingest have their input
-        s.jobs.insert("school.apply".into(), done_rec()); // and registrar.confirm waits for this too (F8h)
+        s.jobs.insert("school.courses".into(), done_rec()); // config.ingest has its input
+        s.jobs.insert("school.apply".into(), done_rec());
         let (q, fake, dir) = rig("i5", s, vec![], false);
-        for j in ["registrar.confirm", "config.ingest"] { q.enqueue(j); }
+        q.enqueue("config.ingest");
         idle(&q);
         assert!(fake.log().is_empty(), "{:?}", fake.log());
         std::fs::write(crate::onboarding_state::answers_path(&dir), "{ broken").unwrap();
@@ -1813,7 +1805,7 @@ mod order_tests {
         assert!(fake.log().is_empty(), "an unreadable file is not no answers: {:?}", fake.log());
         save_answers(&dir, &Answers::default()).unwrap();
         q.wake();
-        wait_for("both jobs", || job(&q, "registrar.confirm").state == JobState::Done && job(&q, "config.ingest").state == JobState::Done);
+        wait_for("config.ingest", || job(&q, "config.ingest").state == JobState::Done);
     }
 
     #[test]
