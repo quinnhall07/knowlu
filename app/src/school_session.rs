@@ -190,13 +190,17 @@ pub fn clear_use(data_dir: &Path, u: Use) -> Result<(), String> {
 // ---- who gets the folder ----------------------------------------------------------------------
 
 /// The folder a feature's window is built on; `None` for a feature with no folder of this module's.
-/// Grades keep today's `lms-session` folder until the school folder exists, so an install already
-/// signed in is not signed out by an upgrade.
+/// **Grades keep today's `lms-session` folder** while it exists, until a `Use::Grades` is recorded
+/// (S2's review): a capture window opened and closed unsigned leaves a bare school folder, and that
+/// must not move grades off a working sign-in. With no old folder, grades read through the school's.
+/// This never writes or deletes; [`grades_profile`] is the one that records the use.
 pub fn profile_for(feature: Feature, _row: Option<&Curated>, data_dir: &Path) -> Option<PathBuf> {
     match feature {
         Feature::Grades => {
             let legacy = data_dir.join(LEGACY_GRADES_DIR);
-            Some(if !session_dir(data_dir).exists() && legacy.exists() { legacy } else { session_dir(data_dir) })
+            // A `school.json` that cannot be read records nothing, so the old folder, if any, stays.
+            let moved = uses(data_dir).is_ok_and(|u| u.contains(&Use::Grades));
+            Some(if legacy.exists() && !moved { legacy } else { session_dir(data_dir) })
         }
         Feature::LmsCapture => Some(session_dir(data_dir)),
         Feature::Registrar | Feature::SchoolMail => None,
@@ -222,21 +226,22 @@ pub fn wrong_password_text_ok(text: &str) -> bool {
         && !text.split(|c: char| !c.is_alphanumeric()).any(|t| !t.is_empty() && t.chars().all(char::is_numeric))
 }
 
-// ---- S3 stubs: the seams the windows on the folder are tested through. S4a and S4b fill them. ----
+// ---- the windows on the folder (S3's seams; S4a and S4b fill them) -------------------------------
 
-/// The one arguments string every window on the school folder is built with. **S3 stub**: S4a sets it
-/// equal to `mail::MAIL_BROWSER_ARGS` (S-G recorded no change). It never carries a debug port.
-pub const SCHOOL_BROWSER_ARGS: &str = "";
+/// The one arguments string every window on the school folder is built with: the mail window's, since
+/// S-G recorded no change. It never carries a debug port.
+pub const SCHOOL_BROWSER_ARGS: &str = crate::mail::MAIL_BROWSER_ARGS;
 
-/// A school window's browser arguments. The debug port is a parameter so the rule is testable without
-/// the environment: a window on the school folder gets [`SCHOOL_BROWSER_ARGS`] whatever port is
-/// passed, in every build. **S3 stub.**
+/// A school window's browser arguments. The debug port is a parameter only so the rule is testable
+/// without the environment: a window on the school folder gets [`SCHOOL_BROWSER_ARGS`] whatever port is
+/// passed, in every build. The mail window's own port rule (`crate::debug_port`) is not this one's.
 pub fn window_args(_debug_port: Option<u16>) -> &'static str {
     SCHOOL_BROWSER_ARGS
 }
 
 /// One cookie a window's jar returned, for the fakes of the S3 cookie tests. `domain` is the cookie's own
-/// `Domain` attribute, which no reader may send a request to.
+/// `Domain` attribute, which no reader may send a request to: a request goes to the host the reader was
+/// given, and the jar is asked for that host alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JarCookie {
     pub name: String,
@@ -244,9 +249,64 @@ pub struct JarCookie {
     pub domain: String,
 }
 
-/// The folder grades' window is built on, and the use that choice records. **S3 stub**: S4a makes it
-/// [`profile_for`]'s answer for `Feature::Grades` and, whenever that is [`session_dir`], calls
-/// `add_use(Grades)` before returning. It moves off `lms-session` only on a recorded `Use::Grades`.
+/// The cookies as one `cookie` header: `name=value` pairs only, never a `Domain`.
+pub fn cookie_header(cookies: &[JarCookie]) -> String {
+    cookies.iter().map(|c| format!("{}={}", c.name, c.value)).collect::<Vec<_>>().join("; ")
+}
+
+/// A real window's jar for one URL, as the readers' `query_jar` closures take it. A URL that does not
+/// parse, or a jar WebView2 will not give, answers no cookies and sets [`WindowJar::failed`], so the
+/// caller's request closure can refuse to send and the caller can name the failure.
+pub struct WindowJar<'a> {
+    window: &'a tauri::WebviewWindow,
+    failed: std::cell::Cell<bool>,
+}
+
+impl<'a> WindowJar<'a> {
+    pub fn new(window: &'a tauri::WebviewWindow) -> Self {
+        WindowJar { window, failed: std::cell::Cell::new(false) }
+    }
+    pub fn query(&self, url: &str) -> Vec<JarCookie> {
+        let read = url.parse::<tauri::Url>().ok().and_then(|u| self.window.cookies_for_url(u).ok());
+        match read {
+            Some(cookies) => cookies
+                .iter()
+                .map(|c| JarCookie { name: c.name().to_string(), value: c.value().to_string(), domain: c.domain().unwrap_or("").to_string() })
+                .collect(),
+            None => {
+                self.failed.set(true);
+                Vec::new()
+            }
+        }
+    }
+    /// Whether any read since the last [`WindowJar::reset`] could not be made.
+    pub fn failed(&self) -> bool {
+        self.failed.get()
+    }
+    pub fn reset(&self) {
+        self.failed.set(false);
+    }
+}
+
+/// The key the per-profile lock is taken under: the profile folder's own name (`profiles\<id>`), which
+/// is the profile's id. A path with no name falls back to the whole path, so two profiles never share one.
+pub fn profile_key(data_dir: &Path) -> String {
+    data_dir.file_name().map_or_else(|| data_dir.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned())
+}
+
+/// The folder grades' window is built on, and the use that choice records: [`profile_for`]'s answer for
+/// `Feature::Grades` and, whenever that is [`session_dir`], `add_use(Grades)` before returning, so a later
+/// `clear_use(CourseList)` can never delete the folder grades read through. It moves off `lms-session`
+/// only on a recorded `Use::Grades`; once it has, the abandoned `lms-session` is forgotten (Q-B4), best
+/// effort: a delete that cannot finish is tried again at the next window. Window-opening callers only:
+/// status and "connected" ask [`profile_for`], which writes and deletes nothing.
 pub fn grades_profile(data_dir: &Path) -> Result<PathBuf, String> {
-    profile_for(Feature::Grades, None, data_dir).ok_or_else(|| "no folder for grades".to_string())
+    let profile = profile_for(Feature::Grades, None, data_dir).ok_or_else(|| "no folder for grades".to_string())?;
+    if profile == session_dir(data_dir) {
+        add_use(data_dir, Use::Grades)?;
+        if data_dir.join(LEGACY_GRADES_DIR).exists() {
+            let _ = crate::grades::forget(data_dir);
+        }
+    }
+    Ok(profile)
 }

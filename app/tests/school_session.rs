@@ -211,12 +211,13 @@ fn the_registrar_and_the_school_mailbox_never_get_the_school_folder() {
 }
 
 #[test]
-fn an_existing_install_keeps_its_old_folder_until_the_school_folder_exists() {
+fn an_existing_install_keeps_its_old_folder_until_grades_use_of_the_school_folder_is_recorded() {
     let d = temp("profile-legacy");
     std::fs::create_dir_all(d.join("lms-session")).unwrap(); // today's grades folder, signed in
     assert_eq!(profile_for(Feature::Grades, Some(&row()), &d), Some(d.join("lms-session")), "old folder kept");
     std::fs::create_dir_all(session_dir(&d)).unwrap();
-    assert_eq!(profile_for(Feature::Grades, Some(&row()), &d), Some(session_dir(&d)), "the new folder once it exists");
+    // S2's review: a bare school folder (a capture window opened and closed unsigned) moves nothing.
+    assert_eq!(profile_for(Feature::Grades, Some(&row()), &d), Some(d.join("lms-session")), "mere existence moves nothing");
 }
 
 // ---- 5. the lock: per profile, non-blocking --------------------------------------------------

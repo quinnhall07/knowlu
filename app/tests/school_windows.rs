@@ -149,6 +149,29 @@ fn grades_windows_are_built_on_the_resolved_profile_and_never_on_the_old_folder_
     assert!(grades.contains("grades_profile") || grades.contains("profile_for"), "grades choose through school_session");
 }
 
+#[test]
+fn once_grades_move_to_the_school_folder_the_abandoned_lms_session_is_forgotten() {
+    let d = temp("abandon");
+    make(&legacy(&d));
+    make(&session_dir(&d));
+    // Not moved yet: resolving the folder, either way, forgets nothing.
+    assert_eq!(grades_profile(&d), Ok(legacy(&d)));
+    assert!(legacy(&d).exists());
+    add_use(&d, Use::Grades).unwrap();
+    // The pure choice (status, connected) never deletes; only the window's resolution does.
+    assert_eq!(profile_for(Feature::Grades, Some(&row()), &d), Some(session_dir(&d)));
+    assert!(legacy(&d).exists(), "profile_for deletes nothing (Q-B4)");
+    assert_eq!(grades_profile(&d), Ok(session_dir(&d)));
+    assert!(!legacy(&d).exists(), "the abandoned lms-session is forgotten once grades moved (Q-B4)");
+    assert!(session_dir(&d).exists(), "and the school folder is untouched");
+    assert_eq!(uses(&d).unwrap(), vec![Use::Grades]);
+}
+
+#[test]
+fn the_lock_key_is_the_profile_folders_own_name() {
+    assert_eq!(knowlu::school_session::profile_key(Path::new("C:\\synthetic\\profiles\\prof-abc123")), "prof-abc123");
+}
+
 // ---- 3. Forget and "needs sign-in" (S3 tests 6 and 8, grades) ---------------------------------
 
 #[test]

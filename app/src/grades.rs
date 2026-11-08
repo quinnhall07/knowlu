@@ -369,9 +369,11 @@ pub fn set_signed_out(data_dir: &Path, signed_out: bool) {
     }
 }
 
-/// Whether a session has been saved at all: the kept profile's directory exists.
+/// Whether a session has been saved at all: the directory of the profile grades read through
+/// ([`crate::school_session::profile_for`], which writes nothing) exists.
 pub fn connected(data_dir: &Path) -> bool {
-    std::fs::symlink_metadata(session_dir(data_dir)).is_ok()
+    crate::school_session::profile_for(crate::school_session::Feature::Grades, None, data_dir)
+        .is_some_and(|dir| std::fs::symlink_metadata(dir).is_ok())
 }
 
 /// **`grades_status`'s seam** (spec §9): available or not and why; and only when available, the
@@ -438,15 +440,25 @@ pub fn refresh_with(
 
 /// **`grades_forget`'s seam: never gated** (spec §4). Close any `lms-grades` window, delete the
 /// saved session ([`forget`]) and clear the signed-out mark, whatever the predicate says.
+///
+/// **At a shared school this is [`crate::school_session::forget`]**: when grades read through the school
+/// folder, Forget deletes it and its record of uses (Forget school sign-in), and any `lms-session` left
+/// beside it. Otherwise it is today's delete of `lms-session` alone.
 pub fn forget_with(data_dir: &Path, close_window: impl FnOnce()) -> Value {
+    use crate::school_session::{forget as forget_school, profile_for, session_dir as school_dir, Feature};
     close_window();
-    let gone = forget(data_dir);
+    let on_school = profile_for(Feature::Grades, None, data_dir).is_some_and(|p| p == school_dir(data_dir));
+    let school = if on_school { forget_school(data_dir) } else { Ok(()) };
+    let outcome = school.and_then(|()| if forget(data_dir) { Ok(()) } else { Err(not_deleted()) });
     set_signed_out(data_dir, false);
-    if gone {
-        json!({ "ok": true, "error": null })
-    } else {
-        json!({ "ok": false, "error": "the saved Blackboard sign-in could not be deleted yet; try again in a moment" })
+    match outcome {
+        Ok(()) => json!({ "ok": true, "error": null }),
+        Err(e) => json!({ "ok": false, "error": e }),
     }
+}
+
+fn not_deleted() -> String {
+    "the saved Blackboard sign-in could not be deleted yet; try again in a moment".to_string()
 }
 
 // ---- the window half (Task 5c; spec §4) -------------------------------------------------------
@@ -524,22 +536,56 @@ fn get(agent: &ureq::Agent, url: &str, jar: &str) -> Result<String, String> {
         })
 }
 
-/// `users/me`'s body, or its status (`None` when unreachable or not JSON).
-fn users_me(agent: &ureq::Agent, host: &str, jar: &str) -> Result<Value, Option<u16>> {
-    match get(agent, &format!("https://{host}/learn/api/public/v1/users/me"), jar) {
+/// What every request in this module is sent through: `(url, cookie header)` to a body or a status or
+/// `unreachable`. Production passes [`get`]; the S3 tests pass a fake that records the host.
+type SendFn<'a> = &'a mut dyn FnMut(&str, &str) -> Result<String, String>;
+
+/// `users/me`'s body, or its status (`None` when unreachable or not JSON). The one request goes to
+/// `https://<host>/…`, the host the caller was given.
+fn users_me_via(host: &str, jar: &str, send: SendFn) -> Result<Value, Option<u16>> {
+    match send(&format!("https://{host}/learn/api/public/v1/users/me"), jar) {
         Ok(body) => serde_json::from_str(&body).map_err(|_| None),
         Err(code) => Err(code.parse().ok()),
     }
 }
 
-/// The window's cookies as one `cookie` header, by `lms_link::capture_courses`'s own rule
-/// (`lms_link::cookie_url`): the window's URL while it is on the endpoint's host, else the endpoint.
-fn jar_for(w: &tauri::WebviewWindow, host: &str) -> Option<String> {
+fn users_me(agent: &ureq::Agent, host: &str, jar: &str) -> Result<Value, Option<u16>> {
+    users_me_via(host, jar, &mut |url, cookie| get(agent, url, cookie))
+}
+
+/// The cookies for `host` as one `cookie` header, by `lms_link::capture_courses`'s own rule
+/// (`lms_link::cookie_url`): the jar is asked about the window's URL while it is on the endpoint's host,
+/// else about the endpoint. The jar is asked about nothing else, and a cookie's `Domain` is never read.
+fn jar_header(host: &str, window_url: Option<&str>, query_jar: &mut dyn FnMut(&str) -> Vec<crate::school_session::JarCookie>) -> String {
     let target = format!("https://{host}/learn/api/public/v1/users/me");
+    crate::school_session::cookie_header(&query_jar(&crate::lms_link::cookie_url(window_url, &target)))
+}
+
+/// [`jar_header`] over the real window; `None` when the jar could not be read.
+fn jar_for(w: &tauri::WebviewWindow, host: &str) -> Option<String> {
+    let jar = crate::school_session::WindowJar::new(w);
     let here = w.url().ok();
-    let jar_url = crate::lms_link::cookie_url(here.as_ref().map(|u| u.as_str()), &target).parse::<tauri::Url>().ok()?;
-    let cookies = w.cookies_for_url(jar_url).ok()?;
-    Some(cookies.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; "))
+    let header = jar_header(host, here.as_ref().map(|u| u.as_str()), &mut |url| jar.query(url));
+    (!jar.failed()).then_some(header)
+}
+
+/// **One whole read from one jar** (S3 test 3): the jar's cookies, `users/me`, then the capture, every
+/// request sent to `https://<host>/…` with `send(url, cookie header)`. The jar is asked for
+/// [`crate::lms_link::cookie_url`]`(window_url, https://<host>/learn/api/public/v1/users/me)` and for
+/// nothing else, and no host is ever taken from a cookie's `Domain`. The real window's polls use the
+/// same three pieces ([`jar_header`], [`users_me_via`], [`capture_via`]) a step at a time.
+pub fn read_session_with(
+    host: &str,
+    window_url: Option<&str>,
+    query_jar: &mut dyn FnMut(&str) -> Vec<crate::school_session::JarCookie>,
+    send: SendFn,
+) -> Result<Value, CaptureError> {
+    let jar = jar_header(host, window_url, query_jar);
+    let user = users_me_via(host, &jar, &mut *send).map_err(|code| match code {
+        Some(401 | 403) => CaptureError::SignedOut,
+        _ => CaptureError::Unreachable,
+    })?;
+    capture_via(host, &user, &mut |url| send(url, &jar))
 }
 
 /// A Blackboard primary id that may sit in a URL path as it is (`_4686399_1`).
@@ -551,9 +597,14 @@ fn path_safe(id: &str) -> bool {
 /// columns, the student's grades and the categories. The memberships refused with 401 or 403 is
 /// signed out; any other failure there is unreachable. A course's own failure is its `error`.
 fn capture(agent: &ureq::Agent, host: &str, jar: &str, user: &Value) -> Result<Value, CaptureError> {
-    let fetch = |url: &str| get(agent, url, jar);
+    capture_via(host, user, &mut |url| get(agent, url, jar))
+}
+
+/// [`capture`] over any `fetch`: every URL is `https://<host>/…`, and [`read_list`] refuses a next page
+/// anywhere else.
+fn capture_via(host: &str, user: &Value, fetch: &mut dyn FnMut(&str) -> Result<String, String>) -> Result<Value, CaptureError> {
     let api = |path: String| format!("https://{host}/learn/api/public/{path}");
-    let memberships = read_list(host, &api("v1/users/me/courses?expand=course".into()), fetch).map_err(|e| match e.as_str() {
+    let memberships = read_list(host, &api("v1/users/me/courses?expand=course".into()), &mut *fetch).map_err(|e| match e.as_str() {
         "401" | "403" => CaptureError::SignedOut,
         _ => CaptureError::Unreachable,
     })?;
@@ -562,9 +613,9 @@ fn capture(agent: &ureq::Agent, host: &str, jar: &str, user: &Value) -> Result<V
     for m in available_memberships(&memberships).map_err(|_| CaptureError::Unreachable)? {
         let Some(id) = membership_course_id(&m).filter(|id| path_safe(id)) else { continue };
         let calls = CourseCalls {
-            columns: read_list(host, &api(format!("v2/courses/{id}/gradebook/columns")), fetch),
-            grades: read_list(host, &api(format!("v2/courses/{id}/gradebook/users/{user_id}")), fetch),
-            categories: read_list(host, &api(format!("v1/courses/{id}/gradebook/categories")), fetch),
+            columns: read_list(host, &api(format!("v2/courses/{id}/gradebook/columns")), &mut *fetch),
+            grades: read_list(host, &api(format!("v2/courses/{id}/gradebook/users/{user_id}")), &mut *fetch),
+            categories: read_list(host, &api(format!("v1/courses/{id}/gradebook/categories")), &mut *fetch),
         };
         per_course.insert(id.to_string(), calls);
     }
@@ -574,7 +625,8 @@ fn capture(agent: &ureq::Agent, host: &str, jar: &str, user: &Value) -> Result<V
 }
 
 /// **Connect's window** (spec §4): `lms-grades`, visible, at the sign-in link when there is one (replan §7.2),
-/// else at `https://<host>/`, on the kept profile.
+/// else at `https://<host>/`, on the profile [`crate::school_session::grades_profile`] resolves (which
+/// records the use when that is the school folder), with the school windows' one arguments string.
 pub fn open_visible(app: &tauri::AppHandle, data_dir: &Path, host: &str) -> Result<(), String> {
     if app.get_webview_window(WINDOW).is_some() {
         return Err(CaptureError::WindowOpen.as_str().into());
@@ -582,11 +634,13 @@ pub fn open_visible(app: &tauri::AppHandle, data_dir: &Path, host: &str) -> Resu
     let start = visible_start_url(&format!("https://{host}"), host, sign_in_prefix(host));
     let url: tauri::Url = start.parse().map_err(|_| "the LMS address is not a URL".to_string())?;
     std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
+    let profile = crate::school_session::grades_profile(data_dir)?;
     WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(url))
         .title("Sign in to Blackboard")
         .inner_size(1000.0, 760.0)
         .center()
-        .data_directory(session_dir(data_dir))
+        .data_directory(profile)
+        .additional_browser_args(crate::school_session::window_args(None))
         .build()
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -628,12 +682,14 @@ pub fn open_hidden(app: &tauri::AppHandle, data_dir: &Path, host: &str) -> Resul
     }
     open_hidden_with(&format!("https://{host}"), host, sign_in_prefix(host), |start| {
         let url: tauri::Url = start.parse().map_err(|_| CaptureError::Unreachable)?;
+        let profile = crate::school_session::grades_profile(data_dir).map_err(|_| CaptureError::Unreachable)?;
         WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(url))
             .title("Blackboard")
             .visible(false)
             .focused(false)
             .skip_taskbar(true)
-            .data_directory(session_dir(data_dir))
+            .data_directory(profile)
+            .additional_browser_args(crate::school_session::window_args(None))
             .build()
             .map(|_| ())
             .map_err(|_| CaptureError::Unreachable)
@@ -677,37 +733,34 @@ pub fn read_hidden(app: &tauri::AppHandle, host: &str) -> Result<Value, CaptureE
 }
 
 /// The whole hidden capture, for a caller that has already checked [`availability`] (the slot's
-/// grades step, Task 6): one capture at a time, then [`open_hidden`] and [`read_hidden`].
+/// grades step, Task 6): [`capture_hidden_with`] over [`open_hidden`] and [`read_hidden`], under this
+/// profile's key. A busy profile or capture is the same `Busy`, named `sign-in window open` when it is
+/// the visible window.
 pub fn capture_hidden(app: &tauri::AppHandle, data_dir: &Path, host: &str) -> Result<Value, CaptureError> {
-    let Some(_capturing) = Capturing::try_take() else { return Err(busy_or_open(app)) };
-    open_hidden(app, data_dir, host)?;
-    read_hidden(app, host)
+    let key = crate::school_session::profile_key(data_dir);
+    match capture_hidden_with(&key, || open_hidden(app, data_dir, host), || read_hidden(app, host)) {
+        Err(CaptureError::Busy) => Err(busy_or_open(app)),
+        other => other,
+    }
 }
 
-/// **S3 stub: the seam for "one window at a time on the folder"** (S3 test 5). S4a makes it
-/// [`crate::school_session::take_both`] for `profile_id`, then `open`, then `read`; a busy lock or
-/// capture guard answers `Busy` and calls neither.
+/// **One window at a time on the folder** (S3 test 5): [`crate::school_session::take_both`] for
+/// `profile_id`, then `open`, then `read`, both guards held to the end. A busy profile lock or capture
+/// guard answers `Busy` and calls neither; another profile is never blocked.
 pub fn capture_hidden_with(
-    _profile_id: &str,
+    profile_id: &str,
     open: impl FnOnce() -> Result<(), CaptureError>,
     read: impl FnOnce() -> Result<Value, CaptureError>,
 ) -> Result<Value, CaptureError> {
+    let _held = crate::school_session::take_both(profile_id)?;
     open()?;
     read()
 }
 
-/// **S3 stub: the seam for "cookies go only where they were read"** (S3 test 3). S4a moves the jar read
-/// and every request of [`capture`] behind it. It asks `query_jar` for the cookies of
-/// [`crate::lms_link::cookie_url`]`(window_url, https://<host>/learn/api/public/v1/users/me)` and sends
-/// every request, `users/me` and the capture's, to `https://<host>/...` with `send(url, cookie_header)`,
-/// never to a cookie's `Domain`. A request to any other host is a bug.
-pub fn read_session_with(
-    _host: &str,
-    _window_url: Option<&str>,
-    _query_jar: &mut dyn FnMut(&str) -> Vec<crate::school_session::JarCookie>,
-    _send: &mut dyn FnMut(&str, &str) -> Result<String, String>,
-) -> Result<Value, CaptureError> {
-    Err(CaptureError::Unreachable)
+/// The two guards a Connect or a Refresh holds across its window: this profile's school lock, then the
+/// process's one `lms-grades` window ([`crate::school_session::take_both`]). Busy is the answer's words.
+fn take_window(app: &tauri::AppHandle, data_dir: &Path) -> Result<(crate::school_session::SessionGuard, Capturing), String> {
+    crate::school_session::take_both(&crate::school_session::profile_key(data_dir)).map_err(|_| busy_or_open(app).as_str().to_string())
 }
 
 /// A capture that could not start: the visible sign-in window is open, or another capture runs.
@@ -828,7 +881,7 @@ pub fn grades_connect(app: tauri::AppHandle, cs: State<'_, ConsoleState>) -> Val
         row,
         &lms,
         |host| {
-            *held.borrow_mut() = Some(Capturing::try_take().ok_or_else(|| busy_or_open(&app).as_str().to_string())?);
+            *held.borrow_mut() = Some(take_window(&app, &cs.data_dir)?);
             open_visible(&app, &cs.data_dir, host)
         },
         |host| finish(&cs.vault, &cs.data_dir, await_sign_in(&app, host)),
@@ -844,7 +897,7 @@ pub fn grades_refresh(app: tauri::AppHandle, cs: State<'_, ConsoleState>) -> Val
         &lms,
         &cs.data_dir,
         |host| {
-            *held.borrow_mut() = Some(Capturing::try_take().ok_or_else(|| busy_or_open(&app).as_str().to_string())?);
+            *held.borrow_mut() = Some(take_window(&app, &cs.data_dir)?);
             open_hidden(&app, &cs.data_dir, host).map_err(|e| e.as_str().to_string())
         },
         |host| finish(&cs.vault, &cs.data_dir, read_hidden(&app, host)),

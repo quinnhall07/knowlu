@@ -70,6 +70,11 @@ fn the_hook_is_debug_only_and_reads_one_variable() {
         match name.as_str() {
             "lib.rs" | "debug_port.rs" => {}
             "mail.rs" => assert_eq!(uses, 2, "mail.rs uses the hook more than once"),
+            // The windows on the school folder set `school_session::SCHOOL_BROWSER_ARGS` and never a
+            // port (`tests/school_windows.rs` pins every builder); the hook stays the mail window's.
+            "grades.rs" | "lms_link.rs" => {
+                assert_eq!(text.matches("debug_port::").count(), 0, "{name} uses the debug hook: a school window never carries a port")
+            }
             _ => assert_eq!(uses, 0, "{name} uses the debug hook or sets browser args"),
         }
     }
