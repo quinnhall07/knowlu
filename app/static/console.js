@@ -979,6 +979,7 @@
 
   // R5-a: a row the registrar proposed.
   function fromRegistrar(p) { return p.source_uid.indexOf("registrar:") === 0; }
+  function fromClassSearch(p) { return p.source_uid.indexOf("classsearch:") === 0; }
 
   function registrarControls(host) {
     return { open: host.querySelector("[data-reg-open]"), done: host.querySelector("[data-reg-done]"),
@@ -1038,7 +1039,7 @@
     open.textContent = (reg && reg.held && reg.held.length ? "Refresh from " : "Get my class times from ") + registrarLabel;
     open.classList.toggle("pri", !!(reg && reg.refresh));
     open.classList.toggle("y", !!(reg && reg.refresh));
-    EL("sched-reg-rows").innerHTML = (w.registrar_proposals || []).map(function (p) {
+    EL("sched-reg-rows").innerHTML = (w.registrar_proposals || []).filter(fromRegistrar).map(function (p) {
       return '<div class="row sched reg-row"><div class="ttl"><span class="a">' + h(p.title) + '</span><span class="meta">' + h(p.when || "") +
         ' <span class="src">from ' + h(registrarLabel) + '</span></span></div><div class="acts"><button class="b" type="button" data-reg-add="' +
         h(p.source_uid) + '">Add</button></div></div>';
@@ -1165,10 +1166,11 @@
   // One row: title, the §5.2 label, `where` in small type; Mine / Not mine; the level control,
   // shown by CSS only on a Mine row. Nothing typed.
   function setupRow(p) {
-    var preset = { class: 1, lab: 1, work: 1 }[p.kind] ? "mine" : "";
+    var preset = !fromClassSearch(p) && { class: 1, lab: 1, work: 1 }[p.kind] ? "mine" : "";
     return '<div class="wsrow" data-key="' + h(p.source_uid) + '" data-answer="' + preset + '" data-level="' + h(p.level) + '">' +
       '<div class="ttl"><span class="a">' + h(p.title) + '</span><span class="meta">' + h(p.when || "") + "</span>" +
       (fromRegistrar(p) && registrarLabel ? ' <span class="src">from ' + h(registrarLabel) + "</span>" : "") +
+      (fromClassSearch(p) ? " <span class=\"src\">from your school's public class search</span>" : "") +
       (p.where ? "<small>" + h(p.where) + "</small>" : "") + "</div>" +
       '<div class="acts"><button class="b" type="button" data-answer-set="mine" aria-pressed="' + (preset === "mine") + '">Mine</button>' +
       '<button class="b" type="button" data-answer-set="not" aria-pressed="false">Not mine</button>' + levelButtons(p.level) + "</div></div>";
