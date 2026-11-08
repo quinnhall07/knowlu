@@ -646,13 +646,20 @@ pub fn read_hidden(app: &tauri::AppHandle, host: &str) -> Result<Value, CaptureE
     let began = Instant::now();
     // The jar read for the poll that answered 200, held for the capture and dropped with this call.
     let jar = std::cell::RefCell::new(None::<String>);
+    let previous = std::cell::Cell::new(None::<u16>);
     let result = read_hidden_with(
         host,
         || w.url().ok().map(|u| u.to_string()),
         || {
-            let held = jar_for(&w, host).ok_or(None)?;
-            let me = users_me(&agent, host, &held);
-            *jar.borrow_mut() = Some(held);
+            // A jar that cannot be read is no poll: `last` stays as the previous poll left it.
+            let held = jar_for(&w, host);
+            let me = poll_or_keep(held.as_deref(), previous.get(), |j| users_me(&agent, host, j));
+            if let Err(code) = &me {
+                previous.set(*code);
+            }
+            if held.is_some() {
+                *jar.borrow_mut() = held;
+            }
             me
         },
         |user| match jar.borrow().as_deref() {
@@ -909,8 +916,23 @@ pub fn read_hidden_with(
             }
         }
         if now() >= SETTLE {
-            return Err(hidden_outcome(on_host_now, last));
+            // Where the window is *now*: a slow `users/me` may have outlasted a redirect to the identity provider.
+            let on_host_at_deadline = window_url().is_some_and(|u| on_host(&u, host));
+            return Err(hidden_outcome(on_host_at_deadline, last));
         }
         pause();
+    }
+}
+
+/// One `users/me` poll for [`read_hidden`]: no jar means no poll, and the answer is the previous one, so a
+/// jar that cannot be read leaves `last` as it was.
+pub fn poll_or_keep(
+    jar: Option<&str>,
+    previous: Option<u16>,
+    read: impl FnOnce(&str) -> Result<Value, Option<u16>>,
+) -> Result<Value, Option<u16>> {
+    match jar {
+        Some(jar) => read(jar),
+        None => Err(previous),
     }
 }

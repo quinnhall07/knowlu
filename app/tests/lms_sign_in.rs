@@ -4,9 +4,10 @@
 //! listener bound to `127.0.0.1:0`; the hidden read is tested over injected closures. Every host is
 //! invented (`lms.example.edu`, `idp.example.edu`).
 use knowlu::grades::{
-    hidden_outcome, hidden_start_url, open_hidden_with, read_hidden_with, visible_start_url, CaptureError, LastRead, SETTLE,
+    hidden_outcome, hidden_start_url, open_hidden_with, poll_or_keep, read_hidden_with, visible_start_url, CaptureError,
+    LastRead, SETTLE,
 };
-use knowlu::lms_link::{fetch_sign_in_link, sign_in_link, LoginPageError};
+use knowlu::lms_link::{fetch_sign_in_link, sign_in_link, start_unless_open, LoginPageError};
 use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
 use std::io::{Read, Write};
@@ -106,15 +107,44 @@ fn a_refused_link_beside_a_good_one_does_not_make_two() {
     assert_eq!(link_of(html).as_deref(), Some("https://lms.example.edu/auth-saml/saml/login?idp=_1_1"));
 }
 
+#[test]
+fn a_dot_or_dot_dot_segment_is_refused_plain_or_percent_encoded() {
+    for path in [
+        "/auth-saml/saml/login/../../admin",
+        "/auth-saml/saml/login/./x",
+        "/auth-saml/saml/login/%2e%2e/admin",
+        "/auth-saml/saml/login/%2E%2E/admin",
+        "/auth-saml/saml/login/.%2e/admin",
+        "/auth-saml/saml/login/%2e/x",
+        "/auth-saml/saml/login/..",
+    ] {
+        assert_eq!(link_of(&format!(r#"<a href="{path}">x</a>"#)), None, "{path}");
+        assert_eq!(link_of(&format!(r#"<a href="https://lms.example.edu{path}">x</a>"#)), None, "{path}");
+    }
+    // Dots that are not a whole segment, and a dot-segment only in the query, are not this rule's business.
+    assert!(link_of(r#"<a href="/auth-saml/saml/login/a.b?next=../x">x</a>"#).is_some());
+}
+
 // ---- the page fetch, on a local listener -------------------------------------------------------
 
 /// Serve one scripted response per connection, in order, and hand back every request head. Gives up
 /// waiting after 5 s, so an implementation that connects less than the script expects fails the
 /// assertions rather than hanging.
 fn serve(responses: Vec<String>) -> (u16, std::thread::JoinHandle<Vec<String>>) {
+    serve_with(|_| responses)
+}
+
+/// [`serve`], with the script built once the port is known (a redirect that names its own origin).
+fn serve_with(script: impl FnOnce(u16) -> Vec<String>) -> (u16, std::thread::JoinHandle<Vec<String>>) {
+    serve_raw(|port| script(port).into_iter().map(String::into_bytes).collect())
+}
+
+/// [`serve_with`] over raw bytes, for a body that is not UTF-8.
+fn serve_raw(script: impl FnOnce(u16) -> Vec<Vec<u8>>) -> (u16, std::thread::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
+    let responses = script(port);
     let handle = std::thread::spawn(move || {
         let mut seen = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -137,7 +167,7 @@ fn serve(responses: Vec<String>) -> (u16, std::thread::JoinHandle<Vec<String>>) 
                 }
             }
             seen.push(String::from_utf8_lossy(&buf).to_string());
-            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(&response);
         }
         seen
     });
@@ -150,6 +180,10 @@ fn ok(body: &str) -> String {
 
 fn redirect(to: &str) -> String {
     format!("HTTP/1.1 302 Found\r\nlocation: {to}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+}
+
+fn redirect_with(to: &str, header: &str) -> String {
+    format!("HTTP/1.1 302 Found\r\nlocation: {to}\r\n{header}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
 }
 
 fn status(line: &str) -> String {
@@ -207,10 +241,34 @@ fn a_redirect_to_any_other_host_gives_none_and_is_never_requested() {
 }
 
 #[test]
-fn a_redirect_to_a_look_alike_name_gives_none() {
-    let (port, server) = serve(vec![redirect("http://lms.example.edu.evil.test/"), ok(PAGE)]);
-    assert_eq!(fetch(port), Ok(None));
-    assert_eq!(server.join().unwrap().len(), 1);
+fn a_redirect_to_a_look_alike_origin_gives_none_and_is_never_requested() {
+    // Every target is an IP literal, so a wrongly followed hop could never reach DNS: a different
+    // loopback address, a different port, and a different scheme on the same address.
+    for target in ["http://127.0.0.2:{port}/", "http://127.0.0.1:{other}/", "https://127.0.0.1:{port}/"] {
+        let other = {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let (port, server) = serve_with(|port| {
+            let to = target.replace("{port}", &port.to_string()).replace("{other}", &other.to_string());
+            vec![redirect(&to), ok(PAGE)]
+        });
+        assert_eq!(fetch(port), Ok(None), "{target}");
+        assert_eq!(server.join().unwrap().len(), 1, "{target}: the hop must never be requested");
+    }
+}
+
+#[test]
+fn a_cookie_set_by_one_hop_is_not_sent_to_the_next() {
+    let (port, server) = serve(vec![
+        redirect_with("/next", "set-cookie: sid=abc123; Path=/"),
+        ok(PAGE),
+    ]);
+    assert!(fetch(port).unwrap().is_some());
+    let seen = server.join().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[1].starts_with("GET /next HTTP/1.1\r\n"));
+    assert!(!seen[1].to_ascii_lowercase().contains("cookie"), "a Set-Cookie must not come back: {}", seen[1]);
 }
 
 #[test]
@@ -224,6 +282,34 @@ fn a_page_with_no_link_is_none_not_unreachable() {
 fn a_5xx_is_unreachable() {
     let (port, server) = serve(vec![status("503 Service Unavailable")]);
     assert_eq!(fetch(port), Err(LoginPageError::Unreachable));
+    server.join().unwrap();
+}
+
+#[test]
+fn a_200_page_over_a_mebibyte_or_not_utf8_is_none_not_unreachable() {
+    let big = "a".repeat((1 << 20) + 10);
+    let (port, server) = serve(vec![ok(&big)]);
+    assert_eq!(fetch(port), Ok(None), "over 1 MiB");
+    server.join().unwrap();
+
+    let bytes: &[u8] = b"<a href=\"/auth-saml/saml/login?idp=_1_1\">\xff\xfe</a>";
+    let response = [
+        format!("HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", bytes.len()).into_bytes(),
+        bytes.to_vec(),
+    ]
+    .concat();
+    let (port, server) = serve_raw(|_| vec![response]);
+    assert_eq!(fetch(port), Ok(None), "not UTF-8");
+    server.join().unwrap();
+}
+
+#[test]
+fn a_page_that_cannot_be_read_falls_back_to_ultra_not_unreachable() {
+    let big = "a".repeat((1 << 20) + 10);
+    let (port, server) = serve(vec![ok(&big)]);
+    let host = format!("127.0.0.1:{port}");
+    let origin = format!("http://{host}");
+    assert_eq!(hidden_start_url(&origin, &host, Some(PREFIX)), Ok(format!("{origin}/ultra/")));
     server.join().unwrap();
 }
 
@@ -497,4 +583,70 @@ fn the_loop_stops_at_settle_and_pauses_between_polls() {
     let _ = read_hidden_with(HOST, || Some(ON_LMS.into()), || Err(None), bundle, ticking(), || pauses.set(pauses.get() + 1));
     assert!(pauses.get() >= 1, "a poll that finds nothing waits before the next");
     assert!(pauses.get() <= SETTLE.as_secs() + 1, "the injected clock, not the wall clock, ends the read: {}", pauses.get());
+}
+
+// ---- review fixes: the jar, the second look at the window, the open window -------------------------
+
+#[test]
+fn a_failed_jar_leaves_last_as_the_previous_poll_left_it() {
+    // A 401 on the first poll, then the cookie jar cannot be read for every later poll: the read ends
+    // SignedOut (as today), not Unreachable.
+    let previous = Cell::new(None::<u16>);
+    let polls = Cell::new(0);
+    let got = read_hidden_with(
+        HOST,
+        || Some(ON_LMS.into()),
+        || {
+            polls.set(polls.get() + 1);
+            let jar = if polls.get() == 1 { Some("jar") } else { None };
+            let answer = poll_or_keep(jar, previous.get(), |_| Err(Some(401)));
+            if let Err(code) = &answer {
+                previous.set(*code);
+            }
+            answer
+        },
+        bundle,
+        ticking(),
+        || {},
+    );
+    assert_eq!(got, Err(CaptureError::SignedOut));
+}
+
+#[test]
+fn poll_or_keep_reads_with_a_jar_and_repeats_the_last_answer_without_one() {
+    assert_eq!(poll_or_keep(Some("jar"), None, |j| if j == "jar" { Ok(json!(1)) } else { Err(None) }), Ok(json!(1)));
+    assert_eq!(poll_or_keep(None, Some(403), |_| panic!("no jar, no read")), Err(Some(403)));
+    assert_eq!(poll_or_keep(None, None, |_| panic!("no jar, no read")), Err(None));
+}
+
+#[test]
+fn a_window_that_settled_on_the_idp_during_the_last_users_me_is_signed_out() {
+    // On the LMS host at the top of the last iteration, on the identity provider by the time the
+    // slow users_me returned: the outcome is read from where the window is at the deadline.
+    let calls = Cell::new(0u64);
+    let got = read_hidden_with(
+        HOST,
+        || {
+            calls.set(calls.get() + 1);
+            Some(if calls.get() <= SETTLE.as_secs() + 1 { ON_LMS } else { ON_IDP }.into())
+        },
+        || Err(None),
+        bundle,
+        ticking(),
+        || {},
+    );
+    assert_eq!(got, Err(CaptureError::SignedOut));
+}
+
+#[test]
+fn an_open_window_means_no_fetch() {
+    let fetched = Cell::new(0);
+    let link = || {
+        fetched.set(fetched.get() + 1);
+        "https://lms.example.edu/auth-saml/saml/login".to_string()
+    };
+    assert_eq!(start_unless_open(true, "https://lms.example.edu/".into(), link), "https://lms.example.edu/");
+    assert_eq!(fetched.get(), 0, "a second Sign in click must focus the open window at once");
+    assert_eq!(start_unless_open(false, "https://lms.example.edu/".into(), link), "https://lms.example.edu/auth-saml/saml/login");
+    assert_eq!(fetched.get(), 1);
 }

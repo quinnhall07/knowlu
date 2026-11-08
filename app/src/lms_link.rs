@@ -232,10 +232,13 @@ pub fn open_lms_window(app: tauri::AppHandle, unitid: String) -> Value {
         return json!({ "ok": false, "error": "we do not know your school's sign-in page yet — paste your calendar link below", "opened": false });
     };
     let dir = session_dir();
-    // A visible LMS sign-in opens at the school's sign-in link when its row names one (replan §7.2).
-    let url = crate::scaffold::curated(&unitid)
-        .map(|c| crate::grades::visible_start_url(&format!("https://{}", c.lms_host), c.lms_host, c.lms_sign_in))
-        .unwrap_or(url);
+    // A visible LMS sign-in opens at the school's sign-in link when its row names one (replan §7.2). An open
+    // window is only shown and focused, so the page is not fetched for it.
+    let url = start_unless_open(app.get_webview_window(WINDOW).is_some(), url.clone(), || {
+        crate::scaffold::curated(&unitid)
+            .map(|c| crate::grades::visible_start_url(&format!("https://{}", c.lms_host), c.lms_host, c.lms_sign_in))
+            .unwrap_or(url)
+    });
     match open_window_at(&app, &url, &dir) {
         // **The path is not in the envelope** (R-C1-40, I2): the page has no use for it now that
         // closing takes no argument, and a temp path handed to a page is a temp path that comes back.
@@ -992,6 +995,9 @@ fn accepted(href: &str, lms_host: &str, prefix: &str) -> Option<String> {
         return None;
     };
     let path = &path_and_rest[..path_and_rest.find(['?', '#']).unwrap_or(path_and_rest.len())];
+    if path.split('/').any(|seg| matches!(seg.to_ascii_lowercase().replace("%2e", ".").as_str(), "." | "..")) {
+        return None;
+    }
     path.starts_with(prefix).then(|| format!("https://{lms_host}{path_and_rest}"))
 }
 
@@ -1061,11 +1067,22 @@ pub fn fetch_sign_in_link(origin: &str, lms_host: &str, prefix: &str) -> Result<
                 }
             }
             200..=299 => {
-                let body = res.body_mut().with_config().limit(1 << 20).read_to_string().map_err(|_| LoginPageError::Unreachable)?;
-                return Ok(sign_in_link(&body, lms_host, prefix));
+                // A page too big to be a login page, or not text, is a page Knowlu does not understand
+                // (`Ok(None)`); only a failure to move the bytes is a transport failure (§7.4).
+                let bytes = match res.body_mut().with_config().limit(1 << 20).read_to_vec() {
+                    Ok(bytes) => bytes,
+                    Err(ureq::Error::BodyExceedsLimit(_)) => return Ok(None),
+                    Err(_) => return Err(LoginPageError::Unreachable),
+                };
+                return Ok(String::from_utf8(bytes).ok().and_then(|body| sign_in_link(&body, lms_host, prefix)));
             }
             _ => return Ok(None),
         }
     }
     Ok(None)
+}
+
+/// The start page for a visible window, asking for the link only when no window is open already.
+pub fn start_unless_open(already_open: bool, home: String, link: impl FnOnce() -> String) -> String {
+    if already_open { home } else { link() }
 }
