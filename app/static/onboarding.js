@@ -260,7 +260,8 @@
     return {
       label: month ? "Week of " + month + " " + Number(parts[2]) : "This week",
       days: DAYS.map(function (d, i) { return { name: d[1], past: i < today, count: i < today ? null : (s3["due_" + d[0]] === undefined ? null : s3["due_" + d[0]]) }; }),
-      later: s3.due_later === undefined ? null : s3.due_later
+      later: s3.due_later === undefined ? null : s3.due_later,
+      turnedIn: typeof s3.turned_in === "number" && s3.turned_in >= 1 ? s3.turned_in : null
     };
   }
   function weekStripHtml(status, step) {
@@ -270,7 +271,8 @@
       return '<li class="ob-day' + (past ? " ob-past" : "") + '"><span class="ob-dn">' + esc(name) + '</span>' + (count === null ? "" : '<span class="ob-dc">' + esc(String(count)) + '</span>') + '</li>';
     };
     return '<div class="ob-week-head"><strong>Your week</strong> <span class="su-dim">' + esc(m.label) + '</span></div><ul class="ob-days">' +
-      m.days.map(function (d) { return cell(d.name, d.count, d.past); }).join("") + cell("Later", m.later, false) + '</ul>';
+      m.days.map(function (d) { return cell(d.name, d.count, d.past); }).join("") + cell("Later", m.later, false) + '</ul>' +
+      (m.turnedIn === null ? "" : '<p class="ob-turned-in">' + esc(String(m.turnedIn)) + ' turned in, kept off your list</p>');
   }
   function renderWeek() {
     var el = EL("ob-week");
