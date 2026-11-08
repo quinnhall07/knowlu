@@ -2,6 +2,7 @@
 //! `tests/commands.rs` exercises them directly against a scratch vault copy without going through
 //! Tauri's IPC or spinning up a window (console plan 1, Task 10).
 pub mod account;
+pub mod class_search;
 pub mod commands;
 #[cfg(windows)] pub mod credentials;
 #[cfg(debug_assertions)] pub mod debug_port;
