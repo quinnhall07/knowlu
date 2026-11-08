@@ -77,6 +77,10 @@ pub struct Curated {
     /// The path prefix of the LMS's sign-in link (`/auth-saml/saml/login`), `None` by default (replan
     /// §7.1). The link itself is read fresh from the public login page, never stored.
     pub lms_sign_in: Option<&'static str>,
+    /// Hosts the saved-password fill may fill on: bare host names, no scheme, path or port. Empty by default.
+    pub sign_in_hosts: &'static [&'static str],
+    /// The school's own "wrong password" text, fixed, with no `@` and no digits-only token. Empty by default.
+    pub wrong_password_text: &'static str,
 }
 
 /// A curated school's public class search (replan §6.10). **Data**: adding a school is adding one.
@@ -118,6 +122,9 @@ pub const CAMPUSES: [Curated; 2] = [
         // Curation check, 2026-11-08 (replan §6.10 item 5): one anonymous, cookie-less GET of the
         // LMS root answered 200 with exactly one link under this prefix.
         lms_sign_in: Some("/auth-saml/saml/login"),
+        // R0a (2026-11-05 to 11-07), R0c and T3a: the one host the saved-password fill filled on.
+        sign_in_hosts: &["myapps.ua.edu"],
+        wrong_password_text: "",
     },
     Curated {
         unitid: "157085",
@@ -134,6 +141,8 @@ pub const CAMPUSES: [Curated; 2] = [
         registrar: None,
         class_search: None,
         lms_sign_in: None,
+        sign_in_hosts: &[],
+        wrong_password_text: "",
     },
 ];
 

@@ -20,6 +20,7 @@ pub mod profiles;
 pub mod registrar;
 pub mod report;
 pub mod scaffold;
+pub mod school_session;
 pub mod scheduler;
 pub mod state;
 pub mod telemetry;

@@ -287,20 +287,23 @@ pub fn is_session_dir(data_dir: &Path, dir: &Path) -> bool {
 /// out. Closing the window first is the caller's; this touches no other file in the profile.
 pub fn forget(data_dir: &Path) -> bool {
     let dir = session_dir(data_dir);
-    if !is_session_dir(data_dir, &dir) {
-        return false;
-    }
+    is_session_dir(data_dir, &dir) && remove_dir_patiently(&dir)
+}
+
+/// The patient delete, shared with `school_session::forget`: `true` once `dir` is gone (or never was
+/// there), `false` when the tries run out. The caller has already checked the path is one it may delete.
+pub(crate) fn remove_dir_patiently(dir: &Path) -> bool {
     // `symlink_metadata`, not `exists`: a dangling link still counts as there.
     let gone = |d: &Path| std::fs::symlink_metadata(d).is_err();
     for attempt in 0..WIPE_TRIES {
-        if gone(&dir) || std::fs::remove_dir_all(&dir).is_ok() {
+        if gone(dir) || std::fs::remove_dir_all(dir).is_ok() {
             return true;
         }
         if attempt + 1 < WIPE_TRIES {
             std::thread::sleep(WIPE_BACKOFF);
         }
     }
-    gone(&dir)
+    gone(dir)
 }
 
 // ---- the gated seams (Task 5c; spec §4, §9) --------------------------------------------------
