@@ -1286,7 +1286,8 @@ pub fn registrar_class(series: &Series, codes: &Codes) -> Class {
 /// in order, first match wins, on the title trimmed of surrounding punctuation (C5).
 pub fn classify(series: &Series, codes: &Codes, planning: &[String]) -> Option<Class> {
     // Phase 3 (Plan ruling R2-e): a registrar row carries no instances and needs no eligibility.
-    if series.calendar.starts_with(crate::registrar::CALENDAR_PREFIX) {
+    // Class search too (replan §6.6): both emit a weekly rule only, the table's instances column.
+    if !Source::by_calendar(&series.calendar).instances {
         return Some(registrar_class(series, codes));
     }
     if !eligible(series) {
@@ -1481,6 +1482,10 @@ enum KeepAlive {
     GoogleFeed,
     /// Configured while the vault names the calendar as a feed, or read in 14 days.
     NamedFeed,
+    /// Class search (onboarding replan §6.6): a read covers only the courses asked about, so a
+    /// row a fresh read omits stays while its `until` is open and then goes silently, never to
+    /// `ended`; unfetched, the calendar counts as configured while it holds an open row.
+    PerCourse,
 }
 
 /// How a change to a confirmed note lands (the table's last column).
@@ -1509,15 +1514,19 @@ struct Source {
     lands: Lands,
 }
 
-/// The rows, as the spec's table. The fourth row's tier, keep-alive and instances are "as its
-/// calendar": a `by_calendar` lookup never reaches it (the third row matches any other calendar
-/// first), so only its `lands` and `holds_per_kind` are read. L5 adds one `syllabus:` row and its
-/// two keep-alive arms.
-const SOURCES: [Source; 4] = [
+/// The rows, as the spec's table, in the ruled order (replan RQ1): registrar, class search,
+/// Google, the rest. The last row's tier, keep-alive and instances are "as its calendar": a
+/// `by_calendar` lookup never reaches it (the `ics-series:` row matches any other calendar
+/// first), so only its `lands` and `holds_per_kind` are read. The class-search row (§6.6) names
+/// its prefix in both columns, because `None` is the catch-all; it holds nothing, since it may not
+/// be the student's class, and a change to its note is never watched. L5 adds one `syllabus:` row
+/// (after class search) and its two keep-alive arms.
+const SOURCES: [Source; 5] = [
     Source { calendar: Some(crate::registrar::CALENDAR_PREFIX), uid: Some(crate::registrar::CALENDAR_PREFIX), tier: 0, keep_alive: KeepAlive::InPlay, instances: false, holds_per_kind: true, lands: Lands::AppliedAndListed },
-    Source { calendar: Some("google:"), uid: Some("gcal-series:"), tier: 1, keep_alive: KeepAlive::GoogleFeed, instances: true, holds_per_kind: false, lands: Lands::Carded },
-    Source { calendar: None, uid: Some("ics-series:"), tier: 2, keep_alive: KeepAlive::NamedFeed, instances: true, holds_per_kind: false, lands: Lands::Carded },
-    Source { calendar: None, uid: None, tier: 2, keep_alive: KeepAlive::NamedFeed, instances: true, holds_per_kind: false, lands: Lands::NotWatched },
+    Source { calendar: Some(CLASS_SEARCH_PREFIX), uid: Some(CLASS_SEARCH_PREFIX), tier: 1, keep_alive: KeepAlive::PerCourse, instances: false, holds_per_kind: false, lands: Lands::NotWatched },
+    Source { calendar: Some("google:"), uid: Some("gcal-series:"), tier: 2, keep_alive: KeepAlive::GoogleFeed, instances: true, holds_per_kind: false, lands: Lands::Carded },
+    Source { calendar: None, uid: Some("ics-series:"), tier: 3, keep_alive: KeepAlive::NamedFeed, instances: true, holds_per_kind: false, lands: Lands::Carded },
+    Source { calendar: None, uid: None, tier: 3, keep_alive: KeepAlive::NamedFeed, instances: true, holds_per_kind: false, lands: Lands::NotWatched },
 ];
 
 impl Source {
@@ -1532,14 +1541,19 @@ impl Source {
     }
 }
 
+/// The class-search prefix of a series' `source_uid` (`classsearch:<school>:<term>-<crn>`) and its
+/// calendar (`classsearch:<school>:<term>`), as `registrar::parse_class_search_with` writes them.
+pub const CLASS_SEARCH_PREFIX: &str = "classsearch:";
+
 /// Whether `key` (a series' `source_uid` or its calendar) names class search: the one test every
-/// guard of §6.6 uses. C2a stub: always false until the source row lands.
-pub fn is_class_search(_key: &str) -> bool {
-    false
+/// guard of §6.6 uses.
+pub fn is_class_search(key: &str) -> bool {
+    key.starts_with(CLASS_SEARCH_PREFIX)
 }
 
-/// The one precedence between two records of one key or one signature (I2, phase-3 D7): a
-/// `registrar:` calendar first, then a `google:` one, then any other; then the lower calendar key.
+/// The one precedence between two records of one key or one signature (I2, phase-3 D7, replan
+/// RQ1): a `registrar:` calendar first, then a `classsearch:` one, then a `google:` one, then any
+/// other; then the lower calendar key.
 /// Smaller wins (Plan ruling R2-f). The tier is the table's ([`Source::by_calendar`]).
 fn precedence(series: &Series) -> (u8, &str) {
     (Source::by_calendar(&series.calendar).tier, series.calendar.as_str())
@@ -2259,6 +2273,9 @@ fn write_state_file(vault: &Path, name: &str, bytes: &str) -> std::io::Result<()
 /// - A `registrar:` calendar (phase 3, D5) is configured while its term is in play (a series with
 ///   an open `until` or one under 28 days past); a row its own fresh fetch no longer returns moves
 ///   to `ended` that day, with the day before as its last instance.
+/// - A `classsearch:` calendar (replan §6.6) is configured while it holds a row whose `until` is
+///   open; a row its own fresh read omits stays while its `until` is open and then goes, and no
+///   class-search row ever moves to `ended`.
 ///
 /// The file is written only when `fresh` is non-empty and the bytes differ, whole (temp file,
 /// then rename). With `fresh` non-empty, the whole read-to-rename holds [`SERIES_LOCK_FILE`]
@@ -2356,10 +2373,16 @@ pub fn refresh_series_held(
     // Each arm is the table's keep-alive column ([`Source::by_calendar`], [`KeepAlive`]).
     let whole_term = |calendar: &str| Source::by_calendar(calendar).keep_alive == KeepAlive::InPlay;
     let in_play = registrar_in_play(&old, today);
+    // Replan §6.6: a class-search calendar counts as configured while it holds an open row.
+    let per_course = |calendar: &str| Source::by_calendar(calendar).keep_alive == KeepAlive::PerCourse;
+    let open = |s: &Series| s.until.is_none_or(|until| until >= today);
+    let open_courses: BTreeSet<String> =
+        old.series.iter().filter(|s| per_course(&s.calendar) && open(s)).map(|s| s.calendar.clone()).collect();
     let configured = |calendar: &str| match Source::by_calendar(calendar).keep_alive {
         KeepAlive::InPlay => in_play.contains(calendar),
         KeepAlive::GoogleFeed => google,
         KeepAlive::NamedFeed => names.contains(calendar),
+        KeepAlive::PerCourse => open_courses.contains(calendar),
     };
     let recent = |read: Option<Date>| read.is_some_and(|d| days_since(d, today) < UNSEEN_DAYS);
 
@@ -2385,6 +2408,13 @@ pub fn refresh_series_held(
             // D5 (Plan ruling R2-c): a registrar fetch is the whole term's truth; a row it no
             // longer returns is a dropped course, at once.
             Some(_) if whole_term(&held.calendar) => aged_out.push(held),
+            // Replan §6.6: a class-search read covers only the courses it asked about, so a row
+            // it omits stays while its `until` is open and then goes silently, never to `ended`.
+            Some(_) if per_course(&held.calendar) => {
+                if open(&held) {
+                    series.push(held);
+                }
+            }
             Some(_) if recent(held.last_seen) => series.push(held),
             Some(_) => aged_out.push(held),
             None if configured(&held.calendar) => series.push(held),
@@ -2659,8 +2689,8 @@ fn minutes(time: Time) -> i64 {
 /// **Twins** (P8 review): one real series can reach the file under two keys — an Outlook/Exchange
 /// invite keeps its own UID, so a `gcal-series:` key and an `ics-series:` key carry the same
 /// signature. Candidates are grouped by signature and one proposal is made per group, from the
-/// record [`SeriesFile::by_key`]'s precedence prefers (a `registrar:` calendar, then a `google:`
-/// calendar, then the lower calendar key; then the lower key). A key answered or held closes its signature, so a declined,
+/// record [`SeriesFile::by_key`]'s precedence prefers (a `registrar:` calendar, then a
+/// `classsearch:` one, then a `google:` one, then the lower calendar key; then the lower key). A key answered or held closes its signature, so a declined,
 /// confirmed or held twin suppresses the other.
 ///
 /// Routines feed the one window proposal (decision 3, [`window_proposal`]), never a commitment.
@@ -3995,9 +4025,11 @@ pub fn emit_checks_locked(
     // Convergence round 5: a fetch since `refresh_series` may have moved a `registrar:` key to
     // `ended`, and its withdrawn card no longer closes the question, so only a held key is filed.
     let held: BTreeSet<&str> = file.series.iter().filter(|_| good).map(|s| s.source_uid.as_str()).collect();
+    // Replan §6.7 (RQ2): a class-search row never files a card; only a press on its row confirms it.
     let asked: Vec<Proposal> = proposals
         .iter()
         .filter(|p| Source::by_uid(&p.source_uid).lands != Lands::AppliedAndListed || held.contains(p.source_uid.as_str()))
+        .filter(|p| !is_class_search(&p.source_uid))
         .cloned()
         .collect();
     let budget = std::cmp::max(0, daily_budget - crate::approvals::count_proposals_created(vault, today));
@@ -4055,9 +4087,11 @@ pub fn detect_changes(
     journal: &mut crate::journal::Journal,
 ) -> (Vec<Change>, Vec<String>) {
     let by_key = file.by_key();
+    // Replan §6.6: a class-search row is never live here, so it is never a Google note's successor
+    // and no change card carries a section.
     let live: Vec<Candidate> = by_key
         .iter()
-        .filter(|(_, series)| is_live(file, series))
+        .filter(|(_, series)| is_live(file, series) && !is_class_search(&series.calendar))
         .filter_map(|(key, series)| match classify(series, codes, planning)? {
             Class::Kind { kind, course } => Some(Candidate {
                 key,
@@ -4525,6 +4559,8 @@ fn create_confirmed_as(
             "You told Knowlu when this class meets.\n".to_string()
         } else if key.starts_with(crate::registrar::CALENDAR_PREFIX) {
             "Found in your school's class schedule.\n".to_string()
+        } else if is_class_search(&key) {
+            "Found in your school's public class search.\n".to_string()
         } else {
             "Found as a weekly series on your calendar.\n".to_string()
         };
