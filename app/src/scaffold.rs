@@ -122,7 +122,8 @@ pub const CAMPUSES: [Curated; 2] = [
         // Curation check, 2026-11-08 (replan §6.10 item 5): one anonymous, cookie-less GET of the
         // LMS root answered 200 with exactly one link under this prefix.
         lms_sign_in: Some("/auth-saml/saml/login"),
-        sign_in_hosts: &[],
+        // R0a (2026-11-05 to 11-07), R0c and T3a: the one host the saved-password fill filled on.
+        sign_in_hosts: &["myapps.ua.edu"],
         wrong_password_text: "",
     },
     Curated {
