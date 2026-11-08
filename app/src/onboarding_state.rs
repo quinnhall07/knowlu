@@ -13,7 +13,6 @@ pub const STATE_FILE: &str = "onboarding.json";
 /// The only `version` this build reads; a file of any other is `Loaded::Unreadable`.
 pub const STATE_VERSION: u32 = 1;
 pub const ANSWERS_FILE: &str = "onboarding-answers.json";
-// REGISTRAR_FILE and its deletes (write_finish, on_sign_out_with) go here under Q7 option A (§14.52.4); not built until Quinn answers.
 /// The two pending-credential names under `knowlu/<profile_id>/` (§4.11).
 pub const PENDING_LMS: &str = "pending-lms_ics";
 pub const PENDING_CALENDAR: &str = "pending-calendar_ics";
@@ -350,14 +349,6 @@ pub struct Bucket {
     pub counts: BTreeMap<String, Option<i64>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RegistrarRow {
-    pub code: String,
-    pub days: String,
-    pub start: String,
-    pub end: String,
-}
-
 /// A feed's state: never the link (§4.11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -374,7 +365,6 @@ pub struct BookRow {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Answers {
     pub courses: Vec<CourseAnswer>,
-    pub registrar_rows: Vec<RegistrarRow>,
     /// [`CourseAnswer::key`] (the LMS course key, then the slug, then the label; never the human code,
     /// which two shells share) to the slug `school.courses` settled on (a restored note's own where
     /// one matched). Two kept shells of one human code have two entries.
@@ -433,7 +423,7 @@ impl Answers {
     }
 }
 
-/// Step 3's proof totals (§14.45, §14.47), what F6c's ingest and `registrar.confirm` will import
+/// Step 3's proof totals (§14.45, §14.47), what F6c's ingest will import
 /// (`onboarding_status` returns it):
 /// - `classes`: the number of kept rows;
 /// - `assignments_upcoming`, `turned_in` (every feed count): the sum, over **every bucket whose
@@ -482,8 +472,7 @@ pub fn save_pairs(_data_dir: &Path, _pairs: &BTreeMap<String, Vec<String>>) -> R
 
 /// The answer-recording inner of `onboarding_answer(step, answer)` (F2b): saves the answer to the
 /// answers file **first**, then calls `enqueue` once per job the answer asks for. Shapes and jobs:
-/// - 3 `{"capture": {"courses": [CourseAnswer], "registrar_rows": [..] (default empty), "feeds":
-///   {kind: state} (default empty)}}` enqueues `school.preview`. It goes through
+/// - 3 `{"capture": {"courses": [CourseAnswer], "feeds": {kind: state} (default empty)}}` enqueues `school.preview`. It goes through
 ///   [`Answers::recapture`] with each row's `fragments` **dropped**: a page never supplies pairs;
 ///   a matching row keeps the ones [`save_pairs`] wrote;
 /// - 3 `{"remove": <CourseAnswer::key>}` and `{"label": {"key": <key>, "label": <text>}}` (display
@@ -496,7 +485,7 @@ pub fn save_pairs(_data_dir: &Path, _pairs: &BTreeMap<String, Vec<String>>) -> R
 /// - 10 `{"confirmed": true}` saves and enqueues nothing and answers `confirm_step10: true`, which
 ///   [`answer_on_queue`] turns into the queue's one stamp (§14.57.2);
 /// - the proceeds, `{"proceed": true}` (§14.52.3), each saves nothing: 3 enqueues `school.store`,
-///   `school.apply`, `school.courses`, `registrar.confirm`, `slot.partial` and is refused unread unless
+///   `school.apply`, `school.courses`, `slot.partial` and is refused unread unless
 ///   `school_confirmed` (the wrapper reads it from the queue's live state with [`school_apply_may_run`]);
 ///   7 enqueues `calendar.store`; 8 enqueues `config.ingest`, `slot.partial`. A repeat asks again and the
 ///   queue keeps one copy of each queued job.
@@ -531,8 +520,6 @@ pub fn onboarding_answer_checked(
             struct Capture {
                 courses: Vec<CourseAnswer>,
                 #[serde(default)]
-                registrar_rows: Vec<RegistrarRow>,
-                #[serde(default)]
                 feeds: BTreeMap<String, FeedState>,
             }
             let Ok(c) = serde_json::from_value::<Capture>(body.clone()) else { return refuse("step 3's capture is not a course list") };
@@ -543,7 +530,6 @@ pub fn onboarding_answer_checked(
             let courses: Vec<CourseAnswer> = c.courses.into_iter().map(|mut r| { r.fragments.clear(); r }).collect();
             let saved = replace_answers(data_dir, stopping, &|a| {
                 a.recapture(courses.clone());
-                a.registrar_rows = c.registrar_rows.clone();
                 a.feeds.extend(c.feeds.clone());
             });
             (saved, &["school.preview"])
@@ -589,7 +575,7 @@ pub fn onboarding_answer_checked(
         // A proceed saves nothing, so an unreadable answers file never refuses it.
         (3 | 7 | 8, "proceed") if body.as_bool() == Some(true) => match step {
             3 if !school_confirmed => return refuse("choose and confirm your school first"),
-            3 => (Ok(()), &["school.store", "school.apply", "school.courses", "registrar.confirm", "slot.partial"]),
+            3 => (Ok(()), &["school.store", "school.apply", "school.courses", "slot.partial"]),
             7 => (Ok(()), &["calendar.store"]),
             _ => (Ok(()), &["config.ingest", "slot.partial"]),
         },
@@ -1064,8 +1050,8 @@ pub fn onboarding_sign_out_inner(s: &dyn ExitSeams, g: &ExitGuard) -> Value {
     serde_json::json!({ "ok": true, "error": Value::Null })
 }
 
-const LANE_REQUIRED: [&str; 4] = ["school.apply", "school.courses", "registrar.confirm", "config.ingest"];
-/// The first of the four required lane jobs that is `failed`: `status_inner`'s `failed_job`.
+const LANE_REQUIRED: [&str; 3] = ["school.apply", "school.courses", "config.ingest"];
+/// The first of the three required lane jobs that is `failed`: `status_inner`'s `failed_job`.
 fn failed_lane_job(state: &OnboardingState) -> Option<&'static str> {
     LANE_REQUIRED.into_iter().find(|j| state.jobs.get(*j).is_some_and(|r| r.state == JobState::Failed))
 }
@@ -1077,7 +1063,7 @@ fn finish_refusal(state: &OnboardingState, now_secs: i64) -> Option<String> {
     let st = |j: &str| state.jobs.get(j).map(|r| r.state);
     // A failed lane job is named before "still saving": only Try again moves it (F8e r3).
     if failed_lane_job(state).is_some() { return Some("Something in your setup needs Try again before Knowlu opens.".into()); }
-    // The four local jobs must exist and be done: a crash between two enqueues can leave one unrecorded,
+    // The three local jobs must exist and be done: a crash between two enqueues can leave one unrecorded,
     // and finish deletes the only copy of the answers it would have read.
     let lane_open = LANE_REQUIRED.iter().any(|j| st(j) != Some(JobState::Done))
         || ["school.store", "calendar.store"].iter().any(|j| st(j).is_some_and(|s| !matches!(s, JobState::Done | JobState::Failed | JobState::Skipped)));
@@ -1372,7 +1358,7 @@ pub fn answer_on_queue(queue: &crate::onboarding_jobs::Queue, data_dir: &Path, s
     // The school fact is read from the queue's live state (its lock is released before the answers lock is taken).
     let confirmed = school_apply_may_run(&queue.snapshot());
     let out = answer_unless_exiting_with(stopping, data_dir, step, answer, &mut answer_enqueuer(queue), confirmed);
-    // The jobs that wait for the answers file (`school.courses`, `registrar.confirm`, `config.ingest`)
+    // The jobs that wait for the answers file (`school.courses`, `config.ingest`)
     // are woken by nothing else: a saved answer wakes the queue even when it enqueued no job.
     if out["ok"] == true {
         if out["confirm_step10"] == true { queue.confirm_step10(now); }
