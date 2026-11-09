@@ -6,10 +6,18 @@
 #![cfg(windows)]
 use knowlu::school_password::{
     forget_with, gate_with, read_with, reject_with, retarget_with, save_with, signed_in_with, target, FileMarks, Gate,
-    RealStore, SchoolMarks, SchoolSecret,
+    RealStore, SchoolMarks, SchoolSecret, BUSY,
 };
 use knowlu::school_session::try_take;
 use std::path::{Path, PathBuf};
+
+/// `school_session`'s lock is one process-wide set, and every test here takes profile `A`'s or `B`'s
+/// (the fake probes it on each call). Test threads run at once, so each such test holds this first:
+/// otherwise one test's held lock reads as another's `Busy`.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[path = "support/school_fakes.rs"]
 mod school_fakes;
@@ -32,6 +40,7 @@ fn t(id: &str) -> String {
 
 #[test]
 fn the_target_is_built_by_target_for_and_two_profiles_never_share_one() {
+    let _serial = serial();
     assert_eq!(target(A), knowlu::credentials::target_for(A, knowlu::account::SCHOOL_PASSWORD_SOURCE));
     assert_eq!(target(A), t(A));
     assert_ne!(target(A), target(B));
@@ -41,6 +50,7 @@ fn the_target_is_built_by_target_for_and_two_profiles_never_share_one() {
 
 #[test]
 fn a_save_writes_through_the_injected_store_under_the_profiles_own_target() {
+    let _serial = serial();
     let f = Fake::new(A);
     let reply = save_with(&f, &f, A, USER, PW);
     assert_eq!(reply["ok"], true, "{reply}");
@@ -51,6 +61,7 @@ fn a_save_writes_through_the_injected_store_under_the_profiles_own_target() {
 
 #[test]
 fn a_save_writes_the_credential_first_then_clears_both_marks() {
+    let _serial = serial();
     let f = Fake::new(A);
     f.rejected.set(true);
     f.in_flight.set(true);
@@ -64,6 +75,7 @@ fn a_save_writes_the_credential_first_then_clears_both_marks() {
 
 #[test]
 fn a_failed_credential_write_clears_no_mark() {
+    let _serial = serial();
     let f = Fake::new(A).failing(&["write"]);
     f.rejected.set(true);
     f.in_flight.set(true);
@@ -75,6 +87,7 @@ fn a_failed_credential_write_clears_no_mark() {
 
 #[test]
 fn a_failed_mark_clear_keeps_the_old_mark_and_the_save_is_reported_not_ok() {
+    let _serial = serial();
     // The old mark then blocks the new password, which fails safe: the student is asked again.
     let f = Fake::new(A).failing(&["clear_rejected"]);
     f.rejected.set(true);
@@ -86,6 +99,7 @@ fn a_failed_mark_clear_keeps_the_old_mark_and_the_save_is_reported_not_ok() {
 
 #[test]
 fn a_save_reply_holds_no_secret_even_when_the_stores_own_error_does() {
+    let _serial = serial();
     let f = Fake::new(A).failing(&["write"]);
     f.echo_secret.set(true);
     let reply = save_with(&f, &f, A, USER, PW);
@@ -98,6 +112,7 @@ fn a_save_reply_holds_no_secret_even_when_the_stores_own_error_does() {
 
 #[test]
 fn a_secret_and_a_gate_holding_one_never_print_the_password() {
+    let _serial = serial();
     let s = SchoolSecret::new(USER, PW);
     assert!(!format!("{s:?}").contains(PW), "SchoolSecret's Debug must redact: {s:?}");
     assert!(!format!("{s:#?}").contains(PW));
@@ -109,6 +124,7 @@ fn a_secret_and_a_gate_holding_one_never_print_the_password() {
 
 #[test]
 fn a_saved_password_reads_back_inside_the_process_only_under_the_lock() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     let guard = try_take(A).expect("lock free");
     let got = read_with(&f, A, &guard).expect("read").expect("a saved password");
@@ -130,8 +146,30 @@ fn no_tauri_command_returns_the_secret() {
     assert!(body.contains("save_with"), "the one command saves through save_with");
 }
 
+/// The controller's ruling (P1a): the lock, the target and the marks are all the profile folder's,
+/// the key `grades` and `lms_link` already take the lock under, so a fill and a save exclude each
+/// other; a folder whose name is not a profile id is refused, so sign-out can always delete the save.
+#[test]
+fn the_save_command_keys_its_lock_target_and_marks_to_the_profiles_own_folder() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/school_password.rs")).expect("source");
+    let body = src.split("#[tauri::command").nth(1).and_then(|b| b.split("\n}\n").next()).expect("the command");
+    assert!(body.contains("school_session::profile_key(&cs.data_dir)"), "{body}");
+    assert!(body.contains("FileMarks::new(&cs.data_dir)"), "the marks sit beside school.json: {body}");
+    assert!(body.contains("is_profile_id("), "{body}");
+}
+
+#[test]
+fn a_guard_for_another_profile_reads_no_secret() {
+    let _serial = serial();
+    let f = Fake::new(A).with_entry(&t(A), USER, PW);
+    let other = try_take(B).expect("lock free");
+    assert!(read_with(&f, A, &other).is_err(), "A's secret is read only while A's lock is held");
+    assert!(f.log.borrow().is_empty(), "{:?}", f.log.borrow());
+}
+
 #[test]
 fn a_save_while_a_fill_holds_the_lock_answers_busy_and_writes_nothing() {
+    let _serial = serial();
     let f = Fake::new(A);
     f.rejected.set(true);
     f.in_flight.set(true);
@@ -139,6 +177,7 @@ fn a_save_while_a_fill_holds_the_lock_answers_busy_and_writes_nothing() {
     let reply = save_with(&f, &f, A, USER, PW);
     assert_eq!(reply["busy"], true, "{reply}");
     assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(reply["error"], BUSY, "{reply}");
     assert!(f.log.borrow().is_empty(), "no store call and no mark touched: {:?}", f.log.borrow());
     assert!(f.rejected.get() && f.in_flight.get(), "no mark is cleared under a running fill");
     // Another profile's lock is its own.
@@ -150,6 +189,7 @@ fn a_save_while_a_fill_holds_the_lock_answers_busy_and_writes_nothing() {
 
 #[test]
 fn a_save_frees_the_lock_when_it_returns() {
+    let _serial = serial();
     let f = Fake::new(A);
     let _ = save_with(&f, &f, A, USER, PW);
     assert!(try_take(A).is_some(), "the save's own lock is dropped");
@@ -159,6 +199,7 @@ fn a_save_frees_the_lock_when_it_returns() {
 
 #[test]
 fn the_gate_reads_both_marks_and_the_secret_only_under_the_lock() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     let guard = try_take(A).expect("lock free");
     let _ = gate_with(&f, &f, A, &guard).expect("gate");
@@ -168,6 +209,7 @@ fn the_gate_reads_both_marks_and_the_secret_only_under_the_lock() {
 
 #[test]
 fn with_a_password_and_no_mark_the_gate_gives_the_secret_to_fill() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     let guard = try_take(A).unwrap();
     match gate_with(&f, &f, A, &guard).expect("gate") {
@@ -178,6 +220,7 @@ fn with_a_password_and_no_mark_the_gate_gives_the_secret_to_fill() {
 
 #[test]
 fn with_nothing_saved_and_no_mark_the_gate_is_todays_path() {
+    let _serial = serial();
     let f = Fake::new(A);
     let guard = try_take(A).unwrap();
     assert!(matches!(gate_with(&f, &f, A, &guard).expect("gate"), Gate::NoPassword));
@@ -185,6 +228,7 @@ fn with_nothing_saved_and_no_mark_the_gate_is_todays_path() {
 
 #[test]
 fn the_rejected_mark_with_no_password_saved_gives_the_form_never_todays_path() {
+    let _serial = serial();
     let f = Fake::new(A);
     f.rejected.set(true);
     let guard = try_take(A).unwrap();
@@ -193,6 +237,7 @@ fn the_rejected_mark_with_no_password_saved_gives_the_form_never_todays_path() {
 
 #[test]
 fn the_rejected_mark_blocks_a_saved_password_too() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     f.rejected.set(true);
     let guard = try_take(A).unwrap();
@@ -202,6 +247,7 @@ fn the_rejected_mark_blocks_a_saved_password_too() {
 
 #[test]
 fn an_in_flight_mark_from_an_earlier_attempt_makes_a_fill_unconfirmed_and_stays_set() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     f.in_flight.set(true);
     let guard = try_take(A).unwrap();
@@ -212,6 +258,7 @@ fn an_in_flight_mark_from_an_earlier_attempt_makes_a_fill_unconfirmed_and_stays_
 
 #[test]
 fn reading_the_secret_never_looks_at_the_in_flight_mark() {
+    let _serial = serial();
     // The mark is checked only before a fill: a read whose session is live still reads grades, and
     // the mark stays.
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
@@ -227,6 +274,7 @@ fn reading_the_secret_never_looks_at_the_in_flight_mark() {
 
 #[test]
 fn a_rejection_sets_the_rejected_mark_first_then_deletes_the_saved_password() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     reject_with(&f, &f, A).expect("both steps ran");
     assert!(at(&f.log, "set_rejected").unwrap() < at(&f.log, "delete:").unwrap(), "{:?}", f.log.borrow());
@@ -236,6 +284,7 @@ fn a_rejection_sets_the_rejected_mark_first_then_deletes_the_saved_password() {
 
 #[test]
 fn if_the_delete_fails_the_mark_still_blocks_every_fill() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW).failing(&["delete"]);
     assert!(reject_with(&f, &f, A).is_err(), "the failed delete is reported");
     assert!(f.rejected.get());
@@ -245,6 +294,7 @@ fn if_the_delete_fails_the_mark_still_blocks_every_fill() {
 
 #[test]
 fn if_the_mark_cannot_be_written_the_delete_still_runs() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW).failing(&["set_rejected"]);
     assert!(reject_with(&f, &f, A).is_err(), "the failed mark is reported");
     assert!(f.entries.borrow().is_empty(), "the password was deleted anyway");
@@ -255,6 +305,7 @@ fn if_the_mark_cannot_be_written_the_delete_still_runs() {
 
 #[test]
 fn a_visible_sign_in_that_reaches_users_me_clears_the_in_flight_mark_and_never_the_rejected_one() {
+    let _serial = serial();
     let f = Fake::new(A);
     f.rejected.set(true);
     f.in_flight.set(true);
@@ -268,6 +319,7 @@ fn a_visible_sign_in_that_reaches_users_me_clears_the_in_flight_mark_and_never_t
 
 #[test]
 fn forget_deletes_the_credential_first_then_clears_both_marks() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     f.rejected.set(true);
     f.in_flight.set(true);
@@ -279,14 +331,33 @@ fn forget_deletes_the_credential_first_then_clears_both_marks() {
 
 #[test]
 fn forget_of_a_credential_already_gone_is_ok_and_still_clears_the_marks() {
+    let _serial = serial();
     let f = Fake::new(A);
     f.rejected.set(true);
     forget_with(&f, &f, A).expect("already gone is success");
     assert!(!f.rejected.get());
 }
 
+/// The controller's ruling (P1a): Forget clears the marks, so it takes the lock a fill holds, and a
+/// Forget during a fill answers `Busy` and touches nothing (no mark cleared under a running fill).
+#[test]
+fn forget_while_a_fill_holds_the_lock_answers_busy_and_touches_nothing() {
+    let _serial = serial();
+    let f = Fake::new(A).with_entry(&t(A), USER, PW);
+    f.rejected.set(true);
+    f.in_flight.set(true);
+    let held = try_take(A).expect("lock free");
+    assert_eq!(forget_with(&f, &f, A), Err(BUSY.to_string()));
+    assert!(f.log.borrow().is_empty(), "no store call and no mark touched: {:?}", f.log.borrow());
+    assert!(f.rejected.get() && f.in_flight.get() && f.entries.borrow().contains_key(&t(A)));
+    drop(held);
+    forget_with(&f, &f, A).expect("the lock is free again");
+    assert!(try_take(A).is_some(), "forget's own lock is dropped");
+}
+
 #[test]
 fn a_failed_forget_keeps_the_marks_and_reports_the_failure() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW).failing(&["delete"]);
     f.rejected.set(true);
     f.in_flight.set(true);
@@ -332,6 +403,7 @@ fn the_file_marks_set_and_clear_and_outlive_the_value_that_wrote_them() {
 
 #[test]
 fn retarget_writes_the_new_school_target_before_it_deletes_the_old() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     assert_eq!(retarget_with(&f, &f, A, B).expect("moved"), 1);
     assert!(at(&f.log, &format!("write:{}", t(B))).unwrap() < at(&f.log, &format!("delete:{}", t(A))).unwrap());
@@ -341,6 +413,7 @@ fn retarget_writes_the_new_school_target_before_it_deletes_the_old() {
 
 #[test]
 fn a_failed_new_write_leaves_the_old_credential_in_place() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW).failing(&["write"]);
     assert!(retarget_with(&f, &f, A, B).is_err());
     assert!(f.entries.borrow().contains_key(&t(A)), "never delete before the new one is safe");
@@ -348,6 +421,7 @@ fn a_failed_new_write_leaves_the_old_credential_in_place() {
 
 #[test]
 fn retarget_with_nothing_saved_moves_nothing_and_is_not_a_failure() {
+    let _serial = serial();
     let f = Fake::new(A);
     assert_eq!(retarget_with(&f, &f, A, B).expect("ok"), 0);
     assert_eq!(count(&f.log, "write:"), 0);
@@ -355,6 +429,7 @@ fn retarget_with_nothing_saved_moves_nothing_and_is_not_a_failure() {
 
 #[test]
 fn a_rejected_password_is_never_moved_and_that_is_not_a_failure() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     f.rejected.set(true);
     assert_eq!(retarget_with(&f, &f, A, B).expect("not a failure"), 0);
@@ -364,6 +439,7 @@ fn a_rejected_password_is_never_moved_and_that_is_not_a_failure() {
 
 #[test]
 fn an_in_flight_password_is_never_moved_either() {
+    let _serial = serial();
     let f = Fake::new(A).with_entry(&t(A), USER, PW);
     f.in_flight.set(true);
     assert_eq!(retarget_with(&f, &f, A, B).expect("not a failure"), 0);
