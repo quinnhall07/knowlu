@@ -707,18 +707,21 @@ pub fn open_policy(which: String) -> Value {
 /// [`SIGN_OUT_MAIL_CALL`], the session read once. A client that cannot be built skips the clean, never
 /// the sign-out.
 ///
-/// **…and no school sign-in** (onboarding plan §S5, spec §2.5; replan RQ17): the profile's saved school
-/// password and its `school-session` folder go too, because another account may sign in on this profile
-/// next and must not sign in to this student's school ([`sign_out_with`], steps (0) and (4b)).
+/// **…and no school sign-in** (onboarding plan §S5, spec §2.5; replan RQ17, Q-B9): the profile's saved
+/// school password, its `school-session` folder and today's grades folder `lms-session` go too, after
+/// every window on them ([`SCHOOL_WINDOWS`]) is destroyed, because another account may sign in on this
+/// profile next and must not sign in to this student's school ([`sign_out_with`], steps (0) and (4b)).
 #[tauri::command(async)]
 pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Value, String> {
     // The one mail window is this console's profile's: it closes only when that profile signs out, and
     // its hold is taken, within the bound, and kept until every mail profile is deleted, as the wipe does.
+    // The school windows are this console's too, so they close under the same test, first.
     let close = |dir: &std::path::Path| {
         use tauri::Manager;
         if !app.try_state::<crate::state::ConsoleState>().is_some_and(|cs| cs.data_dir == dir) {
             return None;
         }
+        close_school_windows(&app);
         close_mail_windows(&app);
         take_mail_window(&app, std::time::Instant::now() + MAIL_STOP_BOUND)
     };
@@ -732,10 +735,11 @@ pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Val
     sign_out_with(profile_id, crate::state::app_data_root().as_deref(), close, clean)
 }
 
-/// [`sign_out`] without the app's handle. `close_mail_window` is called with the profile's folder
-/// before any mail profile in it is deleted (WebView2 holds a profile while its window is open), and
-/// what it hands back (the console's: the mail window's hold) is kept until the deletion is done, so
-/// nothing opens a mail profile in between (spec §4.13). The deletion itself is
+/// [`sign_out`] without the app's handle. `close_windows` is called with the profile's folder before
+/// any mail profile or school folder in it is deleted (WebView2 holds a profile while its window is
+/// open; the console's closes [`SCHOOL_WINDOWS`] and the mail windows), and what it hands back (the
+/// console's: the mail window's hold) is kept until the deletion is done, so nothing opens a mail
+/// profile in between (spec §4.13). The deletion itself is
 /// `mail_session::forget_all`'s, through its guard, so nothing but `mail-setup` and
 /// `mail-session-<address_id>` goes. `None` (the pending session), an id that is not
 /// [`is_profile_id`]-shaped and an unknown `app_root` name no folder, so no folder is deleted.
@@ -747,12 +751,14 @@ pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Val
 /// with `credentials::delete`, before anything else, so a school folder that cannot be deleted never keeps
 /// a password that signs it back in. `school_password_left` is `true` when it is still in Credential
 /// Manager afterwards; one never saved is not left. Step (4b), under the hold: `school_session::forget`,
-/// the patient delete of `school-session` and `school.json`. `school_profiles_left` is `true` when it
-/// did not finish; nothing records it for a start-up retry yet. Neither failure stops another step.
+/// the patient delete of `school-session` and `school.json`, then `grades::forget`, the same patient
+/// delete of today's grades folder `lms-session` (Q-B9: a signed-in Blackboard folder never outlives
+/// sign-out). `school_profiles_left` is `true` when either did not finish; C5d's launch sweep owns the
+/// retry. No failure stops another step, and each folder is tried whatever the other did.
 ///
 /// **The order** (L4 plan §4.7), for a profile with a folder: (1) the hold, first and once; (2) the
 /// clean, `clean_unfinished(dir)`; (3) every `pending_setups` record cleared through
-/// `MailState::update`, whatever the clean did; (4) `forget_all`; (4b) the school folder; (5) the hold
+/// `MailState::update`, whatever the clean did; (4) `forget_all`; (4b) the school folders; (5) the hold
 /// dropped; (6) the token read and the credential deleted; (7) the revoke. Why: the clean deletes mail
 /// profiles (`forget`), so it runs under the hold; its client reads the session from Credential Manager,
 /// so it runs before the delete, and the token revoked is the one a refresh in the clean saved; and the
@@ -765,7 +771,7 @@ pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Val
 pub fn sign_out_with<Held>(
     profile_id: Option<String>,
     app_root: Option<&std::path::Path>,
-    close_mail_window: impl FnOnce(&std::path::Path) -> Held,
+    close_windows: impl FnOnce(&std::path::Path) -> Held,
     clean_unfinished: impl FnOnce(&std::path::Path),
 ) -> Result<Value, String> {
     let target = match &profile_id {
@@ -778,11 +784,14 @@ pub fn sign_out_with<Held>(
     let school_password_left = shaped.is_some_and(|id| delete_school_password(id).is_err());
     if let (Some(id), Some(root)) = (shaped, app_root) {
         let dir = crate::profiles::profile_dir(root, id);
-        let held = close_mail_window(&dir);
+        let held = close_windows(&dir);
         clean_unfinished(&dir);
         setups_cleared = forget_pending_setups(&dir);
         mail_profiles_left = crate::mail_session::forget_all(&dir) != Ok(true);
-        school_profiles_left = crate::school_session::forget(&dir).is_err();
+        // (4b) Two statements, so the second folder is tried whatever the first answered.
+        let school_gone = crate::school_session::forget(&dir).is_ok();
+        let lms_gone = crate::grades::forget(&dir);
+        school_profiles_left = !(school_gone && lms_gone);
         drop(held);
     }
     let token = load_session(&target).ok().map(|(_, s)| s.access_token);
@@ -812,6 +821,21 @@ pub fn sign_out_with<Held>(
 fn forget_pending_setups(dir: &std::path::Path) -> bool {
     crate::mail_session::MailState::update(dir, |s| !std::mem::take(&mut s.pending_setups).is_empty())
         .is_ok_and(|s| s.pending_setups.is_empty())
+}
+
+/// Every window that reads a school folder (onboarding plan §S5): grades' (`lms-session`, or
+/// `school-session` once S4a moves grades) and the LMS capture window. Sign-out destroys them by label,
+/// as `mail::close` destroys the mail windows, so WebView2 lets go of the folders before they are deleted.
+pub const SCHOOL_WINDOWS: [&str; 2] = [crate::grades::WINDOW, crate::lms_link::WINDOW];
+
+/// Sign-out's close of [`SCHOOL_WINDOWS`]: each one open is destroyed, and one already gone is nothing.
+fn close_school_windows(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    for label in SCHOOL_WINDOWS {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.destroy();
+        }
+    }
 }
 
 /// The saved school password's source: `knowlu/<profile_id>/school` (replan RQ17), the target P1's

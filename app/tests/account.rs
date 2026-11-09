@@ -2710,12 +2710,12 @@ fn the_mail_windows_close_before_delete_local_data() {
 
 /// Spec §4.13: Knowlu sign-out closes the mail window and deletes every `mail-session-*` profile and the
 /// `mail-setup` profile of THAT Knowlu profile: a signed-out Knowlu keeps no signed-in mailbox. Nothing
-/// else in its folder goes (its settings, the grades kept session, a folder that only looks like a mail
-/// profile), and a second profile on the machine keeps its own. The window closes first, while the
+/// else in its folder that only looks like a mail profile goes, nor its settings (the school folders are
+/// S5's, below), and a second profile on the machine keeps its own. The window closes first, while the
 /// profiles are still there.
 #[cfg(windows)]
 #[test]
-fn sign_out_deletes_this_profiles_mail_session_and_mail_setup_profiles_and_no_others() {
+fn sign_out_deletes_this_profiles_mail_profiles_and_no_look_alikes_or_others() {
     let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _api = ApiBase::set(&closed_loopback_base());
     let root = std::env::temp_dir().join(format!("knowlu-t12-signout-{}-{}", std::process::id(), line!()));
@@ -2725,7 +2725,7 @@ fn sign_out_deletes_this_profiles_mail_session_and_mail_setup_profiles_and_no_ot
     let _cleanup = Cleanup(vec![knowlu::account::session_target(&my_id)]);
     let (mine, theirs) = (knowlu::profiles::profile_dir(&app_root, &my_id), knowlu::profiles::profile_dir(&app_root, &their_id));
     let mail = ["mail-session-mbx-school", "mail-session-mbx-gmail", "mail-setup"];
-    let kept = ["lms-session", "mail-session-NOT-AN-ID", "mail-sessions"];
+    let kept = ["mail-session-NOT-AN-ID", "mail-sessions"];
     for n in mail.iter().chain(kept.iter()) {
         std::fs::create_dir_all(mine.join(n)).unwrap();
     }
@@ -3683,8 +3683,18 @@ fn hold_open(file: &std::path::Path) -> std::fs::File {
     std::fs::OpenOptions::new().read(true).share_mode(1).open(file).unwrap()
 }
 
-/// What the school test's close hands back to `sign_out_with`: at the release it records whether the
-/// school folder was already gone and whether the session's credential was still there.
+/// Today's grades folder, `lms-session`, with one file in it, as a signed-in grades window leaves it.
+#[cfg(windows)]
+fn lms_folder(dir: &std::path::Path) -> std::path::PathBuf {
+    let network = knowlu::grades::session_dir(dir).join("Default").join("Network");
+    std::fs::create_dir_all(&network).unwrap();
+    std::fs::write(network.join("Cookies"), "synthetic").unwrap();
+    network.join("Cookies")
+}
+
+/// What the school test's close hands back to `sign_out_with`: at the release it records whether both
+/// school folders (`school-session` and `lms-session`) were already gone and whether the session's
+/// credential was still there.
 #[cfg(windows)]
 struct SchoolAtRelease<'a> {
     dir: std::path::PathBuf,
@@ -3695,18 +3705,19 @@ struct SchoolAtRelease<'a> {
 #[cfg(windows)]
 impl Drop for SchoolAtRelease<'_> {
     fn drop(&mut self) {
-        let gone = !knowlu::school_session::session_dir(&self.dir).exists();
+        let gone = !knowlu::school_session::session_dir(&self.dir).exists() && !knowlu::grades::session_dir(&self.dir).exists();
         self.seen.set(Some((gone, knowlu::credentials::exists(&self.session))));
     }
 }
 
-/// RQ17 and spec §2.5: sign-out deletes this profile's school folder, its record of uses and its saved
-/// school password, and nothing of another profile's. The password goes first, before the mail window's
-/// hold, so a folder that cannot be deleted never keeps a password that signs it back in. The folder goes
-/// under the hold, and both are gone while the session's credential is still there.
+/// RQ17, spec §2.5 and Q-B9: sign-out deletes this profile's school folder, its record of uses, today's
+/// grades folder (`lms-session`) and its saved school password, and nothing of another profile's. The
+/// password goes first, before the close and the mail window's hold, so a folder that cannot be deleted
+/// never keeps a password that signs it back in. Both folders are still there when the close runs, go
+/// under the hold, and are gone while the session's credential is still there.
 #[cfg(windows)]
 #[test]
-fn sign_out_deletes_this_profiles_school_folder_and_school_password_and_no_others() {
+fn sign_out_deletes_this_profiles_school_folders_and_school_password_and_no_others() {
     let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _api = ApiBase::set(&closed_loopback_base());
     let (root, app_root, id, dir) = signout_profile("school");
@@ -3718,7 +3729,8 @@ fn sign_out_deletes_this_profiles_school_folder_and_school_password_and_no_other
     knowlu::credentials::write(&mine_pw, "student@example.invalid", "synthetic-school-pw").expect("my school password");
     knowlu::credentials::write(&their_pw, "other@example.invalid", "synthetic-school-pw").expect("their school password");
     school_folder(&dir);
-    let their_file = school_folder(&theirs);
+    lms_folder(&dir);
+    let (their_file, their_lms) = (school_folder(&theirs), lms_folder(&theirs));
     std::fs::write(dir.join("settings.json"), "{}").unwrap();
 
     let (at_hold, at_release) = (std::cell::Cell::new(None), std::cell::Cell::new(None));
@@ -3726,15 +3738,18 @@ fn sign_out_deletes_this_profiles_school_folder_and_school_password_and_no_other
         Some(id.clone()),
         Some(&app_root),
         |d: &std::path::Path| {
-            at_hold.set(Some((knowlu::credentials::exists(&mine_pw), knowlu::school_session::session_dir(d).is_dir())));
+            let both = knowlu::school_session::session_dir(d).is_dir() && knowlu::grades::session_dir(d).is_dir();
+            at_hold.set(Some((knowlu::credentials::exists(&mine_pw), both)));
             SchoolAtRelease { dir: d.to_path_buf(), session: session.clone(), seen: &at_release }
         },
         |_: &std::path::Path| {},
     )
     .expect("sign out");
 
-    assert_eq!(at_hold.get(), Some((false, true)), "at the hold: the password already gone, the folder still there");
-    assert_eq!(at_release.get(), Some((true, true)), "at the release: the folder gone, the session's credential still there");
+    assert_eq!(at_hold.get(), Some((false, true)), "at the close: the password already gone, both folders still there");
+    assert_eq!(at_release.get(), Some((true, true)), "at the release: both folders gone, the session's credential still there");
+    assert!(!knowlu::grades::session_dir(&dir).exists(), "my lms-session is gone");
+    assert!(their_lms.is_file(), "another profile's lms-session was deleted");
     assert_eq!((out["ok"].clone(), out["had_session"].clone()), (serde_json::json!(true), serde_json::json!(true)), "{out}");
     let left = (out["school_profiles_left"].clone(), out["school_password_left"].clone());
     assert_eq!(left, (serde_json::json!(false), serde_json::json!(false)), "{out}");
@@ -3839,4 +3854,54 @@ fn deleting_my_data_deletes_the_school_folder_patiently_and_the_saved_school_pas
     assert!(!knowlu::credentials::exists(&pw), "my school password is gone");
     assert!(knowlu::credentials::exists(&their_pw), "another profile's school password was deleted");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Q-B9: an `lms-session` WebView2 still holds is named in `school_profiles_left` too, and it stops nothing
+/// else: the school folder, the saved school password and the session's credential still go.
+#[cfg(windows)]
+#[test]
+fn a_legacy_lms_session_still_held_is_reported_and_the_school_folder_still_goes() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let (root, app_root, id, dir) = signout_profile("lms-held");
+    let (session, pw) = (knowlu::account::session_target(&id), school_password(&id));
+    let _cleanup = Cleanup(vec![session.clone(), pw.clone()]);
+    save_session_left(&session, 3600);
+    knowlu::credentials::write(&pw, "student@example.invalid", "synthetic-school-pw").expect("a school password");
+    school_folder(&dir);
+    let held = hold_open(&lms_folder(&dir));
+
+    let out = knowlu::account::sign_out_with(Some(id), Some(&app_root), |_: &std::path::Path| {}, |_: &std::path::Path| {});
+    drop(held);
+    let out = out.expect("sign out");
+
+    assert_eq!((out["ok"].clone(), out["school_profiles_left"].clone()), (serde_json::json!(true), serde_json::json!(true)), "{out}");
+    assert!(knowlu::grades::session_dir(&dir).is_dir(), "the lms-session really was left");
+    assert!(!knowlu::school_session::session_dir(&dir).exists(), "the school folder still went");
+    assert!(!knowlu::credentials::exists(&pw) && !knowlu::credentials::exists(&session), "the password and the session still went");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The live half of the school close, which needs the app's handle, so no test drives it (as
+/// `the_live_close_stops_runs_first_and_sign_out_and_the_wipe_wait_for_the_window` reads the mail close):
+/// sign-out's close, for this console's profile only, destroys every window that reads a school folder by
+/// label (grades' and the LMS capture window), before the mail windows close and the hold is taken, so
+/// before any folder is deleted.
+#[test]
+fn sign_outs_close_destroys_every_school_window_by_label_first() {
+    assert_eq!(knowlu::account::SCHOOL_WINDOWS, [knowlu::grades::WINDOW, knowlu::lms_link::WINDOW]);
+    let src = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let body = |head: &str| {
+        let at = src.find(head).unwrap_or_else(|| panic!("{head}"));
+        &src[at..at + src[at..].find("\n}\n").expect("the end of its body")]
+    };
+    let close = body("fn close_school_windows(app: &tauri::AppHandle) {");
+    assert!(close.contains("for label in SCHOOL_WINDOWS") && close.contains("let _ = w.destroy();"), "{close}");
+    // Split so this file's compiled-in-project guard does not read a search string as a call to sign_out.
+    let sign_out = body(concat!("pub fn sign_out", "(app: tauri::AppHandle"));
+    let gate = sign_out.find("return None;");
+    let school = sign_out.find("close_school_windows(&app);");
+    let (mail, take) = (sign_out.find("close_mail_windows(&app);"), sign_out.find("take_mail_window(&app"));
+    assert!(gate.is_some() && gate < school, "only this console's profile closes its windows: {sign_out}");
+    assert!(school < mail && mail < take, "the school windows close first, then the mail windows, then the hold: {sign_out}");
 }
