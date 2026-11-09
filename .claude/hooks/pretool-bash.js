@@ -8,8 +8,10 @@
 // 2. Outward-facing git and GitHub actions ask Quinn even in bypassPermissions mode: tag pushes,
 //    force pushes in any spelling, gh release/variable/secret/ruleset changes (a v* tag ships a
 //    release to every installed tester; CI_SELF_HOSTED would run public PRs on the laptop).
-// 3. researcher may run read-only git and gh only (it also reads untrusted web pages).
-// 4. Cargo output trim: an inert cargo build/check/clippy/test/nextest command (optionally behind
+// 3. reviewer may write one thing: its own report, a .md file directly under docs/reports/. Every
+//    other Edit or Write from reviewer is denied (it reviews; it never edits).
+// 4. researcher may run read-only git and gh only (it also reads untrusted web pages).
+// 5. Cargo output trim: an inert cargo build/check/clippy/test/nextest command (optionally behind
 //    `cd <plain path> &&` or slot.sh) is rewritten to pipe through trim-cargo-output.js.
 //    Prefix KNOWLU_RAW_OUTPUT=1 to skip.
 // An internal error exits 0 with no output, so a hook bug never blocks a call.
@@ -133,7 +135,21 @@ function guardOutward(input) {
   }
 }
 
-const RESEARCHER_OK = /^\s*(git\s+(log|show|diff|blame|status|rev-parse|merge-base|ls-files|ls-tree|cat-file|for-each-ref|describe|shortlog)\b|gh\s+(pr|issue|run|release)\s+(view|list|diff|checks)\b|gh\s+repo\s+view\b)[^;&|<>`$\n\r"'\\]*$/;
+// reviewer's one writable place. Any `..` segment is refused outright rather than resolved.
+const REVIEWER_REPORT = /(^|\/)docs\/reports\/[^/]+\.md$/;
+
+function guardReviewer(input) {
+  if (subagentOf(input) !== 'reviewer') return;
+  if (!['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(input.tool_name)) return;
+  const ti = input.tool_input || {};
+  const p = norm(ti.file_path || ti.notebook_path || '');
+  if (p.split('/').includes('..') || !REVIEWER_REPORT.test(p)) {
+    deny('reviewer writes only its own report, a .md file directly under docs/reports/. It never edits anything else; ' +
+      'put findings in the report or the final message.');
+  }
+}
+
+const RESEARCHER_OK =/^\s*(git\s+(log|show|diff|blame|status|rev-parse|merge-base|ls-files|ls-tree|cat-file|for-each-ref|describe|shortlog)\b|gh\s+(pr|issue|run|release)\s+(view|list|diff|checks)\b|gh\s+repo\s+view\b)[^;&|<>`$\n\r"'\\]*$/;
 
 function guardResearcher(input) {
   if (subagentOf(input) !== 'researcher' || input.tool_name !== 'Bash') return;
@@ -205,6 +221,7 @@ process.stdin.on('end', () => {
   try {
     const input = JSON.parse(raw);
     guardFixtures(input);
+    guardReviewer(input);
     guardResearcher(input);
     guardOutward(input);
     trim(input);
