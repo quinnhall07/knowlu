@@ -174,7 +174,7 @@ fn capture(app: &tauri::AppHandle, cs: &ConsoleState, view: &str) -> Value {
         return failed(format!("You're not signed in yet. Finish signing in to {} in the window, then press I'm signed in.", reg.label), false);
     }
     let env = run_file(cs, view, reg.school, body.as_bytes(), today);
-    lms_link::close_and_wipe(app);
+    lms_link::close_registrars_window(app, &w);
     env
 }
 

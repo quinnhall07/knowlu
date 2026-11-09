@@ -561,3 +561,37 @@ fn capture_and_close_check_the_window_before_they_read_a_cookie_or_close_anythin
         assert!(body.contains("\"ok\": false") || body.contains("failed("), "{name} refuses with ok:false");
     }
 }
+
+#[test]
+fn a_finished_registrar_capture_closes_its_own_window_handle_never_the_label() {
+    let reg = src("src/registrar.rs");
+    let at = reg.find("fn capture(").expect("capture");
+    let body = &reg[at..at + reg[at..].find("\n}\n").unwrap()];
+    let taken = body.find("let Some(w) = app.get_webview_window(").expect("capture takes its window handle");
+    let after = &body[taken..];
+    assert!(!after.contains("close_and_wipe("), "once it holds its window, capture never closes by label:\n{after}");
+    assert!(after.contains("close_registrars_window(app, &w)"), "it closes the handle it read from:\n{after}");
+}
+
+#[test]
+fn forget_with_an_unreadable_school_json_deletes_the_school_folder_and_the_record() {
+    for bad in ["{not json", "", r#"{"uses": ["not-a-use"]}"#] {
+        // The folder is there: it goes, and the record that could not be read goes with it.
+        let d = temp("forget-bad-folder");
+        make(&session_dir(&d));
+        std::fs::write(d.join("school.json"), bad).unwrap();
+        let out = forget_with(&d, || {});
+        assert_eq!(out["ok"], json!(true), "{bad:?}: {out}");
+        assert!(!session_dir(&d).exists() && !d.join("school.json").exists(), "{bad:?}");
+        // The folder is gone but the record is unreadable: it still counts as in use, so Forget clears
+        // it (an unreadable record never reads as "no use"); this is the case that needs the rule.
+        let d = temp("forget-bad-record");
+        make(&legacy(&d));
+        std::fs::write(d.join("school.json"), bad).unwrap();
+        assert!(!session_dir(&d).exists());
+        let out = forget_with(&d, || {});
+        assert_eq!(out["ok"], json!(true), "{bad:?}: {out}");
+        assert!(!d.join("school.json").exists(), "{bad:?}: the unreadable record is cleared, not left to be misread later");
+        assert!(!legacy(&d).exists());
+    }
+}

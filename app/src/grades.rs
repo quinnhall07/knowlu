@@ -444,8 +444,9 @@ pub fn refresh_with(
 /// **Where the school folder is in use, this is also [`crate::school_session::forget`]**: the folder
 /// exists or `school.json` records a use (grades', or the course list's), so Forget deletes it and its
 /// record of uses along with any `lms-session`. Forgetting `lms-session` alone would leave a bare school
-/// folder for grades to resolve to, which would read as connected: Forget would be undone. A folder
-/// nothing uses is not touched, so an old install's Forget is today's delete of `lms-session` alone.
+/// folder for grades to resolve to, which would read as connected: Forget would be undone. With no school
+/// folder and no recorded use (an unreadable record counts as one) the school side is not touched, so an
+/// old install's Forget is today's delete of `lms-session` alone.
 pub fn forget_with(data_dir: &Path, close_window: impl FnOnce()) -> Value {
     use crate::school_session::{forget as forget_school, session_dir as school_dir, uses};
     close_window();

@@ -11,8 +11,9 @@ use std::time::{Duration, SystemTime};
 use serde_json::{json, Value};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
-/// The window's label. One at a time, by construction: `open_window_at` shows the window already
-/// carrying this label rather than building a second (R-C1-41, M5).
+/// The window's label, shared by the registrar's throwaway window and the LMS capture on the school
+/// folder. One at a time, by construction: `open_window_with` shows an open window of the plan's own
+/// kind rather than building a second (R-C1-41, M5), and refuses one of the other kind.
 pub const WINDOW: &str = "lms-signin";
 
 /// Every session directory this module makes starts with this, and nothing else it deletes does.
@@ -215,14 +216,16 @@ pub fn sweep_stale_sessions() {
     sweep_stale_sessions_in(&std::env::temp_dir(), SESSION_PREFIX, Some(&mine), SystemTime::now(), STALE_AFTER);
 }
 
-/// Open the sign-in window, or show the one that is already open.
+/// Open the registrar's throwaway sign-in window, or show the registrar's that is already open. An open
+/// window of the other kind (the kept school window) is refused with [`OTHER_WINDOW_OPEN`], never shown.
 ///
 /// **The second *Sign in* click used to surface a Tauri internal string** (R-C1-41, M5): a close is
 /// posted asynchronously while `build` refuses the still-registered label on this thread, so the page
-/// got "a webview with label `lms-signin` already exists". The window the student already has is the
-/// right answer, so it is shown and focused — and *not* closed on the way, which would have handed
-/// them a window that vanished a moment after being told it was open. That also keeps the "one at a
-/// time" guarantee: this is the only thing that builds the window, and it never builds a second.
+/// got "a webview with label `lms-signin` already exists". The window the student already has, of the
+/// same kind, is the right answer, so it is shown and focused — and *not* closed on the way, which would
+/// have handed them a window that vanished a moment after being told it was open. That also keeps the
+/// "one at a time" guarantee: [`open_window_with`] is the only thing that builds the window, and it
+/// never builds a second.
 pub fn open_window_at(app: &tauri::AppHandle, url: &str, data_dir: &Path) -> Result<(), String> {
     open_window_with(app, url, &window_plan(None, data_dir), None)
 }
@@ -1329,4 +1332,14 @@ pub fn registrar_window_check(open: Option<bool>) -> Result<(), &'static str> {
 pub fn check_registrar_window(app: &tauri::AppHandle) -> Result<(), &'static str> {
     let open = app.get_webview_window(WINDOW).map(|_| app.try_state::<LmsSession>().is_some_and(|s| s.is_school()));
     registrar_window_check(open)
+}
+
+/// The registrar closes **the window it read from**, by its own handle, and never by the shared label: a
+/// school window opened while the capture ran must survive. Then the throwaway folder is wiped, as
+/// [`close_and_wipe`] does; a school window leaves none to take.
+pub fn close_registrars_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    let _ = window.close();
+    if let Some(dir) = take_session(app) {
+        std::thread::spawn(move || { wipe_dir(&dir, WIPE_TRIES); });
+    }
 }
