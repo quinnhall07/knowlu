@@ -2450,6 +2450,9 @@ thread_local! {
     /// C2b tests only: the same, for a `rank`'s drop of a passed no-time block in
     /// [`refresh_series_with`].
     pub(crate) static BEFORE_DROP_LOCK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+    /// C2d tests only: called on this thread after `confirm`'s read and just before Not mine
+    /// removes a class-search row, so a test can break the series file in between.
+    pub(crate) static BEFORE_ROW_REMOVAL: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Replan §6.12 (RQ11, RQ12): deletes the unconfirmed class-search rows (`Rows`), or those and the
@@ -4662,13 +4665,17 @@ pub fn create_marker(
 
 /// [`create_marker`] under the context it is given (Plan ruling Q3-a): the confirm screen's
 /// markers are the student's own writes (phase-2 spec §3), a settlement's are `agent:commitments`.
+///
+/// Replan §6.7 item 4: a `classsearch:` key ([`is_class_search`]) gets no marker, ever. A marker
+/// syncs and would carry a section off the device, so this returns `Ok(None)` and writes nothing,
+/// journal included. Every marker is written here, so Not mine and a rejected card alike are covered.
 fn create_marker_as(
     vault: &Path,
     key: &str,
     ctx: &crate::write::WriteContext,
     journal: &mut crate::journal::Journal,
 ) -> Result<Option<PathBuf>, crate::write::WriteError> {
-    if load(vault).declined.contains(key) {
+    if is_class_search(key) || load(vault).declined.contains(key) {
         return Ok(None);
     }
     let front = front_matter(&[
@@ -5406,14 +5413,16 @@ fn proposal_signatures(p: &Proposal, codes: &Codes) -> Vec<Signature> {
 ///   by `source_uid` or by signature, is skipped silently: a second Finish is a no-op.
 /// - **`not_mine`** → [`create_marker_as`] for the key and every twin ([`twin_keys`]), as a card
 ///   rejection does. A key a confirmed note holds gets no marker. A key already declined is skipped
-///   silently.
+///   silently. A `classsearch:` key among them gets no marker: once every other twin's marker is
+///   written, its row is removed from the series file ([`remove_class_search_rows`], replan §6.7
+///   item 4), and it is not counted. A failed marker keeps the row.
 /// - **the window** → the planning day, created when there is none ([`create_confirmed_as`]).
 ///   Otherwise its one `window:` line is written through `write_literals`, a human edit that
 ///   `journal.human_set` protects. An equal window writes nothing (`unchanged`).
 ///
 /// A key that is no current proposal, or is the window proposal's, is skipped with a warning. A
 /// write that fails is reported, and the rest still run. No card is filed, so nothing is charged
-/// to the cap.
+/// to the cap. No warning prints a `classsearch:` key: it reads "a class-search row" (replan §6.12).
 pub fn confirm(
     vault: &Path,
     input: &ConfirmInput,
@@ -5436,7 +5445,9 @@ pub fn confirm(
     let stored = stored_proposals(vault, today);
     let codes = &stored.codes;
     let mut report = ConfirmReport::default();
-    let stale = |key: &str| format!("{key}: not a current proposal; skipped");
+    // Replan §6.12: no warning prints a class-search key; it is named by fixed words.
+    let shown = |key: &str| if is_class_search(key) { "a class-search row".to_string() } else { key.to_string() };
+    let stale = |key: &str| format!("{}: not a current proposal; skipped", shown(key));
 
     for (key, level) in &input.mine {
         let set = load(vault);
@@ -5456,17 +5467,17 @@ pub fn confirm(
             continue;
         }
         let Some(level) = Level::parse(level) else {
-            report.warnings.push(format!("{key}: level {level:?} is not hard, soft or optional; skipped"));
+            report.warnings.push(format!("{}: level {level:?} is not hard, soft or optional; skipped", shown(key)));
             continue;
         };
         let chosen = Proposal { level, ..p.clone() };
         let Value::Mapping(map) = to_value(proposal_commitment(&chosen)) else {
-            report.warnings.push(format!("{key}: not written (no commitment mapping)"));
+            report.warnings.push(format!("{}: not written (no commitment mapping)", shown(key)));
             continue;
         };
         match create_confirmed_as(vault, &map, key, today, ctx, journal) {
             Ok(_) => report.created += 1,
-            Err(e) => report.warnings.push(format!("{key}: not written ({e})")),
+            Err(e) => report.warnings.push(format!("{}: not written ({e})", shown(key))),
         }
     }
 
@@ -5480,14 +5491,27 @@ pub fn confirm(
             continue;
         };
         let held: BTreeSet<String> = set.confirmed.iter().filter_map(|n| n.source_uid.clone()).collect();
-        for twin in twin_keys(vault, key, proposal_signatures(p, codes), codes) {
-            if held.contains(&twin) {
-                continue;
-            }
+        let (rows, twins): (BTreeSet<String>, BTreeSet<String>) = twin_keys(vault, key, proposal_signatures(p, codes), codes)
+            .into_iter()
+            .filter(|twin| !held.contains(twin))
+            .partition(|twin| is_class_search(twin));
+        let mut marked = true;
+        for twin in twins {
             match create_marker_as(vault, &twin, ctx, journal) {
                 Ok(Some(_)) => report.declined += 1,
                 Ok(None) => {}
-                Err(e) => report.warnings.push(format!("{twin}: marker not written ({e})")),
+                Err(e) => {
+                    marked = false;
+                    report.warnings.push(format!("{}: marker not written ({e})", shown(&twin)));
+                }
+            }
+        }
+        // Replan §6.7 item 4: a class-search twin gets no marker; its row leaves the series file
+        // once every other twin is marked (C2d review). A failed marker keeps the row, so the
+        // student sees it again; a hidden same-signature twin is declined by its own marker.
+        if marked {
+            if let Err(why) = remove_class_search_rows(vault, &rows) {
+                report.warnings.push(format!("a class-search row: not removed ({why})"));
             }
         }
     }
@@ -5518,6 +5542,38 @@ pub fn confirm(
         }
     }
     Ok(report)
+}
+
+/// Replan §6.7 item 4, §6.12 ("one row at once on Not mine"): removes the class-search series
+/// `keys` names from the series file, and a `classsearch:` calendar's `calendars` entry once no
+/// row is left under it. It holds [`SERIES_LOCK_FILE`] and re-reads the file under it, so nothing
+/// another writer stored is lost; it writes only the series file, through [`file_bytes`], and only
+/// when a row went. No `keys`, no lock and no write. An error is fixed words, never a key.
+fn remove_class_search_rows(vault: &Path, keys: &BTreeSet<String>) -> Result<(), String> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    #[cfg(test)]
+    BEFORE_ROW_REMOVAL.with(|hook| {
+        if let Some(signal) = hook.borrow().as_ref() {
+            signal();
+        }
+    });
+    let _lock = lock_series_file(vault).map_err(|err| format!("could not lock {SERIES_LOCK_FILE} ({})", err.kind()))?;
+    let mut file = match load_series_file(vault) {
+        Loaded::Read(file) => file,
+        Loaded::Malformed(_) => return Err(format!("{SERIES_FILE} malformed")),
+        Loaded::Unreadable(kind) => return Err(format!("{SERIES_FILE} unreadable ({kind})")),
+    };
+    let gone: BTreeSet<String> =
+        file.series.iter().filter(|s| keys.contains(&s.source_uid)).map(|s| s.calendar.clone()).collect();
+    if gone.is_empty() {
+        return Ok(());
+    }
+    file.series.retain(|s| !keys.contains(&s.source_uid));
+    let still: BTreeSet<&str> = file.series.iter().map(|s| s.calendar.as_str()).collect();
+    file.calendars.retain(|calendar, _| !(is_class_search(calendar) && gone.contains(calendar) && !still.contains(calendar.as_str())));
+    write_series_file(vault, &file_bytes(&file)).map_err(|err| format!("{SERIES_FILE} could not be written ({})", err.kind()))
 }
 
 /// What the *Schedule* view and the confirm screen read (phase-2 spec §4). Built purely, with no
@@ -13252,5 +13308,530 @@ mod class_search_purge_tests {
         assert_eq!(on_disk(&v), before, "no lock, no write");
         refresh_series(&v, &[], TODAY);
         assert_block_kept(&v, &base, &[]);
+    }
+}
+
+#[cfg(test)]
+mod class_search_marker_tests {
+    //! C2d (onboarding replan §6.7 item 4, §6.12, RQ2): no decline marker and no warning ever
+    //! carries a `classsearch:` key. A marker syncs and a section would leave the device, so
+    //! `create_marker_as` refuses the key, Not mine on a class-search row writes none and removes
+    //! the row, and `confirm`'s warnings use fixed words. Every title, key, course and date is
+    //! invented. Every vault write goes through the write path; the series file is written by the
+    //! file's own writer.
+
+    use super::*;
+    use crate::journal::Journal;
+    use crate::write::WriteContext;
+    use jiff::civil::date;
+
+    const TODAY: Date = Date::constant(2026, 9, 10);
+    const CS_CAL: &str = "classsearch:ua:202640";
+    const CS_KEY: &str = "classsearch:ua:202640-40001";
+    const REG_KEY: &str = "registrar:ua:202640-40003";
+    const GOOGLE_CAL: &str = "google:invented";
+    const GCAL_KEY: &str = "gcal-series:cs100";
+    /// A class-search key no series holds.
+    const UNKNOWN_CS: &str = "classsearch:ua:202640-49999";
+    /// What a class-search key may be called in a warning.
+    const WORDS: &str = "a class-search row";
+
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A vault whose one course is `cs-100`, code `CS 100`, and a `state/` folder.
+    fn vault(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("knowlu-c2d-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("courses")).unwrap();
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        std::fs::write(
+            dir.join("courses").join("cs-100.md"),
+            "---\ntitle: \"CS 100\"\nslug: cs-100\ncode: \"CS 100\"\nstatus: active\n---\n\nInvented.\n",
+        )
+        .unwrap();
+        Scratch(dir)
+    }
+
+    fn human() -> WriteContext {
+        WriteContext::new("quinn", "dashboard")
+    }
+
+    fn agent() -> WriteContext {
+        WriteContext::new("agent:test", "test")
+    }
+
+    fn t(h: i8, m: i8) -> Time {
+        Time::new(h, m, 0, 0).unwrap()
+    }
+
+    /// A weekly rule Mon/Wed/Fri 12:00 to `12:end`, with no instances.
+    fn row(uid: &str, cal: &str, title: &str, end: i8) -> Series {
+        Series {
+            source_uid: uid.to_string(),
+            calendar: cal.to_string(),
+            title: title.to_string(),
+            where_: None,
+            event_type: None,
+            rule: Rule { freq: "WEEKLY".into(), interval: 1, until: None, count: None },
+            has_master: true,
+            rdate: false,
+            unsupported: false,
+            instances: Vec::new(),
+            meets: vec![Meet { days: vec!["mon", "wed", "fri"], start: t(12, 0), end: t(12, end) }],
+            first: Some(date(2026, 8, 24)),
+            until: None,
+            last_seen: Some(TODAY),
+        }
+    }
+
+    fn cs_row() -> Series {
+        row(CS_KEY, CS_CAL, "CS 100", 50)
+    }
+
+    /// Google's copy of the class, with its instances, ending at `12:end`.
+    fn google_row(end: i8) -> Series {
+        let mut s = row(GCAL_KEY, GOOGLE_CAL, "CS 100", end);
+        s.event_type = Some("default".into());
+        s.instances = [date(2026, 9, 7), date(2026, 9, 9), date(2026, 9, 11)]
+            .into_iter()
+            .map(|d| Instance { date: d, start: Some(t(12, 0)), end: Some(t(12, end)) })
+            .collect();
+        s
+    }
+
+    fn put(v: &Path, series: Vec<Series>) {
+        let mut file = SeriesFile::default();
+        for s in &series {
+            file.calendars.insert(s.calendar.clone(), TODAY);
+        }
+        file.series = series;
+        write_series_file(v, &file_bytes(&file)).unwrap();
+    }
+
+    fn series_keys(v: &Path) -> Vec<String> {
+        read_series_file(v).0.series.iter().map(|s| s.source_uid.clone()).collect()
+    }
+
+    fn series_bytes(v: &Path) -> String {
+        std::fs::read_to_string(v.join(SERIES_FILE)).unwrap()
+    }
+
+    /// Every file under `v` but the series file, its lock and its temp copies, by relative path.
+    fn tree(v: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else {
+                    let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                    if !rel.starts_with(SERIES_FILE) && rel != SERIES_LOCK_FILE {
+                        out.insert(rel, std::fs::read(&path).unwrap());
+                    }
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(v, v, &mut out);
+        out
+    }
+
+    /// A search of every note, card and journal record: no `classsearch:` key and no section.
+    fn assert_no_section_key(v: &Path) {
+        for (rel, bytes) in tree(v) {
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(!text.contains("classsearch:"), "{rel} holds a class-search key: {text}");
+            assert!(!text.contains("40001") && !text.contains("202640"), "{rel} holds a section: {text}");
+        }
+    }
+
+    /// The `source_uid` of every marker in `commitments/`, sorted.
+    fn marker_keys(v: &Path) -> Vec<String> {
+        let mut out: Vec<String> = tree(v)
+            .into_iter()
+            .filter(|(rel, _)| rel.starts_with("commitments/"))
+            .map(|(_, bytes)| {
+                let text = String::from_utf8(bytes).unwrap();
+                text.lines().find_map(|l| l.strip_prefix("source_uid: ")).unwrap_or("").trim_matches('"').to_string()
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn journal_len(v: &Path) -> usize {
+        Journal::new(v).read(None, None).len()
+    }
+
+    fn input(mine: &[(&str, &str)], not_mine: &[&str], window: Option<&str>) -> ConfirmInput {
+        ConfirmInput {
+            mine: mine.iter().map(|(k, l)| (k.to_string(), l.to_string())).collect(),
+            not_mine: not_mine.iter().map(|k| k.to_string()).collect(),
+            window: window.map(String::from),
+        }
+    }
+
+    fn run(v: &Path, given: &ConfirmInput) -> ConfirmReport {
+        confirm(v, given, TODAY, &human(), &mut Journal::new(v)).unwrap()
+    }
+
+    /// A `commitment-check` card of key `uid` for CS 100, Mon/Wed/Fri 12:00-12:50, as `rank` files it.
+    fn proposal_card(uid: &str) -> Mapping {
+        crate::yaml::mapping_of(&format!(
+            "type: approval\nkind: commitment-check\ntitle: CS 100 · a class?\nstatus: pending\nsource_uid: {uid}\n\
+             commitment: {{course: cs-100, from: '2026-08-24', kind: class, level: hard, \
+             meets: [{{days: [mon, wed, fri], end: '12:50', start: '12:00'}}], title: CS 100}}\n\
+             proposed_at: 2026-09-10\nfirst_proposed_at: 2026-09-10\ncreated_by: agent:commitments\n"
+        ))
+    }
+
+    /// A change card whose `change` names `successor` as the new `source_uid`.
+    fn change_card(successor: &str) -> Mapping {
+        crate::yaml::mapping_of(&format!(
+            "type: approval\nkind: commitment-check\ntitle: CS 100 · moved\nstatus: pending\n\
+             target: commitments/cs-100.md\nchange: {{source_uid: '{successor}'}}\n\
+             proposed_at: 2026-09-10\nfirst_proposed_at: 2026-09-10\ncreated_by: agent:commitments\n"
+        ))
+    }
+
+    fn reject(v: &Path, meta: &Mapping) -> Vec<PathBuf> {
+        settle_rejected(v, meta, &agent(), &mut Journal::new(v)).unwrap()
+    }
+
+    // ---- Not mine on a class-search row ----
+
+    /// Not mine on a class-search row writes no marker, removes the row and exits 0 (reports no
+    /// decline). Red now: the row's own marker is written and the row stays.
+    #[test]
+    fn not_mine_on_a_class_search_row_writes_no_marker_and_removes_the_row() {
+        let v = vault("nm-row");
+        put(&v, vec![cs_row()]);
+        let report = run(&v, &input(&[], &[CS_KEY], None));
+        assert_eq!(report.declined, 0, "{report:?}");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert!(marker_keys(&v).is_empty(), "{:?}", marker_keys(&v));
+        assert!(series_keys(&v).is_empty(), "the row is removed: {:?}", series_keys(&v));
+        assert_eq!(journal_len(&v), 0);
+        assert_no_section_key(&v);
+    }
+
+    /// With a same-signature Google twin hidden behind the row, the Google key is marked and
+    /// only it; the row goes and the Google row stays. Red now: both keys are marked.
+    #[test]
+    fn not_mine_on_a_class_search_row_marks_its_hidden_same_signature_google_twin() {
+        let v = vault("nm-hidden");
+        put(&v, vec![cs_row(), google_row(50)]);
+        let report = run(&v, &input(&[], &[CS_KEY], None));
+        assert_eq!(report.declined, 1, "{report:?}");
+        assert_eq!(marker_keys(&v), [GCAL_KEY]);
+        assert_eq!(series_keys(&v), [GCAL_KEY], "only the class-search row is removed");
+        assert_no_section_key(&v);
+    }
+
+    /// A by-title Google twin: the class-search row's raw title `CS  100` (two spaces) reads no
+    /// course, so its signature is the title's, and Google's `CS 100` reads course `cs-100`. The
+    /// two are proposed separately and are twins by title only. Not mine on the Google key marks
+    /// it and removes the class-search row. Red now: the row's marker is written and the row stays.
+    #[test]
+    fn not_mine_on_a_by_title_google_twin_marks_the_google_key_and_removes_the_row() {
+        let v = vault("nm-title");
+        put(&v, vec![row(CS_KEY, CS_CAL, "CS  100", 50), google_row(50)]);
+        let proposed: Vec<String> = stored_proposals(&v, TODAY).proposals.iter().map(|p| p.source_uid.clone()).collect();
+        assert_eq!(proposed, [CS_KEY, GCAL_KEY], "setup: two proposals, twins by title only");
+        let report = run(&v, &input(&[], &[GCAL_KEY], None));
+        assert_eq!(report.declined, 1, "{report:?}");
+        assert_eq!(marker_keys(&v), [GCAL_KEY]);
+        assert_eq!(series_keys(&v), [GCAL_KEY], "the class-search row is removed");
+        assert_no_section_key(&v);
+    }
+
+    /// Not mine on a same-signature Google key stays stale: it is collapsed behind the row, so it
+    /// is no proposal. Nothing is written and the row stays. Green before and after.
+    #[test]
+    fn not_mine_on_a_same_signature_google_key_stays_stale() {
+        let v = vault("nm-stale");
+        put(&v, vec![cs_row(), google_row(50)]);
+        let before = series_bytes(&v);
+        let report = run(&v, &input(&[], &[GCAL_KEY], None));
+        assert_eq!(report.warnings, [format!("{GCAL_KEY}: not a current proposal; skipped")]);
+        assert_eq!(report.declined, 0);
+        assert!(marker_keys(&v).is_empty());
+        assert_eq!(series_bytes(&v), before, "the row stays");
+    }
+
+    /// A Google key's marker is written as today when no class-search row is in play. Green
+    /// before and after: the guard must not reach a Google key.
+    #[test]
+    fn a_google_key_alone_is_still_marked_not_mine() {
+        let v = vault("nm-google");
+        put(&v, vec![google_row(50)]);
+        let report = run(&v, &input(&[], &[GCAL_KEY], None));
+        assert_eq!(report.declined, 1, "{report:?}");
+        assert_eq!(marker_keys(&v), [GCAL_KEY]);
+    }
+
+    // ---- a rejected commitment-check card ----
+
+    /// A rejected proposal card whose key has a class-search twin writes the Google marker only
+    /// (`Shape::Proposal`). Red now: the twin's marker is written too.
+    #[test]
+    fn a_rejected_proposal_card_with_a_class_search_twin_writes_the_google_marker_only() {
+        let v = vault("rej-prop");
+        put(&v, vec![cs_row(), google_row(50)]);
+        let written = reject(&v, &proposal_card(GCAL_KEY));
+        assert_eq!(written.len(), 1, "{written:?}");
+        assert_eq!(marker_keys(&v), [GCAL_KEY]);
+        assert_no_section_key(&v);
+    }
+
+    /// A rejected proposal card keyed by the class-search key itself writes no marker for it.
+    /// Red now: it is written.
+    #[test]
+    fn a_rejected_proposal_card_keyed_by_a_class_search_key_writes_no_marker() {
+        let v = vault("rej-cs");
+        put(&v, vec![cs_row()]);
+        assert!(reject(&v, &proposal_card(CS_KEY)).is_empty());
+        assert!(marker_keys(&v).is_empty(), "{:?}", marker_keys(&v));
+        assert_eq!(journal_len(&v), 0);
+        assert_no_section_key(&v);
+    }
+
+    /// `Shape::Change`: a successor key with a class-search twin writes the Google marker only,
+    /// and a class-search successor writes none of its own. Red now: the twin's marker is written.
+    #[test]
+    fn a_rejected_change_card_writes_the_google_marker_only() {
+        let v = vault("rej-change");
+        put(&v, vec![cs_row(), google_row(50)]);
+        reject(&v, &change_card(GCAL_KEY));
+        assert_eq!(marker_keys(&v), [GCAL_KEY]);
+        assert_no_section_key(&v);
+        let w = vault("rej-change-cs");
+        put(&w, vec![cs_row(), google_row(50)]);
+        reject(&w, &change_card(CS_KEY));
+        assert_eq!(marker_keys(&w), [GCAL_KEY], "the Google twin of a class-search successor is marked");
+        assert_no_section_key(&w);
+    }
+
+    // ---- create_marker_as ----
+
+    /// Called directly with any `classsearch:` key, `create_marker` and `create_marker_as` return
+    /// `Ok(None)` and write nothing: no note, no card, no journal record. Red now: a marker is written.
+    #[test]
+    fn create_marker_refuses_every_class_search_key_and_writes_nothing() {
+        let v = vault("guard");
+        put(&v, vec![cs_row()]);
+        let before = tree(&v);
+        for key in [CS_KEY, CS_CAL, UNKNOWN_CS, "classsearch:", "classsearch:xx:1-2"] {
+            let mut journal = Journal::new(&*v);
+            assert_eq!(create_marker(&v, key, &agent(), &mut journal).unwrap(), None, "{key}");
+            assert_eq!(create_marker_as(&v, key, &human(), &mut journal).unwrap(), None, "{key}");
+        }
+        assert_eq!(tree(&v), before);
+        assert_eq!(journal_len(&v), 0);
+    }
+
+    /// Google and registrar keys get their marker as today. Green before and after.
+    #[test]
+    fn create_marker_still_writes_a_google_and_a_registrar_marker() {
+        let v = vault("guard-others");
+        let mut journal = Journal::new(&*v);
+        assert!(create_marker(&v, GCAL_KEY, &agent(), &mut journal).unwrap().is_some());
+        assert!(create_marker_as(&v, REG_KEY, &human(), &mut journal).unwrap().is_some());
+        assert_eq!(marker_keys(&v), [GCAL_KEY, REG_KEY]);
+        assert_eq!(journal_len(&v), 2);
+    }
+
+    // ---- confirm: bad input ----
+
+    /// Bad input writes nothing at all, row removal included. Green before and after.
+    #[test]
+    fn confirm_on_bad_input_removes_no_row_and_writes_nothing() {
+        let v = vault("bad");
+        put(&v, vec![cs_row(), google_row(50)]);
+        let (before, bytes) = (tree(&v), series_bytes(&v));
+        let got = confirm(&v, &input(&[], &[CS_KEY], Some("not a window")), TODAY, &human(), &mut Journal::new(&*v));
+        assert!(got.is_err());
+        assert_eq!(tree(&v), before);
+        assert_eq!(series_bytes(&v), bytes, "the row stays");
+    }
+
+    // ---- confirm: the words of the warnings ----
+
+    /// A key no series holds, `mine` or `not_mine`: the stale line names "a class-search row" and
+    /// holds no key. Any other key keeps today's words, byte for byte. Red now: the key is printed.
+    #[test]
+    fn the_stale_warning_on_a_class_search_key_uses_fixed_words() {
+        let v = vault("w-stale");
+        put(&v, vec![cs_row()]);
+        let report = run(&v, &input(&[(UNKNOWN_CS, "hard")], &[UNKNOWN_CS, "gcal-series:nope"], None));
+        assert_eq!(
+            report.warnings,
+            [
+                format!("{WORDS}: not a current proposal; skipped"),
+                format!("{WORDS}: not a current proposal; skipped"),
+                "gcal-series:nope: not a current proposal; skipped".to_string(),
+            ]
+        );
+    }
+
+    /// A bad level on a live class-search row: fixed words, today's sentence otherwise. A bad
+    /// level on a Google key is today's line. Red now: the key is printed.
+    #[test]
+    fn the_level_warning_on_a_class_search_key_uses_fixed_words() {
+        let v = vault("w-level");
+        put(&v, vec![cs_row()]);
+        let report = run(&v, &input(&[(CS_KEY, "urgent")], &[], None));
+        assert_eq!(report.warnings, [format!("{WORDS}: level \"urgent\" is not hard, soft or optional; skipped")]);
+        let g = vault("w-level-google");
+        put(&g, vec![google_row(50)]);
+        let report = run(&g, &input(&[(GCAL_KEY, "urgent")], &[], None));
+        assert_eq!(report.warnings, [format!("{GCAL_KEY}: level \"urgent\" is not hard, soft or optional; skipped")]);
+    }
+
+    /// The write-failure warnings, made by a regular file where `commitments/` should be. Mine on
+    /// a class-search row: "a class-search row: not written (...)" with no key anywhere in it.
+    /// Mine on a Google key keeps today's `<key>: not written (`. Not mine on a class-search row
+    /// with a Google twin: the twin's own `marker not written` line names the Google key, and no
+    /// line holds a class-search key or section. The twins' markers are written first, and a failed
+    /// one keeps the row in place, so the student sees it again (C2d contract review, item 1).
+    #[test]
+    fn the_write_failure_warnings_on_a_class_search_key_use_fixed_words() {
+        let v = vault("w-write");
+        put(&v, vec![cs_row()]);
+        std::fs::write(v.join(FOLDER), "not a folder").unwrap();
+        let report = run(&v, &input(&[(CS_KEY, "hard")], &[], None));
+        assert_eq!(report.created, 0);
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(report.warnings[0].starts_with(&format!("{WORDS}: not written (")), "{:?}", report.warnings);
+        assert!(!report.warnings[0].contains("classsearch") && !report.warnings[0].contains("40001"));
+
+        let g = vault("w-write-google");
+        put(&g, vec![google_row(50)]);
+        std::fs::write(g.join(FOLDER), "not a folder").unwrap();
+        let report = run(&g, &input(&[(GCAL_KEY, "hard")], &[], None));
+        assert!(report.warnings[0].starts_with(&format!("{GCAL_KEY}: not written (")), "{:?}", report.warnings);
+
+        let t = vault("w-write-twin");
+        put(&t, vec![cs_row(), google_row(50)]);
+        std::fs::write(t.join(FOLDER), "not a folder").unwrap();
+        let before = series_bytes(&t);
+        let report = run(&t, &input(&[], &[CS_KEY], None));
+        assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+        assert!(report.warnings[0].starts_with(&format!("{GCAL_KEY}: marker not written (")), "{:?}", report.warnings);
+        let all = format!("{:?}", report.warnings);
+        assert!(!all.contains("classsearch") && !all.contains("40001") && !all.contains("202640"), "{all}");
+        assert_eq!(series_bytes(&t), before, "a twin's failed marker keeps the row, untouched");
+        assert_eq!(series_keys(&t), [CS_KEY, GCAL_KEY]);
+    }
+
+    /// The report's JSON holds no class-search key or section either. Red now: the warnings
+    /// print the key.
+    #[test]
+    fn the_report_json_holds_no_class_search_key_or_section() {
+        let v = vault("w-json");
+        put(&v, vec![cs_row(), google_row(50)]);
+        let report = run(&v, &input(&[(UNKNOWN_CS, "hard"), (CS_KEY, "urgent")], &[UNKNOWN_CS, CS_KEY], None));
+        let json = report.to_json().to_string();
+        assert!(!json.contains("classsearch") && !json.contains("40001") && !json.contains("49999"), "{json}");
+    }
+
+    // ---- C2d contract review: rulings 1 to 3 ----
+
+    /// Ruling 1: a `classsearch:` calendar's `calendars` entry stays while another row of it
+    /// remains, and goes with its last row.
+    #[test]
+    fn the_calendars_entry_goes_with_the_last_row_of_its_calendar() {
+        const CS_KEY_2: &str = "classsearch:ua:202640-40002";
+        let v = vault("cal-entry");
+        put(&v, vec![cs_row(), row(CS_KEY_2, CS_CAL, "MATH 200", 45)]);
+        let mut proposed: Vec<String> = stored_proposals(&v, TODAY).proposals.iter().map(|p| p.source_uid.clone()).collect();
+        proposed.sort();
+        assert_eq!(proposed, [CS_KEY, CS_KEY_2], "setup: two rows of one calendar, not twins");
+        let calendars = |v: &Path| read_series_file(v).0.calendars.keys().cloned().collect::<Vec<_>>();
+        run(&v, &input(&[], &[CS_KEY], None));
+        assert_eq!(series_keys(&v), [CS_KEY_2]);
+        assert_eq!(calendars(&v), [CS_CAL], "another row of the calendar remains");
+        run(&v, &input(&[], &[CS_KEY_2], None));
+        assert!(series_keys(&v).is_empty());
+        assert!(calendars(&v).is_empty(), "the entry goes with its last row");
+        assert_no_section_key(&v);
+    }
+
+    /// Ruling 2: a class-search twin a confirmed note holds stays in the file on Not mine of its
+    /// by-title Google twin, and gets no marker; the Google key is marked. One Finish holds both
+    /// answers: `mine` runs first, so the not_mine loop finds the row held. (Across two runs the
+    /// held row's signature closes the Google twin, and Not mine on it is stale.)
+    #[test]
+    fn a_held_class_search_twin_stays_on_not_mine_of_its_google_twin() {
+        let v = vault("held");
+        put(&v, vec![row(CS_KEY, CS_CAL, "CS  100", 50), google_row(50)]);
+        let report = run(&v, &input(&[(CS_KEY, "hard")], &[GCAL_KEY], None));
+        assert_eq!((report.created, report.declined), (1, 1), "{report:?}");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let declined: Vec<String> = load(&v).declined.iter().cloned().collect();
+        assert_eq!(declined, [GCAL_KEY]);
+        assert_eq!(series_keys(&v), [CS_KEY, GCAL_KEY], "the held row stays");
+    }
+
+    /// Ruling 3: a row that cannot be removed (a folder put where the series file was, between
+    /// `confirm`'s read and the removal) is one line of fixed words, with no key, and exits 0.
+    #[test]
+    fn a_row_that_cannot_be_removed_is_named_by_fixed_words() {
+        let v = vault("not-removed");
+        put(&v, vec![cs_row()]);
+        let path = v.join(SERIES_FILE);
+        let swap = path.clone();
+        BEFORE_ROW_REMOVAL.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::remove_file(&swap).unwrap();
+                std::fs::create_dir(&swap).unwrap();
+            }))
+        });
+        let report = run(&v, &input(&[], &[CS_KEY], None));
+        BEFORE_ROW_REMOVAL.with(|hook| *hook.borrow_mut() = None);
+        let kind = std::fs::read_to_string(&path).unwrap_err().kind();
+        assert_eq!(report.warnings, [format!("a class-search row: not removed ({SERIES_FILE} unreadable ({kind}))")]);
+        assert_eq!(report.declined, 0);
+        let all = report.to_json().to_string();
+        assert!(!all.contains("classsearch:") && !all.contains("40001") && !all.contains("202640"), "{all}");
+        assert_no_section_key(&v);
+    }
+
+    // ---- determinism ----
+
+    /// Two vaults given the same data in another series order end on the same report, the same
+    /// series bytes, the same marker names and keys, and the same journal count; a second run of
+    /// the same answer writes and reports nothing new. Ids are random, so contents are not compared.
+    #[test]
+    fn not_mine_on_a_class_search_row_is_deterministic_and_repeatable() {
+        let (a, b) = (vault("det-a"), vault("det-b"));
+        put(&a, vec![cs_row(), google_row(50)]);
+        put(&b, vec![google_row(50), cs_row()]);
+        let given = input(&[], &[CS_KEY], None);
+        let (ra, rb) = (run(&a, &given), run(&b, &given));
+        assert_eq!(ra, rb);
+        assert_eq!(ra.declined, 1);
+        assert_eq!(series_bytes(&a), series_bytes(&b));
+        assert_eq!(tree(&a).keys().collect::<Vec<_>>(), tree(&b).keys().collect::<Vec<_>>());
+        assert_eq!(marker_keys(&a), marker_keys(&b));
+        assert_eq!(series_keys(&a), [GCAL_KEY]);
+        let (names, bytes, records) = (tree(&a).into_keys().collect::<Vec<_>>(), series_bytes(&a), journal_len(&a));
+        let again = run(&a, &given);
+        assert_eq!(again.declined, 0, "{again:?}");
+        assert_eq!(tree(&a).into_keys().collect::<Vec<_>>(), names);
+        assert_eq!((series_bytes(&a), journal_len(&a)), (bytes, records));
     }
 }
