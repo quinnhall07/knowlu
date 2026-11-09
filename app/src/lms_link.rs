@@ -1308,3 +1308,25 @@ pub fn fetch_sign_in_link(origin: &str, lms_host: &str, prefix: &str) -> Result<
 pub fn start_unless_open(already_open: bool, home: String, link: impl FnOnce() -> String) -> String {
     if already_open { home } else { link() }
 }
+
+// ---- the registrar acts only on its own window (S4b review) ---------------------------------------
+
+/// The refusal when the open `lms-signin` window is the kept school window, not the registrar's.
+pub const NOT_THE_REGISTRARS: &str = "the open sign-in window is not the registrar's";
+
+/// Whether the registrar may read from or close the `lms-signin` window, pure: `open` is `None` with no
+/// window, else whether it is on the school folder. The same rule as [`reuse_open_window`] for the
+/// registrar's throwaway plan, so the registrar never acts on the kept school window.
+pub fn registrar_window_check(open: Option<bool>) -> Result<(), &'static str> {
+    match reuse_open_window(open, &window_plan(None, Path::new(""))) {
+        Reuse::Refuse => Err(NOT_THE_REGISTRARS),
+        Reuse::Build | Reuse::Show => Ok(()),
+    }
+}
+
+/// [`registrar_window_check`] over the live window: the registrar's `capture` and `close` call this
+/// first, so a school window is never read for cookies and never closed by them.
+pub fn check_registrar_window(app: &tauri::AppHandle) -> Result<(), &'static str> {
+    let open = app.get_webview_window(WINDOW).map(|_| app.try_state::<LmsSession>().is_some_and(|s| s.is_school()));
+    registrar_window_check(open)
+}

@@ -138,6 +138,8 @@ fn failed(error: String, closed: bool) -> Value {
 /// Spec §2 step 2: the recorded calls, with the window's cookies for each call's host only
 /// (`cookie_url`). The cookies live on this stack: never written, logged or put in an error.
 fn capture(app: &tauri::AppHandle, cs: &ConsoleState, view: &str) -> Value {
+    // First of all: the kept school window shares this label, and is never read or closed here.
+    if let Err(why) = lms_link::check_registrar_window(app) { return failed(why.into(), false); }
     // The envelope says `closed`, so the window really is closed (plan review M1).
     let Some(reg) = school_of(&cs.vault) else { lms_link::close_and_wipe(app); return failed(NO_REGISTRAR.into(), true) };
     let Some(w) = app.get_webview_window(lms_link::WINDOW) else {
@@ -196,6 +198,10 @@ pub fn capture_registrar(app: tauri::AppHandle, cs: State<'_, ConsoleState>, sch
 
 #[tauri::command(async)]
 pub fn close_registrar_window(app: tauri::AppHandle) -> Value {
+    // The kept school window shares this label: it is never closed from here.
+    if let Err(why) = lms_link::check_registrar_window(&app) {
+        return json!({ "ok": false, "error": why });
+    }
     lms_link::close_and_wipe(&app);
     json!({ "ok": true, "error": Value::Null })
 }

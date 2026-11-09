@@ -532,3 +532,32 @@ fn a_busy_profile_held_by_the_sign_in_window_is_named_for_it() {
     assert_eq!(busy_kind(false, false), CaptureError::Busy, "another capture running");
     assert_eq!(CaptureError::WindowOpen.as_str(), "sign-in window open");
 }
+
+#[test]
+fn the_registrar_acts_only_on_a_throwaway_window_and_says_so_in_words() {
+    use lms_link::registrar_window_check as check;
+    assert_eq!(check(None), Ok(()), "no window: the registrar's own checks answer");
+    assert_eq!(check(Some(false)), Ok(()), "the registrar's throwaway window");
+    assert_eq!(check(Some(true)), Err("the open sign-in window is not the registrar's"), "the kept school window");
+    assert_eq!(lms_link::NOT_THE_REGISTRARS, "the open sign-in window is not the registrar's");
+}
+
+#[test]
+fn capture_and_close_check_the_window_before_they_read_a_cookie_or_close_anything() {
+    let reg = src("src/registrar.rs");
+    assert!(!reg.contains("school_session"), "registrar.rs names no school folder, only lms_link's check");
+    let body_of = |start: &str| {
+        let at = reg.find(start).unwrap_or_else(|| panic!("{start}"));
+        let tail = &reg[at..];
+        tail[..tail.find("\n}\n").unwrap()].to_string()
+    };
+    for (name, body) in [("capture", body_of("fn capture(")), ("close_registrar_window", body_of("pub fn close_registrar_window("))] {
+        let check = body.find("check_registrar_window(").unwrap_or_else(|| panic!("{name} never checks the open window"));
+        for acts in ["get_webview_window(", "cookies_for_url(", "close_and_wipe("] {
+            if let Some(at) = body.find(acts) {
+                assert!(check < at, "{name}: {acts} comes before the check:\n{body}");
+            }
+        }
+        assert!(body.contains("\"ok\": false") || body.contains("failed("), "{name} refuses with ok:false");
+    }
+}
