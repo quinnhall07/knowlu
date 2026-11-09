@@ -3921,3 +3921,53 @@ fn delete_my_datas_close_destroys_the_school_windows_before_the_wipe() {
     // That the close step runs before the wipe is `delete_my_data_with`'s order, pinned at run time by
     // `the_mail_windows_close_before_delete_local_data` (its log: "delete", "close", "local").
 }
+
+/// Q-B9 on the deletion path: *Delete my data* deletes `lms-session` patiently too (`grades::forget`)
+/// before `remove_dir_all(data_dir)`. Here WebView2 lets go of it a moment after the wipe begins, and the
+/// app-data folder still goes whole. No profile id and no session target, so no Credential Manager.
+#[cfg(windows)]
+#[test]
+fn deleting_my_data_deletes_lms_session_patiently() {
+    // No credential is touched, but the lock is held anyway: the sign-out tests that hold a school folder
+    // keep `school_session`'s process-wide lock for about 3 s, and a wipe waiting on that lock outlasts
+    // this test's hold, so it would pass without the patient delete. Every one of them holds this lock.
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _app_root, _id, dir) = signout_profile("delete-lms");
+    let vault = root.join("Mine");
+    std::fs::create_dir_all(vault.join("tasks")).unwrap();
+    let held = hold_open(&lms_folder(&dir));
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400)); // past the first try, well inside the patience
+        drop(held);
+    });
+
+    knowlu::account::delete_local_data(&vault, &dir, None, "", None, "");
+    release.join().unwrap();
+
+    assert!(!dir.exists(), "the app-data folder went whole, lms-session with it");
+    assert!(!vault.exists(), "the vault is gone");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The two folder deletes at sign-out are independent: with `school-session` held for the whole call,
+/// `lms-session` still goes and `school_profiles_left` is `true`. Catches a rewrite that short-circuits the
+/// second delete on the first's failure (`a && b`).
+#[cfg(windows)]
+#[test]
+fn a_held_school_folder_never_stops_the_lms_session_delete() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let (root, app_root, id, dir) = signout_profile("school-held-lms");
+    let _cleanup = Cleanup(vec![knowlu::account::session_target(&id), school_password(&id)]);
+    let held = hold_open(&school_folder(&dir));
+    lms_folder(&dir);
+
+    let out = knowlu::account::sign_out_with(Some(id), Some(&app_root), |_: &std::path::Path| {}, |_: &std::path::Path| {});
+    drop(held);
+    let out = out.expect("sign out");
+
+    assert_eq!((out["ok"].clone(), out["school_profiles_left"].clone()), (serde_json::json!(true), serde_json::json!(true)), "{out}");
+    assert!(knowlu::school_session::session_dir(&dir).is_dir(), "the school folder really was left");
+    assert!(!knowlu::grades::session_dir(&dir).exists(), "lms-session still went");
+    let _ = std::fs::remove_dir_all(&root);
+}

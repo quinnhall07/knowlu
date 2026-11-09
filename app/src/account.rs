@@ -858,7 +858,9 @@ fn delete_school_password(profile_id: &str) -> Result<(), String> {
 /// D3's live addresses). Sign-out's worst case, term by term: `MAIL_STOP_BOUND` (60 s, the hold) +
 /// `SIGN_OUT_MAIL_CALL` × (2 + deletes) + the revoke's 30 s (`TIMEOUT`), so at most 115 s of network
 /// waits; plus the local `wipe` term, about 2.75 s per mail profile WebView2 still holds (in the clean's
-/// `forget` and again in `forget_all`). Every other part is local file and Credential Manager work.
+/// `forget` and again in `forget_all`), and the two patient school-folder deletes of step (4b),
+/// `school-session` and `lms-session`, about 2.75 s each (call it 3 s) when WebView2 still holds that
+/// folder. Every other part is local file and Credential Manager work.
 pub const SIGN_OUT_MAIL_CALL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The client sign-out's clean uses ([`sign_out`], step 2): `api_base`'s mail routes, each request capped
@@ -1723,9 +1725,10 @@ pub fn open_portal(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
 /// **The kept mail profiles go first, patiently** (email-forwarding spec §4.13): the mail windows
 /// were closed a moment ago, and WebView2 lets go of a profile folder a second or so after its window
 /// is gone, so a single `remove_dir_all` could leave a signed-in mailbox behind. They are inside
-/// `data_dir`, so this names nothing new. **So does the school folder** (onboarding plan §S5), through
-/// `school_session::forget`, for the same reason. A school folder or a credential that will not go is a
-/// named line on stderr, as an id that is not one is: this has no envelope, and the next delete runs.
+/// `data_dir`, so this names nothing new. **So do the school folders** (onboarding plan §S5, Q-B9), for
+/// the same reason: `school-session` through `school_session::forget`, then `lms-session` through
+/// `grades::forget`, each tried whatever the other did. A school folder or a credential that will not go
+/// is a named line on stderr, as an id that is not one is: this has no envelope, and the next delete runs.
 pub fn delete_local_data(
     vault: &std::path::Path,
     data_dir: &std::path::Path,
@@ -1738,6 +1741,10 @@ pub fn delete_local_data(
     let _ = crate::mail_session::forget_all(data_dir);
     if let Err(e) = crate::school_session::forget(data_dir) {
         eprintln!("Knowlu: {e}");
+    }
+    // Q-B9: today's grades folder, as patiently, whatever the school folder's delete answered.
+    if !crate::grades::forget(data_dir) {
+        eprintln!("Knowlu: the grades sign-in folder (lms-session) could not be deleted yet");
     }
     let _ = std::fs::remove_dir_all(data_dir);
     if !session_credential_target.is_empty() {
