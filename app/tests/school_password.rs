@@ -483,7 +483,10 @@ fn forget_of_a_credential_already_gone_is_ok_clears_the_in_flight_mark_and_keeps
     forget_with(&f, &f, A).expect("already gone is success");
     assert!(f.rejected.get(), "a not-found delete keeps the rejected mark");
     assert!(!f.in_flight.get());
-    assert_eq!(count(&f.log, "exists:"), 0, "never decided from exists: {:?}", f.log.borrow());
+    // Never decided from `exists`: "gone" is the store's not-found. Since the re-review (Minor 3) a
+    // true `exists` may still overrule a not-found, so it is asked only after the delete answered.
+    let first_exists = at(&f.log, "exists:").unwrap_or(usize::MAX);
+    assert!(at(&f.log, "delete:").expect("the delete ran") < first_exists, "{:?}", f.log.borrow());
 }
 
 /// The same review: a delete that failed is never "already gone", whatever `exists` would say.
