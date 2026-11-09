@@ -1240,6 +1240,16 @@ pub fn retarget_credentials(from_vault: String, to_vault: String) -> Value {
         }
         moved += 1;
     }
+    // P1b: the saved school password moves too, unless the old id's rejected or in-flight mark is set:
+    // then it is deleted and never moved (review r6, Minor 3), and a rejected mark is carried to the new
+    // id, password or not (contract review r1, Minor 5, as ruled). `retarget_with_root` decides from the
+    // old id's folder, under `main`'s root looked up without making or migrating anything (review r1,
+    // Minor 4): with neither a password nor a mark, nothing on disk is touched.
+    let root = crate::state::app_data_root_or_temp_path();
+    match crate::school_password::retarget_with_root(&crate::school_password::RealStore, &root, &from_id, &to_id) {
+        Ok(n) => moved += n,
+        Err(e) => return json!({ "ok": false, "error": format!("school: {e}"), "moved": moved }),
+    }
     json!({ "ok": true, "error": Value::Null, "moved": moved })
 }
 

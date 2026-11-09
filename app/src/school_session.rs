@@ -63,6 +63,13 @@ static HELD: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 /// Held while a caller owns one profile's school folder; dropping it frees the profile.
 pub struct SessionGuard(String);
 
+impl SessionGuard {
+    /// The profile this guard holds, so a callee can check the guard it is handed (read-only).
+    pub fn profile_id(&self) -> &str {
+        &self.0
+    }
+}
+
 impl Drop for SessionGuard {
     fn drop(&mut self) {
         let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());

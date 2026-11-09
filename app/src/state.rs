@@ -276,22 +276,55 @@ pub fn run_backup(cs: &ConsoleState, now: jiff::Timestamp) -> Result<knowlu_engi
 /// INTO whatever `knowlu` is there and renames nothing (R-P4a-28) — but this is still the one place
 /// the path is decided.
 pub fn app_data_root_in(base: &Path) -> PathBuf {
-    let d = base.join("knowlu");
+    let d = root_under(base);
     let _ = std::fs::create_dir_all(&d);
     d
 }
 
-/// `%LOCALAPPDATA%\knowlu` (plan 4a decision 2 — the move plan 2 Task 12 was going to make).
-/// `None` only when `LOCALAPPDATA` is unset or empty; `main` then falls back to the temp dir. There
-/// is no `app_data_dir()` fallback any more — the shell resolves its root before Tauri exists.
-pub fn app_data_root() -> Option<PathBuf> {
+/// `<base>\knowlu`: the root's name under a base. Private to [`app_data_root`] and its parts.
+fn root_under(base: &Path) -> PathBuf {
+    base.join("knowlu")
+}
+
+/// [`app_data_root`]'s own pure part: the path it decides, `%LOCALAPPDATA%\knowlu`, worked out alone,
+/// creating and migrating nothing (`None` when `LOCALAPPDATA` is unset or empty). `app_data_root`
+/// calls it, so that stays the one place the path is decided; a caller that only reads, and must touch
+/// nothing on disk, uses this part (re-review of 807ed978..a74cbe7b, Minor 4).
+pub fn app_data_root_path() -> Option<PathBuf> {
     let base = std::env::var("LOCALAPPDATA").ok().filter(|s| !s.is_empty())?;
-    let base = PathBuf::from(base);
+    Some(root_under(Path::new(&base)))
+}
+
+/// `%LOCALAPPDATA%\knowlu` (plan 4a decision 2 — the move plan 2 Task 12 was going to make), decided by
+/// its pure part [`app_data_root_path`], then made: the old flat layout is folded in first, and the
+/// folder is created. `None` only when `LOCALAPPDATA` is unset or empty; `main` then falls back to the
+/// temp dir. There is no `app_data_dir()` fallback any more — the shell resolves its root before Tauri exists.
+pub fn app_data_root() -> Option<PathBuf> {
+    let root = app_data_root_path()?;
+    let base = root.parent()?; // `root_under` adds one name, so this is `%LOCALAPPDATA%` itself
     // Anything the move could not do is printed, never swallowed (review round 1, IMPORTANT 2).
-    if let Some(m) = crate::profiles::migrate_flat_layout(&base, None) {
+    if let Some(m) = crate::profiles::migrate_flat_layout(base, None) {
         for e in &m.errors { eprintln!("Knowlu: {e}"); }
     }
-    Some(app_data_root_in(&base))
+    Some(app_data_root_in(base))
+}
+
+/// The root the app launches under: [`app_data_root`], else `%TEMP%\knowlu` when `LOCALAPPDATA` is unset
+/// (`main`'s fallback). Anything that must find a profile's folder where the running app keeps it, such
+/// as the school password's marks, takes this, so the two can never disagree (contract review r1, Minor 4).
+pub fn app_data_root_or_temp() -> PathBuf {
+    root_or_temp(app_data_root())
+}
+
+/// [`app_data_root_or_temp`]'s path, from [`app_data_root_path`] with the same fallback: nothing is
+/// created or migrated, for a caller that only reads and must touch nothing on disk.
+pub fn app_data_root_or_temp_path() -> PathBuf {
+    root_or_temp(app_data_root_path())
+}
+
+/// [`app_data_root_or_temp`]'s rule over a root already looked up, so a test can drive the fallback.
+pub fn root_or_temp(found: Option<PathBuf>) -> PathBuf {
+    found.unwrap_or_else(|| root_under(&std::env::temp_dir()))
 }
 
 /// What a quit flush actually managed before its cap fired. Every field means "this completed",

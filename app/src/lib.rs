@@ -20,6 +20,8 @@ pub mod profiles;
 pub mod registrar;
 pub mod report;
 pub mod scaffold;
+#[cfg(windows)] pub mod school_fill;
+#[cfg(windows)] pub mod school_password;
 pub mod school_session;
 pub mod scheduler;
 pub mod state;

@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use tauri::Manager;
-use knowlu::{account, commands, grades, lms_link, mail, onboarding, profiles, onboarding_state::{self, LaunchMode}, registrar, report, scheduler, state::{app_data_root, resolve_vault, ConsoleState}, tray, week};
+use knowlu::{account, commands, grades, lms_link, mail, onboarding, profiles, onboarding_state::{self, LaunchMode}, registrar, report, scheduler, state::{app_data_root_or_temp, resolve_vault, ConsoleState}, tray, week};
 
 /// A missing/bad vault is fatal before any window exists, so it has to reach the user some way
 /// other than a console that may not be attached (the exe carries `windows_subsystem = "windows"`
@@ -55,7 +55,7 @@ fn main() {
             for e in &m.errors { eprintln!("Knowlu: {e}"); }
         }
     }
-    let root = match app_data_root() { Some(r) => r, None => std::env::temp_dir().join("knowlu") };
+    let root = app_data_root_or_temp();
 
     // `--pick` forces the picker whatever the registry holds: it is how *Switch profile…* in the
     // settings overlay gets back to the chooser with one profile registered, or none (R-P4a-15).
