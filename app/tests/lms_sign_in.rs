@@ -650,3 +650,40 @@ fn an_open_window_means_no_fetch() {
     assert_eq!(start_unless_open(false, "https://lms.example.edu/".into(), link), "https://lms.example.edu/auth-saml/saml/login");
     assert_eq!(fetched.get(), 1);
 }
+
+// ---- re-review of 36114ae5..27b324c2, Minor 1: a destroyed hidden window ends the read at once ----------
+//
+// A window destroyed under a refresh (Forget, sign-out) has no URL, and a read that waits out SETTLE on it
+// holds the profile lock for 45 s and ends SignedOut, which writes a false signed-out mark on a valid
+// session. Gone is its own answer, `Unreachable` (a named skip that writes no mark), within one poll.
+use knowlu::grades::read_hidden_with_gone;
+
+#[test]
+fn a_destroyed_window_ends_the_read_unreachable_within_one_poll_and_never_signed_out() {
+    let pauses = Cell::new(0u64);
+    let gone = Cell::new(false);
+    let got = read_hidden_with_gone(
+        HOST,
+        || gone.get(),
+        || if gone.get() { None } else { Some(ON_IDP.into()) },
+        || Err(None),
+        bundle,
+        ticking(),
+        || {
+            pauses.set(pauses.get() + 1);
+            if pauses.get() == 2 {
+                gone.set(true); // Forget destroyed the window during the second pause
+            }
+        },
+    );
+    assert_eq!(got, Err(CaptureError::Unreachable), "gone is no sign-out");
+    assert_eq!(pauses.get(), 2, "it stopped at the first look after the window went, not at SETTLE");
+}
+
+#[test]
+fn a_window_that_is_still_there_reads_as_before() {
+    let got = read_hidden_with_gone(HOST, || false, || None, || Err(None), bundle, ticking(), || {});
+    assert_eq!(got, Err(CaptureError::SignedOut), "a present window with no URL keeps today's answer");
+    let got = read_hidden_with_gone(HOST, || false, || Some(ON_LMS.into()), || Ok(json!({"id": "_1_1"})), bundle, ticking(), || {});
+    assert!(got.is_ok());
+}

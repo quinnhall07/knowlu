@@ -991,6 +991,19 @@ pub fn open_hidden_with(
 /// answers 200 or `now() >= SETTLE`, then [`hidden_outcome`] on the window's URL at that moment.
 pub fn read_hidden_with(
     host: &str,
+    window_url: impl FnMut() -> Option<String>,
+    users_me: impl FnMut() -> Result<Value, Option<u16>>,
+    capture: impl FnOnce(&Value) -> Result<Value, CaptureError>,
+    now: impl FnMut() -> Duration,
+    pause: impl FnMut(),
+) -> Result<Value, CaptureError> {
+    read_hidden_with_gone(host, || false, window_url, users_me, capture, now, pause)
+}
+
+/// STUB (re-review Minor 1): [`read_hidden_with`] plus `window_gone`; so far it ignores it.
+pub fn read_hidden_with_gone(
+    host: &str,
+    _window_gone: impl FnMut() -> bool,
     mut window_url: impl FnMut() -> Option<String>,
     mut users_me: impl FnMut() -> Result<Value, Option<u16>>,
     capture: impl FnOnce(&Value) -> Result<Value, CaptureError>,

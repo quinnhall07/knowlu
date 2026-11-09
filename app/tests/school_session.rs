@@ -519,7 +519,7 @@ fn school_forget_retries_a_busy_lock_until_the_window_lets_go() {
         },
         &mut |id| try_take(id),
     );
-    assert_eq!(reply["ok"], serde_json::json!(true), "the third try finds the lock free: {reply}");
+    assert_eq!(reply["ok"], serde_json::json!(true), "the fourth call, after the third pause, finds the lock free: {reply}");
     assert_eq!(pauses.get(), 3, "it waited only as long as it had to");
     assert_eq!(closed, 2, "the windows were closed once, not again on each try");
     assert!(fake.entries.borrow().is_empty() && !session_dir(&d).exists(), "everything was forgotten");
