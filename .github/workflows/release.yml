@@ -57,7 +57,7 @@ jobs:
       # The toolchain steps are ci.yml's, line for line: same pinned action, same host triple, same
       # WinLibs archive. A release built on a different compiler than the one CI tested is not the
       # thing CI tested.
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0  # master
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0  # master  # zizmor: ignore[ref-version-mismatch] -- the action publishes no version tags; this is a reviewed master commit
         with: { toolchain: "1.98.0-x86_64-pc-windows-gnu" }
       - run: .\scripts\ci\toolchain.ps1
         shell: pwsh

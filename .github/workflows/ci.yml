@@ -82,7 +82,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         if: needs.changes.outputs.code != 'false'
         with: { persist-credentials: false }
-      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0  # master
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0  # master  # zizmor: ignore[ref-version-mismatch] -- the action publishes no version tags; this is a reviewed master commit
         if: needs.changes.outputs.code != 'false'
         with: { toolchain: "1.98.0-x86_64-pc-windows-gnu" }
       - run: .\scripts\ci\toolchain.ps1
