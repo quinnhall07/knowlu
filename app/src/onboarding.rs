@@ -1069,7 +1069,10 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 /// rewritten only when they differ (a file without that text is its own raw bytes), and is removed when
 /// that gives `None`: a malformed file holding that text, which the engine's next read would replace
 /// with a fresh one anyway. Fixed-word errors, no key.
-fn scrub_class_search(vault: &Path) -> Result<(), String> {
+///
+/// Public so `app/tests/onboarding.rs` can drive its error branches, which `restore_vault_in`'s
+/// randomly named staging folder keeps out of a test's reach.
+pub fn scrub_class_search(vault: &Path) -> Result<(), String> {
     let state = vault.join("state");
     let series = state.join("calendar-series.json");
     for e in std::fs::read_dir(&state).into_iter().flatten().flatten() {

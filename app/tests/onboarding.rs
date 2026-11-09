@@ -4,7 +4,7 @@
 //! promise on both is the same — it is read, never written.
 use knowlu::onboarding::{
     adopt_vault_in, apply_profile_settings_in, create_vault_in, dest_for, finish_or_roll_back,
-    default_folders_in, mail_offer_marker, restore_vault_in, WizardPlan,
+    default_folders_in, mail_offer_marker, restore_vault_in, scrub_class_search, WizardPlan,
 };
 use std::path::{Path, PathBuf};
 
@@ -96,16 +96,21 @@ fn restoring_copies_the_mirror_and_never_writes_into_the_backup() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// C2e's series files: one holding every class-search part, one without any (hand-written, non-canonical,
+/// an unknown key), and one holding that text that cannot be parsed.
+const DIRTY: &str = r#"{"calendars":{"classsearch:ua:202640":"2026-09-10","registrar:ua:202640":"2026-09-10"},"class_search":{"classsearch:ua:202640":{"no_time":["cs-100"]}},"ended":{"classsearch:ua:202640-40009":{"calendar":"classsearch:ua:202640","dropped":"2026-09-10","last_instance":null,"until":null}},"series":[]}"#;
+const CLEAN: &str = "{ \"series\" :[ ],\n\t\"calendars\":{ },  \"ended\" : {}, \"extra_key\" : 1 }\n\n";
+const MALFORMED: &str = "{\"calendars\": {\"classsearch:ua:202640\": ";
+
 /// C2e (replan §6.12): a mirror written before C2e can hold class-search data, in the series file and
 /// in a leftover `calendar-series.json.tmp<pid>`. A restore brings back none of it: the series file
 /// arrives as `commitments::series_for_backup` gives it, the leftover copy and a malformed series file
 /// holding that text do not arrive, a series file without it arrives byte for byte, and every other
-/// file and the backup itself are untouched. Every key, course and date is invented.
+/// file and the backup itself are untouched. Every key, course and date is invented. Only `state/` is
+/// cleaned: a mirror's `archive/` arrives whole, and holds no class-search data because no released
+/// build wrote any.
 #[test]
 fn restoring_an_older_mirror_brings_back_no_class_search_data() {
-    const DIRTY: &str = r#"{"calendars":{"classsearch:ua:202640":"2026-09-10","registrar:ua:202640":"2026-09-10"},"class_search":{"classsearch:ua:202640":{"no_time":["cs-100"]}},"ended":{"classsearch:ua:202640-40009":{"calendar":"classsearch:ua:202640","dropped":"2026-09-10","last_instance":null,"until":null}},"series":[]}"#;
-    const CLEAN: &str = "{ \"series\" :[ ],\n\t\"calendars\":{ },  \"ended\" : {}, \"extra_key\" : 1 }\n\n";
-    const MALFORMED: &str = "{\"calendars\": {\"classsearch:ua:202640\": ";
     let has = |b: &[u8], n: &str| b.windows(n.len()).any(|w| w == n.as_bytes());
     for (case, series) in [("dirty", DIRTY), ("clean", CLEAN), ("malformed", MALFORMED)] {
         let root = tmp(&format!("restore-c2e-{case}"));
@@ -146,6 +151,48 @@ fn restoring_an_older_mirror_brings_back_no_class_search_data() {
         assert_eq!(rest(&got, ""), rest(&before, "profile_1111111111\\vault\\"), "{case}: every other file arrives whole");
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+/// Holds `path` open as another process can. Share mode 0 lets no one else read, write or delete it;
+/// 1 (FILE_SHARE_READ) lets a read through; 4 (FILE_SHARE_DELETE) lets a delete through but no read.
+#[cfg(windows)]
+fn hold_open(path: &Path, share: u32) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().read(true).share_mode(share).open(path).unwrap()
+}
+
+/// C2e review, items 2 and 4: `scrub_class_search` on a staged copy while a file in it is held open
+/// elsewhere. A series file that cannot be read is an error and stays: a clean file and its registrar
+/// block are never deleted as if malformed (red before the fix, which deleted it whenever a delete could
+/// get through). A leftover copy that cannot be removed, a filtered file that cannot be written and a
+/// malformed one that cannot be removed are each a named error with no key, and leave the file as it was.
+#[cfg(windows)]
+#[test]
+fn scrubbing_a_staged_copy_names_each_failure_and_never_deletes_a_series_file_it_could_not_read() {
+    let root = tmp("scrub-c2e");
+    let series = root.join("state").join("calendar-series.json");
+    let leftover = root.join("state").join("calendar-series.json.tmp4242");
+    std::fs::create_dir_all(root.join("state")).unwrap();
+    // (case, the series file's text, whether the leftover is the held file, share mode, the error's words)
+    for (case, text, on_leftover, share, words) in [
+        ("unreadable", CLEAN, false, 4, "the series file could not be read"),
+        ("leftover", CLEAN, true, 0, "a leftover series copy could not be removed"),
+        ("unwritable", DIRTY, false, 1, "the series file could not be written"),
+        ("undeletable", MALFORMED, false, 1, "the series file could not be removed"),
+    ] {
+        std::fs::write(&series, text).unwrap();
+        if on_leftover { std::fs::write(&leftover, DIRTY).unwrap(); }
+        let held = hold_open(if on_leftover { &leftover } else { &series }, share);
+        let err = scrub_class_search(&root).expect_err(case);
+        assert!(err.starts_with("restore: ") && err.contains(words), "{case}: {err}");
+        assert!(!err.contains("classsearch") && !err.contains("ua:202640"), "{case}: no key in {err}");
+        drop(held);
+        assert_eq!(std::fs::read(&series).unwrap(), text.as_bytes(), "{case}: the series file is as it was");
+        assert_eq!(leftover.exists(), on_leftover, "{case}: the leftover copy stays until it can go");
+        scrub_class_search(&root).unwrap_or_else(|e| panic!("{case}: once nothing is held: {e}"));
+        assert!(!leftover.exists(), "{case}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// R-P4a-23(c): the names Windows would rewrite or refuse, caught before a credential can be keyed

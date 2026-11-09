@@ -410,7 +410,8 @@ mod class_search_backup_tests {
     //! mirror or in a snapshot zip, and holds everything else exactly as before. Each vault is
     //! built here from invented data; no fixture is read. `restore_vault_in` (`app/`) copies a
     //! mirror and filters its series file the same way (`app/tests/onboarding.rs`), so a mirror
-    //! older than C2e restores clean too.
+    //! older than C2e restores with a clean `state/`. Neither scrubs a mirror's `archive/`, and
+    //! neither needs to: no released build wrote class-search data, so none was ever archived.
     use super::*;
     use std::collections::BTreeMap;
     use std::io::Read;
@@ -630,10 +631,12 @@ mod class_search_backup_tests {
         assert_eq!(zip_entries(&zip)[SERIES], raw.as_bytes());
     }
 
-    /// An older mirror (written before C2e) holds the series file and a temp copy with class-search text.
-    /// `restore_vault_in` copies a mirror whole, so the next run must scrub it: the series copy is
-    /// overwritten with the filtered bytes, and the old temp copy is not moved into `archive/`, where it
-    /// would survive. Red now: both stay as they were (the temp one in `archive/`).
+    /// An older mirror (written before C2e) holds the series file and a temp copy with class-search text,
+    /// both in `state/`. `restore_vault_in` copies a mirror whole, so the next run must scrub them: the
+    /// series copy is overwritten with the filtered bytes, and the old temp copy is deleted rather than
+    /// moved into `archive/`, where it would survive. What is already under the mirror's `archive/` is never
+    /// rewritten or scrubbed; no released build wrote class-search data, so none is there. Red now: both
+    /// stay as they were (the temp one in `archive/`).
     #[test]
     fn a_run_over_an_older_mirror_that_holds_class_search_data_leaves_none_of_it_anywhere_in_the_mirror() {
         let v = vault("older", &series_text(true));
@@ -664,5 +667,63 @@ mod class_search_backup_tests {
         assert_clean("zip a", &ea);
         assert_eq!(ea, eb);
         assert_eq!(ta[SERIES], ea[SERIES], "mirror and zip hold the same filtered bytes");
+    }
+
+    /// Holds `path` open as another process can. Share mode 0 lets no one else read, write or delete it.
+    #[cfg(windows)]
+    fn hold(path: &Path, share: u32) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true).share_mode(share).open(path).unwrap()
+    }
+
+    /// C2e review, item 1: a clean series file that cannot be read (held open elsewhere) is an error, as a
+    /// failed copy always was, never a skip. The mirror reports it and keeps the older copy, the snapshot
+    /// fails and writes no zip, the tick is amber, and once the file can be read the next tick writes the
+    /// day's zip with it. Red before the fix: the read failure was a skip, so the tick was green, the day's
+    /// zip lacked the file, and no later tick that day redid it.
+    #[cfg(windows)]
+    #[test]
+    fn a_series_file_that_cannot_be_read_is_an_error_and_the_next_tick_writes_the_days_zip_with_it() {
+        let v = vault("held", &series_text(false));
+        let t = scratch("held", "target");
+        mirror(&v, &t, "p1").unwrap();
+        let older = std::fs::read(t.join("p1/vault").join(SERIES)).unwrap();
+        let held = hold(&v.join(SERIES), 0);
+        let r = mirror(&v, &t, "p1").unwrap();
+        assert!(r.errors.iter().any(|e| e.contains("calendar-series.json")), "{r:?}");
+        assert_eq!(r.archived, 0, "still wanted, so never archived: {r:?}");
+        assert_eq!(std::fs::read(t.join("p1/vault").join(SERIES)).unwrap(), older, "the older copy stays");
+        let err = snapshot(&v, &t, "p1", today()).expect_err("a read failure fails the snapshot");
+        assert!(err.contains("calendar-series.json"), "{err}");
+        let zip = t.join("p1/snapshots").join(format!("{}.zip", today()));
+        assert!(!zip.exists(), "no zip for the day, so a later tick makes it");
+        let now: jiff::Timestamp = "2026-09-10T18:00:00Z".parse().unwrap();
+        assert!(tick(&v, &t, "p1", now, today()).last_error.is_some(), "amber while it cannot be read");
+        drop(held);
+        let s = tick(&v, &t, "p1", now, today());
+        assert!(s.last_error.is_none(), "{:?}", s.last_error);
+        assert_eq!(zip_entries(&zip)[SERIES], series_text(false).as_bytes(), "the day's zip holds it");
+    }
+
+    /// C2e review, item 4: a leftover series copy an older mirror took, which the mirror cannot delete (held
+    /// open elsewhere), is a mirror error, never archived instead; the next run deletes it.
+    #[cfg(windows)]
+    #[test]
+    fn a_leftover_series_copy_the_mirror_cannot_delete_is_an_error_and_the_next_run_deletes_it() {
+        let v = vault("undeletable", &series_text(false));
+        let t = scratch("undeletable", "target");
+        let m = t.join("p1/vault");
+        std::fs::create_dir_all(m.join("state")).unwrap();
+        std::fs::write(m.join(TMP), series_text(true)).unwrap();
+        let held = hold(&m.join(TMP), 0);
+        let r = mirror(&v, &t, "p1").unwrap();
+        assert!(r.errors.iter().any(|e| e.starts_with("remove ") && e.contains("calendar-series.json.tmp4242")), "{r:?}");
+        assert_eq!(r.archived, 0, "never archived instead: {r:?}");
+        assert!(m.join(TMP).exists() && !m.join("archive").exists(), "it stays where it was");
+        drop(held);
+        let again = mirror(&v, &t, "p1").unwrap();
+        assert!(again.errors.is_empty(), "{again:?}");
+        assert!(!m.join(TMP).exists());
+        assert_clean("mirror (archive included)", &tree(&m));
     }
 }
