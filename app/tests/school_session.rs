@@ -462,3 +462,30 @@ fn after_forget_the_next_grades_slot_finds_no_saved_password_and_fills_nothing()
         other => panic!("after Forget the slot finds no password and fills nothing, got {other:?}"),
     }
 }
+
+// ---- S6a rulings (coordinator, 2026-11-08): the legacy folder counts, and Forget clears the mark -----
+
+#[test]
+fn school_status_counts_the_legacy_lms_session_folder_as_a_kept_sign_in() {
+    let d = temp("status-legacy");
+    std::fs::create_dir_all(d.join("lms-session").join("Default")).unwrap();
+    let s = status_with(&d, None);
+    assert_eq!(s["folder"], serde_json::json!(true), "an old install signed in through lms-session is offered Forget: {s}");
+    assert_eq!(s["uses"], serde_json::json!([]), "{s}");
+    let text = s.to_string();
+    assert!(!text.contains("lms-session") && !text.contains('\\') && !text.contains('/'), "still no path: {text}");
+}
+
+#[test]
+fn school_forget_deletes_the_legacy_folder_and_clears_grades_signed_out_mark() {
+    let profile = "profile_s6forget7";
+    let (d, fake) = forget_setup("forget-legacy-mark", profile);
+    std::fs::create_dir_all(d.join("lms-session").join("Default")).unwrap();
+    knowlu::grades::set_signed_out(&d, true);
+    assert!(d.join("grades-signed-out").is_file(), "the mark is set before Forget");
+    let reply = school_forget_with(&d, profile, &fake, &fake, &mut |_| {});
+    assert_eq!(reply["ok"], serde_json::json!(true), "{reply}");
+    assert!(!d.join("lms-session").exists(), "the legacy folder is gone");
+    assert!(!d.join("grades-signed-out").exists(), "grades' signed-out mark is cleared, as grades' own Forget does");
+    assert_eq!(status_with(&d, None)["folder"], serde_json::json!(false), "nothing kept afterwards");
+}
