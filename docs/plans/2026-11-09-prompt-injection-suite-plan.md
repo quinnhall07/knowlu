@@ -214,7 +214,9 @@ The rules:
       the extension list. So `lab3.py` and `notes.md` are file names, and `name.zip/` is a host.
   - A **URL tail** is what follows a host in a URL: `/`; `?` or `#` followed by a non-space character
     (a query or a fragment); or `:` followed by a digit (a port). A `?` that ends a sentence
-    (`Did you submit essay.docx?`) is not a tail.
+    (`Did you submit essay.docx?`) is not a tail. On an extension-list final label, `:` and a digit
+    is a file-and-line reference, not a port (`main.rs:42` is a file name; controller, 2026-11-09):
+    only `/`, `?` and `#` make such a token a host.
   - **TLD list (enforcement):** a dated snapshot of IANA's root-zone list (`tlds-alpha-by-domain.txt`,
     its version line kept in the file), plus the reserved `example test invalid localhost`, in
     `_shared/tlds.ts`. Each internationalised name is carried in both forms, the `xn--` name and its
@@ -435,7 +437,7 @@ Q3's ruling (non-blocking) is already in T6.
       - a two-label and a three-label host on a common TLD and on an uncommon delegated one, with and
         without a path; a host on each extension-list name followed by `/` (`name.zip/x`);
       - a host on an extension-list name with each other URL tail: `?` and a query, `#` and a
-        fragment, `:` and a port;
+        fragment; a host on a TLD-only name with `:` and a port;
       - a host on an internationalised TLD, in its Unicode form and in its `xn--` form;
       - the same hosts in upper case, with each dot look-alike (U+3002, U+FF0E, U+FF61), and with a
         zero-width or bidi character inside;
@@ -447,6 +449,7 @@ Q3's ruling (non-blocking) is already in T6.
       - prose `Lab 2 data: due Friday` and `Submit file: essay.docx`;
       - a file name that ends a question or a clause (`Did you submit essay.docx?`, `see notes.md: it
         covers week 3`);
+      - a file-and-line reference (`main.rs:42`, `lab3.py:7`);
       - `<` followed by a space or a digit;
       - each of the six scrub tokens in a sentence (`Register at <url> by Friday`);
       - both placeholders alone and inside a sentence.
