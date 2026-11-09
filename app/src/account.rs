@@ -735,6 +735,11 @@ pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Val
     sign_out_with(profile_id, crate::state::app_data_root().as_deref(), close, clean)
 }
 
+/// F2c: sign-out's clean, the mail clean plus `onboarding_state::on_sign_out`.
+pub fn sign_out_clean(_dir: &std::path::Path, _id: &str, _api_base: &str) {
+    todo!("F2c: the mail clean, then on_sign_out")
+}
+
 /// [`sign_out`] without the app's handle. `close_windows` is called with the profile's folder before
 /// any mail profile or school folder in it is deleted (WebView2 holds a profile while its window is
 /// open; the console's closes [`SCHOOL_WINDOWS`] and the mail windows), and what it hands back (the
@@ -851,6 +856,11 @@ fn delete_school_password(profile_id: &str) -> Result<(), String> {
         Err(e) if crate::credentials::exists(&target) => Err(e),
         _ => Ok(()),
     }
+}
+
+/// P1's rule for the saved school password, over `store`.
+pub fn delete_school_password_in(_store: &dyn crate::school_password::SchoolStore, _profile_id: &str) -> Result<(), String> {
+    todo!("P1's rule: gone from the delete's own answer")
 }
 
 /// Sign-out's cap on each network wait of its clean: the one session read (lock wait and refresh
