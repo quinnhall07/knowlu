@@ -3666,6 +3666,7 @@ fn console_js_dispatches_on_the_view_name_only_through_own_property_checks() {
     assert!(!js.contains("VIEW_RENDERERS[current.view]) {"), "VIEW_RENDERERS is looked up bare");
     assert!(js.contains("Object.prototype.hasOwnProperty.call(VIEW_RENDERERS, current.view)"), "the renderer call is guarded by an own-property check");
     assert!(js.contains("Object.prototype.hasOwnProperty.call(listViews, current.view)"), "listViews is checked by own property");
+    assert!(js.contains("if (typeof renderView === \"function\") { renderView(state); }"), "the renderer is called only once it is known to be a function");
     assert!(!js.contains("!listViews[current.view]") && !js.contains("else if (listViews[current.view])"), "listViews is looked up bare");
     assert!(!js.contains("}[view])"), "route() looks the requested view up in a bare literal");
     assert!(js.contains("Object.prototype.hasOwnProperty.call(KNOWN_VIEWS, view)"), "route() checks the requested view by own property");

@@ -1475,7 +1475,10 @@
     ROWS = {};
     if (current.view === "today") { renderMustDo(state); renderRecommended(state); }
     else if (Object.prototype.hasOwnProperty.call(listViews, current.view)) { renderList(state); }
-    else if (Object.prototype.hasOwnProperty.call(VIEW_RENDERERS, current.view)) { VIEW_RENDERERS[current.view](state); }
+    else {
+      var renderView = Object.prototype.hasOwnProperty.call(VIEW_RENDERERS, current.view) ? VIEW_RENDERERS[current.view] : null;
+      if (typeof renderView === "function") { renderView(state); }
+    }
     watchSeen();
   }
 
