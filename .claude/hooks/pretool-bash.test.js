@@ -167,6 +167,8 @@ for (const [want, input, name, projectDir] of CASES) check(want, input, name, pr
     if (process.platform === 'win32') {
       const gitBash = (p) => p.split(B).join('/').replace(/^([A-Za-z]):/, (_, d) => '/' + d.toLowerCase());
       check('deny', file('Write', gitBash(earlier), 'reviewer'), 'reviewer overwriting an existing report by Git Bash path', root);
+      check('deny', file('Write', '/' + gitBash(earlier), 'reviewer'), 'same, with a doubled leading slash', root);
+      check('deny', file('Write', '/.' + gitBash(earlier), 'reviewer'), 'same, with a leading /./', root);
       check('pass', file('Write', gitBash(path.join(dir, '2026-01-03-third-review.md')), 'reviewer'), 'reviewer new report by Git Bash path', root);
     }
   } finally {
