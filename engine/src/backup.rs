@@ -2,6 +2,9 @@
 //! owns, copied on content change with temp-and-rename, **never deleting** — a source that
 //! disappears moves to the mirror's own `archive/` — plus one dated zip **snapshot** a day,
 //! `SNAPSHOTS_KEPT` retained. Failure is a status, never a panic; the console paints it amber.
+//! No backup holds class-search data (replan §6.12, C2e): the series file is copied filtered, a
+//! leftover `state/calendar-series.json*` beside it is never copied, and one an older mirror took
+//! is the one file the mirror deletes rather than archives.
 //! The console is the only caller. Credentials are never a rule here: the vault does not hold
 //! them (the keychain does); `config/` is copied as the user's own data to the user's own storage.
 use std::io::Write;
@@ -47,11 +50,50 @@ fn same_bytes(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn place(src: &Path, dst: &Path) -> Result<(), String> {
+/// What a backup does with one vault file (replan §6.12, C2e), for `mirror` and `snapshot` alike.
+enum Take {
+    /// Copied as today, byte for byte.
+    Whole,
+    /// The series file: the bytes [`crate::commitments::series_for_backup`] gives, with no
+    /// class-search data in them.
+    Filtered(Vec<u8>),
+    /// The series file when those bytes could not be had: skipped this run but still wanted, so
+    /// `mirror` never archives the older copy.
+    Skipped,
+    /// A leftover `state/calendar-series.json*` beside the file (`write_state_file`'s
+    /// `.tmp<pid>`, which `TMP_MARK` does not catch): never copied, never wanted.
+    Never,
+}
+
+/// The one per-path rule (§6.12); `rel` is vault-relative.
+fn take(vault: &Path, rel: &Path) -> Take {
+    if rel == Path::new(crate::commitments::SERIES_FILE) {
+        return crate::commitments::series_for_backup(vault).map_or(Take::Skipped, Take::Filtered);
+    }
+    if is_series_leftover(rel) { Take::Never } else { Take::Whole }
+}
+
+/// `state/<name>` where `name` starts `calendar-series.json` and is not the file itself.
+fn is_series_leftover(rel: &Path) -> bool {
+    rel.parent() == Some(Path::new("state"))
+        && rel != Path::new(crate::commitments::SERIES_FILE)
+        && rel.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("calendar-series.json"))
+}
+
+/// Temp beside `dst`, filled by `fill`, then renamed over it.
+fn place_with(dst: &Path, fill: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
     if let Some(parent) = dst.parent() { std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?; }
     let tmp = dst.with_file_name(format!("{}{TMP_MARK}{}", dst.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
-    std::fs::copy(src, &tmp).map_err(|e| format!("copy {}: {e}", src.display()))?;
+    fill(&tmp).inspect_err(|_| { let _ = std::fs::remove_file(&tmp); })?;
     std::fs::rename(&tmp, dst).map_err(|e| { let _ = std::fs::remove_file(&tmp); format!("rename {}: {e}", dst.display()) })
+}
+
+fn place(src: &Path, dst: &Path) -> Result<(), String> {
+    place_with(dst, |tmp| std::fs::copy(src, tmp).map(|_| ()).map_err(|e| format!("copy {}: {e}", src.display())))
+}
+
+fn place_bytes(bytes: &[u8], dst: &Path) -> Result<(), String> {
+    place_with(dst, |tmp| std::fs::write(tmp, bytes).map_err(|e| format!("write {}: {e}", dst.display())))
 }
 
 fn free_name(dir: &Path, name: &str) -> PathBuf {
@@ -78,9 +120,17 @@ pub fn mirror(vault: &Path, target: &Path, profile_id: &str) -> Result<MirrorRep
         for src in files {
             let rel = src.strip_prefix(vault).map_err(|e| e.to_string())?.to_path_buf();
             let dst = root.join(&rel);
-            wanted.insert(rel.clone());
-            if same_bytes(&src, &dst) { rep.unchanged += 1; continue; }
-            match place(&src, &dst) { Ok(()) => rep.copied += 1, Err(e) => rep.errors.push(e) }
+            let placed = match take(vault, &rel) {
+                Take::Never => continue,
+                Take::Skipped => { wanted.insert(rel); continue; }
+                // Compared filtered-to-destination, so a second tick copies nothing (§6.12).
+                Take::Filtered(bytes) if std::fs::read(&dst).is_ok_and(|d| d == bytes) => None,
+                Take::Filtered(bytes) => Some(place_bytes(&bytes, &dst)),
+                Take::Whole if same_bytes(&src, &dst) => None,
+                Take::Whole => Some(place(&src, &dst)),
+            };
+            wanted.insert(rel);
+            match placed { None => rep.unchanged += 1, Some(Ok(())) => rep.copied += 1, Some(Err(e)) => rep.errors.push(e) }
         }
     }
     // 3. archive what the vault no longer has (never under the mirror's own archive/)
@@ -88,6 +138,12 @@ pub fn mirror(vault: &Path, target: &Path, profile_id: &str) -> Result<MirrorRep
     for m in mirrored {
         let rel = m.strip_prefix(&root).map_err(|e| e.to_string())?.to_path_buf();
         if rel.starts_with("archive") || wanted.contains(&rel) { continue; }
+        // A leftover series copy an older mirror took can hold class-search data: deleted, never
+        // archived, where it would outlive the purge (C2e, ruling 1).
+        if is_series_leftover(&rel) {
+            if let Err(e) = std::fs::remove_file(&m) { rep.errors.push(format!("remove {}: {e}", m.display())); }
+            continue;
+        }
         let dst_dir = root.join("archive").join(rel.parent().unwrap_or(Path::new("")));
         if std::fs::create_dir_all(&dst_dir).is_ok() {
             let dst = free_name(&dst_dir, &rel.file_name().unwrap_or_default().to_string_lossy());
@@ -130,9 +186,14 @@ pub fn snapshot(vault: &Path, target: &Path, profile_id: &str, today: jiff::civi
             if !src_dir.is_dir() { continue; }
             let mut files = Vec::new(); walk(&src_dir, &mut files);
             for src in files {
-                let rel = src.strip_prefix(vault).map_err(|e| e.to_string())?.to_string_lossy().replace('\\', "/");
-                zip.start_file(rel, opts).map_err(|e| e.to_string())?;
-                zip.write_all(&std::fs::read(&src).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                let rel = src.strip_prefix(vault).map_err(|e| e.to_string())?;
+                let bytes = match take(vault, rel) {
+                    Take::Never | Take::Skipped => continue,
+                    Take::Filtered(bytes) => bytes,
+                    Take::Whole => std::fs::read(&src).map_err(|e| e.to_string())?,
+                };
+                zip.start_file(rel.to_string_lossy().replace('\\', "/"), opts).map_err(|e| e.to_string())?;
+                zip.write_all(&bytes).map_err(|e| e.to_string())?;
             }
         }
         zip.finish().map_err(|e| e.to_string())?;
@@ -391,7 +452,9 @@ mod class_search_backup_tests {
     /// series, its calendar, an `ended` key and the no-time block.
     fn series_text(class_search: bool) -> String {
         let mut calendars = json!({REG_CAL: "2026-09-10", "google:invented": "2026-09-10"});
-        let mut all = vec![series("registrar:ua:202640-40003", REG_CAL), series("gcal-series:cs100", "google:invented")];
+        // In `file_bytes`' order, `(source_uid, calendar)`, as every engine-written file is: the filtered
+        // copy is re-emitted canonically, so a hand-ordered `want` would differ in order alone.
+        let mut all = vec![series("gcal-series:cs100", "google:invented"), series("registrar:ua:202640-40003", REG_CAL)];
         let mut ended = json!({});
         let mut v = json!({});
         if class_search {

@@ -2411,9 +2411,7 @@ fn mentions_class_search(bytes: &[u8]) -> bool {
 fn purge_file(file: &mut SeriesFile, scope: PurgeScope, today: Date) -> bool {
     let size = |f: &SeriesFile| (f.series.len(), f.calendars.len(), f.ended.len(), f.class_search.len());
     let before = size(file);
-    file.series.retain(|s| !is_class_search(&s.source_uid) && !is_class_search(&s.calendar));
-    file.calendars.retain(|calendar, _| !is_class_search(calendar));
-    file.ended.retain(|key, e| !is_class_search(key) && !is_class_search(&e.calendar));
+    strip_class_search_rows(file);
     match scope {
         PurgeScope::Rows => file.class_search.retain(|key, _| !block_passed(key, today)),
         PurgeScope::All => file.class_search.clear(),
@@ -2421,10 +2419,30 @@ fn purge_file(file: &mut SeriesFile, scope: PurgeScope, today: Date) -> bool {
     size(file) != before
 }
 
-/// Replan §6.12, C2e: the series file's bytes as a backup may hold them. STUB (red): copies the
-/// file whole, class-search data and all.
+/// Every `classsearch:` series (by key or calendar), `calendars` entry and `ended` entry: the rows
+/// [`purge_file`] and [`series_for_backup`] both remove. The no-time block is the caller's.
+fn strip_class_search_rows(file: &mut SeriesFile) {
+    file.series.retain(|s| !is_class_search(&s.source_uid) && !is_class_search(&s.calendar));
+    file.calendars.retain(|calendar, _| !is_class_search(calendar));
+    file.ended.retain(|key, e| !is_class_search(key) && !is_class_search(&e.calendar));
+}
+
+/// Replan §6.12, C2e: the series file's bytes as a backup may hold them. A file whose bytes hold
+/// neither `classsearch` nor `class_search` is returned raw, malformed or not, so a backup without
+/// class-search data is unchanged to the byte (`parse_file` drops unknown keys). Otherwise the file
+/// is parsed, every class-search row, `calendars` entry and `ended` key and the whole no-time block
+/// are removed, and [`file_bytes`] is returned: the same data, the same bytes. `None` when the file
+/// cannot be read, or holds that text and cannot be parsed; the caller skips it. Reads no clock and
+/// takes no lock: it only reads, and a torn read is a parse failure or a later tick's copy.
 pub fn series_for_backup(vault: &Path) -> Option<Vec<u8>> {
-    std::fs::read(series_path(vault)).ok()
+    let bytes = std::fs::read(series_path(vault)).ok()?;
+    if !mentions_class_search(&bytes) {
+        return Some(bytes);
+    }
+    let mut file = parse_file(std::str::from_utf8(&bytes).ok()?).ok()?;
+    strip_class_search_rows(&mut file);
+    file.class_search.clear();
+    Some(file_bytes(&file).into_bytes())
 }
 
 /// What [`purge_class_search`] removes (replan §6.12): `Rows` the unconfirmed `classsearch:` rows,
