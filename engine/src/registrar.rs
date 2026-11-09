@@ -1685,3 +1685,5 @@ mod kept_tests;
 mod block_tests;
 #[cfg(test)]
 mod class_search_tests;
+#[cfg(test)]
+mod adopt_tests;
