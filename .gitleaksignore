@@ -1,0 +1,20 @@
+# Reviewed 2026-11-09: every entry is a test fixture, a placeholder token in a plan, or the Supabase
+# anon key (role: anon, public by design) in app/src/account.rs. Format: commit:file:rule:line.
+0262040ec67ee002a2a7761ccc2eef05ff64ee2a:cloud/supabase/functions/_shared/judge_prompts_mail_test.ts:generic-api-key:16
+20b6ce2d232dcdd4a4c86bf055992ab659cd4d00:cloud/supabase/functions/_shared/sync_vectors.json:generic-api-key:3
+2aab410fd31d88f8972007403e05463b15b1ea46:cloud/supabase/functions/issues/handler_test.ts:generic-api-key:32
+4f41cd745dbe90672fa7d9228763d927daac2ff3:docs/plans/2026-09-14-c3-sync-plan.md:generic-api-key:2093
+57b6d2043b8892dcd31fadcaf364e0a1254e388f:cloud/supabase/functions/_shared/scrub_test.ts:generic-api-key:86
+57b6d2043b8892dcd31fadcaf364e0a1254e388f:cloud/supabase/functions/_shared/scrub_test.ts:generic-api-key:86
+58954efaa129f7e72708d41b7af9f512a5863bd6:docs/plans/2026-09-09-c1-accounts-plan.md:generic-api-key:4261
+7029b6a2ccfa5066b35e999b8f35cad1dcd3106f:app/src/account.rs:jwt:19
+70323f6ef7939d4892aa1d0a0f5fe483418165ad:cloud/supabase/functions/mail-inbound/confirm_test.ts:generic-api-key:134
+8492f787597d87cbd200cb9c136d93e1742cb605:cloud/supabase/functions/_shared/scrub_test.ts:generic-api-key:85
+8492f787597d87cbd200cb9c136d93e1742cb605:cloud/supabase/functions/_shared/scrub_test.ts:generic-api-key:88
+989b2fd1e1a39c91956560f749ad7ba6cc98e213:cloud/supabase/functions/account/mail_test.ts:generic-api-key:204
+a2d740b7a704ba8348b3fc7d505c056c772eca50:cloud/supabase/functions/_shared/judge_prompts_test.ts:generic-api-key:121
+a2d740b7a704ba8348b3fc7d505c056c772eca50:cloud/supabase/functions/_shared/judge_prompts_test.ts:jwt:134
+bab96a83790db27c5287ad016cd6ad523f64db36:cloud/supabase/functions/ingest-calendar/handler_test.ts:generic-api-key:10
+cd612faedaf452d0fa2992a6cef639053c17f598:cloud/supabase/functions/_shared/scrub_test.ts:generic-api-key:237
+cd612faedaf452d0fa2992a6cef639053c17f598:cloud/supabase/functions/_shared/scrub_test.ts:generic-api-key:238
+cd612faedaf452d0fa2992a6cef639053c17f598:cloud/supabase/functions/_shared/scrub_test.ts:jwt:215

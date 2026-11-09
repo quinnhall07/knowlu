@@ -47,7 +47,7 @@ jobs:
       # fetch-depth: 0 - the release notes need the tag history, and checkout's default depth of 1
       # would make `git describe --tags HEAD^` find nothing on every release.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with: { fetch-depth: 0 }
+        with: { fetch-depth: 0 , persist-credentials: false }
       # D18 (Quinn, 2026-10-04): no release ships email forwarding before privacy bump #1. The guard
       # runs first and unconditionally, so a too-early tag fails in seconds, not after the build.
       # The rule and its markers are in the script; engine/tests/workflows.rs runs it.
@@ -67,10 +67,9 @@ jobs:
           $v = (rustc -vV | Out-String)
           Write-Output $v
           if ($v -notmatch "host: x86_64-pc-windows-gnu") { Write-Output "expected host: x86_64-pc-windows-gnu"; exit 1 }
-      # cache-on-failure, as ci.yml has it: the first release run failed, so the cache saved nothing
-      # and the rerun paid for the whole dependency graph a second time.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
-        with: { cache-on-failure: true }
+      # No build cache (2026-11-09, Quinn): a cache is written by CI runs on main, and restoring one
+      # here would let anything that ran in such a run reach a signed release (zizmor
+      # cache-poisoning). Releases are rare and hosted minutes are free; the job builds from scratch.
       - name: release notes
         shell: pwsh
         env: { RELEASE_AUTHENTICODE: "${{ vars.RELEASE_AUTHENTICODE }}" }
@@ -285,7 +284,7 @@ jobs:
       # fetch-depth: 1 - no notes are generated here, so no tag history is needed. The checkout is
       # for site\'s static pages, which are this same commit's.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with: { fetch-depth: 1 }
+        with: { fetch-depth: 1 , persist-credentials: false }
       # path: . - the artifact was uploaded from the workspace root, so site/releases and publish
       # land back at exactly the relative paths they had.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
