@@ -120,13 +120,13 @@ Full detail in `docs/reference/`; these are the parts a change must not break.
 ## Model and effort
 
 The session default is Fable 5.2 at `high`, capped at `xhigh` (`.claude/settings.json`); an agent with
-no model of its own runs on Opus 5.5 (`CLAUDE_CODE_SUBAGENT_MODEL`). The main
+no model of its own runs on Opus 5.5 at `xhigh` (`CLAUDE_CODE_SUBAGENT_MODEL`, `modelSettings`). The main
 session does everyday work and delegates a separable piece to a subagent in `.claude/agents/` when that
 is cheaper or safer; each agent's `description:` says when. Rationale: `docs/notes/2026-11-09-model-and-effort-review.md`.
 
 | Agent | Model, effort | Use for |
 |---|---|---|
-| `planner` / `debugger` | Fable, high | specs and plans / root cause |
+| `planner` / `debugger` | the session's: Fable, high | specs and plans / root cause |
 | `implementer` / `test-writer` / `console-ui` | Opus, high | specified feature tasks off the contract list / the failing test / `app/static`, `site/` |
 | `integrator` / `cloud-engineer` / `reviewer` | Opus, high | the merge train / `cloud/` / pre-push review, and spec/plan review |
 | `contract-engineer` / `contract-reviewer` | Opus, xhigh | the contract list / contract-list diffs |
@@ -147,8 +147,9 @@ inventing one. Subagents don't see the conversation: give them the goal, the fil
 constraints. Anything `mechanical`, `test-writer`, `console-ui`, `implementer` or `docs-keeper` changed
 goes through `reviewer` before a push. Two failed attempts means one level up, effort before model,
 never straight to `max`; `max`, and Fable for a role this table does not give it, are Quinn's call.
-When the plan's Fable allowance runs out, dispatch `planner` and `debugger` with `model: 'opus'` and
-`effort: 'xhigh'`; the main session moves to Opus last.
+When the plan's Fable allowance runs out, Claude Code asks whether to switch to the default model. That
+is Opus 5.5, which runs at `xhigh` here, and `planner` and `debugger` follow the session there on their
+own. If one of them ends on a usage error first, start it again after the switch.
 
 ## Gates and conventions
 

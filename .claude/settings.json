@@ -1,12 +1,18 @@
 {
   "model": "claude-fable-5-2",
   "effortLevel": "high",
+  "modelSettings": {
+    "claude-opus-5-5": {
+      "effortLevel": "xhigh"
+    }
+  },
   "maxEffortLevel": "xhigh",
   "switchModelsOnFlag": false,
   "env": {
     "CARGO_BUILD_JOBS": "2",
     "ENABLE_CODE_SECURITY_REVIEW": "0",
-    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-5-5"
+    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-5-5",
+    "ANTHROPIC_DEFAULT_MODEL": "claude-opus-5-5"
   },
   "permissions": {
     "allow": [
