@@ -2431,11 +2431,19 @@ fn strip_class_search_rows(file: &mut SeriesFile) {
 /// neither `classsearch` nor `class_search` is returned raw, malformed or not, so a backup without
 /// class-search data is unchanged to the byte (`parse_file` drops unknown keys). Otherwise the file
 /// is parsed, every class-search row, `calendars` entry and `ended` key and the whole no-time block
-/// are removed, and [`file_bytes`] is returned: the same data, the same bytes. `None` when the file
-/// cannot be read, or holds that text and cannot be parsed; the caller skips it. Reads no clock and
-/// takes no lock: it only reads, and a torn read is a parse failure or a later tick's copy.
-pub fn series_for_backup(vault: &Path) -> Option<Vec<u8>> {
-    let bytes = std::fs::read(series_path(vault)).ok()?;
+/// are removed, and [`file_bytes`] is returned: the same data, the same bytes. `Ok(None)` when the
+/// file holds that text and cannot be parsed; the caller skips it. A file that cannot be read is an
+/// `Err`, the caller's error as a failed copy always was, never a skip (C2e review, item 1): a skip
+/// would let the day's zip leave a clean file out and report success. Reads no clock and takes no
+/// lock: it only reads, and a torn read is a parse failure or a later tick's copy.
+pub fn series_for_backup(vault: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    std::fs::read(series_path(vault)).map(series_bytes_for_backup)
+}
+
+/// [`series_for_backup`] on bytes the caller already read: the raw bytes when they hold no
+/// class-search text, the filtered [`file_bytes`] when they do and parse, `None` when they do and
+/// do not. Pure.
+pub fn series_bytes_for_backup(bytes: Vec<u8>) -> Option<Vec<u8>> {
     if !mentions_class_search(&bytes) {
         return Some(bytes);
     }
@@ -13883,14 +13891,14 @@ mod class_search_backup_tests {
     fn the_filtered_copy_drops_every_class_search_part_and_keeps_the_rest() {
         let v = vault("filtered");
         std::fs::write(v.join(SERIES_FILE), WITH).unwrap();
-        let bytes = series_for_backup(&v).expect("a parseable file gives bytes");
+        let bytes = series_for_backup(&v).unwrap().expect("a parseable file gives bytes");
         let text = String::from_utf8(bytes).unwrap();
         assert!(!text.contains("classsearch") && !text.contains("class_search"), "{text}");
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["calendars"], serde_json::json!({"registrar:ua:202640": "2026-09-10"}));
         assert_eq!(value["ended"], serde_json::json!({}));
         assert!(text.ends_with('\n'), "file_bytes' trailing newline");
-        assert_eq!(series_for_backup(&v), Some(text.into_bytes()), "deterministic");
+        assert_eq!(series_for_backup(&v).unwrap(), Some(text.into_bytes()), "deterministic");
         let _ = std::fs::remove_dir_all(&v);
     }
 
@@ -13901,23 +13909,41 @@ mod class_search_backup_tests {
         for raw in ["{ \"series\" : [] ,\n\"extra\":1 }\n\n", "not json at all \u{0}"] {
             let v = vault("raw");
             std::fs::write(v.join(SERIES_FILE), raw).unwrap();
-            assert_eq!(series_for_backup(&v), Some(raw.as_bytes().to_vec()), "{raw:?}");
+            assert_eq!(series_for_backup(&v).unwrap(), Some(raw.as_bytes().to_vec()), "{raw:?}");
             let _ = std::fs::remove_dir_all(&v);
         }
     }
 
-    /// Text that cannot be parsed, or read, gives `None`: the caller skips it. Red now.
+    /// Text holding class-search data that cannot be parsed gives `Ok(None)`: the caller skips it.
     #[test]
     fn a_malformed_file_holding_class_search_text_gives_none() {
         for raw in ["{\"classsearch:ua:202640\": ", "{\"calendars\": {\"classsearch:ua:202640\": 1}}"] {
             let v = vault("malformed");
             std::fs::write(v.join(SERIES_FILE), raw).unwrap();
-            assert_eq!(series_for_backup(&v), None, "{raw}");
+            assert_eq!(series_for_backup(&v).unwrap(), None, "{raw}");
             let _ = std::fs::remove_dir_all(&v);
         }
         let v = vault("not-utf8");
         std::fs::write(v.join(SERIES_FILE), b"{\"class_search\": \xff}").unwrap();
-        assert_eq!(series_for_backup(&v), None, "not UTF-8");
+        assert_eq!(series_for_backup(&v).unwrap(), None, "not UTF-8");
+        let _ = std::fs::remove_dir_all(&v);
+    }
+
+    /// C2e review, item 1: a file that cannot be read is an `Err`, never `Ok(None)`, whatever it holds:
+    /// absent, or (on Windows) a clean file held open with share mode 0.
+    #[test]
+    fn a_file_that_cannot_be_read_is_an_error_never_a_skip() {
+        let v = vault("unreadable");
+        assert!(series_for_backup(&v).is_err(), "absent");
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::write(v.join(SERIES_FILE), "{\"series\": []}\n").unwrap();
+            let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(v.join(SERIES_FILE)).unwrap();
+            assert!(series_for_backup(&v).is_err(), "held open");
+            drop(held);
+            assert_eq!(series_for_backup(&v).unwrap(), Some(b"{\"series\": []}\n".to_vec()), "readable again");
+        }
         let _ = std::fs::remove_dir_all(&v);
     }
 }

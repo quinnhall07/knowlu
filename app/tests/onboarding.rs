@@ -135,7 +135,7 @@ fn restoring_an_older_mirror_brings_back_no_class_search_data() {
         let series_at = dest.join("state").join("calendar-series.json");
         match case {
             "dirty" => {
-                let want = knowlu_engine::commitments::series_for_backup(&mirror).expect("parseable");
+                let want = knowlu_engine::commitments::series_for_backup(&mirror).expect("readable").expect("parseable");
                 assert_eq!(std::fs::read(&series_at).unwrap(), want, "the filtered bytes, as a backup takes them");
                 let v: serde_json::Value = serde_json::from_slice(&want).unwrap();
                 assert_eq!(v["calendars"], serde_json::json!({"registrar:ua:202640": "2026-09-10"}), "the rest is kept");

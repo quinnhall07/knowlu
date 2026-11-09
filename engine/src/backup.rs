@@ -57,20 +57,25 @@ enum Take {
     /// The series file: the bytes [`crate::commitments::series_for_backup`] gives, with no
     /// class-search data in them.
     Filtered(Vec<u8>),
-    /// The series file when those bytes could not be had: skipped this run but still wanted, so
-    /// `mirror` never archives the older copy.
+    /// The series file when it holds class-search text and cannot be parsed: skipped this run but
+    /// still wanted, so `mirror` never archives the older copy.
     Skipped,
     /// A leftover `state/calendar-series.json*` beside the file (`write_state_file`'s
     /// `.tmp<pid>`, which `TMP_MARK` does not catch): never copied, never wanted.
     Never,
 }
 
-/// The one per-path rule (§6.12); `rel` is vault-relative.
-fn take(vault: &Path, rel: &Path) -> Take {
+/// The one per-path rule (§6.12); `rel` is vault-relative. A series file that cannot be read is
+/// the `Err`, as a failed copy is, never a skip (C2e review, item 1): `mirror` reports it and still
+/// wants the path, and `snapshot` fails, so the day's zip is made by a later tick, not without it.
+fn take(vault: &Path, rel: &Path) -> Result<Take, String> {
     if rel == Path::new(crate::commitments::SERIES_FILE) {
-        return crate::commitments::series_for_backup(vault).map_or(Take::Skipped, Take::Filtered);
+        return match crate::commitments::series_for_backup(vault) {
+            Ok(bytes) => Ok(bytes.map_or(Take::Skipped, Take::Filtered)),
+            Err(e) => Err(format!("read {}: {e}", vault.join(rel).display())),
+        };
     }
-    if is_series_leftover(rel) { Take::Never } else { Take::Whole }
+    Ok(if is_series_leftover(rel) { Take::Never } else { Take::Whole })
 }
 
 /// `state/<name>` where `name` starts `calendar-series.json` and is not the file itself.
@@ -121,13 +126,15 @@ pub fn mirror(vault: &Path, target: &Path, profile_id: &str) -> Result<MirrorRep
             let rel = src.strip_prefix(vault).map_err(|e| e.to_string())?.to_path_buf();
             let dst = root.join(&rel);
             let placed = match take(vault, &rel) {
-                Take::Never => continue,
-                Take::Skipped => { wanted.insert(rel); continue; }
+                Ok(Take::Never) => continue,
+                Ok(Take::Skipped) => { wanted.insert(rel); continue; }
+                // Unreadable: an error, still wanted, so the older copy is never archived.
+                Err(e) => Some(Err(e)),
                 // Compared filtered-to-destination, so a second tick copies nothing (§6.12).
-                Take::Filtered(bytes) if std::fs::read(&dst).is_ok_and(|d| d == bytes) => None,
-                Take::Filtered(bytes) => Some(place_bytes(&bytes, &dst)),
-                Take::Whole if same_bytes(&src, &dst) => None,
-                Take::Whole => Some(place(&src, &dst)),
+                Ok(Take::Filtered(bytes)) if std::fs::read(&dst).is_ok_and(|d| d == bytes) => None,
+                Ok(Take::Filtered(bytes)) => Some(place_bytes(&bytes, &dst)),
+                Ok(Take::Whole) if same_bytes(&src, &dst) => None,
+                Ok(Take::Whole) => Some(place(&src, &dst)),
             };
             wanted.insert(rel);
             match placed { None => rep.unchanged += 1, Some(Ok(())) => rep.copied += 1, Some(Err(e)) => rep.errors.push(e) }
@@ -139,7 +146,9 @@ pub fn mirror(vault: &Path, target: &Path, profile_id: &str) -> Result<MirrorRep
         let rel = m.strip_prefix(&root).map_err(|e| e.to_string())?.to_path_buf();
         if rel.starts_with("archive") || wanted.contains(&rel) { continue; }
         // A leftover series copy an older mirror took can hold class-search data: deleted, never
-        // archived, where it would outlive the purge (C2e, ruling 1).
+        // archived, where it would outlive the purge (C2e, ruling 1). Only under `state/`: what is
+        // already under `archive/` is skipped above and never scrubbed; no released build wrote
+        // class-search data, so none was archived.
         if is_series_leftover(&rel) {
             if let Err(e) = std::fs::remove_file(&m) { rep.errors.push(format!("remove {}: {e}", m.display())); }
             continue;
@@ -187,7 +196,7 @@ pub fn snapshot(vault: &Path, target: &Path, profile_id: &str, today: jiff::civi
             let mut files = Vec::new(); walk(&src_dir, &mut files);
             for src in files {
                 let rel = src.strip_prefix(vault).map_err(|e| e.to_string())?;
-                let bytes = match take(vault, rel) {
+                let bytes = match take(vault, rel)? {
                     Take::Never | Take::Skipped => continue,
                     Take::Filtered(bytes) => bytes,
                     Take::Whole => std::fs::read(&src).map_err(|e| e.to_string())?,
