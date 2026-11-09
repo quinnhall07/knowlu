@@ -303,7 +303,7 @@ impl CloudClient {
                 .unwrap_or_default();
             return Err(CloudError::Status { code, detail: judge::clip(&self.scrub(&detail), 200) });
         }
-        serde_json::from_str(&text).map_err(|e| CloudError::Body(e.to_string()))
+        serde_json::from_str(&text).map_err(|e| CloudError::Body(self.scrub(&e.to_string())))
     }
 
     pub fn post(&self, path: &str, body: &Value) -> Result<Value, CloudError> {
