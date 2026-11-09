@@ -1063,13 +1063,20 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// C2e (replan §6.12): a mirror written before C2e can hold class-search data, so the STAGED copy (never
-/// the backup) is cleaned the way a backup now takes it. Every leftover `state/calendar-series.json*`
-/// beside the series file goes; the series file becomes `commitments::series_for_backup`'s bytes,
-/// rewritten only when they differ (a file without that text is its own raw bytes), and is removed when
-/// that gives `None`: a malformed file holding that text, which the engine's next read would replace
-/// with a fresh one anyway. Fixed-word errors, no key.
-fn scrub_class_search(vault: &Path) -> Result<(), String> {
+/// C2e (replan §6.12): a mirror written before C2e can hold class-search data in `state/`, so the
+/// STAGED copy's `state/` (never the backup) is cleaned the way a backup now takes it. Every leftover
+/// `state/calendar-series.json*` beside the series file goes; the series file, read once, becomes
+/// `commitments::series_bytes_for_backup`'s bytes, rewritten only when they differ (a file without
+/// that text is its own raw bytes), and is removed only when it was read, holds that text and cannot
+/// be parsed, which the engine's next read would replace with a fresh one anyway. A series file that
+/// cannot be read is an error and stays (C2e review, item 2): never deleted as if malformed, which
+/// would lose a clean file and its registrar block. The staged `archive/` arrives as the mirror holds
+/// it and is not scrubbed: no released build wrote class-search data, so none was archived. Fixed-word
+/// errors, no key.
+///
+/// Public so `app/tests/onboarding.rs` can drive its error branches, which `restore_vault_in`'s
+/// randomly named staging folder keeps out of a test's reach.
+pub fn scrub_class_search(vault: &Path) -> Result<(), String> {
     let state = vault.join("state");
     let series = state.join("calendar-series.json");
     for e in std::fs::read_dir(&state).into_iter().flatten().flatten() {
@@ -1079,8 +1086,9 @@ fn scrub_class_search(vault: &Path) -> Result<(), String> {
         }
     }
     if !series.is_file() { return Ok(()); }
-    match knowlu_engine::commitments::series_for_backup(vault) {
-        Some(bytes) if std::fs::read(&series).is_ok_and(|raw| raw == bytes) => Ok(()),
+    let raw = std::fs::read(&series).map_err(|e| format!("restore: the series file could not be read ({})", e.kind()))?;
+    match knowlu_engine::commitments::series_bytes_for_backup(raw.clone()) {
+        Some(bytes) if bytes == raw => Ok(()),
         Some(bytes) => std::fs::write(&series, bytes).map_err(|e| format!("restore: the series file could not be written ({})", e.kind())),
         None => std::fs::remove_file(&series).map_err(|e| format!("restore: the series file could not be removed ({})", e.kind())),
     }
