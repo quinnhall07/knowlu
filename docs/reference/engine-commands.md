@@ -149,8 +149,8 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   school's public class search (onboarding replan §6.5, C3). Conflicts with `--confirm` and
   `--registrar` (clap, exit 2). **No network:** the app fetches and writes the bundle
   `{school, term, queries: [{subject, number, sections, status, body}]}`. **Always exits 0 and writes
-  only `state/calendar-series.json`** (no note, no card, no journal record; the series lock is held,
-  `state/calendar-series.lock` may appear): the `found` sections that name an active vault course
+  only `state/calendar-series.json`** (no note, no card, no journal record; it takes the series lock, and
+  when that fails it warns and writes unlocked, as every writer of the file; `state/calendar-series.lock` may appear): the `found` sections that name an active vault course
   become series under `classsearch:<school>:<term>-<crn>` in the calendar `classsearch:<school>:<term>`,
   and the courses whose section lists no day or time go in the file's `class_search` block (course
   keys only), under that term and, when it is still ahead of `registrar::term_for`'s, under
@@ -160,7 +160,8 @@ Moved verbatim out of `CLAUDE.md` on 2026-09-29 so the file every session loads 
   per section; a query's state is its sections' first of found, part_read, ambiguous, no_time,
   not_found), and `warnings` are fixed words. An `answered` query whose body is not JSON, or has no
   `data` list, is `closed`. A missing or unknown `--school`, a bundle for another school, a bundle that
-  is missing or not one, or a bad `--today` is one named line, **exit 0, nothing written**. Never
+  is missing or not one (a `term` whose suffix the school does not list included), a vault
+  folder that is not there, or a bad `--today` is one named line, **exit 0, nothing written**. Never
   gated; no model.
 - `onboarding --vault <v> --preview … [--class-search <bundle> --school <key>]` — with the bundle,
   `class_times` also counts each `found` query naming a course in `--courses` (each course once,

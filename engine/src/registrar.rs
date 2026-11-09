@@ -971,7 +971,8 @@ const WARN_MIDNIGHT: &str = "class search: a section meets across midnight; not 
 const WARN_PARTIAL: &str = "class search: a section was only partly read";
 
 /// Reads a bundle (replan §6.4, §6.5, §6.8; C3). `None` when the text is not one: not a JSON object,
-/// no `school` or six-digit `term`, no `queries` list, or a query without a `subject` and `number`.
+/// no `school` or six-digit `term` (its suffix one of the school's [`School::terms`], when the school
+/// is known), no `queries` list, or a query without a `subject` and `number`.
 ///
 /// A query's state: `paused` and `fetch_failed` pass through, as does `closed`; an `answered` query
 /// whose body is not JSON, or has no `data` list, is `closed` (§6.8). An unknown `status` is
@@ -983,6 +984,10 @@ pub fn read_class_search_bundle(text: &str, today: &str) -> Option<ClassSearchBu
     let json: Value = serde_json::from_str(text).ok()?;
     let school = json.get("school")?.as_str()?.to_string();
     let term = json.get("term")?.as_str().filter(|t| t.len() == 6 && t.bytes().all(|b| b.is_ascii_digit()))?.to_string();
+    // A school Knowlu knows reads only its own terms; an unknown school is the caller's to name.
+    if self::school(&school).is_some_and(|s| !s.terms.iter().any(|(_, suffix)| Some(*suffix) == term.get(4..))) {
+        return None;
+    }
     let mut queries = Vec::new();
     for q in json.get("queries")?.as_array()? {
         let field = |k: &str| q.get(k).and_then(Value::as_str);

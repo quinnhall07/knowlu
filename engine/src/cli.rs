@@ -1114,6 +1114,9 @@ pub fn commitments_class_search(vault: &Path, today_iso: Option<&str>, school: O
     if registrar::school(school).is_none() {
         return Err("commitments: class search: unknown school; nothing written".to_string());
     }
+    if !vault.is_dir() {
+        return Err("commitments: class search: the vault folder was not found; nothing written".to_string());
+    }
     let today = match today_iso {
         Some(iso) => Date::strptime("%Y-%m-%d", iso).map_err(|_| "commitments: class search: bad --today; nothing written".to_string())?,
         None => Timestamp::now().to_zoned(vault_zone(vault)).date(),

@@ -2870,14 +2870,17 @@ fn class_search_block_keys(school: &str, term: &str, today: Date) -> Vec<String>
 /// Stores a class-search read in `state/calendar-series.json`, and nothing else: its rows under the
 /// calendar `classsearch:<school>:<term>` (read fresh `today`) and its no-time courses in the block
 /// ([`class_search_block_keys`]). Courses the read answered are updated in the block, others left; an
-/// entry that ends empty goes. One read-modify-write under the series lock, as every writer of the
-/// file. Returns the file's warnings and whether the file now holds the result.
+/// entry that ends empty goes. A key whose term has passed ([`block_passed`]) is never written: the
+/// same pass drops it, so a stale read leaves no block. One read-modify-write of the file under the
+/// series lock; when the lock cannot be taken, as for every writer of the file, that is one warning
+/// and the write goes on unlocked (a concurrent writer's change may then be lost). Returns the
+/// file's warnings and whether the file now holds the result.
 pub fn store_class_search(vault: &Path, today: Date, store: &ClassSearchStore) -> (Vec<String>, bool) {
     let calendar = format!("{CLASS_SEARCH_PREFIX}{}:{}", store.school, store.term);
     let fresh: Vec<(String, Vec<Series>)> = if store.series.is_empty() { Vec::new() } else { vec![(calendar, store.series.clone())] };
     let keys = class_search_block_keys(&store.school, &store.term, today);
     let edit = |block: &mut BTreeMap<String, BTreeSet<String>>| {
-        for key in &keys {
+        for key in keys.iter().filter(|key| !block_passed(key, today)) {
             let mut courses = block.remove(key).unwrap_or_default();
             courses.retain(|course| !store.answered.contains(course));
             courses.extend(store.no_time.iter().cloned());
