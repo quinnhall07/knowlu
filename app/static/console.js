@@ -1304,7 +1304,7 @@
     return gradesStatus().then(refreshGradesDrawer);
   }
   function gradesStatus() {
-    return invoke("grades_status", {}).then(function (s) { GRADES.status = s; drawGrades(); }).catch(function () { GRADES.status = null; drawGrades(); });
+    return invoke("grades_status", {}).then(function (s) { GRADES.status = s; drawGrades(); schoolConnectSync(); }).catch(function () { GRADES.status = null; drawGrades(); schoolConnectSync(); });
   }
   function gradesUnavailableHtml() {
     return '<div class="gs-line"><span>Grades from Blackboard are not available at your school yet</span></div>';
@@ -1433,12 +1433,22 @@
       var shared = !!(s && s.label), has = !!(s && s.folder);
       SCHOOL.uses = (s && s.uses) || [];
       EL("set-school").hidden = !shared;
-      EL("set-grades-key").hidden = shared; EL("set-grades-forget").hidden = shared;
+      SCHOOL.shared = shared; SCHOOL.has = has;
+      EL("set-grades-forget").hidden = shared;
+      EL("set-grades-key").textContent = shared ? "Grades" : "Blackboard sign-in";
+      syncGradesRow();
       EL("set-school-state").textContent = has ? schoolWords(SCHOOL.uses) : "School sign-in: not connected";
-      EL("set-school-connect").hidden = has;
+      schoolConnectSync();
       EL("set-school-forget").hidden = !has;
-    }).catch(function () { EL("set-school").hidden = true; EL("set-grades-key").hidden = false; EL("set-grades-forget").hidden = false; });
+    }).catch(function () { SCHOOL.shared = false; EL("set-school").hidden = true; EL("set-grades-forget").hidden = false; syncGradesRow(); });
   }
+  // Connect shows only where grades sign-in is available (review: grades_connect needs a Blackboard school).
+  function schoolConnectSync() {
+    var g = GRADES.status;
+    EL("set-school-connect").hidden = !!SCHOOL.has || !(g && g.ok !== false && g.available !== false);
+  }
+  // At a shared school the grades row holds only its note; hide it while the note is empty.
+  function syncGradesRow() { EL("set-grades").hidden = !!SCHOOL.shared && !EL("set-grades-note").textContent; }
   EL("set-school-connect").addEventListener("click", function () {
     invoke("grades_connect", {}).then(function (r) {
       EL("set-school-note").textContent = r && r.ok === false ? String(r.error || "") : "";
@@ -1458,6 +1468,7 @@
   EL("set-grades-hide-in").addEventListener("change", function () {
     invoke("set_settings", { patch: { grades_hidden: EL("set-grades-hide-in").checked } }).then(function (r) {
       EL("set-grades-note").textContent = r && r.ok === false ? String(r.error || "") : "";
+      syncGradesRow();
       return gradesStatus();
     }).catch(function () {});
   });

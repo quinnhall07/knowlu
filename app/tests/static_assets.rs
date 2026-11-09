@@ -3235,9 +3235,12 @@ fn the_school_rows_handler_calls_school_forget_only_after_a_confirm_that_lists_t
     assert_eq!(js.matches("invoke(\"school_forget\"").count(), 1, "one call site, the one behind the confirm");
 }
 
+// Review of the S6 lane: Connect shows only where grades sign-in is available, and at a shared school the
+// grades row hides while its note is empty (it never leaves a blank row) but is not removed.
 #[test]
 fn at_a_shared_school_only_the_grades_forget_button_hides_and_the_grades_row_stays() {
     let js = read("console.js");
     assert!(js.contains("EL(\"set-grades-forget\").hidden = shared"), "the grades Forget button hides at a shared school");
-    assert!(!js.contains("EL(\"set-grades\").hidden"), "the grades row itself (note, Hide grades) is never hidden");
+    assert!(js.contains("EL(\"set-grades\").hidden = !!SCHOOL.shared && !EL(\"set-grades-note\").textContent"), "the grades row hides only while its note is empty");
+    assert!(js.contains("g.available !== false"), "Connect needs grades sign-in to be available");
 }
