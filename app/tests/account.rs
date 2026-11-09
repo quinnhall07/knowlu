@@ -2826,7 +2826,10 @@ fn the_live_close_stops_runs_first_and_sign_out_and_the_wipe_wait_for_the_window
     assert!(body("impl DeleteSteps for LiveDelete").contains("take_mail_window(self.app, std::time::Instant::now() + MAIL_STOP_BOUND)"));
     assert!(body("fn take_mail_window(").contains("MailWindow::take_by(deadline, || close_mail_windows(app))"));
     // L4 (plan §4.7): sign-out's clean is the start-up clean, and it runs before the credential is deleted.
-    assert!(sign_out.contains("crate::mail::setup::clean_unfinished(dir, &client)"), "sign-out runs the unfinished-setup clean: {sign_out}");
+    // F2c moved it into `sign_out_clean`, which sign-out's closure calls with the host the revoke uses.
+    assert!(sign_out.contains(concat!("sign_out_clean", "(dir, &id, &api_base())")), "sign-out's clean is sign_out_clean: {sign_out}");
+    let clean = body(concat!("pub fn sign_out_clean", "("));
+    assert!(clean.contains("crate::mail::setup::clean_unfinished(dir, &client)"), "sign-out runs the unfinished-setup clean: {clean}");
     let with = body(concat!("pub fn sign_out_with", "<Held>("));
     let (clean, delete) = (with.find("clean_unfinished(&dir)"), with.find("crate::credentials::delete(&target)"));
     assert!(clean.is_some() && clean < delete, "the clean runs before the session's credential is deleted: {with}");
@@ -3628,9 +3631,11 @@ fn the_sign_out_clean_is_capped_read_once_and_wired_into_sign_out() {
     assert!(client.contains("OnceLock"), "the clean's token is memoised: {client}");
     assert_eq!(client.matches("valid_access_token_within(").count(), 1, "{client}");
     assert!(client.contains("get_or_init(|| valid_access_token_within("), "read only inside get_or_init: {client}");
-    let sign_out = body("sign_out");
-    let call = sign_out.lines().find(|l| l.contains("sign_out_mail_client(")).expect("sign-out builds the clean's client");
-    assert!(call.contains("SIGN_OUT_MAIL_CALL"), "with the cap: {call}");
+    // F2c: sign-out's clean is `sign_out_clean`, given `api_base()`; it builds the client with the cap and that base.
+    assert!(body("sign_out").contains(concat!("sign_out_clean", "(dir, &id, &api_base())")), "sign-out's clean is sign_out_clean");
+    let clean = body("sign_out_clean");
+    let call = clean.lines().find(|l| l.contains("sign_out_mail_client(")).expect("sign-out's clean builds the clean's client");
+    assert!(call.contains("SIGN_OUT_MAIL_CALL") && call.contains("sign_out_mail_client(api_base, "), "with the cap and its own base: {call}");
 
     // The helper's only caller in `src/` is `sign_out_mail_client`: two code mentions, the definition and that call.
     let mut mentions = Vec::new();
@@ -3969,5 +3974,249 @@ fn a_held_school_folder_never_stops_the_lms_session_delete() {
     assert_eq!((out["ok"].clone(), out["school_profiles_left"].clone()), (serde_json::json!(true), serde_json::json!(true)), "{out}");
     assert!(knowlu::school_session::session_dir(&dir).is_dir(), "the school folder really was left");
     assert!(!knowlu::grades::session_dir(&dir).exists(), "lms-session still went");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---- F2c: sign-out's clean is the mail clean plus `on_sign_out`; deletion takes the pending links ----
+//
+// The tests call `sign_out_clean` itself, so they reach its wiring (wave-B plan F2c). Its base is the test's
+// own loopback, and `KNOWLU_API_BASE` points at a closed port, so a clean that read `api_base()` instead
+// would reach nothing the test serves. Every profile id, target and link is generated or synthetic.
+
+/// This profile's two pending feed links, at the targets `onboarding_state`'s real store uses.
+#[cfg(windows)]
+fn pending_links(id: &str) -> [String; 2] {
+    [knowlu::onboarding_state::PENDING_LMS, knowlu::onboarding_state::PENDING_CALENDAR].map(|n| knowlu::credentials::target_for(id, n))
+}
+
+/// Both pending links saved, and a step-8 setup with a skip and an answers file beside it.
+#[cfg(windows)]
+fn half_done_setup(dir: &std::path::Path, id: &str) {
+    for t in pending_links(id) {
+        knowlu::credentials::write(&t, id, "https://feeds.example.invalid/synthetic.ics").expect("a pending link");
+    }
+    let mut s = knowlu::onboarding_state::OnboardingState::new("2026-11-01T12:00:00Z", 8);
+    s.account_settled = true;
+    knowlu::onboarding_state::skip_step(&mut s, 7, "calendar").expect("a skip");
+    knowlu::onboarding_state::save_state(dir, &s).expect("onboarding.json");
+    std::fs::write(knowlu::onboarding_state::answers_path(dir), b"{}").unwrap();
+}
+
+/// `on_sign_out` ran: both links and the answers file gone, and the setup rewound to step 2 with nothing kept.
+#[cfg(windows)]
+fn assert_rewound(dir: &std::path::Path, id: &str) {
+    for t in pending_links(id) {
+        assert!(!knowlu::credentials::exists(&t), "{t} is gone");
+    }
+    assert!(!knowlu::onboarding_state::answers_path(dir).exists(), "the answers file is gone");
+    let knowlu::onboarding_state::Loaded::Ok(s) = knowlu::onboarding_state::load_state(dir) else {
+        panic!("an unfinished onboarding.json is rewritten, never removed")
+    };
+    assert_eq!((s.step, s.finished, s.account_settled, s.skips.len()), (2, false, false, 0), "rewound to step 2");
+}
+
+/// With no session credential the mail clean sends nothing (its one session read fails before any request)
+/// and keeps its record for `sign_out_with`'s step (3); `on_sign_out` still runs.
+#[cfg(windows)]
+#[test]
+fn sign_out_clean_with_no_session_sends_nothing_and_still_rewinds_the_setup() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let (root, _app_root, id, dir) = signout_profile("f2c-no-session");
+    let session = knowlu::account::session_target(&id);
+    let _cleanup = Cleanup(pending_links(&id).into_iter().chain([session.clone()]).collect());
+    half_done_setup(&dir, &id);
+    record_setups(&dir, vec![setup_record("mbx-new", false, false)], &[]);
+    let silent = Silent::start();
+
+    knowlu::account::sign_out_clean(&dir, &id, &silent.functions());
+
+    assert_eq!(silent.finish(), 0, "no session, so the clean asked the service nothing");
+    assert_eq!(pending_setups(&dir).len(), 1, "the clean could not ask, so it kept its record");
+    assert!(!knowlu::credentials::exists(&session), "the clean never writes a session");
+    assert_rewound(&dir, &id);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// With a session the clean's requests reach the base it is given and nowhere else: the list and the delete
+/// of a never-placed `pending` address arrive at this test's listener with the session's bearer. The clean
+/// only reads the session, so it is still there, and the rewind still runs.
+#[cfg(windows)]
+#[test]
+fn sign_out_clean_with_a_session_reaches_only_the_base_it_is_given() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let (root, _app_root, id, dir) = signout_profile("f2c-session");
+    let session = knowlu::account::session_target(&id);
+    let _cleanup = Cleanup(pending_links(&id).into_iter().chain([session.clone()]).collect());
+    save_session_left(&session, 3600);
+    half_done_setup(&dir, &id);
+    record_setups(&dir, vec![setup_record("mbx-new", false, false)], &[]);
+    let listed = r#"{"addresses":[{"address_id":"mbx-new","status":"pending"}]}"#.to_string();
+    let (base, server) = loopback(vec![(200, listed), (200, "{}".to_string())]);
+
+    knowlu::account::sign_out_clean(&dir, &id, &format!("{base}/functions/v1"));
+
+    let seen = server.join().expect("both requests reached the test's listener");
+    let lines: Vec<&str> = seen.iter().map(|r| r.lines().next().unwrap_or("")).collect();
+    let want = ["GET /functions/v1/mail/addresses HTTP/1.1", "DELETE /functions/v1/mail/addresses/mbx-new HTTP/1.1"];
+    assert_eq!(lines, want, "the list, then the never-placed address's delete");
+    assert!(seen.iter().all(|r| r.to_ascii_lowercase().contains("authorization: bearer live-at")), "each carries the session's bearer");
+    assert!(pending_setups(&dir).is_empty(), "the address was deleted, so its record went");
+    assert!(knowlu::credentials::exists(&session), "the clean leaves the session for sign-out to delete");
+    assert_rewound(&dir, &id);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// *Delete my data* deletes this profile's two pending links beside its logins; another profile's stay.
+#[cfg(windows)]
+#[test]
+fn deleting_my_data_deletes_both_pending_links_and_no_others() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _app_root, id, dir) = signout_profile("f2c-delete");
+    let vault = root.join("Mine");
+    std::fs::create_dir_all(vault.join("tasks")).unwrap();
+    let their_id = knowlu::profiles::id_for(&root.join("Theirs"));
+    let (mine, theirs) = (pending_links(&id), pending_links(&their_id));
+    let _cleanup = Cleanup(mine.iter().chain(&theirs).cloned().collect());
+    for t in mine.iter().chain(&theirs) {
+        knowlu::credentials::write(t, "synthetic", "https://feeds.example.invalid/synthetic.ics").expect("a pending link");
+    }
+
+    knowlu::account::delete_local_data(&vault, &dir, None, &id, None, "");
+
+    assert!(mine.iter().all(|t| !knowlu::credentials::exists(t)), "both of my pending links are gone");
+    assert!(theirs.iter().all(|t| knowlu::credentials::exists(t)), "another profile's pending links were deleted");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---- P1's rule for `knowlu/<id>/school` at sign-out and deletion (P1 review) ----
+//
+// "Gone" comes from the delete's own answer (`school_password.rs`). `credentials::exists` reads false on any
+// error, and Windows has answered not-found spuriously under load, so a false `exists` alone never decides it.
+
+/// A school-password store that answers its one delete as told and records what it was asked, in order.
+/// No real credential: the answers it gives are the ones Credential Manager gives only now and then.
+#[cfg(windows)]
+struct Answering {
+    delete: Result<(), knowlu::school_password::DeleteError>,
+    exists: bool,
+    asked: std::cell::RefCell<Vec<String>>,
+}
+
+#[cfg(windows)]
+impl knowlu::school_password::SchoolStore for Answering {
+    fn write(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+        panic!("deleting a school password never writes one")
+    }
+    fn read(&self, _: &str) -> Result<(String, String), String> {
+        panic!("deleting a school password never reads one")
+    }
+    fn exists(&self, target: &str) -> bool {
+        self.asked.borrow_mut().push(format!("exists {target}"));
+        self.exists
+    }
+    fn delete(&self, target: &str) -> Result<(), knowlu::school_password::DeleteError> {
+        self.asked.borrow_mut().push(format!("delete {target}"));
+        self.delete.clone()
+    }
+}
+
+/// A removed password is gone; a not-found is gone only when `exists` agrees; a failed delete is never gone,
+/// whatever `exists` reads. Before P1's rule, a failed delete with a false `exists` read as a silent success,
+/// and sign-out's `school_password_left` was then `false` with the password possibly still saved.
+#[cfg(windows)]
+#[test]
+fn the_school_password_is_gone_only_on_the_deletes_own_answer() {
+    use knowlu::school_password::DeleteError::{Failed, NotFound};
+    let id = knowlu::profiles::id_for(&std::env::temp_dir().join(format!("knowlu-p1-rule-{}", std::process::id())));
+    let target = knowlu::credentials::target_for(&id, "school");
+    let failed = Failed(format!("credential delete failed for {target}: 5"));
+    for (delete, exists, gone) in [
+        (Ok(()), false, true),
+        (Ok(()), true, true),
+        (Err(NotFound), false, true),
+        (Err(NotFound), true, false),
+        (Err(failed.clone()), false, false),
+        (Err(failed.clone()), true, false),
+    ] {
+        let store = Answering { delete: delete.clone(), exists, asked: Default::default() };
+        let out = knowlu::account::delete_school_password_in(&store, &id);
+        assert_eq!(out.is_ok(), gone, "delete {delete:?}, exists {exists}: {out:?}");
+        let asked = store.asked.borrow();
+        assert_eq!(asked.first(), Some(&format!("delete {target}")), "the delete is tried first, never skipped on exists: {asked:?}");
+    }
+}
+
+/// Both paths that delete `knowlu/<id>/school` take that rule over the real store: sign-out's step (0) and
+/// *Delete my data*, which no longer gates the school password on `exists`. The rule is P1's own, not a copy.
+#[test]
+fn sign_out_and_deletion_delete_the_school_password_only_through_p1s_rule() {
+    let src = std::fs::read_to_string("src/account.rs").expect("src/account.rs");
+    let fns = top_level_fns(&src);
+    let body = |name: &str| {
+        fns.iter().find(|(n, _)| n == name).map(|(_, b)| b.clone()).unwrap_or_else(|| panic!("account.rs has no fn {name}"))
+    };
+    let real = body("delete_school_password");
+    assert!(real.contains("delete_school_password_in(&crate::school_password::RealStore, profile_id)"), "{real}");
+    let rule = body("delete_school_password_in");
+    assert!(rule.contains("crate::school_password::removed(store, "), "P1's rule itself: {rule}");
+    assert!(body("sign_out_with").contains("delete_school_password(id)"), "sign-out's step (0)");
+    let wipe = body("delete_local_data");
+    assert!(wipe.contains("delete_school_password(profile_id)"), "Delete my data: {wipe}");
+    assert!(!wipe.contains("SCHOOL_PASSWORD_SOURCE"), "the deletion's exists-gated loop no longer names it: {wipe}");
+    // Contract review Minor 3: one that will not go is one plain line, the sentence below.
+    assert!(wipe.contains(r#"eprintln!("Knowlu: {SCHOOL_PASSWORD_MAY_REMAIN}")"#), "Delete my data's line: {wipe}");
+}
+
+/// Contract review Minor 2: an id that is not a profile id names no credential, `delete_local_data`'s rule,
+/// so the public rule refuses it by name and asks the store nothing.
+#[cfg(windows)]
+#[test]
+fn an_id_that_is_not_a_profile_id_deletes_no_school_password() {
+    let pid = std::process::id();
+    for bad in [String::new(), "../..".to_string(), format!("profile_{pid:09x}"), format!("knowlu/profile_{pid:010x}")] {
+        let store = Answering { delete: Ok(()), exists: false, asked: Default::default() };
+        let out = knowlu::account::delete_school_password_in(&store, &bad);
+        let e = out.expect_err("a bad id is never a deleted password");
+        assert!(e.contains("is not a profile id"), "{bad:?}: {e}");
+        assert!(store.asked.borrow().is_empty(), "{bad:?}: the store was asked {:?}", store.asked.borrow());
+    }
+}
+
+/// Contract review Minor 3: *Delete my data*'s line for a school password that may not have gone. The account
+/// is already gone when it prints, so it says what may be left and gives no advice, and it carries no
+/// "Knowlu" of its own, because the line's prefix is the only one.
+#[test]
+fn delete_my_datas_school_password_line_is_one_plain_statement() {
+    let line = knowlu::account::SCHOOL_PASSWORD_MAY_REMAIN;
+    assert!(line.contains("school password") && line.contains("may still be on this computer"), "{line}");
+    assert!(!line.to_ascii_lowercase().contains("knowlu"), "the prefix is the line's only Knowlu: {line}");
+    assert!(!line.to_ascii_lowercase().contains("try again"), "no retry advice after the account is gone: {line}");
+}
+
+/// Contract review Minor 5: an `on_sign_out` failure (an unreadable `onboarding.json`) never stops the clean.
+/// It returns, the line it logs says it came from sign-out and names the file, and the rest still ran: both
+/// pending links are gone, and the unreadable file is left as it was.
+#[cfg(windows)]
+#[test]
+fn an_on_sign_out_failure_is_a_named_sign_out_line_and_the_clean_returns() {
+    let _credman_guard = CREDMAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _api = ApiBase::set(&closed_loopback_base());
+    let (root, _app_root, id, dir) = signout_profile("f2c-unreadable");
+    let _cleanup = Cleanup(pending_links(&id).into_iter().chain([knowlu::account::session_target(&id)]).collect());
+    for t in pending_links(&id) {
+        knowlu::credentials::write(&t, &id, "https://feeds.example.invalid/synthetic.ics").expect("a pending link");
+    }
+    let file = knowlu::onboarding_state::state_path(&dir);
+    std::fs::write(&file, b"not an onboarding file").unwrap();
+
+    let line = knowlu::account::sign_out_clean(&dir, &id, &closed_loopback_base());
+
+    let line = line.expect("an on_sign_out failure is logged");
+    assert!(line.starts_with("Knowlu: sign-out: "), "the line says where it came from: {line}");
+    assert!(line.contains("onboarding.json"), "and names the file: {line}");
+    assert!(pending_links(&id).iter().all(|t| !knowlu::credentials::exists(t)), "the pending links still went");
+    assert_eq!(std::fs::read(&file).unwrap(), b"not an onboarding file", "an unreadable file is never rewritten");
     let _ = std::fs::remove_dir_all(&root);
 }

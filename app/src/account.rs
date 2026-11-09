@@ -707,6 +707,10 @@ pub fn open_policy(which: String) -> Value {
 /// [`SIGN_OUT_MAIL_CALL`], the session read once. A client that cannot be built skips the clean, never
 /// the sign-out.
 ///
+/// **…and no half-done setup** (wave-B plan F2c): the same clean, [`sign_out_clean`], then runs
+/// `onboarding_state::on_sign_out`, so the next account to sign in on this profile starts setup at step 2
+/// with no answers and no pending feed links of this one's.
+///
 /// **…and no school sign-in** (onboarding plan §S5, spec §2.5; replan RQ17, Q-B9): the profile's saved
 /// school password, its `school-session` folder and today's grades folder `lms-session` go too, after
 /// every window on them ([`SCHOOL_WINDOWS`]) is destroyed, because another account may sign in on this
@@ -728,11 +732,30 @@ pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Val
     // Called only for a profile id with a folder, under the hold and before the credential is deleted.
     let id = profile_id.clone().unwrap_or_default();
     let clean = |dir: &std::path::Path| {
-        if let Ok(client) = sign_out_mail_client(&api_base(), &anon_key(), &session_target(&id), SIGN_OUT_MAIL_CALL) {
-            crate::mail::setup::clean_unfinished(dir, &client);
-        }
+        let _ = sign_out_clean(dir, &id, &api_base());
     };
     sign_out_with(profile_id, crate::state::app_data_root().as_deref(), close, clean)
+}
+
+/// [`sign_out`]'s clean, step (2) of [`sign_out_with`] (wave-B plan F2c): called for a profile id with a
+/// folder, under the hold and before the session's credential is deleted. First the start-up mail clean,
+/// `mail::setup::clean_unfinished`, with [`sign_out_mail_client`]`(api_base, …)`; then
+/// `onboarding_state::on_sign_out`, which deletes the answers file and both pending feed links and rewinds an
+/// unfinished `onboarding.json` to step 2 (F2e). **Neither stops the sign-out:** a client that cannot be
+/// built skips the mail clean, and `on_sign_out`'s collected failures are one line on stderr, prefixed
+/// `sign-out:` so the log says where it came from, as [`delete_local_data`]'s lines are named. That line
+/// is also returned (`None` when `on_sign_out` succeeded), so a test can read it. `api_base` is a
+/// parameter, as `sign_out_mail_client`'s is, so a test points the clean at its own listener; `sign_out`
+/// passes `api_base()`, the host the revoke uses.
+pub fn sign_out_clean(dir: &std::path::Path, id: &str, api_base: &str) -> Option<String> {
+    if let Ok(client) = sign_out_mail_client(api_base, &anon_key(), &session_target(id), SIGN_OUT_MAIL_CALL) {
+        crate::mail::setup::clean_unfinished(dir, &client);
+    }
+    let line = crate::onboarding_state::on_sign_out(dir, id).err().map(|e| format!("Knowlu: sign-out: {e}"));
+    if let Some(l) = &line {
+        eprintln!("{l}");
+    }
+    line
 }
 
 /// [`sign_out`] without the app's handle. `close_windows` is called with the profile's folder before
@@ -749,8 +772,9 @@ pub fn sign_out(app: tauri::AppHandle, profile_id: Option<String>) -> Result<Val
 /// **The school sign-in** (onboarding plan §S5; replan RQ17). Step (0), for any [`is_profile_id`]-shaped
 /// id, with or without an `app_root`: the saved school password, `knowlu/<profile_id>/school`, deleted
 /// with `credentials::delete`, before anything else, so a school folder that cannot be deleted never keeps
-/// a password that signs it back in. `school_password_left` is `true` when it is still in Credential
-/// Manager afterwards; one never saved is not left. Step (4b), under the hold: `school_session::forget`,
+/// a password that signs it back in. `school_password_left` is `true` unless the delete's own answer says
+/// it is gone ([`delete_school_password_in`], P1's rule): a failed delete, or a not-found that `exists`
+/// contradicts, is left; one never saved is not. Step (4b), under the hold: `school_session::forget`,
 /// the patient delete of `school-session` and `school.json`, then `grades::forget`, the same patient
 /// delete of today's grades folder `lms-session` (Q-B9: a signed-in Blackboard folder never outlives
 /// sign-out). `school_profiles_left` is `true` when either did not finish; C5d's launch sweep owns the
@@ -842,15 +866,30 @@ fn close_school_windows(app: &tauri::AppHandle) {
 /// `school_password.rs` saves to. Sign-out and [`delete_local_data`] delete it; nothing else here reads it.
 pub const SCHOOL_PASSWORD_SOURCE: &str = "school";
 
-/// Step (0) of [`sign_out_with`]: deletes `profile_id`'s saved school password (an id the caller has
-/// checked with [`is_profile_id`]). `Ok` when none is left, one never saved included; `Err` is
-/// `credentials::delete`'s sentence, which names the target and never the secret.
+/// [`delete_local_data`]'s line, after `Knowlu: `, when the saved school password's delete did not answer
+/// it gone. The account is already deleted by then, so it says what may be left and gives no advice.
+pub const SCHOOL_PASSWORD_MAY_REMAIN: &str = "the saved school password may still be on this computer";
+
+/// Step (0) of [`sign_out_with`], and [`delete_local_data`]'s: deletes `profile_id`'s saved school
+/// password (an id the caller has checked with [`is_profile_id`]) from Credential Manager, by
+/// [`delete_school_password_in`]'s rule.
 fn delete_school_password(profile_id: &str) -> Result<(), String> {
-    let target = crate::credentials::target_for(profile_id, SCHOOL_PASSWORD_SOURCE);
-    match crate::credentials::delete(&target) {
-        Err(e) if crate::credentials::exists(&target) => Err(e),
-        _ => Ok(()),
+    delete_school_password_in(&crate::school_password::RealStore, profile_id)
+}
+
+/// P1's rule (`school_password::removed`; P1's review): "gone" comes from the delete's own answer. `Ok`
+/// when the delete removed it, or answered not-found and `exists` agrees (one never saved included). A
+/// not-found that `exists` contradicts, or any other failed delete, is `Err`, never a silent success:
+/// `credentials::exists` reads false on any error, and Windows sometimes answers not-found spuriously under
+/// load, so a false `exists` alone never decides it. The store is a parameter so a test can answer as
+/// Credential Manager does only now and then; `Err` never carries the secret. An id that is not
+/// [`is_profile_id`]-shaped names no credential, [`delete_local_data`]'s rule: it is refused by name and
+/// the store is asked nothing.
+pub fn delete_school_password_in(store: &dyn crate::school_password::SchoolStore, profile_id: &str) -> Result<(), String> {
+    if !is_profile_id(profile_id) {
+        return Err(format!("{profile_id:?} is not a profile id, so no saved school password was deleted"));
     }
+    crate::school_password::removed(store, &crate::credentials::target_for(profile_id, SCHOOL_PASSWORD_SOURCE))
 }
 
 /// Sign-out's cap on each network wait of its clean: the one session read (lock wait and refresh
@@ -1703,8 +1742,10 @@ pub fn open_portal(cs: tauri::State<'_, crate::state::ConsoleState>) -> Value {
 /// `app/tests/account.rs` can drive it over scratch folders and prove the list is exactly this long.
 /// **Everything it removes is named here and nowhere else**: the vault folder, THIS profile's
 /// subtree of the backups root, this profile's app-data folder, this profile's row in
-/// `profiles.json`, its session credential, its two coursework logins and its saved school password
-/// (`knowlu/<profile_id>/school`, replan RQ17).
+/// `profiles.json`, its session credential, its two coursework logins, its two pending feed links
+/// (`onboarding_state::PENDING_LMS` and `PENDING_CALENDAR`, wave-B plan F2c) and its saved school password
+/// (`knowlu/<profile_id>/school`, replan RQ17; [`delete_school_password_in`]'s rule). The answers file
+/// needs no line: it is in `data_dir`.
 ///
 /// **`backup_root` is the ROOT** — `%USERPROFILE%\Knowlu\Backups` for every profile on the machine —
 /// and `backup::tick` writes `<root>\<profile_id>\` inside it. Removing the root would destroy a
@@ -1766,16 +1807,21 @@ pub fn delete_local_data(
             let _ = crate::profiles::save(root, &left);
         }
     }
-    // The coursework logins and the saved school password are keyed to the PROFILE, not the account
-    // (`credentials::target_for`), and they are this machine's — deleting the account does not delete
-    // them, so this does. One that will not go is a named line, and the next is still tried.
-    for source in ["zybooks", "vhl", SCHOOL_PASSWORD_SOURCE] {
+    // The coursework logins, the pending feed links (F2c) and the saved school password are keyed to the
+    // PROFILE, not the account (`credentials::target_for`), and they are this machine's — deleting the
+    // account does not delete them, so this does. One that will not go is a named line, and the next is
+    // still tried. The school password is always tried and judged by P1's rule, never gated on `exists`.
+    use crate::onboarding_state::{PENDING_CALENDAR, PENDING_LMS};
+    for source in ["zybooks", "vhl", PENDING_LMS, PENDING_CALENDAR] {
         let t = crate::credentials::target_for(profile_id, source);
         if crate::credentials::exists(&t) {
             if let Err(e) = crate::credentials::delete(&t) {
                 eprintln!("Knowlu: {e}");
             }
         }
+    }
+    if delete_school_password(profile_id).is_err() {
+        eprintln!("Knowlu: {SCHOOL_PASSWORD_MAY_REMAIN}");
     }
 }
 
@@ -2178,22 +2224,25 @@ pub fn google_disconnect_at(api_base: &str, anon: &str, token: &str) -> Result<(
     send_json(ureq::http::Method::DELETE, &url, anon, token).map(|_| ())
 }
 
-/// The Google consent URL for the account this wizard signed in as (§11a).
+/// The Google consent URL for the account the pending session signed in as (§11a).
 ///
-/// **Vault-less on purpose.** `#wiz-google` is on the wizard window, which has no `ConsoleState`
-/// (C1: "no command that needs one can be called" there), so the session comes from
-/// `PENDING_TARGET` — the same pre-vault target `sign_in` writes and `create_vault_in` later moves
-/// onto the profile — and the base URLs come from `api_base()` / `anon_key()`, never from a
-/// `config/cloud.yaml` that does not exist yet.
+/// **No handler list registers it and no page calls it** (wave-B plan F5b; F10's review r2): its one
+/// caller was the old wizard window's Google panel, which is gone. Google consent now opens from Rust over
+/// the vault's session, through [`google_connect`] on the console's list. It stays, with its tests, until a
+/// later contract-engineer cleanup removes it.
 ///
-/// `scope` is `"calendar"` (the default, and the wizard's) or `"gmail"` (the later, incremental
+/// **Vault-less.** The session comes from `PENDING_TARGET`, the pre-vault target `sign_in` writes and
+/// `create_vault_in` later moves onto the profile, and the base URLs from `api_base()` / `anon_key()`,
+/// never from a `config/cloud.yaml`.
+///
+/// `scope` is `"calendar"` (the default) or `"gmail"` (the later, incremental
 /// ask). The service decides which Google scope each means and whether the consent widens an
 /// existing grant; this command carries the session bearer and nothing else, and **never sees a
 /// Google token** — the exchange happens server-side in `google-callback` (D12).
 #[tauri::command(async)]
 pub fn google_connect_url(scope: String) -> Value {
-    // The wizard asks for `calendar` or `gmail` and nothing else, as it always has; `reconnect` is
-    // the Settings row's, so it is folded to `calendar` here before the core sees it.
+    // `calendar` or `gmail` and nothing else; `reconnect` is the Settings row's, so it is folded to
+    // `calendar` here before the core sees it.
     let scope = if scope == "gmail" { "gmail" } else { "calendar" };
     let api = api_base();
     let auth = match auth_base(&api) {
