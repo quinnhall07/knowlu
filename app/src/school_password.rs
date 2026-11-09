@@ -332,12 +332,13 @@ pub fn signed_in_with(marks: &dyn SchoolMarks) -> Result<(), String> {
 
 /// Moves `school` between profile ids: the new target is written before the old is deleted; a password
 /// whose rejected or in-flight mark is set (read from `from_marks`) is deleted and not moved. A rejected
-/// mark goes with it (review r1, Minor 5): set in `to_marks` first, so the new id shows the form, then
-/// the old password is deleted, which runs even if the carry fails. An in-flight mark alone is not
-/// carried: with no password at the new id nothing can be sent. `Ok(1)` moved, `Ok(0)` nothing to move
-/// or one dropped. It reads the old id's marks and secret, so it takes that id's lock (`BUSY` when held,
-/// nothing touched). The same id twice moves nothing: a write then a delete of one target would delete
-/// the only copy.
+/// mark goes with the move whenever it is set, password or not (review r1, Minor 5, as ruled: the
+/// rejected step-3 fill deleted the password before the rename): set in `to_marks` first, so the new
+/// id shows the form, then any old password is deleted, which runs even if the carry fails. An
+/// in-flight mark is never carried: with no password at the new id nothing can be sent. `Ok(1)` moved,
+/// `Ok(0)` nothing to move or one dropped. It reads the old id's marks and secret, so it takes that
+/// id's lock (`BUSY` when held, nothing touched). The same id twice moves nothing: a write then a
+/// delete of one target would delete the only copy.
 pub fn retarget_with(
     store: &dyn SchoolStore,
     from_marks: &dyn SchoolMarks,
@@ -349,13 +350,13 @@ pub fn retarget_with(
         return Ok(0);
     }
     let Some(_held) = try_take(from_id) else { return Err(BUSY.to_string()) };
+    let rejected = from_marks.rejected();
+    let carried = if rejected { to_marks.set_rejected() } else { Ok(()) };
     let old = target(from_id);
     if !store.exists(&old) {
-        return Ok(0);
+        return carried.map(|()| 0);
     }
-    let rejected = from_marks.rejected();
     if rejected || from_marks.in_flight() {
-        let carried = if rejected { to_marks.set_rejected() } else { Ok(()) };
         return both(carried, gone(store.delete(&old))).map(|()| 0);
     }
     let (username, password) = store.read(&old).map_err(|_| READ_FAILED.to_string())?;
@@ -363,6 +364,25 @@ pub fn retarget_with(
     // Only after the new one is safely written, as `retarget_credentials` does for the coursework logins.
     gone(store.delete(&old))?;
     Ok(1)
+}
+
+/// `retarget_credentials`' school step over an app-data `root`: the old id's marks are in its profile
+/// folder, a carried mark goes to the new id's. With neither a saved password nor a rejected mark at the
+/// old id it returns at once, having written and made nothing; it reads the mark without the lock only
+/// to decide that, and with no password no fill can be setting one. The new id's folder is made only
+/// to carry a rejected mark (`FileMarks` never makes one); a folder that cannot be made fails the carry,
+/// by name.
+pub fn retarget_with_root(store: &dyn SchoolStore, root: &Path, from_id: &str, to_id: &str) -> Result<usize, String> {
+    let from_marks = FileMarks::new(&crate::profiles::profile_dir(root, from_id));
+    let rejected = from_marks.rejected();
+    if !rejected && !store.exists(&target(from_id)) {
+        return Ok(0);
+    }
+    let to_dir = crate::profiles::profile_dir(root, to_id);
+    if rejected && from_id != to_id {
+        let _ = std::fs::create_dir_all(&to_dir);
+    }
+    retarget_with(store, &from_marks, &FileMarks::new(&to_dir), from_id, to_id)
 }
 
 /// The one Tauri command here: saves the password typed at step 3 or in Settings, and its reply is

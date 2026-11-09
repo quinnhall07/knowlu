@@ -276,17 +276,26 @@ pub fn run_backup(cs: &ConsoleState, now: jiff::Timestamp) -> Result<knowlu_engi
 /// INTO whatever `knowlu` is there and renames nothing (R-P4a-28) — but this is still the one place
 /// the path is decided.
 pub fn app_data_root_in(base: &Path) -> PathBuf {
-    let d = base.join("knowlu");
+    let d = root_under(base);
     let _ = std::fs::create_dir_all(&d);
     d
+}
+
+/// `<base>\knowlu`: the root's name under a base, decided here once for every root below.
+pub fn root_under(base: &Path) -> PathBuf {
+    base.join("knowlu")
+}
+
+/// `%LOCALAPPDATA%`, when it is set and not empty.
+fn local_app_data() -> Option<PathBuf> {
+    std::env::var("LOCALAPPDATA").ok().filter(|s| !s.is_empty()).map(PathBuf::from)
 }
 
 /// `%LOCALAPPDATA%\knowlu` (plan 4a decision 2 — the move plan 2 Task 12 was going to make).
 /// `None` only when `LOCALAPPDATA` is unset or empty; `main` then falls back to the temp dir. There
 /// is no `app_data_dir()` fallback any more — the shell resolves its root before Tauri exists.
 pub fn app_data_root() -> Option<PathBuf> {
-    let base = std::env::var("LOCALAPPDATA").ok().filter(|s| !s.is_empty())?;
-    let base = PathBuf::from(base);
+    let base = local_app_data()?;
     // Anything the move could not do is printed, never swallowed (review round 1, IMPORTANT 2).
     if let Some(m) = crate::profiles::migrate_flat_layout(&base, None) {
         for e in &m.errors { eprintln!("Knowlu: {e}"); }
@@ -301,9 +310,15 @@ pub fn app_data_root_or_temp() -> PathBuf {
     root_or_temp(app_data_root())
 }
 
+/// The same path as [`app_data_root_or_temp`], worked out without creating or migrating anything: for
+/// a caller that only reads, and must touch nothing on disk when there is nothing there.
+pub fn app_data_root_or_temp_path() -> PathBuf {
+    root_or_temp(local_app_data().map(|base| root_under(&base)))
+}
+
 /// [`app_data_root_or_temp`]'s rule over a root already looked up, so a test can drive the fallback.
 pub fn root_or_temp(found: Option<PathBuf>) -> PathBuf {
-    found.unwrap_or_else(|| std::env::temp_dir().join("knowlu"))
+    found.unwrap_or_else(|| root_under(&std::env::temp_dir()))
 }
 
 /// What a quit flush actually managed before its cap fired. Every field means "this completed",
