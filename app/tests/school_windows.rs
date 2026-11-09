@@ -425,13 +425,69 @@ fn the_registrar_never_shares_the_lms_profile() {
 fn the_lms_capture_window_holds_the_profile_lock_for_its_life_and_releases_it_with_the_window() {
     let session = lms_link::LmsSession::default();
     let profile = "s4b-capture-profile";
-    assert!(session.hold_school(profile), "a free profile is taken by the window being built");
+    let mine = session.hold_school(profile).expect("a free profile is taken by the window being built");
+    assert!(session.is_school(), "the open window is a school window while it holds the folder");
     assert!(try_take(profile).is_none(), "held while the window lives: grades' windows answer Busy");
-    assert!(!lms_link::LmsSession::default().hold_school(profile), "a second window on the profile is refused, not waited on");
+    assert!(lms_link::LmsSession::default().hold_school(profile).is_none(), "a second window on the profile is refused, not waited on");
     assert!(try_take("s4b-other-profile").is_some(), "another profile is not blocked");
-    // The window's Destroyed event, or the exit: the hold goes, and the school folder is never named for a wipe.
+    // The window's own Destroyed event: the hold goes, and the school folder is never named for a wipe.
+    assert!(session.release(mine));
+    assert!(!session.is_school());
     assert_eq!(session.end(), None, "no throwaway folder was remembered for a school window");
     assert!(try_take(profile).is_some(), "freed once the window is gone");
+}
+
+#[test]
+fn a_late_destroyed_event_from_an_old_window_cannot_free_a_new_windows_hold() {
+    let session = lms_link::LmsSession::default();
+    let profile = "s4b-late-profile";
+    let old = session.hold_school(profile).unwrap();
+    assert!(session.release(old), "the old window's own event frees its hold");
+    let new = session.hold_school(profile).expect("a new window on the freed profile");
+    assert_ne!(old, new, "each window has its own generation");
+    assert!(!session.release(old), "the old window's late event finds a hold that is not its own");
+    assert!(session.is_school() && try_take(profile).is_none(), "the new window still holds the profile");
+    assert!(session.release(new));
+    assert!(try_take(profile).is_some());
+}
+
+#[test]
+fn the_exit_frees_whatever_hold_is_left() {
+    let session = lms_link::LmsSession::default();
+    session.hold_school("s4b-exit-profile").unwrap();
+    session.end();
+    assert!(try_take("s4b-exit-profile").is_some());
+}
+
+#[test]
+fn the_registrar_and_the_school_window_never_land_on_each_others_open_window() {
+    use lms_link::{reuse_open_window as reuse, Reuse};
+    let school = window_plan(Some(Path::new("C:/synthetic")), &lms_link::session_dir());
+    let throwaway = window_plan(None, &lms_link::session_dir());
+    assert_eq!(reuse(None, &school), Reuse::Build);
+    assert_eq!(reuse(None, &throwaway), Reuse::Build);
+    assert_eq!(reuse(Some(true), &school), Reuse::Show, "a second Sign in shows the school window");
+    assert_eq!(reuse(Some(false), &throwaway), Reuse::Show, "a second registrar click shows the registrar's");
+    assert_eq!(reuse(Some(true), &throwaway), Reuse::Refuse, "the registrar never shows the kept school window");
+    assert_eq!(reuse(Some(false), &school), Reuse::Refuse, "and the school capture never shows the registrar's");
+    // The kind of the open window is whether the session holds the school folder.
+    let session = lms_link::LmsSession::default();
+    let open = |s: &lms_link::LmsSession| Some(s.is_school());
+    assert_eq!(reuse(open(&session), &school), Reuse::Refuse, "an open window with no hold is a throwaway");
+    let g = session.hold_school("s4b-kind-profile").unwrap();
+    assert_eq!(reuse(open(&session), &throwaway), Reuse::Refuse);
+    assert_eq!(reuse(open(&session), &school), Reuse::Show);
+    session.release(g);
+}
+
+#[test]
+fn the_builder_decides_before_it_shows_and_refuses_in_words() {
+    let lms = src("src/lms_link.rs");
+    let at = lms.find("fn open_window_with").expect("open_window_with");
+    let body = &lms[at..at + lms[at..].find("\n}\n").unwrap()];
+    let decide = body.find("reuse_open_window(").expect("the open window's kind is checked");
+    assert!(decide < body.find(".show()").expect("an open window is shown"), "never shown before its kind is checked");
+    assert!(lms.contains("close the other sign-in window first"));
 }
 
 #[test]
@@ -448,4 +504,31 @@ fn the_lms_capture_records_its_use_when_it_opens_and_never_clears_it_when_it_clo
     let lms = src("src/lms_link.rs");
     assert!(lms.contains("add_use("), "the school window records Use::CourseList");
     assert!(!lms.contains("clear_use("), "the use is not cleared on close (controller ruling): grades' use and Forget govern the folder");
+}
+
+#[test]
+fn forget_with_both_folders_and_only_the_course_list_recorded_leaves_neither_and_nothing_opens() {
+    let d = temp("forget-both");
+    make(&legacy(&d));
+    make(&session_dir(&d));
+    add_use(&d, Use::CourseList).unwrap();
+    assert_eq!(grades_profile(&d), Ok(legacy(&d)), "grades are still on the old folder");
+    let out = forget_with(&d, || {});
+    assert_eq!(out["ok"], json!(true), "{out}");
+    assert!(!legacy(&d).exists() && !session_dir(&d).exists(), "neither folder remains: forgetting one must not leave the other to answer");
+    assert!(!knowlu::grades::connected(&d), "so grades are not connected");
+    let opened = Cell::new(false);
+    let r = row();
+    let out = refresh_with(Some(&r), "blackboard", &d, |_| { opened.set(true); Ok(()) }, |_| json!({ "ok": true }));
+    assert!(!opened.get() && out["error"] == json!(knowlu::grades::NOT_CONNECTED), "the next capture opens nothing");
+    assert_eq!(uses(&d).unwrap(), Vec::<Use>::new(), "and records nothing");
+}
+
+#[test]
+fn a_busy_profile_held_by_the_sign_in_window_is_named_for_it() {
+    use knowlu::grades::busy_kind;
+    assert_eq!(busy_kind(false, true), CaptureError::WindowOpen, "the LMS capture window holds the folder");
+    assert_eq!(busy_kind(true, false), CaptureError::WindowOpen, "grades' own visible sign-in");
+    assert_eq!(busy_kind(false, false), CaptureError::Busy, "another capture running");
+    assert_eq!(CaptureError::WindowOpen.as_str(), "sign-in window open");
 }

@@ -1,9 +1,11 @@
-//! The LMS calendar link, captured through a sign-in window (spec §11a).
+//! The LMS calendar link and course list, captured through a sign-in window (spec §11a).
 //!
 //! **Knowlu never asks for a campus credential.** The student signs in on the university's own page,
-//! in a window that has *no capability grant* — so that page cannot reach a single Tauri command —
-//! and in incognito mode, so the live session lives in memory rather than in a profile on disk. We
-//! keep the calendar link. We keep nothing else: not the password, not the cookies, not the session.
+//! in a window that has *no capability grant* — so that page cannot reach a single Tauri command. The
+//! capture window is kept on the school sign-in folder (`school_session`, non-incognito), so grades
+//! and the course list read through one sign-in; the registrar's window is the one that stays
+//! incognito, on a throwaway folder wiped when it closes. Knowlu keeps the calendar link and the course
+//! list and nothing else of its own: not the password, and no cookie outside the window's own folder.
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use serde_json::{json, Value};
@@ -72,24 +74,44 @@ fn wipe_dir(dir: &Path, tries: u32) -> bool {
 /// idempotent.
 ///
 /// **A window on the school folder holds nothing to wipe but a lock** (S4b): `school_session`'s
-/// per-profile guard, kept from the moment the window is being built until [`LmsSession::end`] (the
-/// `Destroyed` event or the exit), so no grades window opens on the folder beside it.
+/// per-profile guard, kept from the moment the window is being built until that window's own
+/// `Destroyed` event ([`LmsSession::release`]) or the exit ([`LmsSession::end`]), so no grades window
+/// opens on the folder beside it. Each hold has a **generation**, and a window frees only the
+/// generation it was built with: the label is shared, so a late `Destroyed` from an old window must
+/// not free a new window's hold.
 #[derive(Default)]
 pub struct LmsSession {
     dir: std::sync::Mutex<Option<PathBuf>>,
-    hold: std::sync::Mutex<Option<crate::school_session::SessionGuard>>,
+    hold: std::sync::Mutex<Option<(u64, crate::school_session::SessionGuard)>>,
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl LmsSession {
-    /// Take `profile_id`'s school lock for the window about to be built. `false` when the profile is
-    /// busy or this session already holds one; nothing waits.
-    pub fn hold_school(&self, profile_id: &str) -> bool {
+    /// Take `profile_id`'s school lock for the window about to be built, and answer that window's
+    /// generation. `None` when the profile is busy or this session already holds one; nothing waits.
+    pub fn hold_school(&self, profile_id: &str) -> Option<u64> {
         let mut hold = self.hold.lock().unwrap_or_else(|e| e.into_inner());
-        if hold.is_some() { return false; }
-        match crate::school_session::try_take(profile_id) {
-            Some(guard) => { *hold = Some(guard); true }
-            None => false,
+        if hold.is_some() { return None; }
+        let guard = crate::school_session::try_take(profile_id)?;
+        let generation = self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        *hold = Some((generation, guard));
+        Some(generation)
+    }
+
+    /// Whether the open window is on the school folder: it is the one that holds the lock. The
+    /// registrar's throwaway window holds none.
+    pub fn is_school(&self) -> bool {
+        self.hold.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    /// Free the hold if it is `generation`'s; `false` (and nothing freed) for any other window's.
+    pub fn release(&self, generation: u64) -> bool {
+        let mut hold = self.hold.lock().unwrap_or_else(|e| e.into_inner());
+        if hold.as_ref().is_some_and(|(g, _)| *g == generation) {
+            hold.take();
+            return true;
         }
+        false
     }
 
     /// Remember the throwaway folder the open window is using.
@@ -101,8 +123,8 @@ impl LmsSession {
         self.dir.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
-    /// The window is gone (or never opened): free the school lock and hand back the throwaway
-    /// folder to wipe, once. A school window leaves no folder to hand back.
+    /// The exit: free whatever hold is left and hand back the throwaway folder to wipe, once. A
+    /// school window leaves no folder to hand back.
     pub fn end(&self) -> Option<PathBuf> {
         self.hold.lock().unwrap_or_else(|e| e.into_inner()).take();
         self.take_dir()
@@ -113,21 +135,22 @@ fn remember_session(app: &tauri::AppHandle, dir: &Path) {
     if let Some(state) = app.try_state::<LmsSession>() { state.remember_dir(dir); }
 }
 
-/// The throwaway folder alone: [`close_and_wipe`]'s, which closes the window but does not end it.
+/// The throwaway folder alone: what [`close_and_wipe`] and the `Destroyed` wipe take. Neither frees a
+/// school hold; that is the window's own handler's, by generation.
 fn take_session(app: &tauri::AppHandle) -> Option<PathBuf> {
     app.try_state::<LmsSession>()?.take_dir()
 }
 
-/// The window has ended: free its school lock and take its throwaway folder, if it had one.
+/// The exit: free the school hold and take the throwaway folder, if there is one.
 fn end_session(app: &tauri::AppHandle) -> Option<PathBuf> {
     app.try_state::<LmsSession>()?.end()
 }
 
-/// Wipe the session directory the app is holding, on a detached thread, and free the window's school
-/// lock. This runs from a window event, and WebView2 still has the profile open at that moment —
-/// waiting three seconds on the event loop's thread would freeze the wizard behind it.
+/// Wipe the throwaway session directory the app is holding, on a detached thread. This runs from a
+/// window event, and WebView2 still has the profile open at that moment — waiting three seconds on the
+/// event loop's thread would freeze the wizard behind it. It frees no school hold (see [`LmsSession`]).
 pub fn wipe_session(app: &tauri::AppHandle) {
-    if let Some(dir) = end_session(app) {
+    if let Some(dir) = take_session(app) {
         std::thread::spawn(move || { wipe_dir(&dir, WIPE_TRIES); });
     }
 }
@@ -212,31 +235,65 @@ pub fn open_school_window(app: &tauri::AppHandle, url: &str, app_data: &Path) ->
     open_window_with(app, url, &window_plan(Some(app_data), &session_dir()), Some(app_data))
 }
 
+/// What to do with the `lms-signin` window that may already be open, given the plan being asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reuse {
+    /// None is open: build the plan's window.
+    Build,
+    /// The open window is the plan's kind: show and focus it, as before.
+    Show,
+    /// The open window is the other kind: never show it, and build nothing.
+    Refuse,
+}
+
+/// The registrar and the LMS capture share one label, so an open window may be the other's. `open` is
+/// `None` with no window and otherwise whether it is on the school folder (`LmsSession::is_school`).
+/// A window of the plan's own kind is shown; one of the other kind is refused, never shown: the
+/// registrar must not land on the kept school window, nor the capture on the registrar's.
+pub fn reuse_open_window(open: Option<bool>, plan: &WindowPlan) -> Reuse {
+    match open {
+        None => Reuse::Build,
+        Some(is_school) if is_school == plan.records_use.is_some() => Reuse::Show,
+        Some(_) => Reuse::Refuse,
+    }
+}
+
+/// The refusal for [`Reuse::Refuse`], in the words the page shows.
+pub const OTHER_WINDOW_OPEN: &str = "close the other sign-in window first";
+
 /// The one builder of the `lms-signin` window, over a [`WindowPlan`]. A plan that records a use holds
 /// the profile's school lock first (a busy profile is refused, never waited on) and records the use
 /// before the window exists; the use is **not** cleared when the window closes, because grades' use and
-/// Forget govern the folder, not this window.
+/// Forget govern the folder, not this window. The lock is freed by this window's own `Destroyed`
+/// event, by generation, so a late event from an older window frees nothing of a newer one.
 fn open_window_with(app: &tauri::AppHandle, url: &str, plan: &WindowPlan, app_data: Option<&Path>) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window(WINDOW) {
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
-        return Ok(());
+    let open = app.get_webview_window(WINDOW).map(|_| app.try_state::<LmsSession>().is_some_and(|s| s.is_school()));
+    match reuse_open_window(open, plan) {
+        Reuse::Refuse => return Err(OTHER_WINDOW_OPEN.to_string()),
+        Reuse::Show => {
+            if let Some(w) = app.get_webview_window(WINDOW) {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+            return Ok(());
+        }
+        Reuse::Build => {}
     }
     let parsed: tauri::Url = url.parse().map_err(|e| format!("{url}: {e}"))?;
     let held = match (plan.records_use, app_data) {
         (Some(used), Some(dir)) => {
             let state = app.try_state::<LmsSession>().ok_or_else(|| "the school sign-in window is not available here".to_string())?;
-            if !state.hold_school(&crate::school_session::profile_key(dir)) {
+            let Some(generation) = state.hold_school(&crate::school_session::profile_key(dir)) else {
                 return Err("another window is using your school sign-in right now; try again in a moment".to_string());
-            }
+            };
             if let Err(e) = crate::school_session::add_use(dir, used) {
-                state.end();
+                state.release(generation);
                 return Err(e);
             }
-            true
+            Some(generation)
         }
-        _ => false,
+        _ => None,
     };
     let _ = std::fs::create_dir_all(&plan.data_dir);
     let mut builder = WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::External(parsed))
@@ -252,11 +309,20 @@ fn open_window_with(app: &tauri::AppHandle, url: &str, plan: &WindowPlan, app_da
     if let Some(args) = plan.browser_args {
         builder = builder.additional_browser_args(args);
     }
-    if let Err(e) = builder.build() {
-        if held {
-            if let Some(state) = app.try_state::<LmsSession>() { state.end(); }
+    let window = match builder.build() {
+        Ok(w) => w,
+        Err(e) => {
+            if let (Some(generation), Some(state)) = (held, app.try_state::<LmsSession>()) { state.release(generation); }
+            return Err(e.to_string());
         }
-        return Err(e.to_string());
+    };
+    if let Some(generation) = held {
+        let handle = app.clone();
+        window.on_window_event(move |event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Some(state) = handle.try_state::<LmsSession>() { state.release(generation); }
+            }
+        });
     }
     // Only a builder that managed [`LmsSession`] can be wiped by the window's own close button; on
     // one that did not, this is a no-op and the sweep is what eventually takes the directory. Today

@@ -441,14 +441,17 @@ pub fn refresh_with(
 /// **`grades_forget`'s seam: never gated** (spec §4). Close any `lms-grades` window, delete the
 /// saved session ([`forget`]) and clear the signed-out mark, whatever the predicate says.
 ///
-/// **At a shared school this is [`crate::school_session::forget`]**: when grades read through the school
-/// folder, Forget deletes it and its record of uses (Forget school sign-in), and any `lms-session` left
-/// beside it. Otherwise it is today's delete of `lms-session` alone.
+/// **Where the school folder is in use, this is also [`crate::school_session::forget`]**: the folder
+/// exists or `school.json` records a use (grades', or the course list's), so Forget deletes it and its
+/// record of uses along with any `lms-session`. Forgetting `lms-session` alone would leave a bare school
+/// folder for grades to resolve to, which would read as connected: Forget would be undone. A folder
+/// nothing uses is not touched, so an old install's Forget is today's delete of `lms-session` alone.
 pub fn forget_with(data_dir: &Path, close_window: impl FnOnce()) -> Value {
-    use crate::school_session::{forget as forget_school, profile_for, session_dir as school_dir, Feature};
+    use crate::school_session::{forget as forget_school, session_dir as school_dir, uses};
     close_window();
-    let on_school = profile_for(Feature::Grades, None, data_dir).is_some_and(|p| p == school_dir(data_dir));
-    let school = if on_school { forget_school(data_dir) } else { Ok(()) };
+    // A `school.json` that cannot be read counts as in use: `forget_school` clears it.
+    let school_in_use = school_dir(data_dir).exists() || uses(data_dir).map_or(true, |u| !u.is_empty());
+    let school = if school_in_use { forget_school(data_dir) } else { Ok(()) };
     let outcome = school.and_then(|()| if forget(data_dir) { Ok(()) } else { Err(not_deleted()) });
     set_signed_out(data_dir, false);
     match outcome {
@@ -763,12 +766,18 @@ fn take_window(app: &tauri::AppHandle, data_dir: &Path) -> Result<(crate::school
     crate::school_session::take_both(&crate::school_session::profile_key(data_dir)).map_err(|_| busy_or_open(app).as_str().to_string())
 }
 
-/// A capture that could not start: the visible sign-in window is open, or another capture runs.
+/// A capture that could not start: a visible sign-in window is open (grades' own, or the LMS capture
+/// window that holds the school folder), or another capture runs.
 fn busy_or_open(app: &tauri::AppHandle) -> CaptureError {
-    match app.get_webview_window(WINDOW) {
-        Some(w) if w.is_visible().unwrap_or(false) => CaptureError::WindowOpen,
-        _ => CaptureError::Busy,
-    }
+    let grades_window_visible = app.get_webview_window(WINDOW).is_some_and(|w| w.is_visible().unwrap_or(false));
+    let lms_holds = app.try_state::<crate::lms_link::LmsSession>().is_some_and(|s| s.is_school());
+    busy_kind(grades_window_visible, lms_holds)
+}
+
+/// [`busy_or_open`]'s decision, pure: a visible grades window, or the LMS capture window holding the
+/// profile, is `WindowOpen` ("sign-in window open"); anything else that held a guard is `Busy`.
+pub fn busy_kind(grades_window_visible: bool, lms_window_holds_profile: bool) -> CaptureError {
+    if grades_window_visible || lms_window_holds_profile { CaptureError::WindowOpen } else { CaptureError::Busy }
 }
 
 // ---- the bundle handed to the engine (spec §5, §6) ---------------------------------------------

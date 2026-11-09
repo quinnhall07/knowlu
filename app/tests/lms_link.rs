@@ -521,6 +521,7 @@ fn the_course_list_is_read_from_the_endpoint_the_spike_recorded_and_never_by_nav
     // anything that leaves it. The envelope carries courses and a flag, and nothing else.
     for leak in ["println!", "eprintln!", "log::", "write_text", "store_source"] {
         assert!(!body.contains(leak), "{leak} in the course capture:\n{body}");
+        assert!(!cmd.contains(leak), "{leak} in the course capture command:\n{cmd}");
     }
 }
 
