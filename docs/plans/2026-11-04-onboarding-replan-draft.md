@@ -924,8 +924,10 @@ decides per path, for `mirror` and `snapshot` alike:
 malformed or not, so other students' backups are unchanged to the byte. `parse_file` (`:2121`) drops
 unknown keys, so going through it for those files would not be. Otherwise it parses the file, removes every
 `classsearch:` series, `calendars` entry and `ended` key and the `class_search` block, and returns
-`file_bytes`. A file that holds that text and cannot be parsed, or cannot be read at all, gives `None`: it
-is skipped for that run and still counted as wanted, so `mirror` never archives the older copy.
+`file_bytes`. A file that holds that text and cannot be parsed gives `None`: it is skipped for that run and
+still counted as wanted, so `mirror` never archives the older copy. A file that cannot be read at all is an
+error, as before C2e (C2e review follow-up, 2026-11-08): the mirror keeps its older copy, the snapshot
+writes no zip so a later tick retries, and a restore fails whole rather than deleting a clean file.
 
 `same_bytes` (`backup.rs:43`) compares source to destination, which would recopy a filtered file on every
 tick. For this path `mirror` compares the filtered bytes to the destination, so a second tick copies nothing.
