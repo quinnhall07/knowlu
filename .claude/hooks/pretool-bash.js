@@ -161,9 +161,9 @@ function reviewerMayWrite(filePath) {
   const ours = projectRoots().some((r) => base === r ||
     (base.startsWith(r + WORKTREES) && !base.slice((r + WORKTREES).length).includes('/')));
   if (!ours) return false;
-  const given = String(filePath);
-  const driveForm = given.replace(/^[\\/]([a-zA-Z])[\\/]/, '$1:/');
-  return !fs.existsSync(given) && !fs.existsSync(driveForm);
+  // Built from the normalized path, so //c/x and /./c/x are read the same way as /c/x.
+  const driveForm = p.replace(/^\/([a-z])\//, '$1:/');
+  return !fs.existsSync(driveForm) && !fs.existsSync(String(filePath));
 }
 
 function guardReviewer(input) {
