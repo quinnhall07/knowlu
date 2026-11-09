@@ -6,8 +6,8 @@ description: >-
   them. Use for layout, styling, copy, view rendering from the surface JSON, and small interaction
   changes. Do not use for anything that changes what the read model computes (engine/src/surface.rs),
   for Tauri command behavior, or for vault writes; use contract-engineer or the main session. Use instead of impeccable:* agents in this repo.
-model: claude-sonnet-5-5
-effort: medium
+model: claude-opus-5-5
+effort: high
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 

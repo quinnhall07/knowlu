@@ -8,7 +8,7 @@ description: >-
   plus cloud/supabase/**, for new behavior, or for tests that encode new behavior; use
   contract-engineer, cloud-engineer or test-writer.
 model: claude-sonnet-5-5
-effort: low
+effort: medium
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 

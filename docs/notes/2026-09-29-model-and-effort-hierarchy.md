@@ -1,6 +1,8 @@
 # Model and effort hierarchy for Claude Code sessions
 
-Status: proposed 2026-09-29, not yet measured on Knowlu work. Figures come from web-search summaries of
+Status: superseded 2026-11-09 by `2026-11-09-model-and-effort-review.md`, which measured this hierarchy on
+Knowlu work and changed the tiers. Kept as the record of the first proposal; the settings, tiers and the
+"Fable is a last resort" line below are no longer current. Figures come from web-search summaries of
 secondary sources (the original pages could not be fetched); re-check before quoting them.
 
 ## The hierarchy
